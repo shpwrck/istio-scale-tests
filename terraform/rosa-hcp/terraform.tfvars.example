@@ -1,0 +1,35 @@
+# Copy to terraform.tfvars (do not commit secrets or real cluster names if policy forbids).
+# Authenticate Red Hat API with offline token:
+#   export RHCS_TOKEN="$(cat ~/.config/openshift/token)"   # example only
+# Optional explicit token for CI:
+#   export TF_VAR_rhcs_token='***'
+
+aws_region        = "us-east-1"
+openshift_version = "4.18.38"
+
+# Multi-cluster: each key is an arbitrary stable label; each cluster gets its own VPC CIDR,
+# subnets, and STS/OIDC stack via separate module instances.
+# Keep availability_zones_count aligned with QUOTA_ASSUMED_AVAILABILITY_ZONES_COUNT in
+# quota-assumptions.env (use the maximum AZ count across clusters for quota planning).
+clusters = {
+  rosa-001 = {
+    cluster_name              = "istio-scale-001"
+    vpc_cidr                  = "10.10.0.0/16"
+    availability_zones_count  = 3
+    create_cluster_admin_user = false
+    tags = {
+      Environment = "scale-test"
+      ClusterSlot = "001"
+    }
+  }
+  rosa-002 = {
+    cluster_name              = "istio-scale-002"
+    vpc_cidr                  = "10.11.0.0/16"
+    availability_zones_count  = 3
+    create_cluster_admin_user = false
+  }
+}
+
+default_tags = {
+  Project = "istio-scale-tests"
+}

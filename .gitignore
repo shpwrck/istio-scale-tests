@@ -1,0 +1,16 @@
+# Generated certificates and local PEM material (see setup-scripts/00-ossm-mc-cacerts.sh)
+/cacerts/
+
+# Local or environment-specific manifests (keep repo templates elsewhere if needed)
+/manifests/
+
+# Optional local cache (e.g. tooling clones)
+/.cache/
+
+# Terraform — ROSA HCP stack (keep .terraform.lock.hcl tracked for reproducible init)
+/terraform/rosa-hcp/.terraform/
+/terraform/rosa-hcp/terraform.tfstate
+/terraform/rosa-hcp/terraform.tfstate.*
+/terraform/rosa-hcp/*.tfplan
+/terraform/rosa-hcp/crash.log
+/terraform/rosa-hcp/terraform.tfvars
