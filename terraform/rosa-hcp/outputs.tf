@@ -1,40 +1,41 @@
-output "cluster_ids" {
-  description = "Map of Terraform cluster key → RHCS cluster ID."
-  value       = { for k, m in module.rosa_hcp : k => m.cluster_id }
+output "cluster_keys" {
+  description = "Terraform map keys passed in var.clusters (useful to align with kubeconfig context names)."
+  value       = keys(var.clusters)
 }
 
-output "cluster_api_urls" {
-  description = "Map of Terraform cluster key → Kubernetes API URL."
-  value       = { for k, m in module.rosa_hcp : k => m.cluster_api_url }
+output "by_cluster" {
+  description = "Per-cluster API endpoints, OCM id, and VPC id after apply."
+  value = {
+    for k, m in module.rosa_hcp : k => {
+      cluster_id           = m.cluster_id
+      cluster_name         = var.clusters[k].cluster_name
+      cluster_api_url      = m.cluster_api_url
+      cluster_console_url  = m.cluster_console_url
+      cluster_state        = m.cluster_state
+      vpc_id               = module.vpc[k].vpc_id
+      machine_cidr         = module.vpc[k].cidr_block
+      account_role_prefix  = m.account_role_prefix
+      operator_role_prefix = m.operator_role_prefix
+    }
+  }
 }
 
-output "cluster_console_urls" {
-  description = "Map of Terraform cluster key → OpenShift console URL."
-  value       = { for k, m in module.rosa_hcp : k => m.cluster_console_url }
+output "service_quota_targets" {
+  description = "Computed minimum quota levels (before max with current AWS limits). For debugging; see service_quotas.tf."
+  value = {
+    vpc_and_igw = local.vpc_quota_target
+    eip         = local.eip_quota_target
+    nat_per_az  = local.nat_quota_target
+    gw_endpoint = local.gw_ep_quota_target
+    iam_roles   = local.iam_roles_quota_target
+  }
 }
 
-output "vpc_ids" {
-  description = "Map of Terraform cluster key → AWS VPC ID."
-  value       = { for k, m in module.vpc : k => m.vpc_id }
-}
-
-output "oidc_config_ids" {
-  description = "Per-cluster OIDC config IDs (each module instance uses create_oidc = true)."
-  value       = { for k, m in module.rosa_hcp : k => m.oidc_config_id }
-}
-
-output "oidc_endpoint_urls" {
-  description = "Per-cluster OIDC issuer URLs used for operator trust policies."
-  value       = { for k, m in module.rosa_hcp : k => m.oidc_endpoint_url }
-}
-
-output "cluster_admin_usernames" {
-  description = "Present when create_cluster_admin_user is true for that cluster."
-  value       = { for k, m in module.rosa_hcp : k => m.cluster_admin_username }
-}
-
-output "cluster_admin_passwords" {
-  description = "Sensitive — only set when create_cluster_admin_user is true."
+output "cluster_admin_login" {
+  description = "Shared cluster-admin credentials for every cluster (same password). Retrieve with: terraform output cluster_admin_login (sensitive)."
   sensitive   = true
-  value       = { for k, m in module.rosa_hcp : k => m.cluster_admin_password }
+  value = {
+    username = "cluster-admin"
+    password = random_password.cluster_admin.result
+  }
 }

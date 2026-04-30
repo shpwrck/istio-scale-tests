@@ -2,8 +2,14 @@ provider "aws" {
   region = var.aws_region
 }
 
-# Authentication: export RHCS_TOKEN (offline token from https://console.redhat.com/openshift/token ).
-# If var.rhcs_token is set, it is passed explicitly (e.g. CI secrets via TF_VAR_rhcs_token).
+# IAM service quotas are global; the Service Quotas API expects us-east-1 (commercial).
+provider "aws" {
+  alias  = "quota_iam"
+  region = "us-east-1"
+}
+
 provider "rhcs" {
+  # Authenticate with OpenShift Cluster Manager (export RHCS_TOKEN), or set
+  # TF_VAR_rhcs_token for CI. See https://registry.terraform.io/providers/terraform-redhat/rhcs/latest/docs
   token = var.rhcs_token
 }

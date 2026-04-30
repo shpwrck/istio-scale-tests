@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.14.9"
+  required_version = ">= 1.14.8"
 
   required_providers {
     aws = {
@@ -10,9 +10,13 @@ terraform {
       source  = "terraform-redhat/rhcs"
       version = ">= 1.7.6"
     }
-    time = {
-      source  = "hashicorp/time"
-      version = ">= 0.9.0"
+    null = {
+      source  = "hashicorp/null"
+      version = ">= 3.2.4"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.6.0"
     }
   }
 }

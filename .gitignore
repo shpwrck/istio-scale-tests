@@ -7,10 +7,13 @@
 # Optional local cache (e.g. tooling clones)
 /.cache/
 
-# Terraform — ROSA HCP stack (keep .terraform.lock.hcl tracked for reproducible init)
-/terraform/rosa-hcp/.terraform/
-/terraform/rosa-hcp/terraform.tfstate
-/terraform/rosa-hcp/terraform.tfstate.*
-/terraform/rosa-hcp/*.tfplan
-/terraform/rosa-hcp/crash.log
-/terraform/rosa-hcp/terraform.tfvars
+# Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
+/terraform/**/.terraform/
+/terraform/**/*.tfstate
+/terraform/**/*.tfstate.*
+/terraform/**/.terraform.tfstate.lock.info
+/terraform/**/terraform.tfstate.d/
+/terraform/**/*.tfplan
+/terraform/**/crash.log
+/terraform/**/crash.*.log
+/terraform/**/terraform.tfvars

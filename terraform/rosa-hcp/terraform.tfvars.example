@@ -1,35 +1,29 @@
-# Copy to terraform.tfvars (do not commit secrets or real cluster names if policy forbids).
-# Authenticate Red Hat API with offline token:
-#   export RHCS_TOKEN="$(cat ~/.config/openshift/token)"   # example only
-# Optional explicit token for CI:
-#   export TF_VAR_rhcs_token='***'
+# Copy to terraform.tfvars (gitignored) and adjust.
+# export RHCS_TOKEN='...'   # or set rhcs_token below (avoid committing secrets)
 
-aws_region        = "us-east-1"
-openshift_version = "4.18.38"
+aws_region         = "us-east-2"
+openshift_version  = "4.18.38"
 
-# Multi-cluster: each key is an arbitrary stable label; each cluster gets its own VPC CIDR,
-# subnets, and STS/OIDC stack via separate module instances.
-# Keep availability_zones_count aligned with QUOTA_ASSUMED_AVAILABILITY_ZONES_COUNT in
-# quota-assumptions.env (use the maximum AZ count across clusters for quota planning).
-clusters = {
-  rosa-001 = {
-    cluster_name              = "istio-scale-001"
-    vpc_cidr                  = "10.10.0.0/16"
-    availability_zones_count  = 3
-    create_cluster_admin_user = false
-    tags = {
-      Environment = "scale-test"
-      ClusterSlot = "001"
-    }
-  }
-  rosa-002 = {
-    cluster_name              = "istio-scale-002"
-    vpc_cidr                  = "10.11.0.0/16"
-    availability_zones_count  = 3
-    create_cluster_admin_user = false
-  }
+# Optional: set false if your account cannot change service quotas via API.
+# manage_service_quotas = false
+
+common_tags = {
+  environment = "scale-test"
 }
 
-default_tags = {
-  Project = "istio-scale-tests"
+clusters = {
+  rosa-001 = {
+    cluster_name = "scale-hcp-001"
+    vpc_cidr     = "10.0.0.0/16"
+  }
+  rosa-002 = {
+    cluster_name = "scale-hcp-002"
+    vpc_cidr     = "10.1.0.0/16"
+  }
+  rosa-003 = {
+    cluster_name = "scale-hcp-003"
+    vpc_cidr     = "10.2.0.0/16"
+    # replicas defaults to 2 (single-AZ ROSA minimum). Optional: replicas = 3
+    # compute_machine_type = "m5.xlarge"
+  }
 }

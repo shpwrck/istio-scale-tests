@@ -1,63 +1,74 @@
 variable "aws_region" {
   type        = string
-  description = "AWS region where ROSA HCP clusters and VPCs are created."
+  description = "AWS region where every cluster VPC and ROSA HCP worker footprint is created."
 }
 
 variable "rhcs_token" {
   type        = string
-  description = "Red Hat OpenShift Cluster Manager API token (offline token). Prefer environment variable RHCS_TOKEN; use TF_VAR_rhcs_token if setting via env for Terraform."
   sensitive   = true
   default     = null
+  description = "Red Hat OpenShift API token. Leave null and export RHCS_TOKEN in the shell instead."
 }
 
 variable "openshift_version" {
   type        = string
-  description = "OpenShift version for new clusters (example: 4.18.38). Align with config/versions.env when using this repo's mesh scripts."
+  description = "OpenShift version for all clusters (e.g. 4.18.38). Align with config/versions.env when using this repo's mesh scripts."
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.openshift_version))
+    error_message = "openshift_version must look like major.minor.patch (e.g. 4.18.38)."
+  }
+}
+
+variable "common_tags" {
+  type        = map(string)
+  default     = {}
+  description = "Tags merged into each cluster's AWS-tagged resources (plus any per-cluster tags)."
+}
+
+variable "manage_service_quotas" {
+  type        = bool
+  default     = true
+  description = "When true, apply aws_servicequotas_service_quota so AWS applied limits are at least usage plus this stack (see service_quotas.tf). Set false if your org blocks Service Quotas changes."
+}
+
+variable "service_quota_buffer" {
+  type        = number
+  default     = 2
+  description = "Headroom added to computed minimum quota targets."
+
+  validation {
+    condition     = var.service_quota_buffer >= 0
+    error_message = "service_quota_buffer must be >= 0."
+  }
+}
+
+variable "service_quota_iam_roles_per_new_cluster" {
+  type        = number
+  default     = 55
+  description = "Estimated IAM roles created per new ROSA HCP cluster (account + operator + OIDC), used only for Roles-per-account quota math."
 }
 
 variable "clusters" {
   type = map(object({
-    cluster_name              = string
-    vpc_cidr                  = string
-    availability_zones_count  = optional(number, 3)
-    replicas                  = optional(number)
-    create_cluster_admin_user = optional(bool, false)
-    tags                      = optional(map(string), {})
+    cluster_name             = string
+    vpc_cidr                 = string
+    replicas                 = optional(number)
+    compute_machine_type     = optional(string)
+    ec2_metadata_http_tokens = optional(string, "required")
+    tags                     = optional(map(string), {})
   }))
   description = <<-EOT
-    One entry per ROSA HCP cluster. Each cluster gets:
-    - Its own AWS VPC via terraform-redhat/rosa-hcp/rhcs//modules/vpc (unique vpc_cidr required to avoid overlap).
-    - Its own STS stack: create_account_roles / create_oidc / create_operator_roles per module instance = distinct IAM/OIDC per cluster.
-
-    Map keys are stable labels (e.g. rosa-001) used in Terraform addresses and outputs.
+    One independent ROSA HCP cluster per map entry: dedicated VPC, subnets, OIDC config, and
+    account/operator IAM roles (no shared STS or networking between entries). Use non-overlapping
+    vpc_cidr values. Map keys are labels only (for outputs/state); cluster_name is the OCM cluster name.
+    Each cluster is fixed to a single availability zone (first AZ in the region returned by AWS for the VPC submodule).
+    Cluster-admin is always created with a single Terraform-generated password shared across all clusters
+    (see output cluster_admin_login).
   EOT
 
   validation {
-    condition     = length(var.clusters) >= 1
+    condition     = length(var.clusters) > 0
     error_message = "Define at least one cluster in var.clusters."
   }
-}
-
-variable "default_tags" {
-  type        = map(string)
-  description = "Tags merged into each VPC module and passed to the ROSA HCP module (cluster AWS resources)."
-  default     = {}
-}
-
-variable "ec2_metadata_http_tokens" {
-  type        = string
-  description = "IMDS settings for worker nodes (optional/required)."
-  default     = "required"
-}
-
-variable "wait_for_create_complete" {
-  type        = bool
-  description = "Wait for cluster creation (upstream module waiter)."
-  default     = true
-}
-
-variable "wait_for_std_compute_nodes_complete" {
-  type        = bool
-  description = "Wait for initial machine pool (upstream module waiter)."
-  default     = true
 }
