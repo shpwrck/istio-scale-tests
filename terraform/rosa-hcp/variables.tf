@@ -49,6 +49,25 @@ variable "service_quota_iam_roles_per_new_cluster" {
   description = "Estimated IAM roles created per new ROSA HCP cluster (account + operator + OIDC), used only for Roles-per-account quota math."
 }
 
+variable "kubeconfig_output_path" {
+  type        = string
+  nullable    = true
+  default     = null
+  description = "Destination file for the merged kubeconfig (cluster-admin + generated password). Default: rosa-generated.kubeconfig next to this stack. Treat as secret; path is gitignored when using the default name pattern."
+}
+
+variable "kubeconfig_skip_tls_verify" {
+  type        = bool
+  default     = false
+  description = "When true, kubeconfig sets insecure-skip-tls-verify (no CA fetch). Use if tls_certificate against the API fails during apply."
+}
+
+variable "default_compute_machine_type" {
+  type        = string
+  default     = "m5.xlarge"
+  description = "Instance type for the default worker pool when a cluster entry omits compute_machine_type (rhcs_hcp_machine_pool.aws_node_pool.instance_type is required)."
+}
+
 variable "clusters" {
   type = map(object({
     cluster_name             = string
@@ -57,6 +76,8 @@ variable "clusters" {
     compute_machine_type     = optional(string)
     ec2_metadata_http_tokens = optional(string, "required")
     tags                     = optional(map(string), {})
+    worker_autoscale_min     = optional(number, 2)
+    worker_autoscale_max     = optional(number, 10)
   }))
   description = <<-EOT
     One independent ROSA HCP cluster per map entry: dedicated VPC, subnets, OIDC config, and
@@ -70,5 +91,13 @@ variable "clusters" {
   validation {
     condition     = length(var.clusters) > 0
     error_message = "Define at least one cluster in var.clusters."
+  }
+
+  validation {
+    condition = alltrue([
+      for _, c in var.clusters :
+      c.worker_autoscale_min >= 2 && c.worker_autoscale_min <= c.worker_autoscale_max
+    ])
+    error_message = "Each cluster needs worker_autoscale_min >= 2 (single-zone ROSA minimum) and worker_autoscale_min <= worker_autoscale_max."
   }
 }

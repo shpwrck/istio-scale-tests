@@ -7,7 +7,7 @@
 #
 # Requires: oc, jq; optional terraform (to resolve kube context from terraform/rosa-hcp outputs).
 # Usage (repo root):
-#   ./istio-setup/010-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
+#   ./istio-setup/001-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

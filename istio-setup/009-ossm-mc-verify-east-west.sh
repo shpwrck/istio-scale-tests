@@ -2,7 +2,7 @@
 # Verification helpers after east-west gateways + remote secrets + Istio are configured (read-only).
 # Requires: oc contexts rosa-001/002/003; istioctl on PATH or ${REPO}/.bin (version pinned in config/versions.env).
 #
-# Usage (repo root): ./setup-scripts/07-ossm-mc-verify-east-west.sh [--dry-run]
+# Usage (repo root): ./istio-setup/009-ossm-mc-verify-east-west.sh [--dry-run]
 # (--dry-run: no effect; all operations are read-only — accepted for consistent CLI with other setup scripts)
 set -euo pipefail
 

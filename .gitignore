@@ -1,4 +1,4 @@
-# Generated certificates and local PEM material (see istio-setup/001-ossm-mc-cacerts.sh)
+# Generated certificates and local PEM material (see istio-setup/002-ossm-mc-cacerts.sh)
 /cacerts/
 
 # Local or environment-specific manifests (keep repo templates elsewhere if needed)

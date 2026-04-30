@@ -1,5 +1,11 @@
 # First regional AZ (single-AZ clusters). Passed explicitly so VPC subnet/NAT/EIP counts are known at plan
 # time (the upstream VPC module otherwise reads AZs internally, which breaks when module depends_on quotas).
+locals {
+  # Terraform sorts map keys lexicographically — same order as keys(var.clusters) output.
+  sorted_cluster_keys = sort(keys(var.clusters))
+  first_cluster_key   = local.sorted_cluster_keys[0]
+}
+
 data "aws_availability_zones" "cluster" {
   state = "available"
 }
@@ -34,6 +40,9 @@ module "rosa_hcp" {
   # ROSA HCP single-zone minimum is 2 worker nodes (upstream module / installer expectation).
   replicas = coalesce(each.value.replicas, 2)
 
+  # Pool-level min/max is managed by rhcs_hcp_machine_pool.default_workers in worker_pool.tf.
+  # Do not enable rhcs_hcp_cluster_autoscaler via this module here: the provider often returns
+  # a different ResourceLimits shape from Update vs Get, causing inconsistent apply/refresh.
   compute_machine_type     = each.value.compute_machine_type
   create_admin_user        = true
   ec2_metadata_http_tokens = each.value.ec2_metadata_http_tokens

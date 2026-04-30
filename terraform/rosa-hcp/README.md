@@ -35,9 +35,19 @@ terraform apply tfplan
 
 Add or remove map entries in `clusters` to scale cluster count. Use **non-overlapping** `vpc_cidr` values. Multi-AZ VPCs are **not** configurable here (always one AZ per cluster; one NAT and one EIP per cluster).
 
-Default **worker `replicas`** is **2** (ROSA single-zone minimum) unless you set `replicas` on a cluster entry.
+Default **worker `replicas`** at cluster install is **2** (ROSA single-zone minimum) unless you set `replicas` on a cluster entry. The **default machine pool** (`workers`) is also managed by Terraform with **autoscaling** (**2–10** nodes by default), via `worker_pool.tf` (`worker_autoscale_min` / `worker_autoscale_max` per cluster entry). This root module does **not** manage `rhcs_hcp_cluster_autoscaler` (pool bounds still define scaling range; enabling the autoscaler resource in the upstream module has triggered provider apply/refresh inconsistencies for some API responses).
 
-After apply, use `outputs.by_cluster` for API URLs and align kubeconfig context names with your workflow (for example `SETUP_CONTEXTS` in `config/versions.env`).
+After apply, use `outputs.by_cluster` for API URLs. **`kubeconfig.tf`** writes a merged kubeconfig (default **`rosa-generated.kubeconfig`** next to this stack) with **one context per `var.clusters` key** (`rosa-001`, …), user **`rosa-cluster-admin`** / **`cluster-admin`**, and the shared generated password. API CA data comes from **`tls_certificate`** against each API URL unless **`kubeconfig_skip_tls_verify = true`**. Use it with:
+
+```bash
+export KUBECONFIG="$PWD/rosa-generated.kubeconfig"   # or terraform output -raw kubeconfig_path
+oc config get-contexts
+oc config use-context rosa-002
+```
+
+Override the path with **`kubeconfig_output_path`**. The default filename pattern is **gitignored**; do not commit kubeconfigs.
+
+**ACM hub:** Outputs **`first_cluster_key`** and **`first_cluster`** identify the lexicographically first entry in `var.clusters` (same ordering as `cluster_keys`). Use them with `istio-setup/001-acm-install-hub.sh` so the hub lands on that cluster’s API (`first_cluster.cluster_api_url`).
 
 Every cluster gets a **cluster-admin** user. Terraform generates **one** random password (`password.tf`) and applies it to **all** clusters so you can log in everywhere with the same credentials. Read them with `terraform output cluster_admin_login` (sensitive); username is `cluster-admin`.
 

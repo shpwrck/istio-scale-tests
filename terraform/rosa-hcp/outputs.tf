@@ -1,6 +1,24 @@
 output "cluster_keys" {
-  description = "Terraform map keys passed in var.clusters (useful to align with kubeconfig context names)."
+  description = "Terraform map keys passed in var.clusters (lexicographically sorted; align with kubeconfig context names where practical)."
   value       = keys(var.clusters)
+}
+
+output "first_cluster_key" {
+  description = "Lexicographically first key in var.clusters — default ACM hub candidate when contexts match TF keys."
+  value       = local.first_cluster_key
+}
+
+output "first_cluster" {
+  description = "Summary for the first cluster in var.clusters (same ordering as first_cluster_key)."
+  value = {
+    key                 = local.first_cluster_key
+    cluster_name        = var.clusters[local.first_cluster_key].cluster_name
+    cluster_api_url     = module.rosa_hcp[local.first_cluster_key].cluster_api_url
+    cluster_console_url = module.rosa_hcp[local.first_cluster_key].cluster_console_url
+    cluster_id          = module.rosa_hcp[local.first_cluster_key].cluster_id
+    vpc_id              = module.vpc[local.first_cluster_key].vpc_id
+    openshift_version   = var.openshift_version
+  }
 }
 
 output "by_cluster" {
@@ -29,6 +47,11 @@ output "service_quota_targets" {
     gw_endpoint = local.gw_ep_quota_target
     iam_roles   = local.iam_roles_quota_target
   }
+}
+
+output "kubeconfig_path" {
+  description = "Merged kubeconfig written by apply (Bearer token per cluster from OAuth). Use: export KUBECONFIG=<path>. Regenerate tokens: terraform apply -replace=null_resource.kubeconfig."
+  value       = abspath(local.kubeconfig_output_path_resolved)
 }
 
 output "cluster_admin_login" {
