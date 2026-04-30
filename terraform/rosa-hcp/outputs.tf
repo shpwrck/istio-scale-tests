@@ -1,5 +1,5 @@
 output "cluster_keys" {
-  description = "Terraform map keys passed in var.clusters (lexicographically sorted; align with kubeconfig context names where practical)."
+  description = "Terraform map keys passed in var.clusters (lexicographically sorted). Use the same names for kubectl/oc contexts when merging credentials manually."
   value       = keys(var.clusters)
 }
 
@@ -47,11 +47,6 @@ output "service_quota_targets" {
     gw_endpoint = local.gw_ep_quota_target
     iam_roles   = local.iam_roles_quota_target
   }
-}
-
-output "kubeconfig_path" {
-  description = "Merged kubeconfig written by apply (Bearer token per cluster from OAuth). Use: export KUBECONFIG=<path>. Regenerate tokens: terraform apply -replace=null_resource.kubeconfig."
-  value       = abspath(local.kubeconfig_output_path_resolved)
 }
 
 output "cluster_admin_login" {

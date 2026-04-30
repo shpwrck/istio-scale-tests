@@ -49,19 +49,6 @@ variable "service_quota_iam_roles_per_new_cluster" {
   description = "Estimated IAM roles created per new ROSA HCP cluster (account + operator + OIDC), used only for Roles-per-account quota math."
 }
 
-variable "kubeconfig_output_path" {
-  type        = string
-  nullable    = true
-  default     = null
-  description = "Destination file for the merged kubeconfig (cluster-admin + generated password). Default: rosa-generated.kubeconfig next to this stack. Treat as secret; path is gitignored when using the default name pattern."
-}
-
-variable "kubeconfig_skip_tls_verify" {
-  type        = bool
-  default     = false
-  description = "When true, kubeconfig sets insecure-skip-tls-verify (no CA fetch). Use if tls_certificate against the API fails during apply."
-}
-
 variable "default_compute_machine_type" {
   type        = string
   default     = "m5.xlarge"

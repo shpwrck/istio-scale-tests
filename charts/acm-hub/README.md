@@ -1,13 +1,13 @@
 # acm-hub Helm chart
 
-Templates for installing the **Red Hat Advanced Cluster Management** hub operator on OpenShift: `Namespace`, `OperatorGroup`, `Subscription`, and optionally `MultiClusterHub`.
+Templates for installing the **Red Hat Advanced Cluster Management** hub operator on OpenShift: `Namespace`, `OperatorGroup`, `Subscription`, and `MultiClusterHub` in one release.
 
 ## Editing manifests
 
-- **`values.yaml`** — channels, names, `MultiClusterHub.spec`, target namespaces for the OperatorGroup.
-- **`templates/`** — Kubernetes shapes when you need schema changes beyond values.
+- `**values.yaml`** — channels, names, `MultiClusterHub.spec`, target namespaces for the OperatorGroup.
+- `**templates/`** — Kubernetes shapes when you need schema changes beyond values.
 
-The install script `istio-setup/001-acm-install-hub.sh` runs Helm in two phases (`multiclusterHub.enabled=false` then `true`) so the operator CSV can succeed before the hub CR is applied.
+The install script `istio-setup/001-acm-install-hub.sh` applies this chart once (`helm upgrade --install`), then waits for the operator CSV and `MultiClusterHub` phase **Running** (unless `--skip-wait`).
 
 ## Overrides
 
@@ -20,4 +20,4 @@ helm upgrade --install acm-hub ./charts/acm-hub \
   -f my-acm-values.yaml
 ```
 
-Do **not** set `multiclusterHub.enabled=false` on an existing release that already has the hub running unless you intend Helm to drop that resource from the release (and likely delete the CR).
+The operator reconciles `MultiClusterHub` after the subscription installs; until the CSV succeeds, the hub CR may stay pending—use `oc get csv,mch -n open-cluster-management` to watch progress.

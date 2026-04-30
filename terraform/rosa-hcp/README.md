@@ -37,17 +37,11 @@ Add or remove map entries in `clusters` to scale cluster count. Use **non-overla
 
 Default **worker `replicas`** at cluster install is **2** (ROSA single-zone minimum) unless you set `replicas` on a cluster entry. The **default machine pool** (`workers`) is also managed by Terraform with **autoscaling** (**2–10** nodes by default), via `worker_pool.tf` (`worker_autoscale_min` / `worker_autoscale_max` per cluster entry). This root module does **not** manage `rhcs_hcp_cluster_autoscaler` (pool bounds still define scaling range; enabling the autoscaler resource in the upstream module has triggered provider apply/refresh inconsistencies for some API responses).
 
-After apply, use `outputs.by_cluster` for API URLs. **`kubeconfig.tf`** writes a merged kubeconfig (default **`rosa-generated.kubeconfig`** next to this stack) with **one context per `var.clusters` key** (`rosa-001`, …), user **`rosa-cluster-admin`** / **`cluster-admin`**, and the shared generated password. API CA data comes from **`tls_certificate`** against each API URL unless **`kubeconfig_skip_tls_verify = true`**. Use it with:
+After apply, use **`terraform output by_cluster`** for each cluster’s **`cluster_api_url`** (and console URL). This stack does **not** generate a kubeconfig from Terraform itself. Terraform creates a shared **`cluster-admin`** password for every cluster (`password.tf`); read it with **`terraform output cluster_admin_login`** (sensitive). Log in with **`oc login <cluster_api_url> -u cluster-admin -p '<password>'`** per cluster and name your kubectl/oc contexts to match the **`var.clusters`** map keys (e.g. **`rosa-001`**, **`rosa-002`**) so they align with **`SETUP_CONTEXTS`** in **`config/versions.env`** and **`istio-setup`** scripts. Do not commit kubeconfigs.
 
-```bash
-export KUBECONFIG="$PWD/rosa-generated.kubeconfig"   # or terraform output -raw kubeconfig_path
-oc config get-contexts
-oc config use-context rosa-002
-```
+Optional helper (repo root): **`terraform/scripts/001-oc-login-merge-kubeconfig.sh`** — reads **`by_cluster`** and **`cluster_admin_login`** via **`terraform output -json`**, creates a **new** kubeconfig file (temp path or **`--output`**), sets **`KUBECONFIG`** for its **`oc`** calls, runs **`oc login --server … --username … --password …`** once per cluster (sorted keys), renames contexts to map keys, **`oc config use-context`** on the first key, then prints **`export KUBECONFIG=…`** to copy into your shell. Flags: **`--terraform-dir`**, **`--insecure-skip-tls-verify`**, **`--dry-run`**.
 
-Override the path with **`kubeconfig_output_path`**. The default filename pattern is **gitignored**; do not commit kubeconfigs.
-
-**ACM hub:** Outputs **`first_cluster_key`** and **`first_cluster`** identify the lexicographically first entry in `var.clusters` (same ordering as `cluster_keys`). Use them with `istio-setup/001-acm-install-hub.sh` so the hub lands on that cluster’s API (`first_cluster.cluster_api_url`).
+**ACM hub:** Outputs **`first_cluster_key`** and **`first_cluster`** identify the lexicographically first entry in `var.clusters` (same ordering as `cluster_keys`). Use them with `istio-setup/001-acm-install-hub.sh` so the hub lands on that cluster’s API (`first_cluster.cluster_api_url`); pass **`--context`** or rely on API URL matching against your kubeconfig.
 
 Every cluster gets a **cluster-admin** user. Terraform generates **one** random password (`password.tf`) and applies it to **all** clusters so you can log in everywhere with the same credentials. Read them with `terraform output cluster_admin_login` (sensitive); username is `cluster-admin`.
 

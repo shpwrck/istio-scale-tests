@@ -1,0 +1,21 @@
+# Multicluster isotope graph — mirrors istio/tools example-topologies/chain-2-services-different-cluster.yaml
+# Service "a" (cluster1) calls "b" via multicluster DNS stub domain (.global). Requires mesh multicluster DNS
+# as in OSSM / Istio multi-primary docs (remote clusters discoverable).
+#
+# Render per cluster with the istio/tools converter --cluster <logical>, then apply each manifest to the
+# matching kube context (see 002-apply-isotope-multicluster.sh).
+defaults:
+  requestSize: 1 KB
+  responseSize: 1 KB
+services:
+  - isEntrypoint: true
+    name: a
+    namespace: demo1
+    cluster: cluster1
+    script:
+      - call:
+          service: b
+          hostname: b.global:8080
+  - name: b
+    namespace: demo2
+    cluster: cluster2

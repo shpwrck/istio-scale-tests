@@ -7,9 +7,6 @@ openshift_version  = "4.18.38"
 # Optional: set false if your account cannot change service quotas via API.
 # manage_service_quotas = false
 
-# kubeconfig_output_path    = "/tmp/rosa.kubeconfig"
-# kubeconfig_skip_tls_verify = true
-
 common_tags = {
   environment = "scale-test"
 }

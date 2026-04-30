@@ -5,8 +5,8 @@
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.15/html/install/installing-advanced-cluster-management
 # Support matrix: https://access.redhat.com/articles/7133095
 #
-# Requires: Helm 3, oc, jq; optional terraform (to resolve kube context from terraform/rosa-hcp outputs).
-# Hub manifests live in charts/acm-hub (edit templates/values there; this script wires versions.env + waits).
+# Requires: Helm 3, oc, jq; optional terraform (context resolution only).
+# Hub manifests: charts/acm-hub (single Helm apply).
 # Usage (repo root):
 #   ./istio-setup/001-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
 set -euo pipefail
@@ -31,7 +31,7 @@ Usage: $(basename "$0") [options]
   --context NAME       kube/oc context (recommended). If omitted, tries ACM_HUB_CONTEXT,
                        then matches terraform output first_cluster.cluster_api_url to kubeconfig.
   --terraform-dir DIR  Terraform root with applied state (default: ${ROOT}/terraform/rosa-hcp).
-  --dry-run            oc apply --dry-run=client only.
+  --dry-run            oc apply --dry-run=client only (hub Helm apply + skip waits).
   --skip-wait          Do not wait for CSV / MultiClusterHub Running.
 
 Environment:
@@ -39,7 +39,6 @@ Environment:
   ACM_CHANNEL          OLM channel (default ${ACM_CHANNEL} from versions.env).
   ACM_NAMESPACE        Install namespace (default ${ACM_NAMESPACE}).
   ACM_TERRAFORM_DIR    Override terraform root for auto context resolution.
-  ACM_HELM_RELEASE     Helm release name (default acm-hub).
 
 OpenShift ${OPENSHIFT_VERSION} is pinned with ACM channel ${ACM_CHANNEL}; bump both together per RHACM support matrix.
 Requires cluster-admin on the hub.
@@ -152,14 +151,12 @@ fi
 
 [[ -d "$CHART_DIR" ]] || die "chart not found: ${CHART_DIR}"
 
-helm_upgrade() {
-	local mch_enabled="$1"
+helm_upgrade_hub() {
 	local -a cmd=(
 		helm --kube-context "$CTX" upgrade --install "$HELM_RELEASE" "$CHART_DIR"
 		--namespace "$ACM_NAMESPACE"
 		--create-namespace
 		--set subscription.channel="$ACM_CHANNEL"
-		--set multiclusterHub.enabled="$mch_enabled"
 	)
 	if ((DRY_RUN)); then
 		cmd+=(--dry-run=client)
@@ -171,11 +168,11 @@ if ((DRY_RUN == 0)); then
 	helm lint "$CHART_DIR" >/dev/null || die "helm lint failed for ${CHART_DIR}"
 fi
 
-echo "Phase 1: namespace, OperatorGroup, Subscription (MultiClusterHub disabled)."
-helm_upgrade false
+echo "Applying charts/acm-hub (namespace, OperatorGroup, Subscription, MultiClusterHub)."
+helm_upgrade_hub
 
 if ((DRY_RUN)); then
-	echo "dry-run: skipping CSV wait and MultiClusterHub-enabled Helm upgrade."
+	echo "dry-run: skipping CSV / MultiClusterHub wait."
 	exit 0
 fi
 
@@ -199,11 +196,8 @@ if ((SKIP_WAIT == 0)); then
 	echo "CSV ready: ${found}"
 fi
 
-echo "Phase 2: enable MultiClusterHub via Helm."
-helm_upgrade true
-
 if ((SKIP_WAIT)); then
-	echo "Skipping MultiClusterHub status wait (--skip-wait)."
+	echo "Skipping MultiClusterHub status wait (--skip-wait); re-run without --skip-wait to wait for Running."
 	echo "Done (apply issued)."
 	exit 0
 fi
