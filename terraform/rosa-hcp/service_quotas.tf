@@ -1,5 +1,5 @@
 # Regional limits for ROSA HCP + terraform-redhat/rosa-hcp/rhcs VPC (one VPC per cluster, 1 AZ → 1 NAT + 1 EIP each).
-# Resource: https://registry.terraform.io/providers/hashicorp/aws/6.43.0/docs/resources/servicequotas_service_quota
+# Resource: https://registry.terraform.io/providers/hashicorp/aws/6.43.0/docs/resources/aws_servicequotas_service_quota
 
 data "aws_vpcs" "current" {}
 
@@ -30,6 +30,14 @@ locals {
   iam_roles_quota_target = length(tolist(data.aws_iam_roles.account.names)) + (
     local.num_clusters * var.service_quota_iam_roles_per_new_cluster
   ) + var.service_quota_buffer
+
+  # Never request a quota below what AWS reports as applied or below computed need (whichever is higher).
+  vpc_quota_candidate         = max(data.aws_servicequotas_service_quota.vpc_max.value, local.vpc_quota_target)
+  igw_quota_candidate         = max(data.aws_servicequotas_service_quota.igw_max.value, local.igw_quota_target)
+  eip_quota_candidate         = max(data.aws_servicequotas_service_quota.eip_max.value, local.eip_quota_target)
+  nat_per_az_quota_candidate  = max(data.aws_servicequotas_service_quota.nat_per_az_max.value, local.nat_quota_target)
+  gw_endpoint_quota_candidate = max(data.aws_servicequotas_service_quota.gw_ep_max.value, local.gw_ep_quota_target)
+  iam_roles_quota_candidate   = max(data.aws_servicequotas_service_quota.iam_roles_max.value, local.iam_roles_quota_target)
 }
 
 data "aws_servicequotas_service_quota" "vpc_max" {
@@ -67,35 +75,35 @@ resource "aws_servicequotas_service_quota" "vpc" {
   count        = var.manage_service_quotas ? 1 : 0
   service_code = "vpc"
   quota_code   = "L-F678F1CE"
-  value        = max(data.aws_servicequotas_service_quota.vpc_max.value, local.vpc_quota_target)
+  value        = local.vpc_quota_candidate
 }
 
 resource "aws_servicequotas_service_quota" "internet_gateway" {
   count        = var.manage_service_quotas ? 1 : 0
   service_code = "vpc"
   quota_code   = "L-A4707A72"
-  value        = max(data.aws_servicequotas_service_quota.igw_max.value, local.igw_quota_target)
+  value        = local.igw_quota_candidate
 }
 
 resource "aws_servicequotas_service_quota" "eip" {
   count        = var.manage_service_quotas ? 1 : 0
   service_code = "ec2"
   quota_code   = "L-0263D0A3"
-  value        = max(data.aws_servicequotas_service_quota.eip_max.value, local.eip_quota_target)
+  value        = local.eip_quota_candidate
 }
 
 resource "aws_servicequotas_service_quota" "nat_per_az" {
   count        = var.manage_service_quotas ? 1 : 0
   service_code = "vpc"
   quota_code   = "L-FE5A380F"
-  value        = max(data.aws_servicequotas_service_quota.nat_per_az_max.value, local.nat_quota_target)
+  value        = local.nat_per_az_quota_candidate
 }
 
 resource "aws_servicequotas_service_quota" "gateway_vpc_endpoint" {
   count        = var.manage_service_quotas ? 1 : 0
   service_code = "vpc"
   quota_code   = "L-1B52E74A"
-  value        = max(data.aws_servicequotas_service_quota.gw_ep_max.value, local.gw_ep_quota_target)
+  value        = local.gw_endpoint_quota_candidate
 }
 
 resource "aws_servicequotas_service_quota" "iam_roles" {
@@ -103,5 +111,5 @@ resource "aws_servicequotas_service_quota" "iam_roles" {
   provider     = aws.quota_iam
   service_code = "iam"
   quota_code   = "L-FE177D64"
-  value        = max(data.aws_servicequotas_service_quota.iam_roles_max.value, local.iam_roles_quota_target)
+  value        = local.iam_roles_quota_candidate
 }

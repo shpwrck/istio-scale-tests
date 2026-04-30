@@ -1,0 +1,9 @@
+{{- if .Values.multiclusterHub.enabled }}
+apiVersion: operator.open-cluster-management.io/v1
+kind: MultiClusterHub
+metadata:
+  name: {{ .Values.multiclusterHub.resourceName }}
+  namespace: {{ .Release.Namespace }}
+spec:
+{{ toYaml .Values.multiclusterHub.spec | indent 2 }}
+{{- end }}

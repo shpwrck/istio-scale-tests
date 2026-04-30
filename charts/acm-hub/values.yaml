@@ -1,0 +1,20 @@
+operatorGroup:
+  name: default
+  # If empty, templates use the release namespace only.
+  targetNamespaces: []
+
+subscription:
+  # metadata.name
+  resourceName: acm-operator-subscription
+  # spec.name — OperatorHub package
+  packageName: advanced-cluster-management
+  sourceNamespace: openshift-marketplace
+  source: redhat-operators
+  channel: release-2.15
+  installPlanApproval: Automatic
+
+# Applied in a second Helm upgrade after the operator CSV is Succeeded (see istio-setup/001-acm-install-hub.sh).
+multiclusterHub:
+  enabled: false
+  resourceName: multiclusterhub
+  spec: {}

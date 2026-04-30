@@ -1,0 +1,6 @@
+apiVersion: v2
+name: acm-hub
+description: Red Hat Advanced Cluster Management hub (OLM subscription + MultiClusterHub)
+type: application
+version: 0.1.0
+# Chart version is independent of the ACM operator version (delivered via OLM subscription channel).

@@ -5,7 +5,8 @@
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.15/html/install/installing-advanced-cluster-management
 # Support matrix: https://access.redhat.com/articles/7133095
 #
-# Requires: oc, jq; optional terraform (to resolve kube context from terraform/rosa-hcp outputs).
+# Requires: Helm 3, oc, jq; optional terraform (to resolve kube context from terraform/rosa-hcp outputs).
+# Hub manifests live in charts/acm-hub (edit templates/values there; this script wires versions.env + waits).
 # Usage (repo root):
 #   ./istio-setup/001-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
 set -euo pipefail
@@ -38,6 +39,7 @@ Environment:
   ACM_CHANNEL          OLM channel (default ${ACM_CHANNEL} from versions.env).
   ACM_NAMESPACE        Install namespace (default ${ACM_NAMESPACE}).
   ACM_TERRAFORM_DIR    Override terraform root for auto context resolution.
+  ACM_HELM_RELEASE     Helm release name (default acm-hub).
 
 OpenShift ${OPENSHIFT_VERSION} is pinned with ACM channel ${ACM_CHANNEL}; bump both together per RHACM support matrix.
 Requires cluster-admin on the hub.
@@ -80,6 +82,10 @@ if ! command -v oc >/dev/null 2>&1; then
 fi
 if ! command -v jq >/dev/null 2>&1; then
 	echo "error: jq not found" >&2
+	exit 2
+fi
+if ! command -v helm >/dev/null 2>&1; then
+	echo "error: helm not found (Helm 3 required)" >&2
 	exit 2
 fi
 
@@ -125,11 +131,12 @@ resolve_context() {
 
 CTX="$(resolve_context)"
 
-apply=(oc apply)
-((DRY_RUN)) && apply=(oc apply --dry-run=client)
+HELM_RELEASE="${ACM_HELM_RELEASE:-acm-hub}"
+CHART_DIR="${ROOT}/charts/acm-hub"
 
 echo "Using context: ${CTX}"
 echo "ACM channel: ${ACM_CHANNEL} (OpenShift pin in versions.env: ${OPENSHIFT_VERSION})"
+echo "Helm release: ${HELM_RELEASE} (chart: ${CHART_DIR})"
 
 if ((DRY_RUN == 0)); then
 	ocv="$(oc --context="$CTX" version -o json 2>/dev/null | jq -r '.openshiftVersion // empty')"
@@ -143,56 +150,32 @@ if ((DRY_RUN == 0)); then
 	fi
 fi
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+[[ -d "$CHART_DIR" ]] || die "chart not found: ${CHART_DIR}"
 
-cat >"${tmp}/namespace.yaml" <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${ACM_NAMESPACE}
-EOF
+helm_upgrade() {
+	local mch_enabled="$1"
+	local -a cmd=(
+		helm --kube-context "$CTX" upgrade --install "$HELM_RELEASE" "$CHART_DIR"
+		--namespace "$ACM_NAMESPACE"
+		--create-namespace
+		--set subscription.channel="$ACM_CHANNEL"
+		--set multiclusterHub.enabled="$mch_enabled"
+	)
+	if ((DRY_RUN)); then
+		cmd+=(--dry-run=client)
+	fi
+	"${cmd[@]}"
+}
 
-cat >"${tmp}/operatorgroup.yaml" <<EOF
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: default
-  namespace: ${ACM_NAMESPACE}
-spec:
-  targetNamespaces:
-  - ${ACM_NAMESPACE}
-EOF
+if ((DRY_RUN == 0)); then
+	helm lint "$CHART_DIR" >/dev/null || die "helm lint failed for ${CHART_DIR}"
+fi
 
-cat >"${tmp}/subscription.yaml" <<EOF
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: acm-operator-subscription
-  namespace: ${ACM_NAMESPACE}
-spec:
-  sourceNamespace: openshift-marketplace
-  source: redhat-operators
-  channel: ${ACM_CHANNEL}
-  installPlanApproval: Automatic
-  name: advanced-cluster-management
-EOF
-
-cat >"${tmp}/multiclusterhub.yaml" <<EOF
-apiVersion: operator.open-cluster-management.io/v1
-kind: MultiClusterHub
-metadata:
-  name: multiclusterhub
-  namespace: ${ACM_NAMESPACE}
-spec: {}
-EOF
-
-"${apply[@]}" --context="$CTX" -f "${tmp}/namespace.yaml"
-"${apply[@]}" --context="$CTX" -f "${tmp}/operatorgroup.yaml"
-"${apply[@]}" --context="$CTX" -f "${tmp}/subscription.yaml"
+echo "Phase 1: namespace, OperatorGroup, Subscription (MultiClusterHub disabled)."
+helm_upgrade false
 
 if ((DRY_RUN)); then
-	echo "dry-run: skipping CSV wait and MultiClusterHub apply."
+	echo "dry-run: skipping CSV wait and MultiClusterHub-enabled Helm upgrade."
 	exit 0
 fi
 
@@ -216,7 +199,8 @@ if ((SKIP_WAIT == 0)); then
 	echo "CSV ready: ${found}"
 fi
 
-oc --context="$CTX" apply -f "${tmp}/multiclusterhub.yaml"
+echo "Phase 2: enable MultiClusterHub via Helm."
+helm_upgrade true
 
 if ((SKIP_WAIT)); then
 	echo "Skipping MultiClusterHub status wait (--skip-wait)."
