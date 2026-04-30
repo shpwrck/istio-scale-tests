@@ -1,4 +1,4 @@
-# Generated certificates and local PEM material (see setup-scripts/00-ossm-mc-cacerts.sh)
+# Generated certificates and local PEM material (see istio-setup/001-ossm-mc-cacerts.sh)
 /cacerts/
 
 # Local or environment-specific manifests (keep repo templates elsewhere if needed)
@@ -6,6 +6,9 @@
 
 # Optional local cache (e.g. tooling clones)
 /.cache/
+
+# Git worktrees (isolated checkouts; see using-git-worktrees skill)
+/.worktrees/
 
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/
@@ -17,3 +20,7 @@
 /terraform/**/crash.log
 /terraform/**/crash.*.log
 /terraform/**/terraform.tfvars
+
+# Generated kubeconfig (contains cluster-admin credentials)
+/terraform/rosa-hcp/*.kubeconfig
+/terraform/rosa-hcp/rosa-generated.kubeconfig
