@@ -10,9 +10,11 @@ subscription:
   packageName: advanced-cluster-management
   sourceNamespace: openshift-marketplace
   source: redhat-operators
-  channel: release-2.15
+  channel: release-2.16
   installPlanApproval: Automatic
 
 multiclusterHub:
   resourceName: multiclusterhub
+  disableHubSelfManagement: false
+  # spec.localClusterName is normally set by istio-setup/001-acm-install-hub.sh from terraform first_cluster.cluster_name (≤34 chars).
   spec: {}

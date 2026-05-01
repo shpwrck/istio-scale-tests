@@ -1,18 +1,18 @@
 output "cluster_keys" {
-  description = "Terraform map keys passed in var.clusters (lexicographically sorted). Use the same names for kubectl/oc contexts when merging credentials manually."
-  value       = keys(var.clusters)
+  description = "Logical cluster keys (lexicographically sorted), same as generated Terraform map keys. Use the same names for kubectl/oc contexts when merging credentials manually."
+  value       = local.sorted_cluster_keys
 }
 
 output "first_cluster_key" {
-  description = "Lexicographically first key in var.clusters — default ACM hub candidate when contexts match TF keys."
+  description = "Lexicographically first generated cluster key — default ACM hub candidate when contexts match TF keys."
   value       = local.first_cluster_key
 }
 
 output "first_cluster" {
-  description = "Summary for the first cluster in var.clusters (same ordering as first_cluster_key)."
+  description = "Summary for the first cluster (same ordering as first_cluster_key)."
   value = {
     key                 = local.first_cluster_key
-    cluster_name        = var.clusters[local.first_cluster_key].cluster_name
+    cluster_name        = local.clusters[local.first_cluster_key].cluster_name
     cluster_api_url     = module.rosa_hcp[local.first_cluster_key].cluster_api_url
     cluster_console_url = module.rosa_hcp[local.first_cluster_key].cluster_console_url
     cluster_id          = module.rosa_hcp[local.first_cluster_key].cluster_id
@@ -26,7 +26,7 @@ output "by_cluster" {
   value = {
     for k, m in module.rosa_hcp : k => {
       cluster_id           = m.cluster_id
-      cluster_name         = var.clusters[k].cluster_name
+      cluster_name         = local.clusters[k].cluster_name
       cluster_api_url      = m.cluster_api_url
       cluster_console_url  = m.cluster_console_url
       cluster_state        = m.cluster_state

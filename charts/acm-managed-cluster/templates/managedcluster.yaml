@@ -1,0 +1,14 @@
+{{- if not .Values.managedCluster.name }}
+{{- fail "managedCluster.name is required (cluster name / namespace on hub)" }}
+{{- end }}
+apiVersion: cluster.open-cluster-management.io/v1
+kind: ManagedCluster
+metadata:
+  name: {{ .Values.managedCluster.name }}
+  labels:
+{{- $defaults := .Values.defaultLabels | default dict }}
+{{- $extra := .Values.managedCluster.labels | default dict }}
+{{- $lbl := merge $defaults $extra }}
+{{- toYaml $lbl | nindent 4 }}
+spec:
+  hubAcceptsClient: true

@@ -2,7 +2,7 @@
 # export RHCS_TOKEN='...'   # or set rhcs_token below (avoid committing secrets)
 
 aws_region         = "us-east-2"
-openshift_version  = "4.18.38"
+openshift_version  = "4.21.11"
 
 # Optional: set false if your account cannot change service quotas via API.
 # manage_service_quotas = false
@@ -11,20 +11,24 @@ common_tags = {
   environment = "scale-test"
 }
 
-clusters = {
-  rosa-001 = {
-    cluster_name = "scale-hcp-001"
-    vpc_cidr     = "10.0.0.0/16"
-  }
-  rosa-002 = {
-    cluster_name = "scale-hcp-002"
-    vpc_cidr     = "10.1.0.0/16"
-  }
-  rosa-003 = {
-    cluster_name = "scale-hcp-003"
-    vpc_cidr     = "10.2.0.0/16"
-    # replicas defaults to 2 (single-AZ ROSA minimum). Optional: replicas = 3
-    # compute_machine_type = "m5.xlarge"
-    # Default worker pool autoscaling: worker_autoscale_min = 2, worker_autoscale_max = 10
-  }
-}
+# --- Generated clusters (same pattern as the former manual `clusters` map) ---
+cluster_count = 3
+
+# Terraform keys, OCM cluster_name, and kubectl/oc context names (first → rosa-001 …).
+cluster_name_format = "rosa-%03d"
+
+# VPC CIDRs: idx 0..cluster_count-1 uses format(idx + vpc_cidr_index_start).
+# Defaults → 10.0.0.0/16, 10.1.0.0/16, 10.2.0.0/16
+vpc_cidr_format      = "10.%d.0.0/16"
+vpc_cidr_index_start = 0
+cluster_index_start  = 1
+
+# Optional shared overrides for every cluster:
+# cluster_defaults = {
+#   replicas                 = 2
+#   compute_machine_type     = "m5.xlarge"
+#   ec2_metadata_http_tokens = "required"
+#   worker_autoscale_min       = 2
+#   worker_autoscale_max       = 10
+#   tags                       = {}
+# }

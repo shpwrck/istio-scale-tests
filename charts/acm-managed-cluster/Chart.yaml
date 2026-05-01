@@ -1,0 +1,5 @@
+apiVersion: v2
+name: acm-managed-cluster
+description: Single RHACM ManagedCluster resource (one Helm release per spoke cluster).
+type: application
+version: 0.1.0

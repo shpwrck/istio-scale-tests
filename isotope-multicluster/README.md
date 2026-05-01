@@ -23,7 +23,7 @@ Adjust namespaces, logical cluster names, or hostnames to match your mesh DNS an
 
 ### Topology from Terraform (`cluster_keys`)
 
-When clusters come from **`terraform/rosa-hcp`**, use the same names as **`var.clusters`** map keys for your kubectl/oc contexts (e.g. **`rosa-001`**). **`001-generate-topology-from-terraform.sh`** reads **`terraform output cluster_keys`** and writes a **chain** graph **`svc0 → svc1 → … → svc{N-1}`**, placing one hop on each cluster in that order (cross-cluster calls use **`svcK.global:8080`**). Single-cluster stacks get one entrypoint service only.
+When clusters come from **`terraform/rosa-hcp`**, use the same names as Terraform **`cluster_keys`** (from **`cluster_name_format`**, e.g. **`rosa-001`**) for your kubectl/oc contexts. **`001-generate-topology-from-terraform.sh`** reads **`terraform output cluster_keys`** and writes a **chain** graph **`svc0 → svc1 → … → svc{N-1}`**, placing one hop on each cluster in that order (cross-cluster calls use **`svcK.global:8080`**). Single-cluster stacks get one entrypoint service only.
 
 From the **repository root** (after **`terraform apply`** in the stack):
 

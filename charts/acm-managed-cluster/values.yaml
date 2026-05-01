@@ -1,0 +1,7 @@
+defaultLabels:
+  cloud: auto-detect
+  vendor: OpenShift
+
+managedCluster:
+  name: ""
+  labels: {}

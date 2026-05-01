@@ -12,11 +12,11 @@ variable "rhcs_token" {
 
 variable "openshift_version" {
   type        = string
-  description = "OpenShift version for all clusters (e.g. 4.18.38). Align with config/versions.env when using this repo's mesh scripts."
+  description = "OpenShift version for all clusters (e.g. 4.21.11). Align with config/versions.env when using this repo's mesh scripts."
 
   validation {
     condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.openshift_version))
-    error_message = "openshift_version must look like major.minor.patch (e.g. 4.18.38)."
+    error_message = "openshift_version must look like major.minor.patch (e.g. 4.21.11)."
   }
 }
 
@@ -52,39 +52,59 @@ variable "service_quota_iam_roles_per_new_cluster" {
 variable "default_compute_machine_type" {
   type        = string
   default     = "m5.xlarge"
-  description = "Instance type for the default worker pool when a cluster entry omits compute_machine_type (rhcs_hcp_machine_pool.aws_node_pool.instance_type is required)."
+  description = "Instance type for the default worker pool when cluster_defaults.compute_machine_type is null (rhcs_hcp_machine_pool.aws_node_pool.instance_type is required)."
 }
 
-variable "clusters" {
-  type = map(object({
-    cluster_name             = string
-    vpc_cidr                 = string
+variable "cluster_count" {
+  type        = number
+  description = "How many independent ROSA HCP clusters to create (each: dedicated VPC, subnets, OIDC, account/operator IAM roles)."
+  validation {
+    condition     = var.cluster_count >= 1
+    error_message = "cluster_count must be >= 1."
+  }
+}
+
+variable "cluster_index_start" {
+  type        = number
+  default     = 1
+  description = "First number substituted into cluster_name_format (e.g. 1 with \"rosa-%03d\" → rosa-001 for the first cluster)."
+}
+
+variable "vpc_cidr_index_start" {
+  type        = number
+  default     = 0
+  description = "Added to each cluster index (0 .. cluster_count-1) before formatting vpc_cidr_format (defaults: \"10.%d.0.0/16\" → 10.0.0.0/16, 10.1.0.0/16, …)."
+}
+
+variable "cluster_name_format" {
+  type        = string
+  default     = "rosa-%03d"
+  description = "format() pattern for Terraform map keys, OCM cluster_name, and kubectl/oc context names (one integer: idx + cluster_index_start; must yield unique keys)."
+}
+
+variable "vpc_cidr_format" {
+  type        = string
+  default     = "10.%d.0.0/16"
+  description = "VPC CIDR per cluster; format() with one integer: idx + vpc_cidr_index_start. Use non-overlapping ranges (e.g. increment second octet)."
+}
+
+variable "cluster_defaults" {
+  type = object({
     replicas                 = optional(number)
     compute_machine_type     = optional(string)
-    ec2_metadata_http_tokens = optional(string, "required")
-    tags                     = optional(map(string), {})
-    worker_autoscale_min     = optional(number, 2)
-    worker_autoscale_max     = optional(number, 10)
-  }))
-  description = <<-EOT
-    One independent ROSA HCP cluster per map entry: dedicated VPC, subnets, OIDC config, and
-    account/operator IAM roles (no shared STS or networking between entries). Use non-overlapping
-    vpc_cidr values. Map keys are labels only (for outputs/state); cluster_name is the OCM cluster name.
-    Each cluster is fixed to a single availability zone (first AZ in the region returned by AWS for the VPC submodule).
-    Cluster-admin is always created with a single Terraform-generated password shared across all clusters
-    (see output cluster_admin_login).
-  EOT
+    ec2_metadata_http_tokens = optional(string)
+    tags                     = optional(map(string))
+    worker_autoscale_min     = optional(number)
+    worker_autoscale_max     = optional(number)
+  })
+  default     = {}
+  description = "Shared settings for every generated cluster (optional fields fall back to ROSA/upstream defaults where noted in README)."
 
   validation {
-    condition     = length(var.clusters) > 0
-    error_message = "Define at least one cluster in var.clusters."
-  }
-
-  validation {
-    condition = alltrue([
-      for _, c in var.clusters :
-      c.worker_autoscale_min >= 2 && c.worker_autoscale_min <= c.worker_autoscale_max
-    ])
-    error_message = "Each cluster needs worker_autoscale_min >= 2 (single-zone ROSA minimum) and worker_autoscale_min <= worker_autoscale_max."
+    condition = (
+      coalesce(var.cluster_defaults.worker_autoscale_min, 2) >= 2 &&
+      coalesce(var.cluster_defaults.worker_autoscale_min, 2) <= coalesce(var.cluster_defaults.worker_autoscale_max, 10)
+    )
+    error_message = "cluster_defaults.worker_autoscale_min must be >= 2 and <= worker_autoscale_max."
   }
 }

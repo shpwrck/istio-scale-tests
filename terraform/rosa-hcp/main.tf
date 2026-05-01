@@ -1,8 +1,22 @@
 # First regional AZ (single-AZ clusters). Passed explicitly so VPC subnet/NAT/EIP counts are known at plan
 # time (the upstream VPC module otherwise reads AZs internally, which breaks when module depends_on quotas).
 locals {
-  # Terraform sorts map keys lexicographically — same order as keys(var.clusters) output.
-  sorted_cluster_keys = sort(keys(var.clusters))
+  clusters = {
+    for idx in range(var.cluster_count) :
+    format(var.cluster_name_format, idx + var.cluster_index_start) => {
+      cluster_name             = format(var.cluster_name_format, idx + var.cluster_index_start)
+      vpc_cidr                 = format(var.vpc_cidr_format, idx + var.vpc_cidr_index_start)
+      replicas                 = try(var.cluster_defaults.replicas, null)
+      compute_machine_type     = try(var.cluster_defaults.compute_machine_type, null)
+      ec2_metadata_http_tokens = coalesce(try(var.cluster_defaults.ec2_metadata_http_tokens, null), "required")
+      tags                     = coalesce(try(var.cluster_defaults.tags, null), {})
+      worker_autoscale_min     = coalesce(try(var.cluster_defaults.worker_autoscale_min, null), 2)
+      worker_autoscale_max     = coalesce(try(var.cluster_defaults.worker_autoscale_max, null), 10)
+    }
+  }
+
+  # Terraform sorts map keys lexicographically — same order as cluster_keys output.
+  sorted_cluster_keys = sort(keys(local.clusters))
   first_cluster_key   = local.sorted_cluster_keys[0]
 }
 
@@ -15,7 +29,7 @@ module "vpc" {
   source  = "terraform-redhat/rosa-hcp/rhcs//modules/vpc"
   version = "1.7.3"
 
-  for_each = var.clusters
+  for_each = local.clusters
 
   name_prefix        = each.value.cluster_name
   vpc_cidr           = each.value.vpc_cidr
@@ -27,7 +41,7 @@ module "rosa_hcp" {
   source  = "terraform-redhat/rosa-hcp/rhcs"
   version = "1.7.3"
 
-  for_each = var.clusters
+  for_each = local.clusters
 
   cluster_name      = each.value.cluster_name
   openshift_version = var.openshift_version

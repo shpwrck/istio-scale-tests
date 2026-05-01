@@ -10,7 +10,7 @@ data "aws_iam_roles" "account" {
 }
 
 locals {
-  num_clusters = length(var.clusters)
+  num_clusters = var.cluster_count
 
   # One EIP and one NAT per cluster (single-AZ VPC layout).
   new_stack_eip_total = local.num_clusters

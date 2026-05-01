@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a fresh kubeconfig by running oc login once per ROSA cluster from terraform/rosa-hcp outputs.
 # Creates a new kubeconfig file, sets KUBECONFIG for all oc calls in this process, renames contexts to
-# match var.clusters keys (e.g. rosa-001). Requires: terraform, jq, oc (run after terraform apply).
+# match terraform cluster_keys / cluster_name_format (e.g. rosa-001). Requires: terraform, jq, oc (run after terraform apply).
 #
 # Usage (repo root or any cwd):
 #   ./terraform/scripts/001-oc-login-merge-kubeconfig.sh [--terraform-dir DIR] [--output FILE] [--insecure-skip-tls-verify] [--dry-run]

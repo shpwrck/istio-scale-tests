@@ -4,7 +4,7 @@
 # we can enable autoscaling without a separate terraform import step.
 
 resource "rhcs_hcp_machine_pool" "default_workers" {
-  for_each = var.clusters
+  for_each = local.clusters
 
   cluster   = module.rosa_hcp[each.key].cluster_id
   name      = "workers"
