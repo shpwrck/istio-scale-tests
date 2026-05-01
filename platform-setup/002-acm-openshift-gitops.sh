@@ -2,7 +2,7 @@
 # Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
 # Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
-# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 002-ossm-mc-cacerts.sh). This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
 # Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).

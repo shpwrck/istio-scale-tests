@@ -2,7 +2,7 @@
 # Apply east-west gateway + cross-network Gateway from templates (OSSM 3.3 — see AGENTS.md).
 #
 # Requires: envsubst (gettext), oc
-# Usage (repo root): ./istio-setup/008-ossm-mc-apply-east-west.sh [--dry-run]
+# Usage (repo root): ./istio-setup/007-ossm-mc-apply-east-west.sh [--dry-run]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

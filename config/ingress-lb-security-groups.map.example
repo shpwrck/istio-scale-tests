@@ -1,4 +1,4 @@
-# Per-context AWS LoadBalancer security groups for istio-ingressgateway (see istio-setup/005).
+# Per-context AWS LoadBalancer security groups for istio-ingressgateway (see istio-setup/004).
 # SG IDs are VPC-scoped — use a different list per kube/oc context when clusters sit in different VPCs.
 #
 # Format (one row per context):  context|replace-SGs|extra-SGs

@@ -6,7 +6,7 @@ Upstream describes the pattern in `isotope/example-topologies/chain-2-services-d
 
 ## Prerequisites
 
-- Mesh installed through `istio-setup/004`–`008` (or equivalent): remote secrets and east–west gateways so services resolve across clusters.
+- Mesh installed through `istio-setup/003`–`007` (or equivalent): remote secrets and east–west gateways so services resolve across clusters.
 - **Multicluster DNS** for the stub domain used in the graph (`b.global` in the sample). Without it, calls from `a` to `b` will not resolve. Align stub domains with your Istio/OSSM multicluster install (`.global` is the common Istio multicluster pattern).
 - **Go** on `PATH` and a local clone of **[istio/tools](https://github.com/istio/tools)**.
 - An **isotope service image** built from `istio/tools/isotope/service` (for example via `ko`) — there is no universal public pin in-tree; set `ISOTOPE_SERVICE_IMAGE` or `--service-image`.

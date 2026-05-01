@@ -8,12 +8,12 @@
 #   openssl s_client -showcerts (live chain) + https://letsencrypt.org/certs/isrgrootx1.pem
 #
 # If istiod still logs x509 errors on remote watches, use after regenerating secrets:
-#   ./istio-setup/007-ossm-mc-remote-secrets-insecure-apiserver.sh
+#   ./istio-setup/006-ossm-mc-remote-secrets-insecure-apiserver.sh
 # (development / lab only — skips apiserver TLS verification inside embedded kubeconfigs.)
 #
 # Updates your active kubeconfig (set KUBECONFIG to use a copy).
 #
-# Usage: ./istio-setup/003-ossm-mc-kubeconfig-embed-api-ca.sh [--dry-run] [context ...]
+# Usage: ./istio-setup/002-ossm-mc-kubeconfig-embed-api-ca.sh [--dry-run] [context ...]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -66,6 +66,6 @@ for ctx in "${CTXS[@]}"; do
 	kubectl config set-cluster "$cluster" --server="$server" --embed-certs=true --certificate-authority="$cafile"
 	echo "embedded API CA (+ ISRG root) for context=$ctx cluster=$cluster"
 done
-echo "Done. Re-run: PATH=\"\$REPO/.bin:\$PATH\" ./istio-setup/006-ossm-mc-remote-secrets.sh"
+echo "Done. Re-run: PATH=\"\$REPO/.bin:\$PATH\" ./istio-setup/005-ossm-mc-remote-secrets.sh"
 echo "Then restart istiod on each cluster if endpoints do not refresh:"
 echo "  for c in rosa-001 rosa-002 rosa-003; do oc --context=\$c rollout restart deploy/istiod -n istio-system; done"

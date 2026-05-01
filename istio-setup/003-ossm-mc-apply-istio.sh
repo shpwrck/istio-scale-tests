@@ -4,7 +4,7 @@
 #
 # Requires: envsubst (gettext), oc
 # Usage (repo root):
-#   ./istio-setup/004-ossm-mc-apply-istio.sh [--contexts CSV] [--dry-run]
+#   ./istio-setup/003-ossm-mc-apply-istio.sh [--contexts CSV] [--dry-run]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

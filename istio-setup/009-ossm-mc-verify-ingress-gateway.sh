@@ -6,7 +6,7 @@
 #
 # Requires: oc, curl
 # Usage (repo root):
-#   ./istio-setup/010-ossm-mc-verify-ingress-gateway.sh [--contexts CSV] [--dry-run] [--cleanup]
+#   ./istio-setup/009-ossm-mc-verify-ingress-gateway.sh [--contexts CSV] [--dry-run] [--cleanup]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,7 +32,7 @@ Usage: $(basename "$0") [options]
 Environment:
   SETUP_CONTEXTS   Default for --contexts when omitted.
 
-Requires istio-system/istio-ingressgateway (istio-setup/005) and curl on PATH.
+Requires istio-system/istio-ingressgateway (istio-setup/004) and curl on PATH.
 
 If checks fail: namespace must label sidecar injection (istio.io/rev) — see manifest comments;
 mesh STRICT mTLS requires a proxy on the workload pod (2/2 Ready).

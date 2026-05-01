@@ -4,7 +4,7 @@
 #
 # Requires: bash 4+, oc, jq, base64, awk
 #
-# Usage: ./istio-setup/007-ossm-mc-remote-secrets-insecure-apiserver.sh [--dry-run]
+# Usage: ./istio-setup/006-ossm-mc-remote-secrets-insecure-apiserver.sh [--dry-run]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

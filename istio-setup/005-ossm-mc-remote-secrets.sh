@@ -5,7 +5,7 @@
 # Requires: istioctl on PATH (pin ISTIO / Istio version via config/versions.env + AGENTS.md),
 #           oc logged into all contexts.
 #
-# Usage: ./istio-setup/006-ossm-mc-remote-secrets.sh [--dry-run]
+# Usage: ./istio-setup/005-ossm-mc-remote-secrets.sh [--dry-run]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

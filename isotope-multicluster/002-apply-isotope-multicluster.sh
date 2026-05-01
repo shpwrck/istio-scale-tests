@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Render istio/tools isotope manifests per logical cluster and apply to kube contexts (multi-cluster mesh).
-# Prerequisites: multi-primary mesh (istio-setup 004–008), multicluster DNS for *.global, clone of istio/tools, Go.
+# Prerequisites: multi-primary mesh (istio-setup 003–007), multicluster DNS for *.global, clone of istio/tools, Go.
 #
 # Usage (repo root):
 #   ./isotope-multicluster/002-apply-isotope-multicluster.sh [--tools-root DIR] [--topology FILE] \\

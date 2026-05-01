@@ -19,7 +19,7 @@
 #
 # Requires: Helm 3, oc
 # Usage (repo root):
-#   ./istio-setup/005-ossm-mc-apply-ingress-gateway.sh [--contexts CSV] [--dry-run]
+#   ./istio-setup/004-ossm-mc-apply-ingress-gateway.sh [--contexts CSV] [--dry-run]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
