@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Install Red Hat Advanced Cluster Management hub on one OpenShift cluster (OperatorHub subscription + MultiClusterHub).
-# Pair OpenShift and ACM trains using config/versions.env (defaults: OCP 4.21.x + ACM channel release-2.16).
+# Install RHACM hub: merge kubeconfigs from Terraform; three Helm charts on hub (operator → MultiClusterHub → KlusterletConfig);
+# then per spoke cluster: ManagedCluster Helm → wait hub import/auto-import secret → apply CRD docs from import.yaml → apply full import.yaml on spoke.
+# Pair OpenShift and ACM using config/versions.env (defaults: OCP 4.21.x + ACM channel release-2.16).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/install/installing-advanced-cluster-management
-# Support matrix: https://access.redhat.com/articles/7133095
 #
-# When registering Terraform spokes: builds a merged kubeconfig via terraform/scripts/001-oc-login-merge-kubeconfig.sh,
-# installs charts/acm-managed-cluster once per non-hub cluster key, then applies RHACM import YAML on each spoke
-# (secret <cluster>-import / import.yaml on hub — see RHACM "Importing a managed cluster with the CLI").
+# Requires: Helm 3, oc, jq, base64; terraform when merging kubeconfig / listing spokes (unless --skip-managed-clusters).
 #
-# Requires: Helm 3, oc, jq, base64; terraform when using spoke registration (not --skip-managed-clusters).
+# Migration: if the hub namespace still has an older single Helm release (e.g. acm-hub from the previous monolithic chart),
+# uninstall it when safe before installing these releases, or Helm will error on OperatorGroup ownership / pruning.
 # Usage (repo root):
 #   ./istio-setup/001-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
 #       [--skip-managed-clusters] [--skip-import] [--insecure-skip-tls-verify] [--local-cluster-name NAME]
@@ -33,9 +32,28 @@ MC_KUBECONFIG=""
 INSECURE_LOGIN=()
 
 ACM_IMPORT_WAIT_SEC="${ACM_IMPORT_WAIT_SEC:-900}"
+# Hub secret import.yaml often applies Klusterlet before the spoke has registered the Klusterlet CRD; retry apply.
+ACM_IMPORT_APPLY_RETRY_SEC="${ACM_IMPORT_APPLY_RETRY_SEC:-900}"
+# After import.yaml exists, poll for hub secret key crds.yaml (RHACM split) before falling back to CRDs embedded in import.yaml.
+ACM_CRDS_YAML_WAIT_SEC="${ACM_CRDS_YAML_WAIT_SEC:-180}"
+ACM_INSTALL_KLUSTERLETCONFIG="${ACM_INSTALL_KLUSTERLETCONFIG:-1}"
+ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC="${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC:-900}"
+
+CHART_OPERATOR="${ROOT}/charts/acm-operator"
+CHART_MULTICLUSTER_HUB="${ROOT}/charts/acm-multicluster-hub"
+CHART_KLUSTERLET_CONFIG="${ROOT}/charts/acm-klusterlet-config"
+CHART_MANAGED_CLUSTER="${ROOT}/charts/acm-managed-cluster"
+
+RELEASE_OPERATOR="${ACM_OPERATOR_RELEASE:-acm-operator}"
+RELEASE_MULTICLUSTER_HUB="${ACM_MULTICLUSTER_HUB_RELEASE:-acm-multicluster-hub}"
+RELEASE_KLUSTERLET_CONFIG="${ACM_KLUSTERLET_CONFIG_RELEASE:-acm-klusterlet-config}"
+RELEASE_MC_PREFIX="${ACM_MANAGED_CLUSTER_RELEASE_PREFIX:-acm-managed-cluster}"
 
 cleanup_mc_kubeconfig() {
-	[[ -n "${MC_KUBECONFIG}" && -f "${MC_KUBECONFIG}" ]] && rm -f "${MC_KUBECONFIG}"
+	if [[ -n "${MC_KUBECONFIG}" && -f "${MC_KUBECONFIG}" ]]; then
+		rm -f "${MC_KUBECONFIG}" || true
+	fi
+	return 0
 }
 trap cleanup_mc_kubeconfig EXIT
 
@@ -43,16 +61,20 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  Install RHACM hub operator on the target cluster (namespace ${ACM_NAMESPACE}).
+  1) Merge kubeconfig from Terraform (unless --skip-managed-clusters or --dry-run).
+  2) Helm: charts/acm-operator → wait for ACM CSV Succeeded.
+  3) Helm: charts/acm-multicluster-hub → wait for MultiClusterHub Running.
+  4) Helm: charts/acm-klusterlet-config (unless ACM_INSTALL_KLUSTERLETCONFIG=0) after KlusterletConfig CRD exists.
+  5) Per spoke (Terraform keys except hub): Helm ManagedCluster → wait hub import/auto-import secret → CRDs from import.yaml → full import.yaml on spoke.
 
   --context NAME       kube/oc context for the hub (recommended). If omitted, tries ACM_HUB_CONTEXT,
                        then matches terraform output first_cluster.cluster_api_url to kubeconfig.
   --terraform-dir DIR  Terraform root with applied state (default: ${ROOT}/terraform/rosa-hcp).
-  --dry-run            Client-side Helm dry-run; skip waits, kubeconfig merge, and spoke import apply.
-  --skip-wait          Do not wait for CSV / MultiClusterHub Running (skips spoke Helm + import).
+  --dry-run            Client dry-run for Helm operator; helm template for CR charts that need CRDs.
+  --skip-wait          Do not wait for CSV / MultiClusterHub (skips steps 2–4 readiness and spoke Helm + import).
   --skip-managed-clusters
-                       Do not merge kubeconfig, Helm charts/acm-managed-cluster, or import spokes.
-  --skip-import        Apply hub-side ManagedCluster Helm only; do not pull import.yaml / oc apply on spokes.
+                       Do not merge kubeconfig, ManagedCluster Helm, or import apply.
+  --skip-import        Hub-side ManagedCluster Helm only; no oc apply import on spokes.
   --insecure-skip-tls-verify
                        Forward to terraform/scripts/001-oc-login-merge-kubeconfig.sh (ROSA API TLS).
   --local-cluster-name NAME
@@ -63,10 +85,15 @@ Environment:
   ACM_CHANNEL                      OLM channel (default ${ACM_CHANNEL} from versions.env).
   ACM_NAMESPACE                    Install namespace (default ${ACM_NAMESPACE}).
   ACM_TERRAFORM_DIR                Override terraform root for auto context + spoke list.
-  ACM_HELM_RELEASE                 Hub release name (default acm-hub).
-  ACM_MANAGED_CLUSTER_RELEASE_PREFIX
-                                   Prefix for per-spoke releases (default acm-managed-cluster → acm-managed-cluster-<key>).
+  ACM_OPERATOR_RELEASE             Helm release for charts/acm-operator (default ${RELEASE_OPERATOR}).
+  ACM_MULTICLUSTER_HUB_RELEASE     Helm release for charts/acm-multicluster-hub (default ${RELEASE_MULTICLUSTER_HUB}).
+  ACM_KLUSTERLET_CONFIG_RELEASE    Helm release for charts/acm-klusterlet-config (default ${RELEASE_KLUSTERLET_CONFIG}).
+  ACM_MANAGED_CLUSTER_RELEASE_PREFIX  Prefix for per-spoke releases (default ${RELEASE_MC_PREFIX}-<key>).
   ACM_IMPORT_WAIT_SEC              Seconds to wait per spoke for hub import secret (default ${ACM_IMPORT_WAIT_SEC}).
+  ACM_IMPORT_APPLY_RETRY_SEC       Seconds to retry oc apply of import.yaml on each spoke if CRDs are not ready (default ${ACM_IMPORT_APPLY_RETRY_SEC}).
+  ACM_CRDS_YAML_WAIT_SEC           Seconds to wait for hub secret data key crds.yaml after import.yaml exists (default ${ACM_CRDS_YAML_WAIT_SEC}).
+  ACM_INSTALL_KLUSTERLETCONFIG     If 1 (default), install KlusterletConfig chart after CRD exists; set 0 to skip.
+  ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC  Seconds to wait for KlusterletConfig CRD (default ${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC}).
   ACM_LOCAL_CLUSTER_NAME           MultiClusterHub spec.localClusterName when --local-cluster-name is not used.
 
 OpenShift ${OPENSHIFT_VERSION} is pinned with ACM channel ${ACM_CHANNEL}; bump both together per RHACM support matrix.
@@ -121,22 +148,22 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if ! command -v oc >/dev/null 2>&1; then
+command -v oc >/dev/null 2>&1 || {
 	echo "error: oc not found" >&2
 	exit 2
-fi
-if ! command -v jq >/dev/null 2>&1; then
+}
+command -v jq >/dev/null 2>&1 || {
 	echo "error: jq not found" >&2
 	exit 2
-fi
-if ! command -v helm >/dev/null 2>&1; then
+}
+command -v helm >/dev/null 2>&1 || {
 	echo "error: helm not found (Helm 3 required)" >&2
 	exit 2
-fi
-if ! command -v base64 >/dev/null 2>&1; then
+}
+command -v base64 >/dev/null 2>&1 || {
 	echo "error: base64 not found" >&2
 	exit 2
-fi
+}
 
 normalize_url() {
 	local u="$1"
@@ -188,7 +215,6 @@ resolve_context() {
 	echo "$matched"
 }
 
-# RHACM limits spec.localClusterName length (see MultiClusterHub advanced configuration in RHACM install docs).
 readonly _ACM_LOCAL_CLUSTER_NAME_MAX_LEN=34
 
 resolve_local_cluster_name() {
@@ -225,7 +251,6 @@ resolve_local_cluster_name() {
 	echo "$CTX"
 }
 
-# Emit spoke Terraform keys (map keys excluding hub), one per line.
 list_spoke_cluster_keys() {
 	command -v terraform >/dev/null 2>&1 || return 1
 	local keys hub
@@ -242,7 +267,16 @@ extract_import_yaml_from_hub() {
 	local hub="${CTX}"
 	local raw sec
 
+	# RHACM may expose import payloads as ${cluster}-import, auto-import-secret, or manual-import (see import docs).
 	if raw="$(oc --context="$hub" get secret "${cluster}-import" -n "${cluster}" -o json 2>/dev/null)"; then
+		sec="$(echo "$raw" | jq -r '.data["import.yaml"] // empty')"
+		if [[ -n "$sec" ]]; then
+			echo "$sec" | base64 -d
+			return 0
+		fi
+	fi
+
+	if raw="$(oc --context="$hub" get secret "auto-import-secret" -n "${cluster}" -o json 2>/dev/null)"; then
 		sec="$(echo "$raw" | jq -r '.data["import.yaml"] // empty')"
 		if [[ -n "$sec" ]]; then
 			echo "$sec" | base64 -d
@@ -264,6 +298,40 @@ extract_import_yaml_from_hub() {
 	return 1
 }
 
+# Decode hub secret data key crds.yaml (${cluster}-import, auto-import-secret, or manual-import).
+extract_crds_yaml_from_hub() {
+	local cluster="$1"
+	local hub="${CTX}"
+	local raw sec
+
+	if raw="$(oc --context="$hub" get secret "${cluster}-import" -n "${cluster}" -o json 2>/dev/null)"; then
+		sec="$(echo "$raw" | jq -r '.data["crds.yaml"] // empty')"
+		if [[ -n "$sec" ]]; then
+			echo "$sec" | base64 -d
+			return 0
+		fi
+	fi
+
+	if raw="$(oc --context="$hub" get secret "auto-import-secret" -n "${cluster}" -o json 2>/dev/null)"; then
+		sec="$(echo "$raw" | jq -r '.data["crds.yaml"] // empty')"
+		if [[ -n "$sec" ]]; then
+			echo "$sec" | base64 -d
+			return 0
+		fi
+	fi
+
+	if oc --context="$hub" get secret "import-${cluster}-manual-import" -n "${cluster}" &>/dev/null; then
+		raw="$(oc --context="$hub" get secret "import-${cluster}-manual-import" -n "${cluster}" -o json)"
+		sec="$(echo "$raw" | jq -r '.data["crds.yaml"] // empty')"
+		if [[ -n "$sec" ]]; then
+			echo "$sec" | base64 -d
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
 wait_import_yaml_from_hub() {
 	local cluster="$1"
 	local deadline=$((SECONDS + ACM_IMPORT_WAIT_SEC))
@@ -278,20 +346,193 @@ wait_import_yaml_from_hub() {
 	return 1
 }
 
-apply_import_on_spoke() {
-	local cluster="$1"
-	local yaml
-	if ! yaml="$(wait_import_yaml_from_hub "$cluster")"; then
-		die "timed out after ${ACM_IMPORT_WAIT_SEC}s waiting for import secret on hub for cluster ${cluster} (see RHACM import docs)."
+# Apply only CustomResourceDefinition documents first so the spoke API recognizes kinds (e.g. Klusterlet) before the rest.
+apply_crd_documents_from_import_first() {
+	local ctx="$1"
+	local yaml="$2"
+	local doc=""
+	local line
+	local applied=0
+	while IFS= read -r line || [[ -n "${line:-}" ]]; do
+		if [[ "$line" == "---" ]]; then
+			if [[ -n "${doc//[$'\t\n\r ']/}" ]] && printf '%s' "$doc" | grep -q 'kind:[[:space:]]*CustomResourceDefinition'; then
+				echo "${doc}" | oc --context="$ctx" apply -f -
+				applied=1
+			fi
+			doc=""
+		else
+			doc+="${line}"$'\n'
+		fi
+	done <<< "${yaml}"
+	if [[ -n "${doc//[$'\t\n\r ']/}" ]] && printf '%s' "$doc" | grep -q 'kind:[[:space:]]*CustomResourceDefinition'; then
+		echo "${doc}" | oc --context="$ctx" apply -f -
+		applied=1
 	fi
-	echo "${yaml}" | oc --context="$cluster" apply -f -
+	if ((applied)); then
+		echo "Applied CRD manifest(s) from import bundle on spoke ${ctx}."
+	else
+		echo "No CustomResourceDefinition documents embedded in import.yaml for ${ctx}."
+	fi
 }
 
-HELM_RELEASE="${ACM_HELM_RELEASE:-acm-hub}"
-HELM_MC_PREFIX="${ACM_MANAGED_CLUSTER_RELEASE_PREFIX:-acm-managed-cluster}"
-CHART_DIR="${ROOT}/charts/acm-hub"
-CHART_DIR_MC="${ROOT}/charts/acm-managed-cluster"
+# Prefer hub secret key crds.yaml (RHACM); poll briefly; else split import.yaml for CRD kinds.
+apply_hub_crds_yaml_then_fallback_embedded() {
+	local cluster="$1"
+	local import_yaml="$2"
+	local hub_crds=""
+	local deadline=$((SECONDS + ACM_CRDS_YAML_WAIT_SEC))
+	while ((SECONDS < deadline)); do
+		if hub_crds="$(extract_crds_yaml_from_hub "$cluster" 2>/dev/null)" && [[ -n "${hub_crds//[$'\t\n\r ']/}" ]]; then
+			echo "Applying hub secret crds.yaml on spoke ${cluster}..."
+			echo "${hub_crds}" | oc --context="$cluster" apply -f -
+			return 0
+		fi
+		sleep 5
+	done
+	echo "hub secret crds.yaml not available within ${ACM_CRDS_YAML_WAIT_SEC}s; trying CRD documents inside import.yaml..."
+	apply_crd_documents_from_import_first "$cluster" "$import_yaml"
+}
 
+# Full multi-document import.yaml; retries until CRDs/operators on the spoke have settled.
+apply_import_bundle_with_retry() {
+	local cluster="$1"
+	local yaml="$2"
+	local deadline=$((SECONDS + ACM_IMPORT_APPLY_RETRY_SEC))
+	while ((SECONDS < deadline)); do
+		if echo "${yaml}" | oc --context="$cluster" apply -f -; then
+			return 0
+		fi
+		echo "warn: oc apply on spoke ${cluster} failed (retrying until ${ACM_IMPORT_APPLY_RETRY_SEC}s; CRDs/operators may still be registering)..." >&2
+		sleep 15
+	done
+	die "oc apply on spoke ${cluster} failed after ${ACM_IMPORT_APPLY_RETRY_SEC}s; check: oc --context=${cluster} get crd | grep -i klusterlet"
+}
+
+# Per spoke: Helm ManagedCluster on hub → wait hub import/auto-import secret → CRDs on spoke → full import.yaml on spoke.
+register_spoke_cluster() {
+	local k="$1"
+	local rel="${RELEASE_MC_PREFIX}-${k}"
+
+	echo ""
+	echo "========== Spoke: ${k} =========="
+
+	if ((DRY_RUN)); then
+		helm template "$rel" "$CHART_MANAGED_CLUSTER" \
+			--namespace "$ACM_NAMESPACE" \
+			--set managedCluster.name="$k" >/dev/null
+		echo "dry-run: would wait for hub import secret, apply crds.yaml (or embedded CRDs), then full import.yaml on context ${k}."
+		return 0
+	fi
+
+	echo "1) Helm ManagedCluster on hub: release ${rel}"
+	helm --kube-context "$CTX" upgrade --install "$rel" "$CHART_MANAGED_CLUSTER" \
+		--namespace "$ACM_NAMESPACE" \
+		--create-namespace \
+		--set managedCluster.name="$k"
+
+	if ((SKIP_IMPORT)); then
+		echo "Skipping import for ${k} (--skip-import)."
+		return 0
+	fi
+
+	echo "2) Waiting for hub import / auto-import secret (import.yaml) for ${k}..."
+	local yaml=""
+	if ! yaml="$(wait_import_yaml_from_hub "$k")"; then
+		die "timed out after ${ACM_IMPORT_WAIT_SEC}s waiting for import secret on hub for cluster ${k} (${k}-import / auto-import-secret / manual-import; see RHACM import docs)."
+	fi
+
+	echo "3) Applying CRDs on spoke ${k} (hub secret crds.yaml, else CRDs embedded in import.yaml)"
+	apply_hub_crds_yaml_then_fallback_embedded "$k" "$yaml"
+
+	echo "4) Applying full import.yaml on spoke ${k}"
+	apply_import_bundle_with_retry "$k" "$yaml"
+	echo "Spoke ${k} import applied."
+}
+
+# ------------------------------------------------------------------------------
+# Spokes: one Helm release + import sequence per cluster (hub uses merged kubeconfig when enabled)
+# ------------------------------------------------------------------------------
+helm_managed_clusters_and_import() {
+	local -a keys
+	if ((SKIP_MANAGED_CLUSTERS)); then
+		echo "Skipping spoke registration (--skip-managed-clusters)."
+		return 0
+	fi
+
+	if ! mapfile -t keys < <(list_spoke_cluster_keys); then
+		echo "warn: Terraform outputs cluster_keys / first_cluster_key unavailable under ${TF_DIR}; skipping spokes." >&2
+		return 0
+	fi
+	if ((${#keys[@]} == 0)); then
+		echo "No spoke clusters in Terraform (hub only); skipping ${CHART_MANAGED_CLUSTER}."
+		return 0
+	fi
+
+	local k
+	for k in "${keys[@]}"; do
+		[[ -z "$k" ]] && continue
+		register_spoke_cluster "$k"
+	done
+}
+
+wait_for_acm_csv_succeeded() {
+	echo "Waiting for advanced-cluster-management ClusterServiceVersion (up to 15m)..."
+	local found=""
+	for _ in $(seq 1 90); do
+		found="$(oc --context="$CTX" get csv -n "${ACM_NAMESPACE}" -o json 2>/dev/null | jq -r '
+			.items[]
+			| select(.metadata.name | test("^advanced-cluster-management\\."))
+			| select(.status.phase != null)
+			| .metadata.name + " " + .status.phase
+		' | head -1 || true)"
+		if [[ -n "$found" ]]; then
+			local ph="${found##* }"
+			[[ "$ph" == "Succeeded" ]] && break
+		fi
+		sleep 10
+	done
+	[[ "${found##* }" == "Succeeded" ]] || die "CSV did not reach Succeeded (last: ${found:-none}). Check: oc --context=$CTX get csv -n ${ACM_NAMESPACE}"
+	echo "ACM operator CSV ready: ${found}"
+}
+
+wait_for_multicluster_hub_running() {
+	echo "Waiting for MultiClusterHub phase Running (up to 20m)..."
+	local ph=""
+	for _ in $(seq 1 120); do
+		ph="$(oc --context="$CTX" get multiclusterhub multiclusterhub -n "${ACM_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+		if [[ "$ph" == "Running" ]]; then
+			echo "MultiClusterHub status: Running"
+			return 0
+		fi
+		sleep 10
+	done
+	die "MultiClusterHub did not reach Running in time; check: oc --context=$CTX get mch -n ${ACM_NAMESPACE} -o yaml"
+}
+
+wait_for_klusterletconfig_crd() {
+	local deadline=$((SECONDS + ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC))
+	echo "Waiting for KlusterletConfig CRD klusterletconfigs.config.open-cluster-management.io (up to ${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC}s)..."
+	while ((SECONDS < deadline)); do
+		if oc --context="$CTX" get crd klusterletconfigs.config.open-cluster-management.io &>/dev/null; then
+			echo "KlusterletConfig CRD is available."
+			return 0
+		fi
+		sleep 10
+	done
+	die "Timed out waiting for KlusterletConfig CRD. Increase ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC or set ACM_INSTALL_KLUSTERLETCONFIG=0."
+}
+
+lint_charts() {
+	helm lint "$CHART_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_OPERATOR}"
+	helm lint "$CHART_MULTICLUSTER_HUB" >/dev/null || die "helm lint failed: ${CHART_MULTICLUSTER_HUB}"
+	helm lint "$CHART_KLUSTERLET_CONFIG" >/dev/null || die "helm lint failed: ${CHART_KLUSTERLET_CONFIG}"
+	helm lint "$CHART_MANAGED_CLUSTER" --set managedCluster.name=helm-lint-placeholder >/dev/null \
+		|| die "helm lint failed: ${CHART_MANAGED_CLUSTER}"
+}
+
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
 if ((SKIP_MANAGED_CLUSTERS == 0)) && ((DRY_RUN == 0)); then
 	merge_kubeconfig_from_terraform
 fi
@@ -306,16 +547,19 @@ if [[ -z "${LOCAL_CLUSTER_NAME}" ]]; then
 	die "resolved localClusterName is empty"
 fi
 
-echo "Using hub context: ${CTX}"
+[[ -d "$CHART_OPERATOR" ]] || die "chart not found: ${CHART_OPERATOR}"
+[[ -d "$CHART_MULTICLUSTER_HUB" ]] || die "chart not found: ${CHART_MULTICLUSTER_HUB}"
+[[ -d "$CHART_KLUSTERLET_CONFIG" ]] || die "chart not found: ${CHART_KLUSTERLET_CONFIG}"
+[[ -d "$CHART_MANAGED_CLUSTER" ]] || die "chart not found: ${CHART_MANAGED_CLUSTER}"
+
+echo "Hub context: ${CTX}"
 echo "MultiClusterHub spec.localClusterName: ${LOCAL_CLUSTER_NAME}"
-echo "ACM channel: ${ACM_CHANNEL} (OpenShift pin in versions.env: ${OPENSHIFT_VERSION})"
-echo "Hub Helm release: ${HELM_RELEASE} (chart: ${CHART_DIR})"
-echo "Per-spoke chart: ${CHART_DIR_MC} (release prefix: ${HELM_MC_PREFIX}-<cluster-key>)"
+echo "Charts: ${CHART_OPERATOR} → ${CHART_MULTICLUSTER_HUB} → ${CHART_KLUSTERLET_CONFIG}; spokes: ${CHART_MANAGED_CLUSTER}"
 
 if ((DRY_RUN == 0)); then
 	ocv="$(oc --context="$CTX" version -o json 2>/dev/null | jq -r '.openshiftVersion // empty')"
 	if [[ -n "$ocv" ]]; then
-		echo "Hub cluster reports OpenShift version: ${ocv}"
+		echo "Hub cluster OpenShift version: ${ocv}"
 		majmin_env="${OPENSHIFT_VERSION%.*}"
 		majmin_cls="${ocv%.*}"
 		if [[ "$majmin_env" != "$majmin_cls" ]]; then
@@ -324,123 +568,62 @@ if ((DRY_RUN == 0)); then
 	fi
 fi
 
-[[ -d "$CHART_DIR" ]] || die "chart not found: ${CHART_DIR}"
-[[ -d "$CHART_DIR_MC" ]] || die "chart not found: ${CHART_DIR_MC}"
+lint_charts
 
-helm_upgrade_managed_clusters_and_import() {
-	local -a keys
-	if ((SKIP_MANAGED_CLUSTERS)); then
-		echo "Skipping spoke registration (--skip-managed-clusters)."
-		return 0
-	fi
-
-	if ! mapfile -t keys < <(list_spoke_cluster_keys); then
-		echo "warn: Terraform outputs cluster_keys / first_cluster_key unavailable under ${TF_DIR}; skipping spokes." >&2
-		return 0
-	fi
-	if ((${#keys[@]} == 0)); then
-		echo "No spoke clusters in Terraform (hub only); skipping ${CHART_DIR_MC}."
-		return 0
-	fi
-
-	local k rel
-	for k in "${keys[@]}"; do
-		[[ -z "$k" ]] && continue
-		rel="${HELM_MC_PREFIX}-${k}"
-		echo "Helm upgrade --install ${rel} (ManagedCluster name=${k})."
-		local -a cmd=(
-			helm --kube-context "$CTX" upgrade --install "$rel" "$CHART_DIR_MC"
-			--namespace "$ACM_NAMESPACE"
-			--create-namespace
-			--set managedCluster.name="$k"
-		)
-		if ((DRY_RUN)); then
-			cmd+=(--dry-run=client)
-		fi
-		"${cmd[@]}"
-	done
-
-	if ((DRY_RUN)); then
-		echo "dry-run: skipping import apply on spokes."
-		return 0
-	fi
-
-	if ((SKIP_IMPORT)); then
-		echo "Skipping spoke import apply (--skip-import)."
-		return 0
-	fi
-
-	for k in "${keys[@]}"; do
-		[[ -z "$k" ]] && continue
-		echo "Importing klusterlet on spoke context ${k} (hub import secret → oc apply)."
-		apply_import_on_spoke "$k"
-	done
-}
-
-helm_upgrade_hub() {
-	local -a cmd=(
-		helm --kube-context "$CTX" upgrade --install "$HELM_RELEASE" "$CHART_DIR"
-		--namespace "$ACM_NAMESPACE"
-		--create-namespace
-		--set subscription.channel="$ACM_CHANNEL"
-		--set-string multiclusterHub.spec.localClusterName="$LOCAL_CLUSTER_NAME"
-	)
-	if ((DRY_RUN)); then
-		cmd+=(--dry-run=client)
-	fi
-	"${cmd[@]}"
-}
-
-if ((DRY_RUN == 0)); then
-	helm lint "$CHART_DIR" >/dev/null || die "helm lint failed for ${CHART_DIR}"
-	helm lint "$CHART_DIR_MC" >/dev/null || die "helm lint failed for ${CHART_DIR_MC}"
+# --- 1) ACM operator (OLM) ---
+echo "--- 1) Install ACM operator (Helm: ${RELEASE_OPERATOR}) ---"
+helm_operator_cmd=(
+	helm --kube-context "$CTX" upgrade --install "$RELEASE_OPERATOR" "$CHART_OPERATOR"
+	--namespace "$ACM_NAMESPACE"
+	--create-namespace
+	--set subscription.channel="$ACM_CHANNEL"
+)
+if ((DRY_RUN)); then
+	helm_operator_cmd+=(--dry-run=client)
 fi
-
-echo "Applying charts/acm-hub (namespace, OperatorGroup, Subscription, MultiClusterHub)."
-helm_upgrade_hub
+"${helm_operator_cmd[@]}"
 
 if ((DRY_RUN)); then
-	helm_upgrade_managed_clusters_and_import || die "spoke Helm dry-run failed."
-	echo "dry-run: skipping CSV / MultiClusterHub wait."
+	echo "--- dry-run: render MultiClusterHub + KlusterletConfig (no cluster CRDs required) ---"
+	helm template "$RELEASE_MULTICLUSTER_HUB" "$CHART_MULTICLUSTER_HUB" \
+		--namespace "$ACM_NAMESPACE" \
+		--set-string multiclusterHub.spec.localClusterName="$LOCAL_CLUSTER_NAME" >/dev/null
+	helm template "$RELEASE_KLUSTERLET_CONFIG" "$CHART_KLUSTERLET_CONFIG" \
+		--namespace "$ACM_NAMESPACE" >/dev/null
+	helm_managed_clusters_and_import || die "spoke dry-run failed."
+	echo "dry-run: done."
 	exit 0
-fi
-
-if ((SKIP_WAIT == 0)); then
-	echo "Waiting for advanced-cluster-management ClusterServiceVersion (up to 15m)..."
-	found=""
-	for _ in $(seq 1 90); do
-		found="$(oc --context="$CTX" get csv -n "${ACM_NAMESPACE}" -o json 2>/dev/null | jq -r '
-			.items[]
-			| select(.metadata.name | test("^advanced-cluster-management\\."))
-			| select(.status.phase != null)
-			| .metadata.name + " " + .status.phase
-		' | head -1 || true)"
-		if [[ -n "$found" ]]; then
-			ph="${found##* }"
-			[[ "$ph" == "Succeeded" ]] && break
-		fi
-		sleep 10
-	done
-	[[ "${found##* }" == "Succeeded" ]] || die "CSV did not reach Succeeded (last: ${found:-none}). Check: oc --context=$CTX get csv -n ${ACM_NAMESPACE}"
-	echo "CSV ready: ${found}"
 fi
 
 if ((SKIP_WAIT)); then
-	echo "Skipping MultiClusterHub status wait (--skip-wait); re-run without --skip-wait for spoke Helm + import."
-	echo "Done (hub apply issued)."
+	echo "Skipping waits (--skip-wait). Operator subscription applied; re-run without --skip-wait for MultiClusterHub, KlusterletConfig, and spokes."
 	exit 0
 fi
 
-echo "Waiting for MultiClusterHub phase Running (up to 20m)..."
-for _ in $(seq 1 120); do
-	ph="$(oc --context="$CTX" get multiclusterhub multiclusterhub -n "${ACM_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-	if [[ "$ph" == "Running" ]]; then
-		echo "MultiClusterHub status: Running"
-		helm_upgrade_managed_clusters_and_import || die "spoke registration failed."
-		echo "Done."
-		exit 0
-	fi
-	sleep 10
-done
+wait_for_acm_csv_succeeded
 
-die "MultiClusterHub did not reach Running in time; check: oc --context=$CTX get mch -n ${ACM_NAMESPACE} -o yaml"
+# --- 2) MultiClusterHub ---
+echo "--- 2) Install MultiClusterHub (Helm: ${RELEASE_MULTICLUSTER_HUB}) ---"
+helm --kube-context "$CTX" upgrade --install "$RELEASE_MULTICLUSTER_HUB" "$CHART_MULTICLUSTER_HUB" \
+	--namespace "$ACM_NAMESPACE" \
+	--create-namespace \
+	--set-string multiclusterHub.spec.localClusterName="$LOCAL_CLUSTER_NAME"
+
+wait_for_multicluster_hub_running
+
+# --- 3) KlusterletConfig (optional) ---
+if [[ "${ACM_INSTALL_KLUSTERLETCONFIG}" == "1" ]]; then
+	wait_for_klusterletconfig_crd
+	echo "--- 3) Install KlusterletConfig (Helm: ${RELEASE_KLUSTERLET_CONFIG}) ---"
+	helm --kube-context "$CTX" upgrade --install "$RELEASE_KLUSTERLET_CONFIG" "$CHART_KLUSTERLET_CONFIG" \
+		--namespace "$ACM_NAMESPACE" \
+		--create-namespace
+else
+	echo "--- 3) Skipping KlusterletConfig (ACM_INSTALL_KLUSTERLETCONFIG!=1) ---"
+fi
+
+# --- 4) Spokes ---
+echo "--- 4) Register spoke clusters ---"
+helm_managed_clusters_and_import || die "spoke registration failed."
+echo "Done."
+exit 0

@@ -1,0 +1,6 @@
+apiVersion: config.open-cluster-management.io/v1alpha1
+kind: KlusterletConfig
+metadata:
+  name: {{ .Values.klusterletConfig.name }}
+spec:
+{{ toYaml .Values.klusterletConfig.spec | indent 2 }}

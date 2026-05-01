@@ -1,0 +1,11 @@
+operatorGroup:
+  name: default
+  targetNamespaces: []
+
+subscription:
+  resourceName: acm-operator-subscription
+  packageName: advanced-cluster-management
+  sourceNamespace: openshift-marketplace
+  source: redhat-operators
+  channel: release-2.16
+  installPlanApproval: Automatic

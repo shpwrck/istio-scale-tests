@@ -1,0 +1,4 @@
+multiclusterHub:
+  resourceName: multiclusterhub
+  disableHubSelfManagement: false
+  spec: {}

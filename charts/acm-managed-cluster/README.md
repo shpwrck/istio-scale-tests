@@ -2,7 +2,7 @@
 
 Install **once per spoke**: one cluster-scoped `ManagedCluster` on the hub. Release names should be unique per cluster (for example `acm-managed-cluster-rosa-002`).
 
-`istio-setup/001-acm-install-hub.sh` loops Terraform spoke keys and runs `helm upgrade --install` for each.
+`istio-setup/001-acm-install-hub.sh` processes each Terraform spoke key in order: `helm upgrade --install` on the **hub**, waits for the hub import / **auto-import** secret (`import.yaml`), applies **`crds.yaml`** from that secret on the **spoke** when present (else CRD stanzas embedded in `import.yaml`), then applies the full `import.yaml` on the **spoke** (with retries). Repeat for the next cluster.
 
 ## Values
 
@@ -18,4 +18,4 @@ helm upgrade --install acm-managed-cluster-rosa-002 ./charts/acm-managed-cluster
   --set managedCluster.name=rosa-002
 ```
 
-Import klusterlet on the spoke using the hub secret `${CLUSTER_NAME}-import` (see RHACM docs) or rely on **001** automation.
+See RHACM docs for import secrets (`${CLUSTER_NAME}-import`, `auto-import-secret`, manual import). **001** automates the full flow per cluster.

@@ -1,0 +1,6 @@
+# Cluster-scoped resource; metadata.name is typically "global".
+klusterletConfig:
+  name: global
+  spec:
+    hubKubeAPIServerConfig:
+      serverVerificationStrategy: UseSystemTruststore
