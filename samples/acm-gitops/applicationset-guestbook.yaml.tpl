@@ -1,4 +1,4 @@
-# Sample ApplicationSet for ACM + OpenShift GitOps (manual apply; not run by istio-setup scripts).
+# Sample ApplicationSet for ACM + OpenShift GitOps (manual apply; not run by platform-setup / istio-setup scripts).
 # Expects Argo cluster Secrets in ${GITOPS_NAMESPACE} (GitOpsCluster / ACM gitops-addon).
 #
 # Uses the small public Argo **helm-guestbook** chart with **hello-openshift** (8080) so workloads stay

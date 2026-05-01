@@ -1,6 +1,6 @@
 # ACM GitOps samples (manual)
 
-Use after **011** succeeds.
+Use after **platform-setup/002** succeeds.
 
 ## ApplicationSet (`applicationset-guestbook.yaml.tpl`)
 
@@ -29,7 +29,7 @@ envsubst < samples/acm-gitops/applicationset-guestbook.yaml.tpl | oc --context "
 Patch ACM cluster secrets (**public API URL** + **kubeconfig JSON** token from your workstation):
 
 ```bash
-./istio-setup/012-acm-argoc-managed-cluster-secrets.sh --hub-context "$CTX"
+./platform-setup/002-acm-openshift-gitops.sh --patch-argoc-cluster-secrets-only --context "$CTX"
 ```
 
 Then optionally restart: `oc delete pod -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-application-controller`.
@@ -47,4 +47,4 @@ Cleanup:
 oc --context "$CTX" delete applicationset acm-test-guestbook -n "${GITOPS_NAMESPACE}"
 ```
 
-Spokes need **`cluster.open-cluster-management.io/clusterset=istio-scale-tests`** (**001** / **`ACM_CLUSTER_SET`**).
+Spokes need **`cluster.open-cluster-management.io/clusterset=istio-scale-tests`** (**platform-setup/001** / **`ACM_CLUSTER_SET`**).

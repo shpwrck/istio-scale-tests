@@ -6,4 +6,4 @@ Helm installs into **`openshift-operators`** by default (`GITOPS_OPERATOR_NAMESP
 
 The **Argo CD** instance and ACM **Placement** / **GitOpsCluster** CRs stay in **`openshift-gitops`** (`GITOPS_NAMESPACE`).
 
-Installed from `istio-setup/011-acm-openshift-gitops.sh`. Channel defaults from `config/versions.env` (`GITOPS_OPERATOR_CHANNEL`); align with your OpenShift version per [OpenShift GitOps release notes](https://docs.redhat.com/en/documentation/red_hat_openshift_gitops/).
+Installed from `platform-setup/002-acm-openshift-gitops.sh`. Channel defaults from `config/versions.env` (`GITOPS_OPERATOR_CHANNEL`); align with your OpenShift version per [OpenShift GitOps release notes](https://docs.redhat.com/en/documentation/red_hat_openshift_gitops/).

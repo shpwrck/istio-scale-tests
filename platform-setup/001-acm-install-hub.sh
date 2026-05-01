@@ -11,7 +11,7 @@
 # Migration: if the hub namespace still has an older single Helm release (e.g. acm-hub from the previous monolithic chart),
 # uninstall it when safe before installing these releases, or Helm will error on OperatorGroup ownership / pruning.
 # Usage (repo root):
-#   ./istio-setup/001-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
+#   ./platform-setup/001-acm-install-hub.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
 #       [--skip-managed-clusters] [--skip-import] [--insecure-skip-tls-verify] [--local-cluster-name NAME]
 set -euo pipefail
 
@@ -101,7 +101,7 @@ Environment:
   ACM_WAIT_MANAGED_CLUSTER_READY   If 1 (default), after imports wait for ManagedCluster Joined+Available for each Terraform cluster_keys name.
   ACM_MANAGED_CLUSTER_READY_WAIT_SEC  Max seconds for that wait (default ${ACM_MANAGED_CLUSTER_READY_WAIT_SEC}).
   ACM_LOCAL_CLUSTER_NAME           MultiClusterHub spec.localClusterName when --local-cluster-name is not used.
-  ACM_CLUSTER_SET                  Sets label cluster.open-cluster-management.io/clusterset on each spoke ManagedCluster (default istio-scale-tests). Must match ManagedClusterSet / Binding / Placement.clusterSets (011 chart).
+  ACM_CLUSTER_SET                  Sets label cluster.open-cluster-management.io/clusterset on each spoke ManagedCluster (default istio-scale-tests). Must match ManagedClusterSet / Binding / Placement.clusterSets (`charts/acm-openshift-gitops-resources` / `platform-setup/002-acm-openshift-gitops.sh`).
 
 OpenShift ${OPENSHIFT_VERSION} is pinned with ACM channel ${ACM_CHANNEL}; bump both together per RHACM support matrix.
 Requires cluster-admin on the hub and on each spoke for import apply.

@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
-# Repo note: mesh script slot 002 is 002-ossm-mc-cacerts.sh — this ACM helper is 011 (after 001).
+# Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 002-ossm-mc-cacerts.sh). This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
-# Prerequisites: RHACM hub (001); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from 001).
+# Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).
 #
 # Usage (repo root):
-#   ./istio-setup/011-acm-openshift-gitops.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
+#   ./platform-setup/002-acm-openshift-gitops.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
 #       [--skip-acm-gitops-resources] [--merge-kubeconfig] [--local-cluster-name NAME]
+#       [--skip-argoc-cluster-secret-fix] [--gitops-namespace NS]
+#   ./platform-setup/002-acm-openshift-gitops.sh --patch-argoc-cluster-secrets-only --context NAME [--dry-run] [--gitops-namespace NS]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,6 +25,8 @@ LOCAL_CLUSTER_NAME_OVERRIDE=""
 DRY_RUN=0
 SKIP_WAIT=0
 SKIP_ACM_GITOPS_RESOURCES=0
+SKIP_ARGO_CLUSTER_SECRET_FIX=0
+PATCH_ARGO_CLUSTER_SECRETS_ONLY=0
 MERGE_KUBECONFIG=0
 TF_DIR="${ACM_TERRAFORM_DIR:-${ROOT}/terraform/rosa-hcp}"
 TF_LOGIN_SCRIPT="${ROOT}/terraform/scripts/001-oc-login-merge-kubeconfig.sh"
@@ -57,15 +62,22 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  Full install:
   1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize.
   2) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success.
+  3) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
+
+  Patch only (e.g. after ACM/GitOps reconciles secrets): --patch-argoc-cluster-secrets-only --context HUB
 
   --context NAME              kube/oc context for the hub (recommended).
   --terraform-dir DIR         Terraform root for auto hub context / localClusterName (default: ${TF_DIR}).
-  --dry-run                   helm --dry-run=client for both charts; no cluster changes.
+  --dry-run                   Helm client dry-run for charts; with --patch-argoc-cluster-secrets-only, print patches only.
   --skip-wait                 Do not wait for CSV / Argo CD / GitOpsCluster readiness.
   --skip-acm-gitops-resources Install only the GitOps operator chart (skip ACM Placement / GitOpsCluster chart).
-  --merge-kubeconfig          Run terraform/scripts/001-oc-login-merge-kubeconfig.sh (same as 001).
+  --skip-argoc-cluster-secret-fix  Skip step (3) after GitOpsCluster (RHACM may leave unusable internal *.control-plane URLs).
+  --patch-argoc-cluster-secrets-only  Only patch ACM *-application-manager-cluster Secrets; requires hub --context (and spoke contexts in kubeconfig).
+  --gitops-namespace NS       Operand namespace / Argo CD + ACM CRs (default ${GITOPS_NAMESPACE}).
+  --merge-kubeconfig          Run terraform/scripts/001-oc-login-merge-kubeconfig.sh (same as platform-setup/001).
   --local-cluster-name NAME   Hub ManagedCluster name for GitOpsCluster.spec.argoServer.cluster (max ${_ACM_LOCAL_CLUSTER_NAME_MAX_LEN} chars).
   --insecure-skip-tls-verify  Forward to kubeconfig merge helper.
 
@@ -81,6 +93,8 @@ Environment:
   GITOPS_ADDON_ENABLED          GitOpsCluster gitopsAddon.enabled (default ${GITOPS_ADDON_ENABLED}).
   GITOPS_CLUSTER_READY_WAIT_SEC Max wait for GitOpsCluster success (default ${GITOPS_CLUSTER_READY_WAIT_SEC}).
   ARGOCD_STABILIZE_WAIT_SEC     Max wait for Argo CD after CSV (default ${ARGOCD_STABILIZE_WAIT_SEC}).
+
+  Step (3) / patch-only mode requires kubeconfig contexts named like each spoke ManagedCluster (e.g. rosa-002); use --merge-kubeconfig or log in spokes first.
   ACM_HUB_CONTEXT               Default hub context when --context omitted.
   ACM_LOCAL_CLUSTER_NAME        Hub ManagedCluster name when --local-cluster-name omitted.
 
@@ -113,6 +127,19 @@ while [[ $# -gt 0 ]]; do
 		SKIP_ACM_GITOPS_RESOURCES=1
 		shift
 		;;
+	--skip-argoc-cluster-secret-fix)
+		SKIP_ARGO_CLUSTER_SECRET_FIX=1
+		shift
+		;;
+	--patch-argoc-cluster-secrets-only)
+		PATCH_ARGO_CLUSTER_SECRETS_ONLY=1
+		shift
+		;;
+	--gitops-namespace)
+		[[ -n "${2:-}" ]] || die "--gitops-namespace requires a value"
+		GITOPS_NAMESPACE="$2"
+		shift 2
+		;;
 	--merge-kubeconfig)
 		MERGE_KUBECONFIG=1
 		shift
@@ -144,9 +171,54 @@ command -v jq >/dev/null 2>&1 || {
 	echo "error: jq not found" >&2
 	exit 2
 }
-command -v helm >/dev/null 2>&1 || {
-	echo "error: helm not found" >&2
-	exit 2
+
+build_argoc_cluster_secret_config_b64() {
+	local ctx="$1"
+	local token
+	token="$(oc whoami -t --context "$ctx")" || die "cannot read token for context ${ctx} (log in)"
+	jq -nc --arg t "$token" '{bearerToken: $t, tlsClientConfig: {insecure: false}}' | base64 -w0
+}
+
+patch_acm_argoc_managed_cluster_secrets() {
+	local hub_ctx="$1"
+	local ns="$2"
+	local dry="$3"
+
+	local secrets secname mc url cfg64 srv64
+	secrets="$(oc --context "$hub_ctx" get secrets -n "$ns" -l apps.open-cluster-management.io/acm-cluster=true -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+	[[ -n "$secrets" ]] || die "no ACM cluster secrets in ${ns} (label apps.open-cluster-management.io/acm-cluster=true)"
+
+	while IFS= read -r secname; do
+		[[ -z "$secname" ]] && continue
+		case "$secname" in
+		*-application-manager-cluster-secret) ;;
+		*) continue ;;
+		esac
+
+		mc="$(oc --context "$hub_ctx" get secret "$secname" -n "$ns" -o jsonpath='{.metadata.labels.apps\.open-cluster-management\.io/cluster-name}' 2>/dev/null || true)"
+		[[ -n "$mc" ]] || die "secret ${secname}: missing cluster-name label"
+
+		url="$(oc --context "$hub_ctx" get managedcluster "$mc" -o jsonpath='{.spec.managedClusterClientConfigs[0].url}' 2>/dev/null || true)"
+		[[ -n "$url" ]] || die "ManagedCluster ${mc}: no managedClusterClientConfigs[0].url"
+
+		cfg64="$(build_argoc_cluster_secret_config_b64 "$mc")"
+		srv64="$(echo -n "$url" | base64 -w0)"
+
+		echo "### ${secname} -> server=${url} tokenContext=${mc}"
+		if ((dry)); then
+			continue
+		fi
+		oc --context "$hub_ctx" patch secret "$secname" -n "$ns" --type merge -p "{\"data\":{\"server\":\"${srv64}\",\"config\":\"${cfg64}\"}}"
+	done <<<"$secrets"
+
+	if ((dry)); then
+		echo "dry-run: patch preview done."
+		return 0
+	fi
+
+	echo "Restarting Argo CD application controller (reloads cluster secrets)..."
+	oc --context "$hub_ctx" delete pod -n "$ns" -l app.kubernetes.io/name=openshift-gitops-application-controller --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+	echo "Argo cluster secret patch done."
 }
 
 normalize_url() {
@@ -173,7 +245,7 @@ context_for_server() {
 merge_kubeconfig_from_terraform() {
 	[[ -f "${TF_LOGIN_SCRIPT}" ]] || die "missing ${TF_LOGIN_SCRIPT}"
 	command -v terraform >/dev/null 2>&1 || die "terraform not on PATH (required for --merge-kubeconfig)"
-	MC_KUBECONFIG="$(mktemp "${TMPDIR:-/tmp}/011-gitops-kubeconfig.XXXXXX")"
+	MC_KUBECONFIG="$(mktemp "${TMPDIR:-/tmp}/002-gitops-kubeconfig.XXXXXX")"
 	chmod 600 "${MC_KUBECONFIG}"
 	bash "${TF_LOGIN_SCRIPT}" --terraform-dir "${TF_DIR}" --output "${MC_KUBECONFIG}" "${INSECURE_LOGIN[@]}"
 	export KUBECONFIG="${MC_KUBECONFIG}"
@@ -360,11 +432,24 @@ lint_charts() {
 # ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
-if ((MERGE_KUBECONFIG == 1)) && ((DRY_RUN == 0)); then
-	merge_kubeconfig_from_terraform
+if ((MERGE_KUBECONFIG == 1)); then
+	if ((PATCH_ARGO_CLUSTER_SECRETS_ONLY == 1)) || ((DRY_RUN == 0)); then
+		merge_kubeconfig_from_terraform
+	fi
 fi
 
 CTX="$(resolve_context)"
+
+if ((PATCH_ARGO_CLUSTER_SECRETS_ONLY == 1)); then
+	patch_acm_argoc_managed_cluster_secrets "$CTX" "$GITOPS_NAMESPACE" "$DRY_RUN"
+	exit 0
+fi
+
+command -v helm >/dev/null 2>&1 || {
+	echo "error: helm not found" >&2
+	exit 2
+}
+
 ACM_LOCAL_CLUSTER_NAME="$(resolve_local_cluster_name)"
 if (( ${#ACM_LOCAL_CLUSTER_NAME} > _ACM_LOCAL_CLUSTER_NAME_MAX_LEN )); then
 	die "GitOpsCluster argoServer.cluster must be at most ${_ACM_LOCAL_CLUSTER_NAME_MAX_LEN} characters (got ${#ACM_LOCAL_CLUSTER_NAME}: ${ACM_LOCAL_CLUSTER_NAME})."
@@ -419,6 +504,13 @@ echo "--- 2) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
 helm_acm_gitops_resources_install
 
 wait_for_gitopscluster_ready
+
+if ((SKIP_ARGO_CLUSTER_SECRET_FIX == 0)); then
+	echo "--- 3) Patch ACM → Argo managed-cluster Secrets (${GITOPS_NAMESPACE}) ---"
+	patch_acm_argoc_managed_cluster_secrets "$CTX" "$GITOPS_NAMESPACE" 0
+else
+	echo "Skipping Argo cluster secret patch (--skip-argoc-cluster-secret-fix)."
+fi
 
 echo "Done. Placement ${GITOPS_PLACEMENT_NAME} selects all clusters in ${ACM_CLUSTER_SET} except the hub (local-cluster label)."
 exit 0

@@ -13,10 +13,10 @@ On the machine where you run repo commands (tests assume **bash** 4+):
 
 | Binary / runtime  | Notes                                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bash`            | 4 or newer (`istio-setup/` scripts use bash).                                                                                                                     |
+| `bash`            | 4 or newer (`platform-setup/` and `istio-setup/` scripts use bash).                                                                                                                     |
 | `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match what you pass to `--contexts` / `SETUP_CONTEXTS` (examples in docs use `rosa-001`, …). |
 | `terraform`       | To apply `terraform/rosa-hcp/` (pinned Terraform version: see that directory’s `versions.tf`).                                                                    |
-| `helm`            | **Helm 3** for `istio-setup/001`, `005`, and charts under `charts/`.                                                                                              |
+| `helm`            | **Helm 3** for `platform-setup/001`, `istio-setup/005`, and charts under `charts/`.                                                                                              |
 | `istioctl`        | On `PATH`, or a binary at `.bin/istioctl` with `PATH="$PWD/.bin:$PATH"`; align the build with `ISTIO_VERSION` in `config/versions.env`.                           |
 | `jq`              | JSON filtering (Terraform merge helper, script outputs).                                                                                                          |
 | `openssl`         | CA generation (`002`).                                                                                                                                            |
@@ -34,7 +34,7 @@ On the machine where you run repo commands (tests assume **bash** 4+):
 Run automation in this sequence:
 
 1. **Infrastructure** — provision clusters with Terraform (`terraform/rosa-hcp/`).
-2. **Mesh (and optional ACM hub)** — drive RHACM registration if needed, then install and verify Istio across clusters (`istio-setup/`).
+2. **Optional ACM / GitOps and mesh** — `platform-setup/` for RHACM hub + hub GitOps (`001`, `002`), then install and verify Istio across clusters (`istio-setup/`, `002`–`010`).
 3. **Load testing** — deploy the multicluster Isotope topology (`isotope-multicluster/`).
 4. **Results** — collect metrics and reports from the run *(section reserved; tooling not yet in this repository)*.
 
@@ -46,33 +46,41 @@ Use `terraform/rosa-hcp/` to create **ROSA HCP** clusters (upstream module `terr
 
 ---
 
-## 2. Install ACM and the mesh (`istio-setup/`)
+## 2. Optional ACM / GitOps (`platform-setup/`) and mesh (`istio-setup/`)
 
-After clusters exist and you can `oc login`, run the numbered scripts in order. **001** is optional (ACM hub on the first Terraform cluster); **011** is optional (OpenShift GitOps + ACM GitOpsCluster on the hub); **002**–**010** cover CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks.
+After clusters exist and you can `oc login`, run scripts in directory order: optional **`platform-setup/`** **001** (ACM hub) and **002** (OpenShift GitOps + ACM GitOpsCluster on the hub), then **`istio-setup/`** **002**–**010** for CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks.
 
 
 | Path                            | Role                                                                                                                                                                                                                  |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `istio-setup/`                  | Numbered shell helpers (`001`–`010`, optional `011` ACM GitOps) for mesh install and wiring (table below).                                                                                                             |
-| `charts/acm-operator/`         | OLM OperatorGroup + Subscription for the ACM operator (`001-acm-install-hub.sh`).                                                                                                                                                                                                    |
-| `charts/acm-multicluster-hub/` | `MultiClusterHub` CR only (`001`).                                                                                                                                                                                                                                                   |
-| `charts/acm-klusterlet-config/`  | `KlusterletConfig` CR only (`001`, after CRD exists).                                                                                                                                                                                                                                |
-| `charts/acm-managed-cluster/`   | One `ManagedCluster` per Helm release / spoke; `001-acm-install-hub.sh` loops Terraform keys (excluding hub) after MCH **Running**, then applies hub secret `import.yaml` on each spoke context.                      |
-| `charts/openshift-gitops-operator/` | OLM OperatorGroup + Subscription for Red Hat OpenShift GitOps (`011-acm-openshift-gitops.sh`).                                                                                                                     |
-| `charts/acm-openshift-gitops-resources/` | Helm — ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD (`011`).                                                                                                                                       |
+| `platform-setup/`               | Optional **001** ACM hub + **002** hub GitOps / Argo wiring (`README.md` in this directory).                                                                                                                            |
+| `istio-setup/`                  | Mesh install and checks (**002**–**010**; table below).                                                                                                                                                               |
+| `charts/acm-operator/`         | OLM OperatorGroup + Subscription for the ACM operator (`platform-setup/001-acm-install-hub.sh`).                                                                                                                                                                                                    |
+| `charts/acm-multicluster-hub/` | `MultiClusterHub` CR only (`platform-setup/001`).                                                                                                                                                                                                                                                   |
+| `charts/acm-klusterlet-config/`  | `KlusterletConfig` CR only (`platform-setup/001`, after CRD exists).                                                                                                                                                                                                                                |
+| `charts/acm-managed-cluster/`   | One `ManagedCluster` per Helm release / spoke; `platform-setup/001-acm-install-hub.sh` loops Terraform keys (excluding hub) after MCH **Running**, then applies hub secret `import.yaml` on each spoke context.                      |
+| `charts/openshift-gitops-operator/` | OLM OperatorGroup + Subscription for Red Hat OpenShift GitOps (`platform-setup/002-acm-openshift-gitops.sh`).                                                                                                                     |
+| `charts/acm-openshift-gitops-resources/` | Helm — ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD (`platform-setup/002`).                                                                                                                                       |
 | `manifests/ossm-multi-cluster/` | `templates/*.yaml.tpl` — rendered by `istio-setup/004` / `008` (`envsubst` + `config/versions.env`); `east-west/common/`, `ingress-verify/`, optional `samples/`. Ingress gateways use Helm `istio/gateway` in `005`. |
 | `cacerts/`                      | Generated plug-in CA material and per-cluster intermediates (created by `istio-setup/002-ossm-mc-cacerts.sh`).                                                                                                        |
 
 
-### Scripts (`001`–`010`, optional `011`)
+### Platform scripts (`platform-setup/`)
 
-Setup scripts use numbered prefixes in execution order. Use **001** when you want an **ACM hub** on the first ROSA cluster from Terraform outputs (optional for mesh-only workflows). Use **011** after **001** to install **OpenShift GitOps** on the hub and wire ACM **GitOpsCluster** push to managed clusters ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
+Use **001** for an **ACM hub** on the first ROSA cluster from Terraform outputs (optional for mesh-only workflows). Use **002** after **001** to install **OpenShift GitOps** and wire ACM **GitOpsCluster** ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
 
 
 | Step    | Script                                                         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **001** | `istio-setup/001-acm-install-hub.sh`                           | **Optional.** Merged kubeconfig from Terraform (unless `--skip-managed-clusters`), then **`charts/acm-operator`** → wait CSV → **`charts/acm-multicluster-hub`** → wait Running → **`charts/acm-klusterlet-config`** (optional) → **`charts/acm-managed-cluster`** + import on spokes → wait **ManagedCluster** Joined+Available for each Terraform cluster key. Default `ACM_CHANNEL` pairs with `OPENSHIFT_VERSION` in `config/versions.env`. `ACM_WAIT_MANAGED_CLUSTER_READY`, `ACM_INSTALL_KLUSTERLETCONFIG`, `--skip-managed-clusters`, `--skip-import`, `--skip-wait`, `--dry-run` control behavior. Run first when you want an ACM hub before mesh install. |
-| **011** | `istio-setup/011-acm-openshift-gitops.sh`                     | **Optional (ACM).** After **001**: Helm **`charts/openshift-gitops-operator`** → wait for CSV + Argo CD → Helm **`charts/acm-openshift-gitops-resources`** (ManagedClusterSetBinding, Placement excluding hub, GitOpsCluster) so hub Argo CD can push to spokes. Uses `config/versions.env`. Not mesh **002** (CA — table below).                                                                                                                                                                                                      |
+| **001** | `platform-setup/001-acm-install-hub.sh`                           | **Optional.** Merged kubeconfig from Terraform (unless `--skip-managed-clusters`), then **`charts/acm-operator`** → wait CSV → **`charts/acm-multicluster-hub`** → wait Running → **`charts/acm-klusterlet-config`** (optional) → **`charts/acm-managed-cluster`** + import on spokes → wait **ManagedCluster** Joined+Available for each Terraform cluster key. Default `ACM_CHANNEL` pairs with `OPENSHIFT_VERSION` in `config/versions.env`. `ACM_WAIT_MANAGED_CLUSTER_READY`, `ACM_INSTALL_KLUSTERLETCONFIG`, `--skip-managed-clusters`, `--skip-import`, `--skip-wait`, `--dry-run` control behavior. |
+| **002** | `platform-setup/002-acm-openshift-gitops.sh`                     | **Optional (ACM).** After platform **001**: Helm **`charts/openshift-gitops-operator`** → wait for CSV + Argo CD → Helm **`charts/acm-openshift-gitops-resources`** (ManagedClusterSetBinding, Placement excluding hub, GitOpsCluster), then patches Argo cluster Secrets by default (public API URL + token; **`--patch-argoc-cluster-secrets-only`** to re-run). Uses `config/versions.env`.                                                                                                                                                                                                      |
+
+
+### Mesh scripts (`istio-setup/`)
+
+
+| Step    | Script                                                         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **002** | `istio-setup/002-ossm-mc-cacerts.sh`                           | Generate a shared root + per-cluster intermediate CAs; `verify`; optional `apply` to create the `cacerts` Secret in `istio-system` and label `topology.istio.io/network` on each cluster.                                                                                                                                                                                                                                                                         |
 | **003** | `istio-setup/003-ossm-mc-kubeconfig-embed-api-ca.sh`           | **Optional.** Embeds API server TLS chains into your kubeconfig so `istioctl create-remote-secret` produces Secrets **istiod** can use (e.g. ROSA APIs with Let’s Encrypt). Run before **006** if remote watches fail with TLS errors.                                                                                                                                                                                                                            |
 | **004** | `istio-setup/004-ossm-mc-apply-istio.sh`                       | Renders `templates/istio-cni.yaml.tpl` and `templates/istio.cluster.yaml.tpl` (`--contexts` / `SETUP_CONTEXTS`). `Istio/default` sets mesh Envoy access logging via `meshConfig` (`ACCESS_LOG`_* in `config/versions.env`). Waits for Ready (skipped with `--dry-run`).                                                                                                                                                                                           |
@@ -88,10 +96,10 @@ Typical one-liners (from repo root):
 
 ```bash
 # Optional: ACM hub on first Terraform cluster (context auto-resolved when state exists)
-./istio-setup/001-acm-install-hub.sh --context rosa-001
+./platform-setup/001-acm-install-hub.sh --context rosa-001
 
-# Optional: OpenShift GitOps + ACM GitOpsCluster on hub (after 001; slot 011 — mesh 002 is still CA below)
-./istio-setup/011-acm-openshift-gitops.sh --context rosa-001
+# Optional: OpenShift GitOps + ACM GitOpsCluster on hub (after platform 001; mesh CA is istio-setup/002 below)
+./platform-setup/002-acm-openshift-gitops.sh --context rosa-001
 
 ./istio-setup/002-ossm-mc-cacerts.sh generate --base "$PWD" --clusters rosa-001,rosa-002,rosa-003
 ./istio-setup/002-ossm-mc-cacerts.sh verify --base "$PWD"
