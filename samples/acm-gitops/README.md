@@ -1,13 +1,18 @@
 # ACM GitOps samples (manual)
 
-These manifests are **not** applied by `istio-setup/011-acm-openshift-gitops.sh`. Use them after **011** succeeds.
+Use after **011** succeeds.
 
-## Guestbook ApplicationSet (`applicationset-guestbook.yaml.tpl`)
+## ApplicationSet (`applicationset-guestbook.yaml.tpl`)
 
-Syncs **`samples/acm-gitops/hello-openshift/`** from **`GITOPS_SAMPLE_REPO_URL`** (default `https://github.com/shpwrck/istio-scale-tests.git`) at **`GITOPS_SAMPLE_REPO_REVISION`** (`main`) to every Argo **cluster** secret in `${GITOPS_NAMESPACE}`.  
-Uses **`quay.io/openshift/origin-hello-openshift`** on **port 8080** so ROSA restricted SCC is satisfied (upstream argoproj `guestbook` binds **:80** and fails).
+Targets every Argo **cluster** secret in `${GITOPS_NAMESPACE}`.
 
-**Push commits to `GITOPS_SAMPLE_REPO_URL` before** applying the ApplicationSet, or sync will fail.
+**Default manifest** syncs the small public [Argo `helm-guestbook`](https://github.com/argoproj/argocd-example-apps/tree/master/helm-guestbook) chart with **`quay.io/openshift/origin-hello-openshift`** on **8080** (ROSA-friendly). No GitHub credential is required on the hub.
+
+If **repo-server** restarts with **OOMKilled** while syncing heavier Helm sources, raise limits on the hub instance, for example:
+
+```bash
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '{"spec":{"repo":{"resources":{"limits":{"memory":"2Gi"},"requests":{"memory":"512Mi"}}}}}'
+```
 
 ```bash
 source config/versions.env
@@ -15,26 +20,25 @@ export CTX=<hub-kube-context>
 envsubst < samples/acm-gitops/applicationset-guestbook.yaml.tpl | oc --context "$CTX" apply -f -
 ```
 
-### Argo cannot reach spokes (`*.control-plane`, ComparisonError, unknown)
+### In-repo `hello-openshift/` (optional)
 
-ACM secrets often set **`server`** to an **internal** API hostname that does not resolve from hub pods. Patch **`server`** to **`ManagedCluster.spec.managedClusterClientConfigs[0].url`** and add **`config`** (bearer token from your kubeconfig):
+`hello-openshift/` is an OpenShift **hello** Deployment (**8080**). To use it, edit the ApplicationSet `source` to point at a **public** Git URL (or create an Argo CD **Repository** secret on the hub for a private repo). Cloning `Repository not found` usually means the repo is **private** without credentials.
+
+### Spokes unreachable from Argo (`*.control-plane`, ComparisonError)
+
+Patch ACM cluster secrets (**public API URL** + **kubeconfig JSON** token from your workstation):
 
 ```bash
 ./istio-setup/012-acm-argoc-managed-cluster-secrets.sh --hub-context "$CTX"
 ```
 
-Then restart tends to clear: `oc delete pod -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-application-controller`.
+Then optionally restart: `oc delete pod -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-application-controller`.
 
-Check:
+### Checks
 
 ```bash
 oc --context "$CTX" get applicationset,applications.argoproj.io -n "${GITOPS_NAMESPACE}"
-```
-
-On a spoke:
-
-```bash
-oc --context <spoke-context> get pods -n acm-gitops-test-guestbook
+oc --context <spoke> get pods -n acm-gitops-test-guestbook
 ```
 
 Cleanup:
@@ -43,4 +47,4 @@ Cleanup:
 oc --context "$CTX" delete applicationset acm-test-guestbook -n "${GITOPS_NAMESPACE}"
 ```
 
-Spokes must carry **`cluster.open-cluster-management.io/clusterset=istio-scale-tests`** (see **001** / **`ACM_CLUSTER_SET`**).
+Spokes need **`cluster.open-cluster-management.io/clusterset=istio-scale-tests`** (**001** / **`ACM_CLUSTER_SET`**).
