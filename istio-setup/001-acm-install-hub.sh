@@ -38,6 +38,8 @@ ACM_IMPORT_APPLY_RETRY_SEC="${ACM_IMPORT_APPLY_RETRY_SEC:-900}"
 ACM_CRDS_YAML_WAIT_SEC="${ACM_CRDS_YAML_WAIT_SEC:-180}"
 ACM_INSTALL_KLUSTERLETCONFIG="${ACM_INSTALL_KLUSTERLETCONFIG:-1}"
 ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC="${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC:-900}"
+ACM_WAIT_MANAGED_CLUSTER_READY="${ACM_WAIT_MANAGED_CLUSTER_READY:-1}"
+ACM_MANAGED_CLUSTER_READY_WAIT_SEC="${ACM_MANAGED_CLUSTER_READY_WAIT_SEC:-3600}"
 
 CHART_OPERATOR="${ROOT}/charts/acm-operator"
 CHART_MULTICLUSTER_HUB="${ROOT}/charts/acm-multicluster-hub"
@@ -66,6 +68,7 @@ Usage: $(basename "$0") [options]
   3) Helm: charts/acm-multicluster-hub → wait for MultiClusterHub Running.
   4) Helm: charts/acm-klusterlet-config (unless ACM_INSTALL_KLUSTERLETCONFIG=0) after KlusterletConfig CRD exists.
   5) Per spoke (Terraform keys except hub): Helm ManagedCluster → wait hub import/auto-import secret → CRDs from import.yaml → full import.yaml on spoke.
+  6) Wait until every Terraform cluster name has ManagedCluster Joined+Available on the hub (optional).
 
   --context NAME       kube/oc context for the hub (recommended). If omitted, tries ACM_HUB_CONTEXT,
                        then matches terraform output first_cluster.cluster_api_url to kubeconfig.
@@ -94,6 +97,8 @@ Environment:
   ACM_CRDS_YAML_WAIT_SEC           Seconds to wait for hub secret data key crds.yaml after import.yaml exists (default ${ACM_CRDS_YAML_WAIT_SEC}).
   ACM_INSTALL_KLUSTERLETCONFIG     If 1 (default), install KlusterletConfig chart after CRD exists; set 0 to skip.
   ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC  Seconds to wait for KlusterletConfig CRD (default ${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC}).
+  ACM_WAIT_MANAGED_CLUSTER_READY   If 1 (default), after imports wait for ManagedCluster Joined+Available for each Terraform cluster_keys name.
+  ACM_MANAGED_CLUSTER_READY_WAIT_SEC  Max seconds for that wait (default ${ACM_MANAGED_CLUSTER_READY_WAIT_SEC}).
   ACM_LOCAL_CLUSTER_NAME           MultiClusterHub spec.localClusterName when --local-cluster-name is not used.
 
 OpenShift ${OPENSHIFT_VERSION} is pinned with ACM channel ${ACM_CHANNEL}; bump both together per RHACM support matrix.
@@ -260,6 +265,12 @@ list_spoke_cluster_keys() {
 		(if type == "array" then . else [] end) as $k
 		| $k[] | select(. != $hub)
 	'
+}
+
+# All logical cluster keys from Terraform (hub + spokes) — matches ManagedCluster metadata.name on the hub.
+list_all_terraform_cluster_keys() {
+	command -v terraform >/dev/null 2>&1 || return 1
+	terraform -chdir="$TF_DIR" output -json cluster_keys 2>/dev/null | jq -r '(if type == "array" then . else [] end)[]'
 }
 
 extract_import_yaml_from_hub() {
@@ -475,6 +486,78 @@ helm_managed_clusters_and_import() {
 	done
 }
 
+# OCM ManagedCluster: ManagedClusterJoined + ManagedClusterConditionAvailable must be True (open-cluster-management.io/api).
+managed_cluster_joined_and_available() {
+	local name="$1"
+	oc --context="$CTX" get managedcluster "$name" -o json 2>/dev/null | jq -e '
+		(.status.conditions // []) as $c
+		| (($c | map(select(.type=="ManagedClusterJoined")) | .[0].status // "") == "True")
+		  and
+		  (($c | map(select(.type=="ManagedClusterConditionAvailable")) | .[0].status // "") == "True")
+	' >/dev/null
+}
+
+wait_for_all_managed_clusters_ready() {
+	if [[ "${ACM_WAIT_MANAGED_CLUSTER_READY:-1}" != "1" ]]; then
+		echo "Skipping ManagedCluster Ready wait (ACM_WAIT_MANAGED_CLUSTER_READY!=1)."
+		return 0
+	fi
+	if ((SKIP_MANAGED_CLUSTERS)); then
+		echo "Skipping ManagedCluster Ready wait (--skip-managed-clusters)."
+		return 0
+	fi
+	if ((SKIP_IMPORT)); then
+		echo "Skipping ManagedCluster Ready wait (--skip-import)."
+		return 0
+	fi
+
+	local -a names
+	if ! mapfile -t names < <(list_all_terraform_cluster_keys); then
+		echo "warn: Terraform cluster_keys unavailable; skipping ManagedCluster Ready wait." >&2
+		return 0
+	fi
+	if ((${#names[@]} == 0)); then
+		return 0
+	fi
+
+	echo "--- 6) Wait until all ManagedClusters are Joined and Available (hub) ---"
+	echo "Expecting ManagedCluster objects: ${names[*]}"
+
+	local deadline=$((SECONDS + ACM_MANAGED_CLUSTER_READY_WAIT_SEC))
+	local iter=0
+	while ((SECONDS < deadline)); do
+		local all_ok=1
+		local pending=""
+		local n
+		for n in "${names[@]}"; do
+			[[ -z "$n" ]] && continue
+			if ! managed_cluster_joined_and_available "$n"; then
+				all_ok=0
+				pending+="${n} "
+			fi
+		done
+		if ((all_ok)); then
+			echo "All ManagedClusters Ready (Joined+Available): ${names[*]}"
+			return 0
+		fi
+		((iter++))
+		if ((iter % 4 == 1)); then
+			echo "Still waiting for: ${pending:-unknown}"
+		fi
+		sleep 15
+	done
+
+	echo "ManagedCluster status (debug):" >&2
+	for n in "${names[@]}"; do
+		[[ -z "$n" ]] && continue
+		if ! oc --context="$CTX" get managedcluster "$n" -o json 2>/dev/null \
+			| jq -e --arg n "$n" '{name:$n, joined:(.status.conditions // []) | map(select(.type=="ManagedClusterJoined")) | .[0], avail:(.status.conditions // []) | map(select(.type=="ManagedClusterConditionAvailable")) | .[0]}' >&2; then
+			echo "(no ManagedCluster named ${n})" >&2
+		fi
+	done
+	die "Timed out after ${ACM_MANAGED_CLUSTER_READY_WAIT_SEC}s waiting for ManagedClusters Joined+Available."
+}
+
 wait_for_acm_csv_succeeded() {
 	echo "Waiting for advanced-cluster-management ClusterServiceVersion (up to 15m)..."
 	local found=""
@@ -591,7 +674,7 @@ if ((DRY_RUN)); then
 	helm template "$RELEASE_KLUSTERLET_CONFIG" "$CHART_KLUSTERLET_CONFIG" \
 		--namespace "$ACM_NAMESPACE" >/dev/null
 	helm_managed_clusters_and_import || die "spoke dry-run failed."
-	echo "dry-run: done."
+	echo "dry-run: would wait for ManagedCluster Joined+Available on hub for each Terraform cluster_keys name."
 	exit 0
 fi
 
@@ -625,5 +708,8 @@ fi
 # --- 4) Spokes ---
 echo "--- 4) Register spoke clusters ---"
 helm_managed_clusters_and_import || die "spoke registration failed."
+
+wait_for_all_managed_clusters_ready
+
 echo "Done."
 exit 0
