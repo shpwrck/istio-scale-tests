@@ -7,7 +7,8 @@ Install **once per spoke**: one cluster-scoped `ManagedCluster` on the hub. Rele
 ## Values
 
 - `managedCluster.name` (required) — must match the spoke’s kubectl/oc context name and the hub namespace RHACM creates for that cluster.
-- `managedCluster.labels` — merged over `defaultLabels`.
+- `clustersetName` (default `istio-scale-tests`) — sets label `cluster.open-cluster-management.io/clusterset=<name>` for **ManagedClusterSet** membership (`ACM_CLUSTER_SET` / **011** chart **`clusterSet`** must match).
+- `managedCluster.labels` — merged over `defaultLabels` and the clusterset label (can override membership if needed).
 
 ## Manual Helm
 
@@ -15,7 +16,8 @@ Install **once per spoke**: one cluster-scoped `ManagedCluster` on the hub. Rele
 helm upgrade --install acm-managed-cluster-rosa-002 ./charts/acm-managed-cluster \
   --kube-context "$HUB_CONTEXT" \
   --namespace open-cluster-management --create-namespace \
-  --set managedCluster.name=rosa-002
+  --set managedCluster.name=rosa-002 \
+  --set clustersetName=istio-scale-tests
 ```
 
 See RHACM docs for import secrets (`${CLUSTER_NAME}-import`, `auto-import-secret`, manual import). **001** automates the full flow per cluster.

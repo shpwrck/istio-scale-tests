@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install RHACM hub: merge kubeconfigs from Terraform; three Helm charts on hub (operator → MultiClusterHub → KlusterletConfig);
 # then per spoke cluster: ManagedCluster Helm → wait hub import/auto-import secret → apply CRD docs from import.yaml → apply full import.yaml on spoke.
+# Each spoke ManagedCluster gets label cluster.open-cluster-management.io/clusterset=<ACM_CLUSTER_SET> (default istio-scale-tests via charts/acm-managed-cluster).
 # Pair OpenShift and ACM using config/versions.env (defaults: OCP 4.21.x + ACM channel release-2.16).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/install/installing-advanced-cluster-management
@@ -100,6 +101,7 @@ Environment:
   ACM_WAIT_MANAGED_CLUSTER_READY   If 1 (default), after imports wait for ManagedCluster Joined+Available for each Terraform cluster_keys name.
   ACM_MANAGED_CLUSTER_READY_WAIT_SEC  Max seconds for that wait (default ${ACM_MANAGED_CLUSTER_READY_WAIT_SEC}).
   ACM_LOCAL_CLUSTER_NAME           MultiClusterHub spec.localClusterName when --local-cluster-name is not used.
+  ACM_CLUSTER_SET                  Sets label cluster.open-cluster-management.io/clusterset on each spoke ManagedCluster (default istio-scale-tests). Must match ManagedClusterSet / Binding / Placement.clusterSets (011 chart).
 
 OpenShift ${OPENSHIFT_VERSION} is pinned with ACM channel ${ACM_CHANNEL}; bump both together per RHACM support matrix.
 Requires cluster-admin on the hub and on each spoke for import apply.
@@ -430,16 +432,18 @@ register_spoke_cluster() {
 	if ((DRY_RUN)); then
 		helm template "$rel" "$CHART_MANAGED_CLUSTER" \
 			--namespace "$ACM_NAMESPACE" \
-			--set managedCluster.name="$k" >/dev/null
+			--set managedCluster.name="$k" \
+			--set clustersetName="${ACM_CLUSTER_SET:-istio-scale-tests}" >/dev/null
 		echo "dry-run: would wait for hub import secret, apply crds.yaml (or embedded CRDs), then full import.yaml on context ${k}."
 		return 0
 	fi
 
-	echo "1) Helm ManagedCluster on hub: release ${rel}"
+	echo "1) Helm ManagedCluster on hub: release ${rel} (label cluster.open-cluster-management.io/clusterset=${ACM_CLUSTER_SET:-istio-scale-tests})"
 	helm --kube-context "$CTX" upgrade --install "$rel" "$CHART_MANAGED_CLUSTER" \
 		--namespace "$ACM_NAMESPACE" \
 		--create-namespace \
-		--set managedCluster.name="$k"
+		--set managedCluster.name="$k" \
+		--set clustersetName="${ACM_CLUSTER_SET:-istio-scale-tests}"
 
 	if ((SKIP_IMPORT)); then
 		echo "Skipping import for ${k} (--skip-import)."

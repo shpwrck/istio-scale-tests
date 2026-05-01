@@ -1,0 +1,19 @@
+{{- if not .Values.argoServer.cluster }}
+{{- fail "argoServer.cluster is required (hub ManagedCluster / localClusterName)" }}
+{{- end }}
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: {{ .Values.gitopsCluster.name }}
+  namespace: {{ .Values.gitopsNamespace }}
+spec:
+  argoServer:
+    cluster: {{ .Values.argoServer.cluster | quote }}
+    argoNamespace: {{ .Values.gitopsNamespace }}
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: {{ .Values.placement.name }}
+    namespace: {{ .Values.gitopsNamespace }}
+  gitopsAddon:
+    enabled: {{ .Values.gitopsAddon.enabled }}

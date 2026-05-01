@@ -1,0 +1,5 @@
+apiVersion: v2
+name: acm-openshift-gitops-resources
+description: RHACM ManagedClusterSetBinding, Placement, and GitOpsCluster for hub OpenShift GitOps (push model).
+type: application
+version: 0.1.0

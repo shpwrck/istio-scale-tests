@@ -1,0 +1,8 @@
+{{- $bindingName := .Values.managedClusterSetBinding.name | default .Values.clusterSet }}
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: {{ $bindingName }}
+  namespace: {{ .Values.gitopsNamespace }}
+spec:
+  clusterSet: {{ .Values.clusterSet }}

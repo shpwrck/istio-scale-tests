@@ -8,7 +8,9 @@ metadata:
   labels:
 {{- $defaults := .Values.defaultLabels | default dict }}
 {{- $extra := .Values.managedCluster.labels | default dict }}
-{{- $lbl := merge $defaults $extra }}
+{{- $cs := .Values.clustersetName | default "istio-scale-tests" }}
+{{- $membership := dict "cluster.open-cluster-management.io/clusterset" $cs }}
+{{- $lbl := merge $defaults $membership $extra }}
 {{- toYaml $lbl | nindent 4 }}
 spec:
   hubAcceptsClient: true

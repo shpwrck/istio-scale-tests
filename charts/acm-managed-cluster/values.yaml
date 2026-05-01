@@ -1,3 +1,6 @@
+# Membership for ManagedClusterSetBinding + Placement (must match ACM_CLUSTER_SET / ManagedClusterSet in openshift-gitops chart).
+clustersetName: istio-scale-tests
+
 defaultLabels:
   cloud: auto-detect
   vendor: OpenShift

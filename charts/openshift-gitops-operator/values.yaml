@@ -1,0 +1,14 @@
+# Subscription is installed in openshift-operators (AllNamespaces / cluster default OperatorGroup).
+# Do not create an OperatorGroup that sets targetNamespaces to the subscription namespace — that selects
+# OwnNamespace install mode, which openshift-gitops-operator does not support ("OwnNamespace InstallModeType not supported").
+operatorGroup:
+  create: false
+  name: openshift-gitops-operator
+
+subscription:
+  resourceName: openshift-gitops-operator
+  packageName: openshift-gitops-operator
+  sourceNamespace: openshift-marketplace
+  source: redhat-operators
+  channel: gitops-1.14
+  installPlanApproval: Automatic
