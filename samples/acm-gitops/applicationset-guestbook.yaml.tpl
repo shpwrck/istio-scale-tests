@@ -1,13 +1,13 @@
-# Sample ApplicationSet for ACM + OpenShift GitOps (manual test only; not run by istio-setup scripts).
-# Expects cluster Secrets in ${GITOPS_NAMESPACE} labeled argocd.argoproj.io/secret-type=cluster
-# (created after GitOpsCluster reconciles for Placement-selected clusters).
+# Sample ApplicationSet for ACM + OpenShift GitOps (manual apply; not run by istio-setup scripts).
+# Expects Argo cluster Secrets in ${GITOPS_NAMESPACE} (GitOpsCluster / ACM gitops-addon).
 #
-# Apply (repo root, hub kube context):
+# Uses this repo's OpenShift-safe manifests (port 8080) — not argoproj/guestbook (binds :80, fails SCC on ROSA).
+#
+# Apply (repo root, hub context):
 #   source config/versions.env
 #   envsubst < samples/acm-gitops/applicationset-guestbook.yaml.tpl | oc --context "$CTX" apply -f -
 #
-# Remove:
-#   oc --context "$CTX" delete applicationset acm-test-guestbook -n "${GITOPS_NAMESPACE:-openshift-gitops}"
+# Requires: hub can clone GITOPS_SAMPLE_REPO_URL at GITOPS_SAMPLE_REPO_REVISION (push commits before sync).
 #
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -28,9 +28,9 @@ spec:
     spec:
       project: default
       source:
-        repoURL: https://github.com/argoproj/argocd-example-apps.git
-        targetRevision: HEAD
-        path: guestbook
+        repoURL: ${GITOPS_SAMPLE_REPO_URL}
+        targetRevision: ${GITOPS_SAMPLE_REPO_REVISION}
+        path: samples/acm-gitops/hello-openshift
       destination:
         server: '{{server}}'
         namespace: acm-gitops-test-guestbook

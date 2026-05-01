@@ -1,12 +1,13 @@
 # ACM GitOps samples (manual)
 
-These manifests are **not** applied by `istio-setup/011-acm-openshift-gitops.sh`. Use them to validate OpenShift GitOps + ACM **GitOpsCluster** after **011** succeeds.
+These manifests are **not** applied by `istio-setup/011-acm-openshift-gitops.sh`. Use them after **011** succeeds.
 
-## Guestbook ApplicationSet
+## Guestbook ApplicationSet (`applicationset-guestbook.yaml.tpl`)
 
-Deploys the upstream [Argo CD guestbook example](https://github.com/argoproj/argocd-example-apps/tree/master/guestbook) to **every** cluster represented by an Argo CD cluster `Secret` in `${GITOPS_NAMESPACE}` (typically `openshift-gitops`), matching the label `argocd.argoproj.io/secret-type=cluster`.
+Syncs **`samples/acm-gitops/hello-openshift/`** from **`GITOPS_SAMPLE_REPO_URL`** (default `https://github.com/shpwrck/istio-scale-tests.git`) at **`GITOPS_SAMPLE_REPO_REVISION`** (`main`) to every Argo **cluster** secret in `${GITOPS_NAMESPACE}`.  
+Uses **`quay.io/openshift/origin-hello-openshift`** on **port 8080** so ROSA restricted SCC is satisfied (upstream argoproj `guestbook` binds **:80** and fails).
 
-Prerequisites: **001** + **011** with ACM GitOps resources applied; **GitOpsCluster** healthy; spoke clusters in your **Placement**.
+**Push commits to `GITOPS_SAMPLE_REPO_URL` before** applying the ApplicationSet, or sync will fail.
 
 ```bash
 source config/versions.env
@@ -14,10 +15,20 @@ export CTX=<hub-kube-context>
 envsubst < samples/acm-gitops/applicationset-guestbook.yaml.tpl | oc --context "$CTX" apply -f -
 ```
 
+### Argo cannot reach spokes (`*.control-plane`, ComparisonError, unknown)
+
+ACM secrets often set **`server`** to an **internal** API hostname that does not resolve from hub pods. Patch **`server`** to **`ManagedCluster.spec.managedClusterClientConfigs[0].url`** and add **`config`** (bearer token from your kubeconfig):
+
+```bash
+./istio-setup/012-acm-argoc-managed-cluster-secrets.sh --hub-context "$CTX"
+```
+
+Then restart tends to clear: `oc delete pod -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-application-controller`.
+
 Check:
 
 ```bash
-oc --context "$CTX" get applicationset,applications -n "${GITOPS_NAMESPACE}"
+oc --context "$CTX" get applicationset,applications.argoproj.io -n "${GITOPS_NAMESPACE}"
 ```
 
 On a spoke:
@@ -32,6 +43,4 @@ Cleanup:
 oc --context "$CTX" delete applicationset acm-test-guestbook -n "${GITOPS_NAMESPACE}"
 ```
 
-If **no** Applications appear, confirm cluster secrets exist (`oc get secrets -n "${GITOPS_NAMESPACE}" -l argocd.argoproj.io/secret-type=cluster`) and that your **Placement** includes the spokes.
-
-Spokes must match **ManagedClusterSet** **`istio-scale-tests`** (default **`ACM_CLUSTER_SET`**): each **ManagedCluster** needs `cluster.open-cluster-management.io/clusterset=<set>`. **001** sets this via `clustersetName` / `ACM_CLUSTER_SET`. Existing clusters: `oc label managedcluster NAME cluster.open-cluster-management.io/clusterset=istio-scale-tests --overwrite`, then re-run **011** (or `helm upgrade` **`acm-openshift-gitops-resources`**) and wait for GitOpsCluster to reconcile.
+Spokes must carry **`cluster.open-cluster-management.io/clusterset=istio-scale-tests`** (see **001** / **`ACM_CLUSTER_SET`**).

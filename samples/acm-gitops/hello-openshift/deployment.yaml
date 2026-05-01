@@ -1,0 +1,23 @@
+# OpenShift-friendly sample (non-privileged port). Replaces argoproj guestbook (port 80 / SCC issues on ROSA).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guestbook-ui
+  labels:
+    app: guestbook-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guestbook-ui
+  template:
+    metadata:
+      labels:
+        app: guestbook-ui
+    spec:
+      containers:
+        - name: guestbook-ui
+          image: quay.io/openshift/origin-hello-openshift:latest
+          ports:
+            - name: http
+              containerPort: 8080
