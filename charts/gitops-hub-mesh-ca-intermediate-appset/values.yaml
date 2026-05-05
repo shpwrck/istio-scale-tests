@@ -1,0 +1,28 @@
+gitopsNamespace: openshift-gitops
+
+# Placement metadata.name — PlacementDecision objects carry label cluster.open-cluster-management.io/placement=<name>.
+placement:
+  name: acm-openshift-gitops-placement
+
+generatorConfigMap:
+  create: true
+  name: ocm-placement-generator-hub-mesh-ca
+
+clusterDecisionResource:
+  requeueAfterSeconds: 30
+
+placementRbac:
+  create: true
+  roleName: openshift-gitops-ocm-placement-hub-mesh-ca
+  roleBindingName: openshift-gitops-ocm-placement-hub-mesh-ca
+  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
+
+applicationSet:
+  name: hub-mesh-ca-intermediate
+
+repo:
+  url: ""
+  revision: main
+
+intermediateChart:
+  path: charts/hub-mesh-ca-intermediate

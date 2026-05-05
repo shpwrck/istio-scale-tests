@@ -18,7 +18,13 @@ Waves fix apply ordering only; cert-manager still reconciles certificates asynch
 
 Placement-based intermediates still require a successful **`lookup`** on `PlacementDecision` at template time—waves do not create intermediates if Helm renders none.
 
-## Intermediate CAs: Placement (default)
+## Argo CD: intermediates via ApplicationSet (recommended)
+
+Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-mesh-ca-intermediate-appset`**, which installs an **ApplicationSet** with the **[clusterDecisionResource](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster-Decision-Resource/)** generator bound to the same **Placement** as `charts/acm-openshift-gitops-resources`. Each selected cluster gets an **Application** that deploys **`charts/hub-mesh-ca-intermediate`** on the hub with **`clusterName`** set.
+
+The **`hub-mesh-ca`** Application under `charts/gitops-hub-apps/applications/` passes **`intermediates.enabled: false`** so this chart only manages the root CA chain; intermediate CAs come from the ApplicationSet.
+
+## Intermediate CAs: Placement (helm CLI / live API)
 
 With `intermediates.source: placement` (default), the chart uses Helm `lookup` on the **PlacementDecision** that matches **`global.placement`** — same namespace/name convention as `charts/acm-openshift-gitops-resources` (`Placement` `acm-openshift-gitops-placement` in `openshift-gitops`). Each entry in `status.decisions[].clusterName` becomes one intermediate (`mesh-intermediate-<clusterName>`).
 

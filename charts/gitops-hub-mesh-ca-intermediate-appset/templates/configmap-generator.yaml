@@ -1,0 +1,14 @@
+{{- if .Values.generatorConfigMap.create }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.generatorConfigMap.name | quote }}
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+data:
+  apiVersion: cluster.open-cluster-management.io/v1beta1
+  kind: placementdecisions
+  statusListKey: decisions
+  matchKey: clusterName
+{{- end }}

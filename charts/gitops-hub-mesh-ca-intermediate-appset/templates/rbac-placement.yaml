@@ -1,0 +1,29 @@
+{{- if .Values.placementRbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.placementRbac.roleName | quote }}
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+rules:
+  - apiGroups: ["cluster.open-cluster-management.io"]
+    resources: ["placementdecisions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.placementRbac.roleBindingName | quote }}
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.placementRbac.roleName | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.placementRbac.applicationSetServiceAccountName | quote }}
+    namespace: {{ .Values.gitopsNamespace | quote }}
+{{- end }}

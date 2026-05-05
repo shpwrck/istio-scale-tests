@@ -1,0 +1,5 @@
+{{- if not .Values.clusterName }}
+clusterName is not set — no Certificate was rendered. ApplicationSet sync sets clusterName per Placement cluster.
+{{- else }}
+Intermediate CA Certificate: {{ printf "mesh-intermediate-%s" .Values.clusterName }} (namespace {{ .Values.namespace }}).
+{{- end }}
