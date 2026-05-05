@@ -1,10 +1,10 @@
 # gitops-hub-ocm-placement-appset
 
-Standard Argo CD ApplicationSet for RHACM GitOps: **clusterDecisionResource** (shared duck-type ConfigMap from `charts/acm-openshift-gitops-resources`) plus optional **list** generator for the hub Argo cluster name (`in-cluster` by default).
+Standard Argo CD ApplicationSet for RHACM GitOps: `clusterDecisionResource` (shared duck-type ConfigMap from `charts/acm-openshift-gitops-resources`) plus optional list generator for the hub Argo cluster name (`in-cluster` by default).
 
 Preset value files:
 
-- `values-external-secrets.yaml` — installs `charts/external-secrets-operator` on **every cluster** in Placement plus the hub (`destination.mode: clusterName`).
+- `values-external-secrets.yaml` — installs `charts/external-secrets-operator` on every cluster in Placement (`clusterDecisionResource`, typically spokes without `local-cluster`) plus the hub list entry (`in-cluster` default, `destination.mode: clusterName` on each Application).
 - `values-mesh-ca-intermediate.yaml` — installs `charts/hub-mesh-ca-intermediate` only on the hub API (`destination.mode: inClusterServer`).
 
 Override `repo.url` / `placement.name` / `generatorConfigMap` / RBAC names via Helm or Argo `parameters` as needed.

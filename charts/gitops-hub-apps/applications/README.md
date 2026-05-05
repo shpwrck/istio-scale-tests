@@ -8,6 +8,6 @@ Adding a new app: commit a new `Application` manifest here with `metadata.namesp
 
 **`hub-mesh-ca-intermediate-appset`** installs **`charts/gitops-hub-ocm-placement-appset`** with **`values-mesh-ca-intermediate.yaml`** (hub-only destination).
 
-**`hub-external-secrets-operator-appset`** installs the same chart with **`values-external-secrets.yaml`** so External Secrets is deployed on **every cluster** in Placement plus **`in-cluster`** (`spec.destination.name` per Application).
+`hub-external-secrets-operator-appset` installs `charts/gitops-hub-ocm-placement-appset` with `values-external-secrets.yaml` so External Secrets is deployed on each cluster in Placement (spokes) plus `in-cluster` for the hub; each generated Application sets `spec.destination.name` to that cluster. Do not use a separate hub-only Application targeting `charts/external-secrets-operator` if you rely on spokes.
 
 Exclude patterns on the root Application omit `*.md` so this README is not applied as a manifest.

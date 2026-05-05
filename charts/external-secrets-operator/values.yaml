@@ -1,6 +1,19 @@
 # Operand / OLM namespace for the Red Hat External Secrets operator Subscription.
 namespace: external-secrets-operator
 
+# Grant OpenShift GitOps application-controller permission to reconcile OLM objects in namespace (needed for hub in-cluster Applications and permissive setups).
+argoSyncWaves:
+  enabled: true
+  rbac: -20
+
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller
+  labels: {}
+  annotations: {}
+
 operatorGroup:
   name: openshift-external-secrets-operator
 
