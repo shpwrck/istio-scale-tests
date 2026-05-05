@@ -24,6 +24,14 @@ placementRbac:
   roleBindingName: openshift-gitops-ocm-placement-hub-mesh-ca
   applicationSetServiceAccountName: openshift-gitops-applicationset-controller
 
+# Lets openshift-gitops-argocd-application-controller sync ApplicationSet + ConfigMap + RBAC into applicationSetNamespace.
+argocdApplicationControllerRbac:
+  create: true
+  roleName: gitops-hub-mesh-ca-intermediate-appset-argocd-sync
+  roleBindingName: gitops-hub-mesh-ca-intermediate-appset-argocd-sync
+  serviceAccountName: openshift-gitops-argocd-application-controller
+  serviceAccountNamespace: openshift-gitops
+
 applicationSet:
   name: hub-mesh-ca-intermediate
 
