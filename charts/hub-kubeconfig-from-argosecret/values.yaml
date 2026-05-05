@@ -15,6 +15,16 @@ targetSecretName: ""
 
 refreshInterval: 1h
 
+# In-cluster Kubernetes API client settings for the kubernetes provider (SecretStore validation + fetches).
+# Set caFromConfigMap.enabled to false only if the apiserver uses a public CA and validation succeeds without it.
+kubernetesAPI:
+  # Optional override; empty uses ESO default (kubernetes.default.svc).
+  serverURL: ""
+  caFromConfigMap:
+    enabled: true
+    name: kube-root-ca.crt
+    key: ca.crt
+
 secretStoreName: ""
 
 serviceAccountName: ""

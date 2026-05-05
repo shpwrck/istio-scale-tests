@@ -9,3 +9,7 @@ Prerequisites on the hub: External Secrets Operator (for example via `hub-extern
 Template logic lives in `files/eso-kubeconfig.tpl` (External Secrets engine v2 / sprig); Helm does not interpret that file so ESO `{{ ... }}` expressions pass through unchanged.
 
 `SecretStore` and `ExternalSecret` use `apiVersion: external-secrets.io/v1` for External Secrets Operator installs that expose the stable v1 API (for example Red Hat OpenShift).
+
+The kubernetes provider `SecretStore` sets `spec.provider.kubernetes.server.caProvider` to the platform root CA (`kube-root-ca.crt` / `ca.crt` by default on OpenShift) so the operator can validate TLS to the apiserver. It also sets `auth.serviceAccount.namespace` next to `name` (required by the v1 CRD shape). The store `ServiceAccount` Role allows `selfsubjectrulesreviews` and `selfsubjectaccessreviews` `create` for ESO validation.
+
+If `SecretStore` never reaches Ready, check `kubectl describe secretstore -n openshift-gitops`, confirm ConfigMap `kube-root-ca.crt` exists in that namespace, and confirm the External Secrets operand reconciles namespaces where you deploy `SecretStore` (operand configuration / `watchNamespace` depending on version). You can disable the CA block with `kubernetesAPI.caFromConfigMap.enabled: false` when the apiserver chain is signed by a CA already trusted by the operator image.
