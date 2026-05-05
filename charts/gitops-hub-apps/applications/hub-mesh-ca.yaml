@@ -1,0 +1,24 @@
+# Argo CD Application — mesh root + intermediate CAs (cert-manager). Same repo URL requirement as sibling manifests.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-mesh-ca
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: hub-mesh-ca
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/hub-mesh-ca
+    helm:
+      releaseName: hub-mesh-ca
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
