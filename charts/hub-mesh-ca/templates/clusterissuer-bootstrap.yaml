@@ -1,0 +1,8 @@
+{{- if and .Values.bootstrapIssuer.enabled .Values.rootCA.enabled }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.bootstrapIssuer.name | quote }}
+spec:
+  selfSigned: {}
+{{- end }}

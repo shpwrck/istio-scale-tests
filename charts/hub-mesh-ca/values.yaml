@@ -1,0 +1,51 @@
+# Operand namespace where cert-manager runs and TLS secrets are stored (default OpenShift operand ns).
+namespace: cert-manager
+
+# Align with charts/acm-openshift-gitops-resources Placement (same cluster set and hub exclusion via local-cluster).
+global:
+  placement:
+    namespace: openshift-gitops
+    name: acm-openshift-gitops-placement
+    # PlacementDecision metadata.name — usually matches Placement name when one decision exists; override if needed (oc get placementdecision -n openshift-gitops).
+    placementDecisionName: ""
+
+bootstrapIssuer:
+  enabled: true
+  name: mesh-selfsigned-bootstrap
+
+rootCA:
+  enabled: true
+  certificateName: mesh-root-ca
+  secretName: mesh-root-ca-material
+  clusterIssuerName: mesh-root-ca
+  commonName: Istio Mesh Root CA
+  duration: 87600h
+  organization: Istio
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+
+# Issuer that signs intermediate CA certs (references root secret after mesh-root-ca Certificate is Ready).
+rootClusterIssuer:
+  enabled: true
+
+intermediates:
+  enabled: true
+  # placement — read cluster names from PlacementDecision status (global.placement); static — use clusters[] below.
+  source: placement
+  # Optional per-cluster-name overrides when source is placement (keys are ManagedCluster / decision clusterName).
+  clusterOverrides: {}
+  # rosa-001:
+  #   commonName: ""
+  #   duration: 8760h
+  #   secretName: ""
+  #   privateKey:
+  #     algorithm: ECDSA
+  #     size: 256
+  # Only used when source is static:
+  clusters: []
+  # - key: rosa-001
+  defaultDuration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256

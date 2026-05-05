@@ -1,0 +1,70 @@
+{{- if and .Values.intermediates.enabled .Values.rootCA.enabled }}
+{{- $src := .Values.intermediates.source | default "placement" }}
+{{- $overrides := .Values.intermediates.clusterOverrides | default dict }}
+{{- if eq $src "static" }}
+{{- range .Values.intermediates.clusters }}
+{{- $pk := .privateKey | default dict }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "mesh-intermediate-%s" .key | quote }}
+  namespace: {{ $.Values.namespace | quote }}
+spec:
+  isCA: true
+  commonName: {{ .commonName | default (printf "Istio Intermediate %s" .key) | quote }}
+  duration: {{ .duration | default $.Values.intermediates.defaultDuration | quote }}
+  secretName: {{ .secretName | default (printf "mesh-intermediate-%s-material" .key) | quote }}
+  issuerRef:
+    name: {{ $.Values.rootCA.clusterIssuerName | quote }}
+    kind: ClusterIssuer
+  usages:
+    - digital signature
+    - key encipherment
+    - cert sign
+    - crl sign
+  privateKey:
+    algorithm: {{ $pk.algorithm | default $.Values.intermediates.privateKey.algorithm | quote }}
+    size: {{ $pk.size | default $.Values.intermediates.privateKey.size }}
+{{- end }}
+{{- else }}
+{{- $global := .Values.global | default dict }}
+{{- $pl := $global.placement | default dict }}
+{{- $pdNs := $pl.namespace | default "openshift-gitops" }}
+{{- $placementName := $pl.name | default "acm-openshift-gitops-placement" }}
+{{- $pdName := $pl.placementDecisionName | default $placementName }}
+{{- $pd := lookup "cluster.open-cluster-management.io/v1beta1" "PlacementDecision" $pdNs $pdName }}
+{{- if $pd }}
+{{- $status := $pd.status | default dict }}
+{{- range $d := ($status.decisions | default list) }}
+{{- $cn := $d.clusterName }}
+{{- if $cn }}
+{{- $ov := index $overrides $cn | default dict }}
+{{- $pk := $ov.privateKey | default dict }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "mesh-intermediate-%s" $cn | quote }}
+  namespace: {{ $.Values.namespace | quote }}
+spec:
+  isCA: true
+  commonName: {{ $ov.commonName | default (printf "Istio Intermediate %s" $cn) | quote }}
+  duration: {{ $ov.duration | default $.Values.intermediates.defaultDuration | quote }}
+  secretName: {{ $ov.secretName | default (printf "mesh-intermediate-%s-material" $cn) | quote }}
+  issuerRef:
+    name: {{ $.Values.rootCA.clusterIssuerName | quote }}
+    kind: ClusterIssuer
+  usages:
+    - digital signature
+    - key encipherment
+    - cert sign
+    - crl sign
+  privateKey:
+    algorithm: {{ $pk.algorithm | default $.Values.intermediates.privateKey.algorithm | quote }}
+    size: {{ $pk.size | default $.Values.intermediates.privateKey.size }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
