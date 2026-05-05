@@ -6,7 +6,7 @@ operatorGroup:
 
 subscription:
   name: openshift-external-secrets-operator
-  channel: tech-preview-v0.1
+  channel: stable-v1
   package: openshift-external-secrets-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
