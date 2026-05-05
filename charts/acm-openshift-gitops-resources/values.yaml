@@ -31,3 +31,11 @@ argoServer:
 
 gitopsAddon:
   enabled: true
+
+# Grants openshift-gitops-argocd-application-controller permission to reconcile cluster-scoped ManagedClusterSet when this chart is synced by Argo CD.
+argocdApplicationControllerRbac:
+  create: true
+  clusterRoleName: acm-openshift-gitops-resources-argocd-managedclustersets
+  clusterRoleBindingName: acm-openshift-gitops-resources-argocd-managedclustersets
+  serviceAccountName: openshift-gitops-argocd-application-controller
+  serviceAccountNamespace: openshift-gitops
