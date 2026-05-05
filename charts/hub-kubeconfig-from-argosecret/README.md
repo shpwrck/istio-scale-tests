@@ -7,3 +7,5 @@ Designed for `charts/gitops-hub-ocm-placement-appset` with `values-kubeconfig-fr
 Prerequisites on the hub: External Secrets Operator (for example via `hub-external-secrets-operator-appset`), and the usual `*-application-manager-cluster-secret` objects created by the GitOps addon.
 
 Template logic lives in `files/eso-kubeconfig.tpl` (External Secrets engine v2 / sprig); Helm does not interpret that file so ESO `{{ ... }}` expressions pass through unchanged.
+
+`SecretStore` and `ExternalSecret` use `apiVersion: external-secrets.io/v1` for External Secrets Operator installs that expose the stable v1 API (for example Red Hat OpenShift).
