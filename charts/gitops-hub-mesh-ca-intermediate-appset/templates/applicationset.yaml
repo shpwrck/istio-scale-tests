@@ -9,9 +9,7 @@ spec:
   generators:
     - clusterDecisionResource:
         configMapRef: {{ .Values.generatorConfigMap.name | quote }}
-        labelSelector:
-          matchLabels:
-            cluster.open-cluster-management.io/placement: {{ .Values.placement.name | quote }}
+        name: {{ required "placement.placementDecisionName must be set (PlacementDecision metadata.name in gitopsNamespace)" .Values.placement.placementDecisionName | quote }}
         requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
   template:
     metadata:
