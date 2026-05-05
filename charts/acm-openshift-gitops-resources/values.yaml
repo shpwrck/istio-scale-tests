@@ -16,6 +16,12 @@ placement:
   # Exclude the ACM hub (“first” cluster): RHACM labels only the hub ManagedCluster with local-cluster=true.
   excludeHubLocalClusterLabel: true
 
+# Shared duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource (charts/gitops-hub-*-appset).
+# Uses the same Placement / PlacementDecision as placement.name above (OCM names decisions "<name>-decision-1" by default).
+argocdPlacementDecisionGenerator:
+  create: true
+  configMapName: acm-gitops-placement-generator
+
 gitopsCluster:
   name: acm-openshift-gitops
 

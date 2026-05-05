@@ -2,4 +2,4 @@ apiVersion: v2
 name: gitops-hub-external-secrets-operator-appset
 description: Argo CD ApplicationSet (clusterDecisionResource / OCM PlacementDecision) plus duck-type ConfigMap and RBAC for per-cluster external-secrets-operator Applications on each registered cluster.
 type: application
-version: 0.1.0
+version: 0.2.0
