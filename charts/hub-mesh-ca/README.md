@@ -10,6 +10,14 @@ When **`rbac.enabled`** is true (default), the chart installs a **Role** and **R
 
 Disable with **`rbac.enabled: false`** if you manage this RBAC outside the chart (for example in `platform-setup`).
 
+## Argo CD sync waves (default)
+
+When **`argoSyncWaves.enabled`** is true (default), manifests include **`argocd.argoproj.io/sync-wave`** so Argo applies resources in order: RBAC → bootstrap `ClusterIssuer` → root `Certificate` → root CA `ClusterIssuer` → intermediate `Certificate` resources (defaults `-20`, `0`, `1`, `2`, `3`). Override integers under **`argoSyncWaves`**.
+
+Waves fix apply ordering only; cert-manager still reconciles certificates asynchronously. If an intermediate appears before the root `Secret` is ready, Argo self-heal or a sync retry usually clears it. Disable waves for non-Argo Helm installs with **`argoSyncWaves.enabled: false`**.
+
+Placement-based intermediates still require a successful **`lookup`** on `PlacementDecision` at template time—waves do not create intermediates if Helm renders none.
+
 ## Intermediate CAs: Placement (default)
 
 With `intermediates.source: placement` (default), the chart uses Helm `lookup` on the **PlacementDecision** that matches **`global.placement`** — same namespace/name convention as `charts/acm-openshift-gitops-resources` (`Placement` `acm-openshift-gitops-placement` in `openshift-gitops`). Each entry in `status.decisions[].clusterName` becomes one intermediate (`mesh-intermediate-<clusterName>`).
