@@ -1,10 +1,10 @@
 # acm-openshift-gitops-resources
 
-Installs ManagedClusterSetBinding, Placement, and GitOpsCluster into `${GITOPS_NAMESPACE}` so the hub OpenShift GitOps / Argo CD instance registers spokes ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
+Installs ManagedClusterSetBinding, Placement, and (when `argoServer.cluster` is set) GitOpsCluster into `${GITOPS_NAMESPACE}` so the hub OpenShift GitOps / Argo CD instance registers spokes ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
 
 Applied by `platform-setup/002-acm-openshift-gitops.sh` after the OpenShift GitOps operator chart. Unless `--skip-argoc-cluster-secret-fix`, that script patches ACM Argo cluster `Secret`s in place: RHACM’s GitOps addon often writes `server` as an internal API hostname hub pods cannot resolve and/or omits usable `config`; the patch resets `server` from `ManagedCluster.spec.managedClusterClientConfigs[0].url` and `config` from local `oc` tokens. Re-run with `platform-setup/002-acm-openshift-gitops.sh --patch-argoc-cluster-secrets-only --context <hub>` after addon reconcile if secrets regress.
 
-Default `clusterSet` is `istio-scale-tests`. When `managedClusterSet.create` is `true` (default), the chart installs a ManagedClusterSet with `spec: {}` (empty spec per hub requirement) named `istio-scale-tests`, a ManagedClusterSetBinding with the same name pointing at that set, Placement with `spec.clusterSets: [istio-scale-tests]`, and GitOpsCluster referencing that Placement. Spokes must carry `cluster.open-cluster-management.io/clusterset=istio-scale-tests` (platform-setup/001 / `ACM_CLUSTER_SET`). Set `managedClusterSet.create: false` if the ManagedClusterSet already exists on the hub.
+Default `clusterSet` is `istio-scale-tests`. When `managedClusterSet.create` is `true` (default), the chart installs a ManagedClusterSet with `spec: {}` (empty spec per hub requirement) named `istio-scale-tests`, a ManagedClusterSetBinding with the same name pointing at that set, Placement with `spec.clusterSets: [istio-scale-tests]`, and (when `argoServer.cluster` is set) GitOpsCluster referencing that Placement. Spokes must carry `cluster.open-cluster-management.io/clusterset=istio-scale-tests` (platform-setup/001 / `ACM_CLUSTER_SET`). Set `managedClusterSet.create: false` if the ManagedClusterSet already exists on the hub.
 
 Placement sets `spec.clusterSets: [<clusterSet>]` so the controller selects that bound set; omitting `clusterSets` often yields status `NoManagedClusterSetBindings` / “No valid ManagedClusterSetBindings found”.
 
@@ -20,7 +20,7 @@ To select all clusters in the set (including the hub), set `placement.excludeHub
 
 ## Required values
 
-- `argoServer.cluster` — hub ManagedCluster name (`localClusterName`).
+- `argoServer.cluster` — hub ManagedCluster name (`MultiClusterHub.spec.localClusterName`). When empty, the chart still renders ManagedClusterSet(optional), ManagedClusterSetBinding, Placement, ConfigMap, and RBAC, but **skips** the `GitOpsCluster` CR so a first Argo sync from Git can succeed before `platform-setup/002` (or a manual parameter update) sets the hub cluster name.
 
 ## Example
 
