@@ -20,7 +20,7 @@ Placement-based intermediates still require a successful **`lookup`** on `Placem
 
 ## Argo CD: intermediates via ApplicationSet (recommended)
 
-Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-mesh-ca-intermediate-appset`**, which installs an **ApplicationSet** in **`open-cluster-management-global-set`** (same namespace as **`PlacementDecision`** **`global-decision-1`**) with the **[clusterDecisionResource](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster-Decision-Resource/)** generator. Each selected cluster gets an **Application** that deploys **`charts/hub-mesh-ca-intermediate`** on the hub with **`clusterName`** set.
+Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-mesh-ca-intermediate-appset`**, which installs an **ApplicationSet** in **`openshift-gitops`** (same namespace as **`charts/acm-openshift-gitops-resources`** **Placement** and the **`PlacementDecision`**, typically **`acm-openshift-gitops-placement-decision-1`**) with the **[clusterDecisionResource](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster-Decision-Resource/)** generator. Each selected cluster gets an **Application** that deploys **`charts/hub-mesh-ca-intermediate`** on the hub with **`clusterName`** set.
 
 The **`hub-mesh-ca`** Application under `charts/gitops-hub-apps/applications/` passes **`intermediates.enabled: false`** so this chart only manages the root CA chain; intermediate CAs come from the ApplicationSet.
 
@@ -28,7 +28,7 @@ The **`hub-mesh-ca`** Application under `charts/gitops-hub-apps/applications/` p
 
 With `intermediates.source: placement` (default), the chart uses Helm `lookup` on the **PlacementDecision** that matches **`global.placement`** — same namespace/name convention as `charts/acm-openshift-gitops-resources` (`Placement` `acm-openshift-gitops-placement` in `openshift-gitops`). Each entry in `status.decisions[].clusterName` becomes one intermediate (`mesh-intermediate-<clusterName>`).
 
-Override **`global.placement.placementDecisionName`** if your hub uses a different `PlacementDecision` metadata name (`oc get placementdecision -n openshift-gitops`). Defaults to **`global.placement.name`**.
+Override **`global.placement.placementDecisionName`** if your hub uses a different `PlacementDecision` metadata name (`oc get placementdecision -n openshift-gitops`). When unset, the chart looks up a `PlacementDecision` named from the placement resource name plus `-decision-1` (for example `acm-openshift-gitops-placement-decision-1` with the default `acm-openshift-gitops-placement` placement name).
 
 Optional **`intermediates.clusterOverrides`** keys off ManagedCluster name for `commonName`, `duration`, `secretName`, or `privateKey`.
 
