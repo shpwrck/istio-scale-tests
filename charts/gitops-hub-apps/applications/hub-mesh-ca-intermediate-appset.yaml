@@ -24,11 +24,11 @@ spec:
         - name: repo.revision
           value: main
         - name: placement.placementDecisionName
-          value: global-decision-1
+          value: acm-openshift-gitops-placement-decision-1
   destination:
     server: https://kubernetes.default.svc
-    # Must match PlacementDecision namespace (clusterDecisionResource resolves name here).
-    namespace: open-cluster-management-global-set
+    # Must match PlacementDecision namespace (same as charts/acm-openshift-gitops-resources Placement).
+    namespace: openshift-gitops
   syncPolicy:
     automated:
       prune: false
