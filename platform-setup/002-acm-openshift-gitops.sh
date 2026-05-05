@@ -9,7 +9,7 @@
 #
 # Usage (repo root):
 #   ./platform-setup/002-acm-openshift-gitops.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
-#       [--skip-acm-gitops-resources] [--skip-hub-app-of-apps] [--hub-app-repo-url URL] [--gitops-repo-token-file PATH] [--merge-kubeconfig]
+#       [--skip-acm-gitops-resources] [--skip-hub-app-of-apps] [--skip-argocd-applicationset-source-namespaces] [--hub-app-repo-url URL] [--gitops-repo-token-file PATH] [--merge-kubeconfig]
 #       [--local-cluster-name NAME] [--skip-argoc-cluster-secret-fix] [--gitops-namespace NS]
 #   ./platform-setup/002-acm-openshift-gitops.sh --patch-argoc-cluster-secrets-only --context NAME [--dry-run] [--gitops-namespace NS]
 set -euo pipefail
@@ -50,6 +50,7 @@ SKIP_ACM_GITOPS_RESOURCES=0
 SKIP_ARGO_CLUSTER_SECRET_FIX=0
 PATCH_ARGO_CLUSTER_SECRETS_ONLY=0
 SKIP_HUB_APP_OF_APPS=0
+SKIP_APPLICATION_SET_SOURCE_NS=0
 HUB_APP_REPO_URL_CLI=""
 HUB_APP_REPO_TOKEN_FILE_CLI=""
 MERGE_KUBECONFIG=0
@@ -107,7 +108,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   Full install:
-  1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize.
+  1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize; patch ArgoCD \`spec.applicationSet.sourceNamespaces\` (\`GITOPS_APPLICATION_SET_SOURCE_NAMESPACES\`) so ApplicationSet CRs can live outside the operand namespace when needed (explicit list per namespace).
   2a) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret (private Git over HTTPS or SSH) then Argo CD Application hub-gitops-root (directory sync of charts/gitops-hub-apps/applications for child Applications; skipped only if no repo URL after defaults: \`GITOPS_APP_REPO_URL\` defaults to \`git -C repo-root remote get-url origin\` when unset).
   2b) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success + gitops-addon feature label on each ManagedCluster in ACM_CLUSTER_SET (skipped when no spokes unless GITOPS_FORCE_ACM_GITOPS_WAITS=1).
   3) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
@@ -120,6 +121,7 @@ Usage: $(basename "$0") [options]
   --skip-wait                 Do not wait for CSV / Argo CD / GitOpsCluster readiness.
   --skip-acm-gitops-resources Install only the GitOps operator chart (skip ACM Placement / GitOpsCluster chart).
   --skip-hub-app-of-apps      Skip charts/gitops-hub-app-of-apps (Argo hub-gitops-root app-of-apps Application).
+  --skip-argocd-applicationset-source-namespaces  Do not patch ArgoCD.spec.applicationSet.sourceNamespaces (see GITOPS_APPLICATION_SET_SOURCE_NAMESPACES).
   --hub-app-repo-url URL      Override GITOPS_APP_REPO_URL for Argo CD Git source (HTTPS or SSH clone URL of this repo/fork).
   --gitops-repo-token-file PATH  Read HTTPS token from file (avoid env); stored only in the cluster Argo repo Secret. Same as GITOPS_APP_REPO_TOKEN_FILE.
   --skip-argoc-cluster-secret-fix  Skip step (3) after GitOpsCluster (RHACM may leave unusable internal *.control-plane URLs).
@@ -131,6 +133,7 @@ Usage: $(basename "$0") [options]
 
 Environment:
   GITOPS_NAMESPACE              Operand namespace / Argo CD + ACM CRs (default ${GITOPS_NAMESPACE}).
+  GITOPS_APPLICATION_SET_SOURCE_NAMESPACES  Comma-separated namespaces merged into ArgoCD.spec.applicationSet.sourceNamespaces (ApplicationSets outside openshift-gitops). Wildcards are not supported. Default from versions.env includes open-cluster-management-global-set. Set empty to skip patch.
   GITOPS_OPERATOR_NAMESPACE     openshift-gitops-operator Subscription (default ${GITOPS_OPERATOR_NAMESPACE}).
   GITOPS_OPERATOR_CHANNEL       OLM channel (default ${GITOPS_OPERATOR_CHANNEL} from versions.env).
   GITOPS_HELM_RELEASE           Helm release for openshift-gitops-operator chart (default ${GITOPS_HELM_RELEASE}).
@@ -189,6 +192,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--skip-hub-app-of-apps)
 		SKIP_HUB_APP_OF_APPS=1
+		shift
+		;;
+	--skip-argocd-applicationset-source-namespaces)
+		SKIP_APPLICATION_SET_SOURCE_NS=1
 		shift
 		;;
 	--hub-app-repo-url)
@@ -568,6 +575,48 @@ wait_for_argocd_stabilized() {
 	die "Argo CD did not stabilize in time; check: oc --context=$CTX describe argocd openshift-gitops -n ${GITOPS_NAMESPACE}"
 }
 
+# Merge GITOPS_APPLICATION_SET_SOURCE_NAMESPACES into ArgoCD.spec.applicationSet.sourceNamespaces (Red Hat OpenShift GitOps — explicit list only; no wildcards).
+patch_argocd_applicationset_source_namespaces() {
+	if ((SKIP_APPLICATION_SET_SOURCE_NS)); then
+		echo "Skipping ArgoCD applicationSet.sourceNamespaces patch (--skip-argocd-applicationset-source-namespaces)."
+		return 0
+	fi
+	local csv="${GITOPS_APPLICATION_SET_SOURCE_NAMESPACES:-}"
+	if [[ -z "${csv// }" ]]; then
+		echo "GITOPS_APPLICATION_SET_SOURCE_NAMESPACES unset or empty; skip ApplicationSet source namespace patch."
+		return 0
+	fi
+	if ! oc --context="$CTX" get argocd openshift-gitops -n "${GITOPS_NAMESPACE}" &>/dev/null; then
+		echo "warn: ArgoCD openshift-gitops not found in ${GITOPS_NAMESPACE}; skip ApplicationSet sourceNamespaces patch." >&2
+		return 0
+	fi
+	local add_json patch_compact
+	add_json="$(echo "$csv" | tr ',' '\n' | sed '/^$/d' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c 'map(select(length > 0))')"
+	patch_compact="$(oc --context="$CTX" get argocd openshift-gitops -n "${GITOPS_NAMESPACE}" -o json \
+		| jq --argjson add "$add_json" '
+			.spec.applicationSet |= (. // {})
+			| (.spec.applicationSet.sourceNamespaces // []) as $cur
+			| .spec.applicationSet.sourceNamespaces = ($cur + $add | unique | sort)
+			| {spec: {applicationSet: {sourceNamespaces: .spec.applicationSet.sourceNamespaces}}}
+		' | jq -c .)" || die "failed to build ArgoCD applicationSet.sourceNamespaces patch"
+	if [[ -z "$patch_compact" || "$patch_compact" == "null" ]]; then
+		die "empty patch for applicationSet.sourceNamespaces"
+	fi
+	if ((DRY_RUN)); then
+		echo "--- dry-run: oc patch argocd openshift-gitops --type merge (applicationSet.sourceNamespaces) ---"
+		echo "$patch_compact" | jq .
+		return 0
+	fi
+	oc --context="$CTX" patch argocd openshift-gitops -n "${GITOPS_NAMESPACE}" --type merge -p "$patch_compact" \
+		|| die "patch argocd applicationSet.sourceNamespaces failed"
+	echo "Patched ArgoCD spec.applicationSet.sourceNamespaces (merged: $(echo "$patch_compact" | jq -r '.spec.applicationSet.sourceNamespaces | join(",")'))."
+	if oc --context="$CTX" get deployment openshift-gitops-applicationset-controller -n "${GITOPS_NAMESPACE}" &>/dev/null; then
+		echo "Restarting openshift-gitops-applicationset-controller to pick up ApplicationSet namespace scope..."
+		oc --context="$CTX" rollout restart deployment openshift-gitops-applicationset-controller -n "${GITOPS_NAMESPACE}" >/dev/null \
+			|| echo "warn: rollout restart openshift-gitops-applicationset-controller failed (non-fatal)." >&2
+	fi
+}
+
 helm_gitops_operator_install() {
 	local -a cmd=(
 		helm --kube-context "$CTX" upgrade --install "$GITOPS_HELM_RELEASE" "$CHART_GITOPS_OPERATOR"
@@ -788,6 +837,7 @@ if [[ -z "${ACM_LOCAL_CLUSTER_NAME}" ]]; then
 fi
 
 if ((PATCH_ARGO_CLUSTER_SECRETS_ONLY == 1)); then
+	patch_argocd_applicationset_source_namespaces
 	patch_acm_argoc_managed_cluster_secrets "$CTX" "$GITOPS_NAMESPACE" "$DRY_RUN"
 	exit 0
 fi
@@ -815,6 +865,8 @@ echo "--- 1) Install OpenShift GitOps operator (${GITOPS_HELM_RELEASE}) ---"
 helm_gitops_operator_install
 
 if ((DRY_RUN)); then
+	echo "--- dry-run: ApplicationSet source namespaces (ArgoCD patch if instance exists) ---"
+	patch_argocd_applicationset_source_namespaces
 	echo "--- dry-run: ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
 	if ((SKIP_ACM_GITOPS_RESOURCES == 0)); then
 		helm_acm_gitops_resources_install
@@ -828,6 +880,10 @@ fi
 if ((SKIP_WAIT)); then
 	echo "Skipping readiness waits (--skip-wait)."
 	ensure_gitops_operand_namespace
+	if oc --context="$CTX" get argocd openshift-gitops -n "${GITOPS_NAMESPACE}" &>/dev/null; then
+		echo "--- 1b) Patch ArgoCD ApplicationSet source namespaces ---"
+		patch_argocd_applicationset_source_namespaces
+	fi
 	echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) (requires Application CRD from OpenShift GitOps) ---"
 	if oc --context="$CTX" get crd applications.argoproj.io &>/dev/null; then
 		helm_hub_app_of_apps_install
@@ -844,6 +900,9 @@ fi
 wait_for_gitops_csv_succeeded
 ensure_gitops_operand_namespace
 wait_for_argocd_stabilized
+
+echo "--- 1b) Patch ArgoCD ApplicationSet source namespaces ---"
+patch_argocd_applicationset_source_namespaces
 
 echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
 helm_hub_app_of_apps_install
