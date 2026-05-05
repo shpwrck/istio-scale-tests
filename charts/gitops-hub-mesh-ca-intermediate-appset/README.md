@@ -4,7 +4,7 @@ Installs:
 
 - **ConfigMap** — duck-type definition for Argo CD ApplicationSet [clusterDecisionResource](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster-Decision-Resource/) (OCM `PlacementDecision`).
 - **Role** / **RoleBinding** — lets **`openshift-gitops-applicationset-controller`** read `placementdecisions` in **`gitopsNamespace`**.
-- **ApplicationSet** — one **Application** per cluster in the PlacementDecision matching label **`cluster.open-cluster-management.io/placement=<placement.name>`** (default same Placement as `charts/acm-openshift-gitops-resources`), each syncing **`charts/hub-mesh-ca-intermediate`** with **`clusterName`** set.
+- **ApplicationSet** — **clusterDecisionResource** targets one **PlacementDecision** by **`metadata.name`** (`placement.placementDecisionName`, default **`global-decision-1`**) so decisions include the hub cluster as well as spokes; each entry syncs **`charts/hub-mesh-ca-intermediate`** with **`clusterName`** set.
 
 Requires **`repo.url`** (same fork Argo uses). Hub **`hub-mesh-ca`** Application should set **`intermediates.enabled=false`** so root CA stays in `charts/hub-mesh-ca` and intermediates come only from this ApplicationSet.
 
