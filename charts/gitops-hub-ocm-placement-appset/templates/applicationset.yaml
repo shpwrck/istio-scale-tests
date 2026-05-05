@@ -30,13 +30,17 @@ spec:
         repoURL: {{ required "repo.url must be set (same Git URL Argo uses for this repo)" .Values.repo.url | quote }}
         targetRevision: {{ .Values.repo.revision | quote }}
         path: {{ .Values.template.source.path | quote }}
-{{- $helm := .Values.template.source.helm }}
-{{- if or $helm.releaseName $helm.parameters }}
+{{- $helm := .Values.template.source.helm | default dict }}
+{{- if or (and (eq $mode "clusterName") $helm.releaseName) (eq $mode "inClusterServer") ($helm.parameters) }}
         helm:
-{{- if $helm.releaseName }}
+{{- if and (eq $mode "clusterName") $helm.releaseName }}
           releaseName: {{ $helm.releaseName | quote }}
 {{- end }}
-{{- if $helm.parameters }}
+{{- if eq $mode "inClusterServer" }}
+          parameters:
+            - name: clusterName
+              value: '{{ "{{clusterName}}" }}'
+{{- else if $helm.parameters }}
           parameters:
 {{- range $helm.parameters }}
             - name: {{ .name | quote }}

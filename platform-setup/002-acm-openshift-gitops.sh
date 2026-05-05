@@ -747,26 +747,25 @@ wait_and_patch_hub_acm_gitops_resources_application() {
 	if ! oc --context="$CTX" get applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" &>/dev/null; then
 		die "timeout waiting for Application hub-acm-openshift-gitops-resources in ${GITOPS_NAMESPACE} (ensure hub-gitops-root can sync charts/gitops-hub-apps/applications)."
 	fi
-	local tmp cur addon
+	local params_json patch_json addon
 	addon="$(gitops_addon_helm_bool)"
-	tmp="$(mktemp)"
-	cur="$(oc --context="$CTX" get applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" -o json)"
-	jq --arg gitopsNs "$GITOPS_NAMESPACE" \
+	params_json="$(jq -n \
+		--arg gitopsNs "$GITOPS_NAMESPACE" \
 		--arg cs "$ACM_CLUSTER_SET" \
 		--arg pn "$GITOPS_PLACEMENT_NAME" \
 		--arg gn "$GITOPS_CLUSTER_CR_NAME" \
 		--arg cluster "$ACM_LOCAL_CLUSTER_NAME" \
 		--arg addon "$addon" \
-		'.spec.source.helm.parameters = [
+		'[
 			{name:"gitopsNamespace",value:$gitopsNs},
 			{name:"clusterSet",value:$cs},
 			{name:"placement.name",value:$pn},
 			{name:"gitopsCluster.name",value:$gn},
 			{name:"argoServer.cluster",value:$cluster},
 			{name:"gitopsAddon.enabled",value:$addon}
-		]' <<<"$cur" > "$tmp"
-	oc --context="$CTX" apply -f "$tmp"
-	rm -f "$tmp"
+		]')"
+	patch_json="$(jq -n --argjson p "$params_json" '[{"op":"replace","path":"/spec/source/helm/parameters","value":$p}]')"
+	oc --context="$CTX" patch applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" --type=json -p "$patch_json"
 	echo "Patched hub-acm-openshift-gitops-resources Helm parameters (argoServer.cluster=${ACM_LOCAL_CLUSTER_NAME})."
 }
 

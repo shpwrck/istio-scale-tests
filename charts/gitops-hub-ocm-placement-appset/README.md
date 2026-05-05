@@ -9,6 +9,8 @@ Preset value files:
 
 Override `repo.url` / `placement.name` / `generatorConfigMap` / RBAC names via Helm or Argo `parameters` as needed.
 
+`values-mesh-ca-intermediate.yaml` uses `destination.mode: inClusterServer`; the chart template emits the `clusterName` Helm parameter with a literal `{{clusterName}}` for ApplicationSet substitution (do not copy that string into another values file with `| quote` in a custom template). Per-cluster presets use `destination.mode: clusterName` and set `template.source.helm.releaseName` only for that mode so hub-only installs do not inherit an OLM `releaseName` from chart defaults.
+
 ```bash
 helm upgrade --install gitops-hub-ocm-placement-es ./charts/gitops-hub-ocm-placement-appset \
   --namespace openshift-gitops \
