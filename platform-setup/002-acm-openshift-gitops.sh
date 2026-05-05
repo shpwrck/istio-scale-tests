@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, then apply RHACM GitOps wiring (Helm):
+# Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, apply hub Argo “app of apps” + cert-manager (Helm), then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
 # Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
-# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo Helm apps: `charts/gitops-hub-app-of-apps`, `charts/cert-manager-operator`, `charts/gitops-hub-apps`. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
 # Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).
 #
 # Usage (repo root):
 #   ./platform-setup/002-acm-openshift-gitops.sh [--context NAME] [--terraform-dir DIR] [--dry-run] [--skip-wait]
-#       [--skip-acm-gitops-resources] [--merge-kubeconfig] [--local-cluster-name NAME]
-#       [--skip-argoc-cluster-secret-fix] [--gitops-namespace NS]
+#       [--skip-acm-gitops-resources] [--skip-hub-app-of-apps] [--hub-app-repo-url URL] [--gitops-repo-token-file PATH] [--merge-kubeconfig]
+#       [--local-cluster-name NAME] [--skip-argoc-cluster-secret-fix] [--gitops-namespace NS]
 #   ./platform-setup/002-acm-openshift-gitops.sh --patch-argoc-cluster-secrets-only --context NAME [--dry-run] [--gitops-namespace NS]
 set -euo pipefail
 
@@ -20,6 +20,28 @@ source "${ROOT}/config/versions.env"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# Map common SSH clone URLs to HTTPS so Argo CD on-cluster can fetch without SSH keys.
+normalize_git_clone_url_to_https() {
+	local u="$1"
+	case "$u" in
+	git@github.com:*)
+		echo "https://github.com/${u#git@github.com:}"
+		return 0
+		;;
+	ssh://git@github.com/*)
+		echo "https://github.com/${u#ssh://git@github.com/}"
+		return 0
+		;;
+	git@gitlab.com:*)
+		echo "https://gitlab.com/${u#git@gitlab.com:}"
+		return 0
+		;;
+	*)
+		echo "$u"
+		;;
+	esac
+}
+
 CONTEXT=""
 LOCAL_CLUSTER_NAME_OVERRIDE=""
 DRY_RUN=0
@@ -27,6 +49,9 @@ SKIP_WAIT=0
 SKIP_ACM_GITOPS_RESOURCES=0
 SKIP_ARGO_CLUSTER_SECRET_FIX=0
 PATCH_ARGO_CLUSTER_SECRETS_ONLY=0
+SKIP_HUB_APP_OF_APPS=0
+HUB_APP_REPO_URL_CLI=""
+HUB_APP_REPO_TOKEN_FILE_CLI=""
 MERGE_KUBECONFIG=0
 TF_DIR="${ACM_TERRAFORM_DIR:-${ROOT}/terraform/rosa-hcp}"
 TF_LOGIN_SCRIPT="${ROOT}/terraform/scripts/001-oc-login-merge-kubeconfig.sh"
@@ -37,9 +62,24 @@ GITOPS_NAMESPACE="${GITOPS_NAMESPACE:-openshift-gitops}"
 GITOPS_OPERATOR_NAMESPACE="${GITOPS_OPERATOR_NAMESPACE:-openshift-operators}"
 GITOPS_HELM_RELEASE="${GITOPS_HELM_RELEASE:-openshift-gitops-operator}"
 GITOPS_RESOURCES_RELEASE="${GITOPS_RESOURCES_RELEASE:-acm-openshift-gitops-resources}"
+GITOPS_HUB_APP_OF_APPS_RELEASE="${GITOPS_HUB_APP_OF_APPS_RELEASE:-gitops-hub-app-of-apps}"
+GITOPS_APP_REPO_URL="${GITOPS_APP_REPO_URL:-}"
+GITOPS_APP_REPO_REVISION="${GITOPS_APP_REPO_REVISION:-main}"
+
+# When unset, use this clone's origin URL so hub Argo Applications point at the same repo.
+# Map SSH remotes to HTTPS unless using SSH deploy keys (GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE or GITOPS_APP_REPO_PREFER_SSH=1).
+if [[ -z "${GITOPS_APP_REPO_URL}" ]] && git -C "${ROOT}" rev-parse --git-dir &>/dev/null; then
+	GITOPS_APP_REPO_URL="$(git -C "${ROOT}" remote get-url origin 2>/dev/null || true)"
+	if [[ "${GITOPS_APP_REPO_PREFER_SSH:-0}" != "1" && -z "${GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE:-}" ]]; then
+		GITOPS_APP_REPO_URL="$(normalize_git_clone_url_to_https "${GITOPS_APP_REPO_URL}")"
+	fi
+fi
 
 CHART_GITOPS_OPERATOR="${ROOT}/charts/openshift-gitops-operator"
 CHART_ACM_GITOPS_RESOURCES="${ROOT}/charts/acm-openshift-gitops-resources"
+CHART_HUB_APP_OF_APPS="${ROOT}/charts/gitops-hub-app-of-apps"
+CHART_CERT_MANAGER_OPERATOR="${ROOT}/charts/cert-manager-operator"
+CHART_GITOPS_HUB_APPS="${ROOT}/charts/gitops-hub-apps"
 
 ACM_CLUSTER_SET="${ACM_CLUSTER_SET:-istio-scale-tests}"
 GITOPS_PLACEMENT_NAME="${GITOPS_PLACEMENT_NAME:-acm-openshift-gitops-placement}"
@@ -65,7 +105,8 @@ Usage: $(basename "$0") [options]
 
   Full install:
   1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize.
-  2) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success.
+  2a) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret (private Git over HTTPS or SSH) then Argo CD Applications for hub app-of-apps root + cert-manager operator manifests (skipped only if no repo URL after defaults: \`GITOPS_APP_REPO_URL\` defaults to \`git -C repo-root remote get-url origin\` when unset).
+  2b) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success.
   3) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
 
   Patch only (e.g. after ACM/GitOps reconciles secrets): --patch-argoc-cluster-secrets-only --context HUB
@@ -75,6 +116,9 @@ Usage: $(basename "$0") [options]
   --dry-run                   Helm client dry-run for charts; with --patch-argoc-cluster-secrets-only, print patches only.
   --skip-wait                 Do not wait for CSV / Argo CD / GitOpsCluster readiness.
   --skip-acm-gitops-resources Install only the GitOps operator chart (skip ACM Placement / GitOpsCluster chart).
+  --skip-hub-app-of-apps      Skip charts/gitops-hub-app-of-apps (Argo app-of-apps root + cert-manager operator Application).
+  --hub-app-repo-url URL      Override GITOPS_APP_REPO_URL for Argo CD Git source (HTTPS or SSH clone URL of this repo/fork).
+  --gitops-repo-token-file PATH  Read HTTPS token from file (avoid env); stored only in the cluster Argo repo Secret. Same as GITOPS_APP_REPO_TOKEN_FILE.
   --skip-argoc-cluster-secret-fix  Skip step (3) after GitOpsCluster (RHACM may leave unusable internal *.control-plane URLs).
   --patch-argoc-cluster-secrets-only  Only patch ACM *-application-manager-cluster Secrets; requires hub --context (and spoke contexts in kubeconfig).
   --gitops-namespace NS       Operand namespace / Argo CD + ACM CRs (default ${GITOPS_NAMESPACE}).
@@ -88,6 +132,16 @@ Environment:
   GITOPS_OPERATOR_CHANNEL       OLM channel (default ${GITOPS_OPERATOR_CHANNEL} from versions.env).
   GITOPS_HELM_RELEASE           Helm release for openshift-gitops-operator chart (default ${GITOPS_HELM_RELEASE}).
   GITOPS_RESOURCES_RELEASE       Helm release for acm-openshift-gitops-resources chart (default ${GITOPS_RESOURCES_RELEASE}).
+  GITOPS_HUB_APP_OF_APPS_RELEASE Helm release for gitops-hub-app-of-apps chart (default ${GITOPS_HUB_APP_OF_APPS_RELEASE}).
+  GITOPS_APP_REPO_URL           Git URL Argo CD uses for hub Application sources (HTTPS or SSH). When unset, defaults to this repository's \`origin\` remote (\`git remote get-url origin\` from repo root); SSH URLs are mapped to HTTPS for github.com / gitlab.com unless GITOPS_APP_REPO_PREFER_SSH=1 or GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE is set.
+  GITOPS_APP_REPO_REVISION      Branch/tag/commit for hub Applications (default ${GITOPS_APP_REPO_REVISION}).
+  GITOPS_APP_REPO_CREDENTIALS_SECRET_NAME  Name of Secret with label argocd.argoproj.io/secret-type=repository (default gitops-hub-app-repo).
+  GITOPS_APP_REPO_USERNAME      HTTPS username (optional; defaults to git when using PAT/token).
+  GITOPS_APP_REPO_PASSWORD      HTTPS password or PAT (prefer GITOPS_APP_REPO_TOKEN_FILE for CI).
+  GITOPS_APP_REPO_TOKEN         Same as password for PAT-only flows.
+  GITOPS_APP_REPO_TOKEN_FILE    Path to file containing token or PAT (newline trimmed).
+  GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE  Path to SSH private key for Git over SSH; set GITOPS_APP_REPO_URL to matching SSH URL (or GITOPS_APP_REPO_PREFER_SSH=1 with SSH origin).
+  GITOPS_APP_REPO_PREFER_SSH    When 1, default origin URL from git is not rewritten to HTTPS (use with SSH deploy keys).
   ACM_CLUSTER_SET               ManagedClusterSet for ManagedClusterSetBinding (default ${ACM_CLUSTER_SET}).
   GITOPS_PLACEMENT_NAME         Placement metadata.name → Helm --set placement.name (default ${GITOPS_PLACEMENT_NAME}).
   GITOPS_CLUSTER_CR_NAME        GitOpsCluster metadata.name → Helm --set gitopsCluster.name (default ${GITOPS_CLUSTER_CR_NAME}).
@@ -128,6 +182,20 @@ while [[ $# -gt 0 ]]; do
 	--skip-acm-gitops-resources)
 		SKIP_ACM_GITOPS_RESOURCES=1
 		shift
+		;;
+	--skip-hub-app-of-apps)
+		SKIP_HUB_APP_OF_APPS=1
+		shift
+		;;
+	--hub-app-repo-url)
+		[[ -n "${2:-}" ]] || die "--hub-app-repo-url requires a value"
+		HUB_APP_REPO_URL_CLI="$2"
+		shift 2
+		;;
+	--gitops-repo-token-file)
+		[[ -n "${2:-}" ]] || die "--gitops-repo-token-file requires a path"
+		HUB_APP_REPO_TOKEN_FILE_CLI="$2"
+		shift 2
 		;;
 	--skip-argoc-cluster-secret-fix)
 		SKIP_ARGO_CLUSTER_SECRET_FIX=1
@@ -227,6 +295,135 @@ normalize_url() {
 	local u="$1"
 	u="${u%/}"
 	echo "$u"
+}
+
+# Argo CD matches repository Secrets to Application.spec.source.repoURL by URL prefix — use the same normalized URL for both.
+normalize_git_repo_url_for_argo() {
+	local u="$1"
+	while [[ "$u" == */ ]]; do
+		u="${u%/}"
+	done
+	case "$u" in
+	https://github.com/* | http://github.com/* | https://gitlab.com/* | http://gitlab.com/*)
+		if [[ "$u" == *.git ]]; then
+			u="${u%.git}"
+		fi
+		;;
+	esac
+	echo "$u"
+}
+
+# Trim PAT/password for GitHub/GitLab (editor BOM, trailing newline/spaces break auth; private repos then return "not found").
+trim_git_https_secret() {
+	local s="$1"
+	# UTF-8 BOM
+	if [[ "${s:0:3}" == $'\xEF\xBB\xBF' ]]; then
+		s="${s:3}"
+	fi
+	s="${s#"${s%%[![:space:]]*}"}"
+	s="${s%"${s##*[![:space:]]}"}"
+	printf '%s' "$s"
+}
+
+resolve_gitops_app_repo_https_password() {
+	local raw="" tf=""
+	if [[ -n "${GITOPS_APP_REPO_TOKEN:-}" ]]; then
+		raw="${GITOPS_APP_REPO_TOKEN}"
+	elif [[ -n "${GITOPS_APP_REPO_PASSWORD:-}" ]]; then
+		raw="${GITOPS_APP_REPO_PASSWORD}"
+	else
+		tf="${HUB_APP_REPO_TOKEN_FILE_CLI:-}"
+		[[ -n "$tf" ]] || tf="${GITOPS_APP_REPO_TOKEN_FILE:-}"
+		if [[ -n "$tf" ]]; then
+			[[ -f "$tf" ]] || die "GITOPS_APP_REPO_TOKEN_FILE not a readable file: ${tf}"
+			raw="$(<"$tf")"
+		fi
+	fi
+	[[ -z "$raw" ]] && return 0
+	trim_git_https_secret "$(printf '%s' "$raw" | tr -d '\n\r')"
+}
+
+# Repo-server caches credentials; pick up new or fixed repository Secrets without waiting for a sync interval.
+restart_openshift_gitops_repo_server() {
+	if ((DRY_RUN)); then
+		return 0
+	fi
+	if ! oc --context "$CTX" get deployment openshift-gitops-repo-server -n "$GITOPS_NAMESPACE" &>/dev/null; then
+		return 0
+	fi
+	echo "Restarting openshift-gitops-repo-server so Argo CD reloads repository credentials..."
+	oc --context "$CTX" rollout restart deployment openshift-gitops-repo-server -n "$GITOPS_NAMESPACE" >/dev/null \
+		|| true
+}
+
+# Ref: https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#repositories
+ensure_hub_argoc_git_repo_credentials() {
+	local repo_url="$1"
+	local secret_name="${GITOPS_APP_REPO_CREDENTIALS_SECRET_NAME:-gitops-hub-app-repo}"
+	local ssh_file="${GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE:-}"
+	local pass=""
+	local user=""
+
+	repo_url="$(normalize_git_repo_url_for_argo "$repo_url")"
+
+	pass="$(resolve_gitops_app_repo_https_password)"
+	user="${GITOPS_APP_REPO_USERNAME:-}"
+
+	if [[ -n "$ssh_file" && -n "$pass" ]]; then
+		die "use either GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE (SSH) or GITOPS_APP_REPO_TOKEN / GITOPS_APP_REPO_PASSWORD / token file (HTTPS), not both"
+	fi
+	if [[ -z "$ssh_file" && -z "$pass" ]]; then
+		return 0
+	fi
+
+	if [[ -n "$ssh_file" ]]; then
+		[[ -f "$ssh_file" ]] || die "GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE is not a readable file: ${ssh_file}"
+		case "$repo_url" in
+		git@* | ssh://*) ;;
+		*)
+			echo "warn: repo URL does not look like SSH — Argo CD repository Secrets must use the same URL form as Application.spec.source.repoURL; set GITOPS_APP_REPO_URL or GITOPS_APP_REPO_PREFER_SSH=1." >&2
+			;;
+		esac
+		if ((DRY_RUN)); then
+			echo "dry-run: would create/update Secret ${secret_name} (Argo CD repo credentials, SSH key from file, url=${repo_url})."
+			return 0
+		fi
+		echo "Applying Argo CD repository credentials Secret ${secret_name} (SSH key, namespace ${GITOPS_NAMESPACE})..."
+		oc --context "$CTX" create secret generic "$secret_name" -n "$GITOPS_NAMESPACE" \
+			--from-literal=type=git \
+			--from-literal=url="$repo_url" \
+			--from-file=sshPrivateKey="$ssh_file" \
+			--dry-run=client -o yaml | oc --context "$CTX" apply -f -
+		oc --context "$CTX" label secret "$secret_name" -n "$GITOPS_NAMESPACE" \
+			argocd.argoproj.io/secret-type=repository --overwrite
+		restart_openshift_gitops_repo_server
+		return 0
+	fi
+
+	[[ -n "$pass" ]] || return 0
+	[[ -n "$user" ]] || user="git"
+	if ((DRY_RUN)); then
+		echo "dry-run: would create/update Secret ${secret_name} (Argo CD repo credentials, HTTPS token/password, url=${repo_url})."
+		return 0
+	fi
+	echo "Applying Argo CD repository credentials Secret ${secret_name} (HTTPS token, namespace ${GITOPS_NAMESPACE})..."
+	oc --context "$CTX" create secret generic "$secret_name" -n "$GITOPS_NAMESPACE" \
+		--from-literal=type=git \
+		--from-literal=url="$repo_url" \
+		--from-literal=username="$user" \
+		--from-literal=password="$pass" \
+		--dry-run=client -o yaml | oc --context "$CTX" apply -f -
+	oc --context "$CTX" label secret "$secret_name" -n "$GITOPS_NAMESPACE" \
+		argocd.argoproj.io/secret-type=repository --overwrite
+	restart_openshift_gitops_repo_server
+}
+
+resolve_gitops_app_repo_url() {
+	local out="${HUB_APP_REPO_URL_CLI:-}"
+	if [[ -z "$out" ]]; then
+		out="${GITOPS_APP_REPO_URL:-}"
+	fi
+	echo "$out"
 }
 
 context_for_server() {
@@ -402,6 +599,52 @@ helm_acm_gitops_resources_install() {
 	"${cmd[@]}"
 }
 
+verify_hub_argoc_applications() {
+	local ns="$1"
+	if ! oc --context="$CTX" get crd applications.argoproj.io &>/dev/null; then
+		echo "warn: applications.argoproj.io CRD not found yet (OpenShift GitOps still installing?)." >&2
+		return 0
+	fi
+	echo "Argo CD Applications in ${ns}:"
+	oc --context="$CTX" get applications.argoproj.io -n "$ns" -o wide 2>/dev/null || true
+}
+
+helm_hub_app_of_apps_install() {
+	local repo_url
+	repo_url="$(resolve_gitops_app_repo_url)"
+	if ((SKIP_HUB_APP_OF_APPS)); then
+		echo "Skipping hub app-of-apps Helm chart (--skip-hub-app-of-apps)."
+		return 0
+	fi
+	[[ -d "$CHART_HUB_APP_OF_APPS" ]] || die "chart not found: ${CHART_HUB_APP_OF_APPS}"
+	if [[ -z "$repo_url" ]]; then
+		echo "" >&2
+		echo "NOTICE: hub app-of-apps (Argo CD Applications) was skipped — no Git URL for spec.source.repoURL." >&2
+		echo "  Set: export GITOPS_APP_REPO_URL=\"https://github.com/ORG/istio-scale-tests.git\"" >&2
+		echo "  Or:  ./platform-setup/002-acm-openshift-gitops.sh --hub-app-repo-url \"https://...\"" >&2
+		echo "  Or run this script from a git clone so \`git remote get-url origin\` resolves (SSH URLs are mapped to HTTPS for github.com / gitlab.com)." >&2
+		echo "" >&2
+		return 0
+	fi
+	repo_url="$(normalize_git_repo_url_for_argo "$repo_url")"
+	echo "Using Git repo URL for hub Application sources: ${repo_url}"
+	ensure_hub_argoc_git_repo_credentials "$repo_url"
+	local -a cmd=(
+		helm --kube-context "$CTX" upgrade --install "$GITOPS_HUB_APP_OF_APPS_RELEASE" "$CHART_HUB_APP_OF_APPS"
+		--namespace "$GITOPS_NAMESPACE"
+		--set gitopsNamespace="$GITOPS_NAMESPACE"
+		--set-string repo.url="$repo_url"
+		--set-string repo.revision="$GITOPS_APP_REPO_REVISION"
+	)
+	if ((DRY_RUN)); then
+		cmd+=(--dry-run=client)
+	fi
+	"${cmd[@]}"
+	if ((DRY_RUN == 0)); then
+		verify_hub_argoc_applications "$GITOPS_NAMESPACE"
+	fi
+}
+
 wait_for_gitopscluster_ready() {
 	local deadline=$((SECONDS + GITOPS_CLUSTER_READY_WAIT_SEC))
 	echo "Waiting for GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} (up to ${GITOPS_CLUSTER_READY_WAIT_SEC}s)..."
@@ -445,6 +688,10 @@ lint_charts() {
 	helm lint "$CHART_GITOPS_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_GITOPS_OPERATOR}"
 	helm lint "$CHART_ACM_GITOPS_RESOURCES" --set argoServer.cluster=helm-lint-placeholder >/dev/null \
 		|| die "helm lint failed: ${CHART_ACM_GITOPS_RESOURCES}"
+	helm lint "$CHART_CERT_MANAGER_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_CERT_MANAGER_OPERATOR}"
+	helm lint "$CHART_GITOPS_HUB_APPS" >/dev/null || die "helm lint failed: ${CHART_GITOPS_HUB_APPS}"
+	helm lint "$CHART_HUB_APP_OF_APPS" --set repo.url=https://example.com/org/repo.git >/dev/null \
+		|| die "helm lint failed: ${CHART_HUB_APP_OF_APPS}"
 }
 
 # ------------------------------------------------------------------------------
@@ -478,6 +725,9 @@ fi
 
 [[ -d "$CHART_GITOPS_OPERATOR" ]] || die "chart not found: ${CHART_GITOPS_OPERATOR}"
 [[ -d "$CHART_ACM_GITOPS_RESOURCES" ]] || die "chart not found: ${CHART_ACM_GITOPS_RESOURCES}"
+[[ -d "$CHART_HUB_APP_OF_APPS" ]] || die "chart not found: ${CHART_HUB_APP_OF_APPS}"
+[[ -d "$CHART_CERT_MANAGER_OPERATOR" ]] || die "chart not found: ${CHART_CERT_MANAGER_OPERATOR}"
+[[ -d "$CHART_GITOPS_HUB_APPS" ]] || die "chart not found: ${CHART_GITOPS_HUB_APPS}"
 
 echo "Hub context: ${CTX}"
 echo "GitOps operator Subscription namespace: ${GITOPS_OPERATOR_NAMESPACE}"
@@ -495,16 +745,25 @@ if ((DRY_RUN)); then
 	if ((SKIP_ACM_GITOPS_RESOURCES == 0)); then
 		helm_acm_gitops_resources_install
 	fi
+	echo "--- dry-run: hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
+	helm_hub_app_of_apps_install
 	echo "dry-run: done."
 	exit 0
 fi
 
 if ((SKIP_WAIT)); then
 	echo "Skipping readiness waits (--skip-wait)."
+	ensure_gitops_operand_namespace
+	echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) (requires Application CRD from OpenShift GitOps) ---"
+	if oc --context="$CTX" get crd applications.argoproj.io &>/dev/null; then
+		helm_hub_app_of_apps_install
+	else
+		echo "warn: applications.argoproj.io CRD not ready yet — hub app-of-apps not installed. Re-run 002 without --skip-wait after the GitOps CSV succeeds, or set GITOPS_APP_REPO_URL and apply ${CHART_HUB_APP_OF_APPS} manually." >&2
+	fi
 	if ((SKIP_ACM_GITOPS_RESOURCES == 0)); then
-		ensure_gitops_operand_namespace
 		helm_acm_gitops_resources_install
 	fi
+	echo "Done (--skip-wait)."
 	exit 0
 fi
 
@@ -512,13 +771,16 @@ wait_for_gitops_csv_succeeded
 ensure_gitops_operand_namespace
 wait_for_argocd_stabilized
 
+echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
+helm_hub_app_of_apps_install
+
 if ((SKIP_ACM_GITOPS_RESOURCES)); then
 	echo "Skipping ACM GitOps Helm chart (--skip-acm-gitops-resources)."
-	echo "Done (operator only)."
+	echo "Done (operator + hub GitOps Applications only)."
 	exit 0
 fi
 
-echo "--- 2) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
+echo "--- 2b) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
 helm_acm_gitops_resources_install
 
 wait_for_gitopscluster_ready

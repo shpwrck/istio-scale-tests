@@ -1,0 +1,5 @@
+apiVersion: v2
+name: cert-manager-operator
+description: OLM install for cert-manager Operator for Red Hat OpenShift (hub Argo CD sync).
+type: application
+version: 0.1.0

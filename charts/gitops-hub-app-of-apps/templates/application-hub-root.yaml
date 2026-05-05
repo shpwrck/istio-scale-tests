@@ -1,0 +1,25 @@
+{{- if and .Values.appOfApps.enabled .Values.repo.url }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-gitops-root
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-app-of-apps
+    app.kubernetes.io/component: app-of-apps-root
+spec:
+  project: default
+  source:
+    repoURL: {{ .Values.repo.url | quote }}
+    targetRevision: {{ .Values.repo.revision | quote }}
+    path: {{ .Values.repo.chartPathHubApps | quote }}
+    helm:
+      releaseName: {{ .Values.repo.helm.releaseName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.gitopsNamespace | quote }}
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.automated.prune }}
+      selfHeal: {{ .Values.syncPolicy.automated.selfHeal }}
+{{- end }}
