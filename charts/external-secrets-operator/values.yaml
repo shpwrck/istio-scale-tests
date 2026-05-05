@@ -1,0 +1,13 @@
+# Operand / OLM namespace for the Red Hat External Secrets operator Subscription.
+namespace: external-secrets-operator
+
+operatorGroup:
+  name: openshift-external-secrets-operator
+
+subscription:
+  name: openshift-external-secrets-operator
+  channel: tech-preview-v0.1
+  package: openshift-external-secrets-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

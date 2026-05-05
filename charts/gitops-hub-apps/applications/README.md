@@ -6,4 +6,6 @@ Adding a new app: commit a new `Application` manifest here with `metadata.namesp
 
 **`hub-mesh-ca-intermediate-appset`** installs the ApplicationSet in **`openshift-gitops`**: **`clusterDecisionResource`** uses **`acm-openshift-gitops-placement-decision-1`** (spokes); a **`list`** generator adds a static **`local-cluster`** hub app. Override **`placement.placementDecisionName`** / **`localClusterGenerator`** via Helm parameters if needed.
 
+**`hub-external-secrets-operator-appset`** installs the ApplicationSet `hub-external-secrets-operator` in **`openshift-gitops`**, generating one **`charts/external-secrets-operator`** Application per cluster (same Placement + **`local-cluster`** pattern); each child Application targets that cluster via **`spec.destination.name`**.
+
 Exclude patterns on the root Application omit `*.md` so this README is not applied as a manifest.
