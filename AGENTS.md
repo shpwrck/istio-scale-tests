@@ -83,7 +83,7 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 - `oc` / `kubectl`, `istioctl` (version aligned with `ISTIO_VERSION` / `spec.version` in templates — see `config/versions.env`).
 - `openssl`, `jq`, `curl` as documented in `README.md`.
 - `envsubst` (gettext package) for template rendering in `istio-setup/003` and `istio-setup/007`.
-- `git`, Helm 3 for `platform-setup/001-acm-install-hub.sh` (`charts/acm-operator`, `charts/acm-multicluster-hub`, `charts/acm-klusterlet-config`, `charts/acm-managed-cluster`), `platform-setup/002-acm-openshift-gitops.sh` (`charts/openshift-gitops-operator`, `charts/acm-openshift-gitops-resources`, `charts/gitops-hub-app-of-apps`, `charts/cert-manager-operator`, `charts/gitops-hub-apps`, optional `charts/hub-mesh-ca-intermediate`, `charts/gitops-hub-ocm-placement-appset`, optional `charts/external-secrets-operator`), and `istio-setup/004-ossm-mc-apply-ingress-gateway.sh` (`istio/gateway` chart).
+- `git`, Helm 3 for `platform-setup/001-acm-install-hub.sh` (`charts/acm-operator`, `charts/acm-multicluster-hub`, `charts/acm-klusterlet-config`, `charts/acm-managed-cluster`), `platform-setup/002-acm-openshift-gitops.sh` (`charts/openshift-gitops-operator`, `charts/acm-openshift-gitops-resources`, `charts/gitops-hub-app-of-apps`, `charts/cert-manager-operator`, `charts/gitops-hub-apps`, optional `charts/hub-mesh-ca-intermediate`, `charts/gitops-hub-ocm-placement-appset`, `charts/external-secrets-operator` as the Helm source only for ApplicationSet-generated child Applications—not a separate hub-only install), and `istio-setup/004-ossm-mc-apply-ingress-gateway.sh` (`istio/gateway` chart).
 
 ## References
 

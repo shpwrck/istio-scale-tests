@@ -1,0 +1,56 @@
+{{- if .Values.rbac.enabled }}
+{{- $ns := .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ $ns | quote }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    {{- if .Values.argoSyncWaves.enabled }}
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+    {{- end }}
+    {{- range $k, $v := (.Values.rbac.annotations | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  labels:
+    {{- range $k, $v := (.Values.rbac.labels | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+rules:
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["operatorgroups", "subscriptions", "installplans"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["clusterserviceversions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ $ns | quote }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    {{- if .Values.argoSyncWaves.enabled }}
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+    {{- end }}
+    {{- range $k, $v := (.Values.rbac.annotations | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  labels:
+    {{- range $k, $v := (.Values.rbac.labels | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.rbac.argocd.serviceAccountName | quote }}
+    namespace: {{ .Values.rbac.argocd.namespace | quote }}
+{{- end }}
