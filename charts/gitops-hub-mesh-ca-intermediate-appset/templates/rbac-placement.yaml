@@ -3,7 +3,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ .Values.placementRbac.roleName | quote }}
-  namespace: {{ .Values.gitopsNamespace | quote }}
+  namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
     app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
 rules:
@@ -15,7 +15,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ .Values.placementRbac.roleBindingName | quote }}
-  namespace: {{ .Values.gitopsNamespace | quote }}
+  namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
     app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
 roleRef:
@@ -25,5 +25,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.placementRbac.applicationSetServiceAccountName | quote }}
-    namespace: {{ .Values.gitopsNamespace | quote }}
+    namespace: {{ .Values.applicationSetControllerNamespace | quote }}
 {{- end }}

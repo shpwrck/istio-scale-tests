@@ -27,7 +27,8 @@ spec:
           value: global-decision-1
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    # Must match PlacementDecision namespace (clusterDecisionResource resolves name here).
+    namespace: open-cluster-management-global-set
   syncPolicy:
     automated:
       prune: false
