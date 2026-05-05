@@ -1,6 +1,4 @@
-{{- if not .Values.argoServer.cluster }}
-{{- fail "argoServer.cluster is required (hub ManagedCluster / localClusterName)" }}
-{{- end }}
+{{- if .Values.argoServer.cluster }}
 apiVersion: apps.open-cluster-management.io/v1beta1
 kind: GitOpsCluster
 metadata:
@@ -17,3 +15,4 @@ spec:
     namespace: {{ .Values.gitopsNamespace }}
   gitopsAddon:
     enabled: {{ .Values.gitopsAddon.enabled }}
+{{- end }}

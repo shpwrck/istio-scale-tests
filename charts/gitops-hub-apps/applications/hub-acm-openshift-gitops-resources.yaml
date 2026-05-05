@@ -30,7 +30,7 @@ spec:
           value: acm-openshift-gitops
         - name: gitopsAddon.enabled
           value: "true"
-        # Required — placeholder until platform-setup/002 patches from ACM_LOCAL_CLUSTER_NAME / hub ManagedCluster name.
+        # Set by platform-setup/002 (ACM_LOCAL_CLUSTER_NAME) or manually; if empty, chart skips GitOpsCluster until set.
         - name: argoServer.cluster
           value: ""
   destination:
