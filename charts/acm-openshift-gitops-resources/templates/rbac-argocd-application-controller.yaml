@@ -1,0 +1,34 @@
+{{- if .Values.argocdApplicationControllerRbac.create }}
+# Cluster-scoped ManagedClusterSet requires ClusterRole for Argo CD application controller (hub-acm-openshift-gitops-resources Application sync).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.argocdApplicationControllerRbac.clusterRoleName | quote }}
+  labels:
+    app.kubernetes.io/name: acm-openshift-gitops-resources
+    app.kubernetes.io/component: argocd-application-controller-rbac
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: ["cluster.open-cluster-management.io"]
+    resources: ["managedclustersets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.argocdApplicationControllerRbac.clusterRoleBindingName | quote }}
+  labels:
+    app.kubernetes.io/name: acm-openshift-gitops-resources
+    app.kubernetes.io/component: argocd-application-controller-rbac
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.argocdApplicationControllerRbac.clusterRoleName | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.argocdApplicationControllerRbac.serviceAccountName | quote }}
+    namespace: {{ .Values.argocdApplicationControllerRbac.serviceAccountNamespace | quote }}
+{{- end }}

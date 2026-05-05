@@ -10,6 +10,8 @@ Placement sets `spec.clusterSets: [<clusterSet>]` so the controller selects that
 
 When `argocdPlacementDecisionGenerator.create` is true (default), the chart also installs ConfigMap `argocdPlacementDecisionGenerator.configMapName` (default `acm-gitops-placement-generator`) in `gitopsNamespace`. Hub ApplicationSet charts (`charts/gitops-hub-mesh-ca-intermediate-appset`, `charts/gitops-hub-external-secrets-operator-appset`) reference that ConfigMap for `clusterDecisionResource` and derive the PlacementDecision resource name as `{placement.name}-decision-1` unless overridden (same OCM naming as the PlacementDecision created for `placement.name`).
 
+When `argocdApplicationControllerRbac.create` is true (default), the chart installs a ClusterRole and ClusterRoleBinding so the OpenShift GitOps Argo CD application controller service account can manage cluster-scoped `ManagedClusterSet` objects (`managedclustersets.cluster.open-cluster-management.io`). Disable only if you grant equivalent RBAC elsewhere.
+
 ## Placement “all except the first cluster”
 
 By default `placement.excludeHubLocalClusterLabel: true`: the Placement selects every ManagedCluster in the bound set except those labeled `local-cluster` (the ACM hub / terraform `first_cluster`). Spokes must carry `cluster.open-cluster-management.io/clusterset=<clusterSet>` (see `charts/acm-managed-cluster` / platform-setup/001).
