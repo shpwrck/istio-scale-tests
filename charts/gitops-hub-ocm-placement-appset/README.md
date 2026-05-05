@@ -5,7 +5,7 @@ Standard Argo CD ApplicationSet for RHACM GitOps: `clusterDecisionResource` (sha
 Preset value files:
 
 - `values-external-secrets.yaml` — installs `charts/external-secrets-operator` on every cluster in Placement (`clusterDecisionResource`, typically spokes without `local-cluster`) plus the hub list entry (`in-cluster` default, `destination.mode: clusterName` on each Application).
-- `values-kubeconfig-from-argosecret.yaml` — installs `charts/hub-kubeconfig-from-argosecret` on the hub only (`destination.mode: inClusterServer`), one child Application per Placement cluster plus the hub list row (External Secrets reads each `*-application-manager-cluster-secret` and writes `kubeconfig-*` Secrets).
+- `values-kubeconfig-from-argosecret.yaml` — installs `charts/hub-kubeconfig-from-argosecret` on the hub only (`destination.mode: inClusterServer`), child Applications use `destination.namespace: external-secrets-operator` (SecretStore/ExternalSecret land where the ESO operand reconciles; Argo cluster Secrets are read from `openshift-gitops` via chart values).
 - `values-mesh-ca-intermediate.yaml` — installs `charts/hub-mesh-ca-intermediate` only on the hub API (`destination.mode: inClusterServer`).
 
 Override `repo.url` / `placement.name` / `generatorConfigMap` / RBAC names via Helm or Argo `parameters` as needed.
