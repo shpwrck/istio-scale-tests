@@ -1,0 +1,47 @@
+# Namespace where the PlacementDecision lives (same as charts/acm-openshift-gitops-resources Placement).
+applicationSetNamespace: openshift-gitops
+
+# Namespace for each generated Application spec.destination (OLM Subscription on each cluster).
+applicationDestinationNamespace: external-secrets-operator
+
+# Namespace of the ApplicationSet controller ServiceAccount (RoleBinding subject).
+applicationSetControllerNamespace: openshift-gitops
+
+placement:
+  placementDecisionName: acm-openshift-gitops-placement-decision-1
+
+# Second generator: one static Application for the hub (Argo cluster name local-cluster) — GitOps Placement omits the hub from PlacementDecision.
+localClusterGenerator:
+  enabled: true
+  clusterName: local-cluster
+
+generatorConfigMap:
+  create: true
+  name: ocm-placement-generator-hub-external-secrets
+
+clusterDecisionResource:
+  requeueAfterSeconds: 30
+
+placementRbac:
+  create: true
+  roleName: openshift-gitops-ocm-placement-hub-external-secrets
+  roleBindingName: openshift-gitops-ocm-placement-hub-external-secrets
+  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
+
+# Lets openshift-gitops-argocd-application-controller sync ApplicationSet + ConfigMap + RBAC into applicationSetNamespace.
+argocdApplicationControllerRbac:
+  create: true
+  roleName: gitops-hub-external-secrets-operator-appset-argocd-sync
+  roleBindingName: gitops-hub-external-secrets-operator-appset-argocd-sync
+  serviceAccountName: openshift-gitops-argocd-application-controller
+  serviceAccountNamespace: openshift-gitops
+
+applicationSet:
+  name: hub-external-secrets-operator
+
+repo:
+  url: ""
+  revision: main
+
+externalSecretsChart:
+  path: charts/external-secrets-operator

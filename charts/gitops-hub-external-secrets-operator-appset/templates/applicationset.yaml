@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.applicationSet.name | quote }}
+  namespace: {{ .Values.applicationSetNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-external-secrets-operator-appset
+spec:
+  generators:
+    - clusterDecisionResource:
+        configMapRef: {{ .Values.generatorConfigMap.name | quote }}
+        name: {{ required "placement.placementDecisionName must be set (PlacementDecision metadata.name in applicationSetNamespace)" .Values.placement.placementDecisionName | quote }}
+        requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
+{{- $lcOn := .Values.localClusterGenerator.enabled | default true }}
+{{- if or (eq $lcOn true) (eq ($lcOn | toString) "true") }}
+    # Static hub entry — GitOps Placement excludes the hub (local-cluster label); spokes still come from clusterDecisionResource above.
+    - list:
+        elements:
+          - clusterName: {{ .Values.localClusterGenerator.clusterName | quote }}
+{{- end }}
+  template:
+    metadata:
+      name: '{{ "{{clusterName}}" }}-external-secrets-operator'
+    spec:
+      project: default
+      source:
+        repoURL: {{ required "repo.url must be set (same Git URL Argo uses for this repo)" .Values.repo.url | quote }}
+        targetRevision: {{ .Values.repo.revision | quote }}
+        path: {{ .Values.externalSecretsChart.path | quote }}
+        helm:
+          releaseName: external-secrets-operator-olm
+      destination:
+        name: '{{ "{{clusterName}}" }}'
+        namespace: {{ .Values.applicationDestinationNamespace | quote }}
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

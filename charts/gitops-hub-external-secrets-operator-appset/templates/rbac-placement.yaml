@@ -1,0 +1,29 @@
+{{- if .Values.placementRbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.placementRbac.roleName | quote }}
+  namespace: {{ .Values.applicationSetNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-external-secrets-operator-appset
+rules:
+  - apiGroups: ["cluster.open-cluster-management.io"]
+    resources: ["placementdecisions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.placementRbac.roleBindingName | quote }}
+  namespace: {{ .Values.applicationSetNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-external-secrets-operator-appset
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.placementRbac.roleName | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.placementRbac.applicationSetServiceAccountName | quote }}
+    namespace: {{ .Values.applicationSetControllerNamespace | quote }}
+{{- end }}
