@@ -8,16 +8,20 @@ applicationDestinationNamespace: openshift-gitops
 applicationSetControllerNamespace: openshift-gitops
 
 placement:
-  placementDecisionName: acm-openshift-gitops-placement-decision-1
+  # Must match charts/acm-openshift-gitops-resources placement.name (e.g. GITOPS_PLACEMENT_NAME).
+  name: acm-openshift-gitops-placement
+  # Optional override; default is "{placement.name}-decision-1".
+  placementDecisionName: ""
 
-# Second generator: one static Application for the hub (Argo cluster name local-cluster) — GitOps Placement omits the hub from PlacementDecision.
-localClusterGenerator:
+# Second generator: static hub entry — Argo in-cluster registration name (Placement excludes the hub ManagedCluster via RHACM label local-cluster=true).
+inClusterGenerator:
   enabled: true
-  clusterName: local-cluster
+  clusterName: in-cluster
 
+# Duck-type ConfigMap: default uses shared CM from acm-openshift-gitops-resources (install that chart first or set create: true for a local duplicate).
 generatorConfigMap:
-  create: true
-  name: ocm-placement-generator-hub-mesh-ca
+  create: false
+  name: acm-gitops-placement-generator
 
 clusterDecisionResource:
   requeueAfterSeconds: 30

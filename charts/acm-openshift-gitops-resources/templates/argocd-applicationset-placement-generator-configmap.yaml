@@ -1,0 +1,16 @@
+{{- if .Values.argocdPlacementDecisionGenerator.create }}
+# Duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource generators (shared by hub ApplicationSet charts).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.argocdPlacementDecisionGenerator.configMapName | quote }}
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: acm-openshift-gitops-resources
+    app.kubernetes.io/component: argocd-applicationset-placement-generator
+data:
+  apiVersion: cluster.open-cluster-management.io/v1beta1
+  kind: placementdecisions
+  statusListKey: decisions
+  matchKey: clusterName
+{{- end }}

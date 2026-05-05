@@ -23,8 +23,9 @@ spec:
           value: https://github.com/shpwrck/istio-scale-tests.git
         - name: repo.revision
           value: main
-        - name: placement.placementDecisionName
-          value: acm-openshift-gitops-placement-decision-1
+        # Align with charts/acm-openshift-gitops-resources placement.name / GITOPS_PLACEMENT_NAME when overriding.
+        - name: placement.name
+          value: acm-openshift-gitops-placement
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
