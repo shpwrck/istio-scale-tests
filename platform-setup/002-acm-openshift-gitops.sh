@@ -2,7 +2,7 @@
 # Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, apply hub Argo “app of apps” + cert-manager (Helm), then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
 # Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
-# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); charts under `charts/cert-manager-operator`, `charts/hub-mesh-ca`, `charts/hub-mesh-ca-intermediate`, `charts/gitops-hub-mesh-ca-intermediate-appset`, `charts/external-secrets-operator`, `charts/gitops-hub-external-secrets-operator-appset` are referenced by child Applications in that directory. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); child Applications include `hub-acm-openshift-gitops-resources` (default: `charts/acm-openshift-gitops-resources` when `GITOPS_ACM_RESOURCES_VIA_ARGO=1`) and charts under `charts/cert-manager-operator`, `charts/hub-mesh-ca`, `charts/hub-mesh-ca-intermediate`, `charts/gitops-hub-mesh-ca-intermediate-appset`, `charts/external-secrets-operator`, `charts/gitops-hub-external-secrets-operator-appset`. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
 # Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).
@@ -92,6 +92,9 @@ GITOPS_APPSET_ANY_NS_MANIFEST_DIR="${ROOT}/platform-setup/manifests/gitops-appse
 ACM_CLUSTER_SET="${ACM_CLUSTER_SET:-istio-scale-tests}"
 GITOPS_PLACEMENT_NAME="${GITOPS_PLACEMENT_NAME:-acm-openshift-gitops-placement}"
 GITOPS_CLUSTER_CR_NAME="${GITOPS_CLUSTER_CR_NAME:-acm-openshift-gitops}"
+# When 1 (default), charts/acm-openshift-gitops-resources is synced by Argo (hub-acm-openshift-gitops-resources Application); 002 patches Helm parameters from the environment. When 0, 002 installs that chart with Helm before hub-gitops-root so Argo can adopt the release.
+GITOPS_ACM_RESOURCES_VIA_ARGO="${GITOPS_ACM_RESOURCES_VIA_ARGO:-1}"
+HUB_ACM_GITOPS_APP_WAIT_SEC="${HUB_ACM_GITOPS_APP_WAIT_SEC:-600}"
 GITOPS_ADDON_ENABLED="${GITOPS_ADDON_ENABLED:-true}"
 GITOPS_CLUSTER_READY_WAIT_SEC="${GITOPS_CLUSTER_READY_WAIT_SEC:-1800}"
 ARGOCD_STABILIZE_WAIT_SEC="${ARGOCD_STABILIZE_WAIT_SEC:-900}"
@@ -113,9 +116,10 @@ Usage: $(basename "$0") [options]
 
   Full install:
   1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize; configure Argo CD ApplicationSets — RHACM-style any-namespace (\`GITOPS_RHACM_APPSET_ANY_NAMESPACE\`: \`spec.applicationSet.enabled\`, controller env \`ARGOCD_APPLICATIONSET_CONTROLLER_NAMESPACES=*\`, ClusterRole/Binding from \`platform-setup/manifests/gitops-appset-any-namespace/\`) and optionally merge \`GITOPS_APPLICATION_SET_SOURCE_NAMESPACES\` into \`spec.applicationSet.sourceNamespaces\`.
-  2a) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret (private Git over HTTPS or SSH) then Argo CD Application hub-gitops-root (directory sync of charts/gitops-hub-apps/applications for child Applications; skipped only if no repo URL after defaults: \`GITOPS_APP_REPO_URL\` defaults to \`git -C repo-root remote get-url origin\` when unset).
-  2b) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success + gitops-addon feature label on each ManagedCluster in ACM_CLUSTER_SET (skipped when no spokes unless GITOPS_FORCE_ACM_GITOPS_WAITS=1).
-  3) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
+  2a/2b) ACM GitOps resources: either Argo Application \`hub-acm-openshift-gitops-resources\` (default when \`GITOPS_ACM_RESOURCES_VIA_ARGO=1\` and hub-gitops-root can sync Git) or direct Helm (\`GITOPS_ACM_RESOURCES_VIA_ARGO=0\`, chart installed before hub-gitops-root). ManagedClusterSetBinding, Placement, GitOpsCluster; optional shared ApplicationSet placement ConfigMap.
+  2c) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret then Application hub-gitops-root (directory sync \`charts/gitops-hub-apps/applications\`; skipped if no repo URL / \`GITOPS_APP_REPO_URL\` defaults from \`git remote get-url origin\`).
+  3) Wait for GitOpsCluster success + gitops-addon feature label on each ManagedCluster in ACM_CLUSTER_SET when applicable (skipped when no spokes unless GITOPS_FORCE_ACM_GITOPS_WAITS=1).
+  4) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
 
   Patch only (e.g. after ACM/GitOps reconciles secrets): --patch-argoc-cluster-secrets-only --context HUB
 
@@ -129,7 +133,7 @@ Usage: $(basename "$0") [options]
   --skip-argocd-applicationset-any-namespace     Do not apply RHACM ApplicationSet-in-any-namespace steps (ArgoCD env patch + ClusterRole/Binding); see GITOPS_RHACM_APPSET_ANY_NAMESPACE.
   --hub-app-repo-url URL      Override GITOPS_APP_REPO_URL for Argo CD Git source (HTTPS or SSH clone URL of this repo/fork).
   --gitops-repo-token-file PATH  Read HTTPS token from file (avoid env); stored only in the cluster Argo repo Secret. Same as GITOPS_APP_REPO_TOKEN_FILE.
-  --skip-argoc-cluster-secret-fix  Skip step (3) after GitOpsCluster (RHACM may leave unusable internal *.control-plane URLs).
+  --skip-argoc-cluster-secret-fix  Skip step (4) after GitOpsCluster (RHACM may leave unusable internal *.control-plane URLs).
   --patch-argoc-cluster-secrets-only  Only patch ACM *-application-manager-cluster Secrets; requires hub --context (and spoke contexts in kubeconfig).
   --gitops-namespace NS       Operand namespace / Argo CD + ACM CRs (default ${GITOPS_NAMESPACE}).
   --merge-kubeconfig          Run terraform/scripts/001-oc-login-merge-kubeconfig.sh (same as platform-setup/001).
@@ -164,7 +168,10 @@ Environment:
   GITOPS_ADDON_FEATURE_WAIT_SEC Max wait for feature.open-cluster-management.io/addon-gitops-addon=available on each ManagedCluster in ACM_CLUSTER_SET (default ${GITOPS_ADDON_FEATURE_WAIT_SEC}).
   GITOPS_FORCE_ACM_GITOPS_WAITS   When 1, always run GitOpsCluster / per-ManagedCluster gitops-addon waits even if there are zero spoke ManagedClusters (hub-only). Default: those waits are skipped when no spokes match Placement (same as excluding the hub).
 
-  Step (3) / patch-only mode requires kubeconfig contexts named like each spoke ManagedCluster (e.g. rosa-002); use --merge-kubeconfig or log in spokes first. Hub ManagedCluster cluster Secrets are not patched (kube context is the hub).
+  GITOPS_ACM_RESOURCES_VIA_ARGO  When 1 (default), skip direct Helm for charts/acm-openshift-gitops-resources; Argo syncs it (see hub-acm-openshift-gitops-resources Application) and 002 patches Helm parameters. When 0, 002 installs that chart with Helm before hub-gitops-root.
+  HUB_ACM_GITOPS_APP_WAIT_SEC   Max wait for Argo Application hub-acm-openshift-gitops-resources to appear before patching (default ${HUB_ACM_GITOPS_APP_WAIT_SEC}).
+
+  Step (4) / patch-only mode requires kubeconfig contexts named like each spoke ManagedCluster (e.g. rosa-002); use --merge-kubeconfig or log in spokes first. Hub ManagedCluster cluster Secrets are not patched (kube context is the hub).
   ACM_HUB_CONTEXT               Default hub context when --context omitted.
   ACM_LOCAL_CLUSTER_NAME        Hub ManagedCluster name when --local-cluster-name omitted.
 
@@ -715,6 +722,55 @@ gitops_addon_helm_bool() {
 	esac
 }
 
+# Returns 0 when charts/acm-openshift-gitops-resources should be synced by Argo (hub-acm-openshift-gitops-resources), not installed by helm_acm_gitops_resources_install here.
+should_install_acm_gitops_resources_via_argo() {
+	((SKIP_ACM_GITOPS_RESOURCES)) && return 1
+	((GITOPS_ACM_RESOURCES_VIA_ARGO)) || return 1
+	((SKIP_HUB_APP_OF_APPS)) && return 1
+	local repo_url
+	repo_url="$(resolve_gitops_app_repo_url)"
+	[[ -n "$repo_url" ]]
+}
+
+wait_and_patch_hub_acm_gitops_resources_application() {
+	if ((DRY_RUN)); then
+		echo "dry-run: would wait for Application hub-acm-openshift-gitops-resources and patch Helm parameters from environment."
+		return 0
+	fi
+	local deadline=$((SECONDS + HUB_ACM_GITOPS_APP_WAIT_SEC))
+	echo "Waiting for Argo CD Application hub-acm-openshift-gitops-resources (up to ${HUB_ACM_GITOPS_APP_WAIT_SEC}s)..."
+	while ((SECONDS < deadline)); do
+		if oc --context="$CTX" get applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" &>/dev/null; then
+			break
+		fi
+		sleep 3
+	done
+	if ! oc --context="$CTX" get applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" &>/dev/null; then
+		die "timeout waiting for Application hub-acm-openshift-gitops-resources in ${GITOPS_NAMESPACE} (ensure hub-gitops-root can sync charts/gitops-hub-apps/applications)."
+	fi
+	local tmp cur addon
+	addon="$(gitops_addon_helm_bool)"
+	tmp="$(mktemp)"
+	cur="$(oc --context="$CTX" get applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" -o json)"
+	jq --arg gitopsNs "$GITOPS_NAMESPACE" \
+		--arg cs "$ACM_CLUSTER_SET" \
+		--arg pn "$GITOPS_PLACEMENT_NAME" \
+		--arg gn "$GITOPS_CLUSTER_CR_NAME" \
+		--arg cluster "$ACM_LOCAL_CLUSTER_NAME" \
+		--arg addon "$addon" \
+		'.spec.source.helm.parameters = [
+			{name:"gitopsNamespace",value:$gitopsNs},
+			{name:"clusterSet",value:$cs},
+			{name:"placement.name",value:$pn},
+			{name:"gitopsCluster.name",value:$gn},
+			{name:"argoServer.cluster",value:$cluster},
+			{name:"gitopsAddon.enabled",value:$addon}
+		]' <<<"$cur" > "$tmp"
+	oc --context="$CTX" apply -f "$tmp"
+	rm -f "$tmp"
+	echo "Patched hub-acm-openshift-gitops-resources Helm parameters (argoServer.cluster=${ACM_LOCAL_CLUSTER_NAME})."
+}
+
 helm_acm_gitops_resources_install() {
 	local addon
 	addon="$(gitops_addon_helm_bool)"
@@ -948,12 +1004,16 @@ helm_gitops_operator_install
 if ((DRY_RUN)); then
 	echo "--- dry-run: ApplicationSet configuration (ArgoCD patch + RBAC if enabled) ---"
 	configure_argocd_applicationset
-	echo "--- dry-run: ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
-	if ((SKIP_ACM_GITOPS_RESOURCES == 0)); then
+	echo "--- dry-run: ACM GitOps resources + hub app-of-apps ---"
+	if ((SKIP_ACM_GITOPS_RESOURCES)); then
+		helm_hub_app_of_apps_install
+	elif should_install_acm_gitops_resources_via_argo; then
+		helm_hub_app_of_apps_install
+		wait_and_patch_hub_acm_gitops_resources_application
+	else
 		helm_acm_gitops_resources_install
+		helm_hub_app_of_apps_install
 	fi
-	echo "--- dry-run: hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
-	helm_hub_app_of_apps_install
 	echo "dry-run: done."
 	exit 0
 fi
@@ -965,14 +1025,23 @@ if ((SKIP_WAIT)); then
 		echo "--- 1b) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
 		configure_argocd_applicationset
 	fi
-	echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) (requires Application CRD from OpenShift GitOps) ---"
+	echo "--- 2) Hub app-of-apps + ACM GitOps resources (requires Application CRD for Argo path) ---"
 	if oc --context="$CTX" get crd applications.argoproj.io &>/dev/null; then
-		helm_hub_app_of_apps_install
+		if ((SKIP_ACM_GITOPS_RESOURCES)); then
+			helm_hub_app_of_apps_install
+		elif should_install_acm_gitops_resources_via_argo; then
+			helm_hub_app_of_apps_install
+			wait_and_patch_hub_acm_gitops_resources_application
+		else
+			helm_acm_gitops_resources_install
+			helm_hub_app_of_apps_install
+		fi
 	else
 		echo "warn: applications.argoproj.io CRD not ready yet — hub app-of-apps not installed. Re-run 002 without --skip-wait after the GitOps CSV succeeds, or set GITOPS_APP_REPO_URL and apply ${CHART_HUB_APP_OF_APPS} manually." >&2
-	fi
-	if ((SKIP_ACM_GITOPS_RESOURCES == 0)); then
-		helm_acm_gitops_resources_install
+		if ((SKIP_ACM_GITOPS_RESOURCES == 0)); then
+			echo "Installing ACM GitOps resources via Helm (Application CRD not ready)."
+			helm_acm_gitops_resources_install
+		fi
 	fi
 	echo "Done (--skip-wait)."
 	exit 0
@@ -985,17 +1054,25 @@ wait_for_argocd_stabilized
 echo "--- 1b) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
 configure_argocd_applicationset
 
-echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
-helm_hub_app_of_apps_install
-
 if ((SKIP_ACM_GITOPS_RESOURCES)); then
-	echo "Skipping ACM GitOps Helm chart (--skip-acm-gitops-resources)."
+	echo "--- 2) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
+	helm_hub_app_of_apps_install
+	echo "Skipping ACM GitOps resources (--skip-acm-gitops-resources)."
 	echo "Done (operator + hub GitOps Applications only)."
 	exit 0
 fi
 
-echo "--- 2b) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
-helm_acm_gitops_resources_install
+if should_install_acm_gitops_resources_via_argo; then
+	echo "--- 2a) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
+	helm_hub_app_of_apps_install
+	echo "--- 2b) Patch Argo Application hub-acm-openshift-gitops-resources ---"
+	wait_and_patch_hub_acm_gitops_resources_application
+else
+	echo "--- 2a) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) via Helm ---"
+	helm_acm_gitops_resources_install
+	echo "--- 2b) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
+	helm_hub_app_of_apps_install
+fi
 
 if skip_acm_gitops_cluster_and_addon_waits; then
 	:
@@ -1005,7 +1082,7 @@ else
 fi
 
 if ((SKIP_ARGO_CLUSTER_SECRET_FIX == 0)); then
-	echo "--- 3) Patch ACM → Argo managed-cluster Secrets (${GITOPS_NAMESPACE}) ---"
+	echo "--- 4) Patch ACM → Argo managed-cluster Secrets (${GITOPS_NAMESPACE}) ---"
 	patch_acm_argoc_managed_cluster_secrets "$CTX" "$GITOPS_NAMESPACE" 0
 else
 	echo "Skipping Argo cluster secret patch (--skip-argoc-cluster-secret-fix)."
