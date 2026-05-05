@@ -1,0 +1,13 @@
+# Operand / OLM namespace for the Red Hat cert-manager operator Subscription.
+namespace: cert-manager-operator
+
+operatorGroup:
+  name: openshift-cert-manager-operator
+
+subscription:
+  name: openshift-cert-manager-operator
+  channel: stable-v1
+  package: openshift-cert-manager-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

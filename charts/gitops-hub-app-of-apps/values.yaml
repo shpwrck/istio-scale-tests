@@ -1,0 +1,29 @@
+# Namespace where OpenShift GitOps / Argo CD instance runs (Application CRs live here).
+gitopsNamespace: openshift-gitops
+
+# Root Application syncs this Helm chart from spec.repo (add child Application templates under charts/gitops-hub-apps/templates/).
+appOfApps:
+  enabled: true
+
+# Git repository that contains this repo’s charts (fork URL). Required for Argo CD to sync.
+repo:
+  url: ""
+  revision: main
+  chartPathHubApps: charts/gitops-hub-apps
+  helm:
+    releaseName: gitops-hub-apps
+
+syncPolicy:
+  automated:
+    prune: false
+    selfHeal: true
+
+# Argo CD Application that installs cert-manager Operator for Red Hat OpenShift (OLM) on the hub only.
+certManagerApp:
+  enabled: true
+  name: hub-cert-manager-operator
+  chartPath: charts/cert-manager-operator
+  # Default namespace for the Helm release (matches chart Namespace / Subscription).
+  destinationNamespace: cert-manager-operator
+  helm:
+    releaseName: cert-manager-operator-olm

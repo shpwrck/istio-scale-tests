@@ -1,0 +1,5 @@
+apiVersion: v2
+name: gitops-hub-app-of-apps
+description: Argo CD Applications for hub GitOps (root app-of-apps + cert-manager operator sync).
+type: application
+version: 0.1.0

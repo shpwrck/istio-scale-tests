@@ -1,0 +1,2 @@
+# Default namespace for Argo CD Application CRs you add under templates/ (optional).
+gitopsNamespace: openshift-gitops

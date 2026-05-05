@@ -1,0 +1,25 @@
+{{- if and .Values.certManagerApp.enabled .Values.repo.url }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.certManagerApp.name | quote }}
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-app-of-apps
+    app.kubernetes.io/component: cert-manager-operator
+spec:
+  project: default
+  source:
+    repoURL: {{ .Values.repo.url | quote }}
+    targetRevision: {{ .Values.repo.revision | quote }}
+    path: {{ .Values.certManagerApp.chartPath | quote }}
+    helm:
+      releaseName: {{ .Values.certManagerApp.helm.releaseName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.certManagerApp.destinationNamespace | quote }}
+  syncPolicy:
+    automated:
+      prune: {{ .Values.syncPolicy.automated.prune }}
+      selfHeal: {{ .Values.syncPolicy.automated.selfHeal }}
+{{- end }}
