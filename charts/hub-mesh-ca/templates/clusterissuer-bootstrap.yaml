@@ -3,6 +3,10 @@ apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: {{ .Values.bootstrapIssuer.name | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.bootstrapIssuer | quote }}
+  {{- end }}
 spec:
   selfSigned: {}
 {{- end }}
