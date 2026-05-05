@@ -1,6 +1,15 @@
 # Operand namespace where cert-manager runs and TLS secrets are stored (default OpenShift operand ns).
 namespace: cert-manager
 
+# Grant the Argo CD application controller permission to sync Certificate / Secret into namespace above and ClusterIssuer cluster-wide (OpenShift GitOps defaults).
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller
+  labels: {}
+  annotations: {}
+
 # Align with charts/acm-openshift-gitops-resources Placement (same cluster set and hub exclusion via local-cluster).
 global:
   placement:
