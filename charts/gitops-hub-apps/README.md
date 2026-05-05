@@ -1,7 +1,9 @@
-# gitops-hub-apps (Helm)
+# gitops-hub-apps
 
-Hub-only resources reconciled by Argo CD `Application` `hub-gitops-root` (Helm source path `charts/gitops-hub-apps`).
+Hub-only Argo CD child `Application` manifests for the hub **app of apps** pattern.
 
-Add optional `Application` or other manifests as YAML under `templates/`. Use `metadata.namespace` (typically `openshift-gitops`) or set `gitopsNamespace` in `values.yaml` for templates that reference it.
+The Argo CD Application `hub-gitops-root` (installed by `charts/gitops-hub-app-of-apps`, `platform-setup/002`) uses a **directory** source pointing at `applications/` in this tree (`charts/gitops-hub-apps/applications` in the Git repo). Add or edit `*.yaml` files there; after commit and push, refresh/sync `hub-gitops-root` so Argo applies the child Applications.
 
-This chart intentionally ships without extra Kubernetes objects beyond Helm helpers so operators start from an empty sync.
+The Helm chart metadata under this directory (`Chart.yaml`, `templates/_helpers.tpl`) remains for `helm lint` in CI/scripts; Argo does not Helm-install this chart for the app-of-apps flow.
+
+See `applications/README.md` for conventions (including matching `spec.source.repoURL` to your fork).

@@ -2,7 +2,7 @@
 # Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, apply hub Argo “app of apps” + cert-manager (Helm), then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
 # Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
-# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo Helm apps: `charts/gitops-hub-app-of-apps`, `charts/cert-manager-operator`, `charts/gitops-hub-apps`. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); charts under `charts/cert-manager-operator`, `charts/hub-mesh-ca` are referenced by child Applications in that directory. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
 # Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).
@@ -105,7 +105,7 @@ Usage: $(basename "$0") [options]
 
   Full install:
   1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize.
-  2a) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret (private Git over HTTPS or SSH) then Argo CD Applications for hub app-of-apps root + cert-manager operator manifests (skipped only if no repo URL after defaults: \`GITOPS_APP_REPO_URL\` defaults to \`git -C repo-root remote get-url origin\` when unset).
+  2a) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret (private Git over HTTPS or SSH) then Argo CD Application hub-gitops-root (directory sync of charts/gitops-hub-apps/applications for child Applications; skipped only if no repo URL after defaults: \`GITOPS_APP_REPO_URL\` defaults to \`git -C repo-root remote get-url origin\` when unset).
   2b) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success + gitops-addon feature label on each ManagedCluster in ACM_CLUSTER_SET (skipped when no spokes unless GITOPS_FORCE_ACM_GITOPS_WAITS=1).
   3) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
 
@@ -116,7 +116,7 @@ Usage: $(basename "$0") [options]
   --dry-run                   Helm client dry-run for charts; with --patch-argoc-cluster-secrets-only, print patches only.
   --skip-wait                 Do not wait for CSV / Argo CD / GitOpsCluster readiness.
   --skip-acm-gitops-resources Install only the GitOps operator chart (skip ACM Placement / GitOpsCluster chart).
-  --skip-hub-app-of-apps      Skip charts/gitops-hub-app-of-apps (Argo app-of-apps root + cert-manager operator Application).
+  --skip-hub-app-of-apps      Skip charts/gitops-hub-app-of-apps (Argo hub-gitops-root app-of-apps Application).
   --hub-app-repo-url URL      Override GITOPS_APP_REPO_URL for Argo CD Git source (HTTPS or SSH clone URL of this repo/fork).
   --gitops-repo-token-file PATH  Read HTTPS token from file (avoid env); stored only in the cluster Argo repo Secret. Same as GITOPS_APP_REPO_TOKEN_FILE.
   --skip-argoc-cluster-secret-fix  Skip step (3) after GitOpsCluster (RHACM may leave unusable internal *.control-plane URLs).

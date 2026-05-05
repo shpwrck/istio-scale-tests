@@ -1,0 +1,25 @@
+# Argo CD Application — picked up by hub-gitops-root directory sync.
+# Set spec.source.repoURL to the same Git URL as hub-gitops-root (GITOPS_APP_REPO_URL / your fork).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-cert-manager-operator
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: cert-manager-operator
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/cert-manager-operator
+    helm:
+      releaseName: cert-manager-operator-olm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager-operator
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true

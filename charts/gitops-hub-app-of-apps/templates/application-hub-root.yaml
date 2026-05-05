@@ -12,9 +12,12 @@ spec:
   source:
     repoURL: {{ .Values.repo.url | quote }}
     targetRevision: {{ .Values.repo.revision | quote }}
-    path: {{ .Values.repo.chartPathHubApps | quote }}
-    helm:
-      releaseName: {{ .Values.repo.helm.releaseName | quote }}
+    path: {{ .Values.repo.applicationsPath | quote }}
+    directory:
+      recurse: {{ .Values.repo.directory.recurse }}
+      {{- if .Values.repo.directory.exclude }}
+      exclude: {{ .Values.repo.directory.exclude | quote }}
+      {{- end }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.gitopsNamespace | quote }}

@@ -5,7 +5,7 @@ Optional ACM hub and OpenShift GitOps automation on the RHACM hub (before Istio 
 | Script | Purpose |
 | ------ | ------- |
 | `001-acm-install-hub.sh` | RHACM operator, MultiClusterHub, KlusterletConfig, per-spoke ManagedCluster + import |
-| `002-acm-openshift-gitops.sh` | OpenShift GitOps operator, optional hub Argo Applications (`charts/gitops-hub-app-of-apps` → Helm paths `charts/gitops-hub-apps`, `charts/cert-manager-operator`), optional Argo repository credentials for private Git, ACM GitOpsCluster wiring, Argo managed-cluster Secret patch |
+| `002-acm-openshift-gitops.sh` | OpenShift GitOps operator, optional hub Argo Application `hub-gitops-root` (`charts/gitops-hub-app-of-apps` → directory `charts/gitops-hub-apps/applications`), optional Argo repository credentials for private Git, ACM GitOpsCluster wiring, Argo managed-cluster Secret patch |
 
 Run from repo root. Typical order: `001` then `002`, then `istio-setup/001`–`009`. See root `README.md` and `AGENTS.md`. For `002`, `GITOPS_APP_REPO_URL` defaults from `git remote get-url origin` when unset; Argo clones Git-tracked content under `charts/` (not under ignored `manifests/**`). For a private HTTPS repo use `GITOPS_APP_REPO_TOKEN_FILE` or `GITOPS_APP_REPO_TOKEN` (and optional `GITOPS_APP_REPO_USERNAME`). For SSH deploy keys use `GITOPS_APP_REPO_SSH_PRIVATE_KEY_FILE` and an SSH clone URL (or `GITOPS_APP_REPO_PREFER_SSH=1`). Tokens stay out of git and are stored only in the hub cluster Secret. A placeholder line you can copy from is `config/gitops-repo-token.example` (save the real token outside the repo, single line, no comments).
 
