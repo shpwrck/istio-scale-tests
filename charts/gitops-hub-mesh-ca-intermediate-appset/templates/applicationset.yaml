@@ -11,6 +11,13 @@ spec:
         configMapRef: {{ .Values.generatorConfigMap.name | quote }}
         name: {{ required "placement.placementDecisionName must be set (PlacementDecision metadata.name in applicationSetNamespace)" .Values.placement.placementDecisionName | quote }}
         requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
+{{- $lcOn := .Values.localClusterGenerator.enabled | default true }}
+{{- if or (eq $lcOn true) (eq ($lcOn | toString) "true") }}
+    # Static hub entry — GitOps Placement excludes the hub (local-cluster label); spokes still come from clusterDecisionResource above.
+    - list:
+        elements:
+          - clusterName: {{ .Values.localClusterGenerator.clusterName | quote }}
+{{- end }}
   template:
     metadata:
       name: '{{ "{{clusterName}}" }}-hub-mesh-ca-intermediate'

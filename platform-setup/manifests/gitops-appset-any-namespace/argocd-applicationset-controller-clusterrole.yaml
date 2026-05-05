@@ -91,3 +91,12 @@ rules:
       - patch
       - update
       - watch
+  # clusterDecisionResource / OCM PlacementDecision — controller lists with cluster-wide API scope (requires ClusterRole; namespaced Role alone is insufficient for non-operand namespaces).
+  - apiGroups:
+      - cluster.open-cluster-management.io
+    resources:
+      - placementdecisions
+    verbs:
+      - get
+      - list
+      - watch
