@@ -1,0 +1,42 @@
+# Argo CD Application — RHACM ManagedClusterSetBinding, Placement, GitOpsCluster + shared ApplicationSet placement ConfigMap.
+# Same repo URL requirement as sibling manifests. platform-setup/002 patches spec.source.helm.parameters from the environment
+# (argoServer.cluster, gitopsNamespace, etc.) after hub-gitops-root creates this Application — fork URLs must match GITOPS_APP_REPO_URL.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-acm-openshift-gitops-resources
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: acm-openshift-gitops-resources
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/acm-openshift-gitops-resources
+    helm:
+      releaseName: acm-openshift-gitops-resources
+      parameters:
+        - name: gitopsNamespace
+          value: openshift-gitops
+        - name: clusterSet
+          value: istio-scale-tests
+        - name: placement.name
+          value: acm-openshift-gitops-placement
+        - name: gitopsCluster.name
+          value: acm-openshift-gitops
+        - name: gitopsAddon.enabled
+          value: "true"
+        # Required — placeholder until platform-setup/002 patches from ACM_LOCAL_CLUSTER_NAME / hub ManagedCluster name.
+        - name: argoServer.cluster
+          value: ""
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
