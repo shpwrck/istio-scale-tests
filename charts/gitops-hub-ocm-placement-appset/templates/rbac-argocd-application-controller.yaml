@@ -5,7 +5,7 @@ metadata:
   name: {{ .Values.argocdApplicationControllerRbac.roleName | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
-    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+{{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applicationsets"]
@@ -23,7 +23,7 @@ metadata:
   name: {{ .Values.argocdApplicationControllerRbac.roleBindingName | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
-    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+{{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: gitops-hub-ocm-placement-appset
+description: Standard Argo CD ApplicationSet for RHACM Placement / PlacementDecision (clusterDecisionResource + in-cluster list) with configurable per-cluster vs hub-only destinations.
+type: application
+version: 0.1.0

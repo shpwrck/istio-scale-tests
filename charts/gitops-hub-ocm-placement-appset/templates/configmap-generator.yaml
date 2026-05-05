@@ -5,7 +5,7 @@ metadata:
   name: {{ .Values.generatorConfigMap.name | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
-    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+{{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
 data:
   apiVersion: cluster.open-cluster-management.io/v1beta1
   kind: placementdecisions
