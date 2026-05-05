@@ -2,4 +2,4 @@ apiVersion: v2
 name: hub-mesh-ca
 description: cert-manager ClusterIssuers and Certificates for a self-signed mesh root CA and per-cluster intermediate CAs on the hub.
 type: application
-version: 0.2.0
+version: 0.3.0
