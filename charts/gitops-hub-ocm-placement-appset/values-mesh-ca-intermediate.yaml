@@ -44,10 +44,7 @@ template:
   applicationNameSuffix: hub-mesh-ca-intermediate
   source:
     path: charts/hub-mesh-ca-intermediate
-    helm:
-      parameters:
-        - name: clusterName
-          value: '{{ "{{clusterName}}" }}'
+    helm: {}
 
 repo:
   url: ""
