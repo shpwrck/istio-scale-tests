@@ -20,7 +20,7 @@ Placement-based intermediates still require a successful **`lookup`** on `Placem
 
 ## Argo CD: intermediates via ApplicationSet (recommended)
 
-Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-mesh-ca-intermediate-appset`**, which installs an **ApplicationSet** with the **[clusterDecisionResource](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster-Decision-Resource/)** generator targeting **`PlacementDecision`** **`global-decision-1`** by name (includes the hub ManagedCluster in **`status.decisions`**). Each selected cluster gets an **Application** that deploys **`charts/hub-mesh-ca-intermediate`** on the hub with **`clusterName`** set.
+Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-mesh-ca-intermediate-appset`**, which installs an **ApplicationSet** in **`open-cluster-management-global-set`** (same namespace as **`PlacementDecision`** **`global-decision-1`**) with the **[clusterDecisionResource](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Generators-Cluster-Decision-Resource/)** generator. Each selected cluster gets an **Application** that deploys **`charts/hub-mesh-ca-intermediate`** on the hub with **`clusterName`** set.
 
 The **`hub-mesh-ca`** Application under `charts/gitops-hub-apps/applications/` passes **`intermediates.enabled: false`** so this chart only manages the root CA chain; intermediate CAs come from the ApplicationSet.
 

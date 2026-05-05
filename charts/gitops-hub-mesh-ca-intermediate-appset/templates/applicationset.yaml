@@ -2,14 +2,14 @@ apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
   name: {{ .Values.applicationSet.name | quote }}
-  namespace: {{ .Values.gitopsNamespace | quote }}
+  namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
     app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
 spec:
   generators:
     - clusterDecisionResource:
         configMapRef: {{ .Values.generatorConfigMap.name | quote }}
-        name: {{ required "placement.placementDecisionName must be set (PlacementDecision metadata.name in gitopsNamespace)" .Values.placement.placementDecisionName | quote }}
+        name: {{ required "placement.placementDecisionName must be set (PlacementDecision metadata.name in applicationSetNamespace)" .Values.placement.placementDecisionName | quote }}
         requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
   template:
     metadata:
@@ -26,7 +26,7 @@ spec:
               value: '{{ "{{clusterName}}" }}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: {{ .Values.gitopsNamespace | quote }}
+        namespace: {{ .Values.applicationDestinationNamespace | quote }}
       syncPolicy:
         automated:
           prune: true

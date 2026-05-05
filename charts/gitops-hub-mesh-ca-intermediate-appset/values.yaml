@@ -1,6 +1,13 @@
-gitopsNamespace: openshift-gitops
+# Namespace where the PlacementDecision lives (clusterDecisionResource looks up `name` here).
+applicationSetNamespace: open-cluster-management-global-set
 
-# PlacementDecision metadata.name in gitopsNamespace — ApplicationSet clusterDecisionResource.name (hub-inclusive list).
+# Namespace for each generated Application's spec.destination (Helm release scope on the hub).
+applicationDestinationNamespace: openshift-gitops
+
+# Namespace of the ApplicationSet controller ServiceAccount (RoleBinding subject).
+applicationSetControllerNamespace: openshift-gitops
+
+# PlacementDecision metadata.name in applicationSetNamespace.
 placement:
   placementDecisionName: global-decision-1
 
