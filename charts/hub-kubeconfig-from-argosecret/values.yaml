@@ -1,5 +1,9 @@
-# Namespace where Argo CD + ACM cluster Secrets live (same as SecretStore and target Secret).
-namespace: openshift-gitops
+# Namespace for SecretStore, ExternalSecret, kubeconfig output Secret, and store ServiceAccount.
+# The Red Hat External Secrets operand reconciles namespaced CRs in this namespace (default) — not openshift-gitops.
+namespace: external-secrets-operator
+
+# Namespace that holds ACM/GitOps *-application-manager-cluster-secret (Argo cluster Secrets).
+sourceSecretsNamespace: openshift-gitops
 
 # ManagedCluster name matching the Argo cluster secret (for spokes e.g. rosa-002; for hub list entry use the hub ManagedCluster name e.g. rosa-001, not in-cluster).
 clusterName: ""
