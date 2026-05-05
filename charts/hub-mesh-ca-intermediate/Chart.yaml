@@ -1,0 +1,5 @@
+apiVersion: v2
+name: hub-mesh-ca-intermediate
+description: Single intermediate mesh CA Certificate (cert-manager) for one ManagedCluster name — used per cluster by ApplicationSet.
+type: application
+version: 0.1.0

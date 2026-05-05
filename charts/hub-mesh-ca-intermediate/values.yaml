@@ -1,0 +1,19 @@
+# ManagedCluster name (PlacementDecision status.decisions[].clusterName) — must match [a-z0-9]([-a-z0-9]*[a-z0-9])? style names safe for Kubernetes metadata.
+clusterName: ""
+
+# Namespace for the Certificate and issued Secret (cert-manager operand namespace on the hub).
+namespace: cert-manager
+
+# Must match hub-mesh-ca root CA ClusterIssuer (.Values.rootCA.clusterIssuerName there).
+rootClusterIssuerName: mesh-root-ca
+
+certificate:
+  commonName: ""
+  duration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+
+argoSyncWaves:
+  enabled: true
+  wave: 3

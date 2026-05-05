@@ -1,0 +1,27 @@
+{{- if .Values.clusterName }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "mesh-intermediate-%s" .Values.clusterName | quote }}
+  namespace: {{ .Values.namespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.wave | quote }}
+  {{- end }}
+spec:
+  isCA: true
+  commonName: {{ .Values.certificate.commonName | default (printf "Istio Intermediate %s" .Values.clusterName) | quote }}
+  duration: {{ .Values.certificate.duration | quote }}
+  secretName: {{ printf "mesh-intermediate-%s-material" .Values.clusterName | quote }}
+  issuerRef:
+    name: {{ .Values.rootClusterIssuerName | quote }}
+    kind: ClusterIssuer
+  usages:
+    - digital signature
+    - key encipherment
+    - cert sign
+    - crl sign
+  privateKey:
+    algorithm: {{ .Values.certificate.privateKey.algorithm | quote }}
+    size: {{ .Values.certificate.privateKey.size }}
+{{- end }}

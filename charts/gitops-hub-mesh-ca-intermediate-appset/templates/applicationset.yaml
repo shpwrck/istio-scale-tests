@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.applicationSet.name | quote }}
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  labels:
+    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+spec:
+  generators:
+    - clusterDecisionResource:
+        configMapRef: {{ .Values.generatorConfigMap.name | quote }}
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: {{ .Values.placement.name | quote }}
+        requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
+  template:
+    metadata:
+      name: '{{ "{{clusterName}}" }}-hub-mesh-ca-intermediate'
+    spec:
+      project: default
+      source:
+        repoURL: {{ required "repo.url must be set (same Git URL Argo uses for this repo)" .Values.repo.url | quote }}
+        targetRevision: {{ .Values.repo.revision | quote }}
+        path: {{ .Values.intermediateChart.path | quote }}
+        helm:
+          parameters:
+            - name: clusterName
+              value: '{{ "{{clusterName}}" }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: {{ .Values.gitopsNamespace | quote }}
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

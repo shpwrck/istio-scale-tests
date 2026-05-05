@@ -4,6 +4,8 @@ kind: Application
 metadata:
   name: hub-mesh-ca
   namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
   labels:
     app.kubernetes.io/name: gitops-hub-apps
     app.kubernetes.io/component: hub-mesh-ca
@@ -15,6 +17,9 @@ spec:
     path: charts/hub-mesh-ca
     helm:
       releaseName: hub-mesh-ca
+      parameters:
+        - name: intermediates.enabled
+          value: "false"
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
