@@ -1,12 +1,13 @@
 {{- $pn := .Values.placement.name | default "acm-openshift-gitops-placement" }}
 {{- $pdec := .Values.placement.placementDecisionName | default (printf "%s-decision-1" $pn) }}
+{{- $mode := required "destination.mode must be clusterName or inClusterServer" .Values.destination.mode }}
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
   name: {{ .Values.applicationSet.name | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
-    app.kubernetes.io/name: gitops-hub-mesh-ca-intermediate-appset
+{{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
 spec:
   generators:
     - clusterDecisionResource:
@@ -22,20 +23,37 @@ spec:
 {{- end }}
   template:
     metadata:
-      name: '{{ "{{clusterName}}" }}-hub-mesh-ca-intermediate'
+      name: '{{ "{{clusterName}}" }}-{{ .Values.template.applicationNameSuffix }}'
     spec:
       project: default
       source:
         repoURL: {{ required "repo.url must be set (same Git URL Argo uses for this repo)" .Values.repo.url | quote }}
         targetRevision: {{ .Values.repo.revision | quote }}
-        path: {{ .Values.intermediateChart.path | quote }}
+        path: {{ .Values.template.source.path | quote }}
+{{- $helm := .Values.template.source.helm }}
+{{- if or $helm.releaseName $helm.parameters }}
         helm:
+{{- if $helm.releaseName }}
+          releaseName: {{ $helm.releaseName | quote }}
+{{- end }}
+{{- if $helm.parameters }}
           parameters:
-            - name: clusterName
-              value: '{{ "{{clusterName}}" }}'
+{{- range $helm.parameters }}
+            - name: {{ .name | quote }}
+              value: {{ .value | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
       destination:
+{{- if eq $mode "clusterName" }}
+        name: '{{ "{{clusterName}}" }}'
+        namespace: {{ .Values.destination.namespace | quote }}
+{{- else if eq $mode "inClusterServer" }}
         server: https://kubernetes.default.svc
-        namespace: {{ .Values.applicationDestinationNamespace | quote }}
+        namespace: {{ .Values.destination.namespace | quote }}
+{{- else }}
+{{- fail "destination.mode must be clusterName (sync to every registered cluster by name) or inClusterServer (hub Kubernetes API only)" }}
+{{- end }}
       syncPolicy:
         automated:
           prune: true

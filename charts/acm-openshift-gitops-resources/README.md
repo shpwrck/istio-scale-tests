@@ -8,7 +8,7 @@ Default `clusterSet` is `istio-scale-tests`. When `managedClusterSet.create` is 
 
 Placement sets `spec.clusterSets: [<clusterSet>]` so the controller selects that bound set; omitting `clusterSets` often yields status `NoManagedClusterSetBindings` / “No valid ManagedClusterSetBindings found”.
 
-When `argocdPlacementDecisionGenerator.create` is true (default), the chart also installs ConfigMap `argocdPlacementDecisionGenerator.configMapName` (default `acm-gitops-placement-generator`) in `gitopsNamespace`. Hub ApplicationSet charts (`charts/gitops-hub-mesh-ca-intermediate-appset`, `charts/gitops-hub-external-secrets-operator-appset`) reference that ConfigMap for `clusterDecisionResource` and derive the PlacementDecision resource name as `{placement.name}-decision-1` unless overridden (same OCM naming as the PlacementDecision created for `placement.name`).
+When `argocdPlacementDecisionGenerator.create` is true (default), the chart also installs ConfigMap `argocdPlacementDecisionGenerator.configMapName` (default `acm-gitops-placement-generator`) in `gitopsNamespace`. Hub ApplicationSet chart `charts/gitops-hub-ocm-placement-appset` (preset value files) references that ConfigMap for `clusterDecisionResource` and derive the PlacementDecision resource name as `{placement.name}-decision-1` unless overridden (same OCM naming as the PlacementDecision created for `placement.name`).
 
 When `argocdApplicationControllerRbac.create` is true (default), the chart installs a ClusterRole and ClusterRoleBinding so the OpenShift GitOps Argo CD application controller service account can manage cluster-scoped `ManagedClusterSet` objects (`managedclustersets.cluster.open-cluster-management.io`). Disable only if you grant equivalent RBAC elsewhere.
 

@@ -1,0 +1,52 @@
+# Defaults for helm lint only — use values-external-secrets.yaml or values-mesh-ca-intermediate.yaml (or pass -f) for real installs.
+applicationSetNamespace: openshift-gitops
+applicationSetControllerNamespace: openshift-gitops
+
+identity:
+  component: lint-placeholder
+
+placement:
+  name: acm-openshift-gitops-placement
+  placementDecisionName: ""
+
+inClusterGenerator:
+  enabled: true
+  clusterName: in-cluster
+
+generatorConfigMap:
+  create: false
+  name: acm-gitops-placement-generator
+
+clusterDecisionResource:
+  requeueAfterSeconds: 30
+
+placementRbac:
+  create: true
+  roleName: openshift-gitops-ocm-placement-lint
+  roleBindingName: openshift-gitops-ocm-placement-lint
+  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
+
+argocdApplicationControllerRbac:
+  create: true
+  roleName: gitops-hub-ocm-placement-appset-argocd-sync-lint
+  roleBindingName: gitops-hub-ocm-placement-appset-argocd-sync-lint
+  serviceAccountName: openshift-gitops-argocd-application-controller
+  serviceAccountNamespace: openshift-gitops
+
+applicationSet:
+  name: hub-ocm-placement-lint
+
+destination:
+  mode: clusterName
+  namespace: external-secrets-operator
+
+template:
+  applicationNameSuffix: lint-app
+  source:
+    path: charts/external-secrets-operator
+    helm:
+      releaseName: external-secrets-operator-olm
+
+repo:
+  url: ""
+  revision: main

@@ -1,0 +1,54 @@
+# Preset: hub-only intermediate CA Certificates (destination.inClusterServer).
+applicationSetNamespace: openshift-gitops
+applicationSetControllerNamespace: openshift-gitops
+
+identity:
+  component: hub-mesh-ca-intermediate
+
+placement:
+  name: acm-openshift-gitops-placement
+  placementDecisionName: ""
+
+inClusterGenerator:
+  enabled: true
+  clusterName: in-cluster
+
+generatorConfigMap:
+  create: false
+  name: acm-gitops-placement-generator
+
+clusterDecisionResource:
+  requeueAfterSeconds: 30
+
+placementRbac:
+  create: true
+  roleName: openshift-gitops-ocm-placement-hub-mesh-ca
+  roleBindingName: openshift-gitops-ocm-placement-hub-mesh-ca
+  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
+
+argocdApplicationControllerRbac:
+  create: true
+  roleName: gitops-hub-mesh-ca-intermediate-appset-argocd-sync
+  roleBindingName: gitops-hub-mesh-ca-intermediate-appset-argocd-sync
+  serviceAccountName: openshift-gitops-argocd-application-controller
+  serviceAccountNamespace: openshift-gitops
+
+applicationSet:
+  name: hub-mesh-ca-intermediate
+
+destination:
+  mode: inClusterServer
+  namespace: openshift-gitops
+
+template:
+  applicationNameSuffix: hub-mesh-ca-intermediate
+  source:
+    path: charts/hub-mesh-ca-intermediate
+    helm:
+      parameters:
+        - name: clusterName
+          value: '{{ "{{clusterName}}" }}'
+
+repo:
+  url: ""
+  revision: main

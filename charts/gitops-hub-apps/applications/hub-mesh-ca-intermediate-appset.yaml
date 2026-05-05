@@ -15,9 +15,11 @@ spec:
   source:
     repoURL: https://github.com/shpwrck/istio-scale-tests.git
     targetRevision: main
-    path: charts/gitops-hub-mesh-ca-intermediate-appset
+    path: charts/gitops-hub-ocm-placement-appset
     helm:
       releaseName: gitops-hub-mesh-ca-intermediate-appset
+      valueFiles:
+        - values-mesh-ca-intermediate.yaml
       parameters:
         - name: repo.url
           value: https://github.com/shpwrck/istio-scale-tests.git

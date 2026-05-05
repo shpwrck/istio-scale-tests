@@ -1,5 +1,0 @@
-apiVersion: v2
-name: gitops-hub-mesh-ca-intermediate-appset
-description: Argo CD ApplicationSet (clusterDecisionResource / OCM PlacementDecision) plus duck-type ConfigMap and RBAC for per-cluster hub-mesh-ca-intermediate Applications.
-type: application
-version: 0.3.0

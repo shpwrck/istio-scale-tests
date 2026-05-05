@@ -2,7 +2,7 @@
 # Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, apply hub Argo “app of apps” + cert-manager (Helm), then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
 # Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
-# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); child Applications include `hub-acm-openshift-gitops-resources` (default: `charts/acm-openshift-gitops-resources` when `GITOPS_ACM_RESOURCES_VIA_ARGO=1`) and charts under `charts/cert-manager-operator`, `charts/hub-mesh-ca`, `charts/hub-mesh-ca-intermediate`, `charts/gitops-hub-mesh-ca-intermediate-appset`, `charts/external-secrets-operator`, `charts/gitops-hub-external-secrets-operator-appset`. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); child Applications include `hub-acm-openshift-gitops-resources` (default: `charts/acm-openshift-gitops-resources` when `GITOPS_ACM_RESOURCES_VIA_ARGO=1`) and charts under `charts/cert-manager-operator`, `charts/hub-mesh-ca`, `charts/hub-mesh-ca-intermediate`, `charts/gitops-hub-ocm-placement-appset` (presets for mesh intermediate + external-secrets ApplicationSets), `charts/external-secrets-operator`. This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
 # Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).
@@ -84,9 +84,8 @@ CHART_CERT_MANAGER_OPERATOR="${ROOT}/charts/cert-manager-operator"
 CHART_GITOPS_HUB_APPS="${ROOT}/charts/gitops-hub-apps"
 CHART_HUB_MESH_CA="${ROOT}/charts/hub-mesh-ca"
 CHART_HUB_MESH_CA_INTERMEDIATE="${ROOT}/charts/hub-mesh-ca-intermediate"
-CHART_GITOPS_HUB_MESH_CA_INTERMEDIATE_APPSET="${ROOT}/charts/gitops-hub-mesh-ca-intermediate-appset"
+CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET="${ROOT}/charts/gitops-hub-ocm-placement-appset"
 CHART_EXTERNAL_SECRETS_OPERATOR="${ROOT}/charts/external-secrets-operator"
-CHART_GITOPS_HUB_EXTERNAL_SECRETS_OPERATOR_APPSET="${ROOT}/charts/gitops-hub-external-secrets-operator-appset"
 GITOPS_APPSET_ANY_NS_MANIFEST_DIR="${ROOT}/platform-setup/manifests/gitops-appset-any-namespace"
 
 ACM_CLUSTER_SET="${ACM_CLUSTER_SET:-istio-scale-tests}"
@@ -947,11 +946,11 @@ lint_charts() {
 		|| die "helm lint failed: ${CHART_HUB_APP_OF_APPS}"
 	helm lint "$CHART_HUB_MESH_CA" >/dev/null || die "helm lint failed: ${CHART_HUB_MESH_CA}"
 	helm lint "$CHART_HUB_MESH_CA_INTERMEDIATE" >/dev/null || die "helm lint failed: ${CHART_HUB_MESH_CA_INTERMEDIATE}"
-	helm lint "$CHART_GITOPS_HUB_MESH_CA_INTERMEDIATE_APPSET" --set repo.url=https://example.com/org/repo.git >/dev/null \
-		|| die "helm lint failed: ${CHART_GITOPS_HUB_MESH_CA_INTERMEDIATE_APPSET}"
+	helm lint "$CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET" -f "${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET}/values-external-secrets.yaml" --set repo.url=https://example.com/org/repo.git >/dev/null \
+		|| die "helm lint failed: ${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET} (external-secrets preset)"
+	helm lint "$CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET" -f "${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET}/values-mesh-ca-intermediate.yaml" --set repo.url=https://example.com/org/repo.git >/dev/null \
+		|| die "helm lint failed: ${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET} (mesh-ca-intermediate preset)"
 	helm lint "$CHART_EXTERNAL_SECRETS_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_EXTERNAL_SECRETS_OPERATOR}"
-	helm lint "$CHART_GITOPS_HUB_EXTERNAL_SECRETS_OPERATOR_APPSET" --set repo.url=https://example.com/org/repo.git >/dev/null \
-		|| die "helm lint failed: ${CHART_GITOPS_HUB_EXTERNAL_SECRETS_OPERATOR_APPSET}"
 }
 
 # ------------------------------------------------------------------------------
