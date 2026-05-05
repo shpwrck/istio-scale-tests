@@ -27,7 +27,6 @@ spec:
           value: acm-openshift-gitops-placement-decision-1
   destination:
     server: https://kubernetes.default.svc
-    # Must match PlacementDecision namespace (same as charts/acm-openshift-gitops-resources Placement).
     namespace: openshift-gitops
   syncPolicy:
     automated:
