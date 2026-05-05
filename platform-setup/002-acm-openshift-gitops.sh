@@ -47,6 +47,7 @@ GITOPS_CLUSTER_CR_NAME="${GITOPS_CLUSTER_CR_NAME:-acm-openshift-gitops}"
 GITOPS_ADDON_ENABLED="${GITOPS_ADDON_ENABLED:-true}"
 GITOPS_CLUSTER_READY_WAIT_SEC="${GITOPS_CLUSTER_READY_WAIT_SEC:-1800}"
 ARGOCD_STABILIZE_WAIT_SEC="${ARGOCD_STABILIZE_WAIT_SEC:-900}"
+GITOPS_ADDON_FEATURE_WAIT_SEC="${GITOPS_ADDON_FEATURE_WAIT_SEC:-900}"
 
 readonly _ACM_LOCAL_CLUSTER_NAME_MAX_LEN=34
 
@@ -93,6 +94,7 @@ Environment:
   GITOPS_ADDON_ENABLED          GitOpsCluster gitopsAddon.enabled (default ${GITOPS_ADDON_ENABLED}).
   GITOPS_CLUSTER_READY_WAIT_SEC Max wait for GitOpsCluster success (default ${GITOPS_CLUSTER_READY_WAIT_SEC}).
   ARGOCD_STABILIZE_WAIT_SEC     Max wait for Argo CD after CSV (default ${ARGOCD_STABILIZE_WAIT_SEC}).
+  GITOPS_ADDON_FEATURE_WAIT_SEC Max wait for ClusterManager addon-gitops feature label availability (default ${GITOPS_ADDON_FEATURE_WAIT_SEC}).
 
   Step (3) / patch-only mode requires kubeconfig contexts named like each spoke ManagedCluster (e.g. rosa-002); use --merge-kubeconfig or log in spokes first.
   ACM_HUB_CONTEXT               Default hub context when --context omitted.
@@ -423,6 +425,22 @@ wait_for_gitopscluster_ready() {
 	die "GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} did not report success in time; oc --context=$CTX describe gitopscluster -n ${GITOPS_NAMESPACE} ${GITOPS_CLUSTER_CR_NAME}"
 }
 
+wait_for_gitops_addon_feature_available() {
+	local deadline=$((SECONDS + GITOPS_ADDON_FEATURE_WAIT_SEC))
+	local key='feature.open-cluster-management.io/addon-gitops-addon'
+	echo "Waiting for clustermanager/cluster-manager label ${key}=available (up to ${GITOPS_ADDON_FEATURE_WAIT_SEC}s)..."
+	while ((SECONDS < deadline)); do
+		local val
+		val="$(oc --context="$CTX" get clustermanager cluster-manager -o jsonpath="{.metadata.labels['feature\\.open-cluster-management\\.io/addon-gitops-addon']}" 2>/dev/null || true)"
+		if [[ "${val}" == "available" ]]; then
+			echo "ClusterManager label ${key}=${val}."
+			return 0
+		fi
+		sleep 15
+	done
+	die "ClusterManager label ${key} did not become available in time; check: oc --context=$CTX get clustermanager cluster-manager --show-labels"
+}
+
 lint_charts() {
 	helm lint "$CHART_GITOPS_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_GITOPS_OPERATOR}"
 	helm lint "$CHART_ACM_GITOPS_RESOURCES" --set argoServer.cluster=helm-lint-placeholder >/dev/null \
@@ -504,6 +522,7 @@ echo "--- 2) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
 helm_acm_gitops_resources_install
 
 wait_for_gitopscluster_ready
+wait_for_gitops_addon_feature_available
 
 if ((SKIP_ARGO_CLUSTER_SECRET_FIX == 0)); then
 	echo "--- 3) Patch ACM → Argo managed-cluster Secrets (${GITOPS_NAMESPACE}) ---"
