@@ -106,7 +106,7 @@ Usage: $(basename "$0") [options]
   Full install:
   1) Helm: charts/openshift-gitops-operator into ${GITOPS_OPERATOR_NAMESPACE}; wait for CSV + Argo CD instance to stabilize.
   2a) Helm: charts/gitops-hub-app-of-apps — optional Argo CD repository Secret (private Git over HTTPS or SSH) then Argo CD Applications for hub app-of-apps root + cert-manager operator manifests (skipped only if no repo URL after defaults: \`GITOPS_APP_REPO_URL\` defaults to \`git -C repo-root remote get-url origin\` when unset).
-  2b) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success.
+  2b) Helm: charts/acm-openshift-gitops-resources into ${GITOPS_NAMESPACE} — ManagedClusterSetBinding, Placement (hub excluded via local-cluster label), GitOpsCluster; wait for GitOpsCluster success + gitops-addon feature label on each ManagedCluster in ACM_CLUSTER_SET (skipped when no spokes unless GITOPS_FORCE_ACM_GITOPS_WAITS=1).
   3) Patch ACM Argo cluster Secrets (public API URL + bearer token) unless --skip-argoc-cluster-secret-fix.
 
   Patch only (e.g. after ACM/GitOps reconciles secrets): --patch-argoc-cluster-secrets-only --context HUB
@@ -148,9 +148,10 @@ Environment:
   GITOPS_ADDON_ENABLED          GitOpsCluster gitopsAddon.enabled (default ${GITOPS_ADDON_ENABLED}).
   GITOPS_CLUSTER_READY_WAIT_SEC Max wait for GitOpsCluster success (default ${GITOPS_CLUSTER_READY_WAIT_SEC}).
   ARGOCD_STABILIZE_WAIT_SEC     Max wait for Argo CD after CSV (default ${ARGOCD_STABILIZE_WAIT_SEC}).
-  GITOPS_ADDON_FEATURE_WAIT_SEC Max wait for ClusterManager addon-gitops feature label availability (default ${GITOPS_ADDON_FEATURE_WAIT_SEC}).
+  GITOPS_ADDON_FEATURE_WAIT_SEC Max wait for feature.open-cluster-management.io/addon-gitops-addon=available on each ManagedCluster in ACM_CLUSTER_SET (default ${GITOPS_ADDON_FEATURE_WAIT_SEC}).
+  GITOPS_FORCE_ACM_GITOPS_WAITS   When 1, always run GitOpsCluster / per-ManagedCluster gitops-addon waits even if there are zero spoke ManagedClusters (hub-only). Default: those waits are skipped when no spokes match Placement (same as excluding the hub).
 
-  Step (3) / patch-only mode requires kubeconfig contexts named like each spoke ManagedCluster (e.g. rosa-002); use --merge-kubeconfig or log in spokes first.
+  Step (3) / patch-only mode requires kubeconfig contexts named like each spoke ManagedCluster (e.g. rosa-002); use --merge-kubeconfig or log in spokes first. Hub ManagedCluster cluster Secrets are not patched (kube context is the hub).
   ACM_HUB_CONTEXT               Default hub context when --context omitted.
   ACM_LOCAL_CLUSTER_NAME        Hub ManagedCluster name when --local-cluster-name omitted.
 
@@ -267,6 +268,11 @@ patch_acm_argoc_managed_cluster_secrets() {
 
 		mc="$(oc --context "$hub_ctx" get secret "$secname" -n "$ns" -o jsonpath='{.metadata.labels.apps\.open-cluster-management\.io/cluster-name}' 2>/dev/null || true)"
 		[[ -n "$mc" ]] || die "secret ${secname}: missing cluster-name label"
+
+		if [[ -n "${ACM_LOCAL_CLUSTER_NAME:-}" && "$mc" == "${ACM_LOCAL_CLUSTER_NAME}" ]]; then
+			echo "### ${secname} -> skip (hub ManagedCluster ${mc}; Argo runs on-cluster)"
+			continue
+		fi
 
 		url="$(oc --context "$hub_ctx" get managedcluster "$mc" -o jsonpath='{.spec.managedClusterClientConfigs[0].url}' 2>/dev/null || true)"
 		[[ -n "$url" ]] || die "ManagedCluster ${mc}: no managedClusterClientConfigs[0].url"
@@ -645,6 +651,35 @@ helm_hub_app_of_apps_install() {
 	fi
 }
 
+# Placement selects ManagedClusters in ACM_CLUSTER_SET without label local-cluster=true (same as charts/acm-openshift-gitops-resources Placement).
+count_spoke_managedclusters_for_gitops_placement() {
+	local out=""
+	out="$(oc --context "$CTX" get managedcluster -o json 2>/dev/null \
+		| jq -r --arg cs "${ACM_CLUSTER_SET}" '
+			[.items[]
+				| select(.metadata.labels["cluster.open-cluster-management.io/clusterset"] == $cs)
+				| select((.metadata.labels["local-cluster"] // "") != "true")]
+			| length
+		' 2>/dev/null || true)"
+	echo "${out:-}"
+}
+
+skip_acm_gitops_cluster_and_addon_waits() {
+	if [[ "${GITOPS_FORCE_ACM_GITOPS_WAITS:-0}" == "1" ]]; then
+		return 1
+	fi
+	local n=""
+	n="$(count_spoke_managedclusters_for_gitops_placement)"
+	if [[ -z "$n" ]] || ! [[ "$n" =~ ^[0-9]+$ ]]; then
+		return 1
+	fi
+	if [[ "$n" != "0" ]]; then
+		return 1
+	fi
+	echo "Skipping GitOpsCluster success wait and spoke ManagedCluster gitops-addon label wait: zero spoke ManagedClusters in clusterset ${ACM_CLUSTER_SET} (hub-only — same exclusion as Placement local-cluster). Set GITOPS_FORCE_ACM_GITOPS_WAITS=1 to wait anyway."
+	return 0
+}
+
 wait_for_gitopscluster_ready() {
 	local deadline=$((SECONDS + GITOPS_CLUSTER_READY_WAIT_SEC))
 	echo "Waiting for GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} (up to ${GITOPS_CLUSTER_READY_WAIT_SEC}s)..."
@@ -668,20 +703,52 @@ wait_for_gitopscluster_ready() {
 	die "GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} did not report success in time; oc --context=$CTX describe gitopscluster -n ${GITOPS_NAMESPACE} ${GITOPS_CLUSTER_CR_NAME}"
 }
 
-wait_for_gitops_addon_feature_available() {
+# Every ManagedCluster in ACM_CLUSTER_SET (hub and spokes). RHACM sets feature.open-cluster-management.io/addon-gitops-addon on each ManagedCluster.
+list_managedclusters_in_clusterset() {
+	oc --context "$CTX" get managedcluster -o json 2>/dev/null \
+		| jq -r --arg cs "${ACM_CLUSTER_SET}" '
+			[.items[]
+				| select(.metadata.labels["cluster.open-cluster-management.io/clusterset"] == $cs)]
+			| .[].metadata.name
+		' 2>/dev/null || true
+}
+
+managedcluster_gitops_addon_feature_available() {
+	local mc="$1"
+	local val=""
+	val="$(oc --context "$CTX" get managedcluster "$mc" -o json 2>/dev/null \
+		| jq -r '.metadata.labels["feature.open-cluster-management.io/addon-gitops-addon"] // empty' 2>/dev/null || true)"
+	[[ "${val}" == "available" ]]
+}
+
+wait_for_gitops_addon_feature_on_managedclusters() {
 	local deadline=$((SECONDS + GITOPS_ADDON_FEATURE_WAIT_SEC))
-	local key='feature.open-cluster-management.io/addon-gitops-addon'
-	echo "Waiting for clustermanager/cluster-manager label ${key}=available (up to ${GITOPS_ADDON_FEATURE_WAIT_SEC}s)..."
+	local key="feature.open-cluster-management.io/addon-gitops-addon"
+	local names pending
+	names="$(list_managedclusters_in_clusterset)"
+	names="$(echo "$names" | sed '/^[[:space:]]*$/d')"
+	if [[ -z "$names" ]]; then
+		echo "No ManagedClusters in clusterset ${ACM_CLUSTER_SET}; nothing to wait for for ${key}."
+		return 0
+	fi
+	echo "Waiting for ManagedCluster label ${key}=available on each cluster in clusterset ${ACM_CLUSTER_SET} (up to ${GITOPS_ADDON_FEATURE_WAIT_SEC}s)..."
 	while ((SECONDS < deadline)); do
-		local val
-		val="$(oc --context="$CTX" get clustermanager cluster-manager -o jsonpath="{.metadata.labels['feature\\.open-cluster-management\\.io/addon-gitops-addon']}" 2>/dev/null || true)"
-		if [[ "${val}" == "available" ]]; then
-			echo "ClusterManager label ${key}=${val}."
+		pending=""
+		while IFS= read -r mc; do
+			[[ -z "$mc" ]] && continue
+			if managedcluster_gitops_addon_feature_available "$mc"; then
+				continue
+			fi
+			pending="${pending}${pending:+, }${mc}"
+		done <<<"$names"
+		if [[ -z "$pending" ]]; then
+			echo "All ManagedClusters in clusterset ${ACM_CLUSTER_SET} have ${key}=available."
 			return 0
 		fi
+		echo "  Pending (${key}): ${pending}"
 		sleep 15
 	done
-	die "ClusterManager label ${key} did not become available in time; check: oc --context=$CTX get clustermanager cluster-manager --show-labels"
+	die "Timed out waiting for ${key}=available on every ManagedCluster in clusterset ${ACM_CLUSTER_SET}; try: oc --context=$CTX get managedcluster -o json | jq '.items[] | {name: .metadata.name, addonGitOps: .metadata.labels[\"feature.open-cluster-management.io/addon-gitops-addon\"]}'"
 }
 
 lint_charts() {
@@ -705,6 +772,14 @@ fi
 
 CTX="$(resolve_context)"
 
+ACM_LOCAL_CLUSTER_NAME="$(resolve_local_cluster_name)"
+if (( ${#ACM_LOCAL_CLUSTER_NAME} > _ACM_LOCAL_CLUSTER_NAME_MAX_LEN )); then
+	die "GitOpsCluster argoServer.cluster must be at most ${_ACM_LOCAL_CLUSTER_NAME_MAX_LEN} characters (got ${#ACM_LOCAL_CLUSTER_NAME}: ${ACM_LOCAL_CLUSTER_NAME})."
+fi
+if [[ -z "${ACM_LOCAL_CLUSTER_NAME}" ]]; then
+	die "hub ManagedCluster name is empty; use --local-cluster-name or ACM_LOCAL_CLUSTER_NAME."
+fi
+
 if ((PATCH_ARGO_CLUSTER_SECRETS_ONLY == 1)); then
 	patch_acm_argoc_managed_cluster_secrets "$CTX" "$GITOPS_NAMESPACE" "$DRY_RUN"
 	exit 0
@@ -714,14 +789,6 @@ command -v helm >/dev/null 2>&1 || {
 	echo "error: helm not found" >&2
 	exit 2
 }
-
-ACM_LOCAL_CLUSTER_NAME="$(resolve_local_cluster_name)"
-if (( ${#ACM_LOCAL_CLUSTER_NAME} > _ACM_LOCAL_CLUSTER_NAME_MAX_LEN )); then
-	die "GitOpsCluster argoServer.cluster must be at most ${_ACM_LOCAL_CLUSTER_NAME_MAX_LEN} characters (got ${#ACM_LOCAL_CLUSTER_NAME}: ${ACM_LOCAL_CLUSTER_NAME})."
-fi
-if [[ -z "${ACM_LOCAL_CLUSTER_NAME}" ]]; then
-	die "hub ManagedCluster name is empty; use --local-cluster-name or ACM_LOCAL_CLUSTER_NAME."
-fi
 
 [[ -d "$CHART_GITOPS_OPERATOR" ]] || die "chart not found: ${CHART_GITOPS_OPERATOR}"
 [[ -d "$CHART_ACM_GITOPS_RESOURCES" ]] || die "chart not found: ${CHART_ACM_GITOPS_RESOURCES}"
@@ -783,8 +850,12 @@ fi
 echo "--- 2b) Install ACM GitOps resources (${GITOPS_RESOURCES_RELEASE}) ---"
 helm_acm_gitops_resources_install
 
-wait_for_gitopscluster_ready
-wait_for_gitops_addon_feature_available
+if skip_acm_gitops_cluster_and_addon_waits; then
+	:
+else
+	wait_for_gitopscluster_ready
+	wait_for_gitops_addon_feature_on_managedclusters
+fi
 
 if ((SKIP_ARGO_CLUSTER_SECRET_FIX == 0)); then
 	echo "--- 3) Patch ACM → Argo managed-cluster Secrets (${GITOPS_NAMESPACE}) ---"
