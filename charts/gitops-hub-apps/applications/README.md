@@ -10,4 +10,6 @@ Adding a new app: commit a new `Application` manifest here with `metadata.namesp
 
 `hub-external-secrets-operator-appset` installs `charts/gitops-hub-ocm-placement-appset` with `values-external-secrets.yaml` so External Secrets is deployed on each cluster in Placement (spokes) plus `in-cluster` for the hub; each generated Application sets `spec.destination.name` to that cluster. Do not use a separate hub-only Application targeting `charts/external-secrets-operator` if you rely on spokes.
 
+`hub-kubeconfig-from-argosecret-appset` installs the same placement chart with `values-kubeconfig-from-argosecret.yaml` on the hub: generated Applications remain `destination.inClusterServer` but each Helm release parameter `clusterName` matches a ManagedCluster name so `ExternalSecret` can read that cluster’s `*-application-manager-cluster-secret` and emit a `kubeconfig` Secret. Set `inClusterGenerator.clusterName` in the value file to the hub’s `ManagedCluster` name (not `in-cluster`). Install after or with External Secrets on the hub (wave 18 after ESO appset wave 12).
+
 Exclude patterns on the root Application omit `*.md` so this README is not applied as a manifest.

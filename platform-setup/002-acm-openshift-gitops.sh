@@ -2,7 +2,7 @@
 # Install OpenShift GitOps on the ACM hub (Helm), wait until Argo CD is ready, apply hub Argo “app of apps” + cert-manager (Helm), then apply RHACM GitOps wiring (Helm):
 # ManagedClusterSetBinding, Placement (all clusters in the set except the hub / local-cluster), GitOpsCluster — and wait for success.
 # Optionally patch ACM-created Argo cluster Secrets (public API URL + bearer token); RHACM often emits unusable internal URLs.
-# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); child Applications include `hub-acm-openshift-gitops-resources` (default: `charts/acm-openshift-gitops-resources` when `GITOPS_ACM_RESOURCES_VIA_ARGO=1`), `hub-cert-manager-operator`, `hub-mesh-ca`, ApplicationSet parents `hub-mesh-ca-intermediate-appset` / `hub-external-secrets-operator-appset` (Helm chart `charts/gitops-hub-ocm-placement-appset`; per-cluster children use `charts/hub-mesh-ca-intermediate` and `charts/external-secrets-operator`). This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
+# Repo note: mesh CA / Istio lives under `istio-setup/` (starts at 001-ossm-mc-cacerts.sh). Hub cert-manager samples: `manifests/cert-manager-samples/`. Hub Argo: `charts/gitops-hub-app-of-apps` installs `hub-gitops-root` (directory-sync `charts/gitops-hub-apps/applications`); child Applications include `hub-acm-openshift-gitops-resources` (default: `charts/acm-openshift-gitops-resources` when `GITOPS_ACM_RESOURCES_VIA_ARGO=1`), `hub-cert-manager-operator`, `hub-mesh-ca`, ApplicationSet parents `hub-mesh-ca-intermediate-appset`, `hub-external-secrets-operator-appset`, `hub-kubeconfig-from-argosecret-appset` (Helm chart `charts/gitops-hub-ocm-placement-appset`; per-cluster children use `charts/hub-mesh-ca-intermediate`, `charts/external-secrets-operator`, `charts/hub-kubeconfig-from-argosecret`). This script is `platform-setup/002` (after `platform-setup/001` ACM hub).
 #
 # Ref: https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview
 # Prerequisites: RHACM hub (`platform-setup/001`); spokes in ManagedClusterSet ${ACM_CLUSTER_SET} (cluster.open-cluster-management.io/clusterset label from hub install).
@@ -84,6 +84,7 @@ CHART_CERT_MANAGER_OPERATOR="${ROOT}/charts/cert-manager-operator"
 CHART_GITOPS_HUB_APPS="${ROOT}/charts/gitops-hub-apps"
 CHART_HUB_MESH_CA="${ROOT}/charts/hub-mesh-ca"
 CHART_HUB_MESH_CA_INTERMEDIATE="${ROOT}/charts/hub-mesh-ca-intermediate"
+CHART_HUB_KUBECONFIG_FROM_ARGOSECRET="${ROOT}/charts/hub-kubeconfig-from-argosecret"
 CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET="${ROOT}/charts/gitops-hub-ocm-placement-appset"
 CHART_EXTERNAL_SECRETS_OPERATOR="${ROOT}/charts/external-secrets-operator"
 GITOPS_APPSET_ANY_NS_MANIFEST_DIR="${ROOT}/platform-setup/manifests/gitops-appset-any-namespace"
@@ -949,7 +950,10 @@ lint_charts() {
 		|| die "helm lint failed: ${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET} (external-secrets preset)"
 	helm lint "$CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET" -f "${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET}/values-mesh-ca-intermediate.yaml" --set repo.url=https://example.com/org/repo.git >/dev/null \
 		|| die "helm lint failed: ${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET} (mesh-ca-intermediate preset)"
-	helm lint "$CHART_EXTERNAL_SECRETS_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_EXTERNAL_SECRETS_OPERATOR}"
+	helm lint "$CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET" -f "${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET}/values-kubeconfig-from-argosecret.yaml" --set repo.url=https://example.com/org/repo.git >/dev/null \
+		|| die "helm lint failed: ${CHART_GITOPS_HUB_OCM_PLACEMENT_APPSET} (kubeconfig-from-argosecret preset)"
+	helm lint "$CHART_HUB_KUBECONFIG_FROM_ARGOSECRET" --set clusterName=helm-lint-placeholder >/dev/null \
+		|| die "helm lint failed: ${CHART_HUB_KUBECONFIG_FROM_ARGOSECRET}"
 }
 
 # ------------------------------------------------------------------------------
@@ -987,6 +991,7 @@ command -v helm >/dev/null 2>&1 || {
 [[ -d "$CHART_HUB_APP_OF_APPS" ]] || die "chart not found: ${CHART_HUB_APP_OF_APPS}"
 [[ -d "$CHART_CERT_MANAGER_OPERATOR" ]] || die "chart not found: ${CHART_CERT_MANAGER_OPERATOR}"
 [[ -d "$CHART_GITOPS_HUB_APPS" ]] || die "chart not found: ${CHART_GITOPS_HUB_APPS}"
+[[ -d "$CHART_HUB_KUBECONFIG_FROM_ARGOSECRET" ]] || die "chart not found: ${CHART_HUB_KUBECONFIG_FROM_ARGOSECRET}"
 
 echo "Hub context: ${CTX}"
 echo "GitOps operator Subscription namespace: ${GITOPS_OPERATOR_NAMESPACE}"

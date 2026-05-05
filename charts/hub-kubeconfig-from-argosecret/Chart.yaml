@@ -1,0 +1,5 @@
+apiVersion: v2
+name: hub-kubeconfig-from-argosecret
+description: ExternalSecret that reads an ACM Argo cluster (*-application-manager-cluster-secret) and writes a kubectl kubeconfig Secret (hub-only; one ManagedCluster name per sync).
+type: application
+version: 0.1.0

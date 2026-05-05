@@ -1,0 +1,35 @@
+# Namespace where Argo CD + ACM cluster Secrets live (same as SecretStore and target Secret).
+namespace: openshift-gitops
+
+# ManagedCluster name matching the Argo cluster secret (for spokes e.g. rosa-002; for hub list entry use the hub ManagedCluster name e.g. rosa-001, not in-cluster).
+clusterName: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Source Argo cluster Secret name; default {clusterName}-application-manager-cluster-secret.
+sourceSecretName: ""
+
+# Target Secret name holding key kubeconfig; default kubeconfig-{clusterName}.
+targetSecretName: ""
+
+refreshInterval: 1h
+
+secretStoreName: ""
+
+serviceAccountName: ""
+
+# Grant openshift-gitops-argocd-application-controller permission to reconcile ESO CRs and target Secret.
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller
+  labels: {}
+  annotations: {}
+
+argoSyncWaves:
+  enabled: true
+  rbac: -30
+  secretStore: -25
+  externalSecret: 0
