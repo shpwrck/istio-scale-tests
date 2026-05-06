@@ -4,6 +4,59 @@ This repository holds automation and manifests used to scale-test Istio in a mul
 
 Use it to reproduce installs, certificate wiring, remote secrets, east–west gateways, and sample workloads—then measure behavior under load or changing cluster counts.
 
+```
+   Multi-primary, multi-network mesh — mesh-id: mesh1
+   Shared plug-in CA: root + per-cluster intermediates (cacerts/)
+
+     ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+     │   rosa-001   │    │   rosa-002   │    │   rosa-003   │
+     │  network-1   │    │  network-2   │    │  network-3   │
+     ├──────────────┤    ├──────────────┤    ├──────────────┤
+     │ istiod       │    │ istiod       │    │ istiod       │
+     │ ingress-gw   │    │ ingress-gw   │    │ ingress-gw   │
+     │ east-west-gw │◄──▶│ east-west-gw │◄──▶│ east-west-gw │
+     │  :15443      │    │  :15443      │    │  :15443      │
+     └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+            └────── remote secrets (istio-setup/005) ──────┘
+              istiod on each cluster watches remote APIs
+```
+
+---
+
+## Quick start
+
+Already have three ROSA HCP clusters with merged kubeconfig contexts `rosa-001`, `rosa-002`, `rosa-003`? Run a mesh-only install end-to-end from the repo root:
+
+```bash
+export SETUP_CONTEXTS=rosa-001,rosa-002,rosa-003
+source config/versions.env
+
+# Plug-in CA + Istio + ingress
+./istio-setup/001-ossm-mc-cacerts.sh generate --base "$PWD" --clusters "$SETUP_CONTEXTS"
+./istio-setup/001-ossm-mc-cacerts.sh apply --base "$PWD" \
+  --context-map 'rosa-001:rosa-001,rosa-002:rosa-002,rosa-003:rosa-003' \
+  --replace --network-suffix network
+./istio-setup/003-ossm-mc-apply-istio.sh
+./istio-setup/004-ossm-mc-apply-ingress-gateway.sh
+
+# Multi-cluster wiring + verify
+PATH="$PWD/.bin:$PATH" ./istio-setup/005-ossm-mc-remote-secrets.sh
+./istio-setup/007-ossm-mc-apply-east-west.sh
+PATH="$PWD/.bin:$PATH" ./istio-setup/008-ossm-mc-verify-east-west.sh
+```
+
+No clusters yet? Start at [§1 Provision clusters](#1-provision-clusters-terraform). Want GitOps-driven installs? See [Optional — Platform scripts](#optional--platform-scripts-platform-setup).
+
+---
+
+## End-to-end order
+
+Run automation in this sequence:
+
+1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
+2. Mesh — install and verify Istio across clusters (`istio-setup/`, `001`–`009`). Optional GitOps overlay: run `platform-setup/` `001`–`002` first.
+3. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
+
 ---
 
 ## What you need
@@ -18,25 +71,12 @@ On the machine where you run repo commands (tests assume bash 4+):
 | `terraform`       | To apply `terraform/rosa-hcp/` (pinned Terraform version: see that directory’s `versions.tf`).                                                                    |
 | `helm`            | Helm 3 for `platform-setup/001`, `istio-setup/004`, and charts under `charts/`.                                                                                   |
 | `istioctl`        | On `PATH`, or a binary at `.bin/istioctl` with `PATH="$PWD/.bin:$PATH"`; align the build with `ISTIO_VERSION` in `config/versions.env`.                           |
-| `jq`              | JSON filtering (Terraform merge helper, script outputs).                                                                                                          |
-| `openssl`         | CA generation (`istio-setup/001`).                                                                                                                                |
-| `curl`            | Ingress checks and helpers.                                                                                                                                       |
-| `envsubst`        | Usually from gettext — template rendering (`istio-setup/003`, `istio-setup/007`).                                                                                 |
-| `git`             | Only if you clone or vendor tooling outside this repo.                                                                                                            |
+| `jq`, `openssl`, `curl`, `envsubst` | Standard Unix utilities — `jq` for Terraform/script JSON, `openssl` for `istio-setup/001` CA generation, `curl` for ingress checks, `envsubst` (gettext) renders templates in `istio-setup/003` and `007`. |
 
 
 Optional (later steps): Go on `PATH` when running `isotope-multicluster/` against a local [istio/tools](https://github.com/istio/tools) checkout.
 
----
-
-## End-to-end order
-
-Run automation in this sequence:
-
-1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
-2. Optional ACM / GitOps and mesh — `platform-setup/` for RHACM hub + hub GitOps (`001`, `002`), then install and verify Istio across clusters (`istio-setup/`, `001`–`009`).
-3. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
-4. Results — collect metrics and reports from the run *(section reserved; tooling not yet in this repository)*.
+**Configuration:** most scripts read defaults from `config/versions.env`. `source` it before overriding any variable; common ones: `SETUP_CONTEXTS`, `ISTIO_VERSION`, `MESH_ID`, `OPENSHIFT_VERSION`.
 
 ---
 
@@ -46,10 +86,12 @@ Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terrafor
 
 ---
 
-## 2. Optional ACM / GitOps (`platform-setup/`) and mesh (`istio-setup/`)
+## 2. Install the mesh (`istio-setup/`)
 
-After clusters exist and you can `oc login`, run scripts in directory order: optional `platform-setup/` 001 (ACM hub) and 002 (OpenShift GitOps + ACM GitOpsCluster on the hub), then `istio-setup/` 001–009 for CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks.
+After clusters exist and you can `oc login`, run `istio-setup/` 001–009 for CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks. If you want a GitOps-driven workflow on top, run `platform-setup/` 001–002 first; both are optional and covered in the [Optional — Platform scripts](#optional--platform-scripts-platform-setup) subsection below.
 
+<details>
+<summary><b>Repository layout</b> — directories and Helm charts (click to expand)</summary>
 
 | Path                                     | Role                                                                                                                                                                                                                              |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -71,10 +113,18 @@ After clusters exist and you can `oc login`, run scripts in directory order: opt
 | `manifests/ossm-multi-cluster/`          | `templates/*.yaml.tpl` — rendered by `istio-setup/003` / `istio-setup/007` (`envsubst` + `config/versions.env`); `east-west/common/`, `ingress-verify/`, optional `samples/`. Ingress gateways use Helm `istio/gateway` in `004`. |
 | `cacerts/`                               | Generated plug-in CA material and per-cluster intermediates (created by `istio-setup/001-ossm-mc-cacerts.sh`).                                                                                                                    |
 
+</details>
 
-### Platform scripts (`platform-setup/`)
 
-Use 001 for an ACM hub on the first ROSA cluster from Terraform outputs (optional for mesh-only workflows). Use 002 after 001 to install OpenShift GitOps and wire ACM GitOpsCluster ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
+### Optional — Platform scripts (`platform-setup/`)
+
+Skip this subsection for mesh-only flows. Use 001 for an ACM hub on the first ROSA cluster from Terraform outputs. Use 002 after 001 to install OpenShift GitOps and wire ACM GitOpsCluster ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
+
+```bash
+# Run BEFORE the mesh scripts in Quick start (the hub cluster gets ACM + Argo CD)
+./platform-setup/001-acm-install-hub.sh --context rosa-001
+./platform-setup/002-acm-openshift-gitops.sh --context rosa-001
+```
 
 
 | Step | Script                                       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -99,33 +149,22 @@ Use 001 for an ACM hub on the first ROSA cluster from Terraform outputs (optiona
 | 009  | `istio-setup/009-ossm-mc-verify-ingress-gateway.sh`            | Optional. Deploys `ingress-verify` echo workload + Gateway/VS (`manifests/ossm-multi-cluster/ingress-verify/`), then curls the ingress LB per context (`--contexts` / `SETUP_CONTEXTS`). `--cleanup` removes the namespace after success.                               |
 
 
-Typical one-liners (from repo root):
-
-```bash
-# Optional: ACM hub on first Terraform cluster (context auto-resolved when state exists)
-./platform-setup/001-acm-install-hub.sh --context rosa-001
-
-# Optional: OpenShift GitOps + ACM GitOpsCluster on hub (after platform 001; mesh CA is istio-setup/001 below)
-./platform-setup/002-acm-openshift-gitops.sh --context rosa-001
-
-./istio-setup/001-ossm-mc-cacerts.sh generate --base "$PWD" --clusters rosa-001,rosa-002,rosa-003
-./istio-setup/001-ossm-mc-cacerts.sh verify --base "$PWD"
-./istio-setup/001-ossm-mc-cacerts.sh apply --base "$PWD" \
-  --context-map 'rosa-001:rosa-001,rosa-002:rosa-002,rosa-003:rosa-003' --replace --network-suffix network
-
-./istio-setup/003-ossm-mc-apply-istio.sh --contexts rosa-001,rosa-002,rosa-003
-./istio-setup/004-ossm-mc-apply-ingress-gateway.sh --contexts rosa-001,rosa-002,rosa-003
-./istio-setup/009-ossm-mc-verify-ingress-gateway.sh --contexts rosa-001,rosa-002,rosa-003
-PATH="$PWD/.bin:$PATH" ./istio-setup/005-ossm-mc-remote-secrets.sh
-./istio-setup/007-ossm-mc-apply-east-west.sh
-PATH="$PWD/.bin:$PATH" ./istio-setup/008-ossm-mc-verify-east-west.sh
-```
-
 Most setup scripts accept `--dry-run` (typically `oc apply --dry-run=client`) to validate YAML without mutating clusters; 008 is read-only and documents `--dry-run` as a no-op. 009 supports `--dry-run` and optional `--cleanup`.
 
 ### Sample workloads (optional)
 
 Under `manifests/ossm-multi-cluster/samples/` there are split helloworld and sleep YAML files used to validate routing and load balancing across clusters (e.g. v1 on one cluster, v2 on another, client on a third). Apply them with `oc apply` per cluster after sidecar injection is enabled on namespace `sample`. A `DestinationRule` is included to relax locality load balancing for demos.
+
+---
+
+## Verify the mesh install
+
+Two scripts confirm the multi-cluster mesh is wired correctly:
+
+- **`istio-setup/009-ossm-mc-verify-ingress-gateway.sh`** — deploys an echo workload + Gateway/VirtualService per cluster and curls the ingress LoadBalancer. Each context should return HTTP 200 from the per-cluster hostname.
+- **`istio-setup/008-ossm-mc-verify-east-west.sh`** — prints `istioctl proxy-status`, east–west Service/Endpoints, and istiod pods. In `proxy-status`, proxies should report `SYNCED` for endpoints from the *other* clusters (proof remote secrets propagated).
+
+If 008 only shows local endpoints, remote secrets aren't reaching istiod — re-run `istio-setup/005`, and fall back to `istio-setup/006` (lab only) if TLS to remote API servers is the blocker.
 
 ---
 
@@ -135,18 +174,18 @@ Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/is
 
 ---
 
-## 4. Gather results
+## Troubleshooting
 
-*This step is not implemented in the repository yet. It will document how to pull telemetry, Fortio output, and other artifacts into a single report after Isotope (or other load generators) finish.*
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Remote watches fail with TLS errors after `istio-setup/005` | Remote API server cert chain not trusted by istiod | Run `istio-setup/002` to embed CA chains into your kubeconfig, then re-run 005. Lab fallback: `istio-setup/006` (`insecure-skip-tls-verify`). |
+| Ingress LoadBalancer returns connection refused on ROSA AWS | NLB security groups missing or wrong | Set `AWS_LOAD_BALANCER_SECURITY_GROUPS` (and optionally `_EXTRA_`) per the notes in `config/versions.env`, or use `config/ingress-lb-security-groups.map`. |
+| `istioctl` errors on unrecognized API versions or schema | Local `istioctl` doesn't match `ISTIO_VERSION` | Place a matching binary at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"` before mesh scripts. |
+| `proxy-status` only lists local endpoints | Remote secrets not propagated | Re-run `istio-setup/005`; restart istiod after applying secrets if endpoints don't refresh. |
 
 ---
 
 ## References
 
 - [Red Hat OpenShift Service Mesh 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies)
-
----
-
-## Coding agents
-
-See `AGENTS.md` in the repository root for project context, edit conventions, and keeping documentation aligned with code changes.
+- Coding agents: see [`AGENTS.md`](AGENTS.md) for project context, edit conventions, and keeping docs aligned with code changes.
