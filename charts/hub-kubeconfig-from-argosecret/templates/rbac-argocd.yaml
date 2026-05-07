@@ -20,7 +20,7 @@ metadata:
     {{- end }}
 rules:
   - apiGroups: ["external-secrets.io"]
-    resources: ["externalsecrets", "secretstores"]
+    resources: ["externalsecrets", "secretstores", "pushsecrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets", "serviceaccounts"]
