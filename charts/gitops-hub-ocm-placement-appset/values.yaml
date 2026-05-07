@@ -18,6 +18,7 @@ generatorConfigMap:
   name: acm-gitops-placement-generator
 
 clusterDecisionResource:
+  enabled: true
   requeueAfterSeconds: 30
 
 placementRbac:
