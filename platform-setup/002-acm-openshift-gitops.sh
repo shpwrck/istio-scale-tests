@@ -309,8 +309,11 @@ patch_acm_argoc_managed_cluster_secrets() {
 			continue
 		fi
 
-		url="$(oc --context "$hub_ctx" get managedcluster "$mc" -o jsonpath='{.spec.managedClusterClientConfigs[0].url}' 2>/dev/null || true)"
-		[[ -n "$url" ]] || die "ManagedCluster ${mc}: no managedClusterClientConfigs[0].url"
+		# Read the API URL from the kubeconfig context (public endpoint) rather than
+		# ManagedCluster.spec.managedClusterClientConfigs which often contains an
+		# internal control-plane URL unreachable from the hub.
+		url="$(oc config view --minify --context "$mc" -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+		[[ -n "$url" ]] || die "ManagedCluster ${mc}: no server URL in kubeconfig context (log in to spoke or use --merge-kubeconfig)"
 
 		cfg64="$(build_argoc_cluster_secret_config_b64 "$mc")"
 		srv64="$(echo -n "$url" | base64 -w0)"
