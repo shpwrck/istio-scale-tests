@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spoke-ossm-operator
+description: Creates istio-system and istio-cni namespaces and installs the Red Hat OSSM 3 (Sail) operator via OLM on each spoke cluster.
+type: application
+version: 0.1.0

@@ -1,0 +1,35 @@
+# Argo CD Application — ApplicationSet that installs OSSM 3 (Sail) operator and creates istio-system / istio-cni namespaces on every spoke cluster via ACM Placement.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spoke-ossm-operator-appset
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: spoke-ossm-operator-appset
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/gitops-hub-ocm-placement-appset
+    helm:
+      releaseName: gitops-spoke-ossm-operator-appset
+      valueFiles:
+        - values-ossm-operator.yaml
+      parameters:
+        - name: repo.url
+          value: https://github.com/shpwrck/istio-scale-tests.git
+        - name: repo.revision
+          value: main
+        - name: placement.name
+          value: acm-openshift-gitops-placement
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
