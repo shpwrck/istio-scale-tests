@@ -751,31 +751,22 @@ wait_and_patch_hub_acm_gitops_resources_application() {
 	if ! oc --context="$CTX" get applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" &>/dev/null; then
 		die "timeout waiting for Application hub-acm-openshift-gitops-resources in ${GITOPS_NAMESPACE} (ensure hub-gitops-root can sync charts/gitops-hub-apps/applications)."
 	fi
-	local params_json patch_json addon
-	addon="$(gitops_addon_helm_bool)"
+	local params_json patch_json
 	params_json="$(jq -n \
 		--arg gitopsNs "$GITOPS_NAMESPACE" \
 		--arg cs "$ACM_CLUSTER_SET" \
 		--arg pn "$GITOPS_PLACEMENT_NAME" \
-		--arg gn "$GITOPS_CLUSTER_CR_NAME" \
-		--arg cluster "$ACM_LOCAL_CLUSTER_NAME" \
-		--arg addon "$addon" \
 		'[
 			{name:"gitopsNamespace",value:$gitopsNs},
 			{name:"clusterSet",value:$cs},
-			{name:"placement.name",value:$pn},
-			{name:"gitopsCluster.name",value:$gn},
-			{name:"argoServer.cluster",value:$cluster},
-			{name:"gitopsAddon.enabled",value:$addon}
+			{name:"placement.name",value:$pn}
 		]')"
 	patch_json="$(jq -n --argjson p "$params_json" '[{"op":"replace","path":"/spec/source/helm/parameters","value":$p}]')"
 	oc --context="$CTX" patch applications.argoproj.io hub-acm-openshift-gitops-resources -n "$GITOPS_NAMESPACE" --type=json -p "$patch_json"
-	echo "Patched hub-acm-openshift-gitops-resources Helm parameters (argoServer.cluster=${ACM_LOCAL_CLUSTER_NAME})."
+	echo "Patched hub-acm-openshift-gitops-resources Helm parameters."
 }
 
 helm_acm_gitops_resources_install() {
-	local addon
-	addon="$(gitops_addon_helm_bool)"
 	local -a cmd=(
 		helm --kube-context "$CTX" upgrade --install "$GITOPS_RESOURCES_RELEASE" "$CHART_ACM_GITOPS_RESOURCES"
 		--namespace "$GITOPS_NAMESPACE"
@@ -783,14 +774,39 @@ helm_acm_gitops_resources_install() {
 		--set gitopsNamespace="$GITOPS_NAMESPACE"
 		--set clusterSet="$ACM_CLUSTER_SET"
 		--set placement.name="$GITOPS_PLACEMENT_NAME"
-		--set gitopsCluster.name="$GITOPS_CLUSTER_CR_NAME"
-		--set argoServer.cluster="$ACM_LOCAL_CLUSTER_NAME"
-		--set "gitopsAddon.enabled=${addon}"
 	)
 	if ((DRY_RUN)); then
 		cmd+=(--dry-run=client)
 	fi
 	"${cmd[@]}"
+}
+
+apply_gitopscluster() {
+	local addon
+	addon="$(gitops_addon_helm_bool)"
+	echo "Applying GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} in ${GITOPS_NAMESPACE}..."
+	if ((DRY_RUN)); then
+		echo "dry-run: would apply GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} (argoServer.cluster=${ACM_LOCAL_CLUSTER_NAME}, gitopsAddon.enabled=${addon})."
+		return 0
+	fi
+	oc --context="$CTX" apply -f - <<-EOF
+	apiVersion: apps.open-cluster-management.io/v1beta1
+	kind: GitOpsCluster
+	metadata:
+	  name: ${GITOPS_CLUSTER_CR_NAME}
+	  namespace: ${GITOPS_NAMESPACE}
+	spec:
+	  argoServer:
+	    cluster: "${ACM_LOCAL_CLUSTER_NAME}"
+	    argoNamespace: ${GITOPS_NAMESPACE}
+	  placementRef:
+	    kind: Placement
+	    apiVersion: cluster.open-cluster-management.io/v1beta1
+	    name: ${GITOPS_PLACEMENT_NAME}
+	    namespace: ${GITOPS_NAMESPACE}
+	  gitopsAddon:
+	    enabled: ${addon}
+	EOF
 }
 
 verify_hub_argoc_applications() {
@@ -1020,6 +1036,7 @@ if ((DRY_RUN)); then
 		helm_acm_gitops_resources_install
 		helm_hub_app_of_apps_install
 	fi
+	apply_gitopscluster
 	echo "dry-run: done."
 	exit 0
 fi
@@ -1049,6 +1066,7 @@ if ((SKIP_WAIT)); then
 			helm_acm_gitops_resources_install
 		fi
 	fi
+	apply_gitopscluster
 	echo "Done (--skip-wait)."
 	exit 0
 fi
@@ -1079,6 +1097,9 @@ else
 	echo "--- 2b) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
 	helm_hub_app_of_apps_install
 fi
+
+echo "--- 3) Apply GitOpsCluster ${GITOPS_CLUSTER_CR_NAME} ---"
+apply_gitopscluster
 
 if skip_acm_gitops_cluster_and_addon_waits; then
 	:
