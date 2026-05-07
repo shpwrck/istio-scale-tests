@@ -8,6 +8,9 @@ sourceSecretsNamespace: openshift-gitops
 # ManagedCluster name matching the Argo cluster secret (for spokes e.g. rosa-002; for hub list entry use the hub ManagedCluster name e.g. rosa-001, not in-cluster).
 clusterName: ""
 
+# Spoke cluster API server URL, injected by the ApplicationSet generator.
+clusterServer: ""
+
 nameOverride: ""
 fullnameOverride: ""
 
@@ -31,6 +34,11 @@ kubernetesAPI:
 
 secretStoreName: ""
 
+spokeSecretStore:
+  enabled: true
+  name: ""
+  remoteNamespace: ""
+
 serviceAccountName: ""
 
 # Grant openshift-gitops-argocd-application-controller permission to reconcile ESO CRs and target Secret.
@@ -47,3 +55,4 @@ argoSyncWaves:
   rbac: -30
   secretStore: -25
   externalSecret: 0
+  spokeSecretStore: 5

@@ -38,6 +38,16 @@ Create a default fully qualified app name.
 {{- end }}
 {{- end }}
 
+{{- define "hub-kubeconfig-from-argosecret.spokeSecretStoreName" -}}
+{{- if .Values.spokeSecretStore.name }}
+{{- .Values.spokeSecretStore.name | trunc 63 | trimSuffix "-" }}
+{{- else if .Values.clusterName }}
+{{- printf "%s-spoke-k8s" .Values.clusterName | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- fail "clusterName or spokeSecretStore.name is required" }}
+{{- end }}
+{{- end }}
+
 {{- define "hub-kubeconfig-from-argosecret.secretStoreName" -}}
 {{- default (printf "%s-k8s" (include "hub-kubeconfig-from-argosecret.fullname" .) | trunc 63 | trimSuffix "-") .Values.secretStoreName }}
 {{- end }}
