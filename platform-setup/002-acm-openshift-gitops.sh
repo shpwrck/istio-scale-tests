@@ -98,6 +98,8 @@ HUB_ACM_GITOPS_APP_WAIT_SEC="${HUB_ACM_GITOPS_APP_WAIT_SEC:-600}"
 GITOPS_ADDON_ENABLED="${GITOPS_ADDON_ENABLED:-true}"
 GITOPS_CLUSTER_READY_WAIT_SEC="${GITOPS_CLUSTER_READY_WAIT_SEC:-1800}"
 ARGOCD_STABILIZE_WAIT_SEC="${ARGOCD_STABILIZE_WAIT_SEC:-900}"
+ARGOCD_RESOURCE_LIMITS_CPU="${ARGOCD_RESOURCE_LIMITS_CPU:-4}"
+ARGOCD_RESOURCE_LIMITS_MEMORY="${ARGOCD_RESOURCE_LIMITS_MEMORY:-4Gi}"
 GITOPS_ADDON_FEATURE_WAIT_SEC="${GITOPS_ADDON_FEATURE_WAIT_SEC:-900}"
 
 readonly _ACM_LOCAL_CLUSTER_NAME_MAX_LEN=34
@@ -165,6 +167,8 @@ Environment:
   GITOPS_ADDON_ENABLED          GitOpsCluster gitopsAddon.enabled (default ${GITOPS_ADDON_ENABLED}).
   GITOPS_CLUSTER_READY_WAIT_SEC Max wait for GitOpsCluster success (default ${GITOPS_CLUSTER_READY_WAIT_SEC}).
   ARGOCD_STABILIZE_WAIT_SEC     Max wait for Argo CD after CSV (default ${ARGOCD_STABILIZE_WAIT_SEC}).
+  ARGOCD_RESOURCE_LIMITS_CPU    CPU limit for ArgoCD components — controller, repo-server, server, applicationSet (default ${ARGOCD_RESOURCE_LIMITS_CPU}).
+  ARGOCD_RESOURCE_LIMITS_MEMORY Memory limit for ArgoCD components (default ${ARGOCD_RESOURCE_LIMITS_MEMORY}).
   GITOPS_ADDON_FEATURE_WAIT_SEC Max wait for feature.open-cluster-management.io/addon-gitops-addon=available on each ManagedCluster in ACM_CLUSTER_SET (default ${GITOPS_ADDON_FEATURE_WAIT_SEC}).
   GITOPS_FORCE_ACM_GITOPS_WAITS   When 1, always run GitOpsCluster / per-ManagedCluster gitops-addon waits even if there are zero spoke ManagedClusters (hub-only). Default: those waits are skipped when no spokes match Placement (same as excluding the hub).
 
@@ -605,6 +609,33 @@ wait_for_argocd_stabilized() {
 	die "Argo CD did not stabilize in time; check: oc --context=$CTX describe argocd ${cr} -n ${GITOPS_NAMESPACE}"
 }
 
+patch_argocd_resource_limits() {
+	local argocd_name="${GITOPS_ARGOCD_CR_NAME:-openshift-gitops}"
+	local cpu="${ARGOCD_RESOURCE_LIMITS_CPU}"
+	local mem="${ARGOCD_RESOURCE_LIMITS_MEMORY}"
+	echo "Patching ArgoCD ${argocd_name} resource limits (cpu=${cpu}, memory=${mem})..."
+
+	local patch
+	patch="$(jq -nc \
+		--arg cpu "$cpu" \
+		--arg mem "$mem" \
+		'{spec: {
+			controller: {resources: {limits: {cpu: $cpu, memory: $mem}}},
+			repo:       {resources: {limits: {cpu: $cpu, memory: $mem}}},
+			server:     {resources: {limits: {cpu: $cpu, memory: $mem}}},
+			applicationSet: {resources: {limits: {cpu: $cpu, memory: $mem}}}
+		}}')"
+
+	if ((DRY_RUN)); then
+		echo "--- dry-run: oc patch argocd ${argocd_name} --type merge (resource limits) ---"
+		echo "$patch" | jq .
+		return 0
+	fi
+	oc --context="$CTX" patch argocd "$argocd_name" -n "${GITOPS_NAMESPACE}" --type merge -p "$patch" \
+		|| die "patch argocd resource limits failed"
+	echo "Patched ArgoCD ${argocd_name} resource limits."
+}
+
 # RHACM GitOps doc "Enabling the ApplicationSet resource in any namespace" (setup-appset-any-namespace.sh): ArgoCD
 # spec.applicationSet.enabled + controller env ARGOCD_APPLICATIONSET_CONTROLLER_NAMESPACES=* , ClusterRole/Binding;
 # optionally merge GITOPS_APPLICATION_SET_SOURCE_NAMESPACES into spec.applicationSet.sourceNamespaces.
@@ -1024,6 +1055,8 @@ echo "--- 1) Install OpenShift GitOps operator (${GITOPS_HELM_RELEASE}) ---"
 helm_gitops_operator_install
 
 if ((DRY_RUN)); then
+	echo "--- dry-run: ArgoCD resource limits ---"
+	patch_argocd_resource_limits
 	echo "--- dry-run: ApplicationSet configuration (ArgoCD patch + RBAC if enabled) ---"
 	configure_argocd_applicationset
 	echo "--- dry-run: ACM GitOps resources + hub app-of-apps ---"
@@ -1045,7 +1078,9 @@ if ((SKIP_WAIT)); then
 	echo "Skipping readiness waits (--skip-wait)."
 	ensure_gitops_operand_namespace
 	if oc --context="$CTX" get argocd "${GITOPS_ARGOCD_CR_NAME:-openshift-gitops}" -n "${GITOPS_NAMESPACE}" &>/dev/null; then
-		echo "--- 1b) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
+		echo "--- 1b) Patch ArgoCD resource limits ---"
+		patch_argocd_resource_limits
+		echo "--- 1c) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
 		configure_argocd_applicationset
 	fi
 	echo "--- 2) Hub app-of-apps + ACM GitOps resources (requires Application CRD for Argo path) ---"
@@ -1075,7 +1110,10 @@ wait_for_gitops_csv_succeeded
 ensure_gitops_operand_namespace
 wait_for_argocd_stabilized
 
-echo "--- 1b) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
+echo "--- 1b) Patch ArgoCD resource limits ---"
+patch_argocd_resource_limits
+
+echo "--- 1c) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
 configure_argocd_applicationset
 
 if ((SKIP_ACM_GITOPS_RESOURCES)); then
