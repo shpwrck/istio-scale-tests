@@ -22,16 +22,6 @@ argocdPlacementDecisionGenerator:
   create: true
   configMapName: acm-gitops-placement-generator
 
-gitopsCluster:
-  name: acm-openshift-gitops
-
-argoServer:
-  # Hub ManagedCluster name — MultiClusterHub spec.localClusterName (required).
-  cluster: ""
-
-gitopsAddon:
-  enabled: true
-
 # Grants openshift-gitops-argocd-application-controller permission to reconcile cluster-scoped ManagedClusterSet when this chart is synced by Argo CD.
 argocdApplicationControllerRbac:
   create: true
