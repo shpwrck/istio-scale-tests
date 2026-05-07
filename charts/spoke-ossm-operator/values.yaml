@@ -1,0 +1,25 @@
+operatorNamespace: openshift-operators
+
+subscription:
+  name: servicemeshoperator3
+  channel: stable
+  package: servicemeshoperator3
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+
+namespaces:
+  istioSystem: istio-system
+  istioCni: istio-cni
+
+argoSyncWaves:
+  enabled: true
+  rbac: "-30"
+  namespaces: "0"
+  subscription: "5"
+
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller
