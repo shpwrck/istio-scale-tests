@@ -2,4 +2,4 @@ apiVersion: v2
 name: external-secrets-operator
 description: OLM install for External Secrets Operator for Red Hat OpenShift (per-cluster Argo CD sync).
 type: application
-version: 0.1.1
+version: 0.1.2
