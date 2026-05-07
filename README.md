@@ -14,7 +14,7 @@ Use it to reproduce installs, certificate wiring, remote secrets, east–west ga
      ├──────────────┤    ├──────────────┤    ├──────────────┤
      │ istiod       │    │ istiod       │    │ istiod       │
      │ ingress-gw   │    │ ingress-gw   │    │ ingress-gw   │
-     │ east-west-gw │◄──▶│ east-west-gw │◄──▶│ east-west-gw │
+     │ east-west-gw │◄─▶│ east-west-gw │◄─▶│ east-west-gw │
      │  :15443      │    │  :15443      │    │  :15443      │
      └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
             └────── remote secrets (istio-setup/005) ──────┘
