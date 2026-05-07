@@ -1,2 +1,2 @@
 {{- $cfg := .argoConfig | fromJson -}}
-{{ $cfg.bearerToken }}
+{{- $cfg.bearerToken -}}
