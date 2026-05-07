@@ -14,7 +14,7 @@ spec:
         configMapRef: {{ .Values.generatorConfigMap.name | quote }}
         name: {{ $pdec | quote }}
         requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
-{{- $hubOn := .Values.inClusterGenerator.enabled | default true }}
+{{- $hubOn := .Values.inClusterGenerator.enabled }}
 {{- if or (eq $hubOn true) (eq ($hubOn | toString) "true") }}
     - list:
         elements:

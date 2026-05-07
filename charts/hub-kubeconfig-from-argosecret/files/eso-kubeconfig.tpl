@@ -1,14 +1,22 @@
-{{- $cfg := .argoConfig | fromJson }}
-{{- $cn := .argoName | trim }}
+{{- $cfg := .argoConfig | fromJson -}}
+{{- $cn := .argoName | trim -}}
+{{- $tls := dict -}}
+{{- if hasKey $cfg "tlsClientConfig" -}}
+{{-   $tls = index $cfg "tlsClientConfig" -}}
+{{- end -}}
 apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-{{- if and $cfg.tlsClientConfig $cfg.tlsClientConfig.caData }}
-    certificate-authority-data: {{ $cfg.tlsClientConfig.caData }}
+{{- if hasKey $tls "caData" }}
+    certificate-authority-data: {{ index $tls "caData" }}
 {{- end }}
-{{- if and $cfg.tlsClientConfig $cfg.tlsClientConfig.insecure }}
+{{- if hasKey $tls "insecure" }}
+{{-   if index $tls "insecure" }}
     insecure-skip-tls-verify: true
+{{-   else }}
+    insecure-skip-tls-verify: false
+{{-   end }}
 {{- else }}
     insecure-skip-tls-verify: false
 {{- end }}
