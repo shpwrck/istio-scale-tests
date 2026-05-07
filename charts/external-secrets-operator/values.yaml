@@ -5,6 +5,7 @@ namespace: external-secrets-operator
 argoSyncWaves:
   enabled: true
   rbac: -20
+  externalSecretsConfig: "5"
 
 rbac:
   enabled: true
@@ -16,6 +17,9 @@ rbac:
 
 operatorGroup:
   name: openshift-external-secrets-operator
+
+externalSecretsConfig:
+  enabled: true
 
 subscription:
   name: openshift-external-secrets-operator

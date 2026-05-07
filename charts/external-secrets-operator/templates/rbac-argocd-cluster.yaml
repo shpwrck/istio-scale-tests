@@ -1,0 +1,50 @@
+{{- if and .Values.rbac.enabled .Values.externalSecretsConfig.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ printf "%s-%s-argocd-sync" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    {{- if .Values.argoSyncWaves.enabled }}
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+    {{- end }}
+    {{- range $k, $v := (.Values.rbac.annotations | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  labels:
+    {{- range $k, $v := (.Values.rbac.labels | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+rules:
+  - apiGroups: ["operator.openshift.io"]
+    resources: ["externalsecretsconfigs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-%s-argocd-sync" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    {{- if .Values.argoSyncWaves.enabled }}
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+    {{- end }}
+    {{- range $k, $v := (.Values.rbac.annotations | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  labels:
+    {{- range $k, $v := (.Values.rbac.labels | default dict) }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "%s-%s-argocd-sync" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.rbac.argocd.serviceAccountName | quote }}
+    namespace: {{ .Values.rbac.argocd.namespace | quote }}
+{{- end }}
