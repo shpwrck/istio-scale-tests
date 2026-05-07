@@ -16,10 +16,15 @@ spec:
         requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
 {{- $hubOn := .Values.inClusterGenerator.enabled | default true }}
 {{- if or (eq $hubOn true) (eq ($hubOn | toString) "true") }}
-    # Static hub entry — Placement omits the hub (RHACM ManagedCluster label local-cluster=true); spokes come from clusterDecisionResource above.
     - list:
         elements:
+{{- if .Values.inClusterGenerator.clusters }}
+{{- range .Values.inClusterGenerator.clusters }}
+          - clusterName: {{ . | quote }}
+{{- end }}
+{{- else }}
           - clusterName: {{ .Values.inClusterGenerator.clusterName | quote }}
+{{- end }}
 {{- end }}
   template:
     metadata:
