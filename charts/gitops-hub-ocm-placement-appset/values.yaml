@@ -47,10 +47,6 @@ template:
     helm:
       releaseName: external-secrets-operator-olm
 
-syncPolicy:
-  syncOptions: []
-  retry: {}
-
 repo:
   url: ""
   revision: main
