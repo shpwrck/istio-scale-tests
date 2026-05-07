@@ -38,6 +38,14 @@ spokeSecretStore:
   enabled: true
   name: ""
   remoteNamespace: ""
+  labels:
+    hub-kubeconfig-from-argosecret/push-target: "true"
+
+pushSecret:
+  enabled: true
+  refreshInterval: 1h
+  storeMatchLabels:
+    hub-kubeconfig-from-argosecret/push-target: "true"
 
 serviceAccountName: ""
 
@@ -56,3 +64,4 @@ argoSyncWaves:
   secretStore: -25
   externalSecret: 0
   spokeSecretStore: 5
+  pushSecret: 10
