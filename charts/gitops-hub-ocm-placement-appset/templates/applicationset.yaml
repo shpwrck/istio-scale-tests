@@ -10,7 +10,7 @@ metadata:
 {{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
 spec:
   generators:
-{{- $cdrOn := .Values.clusterDecisionResource.enabled | default true }}
+{{- $cdrOn := ternary .Values.clusterDecisionResource.enabled true (hasKey .Values.clusterDecisionResource "enabled") }}
 {{- if or (eq $cdrOn true) (eq ($cdrOn | toString) "true") }}
     - clusterDecisionResource:
         configMapRef: {{ .Values.generatorConfigMap.name | quote }}
