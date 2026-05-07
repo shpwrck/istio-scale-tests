@@ -1,0 +1,151 @@
+{
+  "allowedCommands": [
+    {
+      "command": "find . -type f -name '*.sh' | head -20",
+      "reason": "List bash scripts in repo"
+    },
+    {
+      "command": "find . -type f -name '*.yaml' -o -name '*.yml' | head -20",
+      "reason": "List YAML manifests and chart files"
+    },
+    {
+      "command": "find . -name 'Chart.yaml' -o -name 'values.yaml'",
+      "reason": "Locate Helm charts"
+    },
+    {
+      "command": "find /home/jskrzype/workdir/istio-scale-tests/charts -type f",
+      "reason": "Browse Helm chart files"
+    },
+    {
+      "command": "find /home/jskrzype/workdir/istio-scale-tests/istio-setup -type f -name '*.sh'",
+      "reason": "List mesh installation scripts"
+    },
+    {
+      "command": "find /home/jskrzype/workdir/istio-scale-tests/platform-setup -type f -name '*.sh'",
+      "reason": "List platform setup scripts"
+    },
+    {
+      "command": "grep -r 'SETUP_CONTEXTS' /home/jskrzype/workdir/istio-scale-tests --include='*.sh' | head -10",
+      "reason": "Search for context handling patterns in scripts"
+    },
+    {
+      "command": "grep -r 'DRY_RUN' /home/jskrzype/workdir/istio-scale-tests --include='*.sh' | head -10",
+      "reason": "Search for dry-run patterns in scripts"
+    },
+    {
+      "command": "grep -r 'set -euo pipefail' /home/jskrzype/workdir/istio-scale-tests --include='*.sh'",
+      "reason": "Verify bash safety patterns"
+    },
+    {
+      "command": "ls -la /home/jskrzype/workdir/istio-scale-tests/.claude/",
+      "reason": "List Claude configuration directory"
+    },
+    {
+      "command": "ls -la /home/jskrzype/workdir/istio-scale-tests/charts/",
+      "reason": "List Helm charts"
+    },
+    {
+      "command": "ls -la /home/jskrzype/workdir/istio-scale-tests/istio-setup/",
+      "reason": "List mesh setup scripts"
+    },
+    {
+      "command": "ls -la /home/jskrzype/workdir/istio-scale-tests/platform-setup/",
+      "reason": "List platform setup scripts"
+    },
+    {
+      "command": "ls -la /home/jskrzype/workdir/istio-scale-tests/terraform/",
+      "reason": "List Terraform directories"
+    },
+    {
+      "command": "ls -la /home/jskrzype/workdir/istio-scale-tests/config/",
+      "reason": "List configuration files"
+    },
+    {
+      "command": "ls /home/jskrzype/workdir/istio-scale-tests/",
+      "reason": "List repo root contents"
+    },
+    {
+      "command": "git status",
+      "reason": "Check git working tree status"
+    },
+    {
+      "command": "git log --oneline -10",
+      "reason": "View recent commit history"
+    },
+    {
+      "command": "git log --oneline --graph --all -20",
+      "reason": "View commit history with graph"
+    },
+    {
+      "command": "git diff",
+      "reason": "View unstaged changes"
+    },
+    {
+      "command": "git diff --staged",
+      "reason": "View staged changes"
+    },
+    {
+      "command": "git branch -a",
+      "reason": "List all git branches"
+    },
+    {
+      "command": "git remote -v",
+      "reason": "Show git remote URLs"
+    },
+    {
+      "command": "helm lint /home/jskrzype/workdir/istio-scale-tests/charts/*",
+      "reason": "Validate Helm chart syntax"
+    },
+    {
+      "command": "shellcheck /home/jskrzype/workdir/istio-scale-tests/**/*.sh",
+      "reason": "Lint bash scripts"
+    },
+    {
+      "command": "terraform -chdir=/home/jskrzype/workdir/istio-scale-tests/terraform/rosa-hcp validate",
+      "reason": "Validate Terraform configuration"
+    },
+    {
+      "command": "terraform -chdir=/home/jskrzype/workdir/istio-scale-tests/terraform/rosa-hcp fmt -check",
+      "reason": "Check Terraform formatting"
+    },
+    {
+      "command": "cat /home/jskrzype/workdir/istio-scale-tests/config/versions.env",
+      "reason": "View pinned versions and environment variables"
+    }
+  ],
+  "permissions": {
+    "bash": {
+      "defaultAllow": false,
+      "allowPatterns": [
+        "^ls( -[a-zA-Z]+)? ",
+        "^find \\.",
+        "^grep ",
+        "^cat ",
+        "^head ",
+        "^tail ",
+        "^wc ",
+        "^tree ",
+        "^git status$",
+        "^git log ",
+        "^git diff",
+        "^git branch",
+        "^git remote",
+        "^which ",
+        "^command -v ",
+        "^type ",
+        "^helm version$",
+        "^terraform version$",
+        "^kubectl version$",
+        "^oc version$",
+        "^istioctl version$"
+      ]
+    }
+  },
+  "context": {
+    "alwaysInclude": [
+      "/home/jskrzype/workdir/istio-scale-tests/CLAUDE.md",
+      "/home/jskrzype/workdir/istio-scale-tests/AGENTS.md",
+      "/home/jskrzype/workdir/istio-scale-tests/config/versions.env"
+    ]
+  }
+}
