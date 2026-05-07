@@ -67,3 +67,17 @@ spec:
         automated:
           prune: true
           selfHeal: true
+{{- with .Values.syncPolicy.syncOptions }}
+        syncOptions:
+{{- range . }}
+          - {{ . }}
+{{- end }}
+{{- end }}
+{{- with .Values.syncPolicy.retry }}
+        retry:
+          limit: {{ .limit | default 5 }}
+          backoff:
+            duration: {{ .backoff.duration | default "30s" | quote }}
+            factor: {{ .backoff.factor | default 2 }}
+            maxDuration: {{ .backoff.maxDuration | default "5m" | quote }}
+{{- end }}
