@@ -33,9 +33,6 @@ spec:
       containers:
         - name: istio-proxy
           image: auto
-          env:
-            - name: ISTIO_META_REQUESTED_NETWORK_VIEW
-              value: {{ include "spoke-ingress-gateway.network" . | quote }}
           ports:
             - containerPort: 15021
               protocol: TCP
