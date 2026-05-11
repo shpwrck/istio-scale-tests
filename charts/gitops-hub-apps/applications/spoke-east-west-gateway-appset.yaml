@@ -1,0 +1,35 @@
+# Argo CD Application — ApplicationSet that deploys east-west gateway and cross-network Gateway CR on every spoke cluster via ACM Placement.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spoke-east-west-gateway-appset
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "27"
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: spoke-east-west-gateway-appset
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/gitops-hub-ocm-placement-appset
+    helm:
+      releaseName: gitops-spoke-east-west-gateway-appset
+      valueFiles:
+        - values-east-west-gateway.yaml
+      parameters:
+        - name: repo.url
+          value: https://github.com/shpwrck/istio-scale-tests.git
+        - name: repo.revision
+          value: main
+        - name: placement.name
+          value: acm-openshift-gitops-placement
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true

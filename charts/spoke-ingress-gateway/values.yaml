@@ -1,0 +1,33 @@
+clusterName: ""
+networkSuffix: network
+platform: openshift
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 2000m
+    memory: 1024Mi
+
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+service:
+  type: LoadBalancer
+  annotations: {}
+
+argoSyncWaves:
+  enabled: true
+  rbac: "-30"
+  gateway: "0"
+
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller
