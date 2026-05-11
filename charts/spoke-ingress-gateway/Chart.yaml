@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spoke-ingress-gateway
+description: North-south ingress gateway (LoadBalancer) for each spoke cluster with per-cluster network topology labels.
+type: application
+version: 0.1.0

@@ -1,0 +1,21 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: cross-network-gateway
+  namespace: istio-system
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.exposeServices | quote }}
+  {{- end }}
+spec:
+  selector:
+    istio: eastwestgateway
+  servers:
+    - port:
+        number: 15443
+        name: tls
+        protocol: TLS
+      tls:
+        mode: AUTO_PASSTHROUGH
+      hosts:
+        - "*.local"

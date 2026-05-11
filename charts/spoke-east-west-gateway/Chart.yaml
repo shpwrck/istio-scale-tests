@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spoke-east-west-gateway
+description: East-west gateway (cross-cluster mesh traffic) and cross-network Gateway CR for multi-primary multi-network Istio on each spoke cluster.
+type: application
+version: 0.1.0
