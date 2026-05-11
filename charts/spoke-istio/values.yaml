@@ -1,0 +1,19 @@
+clusterName: ""
+meshID: mesh1
+networkSuffix: network
+istioVersion: v1.28.5
+
+accessLogFile: /dev/stdout
+accessLogEncoding: JSON
+
+argoSyncWaves:
+  enabled: true
+  rbac: "-30"
+  istioCni: "0"
+  istio: "5"
+
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller

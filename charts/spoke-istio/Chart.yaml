@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spoke-istio
+description: Deploys Istio and IstioCNI custom resources (Sail operator) with per-cluster multi-primary mesh settings on each spoke cluster.
+type: application
+version: 0.1.0
