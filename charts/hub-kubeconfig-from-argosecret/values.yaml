@@ -38,6 +38,8 @@ spokeSecretStore:
   enabled: true
   name: ""
   remoteNamespace: ""
+  # Skip caProvider when spoke API uses a publicly-trusted CA (e.g. Let's Encrypt on ROSA HCP).
+  skipCAProvider: false
   labels:
     hub-kubeconfig-from-argosecret/push-target: "true"
 
