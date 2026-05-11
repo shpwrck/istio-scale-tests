@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-verify-echo
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mesh-verify.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mesh-verify.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mesh-verify.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: http-echo
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          args:
+            - -listen=:{{ .Values.service.port }}
+            - -text={{ .Values.clusterName }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true

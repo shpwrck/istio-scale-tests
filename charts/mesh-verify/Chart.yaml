@@ -1,0 +1,5 @@
+apiVersion: v2
+name: mesh-verify
+description: Multicluster mesh verification workload — echo server returning cluster name to verify cross-cluster load balancing.
+type: application
+version: 0.1.0
