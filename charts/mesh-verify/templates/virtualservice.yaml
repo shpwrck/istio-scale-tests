@@ -1,0 +1,16 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: mesh-verify
+  namespace: {{ .Values.namespace }}
+spec:
+  hosts:
+    - {{ .Values.gateway.host | quote }}
+  gateways:
+    - mesh-verify-gw
+  http:
+    - route:
+        - destination:
+            host: mesh-verify-echo
+            port:
+              number: {{ .Values.service.port }}

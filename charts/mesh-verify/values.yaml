@@ -1,0 +1,15 @@
+clusterName: ""
+
+namespace: mesh-verify
+
+image:
+  repository: hashicorp/http-echo
+  tag: latest
+
+replicaCount: 1
+
+service:
+  port: 8080
+
+gateway:
+  host: mesh-verify.local
