@@ -15,6 +15,9 @@ placement:
   name: acm-openshift-gitops-placement
   # Exclude the ACM hub (“first” cluster): RHACM labels only the hub ManagedCluster with local-cluster=true.
   excludeHubLocalClusterLabel: true
+  # Require istio-mesh-member=true label on ManagedClusters for Placement selection.
+  # Enables incremental mesh deployment: label spokes one-by-one to add them to the mesh.
+  requireMeshMemberLabel: true
 
 # Shared duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource (charts/gitops-hub-*-appset).
 # Uses the same Placement / PlacementDecision as placement.name above (OCM names decisions "<name>-decision-1" by default).
