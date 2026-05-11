@@ -57,3 +57,42 @@ output "cluster_admin_login" {
     password = random_password.cluster_admin.result
   }
 }
+
+output "kubeconfig" {
+  description = "Merged kubeconfig for all clusters (exec plugin auth via oc-token-exec-credential.sh). Write with: terraform output -raw kubeconfig > ~/.kube/rosa-config"
+  sensitive   = true
+  value = yamlencode({
+    apiVersion = "v1"
+    kind       = "Config"
+    clusters = [for k in local.sorted_cluster_keys : {
+      name = k
+      cluster = {
+        server                     = module.rosa_hcp[k].cluster_api_url
+        "insecure-skip-tls-verify" = true
+      }
+    }]
+    users = [for k in local.sorted_cluster_keys : {
+      name = k
+      user = {
+        exec = {
+          apiVersion = "client.authentication.k8s.io/v1beta1"
+          command    = "bash"
+          args = [
+            "${abspath(path.module)}/../scripts/oc-token-exec-credential.sh",
+            module.rosa_hcp[k].cluster_api_url,
+            "cluster-admin",
+            random_password.cluster_admin.result,
+          ]
+        }
+      }
+    }]
+    contexts = [for k in local.sorted_cluster_keys : {
+      name = k
+      context = {
+        cluster = k
+        user    = k
+      }
+    }]
+    current-context = local.first_cluster_key
+  })
+}
