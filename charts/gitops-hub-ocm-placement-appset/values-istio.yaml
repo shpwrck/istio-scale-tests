@@ -41,6 +41,11 @@ destination:
 
 template:
   applicationNameSuffix: istio
+  ignoreDifferences:
+    - group: sailoperator.io
+      kind: Istio
+      jsonPointers:
+        - /spec/values/global/enableReaderRBAC
   source:
     path: charts/spoke-istio
     helm:
