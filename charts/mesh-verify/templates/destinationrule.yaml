@@ -1,0 +1,15 @@
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: mesh-verify-echo
+  namespace: {{ .Values.namespace }}
+spec:
+  host: mesh-verify-echo.mesh-verify.svc.cluster.local
+  trafficPolicy:
+    loadBalancer:
+      localityLbSetting:
+        enabled: false
+    outlierDetection:
+      consecutive5xxErrors: 1
+      interval: 1s
+      baseEjectionTime: 30s
