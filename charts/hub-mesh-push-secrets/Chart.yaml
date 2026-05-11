@@ -1,0 +1,5 @@
+apiVersion: v2
+name: hub-mesh-push-secrets
+description: Pushes cert-manager intermediate CA material as cacerts and kubeconfigs to istio-system on each spoke cluster via External Secrets PushSecret.
+type: application
+version: 0.1.0
