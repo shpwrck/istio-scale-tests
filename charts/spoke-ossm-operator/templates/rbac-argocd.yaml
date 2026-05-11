@@ -5,12 +5,10 @@ kind: Role
 metadata:
   name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
   namespace: {{ .Values.operatorNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
   annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-10"
-    {{- if .Values.argoSyncWaves.enabled }}
     argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
-    {{- end }}
+  {{- end }}
 rules:
   - apiGroups: ["operators.coreos.com"]
     resources: ["subscriptions", "operatorgroups"]
@@ -21,12 +19,10 @@ kind: RoleBinding
 metadata:
   name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
   namespace: {{ .Values.operatorNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
   annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-10"
-    {{- if .Values.argoSyncWaves.enabled }}
     argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
-    {{- end }}
+  {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
