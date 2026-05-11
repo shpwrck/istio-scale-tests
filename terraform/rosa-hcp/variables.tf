@@ -88,6 +88,12 @@ variable "vpc_cidr_format" {
   description = "VPC CIDR per cluster; format() with one integer: idx + vpc_cidr_index_start. Use non-overlapping ranges (e.g. increment second octet)."
 }
 
+variable "vpc_peering_enabled" {
+  type        = bool
+  default     = true
+  description = "Create VPC peering connections (full mesh) between every cluster pair so cross-cluster traffic (API, east-west gateway, istiod) can flow without traversing the public internet."
+}
+
 variable "cluster_defaults" {
   type = object({
     replicas                 = optional(number)
