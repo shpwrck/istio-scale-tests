@@ -40,7 +40,9 @@ Multi-AZ VPCs are not configurable here (always one AZ per cluster; one NAT and 
 
 Default worker replicas at cluster install is 2 (ROSA single-zone minimum) unless `cluster_defaults.replicas` is set. The default machine pool (`workers`) is managed by Terraform with autoscaling (2–10 nodes by default unless `cluster_defaults.worker_autoscale_*` overrides), via `worker_pool.tf`. This root module does not manage `rhcs_hcp_cluster_autoscaler` (pool bounds still define scaling range; enabling the autoscaler resource in the upstream module has triggered provider apply/refresh inconsistencies for some API responses).
 
-After apply, use `terraform output by_cluster` for each cluster’s `cluster_api_url` (and console URL). This stack does not generate a kubeconfig from Terraform itself. Terraform creates a shared cluster-admin password for every cluster (`password.tf`); read it with `terraform output cluster_admin_login` (sensitive). Log in with `oc login <cluster_api_url> -u cluster-admin -p ‘<password>’` per cluster and name your kubectl/oc contexts to match `cluster_name_format` (e.g. `rosa-001`, `rosa-002`) so they align with `SETUP_CONTEXTS` in `config/versions.env` and `istio-setup/` scripts. Do not commit kubeconfigs.
+After apply, use `terraform output by_cluster` for each cluster’s `cluster_api_url` (and console URL). Terraform creates a shared cluster-admin password for every cluster (`password.tf`); read it with `terraform output cluster_admin_login` (sensitive). Log in with `oc login <cluster_api_url> -u cluster-admin -p ‘<password>’` per cluster and name your kubectl/oc contexts to match `cluster_name_format` (e.g. `rosa-001`, `rosa-002`) so they align with `SETUP_CONTEXTS` in `config/versions.env`.
+
+A merged kubeconfig covering all clusters is available via `terraform output -raw kubeconfig > ~/.kube/rosa-config`. It uses an exec credential plugin (`oc-token-exec-credential.sh`) so tokens refresh automatically. Do not commit kubeconfigs.
 
 ## ACM + GitOps (platform setup)
 

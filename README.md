@@ -2,125 +2,145 @@
 
 This repository holds automation and manifests used to scale-test Istio in a multi-cluster setup on OpenShift. The target pattern is multi-primary, multi-network mesh: several independent clusters share one logical mesh (common mesh id and trust), with Istio delivered via the Sail operator (`Istio` / `IstioCNI` CRs). Procedures follow [Red Hat OSSM 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies); pinned OpenShift / Kubernetes / Istio versions live in `config/versions.env`.
 
-Use it to reproduce installs, certificate wiring, remote secrets, east–west gateways, and sample workloads—then measure behavior under load or changing cluster counts.
+Use it to reproduce installs, certificate wiring, remote secrets, east-west gateways, and sample workloads — then measure behavior under load or changing cluster counts.
 
 ```
    Multi-primary, multi-network mesh — mesh-id: mesh1
-   Shared plug-in CA: root + per-cluster intermediates (cacerts/)
+   Shared plug-in CA: cert-manager root + per-cluster intermediates
 
      ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-     │   rosa-001   │    │   rosa-002   │    │   rosa-003   │
-     │  network-1   │    │  network-2   │    │  network-3   │
+     │   istio-001  │    │   istio-002  │    │   istio-003  │
+     │  (ACM hub)   │    │  network-2   │    │  network-3   │
      ├──────────────┤    ├──────────────┤    ├──────────────┤
-     │ istiod       │    │ istiod       │    │ istiod       │
-     │ ingress-gw   │    │ ingress-gw   │    │ ingress-gw   │
-     │ east-west-gw │◄─▶│ east-west-gw │◄─▶│ east-west-gw │
-     │  :15443      │    │  :15443      │    │  :15443      │
+     │ Argo CD      │    │ istiod       │    │ istiod       │
+     │ cert-manager │    │ ingress-gw   │    │ ingress-gw   │
+     │ ESO          │    │ east-west-gw │◄─▶│ east-west-gw │
+     │              │    │  :15443      │    │  :15443      │
      └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-            └────── remote secrets (istio-setup/005) ──────┘
-              istiod on each cluster watches remote APIs
+            └── Argo CD ApplicationSets (ACM Placement) ──┘
+              Hub pushes cacerts + remote secrets via ESO
 ```
 
 ---
 
 ## Quick start
 
-Already have three ROSA HCP clusters with merged kubeconfig contexts `rosa-001`, `rosa-002`, `rosa-003`? Run a mesh-only install end-to-end from the repo root:
+Provision clusters and deploy the full mesh with two Terraform applies:
 
 ```bash
-export SETUP_CONTEXTS=rosa-001,rosa-002,rosa-003
-source config/versions.env
+cd terraform/rosa-hcp
 
-# Plug-in CA + Istio + ingress
-./istio-setup/001-ossm-mc-cacerts.sh generate --base "$PWD" --clusters "$SETUP_CONTEXTS"
-./istio-setup/001-ossm-mc-cacerts.sh apply --base "$PWD" \
-  --context-map 'rosa-001:rosa-001,rosa-002:rosa-002,rosa-003:rosa-003' \
-  --replace --network-suffix network
-./istio-setup/003-ossm-mc-apply-istio.sh
-./istio-setup/004-ossm-mc-apply-ingress-gateway.sh
+# 1. Create ROSA HCP clusters
+export RHCS_TOKEN='...'
+terraform init && terraform apply
 
-# Multi-cluster wiring + verify
-PATH="$PWD/.bin:$PATH" ./istio-setup/005-ossm-mc-remote-secrets.sh
-./istio-setup/007-ossm-mc-apply-east-west.sh
-PATH="$PWD/.bin:$PATH" ./istio-setup/008-ossm-mc-verify-east-west.sh
+# 2. Enable platform setup (ACM + GitOps + full mesh)
+#    Set enable_platform_setup = true in terraform.tfvars, then:
+terraform apply
+
+# 3. Get a merged kubeconfig for all clusters
+terraform output -raw kubeconfig > ~/.kube/rosa-config
+export KUBECONFIG=~/.kube/rosa-config
 ```
 
-No clusters yet? Start at [§1 Provision clusters](#1-provision-clusters-terraform). Want GitOps-driven installs? Enable `enable_platform_setup = true` in Terraform (see `terraform/rosa-hcp/README.md`).
+The second apply installs ACM, imports spoke clusters, deploys OpenShift GitOps (Argo CD), and syncs the app-of-apps which rolls out the entire mesh: Sail operator, Istio CRs, cert-manager CAs, External Secrets for cacerts and remote secrets, ingress gateways, and east-west gateways.
+
+No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want to verify the mesh? See [Verify the mesh install](#verify-the-mesh-install).
 
 ---
 
 ## End-to-end order
 
-Run automation in this sequence:
-
 1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
-2. Mesh — install and verify Istio across clusters (`istio-setup/`, `001`–`009`). Optional GitOps overlay: set `enable_platform_setup = true` in Terraform.
+2. Platform + Mesh — set `enable_platform_setup = true` and re-apply Terraform. This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
 3. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
 
 ---
 
 ## What you need
 
-On the machine where you run repo commands (tests assume bash 4+):
+On the machine where you run repo commands:
 
+| Binary / runtime  | Notes |
+| ----------------- | ----- |
+| `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match `cluster_name_format` (e.g. `istio-001`, `istio-002`). |
+| `terraform`       | To apply `terraform/rosa-hcp/` (pinned version: see `versions.tf`). |
+| `helm`            | Helm 3 for charts under `charts/`. |
+| `istioctl`        | For mesh verification; align the build with `ISTIO_VERSION` in `config/versions.env`. Place at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
+| `jq`, `curl`      | `jq` for Terraform JSON, `curl` for ingress checks. |
 
-| Binary / runtime  | Notes                                                                                                                                                             |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bash`            | 4 or newer (`istio-setup/` scripts use bash).                                                                                                                     |
-| `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match what you pass to `--contexts` / `SETUP_CONTEXTS` (examples in docs use `rosa-001`, …). |
-| `terraform`       | To apply `terraform/rosa-hcp/` (pinned Terraform version: see that directory’s `versions.tf`).                                                                    |
-| `helm`            | Helm 3 for `istio-setup/004` and charts under `charts/`.                                                                                                          |
-| `istioctl`        | On `PATH`, or a binary at `.bin/istioctl` with `PATH="$PWD/.bin:$PATH"`; align the build with `ISTIO_VERSION` in `config/versions.env`.                           |
-| `jq`, `openssl`, `curl`, `envsubst` | Standard Unix utilities — `jq` for Terraform/script JSON, `openssl` for `istio-setup/001` CA generation, `curl` for ingress checks, `envsubst` (gettext) renders templates in `istio-setup/003` and `007`. |
+Optional: Go on `PATH` when running `isotope-multicluster/` against a local [istio/tools](https://github.com/istio/tools) checkout.
 
-
-Optional (later steps): Go on `PATH` when running `isotope-multicluster/` against a local [istio/tools](https://github.com/istio/tools) checkout.
-
-**Configuration:** most scripts read defaults from `config/versions.env`. `source` it before overriding any variable; common ones: `SETUP_CONTEXTS`, `ISTIO_VERSION`, `MESH_ID`, `OPENSHIFT_VERSION`.
+Configuration: common pins and defaults live in `config/versions.env` (`ISTIO_VERSION`, `MESH_ID`, `OPENSHIFT_VERSION`, etc.).
 
 ---
 
 ## 1. Provision clusters (Terraform)
 
-Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terraform-redhat/rosa-hcp/rhcs`). You set `cluster_count`, `cluster_name_format`, and `vpc_cidr_format` (plus pins such as `openshift_version`); each cluster gets its own VPC, OIDC stack, and IAM roles. Outputs include API URLs and a shared `cluster_admin_login`. Log in with `oc login` per cluster (see `terraform/rosa-hcp/README.md`). Optional: set `enable_platform_setup = true` to install ACM + GitOps on the hub in a second apply.
+Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terraform-redhat/rosa-hcp/rhcs`). You set `cluster_count`, `cluster_name_format`, and `vpc_cidr_format` (plus pins such as `openshift_version`); each cluster gets its own VPC, OIDC stack, and IAM roles. Outputs include API URLs, a shared `cluster_admin_login`, and a merged `kubeconfig` (exec plugin auth). See `terraform/rosa-hcp/README.md`.
 
 ---
 
-## 2. Install the mesh (`istio-setup/`)
+## 2. Deploy the mesh (GitOps)
 
-After clusters exist and you can `oc login`, run `istio-setup/` 001–009 for CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks. If you want a GitOps-driven workflow on top, set `enable_platform_setup = true` in Terraform before running mesh scripts.
+After clusters exist, set `enable_platform_setup = true` in `terraform.tfvars` and re-apply. This two-phase Terraform approach installs everything via GitOps:
+
+1. ACM operator + MultiClusterHub + spoke import
+2. OpenShift GitOps (Argo CD) + app-of-apps
+
+The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops-hub-apps/applications/`, each deploying an ApplicationSet that targets spoke clusters via ACM Placement. The sync wave order ensures dependencies resolve correctly:
+
+| Wave | Component | Chart |
+| ---- | --------- | ----- |
+| 8    | Sail operator (OLM) | `charts/spoke-ossm-operator/` |
+| 10   | cert-manager operator (OLM) | `charts/cert-manager-operator/` |
+| 12   | External Secrets operator | `charts/external-secrets-operator/` |
+| 13   | Mesh root CA + ClusterIssuer | `charts/hub-mesh-ca/` |
+| 15   | Per-cluster intermediate CAs | `charts/hub-mesh-ca-intermediate/` |
+| 16   | Kubeconfig extraction from Argo secrets | `charts/hub-kubeconfig-from-argosecret/` |
+| 19   | Push cacerts + kubeconfigs + remote secrets to spokes | `charts/hub-mesh-push-secrets/` |
+| 21   | Istio + IstioCNI CRs | `charts/spoke-istio/` |
+| 24   | North-south ingress gateway | `charts/spoke-ingress-gateway/` |
+| 27   | East-west gateway + cross-network Gateway CR | `charts/spoke-east-west-gateway/` |
+
 
 <details>
-<summary><b>Repository layout</b> — directories and Helm charts (click to expand)</summary>
+<summary>Repository layout — directories and Helm charts (click to expand)</summary>
 
-| Path                                     | Role                                                                                                                                                                                                                              |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `terraform/rosa-hcp/platform_acm.tf`     | ACM operator + MultiClusterHub + KlusterletConfig on the hub (gated by `enable_platform_setup`).                                                                                                                                  |
-| `terraform/rosa-hcp/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster.                                                                                                                                                                |
-| `terraform/rosa-hcp/platform_gitops.tf`  | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps.                                                                                                                                                      |
-| `istio-setup/`                           | Mesh install and checks (001–009; table below).                                                                                                                                                                                   |
-| `charts/acm-operator/`                   | Helm chart: OLM OperatorGroup + Subscription for ACM (used by Terraform `platform_acm.tf`).                                                                                                                                       |
-| `charts/acm-multicluster-hub/`           | Helm chart: `MultiClusterHub` CR only (Terraform `platform_acm.tf`).                                                                                                                                                              |
-| `charts/acm-klusterlet-config/`          | Helm chart: `KlusterletConfig` CR only (Terraform `platform_acm.tf`, after CRD exists).                                                                                                                                           |
-| `charts/acm-managed-cluster/`            | Helm chart: one `ManagedCluster` per spoke (Terraform `platform_acm_spokes.tf`).                                                                                                                                                   |
-| `charts/openshift-gitops-operator/`      | Helm chart: OLM Subscription for Red Hat OpenShift GitOps (Terraform `platform_gitops.tf`).                                                                                                                                        |
-| `charts/acm-openshift-gitops-resources/` | Helm — ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD (Terraform `platform_gitops.tf`).                                                                                                                        |
-| `charts/gitops-hub-app-of-apps/`        | Helm — Argo CD `Application` CR `hub-gitops-root` (directory sync of `charts/gitops-hub-apps/applications`) (Terraform `platform_gitops.tf`).                                                                                      |
-| `charts/gitops-hub-apps/`                 | Plain YAML child `Application` manifests under `applications/`; applied when `hub-gitops-root` syncs.                                                                                                                               |
-| `charts/cert-manager-operator/`          | Helm — OLM install for cert-manager Operator for Red Hat OpenShift; synced by `hub-cert-manager-operator`.                                                                                                                        |
-| `charts/hub-mesh-ca/`                    | Helm — cert-manager mesh root + `ClusterIssuer` stack; intermediates optional or delegated to `hub-mesh-ca-intermediate` + ApplicationSet (after operator).                                                                        |
-| `charts/hub-mesh-ca-intermediate/`       | Helm — single intermediate CA `Certificate` per cluster name (synced by ApplicationSet-generated Applications).                                                                                                                      |
-| `charts/hub-kubeconfig-from-argosecret/` | Helm — External Secrets `SecretStore` + `ExternalSecret` per cluster name; deploys CRs into the External Secrets operand namespace (default `external-secrets-operator`), reads Argo `*-application-manager-cluster-secret` from `openshift-gitops` (ApplicationSet preset `values-kubeconfig-from-argosecret.yaml`). |
-| `charts/gitops-hub-ocm-placement-appset/` | Helm — standard ApplicationSet + RBAC (`values-mesh-ca-intermediate.yaml` / `values-external-secrets.yaml` / `values-kubeconfig-from-argosecret.yaml`); shared PlacementDecision duck-type ConfigMap from `acm-openshift-gitops-resources`. |
-| `manifests/ossm-multi-cluster/`          | `templates/*.yaml.tpl` — rendered by `istio-setup/003` / `istio-setup/007` (`envsubst` + `config/versions.env`); `east-west/common/`, `ingress-verify/`, optional `samples/`. Ingress gateways use Helm `istio/gateway` in `004`. |
-| `cacerts/`                               | Generated plug-in CA material and per-cluster intermediates (created by `istio-setup/001-ossm-mc-cacerts.sh`).                                                                                                                    |
+| Path | Role |
+| ---- | ---- |
+| `terraform/rosa-hcp/` | ROSA HCP cluster provisioning + optional ACM/GitOps platform setup. |
+| `terraform/rosa-hcp/platform_acm.tf` | ACM operator + MultiClusterHub + KlusterletConfig (gated by `enable_platform_setup`). |
+| `terraform/rosa-hcp/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster. |
+| `terraform/rosa-hcp/platform_gitops.tf` | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps. |
+| `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke. |
+| `charts/spoke-istio/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke (multi-primary, multi-network). |
+| `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke. |
+| `charts/spoke-east-west-gateway/` | Helm chart: east-west gateway + cross-network Gateway CR per spoke. |
+| `charts/hub-mesh-ca/` | Helm chart: cert-manager root CA + ClusterIssuer on the hub. |
+| `charts/hub-mesh-ca-intermediate/` | Helm chart: one intermediate CA Certificate per spoke cluster. |
+| `charts/hub-mesh-push-secrets/` | Helm chart: ESO PushSecrets for cacerts, kubeconfigs, and Istio remote secrets to spokes. |
+| `charts/hub-kubeconfig-from-argosecret/` | Helm chart: ESO SecretStore + ExternalSecret extracting kubeconfigs from Argo cluster secrets. |
+| `charts/external-secrets-operator/` | Helm chart: OLM install for External Secrets Operator per spoke. |
+| `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
+| `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app). |
+| `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD ApplicationSet + RBAC for ACM Placement; preset value files per component. |
+| `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD Application `hub-gitops-root` (directory sync of child Applications). |
+| `charts/gitops-hub-apps/` | Child Application manifests under `applications/`; synced by `hub-gitops-root`. |
+| `charts/acm-operator/` | Helm chart: OLM Subscription for ACM (Terraform `platform_acm.tf`). |
+| `charts/acm-multicluster-hub/` | Helm chart: MultiClusterHub CR (Terraform `platform_acm.tf`). |
+| `charts/acm-klusterlet-config/` | Helm chart: KlusterletConfig CR (Terraform `platform_acm.tf`). |
+| `charts/acm-managed-cluster/` | Helm chart: one ManagedCluster per spoke (Terraform `platform_acm_spokes.tf`). |
+| `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for OpenShift GitOps (Terraform `platform_gitops.tf`). |
+| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD. |
+| `config/versions.env` | Pinned versions and mesh-wide defaults sourced by scripts and referenced by charts. |
+| `isotope-multicluster/` | Multicluster isotope load test workload generator and applier. |
 
 </details>
 
-
 ### Optional — ACM + GitOps (Terraform)
 
-Skip this subsection for mesh-only flows. ACM and OpenShift GitOps are installed via Terraform with a two-phase apply. After provisioning clusters, set `enable_platform_setup = true` and re-apply:
+ACM and OpenShift GitOps are installed via Terraform with a two-phase apply. After provisioning clusters, set `enable_platform_setup = true` and re-apply:
 
 ```bash
 # In terraform/rosa-hcp/:
@@ -129,51 +149,47 @@ terraform apply
 
 # 2. Set enable_platform_setup = true in terraform.tfvars, then:
 terraform apply
-# This installs ACM operator, MultiClusterHub, imports spokes, installs GitOps,
-# configures ArgoCD, and deploys the app-of-apps.
+# This installs ACM, imports spokes, installs GitOps, deploys app-of-apps,
+# and rolls out the entire Istio mesh via Argo CD ApplicationSets.
 ```
 
 See `terraform/rosa-hcp/README.md` for variables controlling ACM channel, GitOps config, and spoke import behavior.
-
-
-### Mesh scripts (`istio-setup/`)
-
-
-| Step | Script                                                         | Purpose                                                                                                                                                                                                                                                                 |
-| ---- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 001  | `istio-setup/001-ossm-mc-cacerts.sh`                           | Generate a shared root + per-cluster intermediate CAs; `verify`; optional `apply` to create the `cacerts` Secret in `istio-system` and label `topology.istio.io/network` on each cluster.                                                                               |
-| 002  | `istio-setup/002-ossm-mc-kubeconfig-embed-api-ca.sh`           | Optional. Embeds API server TLS chains into your kubeconfig so `istioctl create-remote-secret` produces Secrets istiod can use (e.g. ROSA APIs with Let’s Encrypt). Run before 005 if remote watches fail with TLS errors.                                              |
-| 003  | `istio-setup/003-ossm-mc-apply-istio.sh`                       | Renders `templates/istio-cni.yaml.tpl` and `templates/istio.cluster.yaml.tpl` (`--contexts` / `SETUP_CONTEXTS`). `Istio/default` sets mesh Envoy access logging via `meshConfig` (`ACCESS_LOG`_* in `config/versions.env`). Waits for Ready (skipped with `--dry-run`). |
-| 004  | `istio-setup/004-ossm-mc-apply-ingress-gateway.sh`             | Per cluster: `istio/gateway` → `istio-system/istio-ingressgateway` LoadBalancer (HTTP 80/HTTPS 443). SCC-safe Helm flags; optional `AWS_LOAD_BALANCER_*_SECURITY_GROUPS` (see `config/versions.env`) for ROSA/NLB SGs. `--contexts` / `SETUP_CONTEXTS`.                 |
-| 005  | `istio-setup/005-ossm-mc-remote-secrets.sh`                    | For each ordered pair of clusters, runs `istioctl create-remote-secret` and applies the result to the other clusters’ `istio-system` so istiod can discover remote services.                                                                                            |
-| 006  | `istio-setup/006-ossm-mc-remote-secrets-insecure-apiserver.sh` | Optional fallback. Patches remote-secret kubeconfigs to `insecure-skip-tls-verify: true` for remote apiservers when CA embedding alone is not enough (lab only; prefer proper CA bundles for production). Restart istiod afterward if endpoints do not refresh.         |
-| 007  | `istio-setup/007-ossm-mc-apply-east-west.sh`                   | Renders `templates/east-west-gateway.yaml.tpl` per cluster; applies `east-west/common/expose-services.yaml` (`cross-network-gateway`, port 15443).                                                                                                                      |
-| 008  | `istio-setup/008-ossm-mc-verify-east-west.sh`                  | Prints `istioctl proxy-status`, east–west Service / Endpoints, and istiod pods per context.                                                                                                                                                                             |
-| 009  | `istio-setup/009-ossm-mc-verify-ingress-gateway.sh`            | Optional. Deploys `ingress-verify` echo workload + Gateway/VS (`manifests/ossm-multi-cluster/ingress-verify/`), then curls the ingress LB per context (`--contexts` / `SETUP_CONTEXTS`). `--cleanup` removes the namespace after success.                               |
-
-
-Most setup scripts accept `--dry-run` (typically `oc apply --dry-run=client`) to validate YAML without mutating clusters; 008 is read-only and documents `--dry-run` as a no-op. 009 supports `--dry-run` and optional `--cleanup`.
-
-### Sample workloads (optional)
-
-Under `manifests/ossm-multi-cluster/samples/` there are split helloworld and sleep YAML files used to validate routing and load balancing across clusters (e.g. v1 on one cluster, v2 on another, client on a third). Apply them with `oc apply` per cluster after sidecar injection is enabled on namespace `sample`. A `DestinationRule` is included to relax locality load balancing for demos.
 
 ---
 
 ## Verify the mesh install
 
-Two scripts confirm the multi-cluster mesh is wired correctly:
+Deploy the standalone `mesh-verify` test workload to confirm cross-cluster load balancing:
 
-- **`istio-setup/009-ossm-mc-verify-ingress-gateway.sh`** — deploys an echo workload + Gateway/VirtualService per cluster and curls the ingress LoadBalancer. Each context should return HTTP 200 from the per-cluster hostname.
-- **`istio-setup/008-ossm-mc-verify-east-west.sh`** — prints `istioctl proxy-status`, east–west Service/Endpoints, and istiod pods. In `proxy-status`, proxies should report `SYNCED` for endpoints from the *other* clusters (proof remote secrets propagated).
+```bash
+# Deploy the mesh verification ApplicationSet (not part of root app-of-apps)
+oc apply -f charts/mesh-verify-appset.yaml
 
-If 008 only shows local endpoints, remote secrets aren't reaching istiod — re-run `istio-setup/005`, and fall back to `istio-setup/006` (lab only) if TLS to remote API servers is the blocker.
+# Curl any cluster's ingress — responses should come from different clusters
+INGRESS=$(oc get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+for i in {1..10}; do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
+
+# Clean up
+oc delete -f charts/mesh-verify-appset.yaml
+```
+
+Each cluster's echo pod returns its cluster name. Seeing responses from multiple clusters confirms east-west gateways and remote secrets are working.
+
+For deeper diagnostics:
+
+```bash
+# Check remote cluster discovery
+istioctl remote-clusters --context istio-002
+
+# Check cross-cluster endpoints from a sidecar
+istioctl proxy-config endpoints deploy/mesh-verify-echo -n mesh-verify --context istio-002 | grep mesh-verify
+```
 
 ---
 
 ## 3. Run Isotope (`isotope-multicluster/`)
 
-Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) workload: generate a chain topology from Terraform `cluster_keys`, render manifests, and apply per context. Requires a local istio/tools clone, Go, and an isotope service image. Run after mesh steps `003`–`007` (remote secrets and east–west). See `isotope-multicluster/README.md` for prerequisites, `001-generate-topology-from-terraform.sh`, and `002-apply-isotope-multicluster.sh`.
+Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) workload: generate a chain topology from Terraform `cluster_keys`, render manifests, and apply per context. Requires a local istio/tools clone, Go, and an isotope service image. Run after the mesh is deployed and verified. See `isotope-multicluster/README.md`.
 
 ---
 
@@ -181,10 +197,11 @@ Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/is
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Remote watches fail with TLS errors after `istio-setup/005` | Remote API server cert chain not trusted by istiod | Run `istio-setup/002` to embed CA chains into your kubeconfig, then re-run 005. Lab fallback: `istio-setup/006` (`insecure-skip-tls-verify`). |
-| Ingress LoadBalancer returns connection refused on ROSA AWS | NLB security groups missing or wrong | Set `AWS_LOAD_BALANCER_SECURITY_GROUPS` (and optionally `_EXTRA_`) per the notes in `config/versions.env`, or use `config/ingress-lb-security-groups.map`. |
-| `istioctl` errors on unrecognized API versions or schema | Local `istioctl` doesn't match `ISTIO_VERSION` | Place a matching binary at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"` before mesh scripts. |
-| `proxy-status` only lists local endpoints | Remote secrets not propagated | Re-run `istio-setup/005`; restart istiod after applying secrets if endpoints don't refresh. |
+| Remote secrets missing on spokes | ESO PushSecret not synced | Check `oc get pushsecret -n external-secrets-operator` on the hub; verify spoke SecretStores are healthy. |
+| Ingress LoadBalancer returns connection refused on ROSA AWS | NLB security groups missing | Set `AWS_LOAD_BALANCER_SECURITY_GROUPS` per `config/versions.env`. |
+| `istioctl` errors on unrecognized API versions | Local `istioctl` doesn't match `ISTIO_VERSION` | Place a matching binary at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
+| `proxy-status` only lists local endpoints | Remote secrets not labeled correctly | Check `oc get secret -n istio-system -l istio/multiCluster=true`; verify `hub-mesh-push-secrets` chart synced. |
+| Cross-cluster requests time out | Ingress gateway Service has `topology.istio.io/network` label | This label should only be on the east-west gateway Service, not the ingress gateway. |
 
 ---
 
