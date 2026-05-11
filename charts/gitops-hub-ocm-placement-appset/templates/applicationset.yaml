@@ -56,6 +56,10 @@ spec:
               value: '{{ "{{clusterName}}" }}'
             - name: clusterServer
               value: '{{ "{{server}}" }}'
+{{- range ($helm.parameters | default list) }}
+            - name: {{ .name | quote }}
+              value: {{ .value | quote }}
+{{- end }}
 {{- else if $helm.parameters }}
           parameters:
 {{- range $helm.parameters }}
