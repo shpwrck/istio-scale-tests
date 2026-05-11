@@ -21,6 +21,10 @@ operatorGroup:
 externalSecretsConfig:
   enabled: true
 
+spokeEgress:
+  enabled: true
+  operandNamespace: external-secrets
+
 subscription:
   name: openshift-external-secrets-operator
   channel: stable-v1

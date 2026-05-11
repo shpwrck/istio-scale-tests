@@ -59,4 +59,38 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.rbac.argocd.serviceAccountName | quote }}
     namespace: {{ .Values.rbac.argocd.namespace | quote }}
+{{- if .Values.spokeEgress.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-argocd-operand-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ .Values.spokeEgress.operandNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+  {{- end }}
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-argocd-operand-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ .Values.spokeEgress.operandNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-argocd-operand-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.rbac.argocd.serviceAccountName | quote }}
+    namespace: {{ .Values.rbac.argocd.namespace | quote }}
+{{- end }}
 {{- end }}
