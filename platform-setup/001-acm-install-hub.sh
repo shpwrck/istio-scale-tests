@@ -39,6 +39,7 @@ ACM_IMPORT_APPLY_RETRY_SEC="${ACM_IMPORT_APPLY_RETRY_SEC:-900}"
 ACM_CRDS_YAML_WAIT_SEC="${ACM_CRDS_YAML_WAIT_SEC:-180}"
 ACM_INSTALL_KLUSTERLETCONFIG="${ACM_INSTALL_KLUSTERLETCONFIG:-1}"
 ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC="${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC:-900}"
+ACM_OCM_WEBHOOK_READY_WAIT_SEC="${ACM_OCM_WEBHOOK_READY_WAIT_SEC:-300}"
 ACM_WAIT_MANAGED_CLUSTER_READY="${ACM_WAIT_MANAGED_CLUSTER_READY:-1}"
 ACM_MANAGED_CLUSTER_READY_WAIT_SEC="${ACM_MANAGED_CLUSTER_READY_WAIT_SEC:-3600}"
 
@@ -98,6 +99,7 @@ Environment:
   ACM_CRDS_YAML_WAIT_SEC           Seconds to wait for hub secret data key crds.yaml after import.yaml exists (default ${ACM_CRDS_YAML_WAIT_SEC}).
   ACM_INSTALL_KLUSTERLETCONFIG     If 1 (default), install KlusterletConfig chart after CRD exists; set 0 to skip.
   ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC  Seconds to wait for KlusterletConfig CRD (default ${ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC}).
+  ACM_OCM_WEBHOOK_READY_WAIT_SEC   Seconds to wait for OCM validating webhook TLS readiness before spoke registration (default ${ACM_OCM_WEBHOOK_READY_WAIT_SEC}).
   ACM_WAIT_MANAGED_CLUSTER_READY   If 1 (default), after imports wait for ManagedCluster Joined+Available for each Terraform cluster_keys name.
   ACM_MANAGED_CLUSTER_READY_WAIT_SEC  Max seconds for that wait (default ${ACM_MANAGED_CLUSTER_READY_WAIT_SEC}).
   ACM_LOCAL_CLUSTER_NAME           MultiClusterHub spec.localClusterName when --local-cluster-name is not used.
@@ -198,7 +200,7 @@ merge_kubeconfig_from_terraform() {
 	command -v terraform >/dev/null 2>&1 || die "terraform not on PATH (required for spoke kubeconfig merge)"
 	MC_KUBECONFIG="$(mktemp "${TMPDIR:-/tmp}/001-acm-kubeconfig.XXXXXX")"
 	chmod 600 "${MC_KUBECONFIG}"
-	bash "${TF_LOGIN_SCRIPT}" --terraform-dir "${TF_DIR}" --output "${MC_KUBECONFIG}" "${INSECURE_LOGIN[@]}"
+	bash "${TF_LOGIN_SCRIPT}" --terraform-dir "${TF_DIR}" --output "${MC_KUBECONFIG}" "${INSECURE_LOGIN[@]}" &>/dev/null
 	export KUBECONFIG="${MC_KUBECONFIG}"
 	echo "Using merged kubeconfig from ${TF_LOGIN_SCRIPT} (${KUBECONFIG})."
 }
@@ -609,6 +611,27 @@ wait_for_klusterletconfig_crd() {
 	die "Timed out waiting for KlusterletConfig CRD. Increase ACM_KLUSTERLETCONFIG_CRD_WAIT_SEC or set ACM_INSTALL_KLUSTERLETCONFIG=0."
 }
 
+wait_for_ocm_webhook_ready() {
+	local deadline=$((SECONDS + ACM_OCM_WEBHOOK_READY_WAIT_SEC))
+	echo "Waiting for OCM validating webhook TLS readiness (up to ${ACM_OCM_WEBHOOK_READY_WAIT_SEC}s)..."
+	while ((SECONDS < deadline)); do
+		if oc --context="$CTX" create -f - --dry-run=server 2>/dev/null <<-'PROBE'
+			apiVersion: cluster.open-cluster-management.io/v1
+			kind: ManagedCluster
+			metadata:
+			  name: ocm-webhook-probe
+			spec:
+			  hubAcceptsClient: false
+		PROBE
+		then
+			echo "OCM validating webhook is ready."
+			return 0
+		fi
+		sleep 10
+	done
+	die "OCM webhook not ready after ${ACM_OCM_WEBHOOK_READY_WAIT_SEC}s; check: oc --context=${CTX} get validatingwebhookconfigurations ocm.validating.webhook.admission.open-cluster-management.io -o yaml"
+}
+
 lint_charts() {
 	helm lint "$CHART_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_OPERATOR}"
 	helm lint "$CHART_MULTICLUSTER_HUB" >/dev/null || die "helm lint failed: ${CHART_MULTICLUSTER_HUB}"
@@ -708,6 +731,8 @@ if [[ "${ACM_INSTALL_KLUSTERLETCONFIG}" == "1" ]]; then
 else
 	echo "--- 3) Skipping KlusterletConfig (ACM_INSTALL_KLUSTERLETCONFIG!=1) ---"
 fi
+
+wait_for_ocm_webhook_ready
 
 # --- 4) Spokes ---
 echo "--- 4) Register spoke clusters ---"
