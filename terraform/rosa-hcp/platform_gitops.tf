@@ -382,6 +382,15 @@ resource "time_sleep" "wait_gitops_addon_secrets" {
 
   depends_on      = [kubernetes_manifest.gitops_cluster, time_sleep.wait_spoke_registration]
   create_duration = "120s"
+
+  # Re-sleep when any ManagedCluster Helm release changes (e.g. label update),
+  # giving ACM time to reconcile before we patch ArgoCD cluster secrets.
+  triggers = {
+    managed_cluster_revisions = join(",", [
+      for k in sort(keys(local.spoke_cluster_keys)) :
+      helm_release.acm_managed_cluster[k].metadata.revision
+    ])
+  }
 }
 
 data "external" "spoke_cluster_secret_token" {
