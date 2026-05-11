@@ -986,6 +986,26 @@ wait_for_gitops_addon_feature_on_managedclusters() {
 	die "Timed out waiting for ${key}=available on every ManagedCluster in clusterset ${ACM_CLUSTER_SET}; try: oc --context=$CTX get managedcluster -o json | jq '.items[] | {name: .metadata.name, addonGitOps: .metadata.labels[\"feature.open-cluster-management.io/addon-gitops-addon\"]}'"
 }
 
+wait_for_argocd_deployments_ready() {
+	local argocd_name="${GITOPS_ARGOCD_CR_NAME:-openshift-gitops}"
+	local deadline=$((SECONDS + ARGOCD_STABILIZE_WAIT_SEC))
+	local deploys=("${argocd_name}-repo-server" "${argocd_name}-server" "${argocd_name}-application-controller")
+	echo "Waiting for ArgoCD deployments to roll out after configuration changes (up to ${ARGOCD_STABILIZE_WAIT_SEC}s)..."
+	local d
+	for d in "${deploys[@]}"; do
+		if ! oc --context="$CTX" get deployment "$d" -n "${GITOPS_NAMESPACE}" &>/dev/null; then
+			continue
+		fi
+		local remaining=$(( deadline - SECONDS ))
+		if (( remaining <= 0 )); then
+			die "Timed out waiting for ArgoCD deployments to roll out."
+		fi
+		oc --context="$CTX" rollout status deployment "$d" -n "${GITOPS_NAMESPACE}" --timeout="${remaining}s" \
+			|| die "rollout of ${d} did not complete in time"
+	done
+	echo "ArgoCD deployments ready."
+}
+
 lint_charts() {
 	helm lint "$CHART_GITOPS_OPERATOR" >/dev/null || die "helm lint failed: ${CHART_GITOPS_OPERATOR}"
 	helm lint "$CHART_ACM_GITOPS_RESOURCES" --set argoServer.cluster=helm-lint-placeholder >/dev/null \
@@ -1115,6 +1135,8 @@ patch_argocd_resource_limits
 
 echo "--- 1c) Configure Argo CD ApplicationSet (RHACM any-namespace + optional sourceNamespaces) ---"
 configure_argocd_applicationset
+
+wait_for_argocd_deployments_ready
 
 if ((SKIP_ACM_GITOPS_RESOURCES)); then
 	echo "--- 2) Install hub app-of-apps (${GITOPS_HUB_APP_OF_APPS_RELEASE}) ---"
