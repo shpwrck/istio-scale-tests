@@ -1,0 +1,25 @@
+apiVersion: sailoperator.io/v1
+kind: Istio
+metadata:
+  name: default
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.istio | quote }}
+  {{- end }}
+spec:
+  version: {{ .Values.istioVersion | quote }}
+  profile: openshift
+  namespace: istio-system
+  values:
+    global:
+      meshID: {{ .Values.meshID | quote }}
+      network: {{ printf "%s-%s" .Values.clusterName .Values.networkSuffix | quote }}
+      multiCluster:
+        clusterName: {{ .Values.clusterName | quote }}
+      enableReaderRBAC: true
+    pilot:
+      cni:
+        enabled: true
+    meshConfig:
+      accessLogFile: {{ .Values.accessLogFile | quote }}
+      accessLogEncoding: {{ .Values.accessLogEncoding | quote }}
