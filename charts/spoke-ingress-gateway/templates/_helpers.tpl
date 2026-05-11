@@ -10,6 +10,10 @@
 app: istio-ingressgateway
 istio: ingressgateway
 release: istio
+{{- end }}
+
+{{- define "spoke-ingress-gateway.podLabels" -}}
+{{ include "spoke-ingress-gateway.labels" . }}
 topology.istio.io/network: {{ include "spoke-ingress-gateway.network" . | quote }}
 {{- end }}
 

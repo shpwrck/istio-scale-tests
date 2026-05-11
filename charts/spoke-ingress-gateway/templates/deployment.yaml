@@ -27,7 +27,7 @@ spec:
         prometheus.io/scrape: "true"
         sidecar.istio.io/inject: "true"
       labels:
-        {{- include "spoke-ingress-gateway.labels" . | nindent 8 }}
+        {{- include "spoke-ingress-gateway.podLabels" . | nindent 8 }}
         sidecar.istio.io/inject: "true"
     spec:
       containers:
