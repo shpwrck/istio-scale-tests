@@ -45,6 +45,8 @@ export KUBECONFIG=~/.kube/rosa-config
 
 The second apply installs ACM, imports spoke clusters, deploys OpenShift GitOps (Argo CD), and syncs the app-of-apps which rolls out the entire mesh: Sail operator, Istio CRs, cert-manager CAs, External Secrets for cacerts and remote secrets, ingress gateways, and east-west gateways.
 
+By default `mesh_member_count = 0` labels all spokes as mesh members. Set it to `1` to start with a single spoke and [incrementally add clusters](#incremental-mesh-deployment).
+
 No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want to verify the mesh? See [Verify the mesh install](#verify-the-mesh-install).
 
 ---
@@ -157,33 +159,106 @@ See `terraform/rosa-hcp/README.md` for variables controlling ACM channel, GitOps
 
 ---
 
-## Verify the mesh install
+## Incremental mesh deployment
 
-Deploy the standalone `mesh-verify` test workload to confirm cross-cluster load balancing:
+The `mesh_member_count` Terraform variable controls how many spoke clusters participate in the Istio mesh. Spokes are labeled with `istio-mesh-member=true` in sorted key order; the ACM Placement selects only labeled spokes.
+
+| `mesh_member_count` | Labeled spokes | Behavior |
+| --- | --- | --- |
+| `0` | All spokes | All spokes get Istio (default, backward-compatible) |
+| `1` | First spoke only (e.g. `istio-002`) | Single-cluster Istio, no multicluster |
+| `2` | First two spokes | Two-cluster mesh with cross-cluster discovery |
+| `N` | First N spokes | N-cluster mesh |
 
 ```bash
-# Deploy the mesh verification ApplicationSet (not part of root app-of-apps)
+# Start with one cluster
+# In terraform.tfvars: mesh_member_count = 1
+terraform apply
+
+# Verify single-cluster Istio works (see next section)
+
+# Add a second cluster
+# In terraform.tfvars: mesh_member_count = 2
+terraform apply
+
+# Verify cross-cluster load balancing works
+```
+
+For quick iteration without Terraform, label clusters directly:
+
+```bash
+# Add a cluster to the mesh
+oc label managedcluster/istio-003 istio-mesh-member=true
+
+# Remove a cluster from the mesh
+oc label managedcluster/istio-003 istio-mesh-member-
+```
+
+Manual labels take effect immediately (next ACM reconciliation cycle). The next `terraform apply` reconciles labels to match `mesh_member_count`.
+
+Check which spokes are currently mesh members:
+
+```bash
+oc get managedcluster -l istio-mesh-member=true
+```
+
+---
+
+## Verify the mesh install
+
+The `mesh-verify` chart (`charts/mesh-verify/`) deploys a lightweight echo workload for validating Istio. It runs an `http-echo` pod per cluster that returns its cluster name, exposed via an Istio VirtualService on `Host: mesh-verify.local`. A DestinationRule disables locality-aware load balancing so requests spread evenly across clusters.
+
+The chart is **not** part of the root app-of-apps — deploy it manually via a standalone ApplicationSet. It uses the same ACM Placement as the mesh components, so it only targets clusters with the `istio-mesh-member` label.
+
+### Deploy and test
+
+```bash
+# Deploy the mesh-verify ApplicationSet
 oc apply -f charts/mesh-verify-appset.yaml
 
-# Curl any cluster's ingress — responses should come from different clusters
-INGRESS=$(oc get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-for i in {1..10}; do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
+# Wait for Argo CD to sync (check the mesh-verify-appset Application in the UI,
+# or wait for pods to appear):
+oc get pods -n mesh-verify --context istio-002
+```
 
-# Clean up
+Once pods are running, curl any mesh member's ingress gateway:
+
+```bash
+INGRESS=$(oc get svc istio-ingressgateway -n istio-system --context istio-002 \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+for i in {1..10}; do
+  curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"
+done
+```
+
+### What to expect
+
+**Single cluster** (`mesh_member_count = 1`): all responses return the same cluster name (e.g. `istio-002`). This confirms Istio, the ingress gateway, and sidecar injection are working on that cluster.
+
+**Multiple clusters** (`mesh_member_count >= 2`): responses should come from different cluster names (e.g. alternating `istio-002` and `istio-003`). This confirms east-west gateways, remote secrets, and cross-cluster endpoint discovery are all functioning.
+
+### Deeper diagnostics
+
+```bash
+# Check that istiod discovers remote clusters
+istioctl remote-clusters --context istio-002
+
+# Verify cross-cluster endpoints are visible to a sidecar
+istioctl proxy-config endpoints deploy/mesh-verify-echo -n mesh-verify \
+  --context istio-002 | grep mesh-verify
+
+# Check remote secrets exist on a spoke
+oc get secret -n istio-system -l istio/multiCluster=true --context istio-002
+```
+
+### Clean up
+
+```bash
 oc delete -f charts/mesh-verify-appset.yaml
 ```
 
-Each cluster's echo pod returns its cluster name. Seeing responses from multiple clusters confirms east-west gateways and remote secrets are working.
-
-For deeper diagnostics:
-
-```bash
-# Check remote cluster discovery
-istioctl remote-clusters --context istio-002
-
-# Check cross-cluster endpoints from a sidecar
-istioctl proxy-config endpoints deploy/mesh-verify-echo -n mesh-verify --context istio-002 | grep mesh-verify
-```
+This removes the ApplicationSet and all generated Applications. The `mesh-verify` namespace and its resources are cleaned up on each spoke by Argo CD's prune policy.
 
 ---
 
