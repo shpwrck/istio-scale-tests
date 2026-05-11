@@ -6,8 +6,8 @@ This repository automates multi-cluster Istio (Red Hat OpenShift Service Mesh 3.
 
 **What this repo does:**
 1. Provisions ROSA HCP clusters via Terraform (`terraform/rosa-hcp/`)
-2. Installs multi-primary, multi-network Istio mesh using Sail operator (`istio-setup/` 001–009)
-3. Optional: ACM hub + GitOps wiring (`platform-setup/` 001–002)
+2. Optional: ACM hub + GitOps wiring via Terraform (`terraform/rosa-hcp/`, `enable_platform_setup = true`)
+3. Installs multi-primary, multi-network Istio mesh using Sail operator (`istio-setup/` 001–009)
 4. Deploys multicluster load test workloads (`isotope-multicluster/`)
 
 **Source of truth:** [Red Hat OSSM 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies)
@@ -23,9 +23,7 @@ All pinned versions and environment variables live in **`config/versions.env`** 
 ### Script Conventions
 
 Automation scripts are **numbered bash** (`NNN-kebab-case.sh`) reflecting execution order:
-- `platform-setup/001-002`: ACM + GitOps (optional)
 - `istio-setup/001-009`: Mesh install + verification
-- `terraform/scripts/001`: Kubeconfig merging
 
 **Every mesh script must:**
 - Use `#!/usr/bin/env bash` + `set -euo pipefail`
@@ -86,21 +84,13 @@ PATH="$PWD/.bin:$PATH" ./istio-setup/005-ossm-mc-remote-secrets.sh
 PATH="$PWD/.bin:$PATH" ./istio-setup/008-ossm-mc-verify-east-west.sh
 ```
 
-### Add ACM + GitOps (Hub Setup)
+### Provision Clusters + ACM + GitOps (Terraform)
 
-Before mesh install, on the first cluster (hub):
-
-```bash
-./platform-setup/001-acm-install-hub.sh --context rosa-001
-./platform-setup/002-acm-openshift-gitops.sh --context rosa-001
-```
-
-### Provision Clusters (Terraform)
-
-See `terraform/rosa-hcp/README.md`. Key steps:
+See `terraform/rosa-hcp/README.md`. Two-phase apply:
 1. Set `RHCS_TOKEN`, `cluster_count`, `openshift_version` in variables or env
-2. `terraform init && terraform apply`
-3. Build kubeconfig: `terraform/scripts/001-oc-login-merge-kubeconfig.sh`
+2. `terraform init && terraform apply` — creates ROSA clusters
+3. Set `enable_platform_setup = true`, `terraform apply` — installs ACM + GitOps on the hub
+4. Log in with `oc login` per cluster using `terraform output cluster_admin_login`
 
 ### Update Pinned Versions
 
