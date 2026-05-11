@@ -1,12 +1,12 @@
 # Multicluster isotope (istio/tools)
 
-This directory wires [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) into the same multi-primary, multi-network clusters you bring up with `istio-setup/` (see repo root README.md and [OSSM 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies)).
+This directory wires [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) into the same multi-primary, multi-network clusters you bring up with GitOps (Helm charts deployed by Argo CD ApplicationSets — see repo root README.md and [OSSM 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies)).
 
 Upstream describes the pattern in `isotope/example-topologies/chain-2-services-different-cluster.yaml` and `isotope/convert/README.md`: each logical cluster name in the topology is rendered separately with `convert kubernetes ... --cluster <name>`, then applied to the matching kube context.
 
 ## Prerequisites
 
-- Mesh installed through `istio-setup/003`–`007` (or equivalent): remote secrets and east–west gateways so services resolve across clusters.
+- Mesh installed via GitOps (Argo CD ApplicationSets deploying Helm charts) or equivalent: remote secrets and east-west gateways so services resolve across clusters.
 - Multicluster DNS for the stub domain used in the graph (`b.global` in the sample). Without it, calls from `a` to `b` will not resolve. Align stub domains with your Istio/OSSM multicluster install (`.global` is the common Istio multicluster pattern).
 - Go on `PATH` and a local clone of [istio/tools](https://github.com/istio/tools).
 - An isotope service image built from `istio/tools/isotope/service` (for example via `ko`) — there is no universal public pin in-tree; set `ISOTOPE_SERVICE_IMAGE` or `--service-image`.
