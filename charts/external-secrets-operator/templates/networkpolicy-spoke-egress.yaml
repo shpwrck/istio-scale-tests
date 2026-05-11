@@ -1,0 +1,23 @@
+{{- if .Values.spokeEgress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-spoke-api-egress-for-main-controller
+  namespace: {{ .Values.spokeEgress.operandNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.externalSecretsConfig | quote }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Name | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+{{- end }}
