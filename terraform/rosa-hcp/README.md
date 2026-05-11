@@ -40,11 +40,21 @@ Multi-AZ VPCs are not configurable here (always one AZ per cluster; one NAT and 
 
 Default worker replicas at cluster install is 2 (ROSA single-zone minimum) unless `cluster_defaults.replicas` is set. The default machine pool (`workers`) is managed by Terraform with autoscaling (2–10 nodes by default unless `cluster_defaults.worker_autoscale_*` overrides), via `worker_pool.tf`. This root module does not manage `rhcs_hcp_cluster_autoscaler` (pool bounds still define scaling range; enabling the autoscaler resource in the upstream module has triggered provider apply/refresh inconsistencies for some API responses).
 
-After apply, use `terraform output by_cluster` for each cluster’s `cluster_api_url` (and console URL). This stack does not generate a kubeconfig from Terraform itself. Terraform creates a shared cluster-admin password for every cluster (`password.tf`); read it with `terraform output cluster_admin_login` (sensitive). Log in with `oc login <cluster_api_url> -u cluster-admin -p '<password>'` per cluster and name your kubectl/oc contexts to match `cluster_name_format` (e.g. `rosa-001`, `rosa-002`) so they align with `SETUP_CONTEXTS` in `config/versions.env` and `platform-setup` / `istio-setup` scripts. Do not commit kubeconfigs.
+After apply, use `terraform output by_cluster` for each cluster’s `cluster_api_url` (and console URL). This stack does not generate a kubeconfig from Terraform itself. Terraform creates a shared cluster-admin password for every cluster (`password.tf`); read it with `terraform output cluster_admin_login` (sensitive). Log in with `oc login <cluster_api_url> -u cluster-admin -p ‘<password>’` per cluster and name your kubectl/oc contexts to match `cluster_name_format` (e.g. `rosa-001`, `rosa-002`) so they align with `SETUP_CONTEXTS` in `config/versions.env` and `istio-setup/` scripts. Do not commit kubeconfigs.
 
-Optional helper (repo root): `terraform/scripts/001-oc-login-merge-kubeconfig.sh` — reads `by_cluster` and `cluster_admin_login` via `terraform output -json`, creates a new kubeconfig file (temp path or `--output`), sets `KUBECONFIG` for its `oc` calls, runs `oc login --server … --username … --password …` once per cluster (sorted keys), renames contexts to map keys, `oc config use-context` on the first key, then prints `export KUBECONFIG=…` to copy into your shell. Flags: `--terraform-dir`, `--insecure-skip-tls-verify`, `--dry-run`.
+## ACM + GitOps (platform setup)
 
-ACM hub: Outputs `first_cluster_key` and `first_cluster` identify the lexicographically first generated cluster (same ordering as `cluster_keys`). Use them with `platform-setup/001-acm-install-hub.sh` so the hub lands on that cluster’s API (`first_cluster.cluster_api_url`); pass `--context` or rely on API URL matching after `terraform/scripts/001-oc-login-merge-kubeconfig.sh` runs inside platform-setup/001 (when registering spokes). After MultiClusterHub is Running, platform-setup/001 installs `charts/acm-managed-cluster` once per non-hub key and applies each spoke’s RHACM import manifest using that merged kubeconfig.
+Set `enable_platform_setup = true` (default `false`) and re-apply to install RHACM and OpenShift GitOps on the hub cluster. This is a two-phase apply: the first apply creates ROSA clusters, the second installs platform components. The hub is always the lexicographically first cluster (`first_cluster_key`).
+
+Resources created (in `platform_acm.tf`, `platform_acm_spokes.tf`, `platform_gitops.tf`):
+- ACM operator namespace, Subscription, MultiClusterHub, KlusterletConfig
+- Per-spoke ManagedCluster + auto-import-secret (idempotent — skips already-joined spokes)
+- OpenShift GitOps operator Subscription, ArgoCD CR configuration
+- ACM GitOps resources (ManagedClusterSetBinding, Placement, GitOpsCluster)
+- Hub app-of-apps (when `gitops_app_repo_url` is set)
+- ArgoCD cluster secret patching (public API URL + TLS CA chain)
+
+Key variables: `acm_channel`, `gitops_operator_channel`, `gitops_app_repo_url`, `gitops_app_repo_revision`, `enable_gitops`. See `platform_variables.tf` and `terraform.tfvars.example`.
 
 Every cluster gets a cluster-admin user. Terraform generates one random password (`password.tf`) and applies it to all clusters so you can log in everywhere with the same credentials. Read them with `terraform output cluster_admin_login` (sensitive); username is `cluster-admin`.
 

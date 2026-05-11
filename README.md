@@ -45,7 +45,7 @@ PATH="$PWD/.bin:$PATH" ./istio-setup/005-ossm-mc-remote-secrets.sh
 PATH="$PWD/.bin:$PATH" ./istio-setup/008-ossm-mc-verify-east-west.sh
 ```
 
-No clusters yet? Start at [§1 Provision clusters](#1-provision-clusters-terraform). Want GitOps-driven installs? See [Optional — Platform scripts](#optional--platform-scripts-platform-setup).
+No clusters yet? Start at [§1 Provision clusters](#1-provision-clusters-terraform). Want GitOps-driven installs? Enable `enable_platform_setup = true` in Terraform (see `terraform/rosa-hcp/README.md`).
 
 ---
 
@@ -54,7 +54,7 @@ No clusters yet? Start at [§1 Provision clusters](#1-provision-clusters-terrafo
 Run automation in this sequence:
 
 1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
-2. Mesh — install and verify Istio across clusters (`istio-setup/`, `001`–`009`). Optional GitOps overlay: run `platform-setup/` `001`–`002` first.
+2. Mesh — install and verify Istio across clusters (`istio-setup/`, `001`–`009`). Optional GitOps overlay: set `enable_platform_setup = true` in Terraform.
 3. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
 
 ---
@@ -66,10 +66,10 @@ On the machine where you run repo commands (tests assume bash 4+):
 
 | Binary / runtime  | Notes                                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bash`            | 4 or newer (`platform-setup/` and `istio-setup/` scripts use bash).                                                                                               |
+| `bash`            | 4 or newer (`istio-setup/` scripts use bash).                                                                                                                     |
 | `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match what you pass to `--contexts` / `SETUP_CONTEXTS` (examples in docs use `rosa-001`, …). |
 | `terraform`       | To apply `terraform/rosa-hcp/` (pinned Terraform version: see that directory’s `versions.tf`).                                                                    |
-| `helm`            | Helm 3 for `platform-setup/001`, `istio-setup/004`, and charts under `charts/`.                                                                                   |
+| `helm`            | Helm 3 for `istio-setup/004` and charts under `charts/`.                                                                                                          |
 | `istioctl`        | On `PATH`, or a binary at `.bin/istioctl` with `PATH="$PWD/.bin:$PATH"`; align the build with `ISTIO_VERSION` in `config/versions.env`.                           |
 | `jq`, `openssl`, `curl`, `envsubst` | Standard Unix utilities — `jq` for Terraform/script JSON, `openssl` for `istio-setup/001` CA generation, `curl` for ingress checks, `envsubst` (gettext) renders templates in `istio-setup/003` and `007`. |
 
@@ -82,28 +82,30 @@ Optional (later steps): Go on `PATH` when running `isotope-multicluster/` agains
 
 ## 1. Provision clusters (Terraform)
 
-Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terraform-redhat/rosa-hcp/rhcs`). You set `cluster_count`, `cluster_name_format`, and `vpc_cidr_format` (plus pins such as `openshift_version`); each cluster gets its own VPC, OIDC stack, and IAM roles. Outputs include API URLs and a shared `cluster_admin_login`; kubeconfig is built outside Terraform (see `terraform/rosa-hcp/README.md` and `terraform/scripts/001-oc-login-merge-kubeconfig.sh`).
+Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terraform-redhat/rosa-hcp/rhcs`). You set `cluster_count`, `cluster_name_format`, and `vpc_cidr_format` (plus pins such as `openshift_version`); each cluster gets its own VPC, OIDC stack, and IAM roles. Outputs include API URLs and a shared `cluster_admin_login`. Log in with `oc login` per cluster (see `terraform/rosa-hcp/README.md`). Optional: set `enable_platform_setup = true` to install ACM + GitOps on the hub in a second apply.
 
 ---
 
 ## 2. Install the mesh (`istio-setup/`)
 
-After clusters exist and you can `oc login`, run `istio-setup/` 001–009 for CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks. If you want a GitOps-driven workflow on top, run `platform-setup/` 001–002 first; both are optional and covered in the [Optional — Platform scripts](#optional--platform-scripts-platform-setup) subsection below.
+After clusters exist and you can `oc login`, run `istio-setup/` 001–009 for CA material, optional kubeconfig CA embedding, Istio CRs, ingress gateway, remote secrets, east–west gateways, and checks. If you want a GitOps-driven workflow on top, set `enable_platform_setup = true` in Terraform before running mesh scripts.
 
 <details>
 <summary><b>Repository layout</b> — directories and Helm charts (click to expand)</summary>
 
 | Path                                     | Role                                                                                                                                                                                                                              |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `platform-setup/`                        | Optional 001 ACM hub + 002 hub GitOps / Argo wiring (`README.md` in this directory).                                                                                                                                              |
+| `terraform/rosa-hcp/platform_acm.tf`     | ACM operator + MultiClusterHub + KlusterletConfig on the hub (gated by `enable_platform_setup`).                                                                                                                                  |
+| `terraform/rosa-hcp/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster.                                                                                                                                                                |
+| `terraform/rosa-hcp/platform_gitops.tf`  | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps.                                                                                                                                                      |
 | `istio-setup/`                           | Mesh install and checks (001–009; table below).                                                                                                                                                                                   |
-| `charts/acm-operator/`                   | OLM OperatorGroup + Subscription for the ACM operator (`platform-setup/001-acm-install-hub.sh`).                                                                                                                                  |
-| `charts/acm-multicluster-hub/`           | `MultiClusterHub` CR only (`platform-setup/001`).                                                                                                                                                                                 |
-| `charts/acm-klusterlet-config/`          | `KlusterletConfig` CR only (`platform-setup/001`, after CRD exists).                                                                                                                                                              |
-| `charts/acm-managed-cluster/`            | One `ManagedCluster` per Helm release / spoke; `platform-setup/001-acm-install-hub.sh` loops Terraform keys (excluding hub) after MCH Running, then applies hub secret `import.yaml` on each spoke context.                       |
-| `charts/openshift-gitops-operator/`      | OLM OperatorGroup + Subscription for Red Hat OpenShift GitOps (`platform-setup/002-acm-openshift-gitops.sh`).                                                                                                                     |
-| `charts/acm-openshift-gitops-resources/` | Helm — ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD (`platform-setup/002`).                                                                                                                                 |
-| `charts/gitops-hub-app-of-apps/`        | Helm — Argo CD `Application` CR `hub-gitops-root` (directory sync of `charts/gitops-hub-apps/applications`) (`platform-setup/002`).                                                                                                |
+| `charts/acm-operator/`                   | Helm chart: OLM OperatorGroup + Subscription for ACM (used by Terraform `platform_acm.tf`).                                                                                                                                       |
+| `charts/acm-multicluster-hub/`           | Helm chart: `MultiClusterHub` CR only (Terraform `platform_acm.tf`).                                                                                                                                                              |
+| `charts/acm-klusterlet-config/`          | Helm chart: `KlusterletConfig` CR only (Terraform `platform_acm.tf`, after CRD exists).                                                                                                                                           |
+| `charts/acm-managed-cluster/`            | Helm chart: one `ManagedCluster` per spoke (Terraform `platform_acm_spokes.tf`).                                                                                                                                                   |
+| `charts/openshift-gitops-operator/`      | Helm chart: OLM Subscription for Red Hat OpenShift GitOps (Terraform `platform_gitops.tf`).                                                                                                                                        |
+| `charts/acm-openshift-gitops-resources/` | Helm — ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD (Terraform `platform_gitops.tf`).                                                                                                                        |
+| `charts/gitops-hub-app-of-apps/`        | Helm — Argo CD `Application` CR `hub-gitops-root` (directory sync of `charts/gitops-hub-apps/applications`) (Terraform `platform_gitops.tf`).                                                                                      |
 | `charts/gitops-hub-apps/`                 | Plain YAML child `Application` manifests under `applications/`; applied when `hub-gitops-root` syncs.                                                                                                                               |
 | `charts/cert-manager-operator/`          | Helm — OLM install for cert-manager Operator for Red Hat OpenShift; synced by `hub-cert-manager-operator`.                                                                                                                        |
 | `charts/hub-mesh-ca/`                    | Helm — cert-manager mesh root + `ClusterIssuer` stack; intermediates optional or delegated to `hub-mesh-ca-intermediate` + ApplicationSet (after operator).                                                                        |
@@ -116,21 +118,22 @@ After clusters exist and you can `oc login`, run `istio-setup/` 001–009 for CA
 </details>
 
 
-### Optional — Platform scripts (`platform-setup/`)
+### Optional — ACM + GitOps (Terraform)
 
-Skip this subsection for mesh-only flows. Use 001 for an ACM hub on the first ROSA cluster from Terraform outputs. Use 002 after 001 to install OpenShift GitOps and wire ACM GitOpsCluster ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
+Skip this subsection for mesh-only flows. ACM and OpenShift GitOps are installed via Terraform with a two-phase apply. After provisioning clusters, set `enable_platform_setup = true` and re-apply:
 
 ```bash
-# Run BEFORE the mesh scripts in Quick start (the hub cluster gets ACM + Argo CD)
-./platform-setup/001-acm-install-hub.sh --context rosa-001
-./platform-setup/002-acm-openshift-gitops.sh --context rosa-001
+# In terraform/rosa-hcp/:
+# 1. First apply creates ROSA clusters (enable_platform_setup defaults to false)
+terraform apply
+
+# 2. Set enable_platform_setup = true in terraform.tfvars, then:
+terraform apply
+# This installs ACM operator, MultiClusterHub, imports spokes, installs GitOps,
+# configures ArgoCD, and deploys the app-of-apps.
 ```
 
-
-| Step | Script                                       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 001  | `platform-setup/001-acm-install-hub.sh`      | Optional. Merged kubeconfig from Terraform (unless `--skip-managed-clusters`), then `charts/acm-operator` → wait CSV → `charts/acm-multicluster-hub` → wait Running → `charts/acm-klusterlet-config` (optional) → `charts/acm-managed-cluster` + import on spokes → wait ManagedCluster Joined+Available for each Terraform cluster key. Default `ACM_CHANNEL` pairs with `OPENSHIFT_VERSION` in `config/versions.env`. `ACM_WAIT_MANAGED_CLUSTER_READY`, `ACM_INSTALL_KLUSTERLETCONFIG`, `--skip-managed-clusters`, `--skip-import`, `--skip-wait`, `--dry-run` control behavior. |
-| 002  | `platform-setup/002-acm-openshift-gitops.sh` | Optional (ACM). After platform 001: Helm `charts/openshift-gitops-operator` → wait for CSV + Argo CD → Helm `charts/gitops-hub-app-of-apps` (hub `hub-gitops-root` directory-syncing child Applications under `charts/gitops-hub-apps/applications`) → Helm `charts/acm-openshift-gitops-resources` (ManagedClusterSetBinding, Placement excluding hub, GitOpsCluster), then patches Argo cluster Secrets by default (public API URL + token; `--patch-argoc-cluster-secrets-only` to re-run). Uses `config/versions.env`.                                                        |
+See `terraform/rosa-hcp/README.md` for variables controlling ACM channel, GitOps config, and spoke import behavior.
 
 
 ### Mesh scripts (`istio-setup/`)
