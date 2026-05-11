@@ -1,0 +1,34 @@
+{{- if and .Values.rbac.enabled (ne .Values.namespace .Values.sourceSecretsNamespace) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-argocd-rbac-in-source-ns" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ .Values.sourceSecretsNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+  {{- end }}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-argocd-rbac-in-source-ns" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ .Values.sourceSecretsNamespace | quote }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-argocd-rbac-in-source-ns" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.rbac.argocd.serviceAccountName | quote }}
+    namespace: {{ .Values.rbac.argocd.namespace | quote }}
+{{- end }}

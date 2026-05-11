@@ -1,0 +1,56 @@
+namespace: external-secrets-operator
+sourceSecretsNamespace: cert-manager
+spokeTargetNamespace: istio-system
+
+clusterName: ""
+clusterServer: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+cacerts:
+  enabled: true
+  sourceSecretName: ""
+  targetSecretName: ""
+  refreshInterval: 1h
+
+kubeconfig:
+  enabled: true
+  sourceSecretName: ""
+  refreshInterval: 1h
+
+kubernetesAPI:
+  serverURL: ""
+  caFromConfigMap:
+    enabled: true
+    name: kube-root-ca.crt
+    key: ca.crt
+
+secretStoreName: ""
+serviceAccountName: ""
+
+spokeSecretStore:
+  enabled: true
+  name: ""
+  skipCAProvider: false
+  labels:
+    hub-mesh-push-secrets/push-target: "true"
+
+pushSecret:
+  refreshInterval: 1h
+  storeMatchLabels:
+    hub-mesh-push-secrets/push-target: "true"
+
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller
+
+argoSyncWaves:
+  enabled: true
+  rbac: -30
+  secretStore: -25
+  externalSecret: 0
+  spokeSecretStore: 5
+  pushSecret: 10
