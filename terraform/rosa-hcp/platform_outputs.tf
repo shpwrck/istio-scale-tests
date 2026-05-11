@@ -31,3 +31,8 @@ output "gitops_namespace" {
   description = "Namespace for Argo CD and ACM GitOps CRs."
   value       = var.gitops_namespace
 }
+
+output "mesh_member_spoke_keys" {
+  description = "Spoke cluster keys labeled as Istio mesh members."
+  value       = var.enable_platform_setup ? local.mesh_member_spoke_keys : []
+}

@@ -27,6 +27,14 @@ locals {
     for k, v in local.spoke_cluster_keys : k => v
     if local.platform_enabled && try(data.external.spoke_joined[k].result.joined, "false") != "true"
   }
+
+  sorted_spoke_keys = sort(keys(local.spoke_cluster_keys))
+  mesh_member_spoke_keys = (
+    var.mesh_member_count == 0
+    ? local.sorted_spoke_keys
+    : slice(local.sorted_spoke_keys, 0, min(var.mesh_member_count, length(local.sorted_spoke_keys)))
+  )
+  mesh_member_spoke_set = toset(local.mesh_member_spoke_keys)
 }
 
 # Obtain an OAuth bearer token only for spokes that need importing.
@@ -76,16 +84,25 @@ resource "helm_release" "acm_managed_cluster" {
   wait             = true
   timeout          = 300
 
-  set = [
-    {
-      name  = "managedCluster.name"
-      value = each.key
-    },
-    {
-      name  = "clustersetName"
-      value = var.acm_cluster_set
-    },
-  ]
+  set = concat(
+    [
+      {
+        name  = "managedCluster.name"
+        value = each.key
+      },
+      {
+        name  = "clustersetName"
+        value = var.acm_cluster_set
+      },
+    ],
+    contains(local.mesh_member_spoke_set, each.key) ? [
+      {
+        name  = "managedCluster.labels.istio-mesh-member"
+        value = "true"
+        type  = "string"
+      },
+    ] : [],
+  )
 
   depends_on = [kubernetes_manifest.spoke_namespace]
 }

@@ -12,12 +12,19 @@ spec:
       operator: Exists
     - key: cluster.open-cluster-management.io/unavailable
       operator: Exists
-  {{- if .Values.placement.excludeHubLocalClusterLabel }}
+  {{- if or .Values.placement.excludeHubLocalClusterLabel (.Values.placement.requireMeshMemberLabel | default false) }}
   predicates:
     - requiredClusterSelector:
         labelSelector:
           matchExpressions:
-            # Hub (terraform first_cluster) carries this label; spokes do not — Argo CD stays off duplicate hub API entry.
+            {{- if .Values.placement.excludeHubLocalClusterLabel }}
             - key: local-cluster
               operator: DoesNotExist
+            {{- end }}
+            {{- if .Values.placement.requireMeshMemberLabel | default false }}
+            - key: istio-mesh-member
+              operator: In
+              values:
+                - "true"
+            {{- end }}
   {{- end }}

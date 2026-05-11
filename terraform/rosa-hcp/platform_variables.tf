@@ -148,3 +148,18 @@ variable "gitops_addon_enabled" {
   default     = true
   description = "GitOpsCluster spec.gitopsAddon.enabled — enables the gitops-addon on spoke ManagedClusters."
 }
+
+# --------------------------------------------------------------------------
+# Incremental mesh deployment
+# --------------------------------------------------------------------------
+
+variable "mesh_member_count" {
+  type        = number
+  default     = 0
+  description = "Number of spoke clusters to label as Istio mesh members (0 = all spokes). Spokes are labeled in sorted key order (e.g. istio-002 first when hub is istio-001)."
+
+  validation {
+    condition     = var.mesh_member_count >= 0
+    error_message = "mesh_member_count must be >= 0 (0 = all spokes)."
+  }
+}

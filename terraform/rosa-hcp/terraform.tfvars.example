@@ -59,3 +59,6 @@ cluster_index_start  = 1
 # gitops_rhacm_appset_any_namespace = true
 # gitops_applicationset_source_namespaces = ["open-cluster-management-global-set"]
 # gitops_addon_enabled           = true
+
+# Incremental mesh: number of spokes that get Istio (0 = all, sorted order).
+# mesh_member_count = 0
