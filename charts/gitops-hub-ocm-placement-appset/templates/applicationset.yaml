@@ -78,6 +78,10 @@ spec:
 {{- else }}
 {{- fail "destination.mode must be clusterName (sync to every registered cluster by name) or inClusterServer (hub Kubernetes API only)" }}
 {{- end }}
+{{- if .Values.template.ignoreDifferences }}
+      ignoreDifferences:
+{{- toYaml .Values.template.ignoreDifferences | nindent 8 }}
+{{- end }}
       syncPolicy:
         automated:
           prune: true
