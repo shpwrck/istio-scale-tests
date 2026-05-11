@@ -16,6 +16,20 @@
 # Git worktrees (isolated checkouts; see using-git-worktrees skill)
 /.worktrees/
 
+# Private key and certificate material (beyond /cacerts/)
+*.pem
+*.key
+*.crt
+
+# Kubeconfig files
+kubeconfig
+*kubeconfig*
+
+# Environment files with potential secrets
+.env
+.env.local
+.env.*.local
+
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/
 /terraform/**/*.tfstate
