@@ -48,7 +48,7 @@ helm upgrade --install hub-mesh-ca ./charts/hub-mesh-ca \
 
 ## Relationship to Istio cacerts
 
-This chart issues TLS secrets in cert-manager’s shape. To feed Istio `cacerts`, export PEMs from each issued `Secret` into `ca-cert.pem` / `ca-key.pem` / `cert-chain.pem` / `root-cert.pem`, or use Istio-CSR / upstream integration. See `manifests/cert-manager-samples/README.md`.
+This chart issues TLS secrets in cert-manager’s shape. To feed Istio `cacerts`, export PEMs from each issued `Secret` into `ca-cert.pem` / `ca-key.pem` / `cert-chain.pem` / `root-cert.pem`, or use Istio-CSR / upstream integration.
 
 ## Objects
 
