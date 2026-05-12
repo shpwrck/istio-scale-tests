@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: propagation-watcher
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "propagation-test.watcher.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.watcher.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "propagation-test.watcher.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "propagation-test.watcher.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: {{ .Values.watcher.image.repository }}:{{ .Values.watcher.image.tag }}
+          command: ["sleep", "infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true

@@ -30,6 +30,9 @@ kubeconfig
 .env.local
 .env.*.local
 
+# Propagation test results (TSV data and scraped metrics)
+/propagation-test/results/
+
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/
 /terraform/**/*.tfstate

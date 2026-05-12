@@ -52,6 +52,8 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 | `charts/external-secrets-operator/` | Helm chart: OLM install for External Secrets Operator per spoke. |
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app-of-apps). |
+| `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency (namespace, watcher pod, conditional canary service/VS/DR). |
+| `charts/istiod-monitor/` | Helm chart: OpenShift User Workload Monitoring ServiceMonitor + PrometheusRule for istiod `pilot_*` metrics. |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD `ApplicationSet` for OCM Placement + RBAC; preset value files per component (e.g. `values-istio.yaml`, `values-ingress-gateway.yaml`, `values-mesh-push-secrets.yaml`). |
 | `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD `Application` CRs on the hub — `hub-gitops-root` (directory path `charts/gitops-hub-apps/applications` for child `Application` YAML) (Terraform `terraform/platform/platform_gitops.tf`). |
 | `charts/gitops-hub-apps/` | Child hub `Application` manifests under `applications/` (directory-synced by `hub-gitops-root`). |
@@ -64,6 +66,7 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 | `manifests/acm-gitops/` | Pointer README — ACM GitOps wiring lives in `charts/acm-openshift-gitops-resources`. |
 | `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
 | `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |
+| `propagation-test/` | Propagation latency test suite: numbered scripts (001-006) for setup, endpoint probe, config probe, metrics collection, reporting, and mesh-size sweep. See `propagation-test/README.md`. |
 | `isotope-multicluster/` | [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) multicluster workload: chain graph from `terraform output cluster_keys`, per-cluster rendering and apply. See `isotope-multicluster/README.md`. |
 
 

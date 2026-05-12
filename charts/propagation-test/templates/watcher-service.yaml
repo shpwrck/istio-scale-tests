@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: propagation-watcher
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "propagation-test.watcher.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "propagation-test.watcher.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      protocol: TCP
+      targetPort: {{ .Values.service.port }}

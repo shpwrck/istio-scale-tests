@@ -1,0 +1,17 @@
+{{- if .Values.canary.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: propagation-canary
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "propagation-test.canary.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "propagation-test.canary.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      protocol: TCP
+      targetPort: {{ .Values.service.port }}
+{{- end }}

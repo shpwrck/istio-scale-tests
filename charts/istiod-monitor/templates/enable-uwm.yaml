@@ -1,0 +1,10 @@
+{{- if .Values.enableUserWorkloadMonitoring }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkloadMonitoring: true
+{{- end }}
