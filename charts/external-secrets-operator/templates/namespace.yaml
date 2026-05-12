@@ -4,3 +4,12 @@ metadata:
   name: {{ .Values.namespace | quote }}
   labels:
     openshift.io/cluster-monitoring: "true"
+{{- if .Values.spokeEgress.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.spokeEgress.operandNamespace | quote }}
+  labels:
+    openshift.io/cluster-monitoring: "true"
+{{- end }}
