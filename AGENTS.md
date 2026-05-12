@@ -40,7 +40,7 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 
 | Path | Use |
 | ---- | --- |
-| `config/versions.env` | Pinned `OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, optional `ACM_CHANNEL` / `ACM_NAMESPACE`, `GITOPS_NAMESPACE` / `GITOPS_OPERATOR_NAMESPACE` / `GITOPS_OPERATOR_CHANNEL` / `GITOPS_ARGOCD_CR_NAME`, `ACCESS_LOG_FILE` / `ACCESS_LOG_ENCODING`, `SETUP_CONTEXTS`, mesh/network defaults; `OSSM_DOC_MULTI_CLUSTER_URL`. Sourced by automation scripts; ACM/GitOps defaults also used by Terraform `platform_variables.tf`. |
+| `config/versions.env` | Pinned `OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, optional `ACM_CHANNEL` / `ACM_NAMESPACE`, `GITOPS_NAMESPACE` / `GITOPS_OPERATOR_NAMESPACE` / `GITOPS_OPERATOR_CHANNEL` / `GITOPS_ARGOCD_CR_NAME`, `ACCESS_LOG_FILE` / `ACCESS_LOG_ENCODING`, `SETUP_CONTEXTS`, mesh/network defaults; `OSSM_DOC_MULTI_CLUSTER_URL`. Sourced by automation scripts; ACM/GitOps defaults also used by Terraform `terraform/platform/variables.tf`. |
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke (ApplicationSet wave 8). |
 | `charts/spoke-istio/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke cluster with per-cluster clusterName, network, meshID (wave 21). |
 | `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke — Deployment, Service, HPA, PDB, RBAC (wave 24). |
@@ -53,16 +53,17 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app-of-apps). |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD `ApplicationSet` for OCM Placement + RBAC; preset value files per component (e.g. `values-istio.yaml`, `values-ingress-gateway.yaml`, `values-mesh-push-secrets.yaml`). |
-| `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD `Application` CRs on the hub — `hub-gitops-root` (directory path `charts/gitops-hub-apps/applications` for child `Application` YAML) (Terraform `platform_gitops.tf`). |
+| `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD `Application` CRs on the hub — `hub-gitops-root` (directory path `charts/gitops-hub-apps/applications` for child `Application` YAML) (Terraform `terraform/platform/platform_gitops.tf`). |
 | `charts/gitops-hub-apps/` | Child hub `Application` manifests under `applications/` (directory-synced by `hub-gitops-root`). |
-| `charts/acm-operator/` | Helm chart: OLM OperatorGroup + Subscription for ACM (Terraform `platform_acm.tf`). |
-| `charts/acm-multicluster-hub/` | Helm chart: `MultiClusterHub` CR only (Terraform `platform_acm.tf`). |
-| `charts/acm-klusterlet-config/` | Helm chart: `KlusterletConfig` CR only (Terraform `platform_acm.tf`). |
-| `charts/acm-managed-cluster/` | Helm chart for a single spoke `ManagedCluster`; Terraform `platform_acm_spokes.tf` installs one release per non-hub cluster. |
-| `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for Red Hat OpenShift GitOps (Terraform `platform_gitops.tf`). |
-| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster into GitOps namespace (Terraform `platform_gitops.tf`). |
+| `charts/acm-operator/` | Helm chart: OLM OperatorGroup + Subscription for ACM (Terraform `terraform/platform/platform_acm.tf`). |
+| `charts/acm-multicluster-hub/` | Helm chart: `MultiClusterHub` CR only (Terraform `terraform/platform/platform_acm.tf`). |
+| `charts/acm-klusterlet-config/` | Helm chart: `KlusterletConfig` CR only (Terraform `terraform/platform/platform_acm.tf`). |
+| `charts/acm-managed-cluster/` | Helm chart for a single spoke `ManagedCluster`; Terraform `terraform/platform/platform_acm_spokes.tf` installs one release per non-hub cluster. |
+| `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for Red Hat OpenShift GitOps (Terraform `terraform/platform/platform_gitops.tf`). |
+| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster into GitOps namespace (Terraform `terraform/platform/platform_gitops.tf`). |
 | `manifests/acm-gitops/` | Pointer README — ACM GitOps wiring lives in `charts/acm-openshift-gitops-resources`. |
-| `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane clusters; optional ACM + GitOps + mesh via `enable_platform_setup = true` (two-phase apply). |
+| `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
+| `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |
 | `isotope-multicluster/` | [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) multicluster workload: chain graph from `terraform output cluster_keys`, per-cluster rendering and apply. See `isotope-multicluster/README.md`. |
 
 

@@ -34,31 +34,5 @@ cluster_index_start  = 1
 # }
 
 # --- Platform setup (ACM + GitOps) ---
-# Two-phase apply: first create clusters (default), then set to true and apply again.
-# enable_platform_setup = true
-
-# ACM hub configuration:
-# acm_channel              = "release-2.16"
-# acm_namespace            = "open-cluster-management"
-# acm_cluster_set          = "istio-scale-tests"
-# acm_local_cluster_name   = null       # auto from first cluster key
-# acm_install_klusterletconfig = true
-
-# OpenShift GitOps / Argo CD:
-# enable_gitops                  = true
-# gitops_namespace               = "openshift-gitops"
-# gitops_operator_channel        = "gitops-1.14"
-# gitops_argocd_cr_name          = "openshift-gitops"
-# argocd_resource_limits_cpu     = "4"
-# argocd_resource_limits_memory  = "4Gi"
-# gitops_app_repo_url            = "https://github.com/ORG/istio-scale-tests.git"
-# gitops_app_repo_revision       = "main"
-# gitops_app_repo_username       = "git"          # default for PAT auth
-# gitops_app_repo_password       = ""             # HTTPS PAT/token (sensitive; prefer TF_VAR_gitops_app_repo_password)
-# gitops_app_repo_ssh_private_key = ""            # SSH key (sensitive; mutually exclusive with password)
-# gitops_rhacm_appset_any_namespace = true
-# gitops_applicationset_source_namespaces = ["open-cluster-management-global-set"]
-# gitops_addon_enabled           = true
-
-# Incremental mesh: number of spokes that get Istio (0 = all, sorted order).
-# mesh_member_count = 0
+# Platform setup is in a separate module: terraform/platform/
+# See terraform/platform/terraform.tfvars.example for ACM + GitOps variables.

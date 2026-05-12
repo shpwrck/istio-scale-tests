@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: {{ .Values.argocd.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  controller:
+    resources:
+      limits:
+        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
+        memory: {{ .Values.argocd.resourceLimits.memory }}
+  repo:
+    resources:
+      limits:
+        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
+        memory: {{ .Values.argocd.resourceLimits.memory }}
+  server:
+    resources:
+      limits:
+        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
+        memory: {{ .Values.argocd.resourceLimits.memory }}
+  applicationSet:
+    enabled: {{ .Values.argocd.applicationSet.enabled }}
+    resources:
+      limits:
+        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
+        memory: {{ .Values.argocd.resourceLimits.memory }}
+    {{- if .Values.argocd.applicationSet.env }}
+    env:
+      {{- toYaml .Values.argocd.applicationSet.env | nindent 6 }}
+    {{- end }}
+    {{- if .Values.argocd.applicationSet.sourceNamespaces }}
+    sourceNamespaces:
+      {{- toYaml .Values.argocd.applicationSet.sourceNamespaces | nindent 6 }}
+    {{- end }}

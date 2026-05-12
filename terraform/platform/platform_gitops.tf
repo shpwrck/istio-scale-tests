@@ -1,10 +1,8 @@
 # --------------------------------------------------------------------------
 # OpenShift GitOps — operator, ArgoCD config, ACM GitOps wiring
-# Maps to platform-setup/002-acm-openshift-gitops.sh.
 # --------------------------------------------------------------------------
 
 # --- GitOps operator (OLM Subscription) ---
-# No OperatorGroup: openshift-gitops-operator uses the cluster-default AllNamespaces OperatorGroup.
 
 resource "kubernetes_manifest" "gitops_subscription" {
   count    = local.gitops_enabled ? 1 : 0
@@ -47,7 +45,6 @@ resource "time_sleep" "wait_gitops_operator" {
   create_duration = "60s"
 }
 
-# ArgoCD instance is created by the operator; wait for it to stabilize.
 resource "time_sleep" "wait_argocd_stabilized" {
   count = local.gitops_enabled ? 1 : 0
 
@@ -57,73 +54,77 @@ resource "time_sleep" "wait_argocd_stabilized" {
 
 # --- ArgoCD configuration (resource limits + ApplicationSet) ---
 
-resource "kubernetes_manifest" "argocd_config" {
-  count    = local.gitops_enabled ? 1 : 0
-  provider = kubernetes.hub
+resource "terraform_data" "adopt_argocd_for_helm" {
+  count = local.gitops_enabled ? 1 : 0
 
-  manifest = {
-    apiVersion = "argoproj.io/v1beta1"
-    kind       = "ArgoCD"
-    metadata = {
-      name      = var.gitops_argocd_cr_name
-      namespace = var.gitops_namespace
-    }
-    spec = {
-      controller = {
-        resources = {
-          limits = {
-            cpu    = var.argocd_resource_limits_cpu
-            memory = var.argocd_resource_limits_memory
-          }
-        }
-      }
-      repo = {
-        resources = {
-          limits = {
-            cpu    = var.argocd_resource_limits_cpu
-            memory = var.argocd_resource_limits_memory
-          }
-        }
-      }
-      server = {
-        resources = {
-          limits = {
-            cpu    = var.argocd_resource_limits_cpu
-            memory = var.argocd_resource_limits_memory
-          }
-        }
-      }
-      applicationSet = {
-        enabled = true
-        resources = {
-          limits = {
-            cpu    = var.argocd_resource_limits_cpu
-            memory = var.argocd_resource_limits_memory
-          }
-        }
-        env = var.gitops_rhacm_appset_any_namespace ? [
-          {
-            name  = "ARGOCD_APPLICATIONSET_CONTROLLER_NAMESPACES"
-            value = "*"
-          },
-          {
-            name  = "ARGOCD_APPLICATIONSET_CONTROLLER_ENABLE_SCM_PROVIDERS"
-            value = "false"
-          },
-        ] : []
-        sourceNamespaces = var.gitops_applicationset_source_namespaces
-      }
-    }
-  }
-
-  computed_fields = ["metadata.labels", "metadata.annotations", "metadata.resourceVersion"]
-
-  field_manager {
-    name            = "terraform"
-    force_conflicts = true
+  provisioner "local-exec" {
+    command = <<-EOT
+      TOKEN=$("${local.token_script}" "${local.hub_api_url}" "cluster-admin" "${local.hub_admin_pass}" | jq -r '.status.token')
+      KC="kubectl --server=${local.hub_api_url} --token=$TOKEN --insecure-skip-tls-verify"
+      $KC annotate argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
+        meta.helm.sh/release-name=argocd-config \
+        meta.helm.sh/release-namespace="${var.gitops_namespace}" \
+        --overwrite 2>/dev/null || true
+      $KC label argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
+        app.kubernetes.io/managed-by=Helm \
+        --overwrite 2>/dev/null || true
+    EOT
   }
 
   depends_on = [time_sleep.wait_argocd_stabilized]
+}
+
+resource "helm_release" "argocd_config" {
+  count    = local.gitops_enabled ? 1 : 0
+  provider = helm.hub
+
+  name             = "argocd-config"
+  chart            = "${path.module}/../../charts/argocd-config"
+  namespace        = var.gitops_namespace
+  create_namespace = false
+  wait             = true
+  timeout          = 300
+
+  set = concat(
+    [
+      {
+        name  = "argocd.name"
+        value = var.gitops_argocd_cr_name
+      },
+      {
+        name  = "argocd.resourceLimits.cpu"
+        value = var.argocd_resource_limits_cpu
+      },
+      {
+        name  = "argocd.resourceLimits.memory"
+        value = var.argocd_resource_limits_memory
+      },
+    ],
+    var.gitops_rhacm_appset_any_namespace ? [
+      {
+        name  = "argocd.applicationSet.env[0].name"
+        value = "ARGOCD_APPLICATIONSET_CONTROLLER_NAMESPACES"
+      },
+      {
+        name  = "argocd.applicationSet.env[0].value"
+        value = "*"
+      },
+      {
+        name  = "argocd.applicationSet.env[1].name"
+        value = "ARGOCD_APPLICATIONSET_CONTROLLER_ENABLE_SCM_PROVIDERS"
+      },
+      {
+        name  = "argocd.applicationSet.env[1].value"
+        value = "false"
+      },
+    ] : [],
+    [for i, ns in var.gitops_applicationset_source_namespaces : {
+      name  = "argocd.applicationSet.sourceNamespaces[${i}]"
+      value = ns
+    }],
+  )
+
+  depends_on = [terraform_data.adopt_argocd_for_helm]
 }
 
 # --- RHACM ApplicationSet-in-any-namespace RBAC ---
@@ -255,7 +256,7 @@ resource "helm_release" "acm_gitops_resources" {
     },
   ]
 
-  depends_on = [kubernetes_manifest.argocd_config]
+  depends_on = [helm_release.argocd_config]
 }
 
 # --- Argo CD repository credentials Secret (private repos) ---
@@ -341,50 +342,47 @@ resource "helm_release" "gitops_hub_app_of_apps" {
 
 # --- GitOpsCluster CR ---
 
-resource "kubernetes_manifest" "gitops_cluster" {
+resource "helm_release" "gitops_cluster" {
   count    = local.gitops_enabled ? 1 : 0
-  provider = kubernetes.hub
+  provider = helm.hub
 
-  manifest = {
-    apiVersion = "apps.open-cluster-management.io/v1beta1"
-    kind       = "GitOpsCluster"
-    metadata = {
-      name      = "acm-openshift-gitops"
-      namespace = var.gitops_namespace
-    }
-    spec = {
-      argoServer = {
-        cluster       = local.acm_local_cluster_name
-        argoNamespace = var.gitops_namespace
-      }
-      placementRef = {
-        kind       = "Placement"
-        apiVersion = "cluster.open-cluster-management.io/v1beta1"
-        name       = "acm-openshift-gitops-placement"
-        namespace  = var.gitops_namespace
-      }
-      gitopsAddon = {
-        enabled = var.gitops_addon_enabled
-      }
-    }
-  }
+  name             = "acm-gitops-cluster"
+  chart            = "${path.module}/../../charts/acm-gitops-cluster"
+  namespace        = var.gitops_namespace
+  create_namespace = false
+  wait             = true
+  timeout          = 300
+
+  set = [
+    {
+      name  = "gitopsCluster.argoServer.cluster"
+      value = local.acm_local_cluster_name
+    },
+    {
+      name  = "gitopsCluster.argoServer.argoNamespace"
+      value = var.gitops_namespace
+    },
+    {
+      name  = "gitopsCluster.placementRef.name"
+      value = "acm-openshift-gitops-placement"
+    },
+    {
+      name  = "gitopsCluster.gitopsAddon.enabled"
+      value = tostring(var.gitops_addon_enabled)
+    },
+  ]
 
   depends_on = [helm_release.acm_gitops_resources]
 }
 
 # --- Patch ACM ArgoCD cluster secrets ---
-# ACM's GitOps addon creates *-application-manager-cluster-secret per spoke
-# with internal *-control-plane URLs that are unreachable from the hub.
-# Wait for the addon to create them, then patch with real API URLs + tokens.
 
 resource "time_sleep" "wait_gitops_addon_secrets" {
   count = local.gitops_enabled && length(local.spoke_cluster_keys) > 0 ? 1 : 0
 
-  depends_on      = [kubernetes_manifest.gitops_cluster, time_sleep.wait_spoke_registration]
+  depends_on      = [helm_release.gitops_cluster, time_sleep.wait_spoke_registration]
   create_duration = "120s"
 
-  # Re-sleep when any ManagedCluster Helm release changes (e.g. label update),
-  # giving ACM time to reconcile before we patch ArgoCD cluster secrets.
   triggers = {
     managed_cluster_revisions = join(",", [
       for k in sort(keys(local.spoke_cluster_keys)) :
@@ -398,11 +396,12 @@ data "external" "spoke_cluster_secret_token" {
 
   program = [
     "bash", "-c",
-    "TOKEN=$(\"${path.module}/../scripts/oc-token-exec-credential.sh\" \"$1\" \"$2\" \"$3\" | jq -r '.status.token') && jq -n --arg token \"$TOKEN\" '{\"token\":$token}'",
+    "TOKEN=$(\"$1\" \"$2\" \"$3\" \"$4\" | jq -r '.status.token') && jq -n --arg token \"$TOKEN\" '{\"token\":$token}'",
     "--",
-    module.rosa_hcp[each.key].cluster_api_url,
+    local.token_script,
+    local.by_cluster[each.key].cluster_api_url,
     "cluster-admin",
-    random_password.cluster_admin.result,
+    local.admin_password,
   ]
 }
 
@@ -413,7 +412,7 @@ data "external" "patch_argocd_cluster_secret" {
     "bash",
     "${path.module}/../scripts/patch-argocd-cluster-secret.sh",
     each.key,
-    module.rosa_hcp[each.key].cluster_api_url,
+    local.by_cluster[each.key].cluster_api_url,
     data.external.spoke_cluster_secret_token[each.key].result.token,
     var.gitops_namespace,
   ]

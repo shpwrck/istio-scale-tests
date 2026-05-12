@@ -1,33 +1,12 @@
 # --------------------------------------------------------------------------
 # ACM spoke registration — ManagedCluster + auto-import-secret
-# Maps to platform-setup/001-acm-install-hub.sh steps 5-6.
 #
 # Uses the RHACM auto-import-secret approach instead of the manual
 # import.yaml extraction from the bash scripts. The ACM import controller
 # picks up the auto-import-secret and handles spoke registration.
 # --------------------------------------------------------------------------
 
-# Check whether each spoke ManagedCluster is already joined.
-# Returns {"joined":"true"} or {"joined":"false"}.
-data "external" "spoke_joined" {
-  for_each = local.platform_enabled ? local.spoke_cluster_keys : {}
-
-  program = [
-    "bash", "-c",
-    "S=$(kubectl get managedcluster \"$1\" -o jsonpath='{.status.conditions[?(@.type==\"ManagedClusterJoined\")].status}' 2>/dev/null); if [ \"$S\" = \"True\" ]; then echo '{\"joined\":\"true\"}'; else echo '{\"joined\":\"false\"}'; fi",
-    "--",
-    each.key,
-  ]
-
-  depends_on = [time_sleep.wait_acm_ocm_webhook]
-}
-
 locals {
-  spokes_needing_import = {
-    for k, v in local.spoke_cluster_keys : k => v
-    if local.platform_enabled && try(data.external.spoke_joined[k].result.joined, "false") != "true"
-  }
-
   sorted_spoke_keys = sort(keys(local.spoke_cluster_keys))
   mesh_member_spoke_keys = (
     var.mesh_member_count == 0
@@ -37,22 +16,22 @@ locals {
   mesh_member_spoke_set = toset(local.mesh_member_spoke_keys)
 }
 
-# Obtain an OAuth bearer token only for spokes that need importing.
 data "external" "spoke_token" {
-  for_each = local.spokes_needing_import
+  for_each = local.spoke_cluster_keys
 
   program = [
     "bash", "-c",
-    "TOKEN=$(\"${path.module}/../scripts/oc-token-exec-credential.sh\" \"$1\" \"$2\" \"$3\" | jq -r '.status.token') && jq -n --arg token \"$TOKEN\" '{\"token\":$token}'",
+    "TOKEN=$(\"$1\" \"$2\" \"$3\" \"$4\" | jq -r '.status.token') && jq -n --arg token \"$TOKEN\" '{\"token\":$token}'",
     "--",
-    module.rosa_hcp[each.key].cluster_api_url,
+    local.token_script,
+    local.by_cluster[each.key].cluster_api_url,
     "cluster-admin",
-    random_password.cluster_admin.result,
+    local.admin_password,
   ]
 }
 
 resource "kubernetes_manifest" "spoke_namespace" {
-  for_each = local.platform_enabled ? local.spoke_cluster_keys : {}
+  for_each = local.spoke_cluster_keys
   provider = kubernetes.hub
 
   manifest = {
@@ -74,7 +53,7 @@ resource "kubernetes_manifest" "spoke_namespace" {
 }
 
 resource "helm_release" "acm_managed_cluster" {
-  for_each = local.platform_enabled ? local.spoke_cluster_keys : {}
+  for_each = local.spoke_cluster_keys
   provider = helm.hub
 
   name             = "acm-managed-cluster-${each.key}"
@@ -107,10 +86,8 @@ resource "helm_release" "acm_managed_cluster" {
   depends_on = [kubernetes_manifest.spoke_namespace]
 }
 
-# Auto-import secret — only created for spokes not yet joined.
-# RHACM's import controller consumes and deletes this secret after use.
 resource "kubernetes_secret_v1" "auto_import" {
-  for_each = local.spokes_needing_import
+  for_each = local.spoke_cluster_keys
   provider = kubernetes.hub
 
   metadata {
@@ -119,7 +96,7 @@ resource "kubernetes_secret_v1" "auto_import" {
   }
 
   data = {
-    server = module.rosa_hcp[each.key].cluster_api_url
+    server = local.by_cluster[each.key].cluster_api_url
     token  = data.external.spoke_token[each.key].result.token
   }
 
@@ -133,7 +110,7 @@ resource "kubernetes_secret_v1" "auto_import" {
 }
 
 resource "time_sleep" "wait_spoke_registration" {
-  count = local.platform_enabled && length(local.spokes_needing_import) > 0 ? 1 : 0
+  count = length(local.spoke_cluster_keys) > 0 ? 1 : 0
 
   depends_on      = [kubernetes_secret_v1.auto_import]
   create_duration = "300s"

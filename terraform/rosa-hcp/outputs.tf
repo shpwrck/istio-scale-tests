@@ -58,8 +58,63 @@ output "cluster_admin_login" {
   }
 }
 
+output "cluster_admin_password" {
+  description = "Shared cluster-admin password for all clusters. Used by the platform module for Kubernetes/Helm provider authentication."
+  sensitive   = true
+  value       = random_password.cluster_admin.result
+}
+
+output "token_script_path" {
+  description = "Absolute path to oc-token-exec-credential.sh for exec credential plugins."
+  value       = abspath("${path.module}/../scripts/oc-token-exec-credential.sh")
+}
+
+resource "local_sensitive_file" "kubeconfig" {
+  filename        = "${path.module}/kubeconfig"
+  file_permission = "0600"
+  content = yamlencode({
+    apiVersion = "v1"
+    kind       = "Config"
+    clusters = [for k in local.sorted_cluster_keys : {
+      name = k
+      cluster = {
+        server                     = module.rosa_hcp[k].cluster_api_url
+        "insecure-skip-tls-verify" = true
+      }
+    }]
+    users = [for k in local.sorted_cluster_keys : {
+      name = k
+      user = {
+        exec = {
+          apiVersion = "client.authentication.k8s.io/v1beta1"
+          command    = "bash"
+          args = [
+            "${abspath(path.module)}/../scripts/oc-token-exec-credential.sh",
+            module.rosa_hcp[k].cluster_api_url,
+            "cluster-admin",
+            random_password.cluster_admin.result,
+          ]
+        }
+      }
+    }]
+    contexts = [for k in local.sorted_cluster_keys : {
+      name = k
+      context = {
+        cluster = k
+        user    = k
+      }
+    }]
+    current-context = local.first_cluster_key
+  })
+}
+
+output "kubeconfig_path" {
+  description = "Absolute path to the generated kubeconfig file."
+  value       = local_sensitive_file.kubeconfig.filename
+}
+
 output "kubeconfig" {
-  description = "Merged kubeconfig for all clusters (exec plugin auth via oc-token-exec-credential.sh). Write with: terraform output -raw kubeconfig > ~/.kube/rosa-config"
+  description = "Merged kubeconfig for all clusters (exec plugin auth via oc-token-exec-credential.sh). Also written to kubeconfig in the module directory."
   sensitive   = true
   value = yamlencode({
     apiVersion = "v1"

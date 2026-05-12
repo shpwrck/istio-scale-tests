@@ -46,17 +46,15 @@ A merged kubeconfig covering all clusters is available via `terraform output -ra
 
 ## ACM + GitOps (platform setup)
 
-Set `enable_platform_setup = true` (default `false`) and re-apply to install RHACM and OpenShift GitOps on the hub cluster. This is a two-phase apply: the first apply creates ROSA clusters, the second installs platform components. The hub is always the lexicographically first cluster (`first_cluster_key`).
+ACM and OpenShift GitOps are managed in a separate Terraform module at `terraform/platform/`. After clusters are up, apply that module:
 
-Resources created (in `platform_acm.tf`, `platform_acm_spokes.tf`, `platform_gitops.tf`):
-- ACM operator namespace, Subscription, MultiClusterHub, KlusterletConfig
-- Per-spoke ManagedCluster + auto-import-secret (idempotent — skips already-joined spokes)
-- OpenShift GitOps operator Subscription, ArgoCD CR configuration
-- ACM GitOps resources (ManagedClusterSetBinding, Placement, GitOpsCluster)
-- Hub app-of-apps (when `gitops_app_repo_url` is set)
-- ArgoCD cluster secret patching (public API URL + TLS CA chain)
+```bash
+cd ../platform
+cp terraform.tfvars.example terraform.tfvars   # edit as needed
+terraform init && terraform apply
+```
 
-Key variables: `acm_channel`, `gitops_operator_channel`, `gitops_app_repo_url`, `gitops_app_repo_revision`, `enable_gitops`. See `platform_variables.tf` and `terraform.tfvars.example`.
+The platform module reads this module's state via `terraform_remote_state` (local backend). See `terraform/platform/terraform.tfvars.example` for variables controlling ACM channel, GitOps config, and spoke import behavior.
 
 Every cluster gets a cluster-admin user. Terraform generates one random password (`password.tf`) and applies it to all clusters so you can log in everywhere with the same credentials. Read them with `terraform output cluster_admin_login` (sensitive); username is `cluster-admin`.
 
