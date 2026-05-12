@@ -196,7 +196,7 @@ start_port_forward() {
 	PF_PIDS+=($!)
 	local attempts=0
 	while ! curl -s -o /dev/null "http://localhost:$local_port/debug/syncz" 2>/dev/null; do
-		((attempts++))
+		attempts=$((attempts + 1))
 		((attempts > 30)) && die "port-forward to istiod on $ctx (port $local_port) failed to connect"
 		sleep 0.5
 	done
@@ -277,6 +277,11 @@ echo "Port-forwards ready."
 TMPDIR_RUN=$(mktemp -d)
 trap 'cleanup_port_forwards; rm -rf "$TMPDIR_RUN"' EXIT
 
+VS_C1_SUM=0; VS_C1_COUNT=0; VS_C1_MIN=""; VS_C1_MAX=""
+VS_C2_SUM=0; VS_C2_COUNT=0; VS_C2_MIN=""; VS_C2_MAX=""
+DR_C1_SUM=0; DR_C1_COUNT=0; DR_C1_MIN=""; DR_C1_MAX=""
+DR_C2_SUM=0; DR_C2_COUNT=0; DR_C2_MIN=""; DR_C2_MAX=""
+
 VS_HOST="propagation-canary.local"
 
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
@@ -315,6 +320,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	c1_ms=$(compute_delta_ms "$C1_FILE" "$T0")
 	echo "  VS C1 (local sync): ${c1_ms}ms"
 
+	if [[ "$c1_ms" != "TIMEOUT" ]]; then
+		VS_C1_SUM=$((VS_C1_SUM + c1_ms))
+		VS_C1_COUNT=$((VS_C1_COUNT + 1))
+		[[ -z "$VS_C1_MIN" || "$c1_ms" -lt "$VS_C1_MIN" ]] && VS_C1_MIN="$c1_ms"
+		[[ -z "$VS_C1_MAX" || "$c1_ms" -gt "$VS_C1_MAX" ]] && VS_C1_MAX="$c1_ms"
+	fi
+
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
 		status="OK"
 		[[ "$c1_ms" == "TIMEOUT" ]] && status="TIMEOUT_C1"
@@ -323,6 +335,14 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		for i in "${!REMOTES[@]}"; do
 			c2_ms=$(compute_delta_ms "${C2_VS_FILES[i]}" "$T0")
 			echo "  VS C2 (remote routes ${REMOTES[i]}): ${c2_ms}ms"
+
+			if [[ "$c2_ms" != "TIMEOUT" ]]; then
+				VS_C2_SUM=$((VS_C2_SUM + c2_ms))
+				VS_C2_COUNT=$((VS_C2_COUNT + 1))
+				[[ -z "$VS_C2_MIN" || "$c2_ms" -lt "$VS_C2_MIN" ]] && VS_C2_MIN="$c2_ms"
+				[[ -z "$VS_C2_MAX" || "$c2_ms" -gt "$VS_C2_MAX" ]] && VS_C2_MAX="$c2_ms"
+			fi
+
 			status="OK"
 			[[ "$c1_ms" == "TIMEOUT" ]] && status="TIMEOUT_C1"
 			[[ "$c2_ms" == "TIMEOUT" ]] && status="TIMEOUT_C2"
@@ -364,6 +384,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	c1_ms=$(compute_delta_ms "$C1_FILE" "$T0")
 	echo "  DR C1 (local sync): ${c1_ms}ms"
 
+	if [[ "$c1_ms" != "TIMEOUT" ]]; then
+		DR_C1_SUM=$((DR_C1_SUM + c1_ms))
+		DR_C1_COUNT=$((DR_C1_COUNT + 1))
+		[[ -z "$DR_C1_MIN" || "$c1_ms" -lt "$DR_C1_MIN" ]] && DR_C1_MIN="$c1_ms"
+		[[ -z "$DR_C1_MAX" || "$c1_ms" -gt "$DR_C1_MAX" ]] && DR_C1_MAX="$c1_ms"
+	fi
+
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
 		status="OK"
 		[[ "$c1_ms" == "TIMEOUT" ]] && status="TIMEOUT_C1"
@@ -372,6 +399,14 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		for i in "${!REMOTES[@]}"; do
 			c2_ms=$(compute_delta_ms "${C2_DR_FILES[i]}" "$T0")
 			echo "  DR C2 (remote clusters ${REMOTES[i]}): ${c2_ms}ms"
+
+			if [[ "$c2_ms" != "TIMEOUT" ]]; then
+				DR_C2_SUM=$((DR_C2_SUM + c2_ms))
+				DR_C2_COUNT=$((DR_C2_COUNT + 1))
+				[[ -z "$DR_C2_MIN" || "$c2_ms" -lt "$DR_C2_MIN" ]] && DR_C2_MIN="$c2_ms"
+				[[ -z "$DR_C2_MAX" || "$c2_ms" -gt "$DR_C2_MAX" ]] && DR_C2_MAX="$c2_ms"
+			fi
+
 			status="OK"
 			[[ "$c1_ms" == "TIMEOUT" ]] && status="TIMEOUT_C1"
 			[[ "$c2_ms" == "TIMEOUT" ]] && status="TIMEOUT_C2"
@@ -392,13 +427,18 @@ echo ""
 echo "=== Results written to $TSV_FILE ==="
 echo ""
 echo "Summary:"
-awk -F'\t' 'NR>1 && !/^#/ {
-	t=$6; c1=$8; c2=$9
-	if(c1!="TIMEOUT"){c1s[t]+=c1;c1n[t]++;if(!c1min[t]||c1<c1min[t])c1min[t]=c1;if(c1>c1max[t])c1max[t]=c1}
-	if(c2!="TIMEOUT" && c2!="N/A"){c2s[t]+=c2;c2n[t]++;if(!c2min[t]||c2<c2min[t])c2min[t]=c2;if(c2>c2max[t])c2max[t]=c2}
-} END {
-	for(t in c1n) {
-		printf "  %s C1 local sync:  n=%d min=%dms max=%dms avg=%dms\n", t, c1n[t], c1min[t], c1max[t], c1s[t]/c1n[t]
-		if(c2n[t]>0) printf "  %s C2 remote:      n=%d min=%dms max=%dms avg=%dms\n", t, c2n[t], c2min[t], c2max[t], c2s[t]/c2n[t]
-	}
-}' "$TSV_FILE"
+if ((VS_C1_COUNT > 0)); then
+	printf "  VS C1 local sync:      n=%d min=%dms max=%dms avg=%dms\n" "$VS_C1_COUNT" "$VS_C1_MIN" "$VS_C1_MAX" "$((VS_C1_SUM / VS_C1_COUNT))"
+fi
+if ((VS_C2_COUNT > 0)); then
+	printf "  VS C2 remote:          n=%d min=%dms max=%dms avg=%dms\n" "$VS_C2_COUNT" "$VS_C2_MIN" "$VS_C2_MAX" "$((VS_C2_SUM / VS_C2_COUNT))"
+fi
+if ((DR_C1_COUNT > 0)); then
+	printf "  DR C1 local sync:      n=%d min=%dms max=%dms avg=%dms\n" "$DR_C1_COUNT" "$DR_C1_MIN" "$DR_C1_MAX" "$((DR_C1_SUM / DR_C1_COUNT))"
+fi
+if ((DR_C2_COUNT > 0)); then
+	printf "  DR C2 remote:          n=%d min=%dms max=%dms avg=%dms\n" "$DR_C2_COUNT" "$DR_C2_MIN" "$DR_C2_MAX" "$((DR_C2_SUM / DR_C2_COUNT))"
+fi
+if ((VS_C1_COUNT == 0 && DR_C1_COUNT == 0)); then
+	echo "  No successful measurements."
+fi

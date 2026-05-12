@@ -196,7 +196,7 @@ start_port_forward() {
 	PF_PIDS+=($!)
 	local attempts=0
 	while ! curl -s -o /dev/null "http://localhost:$local_port/debug/syncz" 2>/dev/null; do
-		((attempts++))
+		attempts=$((attempts + 1))
 		((attempts > 30)) && die "port-forward to istiod on $ctx (port $local_port) failed to connect"
 		sleep 0.5
 	done
@@ -280,6 +280,10 @@ echo "Port-forwards ready."
 TMPDIR_RUN=$(mktemp -d)
 trap 'cleanup_port_forwards; rm -rf "$TMPDIR_RUN"' EXIT
 
+P1_SUM=0; P1_COUNT=0; P1_MIN=""; P1_MAX=""
+P2_SUM=0; P2_COUNT=0; P2_MIN=""; P2_MAX=""
+P3_SUM=0; P3_COUNT=0; P3_MIN=""; P3_MAX=""
+
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
@@ -322,6 +326,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	p1_ms=$(compute_delta_ms "$P1_FILE" "$T0")
 	echo "  P1 (local xDS push): ${p1_ms}ms"
 
+	if [[ "$p1_ms" != "TIMEOUT" ]]; then
+		P1_SUM=$((P1_SUM + p1_ms))
+		P1_COUNT=$((P1_COUNT + 1))
+		[[ -z "$P1_MIN" || "$p1_ms" -lt "$P1_MIN" ]] && P1_MIN="$p1_ms"
+		[[ -z "$P1_MAX" || "$p1_ms" -gt "$P1_MAX" ]] && P1_MAX="$p1_ms"
+	fi
+
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
 		status="OK"
 		[[ "$p1_ms" == "TIMEOUT" ]] && status="TIMEOUT_P1"
@@ -332,6 +343,19 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			p3_ms=$(compute_delta_ms "${P3_FILES[i]}" "$T0")
 			echo "  P2 (remote istiod ${REMOTES[i]}): ${p2_ms}ms"
 			echo "  P3 (remote sidecar ${REMOTES[i]}): ${p3_ms}ms"
+
+			if [[ "$p2_ms" != "TIMEOUT" ]]; then
+				P2_SUM=$((P2_SUM + p2_ms))
+				P2_COUNT=$((P2_COUNT + 1))
+				[[ -z "$P2_MIN" || "$p2_ms" -lt "$P2_MIN" ]] && P2_MIN="$p2_ms"
+				[[ -z "$P2_MAX" || "$p2_ms" -gt "$P2_MAX" ]] && P2_MAX="$p2_ms"
+			fi
+			if [[ "$p3_ms" != "TIMEOUT" ]]; then
+				P3_SUM=$((P3_SUM + p3_ms))
+				P3_COUNT=$((P3_COUNT + 1))
+				[[ -z "$P3_MIN" || "$p3_ms" -lt "$P3_MIN" ]] && P3_MIN="$p3_ms"
+				[[ -z "$P3_MAX" || "$p3_ms" -gt "$P3_MAX" ]] && P3_MAX="$p3_ms"
+			fi
 
 			status="OK"
 			[[ "$p1_ms" == "TIMEOUT" ]] && status="TIMEOUT_P1"
@@ -358,21 +382,15 @@ echo ""
 echo "=== Results written to $TSV_FILE ==="
 echo ""
 echo "Summary:"
-if [[ ${#REMOTES[@]} -eq 0 ]]; then
-	awk -F'\t' 'NR>1 && !/^#/ && $7 != "TIMEOUT" {
-		sum+=$7; n++; if(!min||$7<min)min=$7; if($7>max)max=$7
-	} END {
-		if(n>0) printf "  P1 local: n=%d min=%dms max=%dms avg=%dms\n", n, min, max, sum/n
-		else print "  No successful measurements."
-	}' "$TSV_FILE"
-else
-	awk -F'\t' 'NR>1 && !/^#/ {
-		if($7!="TIMEOUT"){p1s+=$7;p1n++;if(!p1min||$7<p1min)p1min=$7;if($7>p1max)p1max=$7}
-		if($8!="TIMEOUT"){p2s+=$8;p2n++;if(!p2min||$8<p2min)p2min=$8;if($8>p2max)p2max=$8}
-		if($9!="TIMEOUT"){p3s+=$9;p3n++;if(!p3min||$9<p3min)p3min=$9;if($9>p3max)p3max=$9}
-	} END {
-		if(p1n>0) printf "  P1 local xDS push:     n=%d min=%dms max=%dms avg=%dms\n", p1n, p1min, p1max, p1s/p1n
-		if(p2n>0) printf "  P2 remote istiod disc: n=%d min=%dms max=%dms avg=%dms\n", p2n, p2min, p2max, p2s/p2n
-		if(p3n>0) printf "  P3 remote sidecar:     n=%d min=%dms max=%dms avg=%dms\n", p3n, p3min, p3max, p3s/p3n
-	}' "$TSV_FILE"
+if ((P1_COUNT > 0)); then
+	printf "  P1 local xDS push:     n=%d min=%dms max=%dms avg=%dms\n" "$P1_COUNT" "$P1_MIN" "$P1_MAX" "$((P1_SUM / P1_COUNT))"
+fi
+if ((P2_COUNT > 0)); then
+	printf "  P2 remote istiod disc: n=%d min=%dms max=%dms avg=%dms\n" "$P2_COUNT" "$P2_MIN" "$P2_MAX" "$((P2_SUM / P2_COUNT))"
+fi
+if ((P3_COUNT > 0)); then
+	printf "  P3 remote sidecar:     n=%d min=%dms max=%dms avg=%dms\n" "$P3_COUNT" "$P3_MIN" "$P3_MAX" "$((P3_SUM / P3_COUNT))"
+fi
+if ((P1_COUNT == 0)); then
+	echo "  No successful measurements."
 fi
