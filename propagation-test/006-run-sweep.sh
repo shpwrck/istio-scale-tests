@@ -25,10 +25,10 @@ source "${ROOT}/config/versions.env"
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
-PAUSE_SEC="${PROPAGATION_PAUSE_SEC}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 OUTPUT_DIR="${ROOT}/propagation-test/results"
 DRY_RUN=0
+WRITE_TSV=0
 COLLECT_METRICS=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -40,15 +40,15 @@ Usage: $(basename "$0") [options]
   --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
   --iterations N       Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
-  --pause SEC          Seconds between iterations (default: \$PROPAGATION_PAUSE_SEC=$PAUSE_SEC).
   --timeout SEC        Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --output-dir DIR     Results directory (default: propagation-test/results).
+  --tsv                Also write per-iteration TSV files (enables 005 report).
   --collect-metrics    Also run 004-collect-pilot-metrics.sh at each mesh size.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
 
 Environment:
-  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_PAUSE_SEC, PROPAGATION_TIMEOUT_SEC.
+  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC.
 EOF
 }
 
@@ -82,11 +82,6 @@ while [[ $# -gt 0 ]]; do
 		ITERATIONS="$2"
 		shift 2
 		;;
-	--pause)
-		[[ -n "${2:-}" ]] || die "--pause requires a value"
-		PAUSE_SEC="$2"
-		shift 2
-		;;
 	--timeout)
 		[[ -n "${2:-}" ]] || die "--timeout requires a value"
 		TIMEOUT_SEC="$2"
@@ -99,6 +94,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--collect-metrics)
 		COLLECT_METRICS=1
+		shift
+		;;
+	--tsv)
+		WRITE_TSV=1
 		shift
 		;;
 	--dry-run)
@@ -147,6 +146,8 @@ echo "Iterations per size: $ITERATIONS"
 echo "Output: $OUTPUT_DIR"
 echo ""
 
+MD_FILES=()
+
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	source_ctx="${active_ctxs[0]}"
@@ -188,14 +189,17 @@ for ms in "${MESH_SIZES[@]}"; do
 		--source-context "$source_ctx"
 		--mesh-size "$ms"
 		--iterations "$ITERATIONS"
-		--pause "$PAUSE_SEC"
 		--timeout "$TIMEOUT_SEC"
 		--output-dir "$OUTPUT_DIR"
 	)
+	((WRITE_TSV)) && endpoint_args+=(--tsv)
 	if [[ -n "$remote_csv" ]]; then
 		endpoint_args+=(--remote-contexts "$remote_csv")
 	fi
 	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"
+
+	newest_md=$(ls -t "$OUTPUT_DIR"/endpoint-*.md 2>/dev/null | head -1)
+	[[ -n "$newest_md" ]] && MD_FILES+=("$newest_md")
 	echo ""
 
 	if ((COLLECT_METRICS)); then
@@ -213,7 +217,34 @@ if ((DRY_RUN)); then
 fi
 
 echo "=========================================="
-echo "  Sweep complete — generating report"
+echo "  Sweep complete"
 echo "=========================================="
 echo ""
-"$SCRIPT_DIR/005-report-results.sh" --results-dir "$OUTPUT_DIR" --format text
+if ((WRITE_TSV)); then
+	echo "Generating TSV report..."
+	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$OUTPUT_DIR" --format text
+	echo ""
+fi
+
+if ((${#MD_FILES[@]} > 0)); then
+	COMBINED="${OUTPUT_DIR}/sweep-$(date +%Y%m%dT%H%M%S).md"
+	{
+		echo "# Propagation Latency Sweep"
+		echo ""
+		echo "| Field | Value |"
+		echo "|-------|-------|"
+		echo "| Date | $(date -Iseconds) |"
+		echo "| Contexts | ${CONTEXTS[*]} |"
+		echo "| Mesh sizes | ${MESH_SIZES[*]} |"
+		echo "| Iterations per size | ${ITERATIONS} |"
+		echo "| Timeout | ${TIMEOUT_SEC}s |"
+		echo ""
+		for i in "${!MD_FILES[@]}"; do
+			echo "## Mesh Size ${MESH_SIZES[i]}"
+			echo ""
+			awk '/^## Summary$/{found=1;next} /^## /{found=0} found{print}' "${MD_FILES[i]}"
+			echo ""
+		done
+	} > "$COMBINED"
+	echo "Combined report: $COMBINED"
+fi
