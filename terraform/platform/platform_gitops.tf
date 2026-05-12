@@ -398,6 +398,11 @@ resource "time_sleep" "wait_argocd_cluster_secrets" {
 resource "terraform_data" "patch_argocd_cluster_secret" {
   for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
 
+  triggers_replace = [
+    local.by_cluster[each.key].cluster_api_url,
+    helm_release.acm_managed_cluster[each.key].metadata.revision,
+  ]
+
   input = {
     spoke_name       = each.key
     api_url          = local.by_cluster[each.key].cluster_api_url
@@ -409,7 +414,16 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
   }
 
   provisioner "local-exec" {
-    command = "bash ${path.module}/../scripts/patch-argocd-cluster-secret.sh ${self.input.spoke_name} ${self.input.api_url} ${self.input.token} ${self.input.token_script} ${self.input.hub_api_url} ${self.input.hub_admin_pass} ${self.input.gitops_namespace}"
+    command = "bash ${path.module}/../scripts/patch-argocd-cluster-secret.sh"
+    environment = {
+      SPOKE_NAME       = self.input.spoke_name
+      API_URL          = self.input.api_url
+      SPOKE_TOKEN      = self.input.token
+      HUB_TOKEN_SCRIPT = self.input.token_script
+      HUB_API_URL      = self.input.hub_api_url
+      HUB_ADMIN_PASS   = self.input.hub_admin_pass
+      GITOPS_NAMESPACE = self.input.gitops_namespace
+    }
   }
 
   depends_on = [time_sleep.wait_argocd_cluster_secrets]
