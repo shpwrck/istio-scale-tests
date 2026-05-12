@@ -4,6 +4,9 @@ metadata:
   name: {{ .Values.gitopsCluster.name }}
   namespace: {{ .Release.Namespace }}
 spec:
+{{- if .Values.gitopsCluster.managedServiceAccountRef }}
+  managedServiceAccountRef: {{ .Values.gitopsCluster.managedServiceAccountRef }}
+{{- end }}
   argoServer:
     cluster: {{ .Values.gitopsCluster.argoServer.cluster }}
     argoNamespace: {{ .Values.gitopsCluster.argoServer.argoNamespace }}

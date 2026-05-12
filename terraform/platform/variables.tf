@@ -139,6 +139,12 @@ variable "gitops_addon_enabled" {
   description = "GitOpsCluster spec.gitopsAddon.enabled — enables the gitops-addon on spoke ManagedClusters."
 }
 
+variable "gitops_managed_service_account_name" {
+  type        = string
+  default     = "argocd-gitops"
+  description = "ManagedServiceAccount name for GitOpsCluster integration. Created per spoke; referenced by GitOpsCluster.spec.managedServiceAccountRef. Uses ManagedCluster.spec.managedClusterClientConfigs for the ArgoCD cluster secret server URL."
+}
+
 # --------------------------------------------------------------------------
 # Incremental mesh deployment
 # --------------------------------------------------------------------------
