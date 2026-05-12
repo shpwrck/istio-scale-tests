@@ -1,0 +1,5 @@
+apiVersion: v2
+name: propagation-test
+description: Watcher and canary workloads for measuring multi-cluster xDS propagation latency.
+type: application
+version: 0.1.0

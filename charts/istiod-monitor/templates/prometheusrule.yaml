@@ -1,0 +1,26 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: istiod-convergence
+  namespace: {{ .Values.istioNamespace }}
+  labels:
+    {{- include "istiod-monitor.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: istiod.convergence
+      interval: 30s
+      rules:
+        - record: pilot:proxy_convergence_time:p50_5m
+          expr: histogram_quantile(0.50, rate(pilot_proxy_convergence_time_bucket[5m]))
+        - record: pilot:proxy_convergence_time:p95_5m
+          expr: histogram_quantile(0.95, rate(pilot_proxy_convergence_time_bucket[5m]))
+        - record: pilot:proxy_convergence_time:p99_5m
+          expr: histogram_quantile(0.99, rate(pilot_proxy_convergence_time_bucket[5m]))
+        - record: pilot:xds_push_time:p95_5m
+          expr: histogram_quantile(0.95, rate(pilot_xds_push_time_bucket[5m]))
+        - record: pilot:xds_push_time:p99_5m
+          expr: histogram_quantile(0.99, rate(pilot_xds_push_time_bucket[5m]))
+        - record: pilot:xds_pushes:rate_5m
+          expr: sum(rate(pilot_xds_pushes[5m])) by (type)
+{{- end }}

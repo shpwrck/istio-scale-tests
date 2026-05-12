@@ -1,0 +1,5 @@
+apiVersion: v2
+name: istiod-monitor
+description: OpenShift User Workload Monitoring ServiceMonitor and PrometheusRule for istiod pilot metrics.
+type: application
+version: 0.1.0

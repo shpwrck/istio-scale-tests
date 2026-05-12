@@ -54,7 +54,8 @@ No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want
 
 1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
 2. Platform + Mesh — apply the platform Terraform module (`terraform/platform/`). This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
-3. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
+3. Propagation testing — measure xDS propagation latency across clusters (`propagation-test/`).
+4. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
 
 ---
 
@@ -126,6 +127,8 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/external-secrets-operator/` | Helm chart: OLM install for External Secrets Operator per spoke. |
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app). |
+| `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency. |
+| `charts/istiod-monitor/` | Helm chart: OpenShift UWM ServiceMonitor + PrometheusRule for istiod pilot metrics. |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD ApplicationSet + RBAC for ACM Placement; preset value files per component. |
 | `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD Application `hub-gitops-root` (directory sync of child Applications). |
 | `charts/gitops-hub-apps/` | Child Application manifests under `applications/`; synced by `hub-gitops-root`. |
@@ -136,6 +139,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for OpenShift GitOps (Terraform `platform_gitops.tf`). |
 | `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD. |
 | `config/versions.env` | Pinned versions and mesh-wide defaults sourced by scripts and referenced by charts. |
+| `propagation-test/` | Propagation latency test suite: active probes + metrics collection + sweep orchestrator. |
 | `isotope-multicluster/` | Multicluster isotope load test workload generator and applier. |
 
 </details>
@@ -259,7 +263,26 @@ This removes the ApplicationSet and all generated Applications. The `mesh-verify
 
 ---
 
-## 3. Run Isotope (`isotope-multicluster/`)
+## 3. Propagation Latency Testing (`propagation-test/`)
+
+Measure how quickly the multi-cluster control plane propagates endpoint and config changes across clusters. Two complementary approaches:
+
+- **Active probes** — deploy a canary service, poll istiod debug endpoints and sidecar proxy-config, record wall-clock propagation times
+- **Passive metrics** — OpenShift User Workload Monitoring ServiceMonitor for istiod (`charts/istiod-monitor/`)
+
+Run the sweep to compare propagation latency across mesh sizes (1, 2, 3, ... N clusters):
+
+```bash
+./propagation-test/006-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --mesh-sizes 1,2,3 --iterations 5
+```
+
+See `propagation-test/README.md` for full usage.
+
+---
+
+## 4. Run Isotope (`isotope-multicluster/`)
 
 Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) workload: generate a chain topology from Terraform `cluster_keys`, render manifests, and apply per context. Requires a local istio/tools clone, Go, and an isotope service image. Run after the mesh is deployed and verified. See `isotope-multicluster/README.md`.
 
