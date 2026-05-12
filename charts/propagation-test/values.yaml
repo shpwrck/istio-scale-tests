@@ -14,11 +14,6 @@ canary:
     repository: hashicorp/http-echo
     tag: latest
   runId: ""
-  virtualservice:
-    enabled: false
-    host: propagation-canary.local
-  destinationrule:
-    enabled: false
 
 service:
   port: 8080

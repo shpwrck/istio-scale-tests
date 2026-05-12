@@ -1,6 +1,6 @@
 # Propagation Latency Test Suite
 
-Automated measurement of how quickly Istio's multi-cluster control plane propagates endpoint and config changes across clusters.
+Automated measurement of how quickly Istio's multi-cluster control plane propagates endpoint changes across clusters.
 
 ## What Gets Measured
 
@@ -10,18 +10,13 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
 |-------|------|-----|
 | P1 | Local istiod pushes xDS to local sidecars | Poll istiod `/debug/syncz` |
 | P2 | Remote istiod discovers new endpoints | Poll remote istiod `/debug/endpointz` |
-| P3 | Remote sidecar has HEALTHY endpoints | `istioctl proxy-config endpoints` on watcher pod |
+| P3 | Remote sidecar has HEALTHY endpoints | Poll watcher pod's Envoy admin API (`/clusters`) |
 
-### Config Propagation (003)
-
-| Phase | What | How |
-|-------|------|-----|
-| C1 | Local istiod pushes VirtualService/DestinationRule | Poll istiod `/debug/syncz` |
-| C2 | Remote sidecar reflects the route/DR config | `istioctl proxy-config routes/clusters` on watcher pod |
+In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService and DestinationRule are local config processed only by the istiod that owns the namespace.
 
 ## Prerequisites
 
-- `oc` or `kubectl`, `helm`, `istioctl`, `jq`, `curl`
+- `oc` or `kubectl`, `helm`, `jq`, `curl`
 - Multi-primary mesh deployed (see root README)
 - Kube contexts configured for each cluster
 
@@ -36,15 +31,7 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
   --source-context rosa-001 --remote-contexts rosa-002 \
   --iterations 10
 
-# 3. Run config probe (requires canary from step 2 with --keep-canary)
-./propagation-test/002-run-endpoint-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 \
-  --iterations 1 --keep-canary
-./propagation-test/003-run-config-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 \
-  --iterations 10
-
-# 4. View results
+# 3. View results
 ./propagation-test/005-report-results.sh
 ```
 
@@ -66,8 +53,7 @@ Compare propagation latency at different cluster counts:
 The sweep orchestrator:
 1. Sets up watcher pods on clusters for each mesh size
 2. Runs endpoint probe (002) at each size
-3. Runs config probe (003) at each size
-4. Generates a comparison report grouped by mesh_size
+3. Generates a comparison report grouped by mesh_size
 
 ## Passive Metrics Collection
 
@@ -108,7 +94,7 @@ Report output groups by mesh_size with min/max/avg/p50/p95/p99 statistics.
 ## Cleanup
 
 ```bash
-./propagation-test/001-setup-propagation-test.sh --cleanup --contexts rosa-001,rosa-002,rosa-003
+./propagation-test/007-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 ```
 
 ## Scripts
@@ -117,7 +103,7 @@ Report output groups by mesh_size with min/max/avg/p50/p95/p99 statistics.
 |--------|---------|
 | `001-setup-propagation-test.sh` | Deploy/cleanup watcher pods and namespace |
 | `002-run-endpoint-probe.sh` | Measure endpoint propagation (P1/P2/P3) |
-| `003-run-config-probe.sh` | Measure config propagation (C1/C2) |
 | `004-collect-pilot-metrics.sh` | Scrape istiod Prometheus metrics |
 | `005-report-results.sh` | Generate summary statistics from TSV results |
 | `006-run-sweep.sh` | Orchestrate probes across multiple mesh sizes |
+| `007-cleanup.sh` | Remove all propagation-test resources |

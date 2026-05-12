@@ -66,7 +66,7 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 | `manifests/acm-gitops/` | Pointer README — ACM GitOps wiring lives in `charts/acm-openshift-gitops-resources`. |
 | `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
 | `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |
-| `propagation-test/` | Propagation latency test suite: numbered scripts (001-006) for setup, endpoint probe, config probe, metrics collection, reporting, and mesh-size sweep. See `propagation-test/README.md`. |
+| `propagation-test/` | Propagation latency test suite: numbered scripts for setup, endpoint probe, metrics collection, reporting, mesh-size sweep, and cleanup. See `propagation-test/README.md`. |
 | `isotope-multicluster/` | [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) multicluster workload: chain graph from `terraform output cluster_keys`, per-cluster rendering and apply. See `isotope-multicluster/README.md`. |
 
 
