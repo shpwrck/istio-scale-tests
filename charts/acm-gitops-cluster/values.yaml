@@ -1,5 +1,6 @@
 gitopsCluster:
   name: acm-openshift-gitops
+  managedServiceAccountRef: ""
   argoServer:
     cluster: ""
     argoNamespace: openshift-gitops

@@ -370,6 +370,10 @@ resource "helm_release" "gitops_cluster" {
       name  = "gitopsCluster.gitopsAddon.enabled"
       value = tostring(var.gitops_addon_enabled)
     },
+    {
+      name  = "gitopsCluster.managedServiceAccountRef"
+      value = var.gitops_managed_service_account_name
+    },
   ]
 
   depends_on = [helm_release.acm_gitops_resources]

@@ -9,3 +9,7 @@ managedCluster:
   name: ""
   labels: {}
   clientConfigs: []
+
+managedServiceAccount:
+  create: false
+  name: argocd-gitops

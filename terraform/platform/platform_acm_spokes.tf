@@ -77,6 +77,14 @@ resource "helm_release" "acm_managed_cluster" {
         name  = "managedCluster.clientConfigs[0].url"
         value = local.by_cluster[each.key].cluster_api_url
       },
+      {
+        name  = "managedServiceAccount.create"
+        value = tostring(var.enable_gitops)
+      },
+      {
+        name  = "managedServiceAccount.name"
+        value = var.gitops_managed_service_account_name
+      },
     ],
     contains(local.mesh_member_spoke_set, each.key) ? [
       {
