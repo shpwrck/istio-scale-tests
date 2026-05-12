@@ -404,13 +404,14 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
   ]
 
   input = {
-    spoke_name       = each.key
-    api_url          = local.by_cluster[each.key].cluster_api_url
-    token            = data.external.spoke_token[each.key].result.token
-    token_script     = local.token_script
-    hub_api_url      = local.hub_api_url
-    hub_admin_pass   = local.hub_admin_pass
-    gitops_namespace = var.gitops_namespace
+    spoke_name              = each.key
+    api_url                 = local.by_cluster[each.key].cluster_api_url
+    token                   = data.external.spoke_token[each.key].result.token
+    token_script            = local.token_script
+    hub_api_url             = local.hub_api_url
+    hub_admin_pass          = local.hub_admin_pass
+    gitops_namespace        = var.gitops_namespace
+    managed_sa_name         = var.gitops_managed_service_account_name
   }
 
   provisioner "local-exec" {
@@ -423,6 +424,7 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
       HUB_API_URL      = self.input.hub_api_url
       HUB_ADMIN_PASS   = self.input.hub_admin_pass
       GITOPS_NAMESPACE = self.input.gitops_namespace
+      MANAGED_SA_NAME  = self.input.managed_sa_name
     }
   }
 
