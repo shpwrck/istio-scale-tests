@@ -5,23 +5,24 @@ set -euo pipefail
 # ACM's GitOps addon creates secrets with internal control-plane URLs that are
 # unreachable from the hub; this replaces them with the public API endpoint.
 #
-# Usage: patch-argocd-cluster-secret.sh <spoke_name> <api_url> <spoke_token> <hub_token_script> <hub_api_url> <hub_admin_pass> <gitops_namespace>
+# Reads from environment variables (set by Terraform local-exec):
+#   SPOKE_NAME, API_URL, SPOKE_TOKEN, HUB_TOKEN_SCRIPT, HUB_API_URL, HUB_ADMIN_PASS, GITOPS_NAMESPACE
 
-SPOKE="${1:?usage: $0 <spoke_name> <api_url> <spoke_token> <hub_token_script> <hub_api_url> <hub_admin_pass> <gitops_namespace>}"
-API_URL="${2:?}"
-SPOKE_TOKEN="${3:?}"
-HUB_TOKEN_SCRIPT="${4:?}"
-HUB_API_URL="${5:?}"
-HUB_ADMIN_PASS="${6:?}"
-NS="${7:?}"
+: "${SPOKE_NAME:?SPOKE_NAME is required}"
+: "${API_URL:?API_URL is required}"
+: "${SPOKE_TOKEN:?SPOKE_TOKEN is required}"
+: "${HUB_TOKEN_SCRIPT:?HUB_TOKEN_SCRIPT is required}"
+: "${HUB_API_URL:?HUB_API_URL is required}"
+: "${HUB_ADMIN_PASS:?HUB_ADMIN_PASS is required}"
+: "${GITOPS_NAMESPACE:?GITOPS_NAMESPACE is required}"
 
 HUB_TOKEN=$("$HUB_TOKEN_SCRIPT" "$HUB_API_URL" "cluster-admin" "$HUB_ADMIN_PASS" | jq -r '.status.token')
 KC="kubectl --server=$HUB_API_URL --token=$HUB_TOKEN --insecure-skip-tls-verify"
 
-SECRET_NAME="${SPOKE}-application-manager-cluster-secret"
+SECRET_NAME="${SPOKE_NAME}-application-manager-cluster-secret"
 
-if ! $KC get secret "$SECRET_NAME" -n "$NS" &>/dev/null; then
-  echo "Secret $SECRET_NAME not found in $NS — skipping (addon may not have created it yet)"
+if ! $KC get secret "$SECRET_NAME" -n "$GITOPS_NAMESPACE" &>/dev/null; then
+  echo "Secret $SECRET_NAME not found in $GITOPS_NAMESPACE — skipping (addon may not have created it yet)"
   exit 0
 fi
 
@@ -34,7 +35,7 @@ SERVER_B64=$(echo -n "$API_URL" | base64 -w0)
 CONFIG_B64=$(jq -nc --arg t "$SPOKE_TOKEN" --arg ca "$CA_B64_DATA" \
   '{bearerToken: $t, tlsClientConfig: {insecure: false, caData: $ca}}' | base64 -w0)
 
-$KC patch secret "$SECRET_NAME" -n "$NS" --type merge \
-  -p "{\"data\":{\"server\":\"${SERVER_B64}\",\"config\":\"${CONFIG_B64}\"}}" &>/dev/null
+$KC patch secret "$SECRET_NAME" -n "$GITOPS_NAMESPACE" --type merge \
+  -p "{\"data\":{\"server\":\"${SERVER_B64}\",\"config\":\"${CONFIG_B64}\"}}"
 
 echo "Patched $SECRET_NAME with server=$API_URL"
