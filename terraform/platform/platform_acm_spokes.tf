@@ -73,6 +73,10 @@ resource "helm_release" "acm_managed_cluster" {
         name  = "clustersetName"
         value = var.acm_cluster_set
       },
+      {
+        name  = "managedCluster.clientConfigs[0].url"
+        value = local.by_cluster[each.key].cluster_api_url
+      },
     ],
     contains(local.mesh_member_spoke_set, each.key) ? [
       {

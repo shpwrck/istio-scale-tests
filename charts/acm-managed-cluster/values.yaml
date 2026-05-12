@@ -8,3 +8,4 @@ defaultLabels:
 managedCluster:
   name: ""
   labels: {}
+  clientConfigs: []

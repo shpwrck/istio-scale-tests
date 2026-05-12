@@ -14,3 +14,7 @@ metadata:
 {{- toYaml $lbl | nindent 4 }}
 spec:
   hubAcceptsClient: true
+{{- if .Values.managedCluster.clientConfigs }}
+  managedClusterClientConfigs:
+{{- toYaml .Values.managedCluster.clientConfigs | nindent 4 }}
+{{- end }}
