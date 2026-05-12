@@ -401,6 +401,7 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
   triggers_replace = [
     local.by_cluster[each.key].cluster_api_url,
     helm_release.acm_managed_cluster[each.key].metadata.revision,
+    timestamp(),
   ]
 
   input = {
@@ -429,6 +430,33 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
   }
 
   depends_on = [time_sleep.wait_argocd_cluster_secrets]
+}
+
+# --- Spoke mesh restart (istiod + gateways) ---
+# Ensures istiod picks up the cacerts secret (shared root CA) and
+# gateways get proper sidecar injection after GitOps converges.
+
+resource "terraform_data" "spoke_mesh_restart" {
+  for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
+
+  triggers_replace = [timestamp()]
+
+  input = {
+    spoke_name = each.key
+    api_url    = local.by_cluster[each.key].cluster_api_url
+    token      = data.external.spoke_token[each.key].result.token
+  }
+
+  provisioner "local-exec" {
+    command = "bash ${path.module}/../scripts/spoke-mesh-restart.sh"
+    environment = {
+      SPOKE_NAME  = self.input.spoke_name
+      API_URL     = self.input.api_url
+      SPOKE_TOKEN = self.input.token
+    }
+  }
+
+  depends_on = [terraform_data.patch_argocd_cluster_secret]
 }
 
 # --- Destroy-time cleanup: cascade-delete all Argo CD Applications ---
