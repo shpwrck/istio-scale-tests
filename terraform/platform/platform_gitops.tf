@@ -82,6 +82,7 @@ resource "helm_release" "argocd_config" {
   chart            = "${path.module}/../../charts/argocd-config"
   namespace        = var.gitops_namespace
   create_namespace = false
+  take_ownership   = true
   wait             = true
   timeout          = 300
 
@@ -238,6 +239,7 @@ resource "helm_release" "acm_gitops_resources" {
   chart            = "${path.module}/../../charts/acm-openshift-gitops-resources"
   namespace        = var.gitops_namespace
   create_namespace = true
+  take_ownership   = true
   wait             = true
   timeout          = 300
 
@@ -317,6 +319,7 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   chart            = "${path.module}/../../charts/gitops-hub-app-of-apps"
   namespace        = var.gitops_namespace
   create_namespace = false
+  take_ownership   = true
   wait             = true
   timeout          = 300
 
@@ -350,6 +353,7 @@ resource "helm_release" "gitops_cluster" {
   chart            = "${path.module}/../../charts/acm-gitops-cluster"
   namespace        = var.gitops_namespace
   create_namespace = false
+  take_ownership   = true
   wait             = true
   timeout          = 300
 

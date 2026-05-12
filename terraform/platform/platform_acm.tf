@@ -90,6 +90,7 @@ resource "helm_release" "acm_multicluster_hub" {
   chart            = "${path.module}/../../charts/acm-multicluster-hub"
   namespace        = var.acm_namespace
   create_namespace = false
+  take_ownership   = true
   wait             = true
   timeout          = 1200
 
@@ -118,6 +119,7 @@ resource "helm_release" "acm_klusterlet_config" {
   chart            = "${path.module}/../../charts/acm-klusterlet-config"
   namespace        = var.acm_namespace
   create_namespace = false
+  take_ownership   = true
   wait             = true
   timeout          = 600
 
