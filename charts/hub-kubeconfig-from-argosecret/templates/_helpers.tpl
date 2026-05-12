@@ -22,7 +22,7 @@ Create a default fully qualified app name.
 {{- if .Values.sourceSecretName }}
 {{- .Values.sourceSecretName }}
 {{- else if .Values.clusterName }}
-{{- printf "%s-application-manager-cluster-secret" .Values.clusterName }}
+{{- printf "%s-%s-cluster-secret" .Values.clusterName (.Values.managedServiceAccountName | default "application-manager") }}
 {{- else }}
 {{- fail "clusterName or sourceSecretName is required" }}
 {{- end }}
