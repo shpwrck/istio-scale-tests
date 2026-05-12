@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Orchestrate propagation probes across multiple mesh sizes for comparison.
-# Runs endpoint and config probes at each mesh size (1, 2, 3, ... N clusters),
+# Orchestrate endpoint propagation probes across multiple mesh sizes for comparison.
+# Runs endpoint probes at each mesh size (1, 2, 3, ... N clusters),
 # producing results tagged by cluster count for side-by-side analysis.
 #
 # Usage:
@@ -29,7 +29,6 @@ PAUSE_SEC="${PROPAGATION_PAUSE_SEC}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 OUTPUT_DIR="${ROOT}/propagation-test/results"
 DRY_RUN=0
-SKIP_CONFIG=0
 COLLECT_METRICS=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -40,11 +39,10 @@ Usage: $(basename "$0") [options]
 
   --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
-  --iterations N       Iterations per mesh size per probe (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
+  --iterations N       Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --pause SEC          Seconds between iterations (default: \$PROPAGATION_PAUSE_SEC=$PAUSE_SEC).
   --timeout SEC        Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --output-dir DIR     Results directory (default: propagation-test/results).
-  --skip-config        Skip config propagation probes (VirtualService/DestinationRule).
   --collect-metrics    Also run 004-collect-pilot-metrics.sh at each mesh size.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
@@ -98,10 +96,6 @@ while [[ $# -gt 0 ]]; do
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
 		shift 2
-		;;
-	--skip-config)
-		SKIP_CONFIG=1
-		shift
 		;;
 	--collect-metrics)
 		COLLECT_METRICS=1
@@ -178,9 +172,6 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "  [dry-run] Would run:"
 		echo "    001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
 		echo "    002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --iterations $ITERATIONS"
-		if ((! SKIP_CONFIG && ms > 1)); then
-			echo "    003-run-config-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --iterations $ITERATIONS"
-		fi
 		if ((COLLECT_METRICS)); then
 			echo "    004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
 		fi
@@ -204,25 +195,8 @@ for ms in "${MESH_SIZES[@]}"; do
 	if [[ -n "$remote_csv" ]]; then
 		endpoint_args+=(--remote-contexts "$remote_csv")
 	fi
-	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}" --keep-canary
+	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"
 	echo ""
-
-	if ((! SKIP_CONFIG)); then
-		echo "--- Running config probe (mesh_size=$ms) ---"
-		config_args=(
-			--source-context "$source_ctx"
-			--mesh-size "$ms"
-			--iterations "$ITERATIONS"
-			--pause "$PAUSE_SEC"
-			--timeout "$TIMEOUT_SEC"
-			--output-dir "$OUTPUT_DIR"
-		)
-		if [[ -n "$remote_csv" ]]; then
-			config_args+=(--remote-contexts "$remote_csv")
-		fi
-		"$SCRIPT_DIR/003-run-config-probe.sh" "${config_args[@]}"
-		echo ""
-	fi
 
 	if ((COLLECT_METRICS)); then
 		echo "--- Collecting pilot metrics (mesh_size=$ms) ---"
@@ -230,13 +204,6 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo ""
 	fi
 
-	# Clean up canary left by --keep-canary
-	echo "--- Cleaning up canary ---"
-	if command -v oc >/dev/null 2>&1; then
-		oc --context="$source_ctx" -n "$PROPAGATION_TEST_NAMESPACE" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true >/dev/null
-	else
-		kubectl --context="$source_ctx" -n "$PROPAGATION_TEST_NAMESPACE" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true >/dev/null
-	fi
 	echo ""
 done
 

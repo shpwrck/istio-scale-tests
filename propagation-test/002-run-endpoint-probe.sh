@@ -31,9 +31,9 @@ TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_S="0.$(printf '%03d' "$((PROPAGATION_POLL_INTERVAL_MS))")"
 OUTPUT_DIR="${ROOT}/propagation-test/results"
 DRY_RUN=0
-KEEP_CANARY=0
 NS="${PROPAGATION_TEST_NAMESPACE}"
 BASE_PF_PORT=15014
+BASE_ENVOY_PF_PORT=15100
 CHART_DIR="${ROOT}/charts/propagation-test"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -50,7 +50,6 @@ Usage: $(basename "$0") [options]
   --timeout SEC             Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS).
   --output-dir DIR          Results directory (default: propagation-test/results).
-  --keep-canary             Do not delete canary after the final iteration.
   --dry-run                 Render and print canary manifests without applying.
   -h, --help                Show this help.
 
@@ -115,10 +114,6 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR="$2"
 		shift 2
 		;;
-	--keep-canary)
-		KEEP_CANARY=1
-		shift
-		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -146,7 +141,6 @@ fi
 command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
-command -v istioctl >/dev/null 2>&1 || die "istioctl not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
@@ -202,6 +196,18 @@ start_port_forward() {
 	done
 }
 
+start_envoy_port_forward() {
+	local ctx="$1" local_port="$2"
+	"${KUBECTL[@]}" --context="$ctx" -n "$NS" port-forward deploy/propagation-watcher "$local_port":15000 >/dev/null 2>&1 &
+	PF_PIDS+=($!)
+	local attempts=0
+	while ! curl -s -o /dev/null "http://localhost:$local_port/clusters" 2>/dev/null; do
+		attempts=$((attempts + 1))
+		((attempts > 30)) && die "port-forward to watcher envoy on $ctx (port $local_port) failed to connect"
+		sleep 0.5
+	done
+}
+
 poll_p1_local_sync() {
 	local port="$1" t0="$2" result_file="$3"
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
@@ -238,15 +244,14 @@ poll_p2_remote_discovery() {
 }
 
 poll_p3_sidecar_endpoints() {
-	local remote_ctx="$1" t0="$2" result_file="$3"
+	local envoy_port="$1" t0="$2" result_file="$3"
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
 		local now_ms=$(( $(date +%s%N) / 1000000 ))
 		((now_ms > deadline)) && echo "TIMEOUT" > "$result_file" && return
-		local ep
-		ep=$(istioctl proxy-config endpoints deploy/propagation-watcher \
-			-n "$NS" --context="$remote_ctx" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
-		if echo "$ep" | grep -q "propagation-canary.*HEALTHY"; then
+		local clusters
+		clusters=$(curl -s "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
+		if echo "$clusters" | grep -q "propagation-canary.*health_flags::healthy"; then
 			echo "$(date +%s%N)" > "$result_file"
 			return
 		fi
@@ -270,10 +275,11 @@ echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE
 echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s | Pause: ${PAUSE_SEC}s"
 echo ""
 
-echo "Starting port-forwards to istiod..."
+echo "Starting port-forwards..."
 start_port_forward "$SOURCE_CTX" "$BASE_PF_PORT"
 for i in "${!REMOTES[@]}"; do
 	start_port_forward "${REMOTES[i]}" $(( BASE_PF_PORT + i + 1 ))
+	start_envoy_port_forward "${REMOTES[i]}" $(( BASE_ENVOY_PF_PORT + i ))
 done
 echo "Port-forwards ready."
 
@@ -315,7 +321,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		P3_FILES+=("$p3f")
 		poll_p2_remote_discovery $(( BASE_PF_PORT + i + 1 )) "$T0" "$p2f" &
 		POLL_PIDS+=($!)
-		poll_p3_sidecar_endpoints "${REMOTES[i]}" "$T0" "$p3f" &
+		poll_p3_sidecar_endpoints $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$p3f" &
 		POLL_PIDS+=($!)
 	done
 
@@ -367,10 +373,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		done
 	fi
 
-	if ((iter < ITERATIONS)) || ((! KEEP_CANARY)); then
-		echo "  Cleaning up canary..."
-		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true >/dev/null
-	fi
+	echo "  Cleaning up canary..."
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true >/dev/null
 
 	if ((iter < ITERATIONS)); then
 		echo "  Pausing ${PAUSE_SEC}s..."

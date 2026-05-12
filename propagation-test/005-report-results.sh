@@ -58,15 +58,11 @@ done
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
 ENDPOINT_FILES=()
-CONFIG_FILES=()
 while IFS= read -r f; do
 	ENDPOINT_FILES+=("$f")
 done < <(find "$RESULTS_DIR" -name 'endpoint-*.tsv' -type f 2>/dev/null | sort)
-while IFS= read -r f; do
-	CONFIG_FILES+=("$f")
-done < <(find "$RESULTS_DIR" -name 'config-*.tsv' -type f 2>/dev/null | sort)
 
-if [[ ${#ENDPOINT_FILES[@]} -eq 0 && ${#CONFIG_FILES[@]} -eq 0 ]]; then
+if [[ ${#ENDPOINT_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
@@ -118,63 +114,6 @@ report_endpoint_text() {
 			stats_line("P1 local xDS push", p1_vals[ms_cur], p1_n[ms_cur])
 			stats_line("P2 remote istiod disc", p2_vals[ms_cur], p2_n[ms_cur])
 			stats_line("P3 remote sidecar", p3_vals[ms_cur], p3_n[ms_cur])
-		}
-	}'
-}
-
-report_config_text() {
-	echo ""
-	echo "=== Config Propagation Latency ==="
-	echo ""
-	cat "${CONFIG_FILES[@]}" | awk -F'\t' '
-	!/^#/ && !/^run_id/ && NF>=10 {
-		ms=$2; ctype=$6; c1=$8; c2=$9
-		key=ms SUBSEP ctype
-		if(c1!="TIMEOUT" && c1!="N/A") { c1_vals[key][++c1_n[key]]=c1+0 }
-		if(c2!="TIMEOUT" && c2!="N/A") { c2_vals[key][++c2_n[key]]=c2+0 }
-		seen_ms[ms]=1; seen_ct[ctype]=1
-	}
-	function percentile(arr, n, pct,    idx) {
-		if(n==0) return "N/A"
-		idx = int(n * pct / 100)
-		if(idx < 1) idx = 1
-		if(idx > n) idx = n
-		return arr[idx]
-	}
-	function sort_arr(arr, n,    i, j, tmp) {
-		for(i=2; i<=n; i++) {
-			tmp = arr[i]
-			j = i - 1
-			while(j >= 1 && arr[j] > tmp) {
-				arr[j+1] = arr[j]
-				j--
-			}
-			arr[j+1] = tmp
-		}
-	}
-	function stats_line(label, arr, n, ms_cur) {
-		if(n==0) return
-		sort_arr(arr, n)
-		sum=0; for(i=1;i<=n;i++) sum+=arr[i]
-		printf "  %-3s | %-22s | %5d | %7d | %7d | %7d | %7s | %7s | %7s\n", \
-			ms_cur, label, n, arr[1], arr[n], sum/n, \
-			percentile(arr,n,50), percentile(arr,n,95), percentile(arr,n,99)
-	}
-	END {
-		printf "  %-3s | %-22s | %5s | %7s | %7s | %7s | %7s | %7s | %7s\n", \
-			"Sz", "Phase", "n", "min", "max", "avg", "p50", "p95", "p99"
-		printf "  %-3s-+-%-22s-+-%5s-+-%7s-+-%7s-+-%7s-+-%7s-+-%7s-+-%7s\n", \
-			"---", "----------------------", "-----", "-------", "-------", "-------", "-------", "-------", "-------"
-		asorti(seen_ms, ms_sorted)
-		asorti(seen_ct, ct_sorted)
-		for(s in ms_sorted) {
-			m = ms_sorted[s]
-			for(c in ct_sorted) {
-				ct = ct_sorted[c]
-				key=m SUBSEP ct
-				stats_line(ct " C1 local", c1_vals[key], c1_n[key], m)
-				stats_line(ct " C2 remote", c2_vals[key], c2_n[key], m)
-			}
 		}
 	}'
 }
@@ -262,14 +201,8 @@ report_endpoint_json() {
 
 case "$FORMAT" in
 text)
-	if [[ ${#ENDPOINT_FILES[@]} -gt 0 ]]; then
-		echo "Files: ${ENDPOINT_FILES[*]}"
-		report_endpoint_text
-	fi
-	if [[ ${#CONFIG_FILES[@]} -gt 0 ]]; then
-		echo "Files: ${CONFIG_FILES[*]}"
-		report_config_text
-	fi
+	echo "Files: ${ENDPOINT_FILES[*]}"
+	report_endpoint_text
 	;;
 csv)
 	if [[ ${#ENDPOINT_FILES[@]} -gt 0 ]]; then
