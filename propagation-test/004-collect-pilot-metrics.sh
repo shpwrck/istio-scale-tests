@@ -149,7 +149,7 @@ for i in "${!CONTEXTS[@]}"; do
 	port=$(( BASE_PF_PORT + i ))
 	attempts=0
 	while ! curl -s -o /dev/null "http://localhost:$port/metrics" 2>/dev/null; do
-		((attempts++))
+		attempts=$((attempts + 1))
 		((attempts > 20)) && die "port-forward to istiod on ${CONTEXTS[i]} (port $port) failed"
 		sleep 0.5
 	done
