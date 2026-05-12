@@ -38,6 +38,8 @@ spec:
   template:
     metadata:
       name: '{{ "{{clusterName}}" }}-{{ .Values.template.applicationNameSuffix }}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
     spec:
       project: default
       source:

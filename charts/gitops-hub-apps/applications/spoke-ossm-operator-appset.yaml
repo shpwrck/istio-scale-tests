@@ -4,6 +4,8 @@ kind: Application
 metadata:
   name: spoke-ossm-operator-appset
   namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
   annotations:
     argocd.argoproj.io/sync-wave: "8"
   labels:
