@@ -383,6 +383,38 @@ resource "helm_release" "gitops_cluster" {
   depends_on = [helm_release.acm_gitops_resources]
 }
 
+# --- ArgoCD cluster secrets (correct server URL) ---
+# ACM's gitops-addon creates cluster secrets with internal control-plane
+# URLs that are unreachable. We wait for them to appear, then overwrite
+# the server and config fields with the correct external API URL.
+
+resource "time_sleep" "wait_argocd_cluster_secrets" {
+  count = local.gitops_enabled && length(local.spoke_cluster_keys) > 0 ? 1 : 0
+
+  depends_on      = [helm_release.gitops_cluster, time_sleep.wait_spoke_registration]
+  create_duration = "120s"
+}
+
+resource "terraform_data" "patch_argocd_cluster_secret" {
+  for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
+
+  input = {
+    spoke_name       = each.key
+    api_url          = local.by_cluster[each.key].cluster_api_url
+    token            = data.external.spoke_token[each.key].result.token
+    token_script     = local.token_script
+    hub_api_url      = local.hub_api_url
+    hub_admin_pass   = local.hub_admin_pass
+    gitops_namespace = var.gitops_namespace
+  }
+
+  provisioner "local-exec" {
+    command = "bash ${path.module}/../scripts/patch-argocd-cluster-secret.sh ${self.input.spoke_name} ${self.input.api_url} ${self.input.token} ${self.input.token_script} ${self.input.hub_api_url} ${self.input.hub_admin_pass} ${self.input.gitops_namespace}"
+  }
+
+  depends_on = [time_sleep.wait_argocd_cluster_secrets]
+}
+
 # --- Destroy-time cleanup: cascade-delete all Argo CD Applications ---
 
 resource "terraform_data" "argocd_app_cleanup" {
