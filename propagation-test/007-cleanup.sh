@@ -98,33 +98,50 @@ run_delete() {
 	fi
 }
 
+cleanup_context() {
+	local ctx="$1"
+	echo "--- Cleaning up context: $ctx ---"
+
+	if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+		echo "  [$ctx] Namespace $NS does not exist, skipping."
+		return 0
+	fi
+
+	echo "  [$ctx] Removing canary resources..."
+	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete virtualservice/propagation-canary --ignore-not-found=true
+	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete destinationrule/propagation-canary --ignore-not-found=true
+	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete deploy/propagation-canary --ignore-not-found=true
+	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete svc/propagation-canary --ignore-not-found=true
+
+	echo "  [$ctx] Removing watcher resources..."
+	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete deploy/propagation-watcher --ignore-not-found=true
+	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete svc/propagation-watcher --ignore-not-found=true
+
+	echo "  [$ctx] Deleting namespace $NS..."
+	run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+	echo "  [$ctx] Done."
+}
+
 echo "=== Propagation test cleanup ==="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Namespace: $NS"
 ((DRY_RUN)) && echo "Mode: dry-run"
 echo ""
 
+PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	echo "--- Cleaning up context: $ctx ---"
+	cleanup_context "$ctx" &
+	PIDS+=($!)
+done
 
-	if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
-		echo "  Namespace $NS does not exist, skipping."
-		continue
-	fi
-
-	echo "  Removing canary resources..."
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete virtualservice/propagation-canary --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete destinationrule/propagation-canary --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete deploy/propagation-canary --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete svc/propagation-canary --ignore-not-found=true
-
-	echo "  Removing watcher resources..."
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete deploy/propagation-watcher --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete svc/propagation-watcher --ignore-not-found=true
-
-	echo "  Deleting namespace $NS..."
-	run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+FAILED=0
+for pid in "${PIDS[@]}"; do
+	wait "$pid" || FAILED=$((FAILED + 1))
 done
 
 echo ""
+if ((FAILED > 0)); then
+	echo "Cleanup finished with $FAILED failed context(s)."
+	exit 1
+fi
 echo "Cleanup complete."

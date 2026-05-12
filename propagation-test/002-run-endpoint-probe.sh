@@ -26,11 +26,11 @@ SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
 MESH_SIZE=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
-PAUSE_SEC="${PROPAGATION_PAUSE_SEC}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_S="0.$(printf '%03d' "$((PROPAGATION_POLL_INTERVAL_MS))")"
 OUTPUT_DIR="${ROOT}/propagation-test/results"
 DRY_RUN=0
+WRITE_TSV=0
 NS="${PROPAGATION_TEST_NAMESPACE}"
 BASE_PF_PORT=15014
 BASE_ENVOY_PF_PORT=15100
@@ -46,16 +46,19 @@ Usage: $(basename "$0") [options]
   --remote-contexts CSV     Remote cluster contexts (comma-separated). Omit for single-cluster baseline.
   --mesh-size N             Metadata tag for TSV output (default: 1 + number of remotes).
   --iterations N            Number of probe iterations (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
-  --pause SEC               Seconds between iterations (default: \$PROPAGATION_PAUSE_SEC=$PAUSE_SEC).
   --timeout SEC             Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS).
   --output-dir DIR          Results directory (default: propagation-test/results).
+  --tsv                     Also write per-iteration rows to a TSV file.
   --dry-run                 Render and print canary manifests without applying.
   -h, --help                Show this help.
 
+Between iterations the script polls istiod and watcher sidecars to confirm canary
+endpoints have drained before starting the next iteration, instead of using a fixed pause.
+
 Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
-  PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_PAUSE_SEC.
+  PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS.
 EOF
 }
 
@@ -94,11 +97,6 @@ while [[ $# -gt 0 ]]; do
 		ITERATIONS="$2"
 		shift 2
 		;;
-	--pause)
-		[[ -n "${2:-}" ]] || die "--pause requires a value"
-		PAUSE_SEC="$2"
-		shift 2
-		;;
 	--timeout)
 		[[ -n "${2:-}" ]] || die "--timeout requires a value"
 		TIMEOUT_SEC="$2"
@@ -113,6 +111,10 @@ while [[ $# -gt 0 ]]; do
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
 		shift 2
+		;;
+	--tsv)
+		WRITE_TSV=1
+		shift
 		;;
 	--dry-run)
 		DRY_RUN=1
@@ -165,16 +167,25 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-cat > "$TSV_FILE" <<EOF
+if ((WRITE_TSV)); then
+	cat > "$TSV_FILE" <<EOF
 # Endpoint propagation latency test — $(date -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Iterations: $ITERATIONS  Poll interval: ${POLL_INTERVAL_S}s  Timeout: ${TIMEOUT_SEC}s
 EOF
-echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_local_ms\tp2_discovery_ms\tp3_dataplane_ms\tstatus" >> "$TSV_FILE"
+	echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_local_ms\tp2_discovery_ms\tp3_dataplane_ms\tstatus" >> "$TSV_FILE"
+fi
 
 PF_PIDS=()
 
-cleanup_port_forwards() {
+POLL_PIDS=()
+
+cleanup() {
+	for pid in "${POLL_PIDS[@]}"; do
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	done
+	POLL_PIDS=()
 	for pid in "${PF_PIDS[@]}"; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
@@ -182,7 +193,7 @@ cleanup_port_forwards() {
 	PF_PIDS=()
 }
 
-trap cleanup_port_forwards EXIT
+trap cleanup EXIT
 
 start_port_forward() {
 	local ctx="$1" local_port="$2"
@@ -270,13 +281,27 @@ compute_delta_ms() {
 	echo $(( (ts - t0) / 1000000 ))
 }
 
+wait_sidecar_endpoint_removed() {
+	local port="$1"
+	local deadline=$(( $(date +%s) + TIMEOUT_SEC ))
+	while (($(date +%s) <= deadline)); do
+		local data
+		data=$(curl -s "http://localhost:$port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
+		echo "$data" | grep -q "propagation-canary" || return 0
+		sleep "$POLL_INTERVAL_S"
+	done
+	return 1
+}
+
 echo "=== Endpoint propagation probe ==="
 echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE"
-echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s | Pause: ${PAUSE_SEC}s"
+echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s"
 echo ""
 
 echo "Starting port-forwards..."
 start_port_forward "$SOURCE_CTX" "$BASE_PF_PORT"
+SOURCE_ENVOY_PF_PORT=$(( BASE_ENVOY_PF_PORT + ${#REMOTES[@]} ))
+start_envoy_port_forward "$SOURCE_CTX" "$SOURCE_ENVOY_PF_PORT"
 for i in "${!REMOTES[@]}"; do
 	start_port_forward "${REMOTES[i]}" $(( BASE_PF_PORT + i + 1 ))
 	start_envoy_port_forward "${REMOTES[i]}" $(( BASE_ENVOY_PF_PORT + i ))
@@ -284,7 +309,7 @@ done
 echo "Port-forwards ready."
 
 TMPDIR_RUN=$(mktemp -d)
-trap 'cleanup_port_forwards; rm -rf "$TMPDIR_RUN"' EXIT
+trap 'cleanup; rm -rf "$TMPDIR_RUN"' EXIT
 
 P1_SUM=0; P1_COUNT=0; P1_MIN=""; P1_MAX=""
 P2_SUM=0; P2_COUNT=0; P2_MIN=""; P2_MAX=""
@@ -342,7 +367,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
 		status="OK"
 		[[ "$p1_ms" == "TIMEOUT" ]] && status="TIMEOUT_P1"
-		echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\tN/A\t${T0}\t${p1_ms}\tN/A\tN/A\t${status}" >> "$TSV_FILE"
+		if ((WRITE_TSV)); then
+			echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\tN/A\t${T0}\t${p1_ms}\tN/A\tN/A\t${status}" >> "$TSV_FILE"
+		fi
 	else
 		for i in "${!REMOTES[@]}"; do
 			p2_ms=$(compute_delta_ms "${P2_FILES[i]}" "$T0")
@@ -369,21 +396,29 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			[[ "$p3_ms" == "TIMEOUT" ]] && status="TIMEOUT_P3"
 			[[ "$p1_ms" == "TIMEOUT" && "$p2_ms" == "TIMEOUT" && "$p3_ms" == "TIMEOUT" ]] && status="TIMEOUT_ALL"
 
-			echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\t${REMOTES[i]}\t${T0}\t${p1_ms}\t${p2_ms}\t${p3_ms}\t${status}" >> "$TSV_FILE"
+			if ((WRITE_TSV)); then
+				echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\t${REMOTES[i]}\t${T0}\t${p1_ms}\t${p2_ms}\t${p3_ms}\t${status}" >> "$TSV_FILE"
+			fi
 		done
 	fi
 
 	echo "  Cleaning up canary..."
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true >/dev/null
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true --wait=true >/dev/null
 
 	if ((iter < ITERATIONS)); then
-		echo "  Pausing ${PAUSE_SEC}s..."
-		sleep "$PAUSE_SEC"
+		echo "  Waiting for canary endpoints to drain..."
+		wait_sidecar_endpoint_removed "$SOURCE_ENVOY_PF_PORT" || echo "  Warning: timeout waiting for $SOURCE_CTX sidecar endpoint removal"
+		for i in "${!REMOTES[@]}"; do
+			wait_sidecar_endpoint_removed $(( BASE_ENVOY_PF_PORT + i )) || echo "  Warning: timeout waiting for ${REMOTES[i]} sidecar endpoint removal"
+		done
+		echo "  Canary endpoints drained."
 	fi
 done
 
 echo ""
-echo "=== Results written to $TSV_FILE ==="
+if ((WRITE_TSV)); then
+	echo "=== Results written to $TSV_FILE ==="
+fi
 echo ""
 echo "Summary:"
 if ((P1_COUNT > 0)); then
@@ -398,3 +433,44 @@ fi
 if ((P1_COUNT == 0)); then
 	echo "  No successful measurements."
 fi
+
+MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
+{
+	echo "# Endpoint Propagation Latency"
+	echo ""
+	echo "| Field | Value |"
+	echo "|-------|-------|"
+	echo "| Run ID | \`${RUN_ID}\` |"
+	echo "| Date | $(date -Iseconds) |"
+	echo "| Source | ${SOURCE_CTX} |"
+	echo "| Remotes | ${REMOTES[*]:-none} |"
+	echo "| Mesh size | ${MESH_SIZE} |"
+	echo "| Iterations | ${ITERATIONS} |"
+	echo "| Timeout | ${TIMEOUT_SEC}s |"
+	echo "| Poll interval | ${POLL_INTERVAL_S}s |"
+	echo ""
+	echo "## Summary"
+	echo ""
+	if ((P1_COUNT > 0 || P2_COUNT > 0 || P3_COUNT > 0)); then
+		echo "| Phase | n | min (ms) | max (ms) | avg (ms) |"
+		echo "|-------|---|----------|----------|----------|"
+		if ((P1_COUNT > 0)); then
+			echo "| P1 local xDS push | ${P1_COUNT} | ${P1_MIN} | ${P1_MAX} | $((P1_SUM / P1_COUNT)) |"
+		fi
+		if ((P2_COUNT > 0)); then
+			echo "| P2 remote istiod discovery | ${P2_COUNT} | ${P2_MIN} | ${P2_MAX} | $((P2_SUM / P2_COUNT)) |"
+		fi
+		if ((P3_COUNT > 0)); then
+			echo "| P3 remote sidecar | ${P3_COUNT} | ${P3_MIN} | ${P3_MAX} | $((P3_SUM / P3_COUNT)) |"
+		fi
+	else
+		echo "No successful measurements."
+	fi
+	if ((WRITE_TSV)); then
+		echo ""
+		echo "## Raw Data"
+		echo ""
+		echo "TSV: [\`$(basename "$TSV_FILE")\`]($(basename "$TSV_FILE"))"
+	fi
+} > "$MD_FILE"
+echo "Summary written to $MD_FILE"
