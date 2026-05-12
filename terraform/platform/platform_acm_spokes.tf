@@ -60,6 +60,7 @@ resource "helm_release" "acm_managed_cluster" {
   chart            = "${path.module}/../../charts/acm-managed-cluster"
   namespace        = var.acm_namespace
   create_namespace = false
+  take_ownership   = true
   wait             = true
   timeout          = 300
 
