@@ -6,7 +6,7 @@ This repository automates multi-cluster Istio (Red Hat OpenShift Service Mesh 3.
 
 **What this repo does:**
 1. Provisions ROSA HCP clusters via Terraform (`terraform/rosa-hcp/`)
-2. Installs ACM hub + GitOps wiring via Terraform (`terraform/rosa-hcp/`, `enable_platform_setup = true`)
+2. Installs ACM hub + GitOps wiring via Terraform (`terraform/platform/`)
 3. Deploys multi-primary, multi-network Istio mesh via GitOps (Helm charts under `charts/` synced by Argo CD ApplicationSets)
 4. Deploys multicluster load test workloads (`isotope-multicluster/`)
 
@@ -73,20 +73,19 @@ Use `.gitignore` patterns and local secret stores.
 
 ### Deploy the Full Mesh (Terraform + GitOps)
 
-From `terraform/rosa-hcp/`:
-
 ```bash
-# Phase 1: Create ROSA clusters
+# Phase 1: Create ROSA clusters (terraform/rosa-hcp/)
+cd terraform/rosa-hcp
 export RHCS_TOKEN='...'
 terraform init && terraform apply
-
-# Phase 2: Enable platform setup (ACM + GitOps + mesh)
-# Set enable_platform_setup = true in terraform.tfvars
-terraform apply
 
 # Get kubeconfig
 terraform output -raw kubeconfig > ~/.kube/rosa-config
 export KUBECONFIG=~/.kube/rosa-config
+
+# Phase 2: Install ACM + GitOps + mesh (terraform/platform/)
+cd ../platform
+terraform init && terraform apply
 ```
 
 ### Verify the Mesh

@@ -1,14 +1,4 @@
 # --------------------------------------------------------------------------
-# Platform setup variables — ACM hub + OpenShift GitOps
-# --------------------------------------------------------------------------
-
-variable "enable_platform_setup" {
-  type        = bool
-  default     = false
-  description = "Install RHACM and OpenShift GitOps on the hub cluster. Requires clusters to exist first (two-phase apply: first apply creates clusters, second apply with this set to true installs the platform)."
-}
-
-# --------------------------------------------------------------------------
 # ACM (Red Hat Advanced Cluster Management)
 # --------------------------------------------------------------------------
 
@@ -54,7 +44,7 @@ variable "acm_install_klusterletconfig" {
 variable "enable_gitops" {
   type        = bool
   default     = true
-  description = "Install OpenShift GitOps and configure ACM GitOps wiring when enable_platform_setup is true."
+  description = "Install OpenShift GitOps and configure ACM GitOps wiring."
 }
 
 variable "gitops_namespace" {
@@ -89,7 +79,7 @@ variable "argocd_resource_limits_cpu" {
 
 variable "argocd_resource_limits_memory" {
   type        = string
-  default     = "4Gi"
+  default     = "8Gi"
   description = "Memory limit for ArgoCD components (controller, repo-server, server, applicationSet)."
 }
 

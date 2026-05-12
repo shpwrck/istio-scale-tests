@@ -25,25 +25,24 @@ Use it to reproduce installs, certificate wiring, remote secrets, east-west gate
 
 ## Quick start
 
-Provision clusters and deploy the full mesh with two Terraform applies:
+Provision clusters and deploy the full mesh with two Terraform modules:
 
 ```bash
-cd terraform/rosa-hcp
-
 # 1. Create ROSA HCP clusters
+cd terraform/rosa-hcp
 export RHCS_TOKEN='...'
 terraform init && terraform apply
 
-# 2. Enable platform setup (ACM + GitOps + full mesh)
-#    Set enable_platform_setup = true in terraform.tfvars, then:
-terraform apply
-
-# 3. Get a merged kubeconfig for all clusters
+# 2. Get a merged kubeconfig for all clusters
 terraform output -raw kubeconfig > ~/.kube/rosa-config
 export KUBECONFIG=~/.kube/rosa-config
+
+# 3. Install ACM + GitOps + full mesh
+cd ../platform
+terraform init && terraform apply
 ```
 
-The second apply installs ACM, imports spoke clusters, deploys OpenShift GitOps (Argo CD), and syncs the app-of-apps which rolls out the entire mesh: Sail operator, Istio CRs, cert-manager CAs, External Secrets for cacerts and remote secrets, ingress gateways, and east-west gateways.
+The platform module installs ACM, imports spoke clusters, deploys OpenShift GitOps (Argo CD), and syncs the app-of-apps which rolls out the entire mesh: Sail operator, Istio CRs, cert-manager CAs, External Secrets for cacerts and remote secrets, ingress gateways, and east-west gateways.
 
 By default `mesh_member_count = 0` labels all spokes as mesh members. Set it to `1` to start with a single spoke and [incrementally add clusters](#incremental-mesh-deployment).
 
@@ -54,7 +53,7 @@ No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want
 ## End-to-end order
 
 1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
-2. Platform + Mesh — set `enable_platform_setup = true` and re-apply Terraform. This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
+2. Platform + Mesh — apply the platform Terraform module (`terraform/platform/`). This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
 3. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
 
 ---
@@ -85,7 +84,7 @@ Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terrafor
 
 ## 2. Deploy the mesh (GitOps)
 
-After clusters exist, set `enable_platform_setup = true` in `terraform.tfvars` and re-apply. This two-phase Terraform approach installs everything via GitOps:
+After clusters exist, apply the platform module (`terraform/platform/`). This installs everything via GitOps:
 
 1. ACM operator + MultiClusterHub + spoke import
 2. OpenShift GitOps (Argo CD) + app-of-apps
@@ -111,10 +110,11 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 
 | Path | Role |
 | ---- | ---- |
-| `terraform/rosa-hcp/` | ROSA HCP cluster provisioning + optional ACM/GitOps platform setup. |
-| `terraform/rosa-hcp/platform_acm.tf` | ACM operator + MultiClusterHub + KlusterletConfig (gated by `enable_platform_setup`). |
-| `terraform/rosa-hcp/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster. |
-| `terraform/rosa-hcp/platform_gitops.tf` | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps. |
+| `terraform/rosa-hcp/` | ROSA HCP cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
+| `terraform/platform/` | ACM + OpenShift GitOps platform setup (reads rosa-hcp state via `terraform_remote_state`). |
+| `terraform/platform/platform_acm.tf` | ACM operator + MultiClusterHub + KlusterletConfig. |
+| `terraform/platform/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster. |
+| `terraform/platform/platform_gitops.tf` | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps. |
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke. |
 | `charts/spoke-istio/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke (multi-primary, multi-network). |
 | `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke. |
@@ -142,26 +142,23 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 
 ### Optional — ACM + GitOps (Terraform)
 
-ACM and OpenShift GitOps are installed via Terraform with a two-phase apply. After provisioning clusters, set `enable_platform_setup = true` and re-apply:
+ACM and OpenShift GitOps are installed via a separate Terraform module. After provisioning clusters:
 
 ```bash
-# In terraform/rosa-hcp/:
-# 1. First apply creates ROSA clusters (enable_platform_setup defaults to false)
-terraform apply
-
-# 2. Set enable_platform_setup = true in terraform.tfvars, then:
-terraform apply
+cd terraform/platform
+cp terraform.tfvars.example terraform.tfvars   # edit as needed
+terraform init && terraform apply
 # This installs ACM, imports spokes, installs GitOps, deploys app-of-apps,
 # and rolls out the entire Istio mesh via Argo CD ApplicationSets.
 ```
 
-See `terraform/rosa-hcp/README.md` for variables controlling ACM channel, GitOps config, and spoke import behavior.
+See `terraform/platform/terraform.tfvars.example` for variables controlling ACM channel, GitOps config, and spoke import behavior.
 
 ---
 
 ## Incremental mesh deployment
 
-The `mesh_member_count` Terraform variable controls how many spoke clusters participate in the Istio mesh. Spokes are labeled with `istio-mesh-member=true` in sorted key order; the ACM Placement selects only labeled spokes.
+The `mesh_member_count` variable (in `terraform/platform/`) controls how many spoke clusters participate in the Istio mesh. Spokes are labeled with `istio-mesh-member=true` in sorted key order; the ACM Placement selects only labeled spokes.
 
 | `mesh_member_count` | Labeled spokes | Behavior |
 | --- | --- | --- |
@@ -171,7 +168,7 @@ The `mesh_member_count` Terraform variable controls how many spoke clusters part
 | `N` | First N spokes | N-cluster mesh |
 
 ```bash
-# Start with one cluster
+# Start with one cluster (in terraform/platform/)
 # In terraform.tfvars: mesh_member_count = 1
 terraform apply
 

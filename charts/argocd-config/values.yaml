@@ -1,0 +1,9 @@
+argocd:
+  name: openshift-gitops
+  applicationSet:
+    enabled: true
+    env: []
+    sourceNamespaces: []
+  resourceLimits:
+    cpu: "4"
+    memory: 4Gi

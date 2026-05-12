@@ -1,0 +1,9 @@
+gitopsCluster:
+  name: acm-openshift-gitops
+  argoServer:
+    cluster: ""
+    argoNamespace: openshift-gitops
+  placementRef:
+    name: acm-openshift-gitops-placement
+  gitopsAddon:
+    enabled: true

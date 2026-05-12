@@ -1,0 +1,5 @@
+apiVersion: v2
+name: argocd-config
+description: ArgoCD custom resource configuration (requires OpenShift GitOps operator CRDs).
+type: application
+version: 0.1.0
