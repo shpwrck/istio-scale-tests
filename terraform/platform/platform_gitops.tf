@@ -398,41 +398,6 @@ resource "terraform_data" "argocd_app_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = <<-'EOT'
-      set -euo pipefail
-
-      TOKEN=$("${self.input.token_script}" "${self.input.hub_api_url}" "cluster-admin" "${self.input.hub_admin_pass}" | jq -r '.status.token')
-      KC="kubectl --server=${self.input.hub_api_url} --token=$TOKEN --insecure-skip-tls-verify"
-      NS="${self.input.gitops_namespace}"
-
-      echo "=== Deleting hub-gitops-root Application (cascade via finalizer) ==="
-      $KC delete application.argoproj.io "hub-gitops-root" -n "$NS" --wait=false 2>/dev/null || true
-
-      echo "=== Waiting for Applications and ApplicationSets to be cleaned up (timeout: 600s) ==="
-      ELAPSED=0
-      while [ $ELAPSED -lt 600 ]; do
-        APPS=$($KC get applications.argoproj.io -n "$NS" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | wc -w)
-        APPSETS=$($KC get applicationsets.argoproj.io -n "$NS" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | wc -w)
-        TOTAL=$((APPS + APPSETS))
-        if [ "$TOTAL" -eq 0 ]; then
-          echo "  All Applications and ApplicationSets removed."
-          exit 0
-        fi
-        echo "  $TOTAL resources remaining (apps=$APPS, appsets=$APPSETS). Waiting 10s..."
-        sleep 10
-        ELAPSED=$((ELAPSED + 10))
-      done
-
-      echo "WARNING: Timeout. Force-clearing finalizers on remaining resources..."
-      for app in $($KC get applications.argoproj.io -n "$NS" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-        $KC patch application.argoproj.io "$app" -n "$NS" --type=json \
-          -p '[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
-        $KC delete application.argoproj.io "$app" -n "$NS" --wait=false 2>/dev/null || true
-      done
-      for appset in $($KC get applicationsets.argoproj.io -n "$NS" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-        $KC delete applicationset.argoproj.io "$appset" -n "$NS" --wait=false 2>/dev/null || true
-      done
-      echo "=== ArgoCD Application cleanup complete ==="
-    EOT
+    command = "bash ${path.module}/../scripts/argocd-app-cleanup.sh ${self.input.token_script} ${self.input.hub_api_url} ${self.input.hub_admin_pass} ${self.input.gitops_namespace}"
   }
 }
