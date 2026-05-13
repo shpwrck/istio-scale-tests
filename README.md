@@ -9,7 +9,7 @@ Use it to reproduce installs, certificate wiring, remote secrets, east-west gate
    Shared plug-in CA: cert-manager root + per-cluster intermediates
 
      ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-     │   istio-001  │    │   istio-002  │    │   istio-003  │
+     │  cluster-1   │    │  cluster-2   │    │  cluster-3   │
      │  (ACM hub)   │    │  network-2   │    │  network-3   │
      ├──────────────┤    ├──────────────┤    ├──────────────┤
      │ Argo CD      │    │ istiod       │    │ istiod       │
@@ -63,17 +63,17 @@ No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want
 
 On the machine where you run repo commands:
 
-| Binary / runtime  | Notes |
-| ----------------- | ----- |
-| `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match `cluster_name_format` (e.g. `istio-001`, `istio-002`). |
-| `terraform`       | To apply `terraform/rosa-hcp/` (pinned version: see `versions.tf`). |
-| `helm`            | Helm 3 for charts under `charts/`. |
-| `istioctl`        | For mesh verification; align the build with `ISTIO_VERSION` in `config/versions.env`. Place at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
-| `jq`, `curl`      | `jq` for Terraform JSON, `curl` for ingress checks. |
+| Binary / runtime | Notes |
+| --- | --- |
+| `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match `cluster_name_format` in your Terraform config. |
+| `terraform` | To apply `terraform/rosa-hcp/` (pinned version: see `versions.tf`). |
+| `helm` | Helm 3 for charts under `charts/`. |
+| `istioctl` | For mesh verification; align the build with `ISTIO_VERSION` in `config/versions.env`. Place at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
+| `jq`, `curl` | `jq` for Terraform JSON, `curl` for ingress checks. |
 
 Optional: Go on `PATH` when running `isotope-multicluster/` against a local [istio/tools](https://github.com/istio/tools) checkout.
 
-Configuration: common pins and defaults live in `config/versions.env` (`ISTIO_VERSION`, `MESH_ID`, `OPENSHIFT_VERSION`, etc.).
+Configuration: version pins and mesh identity live in `config/versions.env`; operational defaults (namespaces, logging, test params) are in `config/options.env`, sourced automatically.
 
 ---
 
@@ -101,7 +101,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | 15   | Per-cluster intermediate CAs | `charts/hub-mesh-ca-intermediate/` |
 | 16   | Kubeconfig extraction from Argo secrets | `charts/hub-kubeconfig-from-argosecret/` |
 | 19   | Push cacerts + kubeconfigs + remote secrets to spokes | `charts/hub-mesh-push-secrets/` |
-| 21   | Istio + IstioCNI CRs | `charts/spoke-istio/` |
+| 21   | Istio + IstioCNI CRs | `charts/spoke-ossm/` |
 | 24   | North-south ingress gateway | `charts/spoke-ingress-gateway/` |
 | 27   | East-west gateway + cross-network Gateway CR | `charts/spoke-east-west-gateway/` |
 
@@ -117,7 +117,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `terraform/platform/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster. |
 | `terraform/platform/platform_gitops.tf` | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps. |
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke. |
-| `charts/spoke-istio/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke (multi-primary, multi-network). |
+| `charts/spoke-ossm/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke (multi-primary, multi-network). |
 | `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke. |
 | `charts/spoke-east-west-gateway/` | Helm chart: east-west gateway + cross-network Gateway CR per spoke. |
 | `charts/hub-mesh-ca/` | Helm chart: cert-manager root CA + ClusterIssuer on the hub. |
@@ -138,15 +138,17 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/acm-managed-cluster/` | Helm chart: one ManagedCluster per spoke (Terraform `platform_acm_spokes.tf`). |
 | `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for OpenShift GitOps (Terraform `platform_gitops.tf`). |
 | `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD. |
-| `config/versions.env` | Pinned versions and mesh-wide defaults sourced by scripts and referenced by charts. |
+| `charts/acm-gitops-cluster/` | Helm chart: GitOpsCluster CR binding ACM Placement to an Argo CD instance. |
+| `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration. |
+| `config/versions.env` | Core version pins and mesh identity; sources `config/options.env` for operational defaults. |
 | `propagation-test/` | Propagation latency test suite: active probes + metrics collection + sweep orchestrator. |
 | `isotope-multicluster/` | Multicluster isotope load test workload generator and applier. |
 
 </details>
 
-### Optional — ACM + GitOps (Terraform)
+### ACM + GitOps (Terraform)
 
-ACM and OpenShift GitOps are installed via a separate Terraform module. After provisioning clusters:
+After provisioning clusters, the platform module installs ACM and OpenShift GitOps:
 
 ```bash
 cd terraform/platform
@@ -167,7 +169,7 @@ The `mesh_member_count` variable (in `terraform/platform/`) controls how many sp
 | `mesh_member_count` | Labeled spokes | Behavior |
 | --- | --- | --- |
 | `0` | All spokes | All spokes get Istio (default, backward-compatible) |
-| `1` | First spoke only (e.g. `istio-002`) | Single-cluster Istio, no multicluster |
+| `1` | First spoke only | Single-cluster Istio, no multicluster |
 | `2` | First two spokes | Two-cluster mesh with cross-cluster discovery |
 | `N` | First N spokes | N-cluster mesh |
 
@@ -189,10 +191,10 @@ For quick iteration without Terraform, label clusters directly:
 
 ```bash
 # Add a cluster to the mesh
-oc label managedcluster/istio-003 istio-mesh-member=true
+oc label managedcluster/<cluster-3> istio-mesh-member=true
 
 # Remove a cluster from the mesh
-oc label managedcluster/istio-003 istio-mesh-member-
+oc label managedcluster/<cluster-3> istio-mesh-member-
 ```
 
 Manual labels take effect immediately (next ACM reconciliation cycle). The next `terraform apply` reconciles labels to match `mesh_member_count`.
@@ -219,13 +221,13 @@ oc apply -f charts/mesh-verify-appset.yaml
 
 # Wait for Argo CD to sync (check the mesh-verify-appset Application in the UI,
 # or wait for pods to appear):
-oc get pods -n mesh-verify --context istio-002
+oc get pods -n mesh-verify --context <cluster-2>
 ```
 
 Once pods are running, curl any mesh member's ingress gateway:
 
 ```bash
-INGRESS=$(oc get svc istio-ingressgateway -n istio-system --context istio-002 \
+INGRESS=$(oc get svc istio-ingressgateway -n istio-system --context <cluster-2> \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 
 for i in {1..10}; do
@@ -235,22 +237,22 @@ done
 
 ### What to expect
 
-**Single cluster** (`mesh_member_count = 1`): all responses return the same cluster name (e.g. `istio-002`). This confirms Istio, the ingress gateway, and sidecar injection are working on that cluster.
+**Single cluster** (`mesh_member_count = 1`): all responses return the same cluster name. This confirms Istio, the ingress gateway, and sidecar injection are working on that cluster.
 
-**Multiple clusters** (`mesh_member_count >= 2`): responses should come from different cluster names (e.g. alternating `istio-002` and `istio-003`). This confirms east-west gateways, remote secrets, and cross-cluster endpoint discovery are all functioning.
+**Multiple clusters** (`mesh_member_count >= 2`): responses should come from different cluster names. This confirms east-west gateways, remote secrets, and cross-cluster endpoint discovery are all functioning.
 
 ### Deeper diagnostics
 
 ```bash
 # Check that istiod discovers remote clusters
-istioctl remote-clusters --context istio-002
+istioctl remote-clusters --context <cluster-2>
 
 # Verify cross-cluster endpoints are visible to a sidecar
 istioctl proxy-config endpoints deploy/mesh-verify-echo -n mesh-verify \
-  --context istio-002 | grep mesh-verify
+  --context <cluster-2> | grep mesh-verify
 
 # Check remote secrets exist on a spoke
-oc get secret -n istio-system -l istio/multiCluster=true --context istio-002
+oc get secret -n istio-system -l istio/multiCluster=true --context <cluster-2>
 ```
 
 ### Clean up
@@ -293,7 +295,7 @@ Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/is
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Remote secrets missing on spokes | ESO PushSecret not synced | Check `oc get pushsecret -n external-secrets-operator` on the hub; verify spoke SecretStores are healthy. |
-| Ingress LoadBalancer returns connection refused on ROSA AWS | NLB security groups missing | Set `AWS_LOAD_BALANCER_SECURITY_GROUPS` per `config/versions.env`. |
+| Ingress LoadBalancer returns connection refused on ROSA AWS | NLB security groups missing | Set `AWS_LOAD_BALANCER_SECURITY_GROUPS` in `config/options.env`. |
 | `istioctl` errors on unrecognized API versions | Local `istioctl` doesn't match `ISTIO_VERSION` | Place a matching binary at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
 | `proxy-status` only lists local endpoints | Remote secrets not labeled correctly | Check `oc get secret -n istio-system -l istio/multiCluster=true`; verify `hub-mesh-push-secrets` chart synced. |
 | Cross-cluster requests time out | Ingress gateway Service has `topology.istio.io/network` label | This label should only be on the east-west gateway Service, not the ingress gateway. |

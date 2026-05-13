@@ -1,20 +1,8 @@
-# Generated certificates and local PEM material (cert-manager handles CAs in the mesh)
-/cacerts/
-
-# Local or environment-specific manifests (keep repo templates elsewhere if needed)
-/manifests/
-
-# Optional local cache (e.g. tooling clones)
-/.cache/
-
 # Isotope converter output (istio-multicluster/gen — see isotope-multicluster/README.md)
 /isotope-multicluster/gen/
 
 # Terraform-driven isotope topology (see isotope-multicluster/001-generate-topology-from-terraform.sh)
 /isotope-multicluster/topology/generated-from-terraform.yaml
-
-# Git worktrees (isolated checkouts; see using-git-worktrees skill)
-/.worktrees/
 
 # Private key and certificate material (beyond /cacerts/)
 *.pem

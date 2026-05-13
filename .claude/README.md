@@ -19,8 +19,7 @@ Project-level Claude Code configuration that:
    - Linting operations (`helm lint`, `shellcheck`, `terraform validate`)
 
 3. **Always includes key context files**:
-   - `CLAUDE.md` — Claude Code workflow guide
-   - `AGENTS.md` — Implementation rules and conventions
+   - `AGENTS.md` — Implementation rules, conventions, and common tasks
    - `config/versions.env` — Version pins and environment variables
 
 ### Local Overrides

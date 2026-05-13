@@ -2,7 +2,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: spoke-istio-appset
+  name: spoke-ossm-appset
   namespace: openshift-gitops
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -10,7 +10,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "21"
   labels:
     app.kubernetes.io/name: gitops-hub-apps
-    app.kubernetes.io/component: spoke-istio-appset
+    app.kubernetes.io/component: spoke-ossm-appset
 spec:
   project: default
   source:
@@ -18,9 +18,9 @@ spec:
     targetRevision: main
     path: charts/gitops-hub-ocm-placement-appset
     helm:
-      releaseName: gitops-spoke-istio-appset
+      releaseName: gitops-spoke-ossm-appset
       valueFiles:
-        - values-istio.yaml
+        - values-ossm.yaml
       parameters:
         - name: repo.url
           value: https://github.com/shpwrck/istio-scale-tests.git

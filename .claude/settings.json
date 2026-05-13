@@ -143,7 +143,6 @@
   },
   "context": {
     "alwaysInclude": [
-      "<home>/workdir/istio-scale-tests/CLAUDE.md",
       "<home>/workdir/istio-scale-tests/AGENTS.md",
       "<home>/workdir/istio-scale-tests/config/versions.env"
     ]
