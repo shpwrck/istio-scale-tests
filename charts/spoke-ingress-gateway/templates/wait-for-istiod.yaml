@@ -73,7 +73,7 @@ spec:
               echo "Waiting for istiod deployment to be available..."
               ELAPSED=0
               while [ $ELAPSED -lt 600 ]; do
-                AVAIL=$(curl -s --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$URL" | grep -o '"availableReplicas":[0-9]*' | cut -d: -f2)
+                AVAIL=$(curl -s --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$URL" | grep -o '"availableReplicas":[[:space:]]*[0-9]*' | grep -o '[0-9]*')
                 if [ "${AVAIL:-0}" -ge 1 ] 2>/dev/null; then
                   echo "istiod is available (${AVAIL} replicas). Gateway sync can proceed."
                   exit 0
