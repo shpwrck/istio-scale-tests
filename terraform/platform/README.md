@@ -33,9 +33,10 @@ The module deploys resources in order, waiting for dependencies at each step:
 4. **ACM GitOps wiring** — ManagedClusterSetBinding, Placement, and GitOpsCluster binding spokes to Argo CD
 5. **Hub app-of-apps** — Argo CD Application pointing to `charts/gitops-hub-apps/applications/`, which rolls out the entire mesh via ApplicationSets (Sail operator, Istio CRs, cert-manager, ESO, gateways)
 6. **Cluster secret patching** — corrects spoke API URLs in Argo CD cluster secrets
-7. **Mesh restart** — restarts istiod and gateways on spokes so they pick up the shared CA and sidecar config
 
-Steps 3–7 are skipped when `enable_gitops = false`.
+Steps 3–6 are skipped when `enable_gitops = false`.
+
+Mesh restart (istiod and gateways) is handled by the GitOps sync wave 30 chart (`charts/spoke-mesh-restart/`), not by Terraform.
 
 ## Incremental mesh deployment
 

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spoke-mesh-restart
+description: Restarts istiod and gateway deployments after mesh GitOps sync completes, ensuring components pick up shared CA and sidecar config.
+type: application
+version: 0.1.0
