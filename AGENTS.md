@@ -1,6 +1,16 @@
 # Agent instructions — istio-scale-tests
 
-Use this file with Cursor agents working in this repository. For human-oriented setup and commands, prefer `README.md`.
+Project conventions and implementation rules for AI coding assistants. For human-oriented setup and commands, prefer `README.md`.
+
+## Quick context
+
+What is currently implemented:
+
+1. ROSA HCP cluster provisioning via Terraform (`terraform/rosa-hcp/`)
+2. ACM hub + GitOps wiring via Terraform (`terraform/platform/`)
+3. Multi-primary, multi-network Istio mesh via GitOps (Helm charts under `charts/` synced by Argo CD ApplicationSets)
+4. Multicluster load test workloads (`isotope-multicluster/`)
+5. xDS propagation latency test suite (`propagation-test/`)
 
 ## Source of truth
 
@@ -12,13 +22,13 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 
 ## Implementation rules
 
-- No secrets in git: Never add commits that contain secrets or credentials (see Conventions for edits).
+- No secrets in git: Never commit secrets, credentials, kubeconfigs with live tokens, private keys, CA material, or API keys. Rely on `.gitignore` (e.g. `/cacerts/` at repo root) and local secret stores; use placeholders or templates for examples.
 - Mesh via GitOps: The mesh is deployed via Helm charts under `charts/`, synced by Argo CD ApplicationSets using ACM Placement. Do not add bash scripts for mesh installation — use Helm charts and Argo CD Applications instead.
 - Numbered bash scripts: Name repo-owned executable bash helpers `NNN-kebab-case.sh` with a three-digit prefix (`001`, `002`, ...). The number reflects typical execution order within that directory (e.g. `isotope-multicluster/001`-`002`). Use this pattern for all such scripts in `isotope-multicluster/`, `terraform/**/scripts/` (when used), and future automation directories — never add unnumbered `*.sh` peers without renumbering the folder. When you add or renumber a script, update callers (e.g. Terraform `external`, other bash wrappers) and README / AGENTS references in the same change.
-- Helm charts: Use Helm charts under `charts/` for all mesh resources, platform resources, and operator installations. Follow the established patterns (e.g. `spoke-istio/`, `spoke-ingress-gateway/`, `hub-mesh-push-secrets/`).
+- Helm charts: Use Helm charts under `charts/` for all mesh resources, platform resources, and operator installations. Follow the established patterns (e.g. `spoke-ossm/`, `spoke-ingress-gateway/`, `hub-mesh-push-secrets/`).
 - Avoid storing file content in scripts. Use templates appropriate for the situation (Helm charts under `charts/`, etc.) rather than large inline YAML or kubeconfig bodies in bash.
 - --dry-run: Setup scripts that mutate clusters (`oc` / `kubectl` / `istioctl apply`) should accept `--dry-run` (typically `oc apply --dry-run=client`) so operators can validate renders without changing the cluster.
-- Pinned versions: Maintain a single pin list in `config/versions.env`. Current targets: OpenShift 4.21.11, Kubernetes v1.34.6, Istio / Sail `spec.version` v1.28.5 (match `istioctl`), RHACM hub `ACM_CHANNEL` default `release-2.16` (supported with OpenShift 4.21.x per RHACM matrix — bump with `OPENSHIFT_VERSION`). Bump `README.md` when pins change.
+- Pinned versions: All version pins live in `config/versions.env` — do not duplicate version numbers elsewhere. Bump `README.md` when pins change.
 
 ## Script variables and naming (bash)
 
@@ -33,16 +43,16 @@ Keep automation scripts consistent so operators can rely on the same env vars, f
 
 ## Purpose
 
-This repository exists so operators can end-to-end: provision ROSA clusters (or equivalent OpenShift targets), install multi-cluster Istio / OSSM on them following [Red Hat OpenShift Service Mesh multi-cluster documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies) (multi-primary, multi-network meshes using the Sail operator — `Istio`, `IstioCNI`), load dynamic scale tests into those clusters, and produce reports from the runs. The mesh is deployed via GitOps (Argo CD ApplicationSets) rather than manual scripts.
+Provide reproducible Istio scale testing across many dimensions — mesh size, workload complexity, xDS propagation, control-plane resource consumption — and across several cluster and infrastructure configurations (ROSA HCP today, other OpenShift targets in the future). The mesh is deployed via GitOps (Argo CD ApplicationSets) following [Red Hat OpenShift Service Mesh 3.3 multi-cluster documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies) so results are repeatable and infrastructure is declarative.
 
 ## Repository map
 
-
 | Path | Use |
 | ---- | --- |
-| `config/versions.env` | Pinned `OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, optional `ACM_CHANNEL` / `ACM_NAMESPACE`, `GITOPS_NAMESPACE` / `GITOPS_OPERATOR_NAMESPACE` / `GITOPS_OPERATOR_CHANNEL` / `GITOPS_ARGOCD_CR_NAME`, `ACCESS_LOG_FILE` / `ACCESS_LOG_ENCODING`, `SETUP_CONTEXTS`, mesh/network defaults; `OSSM_DOC_MULTI_CLUSTER_URL`. Sourced by automation scripts; ACM/GitOps defaults also used by Terraform `terraform/platform/variables.tf`. |
+| `config/versions.env` | Core version pins (`OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, `ACM_CHANNEL`, `GITOPS_OPERATOR_CHANNEL`), mesh identity (`MESH_ID`, `ACM_CLUSTER_SET`), and cluster contexts (`SETUP_CONTEXTS`). Sources `config/options.env` automatically. |
+| `config/options.env` | Operational defaults: operator namespaces, GitOps config, mesh/logging defaults, AWS infra, and propagation test parameters. Sourced by `versions.env`; ACM/GitOps defaults are mirrored in `terraform/platform/variables.tf`. |
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke (ApplicationSet wave 8). |
-| `charts/spoke-istio/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke cluster with per-cluster clusterName, network, meshID (wave 21). |
+| `charts/spoke-ossm/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke cluster with per-cluster clusterName, network, meshID (wave 21). |
 | `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke — Deployment, Service, HPA, PDB, RBAC (wave 24). |
 | `charts/spoke-east-west-gateway/` | Helm chart: east-west gateway + cross-network Gateway CR per spoke — TLS AUTO_PASSTHROUGH on port 15443 (wave 27). |
 | `charts/hub-mesh-ca/` | Helm chart: cert-manager root CA + `ClusterIssuer` chain on the hub. |
@@ -54,7 +64,7 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app-of-apps). |
 | `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency (namespace, watcher pod, conditional canary service/VS/DR). |
 | `charts/istiod-monitor/` | Helm chart: OpenShift User Workload Monitoring ServiceMonitor + PrometheusRule for istiod `pilot_*` metrics. |
-| `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD `ApplicationSet` for OCM Placement + RBAC; preset value files per component (e.g. `values-istio.yaml`, `values-ingress-gateway.yaml`, `values-mesh-push-secrets.yaml`). |
+| `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD `ApplicationSet` for OCM Placement + RBAC; preset value files per component (e.g. `values-ossm.yaml`, `values-ingress-gateway.yaml`, `values-mesh-push-secrets.yaml`). |
 | `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD `Application` CRs on the hub — `hub-gitops-root` (directory path `charts/gitops-hub-apps/applications` for child `Application` YAML) (Terraform `terraform/platform/platform_gitops.tf`). |
 | `charts/gitops-hub-apps/` | Child hub `Application` manifests under `applications/` (directory-synced by `hub-gitops-root`). |
 | `charts/acm-operator/` | Helm chart: OLM OperatorGroup + Subscription for ACM (Terraform `terraform/platform/platform_acm.tf`). |
@@ -63,27 +73,76 @@ This repository exists so operators can end-to-end: provision ROSA clusters (or 
 | `charts/acm-managed-cluster/` | Helm chart for a single spoke `ManagedCluster`; Terraform `terraform/platform/platform_acm_spokes.tf` installs one release per non-hub cluster. |
 | `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for Red Hat OpenShift GitOps (Terraform `terraform/platform/platform_gitops.tf`). |
 | `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster into GitOps namespace (Terraform `terraform/platform/platform_gitops.tf`). |
-| `manifests/acm-gitops/` | Pointer README — ACM GitOps wiring lives in `charts/acm-openshift-gitops-resources`. |
+| `charts/acm-gitops-cluster/` | Helm chart: `GitOpsCluster` CR binding ACM Placement to an Argo CD instance. |
+| `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration (requires OpenShift GitOps operator CRDs). |
 | `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
 | `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |
 | `propagation-test/` | Propagation latency test suite: numbered scripts for setup, endpoint probe, metrics collection, reporting, mesh-size sweep, and cleanup. See `propagation-test/README.md`. |
 | `isotope-multicluster/` | [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) multicluster workload: chain graph from `terraform output cluster_keys`, per-cluster rendering and apply. See `isotope-multicluster/README.md`. |
 
+## Common tasks
+
+### Deploy the full mesh (Terraform + GitOps)
+
+```bash
+# Phase 1: Create ROSA clusters (terraform/rosa-hcp/)
+cd terraform/rosa-hcp
+export RHCS_TOKEN='...'
+terraform init && terraform apply
+
+# Get kubeconfig
+terraform output -raw kubeconfig > ~/.kube/rosa-config
+export KUBECONFIG=~/.kube/rosa-config
+
+# Phase 2: Install ACM + GitOps + mesh (terraform/platform/)
+cd ../platform
+terraform init && terraform apply
+```
+
+### Verify the mesh
+
+```bash
+# Deploy mesh-verify test
+oc apply -f charts/mesh-verify-appset.yaml
+
+# Curl any cluster's ingress — should see responses from different clusters
+INGRESS=$(oc get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+for i in {1..10}; do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
+
+# Clean up
+oc delete -f charts/mesh-verify-appset.yaml
+```
+
+### Update pinned versions
+
+Edit `config/versions.env` (or `config/options.env` for operational defaults), then update:
+
+- `README.md` (prerequisites, quick start examples)
+- `AGENTS.md` (version references)
+- `terraform/platform/variables.tf` defaults if the change affects Terraform-managed config
+
+## Testing and verification
+
+No CI/test framework configured. Manual verification via:
+
+- `charts/mesh-verify/` — standalone echo workload for cross-cluster load balancing verification
+- `istioctl remote-clusters` — check istiod remote cluster discovery
+- `istioctl proxy-config endpoints` — verify cross-cluster endpoint propagation
 
 ## Conventions for edits
 
-- Markdown: Do not use GFM bold (two asterisk characters immediately before and after a phrase) in repository Markdown (`README.md`, `AGENTS.md`, chart READMEs, and other checked-in `.md`). Prefer headings, plain wording, or inline code for emphasis; single-asterisk italics are acceptable when useful. When documentation must show glob syntax that contains consecutive asterisk characters, put it in backticks (for example `terraform/**/scripts/`) so it is not parsed as bold.
 - Shell: Bash 4+; `set -euo pipefail` where already used.
 - Contexts: Follow Script variables and naming; cluster names are placeholders — override via `SETUP_CONTEXTS` / `--contexts`.
 - Paths: Helpers resolve repo root via `"$(cd "$(dirname "$0")/.." && pwd)"` from peer dirs (`isotope-multicluster/`, etc.) — adjust `..` depth for deeper subtrees; keep this pattern for new automation scripts.
-- Secrets — never commit: Do not commit secrets, credentials, kubeconfigs with live tokens, private keys, CA material, API keys, or other sensitive values to git. Rely on `.gitignore` (e.g. `/cacerts/`, `/manifests/` at repo root) and local secret stores; use placeholders or templates for examples. If something might be secret, treat it as secret.
 - READMEs: After each update, check each relevant README (`README.md` at repo root and under affected subtrees — e.g. `terraform/`, `isotope-multicluster/`) for necessary changes so commands, paths, prerequisites, and examples stay accurate. When you add or rename charts, change defaults, or move YAML, update those READMEs in the same change.
 
 ## Tools agents may assume
 
-- `oc` / `kubectl`, `istioctl` (version aligned with `ISTIO_VERSION` / `spec.version` — see `config/versions.env`).
-- `jq`, `curl` as documented in `README.md`.
-- `git`, Helm 3 for charts under `charts/` and Terraform `helm_release` resources.
+- `bash` 4+, `oc` or `kubectl`, `istioctl` (version aligned with `ISTIO_VERSION` — see `config/versions.env`)
+- `terraform` (for `terraform/rosa-hcp/` and `terraform/platform/`)
+- `helm` 3 (for charts under `charts/` and Terraform `helm_release` resources)
+- `jq`, `curl`
+- Optional: `go` (for isotope multicluster workload generation)
 
 ## References
 

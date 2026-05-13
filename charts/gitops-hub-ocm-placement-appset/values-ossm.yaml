@@ -3,7 +3,7 @@ applicationSetNamespace: openshift-gitops
 applicationSetControllerNamespace: openshift-gitops
 
 identity:
-  component: spoke-istio
+  component: spoke-ossm
 
 placement:
   name: acm-openshift-gitops-placement
@@ -21,35 +21,35 @@ clusterDecisionResource:
 
 placementRbac:
   create: true
-  roleName: openshift-gitops-ocm-placement-spoke-istio
-  roleBindingName: openshift-gitops-ocm-placement-spoke-istio
+  roleName: openshift-gitops-ocm-placement-spoke-ossm
+  roleBindingName: openshift-gitops-ocm-placement-spoke-ossm
   applicationSetServiceAccountName: openshift-gitops-applicationset-controller
 
 argocdApplicationControllerRbac:
   create: true
-  roleName: gitops-spoke-istio-appset-argocd-sync
-  roleBindingName: gitops-spoke-istio-appset-argocd-sync
+  roleName: gitops-spoke-ossm-appset-argocd-sync
+  roleBindingName: gitops-spoke-ossm-appset-argocd-sync
   serviceAccountName: openshift-gitops-argocd-application-controller
   serviceAccountNamespace: openshift-gitops
 
 applicationSet:
-  name: spoke-istio
+  name: spoke-ossm
 
 destination:
   mode: clusterName
   namespace: istio-system
 
 template:
-  applicationNameSuffix: istio
+  applicationNameSuffix: ossm
   ignoreDifferences:
     - group: sailoperator.io
       kind: Istio
       jsonPointers:
         - /spec/values/global/enableReaderRBAC
   source:
-    path: charts/spoke-istio
+    path: charts/spoke-ossm
     helm:
-      releaseName: spoke-istio
+      releaseName: spoke-ossm
       parameters:
         - name: clusterName
           value: "{{clusterName}}"

@@ -143,7 +143,6 @@
   },
   "context": {
     "alwaysInclude": [
-      "/home/jskrzype/workdir/istio-scale-tests/CLAUDE.md",
       "/home/jskrzype/workdir/istio-scale-tests/AGENTS.md",
       "/home/jskrzype/workdir/istio-scale-tests/config/versions.env"
     ]

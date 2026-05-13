@@ -1,8 +1,8 @@
-{{- define "spoke-istio.name" -}}
+{{- define "spoke-ossm.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "spoke-istio.fullname" -}}
+{{- define "spoke-ossm.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -15,7 +15,7 @@
 {{- end }}
 {{- end }}
 
-{{- define "spoke-istio.labels" -}}
-app.kubernetes.io/name: {{ include "spoke-istio.name" . | quote }}
+{{- define "spoke-ossm.labels" -}}
+app.kubernetes.io/name: {{ include "spoke-ossm.name" . | quote }}
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end }}
