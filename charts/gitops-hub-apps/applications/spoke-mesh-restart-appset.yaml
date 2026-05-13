@@ -1,0 +1,37 @@
+# Argo CD Application — ApplicationSet that restarts istiod and gateways on every spoke cluster after all mesh waves complete.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spoke-mesh-restart-appset
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "30"
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: spoke-mesh-restart-appset
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/gitops-hub-ocm-placement-appset
+    helm:
+      releaseName: gitops-spoke-mesh-restart-appset
+      valueFiles:
+        - values-mesh-restart.yaml
+      parameters:
+        - name: repo.url
+          value: https://github.com/shpwrck/istio-scale-tests.git
+        - name: repo.revision
+          value: main
+        - name: placement.name
+          value: acm-openshift-gitops-placement
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true

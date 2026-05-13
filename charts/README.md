@@ -18,6 +18,7 @@ The app-of-apps syncs child Applications with sync-wave ordering:
 | 21 | `spoke-ossm/` | Istio + IstioCNI CRs per spoke |
 | 24 | `spoke-ingress-gateway/` | North-south ingress gateway per spoke |
 | 27 | `spoke-east-west-gateway/` | East-west gateway + cross-network Gateway CR per spoke |
+| 30 | `spoke-mesh-restart/` | Restart istiod and gateways after all mesh waves complete |
 
 ## All charts
 
@@ -46,6 +47,7 @@ The app-of-apps syncs child Applications with sync-wave ordering:
 | `spoke-east-west-gateway/` | East-west gateway + cross-network Gateway CR per spoke |
 | `spoke-ingress-gateway/` | North-south ingress gateway (LoadBalancer) per spoke |
 | `spoke-ossm/` | Istio + IstioCNI CRs per spoke (multi-primary, multi-network) |
+| `spoke-mesh-restart/` | Restart Job for istiod and gateways after mesh GitOps sync completes (wave 30) |
 | `spoke-ossm-operator/` | Sail operator OLM Subscription per spoke |
 
 ## Standalone files

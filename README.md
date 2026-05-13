@@ -104,6 +104,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | 21   | Istio + IstioCNI CRs | `charts/spoke-ossm/` |
 | 24   | North-south ingress gateway | `charts/spoke-ingress-gateway/` |
 | 27   | East-west gateway + cross-network Gateway CR | `charts/spoke-east-west-gateway/` |
+| 30   | Restart istiod and gateways | `charts/spoke-mesh-restart/` |
 
 
 <details>
@@ -126,6 +127,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/hub-kubeconfig-from-argosecret/` | Helm chart: ESO SecretStore + ExternalSecret extracting kubeconfigs from Argo cluster secrets. |
 | `charts/external-secrets-operator/` | Helm chart: OLM install for External Secrets Operator per spoke. |
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
+| `charts/spoke-mesh-restart/` | Helm chart: restart Job for istiod and gateways after mesh GitOps sync completes (wave 30). |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app). |
 | `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency. |
 | `charts/istiod-monitor/` | Helm chart: OpenShift UWM ServiceMonitor + PrometheusRule for istiod pilot metrics. |

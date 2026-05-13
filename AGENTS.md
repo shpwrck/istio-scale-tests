@@ -61,6 +61,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `charts/hub-kubeconfig-from-argosecret/` | Helm chart: `SecretStore` + `ExternalSecret` extracting kubeconfigs from Argo cluster secrets. |
 | `charts/external-secrets-operator/` | Helm chart: OLM install for External Secrets Operator per spoke. |
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
+| `charts/spoke-mesh-restart/` | Helm chart: restart Job (PostSync hook) for istiod and gateways after mesh GitOps sync completes (wave 30). |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app-of-apps). |
 | `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency (namespace, watcher pod, conditional canary service/VS/DR). |
 | `charts/istiod-monitor/` | Helm chart: OpenShift User Workload Monitoring ServiceMonitor + PrometheusRule for istiod `pilot_*` metrics. |
