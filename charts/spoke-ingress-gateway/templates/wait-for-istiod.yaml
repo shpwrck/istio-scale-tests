@@ -29,7 +29,7 @@ spec:
               echo "Waiting for istiod to be ready..."
               ELAPSED=0
               while [ $ELAPSED -lt 600 ]; do
-                if curl -sf http://istiod.istio-system.svc:15014/healthz >/dev/null 2>&1; then
+                if curl -sf http://istiod.istio-system.svc:15014/version >/dev/null 2>&1; then
                   echo "istiod is ready. Gateway sync can proceed."
                   exit 0
                 fi
