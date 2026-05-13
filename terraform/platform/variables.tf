@@ -71,18 +71,6 @@ variable "gitops_argocd_cr_name" {
   description = "Name of the ArgoCD custom resource created by the GitOps operator on the hub."
 }
 
-variable "argocd_resource_limits_cpu" {
-  type        = string
-  default     = "4"
-  description = "CPU limit for ArgoCD components (controller, repo-server, server, applicationSet)."
-}
-
-variable "argocd_resource_limits_memory" {
-  type        = string
-  default     = "8Gi"
-  description = "Memory limit for ArgoCD components (controller, repo-server, server, applicationSet)."
-}
-
 variable "gitops_app_repo_url" {
   type        = string
   default     = ""

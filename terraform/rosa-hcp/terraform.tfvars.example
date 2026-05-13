@@ -38,3 +38,11 @@ common_tags = {
 #   worker_autoscale_min = 2
 #   worker_autoscale_max = 10
 # }
+
+# Per-cluster overrides (merge over cluster_defaults):
+# cluster_overrides = {
+#   "rosa-001" = {                     # hub — more capacity for ArgoCD + ACM
+#     compute_machine_type = "m5.4xlarge"
+#     worker_autoscale_max = 15
+#   }
+# }

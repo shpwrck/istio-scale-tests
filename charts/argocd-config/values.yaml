@@ -4,6 +4,58 @@ argocd:
     enabled: true
     env: []
     sourceNamespaces: []
-  resourceLimits:
-    cpu: "4"
-    memory: 4Gi
+
+  controller:
+    sharding:
+      enabled: true
+      dynamicScalingEnabled: true
+      minShards: 1
+      maxShards: 20
+      clustersPerShard: 1
+    shardingAlgorithm: consistent-hashing
+    processors:
+      status: 50
+      operation: 25
+    appSync: 300s
+    resources:
+      limits:
+        cpu: "4"
+        memory: 8Gi
+      requests:
+        cpu: "2"
+        memory: 4Gi
+
+  repo:
+    replicas: 2
+    resources:
+      limits:
+        cpu: "2"
+        memory: 4Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+
+  server:
+    resources:
+      limits:
+        cpu: "2"
+        memory: 4Gi
+      requests:
+        cpu: "500m"
+        memory: 1Gi
+
+  applicationSetResources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+
+  resourceExclusions:
+    - apiGroups: ["events.k8s.io", "metrics.k8s.io"]
+      kinds: ["Event"]
+      clusters: ["*"]
+    - apiGroups: ["coordination.k8s.io"]
+      kinds: ["Lease"]
+      clusters: ["*"]

@@ -81,6 +81,7 @@ resource "helm_release" "acm_managed_cluster" {
       {
         name  = "managedServiceAccount.create"
         value = tostring(var.enable_gitops)
+        type  = "string"
       },
       {
         name  = "managedServiceAccount.name"

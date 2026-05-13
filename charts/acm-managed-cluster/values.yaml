@@ -12,4 +12,5 @@ managedCluster:
 
 managedServiceAccount:
   create: false
+  createAddon: false
   name: argocd-gitops

@@ -21,8 +21,8 @@ clusterDecisionResource:
 
 placementRbac:
   create: true
-  roleName: openshift-gitops-ocm-placement-spoke-ossm
-  roleBindingName: openshift-gitops-ocm-placement-spoke-ossm
+  roleName: openshift-gitops-ocm-placement-spoke-ossm-operator
+  roleBindingName: openshift-gitops-ocm-placement-spoke-ossm-operator
   applicationSetServiceAccountName: openshift-gitops-applicationset-controller
 
 argocdApplicationControllerRbac:

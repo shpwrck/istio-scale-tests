@@ -92,14 +92,6 @@ resource "helm_release" "argocd_config" {
         name  = "argocd.name"
         value = var.gitops_argocd_cr_name
       },
-      {
-        name  = "argocd.resourceLimits.cpu"
-        value = var.argocd_resource_limits_cpu
-      },
-      {
-        name  = "argocd.resourceLimits.memory"
-        value = var.argocd_resource_limits_memory
-      },
     ],
     var.gitops_rhacm_appset_any_namespace ? [
       {
@@ -117,6 +109,7 @@ resource "helm_release" "argocd_config" {
       {
         name  = "argocd.applicationSet.env[1].value"
         value = "false"
+        type  = "string"
       },
     ] : [],
     [for i, ns in var.gitops_applicationset_source_namespaces : {
@@ -373,6 +366,7 @@ resource "helm_release" "gitops_cluster" {
     {
       name  = "gitopsCluster.gitopsAddon.enabled"
       value = tostring(var.gitops_addon_enabled)
+      type  = "string"
     },
     {
       name  = "gitopsCluster.managedServiceAccountRef"

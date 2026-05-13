@@ -36,7 +36,7 @@ terraform apply tfplan
 
 Change `cluster_count` to add or remove clusters. Each cluster's Terraform key, OCM `cluster_name`, and kubectl context share `format(cluster_name_format, idx + cluster_index_start)`. VPC CIDRs use `vpc_cidr_format` with `idx + vpc_cidr_index_start` (default `10.%d.0.0/16` — non-overlapping). Shrinking `cluster_count` destroys removed clusters — plan carefully.
 
-Default worker replicas at install is 2 (ROSA single-zone minimum). Autoscaling is enabled with a 2–10 node range by default; override via `cluster_defaults.worker_autoscale_*`.
+Default worker replicas at install is 2 (ROSA single-zone minimum). Autoscaling is enabled with a 2–10 node range by default; override via `cluster_defaults.worker_autoscale_*`. Use `cluster_overrides` to size individual clusters differently (e.g. a larger hub for ArgoCD + ACM) — fields merge over `cluster_defaults`.
 
 ### Outputs
 
