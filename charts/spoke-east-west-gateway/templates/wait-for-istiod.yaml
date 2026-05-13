@@ -1,42 +1,3 @@
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: wait-for-istiod-eastwest
-  namespace: istio-system
-  annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: wait-for-istiod-eastwest
-  namespace: istio-system
-  annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: wait-for-istiod-eastwest
-  namespace: istio-system
-  annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: wait-for-istiod-eastwest
-subjects:
-  - kind: ServiceAccount
-    name: wait-for-istiod-eastwest
-    namespace: istio-system
----
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -56,7 +17,6 @@ spec:
         app.kubernetes.io/name: wait-for-istiod-eastwest
         sidecar.istio.io/inject: "false"
     spec:
-      serviceAccountName: wait-for-istiod-eastwest
       restartPolicy: Never
       containers:
         - name: wait
@@ -66,21 +26,16 @@ spec:
             - -c
             - |
               set -euo pipefail
-              APISERVER=https://kubernetes.default.svc
-              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-              CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-              URL="$APISERVER/apis/apps/v1/namespaces/istio-system/deployments/istiod"
-              echo "Waiting for istiod deployment to be available..."
+              echo "Waiting for istiod to be ready..."
               ELAPSED=0
               while [ $ELAPSED -lt 600 ]; do
-                AVAIL=$(curl -s --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$URL" | grep -o '"availableReplicas":[[:space:]]*[0-9]*' | grep -o '[0-9]*')
-                if [ "${AVAIL:-0}" -ge 1 ] 2>/dev/null; then
-                  echo "istiod is available (${AVAIL} replicas). Gateway sync can proceed."
+                if curl -sf http://istiod.istio-system.svc:15014/healthz >/dev/null 2>&1; then
+                  echo "istiod is ready. Gateway sync can proceed."
                   exit 0
                 fi
-                echo "istiod not yet available (elapsed ${ELAPSED}s)..."
+                echo "istiod not yet ready (elapsed ${ELAPSED}s)..."
                 sleep 10
                 ELAPSED=$((ELAPSED + 10))
               done
-              echo "ERROR: istiod not available after 600s"
+              echo "ERROR: istiod not ready after 600s"
               exit 1
