@@ -60,17 +60,21 @@ spec:
       restartPolicy: Never
       containers:
         - name: wait
-          image: registry.redhat.io/openshift4/ose-cli:latest
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
           command:
             - /bin/bash
             - -c
             - |
               set -euo pipefail
+              APISERVER=https://kubernetes.default.svc
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              URL="$APISERVER/apis/apps/v1/namespaces/istio-system/deployments/istiod"
               echo "Waiting for istiod deployment to be available..."
               ELAPSED=0
               while [ $ELAPSED -lt 600 ]; do
-                AVAIL=$(oc get deployment istiod -n istio-system -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo "0")
-                if [ "${AVAIL:-0}" -ge 1 ]; then
+                AVAIL=$(curl -s --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$URL" | grep -o '"availableReplicas":[0-9]*' | cut -d: -f2)
+                if [ "${AVAIL:-0}" -ge 1 ] 2>/dev/null; then
                   echo "istiod is available (${AVAIL} replicas). Gateway sync can proceed."
                   exit 0
                 fi
