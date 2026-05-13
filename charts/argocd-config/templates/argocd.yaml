@@ -5,26 +5,33 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   controller:
+    {{- if .Values.argocd.controller.sharding.enabled }}
+    sharding:
+      dynamicScalingEnabled: {{ .Values.argocd.controller.sharding.dynamicScalingEnabled }}
+      minShards: {{ .Values.argocd.controller.sharding.minShards }}
+      maxShards: {{ .Values.argocd.controller.sharding.maxShards }}
+      clustersPerShard: {{ .Values.argocd.controller.sharding.clustersPerShard }}
+    {{- end }}
+    env:
+      - name: ARGOCD_CONTROLLER_SHARDING_ALGORITHM
+        value: {{ .Values.argocd.controller.shardingAlgorithm | quote }}
+    processors:
+      status: {{ .Values.argocd.controller.processors.status }}
+      operation: {{ .Values.argocd.controller.processors.operation }}
+    appSync: {{ .Values.argocd.controller.appSync | quote }}
     resources:
-      limits:
-        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
-        memory: {{ .Values.argocd.resourceLimits.memory }}
+      {{- toYaml .Values.argocd.controller.resources | nindent 6 }}
   repo:
+    replicas: {{ .Values.argocd.repo.replicas }}
     resources:
-      limits:
-        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
-        memory: {{ .Values.argocd.resourceLimits.memory }}
+      {{- toYaml .Values.argocd.repo.resources | nindent 6 }}
   server:
     resources:
-      limits:
-        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
-        memory: {{ .Values.argocd.resourceLimits.memory }}
+      {{- toYaml .Values.argocd.server.resources | nindent 6 }}
   applicationSet:
     enabled: {{ .Values.argocd.applicationSet.enabled }}
     resources:
-      limits:
-        cpu: {{ .Values.argocd.resourceLimits.cpu | quote }}
-        memory: {{ .Values.argocd.resourceLimits.memory }}
+      {{- toYaml .Values.argocd.applicationSetResources | nindent 6 }}
     {{- if .Values.argocd.applicationSet.env }}
     env:
       {{- toYaml .Values.argocd.applicationSet.env | nindent 6 }}
@@ -33,3 +40,20 @@ spec:
     sourceNamespaces:
       {{- toYaml .Values.argocd.applicationSet.sourceNamespaces | nindent 6 }}
     {{- end }}
+  {{- if .Values.argocd.resourceExclusions }}
+  resourceExclusions: |
+    {{- range .Values.argocd.resourceExclusions }}
+    - apiGroups:
+        {{- range .apiGroups }}
+        - {{ . | quote }}
+        {{- end }}
+      kinds:
+        {{- range .kinds }}
+        - {{ . | quote }}
+        {{- end }}
+      clusters:
+        {{- range .clusters }}
+        - {{ . | quote }}
+        {{- end }}
+    {{- end }}
+  {{- end }}

@@ -3,16 +3,41 @@
 locals {
   clusters = {
     for idx in range(var.cluster_count) :
-    format(var.cluster_name_format, idx + var.cluster_index_start) => {
-      cluster_name             = format(var.cluster_name_format, idx + var.cluster_index_start)
-      vpc_cidr                 = format(var.vpc_cidr_format, idx + var.vpc_cidr_index_start)
-      replicas                 = try(var.cluster_defaults.replicas, null)
-      compute_machine_type     = try(var.cluster_defaults.compute_machine_type, null)
-      ec2_metadata_http_tokens = coalesce(try(var.cluster_defaults.ec2_metadata_http_tokens, null), "required")
-      tags                     = coalesce(try(var.cluster_defaults.tags, null), {})
-      worker_autoscale_min     = coalesce(try(var.cluster_defaults.worker_autoscale_min, null), 2)
-      worker_autoscale_max     = coalesce(try(var.cluster_defaults.worker_autoscale_max, null), 10)
-    }
+    format(var.cluster_name_format, idx + var.cluster_index_start) => merge(
+      {
+        cluster_name = format(var.cluster_name_format, idx + var.cluster_index_start)
+        vpc_cidr     = format(var.vpc_cidr_format, idx + var.vpc_cidr_index_start)
+      },
+      {
+        for field in ["replicas", "compute_machine_type"] :
+        field => try(
+          var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)][field],
+          var.cluster_defaults[field],
+          null,
+        )
+      },
+      {
+        ec2_metadata_http_tokens = coalesce(
+          try(var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)].ec2_metadata_http_tokens, null),
+          try(var.cluster_defaults.ec2_metadata_http_tokens, null),
+          "required",
+        )
+        tags = merge(
+          coalesce(try(var.cluster_defaults.tags, null), {}),
+          coalesce(try(var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)].tags, null), {}),
+        )
+        worker_autoscale_min = coalesce(
+          try(var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)].worker_autoscale_min, null),
+          try(var.cluster_defaults.worker_autoscale_min, null),
+          2,
+        )
+        worker_autoscale_max = coalesce(
+          try(var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)].worker_autoscale_max, null),
+          try(var.cluster_defaults.worker_autoscale_max, null),
+          10,
+        )
+      },
+    )
   }
 
   # Terraform sorts map keys lexicographically — same order as cluster_keys output.

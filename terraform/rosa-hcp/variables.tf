@@ -114,3 +114,16 @@ variable "cluster_defaults" {
     error_message = "cluster_defaults.worker_autoscale_min must be >= 2 and <= worker_autoscale_max."
   }
 }
+
+variable "cluster_overrides" {
+  type = map(object({
+    replicas                 = optional(number)
+    compute_machine_type     = optional(string)
+    ec2_metadata_http_tokens = optional(string)
+    tags                     = optional(map(string))
+    worker_autoscale_min     = optional(number)
+    worker_autoscale_max     = optional(number)
+  }))
+  default     = {}
+  description = "Per-cluster overrides keyed by cluster name (e.g. rosa-001). Fields merge over cluster_defaults."
+}
