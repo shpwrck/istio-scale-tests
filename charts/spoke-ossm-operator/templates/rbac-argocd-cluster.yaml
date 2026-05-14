@@ -10,7 +10,7 @@ metadata:
   {{- end }}
 rules:
   - apiGroups: [""]
-    resources: ["namespaces", "serviceaccounts"]
+    resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]

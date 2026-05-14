@@ -1,9 +1,9 @@
-# Preset: mesh restart Job on every ManagedCluster (destination.clusterName).
+# Preset: istio-system and istio-cni namespaces on every ManagedCluster (destination.clusterName).
 applicationSetNamespace: openshift-gitops
 applicationSetControllerNamespace: openshift-gitops
 
 identity:
-  component: spoke-mesh-restart
+  component: spoke-istio-namespaces
 
 placement:
   name: acm-openshift-gitops-placement
@@ -21,30 +21,30 @@ clusterDecisionResource:
 
 placementRbac:
   create: true
-  roleName: openshift-gitops-ocm-placement-spoke-mesh-restart
-  roleBindingName: openshift-gitops-ocm-placement-spoke-mesh-restart
+  roleName: openshift-gitops-ocm-placement-spoke-istio-namespaces
+  roleBindingName: openshift-gitops-ocm-placement-spoke-istio-namespaces
   applicationSetServiceAccountName: openshift-gitops-applicationset-controller
 
 argocdApplicationControllerRbac:
   create: true
-  roleName: gitops-spoke-mesh-restart-appset-argocd-sync
-  roleBindingName: gitops-spoke-mesh-restart-appset-argocd-sync
+  roleName: gitops-spoke-istio-namespaces-appset-argocd-sync
+  roleBindingName: gitops-spoke-istio-namespaces-appset-argocd-sync
   serviceAccountName: openshift-gitops-argocd-application-controller
   serviceAccountNamespace: openshift-gitops
 
 applicationSet:
-  name: spoke-mesh-restart
+  name: spoke-istio-namespaces
 
 destination:
   mode: clusterName
-  namespace: istio-system
+  namespace: default
 
 template:
-  applicationNameSuffix: mesh-restart
+  applicationNameSuffix: istio-namespaces
   source:
-    path: charts/spoke-mesh-restart
+    path: charts/spoke-istio-namespaces
     helm:
-      releaseName: spoke-mesh-restart
+      releaseName: spoke-istio-namespaces
 
 repo:
   url: ""

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spoke-istio-namespaces
+description: Creates istio-system and istio-cni namespaces on each spoke cluster.
+type: application
+version: 0.1.0

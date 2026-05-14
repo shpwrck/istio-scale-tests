@@ -1,0 +1,9 @@
+namespaces:
+  istioSystem: istio-system
+  istioCni: istio-cni
+
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller

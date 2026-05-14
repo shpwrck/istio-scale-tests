@@ -8,14 +8,9 @@ subscription:
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
 
-namespaces:
-  istioSystem: istio-system
-  istioCni: istio-cni
-
 argoSyncWaves:
   enabled: true
   rbac: "-30"
-  namespaces: "0"
   subscription: "5"
 
 rbac:
