@@ -445,6 +445,6 @@ resource "terraform_data" "argocd_app_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "bash ${path.module}/../scripts/argocd-app-cleanup.sh ${self.input.token_script} ${self.input.hub_api_url} ${self.input.hub_admin_pass} ${self.input.gitops_namespace}"
+    command = "bash ${path.module}/../scripts/argocd-app-cleanup.sh '${self.input.token_script}' '${self.input.hub_api_url}' '${self.input.hub_admin_pass}' '${self.input.gitops_namespace}'"
   }
 }
