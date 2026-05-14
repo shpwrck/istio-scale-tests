@@ -478,6 +478,28 @@ resource "kubernetes_manifest" "placement_generator_configmap" {
   depends_on = [terraform_data.patch_argocd_cluster_secret]
 }
 
+# --- Destroy-time cleanup: OSSM operator CSV on spoke clusters ---
+# Argo CD's PreDelete hook may not run if apps are force-deleted, so we
+# clean up the OSSM CSV directly on each spoke after Argo CD apps are gone.
+
+resource "terraform_data" "spoke_ossm_csv_cleanup" {
+  for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
+
+  input = {
+    token_script  = local.token_script
+    spoke_api_url = local.by_cluster[each.key].cluster_api_url
+    admin_pass    = local.admin_password
+    sub_namespace = "openshift-operators"
+    sub_name      = "servicemeshoperator3"
+    package_name  = "servicemeshoperator3"
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh' '${self.input.token_script}' '${self.input.spoke_api_url}' '${self.input.admin_pass}' '${self.input.sub_namespace}' '${self.input.sub_name}' '${self.input.package_name}'"
+  }
+}
+
 # --- Destroy-time cleanup: cascade-delete all Argo CD Applications ---
 
 resource "terraform_data" "argocd_app_cleanup" {
@@ -493,6 +515,7 @@ resource "terraform_data" "argocd_app_cleanup" {
   depends_on = [
     helm_release.gitops_hub_app_of_apps,
     helm_release.gitops_cluster,
+    terraform_data.spoke_ossm_csv_cleanup,
   ]
 
   provisioner "local-exec" {
