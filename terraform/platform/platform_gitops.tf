@@ -249,6 +249,10 @@ resource "helm_release" "acm_gitops_resources" {
       name  = "placement.name"
       value = "acm-openshift-gitops-placement"
     },
+    {
+      name  = "argoServer.cluster"
+      value = local.acm_local_cluster_name
+    },
   ]
 
   depends_on = [helm_release.argocd_config]
