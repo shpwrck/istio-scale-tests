@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespaces.istioCni | quote }}
+  labels:
+    {{- include "spoke-istio-namespaces.labels" . | nindent 4 }}

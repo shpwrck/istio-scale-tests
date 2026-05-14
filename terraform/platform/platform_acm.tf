@@ -76,6 +76,23 @@ resource "kubernetes_manifest" "acm_subscription" {
   depends_on = [kubernetes_manifest.acm_operator_group]
 }
 
+resource "terraform_data" "acm_csv_cleanup" {
+  input = {
+    token_script   = local.token_script
+    hub_api_url    = local.hub_api_url
+    hub_admin_pass = local.hub_admin_pass
+    csv_namespace  = var.acm_namespace
+    package_name   = "advanced-cluster-management"
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh' '${self.input.token_script}' '${self.input.hub_api_url}' '${self.input.hub_admin_pass}' '${self.input.csv_namespace}' '${self.input.package_name}'"
+  }
+
+  depends_on = [kubernetes_manifest.acm_subscription]
+}
+
 resource "time_sleep" "wait_acm_operator" {
   depends_on      = [kubernetes_manifest.acm_subscription]
   create_duration = "60s"
