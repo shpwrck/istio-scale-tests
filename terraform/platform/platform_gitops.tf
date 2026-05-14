@@ -269,10 +269,6 @@ resource "helm_release" "acm_gitops_resources" {
       name  = "placement.name"
       value = "acm-openshift-gitops-placement"
     },
-    {
-      name  = "argoServer.cluster"
-      value = local.acm_local_cluster_name
-    },
   ]
 
   depends_on = [helm_release.argocd_config]
@@ -448,6 +444,38 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
   }
 
   depends_on = [time_sleep.wait_argocd_cluster_secrets]
+}
+
+# --- Placement-generator ConfigMap (deferred until cluster secrets are patched) ---
+# ApplicationSets use this ConfigMap to discover spoke clusters via ACM PlacementDecisions.
+# Created AFTER patch_argocd_cluster_secret so that ApplicationSets only generate spoke
+# apps once the cluster secrets have correct external API URLs (not internal control-plane URLs).
+
+resource "kubernetes_manifest" "placement_generator_configmap" {
+  count    = local.gitops_enabled && length(local.spoke_cluster_keys) > 0 ? 1 : 0
+  provider = kubernetes.hub
+
+  manifest = {
+    apiVersion = "v1"
+    kind       = "ConfigMap"
+    metadata = {
+      name      = "acm-gitops-placement-generator"
+      namespace = var.gitops_namespace
+    }
+    data = {
+      apiVersion    = "cluster.open-cluster-management.io/v1beta1"
+      kind          = "placementdecisions"
+      statusListKey = "decisions"
+      matchKey      = "clusterName"
+    }
+  }
+
+  field_manager {
+    name            = "terraform"
+    force_conflicts = true
+  }
+
+  depends_on = [terraform_data.patch_argocd_cluster_secret]
 }
 
 # --- Destroy-time cleanup: cascade-delete all Argo CD Applications ---
