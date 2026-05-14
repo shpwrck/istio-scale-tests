@@ -1,4 +1,4 @@
-{{- if .Values.argocdPlacementDecisionGenerator.create }}
+{{- if and .Values.argocdPlacementDecisionGenerator.create .Values.argoServer.cluster }}
 # Duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource generators (shared by hub ApplicationSet charts).
 apiVersion: v1
 kind: ConfigMap
