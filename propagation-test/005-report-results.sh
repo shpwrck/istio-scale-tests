@@ -28,7 +28,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: propagation-test/results).
-  --format FMT       Output format: text, csv, json (default: text).
+  --format FMT       Output format: text, csv, json, markdown (default: text).
   -h, --help         Show this help.
 EOF
 }
@@ -153,6 +153,66 @@ report_endpoint_csv() {
 	}'
 }
 
+report_endpoint_markdown() {
+	echo "# Endpoint Propagation Latency"
+	echo ""
+	echo "Generated: $(date -Iseconds)"
+	echo ""
+	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
+	echo ""
+	for f in "${ENDPOINT_FILES[@]}"; do
+		echo "- \`$(basename "$f")\`"
+	done
+	echo ""
+	cat "${ENDPOINT_FILES[@]}" | awk -F'\t' '
+	!/^#/ && !/^run_id/ && NF>=10 {
+		ms=$2
+		p1=$7; p2=$8; p3=$9
+		if(p1!="TIMEOUT" && p1!="N/A") { p1_vals[ms][++p1_n[ms]]=p1+0 }
+		if(p2!="TIMEOUT" && p2!="N/A") { p2_vals[ms][++p2_n[ms]]=p2+0 }
+		if(p3!="TIMEOUT" && p3!="N/A") { p3_vals[ms][++p3_n[ms]]=p3+0 }
+	}
+	function percentile(arr, n, pct,    idx) {
+		if(n==0) return "N/A"
+		idx = int(n * pct / 100)
+		if(idx < 1) idx = 1
+		if(idx > n) idx = n
+		return arr[idx]
+	}
+	function sort_arr(arr, n,    i, j, tmp) {
+		for(i=2; i<=n; i++) {
+			tmp = arr[i]
+			j = i - 1
+			while(j >= 1 && arr[j] > tmp) {
+				arr[j+1] = arr[j]
+				j--
+			}
+			arr[j+1] = tmp
+		}
+	}
+	function md_row(phase, arr, n) {
+		if(n==0) return
+		sort_arr(arr, n)
+		sum=0; for(i=1;i<=n;i++) sum+=arr[i]
+		printf "| %s | %d | %d | %d | %d | %s | %s | %s |\n", \
+			phase, n, arr[1], arr[n], sum/n, \
+			percentile(arr,n,50), percentile(arr,n,95), percentile(arr,n,99)
+	}
+	END {
+		asorti(p1_n, sizes)
+		for(s in sizes) {
+			m = sizes[s]
+			printf "## Mesh size: %s\n\n", m
+			printf "| Phase | n | min (ms) | max (ms) | avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) |\n"
+			printf "|-------|---|----------|----------|----------|----------|----------|----------|\n"
+			md_row("P1 local xDS push", p1_vals[m], p1_n[m])
+			md_row("P2 remote istiod discovery", p2_vals[m], p2_n[m])
+			md_row("P3 remote sidecar", p3_vals[m], p3_n[m])
+			printf "\n"
+		}
+	}'
+}
+
 report_endpoint_json() {
 	cat "${ENDPOINT_FILES[@]}" | awk -F'\t' '
 	!/^#/ && !/^run_id/ && NF>=10 {
@@ -214,7 +274,11 @@ json)
 		report_endpoint_json
 	fi
 	;;
+markdown|md)
+	echo "Files: ${ENDPOINT_FILES[*]}" >&2
+	report_endpoint_markdown
+	;;
 *)
-	die "unknown format: $FORMAT (use text, csv, or json)"
+	die "unknown format: $FORMAT (use text, csv, json, or markdown)"
 	;;
 esac

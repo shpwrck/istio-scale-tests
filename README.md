@@ -55,7 +55,9 @@ No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want
 1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
 2. Platform + Mesh — apply the platform Terraform module (`terraform/platform/`). This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
 3. Propagation testing — measure xDS propagation latency across clusters (`propagation-test/`).
-4. Load testing — deploy the multicluster Isotope topology (`isotope-multicluster/`).
+4. Control-plane testing — measure istiod resource consumption as mesh size grows (`controlplane-test/`).
+5. Data-plane testing — measure cross-cluster latency and throughput through east-west gateways (`dataplane-test/`).
+6. Churn testing — measure control-plane convergence under endpoint churn (`churn-test/`).
 
 ---
 
@@ -70,8 +72,6 @@ On the machine where you run repo commands:
 | `helm` | Helm 3 for charts under `charts/`. |
 | `istioctl` | For mesh verification; align the build with `ISTIO_VERSION` in `config/versions.env`. Place at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
 | `jq`, `curl` | `jq` for Terraform JSON, `curl` for ingress checks. |
-
-Optional: Go on `PATH` when running `isotope-multicluster/` against a local [istio/tools](https://github.com/istio/tools) checkout.
 
 Configuration: version pins and mesh identity live in `config/versions.env`; operational defaults (namespaces, logging, test params) are in `config/options.env`, sourced automatically.
 
@@ -144,7 +144,6 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration. |
 | `config/versions.env` | Core version pins and mesh identity; sources `config/options.env` for operational defaults. |
 | `propagation-test/` | Propagation latency test suite: active probes + metrics collection + sweep orchestrator. |
-| `isotope-multicluster/` | Multicluster isotope load test workload generator and applier. |
 
 </details>
 
@@ -286,9 +285,51 @@ See `propagation-test/README.md` for full usage.
 
 ---
 
-## 4. Run Isotope (`isotope-multicluster/`)
+## 4. Control-Plane Resource Testing (`controlplane-test/`)
 
-Multicluster [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) workload: generate a chain topology from Terraform `cluster_keys`, render manifests, and apply per context. Requires a local istio/tools clone, Go, and an isotope service image. Run after the mesh is deployed and verified. See `isotope-multicluster/README.md`.
+Measure istiod CPU, memory, and xDS metrics as a function of mesh size. Deploys dummy workloads to generate endpoint load, then scrapes `kubectl top` and istiod Prometheus metrics.
+
+```bash
+# Sweep across mesh sizes with 50 services per cluster
+./controlplane-test/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --service-count 50
+
+# Or collect a single snapshot
+./controlplane-test/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002
+```
+
+See `controlplane-test/README.md` for full usage.
+
+---
+
+## 5. Data-Plane Latency Testing (`dataplane-test/`)
+
+Measure cross-cluster request latency and throughput through east-west gateways using fortio. Compares same-cluster baseline with cross-cluster hops at multiple QPS levels.
+
+```bash
+# Sweep across mesh sizes
+./dataplane-test/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --qps-levels 10,100,500,1000
+```
+
+See `dataplane-test/README.md` for full usage.
+
+---
+
+## 6. Churn / Convergence Testing (`churn-test/`)
+
+Measure control-plane convergence time under simultaneous scaling events. Scales deployments across clusters and polls istiod `/debug/syncz` and sidecar endpoints to measure how quickly the mesh converges.
+
+```bash
+# Sweep across mesh sizes and churn intensities
+./churn-test/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --churn-intensities 5,10,20
+```
+
+See `churn-test/README.md` for full usage.
 
 ---
 

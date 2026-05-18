@@ -1,0 +1,30 @@
+{{- if or (eq .Values.role "client") (eq .Values.role "both") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dataplane-client
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dataplane-test.client.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dataplane-test.client.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dataplane-test.client.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: fortio
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          args: ["server", "-http-port", "8090", "-redirect-port", "-1"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}

@@ -1,0 +1,19 @@
+{{- range $i := until (.Values.serviceCount | int) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app: dummy-svc-{{ $i }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: controlplane-test
+description: Dummy workloads for measuring istiod control-plane resource consumption at scale.
+type: application
+version: 0.1.0

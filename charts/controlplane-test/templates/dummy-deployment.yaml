@@ -1,0 +1,36 @@
+{{- range $i := until (.Values.serviceCount | int) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ $.Values.replicasPerService }}
+  selector:
+    matchLabels:
+      app: dummy-svc-{{ $i }}
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-{{ $i }}
+        {{- include "controlplane-test.labels" $ | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: {{ $.Values.image.repository }}:{{ $.Values.image.tag }}
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: {{ $.Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}

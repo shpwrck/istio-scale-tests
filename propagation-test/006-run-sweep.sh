@@ -245,6 +245,36 @@ if ((${#MD_FILES[@]} > 0)); then
 			awk '/^## Summary$/{found=1;next} /^## /{found=0} found{print}' "${MD_FILES[i]}"
 			echo ""
 		done
+
+		TSV_SWEEP_FILES=()
+		for mf in "${MD_FILES[@]}"; do
+			[[ -f "${mf%.md}.tsv" ]] && TSV_SWEEP_FILES+=("${mf%.md}.tsv")
+		done
+		if ((${#TSV_SWEEP_FILES[@]} > 0)); then
+			echo "## Comparison"
+			echo ""
+			echo "| Mesh Size | P1 local xDS (avg ms) | P2 remote istiod (avg ms) | P3 remote sidecar (avg ms) |"
+			echo "|-----------|----------------------|--------------------------|---------------------------|"
+			cat "${TSV_SWEEP_FILES[@]}" | awk -F'\t' '
+			!/^#/ && !/^run_id/ && NF>=10 {
+				ms=$2; p1=$7; p2=$8; p3=$9
+				if(p1!="TIMEOUT" && p1!="N/A") { p1_sum[ms]+=p1; p1_n[ms]++ }
+				if(p2!="TIMEOUT" && p2!="N/A") { p2_sum[ms]+=p2; p2_n[ms]++ }
+				if(p3!="TIMEOUT" && p3!="N/A") { p3_sum[ms]+=p3; p3_n[ms]++ }
+				seen[ms]=1
+			}
+			END {
+				asorti(seen, sizes)
+				for(s in sizes) {
+					m = sizes[s]
+					p1_avg = (p1_n[m] > 0) ? sprintf("%d", p1_sum[m]/p1_n[m]) : "--"
+					p2_avg = (p2_n[m] > 0) ? sprintf("%d", p2_sum[m]/p2_n[m]) : "--"
+					p3_avg = (p3_n[m] > 0) ? sprintf("%d", p3_sum[m]/p3_n[m]) : "--"
+					printf "| %s | %s | %s | %s |\n", m, p1_avg, p2_avg, p3_avg
+				}
+			}'
+			echo ""
+		fi
 	} > "$COMBINED"
 	echo "Combined report: $COMBINED"
 fi

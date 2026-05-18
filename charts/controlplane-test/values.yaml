@@ -1,0 +1,14 @@
+clusterName: ""
+
+namespace: controlplane-test
+
+serviceCount: 10
+
+replicasPerService: 3
+
+image:
+  repository: busybox
+  tag: stable
+
+service:
+  port: 8080
