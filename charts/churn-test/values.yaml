@@ -1,0 +1,19 @@
+clusterName: ""
+
+namespace: churn-test
+
+deploymentCount: 5
+
+baseReplicas: 1
+
+image:
+  repository: busybox
+  tag: stable
+
+watcher:
+  image:
+    repository: busybox
+    tag: stable
+
+service:
+  port: 8080

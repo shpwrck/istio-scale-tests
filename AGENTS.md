@@ -9,8 +9,10 @@ What is currently implemented:
 1. ROSA HCP cluster provisioning via Terraform (`terraform/rosa-hcp/`)
 2. ACM hub + GitOps wiring via Terraform (`terraform/platform/`)
 3. Multi-primary, multi-network Istio mesh via GitOps (Helm charts under `charts/` synced by Argo CD ApplicationSets)
-4. Multicluster load test workloads (`isotope-multicluster/`)
-5. xDS propagation latency test suite (`propagation-test/`)
+4. xDS propagation latency test suite (`propagation-test/`)
+5. Control-plane resource scaling test suite (`controlplane-test/`)
+6. Cross-cluster data-plane latency test suite (`dataplane-test/`)
+7. Churn/convergence test suite (`churn-test/`)
 
 ## Source of truth
 
@@ -24,7 +26,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 
 - No secrets in git: Never commit secrets, credentials, kubeconfigs with live tokens, private keys, CA material, or API keys. Rely on `.gitignore` (e.g. `/cacerts/` at repo root) and local secret stores; use placeholders or templates for examples.
 - Mesh via GitOps: The mesh is deployed via Helm charts under `charts/`, synced by Argo CD ApplicationSets using ACM Placement. Do not add bash scripts for mesh installation — use Helm charts and Argo CD Applications instead.
-- Numbered bash scripts: Name repo-owned executable bash helpers `NNN-kebab-case.sh` with a three-digit prefix (`001`, `002`, ...). The number reflects typical execution order within that directory (e.g. `isotope-multicluster/001`-`002`). Use this pattern for all such scripts in `isotope-multicluster/`, `terraform/**/scripts/` (when used), and future automation directories — never add unnumbered `*.sh` peers without renumbering the folder. When you add or renumber a script, update callers (e.g. Terraform `external`, other bash wrappers) and README / AGENTS references in the same change.
+- Numbered bash scripts: Name repo-owned executable bash helpers `NNN-kebab-case.sh` with a three-digit prefix (`001`, `002`, ...). The number reflects typical execution order within that directory (e.g. `propagation-test/001`-`002`). Use this pattern for all such scripts in `propagation-test/`, `controlplane-test/`, `dataplane-test/`, `churn-test/`, `terraform/**/scripts/` (when used), and future automation directories — never add unnumbered `*.sh` peers without renumbering the folder. When you add or renumber a script, update callers (e.g. Terraform `external`, other bash wrappers) and README / AGENTS references in the same change.
 - Helm charts: Use Helm charts under `charts/` for all mesh resources, platform resources, and operator installations. Follow the established patterns (e.g. `spoke-ossm/`, `spoke-ingress-gateway/`, `hub-mesh-push-secrets/`).
 - Avoid storing file content in scripts. Use templates appropriate for the situation (Helm charts under `charts/`, etc.) rather than large inline YAML or kubeconfig bodies in bash.
 - --dry-run: Setup scripts that mutate clusters (`oc` / `kubectl` / `istioctl apply`) should accept `--dry-run` (typically `oc apply --dry-run=client`) so operators can validate renders without changing the cluster.
@@ -79,7 +81,12 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
 | `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |
 | `propagation-test/` | Propagation latency test suite: numbered scripts for setup, endpoint probe, metrics collection, reporting, mesh-size sweep, and cleanup. See `propagation-test/README.md`. |
-| `isotope-multicluster/` | [istio/tools isotope](https://github.com/istio/tools/tree/master/isotope) multicluster workload: chain graph from `terraform output cluster_keys`, per-cluster rendering and apply. See `isotope-multicluster/README.md`. |
+| `controlplane-test/` | Control-plane resource scaling test suite: dummy workloads, istiod metrics collection (`kubectl top` + Prometheus), sweep across mesh sizes. See `controlplane-test/README.md`. |
+| `charts/controlplane-test/` | Helm chart: configurable dummy services (N deployments × M replicas with sidecar injection) for istiod load generation. |
+| `dataplane-test/` | Data-plane latency test suite: fortio-based cross-cluster latency and throughput measurement through east-west gateways. See `dataplane-test/README.md`. |
+| `charts/dataplane-test/` | Helm chart: fortio server and client pods with sidecar injection for latency testing. |
+| `churn-test/` | Churn/convergence test suite: simultaneous scaling events across clusters, measures control-plane convergence time. See `churn-test/README.md`. |
+| `charts/churn-test/` | Helm chart: churn target deployments and watcher pod with sidecar injection for convergence testing. |
 
 ## Common tasks
 
@@ -134,8 +141,8 @@ No CI/test framework configured. Manual verification via:
 
 - Shell: Bash 4+; `set -euo pipefail` where already used.
 - Contexts: Follow Script variables and naming; cluster names are placeholders — override via `SETUP_CONTEXTS` / `--contexts`.
-- Paths: Helpers resolve repo root via `"$(cd "$(dirname "$0")/.." && pwd)"` from peer dirs (`isotope-multicluster/`, etc.) — adjust `..` depth for deeper subtrees; keep this pattern for new automation scripts.
-- READMEs: After each update, check each relevant README (`README.md` at repo root and under affected subtrees — e.g. `terraform/`, `isotope-multicluster/`) for necessary changes so commands, paths, prerequisites, and examples stay accurate. When you add or rename charts, change defaults, or move YAML, update those READMEs in the same change.
+- Paths: Helpers resolve repo root via `"$(cd "$(dirname "$0")/.." && pwd)"` from peer dirs (`propagation-test/`, etc.) — adjust `..` depth for deeper subtrees; keep this pattern for new automation scripts.
+- READMEs: After each update, check each relevant README (`README.md` at repo root and under affected subtrees — e.g. `terraform/`, `propagation-test/`) for necessary changes so commands, paths, prerequisites, and examples stay accurate. When you add or rename charts, change defaults, or move YAML, update those READMEs in the same change.
 
 ## Tools agents may assume
 
@@ -143,7 +150,6 @@ No CI/test framework configured. Manual verification via:
 - `terraform` (for `terraform/rosa-hcp/` and `terraform/platform/`)
 - `helm` 3 (for charts under `charts/` and Terraform `helm_release` resources)
 - `jq`, `curl`
-- Optional: `go` (for isotope multicluster workload generation)
 
 ## References
 

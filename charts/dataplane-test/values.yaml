@@ -1,0 +1,13 @@
+clusterName: ""
+
+namespace: dataplane-test
+
+# role: server, client, or both
+role: server
+
+image:
+  repository: fortio/fortio
+  tag: latest
+
+service:
+  port: 8080

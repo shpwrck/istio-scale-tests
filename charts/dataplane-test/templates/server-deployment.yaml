@@ -1,0 +1,36 @@
+{{- if or (eq .Values.role "server") (eq .Values.role "both") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dataplane-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dataplane-test.server.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dataplane-test.server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dataplane-test.server.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: fortio
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          args:
+            - server
+            - -http-port
+            - "{{ .Values.service.port }}"
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}

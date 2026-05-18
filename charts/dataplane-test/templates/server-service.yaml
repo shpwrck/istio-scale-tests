@@ -1,0 +1,17 @@
+{{- if or (eq .Values.role "server") (eq .Values.role "both") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: dataplane-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dataplane-test.server.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dataplane-test.server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      protocol: TCP
+      targetPort: {{ .Values.service.port }}
+{{- end }}

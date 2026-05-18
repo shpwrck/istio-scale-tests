@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: churn-watcher
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "churn-test.watcher.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "churn-test.watcher.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "churn-test.watcher.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: {{ .Values.watcher.image.repository }}:{{ .Values.watcher.image.tag }}
+          command: ["sleep", "infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true

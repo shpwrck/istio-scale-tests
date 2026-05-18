@@ -1,0 +1,5 @@
+apiVersion: v2
+name: churn-test
+description: Churn target and watcher workloads for measuring control-plane convergence under endpoint churn.
+type: application
+version: 0.1.0

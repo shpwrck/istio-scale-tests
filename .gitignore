@@ -1,9 +1,3 @@
-# Isotope converter output (istio-multicluster/gen — see isotope-multicluster/README.md)
-/isotope-multicluster/gen/
-
-# Terraform-driven isotope topology (see isotope-multicluster/001-generate-topology-from-terraform.sh)
-/isotope-multicluster/topology/generated-from-terraform.yaml
-
 # Private key and certificate material (beyond /cacerts/)
 *.pem
 *.key
@@ -20,6 +14,15 @@ kubeconfig
 
 # Propagation test results (TSV data and scraped metrics)
 /propagation-test/results/
+
+# Control-plane test results
+/controlplane-test/results/
+
+# Data-plane latency test results
+/dataplane-test/results/
+
+# Churn convergence test results
+/churn-test/results/
 
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/

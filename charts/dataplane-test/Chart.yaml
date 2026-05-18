@@ -1,0 +1,5 @@
+apiVersion: v2
+name: dataplane-test
+description: Fortio workloads for measuring cross-cluster data-plane latency and throughput.
+type: application
+version: 0.1.0
