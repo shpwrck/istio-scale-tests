@@ -31,4 +31,9 @@ current-context: {{ $cn }}
 users:
 - name: {{ $cn }}
   user:
+{{- if and (hasKey $tls "certData") (hasKey $tls "keyData") }}
+    client-certificate-data: {{ index $tls "certData" }}
+    client-key-data: {{ index $tls "keyData" }}
+{{- else if hasKey $cfg "bearerToken" }}
     token: {{ $cfg.bearerToken }}
+{{- end }}

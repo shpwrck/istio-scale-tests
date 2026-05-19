@@ -16,8 +16,9 @@ locals {
   mesh_member_spoke_set = toset(local.mesh_member_spoke_keys)
 }
 
+# --- ROSA mode: get bearer tokens via OAuth token script ---
 data "external" "spoke_token" {
-  for_each = local.spoke_cluster_keys
+  for_each = local.use_kubeconfig ? {} : local.spoke_cluster_keys
 
   program = [
     "bash", "-c",
@@ -27,6 +28,19 @@ data "external" "spoke_token" {
     local.by_cluster[each.key].cluster_api_url,
     "cluster-admin",
     local.admin_password,
+  ]
+}
+
+# --- Kubeconfig mode: extract minified kubeconfig per spoke ---
+data "external" "spoke_kubeconfig" {
+  for_each = local.use_kubeconfig ? local.spoke_cluster_keys : {}
+
+  program = [
+    "bash", "-c",
+    "KC=$(kubectl --kubeconfig \"$1\" config view --raw --minify --context \"$2\" --flatten 2>/dev/null) && jq -n --arg kc \"$KC\" '{\"kubeconfig\":$kc}'",
+    "--",
+    local.kubeconfig,
+    each.key,
   ]
 }
 
@@ -100,6 +114,7 @@ resource "helm_release" "acm_managed_cluster" {
   depends_on = [kubernetes_manifest.spoke_namespace]
 }
 
+# --- Auto-import secret: kubeconfig mode uses kubeConfig field, ROSA uses server+token ---
 resource "kubernetes_secret_v1" "auto_import" {
   for_each = local.spoke_cluster_keys
   provider = kubernetes.hub
@@ -109,10 +124,16 @@ resource "kubernetes_secret_v1" "auto_import" {
     namespace = each.key
   }
 
-  data = {
-    server = local.by_cluster[each.key].cluster_api_url
-    token  = data.external.spoke_token[each.key].result.token
-  }
+  data = (
+    local.use_kubeconfig
+    ? {
+        kubeconfig = data.external.spoke_kubeconfig[each.key].result.kubeconfig
+      }
+    : {
+        server = local.by_cluster[each.key].cluster_api_url
+        token  = data.external.spoke_token[each.key].result.token
+      }
+  )
 
   type = "Opaque"
 

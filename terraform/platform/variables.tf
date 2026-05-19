@@ -1,4 +1,37 @@
 # --------------------------------------------------------------------------
+# Cluster provider — controls how the platform module discovers clusters
+# --------------------------------------------------------------------------
+
+variable "cluster_provider" {
+  type        = string
+  default     = "rosa"
+  description = "Cluster provisioning backend. 'rosa' reads from terraform_remote_state (rosa-hcp module). 'kubeconfig' reads from a kubeconfig file with explicit context names."
+
+  validation {
+    condition     = contains(["rosa", "kubeconfig"], var.cluster_provider)
+    error_message = "cluster_provider must be one of: rosa, kubeconfig."
+  }
+}
+
+variable "kubeconfig_path" {
+  type        = string
+  default     = ""
+  description = "Absolute path to a kubeconfig file. Required when cluster_provider = 'kubeconfig'."
+}
+
+variable "hub_cluster_context" {
+  type        = string
+  default     = ""
+  description = "Kubeconfig context name for the ACM hub cluster. Required when cluster_provider = 'kubeconfig'."
+}
+
+variable "spoke_cluster_contexts" {
+  type        = list(string)
+  default     = []
+  description = "Kubeconfig context names for spoke clusters. Required when cluster_provider = 'kubeconfig'."
+}
+
+# --------------------------------------------------------------------------
 # ACM (Red Hat Advanced Cluster Management)
 # --------------------------------------------------------------------------
 

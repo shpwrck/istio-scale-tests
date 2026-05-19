@@ -33,6 +33,7 @@ spokeSecretStore:
   enabled: true
   name: ""
   skipCAProvider: false
+  authType: token
   labels:
     hub-mesh-push-secrets/push-target: "true"
 
