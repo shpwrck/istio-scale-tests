@@ -45,6 +45,8 @@ resource "terraform_data" "gitops_csv_cleanup" {
     token_script      = local.token_script
     hub_api_url       = local.hub_api_url
     hub_admin_pass    = local.hub_admin_pass
+    kubeconfig_path   = local.kubeconfig
+    hub_context       = local.hub_cluster_key
     sub_namespace     = var.gitops_operator_namespace
     sub_name          = "openshift-gitops-operator"
     package_name      = "openshift-gitops-operator"
@@ -52,7 +54,17 @@ resource "terraform_data" "gitops_csv_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh' '${self.input.token_script}' '${self.input.hub_api_url}' '${self.input.hub_admin_pass}' '${self.input.sub_namespace}' '${self.input.sub_name}' '${self.input.package_name}'"
+    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh'"
+    environment = {
+      TOKEN_SCRIPT    = self.input.token_script
+      API_URL         = self.input.hub_api_url
+      ADMIN_PASS      = self.input.hub_admin_pass
+      KUBECONFIG_PATH = self.input.kubeconfig_path
+      KUBE_CONTEXT    = self.input.hub_context
+      SUB_NAMESPACE   = self.input.sub_namespace
+      SUB_NAME        = self.input.sub_name
+      PACKAGE_NAME    = self.input.package_name
+    }
   }
 
   depends_on = [kubernetes_manifest.gitops_subscription]
@@ -79,8 +91,12 @@ resource "terraform_data" "adopt_argocd_for_helm" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      TOKEN=$("${local.token_script}" "${local.hub_api_url}" "cluster-admin" "${local.hub_admin_pass}" | jq -r '.status.token')
-      KC="kubectl --server=${local.hub_api_url} --token=$TOKEN --insecure-skip-tls-verify"
+      if [[ -n "${local.kubeconfig}" ]]; then
+        KC="kubectl --kubeconfig=${local.kubeconfig} --context=${local.hub_cluster_key}"
+      else
+        TOKEN=$("${local.token_script}" "${local.hub_api_url}" "cluster-admin" "${local.hub_admin_pass}" | jq -r '.status.token')
+        KC="kubectl --server=${local.hub_api_url} --token=$TOKEN --insecure-skip-tls-verify"
+      fi
       $KC annotate argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
         meta.helm.sh/release-name=argocd-config \
         meta.helm.sh/release-namespace="${var.gitops_namespace}" \
@@ -421,10 +437,13 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
   input = {
     spoke_name              = each.key
     api_url                 = local.by_cluster[each.key].cluster_api_url
-    token                   = data.external.spoke_token[each.key].result.token
+    token                   = local.use_kubeconfig ? "" : data.external.spoke_token[each.key].result.token
     token_script            = local.token_script
     hub_api_url             = local.hub_api_url
     hub_admin_pass          = local.hub_admin_pass
+    kubeconfig_path         = local.kubeconfig
+    hub_context             = local.hub_cluster_key
+    spoke_context           = each.key
     gitops_namespace        = var.gitops_namespace
     managed_sa_name         = var.gitops_managed_service_account_name
   }
@@ -438,6 +457,9 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
       HUB_TOKEN_SCRIPT = self.input.token_script
       HUB_API_URL      = self.input.hub_api_url
       HUB_ADMIN_PASS   = self.input.hub_admin_pass
+      KUBECONFIG_PATH  = self.input.kubeconfig_path
+      HUB_CONTEXT      = self.input.hub_context
+      SPOKE_CONTEXT    = self.input.spoke_context
       GITOPS_NAMESPACE = self.input.gitops_namespace
       MANAGED_SA_NAME  = self.input.managed_sa_name
     }
@@ -486,17 +508,29 @@ resource "terraform_data" "spoke_ossm_csv_cleanup" {
   for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
 
   input = {
-    token_script  = local.token_script
-    spoke_api_url = local.by_cluster[each.key].cluster_api_url
-    admin_pass    = local.admin_password
-    sub_namespace = "openshift-operators"
-    sub_name      = "servicemeshoperator3"
-    package_name  = "servicemeshoperator3"
+    token_script    = local.token_script
+    spoke_api_url   = local.by_cluster[each.key].cluster_api_url
+    admin_pass      = local.admin_password
+    kubeconfig_path = local.kubeconfig
+    spoke_context   = each.key
+    sub_namespace   = "openshift-operators"
+    sub_name        = "servicemeshoperator3"
+    package_name    = "servicemeshoperator3"
   }
 
   provisioner "local-exec" {
     when    = destroy
-    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh' '${self.input.token_script}' '${self.input.spoke_api_url}' '${self.input.admin_pass}' '${self.input.sub_namespace}' '${self.input.sub_name}' '${self.input.package_name}'"
+    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh'"
+    environment = {
+      TOKEN_SCRIPT    = self.input.token_script
+      API_URL         = self.input.spoke_api_url
+      ADMIN_PASS      = self.input.admin_pass
+      KUBECONFIG_PATH = self.input.kubeconfig_path
+      KUBE_CONTEXT    = self.input.spoke_context
+      SUB_NAMESPACE   = self.input.sub_namespace
+      SUB_NAME        = self.input.sub_name
+      PACKAGE_NAME    = self.input.package_name
+    }
   }
 }
 
@@ -509,6 +543,8 @@ resource "terraform_data" "argocd_app_cleanup" {
     token_script     = local.token_script
     hub_api_url      = local.hub_api_url
     hub_admin_pass   = local.hub_admin_pass
+    kubeconfig_path  = local.kubeconfig
+    hub_context      = local.hub_cluster_key
     gitops_namespace = var.gitops_namespace
   }
 
@@ -520,6 +556,14 @@ resource "terraform_data" "argocd_app_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "bash ${path.module}/../scripts/argocd-app-cleanup.sh '${self.input.token_script}' '${self.input.hub_api_url}' '${self.input.hub_admin_pass}' '${self.input.gitops_namespace}'"
+    command = "bash ${path.module}/../scripts/argocd-app-cleanup.sh"
+    environment = {
+      TOKEN_SCRIPT    = self.input.token_script
+      API_URL         = self.input.hub_api_url
+      ADMIN_PASS      = self.input.hub_admin_pass
+      KUBECONFIG_PATH = self.input.kubeconfig_path
+      KUBE_CONTEXT    = self.input.hub_context
+      GITOPS_NS       = self.input.gitops_namespace
+    }
   }
 }

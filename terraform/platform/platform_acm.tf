@@ -81,6 +81,8 @@ resource "terraform_data" "acm_csv_cleanup" {
     token_script      = local.token_script
     hub_api_url       = local.hub_api_url
     hub_admin_pass    = local.hub_admin_pass
+    kubeconfig_path   = local.kubeconfig
+    hub_context       = local.hub_cluster_key
     sub_namespace     = var.acm_namespace
     sub_name          = "acm-operator-subscription"
     package_name      = "advanced-cluster-management"
@@ -88,7 +90,17 @@ resource "terraform_data" "acm_csv_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh' '${self.input.token_script}' '${self.input.hub_api_url}' '${self.input.hub_admin_pass}' '${self.input.sub_namespace}' '${self.input.sub_name}' '${self.input.package_name}'"
+    command = "bash '${path.module}/../scripts/cleanup-olm-csv.sh'"
+    environment = {
+      TOKEN_SCRIPT    = self.input.token_script
+      API_URL         = self.input.hub_api_url
+      ADMIN_PASS      = self.input.hub_admin_pass
+      KUBECONFIG_PATH = self.input.kubeconfig_path
+      KUBE_CONTEXT    = self.input.hub_context
+      SUB_NAMESPACE   = self.input.sub_namespace
+      SUB_NAME        = self.input.sub_name
+      PACKAGE_NAME    = self.input.package_name
+    }
   }
 
   depends_on = [kubernetes_manifest.acm_subscription]
@@ -140,6 +152,13 @@ resource "helm_release" "acm_klusterlet_config" {
   take_ownership   = true
   wait             = true
   timeout          = 600
+
+  set = local.use_kubeconfig ? [
+    {
+      name  = "klusterletConfig.spec.hubKubeAPIServerConfig.serverVerificationStrategy"
+      value = "UseAutoDetectedCABundle"
+    },
+  ] : []
 
   depends_on = [time_sleep.wait_acm_multicluster_hub]
 }
