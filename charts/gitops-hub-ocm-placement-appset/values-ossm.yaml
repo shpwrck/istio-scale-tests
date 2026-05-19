@@ -46,6 +46,7 @@ template:
       kind: Istio
       jsonPointers:
         - /spec/values/global/enableReaderRBAC
+        - /spec/values/global/meshNetworks
   source:
     path: charts/spoke-ossm
     helm:
