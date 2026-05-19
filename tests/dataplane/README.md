@@ -21,15 +21,15 @@ Measure request latency and throughput through Istio east-west gateways using fo
 
 ```bash
 # 1. Deploy fortio server on all clusters, client on source
-./dataplane-test/001-setup-dataplane-test.sh \
+./tests/dataplane/001-setup-dataplane-test.sh \
   --source-context rosa-001 --remote-contexts rosa-002,rosa-003
 
 # 2. Run latency probes
-./dataplane-test/002-run-latency-probe.sh \
+./tests/dataplane/002-run-latency-probe.sh \
   --source-context rosa-001 --remote-contexts rosa-002,rosa-003
 
 # 3. View results
-./dataplane-test/004-report-results.sh
+./tests/dataplane/004-report-results.sh
 ```
 
 ## Sweep Across Mesh Sizes
@@ -37,25 +37,25 @@ Measure request latency and throughput through Istio east-west gateways using fo
 Compare data-plane latency at different cluster counts:
 
 ```bash
-./dataplane-test/003-run-sweep.sh \
+./tests/dataplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3
 
 # Dry-run to see plan
-./dataplane-test/003-run-sweep.sh --dry-run
+./tests/dataplane/003-run-sweep.sh --dry-run
 ```
 
 ## Custom QPS Levels
 
 ```bash
-./dataplane-test/002-run-latency-probe.sh \
+./tests/dataplane/002-run-latency-probe.sh \
   --source-context rosa-001 --remote-contexts rosa-002 \
   --qps-levels 50,200,500 --duration 60 --connections 16
 ```
 
 ## Results Format
 
-TSV files in `dataplane-test/results/` (gitignored):
+TSV files in `tests/dataplane/results/` (gitignored):
 
 ```
 run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections  duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms  status
@@ -64,7 +64,7 @@ run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections  
 ## Cleanup
 
 ```bash
-./dataplane-test/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/dataplane/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 ```
 
 ## Scripts

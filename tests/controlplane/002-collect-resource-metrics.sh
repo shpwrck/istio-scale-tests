@@ -3,22 +3,22 @@
 # Scrapes kubectl top, istiod /metrics, and writes a TSV row per cluster.
 #
 # Usage:
-#   ./controlplane-test/002-collect-resource-metrics.sh [--contexts CSV] [options]
+#   ./tests/controlplane/002-collect-resource-metrics.sh [--contexts CSV] [options]
 #
 # Examples:
 #   # One-shot collection from all clusters:
-#   ./controlplane-test/002-collect-resource-metrics.sh --mesh-size 3 --service-count 10
+#   ./tests/controlplane/002-collect-resource-metrics.sh --mesh-size 3 --service-count 10
 #
 #   # Watch mode during load test:
-#   ./controlplane-test/002-collect-resource-metrics.sh --watch --interval 15
+#   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
-OUTPUT_DIR="${ROOT}/controlplane-test/results"
+OUTPUT_DIR="${ROOT}/tests/controlplane/results"
 MESH_SIZE=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
@@ -37,7 +37,7 @@ Usage: $(basename "$0") [options]
   --mesh-size N        Metadata tag for TSV output.
   --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
   --replicas N         Metadata tag for TSV output (default: $REPLICAS).
-  --output-dir DIR     Results directory (default: controlplane-test/results).
+  --output-dir DIR     Results directory (default: tests/controlplane/results).
   --watch              Loop continuously.
   --interval SEC       Seconds between scrapes in watch mode (default: 15).
   --dry-run            Show what would be scraped without connecting.

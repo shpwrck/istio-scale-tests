@@ -1,24 +1,28 @@
 #!/usr/bin/env bash
-# Orchestrate data-plane latency probes across multiple mesh sizes.
+# Orchestrate control-plane resource collection across multiple mesh sizes.
+# For each mesh size, deploys dummy workloads, collects metrics, then cleans up.
 #
 # Usage:
-#   ./dataplane-test/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
+#   ./tests/controlplane/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
 #
 # Examples:
-#   # Sweep 1, 2, 3 clusters:
-#   ./dataplane-test/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   # Sweep 1, 2, 3 clusters with 10 services:
+#   ./tests/controlplane/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#
+#   # Custom service counts per sweep step:
+#   ./tests/controlplane/003-run-sweep.sh --mesh-sizes 1,2,3 --service-count 50
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
-QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
-DURATION="${DATAPLANE_DURATION_SEC:-30}"
-CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
-OUTPUT_DIR="${ROOT}/dataplane-test/results"
+SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
+REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
+OUTPUT_DIR="${ROOT}/tests/controlplane/results"
+SETTLE_SEC=30
 DRY_RUN=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -29,12 +33,15 @@ Usage: $(basename "$0") [options]
 
   --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
-  --qps-levels CSV     QPS levels to test (default: $QPS_LEVELS).
-  --duration SEC       Duration per QPS level (default: $DURATION).
-  --connections N      Concurrent connections (default: $CONNECTIONS).
-  --output-dir DIR     Results directory (default: dataplane-test/results).
+  --service-count N    Dummy services per cluster (default: $SERVICE_COUNT).
+  --replicas N         Replicas per service (default: $REPLICAS).
+  --settle SEC         Seconds to wait after deploy before collecting (default: $SETTLE_SEC).
+  --output-dir DIR     Results directory (default: tests/controlplane/results).
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
+
+Environment:
+  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE.
 EOF
 }
 
@@ -63,19 +70,19 @@ while [[ $# -gt 0 ]]; do
 		MESH_SIZES_CSV="$2"
 		shift 2
 		;;
-	--qps-levels)
-		[[ -n "${2:-}" ]] || die "--qps-levels requires a value"
-		QPS_LEVELS="$2"
+	--service-count)
+		[[ -n "${2:-}" ]] || die "--service-count requires a value"
+		SERVICE_COUNT="$2"
 		shift 2
 		;;
-	--duration)
-		[[ -n "${2:-}" ]] || die "--duration requires a value"
-		DURATION="$2"
+	--replicas)
+		[[ -n "${2:-}" ]] || die "--replicas requires a value"
+		REPLICAS="$2"
 		shift 2
 		;;
-	--connections)
-		[[ -n "${2:-}" ]] || die "--connections requires a value"
-		CONNECTIONS="$2"
+	--settle)
+		[[ -n "${2:-}" ]] || die "--settle requires a value"
+		SETTLE_SEC="$2"
 		shift 2
 		;;
 	--output-dir)
@@ -118,65 +125,59 @@ for ms in "${MESH_SIZES[@]}"; do
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 
-SCRIPT_DIR="${ROOT}/dataplane-test"
+SCRIPT_DIR="${ROOT}/tests/controlplane"
 
 echo "=========================================="
-echo "  Data-Plane Latency Sweep"
+echo "  Control-Plane Resource Sweep"
 echo "=========================================="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
-echo "QPS levels: $QPS_LEVELS"
+echo "Workload: ${SERVICE_COUNT} services × ${REPLICAS} replicas"
+echo "Settle time: ${SETTLE_SEC}s"
 echo "Output: $OUTPUT_DIR"
 echo ""
 
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
-	source_ctx="${active_ctxs[0]}"
-	remote_ctxs=()
-	if ((ms > 1)); then
-		remote_ctxs=("${active_ctxs[@]:1}")
-	fi
-	remote_csv=""
-	for rc in "${remote_ctxs[@]}"; do
-		[[ -n "$remote_csv" ]] && remote_csv+=","
-		remote_csv+="$rc"
-	done
+	active_csv=$(IFS=,; echo "${active_ctxs[*]}")
 
 	echo "=========================================="
 	echo "  Sweep: mesh_size=$ms"
-	echo "  Source: $source_ctx  Remotes: ${remote_ctxs[*]:-none}"
+	echo "  Clusters: ${active_ctxs[*]}"
 	echo "=========================================="
+	echo ""
 
 	if ((DRY_RUN)); then
 		echo "  [dry-run] Would run:"
-		echo "    001-setup-dataplane-test.sh --source-context $source_ctx --remote-contexts $remote_csv"
-		echo "    002-run-latency-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms"
-		echo "    005-cleanup.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+		echo "    001-setup-controlplane-test.sh --contexts $active_csv --service-count $SERVICE_COUNT --replicas $REPLICAS"
+		echo "    (settle ${SETTLE_SEC}s)"
+		echo "    002-collect-resource-metrics.sh --contexts $active_csv --mesh-size $ms"
+		echo "    005-cleanup.sh --contexts $active_csv"
 		echo ""
 		continue
 	fi
 
-	echo "--- Setting up ---"
-	setup_args=(--source-context "$source_ctx")
-	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
-	"$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"
+	echo "--- Deploying workloads ---"
+	"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
+		--contexts "$active_csv" \
+		--service-count "$SERVICE_COUNT" \
+		--replicas "$REPLICAS"
 	echo ""
 
-	echo "--- Running latency probe (mesh_size=$ms) ---"
-	probe_args=(
-		--source-context "$source_ctx"
-		--mesh-size "$ms"
-		--qps-levels "$QPS_LEVELS"
-		--duration "$DURATION"
-		--connections "$CONNECTIONS"
+	echo "--- Settling for ${SETTLE_SEC}s ---"
+	sleep "$SETTLE_SEC"
+
+	echo "--- Collecting metrics (mesh_size=$ms) ---"
+	"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+		--contexts "$active_csv" \
+		--mesh-size "$ms" \
+		--service-count "$SERVICE_COUNT" \
+		--replicas "$REPLICAS" \
 		--output-dir "$OUTPUT_DIR"
-	)
-	[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-	"$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"
 	echo ""
 
 	echo "--- Cleaning up ---"
-	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
+	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
 	echo ""
 done
 

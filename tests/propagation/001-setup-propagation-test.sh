@@ -2,20 +2,20 @@
 # Deploy propagation-test namespace and watcher pods on target clusters.
 #
 # Usage:
-#   ./propagation-test/001-setup-propagation-test.sh [--contexts CSV] [--dry-run] [--cleanup]
+#   ./tests/propagation/001-setup-propagation-test.sh [--contexts CSV] [--dry-run] [--cleanup]
 #
 # Examples:
 #   # Setup on all default clusters:
-#   ./propagation-test/001-setup-propagation-test.sh
+#   ./tests/propagation/001-setup-propagation-test.sh
 #
 #   # Setup on specific clusters:
-#   ./propagation-test/001-setup-propagation-test.sh --contexts rosa-001,rosa-002
+#   ./tests/propagation/001-setup-propagation-test.sh --contexts rosa-001,rosa-002
 #
 #   # Tear down from all clusters:
-#   ./propagation-test/001-setup-propagation-test.sh --cleanup
+#   ./tests/propagation/001-setup-propagation-test.sh --cleanup
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -120,7 +120,7 @@ command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 apply=("${KUBECTL[@]}" apply)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
-CHART_DIR="${ROOT}/charts/propagation-test"
+CHART_DIR="${ROOT}/tests/propagation/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
 	echo "Setting up propagation-test on context $ctx"

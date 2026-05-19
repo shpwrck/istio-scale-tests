@@ -4,18 +4,18 @@
 # sidecar admin endpoints to measure how long until the mesh converges.
 #
 # Usage:
-#   ./churn-test/002-run-churn-probe.sh --source-context CTX [options]
+#   ./tests/churn/002-run-churn-probe.sh --source-context CTX [options]
 #
 # Examples:
 #   # 2-cluster churn test:
-#   ./churn-test/002-run-churn-probe.sh --source-context rosa-001 --remote-contexts rosa-002
+#   ./tests/churn/002-run-churn-probe.sh --source-context rosa-001 --remote-contexts rosa-002
 #
 #   # Scale 10 deployments from 1 to 10 replicas:
-#   ./churn-test/002-run-churn-probe.sh --source-context rosa-001 \
+#   ./tests/churn/002-run-churn-probe.sh --source-context rosa-001 \
 #     --deployment-count 10 --scale-to 10 --iterations 3
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -28,7 +28,7 @@ SCALE_TO="${CHURN_SCALE_TO_REPLICAS:-5}"
 ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
 POLL_INTERVAL_S="0.$(printf '%03d' "${CHURN_POLL_INTERVAL_MS:-250}")"
-OUTPUT_DIR="${ROOT}/churn-test/results"
+OUTPUT_DIR="${ROOT}/tests/churn/results"
 DRY_RUN=0
 NS="${CHURN_TEST_NAMESPACE:-churn-test}"
 BASE_PF_PORT=15014
@@ -47,7 +47,7 @@ Usage: $(basename "$0") [options]
   --scale-to N             Scale targets to N replicas (default: $SCALE_TO).
   --iterations N           Number of churn iterations (default: $ITERATIONS).
   --timeout SEC            Timeout per iteration (default: $TIMEOUT_SEC).
-  --output-dir DIR         Results directory (default: churn-test/results).
+  --output-dir DIR         Results directory (default: tests/churn/results).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 EOF

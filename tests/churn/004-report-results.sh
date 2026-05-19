@@ -2,12 +2,12 @@
 # Generate summary statistics from churn convergence TSV files.
 #
 # Usage:
-#   ./churn-test/004-report-results.sh [--results-dir DIR]
+#   ./tests/churn/004-report-results.sh [--results-dir DIR]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-RESULTS_DIR="${ROOT}/churn-test/results"
+RESULTS_DIR="${ROOT}/tests/churn/results"
 FORMAT="text"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -16,7 +16,7 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: churn-test/results).
+  --results-dir DIR  Results directory (default: tests/churn/results).
   --format FMT       Output format: text, csv (default: text).
   -h, --help         Show this help.
 EOF

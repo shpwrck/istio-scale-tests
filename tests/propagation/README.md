@@ -24,15 +24,15 @@ In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService a
 
 ```bash
 # 1. Setup watcher pods on all clusters
-./propagation-test/001-setup-propagation-test.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/propagation/001-setup-propagation-test.sh --contexts rosa-001,rosa-002,rosa-003
 
 # 2. Run endpoint probe (2-cluster)
-./propagation-test/002-run-endpoint-probe.sh \
+./tests/propagation/002-run-endpoint-probe.sh \
   --source-context rosa-001 --remote-contexts rosa-002 \
   --iterations 10
 
 # 3. View results
-./propagation-test/005-report-results.sh
+./tests/propagation/005-report-results.sh
 ```
 
 ## Sweep Across Mesh Sizes
@@ -41,13 +41,13 @@ Compare propagation latency at different cluster counts:
 
 ```bash
 # Run probes at mesh_size=1, 2, 3
-./propagation-test/006-run-sweep.sh \
+./tests/propagation/006-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3 \
   --iterations 5
 
 # Dry-run to see plan without executing
-./propagation-test/006-run-sweep.sh --dry-run
+./tests/propagation/006-run-sweep.sh --dry-run
 ```
 
 The sweep orchestrator:
@@ -61,10 +61,10 @@ The sweep orchestrator:
 
 ```bash
 # One-shot snapshot
-./propagation-test/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
+./tests/propagation/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
 
 # Watch mode during load test
-./propagation-test/004-collect-pilot-metrics.sh --watch --interval 10
+./tests/propagation/004-collect-pilot-metrics.sh --watch --interval 10
 ```
 
 ### Via OpenShift User Workload Monitoring
@@ -83,7 +83,7 @@ histogram_quantile(0.99, rate(pilot_proxy_convergence_time_bucket[5m]))
 
 ## Results Format
 
-TSV files in `propagation-test/results/` (gitignored):
+TSV files in `tests/propagation/results/` (gitignored):
 
 ```
 run_id  mesh_size  iteration  source_ctx  remote_ctx  t0_epoch_ns  p1_local_ms  p2_discovery_ms  p3_dataplane_ms  status
@@ -94,7 +94,7 @@ Report output groups by mesh_size with min/max/avg/p50/p95/p99 statistics.
 ## Cleanup
 
 ```bash
-./propagation-test/007-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/propagation/007-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 ```
 
 ## Scripts

@@ -2,16 +2,16 @@
 # Generate summary statistics from control-plane resource metrics TSV files.
 #
 # Usage:
-#   ./controlplane-test/004-report-results.sh [--results-dir DIR]
+#   ./tests/controlplane/004-report-results.sh [--results-dir DIR]
 #
 # Examples:
-#   ./controlplane-test/004-report-results.sh
-#   ./controlplane-test/004-report-results.sh --format csv
+#   ./tests/controlplane/004-report-results.sh
+#   ./tests/controlplane/004-report-results.sh --format csv
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-RESULTS_DIR="${ROOT}/controlplane-test/results"
+RESULTS_DIR="${ROOT}/tests/controlplane/results"
 FORMAT="text"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -20,7 +20,7 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: controlplane-test/results).
+  --results-dir DIR  Results directory (default: tests/controlplane/results).
   --format FMT       Output format: text, csv (default: text).
   -h, --help         Show this help.
 EOF

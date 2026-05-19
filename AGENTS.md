@@ -9,10 +9,10 @@ What is currently implemented:
 1. ROSA HCP cluster provisioning via Terraform (`terraform/rosa-hcp/`)
 2. ACM hub + GitOps wiring via Terraform (`terraform/platform/`)
 3. Multi-primary, multi-network Istio mesh via GitOps (Helm charts under `charts/` synced by Argo CD ApplicationSets)
-4. xDS propagation latency test suite (`propagation-test/`)
-5. Control-plane resource scaling test suite (`controlplane-test/`)
-6. Cross-cluster data-plane latency test suite (`dataplane-test/`)
-7. Churn/convergence test suite (`churn-test/`)
+4. xDS propagation latency test suite (`tests/propagation/`)
+5. Control-plane resource scaling test suite (`tests/controlplane/`)
+6. Cross-cluster data-plane latency test suite (`tests/dataplane/`)
+7. Churn/convergence test suite (`tests/churn/`)
 
 ## Source of truth
 
@@ -26,7 +26,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 
 - No secrets in git: Never commit secrets, credentials, kubeconfigs with live tokens, private keys, CA material, or API keys. Rely on `.gitignore` (e.g. `/cacerts/` at repo root) and local secret stores; use placeholders or templates for examples.
 - Mesh via GitOps: The mesh is deployed via Helm charts under `charts/`, synced by Argo CD ApplicationSets using ACM Placement. Do not add bash scripts for mesh installation — use Helm charts and Argo CD Applications instead.
-- Numbered bash scripts: Name repo-owned executable bash helpers `NNN-kebab-case.sh` with a three-digit prefix (`001`, `002`, ...). The number reflects typical execution order within that directory (e.g. `propagation-test/001`-`002`). Use this pattern for all such scripts in `propagation-test/`, `controlplane-test/`, `dataplane-test/`, `churn-test/`, `terraform/**/scripts/` (when used), and future automation directories — never add unnumbered `*.sh` peers without renumbering the folder. When you add or renumber a script, update callers (e.g. Terraform `external`, other bash wrappers) and README / AGENTS references in the same change.
+- Numbered bash scripts: Name repo-owned executable bash helpers `NNN-kebab-case.sh` with a three-digit prefix (`001`, `002`, ...). The number reflects typical execution order within that directory (e.g. `propagation-test/001`-`002`). Use this pattern for all such scripts in `tests/propagation/`, `tests/controlplane/`, `tests/dataplane/`, `tests/churn/`, `terraform/**/scripts/` (when used), and future automation directories — never add unnumbered `*.sh` peers without renumbering the folder. When you add or renumber a script, update callers (e.g. Terraform `external`, other bash wrappers) and README / AGENTS references in the same change.
 - Helm charts: Use Helm charts under `charts/` for all mesh resources, platform resources, and operator installations. Follow the established patterns (e.g. `spoke-ossm/`, `spoke-ingress-gateway/`, `hub-mesh-push-secrets/`).
 - Avoid storing file content in scripts. Use templates appropriate for the situation (Helm charts under `charts/`, etc.) rather than large inline YAML or kubeconfig bodies in bash.
 - --dry-run: Setup scripts that mutate clusters (`oc` / `kubectl` / `istioctl apply`) should accept `--dry-run` (typically `oc apply --dry-run=client`) so operators can validate renders without changing the cluster.
@@ -65,7 +65,6 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
 | `charts/spoke-mesh-restart/` | Helm chart: restart Job (PostSync hook) for istiod and gateways after mesh GitOps sync completes (wave 30). |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app-of-apps). |
-| `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency (namespace, watcher pod, conditional canary service/VS/DR). |
 | `charts/istiod-monitor/` | Helm chart: OpenShift User Workload Monitoring ServiceMonitor + PrometheusRule for istiod `pilot_*` metrics. |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD `ApplicationSet` for OCM Placement + RBAC; preset value files per component (e.g. `values-ossm.yaml`, `values-ingress-gateway.yaml`, `values-mesh-push-secrets.yaml`). |
 | `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD `Application` CRs on the hub — `hub-gitops-root` (directory path `charts/gitops-hub-apps/applications` for child `Application` YAML) (Terraform `terraform/platform/platform_gitops.tf`). |
@@ -80,13 +79,10 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration (requires OpenShift GitOps operator CRDs). |
 | `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
 | `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |
-| `propagation-test/` | Propagation latency test suite: numbered scripts for setup, endpoint probe, metrics collection, reporting, mesh-size sweep, and cleanup. See `propagation-test/README.md`. |
-| `controlplane-test/` | Control-plane resource scaling test suite: dummy workloads, istiod metrics collection (`kubectl top` + Prometheus), sweep across mesh sizes. See `controlplane-test/README.md`. |
-| `charts/controlplane-test/` | Helm chart: configurable dummy services (N deployments × M replicas with sidecar injection) for istiod load generation. |
-| `dataplane-test/` | Data-plane latency test suite: fortio-based cross-cluster latency and throughput measurement through east-west gateways. See `dataplane-test/README.md`. |
-| `charts/dataplane-test/` | Helm chart: fortio server and client pods with sidecar injection for latency testing. |
-| `churn-test/` | Churn/convergence test suite: simultaneous scaling events across clusters, measures control-plane convergence time. See `churn-test/README.md`. |
-| `charts/churn-test/` | Helm chart: churn target deployments and watcher pod with sidecar injection for convergence testing. |
+| `tests/propagation/` | Propagation latency test suite: numbered scripts + `chart/` Helm chart for watcher/canary workloads. See `tests/propagation/README.md`. |
+| `tests/controlplane/` | Control-plane resource scaling test suite: numbered scripts + `chart/` Helm chart for dummy services. See `tests/controlplane/README.md`. |
+| `tests/dataplane/` | Data-plane latency test suite: numbered scripts + `chart/` Helm chart for fortio server/client. See `tests/dataplane/README.md`. |
+| `tests/churn/` | Churn/convergence test suite: numbered scripts + `chart/` Helm chart for churn targets/watcher. See `tests/churn/README.md`. |
 
 ## Common tasks
 
@@ -141,8 +137,8 @@ No CI/test framework configured. Manual verification via:
 
 - Shell: Bash 4+; `set -euo pipefail` where already used.
 - Contexts: Follow Script variables and naming; cluster names are placeholders — override via `SETUP_CONTEXTS` / `--contexts`.
-- Paths: Helpers resolve repo root via `"$(cd "$(dirname "$0")/.." && pwd)"` from peer dirs (`propagation-test/`, etc.) — adjust `..` depth for deeper subtrees; keep this pattern for new automation scripts.
-- READMEs: After each update, check each relevant README (`README.md` at repo root and under affected subtrees — e.g. `terraform/`, `propagation-test/`) for necessary changes so commands, paths, prerequisites, and examples stay accurate. When you add or rename charts, change defaults, or move YAML, update those READMEs in the same change.
+- Paths: Helpers resolve repo root via `"$(cd "$(dirname "$0")/../.." && pwd)"` from test dirs (`tests/propagation/`, etc.) — adjust `..` depth for deeper subtrees; keep this pattern for new automation scripts.
+- READMEs: After each update, check each relevant README (`README.md` at repo root and under affected subtrees — e.g. `terraform/`, `tests/propagation/`) for necessary changes so commands, paths, prerequisites, and examples stay accurate. When you add or rename charts, change defaults, or move YAML, update those READMEs in the same change.
 
 ## Tools agents may assume
 

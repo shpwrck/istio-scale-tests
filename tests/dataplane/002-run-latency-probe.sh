@@ -4,18 +4,18 @@
 # capturing latency percentiles and throughput at multiple QPS levels.
 #
 # Usage:
-#   ./dataplane-test/002-run-latency-probe.sh --source-context CTX [options]
+#   ./tests/dataplane/002-run-latency-probe.sh --source-context CTX [options]
 #
 # Examples:
 #   # Baseline + cross-cluster latency:
-#   ./dataplane-test/002-run-latency-probe.sh --source-context rosa-001 --remote-contexts rosa-002
+#   ./tests/dataplane/002-run-latency-probe.sh --source-context rosa-001 --remote-contexts rosa-002
 #
 #   # Custom QPS levels and duration:
-#   ./dataplane-test/002-run-latency-probe.sh --source-context rosa-001 \
+#   ./tests/dataplane/002-run-latency-probe.sh --source-context rosa-001 \
 #     --remote-contexts rosa-002 --qps-levels 10,100,1000 --duration 60
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -25,7 +25,7 @@ MESH_SIZE=""
 QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
 DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
-OUTPUT_DIR="${ROOT}/dataplane-test/results"
+OUTPUT_DIR="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
 
@@ -41,7 +41,7 @@ Usage: $(basename "$0") [options]
   --qps-levels CSV         QPS levels to test (default: $QPS_LEVELS).
   --duration SEC           Duration per QPS level (default: $DURATION).
   --connections N          Concurrent connections (default: $CONNECTIONS).
-  --output-dir DIR         Results directory (default: dataplane-test/results).
+  --output-dir DIR         Results directory (default: tests/dataplane/results).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 

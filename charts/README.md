@@ -43,7 +43,6 @@ The app-of-apps syncs child Applications with sync-wave ordering:
 | `istiod-monitor/` | ServiceMonitor + PrometheusRule for istiod pilot metrics |
 | `mesh-verify/` | Echo workload for cross-cluster mesh verification |
 | `openshift-gitops-operator/` | OpenShift GitOps operator OLM Subscription (hub) |
-| `propagation-test/` | Watcher and canary workloads for xDS propagation latency testing |
 | `spoke-east-west-gateway/` | East-west gateway + cross-network Gateway CR per spoke |
 | `spoke-ingress-gateway/` | North-south ingress gateway (LoadBalancer) per spoke |
 | `spoke-ossm/` | Istio + IstioCNI CRs per spoke (multi-primary, multi-network) |
