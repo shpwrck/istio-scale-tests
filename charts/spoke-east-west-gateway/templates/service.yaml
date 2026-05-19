@@ -27,6 +27,9 @@ spec:
       port: 15443
       protocol: TCP
       targetPort: 15443
+      {{- if .Values.service.nodePorts.tls }}
+      nodePort: {{ .Values.service.nodePorts.tls }}
+      {{- end }}
     - name: tls-istiod
       port: 15012
       protocol: TCP

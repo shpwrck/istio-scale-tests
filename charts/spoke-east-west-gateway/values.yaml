@@ -20,6 +20,8 @@ autoscaling:
 service:
   type: LoadBalancer
   annotations: {}
+  nodePorts:
+    tls: ""
 
 argoSyncWaves:
   enabled: true

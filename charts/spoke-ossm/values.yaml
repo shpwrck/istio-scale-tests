@@ -6,6 +6,8 @@ istioVersion: v1.28.5
 accessLogFile: /dev/stdout
 accessLogEncoding: JSON
 
+meshNetworks: {}
+
 argoSyncWaves:
   enabled: true
   rbac: "-30"
