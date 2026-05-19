@@ -11,7 +11,7 @@ argocd:
       dynamicScalingEnabled: true
       minShards: 1
       maxShards: 20
-      clustersPerShard: 1
+      clustersPerShard: 3
     shardingAlgorithm: consistent-hashing
     processors:
       status: 50
