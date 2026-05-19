@@ -3,9 +3,11 @@
 *.key
 *.crt
 
-# Kubeconfig files
+# Kubeconfig files (but not chart directories containing "kubeconfig" in the name)
 kubeconfig
 *kubeconfig*
+!charts/*kubeconfig*/
+!charts/*kubeconfig*/**
 
 # Environment files with potential secrets
 .env
