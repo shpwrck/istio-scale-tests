@@ -44,9 +44,20 @@ if [[ -n "${KUBECONFIG_PATH:-}" ]] && [[ -n "${SPOKE_CONTEXT:-}" ]]; then
   SPOKE_TOKEN_VALUE=$(echo "$SPOKE_KC_JSON" | jq -r '.users[0].user.token // empty')
 
   if [[ -n "$CLIENT_CERT" ]] && [[ -n "$CLIENT_KEY" ]]; then
-    CONFIG_JSON=$(jq -nc \
-      --arg cert "$CLIENT_CERT" --arg key "$CLIENT_KEY" --arg ca "${CA_DATA:-}" \
-      '{tlsClientConfig: {certData: $cert, keyData: $key, caData: $ca, insecure: false}}')
+    # Create an SA token so spoke SecretStores can use bearer-token auth universally.
+    # The cert data is still included for kubeconfig generation (ESO template prefers certs).
+    SPOKE_TOKEN_VALUE=$(kubectl --kubeconfig="$KUBECONFIG_PATH" --context="$SPOKE_CONTEXT" \
+      create token default --namespace kube-system --duration=87600h 2>/dev/null) || SPOKE_TOKEN_VALUE=""
+    if [[ -n "$SPOKE_TOKEN_VALUE" ]]; then
+      CONFIG_JSON=$(jq -nc \
+        --arg cert "$CLIENT_CERT" --arg key "$CLIENT_KEY" --arg ca "${CA_DATA:-}" --arg t "$SPOKE_TOKEN_VALUE" \
+        '{bearerToken: $t, tlsClientConfig: {certData: $cert, keyData: $key, caData: $ca, insecure: false}}')
+    else
+      echo "WARNING: could not create SA token on spoke $SPOKE_NAME; cert-only config (spoke SecretStore may need authType=cert)"
+      CONFIG_JSON=$(jq -nc \
+        --arg cert "$CLIENT_CERT" --arg key "$CLIENT_KEY" --arg ca "${CA_DATA:-}" \
+        '{tlsClientConfig: {certData: $cert, keyData: $key, caData: $ca, insecure: false}}')
+    fi
   elif [[ -n "$SPOKE_TOKEN_VALUE" ]]; then
     CONFIG_JSON=$(jq -nc \
       --arg t "$SPOKE_TOKEN_VALUE" --arg ca "${CA_DATA:-}" \
