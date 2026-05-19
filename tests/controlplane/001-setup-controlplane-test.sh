@@ -2,17 +2,17 @@
 # Deploy dummy workloads for measuring istiod control-plane resource consumption.
 #
 # Usage:
-#   ./controlplane-test/001-setup-controlplane-test.sh [--contexts CSV] [options]
+#   ./tests/controlplane/001-setup-controlplane-test.sh [--contexts CSV] [options]
 #
 # Examples:
 #   # Setup on all default clusters:
-#   ./controlplane-test/001-setup-controlplane-test.sh
+#   ./tests/controlplane/001-setup-controlplane-test.sh
 #
 #   # Setup with custom workload size:
-#   ./controlplane-test/001-setup-controlplane-test.sh --service-count 50 --replicas 5
+#   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 50 --replicas 5
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -112,7 +112,7 @@ fi
 apply=("${KUBECTL[@]}" apply)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
-CHART_DIR="${ROOT}/charts/controlplane-test"
+CHART_DIR="${ROOT}/tests/controlplane/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
 	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas)"

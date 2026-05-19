@@ -54,10 +54,10 @@ No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want
 
 1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
 2. Platform + Mesh — apply the platform Terraform module (`terraform/platform/`). This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
-3. Propagation testing — measure xDS propagation latency across clusters (`propagation-test/`).
-4. Control-plane testing — measure istiod resource consumption as mesh size grows (`controlplane-test/`).
-5. Data-plane testing — measure cross-cluster latency and throughput through east-west gateways (`dataplane-test/`).
-6. Churn testing — measure control-plane convergence under endpoint churn (`churn-test/`).
+3. Propagation testing — measure xDS propagation latency across clusters (`tests/propagation/`).
+4. Control-plane testing — measure istiod resource consumption as mesh size grows (`tests/controlplane/`).
+5. Data-plane testing — measure cross-cluster latency and throughput through east-west gateways (`tests/dataplane/`).
+6. Churn testing — measure control-plane convergence under endpoint churn (`tests/churn/`).
 
 ---
 
@@ -129,7 +129,6 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
 | `charts/spoke-mesh-restart/` | Helm chart: restart Job for istiod and gateways after mesh GitOps sync completes (wave 30). |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app). |
-| `charts/propagation-test/` | Helm chart: watcher and canary workloads for measuring xDS propagation latency. |
 | `charts/istiod-monitor/` | Helm chart: OpenShift UWM ServiceMonitor + PrometheusRule for istiod pilot metrics. |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD ApplicationSet + RBAC for ACM Placement; preset value files per component. |
 | `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD Application `hub-gitops-root` (directory sync of child Applications). |
@@ -143,7 +142,10 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/acm-gitops-cluster/` | Helm chart: GitOpsCluster CR binding ACM Placement to an Argo CD instance. |
 | `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration. |
 | `config/versions.env` | Core version pins and mesh identity; sources `config/options.env` for operational defaults. |
-| `propagation-test/` | Propagation latency test suite: active probes + metrics collection + sweep orchestrator. |
+| `tests/propagation/` | Propagation latency test suite: scripts + `chart/` Helm chart. |
+| `tests/controlplane/` | Control-plane resource scaling test suite: scripts + `chart/` Helm chart. |
+| `tests/dataplane/` | Data-plane latency test suite: scripts + `chart/` Helm chart. |
+| `tests/churn/` | Churn/convergence test suite: scripts + `chart/` Helm chart. |
 
 </details>
 
@@ -266,7 +268,7 @@ This removes the ApplicationSet and all generated Applications. The `mesh-verify
 
 ---
 
-## 3. Propagation Latency Testing (`propagation-test/`)
+## 3. Propagation Latency Testing (`tests/propagation/`)
 
 Measure how quickly the multi-cluster control plane propagates endpoint and config changes across clusters. Two complementary approaches:
 
@@ -276,60 +278,60 @@ Measure how quickly the multi-cluster control plane propagates endpoint and conf
 Run the sweep to compare propagation latency across mesh sizes (1, 2, 3, ... N clusters):
 
 ```bash
-./propagation-test/006-run-sweep.sh \
+./tests/propagation/006-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3 --iterations 5
 ```
 
-See `propagation-test/README.md` for full usage.
+See `tests/propagation/README.md` for full usage.
 
 ---
 
-## 4. Control-Plane Resource Testing (`controlplane-test/`)
+## 4. Control-Plane Resource Testing (`tests/controlplane/`)
 
 Measure istiod CPU, memory, and xDS metrics as a function of mesh size. Deploys dummy workloads to generate endpoint load, then scrapes `kubectl top` and istiod Prometheus metrics.
 
 ```bash
 # Sweep across mesh sizes with 50 services per cluster
-./controlplane-test/003-run-sweep.sh \
+./tests/controlplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --service-count 50
 
 # Or collect a single snapshot
-./controlplane-test/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002
+./tests/controlplane/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002
 ```
 
-See `controlplane-test/README.md` for full usage.
+See `tests/controlplane/README.md` for full usage.
 
 ---
 
-## 5. Data-Plane Latency Testing (`dataplane-test/`)
+## 5. Data-Plane Latency Testing (`tests/dataplane/`)
 
 Measure cross-cluster request latency and throughput through east-west gateways using fortio. Compares same-cluster baseline with cross-cluster hops at multiple QPS levels.
 
 ```bash
 # Sweep across mesh sizes
-./dataplane-test/003-run-sweep.sh \
+./tests/dataplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --qps-levels 10,100,500,1000
 ```
 
-See `dataplane-test/README.md` for full usage.
+See `tests/dataplane/README.md` for full usage.
 
 ---
 
-## 6. Churn / Convergence Testing (`churn-test/`)
+## 6. Churn / Convergence Testing (`tests/churn/`)
 
 Measure control-plane convergence time under simultaneous scaling events. Scales deployments across clusters and polls istiod `/debug/syncz` and sidecar endpoints to measure how quickly the mesh converges.
 
 ```bash
 # Sweep across mesh sizes and churn intensities
-./churn-test/003-run-sweep.sh \
+./tests/churn/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --churn-intensities 5,10,20
 ```
 
-See `churn-test/README.md` for full usage.
+See `tests/churn/README.md` for full usage.
 
 ---
 

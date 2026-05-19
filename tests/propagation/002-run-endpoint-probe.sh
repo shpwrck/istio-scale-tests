@@ -4,21 +4,21 @@
 # and sidecar proxy-config on remote clusters to measure wall-clock propagation time.
 #
 # Usage:
-#   ./propagation-test/002-run-endpoint-probe.sh --source-context CTX [--remote-contexts CSV] [options]
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context CTX [--remote-contexts CSV] [options]
 #
 # Examples:
 #   # Measure 2-cluster propagation, 10 iterations:
-#   ./propagation-test/002-run-endpoint-probe.sh --source-context rosa-001 --remote-contexts rosa-002
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 --remote-contexts rosa-002
 #
 #   # Measure single-cluster baseline (local xDS push only):
-#   ./propagation-test/002-run-endpoint-probe.sh --source-context rosa-001 --mesh-size 1
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 --mesh-size 1
 #
 #   # 3-cluster sweep, 5 iterations:
-#   ./propagation-test/002-run-endpoint-probe.sh --source-context rosa-001 \
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 \
 #     --remote-contexts rosa-002,rosa-003 --mesh-size 3 --iterations 5
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -28,13 +28,13 @@ MESH_SIZE=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_S="0.$(printf '%03d' "$((PROPAGATION_POLL_INTERVAL_MS))")"
-OUTPUT_DIR="${ROOT}/propagation-test/results"
+OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
 NS="${PROPAGATION_TEST_NAMESPACE}"
 BASE_PF_PORT=15014
 BASE_ENVOY_PF_PORT=15100
-CHART_DIR="${ROOT}/charts/propagation-test"
+CHART_DIR="${ROOT}/tests/propagation/chart"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -48,7 +48,7 @@ Usage: $(basename "$0") [options]
   --iterations N            Number of probe iterations (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC             Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS).
-  --output-dir DIR          Results directory (default: propagation-test/results).
+  --output-dir DIR          Results directory (default: tests/propagation/results).
   --tsv                     Also write per-iteration rows to a TSV file.
   --dry-run                 Render and print canary manifests without applying.
   -h, --help                Show this help.

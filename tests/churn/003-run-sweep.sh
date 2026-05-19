@@ -2,17 +2,17 @@
 # Orchestrate churn probes across mesh sizes and churn intensities.
 #
 # Usage:
-#   ./churn-test/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
+#   ./tests/churn/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
 #
 # Examples:
 #   # Sweep 1, 2, 3 clusters with default churn:
-#   ./churn-test/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/churn/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
 #
 #   # Sweep churn intensities (deployment counts):
-#   ./churn-test/003-run-sweep.sh --churn-intensities 5,10,20
+#   ./tests/churn/003-run-sweep.sh --churn-intensities 5,10,20
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -22,7 +22,7 @@ CHURN_INTENSITIES_CSV=""
 SCALE_TO="${CHURN_SCALE_TO_REPLICAS:-5}"
 ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
-OUTPUT_DIR="${ROOT}/churn-test/results"
+OUTPUT_DIR="${ROOT}/tests/churn/results"
 DRY_RUN=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -37,7 +37,7 @@ Usage: $(basename "$0") [options]
   --scale-to N              Scale targets to N replicas (default: $SCALE_TO).
   --iterations N            Iterations per combination (default: $ITERATIONS).
   --timeout SEC             Timeout per iteration (default: $TIMEOUT_SEC).
-  --output-dir DIR          Results directory (default: churn-test/results).
+  --output-dir DIR          Results directory (default: tests/churn/results).
   --dry-run                 Show plan without executing.
   -h, --help                Show this help.
 EOF
@@ -131,7 +131,7 @@ else
 	CHURN_INTENSITIES=("${CHURN_DEPLOYMENT_COUNT:-5}")
 fi
 
-SCRIPT_DIR="${ROOT}/churn-test"
+SCRIPT_DIR="${ROOT}/tests/churn"
 
 echo "=========================================="
 echo "  Churn Convergence Sweep"

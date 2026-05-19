@@ -2,14 +2,14 @@
 # Deploy fortio server and client pods for cross-cluster data-plane latency testing.
 #
 # Usage:
-#   ./dataplane-test/001-setup-dataplane-test.sh --source-context CTX [--remote-contexts CSV] [options]
+#   ./tests/dataplane/001-setup-dataplane-test.sh --source-context CTX [--remote-contexts CSV] [options]
 #
 # Examples:
 #   # Server on all clusters, client on rosa-001:
-#   ./dataplane-test/001-setup-dataplane-test.sh --source-context rosa-001 --remote-contexts rosa-002,rosa-003
+#   ./tests/dataplane/001-setup-dataplane-test.sh --source-context rosa-001 --remote-contexts rosa-002,rosa-003
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -102,7 +102,7 @@ ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 apply=("${KUBECTL[@]}" apply)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
-CHART_DIR="${ROOT}/charts/dataplane-test"
+CHART_DIR="${ROOT}/tests/dataplane/chart"
 
 echo "Deploying fortio server on all clusters..."
 for ctx in "${ALL_CTXS[@]}"; do

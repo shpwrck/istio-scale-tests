@@ -2,12 +2,12 @@
 # Generate summary statistics from data-plane latency TSV files.
 #
 # Usage:
-#   ./dataplane-test/004-report-results.sh [--results-dir DIR]
+#   ./tests/dataplane/004-report-results.sh [--results-dir DIR]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-RESULTS_DIR="${ROOT}/dataplane-test/results"
+RESULTS_DIR="${ROOT}/tests/dataplane/results"
 FORMAT="text"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -16,7 +16,7 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: dataplane-test/results).
+  --results-dir DIR  Results directory (default: tests/dataplane/results).
   --format FMT       Output format: text, csv (default: text).
   -h, --help         Show this help.
 EOF

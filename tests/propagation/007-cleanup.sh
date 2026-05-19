@@ -6,17 +6,17 @@
 # Safe to run at any time — all deletes use --ignore-not-found.
 #
 # Usage:
-#   ./propagation-test/007-cleanup.sh [--contexts CSV] [--dry-run]
+#   ./tests/propagation/007-cleanup.sh [--contexts CSV] [--dry-run]
 #
 # Examples:
 #   # Clean up all default clusters:
-#   ./propagation-test/007-cleanup.sh
+#   ./tests/propagation/007-cleanup.sh
 #
 #   # Clean up specific clusters:
-#   ./propagation-test/007-cleanup.sh --contexts istio-002,istio-003
+#   ./tests/propagation/007-cleanup.sh --contexts istio-002,istio-003
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 

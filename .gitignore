@@ -3,28 +3,19 @@
 *.key
 *.crt
 
-# Kubeconfig files (but not chart directories containing "kubeconfig" in the name)
-kubeconfig
-*kubeconfig*
-!charts/*kubeconfig*/
-!charts/*kubeconfig*/**
+# Generated kubeconfig (terraform/rosa-hcp/kubeconfig)
+/terraform/rosa-hcp/kubeconfig
 
 # Environment files with potential secrets
 .env
 .env.local
 .env.*.local
 
-# Propagation test results (TSV data and scraped metrics)
-/propagation-test/results/
-
-# Control-plane test results
-/controlplane-test/results/
-
-# Data-plane latency test results
-/dataplane-test/results/
-
-# Churn convergence test results
-/churn-test/results/
+# Test results (TSV data, scraped metrics, reports)
+/tests/propagation/results/
+/tests/controlplane/results/
+/tests/dataplane/results/
+/tests/churn/results/
 
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/

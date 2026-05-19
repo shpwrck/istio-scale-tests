@@ -4,21 +4,21 @@
 # producing results tagged by cluster count for side-by-side analysis.
 #
 # Usage:
-#   ./propagation-test/006-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [--iterations N] [options]
+#   ./tests/propagation/006-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [--iterations N] [options]
 #
 # Examples:
 #   # Sweep 1, 2, 3 clusters:
-#   ./propagation-test/006-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/propagation/006-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
 #
 #   # Sweep specific sizes with fewer iterations:
-#   ./propagation-test/006-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003 \
+#   ./tests/propagation/006-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003 \
 #     --mesh-sizes 1,3 --iterations 5
 #
 #   # Dry-run to see what would be executed:
-#   ./propagation-test/006-run-sweep.sh --dry-run
+#   ./tests/propagation/006-run-sweep.sh --dry-run
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -26,7 +26,7 @@ CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
-OUTPUT_DIR="${ROOT}/propagation-test/results"
+OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
 COLLECT_METRICS=0
@@ -41,7 +41,7 @@ Usage: $(basename "$0") [options]
   --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
   --iterations N       Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC        Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
-  --output-dir DIR     Results directory (default: propagation-test/results).
+  --output-dir DIR     Results directory (default: tests/propagation/results).
   --tsv                Also write per-iteration TSV files (enables 005 report).
   --collect-metrics    Also run 004-collect-pilot-metrics.sh at each mesh size.
   --dry-run            Show plan without executing.
@@ -135,7 +135,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 
-SCRIPT_DIR="${ROOT}/propagation-test"
+SCRIPT_DIR="${ROOT}/tests/propagation"
 
 echo "=========================================="
 echo "  Propagation Latency Sweep"

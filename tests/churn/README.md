@@ -22,37 +22,37 @@ Measure control-plane convergence time under simultaneous endpoint churn across 
 
 ```bash
 # 1. Deploy churn targets and watcher pods
-./churn-test/001-setup-churn-test.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/churn/001-setup-churn-test.sh --contexts rosa-001,rosa-002,rosa-003
 
 # 2. Run churn probe (scale 5 deployments from 1 to 5 replicas)
-./churn-test/002-run-churn-probe.sh \
+./tests/churn/002-run-churn-probe.sh \
   --source-context rosa-001 --remote-contexts rosa-002 \
   --iterations 5
 
 # 3. View results
-./churn-test/004-report-results.sh
+./tests/churn/004-report-results.sh
 ```
 
 ## Sweep Across Mesh Sizes and Churn Intensities
 
 ```bash
 # Sweep mesh sizes with default churn
-./churn-test/003-run-sweep.sh \
+./tests/churn/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3
 
 # Sweep churn intensities (5, 10, 20 deployments)
-./churn-test/003-run-sweep.sh \
+./tests/churn/003-run-sweep.sh \
   --contexts rosa-001,rosa-002 \
   --churn-intensities 5,10,20
 
 # Dry-run
-./churn-test/003-run-sweep.sh --dry-run
+./tests/churn/003-run-sweep.sh --dry-run
 ```
 
 ## Results Format
 
-TSV files in `churn-test/results/` (gitignored):
+TSV files in `tests/churn/results/` (gitignored):
 
 ```
 run_id  mesh_size  churn_intensity  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  push_triggers_delta  xds_pushes_delta  queue_time_p99_ms  status
@@ -61,7 +61,7 @@ run_id  mesh_size  churn_intensity  iteration  t0_epoch_ns  convergence_local_ms
 ## Cleanup
 
 ```bash
-./churn-test/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/churn/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 ```
 
 ## Scripts

@@ -2,17 +2,17 @@
 # Deploy churn target workloads and watcher pods for convergence testing.
 #
 # Usage:
-#   ./churn-test/001-setup-churn-test.sh [--contexts CSV] [options]
+#   ./tests/churn/001-setup-churn-test.sh [--contexts CSV] [options]
 #
 # Examples:
 #   # Setup on all default clusters:
-#   ./churn-test/001-setup-churn-test.sh
+#   ./tests/churn/001-setup-churn-test.sh
 #
 #   # Setup with custom churn targets:
-#   ./churn-test/001-setup-churn-test.sh --deployment-count 10 --base-replicas 1
+#   ./tests/churn/001-setup-churn-test.sh --deployment-count 10 --base-replicas 1
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
@@ -111,7 +111,7 @@ fi
 apply=("${KUBECTL[@]}" apply)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
-CHART_DIR="${ROOT}/charts/churn-test"
+CHART_DIR="${ROOT}/tests/churn/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
 	echo "Setting up churn-test on context $ctx (${DEPLOYMENT_COUNT} deployments × ${BASE_REPLICAS} replicas)"

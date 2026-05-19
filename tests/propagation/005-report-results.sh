@@ -3,22 +3,22 @@
 # Groups results by mesh_size to compare propagation latency across cluster counts.
 #
 # Usage:
-#   ./propagation-test/005-report-results.sh [--results-dir DIR] [--format text|csv|json]
+#   ./tests/propagation/005-report-results.sh [--results-dir DIR] [--format text|csv|json]
 #
 # Examples:
 #   # Default text report from all results:
-#   ./propagation-test/005-report-results.sh
+#   ./tests/propagation/005-report-results.sh
 #
 #   # CSV output:
-#   ./propagation-test/005-report-results.sh --format csv
+#   ./tests/propagation/005-report-results.sh --format csv
 #
 #   # Specific results directory:
-#   ./propagation-test/005-report-results.sh --results-dir propagation-test/results
+#   ./tests/propagation/005-report-results.sh --results-dir tests/propagation/results
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-RESULTS_DIR="${ROOT}/propagation-test/results"
+RESULTS_DIR="${ROOT}/tests/propagation/results"
 FORMAT="text"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -27,7 +27,7 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: propagation-test/results).
+  --results-dir DIR  Results directory (default: tests/propagation/results).
   --format FMT       Output format: text, csv, json, markdown (default: text).
   -h, --help         Show this help.
 EOF

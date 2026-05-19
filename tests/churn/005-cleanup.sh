@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Clean up all controlplane-test resources from target clusters.
+# Clean up all churn-test resources from target clusters.
 #
 # Usage:
-#   ./controlplane-test/005-cleanup.sh [--contexts CSV] [--dry-run]
+#   ./tests/churn/005-cleanup.sh [--contexts CSV] [--dry-run]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
-NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
+NS="${CHURN_TEST_NAMESPACE:-churn-test}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -24,7 +24,7 @@ Usage: $(basename "$0") [options]
   -h, --help       Show this help.
 
 Environment:
-  SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE.
+  SETUP_CONTEXTS, CHURN_TEST_NAMESPACE.
 EOF
 }
 
@@ -86,7 +86,7 @@ run_delete() {
 	fi
 }
 
-echo "=== Control-plane test cleanup ==="
+echo "=== Churn test cleanup ==="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Namespace: $NS"
 ((DRY_RUN)) && echo "Mode: dry-run"

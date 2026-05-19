@@ -25,13 +25,13 @@ Measure istiod CPU, memory, and xDS metrics as a function of mesh size and workl
 
 ```bash
 # 1. Deploy dummy workloads on all clusters
-./controlplane-test/001-setup-controlplane-test.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/controlplane/001-setup-controlplane-test.sh --contexts rosa-001,rosa-002,rosa-003
 
 # 2. Collect metrics snapshot
-./controlplane-test/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/controlplane/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002,rosa-003
 
 # 3. View results
-./controlplane-test/004-report-results.sh
+./tests/controlplane/004-report-results.sh
 ```
 
 ## Sweep Across Mesh Sizes
@@ -40,13 +40,13 @@ Compare istiod resource consumption at different cluster counts:
 
 ```bash
 # Deploy, collect, cleanup at mesh_size=1, 2, 3
-./controlplane-test/003-run-sweep.sh \
+./tests/controlplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3 \
   --service-count 50
 
 # Dry-run to see plan without executing
-./controlplane-test/003-run-sweep.sh --dry-run
+./tests/controlplane/003-run-sweep.sh --dry-run
 ```
 
 ## Watch Mode
@@ -54,12 +54,12 @@ Compare istiod resource consumption at different cluster counts:
 Monitor istiod metrics continuously during a load test:
 
 ```bash
-./controlplane-test/002-collect-resource-metrics.sh --watch --interval 15
+./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 ```
 
 ## Results Format
 
-TSV files in `controlplane-test/results/` (gitignored):
+TSV files in `tests/controlplane/results/` (gitignored):
 
 ```
 timestamp  context  mesh_size  service_count  replicas  istiod_cpu_m  istiod_mem_mi  convergence_p50_ms  convergence_p99_ms  queue_p50_ms  queue_p99_ms  xds_pushes  k8s_events  connected_proxies  config_size_bytes
@@ -68,7 +68,7 @@ timestamp  context  mesh_size  service_count  replicas  istiod_cpu_m  istiod_mem
 ## Cleanup
 
 ```bash
-./controlplane-test/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/controlplane/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 ```
 
 ## Scripts

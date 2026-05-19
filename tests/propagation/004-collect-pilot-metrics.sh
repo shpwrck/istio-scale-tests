@@ -4,25 +4,25 @@
 # or for quick point-in-time snapshots during load tests.
 #
 # Usage:
-#   ./propagation-test/004-collect-pilot-metrics.sh [--contexts CSV] [--output-dir DIR] [--watch --interval SEC]
+#   ./tests/propagation/004-collect-pilot-metrics.sh [--contexts CSV] [--output-dir DIR] [--watch --interval SEC]
 #
 # Examples:
 #   # One-shot snapshot from all clusters:
-#   ./propagation-test/004-collect-pilot-metrics.sh
+#   ./tests/propagation/004-collect-pilot-metrics.sh
 #
 #   # Watch mode, scrape every 10s:
-#   ./propagation-test/004-collect-pilot-metrics.sh --watch --interval 10
+#   ./tests/propagation/004-collect-pilot-metrics.sh --watch --interval 10
 #
 #   # Specific clusters:
-#   ./propagation-test/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
+#   ./tests/propagation/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
-OUTPUT_DIR="${ROOT}/propagation-test/results"
+OUTPUT_DIR="${ROOT}/tests/propagation/results"
 WATCH=0
 INTERVAL=10
 DRY_RUN=0
@@ -35,7 +35,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --contexts CSV     Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --output-dir DIR   Results directory (default: propagation-test/results).
+  --output-dir DIR   Results directory (default: tests/propagation/results).
   --watch            Loop continuously.
   --interval SEC     Seconds between scrapes in watch mode (default: 10).
   --dry-run          Show what would be scraped without connecting.
