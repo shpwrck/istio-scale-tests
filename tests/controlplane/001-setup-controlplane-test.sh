@@ -167,6 +167,29 @@ echo "Namespaces:      ${NAMESPACES[*]}"
 ((DRY_RUN)) && echo "Mode:            dry-run"
 echo ""
 
+# Capacity preflight: verify each cluster can schedule the planned pods before
+# deploying anything. Queries node allocatable.pods and current pod count; fails
+# early with an actionable message instead of hanging at the wait timeout.
+if ! ((DRY_RUN)); then
+	NEEDED_PODS=$((SERVICE_COUNT * REPLICAS))
+	echo "Capacity preflight ($NEEDED_PODS pods needed per cluster)..."
+	for ctx in "${CONTEXTS[@]}"; do
+		alloc=$("${KUBECTL[@]}" --context="$ctx" get nodes -o json 2>/dev/null \
+			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
+		current=$("${KUBECTL[@]}" --context="$ctx" get pods --all-namespaces --no-headers 2>/dev/null | wc -l) || current=""
+		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
+			remaining=$((alloc - current))
+			if ((NEEDED_PODS > remaining)); then
+				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current running). Reduce --service-count or --replicas, or add nodes."
+			fi
+			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
+		else
+			echo "  $ctx: could not query capacity (alloc=$alloc, current=$current) — skipping preflight" >&2
+		fi
+	done
+	echo ""
+fi
+
 # Use server-side apply so partial updates and field-manager ownership are
 # tracked by the API server (no client-side last-applied annotation). With
 # --force-conflicts we win any field-ownership conflict from a previous
