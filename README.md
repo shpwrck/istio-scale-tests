@@ -289,7 +289,7 @@ See `tests/propagation/README.md` for full usage.
 
 ## 4. Control-Plane Resource Testing (`tests/controlplane/`)
 
-Measure istiod CPU, memory, and xDS metrics as a function of mesh size. Deploys dummy workloads to generate endpoint load, then scrapes `kubectl top` and istiod Prometheus metrics.
+Measure istiod CPU, memory, and xDS metrics as a function of mesh size **and `Sidecar` CR scoping**. Deploys dummy workloads to generate endpoint load, then scrapes `kubectl top`, istiod Prometheus metrics, and per-proxy `/config_dump?include_eds` byte size.
 
 ```bash
 # Sweep across mesh sizes with 50 services per cluster
@@ -297,11 +297,18 @@ Measure istiod CPU, memory, and xDS metrics as a function of mesh size. Deploys 
   --contexts rosa-001,rosa-002,rosa-003 \
   --service-count 50
 
+# Cross-product mesh size with Sidecar scoping (none, namespace, explicit)
+# — measures the per-proxy config-size reduction that Sidecar CRs provide.
+./tests/controlplane/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --mesh-sizes 1,2,3 \
+  --sidecar-scopings none,namespace,explicit
+
 # Or collect a single snapshot
 ./tests/controlplane/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002
 ```
 
-See `tests/controlplane/README.md` for full usage.
+`--sidecar-scopings` accepts a CSV of `none`, `namespace`, and/or `explicit`; the report's headline is the percentage reduction in per-proxy config bytes versus the `none` baseline. See `tests/controlplane/README.md` for full usage.
 
 ---
 

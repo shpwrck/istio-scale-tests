@@ -46,7 +46,7 @@ Usage: $(basename "$0") [options]
   --sidecar-scoping VALUE      Singular alias: a single scoping mode.
   --service-count N            Dummy services per cluster (default: $SERVICE_COUNT).
   --replicas N                 Replicas per service (default: $REPLICAS).
-  --config-dump-samples N      Pods per cluster to exec /config_dump on (default: $CONFIG_DUMP_SAMPLES).
+  --config-dump-samples N      Pods per cluster to exec /config_dump on (default: $CONFIG_DUMP_SAMPLES; 0 disables).
   --settle SEC                 Seconds to wait after deploy before collecting (default: $SETTLE_SEC).
   --output-dir DIR             Results directory (default: tests/controlplane/results).
   --max-combos N               Safety cap on matrix size (default: $MAX_COMBOS).
@@ -75,7 +75,8 @@ split_csv() {
 validate_scoping_value() {
 	case "$1" in
 	none | namespace | explicit) return 0 ;;
-	*) die "sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	# F1: error wording matches 001/002 (`--sidecar-scoping must be one of …`).
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
 	esac
 }
 
@@ -213,7 +214,7 @@ SCRIPT_DIR="${ROOT}/tests/controlplane"
 	echo "Sidecar scopings (n=${#SCOPINGS[@]}): ${SCOPINGS[*]}"
 	echo "Planned combinations: ${COMBOS} (cap ${MAX_COMBOS})"
 	echo "Workload:           ${SERVICE_COUNT} services × ${REPLICAS} replicas"
-	echo "Settle time:        ${SETTLE_SEC}s"
+	echo "Settle time:        ${SETTLE_SEC}s (pre-baseline, baseline→final, AND post-cleanup)"
 	echo "Config-dump samples: ${CONFIG_DUMP_SAMPLES}"
 	echo "Output:             ${SWEEP_DIR}"
 	echo ""
@@ -273,6 +274,15 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "--- Cleaning up ---"
 		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
 		echo ""
+
+		# D1: post-cleanup settle. When 005 deletes the test namespace, istiod
+		# re-pushes a broader (no-Sidecar) config to remaining proxies. Without
+		# this sleep, the next combo's baseline scrape lands inside that push
+		# storm and corrupts the counter/quantile deltas. Use the same
+		# SETTLE_SEC value as the baseline→final window so the system is at
+		# rest before the next 001.
+		echo "--- Settling post-cleanup (${SETTLE_SEC}s) ---" >&2
+		sleep "$SETTLE_SEC"
 	done
 done
 

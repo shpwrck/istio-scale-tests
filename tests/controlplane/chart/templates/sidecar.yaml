@@ -1,11 +1,19 @@
 {{- include "controlplane-test.validateSidecarScoping" . -}}
 {{- $scope := .Values.sidecarScoping | default "none" -}}
 {{- if ne $scope "none" }}
-{{- $nsList := fromYamlArray (include "controlplane-test.namespaces" .) -}}
+{{- /*
+  B2: Sidecar CRs are only emitted into the PRIMARY namespace. Although
+  `namespaceCount > 1` requests multiple workload namespaces, the chart only
+  deploys dummy-svc-* Deployments in the primary namespace. Emitting Sidecar
+  CRs into namespaces with zero pods would inflate pilot_xds_pushes /
+  pilot_k8s_cfg_events with "extra empty CRs" rather than "more scoped
+  namespaces" and contaminate the measurement. The runtime sweep across
+  namespace counts is owned by a sibling branch; revisit when it lands.
+*/ -}}
+{{- $ns := .Values.namespace -}}
 {{- $extra := default (list) .Values.sidecarExtraEgressHosts -}}
 {{- if eq $scope "namespace" }}
-{{- /* One namespace-scoped Sidecar per workload namespace (no workloadSelector). */ -}}
-{{- range $ns := $nsList }}
+{{- /* One namespace-scoped Sidecar in the primary namespace (no workloadSelector). */ -}}
 ---
 apiVersion: networking.istio.io/v1
 kind: Sidecar
@@ -13,7 +21,7 @@ metadata:
   name: default
   namespace: {{ $ns }}
   labels:
-    {{- include "controlplane-test.labels" $ | nindent 4 }}
+    {{- include "controlplane-test.labels" . | nindent 4 }}
     controlplane-test.scope: namespace
 spec:
   egress:
@@ -24,11 +32,9 @@ spec:
         {{- range $h := $extra }}
         - {{ $h | quote }}
         {{- end }}
-{{- end }}
 {{- else if eq $scope "explicit" }}
-{{- /* One Sidecar per Deployment with workloadSelector matching dummy-svc-<i>. */ -}}
-{{- $count := int $.Values.serviceCount -}}
-{{- range $ns := $nsList }}
+{{- /* One Sidecar per Deployment in the primary namespace with workloadSelector matching dummy-svc-<i>. */ -}}
+{{- $count := int .Values.serviceCount -}}
 {{- range $i := until $count }}
 ---
 apiVersion: networking.istio.io/v1
@@ -52,7 +58,6 @@ spec:
         {{- range $h := $extra }}
         - {{ $h | quote }}
         {{- end }}
-{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
