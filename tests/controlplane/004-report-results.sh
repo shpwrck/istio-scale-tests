@@ -76,16 +76,16 @@ if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Partition into "new schema" (27 columns — adds settle_sec & istiod_restarted)
-# and "legacy" (anything else). We do this with a per-file probe of the header
+# Partition into "new schema" (28 columns — adds istiod_cpu_m_delta) and
+# "legacy" (anything else). We do this with a per-file probe of the header
 # line so a partial sweep with mixed schemas doesn't poison the aggregation.
 TSV_FILES=()
 LEGACY_FILES=()
 for f in "${ALL_TSV[@]}"; do
 	header=$(grep -m1 -v '^#' "$f" 2>/dev/null || true)
-	# Count tabs + 1. The new schema has 27 cols (26 tabs).
+	# Count tabs + 1. The new schema has 28 cols (27 tabs).
 	tabs=$(awk -F'\t' '{print NF}' <<<"$header")
-	if [[ "$tabs" == "27" ]]; then
+	if [[ "$tabs" == "28" ]]; then
 		TSV_FILES+=("$f")
 	else
 		LEGACY_FILES+=("$f")
@@ -100,7 +100,7 @@ if (( ${#LEGACY_FILES[@]} > 0 )); then
 fi
 
 if (( ${#TSV_FILES[@]} == 0 )); then
-	die "no TSV files with the current 27-column schema found in $RESULTS_DIR"
+	die "no TSV files with the current 28-column schema found in $RESULTS_DIR"
 fi
 
 # Pluck reproducibility tags from the first new-schema file's preamble.
@@ -116,7 +116,7 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 # the literal "overflow" for that metric and skips it in the numeric min/max
 # /avg. Pure-numeric keys behave identically to before.
 #
-# New 27-column schema (1-indexed):
+# New 28-column schema (1-indexed):
 #  1 timestamp        2 context       3 mesh_size     4 service_count
 #  5 replicas         6 namespace_count
 #  7 istiod_cpu_m     8 istiod_mem_mi
@@ -128,10 +128,14 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 # 22 connected_proxies   23 config_size_avg_bytes
 # 24 scrape_window_sec   25 scrape_skew_ms
 # 26 settle_sec          27 istiod_restarted
+# 28 istiod_cpu_m_delta — delta of `process_cpu_seconds_total` over the
+#                          scrape window, scaled to millicores. The primary
+#                          CPU metric; column 7 is a `kubectl top` snapshot
+#                          retained for spot-check comparison.
 #
 # Output (aggregated, tab-separated):
 #   mesh_size service_count replicas namespace_count n
-#   cpu_min cpu_max cpu_avg
+#   cpu_min cpu_max cpu_avg                   (kubectl top snapshot)
 #   mem_min mem_max mem_avg
 #   conv99_min conv99_max conv99_avg
 #   queue99_min queue99_max queue99_avg
@@ -139,6 +143,8 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 #   restarts          (count of rows with istiod_restarted=1 for this 4-tuple)
 #   unknown_restarts  (count of rows with istiod_restarted=unknown — couldn't
 #                      tell whether a restart happened during the window)
+#   cpu_delta_min cpu_delta_max cpu_delta_avg   (process_cpu_seconds_total
+#                                                delta — primary CPU metric)
 #
 # Any *_min/*_max/*_avg cell where the underlying samples included an
 # "overflow" is printed as the literal string "overflow".
@@ -168,14 +174,15 @@ aggregate() {
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
 	}
-	!/^#/ && !/^timestamp/ && NF>=27 {
+	!/^#/ && !/^timestamp/ && NF>=28 {
 		key = $3 "|" $4 "|" $5 "|" $6
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
-		ingest("cpu",   $7,  key)
-		ingest("mem",   $8,  key)
-		ingest("conv",  $10, key)
-		ingest("queue", $12, key)
-		ingest("prx",   $22, key)
+		ingest("cpu",       $7,  key)
+		ingest("mem",       $8,  key)
+		ingest("conv",      $10, key)
+		ingest("queue",     $12, key)
+		ingest("prx",       $22, key)
+		ingest("cpu_delta", $28, key)
 		# istiod_restarted is pass-through: count rows in this group that
 		# had a restart during the scrape window. No aggregation math —
 		# operators care about "did *any* sample in this cell get tainted".
@@ -201,21 +208,22 @@ aggregate() {
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
-		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tn\tcpu_min\tcpu_max\tcpu_avg\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\n"
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tn\tcpu_min\tcpu_max\tcpu_avg\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\n"
 		for (i = 1; i <= nkey; i++) {
 			k = order[i]
 			split(k, p, "|")
 			nn = n[k]
 			rr = (k in restarts) ? restarts[k] : 0
 			uu = (k in unknowns) ? unknowns[k] : 0
-			printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
+			printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
 				p[1], p[2], p[3], p[4], nn,
-				emit3("cpu",   k),
-				emit3("mem",   k),
-				emit3("conv",  k),
-				emit3("queue", k),
-				emit3("prx",   k),
-				rr, uu
+				emit3("cpu",       k),
+				emit3("mem",       k),
+				emit3("conv",      k),
+				emit3("queue",     k),
+				emit3("prx",       k),
+				rr, uu,
+				emit3("cpu_delta", k)
 		}
 	}'
 }
@@ -230,13 +238,14 @@ report_text() {
 	NR == 1 { next }
 	{
 		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s (n=%s) ---\n", $1, $2, $3, $4, $5
-		printf "  istiod CPU (m):          min=%s max=%s avg=%s\n",     $6, $7, $8
-		printf "  istiod Memory (Mi):      min=%s max=%s avg=%s\n",     $9, $10, $11
-		printf "  Convergence p99 (ms):    min=%s max=%s avg=%s\n",     $12, $13, $14
-		printf "  Queue p99 (ms):          min=%s max=%s avg=%s\n",     $15, $16, $17
-		printf "  Connected proxies:       min=%s max=%s avg=%s\n",     $18, $19, $20
-		if ($21+0 > 0) printf "  ! istiod restarts:       %s row(s) had restarts during the scrape window\n", $21
-		if ($22+0 > 0) printf "  ? undetectable restart:  %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $22
+		printf "  istiod CPU window avg (m): min=%s max=%s avg=%s   [primary: process_cpu_seconds_total delta over window]\n", $23, $24, $25
+		printf "  istiod CPU spot-check (m): min=%s max=%s avg=%s   [kubectl top snapshot — informational]\n",                 $6,  $7,  $8
+		printf "  istiod Memory (Mi):        min=%s max=%s avg=%s\n",     $9, $10, $11
+		printf "  Convergence p99 (ms):      min=%s max=%s avg=%s\n",     $12, $13, $14
+		printf "  Queue p99 (ms):            min=%s max=%s avg=%s\n",     $15, $16, $17
+		printf "  Connected proxies:         min=%s max=%s avg=%s\n",     $18, $19, $20
+		if ($21+0 > 0) printf "  ! istiod restarts:         %s row(s) had restarts during the scrape window\n", $21
+		if ($22+0 > 0) printf "  ? undetectable restart:    %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $22
 		printf "\n"
 	}'
 }
@@ -266,11 +275,14 @@ report_markdown() {
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	echo "| mesh_size | service_count | replicas | namespace_count | n | cpu_avg (m) | mem_avg (Mi) | conv_p99_avg (ms) | queue_p99_avg (ms) | proxies_avg | restarts | unknown_restarts |"
-	echo "|-----------|---------------|----------|-----------------|---|-------------|--------------|-------------------|--------------------|-------------|----------|------------------|"
+	# cpu_window_avg (m) is the headline — process_cpu_seconds_total delta
+	# scaled to millicores over the actual scrape window. cpu_spot_avg (m) is
+	# the kubectl-top snapshot kept as a sanity check.
+	echo "| mesh_size | service_count | replicas | namespace_count | n | cpu_window_avg (m) | cpu_spot_avg (m) | mem_avg (Mi) | conv_p99_avg (ms) | queue_p99_avg (ms) | proxies_avg | restarts | unknown_restarts |"
+	echo "|-----------|---------------|----------|-----------------|---|--------------------|------------------|--------------|-------------------|--------------------|-------------|----------|------------------|"
 	awk -F'\t' '
 	NR == 1 { next }
-	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $8, $11, $14, $17, $20, $21, $22 }' <<<"$aggregated"
+	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $25, $8, $11, $14, $17, $20, $21, $22 }' <<<"$aggregated"
 	# Only surface the footnote when *something* is non-zero. If only restarts
 	# happened, mention restarts; if only undetectable rows happened, mention
 	# that; if both, combine them into one line.
@@ -300,6 +312,7 @@ report_json() {
 		if (printed++) printf ",\n    "; else printf "\n    "
 		printf "{\"mesh_size\":%s,\"service_count\":%s,\"replicas\":%s,\"namespace_count\":%s,\"n\":%s,",
 			$1, $2, $3, $4, $5
+		printf "\"cpu_m_delta\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($23), cell($24), cell($25)
 		printf "\"cpu_m\":{\"min\":%s,\"max\":%s,\"avg\":%s},",       cell($6), cell($7), cell($8)
 		printf "\"mem_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($9), cell($10), cell($11)
 		printf "\"convergence_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($12), cell($13), cell($14)
