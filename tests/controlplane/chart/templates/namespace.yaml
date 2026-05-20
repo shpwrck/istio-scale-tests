@@ -1,6 +1,14 @@
+{{- $count := .Values.namespaceCount | int -}}
+{{- if lt $count 1 -}}
+{{- fail "namespaceCount must be >= 1" -}}
+{{- end -}}
+{{- range $i := until $count }}
+---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.namespace }}
+  name: {{ include "controlplane-test.namespaceName" (dict "ctx" $ "i" $i) }}
   labels:
     istio.io/rev: default
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+{{- end }}
