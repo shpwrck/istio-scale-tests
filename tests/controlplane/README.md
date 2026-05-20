@@ -59,7 +59,7 @@ This suite sweeps three modes:
 | Mode | Sidecar CRs | Effect |
 |------|-------------|--------|
 | `none` | 0 | Baseline / worst case: every proxy sees every Service in the mesh. |
-| `namespace` | 1 in the primary namespace (no `workloadSelector`) | Realistic operator config. `egress.hosts` restricts each proxy to that namespace + `istio-system`. When `namespaceCount > 1`, fan-out of Sidecar CRs across the extra namespaces is out of scope for this chart — only the primary namespace receives a CR. |
+| `namespace` | 1 in the primary namespace (no `workloadSelector`) | Realistic operator config. `egress.hosts` restricts each proxy to its own namespace + `istio-system`. |
 | `explicit` | 1 per Deployment (with `workloadSelector.labels.app: dummy-svc-<i>`) | Maximum precision; many CRs, smallest per-proxy config. |
 
 Expected per-proxy config size ordering: `none` >> `namespace` >= `explicit`.
@@ -137,12 +137,12 @@ Services are distributed deterministically: service `i` is created in namespace 
   --contexts rosa-001 --config-dump-samples 0
 ```
 
-`SETTLE_SEC` is applied at TWO points inside each combo:
-(1) between the workload deploy (`001`) and the final scrape (`002 --phase final`) — i.e. between baseline and final snapshots; and
-(2) **after** the combo's namespace deletion in `005`, before the next combo's `001`.
-
-The post-cleanup settle lets istiod finish re-pushing the broader (no-Sidecar)
-config to remaining proxies so the next combo's baseline lands at rest.
+`SETTLE_SEC` is applied at TWO points inside each combo: (1) between the
+deploy step (001) and the final scrape, (2) **after** the combo's namespace
+deletion in 005, before the next combo's 001. The post-cleanup settle lets
+istiod finish re-pushing the broader (no-Sidecar) config to remaining
+proxies, so the previous combo's post-cleanup settle serves as a de facto
+pre-baseline rest for subsequent combos.
 
 ## Watch Mode
 
@@ -184,7 +184,7 @@ xds_pushes_delta  xds_pushes_rate
 xds_pushes_cds  xds_pushes_eds  xds_pushes_lds  xds_pushes_rds  xds_pushes_nds
 k8s_events_delta  k8s_events_rate
 connected_proxies  config_size_avg_bytes
-sidecar_config_bytes_avg  sidecar_config_bytes_p50  sidecar_config_bytes_max  sidecar_config_bytes_samples
+sidecar_config_bytes_avg  sidecar_config_bytes_p50  sidecar_config_bytes_max  sidecar_config_bytes_samples (got/attempted)
 scrape_window_sec  scrape_skew_ms
 settle_sec  istiod_restarted
 istiod_cpu_m_delta
@@ -237,3 +237,7 @@ confirms no `Sidecar` CRs leaked.
 - **Settle time is single-valued** across the entire sweep.
 - **Watch mode reports raw cumulative metrics**, not deltas. Use one-shot mode
   for percentile / counter measurements over a defined window.
+- **`namespaceCount > 1` with sidecar scoping**: Sidecar CRs are only emitted
+  into the primary namespace. Config-dump sampling is filtered to the primary
+  namespace so scoped and unscoped pods are not mixed. Pods in additional
+  namespaces have no Sidecar CR and receive the full unscoped config.

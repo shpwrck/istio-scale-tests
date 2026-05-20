@@ -289,7 +289,7 @@ See `tests/propagation/README.md` for full usage.
 
 ## 4. Control-Plane Resource Testing (`tests/controlplane/`)
 
-Measure istiod CPU, memory, and xDS metrics as a function of mesh size **and `Sidecar` CR scoping**. Deploys dummy workloads to generate endpoint load, then scrapes istiod Prometheus `/metrics` (delta-window for histograms and counters; `process_cpu_seconds_total` for CPU) and per-proxy `/config_dump?include_eds` byte size.
+Measure istiod CPU, memory, and xDS metrics as a function of mesh size **and `Sidecar` CR scoping**. Deploys dummy workloads to generate endpoint load, then scrapes istiod Prometheus `/metrics` directly (delta-window approach) and per-proxy `/config_dump?include_eds` byte size.
 
 ```bash
 # Sweep across mesh sizes with 50 services per cluster (singular --service-count

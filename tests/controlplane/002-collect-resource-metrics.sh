@@ -33,6 +33,7 @@ MESH_SIZE=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
+PRIMARY_NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
 CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
 SETTLE_SEC=60
@@ -294,23 +295,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		# Emit kube versions in BOTH formats: a flat CSV for human eyeballing,
-		# and one bracket-format line per context for 004's parser. Earlier
-		# revisions only wrote the flat line, which 004's KUBE_VERSION[ctx]
-		# regex never matched — every report showed kube versions as N/A.
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
-		for ctx in "${CONTEXTS[@]}"; do
-			if [[ -s "${KUBE_PROBE_DIR}/${ctx}" ]] 2>/dev/null; then
-				v=$(<"${KUBE_PROBE_DIR}/${ctx}")
-			else
-				# Re-derive from the CSV we already built; falls back to
-				# 'unreachable' if absent. The probe dir is removed by now;
-				# use the CSV as source of truth.
-				v=$(awk -v c="$ctx" 'BEGIN{FS=", *"} { for(i=1;i<=NF;i++){ split($i,kv,"="); if(kv[1]==c){print kv[2]; exit} } }' <<<"$KUBE_VERSIONS_CSV")
-				[[ -z "$v" ]] && v=unreachable
-			fi
-			echo "# KUBE_VERSION[${ctx}]=${v}"
-		done
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
 		echo "# PHASE=${PHASE}"
@@ -492,22 +477,17 @@ delta_histogram() {
 				j--
 			}
 		}
+		# PL14: if ANY per-bucket delta is negative, the histogram is
+		# corrupt (counter rotation / label drift / undetected restart).
+		# Emit nothing so the caller produces N/A for all quantiles.
 		mname = name; sub(/_bucket$/, "", mname)
-		# Detect any negative per-bucket delta (counter rotation, label-set
-		# drift, or a missed restart) and emit a sentinel marker the
-		# quantile extractor will recognize and turn into N/A. Previous code
-		# clamped delta to 0, which silently produced a non-monotone CDF
-		# and a bogus quantile.
-		neg = 0
+		bad = 0
 		for (i = 1; i <= n; i++) {
 			le = sortable[i]
-			d = final_v[le] - (le in base ? base[le] : 0)
-			if (d < 0) { neg = 1; break }
+			delta = final_v[le] - (le in base ? base[le] : 0)
+			if (delta < 0) { bad = 1; break }
 		}
-		if (neg) {
-			print "# delta_histogram: negative bucket delta detected — emitting N/A sentinel"
-			exit
-		}
+		if (bad) exit
 		for (i = 1; i <= n; i++) {
 			le = sortable[i]
 			delta = final_v[le] - (le in base ? base[le] : 0)
@@ -549,20 +529,11 @@ collect_config_dump_samples() {
 		echo ""
 		return 0
 	fi
-	local pod_lines pod_scope_args
-	# When sidecar-scoping is active, Sidecar CRs are only emitted in the
-	# primary namespace (the chart doesn't fan out CRs across namespaceCount).
-	# Sampling pods from -A would mix scoped (primary-ns) and unscoped (other-
-	# ns) pods into one cell's bytes-avg/max — the scoping reduction would
-	# wash out in the report. Restrict sampling to the primary namespace
-	# whenever scoping != none.
-	local primary_ns="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
-	if [[ "$SIDECAR_SCOPING" != "none" ]]; then
-		pod_scope_args=(-n "$primary_ns")
-	else
-		pod_scope_args=(-A)
-	fi
-	pod_lines="$("${KUBECTL[@]}" --context="$ctx" get pods "${pod_scope_args[@]}" \
+	# Sample pods only from the primary namespace. When namespaceCount > 1,
+	# Sidecar CRs are only emitted there, so mixing scoped and unscoped
+	# pods would contaminate the measurement.
+	local pod_lines
+	pod_lines="$("${KUBECTL[@]}" --context="$ctx" -n "$PRIMARY_NS" get pods \
 		-l app.kubernetes.io/instance=controlplane-test \
 		-o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' \
 		2>/dev/null || true)"
@@ -585,9 +556,7 @@ collect_config_dump_samples() {
 		fi
 	done <<<"$picked"
 	out_csv="${out_csv%,}"
-	# Emit got first, then attempted — PL17 canonical order is `got/attempted`
-	# so partial-failure is distinguishable from "configured low".
-	echo "${out_csv}|got=${got}|attempted=${attempted}"
+	echo "${out_csv}|attempted=${attempted}|got=${got}"
 }
 
 aggregate_sample_bytes() {
@@ -747,56 +716,12 @@ scrape_window() {
 			mem_mi=$(awk -v b="$mem_mi" 'BEGIN{ printf "%.0f", b / 1048576 }')
 		fi
 
-		# Delta-window histograms.
-		local conv_delta_text queue_delta_text
-		conv_delta_text=$(delta_histogram "$baseline" "$final" "pilot_proxy_convergence_time")
-		queue_delta_text=$(delta_histogram "$baseline" "$final" "pilot_proxy_queue_time")
-		local conv_p50 conv_p99 queue_p50 queue_p99
-		conv_p50=$(extract_histogram_quantile "$conv_delta_text" "pilot_proxy_convergence_time" "0.5")
-		conv_p99=$(extract_histogram_quantile "$conv_delta_text" "pilot_proxy_convergence_time" "0.99")
-		queue_p50=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.5")
-		queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
-
-		# Counter deltas (xds pushes + k8s events).
-		local b_pushes f_pushes pushes_delta pushes_rate
-		b_pushes=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_xds_pushes || echo 0)
-		f_pushes=$(extract_counter_sum "$final" pilot_xds_pushes)
-		pushes_delta=$(( f_pushes - b_pushes ))
-		(( pushes_delta < 0 )) && pushes_delta=0
-		if (( window_positive )); then
-			pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
-		else
-			pushes_rate="N/A"
-		fi
-
-		local b_evts f_evts evts_delta evts_rate
-		b_evts=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_k8s_cfg_events || echo 0)
-		f_evts=$(extract_counter_sum "$final" pilot_k8s_cfg_events)
-		evts_delta=$(( f_evts - b_evts ))
-		(( evts_delta < 0 )) && evts_delta=0
-		if (( window_positive )); then
-			evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
-		else
-			evts_rate="N/A"
-		fi
-
-		# Per-type xds_pushes deltas.
-		local types=(cds eds lds rds nds)
-		local push_by_type=()
-		for t in "${types[@]}"; do
-			local b_t f_t d_t
-			b_t=$([[ -n "$baseline" ]] && extract_counter_by_label "$baseline" pilot_xds_pushes type "$t" || echo 0)
-			f_t=$(extract_counter_by_label "$final" pilot_xds_pushes type "$t")
-			d_t=$(( f_t - b_t ))
-			(( d_t < 0 )) && d_t=0
-			push_by_type+=("$d_t")
-		done
-
 		# Connected proxies (gauge — read from final scrape).
 		local connected_proxies
 		connected_proxies=$(extract_gauge_exact "$final" pilot_xds)
 
-		# Restart detection.
+		# Restart detection (must run before delta computations so the
+		# restart guard can protect counter/histogram columns — PL9/PL13).
 		local b_pst f_pst istiod_restarted
 		b_pst=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_start_time_seconds || echo N/A)
 		f_pst=$(extract_gauge_exact "$final" process_start_time_seconds)
@@ -809,28 +734,81 @@ scrape_window() {
 			echo "warning: istiod restart detected during scrape window on ${ctx} (process_start_time_seconds ${b_pst} -> ${f_pst})" >&2
 		fi
 
-		# Restart guard (PL13): when istiod restarted mid-window, every
-		# counter reset to 0 and every histogram bucket count restarted from
-		# 0 — so EVERY delta-derived value is meaningless, not just
-		# cpu_m_delta. Earlier revisions only guarded cpu_m_delta; this
-		# block null-poisons all the others. Gauges (mem_mi, connected_proxies)
-		# stay as-is because they're current readings, not deltas.
-		if [[ "$istiod_restarted" == "1" ]]; then
-			conv_p50="N/A"; conv_p99="N/A"
-			queue_p50="N/A"; queue_p99="N/A"
+		# Restart guard: when istiod restarted (or state is unknown), all
+		# counter deltas, histogram quantiles, and derived rates are invalid
+		# because the counters reset to zero mid-window (PL13).
+		local restarted_or_unknown=0
+		if [[ "$istiod_restarted" == "1" || "$istiod_restarted" == "unknown" ]]; then
+			restarted_or_unknown=1
+		fi
+
+		# Delta-window histograms.
+		local conv_p50 conv_p99 queue_p50 queue_p99
+		if (( restarted_or_unknown )); then
+			conv_p50="N/A"; conv_p99="N/A"; queue_p50="N/A"; queue_p99="N/A"
+		else
+			local conv_delta_text queue_delta_text
+			conv_delta_text=$(delta_histogram "$baseline" "$final" "pilot_proxy_convergence_time")
+			queue_delta_text=$(delta_histogram "$baseline" "$final" "pilot_proxy_queue_time")
+			conv_p50=$(extract_histogram_quantile "$conv_delta_text" "pilot_proxy_convergence_time" "0.5")
+			conv_p99=$(extract_histogram_quantile "$conv_delta_text" "pilot_proxy_convergence_time" "0.99")
+			queue_p50=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.5")
+			queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
+		fi
+
+		# Counter deltas (xds pushes + k8s events).
+		local pushes_delta pushes_rate evts_delta evts_rate
+		if (( restarted_or_unknown )); then
 			pushes_delta="N/A"; pushes_rate="N/A"
 			evts_delta="N/A"; evts_rate="N/A"
+		else
+			local b_pushes f_pushes
+			b_pushes=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_xds_pushes || echo 0)
+			f_pushes=$(extract_counter_sum "$final" pilot_xds_pushes)
+			pushes_delta=$(( f_pushes - b_pushes ))
+			(( pushes_delta < 0 )) && pushes_delta=0
+			if (( window_positive )); then
+				pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
+			else
+				pushes_rate="N/A"
+			fi
+
+			local b_evts f_evts
+			b_evts=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_k8s_cfg_events || echo 0)
+			f_evts=$(extract_counter_sum "$final" pilot_k8s_cfg_events)
+			evts_delta=$(( f_evts - b_evts ))
+			(( evts_delta < 0 )) && evts_delta=0
+			if (( window_positive )); then
+				evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
+			else
+				evts_rate="N/A"
+			fi
+		fi
+
+		# Per-type xds_pushes deltas.
+		local types=(cds eds lds rds nds)
+		local push_by_type=()
+		if (( restarted_or_unknown )); then
 			push_by_type=("N/A" "N/A" "N/A" "N/A" "N/A")
-			cs_avg="N/A"
+		else
+			for t in "${types[@]}"; do
+				local b_t f_t d_t
+				b_t=$([[ -n "$baseline" ]] && extract_counter_by_label "$baseline" pilot_xds_pushes type "$t" || echo 0)
+				f_t=$(extract_counter_by_label "$final" pilot_xds_pushes type "$t")
+				d_t=$(( f_t - b_t ))
+				(( d_t < 0 )) && d_t=0
+				push_by_type+=("$d_t")
+			done
 		fi
 
 		# CPU delta (average millicores over window).
-		local b_cpu_s f_cpu_s cpu_m_delta
-		b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
-		f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
-		if [[ "$istiod_restarted" == "1" ]]; then
+		local cpu_m_delta
+		if (( restarted_or_unknown )); then
 			cpu_m_delta="N/A"
 		else
+			local b_cpu_s f_cpu_s
+			b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
+			f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
 			cpu_m_delta=$(awk -v b="$b_cpu_s" -v f="$f_cpu_s" -v w="$window_sec" '
 				BEGIN {
 					if (b == "N/A" || f == "N/A" || w+0 <= 0) { print "N/A"; exit }
@@ -841,23 +819,23 @@ scrape_window() {
 		fi
 
 		# config_size: histogram, avg = (sum_delta / count_delta) bytes.
-		local b_sum f_sum b_cnt f_cnt
-		b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" pilot_xds_config_size_bytes || echo 0)
-		f_sum=$(extract_hist_sum "$final" pilot_xds_config_size_bytes)
-		b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" pilot_xds_config_size_bytes || echo 0)
-		f_cnt=$(extract_hist_count "$final" pilot_xds_config_size_bytes)
 		local cs_avg
-		cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
-			BEGIN {
-				ds = fs - bs; dc = fc - bc
-				if (ds < 0) ds = 0
-				if (dc <= 0) { print "N/A"; exit }
-				printf "%.0f", ds/dc
-			}')
-		# Final restart guard: cs_avg is a delta-derived histogram metric;
-		# the earlier guard block can't catch it because cs_avg is computed
-		# after the guard runs. Apply N/A here when istiod restarted.
-		[[ "$istiod_restarted" == "1" ]] && cs_avg="N/A"
+		if (( restarted_or_unknown )); then
+			cs_avg="N/A"
+		else
+			local b_sum f_sum b_cnt f_cnt
+			b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" pilot_xds_config_size_bytes || echo 0)
+			f_sum=$(extract_hist_sum "$final" pilot_xds_config_size_bytes)
+			b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" pilot_xds_config_size_bytes || echo 0)
+			f_cnt=$(extract_hist_count "$final" pilot_xds_config_size_bytes)
+			cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
+				BEGIN {
+					ds = fs - bs; dc = fc - bc
+					if (ds < 0) ds = 0
+					if (dc <= 0) { print "N/A"; exit }
+					printf "%.0f", ds/dc
+				}')
+		fi
 
 		# Per-sidecar /config_dump sampling (only in final/combined phase).
 		local cd_avg="N/A" cd_p50="N/A" cd_max="N/A" cd_samples="0/0"
@@ -874,8 +852,6 @@ scrape_window() {
 			cd_avg="${agg%%|*}"
 			cd_p50="$(echo "$agg" | awk -F'|' '{print $2}')"
 			cd_max="$(echo "$agg" | awk -F'|' '{print $3}')"
-			# PL17: `got/attempted` so "ran 3 samples, 1 succeeded" reads
-			# `1/3` and is distinguishable from `--config-dump-samples 1`.
 			cd_samples="${got}/${attempted}"
 		fi
 
@@ -942,10 +918,10 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg |"
-		echo "|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|--------------|"
+		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg |"
+		echo "|---------|------|-----|------|----|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|--------------|"
 		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=32 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $32, $8, $10, $12, $22, $13, $16, $15, $24
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $10, $12, $22, $13, $16, $15, $24
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
