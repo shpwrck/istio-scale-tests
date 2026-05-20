@@ -42,7 +42,9 @@ SETTLE_SEC=60
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
 # Safety cap on cross-product matrix size; opt out with --force-large-matrix.
-# Override via env CONTROLPLANE_MAX_MATRIX (declared in config/options.env).
+# Default lives in config/options.env (CONTROLPLANE_MAX_MATRIX, sourced via
+# versions.env above). The :- fallback here is a belt-and-braces guard in
+# case options.env is ever bypassed; it should never fire in normal use.
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
@@ -66,7 +68,7 @@ Sweep dimensions (cross-product):
 Singular aliases (one CSV value each — handy for copy-paste from older runs):
   --service-count N           Alias for --service-counts N.
   --replicas N                Alias for --replica-counts N.
-  --replicas-counts CSV       Alias for --replica-counts CSV (deprecated spelling).
+  --replicas-counts CSV       Deprecated alias for --replica-counts (will be removed in a future release).
   --namespace-count N         Alias for --namespace-counts N.
 
 Other:
@@ -139,6 +141,7 @@ while [[ $# -gt 0 ]]; do
 	--replicas-counts)
 		# Deprecated alias for --replica-counts.
 		[[ -n "${2:-}" ]] || die "--replicas-counts requires a value"
+		echo "warning: --replicas-counts is deprecated; use --replica-counts" >&2
 		REPLICA_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -349,12 +352,20 @@ for ms in "${MESH_SIZES[@]}"; do
 				# Defense-in-depth: even after 005 returns, give the API server
 				# a moment to actually finalize ns deletion before the next
 				# 001 starts re-creating. 005 already waits, this is belt+brace
-				# and is a no-op once the namespaces are gone.
+				# and is a no-op once the namespaces are gone. Run per-context
+				# in parallel — sequential waits compound badly on big meshes —
+				# and match 005's own polling timeout (300s) so we don't trip
+				# before the cleanup script itself would have.
 				if (( ${#KUBECTL[@]} )); then
+					wait_pids=()
 					for ctx in "${active_ctxs[@]}"; do
 						"${KUBECTL[@]}" --context="$ctx" wait --for=delete \
 							namespace -l app.kubernetes.io/instance=controlplane-test \
-							--timeout=60s >/dev/null 2>&1 || true
+							--timeout=300s >/dev/null 2>&1 &
+						wait_pids+=($!)
+					done
+					for pid in "${wait_pids[@]}"; do
+						wait "$pid" 2>/dev/null || true
 					done
 				fi
 				echo ""
