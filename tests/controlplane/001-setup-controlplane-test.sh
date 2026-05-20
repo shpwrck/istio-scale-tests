@@ -10,6 +10,9 @@
 #
 #   # Setup with custom workload size:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 50 --replicas 5
+#
+#   # Setup with namespace-scoped Sidecar CRs:
+#   ./tests/controlplane/001-setup-controlplane-test.sh --sidecar-scoping namespace
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -22,6 +25,7 @@ WAIT_TIMEOUT=300
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
+SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -29,16 +33,20 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV       Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --service-count N    Number of dummy services per cluster (default: $SERVICE_COUNT).
-  --replicas N         Replicas per service (default: $REPLICAS).
-  --dry-run            Pass --dry-run=client to oc apply.
-  --wait-timeout N     Seconds to wait for pods (default: 300).
-  -h, --help           Show this help.
+  --contexts CSV             Kube contexts to target (default: \$SETUP_CONTEXTS).
+  --service-count N          Number of dummy services per cluster (default: $SERVICE_COUNT).
+  --replicas N               Replicas per service (default: $REPLICAS).
+  --sidecar-scoping MODE     Sidecar CR scoping: none|namespace|explicit (default: $SIDECAR_SCOPING).
+                             none      - no Sidecar CRs (baseline; worst-case config size).
+                             namespace - one namespace-scoped Sidecar per workload namespace.
+                             explicit  - one Sidecar per Deployment with workloadSelector.
+  --dry-run                  Pass --dry-run=client to oc apply.
+  --wait-timeout N           Seconds to wait for pods (default: 300).
+  -h, --help                 Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
-  CONTROLPLANE_REPLICAS_PER_SERVICE.
+  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_SIDECAR_SCOPING.
 EOF
 }
 
@@ -53,6 +61,13 @@ split_csv() {
 		x="${x%"${x##*[![:space:]]}"}"
 		[[ -n "$x" ]] && _out+=("$x")
 	done
+}
+
+validate_scoping() {
+	case "$1" in
+	none | namespace | explicit) return 0 ;;
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	esac
 }
 
 while [[ $# -gt 0 ]]; do
@@ -70,6 +85,11 @@ while [[ $# -gt 0 ]]; do
 	--replicas)
 		[[ -n "${2:-}" ]] || die "--replicas requires a value"
 		REPLICAS="$2"
+		shift 2
+		;;
+	--sidecar-scoping)
+		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
+		SIDECAR_SCOPING="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -91,6 +111,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+validate_scoping "$SIDECAR_SCOPING"
+
 if command -v oc >/dev/null 2>&1; then
 	KUBECTL=(oc)
 elif command -v kubectl >/dev/null 2>&1; then
@@ -109,18 +131,20 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
-apply=("${KUBECTL[@]}" apply)
+# Server-side apply avoids kubectl OOM at thousands of objects (PL5).
+apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
-	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas)"
+	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas, sidecar-scoping=${SIDECAR_SCOPING})"
 	helm template controlplane-test "$CHART_DIR" \
 		--set clusterName="$ctx" \
 		--set namespace="$NS" \
 		--set serviceCount="$SERVICE_COUNT" \
 		--set replicasPerService="$REPLICAS" \
+		--set sidecarScoping="$SIDECAR_SCOPING" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 
@@ -133,10 +157,28 @@ echo "Waiting for dummy deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 for ctx in "${CONTEXTS[@]}"; do
 	echo "  Waiting on context $ctx..."
 	for ((i = 0; i < SERVICE_COUNT; i++)); do
-		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/dummy-svc-${i} \
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait "deployment/dummy-svc-${i}" \
 			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "dummy-svc-${i} not ready on $ctx"
 	done
 	echo "  All deployments ready on $ctx."
 done
 
-echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas on: ${CONTEXTS[*]}"
+# PL4: confirm Sidecar CRs landed when scoping is enabled.
+if [[ "$SIDECAR_SCOPING" != "none" ]]; then
+	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING})..."
+	for ctx in "${CONTEXTS[@]}"; do
+		deadline=$(( $(date +%s) + 30 ))
+		count=0
+		while (( $(date +%s) < deadline )); do
+			count=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
+				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
+			[[ -z "$count" ]] && count=0
+			(( count > 0 )) && break
+			sleep 1
+		done
+		(( count > 0 )) || die "no Sidecar CRs found on $ctx after 30s (expected >=1 for scoping=$SIDECAR_SCOPING)"
+		echo "  [$ctx] Sidecar CR count: $count"
+	done
+fi
+
+echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas (sidecar-scoping=${SIDECAR_SCOPING}) on: ${CONTEXTS[*]}"

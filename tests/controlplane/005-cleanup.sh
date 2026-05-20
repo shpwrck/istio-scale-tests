@@ -100,7 +100,26 @@ for ctx in "${CONTEXTS[@]}"; do
 			echo "  [$ctx] Namespace $NS does not exist, skipping."
 			exit 0
 		fi
-		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=true
+		if ((DRY_RUN==0)); then
+			# PL4: await namespace fully gone.
+			deadline=$(( $(date +%s) + 180 ))
+			while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do
+				if (( $(date +%s) >= deadline )); then
+					echo "  [$ctx] WARNING: namespace $NS still present after 180s" >&2
+					break
+				fi
+				sleep 2
+			done
+			# Sidecar CRs are namespace-scoped; deleting the namespace deletes them.
+			# Confirm none remain.
+			sc_left=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
+				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
+			[[ -z "$sc_left" ]] && sc_left=0
+			if (( sc_left > 0 )); then
+				echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present in $NS" >&2
+			fi
+		fi
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)

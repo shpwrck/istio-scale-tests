@@ -6,6 +6,27 @@ serviceCount: 10
 
 replicasPerService: 3
 
+# Sidecar CR scoping mode. One of:
+#   none      - emit no Sidecar resources; proxies see every Service in the mesh.
+#   namespace - one namespace-scoped Sidecar per workload namespace (no
+#               workloadSelector); egress is restricted to the workload
+#               namespace, istio-system, and ./* in-namespace traffic.
+#   explicit  - one Sidecar per Deployment with workloadSelector.labels.app
+#               matching `dummy-svc-<i>`; maximum scoping precision.
+sidecarScoping: none
+
+# Number of workload namespaces to fan out across. The chart creates namespace
+# `<namespace>` plus `<namespace>-<i>` for i in 1..namespaceCount-1.
+# Branch 1 owns the runtime sweep for this axis; here we only use the value to
+# decide how many namespace-scoped Sidecar CRs to emit. Default 1 keeps the
+# existing single-namespace behaviour.
+namespaceCount: 1
+
+# Extra egress hosts appended to every Sidecar CR emitted by this chart.
+# Defaults to a no-op empty list; operators can extend if their workloads
+# need to reach additional namespaces (e.g. `monitoring/*`).
+sidecarExtraEgressHosts: []
+
 image:
   repository: busybox
   tag: stable
