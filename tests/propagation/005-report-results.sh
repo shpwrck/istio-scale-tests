@@ -2,8 +2,14 @@
 # Post-process propagation test TSV files into summary statistics.
 # Groups results by mesh_size to compare propagation latency across cluster counts.
 #
-# Filters out rows where restarted=1 or p1_overflow=1 (those rows are statistically
-# unsafe). Reports both n_total (rows considered) and n_valid (rows used).
+# Filtering policy (rows excluded from numeric aggregation):
+#   - restarted == 1            (istiod restart mid-iteration; counters reset)
+#   - restarted == unknown      (process_start_time_seconds missing — can't tell)
+#   - p1_overflow == 1          (samples landed in +Inf bucket; quantiles unsafe)
+#   - status != OK              (TIMEOUT_* or DRAIN_TIMEOUT — drain leak)
+# p2_ms values are also excluded when p2_dirty == 1 (EDS counter delta wasn't
+# matched by a pilot_services delta; could be unrelated endpoint churn).
+# Reports both n_total (rows considered) and n_valid (rows used).
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION,
 # KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
@@ -38,11 +44,28 @@ Usage: $(basename "$0") [options]
   --format FMT       Output format: text, csv, json, markdown (default: text).
   -h, --help         Show this help.
 
-Columns emitted:
-  P1: includes wall-clock p1_ms plus delta-window p1_conv_p50_ms / p1_conv_p99_ms.
-  P2: pilot_xds_pushes{type="eds"} counter-delta detection (ms).
-  P3: watcher Envoy /clusters detection (ms).
-  n_total / n_valid: rows considered vs rows used after filtering restarted=1 and overflow=1.
+TSV columns consumed (positions are stable; new columns appended):
+  1  run_id            2  mesh_size       3  iteration       4  source_ctx
+  5  remote_ctx        6  t0_epoch_ns     7  p1_ms           8  p2_ms
+  9  p3_ms            10  status         11  p1_conv_p50_ms 12  p1_conv_p99_ms
+ 13  p1_sample_count  14  p1_proxy_count 15  p1_overflow    16  restarted
+ 17  p2_dirty         18  window_ms      19  scrape_skew_ms
+
+Phases emitted in the report:
+  P1_local_wall  wall-clock ms (p1_ms) from canary apply until histogram delta
+                 _count reached proxy_count * eds_pushes_in_window.
+  P1_conv_p50    p50 of delta-window pilot_proxy_convergence_time (ms).
+  P1_conv_p99    p99 of delta-window pilot_proxy_convergence_time (ms).
+  P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
+  P3_dataplane   watcher Envoy /clusters detection (ms).
+
+Filtering policy (rows excluded from numeric aggregation):
+  restarted == 1 or unknown
+  p1_overflow == 1
+  status != OK   (TIMEOUT_*, DRAIN_TIMEOUT, RESTART)
+P2 values are additionally suppressed when p2_dirty == 1.
+
+n_total / n_valid: rows considered vs rows used after the above filtering.
 EOF
 }
 
@@ -102,6 +125,7 @@ format_preamble_text() {
 	for k in "${PREAMBLE_KEYS[@]}"; do
 		[[ -n "${PREAMBLE[$k]:-}" ]] && printf "  %s: %s\n" "$k" "${PREAMBLE[$k]}"
 	done
+	return 0
 }
 format_preamble_md() {
 	echo "| Field | Value |"
@@ -110,6 +134,7 @@ format_preamble_md() {
 	for k in "${PREAMBLE_KEYS[@]}"; do
 		[[ -n "${PREAMBLE[$k]:-}" ]] && printf "| %s | \`%s\` |\n" "$k" "${PREAMBLE[$k]}"
 	done
+	return 0
 }
 format_preamble_csv_header() {
 	local k first=1
@@ -153,7 +178,10 @@ format_preamble_json() {
 #   6 t0      7 p1_ms      8 p2_ms 9 p3_ms 10 status
 #  11 p1_conv_p50_ms  12 p1_conv_p99_ms  13 p1_sample_count
 #  14 p1_proxy_count  15 p1_overflow     16 restarted
-#  17 window_ms       18 scrape_skew_ms
+#  17 p2_dirty (new)  18 window_ms       19 scrape_skew_ms
+#
+# Pre-branch TSVs have NF=18 (no p2_dirty column); the missing column is
+# default-filled to "0" (clean), which keeps legacy reports identical.
 
 # Shared awk aggregation block. Uses SUBSEP-keyed single-dim arrays so it works
 # in mawk (no gawk multi-dim required). The $-style dollars are awk fields, not bash.
@@ -165,24 +193,34 @@ BEGIN { FS = "\t"; SUBSEP = "\034" }
 NF < 10 { next }
 {
 	ms = $2
+	status = $10
 	p1 = $7; p2 = $8; p3 = $9
 	cp50 = ($11 == "") ? "N/A" : $11
 	cp99 = ($12 == "") ? "N/A" : $12
 	overflow = ($15 == "") ? "0" : $15
 	restarted = ($16 == "") ? "0" : $16
+	# p2_dirty introduced mid-branch; pre-branch TSVs (NF=18) lack it.
+	if (NF >= 19) {
+		p2_dirty = ($17 == "") ? "0" : $17
+	} else {
+		p2_dirty = "0"
+	}
 
 	n_total[ms]++
 	seen[ms] = 1
 
-	# Filter out restarted=1 and overflow=1 rows.
-	if (restarted == "1" || overflow == "1") next
+	# Filter: restarted=1 or unknown, overflow=1, or any non-OK status.
+	if (restarted == "1" || restarted == "unknown") next
+	if (overflow == "1") next
+	if (status != "" && status != "OK") next
 
 	n_valid[ms]++
 
 	if (p1 != "TIMEOUT" && p1 != "N/A" && p1 ~ /^[0-9]+$/) {
 		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = p1 + 0
 	}
-	if (p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) {
+	# Skip p2 sample if dirty (EDS bumped without a matching pilot_services delta).
+	if (p2_dirty != "1" && p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) {
 		p2_n[ms]++; p2_vals[ms, p2_n[ms]] = p2 + 0
 	}
 	if (p3 != "TIMEOUT" && p3 != "N/A" && p3 ~ /^[0-9]+$/) {

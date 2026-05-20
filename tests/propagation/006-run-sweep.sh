@@ -303,27 +303,39 @@ if ((${#MD_FILES[@]} > 0)); then
 			[[ -f "${mf%.md}.tsv" ]] && TSV_SWEEP_FILES+=("${mf%.md}.tsv")
 		done
 		if ((${#TSV_SWEEP_FILES[@]} > 0)); then
-			echo "## Comparison (rows with restarted=1 or overflow=1 dropped)"
+			echo "## Comparison (rows with restarted, overflow, non-OK status dropped; p2_ms dropped when p2_dirty=1)"
 			echo ""
 			echo "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 avg (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |"
 			echo "|-----------|------------------|----------------------|-----------------|---------------------|"
+			# H2: asorti() is gawk-only; emit a manual sort that works under mawk.
 			cat "${TSV_SWEEP_FILES[@]}" | awk -F'\t' '
 			!/^#/ && !/^run_id/ && NF>=10 {
 				ms = $2
+				status = $10
 				p1 = $7; p2 = $8; p3 = $9
 				cp99 = ($12 == "") ? "N/A" : $12
 				overflow = ($15 == "") ? "0" : $15
 				restarted = ($16 == "") ? "0" : $16
-				if (restarted == "1" || overflow == "1") next
+				p2_dirty = (NF >= 19 && $17 != "") ? $17 : "0"
+				if (restarted == "1" || restarted == "unknown") next
+				if (overflow == "1") next
+				if (status != "" && status != "OK") next
 				if (p1 != "TIMEOUT" && p1 != "N/A" && p1 ~ /^[0-9]+$/) { p1_sum[ms] += p1; p1_n[ms]++ }
-				if (p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) { p2_sum[ms] += p2; p2_n[ms]++ }
+				if (p2_dirty != "1" && p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) { p2_sum[ms] += p2; p2_n[ms]++ }
 				if (p3 != "TIMEOUT" && p3 != "N/A" && p3 ~ /^[0-9]+$/) { p3_sum[ms] += p3; p3_n[ms]++ }
 				if (cp99 != "N/A" && cp99 != "overflow" && cp99 ~ /^[0-9]+$/) { cp99_sum[ms] += cp99; cp99_n[ms]++ }
 				seen[ms] = 1
 			}
 			END {
-				asorti(seen, sizes)
-				for (s in sizes) {
+				# Manual sort: gather keys, insertion-sort. Same approach as 005.
+				n = 0
+				for (k in seen) { sizes[++n] = k }
+				for (i = 2; i <= n; i++) {
+					tmp = sizes[i]; j = i - 1
+					while (j >= 1 && sizes[j] > tmp) { sizes[j+1] = sizes[j]; j-- }
+					sizes[j+1] = tmp
+				}
+				for (s = 1; s <= n; s++) {
 					m = sizes[s]
 					p1_avg   = (p1_n[m]   > 0) ? sprintf("%d", p1_sum[m]   / p1_n[m])   : "--"
 					cp99_avg = (cp99_n[m] > 0) ? sprintf("%d", cp99_sum[m] / cp99_n[m]) : "--"
