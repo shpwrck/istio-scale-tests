@@ -86,12 +86,32 @@ aggregate() {
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	!/^#/ && !/^timestamp/ && NF>=16 {
 		key = $3 "|" $4 "|" $5 "|" $6
-		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
-		cpu_sum[key]   += $7;  cpu_min[key]  = (key in cpu_min  && cpu_min[key]  <= $7+0) ? cpu_min[key]  : $7+0;  cpu_max[key]  = (key in cpu_max  && cpu_max[key]  >= $7+0) ? cpu_max[key]  : $7+0
-		mem_sum[key]   += $8;  mem_min[key]  = (key in mem_min  && mem_min[key]  <= $8+0) ? mem_min[key]  : $8+0;  mem_max[key]  = (key in mem_max  && mem_max[key]  >= $8+0) ? mem_max[key]  : $8+0
-		conv_sum[key]  += $10; conv_min[key] = (key in conv_min && conv_min[key] <= $10+0) ? conv_min[key] : $10+0; conv_max[key] = (key in conv_max && conv_max[key] >= $10+0) ? conv_max[key] : $10+0
-		queue_sum[key] += $12; queue_min[key]= (key in queue_min&& queue_min[key]<= $12+0) ? queue_min[key]: $12+0; queue_max[key]= (key in queue_max&& queue_max[key]>= $12+0) ? queue_max[key]: $12+0
-		prx_sum[key]   += $15; prx_min[key]  = (key in prx_min  && prx_min[key]  <= $15+0) ? prx_min[key]  : $15+0; prx_max[key]  = (key in prx_max  && prx_max[key]  >= $15+0) ? prx_max[key]  : $15+0
+		v_cpu = $7 + 0;   v_mem = $8 + 0;   v_conv = $10 + 0
+		v_queue = $12 + 0; v_prx = $15 + 0
+		if (!(key in seen)) {
+			keys[++nkey] = key; seen[key] = 1
+			cpu_min[key] = v_cpu;   cpu_max[key] = v_cpu
+			mem_min[key] = v_mem;   mem_max[key] = v_mem
+			conv_min[key] = v_conv; conv_max[key] = v_conv
+			queue_min[key] = v_queue; queue_max[key] = v_queue
+			prx_min[key] = v_prx;   prx_max[key] = v_prx
+		} else {
+			if (v_cpu   < cpu_min[key])   cpu_min[key]   = v_cpu
+			if (v_cpu   > cpu_max[key])   cpu_max[key]   = v_cpu
+			if (v_mem   < mem_min[key])   mem_min[key]   = v_mem
+			if (v_mem   > mem_max[key])   mem_max[key]   = v_mem
+			if (v_conv  < conv_min[key])  conv_min[key]  = v_conv
+			if (v_conv  > conv_max[key])  conv_max[key]  = v_conv
+			if (v_queue < queue_min[key]) queue_min[key] = v_queue
+			if (v_queue > queue_max[key]) queue_max[key] = v_queue
+			if (v_prx   < prx_min[key])   prx_min[key]   = v_prx
+			if (v_prx   > prx_max[key])   prx_max[key]   = v_prx
+		}
+		cpu_sum[key]   += v_cpu
+		mem_sum[key]   += v_mem
+		conv_sum[key]  += v_conv
+		queue_sum[key] += v_queue
+		prx_sum[key]   += v_prx
 		n[key]++
 	}
 	END {
