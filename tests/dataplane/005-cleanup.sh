@@ -2,7 +2,7 @@
 # Clean up all dataplane-test resources from target clusters.
 #
 # Usage:
-#   ./tests/dataplane/005-cleanup.sh [--contexts CSV] [--dry-run]
+#   ./tests/dataplane/005-cleanup.sh [--contexts CSV] [--dry-run] [--no-wait-deletion]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -11,6 +11,8 @@ source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
+WAIT_DELETION=1
+DELETION_TIMEOUT=180
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -19,9 +21,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV   Kube contexts to clean up (default: \$SETUP_CONTEXTS).
-  --dry-run        Show what would be deleted without deleting.
-  -h, --help       Show this help.
+  --contexts CSV         Kube contexts to clean up (default: \$SETUP_CONTEXTS).
+  --dry-run              Show what would be deleted without deleting.
+  --no-wait-deletion     Return immediately after delete is accepted (default: wait).
+  --deletion-timeout N   Seconds to wait for namespace termination (default: 180).
+  -h, --help             Show this help.
 
 Environment:
   SETUP_CONTEXTS, DATAPLANE_TEST_NAMESPACE.
@@ -51,6 +55,17 @@ while [[ $# -gt 0 ]]; do
 	--dry-run)
 		DRY_RUN=1
 		shift
+		;;
+	--no-wait-deletion)
+		WAIT_DELETION=0
+		shift
+		;;
+	--deletion-timeout)
+		[[ -n "${2:-}" ]] || die "--deletion-timeout requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--deletion-timeout must be a positive integer"
+		(( $2 > 0 )) || die "--deletion-timeout must be > 0"
+		DELETION_TIMEOUT="$2"
+		shift 2
 		;;
 	-h | --help)
 		usage
@@ -86,9 +101,24 @@ run_delete() {
 	fi
 }
 
+wait_for_ns_termination() {
+	local ctx="$1"
+	local waited=0
+	while "${KUBECTL[@]}" --context="$ctx" get ns "$NS" -o name 2>/dev/null | grep -q .; do
+		sleep 2
+		waited=$((waited + 2))
+		((waited >= DELETION_TIMEOUT)) && {
+			echo "  [$ctx] ns termination timeout after ${DELETION_TIMEOUT}s"
+			return 1
+		}
+	done
+	return 0
+}
+
 echo "=== Data-plane test cleanup ==="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Namespace: $NS"
+echo "Wait for deletion: $((WAIT_DELETION))"
 ((DRY_RUN)) && echo "Mode: dry-run"
 echo ""
 
@@ -101,6 +131,10 @@ for ctx in "${CONTEXTS[@]}"; do
 			exit 0
 		fi
 		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		if ((WAIT_DELETION && !DRY_RUN)); then
+			echo "  [$ctx] waiting for namespace termination (timeout ${DELETION_TIMEOUT}s)..."
+			wait_for_ns_termination "$ctx" || exit 1
+		fi
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)

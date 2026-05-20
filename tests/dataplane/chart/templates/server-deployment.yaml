@@ -1,4 +1,5 @@
 {{- if or (eq .Values.role "server") (eq .Values.role "both") }}
+{{- if not .Values.clusterName }}{{ fail "clusterName is required (pass --set clusterName=...)" }}{{ end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,15 +7,18 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "dataplane-test.server.labels" . | nindent 4 }}
+    cluster: {{ .Values.clusterName }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       {{- include "dataplane-test.server.selectorLabels" . | nindent 6 }}
+      cluster: {{ .Values.clusterName }}
   template:
     metadata:
       labels:
         {{- include "dataplane-test.server.labels" . | nindent 8 }}
+        cluster: {{ .Values.clusterName }}
         sidecar.istio.io/inject: "true"
     spec:
       containers:

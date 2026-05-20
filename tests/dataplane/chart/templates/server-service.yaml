@@ -1,4 +1,8 @@
 {{- if or (eq .Values.role "server") (eq .Values.role "both") }}
+{{- if not .Values.clusterName }}{{ fail "clusterName is required (pass --set clusterName=...)" }}{{ end }}
+# Generic Service — selects all dataplane-server pods regardless of cluster.
+# Used for the local (intra-cluster) baseline probe; under PILOT_ENABLE_LOCALITY_LB
+# the source-cluster client stays in-cluster for this hostname.
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,6 +13,28 @@ metadata:
 spec:
   selector:
     {{- include "dataplane-test.server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      protocol: TCP
+      targetPort: {{ .Values.service.port }}
+---
+# Per-cluster Service — selects only the pods running on this cluster.
+# A client on a *different* source cluster routing to this hostname has no
+# local endpoint, so traffic must traverse the east-west gateway. This is
+# what makes the "cross-cluster" probe actually cross-cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dataplane-server-{{ .Values.clusterName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dataplane-test.server.labels" . | nindent 4 }}
+    cluster: {{ .Values.clusterName }}
+spec:
+  selector:
+    {{- include "dataplane-test.server.selectorLabels" . | nindent 4 }}
+    cluster: {{ .Values.clusterName }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

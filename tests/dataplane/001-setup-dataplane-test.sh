@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Deploy fortio server and client pods for cross-cluster data-plane latency testing.
 #
+# The chart emits two Services per cluster:
+#   - dataplane-server                  (generic; selects local pods under locality LB)
+#   - dataplane-server-${clusterName}   (per-cluster; forces cross-cluster routing)
+#
 # Usage:
 #   ./tests/dataplane/001-setup-dataplane-test.sh --source-context CTX [--remote-contexts CSV] [options]
 #
@@ -18,6 +22,7 @@ REMOTE_CONTEXTS_CSV=""
 DRY_RUN=0
 WAIT_TIMEOUT=300
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
+FORTIO_TAG="${FORTIO_VERSION:-stable}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -32,7 +37,7 @@ Usage: $(basename "$0") [options]
   -h, --help               Show this help.
 
 Environment:
-  SETUP_CONTEXTS, DATAPLANE_TEST_NAMESPACE.
+  SETUP_CONTEXTS, DATAPLANE_TEST_NAMESPACE, FORTIO_VERSION.
 EOF
 }
 
@@ -67,6 +72,8 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--wait-timeout)
 		[[ -n "${2:-}" ]] || die "--wait-timeout requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--wait-timeout must be a positive integer"
+		(( $2 > 0 )) || die "--wait-timeout must be > 0"
 		WAIT_TIMEOUT="$2"
 		shift 2
 		;;
@@ -99,18 +106,19 @@ fi
 
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 
-apply=("${KUBECTL[@]}" apply)
+apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
 CHART_DIR="${ROOT}/tests/dataplane/chart"
 
-echo "Deploying fortio server on all clusters..."
+echo "Deploying fortio server on all clusters (image tag: ${FORTIO_TAG})..."
 for ctx in "${ALL_CTXS[@]}"; do
 	echo "  Server on $ctx"
 	helm template dataplane-test "$CHART_DIR" \
 		--set clusterName="$ctx" \
 		--set namespace="$NS" \
 		--set role=server \
+		--set image.tag="$FORTIO_TAG" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 
@@ -119,6 +127,7 @@ helm template dataplane-test "$CHART_DIR" \
 	--set clusterName="$SOURCE_CTX" \
 	--set namespace="$NS" \
 	--set role=both \
+	--set image.tag="$FORTIO_TAG" \
 	| "${apply[@]}" --context="$SOURCE_CTX" -f -
 
 if ((DRY_RUN)); then
@@ -128,13 +137,11 @@ fi
 
 echo "Waiting for pods to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 for ctx in "${ALL_CTXS[@]}"; do
-	echo "  Waiting for server on $ctx..."
-	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/dataplane-server \
-		--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "server not ready on $ctx"
+	echo "  Waiting for deployments on $ctx..."
+	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait \
+		--for=condition=Available deployment \
+		-l app.kubernetes.io/instance=dataplane-test \
+		--timeout="${WAIT_TIMEOUT}s" || die "deployment(s) not ready on $ctx"
 done
-
-echo "  Waiting for client on $SOURCE_CTX..."
-"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" wait deployment/dataplane-client \
-	--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "client not ready on $SOURCE_CTX"
 
 echo "Setup complete. Server on: ${ALL_CTXS[*]}  Client on: $SOURCE_CTX"
