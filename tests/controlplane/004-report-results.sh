@@ -136,7 +136,9 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 #   conv99_min conv99_max conv99_avg
 #   queue99_min queue99_max queue99_avg
 #   proxies_min proxies_max proxies_avg
-#   restarts (count of rows with istiod_restarted=1 for this 4-tuple)
+#   restarts          (count of rows with istiod_restarted=1 for this 4-tuple)
+#   unknown_restarts  (count of rows with istiod_restarted=unknown — couldn't
+#                      tell whether a restart happened during the window)
 #
 # Any *_min/*_max/*_avg cell where the underlying samples included an
 # "overflow" is printed as the literal string "overflow".
@@ -177,7 +179,12 @@ aggregate() {
 		# istiod_restarted is pass-through: count rows in this group that
 		# had a restart during the scrape window. No aggregation math —
 		# operators care about "did *any* sample in this cell get tainted".
-		if ($27+0 > 0) restarts[key] += 1
+		# Column 27 is `0 | 1 | unknown`. Treat `unknown` as "not a restart"
+		# for the restarts counter (matches `0` behavior) but track it in a
+		# separate unknown_restarts counter so the report can flag samples
+		# where restart state was undetectable.
+		if ($27 == "1") restarts[key] += 1
+		else if ($27 == "unknown") unknowns[key] += 1
 		n[key]++
 	}
 	END {
@@ -194,20 +201,21 @@ aggregate() {
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
-		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tn\tcpu_min\tcpu_max\tcpu_avg\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\n"
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tn\tcpu_min\tcpu_max\tcpu_avg\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\n"
 		for (i = 1; i <= nkey; i++) {
 			k = order[i]
 			split(k, p, "|")
 			nn = n[k]
 			rr = (k in restarts) ? restarts[k] : 0
-			printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\n",
+			uu = (k in unknowns) ? unknowns[k] : 0
+			printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
 				p[1], p[2], p[3], p[4], nn,
 				emit3("cpu",   k),
 				emit3("mem",   k),
 				emit3("conv",  k),
 				emit3("queue", k),
 				emit3("prx",   k),
-				rr
+				rr, uu
 		}
 	}'
 }
@@ -228,6 +236,7 @@ report_text() {
 		printf "  Queue p99 (ms):          min=%s max=%s avg=%s\n",     $15, $16, $17
 		printf "  Connected proxies:       min=%s max=%s avg=%s\n",     $18, $19, $20
 		if ($21+0 > 0) printf "  ! istiod restarts:       %s row(s) had restarts during the scrape window\n", $21
+		if ($22+0 > 0) printf "  ? undetectable restart:  %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $22
 		printf "\n"
 	}'
 }
@@ -239,11 +248,12 @@ report_csv() {
 
 report_markdown() {
 	# Render aggregate once so we can both build the table AND compute the
-	# total restart-row count for the footnote without re-running awk twice.
+	# total restart-row counts for the footnote without re-running awk twice.
 	local aggregated
 	aggregated=$(aggregate)
-	local total_restarts
+	local total_restarts total_unknowns
 	total_restarts=$(awk -F'\t' 'NR>1 { s += $21+0 } END { printf "%d", s+0 }' <<<"$aggregated")
+	total_unknowns=$(awk -F'\t' 'NR>1 { s += $22+0 } END { printf "%d", s+0 }' <<<"$aggregated")
 
 	echo "---"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
@@ -256,14 +266,23 @@ report_markdown() {
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	echo "| mesh_size | service_count | replicas | namespace_count | n | cpu_avg (m) | mem_avg (Mi) | conv_p99_avg (ms) | queue_p99_avg (ms) | proxies_avg | restarts |"
-	echo "|-----------|---------------|----------|-----------------|---|-------------|--------------|-------------------|--------------------|-------------|----------|"
+	echo "| mesh_size | service_count | replicas | namespace_count | n | cpu_avg (m) | mem_avg (Mi) | conv_p99_avg (ms) | queue_p99_avg (ms) | proxies_avg | restarts | unknown_restarts |"
+	echo "|-----------|---------------|----------|-----------------|---|-------------|--------------|-------------------|--------------------|-------------|----------|------------------|"
 	awk -F'\t' '
 	NR == 1 { next }
-	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $8, $11, $14, $17, $20, $21 }' <<<"$aggregated"
-	if (( total_restarts > 0 )); then
+	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $8, $11, $14, $17, $20, $21, $22 }' <<<"$aggregated"
+	# Only surface the footnote when *something* is non-zero. If only restarts
+	# happened, mention restarts; if only undetectable rows happened, mention
+	# that; if both, combine them into one line.
+	if (( total_restarts > 0 || total_unknowns > 0 )); then
 		echo ""
-		echo "> ⚠ ${total_restarts} row(s) had istiod restarts during the scrape window — counters/histograms for those samples under-report and should be treated as suspect."
+		local parts=()
+		(( total_restarts > 0 )) && parts+=("${total_restarts} row(s) had istiod restarts during the scrape window")
+		(( total_unknowns > 0 )) && parts+=("${total_unknowns} row(s) had undetectable restart state during the window")
+		# Join with "; ".
+		local joined="${parts[0]}"
+		[[ ${#parts[@]} -gt 1 ]] && joined+="; ${parts[1]}"
+		echo "> ⚠ ${joined} — counters/histograms for those samples may under-report and should be treated as suspect."
 	fi
 }
 
@@ -286,7 +305,7 @@ report_json() {
 		printf "\"convergence_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($12), cell($13), cell($14)
 		printf "\"queue_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($15), cell($16), cell($17)
 		printf "\"connected_proxies\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($18), cell($19), cell($20)
-		printf "\"istiod_restarted_rows\":%d}", $21+0
+		printf "\"istiod_restarted_rows\":%d,\"istiod_restarted_unknown_rows\":%d}", $21+0, $22+0
 	}
 	END {
 		if (printed) printf "\n  ]\n}\n"; else printf "]\n}\n"

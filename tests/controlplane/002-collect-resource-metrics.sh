@@ -240,12 +240,15 @@ TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #
 # NOTE: `scrape_window_sec` is the actual wall-clock seconds between the
-# (latest) baseline scrape and the (earliest) final scrape — used as the
-# denominator for `*_rate`. `settle_sec` records the operator-supplied
-# `--settle` value so intent vs. actual elapsed window are both visible.
-# `istiod_restarted` is 1 if istiod's `process_start_time_seconds` moved
-# forward between baseline and final (counters/histograms would underflow,
-# so the report should treat that row as suspect).
+# latest baseline scrape *end* and the earliest final scrape *start* — i.e.
+# `min(final.start) - max(baseline.end)`. That's the conservative interval
+# every counter saw the same elapsed time, and is used as the denominator
+# for `*_rate`. `settle_sec` records the operator-supplied `--settle` value
+# so intent vs. actual elapsed window are both visible. `istiod_restarted`
+# is `1` if istiod's `process_start_time_seconds` moved forward between
+# baseline and final, `0` if it did not, and the literal string `unknown`
+# if either side's `process_start_time_seconds` was missing (so the report
+# can distinguish "definitely no restart" from "couldn't tell").
 echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted" >> "$TSV_FILE"
 
 PF_PIDS=()
@@ -509,9 +512,13 @@ scrape_all_parallel() {
 # Take baseline + final scrape, compute deltas, emit one TSV row per context.
 # `settle_input_sec` is the operator-supplied --settle value; the actual rate
 # denominator (`scrape_window_sec`) is computed from wall-clock as
-# `min(final_start_ts) - max(baseline_start_ts)`, recorded with one decimal
-# of precision. This is conservative: the largest plausible elapsed window
-# across all contexts, so per-context rates never overstate.
+# `min(final_start_ts) - max(baseline_end_ts)`, recorded with one decimal of
+# precision. This is conservative: the lower bound uses each baseline scrape's
+# *end* timestamp (latest moment the istiod counters could have started
+# accumulating "new" samples for the window) and the upper bound uses each
+# final scrape's *start* timestamp (earliest moment any counter snapshot
+# could have been read) — so every counter saw at least this much elapsed
+# time, and per-context rates never overstate.
 scrape_window() {
 	local settle_input_sec="$1"
 	local baseline_skew_ms final_skew_ms
@@ -525,11 +532,13 @@ scrape_window() {
 	final_skew_ms=$(scrape_all_parallel "${TMP_DIR}/final")
 	local total_skew_ms=$(( baseline_skew_ms > final_skew_ms ? baseline_skew_ms : final_skew_ms ))
 
-	# Wall-clock window: max(baseline.start) → min(final.start) in ms.
-	# Falls back to settle_input_sec * 1000 if any timestamp is missing.
+	# Wall-clock window: max(baseline.end) → min(final.start) in ms — see
+	# header comment for why baseline-END (`.tsend`) and final-START (`.ts`)
+	# are the conservative pair. Falls back to settle_input_sec * 1000 if any
+	# timestamp is missing.
 	local b_max_ms="" f_min_ms="" ts_val
 	for i in "${!CONTEXTS[@]}"; do
-		local bt="${TMP_DIR}/baseline-${i}.ts"
+		local bt="${TMP_DIR}/baseline-${i}.tsend"
 		local ft="${TMP_DIR}/final-${i}.ts"
 		if [[ -s "$bt" ]]; then
 			ts_val=$(<"$bt")
@@ -569,8 +578,8 @@ scrape_window() {
 		local f_file="${TMP_DIR}/final-${i}.metrics"
 		if [[ ! -s "$f_file" ]]; then
 			echo "warning: no final scrape for $ctx; emitting N/A row" >&2
-			# Restart flag is 0 (unknown — we couldn't read the final metric).
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${cpu_m}\t${mem_mi}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t0" >> "$TSV_FILE"
+			# No final metric -> restart state is genuinely undetectable.
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${cpu_m}\t${mem_mi}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
@@ -630,16 +639,21 @@ scrape_window() {
 		# Prom metric (seconds-since-epoch of process start). If the final
 		# value is strictly greater than the baseline value, istiod restarted
 		# during the scrape window — counters/histograms reset to 0 mid-window,
-		# which makes deltas under-report.
+		# which makes deltas under-report. Three possible outputs:
+		#   1        — restart detected (final > baseline)
+		#   0        — both readings present, no restart
+		#   unknown  — either side's process_start_time_seconds was missing,
+		#              so we can't tell. Don't claim "no restart" when we
+		#              actually just couldn't measure.
 		local b_pst f_pst istiod_restarted
 		b_pst=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_start_time_seconds || echo N/A)
 		f_pst=$(extract_gauge_exact "$final" process_start_time_seconds)
 		istiod_restarted=$(awk -v b="$b_pst" -v f="$f_pst" '
 			BEGIN {
-				if (b == "N/A" || f == "N/A") { print 0; exit }
+				if (b == "N/A" || f == "N/A") { print "unknown"; exit }
 				print (f+0 > b+0) ? 1 : 0
 			}')
-		if (( istiod_restarted )); then
+		if [[ "$istiod_restarted" == "1" ]]; then
 			echo "warning: istiod restart detected during scrape window on ${ctx} (process_start_time_seconds ${b_pst} -> ${f_pst})" >&2
 		fi
 
