@@ -20,9 +20,9 @@ meaningful when 001/005 are re-invoked between sweep points.
 | `pilot_k8s_cfg_events` delta + rate | istiod Prometheus | Kubernetes watch events during the window |
 | `pilot_xds` | istiod Prometheus | Connected proxy count (gauge — read from final scrape) |
 | `pilot_xds_config_size_bytes` avg | istiod Prometheus | Average xDS payload bytes during the window (histogram `_sum`/`_count` delta) |
-| `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length (conservative: `min(final.start) − max(baseline.start)`, used as the rate denominator) and max clock skew across concurrent per-context scrapes |
+| `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length (conservative: `min(final.start) − max(baseline.end)`, used as the rate denominator) and max clock skew across concurrent per-context scrapes |
 | `settle_sec` | Internal | Operator-supplied `--settle` value (intent — distinct from `scrape_window_sec` which is the observed elapsed window) |
-| `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape (istiod restarted mid-window — counters/histograms for that row under-report); `0` otherwise |
+| `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape (istiod restarted mid-window — counters/histograms for that row under-report); `0` if both readings were present and equal; the literal string `unknown` if either side's `process_start_time_seconds` was missing (e.g. baseline scrape failed) so we couldn't tell |
 
 Histogram cells whose target quantile lands in the `+Inf` overflow bucket are
 emitted as the literal string `overflow` in TSV/CSV/text/markdown outputs and
@@ -80,9 +80,10 @@ Services are distributed deterministically: service `i` is created in namespace 
 - **No `--samples N` repeated scrapes per cell** — every sweep point is a
   single (baseline + final) window. Re-run the sweep to get N samples per
   cell.
-- **Settle time is single-valued** across the entire sweep. It's recorded
-  per-row in the TSV (`scrape_window_sec`), but auto-scaling settle time as
-  a function of matrix point is out of scope.
+- **Settle time is single-valued** across the entire sweep. The operator's
+  intent is recorded per-row in the TSV (`settle_sec`), while the observed
+  wall-clock window lives in `scrape_window_sec` — auto-scaling settle time
+  as a function of matrix point is out of scope.
 - **No resource-quota or node-capacity precheck.** The sweep will happily
   schedule workloads it cannot fit; verify cluster headroom manually before
   large runs.
@@ -150,6 +151,11 @@ conflate. TSV files carry a metadata preamble:
 # RUN_ID=20260520T183201Z-12345
 ```
 
+The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each value is either the apiserver `gitVersion` (e.g. `v1.30.4`), or one of:
+
+- `unreachable` — `kubectl version` returned a non-zero exit (timeout or connection refused) within `--request-timeout=5s`. The cluster could not be contacted at sweep startup.
+- `unknown` — `kubectl version` succeeded but `jq .serverVersion.gitVersion` returned empty (unexpected schema, very old client). The cluster *was* reachable; we just couldn't parse a version out of the response.
+
 Followed by the 27-column data schema:
 
 ```
@@ -164,7 +170,7 @@ scrape_window_sec  scrape_skew_ms
 settle_sec  istiod_restarted
 ```
 
-`scrape_window_sec` is the observed wall-clock window — `min(final.start) − max(baseline.start)` in seconds (one decimal) — used as the denominator for `xds_pushes_rate` and `k8s_events_rate`. `settle_sec` is the operator's `--settle` value; surfacing both lets operators see intent vs. actual elapsed window. `istiod_restarted` is `1` when istiod's `process_start_time_seconds` moved forward between baseline and final, meaning counters reset mid-window and that row's deltas under-report.
+`scrape_window_sec` is the observed wall-clock window — `min(final.start) − max(baseline.end)` in seconds (one decimal) — used as the denominator for `xds_pushes_rate` and `k8s_events_rate`. The lower bound is each baseline scrape's *end* timestamp (not its start), so the window represents the conservative interval every counter saw the same elapsed time. `settle_sec` is the operator's `--settle` value; surfacing both lets operators see intent vs. actual elapsed window. `istiod_restarted` is `1` when istiod's `process_start_time_seconds` moved forward between baseline and final (counters reset mid-window, row's deltas under-report), `0` when both readings were present and equal, or the literal string `unknown` when either side's `process_start_time_seconds` was missing.
 
 `004-report-results.sh` groups rows by `(mesh_size, service_count, replicas, namespace_count)` and emits `text`, `csv`, `json`, or `markdown` summaries via `--format`. Each output carries the same `ISTIO_VERSION` / `HARNESS_SHA` / `files_consumed` / `skipped_legacy` metadata (preamble in text/csv, frontmatter in markdown, top-level object in JSON). Each aggregated row also gains a `restarts` column counting how many input rows for that 4-tuple had `istiod_restarted=1`; markdown output appends a footnote when any restarts occurred. Legacy TSV files with the pre-27-column schema are skipped with a stderr warning.
 
