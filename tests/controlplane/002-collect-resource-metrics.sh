@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # Collect istiod resource usage and Prometheus metrics for control-plane analysis.
+# Scrapes istiod /metrics, computes delta-window stats for the histograms and
+# counters that are cumulative since istiod start, and writes a TSV row per
+# cluster. Optionally samples per-sidecar /config_dump byte size for Sidecar CR
+# scoping analysis.
 #
-# Implements delta-window scraping: baseline and final snapshots are taken, then
-# per-bucket / per-counter deltas are computed. Per-sidecar config-dump sampling
-# captures Envoy /config_dump size per scoping mode.
+# Delta-window approach (chosen because Prometheus UWM is not guaranteed to be
+# reachable from where this script runs): we take a *baseline* scrape on entry,
+# wait `--settle SEC` (passed through by 003), take a *final* scrape, and
+# compute deltas per histogram bucket / counter. p50 and p99 are derived from
+# the windowed cumulative buckets via the standard linear-interp algorithm.
 #
 # Usage:
 #   ./tests/controlplane/002-collect-resource-metrics.sh [--contexts CSV] [options]
 #
 # Examples:
-#   # One-shot collection from all clusters:
-#   ./tests/controlplane/002-collect-resource-metrics.sh --mesh-size 3 --service-count 10
+#   # One-shot collection from all clusters (60-second window):
+#   ./tests/controlplane/002-collect-resource-metrics.sh --mesh-size 3 \
+#     --service-count 10 --settle 60
 #
-#   # With sidecar scoping metadata + 5 config-dump samples per cluster:
-#   ./tests/controlplane/002-collect-resource-metrics.sh \
-#     --sidecar-scoping namespace --config-dump-samples 5
-#
-#   # Watch mode during load test:
+#   # Watch mode during load test (per-tick deltas at the interval cadence):
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 set -euo pipefail
 
@@ -29,42 +32,69 @@ OUTPUT_DIR="${ROOT}/tests/controlplane/results"
 MESH_SIZE=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
+NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
 CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
-# NS is kept for forward-compat with multi-namespace deployments; currently
-# the chart writes to a single namespace and config_dump sampling walks all of
-# them via label selectors.
-NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
-export NS  # silence SC2034: consumed implicitly when sourced by callers
+SETTLE_SEC=60
 WATCH=0
 INTERVAL=15
-SETTLE_SEC=30
-RUN_ID_OVERRIDE=""
 DRY_RUN=0
 BASE_PF_PORT=15014
+PHASE=combined
+STATE_DIR=""
+RUN_ID_OVERRIDE=""
 
 die() { echo "error: $*" >&2; exit 1; }
+
+is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
+
+validate_scoping() {
+	case "$1" in
+	none | namespace | explicit) return 0 ;;
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	esac
+}
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV             Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --mesh-size N              Metadata tag for TSV output.
-  --service-count N          Metadata tag for TSV output (default: $SERVICE_COUNT).
-  --replicas N               Metadata tag for TSV output (default: $REPLICAS).
-  --sidecar-scoping MODE     Metadata: none|namespace|explicit (default: $SIDECAR_SCOPING).
-  --config-dump-samples N    Random pods per cluster to exec /config_dump on (default: $CONFIG_DUMP_SAMPLES; 0 disables).
-  --settle SEC               Operator intent; recorded as settle_sec (default: $SETTLE_SEC).
-  --output-dir DIR           Results directory (default: tests/controlplane/results).
-  --run-id ID                Reuse a sweep RUN_ID (writes into sweep-<ID>/).
-  --watch                    Loop continuously (single-snapshot mode; no delta).
-  --interval SEC             Seconds between scrapes in watch mode (default: 15).
-  --dry-run                  Show what would be scraped without connecting.
-  -h, --help                 Show this help.
+  --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
+  --mesh-size N        Metadata tag for TSV output.
+  --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
+  --replicas N         Metadata tag for TSV output (default: $REPLICAS).
+  --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
+  --sidecar-scoping M  Metadata tag: none|namespace|explicit (default: $SIDECAR_SCOPING).
+  --config-dump-samples N  Random pods per cluster to exec /config_dump on
+                       (default: $CONFIG_DUMP_SAMPLES; 0 disables).
+  --settle SEC         Delta-window length (seconds) between baseline and
+                       final scrape (default: $SETTLE_SEC). Must match the
+                       settle time used by the calling orchestrator.
+  --output-dir DIR     Results directory (default: tests/controlplane/results).
+  --run-id ID          Reuse an existing sweep RUN_ID (writes into sweep-<ID>/).
+  --watch              Loop continuously (delta window = --interval).
+  --interval SEC       Seconds between scrapes in watch mode (default: 15).
+  --phase PHASE        Orchestration phase, one of:
+                         combined  baseline + settle + final + emit (default,
+                                   for standalone use)
+                         baseline  scrape baseline metrics only, write to
+                                   --state-dir, exit without emitting a row.
+                                   No settle; caller (003) should invoke 001
+                                   AFTER this so the deploy storm lands inside
+                                   the scrape window.
+                         final     scrape final metrics, read baseline from
+                                   --state-dir, compute deltas, emit one row.
+  --state-dir DIR      Required for --phase baseline (must be empty/writable)
+                       and --phase final (must contain a prior baseline's
+                       output). Used to ferry baseline metrics across the
+                       deploy step in split-phase mode. Ignored for combined.
+  --dry-run            Show what would be scraped without connecting.
+  -h, --help           Show this help.
 
 Environment:
-  SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SIDECAR_SCOPING,
+  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
+  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES.
 EOF
 }
@@ -81,15 +111,6 @@ split_csv() {
 		[[ -n "$x" ]] && _out+=("$x")
 	done
 }
-
-validate_scoping() {
-	case "$1" in
-	none | namespace | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
-	esac
-}
-
-is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -113,6 +134,11 @@ while [[ $# -gt 0 ]]; do
 		REPLICAS="$2"
 		shift 2
 		;;
+	--namespace-count)
+		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
+		NAMESPACE_COUNT="$2"
+		shift 2
+		;;
 	--sidecar-scoping)
 		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
 		SIDECAR_SCOPING="$2"
@@ -120,13 +146,12 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--config-dump-samples)
 		[[ -n "${2:-}" ]] || die "--config-dump-samples requires a value"
-		is_uint "$2" || die "--config-dump-samples must be a non-negative integer; got '$2'"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--config-dump-samples must be a non-negative integer; got '$2'"
 		CONFIG_DUMP_SAMPLES="$2"
 		shift 2
 		;;
 	--settle)
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
-		is_uint "$2" || die "--settle must be a non-negative integer; got '$2'"
 		SETTLE_SEC="$2"
 		shift 2
 		;;
@@ -149,6 +174,16 @@ while [[ $# -gt 0 ]]; do
 		INTERVAL="$2"
 		shift 2
 		;;
+	--phase)
+		[[ -n "${2:-}" ]] || die "--phase requires a value"
+		PHASE="$2"
+		shift 2
+		;;
+	--state-dir)
+		[[ -n "${2:-}" ]] || die "--state-dir requires a value"
+		STATE_DIR="$2"
+		shift 2
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -163,7 +198,23 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (got: $SERVICE_COUNT)"
+is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
+is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
+is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
+is_nonneg_int "$CONFIG_DUMP_SAMPLES" || die "--config-dump-samples must be a non-negative integer (got: $CONFIG_DUMP_SAMPLES)"
 validate_scoping "$SIDECAR_SCOPING"
+case "$PHASE" in
+combined|baseline|final) ;;
+*) die "--phase must be one of: combined, baseline, final (got: $PHASE)";;
+esac
+if [[ "$PHASE" != combined ]]; then
+	[[ -n "$STATE_DIR" ]] || die "--phase $PHASE requires --state-dir"
+fi
+if ((WATCH)) && [[ "$PHASE" != combined ]]; then
+	die "--watch is only valid with --phase combined"
+fi
+is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
 if command -v oc >/dev/null 2>&1; then
 	KUBECTL=(oc)
@@ -185,82 +236,91 @@ fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE="${#CONTEXTS[@]}"
+is_pos_int "$MESH_SIZE" || die "--mesh-size must be a positive integer (got: $MESH_SIZE)"
+
+if [[ -n "$RUN_ID_OVERRIDE" ]]; then
+	RUN_ID="$RUN_ID_OVERRIDE"
+else
+	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fi
+HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
+
+echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
+echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
 
 if ((DRY_RUN)); then
 	echo "Would scrape istiod metrics from: ${CONTEXTS[*]}"
-	echo "Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS"
-	echo "Sidecar scoping: $SIDECAR_SCOPING  config-dump samples: $CONFIG_DUMP_SAMPLES"
 	exit 0
 fi
 
-# PL6: per-sweep subdirectory.
-RUN_ID="${RUN_ID_OVERRIDE:-$(date +%Y%m%dT%H%M%S)-$$}"
-if [[ -n "$RUN_ID_OVERRIDE" ]]; then
-	OUTPUT_DIR="${OUTPUT_DIR}/sweep-${RUN_ID_OVERRIDE}"
+if [[ "$PHASE" != baseline ]]; then
+	mkdir -p "$OUTPUT_DIR"
 fi
-mkdir -p "$OUTPUT_DIR"
+if [[ "$PHASE" != combined ]]; then
+	mkdir -p "$STATE_DIR"
+fi
 
-HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
+ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
 
-# PL2: probe kube versions concurrently with short timeouts.
-declare -A KUBE_VERS
-KV_TMPDIR="$(mktemp -d)"
-probe_kube_version_to_file() {
-	local ctx="$1" out file
-	file="${KV_TMPDIR}/${ctx//\//_}.ver"
-	if ! "${KUBECTL[@]}" --context="$ctx" version --request-timeout=5s -o json >"${file}.raw" 2>/dev/null; then
-		echo "unreachable" >"$file"
-		return
-	fi
-	out="$(jq -r '.serverVersion.gitVersion // ""' <"${file}.raw" 2>/dev/null || true)"
-	if [[ -z "$out" || "$out" == "null" ]]; then
-		echo "unknown" >"$file"
-	else
-		echo "$out" >"$file"
-	fi
-}
+# Probe kube server versions per context concurrently (best-effort).
+KUBE_PROBE_DIR="$(mktemp -d -t controlplane-002-kubever.XXXXXX)"
+KV_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	probe_kube_version_to_file "$ctx" &
+	(
+		out=$("${KUBECTL[@]}" --context="$ctx" version -o json --request-timeout=5s 2>/dev/null) \
+			&& v=$(printf '%s' "$out" | jq -r '.serverVersion.gitVersion // "unknown"' 2>/dev/null || echo unknown) \
+			|| v=unreachable
+		[[ -z "$v" ]] && v=unknown
+		printf '%s' "$v" > "${KUBE_PROBE_DIR}/${ctx}"
+	) &
+	KV_PIDS+=($!)
 done
-wait
+for pid in "${KV_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+KUBE_VERSIONS_CSV=""
 for ctx in "${CONTEXTS[@]}"; do
-	f="${KV_TMPDIR}/${ctx//\//_}.ver"
-	if [[ -f "$f" ]]; then
-		KUBE_VERS[$ctx]="$(cat "$f")"
+	if [[ -s "${KUBE_PROBE_DIR}/${ctx}" ]]; then
+		v=$(<"${KUBE_PROBE_DIR}/${ctx}")
 	else
-		KUBE_VERS[$ctx]="unknown"
+		v=unreachable
 	fi
+	[[ -n "$KUBE_VERSIONS_CSV" ]] && KUBE_VERSIONS_CSV+=", "
+	KUBE_VERSIONS_CSV+="${ctx}=${v}"
 done
-rm -rf "$KV_TMPDIR"
+rm -rf "$KUBE_PROBE_DIR"
 
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
+if [[ "$PHASE" != baseline ]]; then
+	{
+		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
+		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
+		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		echo "# RUN_ID=${RUN_ID}"
+		echo "# PHASE=${PHASE}"
+		echo "# SIDECAR_SCOPING=${SIDECAR_SCOPING}"
+		echo "# CONFIG_DUMP_SAMPLES=${CONFIG_DUMP_SAMPLES}"
+		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING"
+	} > "$TSV_FILE"
+fi
 
-# PL2: TSV preamble with all run metadata.
-{
-	echo "# Control-plane resource metrics — $(date -Iseconds)"
-	echo "# RUN_ID=${RUN_ID}"
-	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
-	echo "# CONTEXTS=${CONTEXTS[*]}"
-	for ctx in "${CONTEXTS[@]}"; do
-		echo "# KUBE_VERSION[${ctx}]=${KUBE_VERS[$ctx]}"
-	done
-	echo "# MESH_SIZE=${MESH_SIZE}"
-	echo "# SERVICE_COUNT=${SERVICE_COUNT}"
-	echo "# REPLICAS=${REPLICAS}"
-	echo "# SIDECAR_SCOPING=${SIDECAR_SCOPING}"
-	echo "# CONFIG_DUMP_SAMPLES=${CONFIG_DUMP_SAMPLES}"
-	echo "# SETTLE_SEC=${SETTLE_SEC}"
-} >"$TSV_FILE"
-
-# A1: dropped `config_size_bytes` (pilot_xds_config_size_bytes is a histogram,
-# not a counter — the per-proxy /config_dump byte sample is the correct
-# per-proxy signal).
-# C2: `sidecar_config_bytes_samples` is now `attempted/got` (e.g. "3/1") to
-# distinguish "ran 3, 2 failed" from "ran 1, succeeded".
-echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tsidecar_scoping\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes\tk8s_events\tconnected_proxies\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tistiod_restarted\tsettle_sec" >>"$TSV_FILE"
+# Schema (TSV header — 32 columns):
+#   timestamp context mesh_size service_count replicas namespace_count sidecar_scoping
+#   istiod_mem_mi
+#   convergence_p50_ms convergence_p99_ms queue_p50_ms queue_p99_ms
+#   xds_pushes_delta xds_pushes_rate
+#   xds_pushes_cds xds_pushes_eds xds_pushes_lds xds_pushes_rds xds_pushes_nds
+#   k8s_events_delta k8s_events_rate
+#   connected_proxies config_size_avg_bytes
+#   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max sidecar_config_bytes_samples
+#   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
+#   istiod_cpu_m_delta
+if [[ "$PHASE" != baseline ]]; then
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
+fi
 
 PF_PIDS=()
+TMP_DIR="$(mktemp -d -t controlplane-002.XXXXXX)"
 
 cleanup() {
 	for pid in "${PF_PIDS[@]}"; do
@@ -268,6 +328,7 @@ cleanup() {
 		wait "$pid" 2>/dev/null || true
 	done
 	PF_PIDS=()
+	rm -rf "$TMP_DIR"
 }
 
 trap cleanup EXIT
@@ -275,7 +336,7 @@ trap cleanup EXIT
 echo "Starting port-forwards to istiod..."
 for i in "${!CONTEXTS[@]}"; do
 	ctx="${CONTEXTS[i]}"
-	port=$((BASE_PF_PORT + i))
+	port=$(( BASE_PF_PORT + i ))
 	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "$port":15014 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
 done
@@ -283,7 +344,7 @@ done
 sleep 3
 
 for i in "${!CONTEXTS[@]}"; do
-	port=$((BASE_PF_PORT + i))
+	port=$(( BASE_PF_PORT + i ))
 	attempts=0
 	while ! curl -s -o /dev/null "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
@@ -297,129 +358,151 @@ echo "Port-forwards ready."
 # Metric extraction helpers.
 # ---------------------------------------------------------------------------
 
-# Extract histogram cumulative buckets as "le<TAB>count" lines.
-extract_histogram_buckets() {
-	local metrics="$1" name="$2"
-	echo "$metrics" | awk -v name="${name}_bucket{" '
-	index($0, name) && !/^#/ {
-		line=$0
+extract_histogram_quantile() {
+	local metrics="$1" name="$2" quantile="$3"
+	echo "$metrics" | awk -v name="${name}_bucket" -v q="$quantile" '
+	$0 ~ name && /le="/ {
+		line = $0
 		sub(/.*le="/, "", line); sub(/".*/, "", line)
-		le=line
-		count=$NF+0
-		# Sum across label sets at same le.
-		bucket[le]+=count
+		le = line
+		count = $NF + 0
+		buckets[++n] = le " " count
 	}
 	END {
-		for(k in bucket) printf "%s\t%.0f\n", k, bucket[k]
-	}'
-}
-
-# Extract histogram quantile from a buckets blob ("le<TAB>count" lines).
-# A4: when any bucket delta is negative (rotation/skew between scrapes), emit
-# "N/A" rather than walking a non-monotone CDF. Quantile walks delta values
-# directly (no extra cumulative rebuild — Prometheus buckets are already
-# cumulative-by-le).
-histogram_quantile_from_buckets() {
-	local buckets="$1" quantile="$2"
-	echo "$buckets" | awk -v q="$quantile" '
-	{
-		le=$1; count=$2+0
-		if (count < 0) { negative=1 }
-		# +Inf last.
-		if(le=="+Inf") { has_inf=1; inf_count=count; next }
-		les[++n]=le; counts[le]=count
-	}
-	END {
-		if (negative) { print "N/A"; exit }
-		# Sort le numerically.
-		for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(les[i]+0>les[j]+0){t=les[i];les[i]=les[j];les[j]=t}
-		total = has_inf ? inf_count : (n>0 ? counts[les[n]] : 0)
-		if(total<=0){print "N/A"; exit}
-		target=total*q
+		if(n==0) { print "N/A"; exit }
+		split(buckets[n], lastp, " ")
+		total = lastp[2] + 0
+		if (total <= 0) { print "N/A"; exit }
+		target = total * q
 		for(i=1;i<=n;i++) {
-			if(counts[les[i]]>=target){printf "%.0f\n", les[i]*1000; exit}
+			split(buckets[i], parts, " ")
+			if(parts[2]+0 >= target) {
+				le_val = parts[1]
+				if(le_val == "+Inf") { print "overflow"; exit }
+				printf "%.0f\n", le_val * 1000
+				exit
+			}
 		}
-		# Target fell in +Inf bucket — overflow signal.
-		print "overflow"
+		print "N/A"
 	}'
 }
 
-# Subtract baseline counts (per le) from final counts; emit "le<TAB>delta".
-diff_histogram_buckets() {
-	local base="$1" final="$2"
-	awk -v base="$base" -v final="$final" '
-	BEGIN {
-		n=split(base, blines, "\n")
-		for(i=1;i<=n;i++) if(blines[i]!=""){split(blines[i],a,"\t"); b[a[1]]=a[2]+0}
-		m=split(final, flines, "\n")
-		for(i=1;i<=m;i++) if(flines[i]!=""){split(flines[i],a,"\t"); printf "%s\t%.0f\n", a[1], (a[2]+0)-(b[a[1]]+0)}
-	}'
-}
-
-# A2: sum the gauge across every label permutation. pilot_xds, for example,
-# is labelled and emitting only the first match under-reports connected
-# proxies. Drop the early-exit and accumulate.
-extract_gauge() {
+extract_gauge_exact() {
 	local metrics="$1" name="$2"
 	echo "$metrics" | awk -v name="$name" '
-	$0 !~ /^#/ {
-		# Match "name " or "name{...} ".
-		if (index($0, name "{") == 1 || index($0, name " ") == 1) {
-			sum += $NF
-			seen = 1
-		}
-	}
-	END { if (seen) printf "%.0f\n", sum+0 }'
+	BEGIN { pat = "^" name "(\\{| )" }
+	!/^#/ && $0 ~ pat { val = $NF+0 }
+	END { if (val == "") print "N/A"; else print val }
+	'
 }
 
-# Sum all label combinations of a counter into a single scalar.
 extract_counter_sum() {
 	local metrics="$1" name="$2"
 	echo "$metrics" | awk -v name="$name" '
-	$0 !~ /^#/ {
-		if (index($0, name "{") == 1 || index($0, name " ") == 1) {
-			sum+=$NF
+	BEGIN { pat = "^" name "(\\{| )" }
+	!/^#/ && $0 ~ pat { sum += $NF }
+	END { printf "%.0f\n", sum+0 }
+	'
+}
+
+extract_counter_by_label() {
+	local metrics="$1" name="$2" label="$3" value="$4"
+	echo "$metrics" | awk -v name="$name" -v lbl="$label" -v val="$value" '
+	BEGIN { pat = "^" name "\\{" }
+	!/^#/ && $0 ~ pat {
+		labels = $0
+		sub(/^[^{]*\{/, "", labels); sub(/\}.*$/, "", labels)
+		nkv = split(labels, kvs, ",")
+		hit = 0
+		for (k = 1; k <= nkv; k++) {
+			kv = kvs[k]
+			gsub(/^[ \t]+|[ \t]+$/, "", kv)
+			if (match(kv, "^" lbl "=\"") > 0) {
+				v = kv
+				sub("^" lbl "=\"", "", v)
+				sub(/".*$/, "", v)
+				if (v == val) { hit = 1; break }
+			}
+		}
+		if (hit) sum += $NF
+	}
+	END { printf "%.0f\n", sum+0 }
+	'
+}
+
+extract_hist_sum() {
+	local metrics="$1" name="$2"
+	echo "$metrics" | awk -v name="${name}_sum" '
+	BEGIN { pat = "^" name "(\\{| )" }
+	!/^#/ && $0 ~ pat { s += $NF+0 }
+	END { printf "%.6f\n", s+0 }
+	'
+}
+extract_hist_count() {
+	local metrics="$1" name="$2"
+	echo "$metrics" | awk -v name="${name}_count" '
+	BEGIN { pat = "^" name "(\\{| )" }
+	!/^#/ && $0 ~ pat { c += $NF+0 }
+	END { printf "%.0f\n", c+0 }
+	'
+}
+
+delta_histogram() {
+	local baseline="$1" final="$2" name="$3"
+	awk -v name="${name}_bucket" '
+	function leval(line) {
+		s = line; sub(/.*le="/, "", s); sub(/".*/, "", s); return s
+	}
+	function le_key(le,    k) {
+		if (le == "+Inf") return 1e308
+		k = le + 0
+		return k
+	}
+	NR==FNR {
+		if ($0 ~ name && /le="/) base[leval($0)] += $NF+0
+		next
+	}
+	$0 ~ name && /le="/ {
+		le = leval($0)
+		final_v[le] += $NF+0
+		if (!(le in seen)) { seen[le] = 1; les[++n] = le }
+	}
+	END {
+		for (i = 1; i <= n; i++) sortable[i] = les[i]
+		for (i = 2; i <= n; i++) {
+			j = i
+			while (j > 1 && le_key(sortable[j-1]) > le_key(sortable[j])) {
+				t = sortable[j-1]; sortable[j-1] = sortable[j]; sortable[j] = t
+				j--
+			}
+		}
+		mname = name; sub(/_bucket$/, "", mname)
+		for (i = 1; i <= n; i++) {
+			le = sortable[i]
+			delta = final_v[le] - (le in base ? base[le] : 0)
+			if (delta < 0) delta = 0
+			printf "%s_bucket{le=\"%s\"} %d\n", mname, le, delta
 		}
 	}
-	END { printf "%.0f\n", sum+0 }'
+	' <(echo "$baseline") <(echo "$final")
 }
 
-# PL9: read process_start_time_seconds. Output value or "unknown".
-extract_process_start_time() {
-	local metrics="$1"
-	local v
-	v="$(echo "$metrics" | awk '/^process_start_time_seconds /{print $NF; exit}')"
-	if [[ -z "$v" ]]; then echo "unknown"; else echo "$v"; fi
-}
+# ---------------------------------------------------------------------------
+# Per-sidecar /config_dump sampling.
+# ---------------------------------------------------------------------------
 
-# Scrape a single context's istiod /metrics; return contents or empty on failure.
-scrape_metrics() {
-	local port="$1"
-	curl -s --max-time 10 "http://localhost:${port}/metrics" 2>/dev/null || true
-}
-
-# C1: deterministic, awk-only shuffle. Removes the `shuf` dependency (not on
-# AGENTS.md tools list) and makes pod selection reproducible across reruns.
-# We do NOT use awk's srand()/rand() — mawk reseeds rand() across processes
-# in a non-deterministic way, so two runs with the same srand seed return
-# different sequences. Instead, hash each line with the seed appended and
-# sort by hash. Same seed → same ordering on any awk implementation.
 deterministic_pick() {
 	local n="$1" seed="$2"
 	awk -v n="$n" -v seed="$seed" '
 	function ord(c) { return index("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&\x27()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", c) }
 	function hash(s,   i, h) {
 		h=5381
-		# Two passes (forward + reverse) so adjacent inputs do not produce
-		# adjacent hashes — small mod-prime arithmetic only, portable across
-		# mawk/gawk.
 		for(i=1; i<=length(s); i++) h = (h*131 + ord(substr(s,i,1))) % 2147483647
 		for(i=length(s); i>=1; i--) h = (h*131 + ord(substr(s,i,1))) % 2147483647
 		return h
 	}
 	NF { lines[++idx]=$0; keys[idx]=hash($0 "|" seed) }
 	END {
-		# Bubble sort by hash key (stable for our small N).
 		for(i=1;i<=idx;i++) for(j=i+1;j<=idx;j++) if (keys[i] > keys[j]) {
 			t=keys[i]; keys[i]=keys[j]; keys[j]=t
 			t=lines[i]; lines[i]=lines[j]; lines[j]=t
@@ -429,10 +512,6 @@ deterministic_pick() {
 	}'
 }
 
-# PL10: sample N random pods across the test namespaces and get config_dump
-# byte size. B1: ?include_eds is critical — Envoy's default /config_dump
-# omits EndpointsConfigDump, but EDS is the dominant per-proxy size driver
-# and the metric scoping is designed to reduce.
 collect_config_dump_samples() {
 	local ctx="$1" samples="$2"
 	local out_csv="" got=0 attempted=0
@@ -445,7 +524,6 @@ collect_config_dump_samples() {
 		-l app.kubernetes.io/instance=controlplane-test \
 		-o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' \
 		2>/dev/null || true)"
-	# C1: deterministic shuffle seeded by RUN_ID + ctx so reruns are reproducible.
 	local seed="${RUN_ID}-${ctx}"
 	local picked
 	picked="$(echo "$pod_lines" | grep -v '^$' | deterministic_pick "$samples" "$seed" 2>/dev/null || true)"
@@ -464,13 +542,11 @@ collect_config_dump_samples() {
 			out_csv+="N/A,"
 		fi
 	done <<<"$picked"
-	# Trim trailing comma. attempted/got recorded by caller.
 	out_csv="${out_csv%,}"
 	echo "${out_csv}|attempted=${attempted}|got=${got}"
 }
 
 aggregate_sample_bytes() {
-	# Args: csv-of-bytes-or-NA  -> "avg|p50|max"
 	local csv="$1"
 	[[ -z "$csv" ]] && { echo "N/A|N/A|N/A"; return; }
 	echo "$csv" | awk -F',' '
@@ -490,225 +566,294 @@ aggregate_sample_bytes() {
 }
 
 # ---------------------------------------------------------------------------
-# Baseline + Final delta-window scrape (PL1).
+# Scrape infrastructure.
 # ---------------------------------------------------------------------------
 
-scrape_baseline_then_final() {
-	local i ctx port
-	declare -A BASE_METRICS BASE_TS FINAL_METRICS FINAL_TS BASE_PST FINAL_PST
-
-	# Baseline scrape (concurrent, PL8).
-	local base_tmpdir
-	base_tmpdir="$(mktemp -d)"
-	for i in "${!CONTEXTS[@]}"; do
-		ctx="${CONTEXTS[i]}"
-		port=$((BASE_PF_PORT + i))
-		(
-			ts_ms=$(date +%s%3N)
-			m=$(scrape_metrics "$port")
-			printf '%s\n' "$ts_ms" >"${base_tmpdir}/${ctx}.ts"
-			printf '%s' "$m" >"${base_tmpdir}/${ctx}.metrics"
-		) &
-	done
-	wait
-	for ctx in "${CONTEXTS[@]}"; do
-		BASE_TS[$ctx]="$(cat "${base_tmpdir}/${ctx}.ts" 2>/dev/null || echo 0)"
-		BASE_METRICS[$ctx]="$(cat "${base_tmpdir}/${ctx}.metrics" 2>/dev/null || echo "")"
-		BASE_PST[$ctx]="$(extract_process_start_time "${BASE_METRICS[$ctx]}")"
-	done
-
-	echo "Baseline scraped; settling ${SETTLE_SEC}s for delta window..."
-	sleep "$SETTLE_SEC"
-
-	# Final scrape (concurrent).
-	local final_tmpdir
-	final_tmpdir="$(mktemp -d)"
-	for i in "${!CONTEXTS[@]}"; do
-		ctx="${CONTEXTS[i]}"
-		port=$((BASE_PF_PORT + i))
-		(
-			ts_ms=$(date +%s%3N)
-			m=$(scrape_metrics "$port")
-			printf '%s\n' "$ts_ms" >"${final_tmpdir}/${ctx}.ts"
-			printf '%s' "$m" >"${final_tmpdir}/${ctx}.metrics"
-		) &
-	done
-	wait
-	for ctx in "${CONTEXTS[@]}"; do
-		FINAL_TS[$ctx]="$(cat "${final_tmpdir}/${ctx}.ts" 2>/dev/null || echo 0)"
-		FINAL_METRICS[$ctx]="$(cat "${final_tmpdir}/${ctx}.metrics" 2>/dev/null || echo "")"
-		FINAL_PST[$ctx]="$(extract_process_start_time "${FINAL_METRICS[$ctx]}")"
-	done
-
-	# Compute scrape_window_sec (wall-clock, PL3) and scrape_skew_ms (PL8).
-	local min_final max_base min_base max_final
-	min_final=""
-	max_base=""
-	min_base=""
-	max_final=""
-	for ctx in "${CONTEXTS[@]}"; do
-		[[ -z "$min_final" || "${FINAL_TS[$ctx]}" -lt "$min_final" ]] && min_final="${FINAL_TS[$ctx]}"
-		[[ -z "$max_base"  || "${BASE_TS[$ctx]}"  -gt "$max_base"  ]] && max_base="${BASE_TS[$ctx]}"
-		[[ -z "$min_base"  || "${BASE_TS[$ctx]}"  -lt "$min_base"  ]] && min_base="${BASE_TS[$ctx]}"
-		[[ -z "$max_final" || "${FINAL_TS[$ctx]}" -gt "$max_final" ]] && max_final="${FINAL_TS[$ctx]}"
-	done
-	local window_sec skew_base_ms skew_final_ms skew_ms
-	window_sec=$(awk -v a="$min_final" -v b="$max_base" 'BEGIN{printf "%.3f", (a-b)/1000.0}')
-	skew_base_ms=$((max_base - min_base))
-	skew_final_ms=$((max_final - min_final))
-	# Report the larger skew across the two snapshots.
-	if (( skew_base_ms > skew_final_ms )); then skew_ms=$skew_base_ms; else skew_ms=$skew_final_ms; fi
-
-	local ts
-	ts=$(date -Iseconds)
-	for i in "${!CONTEXTS[@]}"; do
-		ctx="${CONTEXTS[i]}"
-
-		local base_m="${BASE_METRICS[$ctx]}" final_m="${FINAL_METRICS[$ctx]}"
-
-		if [[ -z "$final_m" ]]; then
-			echo "warning: empty final metrics for $ctx" >&2
-			continue
-		fi
-
-		# PL9: restart detection. unknown if either side missing.
-		local restarted="unknown"
-		if [[ "${BASE_PST[$ctx]}" != "unknown" && "${FINAL_PST[$ctx]}" != "unknown" ]]; then
-			if awk -v a="${BASE_PST[$ctx]}" -v b="${FINAL_PST[$ctx]}" 'BEGIN{exit !(a==b)}'; then
-				restarted=0
-			else
-				restarted=1
-			fi
-		fi
-
-		# CPU / mem via kubectl top.
-		local cpu_m="N/A" mem_mi="N/A"
-		local top_output
-		top_output=$("${KUBECTL[@]}" --context="$ctx" -n istio-system top pod -l app=istiod --no-headers 2>/dev/null) || true
-		if [[ -n "$top_output" ]]; then
-			cpu_m=$(echo "$top_output" | awk '{gsub(/m/,"",$2); sum+=$2} END{printf "%.0f", sum}')
-			mem_mi=$(echo "$top_output" | awk '{gsub(/Mi/,"",$3); sum+=$3} END{printf "%.0f", sum}')
-		fi
-
-		# PL1 / A3: histogram quantiles computed over the delta window.
-		# When istiod restarted across the window, cumulative counts reset so
-		# the delta is meaningless — emit N/A.
-		local conv_base conv_final conv_delta queue_base queue_final queue_delta
-		conv_base=$(extract_histogram_buckets "$base_m"  "pilot_proxy_convergence_time")
-		conv_final=$(extract_histogram_buckets "$final_m" "pilot_proxy_convergence_time")
-		conv_delta=$(diff_histogram_buckets "$conv_base" "$conv_final")
-		queue_base=$(extract_histogram_buckets "$base_m"  "pilot_proxy_queue_time")
-		queue_final=$(extract_histogram_buckets "$final_m" "pilot_proxy_queue_time")
-		queue_delta=$(diff_histogram_buckets "$queue_base" "$queue_final")
-
-		local conv_p50 conv_p99 queue_p50 queue_p99
-		if [[ "$restarted" != "0" ]]; then
-			# A3: restarted=1 OR unknown invalidates the delta window.
-			conv_p50="N/A"; conv_p99="N/A"; queue_p50="N/A"; queue_p99="N/A"
-		else
-			conv_p50=$(histogram_quantile_from_buckets "$conv_delta" "0.5")
-			conv_p99=$(histogram_quantile_from_buckets "$conv_delta" "0.99")
-			queue_p50=$(histogram_quantile_from_buckets "$queue_delta" "0.5")
-			queue_p99=$(histogram_quantile_from_buckets "$queue_delta" "0.99")
-		fi
-
-		# PL1 / A1 / A3: counters as deltas. pilot_xds_config_size_bytes
-		# dropped (it is a histogram). When restarted (or unknown), the delta
-		# is invalid.
-		local xds_delta kev_delta
-		if [[ "$restarted" != "0" ]]; then
-			xds_delta="N/A"
-			kev_delta="N/A"
-		else
-			local xds_b xds_f kev_b kev_f
-			xds_b=$(extract_counter_sum "$base_m"  "pilot_xds_pushes")
-			xds_f=$(extract_counter_sum "$final_m" "pilot_xds_pushes")
-			kev_b=$(extract_counter_sum "$base_m"  "pilot_k8s_cfg_events")
-			kev_f=$(extract_counter_sum "$final_m" "pilot_k8s_cfg_events")
-			xds_delta=$((xds_f - xds_b))
-			kev_delta=$((kev_f - kev_b))
-		fi
-
-		# Gauge taken from final (instantaneous). A2: now summed across labels.
-		local connected
-		connected=$(extract_gauge "$final_m" "pilot_xds")
-		[[ -z "$connected" ]] && connected="N/A"
-
-		# PL10 / C2: per-sidecar config dump samples. Emit attempted/got.
-		local cd_out cd_csv cd_meta agg avg p50 max
-		cd_out="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
-		cd_csv="${cd_out%%|*}"
-		cd_meta="${cd_out#*|}"
-		local attempted=0 got=0
-		[[ "$cd_meta" =~ attempted=([0-9]+) ]] && attempted="${BASH_REMATCH[1]}"
-		[[ "$cd_meta" =~ got=([0-9]+) ]] && got="${BASH_REMATCH[1]}"
-		agg="$(aggregate_sample_bytes "$cd_csv")"
-		avg="${agg%%|*}"
-		p50="$(echo "$agg" | awk -F'|' '{print $2}')"
-		max="$(echo "$agg" | awk -F'|' '{print $3}')"
-
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${SIDECAR_SCOPING}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${xds_delta}\t${kev_delta}\t${connected}\t${avg}\t${p50}\t${max}\t${attempted}/${got}\t${window_sec}\t${skew_ms}\t${restarted}\t${SETTLE_SEC}" >>"$TSV_FILE"
-		echo "  Scraped $ctx: cpu=${cpu_m}m mem=${mem_mi}Mi proxies=${connected} pushes_delta=${xds_delta} cfg_bytes_avg=${avg} samples=${attempted}/${got} restarted=${restarted}"
-	done
-
-	rm -rf "$base_tmpdir" "$final_tmpdir"
+scrape_one_context() {
+	local ctx="$1" port="$2" out="$3" ts_start="$4" ts_end="$5"
+	local body t_start t_end
+	t_start=$(date -u +%s%3N)
+	body=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null) || return 1
+	t_end=$(date -u +%s%3N)
+	printf '%s' "$body" > "$out"
+	printf '%s' "$t_start" > "$ts_start"
+	printf '%s' "$t_end" > "$ts_end"
 }
 
-# Watch mode: lightweight single-snapshot loop (no delta).
-scrape_single_snapshot() {
-	local ts i ctx port
-	ts=$(date -Iseconds)
+scrape_all_parallel() {
+	local out_prefix="$1"
+	local -a pids=()
+	local -a ts_files=()
+	local i ctx port
 	for i in "${!CONTEXTS[@]}"; do
 		ctx="${CONTEXTS[i]}"
-		port=$((BASE_PF_PORT + i))
-		local m
-		m=$(scrape_metrics "$port")
-		[[ -z "$m" ]] && { echo "warning: failed to scrape $ctx" >&2; continue; }
+		port=$(( BASE_PF_PORT + i ))
+		local m_out="${out_prefix}-${i}.metrics"
+		local t_out="${out_prefix}-${i}.ts"
+		local te_out="${out_prefix}-${i}.tsend"
+		(
+			scrape_one_context "$ctx" "$port" "$m_out" "$t_out" "$te_out" || exit 1
+		) &
+		pids+=($!)
+		ts_files+=("$t_out")
+	done
+	local rc=0
+	for pid in "${pids[@]}"; do
+		wait "$pid" || rc=$((rc + 1))
+	done
+	[[ $rc -eq 0 ]] || echo "warning: $rc scrape(s) failed for $out_prefix" >&2
 
-		local cpu_m="N/A" mem_mi="N/A" top_output
-		top_output=$("${KUBECTL[@]}" --context="$ctx" -n istio-system top pod -l app=istiod --no-headers 2>/dev/null) || true
-		if [[ -n "$top_output" ]]; then
-			cpu_m=$(echo "$top_output" | awk '{gsub(/m/,"",$2); sum+=$2} END{printf "%.0f", sum}')
-			mem_mi=$(echo "$top_output" | awk '{gsub(/Mi/,"",$3); sum+=$3} END{printf "%.0f", sum}')
+	local min="" max="" t
+	for t_out in "${ts_files[@]}"; do
+		[[ -s "$t_out" ]] || continue
+		t=$(<"$t_out")
+		[[ -z "$min" || "$t" -lt "$min" ]] && min="$t"
+		[[ -z "$max" || "$t" -gt "$max" ]] && max="$t"
+	done
+	if [[ -n "$min" && -n "$max" ]]; then
+		echo $(( max - min ))
+	else
+		echo 0
+	fi
+}
+
+compute_skew_ms() {
+	local prefix="$1"
+	local min="" max="" t i
+	for i in "${!CONTEXTS[@]}"; do
+		local t_file="${prefix}-${i}.ts"
+		[[ -s "$t_file" ]] || continue
+		t=$(<"$t_file")
+		[[ -z "$min" || "$t" -lt "$min" ]] && min="$t"
+		[[ -z "$max" || "$t" -gt "$max" ]] && max="$t"
+	done
+	if [[ -n "$min" && -n "$max" ]]; then
+		echo $(( max - min ))
+	else
+		echo 0
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Main scrape_window: baseline + final + deltas + emit TSV rows.
+# ---------------------------------------------------------------------------
+
+scrape_window() {
+	local sleep_sec="$1"
+	local skip_baseline="${2:-0}"
+	local settle_input_sec="${3:-$sleep_sec}"
+	local baseline_skew_ms final_skew_ms
+	if (( skip_baseline )); then
+		echo "  Baseline scrape: skipped (using pre-populated baseline from state-dir)."
+		baseline_skew_ms=$(compute_skew_ms "${TMP_DIR}/baseline")
+	else
+		echo "  Baseline scrape..."
+		baseline_skew_ms=$(scrape_all_parallel "${TMP_DIR}/baseline")
+	fi
+	if (( sleep_sec > 0 )); then
+		echo "  Settling for ${sleep_sec}s..."
+		sleep "$sleep_sec"
+	fi
+	echo "  Final scrape..."
+	final_skew_ms=$(scrape_all_parallel "${TMP_DIR}/final")
+	local total_skew_ms=$(( baseline_skew_ms > final_skew_ms ? baseline_skew_ms : final_skew_ms ))
+
+	local b_max_ms="" f_min_ms="" ts_val
+	for i in "${!CONTEXTS[@]}"; do
+		local bt="${TMP_DIR}/baseline-${i}.tsend"
+		local ft="${TMP_DIR}/final-${i}.ts"
+		if [[ -s "$bt" ]]; then
+			ts_val=$(<"$bt")
+			[[ -z "$b_max_ms" || "$ts_val" -gt "$b_max_ms" ]] && b_max_ms="$ts_val"
+		fi
+		if [[ -s "$ft" ]]; then
+			ts_val=$(<"$ft")
+			[[ -z "$f_min_ms" || "$ts_val" -lt "$f_min_ms" ]] && f_min_ms="$ts_val"
+		fi
+	done
+	local window_sec window_positive
+	if [[ -n "$b_max_ms" && -n "$f_min_ms" ]] && (( f_min_ms > b_max_ms )); then
+		window_sec=$(awk -v ms=$(( f_min_ms - b_max_ms )) 'BEGIN{ printf "%.1f", ms/1000 }')
+	else
+		window_sec=$(awk -v s="$settle_input_sec" 'BEGIN{ printf "%.1f", s+0 }')
+	fi
+	window_positive=$(awk -v w="$window_sec" 'BEGIN{ print (w+0 > 0) ? 1 : 0 }')
+
+	local ts
+	ts=$(date -u -Iseconds)
+
+	for i in "${!CONTEXTS[@]}"; do
+		ctx="${CONTEXTS[i]}"
+
+		local b_file="${TMP_DIR}/baseline-${i}.metrics"
+		local f_file="${TMP_DIR}/final-${i}.metrics"
+		if [[ ! -s "$f_file" ]]; then
+			echo "warning: no final scrape for $ctx; emitting N/A row" >&2
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A" >> "$TSV_FILE"
+			continue
+		fi
+		local baseline final
+		baseline=$([[ -s "$b_file" ]] && cat "$b_file" || echo "")
+		final=$(cat "$f_file")
+
+		# Memory from process_resident_memory_bytes (gauge, bytes → MiB).
+		local mem_mi
+		mem_mi=$(extract_gauge_exact "$final" process_resident_memory_bytes)
+		if [[ "$mem_mi" != "N/A" ]]; then
+			mem_mi=$(awk -v b="$mem_mi" 'BEGIN{ printf "%.0f", b / 1048576 }')
 		fi
 
-		local buckets conv_p50 conv_p99 q_p50 q_p99
-		buckets=$(extract_histogram_buckets "$m" "pilot_proxy_convergence_time")
-		conv_p50=$(histogram_quantile_from_buckets "$buckets" "0.5")
-		conv_p99=$(histogram_quantile_from_buckets "$buckets" "0.99")
-		buckets=$(extract_histogram_buckets "$m" "pilot_proxy_queue_time")
-		q_p50=$(histogram_quantile_from_buckets "$buckets" "0.5")
-		q_p99=$(histogram_quantile_from_buckets "$buckets" "0.99")
+		# Delta-window histograms.
+		local conv_delta_text queue_delta_text
+		conv_delta_text=$(delta_histogram "$baseline" "$final" "pilot_proxy_convergence_time")
+		queue_delta_text=$(delta_histogram "$baseline" "$final" "pilot_proxy_queue_time")
+		local conv_p50 conv_p99 queue_p50 queue_p99
+		conv_p50=$(extract_histogram_quantile "$conv_delta_text" "pilot_proxy_convergence_time" "0.5")
+		conv_p99=$(extract_histogram_quantile "$conv_delta_text" "pilot_proxy_convergence_time" "0.99")
+		queue_p50=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.5")
+		queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
 
-		local xds kev conn
-		xds=$(extract_counter_sum "$m" "pilot_xds_pushes")
-		kev=$(extract_counter_sum "$m" "pilot_k8s_cfg_events")
-		conn=$(extract_gauge "$m" "pilot_xds")
-		[[ -z "$conn" ]] && conn="N/A"
+		# Counter deltas (xds pushes + k8s events).
+		local b_pushes f_pushes pushes_delta pushes_rate
+		b_pushes=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_xds_pushes || echo 0)
+		f_pushes=$(extract_counter_sum "$final" pilot_xds_pushes)
+		pushes_delta=$(( f_pushes - b_pushes ))
+		(( pushes_delta < 0 )) && pushes_delta=0
+		if (( window_positive )); then
+			pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
+		else
+			pushes_rate="N/A"
+		fi
 
-		# A1: config_size_bytes column dropped; per-pod sample columns are N/A
-		# in watch mode (no /config_dump sampling for low overhead).
-		# C2: samples slot is attempted/got = 0/0 in watch mode.
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${SIDECAR_SCOPING}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${q_p50}\t${q_p99}\t${xds}\t${kev}\t${conn}\tN/A\tN/A\tN/A\t0/0\t0\t0\tunknown\t${SETTLE_SEC}" >>"$TSV_FILE"
-		echo "  Scraped $ctx: cpu=${cpu_m}m mem=${mem_mi}Mi proxies=${conn} pushes=${xds}"
+		local b_evts f_evts evts_delta evts_rate
+		b_evts=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_k8s_cfg_events || echo 0)
+		f_evts=$(extract_counter_sum "$final" pilot_k8s_cfg_events)
+		evts_delta=$(( f_evts - b_evts ))
+		(( evts_delta < 0 )) && evts_delta=0
+		if (( window_positive )); then
+			evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
+		else
+			evts_rate="N/A"
+		fi
+
+		# Per-type xds_pushes deltas.
+		local types=(cds eds lds rds nds)
+		local push_by_type=()
+		for t in "${types[@]}"; do
+			local b_t f_t d_t
+			b_t=$([[ -n "$baseline" ]] && extract_counter_by_label "$baseline" pilot_xds_pushes type "$t" || echo 0)
+			f_t=$(extract_counter_by_label "$final" pilot_xds_pushes type "$t")
+			d_t=$(( f_t - b_t ))
+			(( d_t < 0 )) && d_t=0
+			push_by_type+=("$d_t")
+		done
+
+		# Connected proxies (gauge — read from final scrape).
+		local connected_proxies
+		connected_proxies=$(extract_gauge_exact "$final" pilot_xds)
+
+		# Restart detection.
+		local b_pst f_pst istiod_restarted
+		b_pst=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_start_time_seconds || echo N/A)
+		f_pst=$(extract_gauge_exact "$final" process_start_time_seconds)
+		istiod_restarted=$(awk -v b="$b_pst" -v f="$f_pst" '
+			BEGIN {
+				if (b == "N/A" || f == "N/A") { print "unknown"; exit }
+				print (f+0 > b+0) ? 1 : 0
+			}')
+		if [[ "$istiod_restarted" == "1" ]]; then
+			echo "warning: istiod restart detected during scrape window on ${ctx} (process_start_time_seconds ${b_pst} -> ${f_pst})" >&2
+		fi
+
+		# CPU delta (average millicores over window).
+		local b_cpu_s f_cpu_s cpu_m_delta
+		b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
+		f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
+		if [[ "$istiod_restarted" == "1" ]]; then
+			cpu_m_delta="N/A"
+		else
+			cpu_m_delta=$(awk -v b="$b_cpu_s" -v f="$f_cpu_s" -v w="$window_sec" '
+				BEGIN {
+					if (b == "N/A" || f == "N/A" || w+0 <= 0) { print "N/A"; exit }
+					d = (f - b) * 1000 / w
+					if (d < 0) { print "N/A"; exit }
+					printf "%.0f", d
+				}')
+		fi
+
+		# config_size: histogram, avg = (sum_delta / count_delta) bytes.
+		local b_sum f_sum b_cnt f_cnt
+		b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" pilot_xds_config_size_bytes || echo 0)
+		f_sum=$(extract_hist_sum "$final" pilot_xds_config_size_bytes)
+		b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" pilot_xds_config_size_bytes || echo 0)
+		f_cnt=$(extract_hist_count "$final" pilot_xds_config_size_bytes)
+		local cs_avg
+		cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
+			BEGIN {
+				ds = fs - bs; dc = fc - bc
+				if (ds < 0) ds = 0
+				if (dc <= 0) { print "N/A"; exit }
+				printf "%.0f", ds/dc
+			}')
+
+		# Per-sidecar /config_dump sampling (only in final/combined phase).
+		local cd_avg="N/A" cd_p50="N/A" cd_max="N/A" cd_samples="0/0"
+		if (( CONFIG_DUMP_SAMPLES > 0 )); then
+			local cd_out cd_csv cd_meta
+			cd_out="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
+			cd_csv="${cd_out%%|*}"
+			cd_meta="${cd_out#*|}"
+			local attempted=0 got=0
+			[[ "$cd_meta" =~ attempted=([0-9]+) ]] && attempted="${BASH_REMATCH[1]}"
+			[[ "$cd_meta" =~ got=([0-9]+) ]] && got="${BASH_REMATCH[1]}"
+			local agg
+			agg="$(aggregate_sample_bytes "$cd_csv")"
+			cd_avg="${agg%%|*}"
+			cd_p50="$(echo "$agg" | awk -F'|' '{print $2}')"
+			cd_max="$(echo "$agg" | awk -F'|' '{print $3}')"
+			cd_samples="${attempted}/${got}"
+		fi
+
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}" >> "$TSV_FILE"
+		echo "  Scraped $ctx: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 	done
 }
 
 if ((WATCH)); then
-	echo "Watch mode: scraping every ${INTERVAL}s (Ctrl-C to stop). Note: watch mode reports raw cumulative values; use one-shot mode for delta-window metrics."
+	echo "Watch mode: ${INTERVAL}s window between baseline and final scrapes (Ctrl-C to stop)"
 	while true; do
 		echo ""
-		echo "=== Scrape at $(date -Iseconds) ==="
-		scrape_single_snapshot
-		sleep "$INTERVAL"
+		echo "=== Window at $(date -u -Iseconds) ==="
+		scrape_window "$INTERVAL"
 	done
-else
+elif [[ "$PHASE" == baseline ]]; then
 	echo ""
-	echo "=== Scraping control-plane metrics (delta window=${SETTLE_SEC}s) ==="
-	scrape_baseline_then_final
+	echo "=== Baseline scrape only (phase=baseline) ==="
+	echo "  Writing baseline metrics to $STATE_DIR"
+	scrape_all_parallel "${STATE_DIR}/baseline" >/dev/null
+	echo "  Baseline complete. Caller should now deploy workloads, settle, and"
+	echo "  invoke this script again with --phase final --state-dir $STATE_DIR"
+elif [[ "$PHASE" == final ]]; then
+	echo ""
+	echo "=== Final scrape + emit (phase=final) ==="
+	echo "  Reading baseline from $STATE_DIR"
+	for f in "${STATE_DIR}/baseline-"*; do
+		[[ -e "$f" ]] || die "no baseline files in $STATE_DIR — run --phase baseline first"
+		cp "$f" "${TMP_DIR}/$(basename "$f")"
+	done
+	scrape_window 0 1 "$SETTLE_SEC"
 	echo ""
 	echo "Results appended to $TSV_FILE"
+else
+	echo ""
+	echo "=== Scraping control-plane metrics (phase=combined, window=${SETTLE_SEC}s) ==="
+	scrape_window "$SETTLE_SEC"
+	echo ""
+	echo "Results appended to $TSV_FILE"
+fi
 
+# Generate per-run MD summary.
+if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 	MD_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.md"
 	{
 		echo "# Control-Plane Resource Metrics"
@@ -716,29 +861,31 @@ else
 		echo "| Field | Value |"
 		echo "|-------|-------|"
 		echo "| Run ID | \`${RUN_ID}\` |"
-		echo "| Harness SHA | \`${HARNESS_SHA}\` |"
-		echo "| Istio version | ${ISTIO_VERSION:-unknown} |"
-		echo "| Date | $(date -Iseconds) |"
+		echo "| Date | $(date -u -Iseconds) |"
+		echo "| Phase | ${PHASE} |"
+		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
+		echo "| Harness SHA | ${HARNESS_SHA} |"
+		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
 		echo "| Mesh size | ${MESH_SIZE} |"
 		echo "| Service count | ${SERVICE_COUNT} |"
 		echo "| Replicas | ${REPLICAS} |"
+		echo "| Namespace count | ${NAMESPACE_COUNT} |"
 		echo "| Sidecar scoping | ${SIDECAR_SCOPING} |"
 		echo "| Config-dump samples | ${CONFIG_DUMP_SAMPLES} |"
-		echo "| Settle | ${SETTLE_SEC}s |"
+		echo "| Settle (s) | ${SETTLE_SEC} |"
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | CPU (m) | Memory (Mi) | Conv p50 (ms) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | Cfg bytes avg | Samples | Restarted |"
-		echo "|---------|---------|-------------|---------------|---------------|----------------|---------|----------|---------------|---------|-----------|"
-		# Column count is 23 after A1 dropped config_size_bytes.
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=23 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $8, $9, $10, $12, $15, $13, $16, $19, $22
+		echo "| Context | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg |"
+		echo "|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|--------------|"
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=32 {
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $32, $8, $10, $12, $22, $13, $16, $15, $24
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
 		echo ""
 		echo "TSV: [\`$(basename "$TSV_FILE")\`]($(basename "$TSV_FILE"))"
-	} >"$MD_FILE"
+	} > "$MD_FILE"
 	echo "Summary written to $MD_FILE"
 fi

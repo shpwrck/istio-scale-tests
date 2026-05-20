@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Clean up all controlplane-test resources from target clusters.
 #
+# Approach: delete every namespace carrying the chart's instance label,
+# `app.kubernetes.io/instance=controlplane-test`. The chart stamps that label
+# on every namespace it creates (single or multi-namespace mode), so a single
+# label-selector delete covers both the legacy `controlplane-test` namespace
+# and all `${NS}-N` sweep namespaces in one call — robust against partially
+# completed setup runs and against namespaceCount drift between sweep steps.
+#
 # Usage:
 #   ./tests/controlplane/005-cleanup.sh [--contexts CSV] [--dry-run]
 set -euo pipefail
@@ -12,6 +19,7 @@ source "${ROOT}/config/versions.env"
 CONTEXTS_CSV=""
 DRY_RUN=0
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
+LABEL_SELECTOR="app.kubernetes.io/instance=controlplane-test"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -22,6 +30,11 @@ Usage: $(basename "$0") [options]
   --contexts CSV   Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --dry-run        Show what would be deleted without deleting.
   -h, --help       Show this help.
+
+Behavior:
+  Deletes every namespace labelled '${LABEL_SELECTOR}' on each context, plus
+  the legacy single namespace '\$CONTROLPLANE_TEST_NAMESPACE' (default
+  'controlplane-test') if it lacks the label.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE.
@@ -78,48 +91,75 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
+TERMINATION_TIMEOUT=300
+
 run_delete() {
 	if ((DRY_RUN)); then
 		echo "  [dry-run] $*"
-	else
-		"$@" 2>/dev/null || true
+		return 0
 	fi
+	"$@"
+}
+
+wait_ns_terminated() {
+	local ctx="$1"
+	local waited=0
+	while "${KUBECTL[@]}" --context="$ctx" get ns \
+			-l "$LABEL_SELECTOR" -o name 2>/dev/null | grep -q .; do
+		sleep 2
+		waited=$(( waited + 2 ))
+		if (( waited >= TERMINATION_TIMEOUT )); then
+			echo "  [$ctx] namespace termination timeout after ${TERMINATION_TIMEOUT}s" >&2
+			return 1
+		fi
+	done
+	return 0
 }
 
 echo "=== Control-plane test cleanup ==="
-echo "Contexts: ${CONTEXTS[*]}"
-echo "Namespace: $NS"
-((DRY_RUN)) && echo "Mode: dry-run"
+echo "Contexts:        ${CONTEXTS[*]}"
+echo "Label selector:  $LABEL_SELECTOR"
+echo "Legacy fallback: $NS"
+((DRY_RUN)) && echo "Mode:            dry-run"
 echo ""
 
 PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
+		set -e
 		echo "--- Cleaning up context: $ctx ---"
-		if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
-			echo "  [$ctx] Namespace $NS does not exist, skipping."
-			exit 0
+		matches=$("${KUBECTL[@]}" --context="$ctx" get namespace \
+			-l "$LABEL_SELECTOR" \
+			-o name 2>/dev/null || true)
+		if [[ -n "$matches" ]]; then
+			echo "  [$ctx] Labelled namespaces:"
+			# shellcheck disable=SC2086
+			printf '    %s\n' $matches
+			# shellcheck disable=SC2086
+			run_delete "${KUBECTL[@]}" --context="$ctx" delete $matches --ignore-not-found=true
+		else
+			echo "  [$ctx] No labelled namespaces found."
 		fi
-		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=true
-		if ((DRY_RUN==0)); then
-			# PL4: await namespace fully gone.
-			deadline=$(( $(date +%s) + 180 ))
-			while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do
-				if (( $(date +%s) >= deadline )); then
-					echo "  [$ctx] WARNING: namespace $NS still present after 180s" >&2
-					break
-				fi
-				sleep 2
-			done
-			# Sidecar CRs are namespace-scoped; deleting the namespace deletes them.
-			# Confirm none remain.
-			sc_left=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
-				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
+
+		# Fallback: legacy single namespace from a pre-label deployment.
+		if "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+			echo "  [$ctx] Removing legacy namespace $NS (no chart label)."
+			run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		fi
+
+		if ! ((DRY_RUN)); then
+			echo "  [$ctx] Waiting for namespace termination (timeout ${TERMINATION_TIMEOUT}s)..."
+			wait_ns_terminated "$ctx"
+			# Sidecar CRs are namespace-scoped and go away with the namespace.
+			# Confirm none leaked in a still-existing namespace.
+			sc_left=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io \
+				-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
 			[[ -z "$sc_left" ]] && sc_left=0
 			if (( sc_left > 0 )); then
-				echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present in $NS" >&2
+				echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
 			fi
 		fi
+
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)

@@ -292,10 +292,16 @@ See `tests/propagation/README.md` for full usage.
 Measure istiod CPU, memory, and xDS metrics as a function of mesh size **and `Sidecar` CR scoping**. Deploys dummy workloads to generate endpoint load, then scrapes `kubectl top`, istiod Prometheus metrics, and per-proxy `/config_dump?include_eds` byte size.
 
 ```bash
-# Sweep across mesh sizes with 50 services per cluster
+# Sweep across mesh sizes with 50 services per cluster (singular --service-count
+# is a one-value alias; the canonical flag is --service-counts CSV)
 ./tests/controlplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --service-count 50
+
+# CSV form — sweep multiple values per axis
+./tests/controlplane/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --service-counts 10,100,500 --replica-counts 1,3 --namespace-counts 1,5
 
 # Cross-product mesh size with Sidecar scoping (none, namespace, explicit)
 # — measures the per-proxy config-size reduction that Sidecar CRs provide.

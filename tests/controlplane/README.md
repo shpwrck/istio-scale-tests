@@ -1,27 +1,53 @@
 # Control-Plane Resource Scaling Test Suite
 
 Measure istiod CPU, memory, and xDS metrics as a function of mesh size, workload
-density, and `Sidecar` CR scoping.
+density, namespace cardinality, and `Sidecar` CR scoping.
 
 ## What Gets Measured
 
+All histogram and counter metrics are computed as **deltas over a wall-clock
+window**. The 003 sweep splits the window into three phases per combo so the
+work itself lands inside the measurement:
+
+1. **Baseline scrape** — `002 --phase baseline` runs *before* 001 deploys.
+2. **Deploy + settle** — 001 creates the workloads; 003 then sleeps `--settle`.
+3. **Final scrape + emit** — `002 --phase final` reads the baseline back from
+   `--state-dir`, scrapes again, and writes one TSV row covering the entire
+   baseline → deploy → settle window.
+
+This is why the rate denominators (`xds_pushes_rate`, `cpu_m_delta`,
+histogram quantile windows, etc.) are meaningful: they cover the period when
+istiod is actually pushing config to sidecars. Earlier versions ran 002 only
+*after* 001 returned, by which point the push storm was already over and the
+delta read ~0 even on a 60-service deploy.
+
+Standalone use of 002 (without 003) still works via the default
+`--phase combined`, which does baseline → sleep → final in one invocation.
+Operators just need to know that combined-mode measures the *settle window
+only*, not the deploy itself.
+
 | Metric | Source | What it shows |
 |--------|--------|---------------|
-| istiod CPU (millicores) | `kubectl top pod` | Control-plane CPU cost per cluster count |
-| istiod Memory (MiB) | `kubectl top pod` | Control-plane memory cost per cluster count |
-| `pilot_proxy_convergence_time` p50/p99 (delta) | istiod Prometheus | How fast config reaches all sidecars |
-| `pilot_proxy_queue_time` p50/p99 (delta) | istiod Prometheus | How long pushes wait in istiod's queue |
-| `pilot_xds_pushes` (delta) | istiod Prometheus | Total xDS push count over the window |
-| `pilot_k8s_cfg_events` (delta) | istiod Prometheus | Kubernetes watch event rate |
-| `pilot_xds` | istiod Prometheus | Connected proxy count (gauge; summed across label permutations) |
-| `process_start_time_seconds` | istiod Prometheus | Restart detection across the window |
+| istiod CPU (millicores) | `process_cpu_seconds_total` delta over the scrape window | Average millicores consumed during the actual push window. `N/A` if istiod restarted (counter resets), baseline scrape was missing, or window was non-positive |
+| istiod Memory (MiB) | `process_resident_memory_bytes` from istiod `/metrics` | Control-plane memory cost per cluster (gauge from final scrape, converted to MiB) |
+| `pilot_proxy_convergence_time` p50/p99 (delta) | istiod Prometheus | How fast config reaches all sidecars during the window |
+| `pilot_proxy_queue_time` p50/p99 (delta) | istiod Prometheus | How long pushes wait in istiod's queue during the window |
+| `pilot_xds_pushes` delta + rate | istiod Prometheus | xDS push count during the window (and per-second rate) |
+| `pilot_xds_pushes` by type | istiod Prometheus | One column per xDS type (cds, eds, lds, rds, nds) so EDS-vs-CDS scaling can be separated |
+| `pilot_k8s_cfg_events` delta + rate | istiod Prometheus | Kubernetes watch events during the window |
+| `pilot_xds` | istiod Prometheus | Connected proxy count (gauge — read from final scrape) |
+| `pilot_xds_config_size_bytes` avg | istiod Prometheus | Average xDS payload bytes during the window (histogram `_sum`/`_count` delta) |
 | Per-sidecar `/config_dump` byte size | `kubectl exec` into istio-proxy | **Real** per-proxy config cost per scoping mode |
+| `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length and max clock skew across concurrent per-context scrapes |
+| `settle_sec` | Internal | Operator-supplied `--settle` value (intent — distinct from `scrape_window_sec` which is the observed elapsed window) |
+| `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape; `0` if both readings were present and equal; `unknown` if either side was missing |
+| `istiod_cpu_m_delta` | istiod Prometheus | CPU metric: `(final − baseline) ÷ scrape_window_sec × 1000` from `process_cpu_seconds_total` |
 
-All histogram and counter metrics are reported as **deltas over the scrape
-window** (baseline snapshot, settle, final snapshot). The reported
-`scrape_window_sec` is the wall-clock interval between snapshots.
+Histogram cells whose target quantile lands in the `+Inf` overflow bucket are
+emitted as the literal string `overflow` in TSV/CSV/text/markdown outputs and
+as JSON `null` in JSON output.
 
-## Sidecar scoping
+## Sidecar Scoping
 
 `Sidecar` CRs are istiod's primary scaling lever: they limit per-proxy
 configuration to only the upstream services the workload actually needs.
@@ -36,9 +62,9 @@ This suite sweeps three modes:
 | `namespace` | 1 per workload namespace (no `workloadSelector`) | Realistic operator config. `egress.hosts` restricts each proxy to its own namespace + `istio-system`. |
 | `explicit` | 1 per Deployment (with `workloadSelector.labels.app: dummy-svc-<i>`) | Maximum precision; many CRs, smallest per-proxy config. |
 
-Expected per-proxy config size ordering: `none` ≫ `namespace` ≥ `explicit`.
-The 003 sweep cross-products `(mesh_size × sidecar_scoping)` so 004 can render
-the reduction percentage as the headline of the report.
+Expected per-proxy config size ordering: `none` >> `namespace` >= `explicit`.
+The 003 sweep cross-products all five axes so 004 can render the reduction
+percentage in the markdown report.
 
 ## Prerequisites
 
@@ -59,26 +85,57 @@ the reduction percentage as the headline of the report.
 ./tests/controlplane/004-report-results.sh
 ```
 
-## Sweep Across (mesh size × sidecar scoping)
+## Sweep Dimensions
 
-Compare istiod resource consumption and per-proxy config size at different
-cluster counts and scoping modes:
+`003-run-sweep.sh` iterates the **cross-product** of five independent axes:
+
+| Axis | Flag (CSV) | Singular alias | What it changes | Why it matters |
+|------|------------|----------------|-----------------|----------------|
+| Mesh size | `--mesh-sizes CSV` | (CSV only) | Number of clusters participating | Distinguishes "more clusters" from "more config" |
+| Service count | `--service-counts CSV` | `--service-count N` | Total dummy services per cluster | Push cost scales roughly with services x sidecars (CDS load) |
+| Replicas | `--replica-counts CSV` | `--replicas N` | Pods per service (endpoint count) | EDS push payload + endpoint update churn |
+| Namespace count | `--namespace-counts CSV` | `--namespace-count N` | Namespaces holding the services | Exposes namespace-informer overhead at high cardinality |
+| Sidecar scoping | `--sidecar-scopings CSV` | `--sidecar-scoping MODE` | Sidecar CR mode: none, namespace, explicit | Per-proxy config size / push cost reduction |
+
+The sweep runs `mesh-sizes x service-counts x replica-counts x namespace-counts x sidecar-scopings` combinations. To keep operators from accidentally launching a multi-day sweep, the script **refuses to run a matrix larger than `CONTROLPLANE_MAX_MATRIX` combinations** (default 64) unless `--force-large-matrix` is passed.
+
+Services are distributed deterministically: service `i` is created in namespace `i mod namespace-count`. When `namespace-count = 1` the single namespace keeps its legacy name (`controlplane-test`).
+
+## Sweep Examples
 
 ```bash
-# Full 3×3 sweep: 1,2,3 clusters × none,namespace,explicit
+# Default: sweep mesh sizes 1..N, single (10 svc x 3 replicas x 1 ns x none) point each
+./tests/controlplane/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003
+
+# Mesh-size x service-count grid (3 x 3 = 9 combos)
+./tests/controlplane/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --mesh-sizes 1,2,3 \
+  --service-counts 10,100,500
+
+# Full 3x3 sidecar scoping sweep
 ./tests/controlplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3 \
   --sidecar-scopings none,namespace,explicit \
   --service-count 50
 
-# Dry-run to see plan without executing.
-./tests/controlplane/003-run-sweep.sh --dry-run \
-  --contexts a,b --sidecar-scopings none,namespace,explicit
-```
+# Hold mesh fixed; sweep namespace cardinality to expose informer overhead
+./tests/controlplane/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --mesh-sizes 3 \
+  --service-counts 200 \
+  --namespace-counts 1,5,25,50
 
-Singular `--sidecar-scoping VALUE` and `--mesh-size N` aliases are accepted for
-muscle-memory parity with 001/002 but print a deprecation warning to stderr.
+# Dry-run prints the planned matrix and exits without touching clusters
+./tests/controlplane/003-run-sweep.sh --dry-run \
+  --contexts a,b,c --service-counts 10,100 --sidecar-scopings none,namespace
+
+# Disable config_dump sampling (faster sweep, no exec round-trips)
+./tests/controlplane/003-run-sweep.sh \
+  --contexts rosa-001 --config-dump-samples 0
+```
 
 `SETTLE_SEC` is applied at THREE points inside each combo: (1) before the
 baseline scrape, (2) between baseline and final snapshots, (3) **after** the
@@ -97,51 +154,52 @@ no delta):
 
 ## Results Format
 
-TSV files in `tests/controlplane/results/sweep-<RUN_ID>/` (gitignored). Each
-TSV starts with a `#`-prefixed preamble that records `RUN_ID`, `HARNESS_SHA`,
-`ISTIO_VERSION`, kube versions per context, settle/scoping/sample counts.
-
-The data schema (tab-separated, 23 columns) is:
+Each sweep gets its own subdirectory under `tests/controlplane/results/`:
+`results/sweep-<RUN_ID>/controlplane-<RUN_ID>.tsv`. Back-to-back sweeps never
+conflate. TSV files carry a metadata preamble:
 
 ```
-timestamp
-context
-mesh_size
-service_count
-replicas
-sidecar_scoping             # none | namespace | explicit
-istiod_cpu_m
+# Control-plane resource metrics — 2026-05-20T18:32:01+00:00
+# ISTIO_VERSION=1.24.0
+# HARNESS_SHA=4139b50
+# KUBE_VERSIONS=rosa-001=v1.29.4, rosa-002=v1.29.4, rosa-003=v1.29.4
+# SIDECAR_SCOPING=none
+# CONFIG_DUMP_SAMPLES=3
+# SETTLE_SEC=60
+# RUN_ID=20260520T183201Z-12345
+```
+
+The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each
+value is either the apiserver `gitVersion` (e.g. `v1.30.4`), `unreachable`, or
+`unknown`.
+
+Followed by the 32-column data schema:
+
+```
+timestamp  context  mesh_size  service_count  replicas  namespace_count  sidecar_scoping
 istiod_mem_mi
-convergence_p50_ms          # delta-window p50; "overflow" if target falls in +Inf bucket;
-                            # "N/A" if any delta bucket < 0 or istiod restarted in the window
-convergence_p99_ms          # delta-window p99; "overflow" / "N/A" possible (same conditions)
-queue_p50_ms                # delta-window p50; "N/A" possible
-queue_p99_ms                # delta-window p99; "N/A" possible
-xds_pushes                  # delta over window; "N/A" when istiod_restarted=1
-k8s_events                  # delta over window; "N/A" when istiod_restarted=1
-connected_proxies           # instantaneous gauge from final snapshot, summed across pilot_xds
-                            # label permutations (e.g. ads / sds / cds-only proxies)
-sidecar_config_bytes_avg    # mean of per-pod /config_dump?include_eds bytes
-sidecar_config_bytes_p50    # median of per-pod /config_dump?include_eds bytes
-sidecar_config_bytes_max    # max of per-pod /config_dump?include_eds bytes
-sidecar_config_bytes_samples  # attempted/got (e.g. "3/2" = 3 attempted, 2 successful)
-scrape_window_sec           # wall-clock window: min(final.start) - max(baseline.end)
-scrape_skew_ms              # max(ts) - min(ts) across contexts in either snapshot
-istiod_restarted            # 0 | 1 | unknown (when either process_start_time was missing)
-settle_sec                  # operator's --settle input (intent)
+convergence_p50_ms  convergence_p99_ms  queue_p50_ms  queue_p99_ms
+xds_pushes_delta  xds_pushes_rate
+xds_pushes_cds  xds_pushes_eds  xds_pushes_lds  xds_pushes_rds  xds_pushes_nds
+k8s_events_delta  k8s_events_rate
+connected_proxies  config_size_avg_bytes
+sidecar_config_bytes_avg  sidecar_config_bytes_p50  sidecar_config_bytes_max  sidecar_config_bytes_samples
+scrape_window_sec  scrape_skew_ms
+settle_sec  istiod_restarted
+istiod_cpu_m_delta
 ```
 
-**EDS is included by design.** Envoy's default `/config_dump` omits the
-`EndpointsConfigDump`, but EDS is the dominant per-proxy size driver — exactly
-the cost that `Sidecar` scoping is designed to reduce. We curl
+**EDS is included in config_dump by design.** Envoy's default `/config_dump`
+omits the `EndpointsConfigDump`, but EDS is the dominant per-proxy size driver —
+exactly the cost that `Sidecar` scoping is designed to reduce. We curl
 `http://localhost:15000/config_dump?include_eds` so the headline reduction
-(none → namespace / explicit) is visible.
+(none -> namespace / explicit) is visible.
 
-**`pilot_xds_config_size_bytes` is intentionally not collected.** It is a
-*histogram* (buckets + `_sum` + `_count`), not a counter. Treating it as a
-counter (summing every `_bucket` / `_sum` / `_count` line) yields a
-meaningless number; the per-proxy `/config_dump` byte sample above is the
-correct per-proxy signal.
+`004-report-results.sh` groups rows by `(mesh_size, service_count, replicas,
+namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
+`markdown` summaries via `--format`. The markdown format includes a "Sidecar
+scoping effect" table showing config size reduction percentages across modes.
+Legacy TSV files with a non-32-column schema are skipped with a stderr warning.
 
 ## Cleanup
 
@@ -149,32 +207,32 @@ correct per-proxy signal.
 ./tests/controlplane/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 ```
 
-Cleanup awaits namespace deletion (PL4) and confirms no `Sidecar` CRs remain;
-since `Sidecar` is namespace-scoped, removing the namespace removes them.
+Cleanup deletes every namespace labelled `app.kubernetes.io/instance=controlplane-test`
+on each context — covering both single- and multi-namespace runs — plus the
+legacy unlabeled `controlplane-test` namespace if present. Post-deletion, it
+confirms no `Sidecar` CRs leaked.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `001-setup-controlplane-test.sh` | Deploy dummy workloads + Sidecar CRs on target clusters |
-| `002-collect-resource-metrics.sh` | Delta-window scrape istiod metrics + sample per-pod /config_dump |
-| `003-run-sweep.sh` | Orchestrate deploy/collect/cleanup across (mesh_size × sidecar_scoping) |
-| `004-report-results.sh` | Aggregate TSVs and emit text/csv/markdown/json reports |
+| `001-setup-controlplane-test.sh` | Deploy dummy workloads + optional Sidecar CRs on target clusters |
+| `002-collect-resource-metrics.sh` | Delta-window scrape istiod metrics + optional per-pod /config_dump sampling |
+| `003-run-sweep.sh` | Orchestrate the 5-axis cross-product (mesh x svc x reps x ns x scoping) |
+| `004-report-results.sh` | Aggregate TSV rows by the five sweep axes (text/csv/json/markdown) |
 | `005-cleanup.sh` | Remove all controlplane-test resources |
 
-## Known limitations
+## Known Limitations
 
-- **`/config_dump` exec cost is O(N samples × clusters × combos)**: at default
-  `--config-dump-samples 3` and a 3×3 sweep with 3 clusters, that's 81
-  per-pod exec round-trips per full sweep. Each exec runs `curl localhost:15000`
-  inside the `istio-proxy` container; clusters under heavy churn may see exec
-  timeouts. Set `--config-dump-samples 0` to disable sampling entirely.
+- **`/config_dump` exec cost is O(N samples x clusters x combos)**: at default
+  `--config-dump-samples 3` and a 3x3 sweep with 3 clusters, that's 81
+  per-pod exec round-trips per full sweep. Set `--config-dump-samples 0` to
+  disable sampling entirely.
+- **Service distribution across namespaces is uniform**; real meshes are
+  long-tail (Zipf). Treat namespace-count results as a *lower bound* on
+  per-namespace push cost.
+- **No `--samples N` repeated scrapes per cell** — every sweep point is a
+  single (baseline + final) window. Re-run the sweep to get N samples per cell.
+- **Settle time is single-valued** across the entire sweep.
 - **Watch mode reports raw cumulative metrics**, not deltas. Use one-shot mode
   for percentile / counter measurements over a defined window.
-- **`namespaceCount > 1` is accepted but only the primary namespace receives
-  Deployments AND Sidecar CRs in this branch.** Emitting Sidecar CRs into
-  namespaces with zero workloads would contaminate `pilot_xds_pushes` /
-  `pilot_k8s_cfg_events` with "extra empty CRs" rather than "more scoped
-  namespaces." 001 prints a stderr warning when `--namespace-count > 1`.
-  The runtime sweep across namespace counts is owned by a sibling branch;
-  revisit this when it lands.
