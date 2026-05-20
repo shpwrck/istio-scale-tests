@@ -9,6 +9,10 @@
 # keeps its historical name `${NS}` (e.g. `controlplane-test`). When > 1,
 # namespaces are named `${NS}-0`, `${NS}-1`, ..., `${NS}-(N-1)`.
 #
+# Manifests are applied with server-side apply (`--server-side
+# --force-conflicts`); we use a label-selector wait per namespace instead of
+# looping per Deployment.
+#
 # Usage:
 #   ./tests/controlplane/001-setup-controlplane-test.sh [--contexts CSV] [options]
 #
@@ -51,7 +55,8 @@ Usage: $(basename "$0") [options]
                        N=1 -> single namespace named '$NS'.
                        N>1 -> namespaces '${NS}-0' .. '${NS}-(N-1)';
                        service i lands in namespace (i mod N).
-  --dry-run            Pass --dry-run=client to oc apply.
+  --dry-run            Pass --dry-run=client to oc apply
+                       (skips the --server-side path).
   --wait-timeout N     Seconds to wait for pods (default: 300).
   -h, --help           Show this help.
 
@@ -162,7 +167,12 @@ echo "Namespaces:      ${NAMESPACES[*]}"
 ((DRY_RUN)) && echo "Mode:            dry-run"
 echo ""
 
-apply=("${KUBECTL[@]}" apply)
+# Use server-side apply so partial updates and field-manager ownership are
+# tracked by the API server (no client-side last-applied annotation). With
+# --force-conflicts we win any field-ownership conflict from a previous
+# kubectl-client-side-apply run, which is what we want for a benchmarking
+# harness that owns these namespaces exclusively.
+apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
 CHART_DIR="${ROOT}/tests/controlplane/chart"
@@ -183,15 +193,18 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
+# Wait per-namespace using a label selector — one kubectl call covers every
+# dummy-svc-* Deployment in that namespace, regardless of count. Much faster
+# than per-Deployment loops, and survives missing-name races during rollout.
 echo "Waiting for dummy deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 for ctx in "${CONTEXTS[@]}"; do
 	echo "  Waiting on context $ctx..."
-	for ((i = 0; i < SERVICE_COUNT; i++)); do
-		ns_idx=$(( i % NAMESPACE_COUNT ))
-		svc_ns="${NAMESPACES[$ns_idx]}"
-		"${KUBECTL[@]}" --context="$ctx" -n "$svc_ns" wait "deployment/dummy-svc-${i}" \
-			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" \
-			|| die "dummy-svc-${i} not ready on $ctx (namespace $svc_ns)"
+	for svc_ns in "${NAMESPACES[@]}"; do
+		"${KUBECTL[@]}" --context="$ctx" -n "$svc_ns" wait \
+			--for=condition=Available deployment \
+			-l app.kubernetes.io/instance=controlplane-test \
+			--timeout="${WAIT_TIMEOUT}s" \
+			|| die "deployments in namespace $svc_ns on $ctx not Available within ${WAIT_TIMEOUT}s"
 	done
 	echo "  All deployments ready on $ctx."
 done
