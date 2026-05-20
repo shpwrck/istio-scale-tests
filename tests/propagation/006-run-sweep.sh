@@ -26,11 +26,13 @@ CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
-SETTLE_SEC="${PROPAGATION_SETTLE_SEC:-5}"
+SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
+MAX_MATRIX="${PROPAGATION_MAX_MATRIX:-64}"
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
 COLLECT_METRICS=0
+FORCE_LARGE_MATRIX=0
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -48,11 +50,13 @@ Usage: $(basename "$0") [options]
                          per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
   --tsv                  Also write per-iteration TSV files (enables 005 report).
   --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
+  --force-large-matrix   Bypass matrix safety cap (default: $MAX_MATRIX iterations).
   --dry-run              Print planned matrix to stderr; exit without touching clusters.
   -h, --help             Show this help.
 
 Environment:
-  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC.
+  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
+  PROPAGATION_MAX_MATRIX.
 EOF
 }
 
@@ -116,6 +120,10 @@ while [[ $# -gt 0 ]]; do
 		WRITE_TSV=1
 		shift
 		;;
+	--force-large-matrix)
+		FORCE_LARGE_MATRIX=1
+		shift
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -151,8 +159,13 @@ for ms in "${MESH_SIZES[@]}"; do
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ITERATIONS ))
+if (( MATRIX_SIZE > MAX_MATRIX && !FORCE_LARGE_MATRIX )); then
+	die "matrix too large: ${#MESH_SIZES[@]} mesh_sizes × $ITERATIONS iterations = $MATRIX_SIZE (max $MAX_MATRIX). Use --force-large-matrix to override."
+fi
+
 SCRIPT_DIR="${ROOT}/tests/propagation"
-SWEEP_RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
+SWEEP_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
 
 # --- dry-run: print planned matrix to stderr, exit cleanly --------------------
@@ -164,6 +177,7 @@ if ((DRY_RUN)); then
 		echo "Contexts: ${CONTEXTS[*]}"
 		echo "Mesh sizes: ${MESH_SIZES[*]}"
 		echo "Iterations per size: $ITERATIONS"
+		echo "Total iterations: $MATRIX_SIZE (cap: $MAX_MATRIX)"
 		echo "Settle: ${SETTLE_SEC}s"
 		echo "Output (would create): $SWEEP_DIR"
 		echo ""
@@ -225,6 +239,21 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "=========================================="
 	echo ""
 
+	# Clean up watchers on contexts not active at this mesh size to prevent
+	# orphan sidecars from inflating histogram baselines (R5-S3).
+	inactive_ctxs=()
+	for c in "${CONTEXTS[@]}"; do
+		_match=0
+		for ac in "${active_ctxs[@]}"; do
+			[[ "$c" == "$ac" ]] && { _match=1; break; }
+		done
+		((_match)) || inactive_ctxs+=("$c")
+	done
+	if ((${#inactive_ctxs[@]} > 0)); then
+		echo "--- Cleaning up watchers on inactive contexts: ${inactive_ctxs[*]} ---"
+		"$SCRIPT_DIR/001-setup-propagation-test.sh" --cleanup --contexts "$(IFS=,; echo "${inactive_ctxs[*]}")" || true
+	fi
+
 	echo "--- Setting up watchers ---"
 	"$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
 	echo ""
@@ -284,7 +313,7 @@ if ((${#MD_FILES[@]} > 0)); then
 		echo "| Field | Value |"
 		echo "|-------|-------|"
 		echo "| Sweep run ID | \`${SWEEP_RUN_ID}\` |"
-		echo "| Date | $(date -Iseconds) |"
+		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
 		echo "| Mesh sizes | ${MESH_SIZES[*]} |"
 		echo "| Iterations per size | ${ITERATIONS} |"

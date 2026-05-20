@@ -117,7 +117,7 @@ fi
 
 command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
-apply=("${KUBECTL[@]}" apply)
+apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
 CHART_DIR="${ROOT}/tests/propagation/chart"

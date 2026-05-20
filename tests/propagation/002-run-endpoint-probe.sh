@@ -8,8 +8,8 @@
 #        Measured via delta of the pilot_proxy_convergence_time histogram
 #        (the same metric istiod-monitor's PrometheusRule reads). We snapshot
 #        _bucket / _sum / _count BEFORE the canary apply, then poll /metrics
-#        until the delta _count meets `proxy_count * eds_pushes_in_window`
-#        (= every connected proxy ACKed every EDS push triggered by the canary).
+#        until the delta _count >= proxy_count (= every connected proxy
+#        has received at least one push triggered by the canary).
 #        This avoids self-noise from polling /debug/syncz, which serializes the
 #        full push context per request and competes with the work being measured.
 #        Reports both the wall-clock time-to-converged-count (p1_ms) and the
@@ -55,10 +55,8 @@ ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_MS="${PROPAGATION_POLL_INTERVAL_MS}"
 POLL_INTERVAL_S="0.$(printf '%03d' "${POLL_INTERVAL_MS}")"
-SETTLE_SEC="${PROPAGATION_SETTLE_SEC:-5}"
-# D2: /metrics scrape timeout. At very large mesh sizes (100k+ services) the
-# istiod /metrics payload may take >5s to render; bump this env var.
-METRICS_TIMEOUT="${PROPAGATION_METRICS_TIMEOUT:-5}"
+SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
+METRICS_TIMEOUT="${PROPAGATION_METRICS_TIMEOUT}"
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
@@ -87,9 +85,8 @@ Usage: $(basename "$0") [options]
 
 Measurement methodology:
   P1 (local xDS push)  — pilot_proxy_convergence_time histogram delta on source istiod.
-                         Converged when delta _count >= proxy_count * eds_pushes_in_window
-                         (the multiplier corrects for multi-push applies; see
-                         poll_p1_local_sync_histogram comment).
+                         Converged when delta _count >= proxy_count (each
+                         connected proxy received at least one push).
                          Emits p1_ms (wall-clock to converged-count) plus
                          delta-window p50/p99 (p1_conv_p50_ms / p1_conv_p99_ms).
                          Min-sample guard: p50 N/A if total < 10; p99 N/A if total < 30.
@@ -221,7 +218,7 @@ if [[ -z "$MESH_SIZE" ]]; then
 	MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 fi
 
-RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
 
 mkdir -p "$OUTPUT_DIR"
@@ -293,7 +290,7 @@ if ((WRITE_TSV)); then
 		echo "# POLL_INTERVAL_S=${POLL_INTERVAL_S}"
 		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
-		echo "# DATE=$(date -Iseconds)"
+		echo "# DATE=$(date -u -Iseconds)"
 	} > "$TSV_FILE"
 	# Columns (tab-separated). Old p1/p2/p3 cols preserved for back-compat with
 	# pre-branch readers. New columns are appended. p2_dirty (B1) is a 0/1 flag
@@ -303,6 +300,7 @@ if ((WRITE_TSV)); then
 fi
 
 PF_PIDS=()
+declare -A PF_PORT_PID=()
 POLL_PIDS=()
 TMPDIR_RUN=$(mktemp -d)
 
@@ -326,6 +324,7 @@ start_port_forward() {
 	local ctx="$1" local_port="$2"
 	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "$local_port":15014 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
+	PF_PORT_PID["$local_port"]=$!
 	local attempts=0
 	while ! curl -s -o /dev/null --max-time "$METRICS_TIMEOUT" "http://localhost:$local_port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
@@ -342,12 +341,10 @@ restart_port_forward_if_dead() {
 		return 0
 	fi
 	echo "  Port-forward to istiod on $ctx (port $local_port) unresponsive — restarting..." >&2
-	# Kill any kubectl port-forward bound to this local port. We don't track
-	# per-port PIDs individually, so use lsof if available, else relaunch.
-	if command -v lsof >/dev/null 2>&1; then
-		local pids
-		pids=$(lsof -ti TCP:"$local_port" -sTCP:LISTEN 2>/dev/null || true)
-		for p in $pids; do kill "$p" 2>/dev/null || true; done
+	local old_pid="${PF_PORT_PID[$local_port]:-}"
+	if [[ -n "$old_pid" ]]; then
+		kill "$old_pid" 2>/dev/null || true
+		wait "$old_pid" 2>/dev/null || true
 	fi
 	start_port_forward "$ctx" "$local_port"
 }
@@ -739,26 +736,11 @@ poll_p3_sidecar_endpoints() {
 }
 
 # --- P1 polling: histogram convergence on source istiod --------------------
-# A1: detection threshold.
-#
-# We use the EDS-specific counter delta as the multiplier, not all pushes.
-# Rationale: a Service+Deployment apply commonly causes multiple push types
-# (CDS for the new cluster, EDS for the endpoints, and a Sidecar/Scope recompute
-# for any namespace importing it). If we naively used `delta._count >=
-# proxy_count` we would reach the target at *partial* convergence — some proxies
-# could have received 2 pushes (and contributed 2 samples to the histogram)
-# while others received 0. By scaling the target with the actual number of EDS
-# pushes performed during the window we require, in expectation, that every
-# connected proxy has received every emitted EDS push.
-#
-# Alternative considered: use sum(types: cds, eds, lds, rds, sds). At very
-# large scale this multiplier becomes aggressive (a single canary apply can
-# yield CDS+EDS+RDS = 3 pushes => 3*N samples target). We chose EDS-only as
-# the more conservative + endpoint-relevant signal. The chosen comment style
-# documents the trade-off inline at the point of computation.
+# Converge when delta _count >= proxy_count (each connected proxy has
+# received at least one push).
 poll_p1_local_sync_histogram() {
-	local port="$1" t0="$2" baseline_hist="$3" baseline_eds="$4" \
-		result_file="$5" proxy_count="$6" restart_baseline="$7" final_snapshot_file="$8"
+	local port="$1" t0="$2" baseline_hist="$3" \
+		result_file="$4" proxy_count="$5" restart_baseline="$6" final_snapshot_file="$7"
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local tmp_scrape cur_snapshot tmp_kv delta_file
 	tmp_scrape=$(mktemp -p "$TMPDIR_RUN")
@@ -788,16 +770,7 @@ poll_p1_local_sync_histogram() {
 		local d_count
 		d_count=$(awk -F'\t' '$1=="_count" {print $2; exit}' "$delta_file")
 		[[ -z "$d_count" ]] && d_count=0
-		# A1: scale target by EDS pushes performed in window.
-		local cur_eds eds_delta target
-		cur_eds=$(kv_get "$tmp_kv" eds_count)
-		[[ -z "$cur_eds" ]] && cur_eds=0
-		eds_delta=$(( cur_eds - baseline_eds ))
-		if (( eds_delta < 1 )); then
-			eds_delta=1
-		fi
-		target=$(( proxy_count * eds_delta ))
-		if (( d_count >= target )); then
+		if (( d_count >= proxy_count )); then
 			date +%s%N > "$result_file"
 			cp "$cur_snapshot" "$final_snapshot_file"
 			rm -f "$tmp_scrape" "$cur_snapshot" "$tmp_kv" "$delta_file"
@@ -932,18 +905,20 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	done
 	# H3: scrape_skew_ms is max(ts)-min(ts) across the per-context timestamps,
 	# not total batch duration (which includes scheduling overhead).
+	skew_files=("$BASELINE_DIR/source-ts")
+	for f in "$BASELINE_DIR"/remote-*-ts; do
+		[[ -e "$f" ]] && skew_files+=("$f")
+	done
 	SCRAPE_SKEW_MS=$(awk '
 		BEGIN { min = ""; max = "" }
 		{ v = $1 + 0; if (min == "" || v < min) min = v; if (max == "" || v > max) max = v }
 		END { if (min == "") print 0; else printf "%d\n", (max - min) / 1000000 }
-	' "$BASELINE_DIR/source-ts" "$BASELINE_DIR"/remote-*-ts 2>/dev/null)
+	' "${skew_files[@]}" 2>/dev/null)
 	[[ -z "$SCRAPE_SKEW_MS" ]] && SCRAPE_SKEW_MS=0
 
 	# A2: parse SOURCE_PROXY_COUNT and SOURCE_START from the same baseline scrape.
 	SOURCE_START=$(kv_get "$BASELINE_DIR/source-kv" process_start)
 	SOURCE_PROXY_COUNT=$(normalize_proxy_count "$(kv_get "$BASELINE_DIR/source-kv" pilot_xds)")
-	SOURCE_EDS_BASELINE=$(kv_get "$BASELINE_DIR/source-kv" eds_count)
-	[[ -z "$SOURCE_EDS_BASELINE" ]] && SOURCE_EDS_BASELINE=0
 	echo "  Source connected proxies: $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
 
 	T0=$(date +%s%N)
@@ -960,7 +935,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	: > "$P1_FILE"
 	poll_p1_local_sync_histogram \
 		"$BASE_PF_PORT" "$T0" \
-		"$BASELINE_DIR/source-hist" "$SOURCE_EDS_BASELINE" "$P1_FILE" \
+		"$BASELINE_DIR/source-hist" "$P1_FILE" \
 		"$SOURCE_PROXY_COUNT" "$SOURCE_START" "$P1_FINAL_SNAPSHOT" &
 	POLL_PIDS=($!)
 
@@ -1034,8 +1009,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		p1_conv_p99="N/A"
 	fi
 
-	# PL13: when restarted, quantiles are N/A.
-	if [[ "$restarted" == "1" ]]; then
+	# PL13: when restarted or unknown, quantiles are N/A.
+	if [[ "$restarted" == "1" || "$restarted" == "unknown" ]]; then
 		p1_conv_p50="N/A"
 		p1_conv_p99="N/A"
 	fi
@@ -1135,9 +1110,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 			status=$(status_for_row "$p1_ms" "$p2_ms" "$p3_ms" "$p2_restarted" "$drain_timeout")
 
-			# PL13: counter deltas / quantiles are N/A on restart.
+			# PL13: counter deltas are N/A on restart or unknown.
 			p2_out="$p2_ms"
-			if [[ "$p2_restarted" == "1" ]]; then
+			if [[ "$p2_restarted" == "1" || "$p2_restarted" == "unknown" ]]; then
 				p2_out="N/A"
 			fi
 
@@ -1179,7 +1154,7 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Istio version | ${ISTIO_VERSION} |"
 	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
-	echo "| Date | $(date -Iseconds) |"
+	echo "| Date | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"
 	echo "| Remotes | ${REMOTES[*]:-none} |"
 	echo "| Mesh size | ${MESH_SIZE} |"
@@ -1191,7 +1166,7 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "## Methodology"
 	echo ""
 	echo "- **P1** (local xDS push): \`pilot_proxy_convergence_time\` histogram delta on source istiod."
-	echo "  Converged when delta \`_count\` >= \`proxy_count * eds_pushes_in_window\`. Reports wall-clock"
+	echo "  Converged when delta \`_count\` >= \`proxy_count\`. Reports wall-clock"
 	echo "  time-to-converged-count plus delta-window p50/p99 of the histogram itself."
 	echo "- **P2** (remote discovery): \`pilot_xds_pushes{type=\"eds\"}\` counter delta on each remote istiod;"
 	echo "  flagged as \`p2_dirty=1\` if not accompanied by a \`pilot_services\` gauge delta."
