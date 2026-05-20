@@ -19,7 +19,7 @@ data "external" "cluster_api_url" {
     "bash", "-c",
     "CLUSTER=$(kubectl --kubeconfig \"$1\" config view -o json | jq -r --arg ctx \"$2\" '.contexts[] | select(.name==$ctx) | .context.cluster') && URL=$(kubectl --kubeconfig \"$1\" config view -o json | jq -r --arg c \"$CLUSTER\" '.clusters[] | select(.name==$c) | .cluster.server') && jq -n --arg url \"$URL\" '{url:$url}'",
     "--",
-    var.kubeconfig_path,
+    pathexpand(var.kubeconfig_path),
     each.key,
   ]
 }
@@ -50,7 +50,7 @@ locals {
 
   admin_password = local.use_kubeconfig ? "" : data.terraform_remote_state.rosa[0].outputs.cluster_admin_password
   token_script   = local.use_kubeconfig ? "" : data.terraform_remote_state.rosa[0].outputs.token_script_path
-  kubeconfig     = local.use_kubeconfig ? abspath(var.kubeconfig_path) : ""
+  kubeconfig     = local.use_kubeconfig ? abspath(pathexpand(var.kubeconfig_path)) : ""
 
   hub_cluster_key = local.first_cluster_key
   hub_api_url     = local.by_cluster[local.first_cluster_key].cluster_api_url
