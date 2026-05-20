@@ -256,28 +256,20 @@ for ctx in "${CONTEXTS[@]}"; do
 	echo "  All deployments ready on $ctx."
 done
 
-# Verify Sidecar CRs landed when scoping is enabled. The chart emits
-# Sidecar CRs only in the primary namespace ($NS) — the namespaceCount>1
-# axis fans out *workloads*, not Sidecar CRs (S13). Probing
-# NAMESPACES[0] worked when [0] happened to be $NS, but failed for
-# any future axis ordering where the array's first entry isn't primary;
-# use $NS unambiguously instead (S10). The `kubectl get` is wrapped in
-# `|| true` so a transient apiserver hiccup or a not-yet-applied CR
-# doesn't fatally exit under `set -euo pipefail` mid-poll (S11).
+# Verify Sidecar CRs landed when scoping is enabled.
 if [[ "$SIDECAR_SCOPING" != "none" ]]; then
-	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING}) in primary namespace ${NS}..."
+	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING})..."
 	for ctx in "${CONTEXTS[@]}"; do
 		deadline=$(( $(date +%s) + 30 ))
 		count=0
 		while (( $(date +%s) < deadline )); do
-			local_out="$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
-				--no-headers --ignore-not-found 2>/dev/null || true)"
-			count="$(echo "$local_out" | grep -cv '^$' || true)"
+			count=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
+				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ') || count=0
 			[[ -z "$count" ]] && count=0
 			(( count > 0 )) && break
 			sleep 1
 		done
-		(( count > 0 )) || die "no Sidecar CRs found on $ctx after 30s in $NS (expected >=1 for scoping=$SIDECAR_SCOPING)"
+		(( count > 0 )) || die "no Sidecar CRs found on $ctx after 30s (expected >=1 for scoping=$SIDECAR_SCOPING)"
 		echo "  [$ctx] Sidecar CR count: $count"
 	done
 fi

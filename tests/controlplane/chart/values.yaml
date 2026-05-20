@@ -26,7 +26,7 @@ replicasPerService: 3
 
 # Sidecar CR scoping mode. One of:
 #   none      - emit no Sidecar resources; proxies see every Service in the mesh.
-#   namespace - one namespace-scoped Sidecar per workload namespace (no
+#   namespace - one namespace-scoped Sidecar in the primary namespace (no
 #               workloadSelector); egress is restricted to the workload
 #               namespace, istio-system, and ./* in-namespace traffic.
 #   explicit  - one Sidecar per Deployment with workloadSelector.labels.app
