@@ -53,7 +53,7 @@ TSV columns consumed (positions are stable; new columns appended):
 
 Phases emitted in the report:
   P1_local_wall  wall-clock ms (p1_ms) from canary apply until histogram delta
-                 _count reached proxy_count * eds_pushes_in_window.
+                 _count reached proxy_count.
   P1_conv_p50    p50 of delta-window pilot_proxy_convergence_time (ms).
   P1_conv_p99    p99 of delta-window pilot_proxy_convergence_time (ms).
   P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
@@ -128,11 +128,9 @@ format_preamble_text() {
 	return 0
 }
 format_preamble_md() {
-	echo "| Field | Value |"
-	echo "|-------|-------|"
 	local k
 	for k in "${PREAMBLE_KEYS[@]}"; do
-		[[ -n "${PREAMBLE[$k]:-}" ]] && printf "| %s | \`%s\` |\n" "$k" "${PREAMBLE[$k]}"
+		[[ -n "${PREAMBLE[$k]:-}" ]] && printf "%s: \"%s\"\n" "$k" "${PREAMBLE[$k]}"
 	done
 	return 0
 }
@@ -333,13 +331,12 @@ report_endpoint_csv() {
 }
 
 report_endpoint_markdown() {
-	echo "# Endpoint Propagation Latency"
-	echo ""
-	echo "Generated: $(date -Iseconds)"
-	echo ""
-	echo "## Run Metadata"
-	echo ""
+	echo "---"
 	format_preamble_md
+	echo "generated: $(date -u -Iseconds)"
+	echo "---"
+	echo ""
+	echo "# Endpoint Propagation Latency"
 	echo ""
 	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
 	echo ""

@@ -18,9 +18,7 @@ In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService a
 
 `/debug/syncz` and `/debug/endpointz` serialize the full push context (or endpoint catalogue) per request — at hundreds of services and many clusters that is hundreds of MB of JSON and seconds of CPU per poll. The probe ends up competing with the work it's measuring; the recorded timestamp reflects when istiod could finally serve the debug endpoint, not when convergence happened.
 
-`pilot_proxy_convergence_time` is the same histogram that the repo's `charts/istiod-monitor/templates/prometheusrule.yaml` aggregates into `pilot:proxy_convergence_time:p99_5m`. It records one sample per proxy per push-ACK. The probe captures a snapshot of `_bucket`/`_sum`/`_count` before the canary apply, then polls until the delta `_count` reaches `proxy_count * eds_pushes_in_window`.
-
-The `* eds_pushes_in_window` multiplier matters: a single Service+Deployment apply commonly triggers **multiple** pushes per proxy (CDS for the new cluster, EDS for the endpoints, plus a Sidecar/Scope recompute for any namespace importing it). Naive `delta._count >= proxy_count` would tag the iteration converged when only some proxies have received some of the pushes. Scaling the target by the actual number of EDS pushes performed during the window keeps the detection unbiased at scale. EDS is the per-endpoint signal we care about; CDS/LDS/RDS/SDS are not multiplied into the target.
+`pilot_proxy_convergence_time` is the same histogram that the repo's `charts/istiod-monitor/templates/prometheusrule.yaml` aggregates into `pilot:proxy_convergence_time:p99_5m`. It records one sample per push-ACK. The probe captures a snapshot of `_bucket`/`_sum`/`_count` before the canary apply, then polls until the delta `_count` reaches `proxy_count` (each connected proxy has received at least one push). `pilot_xds_pushes{type="eds"}` is already per-proxy, so the threshold is simply the connected proxy count.
 
 ### Single-istiod-replica precondition
 
@@ -136,7 +134,7 @@ restarted  p2_dirty  window_ms  scrape_skew_ms
 
 | Column | Meaning |
 |--------|---------|
-| `p1_ms` | Wall-clock ms from canary apply until source istiod histogram delta `_count` reached `proxy_count * eds_pushes_in_window`. `TIMEOUT` or `N/A` (when `restarted=1`). |
+| `p1_ms` | Wall-clock ms from canary apply until source istiod histogram delta `_count` reached `proxy_count`. `TIMEOUT` or `N/A` (when `restarted=1`). |
 | `p2_ms` | Wall-clock ms until remote istiod `pilot_xds_pushes{type="eds"}` delta > 0. |
 | `p3_ms` | Wall-clock ms until watcher Envoy `/clusters` reports healthy canary endpoints. |
 | `status` | `OK`, `TIMEOUT_P1`/`P2`/`P3`/`ALL`, `RESTART`, or `DRAIN_TIMEOUT` (canary endpoint did not drain from a watcher before the next iteration; data is suspect). |
