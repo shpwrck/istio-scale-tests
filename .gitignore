@@ -26,4 +26,5 @@
 /terraform/**/*.tfplan
 /terraform/**/crash.log
 /terraform/**/crash.*.log
-/terraform/**/terraform.tfvars
+/terraform/**/*.tfvars
+!/terraform/**/*.tfvars.example

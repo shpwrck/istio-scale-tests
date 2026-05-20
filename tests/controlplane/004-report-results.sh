@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Generate summary statistics from control-plane resource metrics TSV files.
 #
-# Groups by (mesh_size, sidecar_scoping) and emits text/csv/markdown/json with
-# a metadata preamble per PL2.
+# Groups by the five sweep axes — mesh_size, service_count, replicas,
+# namespace_count, sidecar_scoping — so the operator can compare any single
+# dimension while the others are held constant.
 #
 # Usage:
-#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--format FMT]
+#   ./tests/controlplane/004-report-results.sh [--results-dir DIR]
+#
+# Examples:
+#   ./tests/controlplane/004-report-results.sh
+#   ./tests/controlplane/004-report-results.sh --format csv
+#   ./tests/controlplane/004-report-results.sh --format json
+#   ./tests/controlplane/004-report-results.sh --format markdown
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -20,8 +27,15 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/controlplane/results).
-  --format FMT       Output format: text, csv, markdown, json (default: text).
+  --format FMT       Output format: text, csv, json, markdown (default: text).
   -h, --help         Show this help.
+
+Output groups by (mesh_size, service_count, replicas, namespace_count,
+sidecar_scoping) — every unique sweep point gets its own row of
+CPU/memory/convergence/queue/config-dump stats.
+
+Histogram cells whose target quantile falls in the +Inf overflow bucket are
+emitted as the string "overflow" in text/csv/markdown and as null in JSON.
 EOF
 }
 
@@ -48,39 +62,52 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
-text | csv | markdown | json) ;;
-*) die "unknown format: $FORMAT (use text, csv, markdown, json)" ;;
+text|csv|json|markdown) ;;
+*) die "unknown format: $FORMAT (use text, csv, json, or markdown)" ;;
 esac
 
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
-TSV_FILES=()
+ALL_TSV=()
 while IFS= read -r f; do
-	TSV_FILES+=("$f")
+	ALL_TSV+=("$f")
 done < <(find "$RESULTS_DIR" -name 'controlplane-*.tsv' -type f 2>/dev/null | sort)
 
-if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
+if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Extract preamble metadata (PL2) from the first TSV file.
-PREAMBLE_FILE="${TSV_FILES[0]}"
-preamble_meta() {
-	local key="$1"
-	awk -v k="$key" 'BEGIN{FS="="} /^#/ && index($0, k"=") {sub(/^#[[:space:]]*/,"",$0); sub("^"k"=","",$0); print; exit}' "$PREAMBLE_FILE"
-}
+# Partition into "current schema" (32 columns) and "legacy" (anything else).
+TSV_FILES=()
+LEGACY_FILES=()
+for f in "${ALL_TSV[@]}"; do
+	header=$(grep -m1 -v '^#' "$f" 2>/dev/null || true)
+	tabs=$(awk -F'\t' '{print NF}' <<<"$header")
+	if [[ "$tabs" == "32" ]]; then
+		TSV_FILES+=("$f")
+	else
+		LEGACY_FILES+=("$f")
+	fi
+done
 
-RUN_ID="$(preamble_meta RUN_ID)"
-HARNESS_SHA="$(preamble_meta HARNESS_SHA)"
-ISTIO_VER="$(preamble_meta ISTIO_VERSION)"
-SETTLE_M="$(preamble_meta SETTLE_SEC)"
+if (( ${#LEGACY_FILES[@]} > 0 )); then
+	echo "warning: skipping ${#LEGACY_FILES[@]} legacy TSV file(s) with old schema:" >&2
+	for f in "${LEGACY_FILES[@]}"; do
+		echo "  $f" >&2
+	done
+fi
 
-# C3: extract more preamble fields and concatenate kube versions across rows.
-CONFIG_DUMP_SAMPLES_M="$(preamble_meta CONFIG_DUMP_SAMPLES)"
+if (( ${#TSV_FILES[@]} == 0 )); then
+	die "no TSV files with the current 32-column schema found in $RESULTS_DIR"
+fi
 
-# SIDECAR_SCOPING is per-combo on the data rows; the preamble only records
-# the value used at scrape time. If every TSV in this RUN_ID agrees, emit
-# that scalar; otherwise emit "(per-row)".
+# Pluck reproducibility tags from the first file's preamble.
+ISTIO_VERSION_TAG=$(grep -m1 '^# ISTIO_VERSION=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# ISTIO_VERSION=//' || echo unknown)
+HARNESS_SHA_TAG=$(grep -m1 '^# HARNESS_SHA=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# HARNESS_SHA=//' || echo unknown)
+FILES_CONSUMED=${#TSV_FILES[@]}
+FILES_SKIPPED=${#LEGACY_FILES[@]}
+
+# Collect SIDECAR_SCOPING across all files; if they all agree, emit scalar.
 collect_scopings_meta() {
 	local f scoping seen=""
 	for f in "${TSV_FILES[@]}"; do
@@ -95,15 +122,15 @@ collect_scopings_meta() {
 	echo "$seen"
 }
 SIDECAR_SCOPING_M="$(collect_scopings_meta)"
+CONFIG_DUMP_SAMPLES_M=$(grep -m1 '^# CONFIG_DUMP_SAMPLES=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# CONFIG_DUMP_SAMPLES=//' || echo "")
 
-# Concatenate all observed KUBE_VERSION lines into a single readable string.
+# Concatenate KUBE_VERSION lines into one readable string.
 collect_kube_versions_meta() {
 	local f line all=""
 	for f in "${TSV_FILES[@]}"; do
 		while IFS= read -r line; do
 			[[ "$line" =~ ^#\ KUBE_VERSION\[(.+)\]=(.*)$ ]] || continue
 			local entry="${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
-			# Avoid duplicates.
 			if [[ -z "$all" ]]; then
 				all="$entry"
 			elif [[ "$all" != *"$entry"* ]]; then
@@ -115,255 +142,247 @@ collect_kube_versions_meta() {
 }
 KUBE_VERSIONS_M="$(collect_kube_versions_meta)"
 
-# Shared awk that aggregates TSV records by (mesh_size, scoping).
-# SC2016: awk fields ($1, etc.) intentionally not shell-expanded.
+# Shared AWK aggregator. Groups by 5-tuple (mesh|svc|reps|ns|scoping) and
+# emits one record per unique key with min/max/avg for core metrics plus
+# sidecar config-dump aggregates.
 #
-# TSV schema after A1 (config_size_bytes dropped) — 23 columns:
-#   1 ts          2 ctx          3 mesh_size    4 service_count  5 replicas
-#   6 scoping     7 cpu_m        8 mem_mi       9 conv_p50      10 conv_p99
-#  11 queue_p50  12 queue_p99   13 xds_pushes  14 k8s_events    15 proxies
-#  16 cfg_avg    17 cfg_p50     18 cfg_max     19 samples       20 window_sec
-#  21 skew_ms    22 restarted   23 settle_sec
+# 32-column schema (1-indexed):
+#  1 timestamp          2 context            3 mesh_size        4 service_count
+#  5 replicas           6 namespace_count    7 sidecar_scoping
+#  8 istiod_mem_mi
+#  9 convergence_p50_ms  10 convergence_p99_ms
+# 11 queue_p50_ms        12 queue_p99_ms
+# 13 xds_pushes_delta    14 xds_pushes_rate
+# 15..19 xds_pushes_{cds,eds,lds,rds,nds}
+# 20 k8s_events_delta    21 k8s_events_rate
+# 22 connected_proxies   23 config_size_avg_bytes
+# 24 sidecar_config_bytes_avg  25 sidecar_config_bytes_p50
+# 26 sidecar_config_bytes_max  27 sidecar_config_bytes_samples
+# 28 scrape_window_sec   29 scrape_skew_ms
+# 30 settle_sec          31 istiod_restarted
+# 32 istiod_cpu_m_delta
 #
-# A5: rows with restarted=1 are excluded from numeric aggregation; rows with
-# overflow on conv/queue quantiles are also excluded for those columns only.
-# `n_total` counts every data row in the (ms, scope) cell; `n_valid` is the
-# number of restart-clean rows that contributed to averages.
-# shellcheck disable=SC2016
-AWK_AGG='
-BEGIN { FS="\t" }
-!/^#/ && !/^timestamp/ && NF>=23 {
-	ms=$3; scope=$6
-	key=ms "|" scope
-	keys[key]=1
-	count_total[key]++
-
-	# A5: skip the entire row from numeric aggregation when istiod restarted
-	# OR any quantile column overflowed (target landed in +Inf bucket).
-	# n_valid records how many rows survived this filter.
-	if ($22 == "1") { any_restarted[key]=1; next }
-	if ($22 == "unknown") any_restart_unknown[key]=1
-	if ($9=="overflow" || $10=="overflow" || $11=="overflow" || $12=="overflow") {
-		any_overflow[key]=1; next
+# Aggregated output (tab-separated, 25 columns):
+#   mesh_size service_count replicas namespace_count sidecar_scoping n
+#   mem_min mem_max mem_avg
+#   conv99_min conv99_max conv99_avg
+#   queue99_min queue99_max queue99_avg
+#   proxies_min proxies_max proxies_avg
+#   restarts unknown_restarts
+#   cpu_delta_min cpu_delta_max cpu_delta_avg
+#   cfg_dump_avg cfg_dump_max
+aggregate() {
+	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	function ingest(metric, val, key,    m) {
+		if (val == "overflow") { ov[metric, key] = 1; return }
+		if (!is_num(val)) return
+		if (!((metric, key) in nv)) {
+			min[metric, key] = val
+			max[metric, key] = val
+		} else {
+			if (val + 0 < min[metric, key] + 0) min[metric, key] = val
+			if (val + 0 > max[metric, key] + 0) max[metric, key] = val
+		}
+		sum[metric, key] += val
+		nv[metric, key] += 1
 	}
-
-	count_valid[key]++
-
-	if ($7  ~ /^[0-9.]+$/) { cpu_n[key]++;    cpu_v[key,cpu_n[key]]=$7+0 }
-	if ($8  ~ /^[0-9.]+$/) { mem_n[key]++;    mem_v[key,mem_n[key]]=$8+0 }
-	if ($9  ~ /^[0-9.]+$/) { c50_n[key]++;    c50_v[key,c50_n[key]]=$9+0 }
-	if ($10 ~ /^[0-9.]+$/) { c99_n[key]++;    c99_v[key,c99_n[key]]=$10+0 }
-	if ($12 ~ /^[0-9.]+$/) { q99_n[key]++;    q99_v[key,q99_n[key]]=$12+0 }
-	if ($13 ~ /^[0-9.]+$/) { xds_n[key]++;    xds_v[key,xds_n[key]]=$13+0 }
-	if ($15 ~ /^[0-9.]+$/) { prx_n[key]++;    prx_v[key,prx_n[key]]=$15+0 }
-	# cfg_avg/max now at $16/$18 (was $17/$19).
-	if ($16 ~ /^[0-9.]+$/) { avg_n[key]++;    avg_v[key,avg_n[key]]=$16+0 }
-	if ($18 ~ /^[0-9.]+$/) { if($18+0 > max_max[key]+0) max_max[key]=$18+0 }
-}
-END {
-	# Build text rows: mesh_size, scope, n_total, n_valid, cpu, mem, c50, c99, q99, xds, prx, avg_cfg, max_cfg, overflow, restarted
-	nkeys=0
-	for (kk in keys) sorted[++nkeys]=kk
-	for (i=1;i<=nkeys;i++) for (j=i+1;j<=nkeys;j++) {
-		split(sorted[i], pi, "|"); split(sorted[j], pj, "|")
-		swap=0
-		if (pi[1]+0 > pj[1]+0) swap=1
-		else if (pi[1]+0 == pj[1]+0 && pi[2] > pj[2]) swap=1
-		if (swap) { t=sorted[i]; sorted[i]=sorted[j]; sorted[j]=t }
+	function emit3(metric, key,    a, b, c) {
+		if ((metric, key) in ov) {
+			return "overflow\toverflow\toverflow"
+		}
+		if (!((metric, key) in nv) || nv[metric, key] == 0) {
+			return "0\t0\t0"
+		}
+		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
+		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
 	}
-	for (i=1; i<=nkeys; i++) {
-		k = sorted[i]
-		split(k, parts, "|")
-		ms    = parts[1]
-		scope = parts[2]
-		n_total = count_total[k]
-		n_valid = count_valid[k] + 0
-		cpu = (cpu_n[k] ? sum_arr("cpu_v", k, cpu_n[k]) / cpu_n[k] : 0)
-		mem = (mem_n[k] ? sum_arr("mem_v", k, mem_n[k]) / mem_n[k] : 0)
-		c50 = (c50_n[k] ? sum_arr("c50_v", k, c50_n[k]) / c50_n[k] : 0)
-		c99 = (c99_n[k] ? sum_arr("c99_v", k, c99_n[k]) / c99_n[k] : 0)
-		q99 = (q99_n[k] ? sum_arr("q99_v", k, q99_n[k]) / q99_n[k] : 0)
-		xds = (xds_n[k] ? sum_arr("xds_v", k, xds_n[k]) / xds_n[k] : 0)
-		prx = (prx_n[k] ? sum_arr("prx_v", k, prx_n[k]) / prx_n[k] : 0)
-		acfg= (avg_n[k] ? sum_arr("avg_v", k, avg_n[k]) / avg_n[k] : 0)
-		over= (any_overflow[k] ? "overflow" : "ok")
-		rest= (any_restarted[k] ? "1" : (any_restart_unknown[k] ? "unknown" : "0"))
-		printf "%s\t%s\t%d\t%d\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%s\t%s\n", \
-			ms, scope, n_total, n_valid, cpu, mem, c50, c99, q99, xds, prx, acfg, max_max[k]+0, over, rest
+	!/^#/ && !/^timestamp/ && NF>=32 {
+		key = $3 "|" $4 "|" $5 "|" $6 "|" $7
+		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
+		ingest("mem",       $8,  key)
+		ingest("conv",      $10, key)
+		ingest("queue",     $12, key)
+		ingest("prx",       $22, key)
+		ingest("cpu_delta", $32, key)
+		# Config-dump bytes: avg-of-avg and max-of-max across samples.
+		if ($24 ~ /^[0-9.]+$/) { cfg_avg_n[key]++; cfg_avg_sum[key] += $24+0 }
+		if ($26 ~ /^[0-9.]+$/) {
+			if (!(key in cfg_max_val) || $26+0 > cfg_max_val[key]+0) cfg_max_val[key] = $26+0
+		}
+		if ($31 == "1") restarts[key] += 1
+		else if ($31 == "unknown") unknowns[key] += 1
+		n[key]++
 	}
-}
-function sum_arr(name, k, n,    i, s) {
-	s=0
-	if (name=="cpu_v") for(i=1;i<=n;i++) s += cpu_v[k,i]
-	if (name=="mem_v") for(i=1;i<=n;i++) s += mem_v[k,i]
-	if (name=="c50_v") for(i=1;i<=n;i++) s += c50_v[k,i]
-	if (name=="c99_v") for(i=1;i<=n;i++) s += c99_v[k,i]
-	if (name=="q99_v") for(i=1;i<=n;i++) s += q99_v[k,i]
-	if (name=="xds_v") for(i=1;i<=n;i++) s += xds_v[k,i]
-	if (name=="prx_v") for(i=1;i<=n;i++) s += prx_v[k,i]
-	if (name=="avg_v") for(i=1;i<=n;i++) s += avg_v[k,i]
-	return s
-}'
-
-# Run aggregation once into a temp file.
-TMP_AGG="$(mktemp)"
-trap 'rm -f "$TMP_AGG"' EXIT
-cat "${TSV_FILES[@]}" | awk "$AWK_AGG" >"$TMP_AGG"
-
-emit_preamble_text() {
-	cat <<EOF
-=== Control-Plane Resource Scaling Report ===
-RUN_ID:             ${RUN_ID:-N/A}
-Harness SHA:        ${HARNESS_SHA:-N/A}
-Istio version:      ${ISTIO_VER:-N/A}
-Sidecar scoping:    ${SIDECAR_SCOPING_M:-N/A}
-Config-dump samples:${CONFIG_DUMP_SAMPLES_M:-N/A}
-Settle (sec):       ${SETTLE_M:-N/A}
-Kube versions:      ${KUBE_VERSIONS_M:-N/A}
-Files:              ${#TSV_FILES[@]}
-
-EOF
+	END {
+		for (i = 1; i <= nkey; i++) order[i] = keys[i]
+		for (i = 1; i < nkey; i++) {
+			for (j = i + 1; j <= nkey; j++) {
+				split(order[i], a, "|"); split(order[j], b, "|")
+				swap = 0
+				for (k = 1; k <= 4; k++) {
+					if (a[k]+0 < b[k]+0) { break }
+					if (a[k]+0 > b[k]+0) { swap = 1; break }
+				}
+				if (!swap && a[5] > b[5]) swap = 1
+				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
+			}
+		}
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\n"
+		for (i = 1; i <= nkey; i++) {
+			k = order[i]
+			split(k, p, "|")
+			nn = n[k]
+			rr = (k in restarts) ? restarts[k] : 0
+			uu = (k in unknowns) ? unknowns[k] : 0
+			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "0"
+			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
+			printf "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
+				p[1], p[2], p[3], p[4], p[5], nn,
+				emit3("mem",       k),
+				emit3("conv",      k),
+				emit3("queue",     k),
+				emit3("prx",       k),
+				rr, uu,
+				emit3("cpu_delta", k),
+				ca, cm
+		}
+	}'
 }
 
 report_text() {
-	emit_preamble_text
-	# A5: row layout now has n_total + n_valid; n_valid distinguishes
-	# rows that contributed averages from rows skipped for restart.
-	awk -F'\t' '
-	BEGIN {
-		printf "%-10s %-10s %5s %5s %8s %8s %7s %7s %7s %10s %7s %12s %12s %-9s %-8s\n", \
-			"mesh_size", "scoping", "n_tot", "n_val", "cpu_m", "mem_mi", "c50_ms", "c99_ms", "q99_ms", \
-			"xds_push", "proxy", "cfg_bytes", "cfg_max_b", "histo", "restart"
-		printf "%-10s %-10s %5s %5s %8s %8s %7s %7s %7s %10s %7s %12s %12s %-9s %-8s\n", \
-			"---------", "-------", "-----", "-----", "------", "------", "------", "------", "------", \
-			"--------", "-----", "----------", "----------", "-----", "-------"
-	}
+	echo "=== Control-Plane Resource Scaling ==="
+	echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}"
+	echo ""
+	echo "Files: ${TSV_FILES[*]}"
+	echo ""
+	aggregate | awk -F'\t' '
+	NR == 1 { next }
 	{
-		printf "%-10s %-10s %5d %5d %8d %8d %7d %7d %7d %10d %7d %12d %12d %-9s %-8s\n", \
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-	}' "$TMP_AGG"
-	printf "\nNote: n_val < n_tot indicates rows skipped due to istiod restart or histogram quantile overflow in the scrape window.\n"
+		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s (n=%s) ---\n", $1, $2, $3, $4, $5, $6
+		printf "  istiod CPU avg (m):   min=%s max=%s avg=%s   [process_cpu_seconds_total delta over window]\n", $21, $22, $23
+		printf "  istiod Memory (Mi):   min=%s max=%s avg=%s\n",     $7,  $8,  $9
+		printf "  Convergence p99 (ms): min=%s max=%s avg=%s\n",     $10, $11, $12
+		printf "  Queue p99 (ms):       min=%s max=%s avg=%s\n",     $13, $14, $15
+		printf "  Connected proxies:    min=%s max=%s avg=%s\n",     $16, $17, $18
+		if ($24+0 > 0) printf "  Config dump avg (B):  %s   max: %s\n", $24, $25
+		if ($19+0 > 0) printf "  ! istiod restarts:    %s row(s) had restarts during the scrape window\n", $19
+		if ($20+0 > 0) printf "  ? undetectable restart: %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $20
+		printf "\n"
+	}'
 }
 
 report_csv() {
-	echo "# RUN_ID=${RUN_ID:-}"
-	echo "# HARNESS_SHA=${HARNESS_SHA:-}"
-	echo "# ISTIO_VERSION=${ISTIO_VER:-}"
-	echo "# SIDECAR_SCOPING=${SIDECAR_SCOPING_M:-}"
-	echo "# CONFIG_DUMP_SAMPLES=${CONFIG_DUMP_SAMPLES_M:-}"
-	echo "# SETTLE_SEC=${SETTLE_M:-}"
-	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_M:-}"
-	echo "mesh_size,sidecar_scoping,n_total,n_valid,cpu_m,mem_mi,conv_p50_ms,conv_p99_ms,queue_p99_ms,xds_pushes,connected_proxies,sidecar_config_bytes_avg,sidecar_config_bytes_max,histogram_overflow,istiod_restarted"
-	awk -F'\t' '{ for(i=1;i<=NF;i++){printf "%s%s", $i, (i==NF?"\n":",")} }' "$TMP_AGG"
+	echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG},HARNESS_SHA=${HARNESS_SHA_TAG},files_consumed=${FILES_CONSUMED},skipped_legacy=${FILES_SKIPPED}"
+	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
 }
 
 report_markdown() {
-	cat <<EOF
----
-run_id: "${RUN_ID:-}"
-harness_sha: "${HARNESS_SHA:-}"
-istio_version: "${ISTIO_VER:-}"
-sidecar_scoping: "${SIDECAR_SCOPING_M:-}"
-config_dump_samples: "${CONFIG_DUMP_SAMPLES_M:-}"
-settle_sec: "${SETTLE_M:-}"
-kube_versions: "${KUBE_VERSIONS_M:-}"
----
+	local aggregated
+	aggregated=$(aggregate)
+	local total_restarts total_unknowns
+	total_restarts=$(awk -F'\t' 'NR>1 { s += $19+0 } END { printf "%d", s+0 }' <<<"$aggregated")
+	total_unknowns=$(awk -F'\t' 'NR>1 { s += $20+0 } END { printf "%d", s+0 }' <<<"$aggregated")
 
-# Control-Plane Resource Scaling Report
-
-| Field | Value |
-|-------|-------|
-| RUN_ID | \`${RUN_ID:-N/A}\` |
-| Harness SHA | \`${HARNESS_SHA:-N/A}\` |
-| Istio version | ${ISTIO_VER:-N/A} |
-| Sidecar scoping | ${SIDECAR_SCOPING_M:-N/A} |
-| Config-dump samples | ${CONFIG_DUMP_SAMPLES_M:-N/A} |
-| Settle (sec) | ${SETTLE_M:-N/A} |
-| Kube versions | ${KUBE_VERSIONS_M:-N/A} |
-| Source TSV files | ${#TSV_FILES[@]} |
-
-## Aggregated metrics by (mesh_size, sidecar_scoping)
-
-\`n_total\` is every data row in the cell; \`n_valid\` is the subset that
-contributed to averages (rows where istiod restarted within the scrape
-window are excluded — see footnote).
-
-| mesh_size | scoping | n_total / n_valid | cpu_m | mem_mi | c50_ms | c99_ms | q99_ms | xds_pushes | proxies | cfg_bytes_avg | cfg_bytes_max | histogram | restart |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:--|:--|
-EOF
+	echo "---"
+	echo "istio_version: ${ISTIO_VERSION_TAG}"
+	echo "harness_sha: ${HARNESS_SHA_TAG}"
+	echo "sidecar_scoping: ${SIDECAR_SCOPING_M:-N/A}"
+	echo "config_dump_samples: ${CONFIG_DUMP_SAMPLES_M:-N/A}"
+	echo "kube_versions: ${KUBE_VERSIONS_M:-N/A}"
+	echo "files_consumed: ${FILES_CONSUMED}"
+	echo "skipped_legacy: ${FILES_SKIPPED}"
+	echo "---"
+	echo ""
+	echo "# Control-Plane Resource Scaling"
+	echo ""
+	echo "Files: ${TSV_FILES[*]}"
+	echo ""
+	echo "| mesh_size | svc | reps | ns | scoping | n | cpu_avg (m) | mem_avg (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies | cfg_dump_avg | restarts | unk_restarts |"
+	echo "|-----------|-----|------|----|---------|---|-------------|--------------|---------------|----------------|---------|--------------|----------|--------------|"
 	awk -F'\t' '
-	{
-		printf "| %s | %s | %s / %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-	}' "$TMP_AGG"
+	NR == 1 { next }
+	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $23, $9, $12, $15, $18, $24, $19, $20 }' <<<"$aggregated"
+	if (( total_restarts > 0 || total_unknowns > 0 )); then
+		echo ""
+		local parts=()
+		(( total_restarts > 0 )) && parts+=("${total_restarts} row(s) had istiod restarts during the scrape window")
+		(( total_unknowns > 0 )) && parts+=("${total_unknowns} row(s) had undetectable restart state during the window")
+		local joined="${parts[0]}"
+		[[ ${#parts[@]} -gt 1 ]] && joined+="; ${parts[1]}"
+		echo "> ${joined} — counters/histograms for those samples may under-report and should be treated as suspect."
+	fi
 
-	# A5: footnote about row drops.
-	cat <<'EOF'
-
-> Footnote: rows where `istiod_restarted=1` OR any histogram quantile
-> column equals `overflow` are excluded from numeric averages.
-> `n_total / n_valid` shows the split per cell so the reader can see how
-> many rows were dropped.
+	# Sidecar scoping effect table: compare config sizes across scoping modes
+	# for each (mesh_size, service_count, replicas, namespace_count) combo.
+	cat <<'EFFECT_HDR'
 
 ## Sidecar scoping effect on per-proxy config size
 
 Lower is better. The expected ordering is `none` > `namespace` >= `explicit`.
 
-EOF
+EFFECT_HDR
 	awk -F'\t' '
+	NR == 1 { next }
 	{
-		# cfg_avg is at column 12 in the aggregated rows.
-		ms=$1; scope=$2; cfg=$12+0
-		bym_val[ms,scope]=cfg
-		bym_has[ms,scope]=1
-		ms_seen[ms]=1
+		base = $1 "|" $2 "|" $3 "|" $4
+		scope = $5
+		cfg = $24 + 0
+		val[base, scope] = cfg
+		has[base, scope] = 1
+		if (!(base in base_seen)) { bases[++nb] = base; base_seen[base] = 1 }
 	}
 	END {
-		printf "| mesh_size | none (bytes) | namespace (bytes) | explicit (bytes) | none→namespace | none→explicit |\n"
-		printf "|---:|---:|---:|---:|---:|---:|\n"
-		nkeys=0
-		for (k in ms_seen) sorted[++nkeys]=k
-		for(i=1;i<=nkeys;i++) for(j=i+1;j<=nkeys;j++) if (sorted[i]+0 > sorted[j]+0) { t=sorted[i]; sorted[i]=sorted[j]; sorted[j]=t }
-		for(i=1;i<=nkeys;i++) {
-			ms=sorted[i]
-			n_val = (bym_has[ms,"none"] ? bym_val[ms,"none"] : -1)
-			ns_val= (bym_has[ms,"namespace"] ? bym_val[ms,"namespace"] : -1)
-			ex_val= (bym_has[ms,"explicit"] ? bym_val[ms,"explicit"] : -1)
-			ns_red= (n_val>0 && ns_val>=0 ? sprintf("%.1f%%", 100*(n_val-ns_val)/n_val) : "N/A")
-			ex_red= (n_val>0 && ex_val>=0 ? sprintf("%.1f%%", 100*(n_val-ex_val)/n_val) : "N/A")
-			printf "| %s | %s | %s | %s | %s | %s |\n", ms, \
-				(n_val<0?"N/A":n_val), (ns_val<0?"N/A":ns_val), (ex_val<0?"N/A":ex_val), \
-				ns_red, ex_red
+		if (nb == 0) exit
+		any_scoping = 0
+		for (i = 1; i <= nb; i++) {
+			b = bases[i]
+			if (has[b, "namespace"] || has[b, "explicit"]) { any_scoping = 1; break }
 		}
-	}' "$TMP_AGG"
+		if (!any_scoping) { print "(No sidecar scoping data to compare.)"; exit }
+		printf "| mesh | svc | reps | ns | none (B) | namespace (B) | explicit (B) | none->ns | none->explicit |\n"
+		printf "|------|-----|------|----|----------|---------------|--------------|----------|----------------|\n"
+		for (i = 1; i <= nb; i++) {
+			b = bases[i]
+			split(b, p, "|")
+			n_v  = has[b,"none"]     ? val[b,"none"]     : -1
+			ns_v = has[b,"namespace"]? val[b,"namespace"] : -1
+			ex_v = has[b,"explicit"] ? val[b,"explicit"]  : -1
+			ns_r = (n_v>0 && ns_v>=0) ? sprintf("%.1f%%", 100*(n_v-ns_v)/n_v) : "N/A"
+			ex_r = (n_v>0 && ex_v>=0) ? sprintf("%.1f%%", 100*(n_v-ex_v)/n_v) : "N/A"
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+				p[1], p[2], p[3], p[4], \
+				(n_v<0  ? "N/A" : n_v), \
+				(ns_v<0 ? "N/A" : ns_v), \
+				(ex_v<0 ? "N/A" : ex_v), \
+				ns_r, ex_r
+		}
+	}' <<<"$aggregated"
 }
 
 report_json() {
-	# C3: metadata object includes scoping / config-dump samples / kube
-	# versions in addition to the original fields.
-	{
-		echo "{"
-		echo "  \"metadata\": {"
-		echo "    \"run_id\": \"${RUN_ID:-}\","
-		echo "    \"harness_sha\": \"${HARNESS_SHA:-}\","
-		echo "    \"istio_version\": \"${ISTIO_VER:-}\","
-		echo "    \"sidecar_scoping\": \"${SIDECAR_SCOPING_M:-}\","
-		echo "    \"config_dump_samples\": \"${CONFIG_DUMP_SAMPLES_M:-}\","
-		echo "    \"settle_sec\": \"${SETTLE_M:-}\","
-		echo "    \"kube_versions\": \"${KUBE_VERSIONS_M:-}\""
-		echo "  },"
-		echo "  \"rows\": ["
-		awk -F'\t' '
-		{
-			rows[NR]=sprintf("    {\"mesh_size\": %s, \"sidecar_scoping\": \"%s\", \"n_total\": %s, \"n_valid\": %s, \"cpu_m\": %s, \"mem_mi\": %s, \"conv_p50_ms\": %s, \"conv_p99_ms\": %s, \"queue_p99_ms\": %s, \"xds_pushes\": %s, \"connected_proxies\": %s, \"sidecar_config_bytes_avg\": %s, \"sidecar_config_bytes_max\": %s, \"histogram\": \"%s\", \"istiod_restarted\": \"%s\"}", \
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-		}
-		END {
-			for(i=1;i<=NR;i++) printf "%s%s\n", rows[i], (i<NR?",":"")
-		}' "$TMP_AGG"
-		echo "  ]"
-		echo "}"
+	aggregate | awk -F'\t' -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" '
+	function cell(v) {
+		if (v == "overflow") return "null"
+		return v + 0
 	}
+	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d},\n  \"results\": [", iv, hs, fc, fs }
+	NR == 1 { next }
+	{
+		if (printed++) printf ",\n    "; else printf "\n    "
+		printf "{\"mesh_size\":%s,\"service_count\":%s,\"replicas\":%s,\"namespace_count\":%s,\"sidecar_scoping\":\"%s\",\"n\":%s,",
+			$1, $2, $3, $4, $5, $6
+		printf "\"cpu_m_delta\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($21), cell($22), cell($23)
+		printf "\"mem_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($7), cell($8), cell($9)
+		printf "\"convergence_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($10), cell($11), cell($12)
+		printf "\"queue_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($13), cell($14), cell($15)
+		printf "\"connected_proxies\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($16), cell($17), cell($18)
+		printf "\"istiod_restarted_rows\":%d,\"istiod_restarted_unknown_rows\":%d,", $19+0, $20+0
+		printf "\"sidecar_config_bytes_avg\":%s,\"sidecar_config_bytes_max\":%s}", cell($24), cell($25)
+	}
+	END {
+		if (printed) printf "\n  ]\n}\n"; else printf "]\n}\n"
+	}'
 }
 
 case "$FORMAT" in

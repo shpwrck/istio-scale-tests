@@ -1,7 +1,25 @@
 clusterName: ""
 
+# Namespace naming.
+#
+# Backwards-compat rule:
+#   - When namespaceCount == 1, the single namespace is named exactly
+#     `namespace` (e.g. `controlplane-test`). This matches the
+#     pre-multi-namespace layout so existing runs and tooling keep working.
+#   - When namespaceCount > 1, namespaces are named
+#     `${namespace}-1`, `${namespace}-2`, ..., `${namespace}-${namespaceCount-1}`.
+#
+# `namespacePrefix` is retained as an alias that takes precedence over
+# `namespace` to keep older `--set namespacePrefix=...` invocations working.
 namespace: controlplane-test
+namespacePrefix: ""
+namespaceCount: 1
 
+# Number of dummy Deployments + Services to create across the namespaces.
+# Service `i` is placed in namespace `i mod namespaceCount`, so services are
+# distributed deterministically and evenly (modulo remainders). Service names
+# stay `dummy-svc-<i>` regardless of namespace placement so a service can be
+# located by its global index.
 serviceCount: 10
 
 replicasPerService: 3
@@ -14,13 +32,6 @@ replicasPerService: 3
 #   explicit  - one Sidecar per Deployment with workloadSelector.labels.app
 #               matching `dummy-svc-<i>`; maximum scoping precision.
 sidecarScoping: none
-
-# Number of workload namespaces to fan out across. The chart creates namespace
-# `<namespace>` plus `<namespace>-<i>` for i in 1..namespaceCount-1.
-# Branch 1 owns the runtime sweep for this axis; here we only use the value to
-# decide how many namespace-scoped Sidecar CRs to emit. Default 1 keeps the
-# existing single-namespace behaviour.
-namespaceCount: 1
 
 # Extra egress hosts appended to every Sidecar CR emitted by this chart.
 # Defaults to a no-op empty list; operators can extend if their workloads

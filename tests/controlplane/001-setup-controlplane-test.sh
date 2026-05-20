@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
 # Deploy dummy workloads for measuring istiod control-plane resource consumption.
 #
+# Applies one workload configuration (single point in the sweep cube) to each
+# target cluster: SERVICE_COUNT services × REPLICAS pods, distributed across
+# NAMESPACE_COUNT namespaces (service `i` lands in namespace `i mod N`).
+#
+# Backwards compat: when --namespace-count is 1 (default), the single namespace
+# keeps its historical name `${NS}` (e.g. `controlplane-test`). When > 1,
+# namespaces are named `${NS}-0`, `${NS}-1`, ..., `${NS}-(N-1)`.
+#
+# Manifests are applied with server-side apply (`--server-side
+# --force-conflicts`); we use a label-selector wait per namespace instead of
+# looping per Deployment.
+#
 # Usage:
 #   ./tests/controlplane/001-setup-controlplane-test.sh [--contexts CSV] [options]
 #
 # Examples:
-#   # Setup on all default clusters:
+#   # Setup on all default clusters (single namespace, 10 services × 3 replicas):
 #   ./tests/controlplane/001-setup-controlplane-test.sh
 #
 #   # Setup with custom workload size:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 50 --replicas 5
+#
+#   # Spread 100 services across 10 namespaces:
+#   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 100 --namespace-count 10
 #
 #   # Setup with namespace-scoped Sidecar CRs:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --sidecar-scoping namespace
@@ -25,38 +40,45 @@ WAIT_TIMEOUT=300
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
-SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
-# B2: namespaceCount > 1 is allowed but only the primary namespace gets
-# Deployments + Sidecar CRs in this branch. The runtime sweep across
-# namespace counts is owned by a sibling branch.
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
+SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
 
 die() { echo "error: $*" >&2; exit 1; }
+
+is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
+
+validate_scoping() {
+	case "$1" in
+	none | namespace | explicit) return 0 ;;
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	esac
+}
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV             Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --service-count N          Number of dummy services per cluster (default: $SERVICE_COUNT).
-  --replicas N               Replicas per service (default: $REPLICAS).
-  --sidecar-scoping MODE     Sidecar CR scoping: none|namespace|explicit (default: $SIDECAR_SCOPING).
-                             none      - no Sidecar CRs (baseline; worst-case config size).
-                             namespace - one namespace-scoped Sidecar in the primary namespace.
-                             explicit  - one Sidecar per Deployment with workloadSelector.
-  --namespace-count N        Number of workload namespaces to create (default: $NAMESPACE_COUNT).
-                             Only the primary namespace receives Deployments + Sidecar CRs;
-                             values > 1 are accepted for forward-compat but a warning is
-                             printed because the runtime sweep across namespace counts is
-                             owned by a sibling branch.
-  --dry-run                  Pass --dry-run=client to oc apply.
-  --wait-timeout N           Seconds to wait for pods (default: 300).
-  -h, --help                 Show this help.
+  --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
+  --service-count N      Number of dummy services per cluster (default: $SERVICE_COUNT).
+  --replicas N           Replicas per service (default: $REPLICAS).
+  --namespace-count N    Spread services across N namespaces (default: $NAMESPACE_COUNT).
+                         N=1 -> single namespace named '$NS'.
+                         N>1 -> namespaces '${NS}-0' .. '${NS}-(N-1)';
+                         service i lands in namespace (i mod N).
+  --sidecar-scoping MODE Sidecar CR scoping: none|namespace|explicit (default: $SIDECAR_SCOPING).
+                         none      - no Sidecar CRs (baseline; worst-case config size).
+                         namespace - one namespace-scoped Sidecar in the primary namespace.
+                         explicit  - one Sidecar per Deployment with workloadSelector.
+  --dry-run              Pass --dry-run=client to oc apply
+                         (skips the --server-side path).
+  --wait-timeout N       Seconds to wait for pods (default: 300).
+  -h, --help             Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
-  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_NAMESPACE_COUNT.
+  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
+  CONTROLPLANE_SIDECAR_SCOPING.
 EOF
 }
 
@@ -71,13 +93,6 @@ split_csv() {
 		x="${x%"${x##*[![:space:]]}"}"
 		[[ -n "$x" ]] && _out+=("$x")
 	done
-}
-
-validate_scoping() {
-	case "$1" in
-	none | namespace | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
-	esac
 }
 
 while [[ $# -gt 0 ]]; do
@@ -97,15 +112,14 @@ while [[ $# -gt 0 ]]; do
 		REPLICAS="$2"
 		shift 2
 		;;
+	--namespace-count)
+		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
+		NAMESPACE_COUNT="$2"
+		shift 2
+		;;
 	--sidecar-scoping)
 		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
 		SIDECAR_SCOPING="$2"
-		shift 2
-		;;
-	--namespace-count)
-		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--namespace-count must be a non-negative integer; got '$2'"
-		NAMESPACE_COUNT="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -127,13 +141,14 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (got: $SERVICE_COUNT)"
+is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
+is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
+is_nonneg_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a non-negative integer (got: $WAIT_TIMEOUT)"
 validate_scoping "$SIDECAR_SCOPING"
 
-# B2 / F3: warn (do not fail) when namespaceCount > 1; only the primary
-# namespace receives Deployments + Sidecar CRs in this chart.
-if (( NAMESPACE_COUNT > 1 )); then
-	printf 'warning: --namespace-count=%d > 1: fan-out across namespaces requires the runtime sweep on a sibling branch; only the primary namespace (%s) receives Deployments and Sidecar CRs in this chart.\n' \
-		"$NAMESPACE_COUNT" "$NS" >&2
+if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
+	echo "warning: --namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces will be empty" >&2
 fi
 
 if command -v oc >/dev/null 2>&1; then
@@ -154,21 +169,69 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
-# Server-side apply avoids kubectl OOM at thousands of objects (PL5).
+# Compute the list of namespaces to wait against. Mirror the chart's
+# backwards-compat rule (N=1 -> single namespace = $NS; N>1 -> $NS-i).
+NAMESPACES=()
+if ((NAMESPACE_COUNT <= 1)); then
+	NAMESPACES=("$NS")
+else
+	for ((n = 0; n < NAMESPACE_COUNT; n++)); do
+		NAMESPACES+=("${NS}-${n}")
+	done
+fi
+
+echo "=== Control-plane test setup ==="
+echo "Contexts:        ${CONTEXTS[*]}"
+echo "Services:        $SERVICE_COUNT"
+echo "Replicas/svc:    $REPLICAS"
+echo "Namespace count: $NAMESPACE_COUNT"
+echo "Namespaces:      ${NAMESPACES[*]}"
+echo "Sidecar scoping: $SIDECAR_SCOPING"
+((DRY_RUN)) && echo "Mode:            dry-run"
+echo ""
+
+# Capacity preflight: verify each cluster can schedule the planned pods before
+# deploying anything. Queries node allocatable.pods and current pod count; fails
+# early with an actionable message instead of hanging at the wait timeout.
+if ! ((DRY_RUN)); then
+	NEEDED_PODS=$((SERVICE_COUNT * REPLICAS))
+	echo "Capacity preflight ($NEEDED_PODS pods needed per cluster)..."
+	for ctx in "${CONTEXTS[@]}"; do
+		alloc=$("${KUBECTL[@]}" --context="$ctx" get nodes -o json 2>/dev/null \
+			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
+		current=$("${KUBECTL[@]}" --context="$ctx" get pods --all-namespaces --no-headers 2>/dev/null | wc -l) || current=""
+		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
+			remaining=$((alloc - current))
+			if ((NEEDED_PODS > remaining)); then
+				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current running). Reduce --service-count or --replicas, or add nodes."
+			fi
+			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
+		else
+			echo "  $ctx: could not query capacity (alloc=$alloc, current=$current) — skipping preflight" >&2
+		fi
+	done
+	echo ""
+fi
+
+# Use server-side apply so partial updates and field-manager ownership are
+# tracked by the API server (no client-side last-applied annotation). With
+# --force-conflicts we win any field-ownership conflict from a previous
+# kubectl-client-side-apply run, which is what we want for a benchmarking
+# harness that owns these namespaces exclusively.
 apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
-	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas, sidecar-scoping=${SIDECAR_SCOPING}, namespace-count=${NAMESPACE_COUNT})"
+	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING})"
 	helm template controlplane-test "$CHART_DIR" \
 		--set clusterName="$ctx" \
-		--set namespace="$NS" \
+		--set namespacePrefix="$NS" \
+		--set namespaceCount="$NAMESPACE_COUNT" \
 		--set serviceCount="$SERVICE_COUNT" \
 		--set replicasPerService="$REPLICAS" \
 		--set sidecarScoping="$SIDECAR_SCOPING" \
-		--set namespaceCount="$NAMESPACE_COUNT" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 
@@ -177,24 +240,30 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
+# Wait per-namespace using a label selector — one kubectl call covers every
+# dummy-svc-* Deployment in that namespace, regardless of count. Much faster
+# than per-Deployment loops, and survives missing-name races during rollout.
 echo "Waiting for dummy deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 for ctx in "${CONTEXTS[@]}"; do
 	echo "  Waiting on context $ctx..."
-	for ((i = 0; i < SERVICE_COUNT; i++)); do
-		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait "deployment/dummy-svc-${i}" \
-			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "dummy-svc-${i} not ready on $ctx"
+	for svc_ns in "${NAMESPACES[@]}"; do
+		"${KUBECTL[@]}" --context="$ctx" -n "$svc_ns" wait \
+			--for=condition=Available deployment \
+			-l app.kubernetes.io/instance=controlplane-test \
+			--timeout="${WAIT_TIMEOUT}s" \
+			|| die "deployments in namespace $svc_ns on $ctx not Available within ${WAIT_TIMEOUT}s"
 	done
 	echo "  All deployments ready on $ctx."
 done
 
-# PL4: confirm Sidecar CRs landed when scoping is enabled.
+# Verify Sidecar CRs landed when scoping is enabled.
 if [[ "$SIDECAR_SCOPING" != "none" ]]; then
 	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING})..."
 	for ctx in "${CONTEXTS[@]}"; do
 		deadline=$(( $(date +%s) + 30 ))
 		count=0
 		while (( $(date +%s) < deadline )); do
-			count=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
+			count=$("${KUBECTL[@]}" --context="$ctx" -n "${NAMESPACES[0]}" get sidecars.networking.istio.io \
 				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
 			[[ -z "$count" ]] && count=0
 			(( count > 0 )) && break
@@ -205,4 +274,4 @@ if [[ "$SIDECAR_SCOPING" != "none" ]]; then
 	done
 fi
 
-echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas (sidecar-scoping=${SIDECAR_SCOPING}) on: ${CONTEXTS[*]}"
+echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) (sidecar-scoping=${SIDECAR_SCOPING}) on: ${CONTEXTS[*]}"
