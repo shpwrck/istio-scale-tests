@@ -99,6 +99,17 @@ report (A4).
   precondition at setup time and dies with a clear message if any active
   context has more than one Running istiod pod (A2).
 - **Endpoint flux only.** See "What we measure / what we don't" above.
+- **Reproducibility is per-configuration, not per-byte.** `RUN_ID` is
+  **per-invocation**: it is composed of `date +%Y%m%dT%H%M%S` plus the
+  invoking shell's PID (`$$`), so every invocation gets a fresh id. Re-running
+  the same config produces a brand-new `sweep-${RUN_ID}/` subdirectory and
+  never overwrites a prior run's results — that is the PL5/PL6 guarantee.
+  But rows from two reruns of an identical config are **not bit-identical**:
+  wall-clock latencies vary with kernel scheduling and apiserver load, and
+  although the churn driver's chosen index sequence is deterministic given
+  `--seed` (PL16), the actual `kubectl scale` ACK timings are not. Treat
+  reproducibility as "same combo → comparable distribution", not "same
+  bytes on disk".
 
 ## Quick start
 

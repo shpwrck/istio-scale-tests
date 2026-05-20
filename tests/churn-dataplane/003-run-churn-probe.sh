@@ -257,10 +257,16 @@ sleep "$SETTLE_SEC"
 # between base and scale-to replica counts on all contexts in parallel.
 #
 # Per-op log line format (tab-separated):
-#   <unix_ns>\t<exit_status>\t<deployment_index>
-# where <exit_status> is 0 on success, non-zero if any of the parallel
-# kubectl scale invocations for this op returned non-zero (e.g. 429 from
-# kube-apiserver). 005 uses this to compute churn_ops_succeeded.
+#   <dispatch_unix_ns>\t<exit_status>\t<deployment_index>
+# where:
+#   - <dispatch_unix_ns> is the wall-clock at the moment the parallel
+#     `kubectl scale` fan-out is dispatched (BEFORE `wait`), not at op
+#     completion. This is what downstream consumers (and 005) must use to
+#     validate the achieved rate, otherwise apiserver/scheduler latency
+#     would conflate with scheduling drift.
+#   - <exit_status> is 0 on success, non-zero if any of the parallel kubectl
+#     scale invocations for this op returned non-zero (e.g. 429 from
+#     kube-apiserver). 005 uses this to compute churn_ops_succeeded.
 CHURN_LOG="$(mktemp)"
 run_churn_driver() {
 	local pos=0
@@ -280,7 +286,7 @@ run_churn_driver() {
 	fi
 	local start_ns
 	start_ns="$(date +%s%N)"
-	local op idx replicas ctx exit_status pid rc
+	local op idx replicas ctx exit_status pid rc dispatch_ns
 	local -a scale_pids
 	for ((op = 0; op < total_ops; op++)); do
 		idx="${SHUFFLED_INDICES[pos % ${#SHUFFLED_INDICES[@]}]}"
@@ -292,6 +298,10 @@ run_churn_driver() {
 			replicas="$CHURN_BASE_REPLICAS_OPT"
 			PARITY[idx]=0
 		fi
+		# Capture dispatch wall-clock BEFORE the kubectl scale fan-out so the
+		# per-op timestamp reflects when the op was issued, not when its
+		# apiserver ACKs all completed. See header comment for rationale.
+		dispatch_ns="$(date +%s%N)"
 		scale_pids=()
 		for ctx in "${ALL_CTXS[@]}"; do
 			"${KUBECTL[@]}" --context="$ctx" -n "$NS" scale "deployment/churn-target-${idx}" \
@@ -306,7 +316,7 @@ run_churn_driver() {
 			if wait "$pid"; then rc=0; else rc=$?; fi
 			(( rc != 0 )) && exit_status="$rc"
 		done
-		printf '%s\t%s\t%s\n' "$(date +%s%N)" "$exit_status" "$idx" >> "$CHURN_LOG"
+		printf '%s\t%s\t%s\n' "$dispatch_ns" "$exit_status" "$idx" >> "$CHURN_LOG"
 		# Drift compensation: sleep until start_ns + (op+1) * period_ns.
 		if ((period_ns > 0)); then
 			local target_ns now_ns delta_ns
@@ -333,8 +343,16 @@ if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_
 fi
 WINDOW_END_NS="$(date +%s%N)"
 
-# Stop the churn driver (it should be just about done anyway).
-kill "$DRIVER_PID" 2>/dev/null || true
+# Stop the churn driver. Only SIGTERM if fortio exited EARLY (before DURATION
+# elapsed); otherwise the driver has finished its CHURN_RATE * DURATION ops
+# and is about to return on its own — `wait` lets it flush its final per-op
+# accounting write to $CHURN_LOG. Killing mid-`wait` on the scale fan-out
+# could otherwise bias churn_ops_attempted/succeeded low by up to one op (R2).
+ELAPSED_NS=$(( WINDOW_END_NS - WINDOW_START_NS ))
+DURATION_NS=$(( DURATION * 1000000000 ))
+if [[ "$STATUS" == "FAILED" ]] || (( ELAPSED_NS < DURATION_NS )); then
+	kill "$DRIVER_PID" 2>/dev/null || true
+fi
 wait "$DRIVER_PID" 2>/dev/null || true
 DRIVER_PID=""
 
