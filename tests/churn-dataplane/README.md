@@ -1,14 +1,39 @@
-# Churn × Data-plane Co-execution Test Suite
+# Endpoint Churn × Data-plane Co-execution Test Suite
 
-Measure **how p99 request latency degrades when istiod is busy with churn**.
+Measure **how p99 request latency degrades when istiod is busy with endpoint
+churn**.
 
-`tests/churn/` measures convergence under churn but with no data-plane load.
-`tests/dataplane/` measures latency percentiles against a steady mesh. Either
-in isolation will miss a regression that, say, doubles p99 only while churn
-is active. This suite closes that gap: it co-deploys fortio (client + server)
-and churn-target workloads in a **single shared namespace**, runs two paired
-measurement windows — baseline (no churn) and churn (load + scale events) —
-and reports the delta.
+`tests/churn/` measures convergence under endpoint churn but with no
+data-plane load. `tests/dataplane/` measures latency percentiles against a
+steady mesh. Either in isolation will miss a regression that, say, doubles
+p99 only while endpoint churn is active. This suite closes that gap: it
+co-deploys fortio (client + server) and churn-target workloads in a **single
+shared namespace**, runs two paired measurement windows — baseline (no
+churn) and endpoint-churn (load + Deployment scale events) — and reports
+the delta.
+
+## What we measure / what we don't
+
+The churn driver scales `churn-target-N` Deployments between
+`--base-replicas` and `--scale-to` replicas at a configurable ops-per-second
+rate. Each scale event produces an Endpoint add/remove, which istiod
+translates into an **EDS push** to the affected sidecars. So what this suite
+exercises is **endpoint flux only**.
+
+What this suite does **not** cover:
+
+- **Rolling updates / Pod restarts.** Real workload updates trigger CDS+EDS
+  (and often LDS) pushes plus sidecar bootstrap; scaling a Deployment between
+  two replica counts does not.
+- **Config drift** — VirtualService/DestinationRule/Sidecar changes, which
+  ride a different code path through istiod.
+- **Sidecar restarts** — proxy lifecycle perturbations affecting connection
+  pools and pending requests.
+- **istiod HA / leader election** — the suite assumes a single istiod
+  replica per cluster (see precondition below).
+
+If you need any of those, layer additional probes on top — this suite is
+deliberately narrow so the `Δp99_ms` number is unambiguous.
 
 ## What gets measured
 
@@ -34,6 +59,17 @@ top-level labels are used:
 
 `fortio.load` always targets `http://fortio-server.churn-dataplane-test.svc:8080/echo`.
 
+### Explicit no-traffic contract
+
+Fortio and churn-target workloads share the namespace (and therefore istiod
+/ CNI / kubelet contention) but **never exchange traffic** — fortio's
+Service selector is `app=fortio-server` only, and churn-targets use
+`app=churn-target` + `churn-index=N`. The label namespaces are disjoint, so
+the two Service selectors cannot accidentally pick up each other's Pods
+under any concurrent scale event. This guarantees that the only thing
+churn is doing to fortio's measurement is contending for control-plane and
+node-level resources — not stealing or injecting traffic.
+
 ## Churn-rate semantics (Branch-4 N2)
 
 `--churn-rates CSV` is interpreted as **deployment scale operations per
@@ -43,6 +79,26 @@ a deterministic seeded shuffle of `0..--deployment-count` (PL16: bash/awk
 LCG, no `shuf`). Each operation alternates the chosen Deployment between
 `--base-replicas` and `--scale-to` replicas — so churn does not monotonically
 inflate or deflate the mesh.
+
+The driver uses **drift-compensated scheduling** (A5): each iteration sleeps
+until `start_ns + (op+1) * period_ns` rather than a fixed `1/R` slice, so
+the time `kubectl scale` itself takes does not bleed the effective rate
+below target at high rates. Each op also captures the exit status of every
+parallel `kubectl scale`; rows where `succeeded / attempted < 90%` are
+flagged `status=CHURN_RATE_NOT_MET` and filtered from the aggregated
+report (A4).
+
+## Known limitations
+
+- **Single istiod replica per cluster, required.** 002/003 detect istiod
+  restarts via `kubectl port-forward svc/istiod` and reading
+  `process_start_time_seconds`. `port-forward` against the Service
+  load-balances across replicas, so an HA istiod deployment can land the
+  pre-window and post-window scrapes on different pods — yielding a
+  spurious `istiod_restarted=1` and poisoning every row. 001 enforces this
+  precondition at setup time and dies with a clear message if any active
+  context has more than one Running istiod pod (A2).
+- **Endpoint flux only.** See "What we measure / what we don't" above.
 
 ## Quick start
 
@@ -118,20 +174,42 @@ The sweep:
 | 12 | `p99_ms` | Same, `Percentile == 99` |
 | 13 | `p999_ms` | Same, `Percentile == 99.9` |
 | 14 | `max_ms` | `DurationHistogram.Max * 1000` |
-| 15 | `delta_p99_ms` | **NEW** — `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. (Branch-4) |
+| 15 | `delta_p99_ms` | `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. Only computed when the baseline row has `status=OK` (A3). |
 | 16 | `istiod_restarted` | `0` if `process_start_time_seconds` unchanged across window; `1` if changed; `unknown` if either probe failed (PL9) |
-| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `CLEANUP_TIMEOUT` |
+| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
+| 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
+| 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
+
+`status=CHURN_RATE_NOT_MET` is set by 003 when
+`churn_ops_succeeded / churn_ops_attempted < 90%` (typically apiserver 429s
+at high rates). 005 filters these rows from numeric aggregation, the same
+way it filters `POISONED_RESTART`.
 
 Preamble comment lines (PL2 / PL19) above the header carry: `RUN_ID`,
 `HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `SETTLE_SEC`,
 `BASELINE_DURATION_SEC`, `CHURN_DURATION_SEC`, `QPS`, `CONNECTIONS`,
 `NAMESPACE`, plus a `# combo=... phase=... window_start_ns=... window_end_ns=...`
-marker just before every data row (PL3 wall-clock window).
+marker just before every data row (PL3 wall-clock window). Churn rows
+additionally carry `churn_ops_attempted=... churn_ops_succeeded=...` in
+that marker (A4).
 
 `005-report-results.sh` filters rows whose `istiod_restarted` is `1` or
-`unknown`, or whose `status` is not `OK`, and reports `n_total` vs `n_valid`
-per combination (PL15). All four output formats (`text`, `csv`, `json`, `md`)
-propagate the preamble metadata (PL19).
+`unknown`, or whose `status` is not `OK` (including
+`CHURN_RATE_NOT_MET`), and reports `n_total` vs `n_valid` per combination
+(PL15). All four output formats (`text`, `csv`, `json`, `md`) propagate the
+preamble metadata (PL19). The report's headline column order is (A7):
+
+```
+mesh_size | churn_rate | Δp99_ms (endpoint-churn) | n_total | n_valid |
+baseline_p99 | churn_p99 | baseline_p50 | churn_p50 | baseline_qps | churn_qps
+```
+
+### Manual baseline/churn pairing via combo_id
+
+To pair baseline and churn rows manually (outside `004-run-sweep.sh`),
+invoke `002` and `003` with the same `--combo-id`. `005` joins on this
+column (PL20). When `--combo-id` is omitted, the per-probe `RUN_ID` is used
+as the combo id, which only pairs probes within a single invocation.
 
 ## Cleanup
 

@@ -188,7 +188,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"QPS=$QPS" \
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=$NS"
-	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\n' >> "$OUTPUT_FILE"
+	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\n' >> "$OUTPUT_FILE"
 fi
 
 CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
@@ -255,19 +255,33 @@ sleep "$SETTLE_SEC"
 # Churn driver: in the background, issue exactly CHURN_RATE * DURATION scale
 # operations spaced 1/CHURN_RATE seconds apart. Toggles each chosen index
 # between base and scale-to replica counts on all contexts in parallel.
+#
+# Per-op log line format (tab-separated):
+#   <unix_ns>\t<exit_status>\t<deployment_index>
+# where <exit_status> is 0 on success, non-zero if any of the parallel
+# kubectl scale invocations for this op returned non-zero (e.g. 429 from
+# kube-apiserver). 005 uses this to compute churn_ops_succeeded.
 CHURN_LOG="$(mktemp)"
 run_churn_driver() {
 	local pos=0
 	local total_ops=$(( CHURN_RATE * DURATION ))
-	# Avoid divide-by-zero when CHURN_RATE=0 (steady-mesh-but-still-in-churn-phase).
-	local sleep_per_op
-	if ((CHURN_RATE > 0)); then
-		sleep_per_op="0.$(printf '%06d' $(( 1000000 / CHURN_RATE )))"
-	else
-		sleep_per_op="1"
+	if ((CHURN_RATE <= 0)); then
+		# Avoid divide-by-zero when CHURN_RATE=0 (steady-mesh-but-still-in-churn-phase).
 		total_ops=0
 	fi
-	local op idx replicas
+	# Drift-compensated scheduling: rather than sleeping a fixed slice per op
+	# (which lets the kubectl scale + subshell-fork overhead silently bleed
+	# the effective rate below the target at high rates), we compute the
+	# absolute target wall-clock for each op against the loop start and sleep
+	# the residual. This keeps the long-run rate honest.
+	local period_ns=0
+	if ((CHURN_RATE > 0)); then
+		period_ns=$(( 1000000000 / CHURN_RATE ))
+	fi
+	local start_ns
+	start_ns="$(date +%s%N)"
+	local op idx replicas ctx exit_status pid rc
+	local -a scale_pids
 	for ((op = 0; op < total_ops; op++)); do
 		idx="${SHUFFLED_INDICES[pos % ${#SHUFFLED_INDICES[@]}]}"
 		pos=$((pos + 1))
@@ -278,15 +292,32 @@ run_churn_driver() {
 			replicas="$CHURN_BASE_REPLICAS_OPT"
 			PARITY[idx]=0
 		fi
-		local ctx
+		scale_pids=()
 		for ctx in "${ALL_CTXS[@]}"; do
 			"${KUBECTL[@]}" --context="$ctx" -n "$NS" scale "deployment/churn-target-${idx}" \
 				--replicas="$replicas" >/dev/null 2>&1 &
+			scale_pids+=($!)
 		done
-		printf '%s scale churn-target-%s -> %s\n' "$(date +%s.%N)" "$idx" "$replicas" >> "$CHURN_LOG"
-		sleep "$sleep_per_op"
+		# Capture exit status for accounting (A4): non-zero on any kube-apiserver
+		# 429 / connection error / not-found / etc. Without this the TSV reports
+		# wc -l of the log and overstates actual churn at high rates.
+		exit_status=0
+		for pid in "${scale_pids[@]}"; do
+			if wait "$pid"; then rc=0; else rc=$?; fi
+			(( rc != 0 )) && exit_status="$rc"
+		done
+		printf '%s\t%s\t%s\n' "$(date +%s%N)" "$exit_status" "$idx" >> "$CHURN_LOG"
+		# Drift compensation: sleep until start_ns + (op+1) * period_ns.
+		if ((period_ns > 0)); then
+			local target_ns now_ns delta_ns
+			target_ns=$(( start_ns + (op + 1) * period_ns ))
+			now_ns="$(date +%s%N)"
+			delta_ns=$(( target_ns - now_ns ))
+			if (( delta_ns > 0 )); then
+				sleep "$(awk -v n="$delta_ns" 'BEGIN{printf "%.9f", n/1e9}')"
+			fi
+		fi
 	done
-	wait
 }
 run_churn_driver &
 DRIVER_PID=$!
@@ -311,7 +342,11 @@ POST_START="$(istiod_start_time_seconds "$ISTIOD_PF_PORT" 2>/dev/null || echo "u
 ((ISTIOD_PF_OK)) || POST_START="unknown"
 RESTARTED="$(istiod_restart_status "$PRE_START" "$POST_START")"
 
-CHURN_OPS="$(wc -l < "$CHURN_LOG" 2>/dev/null || echo 0)"
+# A4: churn-ops accounting. The driver log has one line per attempted op,
+# each tab-prefixed with the exit status of the kubectl scale fan-out.
+CHURN_OPS_ATTEMPTED="$(wc -l < "$CHURN_LOG" 2>/dev/null || echo 0)"
+CHURN_OPS_ATTEMPTED="${CHURN_OPS_ATTEMPTED// /}"
+CHURN_OPS_SUCCEEDED="$(awk -F'\t' '$2 == "0" { c++ } END { print c + 0 }' "$CHURN_LOG" 2>/dev/null || echo 0)"
 rm -f "$CHURN_LOG"
 
 QPS_ACTUAL=0; P50=0; P90=0; P99=0; P999=0; MAX_LAT=0
@@ -330,11 +365,25 @@ if [[ "$RESTARTED" != "0" ]]; then
 	[[ "$STATUS" == "OK" ]] && STATUS="POISONED_RESTART"
 fi
 
+# A4: if the driver could not keep up (e.g. apiserver 429s), mark the row so
+# 005 filters it from numeric aggregation. Threshold matches the spec (<90%).
+# Skip this check when CHURN_RATE=0 (no ops are expected).
+if (( CHURN_RATE > 0 )) && (( CHURN_OPS_ATTEMPTED > 0 )); then
+	if awk -v s="$CHURN_OPS_SUCCEEDED" -v a="$CHURN_OPS_ATTEMPTED" \
+		'BEGIN { exit !(s/a < 0.9) }'; then
+		# Don't overwrite POISONED_RESTART or FAILED — those signal a worse problem.
+		[[ "$STATUS" == "OK" ]] && STATUS="CHURN_RATE_NOT_MET"
+	fi
+fi
+
 # Δp99: look up the matching baseline row in --baseline-file, by combo_id.
+# A3: gate on baseline status == "OK" (column 17). A baseline that ended in
+# POISONED_RESTART / FAILED has malformed (or N/A) p99 and the resulting
+# delta would be nonsense even if NF >= 17 and $12 != "N/A".
 DELTA_P99="N/A"
 if [[ -n "$BASELINE_FILE" && -f "$BASELINE_FILE" && "$P99" != "N/A" ]]; then
 	BASELINE_P99="$(awk -F'\t' -v combo="$COMBO_ID" '
-		!/^#/ && !/^run_id/ && NF >= 17 && $3 == combo && $6 == "baseline" && $12 != "N/A" {
+		!/^#/ && !/^run_id/ && NF >= 17 && $3 == combo && $6 == "baseline" && $17 == "OK" && $12 != "N/A" {
 			print $12; exit
 		}' "$BASELINE_FILE")"
 	if [[ -n "$BASELINE_P99" ]]; then
@@ -342,16 +391,17 @@ if [[ -n "$BASELINE_FILE" && -f "$BASELINE_FILE" && "$P99" != "N/A" ]]; then
 	fi
 fi
 
-printf "Result: phase=churn rate=%s/s ops=%s qps_actual=%s p50=%s p99=%s max=%s Δp99=%s restarted=%s status=%s\n" \
-	"$CHURN_RATE" "$CHURN_OPS" "$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$DELTA_P99" "$RESTARTED" "$STATUS"
+printf "Result: phase=churn rate=%s/s ops_attempted=%s ops_succeeded=%s qps_actual=%s p50=%s p99=%s max=%s Δp99=%s restarted=%s status=%s\n" \
+	"$CHURN_RATE" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$DELTA_P99" "$RESTARTED" "$STATUS"
 
-printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops=%s\n' \
-	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS" >> "$OUTPUT_FILE"
+printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops_attempted=%s churn_ops_succeeded=%s\n' \
+	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" >> "$OUTPUT_FILE"
 
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$MESH_SIZE" "$CHURN_RATE" "churn" \
 	"$DURATION" "$QPS" "$QPS_ACTUAL" \
 	"$P50" "$P90" "$P99" "$P999" "$MAX_LAT" \
-	"$DELTA_P99" "$RESTARTED" "$STATUS" >> "$OUTPUT_FILE"
+	"$DELTA_P99" "$RESTARTED" "$STATUS" \
+	"$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" >> "$OUTPUT_FILE"
 
 echo "Wrote churn row to $OUTPUT_FILE"

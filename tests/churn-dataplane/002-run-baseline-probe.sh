@@ -151,7 +151,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 		"QPS=$QPS" \
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=$NS"
-	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\n' >> "$OUTPUT_FILE"
+	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\n' >> "$OUTPUT_FILE"
 fi
 
 CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
@@ -228,10 +228,11 @@ printf "Result: phase=baseline qps_actual=%s p50=%s p99=%s max=%s restarted=%s s
 printf '# combo=%s phase=baseline window_start_ns=%s window_end_ns=%s\n' \
 	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" >> "$OUTPUT_FILE"
 
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$MESH_SIZE" "0" "baseline" \
 	"$DURATION" "$QPS" "$QPS_ACTUAL" \
 	"$P50" "$P90" "$P99" "$P999" "$MAX_LAT" \
-	"N/A" "$RESTARTED" "$STATUS" >> "$OUTPUT_FILE"
+	"N/A" "$RESTARTED" "$STATUS" \
+	"N/A" "N/A" >> "$OUTPUT_FILE"
 
 echo "Wrote baseline row to $OUTPUT_FILE"

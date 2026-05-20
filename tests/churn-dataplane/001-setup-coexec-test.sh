@@ -107,6 +107,29 @@ if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 fi
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 
+# Precondition (A2): the restart-detection logic in 002/003 port-forwards
+# svc/istiod, which round-robins across istiod replicas if HA is enabled.
+# When the baseline pre-window scrape lands on replica A and the post-window
+# scrape lands on replica B, process_start_time_seconds will differ and we
+# will record a spurious istiod_restarted=1 (poisoning the row). The suite
+# is only meaningful against a single-replica istiod. Die early with a
+# clear, actionable message rather than letting the noise propagate into
+# the TSV. Skip the check in --dry-run since the user may not have live
+# clusters available.
+if ! ((DRY_RUN)); then
+	for ctx in "${ALL_CTXS[@]}"; do
+		replicas="$("${KUBECTL[@]}" --context="$ctx" -n istio-system \
+			get pods -l app=istiod --field-selector=status.phase=Running \
+			-o name 2>/dev/null | wc -l | tr -d ' ')"
+		if [[ -z "$replicas" || "$replicas" -lt 1 ]]; then
+			die "no Running istiod pod on context $ctx (ns=istio-system, label app=istiod)"
+		fi
+		if (( replicas > 1 )); then
+			die "context $ctx has $replicas Running istiod pods; this suite requires a single replica per cluster because svc/istiod port-forwarding round-robins across pods and would produce spurious istiod_restarted=1 readings. Scale istiod to 1 replica (or disable HPA) before re-running."
+		fi
+	done
+fi
+
 CHART_DIR="${ROOT}/tests/churn-dataplane/chart"
 
 # PL5: server-side apply by default; allow --dry-run=client for verification.
