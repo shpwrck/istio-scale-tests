@@ -289,7 +289,7 @@ done
 rm -rf "$KUBE_PROBE_DIR"
 
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
-if [[ "$PHASE" != baseline ]]; then
+if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
@@ -315,7 +315,7 @@ fi
 #   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max sidecar_config_bytes_samples
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #   istiod_cpu_m_delta
-if [[ "$PHASE" != baseline ]]; then
+if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
 	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
 fi
 
