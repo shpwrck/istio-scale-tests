@@ -59,7 +59,7 @@ This suite sweeps three modes:
 | Mode | Sidecar CRs | Effect |
 |------|-------------|--------|
 | `none` | 0 | Baseline / worst case: every proxy sees every Service in the mesh. |
-| `namespace` | 1 per workload namespace (no `workloadSelector`) | Realistic operator config. `egress.hosts` restricts each proxy to its own namespace + `istio-system`. |
+| `namespace` | 1 in the primary namespace (no `workloadSelector`) | Realistic operator config. `egress.hosts` restricts each proxy to that namespace + `istio-system`. When `namespaceCount > 1`, fan-out of Sidecar CRs across the extra namespaces is out of scope for this chart — only the primary namespace receives a CR. |
 | `explicit` | 1 per Deployment (with `workloadSelector.labels.app: dummy-svc-<i>`) | Maximum precision; many CRs, smallest per-proxy config. |
 
 Expected per-proxy config size ordering: `none` >> `namespace` >= `explicit`.
@@ -137,10 +137,11 @@ Services are distributed deterministically: service `i` is created in namespace 
   --contexts rosa-001 --config-dump-samples 0
 ```
 
-`SETTLE_SEC` is applied at THREE points inside each combo: (1) before the
-baseline scrape, (2) between baseline and final snapshots, (3) **after** the
-combo's namespace deletion in 005, before the next combo's 001. The
-post-cleanup settle lets istiod finish re-pushing the broader (no-Sidecar)
+`SETTLE_SEC` is applied at TWO points inside each combo:
+(1) between the workload deploy (`001`) and the final scrape (`002 --phase final`) — i.e. between baseline and final snapshots; and
+(2) **after** the combo's namespace deletion in `005`, before the next combo's `001`.
+
+The post-cleanup settle lets istiod finish re-pushing the broader (no-Sidecar)
 config to remaining proxies so the next combo's baseline lands at rest.
 
 ## Watch Mode

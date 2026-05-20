@@ -131,6 +131,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--service-count)
 		[[ -n "${2:-}" ]] || die "--service-count requires a value"
+		echo "warning: --service-count is a singular alias for --service-counts; prefer the plural CSV form for sweep scripts (PL7)" >&2
 		SERVICE_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -147,6 +148,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--replicas)
 		[[ -n "${2:-}" ]] || die "--replicas requires a value"
+		echo "warning: --replicas is a singular alias for --replica-counts; prefer the plural CSV form for sweep scripts (PL7)" >&2
 		REPLICA_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -157,6 +159,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--namespace-count)
 		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
+		echo "warning: --namespace-count is a singular alias for --namespace-counts; prefer the plural CSV form for sweep scripts (PL7)" >&2
 		NAMESPACE_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -167,6 +170,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--sidecar-scoping)
 		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
+		echo "warning: --sidecar-scoping is a singular alias for --sidecar-scopings; prefer the plural CSV form for sweep scripts (PL7)" >&2
 		SIDECAR_SCOPINGS_CSV="$2"
 		shift 2
 		;;
