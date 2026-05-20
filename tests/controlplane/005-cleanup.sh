@@ -93,10 +93,6 @@ fi
 
 TERMINATION_TIMEOUT=300
 
-# Issue a delete. We keep --ignore-not-found=true (legitimate: re-running
-# cleanup on a clean cluster should not fail) but DO NOT swallow other failures
-# the way the previous `|| true` pattern did — that masked finalizer hangs and
-# RBAC errors. Caller is responsible for retrying.
 run_delete() {
 	if ((DRY_RUN)); then
 		echo "  [dry-run] $*"
@@ -105,8 +101,6 @@ run_delete() {
 	"$@"
 }
 
-# Wait until no namespaces matching the chart's instance label remain on the
-# given context, or fail after $TERMINATION_TIMEOUT seconds. Polls every 2s.
 wait_ns_terminated() {
 	local ctx="$1"
 	local waited=0
@@ -134,17 +128,14 @@ for ctx in "${CONTEXTS[@]}"; do
 	(
 		set -e
 		echo "--- Cleaning up context: $ctx ---"
-		# Primary: delete every namespace matching the chart's instance label.
-		# This catches single-namespace, multi-namespace, and partially-
-		# completed deployments in one shot.
 		matches=$("${KUBECTL[@]}" --context="$ctx" get namespace \
 			-l "$LABEL_SELECTOR" \
 			-o name 2>/dev/null || true)
 		if [[ -n "$matches" ]]; then
 			echo "  [$ctx] Labelled namespaces:"
-			# shellcheck disable=SC2086 # word-split intentional: one ns/name per shell word
+			# shellcheck disable=SC2086
 			printf '    %s\n' $matches
-			# shellcheck disable=SC2086 # word-split intentional: feed each name to kubectl delete
+			# shellcheck disable=SC2086
 			run_delete "${KUBECTL[@]}" --context="$ctx" delete $matches --ignore-not-found=true
 		else
 			echo "  [$ctx] No labelled namespaces found."
@@ -156,11 +147,17 @@ for ctx in "${CONTEXTS[@]}"; do
 			run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
 		fi
 
-		# Poll until namespaces actually terminate (not just delete-issued).
-		# Skip the wait on dry-run since nothing was actually deleted.
 		if ! ((DRY_RUN)); then
 			echo "  [$ctx] Waiting for namespace termination (timeout ${TERMINATION_TIMEOUT}s)..."
 			wait_ns_terminated "$ctx"
+			# Sidecar CRs are namespace-scoped and go away with the namespace.
+			# Confirm none leaked in a still-existing namespace.
+			sc_left=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io \
+				-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
+			[[ -z "$sc_left" ]] && sc_left=0
+			if (( sc_left > 0 )); then
+				echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
+			fi
 		fi
 
 		echo "  [$ctx] Done."

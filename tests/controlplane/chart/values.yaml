@@ -4,15 +4,13 @@ clusterName: ""
 #
 # Backwards-compat rule:
 #   - When namespaceCount == 1, the single namespace is named exactly
-#     `namespacePrefix` (e.g. `controlplane-test`). This matches the
+#     `namespace` (e.g. `controlplane-test`). This matches the
 #     pre-multi-namespace layout so existing runs and tooling keep working.
 #   - When namespaceCount > 1, namespaces are named
-#     `${namespacePrefix}-0`, `${namespacePrefix}-1`, ...,
-#     `${namespacePrefix}-${namespaceCount-1}`.
+#     `${namespace}-1`, `${namespace}-2`, ..., `${namespace}-${namespaceCount-1}`.
 #
-# `namespace` is retained as an alias for `namespacePrefix` to keep older
-# `--set namespace=...` invocations working; if both are set,
-# `namespacePrefix` wins.
+# `namespacePrefix` is retained as an alias that takes precedence over
+# `namespace` to keep older `--set namespacePrefix=...` invocations working.
 namespace: controlplane-test
 namespacePrefix: ""
 namespaceCount: 1
@@ -25,6 +23,20 @@ namespaceCount: 1
 serviceCount: 10
 
 replicasPerService: 3
+
+# Sidecar CR scoping mode. One of:
+#   none      - emit no Sidecar resources; proxies see every Service in the mesh.
+#   namespace - one namespace-scoped Sidecar in the primary namespace (no
+#               workloadSelector); egress is restricted to the workload
+#               namespace, istio-system, and ./* in-namespace traffic.
+#   explicit  - one Sidecar per Deployment with workloadSelector.labels.app
+#               matching `dummy-svc-<i>`; maximum scoping precision.
+sidecarScoping: none
+
+# Extra egress hosts appended to every Sidecar CR emitted by this chart.
+# Defaults to a no-op empty list; operators can extend if their workloads
+# need to reach additional namespaces (e.g. `monitoring/*`).
+sidecarExtraEgressHosts: []
 
 image:
   repository: busybox

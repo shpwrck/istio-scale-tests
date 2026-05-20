@@ -8,6 +8,17 @@ app.kubernetes.io/name: controlplane-test
 {{- end }}
 
 {{/*
+Validate sidecarScoping is one of the supported values. Fails the render with a
+clear message so operators get a single source-of-truth list.
+*/}}
+{{- define "controlplane-test.validateSidecarScoping" -}}
+{{- $v := .Values.sidecarScoping | default "none" -}}
+{{- if not (has $v (list "none" "namespace" "explicit")) -}}
+{{- fail (printf "sidecarScoping must be one of [none, namespace, explicit]; got %q" $v) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   Effective namespace prefix. `namespacePrefix` takes precedence; otherwise
   fall back to the legacy `namespace` value. Defaults to "controlplane-test"
   if both are empty.
@@ -23,11 +34,26 @@ controlplane-test
 {{- end -}}
 
 {{/*
+Return the ordered list of workload namespaces this chart manages.
+namespace          -> the primary namespace value
+namespace-1, ...   -> additional namespaces when namespaceCount > 1
+*/}}
+{{- define "controlplane-test.namespaces" -}}
+{{- $base := .Values.namespace -}}
+{{- $n := int (default 1 .Values.namespaceCount) -}}
+{{- if lt $n 1 -}}{{- $n = 1 -}}{{- end -}}
+{{- $out := list $base -}}
+{{- range $i, $_ := until (sub $n 1 | int) -}}
+{{- $out = append $out (printf "%s-%d" $base (add $i 1)) -}}
+{{- end -}}
+{{- toYaml $out -}}
+{{- end -}}
+
+{{/*
   Namespace name for a given zero-based index `i`.
   Backwards-compat: when namespaceCount == 1, the single namespace is named
-  exactly `${namespacePrefix}` (no `-0` suffix), preserving the pre-sweep
-  single-namespace layout. When namespaceCount > 1, the name is
-  `${namespacePrefix}-${i}`.
+  exactly `${namespacePrefix}` (e.g. `controlplane-test`). When namespaceCount > 1,
+  the name is `${namespacePrefix}-${i}`.
 
   Usage: {{ include "controlplane-test.namespaceName" (dict "ctx" $ "i" $i) }}
 */}}

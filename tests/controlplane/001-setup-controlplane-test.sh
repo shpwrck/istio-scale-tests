@@ -25,6 +25,9 @@
 #
 #   # Spread 100 services across 10 namespaces:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 100 --namespace-count 10
+#
+#   # Setup with namespace-scoped Sidecar CRs:
+#   ./tests/controlplane/001-setup-controlplane-test.sh --sidecar-scoping namespace
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -38,31 +41,44 @@ NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
+SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
 is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 
+validate_scoping() {
+	case "$1" in
+	none | namespace | explicit) return 0 ;;
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	esac
+}
+
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV       Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --service-count N    Number of dummy services per cluster (default: $SERVICE_COUNT).
-  --replicas N         Replicas per service (default: $REPLICAS).
-  --namespace-count N  Spread services across N namespaces (default: $NAMESPACE_COUNT).
-                       N=1 -> single namespace named '$NS'.
-                       N>1 -> namespaces '${NS}-0' .. '${NS}-(N-1)';
-                       service i lands in namespace (i mod N).
-  --dry-run            Pass --dry-run=client to oc apply
-                       (skips the --server-side path).
-  --wait-timeout N     Seconds to wait for pods (default: 300).
-  -h, --help           Show this help.
+  --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
+  --service-count N      Number of dummy services per cluster (default: $SERVICE_COUNT).
+  --replicas N           Replicas per service (default: $REPLICAS).
+  --namespace-count N    Spread services across N namespaces (default: $NAMESPACE_COUNT).
+                         N=1 -> single namespace named '$NS'.
+                         N>1 -> namespaces '${NS}-0' .. '${NS}-(N-1)';
+                         service i lands in namespace (i mod N).
+  --sidecar-scoping MODE Sidecar CR scoping: none|namespace|explicit (default: $SIDECAR_SCOPING).
+                         none      - no Sidecar CRs (baseline; worst-case config size).
+                         namespace - one namespace-scoped Sidecar in the primary namespace.
+                         explicit  - one Sidecar per Deployment with workloadSelector.
+  --dry-run              Pass --dry-run=client to oc apply
+                         (skips the --server-side path).
+  --wait-timeout N       Seconds to wait for pods (default: 300).
+  -h, --help             Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
-  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT.
+  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
+  CONTROLPLANE_SIDECAR_SCOPING.
 EOF
 }
 
@@ -101,6 +117,11 @@ while [[ $# -gt 0 ]]; do
 		NAMESPACE_COUNT="$2"
 		shift 2
 		;;
+	--sidecar-scoping)
+		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
+		SIDECAR_SCOPING="$2"
+		shift 2
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -124,6 +145,7 @@ is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (
 is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
 is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
 is_nonneg_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a non-negative integer (got: $WAIT_TIMEOUT)"
+validate_scoping "$SIDECAR_SCOPING"
 
 if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
 	echo "warning: --namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces will be empty" >&2
@@ -164,6 +186,7 @@ echo "Services:        $SERVICE_COUNT"
 echo "Replicas/svc:    $REPLICAS"
 echo "Namespace count: $NAMESPACE_COUNT"
 echo "Namespaces:      ${NAMESPACES[*]}"
+echo "Sidecar scoping: $SIDECAR_SCOPING"
 ((DRY_RUN)) && echo "Mode:            dry-run"
 echo ""
 
@@ -201,13 +224,14 @@ apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
-	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s))"
+	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING})"
 	helm template controlplane-test "$CHART_DIR" \
 		--set clusterName="$ctx" \
 		--set namespacePrefix="$NS" \
 		--set namespaceCount="$NAMESPACE_COUNT" \
 		--set serviceCount="$SERVICE_COUNT" \
 		--set replicasPerService="$REPLICAS" \
+		--set sidecarScoping="$SIDECAR_SCOPING" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 
@@ -232,4 +256,22 @@ for ctx in "${CONTEXTS[@]}"; do
 	echo "  All deployments ready on $ctx."
 done
 
-echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) on: ${CONTEXTS[*]}"
+# Verify Sidecar CRs landed when scoping is enabled.
+if [[ "$SIDECAR_SCOPING" != "none" ]]; then
+	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING})..."
+	for ctx in "${CONTEXTS[@]}"; do
+		deadline=$(( $(date +%s) + 30 ))
+		count=0
+		while (( $(date +%s) < deadline )); do
+			count=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
+				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ') || count=0
+			[[ -z "$count" ]] && count=0
+			(( count > 0 )) && break
+			sleep 1
+		done
+		(( count > 0 )) || die "no Sidecar CRs found on $ctx after 30s (expected >=1 for scoping=$SIDECAR_SCOPING)"
+		echo "  [$ctx] Sidecar CR count: $count"
+	done
+fi
+
+echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) (sidecar-scoping=${SIDECAR_SCOPING}) on: ${CONTEXTS[*]}"
