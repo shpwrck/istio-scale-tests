@@ -272,7 +272,7 @@ This removes the ApplicationSet and all generated Applications. The `mesh-verify
 
 Measure how quickly the multi-cluster control plane propagates endpoint and config changes across clusters. Two complementary approaches:
 
-- **Active probes** — deploy a canary service, poll istiod debug endpoints and sidecar proxy-config, record wall-clock propagation times
+- **Active probes** — deploy a canary Service, then compute deltas of `pilot_proxy_convergence_time` (histogram) and `pilot_xds_pushes{type="eds"}` (counter) on each istiod plus a watcher Envoy `/clusters` poll to derive wall-clock propagation times (see `tests/propagation/README.md` for the detection-threshold and filtering details)
 - **Passive metrics** — OpenShift User Workload Monitoring ServiceMonitor for istiod (`charts/istiod-monitor/`)
 
 Run the sweep to compare propagation latency across mesh sizes (1, 2, 3, ... N clusters):
