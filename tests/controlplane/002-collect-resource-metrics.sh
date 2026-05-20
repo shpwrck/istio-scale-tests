@@ -22,12 +22,15 @@ OUTPUT_DIR="${ROOT}/tests/controlplane/results"
 MESH_SIZE=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
+NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 WATCH=0
 INTERVAL=15
 DRY_RUN=0
 BASE_PF_PORT=15014
 
 die() { echo "error: $*" >&2; exit 1; }
+
+is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 
 usage() {
 	cat <<EOF
@@ -37,6 +40,7 @@ Usage: $(basename "$0") [options]
   --mesh-size N        Metadata tag for TSV output.
   --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
   --replicas N         Metadata tag for TSV output (default: $REPLICAS).
+  --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
   --output-dir DIR     Results directory (default: tests/controlplane/results).
   --watch              Loop continuously.
   --interval SEC       Seconds between scrapes in watch mode (default: 15).
@@ -44,7 +48,8 @@ Usage: $(basename "$0") [options]
   -h, --help           Show this help.
 
 Environment:
-  SETUP_CONTEXTS.
+  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
+  CONTROLPLANE_NAMESPACE_COUNT.
 EOF
 }
 
@@ -83,6 +88,11 @@ while [[ $# -gt 0 ]]; do
 		REPLICAS="$2"
 		shift 2
 		;;
+	--namespace-count)
+		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
+		NAMESPACE_COUNT="$2"
+		shift 2
+		;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
@@ -111,6 +121,10 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (got: $SERVICE_COUNT)"
+is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
+is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
+
 if command -v oc >/dev/null 2>&1; then
 	KUBECTL=(oc)
 elif command -v kubectl >/dev/null 2>&1; then
@@ -131,10 +145,11 @@ fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE="${#CONTEXTS[@]}"
+is_pos_int "$MESH_SIZE" || die "--mesh-size must be a positive integer (got: $MESH_SIZE)"
 
 if ((DRY_RUN)); then
 	echo "Would scrape istiod metrics from: ${CONTEXTS[*]}"
-	echo "Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS"
+	echo "Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT"
 	exit 0
 fi
 
@@ -144,9 +159,9 @@ RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 cat > "$TSV_FILE" <<EOF
 # Control-plane resource metrics — $(date -Iseconds)
-# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS
+# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT
 EOF
-echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes\tk8s_events\tconnected_proxies\tconfig_size_bytes" >> "$TSV_FILE"
+echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes\tk8s_events\tconnected_proxies\tconfig_size_bytes" >> "$TSV_FILE"
 
 PF_PIDS=()
 
@@ -252,7 +267,7 @@ scrape_all() {
 		connected_proxies=$(extract_gauge "$metrics" "pilot_xds{")
 		config_size=$(extract_counter "$metrics" "pilot_xds_config_size_bytes")
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${xds_pushes}\t${k8s_events}\t${connected_proxies}\t${config_size}" >> "$TSV_FILE"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${xds_pushes}\t${k8s_events}\t${connected_proxies}\t${config_size}" >> "$TSV_FILE"
 		echo "  Scraped $ctx: cpu=${cpu_m}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes=${xds_pushes}"
 	done
 }
@@ -284,13 +299,14 @@ else
 		echo "| Mesh size | ${MESH_SIZE} |"
 		echo "| Service count | ${SERVICE_COUNT} |"
 		echo "| Replicas | ${REPLICAS} |"
+		echo "| Namespace count | ${NAMESPACE_COUNT} |"
 		echo ""
 		echo "## Summary"
 		echo ""
 		echo "| Context | CPU (m) | Memory (Mi) | Conv p50 (ms) | Conv p99 (ms) | Queue p50 (ms) | Queue p99 (ms) | Proxies | Pushes |"
 		echo "|---------|---------|-------------|---------------|---------------|----------------|----------------|---------|--------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=15 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $6, $7, $8, $9, $10, $11, $14, $12
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=16 {
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $8, $9, $10, $11, $12, $15, $13
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"

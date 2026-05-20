@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Clean up all controlplane-test resources from target clusters.
 #
+# Approach: delete every namespace carrying the chart's instance label,
+# `app.kubernetes.io/instance=controlplane-test`. The chart stamps that label
+# on every namespace it creates (single or multi-namespace mode), so a single
+# label-selector delete covers both the legacy `controlplane-test` namespace
+# and all `${NS}-N` sweep namespaces in one call — robust against partially
+# completed setup runs and against namespaceCount drift between sweep steps.
+#
 # Usage:
 #   ./tests/controlplane/005-cleanup.sh [--contexts CSV] [--dry-run]
 set -euo pipefail
@@ -12,6 +19,7 @@ source "${ROOT}/config/versions.env"
 CONTEXTS_CSV=""
 DRY_RUN=0
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
+LABEL_SELECTOR="app.kubernetes.io/instance=controlplane-test"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -22,6 +30,11 @@ Usage: $(basename "$0") [options]
   --contexts CSV   Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --dry-run        Show what would be deleted without deleting.
   -h, --help       Show this help.
+
+Behavior:
+  Deletes every namespace labelled '${LABEL_SELECTOR}' on each context, plus
+  the legacy single namespace '\$CONTROLPLANE_TEST_NAMESPACE' (default
+  'controlplane-test') if it lacks the label.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE.
@@ -87,20 +100,37 @@ run_delete() {
 }
 
 echo "=== Control-plane test cleanup ==="
-echo "Contexts: ${CONTEXTS[*]}"
-echo "Namespace: $NS"
-((DRY_RUN)) && echo "Mode: dry-run"
+echo "Contexts:        ${CONTEXTS[*]}"
+echo "Label selector:  $LABEL_SELECTOR"
+echo "Legacy fallback: $NS"
+((DRY_RUN)) && echo "Mode:            dry-run"
 echo ""
 
 PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "--- Cleaning up context: $ctx ---"
-		if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
-			echo "  [$ctx] Namespace $NS does not exist, skipping."
-			exit 0
+		# Primary: delete every namespace matching the chart's instance label.
+		# This catches single-namespace, multi-namespace, and partially-
+		# completed deployments in one shot.
+		matches=$("${KUBECTL[@]}" --context="$ctx" get namespace \
+			-l "$LABEL_SELECTOR" \
+			-o name 2>/dev/null || true)
+		if [[ -n "$matches" ]]; then
+			echo "  [$ctx] Labelled namespaces:"
+			echo "$matches" | sed "s/^/    /"
+			# shellcheck disable=SC2086
+			run_delete "${KUBECTL[@]}" --context="$ctx" delete $matches --ignore-not-found=true
+		else
+			echo "  [$ctx] No labelled namespaces found."
 		fi
-		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+
+		# Fallback: legacy single namespace from a pre-label deployment.
+		if "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+			echo "  [$ctx] Removing legacy namespace $NS (no chart label)."
+			run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		fi
+
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)
