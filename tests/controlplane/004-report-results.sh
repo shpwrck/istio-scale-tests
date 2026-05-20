@@ -76,16 +76,16 @@ if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Partition into "new schema" (25 columns) and "legacy" (anything else).
-# We do this with a per-file probe of the header line so a partial sweep with
-# mixed schemas doesn't poison the aggregation.
+# Partition into "new schema" (27 columns — adds settle_sec & istiod_restarted)
+# and "legacy" (anything else). We do this with a per-file probe of the header
+# line so a partial sweep with mixed schemas doesn't poison the aggregation.
 TSV_FILES=()
 LEGACY_FILES=()
 for f in "${ALL_TSV[@]}"; do
 	header=$(grep -m1 -v '^#' "$f" 2>/dev/null || true)
-	# Count tabs + 1. The new schema has 25 cols (24 tabs).
+	# Count tabs + 1. The new schema has 27 cols (26 tabs).
 	tabs=$(awk -F'\t' '{print NF}' <<<"$header")
-	if [[ "$tabs" == "25" ]]; then
+	if [[ "$tabs" == "27" ]]; then
 		TSV_FILES+=("$f")
 	else
 		LEGACY_FILES+=("$f")
@@ -100,7 +100,7 @@ if (( ${#LEGACY_FILES[@]} > 0 )); then
 fi
 
 if (( ${#TSV_FILES[@]} == 0 )); then
-	die "no TSV files with the current 25-column schema found in $RESULTS_DIR"
+	die "no TSV files with the current 27-column schema found in $RESULTS_DIR"
 fi
 
 # Pluck reproducibility tags from the first new-schema file's preamble.
@@ -116,7 +116,7 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 # the literal "overflow" for that metric and skips it in the numeric min/max
 # /avg. Pure-numeric keys behave identically to before.
 #
-# New 25-column schema (1-indexed):
+# New 27-column schema (1-indexed):
 #  1 timestamp        2 context       3 mesh_size     4 service_count
 #  5 replicas         6 namespace_count
 #  7 istiod_cpu_m     8 istiod_mem_mi
@@ -127,6 +127,7 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 # 20 k8s_events_delta    21 k8s_events_rate
 # 22 connected_proxies   23 config_size_avg_bytes
 # 24 scrape_window_sec   25 scrape_skew_ms
+# 26 settle_sec          27 istiod_restarted
 #
 # Output (aggregated, tab-separated):
 #   mesh_size service_count replicas namespace_count n
@@ -135,6 +136,7 @@ FILES_SKIPPED=${#LEGACY_FILES[@]}
 #   conv99_min conv99_max conv99_avg
 #   queue99_min queue99_max queue99_avg
 #   proxies_min proxies_max proxies_avg
+#   restarts (count of rows with istiod_restarted=1 for this 4-tuple)
 #
 # Any *_min/*_max/*_avg cell where the underlying samples included an
 # "overflow" is printed as the literal string "overflow".
@@ -164,7 +166,7 @@ aggregate() {
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
 	}
-	!/^#/ && !/^timestamp/ && NF>=25 {
+	!/^#/ && !/^timestamp/ && NF>=27 {
 		key = $3 "|" $4 "|" $5 "|" $6
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
 		ingest("cpu",   $7,  key)
@@ -172,6 +174,10 @@ aggregate() {
 		ingest("conv",  $10, key)
 		ingest("queue", $12, key)
 		ingest("prx",   $22, key)
+		# istiod_restarted is pass-through: count rows in this group that
+		# had a restart during the scrape window. No aggregation math —
+		# operators care about "did *any* sample in this cell get tainted".
+		if ($27+0 > 0) restarts[key] += 1
 		n[key]++
 	}
 	END {
@@ -188,18 +194,20 @@ aggregate() {
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
-		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tn\tcpu_min\tcpu_max\tcpu_avg\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\n"
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tn\tcpu_min\tcpu_max\tcpu_avg\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\n"
 		for (i = 1; i <= nkey; i++) {
 			k = order[i]
 			split(k, p, "|")
 			nn = n[k]
-			printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			rr = (k in restarts) ? restarts[k] : 0
+			printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\n",
 				p[1], p[2], p[3], p[4], nn,
 				emit3("cpu",   k),
 				emit3("mem",   k),
 				emit3("conv",  k),
 				emit3("queue", k),
-				emit3("prx",   k)
+				emit3("prx",   k),
+				rr
 		}
 	}'
 }
@@ -219,6 +227,7 @@ report_text() {
 		printf "  Convergence p99 (ms):    min=%s max=%s avg=%s\n",     $12, $13, $14
 		printf "  Queue p99 (ms):          min=%s max=%s avg=%s\n",     $15, $16, $17
 		printf "  Connected proxies:       min=%s max=%s avg=%s\n",     $18, $19, $20
+		if ($21+0 > 0) printf "  ! istiod restarts:       %s row(s) had restarts during the scrape window\n", $21
 		printf "\n"
 	}'
 }
@@ -229,6 +238,13 @@ report_csv() {
 }
 
 report_markdown() {
+	# Render aggregate once so we can both build the table AND compute the
+	# total restart-row count for the footnote without re-running awk twice.
+	local aggregated
+	aggregated=$(aggregate)
+	local total_restarts
+	total_restarts=$(awk -F'\t' 'NR>1 { s += $21+0 } END { printf "%d", s+0 }' <<<"$aggregated")
+
 	echo "---"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
@@ -240,11 +256,15 @@ report_markdown() {
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	echo "| mesh_size | service_count | replicas | namespace_count | n | cpu_avg (m) | mem_avg (Mi) | conv_p99_avg (ms) | queue_p99_avg (ms) | proxies_avg |"
-	echo "|-----------|---------------|----------|-----------------|---|-------------|--------------|-------------------|--------------------|-------------|"
-	aggregate | awk -F'\t' '
+	echo "| mesh_size | service_count | replicas | namespace_count | n | cpu_avg (m) | mem_avg (Mi) | conv_p99_avg (ms) | queue_p99_avg (ms) | proxies_avg | restarts |"
+	echo "|-----------|---------------|----------|-----------------|---|-------------|--------------|-------------------|--------------------|-------------|----------|"
+	awk -F'\t' '
 	NR == 1 { next }
-	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $8, $11, $14, $17, $20 }'
+	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $8, $11, $14, $17, $20, $21 }' <<<"$aggregated"
+	if (( total_restarts > 0 )); then
+		echo ""
+		echo "> ⚠ ${total_restarts} row(s) had istiod restarts during the scrape window — counters/histograms for those samples under-report and should be treated as suspect."
+	fi
 }
 
 # JSON-encode a single aggregate cell. Numeric strings pass through as-is;
@@ -265,7 +285,8 @@ report_json() {
 		printf "\"mem_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($9), cell($10), cell($11)
 		printf "\"convergence_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($12), cell($13), cell($14)
 		printf "\"queue_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($15), cell($16), cell($17)
-		printf "\"connected_proxies\":{\"min\":%s,\"max\":%s,\"avg\":%s}}", cell($18), cell($19), cell($20)
+		printf "\"connected_proxies\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($18), cell($19), cell($20)
+		printf "\"istiod_restarted_rows\":%d}", $21+0
 	}
 	END {
 		if (printed) printf "\n  ]\n}\n"; else printf "]\n}\n"

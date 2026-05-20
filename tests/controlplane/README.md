@@ -20,7 +20,9 @@ meaningful when 001/005 are re-invoked between sweep points.
 | `pilot_k8s_cfg_events` delta + rate | istiod Prometheus | Kubernetes watch events during the window |
 | `pilot_xds` | istiod Prometheus | Connected proxy count (gauge — read from final scrape) |
 | `pilot_xds_config_size_bytes` avg | istiod Prometheus | Average xDS payload bytes during the window (histogram `_sum`/`_count` delta) |
-| `scrape_window_sec` / `scrape_skew_ms` | Internal | Window length and max clock skew across concurrent per-context scrapes |
+| `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length (conservative: `min(final.start) − max(baseline.start)`, used as the rate denominator) and max clock skew across concurrent per-context scrapes |
+| `settle_sec` | Internal | Operator-supplied `--settle` value (intent — distinct from `scrape_window_sec` which is the observed elapsed window) |
+| `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape (istiod restarted mid-window — counters/histograms for that row under-report); `0` otherwise |
 
 Histogram cells whose target quantile lands in the `+Inf` overflow bucket are
 emitted as the literal string `overflow` in TSV/CSV/text/markdown outputs and
@@ -84,6 +86,12 @@ Services are distributed deterministically: service `i` is created in namespace 
 - **No resource-quota or node-capacity precheck.** The sweep will happily
   schedule workloads it cannot fit; verify cluster headroom manually before
   large runs.
+- **Each `002` invocation generates a fresh `RUN_ID` and writes a new TSV;
+  the script is not resumable across operator retries.** A retry produces a
+  separate TSV in the per-sweep subdir — `004` will aggregate every TSV it
+  finds in `--results-dir`, so retries appear as additional samples under
+  the same `(mesh_size, service_count, replicas, namespace_count)` 4-tuple
+  rather than replacing the earlier row.
 
 ## Sweep Examples
 
@@ -142,7 +150,7 @@ conflate. TSV files carry a metadata preamble:
 # RUN_ID=20260520T183201Z-12345
 ```
 
-Followed by the 25-column data schema:
+Followed by the 27-column data schema:
 
 ```
 timestamp  context  mesh_size  service_count  replicas  namespace_count
@@ -153,9 +161,12 @@ xds_pushes_cds  xds_pushes_eds  xds_pushes_lds  xds_pushes_rds  xds_pushes_nds
 k8s_events_delta  k8s_events_rate
 connected_proxies  config_size_avg_bytes
 scrape_window_sec  scrape_skew_ms
+settle_sec  istiod_restarted
 ```
 
-`004-report-results.sh` groups rows by `(mesh_size, service_count, replicas, namespace_count)` and emits `text`, `csv`, `json`, or `markdown` summaries via `--format`. Each output carries the same `ISTIO_VERSION` / `HARNESS_SHA` / `files_consumed` / `skipped_legacy` metadata (preamble in text/csv, frontmatter in markdown, top-level object in JSON). Legacy TSV files with the pre-25-column schema are skipped with a stderr warning.
+`scrape_window_sec` is the observed wall-clock window — `min(final.start) − max(baseline.start)` in seconds (one decimal) — used as the denominator for `xds_pushes_rate` and `k8s_events_rate`. `settle_sec` is the operator's `--settle` value; surfacing both lets operators see intent vs. actual elapsed window. `istiod_restarted` is `1` when istiod's `process_start_time_seconds` moved forward between baseline and final, meaning counters reset mid-window and that row's deltas under-report.
+
+`004-report-results.sh` groups rows by `(mesh_size, service_count, replicas, namespace_count)` and emits `text`, `csv`, `json`, or `markdown` summaries via `--format`. Each output carries the same `ISTIO_VERSION` / `HARNESS_SHA` / `files_consumed` / `skipped_legacy` metadata (preamble in text/csv, frontmatter in markdown, top-level object in JSON). Each aggregated row also gains a `restarts` column counting how many input rows for that 4-tuple had `istiod_restarted=1`; markdown output appends a footnote when any restarts occurred. Legacy TSV files with the pre-27-column schema are skipped with a stderr warning.
 
 ## Cleanup
 
