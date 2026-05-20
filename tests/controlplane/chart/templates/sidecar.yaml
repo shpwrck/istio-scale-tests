@@ -1,0 +1,58 @@
+{{- include "controlplane-test.validateSidecarScoping" . -}}
+{{- $scope := .Values.sidecarScoping | default "none" -}}
+{{- if ne $scope "none" }}
+{{- $nsList := fromYamlArray (include "controlplane-test.namespaces" .) -}}
+{{- $extra := default (list) .Values.sidecarExtraEgressHosts -}}
+{{- if eq $scope "namespace" }}
+{{- /* One namespace-scoped Sidecar per workload namespace (no workloadSelector). */ -}}
+{{- range $ns := $nsList }}
+---
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: {{ $ns }}
+  labels:
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+    controlplane-test.scope: namespace
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "{{ $ns }}/*"
+        - "istio-system/*"
+        {{- range $h := $extra }}
+        - {{ $h | quote }}
+        {{- end }}
+{{- end }}
+{{- else if eq $scope "explicit" }}
+{{- /* One Sidecar per Deployment with workloadSelector matching dummy-svc-<i>. */ -}}
+{{- $count := int $.Values.serviceCount -}}
+{{- range $ns := $nsList }}
+{{- range $i := until $count }}
+---
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $ns }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+    controlplane-test.scope: explicit
+spec:
+  workloadSelector:
+    labels:
+      app: dummy-svc-{{ $i }}
+  egress:
+    - hosts:
+        - "./*"
+        - "{{ $ns }}/*"
+        - "istio-system/*"
+        {{- range $h := $extra }}
+        - {{ $h | quote }}
+        {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

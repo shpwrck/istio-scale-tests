@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Orchestrate control-plane resource collection across multiple mesh sizes.
-# For each mesh size, deploys dummy workloads, collects metrics, then cleans up.
+# Orchestrate control-plane resource collection across (mesh_size × sidecar_scoping).
+# For each combination, deploys dummy workloads, collects metrics, then cleans up.
 #
 # Usage:
 #   ./tests/controlplane/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
 #
 # Examples:
-#   # Sweep 1, 2, 3 clusters with 10 services:
-#   ./tests/controlplane/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   # Sweep mesh sizes 1,2,3 across all three scoping modes:
+#   ./tests/controlplane/003-run-sweep.sh \
+#     --contexts rosa-001,rosa-002,rosa-003 \
+#     --mesh-sizes 1,2,3 \
+#     --sidecar-scopings none,namespace,explicit
 #
-#   # Custom service counts per sweep step:
-#   ./tests/controlplane/003-run-sweep.sh --mesh-sizes 1,2,3 --service-count 50
+#   # Dry-run to see plan:
+#   ./tests/controlplane/003-run-sweep.sh --dry-run \
+#     --contexts a,b --sidecar-scopings none,namespace,explicit
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -19,10 +23,13 @@ source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
+SIDECAR_SCOPINGS_CSV=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 OUTPUT_DIR="${ROOT}/tests/controlplane/results"
+CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
 SETTLE_SEC=30
+MAX_COMBOS=64
 DRY_RUN=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -31,17 +38,24 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
-  --service-count N    Dummy services per cluster (default: $SERVICE_COUNT).
-  --replicas N         Replicas per service (default: $REPLICAS).
-  --settle SEC         Seconds to wait after deploy before collecting (default: $SETTLE_SEC).
-  --output-dir DIR     Results directory (default: tests/controlplane/results).
-  --dry-run            Show plan without executing.
-  -h, --help           Show this help.
+  --contexts CSV               All available cluster contexts (default: \$SETUP_CONTEXTS).
+  --mesh-sizes CSV             Cluster counts to test (default: "1,2,...,len(contexts)").
+  --mesh-size N                Singular alias: a single mesh-size value.
+  --sidecar-scopings CSV       Scoping modes to sweep: none,namespace,explicit
+                               (default: \$CONTROLPLANE_SIDECAR_SCOPING or "none").
+  --sidecar-scoping VALUE      Singular alias: a single scoping mode.
+  --service-count N            Dummy services per cluster (default: $SERVICE_COUNT).
+  --replicas N                 Replicas per service (default: $REPLICAS).
+  --config-dump-samples N      Pods per cluster to exec /config_dump on (default: $CONFIG_DUMP_SAMPLES).
+  --settle SEC                 Seconds to wait after deploy before collecting (default: $SETTLE_SEC).
+  --output-dir DIR             Results directory (default: tests/controlplane/results).
+  --max-combos N               Safety cap on matrix size (default: $MAX_COMBOS).
+  --dry-run                    Show plan without executing.
+  -h, --help                   Show this help.
 
 Environment:
-  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE.
+  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
+  CONTROLPLANE_SIDECAR_SCOPING, CONTROLPLANE_CONFIG_DUMP_SAMPLES.
 EOF
 }
 
@@ -58,6 +72,13 @@ split_csv() {
 	done
 }
 
+validate_scoping_value() {
+	case "$1" in
+	none | namespace | explicit) return 0 ;;
+	*) die "sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	esac
+}
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--contexts)
@@ -70,6 +91,25 @@ while [[ $# -gt 0 ]]; do
 		MESH_SIZES_CSV="$2"
 		shift 2
 		;;
+	--mesh-size)
+		# PL7 singular alias.
+		[[ -n "${2:-}" ]] || die "--mesh-size requires a value"
+		echo "deprecated: prefer --mesh-sizes (CSV) on sweep scripts" >&2
+		MESH_SIZES_CSV="$2"
+		shift 2
+		;;
+	--sidecar-scopings)
+		[[ -n "${2:-}" ]] || die "--sidecar-scopings requires a value"
+		SIDECAR_SCOPINGS_CSV="$2"
+		shift 2
+		;;
+	--sidecar-scoping)
+		# PL7 singular alias.
+		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
+		echo "deprecated: prefer --sidecar-scopings (CSV) on sweep scripts" >&2
+		SIDECAR_SCOPINGS_CSV="$2"
+		shift 2
+		;;
 	--service-count)
 		[[ -n "${2:-}" ]] || die "--service-count requires a value"
 		SERVICE_COUNT="$2"
@@ -80,14 +120,27 @@ while [[ $# -gt 0 ]]; do
 		REPLICAS="$2"
 		shift 2
 		;;
+	--config-dump-samples)
+		[[ -n "${2:-}" ]] || die "--config-dump-samples requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--config-dump-samples must be a non-negative integer; got '$2'"
+		CONFIG_DUMP_SAMPLES="$2"
+		shift 2
+		;;
 	--settle)
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--settle must be a non-negative integer; got '$2'"
 		SETTLE_SEC="$2"
 		shift 2
 		;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
+		shift 2
+		;;
+	--max-combos)
+		[[ -n "${2:-}" ]] || die "--max-combos requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--max-combos must be a positive integer; got '$2'"
+		MAX_COMBOS="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -122,63 +175,105 @@ else
 fi
 
 for ms in "${MESH_SIZES[@]}"; do
+	[[ "$ms" =~ ^[0-9]+$ ]] || die "mesh-size '$ms' is not a positive integer"
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 
+SCOPINGS=()
+if [[ -n "$SIDECAR_SCOPINGS_CSV" ]]; then
+	split_csv "$SIDECAR_SCOPINGS_CSV" SCOPINGS
+else
+	SCOPINGS=("${CONTROLPLANE_SIDECAR_SCOPING:-none}")
+fi
+((${#SCOPINGS[@]})) || die "no sidecar-scopings resolved"
+for s in "${SCOPINGS[@]}"; do
+	validate_scoping_value "$s"
+done
+
+# PL10: matrix-size cap.
+COMBOS=$(( ${#MESH_SIZES[@]} * ${#SCOPINGS[@]} ))
+if (( COMBOS > MAX_COMBOS )); then
+	die "planned matrix size ${COMBOS} exceeds --max-combos ${MAX_COMBOS} (axes: mesh_sizes=${#MESH_SIZES[@]} × sidecar_scopings=${#SCOPINGS[@]}); raise --max-combos or trim axes"
+fi
+
+# PL6: per-sweep RUN_ID + subdir.
+RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
+SWEEP_DIR="${OUTPUT_DIR}/sweep-${RUN_ID}"
+mkdir -p "$SWEEP_DIR"
+
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
-echo "=========================================="
-echo "  Control-Plane Resource Sweep"
-echo "=========================================="
-echo "Contexts: ${CONTEXTS[*]}"
-echo "Mesh sizes: ${MESH_SIZES[*]}"
-echo "Workload: ${SERVICE_COUNT} services × ${REPLICAS} replicas"
-echo "Settle time: ${SETTLE_SEC}s"
-echo "Output: $OUTPUT_DIR"
-echo ""
+# PL5 (D5): print planned matrix to stderr before starting.
+{
+	echo "=========================================="
+	echo "  Control-Plane Resource Sweep (RUN_ID=${RUN_ID})"
+	echo "=========================================="
+	echo "Contexts:           ${CONTEXTS[*]}"
+	echo "Mesh sizes (n=${#MESH_SIZES[@]}):    ${MESH_SIZES[*]}"
+	echo "Sidecar scopings (n=${#SCOPINGS[@]}): ${SCOPINGS[*]}"
+	echo "Planned combinations: ${COMBOS} (cap ${MAX_COMBOS})"
+	echo "Workload:           ${SERVICE_COUNT} services × ${REPLICAS} replicas"
+	echo "Settle time:        ${SETTLE_SEC}s"
+	echo "Config-dump samples: ${CONFIG_DUMP_SAMPLES}"
+	echo "Output:             ${SWEEP_DIR}"
+	echo ""
+	echo "Planned matrix:"
+	for ms in "${MESH_SIZES[@]}"; do
+		for sc in "${SCOPINGS[@]}"; do
+			echo "  - mesh_size=${ms}  sidecar_scoping=${sc}"
+		done
+	done
+	echo ""
+} >&2
 
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	active_csv=$(IFS=,; echo "${active_ctxs[*]}")
-
-	echo "=========================================="
-	echo "  Sweep: mesh_size=$ms"
-	echo "  Clusters: ${active_ctxs[*]}"
-	echo "=========================================="
-	echo ""
-
-	if ((DRY_RUN)); then
-		echo "  [dry-run] Would run:"
-		echo "    001-setup-controlplane-test.sh --contexts $active_csv --service-count $SERVICE_COUNT --replicas $REPLICAS"
-		echo "    (settle ${SETTLE_SEC}s)"
-		echo "    002-collect-resource-metrics.sh --contexts $active_csv --mesh-size $ms"
-		echo "    005-cleanup.sh --contexts $active_csv"
+	for sc in "${SCOPINGS[@]}"; do
+		echo "=========================================="
+		echo "  Sweep: mesh_size=$ms  sidecar_scoping=$sc"
+		echo "  Clusters: ${active_ctxs[*]}"
+		echo "=========================================="
 		echo ""
-		continue
-	fi
 
-	echo "--- Deploying workloads ---"
-	"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
-		--contexts "$active_csv" \
-		--service-count "$SERVICE_COUNT" \
-		--replicas "$REPLICAS"
-	echo ""
+		if ((DRY_RUN)); then
+			echo "  [dry-run] Would run:"
+			echo "    001-setup-controlplane-test.sh --contexts $active_csv --service-count $SERVICE_COUNT --replicas $REPLICAS --sidecar-scoping $sc"
+			echo "    (settle ${SETTLE_SEC}s)"
+			echo "    002-collect-resource-metrics.sh --contexts $active_csv --mesh-size $ms --sidecar-scoping $sc --config-dump-samples $CONFIG_DUMP_SAMPLES --run-id $RUN_ID"
+			echo "    005-cleanup.sh --contexts $active_csv"
+			echo ""
+			continue
+		fi
 
-	echo "--- Settling for ${SETTLE_SEC}s ---"
-	sleep "$SETTLE_SEC"
+		echo "--- Deploying workloads (sidecar_scoping=$sc) ---"
+		"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
+			--contexts "$active_csv" \
+			--service-count "$SERVICE_COUNT" \
+			--replicas "$REPLICAS" \
+			--sidecar-scoping "$sc"
+		echo ""
 
-	echo "--- Collecting metrics (mesh_size=$ms) ---"
-	"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
-		--contexts "$active_csv" \
-		--mesh-size "$ms" \
-		--service-count "$SERVICE_COUNT" \
-		--replicas "$REPLICAS" \
-		--output-dir "$OUTPUT_DIR"
-	echo ""
+		echo "--- Settling pre-baseline for ${SETTLE_SEC}s ---"
+		sleep "$SETTLE_SEC"
 
-	echo "--- Cleaning up ---"
-	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
-	echo ""
+		echo "--- Collecting metrics (mesh_size=$ms, scoping=$sc) ---"
+		"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+			--contexts "$active_csv" \
+			--mesh-size "$ms" \
+			--service-count "$SERVICE_COUNT" \
+			--replicas "$REPLICAS" \
+			--sidecar-scoping "$sc" \
+			--config-dump-samples "$CONFIG_DUMP_SAMPLES" \
+			--settle "$SETTLE_SEC" \
+			--output-dir "$OUTPUT_DIR" \
+			--run-id "$RUN_ID"
+		echo ""
+
+		echo "--- Cleaning up ---"
+		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
+		echo ""
+	done
 done
 
 if ((DRY_RUN)); then
@@ -187,8 +282,8 @@ if ((DRY_RUN)); then
 fi
 
 echo "=========================================="
-echo "  Sweep complete"
+echo "  Sweep complete (RUN_ID=${RUN_ID})"
 echo "=========================================="
 echo ""
 echo "Generating report..."
-"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR"
