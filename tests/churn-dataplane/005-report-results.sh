@@ -25,7 +25,10 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Directory containing coexec-*.tsv files (default: tests/churn-dataplane/results).
+  --results-dir DIR  Directory containing coexec-*.tsv files. Searched recursively,
+                     including \`sweep-*\` subdirs. Default: \`tests/churn-dataplane/results\`
+                     relative to the repo root (resolved at script start via
+                     \$(cd "\$(dirname "\$0")/../.." && pwd)).
   --format FMT       Output format: text | csv | json | md (default: text). PL19: all four
                      propagate the preamble metadata.
   -h, --help         Show this help.
@@ -80,19 +83,26 @@ NAMESPACE_STR="$(extract_preamble_kv NAMESPACE)"
 
 # The core aggregation pass: build the joined per-(mesh_size, churn_rate) view
 # from baseline+churn pairs that share combo_id. Emit a single TSV stream that
-# downstream formatters can render. Column order:
-#   mesh_size  churn_rate  n_total  n_valid  baseline_p50  baseline_p99  churn_p50  churn_p99  delta_p99  qps_actual_baseline  qps_actual_churn
+# downstream formatters can render. Column order (A7 — Δp99 immediately after
+# the keys, then validity counts, then the underlying numbers):
+#   mesh_size  churn_rate  delta_p99  n_total  n_valid  baseline_p99  churn_p99  baseline_p50  churn_p50  baseline_qps  churn_qps
+# A6: schema header is "Δp99_ms (endpoint-churn)" — this suite measures
+# endpoint-churn only (deployment scale -> EDS pushes), not CDS/LDS/sidecar
+# restarts.
 aggregate() {
 	awk -F'\t' '
 	function is_valid_row(restarted, status,    bad) {
 		# PL15: filter restarted=1, restarted=unknown, and any non-OK status.
+		# A4 (CHURN_RATE_NOT_MET): driver could not keep up; the latency
+		# numbers might be honest but the rate label is a lie, so filter.
 		if (status != "OK") return 0
 		if (restarted == "1" || restarted == "unknown") return 0
 		return 1
 	}
 	function safe_num(x) { return (x == "N/A" || x == "" ) ? 0 : x + 0 }
 
-	# Header line skipped; comments skipped.
+	# Header line skipped; comments skipped. NF guard accepts both the
+	# legacy 17-col schema and the new 19-col schema (A4 added two columns).
 	!/^#/ && !/^run_id/ && NF >= 17 {
 		combo = $3; ms = $4; cr = $5; phase = $6
 		qps_actual = $9; p50 = $10; p99 = $12; restarted = $16; status = $17
@@ -152,18 +162,22 @@ aggregate() {
 			s_cqps[rk] += ch_qps[combo]
 		}
 
+		# A7: emit columns with delta_p99 right after the keys.
+		# mesh_size  churn_rate  delta_p99  n_total  n_valid
+		#   baseline_p99  churn_p99  baseline_p50  churn_p50  baseline_qps  churn_qps
 		for (rk in total) {
 			tot_pairs = total[rk]
 			nv = (rk in n_valid) ? n_valid[rk] : 0
 			if (nv > 0) {
-				printf "%s\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n",
-					rk, tot_pairs, nv,
-					s_bp50[rk]/nv, s_bp99[rk]/nv,
-					s_cp50[rk]/nv, s_cp99[rk]/nv,
+				printf "%s\t%.2f\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n",
+					rk,
 					s_dp99[rk]/nv,
+					tot_pairs, nv,
+					s_bp99[rk]/nv, s_cp99[rk]/nv,
+					s_bp50[rk]/nv, s_cp50[rk]/nv,
 					s_bqps[rk]/nv, s_cqps[rk]/nv
 			} else {
-				printf "%s\t%d\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\n", rk, tot_pairs
+				printf "%s\tN/A\t%d\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\n", rk, tot_pairs
 			}
 		}
 	}' "${TSV_FILES[@]}" | sort -k1,1n -k2,2n
@@ -188,30 +202,36 @@ report_text() {
 	echo "=== churn-dataplane co-exec summary ==="
 	emit_metadata_lines "#"
 	echo ""
-	printf '  %-9s | %-9s | %-8s | %-8s | %10s | %10s | %10s | %10s | %10s\n' \
-		"mesh_size" "churn_rate" "n_total" "n_valid" "bl_p50_ms" "bl_p99_ms" "ch_p50_ms" "ch_p99_ms" "Δp99_ms"
-	printf '  %-9s-+-%-9s-+-%-8s-+-%-8s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s\n' \
-		"---------" "---------" "--------" "--------" "----------" "----------" "----------" "----------" "----------"
+	# A7: column order is mesh_size, churn_rate, Δp99 (endpoint-churn),
+	# n_total, n_valid, baseline_p99, churn_p99, baseline_p50, churn_p50,
+	# baseline_qps, churn_qps.
+	printf '  %-9s | %-9s | %14s | %-8s | %-8s | %10s | %10s | %10s | %10s | %10s | %10s\n' \
+		"mesh_size" "churn_rate" "Δp99_ms (ec)" "n_total" "n_valid" \
+		"bl_p99_ms" "ch_p99_ms" "bl_p50_ms" "ch_p50_ms" "bl_qps" "ch_qps"
+	printf '  %-9s-+-%-9s-+-%14s-+-%-8s-+-%-8s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s\n' \
+		"---------" "---------" "--------------" "--------" "--------" \
+		"----------" "----------" "----------" "----------" "----------" "----------"
 	aggregate | awk -F'\t' '{
-		printf "  %-9s | %-9s | %-8s | %-8s | %10s | %10s | %10s | %10s | %10s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9
+		printf "  %-9s | %-9s | %14s | %-8s | %-8s | %10s | %10s | %10s | %10s | %10s | %10s\n", \
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 	}'
 }
 
 report_csv() {
 	emit_metadata_lines "#"
-	echo "mesh_size,churn_rate,n_total,n_valid,baseline_p50_ms,baseline_p99_ms,churn_p50_ms,churn_p99_ms,delta_p99_ms,baseline_qps_actual,churn_qps_actual"
+	echo "mesh_size,churn_rate,delta_p99_ms,n_total,n_valid,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps_actual,churn_qps_actual"
 	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }'
 }
 
 report_json() {
-	# Construct a JSON object with metadata + rows.
+	# Construct a JSON object with metadata + rows. A7 ordering.
 	local rows
 	rows="$(aggregate | awk -F'\t' '
 		BEGIN { first=1; printf "[" }
 		{
 			if (!first) printf ",";
 			first=0
-			printf "{\"mesh_size\":%s,\"churn_rate\":%s,\"n_total\":%s,\"n_valid\":%s,\"baseline_p50_ms\":\"%s\",\"baseline_p99_ms\":\"%s\",\"churn_p50_ms\":\"%s\",\"churn_p99_ms\":\"%s\",\"delta_p99_ms\":\"%s\",\"baseline_qps_actual\":\"%s\",\"churn_qps_actual\":\"%s\"}",
+			printf "{\"mesh_size\":%s,\"churn_rate\":%s,\"delta_p99_ms\":\"%s\",\"n_total\":%s,\"n_valid\":%s,\"baseline_p99_ms\":\"%s\",\"churn_p99_ms\":\"%s\",\"baseline_p50_ms\":\"%s\",\"churn_p50_ms\":\"%s\",\"baseline_qps_actual\":\"%s\",\"churn_qps_actual\":\"%s\"}",
 				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
 		}
 		END { printf "]" }')"
@@ -246,8 +266,9 @@ report_md() {
 	echo "| CONNECTIONS | ${CONNECTIONS_STR:-unknown} |"
 	echo "| NAMESPACE | \`${NAMESPACE_STR:-unknown}\` |"
 	echo ""
-	echo "| mesh_size | churn_rate | n_total | n_valid | baseline_p50_ms | baseline_p99_ms | churn_p50_ms | churn_p99_ms | Δp99_ms | baseline_qps | churn_qps |"
-	echo "|-----------|------------|---------|---------|-----------------|-----------------|--------------|--------------|---------|--------------|-----------|"
+	# A7: Δp99 immediately after keys. A6: "(endpoint-churn)" qualifier.
+	echo "| mesh_size | churn_rate | Δp99_ms (endpoint-churn) | n_total | n_valid | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps |"
+	echo "|-----------|------------|--------------------------|---------|---------|-----------------|--------------|-----------------|--------------|--------------|-----------|"
 	aggregate | awk -F'\t' '{
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
 	}'

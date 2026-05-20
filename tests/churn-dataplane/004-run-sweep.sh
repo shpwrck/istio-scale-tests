@@ -61,6 +61,18 @@ Usage: $(basename "$0") [options]
   --force-large-matrix      Bypass the PL10 matrix cap of $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
+
+Note: \`--churn-rates 0\` (or a CSV element with value 0) is accepted and runs
+the churn phase against a steady mesh — useful as a sanity check that the
+churn phase reports the same numbers as the baseline phase. Rates < 0 are
+rejected.
+
+Environment:
+  SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
+  COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
+  COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED,
+  COEXEC_NS_DELETE_TIMEOUT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
+  CHURN_SCALE_TO_REPLICAS.
 EOF
 }
 
@@ -213,7 +225,7 @@ if ! ((DRY_RUN)); then
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" \
 		"MATRIX_SIZE=$MATRIX_SIZE"
-	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\n' >> "$TSV_FILE"
+	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\n' >> "$TSV_FILE"
 fi
 
 COMBO_INDEX=0
@@ -299,11 +311,12 @@ for ms in "${MESH_SIZES[@]}"; do
 		"$SCRIPT_DIR/006-cleanup.sh" "${cleanup_args[@]}" || {
 			echo "warn: cleanup reported failure; recording row status to keep next combo isolated" >&2
 			# PL23: propagate cleanup timeout into the TSV instead of polluting next combo.
-			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 				"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$ms" "$cr" "cleanup" \
 				"0" "0" "0" \
 				"N/A" "N/A" "N/A" "N/A" "N/A" \
-				"N/A" "unknown" "CLEANUP_TIMEOUT" >> "$TSV_FILE"
+				"N/A" "unknown" "CLEANUP_TIMEOUT" \
+				"N/A" "N/A" >> "$TSV_FILE"
 		}
 
 		# PL18: settle gap before next combo.
