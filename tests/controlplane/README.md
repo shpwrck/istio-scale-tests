@@ -27,9 +27,8 @@ only*, not the deploy itself.
 
 | Metric | Source | What it shows |
 |--------|--------|---------------|
-| istiod CPU window-average (millicores) | `process_cpu_seconds_total` delta over the scrape window | **Primary** CPU measurement — average millicores consumed during the actual push window. `N/A` if istiod restarted (counter resets), baseline scrape was missing, or window was non-positive |
-| istiod CPU spot-check (millicores) | `kubectl top pod` snapshot taken after settle | Single point-in-time CPU sample retained for sanity-check comparison; reads near-idle on quiet istiods because all push work has already completed when the snapshot fires. Use `istiod_cpu_m_delta` for analysis |
-| istiod Memory (MiB) | `kubectl top pod` | Control-plane memory cost per cluster count (memory is a gauge, so a snapshot is representative) |
+| istiod CPU (millicores) | `process_cpu_seconds_total` delta over the scrape window | Average millicores consumed during the actual push window. `N/A` if istiod restarted (counter resets), baseline scrape was missing, or window was non-positive |
+| istiod Memory (MiB) | `process_resident_memory_bytes` from istiod `/metrics` | Control-plane memory cost per cluster (gauge from final scrape, converted to MiB) |
 | `pilot_proxy_convergence_time` p50/p99 (delta) | istiod Prometheus | How fast config reaches all sidecars during the window |
 | `pilot_proxy_queue_time` p50/p99 (delta) | istiod Prometheus | How long pushes wait in istiod's queue during the window |
 | `pilot_xds_pushes` delta + rate | istiod Prometheus | xDS push count during the window (and per-second rate) |
@@ -40,7 +39,7 @@ only*, not the deploy itself.
 | `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length (conservative: `min(final.start) − max(baseline.end)`, used as the rate denominator) and max clock skew across concurrent per-context scrapes |
 | `settle_sec` | Internal | Operator-supplied `--settle` value (intent — distinct from `scrape_window_sec` which is the observed elapsed window) |
 | `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape (istiod restarted mid-window — counters/histograms for that row under-report); `0` if both readings were present and equal; the literal string `unknown` if either side's `process_start_time_seconds` was missing (e.g. baseline scrape failed) so we couldn't tell |
-| `istiod_cpu_m_delta` | istiod Prometheus | Primary CPU metric: `(final − baseline) ÷ scrape_window_sec × 1000` from `process_cpu_seconds_total`. Replaces the `kubectl top` snapshot as the main CPU column because the snapshot misses the actual work period (settle has already concluded by the time `top` fires, so istiod reads idle) |
+| `istiod_cpu_m_delta` | istiod Prometheus | CPU metric: `(final − baseline) ÷ scrape_window_sec × 1000` from `process_cpu_seconds_total`. Average millicores over the measurement window |
 
 Histogram cells whose target quantile lands in the `+Inf` overflow bucket are
 emitted as the literal string `overflow` in TSV/CSV/text/markdown outputs and
@@ -102,9 +101,6 @@ Services are distributed deterministically: service `i` is created in namespace 
   intent is recorded per-row in the TSV (`settle_sec`), while the observed
   wall-clock window lives in `scrape_window_sec` — auto-scaling settle time
   as a function of matrix point is out of scope.
-- **No resource-quota or node-capacity precheck.** The sweep will happily
-  schedule workloads it cannot fit; verify cluster headroom manually before
-  large runs.
 - **Each `002` invocation generates a fresh `RUN_ID` and writes a new TSV;
   the script is not resumable across operator retries.** A retry produces a
   separate TSV in the per-sweep subdir — `004` will aggregate every TSV it
@@ -174,11 +170,11 @@ The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each valu
 - `unreachable` — `kubectl version` returned a non-zero exit (timeout or connection refused) within `--request-timeout=5s`. The cluster could not be contacted at sweep startup.
 - `unknown` — `kubectl version` succeeded but `jq .serverVersion.gitVersion` returned empty (unexpected schema, very old client). The cluster *was* reachable; we just couldn't parse a version out of the response.
 
-Followed by the 28-column data schema:
+Followed by the 27-column data schema:
 
 ```
 timestamp  context  mesh_size  service_count  replicas  namespace_count
-istiod_cpu_m  istiod_mem_mi
+istiod_mem_mi
 convergence_p50_ms  convergence_p99_ms  queue_p50_ms  queue_p99_ms
 xds_pushes_delta  xds_pushes_rate
 xds_pushes_cds  xds_pushes_eds  xds_pushes_lds  xds_pushes_rds  xds_pushes_nds
@@ -191,7 +187,7 @@ istiod_cpu_m_delta
 
 `scrape_window_sec` is the observed wall-clock window — `min(final.start) − max(baseline.end)` in seconds (one decimal) — used as the denominator for `xds_pushes_rate` and `k8s_events_rate`. The lower bound is each baseline scrape's *end* timestamp (not its start), so the window represents the conservative interval every counter saw the same elapsed time. `settle_sec` is the operator's `--settle` value; surfacing both lets operators see intent vs. actual elapsed window. `istiod_restarted` is `1` when istiod's `process_start_time_seconds` moved forward between baseline and final (counters reset mid-window, row's deltas under-report), `0` when both readings were present and equal, or the literal string `unknown` when either side's `process_start_time_seconds` was missing.
 
-`004-report-results.sh` groups rows by `(mesh_size, service_count, replicas, namespace_count)` and emits `text`, `csv`, `json`, or `markdown` summaries via `--format`. Each output carries the same `ISTIO_VERSION` / `HARNESS_SHA` / `files_consumed` / `skipped_legacy` metadata (preamble in text/csv, frontmatter in markdown, top-level object in JSON). Each aggregated row also gains a `restarts` column counting how many input rows for that 4-tuple had `istiod_restarted=1`; markdown output appends a footnote when any restarts occurred. Legacy TSV files with the pre-28-column schema are skipped with a stderr warning.
+`004-report-results.sh` groups rows by `(mesh_size, service_count, replicas, namespace_count)` and emits `text`, `csv`, `json`, or `markdown` summaries via `--format`. Each output carries the same `ISTIO_VERSION` / `HARNESS_SHA` / `files_consumed` / `skipped_legacy` metadata (preamble in text/csv, frontmatter in markdown, top-level object in JSON). Each aggregated row also gains a `restarts` column counting how many input rows for that 4-tuple had `istiod_restarted=1`; markdown output appends a footnote when any restarts occurred. Legacy TSV files with a non-27-column schema are skipped with a stderr warning.
 
 ## Cleanup
 

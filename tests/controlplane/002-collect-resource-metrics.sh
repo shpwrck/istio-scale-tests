@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Collect istiod resource usage and Prometheus metrics for control-plane analysis.
-# Scrapes kubectl top and istiod /metrics, computes delta-window stats for the
-# histograms and counters that are cumulative since istiod start, and writes a
-# TSV row per cluster.
+# Scrapes istiod /metrics, computes delta-window stats for the histograms and
+# counters that are cumulative since istiod start, and writes a TSV row per
+# cluster.
 #
 # Delta-window approach (chosen because Prometheus UWM is not guaranteed to be
 # reachable from where this script runs): we take a *baseline* scrape on entry,
@@ -184,14 +184,8 @@ is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTE
 
 if command -v oc >/dev/null 2>&1; then
 	KUBECTL=(oc)
-	# `oc top pod` is a deprecated shim on current OpenShift releases; the
-	# canonical form is `oc adm top pod`. Use the canonical form so the call
-	# succeeds where the shim has been removed (it silently produced no output
-	# on at least one homelab cluster, which made every cpu_m read as N/A).
-	KUBECTL_TOP=(oc adm)
 elif command -v kubectl >/dev/null 2>&1; then
 	KUBECTL=(kubectl)
-	KUBECTL_TOP=(kubectl)
 else
 	die "neither oc nor kubectl found on PATH"
 fi
@@ -282,9 +276,9 @@ if [[ "$PHASE" != baseline ]]; then
 	} > "$TSV_FILE"
 fi
 
-# Schema (TSV header):
+# Schema (TSV header — 27 columns):
 #   timestamp context mesh_size service_count replicas namespace_count
-#   istiod_cpu_m istiod_mem_mi
+#   istiod_mem_mi
 #   convergence_p50_ms convergence_p99_ms queue_p50_ms queue_p99_ms
 #   xds_pushes_delta xds_pushes_rate
 #   xds_pushes_cds xds_pushes_eds xds_pushes_lds xds_pushes_rds xds_pushes_nds
@@ -304,16 +298,12 @@ fi
 # if either side's `process_start_time_seconds` was missing (so the report
 # can distinguish "definitely no restart" from "couldn't tell").
 #
-# `istiod_cpu_m` (column 7) is the `kubectl top` snapshot taken AFTER the
-# settle window concludes — a single point-in-time spot check that, on
-# quiet istiods, frequently reads near-zero even when significant push work
-# happened during the window. `istiod_cpu_m_delta` (column 28) is the
-# average millicores over the scrape window, derived from the monotonic
-# `process_cpu_seconds_total` counter; treat it as the primary CPU metric
-# for sweep analysis. `N/A` when istiod restarted (counter reset), the
-# baseline scrape was missing, or the window was non-positive.
+# `istiod_cpu_m_delta` is the average millicores over the scrape window,
+# derived from the monotonic `process_cpu_seconds_total` counter. `N/A`
+# when istiod restarted (counter reset), the baseline scrape was missing,
+# or the window was non-positive.
 if [[ "$PHASE" != baseline ]]; then
-	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
@@ -671,25 +661,24 @@ scrape_window() {
 	for i in "${!CONTEXTS[@]}"; do
 		ctx="${CONTEXTS[i]}"
 
-		local cpu_m="N/A" mem_mi="N/A"
-		local top_output
-		top_output=$("${KUBECTL_TOP[@]}" --context="$ctx" -n istio-system top pod -l app=istiod --no-headers 2>/dev/null) || true
-		if [[ -n "$top_output" ]]; then
-			cpu_m=$(echo "$top_output" | awk '{gsub(/m/,"",$2); sum+=$2} END{printf "%.0f", sum}')
-			mem_mi=$(echo "$top_output" | awk '{gsub(/Mi/,"",$3); sum+=$3} END{printf "%.0f", sum}')
-		fi
-
 		local b_file="${TMP_DIR}/baseline-${i}.metrics"
 		local f_file="${TMP_DIR}/final-${i}.metrics"
 		if [[ ! -s "$f_file" ]]; then
 			echo "warning: no final scrape for $ctx; emitting N/A row" >&2
 			# No final metric -> restart state is genuinely undetectable.
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${cpu_m}\t${mem_mi}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A" >> "$TSV_FILE"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
 		baseline=$([[ -s "$b_file" ]] && cat "$b_file" || echo "")
 		final=$(cat "$f_file")
+
+		# Memory from process_resident_memory_bytes (gauge, bytes → MiB).
+		local mem_mi
+		mem_mi=$(extract_gauge_exact "$final" process_resident_memory_bytes)
+		if [[ "$mem_mi" != "N/A" ]]; then
+			mem_mi=$(awk -v b="$mem_mi" 'BEGIN{ printf "%.0f", b / 1048576 }')
+		fi
 
 		# Delta-window histograms.
 		local conv_delta_text queue_delta_text
@@ -762,13 +751,10 @@ scrape_window() {
 			echo "warning: istiod restart detected during scrape window on ${ctx} (process_start_time_seconds ${b_pst} -> ${f_pst})" >&2
 		fi
 
-		# istiod CPU averaged over the scrape window — the primary CPU metric.
-		# kubectl top (above, column 7) is a single snapshot taken AFTER settle
-		# has already concluded, so on quiet istiods it routinely reports near-
-		# idle even when significant push work happened during the window.
+		# istiod CPU averaged over the scrape window.
 		# process_cpu_seconds_total is a monotonic counter of CPU seconds
 		# consumed since process start; (delta / window_sec) * 1000 gives the
-		# true average millicores over the measurement window.
+		# average millicores over the measurement window.
 		local b_cpu_s f_cpu_s cpu_m_delta
 		b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
 		f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
@@ -800,8 +786,8 @@ scrape_window() {
 				printf "%.0f", ds/dc
 			}')
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}" >> "$TSV_FILE"
-		echo "  Scraped $ctx: cpu_top=${cpu_m}m cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]})"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}" >> "$TSV_FILE"
+		echo "  Scraped $ctx: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]})"
 	done
 }
 
@@ -875,10 +861,10 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | CPU top (m) | CPU window avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ |"
-		echo "|---------|-------------|--------------------|----------|---------------|----------------|---------|----------|-------|-------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=28 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $28, $8, $10, $12, $22, $13, $16, $15
+		echo "| Context | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ |"
+		echo "|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|"
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=27 {
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $27, $7, $9, $11, $21, $12, $15, $14
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
