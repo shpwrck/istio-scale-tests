@@ -26,6 +26,7 @@ CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
+SETTLE_SEC="${PROPAGATION_SETTLE_SEC:-5}"
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
@@ -37,18 +38,21 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
-  --iterations N       Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
-  --timeout SEC        Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
-  --output-dir DIR     Results directory (default: tests/propagation/results).
-  --tsv                Also write per-iteration TSV files (enables 005 report).
-  --collect-metrics    Also run 004-collect-pilot-metrics.sh at each mesh size.
-  --dry-run            Show plan without executing.
-  -h, --help           Show this help.
+  --contexts CSV         All available cluster contexts (default: \$SETUP_CONTEXTS).
+  --mesh-sizes CSV       Cluster counts to test (default: "1,2,...,len(contexts)").
+  --mesh-size N          DEPRECATED single-size alias (prints warning to stderr).
+  --iterations N         Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
+  --timeout SEC          Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
+  --settle-sec SEC       Settle gap after cleanup between mesh-size steps (default: $SETTLE_SEC).
+  --output-dir DIR       Results root (default: tests/propagation/results). A new
+                         per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
+  --tsv                  Also write per-iteration TSV files (enables 005 report).
+  --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
+  --dry-run              Print planned matrix to stderr; exit without touching clusters.
+  -h, --help             Show this help.
 
 Environment:
-  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC.
+  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC.
 EOF
 }
 
@@ -77,6 +81,13 @@ while [[ $# -gt 0 ]]; do
 		MESH_SIZES_CSV="$2"
 		shift 2
 		;;
+	--mesh-size)
+		# Deprecated singular alias — forward to --mesh-sizes.
+		[[ -n "${2:-}" ]] || die "--mesh-size requires a value"
+		echo "warning: --mesh-size is deprecated; use --mesh-sizes CSV (treating as single-size sweep)" >&2
+		MESH_SIZES_CSV="$2"
+		shift 2
+		;;
 	--iterations)
 		[[ -n "${2:-}" ]] || die "--iterations requires a value"
 		ITERATIONS="$2"
@@ -85,6 +96,11 @@ while [[ $# -gt 0 ]]; do
 	--timeout)
 		[[ -n "${2:-}" ]] || die "--timeout requires a value"
 		TIMEOUT_SEC="$2"
+		shift 2
+		;;
+	--settle-sec)
+		[[ -n "${2:-}" ]] || die "--settle-sec requires a value"
+		SETTLE_SEC="$2"
 		shift 2
 		;;
 	--output-dir)
@@ -136,6 +152,45 @@ for ms in "${MESH_SIZES[@]}"; do
 done
 
 SCRIPT_DIR="${ROOT}/tests/propagation"
+SWEEP_RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
+SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
+
+# --- dry-run: print planned matrix to stderr, exit cleanly --------------------
+if ((DRY_RUN)); then
+	{
+		echo "=========================================="
+		echo "  Propagation Latency Sweep [DRY RUN]"
+		echo "=========================================="
+		echo "Contexts: ${CONTEXTS[*]}"
+		echo "Mesh sizes: ${MESH_SIZES[*]}"
+		echo "Iterations per size: $ITERATIONS"
+		echo "Settle: ${SETTLE_SEC}s"
+		echo "Output (would create): $SWEEP_DIR"
+		echo ""
+		for ms in "${MESH_SIZES[@]}"; do
+			active_ctxs=("${CONTEXTS[@]:0:$ms}")
+			source_ctx="${active_ctxs[0]}"
+			remote_ctxs=()
+			((ms > 1)) && remote_ctxs=("${active_ctxs[@]:1}")
+			remote_csv=""
+			for rc in "${remote_ctxs[@]}"; do
+				[[ -n "$remote_csv" ]] && remote_csv+=","
+				remote_csv+="$rc"
+			done
+			echo "--- Plan: mesh_size=$ms ---"
+			echo "  001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+			echo "  002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --iterations $ITERATIONS --settle-sec $SETTLE_SEC"
+			if ((COLLECT_METRICS)); then
+				echo "  004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+			fi
+			echo ""
+		done
+		echo "Dry-run complete — no clusters touched."
+	} >&2
+	exit 0
+fi
+
+mkdir -p "$SWEEP_DIR"
 
 echo "=========================================="
 echo "  Propagation Latency Sweep"
@@ -143,7 +198,8 @@ echo "=========================================="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "Iterations per size: $ITERATIONS"
-echo "Output: $OUTPUT_DIR"
+echo "Settle: ${SETTLE_SEC}s"
+echo "Output: $SWEEP_DIR"
 echo ""
 
 MD_FILES=()
@@ -169,17 +225,6 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "=========================================="
 	echo ""
 
-	if ((DRY_RUN)); then
-		echo "  [dry-run] Would run:"
-		echo "    001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
-		echo "    002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --iterations $ITERATIONS"
-		if ((COLLECT_METRICS)); then
-			echo "    004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
-		fi
-		echo ""
-		continue
-	fi
-
 	echo "--- Setting up watchers ---"
 	"$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
 	echo ""
@@ -190,7 +235,8 @@ for ms in "${MESH_SIZES[@]}"; do
 		--mesh-size "$ms"
 		--iterations "$ITERATIONS"
 		--timeout "$TIMEOUT_SEC"
-		--output-dir "$OUTPUT_DIR"
+		--settle-sec "$SETTLE_SEC"
+		--output-dir "$SWEEP_DIR"
 	)
 	((WRITE_TSV)) && endpoint_args+=(--tsv)
 	if [[ -n "$remote_csv" ]]; then
@@ -198,46 +244,52 @@ for ms in "${MESH_SIZES[@]}"; do
 	fi
 	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"
 
-	newest_md=$(ls -t "$OUTPUT_DIR"/endpoint-*.md 2>/dev/null | head -1)
+	# Pick the newest endpoint-*.md emitted by the just-finished probe.
+	newest_md=""
+	while IFS= read -r f; do
+		if [[ -z "$newest_md" || "$f" -nt "$newest_md" ]]; then
+			newest_md="$f"
+		fi
+	done < <(find "$SWEEP_DIR" -maxdepth 1 -name 'endpoint-*.md' -type f 2>/dev/null)
 	[[ -n "$newest_md" ]] && MD_FILES+=("$newest_md")
 	echo ""
 
 	if ((COLLECT_METRICS)); then
 		echo "--- Collecting pilot metrics (mesh_size=$ms) ---"
-		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$OUTPUT_DIR"
+		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$SWEEP_DIR"
 		echo ""
 	fi
 
+	echo "  Sweep step settle (${SETTLE_SEC}s)..."
+	sleep "$SETTLE_SEC"
+
 	echo ""
 done
-
-if ((DRY_RUN)); then
-	echo "Dry-run complete."
-	exit 0
-fi
 
 echo "=========================================="
 echo "  Sweep complete"
 echo "=========================================="
 echo ""
 if ((WRITE_TSV)); then
-	echo "Generating TSV report..."
-	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$OUTPUT_DIR" --format text
+	echo "Generating aggregated report..."
+	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
 	echo ""
 fi
 
 if ((${#MD_FILES[@]} > 0)); then
-	COMBINED="${OUTPUT_DIR}/sweep-$(date +%Y%m%dT%H%M%S).md"
+	COMBINED="${SWEEP_DIR}/sweep-summary.md"
 	{
 		echo "# Propagation Latency Sweep"
 		echo ""
 		echo "| Field | Value |"
 		echo "|-------|-------|"
+		echo "| Sweep run ID | \`${SWEEP_RUN_ID}\` |"
 		echo "| Date | $(date -Iseconds) |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
 		echo "| Mesh sizes | ${MESH_SIZES[*]} |"
 		echo "| Iterations per size | ${ITERATIONS} |"
 		echo "| Timeout | ${TIMEOUT_SEC}s |"
+		echo "| Settle | ${SETTLE_SEC}s |"
 		echo ""
 		for i in "${!MD_FILES[@]}"; do
 			echo "## Mesh Size ${MESH_SIZES[i]}"
@@ -251,26 +303,33 @@ if ((${#MD_FILES[@]} > 0)); then
 			[[ -f "${mf%.md}.tsv" ]] && TSV_SWEEP_FILES+=("${mf%.md}.tsv")
 		done
 		if ((${#TSV_SWEEP_FILES[@]} > 0)); then
-			echo "## Comparison"
+			echo "## Comparison (rows with restarted=1 or overflow=1 dropped)"
 			echo ""
-			echo "| Mesh Size | P1 local xDS (avg ms) | P2 remote istiod (avg ms) | P3 remote sidecar (avg ms) |"
-			echo "|-----------|----------------------|--------------------------|---------------------------|"
+			echo "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 avg (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |"
+			echo "|-----------|------------------|----------------------|-----------------|---------------------|"
 			cat "${TSV_SWEEP_FILES[@]}" | awk -F'\t' '
 			!/^#/ && !/^run_id/ && NF>=10 {
-				ms=$2; p1=$7; p2=$8; p3=$9
-				if(p1!="TIMEOUT" && p1!="N/A") { p1_sum[ms]+=p1; p1_n[ms]++ }
-				if(p2!="TIMEOUT" && p2!="N/A") { p2_sum[ms]+=p2; p2_n[ms]++ }
-				if(p3!="TIMEOUT" && p3!="N/A") { p3_sum[ms]+=p3; p3_n[ms]++ }
-				seen[ms]=1
+				ms = $2
+				p1 = $7; p2 = $8; p3 = $9
+				cp99 = ($12 == "") ? "N/A" : $12
+				overflow = ($15 == "") ? "0" : $15
+				restarted = ($16 == "") ? "0" : $16
+				if (restarted == "1" || overflow == "1") next
+				if (p1 != "TIMEOUT" && p1 != "N/A" && p1 ~ /^[0-9]+$/) { p1_sum[ms] += p1; p1_n[ms]++ }
+				if (p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) { p2_sum[ms] += p2; p2_n[ms]++ }
+				if (p3 != "TIMEOUT" && p3 != "N/A" && p3 ~ /^[0-9]+$/) { p3_sum[ms] += p3; p3_n[ms]++ }
+				if (cp99 != "N/A" && cp99 != "overflow" && cp99 ~ /^[0-9]+$/) { cp99_sum[ms] += cp99; cp99_n[ms]++ }
+				seen[ms] = 1
 			}
 			END {
 				asorti(seen, sizes)
-				for(s in sizes) {
+				for (s in sizes) {
 					m = sizes[s]
-					p1_avg = (p1_n[m] > 0) ? sprintf("%d", p1_sum[m]/p1_n[m]) : "--"
-					p2_avg = (p2_n[m] > 0) ? sprintf("%d", p2_sum[m]/p2_n[m]) : "--"
-					p3_avg = (p3_n[m] > 0) ? sprintf("%d", p3_sum[m]/p3_n[m]) : "--"
-					printf "| %s | %s | %s | %s |\n", m, p1_avg, p2_avg, p3_avg
+					p1_avg   = (p1_n[m]   > 0) ? sprintf("%d", p1_sum[m]   / p1_n[m])   : "--"
+					cp99_avg = (cp99_n[m] > 0) ? sprintf("%d", cp99_sum[m] / cp99_n[m]) : "--"
+					p2_avg   = (p2_n[m]   > 0) ? sprintf("%d", p2_sum[m]   / p2_n[m])   : "--"
+					p3_avg   = (p3_n[m]   > 0) ? sprintf("%d", p3_sum[m]   / p3_n[m])   : "--"
+					printf "| %s | %s | %s | %s | %s |\n", m, p1_avg, cp99_avg, p2_avg, p3_avg
 				}
 			}'
 			echo ""
