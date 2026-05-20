@@ -200,6 +200,17 @@ aggregate() {
 	!/^#/ && !/^timestamp/ && NF>=32 {
 		key = $3 "|" $4 "|" $5 "|" $6 "|" $7
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
+		# Always increment n_total and the restart-state counters; these
+		# tally every row regardless of whether it survives the filter.
+		if ($31 == "1") restarts[key] += 1
+		else if ($31 == "unknown") unknowns[key] += 1
+		n[key]++
+		# Restart-poison filter (PL15): rows where istiod restarted
+		# mid-window have nonsense delta-derived numeric columns; skip
+		# them from the numeric ingest so the cell averages are not
+		# poisoned. The restarted/unknowns counts above let the report
+		# surface the drop ratio as n_total vs (n_total - restarts).
+		if ($31 != "0") next
 		ingest("mem",       $8,  key)
 		ingest("conv",      $10, key)
 		ingest("queue",     $12, key)
@@ -210,21 +221,28 @@ aggregate() {
 		if ($26 ~ /^[0-9.]+$/) {
 			if (!(key in cfg_max_val) || $26+0 > cfg_max_val[key]+0) cfg_max_val[key] = $26+0
 		}
-		if ($31 == "1") restarts[key] += 1
-		else if ($31 == "unknown") unknowns[key] += 1
-		n[key]++
 	}
 	END {
 		for (i = 1; i <= nkey; i++) order[i] = keys[i]
 		for (i = 1; i < nkey; i++) {
 			for (j = i + 1; j <= nkey; j++) {
 				split(order[i], a, "|"); split(order[j], b, "|")
-				swap = 0
+				# Decide on the four numeric axes (mesh|svc|reps|ns) first.
+				# `decided` flips on the first axis where a[k] != b[k]; the
+				# `swap` flag records the direction. If the numeric loop runs
+				# to completion without deciding, all four axes are equal and
+				# we fall through to the lexicographic scoping tiebreak on
+				# a[5]. Previous code used `!swap` instead of `!decided`, so
+				# correctly-ordered rows whose final numeric axis decided in
+				# their favour (swap stays 0) still hit the scoping tiebreak
+				# and could be re-sorted by scoping — which incorrectly
+				# overrode the numeric decision.
+				swap = 0; decided = 0
 				for (k = 1; k <= 4; k++) {
-					if (a[k]+0 < b[k]+0) { break }
-					if (a[k]+0 > b[k]+0) { swap = 1; break }
+					if (a[k]+0 < b[k]+0) { decided = 1; break }
+					if (a[k]+0 > b[k]+0) { swap = 1; decided = 1; break }
 				}
-				if (!swap && a[5] > b[5]) swap = 1
+				if (!decided && a[5] > b[5]) swap = 1
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
@@ -265,7 +283,13 @@ report_text() {
 		printf "  Convergence p99 (ms): min=%s max=%s avg=%s\n",     $10, $11, $12
 		printf "  Queue p99 (ms):       min=%s max=%s avg=%s\n",     $13, $14, $15
 		printf "  Connected proxies:    min=%s max=%s avg=%s\n",     $16, $17, $18
+		# Always emit the config-dump row when scoping is in play — when all
+		# samples failed (cfg_dump_avg = 0 because no rows ingested), show
+		# N/A so the operator sees that sampling was attempted and failed,
+		# rather than silently dropping the line and giving the impression
+		# scoping was not measured.
 		if ($24+0 > 0) printf "  Config dump avg (B):  %s   max: %s\n", $24, $25
+		else           printf "  Config dump avg (B):  N/A   max: N/A   [no successful samples for this cell]\n"
 		if ($19+0 > 0) printf "  ! istiod restarts:    %s row(s) had restarts during the scrape window\n", $19
 		if ($20+0 > 0) printf "  ? undetectable restart: %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $20
 		printf "\n"

@@ -294,7 +294,23 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		# Emit kube versions in BOTH formats: a flat CSV for human eyeballing,
+		# and one bracket-format line per context for 004's parser. Earlier
+		# revisions only wrote the flat line, which 004's KUBE_VERSION[ctx]
+		# regex never matched — every report showed kube versions as N/A.
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
+		for ctx in "${CONTEXTS[@]}"; do
+			if [[ -s "${KUBE_PROBE_DIR}/${ctx}" ]] 2>/dev/null; then
+				v=$(<"${KUBE_PROBE_DIR}/${ctx}")
+			else
+				# Re-derive from the CSV we already built; falls back to
+				# 'unreachable' if absent. The probe dir is removed by now;
+				# use the CSV as source of truth.
+				v=$(awk -v c="$ctx" 'BEGIN{FS=", *"} { for(i=1;i<=NF;i++){ split($i,kv,"="); if(kv[1]==c){print kv[2]; exit} } }' <<<"$KUBE_VERSIONS_CSV")
+				[[ -z "$v" ]] && v=unreachable
+			fi
+			echo "# KUBE_VERSION[${ctx}]=${v}"
+		done
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
 		echo "# PHASE=${PHASE}"
@@ -477,10 +493,24 @@ delta_histogram() {
 			}
 		}
 		mname = name; sub(/_bucket$/, "", mname)
+		# Detect any negative per-bucket delta (counter rotation, label-set
+		# drift, or a missed restart) and emit a sentinel marker the
+		# quantile extractor will recognize and turn into N/A. Previous code
+		# clamped delta to 0, which silently produced a non-monotone CDF
+		# and a bogus quantile.
+		neg = 0
+		for (i = 1; i <= n; i++) {
+			le = sortable[i]
+			d = final_v[le] - (le in base ? base[le] : 0)
+			if (d < 0) { neg = 1; break }
+		}
+		if (neg) {
+			print "# delta_histogram: negative bucket delta detected — emitting N/A sentinel"
+			exit
+		}
 		for (i = 1; i <= n; i++) {
 			le = sortable[i]
 			delta = final_v[le] - (le in base ? base[le] : 0)
-			if (delta < 0) delta = 0
 			printf "%s_bucket{le=\"%s\"} %d\n", mname, le, delta
 		}
 	}
@@ -519,8 +549,20 @@ collect_config_dump_samples() {
 		echo ""
 		return 0
 	fi
-	local pod_lines
-	pod_lines="$("${KUBECTL[@]}" --context="$ctx" get pods -A \
+	local pod_lines pod_scope_args
+	# When sidecar-scoping is active, Sidecar CRs are only emitted in the
+	# primary namespace (the chart doesn't fan out CRs across namespaceCount).
+	# Sampling pods from -A would mix scoped (primary-ns) and unscoped (other-
+	# ns) pods into one cell's bytes-avg/max — the scoping reduction would
+	# wash out in the report. Restrict sampling to the primary namespace
+	# whenever scoping != none.
+	local primary_ns="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
+	if [[ "$SIDECAR_SCOPING" != "none" ]]; then
+		pod_scope_args=(-n "$primary_ns")
+	else
+		pod_scope_args=(-A)
+	fi
+	pod_lines="$("${KUBECTL[@]}" --context="$ctx" get pods "${pod_scope_args[@]}" \
 		-l app.kubernetes.io/instance=controlplane-test \
 		-o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' \
 		2>/dev/null || true)"
@@ -543,7 +585,9 @@ collect_config_dump_samples() {
 		fi
 	done <<<"$picked"
 	out_csv="${out_csv%,}"
-	echo "${out_csv}|attempted=${attempted}|got=${got}"
+	# Emit got first, then attempted — PL17 canonical order is `got/attempted`
+	# so partial-failure is distinguishable from "configured low".
+	echo "${out_csv}|got=${got}|attempted=${attempted}"
 }
 
 aggregate_sample_bytes() {
@@ -765,6 +809,21 @@ scrape_window() {
 			echo "warning: istiod restart detected during scrape window on ${ctx} (process_start_time_seconds ${b_pst} -> ${f_pst})" >&2
 		fi
 
+		# Restart guard (PL13): when istiod restarted mid-window, every
+		# counter reset to 0 and every histogram bucket count restarted from
+		# 0 — so EVERY delta-derived value is meaningless, not just
+		# cpu_m_delta. Earlier revisions only guarded cpu_m_delta; this
+		# block null-poisons all the others. Gauges (mem_mi, connected_proxies)
+		# stay as-is because they're current readings, not deltas.
+		if [[ "$istiod_restarted" == "1" ]]; then
+			conv_p50="N/A"; conv_p99="N/A"
+			queue_p50="N/A"; queue_p99="N/A"
+			pushes_delta="N/A"; pushes_rate="N/A"
+			evts_delta="N/A"; evts_rate="N/A"
+			push_by_type=("N/A" "N/A" "N/A" "N/A" "N/A")
+			cs_avg="N/A"
+		fi
+
 		# CPU delta (average millicores over window).
 		local b_cpu_s f_cpu_s cpu_m_delta
 		b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
@@ -795,6 +854,10 @@ scrape_window() {
 				if (dc <= 0) { print "N/A"; exit }
 				printf "%.0f", ds/dc
 			}')
+		# Final restart guard: cs_avg is a delta-derived histogram metric;
+		# the earlier guard block can't catch it because cs_avg is computed
+		# after the guard runs. Apply N/A here when istiod restarted.
+		[[ "$istiod_restarted" == "1" ]] && cs_avg="N/A"
 
 		# Per-sidecar /config_dump sampling (only in final/combined phase).
 		local cd_avg="N/A" cd_p50="N/A" cd_max="N/A" cd_samples="0/0"
@@ -811,7 +874,9 @@ scrape_window() {
 			cd_avg="${agg%%|*}"
 			cd_p50="$(echo "$agg" | awk -F'|' '{print $2}')"
 			cd_max="$(echo "$agg" | awk -F'|' '{print $3}')"
-			cd_samples="${attempted}/${got}"
+			# PL17: `got/attempted` so "ran 3 samples, 1 succeeded" reads
+			# `1/3` and is distinguishable from `--config-dump-samples 1`.
+			cd_samples="${got}/${attempted}"
 		fi
 
 		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}" >> "$TSV_FILE"
