@@ -1,13 +1,11 @@
-{{- $count := .Values.namespaceCount | int -}}
-{{- if lt $count 1 -}}
-{{- fail "namespaceCount must be >= 1" -}}
-{{- end -}}
-{{- range $i := until $count }}
+{{- include "controlplane-test.validateSidecarScoping" . -}}
+{{- $nsList := fromYamlArray (include "controlplane-test.namespaces" .) -}}
+{{- range $ns := $nsList }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ include "controlplane-test.namespaceName" (dict "ctx" $ "i" $i) }}
+  name: {{ $ns }}
   labels:
     istio.io/rev: default
     {{- include "controlplane-test.labels" $ | nindent 4 }}

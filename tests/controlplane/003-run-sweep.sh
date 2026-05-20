@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Orchestrate control-plane resource collection across the cross-product of
-# four sweep axes: mesh size × service count × replicas × namespace count.
+# five sweep axes: mesh size × service count × replicas × namespace count
+# × sidecar scoping.
 #
 # For every combination, deploys dummy workloads, settles, scrapes istiod, and
-# cleans up before moving on. Istiod push cost scales with services × sidecars
-# × endpoints — not just cluster count — so exposing these as independent
-# sweep dimensions lets operators locate the knee and separate the effect of
-# "more clusters" from "more config" and namespace-informer overhead.
+# cleans up before moving on. Uses split-phase metrics so the deploy-time
+# istiod push storm lands inside the measurement window.
 #
 # Usage:
 #   ./tests/controlplane/003-run-sweep.sh [options]
@@ -20,12 +19,14 @@
 #     --contexts rosa-001,rosa-002,rosa-003 \
 #     --mesh-sizes 3 --service-counts 10,100,500 --namespace-counts 1,5,25
 #
-#   # Singular-form aliases (compat with older single-value invocations):
-#   ./tests/controlplane/003-run-sweep.sh --contexts a --service-count 50 --replicas 3
+#   # Cross-product mesh size with Sidecar scoping:
+#   ./tests/controlplane/003-run-sweep.sh \
+#     --contexts rosa-001,rosa-002,rosa-003 \
+#     --mesh-sizes 1,2,3 --sidecar-scopings none,namespace,explicit
 #
 #   # Dry-run to see the planned matrix:
 #   ./tests/controlplane/003-run-sweep.sh --dry-run \
-#     --contexts a,b,c --service-counts 10,100 --namespace-counts 1,5
+#     --contexts a,b,c --service-counts 10,100 --sidecar-scopings none,namespace
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -37,14 +38,12 @@ MESH_SIZES_CSV=""
 SERVICE_COUNTS_CSV="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICA_COUNTS_CSV="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNTS_CSV="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
+SIDECAR_SCOPINGS_CSV="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
+CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
 OUTPUT_DIR_BASE="${ROOT}/tests/controlplane/results"
 SETTLE_SEC=60
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
-# Safety cap on cross-product matrix size; opt out with --force-large-matrix.
-# Default lives in config/options.env (CONTROLPLANE_MAX_MATRIX, sourced via
-# versions.env above). The :- fallback here is a belt-and-braces guard in
-# case options.env is ever bypassed; it should never fire in normal use.
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
@@ -53,6 +52,13 @@ die() { echo "error: $*" >&2; exit 1; }
 
 is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
+
+validate_scoping_value() {
+	case "$1" in
+	none | namespace | explicit) return 0 ;;
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	esac
+}
 
 usage() {
 	cat <<EOF
@@ -64,17 +70,21 @@ Sweep dimensions (cross-product):
   --service-counts CSV        Dummy services per cluster (default: $SERVICE_COUNTS_CSV).
   --replica-counts CSV        Replicas per service (default: $REPLICA_COUNTS_CSV).
   --namespace-counts CSV      Namespaces to spread services across (default: $NAMESPACE_COUNTS_CSV).
+  --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,explicit
+                              (default: \$CONTROLPLANE_SIDECAR_SCOPING or "none").
 
-Singular aliases (one CSV value each — handy for copy-paste from older runs):
+Singular aliases (one CSV value each):
   --service-count N           Alias for --service-counts N.
   --replicas N                Alias for --replica-counts N.
-  --replicas-counts CSV       Deprecated alias for --replica-counts (will be removed in a future release).
+  --replicas-counts CSV       Deprecated alias for --replica-counts.
   --namespace-count N         Alias for --namespace-counts N.
+  --sidecar-scoping VALUE     Alias for --sidecar-scopings VALUE.
 
 Other:
+  --config-dump-samples N     Random pods per cluster to exec /config_dump on
+                              (default: $CONFIG_DUMP_SAMPLES; 0 disables).
   --settle SEC                Seconds for the delta-window between baseline
-                              and final scrape (default: $SETTLE_SEC). Threaded
-                              into 002 verbatim — 002 owns the actual sleep.
+                              and final scrape (default: $SETTLE_SEC).
   --output-dir DIR            Results base directory; each sweep gets a
                               sweep-<RUN_ID>/ subdir under it
                               (default: tests/controlplane/results).
@@ -84,16 +94,8 @@ Other:
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
-  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_MAX_MATRIX.
-
-Notes:
-  * The sweep iterates the cross-product
-        mesh-sizes × service-counts × replica-counts × namespace-counts.
-    For 4 mesh sizes × 3 service counts × 2 replica counts × 3 ns counts the
-    sweep runs 72 combinations — refuse-unless-forced threshold is $MAX_MATRIX.
-  * 001/005 are invoked between every combination so istiod starts from a
-    known empty state. Settle time is single-valued; bump --settle when
-    pushing many services so metrics reflect steady state.
+  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
+  CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
 EOF
 }
 
@@ -128,8 +130,8 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--service-count)
-		# Singular alias — one CSV value.
 		[[ -n "${2:-}" ]] || die "--service-count requires a value"
+		echo "warning: --service-count is deprecated; use --service-counts" >&2
 		SERVICE_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -139,15 +141,14 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--replicas-counts)
-		# Deprecated alias for --replica-counts.
 		[[ -n "${2:-}" ]] || die "--replicas-counts requires a value"
 		echo "warning: --replicas-counts is deprecated; use --replica-counts" >&2
 		REPLICA_COUNTS_CSV="$2"
 		shift 2
 		;;
 	--replicas)
-		# Singular alias — one CSV value.
 		[[ -n "${2:-}" ]] || die "--replicas requires a value"
+		echo "warning: --replicas is deprecated; use --replica-counts" >&2
 		REPLICA_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -157,9 +158,26 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--namespace-count)
-		# Singular alias — one CSV value.
 		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
+		echo "warning: --namespace-count is deprecated; use --namespace-counts" >&2
 		NAMESPACE_COUNTS_CSV="$2"
+		shift 2
+		;;
+	--sidecar-scopings)
+		[[ -n "${2:-}" ]] || die "--sidecar-scopings requires a value"
+		SIDECAR_SCOPINGS_CSV="$2"
+		shift 2
+		;;
+	--sidecar-scoping)
+		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
+		echo "warning: --sidecar-scoping is deprecated; use --sidecar-scopings" >&2
+		SIDECAR_SCOPINGS_CSV="$2"
+		shift 2
+		;;
+	--config-dump-samples)
+		[[ -n "${2:-}" ]] || die "--config-dump-samples requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--config-dump-samples must be a non-negative integer; got '$2'"
+		CONFIG_DUMP_SAMPLES="$2"
 		shift 2
 		;;
 	--settle)
@@ -223,6 +241,10 @@ NAMESPACE_COUNTS=()
 split_csv "$NAMESPACE_COUNTS_CSV" NAMESPACE_COUNTS
 ((${#NAMESPACE_COUNTS[@]})) || die "--namespace-counts produced an empty list"
 
+SCOPINGS=()
+split_csv "$SIDECAR_SCOPINGS_CSV" SCOPINGS
+((${#SCOPINGS[@]})) || die "--sidecar-scopings produced an empty list"
+
 for ms in "${MESH_SIZES[@]}"; do
 	is_pos_int "$ms" || die "mesh-size '$ms' is not a positive integer"
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
@@ -236,39 +258,40 @@ done
 for nc in "${NAMESPACE_COUNTS[@]}"; do
 	is_pos_int "$nc" || die "namespace-count '$nc' is not a positive integer"
 done
+for scp in "${SCOPINGS[@]}"; do
+	validate_scoping_value "$scp"
+done
 
-MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} ))
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} * ${#SCOPINGS[@]} ))
 
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
-# Per-sweep output subdirectory so back-to-back sweeps don't conflate.
-# RUN_ID intentionally uses UTC to align with 002's preamble timestamps.
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 
-# Banner goes to stderr so it stays visible even when stdout is piped/captured.
 {
 	echo "=========================================="
 	echo "  Control-Plane Resource Sweep"
 	echo "=========================================="
-	echo "Contexts:         ${CONTEXTS[*]}"
-	echo "Mesh sizes:       ${MESH_SIZES[*]}"
-	echo "Service counts:   ${SERVICE_COUNTS[*]}"
-	echo "Replica counts:   ${REPLICA_COUNTS[*]}"
-	echo "Namespace counts: ${NAMESPACE_COUNTS[*]}"
-	echo "Settle time:      ${SETTLE_SEC}s"
-	echo "Run ID:           ${RUN_ID}"
-	echo "Output:           ${OUTPUT_DIR}"
+	echo "Contexts:          ${CONTEXTS[*]}"
+	echo "Mesh sizes:        ${MESH_SIZES[*]}"
+	echo "Service counts:    ${SERVICE_COUNTS[*]}"
+	echo "Replica counts:    ${REPLICA_COUNTS[*]}"
+	echo "Namespace counts:  ${NAMESPACE_COUNTS[*]}"
+	echo "Sidecar scopings:  ${SCOPINGS[*]}"
+	echo "Config-dump samples: ${CONFIG_DUMP_SAMPLES}"
+	echo "Settle time:       ${SETTLE_SEC}s"
+	echo "Run ID:            ${RUN_ID}"
+	echo "Output:            ${OUTPUT_DIR}"
 	echo ""
-	echo "Planned matrix:   ${MATRIX_SIZE} = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]} (mesh × svc × rep × ns)"
+	echo "Planned matrix:    ${MATRIX_SIZE} = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]} (mesh × svc × rep × ns × scope)"
 	echo ""
 } >&2
 
 if ((MATRIX_SIZE > MAX_MATRIX)) && ! ((FORCE_LARGE_MATRIX)); then
-	die "matrix size $MATRIX_SIZE = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]} exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
+	die "matrix size $MATRIX_SIZE = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]} exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
 fi
 
-# Pick kubectl/oc for defense-in-depth cleanup wait.
 if command -v oc >/dev/null 2>&1; then
 	KUBECTL=(oc)
 elif command -v kubectl >/dev/null 2>&1; then
@@ -281,7 +304,6 @@ if ((DRY_RUN)); then
 	echo "--- Combinations (dry-run) ---" >&2
 fi
 
-# Pretty-print the namespace pattern for the per-combo banner.
 fmt_ns_pattern() {
 	local nc="$1"
 	if (( nc <= 1 )); then
@@ -291,7 +313,6 @@ fmt_ns_pattern() {
 	fi
 }
 
-# Create the per-sweep output dir lazily on first real combo (dry-run skips).
 ensure_output_dir() {
 	[[ -d "$OUTPUT_DIR" ]] && return 0
 	mkdir -p "$OUTPUT_DIR"
@@ -305,98 +326,100 @@ for ms in "${MESH_SIZES[@]}"; do
 	for sc in "${SERVICE_COUNTS[@]}"; do
 		for rc in "${REPLICA_COUNTS[@]}"; do
 			for nc in "${NAMESPACE_COUNTS[@]}"; do
-				combo_idx=$((combo_idx + 1))
-				label="mesh=$ms svcs=$sc reps=$rc ns=$nc"
-				ns_pattern=$(fmt_ns_pattern "$nc")
+				for scp in "${SCOPINGS[@]}"; do
+					combo_idx=$((combo_idx + 1))
+					label="mesh=$ms svcs=$sc reps=$rc ns=$nc scope=$scp"
+					ns_pattern=$(fmt_ns_pattern "$nc")
 
-				if ((DRY_RUN)); then
-					printf "  [%2d/%2d] %s  (clusters: %s)  Namespaces: %s\n" \
-						"$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}" "$ns_pattern" >&2
-					continue
-				fi
+					if ((DRY_RUN)); then
+						printf "  [%2d/%2d] %s  (clusters: %s)  Namespaces: %s\n" \
+							"$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}" "$ns_pattern" >&2
+						continue
+					fi
 
-				ensure_output_dir
+					ensure_output_dir
 
-				echo "=========================================="
-				printf "  Sweep [%d/%d]: %s\n" "$combo_idx" "$MATRIX_SIZE" "$label"
-				echo "  Clusters:   ${active_ctxs[*]}"
-				echo "  Namespaces: ${ns_pattern}"
-				echo "=========================================="
-				echo ""
-
-				# Split-phase metrics collection: scrape baseline BEFORE 001
-				# deploys, so the deploy-time istiod CPU spike and xDS push
-				# storm land inside the measurement window. The previous
-				# arrangement put the entire window AFTER 001 had returned
-				# (workloads already Available, istiod back to idle), which
-				# made `cpu_m_delta` consistently miss the actual work and
-				# read near-zero on quiet clusters.
-				STATE_DIR_COMBO="${OUTPUT_DIR}/state-combo-${combo_idx}"
-				mkdir -p "$STATE_DIR_COMBO"
-
-				echo "--- Baseline metrics scrape (phase 1/3) ---"
-				"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
-					--phase baseline \
-					--state-dir "$STATE_DIR_COMBO" \
-					--contexts "$active_csv" \
-					--mesh-size "$ms" \
-					--service-count "$sc" \
-					--replicas "$rc" \
-					--namespace-count "$nc" \
-					--settle "$SETTLE_SEC"
-				echo ""
-
-				echo "--- Deploying workloads (phase 2/3) ---"
-				"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
-					--contexts "$active_csv" \
-					--service-count "$sc" \
-					--replicas "$rc" \
-					--namespace-count "$nc"
-				echo ""
-
-				if (( SETTLE_SEC > 0 )); then
-					echo "--- Settling ${SETTLE_SEC}s for steady-state before final scrape ---"
-					sleep "$SETTLE_SEC"
+					echo "=========================================="
+					printf "  Sweep [%d/%d]: %s\n" "$combo_idx" "$MATRIX_SIZE" "$label"
+					echo "  Clusters:   ${active_ctxs[*]}"
+					echo "  Namespaces: ${ns_pattern}"
+					echo "=========================================="
 					echo ""
-				fi
 
-				echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
-				"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
-					--phase final \
-					--state-dir "$STATE_DIR_COMBO" \
-					--contexts "$active_csv" \
-					--mesh-size "$ms" \
-					--service-count "$sc" \
-					--replicas "$rc" \
-					--namespace-count "$nc" \
-					--settle "$SETTLE_SEC" \
-					--output-dir "$OUTPUT_DIR"
-				rm -rf "$STATE_DIR_COMBO"
-				echo ""
+					STATE_DIR_COMBO="${OUTPUT_DIR}/state-combo-${combo_idx}"
+					mkdir -p "$STATE_DIR_COMBO"
 
-				echo "--- Cleaning up ---"
-				"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
+					echo "--- Baseline metrics scrape (phase 1/3) ---"
+					"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+						--phase baseline \
+						--state-dir "$STATE_DIR_COMBO" \
+						--contexts "$active_csv" \
+						--mesh-size "$ms" \
+						--service-count "$sc" \
+						--replicas "$rc" \
+						--namespace-count "$nc" \
+						--sidecar-scoping "$scp" \
+						--settle "$SETTLE_SEC"
+					echo ""
 
-				# Defense-in-depth: even after 005 returns, give the API server
-				# a moment to actually finalize ns deletion before the next
-				# 001 starts re-creating. 005 already waits, this is belt+brace
-				# and is a no-op once the namespaces are gone. Run per-context
-				# in parallel — sequential waits compound badly on big meshes —
-				# and match 005's own polling timeout (300s) so we don't trip
-				# before the cleanup script itself would have.
-				if (( ${#KUBECTL[@]} )); then
-					wait_pids=()
-					for ctx in "${active_ctxs[@]}"; do
-						"${KUBECTL[@]}" --context="$ctx" wait --for=delete \
-							namespace -l app.kubernetes.io/instance=controlplane-test \
-							--timeout=300s >/dev/null 2>&1 &
-						wait_pids+=($!)
-					done
-					for pid in "${wait_pids[@]}"; do
-						wait "$pid" 2>/dev/null || true
-					done
-				fi
-				echo ""
+					echo "--- Deploying workloads (phase 2/3, scoping=$scp) ---"
+					"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
+						--contexts "$active_csv" \
+						--service-count "$sc" \
+						--replicas "$rc" \
+						--namespace-count "$nc" \
+						--sidecar-scoping "$scp"
+					echo ""
+
+					if (( SETTLE_SEC > 0 )); then
+						echo "--- Settling ${SETTLE_SEC}s for steady-state before final scrape ---"
+						sleep "$SETTLE_SEC"
+						echo ""
+					fi
+
+					echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
+					"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+						--phase final \
+						--state-dir "$STATE_DIR_COMBO" \
+						--contexts "$active_csv" \
+						--mesh-size "$ms" \
+						--service-count "$sc" \
+						--replicas "$rc" \
+						--namespace-count "$nc" \
+						--sidecar-scoping "$scp" \
+						--config-dump-samples "$CONFIG_DUMP_SAMPLES" \
+						--settle "$SETTLE_SEC" \
+						--output-dir "$OUTPUT_DIR" \
+						--run-id "$RUN_ID"
+					rm -rf "$STATE_DIR_COMBO"
+					echo ""
+
+					echo "--- Cleaning up ---"
+					"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
+
+					if (( ${#KUBECTL[@]} )); then
+						wait_pids=()
+						for ctx in "${active_ctxs[@]}"; do
+							"${KUBECTL[@]}" --context="$ctx" wait --for=delete \
+								namespace -l app.kubernetes.io/instance=controlplane-test \
+								--timeout=300s >/dev/null 2>&1 &
+							wait_pids+=($!)
+						done
+						for pid in "${wait_pids[@]}"; do
+							wait "$pid" 2>/dev/null || true
+						done
+					fi
+
+					# Post-cleanup settle: when 005 deletes the test namespace,
+					# istiod re-pushes a broader (no-Sidecar) config to remaining
+					# proxies. Without this sleep, the next combo's baseline scrape
+					# lands inside that push storm.
+					if (( SETTLE_SEC > 0 )); then
+						echo "--- Post-cleanup settle (${SETTLE_SEC}s) ---" >&2
+						sleep "$SETTLE_SEC"
+					fi
+					echo ""
+				done
 			done
 		done
 	done
