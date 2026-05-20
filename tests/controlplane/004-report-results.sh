@@ -237,7 +237,7 @@ aggregate() {
 			uu = (k in unknowns) ? unknowns[k] : 0
 			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "0"
 			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
-			printf "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
+			printf "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
 				p[1], p[2], p[3], p[4], p[5], nn,
 				emit3("mem",       k),
 				emit3("conv",      k),
