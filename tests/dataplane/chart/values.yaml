@@ -7,7 +7,10 @@ role: server
 
 image:
   repository: fortio/fortio
-  tag: stable
+  # Harness scripts override this via `--set image.tag=$FORTIO_TAG` derived from
+  # FORTIO_VERSION in config/versions.env. Standalone `helm install` users must
+  # bump this value in lockstep with config/versions.env to keep parity.
+  tag: "1.69.5"
 
 service:
   port: 8080
