@@ -7,7 +7,7 @@ role: server
 
 image:
   repository: fortio/fortio
-  tag: latest
+  tag: stable
 
 service:
   port: 8080
