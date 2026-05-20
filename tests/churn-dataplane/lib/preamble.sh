@@ -8,7 +8,7 @@
 #   kube_versions <kubectl_argv...> <ctx>  -> kubectl version --output=json server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
 #                                          -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
-#   istiod_restart_status <port>           -> emit "0" | "1" | "unknown" based on pilot_info uptime (PL9)
+#   istiod_restart_status <port>           -> emit "0" | "1" | "unknown" based on process_start_time_seconds (PL9)
 #   write_preamble <tsv> <kv pairs...>     -> write `# key=value` comment lines + RUN_ID/HARNESS_SHA (PL2, PL19)
 #
 # All callers are expected to have run `set -euo pipefail`.
@@ -93,12 +93,13 @@ probe_kube_versions() {
 	printf '%s\n' "$out"
 }
 
-# Inspect istiod pilot_info gauge to decide whether the control plane restarted
-# during the measurement window. PL9: emit one of "0" / "1" / "unknown".
+# Inspect istiod's process_start_time_seconds gauge (the Go process-level
+# metric exposed by every Prometheus-instrumented Go binary, including istiod)
+# to decide whether the control plane restarted during the measurement window.
+# PL9: emit one of "0" / "1" / "unknown".
 # Inputs:
-#   $1 = istiod /metrics URL (already port-forwarded)
-#   $2 = pre-window pilot_info_start_time_seconds value (epoch float as string)
-#   $3 = post-window pilot_info_start_time_seconds value (epoch float as string)
+#   $1 = pre-window process_start_time_seconds value (epoch float as string)
+#   $2 = post-window process_start_time_seconds value (epoch float as string)
 # Returns "unknown" if either probe sample is missing/non-numeric.
 # shellcheck disable=SC2329
 istiod_restart_status() {
@@ -115,7 +116,7 @@ istiod_restart_status() {
 	}'
 }
 
-# Scrape pilot_info start time once. PL21/PL22: single scrape file, single awk pass.
+# Scrape process_start_time_seconds once. PL21/PL22: single scrape file, single awk pass.
 # Usage: istiod_start_time_seconds <port>
 # shellcheck disable=SC2329
 istiod_start_time_seconds() {
@@ -126,8 +127,9 @@ istiod_start_time_seconds() {
 		printf '%s\n' "unknown"
 		return 0
 	fi
-	# Match either `process_start_time_seconds` or a more istiod-specific gauge;
-	# fall back gracefully if neither exists.
+	# Match `process_start_time_seconds` (Go process-level metric exposed by
+	# every Prometheus-instrumented Go binary, including istiod). Falls back
+	# to "unknown" if the line is absent.
 	awk '
 	/^process_start_time_seconds[ {]/ && !/^#/ { v=$NF; found=1 }
 	END {
