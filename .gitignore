@@ -16,6 +16,7 @@
 /tests/controlplane/results/
 /tests/dataplane/results/
 /tests/churn/results/
+/tests/churn-dataplane/results/
 
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/

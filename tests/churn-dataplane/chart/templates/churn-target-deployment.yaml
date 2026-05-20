@@ -1,0 +1,41 @@
+{{- range $i := until (.Values.churnDeploymentCount | int) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: churn-target-{{ $i }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: churn-target
+    churn-target: "true"
+    churn-index: "{{ $i }}"
+    {{- include "churn-dataplane.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ $.Values.churnBaseReplicas }}
+  selector:
+    matchLabels:
+      app: churn-target
+      churn-index: "{{ $i }}"
+  template:
+    metadata:
+      labels:
+        app: churn-target
+        churn-target: "true"
+        churn-index: "{{ $i }}"
+        {{- include "churn-dataplane.labels" $ | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: {{ $.Values.churnImage.repository }}:{{ $.Values.churnImage.tag }}
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: {{ $.Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}
