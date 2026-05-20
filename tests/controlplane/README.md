@@ -4,10 +4,26 @@ Measure istiod CPU, memory, and xDS metrics as a function of mesh size and workl
 
 ## What Gets Measured
 
-All histogram and counter metrics are computed as **deltas over a settle
-window** (baseline scrape on entry, final scrape `--settle` seconds later),
-not as cumulative-since-istiod-start totals — this is what makes the numbers
-meaningful when 001/005 are re-invoked between sweep points.
+All histogram and counter metrics are computed as **deltas over a wall-clock
+window**. The 003 sweep splits the window into three phases per combo so the
+work itself lands inside the measurement:
+
+1. **Baseline scrape** — `002 --phase baseline` runs *before* 001 deploys.
+2. **Deploy + settle** — 001 creates the workloads; 003 then sleeps `--settle`.
+3. **Final scrape + emit** — `002 --phase final` reads the baseline back from
+   `--state-dir`, scrapes again, and writes one TSV row covering the entire
+   baseline → deploy → settle window.
+
+This is why the rate denominators (`xds_pushes_rate`, `cpu_m_delta`,
+histogram quantile windows, etc.) are meaningful: they cover the period when
+istiod is actually pushing config to sidecars. Earlier versions ran 002 only
+*after* 001 returned, by which point the push storm was already over and the
+delta read ~0 even on a 60-service deploy.
+
+Standalone use of 002 (without 003) still works via the default
+`--phase combined`, which does baseline → sleep → final in one invocation.
+Operators just need to know that combined-mode measures the *settle window
+only*, not the deploy itself.
 
 | Metric | Source | What it shows |
 |--------|--------|---------------|

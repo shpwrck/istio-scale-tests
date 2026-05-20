@@ -324,7 +324,29 @@ for ms in "${MESH_SIZES[@]}"; do
 				echo "=========================================="
 				echo ""
 
-				echo "--- Deploying workloads ---"
+				# Split-phase metrics collection: scrape baseline BEFORE 001
+				# deploys, so the deploy-time istiod CPU spike and xDS push
+				# storm land inside the measurement window. The previous
+				# arrangement put the entire window AFTER 001 had returned
+				# (workloads already Available, istiod back to idle), which
+				# made `cpu_m_delta` consistently miss the actual work and
+				# read near-zero on quiet clusters.
+				STATE_DIR_COMBO="${OUTPUT_DIR}/state-combo-${combo_idx}"
+				mkdir -p "$STATE_DIR_COMBO"
+
+				echo "--- Baseline metrics scrape (phase 1/3) ---"
+				"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+					--phase baseline \
+					--state-dir "$STATE_DIR_COMBO" \
+					--contexts "$active_csv" \
+					--mesh-size "$ms" \
+					--service-count "$sc" \
+					--replicas "$rc" \
+					--namespace-count "$nc" \
+					--settle "$SETTLE_SEC"
+				echo ""
+
+				echo "--- Deploying workloads (phase 2/3) ---"
 				"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
 					--contexts "$active_csv" \
 					--service-count "$sc" \
@@ -332,11 +354,16 @@ for ms in "${MESH_SIZES[@]}"; do
 					--namespace-count "$nc"
 				echo ""
 
-				# 002 owns the settle (so it can take a baseline scrape *before*
-				# the window and a final scrape *after*). We pass --settle so
-				# the window length is single-sourced from this script's flag.
-				echo "--- Collecting metrics ($label) — window ${SETTLE_SEC}s ---"
+				if (( SETTLE_SEC > 0 )); then
+					echo "--- Settling ${SETTLE_SEC}s for steady-state before final scrape ---"
+					sleep "$SETTLE_SEC"
+					echo ""
+				fi
+
+				echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
 				"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+					--phase final \
+					--state-dir "$STATE_DIR_COMBO" \
 					--contexts "$active_csv" \
 					--mesh-size "$ms" \
 					--service-count "$sc" \
@@ -344,6 +371,7 @@ for ms in "${MESH_SIZES[@]}"; do
 					--namespace-count "$nc" \
 					--settle "$SETTLE_SEC" \
 					--output-dir "$OUTPUT_DIR"
+				rm -rf "$STATE_DIR_COMBO"
 				echo ""
 
 				echo "--- Cleaning up ---"

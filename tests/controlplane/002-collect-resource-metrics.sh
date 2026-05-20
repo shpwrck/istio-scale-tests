@@ -37,6 +37,8 @@ WATCH=0
 INTERVAL=15
 DRY_RUN=0
 BASE_PF_PORT=15014
+PHASE=combined
+STATE_DIR=""
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -58,6 +60,20 @@ Usage: $(basename "$0") [options]
   --output-dir DIR     Results directory (default: tests/controlplane/results).
   --watch              Loop continuously (delta window = --interval).
   --interval SEC       Seconds between scrapes in watch mode (default: 15).
+  --phase PHASE        Orchestration phase, one of:
+                         combined  baseline + settle + final + emit (default,
+                                   for standalone use)
+                         baseline  scrape baseline metrics only, write to
+                                   --state-dir, exit without emitting a row.
+                                   No settle; caller (003) should invoke 001
+                                   AFTER this so the deploy storm lands inside
+                                   the scrape window.
+                         final     scrape final metrics, read baseline from
+                                   --state-dir, compute deltas, emit one row.
+  --state-dir DIR      Required for --phase baseline (must be empty/writable)
+                       and --phase final (must contain a prior baseline's
+                       output). Used to ferry baseline metrics across the
+                       deploy step in split-phase mode. Ignored for combined.
   --dry-run            Show what would be scraped without connecting.
   -h, --help           Show this help.
 
@@ -126,6 +142,16 @@ while [[ $# -gt 0 ]]; do
 		INTERVAL="$2"
 		shift 2
 		;;
+	--phase)
+		[[ -n "${2:-}" ]] || die "--phase requires a value"
+		PHASE="$2"
+		shift 2
+		;;
+	--state-dir)
+		[[ -n "${2:-}" ]] || die "--state-dir requires a value"
+		STATE_DIR="$2"
+		shift 2
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -144,6 +170,16 @@ is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (
 is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
 is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
+case "$PHASE" in
+combined|baseline|final) ;;
+*) die "--phase must be one of: combined, baseline, final (got: $PHASE)";;
+esac
+if [[ "$PHASE" != combined ]]; then
+	[[ -n "$STATE_DIR" ]] || die "--phase $PHASE requires --state-dir"
+fi
+if ((WATCH)) && [[ "$PHASE" != combined ]]; then
+	die "--watch is only valid with --phase combined"
+fi
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
 if command -v oc >/dev/null 2>&1; then
@@ -190,7 +226,12 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-mkdir -p "$OUTPUT_DIR"
+if [[ "$PHASE" != baseline ]]; then
+	mkdir -p "$OUTPUT_DIR"
+fi
+if [[ "$PHASE" != combined ]]; then
+	mkdir -p "$STATE_DIR"
+fi
 
 ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
 
@@ -225,15 +266,21 @@ done
 rm -rf "$KUBE_PROBE_DIR"
 
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
-{
-	echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-	echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
-	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
-	echo "# SETTLE_SEC=${SETTLE_SEC}"
-	echo "# RUN_ID=${RUN_ID}"
-	echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT"
-} > "$TSV_FILE"
+# In split-phase orchestration the TSV is written by the `final` phase only —
+# `baseline` doesn't emit a row, so it shouldn't create the file at all.
+# `combined` writes both header and row in one invocation.
+if [[ "$PHASE" != baseline ]]; then
+	{
+		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
+		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
+		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		echo "# RUN_ID=${RUN_ID}"
+		echo "# PHASE=${PHASE}"
+		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT"
+	} > "$TSV_FILE"
+fi
 
 # Schema (TSV header):
 #   timestamp context mesh_size service_count replicas namespace_count
@@ -265,7 +312,9 @@ TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 # `process_cpu_seconds_total` counter; treat it as the primary CPU metric
 # for sweep analysis. `N/A` when istiod restarted (counter reset), the
 # baseline scrape was missing, or the window was non-positive.
-echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
+if [[ "$PHASE" != baseline ]]; then
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
+fi
 
 PF_PIDS=()
 TMP_DIR="$(mktemp -d -t controlplane-002.XXXXXX)"
@@ -525,6 +574,26 @@ scrape_all_parallel() {
 	fi
 }
 
+# Recompute max-min scrape skew from a set of existing `.ts` files written by
+# a prior `scrape_all_parallel` invocation (used by `--phase final` after it
+# copies baseline files in from --state-dir).
+compute_skew_ms() {
+	local prefix="$1"  # e.g. ${TMP_DIR}/baseline
+	local min="" max="" t i
+	for i in "${!CONTEXTS[@]}"; do
+		local t_file="${prefix}-${i}.ts"
+		[[ -s "$t_file" ]] || continue
+		t=$(<"$t_file")
+		[[ -z "$min" || "$t" -lt "$min" ]] && min="$t"
+		[[ -z "$max" || "$t" -gt "$max" ]] && max="$t"
+	done
+	if [[ -n "$min" && -n "$max" ]]; then
+		echo $(( max - min ))
+	else
+		echo 0
+	fi
+}
+
 # Take baseline + final scrape, compute deltas, emit one TSV row per context.
 # `settle_input_sec` is the operator-supplied --settle value; the actual rate
 # denominator (`scrape_window_sec`) is computed from wall-clock as
@@ -536,13 +605,33 @@ scrape_all_parallel() {
 # could have been read) — so every counter saw at least this much elapsed
 # time, and per-context rates never overstate.
 scrape_window() {
-	local settle_input_sec="$1"
+	# Args:
+	#   1. sleep_sec   — how long to actually sleep between baseline and final
+	#                    scrapes (in --phase final this is 0 because the
+	#                    caller already settled externally between phases).
+	#   2. skip_baseline — "1" to skip the baseline scrape because the caller
+	#                    has already pre-populated ${TMP_DIR}/baseline-*. The
+	#                    baseline skew is recomputed from the existing .ts
+	#                    files in that case. Default "0".
+	#   3. record_sec  — value to record in the TSV `settle_sec` column
+	#                    (operator intent). Defaults to sleep_sec when omitted,
+	#                    which matches combined-mode behaviour. In --phase
+	#                    final the caller passes the original --settle value
+	#                    here so the operator's intent is preserved on the row.
+	local sleep_sec="$1"
+	local skip_baseline="${2:-0}"
+	local settle_input_sec="${3:-$sleep_sec}"
 	local baseline_skew_ms final_skew_ms
-	echo "  Baseline scrape..."
-	baseline_skew_ms=$(scrape_all_parallel "${TMP_DIR}/baseline")
-	if (( settle_input_sec > 0 )); then
-		echo "  Settling for ${settle_input_sec}s..."
-		sleep "$settle_input_sec"
+	if (( skip_baseline )); then
+		echo "  Baseline scrape: skipped (using pre-populated baseline from state-dir)."
+		baseline_skew_ms=$(compute_skew_ms "${TMP_DIR}/baseline")
+	else
+		echo "  Baseline scrape..."
+		baseline_skew_ms=$(scrape_all_parallel "${TMP_DIR}/baseline")
+	fi
+	if (( sleep_sec > 0 )); then
+		echo "  Settling for ${sleep_sec}s..."
+		sleep "$sleep_sec"
 	fi
 	echo "  Final scrape..."
 	final_skew_ms=$(scrape_all_parallel "${TMP_DIR}/final")
@@ -723,13 +812,48 @@ if ((WATCH)); then
 		echo "=== Window at $(date -u -Iseconds) ==="
 		scrape_window "$INTERVAL"
 	done
+elif [[ "$PHASE" == baseline ]]; then
+	# Split-phase mode: scrape baseline into --state-dir and exit.
+	# The caller (003) will then invoke 001 to deploy workloads, sleep settle,
+	# and invoke 002 again with --phase final --state-dir <same-dir>. This is
+	# how we capture the deploy-time istiod CPU/push spike inside the window,
+	# instead of starting the window after 001 has already returned.
+	echo ""
+	echo "=== Baseline scrape only (phase=baseline) ==="
+	echo "  Writing baseline metrics to $STATE_DIR"
+	scrape_all_parallel "${STATE_DIR}/baseline" >/dev/null
+	echo "  Baseline complete. Caller should now deploy workloads, settle, and"
+	echo "  invoke this script again with --phase final --state-dir $STATE_DIR"
+elif [[ "$PHASE" == final ]]; then
+	# Pre-populate TMP_DIR with baseline files from --state-dir so the
+	# existing scrape_window machinery can use them.
+	echo ""
+	echo "=== Final scrape + emit (phase=final) ==="
+	echo "  Reading baseline from $STATE_DIR"
+	for f in "${STATE_DIR}/baseline-"*; do
+		[[ -e "$f" ]] || die "no baseline files in $STATE_DIR — run --phase baseline first"
+		cp "$f" "${TMP_DIR}/$(basename "$f")"
+	done
+	# sleep=0 because the caller already settled between the baseline scrape
+	# and this invocation. skip_baseline=1 so scrape_window uses the files we
+	# just copied in instead of re-scraping (which would lose the wall-clock
+	# elapsed time we care about). Pass SETTLE_SEC as the value to record in
+	# the TSV `settle_sec` column so the operator's intent is preserved.
+	scrape_window 0 1 "$SETTLE_SEC"
+	echo ""
+	echo "Results appended to $TSV_FILE"
 else
 	echo ""
-	echo "=== Scraping control-plane metrics (window=${SETTLE_SEC}s) ==="
+	echo "=== Scraping control-plane metrics (phase=combined, window=${SETTLE_SEC}s) ==="
 	scrape_window "$SETTLE_SEC"
 	echo ""
 	echo "Results appended to $TSV_FILE"
+fi
 
+# Generate per-run MD summary for any phase that emitted a TSV row (combined
+# or final). baseline writes no row, so no MD; watch mode loops forever and
+# never reaches here.
+if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 	MD_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.md"
 	{
 		echo "# Control-Plane Resource Metrics"
@@ -738,6 +862,7 @@ else
 		echo "|-------|-------|"
 		echo "| Run ID | \`${RUN_ID}\` |"
 		echo "| Date | $(date -u -Iseconds) |"
+		echo "| Phase | ${PHASE} |"
 		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
@@ -750,10 +875,10 @@ else
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | CPU (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ |"
-		echo "|---------|---------|----------|---------------|----------------|---------|----------|-------|-------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=25 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $8, $10, $12, $22, $13, $16, $15
+		echo "| Context | CPU top (m) | CPU window avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ |"
+		echo "|---------|-------------|--------------------|----------|---------------|----------------|---------|----------|-------|-------|"
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=28 {
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $28, $8, $10, $12, $22, $13, $16, $15
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
