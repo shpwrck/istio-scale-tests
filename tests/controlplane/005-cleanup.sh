@@ -118,8 +118,9 @@ for ctx in "${CONTEXTS[@]}"; do
 			-o name 2>/dev/null || true)
 		if [[ -n "$matches" ]]; then
 			echo "  [$ctx] Labelled namespaces:"
-			echo "$matches" | sed "s/^/    /"
-			# shellcheck disable=SC2086
+			# shellcheck disable=SC2086 # word-split intentional: one ns/name per shell word
+			printf '    %s\n' $matches
+			# shellcheck disable=SC2086 # word-split intentional: feed each name to kubectl delete
 			run_delete "${KUBECTL[@]}" --context="$ctx" delete $matches --ignore-not-found=true
 		else
 			echo "  [$ctx] No labelled namespaces found."
