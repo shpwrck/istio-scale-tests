@@ -145,7 +145,17 @@ No CI/test framework configured. Manual verification via:
 - `bash` 4+, `oc` or `kubectl`, `istioctl` (version aligned with `ISTIO_VERSION` — see `config/versions.env`)
 - `terraform` (for `terraform/rosa-hcp/` and `terraform/platform/`)
 - `helm` 3 (for charts under `charts/` and Terraform `helm_release` resources)
-- `jq`, `curl`
+- `jq`, `curl`, `awk`
+
+## Scale-test improvement cycle
+
+For non-trivial changes to anything under `tests/` (a new sweep axis, a probe correctness fix, a new suite), invoke the 7-agent improvement cycle:
+
+```
+/scale-test-review <proposal description or existing branch name>
+```
+
+The cycle is one Implementer + six lens-specialized reviewers (Istio domain, measurement validity, repo conventions, usability, scale pragmatist, reproducibility). It iterates to consensus, then opens or updates a PR. See [`docs/scale-test-team/`](docs/scale-test-team/) for the full procedure and the carry-forward [process-learnings catalog](docs/scale-test-team/process-learnings.md) every implementer brief should preempt. The agents are defined under [`.claude/agents/`](.claude/agents/); the slash command is at [`.claude/commands/scale-test-review.md`](.claude/commands/scale-test-review.md).
 
 ## References
 
