@@ -13,8 +13,7 @@ density, and `Sidecar` CR scoping.
 | `pilot_proxy_queue_time` p50/p99 (delta) | istiod Prometheus | How long pushes wait in istiod's queue |
 | `pilot_xds_pushes` (delta) | istiod Prometheus | Total xDS push count over the window |
 | `pilot_k8s_cfg_events` (delta) | istiod Prometheus | Kubernetes watch event rate |
-| `pilot_xds` | istiod Prometheus | Connected proxy count (gauge) |
-| `pilot_xds_config_size_bytes` (delta) | istiod Prometheus | xDS push payload size accumulator |
+| `pilot_xds` | istiod Prometheus | Connected proxy count (gauge; summed across label permutations) |
 | `process_start_time_seconds` | istiod Prometheus | Restart detection across the window |
 | Per-sidecar `/config_dump` byte size | `kubectl exec` into istio-proxy | **Real** per-proxy config cost per scoping mode |
 
@@ -81,6 +80,12 @@ cluster counts and scoping modes:
 Singular `--sidecar-scoping VALUE` and `--mesh-size N` aliases are accepted for
 muscle-memory parity with 001/002 but print a deprecation warning to stderr.
 
+`SETTLE_SEC` is applied at THREE points inside each combo: (1) before the
+baseline scrape, (2) between baseline and final snapshots, (3) **after** the
+combo's namespace deletion in 005, before the next combo's 001. The
+post-cleanup settle lets istiod finish re-pushing the broader (no-Sidecar)
+config to remaining proxies so the next combo's baseline lands at rest.
+
 ## Watch Mode
 
 Monitor istiod metrics continuously during a load test (raw cumulative values,
@@ -96,7 +101,7 @@ TSV files in `tests/controlplane/results/sweep-<RUN_ID>/` (gitignored). Each
 TSV starts with a `#`-prefixed preamble that records `RUN_ID`, `HARNESS_SHA`,
 `ISTIO_VERSION`, kube versions per context, settle/scoping/sample counts.
 
-The data schema (tab-separated columns) is:
+The data schema (tab-separated, 23 columns) is:
 
 ```
 timestamp
@@ -107,23 +112,36 @@ replicas
 sidecar_scoping             # none | namespace | explicit
 istiod_cpu_m
 istiod_mem_mi
-convergence_p50_ms          # delta-window p50; "overflow" when target falls in +Inf bucket
-convergence_p99_ms          # delta-window p99; "overflow" possible
-queue_p50_ms                # delta-window p50
-queue_p99_ms                # delta-window p99
-xds_pushes                  # delta over window
-k8s_events                  # delta over window
-connected_proxies           # instantaneous gauge from final snapshot
-config_size_bytes           # pilot_xds_config_size_bytes delta
-sidecar_config_bytes_avg    # mean of per-pod /config_dump bytes
-sidecar_config_bytes_p50    # median of per-pod /config_dump bytes
-sidecar_config_bytes_max    # max of per-pod /config_dump bytes
-sidecar_config_bytes_samples  # actual samples retrieved (decremented on exec failure)
+convergence_p50_ms          # delta-window p50; "overflow" if target falls in +Inf bucket;
+                            # "N/A" if any delta bucket < 0 or istiod restarted in the window
+convergence_p99_ms          # delta-window p99; "overflow" / "N/A" possible (same conditions)
+queue_p50_ms                # delta-window p50; "N/A" possible
+queue_p99_ms                # delta-window p99; "N/A" possible
+xds_pushes                  # delta over window; "N/A" when istiod_restarted=1
+k8s_events                  # delta over window; "N/A" when istiod_restarted=1
+connected_proxies           # instantaneous gauge from final snapshot, summed across pilot_xds
+                            # label permutations (e.g. ads / sds / cds-only proxies)
+sidecar_config_bytes_avg    # mean of per-pod /config_dump?include_eds bytes
+sidecar_config_bytes_p50    # median of per-pod /config_dump?include_eds bytes
+sidecar_config_bytes_max    # max of per-pod /config_dump?include_eds bytes
+sidecar_config_bytes_samples  # attempted/got (e.g. "3/2" = 3 attempted, 2 successful)
 scrape_window_sec           # wall-clock window: min(final.start) - max(baseline.end)
 scrape_skew_ms              # max(ts) - min(ts) across contexts in either snapshot
 istiod_restarted            # 0 | 1 | unknown (when either process_start_time was missing)
 settle_sec                  # operator's --settle input (intent)
 ```
+
+**EDS is included by design.** Envoy's default `/config_dump` omits the
+`EndpointsConfigDump`, but EDS is the dominant per-proxy size driver — exactly
+the cost that `Sidecar` scoping is designed to reduce. We curl
+`http://localhost:15000/config_dump?include_eds` so the headline reduction
+(none → namespace / explicit) is visible.
+
+**`pilot_xds_config_size_bytes` is intentionally not collected.** It is a
+*histogram* (buckets + `_sum` + `_count`), not a counter. Treating it as a
+counter (summing every `_bucket` / `_sum` / `_count` line) yields a
+meaningless number; the per-proxy `/config_dump` byte sample above is the
+correct per-proxy signal.
 
 ## Cleanup
 
@@ -153,7 +171,10 @@ since `Sidecar` is namespace-scoped, removing the namespace removes them.
   timeouts. Set `--config-dump-samples 0` to disable sampling entirely.
 - **Watch mode reports raw cumulative metrics**, not deltas. Use one-shot mode
   for percentile / counter measurements over a defined window.
-- **`namespaceCount > 1` is honoured by the Sidecar template** but the runtime
-  sweep across namespace counts is owned by a sibling branch. Until that lands,
-  only the single-namespace deployment is created at apply time even when
-  multiple Sidecar CRs are rendered.
+- **`namespaceCount > 1` is accepted but only the primary namespace receives
+  Deployments AND Sidecar CRs in this branch.** Emitting Sidecar CRs into
+  namespaces with zero workloads would contaminate `pilot_xds_pushes` /
+  `pilot_k8s_cfg_events` with "extra empty CRs" rather than "more scoped
+  namespaces." 001 prints a stderr warning when `--namespace-count > 1`.
+  The runtime sweep across namespace counts is owned by a sibling branch;
+  revisit this when it lands.

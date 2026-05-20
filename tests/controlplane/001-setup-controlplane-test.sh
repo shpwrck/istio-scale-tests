@@ -26,6 +26,10 @@ NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
+# B2: namespaceCount > 1 is allowed but only the primary namespace gets
+# Deployments + Sidecar CRs in this branch. The runtime sweep across
+# namespace counts is owned by a sibling branch.
+NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -38,15 +42,21 @@ Usage: $(basename "$0") [options]
   --replicas N               Replicas per service (default: $REPLICAS).
   --sidecar-scoping MODE     Sidecar CR scoping: none|namespace|explicit (default: $SIDECAR_SCOPING).
                              none      - no Sidecar CRs (baseline; worst-case config size).
-                             namespace - one namespace-scoped Sidecar per workload namespace.
+                             namespace - one namespace-scoped Sidecar in the primary namespace.
                              explicit  - one Sidecar per Deployment with workloadSelector.
+  --namespace-count N        Number of workload namespaces to create (default: $NAMESPACE_COUNT).
+                             Only the primary namespace receives Deployments + Sidecar CRs;
+                             values > 1 are accepted for forward-compat but a warning is
+                             printed because the runtime sweep across namespace counts is
+                             owned by a sibling branch.
   --dry-run                  Pass --dry-run=client to oc apply.
   --wait-timeout N           Seconds to wait for pods (default: 300).
   -h, --help                 Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
-  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_SIDECAR_SCOPING.
+  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_SIDECAR_SCOPING,
+  CONTROLPLANE_NAMESPACE_COUNT.
 EOF
 }
 
@@ -92,6 +102,12 @@ while [[ $# -gt 0 ]]; do
 		SIDECAR_SCOPING="$2"
 		shift 2
 		;;
+	--namespace-count)
+		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--namespace-count must be a non-negative integer; got '$2'"
+		NAMESPACE_COUNT="$2"
+		shift 2
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -112,6 +128,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_scoping "$SIDECAR_SCOPING"
+
+# B2 / F3: warn (do not fail) when namespaceCount > 1; only the primary
+# namespace receives Deployments + Sidecar CRs in this chart.
+if (( NAMESPACE_COUNT > 1 )); then
+	printf 'warning: --namespace-count=%d > 1: fan-out across namespaces requires the runtime sweep on a sibling branch; only the primary namespace (%s) receives Deployments and Sidecar CRs in this chart.\n' \
+		"$NAMESPACE_COUNT" "$NS" >&2
+fi
 
 if command -v oc >/dev/null 2>&1; then
 	KUBECTL=(oc)
@@ -138,13 +161,14 @@ apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
-	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas, sidecar-scoping=${SIDECAR_SCOPING})"
+	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas, sidecar-scoping=${SIDECAR_SCOPING}, namespace-count=${NAMESPACE_COUNT})"
 	helm template controlplane-test "$CHART_DIR" \
 		--set clusterName="$ctx" \
 		--set namespace="$NS" \
 		--set serviceCount="$SERVICE_COUNT" \
 		--set replicasPerService="$REPLICAS" \
 		--set sidecarScoping="$SIDECAR_SCOPING" \
+		--set namespaceCount="$NAMESPACE_COUNT" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 

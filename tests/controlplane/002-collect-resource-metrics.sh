@@ -253,7 +253,12 @@ TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
 } >"$TSV_FILE"
 
-echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tsidecar_scoping\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes\tk8s_events\tconnected_proxies\tconfig_size_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tistiod_restarted\tsettle_sec" >>"$TSV_FILE"
+# A1: dropped `config_size_bytes` (pilot_xds_config_size_bytes is a histogram,
+# not a counter — the per-proxy /config_dump byte sample is the correct
+# per-proxy signal).
+# C2: `sidecar_config_bytes_samples` is now `attempted/got` (e.g. "3/1") to
+# distinguish "ran 3, 2 failed" from "ran 1, succeeded".
+echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tsidecar_scoping\tistiod_cpu_m\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes\tk8s_events\tconnected_proxies\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tistiod_restarted\tsettle_sec" >>"$TSV_FILE"
 
 PF_PIDS=()
 
@@ -310,16 +315,22 @@ extract_histogram_buckets() {
 }
 
 # Extract histogram quantile from a buckets blob ("le<TAB>count" lines).
+# A4: when any bucket delta is negative (rotation/skew between scrapes), emit
+# "N/A" rather than walking a non-monotone CDF. Quantile walks delta values
+# directly (no extra cumulative rebuild — Prometheus buckets are already
+# cumulative-by-le).
 histogram_quantile_from_buckets() {
 	local buckets="$1" quantile="$2"
 	echo "$buckets" | awk -v q="$quantile" '
 	{
 		le=$1; count=$2+0
+		if (count < 0) { negative=1 }
 		# +Inf last.
 		if(le=="+Inf") { has_inf=1; inf_count=count; next }
 		les[++n]=le; counts[le]=count
 	}
 	END {
+		if (negative) { print "N/A"; exit }
 		# Sort le numerically.
 		for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(les[i]+0>les[j]+0){t=les[i];les[i]=les[j];les[j]=t}
 		total = has_inf ? inf_count : (n>0 ? counts[les[n]] : 0)
@@ -345,15 +356,20 @@ diff_histogram_buckets() {
 	}'
 }
 
+# A2: sum the gauge across every label permutation. pilot_xds, for example,
+# is labelled and emitting only the first match under-reports connected
+# proxies. Drop the early-exit and accumulate.
 extract_gauge() {
 	local metrics="$1" name="$2"
 	echo "$metrics" | awk -v name="$name" '
 	$0 !~ /^#/ {
 		# Match "name " or "name{...} ".
 		if (index($0, name "{") == 1 || index($0, name " ") == 1) {
-			print $NF+0; exit
+			sum += $NF
+			seen = 1
 		}
-	}'
+	}
+	END { if (seen) printf "%.0f\n", sum+0 }'
 }
 
 # Sum all label combinations of a counter into a single scalar.
@@ -382,7 +398,41 @@ scrape_metrics() {
 	curl -s --max-time 10 "http://localhost:${port}/metrics" 2>/dev/null || true
 }
 
-# PL10: sample N random pods across the test namespaces and get config_dump byte size.
+# C1: deterministic, awk-only shuffle. Removes the `shuf` dependency (not on
+# AGENTS.md tools list) and makes pod selection reproducible across reruns.
+# We do NOT use awk's srand()/rand() — mawk reseeds rand() across processes
+# in a non-deterministic way, so two runs with the same srand seed return
+# different sequences. Instead, hash each line with the seed appended and
+# sort by hash. Same seed → same ordering on any awk implementation.
+deterministic_pick() {
+	local n="$1" seed="$2"
+	awk -v n="$n" -v seed="$seed" '
+	function ord(c) { return index("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&\x27()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", c) }
+	function hash(s,   i, h) {
+		h=5381
+		# Two passes (forward + reverse) so adjacent inputs do not produce
+		# adjacent hashes — small mod-prime arithmetic only, portable across
+		# mawk/gawk.
+		for(i=1; i<=length(s); i++) h = (h*131 + ord(substr(s,i,1))) % 2147483647
+		for(i=length(s); i>=1; i--) h = (h*131 + ord(substr(s,i,1))) % 2147483647
+		return h
+	}
+	NF { lines[++idx]=$0; keys[idx]=hash($0 "|" seed) }
+	END {
+		# Bubble sort by hash key (stable for our small N).
+		for(i=1;i<=idx;i++) for(j=i+1;j<=idx;j++) if (keys[i] > keys[j]) {
+			t=keys[i]; keys[i]=keys[j]; keys[j]=t
+			t=lines[i]; lines[i]=lines[j]; lines[j]=t
+		}
+		k = (n < idx ? n : idx)
+		for(i=1;i<=k;i++) print lines[i]
+	}'
+}
+
+# PL10: sample N random pods across the test namespaces and get config_dump
+# byte size. B1: ?include_eds is critical — Envoy's default /config_dump
+# omits EndpointsConfigDump, but EDS is the dominant per-proxy size driver
+# and the metric scoping is designed to reduce.
 collect_config_dump_samples() {
 	local ctx="$1" samples="$2"
 	local out_csv="" got=0 attempted=0
@@ -395,16 +445,17 @@ collect_config_dump_samples() {
 		-l app.kubernetes.io/instance=controlplane-test \
 		-o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' \
 		2>/dev/null || true)"
-	# Shuffle.
+	# C1: deterministic shuffle seeded by RUN_ID + ctx so reruns are reproducible.
+	local seed="${RUN_ID}-${ctx}"
 	local picked
-	picked="$(echo "$pod_lines" | grep -v '^$' | shuf -n "$samples" 2>/dev/null || true)"
+	picked="$(echo "$pod_lines" | grep -v '^$' | deterministic_pick "$samples" "$seed" 2>/dev/null || true)"
 	[[ -z "$picked" ]] && { echo ""; return 0; }
 	while IFS='|' read -r ns pod; do
 		[[ -z "$pod" ]] && continue
 		attempted=$((attempted + 1))
 		local bytes
 		bytes="$("${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
-			sh -c 'curl -s --max-time 10 http://localhost:15000/config_dump | wc -c' 2>/dev/null || true)"
+			sh -c 'curl -s --max-time 10 "http://localhost:15000/config_dump?include_eds" | wc -c' 2>/dev/null || true)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
 		if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
 			got=$((got + 1))
@@ -539,7 +590,9 @@ scrape_baseline_then_final() {
 			mem_mi=$(echo "$top_output" | awk '{gsub(/Mi/,"",$3); sum+=$3} END{printf "%.0f", sum}')
 		fi
 
-		# PL1: histogram quantiles computed over the delta window.
+		# PL1 / A3: histogram quantiles computed over the delta window.
+		# When istiod restarted across the window, cumulative counts reset so
+		# the delta is meaningless — emit N/A.
 		local conv_base conv_final conv_delta queue_base queue_final queue_delta
 		conv_base=$(extract_histogram_buckets "$base_m"  "pilot_proxy_convergence_time")
 		conv_final=$(extract_histogram_buckets "$final_m" "pilot_proxy_convergence_time")
@@ -549,42 +602,53 @@ scrape_baseline_then_final() {
 		queue_delta=$(diff_histogram_buckets "$queue_base" "$queue_final")
 
 		local conv_p50 conv_p99 queue_p50 queue_p99
-		conv_p50=$(histogram_quantile_from_buckets "$conv_delta" "0.5")
-		conv_p99=$(histogram_quantile_from_buckets "$conv_delta" "0.99")
-		queue_p50=$(histogram_quantile_from_buckets "$queue_delta" "0.5")
-		queue_p99=$(histogram_quantile_from_buckets "$queue_delta" "0.99")
+		if [[ "$restarted" != "0" ]]; then
+			# A3: restarted=1 OR unknown invalidates the delta window.
+			conv_p50="N/A"; conv_p99="N/A"; queue_p50="N/A"; queue_p99="N/A"
+		else
+			conv_p50=$(histogram_quantile_from_buckets "$conv_delta" "0.5")
+			conv_p99=$(histogram_quantile_from_buckets "$conv_delta" "0.99")
+			queue_p50=$(histogram_quantile_from_buckets "$queue_delta" "0.5")
+			queue_p99=$(histogram_quantile_from_buckets "$queue_delta" "0.99")
+		fi
 
-		# PL1: counters as deltas.
-		local xds_b xds_f kev_b kev_f cfg_b cfg_f
-		xds_b=$(extract_counter_sum "$base_m"  "pilot_xds_pushes")
-		xds_f=$(extract_counter_sum "$final_m" "pilot_xds_pushes")
-		kev_b=$(extract_counter_sum "$base_m"  "pilot_k8s_cfg_events")
-		kev_f=$(extract_counter_sum "$final_m" "pilot_k8s_cfg_events")
-		cfg_b=$(extract_counter_sum "$base_m"  "pilot_xds_config_size_bytes")
-		cfg_f=$(extract_counter_sum "$final_m" "pilot_xds_config_size_bytes")
-		local xds_delta=$((xds_f - xds_b))
-		local kev_delta=$((kev_f - kev_b))
-		local cfg_delta=$((cfg_f - cfg_b))
+		# PL1 / A1 / A3: counters as deltas. pilot_xds_config_size_bytes
+		# dropped (it is a histogram). When restarted (or unknown), the delta
+		# is invalid.
+		local xds_delta kev_delta
+		if [[ "$restarted" != "0" ]]; then
+			xds_delta="N/A"
+			kev_delta="N/A"
+		else
+			local xds_b xds_f kev_b kev_f
+			xds_b=$(extract_counter_sum "$base_m"  "pilot_xds_pushes")
+			xds_f=$(extract_counter_sum "$final_m" "pilot_xds_pushes")
+			kev_b=$(extract_counter_sum "$base_m"  "pilot_k8s_cfg_events")
+			kev_f=$(extract_counter_sum "$final_m" "pilot_k8s_cfg_events")
+			xds_delta=$((xds_f - xds_b))
+			kev_delta=$((kev_f - kev_b))
+		fi
 
-		# Gauge taken from final (instantaneous).
+		# Gauge taken from final (instantaneous). A2: now summed across labels.
 		local connected
 		connected=$(extract_gauge "$final_m" "pilot_xds")
 		[[ -z "$connected" ]] && connected="N/A"
 
-		# PL10: per-sidecar config dump samples.
+		# PL10 / C2: per-sidecar config dump samples. Emit attempted/got.
 		local cd_out cd_csv cd_meta agg avg p50 max
 		cd_out="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
 		cd_csv="${cd_out%%|*}"
 		cd_meta="${cd_out#*|}"
-		local got=0
+		local attempted=0 got=0
+		[[ "$cd_meta" =~ attempted=([0-9]+) ]] && attempted="${BASH_REMATCH[1]}"
 		[[ "$cd_meta" =~ got=([0-9]+) ]] && got="${BASH_REMATCH[1]}"
 		agg="$(aggregate_sample_bytes "$cd_csv")"
 		avg="${agg%%|*}"
 		p50="$(echo "$agg" | awk -F'|' '{print $2}')"
 		max="$(echo "$agg" | awk -F'|' '{print $3}')"
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${SIDECAR_SCOPING}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${xds_delta}\t${kev_delta}\t${connected}\t${cfg_delta}\t${avg}\t${p50}\t${max}\t${got}\t${window_sec}\t${skew_ms}\t${restarted}\t${SETTLE_SEC}" >>"$TSV_FILE"
-		echo "  Scraped $ctx: cpu=${cpu_m}m mem=${mem_mi}Mi proxies=${connected} pushes_delta=${xds_delta} cfg_bytes_avg=${avg} restarted=${restarted}"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${SIDECAR_SCOPING}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${xds_delta}\t${kev_delta}\t${connected}\t${avg}\t${p50}\t${max}\t${attempted}/${got}\t${window_sec}\t${skew_ms}\t${restarted}\t${SETTLE_SEC}" >>"$TSV_FILE"
+		echo "  Scraped $ctx: cpu=${cpu_m}m mem=${mem_mi}Mi proxies=${connected} pushes_delta=${xds_delta} cfg_bytes_avg=${avg} samples=${attempted}/${got} restarted=${restarted}"
 	done
 
 	rm -rf "$base_tmpdir" "$final_tmpdir"
@@ -616,14 +680,16 @@ scrape_single_snapshot() {
 		q_p50=$(histogram_quantile_from_buckets "$buckets" "0.5")
 		q_p99=$(histogram_quantile_from_buckets "$buckets" "0.99")
 
-		local xds kev cfg conn
+		local xds kev conn
 		xds=$(extract_counter_sum "$m" "pilot_xds_pushes")
 		kev=$(extract_counter_sum "$m" "pilot_k8s_cfg_events")
-		cfg=$(extract_counter_sum "$m" "pilot_xds_config_size_bytes")
 		conn=$(extract_gauge "$m" "pilot_xds")
 		[[ -z "$conn" ]] && conn="N/A"
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${SIDECAR_SCOPING}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${q_p50}\t${q_p99}\t${xds}\t${kev}\t${conn}\t${cfg}\tN/A\tN/A\tN/A\t0\t0\t0\tunknown\t${SETTLE_SEC}" >>"$TSV_FILE"
+		# A1: config_size_bytes column dropped; per-pod sample columns are N/A
+		# in watch mode (no /config_dump sampling for low overhead).
+		# C2: samples slot is attempted/got = 0/0 in watch mode.
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${SIDECAR_SCOPING}\t${cpu_m}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${q_p50}\t${q_p99}\t${xds}\t${kev}\t${conn}\tN/A\tN/A\tN/A\t0/0\t0\t0\tunknown\t${SETTLE_SEC}" >>"$TSV_FILE"
 		echo "  Scraped $ctx: cpu=${cpu_m}m mem=${mem_mi}Mi proxies=${conn} pushes=${xds}"
 	done
 }
@@ -663,10 +729,11 @@ else
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | CPU (m) | Memory (Mi) | Conv p50 (ms) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | Cfg bytes avg | Restarted |"
-		echo "|---------|---------|-------------|---------------|---------------|----------------|---------|----------|---------------|-----------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=24 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $8, $9, $10, $12, $15, $13, $17, $23
+		echo "| Context | CPU (m) | Memory (Mi) | Conv p50 (ms) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | Cfg bytes avg | Samples | Restarted |"
+		echo "|---------|---------|-------------|---------------|---------------|----------------|---------|----------|---------------|---------|-----------|"
+		# Column count is 23 after A1 dropped config_size_bytes.
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=23 {
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $7, $8, $9, $10, $12, $15, $13, $16, $19, $22
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
