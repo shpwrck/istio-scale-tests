@@ -20,6 +20,9 @@
 #     --contexts rosa-001,rosa-002,rosa-003 \
 #     --mesh-sizes 3 --service-counts 10,100,500 --namespace-counts 1,5,25
 #
+#   # Singular-form aliases (compat with older single-value invocations):
+#   ./tests/controlplane/003-run-sweep.sh --contexts a --service-count 50 --replicas 3
+#
 #   # Dry-run to see the planned matrix:
 #   ./tests/controlplane/003-run-sweep.sh --dry-run \
 #     --contexts a,b,c --service-counts 10,100 --namespace-counts 1,5
@@ -32,13 +35,17 @@ source "${ROOT}/config/versions.env"
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
 SERVICE_COUNTS_CSV="${CONTROLPLANE_SERVICE_COUNT:-10}"
-REPLICAS_COUNTS_CSV="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
+REPLICA_COUNTS_CSV="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNTS_CSV="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
-OUTPUT_DIR="${ROOT}/tests/controlplane/results"
+OUTPUT_DIR_BASE="${ROOT}/tests/controlplane/results"
 SETTLE_SEC=60
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
-MAX_MATRIX=64
+# Safety cap on cross-product matrix size; opt out with --force-large-matrix.
+# Override via env CONTROLPLANE_MAX_MATRIX (declared in config/options.env).
+MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
+
+NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -53,23 +60,33 @@ Sweep dimensions (cross-product):
   --contexts CSV              All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV            Cluster counts (default: "1,2,...,len(contexts)").
   --service-counts CSV        Dummy services per cluster (default: $SERVICE_COUNTS_CSV).
-  --replicas-counts CSV       Replicas per service (default: $REPLICAS_COUNTS_CSV).
+  --replica-counts CSV        Replicas per service (default: $REPLICA_COUNTS_CSV).
   --namespace-counts CSV      Namespaces to spread services across (default: $NAMESPACE_COUNTS_CSV).
 
+Singular aliases (one CSV value each — handy for copy-paste from older runs):
+  --service-count N           Alias for --service-counts N.
+  --replicas N                Alias for --replica-counts N.
+  --replicas-counts CSV       Alias for --replica-counts CSV (deprecated spelling).
+  --namespace-count N         Alias for --namespace-counts N.
+
 Other:
-  --settle SEC                Seconds to wait after deploy before collecting (default: $SETTLE_SEC).
-  --output-dir DIR            Results directory (default: tests/controlplane/results).
+  --settle SEC                Seconds for the delta-window between baseline
+                              and final scrape (default: $SETTLE_SEC). Threaded
+                              into 002 verbatim — 002 owns the actual sleep.
+  --output-dir DIR            Results base directory; each sweep gets a
+                              sweep-<RUN_ID>/ subdir under it
+                              (default: tests/controlplane/results).
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
-  CONTROLPLANE_NAMESPACE_COUNT.
+  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_MAX_MATRIX.
 
 Notes:
   * The sweep iterates the cross-product
-        mesh-sizes × service-counts × replicas-counts × namespace-counts.
+        mesh-sizes × service-counts × replica-counts × namespace-counts.
     For 4 mesh sizes × 3 service counts × 2 replica counts × 3 ns counts the
     sweep runs 72 combinations — refuse-unless-forced threshold is $MAX_MATRIX.
   * 001/005 are invoked between every combination so istiod starts from a
@@ -108,13 +125,37 @@ while [[ $# -gt 0 ]]; do
 		SERVICE_COUNTS_CSV="$2"
 		shift 2
 		;;
+	--service-count)
+		# Singular alias — one CSV value.
+		[[ -n "${2:-}" ]] || die "--service-count requires a value"
+		SERVICE_COUNTS_CSV="$2"
+		shift 2
+		;;
+	--replica-counts)
+		[[ -n "${2:-}" ]] || die "--replica-counts requires a value"
+		REPLICA_COUNTS_CSV="$2"
+		shift 2
+		;;
 	--replicas-counts)
+		# Deprecated alias for --replica-counts.
 		[[ -n "${2:-}" ]] || die "--replicas-counts requires a value"
-		REPLICAS_COUNTS_CSV="$2"
+		REPLICA_COUNTS_CSV="$2"
+		shift 2
+		;;
+	--replicas)
+		# Singular alias — one CSV value.
+		[[ -n "${2:-}" ]] || die "--replicas requires a value"
+		REPLICA_COUNTS_CSV="$2"
 		shift 2
 		;;
 	--namespace-counts)
 		[[ -n "${2:-}" ]] || die "--namespace-counts requires a value"
+		NAMESPACE_COUNTS_CSV="$2"
+		shift 2
+		;;
+	--namespace-count)
+		# Singular alias — one CSV value.
+		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
 		NAMESPACE_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -125,7 +166,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
-		OUTPUT_DIR="$2"
+		OUTPUT_DIR_BASE="$2"
 		shift 2
 		;;
 	--force-large-matrix)
@@ -147,6 +188,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
+is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -170,9 +212,9 @@ SERVICE_COUNTS=()
 split_csv "$SERVICE_COUNTS_CSV" SERVICE_COUNTS
 ((${#SERVICE_COUNTS[@]})) || die "--service-counts produced an empty list"
 
-REPLICAS_COUNTS=()
-split_csv "$REPLICAS_COUNTS_CSV" REPLICAS_COUNTS
-((${#REPLICAS_COUNTS[@]})) || die "--replicas-counts produced an empty list"
+REPLICA_COUNTS=()
+split_csv "$REPLICA_COUNTS_CSV" REPLICA_COUNTS
+((${#REPLICA_COUNTS[@]})) || die "--replica-counts produced an empty list"
 
 NAMESPACE_COUNTS=()
 split_csv "$NAMESPACE_COUNTS_CSV" NAMESPACE_COUNTS
@@ -185,57 +227,97 @@ done
 for sc in "${SERVICE_COUNTS[@]}"; do
 	is_pos_int "$sc" || die "service-count '$sc' is not a positive integer"
 done
-for rc in "${REPLICAS_COUNTS[@]}"; do
-	is_pos_int "$rc" || die "replicas-count '$rc' is not a positive integer"
+for rc in "${REPLICA_COUNTS[@]}"; do
+	is_pos_int "$rc" || die "replica-count '$rc' is not a positive integer"
 done
 for nc in "${NAMESPACE_COUNTS[@]}"; do
 	is_pos_int "$nc" || die "namespace-count '$nc' is not a positive integer"
 done
 
-MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICAS_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} ))
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} ))
 
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
-echo "=========================================="
-echo "  Control-Plane Resource Sweep"
-echo "=========================================="
-echo "Contexts:         ${CONTEXTS[*]}"
-echo "Mesh sizes:       ${MESH_SIZES[*]}"
-echo "Service counts:   ${SERVICE_COUNTS[*]}"
-echo "Replicas counts:  ${REPLICAS_COUNTS[*]}"
-echo "Namespace counts: ${NAMESPACE_COUNTS[*]}"
-echo "Settle time:      ${SETTLE_SEC}s"
-echo "Output:           $OUTPUT_DIR"
-echo ""
-echo "Planned matrix:   ${#MESH_SIZES[@]} × ${#SERVICE_COUNTS[@]} × ${#REPLICAS_COUNTS[@]} × ${#NAMESPACE_COUNTS[@]} = $MATRIX_SIZE combinations"
-echo ""
+# Per-sweep output subdirectory so back-to-back sweeps don't conflate.
+# RUN_ID intentionally uses UTC to align with 002's preamble timestamps.
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+
+# Banner goes to stderr so it stays visible even when stdout is piped/captured.
+{
+	echo "=========================================="
+	echo "  Control-Plane Resource Sweep"
+	echo "=========================================="
+	echo "Contexts:         ${CONTEXTS[*]}"
+	echo "Mesh sizes:       ${MESH_SIZES[*]}"
+	echo "Service counts:   ${SERVICE_COUNTS[*]}"
+	echo "Replica counts:   ${REPLICA_COUNTS[*]}"
+	echo "Namespace counts: ${NAMESPACE_COUNTS[*]}"
+	echo "Settle time:      ${SETTLE_SEC}s"
+	echo "Run ID:           ${RUN_ID}"
+	echo "Output:           ${OUTPUT_DIR}"
+	echo ""
+	echo "Planned matrix:   ${MATRIX_SIZE} = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]} (mesh × svc × rep × ns)"
+	echo ""
+} >&2
 
 if ((MATRIX_SIZE > MAX_MATRIX)) && ! ((FORCE_LARGE_MATRIX)); then
-	die "matrix size $MATRIX_SIZE exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
+	die "matrix size $MATRIX_SIZE = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]} exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
+fi
+
+# Pick kubectl/oc for defense-in-depth cleanup wait.
+if command -v oc >/dev/null 2>&1; then
+	KUBECTL=(oc)
+elif command -v kubectl >/dev/null 2>&1; then
+	KUBECTL=(kubectl)
+else
+	KUBECTL=()
 fi
 
 if ((DRY_RUN)); then
-	echo "--- Combinations (dry-run) ---"
+	echo "--- Combinations (dry-run) ---" >&2
 fi
+
+# Pretty-print the namespace pattern for the per-combo banner.
+fmt_ns_pattern() {
+	local nc="$1"
+	if (( nc <= 1 )); then
+		printf '%s\n' "$NS"
+	else
+		printf '%s-0..%s-%d\n' "$NS" "$NS" "$(( nc - 1 ))"
+	fi
+}
+
+# Create the per-sweep output dir lazily on first real combo (dry-run skips).
+ensure_output_dir() {
+	[[ -d "$OUTPUT_DIR" ]] && return 0
+	mkdir -p "$OUTPUT_DIR"
+	echo "Output directory: $OUTPUT_DIR" >&2
+}
 
 combo_idx=0
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	active_csv=$(IFS=,; echo "${active_ctxs[*]}")
 	for sc in "${SERVICE_COUNTS[@]}"; do
-		for rc in "${REPLICAS_COUNTS[@]}"; do
+		for rc in "${REPLICA_COUNTS[@]}"; do
 			for nc in "${NAMESPACE_COUNTS[@]}"; do
 				combo_idx=$((combo_idx + 1))
 				label="mesh=$ms svcs=$sc reps=$rc ns=$nc"
+				ns_pattern=$(fmt_ns_pattern "$nc")
 
 				if ((DRY_RUN)); then
-					printf "  [%2d/%2d] %s  (clusters: %s)\n" "$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}"
+					printf "  [%2d/%2d] %s  (clusters: %s)  Namespaces: %s\n" \
+						"$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}" "$ns_pattern" >&2
 					continue
 				fi
 
+				ensure_output_dir
+
 				echo "=========================================="
 				printf "  Sweep [%d/%d]: %s\n" "$combo_idx" "$MATRIX_SIZE" "$label"
-				echo "  Clusters: ${active_ctxs[*]}"
+				echo "  Clusters:   ${active_ctxs[*]}"
+				echo "  Namespaces: ${ns_pattern}"
 				echo "=========================================="
 				echo ""
 
@@ -247,21 +329,34 @@ for ms in "${MESH_SIZES[@]}"; do
 					--namespace-count "$nc"
 				echo ""
 
-				echo "--- Settling for ${SETTLE_SEC}s ---"
-				sleep "$SETTLE_SEC"
-
-				echo "--- Collecting metrics ($label) ---"
+				# 002 owns the settle (so it can take a baseline scrape *before*
+				# the window and a final scrape *after*). We pass --settle so
+				# the window length is single-sourced from this script's flag.
+				echo "--- Collecting metrics ($label) — window ${SETTLE_SEC}s ---"
 				"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
 					--contexts "$active_csv" \
 					--mesh-size "$ms" \
 					--service-count "$sc" \
 					--replicas "$rc" \
 					--namespace-count "$nc" \
+					--settle "$SETTLE_SEC" \
 					--output-dir "$OUTPUT_DIR"
 				echo ""
 
 				echo "--- Cleaning up ---"
 				"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
+
+				# Defense-in-depth: even after 005 returns, give the API server
+				# a moment to actually finalize ns deletion before the next
+				# 001 starts re-creating. 005 already waits, this is belt+brace
+				# and is a no-op once the namespaces are gone.
+				if (( ${#KUBECTL[@]} )); then
+					for ctx in "${active_ctxs[@]}"; do
+						"${KUBECTL[@]}" --context="$ctx" wait --for=delete \
+							namespace -l app.kubernetes.io/instance=controlplane-test \
+							--timeout=60s >/dev/null 2>&1 || true
+					done
+				fi
 				echo ""
 			done
 		done
@@ -269,8 +364,8 @@ for ms in "${MESH_SIZES[@]}"; do
 done
 
 if ((DRY_RUN)); then
-	echo ""
-	echo "Dry-run complete. $combo_idx combinations enumerated; no clusters touched."
+	echo "" >&2
+	echo "Dry-run complete. $combo_idx combinations enumerated; no clusters touched." >&2
 	exit 0
 fi
 

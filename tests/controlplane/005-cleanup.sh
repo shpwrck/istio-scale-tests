@@ -91,12 +91,35 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
+TERMINATION_TIMEOUT=300
+
+# Issue a delete. We keep --ignore-not-found=true (legitimate: re-running
+# cleanup on a clean cluster should not fail) but DO NOT swallow other failures
+# the way the previous `|| true` pattern did — that masked finalizer hangs and
+# RBAC errors. Caller is responsible for retrying.
 run_delete() {
 	if ((DRY_RUN)); then
 		echo "  [dry-run] $*"
-	else
-		"$@" 2>/dev/null || true
+		return 0
 	fi
+	"$@"
+}
+
+# Wait until no namespaces matching the chart's instance label remain on the
+# given context, or fail after $TERMINATION_TIMEOUT seconds. Polls every 2s.
+wait_ns_terminated() {
+	local ctx="$1"
+	local waited=0
+	while "${KUBECTL[@]}" --context="$ctx" get ns \
+			-l "$LABEL_SELECTOR" -o name 2>/dev/null | grep -q .; do
+		sleep 2
+		waited=$(( waited + 2 ))
+		if (( waited >= TERMINATION_TIMEOUT )); then
+			echo "  [$ctx] namespace termination timeout after ${TERMINATION_TIMEOUT}s" >&2
+			return 1
+		fi
+	done
+	return 0
 }
 
 echo "=== Control-plane test cleanup ==="
@@ -109,6 +132,7 @@ echo ""
 PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
+		set -e
 		echo "--- Cleaning up context: $ctx ---"
 		# Primary: delete every namespace matching the chart's instance label.
 		# This catches single-namespace, multi-namespace, and partially-
@@ -130,6 +154,13 @@ for ctx in "${CONTEXTS[@]}"; do
 		if "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
 			echo "  [$ctx] Removing legacy namespace $NS (no chart label)."
 			run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		fi
+
+		# Poll until namespaces actually terminate (not just delete-issued).
+		# Skip the wait on dry-run since nothing was actually deleted.
+		if ! ((DRY_RUN)); then
+			echo "  [$ctx] Waiting for namespace termination (timeout ${TERMINATION_TIMEOUT}s)..."
+			wait_ns_terminated "$ctx"
 		fi
 
 		echo "  [$ctx] Done."
