@@ -133,7 +133,7 @@
          Caption lives BELOW the cluster frames to avoid overlap. -->
     <g class="step" data-step="2">
       <path id="call-path"
-            d="M 220 255 V 100 H 610 V 200 H 830 V 255 H 880"
+            d="M 220 255 H 250 V 100 H 610 V 200 H 830 V 255 H 880"
             fill="none" stroke="var(--c-call)" stroke-width="3.5" class="flow"
             marker-end="url(#arrow-call)"/>
       <text x="550" y="415" class="lbl" text-anchor="middle">
@@ -145,7 +145,7 @@
       <circle class="smil-motion" r="6" fill="var(--c-call)">
         <animateMotion dur="4s" repeatCount="3"
                        rotate="auto"
-                       path="M 220 255 V 100 H 610 V 200 H 830 V 255 H 880"/>
+                       path="M 220 255 H 250 V 100 H 610 V 200 H 830 V 255 H 880"/>
       </circle>
     </g>
 
@@ -314,7 +314,7 @@
       <text x="560" y="274" class="lbl-s" text-anchor="middle">isCA: true, issuerRef: mesh-root-ca</text>
       <text x="560" y="293" class="lbl-s" text-anchor="middle" font-style="italic">(one per spoke)</text>
 
-      <path d="M 270 350 V 270 H 430" stroke="var(--c-ca)" stroke-width="2" fill="none"
+      <path d="M 270 350 H 310 V 270 H 430" stroke="var(--c-ca)" stroke-width="2" fill="none"
             marker-end="url(#arrow-ca)"/>
       <text x="350" y="262" class="lbl-s">issues</text>
     </g>
@@ -443,7 +443,7 @@ data:
       <text x="910" y="155" class="lbl" text-anchor="middle">cluster-b kube-apiserver</text>
       <text x="910" y="178" class="lbl-s" text-anchor="middle">watch: Services, EndpointSlices, Pods, Nodes</text>
 
-      <path d="M 550 160 V 90 H 910 V 125" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
+      <path d="M 550 160 H 580 V 90 H 910 V 125" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
             stroke-dasharray="6 5" marker-end="url(#arrow-d)"/>
     </g>
 
@@ -462,7 +462,7 @@ data:
       <text x="170" y="300" class="lbl" text-anchor="middle">workload-a sidecar</text>
       <text x="170" y="322" class="lbl-s" text-anchor="middle">Envoy clusters[*]</text>
 
-      <path d="M 410 195 V 250 H 220 V 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
+      <path d="M 410 160 H 380 V 250 H 220 V 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
             marker-end="url(#arrow-d)"/>
       <text x="310" y="242" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
     </g>
@@ -538,9 +538,9 @@ data:
 
     <!-- Step 2: SecretStores authenticate using kubeconfig-X (server URL + bearer token come from that Secret). -->
     <g class="step" data-step="2">
-      <path d="M 270 272 V 220 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 270 272 H 285 V 220 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso)"/>
-      <path d="M 270 342 V 270 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 270 342 H 290 V 270 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso)"/>
     </g>
 
