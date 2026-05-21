@@ -70,6 +70,20 @@ extract_preamble_kv() {
 	done
 }
 
+# Warn if multiple TSV files have mismatched preamble configs.
+if (( ${#TSV_FILES[@]} > 1 )); then
+	_first_qps="$(extract_preamble_kv QPS)"
+	_first_dur="$(extract_preamble_kv CHURN_DURATION_SEC)"
+	for _tsv in "${TSV_FILES[@]:1}"; do
+		_q="$(awk -F'=' '/^# QPS=/ { sub(/^# QPS=/, ""); print; exit }' "$_tsv")"
+		_d="$(awk -F'=' '/^# CHURN_DURATION_SEC=/ { sub(/^# CHURN_DURATION_SEC=/, ""); print; exit }' "$_tsv")"
+		if [[ -n "$_q" && "$_q" != "$_first_qps" ]] || [[ -n "$_d" && "$_d" != "$_first_dur" ]]; then
+			echo "warn: TSV files have mismatched preamble (QPS or DURATION); aggregation may conflate different configurations" >&2
+			break
+		fi
+	done
+fi
+
 RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
@@ -99,7 +113,8 @@ aggregate() {
 		if (restarted == "1" || restarted == "unknown") return 0
 		return 1
 	}
-	function safe_num(x) { return (x == "N/A" || x == "" ) ? 0 : x + 0 }
+	function is_num(x) { return (x != "N/A" && x != "" && x + 0 == x) }
+	function safe_num(x) { return (is_num(x)) ? x + 0 : 0 }
 
 	# Header line skipped; comments skipped. NF guard accepts both the
 	# legacy 17-col schema and the new 19-col schema (A4 added two columns).
@@ -112,22 +127,20 @@ aggregate() {
 			bl_seen[combo] = 1
 			bl_status[combo] = (valid ? "ok" : "bad")
 			if (valid) {
-				bl_p50[combo] = safe_num(p50)
-				bl_p99[combo] = safe_num(p99)
-				bl_qps[combo] = safe_num(qps_actual)
+				bl_p50[combo] = is_num(p50) ? p50 + 0 : "N/A"
+				bl_p99[combo] = is_num(p99) ? p99 + 0 : "N/A"
+				bl_qps[combo] = is_num(qps_actual) ? qps_actual + 0 : "N/A"
 				bl_ms[combo] = ms
 			}
 		} else if (phase == "churn") {
 			ch_seen[combo] = 1
 			ch_status[combo] = (valid ? "ok" : "bad")
-			# Churn-phase row carries the canonical churn_rate for this combo;
-			# baseline is always cr=0 by construction, so we key on the churn row.
 			ch_ms[combo] = ms
 			ch_cr[combo] = cr
 			if (valid) {
-				ch_p50[combo] = safe_num(p50)
-				ch_p99[combo] = safe_num(p99)
-				ch_qps[combo] = safe_num(qps_actual)
+				ch_p50[combo] = is_num(p50) ? p50 + 0 : "N/A"
+				ch_p99[combo] = is_num(p99) ? p99 + 0 : "N/A"
+				ch_qps[combo] = is_num(qps_actual) ? qps_actual + 0 : "N/A"
 			}
 		}
 		# Ignore other phases (e.g. "cleanup") for percentile aggregation.
@@ -147,19 +160,21 @@ aggregate() {
 			total[rk]++
 		}
 
-		# Join on combo_id: both phases must be present AND both valid.
+		# Join on combo_id: both phases must be present, both valid, and
+		# both p99 values must be numeric (not N/A from absent percentiles).
 		for (combo in bl_seen) {
 			if (bl_status[combo] != "ok") continue
 			if (!(combo in ch_seen) || ch_status[combo] != "ok") continue
+			if (bl_p99[combo] == "N/A" || ch_p99[combo] == "N/A") continue
 			rk = ch_ms[combo] "\t" ch_cr[combo]
 			n_valid[rk]++
-			s_bp50[rk] += bl_p50[combo]
+			s_bp50[rk] += (bl_p50[combo] == "N/A" ? 0 : bl_p50[combo])
 			s_bp99[rk] += bl_p99[combo]
-			s_cp50[rk] += ch_p50[combo]
+			s_cp50[rk] += (ch_p50[combo] == "N/A" ? 0 : ch_p50[combo])
 			s_cp99[rk] += ch_p99[combo]
 			s_dp99[rk] += (ch_p99[combo] - bl_p99[combo])
-			s_bqps[rk] += bl_qps[combo]
-			s_cqps[rk] += ch_qps[combo]
+			s_bqps[rk] += (bl_qps[combo] == "N/A" ? 0 : bl_qps[combo])
+			s_cqps[rk] += (ch_qps[combo] == "N/A" ? 0 : ch_qps[combo])
 		}
 
 		# A7: emit columns with delta_p99 right after the keys.

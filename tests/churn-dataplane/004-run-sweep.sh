@@ -44,6 +44,7 @@ Usage: $(basename "$0") [options]
 
   --contexts CSV            All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV          Mesh-size dimension (default: 1..len(contexts)).
+  --mesh-size N             DEPRECATED singular alias for --mesh-sizes.
   --churn-rates CSV         Churn rate dimension, "deployment scale ops/s" (default: $CHURN_RATES_CSV).
   --churn-rate N            DEPRECATED singular alias for --churn-rates.
   --baseline-duration SEC   Baseline-phase fortio duration (default: $BASELINE_DURATION).
@@ -83,6 +84,10 @@ while [[ $# -gt 0 ]]; do
 		CONTEXTS_CSV="$2"; shift 2 ;;
 	--mesh-sizes)
 		[[ -n "${2:-}" ]] || die "--mesh-sizes requires a value"
+		MESH_SIZES_CSV="$2"; shift 2 ;;
+	--mesh-size)
+		[[ -n "${2:-}" ]] || die "--mesh-size requires a value"
+		echo "warn: --mesh-size is deprecated; use --mesh-sizes CSV" >&2
 		MESH_SIZES_CSV="$2"; shift 2 ;;
 	--churn-rates)
 		[[ -n "${2:-}" ]] || die "--churn-rates requires a value"
@@ -179,7 +184,7 @@ if (( MATRIX_SIZE > MATRIX_CAP )); then
 fi
 
 # PL6: per-sweep output subdir.
-RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${RUN_ID}"
 mkdir -p "$SWEEP_DIR"
 TSV_FILE="${SWEEP_DIR}/coexec-${RUN_ID}.tsv"
@@ -336,3 +341,7 @@ echo "=========================================="
 echo "Sweep complete: $TSV_FILE"
 echo "Running 005-report-results.sh..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR"
+
+MD_FILE="${SWEEP_DIR}/coexec-${RUN_ID}.md"
+"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format md > "$MD_FILE"
+echo "Markdown summary: $MD_FILE"

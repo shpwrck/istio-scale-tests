@@ -32,6 +32,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 - Avoid storing file content in scripts. Use templates appropriate for the situation (Helm charts under `charts/`, etc.) rather than large inline YAML or kubeconfig bodies in bash.
 - --dry-run: Setup scripts that mutate clusters (`oc` / `kubectl` / `istioctl apply`) should accept `--dry-run` (typically `oc apply --dry-run=client`) so operators can validate renders without changing the cluster.
 - Pinned versions: All version pins live in `config/versions.env` — do not duplicate version numbers elsewhere. Bump `README.md` when pins change.
+- Markdown summary: All test suites must output a markdown summary file (`.md`) alongside raw TSV data so results are human-readable without post-processing. Sweep orchestrators should call the report script with `--format md` and write the output to the sweep results directory.
 
 ## Script variables and naming (bash)
 

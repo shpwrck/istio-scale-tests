@@ -90,6 +90,13 @@ report (A4).
 
 ## Known limitations
 
+- **Practical churn-rate ceiling ~100 ops/s.** Each churn operation forks
+  `date +%s%N` and awk for drift-compensated scheduling, plus one or more
+  `kubectl scale` subprocesses. At rates above ~100 ops/s, the per-op
+  overhead (~5-10ms) consumes the inter-op interval, and the driver falls
+  behind. Rows where `churn_ops_succeeded / churn_ops_attempted < 90%` are
+  automatically flagged `CHURN_RATE_NOT_MET` and filtered from the report,
+  so this manifests as low `n_valid` rather than wrong numbers.
 - **Single istiod replica per cluster, required.** 002/003 detect istiod
   restarts via `kubectl port-forward svc/istiod` and reading
   `process_start_time_seconds`. `port-forward` against the Service
@@ -121,11 +128,14 @@ report (A4).
     --deployment-count 10
 
 # 2. Baseline (no churn) — 60s at 200 QPS
+#    Use --output-file to set an explicit path reused by step 3.
+TSV=tests/churn-dataplane/results/coexec-smoke.tsv
 ./tests/churn-dataplane/002-run-baseline-probe.sh \
     --source-context rosa-001 \
     --remote-contexts rosa-002,rosa-003 \
     --duration 60 --qps 200 \
-    --combo-id smoke-run
+    --combo-id smoke-run \
+    --output-file "$TSV"
 
 # 3. Churn (200 QPS + 10 scale ops/s) — writes a row into the same TSV
 #    and computes Δp99 vs the matching baseline row.
@@ -134,8 +144,8 @@ report (A4).
     --remote-contexts rosa-002,rosa-003 \
     --duration 60 --qps 200 --churn-rate 10 \
     --combo-id smoke-run \
-    --baseline-file tests/churn-dataplane/results/coexec-*.tsv \
-    --output-file   tests/churn-dataplane/results/coexec-*.tsv
+    --baseline-file "$TSV" \
+    --output-file   "$TSV"
 
 # 4. Aggregate
 ./tests/churn-dataplane/005-report-results.sh \
@@ -286,7 +296,7 @@ Shared from `config/versions.env`: `SETUP_CONTEXTS`, `ISTIO_VERSION`.
 | PL17 (sample count as got/attempted) | APPLIED implicitly — `n_total` vs `n_valid` in 005. |
 | PL18 (settle gap after cleanup) | APPLIED — `--inter-combo-settle`. |
 | PL19 (005 propagates ALL preamble metadata to ALL formats) | APPLIED — text, csv, json, md. |
-| PL20 (Δ accounts for multi-push semantics) | APPLIED — Δp99 is computed only across baseline/churn rows that share `combo_id` and are both valid (PL15 join). |
+| PL20 (Δ accounts for multi-push semantics) | N/A — this suite does not use EDS push-count thresholds for convergence detection; it measures fortio latency directly. Δp99 is computed only across baseline/churn rows that share `combo_id` and are both valid (PL15 join). |
 | PL21 (gauges from SAME baseline scrape) | APPLIED — single scrape per `istiod_start_time_seconds` call, single awk pass. |
 | PL22 (single-file scrape, single awk pass) | APPLIED — `istiod_start_time_seconds` writes once, awks once. |
 | PL23 (drain/cleanup timeout -> row status) | APPLIED — sweep emits a `phase=cleanup status=CLEANUP_TIMEOUT` row when 006 fails. |
