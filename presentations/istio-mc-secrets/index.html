@@ -133,7 +133,7 @@
          Caption lives BELOW the cluster frames to avoid overlap. -->
     <g class="step" data-step="2">
       <path id="call-path"
-            d="M 220 255 H 250 V 100 H 610 V 200 H 830 V 255 H 880"
+            d="M 220 255 H 250 V 100 H 600 V 200 H 860 V 255 H 880"
             fill="none" stroke="var(--c-call)" stroke-width="3.5" class="flow"
             marker-end="url(#arrow-call)"/>
       <text x="550" y="415" class="lbl" text-anchor="middle">
@@ -145,7 +145,7 @@
       <circle class="smil-motion" r="6" fill="var(--c-call)">
         <animateMotion dur="4s" repeatCount="3"
                        rotate="auto"
-                       path="M 220 255 H 250 V 100 H 610 V 200 H 830 V 255 H 880"/>
+                       path="M 220 255 H 250 V 100 H 600 V 200 H 860 V 255 H 880"/>
       </circle>
     </g>
 
@@ -680,9 +680,9 @@ data:
             marker-end="url(#arrow-acm)"/>
       <text x="565" y="200" class="lbl-s" text-anchor="middle">provisions SA + bearer token</text>
 
-      <path d="M 870 250 V 280 H 260 V 250" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="4 4"
+      <path d="M 1005 250 V 280 H 150 V 250" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="4 4"
             marker-end="url(#arrow-acm)"/>
-      <text x="565" y="275" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
+      <text x="565" y="272" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
     </g>
 
     <!-- Step 2: GitOpsCluster + Placement -> Argo materializes cluster-application-manager-cluster-secret -->
