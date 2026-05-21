@@ -216,14 +216,14 @@
         <td style="padding:0.4em 0.6em;">intermediate CA istiod uses to sign workload certificates</td>
       </tr>
       <tr style="border-bottom:1px solid var(--c-rule);">
-        <td style="padding:0.4em 0.6em;"><code>kubeconfig-{cluster}</code></td>
-        <td style="padding:0.4em 0.6em;">hub <code>external-secrets-operator</code> ns</td>
-        <td style="padding:0.4em 0.6em;">how the hub talks to each spoke apiserver (used by ESO)</td>
-      </tr>
-      <tr>
         <td style="padding:0.4em 0.6em;">remote secret <span class="lbl-s">(istio/multiCluster: true)</span></td>
         <td style="padding:0.4em 0.6em;">each spoke <code>istio-system</code></td>
         <td style="padding:0.4em 0.6em;">tells istiod on one spoke how to read the <em>other</em> spoke's apiserver</td>
+      </tr>
+      <tr>
+        <td style="padding:0.4em 0.6em;"><code>kubeconfig-{cluster}</code></td>
+        <td style="padding:0.4em 0.6em;">hub <code>external-secrets-operator</code> ns</td>
+        <td style="padding:0.4em 0.6em;">how the hub authenticates into each spoke (used by ESO to ship the two Secrets above)</td>
       </tr>
     </tbody>
   </table>
@@ -231,12 +231,12 @@
     The next slides cover each of these — what it must contain, who produces it, and how it lands on the right cluster.
   </p>
   <aside class="notes">
-    Three secrets. The first one — cacerts — is the cryptographic root: every workload identity in the mesh
-    chains up to a CA whose intermediate lives in this Secret. The second — kubeconfig-{cluster} — exists on
-    the hub and gives the hub apiserver-level access into each spoke; ESO needs this to push things in. The
-    third — the remote secret — also lives on each spoke, but it's the OTHER spoke's kubeconfig, so istiod
-    can watch services across the boundary. We're going to follow them in cryptographic-root-first order:
-    cacerts, then remote secrets, then how they all get there.
+    Three secrets. cacerts is the cryptographic root: every workload identity in the mesh chains up to a CA
+    whose intermediate lives in this Secret. The remote secret also lives on each spoke, but it's the OTHER
+    spoke's kubeconfig — it tells istiod how to watch services across the boundary. kubeconfig-{cluster} is
+    the third, and the only one that does NOT live on a spoke — it lives only on the hub, and ESO uses it as
+    the auth credential to ship the first two Secrets into the spokes. We'll follow them in this order:
+    cacerts, then the remote secret on the spoke, then ESO's distribution, then the upstream of distribution.
   </aside>
 </section>
 
@@ -482,6 +482,7 @@ data:
 
       <path d="M 800 280 Q 650 280 500 200" stroke="var(--c-arrow-soft)" stroke-width="2" fill="none"
             stroke-dasharray="3 4" marker-end="url(#arrow-d-soft)"/>
+      <text x="650" y="270" class="lbl-s" text-anchor="middle">watch events stream back</text>
 
       <rect x="50" y="260" width="240" height="80" rx="8"
             fill="#ffffff" stroke="var(--c-workload)" stroke-width="2"/>
