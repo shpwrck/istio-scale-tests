@@ -133,7 +133,7 @@
          Caption lives BELOW the cluster frames to avoid overlap. -->
     <g class="step" data-step="2">
       <path id="call-path"
-            d="M 220 255 L 610 200 L 830 200 L 880 255"
+            d="M 220 255 V 100 H 610 V 200 H 830 V 255 H 880"
             fill="none" stroke="var(--c-call)" stroke-width="3.5" class="flow"
             marker-end="url(#arrow-call)"/>
       <text x="550" y="415" class="lbl" text-anchor="middle">
@@ -145,7 +145,7 @@
       <circle class="smil-motion" r="6" fill="var(--c-call)">
         <animateMotion dur="4s" repeatCount="3"
                        rotate="auto"
-                       path="M 220 255 L 610 200 L 830 200 L 880 255"/>
+                       path="M 220 255 V 100 H 610 V 200 H 830 V 255 H 880"/>
       </circle>
     </g>
 
@@ -314,9 +314,9 @@
       <text x="560" y="274" class="lbl-s" text-anchor="middle">isCA: true, issuerRef: mesh-root-ca</text>
       <text x="560" y="293" class="lbl-s" text-anchor="middle" font-style="italic">(one per spoke)</text>
 
-      <path d="M 270 350 Q 360 320 430 270" stroke="var(--c-ca)" stroke-width="2" fill="none"
+      <path d="M 270 350 V 270 H 430" stroke="var(--c-ca)" stroke-width="2" fill="none"
             marker-end="url(#arrow-ca)"/>
-      <text x="350" y="305" class="lbl-s">issues</text>
+      <text x="350" y="262" class="lbl-s">issues</text>
     </g>
 
     <!-- Step 3: ESO ExternalSecret reshapes cert-manager's tls.crt / tls.key / ca.crt into the four cacerts keys -->
@@ -329,7 +329,7 @@
       <text x="820" y="285" class="lbl-c">root-cert.pem</text>   <text x="970" y="285" class="lbl-s">= ca.crt</text>
       <text x="820" y="310" class="lbl-c">cert-chain.pem</text>  <text x="970" y="310" class="lbl-s">= tls.crt + ca.crt</text>
 
-      <path d="M 690 250 Q 745 250 800 250" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 690 250 H 800" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso-b)"/>
 
       <text x="540" y="408" class="lbl-s" text-anchor="middle">
@@ -443,7 +443,7 @@ data:
       <text x="910" y="155" class="lbl" text-anchor="middle">cluster-b kube-apiserver</text>
       <text x="910" y="178" class="lbl-s" text-anchor="middle">watch: Services, EndpointSlices, Pods, Nodes</text>
 
-      <path d="M 550 160 Q 670 70 780 160" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
+      <path d="M 550 160 V 90 H 910 V 125" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
             stroke-dasharray="6 5" marker-end="url(#arrow-d)"/>
     </g>
 
@@ -454,7 +454,7 @@ data:
       <text x="910" y="300" class="lbl" text-anchor="middle">service-b endpoints</text>
       <text x="910" y="322" class="lbl-s" text-anchor="middle">discovered via watch</text>
 
-      <path d="M 780 290 Q 670 290 550 195" stroke="var(--c-arrow-soft)" stroke-width="2" fill="none"
+      <path d="M 780 290 H 670 V 195 H 550" stroke="var(--c-arrow-soft)" stroke-width="2" fill="none"
             stroke-dasharray="3 4" marker-end="url(#arrow-d-soft)"/>
 
       <rect x="40" y="270" width="260" height="80" rx="8"
@@ -462,9 +462,9 @@ data:
       <text x="170" y="300" class="lbl" text-anchor="middle">workload-a sidecar</text>
       <text x="170" y="322" class="lbl-s" text-anchor="middle">Envoy clusters[*]</text>
 
-      <path d="M 410 195 Q 300 240 220 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
+      <path d="M 410 195 V 250 H 220 V 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
             marker-end="url(#arrow-d)"/>
-      <text x="310" y="252" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
+      <text x="310" y="242" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
     </g>
   </svg>
 
@@ -538,9 +538,9 @@ data:
 
     <!-- Step 2: SecretStores authenticate using kubeconfig-X (server URL + bearer token come from that Secret). -->
     <g class="step" data-step="2">
-      <path d="M 270 272 L 300 220" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 270 272 V 220 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso)"/>
-      <path d="M 270 342 L 300 270" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 270 342 V 270 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso)"/>
     </g>
 
@@ -561,9 +561,9 @@ data:
       <text x="815" y="214" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-b</tspan></text>
 
       <!-- cacerts-cluster-a → cluster-a/cacerts -->
-      <path d="M 270 127 Q 450 50 660 115" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <path d="M 270 127 H 580 V 115 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
       <!-- kubeconfig-cluster-b → cluster-a (templates to istio-remote-secret-cluster-b on the way) -->
-      <path d="M 270 342 Q 450 230 660 190" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <path d="M 270 342 H 540 V 190 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
     </g>
 
     <!-- Cluster B target frame: receives cacerts (from cacerts-cluster-b) and istio-remote-secret-cluster-a (templated from kubeconfig-cluster-a). -->
@@ -583,9 +583,9 @@ data:
       <text x="815" y="449" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-a</tspan></text>
 
       <!-- cacerts-cluster-b → cluster-b/cacerts -->
-      <path d="M 270 197 Q 450 390 660 350" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <path d="M 270 197 H 580 V 350 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
       <!-- kubeconfig-cluster-a → cluster-b (templates to istio-remote-secret-cluster-a) -->
-      <path d="M 270 272 Q 450 410 660 425" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <path d="M 270 272 H 540 V 425 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
     </g>
 
     <!-- Step 5: cross-pollination callout — the counter-intuitive bit. kubeconfig-A lands on cluster-b,
@@ -680,9 +680,9 @@ data:
             marker-end="url(#arrow-acm)"/>
       <text x="565" y="200" class="lbl-s" text-anchor="middle">provisions SA + bearer token</text>
 
-      <path d="M 870 240 Q 565 280 260 245" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="4 4"
+      <path d="M 870 250 V 280 H 260 V 250" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="4 4"
             marker-end="url(#arrow-acm)"/>
-      <text x="565" y="285" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
+      <text x="565" y="275" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
     </g>
 
     <!-- Step 2: GitOpsCluster + Placement -> Argo materializes cluster-application-manager-cluster-secret -->
@@ -712,9 +712,9 @@ data:
       <text x="530" y="448" class="lbl" text-anchor="middle">Secret</text>
       <text x="530" y="470" class="lbl-c" text-anchor="middle">kubeconfig-cluster-a</text>
 
-      <path d="M 560 395 L 175 420" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 560 395 V 405 H 175 V 420" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso2)"/>
-      <path d="M 310 452 L 345 452" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 310 452 H 345" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso2)"/>
     </g>
   </svg>
