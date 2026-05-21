@@ -443,7 +443,7 @@ data:
       <text x="910" y="155" class="lbl" text-anchor="middle">cluster-b kube-apiserver</text>
       <text x="910" y="178" class="lbl-s" text-anchor="middle">watch: Services, EndpointSlices, Pods, Nodes</text>
 
-      <path d="M 550 160 H 580 V 90 H 910 V 125" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
+      <path d="M 550 160 H 600 V 90 H 910 V 125" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
             stroke-dasharray="6 5" marker-end="url(#arrow-d)"/>
     </g>
 
@@ -462,9 +462,9 @@ data:
       <text x="170" y="300" class="lbl" text-anchor="middle">workload-a sidecar</text>
       <text x="170" y="322" class="lbl-s" text-anchor="middle">Envoy clusters[*]</text>
 
-      <path d="M 410 160 H 380 V 250 H 220 V 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
+      <path d="M 480 195 V 250 H 220 V 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
             marker-end="url(#arrow-d)"/>
-      <text x="310" y="242" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
+      <text x="320" y="242" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
     </g>
   </svg>
 
@@ -560,10 +560,10 @@ data:
       <text x="815" y="194" class="lbl-s" text-anchor="middle">label: <tspan class="lbl-c" style="font-size:14px;">istio/multiCluster=true</tspan></text>
       <text x="815" y="214" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-b</tspan></text>
 
-      <!-- cacerts-cluster-a → cluster-a/cacerts -->
+      <!-- cacerts-cluster-a → cluster-a/cacerts (route ABOVE ESO box; y=127 is already above ESO top y=135) -->
       <path d="M 270 127 H 580 V 115 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
-      <!-- kubeconfig-cluster-b → cluster-a (templates to istio-remote-secret-cluster-b on the way) -->
-      <path d="M 270 342 H 540 V 190 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <!-- kubeconfig-cluster-b → cluster-a istio-remote-secret-b (route OVER ESO at y=100; exit y=355, V at x=275 — unique x for this V) -->
+      <path d="M 270 355 H 275 V 100 H 600 V 190 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
     </g>
 
     <!-- Cluster B target frame: receives cacerts (from cacerts-cluster-b) and istio-remote-secret-cluster-a (templated from kubeconfig-cluster-a). -->
@@ -582,10 +582,10 @@ data:
       <text x="815" y="429" class="lbl-s" text-anchor="middle">label: <tspan class="lbl-c" style="font-size:14px;">istio/multiCluster=true</tspan></text>
       <text x="815" y="449" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-a</tspan></text>
 
-      <!-- cacerts-cluster-b → cluster-b/cacerts -->
-      <path d="M 270 197 H 580 V 350 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
-      <!-- kubeconfig-cluster-a → cluster-b (templates to istio-remote-secret-cluster-a) -->
-      <path d="M 270 272 H 540 V 425 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <!-- cacerts-cluster-b → cluster-b/cacerts (route UNDER ESO at y=395; V at x=280 to avoid SS-feed-kubeconfig-a's V at x=285) -->
+      <path d="M 270 197 H 280 V 395 H 580 V 350 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <!-- kubeconfig-cluster-a → cluster-b istio-remote-secret-a (route UNDER ESO at y=415; exit y=285 to avoid sharing stub with SecretStore feed at y=272) -->
+      <path d="M 270 285 H 295 V 415 H 620 V 425 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
     </g>
 
     <!-- Step 5: cross-pollination callout — the counter-intuitive bit. kubeconfig-A lands on cluster-b,
@@ -671,16 +671,16 @@ data:
       <text x="150" y="220" class="lbl-c" text-anchor="middle">application-manager</text>
       <text x="150" y="240" class="lbl-s" text-anchor="middle" font-style="italic">(ACM CR — mints SA + token on spoke)</text>
 
-      <rect x="870" y="170" width="270" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
-      <text x="1005" y="195" class="lbl" text-anchor="middle">ServiceAccount + Token</text>
-      <text x="1005" y="215" class="lbl-c" text-anchor="middle">application-manager</text>
-      <text x="1005" y="237" class="lbl-s" text-anchor="middle">ns: open-cluster-management-agent-addon</text>
+      <rect x="860" y="170" width="310" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
+      <text x="1015" y="195" class="lbl" text-anchor="middle">ServiceAccount + Token</text>
+      <text x="1015" y="215" class="lbl-c" text-anchor="middle">application-manager</text>
+      <text x="1015" y="237" class="lbl-s" text-anchor="middle" style="font-size:13px;">ns: open-cluster-management-agent-addon</text>
 
-      <path d="M 260 210 L 870 210" stroke="var(--c-acm)" stroke-width="2" fill="none"
+      <path d="M 260 210 L 860 210" stroke="var(--c-acm)" stroke-width="2" fill="none"
             marker-end="url(#arrow-acm)"/>
       <text x="565" y="200" class="lbl-s" text-anchor="middle">provisions SA + bearer token</text>
 
-      <path d="M 1005 250 V 280 H 150 V 250" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="4 4"
+      <path d="M 1015 250 V 280 H 150 V 250" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="4 4"
             marker-end="url(#arrow-acm)"/>
       <text x="565" y="272" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
     </g>
