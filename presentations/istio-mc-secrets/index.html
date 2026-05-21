@@ -280,7 +280,7 @@
       <rect x="40" y="115" width="230" height="60" rx="8"
             fill="#ffffff" stroke="var(--c-ca)" stroke-width="2" stroke-dasharray="4 4"/>
       <text x="155" y="140" class="lbl" text-anchor="middle">ClusterIssuer (selfSigned)</text>
-      <text x="155" y="160" class="lbl-c" text-anchor="middle">mesh-selfsigned-bootstrap</text>
+      <text x="155" y="160" class="lbl-c" text-anchor="middle" style="font-size:15px;">mesh-selfsigned-bootstrap</text>
 
       <!-- Root Certificate (isCA: true), signed by bootstrap -->
       <rect x="40" y="210" width="230" height="80" rx="8"
@@ -327,7 +327,7 @@
       <text x="820" y="235" class="lbl-c">ca-cert.pem</text>     <text x="970" y="235" class="lbl-s">= tls.crt</text>
       <text x="820" y="260" class="lbl-c">ca-key.pem</text>      <text x="970" y="260" class="lbl-s">= tls.key</text>
       <text x="820" y="285" class="lbl-c">root-cert.pem</text>   <text x="970" y="285" class="lbl-s">= ca.crt</text>
-      <text x="820" y="310" class="lbl-c">cert-chain.pem</text>  <text x="970" y="310" class="lbl-s">= tls.crt + ca.crt</text>
+      <text x="820" y="310" class="lbl-c">cert-chain.pem</text>  <text x="970" y="310" class="lbl-s" style="font-size:14px;">= tls.crt + ca.crt</text>
 
       <path d="M 690 250 H 800" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso-b)"/>
@@ -441,7 +441,7 @@ data:
       <rect x="780" y="125" width="260" height="80" rx="8"
             fill="#ffffff" stroke="var(--c-arrow)" stroke-width="2"/>
       <text x="910" y="155" class="lbl" text-anchor="middle">cluster-b kube-apiserver</text>
-      <text x="910" y="178" class="lbl-s" text-anchor="middle">watch: Services, EndpointSlices, Pods, Nodes</text>
+      <text x="910" y="178" class="lbl-s" text-anchor="middle" style="font-size:13px;">watch: Services, EndpointSlices, Pods, Nodes</text>
 
       <path d="M 550 160 H 600 V 90 H 910 V 125" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
             stroke-dasharray="6 5" marker-end="url(#arrow-d)"/>
@@ -464,7 +464,7 @@ data:
 
       <path d="M 480 195 V 250 H 220 V 270" stroke="var(--c-istiod)" stroke-width="2" fill="none"
             marker-end="url(#arrow-d)"/>
-      <text x="320" y="242" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
+      <text x="350" y="242" class="lbl-s" text-anchor="middle">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
     </g>
   </svg>
 
@@ -533,7 +533,7 @@ data:
       <text x="397" y="324" class="lbl-s" text-anchor="middle" font-style="italic">ship a hub</text>
       <text x="397" y="342" class="lbl-s" text-anchor="middle" font-style="italic">Secret to a spoke</text>
 
-      <text x="270" y="425" class="lbl-s">kubeconfig-X feeds the SecretStore for cluster X</text>
+      <text x="265" y="425" class="lbl-s" text-anchor="middle">kubeconfig-X feeds the SecretStore for cluster X</text>
     </g>
 
     <!-- Step 2: SecretStores authenticate using kubeconfig-X (server URL + bearer token come from that Secret). -->
@@ -669,7 +669,7 @@ data:
       <rect x="40" y="170" width="220" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="150" y="200" class="lbl" text-anchor="middle">ManagedServiceAccount</text>
       <text x="150" y="220" class="lbl-c" text-anchor="middle">application-manager</text>
-      <text x="150" y="240" class="lbl-s" text-anchor="middle" font-style="italic">(ACM CR — mints SA + token on spoke)</text>
+      <text x="150" y="240" class="lbl-s" text-anchor="middle" font-style="italic" style="font-size:13px;">(ACM CR — mints SA + token on spoke)</text>
 
       <rect x="860" y="170" width="310" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="1015" y="195" class="lbl" text-anchor="middle">ServiceAccount + Token</text>
