@@ -20,7 +20,7 @@
   --c-istiod:       #1d4ed8;
   --c-workload:     #047857;
   --c-gateway:      #be123c;   /* east-west gateway */
-  --c-secret:       #6d28d9;   /* secret / cacerts / kubeconfig / remote-secret */
+  --c-secret:       #a21caf;   /* secret / cacerts / kubeconfig / remote-secret (fuchsia — distinct from hub purple and workload emerald) */
   --c-ca:           #92400e;   /* CA chain */
   --c-eso:          #0f766e;   /* ESO accent */
   --c-acm:          #b91c1c;   /* ACM accent */
@@ -87,7 +87,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.6em 1.4em;
-  font-size: 0.55em;
+  font-size: 0.65em;
   color: var(--c-muted);
   margin-top: 0.4em;
 }
@@ -104,18 +104,18 @@
 .reveal svg.diagram {
   width: 100%;
   height: auto;
-  max-height: 62vh;
+  max-height: 70vh;
   display: block;
   margin: 0 auto;
 }
-.reveal svg .lbl   { font: 600 14px 'Source Sans Pro', sans-serif; fill: var(--c-fg); }
-.reveal svg .lbl-s { font: 500 11px 'Source Sans Pro', sans-serif; fill: var(--c-muted); }
-.reveal svg .lbl-c { font: 700 13px 'Source Code Pro', monospace;  fill: var(--c-fg); }
+.reveal svg .lbl   { font: 600 20px 'Source Sans Pro', sans-serif; fill: var(--c-fg); }
+.reveal svg .lbl-s { font: 500 16px 'Source Sans Pro', sans-serif; fill: var(--c-muted); }
+.reveal svg .lbl-c { font: 700 18px 'Source Code Pro', monospace;  fill: var(--c-fg); }
 
 /* Step-reveal: SVG group hidden until its step is active. */
 .reveal svg .step {
   opacity: 0;
-  transition: opacity 350ms ease-in-out;
+  transition: opacity 500ms ease-in-out;
 }
 .reveal svg .step.on {
   opacity: 1;
@@ -179,6 +179,6 @@
   right: 1em;
   display: flex;
   justify-content: space-between;
-  font-size: 0.45em;
+  font-size: 0.55em;
   color: var(--c-muted);
 }
