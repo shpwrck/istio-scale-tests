@@ -51,6 +51,7 @@ source "${ROOT}/config/versions.env"
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
 MESH_SIZE=""
+SWEEP_RUN_ID=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_MS="${PROPAGATION_POLL_INTERVAL_MS}"
@@ -74,6 +75,8 @@ Usage: $(basename "$0") [options]
   --source-context CTX      Kube context for the source cluster (required).
   --remote-contexts CSV     Remote cluster contexts (comma-separated). Omit for single-cluster baseline.
   --mesh-size N             Metadata tag for TSV output (default: 1 + number of remotes).
+  --sweep-run-id ID         Outer sweep RUN_ID to record in TSV preamble (default: empty;
+                            set by 006-run-sweep.sh — omit when running probe standalone).
   --iterations N            Number of probe iterations (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC             Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS=$POLL_INTERVAL_MS).
@@ -148,6 +151,11 @@ while [[ $# -gt 0 ]]; do
 	--mesh-size)
 		[[ -n "${2:-}" ]] || die "--mesh-size requires a value"
 		MESH_SIZE="$2"
+		shift 2
+		;;
+	--sweep-run-id)
+		[[ -n "${2:-}" ]] || die "--sweep-run-id requires a value"
+		SWEEP_RUN_ID="$2"
 		shift 2
 		;;
 	--iterations)
@@ -279,6 +287,9 @@ probe_kube_versions KUBE_VERSIONS_CSV "${ALL_CTXS[@]}"
 if ((WRITE_TSV)); then
 	{
 		echo "# Endpoint propagation latency test"
+		# SWEEP_RUN_ID is only emitted when running under 006-run-sweep.sh; standalone
+		# probe invocations omit it so the preamble doesn't carry a misleading "" value.
+		[[ -n "$SWEEP_RUN_ID" ]] && echo "# SWEEP_RUN_ID=${SWEEP_RUN_ID}"
 		echo "# RUN_ID=${RUN_ID}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION}"
