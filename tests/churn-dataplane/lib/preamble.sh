@@ -148,7 +148,7 @@ write_preamble() {
 	local kv
 	{
 		echo "# churn-dataplane co-exec test"
-		echo "# generated_at=$(date -Iseconds)"
+		echo "# generated_at=$(date -u -Iseconds)"
 		for kv in "$@"; do
 			echo "# ${kv}"
 		done

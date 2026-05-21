@@ -153,7 +153,7 @@ REMOTES=()
 [[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
-RUN_ID="${RUN_ID_OPT:-$(date +%Y%m%dT%H%M%S)-$$}"
+RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ -z "$COMBO_ID" ]] && COMBO_ID="$RUN_ID"
 
 mkdir -p "$OUTPUT_DIR"
@@ -329,6 +329,9 @@ run_churn_driver() {
 		fi
 	done
 }
+if ((CHURN_RATE > 100)); then
+	echo "warn: churn-rate ${CHURN_RATE} exceeds the practical ceiling (~100 ops/s); per-op subshell overhead may cause the driver to fall behind" >&2
+fi
 run_churn_driver &
 DRIVER_PID=$!
 
@@ -367,14 +370,20 @@ CHURN_OPS_ATTEMPTED="${CHURN_OPS_ATTEMPTED// /}"
 CHURN_OPS_SUCCEEDED="$(awk -F'\t' '$2 == "0" { c++ } END { print c + 0 }' "$CHURN_LOG" 2>/dev/null || echo 0)"
 rm -f "$CHURN_LOG"
 
-QPS_ACTUAL=0; P50=0; P90=0; P99=0; P999=0; MAX_LAT=0
+QPS_ACTUAL="N/A"; P50="N/A"; P90="N/A"; P99="N/A"; P999="N/A"; MAX_LAT="N/A"
 if [[ "$STATUS" == "OK" && -n "$JSON_OUT" ]]; then
-	QPS_ACTUAL="$(printf '%s' "$JSON_OUT" | jq -r '.ActualQPS // 0' 2>/dev/null || echo 0)"
-	P50="$(printf '%s' "$JSON_OUT"  | jq -r '((.DurationHistogram.Percentiles[]? | select(.Percentile == 50)   | .Value) // 0) * 1000' 2>/dev/null || echo 0)"
-	P90="$(printf '%s' "$JSON_OUT"  | jq -r '((.DurationHistogram.Percentiles[]? | select(.Percentile == 90)   | .Value) // 0) * 1000' 2>/dev/null || echo 0)"
-	P99="$(printf '%s' "$JSON_OUT"  | jq -r '((.DurationHistogram.Percentiles[]? | select(.Percentile == 99)   | .Value) // 0) * 1000' 2>/dev/null || echo 0)"
-	P999="$(printf '%s' "$JSON_OUT" | jq -r '((.DurationHistogram.Percentiles[]? | select(.Percentile == 99.9) | .Value) // 0) * 1000' 2>/dev/null || echo 0)"
-	MAX_LAT="$(printf '%s' "$JSON_OUT" | jq -r '(.DurationHistogram.Max // 0) * 1000' 2>/dev/null || echo 0)"
+	QPS_ACTUAL="$(printf '%s' "$JSON_OUT" | jq -r '.ActualQPS // empty' 2>/dev/null)"
+	[[ -z "$QPS_ACTUAL" ]] && QPS_ACTUAL="N/A"
+	P50="$(printf '%s' "$JSON_OUT"  | jq -r '(.DurationHistogram.Percentiles[]? | select(.Percentile == 50)   | .Value * 1000) // empty' 2>/dev/null)"
+	[[ -z "$P50" ]] && P50="N/A"
+	P90="$(printf '%s' "$JSON_OUT"  | jq -r '(.DurationHistogram.Percentiles[]? | select(.Percentile == 90)   | .Value * 1000) // empty' 2>/dev/null)"
+	[[ -z "$P90" ]] && P90="N/A"
+	P99="$(printf '%s' "$JSON_OUT"  | jq -r '(.DurationHistogram.Percentiles[]? | select(.Percentile == 99)   | .Value * 1000) // empty' 2>/dev/null)"
+	[[ -z "$P99" ]] && P99="N/A"
+	P999="$(printf '%s' "$JSON_OUT" | jq -r '(.DurationHistogram.Percentiles[]? | select(.Percentile == 99.9) | .Value * 1000) // empty' 2>/dev/null)"
+	[[ -z "$P999" ]] && P999="N/A"
+	MAX_LAT="$(printf '%s' "$JSON_OUT" | jq -r '(.DurationHistogram.Max // empty) * 1000' 2>/dev/null)"
+	[[ -z "$MAX_LAT" ]] && MAX_LAT="N/A"
 fi
 
 # PL13: istiod restarted (or unknown) -> emit N/A for derived quantiles.

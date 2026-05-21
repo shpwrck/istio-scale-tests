@@ -145,7 +145,9 @@ render_for() {
 		--set namespace="$NS" \
 		--set fortioRole="$role" \
 		--set churnDeploymentCount="$CHURN_DEPLOYMENT_COUNT_OPT" \
-		--set churnBaseReplicas="$CHURN_BASE_REPLICAS_OPT"
+		--set churnBaseReplicas="$CHURN_BASE_REPLICAS_OPT" \
+		--set churnImage.tag="$BUSYBOX_VERSION" \
+		--set fortioImage.tag="$FORTIO_VERSION"
 }
 
 # Source context: fortio server+client+churn-targets all in shared NS.
@@ -164,21 +166,20 @@ if ((DRY_RUN)); then
 fi
 
 echo "Waiting for Deployments to be Available (timeout: ${WAIT_TIMEOUT}s)..."
+WAIT_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do
-	echo "  [$ctx] fortio-server"
-	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/fortio-server \
-		--for=condition=Available --timeout="${WAIT_TIMEOUT}s" \
-		|| die "fortio-server not ready on $ctx"
-	for ((i = 0; i < CHURN_DEPLOYMENT_COUNT_OPT; i++)); do
-		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/churn-target-${i} \
+	(
+		echo "  [$ctx] waiting for all deployments..."
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment \
+			-l "app.kubernetes.io/instance=churn-dataplane-test" \
 			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" \
-			|| die "churn-target-${i} not ready on $ctx"
-	done
+			|| { echo "error: deployments not ready on $ctx" >&2; exit 1; }
+		echo "  [$ctx] all deployments ready."
+	) &
+	WAIT_PIDS+=($!)
 done
-
-echo "  [$SOURCE_CTX] fortio-client"
-"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" wait deployment/fortio-client \
-	--for=condition=Available --timeout="${WAIT_TIMEOUT}s" \
-	|| die "fortio-client not ready on $SOURCE_CTX"
+for pid in "${WAIT_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed deployment readiness check"
+done
 
 echo "Setup complete. Contexts: ${ALL_CTXS[*]}  Namespace: ${NS}"

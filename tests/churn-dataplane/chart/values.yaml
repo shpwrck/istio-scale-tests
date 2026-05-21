@@ -18,12 +18,12 @@ fortioRole: both
 # Image used for churn-target workloads (busybox sleep pod).
 churnImage:
   repository: busybox
-  tag: stable
+  tag: "1.37.0"
 
 # Image used for fortio workloads.
 fortioImage:
   repository: fortio/fortio
-  tag: latest
+  tag: "1.68.0"
 
 # Service port for fortio-server and churn-target services.
 service:
