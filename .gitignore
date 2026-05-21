@@ -11,6 +11,10 @@
 .env.local
 .env.*.local
 
+# Reviewer-loop tooling (playwright headless smoke tests)
+/node_modules/
+/package-lock.json
+
 # Test results (TSV data, scraped metrics, reports)
 /tests/propagation/results/
 /tests/controlplane/results/
