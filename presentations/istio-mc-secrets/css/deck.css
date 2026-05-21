@@ -1,0 +1,169 @@
+/* Deck-local styles. Loaded after reveal + theme so it can override safely. */
+
+:root {
+  /* Shared visual language for all five animations.
+     Same concept = same color across every diagram. */
+  --c-bg:           #ffffff;
+  --c-fg:           #111317;
+  --c-muted:        #4a5160;
+  --c-rule:         #c8ccd4;
+
+  --c-cluster:      #1f3a8a;   /* cluster boundary / k8s node-ish frame */
+  --c-cluster-fill: #eef2ff;
+  --c-hub:          #5b21b6;   /* hub cluster accent */
+  --c-hub-fill:     #f3ecff;
+  --c-spoke-a:      #0e7490;   /* network-1 accent */
+  --c-spoke-a-fill: #ecfeff;
+  --c-spoke-b:      #b45309;   /* network-2 accent */
+  --c-spoke-b-fill: #fef3c7;
+
+  --c-istiod:       #1d4ed8;
+  --c-workload:     #047857;
+  --c-gateway:      #be123c;   /* east-west gateway */
+  --c-secret:       #6d28d9;   /* secret / cacerts / kubeconfig / remote-secret */
+  --c-ca:           #92400e;   /* CA chain */
+  --c-eso:          #0f766e;   /* ESO accent */
+  --c-acm:          #b91c1c;   /* ACM accent */
+  --c-argo:         #1e3a8a;   /* Argo CD accent */
+
+  --c-arrow:        #1f2937;
+  --c-arrow-soft:   #6b7280;
+  --c-call:         #dc2626;   /* live data-plane call */
+}
+
+.reveal {
+  font-family: 'Source Sans Pro', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  color: var(--c-fg);
+}
+
+.reveal h1, .reveal h2, .reveal h3 {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: var(--c-fg);
+}
+
+.reveal h1 { font-size: 2.0em; }
+.reveal h2 { font-size: 1.5em; }
+.reveal h3 { font-size: 1.15em; }
+
+.reveal .slide-title-deck {
+  font-size: 1.9em;
+  line-height: 1.15;
+}
+
+.reveal .subtitle {
+  color: var(--c-muted);
+  font-size: 0.85em;
+  margin-top: 0.5em;
+}
+
+.reveal p, .reveal li {
+  font-size: 0.78em;
+  line-height: 1.45;
+}
+
+.reveal ul { margin-left: 1.4em; }
+.reveal li + li { margin-top: 0.35em; }
+
+.reveal .term {
+  font-weight: 700;
+  color: var(--c-fg);
+}
+.reveal .term-def {
+  color: var(--c-muted);
+}
+.reveal code,
+.reveal .mono {
+  font-family: 'Source Code Pro', 'Menlo', 'Consolas', monospace;
+  font-size: 0.92em;
+  background: #f3f4f6;
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+  color: #1f2937;
+}
+
+.reveal .legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6em 1.4em;
+  font-size: 0.55em;
+  color: var(--c-muted);
+  margin-top: 0.4em;
+}
+.reveal .legend .swatch {
+  display: inline-block;
+  width: 0.9em; height: 0.9em;
+  border-radius: 2px;
+  vertical-align: -2px;
+  margin-right: 0.35em;
+  border: 1px solid rgba(0,0,0,0.15);
+}
+
+/* SVG defaults */
+.reveal svg.diagram {
+  width: 100%;
+  height: auto;
+  max-height: 62vh;
+  display: block;
+  margin: 0 auto;
+}
+.reveal svg .lbl   { font: 600 14px 'Source Sans Pro', sans-serif; fill: var(--c-fg); }
+.reveal svg .lbl-s { font: 500 11px 'Source Sans Pro', sans-serif; fill: var(--c-muted); }
+.reveal svg .lbl-c { font: 700 13px 'Source Code Pro', monospace;  fill: var(--c-fg); }
+
+/* Step-reveal: SVG group hidden until its step is active. */
+.reveal svg .step {
+  opacity: 0;
+  transition: opacity 350ms ease-in-out;
+}
+.reveal svg .step.on {
+  opacity: 1;
+}
+
+/* Animated flow line (data-plane call) — dash march on the path. */
+.reveal svg .flow {
+  stroke-dasharray: 8 6;
+  stroke-dashoffset: 0;
+  animation: flow-march 1.2s linear infinite;
+}
+@keyframes flow-march {
+  to { stroke-dashoffset: -28; }
+}
+
+/* The packet "bead" travels along a path via CSS transform-origin trick;
+   for animations that need motion along a path we use SMIL <animateMotion>
+   inside SVG (no JS animation libraries). */
+
+/* Reduced motion: collapse everything to its end state, no marching dashes. */
+@media (prefers-reduced-motion: reduce) {
+  .reveal svg .step {
+    opacity: 1 !important;
+    transition: none !important;
+  }
+  .reveal svg .flow {
+    animation: none !important;
+    stroke-dasharray: none !important;
+  }
+  .reveal svg animateMotion,
+  .reveal svg animate,
+  .reveal svg animateTransform {
+    /* SMIL: freeze at end. Browsers honor 'begin="indefinite"' fallback. */
+  }
+  /* The diagram-controller JS also early-exits in reduced-motion mode. */
+}
+
+/* Speaker-notes block (visible in speaker view only) */
+.reveal aside.notes { display: none; }
+
+/* Slide footer with progress indicator (deck-local; reveal also has its own progress bar). */
+.reveal .footer {
+  position: absolute;
+  bottom: 0.6em;
+  left: 1em;
+  right: 1em;
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.45em;
+  color: var(--c-muted);
+}
