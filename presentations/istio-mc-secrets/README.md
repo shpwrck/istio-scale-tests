@@ -33,7 +33,7 @@ Five hand-authored SVG animations. Each plays step-by-step as you press
 
 | # | Slide title | What it shows |
 | - | ----------- | ------------- |
-| A | Topology: multi-primary, multi-network | Two clusters, each with istiod + workload + east-west gateway (`:15443 AUTO_PASSTHROUGH`), and a cross-cluster mTLS call traversing both gateways. |
+| A | Topology: multi-primary, multi-network | Two clusters, each with istiod + workload + east-west gateway (`:15443 AUTO_PASSTHROUGH`), and a cross-cluster mTLS call traversing the remote east-west gateway. |
 | B | cert-manager assembles `cacerts` | Hub root `Certificate` &rarr; `ClusterIssuer` &rarr; one intermediate `Certificate` per spoke &rarr; the four-key `cacerts` Secret (`ca-cert.pem`, `ca-key.pem`, `root-cert.pem`, `cert-chain.pem`) per cluster. |
 | C | ESO `PushSecret`: hub &rarr; each spoke | Hub-side `SecretStore` + `PushSecret` CRs shipping `cacerts` and `istio-remote-secret-{cluster}` Secrets into each spoke's `istio-system`, applying `istio/multiCluster=true`. |
 | D | How the remote secret drives discovery | istiod on cluster A reading the kubeconfig-shaped Secret in `istio-system`, watching cluster B's apiserver, and pushing cluster B endpoints into cluster A's sidecars via xDS. |

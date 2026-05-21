@@ -62,7 +62,7 @@
     <li><span class="term">Remote secret</span> <span class="term-def">— a kubeconfig-shaped Kubernetes Secret in <code>istio-system</code>, labeled <code>istio/multiCluster: true</code>. It tells istiod how to read another cluster's Kubernetes API.</span></li>
   </ul>
   <aside class="notes">
-    Four terms — others (cluster ID, mesh ID, ManagedCluster, etc.) get inline glosses on first use later.
+    Four terms — others (mesh ID, ManagedCluster, etc.) get inline glosses on first use later.
     Two non-obvious facts: trust domain lets cluster A verify cluster B identities cryptographically — a SPIFFE
     concept, not Kubernetes. AUTO_PASSTHROUGH means the east-west gateway pod never holds inner mTLS keys; it
     SNI-routes encrypted bytes onward, so a different team can operate it from the workloads it carries.
@@ -174,7 +174,8 @@
     the REMOTE east-west gateway directly across the network boundary. The call traverses the remote
     east-west gateway (EW gw B for an A&rarr;B call) — the local EW gateway only carries traffic arriving
     from other networks (ingress side). Trust domain and mesh ID are both <code>mesh1</code> on both
-    clusters; we will revisit those when we get to cacerts.
+    clusters (mesh ID — Istio's name for the mesh as a whole; one string shared by all member clusters);
+    we will revisit those when we get to cacerts.
   </aside>
 </section>
 
@@ -327,7 +328,6 @@
       <text x="820" y="260" class="lbl-c">ca-key.pem</text>      <text x="970" y="260" class="lbl-s">= tls.key</text>
       <text x="820" y="285" class="lbl-c">root-cert.pem</text>   <text x="970" y="285" class="lbl-s">= ca.crt</text>
       <text x="820" y="310" class="lbl-c">cert-chain.pem</text>  <text x="970" y="310" class="lbl-s">= tls.crt + ca.crt</text>
-      <text x="930" y="333" class="lbl-s" text-anchor="middle" font-style="italic">(one Secret per spoke; root-cert.pem identical across spokes)</text>
 
       <path d="M 690 250 Q 745 250 800 250" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso-b)"/>
@@ -352,7 +352,7 @@
     with the standard TLS shape (tls.crt, tls.key, ca.crt) but istiod wants four very specific keys, so an
     ESO ExternalSecret reshapes it into the four-key cacerts Secret using its v2 templating engine.
     cert-chain.pem is just the intermediate concatenated with the root. The assembled cacerts still lives on
-    the hub at this point — getting it onto the spoke is ESO's PushSecret job, on the next animation.
+    the hub at this point — getting it onto the spoke is ESO's PushSecret job, on the PushSecret distribution slide (two slides on).
   </aside>
 </section>
 
