@@ -357,6 +357,16 @@ report_endpoint_markdown() {
 			phase, n_total[ms], n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
+	# Cross-mesh-size comparison table row: averages for the four headline phases.
+	# Sample-count rendering: "avg (n_valid)" — per-mesh-size tables above carry the
+	# full n_total/n_valid breakdown; here we keep it terse so the comparison reads at
+	# a glance while still surfacing how many samples backed each average.
+	function cmp_avg(src, ms, n,    arr, sum, i) {
+		if (n == 0) return "-- (0)"
+		load(arr, src, ms, n)
+		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
+		return sprintf("%d (%d)", sum/n, n)
+	}
 	END {
 		asorti_seen()
 		for (s = 1; s <= __n; s++) {
@@ -369,6 +379,25 @@ report_endpoint_markdown() {
 			md_row("P1 conv_p99 (hist)",   cp99_vals, ms_cur, cp99_n[ms_cur])
 			md_row("P2 remote istiod EDS", p2_vals,   ms_cur, p2_n[ms_cur])
 			md_row("P3 remote sidecar",    p3_vals,   ms_cur, p3_n[ms_cur])
+			printf "\n"
+		}
+		# Cross-mesh-size comparison (only meaningful when >1 mesh size was swept).
+		if (__n > 1) {
+			printf "## Comparison across mesh sizes\n\n"
+			printf "Averages over rows surviving the report filter (restarted ∈ {1, unknown}, "
+			printf "p1_overflow=1, and status != OK are dropped; P2 also drops p2_dirty=1 rows). "
+			printf "Cells show `avg (n_valid)`; per-mesh-size tables above carry the full breakdown.\n\n"
+			printf "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 avg (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |\n"
+			printf "|-----------|------------------|----------------------|-----------------|---------------------|\n"
+			for (s = 1; s <= __n; s++) {
+				ms_cur = __sorted[s]
+				printf "| %s | %s | %s | %s | %s |\n",
+					ms_cur,
+					cmp_avg(p1_vals,   ms_cur, p1_n[ms_cur]),
+					cmp_avg(cp99_vals, ms_cur, cp99_n[ms_cur]),
+					cmp_avg(p2_vals,   ms_cur, p2_n[ms_cur]),
+					cmp_avg(p3_vals,   ms_cur, p3_n[ms_cur])
+			}
 			printf "\n"
 		}
 	}'
