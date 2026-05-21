@@ -497,6 +497,12 @@ data:
       <marker id="arrow-eso" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-eso)"/>
       </marker>
+      <marker id="arrow-to-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-spoke-a)"/>
+      </marker>
+      <marker id="arrow-to-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-spoke-b)"/>
+      </marker>
     </defs>
 
     <!-- Hub frame -->
@@ -563,10 +569,10 @@ data:
       <text x="815" y="194" class="lbl-s" text-anchor="middle">label: <tspan class="lbl-c" style="font-size:14px;">istio/multiCluster=true</tspan></text>
       <text x="815" y="214" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-b</tspan></text>
 
-      <!-- cacerts-cluster-a → cluster-a/cacerts (route ABOVE ESO box; y=127 is already above ESO top y=135) -->
-      <path d="M 270 127 H 580 V 115 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
-      <!-- kubeconfig-cluster-b → cluster-a istio-remote-secret-b (route OVER ESO at y=100; exit y=355, V at x=275 — unique x for this V) -->
-      <path d="M 270 355 H 275 V 100 H 600 V 190 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <!-- cacerts-cluster-a → cluster-a/cacerts (route ABOVE ESO box; y=127 is already above ESO top y=135). Color: teal (--c-spoke-a) marks destination cluster-a. -->
+      <path d="M 270 127 H 580 V 115 H 660" stroke="var(--c-spoke-a)" stroke-width="2" fill="none" marker-end="url(#arrow-to-a)"/>
+      <!-- kubeconfig-cluster-b → cluster-a istio-remote-secret-b (cross-pollination; route OVER ESO at y=100; exit y=355, V at x=275). Color: teal (--c-spoke-a) marks destination cluster-a. -->
+      <path d="M 270 355 H 275 V 100 H 600 V 190 H 660" stroke="var(--c-spoke-a)" stroke-width="2" fill="none" marker-end="url(#arrow-to-a)"/>
     </g>
 
     <!-- Cluster B target frame: receives cacerts (from cacerts-cluster-b) and istio-remote-secret-cluster-a (templated from kubeconfig-cluster-a). -->
@@ -585,10 +591,10 @@ data:
       <text x="815" y="429" class="lbl-s" text-anchor="middle">label: <tspan class="lbl-c" style="font-size:14px;">istio/multiCluster=true</tspan></text>
       <text x="815" y="449" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-a</tspan></text>
 
-      <!-- cacerts-cluster-b → cluster-b/cacerts (route UNDER ESO at y=395; V at x=280 to avoid SS-feed-kubeconfig-a's V at x=285) -->
-      <path d="M 270 197 H 280 V 395 H 580 V 350 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
-      <!-- kubeconfig-cluster-a → cluster-b istio-remote-secret-a (route UNDER ESO at y=415; exit y=285 to avoid sharing stub with SecretStore feed at y=272) -->
-      <path d="M 270 285 H 295 V 415 H 620 V 425 H 660" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
+      <!-- cacerts-cluster-b → cluster-b/cacerts (route UNDER ESO at y=395). Color: orange (--c-spoke-b) marks destination cluster-b. -->
+      <path d="M 270 197 H 280 V 395 H 580 V 350 H 660" stroke="var(--c-spoke-b)" stroke-width="2" fill="none" marker-end="url(#arrow-to-b)"/>
+      <!-- kubeconfig-cluster-a → cluster-b istio-remote-secret-a (cross-pollination; route UNDER ESO at y=415; exit y=285). Color: orange (--c-spoke-b) marks destination cluster-b. -->
+      <path d="M 270 285 H 295 V 415 H 620 V 425 H 660" stroke="var(--c-spoke-b)" stroke-width="2" fill="none" marker-end="url(#arrow-to-b)"/>
     </g>
 
     <!-- Step 5: cross-pollination callout — the counter-intuitive bit. kubeconfig-A lands on cluster-b,
