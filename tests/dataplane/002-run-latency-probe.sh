@@ -227,6 +227,7 @@ done
 	echo "# SOURCE_CTX=${SOURCE_CTX}"
 	echo "# REMOTE_CONTEXTS=${REMOTE_CONTEXTS_CSV}"
 	echo "# MESH_SIZE=${MESH_SIZE}"
+	echo "# NAMESPACE=${NS}"
 } > "$TSV_FILE"
 # New TSV columns appended at the end of the old schema:
 #   pct_200, istiod_restarted, target_class

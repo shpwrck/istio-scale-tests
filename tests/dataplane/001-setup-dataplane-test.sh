@@ -120,6 +120,10 @@ for i in "${!ALL_CTXS[@]}"; do
 	ALL_CN_SETS+=(--set "allClusterNames[$i]=${ALL_CTXS[$i]}")
 done
 
+if (( ${#ALL_CTXS[@]} > 10 )); then
+	echo "warn: ${#ALL_CTXS[@]} clusters creates ~$(( ${#ALL_CTXS[@]} * ${#ALL_CTXS[@]} )) Services (N² scaling); expect slower setup and higher istiod memory" >&2
+fi
+
 echo "Deploying fortio server on all clusters (image tag: ${FORTIO_TAG})..."
 for ctx in "${ALL_CTXS[@]}"; do
 	echo "  Server on $ctx"

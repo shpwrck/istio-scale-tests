@@ -20,8 +20,11 @@ QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
 DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
+MAX_MATRIX="${DATAPLANE_MAX_MATRIX:-64}"
+INTER_COMBO_SETTLE="${DATAPLANE_INTER_COMBO_SETTLE_SEC:-15}"
 OUTPUT_DIR_BASE="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
+FORCE_LARGE_MATRIX=0
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -37,12 +40,14 @@ Usage: $(basename "$0") [options]
   --settle SEC         Seconds to sleep before probing (default: $SETTLE_SEC).
   --output-dir DIR     Base results directory (default: tests/dataplane/results).
                        A per-sweep subdir sweep-\${RUN_ID}/ is created here.
+  --force-large-matrix Bypass the ${MAX_MATRIX}-combo matrix safety cap.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
 
 Environment:
   SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
-  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC.
+  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_MAX_MATRIX,
+  DATAPLANE_INTER_COMBO_SETTLE_SEC.
 EOF
 }
 
@@ -101,6 +106,10 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR_BASE="$2"
 		shift 2
 		;;
+	--force-large-matrix)
+		FORCE_LARGE_MATRIX=1
+		shift
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -139,6 +148,14 @@ done
 
 SCRIPT_DIR="${ROOT}/tests/dataplane"
 
+# Count QPS levels for matrix size check.
+QPS_ARR_TMP=()
+split_csv "$QPS_LEVELS" QPS_ARR_TMP
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#QPS_ARR_TMP[@]} ))
+if (( MATRIX_SIZE > MAX_MATRIX )) && (( !FORCE_LARGE_MATRIX )); then
+	die "matrix size ${MATRIX_SIZE} exceeds cap ${MAX_MATRIX} (${#MESH_SIZES[@]} mesh_sizes × ${#QPS_ARR_TMP[@]} qps_levels); use --force-large-matrix to override"
+fi
+
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 
@@ -148,7 +165,8 @@ echo "=========================================="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "QPS levels: $QPS_LEVELS"
-echo "Settle: ${SETTLE_SEC}s"
+echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
+echo "Settle: ${SETTLE_SEC}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
 echo ""
 
@@ -209,6 +227,11 @@ for ms in "${MESH_SIZES[@]}"; do
 
 	echo "--- Cleaning up ---"
 	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
+
+	if ((INTER_COMBO_SETTLE > 0)); then
+		echo "Inter-combo settle: ${INTER_COMBO_SETTLE}s..."
+		sleep "$INTER_COMBO_SETTLE"
+	fi
 	echo ""
 done
 
