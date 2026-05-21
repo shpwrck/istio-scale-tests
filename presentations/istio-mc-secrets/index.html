@@ -507,49 +507,51 @@ data:
 
     <!-- Hub frame -->
     <g class="step" data-step="1">
-      <rect x="20" y="30" width="490" height="450" rx="14"
+      <rect x="20" y="30" width="510" height="450" rx="14"
             fill="var(--c-hub-fill)" stroke="var(--c-hub)" stroke-width="2.5"/>
       <text x="40" y="60" class="lbl">hub</text>
       <text x="40" y="78" class="lbl-s">ns: external-secrets-operator</text>
 
-      <!-- Source Secrets on hub (only TWO kinds: cacerts-X and kubeconfig-X) -->
-      <rect x="40" y="100" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
-      <text x="155" y="122" class="lbl" text-anchor="middle">Secret</text>
-      <text x="155" y="142" class="lbl-c" text-anchor="middle" style="font-size:15px;">cacerts-cluster-a</text>
-
-      <rect x="40" y="170" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
-      <text x="155" y="192" class="lbl" text-anchor="middle">Secret</text>
-      <text x="155" y="212" class="lbl-c" text-anchor="middle" style="font-size:15px;">cacerts-cluster-b</text>
-
-      <rect x="40" y="245" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
-      <text x="155" y="267" class="lbl" text-anchor="middle">Secret</text>
-      <text x="155" y="287" class="lbl-c" text-anchor="middle" style="font-size:15px;">kubeconfig-cluster-a</text>
-
-      <rect x="40" y="315" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
-      <text x="155" y="337" class="lbl" text-anchor="middle">Secret</text>
-      <text x="155" y="357" class="lbl-c" text-anchor="middle" style="font-size:15px;">kubeconfig-cluster-b</text>
-
-      <!-- ESO control on hub: SecretStore-per-spoke + PushSecret -->
-      <rect x="300" y="135" width="195" height="235" rx="8"
+      <!-- ESO on the LEFT so delivery arrows from source Secrets to spokes can go straight right
+           without detouring around it. -->
+      <rect x="40" y="135" width="195" height="235" rx="8"
             fill="#ffffff" stroke="var(--c-eso)" stroke-width="2.5"/>
-      <text x="397" y="162" class="lbl" text-anchor="middle">ESO</text>
-      <text x="397" y="184" class="lbl-s" text-anchor="middle">SecretStore</text>
-      <text x="397" y="201" class="lbl-s" text-anchor="middle">per spoke</text>
-      <text x="397" y="217" class="lbl-s" text-anchor="middle" font-style="italic">(k8s provider)</text>
-      <text x="397" y="248" class="lbl-s" text-anchor="middle">PushSecret CRs:</text>
-      <text x="397" y="272" class="lbl-c" text-anchor="middle" style="font-size:15px;">push-cacerts-*</text>
-      <text x="397" y="294" class="lbl-c" text-anchor="middle" style="font-size:15px;">push-remote-secret-*</text>
-      <text x="397" y="324" class="lbl-s" text-anchor="middle" font-style="italic">ship a hub</text>
-      <text x="397" y="342" class="lbl-s" text-anchor="middle" font-style="italic">Secret to a spoke</text>
+      <text x="137" y="162" class="lbl" text-anchor="middle">ESO</text>
+      <text x="137" y="184" class="lbl-s" text-anchor="middle">SecretStore</text>
+      <text x="137" y="201" class="lbl-s" text-anchor="middle">per spoke</text>
+      <text x="137" y="217" class="lbl-s" text-anchor="middle" font-style="italic">(k8s provider)</text>
+      <text x="137" y="248" class="lbl-s" text-anchor="middle">PushSecret CRs:</text>
+      <text x="137" y="272" class="lbl-c" text-anchor="middle" style="font-size:15px;">push-cacerts-*</text>
+      <text x="137" y="294" class="lbl-c" text-anchor="middle" style="font-size:15px;">push-remote-secret-*</text>
+      <text x="137" y="324" class="lbl-s" text-anchor="middle" font-style="italic">ship a hub</text>
+      <text x="137" y="342" class="lbl-s" text-anchor="middle" font-style="italic">Secret to a spoke</text>
 
-      <text x="265" y="425" class="lbl-s" text-anchor="middle">kubeconfig-X feeds the SecretStore for cluster X</text>
+      <!-- Source Secrets on hub (cacerts-X and kubeconfig-X), now to the RIGHT of ESO -->
+      <rect x="265" y="100" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
+      <text x="380" y="122" class="lbl" text-anchor="middle">Secret</text>
+      <text x="380" y="142" class="lbl-c" text-anchor="middle" style="font-size:15px;">cacerts-cluster-a</text>
+
+      <rect x="265" y="170" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
+      <text x="380" y="192" class="lbl" text-anchor="middle">Secret</text>
+      <text x="380" y="212" class="lbl-c" text-anchor="middle" style="font-size:15px;">cacerts-cluster-b</text>
+
+      <rect x="265" y="245" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
+      <text x="380" y="267" class="lbl" text-anchor="middle">Secret</text>
+      <text x="380" y="287" class="lbl-c" text-anchor="middle" style="font-size:15px;">kubeconfig-cluster-a</text>
+
+      <rect x="265" y="315" width="230" height="55" rx="8" fill="#ffffff" stroke="var(--c-secret)" stroke-width="2"/>
+      <text x="380" y="337" class="lbl" text-anchor="middle">Secret</text>
+      <text x="380" y="357" class="lbl-c" text-anchor="middle" style="font-size:15px;">kubeconfig-cluster-b</text>
+
+      <text x="275" y="425" class="lbl-s" text-anchor="middle">kubeconfig-X feeds the SecretStore for cluster X</text>
     </g>
 
-    <!-- Step 2: SecretStores authenticate using kubeconfig-X (server URL + bearer token come from that Secret). -->
+    <!-- Step 2: SecretStores authenticate using kubeconfig-X. Arrows exit kubeconfig-X's LEFT edge
+         and travel LEFT into ESO (since ESO is now to the left of the source-Secret column). -->
     <g class="step" data-step="2">
-      <path d="M 270 272 H 285 V 220 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 265 272 H 250 V 220 H 235" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso)"/>
-      <path d="M 270 342 H 290 V 270 H 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
+      <path d="M 265 342 H 250 V 280 H 235" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso)"/>
     </g>
 
@@ -569,10 +571,10 @@ data:
       <text x="815" y="194" class="lbl-s" text-anchor="middle">label: <tspan class="lbl-c" style="font-size:14px;">istio/multiCluster=true</tspan></text>
       <text x="815" y="214" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-b</tspan></text>
 
-      <!-- cacerts-cluster-a → cluster-a/cacerts (route ABOVE ESO box; y=127 is already above ESO top y=135). Color: teal (--c-spoke-a) marks destination cluster-a. -->
-      <path d="M 270 127 H 580 V 115 H 660" stroke="var(--c-spoke-a)" stroke-width="2" fill="none" marker-end="url(#arrow-to-a)"/>
-      <!-- kubeconfig-cluster-b → cluster-a istio-remote-secret-b (cross-pollination; route OVER ESO at y=100; exit y=355, V at x=275). Color: teal (--c-spoke-a) marks destination cluster-a. -->
-      <path d="M 270 355 H 275 V 100 H 600 V 190 H 660" stroke="var(--c-spoke-a)" stroke-width="2" fill="none" marker-end="url(#arrow-to-a)"/>
+      <!-- cacerts-cluster-a → cluster-a/cacerts. Direct H-V-H route now that ESO is on the left. -->
+      <path d="M 495 127 H 515 V 115 H 660" stroke="var(--c-spoke-a)" stroke-width="2" fill="none" marker-end="url(#arrow-to-a)"/>
+      <!-- kubeconfig-cluster-b → cluster-a istio-remote-secret-b (cross-pollination, UP). -->
+      <path d="M 495 342 H 560 V 190 H 660" stroke="var(--c-spoke-a)" stroke-width="2" fill="none" marker-end="url(#arrow-to-a)"/>
     </g>
 
     <!-- Cluster B target frame: receives cacerts (from cacerts-cluster-b) and istio-remote-secret-cluster-a (templated from kubeconfig-cluster-a). -->
@@ -591,10 +593,10 @@ data:
       <text x="815" y="429" class="lbl-s" text-anchor="middle">label: <tspan class="lbl-c" style="font-size:14px;">istio/multiCluster=true</tspan></text>
       <text x="815" y="449" class="lbl-s" text-anchor="middle">templated from <tspan class="lbl-c" style="font-size:14px;">kubeconfig-cluster-a</tspan></text>
 
-      <!-- cacerts-cluster-b → cluster-b/cacerts (route UNDER ESO at y=395). Color: orange (--c-spoke-b) marks destination cluster-b. -->
-      <path d="M 270 197 H 280 V 395 H 580 V 350 H 660" stroke="var(--c-spoke-b)" stroke-width="2" fill="none" marker-end="url(#arrow-to-b)"/>
-      <!-- kubeconfig-cluster-a → cluster-b istio-remote-secret-a (cross-pollination; route UNDER ESO at y=415; exit y=285). Color: orange (--c-spoke-b) marks destination cluster-b. -->
-      <path d="M 270 285 H 295 V 415 H 620 V 425 H 660" stroke="var(--c-spoke-b)" stroke-width="2" fill="none" marker-end="url(#arrow-to-b)"/>
+      <!-- cacerts-cluster-b → cluster-b/cacerts. Direct route. -->
+      <path d="M 495 197 H 530 V 350 H 660" stroke="var(--c-spoke-b)" stroke-width="2" fill="none" marker-end="url(#arrow-to-b)"/>
+      <!-- kubeconfig-cluster-a → cluster-b istio-remote-secret-a (cross-pollination, DOWN). -->
+      <path d="M 495 272 H 545 V 425 H 660" stroke="var(--c-spoke-b)" stroke-width="2" fill="none" marker-end="url(#arrow-to-b)"/>
     </g>
 
     <!-- Step 5: cross-pollination callout — the counter-intuitive bit. kubeconfig-A lands on cluster-b,
