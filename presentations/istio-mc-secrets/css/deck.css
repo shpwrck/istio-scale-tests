@@ -43,9 +43,10 @@
   color: var(--c-fg);
 }
 
-.reveal h1 { font-size: 2.0em; }
-.reveal h2 { font-size: 1.5em; }
-.reveal h3 { font-size: 1.15em; }
+.reveal h1 { font-size: 1.8em; }
+.reveal h2 { font-size: 1.15em; margin-bottom: 0.4em; }
+.reveal h3 { font-size: 1.0em; }
+.reveal h2 code { font-size: 0.95em; }
 
 .reveal .slide-title-deck {
   font-size: 1.9em;
@@ -104,7 +105,7 @@
 .reveal svg.diagram {
   width: 100%;
   height: auto;
-  max-height: 70vh;
+  max-height: 78vh;
   display: block;
   margin: 0 auto;
 }
