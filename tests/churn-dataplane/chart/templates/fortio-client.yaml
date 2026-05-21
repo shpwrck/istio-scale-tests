@@ -1,0 +1,32 @@
+{{- if or (eq .Values.fortioRole "client") (eq .Values.fortioRole "both") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fortio-client
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: fortio-client
+    {{- include "churn-dataplane.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "churn-dataplane.fortio-client.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app: fortio-client
+        {{- include "churn-dataplane.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: fortio
+          image: {{ .Values.fortioImage.repository }}:{{ .Values.fortioImage.tag }}
+          args: ["server", "-http-port", "8090", "-redirect-port", "-1"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}

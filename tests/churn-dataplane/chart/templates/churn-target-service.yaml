@@ -1,0 +1,22 @@
+{{- range $i := until (.Values.churnDeploymentCount | int) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: churn-target-{{ $i }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: churn-target
+    churn-target: "true"
+    churn-index: "{{ $i }}"
+    {{- include "churn-dataplane.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app: churn-target
+    churn-index: "{{ $i }}"
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}

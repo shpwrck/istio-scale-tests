@@ -111,6 +111,15 @@ apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 
 CHART_DIR="${ROOT}/tests/dataplane/chart"
 
+# Build --set flags for allClusterNames so every cluster gets per-cluster
+# Services for ALL clusters. Without this, DNS can't resolve
+# dataplane-server-${remote} on the source cluster (unless Istio DNS
+# proxying is enabled, which is not the default on OSSM 3.x).
+ALL_CN_SETS=()
+for i in "${!ALL_CTXS[@]}"; do
+	ALL_CN_SETS+=(--set "allClusterNames[$i]=${ALL_CTXS[$i]}")
+done
+
 echo "Deploying fortio server on all clusters (image tag: ${FORTIO_TAG})..."
 for ctx in "${ALL_CTXS[@]}"; do
 	echo "  Server on $ctx"
@@ -119,6 +128,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 		--set namespace="$NS" \
 		--set role=server \
 		--set image.tag="$FORTIO_TAG" \
+		"${ALL_CN_SETS[@]}" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 
@@ -128,6 +138,7 @@ helm template dataplane-test "$CHART_DIR" \
 	--set namespace="$NS" \
 	--set role=both \
 	--set image.tag="$FORTIO_TAG" \
+	"${ALL_CN_SETS[@]}" \
 	| "${apply[@]}" --context="$SOURCE_CTX" -f -
 
 if ((DRY_RUN)); then

@@ -8,15 +8,27 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
 
 | Phase | What | How |
 |-------|------|-----|
-| P1 | Local istiod pushes xDS to local sidecars | Poll istiod `/debug/syncz` |
-| P2 | Remote istiod discovers new endpoints | Poll remote istiod `/debug/endpointz` |
-| P3 | Remote sidecar has HEALTHY endpoints | Poll watcher pod's Envoy admin API (`/clusters`) |
+| P1 | Local istiod pushes xDS to local sidecars | Delta of `pilot_proxy_convergence_time` histogram on source istiod (converged when delta `_count` reaches connected proxy count). Reports both wall-clock detection time and delta-window p50/p99 of the histogram itself. |
+| P2 | Remote istiod discovers new endpoints | Delta of `pilot_xds_pushes{type="eds"}` counter on each remote istiod. First non-zero delta = remote learned about the new endpoint and pushed EDS. |
+| P3 | Remote sidecar has HEALTHY endpoints | Watcher pod's Envoy admin `/clusters` polled at >= 1 Hz (the only data-plane-side signal without a custom xDS client). |
 
 In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService and DestinationRule are local config processed only by the istiod that owns the namespace.
 
+### Why histogram-based P1 (not /debug/syncz)
+
+`/debug/syncz` and `/debug/endpointz` serialize the full push context (or endpoint catalogue) per request — at hundreds of services and many clusters that is hundreds of MB of JSON and seconds of CPU per poll. The probe ends up competing with the work it's measuring; the recorded timestamp reflects when istiod could finally serve the debug endpoint, not when convergence happened.
+
+`pilot_proxy_convergence_time` is the same histogram that the repo's `charts/istiod-monitor/templates/prometheusrule.yaml` aggregates into `pilot:proxy_convergence_time:p99_5m`. It records one sample per push-ACK. The probe captures a snapshot of `_bucket`/`_sum`/`_count` before the canary apply, then polls until the delta `_count` reaches `proxy_count` (each connected proxy has received at least one push). `pilot_xds_pushes{type="eds"}` is already per-proxy, so the threshold is simply the connected proxy count.
+
+### Single-istiod-replica precondition
+
+The probe reaches istiod via `kubectl port-forward svc/istiod`, which load-balances to one random replica per connection. At multi-replica istiod, baseline and current snapshots can land on different replicas — and `pilot_xds` (connected-proxy gauge) and `pilot_proxy_convergence_time` only count what that one replica saw, so the detection threshold passes at roughly `1/replicas` of real convergence.
+
+The probe currently `die`s if any context has != 1 istiod pod. The correct long-term fix is per-pod port-forwards with aggregated metrics; the precondition is the cheap escape hatch.
+
 ## Prerequisites
 
-- `oc` or `kubectl`, `helm`, `jq`, `curl`
+- `oc` or `kubectl`, `helm`, `jq`, `curl`, `awk`
 - Multi-primary mesh deployed (see root README)
 - Kube contexts configured for each cluster
 
@@ -29,7 +41,7 @@ In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService a
 # 2. Run endpoint probe (2-cluster)
 ./tests/propagation/002-run-endpoint-probe.sh \
   --source-context rosa-001 --remote-contexts rosa-002 \
-  --iterations 10
+  --iterations 10 --tsv
 
 # 3. View results
 ./tests/propagation/005-report-results.sh
@@ -44,16 +56,21 @@ Compare propagation latency at different cluster counts:
 ./tests/propagation/006-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3 \
-  --iterations 5
+  --iterations 5 --tsv
 
-# Dry-run to see plan without executing
-./tests/propagation/006-run-sweep.sh --dry-run
+# Dry-run prints the planned matrix to stderr without touching clusters
+./tests/propagation/006-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --mesh-sizes 1,2,3 --dry-run
 ```
+
+Each sweep writes into `tests/propagation/results/sweep-${RUN_ID}/` so individual sweep runs are not interleaved with one another.
 
 The sweep orchestrator:
 1. Sets up watcher pods on clusters for each mesh size
 2. Runs endpoint probe (002) at each size
-3. Generates a comparison report grouped by mesh_size
+3. Sleeps `--settle-sec` (default 5s) between mesh-size steps
+4. Generates a comparison report grouped by mesh_size
 
 ## Passive Metrics Collection
 
@@ -83,13 +100,75 @@ histogram_quantile(0.99, rate(pilot_proxy_convergence_time_bucket[5m]))
 
 ## Results Format
 
-TSV files in `tests/propagation/results/` (gitignored):
+TSV files in `tests/propagation/results/` (gitignored). Sweep runs use `tests/propagation/results/sweep-${RUN_ID}/`.
+
+### TSV preamble
+
+Each TSV begins with `# KEY=VALUE` comment lines:
 
 ```
-run_id  mesh_size  iteration  source_ctx  remote_ctx  t0_epoch_ns  p1_local_ms  p2_discovery_ms  p3_dataplane_ms  status
+# RUN_ID=20250520T101530-12345
+# HARNESS_SHA=abc1234
+# ISTIO_VERSION=v1.28.5
+# KUBE_VERSIONS=rosa-001=v1.34.6,rosa-002=v1.34.6,rosa-003=unreachable
+# SOURCE_CTX=rosa-001
+# REMOTES=rosa-002 rosa-003
+# MESH_SIZE=3
+# ITERATIONS=10
+# POLL_INTERVAL_S=0.250
+# TIMEOUT_SEC=120
+# SETTLE_SEC=5
+# DATE=2025-05-20T10:15:30+00:00
 ```
 
-Report output groups by mesh_size with min/max/avg/p50/p95/p99 statistics.
+`KUBE_VERSIONS` is probed concurrently with `--request-timeout=5s`; unreachable contexts emit `unreachable`, contexts that respond without parseable version emit `unknown`.
+
+### TSV columns
+
+```
+run_id  mesh_size  iteration  source_ctx  remote_ctx  t0_epoch_ns
+p1_ms  p2_ms  p3_ms  status
+p1_conv_p50_ms  p1_conv_p99_ms  p1_sample_count  p1_proxy_count  p1_overflow
+restarted  p2_dirty  window_ms  scrape_skew_ms
+```
+
+| Column | Meaning |
+|--------|---------|
+| `p1_ms` | Wall-clock ms from canary apply until source istiod histogram delta `_count` reached `proxy_count`. `TIMEOUT` or `N/A` (when `restarted=1`). |
+| `p2_ms` | Wall-clock ms until remote istiod `pilot_xds_pushes{type="eds"}` delta > 0. |
+| `p3_ms` | Wall-clock ms until watcher Envoy `/clusters` reports healthy canary endpoints. |
+| `status` | `OK`, `TIMEOUT_P1`/`P2`/`P3`/`ALL`, `RESTART`, or `DRAIN_TIMEOUT` (canary endpoint did not drain from a watcher before the next iteration; data is suspect). |
+| `p1_conv_p50_ms`, `p1_conv_p99_ms` | Quantiles computed over the per-bucket delta of the source-istiod histogram across the iteration window. `N/A` if `restarted=1`, if the sample count is below the min-sample floor (10 for p50, 30 for p99), or if there are no samples. `overflow` if the quantile falls in the `+Inf` bucket. |
+| `p1_sample_count` | `got/attempted` — delta `_count` (samples actually observed in window) over `proxy_count` (baseline gauge). Useful for sanity-checking the detection threshold. |
+| `p1_proxy_count` | `pilot_xds` gauge from the baseline scrape (connected proxies on source istiod). |
+| `p1_overflow` | `1` if the `+Inf` bucket gained more samples than any finite bucket (statistically unsafe — quantiles below). |
+| `restarted` | `0` / `1` / `unknown` — `1` if `process_start_time_seconds` on the source istiod changed mid-iteration; `unknown` if baseline or current `process_start_time_seconds` was missing (so we cannot tell). |
+| `p2_dirty` | `0` / `1` — `1` when the remote istiod's EDS push counter advanced **without** a matching `pilot_services` gauge delta of ≥ 1, i.e. the EDS bump could be unrelated endpoint churn rather than our canary. `005` drops `p2_ms` from numeric aggregation when this is set. |
+| `window_ms` | Wall-clock duration of the per-iteration measurement window. |
+| `scrape_skew_ms` | `max(ts) - min(ts)` across the per-context baseline-scrape timestamps. |
+
+Backwards-compat:
+
+- **Pre-branch TSVs are readable by new `005`** — the missing columns (`p1_conv_*`, `p1_sample_count`, `p1_proxy_count`, `p1_overflow`, `restarted`, `p2_dirty`) default-fill to `"0"` / `"N/A"`. Old rows pass the filtering policy unchanged.
+- **New TSVs are readable by pre-branch `005`** — positional `p1_ms`/`p2_ms`/`p3_ms` columns are unchanged at fields 7/8/9, so pre-branch readers see them as expected and ignore the trailing columns.
+
+### Reporting
+
+`005-report-results.sh`:
+
+- Filters rows where any of:
+  - `restarted == 1` or `restarted == unknown`
+  - `p1_overflow == 1`
+  - `status != OK` (`TIMEOUT_*`, `DRAIN_TIMEOUT`, `RESTART`)
+- Additionally suppresses `p2_ms` from numeric aggregation when `p2_dirty == 1`.
+- Emits both `n_total` (rows considered) and `n_valid` (rows used).
+- Carries forward all preamble metadata into `text`, `csv`, `json`, and `markdown` output.
+
+### Known limitations
+
+- **istiod single-replica required**: see "Single-istiod-replica precondition" above. The probe `die`s on > 1 istiod replica per cluster.
+- **`/metrics` scrape timeout**: defaults to 5 s. On very large meshes (100k+ services) the istiod `/metrics` payload may take longer than 5 s to render — bump `PROPAGATION_METRICS_TIMEOUT` (seconds).
+- **Min-sample floor for quantiles**: `p1_conv_p50_ms` requires ≥ 10 samples, `p1_conv_p99_ms` requires ≥ 30 samples. Smaller proxy counts (e.g. 5 connected proxies) will emit `N/A` for p99. Use the wall-clock `p1_ms` for small meshes.
 
 ## Cleanup
 
@@ -102,8 +181,8 @@ Report output groups by mesh_size with min/max/avg/p50/p95/p99 statistics.
 | Script | Purpose |
 |--------|---------|
 | `001-setup-propagation-test.sh` | Deploy/cleanup watcher pods and namespace |
-| `002-run-endpoint-probe.sh` | Measure endpoint propagation (P1/P2/P3) |
+| `002-run-endpoint-probe.sh` | Measure endpoint propagation (P1/P2/P3) via `pilot_proxy_convergence_time` + `pilot_xds_pushes{type="eds"}` + watcher Envoy |
 | `004-collect-pilot-metrics.sh` | Scrape istiod Prometheus metrics |
 | `005-report-results.sh` | Generate summary statistics from TSV results |
-| `006-run-sweep.sh` | Orchestrate probes across multiple mesh sizes |
+| `006-run-sweep.sh` | Orchestrate probes across multiple mesh sizes; writes into per-sweep `sweep-${RUN_ID}/` subdir |
 | `007-cleanup.sh` | Remove all propagation-test resources |

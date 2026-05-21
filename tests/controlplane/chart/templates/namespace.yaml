@@ -1,6 +1,12 @@
+{{- include "controlplane-test.validateSidecarScoping" . -}}
+{{- $nsList := fromYamlArray (include "controlplane-test.namespaces" .) -}}
+{{- range $ns := $nsList }}
+---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.namespace }}
+  name: {{ $ns }}
   labels:
     istio.io/rev: default
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+{{- end }}

@@ -16,6 +16,7 @@
 /tests/controlplane/results/
 /tests/dataplane/results/
 /tests/churn/results/
+/tests/churn-dataplane/results/
 
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)
 /terraform/**/.terraform/
@@ -26,4 +27,5 @@
 /terraform/**/*.tfplan
 /terraform/**/crash.log
 /terraform/**/crash.*.log
-/terraform/**/terraform.tfvars
+/terraform/**/*.tfvars
+!/terraform/**/*.tfvars.example

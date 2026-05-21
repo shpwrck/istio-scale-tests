@@ -1,0 +1,5 @@
+apiVersion: v2
+name: churn-dataplane-test
+description: Composite chart that co-deploys fortio (server+client) and churn-target workloads into a single namespace for measuring data-plane latency delta under churn.
+type: application
+version: 0.1.0
