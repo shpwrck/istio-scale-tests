@@ -58,6 +58,7 @@ No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want
 4. Control-plane testing — measure istiod resource consumption as mesh size grows (`tests/controlplane/`).
 5. Data-plane testing — measure cross-cluster latency and throughput through east-west gateways (`tests/dataplane/`).
 6. Churn testing — measure control-plane convergence under endpoint churn (`tests/churn/`).
+7. Churn × data-plane co-execution — measure how p99 request latency degrades while endpoint churn runs (`tests/churn-dataplane/`).
 
 ---
 
@@ -146,6 +147,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `tests/controlplane/` | Control-plane resource scaling test suite: scripts + `chart/` Helm chart. |
 | `tests/dataplane/` | Data-plane latency test suite: scripts + `chart/` Helm chart. |
 | `tests/churn/` | Churn/convergence test suite: scripts + `chart/` Helm chart. |
+| `tests/churn-dataplane/` | Endpoint-churn × data-plane co-execution test suite: emits `Δp99_ms` (latency delta while endpoint churn runs). Scripts + composite `chart/`. |
 
 </details>
 
@@ -345,6 +347,23 @@ Measure control-plane convergence time under simultaneous scaling events. Scales
 ```
 
 See `tests/churn/README.md` for full usage.
+
+---
+
+## 7. Endpoint-Churn × Data-Plane Co-execution (`tests/churn-dataplane/`)
+
+Measure how p99 request latency degrades while endpoint churn (Deployment scale events → EDS pushes) is happening on the same clusters. Co-deploys fortio (server + client) and churn-target workloads in a single shared namespace; runs paired baseline / churn measurement windows and emits `Δp99_ms`.
+
+```bash
+# Sweep mesh sizes × churn rates (ops/s)
+./tests/churn-dataplane/004-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --mesh-sizes 1,2,3 \
+  --churn-rates 1,5,10
+```
+
+See `tests/churn-dataplane/README.md` for full usage (including the
+single-istiod-replica precondition).
 
 ---
 
