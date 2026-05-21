@@ -102,10 +102,35 @@ if [[ ${#ENDPOINT_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# ---- preamble metadata: collect across all files (last value wins per key) ----
-declare -A PREAMBLE=()
-PREAMBLE_KEYS=(RUN_ID HARNESS_SHA ISTIO_VERSION KUBE_VERSIONS SOURCE_CTX REMOTES MESH_SIZE ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC DATE)
+# ---- preamble metadata: collect across all files ----------------------------
+# Two partitions (PL19 — preamble propagation must survive into all 4 formats):
+#
+# SWEEP_LEVEL_KEYS — scalar, identical across all input TSVs in a sweep. Emitted
+#   once at the top of the metadata block.
+#     SWEEP_RUN_ID is first so the outer→inner ordering reads correctly when
+#     a sweep ran. For standalone probe TSVs SWEEP_RUN_ID is absent (002 omits
+#     the line when --sweep-run-id is empty), and the report just drops it.
+#
+# PER_ITER_KEYS — vary per iteration; emitted as a sequence (one entry per input
+#   TSV). A single-input run (or a sweep with one mesh size and one probe) is
+#   still rendered as a one-element sequence so the schema is uniform.
+#
+# Implementation: for each input file we collect a row of key=value pairs into
+# PER_FILE_<KEY>[i]. Scalars are looked up via the first row (homogeneous by
+# definition); sequences iterate the rows in input order.
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC)
+PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
+# Legacy combined order used by report_endpoint_*'s "first valid value" lookup
+# (preserved so any scalar key, even one we have not classified, still appears).
+PREAMBLE_KEYS=("${SWEEP_LEVEL_KEYS[@]}" "${PER_ITER_KEYS[@]}")
+
+declare -A PREAMBLE=()         # last-value-wins scalar map (sweep-level keys)
+declare -A PER_FILE_VALS=()    # KEY|idx -> value (per-iteration values)
+declare -a PER_FILE_INDICES=() # 0..N-1 indices for input files, in collection order
+N_FILES=0
 for f in "${ENDPOINT_FILES[@]}"; do
+	idx="$N_FILES"
+	PER_FILE_INDICES+=("$idx")
 	while IFS= read -r line; do
 		case "$line" in
 			'# '*)
@@ -114,60 +139,169 @@ for f in "${ENDPOINT_FILES[@]}"; do
 				val="${kv#*=}"
 				[[ "$key" == "$kv" ]] && continue
 				PREAMBLE["$key"]="$val"
+				PER_FILE_VALS["${key}|${idx}"]="$val"
 				;;
 			*) ;;
 		esac
 	done < <(grep -E '^# [A-Z_]+=' "$f" || true)
+	N_FILES=$((N_FILES + 1))
 done
 
+# Helper: does any per-file row carry this key?
+preamble_has() {
+	local k="$1" i
+	for i in "${PER_FILE_INDICES[@]}"; do
+		[[ -n "${PER_FILE_VALS[${k}|${i}]:-}" ]] && return 0
+	done
+	[[ -n "${PREAMBLE[$k]:-}" ]] && return 0
+	return 1
+}
+
+# JSON-escape a single value (backslash + quote only; values are ASCII run metadata).
+json_escape() {
+	local v="$1"
+	v="${v//\\/\\\\}"
+	v="${v//\"/\\\"}"
+	printf '%s' "$v"
+}
+
+# CSV-escape (RFC4180 — quote if comma/quote/newline; double internal quotes).
+csv_escape() {
+	local v="$1"
+	if [[ "$v" == *","* || "$v" == *'"'* || "$v" == *$'\n'* ]]; then
+		printf '"%s"' "${v//\"/\"\"}"
+	else
+		printf '%s' "$v"
+	fi
+}
+
 format_preamble_text() {
-	local k
-	for k in "${PREAMBLE_KEYS[@]}"; do
-		[[ -n "${PREAMBLE[$k]:-}" ]] && printf "  %s: %s\n" "$k" "${PREAMBLE[$k]}"
+	local k i v
+	for k in "${SWEEP_LEVEL_KEYS[@]}"; do
+		preamble_has "$k" || continue
+		printf "  %s: %s\n" "$k" "${PREAMBLE[$k]:-}"
+	done
+	# Per-iteration block: one section per input file, indented under "iterations:".
+	local any_iter=0
+	for k in "${PER_ITER_KEYS[@]}"; do
+		preamble_has "$k" && { any_iter=1; break; }
+	done
+	((any_iter)) || return 0
+	printf "  iterations:\n"
+	for i in "${PER_FILE_INDICES[@]}"; do
+		printf "    -\n"
+		for k in "${PER_ITER_KEYS[@]}"; do
+			v="${PER_FILE_VALS[${k}|${i}]:-}"
+			[[ -n "$v" ]] && printf "      %s: %s\n" "$k" "$v"
+		done
 	done
 	return 0
 }
+
 format_preamble_md() {
-	local k
-	for k in "${PREAMBLE_KEYS[@]}"; do
-		[[ -n "${PREAMBLE[$k]:-}" ]] && printf "%s: \"%s\"\n" "$k" "${PREAMBLE[$k]}"
+	# YAML frontmatter: scalars first, then iterations as a YAML sequence so
+	# downstream tools (and human readers) can recover per-iteration provenance.
+	local k i v
+	for k in "${SWEEP_LEVEL_KEYS[@]}"; do
+		preamble_has "$k" || continue
+		printf "%s: \"%s\"\n" "$k" "${PREAMBLE[$k]:-}"
+	done
+	local any_iter=0
+	for k in "${PER_ITER_KEYS[@]}"; do
+		preamble_has "$k" && { any_iter=1; break; }
+	done
+	((any_iter)) || return 0
+	printf "iterations:\n"
+	for i in "${PER_FILE_INDICES[@]}"; do
+		# Sequence marker on its own line so each per-iteration mapping is a
+		# proper YAML block — easier to read than inline flow form for sweeps
+		# with many iterations.
+		printf "  -\n"
+		for k in "${PER_ITER_KEYS[@]}"; do
+			v="${PER_FILE_VALS[${k}|${i}]:-}"
+			[[ -n "$v" ]] && printf "    %s: \"%s\"\n" "$k" "$v"
+		done
 	done
 	return 0
 }
+
 format_preamble_csv_header() {
-	local k first=1
-	for k in "${PREAMBLE_KEYS[@]}"; do
-		((first)) || printf ","
-		printf "%s" "$k"
-		first=0
+	# Sweep-level scalars rendered as "# KEY=VALUE" comment lines above the
+	# data table (uniform with text format) so the CSV remains a single tabular
+	# stream readable by spreadsheet tools that skip leading comments.
+	# Per-iteration block is a small CSV blob after the scalars.
+	local k i v
+	for k in "${SWEEP_LEVEL_KEYS[@]}"; do
+		preamble_has "$k" || continue
+		printf "# %s=%s\n" "$k" "${PREAMBLE[$k]:-}"
 	done
-	printf "\n"
-	first=1
-	for k in "${PREAMBLE_KEYS[@]}"; do
-		((first)) || printf ","
-		# CSV-escape: quote if value contains comma or quote.
-		local v="${PREAMBLE[$k]:-}"
-		if [[ "$v" == *","* || "$v" == *'"'* ]]; then
-			v="\"${v//\"/\"\"}\""
-		fi
-		printf "%s" "$v"
-		first=0
+	local any_iter=0
+	for k in "${PER_ITER_KEYS[@]}"; do
+		preamble_has "$k" && { any_iter=1; break; }
 	done
-	printf "\n"
+	if ((any_iter)); then
+		printf "# iterations:\n"
+		# Header row for the per-iteration block.
+		local first=1
+		printf "# "
+		for k in "${PER_ITER_KEYS[@]}"; do
+			preamble_has "$k" || continue
+			((first)) || printf ","
+			printf "%s" "$k"
+			first=0
+		done
+		printf "\n"
+		for i in "${PER_FILE_INDICES[@]}"; do
+			first=1
+			printf "# "
+			for k in "${PER_ITER_KEYS[@]}"; do
+				preamble_has "$k" || continue
+				((first)) || printf ","
+				v="${PER_FILE_VALS[${k}|${i}]:-}"
+				csv_escape "$v"
+				first=0
+			done
+			printf "\n"
+		done
+	fi
 }
+
 format_preamble_json() {
-	local k first=1
+	# Sweep-level scalars become top-level metadata fields; per-iteration values
+	# go into an "iterations" array of objects so downstream JSON consumers can
+	# recover every iteration's RUN_ID/DATE/MESH_SIZE without re-reading TSVs.
+	local k i v first=1
 	printf '{'
-	for k in "${PREAMBLE_KEYS[@]}"; do
-		[[ -z "${PREAMBLE[$k]:-}" ]] && continue
+	for k in "${SWEEP_LEVEL_KEYS[@]}"; do
+		preamble_has "$k" || continue
 		((first)) || printf ","
-		# Conservative JSON escape.
-		local v="${PREAMBLE[$k]}"
-		v="${v//\\/\\\\}"
-		v="${v//\"/\\\"}"
-		printf '"%s":"%s"' "$k" "$v"
+		printf '"%s":"%s"' "$k" "$(json_escape "${PREAMBLE[$k]:-}")"
 		first=0
 	done
+	local any_iter=0
+	for k in "${PER_ITER_KEYS[@]}"; do
+		preamble_has "$k" && { any_iter=1; break; }
+	done
+	if ((any_iter)); then
+		((first)) || printf ","
+		printf '"iterations":['
+		local row_first=1 kv_first
+		for i in "${PER_FILE_INDICES[@]}"; do
+			((row_first)) || printf ","
+			printf '{'
+			kv_first=1
+			for k in "${PER_ITER_KEYS[@]}"; do
+				v="${PER_FILE_VALS[${k}|${i}]:-}"
+				[[ -z "$v" ]] && continue
+				((kv_first)) || printf ","
+				printf '"%s":"%s"' "$k" "$(json_escape "$v")"
+				kv_first=0
+			done
+			printf '}'
+			row_first=0
+		done
+		printf ']'
+	fi
 	printf '}'
 }
 
@@ -384,7 +518,7 @@ report_endpoint_markdown() {
 		# Cross-mesh-size comparison (only meaningful when >1 mesh size was swept).
 		if (__n > 1) {
 			printf "## Comparison across mesh sizes\n\n"
-			printf "Averages over rows surviving the report filter (restarted ∈ {1, unknown}, "
+			printf "Averages over rows surviving the report filter (restarted in {1, unknown}, "
 			printf "p1_overflow=1, and status != OK are dropped; P2 also drops p2_dirty=1 rows). "
 			printf "Cells show `avg (n_valid)`; per-mesh-size tables above carry the full breakdown.\n\n"
 			printf "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 avg (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |\n"

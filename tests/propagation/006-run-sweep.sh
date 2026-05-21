@@ -193,7 +193,7 @@ if ((DRY_RUN)); then
 			done
 			echo "--- Plan: mesh_size=$ms ---"
 			echo "  001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
-			echo "  002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --iterations $ITERATIONS --settle-sec $SETTLE_SEC"
+			echo "  002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --sweep-run-id $SWEEP_RUN_ID --iterations $ITERATIONS --settle-sec $SETTLE_SEC"
 			if ((COLLECT_METRICS)); then
 				echo "  004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
 			fi
@@ -260,6 +260,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	endpoint_args=(
 		--source-context "$source_ctx"
 		--mesh-size "$ms"
+		--sweep-run-id "$SWEEP_RUN_ID"
 		--iterations "$ITERATIONS"
 		--timeout "$TIMEOUT_SEC"
 		--settle-sec "$SETTLE_SEC"
