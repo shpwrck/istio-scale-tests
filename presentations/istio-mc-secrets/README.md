@@ -35,7 +35,7 @@ Five hand-authored SVG animations. Each plays step-by-step as you press
 | - | ----------- | ------------- |
 | A | Topology: multi-primary, multi-network | Two clusters, each with istiod + workload + east-west gateway (`:15443 AUTO_PASSTHROUGH`), and a cross-cluster mTLS call traversing both gateways. |
 | B | cert-manager assembles `cacerts` | Hub root `Certificate` &rarr; `ClusterIssuer` &rarr; one intermediate `Certificate` per spoke &rarr; the four-key `cacerts` Secret (`ca-cert.pem`, `ca-key.pem`, `root-cert.pem`, `cert-chain.pem`) per cluster. |
-| C | ESO `PushSecret`: hub &rarr; each spoke | Hub-side `ClusterSecretStore` + `PushSecret` CRs shipping `cacerts` and `istio-remote-secret-{cluster}` Secrets into each spoke's `istio-system`, applying `istio/multiCluster=true`. |
+| C | ESO `PushSecret`: hub &rarr; each spoke | Hub-side `SecretStore` + `PushSecret` CRs shipping `cacerts` and `istio-remote-secret-{cluster}` Secrets into each spoke's `istio-system`, applying `istio/multiCluster=true`. |
 | D | How the remote secret drives discovery | istiod on cluster A reading the kubeconfig-shaped Secret in `istio-system`, watching cluster B's apiserver, and pushing cluster B endpoints into cluster A's sidecars via xDS. |
 | E | ACM &rarr; ManagedServiceAccount &rarr; Argo &rarr; ESO &rarr; kubeconfig | `ManagedCluster` registration &rarr; ACM `ManagedServiceAccount` mints SA + token on the spoke and mirrors back to hub &rarr; `GitOpsCluster` + ACM `Placement` causes Argo CD to write `{cluster}-application-manager-cluster-secret` &rarr; ESO `ExternalSecret` templates `kubeconfig-{cluster}` on the hub. |
 

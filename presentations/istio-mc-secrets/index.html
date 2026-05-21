@@ -21,12 +21,10 @@
   <p class="subtitle">cert-manager + External Secrets + ACM &middot; the secrets that wire the mesh together</p>
   <p class="subtitle" style="margin-top:2em;">A 20-minute walk through the dependency graph</p>
   <aside class="notes">
-    Welcome. In the next 20 minutes I will show you how a multi-primary, multi-network
-    Istio service mesh that spans two or more OpenShift clusters is actually wired up — focusing
-    on the three Kubernetes Secrets that make it work and the four operators (cert-manager,
-    External Secrets, Argo CD, and ACM) that produce and distribute those secrets.
-    The audience I have in mind is fluent in Kubernetes, Helm, and RBAC but new to Istio
-    multicluster, so I will define every Istio-specific term the first time it appears.
+    Welcome. In ~20 minutes we'll walk through how a multi-primary, multi-network Istio mesh spanning two
+    OpenShift clusters is wired up — the three Kubernetes Secrets that make it work and the four operators
+    (cert-manager, External Secrets, Argo CD, ACM) that produce and distribute them. Audience: fluent in
+    Kubernetes/Helm/RBAC but new to Istio multicluster, so Istio terms get a one-line gloss on first use.
   </aside>
 </section>
 
@@ -58,19 +56,16 @@
 <section>
   <h2>Vocabulary (defined once, used everywhere)</h2>
   <ul style="font-size:0.78em;">
-    <li><span class="term">Mesh ID</span> <span class="term-def">— a logical identifier shared by all clusters in one mesh. Same value on every cluster. Example: <code>mesh1</code>.</span></li>
-    <li><span class="term">Cluster name</span> <span class="term-def">— Istio's per-cluster label (distinct from the Kubernetes cluster name in kubeconfigs). Example: <code>cluster-a</code>.</span></li>
     <li><span class="term">Network ID</span> <span class="term-def">— the L3/L4 reachability domain. Clusters with different network IDs cannot reach each other's pod IPs directly — traffic must go through an east-west gateway.</span></li>
     <li><span class="term">Trust domain</span> <span class="term-def">— the SPIFFE root of identity. All clusters in one mesh share one trust domain — that is what lets cluster A's mTLS certificate be valid on cluster B.</span></li>
     <li><span class="term">East-west gateway</span> <span class="term-def">— a special Istio gateway listening on port <code>15443</code> with TLS mode <code>AUTO_PASSTHROUGH</code>. It forwards mTLS traffic between networks without terminating TLS.</span></li>
     <li><span class="term">Remote secret</span> <span class="term-def">— a kubeconfig-shaped Kubernetes Secret in <code>istio-system</code>, labeled <code>istio/multiCluster: true</code>. It tells istiod how to read another cluster's Kubernetes API.</span></li>
   </ul>
   <aside class="notes">
-    Six terms. We will see all of them in the next thirteen minutes. Two key non-obvious facts:
-    one, trust domain is what allows a workload on cluster A to verify a workload identity on cluster B
-    cryptographically — it's a SPIFFE concept, not a Kubernetes one. Two, AUTO_PASSTHROUGH on the
-    east-west gateway means the gateway pod never holds the inner mTLS keys — it just SNI-routes
-    encrypted bytes onward. That is how the gateway can be operated by a different team than the workloads it carries.
+    Four terms — others (cluster ID, mesh ID, ManagedCluster, etc.) get inline glosses on first use later.
+    Two non-obvious facts: trust domain lets cluster A verify cluster B identities cryptographically — a SPIFFE
+    concept, not Kubernetes. AUTO_PASSTHROUGH means the east-west gateway pod never holds inner mTLS keys; it
+    SNI-routes encrypted bytes onward, so a different team can operate it from the workloads it carries.
   </aside>
 </section>
 
@@ -78,28 +73,26 @@
      SLIDE 4 — Animation A — multi-primary multi-network topology
      ============================================================ -->
 <section data-state="anim-a">
-  <h2>Topology: multi-primary, multi-network</h2>
+  <h2>Topology: multi-primary <span style="font-weight:400; font-size:0.6em; color:var(--c-muted);">(each cluster runs its own istiod)</span>, multi-network</h2>
 
   <svg class="diagram" data-steps viewBox="0 0 1100 480" role="img"
-       aria-label="Two clusters cluster-a and cluster-b in networks network-1 and network-2 each running istiod plus a workload plus an east-west gateway. A call from workload-a to service B traverses both east-west gateways on port 15443.">
+       aria-label="Two clusters cluster-a and cluster-b in networks network-1 and network-2 each running istiod plus a workload plus an east-west gateway. A call from workload-a dials directly across networks to cluster-b's east-west gateway on port 15443 and then to service-b.">
     <!-- Cluster A frame -->
     <g class="step" data-step="1">
       <rect x="20" y="40" width="470" height="380" rx="14"
             fill="var(--c-spoke-a-fill)" stroke="var(--c-spoke-a)" stroke-width="2.5"/>
       <text x="40" y="70"  class="lbl">cluster-a</text>
-      <text x="40" y="90"  class="lbl-s">network-1 &middot; trust domain: shared &middot; mesh ID: mesh1</text>
+      <text x="40" y="90"  class="lbl-s">network-1</text>
 
       <!-- istiod A -->
       <rect x="60" y="120" width="170" height="70" rx="8"
             fill="#ffffff" stroke="var(--c-istiod)" stroke-width="2"/>
-      <text x="145" y="150" class="lbl" text-anchor="middle">istiod</text>
-      <text x="145" y="170" class="lbl-s" text-anchor="middle">control plane</text>
+      <text x="145" y="160" class="lbl" text-anchor="middle">istiod</text>
 
       <!-- Workload A -->
       <rect x="60" y="220" width="170" height="70" rx="8"
             fill="#ffffff" stroke="var(--c-workload)" stroke-width="2"/>
-      <text x="145" y="250" class="lbl" text-anchor="middle">workload-a</text>
-      <text x="145" y="270" class="lbl-s" text-anchor="middle">sidecar Envoy</text>
+      <text x="145" y="260" class="lbl" text-anchor="middle">workload-a</text>
 
       <!-- EW Gateway A -->
       <rect x="290" y="170" width="170" height="70" rx="8"
@@ -113,19 +106,17 @@
       <rect x="610" y="40" width="470" height="380" rx="14"
             fill="var(--c-spoke-b-fill)" stroke="var(--c-spoke-b)" stroke-width="2.5"/>
       <text x="630" y="70"  class="lbl">cluster-b</text>
-      <text x="630" y="90"  class="lbl-s">network-2 &middot; trust domain: shared (same as cluster-a) &middot; mesh ID: mesh1</text>
+      <text x="630" y="90"  class="lbl-s">network-2</text>
 
       <!-- istiod B -->
       <rect x="870" y="120" width="170" height="70" rx="8"
             fill="#ffffff" stroke="var(--c-istiod)" stroke-width="2"/>
-      <text x="955" y="150" class="lbl" text-anchor="middle">istiod</text>
-      <text x="955" y="170" class="lbl-s" text-anchor="middle">control plane</text>
+      <text x="955" y="160" class="lbl" text-anchor="middle">istiod</text>
 
       <!-- Workload B -->
       <rect x="870" y="220" width="170" height="70" rx="8"
             fill="#ffffff" stroke="var(--c-workload)" stroke-width="2"/>
-      <text x="955" y="250" class="lbl" text-anchor="middle">service-b</text>
-      <text x="955" y="270" class="lbl-s" text-anchor="middle">sidecar Envoy</text>
+      <text x="955" y="260" class="lbl" text-anchor="middle">service-b</text>
 
       <!-- EW Gateway B -->
       <rect x="640" y="170" width="170" height="70" rx="8"
@@ -134,34 +125,27 @@
       <text x="725" y="220" class="lbl-c" text-anchor="middle">:15443 AUTO_PASSTHROUGH</text>
     </g>
 
-    <!-- Step 2: control-plane discovery (dashed thin arrows from each istiod to the OTHER cluster's apiserver-shaped indicator).
-         We do not draw apiservers separately; istiod-to-istiod arrow communicates the idea, foreshadowing slide 9. -->
+    <!-- Step 2: data-plane call — workload-a sidecar dials the REMOTE EW gateway directly across networks
+         (the local EW gateway is ingress-only for traffic arriving from peer networks), then the remote
+         EW gateway SNI-routes the encrypted bytes to service-b. Animated marching dashes. -->
     <g class="step" data-step="2">
-      <path d="M 230 155 Q 545 30 870 155"
-            fill="none" stroke="var(--c-istiod)" stroke-width="2"
-            stroke-dasharray="4 5" marker-end="url(#arrow-istiod)"/>
-      <text x="550" y="40" class="lbl-s" text-anchor="middle">istiod-A watches cluster-b apiserver (via remote secret — slide 9)</text>
-    </g>
-
-    <!-- Step 3: data-plane call — workload-a → EW gw A → EW gw B → service-b. Animated marching dashes. -->
-    <g class="step" data-step="3">
       <path id="call-path"
-            d="M 230 255 L 290 215 L 460 215 L 640 215 L 810 215 L 870 255"
+            d="M 230 255 L 640 215 L 810 215 L 870 255"
             fill="none" stroke="var(--c-call)" stroke-width="3.5" class="flow"
             marker-end="url(#arrow-call)"/>
       <text x="550" y="310" class="lbl" text-anchor="middle">
         cross-cluster mTLS call: <tspan class="lbl-c">workload-a → service-b</tspan>
       </text>
       <text x="550" y="332" class="lbl-s" text-anchor="middle">
-        gateways pass encrypted bytes through; only the workloads hold private keys
+        the remote east-west gateway passes encrypted bytes through; only the workloads hold private keys
       </text>
 
       <!-- Animated bead following the path: SMIL animateMotion, no JS lib needed.
            Bead is hidden when reduced motion is on (smil-motion class is display:none in that mode). -->
       <circle class="smil-motion" r="6" fill="var(--c-call)">
-        <animateMotion dur="3s" repeatCount="indefinite"
+        <animateMotion dur="4s" repeatCount="3"
                        rotate="auto"
-                       path="M 230 255 L 290 215 L 460 215 L 640 215 L 810 215 L 870 255"/>
+                       path="M 230 255 L 640 215 L 810 215 L 870 255"/>
       </circle>
     </g>
 
@@ -169,9 +153,6 @@
     <defs>
       <marker id="arrow-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-call)"/>
-      </marker>
-      <marker id="arrow-istiod" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-istiod)"/>
       </marker>
     </defs>
   </svg>
@@ -184,15 +165,16 @@
   </div>
 
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="2"></span>
-  <span class="fragment step-driver" aria-hidden="true" data-step-driver="3"></span>
 
   <aside class="notes">
-    Two clusters, two networks. Each cluster runs its own istiod — that's what "multi-primary" means:
-    there is no central control plane, every cluster is self-sufficient. The east-west gateway listens on
+    Two clusters, two networks. Each cluster runs its own istiod — that is what "multi-primary" means:
+    no central control plane, every cluster self-sufficient. The east-west gateway listens on
     15443 with TLS mode AUTO_PASSTHROUGH: it reads the inner mTLS SNI and forwards the encrypted bytes
-    without unwrapping them. The gateway therefore never holds workload identities — only the workloads do.
-    Click once to show istiod-A reading cluster-B's apiserver — that's the remote secret in action, we'll
-    come back to it. Click again to show the actual cross-cluster service call traversing both east-west gateways.
+    without unwrapping them. Click to show the cross-cluster service call: the source sidecar dials
+    the REMOTE east-west gateway directly across the network boundary. The call traverses the remote
+    east-west gateway (EW gw B for an A&rarr;B call) — the local EW gateway only carries traffic arriving
+    from other networks (ingress side). Trust domain and mesh ID are both <code>mesh1</code> on both
+    clusters; we will revisit those when we get to cacerts.
   </aside>
 </section>
 
@@ -201,6 +183,9 @@
      ============================================================ -->
 <section>
   <h2>The three Secrets that make this work</h2>
+  <p style="font-size:0.7em; color:var(--c-muted); margin-top:0.2em;">
+    Terminology: <strong>hub</strong> = ACM management cluster; <strong>spokes</strong> = managed clusters where workloads run.
+  </p>
   <table style="font-size:0.68em; width:100%; border-collapse:collapse; margin-top:0.5em;">
     <thead>
       <tr style="border-bottom:2px solid var(--c-rule);">
@@ -227,9 +212,6 @@
       </tr>
     </tbody>
   </table>
-  <p style="margin-top:1em; color:var(--c-muted); font-size:0.7em;">
-    The next slides cover each of these — what it must contain, who produces it, and how it lands on the right cluster.
-  </p>
   <aside class="notes">
     Three secrets. cacerts is the cryptographic root: every workload identity in the mesh chains up to a CA
     whose intermediate lives in this Secret. The remote secret also lives on each spoke, but it's the OTHER
@@ -254,18 +236,16 @@
     <li><code>root-cert.pem</code> — the shared root CA cert. Same bytes on every cluster in the mesh.</li>
     <li><code>cert-chain.pem</code> — intermediate + root concatenated (the chain workloads need to verify peers).</li>
   </ul>
-  <p style="font-size:0.78em; margin-top:1em;">
-    <strong>Why a shared root?</strong> Because mTLS between a workload on cluster A and a workload on cluster B
-    requires that both peers' certificates validate against a common chain. The <em>intermediate</em> can
-    (and does) differ per cluster; the <em>root</em> is identical everywhere.
+  <p style="font-size:0.72em; margin-top:0.9em; color:var(--c-muted);">
+    <strong>Ordering matters:</strong> <code>cacerts</code> must exist on the spoke <em>before</em> istiod first starts —
+    otherwise istiod self-signs its own CA and the cluster can never join the mesh later without redeploying.
   </p>
   <aside class="notes">
-    The shape of cacerts is fixed by Istio — istiod will look for these exact four file names inside the
-    Secret. If you produce them with cert-manager you have to assemble the four keys yourself; cert-manager
-    Certificate resources don't produce a Secret in this shape by default. We'll see the assembly in the next slide.
-    The intermediate's private key is the highest-value secret in this whole stack — never put it in git,
-    never expose it to a spoke that doesn't need it. Each spoke gets its own intermediate so that revoking
-    one cluster doesn't compromise the others.
+    The shape of cacerts is fixed by Istio — istiod looks for these exact four file names. cert-manager
+    Certificates don't produce a Secret in this shape by default, so we assemble it (next slide). The
+    intermediate's private key is the highest-value secret in the stack. Each spoke gets its own intermediate,
+    so revoking one cluster doesn't compromise the others. Shared root is what lets cluster A's mTLS validate
+    against cluster B's chain.
   </aside>
 </section>
 
@@ -273,14 +253,17 @@
      SLIDE 7 — Animation B — cert-manager CA chain
      ============================================================ -->
 <section data-state="anim-b">
-  <h2>cert-manager assembles <code>cacerts</code></h2>
+  <h2>cert-manager assembles <code>cacerts</code> <span style="font-weight:400; font-size:0.6em; color:var(--c-muted);">(ClusterIssuer = cluster-scoped CA issuer)</span></h2>
 
   <svg class="diagram" data-steps viewBox="0 0 1100 460" role="img"
-       aria-label="On the hub, a root Certificate signs a ClusterIssuer chain that issues one intermediate Certificate per spoke, which is assembled into a Secret named cacerts containing four keys: ca-cert.pem, ca-key.pem, root-cert.pem, cert-chain.pem.">
+       aria-label="On the hub, a self-signed ClusterIssuer mesh-selfsigned-bootstrap signs the root Certificate mesh-root-ca which is isCA true. The root Certificate's Secret backs the CA ClusterIssuer mesh-root-ca, which issues one intermediate Certificate per spoke. Each intermediate is reshaped by an ESO ExternalSecret into a Secret with the four cacerts keys: ca-cert.pem, ca-key.pem, root-cert.pem, cert-chain.pem.">
 
     <defs>
       <marker id="arrow-ca" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-ca)"/>
+      </marker>
+      <marker id="arrow-eso-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-eso)"/>
       </marker>
     </defs>
 
@@ -290,91 +273,86 @@
     <text x="40" y="60" class="lbl">hub cluster</text>
     <text x="40" y="80" class="lbl-s">cert-manager Operator installed; CRs reconciled into Secrets on the hub</text>
 
-    <!-- Step 1: root CA Certificate + self-signed ClusterIssuer -->
+    <!-- Step 1: bootstrap selfSigned ClusterIssuer -> root Certificate -> CA-backed ClusterIssuer -->
     <g class="step" data-step="1">
-      <rect x="60" y="120" width="220" height="100" rx="8"
-            fill="#ffffff" stroke="var(--c-ca)" stroke-width="2"/>
-      <text x="170" y="150" class="lbl" text-anchor="middle">Certificate</text>
-      <text x="170" y="170" class="lbl-c" text-anchor="middle">istio-root-ca</text>
-      <text x="170" y="195" class="lbl-s" text-anchor="middle">isCA: true, selfSigned</text>
-
-      <rect x="60" y="250" width="220" height="70" rx="8"
+      <!-- Bootstrap selfSigned ClusterIssuer -->
+      <rect x="40" y="115" width="230" height="60" rx="8"
             fill="#ffffff" stroke="var(--c-ca)" stroke-width="2" stroke-dasharray="4 4"/>
-      <text x="170" y="280" class="lbl" text-anchor="middle">ClusterIssuer</text>
-      <text x="170" y="300" class="lbl-c" text-anchor="middle">istio-root</text>
+      <text x="155" y="140" class="lbl" text-anchor="middle">ClusterIssuer (selfSigned)</text>
+      <text x="155" y="160" class="lbl-c" text-anchor="middle">mesh-selfsigned-bootstrap</text>
 
-      <path d="M 170 220 L 170 250" stroke="var(--c-ca)" stroke-width="2" fill="none"
+      <!-- Root Certificate (isCA: true), signed by bootstrap -->
+      <rect x="40" y="210" width="230" height="80" rx="8"
+            fill="#ffffff" stroke="var(--c-ca)" stroke-width="2"/>
+      <text x="155" y="237" class="lbl" text-anchor="middle">Certificate</text>
+      <text x="155" y="256" class="lbl-c" text-anchor="middle">mesh-root-ca</text>
+      <text x="155" y="278" class="lbl-s" text-anchor="middle">isCA: true</text>
+
+      <!-- CA-backed ClusterIssuer for the root -->
+      <rect x="40" y="320" width="230" height="60" rx="8"
+            fill="#ffffff" stroke="var(--c-ca)" stroke-width="2" stroke-dasharray="4 4"/>
+      <text x="155" y="345" class="lbl" text-anchor="middle">ClusterIssuer (CA)</text>
+      <text x="155" y="365" class="lbl-c" text-anchor="middle">mesh-root-ca</text>
+
+      <!-- Arrows: bootstrap signs root; root's Secret backs the CA issuer -->
+      <path d="M 155 175 L 155 210" stroke="var(--c-ca)" stroke-width="2" fill="none"
             marker-end="url(#arrow-ca)"/>
-      <text x="195" y="240" class="lbl-s">signs from</text>
+      <text x="178" y="197" class="lbl-s">issues</text>
+
+      <path d="M 155 290 L 155 320" stroke="var(--c-ca)" stroke-width="2" fill="none"
+            marker-end="url(#arrow-ca)"/>
+      <text x="178" y="312" class="lbl-s">spec.ca.secretName</text>
     </g>
 
-    <!-- Step 2: intermediates per spoke (two) -->
+    <!-- Step 2: one intermediate Certificate per spoke (drawn once, annotated "(one per spoke)") -->
     <g class="step" data-step="2">
-      <rect x="430" y="100" width="240" height="100" rx="8"
+      <rect x="430" y="200" width="260" height="100" rx="8"
             fill="#ffffff" stroke="var(--c-ca)" stroke-width="2"/>
-      <text x="550" y="130" class="lbl" text-anchor="middle">Certificate</text>
-      <text x="550" y="150" class="lbl-c" text-anchor="middle">istio-ca-cluster-a</text>
-      <text x="550" y="175" class="lbl-s" text-anchor="middle">isCA: true, issuerRef: istio-root</text>
+      <text x="560" y="230" class="lbl" text-anchor="middle">Certificate</text>
+      <text x="560" y="250" class="lbl-c" text-anchor="middle">istio-ca-cluster-a</text>
+      <text x="560" y="274" class="lbl-s" text-anchor="middle">isCA: true, issuerRef: mesh-root-ca</text>
+      <text x="560" y="293" class="lbl-s" text-anchor="middle" font-style="italic">(one per spoke)</text>
 
-      <rect x="430" y="240" width="240" height="100" rx="8"
-            fill="#ffffff" stroke="var(--c-ca)" stroke-width="2"/>
-      <text x="550" y="270" class="lbl" text-anchor="middle">Certificate</text>
-      <text x="550" y="290" class="lbl-c" text-anchor="middle">istio-ca-cluster-b</text>
-      <text x="550" y="315" class="lbl-s" text-anchor="middle">isCA: true, issuerRef: istio-root</text>
-
-      <path d="M 280 200 Q 360 150 430 150" stroke="var(--c-ca)" stroke-width="2" fill="none"
+      <path d="M 270 350 Q 360 320 430 270" stroke="var(--c-ca)" stroke-width="2" fill="none"
             marker-end="url(#arrow-ca)"/>
-      <path d="M 280 285 Q 360 290 430 290" stroke="var(--c-ca)" stroke-width="2" fill="none"
-            marker-end="url(#arrow-ca)"/>
+      <text x="350" y="305" class="lbl-s">issues</text>
     </g>
 
-    <!-- Step 3: ESO ExternalSecret remaps the cert-manager Secret's tls.crt / tls.key / ca.crt
-         into the four-key cacerts shape Istio expects. -->
+    <!-- Step 3: ESO ExternalSecret reshapes cert-manager's tls.crt / tls.key / ca.crt into the four cacerts keys -->
     <g class="step" data-step="3">
-      <rect x="800" y="80" width="260" height="160" rx="8"
+      <rect x="800" y="180" width="260" height="160" rx="8"
             fill="#ffffff" stroke="var(--c-secret)" stroke-width="2.5"/>
-      <text x="930" y="108" class="lbl" text-anchor="middle">Secret <tspan class="lbl-c">cacerts-cluster-a</tspan></text>
-      <text x="820" y="135" class="lbl-c">ca-cert.pem</text>     <text x="970" y="135" class="lbl-s">= tls.crt</text>
-      <text x="820" y="160" class="lbl-c">ca-key.pem</text>      <text x="970" y="160" class="lbl-s">= tls.key</text>
-      <text x="820" y="185" class="lbl-c">root-cert.pem</text>   <text x="970" y="185" class="lbl-s">= ca.crt</text>
-      <text x="820" y="210" class="lbl-c">cert-chain.pem</text>  <text x="970" y="210" class="lbl-s">= tls.crt + ca.crt</text>
+      <text x="930" y="208" class="lbl" text-anchor="middle">Secret <tspan class="lbl-c">cacerts-{cluster}</tspan></text>
+      <text x="820" y="235" class="lbl-c">ca-cert.pem</text>     <text x="970" y="235" class="lbl-s">= tls.crt</text>
+      <text x="820" y="260" class="lbl-c">ca-key.pem</text>      <text x="970" y="260" class="lbl-s">= tls.key</text>
+      <text x="820" y="285" class="lbl-c">root-cert.pem</text>   <text x="970" y="285" class="lbl-s">= ca.crt</text>
+      <text x="820" y="310" class="lbl-c">cert-chain.pem</text>  <text x="970" y="310" class="lbl-s">= tls.crt + ca.crt</text>
+      <text x="930" y="333" class="lbl-s" text-anchor="middle" font-style="italic">(one Secret per spoke; root-cert.pem identical across spokes)</text>
 
-      <rect x="800" y="260" width="260" height="100" rx="8"
-            fill="#ffffff" stroke="var(--c-secret)" stroke-width="2.5"/>
-      <text x="930" y="288" class="lbl" text-anchor="middle">Secret <tspan class="lbl-c">cacerts-cluster-b</tspan></text>
-      <text x="820" y="315" class="lbl-s">same four keys, cluster-b intermediate</text>
-      <text x="820" y="340" class="lbl-s">root-cert.pem identical to cluster-a</text>
+      <path d="M 690 250 Q 745 250 800 250" stroke="var(--c-eso)" stroke-width="2" fill="none"
+            marker-end="url(#arrow-eso-b)"/>
 
-      <path d="M 670 150 Q 730 110 800 130" stroke="var(--c-eso)" stroke-width="2" fill="none"
-            marker-end="url(#arrow-eso-b)"/>
-      <path d="M 670 290 Q 730 310 800 300" stroke="var(--c-eso)" stroke-width="2" fill="none"
-            marker-end="url(#arrow-eso-b)"/>
-      <text x="735" y="180" class="lbl-s" text-anchor="middle" font-style="italic">via ESO</text>
-      <text x="735" y="265" class="lbl-s" text-anchor="middle" font-style="italic">ExternalSecret</text>
-      <text x="540" y="425" class="lbl-s" text-anchor="middle">
-        cert-manager produces <tspan class="lbl-c">tls.crt / tls.key / ca.crt</tspan>; ESO ExternalSecret remaps to the four cacerts keys
+      <text x="550" y="415" class="lbl-s" text-anchor="middle">
+        cert-manager produces <tspan class="lbl-c">tls.crt / tls.key / ca.crt</tspan>;
+        an ESO <tspan style="font-style:italic">ExternalSecret</tspan> (a CR that templates one Secret from another)
+        remaps to the four cacerts keys
       </text>
     </g>
-
-    <!-- ESO arrow marker (slide 7 needs its own marker since slide 11's is in a different SVG) -->
-    <defs>
-      <marker id="arrow-eso-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-eso)"/>
-      </marker>
-    </defs>
   </svg>
 
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="2"></span>
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="3"></span>
 
   <aside class="notes">
-    Step one: on the hub, a self-signed Certificate is the root, paired with a ClusterIssuer of the same name.
-    Step two: one intermediate Certificate per spoke is issued by that ClusterIssuer — both intermediates roll up
-    to the same root. Step three: cert-manager produces a Kubernetes Secret with the standard TLS shape
-    (tls.crt, tls.key, ca.crt) — but istiod wants four very specific keys. An ESO ExternalSecret reshapes the
-    cert-manager Secret into the four-key cacerts shape, using its v2 templating engine. Worth highlighting:
-    cert-chain.pem is just the intermediate cert concatenated with the root cert. Crucially the assembled
-    cacerts still lives on the hub at this point — getting it onto the spoke is ESO's PushSecret job, two slides from now.
+    Step one: a bootstrap selfSigned ClusterIssuer (mesh-selfsigned-bootstrap) signs the root Certificate
+    (mesh-root-ca, isCA: true). The root Certificate's resulting Kubernetes Secret backs a CA-mode
+    ClusterIssuer of the same name via spec.ca.secretName — that is the issuer downstream resources reference.
+    Step two: one intermediate Certificate per spoke is issued by mesh-root-ca, all rolling up to the same root
+    (only one box drawn to keep the diagram compact). Step three: cert-manager produces a Kubernetes Secret
+    with the standard TLS shape (tls.crt, tls.key, ca.crt) but istiod wants four very specific keys, so an
+    ESO ExternalSecret reshapes it into the four-key cacerts Secret using its v2 templating engine.
+    cert-chain.pem is just the intermediate concatenated with the root. The assembled cacerts still lives on
+    the hub at this point — getting it onto the spoke is ESO's PushSecret job, on the next animation.
   </aside>
 </section>
 
@@ -383,7 +361,7 @@
      ============================================================ -->
 <section>
   <h2>The remote secret — what istiod actually reads</h2>
-  <pre style="font-size:0.55em; background:#f7f8fa; border:1px solid var(--c-rule); padding:0.8em; border-radius:6px;"><code>apiVersion: v1
+  <pre style="font-size:0.7em; background:#f7f8fa; border:1px solid var(--c-rule); padding:0.8em; border-radius:6px;"><code>apiVersion: v1
 kind: Secret
 metadata:
   name: istio-remote-secret-cluster-b   # the OTHER cluster's name
@@ -468,9 +446,6 @@ data:
 
       <path d="M 500 165 Q 650 60 800 165" stroke="var(--c-arrow)" stroke-width="2.5" fill="none"
             stroke-dasharray="6 5" marker-end="url(#arrow-d)"/>
-      <text x="650" y="55" class="lbl-s" text-anchor="middle">
-        TLS via the kubeconfig in the Secret
-      </text>
     </g>
 
     <!-- Step 4: cluster-b services -> istiod-A -> Envoy on cluster-a sidecar -->
@@ -482,7 +457,6 @@ data:
 
       <path d="M 800 280 Q 650 280 500 200" stroke="var(--c-arrow-soft)" stroke-width="2" fill="none"
             stroke-dasharray="3 4" marker-end="url(#arrow-d-soft)"/>
-      <text x="650" y="270" class="lbl-s" text-anchor="middle">watch events stream back</text>
 
       <rect x="50" y="260" width="240" height="80" rx="8"
             fill="#ffffff" stroke="var(--c-workload)" stroke-width="2"/>
@@ -491,11 +465,7 @@ data:
 
       <path d="M 320 200 Q 240 240 200 260" stroke="var(--c-istiod)" stroke-width="2" fill="none"
             marker-end="url(#arrow-d)"/>
-      <text x="240" y="245" class="lbl-s">xDS push</text>
-
-      <text x="550" y="395" class="lbl" text-anchor="middle">
-        Result: cluster-a Envoy now has cluster-b service endpoints (via the east-west gateway VIP)
-      </text>
+      <text x="240" y="245" class="lbl-s">xDS push <tspan font-style="italic">(Envoy config protocol)</tspan></text>
     </g>
   </svg>
 
@@ -514,29 +484,7 @@ data:
 </section>
 
 <!-- ============================================================
-     SLIDE 10 — Distribution problem
-     ============================================================ -->
-<section>
-  <h2>So who puts these Secrets on the spokes?</h2>
-  <ul>
-    <li>cacerts <strong>exists on the hub</strong> (cert-manager produced it there) — but istiod needs it on each spoke.</li>
-    <li>The remote secrets <strong>are derived on the hub</strong> (one kubeconfig per spoke) — but each spoke needs the <em>other</em> spoke's secret.</li>
-    <li>You do not want to write a bash loop with <code>kubectl --context</code>.</li>
-  </ul>
-  <p style="margin-top:1em;">
-    We use the External Secrets Operator (ESO) — specifically its <code>PushSecret</code> resource — to ship
-    the assembled Secrets from the hub into each spoke's <code>istio-system</code> namespace.
-  </p>
-  <aside class="notes">
-    Up to this point everything lives on the hub. We need to fan it out. We pick ESO PushSecret rather than
-    Argo CD because the data is sensitive — we want the source of truth to stay on the hub (in real Secrets,
-    not git), and have a small operator copy it to the spokes. ESO's PushSecret resource does exactly that
-    direction: hub Secret as source, spoke Secret as destination.
-  </aside>
-</section>
-
-<!-- ============================================================
-     SLIDE 11 — Animation C — ESO PushSecret distribution
+     SLIDE 10 — Animation C — ESO PushSecret distribution
      ============================================================ -->
 <section data-state="anim-c">
   <h2>ESO <code>PushSecret</code>: hub &rarr; each spoke</h2>
@@ -576,13 +524,13 @@ data:
       <!-- ESO control on hub: SecretStore-per-spoke + PushSecret -->
       <rect x="250" y="160" width="180" height="170" rx="8"
             fill="#ffffff" stroke="var(--c-eso)" stroke-width="2.5"/>
-      <text x="340" y="190" class="lbl" text-anchor="middle">ESO</text>
-      <text x="340" y="210" class="lbl-s" text-anchor="middle">SecretStore per spoke</text>
-      <text x="340" y="226" class="lbl-s" text-anchor="middle">(kubernetes provider)</text>
-      <text x="340" y="252" class="lbl-s" text-anchor="middle">+ PushSecret CRs:</text>
-      <text x="340" y="270" class="lbl-c" text-anchor="middle">push-cacerts-*</text>
-      <text x="340" y="288" class="lbl-c" text-anchor="middle">push-remote-secret-*</text>
-      <text x="340" y="318" class="lbl-s" text-anchor="middle" font-style="italic">templates on push</text>
+      <text x="340" y="186" class="lbl" text-anchor="middle">ESO</text>
+      <text x="340" y="206" class="lbl-s" text-anchor="middle">SecretStore per spoke</text>
+      <text x="340" y="222" class="lbl-s" text-anchor="middle" font-style="italic">(auth target for ESO; kubernetes provider)</text>
+      <text x="340" y="248" class="lbl-s" text-anchor="middle">+ PushSecret CRs:</text>
+      <text x="340" y="266" class="lbl-s" text-anchor="middle" font-style="italic">(ship a hub Secret to a spoke)</text>
+      <text x="340" y="286" class="lbl-c" text-anchor="middle">push-cacerts-*</text>
+      <text x="340" y="304" class="lbl-c" text-anchor="middle">push-remote-secret-*</text>
     </g>
 
     <!-- Step 2: SecretStores authenticate using kubeconfig-X (server URL + bearer token come from that Secret). -->
@@ -638,32 +586,40 @@ data:
       <path d="M 220 272 Q 420 380 620 405" stroke="var(--c-eso)" stroke-width="2" fill="none" marker-end="url(#arrow-eso)"/>
     </g>
 
-    <!-- Footer caption -->
-    <g class="step" data-step="4">
-      <text x="940" y="470" class="lbl-s" text-anchor="end">
-        cross-pollination: kubeconfig-A lands on cluster-b as a remote secret, and vice-versa.
-      </text>
+    <!-- Step 5: cross-pollination callout — the counter-intuitive bit. kubeconfig-A lands on cluster-b,
+         not cluster-a — kubeconfig-X's role on the OTHER spoke is to become istio-remote-secret-X there. -->
+    <g class="step" data-step="5">
+      <rect x="895" y="220" width="200" height="40" rx="10"
+            fill="#fff7ed" stroke="var(--c-call)" stroke-width="2.5"/>
+      <text x="995" y="240" class="lbl-s" text-anchor="middle" font-weight="700" fill="var(--c-call)">cross-pollination</text>
+      <text x="995" y="255" class="lbl-s" text-anchor="middle">kubeconfig-A &rarr; cluster-b · kubeconfig-B &rarr; cluster-a</text>
     </g>
   </svg>
 
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="2"></span>
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="3"></span>
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="4"></span>
+  <span class="fragment step-driver" aria-hidden="true" data-step-driver="5"></span>
 
   <aside class="notes">
-    Two source-Secret kinds on the hub: cacerts-X (assembled from cert-manager output, as we saw in the previous
-    animation) and kubeconfig-X (an actual usable kubeconfig — we'll see how it's produced two slides from now).
-    ESO has a SecretStore per spoke, authenticated using kubeconfig-X. Then two kinds of PushSecret:
-    push-cacerts-X copies cacerts-X to spoke X as "cacerts". push-remote-secret-X is more interesting — it reads
-    kubeconfig-X but uses the v2 template feature to materialize a Secret named istio-remote-secret-X on
-    the OTHER spokes, with label istio/multiCluster=true applied at template time. So kubeconfig-cluster-a
-    crosses over to cluster-b, and vice-versa. PushSecret direction is always hub-source to spoke-target —
-    inverse of ExternalSecret which reads from a remote source.
+    Up to this point everything lives on the hub; ESO PushSecret fans it out to the spokes. (We pick ESO
+    PushSecret over Argo CD here because the data is sensitive — source of truth stays in real Secrets on
+    the hub, never git, and a small operator copies it to each spoke.) Two source-Secret kinds on the hub:
+    cacerts-X (assembled from cert-manager output, prior animation) and kubeconfig-X (we'll see how it's
+    produced next slide). ESO has a SecretStore per spoke authenticated using kubeconfig-X. Two kinds of
+    PushSecret then run: push-cacerts-X copies cacerts-X to spoke X as "cacerts". push-remote-secret-X is
+    more interesting — it reads kubeconfig-X but uses the v2 template feature to materialize a Secret named
+    istio-remote-secret-X on the OTHER spoke, with label istio/multiCluster=true applied at template time.
+    So kubeconfig-cluster-a crosses over to cluster-b, and vice-versa — the counter-intuitive bit worth
+    pausing on. PushSecret direction is always hub-source to spoke-target — inverse of ExternalSecret.
+    Reminder: cacerts must already be on the spoke before istiod starts there, or istiod self-signs and
+    you cannot rejoin the mesh later without redeploying — so this PushSecret has to win the race with the
+    spoke's istiod boot.
   </aside>
 </section>
 
 <!-- ============================================================
-     SLIDE 12 — Animation E — ACM kubeconfig scaffolding (upstream of slide 11)
+     SLIDE 11 — Animation E — ACM kubeconfig scaffolding (upstream of slide 10)
      ============================================================ -->
 <section data-state="anim-e">
   <h2>Upstream of ESO: where <code>kubeconfig-cluster-a</code> comes from</h2>
@@ -692,11 +648,13 @@ data:
           fill="var(--c-spoke-a-fill)" stroke="var(--c-spoke-a)" stroke-width="2.5"/>
     <text x="850" y="50" class="lbl">cluster-a (spoke)</text>
 
-    <!-- Step 1: ManagedCluster on hub + Klusterlet on spoke -->
+    <!-- Step 1 (merged): ManagedCluster registers a klusterlet, then a ManagedServiceAccount provisions a
+         scoped ServiceAccount + bearer token on the spoke and mirrors the token Secret back to the hub. -->
     <g class="step" data-step="1">
       <rect x="40" y="80" width="220" height="70" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
-      <text x="150" y="108" class="lbl" text-anchor="middle">ManagedCluster</text>
-      <text x="150" y="128" class="lbl-c" text-anchor="middle">cluster-a</text>
+      <text x="150" y="105" class="lbl" text-anchor="middle">ManagedCluster</text>
+      <text x="150" y="123" class="lbl-c" text-anchor="middle">cluster-a</text>
+      <text x="150" y="142" class="lbl-s" text-anchor="middle" font-style="italic">(ACM CR — represents a spoke)</text>
 
       <rect x="870" y="80" width="270" height="70" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="1005" y="108" class="lbl" text-anchor="middle">klusterlet</text>
@@ -705,14 +663,11 @@ data:
       <path d="M 260 115 L 870 115" stroke="var(--c-acm)" stroke-width="2" fill="none" stroke-dasharray="6 5"
             marker-end="url(#arrow-acm)"/>
       <text x="565" y="105" class="lbl-s" text-anchor="middle">registration</text>
-    </g>
 
-    <!-- Step 2: ManagedServiceAccount on hub creates SA + token on spoke -->
-    <g class="step" data-step="2">
       <rect x="40" y="170" width="220" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="150" y="200" class="lbl" text-anchor="middle">ManagedServiceAccount</text>
       <text x="150" y="220" class="lbl-c" text-anchor="middle">application-manager</text>
-      <text x="150" y="240" class="lbl-s" text-anchor="middle">RBAC granted separately by a ClusterRoleBinding</text>
+      <text x="150" y="240" class="lbl-s" text-anchor="middle" font-style="italic">(ACM CR — mints SA + token on spoke)</text>
 
       <rect x="870" y="170" width="270" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="1005" y="195" class="lbl" text-anchor="middle">ServiceAccount + Token</text>
@@ -728,12 +683,13 @@ data:
       <text x="565" y="285" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
     </g>
 
-    <!-- Step 3: GitOpsCluster + Placement -> Argo materializes cluster-application-manager-cluster-secret -->
-    <g class="step" data-step="3">
+    <!-- Step 2: GitOpsCluster + Placement -> Argo materializes cluster-application-manager-cluster-secret -->
+    <g class="step" data-step="2">
       <rect x="40" y="310" width="220" height="80" rx="8" fill="#ffffff" stroke="var(--c-argo)" stroke-width="2"/>
-      <text x="150" y="340" class="lbl" text-anchor="middle">GitOpsCluster</text>
-      <text x="150" y="360" class="lbl-s" text-anchor="middle">+ ACM Placement</text>
-      <text x="150" y="378" class="lbl-s" text-anchor="middle">selects cluster-a, cluster-b</text>
+      <text x="150" y="338" class="lbl" text-anchor="middle">GitOpsCluster</text>
+      <text x="150" y="356" class="lbl-s" text-anchor="middle">+ ACM Placement</text>
+      <text x="150" y="372" class="lbl-s" text-anchor="middle" font-style="italic">(Placement = cluster selector; GitOpsCluster binds Argo CD to it)</text>
+      <text x="150" y="388" class="lbl-s" text-anchor="middle">selects cluster-a, cluster-b</text>
 
       <rect x="320" y="310" width="280" height="80" rx="8" fill="#ffffff" stroke="var(--c-argo)" stroke-width="2.5"/>
       <text x="460" y="338" class="lbl" text-anchor="middle">Argo CD cluster Secret</text>
@@ -744,8 +700,8 @@ data:
             marker-end="url(#arrow-argo)"/>
     </g>
 
-    <!-- Step 4: ESO ExternalSecret reads that Secret and templates kubeconfig-cluster-a -->
-    <g class="step" data-step="4">
+    <!-- Step 3: ESO ExternalSecret reads that Secret and templates kubeconfig-cluster-a -->
+    <g class="step" data-step="3">
       <rect x="40" y="410" width="260" height="70" rx="8" fill="#ffffff" stroke="var(--c-eso)" stroke-width="2"/>
       <text x="170" y="438" class="lbl" text-anchor="middle">ExternalSecret</text>
       <text x="170" y="458" class="lbl-s" text-anchor="middle">chart: hub-kubeconfig-from-argosecret</text>
@@ -756,36 +712,30 @@ data:
 
       <path d="M 460 390 L 170 410" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso2)"/>
-      <text x="300" y="402" class="lbl-s" text-anchor="middle">read server + token, template kubeconfig</text>
+      <text x="300" y="402" class="lbl-s" text-anchor="middle">read server URL + CA + (bearer token or client cert/key), template kubeconfig</text>
       <path d="M 300 445 L 350 445" stroke="var(--c-eso)" stroke-width="2" fill="none"
             marker-end="url(#arrow-eso2)"/>
-
-      <text x="700" y="450" class="lbl-s" text-anchor="start" font-style="italic">
-        kubeconfig-cluster-a is what the previous slide's per-spoke SecretStore authenticated with
-      </text>
     </g>
   </svg>
 
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="2"></span>
   <span class="fragment step-driver" aria-hidden="true" data-step-driver="3"></span>
-  <span class="fragment step-driver" aria-hidden="true" data-step-driver="4"></span>
 
   <aside class="notes">
-    Step 1: ACM ManagedCluster CR is applied on the hub. The klusterlet on the spoke does the actual registration.
-    Step 2: ACM ManagedServiceAccount (an ACM addon) creates a real ServiceAccount on the spoke and mints a
-    bearer token, then mirrors the token Secret back to the hub. The ServiceAccount itself has no RBAC by default —
-    a ClusterRoleBinding has to be applied separately to give it the needed permissions on the spoke.
-    Step 3: a GitOpsCluster CR plus an
-    ACM Placement tell Argo CD which managed clusters to register. For each one Argo CD writes a cluster Secret in
-    openshift-gitops named {cluster}-application-manager-cluster-secret. Step 4: a small ESO ExternalSecret —
-    defined in chart hub-kubeconfig-from-argosecret in this repo — reads the server URL and bearer token from that
-    cluster Secret and templates a full kubeconfig into a Secret named kubeconfig-{cluster} on the hub. That last
-    Secret is what slide 11 used to authenticate into the spokes. The full dependency chain is closed.
+    Step 1: ACM ManagedCluster CR on the hub and the klusterlet on the spoke complete registration; then ACM
+    ManagedServiceAccount (an addon) creates a ServiceAccount on the spoke, mints a bearer token, and mirrors
+    the token Secret back to the hub. The ServiceAccount itself has no RBAC by default — a ClusterRoleBinding
+    is applied separately on the spoke to grant the needed permissions. Step 2: a GitOpsCluster CR plus an
+    ACM Placement tell Argo CD which managed clusters to register; for each one Argo CD writes a cluster Secret
+    in openshift-gitops named {cluster}-application-manager-cluster-secret. Step 3: an ESO ExternalSecret
+    (chart hub-kubeconfig-from-argosecret) reads the server URL, CA data, and bearer token (or client cert/key)
+    from that cluster Secret and templates a full kubeconfig into Secret kubeconfig-{cluster} on the hub.
+    That last Secret is what the previous slide's per-spoke SecretStore authenticated with. Dependency chain closed.
   </aside>
 </section>
 
 <!-- ============================================================
-     SLIDE 14 — Failure modes & verification
+     SLIDE 12 — Failure modes & verification
      ============================================================ -->
 <section>
   <h2>What breaks, and how you'd see it</h2>
@@ -815,8 +765,8 @@ data:
       </tr>
       <tr>
         <td style="padding:0.4em;">east-west gateway returns 503</td>
-        <td style="padding:0.4em;">workload's mesh ID or trust domain doesn't match peer</td>
-        <td style="padding:0.4em;">compare <code>Istio</code> CR fields on both clusters</td>
+        <td style="padding:0.4em;">SNI cluster mismatch — workload not labeled into the right network, or remote EW gateway not advertising the expected cluster</td>
+        <td style="padding:0.4em;"><code>istioctl proxy-config clusters &lt;ew-gw-pod&gt;</code> and verify <code>topology.istio.io/network</code> labels</td>
       </tr>
     </tbody>
   </table>
@@ -829,7 +779,7 @@ data:
 </section>
 
 <!-- ============================================================
-     SLIDE 15 — Closing
+     SLIDE 13 — Closing
      ============================================================ -->
 <section>
   <h2>Recap &middot; the dependency order</h2>
@@ -840,9 +790,6 @@ data:
     <li>ESO PushSecret uses those kubeconfigs to ship cacerts + istio-remote-secret to each spoke's istio-system.</li>
     <li>istiod on each spoke reads its remote secret and starts watching the other apiserver — the mesh is live.</li>
   </ol>
-  <p style="margin-top:1.2em; font-size:0.72em; color:var(--c-muted);">
-    Helm charts in this repo: <code>hub-mesh-ca</code>, <code>hub-mesh-ca-intermediate</code>, <code>hub-kubeconfig-from-argosecret</code>, <code>hub-mesh-push-secrets</code>, <code>spoke-east-west-gateway</code>, <code>spoke-ossm</code>.
-  </p>
   <p style="margin-top:1.5em; font-size:0.85em;">
     Questions?
   </p>
