@@ -135,7 +135,7 @@
    for animations that need motion along a path we use SMIL <animateMotion>
    inside SVG (no JS animation libraries). */
 
-/* Reduced motion: collapse everything to its end state, no marching dashes. */
+/* Reduced motion: collapse everything to its end state, no marching dashes, no SMIL beads. */
 @media (prefers-reduced-motion: reduce) {
   .reveal svg .step {
     opacity: 1 !important;
@@ -145,16 +145,31 @@
     animation: none !important;
     stroke-dasharray: none !important;
   }
-  .reveal svg animateMotion,
-  .reveal svg animate,
-  .reveal svg animateTransform {
-    /* SMIL: freeze at end. Browsers honor 'begin="indefinite"' fallback. */
+  /* SMIL motion elements cannot be paused via CSS, but the elements that
+     carry them can be hidden. Any element tagged .smil-motion is hidden
+     under reduced motion, so the bead disappears and the static end-state
+     path is what the viewer sees. */
+  .reveal svg .smil-motion {
+    display: none !important;
   }
-  /* The diagram-controller JS also early-exits in reduced-motion mode. */
 }
 
 /* Speaker-notes block (visible in speaker view only) */
 .reveal aside.notes { display: none; }
+
+/* Invisible step driver:
+   A zero-area .fragment used purely to register a fragment with reveal.js
+   so that pressing Space advances the SVG step counter, without putting any
+   visible text on the slide. */
+.reveal .step-driver {
+  display: block;
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
 
 /* Slide footer with progress indicator (deck-local; reveal also has its own progress bar). */
 .reveal .footer {
