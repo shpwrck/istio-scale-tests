@@ -223,3 +223,7 @@ echo "=========================================="
 echo ""
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
+
+MD_FILE="${OUTPUT_DIR}/sweep-${RUN_ID}.md"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format markdown > "$MD_FILE"
+echo "Markdown summary written to $MD_FILE"

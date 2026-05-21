@@ -13,6 +13,7 @@ What is currently implemented:
 5. Control-plane resource scaling test suite (`tests/controlplane/`)
 6. Cross-cluster data-plane latency test suite (`tests/dataplane/`)
 7. Churn/convergence test suite (`tests/churn/`)
+8. Churn × data-plane co-execution test suite (`tests/churn-dataplane/`)
 
 ## Source of truth
 
@@ -31,6 +32,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 - Avoid storing file content in scripts. Use templates appropriate for the situation (Helm charts under `charts/`, etc.) rather than large inline YAML or kubeconfig bodies in bash.
 - --dry-run: Setup scripts that mutate clusters (`oc` / `kubectl` / `istioctl apply`) should accept `--dry-run` (typically `oc apply --dry-run=client`) so operators can validate renders without changing the cluster.
 - Pinned versions: All version pins live in `config/versions.env` — do not duplicate version numbers elsewhere. Bump `README.md` when pins change.
+- Markdown summary: All test suites must output a markdown summary file (`.md`) alongside raw TSV data so results are human-readable without post-processing. Sweep orchestrators should call the report script with `--format md` and write the output to the sweep results directory.
 
 ## Script variables and naming (bash)
 
@@ -83,6 +85,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `tests/controlplane/` | Control-plane resource scaling test suite: numbered scripts + `chart/` Helm chart for dummy services. See `tests/controlplane/README.md`. |
 | `tests/dataplane/` | Data-plane latency test suite: numbered scripts + `chart/` Helm chart for fortio server/client. See `tests/dataplane/README.md`. |
 | `tests/churn/` | Churn/convergence test suite: numbered scripts + `chart/` Helm chart for churn targets/watcher. See `tests/churn/README.md`. |
+| `tests/churn-dataplane/` | Churn × data-plane co-execution test suite: numbered scripts + composite `chart/` co-deploying fortio (server+client) and churn-target Pods in one shared namespace; emits `Δp99_ms` (latency delta under churn). See `tests/churn-dataplane/README.md`. |
 
 ## Common tasks
 
@@ -145,7 +148,17 @@ No CI/test framework configured. Manual verification via:
 - `bash` 4+, `oc` or `kubectl`, `istioctl` (version aligned with `ISTIO_VERSION` — see `config/versions.env`)
 - `terraform` (for `terraform/rosa-hcp/` and `terraform/platform/`)
 - `helm` 3 (for charts under `charts/` and Terraform `helm_release` resources)
-- `jq`, `curl`
+- `jq`, `curl`, `awk`
+
+## Scale-test improvement cycle
+
+For non-trivial changes to anything under `tests/` (a new sweep axis, a probe correctness fix, a new suite), invoke the 7-agent improvement cycle:
+
+```
+/scale-test-review <proposal description or existing branch name>
+```
+
+The cycle is one Implementer + six lens-specialized reviewers (Istio domain, measurement validity, repo conventions, usability, scale pragmatist, reproducibility). It iterates to consensus, then opens or updates a PR. See [`docs/scale-test-team/`](docs/scale-test-team/) for the full procedure and the carry-forward [process-learnings catalog](docs/scale-test-team/process-learnings.md) every implementer brief should preempt. The agents are defined under [`.claude/agents/`](.claude/agents/); the slash command is at [`.claude/commands/scale-test-review.md`](.claude/commands/scale-test-review.md).
 
 ## References
 

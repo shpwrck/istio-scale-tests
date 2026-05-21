@@ -188,8 +188,14 @@ fi
 
 # Resolve per-context server Kubernetes version concurrently (~5s budget each).
 declare -A KUBE_VERSIONS
+ISTIOD_PF_PORT="${DATAPLANE_ISTIOD_PF_PORT:-15014}"
+PF_PID=""
 KV_TMPDIR=$(mktemp -d)
-trap 'rm -rf "$KV_TMPDIR"' EXIT
+cleanup_all() {
+	[[ -n "$PF_PID" ]] && { kill "$PF_PID" 2>/dev/null || true; wait "$PF_PID" 2>/dev/null || true; }
+	rm -rf "$KV_TMPDIR"
+}
+trap cleanup_all EXIT
 for ctx in "${ALL_CTXS[@]}"; do
 	(
 		v=$("${KUBECTL[@]}" --context="$ctx" version --request-timeout=5s -o json 2>/dev/null \
@@ -236,11 +242,24 @@ echo "QPS levels: ${QPS_ARR[*]} | Duration: ${DURATION}s | Connections: $CONNECT
 echo "Settle: ${SETTLE_SEC}s | Fortio image: ${FORTIO_IMAGE}"
 echo ""
 
-# Sample source istiod process_start_time_seconds — used to detect a restart
-# spanning the probe window. Empty string when scrape fails.
+# Start istiod port-forward for restart-detection scrapes.
+ISTIOD_PF_OK=0
+start_istiod_pf() {
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n istio-system port-forward svc/istiod "${ISTIOD_PF_PORT}":15014 >/dev/null 2>&1 &
+	PF_PID=$!
+	local attempts=0
+	while ! curl -fsS --max-time 2 "http://localhost:${ISTIOD_PF_PORT}/metrics" -o /dev/null 2>/dev/null; do
+		attempts=$((attempts + 1))
+		((attempts > 30)) && { echo "warn: istiod port-forward did not come up" >&2; return 1; }
+		sleep 0.5
+	done
+	return 0
+}
+if start_istiod_pf; then ISTIOD_PF_OK=1; fi
+
 sample_istiod_start() {
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n istio-system exec deploy/istiod -c discovery -- \
-		sh -c 'wget -qO- http://localhost:15014/metrics 2>/dev/null || curl -sf http://localhost:15014/metrics' 2>/dev/null \
+	((ISTIOD_PF_OK)) || { echo ""; return; }
+	curl -sf --max-time 5 "http://localhost:${ISTIOD_PF_PORT}/metrics" 2>/dev/null \
 		| awk '/^process_start_time_seconds[[:space:]{]/ && !/^#/ { print $NF; exit }'
 }
 

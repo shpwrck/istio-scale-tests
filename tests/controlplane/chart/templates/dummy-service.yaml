@@ -4,7 +4,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: dummy-svc-{{ $i }}
-  namespace: {{ $.Values.namespace }}
+  namespace: {{ include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i) }}
   labels:
     app: dummy-svc-{{ $i }}
     {{- include "controlplane-test.labels" $ | nindent 4 }}

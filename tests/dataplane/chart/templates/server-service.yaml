@@ -18,26 +18,32 @@ spec:
       port: {{ .Values.service.port }}
       protocol: TCP
       targetPort: {{ .Values.service.port }}
+{{- $clusterNames := list .Values.clusterName }}
+{{- if .Values.allClusterNames }}
+{{- $clusterNames = .Values.allClusterNames }}
+{{- end }}
+{{- range $cn := $clusterNames }}
 ---
-# Per-cluster Service — selects only the pods running on this cluster.
+# Per-cluster Service for {{ $cn }}.
 # A client on a *different* source cluster routing to this hostname has no
 # local endpoint, so traffic must traverse the east-west gateway. This is
 # what makes the "cross-cluster" probe actually cross-cluster.
 apiVersion: v1
 kind: Service
 metadata:
-  name: dataplane-server-{{ .Values.clusterName }}
-  namespace: {{ .Values.namespace }}
+  name: dataplane-server-{{ $cn }}
+  namespace: {{ $.Values.namespace }}
   labels:
-    {{- include "dataplane-test.server.labels" . | nindent 4 }}
-    cluster: {{ .Values.clusterName }}
+    {{- include "dataplane-test.server.labels" $ | nindent 4 }}
+    cluster: {{ $cn }}
 spec:
   selector:
-    {{- include "dataplane-test.server.selectorLabels" . | nindent 4 }}
-    cluster: {{ .Values.clusterName }}
+    {{- include "dataplane-test.server.selectorLabels" $ | nindent 4 }}
+    cluster: {{ $cn }}
   ports:
     - name: http
-      port: {{ .Values.service.port }}
+      port: {{ $.Values.service.port }}
       protocol: TCP
-      targetPort: {{ .Values.service.port }}
+      targetPort: {{ $.Values.service.port }}
+{{- end }}
 {{- end }}
