@@ -50,6 +50,35 @@ die() { echo "error: $*" >&2; exit 1; }
 is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 
+# Portable millisecond-resolution Unix timestamp. macOS BSD `date` does not
+# expand `%N`, so `date +%s%3N` yields "<seconds>3N" and breaks arithmetic.
+# Detect the best available implementation once and cache it.
+NOW_MS_IMPL=""
+_detect_now_ms() {
+	[[ -n "$NOW_MS_IMPL" ]] && return
+	if [[ "$(date -u +%s%3N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+		NOW_MS_IMPL=date
+	elif command -v gdate >/dev/null 2>&1 \
+		&& [[ "$(gdate -u +%s%3N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+		NOW_MS_IMPL=gdate
+	elif command -v python3 >/dev/null 2>&1; then
+		NOW_MS_IMPL=python3
+	elif command -v perl >/dev/null 2>&1; then
+		NOW_MS_IMPL=perl
+	else
+		die "no millisecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
+	fi
+}
+now_ms() {
+	_detect_now_ms
+	case "$NOW_MS_IMPL" in
+	date)    date -u +%s%3N ;;
+	gdate)   gdate -u +%s%3N ;;
+	python3) python3 -c 'import time; print(int(time.time()*1000))' ;;
+	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1000' ;;
+	esac
+}
+
 validate_scoping() {
 	case "$1" in
 	none | namespace | explicit) return 0 ;;
@@ -264,23 +293,29 @@ fi
 ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
 
 # Probe kube server versions per context concurrently (best-effort).
+# Use the array index (not the context name) as the per-probe filename —
+# OpenShift's auto-generated context names contain `/` (e.g.
+# `default/api-foo:443/user`) which would otherwise be interpreted as path
+# separators and fail with "No such file or directory".
 KUBE_PROBE_DIR="$(mktemp -d -t controlplane-002-kubever.XXXXXX)"
 KV_PIDS=()
-for ctx in "${CONTEXTS[@]}"; do
+for i in "${!CONTEXTS[@]}"; do
+	ctx="${CONTEXTS[i]}"
 	(
 		out=$("${KUBECTL[@]}" --context="$ctx" version -o json --request-timeout=5s 2>/dev/null) \
 			&& v=$(printf '%s' "$out" | jq -r '.serverVersion.gitVersion // "unknown"' 2>/dev/null || echo unknown) \
 			|| v=unreachable
 		[[ -z "$v" ]] && v=unknown
-		printf '%s' "$v" > "${KUBE_PROBE_DIR}/${ctx}"
+		printf '%s' "$v" > "${KUBE_PROBE_DIR}/${i}"
 	) &
 	KV_PIDS+=($!)
 done
 for pid in "${KV_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 KUBE_VERSIONS_CSV=""
-for ctx in "${CONTEXTS[@]}"; do
-	if [[ -s "${KUBE_PROBE_DIR}/${ctx}" ]]; then
-		v=$(<"${KUBE_PROBE_DIR}/${ctx}")
+for i in "${!CONTEXTS[@]}"; do
+	ctx="${CONTEXTS[i]}"
+	if [[ -s "${KUBE_PROBE_DIR}/${i}" ]]; then
+		v=$(<"${KUBE_PROBE_DIR}/${i}")
 	else
 		v=unreachable
 	fi
@@ -585,9 +620,9 @@ aggregate_sample_bytes() {
 scrape_one_context() {
 	local ctx="$1" port="$2" out="$3" ts_start="$4" ts_end="$5"
 	local body t_start t_end
-	t_start=$(date -u +%s%3N)
+	t_start=$(now_ms)
 	body=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null) || return 1
-	t_end=$(date -u +%s%3N)
+	t_end=$(now_ms)
 	printf '%s' "$body" > "$out"
 	printf '%s' "$t_start" > "$ts_start"
 	printf '%s' "$t_end" > "$ts_end"
