@@ -168,7 +168,8 @@ jobs:
       - name: Portable mktemp (no -p flag)
         run: |
           d=$(mktemp -d)
-          f=$(export TMPDIR="$d" && mktemp)
+          export TMPDIR="$d"
+          f=$(mktemp)
           echo "dir=$d  file=$f"
           [[ "$f" == "$d"/* ]] || { echo "FAIL: file not in custom dir"; exit 1; }
           rm -rf "$d"
