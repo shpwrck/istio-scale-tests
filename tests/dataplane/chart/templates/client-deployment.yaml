@@ -20,6 +20,10 @@ spec:
       containers:
         - name: fortio
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          # fortio is invoked in server mode here so the pod stays alive
+          # for `kubectl exec ... fortio load`. The client Deployment exists
+          # purely as an exec target; outbound traffic is sourced by
+          # `fortio load` runs from the test harness.
           args: ["server", "-http-port", "8090", "-redirect-port", "-1"]
           securityContext:
             allowPrivilegeEscalation: false

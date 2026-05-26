@@ -26,10 +26,13 @@ CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
+SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
+MAX_MATRIX="${PROPAGATION_MAX_MATRIX:-64}"
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
 COLLECT_METRICS=0
+FORCE_LARGE_MATRIX=0
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -37,18 +40,23 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
-  --iterations N       Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
-  --timeout SEC        Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
-  --output-dir DIR     Results directory (default: tests/propagation/results).
-  --tsv                Also write per-iteration TSV files (enables 005 report).
-  --collect-metrics    Also run 004-collect-pilot-metrics.sh at each mesh size.
-  --dry-run            Show plan without executing.
-  -h, --help           Show this help.
+  --contexts CSV         All available cluster contexts (default: \$SETUP_CONTEXTS).
+  --mesh-sizes CSV       Cluster counts to test (default: "1,2,...,len(contexts)").
+  --mesh-size N          DEPRECATED single-size alias (prints warning to stderr).
+  --iterations N         Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
+  --timeout SEC          Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
+  --settle-sec SEC       Settle gap after cleanup between mesh-size steps (default: $SETTLE_SEC).
+  --output-dir DIR       Results root (default: tests/propagation/results). A new
+                         per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
+  --tsv                  Also write per-iteration TSV files (enables 005 report).
+  --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
+  --force-large-matrix   Bypass matrix safety cap (default: $MAX_MATRIX iterations).
+  --dry-run              Print planned matrix to stderr; exit without touching clusters.
+  -h, --help             Show this help.
 
 Environment:
-  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC.
+  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
+  PROPAGATION_MAX_MATRIX.
 EOF
 }
 
@@ -77,6 +85,13 @@ while [[ $# -gt 0 ]]; do
 		MESH_SIZES_CSV="$2"
 		shift 2
 		;;
+	--mesh-size)
+		# Deprecated singular alias — forward to --mesh-sizes.
+		[[ -n "${2:-}" ]] || die "--mesh-size requires a value"
+		echo "warning: --mesh-size is deprecated; use --mesh-sizes CSV (treating as single-size sweep)" >&2
+		MESH_SIZES_CSV="$2"
+		shift 2
+		;;
 	--iterations)
 		[[ -n "${2:-}" ]] || die "--iterations requires a value"
 		ITERATIONS="$2"
@@ -85,6 +100,11 @@ while [[ $# -gt 0 ]]; do
 	--timeout)
 		[[ -n "${2:-}" ]] || die "--timeout requires a value"
 		TIMEOUT_SEC="$2"
+		shift 2
+		;;
+	--settle-sec)
+		[[ -n "${2:-}" ]] || die "--settle-sec requires a value"
+		SETTLE_SEC="$2"
 		shift 2
 		;;
 	--output-dir)
@@ -98,6 +118,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--tsv)
 		WRITE_TSV=1
+		shift
+		;;
+	--force-large-matrix)
+		FORCE_LARGE_MATRIX=1
 		shift
 		;;
 	--dry-run)
@@ -135,7 +159,52 @@ for ms in "${MESH_SIZES[@]}"; do
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ITERATIONS ))
+if (( MATRIX_SIZE > MAX_MATRIX && !FORCE_LARGE_MATRIX )); then
+	die "matrix too large: ${#MESH_SIZES[@]} mesh_sizes × $ITERATIONS iterations = $MATRIX_SIZE (max $MAX_MATRIX). Use --force-large-matrix to override."
+fi
+
 SCRIPT_DIR="${ROOT}/tests/propagation"
+SWEEP_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
+
+# --- dry-run: print planned matrix to stderr, exit cleanly --------------------
+if ((DRY_RUN)); then
+	{
+		echo "=========================================="
+		echo "  Propagation Latency Sweep [DRY RUN]"
+		echo "=========================================="
+		echo "Contexts: ${CONTEXTS[*]}"
+		echo "Mesh sizes: ${MESH_SIZES[*]}"
+		echo "Iterations per size: $ITERATIONS"
+		echo "Total iterations: $MATRIX_SIZE (cap: $MAX_MATRIX)"
+		echo "Settle: ${SETTLE_SEC}s"
+		echo "Output (would create): $SWEEP_DIR"
+		echo ""
+		for ms in "${MESH_SIZES[@]}"; do
+			active_ctxs=("${CONTEXTS[@]:0:$ms}")
+			source_ctx="${active_ctxs[0]}"
+			remote_ctxs=()
+			((ms > 1)) && remote_ctxs=("${active_ctxs[@]:1}")
+			remote_csv=""
+			for rc in "${remote_ctxs[@]}"; do
+				[[ -n "$remote_csv" ]] && remote_csv+=","
+				remote_csv+="$rc"
+			done
+			echo "--- Plan: mesh_size=$ms ---"
+			echo "  001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+			echo "  002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --sweep-run-id $SWEEP_RUN_ID --iterations $ITERATIONS --settle-sec $SETTLE_SEC"
+			if ((COLLECT_METRICS)); then
+				echo "  004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+			fi
+			echo ""
+		done
+		echo "Dry-run complete — no clusters touched."
+	} >&2
+	exit 0
+fi
+
+mkdir -p "$SWEEP_DIR"
 
 echo "=========================================="
 echo "  Propagation Latency Sweep"
@@ -143,10 +212,9 @@ echo "=========================================="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "Iterations per size: $ITERATIONS"
-echo "Output: $OUTPUT_DIR"
+echo "Settle: ${SETTLE_SEC}s"
+echo "Output: $SWEEP_DIR"
 echo ""
-
-MD_FILES=()
 
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
@@ -169,15 +237,19 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "=========================================="
 	echo ""
 
-	if ((DRY_RUN)); then
-		echo "  [dry-run] Would run:"
-		echo "    001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
-		echo "    002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --iterations $ITERATIONS"
-		if ((COLLECT_METRICS)); then
-			echo "    004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
-		fi
-		echo ""
-		continue
+	# Clean up watchers on contexts not active at this mesh size to prevent
+	# orphan sidecars from inflating histogram baselines (R5-S3).
+	inactive_ctxs=()
+	for c in "${CONTEXTS[@]}"; do
+		_match=0
+		for ac in "${active_ctxs[@]}"; do
+			[[ "$c" == "$ac" ]] && { _match=1; break; }
+		done
+		((_match)) || inactive_ctxs+=("$c")
+	done
+	if ((${#inactive_ctxs[@]} > 0)); then
+		echo "--- Cleaning up watchers on inactive contexts: ${inactive_ctxs[*]} ---"
+		"$SCRIPT_DIR/001-setup-propagation-test.sh" --cleanup --contexts "$(IFS=,; echo "${inactive_ctxs[*]}")" || true
 	fi
 
 	echo "--- Setting up watchers ---"
@@ -188,93 +260,47 @@ for ms in "${MESH_SIZES[@]}"; do
 	endpoint_args=(
 		--source-context "$source_ctx"
 		--mesh-size "$ms"
+		--sweep-run-id "$SWEEP_RUN_ID"
 		--iterations "$ITERATIONS"
 		--timeout "$TIMEOUT_SEC"
-		--output-dir "$OUTPUT_DIR"
+		--settle-sec "$SETTLE_SEC"
+		--output-dir "$SWEEP_DIR"
 	)
 	((WRITE_TSV)) && endpoint_args+=(--tsv)
 	if [[ -n "$remote_csv" ]]; then
 		endpoint_args+=(--remote-contexts "$remote_csv")
 	fi
 	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"
-
-	newest_md=$(ls -t "$OUTPUT_DIR"/endpoint-*.md 2>/dev/null | head -1)
-	[[ -n "$newest_md" ]] && MD_FILES+=("$newest_md")
 	echo ""
 
 	if ((COLLECT_METRICS)); then
 		echo "--- Collecting pilot metrics (mesh_size=$ms) ---"
-		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$OUTPUT_DIR"
+		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$SWEEP_DIR"
 		echo ""
 	fi
 
+	echo "  Sweep step settle (${SETTLE_SEC}s)..."
+	sleep "$SETTLE_SEC"
+
 	echo ""
 done
-
-if ((DRY_RUN)); then
-	echo "Dry-run complete."
-	exit 0
-fi
 
 echo "=========================================="
 echo "  Sweep complete"
 echo "=========================================="
 echo ""
 if ((WRITE_TSV)); then
-	echo "Generating TSV report..."
-	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$OUTPUT_DIR" --format text
+	echo "Generating aggregated report..."
+	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
 	echo ""
-fi
 
-if ((${#MD_FILES[@]} > 0)); then
-	COMBINED="${OUTPUT_DIR}/sweep-$(date +%Y%m%dT%H%M%S).md"
-	{
-		echo "# Propagation Latency Sweep"
-		echo ""
-		echo "| Field | Value |"
-		echo "|-------|-------|"
-		echo "| Date | $(date -Iseconds) |"
-		echo "| Contexts | ${CONTEXTS[*]} |"
-		echo "| Mesh sizes | ${MESH_SIZES[*]} |"
-		echo "| Iterations per size | ${ITERATIONS} |"
-		echo "| Timeout | ${TIMEOUT_SEC}s |"
-		echo ""
-		for i in "${!MD_FILES[@]}"; do
-			echo "## Mesh Size ${MESH_SIZES[i]}"
-			echo ""
-			awk '/^## Summary$/{found=1;next} /^## /{found=0} found{print}' "${MD_FILES[i]}"
-			echo ""
-		done
-
-		TSV_SWEEP_FILES=()
-		for mf in "${MD_FILES[@]}"; do
-			[[ -f "${mf%.md}.tsv" ]] && TSV_SWEEP_FILES+=("${mf%.md}.tsv")
-		done
-		if ((${#TSV_SWEEP_FILES[@]} > 0)); then
-			echo "## Comparison"
-			echo ""
-			echo "| Mesh Size | P1 local xDS (avg ms) | P2 remote istiod (avg ms) | P3 remote sidecar (avg ms) |"
-			echo "|-----------|----------------------|--------------------------|---------------------------|"
-			cat "${TSV_SWEEP_FILES[@]}" | awk -F'\t' '
-			!/^#/ && !/^run_id/ && NF>=10 {
-				ms=$2; p1=$7; p2=$8; p3=$9
-				if(p1!="TIMEOUT" && p1!="N/A") { p1_sum[ms]+=p1; p1_n[ms]++ }
-				if(p2!="TIMEOUT" && p2!="N/A") { p2_sum[ms]+=p2; p2_n[ms]++ }
-				if(p3!="TIMEOUT" && p3!="N/A") { p3_sum[ms]+=p3; p3_n[ms]++ }
-				seen[ms]=1
-			}
-			END {
-				asorti(seen, sizes)
-				for(s in sizes) {
-					m = sizes[s]
-					p1_avg = (p1_n[m] > 0) ? sprintf("%d", p1_sum[m]/p1_n[m]) : "--"
-					p2_avg = (p2_n[m] > 0) ? sprintf("%d", p2_sum[m]/p2_n[m]) : "--"
-					p3_avg = (p3_n[m] > 0) ? sprintf("%d", p3_sum[m]/p3_n[m]) : "--"
-					printf "| %s | %s | %s | %s |\n", m, p1_avg, p2_avg, p3_avg
-				}
-			}'
-			echo ""
-		fi
-	} > "$COMBINED"
+	# Markdown sweep summary is generated by the report script (AGENTS.md "Markdown
+	# Summary" rule). The report's YAML frontmatter carries the run metadata
+	# (RUN_ID, SOURCE_CTX, REMOTES, MESH_SIZE, ITERATIONS, TIMEOUT_SEC, SETTLE_SEC,
+	# DATE, HARNESS_SHA, ISTIO_VERSION, KUBE_VERSIONS) that the previous hand-rolled
+	# header surfaced; the cross-mesh-size comparison table lives at the bottom of
+	# the report's markdown output.
+	COMBINED="${SWEEP_DIR}/sweep-summary.md"
+	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$COMBINED"
 	echo "Combined report: $COMBINED"
 fi
