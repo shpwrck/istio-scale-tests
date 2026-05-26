@@ -285,7 +285,7 @@ run_churn_driver() {
 		period_ns=$(( 1000000000 / CHURN_RATE ))
 	fi
 	local start_ns
-	start_ns="$(date +%s%N)"
+	start_ns="$(now_ns)"
 	local op idx replicas ctx exit_status pid rc dispatch_ns
 	local -a scale_pids
 	for ((op = 0; op < total_ops; op++)); do
@@ -301,7 +301,7 @@ run_churn_driver() {
 		# Capture dispatch wall-clock BEFORE the kubectl scale fan-out so the
 		# per-op timestamp reflects when the op was issued, not when its
 		# apiserver ACKs all completed. See header comment for rationale.
-		dispatch_ns="$(date +%s%N)"
+		dispatch_ns="$(now_ns)"
 		scale_pids=()
 		for ctx in "${ALL_CTXS[@]}"; do
 			"${KUBECTL[@]}" --context="$ctx" -n "$NS" scale "deployment/churn-target-${idx}" \
@@ -321,7 +321,7 @@ run_churn_driver() {
 		if ((period_ns > 0)); then
 			local target_ns now_ns delta_ns
 			target_ns=$(( start_ns + (op + 1) * period_ns ))
-			now_ns="$(date +%s%N)"
+			now_ns="$(now_ns)"
 			delta_ns=$(( target_ns - now_ns ))
 			if (( delta_ns > 0 )); then
 				sleep "$(awk -v n="$delta_ns" 'BEGIN{printf "%.9f", n/1e9}')"
@@ -336,7 +336,7 @@ run_churn_driver &
 DRIVER_PID=$!
 
 TARGET_URL="http://fortio-server.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
-WINDOW_START_NS="$(date +%s%N)"
+WINDOW_START_NS="$(now_ns)"
 JSON_OUT=""
 STATUS="OK"
 if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
@@ -344,7 +344,7 @@ if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
-WINDOW_END_NS="$(date +%s%N)"
+WINDOW_END_NS="$(now_ns)"
 
 # Stop the churn driver. Only SIGTERM if fortio exited EARLY (before DURATION
 # elapsed); otherwise the driver has finished its CHURN_RATE * DURATION ops

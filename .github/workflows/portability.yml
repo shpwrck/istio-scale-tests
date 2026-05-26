@@ -1,0 +1,209 @@
+name: Cross-platform script validation
+
+on:
+  push:
+    paths:
+      - 'tests/**/*.sh'
+      - 'terraform/**/*.sh'
+      - 'config/*.env'
+      - '.github/workflows/portability.yml'
+  pull_request:
+    paths:
+      - 'tests/**/*.sh'
+      - 'terraform/**/*.sh'
+      - 'config/*.env'
+      - '.github/workflows/portability.yml'
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bash 4+ (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          echo "bash: $(bash --version | head -1)"
+          echo "date: $(date --version 2>&1 | head -1 || echo 'BSD date (no --version)')"
+          echo "kubectl: $(kubectl version --client -o json 2>/dev/null | jq -r '.clientVersion.gitVersion' 2>/dev/null || echo 'not installed')"
+          echo "helm: $(helm version --short 2>/dev/null || echo 'not installed')"
+
+      - name: Syntax check (bash -n)
+        run: |
+          status=0
+          while IFS= read -r f; do
+            if ! bash -n "$f" 2>&1; then
+              echo "FAIL: $f"
+              status=1
+            fi
+          done < <(find tests/ terraform/ -name '*.sh' -type f)
+          exit $status
+
+      - name: '--help smoke test'
+        run: |
+          status=0
+          while IFS= read -r f; do
+            if grep -q '\-\-help' "$f"; then
+              echo "--- $f --help ---"
+              if ! bash "$f" --help >/dev/null 2>&1; then
+                echo "FAIL: $f --help exited non-zero"
+                status=1
+              fi
+            fi
+          done < <(find tests/ -name '0*.sh' -type f | sort)
+          exit $status
+
+      - name: '--dry-run smoke test'
+        run: |
+          status=0
+          dry_run_script() {
+            local f="$1"; shift
+            echo "--- $f --dry-run $* ---"
+            if ! bash "$f" --dry-run "$@" 2>&1; then
+              echo "FAIL: $f --dry-run exited non-zero"
+              return 1
+            fi
+          }
+
+          # Scripts that need --source-context for --dry-run.
+          for f in \
+            tests/churn/002-run-churn-probe.sh \
+            tests/churn-dataplane/002-run-baseline-probe.sh \
+            tests/dataplane/002-run-latency-probe.sh \
+            tests/propagation/002-run-endpoint-probe.sh; do
+            dry_run_script "$f" --source-context ci-dummy || status=1
+          done
+
+          # churn-dataplane/003 also needs --churn-rate.
+          dry_run_script tests/churn-dataplane/003-run-churn-probe.sh \
+            --source-context ci-dummy --churn-rate 5 || status=1
+
+          # Scripts with --dry-run that need no extra args.
+          for f in \
+            tests/churn/003-run-sweep.sh \
+            tests/churn-dataplane/004-run-sweep.sh \
+            tests/controlplane/003-run-sweep.sh \
+            tests/dataplane/003-run-sweep.sh \
+            tests/propagation/006-run-sweep.sh; do
+            dry_run_script "$f" || status=1
+          done
+
+          exit $status
+
+      - name: Portable timestamp helpers
+        run: |
+          echo "=== preamble.sh (churn-dataplane) ==="
+          (
+            set -euo pipefail
+            die() { echo "error: $*" >&2; exit 1; }
+            source tests/churn-dataplane/lib/preamble.sh
+            ns=$(now_ns)
+            ms=$(now_ms)
+            echo "now_ns=$ns  now_ms=$ms"
+            [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
+            [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
+            (( ${#ns} >= 19 )) || { echo "FAIL: now_ns too short (${#ns} digits, expected >=19)"; exit 1; }
+            (( ${#ms} >= 13 )) || { echo "FAIL: now_ms too short (${#ms} digits, expected >=13)"; exit 1; }
+            echo "PASS"
+          )
+
+          echo ""
+          echo "=== controlplane/002 now_ms() ==="
+          (
+            set -euo pipefail
+            die() { echo "error: $*" >&2; exit 1; }
+            # Extract helper block from controlplane/002.
+            eval "$(sed -n '/^NOW_MS_IMPL=/,/^}$/p' tests/controlplane/002-collect-resource-metrics.sh)"
+            ms=$(now_ms)
+            echo "now_ms=$ms"
+            [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
+            (( ${#ms} >= 13 )) || { echo "FAIL: now_ms too short"; exit 1; }
+            echo "PASS"
+          )
+
+          echo ""
+          echo "=== propagation/002 now_ns()/now_ms() ==="
+          (
+            set -euo pipefail
+            die() { echo "error: $*" >&2; exit 1; }
+            eval "$(sed -n '/^NOW_NS_IMPL=/,/^}$/p' tests/propagation/002-run-endpoint-probe.sh)"
+            ns=$(now_ns)
+            ms=$(now_ms)
+            echo "now_ns=$ns  now_ms=$ms"
+            [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
+            [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
+            echo "PASS"
+          )
+
+          echo ""
+          echo "=== churn/002 now_ns() ==="
+          (
+            set -euo pipefail
+            die() { echo "error: $*" >&2; exit 1; }
+            eval "$(sed -n '/^NOW_NS_IMPL=/,/^}$/p' tests/churn/002-run-churn-probe.sh)"
+            ns=$(now_ns)
+            echo "now_ns=$ns"
+            [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
+            echo "PASS"
+          )
+
+      - name: Portable base64 (no -w flag)
+        run: |
+          encoded=$(echo -n "hello world" | base64 | tr -d '\n')
+          echo "encoded=$encoded"
+          [[ "$encoded" == *$'\n'* ]] && { echo "FAIL: newline in output"; exit 1; }
+          decoded=$(echo "$encoded" | base64 -d 2>/dev/null || echo "$encoded" | base64 -D 2>/dev/null)
+          [[ "$decoded" == "hello world" ]] || { echo "FAIL: round-trip mismatch"; exit 1; }
+          echo "PASS"
+
+      - name: Portable mktemp (no -p flag)
+        run: |
+          d=$(mktemp -d)
+          f=$(TMPDIR="$d" mktemp)
+          echo "dir=$d  file=$f"
+          [[ "$f" == "$d"/* ]] || { echo "FAIL: file not in custom dir"; exit 1; }
+          rm -rf "$d"
+          echo "PASS"
+
+      - name: No incompatible patterns outside helpers
+        run: |
+          status=0
+
+          echo "--- Checking for raw date +%s%N outside detection code ---"
+          if grep -rn 'date +%s%N\|date +%s%3N' tests/ terraform/ --include='*.sh' \
+              | grep -v '_detect_now_\|NOW_NS_IMPL\|NOW_MS_IMPL\|now_ns\|now_ms\|gdate' \
+              | grep -v ':#[[:space:]]'; then
+            echo "FAIL: found raw date %N usage outside portable helpers"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          echo "--- Checking for mktemp -p ---"
+          if grep -rn 'mktemp -p ' tests/ terraform/ --include='*.sh' \
+              | grep -v ':#[[:space:]]'; then
+            echo "FAIL: found mktemp -p (GNU-only)"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          echo "--- Checking for base64 -w ---"
+          if grep -rn 'base64 -w' tests/ terraform/ --include='*.sh' \
+              | grep -v ':#[[:space:]]'; then
+            echo "FAIL: found base64 -w (GNU-only)"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          exit $status

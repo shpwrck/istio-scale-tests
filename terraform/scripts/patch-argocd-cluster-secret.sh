@@ -78,7 +78,7 @@ elif [[ -n "${SPOKE_TOKEN:-}" ]]; then
   if ! echo "$HOST" | grep -q ':'; then HOST="${HOST}:443"; fi
   CA_PEM=$(openssl s_client -connect "${HOST}" -showcerts </dev/null 2>/dev/null \
     | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/')
-  CA_B64_DATA=$(echo -n "$CA_PEM" | base64 -w0)
+  CA_B64_DATA=$(echo -n "$CA_PEM" | base64 | tr -d '\n')
   CONFIG_JSON=$(jq -nc --arg t "$SPOKE_TOKEN_VALUE" --arg ca "$CA_B64_DATA" \
     '{bearerToken: $t, tlsClientConfig: {insecure: false, caData: $ca}}')
 else
@@ -86,8 +86,8 @@ else
   exit 1
 fi
 
-SERVER_B64=$(echo -n "$API_URL" | base64 -w0)
-CONFIG_B64=$(echo -n "$CONFIG_JSON" | base64 -w0)
+SERVER_B64=$(echo -n "$API_URL" | base64 | tr -d '\n')
+CONFIG_B64=$(echo -n "$CONFIG_JSON" | base64 | tr -d '\n')
 
 $KC patch secret "$SECRET_NAME" -n "$GITOPS_NAMESPACE" --type merge \
   -p "{\"data\":{\"server\":\"${SERVER_B64}\",\"config\":\"${CONFIG_B64}\"}}"

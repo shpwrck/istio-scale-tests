@@ -189,7 +189,7 @@ echo "Settling for ${SETTLE_SEC}s..."
 sleep "$SETTLE_SEC"
 
 TARGET_URL="http://fortio-server.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
-WINDOW_START_NS="$(date +%s%N)"
+WINDOW_START_NS="$(now_ns)"
 
 JSON_OUT=""
 STATUS="OK"
@@ -198,7 +198,7 @@ if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
-WINDOW_END_NS="$(date +%s%N)"
+WINDOW_END_NS="$(now_ns)"
 
 POST_START="$(istiod_start_time_seconds "$ISTIOD_PF_PORT" 2>/dev/null || echo "unknown")"
 ((ISTIOD_PF_OK)) || POST_START="unknown"
