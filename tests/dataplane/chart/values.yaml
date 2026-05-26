@@ -1,5 +1,10 @@
 clusterName: ""
 
+# All cluster names in the mesh. When provided, per-cluster Services are created
+# for every name (not just clusterName), so that DNS resolves cross-cluster
+# hostnames locally even without Istio DNS proxying.
+allClusterNames: []
+
 namespace: dataplane-test
 
 # role: server, client, or both
@@ -7,7 +12,10 @@ role: server
 
 image:
   repository: fortio/fortio
-  tag: latest
+  # Harness scripts override this via `--set image.tag=$FORTIO_TAG` derived from
+  # FORTIO_VERSION in config/versions.env. Standalone `helm install` users must
+  # bump this value in lockstep with config/versions.env to keep parity.
+  tag: "1.69.5"
 
 service:
   port: 8080

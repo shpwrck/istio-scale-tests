@@ -1,0 +1,55 @@
+{{- if or (eq .Values.fortioRole "server") (eq .Values.fortioRole "both") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fortio-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: fortio-server
+    {{- include "churn-dataplane.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "churn-dataplane.fortio-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app: fortio-server
+        {{- include "churn-dataplane.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: fortio
+          image: {{ .Values.fortioImage.repository }}:{{ .Values.fortioImage.tag }}
+          args:
+            - server
+            - -http-port
+            - "{{ .Values.service.port }}"
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fortio-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: fortio-server
+    {{- include "churn-dataplane.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "churn-dataplane.fortio-server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      protocol: TCP
+      targetPort: {{ .Values.service.port }}
+{{- end }}

@@ -6,10 +6,22 @@ Measure request latency and throughput through Istio east-west gateways using fo
 
 | Metric | How |
 |--------|-----|
-| Same-cluster baseline latency | fortio client → local fortio server (no east-west gateway) |
-| Cross-cluster latency (p50/p90/p99/p99.9/max) | fortio client → remote fortio server (through east-west gateway) |
+| Intra-cluster (sidecar-to-sidecar) baseline latency | fortio client → `dataplane-server` Service (selects local pods under locality LB) |
+| Cross-cluster latency (p50/p90/p99/p99.9/max) | fortio client → `dataplane-server-${remote_ctx}` Service (per-cluster selector, no local endpoint, so traffic traverses the east-west gateway) |
 | Throughput (actual QPS achieved) | fortio load at target QPS levels |
+| HTTP 200 rate (`pct_200`) | Fraction of 200 responses from fortio `RetCodes`; cells with <99% 200s are flagged `ERROR_RATE_HIGH` |
 | Latency under load | Multiple QPS levels: 10, 100, 500, 1000 (configurable) |
+
+The **baseline** is _intra-cluster (sidecar-to-sidecar)_, **not** a no-mesh baseline. Both endpoints have sidecars. A real no-mesh baseline would require a no-inject sibling pod and is out of scope.
+
+Each cell is a **single sample**. Rerun the sweep to get multiple samples.
+
+## How the Cross-Cluster Probe Works
+
+The chart emits **two Services** per cluster:
+
+1. `dataplane-server` — generic selector. Under `PILOT_ENABLE_LOCALITY_LB=true` (OSSM 3.3 default), traffic from a same-cluster client lands on a local endpoint, so this is the **intra-cluster baseline**.
+2. `dataplane-server-${clusterName}` — per-cluster selector (`cluster=${clusterName}` label). The source cluster has no pod matching this selector, so traffic must leave via the east-west gateway. This is what makes the **cross-cluster** probe actually cross-cluster.
 
 ## Prerequisites
 
@@ -34,16 +46,29 @@ Measure request latency and throughput through Istio east-west gateways using fo
 
 ## Sweep Across Mesh Sizes
 
-Compare data-plane latency at different cluster counts:
+Compare data-plane latency at different cluster counts. The sweep mints a `sweep-${RUN_ID}/` subdirectory under `--output-dir` so each sweep's TSVs stay together.
 
 ```bash
 ./tests/dataplane/003-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3
 
-# Dry-run to see plan
+# Dry-run to see the planned matrix
 ./tests/dataplane/003-run-sweep.sh --dry-run
 ```
+
+## Settle Time
+
+After 001 returns, sidecar xDS endpoints may not have converged on the source cluster. 002 sleeps `--settle SEC` (default 30; env `DATAPLANE_SETTLE_SEC`) before starting any probe to mitigate cold-start cluster-lookup bias on low mesh sizes.
+
+```bash
+./tests/dataplane/002-run-latency-probe.sh \
+  --source-context rosa-001 --remote-contexts rosa-002 --settle 60
+```
+
+## istiod restart detection
+
+002 samples `process_start_time_seconds` from the source istiod's `/metrics` at probe start and end. If the start time advances, all rows in that run are tagged `istiod_restarted=1`. 004 excludes such rows from numeric aggregation (but still counts them in `n_total`).
 
 ## Custom QPS Levels
 
@@ -55,24 +80,68 @@ Compare data-plane latency at different cluster counts:
 
 ## Results Format
 
-TSV files in `tests/dataplane/results/` (gitignored):
+TSV files in `tests/dataplane/results/sweep-${RUN_ID}/` (gitignored). Schema:
 
 ```
-run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections  duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms  status
+run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections
+duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms
+status  pct_200  istiod_restarted  target_class
 ```
+
+`status` values:
+- `OK` — measurement looks good.
+- `FAILED` — fortio exec failed (network, pod missing, etc.).
+- `PERCENTILE_MISSING` — fortio JSON lacked one of the requested percentiles.
+- `ERROR_RATE_HIGH` — `pct_200 < 0.99`.
+
+`target_class`:
+- `local` — same cluster as source.
+- `remote` — different cluster (routed via east-west gateway).
+
+`istiod_restarted`:
+- `0` — istiod process_start_time_seconds unchanged across the probe.
+- `1` — istiod restarted; row is poisoned.
+- `unknown` — could not scrape istiod metrics.
+
+## Report Formats
+
+```bash
+# Aggregated text (default), grouped by (mesh_size, qps_target, target_class):
+./tests/dataplane/004-report-results.sh
+
+# Other formats:
+./tests/dataplane/004-report-results.sh --format csv
+./tests/dataplane/004-report-results.sh --format markdown
+./tests/dataplane/004-report-results.sh --format json
+
+# Per-sweep:
+./tests/dataplane/004-report-results.sh --results-dir tests/dataplane/results/sweep-20260520T120000Z-12345
+```
+
+All formats propagate the TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION, KUBE_VERSION[ctx], FORTIO_IMAGE, SETTLE_SEC, ...).
 
 ## Cleanup
 
 ```bash
 ./tests/dataplane/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+
+# Skip waiting for namespace termination:
+./tests/dataplane/005-cleanup.sh --no-wait-deletion --contexts rosa-001
 ```
+
+## Caveats / Known Limitations
+
+- **No no-mesh baseline.** The "local baseline" still has both sidecars in the path.
+- **Single sample per cell.** Rerun the sweep to bootstrap a sample distribution.
+- **Avg-of-percentiles.** 004 currently averages percentiles across rows; this is statistically suspect when samples have very different cell counts. Future work: pool raw fortio histograms.
+- **Connection-handshake-in-window.** Each fortio invocation opens new connections at probe start; settle mitigates xDS warmup but not in-window TLS handshakes. Increase `--duration` for cleaner percentiles.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `001-setup-dataplane-test.sh` | Deploy fortio server and client pods |
-| `002-run-latency-probe.sh` | Run fortio load tests and record latency |
-| `003-run-sweep.sh` | Orchestrate probes across mesh sizes |
-| `004-report-results.sh` | Generate summary statistics from TSV results |
-| `005-cleanup.sh` | Remove all dataplane-test resources |
+| `001-setup-dataplane-test.sh` | Deploy fortio server and client pods (per-cluster Service + generic Service) |
+| `002-run-latency-probe.sh` | Run fortio load tests, record latency + pct_200 + istiod_restarted |
+| `003-run-sweep.sh` | Orchestrate probes across mesh sizes into a sweep-${RUN_ID}/ subdir |
+| `004-report-results.sh` | Aggregate by (mesh_size, qps_target, target_class), filter poisoned rows, emit text/csv/markdown/json |
+| `005-cleanup.sh` | Remove all dataplane-test resources (waits for ns termination by default) |

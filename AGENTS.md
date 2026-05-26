@@ -13,6 +13,7 @@ What is currently implemented:
 5. Control-plane resource scaling test suite (`tests/controlplane/`)
 6. Cross-cluster data-plane latency test suite (`tests/dataplane/`)
 7. Churn/convergence test suite (`tests/churn/`)
+8. Churn × data-plane co-execution test suite (`tests/churn-dataplane/`)
 
 ## Source of truth
 
@@ -24,6 +25,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 
 ## Implementation rules
 
+- No sensitive or identifying data in PRs, issues, commit messages, code comments, or any other public artifact (this is a top priority): Never paste a reporter's email, username, organization, real cluster/host names, IP addresses, account IDs, internal URLs, kubeconfig fragments, OpenShift / kubectl context strings, or any other identifier that could deanonymize a person or environment. When quoting an error message or log, **redact first** — replace identifiers with generic placeholders (`<user>`, `<api-host>`, `<account>`, `<TMPDIR>`, `<seconds>`) and strip surrounding context that re-identifies them. Applies equally to GitHub PR titles/bodies, issue comments, review replies, commit messages, and any artifact pushed to the repository. If unsure, ask the user before posting.
 - No secrets in git: Never commit secrets, credentials, kubeconfigs with live tokens, private keys, CA material, or API keys. Rely on `.gitignore` (e.g. `/cacerts/` at repo root) and local secret stores; use placeholders or templates for examples.
 - Mesh via GitOps: The mesh is deployed via Helm charts under `charts/`, synced by Argo CD ApplicationSets using ACM Placement. Do not add bash scripts for mesh installation — use Helm charts and Argo CD Applications instead.
 - Numbered bash scripts: Name repo-owned executable bash helpers `NNN-kebab-case.sh` with a three-digit prefix (`001`, `002`, ...). The number reflects typical execution order within that directory (e.g. `propagation-test/001`-`002`). Use this pattern for all such scripts in `tests/propagation/`, `tests/controlplane/`, `tests/dataplane/`, `tests/churn/`, `terraform/**/scripts/` (when used), and future automation directories — never add unnumbered `*.sh` peers without renumbering the folder. When you add or renumber a script, update callers (e.g. Terraform `external`, other bash wrappers) and README / AGENTS references in the same change.
@@ -31,6 +33,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 - Avoid storing file content in scripts. Use templates appropriate for the situation (Helm charts under `charts/`, etc.) rather than large inline YAML or kubeconfig bodies in bash.
 - --dry-run: Setup scripts that mutate clusters (`oc` / `kubectl` / `istioctl apply`) should accept `--dry-run` (typically `oc apply --dry-run=client`) so operators can validate renders without changing the cluster.
 - Pinned versions: All version pins live in `config/versions.env` — do not duplicate version numbers elsewhere. Bump `README.md` when pins change.
+- Markdown summary: All test suites must output a markdown summary file (`.md`) alongside raw TSV data so results are human-readable without post-processing. Sweep orchestrators should call the report script with `--format md` and write the output to the sweep results directory.
 
 ## Script variables and naming (bash)
 
@@ -52,7 +55,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | Path | Use |
 | ---- | --- |
 | `config/versions.env` | Core version pins (`OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, `ACM_CHANNEL`, `GITOPS_OPERATOR_CHANNEL`), mesh identity (`MESH_ID`, `ACM_CLUSTER_SET`), and cluster contexts (`SETUP_CONTEXTS`). Sources `config/options.env` automatically. |
-| `config/options.env` | Operational defaults: operator namespaces, GitOps config, mesh/logging defaults, AWS infra, propagation test parameters, and control-plane test parameters (`CONTROLPLANE_NAMESPACE_COUNT`, `CONTROLPLANE_MAX_MATRIX`, `CONTROLPLANE_SIDECAR_SCOPING`, `CONTROLPLANE_CONFIG_DUMP_SAMPLES`). Sourced by `versions.env`; ACM/GitOps defaults are mirrored in `terraform/platform/variables.tf`. |
+| `config/options.env` | Operational defaults: operator namespaces, GitOps config, mesh/logging defaults, AWS infra, and propagation/controlplane/dataplane test parameters. Sourced by `versions.env`; ACM/GitOps defaults are mirrored in `terraform/platform/variables.tf`. |
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke (ApplicationSet wave 8). |
 | `charts/spoke-ossm/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke cluster with per-cluster clusterName, network, meshID (wave 21). |
 | `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke — Deployment, Service, HPA, PDB, RBAC (wave 24). |
@@ -84,6 +87,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `tests/dataplane/` | Data-plane latency test suite: numbered scripts + `chart/` Helm chart for fortio server/client. See `tests/dataplane/README.md`. |
 | `tests/churn/` | Churn/convergence test suite: numbered scripts + `chart/` Helm chart for churn targets/watcher. See `tests/churn/README.md`. |
 | `presentations/istio-mc-secrets/` | Self-contained reveal.js deck (~20 min) explaining how cert-manager + ESO + ACM produce and distribute the three Secrets (`cacerts`, per-spoke kubeconfigs, Istio remote secrets) that wire the multi-primary, multi-network mesh together. Open `index.html` in a browser. See `presentations/istio-mc-secrets/README.md`. |
+| `tests/churn-dataplane/` | Churn × data-plane co-execution test suite: numbered scripts + composite `chart/` co-deploying fortio (server+client) and churn-target Pods in one shared namespace; emits `Δp99_ms` (latency delta under churn). See `tests/churn-dataplane/README.md`. |
 
 ## Common tasks
 
