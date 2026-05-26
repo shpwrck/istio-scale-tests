@@ -6,6 +6,7 @@
 # Usage:
 #   ./tests/churn-dataplane/002-run-baseline-probe.sh \
 #       --source-context CTX [options]
+# ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

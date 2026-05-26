@@ -15,6 +15,7 @@
 #
 #   # Specific clusters:
 #   ./tests/propagation/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

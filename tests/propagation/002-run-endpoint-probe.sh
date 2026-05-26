@@ -42,6 +42,7 @@
 #   # 3-cluster sweep, 5 iterations:
 #   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 \
 #     --remote-contexts rosa-002,rosa-003 --mesh-size 3 --iterations 5
+# ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

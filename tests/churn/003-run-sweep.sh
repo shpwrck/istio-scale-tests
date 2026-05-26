@@ -10,6 +10,7 @@
 #
 #   # Sweep churn intensities (deployment counts):
 #   ./tests/churn/003-run-sweep.sh --churn-intensities 5,10,20
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

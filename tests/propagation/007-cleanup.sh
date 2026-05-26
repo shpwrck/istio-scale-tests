@@ -14,6 +14,7 @@
 #
 #   # Clean up specific clusters:
 #   ./tests/propagation/007-cleanup.sh --contexts istio-002,istio-003
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

@@ -16,6 +16,7 @@
 #
 #   # Dry-run to see what would be executed:
 #   ./tests/propagation/006-run-sweep.sh --dry-run
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

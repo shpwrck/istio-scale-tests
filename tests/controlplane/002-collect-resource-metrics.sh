@@ -21,6 +21,7 @@
 #
 #   # Watch mode during load test (per-tick deltas at the interval cadence):
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

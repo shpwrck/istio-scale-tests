@@ -7,6 +7,7 @@
 # Usage:
 #   ./tests/churn-dataplane/003-run-churn-probe.sh \
 #       --source-context CTX --churn-rate 5 [options]
+# ci-dry-run: --source-context ci-dummy --churn-rate 5
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
