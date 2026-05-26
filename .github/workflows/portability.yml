@@ -59,7 +59,7 @@ jobs:
                 status=1
               fi
             fi
-          done < <(find tests/ -name '0*.sh' -type f | sort)
+          done < <(find tests/ terraform/ -name '0*.sh' -type f | sort)
           exit $status
 
       - name: '--dry-run smoke test'
@@ -87,7 +87,20 @@ jobs:
           dry_run_script tests/churn-dataplane/003-run-churn-probe.sh \
             --source-context ci-dummy --churn-rate 5 || status=1
 
-          # Scripts with --dry-run that need no extra args.
+          # Cleanup/collect scripts that need --contexts (exit cleanly on
+          # missing contexts — they check namespace existence, not the context).
+          for f in \
+            tests/churn/005-cleanup.sh \
+            tests/churn-dataplane/006-cleanup.sh \
+            tests/controlplane/002-collect-resource-metrics.sh \
+            tests/controlplane/005-cleanup.sh \
+            tests/dataplane/005-cleanup.sh \
+            tests/propagation/004-collect-pilot-metrics.sh \
+            tests/propagation/007-cleanup.sh; do
+            dry_run_script "$f" --contexts ci-dummy || status=1
+          done
+
+          # Sweep scripts with --dry-run that need no extra args.
           for f in \
             tests/churn/003-run-sweep.sh \
             tests/churn-dataplane/004-run-sweep.sh \
