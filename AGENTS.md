@@ -86,6 +86,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `tests/controlplane/` | Control-plane resource scaling test suite: numbered scripts + `chart/` Helm chart for dummy services. See `tests/controlplane/README.md`. |
 | `tests/dataplane/` | Data-plane latency test suite: numbered scripts + `chart/` Helm chart for fortio server/client. See `tests/dataplane/README.md`. |
 | `tests/churn/` | Churn/convergence test suite: numbered scripts + `chart/` Helm chart for churn targets/watcher. See `tests/churn/README.md`. |
+| `presentations/istio-mc-secrets/` | Self-contained reveal.js deck (~20 min) explaining how cert-manager + ESO + ACM produce and distribute the three Secrets (`cacerts`, per-spoke kubeconfigs, Istio remote secrets) that wire the multi-primary, multi-network mesh together. Open `index.html` in a browser. See `presentations/istio-mc-secrets/README.md`. |
 | `tests/churn-dataplane/` | Churn × data-plane co-execution test suite: numbered scripts + composite `chart/` co-deploying fortio (server+client) and churn-target Pods in one shared namespace; emits `Δp99_ms` (latency delta under churn). See `tests/churn-dataplane/README.md`. |
 
 ## Common tasks
