@@ -165,16 +165,6 @@ jobs:
           [[ "$decoded" == "hello world" ]] || { echo "FAIL: round-trip mismatch"; exit 1; }
           echo "PASS"
 
-      - name: Portable mktemp (no -p flag)
-        run: |
-          d=$(mktemp -d)
-          export TMPDIR="$d"
-          f=$(mktemp)
-          echo "dir=$d  file=$f"
-          [[ "$f" == "$d"/* ]] || { echo "FAIL: file not in custom dir"; exit 1; }
-          rm -rf "$d"
-          echo "PASS"
-
       - name: No incompatible patterns outside helpers
         run: |
           status=0

@@ -713,9 +713,9 @@ poll_p2_remote_eds_push() {
 	local baseline_services="$6" dirty_file="$7"
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local tmp_scrape tmp_hist tmp_kv
-	tmp_scrape=$(TMPDIR="$TMPDIR_RUN" mktemp)
-	tmp_hist=$(TMPDIR="$TMPDIR_RUN" mktemp)
-	tmp_kv=$(TMPDIR="$TMPDIR_RUN" mktemp)
+	tmp_scrape=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	tmp_hist=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	tmp_kv=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	# Initialize dirty file to "0" (clean) until we see a dirty hit.
 	echo "0" > "$dirty_file"
 	while true; do
@@ -791,10 +791,10 @@ poll_p1_local_sync_histogram() {
 		result_file="$4" proxy_count="$5" restart_baseline="$6" final_snapshot_file="$7"
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local tmp_scrape cur_snapshot tmp_kv delta_file
-	tmp_scrape=$(TMPDIR="$TMPDIR_RUN" mktemp)
-	cur_snapshot=$(TMPDIR="$TMPDIR_RUN" mktemp)
-	tmp_kv=$(TMPDIR="$TMPDIR_RUN" mktemp)
-	delta_file=$(TMPDIR="$TMPDIR_RUN" mktemp)
+	tmp_scrape=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	cur_snapshot=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	tmp_kv=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	delta_file=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	while true; do
 		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
