@@ -122,6 +122,7 @@ SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS P
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
+# shellcheck disable=SC2034
 PREAMBLE_KEYS=("${SWEEP_LEVEL_KEYS[@]}" "${PER_ITER_KEYS[@]}")
 
 declare -A PREAMBLE=()         # last-value-wins scalar map (sweep-level keys)

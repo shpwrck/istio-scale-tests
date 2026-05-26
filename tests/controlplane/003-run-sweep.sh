@@ -27,6 +27,7 @@
 #   # Dry-run to see the planned matrix:
 #   ./tests/controlplane/003-run-sweep.sh --dry-run \
 #     --contexts a,b,c --service-counts 10,100 --sidecar-scopings none,namespace
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

@@ -5,6 +5,7 @@
 #
 # Usage:
 #   ./tests/churn-dataplane/006-cleanup.sh [--contexts CSV] [--wait-deletion] [--timeout SEC] [--dry-run]
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

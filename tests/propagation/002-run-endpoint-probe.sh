@@ -42,6 +42,7 @@
 #   # 3-cluster sweep, 5 iterations:
 #   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 \
 #     --remote-contexts rosa-002,rosa-003 --mesh-size 3 --iterations 5
+# ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -67,6 +68,43 @@ BASE_ENVOY_PF_PORT=15100
 CHART_DIR="${ROOT}/tests/propagation/chart"
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# Portable nanosecond / millisecond timestamps. macOS BSD `date` does not
+# support `%N`, so we detect the best available source once and cache it.
+NOW_NS_IMPL=""
+_detect_now_ns() {
+	[[ -n "$NOW_NS_IMPL" ]] && return
+	if [[ "$(date -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+		NOW_NS_IMPL="date"
+	elif command -v gdate >/dev/null 2>&1 \
+		&& [[ "$(gdate -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+		NOW_NS_IMPL="gdate"
+	elif command -v python3 >/dev/null 2>&1; then
+		NOW_NS_IMPL="python3"
+	elif command -v perl >/dev/null 2>&1; then
+		NOW_NS_IMPL="perl"
+	else
+		die "no nanosecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
+	fi
+}
+now_ns() {
+	_detect_now_ns
+	case "$NOW_NS_IMPL" in
+	date)    date -u +%s%N ;;
+	gdate)   gdate -u +%s%N ;;
+	python3) python3 -c 'import time; print(int(time.time()*1e9))' ;;
+	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1e9' ;;
+	esac
+}
+now_ms() {
+	_detect_now_ns
+	case "$NOW_NS_IMPL" in
+	date)    echo $(( $(date -u +%s%N) / 1000000 )) ;;
+	gdate)   gdate -u +%s%3N ;;
+	python3) python3 -c 'import time; print(int(time.time()*1000))' ;;
+	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1000' ;;
+	esac
+}
 
 usage() {
 	cat <<EOF
@@ -676,13 +714,13 @@ poll_p2_remote_eds_push() {
 	local baseline_services="$6" dirty_file="$7"
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local tmp_scrape tmp_hist tmp_kv
-	tmp_scrape=$(mktemp -p "$TMPDIR_RUN")
-	tmp_hist=$(mktemp -p "$TMPDIR_RUN")
-	tmp_kv=$(mktemp -p "$TMPDIR_RUN")
+	tmp_scrape=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	tmp_hist=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	tmp_kv=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	# Initialize dirty file to "0" (clean) until we see a dirty hit.
 	echo "0" > "$dirty_file"
 	while true; do
-		local now_ms=$(( $(date +%s%N) / 1000000 ))
+		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			echo "TIMEOUT" > "$result_file"
 			rm -f "$tmp_scrape" "$tmp_hist" "$tmp_kv"
@@ -713,7 +751,7 @@ poll_p2_remote_eds_push() {
 			if (( svc_delta < 1 )); then
 				echo "1" > "$dirty_file"
 			fi
-			date +%s%N > "$result_file"
+			now_ns > "$result_file"
 			rm -f "$tmp_scrape" "$tmp_hist" "$tmp_kv"
 			return
 		fi
@@ -734,12 +772,12 @@ poll_p3_sidecar_endpoints() {
 		interval="1.0"
 	fi
 	while true; do
-		local now_ms=$(( $(date +%s%N) / 1000000 ))
+		local now_ms=$(now_ms)
 		((now_ms > deadline_ms)) && { echo "TIMEOUT" > "$result_file"; return; }
 		local clusters
 		clusters=$(curl -fsS --max-time "$METRICS_TIMEOUT" "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$interval"; continue; }
 		if echo "$clusters" | grep -q "propagation-canary.*health_flags::healthy"; then
-			date +%s%N > "$result_file"
+			now_ns > "$result_file"
 			return
 		fi
 		sleep "$interval"
@@ -754,12 +792,12 @@ poll_p1_local_sync_histogram() {
 		result_file="$4" proxy_count="$5" restart_baseline="$6" final_snapshot_file="$7"
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local tmp_scrape cur_snapshot tmp_kv delta_file
-	tmp_scrape=$(mktemp -p "$TMPDIR_RUN")
-	cur_snapshot=$(mktemp -p "$TMPDIR_RUN")
-	tmp_kv=$(mktemp -p "$TMPDIR_RUN")
-	delta_file=$(mktemp -p "$TMPDIR_RUN")
+	tmp_scrape=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	cur_snapshot=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	tmp_kv=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	delta_file=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	while true; do
-		local now_ms=$(( $(date +%s%N) / 1000000 ))
+		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			echo "TIMEOUT" > "$result_file"
 			rm -f "$tmp_scrape" "$cur_snapshot" "$tmp_kv" "$delta_file"
@@ -782,7 +820,7 @@ poll_p1_local_sync_histogram() {
 		d_count=$(awk -F'\t' '$1=="_count" {print $2; exit}' "$delta_file")
 		[[ -z "$d_count" ]] && d_count=0
 		if (( d_count >= proxy_count )); then
-			date +%s%N > "$result_file"
+			now_ns > "$result_file"
 			cp "$cur_snapshot" "$final_snapshot_file"
 			rm -f "$tmp_scrape" "$cur_snapshot" "$tmp_kv" "$delta_file"
 			return
@@ -891,7 +929,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			printf 'pilot_xds=N/A\npilot_services=0\neds_count=0\npushes_total=0\nprocess_start=unknown\n' \
 				> "$BASELINE_DIR/source-kv"
 		fi
-		date +%s%N > "$BASELINE_DIR/source-ts"
+		now_ns > "$BASELINE_DIR/source-ts"
 	) &
 	BASELINE_PIDS+=($!)
 	for i in "${!REMOTES[@]}"; do
@@ -907,7 +945,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				printf 'pilot_xds=N/A\npilot_services=0\neds_count=0\npushes_total=0\nprocess_start=unknown\n' \
 					> "$BASELINE_DIR/remote-${idx}-kv"
 			fi
-			date +%s%N > "$BASELINE_DIR/remote-${idx}-ts"
+			now_ns > "$BASELINE_DIR/remote-${idx}-ts"
 		) &
 		BASELINE_PIDS+=($!)
 	done
@@ -932,7 +970,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	SOURCE_PROXY_COUNT=$(normalize_proxy_count "$(kv_get "$BASELINE_DIR/source-kv" pilot_xds)")
 	echo "  Source connected proxies: $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
 
-	T0=$(date +%s%N)
+	T0=$(now_ns)
 	echo "  Deploying canary on $SOURCE_CTX..."
 	helm template propagation-test "$CHART_DIR" \
 		--set clusterName="$SOURCE_CTX" \
@@ -981,7 +1019,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	done
 	POLL_PIDS=()
 
-	T1=$(date +%s%N)
+	T1=$(now_ns)
 	WINDOW_MS=$(( (T1 - T0) / 1000000 ))
 
 	# Compute p1 wall-clock + delta-window quantiles.

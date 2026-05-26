@@ -13,6 +13,7 @@
 #   # Scale 10 deployments from 1 to 10 replicas:
 #   ./tests/churn/002-run-churn-probe.sh --source-context rosa-001 \
 #     --deployment-count 10 --scale-to 10 --iterations 3
+# ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -35,6 +36,34 @@ BASE_PF_PORT=15014
 BASE_ENVOY_PF_PORT=15100
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# Portable nanosecond-resolution Unix timestamp. macOS BSD `date` does not
+# support `%N`, so we detect the best available source once and cache it.
+NOW_NS_IMPL=""
+_detect_now_ns() {
+	[[ -n "$NOW_NS_IMPL" ]] && return
+	if [[ "$(date -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+		NOW_NS_IMPL="date"
+	elif command -v gdate >/dev/null 2>&1 \
+		&& [[ "$(gdate -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+		NOW_NS_IMPL="gdate"
+	elif command -v python3 >/dev/null 2>&1; then
+		NOW_NS_IMPL="python3"
+	elif command -v perl >/dev/null 2>&1; then
+		NOW_NS_IMPL="perl"
+	else
+		die "no nanosecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
+	fi
+}
+now_ns() {
+	_detect_now_ns
+	case "$NOW_NS_IMPL" in
+	date)    date -u +%s%N ;;
+	gdate)   gdate -u +%s%N ;;
+	python3) python3 -c 'import time; print(int(time.time()*1e9))' ;;
+	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1e9' ;;
+	esac
+}
 
 usage() {
 	cat <<EOF
@@ -225,13 +254,14 @@ poll_syncz_converged() {
 	local port="$1" t0="$2" result_file="$3"
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
-		local now_ms=$(( $(date +%s%N) / 1000000 ))
+		local now_ms=$(now_ns)
+		now_ms=$(( now_ms / 1000000 ))
 		((now_ms > deadline)) && echo "TIMEOUT" > "$result_file" && return
 		local syncz stale
 		syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
 		stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
 		if [[ "$stale" == "0" ]]; then
-			echo "$(date +%s%N)" > "$result_file"
+			now_ns > "$result_file"
 			return
 		fi
 		sleep "$POLL_INTERVAL_S"
@@ -242,13 +272,14 @@ poll_endpoint_count_changed() {
 	local envoy_port="$1" t0="$2" baseline_count="$3" result_file="$4"
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
-		local now_ms=$(( $(date +%s%N) / 1000000 ))
+		local now_ms=$(now_ns)
+		now_ms=$(( now_ms / 1000000 ))
 		((now_ms > deadline)) && echo "TIMEOUT" > "$result_file" && return
 		local clusters count
 		clusters=$(curl -s "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
 		count=$(echo "$clusters" | grep -c "churn-target.*health_flags::healthy" || true)
 		if ((count > baseline_count)); then
-			echo "$(date +%s%N)" > "$result_file"
+			now_ns > "$result_file"
 			return
 		fi
 		sleep "$POLL_INTERVAL_S"
@@ -294,7 +325,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		BASELINE_COUNTS+=("$bc")
 	done
 
-	T0=$(date +%s%N)
+	T0=$(now_ns)
 	echo "  Scaling $DEPLOYMENT_COUNT deployments to $SCALE_TO replicas on all clusters..."
 	SCALE_PIDS=()
 	for ctx in "${ALL_CTXS[@]}"; do

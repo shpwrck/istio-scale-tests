@@ -8,6 +8,7 @@
 # Examples:
 #   # Sweep 1, 2, 3 clusters:
 #   ./tests/dataplane/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
