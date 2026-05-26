@@ -14,6 +14,7 @@
 #   # Dry-run (templates rendered through `oc apply --dry-run=client`):
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
 #     --source-context rosa-001 --remote-contexts rosa-002 --dry-run
+# ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

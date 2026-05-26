@@ -43,14 +43,14 @@ NOW_NS_IMPL=""
 _detect_now_ns() {
 	[[ -n "$NOW_NS_IMPL" ]] && return
 	if [[ "$(date -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_NS_IMPL=date
+		NOW_NS_IMPL="date"
 	elif command -v gdate >/dev/null 2>&1 \
 		&& [[ "$(gdate -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_NS_IMPL=gdate
+		NOW_NS_IMPL="gdate"
 	elif command -v python3 >/dev/null 2>&1; then
-		NOW_NS_IMPL=python3
+		NOW_NS_IMPL="python3"
 	elif command -v perl >/dev/null 2>&1; then
-		NOW_NS_IMPL=perl
+		NOW_NS_IMPL="perl"
 	else
 		die "no nanosecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
 	fi

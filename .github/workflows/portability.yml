@@ -6,12 +6,14 @@ on:
       - 'tests/**/*.sh'
       - 'terraform/**/*.sh'
       - 'config/*.env'
+      - '.shellcheckrc'
       - '.github/workflows/portability.yml'
   pull_request:
     paths:
       - 'tests/**/*.sh'
       - 'terraform/**/*.sh'
       - 'config/*.env'
+      - '.shellcheckrc'
       - '.github/workflows/portability.yml'
 
 jobs:
@@ -27,7 +29,7 @@ jobs:
       - name: Install Bash 4+ (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install bash kubectl helm
+          brew install bash kubectl helm shellcheck
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
@@ -47,6 +49,11 @@ jobs:
             fi
           done < <(find tests/ terraform/ -name '*.sh' -type f)
           exit $status
+
+      - name: shellcheck
+        run: |
+          find tests/ terraform/ -name '*.sh' -type f | sort \
+            | xargs shellcheck --shell=bash
 
       - name: '--help smoke test'
         run: |
@@ -79,62 +86,68 @@ jobs:
           done < <(grep -rl '^# ci-dry-run:' tests/ terraform/ --include='*.sh' | sort)
           exit $status
 
+      - name: Dry-run annotation enforcement
+        run: |
+          status=0
+          while IFS= read -r f; do
+            if ! grep -q '^# ci-dry-run:\|^# ci-dry-run-skip:' "$f"; then
+              echo "FAIL: $f mentions --dry-run but has no ci-dry-run annotation"
+              status=1
+            fi
+          done < <(grep -rl '\-\-dry-run' tests/ terraform/ --include='0*.sh' | sort)
+          if ((status == 0)); then echo "PASS — all --dry-run scripts are annotated"; fi
+          exit $status
+
       - name: Portable timestamp helpers
         run: |
+          # Robust extraction: match functions by name, not position.
+          EXTRACT_AWK='
+          /^NOW_MS_IMPL=/ || /^NOW_NS_IMPL=/ { print; next }
+          /^_detect_now_(ms|ns)\(\)/ { fn=1 }
+          /^now_(ms|ns)\(\)/          { fn=1 }
+          fn { print; if (/^}$/) fn=0 }
+          '
+
+          # Test the sourced library (preamble.sh).
           echo "=== preamble.sh (churn-dataplane) ==="
           (
             set -euo pipefail
             die() { echo "error: $*" >&2; exit 1; }
             source tests/churn-dataplane/lib/preamble.sh
-            ns=$(now_ns)
-            ms=$(now_ms)
+            ns=$(now_ns); ms=$(now_ms)
             echo "now_ns=$ns  now_ms=$ms"
             [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
             [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
-            (( ${#ns} >= 19 )) || { echo "FAIL: now_ns too short (${#ns} digits, expected >=19)"; exit 1; }
-            (( ${#ms} >= 13 )) || { echo "FAIL: now_ms too short (${#ms} digits, expected >=13)"; exit 1; }
+            (( ${#ns} >= 19 )) || { echo "FAIL: now_ns too short (${#ns} digits)"; exit 1; }
+            (( ${#ms} >= 13 )) || { echo "FAIL: now_ms too short (${#ms} digits)"; exit 1; }
             echo "PASS"
           )
 
-          echo ""
-          echo "=== controlplane/002 now_ms() ==="
-          (
-            set -euo pipefail
-            die() { echo "error: $*" >&2; exit 1; }
-            # Extract the NOW_MS_IMPL variable, _detect_now_ms, and now_ms functions.
-            eval "$(awk '/^NOW_MS_IMPL=/,0 { print; if (/^now_ms\(\)/) f=1; if (f && /^}$/) exit }' tests/controlplane/002-collect-resource-metrics.sh)"
-            ms=$(now_ms)
-            echo "now_ms=$ms"
-            [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
-            (( ${#ms} >= 13 )) || { echo "FAIL: now_ms too short"; exit 1; }
-            echo "PASS"
-          )
-
-          echo ""
-          echo "=== propagation/002 now_ns()/now_ms() ==="
-          (
-            set -euo pipefail
-            die() { echo "error: $*" >&2; exit 1; }
-            eval "$(awk '/^NOW_NS_IMPL=/,0 { print; if (/^now_ms\(\)/) f=1; if (f && /^}$/) exit }' tests/propagation/002-run-endpoint-probe.sh)"
-            ns=$(now_ns)
-            ms=$(now_ms)
-            echo "now_ns=$ns  now_ms=$ms"
-            [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
-            [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
-            echo "PASS"
-          )
-
-          echo ""
-          echo "=== churn/002 now_ns() ==="
-          (
-            set -euo pipefail
-            die() { echo "error: $*" >&2; exit 1; }
-            eval "$(awk '/^NOW_NS_IMPL=/,0 { print; if (/^now_ns\(\)/) f=1; if (f && /^}$/) exit }' tests/churn/002-run-churn-probe.sh)"
-            ns=$(now_ns)
-            echo "now_ns=$ns"
-            [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
-            echo "PASS"
-          )
+          # Dynamically discover and test standalone implementations.
+          status=0
+          while IFS= read -r f; do
+            echo ""
+            echo "=== $f ==="
+            (
+              set -euo pipefail
+              die() { echo "error: $*" >&2; exit 1; }
+              eval "$(awk "$EXTRACT_AWK" "$f")"
+              if type now_ns &>/dev/null; then
+                ns=$(now_ns)
+                echo "now_ns=$ns"
+                [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
+                (( ${#ns} >= 19 )) || { echo "FAIL: now_ns too short (${#ns} digits)"; exit 1; }
+              fi
+              if type now_ms &>/dev/null; then
+                ms=$(now_ms)
+                echo "now_ms=$ms"
+                [[ "$ms" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ms not numeric"; exit 1; }
+                (( ${#ms} >= 13 )) || { echo "FAIL: now_ms too short (${#ms} digits)"; exit 1; }
+              fi
+              echo "PASS"
+            ) || status=1
+          done < <(grep -rl '^NOW_NS_IMPL=\|^NOW_MS_IMPL=' tests/ --include='*.sh' | sort)
+          exit $status
 
       - name: Portable base64 (no -w flag)
         run: |
@@ -172,6 +185,42 @@ jobs:
           if grep -rn 'base64 -w' tests/ terraform/ --include='*.sh' \
               | grep -v ':[0-9]*:[[:space:]]*#'; then
             echo "FAIL: found base64 -w (GNU-only)"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          echo "--- Checking for sed -i (GNU vs BSD incompatibility) ---"
+          if grep -rn "sed -i " tests/ terraform/ --include='*.sh' \
+              | grep -v ':[0-9]*:[[:space:]]*#'; then
+            echo "FAIL: found sed -i (use sed -i '' on BSD or avoid in-place)"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          echo "--- Checking for readlink -f (GNU-only) ---"
+          if grep -rn 'readlink -f' tests/ terraform/ --include='*.sh' \
+              | grep -v ':[0-9]*:[[:space:]]*#'; then
+            echo "FAIL: found readlink -f (use realpath or cd/pwd instead)"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          echo "--- Checking for grep -P (GNU-only Perl regex) ---"
+          if grep -rn 'grep -[a-zA-Z]*P' tests/ terraform/ --include='*.sh' \
+              | grep -v ':[0-9]*:[[:space:]]*#'; then
+            echo "FAIL: found grep -P (use grep -E for extended regex)"
+            status=1
+          else
+            echo "PASS"
+          fi
+
+          echo "--- Checking for gawk-only asorti() ---"
+          if grep -rn 'asorti(' tests/ terraform/ --include='*.sh' \
+              | grep -v ':[0-9]*:[[:space:]]*#'; then
+            echo "FAIL: found asorti() (gawk-only; use portable insertion sort)"
             status=1
           else
             echo "PASS"

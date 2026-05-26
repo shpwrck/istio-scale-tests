@@ -58,14 +58,14 @@ NOW_MS_IMPL=""
 _detect_now_ms() {
 	[[ -n "$NOW_MS_IMPL" ]] && return
 	if [[ "$(date -u +%s%3N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_MS_IMPL=date
+		NOW_MS_IMPL="date"
 	elif command -v gdate >/dev/null 2>&1 \
 		&& [[ "$(gdate -u +%s%3N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_MS_IMPL=gdate
+		NOW_MS_IMPL="gdate"
 	elif command -v python3 >/dev/null 2>&1; then
-		NOW_MS_IMPL=python3
+		NOW_MS_IMPL="python3"
 	elif command -v perl >/dev/null 2>&1; then
-		NOW_MS_IMPL=perl
+		NOW_MS_IMPL="perl"
 	else
 		die "no millisecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
 	fi

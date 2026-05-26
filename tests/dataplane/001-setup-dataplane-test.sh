@@ -11,6 +11,7 @@
 # Examples:
 #   # Server on all clusters, client on rosa-001:
 #   ./tests/dataplane/001-setup-dataplane-test.sh --source-context rosa-001 --remote-contexts rosa-002,rosa-003
+# ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
