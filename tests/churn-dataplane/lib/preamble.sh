@@ -51,7 +51,7 @@ now_ns() {
 now_ms() {
 	_detect_now_ns
 	case "$NOW_NS_IMPL" in
-	date)    date -u +%s%3N ;;
+	date)    echo $(( $(date -u +%s%N) / 1000000 )) ;;
 	gdate)   gdate -u +%s%3N ;;
 	python3) python3 -c 'import time; print(int(time.time()*1000))' ;;
 	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1000' ;;
