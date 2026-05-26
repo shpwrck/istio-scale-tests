@@ -13,6 +13,7 @@
 #
 #   # Tear down from all clusters:
 #   ./tests/propagation/001-setup-propagation-test.sh --cleanup
+# ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

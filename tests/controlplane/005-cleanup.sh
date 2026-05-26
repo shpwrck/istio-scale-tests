@@ -10,6 +10,7 @@
 #
 # Usage:
 #   ./tests/controlplane/005-cleanup.sh [--contexts CSV] [--dry-run]
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

@@ -1,3 +1,6 @@
+#VSCode settings
+settings.json
+
 # Private key and certificate material (beyond /cacerts/)
 *.pem
 *.key

@@ -10,6 +10,7 @@
 #
 #   # Setup with custom churn targets:
 #   ./tests/churn/001-setup-churn-test.sh --deployment-count 10 --base-replicas 1
+# ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

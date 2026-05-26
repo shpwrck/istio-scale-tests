@@ -9,6 +9,7 @@
 #
 # Usage:
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

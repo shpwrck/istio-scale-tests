@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# ci-dry-run-skip: needs AWS credentials for resource listing
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

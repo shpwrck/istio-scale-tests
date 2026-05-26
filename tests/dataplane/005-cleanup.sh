@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./tests/dataplane/005-cleanup.sh [--contexts CSV] [--dry-run] [--no-wait-deletion]
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

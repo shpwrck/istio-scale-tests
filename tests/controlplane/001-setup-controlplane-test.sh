@@ -28,6 +28,7 @@
 #
 #   # Setup with namespace-scoped Sidecar CRs:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --sidecar-scoping namespace
+# ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
