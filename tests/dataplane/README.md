@@ -71,6 +71,18 @@ After 001 returns, sidecar xDS endpoints may not have converged on the source cl
   --source-context rosa-001 --remote-contexts rosa-002 --settle 60
 ```
 
+## Envoy Warmup
+
+After settle, 002 runs a short throwaway `fortio load` (QPS=10) against every target URL to warm Envoy's upstream mTLS connection pools. Without this, the first few measured requests include lazy TLS handshake latency, inflating tail percentiles.
+
+```bash
+# Custom warmup duration (default: 5s; set to 0 to disable):
+./tests/dataplane/002-run-latency-probe.sh \
+  --source-context rosa-001 --remote-contexts rosa-002 --warmup-duration 10
+```
+
+Environment: `DATAPLANE_WARMUP_DURATION_SEC`.
+
 ## istiod restart detection
 
 002 port-forwards to istiod on **every cluster** in the mesh and samples `process_start_time_seconds` from each at probe start and end. If any cluster's start time advances, all rows in that run are tagged `istiod_restarted=1`. 004 excludes such rows from numeric aggregation (but still counts them in `n_total`).

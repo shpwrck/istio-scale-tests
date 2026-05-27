@@ -59,7 +59,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke (ApplicationSet wave 8). |
 | `charts/spoke-ossm/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke cluster with per-cluster clusterName, network, meshID (wave 21). |
 | `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke — Deployment, Service, HPA, PDB, RBAC (wave 24). |
-| `charts/spoke-east-west-gateway/` | Helm chart: east-west gateway + cross-network Gateway CR per spoke — TLS AUTO_PASSTHROUGH on port 15443 (wave 27). |
+| `charts/spoke-east-west-gateway/` | Helm chart: east-west gateway (NodePort :31443) + cross-network Gateway CR per spoke — TLS AUTO_PASSTHROUGH on target port 15443 (wave 27). |
 | `charts/hub-mesh-ca/` | Helm chart: cert-manager root CA + `ClusterIssuer` chain on the hub. |
 | `charts/hub-mesh-ca-intermediate/` | Helm chart: one intermediate CA `Certificate` for a single `clusterName`. |
 | `charts/hub-mesh-push-secrets/` | Helm chart: ESO PushSecrets pushing cacerts, kubeconfigs, and Istio remote secrets (with `istio/multiCluster` label) to spoke `istio-system` namespaces. |
