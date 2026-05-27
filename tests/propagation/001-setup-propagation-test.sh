@@ -24,6 +24,7 @@ CONTEXTS_CSV=""
 DRY_RUN=0
 CLEANUP=0
 WAIT_TIMEOUT=300
+WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -31,14 +32,15 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --contexts CSV   Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --dry-run        Pass --dry-run=client to oc apply.
-  --cleanup        Remove propagation-test namespace from all contexts.
-  --wait-timeout N Seconds to wait for watcher pods (default: 300).
-  -h, --help       Show this help.
+  --contexts CSV        Kube contexts to target (default: \$SETUP_CONTEXTS).
+  --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
+  --dry-run             Pass --dry-run=client to oc apply.
+  --cleanup             Remove propagation-test namespace from all contexts.
+  --wait-timeout N      Seconds to wait for watcher pods (default: 300).
+  -h, --help            Show this help.
 
 Environment:
-  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE.
+  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_WATCHER_REPLICAS.
 EOF
 }
 
@@ -60,6 +62,11 @@ while [[ $# -gt 0 ]]; do
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
+		shift 2
+		;;
+	--watcher-replicas)
+		[[ -n "${2:-}" ]] || die "--watcher-replicas requires a value"
+		WATCHER_REPLICAS="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -129,6 +136,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		--set clusterName="$ctx" \
 		--set namespace="$NS" \
 		--set canary.enabled=false \
+		--set watcher.replicaCount="$WATCHER_REPLICAS" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
 

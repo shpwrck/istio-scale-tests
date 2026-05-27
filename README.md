@@ -282,7 +282,7 @@ Run the sweep to compare propagation latency across mesh sizes (1, 2, 3, ... N c
 ```bash
 ./tests/propagation/006-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
-  --mesh-sizes 1,2,3 --iterations 5
+  --mesh-sizes 1,2,3 --iterations 5 --watcher-replicas 30
 ```
 
 See `tests/propagation/README.md` for full usage.

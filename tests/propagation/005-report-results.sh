@@ -361,9 +361,15 @@ NF < 10 { next }
 	}
 	if (cp50 != "N/A" && cp50 != "overflow" && cp50 ~ /^[0-9]+$/) {
 		cp50_n[ms]++; cp50_vals[ms, cp50_n[ms]] = cp50 + 0
+		v = cp50 + 0
+		if (!(ms in cp50_min) || v < cp50_min[ms]) cp50_min[ms] = v
+		if (!(ms in cp50_max) || v > cp50_max[ms]) cp50_max[ms] = v
 	}
 	if (cp99 != "N/A" && cp99 != "overflow" && cp99 ~ /^[0-9]+$/) {
 		cp99_n[ms]++; cp99_vals[ms, cp99_n[ms]] = cp99 + 0
+		v = cp99 + 0
+		if (!(ms in cp99_min) || v < cp99_min[ms]) cp99_min[ms] = v
+		if (!(ms in cp99_max) || v > cp99_max[ms]) cp99_max[ms] = v
 	}
 }
 function load(into, src, ms, n,    i) {
@@ -383,6 +389,10 @@ function percentile(arr, n, pct,    idx) {
 	if (idx < 1) idx = 1
 	if (idx > n) idx = n
 	return arr[idx]
+}
+function is_floor_pinned(phase_min, phase_max, phase_n) {
+	if (phase_n > 0 && phase_min == 100 && phase_max == 100) return 1
+	return 0
 }
 function asorti_seen(    i, k) {
 	# mawk lacks asorti — emit sorted keys from seen[] manually.
@@ -424,13 +434,22 @@ report_endpoint_text() {
 		printf "  %-3s-+-%-26s-+-%5s-+-%5s-+-%7s-+-%7s-+-%7s-+-%7s-+-%7s-+-%7s\n",
 			"---", "--------------------------", "-----", "-----", "-------", "-------", "-------", "-------", "-------", "-------"
 		asorti_seen()
+		any_pinned = 0
 		for (s = 1; s <= __n; s++) {
 			ms_cur = __sorted[s]
 			stats_line("P1 local xDS (wall)",    p1_vals,   ms_cur, p1_n[ms_cur])
-			stats_line("P1 conv_p50 (hist)",     cp50_vals, ms_cur, cp50_n[ms_cur])
-			stats_line("P1 conv_p99 (hist)",     cp99_vals, ms_cur, cp99_n[ms_cur])
+			p50_pinned = is_floor_pinned(cp50_min[ms_cur], cp50_max[ms_cur], cp50_n[ms_cur])
+			p99_pinned = is_floor_pinned(cp99_min[ms_cur], cp99_max[ms_cur], cp99_n[ms_cur])
+			stats_line("P1 conv_p50 (hist)" (p50_pinned ? " *" : ""),     cp50_vals, ms_cur, cp50_n[ms_cur])
+			stats_line("P1 conv_p99 (hist)" (p99_pinned ? " *" : ""),     cp99_vals, ms_cur, cp99_n[ms_cur])
 			stats_line("P2 remote istiod EDS",   p2_vals,   ms_cur, p2_n[ms_cur])
 			stats_line("P3 remote sidecar",      p3_vals,   ms_cur, p3_n[ms_cur])
+			if (p50_pinned || p99_pinned) any_pinned = 1
+		}
+		if (any_pinned) {
+			printf "\n  * All convergence samples fell in the lowest histogram bucket (<= 100 ms).\n"
+			printf "    Actual push latency is 0-100 ms but cannot be resolved further;\n"
+			printf "    pilot_proxy_convergence_time buckets are compiled into istiod.\n"
 		}
 	}'
 }
@@ -510,11 +529,19 @@ report_endpoint_markdown() {
 			printf "| Phase | n_total | n_valid | min (ms) | max (ms) | avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) |\n"
 			printf "|-------|---------|---------|----------|----------|----------|----------|----------|----------|\n"
 			md_row("P1 local xDS (wall)",  p1_vals,   ms_cur, p1_n[ms_cur])
-			md_row("P1 conv_p50 (hist)",   cp50_vals, ms_cur, cp50_n[ms_cur])
-			md_row("P1 conv_p99 (hist)",   cp99_vals, ms_cur, cp99_n[ms_cur])
+			p50_pinned = is_floor_pinned(cp50_min[ms_cur], cp50_max[ms_cur], cp50_n[ms_cur])
+			p99_pinned = is_floor_pinned(cp99_min[ms_cur], cp99_max[ms_cur], cp99_n[ms_cur])
+			md_row("P1 conv_p50 (hist)" (p50_pinned ? " *" : ""),   cp50_vals, ms_cur, cp50_n[ms_cur])
+			md_row("P1 conv_p99 (hist)" (p99_pinned ? " *" : ""),   cp99_vals, ms_cur, cp99_n[ms_cur])
 			md_row("P2 remote istiod EDS", p2_vals,   ms_cur, p2_n[ms_cur])
 			md_row("P3 remote sidecar",    p3_vals,   ms_cur, p3_n[ms_cur])
 			printf "\n"
+			if (p50_pinned || p99_pinned) {
+				printf "> **\\*** All convergence samples fell in the lowest histogram bucket "
+				printf "(<= 100 ms). The actual push latency is somewhere between 0–100 ms "
+				printf "but cannot be resolved further — `pilot_proxy_convergence_time` bucket "
+				printf "boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s).\n\n"
+			}
 		}
 		# Cross-mesh-size comparison (only meaningful when >1 mesh size was swept).
 		if (__n > 1) {
