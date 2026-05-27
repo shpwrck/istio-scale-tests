@@ -320,6 +320,98 @@ ensure_output_dir() {
 	echo "Output directory: $OUTPUT_DIR" >&2
 }
 
+# ---------------------------------------------------------------------------
+# Background peak-memory poller for split-phase mode.
+# ---------------------------------------------------------------------------
+# Runs between the baseline and final 002 invocations, using the same port
+# range (15014+k). Safe because 002-baseline has exited and freed its ports.
+PEAK_POLLER_PID=""
+PEAK_PF_PIDS=()
+BASE_PF_PORT=15014
+POLL_INTERVAL=5
+
+start_peak_metrics_poller() {
+	local state_dir="$1"
+	local manifest="${state_dir}/pods.tsv"
+	[[ -f "$manifest" ]] || return 0
+	(( ${#KUBECTL[@]} )) || return 0
+
+	local -a pod_ctxs=() pod_names=()
+	while IFS=$'\t' read -r _idx ctx pod; do
+		pod_ctxs+=("$ctx")
+		pod_names+=("$pod")
+	done < "$manifest"
+	(( ${#pod_ctxs[@]} )) || return 0
+
+	PEAK_PF_PIDS=()
+	for k in "${!pod_ctxs[@]}"; do
+		local port=$(( BASE_PF_PORT + k ))
+		"${KUBECTL[@]}" --context="${pod_ctxs[k]}" -n istio-system \
+			port-forward "pod/${pod_names[k]}" "$port":15014 >/dev/null 2>&1 &
+		PEAK_PF_PIDS+=($!)
+	done
+	sleep 2
+
+	(
+		trap 'exit 0' TERM
+		while true; do
+			for k in "${!pod_ctxs[@]}"; do
+				local port=$(( BASE_PF_PORT + k ))
+				local body
+				body=$(curl -s --max-time 3 "http://localhost:${port}/metrics" 2>/dev/null) || continue
+
+				# Peak memory.
+				local mem_val
+				mem_val=$(echo "$body" | awk '/^process_resident_memory_bytes[{ ]/ && !/^#/ { print $NF+0 }')
+				if [[ -n "$mem_val" && "$mem_val" != "0" ]]; then
+					local prev_mem=0
+					[[ -s "${state_dir}/peak-mem-${k}.val" ]] && prev_mem=$(<"${state_dir}/peak-mem-${k}.val")
+					if awk -v a="$mem_val" -v b="$prev_mem" 'BEGIN{ exit !(a+0 > b+0) }'; then
+						printf '%s' "$mem_val" > "${state_dir}/peak-mem-${k}.val"
+					fi
+				fi
+
+				# Peak CPU rate (millicores over this interval).
+				local cpu_val
+				cpu_val=$(echo "$body" | awk '/^process_cpu_seconds_total[{ ]/ && !/^#/ { print $NF+0 }')
+				if [[ -n "$cpu_val" && "$cpu_val" != "0" ]]; then
+					local prev_cpu_file="${state_dir}/prev-cpu-${k}.val"
+					if [[ -s "$prev_cpu_file" ]]; then
+						local prev_cpu
+						prev_cpu=$(<"$prev_cpu_file")
+						local rate_m
+						rate_m=$(awk -v c="$cpu_val" -v p="$prev_cpu" -v iv="$POLL_INTERVAL" \
+							'BEGIN{ d=(c-p)*1000/iv; if(d<0) d=0; printf "%.0f", d }')
+						local prev_peak=0
+						[[ -s "${state_dir}/peak-cpu-${k}.val" ]] && prev_peak=$(<"${state_dir}/peak-cpu-${k}.val")
+						if awk -v a="$rate_m" -v b="$prev_peak" 'BEGIN{ exit !(a+0 > b+0) }'; then
+							printf '%s' "$rate_m" > "${state_dir}/peak-cpu-${k}.val"
+						fi
+					fi
+					printf '%s' "$cpu_val" > "$prev_cpu_file"
+				fi
+			done
+			sleep "$POLL_INTERVAL"
+		done
+	) &
+	PEAK_POLLER_PID=$!
+}
+
+stop_peak_metrics_poller() {
+	if [[ -n "$PEAK_POLLER_PID" ]]; then
+		kill "$PEAK_POLLER_PID" 2>/dev/null || true
+		wait "$PEAK_POLLER_PID" 2>/dev/null || true
+		PEAK_POLLER_PID=""
+	fi
+	for pid in "${PEAK_PF_PIDS[@]}"; do
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	done
+	PEAK_PF_PIDS=()
+}
+
+trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
+
 combo_idx=0
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
@@ -363,6 +455,8 @@ for ms in "${MESH_SIZES[@]}"; do
 						--settle "$SETTLE_SEC"
 					echo ""
 
+					start_peak_metrics_poller "$STATE_DIR_COMBO"
+
 					echo "--- Deploying workloads (phase 2/3, scoping=$scp) ---"
 					"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
 						--contexts "$active_csv" \
@@ -377,6 +471,8 @@ for ms in "${MESH_SIZES[@]}"; do
 						sleep "$SETTLE_SEC"
 						echo ""
 					fi
+
+					stop_peak_metrics_poller
 
 					echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
 					"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
