@@ -18,7 +18,7 @@ The app-of-apps syncs child Applications with sync-wave ordering:
 | 19 | `hub-mesh-push-secrets/` | Push cacerts + kubeconfigs + remote secrets to spokes |
 | 21 | `spoke-ossm/` | Istio + IstioCNI CRs per spoke |
 | 24 | `spoke-ingress-gateway/` | North-south ingress gateway per spoke |
-| 27 | `spoke-east-west-gateway/` | East-west gateway (NodePort :31443) + cross-network Gateway CR per spoke |
+| 27 | `spoke-east-west-gateway/` | East-west gateway + cross-network Gateway CR per spoke |
 
 ## All charts
 
@@ -43,7 +43,7 @@ The app-of-apps syncs child Applications with sync-wave ordering:
 | `istiod-monitor/` | ServiceMonitor + PrometheusRule for istiod pilot metrics |
 | `mesh-verify/` | Echo workload for cross-cluster mesh verification |
 | `openshift-gitops-operator/` | OpenShift GitOps operator OLM Subscription (hub) |
-| `spoke-east-west-gateway/` | East-west gateway (NodePort :31443) + cross-network Gateway CR per spoke |
+| `spoke-east-west-gateway/` | East-west gateway + cross-network Gateway CR per spoke |
 | `spoke-ingress-gateway/` | North-south ingress gateway (LoadBalancer) per spoke |
 | `spoke-ossm/` | Istio + IstioCNI CRs per spoke (multi-primary, multi-network) |
 | `spoke-istio-namespaces/` | istio-system and istio-cni namespaces per spoke |
