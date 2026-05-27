@@ -36,7 +36,10 @@ The probe currently `die`s if any context has != 1 istiod pod. The correct long-
 
 ```bash
 # 1. Setup watcher pods on all clusters
-./tests/propagation/001-setup-propagation-test.sh --contexts rosa-001,rosa-002,rosa-003
+#    Use --watcher-replicas to scale up for histogram quantile extraction
+#    (p50 needs >= 10 connected proxies, p99 needs >= 30).
+./tests/propagation/001-setup-propagation-test.sh --contexts rosa-001,rosa-002,rosa-003 \
+  --watcher-replicas 30
 
 # 2. Run endpoint probe (2-cluster)
 ./tests/propagation/002-run-endpoint-probe.sh \
@@ -52,11 +55,11 @@ The probe currently `die`s if any context has != 1 istiod pod. The correct long-
 Compare propagation latency at different cluster counts:
 
 ```bash
-# Run probes at mesh_size=1, 2, 3
+# Run probes at mesh_size=1, 2, 3 with 30 watcher replicas for histogram quantiles
 ./tests/propagation/006-run-sweep.sh \
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3 \
-  --iterations 5 --tsv
+  --iterations 5 --tsv --watcher-replicas 30
 
 # Dry-run prints the planned matrix to stderr without touching clusters
 ./tests/propagation/006-run-sweep.sh \
@@ -67,7 +70,7 @@ Compare propagation latency at different cluster counts:
 Each sweep writes into `tests/propagation/results/sweep-${RUN_ID}/` so individual sweep runs are not interleaved with one another.
 
 The sweep orchestrator:
-1. Sets up watcher pods on clusters for each mesh size
+1. Sets up watcher pods on clusters for each mesh size (forwarding `--watcher-replicas`)
 2. Runs endpoint probe (002) at each size
 3. Sleeps `--settle-sec` (default 5s) between mesh-size steps
 4. Generates a comparison report grouped by mesh_size
@@ -168,6 +171,11 @@ Backwards-compat:
   per-iteration keys (`RUN_ID`, `DATE`, `MESH_SIZE`, `REMOTES`, `KUBE_VERSIONS`) are
   emitted as a sequence (`iterations:` block in YAML/text/CSV-comment form, `"iterations"`
   array in JSON) with one entry per input TSV.
+- When all convergence samples for a mesh size land in the lowest histogram bucket
+  (<= 100 ms), the `conv_p50` and/or `conv_p99` rows are annotated with `*` in text
+  and markdown output. A footnote explains that the actual push latency is 0-100 ms
+  but cannot be resolved further because `pilot_proxy_convergence_time` bucket
+  boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s).
 
 ### Sweep summary output
 
@@ -208,7 +216,8 @@ The file contains:
 
 - **istiod single-replica required**: see "Single-istiod-replica precondition" above. The probe `die`s on > 1 istiod replica per cluster.
 - **`/metrics` scrape timeout**: defaults to 5 s. On very large meshes (100k+ services) the istiod `/metrics` payload may take longer than 5 s to render — bump `PROPAGATION_METRICS_TIMEOUT` (seconds).
-- **Min-sample floor for quantiles**: `p1_conv_p50_ms` requires ≥ 10 samples, `p1_conv_p99_ms` requires ≥ 30 samples. Smaller proxy counts (e.g. 5 connected proxies) will emit `N/A` for p99. Use the wall-clock `p1_ms` for small meshes.
+- **Min-sample floor for quantiles**: `p1_conv_p50_ms` requires ≥ 10 samples, `p1_conv_p99_ms` requires ≥ 30 samples. With the default 1 watcher replica (3 connected proxies: watcher + ingress-gw + east-west-gw), both columns will be `N/A`. Use `--watcher-replicas 30` on `001-setup` or `006-run-sweep` to reach the thresholds. For quick checks with few proxies, use the wall-clock `p1_ms` column instead.
+- **Histogram bucket resolution floor**: `pilot_proxy_convergence_time` bucket boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s). When all pushes complete in under 100 ms, conv_p50 and conv_p99 are pinned at 100 — the report annotates these rows with `*`. The actual latency is somewhere in 0-100 ms but cannot be resolved further without recompiling istiod with finer buckets.
 
 ## Cleanup
 
@@ -220,7 +229,7 @@ The file contains:
 
 | Script | Purpose |
 |--------|---------|
-| `001-setup-propagation-test.sh` | Deploy/cleanup watcher pods and namespace |
+| `001-setup-propagation-test.sh` | Deploy/cleanup watcher pods and namespace (`--watcher-replicas N`) |
 | `002-run-endpoint-probe.sh` | Measure endpoint propagation (P1/P2/P3) via `pilot_proxy_convergence_time` + `pilot_xds_pushes{type="eds"}` + watcher Envoy |
 | `004-collect-pilot-metrics.sh` | Scrape istiod Prometheus metrics |
 | `005-report-results.sh` | Generate summary statistics from TSV results |

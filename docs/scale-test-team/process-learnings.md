@@ -187,10 +187,17 @@ When there are 5+ preamble fields, propagate ALL of them, not just `RUN_ID` and 
 **Why:** PL19 propagates the TSV preamble into all four report formats, but when a sweep feeds N per-iteration TSVs into one report, the naive "last-value-wins per key" aggregation collapses per-iteration scalars (`RUN_ID`, `DATE`, `MESH_SIZE`, `REMOTES`, `KUBE_VERSIONS`) to whichever input file sorted last. The resulting frontmatter advertises *one* iteration's identity (e.g. `MESH_SIZE: 2`) while the report body summarises the whole sweep (e.g. comparison table listing sizes 1, 2, 4, 8). Operators reading the report file detached from its directory are actively misled about provenance.
 
 **How to preempt:** Classify preamble keys into two partitions before propagation:
-
 - **Sweep-level scalars** — values that must be identical across every input TSV in a coherent run (`SWEEP_RUN_ID`, `HARNESS_SHA`, `ISTIO_VERSION`, sweep-wide knobs like `SETTLE_SEC`/`TIMEOUT_SEC`/`ITERATIONS`). Rendered as scalars at the top of the metadata block.
 - **Per-iteration values** — keys whose values legitimately vary across the N input TSVs (`RUN_ID`, `DATE`, `MESH_SIZE`, per-iteration `REMOTES`/`KUBE_VERSIONS`). Rendered as a sequence (`iterations:` YAML block for markdown/text, `# iterations:` comment block for CSV, `"iterations":[...]` array for JSON) with one entry per input TSV. A single-input report still renders a one-element sequence so the schema is uniform.
 
 The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → TSV preamble (probe omits the line when the flag is unset so standalone runs stay clean) and the report emits it as the first scalar key. The classification predicate (sweep-level keys must be homogeneous across inputs) is a correctness invariant — implementers should consider a stderr warning when a sweep-level key actually varies across inputs, since silent last-wins on a key the operator marked sweep-level is the same failure mode in miniature.
 
 (PL26 was added after PR for issue #11: the propagation sweep was refactored to use the report script for markdown summary; round-1 reviewers (usability + reproducibility) caught that PL19 propagation alone is insufficient when N TSVs feed one report.)
+
+## PL27 — Scope Helm renders to the resources being mutated
+
+**Why:** When a probe script uses `helm template | kubectl apply` to create or update a single resource (e.g. a canary Deployment), the default `helm template` renders the *entire* chart — including resources the probe doesn't own (e.g. watcher Deployments). Server-side apply with `--force-conflicts` then overwrites those resources with the chart's default values, silently reverting operator-configured settings (like `replicaCount`) on every iteration.
+
+**How to preempt:** Use `helm template --show-only templates/<file>.yaml` to scope the render to only the templates the probe needs. This is especially important when the chart contains resources managed by a separate setup script with its own CLI flags (e.g. `--watcher-replicas`). The probe must not re-apply resources it doesn't own.
+
+(PL27 was added after PR #2: the propagation probe's `helm template` rendered the full chart each iteration, overwriting watcher Deployment `replicaCount` from 30 back to the chart default of 1, dropping connected proxy count mid-sweep and losing histogram quantile data.)

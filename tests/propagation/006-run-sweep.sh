@@ -30,6 +30,7 @@ TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
 MAX_MATRIX="${PROPAGATION_MAX_MATRIX:-64}"
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
+WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
 DRY_RUN=0
 WRITE_TSV=0
 COLLECT_METRICS=0
@@ -44,6 +45,7 @@ Usage: $(basename "$0") [options]
   --contexts CSV         All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV       Cluster counts to test (default: "1,2,...,len(contexts)").
   --mesh-size N          DEPRECATED single-size alias (prints warning to stderr).
+  --watcher-replicas N   Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --iterations N         Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC          Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --settle-sec SEC       Settle gap after cleanup between mesh-size steps (default: $SETTLE_SEC).
@@ -57,7 +59,7 @@ Usage: $(basename "$0") [options]
 
 Environment:
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
-  PROPAGATION_MAX_MATRIX.
+  PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX.
 EOF
 }
 
@@ -120,6 +122,11 @@ while [[ $# -gt 0 ]]; do
 	--tsv)
 		WRITE_TSV=1
 		shift
+		;;
+	--watcher-replicas)
+		[[ -n "${2:-}" ]] || die "--watcher-replicas requires a value"
+		WATCHER_REPLICAS="$2"
+		shift 2
 		;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1
@@ -193,7 +200,7 @@ if ((DRY_RUN)); then
 				remote_csv+="$rc"
 			done
 			echo "--- Plan: mesh_size=$ms ---"
-			echo "  001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+			echo "  001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}") --watcher-replicas $WATCHER_REPLICAS"
 			echo "  002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --sweep-run-id $SWEEP_RUN_ID --iterations $ITERATIONS --settle-sec $SETTLE_SEC"
 			if ((COLLECT_METRICS)); then
 				echo "  004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
@@ -254,7 +261,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	fi
 
 	echo "--- Setting up watchers ---"
-	"$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
+	"$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --watcher-replicas "$WATCHER_REPLICAS"
 	echo ""
 
 	echo "--- Running endpoint probe (mesh_size=$ms) ---"
