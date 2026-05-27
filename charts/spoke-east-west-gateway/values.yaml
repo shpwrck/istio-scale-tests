@@ -18,10 +18,10 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
 
 service:
-  type: NodePort
+  type: LoadBalancer
   annotations: {}
   nodePorts:
-    tls: "31443"
+    tls: ""
 
 argoSyncWaves:
   enabled: true
