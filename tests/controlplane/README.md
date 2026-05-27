@@ -28,8 +28,8 @@ only*, not the deploy itself.
 
 | Metric | Source | What it shows |
 |--------|--------|---------------|
-| istiod CPU (millicores) | `process_cpu_seconds_total` delta over the scrape window | Average millicores consumed during the actual push window. `N/A` if istiod restarted (counter resets), baseline scrape was missing, or window was non-positive |
-| istiod Memory (MiB) | `process_resident_memory_bytes` from istiod `/metrics` | Control-plane memory cost per cluster (gauge from final scrape, converted to MiB) |
+| istiod CPU (millicores) | `process_cpu_seconds_total` delta over the scrape window | Peak of (window-average millicores, peak 5-second interval rate). The poller samples every 5 s during the settle window so deploy-time CPU spikes are captured even if they subside before the final scrape. `N/A` if istiod restarted (counter resets), baseline scrape was missing, or window was non-positive |
+| istiod Memory (MiB) | `process_resident_memory_bytes` from istiod `/metrics` | Peak of (baseline, polled samples, final scrape). A background poller samples every 5 s during the measurement window so memory spikes during the deploy storm are captured even if RSS settles before the final scrape |
 | `pilot_proxy_convergence_time` p50/p99 (delta) | istiod Prometheus | How fast config reaches all sidecars during the window |
 | `pilot_proxy_queue_time` p50/p99 (delta) | istiod Prometheus | How long pushes wait in istiod's queue during the window |
 | `pilot_xds_pushes` delta + rate | istiod Prometheus | xDS push count during the window (and per-second rate) |
@@ -65,6 +65,27 @@ This suite sweeps three modes:
 Expected per-proxy config size ordering: `none` >> `namespace` >= `explicit`.
 The 003 sweep cross-products all five axes so 004 can render the reduction
 percentage in the markdown report.
+
+## Multi-Replica istiod
+
+The suite supports any number of istiod replicas. Each running istiod pod
+gets its own port-forward and emits its own TSV row, so per-replica resource
+consumption is visible. In split-phase mode (`003` orchestrator), a `pods.tsv`
+manifest is persisted to `--state-dir` during the baseline phase and reloaded
+during the final phase, ensuring baseline and final scrapes always target the
+same physical process.
+
+If a pinned pod disappears between phases (e.g. HPA scale-down or restart),
+the row is emitted with `istiod_restarted=unknown` and counter/histogram
+deltas are excluded from aggregation.
+
+## Floor-Pinned Histogram Annotations
+
+When all convergence or queue-time samples fall in the lowest histogram
+bucket (<= 100 ms), the report annotates those cells with `*` and appends a
+footnote. This means the actual latency is somewhere between 0–100 ms but
+cannot be resolved further — `pilot_proxy_convergence_time` bucket boundaries
+are compiled into istiod (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 s).
 
 ## Prerequisites
 
