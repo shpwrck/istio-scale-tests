@@ -276,7 +276,9 @@ if ((DRY_RUN)); then
 		--set clusterName="$SOURCE_CTX" \
 		--set namespace="$NS" \
 		--set canary.enabled=true \
-		--set canary.runId="$RUN_ID"
+		--set canary.runId="$RUN_ID" \
+		--show-only templates/canary-deployment.yaml \
+		--show-only templates/canary-service.yaml
 	exit 0
 fi
 
@@ -977,6 +979,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		--set namespace="$NS" \
 		--set canary.enabled=true \
 		--set canary.runId="$ITER_RUN_ID" \
+		--show-only templates/canary-deployment.yaml \
+		--show-only templates/canary-service.yaml \
 		| "${KUBECTL[@]}" apply --context="$SOURCE_CTX" --server-side --force-conflicts -f - >/dev/null
 
 	P1_FILE="$TMPDIR_RUN/p1-${iter}"
