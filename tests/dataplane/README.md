@@ -14,7 +14,7 @@ Measure request latency and throughput through Istio east-west gateways using fo
 
 The **baseline** is _intra-cluster (sidecar-to-sidecar)_, **not** a no-mesh baseline. Both endpoints have sidecars. A real no-mesh baseline would require a no-inject sibling pod and is out of scope.
 
-Each cell is a **single sample**. Rerun the sweep to get multiple samples.
+Use `--repetitions N` on 003 to get multiple independent samples per cell.
 
 ## How the Cross-Cluster Probe Works
 
@@ -53,6 +53,11 @@ Compare data-plane latency at different cluster counts. The sweep mints a `sweep
   --contexts rosa-001,rosa-002,rosa-003 \
   --mesh-sizes 1,2,3
 
+# 3 repetitions per mesh size for statistical confidence:
+./tests/dataplane/003-run-sweep.sh \
+  --contexts rosa-001,rosa-002,rosa-003 \
+  --repetitions 3
+
 # Dry-run to see the planned matrix
 ./tests/dataplane/003-run-sweep.sh --dry-run
 ```
@@ -68,7 +73,7 @@ After 001 returns, sidecar xDS endpoints may not have converged on the source cl
 
 ## istiod restart detection
 
-002 samples `process_start_time_seconds` from the source istiod's `/metrics` at probe start and end. If the start time advances, all rows in that run are tagged `istiod_restarted=1`. 004 excludes such rows from numeric aggregation (but still counts them in `n_total`).
+002 port-forwards to istiod on **every cluster** in the mesh and samples `process_start_time_seconds` from each at probe start and end. If any cluster's start time advances, all rows in that run are tagged `istiod_restarted=1`. 004 excludes such rows from numeric aggregation (but still counts them in `n_total`).
 
 ## Custom QPS Levels
 
@@ -132,9 +137,8 @@ All formats propagate the TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERS
 ## Caveats / Known Limitations
 
 - **No no-mesh baseline.** The "local baseline" still has both sidecars in the path.
-- **Single sample per cell.** Rerun the sweep to bootstrap a sample distribution.
 - **Avg-of-percentiles.** 004 currently averages percentiles across rows; this is statistically suspect when samples have very different cell counts. Future work: pool raw fortio histograms.
-- **Connection-handshake-in-window.** Each fortio invocation opens new connections at probe start; settle mitigates xDS warmup but not in-window TLS handshakes. Increase `--duration` for cleaner percentiles.
+- **Local baseline includes mesh-wide control-plane overhead.** At mesh_size > 1, the local baseline (target_class=local) includes istiod overhead from managing the full multi-cluster mesh. The p99 jump between mesh_size=1 and mesh_size=2 local baselines is real control-plane overhead, not noise. To isolate this, compare local baselines across mesh sizes.
 
 ## Scripts
 

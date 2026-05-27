@@ -34,6 +34,7 @@ QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
 DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
+WARMUP_DURATION="${DATAPLANE_WARMUP_DURATION_SEC:-5}"
 OUTPUT_DIR="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
@@ -53,13 +54,15 @@ Usage: $(basename "$0") [options]
   --duration SEC           Duration per QPS level (default: $DURATION).
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle SEC             Seconds to sleep before probing (default: $SETTLE_SEC).
+  --warmup-duration SEC    Envoy upstream warmup duration, 0 to disable (default: $WARMUP_DURATION).
   --output-dir DIR         Results directory (default: tests/dataplane/results).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
 Environment:
   DATAPLANE_TEST_NAMESPACE, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
-  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, FORTIO_VERSION.
+  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
+  FORTIO_VERSION.
 EOF
 }
 
@@ -117,6 +120,12 @@ while [[ $# -gt 0 ]]; do
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
 		[[ "$2" =~ ^[0-9]+$ ]] || die "--settle must be a non-negative integer"
 		SETTLE_SEC="$2"
+		shift 2
+		;;
+	--warmup-duration)
+		[[ -n "${2:-}" ]] || die "--warmup-duration requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--warmup-duration must be a non-negative integer"
+		WARMUP_DURATION="$2"
 		shift 2
 		;;
 	--output-dir)
@@ -189,11 +198,15 @@ fi
 
 # Resolve per-context server Kubernetes version concurrently (~5s budget each).
 declare -A KUBE_VERSIONS
-ISTIOD_PF_PORT="${DATAPLANE_ISTIOD_PF_PORT:-15014}"
-PF_PID=""
+ISTIOD_PF_BASE_PORT="${DATAPLANE_ISTIOD_PF_PORT:-15014}"
+declare -A PF_PIDS
+declare -A ISTIOD_PF_PORTS
 KV_TMPDIR=$(mktemp -d)
 cleanup_all() {
-	[[ -n "$PF_PID" ]] && { kill "$PF_PID" 2>/dev/null || true; wait "$PF_PID" 2>/dev/null || true; }
+	for pid in "${PF_PIDS[@]}"; do
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	done
 	rm -rf "$KV_TMPDIR"
 }
 trap cleanup_all EXIT
@@ -222,6 +235,7 @@ done
 	done
 	echo "# FORTIO_IMAGE=${FORTIO_IMAGE}"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
+	echo "# WARMUP_DURATION_SEC=${WARMUP_DURATION}"
 	echo "# QPS_LEVELS=${QPS_LEVELS}"
 	echo "# DURATION_SEC=${DURATION}"
 	echo "# CONNECTIONS=${CONNECTIONS}"
@@ -244,24 +258,39 @@ echo "QPS levels: ${QPS_ARR[*]} | Duration: ${DURATION}s | Connections: $CONNECT
 echo "Settle: ${SETTLE_SEC}s | Fortio image: ${FORTIO_IMAGE}"
 echo ""
 
-# Start istiod port-forward for restart-detection scrapes.
-ISTIOD_PF_OK=0
+# Start istiod port-forwards for restart-detection scrapes (all clusters).
+declare -A ISTIOD_PF_OK
 start_istiod_pf() {
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n istio-system port-forward svc/istiod "${ISTIOD_PF_PORT}":15014 >/dev/null 2>&1 &
-	PF_PID=$!
+	local ctx="$1" port="$2"
+	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "${port}":15014 >/dev/null 2>&1 &
+	PF_PIDS["$ctx"]=$!
+	ISTIOD_PF_PORTS["$ctx"]="$port"
 	local attempts=0
-	while ! curl -fsS --max-time 2 "http://localhost:${ISTIOD_PF_PORT}/metrics" -o /dev/null 2>/dev/null; do
+	while ! curl -fsS --max-time 2 "http://localhost:${port}/metrics" -o /dev/null 2>/dev/null; do
 		attempts=$((attempts + 1))
-		((attempts > 30)) && { echo "warn: istiod port-forward did not come up" >&2; return 1; }
+		if ((attempts > 30)); then
+			echo "warn: istiod port-forward for $ctx did not come up" >&2
+			return 1
+		fi
 		sleep 0.5
 	done
 	return 0
 }
-if start_istiod_pf; then ISTIOD_PF_OK=1; fi
+for i in "${!ALL_CTXS[@]}"; do
+	ctx="${ALL_CTXS[$i]}"
+	port=$((ISTIOD_PF_BASE_PORT + i))
+	if start_istiod_pf "$ctx" "$port"; then
+		ISTIOD_PF_OK["$ctx"]=1
+	else
+		ISTIOD_PF_OK["$ctx"]=0
+	fi
+done
 
-sample_istiod_start() {
-	((ISTIOD_PF_OK)) || { echo ""; return; }
-	curl -sf --max-time 5 "http://localhost:${ISTIOD_PF_PORT}/metrics" 2>/dev/null \
+sample_istiod_start_for() {
+	local ctx="$1"
+	(( ${ISTIOD_PF_OK[$ctx]:-0} )) || { echo ""; return; }
+	local port="${ISTIOD_PF_PORTS[$ctx]}"
+	curl -sf --max-time 5 "http://localhost:${port}/metrics" 2>/dev/null \
 		| awk '/^process_start_time_seconds[[:space:]{]/ && !/^#/ { print $NF; exit }'
 }
 
@@ -270,8 +299,26 @@ if ((SETTLE_SEC > 0)); then
 	sleep "$SETTLE_SEC"
 fi
 
-ISTIOD_START_BEFORE=$(sample_istiod_start || true)
-[[ -z "$ISTIOD_START_BEFORE" ]] && echo "warning: could not sample source istiod process_start_time_seconds (pre-probe)" >&2
+if ((WARMUP_DURATION > 0)); then
+	echo "Warming Envoy upstream connection pools (${WARMUP_DURATION}s at QPS=10)..."
+	WARMUP_URLS=("http://dataplane-server.${NS}.svc.cluster.local:8080/echo")
+	for rc in "${REMOTES[@]}"; do
+		WARMUP_URLS+=("http://dataplane-server-${rc}.${NS}.svc.cluster.local:8080/echo")
+	done
+	for wurl in "${WARMUP_URLS[@]}"; do
+		echo "  warmup -> $wurl"
+		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
+			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" \
+			>/dev/null 2>&1 || echo "  warn: warmup failed for $wurl" >&2
+	done
+	echo ""
+fi
+
+declare -A ISTIOD_START_BEFORE
+for ctx in "${ALL_CTXS[@]}"; do
+	ISTIOD_START_BEFORE["$ctx"]=$(sample_istiod_start_for "$ctx" || true)
+	[[ -z "${ISTIOD_START_BEFORE[$ctx]}" ]] && echo "warning: could not sample istiod process_start_time_seconds (pre-probe) on $ctx" >&2
+done
 
 # Extract a percentile latency in ms from fortio JSON, tolerating floating-point
 # representations of the percentile target (e.g. 50 vs 50.0). Emits "N/A" if no
@@ -354,18 +401,27 @@ for remote_ctx in "${REMOTES[@]}"; do
 	run_fortio "$remote_ctx" "http://dataplane-server-${remote_ctx}.${NS}.svc.cluster.local:8080/echo" "remote"
 done
 
-ISTIOD_START_AFTER=$(sample_istiod_start || true)
-[[ -z "$ISTIOD_START_AFTER" ]] && echo "warning: could not sample source istiod process_start_time_seconds (post-probe)" >&2
+declare -A ISTIOD_START_AFTER
+for ctx in "${ALL_CTXS[@]}"; do
+	ISTIOD_START_AFTER["$ctx"]=$(sample_istiod_start_for "$ctx" || true)
+	[[ -z "${ISTIOD_START_AFTER[$ctx]}" ]] && echo "warning: could not sample istiod process_start_time_seconds (post-probe) on $ctx" >&2
+done
 
-# Compute istiod_restarted: "1" if observed start time advanced; "0" if equal;
-# "unknown" if either sample missing.
-if [[ -z "$ISTIOD_START_BEFORE" || -z "$ISTIOD_START_AFTER" ]]; then
-	ISTIOD_RESTARTED="unknown"
-elif awk "BEGIN { exit !(($ISTIOD_START_AFTER) > ($ISTIOD_START_BEFORE)) }"; then
-	ISTIOD_RESTARTED="1"
-else
-	ISTIOD_RESTARTED="0"
-fi
+# Compute istiod_restarted: "1" if any cluster's start time advanced; "0" if all
+# are equal; "unknown" if any sample is missing.
+ISTIOD_RESTARTED="0"
+for ctx in "${ALL_CTXS[@]}"; do
+	before="${ISTIOD_START_BEFORE[$ctx]:-}"
+	after="${ISTIOD_START_AFTER[$ctx]:-}"
+	if [[ -z "$before" || -z "$after" ]]; then
+		ISTIOD_RESTARTED="unknown"
+		break
+	elif awk "BEGIN { exit !(($after) > ($before)) }"; then
+		ISTIOD_RESTARTED="1"
+		echo "warning: istiod restarted on $ctx during probe" >&2
+		break
+	fi
+done
 
 # Rewrite the istiod_restarted column (penultimate) for all data rows.
 tmp_tsv=$(mktemp "${TSV_FILE}.XXXXXX")
@@ -378,7 +434,10 @@ awk -F'\t' -v OFS='\t' -v r="$ISTIOD_RESTARTED" '
 mv "$tmp_tsv" "$TSV_FILE"
 
 echo ""
-echo "istiod_restarted: ${ISTIOD_RESTARTED} (start_before=${ISTIOD_START_BEFORE:-N/A} start_after=${ISTIOD_START_AFTER:-N/A})"
+for ctx in "${ALL_CTXS[@]}"; do
+	echo "istiod_restarted[$ctx]: start_before=${ISTIOD_START_BEFORE[$ctx]:-N/A} start_after=${ISTIOD_START_AFTER[$ctx]:-N/A}"
+done
+echo "istiod_restarted (aggregate): ${ISTIOD_RESTARTED}"
 echo "Results written to $TSV_FILE"
 
 MD_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.md"
@@ -399,9 +458,11 @@ MD_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.md"
 	echo "| Duration | ${DURATION}s |"
 	echo "| Connections | ${CONNECTIONS} |"
 	echo "| Settle | ${SETTLE_SEC}s |"
+	echo "| Warmup | ${WARMUP_DURATION}s |"
 	echo "| istiod_restarted | ${ISTIOD_RESTARTED} |"
 	echo ""
 	echo "Note: the local baseline is intra-cluster (sidecar-to-sidecar), NOT a no-mesh baseline."
+	echo "At mesh_size > 1, the local baseline includes istiod overhead from managing the full multi-cluster mesh."
 	echo ""
 	echo "## Summary"
 	echo ""
