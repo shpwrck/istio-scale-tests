@@ -214,6 +214,13 @@ fi
 
 mkdir -p "$SWEEP_DIR"
 
+sweep_cleanup() {
+	echo ""
+	echo "--- Final cleanup: all contexts ---"
+	"$SCRIPT_DIR/007-cleanup.sh" --contexts "$(IFS=,; echo "${CONTEXTS[*]}")" || true
+}
+trap sweep_cleanup EXIT
+
 echo "=========================================="
 echo "  Propagation Latency Sweep"
 echo "=========================================="
