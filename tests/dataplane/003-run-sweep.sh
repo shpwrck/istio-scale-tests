@@ -23,6 +23,7 @@ CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
 MAX_MATRIX="${DATAPLANE_MAX_MATRIX:-64}"
 INTER_COMBO_SETTLE="${DATAPLANE_INTER_COMBO_SETTLE_SEC:-15}"
+REPETITIONS="${DATAPLANE_REPETITIONS:-1}"
 OUTPUT_DIR_BASE="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
@@ -41,6 +42,7 @@ Usage: $(basename "$0") [options]
   --settle SEC         Seconds to sleep before probing (default: $SETTLE_SEC).
   --output-dir DIR     Base results directory (default: tests/dataplane/results).
                        A per-sweep subdir sweep-\${RUN_ID}/ is created here.
+  --repetitions N      Probe repetitions per mesh size (default: $REPETITIONS).
   --force-large-matrix Bypass the ${MAX_MATRIX}-combo matrix safety cap.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
@@ -48,7 +50,7 @@ Usage: $(basename "$0") [options]
 Environment:
   SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_MAX_MATRIX,
-  DATAPLANE_INTER_COMBO_SETTLE_SEC.
+  DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS.
 EOF
 }
 
@@ -107,6 +109,13 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR_BASE="$2"
 		shift 2
 		;;
+	--repetitions)
+		[[ -n "${2:-}" ]] || die "--repetitions requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--repetitions must be a positive integer"
+		(( $2 > 0 )) || die "--repetitions must be > 0"
+		REPETITIONS="$2"
+		shift 2
+		;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1
 		shift
@@ -152,9 +161,9 @@ SCRIPT_DIR="${ROOT}/tests/dataplane"
 # Count QPS levels for matrix size check.
 QPS_ARR_TMP=()
 split_csv "$QPS_LEVELS" QPS_ARR_TMP
-MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#QPS_ARR_TMP[@]} ))
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#QPS_ARR_TMP[@]} * REPETITIONS ))
 if (( MATRIX_SIZE > MAX_MATRIX )) && (( !FORCE_LARGE_MATRIX )); then
-	die "matrix size ${MATRIX_SIZE} exceeds cap ${MAX_MATRIX} (${#MESH_SIZES[@]} mesh_sizes × ${#QPS_ARR_TMP[@]} qps_levels); use --force-large-matrix to override"
+	die "matrix size ${MATRIX_SIZE} exceeds cap ${MAX_MATRIX} (${#MESH_SIZES[@]} mesh_sizes × ${#QPS_ARR_TMP[@]} qps_levels × ${REPETITIONS} reps); use --force-large-matrix to override"
 fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -166,6 +175,7 @@ echo "=========================================="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "QPS levels: $QPS_LEVELS"
+echo "Repetitions: ${REPETITIONS}"
 echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
 echo "Settle: ${SETTLE_SEC}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
@@ -198,9 +208,11 @@ for ms in "${MESH_SIZES[@]}"; do
 
 	if ((DRY_RUN)); then
 		{
-			echo "  mesh_size=$ms source=$source_ctx remotes=${remote_csv:-none}"
+			echo "  mesh_size=$ms source=$source_ctx remotes=${remote_csv:-none} reps=${REPETITIONS}"
 			echo "    001-setup-dataplane-test.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv}"
-			echo "    002-run-latency-probe.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv} --mesh-size $ms --settle $SETTLE_SEC --output-dir $OUTPUT_DIR"
+			for ((rep = 1; rep <= REPETITIONS; rep++)); do
+				echo "    [rep $rep/$REPETITIONS] 002-run-latency-probe.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv} --mesh-size $ms --settle $SETTLE_SEC --output-dir $OUTPUT_DIR"
+			done
 			echo "    005-cleanup.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
 		} >&2
 		continue
@@ -212,19 +224,21 @@ for ms in "${MESH_SIZES[@]}"; do
 	"$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"
 	echo ""
 
-	echo "--- Running latency probe (mesh_size=$ms) ---"
-	probe_args=(
-		--source-context "$source_ctx"
-		--mesh-size "$ms"
-		--qps-levels "$QPS_LEVELS"
-		--duration "$DURATION"
-		--connections "$CONNECTIONS"
-		--settle "$SETTLE_SEC"
-		--output-dir "$OUTPUT_DIR"
-	)
-	[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-	"$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"
-	echo ""
+	for ((rep = 1; rep <= REPETITIONS; rep++)); do
+		echo "--- Running latency probe (mesh_size=$ms, rep $rep/$REPETITIONS) ---"
+		probe_args=(
+			--source-context "$source_ctx"
+			--mesh-size "$ms"
+			--qps-levels "$QPS_LEVELS"
+			--duration "$DURATION"
+			--connections "$CONNECTIONS"
+			--settle "$SETTLE_SEC"
+			--output-dir "$OUTPUT_DIR"
+		)
+		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
+		"$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"
+		echo ""
+	done
 
 	echo "--- Cleaning up ---"
 	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
