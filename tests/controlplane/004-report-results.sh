@@ -208,6 +208,7 @@ SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 #   restarts unknown_restarts
 #   cpu_delta_min cpu_delta_max cpu_delta_avg
 #   cfg_dump_avg cfg_dump_max
+#   conv99_floor_pinned queue99_floor_pinned
 aggregate() {
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
@@ -274,7 +275,7 @@ aggregate() {
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
-		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn_total\tn_valid\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\n"
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn_total\tn_valid\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\tconv99_floor_pinned\tqueue99_floor_pinned\n"
 		for (i = 1; i <= nkey; i++) {
 			k = order[i]
 			split(k, p, "|")
@@ -284,7 +285,9 @@ aggregate() {
 			uu = (k in unknowns) ? unknowns[k] : 0
 			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "0"
 			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
-			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
+			conv_fp = (nv[("conv"), k]+0 > 0 && min[("conv"), k]+0 == max[("conv"), k]+0) ? 1 : 0
+			queue_fp = (nv[("queue"), k]+0 > 0 && min[("queue"), k]+0 == max[("queue"), k]+0) ? 1 : 0
+			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%d\t%d\n",
 				p[1], p[2], p[3], p[4], p[5], nt, nv_count,
 				emit3("mem",       k),
 				emit3("conv",      k),
@@ -292,7 +295,8 @@ aggregate() {
 				emit3("prx",       k),
 				rr, uu,
 				emit3("cpu_delta", k),
-				ca, cm
+				ca, cm,
+				conv_fp, queue_fp
 		}
 	}'
 }
@@ -316,14 +320,22 @@ report_text() {
 		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s (n_total=%s n_valid=%s) ---\n", $1, $2, $3, $4, $5, $6, $7
 		printf "  istiod CPU avg (m):   min=%s max=%s avg=%s   [process_cpu_seconds_total delta over window]\n", $22, $23, $24
 		printf "  istiod Memory (Mi):   min=%s max=%s avg=%s\n",     $8,  $9,  $10
-		printf "  Convergence p99 (ms): min=%s max=%s avg=%s\n",     $11, $12, $13
-		printf "  Queue p99 (ms):       min=%s max=%s avg=%s\n",     $14, $15, $16
+		printf "  Convergence p99 (ms): min=%s max=%s avg=%s%s\n",   $11, $12, $13, ($27+0 ? " *" : "")
+		printf "  Queue p99 (ms):       min=%s max=%s avg=%s%s\n",   $14, $15, $16, ($28+0 ? " *" : "")
 		printf "  Connected proxies:    min=%s max=%s avg=%s\n",     $17, $18, $19
 		if ($25+0 > 0) printf "  Config dump avg (B):  %s   max: %s\n", $25, $26
 		else if ($6 > 0) printf "  Config dump avg (B):  N/A\n"
 		if ($20+0 > 0) printf "  ! istiod restarts:    %s row(s) had restarts during the scrape window\n", $20
 		if ($21+0 > 0) printf "  ? undetectable restart: %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $21
+		if ($27+0 || $28+0) any_pinned = 1
 		printf "\n"
+	}
+	END {
+		if (any_pinned) {
+			printf "  * All samples fell in the lowest histogram bucket (<= 100 ms).\n"
+			printf "    Actual latency is 0-100 ms but cannot be resolved further;\n"
+			printf "    pilot_proxy_convergence_time buckets are compiled into istiod.\n\n"
+		}
 	}'
 }
 
@@ -364,9 +376,23 @@ report_markdown() {
 	echo ""
 	echo "| mesh_size | svc | reps | ns | scoping | n_total | n_valid | cpu_avg (m) | mem_avg (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies | cfg_dump_avg | restarts | unk_restarts |"
 	echo "|-----------|-----|------|----|---------|---------|---------|-------------|--------------|---------------|----------------|---------|--------------|----------|--------------|"
+	local any_pinned=0
 	awk -F'\t' '
 	NR == 1 { next }
-	{ printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, $13, $16, $19, $25, $20, $21 }' <<<"$aggregated"
+	{
+		conv_star = ($27+0 ? " \\*" : "")
+		queue_star = ($28+0 ? " \\*" : "")
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s%s | %s%s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, $13, conv_star, $16, queue_star, $19, $25, $20, $21
+		if ($27+0 || $28+0) any_pinned = 1
+	}
+	END { exit !any_pinned }' <<<"$aggregated" && any_pinned=1 || true
+	if (( any_pinned )); then
+		echo ""
+		echo "> **\\*** All convergence samples fell in the lowest histogram bucket "\
+"(<= 100 ms). The actual push latency is somewhere between 0–100 ms "\
+"but cannot be resolved further — \`pilot_proxy_convergence_time\` bucket "\
+"boundaries are compiled into istiod (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 s)."
+	fi
 	if (( total_restarts > 0 || total_unknowns > 0 )); then
 		echo ""
 		local parts=()

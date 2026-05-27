@@ -370,22 +370,81 @@ cleanup() {
 
 trap cleanup EXIT
 
+# ---------------------------------------------------------------------------
+# Per-pod port-forward targeting.
+# ---------------------------------------------------------------------------
+# Port-forward to individual istiod pods (not svc/istiod) so that split-phase
+# baseline/final scrapes always hit the same physical process.  In multi-replica
+# deployments each replica gets its own port-forward and emits its own TSV row.
+
+POD_CTXS=()
+POD_NAMES=()
+
+resolve_pods() {
+	POD_CTXS=()
+	POD_NAMES=()
+	for ctx in "${CONTEXTS[@]}"; do
+		local pods
+		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
+			--field-selector=status.phase=Running \
+			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+		[[ -z "$pods" ]] && die "context $ctx: no running istiod pods found in istio-system"
+		for pod in $pods; do
+			POD_CTXS+=("$ctx")
+			POD_NAMES+=("$pod")
+		done
+	done
+}
+
+save_pod_manifest() {
+	local dir="$1"
+	for k in "${!POD_CTXS[@]}"; do
+		printf '%d\t%s\t%s\n' "$k" "${POD_CTXS[k]}" "${POD_NAMES[k]}"
+	done > "${dir}/pods.tsv"
+}
+
+load_pod_manifest() {
+	local dir="$1"
+	local manifest="${dir}/pods.tsv"
+	[[ -f "$manifest" ]] || die "no pods.tsv in $dir — run --phase baseline first"
+	POD_CTXS=()
+	POD_NAMES=()
+	while IFS=$'\t' read -r _idx ctx pod; do
+		POD_CTXS+=("$ctx")
+		POD_NAMES+=("$pod")
+	done < "$manifest"
+	((${#POD_CTXS[@]})) || die "pods.tsv in $dir is empty"
+	for k in "${!POD_CTXS[@]}"; do
+		if ! "${KUBECTL[@]}" --context="${POD_CTXS[k]}" -n istio-system get pod "${POD_NAMES[k]}" &>/dev/null; then
+			echo "warning: pod ${POD_NAMES[k]} on ${POD_CTXS[k]} no longer exists; row will show as restarted" >&2
+		fi
+	done
+}
+
+if [[ "$PHASE" == final ]]; then
+	load_pod_manifest "$STATE_DIR"
+else
+	resolve_pods
+	if [[ "$PHASE" == baseline ]]; then
+		save_pod_manifest "$STATE_DIR"
+	fi
+fi
+
 echo "Starting port-forwards to istiod..."
-for i in "${!CONTEXTS[@]}"; do
-	ctx="${CONTEXTS[i]}"
-	port=$(( BASE_PF_PORT + i ))
-	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "$port":15014 >/dev/null 2>&1 &
+for k in "${!POD_CTXS[@]}"; do
+	port=$(( BASE_PF_PORT + k ))
+	"${KUBECTL[@]}" --context="${POD_CTXS[k]}" -n istio-system port-forward "pod/${POD_NAMES[k]}" "$port":15014 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
 done
 
 sleep 3
 
-for i in "${!CONTEXTS[@]}"; do
-	port=$(( BASE_PF_PORT + i ))
+for k in "${!POD_CTXS[@]}"; do
+	port=$(( BASE_PF_PORT + k ))
 	attempts=0
 	while ! curl -s -o /dev/null "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
-		((attempts > 20)) && die "port-forward to istiod on ${CONTEXTS[i]} (port $port) failed"
+		((attempts > 20)) && die "port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed"
 		sleep 0.5
 	done
 done
@@ -615,6 +674,61 @@ aggregate_sample_bytes() {
 }
 
 # ---------------------------------------------------------------------------
+# Peak metrics poller (combined mode).
+# ---------------------------------------------------------------------------
+# Polls process_resident_memory_bytes and process_cpu_seconds_total every
+# POLL_INTERVAL seconds, tracking peak memory and peak per-interval CPU rate
+# per pod.  Results are written to ${TMP_DIR}/peak-{mem,cpu}-${k}.val.
+POLL_INTERVAL=5
+
+poll_peak_metrics() {
+	local duration="$1"
+	(( duration > 0 )) || return 0
+	echo "  Polling peak metrics every ${POLL_INTERVAL}s for ${duration}s..."
+	local elapsed=0
+	while (( elapsed < duration )); do
+		for k in "${!POD_CTXS[@]}"; do
+			local port=$(( BASE_PF_PORT + k ))
+			local body
+			body=$(curl -s --max-time 3 "http://localhost:${port}/metrics" 2>/dev/null) || continue
+
+			# Peak memory.
+			local mem_val
+			mem_val=$(echo "$body" | awk '/^process_resident_memory_bytes[{ ]/ && !/^#/ { print $NF+0 }')
+			if [[ -n "$mem_val" && "$mem_val" != "0" ]]; then
+				local prev_mem=0
+				[[ -s "${TMP_DIR}/peak-mem-${k}.val" ]] && prev_mem=$(<"${TMP_DIR}/peak-mem-${k}.val")
+				if awk -v a="$mem_val" -v b="$prev_mem" 'BEGIN{ exit !(a+0 > b+0) }'; then
+					printf '%s' "$mem_val" > "${TMP_DIR}/peak-mem-${k}.val"
+				fi
+			fi
+
+			# Peak CPU rate (millicores over this interval).
+			local cpu_val
+			cpu_val=$(echo "$body" | awk '/^process_cpu_seconds_total[{ ]/ && !/^#/ { print $NF+0 }')
+			if [[ -n "$cpu_val" && "$cpu_val" != "0" ]]; then
+				local prev_cpu_file="${TMP_DIR}/prev-cpu-${k}.val"
+				if [[ -s "$prev_cpu_file" ]]; then
+					local prev_cpu
+					prev_cpu=$(<"$prev_cpu_file")
+					local rate_m
+					rate_m=$(awk -v c="$cpu_val" -v p="$prev_cpu" -v iv="$POLL_INTERVAL" \
+						'BEGIN{ d=(c-p)*1000/iv; if(d<0) d=0; printf "%.0f", d }')
+					local prev_peak=0
+					[[ -s "${TMP_DIR}/peak-cpu-${k}.val" ]] && prev_peak=$(<"${TMP_DIR}/peak-cpu-${k}.val")
+					if awk -v a="$rate_m" -v b="$prev_peak" 'BEGIN{ exit !(a+0 > b+0) }'; then
+						printf '%s' "$rate_m" > "${TMP_DIR}/peak-cpu-${k}.val"
+					fi
+				fi
+				printf '%s' "$cpu_val" > "$prev_cpu_file"
+			fi
+		done
+		sleep "$POLL_INTERVAL"
+		elapsed=$(( elapsed + POLL_INTERVAL ))
+	done
+}
+
+# ---------------------------------------------------------------------------
 # Scrape infrastructure.
 # ---------------------------------------------------------------------------
 
@@ -633,15 +747,14 @@ scrape_all_parallel() {
 	local out_prefix="$1"
 	local -a pids=()
 	local -a ts_files=()
-	local i ctx port
-	for i in "${!CONTEXTS[@]}"; do
-		ctx="${CONTEXTS[i]}"
-		port=$(( BASE_PF_PORT + i ))
-		local m_out="${out_prefix}-${i}.metrics"
-		local t_out="${out_prefix}-${i}.ts"
-		local te_out="${out_prefix}-${i}.tsend"
+	local k port
+	for k in "${!POD_CTXS[@]}"; do
+		port=$(( BASE_PF_PORT + k ))
+		local m_out="${out_prefix}-${k}.metrics"
+		local t_out="${out_prefix}-${k}.ts"
+		local te_out="${out_prefix}-${k}.tsend"
 		(
-			scrape_one_context "$ctx" "$port" "$m_out" "$t_out" "$te_out" || exit 1
+			scrape_one_context "${POD_CTXS[k]}" "$port" "$m_out" "$t_out" "$te_out" || exit 1
 		) &
 		pids+=($!)
 		ts_files+=("$t_out")
@@ -668,9 +781,9 @@ scrape_all_parallel() {
 
 compute_skew_ms() {
 	local prefix="$1"
-	local min="" max="" t i
-	for i in "${!CONTEXTS[@]}"; do
-		local t_file="${prefix}-${i}.ts"
+	local min="" max="" t k
+	for k in "${!POD_CTXS[@]}"; do
+		local t_file="${prefix}-${k}.ts"
 		[[ -s "$t_file" ]] || continue
 		t=$(<"$t_file")
 		[[ -z "$min" || "$t" -lt "$min" ]] && min="$t"
@@ -700,17 +813,16 @@ scrape_window() {
 		baseline_skew_ms=$(scrape_all_parallel "${TMP_DIR}/baseline")
 	fi
 	if (( sleep_sec > 0 )); then
-		echo "  Settling for ${sleep_sec}s..."
-		sleep "$sleep_sec"
+		poll_peak_metrics "$sleep_sec"
 	fi
 	echo "  Final scrape..."
 	final_skew_ms=$(scrape_all_parallel "${TMP_DIR}/final")
 	local total_skew_ms=$(( baseline_skew_ms > final_skew_ms ? baseline_skew_ms : final_skew_ms ))
 
 	local b_max_ms="" f_min_ms="" ts_val
-	for i in "${!CONTEXTS[@]}"; do
-		local bt="${TMP_DIR}/baseline-${i}.tsend"
-		local ft="${TMP_DIR}/final-${i}.ts"
+	for k in "${!POD_CTXS[@]}"; do
+		local bt="${TMP_DIR}/baseline-${k}.tsend"
+		local ft="${TMP_DIR}/final-${k}.ts"
 		if [[ -s "$bt" ]]; then
 			ts_val=$(<"$bt")
 			[[ -z "$b_max_ms" || "$ts_val" -gt "$b_max_ms" ]] && b_max_ms="$ts_val"
@@ -731,13 +843,13 @@ scrape_window() {
 	local ts
 	ts=$(date -u -Iseconds)
 
-	for i in "${!CONTEXTS[@]}"; do
-		ctx="${CONTEXTS[i]}"
+	for k in "${!POD_CTXS[@]}"; do
+		ctx="${POD_CTXS[k]}"
 
-		local b_file="${TMP_DIR}/baseline-${i}.metrics"
-		local f_file="${TMP_DIR}/final-${i}.metrics"
+		local b_file="${TMP_DIR}/baseline-${k}.metrics"
+		local f_file="${TMP_DIR}/final-${k}.metrics"
 		if [[ ! -s "$f_file" ]]; then
-			echo "warning: no final scrape for $ctx; emitting N/A row" >&2
+			echo "warning: no final scrape for $ctx/${POD_NAMES[k]}; emitting N/A row" >&2
 			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A" >> "$TSV_FILE"
 			continue
 		fi
@@ -745,11 +857,23 @@ scrape_window() {
 		baseline=$([[ -s "$b_file" ]] && cat "$b_file" || echo "")
 		final=$(cat "$f_file")
 
-		# Memory from process_resident_memory_bytes (gauge, bytes → MiB).
-		local mem_mi
-		mem_mi=$(extract_gauge_exact "$final" process_resident_memory_bytes)
-		if [[ "$mem_mi" != "N/A" ]]; then
-			mem_mi=$(awk -v b="$mem_mi" 'BEGIN{ printf "%.0f", b / 1048576 }')
+		# Memory: peak of (baseline, polled peaks, final) in MiB.
+		local final_mem_bytes baseline_mem_bytes peak_mem_bytes mem_mi
+		final_mem_bytes=$(extract_gauge_exact "$final" process_resident_memory_bytes)
+		baseline_mem_bytes=$([[ -n "$baseline" ]] \
+			&& extract_gauge_exact "$baseline" process_resident_memory_bytes || echo 0)
+		peak_mem_bytes=0
+		[[ -s "${TMP_DIR}/peak-mem-${k}.val" ]] && peak_mem_bytes=$(<"${TMP_DIR}/peak-mem-${k}.val")
+		if [[ "$final_mem_bytes" != "N/A" ]]; then
+			mem_mi=$(awk -v f="$final_mem_bytes" -v b="$baseline_mem_bytes" -v p="$peak_mem_bytes" '
+				BEGIN {
+					m = f+0
+					if (b+0 > m) m = b+0
+					if (p+0 > m) m = p+0
+					printf "%.0f", m / 1048576
+				}')
+		else
+			mem_mi="N/A"
 		fi
 
 		# Connected proxies (gauge — read from final scrape).
@@ -837,20 +961,29 @@ scrape_window() {
 			done
 		fi
 
-		# CPU delta (average millicores over window).
+		# CPU: peak of (window average, per-interval peak) in millicores.
 		local cpu_m_delta
 		if (( restarted_or_unknown )); then
 			cpu_m_delta="N/A"
 		else
-			local b_cpu_s f_cpu_s
+			local b_cpu_s f_cpu_s window_avg_m=0
 			b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
 			f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
-			cpu_m_delta=$(awk -v b="$b_cpu_s" -v f="$f_cpu_s" -v w="$window_sec" '
+			window_avg_m=$(awk -v b="$b_cpu_s" -v f="$f_cpu_s" -v w="$window_sec" '
 				BEGIN {
-					if (b == "N/A" || f == "N/A" || w+0 <= 0) { print "N/A"; exit }
+					if (b == "N/A" || f == "N/A" || w+0 <= 0) { print 0; exit }
 					d = (f - b) * 1000 / w
-					if (d < 0) { print "N/A"; exit }
+					if (d < 0) { print 0; exit }
 					printf "%.0f", d
+				}')
+			local peak_cpu_m=0
+			[[ -s "${TMP_DIR}/peak-cpu-${k}.val" ]] && peak_cpu_m=$(<"${TMP_DIR}/peak-cpu-${k}.val")
+			cpu_m_delta=$(awk -v avg="$window_avg_m" -v peak="$peak_cpu_m" '
+				BEGIN {
+					m = avg+0
+					if (peak+0 > m) m = peak+0
+					if (m == 0) { print "N/A"; exit }
+					printf "%.0f", m
 				}')
 		fi
 
@@ -892,7 +1025,7 @@ scrape_window() {
 		fi
 
 		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}" >> "$TSV_FILE"
-		echo "  Scraped $ctx: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
+		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 	done
 }
 
@@ -917,6 +1050,9 @@ elif [[ "$PHASE" == final ]]; then
 	for f in "${STATE_DIR}/baseline-"*; do
 		[[ -e "$f" ]] || die "no baseline files in $STATE_DIR — run --phase baseline first"
 		cp "$f" "${TMP_DIR}/$(basename "$f")"
+	done
+	for f in "${STATE_DIR}/peak-mem-"*.val "${STATE_DIR}/peak-cpu-"*.val; do
+		[[ -e "$f" ]] && cp "$f" "${TMP_DIR}/$(basename "$f")"
 	done
 	scrape_window 0 1 "$SETTLE_SEC"
 	echo ""
