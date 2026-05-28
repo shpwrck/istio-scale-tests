@@ -259,6 +259,11 @@ done
 for nc in "${NAMESPACE_COUNTS[@]}"; do
 	is_pos_int "$nc" || die "namespace-count '$nc' is not a positive integer"
 done
+for sc in "${SERVICE_COUNTS[@]}"; do
+	for nc in "${NAMESPACE_COUNTS[@]}"; do
+		(( nc <= sc )) || die "namespace-count $nc > service-count $sc; some namespaces would be empty. Reduce --namespace-counts to at most --service-counts."
+	done
+done
 for scp in "${SCOPINGS[@]}"; do
 	validate_scoping_value "$scp"
 done

@@ -624,11 +624,8 @@ collect_config_dump_samples() {
 		echo ""
 		return 0
 	fi
-	# Sample pods only from the primary namespace. When namespaceCount > 1,
-	# Sidecar CRs are only emitted there, so mixing scoped and unscoped
-	# pods would contaminate the measurement.
 	local pod_lines
-	pod_lines="$("${KUBECTL[@]}" --context="$ctx" -n "$PRIMARY_NS" get pods \
+	pod_lines="$("${KUBECTL[@]}" get pods --context="$ctx" --all-namespaces \
 		-l app.kubernetes.io/instance=controlplane-test \
 		-o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' \
 		2>/dev/null || true)"
@@ -641,7 +638,7 @@ collect_config_dump_samples() {
 		attempted=$((attempted + 1))
 		local bytes
 		bytes="$("${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
-			sh -c 'curl -s --max-time 10 "http://localhost:15000/config_dump?include_eds" | wc -c' 2>/dev/null || true)"
+			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null | wc -c || true)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
 		if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
 			got=$((got + 1))
@@ -1090,10 +1087,11 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg |"
-		echo "|---------|------|-----|------|----|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|--------------|"
+		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
+		echo "|---------|------|-----|------|----|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|-------------------|"
 		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=32 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $10, $12, $22, $13, $16, $15, $24
+			cfg_mb = ($24+0 > 0) ? sprintf("%.1f", $24/1048576) : "N/A"
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $10, $12, $22, $13, $16, $15, cfg_mb
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
