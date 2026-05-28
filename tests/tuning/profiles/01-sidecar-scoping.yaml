@@ -1,0 +1,41 @@
+# Profile: sidecar-scoping
+# Tier: 1 (highest impact, safe)
+# OSSM Support: SUPPORTED — core Istio networking API, fully supported in OSSM 3.x
+#
+# Sidecar CRs are istiod's primary scaling lever. Without them every proxy
+# receives configuration for every Service in the mesh and per-proxy config
+# grows O(services x sidecars). A root-namespace Sidecar restricts each proxy
+# to its own namespace + istio-system.
+#
+# Expected impact:
+#   - 80-95% reduction in per-proxy xDS config size
+#   - Proxy memory from 100+ MB down to 20-30 MB
+#   - Proportional reduction in xDS push payload and push time
+#
+# Relevant test suites: controlplane, propagation
+#
+# References:
+#   https://istio.io/latest/docs/reference/config/networking/sidecar/
+#   https://istio.io/latest/docs/ops/configuration/mesh/configuration-scoping/
+
+ossm_support: supported
+
+description: >-
+  Deploy a mesh-wide Sidecar CR in the root namespace (istio-system) that
+  restricts every proxy's egress view to its own namespace plus istio-system.
+
+# No Istio CR patch required — this profile deploys additional resources.
+istio_cr_patch: {}
+
+# Additional resources to apply on each cluster.
+resources:
+  - apiVersion: networking.istio.io/v1
+    kind: Sidecar
+    metadata:
+      name: default
+      namespace: istio-system
+    spec:
+      egress:
+        - hosts:
+            - "./*"
+            - "istio-system/*"

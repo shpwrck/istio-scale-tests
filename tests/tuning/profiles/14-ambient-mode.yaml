@@ -1,0 +1,65 @@
+# Profile: ambient-mode
+# Tier: 4 (architectural comparison)
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ OSSM Support: NOT SUPPORTED FOR MULTICLUSTER                          │
+# │                                                                       │
+# │ OSSM 3.2+ supports ambient mode for SINGLE-CLUSTER deployments only.  │
+# │ Multicluster ambient is NOT supported by Red Hat as of OSSM 3.3.      │
+# │ Upstream Istio multicluster + ambient is experimental.                 │
+# │                                                                       │
+# │ This profile is included for REFERENCE AND FUTURE PLANNING ONLY.      │
+# │ It cannot be used with the multicluster mesh topology in this repo.   │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Ambient mode replaces per-pod sidecar proxies with per-node ztunnel
+# DaemonSets (L4) and optional per-namespace waypoint proxies (L7).
+# Benchmarks show dramatic resource savings for L4-only workloads.
+#
+# Expected impact (single-cluster, from upstream benchmarks):
+#   - 70% less CPU per proxy (ztunnel vs sidecar)
+#   - 80% less memory per proxy (12 MB vs 60 MB)
+#   - 75% lower P90 latency at L4
+#   - Upgrade without pod restarts (DaemonSet rolling update)
+#
+# Caveats for multicluster:
+#   - Waypoint proxies are not AZ-aware (cross-AZ cost risk)
+#   - East-west gateway integration with ambient is experimental upstream
+#   - OSSM docs explicitly state multicluster ambient is not supported
+#
+# Relevant test suites: dataplane, controlplane (single-cluster only)
+#
+# References:
+#   https://istio.io/latest/docs/overview/dataplane-modes/
+#   https://developers.redhat.com/articles/2025/03/12/try-istio-ambient-mode-red-hat-openshift
+#   https://www.redhat.com/en/blog/introducing-openshift-service-mesh-32-istios-ambient-mode
+
+ossm_support: not-supported-multicluster
+ossm_support_detail: >-
+  OSSM 3.2+ supports ambient mode for single-cluster only. Multicluster
+  ambient is not supported by Red Hat. Upstream Istio multicluster ambient
+  remains experimental and lacks production-grade east-west gateway integration.
+
+description: >-
+  REFERENCE ONLY — ambient mode architectural comparison. Replaces sidecar
+  proxies with per-node ztunnel (L4) and optional waypoint proxies (L7).
+  Cannot be applied to multicluster meshes on OSSM.
+
+# This profile cannot be applied automatically. It requires a fundamentally
+# different mesh architecture (no sidecar injection, ztunnel DaemonSet,
+# waypoint Deployments). The Istio CR patch below is illustrative only.
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        env:
+          PILOT_ENABLE_AMBIENT: "true"
+          PILOT_ENABLE_AMBIENT_WAYPOINTS: "true"
+
+resources: []
+
+# Manual steps required:
+#   1. Disable sidecar injection on workload namespaces
+#   2. Label namespaces with istio.io/dataplane-mode=ambient
+#   3. Deploy waypoint proxies for L7 policy namespaces
+#   4. Verify ztunnel DaemonSet is running on all nodes

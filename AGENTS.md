@@ -14,6 +14,7 @@ What is currently implemented:
 6. Cross-cluster data-plane latency test suite (`tests/dataplane/`)
 7. Churn/convergence test suite (`tests/churn/`)
 8. Churn × data-plane co-execution test suite (`tests/churn-dataplane/`)
+9. Performance tuning profile evaluation suite (`tests/tuning/`)
 
 ## Source of truth
 
@@ -88,6 +89,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `tests/churn/` | Churn/convergence test suite: numbered scripts + `chart/` Helm chart for churn targets/watcher. See `tests/churn/README.md`. |
 | `presentations/istio-mc-secrets/` | Self-contained reveal.js deck (~20 min) explaining how cert-manager + ESO + ACM produce and distribute the three Secrets (`cacerts`, per-spoke kubeconfigs, Istio remote secrets) that wire the multi-primary, multi-network mesh together. Open `index.html` in a browser. See `presentations/istio-mc-secrets/README.md`. |
 | `tests/churn-dataplane/` | Churn × data-plane co-execution test suite: numbered scripts + composite `chart/` co-deploying fortio (server+client) and churn-target Pods in one shared namespace; emits `Δp99_ms` (latency delta under churn). See `tests/churn-dataplane/README.md`. |
+| `tests/tuning/` | Performance tuning profile evaluation suite: applies Istio tuning profiles (Sidecar scoping, push throttling, xDS cache tuning, telemetry filtering, etc.) to the live mesh, runs existing test suite probes, and compares results across profiles. 15 profiles in 4 tiers with OSSM support annotations. See `tests/tuning/README.md`. |
 
 ## Common tasks
 

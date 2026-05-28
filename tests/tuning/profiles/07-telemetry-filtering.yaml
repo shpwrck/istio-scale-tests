@@ -1,0 +1,55 @@
+# Profile: telemetry-filtering
+# Tier: 2 (high impact, measure-first)
+# OSSM Support: SUPPORTED — Istio Telemetry API, GA since Istio 1.18
+#
+# By default every sidecar collects and exports the full set of Istio standard
+# metrics on both client and server sides. Disabling client-side metrics
+# reduces metric volume by 40-50%. Removing high-cardinality labels
+# (response_code, connection_security_policy) further reduces time series.
+#
+# Expected impact:
+#   - 40-50% reduction in metric volume (disabling client-side metrics)
+#   - Lower proxy CPU and memory
+#   - Reduced Prometheus scrape and storage cost
+#
+# Relevant test suites: dataplane, controlplane
+#
+# References:
+#   https://istio.io/latest/docs/tasks/observability/metrics/telemetry-api/
+#   https://istio.io/latest/docs/reference/config/telemetry/
+
+ossm_support: supported
+
+description: >-
+  Disable client-side request metrics and remove high-cardinality metric labels
+  to reduce per-proxy telemetry overhead.
+
+istio_cr_patch: {}
+
+resources:
+  - apiVersion: telemetry.istio.io/v1
+    kind: Telemetry
+    metadata:
+      name: tuning-metrics
+      namespace: istio-system
+    spec:
+      metrics:
+        - providers:
+            - name: prometheus
+          overrides:
+            - match:
+                mode: CLIENT
+                metric: REQUEST_COUNT
+              disabled: true
+            - match:
+                mode: CLIENT
+                metric: REQUEST_DURATION
+              disabled: true
+            - match:
+                mode: CLIENT
+                metric: REQUEST_SIZE
+              disabled: true
+            - match:
+                mode: CLIENT
+                metric: RESPONSE_SIZE
+              disabled: true

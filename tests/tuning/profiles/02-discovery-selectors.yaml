@@ -1,0 +1,35 @@
+# Profile: discovery-selectors
+# Tier: 1 (highest impact, safe)
+# OSSM Support: SUPPORTED — meshConfig field, explicitly recommended by Red Hat docs
+#
+# Discovery selectors limit which namespaces istiod watches and processes.
+# Namespaces not matching any selector are completely invisible to the control
+# plane — no watches, no config generation, no push overhead.
+#
+# Expected impact:
+#   - istiod CPU and memory proportional to mesh namespaces, not total namespaces
+#   - Faster startup (fewer informers)
+#   - Reduced Kubernetes API server load
+#
+# Relevant test suites: controlplane, propagation
+#
+# References:
+#   https://istio.io/latest/blog/2021/discovery-selectors/
+#   https://istio.io/latest/docs/ops/configuration/mesh/configuration-scoping/
+
+ossm_support: supported
+
+description: >-
+  Configure discoverySelectors on the Istio CR so istiod only watches
+  namespaces labelled istio-discovery=enabled. Non-mesh namespaces are
+  completely ignored by the control plane.
+
+istio_cr_patch:
+  spec:
+    values:
+      meshConfig:
+        discoverySelectors:
+          - matchLabels:
+              istio-discovery: "enabled"
+
+resources: []

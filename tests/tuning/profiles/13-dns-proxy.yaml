@@ -1,0 +1,38 @@
+# Profile: dns-proxy
+# Tier: 3 (medium impact, workload-specific)
+# OSSM Support: SUPPORTED — meshConfig.defaultConfig field
+#
+# When DNS capture is enabled, DNS queries from application containers are
+# intercepted by the sidecar proxy and resolved locally. This reduces load
+# on CoreDNS (or the cluster DNS provider) and can improve DNS resolution
+# latency for services in the mesh.
+#
+# DNS auto-allocation assigns virtual IPs to ServiceEntry hostnames,
+# enabling TCP routing for external services without user-supplied VIPs.
+#
+# Expected impact:
+#   - Reduced CoreDNS load at scale (significant for 1000+ pod meshes)
+#   - Faster DNS resolution for in-mesh services
+#   - Slight increase in sidecar proxy memory (DNS cache)
+#
+# Relevant test suites: dataplane
+#
+# References:
+#   https://istio.io/latest/docs/ops/configuration/traffic-management/dns-proxy/
+
+ossm_support: supported
+
+description: >-
+  Enable DNS capture and auto-allocation in the sidecar proxy. DNS queries
+  are resolved locally by the sidecar, reducing CoreDNS pressure.
+
+istio_cr_patch:
+  spec:
+    values:
+      meshConfig:
+        defaultConfig:
+          proxyMetadata:
+            ISTIO_META_DNS_CAPTURE: "true"
+            ISTIO_META_DNS_AUTO_ALLOCATE: "true"
+
+resources: []

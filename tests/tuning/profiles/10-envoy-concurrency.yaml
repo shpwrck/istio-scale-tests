@@ -1,0 +1,35 @@
+# Profile: envoy-concurrency
+# Tier: 3 (medium impact, workload-specific)
+# OSSM Support: SUPPORTED — meshConfig.defaultConfig field
+#
+# The concurrency setting controls the number of Envoy worker threads per
+# sidecar proxy. The default is 2. Setting it to 0 auto-detects from the
+# container CPU limit. Higher values increase throughput but MUST be matched
+# with corresponding CPU limits — more threads than CPUs causes context
+# switching overhead that degrades performance.
+#
+# Expected impact:
+#   - Higher throughput for CPU-limited sidecars (when concurrency < CPU limit)
+#   - Higher CPU utilization per proxy
+#   - No effect if CPU limit already matches concurrency
+#
+# Relevant test suites: dataplane, churn-dataplane
+#
+# References:
+#   https://istio.io/latest/docs/ops/deployment/performance-and-scalability/
+#   https://blog.mygraphql.com/en/posts/cloud/istio/istio-tunning/istio-thread-balance/
+
+ossm_support: supported
+
+description: >-
+  Set sidecar proxy concurrency to auto-detect from CPU limits. Ensures
+  Envoy worker threads match available CPU.
+
+istio_cr_patch:
+  spec:
+    values:
+      meshConfig:
+        defaultConfig:
+          concurrency: 0
+
+resources: []
