@@ -42,11 +42,15 @@ namespace-1, ...   -> additional namespaces when namespaceCount > 1
 {{- $base := .Values.namespace -}}
 {{- $n := int (default 1 .Values.namespaceCount) -}}
 {{- if lt $n 1 -}}{{- $n = 1 -}}{{- end -}}
-{{- $out := list $base -}}
-{{- range $i, $_ := until (sub $n 1 | int) -}}
-{{- $out = append $out (printf "%s-%d" $base (add $i 1)) -}}
+{{- if le $n 1 -}}
+{{- toYaml (list $base) -}}
+{{- else -}}
+{{- $out := list -}}
+{{- range $i, $_ := until $n -}}
+{{- $out = append $out (printf "%s-%d" $base $i) -}}
 {{- end -}}
 {{- toYaml $out -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
