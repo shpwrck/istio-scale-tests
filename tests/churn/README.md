@@ -14,6 +14,11 @@ Measure control-plane convergence time under simultaneous endpoint churn across 
 | xDS pushes delta (remote) | `pilot_xds_pushes` counter delta summed across all remote istiods |
 | Queue time p99 (source) | `pilot_proxy_queue_time` **delta-window** p99 on the source istiod — computed from pre/post histogram bucket subtraction, isolating only this churn event's queue times. Reported as a bucket range (e.g. `0-100`). |
 | Queue time p99 (remote) | `pilot_proxy_queue_time` delta-window p99, max across all remote istiods |
+| Connected proxies (source) | `pilot_xds` gauge on the source istiod — number of xDS-connected proxies at measurement time |
+| Connected proxies (remote) | `pilot_xds` gauge summed across all remote istiods |
+| Push time p99 (source) | `pilot_xds_push_time` delta-window p99 on the source istiod — time spent computing and sending each xDS push. Reported as a bucket range. |
+| Push time p99 (remote) | `pilot_xds_push_time` delta-window p99, max across all remote istiods |
+| Push amplification ratio | Derived: `(source_xds_pushes + remote_xds_pushes) / source_push_triggers`. Measures total mesh-wide push fan-out per source event — tracks whether adding clusters causes superlinear push growth. |
 
 ### Inter-iteration settling
 
@@ -62,7 +67,7 @@ After each scale-down, the probe waits for all proxies to reach SYNCED (via sync
 TSV files in per-sweep subdirectories under `tests/churn/results/` (gitignored):
 
 ```
-run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  status
+run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  source_connected_proxies  remote_connected_proxies  source_push_time_p99_ms  remote_push_time_p99_ms  status
 ```
 
 ## Cleanup
