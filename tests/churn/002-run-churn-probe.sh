@@ -28,6 +28,7 @@ BASE_REPLICAS="${CHURN_BASE_REPLICAS:-1}"
 SCALE_TO="${CHURN_SCALE_TO_REPLICAS:-5}"
 ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
+SETTLE_SEC="${CHURN_SETTLE_SEC:-3}"
 POLL_INTERVAL_S="0.$(printf '%03d' "${CHURN_POLL_INTERVAL_MS:-250}")"
 OUTPUT_DIR="${ROOT}/tests/churn/results"
 DRY_RUN=0
@@ -37,8 +38,6 @@ BASE_ENVOY_PF_PORT=15100
 
 die() { echo "error: $*" >&2; exit 1; }
 
-# Portable nanosecond-resolution Unix timestamp. macOS BSD `date` does not
-# support `%N`, so we detect the best available source once and cache it.
 NOW_NS_IMPL=""
 _detect_now_ns() {
 	[[ -n "$NOW_NS_IMPL" ]] && return
@@ -76,6 +75,7 @@ Usage: $(basename "$0") [options]
   --scale-to N             Scale targets to N replicas (default: $SCALE_TO).
   --iterations N           Number of churn iterations (default: $ITERATIONS).
   --timeout SEC            Timeout per iteration (default: $TIMEOUT_SEC).
+  --settle SEC             Settle time after scale-down convergence (default: $SETTLE_SEC).
   --output-dir DIR         Results directory (default: tests/churn/results).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
@@ -132,6 +132,11 @@ while [[ $# -gt 0 ]]; do
 		TIMEOUT_SEC="$2"
 		shift 2
 		;;
+	--settle)
+		[[ -n "${2:-}" ]] || die "--settle requires a value"
+		SETTLE_SEC="$2"
+		shift 2
+		;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
@@ -172,7 +177,7 @@ fi
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 
-RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 mkdir -p "$OUTPUT_DIR"
 TSV_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.tsv"
 
@@ -188,7 +193,13 @@ cat > "$TSV_FILE" <<EOF
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 EOF
-echo -e "run_id\tmesh_size\tchurn_intensity\titeration\tt0_epoch_ns\tconvergence_local_ms\tconvergence_remote_ms\tpush_triggers_delta\txds_pushes_delta\tqueue_time_p99_ms\tstatus" >> "$TSV_FILE"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
+	convergence_local_ms convergence_remote_ms \
+	source_push_triggers_delta remote_push_triggers_delta \
+	source_xds_pushes_delta remote_xds_pushes_delta \
+	source_queue_time_p99_ms remote_queue_time_p99_ms \
+	status >> "$TSV_FILE"
 
 PF_PIDS=()
 POLL_PIDS=()
@@ -230,30 +241,68 @@ get_counter() {
 	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
 }
 
-get_histogram_p99() {
+scrape_histogram() {
 	local port="$1" name="$2"
-	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="${name}_bucket" -v q="0.99" '
+	curl -s "http://localhost:$port/metrics" 2>/dev/null | grep "${name}_bucket{" || true
+}
+
+# Compute delta-window p99 from pre/post histogram scrapes.
+# Adapted from tests/controlplane/002-collect-resource-metrics.sh:545-592.
+delta_histogram_p99() {
+	local pre="$1" post="$2" name="$3"
+	awk -v name="${name}_bucket" -v q="0.99" '
+	function leval(line) {
+		s = line; sub(/.*le="/, "", s); sub(/".*/, "", s); return s
+	}
+	function le_key(le) {
+		if (le == "+Inf") return 1e308
+		return le + 0
+	}
+	NR==FNR {
+		if ($0 ~ name && /le="/) base[leval($0)] += $NF+0
+		next
+	}
 	$0 ~ name && /le="/ {
-		line = $0
-		sub(/.*le="/, "", line); sub(/".*/, "", line); le = line
-		count = $NF + 0
-		buckets[++n] = le " " count
+		le = leval($0)
+		final_v[le] += $NF+0
+		if (!(le in seen)) { seen[le] = 1; les[++n] = le }
 	}
 	END {
-		if(n==0) { print "N/A"; exit }
-		total=0; for(i=1;i<=n;i++) { split(buckets[i],p," "); total=p[2] }
+		if (n == 0) { print "N/A"; exit }
+		for (i = 1; i <= n; i++) sortable[i] = les[i]
+		for (i = 2; i <= n; i++) {
+			j = i
+			while (j > 1 && le_key(sortable[j-1]) > le_key(sortable[j])) {
+				t = sortable[j-1]; sortable[j-1] = sortable[j]; sortable[j] = t
+				j--
+			}
+		}
+		bad = 0
+		for (i = 1; i <= n; i++) {
+			le = sortable[i]
+			delta = final_v[le] - (le in base ? base[le] : 0)
+			if (delta < 0) { bad = 1; break }
+			deltas[i] = delta
+		}
+		if (bad) { print "N/A"; exit }
+		total = deltas[n]
+		if (total <= 0) { print "N/A"; exit }
 		target = total * q
-		for(i=1;i<=n;i++) {
-			split(buckets[i], p, " ")
-			if(p[2]+0 >= target) { v=p[1]; if(v=="+Inf") v=0; printf "%.0f\n", v*1000; exit }
+		for (i = 1; i <= n; i++) {
+			if (deltas[i]+0 >= target) {
+				if (sortable[i] == "+Inf") { print "overflow"; exit }
+				printf "%.0f\n", sortable[i] * 1000
+				exit
+			}
 		}
 		print "N/A"
-	}'
+	}' <(echo "$pre") <(echo "$post")
 }
 
 bucket_range() {
 	local v="${1:-0}"
-	[[ "$v" == "N/A" ]] && { echo "N/A"; return; }
+	[[ "$v" == "N/A" ]]      && { echo "N/A"; return; }
+	[[ "$v" == "overflow" ]]  && { echo ">30000"; return; }
 	(( v <= 0 ))     && { echo "N/A"; return; }
 	(( v <= 100 ))   && { echo "0-100"; return; }
 	(( v <= 500 ))   && { echo "100-500"; return; }
@@ -270,9 +319,9 @@ poll_syncz_converged() {
 	local port="$1" t0="$2" result_file="$3"
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
-		local now_ms=$(now_ns)
-		now_ms=$(( now_ms / 1000000 ))
-		((now_ms > deadline)) && echo "TIMEOUT" > "$result_file" && return
+		local now_ms
+		now_ms=$(( $(now_ns) / 1000000 ))
+		((now_ms > deadline)) && { echo "TIMEOUT" > "$result_file"; return; }
 		local syncz stale
 		syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
 		stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
@@ -284,17 +333,32 @@ poll_syncz_converged() {
 	done
 }
 
-poll_endpoint_count_changed() {
-	local envoy_port="$1" t0="$2" baseline_count="$3" result_file="$4"
+# Wait for syncz to show all-SYNCED (single phase, used for settle).
+wait_syncz_synced() {
+	local port="$1" timeout_sec="$2"
+	local deadline=$(( $(date +%s) + timeout_sec ))
+	while (( $(date +%s) <= deadline )); do
+		local syncz stale
+		syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
+		stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
+		[[ "$stale" == "0" ]] && return 0
+		sleep "$POLL_INTERVAL_S"
+	done
+	return 1
+}
+
+# Wait for expected endpoint count (full convergence, not just first endpoint).
+poll_endpoint_count_converged() {
+	local envoy_port="$1" t0="$2" expected_count="$3" result_file="$4"
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
-		local now_ms=$(now_ns)
-		now_ms=$(( now_ms / 1000000 ))
-		((now_ms > deadline)) && echo "TIMEOUT" > "$result_file" && return
+		local now_ms
+		now_ms=$(( $(now_ns) / 1000000 ))
+		((now_ms > deadline)) && { echo "TIMEOUT" > "$result_file"; return; }
 		local clusters count
 		clusters=$(curl -s "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
 		count=$(echo "$clusters" | grep -c "churn-target.*health_flags::healthy" || true)
-		if ((count > baseline_count)); then
+		if ((count >= expected_count)); then
 			now_ns > "$result_file"
 			return
 		fi
@@ -313,7 +377,7 @@ compute_delta_ms() {
 echo "=== Churn convergence probe ==="
 echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE"
 echo "Deployments: $DEPLOYMENT_COUNT | Scale: $BASE_REPLICAS -> $SCALE_TO"
-echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s"
+echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s | Settle: ${SETTLE_SEC}s"
 echo ""
 
 echo "Starting port-forwards..."
@@ -324,6 +388,16 @@ for i in "${!REMOTES[@]}"; do
 done
 echo "Port-forwards ready."
 
+REMOTE_ISTIOD_PORTS=()
+for i in "${!REMOTES[@]}"; do
+	REMOTE_ISTIOD_PORTS+=( $(( BASE_PF_PORT + i + 1 )) )
+done
+
+# Convergence threshold: at least 1 new endpoint per deployment visible in the
+# remote sidecar.  This confirms EDS propagation without gating on full pod
+# rollout time (which is a Kubernetes scheduling concern, not Istio convergence).
+ENDPOINT_THRESHOLD_DELTA=$DEPLOYMENT_COUNT
+
 TMPDIR_RUN=$(mktemp -d)
 trap 'cleanup; rm -rf "$TMPDIR_RUN"' EXIT
 
@@ -331,8 +405,20 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
 
-	pre_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
-	pre_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
+	# Pre-churn: capture counters and histograms from all istiods.
+	src_pre_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
+	src_pre_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
+	src_pre_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
+
+	rmt_pre_triggers=()
+	rmt_pre_pushes=()
+	rmt_pre_hist=()
+	for i in "${!REMOTES[@]}"; do
+		rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
+		rmt_pre_triggers+=("$(get_counter "$rmt_port" "pilot_push_triggers")")
+		rmt_pre_pushes+=("$(get_counter "$rmt_port" "pilot_xds_pushes")")
+		rmt_pre_hist+=("$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")")
+	done
 
 	BASELINE_COUNTS=()
 	for i in "${!REMOTES[@]}"; do
@@ -362,7 +448,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		rf="$TMPDIR_RUN/remote_${i}"
 		echo "" > "$rf"
 		REMOTE_FILES+=("$rf")
-		poll_endpoint_count_changed $(( BASE_ENVOY_PF_PORT + i )) "$T0" "${BASELINE_COUNTS[i]}" "$rf" &
+		expected=$(( BASELINE_COUNTS[i] + ENDPOINT_THRESHOLD_DELTA ))
+		poll_endpoint_count_converged $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$expected" "$rf" &
 		POLL_PIDS+=($!)
 	done
 
@@ -388,19 +475,59 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		if ((all_ok)); then conv_remote="$max_remote"; else conv_remote="TIMEOUT"; fi
 	fi
 
-	post_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
-	post_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
-	triggers_delta=$((post_triggers - pre_triggers))
-	pushes_delta=$((post_pushes - pre_pushes))
-	queue_p99=$(get_histogram_p99 "$BASE_PF_PORT" "pilot_proxy_queue_time")
+	# Post-churn: capture counters and histograms from all istiods.
+	src_post_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
+	src_post_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
+	src_post_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
 
-	echo "  Push triggers delta: $triggers_delta  xDS pushes delta: $pushes_delta  Queue p99: $(bucket_range "$queue_p99")ms"
+	src_triggers_delta=$((src_post_triggers - src_pre_triggers))
+	src_pushes_delta=$((src_post_pushes - src_pre_pushes))
+	src_queue_p99=$(delta_histogram_p99 "$src_pre_hist" "$src_post_hist" "pilot_proxy_queue_time")
+
+	rmt_triggers_delta=0
+	rmt_pushes_delta=0
+	rmt_queue_p99="N/A"
+	if [[ ${#REMOTES[@]} -gt 0 ]]; then
+		max_rmt_q=0
+		has_rmt_q=0
+		for i in "${!REMOTES[@]}"; do
+			rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
+			rmt_post_t=$(get_counter "$rmt_port" "pilot_push_triggers")
+			rmt_post_p=$(get_counter "$rmt_port" "pilot_xds_pushes")
+			rmt_post_h=$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")
+
+			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_triggers[i] ))
+			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_pushes[i] ))
+
+			rmt_q=$(delta_histogram_p99 "${rmt_pre_hist[i]}" "$rmt_post_h" "pilot_proxy_queue_time")
+			if [[ "$rmt_q" != "N/A" && "$rmt_q" != "overflow" ]]; then
+				has_rmt_q=1
+				((rmt_q > max_rmt_q)) && max_rmt_q="$rmt_q"
+			elif [[ "$rmt_q" == "overflow" ]]; then
+				rmt_queue_p99="overflow"
+			fi
+		done
+		if [[ "$rmt_queue_p99" != "overflow" ]] && ((has_rmt_q)); then
+			rmt_queue_p99="$max_rmt_q"
+		fi
+	fi
+
+	echo "  Source — triggers: $src_triggers_delta  pushes: $src_pushes_delta  queue p99: $(bucket_range "$src_queue_p99")ms"
+	if [[ ${#REMOTES[@]} -gt 0 ]]; then
+		echo "  Remote — triggers: $rmt_triggers_delta  pushes: $rmt_pushes_delta  queue p99: $(bucket_range "$rmt_queue_p99")ms"
+	fi
 
 	status="OK"
 	[[ "$conv_local" == "TIMEOUT" ]] && status="TIMEOUT_LOCAL"
 	[[ "$conv_remote" == "TIMEOUT" ]] && status="TIMEOUT_REMOTE"
 
-	echo -e "${RUN_ID}\t${MESH_SIZE}\t${DEPLOYMENT_COUNT}\t${iter}\t${T0}\t${conv_local}\t${conv_remote}\t${triggers_delta}\t${pushes_delta}\t${queue_p99}\t${status}" >> "$TSV_FILE"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$RUN_ID" "$MESH_SIZE" "$DEPLOYMENT_COUNT" "$BASE_REPLICAS" "$SCALE_TO" \
+		"$iter" "$T0" "$conv_local" "$conv_remote" \
+		"$src_triggers_delta" "$rmt_triggers_delta" \
+		"$src_pushes_delta" "$rmt_pushes_delta" \
+		"$src_queue_p99" "$rmt_queue_p99" \
+		"$status" >> "$TSV_FILE"
 
 	echo "  Scaling back to $BASE_REPLICAS replicas..."
 	SCALE_PIDS=()
@@ -413,8 +540,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	for pid in "${SCALE_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 
 	if ((iter < ITERATIONS)); then
-		echo "  Waiting for scale-down to settle..."
-		sleep 5
+		echo "  Waiting for scale-down convergence..."
+		if ! wait_syncz_synced "$BASE_PF_PORT" "$TIMEOUT_SEC"; then
+			echo "  Warning: scale-down convergence timed out after ${TIMEOUT_SEC}s"
+		fi
+		echo "  Settling for ${SETTLE_SEC}s..."
+		sleep "$SETTLE_SEC"
 	fi
 done
 
@@ -439,23 +570,26 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo ""
 	echo "## Summary"
 	echo ""
-	echo "| Iteration | Local (ms) | Remote (ms) | Push Triggers | xDS Pushes | Queue p99 (ms) | Status |"
-	echo "|-----------|------------|-------------|---------------|------------|----------------|--------|"
+	echo "| Iter | Local (ms) | Remote (ms) | Src Triggers | Rmt Triggers | Src Pushes | Rmt Pushes | Src Queue p99 | Rmt Queue p99 | Status |"
+	echo "|------|------------|-------------|--------------|--------------|------------|------------|---------------|---------------|--------|"
 	awk -F'\t' '
-	function bucket_range(upper_ms) {
-		if (upper_ms+0 <= 0)     return "N/A"
-		if (upper_ms+0 <= 100)   return "0-100"
-		if (upper_ms+0 <= 500)   return "100-500"
-		if (upper_ms+0 <= 1000)  return "500-1000"
-		if (upper_ms+0 <= 3000)  return "1000-3000"
-		if (upper_ms+0 <= 5000)  return "3000-5000"
-		if (upper_ms+0 <= 10000) return "5000-10000"
-		if (upper_ms+0 <= 20000) return "10000-20000"
-		if (upper_ms+0 <= 30000) return "20000-30000"
+	function bucket_range(v) {
+		if (v == "N/A" || v == "")     return "N/A"
+		if (v == "overflow")           return ">30000"
+		if (v+0 <= 0)     return "N/A"
+		if (v+0 <= 100)   return "0-100"
+		if (v+0 <= 500)   return "100-500"
+		if (v+0 <= 1000)  return "500-1000"
+		if (v+0 <= 3000)  return "1000-3000"
+		if (v+0 <= 5000)  return "3000-5000"
+		if (v+0 <= 10000) return "5000-10000"
+		if (v+0 <= 20000) return "10000-20000"
+		if (v+0 <= 30000) return "20000-30000"
 		return ">30000"
 	}
-	!/^#/ && !/^run_id/ && NF>=11 {
-		printf "| %s | %s | %s | %s | %s | %s | %s |\n", $4, $6, $7, $8, $9, bucket_range($10), $11
+	!/^#/ && !/^run_id/ && NF>=16 {
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+			$6, $8, $9, $10, $11, $12, $13, bucket_range($14), bucket_range($15), $16
 	}' "$TSV_FILE"
 	echo ""
 	echo "## Raw Data"
