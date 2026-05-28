@@ -193,12 +193,14 @@ cat > "$TSV_FILE" <<EOF
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 EOF
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
 	convergence_local_ms convergence_remote_ms \
 	source_push_triggers_delta remote_push_triggers_delta \
 	source_xds_pushes_delta remote_xds_pushes_delta \
 	source_queue_time_p99_ms remote_queue_time_p99_ms \
+	source_connected_proxies remote_connected_proxies \
+	source_push_time_p99_ms remote_push_time_p99_ms \
 	status >> "$TSV_FILE"
 
 PF_PIDS=()
@@ -237,6 +239,11 @@ start_envoy_port_forward() {
 }
 
 get_counter() {
+	local port="$1" name="$2"
+	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
+}
+
+get_gauge() {
 	local port="$1" name="$2"
 	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
 }
@@ -405,19 +412,25 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
 
-	# Pre-churn: capture counters and histograms from all istiods.
+	# Pre-churn: capture counters, gauges, and histograms from all istiods.
 	src_pre_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
 	src_pre_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
 	src_pre_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
+	src_pre_push_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_xds_push_time")
+	src_connected_proxies=$(get_gauge "$BASE_PF_PORT" "pilot_xds")
 
 	rmt_pre_triggers=()
 	rmt_pre_pushes=()
 	rmt_pre_hist=()
+	rmt_pre_push_hist=()
+	rmt_connected_proxies=0
 	for i in "${!REMOTES[@]}"; do
 		rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
 		rmt_pre_triggers+=("$(get_counter "$rmt_port" "pilot_push_triggers")")
 		rmt_pre_pushes+=("$(get_counter "$rmt_port" "pilot_xds_pushes")")
 		rmt_pre_hist+=("$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")")
+		rmt_pre_push_hist+=("$(scrape_histogram "$rmt_port" "pilot_xds_push_time")")
+		rmt_connected_proxies=$(( rmt_connected_proxies + $(get_gauge "$rmt_port" "pilot_xds") ))
 	done
 
 	BASELINE_COUNTS=()
@@ -479,22 +492,28 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	src_post_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
 	src_post_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
 	src_post_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
+	src_post_push_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_xds_push_time")
 
 	src_triggers_delta=$((src_post_triggers - src_pre_triggers))
 	src_pushes_delta=$((src_post_pushes - src_pre_pushes))
 	src_queue_p99=$(delta_histogram_p99 "$src_pre_hist" "$src_post_hist" "pilot_proxy_queue_time")
+	src_push_time_p99=$(delta_histogram_p99 "$src_pre_push_hist" "$src_post_push_hist" "pilot_xds_push_time")
 
 	rmt_triggers_delta=0
 	rmt_pushes_delta=0
 	rmt_queue_p99="N/A"
+	rmt_push_time_p99="N/A"
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_rmt_q=0
 		has_rmt_q=0
+		max_rmt_pt=0
+		has_rmt_pt=0
 		for i in "${!REMOTES[@]}"; do
 			rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
 			rmt_post_t=$(get_counter "$rmt_port" "pilot_push_triggers")
 			rmt_post_p=$(get_counter "$rmt_port" "pilot_xds_pushes")
 			rmt_post_h=$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")
+			rmt_post_ph=$(scrape_histogram "$rmt_port" "pilot_xds_push_time")
 
 			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_triggers[i] ))
 			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_pushes[i] ))
@@ -506,27 +525,48 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			elif [[ "$rmt_q" == "overflow" ]]; then
 				rmt_queue_p99="overflow"
 			fi
+
+			rmt_pt=$(delta_histogram_p99 "${rmt_pre_push_hist[i]}" "$rmt_post_ph" "pilot_xds_push_time")
+			if [[ "$rmt_pt" != "N/A" && "$rmt_pt" != "overflow" ]]; then
+				has_rmt_pt=1
+				((rmt_pt > max_rmt_pt)) && max_rmt_pt="$rmt_pt"
+			elif [[ "$rmt_pt" == "overflow" ]]; then
+				rmt_push_time_p99="overflow"
+			fi
 		done
 		if [[ "$rmt_queue_p99" != "overflow" ]] && ((has_rmt_q)); then
 			rmt_queue_p99="$max_rmt_q"
 		fi
+		if [[ "$rmt_push_time_p99" != "overflow" ]] && ((has_rmt_pt)); then
+			rmt_push_time_p99="$max_rmt_pt"
+		fi
 	fi
 
-	echo "  Source — triggers: $src_triggers_delta  pushes: $src_pushes_delta  queue p99: $(bucket_range "$src_queue_p99")ms"
-	if [[ ${#REMOTES[@]} -gt 0 ]]; then
-		echo "  Remote — triggers: $rmt_triggers_delta  pushes: $rmt_pushes_delta  queue p99: $(bucket_range "$rmt_queue_p99")ms"
+	total_pushes=$(( src_pushes_delta + rmt_pushes_delta ))
+	if ((src_triggers_delta > 0)); then
+		amplification=$(awk "BEGIN { printf \"%.1f\", $total_pushes / $src_triggers_delta }")
+	else
+		amplification="N/A"
 	fi
+
+	echo "  Source — triggers: $src_triggers_delta  pushes: $src_pushes_delta  queue p99: $(bucket_range "$src_queue_p99")ms  push_time p99: $(bucket_range "$src_push_time_p99")ms  proxies: $src_connected_proxies"
+	if [[ ${#REMOTES[@]} -gt 0 ]]; then
+		echo "  Remote — triggers: $rmt_triggers_delta  pushes: $rmt_pushes_delta  queue p99: $(bucket_range "$rmt_queue_p99")ms  push_time p99: $(bucket_range "$rmt_push_time_p99")ms  proxies: $rmt_connected_proxies"
+	fi
+	echo "  Push amplification: ${amplification}x  (${total_pushes} total pushes / ${src_triggers_delta} source triggers)"
 
 	status="OK"
 	[[ "$conv_local" == "TIMEOUT" ]] && status="TIMEOUT_LOCAL"
 	[[ "$conv_remote" == "TIMEOUT" ]] && status="TIMEOUT_REMOTE"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$RUN_ID" "$MESH_SIZE" "$DEPLOYMENT_COUNT" "$BASE_REPLICAS" "$SCALE_TO" \
 		"$iter" "$T0" "$conv_local" "$conv_remote" \
 		"$src_triggers_delta" "$rmt_triggers_delta" \
 		"$src_pushes_delta" "$rmt_pushes_delta" \
 		"$src_queue_p99" "$rmt_queue_p99" \
+		"$src_connected_proxies" "$rmt_connected_proxies" \
+		"$src_push_time_p99" "$rmt_push_time_p99" \
 		"$status" >> "$TSV_FILE"
 
 	echo "  Scaling back to $BASE_REPLICAS replicas..."
