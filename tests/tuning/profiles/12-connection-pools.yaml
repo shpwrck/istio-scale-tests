@@ -1,0 +1,57 @@
+# Profile: connection-pools
+# Tier: 3 (medium impact, workload-specific)
+# OSSM Support: SUPPORTED — standard DestinationRule API
+#
+# Default Envoy connection pool settings are extremely permissive (2^32 max
+# connections). Setting explicit limits enables circuit breaking, improves
+# load distribution across new pods, and prevents connection exhaustion.
+#
+# Setting maxRequestsPerConnection to a finite value forces periodic
+# connection recycling, which improves load distribution when pods scale
+# horizontally (new pods receive connections sooner).
+#
+# Expected impact:
+#   - Better load distribution across backend pods
+#   - Circuit breaking prevents cascade failures
+#   - Reduced connection count per upstream
+#   - Slight increase in TLS handshake overhead (connection recycling)
+#
+# Relevant test suites: dataplane
+#
+# References:
+#   https://istio.io/latest/docs/reference/config/networking/destination-rule/
+
+ossm_support: supported
+
+description: >-
+  Apply mesh-wide DestinationRule with connection pool limits, circuit
+  breaking via outlier detection, and connection recycling.
+
+istio_cr_patch: {}
+
+resources:
+  - apiVersion: networking.istio.io/v1
+    kind: DestinationRule
+    metadata:
+      name: tuning-connection-pool
+      namespace: istio-system
+    spec:
+      host: "*.svc.cluster.local"
+      trafficPolicy:
+        connectionPool:
+          tcp:
+            maxConnections: 1024
+            connectTimeout: 5s
+            tcpKeepalive:
+              time: 300s
+              interval: 30s
+              probes: 3
+          http:
+            http2MaxRequests: 1024
+            http1MaxPendingRequests: 1024
+            maxRequestsPerConnection: 100
+        outlierDetection:
+          consecutive5xxErrors: 5
+          interval: 30s
+          baseEjectionTime: 30s
+          maxEjectionPercent: 50

@@ -1,0 +1,49 @@
+# Profile: xds-cache-tuning
+# Tier: 2 (high impact, measure-first)
+# OSSM Support: CONFIGURABLE — pilot env vars set via spec.values.pilot.env;
+#   mechanically supported by the Sail operator Helm passthrough but NOT
+#   explicitly documented by Red Hat for OSSM 3. Known upstream issue with
+#   CDS cache invalidation on DestinationRule changes (istio/istio#39726).
+#
+# Counter-intuitive finding from Airbnb and upstream Istio (GitHub #40744):
+# the xDS response caches (CDS, RDS) use shared locks that can INCREASE
+# propagation delay under concurrent pushes. Disabling the CDS and RDS
+# caches reduced P90 convergence from 2.9s to 0.85s in benchmarks, at the
+# cost of higher CPU (responses are recomputed instead of served from cache).
+#
+# This profile disables CDS and RDS caches while keeping the master cache
+# toggle enabled (so EDS caching continues). Measure both CPU and convergence
+# to determine if the tradeoff is net positive for your mesh size.
+#
+# Expected impact:
+#   - Reduced xDS propagation delay (potentially 50-70% lower P90)
+#   - Higher istiod CPU (recomputes CDS/RDS on every push)
+#   - No effect on memory
+#
+# Relevant test suites: propagation, controlplane, churn
+#
+# References:
+#   https://medium.com/airbnb-engineering/improving-istio-propagation-delay-d4da9b5b9f90
+#   https://github.com/istio/istio/issues/40744
+
+ossm_support: configurable
+ossm_support_detail: >-
+  CDS/RDS cache toggles are upstream Istio pilot env vars, not explicitly
+  documented by Red Hat. The Airbnb and upstream findings (GitHub #40744) are
+  well-established, but Red Hat support coverage for issues caused by disabling
+  these caches is uncertain. Known issue: CDS cache invalidation can fail with
+  DestinationRule changes (GitHub #39726).
+
+description: >-
+  Disable CDS and RDS xDS response caches to reduce lock contention during
+  concurrent pushes. Trades CPU for lower propagation delay.
+
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        env:
+          PILOT_ENABLE_CDS_CACHE: "false"
+          PILOT_ENABLE_RDS_CACHE: "false"
+
+resources: []

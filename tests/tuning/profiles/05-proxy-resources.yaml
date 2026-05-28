@@ -1,0 +1,40 @@
+# Profile: proxy-resources
+# Tier: 1 (highest impact, safe)
+# OSSM Support: SUPPORTED — standard Sail operator global proxy values
+#
+# The default sidecar proxy resource allocation (cpu: 10m) is not
+# production-ready. Red Hat documentation recommends explicit production
+# baselines. Under-provisioned sidecars cause request latency spikes
+# and throttling under load.
+#
+# Expected impact:
+#   - Reduced tail latency under load (p99, p99.9)
+#   - Prevents CPU throttling in sidecar proxies
+#   - More predictable data-plane performance
+#
+# Relevant test suites: dataplane, churn-dataplane
+#
+# References:
+#   https://istio.io/latest/docs/ops/deployment/performance-and-scalability/
+#   https://docs.openshift.com/container-platform/4.14/service_mesh/v2x/ossm-performance-scalability.html
+
+ossm_support: supported
+
+description: >-
+  Set production-grade sidecar proxy resource requests and limits.
+  Baseline for 1000 RPS per-service workloads.
+
+istio_cr_patch:
+  spec:
+    values:
+      global:
+        proxy:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+resources: []

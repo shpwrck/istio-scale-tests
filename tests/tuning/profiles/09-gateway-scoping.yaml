@@ -1,0 +1,61 @@
+# Profile: gateway-scoping
+# Tier: 2 (high impact, measure-first)
+# OSSM Support: CONFIGURABLE (PILOT_FILTER_GATEWAY_CLUSTER_CONFIG) +
+#   SUPPORTED (Sidecar CR on gateway namespace)
+#   The Sidecar CR part is GA. PILOT_FILTER_GATEWAY_CLUSTER_CONFIG is an
+#   EXPERIMENTAL upstream Istio env var — not documented by Red Hat, with
+#   known stability issues during upgrades (istio/istio#44439). This is the
+#   highest-risk profile among the configurable set.
+#
+# PILOT_FILTER_GATEWAY_CLUSTER_CONFIG restricts the clusters sent to gateway
+# proxies to only those referenced by their virtual services, dramatically
+# reducing xDS push size for gateways. Combined with a Sidecar resource on the
+# gateway namespace to scope its view further.
+#
+# CAUTION: Known upstream bugs (#29131, #37997) can cause issues with
+# ext_authz, Telemetry providers, and EnvoyFilter references being omitted
+# from gateway configuration. Test thoroughly before using in production.
+#
+# Expected impact:
+#   - Major reduction in gateway xDS config size
+#   - Faster push times to gateway proxies
+#   - Lower gateway proxy memory
+#
+# Relevant test suites: controlplane, dataplane
+#
+# References:
+#   https://github.com/istio/istio/issues/29131
+#   https://github.com/istio/istio/issues/37997
+#   https://tetrate.io/blog/performance-optimization-for-istio
+
+ossm_support: configurable
+ossm_support_detail: >-
+  PILOT_FILTER_GATEWAY_CLUSTER_CONFIG is experimental upstream (defined in
+  pilot/pkg/features/experimental.go). Known issues: gateway proxies losing
+  cluster config during upgrades (#44439), ext_authz/Telemetry providers
+  omitted (#29131, #37997). The Sidecar CR on the gateway namespace is GA.
+  Not documented by Red Hat — highest-risk configurable profile.
+
+description: >-
+  Scope gateway proxies to only referenced clusters via
+  PILOT_FILTER_GATEWAY_CLUSTER_CONFIG and a namespace-scoped Sidecar CR on
+  the gateway namespace. Significant reduction in gateway config size.
+
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        env:
+          PILOT_FILTER_GATEWAY_CLUSTER_CONFIG: "true"
+
+resources:
+  - apiVersion: networking.istio.io/v1
+    kind: Sidecar
+    metadata:
+      name: east-west-gateway
+      namespace: istio-system
+    spec:
+      egress:
+        - hosts:
+            - "istio-system/*"
+            - "*/*.svc.cluster.local"
