@@ -361,15 +361,9 @@ NF < 10 { next }
 	}
 	if (cp50 != "N/A" && cp50 != "overflow" && cp50 ~ /^[0-9]+$/) {
 		cp50_n[ms]++; cp50_vals[ms, cp50_n[ms]] = cp50 + 0
-		v = cp50 + 0
-		if (!(ms in cp50_min) || v < cp50_min[ms]) cp50_min[ms] = v
-		if (!(ms in cp50_max) || v > cp50_max[ms]) cp50_max[ms] = v
 	}
 	if (cp99 != "N/A" && cp99 != "overflow" && cp99 ~ /^[0-9]+$/) {
 		cp99_n[ms]++; cp99_vals[ms, cp99_n[ms]] = cp99 + 0
-		v = cp99 + 0
-		if (!(ms in cp99_min) || v < cp99_min[ms]) cp99_min[ms] = v
-		if (!(ms in cp99_max) || v > cp99_max[ms]) cp99_max[ms] = v
 	}
 }
 function load(into, src, ms, n,    i) {
@@ -390,9 +384,17 @@ function percentile(arr, n, pct,    idx) {
 	if (idx > n) idx = n
 	return arr[idx]
 }
-function is_floor_pinned(phase_min, phase_max, phase_n) {
-	if (phase_n > 0 && phase_min == 100 && phase_max == 100) return 1
-	return 0
+function bucket_range(upper_ms) {
+	if (upper_ms+0 <= 0)     return "N/A"
+	if (upper_ms+0 <= 100)   return "0-100"
+	if (upper_ms+0 <= 500)   return "100-500"
+	if (upper_ms+0 <= 1000)  return "500-1000"
+	if (upper_ms+0 <= 3000)  return "1000-3000"
+	if (upper_ms+0 <= 5000)  return "3000-5000"
+	if (upper_ms+0 <= 10000) return "5000-10000"
+	if (upper_ms+0 <= 20000) return "10000-20000"
+	if (upper_ms+0 <= 30000) return "20000-30000"
+	return ">30000"
 }
 function asorti_seen(    i, k) {
 	# mawk lacks asorti — emit sorted keys from seen[] manually.
@@ -417,39 +419,46 @@ report_endpoint_text() {
 	cat "${ENDPOINT_FILES[@]}" | awk "$AWK_AGG"'
 	function stats_line(label, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
-			printf "  %-3s | %-26s | %5d | %5s | %7s | %7s | %7s | %7s | %7s | %7s\n",
+			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
 				ms, label, n_total[ms], "-", "-", "-", "-", "-", "-", "-"
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "  %-3s | %-26s | %5d | %5d | %7d | %7d | %7d | %7s | %7s | %7s\n",
+		printf "  %-3s | %-26s | %5d | %5d | %11d | %11d | %11d | %11s | %11s | %11s\n",
 			ms, label, n_total[ms], n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
+	function stats_line_hist(label, src, ms, n,    arr, sum, i) {
+		if (n == 0) {
+			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
+				ms, label, n_total[ms], "-", "-", "-", "-", "-", "-", "-"
+			return
+		}
+		load(arr, src, ms, n)
+		sort_arr(arr, n)
+		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
+		printf "  %-3s | %-26s | %5d | %5d | %11s | %11s | %11s | %11s | %11s | %11s\n",
+			ms, label, n_total[ms], n,
+			bucket_range(arr[1]), bucket_range(arr[n]), bucket_range(sum/n),
+			bucket_range(percentile(arr, n, 50)),
+			bucket_range(percentile(arr, n, 95)),
+			bucket_range(percentile(arr, n, 99))
+	}
 	END {
-		printf "  %-3s | %-26s | %5s | %5s | %7s | %7s | %7s | %7s | %7s | %7s\n",
+		printf "  %-3s | %-26s | %5s | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
 			"Sz", "Phase", "n_tot", "n_val", "min", "max", "avg", "p50", "p95", "p99"
-		printf "  %-3s-+-%-26s-+-%5s-+-%5s-+-%7s-+-%7s-+-%7s-+-%7s-+-%7s-+-%7s\n",
-			"---", "--------------------------", "-----", "-----", "-------", "-------", "-------", "-------", "-------", "-------"
+		printf "  %-3s-+-%-26s-+-%5s-+-%5s-+-%11s-+-%11s-+-%11s-+-%11s-+-%11s-+-%11s\n",
+			"---", "--------------------------", "-----", "-----", "-----------", "-----------", "-----------", "-----------", "-----------", "-----------"
 		asorti_seen()
-		any_pinned = 0
 		for (s = 1; s <= __n; s++) {
 			ms_cur = __sorted[s]
 			stats_line("P1 local xDS (wall)",    p1_vals,   ms_cur, p1_n[ms_cur])
-			p50_pinned = is_floor_pinned(cp50_min[ms_cur], cp50_max[ms_cur], cp50_n[ms_cur])
-			p99_pinned = is_floor_pinned(cp99_min[ms_cur], cp99_max[ms_cur], cp99_n[ms_cur])
-			stats_line("P1 conv_p50 (hist)" (p50_pinned ? " *" : ""),     cp50_vals, ms_cur, cp50_n[ms_cur])
-			stats_line("P1 conv_p99 (hist)" (p99_pinned ? " *" : ""),     cp99_vals, ms_cur, cp99_n[ms_cur])
+			stats_line_hist("P1 conv_p50 (hist)", cp50_vals, ms_cur, cp50_n[ms_cur])
+			stats_line_hist("P1 conv_p99 (hist)", cp99_vals, ms_cur, cp99_n[ms_cur])
 			stats_line("P2 remote istiod EDS",   p2_vals,   ms_cur, p2_n[ms_cur])
 			stats_line("P3 remote sidecar",      p3_vals,   ms_cur, p3_n[ms_cur])
-			if (p50_pinned || p99_pinned) any_pinned = 1
-		}
-		if (any_pinned) {
-			printf "\n  * All convergence samples fell in the lowest histogram bucket (<= 100 ms).\n"
-			printf "    Actual push latency is 0-100 ms but cannot be resolved further;\n"
-			printf "    pilot_proxy_convergence_time buckets are compiled into istiod.\n"
 		}
 	}'
 }
@@ -511,15 +520,32 @@ report_endpoint_markdown() {
 			phase, n_total[ms], n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
-	# Cross-mesh-size comparison table row: averages for the four headline phases.
-	# Sample-count rendering: "avg (n_valid)" — per-mesh-size tables above carry the
-	# full n_total/n_valid breakdown; here we keep it terse so the comparison reads at
-	# a glance while still surfacing how many samples backed each average.
+	function md_row_hist(phase, src, ms, n,    arr, sum, i) {
+		if (n == 0) {
+			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, n_total[ms], 0
+			return
+		}
+		load(arr, src, ms, n)
+		sort_arr(arr, n)
+		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
+		printf "| %s | %d | %d | %s | %s | %s | %s | %s | %s |\n",
+			phase, n_total[ms], n,
+			bucket_range(arr[1]), bucket_range(arr[n]), bucket_range(sum/n),
+			bucket_range(percentile(arr, n, 50)),
+			bucket_range(percentile(arr, n, 95)),
+			bucket_range(percentile(arr, n, 99))
+	}
 	function cmp_avg(src, ms, n,    arr, sum, i) {
 		if (n == 0) return "-- (0)"
 		load(arr, src, ms, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		return sprintf("%d (%d)", sum/n, n)
+	}
+	function cmp_avg_hist(src, ms, n,    arr, sum, i) {
+		if (n == 0) return "-- (0)"
+		load(arr, src, ms, n)
+		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
+		return sprintf("%s (%d)", bucket_range(sum/n), n)
 	}
 	END {
 		asorti_seen()
@@ -529,19 +555,11 @@ report_endpoint_markdown() {
 			printf "| Phase | n_total | n_valid | min (ms) | max (ms) | avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) |\n"
 			printf "|-------|---------|---------|----------|----------|----------|----------|----------|----------|\n"
 			md_row("P1 local xDS (wall)",  p1_vals,   ms_cur, p1_n[ms_cur])
-			p50_pinned = is_floor_pinned(cp50_min[ms_cur], cp50_max[ms_cur], cp50_n[ms_cur])
-			p99_pinned = is_floor_pinned(cp99_min[ms_cur], cp99_max[ms_cur], cp99_n[ms_cur])
-			md_row("P1 conv_p50 (hist)" (p50_pinned ? " *" : ""),   cp50_vals, ms_cur, cp50_n[ms_cur])
-			md_row("P1 conv_p99 (hist)" (p99_pinned ? " *" : ""),   cp99_vals, ms_cur, cp99_n[ms_cur])
+			md_row_hist("P1 conv_p50 (hist)",   cp50_vals, ms_cur, cp50_n[ms_cur])
+			md_row_hist("P1 conv_p99 (hist)",   cp99_vals, ms_cur, cp99_n[ms_cur])
 			md_row("P2 remote istiod EDS", p2_vals,   ms_cur, p2_n[ms_cur])
 			md_row("P3 remote sidecar",    p3_vals,   ms_cur, p3_n[ms_cur])
 			printf "\n"
-			if (p50_pinned || p99_pinned) {
-				printf "> **\\*** All convergence samples fell in the lowest histogram bucket "
-				printf "(<= 100 ms). The actual push latency is somewhere between 0–100 ms "
-				printf "but cannot be resolved further — `pilot_proxy_convergence_time` bucket "
-				printf "boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s).\n\n"
-			}
 		}
 		# Cross-mesh-size comparison (only meaningful when >1 mesh size was swept).
 		if (__n > 1) {
@@ -556,7 +574,7 @@ report_endpoint_markdown() {
 				printf "| %s | %s | %s | %s | %s |\n",
 					ms_cur,
 					cmp_avg(p1_vals,   ms_cur, p1_n[ms_cur]),
-					cmp_avg(cp99_vals, ms_cur, cp99_n[ms_cur]),
+					cmp_avg_hist(cp99_vals, ms_cur, cp99_n[ms_cur]),
 					cmp_avg(p2_vals,   ms_cur, p2_n[ms_cur]),
 					cmp_avg(p3_vals,   ms_cur, p3_n[ms_cur])
 			}

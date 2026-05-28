@@ -690,6 +690,21 @@ histogram_quantile() {
 	' "$file"
 }
 
+bucket_range() {
+	local v="${1:-0}"
+	[[ "$v" == "N/A" ]] && { echo "N/A"; return; }
+	(( v <= 0 ))     && { echo "N/A"; return; }
+	(( v <= 100 ))   && { echo "0-100"; return; }
+	(( v <= 500 ))   && { echo "100-500"; return; }
+	(( v <= 1000 ))  && { echo "500-1000"; return; }
+	(( v <= 3000 ))  && { echo "1000-3000"; return; }
+	(( v <= 5000 ))  && { echo "3000-5000"; return; }
+	(( v <= 10000 )) && { echo "5000-10000"; return; }
+	(( v <= 20000 )) && { echo "10000-20000"; return; }
+	(( v <= 30000 )) && { echo "20000-30000"; return; }
+	echo ">30000"
+}
+
 # A2: proxy count is parsed from the SAME baseline scrape, not a separate HTTP
 # round-trip. This eliminates a race where a proxy connects/disconnects between
 # baseline and the threshold computation, leaving the histogram-_count target
@@ -1068,7 +1083,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		p1_conv_p99="N/A"
 	fi
 
-	echo "  P1 (local xDS push):   wall=${p1_ms}ms  conv_p50=${p1_conv_p50}ms  conv_p99=${p1_conv_p99}ms  samples=${p1_sample_count}/${SOURCE_PROXY_COUNT}  overflow=${p1_overflow}  restarted=${restarted}"
+	echo "  P1 (local xDS push):   wall=${p1_ms}ms  conv_p50=$(bucket_range "$p1_conv_p50")ms  conv_p99=$(bucket_range "$p1_conv_p99")ms  samples=${p1_sample_count}/${SOURCE_PROXY_COUNT}  overflow=${p1_overflow}  restarted=${restarted}"
 
 	if [[ "$p1_ms" =~ ^[0-9]+$ ]]; then
 		P1_SUM=$((P1_SUM + p1_ms))

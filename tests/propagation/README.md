@@ -171,11 +171,11 @@ Backwards-compat:
   per-iteration keys (`RUN_ID`, `DATE`, `MESH_SIZE`, `REMOTES`, `KUBE_VERSIONS`) are
   emitted as a sequence (`iterations:` block in YAML/text/CSV-comment form, `"iterations"`
   array in JSON) with one entry per input TSV.
-- When all convergence samples for a mesh size land in the lowest histogram bucket
-  (<= 100 ms), the `conv_p50` and/or `conv_p99` rows are annotated with `*` in text
-  and markdown output. A footnote explains that the actual push latency is 0-100 ms
-  but cannot be resolved further because `pilot_proxy_convergence_time` bucket
-  boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s).
+- Convergence histogram values (`conv_p50`, `conv_p99`) are displayed as **bucket
+  ranges** (e.g. `0-100`, `100-500`) rather than raw upper bounds, since the
+  Prometheus histogram only resolves to bucket boundaries. The boundaries compiled
+  into istiod are: 100, 500, 1000, 3000, 5000, 10000, 20000, 30000 ms
+  (i.e. 0.1, 0.5, 1, 3, 5, 10, 20, 30 s).
 
 ### Sweep summary output
 

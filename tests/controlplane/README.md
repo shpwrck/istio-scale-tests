@@ -37,7 +37,7 @@ only*, not the deploy itself.
 | `pilot_k8s_cfg_events` delta + rate | istiod Prometheus | Kubernetes watch events during the window |
 | `pilot_xds` | istiod Prometheus | Connected proxy count (gauge — read from final scrape) |
 | `pilot_xds_config_size_bytes` avg | istiod Prometheus | Average xDS payload bytes during the window (histogram `_sum`/`_count` delta) |
-| Per-sidecar `/config_dump` byte size | `kubectl exec` into istio-proxy | **Real** per-proxy config cost per scoping mode |
+| Per-sidecar `/config_dump` size (MB) | `pilot-agent request` into istio-proxy | **Real** per-proxy config cost per scoping mode |
 | `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length and max clock skew across concurrent per-context scrapes |
 | `settle_sec` | Internal | Operator-supplied `--settle` value (intent — distinct from `scrape_window_sec` which is the observed elapsed window) |
 | `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape; `0` if both readings were present and equal; `unknown` if either side was missing |
@@ -79,13 +79,15 @@ If a pinned pod disappears between phases (e.g. HPA scale-down or restart),
 the row is emitted with `istiod_restarted=unknown` and counter/histogram
 deltas are excluded from aggregation.
 
-## Floor-Pinned Histogram Annotations
+## Histogram Bucket Ranges
 
-When all convergence or queue-time samples fall in the lowest histogram
-bucket (<= 100 ms), the report annotates those cells with `*` and appends a
-footnote. This means the actual latency is somewhere between 0–100 ms but
-cannot be resolved further — `pilot_proxy_convergence_time` bucket boundaries
-are compiled into istiod (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 s).
+Convergence and queue-time p99 values are reported as **bucket ranges**
+(e.g. `0-100`) rather than point values, since the underlying Prometheus
+histograms only resolve to bucket boundaries. The bucket boundaries compiled
+into istiod are: 100, 500, 1000, 3000, 5000, 10000, 20000, 30000 ms
+(i.e. 0.1, 0.5, 1, 3, 5, 10, 20, 30 s).
+A reported range of `100-500` means the p99 fell in the bucket with upper
+bound 500 ms — the actual value is somewhere in that interval.
 
 ## Prerequisites
 
@@ -213,9 +215,10 @@ istiod_cpu_m_delta
 
 **EDS is included in config_dump by design.** Envoy's default `/config_dump`
 omits the `EndpointsConfigDump`, but EDS is the dominant per-proxy size driver —
-exactly the cost that `Sidecar` scoping is designed to reduce. We curl
-`http://localhost:15000/config_dump?include_eds` so the headline reduction
-(none -> namespace / explicit) is visible.
+exactly the cost that `Sidecar` scoping is designed to reduce. We request
+`/config_dump?include_eds` via `pilot-agent request` (works with distroless
+sidecar images) so the headline reduction (none -> namespace / explicit) is
+visible. The byte count is piped through `wc -c` on the local side.
 
 `004-report-results.sh` groups rows by `(mesh_size, service_count, replicas,
 namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
@@ -258,7 +261,9 @@ confirms no `Sidecar` CRs leaked.
 - **Settle time is single-valued** across the entire sweep.
 - **Watch mode reports raw cumulative metrics**, not deltas. Use one-shot mode
   for percentile / counter measurements over a defined window.
+- **`namespace-count` must be <= `service-count`**: the setup script rejects
+  configurations where namespaces would be empty (no services mapped to them).
 - **`namespaceCount > 1` with sidecar scoping**: Sidecar CRs are only emitted
-  into the primary namespace. Config-dump sampling is filtered to the primary
-  namespace so scoped and unscoped pods are not mixed. Pods in additional
-  namespaces have no Sidecar CR and receive the full unscoped config.
+  into the primary namespace. Pods in additional namespaces have no Sidecar CR
+  and receive the full unscoped config. Config-dump sampling selects pods
+  across all test namespaces via the `app.kubernetes.io/instance` label.
