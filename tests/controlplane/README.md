@@ -82,10 +82,11 @@ deltas are excluded from aggregation.
 ## Histogram Bucket Ranges
 
 Convergence and queue-time p99 values are reported as **bucket ranges**
-(e.g. `250-500`) rather than point values, since the underlying Prometheus
+(e.g. `0-100`) rather than point values, since the underlying Prometheus
 histograms only resolve to bucket boundaries. The bucket boundaries compiled
-into istiod are: 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 ms.
-A reported range of `250-500` means the p99 fell in the bucket with upper
+into istiod are: 100, 500, 1000, 3000, 5000, 10000, 20000, 30000 ms
+(i.e. 0.1, 0.5, 1, 3, 5, 10, 20, 30 s).
+A reported range of `100-500` means the p99 fell in the bucket with upper
 bound 500 ms — the actual value is somewhere in that interval.
 
 ## Prerequisites
