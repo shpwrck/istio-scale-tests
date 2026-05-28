@@ -23,7 +23,7 @@ CHURN_INTENSITIES_CSV=""
 SCALE_TO="${CHURN_SCALE_TO_REPLICAS:-5}"
 ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
-OUTPUT_DIR="${ROOT}/tests/churn/results"
+OUTPUT_DIR_BASE="${ROOT}/tests/churn/results"
 DRY_RUN=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -38,7 +38,7 @@ Usage: $(basename "$0") [options]
   --scale-to N              Scale targets to N replicas (default: $SCALE_TO).
   --iterations N            Iterations per combination (default: $ITERATIONS).
   --timeout SEC             Timeout per iteration (default: $TIMEOUT_SEC).
-  --output-dir DIR          Results directory (default: tests/churn/results).
+  --output-dir DIR          Results base directory (default: tests/churn/results).
   --dry-run                 Show plan without executing.
   -h, --help                Show this help.
 EOF
@@ -91,7 +91,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
-		OUTPUT_DIR="$2"
+		OUTPUT_DIR_BASE="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -134,14 +134,18 @@ fi
 
 SCRIPT_DIR="${ROOT}/tests/churn"
 
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+SWEEP_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+
 echo "=========================================="
 echo "  Churn Convergence Sweep"
 echo "=========================================="
+echo "Run ID: $RUN_ID"
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "Churn intensities: ${CHURN_INTENSITIES[*]}"
 echo "Scale: -> $SCALE_TO replicas"
-echo "Output: $OUTPUT_DIR"
+echo "Output: $SWEEP_DIR"
 echo ""
 
 for ms in "${MESH_SIZES[@]}"; do
@@ -167,11 +171,13 @@ for ms in "${MESH_SIZES[@]}"; do
 		if ((DRY_RUN)); then
 			echo "  [dry-run] Would run:"
 			echo "    001-setup-churn-test.sh --contexts $active_csv --deployment-count $intensity"
-			echo "    002-run-churn-probe.sh --source-context $source_ctx --deployment-count $intensity --scale-to $SCALE_TO"
+			echo "    002-run-churn-probe.sh --source-context $source_ctx --deployment-count $intensity --scale-to $SCALE_TO --output-dir $SWEEP_DIR"
 			echo "    005-cleanup.sh --contexts $active_csv"
 			echo ""
 			continue
 		fi
+
+		[[ -d "$SWEEP_DIR" ]] || mkdir -p "$SWEEP_DIR"
 
 		echo "--- Setting up ---"
 		"$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"
@@ -185,7 +191,7 @@ for ms in "${MESH_SIZES[@]}"; do
 			--scale-to "$SCALE_TO"
 			--iterations "$ITERATIONS"
 			--timeout "$TIMEOUT_SEC"
-			--output-dir "$OUTPUT_DIR"
+			--output-dir "$SWEEP_DIR"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
 		"$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"
@@ -207,4 +213,8 @@ echo "  Sweep complete"
 echo "=========================================="
 echo ""
 echo "Generating report..."
-"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR"
+
+MD_FILE="${SWEEP_DIR}/sweep-${RUN_ID}.md"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$MD_FILE"
+echo "Markdown summary written to $MD_FILE"

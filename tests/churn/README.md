@@ -6,11 +6,18 @@ Measure control-plane convergence time under simultaneous endpoint churn across 
 
 | Metric | How |
 |--------|-----|
-| Local convergence time | Time until all local proxies are SYNCED after scaling (poll istiod `/debug/syncz`) |
-| Remote convergence time | Time until remote sidecars see updated endpoint counts (poll watcher Envoy `/clusters`) |
-| Push triggers delta | `pilot_push_triggers` change during churn event |
-| xDS pushes delta | `pilot_xds_pushes` change during churn event (compare with triggers for coalescing ratio) |
-| Queue time p99 | `pilot_proxy_queue_time` p99 after churn — how backed up the push queue gets |
+| Local convergence time | Time until all local proxies are SYNCED after scaling (poll istiod `/debug/syncz`). Cross-check with `source_push_triggers_delta` — a zero value means istiod hadn't processed the change yet. |
+| Remote convergence time | Time until remote sidecars see at least 1 new endpoint per deployment (poll watcher Envoy `/clusters`). Threshold = `baseline + deployment_count`, confirming EDS propagation for all services without gating on full pod rollout time. |
+| Push triggers delta (source) | `pilot_push_triggers` counter delta on the source cluster's istiod during the churn event |
+| Push triggers delta (remote) | `pilot_push_triggers` counter delta summed across all remote istiods |
+| xDS pushes delta (source) | `pilot_xds_pushes` counter delta on the source istiod (compare with triggers for coalescing ratio) |
+| xDS pushes delta (remote) | `pilot_xds_pushes` counter delta summed across all remote istiods |
+| Queue time p99 (source) | `pilot_proxy_queue_time` **delta-window** p99 on the source istiod — computed from pre/post histogram bucket subtraction, isolating only this churn event's queue times. Reported as a bucket range (e.g. `0-100`). |
+| Queue time p99 (remote) | `pilot_proxy_queue_time` delta-window p99, max across all remote istiods |
+
+### Inter-iteration settling
+
+After each scale-down, the probe waits for all proxies to reach SYNCED (via syncz polling) before starting the next iteration. This ensures scale-down push storms don't contaminate the next measurement window.
 
 ## Prerequisites
 
@@ -52,10 +59,10 @@ Measure control-plane convergence time under simultaneous endpoint churn across 
 
 ## Results Format
 
-TSV files in `tests/churn/results/` (gitignored):
+TSV files in per-sweep subdirectories under `tests/churn/results/` (gitignored):
 
 ```
-run_id  mesh_size  churn_intensity  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  push_triggers_delta  xds_pushes_delta  queue_time_p99_ms  status
+run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  status
 ```
 
 ## Cleanup
