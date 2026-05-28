@@ -79,6 +79,24 @@ report_text() {
 		sum=0; for(i=1;i<=n;i++) sum+=arr[key,i]
 		return sprintf("n=%d min=%.0f max=%.0f avg=%.0f", n, arr[key,1], arr[key,n], sum/n)
 	}
+	function bucket_range(upper_ms) {
+		if (upper_ms+0 <= 0)     return "N/A"
+		if (upper_ms+0 <= 100)   return "0-100"
+		if (upper_ms+0 <= 500)   return "100-500"
+		if (upper_ms+0 <= 1000)  return "500-1000"
+		if (upper_ms+0 <= 3000)  return "1000-3000"
+		if (upper_ms+0 <= 5000)  return "3000-5000"
+		if (upper_ms+0 <= 10000) return "5000-10000"
+		if (upper_ms+0 <= 20000) return "10000-20000"
+		if (upper_ms+0 <= 30000) return "20000-30000"
+		return ">30000"
+	}
+	function stats_hist(arr, key, n,    i, sum) {
+		if(n==0) return "N/A"
+		sort_vals(arr, key, n)
+		sum=0; for(i=1;i<=n;i++) sum+=arr[key,i]
+		return sprintf("n=%d min=%s max=%s avg=%s", n, bucket_range(arr[key,1]), bucket_range(arr[key,n]), bucket_range(sum/n))
+	}
 	function sort_keys(    i, j, tmp, k) {
 		n_keys = 0
 		for (k in seen) sorted_keys[++n_keys] = k
@@ -98,7 +116,7 @@ report_text() {
 			printf "  Remote convergence (ms):  %s\n", stats(cr, key, cr_n[key])
 			printf "  Push triggers delta:      %s\n", stats(pt, key, pt_n[key])
 			printf "  xDS pushes delta:         %s\n", stats(xp, key, xp_n[key])
-			printf "  Queue time p99 (ms):      %s\n", stats(qq, key, qq_n[key])
+			printf "  Queue time p99 (ms):      %s\n", stats_hist(qq, key, qq_n[key])
 			printf "\n"
 		}
 	}'

@@ -316,18 +316,15 @@ report_text() {
 	echo ""
 	aggregate | awk -F'\t' '
 	function bucket_range(upper_ms) {
-		if (upper_ms+0 <= 0)    return "N/A"
-		if (upper_ms+0 <= 10)   return "0-10"
-		if (upper_ms+0 <= 25)   return "10-25"
-		if (upper_ms+0 <= 50)   return "25-50"
-		if (upper_ms+0 <= 100)  return "50-100"
-		if (upper_ms+0 <= 250)  return "100-250"
-		if (upper_ms+0 <= 500)  return "250-500"
-		if (upper_ms+0 <= 1000) return "500-1000"
-		if (upper_ms+0 <= 2500) return "1000-2500"
-		if (upper_ms+0 <= 5000) return "2500-5000"
+		if (upper_ms+0 <= 0)     return "N/A"
+		if (upper_ms+0 <= 100)   return "0-100"
+		if (upper_ms+0 <= 500)   return "100-500"
+		if (upper_ms+0 <= 1000)  return "500-1000"
+		if (upper_ms+0 <= 3000)  return "1000-3000"
+		if (upper_ms+0 <= 5000)  return "3000-5000"
 		if (upper_ms+0 <= 10000) return "5000-10000"
-		if (upper_ms+0 <= 30000) return "10000-30000"
+		if (upper_ms+0 <= 20000) return "10000-20000"
+		if (upper_ms+0 <= 30000) return "20000-30000"
 		return ">30000"
 	}
 	NR == 1 { next }
@@ -385,18 +382,15 @@ report_markdown() {
 	echo "|-----------|-----|------|----|---------|---------|---------|-------------|--------------|---------------|----------------|---------|-------------------|----------|--------------|"
 	awk -F'\t' '
 	function bucket_range(upper_ms) {
-		if (upper_ms+0 <= 0)    return "N/A"
-		if (upper_ms+0 <= 10)   return "0-10"
-		if (upper_ms+0 <= 25)   return "10-25"
-		if (upper_ms+0 <= 50)   return "25-50"
-		if (upper_ms+0 <= 100)  return "50-100"
-		if (upper_ms+0 <= 250)  return "100-250"
-		if (upper_ms+0 <= 500)  return "250-500"
-		if (upper_ms+0 <= 1000) return "500-1000"
-		if (upper_ms+0 <= 2500) return "1000-2500"
-		if (upper_ms+0 <= 5000) return "2500-5000"
+		if (upper_ms+0 <= 0)     return "N/A"
+		if (upper_ms+0 <= 100)   return "0-100"
+		if (upper_ms+0 <= 500)   return "100-500"
+		if (upper_ms+0 <= 1000)  return "500-1000"
+		if (upper_ms+0 <= 3000)  return "1000-3000"
+		if (upper_ms+0 <= 5000)  return "3000-5000"
 		if (upper_ms+0 <= 10000) return "5000-10000"
-		if (upper_ms+0 <= 30000) return "10000-30000"
+		if (upper_ms+0 <= 20000) return "10000-20000"
+		if (upper_ms+0 <= 30000) return "20000-30000"
 		return ">30000"
 	}
 	NR == 1 { next }
