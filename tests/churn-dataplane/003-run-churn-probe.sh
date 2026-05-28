@@ -15,6 +15,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/churn-dataplane/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/churn-dataplane/lib/metrics.sh"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -158,7 +160,7 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ -z "$COMBO_ID" ]] && COMBO_ID="$RUN_ID"
 
 mkdir -p "$OUTPUT_DIR"
-[[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/coexec-${RUN_ID}.tsv"
+[[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
 
 HARNESS_SHA="$(harness_sha)"
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
@@ -189,7 +191,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"QPS=$QPS" \
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=$NS"
-	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\n' >> "$OUTPUT_FILE"
+	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
 CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
@@ -221,9 +223,11 @@ for ((i = 0; i < CHURN_DEPLOYMENT_COUNT_OPT; i++)); do PARITY[i]=0; done
 # Start istiod port-forward for restart-detection scrapes.
 PF_PID=""
 DRIVER_PID=""
+PRE_SCRAPE=""; POST_SCRAPE=""
 cleanup_all() {
 	if [[ -n "$DRIVER_PID" ]]; then kill "$DRIVER_PID" 2>/dev/null || true; wait "$DRIVER_PID" 2>/dev/null || true; fi
 	if [[ -n "$PF_PID" ]]; then kill "$PF_PID" 2>/dev/null || true; wait "$PF_PID" 2>/dev/null || true; fi
+	rm -f "${PRE_SCRAPE:-}" "${POST_SCRAPE:-}"
 }
 trap cleanup_all EXIT
 
@@ -241,8 +245,14 @@ start_istiod_pf() {
 ISTIOD_PF_OK=0
 if start_istiod_pf; then ISTIOD_PF_OK=1; fi
 
-PRE_START="$(istiod_start_time_seconds "$ISTIOD_PF_PORT" 2>/dev/null || echo "unknown")"
-((ISTIOD_PF_OK)) || PRE_START="unknown"
+PRE_SCRAPE="$(mktemp)"
+if ((ISTIOD_PF_OK)); then
+	scrape_istiod_metrics "$ISTIOD_PF_PORT" "$PRE_SCRAPE" || ISTIOD_PF_OK=0
+fi
+PRE_START="unknown"
+if ((ISTIOD_PF_OK)) && [[ -s "$PRE_SCRAPE" ]]; then
+	PRE_START="$(extract_gauge "$PRE_SCRAPE" process_start_time_seconds)"
+fi
 
 echo "=== Churn phase ==="
 echo "Source: $SOURCE_CTX (pod: $CLIENT_POD) | Remotes: ${REMOTES[*]:-none}"
@@ -360,8 +370,14 @@ fi
 wait "$DRIVER_PID" 2>/dev/null || true
 DRIVER_PID=""
 
-POST_START="$(istiod_start_time_seconds "$ISTIOD_PF_PORT" 2>/dev/null || echo "unknown")"
-((ISTIOD_PF_OK)) || POST_START="unknown"
+POST_SCRAPE="$(mktemp)"
+if ((ISTIOD_PF_OK)); then
+	scrape_istiod_metrics "$ISTIOD_PF_PORT" "$POST_SCRAPE" || true
+fi
+POST_START="unknown"
+if ((ISTIOD_PF_OK)) && [[ -s "$POST_SCRAPE" ]]; then
+	POST_START="$(extract_gauge "$POST_SCRAPE" process_start_time_seconds)"
+fi
 RESTARTED="$(istiod_restart_status "$PRE_START" "$POST_START")"
 
 # A4: churn-ops accounting. The driver log has one line per attempted op,
@@ -370,6 +386,30 @@ CHURN_OPS_ATTEMPTED="$(wc -l < "$CHURN_LOG" 2>/dev/null || echo 0)"
 CHURN_OPS_ATTEMPTED="${CHURN_OPS_ATTEMPTED// /}"
 CHURN_OPS_SUCCEEDED="$(awk -F'\t' '$2 == "0" { c++ } END { print c + 0 }' "$CHURN_LOG" 2>/dev/null || echo 0)"
 rm -f "$CHURN_LOG"
+
+# Extract istiod-side xDS metrics from pre/post scrape files.
+XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
+CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
+if [[ "$RESTARTED" == "0" && -s "$PRE_SCRAPE" && -s "$POST_SCRAPE" ]]; then
+	pre_pushes=$(extract_counter_sum "$PRE_SCRAPE" pilot_xds_pushes)
+	post_pushes=$(extract_counter_sum "$POST_SCRAPE" pilot_xds_pushes)
+	XDS_PUSHES_DELTA=$(( post_pushes - pre_pushes ))
+	(( XDS_PUSHES_DELTA < 0 )) && XDS_PUSHES_DELTA="N/A"
+
+	pre_eds=$(extract_counter_by_label "$PRE_SCRAPE" pilot_xds_pushes type eds)
+	post_eds=$(extract_counter_by_label "$POST_SCRAPE" pilot_xds_pushes type eds)
+	EDS_PUSHES_DELTA=$(( post_eds - pre_eds ))
+	(( EDS_PUSHES_DELTA < 0 )) && EDS_PUSHES_DELTA="N/A"
+
+	pre_triggers=$(extract_counter_sum "$PRE_SCRAPE" pilot_push_triggers)
+	post_triggers=$(extract_counter_sum "$POST_SCRAPE" pilot_push_triggers)
+	PUSH_TRIGGERS_DELTA=$(( post_triggers - pre_triggers ))
+	(( PUSH_TRIGGERS_DELTA < 0 )) && PUSH_TRIGGERS_DELTA="N/A"
+
+	CONVERGENCE_P99=$(delta_histogram_p99 "$PRE_SCRAPE" "$POST_SCRAPE" pilot_proxy_convergence_time)
+	QUEUE_TIME_P99=$(delta_histogram_p99 "$PRE_SCRAPE" "$POST_SCRAPE" pilot_proxy_queue_time)
+	PUSH_TIME_P99=$(delta_histogram_p99 "$PRE_SCRAPE" "$POST_SCRAPE" pilot_xds_push_time)
+fi
 
 QPS_ACTUAL="N/A"; P50="N/A"; P90="N/A"; P99="N/A"; P999="N/A"; MAX_LAT="N/A"
 if [[ "$STATUS" == "OK" && -n "$JSON_OUT" ]]; then
@@ -387,9 +427,12 @@ if [[ "$STATUS" == "OK" && -n "$JSON_OUT" ]]; then
 	[[ -z "$MAX_LAT" ]] && MAX_LAT="N/A"
 fi
 
-# PL13: istiod restarted (or unknown) -> emit N/A for derived quantiles.
+# PL13: istiod restarted (or unknown) -> emit N/A for derived quantiles
+# and istiod counter/histogram deltas.
 if [[ "$RESTARTED" != "0" ]]; then
 	P50="N/A"; P90="N/A"; P99="N/A"; P999="N/A"; MAX_LAT="N/A"
+	XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
+	CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 	[[ "$STATUS" == "OK" ]] && STATUS="POISONED_RESTART"
 fi
 
@@ -421,15 +464,19 @@ fi
 
 printf "Result: phase=churn rate=%s/s ops_attempted=%s ops_succeeded=%s qps_actual=%s p50=%s p99=%s max=%s Δp99=%s restarted=%s status=%s\n" \
 	"$CHURN_RATE" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$DELTA_P99" "$RESTARTED" "$STATUS"
+printf "  istiod: xds_pushes=%s eds_pushes=%s triggers=%s conv_p99=%s queue_p99=%s push_time_p99=%s\n" \
+	"$XDS_PUSHES_DELTA" "$EDS_PUSHES_DELTA" "$PUSH_TRIGGERS_DELTA" "$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99"
 
 printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops_attempted=%s churn_ops_succeeded=%s\n' \
 	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" >> "$OUTPUT_FILE"
 
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$MESH_SIZE" "$CHURN_RATE" "churn" \
 	"$DURATION" "$QPS" "$QPS_ACTUAL" \
 	"$P50" "$P90" "$P99" "$P999" "$MAX_LAT" \
 	"$DELTA_P99" "$RESTARTED" "$STATUS" \
-	"$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" >> "$OUTPUT_FILE"
+	"$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" \
+	"$XDS_PUSHES_DELTA" "$EDS_PUSHES_DELTA" "$PUSH_TRIGGERS_DELTA" \
+	"$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99" >> "$OUTPUT_FILE"
 
 echo "Wrote churn row to $OUTPUT_FILE"

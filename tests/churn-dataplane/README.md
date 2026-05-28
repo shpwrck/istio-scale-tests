@@ -31,6 +31,17 @@ What this suite does **not** cover:
   pools and pending requests.
 - **istiod HA / leader election** — the suite assumes a single istiod
   replica per cluster (see precondition below).
+- **Sidecar-side (Envoy admin) metrics** — the suite captures istiod-side
+  xDS push metrics for attribution but does not capture Envoy admin stats
+  from the fortio sidecars. This means we can see that istiod was busy
+  pushing xDS configs but cannot directly observe how long the sidecars
+  spent processing those updates.
+
+The istiod-side metrics (`pilot_xds_pushes`, `pilot_proxy_convergence_time`,
+`pilot_proxy_queue_time`, `pilot_xds_push_time`) enable **attribution**: if
+`Δp99_ms` is high and `churn_eds_pushes` / `churn_conv_p99` are
+correspondingly elevated, the latency delta is attributable to control-plane
+contention rather than node-level effects alone.
 
 If you need any of those, layer additional probes on top — this suite is
 deliberately narrow so the `Δp99_ms` number is unambiguous.
@@ -44,7 +55,13 @@ deliberately narrow so the `Δp99_ms` number is unambiguous.
 | Under-churn p50 / p99 / p999 / max latency | Same fortio invocation, while a deterministic churn driver scales `churn-target-N` Deployments at `--churn-rates` ops/s |
 | Under-churn actual QPS | `fortio.ActualQPS` |
 | `Δp99_ms` | `churn_p99_ms − baseline_p99_ms` per combo |
+| `stdev(Δp99_ms)` | Standard deviation of `Δp99_ms` across repetitions (when `n_valid >= 2`) |
 | `istiod_restarted` | `0` / `1` / `unknown` based on `process_start_time_seconds` delta during the window (PL9) |
+| istiod xDS push count | `pilot_xds_pushes` counter delta during measurement window (total + EDS-only) |
+| istiod push triggers | `pilot_push_triggers` counter delta during measurement window |
+| istiod convergence p99 | `pilot_proxy_convergence_time` histogram delta-window p99 |
+| istiod queue time p99 | `pilot_proxy_queue_time` histogram delta-window p99 |
+| istiod push time p99 | `pilot_xds_push_time` histogram delta-window p99 |
 
 ## Co-namespace label scheme (Branch-4 N1)
 
@@ -129,7 +146,7 @@ report (A4).
 
 # 2. Baseline (no churn) — 60s at 200 QPS
 #    Use --output-file to set an explicit path reused by step 3.
-TSV=tests/churn-dataplane/results/coexec-smoke.tsv
+TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
 ./tests/churn-dataplane/002-run-baseline-probe.sh \
     --source-context rosa-001 \
     --remote-contexts rosa-002,rosa-003 \
@@ -155,11 +172,12 @@ TSV=tests/churn-dataplane/results/coexec-smoke.tsv
 ## Full sweep
 
 ```bash
-# 2 mesh sizes × 3 churn rates = 6 combinations
+# 2 mesh sizes × 3 churn rates × 2 repetitions = 12 combinations
 ./tests/churn-dataplane/004-run-sweep.sh \
     --contexts     rosa-001,rosa-002,rosa-003 \
     --mesh-sizes   1,2 \
-    --churn-rates  1,5,10
+    --churn-rates  1,5,10 \
+    --repetitions  2
 
 # Dry-run to inspect the plan:
 ./tests/churn-dataplane/004-run-sweep.sh --dry-run \
@@ -200,6 +218,12 @@ The sweep:
 | 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
 | 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
 | 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
+| 20 | `xds_pushes_delta` | `pilot_xds_pushes` counter delta during measurement window. `N/A` when istiod restarted or scrape failed. |
+| 21 | `eds_pushes_delta` | `pilot_xds_pushes{type="eds"}` counter delta — the EDS subset of total pushes. |
+| 22 | `push_triggers_delta` | `pilot_push_triggers` counter delta during measurement window. |
+| 23 | `convergence_p99_ms` | `pilot_proxy_convergence_time` histogram delta-window p99 (bucket upper bound in ms). |
+| 24 | `queue_time_p99_ms` | `pilot_proxy_queue_time` histogram delta-window p99. |
+| 25 | `push_time_p99_ms` | `pilot_xds_push_time` histogram delta-window p99. |
 
 `status=CHURN_RATE_NOT_MET` is set by 003 when
 `churn_ops_succeeded / churn_ops_attempted < 90%` (typically apiserver 429s
@@ -216,13 +240,15 @@ that marker (A4).
 
 `005-report-results.sh` filters rows whose `istiod_restarted` is `1` or
 `unknown`, or whose `status` is not `OK` (including
-`CHURN_RATE_NOT_MET`), and reports `n_total` vs `n_valid` per combination
-(PL15). All four output formats (`text`, `csv`, `json`, `md`) propagate the
-preamble metadata (PL19). The report's headline column order is (A7):
+`CHURN_RATE_NOT_MET`), and reports `total_runs` vs `valid_runs` per
+combination (PL15). All four output formats (`text`, `csv`, `json`, `md`)
+propagate the preamble metadata (PL19). The report's headline column order
+is (A7):
 
 ```
-mesh_size | churn_rate | Δp99_ms (endpoint-churn) | n_total | n_valid |
-baseline_p99 | churn_p99 | baseline_p50 | churn_p50 | baseline_qps | churn_qps
+mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs |
+baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps |
+churn_eds_pushes | churn_convergence_p99
 ```
 
 ### Manual baseline/churn pairing via combo_id
@@ -248,9 +274,9 @@ hitting an in-flight namespace teardown (PL4).
 | Script | Purpose |
 |--------|---------|
 | `001-setup-coexec-test.sh` | Render+apply the composite chart on every active context (server-side apply, PL5). `--dry-run` does not touch clusters. |
-| `002-run-baseline-probe.sh` | Run one fortio measurement window with NO churn; emit `phase=baseline` TSV row. |
-| `003-run-churn-probe.sh` | Run one fortio measurement window while the churn driver runs concurrently; emit `phase=churn` TSV row plus `delta_p99_ms`. |
-| `004-run-sweep.sh` | Orchestrate `001 → 002 → 003 → 006 → settle` across mesh_size × churn_rate combos; PL6 per-sweep dir, PL10 matrix cap. |
+| `002-run-baseline-probe.sh` | Run one fortio measurement window with NO churn; emit `phase=baseline` TSV row with istiod metrics. |
+| `003-run-churn-probe.sh` | Run one fortio measurement window while the churn driver runs concurrently; emit `phase=churn` TSV row with istiod metrics plus `delta_p99_ms`. |
+| `004-run-sweep.sh` | Orchestrate `001 → 002 → 003 → 006 → settle` across mesh_size × churn_rate × repetitions combos; PL6 per-sweep dir, PL10 matrix cap. |
 | `005-report-results.sh` | Aggregate joined baseline+churn pairs by combo_id, filter poisoned rows, emit text/csv/json/md. |
 | `006-cleanup.sh` | Tear down the shared namespace; `--wait-deletion` for PL4 synchronous semantics. |
 
@@ -267,6 +293,7 @@ hitting an in-flight namespace teardown (PL4).
 | `COEXEC_QPS` | `200` | Target QPS for both phases. |
 | `COEXEC_NUM_CONNECTIONS` | `8` | Fortio `-c`. |
 | `COEXEC_CHURN_SEED` | `42` | PL16 deterministic-shuffle seed. |
+| `COEXEC_REPETITIONS` | `1` | Probe repetitions per combination in `004-run-sweep.sh`. |
 | `COEXEC_ISTIOD_PF_PORT` | `15014` | Local port for istiod scrapes. |
 | `COEXEC_NS_DELETE_TIMEOUT_SEC` | `180` | PL4 wait bound. |
 | `COEXEC_SERVICE_PORT` | `8080` | Fortio target port. |
@@ -287,10 +314,10 @@ Shared from `config/versions.env`: `SETUP_CONTEXTS`, `ISTIO_VERSION`.
 | PL8 (concurrent multi-context scrapes) | APPLIED in `probe_kube_versions`. |
 | PL9 (istiod restart 0/1/unknown) | APPLIED via `process_start_time_seconds` delta. |
 | PL10 (matrix safety cap 64) | APPLIED — `--force-large-matrix` bypass. |
-| PL11 (histograms as histograms) | N/A — fortio reports its own quantiles in JSON; no raw histogram scrape needed for this suite. |
+| PL11 (histograms as histograms) | APPLIED — istiod-side histograms (`pilot_proxy_convergence_time`, `pilot_proxy_queue_time`, `pilot_xds_push_time`) are scraped as raw buckets and quantiles computed via delta-window interpolation in `lib/metrics.sh`. |
 | PL12 (gauge sum across permutations) | N/A — no gauge aggregation in this suite (fortio is the source of truth for latency). |
 | PL13 (poisoned rows when restarted != 0) | APPLIED — quantiles emit `N/A`, status `POISONED_RESTART`. |
-| PL14 (negative histogram bucket delta -> N/A) | N/A — no bucket deltas here. |
+| PL14 (negative histogram bucket delta -> N/A) | APPLIED — `delta_histogram_p99` in `lib/metrics.sh` emits `N/A` when any per-bucket delta is negative. |
 | PL15 (005 filters poisoned; reports n_total/n_valid) | APPLIED. |
 | PL16 (deterministic seeded shuffle, no `shuf`) | APPLIED — awk-LCG in `003-run-churn-probe.sh`. |
 | PL17 (sample count as got/attempted) | APPLIED implicitly — `n_total` vs `n_valid` in 005. |
@@ -298,5 +325,5 @@ Shared from `config/versions.env`: `SETUP_CONTEXTS`, `ISTIO_VERSION`.
 | PL19 (005 propagates ALL preamble metadata to ALL formats) | APPLIED — text, csv, json, md. |
 | PL20 (Δ accounts for multi-push semantics) | N/A — this suite does not use EDS push-count thresholds for convergence detection; it measures fortio latency directly. Δp99 is computed only across baseline/churn rows that share `combo_id` and are both valid (PL15 join). |
 | PL21 (gauges from SAME baseline scrape) | APPLIED — single scrape per `istiod_start_time_seconds` call, single awk pass. |
-| PL22 (single-file scrape, single awk pass) | APPLIED — `istiod_start_time_seconds` writes once, awks once. |
+| PL22 (single-file scrape, single awk pass) | APPLIED — `scrape_istiod_metrics` in `lib/metrics.sh` writes once to temp file; `extract_gauge`, `extract_counter_sum`, `extract_counter_by_label`, and `delta_histogram_p99` each awk-pass the same file. |
 | PL23 (drain/cleanup timeout -> row status) | APPLIED — sweep emits a `phase=cleanup status=CLEANUP_TIMEOUT` row when 006 fails. |

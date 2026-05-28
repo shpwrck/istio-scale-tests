@@ -33,6 +33,7 @@ CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-10}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
 CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-3}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
+REPETITIONS="${COEXEC_REPETITIONS:-1}"
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-180}"
 MATRIX_CAP=64
@@ -58,6 +59,7 @@ Usage: $(basename "$0") [options]
   --base-replicas N         Scale-down replica count (default: $CHURN_BASE_REPLICAS_OPT).
   --scale-to N              Scale-up replica count (default: $CHURN_SCALE_TO_OPT).
   --seed N                  Seed for the deterministic churn order (default: $CHURN_SEED).
+  --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
   --output-dir DIR          Top-level results directory (default: tests/churn-dataplane/results).
   --ns-delete-timeout SEC   Bound on async namespace teardown wait (default: $NS_DELETE_TIMEOUT_SEC).
   --force-large-matrix      Bypass the PL10 matrix cap of $MATRIX_CAP combinations.
@@ -72,7 +74,7 @@ rejected.
 Environment:
   SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
-  COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED,
+  COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
   COEXEC_NS_DELETE_TIMEOUT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   CHURN_SCALE_TO_REPLICAS.
 EOF
@@ -126,6 +128,11 @@ while [[ $# -gt 0 ]]; do
 	--seed)
 		[[ -n "${2:-}" ]] || die "--seed requires a value"
 		CHURN_SEED="$2"; shift 2 ;;
+	--repetitions)
+		[[ -n "${2:-}" ]] || die "--repetitions requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--repetitions must be a positive integer"
+		(( $2 > 0 )) || die "--repetitions must be > 0"
+		REPETITIONS="$2"; shift 2 ;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"; shift 2 ;;
@@ -175,7 +182,7 @@ for cr in "${CHURN_RATES[@]}"; do
 done
 
 # PL10: matrix cap.
-MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#CHURN_RATES[@]} ))
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#CHURN_RATES[@]} * REPETITIONS ))
 if (( MATRIX_SIZE > MATRIX_CAP )); then
 	if ((FORCE_LARGE_MATRIX)); then
 		echo "warn: matrix is ${MATRIX_SIZE} combinations (> $MATRIX_CAP); --force-large-matrix set, proceeding" >&2
@@ -188,7 +195,7 @@ fi
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${RUN_ID}"
 mkdir -p "$SWEEP_DIR"
-TSV_FILE="${SWEEP_DIR}/coexec-${RUN_ID}.tsv"
+TSV_FILE="${SWEEP_DIR}/churn-dataplane-${RUN_ID}.tsv"
 HARNESS_SHA="$(harness_sha)"
 
 echo "=========================================="
@@ -197,6 +204,7 @@ echo "=========================================="
 echo "Contexts:       ${CONTEXTS[*]}"
 echo "Mesh sizes:     ${MESH_SIZES[*]}"
 echo "Churn rates:    ${CHURN_RATES[*]} (ops/s)"
+echo "Repetitions:    ${REPETITIONS}"
 echo "Matrix:         ${MATRIX_SIZE} combinations"
 echo "Baseline dur:   ${BASELINE_DURATION}s | Churn dur: ${CHURN_DURATION}s"
 echo "Settle:         ${SETTLE_SEC}s | Inter-combo: ${INTER_COMBO_SETTLE_SEC}s"
@@ -230,8 +238,9 @@ if ! ((DRY_RUN)); then
 		"QPS=$QPS" \
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" \
-		"MATRIX_SIZE=$MATRIX_SIZE"
-	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\n' >> "$TSV_FILE"
+		"MATRIX_SIZE=$MATRIX_SIZE" \
+		"REPETITIONS=$REPETITIONS"
+	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
 COMBO_INDEX=0
@@ -248,11 +257,16 @@ for ms in "${MESH_SIZES[@]}"; do
 	active_csv="$(IFS=,; echo "${active_ctxs[*]}")"
 
 	for cr in "${CHURN_RATES[@]}"; do
+		for ((rep = 1; rep <= REPETITIONS; rep++)); do
 		COMBO_INDEX=$((COMBO_INDEX + 1))
-		COMBO_ID="ms${ms}-cr${cr}"
+		if (( REPETITIONS > 1 )); then
+			COMBO_ID="ms${ms}-cr${cr}-r${rep}"
+		else
+			COMBO_ID="ms${ms}-cr${cr}"
+		fi
 
 		echo "=========================================="
-		echo "[combo $COMBO_INDEX/$MATRIX_SIZE] $COMBO_ID  ctxs=${active_csv}  rate=${cr}/s"
+		echo "[combo $COMBO_INDEX/$MATRIX_SIZE] $COMBO_ID  rep=$rep/$REPETITIONS  ctxs=${active_csv}  rate=${cr}/s"
 		echo "=========================================="
 
 		if ((DRY_RUN)); then
@@ -317,12 +331,13 @@ for ms in "${MESH_SIZES[@]}"; do
 		"$SCRIPT_DIR/006-cleanup.sh" "${cleanup_args[@]}" || {
 			echo "warn: cleanup reported failure; recording row status to keep next combo isolated" >&2
 			# PL23: propagate cleanup timeout into the TSV instead of polluting next combo.
-			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 				"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$ms" "$cr" "cleanup" \
 				"0" "0" "0" \
 				"N/A" "N/A" "N/A" "N/A" "N/A" \
 				"N/A" "unknown" "CLEANUP_TIMEOUT" \
-				"N/A" "N/A" >> "$TSV_FILE"
+				"N/A" "N/A" \
+				"N/A" "N/A" "N/A" "N/A" "N/A" "N/A" >> "$TSV_FILE"
 		}
 
 		# PL18: settle gap before next combo.
@@ -330,6 +345,7 @@ for ms in "${MESH_SIZES[@]}"; do
 			echo "Inter-combo settle ${INTER_COMBO_SETTLE_SEC}s..."
 			sleep "$INTER_COMBO_SETTLE_SEC"
 		fi
+		done
 	done
 done
 
@@ -343,6 +359,6 @@ echo "Sweep complete: $TSV_FILE"
 echo "Running 005-report-results.sh..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR"
 
-MD_FILE="${SWEEP_DIR}/coexec-${RUN_ID}.md"
+MD_FILE="${SWEEP_DIR}/sweep-summary-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format md > "$MD_FILE"
 echo "Markdown summary: $MD_FILE"
