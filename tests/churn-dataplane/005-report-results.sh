@@ -54,8 +54,8 @@ done
 
 # Recurse into sweep-* subdirs as well.
 TSV_FILES=()
-while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find "$RESULTS_DIR" -name 'coexec-*.tsv' -type f 2>/dev/null | sort)
-((${#TSV_FILES[@]})) || die "no coexec-*.tsv files in $RESULTS_DIR"
+while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find "$RESULTS_DIR" \( -name 'churn-dataplane-*.tsv' -o -name 'coexec-*.tsv' \) -type f 2>/dev/null | sort)
+((${#TSV_FILES[@]})) || die "no churn-dataplane-*.tsv files in $RESULTS_DIR"
 
 # Extract preamble metadata from the FIRST file (sweeps emit one preamble per file).
 extract_preamble_kv() {
@@ -99,28 +99,39 @@ NAMESPACE_STR="$(extract_preamble_kv NAMESPACE)"
 # from baseline+churn pairs that share combo_id. Emit a single TSV stream that
 # downstream formatters can render. Column order (A7 — Δp99 immediately after
 # the keys, then validity counts, then the underlying numbers):
-#   mesh_size  churn_rate  delta_p99  n_total  n_valid  baseline_p99  churn_p99  baseline_p50  churn_p50  baseline_qps  churn_qps
-# A6: schema header is "Δp99_ms (endpoint-churn)" — this suite measures
-# endpoint-churn only (deployment scale -> EDS pushes), not CDS/LDS/sidecar
-# restarts.
+#   mesh_size  churn_rate  delta_p99_ms  stdev_delta_p99  total_runs  valid_runs
+#   baseline_p99_ms  churn_p99_ms  baseline_p50_ms  churn_p50_ms
+#   baseline_qps  churn_qps  churn_eds_pushes  churn_convergence_p99
 aggregate() {
 	awk -F'\t' '
-	function is_valid_row(restarted, status,    bad) {
-		# PL15: filter restarted=1, restarted=unknown, and any non-OK status.
-		# A4 (CHURN_RATE_NOT_MET): driver could not keep up; the latency
-		# numbers might be honest but the rate label is a lie, so filter.
+	function is_valid_row(restarted, status) {
 		if (status != "OK") return 0
 		if (restarted == "1" || restarted == "unknown") return 0
 		return 1
 	}
-	function is_num(x) { return (x != "N/A" && x != "" && x + 0 == x) }
-	function safe_num(x) { return (is_num(x)) ? x + 0 : 0 }
+	function is_num(x) { return (x != "N/A" && x != "" && x != "overflow" && x != "unknown" && x + 0 == x) }
+	function bucket_range(upper_ms) {
+		if (upper_ms == "N/A" || upper_ms == "overflow" || upper_ms == "") return upper_ms
+		if (upper_ms+0 <= 0)     return "N/A"
+		if (upper_ms+0 <= 100)   return "0-100ms"
+		if (upper_ms+0 <= 500)   return "100-500ms"
+		if (upper_ms+0 <= 1000)  return "500-1000ms"
+		if (upper_ms+0 <= 3000)  return "1000-3000ms"
+		if (upper_ms+0 <= 5000)  return "3000-5000ms"
+		if (upper_ms+0 <= 10000) return "5000-10000ms"
+		if (upper_ms+0 <= 20000) return "10000-20000ms"
+		if (upper_ms+0 <= 30000) return "20000-30000ms"
+		return ">30000ms"
+	}
 
-	# Header line skipped; comments skipped. NF guard accepts both the
-	# legacy 17-col schema and the new 19-col schema (A4 added two columns).
 	!/^#/ && !/^run_id/ && NF >= 17 {
 		combo = $3; ms = $4; cr = $5; phase = $6
 		qps_actual = $9; p50 = $10; p99 = $12; restarted = $16; status = $17
+
+		# istiod-side metrics (columns 20-25, present when NF >= 25).
+		xds_pushes = (NF >= 20) ? $20 : "N/A"
+		eds_pushes = (NF >= 21) ? $21 : "N/A"
+		conv_p99   = (NF >= 23) ? $23 : "N/A"
 
 		valid = is_valid_row(restarted, status)
 		if (phase == "baseline") {
@@ -141,58 +152,65 @@ aggregate() {
 				ch_p50[combo] = is_num(p50) ? p50 + 0 : "N/A"
 				ch_p99[combo] = is_num(p99) ? p99 + 0 : "N/A"
 				ch_qps[combo] = is_num(qps_actual) ? qps_actual + 0 : "N/A"
+				ch_eds[combo] = is_num(eds_pushes) ? eds_pushes + 0 : "N/A"
+				ch_conv[combo] = is_num(conv_p99) ? conv_p99 + 0 : "N/A"
 			}
 		}
-		# Ignore other phases (e.g. "cleanup") for percentile aggregation.
 	}
 	END {
-		# Build per-(mesh_size, churn_rate) totals: every combo with at least one
-		# of {baseline, churn} rows counts toward n_total for that (ms, cr).
 		for (combo in ch_seen) {
 			rk = ch_ms[combo] "\t" ch_cr[combo]
 			total[rk]++
 		}
-		# Edge case: baseline-only combos with no churn row still need a slot.
-		# Match them to a churn_rate=0 bucket so they are reported but as 0 valid.
 		for (combo in bl_seen) {
 			if (combo in ch_seen) continue
 			rk = bl_ms[combo] "\t0"
 			total[rk]++
 		}
 
-		# Join on combo_id: both phases must be present, both valid, and
-		# both p99 values must be numeric (not N/A from absent percentiles).
 		for (combo in bl_seen) {
 			if (bl_status[combo] != "ok") continue
 			if (!(combo in ch_seen) || ch_status[combo] != "ok") continue
 			if (bl_p99[combo] == "N/A" || ch_p99[combo] == "N/A") continue
 			rk = ch_ms[combo] "\t" ch_cr[combo]
-			n_valid[rk]++
+			nv = ++n_valid[rk]
+
+			dp99 = ch_p99[combo] - bl_p99[combo]
+			s_dp99[rk] += dp99
+
+			# Welford online variance for delta_p99.
+			old_mean = mean_dp99[rk]
+			mean_dp99[rk] += (dp99 - old_mean) / nv
+			m2_dp99[rk] += (dp99 - old_mean) * (dp99 - mean_dp99[rk])
+
 			s_bp50[rk] += (bl_p50[combo] == "N/A" ? 0 : bl_p50[combo])
 			s_bp99[rk] += bl_p99[combo]
 			s_cp50[rk] += (ch_p50[combo] == "N/A" ? 0 : ch_p50[combo])
 			s_cp99[rk] += ch_p99[combo]
-			s_dp99[rk] += (ch_p99[combo] - bl_p99[combo])
 			s_bqps[rk] += (bl_qps[combo] == "N/A" ? 0 : bl_qps[combo])
 			s_cqps[rk] += (ch_qps[combo] == "N/A" ? 0 : ch_qps[combo])
+
+			if (ch_eds[combo] != "N/A") { s_ceds[rk] += ch_eds[combo]; n_ceds[rk]++ }
+			if (ch_conv[combo] != "N/A") { s_cconv[rk] += ch_conv[combo]; n_cconv[rk]++ }
 		}
 
-		# A7: emit columns with delta_p99 right after the keys.
-		# mesh_size  churn_rate  delta_p99  n_total  n_valid
-		#   baseline_p99  churn_p99  baseline_p50  churn_p50  baseline_qps  churn_qps
 		for (rk in total) {
 			tot_pairs = total[rk]
 			nv = (rk in n_valid) ? n_valid[rk] : 0
 			if (nv > 0) {
-				printf "%s\t%.2f\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n",
+				stdev = (nv >= 2) ? sprintf("%.2f", sqrt(m2_dp99[rk] / (nv - 1))) : "N/A"
+				ch_eds_avg = (rk in n_ceds && n_ceds[rk] > 0) ? sprintf("%.0f", s_ceds[rk]/n_ceds[rk]) : "N/A"
+				ch_conv_avg = (rk in n_cconv && n_cconv[rk] > 0) ? bucket_range(s_cconv[rk]/n_cconv[rk]) : "N/A"
+				printf "%s\t%.2f\t%s\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
 					rk,
-					s_dp99[rk]/nv,
+					s_dp99[rk]/nv, stdev,
 					tot_pairs, nv,
 					s_bp99[rk]/nv, s_cp99[rk]/nv,
 					s_bp50[rk]/nv, s_cp50[rk]/nv,
-					s_bqps[rk]/nv, s_cqps[rk]/nv
+					s_bqps[rk]/nv, s_cqps[rk]/nv,
+					ch_eds_avg, ch_conv_avg
 			} else {
-				printf "%s\tN/A\t%d\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\n", rk, tot_pairs
+				printf "%s\tN/A\tN/A\t%d\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\n", rk, tot_pairs
 			}
 		}
 	}' "${TSV_FILES[@]}" | sort -k1,1n -k2,2n
@@ -214,40 +232,38 @@ emit_metadata_lines() {
 }
 
 report_text() {
-	echo "=== churn-dataplane co-exec summary ==="
+	echo "=== sweep-summary ==="
 	emit_metadata_lines "#"
 	echo ""
-	# A7: column order is mesh_size, churn_rate, Δp99 (endpoint-churn),
-	# n_total, n_valid, baseline_p99, churn_p99, baseline_p50, churn_p50,
-	# baseline_qps, churn_qps.
-	printf '  %-9s | %-9s | %14s | %-8s | %-8s | %10s | %10s | %10s | %10s | %10s | %10s\n' \
-		"mesh_size" "churn_rate" "Δp99_ms (ec)" "n_total" "n_valid" \
-		"bl_p99_ms" "ch_p99_ms" "bl_p50_ms" "ch_p50_ms" "bl_qps" "ch_qps"
-	printf '  %-9s-+-%-9s-+-%14s-+-%-8s-+-%-8s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s\n' \
-		"---------" "---------" "--------------" "--------" "--------" \
-		"----------" "----------" "----------" "----------" "----------" "----------"
+	printf '  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %22s\n' \
+		"mesh_size" "churn_rate" "delta_p99_ms" "stdev_delta_p99" "total_runs" "valid_runs" \
+		"baseline_p99_ms" "churn_p99_ms" "baseline_p50_ms" "churn_p50_ms" "baseline_qps" "churn_qps" \
+		"churn_eds_pushes" "churn_convergence_p99"
+	printf '  %-9s-+-%-10s-+-%14s-+-%15s-+-%-10s-+-%-10s-+-%15s-+-%15s-+-%15s-+-%15s-+-%12s-+-%12s-+-%18s-+-%22s\n' \
+		"---------" "----------" "--------------" "---------------" "----------" "----------" \
+		"---------------" "---------------" "---------------" "---------------" "------------" "------------" \
+		"------------------" "----------------------"
 	aggregate | awk -F'\t' '{
-		printf "  %-9s | %-9s | %14s | %-8s | %-8s | %10s | %10s | %10s | %10s | %10s | %10s\n", \
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+		printf "  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %22s\n", \
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 	}'
 }
 
 report_csv() {
 	emit_metadata_lines "#"
-	echo "mesh_size,churn_rate,delta_p99_ms,n_total,n_valid,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps_actual,churn_qps_actual"
-	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }'
+	echo "mesh_size,churn_rate,delta_p99_ms,stdev_delta_p99,total_runs,valid_runs,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps,churn_qps,churn_eds_pushes,churn_convergence_p99"
+	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14 }'
 }
 
 report_json() {
-	# Construct a JSON object with metadata + rows. A7 ordering.
 	local rows
 	rows="$(aggregate | awk -F'\t' '
 		BEGIN { first=1; printf "[" }
 		{
 			if (!first) printf ",";
 			first=0
-			printf "{\"mesh_size\":%s,\"churn_rate\":%s,\"delta_p99_ms\":\"%s\",\"n_total\":%s,\"n_valid\":%s,\"baseline_p99_ms\":\"%s\",\"churn_p99_ms\":\"%s\",\"baseline_p50_ms\":\"%s\",\"churn_p50_ms\":\"%s\",\"baseline_qps_actual\":\"%s\",\"churn_qps_actual\":\"%s\"}",
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+			printf "{\"mesh_size\":%s,\"churn_rate\":%s,\"delta_p99_ms\":\"%s\",\"stdev_delta_p99\":\"%s\",\"total_runs\":%s,\"valid_runs\":%s,\"baseline_p99_ms\":\"%s\",\"churn_p99_ms\":\"%s\",\"baseline_p50_ms\":\"%s\",\"churn_p50_ms\":\"%s\",\"baseline_qps\":\"%s\",\"churn_qps\":\"%s\",\"churn_eds_pushes\":\"%s\",\"churn_convergence_p99\":\"%s\"}",
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
 		}
 		END { printf "]" }')"
 	jq -n \
@@ -266,7 +282,7 @@ report_json() {
 }
 
 report_md() {
-	echo "# churn-dataplane co-exec summary"
+	echo "# sweep-summary"
 	echo ""
 	echo "| Field | Value |"
 	echo "|-------|-------|"
@@ -281,11 +297,10 @@ report_md() {
 	echo "| CONNECTIONS | ${CONNECTIONS_STR:-unknown} |"
 	echo "| NAMESPACE | \`${NAMESPACE_STR:-unknown}\` |"
 	echo ""
-	# A7: Δp99 immediately after keys. A6: "(endpoint-churn)" qualifier.
-	echo "| mesh_size | churn_rate | Δp99_ms (endpoint-churn) | n_total | n_valid | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps |"
-	echo "|-----------|------------|--------------------------|---------|---------|-----------------|--------------|-----------------|--------------|--------------|-----------|"
+	echo "| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 |"
+	echo "|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|------------------------|"
 	aggregate | awk -F'\t' '{
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
 	}'
 }
 
