@@ -234,8 +234,9 @@ get_histogram_p99() {
 	local port="$1" name="$2"
 	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="${name}_bucket" -v q="0.99" '
 	$0 ~ name && /le="/ {
-		gsub(/.*le="/,""); gsub(/".*/,""); le=$0
-		gsub(/.*} /,""); count=$0+0
+		line = $0
+		sub(/.*le="/, "", line); sub(/".*/, "", line); le = line
+		count = $NF + 0
 		buckets[++n] = le " " count
 	}
 	END {
@@ -248,6 +249,21 @@ get_histogram_p99() {
 		}
 		print "N/A"
 	}'
+}
+
+bucket_range() {
+	local v="${1:-0}"
+	[[ "$v" == "N/A" ]] && { echo "N/A"; return; }
+	(( v <= 0 ))     && { echo "N/A"; return; }
+	(( v <= 100 ))   && { echo "0-100"; return; }
+	(( v <= 500 ))   && { echo "100-500"; return; }
+	(( v <= 1000 ))  && { echo "500-1000"; return; }
+	(( v <= 3000 ))  && { echo "1000-3000"; return; }
+	(( v <= 5000 ))  && { echo "3000-5000"; return; }
+	(( v <= 10000 )) && { echo "5000-10000"; return; }
+	(( v <= 20000 )) && { echo "10000-20000"; return; }
+	(( v <= 30000 )) && { echo "20000-30000"; return; }
+	echo ">30000"
 }
 
 poll_syncz_converged() {
@@ -378,7 +394,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	pushes_delta=$((post_pushes - pre_pushes))
 	queue_p99=$(get_histogram_p99 "$BASE_PF_PORT" "pilot_proxy_queue_time")
 
-	echo "  Push triggers delta: $triggers_delta  xDS pushes delta: $pushes_delta  Queue p99: ${queue_p99}ms"
+	echo "  Push triggers delta: $triggers_delta  xDS pushes delta: $pushes_delta  Queue p99: $(bucket_range "$queue_p99")ms"
 
 	status="OK"
 	[[ "$conv_local" == "TIMEOUT" ]] && status="TIMEOUT_LOCAL"
@@ -425,8 +441,21 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo ""
 	echo "| Iteration | Local (ms) | Remote (ms) | Push Triggers | xDS Pushes | Queue p99 (ms) | Status |"
 	echo "|-----------|------------|-------------|---------------|------------|----------------|--------|"
-	awk -F'\t' '!/^#/ && !/^run_id/ && NF>=11 {
-		printf "| %s | %s | %s | %s | %s | %s | %s |\n", $4, $6, $7, $8, $9, $10, $11
+	awk -F'\t' '
+	function bucket_range(upper_ms) {
+		if (upper_ms+0 <= 0)     return "N/A"
+		if (upper_ms+0 <= 100)   return "0-100"
+		if (upper_ms+0 <= 500)   return "100-500"
+		if (upper_ms+0 <= 1000)  return "500-1000"
+		if (upper_ms+0 <= 3000)  return "1000-3000"
+		if (upper_ms+0 <= 5000)  return "3000-5000"
+		if (upper_ms+0 <= 10000) return "5000-10000"
+		if (upper_ms+0 <= 20000) return "10000-20000"
+		if (upper_ms+0 <= 30000) return "20000-30000"
+		return ">30000"
+	}
+	!/^#/ && !/^run_id/ && NF>=11 {
+		printf "| %s | %s | %s | %s | %s | %s | %s |\n", $4, $6, $7, $8, $9, bucket_range($10), $11
 	}' "$TSV_FILE"
 	echo ""
 	echo "## Raw Data"

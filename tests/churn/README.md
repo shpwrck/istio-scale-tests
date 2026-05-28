@@ -10,7 +10,7 @@ Measure control-plane convergence time under simultaneous endpoint churn across 
 | Remote convergence time | Time until remote sidecars see updated endpoint counts (poll watcher Envoy `/clusters`) |
 | Push triggers delta | `pilot_push_triggers` change during churn event |
 | xDS pushes delta | `pilot_xds_pushes` change during churn event (compare with triggers for coalescing ratio) |
-| Queue time p99 | `pilot_proxy_queue_time` p99 after churn — how backed up the push queue gets |
+| Queue time p99 | `pilot_proxy_queue_time` p99 after churn — reported as a bucket range (e.g. `0-100`) since the value is a Prometheus histogram upper bound (boundaries: 100, 500, 1000, 3000, 5000, 10000, 20000, 30000 ms) |
 
 ## Prerequisites
 
