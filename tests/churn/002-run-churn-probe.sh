@@ -245,7 +245,7 @@ get_counter() {
 
 get_gauge() {
 	local port="$1" name="$2"
-	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
+	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}(\\{| )" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
 }
 
 scrape_histogram() {
