@@ -149,7 +149,7 @@ is_nonneg_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a non-negative inte
 validate_scoping "$SIDECAR_SCOPING"
 
 if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
-	echo "warning: --namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces will be empty" >&2
+	die "--namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces would be empty. Reduce --namespace-count to at most --service-count."
 fi
 
 if command -v oc >/dev/null 2>&1; then
