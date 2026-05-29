@@ -47,6 +47,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/timestamp.sh"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -67,44 +71,6 @@ BASE_PF_PORT=15014
 BASE_ENVOY_PF_PORT=15100
 CHART_DIR="${ROOT}/tests/propagation/chart"
 
-die() { echo "error: $*" >&2; exit 1; }
-
-# Portable nanosecond / millisecond timestamps. macOS BSD `date` does not
-# support `%N`, so we detect the best available source once and cache it.
-NOW_NS_IMPL=""
-_detect_now_ns() {
-	[[ -n "$NOW_NS_IMPL" ]] && return
-	if [[ "$(date -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_NS_IMPL="date"
-	elif command -v gdate >/dev/null 2>&1 \
-		&& [[ "$(gdate -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_NS_IMPL="gdate"
-	elif command -v python3 >/dev/null 2>&1; then
-		NOW_NS_IMPL="python3"
-	elif command -v perl >/dev/null 2>&1; then
-		NOW_NS_IMPL="perl"
-	else
-		die "no nanosecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
-	fi
-}
-now_ns() {
-	_detect_now_ns
-	case "$NOW_NS_IMPL" in
-	date)    date -u +%s%N ;;
-	gdate)   gdate -u +%s%N ;;
-	python3) python3 -c 'import time; print(int(time.time()*1e9))' ;;
-	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1e9' ;;
-	esac
-}
-now_ms() {
-	_detect_now_ns
-	case "$NOW_NS_IMPL" in
-	date)    echo $(( $(date -u +%s%N) / 1000000 )) ;;
-	gdate)   gdate -u +%s%3N ;;
-	python3) python3 -c 'import time; print(int(time.time()*1000))' ;;
-	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1000' ;;
-	esac
-}
 
 usage() {
 	cat <<EOF
@@ -161,18 +127,6 @@ Environment:
 EOF
 }
 
-split_csv() {
-	local csv="$1"
-	local -n _out="$2"
-	_out=()
-	local x
-	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
-		x="${x#"${x%%[![:space:]]*}"}"
-		x="${x%"${x##*[![:space:]]}"}"
-		[[ -n "$x" ]] && _out+=("$x")
-	done
-}
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
