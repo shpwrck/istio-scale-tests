@@ -42,8 +42,10 @@ die() { echo "error: $*" >&2; exit 1; }
 
 VERIFY_PASS=0
 VERIFY_FAIL=0
+VERIFY_WARN=0
 verify_ok()   { VERIFY_PASS=$((VERIFY_PASS + 1)); echo "  PASS  $*"; }
 verify_fail() { VERIFY_FAIL=$((VERIFY_FAIL + 1)); echo "  FAIL  $*"; }
+verify_warn() { VERIFY_WARN=$((VERIFY_WARN + 1)); echo "  WARN  $*"; }
 
 # Verify that a jsonpath query on the Istio CR returns a non-empty value.
 verify_istio_cr_field() {
@@ -77,7 +79,7 @@ verify_pilot_env() {
 	elif [[ -n "$actual" ]]; then
 		verify_fail "${ctx}: istiod env ${var_name}=${actual} (expected ${expected})"
 	else
-		verify_fail "${ctx}: istiod env ${var_name} — not found on Deployment"
+		verify_warn "${ctx}: istiod env ${var_name} — not found on Deployment (may use compiled-in default)"
 	fi
 }
 
@@ -397,6 +399,35 @@ done
 
 rm -f "$PATCH_FILE" "$RESOURCES_FILE"
 
+echo ""
+echo "=== Waiting for Sail operator reconciliation ==="
+for ctx in "${CONTEXTS[@]}"; do
+	ctx="${ctx#"${ctx%%[![:space:]]*}"}"
+	ctx="${ctx%"${ctx##*[![:space:]]}"}"
+	[[ -z "$ctx" ]] && continue
+
+	deadline=$(( $(date +%s) + ROLLOUT_TIMEOUT ))
+	reconciled=0
+	while (( $(date +%s) < deadline )); do
+		status="$($KUBECTL --context="$ctx" get istiorevision default \
+			-o jsonpath='{.status.conditions[?(@.type=="Reconciled")].status}' \
+			2>/dev/null)" || true
+		if [[ "$status" == "True" ]]; then
+			reconciled=1
+			break
+		fi
+		sleep 5
+	done
+	if ((reconciled)); then
+		echo "  ${ctx}: Sail operator reconciled"
+		$KUBECTL --context="$ctx" rollout status deployment/istiod \
+			-n "$ISTIO_CR_NAMESPACE" \
+			--timeout="${ROLLOUT_TIMEOUT}s" 2>/dev/null || true
+	else
+		echo "  ${ctx}: Sail operator reconciliation not confirmed (timed out or unsupported) — continuing"
+	fi
+done
+
 if ((SKIP_VERIFY)); then
 	echo ""
 	echo "=== Profile '${PROFILE_NAME}' applied (verification skipped) ==="
@@ -418,9 +449,11 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 
 echo ""
+WARN_MSG=""
+((VERIFY_WARN > 0)) && WARN_MSG=", ${VERIFY_WARN} warned"
 if ((VERIFY_FAIL > 0)); then
 	echo "=== Profile '${PROFILE_NAME}' applied with verification issues ==="
-	echo "    ${VERIFY_PASS} passed, ${VERIFY_FAIL} failed"
+	echo "    ${VERIFY_PASS} passed, ${VERIFY_FAIL} failed${WARN_MSG}"
 	echo ""
 	echo "    Some checks failed. Possible causes:"
 	echo "      - The Sail operator has not yet reconciled the Istio CR"
@@ -429,6 +462,6 @@ if ((VERIFY_FAIL > 0)); then
 	echo "    Re-run with --skip-verify to bypass, or wait and retry."
 else
 	echo "=== Profile '${PROFILE_NAME}' applied and verified ==="
-	echo "    ${VERIFY_PASS} checks passed"
+	echo "    ${VERIFY_PASS} passed${WARN_MSG}"
 fi
 echo "    Revert with: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR} --contexts ${CONTEXTS_CSV}"

@@ -12,6 +12,11 @@
 #   - Proxy memory from 100+ MB down to 20-30 MB
 #   - Proportional reduction in xDS push payload and push time
 #
+# NOTE: Applying this profile triggers a full xDS re-push to every proxy.
+# istiod memory will spike during reconciliation and may read higher than
+# baseline on short measurement windows (≤60s). Use a settle period of at
+# least 120s after apply before measuring to capture the steady-state benefit.
+#
 # Relevant test suites: controlplane, propagation
 #
 # References:

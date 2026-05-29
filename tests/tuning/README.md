@@ -42,7 +42,7 @@ Each profile is a YAML file under `profiles/` containing:
 | 01 | sidecar-scoping | 1 | **Supported** | Sidecar CR in root namespace | 80-95% proxy config size reduction |
 | 02 | discovery-selectors | 1 | **Supported** | meshConfig.discoverySelectors | istiod ignores non-mesh namespaces |
 | 03 | push-throttling | 1 | **Configurable** | PILOT_DEBOUNCE_*, PILOT_PUSH_THROTTLE | Fewer push storms, lower CPU |
-| 04 | istiod-resources | 1 | **Supported** (resources) / **Configurable** (GOMEMLIMIT) | pilot resources + GOMEMLIMIT | Prevents OOM, faster pushes |
+| 04 | istiod-resources | 1 | **Supported** | pilot resources (GOMEMLIMIT auto-derived) | Prevents OOM, faster pushes |
 | 05 | proxy-resources | 1 | **Supported** | global.proxy.resources | Eliminates sidecar CPU throttling |
 | 06 | xds-cache-tuning | 2 | **Configurable** | Disable CDS/RDS cache | Lower propagation delay (CPU tradeoff) |
 | 07 | telemetry-filtering | 2 | **Supported** | Telemetry API metric overrides | 40-50% metric volume reduction |
@@ -52,8 +52,6 @@ Each profile is a YAML file under `profiles/` containing:
 | 11 | traffic-exclusions | 3 | **Supported** | proxy.excludeOutboundPorts | Bypass proxy for DB/cache ports |
 | 12 | connection-pools | 3 | **Supported** | DestinationRule connection pool | Circuit breaking + load distribution |
 | 13 | dns-proxy | 3 | **Supported** | DNS capture + auto-allocate | Reduced CoreDNS pressure |
-| 14 | ambient-mode | 4 | **Not supported (multicluster)** | ztunnel + waypoint proxies | 70% less CPU, 80% less memory |
-| 15 | ebpf-interception | 4 | **Not supported (external)** | Merbridge eBPF DaemonSet | 11-17% latency reduction |
 
 ### Profiles Using Undocumented Pilot Env Vars (Configurable)
 
@@ -75,24 +73,12 @@ What this means in practice:
   stability issues (#29131, #37997, #44439). This is the highest-risk profile
   in the configurable set.
 
-**04-istiod-resources** is mostly GA (pilot resources are fully documented).
-The `GOMEMLIMIT` env var is auto-derived from `limits.memory` in upstream
-Istio's Helm chart via a `resourceFieldRef`, so setting explicit memory limits
-is sufficient — the manual `GOMEMLIMIT` override is not strictly necessary.
-
-### Profiles Outside OSSM Support
-
-**14-ambient-mode**: OSSM 3.2+ supports ambient mode for **single-cluster
-deployments only**. Multicluster ambient is not supported by Red Hat as of
-OSSM 3.3. Upstream Istio multicluster + ambient is experimental. This profile
-is included for reference and future planning — it cannot be applied to the
-multicluster mesh topology used by this repository.
-
-**15-ebpf-interception**: Merbridge is an **independent open-source project**
-(merbridge.io) that is not part of, packaged with, or supported by Red Hat
-OpenShift Service Mesh. It requires separate deployment of a DaemonSet and is
-not compatible with OSSM's istio-cni traffic interception model. This profile
-is included for reference only.
+**04-istiod-resources** is fully GA (pilot resources are documented and
+supported). `GOMEMLIMIT` is auto-derived from `limits.memory` by the istiod
+Helm chart via a `resourceFieldRef`. Do **not** set `GOMEMLIMIT` manually via
+`pilot.env` — the Deployment will have both `value` and `valueFrom` on the
+same env var, which Kubernetes rejects, causing Sail operator reconciliation
+to fail silently (limits are dropped from the Deployment).
 
 ## Prerequisites
 
@@ -185,9 +171,6 @@ some combinations may interact:
 - **Istio CR patches trigger an istiod restart**: most pilot env var changes
   require an istiod rollout. The sweep orchestrator waits for rollout
   completion, but this adds ~60-90s per profile switch.
-- **Profiles 14 and 15 cannot be applied automatically**: they require
-  architectural changes (ambient mode) or external components (Merbridge)
-  that are outside the scope of CR patching.
 - **Discovery selectors (profile 02) require namespace labelling**: the
   apply script labels mesh namespaces, but namespaces created by other test
   suites may not have the label. Run setup scripts after applying this profile.
