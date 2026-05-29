@@ -19,6 +19,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 STATE_DIR=""
 CONTEXTS_CSV=""
@@ -26,8 +28,6 @@ DRY_RUN=0
 ISTIO_CR_NAMESPACE="istio-system"
 ROLLOUT_TIMEOUT=300
 KUBECTL="kubectl"
-
-die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF

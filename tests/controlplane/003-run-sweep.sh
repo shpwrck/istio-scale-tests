@@ -33,6 +33,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -48,18 +50,6 @@ FORCE_LARGE_MATRIX=0
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
-
-die() { echo "error: $*" >&2; exit 1; }
-
-is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
-is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
-
-validate_scoping_value() {
-	case "$1" in
-	none | namespace | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
-	esac
-}
 
 usage() {
 	cat <<EOF
@@ -98,19 +88,6 @@ Environment:
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
 EOF
-}
-
-split_csv() {
-	local csv="$1"
-	local -n _out="$2"
-	_out=()
-	local x
-	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
-		x="${x#"${x%%[![:space:]]*}"}"
-		x="${x%"${x##*[![:space:]]}"}"
-		[[ -n "$x" ]] && _out+=("$x")
-	done
 }
 
 while [[ $# -gt 0 ]]; do
@@ -265,7 +242,7 @@ for sc in "${SERVICE_COUNTS[@]}"; do
 	done
 done
 for scp in "${SCOPINGS[@]}"; do
-	validate_scoping_value "$scp"
+	validate_scoping "$scp"
 done
 
 MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} * ${#SCOPINGS[@]} ))
