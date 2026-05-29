@@ -1,0 +1,40 @@
+# Profile: traffic-exclusions
+# Tier: 3 (medium impact, workload-specific)
+# OSSM Support: SUPPORTED — standard pod annotations and meshConfig
+#
+# Traffic that does not need mesh features (mTLS, observability, routing) can
+# bypass the sidecar proxy entirely via port exclusions. Common candidates:
+# databases (3306, 5432), caches (6379, 9042, 11211), and health check ports.
+#
+# This profile demonstrates mesh-wide outbound exclusions via meshConfig.
+# Per-workload exclusions via pod annotations are also available but require
+# workload-specific configuration.
+#
+# Expected impact:
+#   - Reduced proxy CPU for excluded traffic
+#   - Lower latency for excluded connections (no proxy hop)
+#   - Reduced connection tracking overhead
+#
+# Relevant test suites: dataplane
+#
+# References:
+#   https://istio.io/latest/docs/setup/additional-setup/sidecar-injection/
+#   https://istio.io/latest/docs/ops/configuration/traffic-management/traffic-management-problems/
+
+ossm_support: supported
+
+description: >-
+  Exclude common database and cache ports from sidecar interception. Traffic
+  to these ports bypasses the proxy entirely.
+
+istio_cr_patch:
+  spec:
+    values:
+      meshConfig:
+        outboundTrafficPolicy:
+          mode: REGISTRY_ONLY
+      global:
+        proxy:
+          excludeOutboundPorts: "3306,5432,6379,9042,11211"
+
+resources: []

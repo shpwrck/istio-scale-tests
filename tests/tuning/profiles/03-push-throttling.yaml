@@ -1,0 +1,49 @@
+# Profile: push-throttling
+# Tier: 1 (highest impact, safe)
+# OSSM Support: CONFIGURABLE — pilot env vars set via spec.values.pilot.env;
+#   mechanically supported by the Sail operator Helm passthrough but NOT
+#   explicitly documented by Red Hat for OSSM 3. Red Hat support coverage
+#   for issues caused by non-default pilot env var values is uncertain.
+#
+# Istio's push pipeline has three primary throttles: how long to wait after
+# the last change before pushing (PILOT_DEBOUNCE_AFTER), the maximum wait
+# even if changes keep arriving (PILOT_DEBOUNCE_MAX), and the number of
+# concurrent push goroutines (PILOT_PUSH_THROTTLE).
+#
+# Tuning these reduces push storms at the cost of slightly higher propagation
+# latency. Expedia Group found that PILOT_PUSH_THROTTLE set too high caused
+# lock contention — matching it to vCPU count resolved the issue.
+#
+# Expected impact:
+#   - Reduced istiod CPU during endpoint churn
+#   - Fewer but larger batched xDS pushes
+#   - Slightly higher propagation latency (tradeoff)
+#
+# Relevant test suites: propagation, churn, controlplane
+#
+# References:
+#   https://medium.com/expedia-group-tech/enhancing-istios-performance-unveiling-the-impact-of-lock-contention-on-expedia-s-compute-platform-2cfabc9d8058
+#   https://medium.com/airbnb-engineering/improving-istio-propagation-delay-d4da9b5b9f90
+
+ossm_support: configurable
+ossm_support_detail: >-
+  Pilot env vars are set via spec.values.pilot.env in the Sail operator Istio
+  CR. The mechanism is fully supported, but individual PILOT_* variables are
+  not explicitly documented by Red Hat for OSSM 3. These are standard upstream
+  Istio tuning knobs used in production by Airbnb, Expedia, and others.
+
+description: >-
+  Increase debounce intervals and cap push concurrency to reduce push storms
+  under high-churn conditions. Trades propagation latency for CPU efficiency.
+
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        env:
+          PILOT_DEBOUNCE_AFTER: "200ms"
+          PILOT_DEBOUNCE_MAX: "3s"
+          PILOT_PUSH_THROTTLE: "50"
+          PILOT_ENABLE_EDS_DEBOUNCE: "true"
+
+resources: []
