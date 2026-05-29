@@ -1,0 +1,53 @@
+# Profile: istiod-resources
+# Tier: 1 (highest impact, safe)
+# OSSM Support: SUPPORTED
+#   pilot.resources is GA — fully documented and supported via the Sail operator.
+#   GOMEMLIMIT is automatically derived from limits.memory by the istiod Helm
+#   chart (via resourceFieldRef). Do NOT set GOMEMLIMIT manually via pilot.env —
+#   the Deployment will have both `value` and `valueFrom` on the same env var,
+#   which Kubernetes rejects, causing the Sail operator reconciliation to fail
+#   silently (limits are dropped from the Deployment).
+#
+# Default istiod resource allocations are conservative. At scale (500+ pods),
+# istiod needs significantly more CPU and memory. Setting GOMEMLIMIT to ~90%
+# of the memory limit prevents OOM by triggering earlier garbage collection.
+#
+# Multi-cluster note: istiod must be scaled VERTICALLY, not horizontally —
+# each instance maintains a complete cache of remote services, so adding
+# replicas does not reduce per-instance memory.
+#
+# Expected impact:
+#   - Faster xDS push processing (more CPU headroom)
+#   - Prevents OOM under push storms (GOMEMLIMIT)
+#   - Higher throughput for concurrent proxy connections
+#
+# Relevant test suites: controlplane, propagation, churn
+#
+# References:
+#   https://istio.io/latest/docs/ops/deployment/performance-and-scalability/
+#   https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.0
+
+ossm_support: supported
+ossm_support_detail: >-
+  pilot.resources is fully documented and supported. GOMEMLIMIT is auto-set
+  from limits.memory by the istiod Helm chart (resourceFieldRef), so setting
+  explicit memory limits is sufficient. Do not set GOMEMLIMIT via pilot.env —
+  it conflicts with the resourceFieldRef and causes Sail reconciliation failure.
+
+description: >-
+  Set production-grade istiod resource requests/limits and enable GOMEMLIMIT
+  to prevent OOM under load. Sized for 500-2000 pod meshes.
+
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+
+resources: []

@@ -1,0 +1,44 @@
+# Profile: access-log-filtering
+# Tier: 2 (high impact, measure-first)
+# OSSM Support: SUPPORTED — Istio Telemetry API with CEL match conditions
+#
+# Full access logging at high RPS generates enormous I/O: at 50K mesh-wide
+# RPS, approximately 4 TB/day. Filtering to errors only (HTTP >= 400) reduces
+# volume by 95%+ while retaining the logs operators actually investigate.
+#
+# This profile uses the Telemetry API to log only server-side error responses.
+# Client-side access logging is disabled entirely.
+#
+# Expected impact:
+#   - 95-99% reduction in access log volume
+#   - Lower proxy CPU (fewer write syscalls)
+#   - Lower disk I/O and storage costs
+#   - Retains error visibility for debugging
+#
+# Relevant test suites: dataplane, churn-dataplane
+#
+# References:
+#   https://istio.io/latest/docs/tasks/observability/logs/telemetry-api/
+
+ossm_support: supported
+
+description: >-
+  Filter access logs to server-side error responses only (HTTP >= 400) via the
+  Telemetry API. Eliminates the vast majority of access log I/O.
+
+istio_cr_patch: {}
+
+resources:
+  - apiVersion: telemetry.istio.io/v1
+    kind: Telemetry
+    metadata:
+      name: tuning-access-log
+      namespace: istio-system
+    spec:
+      accessLogging:
+        - providers:
+            - name: envoy
+          match:
+            mode: SERVER
+          filter:
+            expression: "response.code >= 400"
