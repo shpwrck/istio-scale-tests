@@ -21,6 +21,7 @@
 #   # Apply with explicit state dir for later revert:
 #   ./tests/tuning/001-apply-profile.sh --profile profiles/04-istiod-resources.yaml \
 #     --state-dir results/my-run
+# ci-dry-run-skip: needs yq and a valid --profile path
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

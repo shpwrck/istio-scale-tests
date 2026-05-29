@@ -21,6 +21,7 @@
 #   # Dry-run to see the plan:
 #   ./tests/tuning/003-run-tuning-sweep.sh --dry-run \
 #     --profiles 01-sidecar-scoping,06-xds-cache-tuning --suite controlplane
+# ci-dry-run-skip: needs yq and valid --suite directory with profiles
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
