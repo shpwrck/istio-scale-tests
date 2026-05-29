@@ -77,13 +77,13 @@ if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Partition into "current schema" (32 columns) and "legacy" (anything else).
+# Partition into "current schema" (34 columns) and "legacy" (anything else).
 TSV_FILES=()
 LEGACY_FILES=()
 for f in "${ALL_TSV[@]}"; do
 	header=$(grep -m1 -v '^#' "$f" 2>/dev/null || true)
 	tabs=$(awk -F'\t' '{print NF}' <<<"$header")
-	if [[ "$tabs" == "32" ]]; then
+	if [[ "$tabs" == "34" ]]; then
 		TSV_FILES+=("$f")
 	else
 		LEGACY_FILES+=("$f")
@@ -98,7 +98,7 @@ if (( ${#LEGACY_FILES[@]} > 0 )); then
 fi
 
 if (( ${#TSV_FILES[@]} == 0 )); then
-	die "no TSV files with the current 32-column schema found in $RESULTS_DIR"
+	die "no TSV files with the current 34-column schema found in $RESULTS_DIR"
 fi
 
 # Pluck reproducibility tags from the first file's preamble.
@@ -161,7 +161,7 @@ collect_sweep_axes() {
 		bsort(out,n); return n
 	}
 	function join(arr, n,    s,i) { s=arr[1]; for(i=2;i<=n;i++) s=s","arr[i]; return s }
-	!/^#/ && !/^timestamp/ && NF>=32 {
+	!/^#/ && !/^timestamp/ && NF>=34 {
 		mesh[$3]=1; svc[$4]=1; rep[$5]=1; ns[$6]=1; scope[$7]=1
 	}
 	END {
@@ -183,7 +183,7 @@ SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 # emits one record per unique key with min/max/avg for core metrics plus
 # sidecar config-dump aggregates.
 #
-# 32-column schema (1-indexed):
+# 34-column schema (1-indexed):
 #  1 timestamp          2 context            3 mesh_size        4 service_count
 #  5 replicas           6 namespace_count    7 sidecar_scoping
 #  8 istiod_mem_mi
@@ -198,8 +198,9 @@ SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 # 28 scrape_window_sec   29 scrape_skew_ms
 # 30 settle_sec          31 istiod_restarted
 # 32 istiod_cpu_m_delta
+# 33 go_heap_alloc_mi    34 go_heap_inuse_mi
 #
-# Aggregated output (tab-separated, 26 columns):
+# Aggregated output (tab-separated, 34 columns):
 #   mesh_size service_count replicas namespace_count sidecar_scoping n_total n_valid
 #   mem_min mem_max mem_avg
 #   conv99_min conv99_max conv99_avg
@@ -209,6 +210,8 @@ SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 #   cpu_delta_min cpu_delta_max cpu_delta_avg
 #   cfg_dump_avg cfg_dump_max
 #   conv99_floor_pinned queue99_floor_pinned
+#   heap_alloc_min heap_alloc_max heap_alloc_avg
+#   heap_inuse_min heap_inuse_max heap_inuse_avg
 aggregate() {
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
@@ -235,12 +238,14 @@ aggregate() {
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
 	}
-	!/^#/ && !/^timestamp/ && NF>=32 {
+	!/^#/ && !/^timestamp/ && NF>=34 {
 		key = $3 "|" $4 "|" $5 "|" $6 "|" $7
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
-		# Gauge metrics (mem, proxies) can always be ingested.
+		# Gauge metrics (mem, proxies, heap) can always be ingested.
 		ingest("mem",       $8,  key)
 		ingest("prx",       $22, key)
+		ingest("heap_alloc", $33, key)
+		ingest("heap_inuse", $34, key)
 		# Config-dump bytes are independent of istiod counters — always OK.
 		if ($24 ~ /^[0-9.]+$/) { cfg_avg_n[key]++; cfg_avg_sum[key] += $24+0 }
 		if ($26 ~ /^[0-9.]+$/) {
@@ -275,7 +280,7 @@ aggregate() {
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
-		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn_total\tn_valid\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\tconv99_floor_pinned\tqueue99_floor_pinned\n"
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn_total\tn_valid\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\tconv99_floor_pinned\tqueue99_floor_pinned\theap_alloc_min\theap_alloc_max\theap_alloc_avg\theap_inuse_min\theap_inuse_max\theap_inuse_avg\n"
 		for (i = 1; i <= nkey; i++) {
 			k = order[i]
 			split(k, p, "|")
@@ -287,7 +292,7 @@ aggregate() {
 			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
 			conv_fp = (nv[("conv"), k]+0 > 0 && max[("conv"), k]+0 == 100) ? 1 : 0
 			queue_fp = (nv[("queue"), k]+0 > 0 && max[("queue"), k]+0 == 100) ? 1 : 0
-			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%d\t%d\n",
+			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
 				p[1], p[2], p[3], p[4], p[5], nt, nv_count,
 				emit3("mem",       k),
 				emit3("conv",      k),
@@ -296,7 +301,9 @@ aggregate() {
 				rr, uu,
 				emit3("cpu_delta", k),
 				ca, cm,
-				conv_fp, queue_fp
+				conv_fp, queue_fp,
+				emit3("heap_alloc", k),
+				emit3("heap_inuse", k)
 		}
 	}'
 }
@@ -331,7 +338,9 @@ report_text() {
 	{
 		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s (n_total=%s n_valid=%s) ---\n", $1, $2, $3, $4, $5, $6, $7
 		printf "  istiod CPU avg (m):   min=%s max=%s avg=%s   [process_cpu_seconds_total delta over window]\n", $22, $23, $24
-		printf "  istiod Memory (Mi):   min=%s max=%s avg=%s\n",     $8,  $9,  $10
+		printf "  istiod Memory (Mi):   min=%s max=%s avg=%s   [process_resident_memory_bytes peak]\n", $8, $9, $10
+		printf "  Go heap alloc (Mi):   min=%s max=%s avg=%s   [go_memstats_alloc_bytes]\n", $29, $30, $31
+		printf "  Go heap inuse (Mi):   min=%s max=%s avg=%s   [go_memstats_heap_inuse_bytes]\n", $32, $33, $34
 		printf "  Convergence p99 (ms): %s\n", bucket_range($12)
 		printf "  Queue p99 (ms):       %s\n", bucket_range($15)
 		printf "  Connected proxies:    min=%s max=%s avg=%s\n",     $17, $18, $19
@@ -378,8 +387,8 @@ report_markdown() {
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	echo "| mesh_size | svc | reps | ns | scoping | n_total | n_valid | cpu_avg (m) | mem_avg (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies | cfg_dump_avg (MB) | restarts | unk_restarts |"
-	echo "|-----------|-----|------|----|---------|---------|---------|-------------|--------------|---------------|----------------|---------|-------------------|----------|--------------|"
+	echo "| mesh_size | svc | reps | ns | scoping | n_total | n_valid | cpu_avg (m) | mem_avg (Mi) | heap_alloc (Mi) | heap_inuse (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies | cfg_dump_avg (MB) | restarts | unk_restarts |"
+	echo "|-----------|-----|------|----|---------|---------|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|-------------------|----------|--------------|"
 	awk -F'\t' '
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
@@ -396,7 +405,9 @@ report_markdown() {
 	NR == 1 { next }
 	{
 		cfg_mb = ($25+0 > 0) ? sprintf("%.1f", $25/1048576) : "N/A"
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, bucket_range($12), bucket_range($15), $19, cfg_mb, $20, $21
+		ha = ($31+0 > 0) ? sprintf("%.0f", $31) : "N/A"
+		hi = ($34+0 > 0) ? sprintf("%.0f", $34) : "N/A"
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, ha, hi, bucket_range($12), bucket_range($15), $19, cfg_mb, $20, $21
 	}' <<<"$aggregated"
 	if (( total_restarts > 0 || total_unknowns > 0 )); then
 		echo ""
@@ -474,7 +485,9 @@ report_json() {
 		printf "\"queue_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($14), cell($15), cell($16)
 		printf "\"connected_proxies\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($17), cell($18), cell($19)
 		printf "\"istiod_restarted_rows\":%d,\"istiod_restarted_unknown_rows\":%d,", $20+0, $21+0
-		printf "\"sidecar_config_bytes_avg\":%s,\"sidecar_config_bytes_max\":%s}", cell($25), cell($26)
+		printf "\"sidecar_config_bytes_avg\":%s,\"sidecar_config_bytes_max\":%s,", cell($25), cell($26)
+		printf "\"go_heap_alloc_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($29), cell($30), cell($31)
+		printf "\"go_heap_inuse_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s}}", cell($32), cell($33), cell($34)
 	}
 	END {
 		if (printed) printf "\n  ]\n}\n"; else printf "]\n}\n"
