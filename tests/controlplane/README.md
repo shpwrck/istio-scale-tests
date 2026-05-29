@@ -197,7 +197,7 @@ The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each
 value is either the apiserver `gitVersion` (e.g. `v1.30.4`), `unreachable`, or
 `unknown`.
 
-Followed by the 32-column data schema:
+Followed by the 34-column data schema:
 
 ```
 timestamp  context  mesh_size  service_count  replicas  namespace_count  sidecar_scoping
@@ -211,7 +211,13 @@ sidecar_config_bytes_avg  sidecar_config_bytes_p50  sidecar_config_bytes_max  si
 scrape_window_sec  scrape_skew_ms
 settle_sec  istiod_restarted
 istiod_cpu_m_delta
+go_heap_alloc_mi  go_heap_inuse_mi
 ```
+
+`go_heap_alloc_mi` (`go_memstats_alloc_bytes`) and `go_heap_inuse_mi`
+(`go_memstats_heap_inuse_bytes`) are point-in-time values from the final scrape,
+not peaks. They reveal steady-state memory independently of RSS, which stays
+inflated after GC due to `MADV_FREE`.
 
 **EDS is included in config_dump by design.** Envoy's default `/config_dump`
 omits the `EndpointsConfigDump`, but EDS is the dominant per-proxy size driver —
@@ -224,7 +230,7 @@ visible. The byte count is piped through `wc -c` on the local side.
 namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
 `markdown` summaries via `--format`. The markdown format includes a "Sidecar
 scoping effect" table showing config size reduction percentages across modes.
-Legacy TSV files with a non-32-column schema are skipped with a stderr warning.
+Legacy TSV files with a non-34-column schema are skipped with a stderr warning.
 
 ## Cleanup
 
