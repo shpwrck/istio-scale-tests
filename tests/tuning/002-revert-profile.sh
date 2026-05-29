@@ -13,6 +13,7 @@
 #
 #   # Dry-run to see what would be reverted:
 #   ./tests/tuning/002-revert-profile.sh --state-dir results/state-03-push-throttling --dry-run
+# ci-dry-run-skip: needs --state-dir from a prior 001-apply-profile.sh run
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

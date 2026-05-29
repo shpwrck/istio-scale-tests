@@ -11,6 +11,7 @@
 # Examples:
 #   ./tests/tuning/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
 #   ./tests/tuning/005-cleanup.sh --dry-run
+# ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
