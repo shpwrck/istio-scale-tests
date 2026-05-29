@@ -1,10 +1,12 @@
 # Profile: istiod-resources
 # Tier: 1 (highest impact, safe)
-# OSSM Support: SUPPORTED (resources) / CONFIGURABLE (GOMEMLIMIT)
+# OSSM Support: SUPPORTED
 #   pilot.resources is GA — fully documented and supported via the Sail operator.
-#   GOMEMLIMIT is automatically derived from limits.memory in upstream Istio's
-#   istiod Deployment template (via resourceFieldRef). Setting it manually via
-#   pilot.env overrides the automatic value. Not explicitly documented by Red Hat.
+#   GOMEMLIMIT is automatically derived from limits.memory by the istiod Helm
+#   chart (via resourceFieldRef). Do NOT set GOMEMLIMIT manually via pilot.env —
+#   the Deployment will have both `value` and `valueFrom` on the same env var,
+#   which Kubernetes rejects, causing the Sail operator reconciliation to fail
+#   silently (limits are dropped from the Deployment).
 #
 # Default istiod resource allocations are conservative. At scale (500+ pods),
 # istiod needs significantly more CPU and memory. Setting GOMEMLIMIT to ~90%
@@ -28,9 +30,9 @@
 ossm_support: supported
 ossm_support_detail: >-
   pilot.resources is fully documented and supported. GOMEMLIMIT is auto-set
-  from limits.memory in upstream Istio's Helm chart (resourceFieldRef), so
-  setting explicit memory limits is sufficient. The manual GOMEMLIMIT override
-  via pilot.env is not documented by Red Hat but uses the same mechanism.
+  from limits.memory by the istiod Helm chart (resourceFieldRef), so setting
+  explicit memory limits is sufficient. Do not set GOMEMLIMIT via pilot.env —
+  it conflicts with the resourceFieldRef and causes Sail reconciliation failure.
 
 description: >-
   Set production-grade istiod resource requests/limits and enable GOMEMLIMIT
@@ -47,7 +49,5 @@ istio_cr_patch:
           limits:
             cpu: "2"
             memory: 4Gi
-        env:
-          GOMEMLIMIT: "3750MiB"
 
 resources: []
