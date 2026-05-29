@@ -14,9 +14,13 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/churn-dataplane/lib/preamble.sh"
+source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/churn-dataplane/lib/metrics.sh"
+source "${ROOT}/tests/lib/timestamp.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/metrics.sh"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -180,7 +184,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 	ALL_CTXS_CSV="$SOURCE_CTX"
 	for r in "${REMOTES[@]}"; do ALL_CTXS_CSV+=",$r"; done
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
-	write_preamble "$OUTPUT_FILE" \
+	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
 		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \

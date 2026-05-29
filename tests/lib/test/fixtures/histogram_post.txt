@@ -1,0 +1,10 @@
+# HELP pilot_proxy_queue_time Time in seconds, a proxy is in the push queue before being dequeued.
+# TYPE pilot_proxy_queue_time histogram
+pilot_proxy_queue_time_bucket{le="0.01"} 20
+pilot_proxy_queue_time_bucket{le="0.1"} 150
+pilot_proxy_queue_time_bucket{le="0.5"} 280
+pilot_proxy_queue_time_bucket{le="1"} 290
+pilot_proxy_queue_time_bucket{le="5"} 295
+pilot_proxy_queue_time_bucket{le="+Inf"} 300
+pilot_proxy_queue_time_sum 75.3
+pilot_proxy_queue_time_count 300

@@ -27,6 +27,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/timestamp.sh"
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="${ROOT}/tests/controlplane/results"
@@ -45,46 +49,6 @@ PHASE=combined
 STATE_DIR=""
 RUN_ID_OVERRIDE=""
 
-die() { echo "error: $*" >&2; exit 1; }
-
-is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
-is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
-
-# Portable millisecond-resolution Unix timestamp. macOS BSD `date` does not
-# expand `%N`, so `date +%s%3N` yields "<seconds>3N" and breaks arithmetic.
-# Detect the best available implementation once and cache it.
-NOW_MS_IMPL=""
-_detect_now_ms() {
-	[[ -n "$NOW_MS_IMPL" ]] && return
-	if [[ "$(date -u +%s%3N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_MS_IMPL="date"
-	elif command -v gdate >/dev/null 2>&1 \
-		&& [[ "$(gdate -u +%s%3N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_MS_IMPL="gdate"
-	elif command -v python3 >/dev/null 2>&1; then
-		NOW_MS_IMPL="python3"
-	elif command -v perl >/dev/null 2>&1; then
-		NOW_MS_IMPL="perl"
-	else
-		die "no millisecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
-	fi
-}
-now_ms() {
-	_detect_now_ms
-	case "$NOW_MS_IMPL" in
-	date)    date -u +%s%3N ;;
-	gdate)   gdate -u +%s%3N ;;
-	python3) python3 -c 'import time; print(int(time.time()*1000))' ;;
-	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1000' ;;
-	esac
-}
-
-validate_scoping() {
-	case "$1" in
-	none | namespace | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
-	esac
-}
 
 usage() {
 	cat <<EOF
@@ -127,19 +91,6 @@ Environment:
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES.
 EOF
-}
-
-split_csv() {
-	local csv="$1"
-	local -n _out="$2"
-	_out=()
-	local x
-	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
-		x="${x#"${x%%[![:space:]]*}"}"
-		x="${x%"${x##*[![:space:]]}"}"
-		[[ -n "$x" ]] && _out+=("$x")
-	done
 }
 
 while [[ $# -gt 0 ]]; do

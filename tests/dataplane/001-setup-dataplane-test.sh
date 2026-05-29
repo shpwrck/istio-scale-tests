@@ -16,6 +16,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -25,7 +27,6 @@ WAIT_TIMEOUT=300
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
 FORTIO_TAG="${FORTIO_VERSION:-stable}"
 
-die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF
@@ -42,18 +43,6 @@ Environment:
 EOF
 }
 
-split_csv() {
-	local csv="$1"
-	local -n _out="$2"
-	_out=()
-	local x
-	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
-		x="${x#"${x%%[![:space:]]*}"}"
-		x="${x%"${x##*[![:space:]]}"}"
-		[[ -n "$x" ]] && _out+=("$x")
-	done
-}
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in

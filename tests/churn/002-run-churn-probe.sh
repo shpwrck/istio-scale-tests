@@ -18,6 +18,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/timestamp.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/metrics.sh"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -35,34 +41,6 @@ DRY_RUN=0
 NS="${CHURN_TEST_NAMESPACE:-churn-test}"
 BASE_PF_PORT=15014
 BASE_ENVOY_PF_PORT=15100
-
-die() { echo "error: $*" >&2; exit 1; }
-
-NOW_NS_IMPL=""
-_detect_now_ns() {
-	[[ -n "$NOW_NS_IMPL" ]] && return
-	if [[ "$(date -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_NS_IMPL="date"
-	elif command -v gdate >/dev/null 2>&1 \
-		&& [[ "$(gdate -u +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
-		NOW_NS_IMPL="gdate"
-	elif command -v python3 >/dev/null 2>&1; then
-		NOW_NS_IMPL="python3"
-	elif command -v perl >/dev/null 2>&1; then
-		NOW_NS_IMPL="perl"
-	else
-		die "no nanosecond-resolution time source: install GNU coreutils (gdate), python3, or perl"
-	fi
-}
-now_ns() {
-	_detect_now_ns
-	case "$NOW_NS_IMPL" in
-	date)    date -u +%s%N ;;
-	gdate)   gdate -u +%s%N ;;
-	python3) python3 -c 'import time; print(int(time.time()*1e9))' ;;
-	perl)    perl -MTime::HiRes -e 'printf "%d\n", Time::HiRes::time()*1e9' ;;
-	esac
-}
 
 usage() {
 	cat <<EOF
@@ -82,18 +60,6 @@ Usage: $(basename "$0") [options]
 EOF
 }
 
-split_csv() {
-	local csv="$1"
-	local -n _out="$2"
-	_out=()
-	local x
-	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
-		x="${x#"${x%%[![:space:]]*}"}"
-		x="${x%"${x##*[![:space:]]}"}"
-		[[ -n "$x" ]] && _out+=("$x")
-	done
-}
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -253,57 +219,22 @@ scrape_histogram() {
 	curl -s "http://localhost:$port/metrics" 2>/dev/null | grep "${name}_bucket{" || true
 }
 
-# Compute delta-window p99 from pre/post histogram scrapes.
-# Adapted from tests/controlplane/002-collect-resource-metrics.sh:545-592.
-delta_histogram_p99() {
-	local pre="$1" post="$2" name="$3"
-	awk -v name="${name}_bucket" -v q="0.99" '
-	function leval(line) {
-		s = line; sub(/.*le="/, "", s); sub(/".*/, "", s); return s
-	}
-	function le_key(le) {
-		if (le == "+Inf") return 1e308
-		return le + 0
-	}
-	NR==FNR {
-		if ($0 ~ name && /le="/) base[leval($0)] += $NF+0
-		next
-	}
-	$0 ~ name && /le="/ {
-		le = leval($0)
-		final_v[le] += $NF+0
-		if (!(le in seen)) { seen[le] = 1; les[++n] = le }
-	}
-	END {
-		if (n == 0) { print "N/A"; exit }
-		for (i = 1; i <= n; i++) sortable[i] = les[i]
-		for (i = 2; i <= n; i++) {
-			j = i
-			while (j > 1 && le_key(sortable[j-1]) > le_key(sortable[j])) {
-				t = sortable[j-1]; sortable[j-1] = sortable[j]; sortable[j] = t
-				j--
-			}
-		}
-		bad = 0
-		for (i = 1; i <= n; i++) {
-			le = sortable[i]
-			delta = final_v[le] - (le in base ? base[le] : 0)
-			if (delta < 0) { bad = 1; break }
-			deltas[i] = delta
-		}
-		if (bad) { print "N/A"; exit }
-		total = deltas[n]
-		if (total <= 0) { print "N/A"; exit }
-		target = total * q
-		for (i = 1; i <= n; i++) {
-			if (deltas[i]+0 >= target) {
-				if (sortable[i] == "+Inf") { print "overflow"; exit }
-				printf "%.0f\n", sortable[i] * 1000
-				exit
-			}
-		}
-		print "N/A"
-	}' <(echo "$pre") <(echo "$post")
+# String-to-file adapter for the shared delta_histogram_p99 (tests/lib/metrics.sh).
+# This script's scrape_histogram() returns strings; the canonical function takes files.
+_delta_histogram_p99_str() {
+	local pre_str="$1" post_str="$2" name="$3"
+	local tmp_pre="${TMPDIR_RUN}/hist_pre_$$"
+	local tmp_post="${TMPDIR_RUN}/hist_post_$$"
+	echo "$pre_str" > "$tmp_pre"
+	echo "$post_str" > "$tmp_post"
+	local result
+	result=$(delta_histogram_p99 "$tmp_pre" "$tmp_post" "$name")
+	rm -f "$tmp_pre" "$tmp_post"
+	# Truncate to integer — callers use bash (( )) arithmetic
+	case "$result" in
+	N/A|overflow) echo "$result" ;;
+	*)            printf '%.0f\n' "$result" ;;
+	esac
 }
 
 bucket_range() {
@@ -506,8 +437,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	src_triggers_delta=$((src_post_triggers - src_pre_triggers))
 	src_pushes_delta=$((src_post_pushes - src_pre_pushes))
-	src_queue_p99=$(delta_histogram_p99 "$src_pre_hist" "$src_post_hist" "pilot_proxy_queue_time")
-	src_push_time_p99=$(delta_histogram_p99 "$src_pre_push_hist" "$src_post_push_hist" "pilot_xds_push_time")
+	src_queue_p99=$(_delta_histogram_p99_str "$src_pre_hist" "$src_post_hist" "pilot_proxy_queue_time")
+	src_push_time_p99=$(_delta_histogram_p99_str "$src_pre_push_hist" "$src_post_push_hist" "pilot_xds_push_time")
 
 	rmt_triggers_delta=0
 	rmt_pushes_delta=0
@@ -528,7 +459,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_triggers[i] ))
 			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_pushes[i] ))
 
-			rmt_q=$(delta_histogram_p99 "${rmt_pre_hist[i]}" "$rmt_post_h" "pilot_proxy_queue_time")
+			rmt_q=$(_delta_histogram_p99_str "${rmt_pre_hist[i]}" "$rmt_post_h" "pilot_proxy_queue_time")
 			if [[ "$rmt_q" != "N/A" && "$rmt_q" != "overflow" ]]; then
 				has_rmt_q=1
 				((rmt_q > max_rmt_q)) && max_rmt_q="$rmt_q"
@@ -536,7 +467,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				rmt_queue_p99="overflow"
 			fi
 
-			rmt_pt=$(delta_histogram_p99 "${rmt_pre_push_hist[i]}" "$rmt_post_ph" "pilot_xds_push_time")
+			rmt_pt=$(_delta_histogram_p99_str "${rmt_pre_push_hist[i]}" "$rmt_post_ph" "pilot_xds_push_time")
 			if [[ "$rmt_pt" != "N/A" && "$rmt_pt" != "overflow" ]]; then
 				has_rmt_pt=1
 				((rmt_pt > max_rmt_pt)) && max_rmt_pt="$rmt_pt"

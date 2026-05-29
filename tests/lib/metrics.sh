@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Metric extraction helpers for tests/churn-dataplane/ scripts. Sourced, never executed.
+# Prometheus metric extraction helpers. Sourced, never executed.
+#
+# Consumers: churn, churn-dataplane
 #
 # Exposes:
 #   scrape_istiod_metrics <port> <output_file>
@@ -12,8 +14,7 @@
 # output is typically 10-50KB and piping through bash variables invites
 # quoting problems at scale.
 #
-# Requires: curl, awk. Callers must have run `set -euo pipefail` and sourced
-# lib/preamble.sh (for die()).
+# Requires: curl, awk. Callers must have sourced tests/lib/common.sh (for die()).
 # shellcheck shell=bash
 
 # Scrape istiod /metrics to a file. Returns 0 on success, 1 on failure.
@@ -83,7 +84,7 @@ extract_gauge() {
 # Compute p99 from a delta-window histogram (baseline vs final scrape files).
 # Outputs bucket upper bound in milliseconds, "N/A" if empty/corrupt, or
 # "overflow" if p99 is in the +Inf bucket.
-# PL14: negative per-bucket delta → emit "N/A" (counter reset / undetected restart).
+# PL14: negative per-bucket delta -> emit "N/A" (counter reset / undetected restart).
 # Usage: delta_histogram_p99 <baseline_file> <final_file> <histogram_name>
 # shellcheck disable=SC2329
 delta_histogram_p99() {
