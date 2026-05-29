@@ -340,7 +340,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	} > "$TSV_FILE"
 fi
 
-# Schema (TSV header — 32 columns):
+# Schema (TSV header — 34 columns):
 #   timestamp context mesh_size service_count replicas namespace_count sidecar_scoping
 #   istiod_mem_mi
 #   convergence_p50_ms convergence_p99_ms queue_p50_ms queue_p99_ms
@@ -351,8 +351,9 @@ fi
 #   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max sidecar_config_bytes_samples
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #   istiod_cpu_m_delta
+#   go_heap_alloc_mi go_heap_inuse_mi
 if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
-	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta" >> "$TSV_FILE"
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
@@ -846,7 +847,7 @@ scrape_window() {
 		local f_file="${TMP_DIR}/final-${k}.metrics"
 		if [[ ! -s "$f_file" ]]; then
 			echo "warning: no final scrape for $ctx/${POD_NAMES[k]}; emitting N/A row" >&2
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A" >> "$TSV_FILE"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
@@ -983,6 +984,24 @@ scrape_window() {
 				}')
 		fi
 
+		# Go heap metrics: point-in-time from final scrape (not peak).
+		# These reveal steady-state memory independently of RSS, which
+		# stays inflated after GC due to MADV_FREE.
+		local go_heap_alloc_mi go_heap_inuse_mi
+		local alloc_bytes inuse_bytes
+		alloc_bytes=$(extract_gauge_exact "$final" go_memstats_alloc_bytes)
+		inuse_bytes=$(extract_gauge_exact "$final" go_memstats_heap_inuse_bytes)
+		if [[ "$alloc_bytes" != "N/A" ]]; then
+			go_heap_alloc_mi=$(awk -v b="$alloc_bytes" 'BEGIN{ printf "%.0f", b / 1048576 }')
+		else
+			go_heap_alloc_mi="N/A"
+		fi
+		if [[ "$inuse_bytes" != "N/A" ]]; then
+			go_heap_inuse_mi=$(awk -v b="$inuse_bytes" 'BEGIN{ printf "%.0f", b / 1048576 }')
+		else
+			go_heap_inuse_mi="N/A"
+		fi
+
 		# config_size: histogram, avg = (sum_delta / count_delta) bytes.
 		local cs_avg
 		if (( restarted_or_unknown )); then
@@ -1020,8 +1039,8 @@ scrape_window() {
 			cd_samples="${got}/${attempted}"
 		fi
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}" >> "$TSV_FILE"
-		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}" >> "$TSV_FILE"
+		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 	done
 }
 
@@ -1086,11 +1105,11 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
-		echo "|---------|------|-----|------|----|---------|-------------|----------|---------------|----------------|---------|----------|-------|-------|-------------------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=32 {
+		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
+		echo "|---------|------|-----|------|----|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|----------|-------|-------|-------------------|"
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=34 {
 			cfg_mb = ($24+0 > 0) ? sprintf("%.1f", $24/1048576) : "N/A"
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $10, $12, $22, $13, $16, $15, cfg_mb
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $33, $34, $10, $12, $22, $13, $16, $15, cfg_mb
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"

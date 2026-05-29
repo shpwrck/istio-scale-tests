@@ -245,7 +245,7 @@ get_counter() {
 
 get_gauge() {
 	local port="$1" name="$2"
-	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}([{] | )" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
+	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}([{]| )" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
 }
 
 scrape_histogram() {
@@ -412,24 +412,15 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
 
-	# Pre-churn: capture counters, gauges, and histograms from all istiods.
-	src_pre_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
-	src_pre_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
-	src_pre_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
-	src_pre_push_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_xds_push_time")
+	# Pre-churn: capture gauges and endpoint baselines first (order-insensitive),
+	# then counter/histogram baselines immediately before scale-up to prevent
+	# stray triggers from the previous iteration's scale-down bleeding into
+	# this iteration's delta window.
 	src_connected_proxies=$(get_gauge "$BASE_PF_PORT" "pilot_xds")
 
-	rmt_pre_triggers=()
-	rmt_pre_pushes=()
-	rmt_pre_hist=()
-	rmt_pre_push_hist=()
 	rmt_connected_proxies=0
 	for i in "${!REMOTES[@]}"; do
 		rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
-		rmt_pre_triggers+=("$(get_counter "$rmt_port" "pilot_push_triggers")")
-		rmt_pre_pushes+=("$(get_counter "$rmt_port" "pilot_xds_pushes")")
-		rmt_pre_hist+=("$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")")
-		rmt_pre_push_hist+=("$(scrape_histogram "$rmt_port" "pilot_xds_push_time")")
 		rmt_connected_proxies=$(( rmt_connected_proxies + $(get_gauge "$rmt_port" "pilot_xds") ))
 	done
 
@@ -438,6 +429,25 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		envoy_port=$(( BASE_ENVOY_PF_PORT + i ))
 		bc=$(curl -s "http://localhost:$envoy_port/clusters" 2>/dev/null | grep -c "churn-target.*health_flags::healthy" || echo 0)
 		BASELINE_COUNTS+=("$bc")
+	done
+
+	# Counter/histogram baselines — scraped as late as possible so the delta
+	# window starts right at the scale-up.
+	src_pre_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
+	src_pre_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
+	src_pre_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
+	src_pre_push_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_xds_push_time")
+
+	rmt_pre_triggers=()
+	rmt_pre_pushes=()
+	rmt_pre_hist=()
+	rmt_pre_push_hist=()
+	for i in "${!REMOTES[@]}"; do
+		rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
+		rmt_pre_triggers+=("$(get_counter "$rmt_port" "pilot_push_triggers")")
+		rmt_pre_pushes+=("$(get_counter "$rmt_port" "pilot_xds_pushes")")
+		rmt_pre_hist+=("$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")")
+		rmt_pre_push_hist+=("$(scrape_histogram "$rmt_port" "pilot_xds_push_time")")
 	done
 
 	T0=$(now_ns)

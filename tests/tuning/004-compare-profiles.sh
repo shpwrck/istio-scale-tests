@@ -131,8 +131,10 @@ if [[ "$FORMAT" == "markdown" ]]; then
 
 	case "$SUITE" in
 	controlplane)
-		metrics=("istiod_mem_mi:8:Memory (MiB)"
-		         "istiod_cpu_m_delta:31:CPU (millicores)"
+		metrics=("istiod_mem_mi:8:Memory RSS (MiB)"
+		         "go_heap_alloc_mi:33:Heap Alloc (MiB)"
+		         "go_heap_inuse_mi:34:Heap InUse (MiB)"
+		         "istiod_cpu_m_delta:32:CPU (millicores)"
 		         "convergence_p99_ms:10:Convergence P99"
 		         "xds_pushes_delta:13:xDS Pushes"
 		         "connected_proxies:22:Connected Proxies")
