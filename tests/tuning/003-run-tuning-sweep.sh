@@ -9,13 +9,13 @@
 # Examples:
 #   # Sweep two profiles against the controlplane suite:
 #   ./tests/tuning/003-run-tuning-sweep.sh \
-#     --contexts rosa-001,rosa-002,rosa-003 \
+#     --contexts cluster-001,cluster-002,cluster-003 \
 #     --profiles 01-sidecar-scoping,03-push-throttling \
 #     --suite controlplane
 #
 #   # Sweep all supported profiles against propagation:
 #   ./tests/tuning/003-run-tuning-sweep.sh \
-#     --contexts rosa-001,rosa-002,rosa-003 \
+#     --contexts cluster-001,cluster-002,cluster-003 \
 #     --suite propagation
 #
 #   # Dry-run to see the plan:

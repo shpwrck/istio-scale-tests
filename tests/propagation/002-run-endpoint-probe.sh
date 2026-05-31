@@ -34,14 +34,14 @@
 #
 # Examples:
 #   # Measure 2-cluster propagation, 10 iterations:
-#   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 --remote-contexts rosa-002
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context cluster-001 --remote-contexts cluster-002
 #
 #   # Measure single-cluster baseline (local xDS push only):
-#   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 --mesh-size 1
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context cluster-001 --mesh-size 1
 #
 #   # 3-cluster sweep, 5 iterations:
-#   ./tests/propagation/002-run-endpoint-probe.sh --source-context rosa-001 \
-#     --remote-contexts rosa-002,rosa-003 --mesh-size 3 --iterations 5
+#   ./tests/propagation/002-run-endpoint-probe.sh --source-context cluster-001 \
+#     --remote-contexts cluster-002,cluster-003 --mesh-size 3 --iterations 5
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 

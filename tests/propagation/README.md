@@ -38,12 +38,12 @@ The probe currently `die`s if any context has != 1 istiod pod. The correct long-
 # 1. Setup watcher pods on all clusters
 #    Use --watcher-replicas to scale up for histogram quantile extraction
 #    (p50 needs >= 10 connected proxies, p99 needs >= 30).
-./tests/propagation/001-setup-propagation-test.sh --contexts rosa-001,rosa-002,rosa-003 \
+./tests/propagation/001-setup-propagation-test.sh --contexts cluster-001,cluster-002,cluster-003 \
   --watcher-replicas 30
 
 # 2. Run endpoint probe (2-cluster)
 ./tests/propagation/002-run-endpoint-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 \
+  --source-context cluster-001 --remote-contexts cluster-002 \
   --iterations 10 --tsv
 
 # 3. View results
@@ -57,13 +57,13 @@ Compare propagation latency at different cluster counts:
 ```bash
 # Run probes at mesh_size=1, 2, 3 with 30 watcher replicas for histogram quantiles
 ./tests/propagation/006-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 \
   --iterations 5 --tsv --watcher-replicas 30
 
 # Dry-run prints the planned matrix to stderr without touching clusters
 ./tests/propagation/006-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 --dry-run
 ```
 
@@ -81,7 +81,7 @@ The sweep orchestrator:
 
 ```bash
 # One-shot snapshot
-./tests/propagation/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
+./tests/propagation/004-collect-pilot-metrics.sh --contexts cluster-001,cluster-002
 
 # Watch mode during load test
 ./tests/propagation/004-collect-pilot-metrics.sh --watch --interval 10
@@ -92,7 +92,7 @@ The sweep orchestrator:
 Deploy the `istiod-monitor` chart on each spoke:
 
 ```bash
-helm install istiod-monitor charts/istiod-monitor -n istio-system --context rosa-001
+helm install istiod-monitor charts/istiod-monitor -n istio-system --context cluster-001
 ```
 
 This creates a ServiceMonitor scraping istiod's `pilot_*` metrics. Query via thanos-querier:
@@ -113,9 +113,9 @@ Each TSV begins with `# KEY=VALUE` comment lines:
 # RUN_ID=20250520T101530-12345
 # HARNESS_SHA=abc1234
 # ISTIO_VERSION=v1.28.5
-# KUBE_VERSIONS=rosa-001=v1.34.6,rosa-002=v1.34.6,rosa-003=unreachable
-# SOURCE_CTX=rosa-001
-# REMOTES=rosa-002 rosa-003
+# KUBE_VERSIONS=cluster-001=v1.34.6,cluster-002=v1.34.6,cluster-003=unreachable
+# SOURCE_CTX=cluster-001
+# REMOTES=cluster-002 cluster-003
 # MESH_SIZE=3
 # ITERATIONS=10
 # POLL_INTERVAL_S=0.250
@@ -222,7 +222,7 @@ The file contains:
 ## Cleanup
 
 ```bash
-./tests/propagation/007-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/propagation/007-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
 ```
 
 ## Scripts

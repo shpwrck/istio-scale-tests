@@ -12,16 +12,16 @@
 #
 # Examples:
 #   # Default sweep — mesh sizes 1..N with default (10 svc × 3 replicas × 1 ns):
-#   ./tests/controlplane/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/controlplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
 #
 #   # Two-axis sweep: service count × namespace count, fixed mesh size of 3:
 #   ./tests/controlplane/003-run-sweep.sh \
-#     --contexts rosa-001,rosa-002,rosa-003 \
+#     --contexts cluster-001,cluster-002,cluster-003 \
 #     --mesh-sizes 3 --service-counts 10,100,500 --namespace-counts 1,5,25
 #
 #   # Cross-product mesh size with Sidecar scoping:
 #   ./tests/controlplane/003-run-sweep.sh \
-#     --contexts rosa-001,rosa-002,rosa-003 \
+#     --contexts cluster-001,cluster-002,cluster-003 \
 #     --mesh-sizes 1,2,3 --sidecar-scopings none,namespace,explicit
 #
 #   # Dry-run to see the planned matrix:

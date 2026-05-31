@@ -67,7 +67,7 @@ variable "cluster_count" {
 variable "cluster_index_start" {
   type        = number
   default     = 1
-  description = "First number substituted into cluster_name_format (e.g. 1 with \"rosa-%03d\" → rosa-001 for the first cluster)."
+  description = "First number substituted into cluster_name_format (e.g. 1 with \"cluster-%03d\" → cluster-001 for the first cluster)."
 }
 
 variable "vpc_cidr_index_start" {
@@ -78,7 +78,7 @@ variable "vpc_cidr_index_start" {
 
 variable "cluster_name_format" {
   type        = string
-  default     = "rosa-%03d"
+  default     = "cluster-%03d"
   description = "format() pattern for Terraform map keys, OCM cluster_name, and kubectl/oc context names (one integer: idx + cluster_index_start; must yield unique keys)."
 }
 
@@ -125,5 +125,5 @@ variable "cluster_overrides" {
     worker_autoscale_max     = optional(number)
   }))
   default     = {}
-  description = "Per-cluster overrides keyed by cluster name (e.g. rosa-001). Fields merge over cluster_defaults."
+  description = "Per-cluster overrides keyed by cluster name (e.g. cluster-001). Fields merge over cluster_defaults."
 }

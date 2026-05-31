@@ -9,7 +9,7 @@
 #   ./tests/propagation/001-setup-propagation-test.sh
 #
 #   # Setup on specific clusters:
-#   ./tests/propagation/001-setup-propagation-test.sh --contexts rosa-001,rosa-002
+#   ./tests/propagation/001-setup-propagation-test.sh --contexts cluster-001,cluster-002
 #
 #   # Tear down from all clusters:
 #   ./tests/propagation/001-setup-propagation-test.sh --cleanup
