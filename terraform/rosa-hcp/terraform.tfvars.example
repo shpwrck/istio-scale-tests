@@ -10,8 +10,8 @@ cluster_count     = 3
 # --- Cluster naming and networking ---
 
 # Terraform keys, OCM cluster names, and kubectl/oc context names.
-# With defaults below: rosa-001, rosa-002, rosa-003.
-cluster_name_format = "rosa-%03d"
+# With defaults below: cluster-001, cluster-002, cluster-003.
+cluster_name_format = "cluster-%03d"
 cluster_index_start = 1
 
 # VPC CIDRs per cluster (non-overlapping). Defaults: 10.0.0.0/16, 10.1.0.0/16, ...
@@ -41,7 +41,7 @@ common_tags = {
 
 # Per-cluster overrides (merge over cluster_defaults):
 # cluster_overrides = {
-#   "rosa-001" = {                     # hub — more capacity for ArgoCD + ACM
+#   "cluster-001" = {                     # hub — more capacity for ArgoCD + ACM
 #     compute_machine_type = "m5.4xlarge"
 #     worker_autoscale_max = 15
 #   }

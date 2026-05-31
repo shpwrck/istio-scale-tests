@@ -34,11 +34,11 @@ The chart emits **two Services** per cluster:
 ```bash
 # 1. Deploy fortio server on all clusters, client on source
 ./tests/dataplane/001-setup-dataplane-test.sh \
-  --source-context rosa-001 --remote-contexts rosa-002,rosa-003
+  --source-context cluster-001 --remote-contexts cluster-002,cluster-003
 
 # 2. Run latency probes
 ./tests/dataplane/002-run-latency-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002,rosa-003
+  --source-context cluster-001 --remote-contexts cluster-002,cluster-003
 
 # 3. View results
 ./tests/dataplane/004-report-results.sh
@@ -50,12 +50,12 @@ Compare data-plane latency at different cluster counts. The sweep mints a `sweep
 
 ```bash
 ./tests/dataplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3
 
 # 3 repetitions per mesh size for statistical confidence:
 ./tests/dataplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --repetitions 3
 
 # Dry-run to see the planned matrix
@@ -68,7 +68,7 @@ After 001 returns, sidecar xDS endpoints may not have converged on the source cl
 
 ```bash
 ./tests/dataplane/002-run-latency-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 --settle 60
+  --source-context cluster-001 --remote-contexts cluster-002 --settle 60
 ```
 
 ## Envoy Warmup
@@ -78,7 +78,7 @@ After settle, 002 runs a short throwaway `fortio load` (QPS=10) against every ta
 ```bash
 # Custom warmup duration (default: 5s; set to 0 to disable):
 ./tests/dataplane/002-run-latency-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 --warmup-duration 10
+  --source-context cluster-001 --remote-contexts cluster-002 --warmup-duration 10
 ```
 
 Environment: `DATAPLANE_WARMUP_DURATION_SEC`.
@@ -91,7 +91,7 @@ Environment: `DATAPLANE_WARMUP_DURATION_SEC`.
 
 ```bash
 ./tests/dataplane/002-run-latency-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 \
+  --source-context cluster-001 --remote-contexts cluster-002 \
   --qps-levels 50,200,500 --duration 60 --connections 16
 ```
 
@@ -140,10 +140,10 @@ All formats propagate the TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERS
 ## Cleanup
 
 ```bash
-./tests/dataplane/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/dataplane/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
 
 # Skip waiting for namespace termination:
-./tests/dataplane/005-cleanup.sh --no-wait-deletion --contexts rosa-001
+./tests/dataplane/005-cleanup.sh --no-wait-deletion --contexts cluster-001
 ```
 
 ## Caveats / Known Limitations

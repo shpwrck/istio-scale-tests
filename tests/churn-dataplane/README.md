@@ -140,16 +140,16 @@ report (A4).
 ```bash
 # 1. Setup composite chart on three clusters (shared namespace on each)
 ./tests/churn-dataplane/001-setup-coexec-test.sh \
-    --source-context rosa-001 \
-    --remote-contexts rosa-002,rosa-003 \
+    --source-context cluster-001 \
+    --remote-contexts cluster-002,cluster-003 \
     --deployment-count 10
 
 # 2. Baseline (no churn) — 60s at 200 QPS
 #    Use --output-file to set an explicit path reused by step 3.
 TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
 ./tests/churn-dataplane/002-run-baseline-probe.sh \
-    --source-context rosa-001 \
-    --remote-contexts rosa-002,rosa-003 \
+    --source-context cluster-001 \
+    --remote-contexts cluster-002,cluster-003 \
     --duration 60 --qps 200 \
     --combo-id smoke-run \
     --output-file "$TSV"
@@ -157,8 +157,8 @@ TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
 # 3. Churn (200 QPS + 10 scale ops/s) — writes a row into the same TSV
 #    and computes Δp99 vs the matching baseline row.
 ./tests/churn-dataplane/003-run-churn-probe.sh \
-    --source-context rosa-001 \
-    --remote-contexts rosa-002,rosa-003 \
+    --source-context cluster-001 \
+    --remote-contexts cluster-002,cluster-003 \
     --duration 60 --qps 200 --churn-rate 10 \
     --combo-id smoke-run \
     --baseline-file "$TSV" \
@@ -174,7 +174,7 @@ TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
 ```bash
 # 2 mesh sizes × 3 churn rates × 2 repetitions = 12 combinations
 ./tests/churn-dataplane/004-run-sweep.sh \
-    --contexts     rosa-001,rosa-002,rosa-003 \
+    --contexts     cluster-001,cluster-002,cluster-003 \
     --mesh-sizes   1,2 \
     --churn-rates  1,5,10 \
     --repetitions  2
@@ -262,7 +262,7 @@ as the combo id, which only pairs probes within a single invocation.
 
 ```bash
 ./tests/churn-dataplane/006-cleanup.sh \
-    --contexts rosa-001,rosa-002,rosa-003 \
+    --contexts cluster-001,cluster-002,cluster-003 \
     --wait-deletion --timeout 180
 ```
 

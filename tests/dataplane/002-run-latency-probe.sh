@@ -15,11 +15,11 @@
 #
 # Examples:
 #   # Baseline + cross-cluster latency:
-#   ./tests/dataplane/002-run-latency-probe.sh --source-context rosa-001 --remote-contexts rosa-002
+#   ./tests/dataplane/002-run-latency-probe.sh --source-context cluster-001 --remote-contexts cluster-002
 #
 #   # Custom QPS levels and duration:
-#   ./tests/dataplane/002-run-latency-probe.sh --source-context rosa-001 \
-#     --remote-contexts rosa-002 --qps-levels 10,100,1000 --duration 60
+#   ./tests/dataplane/002-run-latency-probe.sh --source-context cluster-001 \
+#     --remote-contexts cluster-002 --qps-levels 10,100,1000 --duration 60
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
