@@ -53,7 +53,7 @@ intermediates:
   source: placement
   # Optional per-cluster-name overrides when source is placement (keys are ManagedCluster / decision clusterName).
   clusterOverrides: {}
-  # rosa-001:
+  # cluster-001:
   #   commonName: ""
   #   duration: 8760h
   #   secretName: ""
@@ -62,7 +62,7 @@ intermediates:
   #     size: 256
   # Only used when source is static:
   clusters: []
-  # - key: rosa-001
+  # - key: cluster-001
   defaultDuration: 8760h
   privateKey:
     algorithm: ECDSA

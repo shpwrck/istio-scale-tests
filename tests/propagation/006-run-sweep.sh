@@ -8,10 +8,10 @@
 #
 # Examples:
 #   # Sweep 1, 2, 3 clusters:
-#   ./tests/propagation/006-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/propagation/006-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
 #
 #   # Sweep specific sizes with fewer iterations:
-#   ./tests/propagation/006-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003 \
+#   ./tests/propagation/006-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003 \
 #     --mesh-sizes 1,3 --iterations 5
 #
 #   # Dry-run to see what would be executed:

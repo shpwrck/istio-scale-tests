@@ -6,7 +6,7 @@
 #
 # Examples:
 #   # Sweep 1, 2, 3 clusters with default churn:
-#   ./tests/churn/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/churn/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
 #
 #   # Sweep churn intensities (deployment counts):
 #   ./tests/churn/003-run-sweep.sh --churn-intensities 5,10,20

@@ -8,10 +8,10 @@
 #
 # Examples:
 #   # 2-cluster churn test:
-#   ./tests/churn/002-run-churn-probe.sh --source-context rosa-001 --remote-contexts rosa-002
+#   ./tests/churn/002-run-churn-probe.sh --source-context cluster-001 --remote-contexts cluster-002
 #
 #   # Scale 10 deployments from 1 to 10 replicas:
-#   ./tests/churn/002-run-churn-probe.sh --source-context rosa-001 \
+#   ./tests/churn/002-run-churn-probe.sh --source-context cluster-001 \
 #     --deployment-count 10 --scale-to 10 --iterations 3
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail

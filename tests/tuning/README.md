@@ -92,20 +92,20 @@ to fail silently (limits are dropped from the Deployment).
 ```bash
 # Apply a single profile and inspect what changed.
 ./tests/tuning/001-apply-profile.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --profile profiles/01-sidecar-scoping.yaml
 
 # Run the controlplane probe to measure impact.
 ./tests/controlplane/002-collect-resource-metrics.sh \
-  --contexts rosa-001,rosa-002,rosa-003
+  --contexts cluster-001,cluster-002,cluster-003
 
 # Revert the profile.
 ./tests/tuning/002-revert-profile.sh \
-  --contexts rosa-001,rosa-002,rosa-003
+  --contexts cluster-001,cluster-002,cluster-003
 
 # Or use the sweep orchestrator to automate multiple profiles.
 ./tests/tuning/003-run-tuning-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --profiles 01-sidecar-scoping,03-push-throttling,06-xds-cache-tuning \
   --suite controlplane
 

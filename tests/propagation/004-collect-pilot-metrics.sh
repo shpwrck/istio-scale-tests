@@ -14,7 +14,7 @@
 #   ./tests/propagation/004-collect-pilot-metrics.sh --watch --interval 10
 #
 #   # Specific clusters:
-#   ./tests/propagation/004-collect-pilot-metrics.sh --contexts rosa-001,rosa-002
+#   ./tests/propagation/004-collect-pilot-metrics.sh --contexts cluster-001,cluster-002
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 

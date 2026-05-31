@@ -7,7 +7,7 @@
 #
 # Examples:
 #   # Sweep 1, 2, 3 clusters:
-#   ./tests/dataplane/003-run-sweep.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/dataplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
 # ci-dry-run:
 set -euo pipefail
 
