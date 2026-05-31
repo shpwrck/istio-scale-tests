@@ -281,7 +281,7 @@ Run the sweep to compare propagation latency across mesh sizes (1, 2, 3, ... N c
 
 ```bash
 ./tests/propagation/006-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 --iterations 5 --watcher-replicas 30
 ```
 
@@ -297,23 +297,23 @@ Measure istiod CPU, memory, and xDS metrics as a function of mesh size **and `Si
 # Sweep across mesh sizes with 50 services per cluster (singular --service-count
 # is a one-value alias; the canonical flag is --service-counts CSV)
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --service-count 50
 
 # CSV form — sweep multiple values per axis
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --service-counts 10,100,500 --replica-counts 1,3 --namespace-counts 1,5
 
 # Cross-product mesh size with Sidecar scoping (none, namespace, explicit)
 # — measures the per-proxy config-size reduction that Sidecar CRs provide.
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 \
   --sidecar-scopings none,namespace,explicit
 
 # Or collect a single snapshot
-./tests/controlplane/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002
+./tests/controlplane/002-collect-resource-metrics.sh --contexts cluster-001,cluster-002
 ```
 
 `--sidecar-scopings` accepts a CSV of `none`, `namespace`, and/or `explicit`; the report's headline is the percentage reduction in per-proxy config bytes versus the `none` baseline. See `tests/controlplane/README.md` for full usage.
@@ -327,7 +327,7 @@ Measure cross-cluster request latency and throughput through east-west gateways 
 ```bash
 # Sweep across mesh sizes
 ./tests/dataplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --qps-levels 10,100,500,1000
 ```
 
@@ -342,7 +342,7 @@ Measure control-plane convergence time under simultaneous scaling events. Scales
 ```bash
 # Sweep across mesh sizes and churn intensities
 ./tests/churn/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --churn-intensities 5,10,20
 ```
 
@@ -357,7 +357,7 @@ Measure how p99 request latency degrades while endpoint churn (Deployment scale 
 ```bash
 # Sweep mesh sizes × churn rates (ops/s)
 ./tests/churn-dataplane/004-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 \
   --churn-rates 1,5,10
 ```

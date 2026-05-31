@@ -99,10 +99,10 @@ bound 500 ms — the actual value is somewhere in that interval.
 
 ```bash
 # 1. Deploy dummy workloads on all clusters (baseline; no Sidecar CRs).
-./tests/controlplane/001-setup-controlplane-test.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/controlplane/001-setup-controlplane-test.sh --contexts cluster-001,cluster-002,cluster-003
 
 # 2. Collect metrics snapshot (delta-window).
-./tests/controlplane/002-collect-resource-metrics.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/controlplane/002-collect-resource-metrics.sh --contexts cluster-001,cluster-002,cluster-003
 
 # 3. View results.
 ./tests/controlplane/004-report-results.sh
@@ -129,24 +129,24 @@ Services are distributed deterministically: service `i` is created in namespace 
 ```bash
 # Default: sweep mesh sizes 1..N, single (10 svc x 3 replicas x 1 ns x none) point each
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003
+  --contexts cluster-001,cluster-002,cluster-003
 
 # Mesh-size x service-count grid (3 x 3 = 9 combos)
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 \
   --service-counts 10,100,500
 
 # Full 3x3 sidecar scoping sweep
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3 \
   --sidecar-scopings none,namespace,explicit \
   --service-count 50
 
 # Hold mesh fixed; sweep namespace cardinality to expose informer overhead
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 3 \
   --service-counts 200 \
   --namespace-counts 1,5,25,50
@@ -157,7 +157,7 @@ Services are distributed deterministically: service `i` is created in namespace 
 
 # Disable config_dump sampling (faster sweep, no exec round-trips)
 ./tests/controlplane/003-run-sweep.sh \
-  --contexts rosa-001 --config-dump-samples 0
+  --contexts cluster-001 --config-dump-samples 0
 ```
 
 `SETTLE_SEC` is applied at TWO points inside each combo: (1) between the
@@ -186,7 +186,7 @@ conflate. TSV files carry a metadata preamble:
 # Control-plane resource metrics — 2026-05-20T18:32:01+00:00
 # ISTIO_VERSION=1.24.0
 # HARNESS_SHA=4139b50
-# KUBE_VERSIONS=rosa-001=v1.29.4, rosa-002=v1.29.4, rosa-003=v1.29.4
+# KUBE_VERSIONS=cluster-001=v1.29.4, cluster-002=v1.29.4, cluster-003=v1.29.4
 # SIDECAR_SCOPING=none
 # CONFIG_DUMP_SAMPLES=3
 # SETTLE_SEC=60
@@ -235,7 +235,7 @@ Legacy TSV files with a non-34-column schema are skipped with a stderr warning.
 ## Cleanup
 
 ```bash
-./tests/controlplane/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/controlplane/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
 ```
 
 Cleanup deletes every namespace labelled `app.kubernetes.io/instance=controlplane-test`

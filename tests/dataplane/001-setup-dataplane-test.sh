@@ -9,8 +9,8 @@
 #   ./tests/dataplane/001-setup-dataplane-test.sh --source-context CTX [--remote-contexts CSV] [options]
 #
 # Examples:
-#   # Server on all clusters, client on rosa-001:
-#   ./tests/dataplane/001-setup-dataplane-test.sh --source-context rosa-001 --remote-contexts rosa-002,rosa-003
+#   # Server on all clusters, client on cluster-001:
+#   ./tests/dataplane/001-setup-dataplane-test.sh --source-context cluster-001 --remote-contexts cluster-002,cluster-003
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 

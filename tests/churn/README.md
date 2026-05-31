@@ -34,11 +34,11 @@ After each scale-down, the probe waits for all proxies to reach SYNCED (via sync
 
 ```bash
 # 1. Deploy churn targets and watcher pods
-./tests/churn/001-setup-churn-test.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/churn/001-setup-churn-test.sh --contexts cluster-001,cluster-002,cluster-003
 
 # 2. Run churn probe (scale 5 deployments from 1 to 5 replicas)
 ./tests/churn/002-run-churn-probe.sh \
-  --source-context rosa-001 --remote-contexts rosa-002 \
+  --source-context cluster-001 --remote-contexts cluster-002 \
   --iterations 5
 
 # 3. View results
@@ -50,12 +50,12 @@ After each scale-down, the probe waits for all proxies to reach SYNCED (via sync
 ```bash
 # Sweep mesh sizes with default churn
 ./tests/churn/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002,rosa-003 \
+  --contexts cluster-001,cluster-002,cluster-003 \
   --mesh-sizes 1,2,3
 
 # Sweep churn intensities (5, 10, 20 deployments)
 ./tests/churn/003-run-sweep.sh \
-  --contexts rosa-001,rosa-002 \
+  --contexts cluster-001,cluster-002 \
   --churn-intensities 5,10,20
 
 # Dry-run
@@ -73,7 +73,7 @@ run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch
 ## Cleanup
 
 ```bash
-./tests/churn/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+./tests/churn/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
 ```
 
 ## Scripts

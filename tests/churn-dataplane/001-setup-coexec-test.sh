@@ -7,13 +7,13 @@
 #       --source-context CTX [--remote-contexts CSV] [options]
 #
 # Examples:
-#   # Source on rosa-001 with two remote clusters as additional server endpoints:
+#   # Source on cluster-001 with two remote clusters as additional server endpoints:
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
-#     --source-context rosa-001 --remote-contexts rosa-002,rosa-003
+#     --source-context cluster-001 --remote-contexts cluster-002,cluster-003
 #
 #   # Dry-run (templates rendered through `oc apply --dry-run=client`):
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
-#     --source-context rosa-001 --remote-contexts rosa-002 --dry-run
+#     --source-context cluster-001 --remote-contexts cluster-002 --dry-run
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 

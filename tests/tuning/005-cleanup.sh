@@ -9,7 +9,7 @@
 #   ./tests/tuning/005-cleanup.sh [--contexts CSV] [options]
 #
 # Examples:
-#   ./tests/tuning/005-cleanup.sh --contexts rosa-001,rosa-002,rosa-003
+#   ./tests/tuning/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
 #   ./tests/tuning/005-cleanup.sh --dry-run
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
