@@ -2,12 +2,12 @@
 
 Install once per spoke: one cluster-scoped `ManagedCluster` on the hub. Release names should be unique per cluster (for example `acm-managed-cluster-cluster-002`).
 
-`platform-setup/001-acm-install-hub.sh` processes each Terraform spoke key in order: `helm upgrade --install` on the hub, waits for the hub import / auto-import secret (`import.yaml`), applies `crds.yaml` from that secret on the spoke when present (else CRD stanzas embedded in `import.yaml`), then applies the full `import.yaml` on the spoke (with retries). Repeat for the next cluster.
+Terraform (`terraform/platform/platform_acm_spokes.tf`) installs one `helm_release.acm_managed_cluster` per spoke on the hub and writes an `auto-import-secret` in that spoke's hub namespace; the RHACM import controller consumes the secret and registers the spoke (no manual `import.yaml` extraction).
 
 ## Values
 
 - `managedCluster.name` (required) — must match the spoke’s kubectl/oc context name and the hub namespace RHACM creates for that cluster.
-- `clustersetName` (default `istio-scale-tests`) — sets label `cluster.open-cluster-management.io/clusterset=<name>` for ManagedClusterSet membership (`ACM_CLUSTER_SET` / platform-setup/002 chart `clusterSet` must match).
+- `clustersetName` (default `istio-scale-tests`) — sets label `cluster.open-cluster-management.io/clusterset=<name>` for ManagedClusterSet membership (must match `var.acm_cluster_set` and the `acm-openshift-gitops-resources` chart `clusterSet`).
 - `managedCluster.labels` — merged over `defaultLabels` and the clusterset label (can override membership if needed).
 
 ## Manual Helm
@@ -20,4 +20,4 @@ helm upgrade --install acm-managed-cluster-cluster-002 ./charts/acm-managed-clus
   --set clustersetName=istio-scale-tests
 ```
 
-See RHACM docs for import secrets (`${CLUSTER_NAME}-import`, `auto-import-secret`, manual import). platform-setup/001 automates the full flow per cluster.
+See RHACM docs for import secrets (`${CLUSTER_NAME}-import`, `auto-import-secret`, manual import). Terraform automates this per spoke via the `auto-import-secret` (see `terraform/platform/platform_acm_spokes.tf`).

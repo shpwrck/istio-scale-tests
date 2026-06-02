@@ -8,7 +8,7 @@ Prerequisites: cert-manager Operator installed and healthy; operand namespace `c
 
 When **`rbac.enabled`** is true (default), the chart installs a **Role** and **RoleBinding** in **`namespace`** (`cert-manager` by default) so the OpenShift GitOps application controller service account can manage **`certificates.cert-manager.io`** and **`Secrets`** there. A **ClusterRole** and **ClusterRoleBinding** grant **`clusterissuers.cert-manager.io`**. Targets **`rbac.argocd.namespace`** / **`rbac.argocd.serviceAccountName`** (OpenShift GitOps defaults: `openshift-gitops`, `openshift-gitops-argocd-application-controller`). Override for upstream Argo CD (`argocd`, `argocd-application-controller`). Hooks run before other manifests so permissions exist before Certificate sync.
 
-Disable with **`rbac.enabled: false`** if you manage this RBAC outside the chart (for example in `platform-setup`).
+Disable with **`rbac.enabled: false`** if you manage this RBAC outside the chart (for example in Terraform).
 
 ## Argo CD sync waves (default)
 
