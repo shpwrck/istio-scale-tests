@@ -1,5 +1,0 @@
-apiVersion: v2
-name: acm-gitops-cluster
-description: GitOpsCluster CR binding ACM Placement to an Argo CD instance (requires RHACM CRDs).
-type: application
-version: 0.1.0
