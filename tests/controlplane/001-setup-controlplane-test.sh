@@ -34,6 +34,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -43,18 +45,6 @@ SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
-
-die() { echo "error: $*" >&2; exit 1; }
-
-is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
-is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
-
-validate_scoping() {
-	case "$1" in
-	none | namespace | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
-	esac
-}
 
 usage() {
 	cat <<EOF
@@ -81,19 +71,6 @@ Environment:
   CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
   CONTROLPLANE_SIDECAR_SCOPING.
 EOF
-}
-
-split_csv() {
-	local csv="$1"
-	local -n _out="$2"
-	_out=()
-	local x
-	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
-		x="${x#"${x%%[![:space:]]*}"}"
-		x="${x%"${x##*[![:space:]]}"}"
-		[[ -n "$x" ]] && _out+=("$x")
-	done
 }
 
 while [[ $# -gt 0 ]]; do

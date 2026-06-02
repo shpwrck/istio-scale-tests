@@ -16,11 +16,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 RESULTS_DIR="${ROOT}/tests/controlplane/results"
 FORMAT="text"
-
-die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF

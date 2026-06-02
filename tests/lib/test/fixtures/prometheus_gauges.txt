@@ -1,0 +1,9 @@
+# HELP pilot_info Pilot version info
+# TYPE pilot_info gauge
+pilot_info{version="1.24.0"} 1
+# HELP pilot_xds Pilot connected endpoints
+# TYPE pilot_xds gauge
+pilot_xds{cluster="outbound|8080||svc.ns.svc.cluster.local"} 5
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.7169408e+09
