@@ -1,0 +1,5 @@
+apiVersion: v2
+name: mesh-wiring-verify
+description: Multicluster mesh wiring health gate — a per-spoke readiness probe that fails (pod NotReady → Argo Application Degraded) when a mesh member is missing remote secrets or istiod has not synced every cluster. Closes the gap where ESO reports PushSecret Synced=True on a partial fan-out and Argo shows all-green.
+type: application
+version: 0.1.0
