@@ -128,6 +128,17 @@ resource "helm_release" "argocd_config" {
         name  = "argocd.name"
         value = var.gitops_argocd_cr_name
       },
+      {
+        name  = "argocd.controller.sharding.clustersPerShard"
+        value = tostring(var.argocd_clusters_per_shard)
+      },
+      # minShards = ceil((spokes + 1 for in-cluster) / clustersPerShard)
+      # Guarantees the statefulset starts with enough replicas so no Application
+      # gets an empty controllerNamespace while dynamic scaling catches up.
+      {
+        name  = "argocd.controller.sharding.minShards"
+        value = tostring(ceil((length(local.spoke_cluster_keys) + 1) / var.argocd_clusters_per_shard))
+      },
     ],
     var.gitops_rhacm_appset_any_namespace ? [
       {
