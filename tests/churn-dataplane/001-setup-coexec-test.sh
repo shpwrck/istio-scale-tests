@@ -51,7 +51,9 @@ Usage: $(basename "$0") [options]
   -h, --help               Show this help.
 
 Environment:
-  SETUP_CONTEXTS, COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS.
+  SETUP_CONTEXTS, COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
+  COEXEC_ISTIOD_REPLICAS (expected istiod replica pin; warns on mismatch),
+  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
 EOF
 }
 

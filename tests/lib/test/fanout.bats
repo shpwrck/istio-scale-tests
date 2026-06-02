@@ -33,7 +33,31 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 
 # --- gauge SUM vs INVARIANT (the load-bearing distinction) ------------------
 
-@test "fanout_gauge_sum: pilot_xds connected-proxies SUM across replicas (5+7=12)" {
+@test "extract_gauge_sum: sums multiple label permutations WITHIN a pod (3+2=5)" {
+	# PL12 axis 1: pod0 has pilot_xds{type=ads}=3 + pilot_xds{type=grpc}=2.
+	result=$(extract_gauge_sum "$POD0" pilot_xds)
+	[ "$result" = "5" ]
+}
+
+@test "extract_gauge_sum: within-pod sum for pod1 (4+3=7)" {
+	result=$(extract_gauge_sum "$POD1" pilot_xds)
+	[ "$result" = "7" ]
+}
+
+@test "extract_gauge (last-line) is NOT a sum — documents the trap fanout avoids" {
+	# Plain extract_gauge returns ONE permutation (last line), here grpc=2, not 5.
+	result=$(extract_gauge "$POD0" pilot_xds)
+	[ "$result" = "2" ]
+}
+
+@test "extract_gauge_sum: missing gauge returns unknown" {
+	result=$(extract_gauge_sum "$ZERO" pilot_xds)
+	[ "$result" = "unknown" ]
+}
+
+@test "fanout_gauge_sum: pilot_xds SUM on BOTH axes (within-pod 5/7 -> cross-pod 12)" {
+	# Each pod has TWO pilot_xds permutations; fanout must sum within (axis 1)
+	# AND across pods (axis 2): (3+2) + (4+3) = 12.
 	result=$(fanout_gauge_sum pilot_xds "$POD0" "$POD1")
 	[ "$result" = "12" ]
 }
@@ -84,6 +108,72 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	rm -f "$merged"
 	# pod0 alone: count 50, target 49.5; cumulative le=0.5:30 le=1:50>=49.5 -> 1*1000
 	[ "$result" = "1000.00" ]
+}
+
+# --- empty / incomplete scrape detection -----------------------------------
+# Stub curl so fanout_scrape_all can be exercised without a live istiod. The
+# stub maps a port to a canned body via $CURL_BODY_DIR/<port>; a missing file
+# simulates a connection failure (curl exits non-zero, empty out file).
+
+_install_curl_stub() {
+	CURL_BODY_DIR="$(mktemp -d)"
+	export CURL_BODY_DIR
+	curl() {
+		local out="" url="" port=""
+		while (($#)); do
+			case "$1" in
+				-o) out="$2"; shift 2 ;;
+				http://localhost:*/metrics) url="$1"; shift ;;
+				*) shift ;;
+			esac
+		done
+		port="${url#http://localhost:}"; port="${port%/metrics}"
+		local body="${CURL_BODY_DIR}/${port}"
+		if [[ -f "$body" ]]; then
+			[[ -n "$out" ]] && cp "$body" "$out"
+			return 0
+		fi
+		[[ -n "$out" ]] && : > "$out"
+		return 7  # curl: couldn't connect
+	}
+	export -f curl
+}
+
+@test "fanout_scrape_all: full body on every pod -> failed=0, returns 0" {
+	_install_curl_stub
+	# Two pods with full multi-KB-ish bodies.
+	cp "$POD0" "$CURL_BODY_DIR/30000"
+	cp "$POD1" "$CURL_BODY_DIR/30001"
+	d=$(mktemp -d)
+	run fanout_scrape_all "$d" tick 30000 30001
+	[ "$status" -eq 0 ]
+	[ "$(fanout_scrape_failed_count "$d" tick)" = "0" ]
+	rm -rf "$d" "$CURL_BODY_DIR"
+}
+
+@test "fanout_scrape_all: a dead PF (no body) -> failed=1, returns non-zero" {
+	_install_curl_stub
+	cp "$POD0" "$CURL_BODY_DIR/30000"
+	# port 30001 has NO canned body -> stub returns 7 (connection failure)
+	d=$(mktemp -d)
+	run fanout_scrape_all "$d" tick 30000 30001
+	[ "$status" -ne 0 ]
+	[ "$(fanout_scrape_failed_count "$d" tick)" = "1" ]
+	# The reachable pod's scrape is intact; the dead pod's file is empty.
+	[ -s "$d/tick-0.metrics" ]
+	[ ! -s "$d/tick-1.metrics" ]
+	rm -rf "$d" "$CURL_BODY_DIR"
+}
+
+@test "fanout_scrape_all: short/truncated body counts as failed (not a legit 0)" {
+	_install_curl_stub
+	cp "$POD0" "$CURL_BODY_DIR/30000"
+	printf 'pilot_xds{type="ads"} 0\n' > "$CURL_BODY_DIR/30001"  # < 512 bytes
+	d=$(mktemp -d)
+	run fanout_scrape_all "$d" tick 30000 30001
+	[ "$status" -ne 0 ]
+	[ "$(fanout_scrape_failed_count "$d" tick)" = "1" ]
+	rm -rf "$d" "$CURL_BODY_DIR"
 }
 
 # --- restart detection (pod-set change + per-pod start-time advance) --------

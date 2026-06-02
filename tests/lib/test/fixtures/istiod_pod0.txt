@@ -1,7 +1,11 @@
 # istiod replica 0 of a multi-replica (fanned-out) control plane.
 # HELP pilot_xds Number of endpoints connected to this pilot using XDS.
 # TYPE pilot_xds gauge
-pilot_xds{type="grpc"} 5
+# Two label permutations whose within-pod TOTAL is 5 (ads 3 + grpc 2). The
+# fanout must sum BOTH permutations within the pod (PL12 axis 1) before summing
+# across pods (axis 2) -> pod0 5 + pod1 7 = 12.
+pilot_xds{type="ads"} 3
+pilot_xds{type="grpc"} 2
 # HELP pilot_services Total services known to pilot.
 # TYPE pilot_services gauge
 pilot_services 42

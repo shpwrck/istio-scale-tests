@@ -2,7 +2,9 @@
 # Disjoint convergence samples from pod0; identical mesh-global pilot_services.
 # HELP pilot_xds Number of endpoints connected to this pilot using XDS.
 # TYPE pilot_xds gauge
-pilot_xds{type="grpc"} 7
+# Within-pod TOTAL 7 (ads 4 + grpc 3); cross-pod with pod0 -> 5 + 7 = 12.
+pilot_xds{type="ads"} 4
+pilot_xds{type="grpc"} 3
 # HELP pilot_services Total services known to pilot.
 # TYPE pilot_services gauge
 pilot_services 42

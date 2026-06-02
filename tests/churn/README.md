@@ -70,6 +70,36 @@ TSV files in per-sweep subdirectories under `tests/churn/results/` (gitignored):
 run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  source_connected_proxies  remote_connected_proxies  source_push_time_p99_ms  remote_push_time_p99_ms  status
 ```
 
+The preamble (`#`-comment lines above the header) records run metadata including
+`ISTIOD_REPLICAS=<n>` — the number of Running source istiod pods discovered at
+preflight (provenance for the per-pod fanout, PL2). Note: churn and
+churn-dataplane record this as a single source-context scalar; the propagation
+suite records a per-context CSV (`ctx=N,...`) because it fans out over the source
+**and** every remote context.
+
+The `status` column is one of: `OK`, `TIMEOUT_LOCAL`, `TIMEOUT_REMOTE`,
+`POISONED_RESTART` (a mid-window istiod restart — local or remote — was detected,
+so the istiod-side counter/histogram deltas are emitted as `N/A`), or
+`SCRAPE_INCOMPLETE` (a per-pod `/metrics` scrape was empty/unreachable, so the
+summed counters / merged histograms are undercounted). The report
+(`004-report-results.sh`) aggregates numeric columns over `status==OK` rows only
+and shows `n_valid`/`n_total` so the filter rate is visible (PL13/PL15).
+
+### Multi-replica istiod fanout
+
+The mesh runs a FIXED multi-replica istiod (HPA disabled). A single
+`kubectl port-forward svc/istiod` load-balances to one random replica, so a lone
+scrape sees only `~1/replicas` of the proxies/pushes. The probe instead
+port-forwards EVERY Running istiod pod per context (`tests/lib/fanout.sh`) and
+aggregates: `pilot_xds` (connected proxies) and the counter deltas
+(`pilot_push_triggers`, `pilot_xds_pushes`) are **summed** across replicas;
+`pilot_proxy_queue_time` / `pilot_xds_push_time` histogram buckets are
+**bucket-summed** across replicas before the delta/quantile; `/debug/syncz` is
+fanned out across all source pods (converged only when every replica reports 0
+stale). Restart detection uses a per-pod `process_start_time_seconds` signature
+(any pod's start advancing OR a pod-set change → `POISONED_RESTART`). The probe
+requires only `>= 1` Running istiod pod per context.
+
 ## Cleanup
 
 ```bash

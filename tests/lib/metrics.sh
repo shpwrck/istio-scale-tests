@@ -8,6 +8,7 @@
 #   extract_counter_sum <metrics_file> <counter_name>
 #   extract_counter_by_label <metrics_file> <counter_name> <label> <value>
 #   extract_gauge <metrics_file> <gauge_name>
+#   extract_gauge_sum <metrics_file> <gauge_name>
 #   delta_histogram_p99 <baseline_file> <final_file> <histogram_name>
 #
 # All functions take file paths rather than string variables — istiod /metrics
@@ -65,9 +66,12 @@ extract_counter_by_label() {
 	' "$file"
 }
 
-# Extract a single Prometheus gauge value.
+# Extract a single Prometheus gauge value (LAST matching line).
 # Usage: extract_gauge <metrics_file> <gauge_name>
 # Returns the gauge value, or "unknown" if not found.
+# NOTE: this returns ONE permutation's value (the last line matched). For a gauge
+# emitted with multiple label permutations whose TOTAL is meaningful (e.g.
+# pilot_xds{type="ads"} + pilot_xds{type="grpc"}), use extract_gauge_sum instead.
 # shellcheck disable=SC2329
 extract_gauge() {
 	local file="$1" name="$2"
@@ -76,6 +80,24 @@ extract_gauge() {
 	!/^#/ && $0 ~ pat { val = $NF+0; found = 1 }
 	END {
 		if (found) printf "%s\n", val
+		else        printf "unknown\n"
+	}
+	' "$file"
+}
+
+# Sum a Prometheus gauge across ALL name-anchored label permutations (PL12).
+# Usage: extract_gauge_sum <metrics_file> <gauge_name>
+# Returns the summed value, or "unknown" if no permutation is present. The name
+# is anchored with a following "{" or space so it does not prefix-collide with
+# e.g. pilot_xds_pushes / pilot_xds_config_size_bytes.
+# shellcheck disable=SC2329
+extract_gauge_sum() {
+	local file="$1" name="$2"
+	awk -v name="$name" '
+	BEGIN { pat = "^" name "(\\{| )" }
+	!/^#/ && $0 ~ pat { sum += $NF+0; found = 1 }
+	END {
+		if (found) printf "%s\n", sum
 		else        printf "unknown\n"
 	}
 	' "$file"

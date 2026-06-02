@@ -60,6 +60,19 @@ Usage: $(basename "$0") [options]
   --output-dir DIR         Results directory (default: tests/churn/results).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
+
+Environment:
+  SETUP_CONTEXTS               Default comma-separated contexts (see config/versions.env).
+  CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
+  CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
+  CHURN_BASE_REPLICAS          Replica count targets scale back down to.
+  CHURN_SCALE_TO_REPLICAS      Default --scale-to.
+  CHURN_ITERATIONS             Default --iterations.
+  CHURN_TIMEOUT_SEC            Default --timeout.
+  CHURN_SETTLE_SEC             Default --settle.
+  CHURN_POLL_INTERVAL_MS       syncz / endpoint poll interval in ms.
+  FANOUT_PF_BASE               Per-pod istiod port-forward block base (default 21014).
+  FANOUT_CTX_STRIDE            Per-context port stride (default 20).
 EOF
 }
 
@@ -353,24 +366,35 @@ echo ""
 TMPDIR_RUN=$(mktemp -d)
 trap 'cleanup; rm -rf "$TMPDIR_RUN"' EXIT
 
-# Fan out one port-forward per Running istiod pod, per context. The source
-# context is ctx_index 0; remote i is ctx_index i+1 (collision-free blocks).
-echo "Starting port-forwards..."
-SRC_ISTIOD_PORTS=()
-# SRC_ISTIOD_PODS is a required out-array of fanout_open; not read directly here
-# (restart detection uses the recorded .podset file), so mark it used.
-# shellcheck disable=SC2034
-SRC_ISTIOD_PODS=()
-fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS SRC_ISTIOD_PODS "${KUBECTL[@]}"
-
 # Per-remote istiod pod-port arrays, stored as newline strings keyed by remote idx
 # (bash has no array-of-arrays); split back with split_csv-style read when used.
 declare -A RMT_PORTS_STR=()
+SRC_ISTIOD_PORTS=()
+
+# (Re)open one istiod port-forward per Running pod, per context. The source
+# context is ctx_index 0; remote i is ctx_index i+1 (collision-free blocks).
+# Re-listing pods on reopen picks up a pod-set change. Envoy watcher PFs are
+# opened once (open_envoy_fanouts) — they are not re-opened here.
+open_istiod_fanouts() {
+	# pods array is a required out-arg of fanout_open; not read directly here
+	# (restart detection uses the recorded .podset file).
+	# shellcheck disable=SC2034
+	local pods=()
+	SRC_ISTIOD_PORTS=()
+	fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS pods "${KUBECTL[@]}"
+	local i rp rpods
+	for i in "${!REMOTES[@]}"; do
+		rp=()
+		# shellcheck disable=SC2034  # required out-arg of fanout_open; podset recorded per-scrape
+		rpods=()
+		fanout_open "${REMOTES[i]}" $(( i + 1 )) PF_PIDS rp rpods "${KUBECTL[@]}"
+		RMT_PORTS_STR["$i"]="$(IFS=$'\n'; echo "${rp[*]}")"
+	done
+}
+
+echo "Starting port-forwards..."
+open_istiod_fanouts
 for i in "${!REMOTES[@]}"; do
-	_rp=()
-	_rpods=()
-	fanout_open "${REMOTES[i]}" $(( i + 1 )) PF_PIDS _rp _rpods "${KUBECTL[@]}"
-	RMT_PORTS_STR["$i"]="$(IFS=$'\n'; echo "${_rp[*]}")"
 	start_envoy_port_forward "${REMOTES[i]}" $(( BASE_ENVOY_PF_PORT + i ))
 done
 echo "Port-forwards ready."
@@ -384,6 +408,38 @@ load_rmt_ports() {
 	while IFS= read -r p; do [[ -n "$p" ]] && _arr+=("$p"); done <<<"${RMT_PORTS_STR[$idx]}"
 }
 
+# Per-iteration PF liveness check: if ANY istiod pod-port across any context is
+# unresponsive, kill the whole istiod PF set and re-open every context's block
+# (re-listing pods, so a pod-set change is picked up). Mirrors propagation's
+# fanout_reopen_if_dead. Envoy watcher PFs are left intact.
+reopen_istiod_fanouts_if_dead() {
+	local alive=1 port
+	for port in "${SRC_ISTIOD_PORTS[@]}"; do
+		curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break; }
+	done
+	if ((alive)); then
+		local j _rp2=()
+		for j in "${!REMOTES[@]}"; do
+			load_rmt_ports "$j" _rp2
+			for port in "${_rp2[@]}"; do
+				curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break 2; }
+			done
+		done
+	fi
+	((alive)) && return 0
+	echo "  istiod port-forward(s) unresponsive — re-opening fanout blocks..." >&2
+	local pid
+	# Kill only the istiod PFs we can't selectively map, so re-open the lot; the
+	# envoy watcher PFs share PF_PIDS, so re-open those too to keep them alive.
+	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	PF_PIDS=()
+	open_istiod_fanouts
+	local k
+	for k in "${!REMOTES[@]}"; do
+		start_envoy_port_forward "${REMOTES[k]}" $(( BASE_ENVOY_PF_PORT + k ))
+	done
+}
+
 # Convergence threshold: at least 1 new endpoint per deployment visible in the
 # remote sidecar.  This confirms EDS propagation without gating on full pod
 # rollout time (which is a Kubernetes scheduling concern, not Istio convergence).
@@ -395,13 +451,21 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	ITER_DIR="$TMPDIR_RUN/iter-${iter}"
 	mkdir -p "$ITER_DIR"
+
+	# Per-iteration PF liveness check (re-opens dead blocks, picks up pod churn)
+	# before the baseline scrape, so a PF that died between iterations does not
+	# silently undercount this iteration's deltas.
+	reopen_istiod_fanouts_if_dead
 	SRC_NPORTS="${#SRC_ISTIOD_PORTS[@]}"
+	# Track whether any per-pod scrape this iteration came back empty/incomplete.
+	ITER_SCRAPE_INCOMPLETE=0
 
 	# Pre-churn: gauges + endpoint baselines first (order-insensitive), then a
 	# full per-pod baseline scrape of every source istiod immediately before
 	# scale-up so the delta window starts at the scale-up. pilot_xds (connected
 	# proxies) SUMS across replicas; histograms/counters aggregate per pod below.
 	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null
+	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_PRE_FILES < <(ctx_metric_files "$ITER_DIR" "src-pre" "$SRC_NPORTS")
 	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-pre.podset" "${KUBECTL[@]}"
 	src_connected_proxies=$(fanout_gauge_sum pilot_xds "${SRC_PRE_FILES[@]}")
@@ -412,6 +476,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		_rports=()  # populated by load_rmt_ports via nameref
 		load_rmt_ports "$i" _rports
 		scrape_ctx "$ITER_DIR" "rmt${i}-pre" "${_rports[@]}" >/dev/null
+		(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 		mapfile -t _rfiles < <(ctx_metric_files "$ITER_DIR" "rmt${i}-pre" "${#_rports[@]}")
 		RMT_PRE_FILES_STR["$i"]="$(IFS=$'\n'; echo "${_rfiles[*]}")"
 		fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-pre.podset" "${KUBECTL[@]}"
@@ -481,6 +546,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
 	scrape_ctx "$ITER_DIR" "src-post" "${SRC_ISTIOD_PORTS[@]}" >/dev/null
+	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_POST_FILES < <(ctx_metric_files "$ITER_DIR" "src-post" "$SRC_NPORTS")
 	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-post.podset" "${KUBECTL[@]}"
 
@@ -518,6 +584,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			_rports=()  # populated by load_rmt_ports via nameref
 			load_rmt_ports "$i" _rports
 			scrape_ctx "$ITER_DIR" "rmt${i}-post" "${_rports[@]}" >/dev/null
+			(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 			mapfile -t _rpost_files < <(ctx_metric_files "$ITER_DIR" "rmt${i}-post" "${#_rports[@]}")
 			fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-post.podset" "${KUBECTL[@]}"
 			mapfile -t _rpre_files <<<"${RMT_PRE_FILES_STR[$i]}"
@@ -566,8 +633,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	fi
 
 	# PL13: poison this row's istiod-side deltas/quantiles if any istiod restarted
-	# (local or remote) or restart status is unknown.
-	if [[ "$restarted_local" != "0" || "$restarted_remote" != "0" ]]; then
+	# (local or remote), restart status is unknown, OR a per-pod scrape was
+	# incomplete (a missing pod undercounts the summed counters / merged buckets).
+	if [[ "$restarted_local" != "0" || "$restarted_remote" != "0" || "$ITER_SCRAPE_INCOMPLETE" == "1" ]]; then
 		src_triggers_delta="N/A"; rmt_triggers_delta="N/A"
 		src_pushes_delta="N/A"; rmt_pushes_delta="N/A"
 		src_queue_p99="N/A"; rmt_queue_p99="N/A"
@@ -600,6 +668,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# convergence TIMEOUT, which signals a worse/different problem.
 	if [[ "$status" == "OK" && ( "$restarted_local" != "0" || "$restarted_remote" != "0" ) ]]; then
 		status="POISONED_RESTART"
+	fi
+	# An incomplete per-pod scrape undercounts the summed istiod-side deltas; tag
+	# the row so the report (004) filters it from numeric aggregation.
+	if [[ "$status" == "OK" && "$ITER_SCRAPE_INCOMPLETE" == "1" ]]; then
+		status="SCRAPE_INCOMPLETE"
 	fi
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
