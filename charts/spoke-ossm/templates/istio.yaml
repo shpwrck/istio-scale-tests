@@ -24,6 +24,14 @@ spec:
     pilot:
       cni:
         enabled: true
+      autoscaleEnabled: {{ .Values.pilot.autoscaleEnabled }}
+      {{- if not .Values.pilot.autoscaleEnabled }}
+      replicaCount: {{ .Values.pilot.replicaCount }}
+      {{- end }}
+      {{- with .Values.pilot.resources }}
+      resources:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     meshConfig:
       accessLogFile: {{ .Values.accessLogFile | quote }}
       accessLogEncoding: {{ .Values.accessLogEncoding | quote }}
