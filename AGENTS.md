@@ -79,8 +79,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `charts/acm-klusterlet-config/` | Helm chart: `KlusterletConfig` CR only (Terraform `terraform/platform/platform_acm.tf`). |
 | `charts/acm-managed-cluster/` | Helm chart for a single spoke `ManagedCluster`; Terraform `terraform/platform/platform_acm_spokes.tf` installs one release per non-hub cluster. |
 | `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for Red Hat OpenShift GitOps (Terraform `terraform/platform/platform_gitops.tf`). |
-| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster into GitOps namespace (Terraform `terraform/platform/platform_gitops.tf`). |
-| `charts/acm-gitops-cluster/` | Helm chart: `GitOpsCluster` CR binding ACM Placement to an Argo CD instance. |
+| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding and Placement into GitOps namespace (Terraform `terraform/platform/platform_gitops.tf`). |
 | `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration (requires OpenShift GitOps operator CRDs). |
 | `terraform/rosa-hcp/` | Terraform root for ROSA Hosted Control Plane cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
 | `terraform/platform/` | Terraform root for ACM + OpenShift GitOps platform setup; reads rosa-hcp state via `terraform_remote_state`. |

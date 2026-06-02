@@ -24,11 +24,10 @@ The app-of-apps syncs child Applications with sync-wave ordering:
 
 | Chart | Description |
 | --- | --- |
-| `acm-gitops-cluster/` | GitOpsCluster CR binding ACM Placement to an Argo CD instance |
 | `acm-klusterlet-config/` | KlusterletConfig for RHACM hub |
 | `acm-managed-cluster/` | Single RHACM ManagedCluster (one release per spoke) |
 | `acm-multicluster-hub/` | MultiClusterHub CR for RHACM |
-| `acm-openshift-gitops-resources/` | ManagedClusterSetBinding, Placement, and GitOpsCluster for hub GitOps |
+| `acm-openshift-gitops-resources/` | ManagedClusterSetBinding and Placement for hub GitOps |
 | `acm-operator/` | ACM operator OLM Subscription |
 | `argocd-config/` | ArgoCD custom resource configuration |
 | `cert-manager-operator/` | cert-manager operator OLM Subscription (hub) |

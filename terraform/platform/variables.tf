@@ -154,16 +154,10 @@ variable "gitops_applicationset_source_namespaces" {
   description = "Namespaces merged into ArgoCD spec.applicationSet.sourceNamespaces."
 }
 
-variable "gitops_addon_enabled" {
-  type        = bool
-  default     = true
-  description = "GitOpsCluster spec.gitopsAddon.enabled — enables the gitops-addon on spoke ManagedClusters."
-}
-
 variable "gitops_managed_service_account_name" {
   type        = string
   default     = "argocd-gitops"
-  description = "ManagedServiceAccount name for GitOpsCluster integration. Created per spoke; referenced by GitOpsCluster.spec.managedServiceAccountRef. Uses ManagedCluster.spec.managedClusterClientConfigs for the ArgoCD cluster secret server URL."
+  description = "ManagedServiceAccount name created per spoke (acm-managed-cluster chart). Its rotated token authenticates the Terraform-owned Argo CD cluster Secret to the spoke. The secret name follows <spoke>-<this>-cluster-secret, which the hub-kubeconfig-from-argosecret ESO chart also reads."
 }
 
 # --------------------------------------------------------------------------

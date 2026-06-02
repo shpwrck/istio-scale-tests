@@ -30,9 +30,9 @@ The module deploys resources in order, waiting for dependencies at each step:
 1. **ACM operator** — OLM Subscription + MultiClusterHub + KlusterletConfig (`platform_acm.tf`)
 2. **Spoke registration** — ManagedCluster + auto-import-secret per non-hub cluster (`platform_acm_spokes.tf`)
 3. **OpenShift GitOps operator** — OLM Subscription + ArgoCD resource limits and ApplicationSet config (`platform_gitops.tf`)
-4. **ACM GitOps wiring** — ManagedClusterSetBinding, Placement, and GitOpsCluster binding spokes to Argo CD
+4. **ACM GitOps wiring** — ManagedClusterSetBinding and Placement binding spokes to Argo CD
 5. **Hub app-of-apps** — Argo CD Application pointing to `charts/gitops-hub-apps/applications/`, which rolls out the entire mesh via ApplicationSets (Sail operator, Istio CRs, cert-manager, ESO, gateways)
-6. **Cluster secret patching** — corrects spoke API URLs in Argo CD cluster secrets
+6. **Cluster secret creation** — Terraform-owned Argo CD cluster secrets pointing at each spoke's direct external API URL (`create-argocd-cluster-secret.sh`). We own these instead of ACM's GitOpsCluster controller, which forces an unreachable internal/cluster-proxy URL.
 
 Steps 3–6 are skipped when `enable_gitops = false`.
 
