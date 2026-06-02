@@ -2,9 +2,9 @@
 
 YAML in this directory is synced by the Argo CD Application **hub-gitops-root** (directory source, recursive). Each file should define one `Application` CR (typically `*.yaml`).
 
-Adding a new app: commit a new `Application` manifest here with `metadata.namespace: openshift-gitops` (or your `GITOPS_NAMESPACE`), `spec.source.path` pointing at a chart or manifests in this repo, and **`spec.source.repoURL` matching** the Git URL used for `hub-gitops-root` (same as `GITOPS_APP_REPO_URL` when using `platform-setup/002`). Forks must replace the default `repoURL` in every file if it differs from upstream.
+Adding a new app: commit a new `Application` manifest here with `metadata.namespace: openshift-gitops` (or your `GITOPS_NAMESPACE`), `spec.source.path` pointing at a chart or manifests in this repo, and **`spec.source.repoURL` matching** the Git URL used for `hub-gitops-root` (terraform `gitops_app_repo_url`). Forks must replace the default `repoURL` in every file if it differs from upstream.
 
-**`hub-acm-openshift-gitops-resources`** syncs `charts/acm-openshift-gitops-resources` when `GITOPS_ACM_RESOURCES_VIA_ARGO=1` (default in `platform-setup/002`); the script patches Helm parameters (`argoServer.cluster`, `gitopsNamespace`, etc.) after `hub-gitops-root` creates this Application.
+**`hub-acm-openshift-gitops-resources`** syncs `charts/acm-openshift-gitops-resources` (ManagedClusterSetBinding + Placement). It is created by `hub-gitops-root`, which Terraform deploys (`helm_release.gitops_hub_app_of_apps`). Its `argoServer.cluster` Helm parameter is left empty on purpose — Terraform owns the per-spoke Argo CD cluster Secrets and the placement-generator ConfigMap. (The manifest still carries legacy `gitopsCluster.name` / `gitopsAddon.enabled` parameters; these are inert because the chart no longer renders a `GitOpsCluster`.)
 
 **`hub-mesh-ca-intermediate-appset`** installs **`charts/gitops-hub-ocm-placement-appset`** with **`values-mesh-ca-intermediate.yaml`** (hub-only destination).
 

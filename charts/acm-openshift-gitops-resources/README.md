@@ -1,10 +1,10 @@
 # acm-openshift-gitops-resources
 
-Installs ManagedClusterSetBinding, Placement, and (when `argoServer.cluster` is set) GitOpsCluster into `${GITOPS_NAMESPACE}` so the hub OpenShift GitOps / Argo CD instance registers spokes ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
+Installs ManagedClusterSetBinding and Placement (plus, optionally, a ManagedClusterSet, the ApplicationSet placement-generator ConfigMap, and Argo CD application-controller RBAC) into `${GITOPS_NAMESPACE}` so the hub OpenShift GitOps / Argo CD instance can target spokes selected by an ACM Placement ([RHACM GitOps overview](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.16/html/gitops/gitops-overview)).
 
-Applied by `platform-setup/002-acm-openshift-gitops.sh` after the OpenShift GitOps operator chart. Unless `--skip-argoc-cluster-secret-fix`, that script patches ACM Argo cluster `Secret`s in place: RHACM’s GitOps addon often writes `server` as an internal API hostname hub pods cannot resolve and/or omits usable `config`; the patch resets `server` from `ManagedCluster.spec.managedClusterClientConfigs[0].url` and `config` from local `oc` tokens. Re-run with `platform-setup/002-acm-openshift-gitops.sh --patch-argoc-cluster-secrets-only --context <hub>` after addon reconcile if secrets regress.
+Applied by Terraform (`terraform/platform/platform_gitops.tf`, `helm_release.acm_gitops_resources`) after the OpenShift GitOps operator. This chart does **not** create a `GitOpsCluster`. The per-spoke Argo CD cluster `Secret`s are created and owned directly by Terraform (`create-argocd-cluster-secret.sh`) pointing at each spoke's direct external API URL — we deliberately do not let ACM's GitOpsCluster controller generate them, because it writes an unreachable `server` (`https://<name>-control-plane` in pull mode, or a flaky cluster-proxy URL in push mode) and reconciles it back on every change.
 
-Default `clusterSet` is `istio-scale-tests`. When `managedClusterSet.create` is `true` (default), the chart installs a ManagedClusterSet with `spec: {}` (empty spec per hub requirement) named `istio-scale-tests`, a ManagedClusterSetBinding with the same name pointing at that set, Placement with `spec.clusterSets: [istio-scale-tests]`, and (when `argoServer.cluster` is set) GitOpsCluster referencing that Placement. Spokes must carry `cluster.open-cluster-management.io/clusterset=istio-scale-tests` (platform-setup/001 / `ACM_CLUSTER_SET`). Set `managedClusterSet.create: false` if the ManagedClusterSet already exists on the hub.
+Default `clusterSet` is `istio-scale-tests`. When `managedClusterSet.create` is `true` (default), the chart installs a ManagedClusterSet with `spec: {}` (empty spec per hub requirement) named `istio-scale-tests`, a ManagedClusterSetBinding with the same name pointing at that set, and a Placement with `spec.clusterSets: [istio-scale-tests]`. Spokes must carry `cluster.open-cluster-management.io/clusterset=istio-scale-tests` (set by `charts/acm-managed-cluster` / `ACM_CLUSTER_SET`). Set `managedClusterSet.create: false` if the ManagedClusterSet already exists on the hub.
 
 Placement sets `spec.clusterSets: [<clusterSet>]` so the controller selects that bound set; omitting `clusterSets` often yields status `NoManagedClusterSetBindings` / “No valid ManagedClusterSetBindings found”.
 
@@ -14,13 +14,13 @@ When `argocdApplicationControllerRbac.create` is true (default), the chart insta
 
 ## Placement “all except the first cluster”
 
-By default `placement.excludeHubLocalClusterLabel: true`: the Placement selects every ManagedCluster in the bound set except those labeled `local-cluster` (the ACM hub / terraform `first_cluster`). Spokes must carry `cluster.open-cluster-management.io/clusterset=<clusterSet>` (see `charts/acm-managed-cluster` / platform-setup/001).
+By default `placement.excludeHubLocalClusterLabel: true`: the Placement selects every ManagedCluster in the bound set except those labeled `local-cluster` (the ACM hub / terraform `first_cluster`). Spokes must carry `cluster.open-cluster-management.io/clusterset=<clusterSet>` (see `charts/acm-managed-cluster`).
 
 To select all clusters in the set (including the hub), set `placement.excludeHubLocalClusterLabel` to `false` (not typical for Argo CD).
 
 ## Required values
 
-- `argoServer.cluster` — hub ManagedCluster name (`MultiClusterHub.spec.localClusterName`). When empty, the chart still renders ManagedClusterSet(optional), ManagedClusterSetBinding, Placement, ConfigMap, and RBAC, but **skips** the `GitOpsCluster` CR so a first Argo sync from Git can succeed before `platform-setup/002` (or a manual parameter update) sets the hub cluster name.
+- `argoServer.cluster` — hub ManagedCluster name (`MultiClusterHub.spec.localClusterName`). Only gates the placement-generator ConfigMap: when empty, the chart renders ManagedClusterSet (optional), ManagedClusterSetBinding, Placement, and RBAC, but **skips** the ConfigMap. In the Terraform deployment this is left empty on purpose — Terraform creates the placement-generator ConfigMap itself (`kubernetes_manifest.placement_generator_configmap`) only after the cluster secrets exist.
 
 ## Example
 
