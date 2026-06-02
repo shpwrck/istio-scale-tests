@@ -148,6 +148,12 @@ variable "gitops_rhacm_appset_any_namespace" {
   description = "Enable RHACM ApplicationSet-in-any-namespace: ArgoCD applicationSet env + ClusterRole/Binding for the applicationset-controller."
 }
 
+variable "argocd_clusters_per_shard" {
+  type        = number
+  default     = 3
+  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace."
+}
+
 variable "gitops_applicationset_source_namespaces" {
   type        = list(string)
   default     = ["open-cluster-management-global-set"]
