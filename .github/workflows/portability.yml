@@ -109,11 +109,11 @@ jobs:
           '
 
           # Test the sourced library (preamble.sh).
-          echo "=== preamble.sh (churn-dataplane) ==="
+          echo "=== preamble.sh (tests/lib) ==="
           (
             set -euo pipefail
             die() { echo "error: $*" >&2; exit 1; }
-            source tests/churn-dataplane/lib/preamble.sh
+            source tests/lib/preamble.sh
             ns=$(now_ns); ms=$(now_ms)
             echo "now_ns=$ns  now_ms=$ms"
             [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
