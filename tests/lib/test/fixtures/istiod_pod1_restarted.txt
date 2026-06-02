@@ -1,0 +1,5 @@
+# istiod replica 1 AFTER a mid-window restart: process_start_time_seconds has
+# advanced relative to istiod_pod1.txt (same pod name, new start time).
+pilot_xds{type="grpc"} 7
+pilot_services 42
+process_start_time_seconds 1.7169414e+09

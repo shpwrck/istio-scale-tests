@@ -29,8 +29,9 @@ What this suite does **not** cover:
   ride a different code path through istiod.
 - **Sidecar restarts** — proxy lifecycle perturbations affecting connection
   pools and pending requests.
-- **istiod HA / leader election** — the suite assumes a single istiod
-  replica per cluster (see precondition below).
+- **istiod HA / leader election** — multi-replica istiod is supported by the
+  per-pod metric fanout (see the istiod fanout note below); leader-election
+  effects themselves are not separately attributed.
 - **Sidecar-side (Envoy admin) metrics** — the suite captures istiod-side
   xDS push metrics for attribution but does not capture Envoy admin stats
   from the fortio sidecars. This means we can see that istiod was busy
@@ -114,14 +115,18 @@ report (A4).
   behind. Rows where `churn_ops_succeeded / churn_ops_attempted < 90%` are
   automatically flagged `CHURN_RATE_NOT_MET` and filtered from the report,
   so this manifests as low `n_valid` rather than wrong numbers.
-- **Single istiod replica per cluster, required.** 002/003 detect istiod
-  restarts via `kubectl port-forward svc/istiod` and reading
-  `process_start_time_seconds`. `port-forward` against the Service
-  load-balances across replicas, so an HA istiod deployment can land the
-  pre-window and post-window scrapes on different pods — yielding a
-  spurious `istiod_restarted=1` and poisoning every row. 001 enforces this
-  precondition at setup time and dies with a clear message if any active
-  context has more than one Running istiod pod (A2).
+- **Multi-replica istiod, supported via per-pod fanout.** 002/003 port-forward
+  EVERY Running istiod pod per context (`tests/lib/fanout.sh`) and aggregate the
+  per-pod scrapes: counters (`pilot_xds_pushes`, `{type=eds}`,
+  `pilot_push_triggers`) are summed across pods; histograms
+  (`pilot_proxy_convergence_time`/`pilot_proxy_queue_time`/`pilot_xds_push_time`)
+  are bucket-summed across pods before the delta/quantile; and restart detection
+  (PL9, widened) flips `istiod_restarted=1` on any pod's
+  `process_start_time_seconds` advancing OR a pod-set change. 001 preflights each
+  context for `>= 1` Running istiod pod (it no longer dies on `> 1`); set
+  `COEXEC_ISTIOD_REPLICAS` to the expected pin to get a warning on mismatch. The
+  source replica count and per-window `scrape_skew_ms` (PL8, now spanning pods)
+  are recorded as `#`-comments in the TSV.
 - **Endpoint flux only.** See "What we measure / what we don't" above.
 - **Reproducibility is per-configuration, not per-byte.** `RUN_ID` is
   **per-invocation**: it is composed of `date +%Y%m%dT%H%M%S` plus the
@@ -215,7 +220,7 @@ The sweep:
 | 14 | `max_ms` | `DurationHistogram.Max * 1000` |
 | 15 | `delta_p99_ms` | `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. Only computed when the baseline row has `status=OK` (A3). |
 | 16 | `istiod_restarted` | `0` if `process_start_time_seconds` unchanged across window; `1` if changed; `unknown` if either probe failed (PL9) |
-| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
+| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
 | 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
 | 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
 | 20 | `xds_pushes_delta` | `pilot_xds_pushes` counter delta during measurement window. `N/A` when istiod restarted or scrape failed. |
@@ -230,11 +235,21 @@ The sweep:
 at high rates). 005 filters these rows from numeric aggregation, the same
 way it filters `POISONED_RESTART`.
 
+`status=POISONED_SCRAPE` is set by 002/003 when a per-pod istiod `/metrics`
+fanout scrape comes back empty or below `FANOUT_MIN_SCRAPE_BYTES` (a dead/slow
+port-forward) and the undercounted deltas would be unreliable; 005 filters it
+like `POISONED_RESTART`. This is the same failure mode the `churn` and
+`propagation` suites tag `SCRAPE_INCOMPLETE`; the name differs because
+churn-dataplane follows its `POISONED_*` prefix for rows whose metric deltas
+are deliberately N/A'd.
+
 Preamble comment lines (PL2 / PL19) above the header carry: `RUN_ID`,
-`HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `SETTLE_SEC`,
-`BASELINE_DURATION_SEC`, `CHURN_DURATION_SEC`, `QPS`, `CONNECTIONS`,
-`NAMESPACE`, plus a `# combo=... phase=... window_start_ns=... window_end_ns=...`
-marker just before every data row (PL3 wall-clock window). Churn rows
+`HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `ISTIOD_REPLICAS` (Running
+source istiod pod count discovered at preflight — provenance for the per-pod
+fanout), `SETTLE_SEC`, `BASELINE_DURATION_SEC`, `CHURN_DURATION_SEC`, `QPS`,
+`CONNECTIONS`, `NAMESPACE`, plus a `# combo=... phase=... window_start_ns=...
+window_end_ns=... istiod_replicas=... scrape_skew_ms=...` marker just before
+every data row (PL3 wall-clock window, PL8 fanned-out scrape skew). Churn rows
 additionally carry `churn_ops_attempted=... churn_ops_succeeded=...` in
 that marker (A4).
 

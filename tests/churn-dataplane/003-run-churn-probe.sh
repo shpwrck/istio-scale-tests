@@ -21,6 +21,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -37,7 +39,8 @@ CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
 CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-3}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-ISTIOD_PF_PORT="${COEXEC_ISTIOD_PF_PORT:-15014}"
+# istiod is reached via tests/lib/fanout.sh, which allocates its own per-pod port
+# block from FANOUT_PF_BASE (default 21014); COEXEC_ISTIOD_PF_PORT is no longer used.
 OUTPUT_FILE=""
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 BASELINE_FILE=""
@@ -69,7 +72,8 @@ Usage: $(basename "$0") [options]
 
 Environment:
   COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
-  COEXEC_TEST_NAMESPACE, COEXEC_ISTIOD_PF_PORT, COEXEC_CHURN_SEED.
+  COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS (expected pin;
+  warns on mismatch), FANOUT_PF_BASE (per-pod istiod PF block base; default 21014).
 
 Churn-rate semantics:
   "Deployment scale operations per second". At rate=N for D seconds, exactly N*D
@@ -179,6 +183,15 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
+# Preflight + record the source istiod replica count (PL2). The fanout
+# (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-replica
+# istiod is supported; we just require >= 1 pod and record provenance. Warn (do
+# not die) if the count differs from the expected pin COEXEC_ISTIOD_REPLICAS.
+SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
+if [[ -n "${COEXEC_ISTIOD_REPLICAS:-}" && "$SOURCE_REPLICAS" != "$COEXEC_ISTIOD_REPLICAS" ]]; then
+	echo "warn: context $SOURCE_CTX has $SOURCE_REPLICAS Running istiod pods, expected pin COEXEC_ISTIOD_REPLICAS=$COEXEC_ISTIOD_REPLICAS" >&2
+fi
+
 # Bootstrap output file if missing.
 if [[ ! -f "$OUTPUT_FILE" ]]; then
 	ALL_CTXS_CSV="$SOURCE_CTX"
@@ -189,6 +202,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"HARNESS_SHA=$HARNESS_SHA" \
 		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
+		"ISTIOD_REPLICAS=$SOURCE_REPLICAS" \
 		"SETTLE_SEC=$SETTLE_SEC" \
 		"BASELINE_DURATION_SEC=${COEXEC_BASELINE_DURATION_SEC:-$DURATION}" \
 		"CHURN_DURATION_SEC=$DURATION" \
@@ -224,39 +238,43 @@ mapfile -t SHUFFLED_INDICES < <(seeded_shuffle "$CHURN_DEPLOYMENT_COUNT_OPT" "$C
 declare -a PARITY=()
 for ((i = 0; i < CHURN_DEPLOYMENT_COUNT_OPT; i++)); do PARITY[i]=0; done
 
-# Start istiod port-forward for restart-detection scrapes.
-PF_PID=""
+# Fan out a port-forward to EVERY Running istiod pod on the source context
+# (tests/lib/fanout.sh) for restart-detection scrapes; source context = ctx 0.
+PF_PIDS=()
 DRIVER_PID=""
-PRE_SCRAPE=""; POST_SCRAPE=""
+ISTIOD_PORTS=()
+ISTIOD_PODS=()
+ISTIOD_DIR="$(mktemp -d)"
+PF_OK=0
 cleanup_all() {
 	if [[ -n "$DRIVER_PID" ]]; then kill "$DRIVER_PID" 2>/dev/null || true; wait "$DRIVER_PID" 2>/dev/null || true; fi
-	if [[ -n "$PF_PID" ]]; then kill "$PF_PID" 2>/dev/null || true; wait "$PF_PID" 2>/dev/null || true; fi
-	rm -f "${PRE_SCRAPE:-}" "${POST_SCRAPE:-}"
+	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	PF_PIDS=()
+	rm -rf "${ISTIOD_DIR:-}"
 }
 trap cleanup_all EXIT
 
-start_istiod_pf() {
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n istio-system port-forward svc/istiod "${ISTIOD_PF_PORT}":15014 >/dev/null 2>&1 &
-	PF_PID=$!
-	local attempts=0
-	while ! curl -fsS --max-time 2 "http://localhost:${ISTIOD_PF_PORT}/metrics" -o /dev/null 2>/dev/null; do
-		attempts=$((attempts + 1))
-		((attempts > 30)) && { echo "warn: istiod port-forward did not come up" >&2; return 1; }
-		sleep 0.5
-	done
-	return 0
-}
-ISTIOD_PF_OK=0
-if start_istiod_pf; then ISTIOD_PF_OK=1; fi
+# fanout_open dies if no istiod pod's /metrics becomes reachable; the istiod-side
+# restart detection and xDS deltas depend on it.
+fanout_open "$SOURCE_CTX" 0 PF_PIDS ISTIOD_PORTS ISTIOD_PODS "${KUBECTL[@]}"
+PF_OK=1
 
-PRE_SCRAPE="$(mktemp)"
-if ((ISTIOD_PF_OK)); then
-	scrape_istiod_metrics "$ISTIOD_PF_PORT" "$PRE_SCRAPE" || ISTIOD_PF_OK=0
+PRE_PODSET="${ISTIOD_DIR}/pre.podset"
+PRE_SKEW_MS=0
+SCRAPE_INCOMPLETE=0
+if ((PF_OK)); then
+	fanout_record_podset "$SOURCE_CTX" "$PRE_PODSET" "${KUBECTL[@]}"
+	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
-PRE_START="unknown"
-if ((ISTIOD_PF_OK)) && [[ -s "$PRE_SCRAPE" ]]; then
-	PRE_START="$(extract_gauge "$PRE_SCRAPE" process_start_time_seconds)"
-fi
+pre_metrics_csv() {
+	local i out=""
+	for i in "${!ISTIOD_PODS[@]}"; do
+		[[ -n "$out" ]] && out+=","
+		out+="${ISTIOD_DIR}/pre-${i}.metrics"
+	done
+	echo "$out"
+}
 
 echo "=== Churn phase ==="
 echo "Source: $SOURCE_CTX (pod: $CLIENT_POD) | Remotes: ${REMOTES[*]:-none}"
@@ -374,15 +392,36 @@ fi
 wait "$DRIVER_PID" 2>/dev/null || true
 DRIVER_PID=""
 
-POST_SCRAPE="$(mktemp)"
-if ((ISTIOD_PF_OK)); then
-	scrape_istiod_metrics "$ISTIOD_PF_PORT" "$POST_SCRAPE" || true
+POST_PODSET="${ISTIOD_DIR}/post.podset"
+POST_SKEW_MS=0
+if ((PF_OK)); then
+	fanout_record_podset "$SOURCE_CTX" "$POST_PODSET" "${KUBECTL[@]}"
+	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" "${ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "post") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
-POST_START="unknown"
-if ((ISTIOD_PF_OK)) && [[ -s "$POST_SCRAPE" ]]; then
-	POST_START="$(extract_gauge "$POST_SCRAPE" process_start_time_seconds)"
+# PL8: per-window scrape skew now spans pods (max of pre/post batches).
+SCRAPE_SKEW_MS="$PRE_SKEW_MS"
+(( POST_SKEW_MS > SCRAPE_SKEW_MS )) && SCRAPE_SKEW_MS="$POST_SKEW_MS"
+post_metrics_csv() {
+	local i out=""
+	for i in "${!ISTIOD_PODS[@]}"; do
+		[[ -n "$out" ]] && out+=","
+		out+="${ISTIOD_DIR}/post-${i}.metrics"
+	done
+	echo "$out"
+}
+
+# PL9 (widened): restart on per-pod start-time advance OR pod-set change.
+RESTARTED="unknown"
+PRE_FILES=(); POST_FILES=()
+if ((PF_OK)); then
+	for i in "${!ISTIOD_PODS[@]}"; do
+		PRE_FILES+=("${ISTIOD_DIR}/pre-${i}.metrics")
+		POST_FILES+=("${ISTIOD_DIR}/post-${i}.metrics")
+	done
+	RESTARTED="$(fanout_restart_status "$PRE_PODSET" "$POST_PODSET" \
+		"$(pre_metrics_csv)" "$(post_metrics_csv)")"
 fi
-RESTARTED="$(istiod_restart_status "$PRE_START" "$POST_START")"
 
 # A4: churn-ops accounting. The driver log has one line per attempted op,
 # each tab-prefixed with the exit status of the kubectl scale fan-out.
@@ -391,28 +430,36 @@ CHURN_OPS_ATTEMPTED="${CHURN_OPS_ATTEMPTED// /}"
 CHURN_OPS_SUCCEEDED="$(awk -F'\t' '$2 == "0" { c++ } END { print c + 0 }' "$CHURN_LOG" 2>/dev/null || echo 0)"
 rm -f "$CHURN_LOG"
 
-# Extract istiod-side xDS metrics from pre/post scrape files.
+# Extract istiod-side xDS metrics by SUMMING counters across pods (each event is
+# emitted by exactly one replica) and MERGING histogram buckets across pods (PL11)
+# before the delta/quantile.
 XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
-if [[ "$RESTARTED" == "0" && -s "$PRE_SCRAPE" && -s "$POST_SCRAPE" ]]; then
-	pre_pushes=$(extract_counter_sum "$PRE_SCRAPE" pilot_xds_pushes)
-	post_pushes=$(extract_counter_sum "$POST_SCRAPE" pilot_xds_pushes)
+# An incomplete scrape (a pod's /metrics unreachable) undercounts the summed
+# counters / merged histograms, so the istiod-side deltas are not trustworthy.
+if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
+	pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")
+	post_pushes=$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")
 	XDS_PUSHES_DELTA=$(( post_pushes - pre_pushes ))
 	(( XDS_PUSHES_DELTA < 0 )) && XDS_PUSHES_DELTA="N/A"
 
-	pre_eds=$(extract_counter_by_label "$PRE_SCRAPE" pilot_xds_pushes type eds)
-	post_eds=$(extract_counter_by_label "$POST_SCRAPE" pilot_xds_pushes type eds)
+	pre_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${PRE_FILES[@]}")
+	post_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${POST_FILES[@]}")
 	EDS_PUSHES_DELTA=$(( post_eds - pre_eds ))
 	(( EDS_PUSHES_DELTA < 0 )) && EDS_PUSHES_DELTA="N/A"
 
-	pre_triggers=$(extract_counter_sum "$PRE_SCRAPE" pilot_push_triggers)
-	post_triggers=$(extract_counter_sum "$POST_SCRAPE" pilot_push_triggers)
+	pre_triggers=$(fanout_counter_sum pilot_push_triggers "${PRE_FILES[@]}")
+	post_triggers=$(fanout_counter_sum pilot_push_triggers "${POST_FILES[@]}")
 	PUSH_TRIGGERS_DELTA=$(( post_triggers - pre_triggers ))
 	(( PUSH_TRIGGERS_DELTA < 0 )) && PUSH_TRIGGERS_DELTA="N/A"
 
-	CONVERGENCE_P99=$(delta_histogram_p99 "$PRE_SCRAPE" "$POST_SCRAPE" pilot_proxy_convergence_time)
-	QUEUE_TIME_P99=$(delta_histogram_p99 "$PRE_SCRAPE" "$POST_SCRAPE" pilot_proxy_queue_time)
-	PUSH_TIME_P99=$(delta_histogram_p99 "$PRE_SCRAPE" "$POST_SCRAPE" pilot_xds_push_time)
+	for h in pilot_proxy_convergence_time pilot_proxy_queue_time pilot_xds_push_time; do
+		fanout_merge_histogram "$h" "${ISTIOD_DIR}/pre-${h}.merged" "${PRE_FILES[@]}"
+		fanout_merge_histogram "$h" "${ISTIOD_DIR}/post-${h}.merged" "${POST_FILES[@]}"
+	done
+	CONVERGENCE_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_proxy_convergence_time.merged" "${ISTIOD_DIR}/post-pilot_proxy_convergence_time.merged" pilot_proxy_convergence_time)
+	QUEUE_TIME_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_proxy_queue_time.merged" "${ISTIOD_DIR}/post-pilot_proxy_queue_time.merged" pilot_proxy_queue_time)
+	PUSH_TIME_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_xds_push_time.merged" "${ISTIOD_DIR}/post-pilot_xds_push_time.merged" pilot_xds_push_time)
 fi
 
 QPS_ACTUAL="N/A"; P50="N/A"; P90="N/A"; P99="N/A"; P999="N/A"; MAX_LAT="N/A"
@@ -438,6 +485,11 @@ if [[ "$RESTARTED" != "0" ]]; then
 	XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 	CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 	[[ "$STATUS" == "OK" ]] && STATUS="POISONED_RESTART"
+fi
+# A pod's /metrics was unreachable -> istiod-side aggregation undercounted; tag
+# the row so 005 filters it (a non-OK status the aggregator drops).
+if [[ "$SCRAPE_INCOMPLETE" == "1" && "$STATUS" == "OK" ]]; then
+	STATUS="POISONED_SCRAPE"
 fi
 
 # A4: if the driver could not keep up (e.g. apiserver 429s), mark the row so
@@ -471,8 +523,10 @@ printf "Result: phase=churn rate=%s/s ops_attempted=%s ops_succeeded=%s qps_actu
 printf "  istiod: xds_pushes=%s eds_pushes=%s triggers=%s conv_p99=%s queue_p99=%s push_time_p99=%s\n" \
 	"$XDS_PUSHES_DELTA" "$EDS_PUSHES_DELTA" "$PUSH_TRIGGERS_DELTA" "$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99"
 
-printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops_attempted=%s churn_ops_succeeded=%s\n' \
-	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" >> "$OUTPUT_FILE"
+# PL8: scrape_skew_ms spans the fanned-out per-pod istiod scrapes (max of the
+# pre/post batch skews); recorded as a comment since the TSV schema is unchanged.
+printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops_attempted=%s churn_ops_succeeded=%s istiod_replicas=%s scrape_skew_ms=%s\n' \
+	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "${SOURCE_REPLICAS:-unknown}" "$SCRAPE_SKEW_MS" >> "$OUTPUT_FILE"
 
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$MESH_SIZE" "$CHURN_RATE" "churn" \

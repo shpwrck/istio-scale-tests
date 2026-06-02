@@ -7,8 +7,8 @@
 # - Δp99_ms aggregate is computed only over valid baseline/churn pairs that
 #   share a combo_id (PL15, PL20).
 # - All preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION, KUBE_VERSIONS,
-#   SETTLE_SEC, BASELINE_DURATION_SEC, CHURN_DURATION_SEC) is propagated to all
-#   four output formats (PL19).
+#   ISTIOD_REPLICAS, SETTLE_SEC, BASELINE_DURATION_SEC, CHURN_DURATION_SEC, QPS,
+#   CONNECTIONS, NAMESPACE) is propagated to all four output formats (PL19).
 #
 # Usage:
 #   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR]
@@ -88,6 +88,7 @@ RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
 KUBE_VERSIONS_STR="$(extract_preamble_kv KUBE_VERSIONS)"
+ISTIOD_REPLICAS_STR="$(extract_preamble_kv ISTIOD_REPLICAS)"
 SETTLE_SEC_STR="$(extract_preamble_kv SETTLE_SEC)"
 BASELINE_DURATION_STR="$(extract_preamble_kv BASELINE_DURATION_SEC)"
 CHURN_DURATION_STR="$(extract_preamble_kv CHURN_DURATION_SEC)"
@@ -223,6 +224,7 @@ emit_metadata_lines() {
 	printf '%s HARNESS_SHA=%s\n'           "$prefix" "${HARNESS_SHA:-unknown}"
 	printf '%s ISTIO_VERSION=%s\n'         "$prefix" "${ISTIO_VERSION_STR:-unknown}"
 	printf '%s KUBE_VERSIONS=%s\n'         "$prefix" "${KUBE_VERSIONS_STR:-unknown}"
+	printf '%s ISTIOD_REPLICAS=%s\n'       "$prefix" "${ISTIOD_REPLICAS_STR:-unknown}"
 	printf '%s SETTLE_SEC=%s\n'            "$prefix" "${SETTLE_SEC_STR:-unknown}"
 	printf '%s BASELINE_DURATION_SEC=%s\n' "$prefix" "${BASELINE_DURATION_STR:-unknown}"
 	printf '%s CHURN_DURATION_SEC=%s\n'    "$prefix" "${CHURN_DURATION_STR:-unknown}"
@@ -271,6 +273,7 @@ report_json() {
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
 		--arg istio_version    "${ISTIO_VERSION_STR:-unknown}" \
 		--arg kube_versions    "${KUBE_VERSIONS_STR:-unknown}" \
+		--arg istiod_replicas  "${ISTIOD_REPLICAS_STR:-unknown}" \
 		--arg settle_sec       "${SETTLE_SEC_STR:-unknown}" \
 		--arg baseline_dur     "${BASELINE_DURATION_STR:-unknown}" \
 		--arg churn_dur        "${CHURN_DURATION_STR:-unknown}" \
@@ -278,7 +281,7 @@ report_json() {
 		--arg connections      "${CONNECTIONS_STR:-unknown}" \
 		--arg namespace        "${NAMESPACE_STR:-unknown}" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace}, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace}, rows: $rows}'
 }
 
 report_md() {
@@ -290,6 +293,7 @@ report_md() {
 	echo "| HARNESS_SHA | \`${HARNESS_SHA:-unknown}\` |"
 	echo "| ISTIO_VERSION | \`${ISTIO_VERSION_STR:-unknown}\` |"
 	echo "| KUBE_VERSIONS | \`${KUBE_VERSIONS_STR:-unknown}\` |"
+	echo "| ISTIOD_REPLICAS | \`${ISTIOD_REPLICAS_STR:-unknown}\` |"
 	echo "| SETTLE_SEC | ${SETTLE_SEC_STR:-unknown} |"
 	echo "| BASELINE_DURATION_SEC | ${BASELINE_DURATION_STR:-unknown} |"
 	echo "| CHURN_DURATION_SEC | ${CHURN_DURATION_STR:-unknown} |"

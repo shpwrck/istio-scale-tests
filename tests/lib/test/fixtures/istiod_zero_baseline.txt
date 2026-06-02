@@ -1,0 +1,10 @@
+# Zero-baseline convergence histogram: lets a merged "final" snapshot be fed
+# directly to delta_histogram_p99 so the merged buckets ARE the delta buckets.
+pilot_proxy_convergence_time_bucket{le="0.1"} 0
+pilot_proxy_convergence_time_bucket{le="0.5"} 0
+pilot_proxy_convergence_time_bucket{le="1"} 0
+pilot_proxy_convergence_time_bucket{le="3"} 0
+pilot_proxy_convergence_time_bucket{le="5"} 0
+pilot_proxy_convergence_time_bucket{le="+Inf"} 0
+pilot_proxy_convergence_time_sum 0
+pilot_proxy_convergence_time_count 0

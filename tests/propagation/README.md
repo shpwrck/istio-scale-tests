@@ -20,11 +20,17 @@ In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService a
 
 `pilot_proxy_convergence_time` is the same histogram that the repo's `charts/istiod-monitor/templates/prometheusrule.yaml` aggregates into `pilot:proxy_convergence_time:p99_5m`. It records one sample per push-ACK. The probe captures a snapshot of `_bucket`/`_sum`/`_count` before the canary apply, then polls until the delta `_count` reaches `proxy_count` (each connected proxy has received at least one push). `pilot_xds_pushes{type="eds"}` is already per-proxy, so the threshold is simply the connected proxy count.
 
-### Single-istiod-replica precondition
+### Multi-replica istiod fanout
 
-The probe reaches istiod via `kubectl port-forward svc/istiod`, which load-balances to one random replica per connection. At multi-replica istiod, baseline and current snapshots can land on different replicas — and `pilot_xds` (connected-proxy gauge) and `pilot_proxy_convergence_time` only count what that one replica saw, so the detection threshold passes at roughly `1/replicas` of real convergence.
+A single `kubectl port-forward svc/istiod` load-balances to one random replica per connection, so at multi-replica istiod a lone scrape sees only `~1/replicas` of the connected proxies, pushes, and convergence samples — and baseline/final snapshots can land on different pods. The probe instead **fans out**: it port-forwards EVERY Running istiod pod per context (via `tests/lib/fanout.sh`) and aggregates the per-pod scrapes with the correct semantics:
 
-The probe currently `die`s if any context has != 1 istiod pod. The correct long-term fix is per-pod port-forwards with aggregated metrics; the precondition is the cheap escape hatch.
+- `pilot_xds` (connected proxies) — **summed** across replicas (each proxy is one istiod connection); this is `proxy_count`.
+- `pilot_services` (mesh-global registry) — **replica-invariant**, reduced with max/any across pods, never summed.
+- `pilot_proxy_convergence_time` / `pilot_xds_pushes{type="eds"}` / `pilot_services` — histogram buckets and counters summed across pods, then delta'd.
+- P1 convergence (mesh-wide, PL20): converged when `Σ delta _count across source pods >= Σ pilot_xds across source pods`.
+- Restart detection (PL9, widened): any pod's `process_start_time_seconds` advancing OR a pod-set change flips the per-pod start signature → `restarted=1`.
+
+The probe requires only `>= 1` Running istiod pod per context (it no longer dies on `> 1`) and records the per-context replica counts in the TSV preamble as `# ISTIOD_REPLICAS=ctx=N,...`. The P3 watcher-Envoy path (data-plane side) is unchanged.
 
 ## Prerequisites
 
@@ -214,7 +220,7 @@ The file contains:
 
 ### Known limitations
 
-- **istiod single-replica required**: see "Single-istiod-replica precondition" above. The probe `die`s on > 1 istiod replica per cluster.
+- **Multi-replica istiod**: supported via per-pod fanout — see "Multi-replica istiod fanout" above. The probe requires only `>= 1` Running istiod pod per context and records the per-context replica counts in the TSV preamble (`ISTIOD_REPLICAS`).
 - **`/metrics` scrape timeout**: defaults to 5 s. On very large meshes (100k+ services) the istiod `/metrics` payload may take longer than 5 s to render — bump `PROPAGATION_METRICS_TIMEOUT` (seconds).
 - **Min-sample floor for quantiles**: `p1_conv_p50_ms` requires ≥ 10 samples, `p1_conv_p99_ms` requires ≥ 30 samples. With the default 1 watcher replica (3 connected proxies: watcher + ingress-gw + east-west-gw), both columns will be `N/A`. Use `--watcher-replicas 30` on `001-setup` or `006-run-sweep` to reach the thresholds. For quick checks with few proxies, use the wall-clock `p1_ms` column instead.
 - **Histogram bucket resolution floor**: `pilot_proxy_convergence_time` bucket boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s). When all pushes complete in under 100 ms, conv_p50 and conv_p99 are pinned at 100 — the report annotates these rows with `*`. The actual latency is somewhere in 0-100 ms but cannot be resolved further without recompiling istiod with finer buckets.

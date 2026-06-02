@@ -75,6 +75,7 @@ EXTRACTED_PATTERNS=(
 	'extract_counter_sum() {'
 	'extract_counter_by_label() {'
 	'extract_gauge() {'
+	'extract_gauge_sum() {'
 	'delta_histogram_p99() {'
 	'scrape_istiod_metrics() {'
 	'harness_sha() {'
@@ -83,6 +84,19 @@ EXTRACTED_PATTERNS=(
 	'istiod_restart_status() {'
 	'istiod_start_time_seconds() {'
 	'write_preamble() {'
+	'fanout_ctx_port_base() {'
+	'fanout_list_istiod_pods() {'
+	'fanout_preflight_istiod() {'
+	'fanout_open() {'
+	'fanout_scrape_all() {'
+	'fanout_scrape_failed_count() {'
+	'fanout_record_podset() {'
+	'fanout_counter_sum() {'
+	'fanout_counter_by_label_sum() {'
+	'fanout_gauge_sum() {'
+	'fanout_gauge_invariant() {'
+	'fanout_merge_histogram() {'
+	'fanout_restart_status() {'
 )
 EXCEPTIONS="tests/lib/|tests/tuning/004-compare-profiles.sh|tests/controlplane/002-collect-resource-metrics.sh|tests/propagation/002-run-endpoint-probe.sh"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
