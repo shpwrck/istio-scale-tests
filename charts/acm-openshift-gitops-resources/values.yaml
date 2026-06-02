@@ -1,7 +1,7 @@
-# Namespace for Argo CD CR, Placement, GitOpsCluster, and ManagedClusterSetBinding (e.g. openshift-gitops).
+# Namespace for the Argo CD CR, Placement, and ManagedClusterSetBinding (e.g. openshift-gitops).
 gitopsNamespace: openshift-gitops
 
-# ManagedClusterSet name + Binding + Placement.clusterSets; must match cluster.open-cluster-management.io/clusterset on spokes (001).
+# ManagedClusterSet name + Binding + Placement.clusterSets; must match cluster.open-cluster-management.io/clusterset on spokes (charts/acm-managed-cluster).
 clusterSet: istio-scale-tests
 
 managedClusterSet:
@@ -21,15 +21,15 @@ placement:
 
 # Shared duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource (charts/gitops-hub-*-appset).
 # Uses the same Placement / PlacementDecision as placement.name above (OCM names decisions "<name>-decision-1" by default).
-# Gated on argoServer.cluster so the ConfigMap is only created after platform-setup/002 sets the hub cluster name
-# and ACM has had time to register spoke clusters as Argo CD cluster secrets.
+# Gated on argoServer.cluster. In the Terraform deployment argoServer.cluster is left empty
+# and Terraform creates this ConfigMap itself (kubernetes_manifest.placement_generator_configmap)
+# only after the cluster secrets exist, so ApplicationSets don't generate spoke apps too early.
 argocdPlacementDecisionGenerator:
   create: true
   configMapName: acm-gitops-placement-generator
 
-# Hub ManagedCluster name (set by platform-setup/002 via helm parameter override).
-# When empty, the chart skips the ApplicationSet placement-generator ConfigMap so that
-# ApplicationSets do not generate spoke apps before clusters are registered in Argo CD.
+# Hub ManagedCluster name. When empty, the chart skips the ApplicationSet placement-generator
+# ConfigMap (Terraform leaves this empty and creates that ConfigMap itself; see above).
 argoServer:
   cluster: ""
 
