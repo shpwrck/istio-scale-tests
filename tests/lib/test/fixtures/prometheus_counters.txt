@@ -1,0 +1,10 @@
+# HELP pilot_xds_pushes Total number of XDS pushes
+# TYPE pilot_xds_pushes counter
+pilot_xds_pushes{type="cds"} 150
+pilot_xds_pushes{type="eds"} 320
+pilot_xds_pushes{type="lds"} 150
+pilot_xds_pushes{type="rds"} 150
+# HELP pilot_push_triggers Total number of push triggers
+# TYPE pilot_push_triggers counter
+pilot_push_triggers{type="endpoint"} 80
+pilot_push_triggers{type="config"} 20

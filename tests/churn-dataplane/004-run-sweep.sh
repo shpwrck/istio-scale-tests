@@ -16,7 +16,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/churn-dataplane/lib/preamble.sh"
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -227,7 +229,7 @@ fi
 if ! ((DRY_RUN)); then
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
-	write_preamble "$TSV_FILE" \
+	write_preamble "churn-dataplane co-exec test" "$TSV_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
 		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \

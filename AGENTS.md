@@ -41,6 +41,7 @@ Base Helm charts and GitOps configuration on this documentation. When generic up
 Keep automation scripts consistent so operators can rely on the same env vars, flags, and internal names.
 
 - Defaults: Scripts that use pinned versions or mesh-wide settings `source "${ROOT}/config/versions.env"` after setting `ROOT`. Put shared defaults (cluster lists, mesh/network IDs) in `config/versions.env` instead of copying literals into each script.
+- Shared helpers: Source `"${ROOT}/tests/lib/common.sh"` (and optionally `timestamp.sh`, `preamble.sh`, `metrics.sh`) after `config/versions.env`. Do not inline functions that exist in the shared lib.
 - Kubernetes contexts — environment: `SETUP_CONTEXTS` — comma-separated `kubectl` / `oc` context names (must match kubeconfig). Exported from `config/versions.env`.
 - Kubernetes contexts — CLI: Where a script accepts multiple contexts, expose `--contexts CSV` using the same comma-separated format as `SETUP_CONTEXTS`.
 - Internal names: Parse `--contexts` into `CONTEXTS_CSV` (string), then split into a bash array `CONTEXTS[@]`. Loop with `ctx` when calling `oc --context="$ctx"` / `kubectl --context="$ctx"`.
@@ -90,6 +91,8 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 | `presentations/istio-mc-secrets/` | Self-contained reveal.js deck (~20 min) explaining how cert-manager + ESO + ACM produce and distribute the three Secrets (`cacerts`, per-spoke kubeconfigs, Istio remote secrets) that wire the multi-primary, multi-network mesh together. Open `index.html` in a browser. See `presentations/istio-mc-secrets/README.md`. |
 | `tests/churn-dataplane/` | Churn × data-plane co-execution test suite: numbered scripts + composite `chart/` co-deploying fortio (server+client) and churn-target Pods in one shared namespace; emits `Δp99_ms` (latency delta under churn). See `tests/churn-dataplane/README.md`. |
 | `tests/tuning/` | Performance tuning profile evaluation suite: applies Istio tuning profiles (Sidecar scoping, push throttling, xDS cache tuning, telemetry filtering, etc.) to the live mesh, runs existing test suite probes, and compares results across profiles. 15 profiles in 4 tiers with OSSM support annotations. See `tests/tuning/README.md`. |
+| `tests/lib/` | Shared bash helper functions sourced by all test suites: `common.sh` (die, split_csv, validation), `timestamp.sh` (portable ns/ms timestamps), `preamble.sh` (harness metadata, TSV preamble), `metrics.sh` (Prometheus metric extraction). |
+| `tests/lib/test/` | bats-core unit tests for shared helpers. Submodules: `bats-core/`, `bats-assert/`, `bats-support/`. Run with `tests/lib/test/bats-core/bin/bats tests/lib/test/*.bats`. |
 
 ## Common tasks
 
@@ -134,7 +137,11 @@ Edit `config/versions.env` (or `config/options.env` for operational defaults), t
 
 ## Testing and verification
 
-No CI/test framework configured. Manual verification via:
+**Shared lib unit tests (bats-core):** Vendored as git submodules under `tests/lib/test/`. After cloning, run `git submodule update --init`. Run tests with `tests/lib/test/bats-core/bin/bats tests/lib/test/*.bats`.
+
+**Pre-merge gate:** Changes to `tests/lib/*.sh` must pass `tests/lib/verify.sh` before merge. It runs syntax checks, shellcheck, inline-definition audits, bats tests, and optionally `--dry-run` sweeps. Use `--skip-dry-run` without cluster access.
+
+**Manual mesh verification:**
 
 - `charts/mesh-verify/` — standalone echo workload for cross-cluster load balancing verification
 - `istioctl remote-clusters` — check istiod remote cluster discovery
