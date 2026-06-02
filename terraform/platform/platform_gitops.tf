@@ -372,88 +372,45 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }
 
-# --- GitOpsCluster CR ---
+# --- ArgoCD cluster secrets (direct external URL, Terraform-owned) ---
+# We create these secrets ourselves instead of letting ACM's GitOpsCluster
+# controller generate them. That controller only ever writes an unreachable
+# server URL — https://<name>-control-plane in gitops-addon/pull mode, or a
+# flaky cluster-proxy tunnel URL in push mode — and reconciles it back on every
+# change, so the old patch-on-apply approach lost the race indefinitely.
+#
+# With the GitOpsCluster removed, nothing reconciles the server field, so the
+# secret durably points at the spoke's direct external API URL. The secret name
+# and data keys (name/server/config) match what the hub-kubeconfig-from-argosecret
+# ESO chart reads, so Argo CD push-sync AND the ESO mesh-CA distribution both
+# resolve the spoke via the same reliable external URL.
 
-resource "helm_release" "gitops_cluster" {
-  count    = local.gitops_enabled ? 1 : 0
-  provider = helm.hub
-
-  name             = "acm-gitops-cluster"
-  chart            = "${path.module}/../../charts/acm-gitops-cluster"
-  namespace        = var.gitops_namespace
-  create_namespace = false
-  take_ownership   = true
-  wait             = true
-  timeout          = 300
-
-  set = [
-    {
-      name  = "gitopsCluster.argoServer.cluster"
-      value = local.acm_local_cluster_name
-    },
-    {
-      name  = "gitopsCluster.argoServer.argoNamespace"
-      value = var.gitops_namespace
-    },
-    {
-      name  = "gitopsCluster.placementRef.name"
-      value = "acm-openshift-gitops-placement"
-    },
-    {
-      name  = "gitopsCluster.gitopsAddon.enabled"
-      value = tostring(var.gitops_addon_enabled)
-      type  = "string"
-    },
-    {
-      name  = "gitopsCluster.managedServiceAccountRef"
-      value = var.gitops_managed_service_account_name
-    },
-  ]
-
-  depends_on = [helm_release.acm_gitops_resources]
-}
-
-# --- ArgoCD cluster secrets (correct server URL) ---
-# ACM's gitops-addon creates cluster secrets with internal control-plane
-# URLs that are unreachable. We wait for them to appear, then overwrite
-# the server and config fields with the correct external API URL.
-
-resource "time_sleep" "wait_argocd_cluster_secrets" {
-  count = local.gitops_enabled && length(local.spoke_cluster_keys) > 0 ? 1 : 0
-
-  depends_on      = [helm_release.gitops_cluster, time_sleep.wait_spoke_registration]
-  create_duration = "120s"
-}
-
-resource "terraform_data" "patch_argocd_cluster_secret" {
+resource "terraform_data" "create_argocd_cluster_secret" {
   for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
 
   triggers_replace = [
     local.by_cluster[each.key].cluster_api_url,
     helm_release.acm_managed_cluster[each.key].metadata.revision,
-    timestamp(),
   ]
 
   input = {
-    spoke_name              = each.key
-    api_url                 = local.by_cluster[each.key].cluster_api_url
-    token                   = local.use_kubeconfig ? "" : data.external.spoke_token[each.key].result.token
-    token_script            = local.token_script
-    hub_api_url             = local.hub_api_url
-    hub_admin_pass          = local.hub_admin_pass
-    kubeconfig_path         = local.kubeconfig
-    hub_context             = local.hub_cluster_key
-    spoke_context           = each.key
-    gitops_namespace        = var.gitops_namespace
-    managed_sa_name         = var.gitops_managed_service_account_name
+    spoke_name       = each.key
+    api_url          = local.by_cluster[each.key].cluster_api_url
+    token_script     = local.token_script
+    hub_api_url      = local.hub_api_url
+    hub_admin_pass   = local.hub_admin_pass
+    kubeconfig_path  = local.kubeconfig
+    hub_context      = local.hub_cluster_key
+    spoke_context    = each.key
+    gitops_namespace = var.gitops_namespace
+    managed_sa_name  = var.gitops_managed_service_account_name
   }
 
   provisioner "local-exec" {
-    command = "bash ${path.module}/../scripts/patch-argocd-cluster-secret.sh"
+    command = "bash ${path.module}/../scripts/create-argocd-cluster-secret.sh"
     environment = {
       SPOKE_NAME       = self.input.spoke_name
       API_URL          = self.input.api_url
-      SPOKE_TOKEN      = self.input.token
       HUB_TOKEN_SCRIPT = self.input.token_script
       HUB_API_URL      = self.input.hub_api_url
       HUB_ADMIN_PASS   = self.input.hub_admin_pass
@@ -465,13 +422,15 @@ resource "terraform_data" "patch_argocd_cluster_secret" {
     }
   }
 
-  depends_on = [time_sleep.wait_argocd_cluster_secrets]
+  # wait_spoke_registration: spoke ManagedCluster registered + MSA token minted on the hub.
+  # acm_gitops_resources: openshift-gitops namespace + Argo CD instance exist to hold the secret.
+  depends_on = [time_sleep.wait_spoke_registration, helm_release.acm_gitops_resources]
 }
 
-# --- Placement-generator ConfigMap (deferred until cluster secrets are patched) ---
+# --- Placement-generator ConfigMap (deferred until cluster secrets exist) ---
 # ApplicationSets use this ConfigMap to discover spoke clusters via ACM PlacementDecisions.
-# Created AFTER patch_argocd_cluster_secret so that ApplicationSets only generate spoke
-# apps once the cluster secrets have correct external API URLs (not internal control-plane URLs).
+# Created AFTER create_argocd_cluster_secret so that ApplicationSets only generate spoke
+# apps once the cluster secrets exist with correct external API URLs.
 
 resource "kubernetes_manifest" "placement_generator_configmap" {
   count    = local.gitops_enabled && length(local.spoke_cluster_keys) > 0 ? 1 : 0
@@ -497,7 +456,7 @@ resource "kubernetes_manifest" "placement_generator_configmap" {
     force_conflicts = true
   }
 
-  depends_on = [terraform_data.patch_argocd_cluster_secret]
+  depends_on = [terraform_data.create_argocd_cluster_secret]
 }
 
 # --- Destroy-time cleanup: OSSM operator CSV on spoke clusters ---
@@ -550,7 +509,6 @@ resource "terraform_data" "argocd_app_cleanup" {
 
   depends_on = [
     helm_release.gitops_hub_app_of_apps,
-    helm_release.gitops_cluster,
     terraform_data.spoke_ossm_csv_cleanup,
   ]
 
