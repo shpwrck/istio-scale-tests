@@ -1,13 +1,6 @@
 name: Cross-platform script validation
 
 on:
-  push:
-    paths:
-      - 'tests/**/*.sh'
-      - 'terraform/**/*.sh'
-      - 'config/*.env'
-      - '.shellcheckrc'
-      - '.github/workflows/portability.yml'
   pull_request:
     paths:
       - 'tests/**/*.sh'
