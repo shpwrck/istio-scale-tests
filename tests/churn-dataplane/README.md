@@ -29,8 +29,9 @@ What this suite does **not** cover:
   ride a different code path through istiod.
 - **Sidecar restarts** — proxy lifecycle perturbations affecting connection
   pools and pending requests.
-- **istiod HA / leader election** — the suite assumes a single istiod
-  replica per cluster (see precondition below).
+- **istiod HA / leader election** — multi-replica istiod is supported by the
+  per-pod metric fanout (see the istiod fanout note below); leader-election
+  effects themselves are not separately attributed.
 - **Sidecar-side (Envoy admin) metrics** — the suite captures istiod-side
   xDS push metrics for attribution but does not capture Envoy admin stats
   from the fortio sidecars. This means we can see that istiod was busy
@@ -114,14 +115,18 @@ report (A4).
   behind. Rows where `churn_ops_succeeded / churn_ops_attempted < 90%` are
   automatically flagged `CHURN_RATE_NOT_MET` and filtered from the report,
   so this manifests as low `n_valid` rather than wrong numbers.
-- **Single istiod replica per cluster, required.** 002/003 detect istiod
-  restarts via `kubectl port-forward svc/istiod` and reading
-  `process_start_time_seconds`. `port-forward` against the Service
-  load-balances across replicas, so an HA istiod deployment can land the
-  pre-window and post-window scrapes on different pods — yielding a
-  spurious `istiod_restarted=1` and poisoning every row. 001 enforces this
-  precondition at setup time and dies with a clear message if any active
-  context has more than one Running istiod pod (A2).
+- **Multi-replica istiod, supported via per-pod fanout.** 002/003 port-forward
+  EVERY Running istiod pod per context (`tests/lib/fanout.sh`) and aggregate the
+  per-pod scrapes: counters (`pilot_xds_pushes`, `{type=eds}`,
+  `pilot_push_triggers`) are summed across pods; histograms
+  (`pilot_proxy_convergence_time`/`pilot_proxy_queue_time`/`pilot_xds_push_time`)
+  are bucket-summed across pods before the delta/quantile; and restart detection
+  (PL9, widened) flips `istiod_restarted=1` on any pod's
+  `process_start_time_seconds` advancing OR a pod-set change. 001 preflights each
+  context for `>= 1` Running istiod pod (it no longer dies on `> 1`); set
+  `COEXEC_ISTIOD_REPLICAS` to the expected pin to get a warning on mismatch. The
+  source replica count and per-window `scrape_skew_ms` (PL8, now spanning pods)
+  are recorded as `#`-comments in the TSV.
 - **Endpoint flux only.** See "What we measure / what we don't" above.
 - **Reproducibility is per-configuration, not per-byte.** `RUN_ID` is
   **per-invocation**: it is composed of `date +%Y%m%dT%H%M%S` plus the

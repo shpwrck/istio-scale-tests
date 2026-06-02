@@ -1,0 +1,6 @@
+# istiod replica 1 lagging behind on registry sync: pilot_services=40 while
+# pod0 reports the converged 42. fanout_gauge_invariant must return the MAX (42),
+# not the sum (82) and not the lagging value (40).
+pilot_xds{type="grpc"} 7
+pilot_services 40
+process_start_time_seconds 1.7169408e+09

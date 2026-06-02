@@ -51,6 +51,8 @@ source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -67,7 +69,8 @@ OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
 WRITE_TSV=0
 NS="${PROPAGATION_TEST_NAMESPACE}"
-BASE_PF_PORT=15014
+# istiod is reached via tests/lib/fanout.sh (per-pod port block from FANOUT_PF_BASE,
+# default 21014). The watcher Envoy PF block (P3, data-plane side) is unchanged.
 BASE_ENVOY_PF_PORT=15100
 CHART_DIR="${ROOT}/tests/propagation/chart"
 
@@ -278,6 +281,19 @@ ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 KUBE_VERSIONS_CSV=""
 probe_kube_versions KUBE_VERSIONS_CSV "${ALL_CTXS[@]}"
 
+# Preflight every context (tests/lib/fanout.sh): require >= 1 Running istiod pod.
+# Multi-replica istiod is supported via the per-pod fanout below. Record the
+# per-context replica counts (CSV) for the TSV preamble (PL2); the source count
+# is the headline ISTIOD_REPLICAS.
+ISTIOD_REPLICAS_CSV=""
+SOURCE_REPLICAS=""
+for ctx in "${ALL_CTXS[@]}"; do
+	r="$(fanout_preflight_istiod "$ctx" "${KUBECTL[@]}")"
+	[[ -z "$SOURCE_REPLICAS" ]] && SOURCE_REPLICAS="$r"
+	[[ -n "$ISTIOD_REPLICAS_CSV" ]] && ISTIOD_REPLICAS_CSV+=","
+	ISTIOD_REPLICAS_CSV+="${ctx}=${r}"
+done
+
 if ((WRITE_TSV)); then
 	{
 		echo "# Endpoint propagation latency test"
@@ -288,6 +304,7 @@ if ((WRITE_TSV)); then
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
+		echo "# ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}"
 		echo "# SOURCE_CTX=${SOURCE_CTX}"
 		echo "# REMOTES=${REMOTES[*]:-none}"
 		echo "# MESH_SIZE=${MESH_SIZE}"
@@ -305,9 +322,15 @@ if ((WRITE_TSV)); then
 fi
 
 PF_PIDS=()
-declare -A PF_PORT_PID=()
 POLL_PIDS=()
 TMPDIR_RUN=$(mktemp -d)
+
+# Per-context istiod pod-port blocks (tests/lib/fanout.sh). The source context is
+# fanout ctx_index 0; remote i is ctx_index i+1 (collision-free port blocks).
+# Remote port lists are stored as newline strings keyed by remote index (bash
+# has no array-of-arrays); load_rmt_istiod_ports re-expands them.
+SRC_ISTIOD_PORTS=()
+declare -A RMT_ISTIOD_PORTS_STR=()
 
 cleanup() {
 	for pid in "${POLL_PIDS[@]}"; do
@@ -325,33 +348,36 @@ cleanup() {
 
 trap cleanup EXIT
 
-start_port_forward() {
-	local ctx="$1" local_port="$2"
-	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "$local_port":15014 >/dev/null 2>&1 &
-	PF_PIDS+=($!)
-	PF_PORT_PID["$local_port"]=$!
-	local attempts=0
-	while ! curl -s -o /dev/null --max-time "$METRICS_TIMEOUT" "http://localhost:$local_port/metrics" 2>/dev/null; do
-		attempts=$((attempts + 1))
-		((attempts > 30)) && die "port-forward to istiod on $ctx (port $local_port) failed to connect"
-		sleep 0.5
-	done
+# Load a remote's istiod pod-ports into a named array.
+load_rmt_istiod_ports() {
+	local idx="$1"
+	local -n _arr="$2"
+	_arr=()
+	local p
+	while IFS= read -r p; do [[ -n "$p" ]] && _arr+=("$p"); done <<<"${RMT_ISTIOD_PORTS_STR[$idx]}"
 }
 
-# H1: per-iteration liveness check on a port-forward. If the metrics endpoint
-# isn't responsive, kill the existing PF and restart it.
-restart_port_forward_if_dead() {
-	local ctx="$1" local_port="$2"
-	if curl -s -o /dev/null --max-time "$METRICS_TIMEOUT" "http://localhost:$local_port/metrics" 2>/dev/null; then
-		return 0
-	fi
-	echo "  Port-forward to istiod on $ctx (port $local_port) unresponsive — restarting..." >&2
-	local old_pid="${PF_PORT_PID[$local_port]:-}"
-	if [[ -n "$old_pid" ]]; then
-		kill "$old_pid" 2>/dev/null || true
-		wait "$old_pid" 2>/dev/null || true
-	fi
-	start_port_forward "$ctx" "$local_port"
+# H1: per-iteration liveness check on a context's istiod PF block. If ANY pod
+# port's /metrics is unresponsive, kill that context's PFs and re-open the block.
+# Note: re-opening re-lists Running pods, so a pod-set change is picked up here.
+fanout_reopen_if_dead() {
+	local ctx="$1"
+	local -n _ports="$2"
+	local port alive=1
+	for port in "${_ports[@]}"; do
+		if ! curl -s -o /dev/null --max-time "$METRICS_TIMEOUT" "http://localhost:$port/metrics" 2>/dev/null; then
+			alive=0; break
+		fi
+	done
+	((alive)) && return 0
+	echo "  istiod port-forward(s) on $ctx unresponsive — re-opening fanout block..." >&2
+	# Kill the whole PF set and re-open every context (cheapest correct option:
+	# the PF_PIDS array is shared; we cannot selectively map pids to a context
+	# without more bookkeeping, and a re-list is needed anyway on pod churn).
+	local pid
+	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	PF_PIDS=()
+	open_all_istiod_fanouts
 }
 
 start_envoy_port_forward() {
@@ -367,34 +393,9 @@ start_envoy_port_forward() {
 }
 
 # --- metric helpers ----------------------------------------------------------
-#
-# scrape_metrics PORT VAR
-#   Curls http://localhost:PORT/metrics and stores text in VAR.
-#   Timeout is controlled by $METRICS_TIMEOUT (env PROPAGATION_METRICS_TIMEOUT).
-scrape_metrics() {
-	local port="$1"
-	local __varname="$2"
-	local __tmp
-	if ! __tmp=$(curl -fsS --max-time "$METRICS_TIMEOUT" "http://localhost:$port/metrics" 2>/dev/null); then
-		printf -v "$__varname" '%s' ""
-		return 1
-	fi
-	printf -v "$__varname" '%s' "$__tmp"
-	return 0
-}
-
-# scrape_metrics_to_file PORT FILE
-#   Like scrape_metrics, but streams to FILE so subsequent extractors can read
-#   it via file reads instead of repeatedly re-piping a multi-MB string through
-#   subshells (D1: removes harness self-noise at 100k-service scale).
-scrape_metrics_to_file() {
-	local port="$1" outfile="$2"
-	if ! curl -fsS --max-time "$METRICS_TIMEOUT" -o "$outfile" "http://localhost:$port/metrics" 2>/dev/null; then
-		: > "$outfile"
-		return 1
-	fi
-	return 0
-}
+# istiod /metrics is scraped per-pod by tests/lib/fanout.sh; honor the suite's
+# configurable curl timeout (PROPAGATION_METRICS_TIMEOUT) for large meshes.
+export FANOUT_METRICS_TIMEOUT="$METRICS_TIMEOUT"
 
 # --- one-pass file-based extractors ----------------------------------------
 # D1: at scrape sizes of multiple MB, calling `echo "$metrics" | awk` 4x per
@@ -539,6 +540,112 @@ kv_get() {
 	awk -F'=' -v k="$2" '$1 == k { print $2; exit }' "$1"
 }
 
+# --- per-pod fanout scrape + aggregate -------------------------------------
+# The mesh runs a FIXED multi-replica istiod (svc/istiod load-balances to ONE
+# pod, so a single scrape sees ~1/replicas of the proxies/pushes). We scrape
+# EVERY Running istiod pod per context (ports allocated by tests/lib/fanout.sh)
+# and aggregate per the metric class:
+#   pilot_xds (connected proxies)  -> SUM across pods (each proxy = one conn)
+#   pilot_services (mesh registry) -> INVARIANT: MAX across pods, NOT sum
+#   eds_count / pushes_total       -> SUM across pods (one replica emits each)
+#   histogram buckets/_sum/_count  -> SUM each bucket across pods (PL11)
+#   process_start                  -> per-pod signature (sorted join); any pod
+#                                     start-time advance OR pod-set change flips it
+#
+# fanout_scrape_aggregate <out_dir> <prefix> <hist_metric> <port>...
+#   Writes (compatible with the existing delta_histogram / kv_get consumers):
+#     <out_dir>/<prefix>-hist : "<le>\t<count>" rows (summed), then _sum/_count
+#     <out_dir>/<prefix>-kv   : pilot_xds, pilot_services, eds_count,
+#                               pushes_total, process_start (legacy: max pod's),
+#                               proc_start_sig (sorted per-pod start join)
+#   Echoes the per-batch scrape skew ms (PL8, spans pods).
+fanout_scrape_aggregate() {
+	local out_dir="$1" prefix="$2" hist_metric="$3"
+	shift 3
+	local -a ports=("$@")
+	mkdir -p "$out_dir"
+	local skew
+	skew="$(fanout_scrape_all "$out_dir" "$prefix" "${ports[@]}")"
+
+	# Per-pod single-pass extraction (PL21/PL22) into per-pod hist+kv files.
+	local i pod_hist pod_kv
+	local -a hist_files=() kv_files=()
+	for i in "${!ports[@]}"; do
+		pod_hist="${out_dir}/${prefix}-${i}.podhist"
+		pod_kv="${out_dir}/${prefix}-${i}.podkv"
+		if [[ -s "${out_dir}/${prefix}-${i}.metrics" ]]; then
+			extract_all_from_file "${out_dir}/${prefix}-${i}.metrics" "$hist_metric" "$pod_hist" "$pod_kv"
+		else
+			: > "$pod_hist"
+			printf 'pilot_xds=N/A\npilot_services=0\neds_count=0\npushes_total=0\nprocess_start=unknown\n' > "$pod_kv"
+		fi
+		hist_files+=("$pod_hist")
+		kv_files+=("$pod_kv")
+	done
+
+	# Merge histogram: SUM each bucket count + _sum/_count across pods.
+	awk '
+		FNR == 1 { }
+		{
+			split($0, a, "\t")
+			if (a[1] == "_sum") { sum += a[2] + 0; sum_seen = 1; next }
+			if (a[1] == "_count") { cnt += a[2] + 0; cnt_seen = 1; next }
+			val[a[1]] += a[2] + 0
+			if (!(a[1] in seen)) { seen[a[1]] = 1; order[++n] = a[1] }
+		}
+		END {
+			for (i = 1; i <= n; i++) printf "%s\t%d\n", order[i], val[order[i]]
+			printf "_sum\t%s\n", (sum_seen ? sum : 0)
+			printf "_count\t%s\n", (cnt_seen ? cnt : 0)
+		}
+	' "${hist_files[@]}" > "${out_dir}/${prefix}-hist"
+
+	# Aggregate KV with per-field reducers.
+	#   pilot_xds: SUM (skip "N/A"/missing)        pilot_services: MAX (invariant)
+	#   eds_count/pushes_total: SUM                process_start: max pod (legacy
+	#     scalar) + proc_start_sig (sorted join of per-pod starts; restart signal)
+	awk '
+		{ split($0, a, "="); k = a[1]; v = a[2] }
+		k == "pilot_xds"      { if (v != "N/A" && v != "") { xds += v + 0; xds_seen = 1 } }
+		k == "pilot_services" { if (v != "" && (v + 0) > svc) svc = v + 0; svc_seen = (svc_seen || v != "") }
+		k == "eds_count"      { eds += v + 0 }
+		k == "pushes_total"   { pushes += v + 0 }
+		k == "process_start"  {
+			if (v != "" && v != "unknown") {
+				starts[++ns] = v
+				if ((v + 0) > maxstart) maxstart = v + 0
+				start_seen = 1
+			} else {
+				# a missing per-pod start makes the whole signature unknown
+				missing = 1
+			}
+		}
+		END {
+			printf "pilot_xds=%s\n", (xds_seen ? sprintf("%.0f", xds) : "N/A")
+			printf "pilot_services=%s\n", (svc_seen ? sprintf("%.0f", svc) : "0")
+			printf "eds_count=%.0f\n", eds
+			printf "pushes_total=%.0f\n", pushes
+			printf "process_start=%s\n", (start_seen ? sprintf("%d", maxstart) : "unknown")
+			# Deterministic signature: sort the per-pod start values then join.
+			if (missing || !start_seen) {
+				printf "proc_start_sig=unknown\n"
+			} else {
+				# insertion sort starts[1..ns]
+				for (i = 2; i <= ns; i++) {
+					key = starts[i]; j = i - 1
+					while (j >= 1 && (starts[j] + 0) > (key + 0)) { starts[j+1] = starts[j]; j-- }
+					starts[j+1] = key
+				}
+				sig = ""
+				for (i = 1; i <= ns; i++) sig = sig (i > 1 ? "," : "") sprintf("%d", starts[i] + 0)
+				printf "proc_start_sig=%s\n", sig
+			}
+		}
+	' "${kv_files[@]}" > "${out_dir}/${prefix}-kv"
+
+	echo "$skew"
+}
+
 # delta_histogram BASELINE_FILE CURRENT_FILE OUTFILE
 #   Computes per-bucket delta of two histogram snapshots.
 #   - Sets first line of OUTFILE to "_count\tDELTA"
@@ -680,50 +787,46 @@ normalize_proxy_count() {
 # When EDS bumped but services did NOT increase, we still record the timestamp
 # (so legacy p2_ms remains comparable) but flag the iteration via a separate
 # result line "DIRTY" so the caller can set p2_dirty=1 in the TSV.
+# Fanned out across the remote's istiod pods: eds_count + pushes_total SUM across
+# pods, pilot_services is replica-INVARIANT (max), restart via proc_start_sig.
 poll_p2_remote_eds_push() {
-	local port="$1" t0="$2" baseline_eds="$3" result_file="$4" restart_baseline="$5"
+	local polldir="$1" t0="$2" baseline_eds="$3" result_file="$4" restart_baseline="$5"
 	local baseline_services="$6" dirty_file="$7"
+	shift 7
+	local -a ports=("$@")
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
-	local tmp_scrape tmp_hist tmp_kv
-	tmp_scrape=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
-	tmp_hist=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
-	tmp_kv=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	mkdir -p "$polldir"
 	# Initialize dirty file to "0" (clean) until we see a dirty hit.
 	echo "0" > "$dirty_file"
 	while true; do
 		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			echo "TIMEOUT" > "$result_file"
-			rm -f "$tmp_scrape" "$tmp_hist" "$tmp_kv"
 			return
 		fi
-		if ! scrape_metrics_to_file "$port" "$tmp_scrape"; then
-			sleep "$POLL_INTERVAL_S"
-			continue
-		fi
-		# One awk pass: extract everything from this scrape.
-		extract_all_from_file "$tmp_scrape" "pilot_proxy_convergence_time" "$tmp_hist" "$tmp_kv"
+		# One fanned-out scrape+aggregate per tick (pilot_xds/eds summed across
+		# pods, pilot_services invariant). Returns the kv/hist aggregate files.
+		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
 		local now_start
-		now_start=$(kv_get "$tmp_kv" process_start)
+		now_start=$(kv_get "$polldir/tick-kv" proc_start_sig)
 		if [[ "$restart_baseline" != "unknown" && "$now_start" != "unknown" && "$now_start" != "$restart_baseline" ]]; then
 			echo "RESTART" > "$result_file"
-			rm -f "$tmp_scrape" "$tmp_hist" "$tmp_kv"
 			return
 		fi
 		local cur_eds cur_svc
-		cur_eds=$(kv_get "$tmp_kv" eds_count)
-		cur_svc=$(kv_get "$tmp_kv" pilot_services)
+		cur_eds=$(kv_get "$polldir/tick-kv" eds_count)
+		cur_svc=$(kv_get "$polldir/tick-kv" pilot_services)
 		[[ -z "$cur_eds" ]] && cur_eds=0
 		[[ -z "$cur_svc" ]] && cur_svc=0
 		# Counter could appear to "decrease" mid restart/deploy; treat as not-yet.
 		if (( cur_eds > baseline_eds )); then
-			# B1: services-gauge delta must be exactly >=1 to call this clean.
+			# B1: services-gauge delta must be >=1 to call this clean. pilot_services
+			# is mesh-global (invariant across replicas), so the delta is mesh-wide.
 			local svc_delta=$(( cur_svc - baseline_services ))
 			if (( svc_delta < 1 )); then
 				echo "1" > "$dirty_file"
 			fi
 			now_ns > "$result_file"
-			rm -f "$tmp_scrape" "$tmp_hist" "$tmp_kv"
 			return
 		fi
 		sleep "$POLL_INTERVAL_S"
@@ -755,45 +858,45 @@ poll_p3_sidecar_endpoints() {
 	done
 }
 
-# --- P1 polling: histogram convergence on source istiod --------------------
-# Converge when delta _count >= proxy_count (each connected proxy has
-# received at least one push).
+# --- P1 polling: histogram convergence on the source istiod (fanned out) ----
+# PL20 (mesh-wide): converge when Σ delta _count across ALL source pods >=
+# Σ pilot_xds across ALL source pods. fanout_scrape_aggregate sums the
+# convergence-histogram buckets/_count AND pilot_xds across pods, so delta_count
+# of the merged histogram is exactly "Σ delta _count" and proxy_count (passed in)
+# is exactly "Σ pilot_xds" — the existing threshold is the mesh-wide rule.
 poll_p1_local_sync_histogram() {
-	local port="$1" t0="$2" baseline_hist="$3" \
+	local polldir="$1" t0="$2" baseline_hist="$3" \
 		result_file="$4" proxy_count="$5" restart_baseline="$6" final_snapshot_file="$7"
+	shift 7
+	local -a ports=("$@")
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
-	local tmp_scrape cur_snapshot tmp_kv delta_file
-	tmp_scrape=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
-	cur_snapshot=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
-	tmp_kv=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
+	mkdir -p "$polldir"
+	local delta_file
 	delta_file=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	while true; do
 		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			echo "TIMEOUT" > "$result_file"
-			rm -f "$tmp_scrape" "$cur_snapshot" "$tmp_kv" "$delta_file"
+			rm -f "$delta_file"
 			return
 		fi
-		if ! scrape_metrics_to_file "$port" "$tmp_scrape"; then
-			sleep "$POLL_INTERVAL_S"
-			continue
-		fi
-		extract_all_from_file "$tmp_scrape" "pilot_proxy_convergence_time" "$cur_snapshot" "$tmp_kv"
+		# One fanned-out scrape+aggregate per tick -> merged hist + kv.
+		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
 		local now_start
-		now_start=$(kv_get "$tmp_kv" process_start)
+		now_start=$(kv_get "$polldir/tick-kv" proc_start_sig)
 		if [[ "$restart_baseline" != "unknown" && "$now_start" != "unknown" && "$now_start" != "$restart_baseline" ]]; then
 			echo "RESTART" > "$result_file"
-			rm -f "$tmp_scrape" "$cur_snapshot" "$tmp_kv" "$delta_file"
+			rm -f "$delta_file"
 			return
 		fi
-		delta_histogram "$baseline_hist" "$cur_snapshot" "$delta_file"
+		delta_histogram "$baseline_hist" "$polldir/tick-hist" "$delta_file"
 		local d_count
 		d_count=$(awk -F'\t' '$1=="_count" {print $2; exit}' "$delta_file")
 		[[ -z "$d_count" ]] && d_count=0
 		if (( d_count >= proxy_count )); then
 			now_ns > "$result_file"
-			cp "$cur_snapshot" "$final_snapshot_file"
-			rm -f "$tmp_scrape" "$cur_snapshot" "$tmp_kv" "$delta_file"
+			cp "$polldir/tick-hist" "$final_snapshot_file"
+			rm -f "$delta_file"
 			return
 		fi
 		sleep "$POLL_INTERVAL_S"
@@ -830,39 +933,40 @@ echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE
 echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s | Poll: ${POLL_INTERVAL_S}s | Settle: ${SETTLE_SEC}s"
 echo ""
 
-# A3: precondition — istiod must be a single replica per cluster. Scraping
-# svc/istiod load-balances to one random replica; baseline + current snapshots
-# may land on different replicas, in which case the pilot_xds gauge and the
-# histogram counts represent only the proxies/pushes seen by that one replica.
-# At multi-replica scale the threshold computation passes at ~50% real
-# convergence. The cheap escape hatch is to require exactly one istiod pod and
-# die early if not. A per-pod port-forward fanout is the correct fix; pursue it
-# in a future change if multi-replica istiod is required.
-check_single_replica_istiod() {
-	local ctx
-	for ctx in "$SOURCE_CTX" "${REMOTES[@]}"; do
-		local replicas
-		replicas=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
-			-o name --no-headers 2>/dev/null | wc -l | tr -d ' ')
-		if [[ -z "$replicas" || "$replicas" == "0" ]]; then
-			die "context $ctx: no istiod pods found (expected exactly 1 in istio-system)"
-		fi
-		if (( replicas != 1 )); then
-			die "context $ctx: found $replicas istiod replicas; this probe currently requires exactly 1 \
-(svc/istiod port-forwards load-balance, so per-replica gauges desync). \
-See A3 in tests/propagation/README.md."
-		fi
+# A3 (fixed): the mesh runs a FIXED multi-replica istiod. We fan out a
+# port-forward to EVERY Running istiod pod per context and aggregate per-pod
+# scrapes (pilot_xds summed, pilot_services invariant=max, histograms
+# bucket-summed) so the convergence threshold is computed mesh-wide rather than
+# against one random replica's slice. Preflight already ran above (>= 1 Running
+# pod per context required; no longer dies on > 1).
+echo "istiod replicas per context: ${ISTIOD_REPLICAS_CSV}"
+
+# Open every context's per-pod istiod fanout block. Idempotent re-open is used
+# by fanout_reopen_if_dead (rebuilds all blocks after a PF death / pod churn).
+open_all_istiod_fanouts() {
+	# pods/rpods are required out-array args of fanout_open; we only consume the
+	# port arrays here (the podset is recorded per-scrape), so mark them used.
+	# shellcheck disable=SC2034
+	local pods=()
+	SRC_ISTIOD_PORTS=()
+	fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS pods "${KUBECTL[@]}"
+	local i rp
+	# shellcheck disable=SC2034
+	local rpods
+	for i in "${!REMOTES[@]}"; do
+		rp=()
+		# shellcheck disable=SC2034  # required out-arg of fanout_open; podset recorded per-scrape
+		rpods=()
+		fanout_open "${REMOTES[i]}" $(( i + 1 )) PF_PIDS rp rpods "${KUBECTL[@]}"
+		RMT_ISTIOD_PORTS_STR["$i"]="$(IFS=$'\n'; echo "${rp[*]}")"
 	done
 }
-check_single_replica_istiod
-echo "istiod single-replica precondition OK."
 
 echo "Starting port-forwards..."
-start_port_forward "$SOURCE_CTX" "$BASE_PF_PORT"
+open_all_istiod_fanouts
 SOURCE_ENVOY_PF_PORT=$(( BASE_ENVOY_PF_PORT + ${#REMOTES[@]} ))
 start_envoy_port_forward "$SOURCE_CTX" "$SOURCE_ENVOY_PF_PORT"
 for i in "${!REMOTES[@]}"; do
-	start_port_forward "${REMOTES[i]}" $(( BASE_PF_PORT + i + 1 ))
 	start_envoy_port_forward "${REMOTES[i]}" $(( BASE_ENVOY_PF_PORT + i ))
 done
 echo "Port-forwards ready."
@@ -877,69 +981,40 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	ITER_RUN_ID="${RUN_ID}-${iter}"
 
-	# H1: port-forward liveness check before each iteration. PFs can die
-	# silently between iterations (kubectl PF closes idle conns, networking
-	# blips); kicking them now avoids attributing a network hiccup to istiod.
-	restart_port_forward_if_dead "$SOURCE_CTX" "$BASE_PF_PORT"
+	# H1: per-iteration PF liveness check across each context's fanout block. PFs
+	# can die silently between iterations (kubectl PF closes idle conns,
+	# networking blips); re-opening now avoids attributing a hiccup to istiod and
+	# picks up any pod-set change.
+	fanout_reopen_if_dead "$SOURCE_CTX" SRC_ISTIOD_PORTS
 	for i in "${!REMOTES[@]}"; do
-		restart_port_forward_if_dead "${REMOTES[i]}" $(( BASE_PF_PORT + i + 1 ))
+		_rip=()  # populated by load_rmt_istiod_ports via nameref
+		load_rmt_istiod_ports "$i" _rip
+		fanout_reopen_if_dead "${REMOTES[i]}" _rip
 	done
 
-	# Concurrent baseline scrape across all istiods. Records per-context skew.
+	# Concurrent baseline scrape across all istiods — now fanned out per-pod and
+	# aggregated (pilot_xds summed, pilot_services invariant, histograms
+	# bucket-summed). scrape_skew spans pods x contexts (PL8).
 	echo "  Scraping baselines..."
 	BASELINE_DIR="$TMPDIR_RUN/baseline-${iter}"
 	mkdir -p "$BASELINE_DIR"
-	BASELINE_PIDS=()
-	(
-		if scrape_metrics_to_file "$BASE_PF_PORT" "$BASELINE_DIR/source-scrape"; then
-			extract_all_from_file \
-				"$BASELINE_DIR/source-scrape" "pilot_proxy_convergence_time" \
-				"$BASELINE_DIR/source-hist" "$BASELINE_DIR/source-kv"
-		else
-			: > "$BASELINE_DIR/source-hist"
-			printf 'pilot_xds=N/A\npilot_services=0\neds_count=0\npushes_total=0\nprocess_start=unknown\n' \
-				> "$BASELINE_DIR/source-kv"
-		fi
-		now_ns > "$BASELINE_DIR/source-ts"
-	) &
-	BASELINE_PIDS+=($!)
+	src_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "source" pilot_proxy_convergence_time "${SRC_ISTIOD_PORTS[@]}")"
+	MAX_SKEW="$src_skew"
 	for i in "${!REMOTES[@]}"; do
-		port=$(( BASE_PF_PORT + i + 1 ))
-		idx="$i"
-		(
-			if scrape_metrics_to_file "$port" "$BASELINE_DIR/remote-${idx}-scrape"; then
-				extract_all_from_file \
-					"$BASELINE_DIR/remote-${idx}-scrape" "pilot_proxy_convergence_time" \
-					"$BASELINE_DIR/remote-${idx}-hist" "$BASELINE_DIR/remote-${idx}-kv"
-			else
-				: > "$BASELINE_DIR/remote-${idx}-hist"
-				printf 'pilot_xds=N/A\npilot_services=0\neds_count=0\npushes_total=0\nprocess_start=unknown\n' \
-					> "$BASELINE_DIR/remote-${idx}-kv"
-			fi
-			now_ns > "$BASELINE_DIR/remote-${idx}-ts"
-		) &
-		BASELINE_PIDS+=($!)
+		_rip=()  # populated by load_rmt_istiod_ports via nameref
+		load_rmt_istiod_ports "$i" _rip
+		r_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "remote-${i}" pilot_proxy_convergence_time "${_rip[@]}")"
+		(( r_skew > MAX_SKEW )) && MAX_SKEW="$r_skew"
 	done
-	for pid in "${BASELINE_PIDS[@]}"; do
-		wait "$pid" 2>/dev/null || true
-	done
-	# H3: scrape_skew_ms is max(ts)-min(ts) across the per-context timestamps,
-	# not total batch duration (which includes scheduling overhead).
-	skew_files=("$BASELINE_DIR/source-ts")
-	for f in "$BASELINE_DIR"/remote-*-ts; do
-		[[ -e "$f" ]] && skew_files+=("$f")
-	done
-	SCRAPE_SKEW_MS=$(awk '
-		BEGIN { min = ""; max = "" }
-		{ v = $1 + 0; if (min == "" || v < min) min = v; if (max == "" || v > max) max = v }
-		END { if (min == "") print 0; else printf "%d\n", (max - min) / 1000000 }
-	' "${skew_files[@]}" 2>/dev/null)
+	SCRAPE_SKEW_MS="$MAX_SKEW"
 	[[ -z "$SCRAPE_SKEW_MS" ]] && SCRAPE_SKEW_MS=0
 
 	# A2: parse SOURCE_PROXY_COUNT and SOURCE_START from the same baseline scrape.
-	SOURCE_START=$(kv_get "$BASELINE_DIR/source-kv" process_start)
+	# SOURCE_START is now the per-pod start signature (sorted join) so any pod's
+	# restart OR a pod-set change flips it.
+	SOURCE_START=$(kv_get "$BASELINE_DIR/source-kv" proc_start_sig)
 	SOURCE_PROXY_COUNT=$(normalize_proxy_count "$(kv_get "$BASELINE_DIR/source-kv" pilot_xds)")
-	echo "  Source connected proxies: $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
+	echo "  Source connected proxies (summed across replicas): $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
 
 	T0=$(now_ns)
 	echo "  Deploying canary on $SOURCE_CTX..."
@@ -956,9 +1031,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	P1_FINAL_SNAPSHOT="$TMPDIR_RUN/p1-final-${iter}"
 	: > "$P1_FILE"
 	poll_p1_local_sync_histogram \
-		"$BASE_PF_PORT" "$T0" \
+		"$TMPDIR_RUN/p1poll-${iter}" "$T0" \
 		"$BASELINE_DIR/source-hist" "$P1_FILE" \
-		"$SOURCE_PROXY_COUNT" "$SOURCE_START" "$P1_FINAL_SNAPSHOT" &
+		"$SOURCE_PROXY_COUNT" "$SOURCE_START" "$P1_FINAL_SNAPSHOT" \
+		"${SRC_ISTIOD_PORTS[@]}" &
 	POLL_PIDS=($!)
 
 	P2_FILES=()
@@ -976,12 +1052,15 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		P2_DIRTY_FILES+=("$p2dirtyf")
 		baseline_eds=$(kv_get "$BASELINE_DIR/remote-${i}-kv" eds_count)
 		baseline_svc=$(kv_get "$BASELINE_DIR/remote-${i}-kv" pilot_services)
-		remote_start=$(kv_get "$BASELINE_DIR/remote-${i}-kv" process_start)
+		remote_start=$(kv_get "$BASELINE_DIR/remote-${i}-kv" proc_start_sig)
 		[[ -z "$baseline_eds" ]] && baseline_eds=0
 		[[ -z "$baseline_svc" ]] && baseline_svc=0
-		poll_p2_remote_eds_push $(( BASE_PF_PORT + i + 1 )) "$T0" \
+		_rip=()  # populated by load_rmt_istiod_ports via nameref
+		load_rmt_istiod_ports "$i" _rip
+		poll_p2_remote_eds_push "$TMPDIR_RUN/p2poll-${iter}-${i}" "$T0" \
 			"$baseline_eds" "$p2f" "$remote_start" \
-			"$baseline_svc" "$p2dirtyf" &
+			"$baseline_svc" "$p2dirtyf" \
+			"${_rip[@]}" &
 		POLL_PIDS+=($!)
 		poll_p3_sidecar_endpoints $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$p3f" &
 		POLL_PIDS+=($!)
@@ -1104,9 +1183,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			if [[ "$p2_raw" == "RESTART" ]]; then
 				p2_restarted="1"
 			fi
-			# C2: if baseline or current process_start was missing AND we have
-			# no explicit RESTART signal, propagate "unknown" instead of "0".
-			remote_start=$(kv_get "$BASELINE_DIR/remote-${i}-kv" process_start)
+			# C2: if the baseline per-pod start signature was unknown (a pod's
+			# process_start_time was missing) AND there is no explicit RESTART
+			# signal, propagate "unknown" instead of "0".
+			remote_start=$(kv_get "$BASELINE_DIR/remote-${i}-kv" proc_start_sig)
 			if [[ "$p2_restarted" == "0" && "$remote_start" == "unknown" ]]; then
 				p2_restarted="unknown"
 			fi
@@ -1176,6 +1256,7 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Istio version | ${ISTIO_VERSION} |"
 	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
+	echo "| istiod replicas | \`${ISTIOD_REPLICAS_CSV}\` |"
 	echo "| Date | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"
 	echo "| Remotes | ${REMOTES[*]:-none} |"
