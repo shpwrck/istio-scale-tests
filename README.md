@@ -267,6 +267,20 @@ oc delete -f charts/mesh-verify-appset.yaml
 
 This removes the ApplicationSet and all generated Applications. The `mesh-verify` namespace and its resources are cleaned up on each spoke by Argo CD's prune policy.
 
+### Continuous wiring health gate (`charts/mesh-wiring-verify/`)
+
+`mesh-verify` is an on-demand data-plane check. `mesh-wiring-verify` is an **always-on control-plane gate**, installed on every mesh member by Terraform (`terraform/platform/platform_gitops.tf`) — no manual apply. Each member runs a pod whose readiness probe is Ready only when that spoke holds a remote secret for every mesh member **and** istiod reports it has ingested them all (`istiod_managed_clusters` on the unauthenticated istiod `/metrics`). When a member loses wiring, the pod goes NotReady and its Argo Application flips **Degraded**.
+
+This exists because a wiring failure is otherwise invisible to GitOps: Argo CD has no health check for ESO `PushSecret`, and ESO reports `Synced=True` even when a `PushSecret` pushed to only a subset of its target stores (a partial fan-out, e.g. after an ESO restart). Both layers show green while istiod silently loses cross-cluster discovery. The gate surfaces it in the same Argo view.
+
+`expectedMembers` is derived by Terraform from `length(local.mesh_member_spoke_keys)` — the same source of truth that applies the `istio-mesh-member` label — so changing `mesh_member_count` updates the gate automatically. The companion 5-minute `refreshInterval` on the hub push-secret charts bounds how long a silently-dropped push can persist before ESO retries it.
+
+```bash
+# See the gate's verdict on a spoke:
+oc get pods -n mesh-wiring-verify --context <cluster-2>
+oc logs -n mesh-wiring-verify deploy/mesh-wiring-verify --context <cluster-2>   # "Ready: secrets=N istiod_managed=N ..."
+```
+
 ---
 
 ## 3. Propagation Latency Testing (`tests/propagation/`)

@@ -26,7 +26,9 @@ sourceSecretName: ""
 # Target Secret name holding key kubeconfig; default kubeconfig-{clusterName}.
 targetSecretName: ""
 
-refreshInterval: 1h
+# Short so kubeconfig changes (and recovery from a partial push) propagate quickly.
+# See scripts/001-verify-mesh-wiring.sh and the hub-mesh-push-secrets values rationale.
+refreshInterval: 5m
 
 # In-cluster Kubernetes API client settings for the kubernetes provider (SecretStore validation + fetches).
 # Set caFromConfigMap.enabled to false only if the apiserver uses a public CA and validation succeeds without it.
@@ -53,7 +55,7 @@ spokeSecretStore:
 
 pushSecret:
   enabled: true
-  refreshInterval: 1h
+  refreshInterval: 5m
   storeMatchLabels:
     hub-kubeconfig-from-argosecret/push-target: "true"
 

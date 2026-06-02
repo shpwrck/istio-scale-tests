@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
+    # No istio.io/rev: the health gate must not be injected into the mesh it checks.

@@ -1,0 +1,58 @@
+# Per-spoke mesh-wiring health gate. Pod is Ready iff this mesh member is fully
+# wired into the multi-primary mesh. Deployed per mesh member by the
+# mesh-wiring-verify ApplicationSet (see
+# charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml).
+
+# Injected per-cluster by the ApplicationSet generator ({{clusterName}}).
+clusterName: ""
+
+# Namespace for the verifier workload. Intentionally NOT istio-injected: the
+# health gate must not depend on the sidecar/mesh it is checking.
+namespace: mesh-wiring-verify
+
+# Expected number of mesh members (each member holds one istio/multiCluster
+# remote secret per member, including itself, and istiod syncs that many
+# clusters). Injected by Terraform from length(local.mesh_member_spoke_keys)
+# (terraform/platform/platform_gitops.tf) — the same source of truth that
+# decides istio-mesh-member labeling. 0 = skip the absolute-count gate and fall
+# back to consistency-only (secrets == istiod clusters, all synced); used for
+# helm lint / standalone renders.
+expectedMembers: 0
+
+# Namespace where Istio remote secrets and istiod live on the spoke.
+istioNamespace: istio-system
+
+# Second-stage gate: confirm istiod actually ingested the clusters (via the
+# istiod_managed_clusters metric on the unauthenticated /metrics endpoint), not
+# just that the secrets exist on disk.
+istiodCheck:
+  enabled: true
+  host: istiod.istio-system.svc
+  port: 15014
+  curlTimeoutSeconds: 5
+
+image:
+  # The cluster's built-in CLI imagestream (oc + bash + curl). Internal registry,
+  # so it needs no external pull secret and is always version-matched to the
+  # cluster — no tag to pin/bump in config/versions.env.
+  repository: image-registry.openshift-image-registry.svc:5000/openshift/cli
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+serviceAccountName: mesh-wiring-verify
+
+# Readiness probe cadence. failureThreshold > 1 avoids flapping on a single
+# transient API/istiod blip; a real wiring gap persists across probes.
+probe:
+  initialDelaySeconds: 15
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 2
+  successThreshold: 1
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi
