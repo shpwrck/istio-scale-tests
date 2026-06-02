@@ -15,8 +15,10 @@ nameOverride: ""
 fullnameOverride: ""
 
 # ManagedServiceAccount name used to construct the default source secret name.
-# The ACM gitops-addon creates cluster secrets as {clusterName}-{managedServiceAccountName}-cluster-secret.
-managedServiceAccountName: application-manager
+# Terraform creates the Argo CD cluster secrets as {clusterName}-{managedServiceAccountName}-cluster-secret
+# (create-argocd-cluster-secret.sh). This repo standardizes on argocd-gitops; the appset value file overrides
+# this to match terraform var.gitops_managed_service_account_name.
+managedServiceAccountName: argocd-gitops
 
 # Source Argo cluster Secret name; default {clusterName}-{managedServiceAccountName}-cluster-secret.
 sourceSecretName: ""
