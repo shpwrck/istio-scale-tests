@@ -3,6 +3,23 @@ meshID: mesh1
 networkSuffix: network
 istioVersion: v1.28.5
 
+# istiod (pilot) control-plane topology + sizing.
+# For scale testing we pin a FIXED replica count (operator HPA disabled) so the
+# per-pod metric fanout in tests/lib/fanout.sh aggregates over a stable topology,
+# and bump resources so the fixed fleet comfortably carries the full multi-cluster
+# xDS load without OOM/CPU-throttling. Set autoscaleEnabled: true to restore the
+# operator's default HorizontalPodAutoscaler (min 1, max 5, 80% CPU).
+# GOMEMLIMIT is auto-derived by the istiod chart from limits.memory — do NOT set it manually.
+pilot:
+  autoscaleEnabled: false
+  replicaCount: 5
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 8Gi
+
 accessLogFile: /dev/stdout
 accessLogEncoding: JSON
 
