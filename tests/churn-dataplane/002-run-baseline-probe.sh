@@ -152,8 +152,12 @@ KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 
 # Preflight + record the source istiod replica count for the TSV preamble (PL2).
 # The fanout (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-
-# replica istiod is supported; we just need >= 1 pod and provenance.
+# replica istiod is supported; we just need >= 1 pod and provenance. Warn (do
+# not die) if the count differs from the expected pin COEXEC_ISTIOD_REPLICAS.
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
+if [[ -n "${COEXEC_ISTIOD_REPLICAS:-}" && "$SOURCE_REPLICAS" != "$COEXEC_ISTIOD_REPLICAS" ]]; then
+	echo "warn: context $SOURCE_CTX has $SOURCE_REPLICAS Running istiod pods, expected pin COEXEC_ISTIOD_REPLICAS=$COEXEC_ISTIOD_REPLICAS" >&2
+fi
 
 if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
@@ -200,9 +204,11 @@ PF_OK=1
 # detection and istiod-side xDS metrics. Record the pod set for restart-by-podset.
 PRE_PODSET="${ISTIOD_DIR}/pre.podset"
 PRE_SKEW_MS=0
+SCRAPE_INCOMPLETE=0
 if ((PF_OK)); then
 	fanout_record_podset "$SOURCE_CTX" "$PRE_PODSET" "${KUBECTL[@]}"
 	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 # CSV of the per-pod pre-scrape files in podset order for fanout_restart_status.
 pre_metrics_csv() {
@@ -240,6 +246,7 @@ POST_SKEW_MS=0
 if ((PF_OK)); then
 	fanout_record_podset "$SOURCE_CTX" "$POST_PODSET" "${KUBECTL[@]}"
 	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" "${ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "post") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 # PL8: per-window scrape skew now spans pods (the max of the pre/post batches).
 SCRAPE_SKEW_MS="$PRE_SKEW_MS"
@@ -269,9 +276,11 @@ fi
 # emitted by exactly one replica) and MERGING histogram buckets across pods
 # (PL11) before the delta/quantile. pilot_services would be replica-invariant
 # (not summed) but is not used here.
+# An incomplete scrape (a pod's /metrics unreachable) undercounts the summed
+# counters / merged histograms, so the istiod-side deltas are not trustworthy.
 XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
-if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 ]]; then
+if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
 	pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")
 	post_pushes=$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")
 	XDS_PUSHES_DELTA=$(( post_pushes - pre_pushes ))
@@ -319,6 +328,11 @@ if [[ "$RESTARTED" != "0" ]]; then
 	XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 	CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 	[[ "$STATUS" == "OK" ]] && STATUS="POISONED_RESTART"
+fi
+# A pod's /metrics was unreachable -> the istiod-side aggregation is undercounted.
+# Tag the row so 005 filters it (a non-OK status the aggregator drops).
+if [[ "$SCRAPE_INCOMPLETE" == "1" && "$STATUS" == "OK" ]]; then
+	STATUS="POISONED_SCRAPE"
 fi
 
 printf "Result: phase=baseline qps_actual=%s p50=%s p99=%s max=%s restarted=%s status=%s\n" \

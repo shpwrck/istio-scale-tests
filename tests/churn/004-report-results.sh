@@ -86,23 +86,28 @@ report_text() {
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
-	!/^#/ && !/^run_id/ && NF>=20 {
+	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE
+	# rows carry N/A or undercounted istiod-side deltas and must NOT leak into
+	# column means. Per-column "N/A"!= guards also stop "N/A"+0 -> 0 fabrication.
+	!/^#/ && !/^run_id/ && NF>=20 && $20=="OK" {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
 		if($8!="TIMEOUT" && $8!="N/A") { cl[key, ++cl_n[key]] = $8+0 }
 		if($9!="TIMEOUT" && $9!="N/A") { cr[key, ++cr_n[key]] = $9+0 }
-		spt[key, ++spt_n[key]] = $10+0
+		if($10!="N/A") { spt[key, ++spt_n[key]] = $10+0 }
 		if($11!="N/A") { rpt[key, ++rpt_n[key]] = $11+0 }
-		sxp[key, ++sxp_n[key]] = $12+0
+		if($12!="N/A") { sxp[key, ++sxp_n[key]] = $12+0 }
 		if($13!="N/A") { rxp[key, ++rxp_n[key]] = $13+0 }
 		if($14!="N/A" && $14!="overflow") { sqq[key, ++sqq_n[key]] = $14+0 }
 		if($15!="N/A" && $15!="overflow") { rqq[key, ++rqq_n[key]] = $15+0 }
-		scp[key, ++scp_n[key]] = $16+0
+		if($16!="N/A") { scp[key, ++scp_n[key]] = $16+0 }
 		if($17!="N/A") { rcp[key, ++rcp_n[key]] = $17+0 }
 		if($18!="N/A" && $18!="overflow") { spt2[key, ++spt2_n[key]] = $18+0 }
 		if($19!="N/A" && $19!="overflow") { rpt2[key, ++rpt2_n[key]] = $19+0 }
-		if($10+0 > 0) { amp[key, ++amp_n[key]] = ($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10 }
+		if($10!="N/A" && $10+0 > 0 && $12!="N/A") { amp[key, ++amp_n[key]] = ($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10 }
 	}
+	# Track totals/valids per cell so we can surface the filter rate.
+	!/^#/ && !/^run_id/ && NF>=20 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($20=="OK") n_valid[tot_key]++ }
 	function sort_vals(arr, key, n,    i, j, tmp) {
 		for(i=2;i<=n;i++){tmp=arr[key,i];j=i-1;while(j>=1&&arr[key,j]>tmp){arr[key,j+1]=arr[key,j];j--}arr[key,j+1]=tmp}
 	}
@@ -151,6 +156,7 @@ report_text() {
 			key = sorted_keys[k]
 			split(key, p, "\t")
 			printf "--- mesh_size=%s  churn_intensity=%s  scale=%s->%s ---\n", p[1], p[2], p[3], p[4]
+			printf "  Rows (valid/total):            %d/%d\n", n_valid[key]+0, n_total[key]+0
 			printf "  Local convergence (ms):        %s\n", stats(cl, key, cl_n[key])
 			printf "  Remote convergence (ms):       %s\n", stats(cr, key, cr_n[key])
 			printf "  Source push triggers:          %s\n", stats(spt, key, spt_n[key])
@@ -172,23 +178,25 @@ report_text() {
 report_csv() {
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
-	!/^#/ && !/^run_id/ && NF>=20 {
+	# Only OK rows feed numeric aggregation (see report_text for rationale).
+	!/^#/ && !/^run_id/ && NF>=20 && $20=="OK" {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
 		if($8!="TIMEOUT" && $8!="N/A") { cl[key, ++cl_n[key]] = $8+0 }
 		if($9!="TIMEOUT" && $9!="N/A") { cr[key, ++cr_n[key]] = $9+0 }
-		spt[key, ++spt_n[key]] = $10+0
+		if($10!="N/A") { spt[key, ++spt_n[key]] = $10+0 }
 		if($11!="N/A") { rpt[key, ++rpt_n[key]] = $11+0 }
-		sxp[key, ++sxp_n[key]] = $12+0
+		if($12!="N/A") { sxp[key, ++sxp_n[key]] = $12+0 }
 		if($13!="N/A") { rxp[key, ++rxp_n[key]] = $13+0 }
 		if($14!="N/A" && $14!="overflow") { sqq[key, ++sqq_n[key]] = $14+0 }
 		if($15!="N/A" && $15!="overflow") { rqq[key, ++rqq_n[key]] = $15+0 }
-		scp[key, ++scp_n[key]] = $16+0
+		if($16!="N/A") { scp[key, ++scp_n[key]] = $16+0 }
 		if($17!="N/A") { rcp[key, ++rcp_n[key]] = $17+0 }
 		if($18!="N/A" && $18!="overflow") { spt2[key, ++spt2_n[key]] = $18+0 }
 		if($19!="N/A" && $19!="overflow") { rpt2[key, ++rpt2_n[key]] = $19+0 }
-		if($10+0 > 0) { amp[key, ++amp_n[key]] = ($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10 }
+		if($10!="N/A" && $10+0 > 0 && $12!="N/A") { amp[key, ++amp_n[key]] = ($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10 }
 	}
+	!/^#/ && !/^run_id/ && NF>=20 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($20=="OK") n_valid[tot_key]++ }
 	function sort_vals(arr, key, n,    i,j,tmp) {
 		for(i=2;i<=n;i++){tmp=arr[key,i];j=i-1;while(j>=1&&arr[key,j]>tmp){arr[key,j+1]=arr[key,j];j--}arr[key,j+1]=tmp}
 	}
@@ -217,6 +225,8 @@ report_csv() {
 		sort_keys()
 		for(k=1; k<=n_keys; k++) {
 			key = sorted_keys[k]; split(key, p, "\t")
+			# Row-validity census: n=n_valid, max=n_total so consumers see both.
+			printf "%s,%s,%s,%s,%s,%d,%d,%d,%d\n", p[1], p[2], p[3], p[4], "rows_valid_of_total", n_valid[key]+0, n_valid[key]+0, n_total[key]+0, n_valid[key]+0
 			csv_stats(p[1], p[2], p[3], p[4], "convergence_local_ms", cl, key, cl_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "convergence_remote_ms", cr, key, cr_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "source_push_triggers_delta", spt, key, spt_n[key])
@@ -276,26 +286,30 @@ report_markdown() {
 		echo "- \`$(basename "$f")\`"
 	done
 	echo ""
-	echo "| mesh | churn | scale | n | local_avg (ms) | remote_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 | rmt_queue_p99 | src_proxies | rmt_proxies | src_push_p99 | rmt_push_p99 | amplification |"
-	echo "|------|-------|-------|---|----------------|-----------------|--------------|--------------|------------|------------|---------------|---------------|-------------|-------------|--------------|--------------|---------------|"
+	echo "| mesh | churn | scale | n_valid | n_total | local_avg (ms) | remote_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 | rmt_queue_p99 | src_proxies | rmt_proxies | src_push_p99 | rmt_push_p99 | amplification |"
+	echo "|------|-------|-------|---------|---------|----------------|-----------------|--------------|--------------|------------|------------|---------------|---------------|-------------|-------------|--------------|--------------|---------------|"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	# n_total counts EVERY row for the cell; numeric aggregation uses ONLY OK rows
+	# (POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE carry N/A or undercounted deltas).
 	!/^#/ && !/^run_id/ && NF>=20 {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
 		n_total[key]++
+		if($20!="OK") next
+		n_valid[key]++
 		if($8!="TIMEOUT" && $8!="N/A") { cl_sum[key]+=$8+0; cl_n[key]++ }
 		if($9!="TIMEOUT" && $9!="N/A") { cr_sum[key]+=$9+0; cr_n[key]++ }
-		spt_sum[key]+=$10+0; spt_n[key]++
+		if($10!="N/A") { spt_sum[key]+=$10+0; spt_n[key]++ }
 		if($11!="N/A") { rpt_sum[key]+=$11+0; rpt_n[key]++ }
-		sxp_sum[key]+=$12+0; sxp_n[key]++
+		if($12!="N/A") { sxp_sum[key]+=$12+0; sxp_n[key]++ }
 		if($13!="N/A") { rxp_sum[key]+=$13+0; rxp_n[key]++ }
 		if($14!="N/A" && $14!="overflow") { sqq_sum[key]+=$14+0; sqq_n[key]++ }
 		if($15!="N/A" && $15!="overflow") { rqq_sum[key]+=$15+0; rqq_n[key]++ }
-		scp_sum[key]+=$16+0; scp_n[key]++
+		if($16!="N/A") { scp_sum[key]+=$16+0; scp_n[key]++ }
 		if($17!="N/A") { rcp_sum[key]+=$17+0; rcp_n[key]++ }
 		if($18!="N/A" && $18!="overflow") { spt2_sum[key]+=$18+0; spt2_n[key]++ }
 		if($19!="N/A" && $19!="overflow") { rpt2_sum[key]+=$19+0; rpt2_n[key]++ }
-		if($10+0 > 0) { amp_sum[key]+=($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10; amp_n[key]++ }
+		if($10!="N/A" && $10+0 > 0 && $12!="N/A") { amp_sum[key]+=($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10; amp_n[key]++ }
 	}
 	function avg_or_na(s, n) { return n>0 ? sprintf("%.0f", s/n) : "N/A" }
 	function avg_ratio(s, n) { return n>0 ? sprintf("%.1f", s/n) : "N/A" }
@@ -323,10 +337,12 @@ report_markdown() {
 	}
 	END {
 		sort_keys()
+		any_filtered = 0
 		for(k=1; k<=n_keys; k++) {
 			key = sorted_keys[k]; split(key, p, "\t")
-			printf "| %s | %s | %s->%s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
-				p[1], p[2], p[3], p[4], n_total[key], \
+			if ((n_valid[key]+0) < (n_total[key]+0)) any_filtered = 1
+			printf "| %s | %s | %s->%s | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+				p[1], p[2], p[3], p[4], n_valid[key]+0, n_total[key]+0, \
 				avg_or_na(cl_sum[key], cl_n[key]), \
 				avg_or_na(cr_sum[key], cr_n[key]), \
 				avg_or_na(spt_sum[key], spt_n[key]), \
@@ -340,6 +356,10 @@ report_markdown() {
 				avg_hist(spt2_sum[key], spt2_n[key]), \
 				avg_hist(rpt2_sum[key], rpt2_n[key]), \
 				avg_ratio(amp_sum[key], amp_n[key])
+		}
+		# PL15: surface the filter rate when any cell dropped rows.
+		if (any_filtered) {
+			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_*) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
 }

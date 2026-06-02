@@ -236,10 +236,12 @@ at high rates). 005 filters these rows from numeric aggregation, the same
 way it filters `POISONED_RESTART`.
 
 Preamble comment lines (PL2 / PL19) above the header carry: `RUN_ID`,
-`HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `SETTLE_SEC`,
-`BASELINE_DURATION_SEC`, `CHURN_DURATION_SEC`, `QPS`, `CONNECTIONS`,
-`NAMESPACE`, plus a `# combo=... phase=... window_start_ns=... window_end_ns=...`
-marker just before every data row (PL3 wall-clock window). Churn rows
+`HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `ISTIOD_REPLICAS` (Running
+source istiod pod count discovered at preflight — provenance for the per-pod
+fanout), `SETTLE_SEC`, `BASELINE_DURATION_SEC`, `CHURN_DURATION_SEC`, `QPS`,
+`CONNECTIONS`, `NAMESPACE`, plus a `# combo=... phase=... window_start_ns=...
+window_end_ns=... istiod_replicas=... scrape_skew_ms=...` marker just before
+every data row (PL3 wall-clock window, PL8 fanned-out scrape skew). Churn rows
 additionally carry `churn_ops_attempted=... churn_ops_succeeded=...` in
 that marker (A4).
 

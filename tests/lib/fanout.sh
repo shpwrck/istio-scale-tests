@@ -23,19 +23,33 @@
 #   process_start_time_seconds
 #              -> restart on ANY pod start-time advance OR pod-set change.
 #
-# PL12 note (TWO summation axes): the single-scrape gauge extractors in
-# metrics.sh / propagation already sum a gauge across its label permutations
-# WITHIN one scrape (axis 1). The fanout adds a SECOND axis: across pods.
-#   - pilot_xds sums on BOTH axes (labels within a pod, then pods).
-#   - pilot_services sums on labels within a pod, but is INVARIANT across pods,
-#     so the cross-pod reducer is max(), not sum().
+# PL12 note (TWO summation axes): a gauge with multiple label permutations whose
+# TOTAL is meaningful is summed on TWO axes.
+#   - axis 1 (labels WITHIN one pod): metrics.sh:extract_gauge_sum accumulates
+#     $NF across every name-anchored permutation in one scrape. (Plain
+#     extract_gauge returns only the LAST line — use extract_gauge_sum here.)
+#   - axis 2 (across pods): the fanout reducers below.
+#   pilot_xds sums on BOTH axes (extract_gauge_sum per pod, then sum across pods).
+#   pilot_services sums on labels WITHIN a pod (extract_gauge_sum) but is
+#     INVARIANT across pods, so the cross-pod reducer is max(), not sum().
+#
+# Dependency contract:
+#   - The PORT/SCRAPE primitives (fanout_ctx_port_base, fanout_list_istiod_pods,
+#     fanout_preflight_istiod, fanout_open, fanout_scrape_all, fanout_record_podset)
+#     depend ONLY on common.sh (die) + timestamp.sh (now_ns) + curl/awk/kubectl.
+#   - The AGGREGATION wrappers (fanout_counter_sum, fanout_counter_by_label_sum,
+#     fanout_gauge_sum, fanout_gauge_invariant, fanout_restart_status) call the
+#     metrics.sh extractors, so a consumer using them MUST source tests/lib/metrics.sh
+#     BEFORE tests/lib/fanout.sh. (Propagation uses only the primitives + its own
+#     extract_all_from_file, so it does not need metrics.sh.)
 #
 # All functions take file paths / ports rather than string variables — istiod
 # /metrics output is typically 10-50KB (MB-class at scale) and piping through
 # bash variables invites quoting problems. Mirrors tests/lib/metrics.sh.
 #
 # Requires: curl, awk, kubectl/oc. Callers must have sourced tests/lib/common.sh
-# (for die(), split_csv()) and tests/lib/timestamp.sh (for now_ns()).
+# (for die(), split_csv()) and tests/lib/timestamp.sh (for now_ns()); see the
+# dependency contract above for which functions also need tests/lib/metrics.sh.
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
 
@@ -43,12 +57,18 @@
 #   local_port = FANOUT_PF_BASE + ctx_index * FANOUT_CTX_STRIDE + pod_index
 # FANOUT_PF_BASE sits above the existing 15014 (istiod) / 15100 (envoy) blocks.
 # FANOUT_CTX_STRIDE leaves headroom above the 5-replica pin for restart churn;
-# 10 contexts -> ports 21014..21213. Per-context blocks keep ports stable across
-# a single context's own pod restarts (the block is indexed by context, not by
-# the global pod ordinal).
+# 10 contexts (indices 0-9) x up to 5 pods -> ports 21014..21198 (ctx 9 base
+# 21194 + pod 4). Per-context blocks keep ports stable across a single context's
+# own pod restarts (the block is indexed by context, not by the global pod ordinal).
 : "${FANOUT_PF_BASE:=21014}"
 : "${FANOUT_CTX_STRIDE:=20}"
 : "${FANOUT_METRICS_TIMEOUT:=5}"
+# Per-pod /metrics readiness loop length (x 0.5s) when opening a port-forward.
+: "${FANOUT_PF_READY_ATTEMPTS:=30}"
+# A scrape shorter than this many bytes is treated as failed/incomplete (an istiod
+# /metrics payload is many KB; an empty or truncated body indicates a PF death or
+# a timed-out scrape, NOT a control plane legitimately reporting 0 for a metric).
+: "${FANOUT_MIN_SCRAPE_BYTES:=512}"
 
 # Compute the base local port for a context's per-pod port-forward block.
 # Usage: fanout_ctx_port_base <ctx_index>
@@ -92,10 +112,17 @@ fanout_preflight_istiod() {
 
 # Open one port-forward per Running istiod pod for a context.
 # Each pod gets a stable local port from the context's block (see fanout_ctx_port_base).
-# Waits for /metrics readiness (30 x 0.5s) per pod, like the single-PF path.
+# Waits for /metrics readiness (FANOUT_PF_READY_ATTEMPTS x 0.5s) per pod.
 # Pushes pid/port/pod into the caller's namerefs (mirrors split_csv's nameref idiom).
 # The caller keeps its own PF_PIDS array + EXIT trap; pids are appended there too
 # via the out_pids nameref so existing cleanup logic kills them.
+#
+# Tolerate-one: a pod whose /metrics never becomes reachable within the readiness
+# window (e.g. a Running-but-not-Ready pod mid-rollout, or a flaky PF) is SKIPPED
+# (its PF pid is still tracked for cleanup, but it is not added to the out arrays).
+# Dies only when ZERO pods on the context become reachable — then there is nothing
+# to aggregate. The port index is keyed by the pod's position in the sorted list,
+# so a skipped pod leaves a gap rather than renumbering later pods' ports.
 #
 # Usage:
 #   fanout_open <ctx> <ctx_index> <out_pids_arr> <out_ports_arr> <out_pods_arr> <kubectl_argv...>
@@ -112,7 +139,7 @@ fanout_open() {
 	mapfile -t pods < <(fanout_list_istiod_pods "$ctx" "${kubectl_argv[@]}")
 	(( ${#pods[@]} >= 1 )) || die "fanout_open: no Running istiod pods on context $ctx"
 
-	local base port pod i attempts
+	local base port pod i attempts ready ok=0
 	base="$(fanout_ctx_port_base "$ctx_index")"
 	for i in "${!pods[@]}"; do
 		pod="${pods[i]}"
@@ -121,26 +148,61 @@ fanout_open() {
 			port-forward "pod/${pod}" "${port}":15014 >/dev/null 2>&1 &
 		_out_pids+=($!)
 		attempts=0
+		ready=0
 		while ! curl -s -o /dev/null --max-time "$FANOUT_METRICS_TIMEOUT" \
 			"http://localhost:${port}/metrics" 2>/dev/null; do
 			attempts=$((attempts + 1))
-			(( attempts > 30 )) && die "fanout_open: port-forward to istiod pod $pod on $ctx (port $port) failed to connect"
+			(( attempts > FANOUT_PF_READY_ATTEMPTS )) && break
 			sleep 0.5
 		done
-		_out_ports+=("$port")
-		_out_pods+=("$pod")
+		if curl -s -o /dev/null --max-time "$FANOUT_METRICS_TIMEOUT" \
+			"http://localhost:${port}/metrics" 2>/dev/null; then
+			ready=1
+		fi
+		if (( ready )); then
+			_out_ports+=("$port")
+			_out_pods+=("$pod")
+			ok=$((ok + 1))
+		else
+			echo "warn: istiod pod $pod on $ctx (port $port) /metrics not reachable; skipping this replica for the scrape" >&2
+		fi
 	done
+	(( ok >= 1 )) || die "fanout_open: no istiod pod on context $ctx served /metrics (all ${#pods[@]} replica PF(s) failed)"
+}
+
+# Scrape one pod's /metrics to a file. Returns 0 only if the body is at least
+# FANOUT_MIN_SCRAPE_BYTES (an empty/truncated scrape is a failure, NOT a legit 0).
+# shellcheck disable=SC2329
+_fanout_scrape_one() {
+	local port="$1" outfile="$2"
+	if ! curl -fsS --max-time "$FANOUT_METRICS_TIMEOUT" \
+		"http://localhost:${port}/metrics" -o "$outfile" 2>/dev/null; then
+		: > "$outfile"
+		return 1
+	fi
+	local sz
+	sz=$(wc -c < "$outfile" 2>/dev/null || echo 0)
+	sz="${sz//[^0-9]/}"
+	(( ${sz:-0} >= FANOUT_MIN_SCRAPE_BYTES ))
 }
 
 # Concurrently scrape /metrics from every pod-port in a context's block.
 # Writes <out_dir>/<prefix>-<i>.metrics (the scrape) and <out_dir>/<prefix>-<i>.ts
-# (now_ns at scrape completion) for each port index i. Also records the sorted
-# pod-name set to <out_dir>/<prefix>.podset for restart detection.
-# Echoes the per-batch scrape skew in ms = max(ts)-min(ts) (PL8), now spanning
-# pods (and, when the caller loops contexts into one out_dir, pods x contexts).
+# (now_ns at scrape completion) for each port index i.
+#
+# Empty/short-scrape handling: a pod whose body is empty or shorter than
+# FANOUT_MIN_SCRAPE_BYTES is retried ONCE in-tick (a transient /metrics timeout
+# usually clears on retry). Pods still failing after the retry are counted; the
+# count is written to <out_dir>/<prefix>.failed and the function RETURNS NON-ZERO
+# so the caller can tag the row (e.g. SCRAPE_INCOMPLETE / PF_DEGRADED) and the
+# report can filter it. An empty scrape is thus distinguishable from a pod
+# legitimately reporting 0 (which yields a full, multi-KB body).
+#
+# Echoes the per-batch scrape skew in ms = max(ts)-min(ts) (PL8), spanning pods
+# (and, when the caller loops contexts into one out_dir, pods x contexts).
 #
 # Usage:
-#   skew_ms=$(fanout_scrape_all <out_dir> <prefix> <port>...)
+#   skew_ms=$(fanout_scrape_all <out_dir> <prefix> <port>...) || handle incompleteness
 # shellcheck disable=SC2329
 fanout_scrape_all() {
 	local out_dir="$1" prefix="$2"
@@ -152,16 +214,27 @@ fanout_scrape_all() {
 	for i in "${!ports[@]}"; do
 		port="${ports[i]}"
 		(
-			if ! curl -fsS --max-time "$FANOUT_METRICS_TIMEOUT" \
-				"http://localhost:${port}/metrics" -o "${out_dir}/${prefix}-${i}.metrics" 2>/dev/null; then
-				: > "${out_dir}/${prefix}-${i}.metrics"
-			fi
+			_fanout_scrape_one "$port" "${out_dir}/${prefix}-${i}.metrics" || true
 			now_ns > "${out_dir}/${prefix}-${i}.ts"
 		) &
 		pids+=($!)
 	done
 	local p
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+
+	# Retry any empty/short scrape ONCE in-tick (transient timeout), then count
+	# pods still failing.
+	local failed=0 mf
+	for i in "${!ports[@]}"; do
+		mf="${out_dir}/${prefix}-${i}.metrics"
+		if [[ ! -s "$mf" ]] || (( $(wc -c < "$mf" 2>/dev/null || echo 0) < FANOUT_MIN_SCRAPE_BYTES )); then
+			if ! _fanout_scrape_one "${ports[i]}" "$mf"; then
+				failed=$((failed + 1))
+			fi
+		fi
+	done
+	echo "$failed" > "${out_dir}/${prefix}.failed"
+
 	# PL8: scrape_skew_ms = max(ts) - min(ts) across the per-pod timestamps.
 	local -a ts_files=()
 	for i in "${!ports[@]}"; do
@@ -177,6 +250,16 @@ fanout_scrape_all() {
 	fi
 	[[ -z "$skew" ]] && skew=0
 	echo "$skew"
+	(( failed == 0 ))
+}
+
+# Read the failed-pod count recorded by the most recent fanout_scrape_all for a
+# given <out_dir>/<prefix>. Echoes 0 if no record exists.
+# Usage: fanout_scrape_failed_count <out_dir> <prefix>
+# shellcheck disable=SC2329
+fanout_scrape_failed_count() {
+	local f="${1}/${2}.failed"
+	if [[ -s "$f" ]]; then cat "$f"; else echo 0; fi
 }
 
 # Record the sorted pod-name set for a context to a file (for restart detection).
@@ -224,8 +307,10 @@ fanout_counter_by_label_sum() {
 }
 
 # SUM a gauge across pods (pilot_xds: each proxy is one istiod connection).
-# extract_gauge already sums across label permutations within a pod (PL12 axis 1);
-# this adds the cross-pod axis (PL12 axis 2). Missing on a pod -> contributes 0.
+# PL12: extract_gauge_sum sums the gauge across its label permutations WITHIN a
+# pod (axis 1); this loop adds the cross-pod axis (axis 2). A pod that does not
+# report the gauge yields "unknown" and is skipped (does not contribute, vs. a
+# pod legitimately reporting 0 which contributes 0).
 # Usage: fanout_gauge_sum <gauge_name> <metrics_file>...
 # shellcheck disable=SC2329
 fanout_gauge_sum() {
@@ -234,7 +319,7 @@ fanout_gauge_sum() {
 	local f total=0 v
 	for f in "$@"; do
 		[[ -s "$f" ]] || continue
-		v="$(extract_gauge "$f" "$name")"
+		v="$(extract_gauge_sum "$f" "$name")"
 		[[ "$v" == "unknown" ]] && continue
 		total=$(awk -v a="$total" -v b="$v" 'BEGIN { printf "%.0f", a + b }')
 	done
@@ -242,7 +327,8 @@ fanout_gauge_sum() {
 }
 
 # Replica-INVARIANT gauge across pods (pilot_services: mesh-global registry,
-# identical on every replica). Reduce with MAX, NOT sum — summing would 5x a
+# identical on every replica). Take each pod's within-pod TOTAL (extract_gauge_sum,
+# PL12 axis 1) then reduce with MAX across pods, NOT sum — summing would 5x a
 # 5-replica mesh and (in propagation P2) break the "services delta >= 1" check.
 # Returns "unknown" only if NO pod reported the gauge.
 # Usage: fanout_gauge_invariant <gauge_name> <metrics_file>...
@@ -253,7 +339,7 @@ fanout_gauge_invariant() {
 	local f best="unknown" v
 	for f in "$@"; do
 		[[ -s "$f" ]] || continue
-		v="$(extract_gauge "$f" "$name")"
+		v="$(extract_gauge_sum "$f" "$name")"
 		[[ "$v" == "unknown" ]] && continue
 		if [[ "$best" == "unknown" ]]; then
 			best="$v"

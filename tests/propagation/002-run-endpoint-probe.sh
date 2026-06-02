@@ -109,12 +109,17 @@ Measurement methodology:
                           xDS client.
 
 Robustness:
-  - istiod must be a single replica per cluster (probe dies otherwise — svc/istiod
-    port-forwards load-balance, so multi-replica gauges desync between snapshots).
-  - istiod restart detection (process_start_time_seconds). When restart
+  - Multi-replica istiod is supported via per-pod fanout: every Running istiod
+    pod per context is port-forwarded (tests/lib/fanout.sh) and the per-pod
+    scrapes are aggregated (pilot_xds summed, pilot_services invariant=max,
+    convergence histogram buckets summed). The probe dies only when a context
+    has ZERO Running istiod pods; it tolerates one replica's PF failing if
+    others serve, and tags the row SCRAPE_INCOMPLETE if a pod's /metrics was
+    unreachable during baseline or the convergence poll.
+  - istiod restart detection via a per-pod process_start_time_seconds signature
+    (any pod's start advancing OR a pod-set change -> restarted=1). When restart
     detected mid-iteration, counter deltas and histogram quantiles emit N/A.
-    If process_start_time_seconds is missing, restarted=unknown (treated as
-    suspect by 005).
+    If a pod's process_start_time_seconds is missing, restarted=unknown.
   - Negative histogram bucket deltas emit N/A.
   - +Inf bucket delta is tracked as "overflow" (sample landed above bucket range).
   - Drain-wait timeouts after canary cleanup tag the row with status=DRAIN_TIMEOUT.
@@ -126,7 +131,9 @@ Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
   PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_SETTLE_SEC,
   PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics; default 5s — bump
-  for large meshes where /metrics may take longer to render).
+  for large meshes where /metrics may take longer to render),
+  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
+  FANOUT_CTX_STRIDE (per-context port stride; default 20).
 EOF
 }
 
@@ -795,18 +802,26 @@ poll_p2_remote_eds_push() {
 	shift 7
 	local -a ports=("$@")
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
+	local ever_complete=0
 	mkdir -p "$polldir"
 	# Initialize dirty file to "0" (clean) until we see a dirty hit.
 	echo "0" > "$dirty_file"
 	while true; do
 		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
-			echo "TIMEOUT" > "$result_file"
+			if (( ever_complete )); then echo "TIMEOUT" > "$result_file"; else echo "INCOMPLETE" > "$result_file"; fi
 			return
 		fi
 		# One fanned-out scrape+aggregate per tick (pilot_xds/eds summed across
 		# pods, pilot_services invariant). Returns the kv/hist aggregate files.
+		# Skip the detection test on an incomplete scrape (a missing pod undercounts
+		# the summed eds_count / pilot_services delta).
 		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
+		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
+			sleep "$POLL_INTERVAL_S"
+			continue
+		fi
+		ever_complete=1
 		local now_start
 		now_start=$(kv_get "$polldir/tick-kv" proc_start_sig)
 		if [[ "$restart_baseline" != "unknown" && "$now_start" != "unknown" && "$now_start" != "$restart_baseline" ]]; then
@@ -871,17 +886,26 @@ poll_p1_local_sync_histogram() {
 	local -a ports=("$@")
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	mkdir -p "$polldir"
-	local delta_file
+	local delta_file ever_complete=0
 	delta_file=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	while true; do
 		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
-			echo "TIMEOUT" > "$result_file"
+			# If we never once got a complete fanned-out scrape, the window is
+			# untrustworthy — report INCOMPLETE rather than a plain TIMEOUT.
+			if (( ever_complete )); then echo "TIMEOUT" > "$result_file"; else echo "INCOMPLETE" > "$result_file"; fi
 			rm -f "$delta_file"
 			return
 		fi
-		# One fanned-out scrape+aggregate per tick -> merged hist + kv.
+		# One fanned-out scrape+aggregate per tick -> merged hist + kv. Skip the
+		# convergence test on an incomplete scrape (a missing pod undercounts the
+		# merged _count and would let P1 "converge" against a partial mesh).
 		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
+		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
+			sleep "$POLL_INTERVAL_S"
+			continue
+		fi
+		ever_complete=1
 		local now_start
 		now_start=$(kv_get "$polldir/tick-kv" proc_start_sig)
 		if [[ "$restart_baseline" != "unknown" && "$now_start" != "unknown" && "$now_start" != "$restart_baseline" ]]; then
@@ -908,9 +932,10 @@ compute_delta_ms() {
 	local ts
 	ts=$(<"$result_file")
 	case "$ts" in
-		TIMEOUT) echo "TIMEOUT"; return ;;
-		RESTART) echo "N/A"; return ;;
-		"")      echo "N/A"; return ;;
+		TIMEOUT)    echo "TIMEOUT"; return ;;
+		RESTART)    echo "N/A"; return ;;
+		INCOMPLETE) echo "N/A"; return ;;
+		"")         echo "N/A"; return ;;
 	esac
 	echo $(( (ts - t0) / 1000000 ))
 }
@@ -998,16 +1023,20 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo "  Scraping baselines..."
 	BASELINE_DIR="$TMPDIR_RUN/baseline-${iter}"
 	mkdir -p "$BASELINE_DIR"
+	BASELINE_INCOMPLETE=0
 	src_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "source" pilot_proxy_convergence_time "${SRC_ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$BASELINE_DIR" "source") > 0 )) && BASELINE_INCOMPLETE=1
 	MAX_SKEW="$src_skew"
 	for i in "${!REMOTES[@]}"; do
 		_rip=()  # populated by load_rmt_istiod_ports via nameref
 		load_rmt_istiod_ports "$i" _rip
 		r_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "remote-${i}" pilot_proxy_convergence_time "${_rip[@]}")"
+		(( $(fanout_scrape_failed_count "$BASELINE_DIR" "remote-${i}") > 0 )) && BASELINE_INCOMPLETE=1
 		(( r_skew > MAX_SKEW )) && MAX_SKEW="$r_skew"
 	done
 	SCRAPE_SKEW_MS="$MAX_SKEW"
 	[[ -z "$SCRAPE_SKEW_MS" ]] && SCRAPE_SKEW_MS=0
+	(( BASELINE_INCOMPLETE )) && echo "  Warning: baseline scrape incomplete (a pod's /metrics was unreachable) — row will be tagged SCRAPE_INCOMPLETE" >&2
 
 	# A2: parse SOURCE_PROXY_COUNT and SOURCE_START from the same baseline scrape.
 	# SOURCE_START is now the per-pod start signature (sorted join) so any pod's
@@ -1151,7 +1180,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	# Helper to compute final status. Honors restart, timeouts, drain timeout.
 	status_for_row() {
-		local p1="$1" p2="$2" p3="$3" rst="$4" drain="$5"
+		local p1="$1" p2="$2" p3="$3" rst="$4" drain="$5" incomplete="${6:-0}"
 		local s="OK"
 		[[ "$p1" == "TIMEOUT" ]] && s="TIMEOUT_P1"
 		[[ "$p2" == "TIMEOUT" ]] && s="TIMEOUT_P2"
@@ -1162,11 +1191,23 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		if [[ "$drain" == "1" && "$s" == "OK" ]]; then
 			s="DRAIN_TIMEOUT"
 		fi
+		# SCRAPE_INCOMPLETE: a pod's /metrics was unreachable during baseline or
+		# the convergence poll, so the summed pilot_xds / merged histogram /
+		# convergence denominator is undercounted. The row is suspect — flag it
+		# (the report filters non-OK). Supersedes OK/DRAIN_TIMEOUT but not a
+		# RESTART/TIMEOUT which are stronger signals.
+		if [[ "$incomplete" == "1" && ( "$s" == "OK" || "$s" == "DRAIN_TIMEOUT" ) ]]; then
+			s="SCRAPE_INCOMPLETE"
+		fi
 		echo "$s"
 	}
 
+	# A poll-loop scrape that never completed cleanly also taints the row.
+	row_incomplete="$BASELINE_INCOMPLETE"
+	[[ -s "$P1_FILE" && "$(<"$P1_FILE")" == "INCOMPLETE" ]] && row_incomplete=1
+
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
-		status=$(status_for_row "$p1_ms" "N/A" "N/A" "$restarted" "$drain_timeout")
+		status=$(status_for_row "$p1_ms" "N/A" "N/A" "$restarted" "$drain_timeout" "$row_incomplete")
 		if ((WRITE_TSV)); then
 			# F1: p1_sample_count is "got/attempted" (delta-_count first, proxy_count second).
 			echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\tN/A\t${T0}\t${p1_ms}\tN/A\tN/A\t${status}\t${p1_conv_p50}\t${p1_conv_p99}\t${p1_sample_count}/${SOURCE_PROXY_COUNT}\t${SOURCE_PROXY_COUNT}\t${p1_overflow}\t${restarted}\t0\t${WINDOW_MS}\t${SCRAPE_SKEW_MS}" >> "$TSV_FILE"
@@ -1210,7 +1251,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				[[ -z "$P3_MAX" || "$p3_ms" -gt "$P3_MAX" ]] && P3_MAX="$p3_ms"
 			fi
 
-			status=$(status_for_row "$p1_ms" "$p2_ms" "$p3_ms" "$p2_restarted" "$drain_timeout")
+			# A P2 poll scrape that never completed cleanly also taints the remote row.
+			p2_incomplete="$row_incomplete"
+			[[ -s "${P2_FILES[i]}" && "$(<"${P2_FILES[i]}")" == "INCOMPLETE" ]] && p2_incomplete=1
+			status=$(status_for_row "$p1_ms" "$p2_ms" "$p3_ms" "$p2_restarted" "$drain_timeout" "$p2_incomplete")
 
 			# PL13: counter deltas are N/A on restart or unknown.
 			p2_out="$p2_ms"

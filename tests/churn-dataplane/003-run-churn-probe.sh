@@ -185,8 +185,12 @@ fi
 
 # Preflight + record the source istiod replica count (PL2). The fanout
 # (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-replica
-# istiod is supported; we just require >= 1 pod and record provenance.
+# istiod is supported; we just require >= 1 pod and record provenance. Warn (do
+# not die) if the count differs from the expected pin COEXEC_ISTIOD_REPLICAS.
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
+if [[ -n "${COEXEC_ISTIOD_REPLICAS:-}" && "$SOURCE_REPLICAS" != "$COEXEC_ISTIOD_REPLICAS" ]]; then
+	echo "warn: context $SOURCE_CTX has $SOURCE_REPLICAS Running istiod pods, expected pin COEXEC_ISTIOD_REPLICAS=$COEXEC_ISTIOD_REPLICAS" >&2
+fi
 
 # Bootstrap output file if missing.
 if [[ ! -f "$OUTPUT_FILE" ]]; then
@@ -257,9 +261,11 @@ PF_OK=1
 
 PRE_PODSET="${ISTIOD_DIR}/pre.podset"
 PRE_SKEW_MS=0
+SCRAPE_INCOMPLETE=0
 if ((PF_OK)); then
 	fanout_record_podset "$SOURCE_CTX" "$PRE_PODSET" "${KUBECTL[@]}"
 	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 pre_metrics_csv() {
 	local i out=""
@@ -391,6 +397,7 @@ POST_SKEW_MS=0
 if ((PF_OK)); then
 	fanout_record_podset "$SOURCE_CTX" "$POST_PODSET" "${KUBECTL[@]}"
 	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" "${ISTIOD_PORTS[@]}")"
+	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "post") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 # PL8: per-window scrape skew now spans pods (max of pre/post batches).
 SCRAPE_SKEW_MS="$PRE_SKEW_MS"
@@ -428,7 +435,9 @@ rm -f "$CHURN_LOG"
 # before the delta/quantile.
 XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
-if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 ]]; then
+# An incomplete scrape (a pod's /metrics unreachable) undercounts the summed
+# counters / merged histograms, so the istiod-side deltas are not trustworthy.
+if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
 	pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")
 	post_pushes=$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")
 	XDS_PUSHES_DELTA=$(( post_pushes - pre_pushes ))
@@ -476,6 +485,11 @@ if [[ "$RESTARTED" != "0" ]]; then
 	XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 	CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 	[[ "$STATUS" == "OK" ]] && STATUS="POISONED_RESTART"
+fi
+# A pod's /metrics was unreachable -> istiod-side aggregation undercounted; tag
+# the row so 005 filters it (a non-OK status the aggregator drops).
+if [[ "$SCRAPE_INCOMPLETE" == "1" && "$STATUS" == "OK" ]]; then
+	STATUS="POISONED_SCRAPE"
 fi
 
 # A4: if the driver could not keep up (e.g. apiserver 429s), mark the row so
