@@ -383,6 +383,54 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }
 
+# --- Mesh-wiring health gate ApplicationSet ---
+# Deploys charts/mesh-wiring-verify on every istio-mesh-member (reuses
+# acm-openshift-gitops-placement, requireMeshMemberLabel=true). Each member runs
+# a readiness-gated pod that goes NotReady — flipping its Argo Application
+# Degraded — when it is missing remote secrets or istiod has not synced every
+# cluster. This surfaces partial ESO PushSecret fan-out, which both Argo
+# (no PushSecret health check) and ESO (reports Synced=True on partial push)
+# otherwise hide.
+#
+# expectedMembers is derived here from the same source of truth that labels mesh
+# members, so a change to mesh_member_count automatically updates the gate.
+resource "helm_release" "mesh_wiring_verify_appset" {
+  count    = local.gitops_enabled && var.gitops_app_repo_url != "" ? 1 : 0
+  provider = helm.hub
+
+  name             = "mesh-wiring-verify-appset"
+  chart            = "${path.module}/../../charts/gitops-hub-ocm-placement-appset"
+  namespace        = var.gitops_namespace
+  create_namespace = false
+  take_ownership   = true
+  wait             = true
+  timeout          = 300
+
+  values = [file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml")]
+
+  set = [
+    {
+      name  = "repo.url"
+      value = var.gitops_app_repo_url
+      type  = "string"
+    },
+    {
+      name  = "repo.revision"
+      value = var.gitops_app_repo_revision
+      type  = "string"
+    },
+    {
+      # parameters[0] = clusterName; parameters[1] = expectedMembers. Threaded
+      # into each per-spoke Application's Helm values by the ApplicationSet.
+      name  = "template.source.helm.parameters[1].value"
+      value = tostring(length(local.mesh_member_spoke_keys))
+      type  = "string"
+    },
+  ]
+
+  depends_on = [helm_release.acm_gitops_resources, helm_release.acm_managed_cluster]
+}
+
 # --- ArgoCD cluster secrets (direct external URL, Terraform-owned) ---
 # We create these secrets ourselves instead of letting ACM's GitOpsCluster
 # controller generate them. That controller only ever writes an unreachable

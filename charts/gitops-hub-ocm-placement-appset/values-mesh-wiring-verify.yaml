@@ -1,0 +1,64 @@
+# Preset: mesh-wiring health gate on every Istio mesh member.
+# Reuses acm-openshift-gitops-placement (requireMeshMemberLabel=true), so it
+# targets exactly the istio-mesh-member set — the same clusters the mesh
+# components deploy to. Installed by Terraform (terraform/platform/
+# platform_gitops.tf), which overrides the expectedMembers parameter with
+# length(local.mesh_member_spoke_keys).
+applicationSetNamespace: openshift-gitops
+applicationSetControllerNamespace: openshift-gitops
+
+identity:
+  component: mesh-wiring-verify
+
+placement:
+  name: acm-openshift-gitops-placement
+  placementDecisionName: ""
+
+inClusterGenerator:
+  enabled: false
+
+generatorConfigMap:
+  create: false
+  name: acm-gitops-placement-generator
+
+clusterDecisionResource:
+  requeueAfterSeconds: 30
+
+placementRbac:
+  create: true
+  roleName: openshift-gitops-ocm-placement-mesh-wiring-verify
+  roleBindingName: openshift-gitops-ocm-placement-mesh-wiring-verify
+  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
+
+argocdApplicationControllerRbac:
+  create: true
+  roleName: gitops-mesh-wiring-verify-appset-argocd-sync
+  roleBindingName: gitops-mesh-wiring-verify-appset-argocd-sync
+  serviceAccountName: openshift-gitops-argocd-application-controller
+  serviceAccountNamespace: openshift-gitops
+
+applicationSet:
+  name: mesh-wiring-verify
+
+destination:
+  mode: clusterName
+  namespace: mesh-wiring-verify
+
+template:
+  applicationNameSuffix: mesh-wiring-verify
+  source:
+    path: charts/mesh-wiring-verify
+    helm:
+      releaseName: mesh-wiring-verify
+      parameters:
+        - name: clusterName
+          value: "{{clusterName}}"
+        # Overridden by Terraform: template.source.helm.parameters[1].value =
+        # tostring(length(local.mesh_member_spoke_keys)). Left at 0 here so a
+        # standalone render (no Terraform) degrades to consistency-only checks.
+        - name: expectedMembers
+          value: "0"
+
+repo:
+  url: ""
+  revision: main
