@@ -24,6 +24,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -39,7 +41,8 @@ POLL_INTERVAL_S="0.$(printf '%03d' "${CHURN_POLL_INTERVAL_MS:-250}")"
 OUTPUT_DIR="${ROOT}/tests/churn/results"
 DRY_RUN=0
 NS="${CHURN_TEST_NAMESPACE:-churn-test}"
-BASE_PF_PORT=15014
+# istiod is reached via tests/lib/fanout.sh (per-pod port block from FANOUT_PF_BASE,
+# default 21014). The envoy watcher PF block is unchanged.
 BASE_ENVOY_PF_PORT=15100
 
 usage() {
@@ -154,10 +157,22 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
+# Preflight every context: require >= 1 Running istiod pod. Multi-replica istiod
+# is supported via the per-pod fanout (tests/lib/fanout.sh); record the source
+# replica count for the TSV preamble (PL2).
+echo "Preflighting istiod replicas..."
+SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
+echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
+for ctx in "${REMOTES[@]}"; do
+	r="$(fanout_preflight_istiod "$ctx" "${KUBECTL[@]}")"
+	echo "  [$ctx] Running istiod replicas: $r"
+done
+
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
+# ISTIOD_REPLICAS=$SOURCE_REPLICAS
 EOF
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
@@ -180,18 +195,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-start_port_forward() {
-	local ctx="$1" local_port="$2"
-	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "$local_port":15014 >/dev/null 2>&1 &
-	PF_PIDS+=($!)
-	local attempts=0
-	while ! curl -s -o /dev/null "http://localhost:$local_port/debug/syncz" 2>/dev/null; do
-		attempts=$((attempts + 1))
-		((attempts > 30)) && die "port-forward to istiod on $ctx (port $local_port) failed"
-		sleep 0.5
-	done
-}
-
 start_envoy_port_forward() {
 	local ctx="$1" local_port="$2"
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" port-forward deploy/churn-watcher "$local_port":15000 >/dev/null 2>&1 &
@@ -204,36 +207,38 @@ start_envoy_port_forward() {
 	done
 }
 
-get_counter() {
-	local port="$1" name="$2"
-	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
+# --- per-context istiod fanout scrape + aggregation ------------------------
+# Each context's Running istiod pods are port-forwarded once via fanout_open
+# (tests/lib/fanout.sh). A "scrape" writes every pod's /metrics to files in a
+# per-context dir; the aggregators below then SUM counters / pilot_xds, and
+# MERGE histogram buckets across pods before delta/quantile.
+#
+# Per-context state is keyed by a context tag (the array index, e.g. "src",
+# "rmt0"). CTX_PORTS_<tag> is a newline list of that context's pod ports.
+
+# Scrape all of a context's pods into <dir> with prefix <prefix> (concurrent).
+# Echoes the scrape skew ms (PL8, spans pods).
+scrape_ctx() {
+	local dir="$1" prefix="$2"
+	shift 2
+	local -a ports=("$@")
+	fanout_scrape_all "$dir" "$prefix" "${ports[@]}"
 }
 
-get_gauge() {
-	local port="$1" name="$2"
-	curl -s "http://localhost:$port/metrics" 2>/dev/null | awk -v name="^${name}([{]| )" '$0 ~ name && !/^#/ { sum += $NF } END { printf "%.0f\n", sum+0 }'
+# List the per-pod metrics files for a scrape (dir/prefix-*.metrics) in order.
+ctx_metric_files() {
+	local dir="$1" prefix="$2" nports="$3"
+	local i
+	for ((i = 0; i < nports; i++)); do
+		echo "${dir}/${prefix}-${i}.metrics"
+	done
 }
 
-scrape_histogram() {
-	local port="$1" name="$2"
-	curl -s "http://localhost:$port/metrics" 2>/dev/null | grep "${name}_bucket{" || true
-}
-
-# String-to-file adapter for the shared delta_histogram_p99 (tests/lib/metrics.sh).
-# This script's scrape_histogram() returns strings; the canonical function takes files.
-_delta_histogram_p99_str() {
-	local pre_str="$1" post_str="$2" name="$3"
-	local tmp_pre="${TMPDIR_RUN}/hist_pre_$$"
-	local tmp_post="${TMPDIR_RUN}/hist_post_$$"
-	echo "$pre_str" > "$tmp_pre"
-	echo "$post_str" > "$tmp_post"
-	local result
-	result=$(delta_histogram_p99 "$tmp_pre" "$tmp_post" "$name")
-	rm -f "$tmp_pre" "$tmp_post"
-	# Truncate to integer — callers use bash (( )) arithmetic
-	case "$result" in
-	N/A|overflow) echo "$result" ;;
-	*)            printf '%.0f\n' "$result" ;;
+# Convert an integer-or-marker p99 (delta_histogram_p99 output) for bash (( )).
+_round_p99() {
+	case "$1" in
+	N/A | overflow) echo "$1" ;;
+	*)              printf '%.0f\n' "$1" ;;
 	esac
 }
 
@@ -253,17 +258,43 @@ bucket_range() {
 	echo ">30000"
 }
 
+# Count stale (non-SYNCED) proxies on ONE istiod pod's /debug/syncz.
+# Echoes the stale count, or "ERR" on curl/jq failure (each istiod replica only
+# knows its OWN connected proxies, so we must query every source pod).
+_syncz_stale_count() {
+	local port="$1" syncz stale
+	syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }
+	stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { echo "ERR"; return; }
+	echo "$stale"
+}
+
+# Sum stale proxies across ALL source istiod pods. Converged only when every pod
+# reports 0 stale (a replica with a backlog must not be hidden by a synced peer).
+# Echoes total stale, or "ERR" if any pod scrape failed (treated as not-yet).
+_syncz_stale_total() {
+	local total=0 s
+	local port
+	for port in "$@"; do
+		s="$(_syncz_stale_count "$port")"
+		[[ "$s" == "ERR" ]] && { echo "ERR"; return; }
+		total=$(( total + s ))
+	done
+	echo "$total"
+}
+
+# Poll syncz across all source pods until total stale == 0 (or timeout).
 poll_syncz_converged() {
-	local port="$1" t0="$2" result_file="$3"
+	local t0="$1" result_file="$2"
+	shift 2
+	local -a ports=("$@")
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
 		local now_ms
 		now_ms=$(( $(now_ns) / 1000000 ))
 		((now_ms > deadline)) && { echo "TIMEOUT" > "$result_file"; return; }
-		local syncz stale
-		syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
-		stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
-		if [[ "$stale" == "0" ]]; then
+		local total
+		total="$(_syncz_stale_total "${ports[@]}")"
+		if [[ "$total" == "0" ]]; then
 			now_ns > "$result_file"
 			return
 		fi
@@ -271,15 +302,16 @@ poll_syncz_converged() {
 	done
 }
 
-# Wait for syncz to show all-SYNCED (single phase, used for settle).
+# Wait for syncz to show all-SYNCED across all source pods (used for settle).
 wait_syncz_synced() {
-	local port="$1" timeout_sec="$2"
+	local timeout_sec="$1"
+	shift
+	local -a ports=("$@")
 	local deadline=$(( $(date +%s) + timeout_sec ))
 	while (( $(date +%s) <= deadline )); do
-		local syncz stale
-		syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
-		stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
-		[[ "$stale" == "0" ]] && return 0
+		local total
+		total="$(_syncz_stale_total "${ports[@]}")"
+		[[ "$total" == "0" ]] && return 0
 		sleep "$POLL_INTERVAL_S"
 	done
 	return 1
@@ -318,41 +350,72 @@ echo "Deployments: $DEPLOYMENT_COUNT | Scale: $BASE_REPLICAS -> $SCALE_TO"
 echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s | Settle: ${SETTLE_SEC}s"
 echo ""
 
+TMPDIR_RUN=$(mktemp -d)
+trap 'cleanup; rm -rf "$TMPDIR_RUN"' EXIT
+
+# Fan out one port-forward per Running istiod pod, per context. The source
+# context is ctx_index 0; remote i is ctx_index i+1 (collision-free blocks).
 echo "Starting port-forwards..."
-start_port_forward "$SOURCE_CTX" "$BASE_PF_PORT"
+SRC_ISTIOD_PORTS=()
+# SRC_ISTIOD_PODS is a required out-array of fanout_open; not read directly here
+# (restart detection uses the recorded .podset file), so mark it used.
+# shellcheck disable=SC2034
+SRC_ISTIOD_PODS=()
+fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS SRC_ISTIOD_PODS "${KUBECTL[@]}"
+
+# Per-remote istiod pod-port arrays, stored as newline strings keyed by remote idx
+# (bash has no array-of-arrays); split back with split_csv-style read when used.
+declare -A RMT_PORTS_STR=()
 for i in "${!REMOTES[@]}"; do
-	start_port_forward "${REMOTES[i]}" $(( BASE_PF_PORT + i + 1 ))
+	_rp=()
+	_rpods=()
+	fanout_open "${REMOTES[i]}" $(( i + 1 )) PF_PIDS _rp _rpods "${KUBECTL[@]}"
+	RMT_PORTS_STR["$i"]="$(IFS=$'\n'; echo "${_rp[*]}")"
 	start_envoy_port_forward "${REMOTES[i]}" $(( BASE_ENVOY_PF_PORT + i ))
 done
 echo "Port-forwards ready."
 
-REMOTE_ISTIOD_PORTS=()
-for i in "${!REMOTES[@]}"; do
-	REMOTE_ISTIOD_PORTS+=( $(( BASE_PF_PORT + i + 1 )) )
-done
+# Helper: load a remote's istiod ports into a named array.
+load_rmt_ports() {
+	local idx="$1"
+	local -n _arr="$2"
+	_arr=()
+	local p
+	while IFS= read -r p; do [[ -n "$p" ]] && _arr+=("$p"); done <<<"${RMT_PORTS_STR[$idx]}"
+}
 
 # Convergence threshold: at least 1 new endpoint per deployment visible in the
 # remote sidecar.  This confirms EDS propagation without gating on full pod
 # rollout time (which is a Kubernetes scheduling concern, not Istio convergence).
 ENDPOINT_THRESHOLD_DELTA=$DEPLOYMENT_COUNT
 
-TMPDIR_RUN=$(mktemp -d)
-trap 'cleanup; rm -rf "$TMPDIR_RUN"' EXIT
-
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
 
-	# Pre-churn: capture gauges and endpoint baselines first (order-insensitive),
-	# then counter/histogram baselines immediately before scale-up to prevent
-	# stray triggers from the previous iteration's scale-down bleeding into
-	# this iteration's delta window.
-	src_connected_proxies=$(get_gauge "$BASE_PF_PORT" "pilot_xds")
+	ITER_DIR="$TMPDIR_RUN/iter-${iter}"
+	mkdir -p "$ITER_DIR"
+	SRC_NPORTS="${#SRC_ISTIOD_PORTS[@]}"
+
+	# Pre-churn: gauges + endpoint baselines first (order-insensitive), then a
+	# full per-pod baseline scrape of every source istiod immediately before
+	# scale-up so the delta window starts at the scale-up. pilot_xds (connected
+	# proxies) SUMS across replicas; histograms/counters aggregate per pod below.
+	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null
+	mapfile -t SRC_PRE_FILES < <(ctx_metric_files "$ITER_DIR" "src-pre" "$SRC_NPORTS")
+	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-pre.podset" "${KUBECTL[@]}"
+	src_connected_proxies=$(fanout_gauge_sum pilot_xds "${SRC_PRE_FILES[@]}")
 
 	rmt_connected_proxies=0
+	declare -A RMT_PRE_FILES_STR=()
 	for i in "${!REMOTES[@]}"; do
-		rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
-		rmt_connected_proxies=$(( rmt_connected_proxies + $(get_gauge "$rmt_port" "pilot_xds") ))
+		_rports=()  # populated by load_rmt_ports via nameref
+		load_rmt_ports "$i" _rports
+		scrape_ctx "$ITER_DIR" "rmt${i}-pre" "${_rports[@]}" >/dev/null
+		mapfile -t _rfiles < <(ctx_metric_files "$ITER_DIR" "rmt${i}-pre" "${#_rports[@]}")
+		RMT_PRE_FILES_STR["$i"]="$(IFS=$'\n'; echo "${_rfiles[*]}")"
+		fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-pre.podset" "${KUBECTL[@]}"
+		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds "${_rfiles[@]}") ))
 	done
 
 	BASELINE_COUNTS=()
@@ -362,24 +425,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		BASELINE_COUNTS+=("$bc")
 	done
 
-	# Counter/histogram baselines — scraped as late as possible so the delta
-	# window starts right at the scale-up.
-	src_pre_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
-	src_pre_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
-	src_pre_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
-	src_pre_push_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_xds_push_time")
-
-	rmt_pre_triggers=()
-	rmt_pre_pushes=()
-	rmt_pre_hist=()
-	rmt_pre_push_hist=()
-	for i in "${!REMOTES[@]}"; do
-		rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
-		rmt_pre_triggers+=("$(get_counter "$rmt_port" "pilot_push_triggers")")
-		rmt_pre_pushes+=("$(get_counter "$rmt_port" "pilot_xds_pushes")")
-		rmt_pre_hist+=("$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")")
-		rmt_pre_push_hist+=("$(scrape_histogram "$rmt_port" "pilot_xds_push_time")")
-	done
+	# Counter baselines summed across source pods.
+	src_pre_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_PRE_FILES[@]}")
+	src_pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_PRE_FILES[@]}")
 
 	T0=$(now_ns)
 	echo "  Scaling $DEPLOYMENT_COUNT deployments to $SCALE_TO replicas on all clusters..."
@@ -394,7 +442,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	LOCAL_FILE="$TMPDIR_RUN/local_conv"
 	echo "" > "$LOCAL_FILE"
-	poll_syncz_converged "$BASE_PF_PORT" "$T0" "$LOCAL_FILE" &
+	# syncz fanned out across ALL source istiod pods: each replica only knows its
+	# own connected proxies, so convergence requires every pod to report 0 stale.
+	poll_syncz_converged "$T0" "$LOCAL_FILE" "${SRC_ISTIOD_PORTS[@]}" &
 	POLL_PIDS=($!)
 
 	REMOTE_FILES=()
@@ -429,37 +479,67 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		if ((all_ok)); then conv_remote="$max_remote"; else conv_remote="TIMEOUT"; fi
 	fi
 
-	# Post-churn: capture counters and histograms from all istiods.
-	src_post_triggers=$(get_counter "$BASE_PF_PORT" "pilot_push_triggers")
-	src_post_pushes=$(get_counter "$BASE_PF_PORT" "pilot_xds_pushes")
-	src_post_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_proxy_queue_time")
-	src_post_push_hist=$(scrape_histogram "$BASE_PF_PORT" "pilot_xds_push_time")
+	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
+	scrape_ctx "$ITER_DIR" "src-post" "${SRC_ISTIOD_PORTS[@]}" >/dev/null
+	mapfile -t SRC_POST_FILES < <(ctx_metric_files "$ITER_DIR" "src-post" "$SRC_NPORTS")
+	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-post.podset" "${KUBECTL[@]}"
 
+	# PL9 (widened): per-pod start-time advance OR pod-set change -> restart.
+	src_pre_csv="$(IFS=,; echo "${SRC_PRE_FILES[*]}")"
+	src_post_csv="$(IFS=,; echo "${SRC_POST_FILES[*]}")"
+	restarted_local="$(fanout_restart_status \
+		"$ITER_DIR/src-pre.podset" "$ITER_DIR/src-post.podset" \
+		"$src_pre_csv" "$src_post_csv")"
+
+	src_post_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_POST_FILES[@]}")
+	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_POST_FILES[@]}")
 	src_triggers_delta=$((src_post_triggers - src_pre_triggers))
 	src_pushes_delta=$((src_post_pushes - src_pre_pushes))
-	src_queue_p99=$(_delta_histogram_p99_str "$src_pre_hist" "$src_post_hist" "pilot_proxy_queue_time")
-	src_push_time_p99=$(_delta_histogram_p99_str "$src_pre_push_hist" "$src_post_push_hist" "pilot_xds_push_time")
+
+	# PL11: merge buckets across source pods, then delta -> quantile.
+	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-pre-q.merged" "${SRC_PRE_FILES[@]}"
+	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-post-q.merged" "${SRC_POST_FILES[@]}"
+	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-pre-pt.merged" "${SRC_PRE_FILES[@]}"
+	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-post-pt.merged" "${SRC_POST_FILES[@]}"
+	src_queue_p99=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/src-pre-q.merged" "$ITER_DIR/src-post-q.merged" pilot_proxy_queue_time)")
+	src_push_time_p99=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/src-pre-pt.merged" "$ITER_DIR/src-post-pt.merged" pilot_xds_push_time)")
 
 	rmt_triggers_delta=0
 	rmt_pushes_delta=0
 	rmt_queue_p99="N/A"
 	rmt_push_time_p99="N/A"
+	restarted_remote="0"
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_rmt_q=0
 		has_rmt_q=0
 		max_rmt_pt=0
 		has_rmt_pt=0
 		for i in "${!REMOTES[@]}"; do
-			rmt_port="${REMOTE_ISTIOD_PORTS[i]}"
-			rmt_post_t=$(get_counter "$rmt_port" "pilot_push_triggers")
-			rmt_post_p=$(get_counter "$rmt_port" "pilot_xds_pushes")
-			rmt_post_h=$(scrape_histogram "$rmt_port" "pilot_proxy_queue_time")
-			rmt_post_ph=$(scrape_histogram "$rmt_port" "pilot_xds_push_time")
+			_rports=()  # populated by load_rmt_ports via nameref
+			load_rmt_ports "$i" _rports
+			scrape_ctx "$ITER_DIR" "rmt${i}-post" "${_rports[@]}" >/dev/null
+			mapfile -t _rpost_files < <(ctx_metric_files "$ITER_DIR" "rmt${i}-post" "${#_rports[@]}")
+			fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-post.podset" "${KUBECTL[@]}"
+			mapfile -t _rpre_files <<<"${RMT_PRE_FILES_STR[$i]}"
 
-			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_triggers[i] ))
-			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_pushes[i] ))
+			# Restart on any remote -> mark remote poisoned (do not mutate local).
+			rpre_csv="$(IFS=,; echo "${_rpre_files[*]}")"
+			rpost_csv="$(IFS=,; echo "${_rpost_files[*]}")"
+			r_restart="$(fanout_restart_status \
+				"$ITER_DIR/rmt${i}-pre.podset" "$ITER_DIR/rmt${i}-post.podset" \
+				"$rpre_csv" "$rpost_csv")"
+			[[ "$r_restart" != "0" ]] && restarted_remote="$r_restart"
 
-			rmt_q=$(_delta_histogram_p99_str "${rmt_pre_hist[i]}" "$rmt_post_h" "pilot_proxy_queue_time")
+			rmt_post_t=$(fanout_counter_sum pilot_push_triggers "${_rpost_files[@]}")
+			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes "${_rpost_files[@]}")
+			rmt_pre_t=$(fanout_counter_sum pilot_push_triggers "${_rpre_files[@]}")
+			rmt_pre_p=$(fanout_counter_sum pilot_xds_pushes "${_rpre_files[@]}")
+			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_t ))
+			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_p ))
+
+			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-pre-q.merged" "${_rpre_files[@]}"
+			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-post-q.merged" "${_rpost_files[@]}"
+			rmt_q=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/rmt${i}-pre-q.merged" "$ITER_DIR/rmt${i}-post-q.merged" pilot_proxy_queue_time)")
 			if [[ "$rmt_q" != "N/A" && "$rmt_q" != "overflow" ]]; then
 				has_rmt_q=1
 				((rmt_q > max_rmt_q)) && max_rmt_q="$rmt_q"
@@ -467,7 +547,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				rmt_queue_p99="overflow"
 			fi
 
-			rmt_pt=$(_delta_histogram_p99_str "${rmt_pre_push_hist[i]}" "$rmt_post_ph" "pilot_xds_push_time")
+			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-pre-pt.merged" "${_rpre_files[@]}"
+			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-post-pt.merged" "${_rpost_files[@]}"
+			rmt_pt=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/rmt${i}-pre-pt.merged" "$ITER_DIR/rmt${i}-post-pt.merged" pilot_xds_push_time)")
 			if [[ "$rmt_pt" != "N/A" && "$rmt_pt" != "overflow" ]]; then
 				has_rmt_pt=1
 				((rmt_pt > max_rmt_pt)) && max_rmt_pt="$rmt_pt"
@@ -483,8 +565,22 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		fi
 	fi
 
-	total_pushes=$(( src_pushes_delta + rmt_pushes_delta ))
-	if ((src_triggers_delta > 0)); then
+	# PL13: poison this row's istiod-side deltas/quantiles if any istiod restarted
+	# (local or remote) or restart status is unknown.
+	if [[ "$restarted_local" != "0" || "$restarted_remote" != "0" ]]; then
+		src_triggers_delta="N/A"; rmt_triggers_delta="N/A"
+		src_pushes_delta="N/A"; rmt_pushes_delta="N/A"
+		src_queue_p99="N/A"; rmt_queue_p99="N/A"
+		src_push_time_p99="N/A"; rmt_push_time_p99="N/A"
+	fi
+
+	# Amplification only when both deltas are numeric (restart poisons them to N/A).
+	if [[ "$src_pushes_delta" =~ ^-?[0-9]+$ && "$rmt_pushes_delta" =~ ^-?[0-9]+$ ]]; then
+		total_pushes=$(( src_pushes_delta + rmt_pushes_delta ))
+	else
+		total_pushes="N/A"
+	fi
+	if [[ "$src_triggers_delta" =~ ^[0-9]+$ ]] && ((src_triggers_delta > 0)) && [[ "$total_pushes" != "N/A" ]]; then
 		amplification=$(awk "BEGIN { printf \"%.1f\", $total_pushes / $src_triggers_delta }")
 	else
 		amplification="N/A"
@@ -499,6 +595,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	status="OK"
 	[[ "$conv_local" == "TIMEOUT" ]] && status="TIMEOUT_LOCAL"
 	[[ "$conv_remote" == "TIMEOUT" ]] && status="TIMEOUT_REMOTE"
+	# PL13: a mid-window istiod restart (local or remote) poisons the istiod-side
+	# deltas; flag the row so the aggregator filters it. Does not override a
+	# convergence TIMEOUT, which signals a worse/different problem.
+	if [[ "$status" == "OK" && ( "$restarted_local" != "0" || "$restarted_remote" != "0" ) ]]; then
+		status="POISONED_RESTART"
+	fi
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$RUN_ID" "$MESH_SIZE" "$DEPLOYMENT_COUNT" "$BASE_REPLICAS" "$SCALE_TO" \
@@ -522,7 +624,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	if ((iter < ITERATIONS)); then
 		echo "  Waiting for scale-down convergence..."
-		if ! wait_syncz_synced "$BASE_PF_PORT" "$TIMEOUT_SEC"; then
+		if ! wait_syncz_synced "$TIMEOUT_SEC" "${SRC_ISTIOD_PORTS[@]}"; then
 			echo "  Warning: scale-down convergence timed out after ${TIMEOUT_SEC}s"
 		fi
 		echo "  Settling for ${SETTLE_SEC}s..."

@@ -1,0 +1,30 @@
+# istiod replica 1 of a multi-replica (fanned-out) control plane.
+# Disjoint convergence samples from pod0; identical mesh-global pilot_services.
+# HELP pilot_xds Number of endpoints connected to this pilot using XDS.
+# TYPE pilot_xds gauge
+pilot_xds{type="grpc"} 7
+# HELP pilot_services Total services known to pilot.
+# TYPE pilot_services gauge
+pilot_services 42
+# HELP pilot_xds_pushes Pilot build and send errors for lds, rds, cds and eds.
+# TYPE pilot_xds_pushes counter
+pilot_xds_pushes{type="cds"} 50
+pilot_xds_pushes{type="eds"} 120
+pilot_xds_pushes{type="lds"} 50
+# HELP pilot_push_triggers Total number of times a push was triggered.
+# TYPE pilot_push_triggers counter
+pilot_push_triggers{type="endpoint"} 25
+pilot_push_triggers{type="config"} 5
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.7169408e+09
+# HELP pilot_proxy_convergence_time Delay in seconds between config change and a proxy receiving all required configuration.
+# TYPE pilot_proxy_convergence_time histogram
+pilot_proxy_convergence_time_bucket{le="0.1"} 0
+pilot_proxy_convergence_time_bucket{le="0.5"} 10
+pilot_proxy_convergence_time_bucket{le="1"} 40
+pilot_proxy_convergence_time_bucket{le="3"} 70
+pilot_proxy_convergence_time_bucket{le="5"} 70
+pilot_proxy_convergence_time_bucket{le="+Inf"} 70
+pilot_proxy_convergence_time_sum 62.0
+pilot_proxy_convergence_time_count 70
