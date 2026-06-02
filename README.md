@@ -139,8 +139,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/acm-klusterlet-config/` | Helm chart: KlusterletConfig CR (Terraform `platform_acm.tf`). |
 | `charts/acm-managed-cluster/` | Helm chart: one ManagedCluster per spoke (Terraform `platform_acm_spokes.tf`). |
 | `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for OpenShift GitOps (Terraform `platform_gitops.tf`). |
-| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding, Placement, GitOpsCluster for hub Argo CD. |
-| `charts/acm-gitops-cluster/` | Helm chart: GitOpsCluster CR binding ACM Placement to an Argo CD instance. |
+| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding and Placement for hub Argo CD. |
 | `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration. |
 | `config/versions.env` | Core version pins and mesh identity; sources `config/options.env` for operational defaults. |
 | `tests/propagation/` | Propagation latency test suite: scripts + `chart/` Helm chart. |
