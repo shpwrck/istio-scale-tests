@@ -89,7 +89,7 @@ for pat in "${EXTRACTED_PATTERNS[@]}"; do
 	matches=$(grep -rn "$pat" "$ROOT/tests/" --include='*.sh' | grep -vE "$EXCEPTIONS" || true)
 	if [[ -n "$matches" ]]; then
 		echo "    INLINE FOUND: $pat"
-		echo "$matches" | sed 's/^/      /'
+		echo "      ${matches//$'\n'/$'\n'      }"
 		audit_fail=1
 	fi
 done
