@@ -108,12 +108,12 @@ jobs:
           fn { print; if (/^}$/) fn=0 }
           '
 
-          # Test the sourced library (preamble.sh).
-          echo "=== preamble.sh (tests/lib) ==="
+          # Test the sourced library (timestamp.sh).
+          echo "=== timestamp.sh (tests/lib) ==="
           (
             set -euo pipefail
             die() { echo "error: $*" >&2; exit 1; }
-            source tests/lib/preamble.sh
+            source tests/lib/timestamp.sh
             ns=$(now_ns); ms=$(now_ms)
             echo "now_ns=$ns  now_ms=$ms"
             [[ "$ns" =~ ^[0-9]+$ ]] || { echo "FAIL: now_ns not numeric"; exit 1; }
