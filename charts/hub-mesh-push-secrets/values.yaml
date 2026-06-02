@@ -12,12 +12,17 @@ cacerts:
   enabled: true
   sourceSecretName: ""
   targetSecretName: ""
-  refreshInterval: 1h
+  refreshInterval: 5m
 
 kubeconfig:
   enabled: true
   sourceSecretName: ""
-  refreshInterval: 1h
+  # Also drives the kubeconfig + remote-secret PushSecrets (templates 05/06).
+  # Kept short: ESO marks a PushSecret Synced=True even when it pushed to only
+  # a subset of its label-selected target stores, so a target dropped during a
+  # reconcile (e.g. ESO restart) stays unwired until the next refresh. 5m bounds
+  # that silent window; scripts/001-verify-mesh-wiring.sh asserts full wiring.
+  refreshInterval: 5m
 
 kubernetesAPI:
   serverURL: ""
@@ -38,7 +43,7 @@ spokeSecretStore:
     hub-mesh-push-secrets/push-target: "true"
 
 pushSecret:
-  refreshInterval: 1h
+  refreshInterval: 5m
   storeMatchLabels:
     hub-mesh-push-secrets/push-target: "true"
 

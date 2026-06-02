@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-wiring-verify
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mesh-wiring-verify.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mesh-wiring-verify.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      containers:
+        - name: gate
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Idle main process; the readiness probe does the real work so the pod's
+          # Ready condition (and the owning Argo Application's health) tracks mesh
+          # wiring continuously.
+          command:
+            - /bin/bash
+            - -c
+            - 'trap "exit 0" TERM INT; while true; do sleep 3600 & wait $!; done'
+          env:
+            - name: ISTIO_NAMESPACE
+              value: {{ .Values.istioNamespace | quote }}
+            - name: EXPECTED_MEMBERS
+              value: {{ .Values.expectedMembers | quote }}
+            - name: ISTIOD_CHECK_ENABLED
+              value: {{ .Values.istiodCheck.enabled | quote }}
+            - name: ISTIOD_HOST
+              value: {{ .Values.istiodCheck.host | quote }}
+            - name: ISTIOD_PORT
+              value: {{ .Values.istiodCheck.port | quote }}
+            - name: CURL_TIMEOUT
+              value: {{ .Values.istiodCheck.curlTimeoutSeconds | quote }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - /opt/check/readiness.sh
+            initialDelaySeconds: {{ .Values.probe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probe.periodSeconds }}
+            timeoutSeconds: {{ .Values.probe.timeoutSeconds }}
+            failureThreshold: {{ .Values.probe.failureThreshold }}
+            successThreshold: {{ .Values.probe.successThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: check
+              mountPath: /opt/check
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: check
+          configMap:
+            name: mesh-wiring-verify-check
+            defaultMode: 0555

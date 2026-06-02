@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mesh-wiring-verify-check
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
+data:
+  readiness.sh: |
+    #!/usr/bin/env bash
+    # Readiness gate for one mesh member. Exit 0 (Ready) iff this spoke is fully
+    # wired into the multi-primary mesh; exit 1 (NotReady) on any gap, which
+    # turns the pod NotReady and the owning Argo Application Degraded.
+    #
+    # Two stages:
+    #   1) remote-secret count on this spoke (catches ESO partial PushSecret
+    #      fan-out — a target dropped during reconcile, reported Synced=True).
+    #   2) istiod_managed_clusters from istiod /metrics (catches secrets present
+    #      but not ingested by istiod). /metrics is unauthenticated; istiod's
+    #      /debug/* endpoints are localhost-only in OSSM 3.3 (401/403 from a
+    #      pod, even with cluster-admin), so they cannot gate a readiness probe.
+    set -uo pipefail
+
+    NS="${ISTIO_NAMESPACE:-istio-system}"
+    EXPECTED="${EXPECTED_MEMBERS:-0}"
+
+    # Stage 1: remote secrets labeled istio/multiCluster=true (one per member,
+    # including self). -o name returns metadata only; never reads secret data.
+    n=$(oc get secret -n "$NS" -l istio/multiCluster=true -o name 2>/dev/null | wc -l || true)
+    if [ "$EXPECTED" -gt 0 ] && [ "$n" -lt "$EXPECTED" ]; then
+      echo "NotReady: remote secrets ${n} < expected ${EXPECTED}" >&2
+      exit 1
+    fi
+
+    # Stage 2: istiod must have actually ingested those clusters into its
+    # registry. istiod_managed_clusters{cluster_type="local"} (self) +
+    # {cluster_type="remote"} = clusters istiod manages = expected mesh size.
+    if [ "${ISTIOD_CHECK_ENABLED:-true}" = "true" ]; then
+      url="http://${ISTIOD_HOST:-istiod.istio-system.svc}:${ISTIOD_PORT:-15014}/metrics"
+      body=$(curl -sf --max-time "${CURL_TIMEOUT:-5}" "$url") || {
+        echo "NotReady: istiod metrics unreachable at ${url}" >&2
+        exit 1
+      }
+      get_metric() {
+        # Last whitespace field of the matching sample line, decimals stripped.
+        local line; line=$(printf '%s\n' "$body" | grep -E "^istiod_managed_clusters\{[^}]*cluster_type=\"$1\"" | head -1)
+        line="${line##* }"; printf '%s' "${line%%.*}"
+      }
+      local_n=$(get_metric local); remote_n=$(get_metric remote)
+      managed=$(( ${local_n:-0} + ${remote_n:-0} ))
+      if [ "$managed" -eq 0 ]; then
+        echo "NotReady: istiod reports 0 managed clusters (metric missing?)" >&2
+        exit 1
+      fi
+      if [ "$EXPECTED" -gt 0 ] && [ "$managed" -lt "$EXPECTED" ]; then
+        echo "NotReady: istiod manages ${managed} clusters (local=${local_n:-0} remote=${remote_n:-0}) < expected ${EXPECTED}" >&2
+        exit 1
+      fi
+      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED}"
+      exit 0
+    fi
+
+    echo "Ready: secrets=${n} expected=${EXPECTED} (istiod check disabled)"
+    exit 0

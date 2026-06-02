@@ -1,0 +1,30 @@
+# The verifier reads remote-secret metadata in istio-system. Scoped to that one
+# namespace (Role, not ClusterRole); list only (it counts -o name, never reads
+# secret data).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mesh-wiring-verify-read-secrets
+  namespace: {{ .Values.istioNamespace }}
+  labels:
+    {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mesh-wiring-verify-read-secrets
+  namespace: {{ .Values.istioNamespace }}
+  labels:
+    {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mesh-wiring-verify-read-secrets
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccountName }}
+    namespace: {{ .Values.namespace }}
