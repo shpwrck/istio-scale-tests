@@ -220,7 +220,7 @@ The sweep:
 | 14 | `max_ms` | `DurationHistogram.Max * 1000` |
 | 15 | `delta_p99_ms` | `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. Only computed when the baseline row has `status=OK` (A3). |
 | 16 | `istiod_restarted` | `0` if `process_start_time_seconds` unchanged across window; `1` if changed; `unknown` if either probe failed (PL9) |
-| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
+| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
 | 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
 | 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
 | 20 | `xds_pushes_delta` | `pilot_xds_pushes` counter delta during measurement window. `N/A` when istiod restarted or scrape failed. |
@@ -234,6 +234,14 @@ The sweep:
 `churn_ops_succeeded / churn_ops_attempted < 90%` (typically apiserver 429s
 at high rates). 005 filters these rows from numeric aggregation, the same
 way it filters `POISONED_RESTART`.
+
+`status=POISONED_SCRAPE` is set by 002/003 when a per-pod istiod `/metrics`
+fanout scrape comes back empty or below `FANOUT_MIN_SCRAPE_BYTES` (a dead/slow
+port-forward) and the undercounted deltas would be unreliable; 005 filters it
+like `POISONED_RESTART`. This is the same failure mode the `churn` and
+`propagation` suites tag `SCRAPE_INCOMPLETE`; the name differs because
+churn-dataplane follows its `POISONED_*` prefix for rows whose metric deltas
+are deliberately N/A'd.
 
 Preamble comment lines (PL2 / PL19) above the header carry: `RUN_ID`,
 `HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `ISTIOD_REPLICAS` (Running
