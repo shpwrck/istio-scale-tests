@@ -93,14 +93,14 @@ else
   if ! echo "$HOST" | grep -q ':'; then HOST="${HOST}:443"; fi
   CA_PEM=$(openssl s_client -connect "${HOST}" -showcerts </dev/null 2>/dev/null \
     | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/')
-  CA_B64_DATA=$(echo -n "$CA_PEM" | base64 -w0)
+  CA_B64_DATA=$(echo -n "$CA_PEM" | base64 | tr -d '\n')
   CONFIG_JSON=$(jq -nc --arg t "$SPOKE_TOKEN_VALUE" --arg ca "$CA_B64_DATA" \
     '{bearerToken: $t, tlsClientConfig: {insecure: false, caData: $ca}}')
 fi
 
-NAME_B64=$(echo -n "$SPOKE_NAME" | base64 -w0)
-SERVER_B64=$(echo -n "$API_URL" | base64 -w0)
-CONFIG_B64=$(echo -n "$CONFIG_JSON" | base64 -w0)
+NAME_B64=$(echo -n "$SPOKE_NAME" | base64 | tr -d '\n')
+SERVER_B64=$(echo -n "$API_URL" | base64 | tr -d '\n')
+CONFIG_B64=$(echo -n "$CONFIG_JSON" | base64 | tr -d '\n')
 
 # Apply the full Argo CD cluster Secret. `apply` is idempotent: it creates the
 # secret on a fresh deploy and updates it (server/config/token refresh) on
