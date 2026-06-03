@@ -64,7 +64,10 @@ Usage: $(basename "$0") [options]
   --baseline-duration SEC   Baseline-phase fortio duration (default: $BASELINE_DURATION).
   --churn-duration SEC      Churn-phase fortio + churn duration (default: $CHURN_DURATION).
   --settle-sec N            Pre-window settle delay (default: $SETTLE_SEC).
-  --inter-combo-settle N    Settle gap between combos, after cleanup (default: $INTER_COMBO_SETTLE_SEC) [PL18].
+  --inter-combo-settle N    Settle gap (default: $INTER_COMBO_SETTLE_SEC) [PL18]. Used BOTH between
+                            mesh-sizes (after the once-per-mesh-size cleanup) AND
+                            between churn rates within a mesh-size (to drain the
+                            post-churn reset-to-base before the next baseline).
   --qps N                   Target QPS for both phases (default: $QPS).
   --connections N           Concurrent fortio connections (default: $CONNECTIONS).
   --deployment-count N      Churn-target Deployments per cluster (default: $CHURN_DEPLOYMENT_COUNT_OPT).
@@ -317,26 +320,32 @@ combo_id_for() {
 #         issuing `scale --replicas=scale-to` against deployments already AT
 #         scale-to → no-op scales → undercounted EDS/xDS push deltas.
 #   The churn-targets carry label churn-target=true (fortio server/client do NOT),
-#   so the selector scopes the reset precisely. Best-effort: a per-context scale
-#   failure is logged (warn:) and tolerated — the next baseline's own settle plus
-#   this drain give best-effort recovery; we do NOT die and do NOT emit a failed
-#   row. The reset's EDS pushes are drained by the INTER_COMBO_SETTLE_SEC settle
-#   that follows this call, before the next baseline measures.
+#   so the selector scopes the reset precisely. The per-context scales are fanned
+#   out concurrently (parallelism is bounded by the active-context count, ≤ the
+#   mesh size). `--request-timeout` bounds a hung apiserver so a stuck reset
+#   degrades to a failure (caller poisons the combo) instead of stalling the sweep
+#   — mirroring O6's --max-time discipline. Returns non-zero if ANY context's scale
+#   failed: the caller records a RESET_FAILED row and SKIPS this rate's measurement
+#   rather than measuring against a known-contaminated (non-all-base) mesh — the
+#   reset failure is the deploy-once analogue of a setup failure. On success the
+#   reset's EDS pushes are drained by the INTER_COMBO_SETTLE_SEC settle that follows
+#   this call, before the next baseline measures.
 reset_churn_targets_to_base() {
-	local csv="$1" rctx rpids=()
+	local csv="$1" rctx rpids=() rpid rc=0
 	local rctxs=()
 	split_csv "$csv" rctxs
 	for rctx in "${rctxs[@]}"; do
 		(
-			"${KUBECTL[@]}" --context="$rctx" -n "$NS" scale deployment \
-				-l churn-target=true --replicas="$CHURN_BASE_REPLICAS_OPT" >/dev/null 2>&1 \
-				|| { echo "warn: churn-target reset to base failed on $rctx (best-effort; continuing)" >&2; exit 1; }
+			"${KUBECTL[@]}" --context="$rctx" -n "$NS" --request-timeout=10s scale deployment \
+				-l churn-target=true --replicas="$CHURN_BASE_REPLICAS_OPT" >/dev/null \
+				|| { echo "warn: churn-target reset to base failed on $rctx" >&2; exit 1; }
 		) &
 		rpids+=($!)
 	done
 	for rpid in "${rpids[@]}"; do
-		wait "$rpid" || true
+		wait "$rpid" || rc=1
 	done
+	return "$rc"
 }
 
 COMBO_INDEX=0
@@ -422,7 +431,18 @@ for ms in "${MESH_SIZES[@]}"; do
 		# all-base starting condition that per-combo setup used to provide.
 		if (( meshsize_combo_seq > 0 )); then
 			echo "--- post-churn reset + settle (O8 fidelity guard) ---"
-			reset_churn_targets_to_base "$active_csv"
+			# If the reset fails on any context the mesh is left in an unknown
+			# (possibly non-all-base) state, so measuring this rate would silently
+			# contaminate its baseline/churn and its istiod-side deltas. Record a
+			# RESET_FAILED row for BOTH phases (buckets via ch_seen into the real
+			# (ms,cr) cell — n_total++, excluded from n_valid because status!=OK) and
+			# skip this rate's measurement. The NEXT rate still re-resets (seq stays >0).
+			if ! reset_churn_targets_to_base "$active_csv"; then
+				echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] churn-target reset failed for $COMBO_ID; recording RESET_FAILED rows and skipping this rate's measurement" >&2
+				emit_failed_rows RESET_FAILED "$COMBO_ID" "$ms" "$cr"
+				meshsize_combo_seq=$((meshsize_combo_seq + 1))
+				continue
+			fi
 			echo "Draining reset EDS pushes: settle ${INTER_COMBO_SETTLE_SEC}s before baseline..."
 			sleep "$INTER_COMBO_SETTLE_SEC"
 		fi
@@ -498,8 +518,10 @@ for ms in "${MESH_SIZES[@]}"; do
 		"$SCRIPT_DIR/006-cleanup.sh" "${cleanup_args[@]}" || {
 			echo "warn: cleanup reported failure for mesh-size $ms; recording CLEANUP_TIMEOUT row" >&2
 			# PL23: propagate cleanup timeout into the TSV instead of polluting the next
-			# mesh-size. The combo_id/cr reflect the last combo of this mesh-size.
-			emit_cleanup_timeout_row "$COMBO_ID" "$ms" "$cr"
+			# mesh-size. Cleanup is now per-mesh-size (not per-rate), so the row carries a
+			# synthetic combo_id "ms${ms}-cleanup" rather than an arbitrary rate's id — the
+			# failure is mesh-size-scoped and 005 ignores phase=cleanup rows for bucketing.
+			emit_cleanup_timeout_row "ms${ms}-cleanup" "$ms" "0"
 		}
 
 		# PL18: settle gap before the next mesh-size's setup.
