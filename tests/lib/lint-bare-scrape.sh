@@ -85,8 +85,10 @@ lint_bare_scrape_file() {
 # condition so the failure becomes a recorded marker/row + continue.
 #
 # Scope/exemptions (deterministic — no fragile loop-depth tracking):
-#   - Only `*-run-sweep.sh` files are checked.
-#   - Anchor (R3-2): the trimmed line STARTS with a `"${VAR}/…/0NN-name.sh"` token —
+#   - Checked for every sweep orchestrator: files matching `*-sweep.sh` (R4-1 — the
+#     dispatch glob in lint_bare_scrape_paths; this includes the 5 `00N-run-sweep.sh`
+#     AND tuning's `003-run-tuning-sweep.sh`, which `*-run-sweep.sh` silently missed).
+#   - Anchor (R3-2): the LOGICAL line STARTS with a `"${VAR}/…/0NN-name.sh"` token —
 #     ANY `$VAR`/`${VAR}`-prefixed path to an `0NN-`-numbered script, not just the
 #     literal `$SCRIPT_DIR` (the original anchor silently missed tuning's
 #     `${TUNING_DIR}/001-apply-profile.sh`). Statement-position only, so captures
@@ -98,38 +100,63 @@ lint_bare_scrape_file() {
 #     -collect-pilot-metrics.sh, -compare-profiles.sh.
 #   - Guarded (`|| …` / `&& …`) or function-tail calls pass.
 #
+# Multi-line robustness (R4-2): a step call is commonly written across several
+# physical lines via trailing `\` continuations, with the `|| …`/`&& …` guard on a
+# LATER continuation line. We therefore JOIN `\`-continued physical lines into one
+# LOGICAL line BEFORE testing the guard/anchor exemptions; inspecting only the first
+# physical line would mis-flag a legitimately-guarded multi-line revert as bare.
+#
 # lint_bare_orchestrator_step_file <file>
-#   Only meaningful for *-run-sweep.sh; emits offenders, returns 1 if any.
+#   Only meaningful for sweep orchestrators (*-sweep.sh); emits offenders, returns 1.
 lint_bare_orchestrator_step_file() {
 	local file="$1"
 	[[ -f "$file" ]] || return 0
 	awk -v FILE="$file" '
-		BEGIN { offenders = 0 }
-		{ lines[NR] = $0 }
+		BEGIN { offenders = 0; nl = 0 }
+		{
+			# Build LOGICAL lines by joining trailing-backslash continuations. Record
+			# the starting physical line number of each logical line for reporting.
+			cur = $0
+			if (building) {
+				logical[nl] = logical[nl] " " cur
+			} else {
+				nl++
+				logical[nl] = cur
+				startline[nl] = NR
+			}
+			# Continue if THIS physical line ends with an unescaped trailing backslash.
+			if (cur ~ /\\[ \t]*$/) {
+				# Strip the trailing backslash from the accumulated logical line so the
+				# joined text reads as a single command (the next piece appends after it).
+				sub(/\\[ \t]*$/, "", logical[nl])
+				building = 1
+			} else {
+				building = 0
+			}
+		}
 		END {
-			for (n = 1; n <= NR; n++) {
-				line = lines[n]
-				t = line
+			for (n = 1; n <= nl; n++) {
+				t = logical[n]
 				sub(/^[ \t]+/, "", t)
 				if (t ~ /^#/ || t == "") continue
-				# Statement-position "${VAR}/.../0NN-name.sh" call (R3-2: any ${VAR}/
-				# or $VAR/ prefix, not just $SCRIPT_DIR)?
+				# Statement-position "${VAR}/.../0NN-name.sh" call (any ${VAR}/ or $VAR/
+				# prefix; R3-2)? Tested on the JOINED logical line (R4-2).
 				if (t !~ /^"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\/[^"]*0[0-9][0-9]-[^"]*\.sh"/) continue
 				# Exempt report/aggregation steps (post-loop; failure acceptable).
 				if (t ~ /-report-results\.sh"/ || t ~ /-collect-pilot-metrics\.sh"/ || t ~ /-compare-profiles\.sh"/) continue
-				# Guarded by || or && anywhere on the line -> OK.
+				# Guarded by || or && ANYWHERE in the logical line (incl. continuations) -> OK.
 				if (t ~ /\|\|/ || t ~ /&&/) continue
-				# Function-tail (next non-blank, non-comment line is "}") -> OK.
+				# Function-tail (next non-blank, non-comment LOGICAL line is "}") -> OK.
 				is_tail = 0
-				for (m = n + 1; m <= NR; m++) {
-					nx = lines[m]; sub(/^[ \t]+/, "", nx)
+				for (m = n + 1; m <= nl; m++) {
+					nx = logical[m]; sub(/^[ \t]+/, "", nx)
 					if (nx == "" || nx ~ /^#/) continue
 					if (nx == "}" || nx ~ /^}[ \t]*(#.*)?$/) is_tail = 1
 					break
 				}
 				if (is_tail) continue
 				step = t; sub(/[ \t].*$/, "", step)
-				printf "%s:%d: bare orchestrator-step call %s (wrap with `if ! …; then warn; record; continue; fi` or `|| { … }`)\n", FILE, n, step
+				printf "%s:%d: bare orchestrator-step call %s (wrap with `if ! …; then warn; record; continue; fi` or `|| { … }`)\n", FILE, startline[n], step
 				offenders++
 			}
 			exit (offenders > 0 ? 1 : 0)
@@ -139,8 +166,12 @@ lint_bare_orchestrator_step_file() {
 
 # lint_bare_scrape_paths <path>...
 #   Recurses into directories for *.sh files; lints individual files directly.
-#   Runs the scrape-call lint on every *.sh, and the orchestrator-step lint on
-#   *-run-sweep.sh. Returns 0 if all clean, 1 if any offender found.
+#   Runs the scrape-call lint on every *.sh, and the orchestrator-step lint on every
+#   sweep orchestrator. R4-1: dispatch glob is `*-sweep.sh` (NOT `*-run-sweep.sh`),
+#   so tuning's `003-run-tuning-sweep.sh` is also routed through verify — it ends
+#   `-run-tuning-sweep.sh` and would otherwise escape the orchestrator-step lint
+#   entirely. `*-sweep.sh` matches exactly the 6 orchestrators and no other file.
+#   Returns 0 if all clean, 1 if any offender found.
 lint_bare_scrape_paths() {
 	local rc=0 p f
 	for p in "$@"; do
@@ -148,13 +179,13 @@ lint_bare_scrape_paths() {
 			while IFS= read -r f; do
 				lint_bare_scrape_file "$f" || rc=1
 				case "$f" in
-					*-run-sweep.sh) lint_bare_orchestrator_step_file "$f" || rc=1 ;;
+					*-sweep.sh) lint_bare_orchestrator_step_file "$f" || rc=1 ;;
 				esac
 			done < <(find "$p" -name '*.sh' -type f 2>/dev/null | sort)
 		elif [[ -f "$p" ]]; then
 			lint_bare_scrape_file "$p" || rc=1
 			case "$p" in
-				*-run-sweep.sh) lint_bare_orchestrator_step_file "$p" || rc=1 ;;
+				*-sweep.sh) lint_bare_orchestrator_step_file "$p" || rc=1 ;;
 			esac
 		fi
 	done

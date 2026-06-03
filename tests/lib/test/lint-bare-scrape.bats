@@ -241,3 +241,81 @@ EOF
 	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
 	assert_success
 }
+
+# --- R4-1: lint_bare_scrape_paths dispatches the orchestrator-step lint to a
+#           *-run-tuning-sweep.sh file (not just *-run-sweep.sh) ---
+
+@test "R4-1: paths dispatches orchestrator-step lint to a *-run-tuning-sweep.sh file" {
+	# A bare step call in a tuning-style sweep name must be CAUGHT via paths.
+	cat > "$FIX/003-run-tuning-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	"${TUNING_DIR}/001-apply-profile.sh" --profile "$p"
+done
+EOF
+	run lint_bare_scrape_paths "$FIX"
+	assert_failure
+	assert_output --partial "003-run-tuning-sweep.sh"
+	assert_output --partial "001-apply-profile.sh"
+}
+
+@test "R4-1: a clean *-run-tuning-sweep.sh passes via paths" {
+	cat > "$FIX/003-run-tuning-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	if ! "${TUNING_DIR}/001-apply-profile.sh" --profile "$p"; then
+		echo warn; continue
+	fi
+done
+EOF
+	run lint_bare_scrape_paths "$FIX"
+	assert_success
+}
+
+# --- R4-2: \-continued multi-line calls — guard on a LATER line must be honored ---
+
+@test "R4-2: a \\-continued call with the || guard on a later line PASSES" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	"${TUNING_DIR}/002-revert-profile.sh" \
+		--state-dir "$state_dir" \
+		--contexts "$CONTEXTS_CSV" \
+		--rollout-timeout "$ROLLOUT_TIMEOUT" || \
+		echo "warn: revert failed" >&2
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+	[[ -z "$output" ]]
+}
+
+@test "R4-2: a \\-continued call with NO guard anywhere is FLAGGED" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	"${TUNING_DIR}/002-revert-profile.sh" \
+		--state-dir "$state_dir" \
+		--contexts "$CONTEXTS_CSV" \
+		--rollout-timeout "$ROLLOUT_TIMEOUT"
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_failure
+	assert_output --partial "002-revert-profile.sh"
+}
+
+@test "R4-2: a \\-continued call guarded by a wrapping if ! PASSES" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	if ! "${TUNING_DIR}/001-apply-profile.sh" \
+		--profile "$p" \
+		--contexts "$CONTEXTS_CSV"; then
+		echo warn; continue
+	fi
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+}
