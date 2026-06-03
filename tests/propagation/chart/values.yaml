@@ -26,6 +26,9 @@ backer:
     repository: hashicorp/http-echo
     # Pinned tag (was :latest). imagePullPolicy IfNotPresent so the image is pulled
     # once during 001-setup warm-up and never re-pulled at t0.
+    # Keep in sync with HTTP_ECHO_VERSION in config/versions.env. "1.0" is a real,
+    # pullable hashicorp/http-echo tag (verified against the registry); do not change
+    # to 1.0.0 without re-checking — the bare "1.0" is the one this chart pins.
     tag: "1.0"
     pullPolicy: IfNotPresent
   runId: ""

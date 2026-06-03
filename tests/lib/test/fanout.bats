@@ -225,6 +225,43 @@ _install_curl_stub() {
 	rm -rf "$d"
 }
 
+# --- R2-5: value-based gate is the SAME code path the probe uses inline ----
+# The propagation probe holds a MAX-across-batches skew (not tied to one .skew
+# sidecar) and must route its gate decision through fanout_skew_high_value so the
+# production path is the unit-tested path. These assert the value variant directly
+# and that the sidecar variant delegates to it (identical strict-"\>" semantics).
+
+@test "fanout_skew_high_value: 4043ms over the 1000ms default -> 1" {
+	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value 4043
+	[ "$output" = "1" ]
+}
+
+@test "fanout_skew_high_value: 300ms under the ceiling -> 0" {
+	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value 300
+	[ "$output" = "0" ]
+}
+
+@test "fanout_skew_high_value: exactly at the ceiling is NOT high (strict >)" {
+	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value 1000
+	[ "$output" = "0" ]
+}
+
+@test "fanout_skew_high_value: empty/non-numeric value -> 0 (treated as no skew)" {
+	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value ""
+	[ "$output" = "0" ]
+}
+
+@test "fanout_scrape_skew_high delegates to fanout_skew_high_value (same decision)" {
+	d=$(mktemp -d)
+	echo "1500" > "$d/tick.skew"
+	FANOUT_MAX_SKEW_MS=1000 run fanout_scrape_skew_high "$d" tick
+	sidecar="$output"
+	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value 1500
+	[ "$sidecar" = "$output" ]
+	[ "$sidecar" = "1" ]
+	rm -rf "$d"
+}
+
 # --- restart detection (pod-set change + per-pod start-time advance) --------
 
 _mk_podset() { # <file> <podname>...

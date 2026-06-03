@@ -9,7 +9,7 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
 | Phase | What | How |
 |-------|------|-----|
 | P1 | Local istiod pushes xDS to local sidecars | Delta of `pilot_proxy_convergence_time` histogram on source istiod (converged when delta `_count` reaches connected proxy count). Reports both wall-clock detection time and delta-window p50/p99 of the histogram itself. |
-| P2 | Remote istiod discovers new endpoints | Delta of `pilot_xds_pushes{type="eds"}` counter on each remote istiod. First non-zero delta = remote learned about the new endpoint and pushed EDS. |
+| P2 | Remote istiod discovers new endpoints | Delta of `pilot_xds_pushes{type="eds"}` counter on each remote istiod. First non-zero delta = remote learned about the new endpoint and pushed EDS. The bump is flagged `p2_dirty=1` unless our canary is confirmed `health_flags::healthy` on that remote's watcher sidecar at the moment of the bump (the same signal P3 uses) — otherwise it could be unrelated endpoint churn. |
 | P3 | Remote sidecar has HEALTHY endpoints | Watcher pod's Envoy admin `/clusters` polled at >= 1 Hz (the only data-plane-side signal without a custom xDS client). |
 
 In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService and DestinationRule are local config processed only by the istiod that owns the namespace.
@@ -135,8 +135,15 @@ Each TSV begins with `# KEY=VALUE` comment lines:
 # POLL_INTERVAL_S=0.250
 # TIMEOUT_SEC=120
 # SETTLE_SEC=5
+# FANOUT_MAX_SKEW_MS=1000
+# FANOUT_METRICS_TIMEOUT=5
 # DATE=2025-05-20T10:15:30+00:00
 ```
+
+`FANOUT_MAX_SKEW_MS` and `FANOUT_METRICS_TIMEOUT` are both result-affecting (PL2):
+the former decides which rows are tagged `SCRAPE_INCOMPLETE` and dropped by `005`;
+the latter bounds the per-`/metrics` curl wait and therefore the worst-case skew
+the gate can observe.
 
 `KUBE_VERSIONS` is probed concurrently with `--request-timeout=5s`; unreachable contexts emit `unreachable`, contexts that respond without parseable version emit `unknown`.
 
@@ -151,7 +158,7 @@ restarted  p2_dirty  window_ms  scrape_skew_ms
 
 | Column | Meaning |
 |--------|---------|
-| `p1_ms` | Wall-clock ms from canary apply until source istiod histogram delta `_count` reached `proxy_count`. `TIMEOUT` or `N/A` (when `restarted=1`). |
+| `p1_ms` | Wall-clock ms from the t0 active-label flip (the backer pod is selected by the canary Service) until source istiod histogram delta `_count` reached `proxy_count`. `TIMEOUT` or `N/A` (when `restarted=1`). |
 | `p2_ms` | Wall-clock ms until remote istiod `pilot_xds_pushes{type="eds"}` delta > 0. |
 | `p3_ms` | Wall-clock ms until watcher Envoy `/clusters` reports healthy canary endpoints. |
 | `status` | `OK`, `TIMEOUT_P1`/`P2`/`P3`/`ALL`, `RESTART`, `DRAIN_TIMEOUT` (canary endpoint did not drain from a watcher before the next iteration; data is suspect), or `SCRAPE_INCOMPLETE` (a pod's `/metrics` was unreachable during baseline/poll, **or** the baseline `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot). `005` drops all non-`OK` rows. |
@@ -160,7 +167,7 @@ restarted  p2_dirty  window_ms  scrape_skew_ms
 | `p1_proxy_count` | `pilot_xds` gauge from the baseline scrape (connected proxies on source istiod). |
 | `p1_overflow` | `1` if the `+Inf` bucket gained more samples than any finite bucket (statistically unsafe — quantiles below). |
 | `restarted` | `0` / `1` / `unknown` — `1` if `process_start_time_seconds` on the source istiod changed mid-iteration; `unknown` if baseline or current `process_start_time_seconds` was missing (so we cannot tell). |
-| `p2_dirty` | `0` / `1` — `1` when the remote istiod's EDS push counter advanced **without** a matching `pilot_services` gauge delta of ≥ 1, i.e. the EDS bump could be unrelated endpoint churn rather than our canary. `005` drops `p2_ms` from numeric aggregation when this is set. |
+| `p2_dirty` | `0` / `1` — `1` when the remote istiod's EDS push counter advanced **without** our canary being confirmed `health_flags::healthy` on that remote's watcher sidecar at the moment of the bump, i.e. the EDS bump could be unrelated endpoint churn rather than our canary. Under the O1 label-flip topology the canary Service persists across iterations (t0 adds an endpoint, not a Service), so a `pilot_services` gauge delta is no longer the right "our change" signal — the data-plane healthy-endpoint confirmation (the same signal P3 detects) is. `005` drops `p2_ms` from numeric aggregation when this is set. |
 | `window_ms` | Wall-clock duration of the per-iteration measurement window. |
 | `scrape_skew_ms` | `max(ts) - min(ts)` across the per-context baseline-scrape timestamps (recorded verbatim for provenance, even when it triggers the `SCRAPE_INCOMPLETE` skew gate). When this exceeds `FANOUT_MAX_SKEW_MS` (default 1000), the snapshot is incoherent and the row is tagged `SCRAPE_INCOMPLETE`. |
 
@@ -176,7 +183,11 @@ Backwards-compat:
 - Filters rows where any of:
   - `restarted == 1` or `restarted == unknown`
   - `p1_overflow == 1`
-  - `status != OK` (`TIMEOUT_*`, `DRAIN_TIMEOUT`, `RESTART`)
+  - `status != OK` (`TIMEOUT_*`, `DRAIN_TIMEOUT`, `RESTART`, `SCRAPE_INCOMPLETE`)
+  - `scrape_skew_ms` (field 19) `> FANOUT_MAX_SKEW_MS` (default 1000; override via the
+    env var). Live runs already tag a high-skew row `SCRAPE_INCOMPLETE`, so this is a
+    fallback that lets **pre-gate historical TSVs** (written `status=OK` with a high
+    recorded skew, before the skew gate existed) be re-derived without a probe re-run.
 - Additionally suppresses `p2_ms` from numeric aggregation when `p2_dirty == 1`.
 - Emits both `n_total` (rows considered) and `n_valid` (rows used).
 - Carries forward all preamble metadata into `text`, `csv`, `json`, and `markdown` output.
