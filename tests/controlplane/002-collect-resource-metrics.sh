@@ -393,9 +393,23 @@ sleep 3
 for k in "${!POD_CTXS[@]}"; do
 	port=$(( BASE_PF_PORT + k ))
 	attempts=0
-	while ! curl -s -o /dev/null "http://localhost:$port/metrics" 2>/dev/null; do
+	restarts=0
+	# --max-time bounds each probe: without it a stuck/half-open port-forward makes
+	# curl block ~30s/attempt, so one bad PF among 35-50 at scale hangs the sweep for
+	# minutes before failing. A transient kubectl port-forward failure is common at
+	# high concurrency, so restart this pod's PF (up to 3x) instead of dying outright.
+	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
-		((attempts > 20)) && die "port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed"
+		if ((attempts > 20)); then
+			((restarts >= 3)) && die "port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed after ${restarts} restarts"
+			restarts=$((restarts + 1))
+			attempts=0
+			# Kill the stuck PF (free its local port) and replace its slot before retrying.
+			kill "${PF_PIDS[k]}" 2>/dev/null || true
+			"${KUBECTL[@]}" --context="${POD_CTXS[k]}" -n istio-system port-forward "pod/${POD_NAMES[k]}" "$port":15014 >/dev/null 2>&1 &
+			PF_PIDS[k]=$!
+			sleep 1
+		fi
 		sleep 0.5
 	done
 done
