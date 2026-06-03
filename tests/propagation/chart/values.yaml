@@ -8,11 +8,26 @@ watcher:
     tag: stable
   replicaCount: 1
 
-canary:
+# Pre-warmed backer (O1). A single already-Ready http-echo pod with its sidecar
+# up and image pre-pulled. The Service does NOT select it until the probe stamps
+# the active-flip label onto the pod at t0, so propagation (P3) measures only the
+# config push for an existing, healthy endpoint — never pod scheduling/image
+# pull/sidecar startup.
+#
+#   enabled  — render the backer Deployment + Service (set true in 001-setup).
+#   active   — render the pod template WITH the active-flip label already set.
+#              Off by default (Ready-but-not-selected). The probe drives the flip
+#              at runtime via `kubectl label pod`; `active=true` is only for
+#              `helm template` smoke tests / dry-run rendering.
+backer:
   enabled: false
+  active: false
   image:
     repository: hashicorp/http-echo
-    tag: latest
+    # Pinned tag (was :latest). imagePullPolicy IfNotPresent so the image is pulled
+    # once during 001-setup warm-up and never re-pulled at t0.
+    tag: "1.0"
+    pullPolicy: IfNotPresent
   runId: ""
 
 service:

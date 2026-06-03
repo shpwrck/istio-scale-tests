@@ -29,6 +29,14 @@
 #        that is the only data-plane-side signal available without a custom
 #        xDS client. Poll is rate-limited and uses a lightweight string match.
 #
+#   O1: t0 is a config-only mutation. 001-setup pre-warms a Ready backer pod
+#   (image pulled, sidecar up, readinessProbe) NOT yet selected by the canary
+#   Service. At t0 the probe stamps an active-flip label onto the backer pod so
+#   the Service's endpoint appears instantly. All three phases share one T0 (just
+#   before the label patch), so P3 measures xDS/EDS propagation for an existing,
+#   healthy endpoint — never pod scheduling / image pull / sidecar startup. Drain
+#   removes the label; the backer stays warm for the next iteration.
+#
 # Usage:
 #   ./tests/propagation/002-run-endpoint-probe.sh --source-context CTX [--remote-contexts CSV] [options]
 #
@@ -73,6 +81,13 @@ NS="${PROPAGATION_TEST_NAMESPACE}"
 # default 21014). The watcher Envoy PF block (P3, data-plane side) is unchanged.
 BASE_ENVOY_PF_PORT=15100
 CHART_DIR="${ROOT}/tests/propagation/chart"
+
+# O1: the active-flip label the probe stamps onto the pre-warmed backer pod at t0.
+# Must match templates/_helpers.tpl (canary.activeLabelKey / activeSelectorLabels):
+# the canary Service selects on app=propagation-canary AND this label, so stamping
+# it adds the (already-Ready) backer to the Service endpoints, and removing it
+# drains the endpoint — a config-only mutation with no pod boot.
+CANARY_ACTIVE_LABEL_KEY="propagation-active"
 
 
 usage() {
@@ -125,7 +140,9 @@ Robustness:
   - Drain-wait timeouts after canary cleanup tag the row with status=DRAIN_TIMEOUT.
   - Server-side apply (--server-side --force-conflicts) on the canary.
   - Concurrent multi-context scrapes; per-iteration scrape_skew_ms is
-    max(ts)-min(ts) across context scrape timestamps.
+    max(ts)-min(ts) across context scrape timestamps. A baseline scrape_skew
+    exceeding FANOUT_MAX_SKEW_MS (default 1000) tags the row SCRAPE_INCOMPLETE
+    (incoherent snapshot) while still recording the raw skew in field 19.
 
 Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
@@ -133,7 +150,11 @@ Environment:
   PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics; default 5s — bump
   for large meshes where /metrics may take longer to render),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
-  FANOUT_CTX_STRIDE (per-context port stride; default 20).
+  FANOUT_CTX_STRIDE (per-context port stride; default 20),
+  FANOUT_MAX_SKEW_MS (baseline scrape_skew ceiling in ms; default 1000 — a row
+  whose max per-context/per-pod baseline skew exceeds this is tagged
+  SCRAPE_INCOMPLETE because the snapshot is incoherent; field 19 still records
+  the raw skew for provenance).
 EOF
 }
 
@@ -235,14 +256,37 @@ mkdir -p "$OUTPUT_DIR"
 TSV_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.tsv"
 
 if ((DRY_RUN)); then
-	echo "=== Dry-run: canary manifests for source context $SOURCE_CTX ==="
+	echo "=== Dry-run: O1 label-flip propagation on source context $SOURCE_CTX ==="
+	echo ""
+	echo "The pre-warmed backer + canary Service are created by 001-setup; this probe"
+	echo "does NOT create a workload at t0. It captures the backer pod, sets T0, then"
+	echo "stamps the active label (config-only, server-side) so the Service endpoint"
+	echo "appears. Drain removes the label. No cluster is contacted in --dry-run."
+	echo ""
+	echo "--- Backer Deployment (rendered by 001-setup, here for reference) ---"
+	# PL27: scope each render to only the template being shown.
 	helm template propagation-test "$CHART_DIR" \
 		--set clusterName="$SOURCE_CTX" \
 		--set namespace="$NS" \
-		--set canary.enabled=true \
-		--set canary.runId="$RUN_ID" \
-		--show-only templates/canary-deployment.yaml \
+		--set backer.enabled=true \
+		--set backer.active=false \
+		--set backer.runId="$RUN_ID" \
+		--show-only templates/canary-deployment.yaml
+	echo ""
+	echo "--- Canary Service (selects on active label; here rendered ACTIVE) ---"
+	helm template propagation-test "$CHART_DIR" \
+		--set clusterName="$SOURCE_CTX" \
+		--set namespace="$NS" \
+		--set backer.enabled=true \
+		--set backer.active=true \
 		--show-only templates/canary-service.yaml
+	echo ""
+	echo "--- t0 mutation (config-only, server-side apply via kubectl label) ---"
+	echo "# T0 is captured immediately BEFORE this patch:"
+	echo "${KUBECTL[*]:-oc} --context=${SOURCE_CTX} -n ${NS} label pod <backer-pod> ${CANARY_ACTIVE_LABEL_KEY}=true --overwrite"
+	echo ""
+	echo "--- drain (config-only, removes the label) ---"
+	echo "${KUBECTL[*]:-oc} --context=${SOURCE_CTX} -n ${NS} label pod <backer-pod> ${CANARY_ACTIVE_LABEL_KEY}- --overwrite"
 	exit 0
 fi
 
@@ -946,7 +990,12 @@ wait_sidecar_endpoint_removed() {
 	while (($(date +%s) <= deadline)); do
 		local data
 		data=$(curl -fsS --max-time "$METRICS_TIMEOUT" "http://localhost:$port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
-		echo "$data" | grep -q "propagation-canary" || return 0
+		# O1: the canary Service persists across iterations (we flip a label, not
+		# delete the Service), so the propagation-canary CLUSTER entry stays in
+		# /clusters even after drain. Drained == no HEALTHY endpoint for it (the
+		# exact inverse of P3's poll_p3_sidecar_endpoints detection), not the
+		# cluster name disappearing.
+		echo "$data" | grep -q "propagation-canary.*health_flags::healthy" || return 0
 		sleep "$POLL_INTERVAL_S"
 	done
 	return 1
@@ -1004,8 +1053,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
 
-	ITER_RUN_ID="${RUN_ID}-${iter}"
-
 	# H1: per-iteration PF liveness check across each context's fanout block. PFs
 	# can die silently between iterations (kubectl PF closes idle conns,
 	# networking blips); re-opening now avoids attributing a hiccup to istiod and
@@ -1038,6 +1085,18 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	[[ -z "$SCRAPE_SKEW_MS" ]] && SCRAPE_SKEW_MS=0
 	(( BASELINE_INCOMPLETE )) && echo "  Warning: baseline scrape incomplete (a pod's /metrics was unreachable) — row will be tagged SCRAPE_INCOMPLETE" >&2
 
+	# O3: a wide baseline scrape skew means the per-pod/per-context bodies were
+	# read seconds apart (e.g. a curl queued behind many port-forward proxies near
+	# FANOUT_METRICS_TIMEOUT). The snapshot is then incoherent and the convergence
+	# denominator / counter deltas computed across it are untrustworthy. Tag the
+	# row via the existing SCRAPE_INCOMPLETE plumbing (the report drops non-OK);
+	# field 19 (scrape_skew_ms) is still recorded verbatim for provenance.
+	SCRAPE_SKEW_HIGH=0
+	if (( SCRAPE_SKEW_MS > FANOUT_MAX_SKEW_MS )); then
+		SCRAPE_SKEW_HIGH=1
+		echo "  Warning: baseline scrape_skew=${SCRAPE_SKEW_MS}ms exceeds FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}ms — row will be tagged SCRAPE_INCOMPLETE" >&2
+	fi
+
 	# A2: parse SOURCE_PROXY_COUNT and SOURCE_START from the same baseline scrape.
 	# SOURCE_START is now the per-pod start signature (sorted join) so any pod's
 	# restart OR a pod-set change flips it.
@@ -1045,16 +1104,27 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	SOURCE_PROXY_COUNT=$(normalize_proxy_count "$(kv_get "$BASELINE_DIR/source-kv" pilot_xds)")
 	echo "  Source connected proxies (summed across replicas): $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
 
+	# O1: resolve the pre-warmed backer pod BEFORE t0 so its boot (scheduling,
+	# image pull, sidecar start) is entirely outside the measured window. The pod
+	# was made Ready by 001-setup and persists across iterations.
+	BACKER_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pods \
+		-l app=propagation-canary --field-selector=status.phase=Running \
+		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+	[[ -n "$BACKER_POD" ]] || die "no Running pre-warmed backer pod on $SOURCE_CTX (run 001-setup first)"
+	# Guard: the backer must be Ready before t0 (a label flip onto a not-yet-Ready
+	# pod would re-introduce boot latency into P3).
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" wait "pod/${BACKER_POD}" \
+		--for=condition=Ready --timeout="${TIMEOUT_SEC}s" >/dev/null 2>&1 \
+		|| die "backer pod $BACKER_POD on $SOURCE_CTX not Ready before t0"
+
 	T0=$(now_ns)
-	echo "  Deploying canary on $SOURCE_CTX..."
-	helm template propagation-test "$CHART_DIR" \
-		--set clusterName="$SOURCE_CTX" \
-		--set namespace="$NS" \
-		--set canary.enabled=true \
-		--set canary.runId="$ITER_RUN_ID" \
-		--show-only templates/canary-deployment.yaml \
-		--show-only templates/canary-service.yaml \
-		| "${KUBECTL[@]}" apply --context="$SOURCE_CTX" --server-side --force-conflicts -f - >/dev/null
+	echo "  Flipping backer active label on $SOURCE_CTX (pod $BACKER_POD)..."
+	# O1: config-only mutation at t0 — stamp the active-flip label onto the running
+	# backer pod (PL5 server-side apply via kubectl label). The canary Service
+	# already selects on this label, so its endpoint appears immediately; P1/P2/P3
+	# now share a single T0 measuring pure xDS/EDS propagation, not pod boot.
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" \
+		label "pod/${BACKER_POD}" "${CANARY_ACTIVE_LABEL_KEY}=true" --overwrite >/dev/null
 
 	P1_FILE="$TMPDIR_RUN/p1-${iter}"
 	P1_FINAL_SNAPSHOT="$TMPDIR_RUN/p1-final-${iter}"
@@ -1154,13 +1224,17 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		[[ -z "$P1_MAX" || "$p1_ms" -gt "$P1_MAX" ]] && P1_MAX="$p1_ms"
 	fi
 
-	# Cleanup canary BEFORE drain-wait so we can report DRAIN_TIMEOUT correctly.
-	echo "  Cleaning up canary..."
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" delete deploy/propagation-canary svc/propagation-canary --ignore-not-found=true --wait=true >/dev/null
+	# O1: drain BEFORE the drain-wait so we can report DRAIN_TIMEOUT correctly.
+	# Flip the active label OFF (config-only) — the backer pod stays Ready and
+	# warm for the next iteration; only the Service endpoint goes away. The
+	# Deployment + Service persist across iterations (created by 001-setup).
+	echo "  Removing backer active label on $SOURCE_CTX (pod $BACKER_POD)..."
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" \
+		label "pod/${BACKER_POD}" "${CANARY_ACTIVE_LABEL_KEY}-" --overwrite >/dev/null 2>&1 || true
 
 	# E1: track per-iteration drain timeout so we can flag the row with
 	# status=DRAIN_TIMEOUT. Without this, the next iteration's baseline
-	# includes an un-drained canary, contaminating the data silently.
+	# includes an un-drained canary endpoint, contaminating the data silently.
 	drain_timeout="0"
 	if ((iter < ITERATIONS)); then
 		echo "  Waiting for canary endpoints to drain..."
@@ -1203,7 +1277,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	}
 
 	# A poll-loop scrape that never completed cleanly also taints the row.
+	# O3: a high-skew baseline (incoherent snapshot) taints it the same way.
 	row_incomplete="$BASELINE_INCOMPLETE"
+	(( SCRAPE_SKEW_HIGH )) && row_incomplete=1
 	[[ -s "$P1_FILE" && "$(<"$P1_FILE")" == "INCOMPLETE" ]] && row_incomplete=1
 
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
@@ -1317,7 +1393,9 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "  time-to-converged-count plus delta-window p50/p99 of the histogram itself."
 	echo "- **P2** (remote discovery): \`pilot_xds_pushes{type=\"eds\"}\` counter delta on each remote istiod;"
 	echo "  flagged as \`p2_dirty=1\` if not accompanied by a \`pilot_services\` gauge delta."
-	echo "- **P3** (remote sidecar): watcher Envoy \`/clusters\` polled at >= 1 Hz."
+	echo "- **P3** (remote sidecar): watcher Envoy \`/clusters\` polled at >= 1 Hz for a"
+	echo "  healthy canary endpoint. t0 is a config-only active-label flip onto a"
+	echo "  pre-warmed backer pod, so P3 excludes pod boot / image pull / sidecar startup."
 	echo ""
 	echo "## Summary"
 	echo ""
