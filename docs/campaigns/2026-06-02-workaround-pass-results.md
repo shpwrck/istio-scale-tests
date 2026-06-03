@@ -1,6 +1,55 @@
 # Scale-test campaign — results summary (workaround pass, 2026-06-02/03)
 
-**Caveat up front:** this was the *workaround* run — istiod pinned to 5 replicas, controlplane reduced to **10×2** (not 10×3) and churn-dataplane to **3×5** for capacity (O5), and the mesh ran at **tiny scale relative to the infra** (connected-proxies ~3–5, istiod ~5% of its 8Gi limit, worker nodes 2–8% CPU — see O9). So **trust the scaling _shapes_ and cross-cluster _overheads_, not the absolute magnitudes** — those characterize a small mesh, not the infra's capacity. Clean full-scale numbers come from the hardened re-run.
+**Caveat up front:** this was the *workaround* run — istiod pinned to 5 replicas, controlplane reduced to **10×2** (not 10×3) and churn-dataplane to **3×5** for capacity (O5), and the mesh ran at **tiny scale relative to the infra** (see the Scale envelope below). So **trust the scaling _shapes_ and cross-cluster _overheads_, not the absolute magnitudes** — those characterize a small mesh, not the infra's capacity. Clean full-scale numbers come from the hardened re-run.
+
+## Scale envelope
+
+_What "mesh size 1→10" actually meant this run. Backfilled from the sweep reports per [`TEMPLATE.md`](TEMPLATE.md); peak = mesh-10. Mesh-wide figures are derived/measured as noted._
+
+### 1. Mesh topology (peak, mesh-10)
+
+| Dimension | Value | Source |
+|---|---|---|
+| Clusters (multi-primary) | **10** | sweep `Mesh size` |
+| Services / cluster | 10 | sweep `Service count` |
+| Namespaces / cluster | 1 | sweep `Namespace count` |
+| Workload replicas / service | 2 | sweep `Replicas` |
+| **Total services in mesh** | **~100** | 10 × 10, derived |
+| **Total workload endpoints** | **~200** | 100 × 2, derived |
+| **Connected proxies (measured peak)** | **~24 / cluster → ~220–240 mesh-wide** | churn mesh-10 `src_proxies`=24, `rmt_proxies`≈198 / 9 |
+| &nbsp;&nbsp;↳ per istiod replica | ~4–5 | controlplane `Proxies` col (÷ 5 replicas) |
+| Per-proxy config — proto xDS payload | **122 KB** → **16 KB** scoped (−87%) | controlplane `config_size_avg` |
+| Per-proxy config — config-dump JSON | **3.9 MB** → **0.5 MB** scoped (−87%) | controlplane `Cfg dump avg (MB)` |
+| Istio / Kube version | v1.28.5 / v1.34.6 | sweep header |
+
+> **Proxy-count correction:** earlier wording called connected-proxies "~3–5". That was the **per-istiod-replica** count; with 5 replicas pinned per cluster the mesh actually carried **~24 sidecars/cluster (~220–240 total)** — still small, but ~10× what "3–5" implied. Report the summed, mesh-wide count.
+>
+> **Two config-size metrics:** the proto-encoded xDS payload (122 KB) and the human-readable config-dump JSON (3.9 MB) differ ~31× in absolute size but **agree on the −87% scoping reduction** — that ratio is the robust headline, the absolute base depends on which metric you cite.
+
+### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
+
+| Resource | Provisioned (req / lim) | Measured peak | % of limit | % of req |
+|---|---|---|---|---|
+| istiod replicas | 5 / cluster (HPA removed) | — | — | — |
+| istiod CPU | 1 core / (none) | ~220 m | — | **~22 %** of req |
+| istiod memory | 2 Gi / 8 Gi | ~377 Mi | **~4.6 %** | ~18 % |
+| Worker-node CPU | — | 2–8 % | — | — |
+
+_istiod CPU/mem from controlplane `CPU avg (m)` / `Mem RSS (Mi)` (none-scoping, mesh 7–10); node CPU from the O9 observation._ **Nothing came within an order of magnitude of a limit → mesh was under-scaled by ~20×.**
+
+### 3. Workload / throughput axis
+
+| Suite | Axis swept | Values | Reps |
+|---|---|---|---|
+| propagation | iterations | 10, mesh 1→10 | 1 |
+| controlplane | sidecar scopings × mesh | none, namespace, explicit (mesh 7–10 clean; 10×2) | 1 |
+| dataplane | QPS levels | 10 / 100 / 500 / 1000 (30 s, 8 conns), mesh 1→10 | 1 |
+| churn | churn intensity × scale range | 5 × (1→5), mesh 8–10 clean | 5 iter |
+| churn-dataplane | churn rates | 1 / 5 / 10 (**incomplete, 11/30**) | 1 |
+
+### Scale verdict
+
+> Peak mesh-10 carried **~100 services / ~200 endpoints / ~220–240 connected proxies** (~24/cluster, ~4–5 per istiod replica), **~122 KB proto xDS (3.9 MB config-dump) per proxy** unscoped. istiod ran at **~4.6 % of its 8 Gi mem limit** (~22 % of its 1-core CPU request) and worker nodes at **2–8 % CPU → under-scaled by ~20× → trust scaling _shapes_ + cross-cluster _overheads_, not absolute magnitudes.**
 
 ## ✅ Usable metrics
 
