@@ -38,6 +38,12 @@ CPU/memory/convergence/queue/config-dump stats.
 
 Histogram cells whose target quantile falls in the +Inf overflow bucket are
 emitted as the string "overflow" in text/csv/markdown and as null in JSON.
+
+Environment (O9 scale-coverage floor; default-off):
+  SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
+                               "Achieved scale" block (default: 0.25).
+  SCALE_COVERAGE_ENFORCE        When 1, exit non-zero if achieved scale is under
+                               the floor (default: 0 — informational only).
 EOF
 }
 
@@ -182,10 +188,13 @@ SWEEP_NS="$(echo "$SWEEP_AXES" | grep '^namespace_counts:' | cut -d' ' -f2-)"
 SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 
 # O9 "Achieved scale" — max of the per-row capacity columns (35-40) and
-# connected_proxies (22) across every valid data row. Tolerates N/A: a key with
-# no numeric observation reports `unknown`. Emits space-separated key=value pairs
-# so the caller can read each. service_count axis (SWEEP_SVC) is the configured
-# workload size; we surface it as services_total best-effort (max over rows).
+# connected_proxies (22) across every VALID data row (istiod_restarted==0, col 31).
+# Mirroring the n_valid gate (PL13/PL15) is essential: a SETUP_FAILED / restarted row
+# still carries the CONFIGURED service_count ($4) and a mid-reconnect connected_proxies
+# ($22), so ingesting it would report e.g. "200 services achieved" when 0 deployed.
+# Tolerates N/A: a key with no numeric observation reports `unknown`. Emits
+# space-separated key=value pairs. services_total is the configured service_count of
+# valid rows (controlplane has no distinct achieved-services metric) — best-effort.
 collect_achieved_scale() {
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	function isnum(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
@@ -193,7 +202,7 @@ collect_achieved_scale() {
 		if (!isnum(v)) return
 		if (!(name in seen) || v+0 > mx[name]+0) { mx[name] = v+0; seen[name] = 1 }
 	}
-	!/^#/ && !/^timestamp/ && NF>=40 {
+	!/^#/ && !/^timestamp/ && NF>=40 && $31 == "0" {
 		upd("proxies",  $22)
 		upd("svc",      $4)
 		upd("istiod_cpu_pct", $35)
@@ -223,11 +232,27 @@ as_get() {
 	done
 	echo "unknown"
 }
+as_pct() {
+	# as_get + a trailing % on a numeric value (leaves unknown/N/A bare).
+	local v; v="$(as_get "$1")"
+	[[ "$v" =~ ^-?[0-9.]+$ ]] && echo "${v}%" || echo "$v"
+}
+# Pull a `# KEY=value` provenance line from the first TSV preamble (absolute
+# allocatable / istiod-limit context for the achieved-scale block); default unknown.
+preamble_get() {
+	local key="$1" v
+	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
+	v="${v#*=}"
+	[[ -n "$v" ]] && echo "$v" || echo "unknown"
+}
 
 # O9 coverage floor: achieved pods (pods_scheduled max) vs allocatable; the
 # achieved fraction is informational unless SCALE_COVERAGE_ENFORCE=1. We use
 # pods_scheduled/pods_allocatable as the achieved-vs-capacity proxy (the per-row
 # legibility columns), independent of the Phase-2 sizing math in 001.
+# NOTE: max(pods_scheduled) and max(pods_allocatable) are taken INDEPENDENTLY across
+# rows, so on a multi-context sweep they may come from different contexts — the
+# fraction is a fleet-level proxy, not a single-cluster paired ratio.
 COVERAGE_STATUS="N/A"      # OK | UNDER | N/A
 COVERAGE_LINE=""
 compute_coverage() {
@@ -397,12 +422,14 @@ report_text() {
 	# O9 achieved-scale block (clearly delimited; tolerates unknown). Pulled from
 	# the per-row capacity columns (max across rows) + the preamble.
 	echo "--- Achieved scale vs capacity (O9) ---"
+	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
+	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
 	echo "  connected_proxies (max):     $(as_get proxies)"
 	echo "  services_total (max):        $(as_get svc)"
-	echo "  istiod_cpu_pct_of_limit (max): $(as_get istiod_cpu_pct)"
-	echo "  istiod_mem_pct_of_limit (max): $(as_get istiod_mem_pct)"
-	echo "  node_cpu_pct (max):          $(as_get node_cpu_pct)"
-	echo "  node_mem_pct (max):          $(as_get node_mem_pct)"
+	echo "  istiod_cpu_pct_of_limit (max): $(as_pct istiod_cpu_pct)"
+	echo "  istiod_mem_pct_of_limit (max): $(as_pct istiod_mem_pct)"
+	echo "  node_cpu_pct (max):          $(as_pct node_cpu_pct)"
+	echo "  node_mem_pct (max):          $(as_pct node_mem_pct)"
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
 	echo "  ${COVERAGE_LINE}"
 	echo ""
@@ -477,12 +504,14 @@ report_markdown() {
 	echo ""
 	echo "| Metric | Value |"
 	echo "|--------|-------|"
+	echo "| node allocatable (cpu_m/mem_mi) | $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI) |"
+	echo "| istiod limit (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI) |"
 	echo "| connected_proxies (max) | $(as_get proxies) |"
 	echo "| services_total (max) | $(as_get svc) |"
-	echo "| istiod_cpu_pct_of_limit (max) | $(as_get istiod_cpu_pct) |"
-	echo "| istiod_mem_pct_of_limit (max) | $(as_get istiod_mem_pct) |"
-	echo "| node_cpu_pct (max) | $(as_get node_cpu_pct) |"
-	echo "| node_mem_pct (max) | $(as_get node_mem_pct) |"
+	echo "| istiod_cpu_pct_of_limit (max) | $(as_pct istiod_cpu_pct) |"
+	echo "| istiod_mem_pct_of_limit (max) | $(as_pct istiod_mem_pct) |"
+	echo "| node_cpu_pct (max) | $(as_pct node_cpu_pct) |"
+	echo "| node_mem_pct (max) | $(as_pct node_mem_pct) |"
 	echo "| pods_scheduled / allocatable | $(as_get pods_sched) / $(as_get pods_alloc) |"
 	echo ""
 	echo "> ${COVERAGE_LINE}"
@@ -616,5 +645,6 @@ esac
 # floor. With ENFORCE=0 (default) this is informational only — behaviour unchanged.
 if [[ "${SCALE_COVERAGE_ENFORCE:-0}" == "1" && "$COVERAGE_STATUS" == "UNDER" ]]; then
 	echo "${COVERAGE_LINE}" >&2
+	echo "  To fix: add cluster nodes, raise the workload size (SCALE_SIZING_MODE=auto, or a larger --service-count/--replicas), lower SCALE_COVERAGE_MIN_FRACTION, or unset SCALE_COVERAGE_ENFORCE to treat coverage as informational." >&2
 	die "scale coverage under floor (SCALE_COVERAGE_ENFORCE=1)"
 fi

@@ -22,7 +22,9 @@
 #   cap_parse_istiod_limits                        -> cpu_m mem_mi replicas (live istiod deploy limits/requests)
 #   cap_parse_istiod_used                          -> cpu_m mem_mi (sum of istiod pod top)
 #   cap_pct <used> <total>                          -> integer percent or `unknown`
-#   cap_max_pods <...>                             -> Phase-2 sizing (see below); `unknown`-propagating
+#
+# Exposes (Phase-2 sizing helper — pure, not a stdin parser):
+#   cap_max_pods <...>                             -> capacity-derived pod ceiling; `unknown`-propagating
 #
 # Exposes (thin kubectl wrappers — each takes <ctx> <kubectl_argv...>):
 #   cap_node_totals  <ctx> <argv...>
@@ -76,7 +78,7 @@ cap_parse_node_totals() {
 		  else
 			($w | map(cpu_to_m(.status.allocatable.cpu)) | add // 0 | floor) as $cpu
 			| ($w | map(mem_to_mi(.status.allocatable.memory)) | add // 0 | floor) as $mem
-			| ($w | map(.status.allocatable.pods | tonumber) | add // 0 | floor) as $pods
+			| ($w | map((.status.allocatable.pods // "0") | tonumber) | add // 0 | floor) as $pods
 			| ($w | map(.metadata.name) | join(",")) as $names
 			| "cpu_m=\($cpu) mem_mi=\($mem) pods=\($pods) nodes=\($n) names=\($names)"
 		  end

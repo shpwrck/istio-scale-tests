@@ -74,6 +74,12 @@ Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
   CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
   CONTROLPLANE_SIDECAR_SCOPING.
+
+  O9 scale-coverage (DEFAULT-OFF — fixed/0 means behaviour is unchanged):
+  SCALE_SIZING_MODE (fixed|auto; auto derives SERVICE_COUNT from cluster capacity),
+  SCALE_TARGET_FRACTION, SCALE_SYSTEM_RESERVE_FRACTION, SCALE_PER_POD_CPU_M,
+  SCALE_PER_POD_MEM_MI (auto-sizing inputs), SCALE_COVERAGE_MIN_FRACTION,
+  SCALE_COVERAGE_ENFORCE (under-provision floor: warn by default, hard-fail when 1).
 EOF
 }
 
@@ -185,8 +191,9 @@ echo ""
 # sidecar. We use a documented conservative constant (sidecar default ~100m / ~128Mi
 # plus headroom) until calibrated against a real cluster on the clean re-run. These
 # are intentionally generous so auto-sizing under-provisions rather than over-provisions.
-PER_POD_CPU_M=200
-PER_POD_MEM_MI=256
+# Centralized in config/options.env (SCALE_PER_POD_*) for calibration consistency.
+PER_POD_CPU_M="${SCALE_PER_POD_CPU_M:-200}"
+PER_POD_MEM_MI="${SCALE_PER_POD_MEM_MI:-256}"
 if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	src_ctx="${CONTEXTS[0]}"
 	echo "Auto-sizing from capacity on source context $src_ctx (target_fraction=${SCALE_TARGET_FRACTION}, reserve=${SCALE_SYSTEM_RESERVE_FRACTION})..."
@@ -258,10 +265,14 @@ if ! ((DRY_RUN)); then
 					'BEGIN{ print ((n/a) < (m+0)) ? 1 : 0 }')
 				if (( under )); then
 					frac=$(awk -v n="$NEEDED_PODS" -v a="$alloc" 'BEGIN{ printf "%.3f", n/a }')
+					# This fires INSIDE auto mode (auto-sizing already ran and still landed
+					# under the floor), so the remediation must NOT say "set auto" — the real
+					# levers are more nodes / a higher target fraction / a lower reserve.
+					fix_hint="add cluster nodes, raise SCALE_TARGET_FRACTION (currently ${SCALE_TARGET_FRACTION}), or lower SCALE_SYSTEM_RESERVE_FRACTION (currently ${SCALE_SYSTEM_RESERVE_FRACTION})"
 					if [[ "${SCALE_COVERAGE_ENFORCE:-0}" == "1" ]]; then
-						die "context $ctx: SCALE_COVERAGE: UNDER ($NEEDED_PODS/$alloc pods = $frac < min $min_frac) and SCALE_COVERAGE_ENFORCE=1"
+						die "context $ctx: SCALE_COVERAGE: UNDER ($NEEDED_PODS/$alloc pods = $frac < min $min_frac) and SCALE_COVERAGE_ENFORCE=1 — to fix: ${fix_hint}, or lower SCALE_COVERAGE_MIN_FRACTION / unset SCALE_COVERAGE_ENFORCE"
 					fi
-					echo "  WARN: $ctx: SCALE_COVERAGE: UNDER ($NEEDED_PODS/$alloc pods = $frac < min $min_frac) — under-scaled (set SCALE_SIZING_MODE=auto + more nodes, or SCALE_COVERAGE_ENFORCE=1 to fail)" >&2
+					echo "  WARN: $ctx: SCALE_COVERAGE: UNDER ($NEEDED_PODS/$alloc pods = $frac < min $min_frac) — under-scaled; to raise coverage: ${fix_hint}" >&2
 				fi
 			fi
 		else

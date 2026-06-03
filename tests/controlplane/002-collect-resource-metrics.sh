@@ -316,6 +316,7 @@ TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
+		echo "# CONTROLPLANE_SCHEMA=40"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
@@ -889,17 +890,25 @@ collect_capacity_for_ctx() {
 		case "$kv" in scheduled=*) pods_sched="${kv#scheduled=}" ;; esac
 	done
 
-	# Only the cpu/mem limits are needed here (replicas is not part of the per-row
-	# %-of-limit columns); cap_istiod_limits still emits a replicas= token we ignore.
-	local istd_cpu_m="unknown" istd_mem_mi="unknown"
+	# cap_istiod_limits returns the PER-REPLICA container limit + the replica count.
+	# cap_istiod_used (below) SUMS usage across ALL istiod replicas, so the %-of-limit
+	# denominator must be the AGGREGATE limit (per-replica × replicas) for the ratio to
+	# share scope with its numerator — otherwise a healthy R-replica control plane reads
+	# up to ~R×100%. (cf PL28 sum-vs-invariant scope.)
+	local istd_cpu_m="unknown" istd_mem_mi="unknown" istd_rep="unknown"
 	# shellcheck disable=SC2207
 	local -a il=($(cap_istiod_limits "$ctx" "${KUBECTL[@]}"))
 	for kv in "${il[@]}"; do
 		case "$kv" in
 			cpu_m=*) istd_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) istd_mem_mi="${kv#mem_mi=}" ;;
+			replicas=*) istd_rep="${kv#replicas=}" ;;
 		esac
 	done
+	# Aggregate limit across replicas (unknown if any input is non-numeric).
+	local istd_cpu_total="unknown" istd_mem_total="unknown"
+	if [[ "$istd_cpu_m" =~ ^[0-9]+$ && "$istd_rep" =~ ^[0-9]+$ ]]; then istd_cpu_total=$(( istd_cpu_m * istd_rep )); fi
+	if [[ "$istd_mem_mi" =~ ^[0-9]+$ && "$istd_rep" =~ ^[0-9]+$ ]]; then istd_mem_total=$(( istd_mem_mi * istd_rep )); fi
 
 	local istd_used_cpu_m="unknown" istd_used_mem_mi="unknown"
 	# shellcheck disable=SC2207
@@ -913,8 +922,8 @@ collect_capacity_for_ctx() {
 
 	# Percent columns (N/A when any input unknown).
 	local icpu_pct imem_pct ncpu_pct nmem_pct
-	icpu_pct=$(cap_pct "$istd_used_cpu_m" "$istd_cpu_m"); [[ "$icpu_pct" == unknown ]] && icpu_pct="N/A"
-	imem_pct=$(cap_pct "$istd_used_mem_mi" "$istd_mem_mi"); [[ "$imem_pct" == unknown ]] && imem_pct="N/A"
+	icpu_pct=$(cap_pct "$istd_used_cpu_m" "$istd_cpu_total"); [[ "$icpu_pct" == unknown ]] && icpu_pct="N/A"
+	imem_pct=$(cap_pct "$istd_used_mem_mi" "$istd_mem_total"); [[ "$imem_pct" == unknown ]] && imem_pct="N/A"
 	ncpu_pct=$(cap_pct "$used_cpu_m" "$node_cpu_m"); [[ "$ncpu_pct" == unknown ]] && ncpu_pct="N/A"
 	nmem_pct=$(cap_pct "$used_mem_mi" "$node_mem_mi"); [[ "$nmem_pct" == unknown ]] && nmem_pct="N/A"
 	[[ "$pods_sched" == unknown ]] && pods_sched="N/A"
