@@ -79,6 +79,25 @@ If a pinned pod disappears between phases (e.g. HPA scale-down or restart),
 the row is emitted with `istiod_restarted=unknown` and counter/histogram
 deltas are excluded from aggregation.
 
+## Fault-tolerance: degraded rows and the `context` sentinel
+
+The suite never aborts a multi-hour sweep on a single per-combo failure. Instead
+it records a **degraded row** that is counted in `n_total` but excluded from
+`n_valid` (the report admits a row to `n_valid` only when `istiod_restarted == 0`,
+so every degraded row carries `istiod_restarted=unknown` and `N/A` for all
+counter/histogram/gauge columns — PL13/PL15). The `context` column carries a
+sentinel naming the fault:
+
+| `context` sentinel | Emitted by | Meaning |
+| ------------------ | ---------- | ------- |
+| `SETUP_FAILED` | `003-run-sweep.sh` | `001-setup` exited non-zero for this combo; the background peak poller is stopped, a row is recorded, cleanup runs, and the sweep continues. |
+| `PROBE_FAILED` | `003-run-sweep.sh` | The baseline or final `002` scrape exited non-zero for this combo. |
+| `ZERO_PODS` | `002-collect-resource-metrics.sh` | A context had **zero running istiod pods** (whole-cluster istiod outage — a rolling restart normally leaves ≥1 Running replica, so it does NOT trip this). The context is dropped from the scrape set and this degraded row records that the combo measured fewer control planes than requested. `002` still `die`s only when **all** contexts are zero-pod. |
+
+The sweep TSV preamble is pre-created by `003` before the first combo, so a
+first-combo `SETUP_FAILED`/`PROBE_FAILED` cannot strip the run's provenance
+(`ISTIO_VERSION`/`HARNESS_SHA`/`KUBE_VERSIONS`) — the metadata always survives.
+
 ## Histogram Bucket Ranges
 
 Convergence and queue-time p99 values are reported as **bucket ranges**

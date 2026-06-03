@@ -18,12 +18,17 @@
 #   ./tests/propagation/006-run-sweep.sh --dry-run
 # ci-dry-run:
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
+# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"  # B6: harness_sha for the placeholder TSV preamble
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -164,6 +169,41 @@ fi
 SCRIPT_DIR="${ROOT}/tests/propagation"
 SWEEP_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
+HARNESS_SHA="$(harness_sha)"
+
+# B6: emit a minimal placeholder TSV for a mesh size whose setup/probe crashed before
+# the probe could write its own rows. Without this, that size is absent from the
+# report and indistinguishable from "never planned". 005-report-results.sh globs
+# endpoint-*.tsv and counts n_total[mesh_size] for any NF>=10 row, excluding non-OK
+# status from n_valid (PL15). Only meaningful when --tsv is set (the report runs only
+# then). The file is named so it sorts AFTER the real endpoint-<RUN_ID> files, and it
+# carries the SAME sweep-level scalar preamble keys (SWEEP_RUN_ID/HARNESS_SHA/
+# ISTIO_VERSION/SOURCE_CTX/ITERATIONS/TIMEOUT_SEC/SETTLE_SEC) so PL26 scalar
+# homogeneity holds; per-iteration RUN_ID/MESH_SIZE are this combo's.
+# Usage: emit_propagation_placeholder <status> <mesh_size> <source_ctx>
+emit_propagation_placeholder() {
+	((WRITE_TSV)) || return 0
+	local status="$1" ms="$2" sctx="$3"
+	mkdir -p "$SWEEP_DIR"
+	local f="${SWEEP_DIR}/endpoint-zzfail-ms${ms}-${SWEEP_RUN_ID}.tsv"
+	{
+		echo "# Endpoint propagation latency test (placeholder — combo failed before any row)"
+		echo "# SWEEP_RUN_ID=${SWEEP_RUN_ID}"
+		echo "# RUN_ID=${SWEEP_RUN_ID}-failms${ms}"
+		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		echo "# SOURCE_CTX=${sctx}"
+		echo "# MESH_SIZE=${ms}"
+		echo "# ITERATIONS=${ITERATIONS}"
+		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
+		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
+		echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms"
+		# One degraded row: status carries the sentinel, restarted=unknown -> filtered
+		# from n_valid; numerics N/A (PL13).
+		echo -e "${SWEEP_RUN_ID}-failms${ms}\t${ms}\t0\t${sctx}\tN/A\tN/A\tN/A\tN/A\tN/A\t${status}\tN/A\tN/A\tN/A\tN/A\tN/A\tunknown\t0\tN/A\tN/A"
+	} > "$f"
+}
 
 # --- dry-run: print planned matrix to stderr, exit cleanly --------------------
 if ((DRY_RUN)); then
@@ -257,7 +297,15 @@ for ms in "${MESH_SIZES[@]}"; do
 	fi
 
 	echo "--- Setting up watchers ---"
-	"$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --watcher-replicas "$WATCHER_REPLICAS"
+	# B1/B6: setup is a probable per-combo failure at scale; bare under set -e it would
+	# abort the whole sweep. On failure record a placeholder row (so this mesh size is
+	# visible in the report), then continue to the next mesh size.
+	if ! "$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --watcher-replicas "$WATCHER_REPLICAS"; then
+		echo "warn: watcher setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2
+		emit_propagation_placeholder SETUP_FAILED "$ms" "$source_ctx"
+		echo ""
+		continue
+	fi
 	echo ""
 
 	echo "--- Running endpoint probe (mesh_size=$ms) ---"
@@ -274,12 +322,24 @@ for ms in "${MESH_SIZES[@]}"; do
 	if [[ -n "$remote_csv" ]]; then
 		endpoint_args+=(--remote-contexts "$remote_csv")
 	fi
-	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"
+	# P0/B6: a probe failure must NOT abort the multi-hour sweep. The endpoint probe
+	# writes its own per-iteration rows into $SWEEP_DIR (self-tagging TIMEOUT_*/
+	# DRAIN_TIMEOUT/RESTART/SCRAPE_INCOMPLETE). If it crashed BEFORE writing any row,
+	# this mesh size would vanish from the report (indistinguishable from never-planned),
+	# so emit a placeholder row to make the combo visible (n_total++, excluded from
+	# n_valid). If the probe DID write rows, the placeholder is additive (one extra
+	# non-OK row in n_total) and still honest.
+	if ! "$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"; then
+		echo "warn: endpoint probe failed for mesh_size=$ms; recording PROBE_FAILED placeholder and continuing" >&2
+		emit_propagation_placeholder PROBE_FAILED "$ms" "$source_ctx"
+	fi
 	echo ""
 
 	if ((COLLECT_METRICS)); then
 		echo "--- Collecting pilot metrics (mesh_size=$ms) ---"
-		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$SWEEP_DIR"
+		# Non-fatal: optional supplementary collection must not abort the sweep.
+		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$SWEEP_DIR" || \
+			echo "warn: pilot metrics collection failed for mesh_size=$ms; continuing" >&2
 		echo ""
 	fi
 

@@ -220,7 +220,7 @@ The sweep:
 | 14 | `max_ms` | `DurationHistogram.Max * 1000` |
 | 15 | `delta_p99_ms` | `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. Only computed when the baseline row has `status=OK` (A3). |
 | 16 | `istiod_restarted` | `0` if `process_start_time_seconds` unchanged across window; `1` if changed; `unknown` if either probe failed (PL9) |
-| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE` (a per-pod `/metrics` scrape came back empty/below `FANOUT_MIN_SCRAPE_BYTES`, **or** the pre/post `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot), `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
+| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE` (a per-pod `/metrics` scrape came back empty/below `FANOUT_MIN_SCRAPE_BYTES`, **or** the pre/post `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot), `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET`, `SETUP_FAILED` / `PROBE_FAILED` (the per-combo setup or a probe phase exited non-zero; the sweep records a degraded row and continues — counted in `n_total`, excluded from `n_valid`). On a setup/baseline failure the sweep writes **both** a `phase=baseline` and a `phase=churn` row so the combo buckets into its real `(mesh_size, churn_rate)` cell. |
 | 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
 | 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
 | 20 | `xds_pushes_delta` | `pilot_xds_pushes` counter delta during measurement window. `N/A` when istiod restarted or scrape failed. |

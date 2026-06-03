@@ -23,6 +23,10 @@
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
+# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# both run). Per-pod faults are degraded to N/A rows; this self-reports an
+# UNEXPECTED abort.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -330,6 +334,11 @@ trap cleanup EXIT
 
 POD_CTXS=()
 POD_NAMES=()
+# B2: contexts dropped by resolve_pods because they had ZERO running istiod pods.
+# Persisted to the state-dir so the FINAL phase can emit one degraded N/A row per
+# dropped context (counted in n_total, excluded from n_valid) — so the report can
+# distinguish "measured N-1 control planes" from "measured all N".
+DROPPED_CTXS=()
 
 resolve_pods() {
 	POD_CTXS=()
@@ -339,12 +348,24 @@ resolve_pods() {
 		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
 			--field-selector=status.phase=Running \
 			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
-		[[ -z "$pods" ]] && die "context $ctx: no running istiod pods found in istio-system"
+		# P2/PL: a SINGLE context with zero istiod pods is a per-instance fault, not a
+		# whole-run precondition — warn and drop that context. `die` is reserved for
+		# "zero istiod pods across ALL contexts". This fires only on a WHOLE-CLUSTER
+		# istiod outage (zero Running istiod pods for that context); a rolling restart
+		# normally leaves >=1 Running replica, so it does NOT trip this drop.
+		# B2: record the dropped context so the final phase emits a degraded N/A row
+		# (counted-but-excluded), consistent with the PF-dead sibling path.
+		if [[ -z "$pods" ]]; then
+			echo "warning: context $ctx: no running istiod pods in istio-system; dropping this context (will emit a degraded N/A row)" >&2
+			DROPPED_CTXS+=("$ctx")
+			continue
+		fi
 		for pod in $pods; do
 			POD_CTXS+=("$ctx")
 			POD_NAMES+=("$pod")
 		done
 	done
+	((${#POD_CTXS[@]})) || die "no running istiod pods found in istio-system across ANY context (${CONTEXTS[*]}) — cannot proceed"
 }
 
 save_pod_manifest() {
@@ -352,6 +373,12 @@ save_pod_manifest() {
 	for k in "${!POD_CTXS[@]}"; do
 		printf '%d\t%s\t%s\n' "$k" "${POD_CTXS[k]}" "${POD_NAMES[k]}"
 	done > "${dir}/pods.tsv"
+	# B2: persist dropped (zero-pod) contexts so the final phase can emit N/A rows.
+	: > "${dir}/dropped-ctxs.tsv"
+	local dctx
+	for dctx in "${DROPPED_CTXS[@]}"; do
+		printf '%s\n' "$dctx" >> "${dir}/dropped-ctxs.tsv"
+	done
 }
 
 load_pod_manifest() {
@@ -365,6 +392,14 @@ load_pod_manifest() {
 		POD_NAMES+=("$pod")
 	done < "$manifest"
 	((${#POD_CTXS[@]})) || die "pods.tsv in $dir is empty"
+	# B2: reload dropped contexts recorded at baseline.
+	DROPPED_CTXS=()
+	if [[ -f "${dir}/dropped-ctxs.tsv" ]]; then
+		local dctx
+		while IFS= read -r dctx; do
+			[[ -n "$dctx" ]] && DROPPED_CTXS+=("$dctx")
+		done < "${dir}/dropped-ctxs.tsv"
+	fi
 	for k in "${!POD_CTXS[@]}"; do
 		if ! "${KUBECTL[@]}" --context="${POD_CTXS[k]}" -n istio-system get pod "${POD_NAMES[k]}" &>/dev/null; then
 			echo "warning: pod ${POD_NAMES[k]} on ${POD_CTXS[k]} no longer exists; row will show as restarted" >&2
@@ -401,7 +436,17 @@ for k in "${!POD_CTXS[@]}"; do
 	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
 		if ((attempts > 20)); then
-			((restarts >= 3)) && die "port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed after ${restarts} restarts"
+			if ((restarts >= 3)); then
+				# P2/PL13/PL15: a single pod whose PF won't come up after 3 restarts is a
+				# per-instance fault, NOT a whole-run precondition. Stop waiting and leave
+				# this pod's PF dead: its scrape (scrape_all_parallel) then yields an empty
+				# final-${k}.metrics, and the existing "no final scrape -> N/A row" path
+				# (see scrape_window) emits a row with restarted=unknown and N/A numerics
+				# for this pod. The report (004) counts it in n_total, excludes from n_valid.
+				echo "warning: port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed after ${restarts} restarts; this pod will emit an N/A row (restarted=unknown)" >&2
+				kill "${PF_PIDS[k]}" 2>/dev/null || true
+				break
+			fi
 			restarts=$((restarts + 1))
 			attempts=0
 			# Kill the stuck PF (free its local port) and replace its slot before retrying.
@@ -698,7 +743,10 @@ scrape_one_context() {
 	local ctx="$1" port="$2" out="$3" ts_start="$4" ts_end="$5"
 	local body t_start t_end
 	t_start=$(now_ms)
-	body=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null) || return 1
+	# P4: --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
+	# (-> empty metrics file -> N/A row via scrape_window) instead of hanging the
+	# whole sweep. 10s is generous for a multi-MB /metrics body at 5k+ services.
+	body=$(curl -s --max-time 10 "http://localhost:${port}/metrics" 2>/dev/null) || return 1
 	t_end=$(now_ms)
 	printf '%s' "$body" > "$out"
 	printf '%s' "$t_start" > "$ts_start"
@@ -812,7 +860,9 @@ scrape_window() {
 		local f_file="${TMP_DIR}/final-${k}.metrics"
 		if [[ ! -s "$f_file" ]]; then
 			echo "warning: no final scrape for $ctx/${POD_NAMES[k]}; emitting N/A row" >&2
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A" >> "$TSV_FILE"
+			# PL13: push-by-type and config-sample columns are N/A (nothing measured),
+			# not literal 0/0/0 which would read as a real zero-push observation.
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
@@ -1006,6 +1056,18 @@ scrape_window() {
 
 		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}" >> "$TSV_FILE"
 		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
+	done
+
+	# B2: emit one degraded N/A row per dropped (zero-pod) context — context column
+	# carries a ZERO_PODS sentinel so the report can see that this combo measured fewer
+	# control planes than were requested. restarted=unknown + all-N/A numerics ->
+	# counted in n_total, excluded from n_valid (same shape as the PF-dead/no-final-
+	# scrape path above; PL13/PL15). All push-by-type and config-sample columns are N/A
+	# (nothing was measured), not literal 0.
+	local dctx
+	for dctx in "${DROPPED_CTXS[@]}"; do
+		echo "warning: context ${dctx}: dropped (zero istiod pods); emitting degraded N/A row" >&2
+		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A" >> "$TSV_FILE"
 	done
 }
 

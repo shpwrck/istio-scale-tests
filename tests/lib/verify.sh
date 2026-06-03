@@ -123,11 +123,26 @@ else
 	fail=$((fail + 1))
 fi
 
-# 5. dry-run sweeps
-if ((SKIP_DRY_RUN)); then
-	step 5 "dry-run sweeps (SKIPPED)"
+# 5. bare by-design-non-zero scrape-call lint
+# Catches the #31 incident class at review: a bare fanout_scrape_all / scrape_ctx /
+# fanout_scrape_aggregate in statement position aborts the whole script under set -e
+# before the next line can tag the row. Must be captured, || true'd, an if/while
+# condition, or a function-tail return.
+step 5 "bare by-design-non-zero scrape-call lint"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/lint-bare-scrape.sh"
+if lint_out="$(lint_bare_scrape_paths "$ROOT/tests")"; then
+	ok
 else
-	step 5 "dry-run sweep scripts"
+	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
+	err "bare by-design-non-zero scrape call(s) found (capture, guard with || true, or use as if/while condition)"
+fi
+
+# 6. dry-run sweeps
+if ((SKIP_DRY_RUN)); then
+	step 6 "dry-run sweeps (SKIPPED)"
+else
+	step 6 "dry-run sweep scripts"
 	dry_fail=0
 	SWEEPS=(
 		"tests/churn/003-run-sweep.sh --dry-run --contexts ci-dummy"

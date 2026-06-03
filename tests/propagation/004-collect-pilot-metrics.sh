@@ -138,7 +138,8 @@ sleep 3
 for i in "${!CONTEXTS[@]}"; do
 	port=$(( BASE_PF_PORT + i ))
 	attempts=0
-	while ! curl -s -o /dev/null "http://localhost:$port/metrics" 2>/dev/null; do
+	# P4: --max-time bounds the readiness probe so a stuck/half-open PF can't block.
+	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
 		((attempts > 20)) && die "port-forward to istiod on ${CONTEXTS[i]} (port $port) failed"
 		sleep 0.5
@@ -153,7 +154,7 @@ scrape_all() {
 		ctx="${CONTEXTS[i]}"
 		port=$(( BASE_PF_PORT + i ))
 		outfile="${OUTPUT_DIR}/${ctx}-${ts}.prom"
-		curl -s "http://localhost:$port/metrics" 2>/dev/null \
+		curl -s --max-time 10 "http://localhost:$port/metrics" 2>/dev/null \
 			| grep -E "$PILOT_METRICS_REGEX" \
 			> "$outfile" || echo "warning: failed to scrape $ctx" >&2
 		echo "  Scraped $ctx -> $outfile ($(wc -l < "$outfile") lines)"
