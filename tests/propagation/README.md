@@ -14,6 +14,14 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
 
 In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService and DestinationRule are local config processed only by the istiod that owns the namespace.
 
+### t0 is a config-only label flip onto a pre-warmed backer (O1)
+
+Earlier the probe created a **fresh** `propagation-canary` Deployment + Service at `t0` every iteration, so `P3`'s clock included pod scheduling, image pull (`http-echo:latest`, no readiness probe), and sidecar startup — `P3` ran 8–102 s and was non-monotonic, measuring "new workload reachable" rather than xDS propagation.
+
+Now `001-setup` pre-warms a single **backer** pod (`propagation-canary` Deployment, image pinned + `imagePullPolicy: IfNotPresent`, sidecar up, `readinessProbe`) and creates the canary Service. The Service selects on `app=propagation-canary` **AND** an active-flip label (`propagation-active: "true"`), so it has **zero endpoints** while the backer is Ready-but-not-selected. At `t0` the probe captures the backer pod, sets `T0`, then stamps `propagation-active=true` onto the running pod (config-only `kubectl label`, no reschedule). The Service endpoint appears immediately and all three phases share one `T0`, so `P3` collapses toward `P1`/`P2` + EDS delivery. Drain flips the label off (`propagation-active-`); the backer stays warm for the next iteration. The Deployment/Service persist across iterations and are removed by `007-cleanup`.
+
+Because the Service persists, the `propagation-canary` **cluster** entry stays in the watcher Envoy's `/clusters` after drain — "drained" means no `health_flags::healthy` endpoint for it (the exact inverse of P3 detection), not the cluster name disappearing.
+
 ### Why histogram-based P1 (not /debug/syncz)
 
 `/debug/syncz` and `/debug/endpointz` serialize the full push context (or endpoint catalogue) per request — at hundreds of services and many clusters that is hundreds of MB of JSON and seconds of CPU per poll. The probe ends up competing with the work it's measuring; the recorded timestamp reflects when istiod could finally serve the debug endpoint, not when convergence happened.
@@ -146,7 +154,7 @@ restarted  p2_dirty  window_ms  scrape_skew_ms
 | `p1_ms` | Wall-clock ms from canary apply until source istiod histogram delta `_count` reached `proxy_count`. `TIMEOUT` or `N/A` (when `restarted=1`). |
 | `p2_ms` | Wall-clock ms until remote istiod `pilot_xds_pushes{type="eds"}` delta > 0. |
 | `p3_ms` | Wall-clock ms until watcher Envoy `/clusters` reports healthy canary endpoints. |
-| `status` | `OK`, `TIMEOUT_P1`/`P2`/`P3`/`ALL`, `RESTART`, or `DRAIN_TIMEOUT` (canary endpoint did not drain from a watcher before the next iteration; data is suspect). |
+| `status` | `OK`, `TIMEOUT_P1`/`P2`/`P3`/`ALL`, `RESTART`, `DRAIN_TIMEOUT` (canary endpoint did not drain from a watcher before the next iteration; data is suspect), or `SCRAPE_INCOMPLETE` (a pod's `/metrics` was unreachable during baseline/poll, **or** the baseline `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot). `005` drops all non-`OK` rows. |
 | `p1_conv_p50_ms`, `p1_conv_p99_ms` | Quantiles computed over the per-bucket delta of the source-istiod histogram across the iteration window. `N/A` if `restarted=1`, if the sample count is below the min-sample floor (10 for p50, 30 for p99), or if there are no samples. `overflow` if the quantile falls in the `+Inf` bucket. |
 | `p1_sample_count` | `got/attempted` — delta `_count` (samples actually observed in window) over `proxy_count` (baseline gauge). Useful for sanity-checking the detection threshold. |
 | `p1_proxy_count` | `pilot_xds` gauge from the baseline scrape (connected proxies on source istiod). |
@@ -154,7 +162,7 @@ restarted  p2_dirty  window_ms  scrape_skew_ms
 | `restarted` | `0` / `1` / `unknown` — `1` if `process_start_time_seconds` on the source istiod changed mid-iteration; `unknown` if baseline or current `process_start_time_seconds` was missing (so we cannot tell). |
 | `p2_dirty` | `0` / `1` — `1` when the remote istiod's EDS push counter advanced **without** a matching `pilot_services` gauge delta of ≥ 1, i.e. the EDS bump could be unrelated endpoint churn rather than our canary. `005` drops `p2_ms` from numeric aggregation when this is set. |
 | `window_ms` | Wall-clock duration of the per-iteration measurement window. |
-| `scrape_skew_ms` | `max(ts) - min(ts)` across the per-context baseline-scrape timestamps. |
+| `scrape_skew_ms` | `max(ts) - min(ts)` across the per-context baseline-scrape timestamps (recorded verbatim for provenance, even when it triggers the `SCRAPE_INCOMPLETE` skew gate). When this exceeds `FANOUT_MAX_SKEW_MS` (default 1000), the snapshot is incoherent and the row is tagged `SCRAPE_INCOMPLETE`. |
 
 Backwards-compat:
 
@@ -222,6 +230,7 @@ The file contains:
 
 - **Multi-replica istiod**: supported via per-pod fanout — see "Multi-replica istiod fanout" above. The probe requires only `>= 1` Running istiod pod per context and records the per-context replica counts in the TSV preamble (`ISTIOD_REPLICAS`).
 - **`/metrics` scrape timeout**: defaults to 5 s. On very large meshes (100k+ services) the istiod `/metrics` payload may take longer than 5 s to render — bump `PROPAGATION_METRICS_TIMEOUT` (seconds).
+- **Scrape-skew gate**: `FANOUT_MAX_SKEW_MS` (default 1000) is the baseline `scrape_skew_ms` ceiling above which a row is tagged `SCRAPE_INCOMPLETE`. The skew is the spread of per-pod/per-context scrape *completion* timestamps; a wide spread (e.g. one curl queued behind dozens of port-forward proxies near the metrics timeout) means the snapshot is not coherent. Raise it on a deliberately slow/large mesh where multi-second `/metrics` reads are expected, or lower it to tighten coherence.
 - **Min-sample floor for quantiles**: `p1_conv_p50_ms` requires ≥ 10 samples, `p1_conv_p99_ms` requires ≥ 30 samples. With the default 1 watcher replica (3 connected proxies: watcher + ingress-gw + east-west-gw), both columns will be `N/A`. Use `--watcher-replicas 30` on `001-setup` or `006-run-sweep` to reach the thresholds. For quick checks with few proxies, use the wall-clock `p1_ms` column instead.
 - **Histogram bucket resolution floor**: `pilot_proxy_convergence_time` bucket boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s). When all pushes complete in under 100 ms, conv_p50 and conv_p99 are pinned at 100 — the report annotates these rows with `*`. The actual latency is somewhere in 0-100 ms but cannot be resolved further without recompiling istiod with finer buckets.
 

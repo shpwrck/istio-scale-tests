@@ -251,6 +251,14 @@ fi
 # PL8: per-window scrape skew now spans pods (the max of the pre/post batches).
 SCRAPE_SKEW_MS="$PRE_SKEW_MS"
 (( POST_SKEW_MS > SCRAPE_SKEW_MS )) && SCRAPE_SKEW_MS="$POST_SKEW_MS"
+# O3 (symmetry with propagation): a wide scrape skew means the pre/post per-pod
+# bodies were read seconds apart, so the istiod-side counter/histogram deltas are
+# computed across an incoherent snapshot. Fold it into SCRAPE_INCOMPLETE so the
+# row is tagged POISONED_SCRAPE; the raw skew is still emitted in the marker line.
+if (( SCRAPE_SKEW_MS > FANOUT_MAX_SKEW_MS )); then
+	SCRAPE_INCOMPLETE=1
+	echo "Warning: scrape_skew=${SCRAPE_SKEW_MS}ms exceeds FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}ms — row will be tagged POISONED_SCRAPE" >&2
+fi
 post_metrics_csv() {
 	local i out=""
 	for i in "${!ISTIOD_PODS[@]}"; do
