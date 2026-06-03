@@ -153,14 +153,28 @@ render_for() {
 		--set fortioImage.tag="$FORTIO_VERSION"
 }
 
-# Source context: fortio server+client+churn-targets all in shared NS.
-echo "Setup [source=$SOURCE_CTX]: fortio (server+client) + ${CHURN_DEPLOYMENT_COUNT_OPT} churn-targets in ns=${NS}"
-render_for "$SOURCE_CTX" both | "${apply[@]}" --context="$SOURCE_CTX" -f -
-
+# O8 item 6: apply source (role=both) and every remote (role=server) concurrently
+# — disjoint contexts, setup-only, fidelity-neutral. Each context's apply runs in
+# its own background subshell; a non-zero exit in ANY context fails the join below
+# (preserving the original `set -e` semantics so 004's SETUP_FAILED wrap still fires).
+APPLY_PIDS=()
+(
+	echo "Setup [source=$SOURCE_CTX]: fortio (server+client) + ${CHURN_DEPLOYMENT_COUNT_OPT} churn-targets in ns=${NS}"
+	render_for "$SOURCE_CTX" both | "${apply[@]}" --context="$SOURCE_CTX" -f - \
+		|| { echo "error: apply failed on source $SOURCE_CTX" >&2; exit 1; }
+) &
+APPLY_PIDS+=($!)
 # Remote contexts: server + churn-targets (no client; that lives on source).
 for ctx in "${REMOTES[@]}"; do
-	echo "Setup [remote=$ctx]: fortio-server + ${CHURN_DEPLOYMENT_COUNT_OPT} churn-targets in ns=${NS}"
-	render_for "$ctx" server | "${apply[@]}" --context="$ctx" -f -
+	(
+		echo "Setup [remote=$ctx]: fortio-server + ${CHURN_DEPLOYMENT_COUNT_OPT} churn-targets in ns=${NS}"
+		render_for "$ctx" server | "${apply[@]}" --context="$ctx" -f - \
+			|| { echo "error: apply failed on remote $ctx" >&2; exit 1; }
+	) &
+	APPLY_PIDS+=($!)
+done
+for pid in "${APPLY_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed the workload apply"
 done
 
 if ((DRY_RUN)); then

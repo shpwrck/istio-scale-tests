@@ -191,14 +191,28 @@ TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
     --churn-rates  1,5,10
 ```
 
-The sweep:
+The sweep (O8 deploy-once-per-mesh-size):
 
 1. Creates a per-sweep subdir `tests/churn-dataplane/results/sweep-${RUN_ID}/`. (PL6)
 2. Writes one TSV containing baseline+churn rows for every combo. (PL2 preamble, PL19 propagation)
 3. Enforces a matrix cap of **64 combinations**; bypass with `--force-large-matrix`. (PL10)
-4. Sleeps `--inter-combo-settle` (default 15s) between combos, **after** cleanup completes. (PL18)
-5. Awaits namespace deletion synchronously between combos. (PL4 via `006-cleanup.sh --wait-deletion`)
-6. Calls `005-report-results.sh` at the end.
+4. **Deploys the workload once per mesh-size** (`001-setup`), sweeps **all** churn
+   rates against that reused workload, then tears it down once (`006-cleanup`) — the
+   setup/teardown overhead is paid once per mesh-size, not once per churn rate.
+5. Keeps a **per-rate baseline**: before each rate (after the first of a mesh-size)
+   it resets the churn-target Deployments back to base replicas (`-l churn-target=true`)
+   so every rate measures from the same clean all-base state a fresh deploy gave —
+   003's churn driver assumes all-base and never resets — then sleeps
+   `--inter-combo-settle` (default 15s) to drain the reset's EDS pushes before the
+   baseline. (PL18) If a reset fails on any context the rate is recorded
+   `RESET_FAILED` and skipped (not measured against a contaminated mesh).
+6. Sleeps `--inter-combo-settle` between mesh-sizes, after the once-per-mesh-size
+   namespace deletion completes (synchronous, PL4 via `006-cleanup.sh --wait-deletion`).
+7. Calls `005-report-results.sh` at the end.
+
+Because each rate now starts from a *reset* rather than a fresh redeploy, same-combo
+reruns are comparable distributions under the post-O8 flow (the seeded churn order is
+unchanged); they are not byte-identical to the pre-O8 fresh-deploy-per-combo era.
 
 ## TSV schema (one row per phase)
 
@@ -206,7 +220,7 @@ The sweep:
 |---|--------|-------|
 | 1 | `run_id` | Sweep / probe identifier (timestamp + PID) |
 | 2 | `harness_sha` | `git describe --always --dirty --abbrev=7` (PL2) |
-| 3 | `combo_id` | Stable per-combo id linking baseline & churn rows; format `ms{N}-cr{R}` from 004 |
+| 3 | `combo_id` | Stable per-combo id linking baseline & churn rows; format `ms{N}-cr{R}` from 004 (a once-per-mesh-size `CLEANUP_TIMEOUT` marker row uses the synthetic id `ms{N}-cleanup`) |
 | 4 | `mesh_size` | Integer |
 | 5 | `churn_rate` | Integer, scale-ops/s; always `0` on baseline rows |
 | 6 | `phase` | `baseline`, `churn`, or `cleanup` (cleanup rows are PL23 markers) |
@@ -220,7 +234,7 @@ The sweep:
 | 14 | `max_ms` | `DurationHistogram.Max * 1000` |
 | 15 | `delta_p99_ms` | `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. Only computed when the baseline row has `status=OK` (A3). |
 | 16 | `istiod_restarted` | `0` if `process_start_time_seconds` unchanged across window; `1` if changed; `unknown` if either probe failed (PL9) |
-| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE` (a per-pod `/metrics` scrape came back empty/below `FANOUT_MIN_SCRAPE_BYTES`, **or** the pre/post `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot), `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET`, `SETUP_FAILED` / `PROBE_FAILED` (the per-combo setup or a probe phase exited non-zero; the sweep records a degraded row and continues — counted in `n_total`, excluded from `n_valid`). On a setup/baseline failure the sweep writes **both** a `phase=baseline` and a `phase=churn` row so the combo buckets into its real `(mesh_size, churn_rate)` cell. |
+| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE` (a per-pod `/metrics` scrape came back empty/below `FANOUT_MIN_SCRAPE_BYTES`, **or** the pre/post `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot), `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET`, `SETUP_FAILED` / `PROBE_FAILED` / `RESET_FAILED` (the once-per-mesh-size setup, a probe phase, or the per-rate churn-target reset-to-base exited non-zero; the sweep records a degraded row and continues — counted in `n_total`, excluded from `n_valid`). On a setup / baseline / reset failure the sweep writes **both** a `phase=baseline` and a `phase=churn` row so the combo buckets into its real `(mesh_size, churn_rate)` cell. A setup failure fans these rows across **every** churn rate of the failed mesh-size. |
 | 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
 | 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
 | 20 | `xds_pushes_delta` | `pilot_xds_pushes` counter delta during measurement window. `N/A` when istiod restarted or scrape failed. |
@@ -300,7 +314,7 @@ hitting an in-flight namespace teardown (PL4).
 | `001-setup-coexec-test.sh` | Render+apply the composite chart on every active context (server-side apply, PL5). `--dry-run` does not touch clusters. |
 | `002-run-baseline-probe.sh` | Run one fortio measurement window with NO churn; emit `phase=baseline` TSV row with istiod metrics. |
 | `003-run-churn-probe.sh` | Run one fortio measurement window while the churn driver runs concurrently; emit `phase=churn` TSV row with istiod metrics plus `delta_p99_ms`. |
-| `004-run-sweep.sh` | Orchestrate `001 → 002 → 003 → 006 → settle` across mesh_size × churn_rate × repetitions combos; PL6 per-sweep dir, PL10 matrix cap. |
+| `004-run-sweep.sh` | Orchestrate the mesh_size × churn_rate × repetitions sweep with O8 deploy-once: `001` once per mesh-size → `[reset-to-base + settle → 002 → 003]` per rate → `006` once per mesh-size → inter-mesh-size settle; PL6 per-sweep dir, PL10 matrix cap. |
 | `005-report-results.sh` | Aggregate joined baseline+churn pairs by combo_id, filter poisoned rows, emit text/csv/json/md. |
 | `006-cleanup.sh` | Tear down the shared namespace; `--wait-deletion` for PL4 synchronous semantics. |
 
