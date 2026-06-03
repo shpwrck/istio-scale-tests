@@ -1,13 +1,15 @@
 name: Cross-platform script validation
 
+# NOTE: This workflow intentionally has NO `paths:` filter on its trigger.
+# `validate (ubuntu-latest)` / `validate (macos-latest)` are *required* status
+# checks on `main`. A `paths:` filter would stop the workflow from triggering on
+# PRs that touch only non-script files (docs, charts, terraform .tf, ...), leaving
+# those required contexts stuck "Expected — waiting for status to be reported"
+# and blocking the PR forever. So the job always runs and reports a status; the
+# "Detect relevant changes" step below decides whether to do real work, and every
+# work step is gated on its output. Doc-only PRs finish green in seconds.
 on:
   pull_request:
-    paths:
-      - 'tests/**/*.sh'
-      - 'terraform/**/*.sh'
-      - 'config/*.env'
-      - '.shellcheckrc'
-      - '.github/workflows/portability.yml'
 
 jobs:
   validate:
@@ -18,14 +20,44 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need base + head to diff changed paths
+
+      - name: Detect relevant changes
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$changed"
+          # `case` globs are NOT path-aware: '*' matches '/', so 'tests/*.sh'
+          # matches any .sh at any depth under tests/. Mirrors the paths that
+          # used to gate the trigger, plus this workflow file itself.
+          relevant=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              tests/*.sh|terraform/*.sh|config/*.env|.shellcheckrc|.github/workflows/portability.yml)
+                relevant=true ;;
+            esac
+          done <<< "$changed"
+          echo "relevant=$relevant"
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [ "$relevant" = "false" ]; then
+            echo "::notice::No script/config changes detected — skipping validation, reporting success."
+          fi
 
       - name: Install Bash 4+ (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.changes.outputs.relevant == 'true'
         run: |
           brew install bash kubectl helm shellcheck
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           echo "bash: $(bash --version | head -1)"
           echo "date: $(date --version 2>&1 | head -1 || echo 'BSD date (no --version)')"
@@ -33,6 +65,7 @@ jobs:
           echo "helm: $(helm version --short 2>/dev/null || echo 'not installed')"
 
       - name: Syntax check (bash -n)
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           status=0
           while IFS= read -r f; do
@@ -44,11 +77,13 @@ jobs:
           exit $status
 
       - name: shellcheck
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           find tests/ terraform/ -name '*.sh' -type f | sort \
             | xargs shellcheck --shell=bash
 
       - name: '--help smoke test'
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           status=0
           while IFS= read -r f; do
@@ -63,6 +98,7 @@ jobs:
           exit $status
 
       - name: '--dry-run smoke test'
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           status=0
           # Discover scripts annotated with "# ci-dry-run: [extra-args]".
@@ -80,6 +116,7 @@ jobs:
           exit $status
 
       - name: Dry-run annotation enforcement
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           status=0
           while IFS= read -r f; do
@@ -92,6 +129,7 @@ jobs:
           exit $status
 
       - name: Portable timestamp helpers
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           # Robust extraction: match functions by name, not position.
           EXTRACT_AWK='
@@ -143,6 +181,7 @@ jobs:
           exit $status
 
       - name: Portable base64 (no -w flag)
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           encoded=$(echo -n "hello world" | base64 | tr -d '\n')
           echo "encoded=$encoded"
@@ -152,6 +191,7 @@ jobs:
           echo "PASS"
 
       - name: No incompatible patterns outside helpers
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           status=0
 
