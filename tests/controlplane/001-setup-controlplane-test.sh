@@ -201,16 +201,27 @@ apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
+# O8 item 3: apply each context's chart concurrently — setup-only, disjoint
+# contexts, fidelity-neutral. A non-zero exit in ANY context fails the join below,
+# preserving the original `set -e` abort semantics.
+APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING})"
-	helm template controlplane-test "$CHART_DIR" \
-		--set clusterName="$ctx" \
-		--set namespacePrefix="$NS" \
-		--set namespaceCount="$NAMESPACE_COUNT" \
-		--set serviceCount="$SERVICE_COUNT" \
-		--set replicasPerService="$REPLICAS" \
-		--set sidecarScoping="$SIDECAR_SCOPING" \
-		| "${apply[@]}" --context="$ctx" -f -
+	(
+		echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING})"
+		helm template controlplane-test "$CHART_DIR" \
+			--set clusterName="$ctx" \
+			--set namespacePrefix="$NS" \
+			--set namespaceCount="$NAMESPACE_COUNT" \
+			--set serviceCount="$SERVICE_COUNT" \
+			--set replicasPerService="$REPLICAS" \
+			--set sidecarScoping="$SIDECAR_SCOPING" \
+			| "${apply[@]}" --context="$ctx" -f - \
+			|| { echo "error: apply failed on $ctx" >&2; exit 1; }
+	) &
+	APPLY_PIDS+=($!)
+done
+for pid in "${APPLY_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed the controlplane-test apply"
 done
 
 if ((DRY_RUN)); then
@@ -221,17 +232,26 @@ fi
 # Wait per-namespace using a label selector — one kubectl call covers every
 # dummy-svc-* Deployment in that namespace, regardless of count. Much faster
 # than per-Deployment loops, and survives missing-name races during rollout.
+# O8 item 3: parallelize the per-context readiness wait (the per-namespace waits
+# stay serial within each context's subshell). Setup-only, fidelity-neutral.
 echo "Waiting for dummy deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
+WAIT_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	echo "  Waiting on context $ctx..."
-	for svc_ns in "${NAMESPACES[@]}"; do
-		"${KUBECTL[@]}" --context="$ctx" -n "$svc_ns" wait \
-			--for=condition=Available deployment \
-			-l app.kubernetes.io/instance=controlplane-test \
-			--timeout="${WAIT_TIMEOUT}s" \
-			|| die "deployments in namespace $svc_ns on $ctx not Available within ${WAIT_TIMEOUT}s"
-	done
-	echo "  All deployments ready on $ctx."
+	(
+		echo "  Waiting on context $ctx..."
+		for svc_ns in "${NAMESPACES[@]}"; do
+			"${KUBECTL[@]}" --context="$ctx" -n "$svc_ns" wait \
+				--for=condition=Available deployment \
+				-l app.kubernetes.io/instance=controlplane-test \
+				--timeout="${WAIT_TIMEOUT}s" \
+				|| { echo "error: deployments in namespace $svc_ns on $ctx not Available within ${WAIT_TIMEOUT}s" >&2; exit 1; }
+		done
+		echo "  All deployments ready on $ctx."
+	) &
+	WAIT_PIDS+=($!)
+done
+for pid in "${WAIT_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 
 # Verify Sidecar CRs landed when scoping is enabled.

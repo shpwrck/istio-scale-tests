@@ -103,14 +103,25 @@ apply=("${KUBECTL[@]}" apply)
 
 CHART_DIR="${ROOT}/tests/churn/chart"
 
+# O8 item 2(b): apply each context's chart concurrently — setup-only, disjoint
+# contexts, fidelity-neutral. A non-zero exit in ANY context fails the join below,
+# preserving the original `set -e` abort semantics.
+APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	echo "Setting up churn-test on context $ctx (${DEPLOYMENT_COUNT} deployments × ${BASE_REPLICAS} replicas)"
-	helm template churn-test "$CHART_DIR" \
-		--set clusterName="$ctx" \
-		--set namespace="$NS" \
-		--set deploymentCount="$DEPLOYMENT_COUNT" \
-		--set baseReplicas="$BASE_REPLICAS" \
-		| "${apply[@]}" --context="$ctx" -f -
+	(
+		echo "Setting up churn-test on context $ctx (${DEPLOYMENT_COUNT} deployments × ${BASE_REPLICAS} replicas)"
+		helm template churn-test "$CHART_DIR" \
+			--set clusterName="$ctx" \
+			--set namespace="$NS" \
+			--set deploymentCount="$DEPLOYMENT_COUNT" \
+			--set baseReplicas="$BASE_REPLICAS" \
+			| "${apply[@]}" --context="$ctx" -f - \
+			|| { echo "error: apply failed on $ctx" >&2; exit 1; }
+	) &
+	APPLY_PIDS+=($!)
+done
+for pid in "${APPLY_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed the churn-test apply"
 done
 
 if ((DRY_RUN)); then
@@ -118,16 +129,26 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
+# O8 item 2(a): one label-selector wait per context (the chart stamps
+# app.kubernetes.io/instance=churn-test on BOTH the churn-targets AND the
+# churn-watcher, so one selector covers all), parallelized across contexts. Same
+# readiness gate as the old per-deployment loop; setup-only, fidelity-neutral.
 echo "Waiting for deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
+WAIT_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	echo "  Waiting on context $ctx..."
-	for ((i = 0; i < DEPLOYMENT_COUNT; i++)); do
-		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/churn-target-${i} \
-			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "churn-target-${i} not ready on $ctx"
-	done
-	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/churn-watcher \
-		--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "churn-watcher not ready on $ctx"
-	echo "  All deployments ready on $ctx."
+	(
+		echo "  Waiting on context $ctx..."
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait \
+			--for=condition=Available deployment \
+			-l app.kubernetes.io/instance=churn-test \
+			--timeout="${WAIT_TIMEOUT}s" \
+			|| { echo "error: deployments not ready on $ctx" >&2; exit 1; }
+		echo "  All deployments ready on $ctx."
+	) &
+	WAIT_PIDS+=($!)
+done
+for pid in "${WAIT_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 
 echo "Setup complete. ${DEPLOYMENT_COUNT} churn targets + watcher on: ${CONTEXTS[*]}"

@@ -114,16 +114,29 @@ if (( ${#ALL_CTXS[@]} > 10 )); then
 	echo "warn: ${#ALL_CTXS[@]} clusters creates ~$(( ${#ALL_CTXS[@]} * ${#ALL_CTXS[@]} )) Services (N² scaling); expect slower setup and higher istiod memory" >&2
 fi
 
+# O8 item 4: apply the fortio server to every context concurrently — setup-only,
+# disjoint contexts, fidelity-neutral. CRITICAL ORDERING (preserved): apply servers
+# to ALL contexts, JOIN (wait all), THEN apply role=both on the source. The
+# role=both render on the source supersedes its server-only render, so the both-apply
+# must not race the server batch.
 echo "Deploying fortio server on all clusters (image tag: ${FORTIO_TAG})..."
+APPLY_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do
-	echo "  Server on $ctx"
-	helm template dataplane-test "$CHART_DIR" \
-		--set clusterName="$ctx" \
-		--set namespace="$NS" \
-		--set role=server \
-		--set image.tag="$FORTIO_TAG" \
-		"${ALL_CN_SETS[@]}" \
-		| "${apply[@]}" --context="$ctx" -f -
+	(
+		echo "  Server on $ctx"
+		helm template dataplane-test "$CHART_DIR" \
+			--set clusterName="$ctx" \
+			--set namespace="$NS" \
+			--set role=server \
+			--set image.tag="$FORTIO_TAG" \
+			"${ALL_CN_SETS[@]}" \
+			| "${apply[@]}" --context="$ctx" -f - \
+			|| { echo "error: server apply failed on $ctx" >&2; exit 1; }
+	) &
+	APPLY_PIDS+=($!)
+done
+for pid in "${APPLY_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed the fortio-server apply"
 done
 
 echo "Deploying fortio client on source cluster $SOURCE_CTX..."
@@ -140,13 +153,22 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
+# O8 item 4: parallelize the per-context readiness wait. Setup-only, fidelity-neutral.
 echo "Waiting for pods to be ready (timeout: ${WAIT_TIMEOUT}s)..."
+WAIT_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do
-	echo "  Waiting for deployments on $ctx..."
-	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait \
-		--for=condition=Available deployment \
-		-l app.kubernetes.io/instance=dataplane-test \
-		--timeout="${WAIT_TIMEOUT}s" || die "deployment(s) not ready on $ctx"
+	(
+		echo "  Waiting for deployments on $ctx..."
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait \
+			--for=condition=Available deployment \
+			-l app.kubernetes.io/instance=dataplane-test \
+			--timeout="${WAIT_TIMEOUT}s" \
+			|| { echo "error: deployment(s) not ready on $ctx" >&2; exit 1; }
+	) &
+	WAIT_PIDS+=($!)
+done
+for pid in "${WAIT_PIDS[@]}"; do
+	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 
 echo "Setup complete. Server on: ${ALL_CTXS[*]}  Client on: $SOURCE_CTX"
