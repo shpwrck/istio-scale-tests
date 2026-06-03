@@ -58,7 +58,16 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# TSV schema (20 columns):
+# Backwards-compat: warn when a file predates the 21-column schema (the
+# convergence_remote_eds_ms split). Such rows are skipped by the NF>=21 awk guards
+# below; surface that so a silently-empty aggregation is not mistaken for "no data".
+for f in "${TSV_FILES[@]}"; do
+	if awk -F'\t' '!/^#/ && !/^run_id/ && NF>0 && NF<21 { legacy=1 } END { exit (legacy ? 0 : 1) }' "$f"; then
+		echo "warning: $f has <21 data columns (pre-EDS-split schema); those rows are skipped" >&2
+	fi
+done
+
+# TSV schema (21 columns):
 #  $1  run_id
 #  $2  mesh_size
 #  $3  churn_intensity
@@ -67,18 +76,23 @@ fi
 #  $6  iteration
 #  $7  t0_epoch_ns
 #  $8  convergence_local_ms
-#  $9  convergence_remote_ms
-#  $10 source_push_triggers_delta
-#  $11 remote_push_triggers_delta
-#  $12 source_xds_pushes_delta
-#  $13 remote_xds_pushes_delta
-#  $14 source_queue_time_p99_ms
-#  $15 remote_queue_time_p99_ms
-#  $16 source_connected_proxies
-#  $17 remote_connected_proxies
-#  $18 source_push_time_p99_ms
-#  $19 remote_push_time_p99_ms
-#  $20 status
+#  $9  remote_endpoint_reachable_ms   (data-plane: Envoy health_flags::healthy; incl pod/sidecar lifecycle)
+#  $10 convergence_remote_eds_ms      (control-plane only: remote istiod EDS-push crossing; pod-boot-free)
+#  $11 source_push_triggers_delta
+#  $12 remote_push_triggers_delta
+#  $13 source_xds_pushes_delta
+#  $14 remote_xds_pushes_delta
+#  $15 source_queue_time_p99_ms
+#  $16 remote_queue_time_p99_ms
+#  $17 source_connected_proxies
+#  $18 remote_connected_proxies
+#  $19 source_push_time_p99_ms
+#  $20 remote_push_time_p99_ms
+#  $21 status
+#
+# Column count was bumped 20 -> 21 when convergence_remote_eds_ms was split out of
+# the old convergence_remote_ms (which is now remote_endpoint_reachable_ms, $9).
+# Pre-split TSVs (20 cols) are skipped by the NF>=21 guard with a stderr warning.
 
 report_text() {
 	echo "=== Churn Convergence Results ==="
@@ -89,25 +103,26 @@ report_text() {
 	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE
 	# rows carry N/A or undercounted istiod-side deltas and must NOT leak into
 	# column means. Per-column "N/A"!= guards also stop "N/A"+0 -> 0 fabrication.
-	!/^#/ && !/^run_id/ && NF>=20 && $20=="OK" {
+	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
 		if($8!="TIMEOUT" && $8!="N/A") { cl[key, ++cl_n[key]] = $8+0 }
 		if($9!="TIMEOUT" && $9!="N/A") { cr[key, ++cr_n[key]] = $9+0 }
-		if($10!="N/A") { spt[key, ++spt_n[key]] = $10+0 }
-		if($11!="N/A") { rpt[key, ++rpt_n[key]] = $11+0 }
-		if($12!="N/A") { sxp[key, ++sxp_n[key]] = $12+0 }
-		if($13!="N/A") { rxp[key, ++rxp_n[key]] = $13+0 }
-		if($14!="N/A" && $14!="overflow") { sqq[key, ++sqq_n[key]] = $14+0 }
-		if($15!="N/A" && $15!="overflow") { rqq[key, ++rqq_n[key]] = $15+0 }
-		if($16!="N/A") { scp[key, ++scp_n[key]] = $16+0 }
-		if($17!="N/A") { rcp[key, ++rcp_n[key]] = $17+0 }
-		if($18!="N/A" && $18!="overflow") { spt2[key, ++spt2_n[key]] = $18+0 }
-		if($19!="N/A" && $19!="overflow") { rpt2[key, ++rpt2_n[key]] = $19+0 }
-		if($10!="N/A" && $10+0 > 0 && $12!="N/A") { amp[key, ++amp_n[key]] = ($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10 }
+		if($10!="TIMEOUT" && $10!="N/A") { cre[key, ++cre_n[key]] = $10+0 }
+		if($11!="N/A") { spt[key, ++spt_n[key]] = $11+0 }
+		if($12!="N/A") { rpt[key, ++rpt_n[key]] = $12+0 }
+		if($13!="N/A") { sxp[key, ++sxp_n[key]] = $13+0 }
+		if($14!="N/A") { rxp[key, ++rxp_n[key]] = $14+0 }
+		if($15!="N/A" && $15!="overflow") { sqq[key, ++sqq_n[key]] = $15+0 }
+		if($16!="N/A" && $16!="overflow") { rqq[key, ++rqq_n[key]] = $16+0 }
+		if($17!="N/A") { scp[key, ++scp_n[key]] = $17+0 }
+		if($18!="N/A") { rcp[key, ++rcp_n[key]] = $18+0 }
+		if($19!="N/A" && $19!="overflow") { spt2[key, ++spt2_n[key]] = $19+0 }
+		if($20!="N/A" && $20!="overflow") { rpt2[key, ++rpt2_n[key]] = $20+0 }
+		if($11!="N/A" && $11+0 > 0 && $13!="N/A") { amp[key, ++amp_n[key]] = ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11 }
 	}
 	# Track totals/valids per cell so we can surface the filter rate.
-	!/^#/ && !/^run_id/ && NF>=20 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($20=="OK") n_valid[tot_key]++ }
+	!/^#/ && !/^run_id/ && NF>=21 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($21=="OK") n_valid[tot_key]++ }
 	function sort_vals(arr, key, n,    i, j, tmp) {
 		for(i=2;i<=n;i++){tmp=arr[key,i];j=i-1;while(j>=1&&arr[key,j]>tmp){arr[key,j+1]=arr[key,j];j--}arr[key,j+1]=tmp}
 	}
@@ -158,7 +173,8 @@ report_text() {
 			printf "--- mesh_size=%s  churn_intensity=%s  scale=%s->%s ---\n", p[1], p[2], p[3], p[4]
 			printf "  Rows (valid/total):            %d/%d\n", n_valid[key]+0, n_total[key]+0
 			printf "  Local convergence (ms):        %s\n", stats(cl, key, cl_n[key])
-			printf "  Remote convergence (ms):       %s\n", stats(cr, key, cr_n[key])
+			printf "  Remote endpoint reachable (ms): %s\n", stats(cr, key, cr_n[key])
+			printf "  Remote EDS converged (ms):     %s\n", stats(cre, key, cre_n[key])
 			printf "  Source push triggers:          %s\n", stats(spt, key, spt_n[key])
 			printf "  Remote push triggers:          %s\n", stats(rpt, key, rpt_n[key])
 			printf "  Source xDS pushes:             %s\n", stats(sxp, key, sxp_n[key])
@@ -179,24 +195,25 @@ report_csv() {
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# Only OK rows feed numeric aggregation (see report_text for rationale).
-	!/^#/ && !/^run_id/ && NF>=20 && $20=="OK" {
+	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
 		if($8!="TIMEOUT" && $8!="N/A") { cl[key, ++cl_n[key]] = $8+0 }
 		if($9!="TIMEOUT" && $9!="N/A") { cr[key, ++cr_n[key]] = $9+0 }
-		if($10!="N/A") { spt[key, ++spt_n[key]] = $10+0 }
-		if($11!="N/A") { rpt[key, ++rpt_n[key]] = $11+0 }
-		if($12!="N/A") { sxp[key, ++sxp_n[key]] = $12+0 }
-		if($13!="N/A") { rxp[key, ++rxp_n[key]] = $13+0 }
-		if($14!="N/A" && $14!="overflow") { sqq[key, ++sqq_n[key]] = $14+0 }
-		if($15!="N/A" && $15!="overflow") { rqq[key, ++rqq_n[key]] = $15+0 }
-		if($16!="N/A") { scp[key, ++scp_n[key]] = $16+0 }
-		if($17!="N/A") { rcp[key, ++rcp_n[key]] = $17+0 }
-		if($18!="N/A" && $18!="overflow") { spt2[key, ++spt2_n[key]] = $18+0 }
-		if($19!="N/A" && $19!="overflow") { rpt2[key, ++rpt2_n[key]] = $19+0 }
-		if($10!="N/A" && $10+0 > 0 && $12!="N/A") { amp[key, ++amp_n[key]] = ($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10 }
+		if($10!="TIMEOUT" && $10!="N/A") { cre[key, ++cre_n[key]] = $10+0 }
+		if($11!="N/A") { spt[key, ++spt_n[key]] = $11+0 }
+		if($12!="N/A") { rpt[key, ++rpt_n[key]] = $12+0 }
+		if($13!="N/A") { sxp[key, ++sxp_n[key]] = $13+0 }
+		if($14!="N/A") { rxp[key, ++rxp_n[key]] = $14+0 }
+		if($15!="N/A" && $15!="overflow") { sqq[key, ++sqq_n[key]] = $15+0 }
+		if($16!="N/A" && $16!="overflow") { rqq[key, ++rqq_n[key]] = $16+0 }
+		if($17!="N/A") { scp[key, ++scp_n[key]] = $17+0 }
+		if($18!="N/A") { rcp[key, ++rcp_n[key]] = $18+0 }
+		if($19!="N/A" && $19!="overflow") { spt2[key, ++spt2_n[key]] = $19+0 }
+		if($20!="N/A" && $20!="overflow") { rpt2[key, ++rpt2_n[key]] = $20+0 }
+		if($11!="N/A" && $11+0 > 0 && $13!="N/A") { amp[key, ++amp_n[key]] = ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11 }
 	}
-	!/^#/ && !/^run_id/ && NF>=20 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($20=="OK") n_valid[tot_key]++ }
+	!/^#/ && !/^run_id/ && NF>=21 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($21=="OK") n_valid[tot_key]++ }
 	function sort_vals(arr, key, n,    i,j,tmp) {
 		for(i=2;i<=n;i++){tmp=arr[key,i];j=i-1;while(j>=1&&arr[key,j]>tmp){arr[key,j+1]=arr[key,j];j--}arr[key,j+1]=tmp}
 	}
@@ -228,7 +245,8 @@ report_csv() {
 			# Row-validity census: n=n_valid, max=n_total so consumers see both.
 			printf "%s,%s,%s,%s,%s,%d,%d,%d,%d\n", p[1], p[2], p[3], p[4], "rows_valid_of_total", n_valid[key]+0, n_valid[key]+0, n_total[key]+0, n_valid[key]+0
 			csv_stats(p[1], p[2], p[3], p[4], "convergence_local_ms", cl, key, cl_n[key])
-			csv_stats(p[1], p[2], p[3], p[4], "convergence_remote_ms", cr, key, cr_n[key])
+			csv_stats(p[1], p[2], p[3], p[4], "remote_endpoint_reachable_ms", cr, key, cr_n[key])
+			csv_stats(p[1], p[2], p[3], p[4], "convergence_remote_eds_ms", cre, key, cre_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "source_push_triggers_delta", spt, key, spt_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "remote_push_triggers_delta", rpt, key, rpt_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "source_xds_pushes_delta", sxp, key, sxp_n[key])
@@ -253,7 +271,7 @@ report_markdown() {
 	# Extract sweep axes from TSV data.
 	local axes
 	axes=$(cat "${TSV_FILES[@]}" | awk -F'\t' '
-	!/^#/ && !/^run_id/ && NF>=16 {
+	!/^#/ && !/^run_id/ && NF>=21 {
 		ms[$2]=1; ci[$3]=1; sc[$4"->"$5]=1
 	}
 	END {
@@ -286,30 +304,31 @@ report_markdown() {
 		echo "- \`$(basename "$f")\`"
 	done
 	echo ""
-	echo "| mesh | churn | scale | n_valid | n_total | local_avg (ms) | remote_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 | rmt_queue_p99 | src_proxies | rmt_proxies | src_push_p99 | rmt_push_p99 | amplification |"
-	echo "|------|-------|-------|---------|---------|----------------|-----------------|--------------|--------------|------------|------------|---------------|---------------|-------------|-------------|--------------|--------------|---------------|"
+	echo "| mesh | churn | scale | n_valid | n_total | local_avg (ms) | remote_reach_avg (ms) | remote_eds_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 | rmt_queue_p99 | src_proxies | rmt_proxies | src_push_p99 | rmt_push_p99 | amplification |"
+	echo "|------|-------|-------|---------|---------|----------------|-----------------------|---------------------|--------------|--------------|------------|------------|---------------|---------------|-------------|-------------|--------------|--------------|---------------|"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# n_total counts EVERY row for the cell; numeric aggregation uses ONLY OK rows
 	# (POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE carry N/A or undercounted deltas).
-	!/^#/ && !/^run_id/ && NF>=20 {
+	!/^#/ && !/^run_id/ && NF>=21 {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
 		n_total[key]++
-		if($20!="OK") next
+		if($21!="OK") next
 		n_valid[key]++
 		if($8!="TIMEOUT" && $8!="N/A") { cl_sum[key]+=$8+0; cl_n[key]++ }
 		if($9!="TIMEOUT" && $9!="N/A") { cr_sum[key]+=$9+0; cr_n[key]++ }
-		if($10!="N/A") { spt_sum[key]+=$10+0; spt_n[key]++ }
-		if($11!="N/A") { rpt_sum[key]+=$11+0; rpt_n[key]++ }
-		if($12!="N/A") { sxp_sum[key]+=$12+0; sxp_n[key]++ }
-		if($13!="N/A") { rxp_sum[key]+=$13+0; rxp_n[key]++ }
-		if($14!="N/A" && $14!="overflow") { sqq_sum[key]+=$14+0; sqq_n[key]++ }
-		if($15!="N/A" && $15!="overflow") { rqq_sum[key]+=$15+0; rqq_n[key]++ }
-		if($16!="N/A") { scp_sum[key]+=$16+0; scp_n[key]++ }
-		if($17!="N/A") { rcp_sum[key]+=$17+0; rcp_n[key]++ }
-		if($18!="N/A" && $18!="overflow") { spt2_sum[key]+=$18+0; spt2_n[key]++ }
-		if($19!="N/A" && $19!="overflow") { rpt2_sum[key]+=$19+0; rpt2_n[key]++ }
-		if($10!="N/A" && $10+0 > 0 && $12!="N/A") { amp_sum[key]+=($12+0 + ($13=="N/A" ? 0 : $13+0)) / $10; amp_n[key]++ }
+		if($10!="TIMEOUT" && $10!="N/A") { cre_sum[key]+=$10+0; cre_n[key]++ }
+		if($11!="N/A") { spt_sum[key]+=$11+0; spt_n[key]++ }
+		if($12!="N/A") { rpt_sum[key]+=$12+0; rpt_n[key]++ }
+		if($13!="N/A") { sxp_sum[key]+=$13+0; sxp_n[key]++ }
+		if($14!="N/A") { rxp_sum[key]+=$14+0; rxp_n[key]++ }
+		if($15!="N/A" && $15!="overflow") { sqq_sum[key]+=$15+0; sqq_n[key]++ }
+		if($16!="N/A" && $16!="overflow") { rqq_sum[key]+=$16+0; rqq_n[key]++ }
+		if($17!="N/A") { scp_sum[key]+=$17+0; scp_n[key]++ }
+		if($18!="N/A") { rcp_sum[key]+=$18+0; rcp_n[key]++ }
+		if($19!="N/A" && $19!="overflow") { spt2_sum[key]+=$19+0; spt2_n[key]++ }
+		if($20!="N/A" && $20!="overflow") { rpt2_sum[key]+=$20+0; rpt2_n[key]++ }
+		if($11!="N/A" && $11+0 > 0 && $13!="N/A") { amp_sum[key]+=($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11; amp_n[key]++ }
 	}
 	function avg_or_na(s, n) { return n>0 ? sprintf("%.0f", s/n) : "N/A" }
 	function avg_ratio(s, n) { return n>0 ? sprintf("%.1f", s/n) : "N/A" }
@@ -341,10 +360,11 @@ report_markdown() {
 		for(k=1; k<=n_keys; k++) {
 			key = sorted_keys[k]; split(key, p, "\t")
 			if ((n_valid[key]+0) < (n_total[key]+0)) any_filtered = 1
-			printf "| %s | %s | %s->%s | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+			printf "| %s | %s | %s->%s | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
 				p[1], p[2], p[3], p[4], n_valid[key]+0, n_total[key]+0, \
 				avg_or_na(cl_sum[key], cl_n[key]), \
 				avg_or_na(cr_sum[key], cr_n[key]), \
+				avg_or_na(cre_sum[key], cre_n[key]), \
 				avg_or_na(spt_sum[key], spt_n[key]), \
 				avg_or_na(rpt_sum[key], rpt_n[key]), \
 				avg_or_na(sxp_sum[key], sxp_n[key]), \

@@ -7,7 +7,8 @@ Measure control-plane convergence time under simultaneous endpoint churn across 
 | Metric | How |
 |--------|-----|
 | Local convergence time | Time until all local proxies are SYNCED after scaling (poll istiod `/debug/syncz`). Cross-check with `source_push_triggers_delta` — a zero value means istiod hadn't processed the change yet. |
-| Remote convergence time | Time until remote sidecars see at least 1 new endpoint per deployment (poll watcher Envoy `/clusters`). Threshold = `baseline + deployment_count`, confirming EDS propagation for all services without gating on full pod rollout time. |
+| Remote endpoint reachable (`remote_endpoint_reachable_ms`) | **Data-plane reachability.** Time until remote sidecars report at least 1 new `health_flags::healthy` endpoint per deployment (poll watcher Envoy `/clusters`; threshold = `baseline + deployment_count`). `health_flags::healthy` requires the source pod to be **Ready** (scheduled + sidecar started), so this is a legitimate end-to-end churn-lifecycle number that **includes** pod scheduling and sidecar startup — not a pure control-plane signal. Analogous to propagation **P3**. (Was `convergence_remote_ms` before the EDS split.) |
+| Remote EDS converged (`convergence_remote_eds_ms`) | **Control-plane only.** Time to the **first** remote EDS push after t0 (`pilot_xds_pushes{type="eds"}` delta `>= 1`, summed across the remote's istiod pods). **Pod-boot-free** — answers "how fast does the remote control plane learn the churn and push EDS", the true cross-cluster xDS scaling signal. This times the first cross-cluster EDS push, **not** per-deployment fan-in: istiod debounces/coalesces concurrent scales into fewer than `deployment_count` pushes, so a per-deployment threshold would spuriously TIMEOUT a converged mesh. The counter is mesh-wide, so it does not disambiguate a concurrent unrelated EDS push (acceptable — in a churn run the scale event is the dominant in-window activity). Analogous to propagation **P2**. Churn scales replicas of existing deployments (no Service is created/deleted), so unlike propagation P2 there is **no** clean `pilot_services` registry-delta cross-check available. |
 | Push triggers delta (source) | `pilot_push_triggers` counter delta on the source cluster's istiod during the churn event |
 | Push triggers delta (remote) | `pilot_push_triggers` counter delta summed across all remote istiods |
 | xDS pushes delta (source) | `pilot_xds_pushes` counter delta on the source istiod (compare with triggers for coalescing ratio) |
@@ -67,8 +68,18 @@ After each scale-down, the probe waits for all proxies to reach SYNCED (via sync
 TSV files in per-sweep subdirectories under `tests/churn/results/` (gitignored):
 
 ```
-run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  convergence_remote_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  source_connected_proxies  remote_connected_proxies  source_push_time_p99_ms  remote_push_time_p99_ms  status
+run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  remote_endpoint_reachable_ms  convergence_remote_eds_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  source_connected_proxies  remote_connected_proxies  source_push_time_p99_ms  remote_push_time_p99_ms  status
 ```
+
+The remote convergence signal is **split into two columns** (mirroring the
+propagation suite's P2/P3 distinction):
+`remote_endpoint_reachable_ms` is the data-plane reachability time (Envoy
+`health_flags::healthy`, includes pod scheduling + sidecar start), and
+`convergence_remote_eds_ms` is the control-plane-only EDS-push time
+(time to the first `pilot_xds_pushes{type="eds"}` push after t0, delta `>= 1`,
+pod-boot-free). The column count is 21;
+the report (`004`) requires `NF >= 21` and prints a stderr warning when it
+encounters a pre-split (20-column) TSV, whose rows it skips.
 
 The preamble (`#`-comment lines above the header) records run metadata including
 `ISTIOD_REPLICAS=<n>` — the number of Running source istiod pods discovered at
@@ -96,9 +107,15 @@ aggregates: `pilot_xds` (connected proxies) and the counter deltas
 `pilot_proxy_queue_time` / `pilot_xds_push_time` histogram buckets are
 **bucket-summed** across replicas before the delta/quantile; `/debug/syncz` is
 fanned out across all source pods (converged only when every replica reports 0
-stale). Restart detection uses a per-pod `process_start_time_seconds` signature
-(any pod's start advancing OR a pod-set change → `POISONED_RESTART`). The probe
-requires only `>= 1` Running istiod pod per context.
+stale); the `convergence_remote_eds_ms` poller fans out the
+`pilot_xds_pushes{type="eds"}` counter across each remote's istiod pods (summed)
+each tick (it reuses a fixed scrape prefix so each tick's per-pod `/metrics`
+bodies overwrite the prior tick's — disk stays bounded across the poll window).
+Restart detection uses a per-pod
+`process_start_time_seconds` signature (any pod's start advancing OR a pod-set
+change → `POISONED_RESTART`); a `POISONED_RESTART` row emits `N/A` for
+`convergence_remote_eds_ms` too (the remote EDS counter reset on restart). The
+probe requires only `>= 1` Running istiod pod per context.
 
 ## Cleanup
 
