@@ -27,6 +27,11 @@ DRY_RUN=0
 CLEANUP=0
 WAIT_TIMEOUT=300
 WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
+# R3-2: pre-warmed backer image pin (O1). Sourced from config/versions.env; the
+# default guard keeps it bound under `set -u` if the pin is ever removed there.
+# Wired into the helm template below via --set so the chart values.yaml literal is
+# not the sole effective pin (mirrors tests/dataplane/001 --set fortioImage.tag).
+: "${HTTP_ECHO_VERSION:=1.0}"
 
 
 usage() {
@@ -37,7 +42,8 @@ Usage: $(basename "$0") [options]
   --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --dry-run             Pass --dry-run=client to oc apply.
   --cleanup             Remove propagation-test namespace from all contexts.
-  --wait-timeout N      Seconds to wait for watcher pods (default: 300).
+  --wait-timeout N      Seconds to wait for watcher pods AND the pre-warmed backer
+                        pod (propagation-canary) to become Ready (default: 300).
   -h, --help            Show this help.
 
 Environment:
@@ -121,10 +127,19 @@ CHART_DIR="${ROOT}/tests/propagation/chart"
 
 for ctx in "${CONTEXTS[@]}"; do
 	echo "Setting up propagation-test on context $ctx"
+	# O1: render the pre-warmed backer Deployment + canary Service alongside the
+	# watcher. backer.enabled=true warms the http-echo pod (image pre-pulled,
+	# sidecar up, readinessProbe) and creates the canary Service; backer.active
+	# stays false so the Service has ZERO endpoints until the probe flips the
+	# active label at t0. The render is uniform across contexts — the source
+	# cluster's backer is the one the probe flips; on remotes the Service simply
+	# stays at zero endpoints (harmless).
 	helm template propagation-test "$CHART_DIR" \
 		--set clusterName="$ctx" \
 		--set namespace="$NS" \
-		--set canary.enabled=false \
+		--set backer.enabled=true \
+		--set backer.active=false \
+		--set backer.image.tag="$HTTP_ECHO_VERSION" \
 		--set watcher.replicaCount="$WATCHER_REPLICAS" \
 		| "${apply[@]}" --context="$ctx" -f -
 done
@@ -134,12 +149,16 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-echo "Waiting for watcher pods to be ready (timeout: ${WAIT_TIMEOUT}s)..."
+echo "Waiting for watcher and backer pods to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 for ctx in "${CONTEXTS[@]}"; do
 	echo "  Waiting on context $ctx..."
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/propagation-watcher \
 		--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "watcher not ready on $ctx"
-	echo "  Watcher ready on $ctx."
+	# O1: the backer must be Available BEFORE any probe iteration so the t0 label
+	# flip is a pure config push with no pod boot inside P3's window.
+	"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/propagation-canary \
+		--for=condition=Available --timeout="${WAIT_TIMEOUT}s" || die "backer not ready on $ctx"
+	echo "  Watcher + backer ready on $ctx."
 done
 
-echo "Setup complete. Watcher pods running on: ${CONTEXTS[*]}"
+echo "Setup complete. Watcher + pre-warmed backer pods running on: ${CONTEXTS[*]}"

@@ -1,4 +1,8 @@
-{{- if .Values.canary.enabled }}
+{{- if .Values.backer.enabled }}
+# Pre-warmed backer Deployment (O1). Created Ready in 001-setup with its sidecar
+# up and image pre-pulled; NOT selected by the Service until the active-flip label
+# is stamped on the running pod at t0. The probe flips the label rather than
+# creating a fresh workload, so P3 isolates xDS/EDS propagation from pod boot.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,8 +10,8 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "propagation-test.canary.labels" . | nindent 4 }}
-    {{- if .Values.canary.runId }}
-    propagation-run-id: {{ .Values.canary.runId | quote }}
+    {{- if .Values.backer.runId }}
+    propagation-run-id: {{ .Values.backer.runId | quote }}
     {{- end }}
 spec:
   replicas: 1
@@ -19,19 +23,32 @@ spec:
       labels:
         {{- include "propagation-test.canary.labels" . | nindent 8 }}
         sidecar.istio.io/inject: "true"
-        {{- if .Values.canary.runId }}
-        propagation-run-id: {{ .Values.canary.runId | quote }}
+        {{- if .Values.backer.active }}
+        {{- include "propagation-test.canary.activeSelectorLabels" . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.backer.runId }}
+        propagation-run-id: {{ .Values.backer.runId | quote }}
         {{- end }}
     spec:
       containers:
         - name: http-echo
-          image: {{ .Values.canary.image.repository }}:{{ .Values.canary.image.tag }}
+          image: {{ .Values.backer.image.repository }}:{{ .Values.backer.image.tag }}
+          imagePullPolicy: {{ .Values.backer.image.pullPolicy }}
           args:
             - -listen=:{{ .Values.service.port }}
             - -text={{ .Values.clusterName }}
           ports:
             - containerPort: {{ .Values.service.port }}
               protocol: TCP
+          readinessProbe:
+            # The backer must be genuinely Ready before t0 so the label flip is a
+            # pure config push (no pod boot in P3's window).
+            httpGet:
+              path: /
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
