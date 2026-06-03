@@ -37,7 +37,8 @@ Usage: $(basename "$0") [options]
   --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --dry-run             Pass --dry-run=client to oc apply.
   --cleanup             Remove propagation-test namespace from all contexts.
-  --wait-timeout N      Seconds to wait for watcher pods (default: 300).
+  --wait-timeout N      Seconds to wait for watcher pods AND the pre-warmed backer
+                        pod (propagation-canary) to become Ready (default: 300).
   -h, --help            Show this help.
 
 Environment:

@@ -56,7 +56,7 @@ Provide reproducible Istio scale testing across many dimensions — mesh size, w
 
 | Path | Use |
 | ---- | --- |
-| `config/versions.env` | Core version pins (`OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, `ACM_CHANNEL`, `GITOPS_OPERATOR_CHANNEL`), mesh identity (`MESH_ID`, `ACM_CLUSTER_SET`), and cluster contexts (`SETUP_CONTEXTS`). Sources `config/options.env` automatically. |
+| `config/versions.env` | Core version pins (`OPENSHIFT_VERSION`, `KUBERNETES_VERSION`, `ISTIO_VERSION`, `ACM_CHANNEL`, `GITOPS_OPERATOR_CHANNEL`), test workload image pins (`FORTIO_VERSION` → `tests/dataplane/chart`, `BUSYBOX_VERSION`, `HTTP_ECHO_VERSION` → `tests/propagation/chart` backer; keep the chart `values.yaml` tags in sync), mesh identity (`MESH_ID`, `ACM_CLUSTER_SET`), and cluster contexts (`SETUP_CONTEXTS`). Sources `config/options.env` automatically. |
 | `config/options.env` | Operational defaults: operator namespaces, GitOps config, mesh/logging defaults, AWS infra, and propagation/controlplane/dataplane test parameters. Sourced by `versions.env`; ACM/GitOps defaults are mirrored in `terraform/platform/variables.tf`. |
 | `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke (ApplicationSet wave 8). |
 | `charts/spoke-ossm/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke cluster with per-cluster clusterName, network, meshID (wave 21). |

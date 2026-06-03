@@ -7,8 +7,12 @@
 #   - restarted == unknown      (process_start_time_seconds missing — can't tell)
 #   - p1_overflow == 1          (samples landed in +Inf bucket; quantiles unsafe)
 #   - status != OK              (TIMEOUT_* or DRAIN_TIMEOUT — drain leak)
-# p2_ms values are also excluded when p2_dirty == 1 (EDS counter delta wasn't
-# matched by a pilot_services delta; could be unrelated endpoint churn).
+#   - scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 19; incoherent snapshot). Live
+#     runs already tag these SCRAPE_INCOMPLETE, but this fallback re-derives
+#     PRE-gate historical TSVs (status=OK with a high recorded skew) without a
+#     probe re-run. Override the ceiling via FANOUT_MAX_SKEW_MS (default 1000).
+# p2_ms values are also excluded when p2_dirty == 1 (EDS counter delta without a
+# confirmed healthy canary endpoint on the remote sidecar; could be unrelated churn).
 # Reports both n_total (rows considered) and n_valid (rows used).
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION,
@@ -321,7 +325,7 @@ format_preamble_json() {
 # in mawk (no gawk multi-dim required). The $-style dollars are awk fields, not bash.
 # shellcheck disable=SC2016
 AWK_AGG='
-BEGIN { FS = "\t"; SUBSEP = "\034" }
+BEGIN { FS = "\t"; SUBSEP = "\034"; if (MAXSKEW == "") MAXSKEW = 1000 }
 /^#/ { next }
 /^run_id/ { next }
 NF < 10 { next }
@@ -339,6 +343,8 @@ NF < 10 { next }
 	} else {
 		p2_dirty = "0"
 	}
+	# scrape_skew_ms (field 19) — present on fanout-era TSVs (NF>=19).
+	skew = (NF >= 19 && $19 ~ /^[0-9]+$/) ? ($19 + 0) : -1
 
 	n_total[ms]++
 	seen[ms] = 1
@@ -347,6 +353,12 @@ NF < 10 { next }
 	if (restarted == "1" || restarted == "unknown") next
 	if (overflow == "1") next
 	if (status != "" && status != "OK") next
+	# R2 reproducibility fallback: a row whose recorded scrape_skew_ms exceeds the
+	# current FANOUT_MAX_SKEW_MS is dropped here even if its status was written OK.
+	# Live runs already tag such rows SCRAPE_INCOMPLETE (caught above); this makes
+	# PRE-gate historical TSVs (status=OK, high skew in field 19) re-derivable
+	# without a probe re-run. -1 means "no skew recorded" (legacy NF<19) -> keep.
+	if (skew >= 0 && skew > MAXSKEW) next
 
 	n_valid[ms]++
 
@@ -417,7 +429,7 @@ report_endpoint_text() {
 	echo "Run metadata:"
 	format_preamble_text
 	echo ""
-	cat "${ENDPOINT_FILES[@]}" | awk "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
 	function stats_line(label, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
@@ -468,7 +480,7 @@ report_endpoint_csv() {
 	format_preamble_csv_header
 	echo ""
 	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms"
-	cat "${ENDPOINT_FILES[@]}" | awk "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
 	function csv_line(ms, phase, src, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "%s,%s,%d,%d,,,,,,\n", ms, phase, n_total[ms], 0
@@ -508,7 +520,7 @@ report_endpoint_markdown() {
 		echo "- \`$(basename "$f")\`"
 	done
 	echo ""
-	cat "${ENDPOINT_FILES[@]}" | awk "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
 	function md_row(phase, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, n_total[ms], 0
@@ -589,7 +601,7 @@ report_endpoint_json() {
 	printf '{"metadata":'
 	format_preamble_json
 	printf ',"rows":'
-	cat "${ENDPOINT_FILES[@]}" | awk "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
 	function json_obj(ms, phase, src, n,    arr, sum, i) {
 		if (n == 0) {
 			return sprintf("{\"mesh_size\":\"%s\",\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0}", ms, phase, n_total[ms])

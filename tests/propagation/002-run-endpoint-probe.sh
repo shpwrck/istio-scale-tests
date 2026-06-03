@@ -105,7 +105,9 @@ Usage: $(basename "$0") [options]
   --settle-sec SEC          Settle gap between iterations after drain (default: \$PROPAGATION_SETTLE_SEC=$SETTLE_SEC).
   --output-dir DIR          Results directory (default: tests/propagation/results).
   --tsv                     Also write per-iteration rows to a TSV file.
-  --dry-run                 Render and print canary manifests without applying.
+  --dry-run                 Print the t0 backer active-label flip + drain commands
+                            and render the backer Deployment / canary Service
+                            (created by 001-setup) without touching a cluster.
   -h, --help                Show this help.
 
 Measurement methodology:
@@ -115,10 +117,14 @@ Measurement methodology:
                          Emits p1_ms (wall-clock to converged-count) plus
                          delta-window p50/p99 (p1_conv_p50_ms / p1_conv_p99_ms).
                          Min-sample guard: p50 N/A if total < 10; p99 N/A if total < 30.
-  P2 (remote discovery) — pilot_xds_pushes{type="eds"} counter delta AND
-                          pilot_services gauge delta. EDS-only bump (with no
-                          services delta) is flagged via p2_dirty=1 because it
-                          could be unrelated endpoint churn.
+  P2 (remote discovery) — pilot_xds_pushes{type="eds"} counter delta on the
+                          remote istiod. Under the O1 label-flip topology the
+                          canary Service persists across iterations (t0 adds an
+                          endpoint, not a Service), so the EDS bump is called
+                          "clean" iff our canary became health_flags::healthy on
+                          this remote's watcher sidecar (the same signal P3 uses);
+                          an EDS bump WITHOUT that confirmation is flagged
+                          p2_dirty=1 as possible unrelated endpoint churn.
   P3 (remote sidecar)   — watcher Envoy /clusters, rate-limited; the only
                           available data-plane-side signal without a custom
                           xDS client.
@@ -363,6 +369,11 @@ if ((WRITE_TSV)); then
 		echo "# POLL_INTERVAL_S=${POLL_INTERVAL_S}"
 		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		# PL2 (R2-4): both are result-affecting. FANOUT_MAX_SKEW_MS decides which
+		# rows are tagged SCRAPE_INCOMPLETE (dropped by 005); METRICS_TIMEOUT bounds
+		# the per-curl wait and therefore the worst-case skew the gate can measure.
+		echo "# FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}"
+		echo "# FANOUT_METRICS_TIMEOUT=${METRICS_TIMEOUT}"
 		echo "# DATE=$(date -u -Iseconds)"
 	} > "$TSV_FILE"
 	# Columns (tab-separated). Old p1/p2/p3 cols preserved for back-compat with
@@ -832,17 +843,33 @@ normalize_proxy_count() {
 }
 
 # --- P2 polling: EDS push counter delta on a remote istiod -----------------
-# B1: a nonzero EDS delta alone is ambiguous — unrelated endpoint churn from
-# other workloads on the remote cluster also bumps the counter. We additionally
-# require pilot_services to have increased by >= 1 to call P2 "clean".
-# When EDS bumped but services did NOT increase, we still record the timestamp
-# (so legacy p2_ms remains comparable) but flag the iteration via a separate
-# result line "DIRTY" so the caller can set p2_dirty=1 in the TSV.
+# B1 (O1 label-flip topology): a nonzero EDS delta alone is ambiguous — unrelated
+# endpoint churn from other workloads on the remote cluster also bumps the counter.
+# We need a companion signal that says "this EDS bump is OUR canary, not churn".
+#
+# The pre-O1 probe required a pilot_services gauge delta >= 1 (t0 CREATED a new
+# canary Service, so the remote registry gained a Service). Under O1 the canary
+# Service is created ONCE in 001-setup and PERSISTS across iterations; at t0 the
+# label flip adds only an ENDPOINT to the existing Service, so pilot_services does
+# NOT change — svc_delta is 0 every iteration and the old check flagged p2_dirty=1
+# unconditionally, structurally always-dropping p2_ms in 005.
+#
+# New companion signal (option (b) in the brief): the EDS bump is "clean" iff our
+# canary endpoint actually became HEALTHY on this remote's watcher sidecar — the
+# exact same health_flags::healthy signal P3 detects. That is unambiguously OUR
+# change (an unrelated workload's endpoint churn never makes propagation-canary
+# healthy on the watcher). We check it via ONE watcher Envoy /clusters read at the
+# moment the EDS counter bumps (once per iteration per remote, NOT per tick), so no
+# extra cluster round-trips are added to the hot poll loop. When the EDS counter
+# bumped but the canary is NOT yet healthy on the sidecar, the bump is attributed
+# to churn and p2_dirty=1 is set; we still record the timestamp so legacy p2_ms
+# stays positionally comparable. envoy_port<=0 disables the check (clean by
+# default) for callers that do not pass a watcher port.
 # Fanned out across the remote's istiod pods: eds_count + pushes_total SUM across
-# pods, pilot_services is replica-INVARIANT (max), restart via proc_start_sig.
+# pods, restart via proc_start_sig.
 poll_p2_remote_eds_push() {
 	local polldir="$1" t0="$2" baseline_eds="$3" result_file="$4" restart_baseline="$5"
-	local baseline_services="$6" dirty_file="$7"
+	local envoy_port="$6" dirty_file="$7"
 	shift 7
 	local -a ports=("$@")
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
@@ -872,18 +899,27 @@ poll_p2_remote_eds_push() {
 			echo "RESTART" > "$result_file"
 			return
 		fi
-		local cur_eds cur_svc
+		local cur_eds
 		cur_eds=$(kv_get "$polldir/tick-kv" eds_count)
-		cur_svc=$(kv_get "$polldir/tick-kv" pilot_services)
 		[[ -z "$cur_eds" ]] && cur_eds=0
-		[[ -z "$cur_svc" ]] && cur_svc=0
 		# Counter could appear to "decrease" mid restart/deploy; treat as not-yet.
 		if (( cur_eds > baseline_eds )); then
-			# B1: services-gauge delta must be >=1 to call this clean. pilot_services
-			# is mesh-global (invariant across replicas), so the delta is mesh-wide.
-			local svc_delta=$(( cur_svc - baseline_services ))
-			if (( svc_delta < 1 )); then
-				echo "1" > "$dirty_file"
+			# B1 (O1): clean iff our canary is HEALTHY on this remote's watcher
+			# sidecar (the same health_flags::healthy signal P3 uses) — that is OUR
+			# change, not unrelated endpoint churn that also bumped the EDS counter.
+			# One /clusters read at the bump (not per-tick). envoy_port<=0 disables
+			# the check (clean by default).
+			if (( envoy_port > 0 )); then
+				local clusters
+				if clusters=$(curl -fsS --max-time "$METRICS_TIMEOUT" \
+					"http://localhost:${envoy_port}/clusters" 2>/dev/null); then
+					echo "$clusters" | grep -Eq "propagation-canary[^[:space:]]*health_flags::healthy([^a-zA-Z_]|$)" \
+						|| echo "1" > "$dirty_file"
+				else
+					# Could not read the sidecar to confirm cleanliness — be honest
+					# and flag dirty rather than silently calling an unconfirmed bump clean.
+					echo "1" > "$dirty_file"
+				fi
 			fi
 			now_ns > "$result_file"
 			return
@@ -909,7 +945,11 @@ poll_p3_sidecar_endpoints() {
 		((now_ms > deadline_ms)) && { echo "TIMEOUT" > "$result_file"; return; }
 		local clusters
 		clusters=$(curl -fsS --max-time "$METRICS_TIMEOUT" "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$interval"; continue; }
-		if echo "$clusters" | grep -q "propagation-canary.*health_flags::healthy"; then
+		# R2-6: anchor health_flags::healthy on a trailing non-identifier boundary so
+		# a hypothetical degraded substring (e.g. health_flags::healthy_pending or a
+		# future flag that embeds "healthy") cannot match the fully-healthy state and
+		# burn the whole TIMEOUT_SEC per remote x iteration on a false negative.
+		if echo "$clusters" | grep -Eq "propagation-canary[^[:space:]]*health_flags::healthy([^a-zA-Z_]|$)"; then
 			now_ns > "$result_file"
 			return
 		fi
@@ -994,8 +1034,10 @@ wait_sidecar_endpoint_removed() {
 		# delete the Service), so the propagation-canary CLUSTER entry stays in
 		# /clusters even after drain. Drained == no HEALTHY endpoint for it (the
 		# exact inverse of P3's poll_p3_sidecar_endpoints detection), not the
-		# cluster name disappearing.
-		echo "$data" | grep -q "propagation-canary.*health_flags::healthy" || return 0
+		# cluster name disappearing. R2-6: same anchored match as P3 detect so the
+		# inverse is exact (a degraded "healthy"-substring flag can't make this loop
+		# believe the endpoint is still healthy and never-return for the full timeout).
+		echo "$data" | grep -Eq "propagation-canary[^[:space:]]*health_flags::healthy([^a-zA-Z_]|$)" || return 0
 		sleep "$POLL_INTERVAL_S"
 	done
 	return 1
@@ -1049,6 +1091,28 @@ P1_SUM=0; P1_COUNT=0; P1_MIN=""; P1_MAX=""
 P2_SUM=0; P2_COUNT=0; P2_MIN=""; P2_MAX=""
 P3_SUM=0; P3_COUNT=0; P3_MIN=""; P3_MAX=""
 
+# R2-2: loud by-reason drop tally. The in-script P1/P2/P3 averages above sum
+# numeric p*_ms regardless of status, and the only thing dropping a mass of rows
+# is the downstream 005 status==OK filter — which is invisible from here. Count
+# every emitted row and tally the ones a status flag will drop (especially
+# SCRAPE_INCOMPLETE from the provisional FANOUT_MAX_SKEW_MS gate, which could
+# mass-drop the most interesting 10x3 data point) so the operator sees it now.
+ROWS_TOTAL=0
+ROWS_DROPPED_SKEW=0
+declare -A ROWS_DROPPED_BY_STATUS=()
+# Record whether the current iteration's taint was specifically a high skew, so a
+# row tallied non-OK can be attributed to the skew gate vs an unreachable pod.
+tally_row() {  # <status>
+	local s="$1"
+	ROWS_TOTAL=$((ROWS_TOTAL + 1))
+	[[ "$s" == "OK" ]] && return 0
+	ROWS_DROPPED_BY_STATUS["$s"]=$(( ${ROWS_DROPPED_BY_STATUS["$s"]:-0} + 1 ))
+	# A SCRAPE_INCOMPLETE row caused by the skew gate (vs an unreachable pod) is the
+	# mass-drop the brief wants surfaced loudly; SCRAPE_SKEW_HIGH is per-iteration.
+	[[ "$s" == "SCRAPE_INCOMPLETE" && "$SCRAPE_SKEW_HIGH" == "1" ]] && ROWS_DROPPED_SKEW=$((ROWS_DROPPED_SKEW + 1))
+	return 0
+}
+
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
@@ -1091,8 +1155,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# denominator / counter deltas computed across it are untrustworthy. Tag the
 	# row via the existing SCRAPE_INCOMPLETE plumbing (the report drops non-OK);
 	# field 19 (scrape_skew_ms) is still recorded verbatim for provenance.
+	# R2-5: route through the unit-tested fanout_skew_high_value (strict ">"
+	# semantics) so the production gate IS the tested gate. SCRAPE_SKEW_MS here is
+	# the MAX across the source+remote baseline batches (not tied to one .skew
+	# sidecar), so the value-based variant is used rather than fanout_scrape_skew_high.
 	SCRAPE_SKEW_HIGH=0
-	if (( SCRAPE_SKEW_MS > FANOUT_MAX_SKEW_MS )); then
+	if [[ "$(fanout_skew_high_value "$SCRAPE_SKEW_MS")" == "1" ]]; then
 		SCRAPE_SKEW_HIGH=1
 		echo "  Warning: baseline scrape_skew=${SCRAPE_SKEW_MS}ms exceeds FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}ms — row will be tagged SCRAPE_INCOMPLETE" >&2
 	fi
@@ -1107,9 +1175,17 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# O1: resolve the pre-warmed backer pod BEFORE t0 so its boot (scheduling,
 	# image pull, sidecar start) is entirely outside the measured window. The pod
 	# was made Ready by 001-setup and persists across iterations.
+	# R2-7: during a rolling restart of the backer Deployment two Running pods can
+	# coexist (old Terminating-but-still-Running + new). items[0] could pick the
+	# terminating one (about to vanish, endpoint already removed), re-introducing the
+	# flip-onto-a-dying-pod race O1 removes. Sort by creationTimestamp and take the
+	# NEWEST Running pod so a just-rolled replacement wins over a lingering
+	# terminating one; the explicit Ready wait below then guarantees readiness before t0.
 	BACKER_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pods \
 		-l app=propagation-canary --field-selector=status.phase=Running \
-		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+		--sort-by=.metadata.creationTimestamp \
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+		| tail -n 1 || true)"
 	[[ -n "$BACKER_POD" ]] || die "no Running pre-warmed backer pod on $SOURCE_CTX (run 001-setup first)"
 	# Guard: the backer must be Ready before t0 (a label flip onto a not-yet-Ready
 	# pod would re-introduce boot latency into P3).
@@ -1150,15 +1226,15 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		P3_FILES+=("$p3f")
 		P2_DIRTY_FILES+=("$p2dirtyf")
 		baseline_eds=$(kv_get "$BASELINE_DIR/remote-${i}-kv" eds_count)
-		baseline_svc=$(kv_get "$BASELINE_DIR/remote-${i}-kv" pilot_services)
 		remote_start=$(kv_get "$BASELINE_DIR/remote-${i}-kv" proc_start_sig)
 		[[ -z "$baseline_eds" ]] && baseline_eds=0
-		[[ -z "$baseline_svc" ]] && baseline_svc=0
 		_rip=()  # populated by load_rmt_istiod_ports via nameref
 		load_rmt_istiod_ports "$i" _rip
+		# B1 (O1): pass the remote's watcher Envoy port so the EDS-bump cleanliness
+		# check can confirm OUR canary went healthy on the sidecar (same port P3 uses).
 		poll_p2_remote_eds_push "$TMPDIR_RUN/p2poll-${iter}-${i}" "$T0" \
 			"$baseline_eds" "$p2f" "$remote_start" \
-			"$baseline_svc" "$p2dirtyf" \
+			"$(( BASE_ENVOY_PF_PORT + i ))" "$p2dirtyf" \
 			"${_rip[@]}" &
 		POLL_PIDS+=($!)
 		poll_p3_sidecar_endpoints $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$p3f" &
@@ -1284,6 +1360,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
 		status=$(status_for_row "$p1_ms" "N/A" "N/A" "$restarted" "$drain_timeout" "$row_incomplete")
+		tally_row "$status"
 		if ((WRITE_TSV)); then
 			# F1: p1_sample_count is "got/attempted" (delta-_count first, proxy_count second).
 			echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\tN/A\t${T0}\t${p1_ms}\tN/A\tN/A\t${status}\t${p1_conv_p50}\t${p1_conv_p99}\t${p1_sample_count}/${SOURCE_PROXY_COUNT}\t${SOURCE_PROXY_COUNT}\t${p1_overflow}\t${restarted}\t0\t${WINDOW_MS}\t${SCRAPE_SKEW_MS}" >> "$TSV_FILE"
@@ -1331,6 +1408,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			p2_incomplete="$row_incomplete"
 			[[ -s "${P2_FILES[i]}" && "$(<"${P2_FILES[i]}")" == "INCOMPLETE" ]] && p2_incomplete=1
 			status=$(status_for_row "$p1_ms" "$p2_ms" "$p3_ms" "$p2_restarted" "$drain_timeout" "$p2_incomplete")
+			tally_row "$status"
 
 			# PL13: counter deltas are N/A on restart or unknown.
 			p2_out="$p2_ms"
@@ -1366,6 +1444,26 @@ if ((P1_COUNT == 0)); then
 	echo "  No successful measurements."
 fi
 
+# R2-2: loud row-drop tally so a mass-drop (especially from the provisional
+# FANOUT_MAX_SKEW_MS skew gate at 10x3) is visible at the probe, not silently
+# absorbed by the downstream 005 status==OK filter. The in-script P1/P2/P3
+# averages above are over numeric p*_ms regardless of status; this tally reports
+# how many emitted rows a status flag will cause 005 to drop, by reason.
+DROPPED_TOTAL=0
+for s in "${!ROWS_DROPPED_BY_STATUS[@]}"; do
+	DROPPED_TOTAL=$(( DROPPED_TOTAL + ROWS_DROPPED_BY_STATUS["$s"] ))
+done
+echo ""
+echo "Row-drop tally (rows 005 will drop from numeric aggregation):"
+printf "  rows_dropped_skew=%d/%d (scrape_skew_ms > FANOUT_MAX_SKEW_MS=%s)\n" \
+	"$ROWS_DROPPED_SKEW" "$ROWS_TOTAL" "$FANOUT_MAX_SKEW_MS"
+printf "  rows_dropped_total=%d/%d\n" "$DROPPED_TOTAL" "$ROWS_TOTAL"
+if (( DROPPED_TOTAL > 0 )); then
+	for s in "${!ROWS_DROPPED_BY_STATUS[@]}"; do
+		printf "    %-18s %d\n" "$s" "${ROWS_DROPPED_BY_STATUS["$s"]}"
+	done
+fi
+
 MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 {
 	echo "# Endpoint Propagation Latency"
@@ -1392,7 +1490,9 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "  Converged when delta \`_count\` >= \`proxy_count\`. Reports wall-clock"
 	echo "  time-to-converged-count plus delta-window p50/p99 of the histogram itself."
 	echo "- **P2** (remote discovery): \`pilot_xds_pushes{type=\"eds\"}\` counter delta on each remote istiod;"
-	echo "  flagged as \`p2_dirty=1\` if not accompanied by a \`pilot_services\` gauge delta."
+	echo "  flagged \`p2_dirty=1\` unless our canary is confirmed \`health_flags::healthy\` on that"
+	echo "  remote's watcher sidecar (O1 label-flip: the Service persists across iterations, so a"
+	echo "  \`pilot_services\` delta is no longer the right \"our change\" signal)."
 	echo "- **P3** (remote sidecar): watcher Envoy \`/clusters\` polled at >= 1 Hz for a"
 	echo "  healthy canary endpoint. t0 is a config-only active-label flip onto a"
 	echo "  pre-warmed backer pod, so P3 excludes pod boot / image pull / sidecar startup."

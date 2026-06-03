@@ -62,7 +62,10 @@ Usage: $(basename "$0") [options]
 Environment:
   COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
   COEXEC_TEST_NAMESPACE, COEXEC_ISTIOD_REPLICAS (expected pin; warns on mismatch),
-  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
+  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
+  FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
+  whose pre/post fanout scrape skew exceeds this is tagged POISONED_SCRAPE because
+  the istiod-side deltas are computed across an incoherent snapshot).
 EOF
 }
 
@@ -171,7 +174,9 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 		"CHURN_DURATION_SEC=${COEXEC_CHURN_DURATION_SEC:-$DURATION}" \
 		"QPS=$QPS" \
 		"CONNECTIONS=$CONNECTIONS" \
-		"NAMESPACE=$NS"
+		"NAMESPACE=$NS" \
+		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
+		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 

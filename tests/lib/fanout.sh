@@ -79,6 +79,15 @@
 # above the ~100-350ms normal spread and well below the multi-second outlier seen
 # at ~50 concurrent port-forwards, but above the ~2s P1/P2 signal so it does not
 # clip legitimate slow convergence.
+#
+# R2-2 (PROVISIONAL — post-merge live-validation item): the 1000ms ceiling is
+# extrapolated from a SINGLE 4043ms outlier, not from a measured .skew distribution
+# at the campaign's 10x3 topology (~50 concurrent port-forwards). At that scale the
+# typical within-batch completion spread may routinely exceed 1000ms, which would
+# mass-drop rows at the most interesting data point. Do NOT finalize this value here:
+# validate against real `.skew` sidecars from a 10x3 run after the node-resize, then
+# re-derive. Until then the probes emit a loud rows_dropped_skew tally so a silent
+# mass-drop is visible. See docs/scale-test-team/process-learnings.md PL8.
 : "${FANOUT_MAX_SKEW_MS:=1000}"
 
 # Compute the base local port for a context's per-pod port-forward block.
@@ -286,6 +295,21 @@ fanout_scrape_skew_ms() {
 	if [[ -s "$f" ]]; then cat "$f"; else echo 0; fi
 }
 
+# Report whether a raw skew value (ms) exceeds FANOUT_MAX_SKEW_MS. Echoes 1 (high
+# — incoherent snapshot, caller should poison the row) or 0, using strict ">" so a
+# batch exactly at the ceiling is NOT high. A non-numeric / empty value is treated
+# as 0 (not high). This is the single comparison primitive both the sidecar-based
+# fanout_scrape_skew_high and callers holding an already-computed skew (e.g. the
+# propagation probe's MAX across the source+remote baseline batches) route through,
+# so the production gate and the unit-tested gate are the same code path.
+# Usage: fanout_skew_high_value <skew_ms>
+# shellcheck disable=SC2329
+fanout_skew_high_value() {
+	local skew="${1:-0}"
+	skew="${skew//[^0-9]/}"
+	if (( ${skew:-0} > FANOUT_MAX_SKEW_MS )); then echo 1; else echo 0; fi
+}
+
 # Report whether the most recent fanout_scrape_all batch for <out_dir>/<prefix>
 # exceeded FANOUT_MAX_SKEW_MS. Echoes 1 (high — incoherent snapshot, caller should
 # poison the row) or 0. A 0-skew or absent record is treated as 0 (not high), so a
@@ -294,10 +318,7 @@ fanout_scrape_skew_ms() {
 # Usage: fanout_scrape_skew_high <out_dir> <prefix>
 # shellcheck disable=SC2329
 fanout_scrape_skew_high() {
-	local skew
-	skew="$(fanout_scrape_skew_ms "$1" "$2")"
-	skew="${skew//[^0-9]/}"
-	if (( ${skew:-0} > FANOUT_MAX_SKEW_MS )); then echo 1; else echo 0; fi
+	fanout_skew_high_value "$(fanout_scrape_skew_ms "$1" "$2")"
 }
 
 # Record the sorted pod-name set for a context to a file (for restart detection).
