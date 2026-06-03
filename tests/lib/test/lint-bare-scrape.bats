@@ -121,3 +121,72 @@ EOF
 	run lint_bare_scrape_paths "${ROOT}/tests"
 	assert_success
 }
+
+# --- B7: bare orchestrator-step calls in *-run-sweep.sh ---
+
+@test "orchestrator-step lint flags a bare setup call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for ms in 1 2; do
+	"$SCRIPT_DIR/001-setup-test.sh" --contexts "$active_csv"
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_failure
+	assert_output --partial "bare orchestrator-step call"
+	assert_output --partial "001-setup-test.sh"
+}
+
+@test "orchestrator-step lint passes a wrapped (if !) setup call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for ms in 1 2; do
+	if ! "$SCRIPT_DIR/001-setup-test.sh" --contexts "$active_csv"; then
+		echo warn; continue
+	fi
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+	[[ -z "$output" ]]
+}
+
+@test "orchestrator-step lint passes a || guarded setup call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for ms in 1 2; do
+	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || echo warn
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+}
+
+@test "orchestrator-step lint passes a captured step call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+out="$("$SCRIPT_DIR/002-probe.sh" --contexts x)"
+echo "$out"
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+}
+
+@test "orchestrator-step lint exempts the post-loop report call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR"
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+}
+
+@test "orchestrator-step lint via paths dispatches only to *-run-sweep.sh" {
+	# A non-sweep file with a bare step call is NOT checked by the step lint.
+	cat > "$FIX/002-probe.sh" <<'EOF'
+#!/usr/bin/env bash
+"$SCRIPT_DIR/001-setup-test.sh" --contexts x
+EOF
+	run lint_bare_scrape_paths "$FIX"
+	assert_success
+}

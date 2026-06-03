@@ -110,10 +110,17 @@ status  pct_200  istiod_restarted  target_class
 - `FAILED` — fortio exec failed (network, pod missing, etc.).
 - `PERCENTILE_MISSING` — fortio JSON lacked one of the requested percentiles.
 - `ERROR_RATE_HIGH` — `pct_200 < 0.99`.
+- `SETUP_FAILED` / `PROBE_FAILED` — **placeholder rows** the sweep
+  (`003-run-sweep.sh`) writes (one per mesh size, `qps_target=0`,
+  `target_class=na`) when setup or the probe exited non-zero before any real row
+  was written. They keep that mesh size visible in the report (a planned mesh size
+  that silently vanished would be indistinguishable from never-planned). Counted in
+  `n_total`, excluded from `n_valid` (`restarted=unknown`, numerics `N/A`).
 
 `target_class`:
 - `local` — same cluster as source.
 - `remote` — different cluster (routed via east-west gateway).
+- `na` — placeholder row for a failed mesh size (see `SETUP_FAILED`/`PROBE_FAILED`).
 
 `istiod_restarted`:
 - `0` — istiod process_start_time_seconds unchanged across the probe.

@@ -248,6 +248,31 @@ if ! ((DRY_RUN)); then
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
+# emit_cd_row <status> <combo_id> <ms> <cr> <phase>
+#   Append one degraded 25-col row (restarted=unknown, all numerics N/A) for the given
+#   phase/status (PL13). Mirrors the CLEANUP_TIMEOUT row's layout.
+emit_cd_row() {
+	local status="$1" combo_id="$2" ms="$3" cr="$4" phase="$5"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$RUN_ID" "$HARNESS_SHA" "$combo_id" "$ms" "$cr" "$phase" \
+		"0" "0" "0" \
+		"N/A" "N/A" "N/A" "N/A" "N/A" \
+		"N/A" "unknown" "$status" \
+		"N/A" "N/A" \
+		"N/A" "N/A" "N/A" "N/A" "N/A" "N/A" >> "$TSV_FILE"
+}
+
+# emit_failed_rows <status> <combo_id> <ms> <cr>
+#   B3: emit BOTH a baseline AND a churn degraded row so 005-report-results.sh buckets
+#   the combo via ch_seen into the REAL (mesh_size, churn_rate) cell — incrementing that
+#   cell's n_total (not a phantom (ms,0) cell) while excluding it from n_valid (PL15).
+#   Used for setup failures and baseline failures (the entire combo produced no data).
+emit_failed_rows() {
+	local status="$1" combo_id="$2" ms="$3" cr="$4"
+	emit_cd_row "$status" "$combo_id" "$ms" "$cr" "baseline"
+	emit_cd_row "$status" "$combo_id" "$ms" "$cr" "churn"
+}
+
 COMBO_INDEX=0
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
@@ -292,7 +317,19 @@ for ms in "${MESH_SIZES[@]}"; do
 			--base-replicas "$CHURN_BASE_REPLICAS_OPT"
 		)
 		[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
-		"$SCRIPT_DIR/001-setup-coexec-test.sh" "${setup_args[@]}"
+		# B1/PL15: setup is the most probable per-combo failure at scale. A bare call
+		# under set -e would abort the whole sweep, discarding every completed combo (the
+		# report runs only after the loop). On failure: record SETUP_FAILED rows for BOTH
+		# phases (so 005 buckets the combo via ch_seen into the real (ms,cr) cell —
+		# n_total++, excluded from n_valid), clean up, settle, continue.
+		if ! "$SCRIPT_DIR/001-setup-coexec-test.sh" "${setup_args[@]}"; then
+			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] setup failed for $COMBO_ID; recording SETUP_FAILED rows and continuing" >&2
+			emit_failed_rows SETUP_FAILED "$COMBO_ID" "$ms" "$cr"
+			"$SCRIPT_DIR/006-cleanup.sh" --contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC" || \
+				echo "warn: cleanup after setup failure also reported failure for $COMBO_ID" >&2
+			if (( COMBO_INDEX < MATRIX_SIZE )); then sleep "$INTER_COMBO_SETTLE_SEC"; fi
+			continue
+		fi
 
 		echo "--- baseline phase ---"
 		baseline_args=(
@@ -309,19 +346,13 @@ for ms in "${MESH_SIZES[@]}"; do
 		)
 		[[ -n "$remote_csv" ]] && baseline_args+=(--remote-contexts "$remote_csv")
 		# P0/PL15: a probe failure must be a RECORDED failed combo, not a sweep abort.
-		# 005-report-results.sh keys n_total on (mesh_size, churn_rate) via the baseline/
-		# churn rows' combo_id and only admits status=OK + restarted=0 rows to n_valid,
-		# so a phase=baseline status=PROBE_FAILED row is counted-but-excluded (PL13/PL15).
-		# 25-col layout mirrors the CLEANUP_TIMEOUT row below.
+		# 005-report-results.sh keys n_total on (mesh_size, churn_rate) and only admits
+		# status=OK + restarted=0 rows to n_valid. B3: emit BOTH phases' rows so the combo
+		# buckets via ch_seen into the real (ms,cr) cell — a baseline-only row would
+		# mis-bucket to a phantom (ms,0) cell (005:171-175) and understate the failure.
 		if ! "$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}"; then
-			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID; recording PROBE_FAILED row and continuing" >&2
-			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-				"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$ms" "$cr" "baseline" \
-				"0" "0" "0" \
-				"N/A" "N/A" "N/A" "N/A" "N/A" \
-				"N/A" "unknown" "PROBE_FAILED" \
-				"N/A" "N/A" \
-				"N/A" "N/A" "N/A" "N/A" "N/A" "N/A" >> "$TSV_FILE"
+			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID; recording PROBE_FAILED rows and continuing" >&2
+			emit_failed_rows PROBE_FAILED "$COMBO_ID" "$ms" "$cr"
 			# Skip the churn phase for this combo (no baseline to delta against), clean
 			# up so the next combo is isolated, settle, and continue.
 			"$SCRIPT_DIR/006-cleanup.sh" --contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC" || \
@@ -354,13 +385,9 @@ for ms in "${MESH_SIZES[@]}"; do
 		# the next combo stays isolated.
 		if ! "$SCRIPT_DIR/003-run-churn-probe.sh" "${churn_args[@]}"; then
 			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] churn probe failed for $COMBO_ID; recording PROBE_FAILED row and continuing" >&2
-			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-				"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$ms" "$cr" "churn" \
-				"0" "0" "0" \
-				"N/A" "N/A" "N/A" "N/A" "N/A" \
-				"N/A" "unknown" "PROBE_FAILED" \
-				"N/A" "N/A" \
-				"N/A" "N/A" "N/A" "N/A" "N/A" "N/A" >> "$TSV_FILE"
+			# Baseline row already exists; only the churn row is needed — it buckets via
+			# ch_seen into the real (ms,cr) cell (n_total++, excluded from n_valid).
+			emit_cd_row PROBE_FAILED "$COMBO_ID" "$ms" "$cr" "churn"
 		fi
 
 		echo "--- cleanup ---"

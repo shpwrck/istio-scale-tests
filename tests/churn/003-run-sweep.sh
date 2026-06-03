@@ -21,6 +21,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"  # B6: harness_sha for the placeholder TSV preamble
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -128,6 +130,48 @@ SCRIPT_DIR="${ROOT}/tests/churn"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+HARNESS_SHA="$(harness_sha)"
+# base_replicas the probe will use (matched here so the placeholder buckets into the
+# SAME (mesh,intensity,base_replicas,scale_to) cell the real probe rows would).
+CHURN_BASE_REPLICAS_DEFAULT="${CHURN_BASE_REPLICAS:-1}"
+
+# B6: emit a minimal placeholder TSV for a combo whose setup/probe crashed before the
+# probe wrote any row. Without it the combo vanishes from the report (looks like
+# never-planned). 004-report-results.sh globs churn-*.tsv and counts n_total per
+# (mesh,intensity,base_replicas,scale_to) for NF>=21 rows, excluding non-OK $21 from
+# n_valid (PL15). Named to sort AFTER the real churn-<RUN_ID> files.
+# Usage: emit_churn_placeholder <status> <mesh_size> <intensity>
+emit_churn_placeholder() {
+	local status="$1" ms="$2" intensity="$3"
+	mkdir -p "$SWEEP_DIR"
+	local f="${SWEEP_DIR}/churn-zzfail-ms${ms}-i${intensity}-${RUN_ID}.tsv"
+	{
+		echo "# Churn convergence test (placeholder — combo failed before any row)"
+		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
+		# 21-col header (matches 002-run-churn-probe.sh).
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
+			convergence_local_ms remote_endpoint_reachable_ms convergence_remote_eds_ms \
+			source_push_triggers_delta remote_push_triggers_delta \
+			source_xds_pushes_delta remote_xds_pushes_delta \
+			source_queue_time_p99_ms remote_queue_time_p99_ms \
+			source_connected_proxies remote_connected_proxies \
+			source_push_time_p99_ms remote_push_time_p99_ms \
+			status
+		# One degraded row: key cols set, numerics N/A, status sentinel in $21.
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$RUN_ID" "$ms" "$intensity" "$CHURN_BASE_REPLICAS_DEFAULT" "$SCALE_TO" "0" "N/A" \
+			"N/A" "N/A" "N/A" \
+			"N/A" "N/A" \
+			"N/A" "N/A" \
+			"N/A" "N/A" \
+			"N/A" "N/A" \
+			"N/A" "N/A" \
+			"$status"
+	} > "$f"
+}
 
 echo "=========================================="
 echo "  Churn Convergence Sweep"
@@ -172,7 +216,17 @@ for ms in "${MESH_SIZES[@]}"; do
 		[[ -d "$SWEEP_DIR" ]] || mkdir -p "$SWEEP_DIR"
 
 		echo "--- Setting up ---"
-		"$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"
+		# B1/B6: setup is a probable per-combo failure at scale; bare under set -e it
+		# would abort the whole sweep. On failure record a placeholder row (so this combo
+		# is visible in the report), clean up, and continue to the next combo.
+		if ! "$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"; then
+			echo "warn: setup failed for mesh_size=$ms churn_intensity=$intensity; recording SETUP_FAILED placeholder and continuing" >&2
+			emit_churn_placeholder SETUP_FAILED "$ms" "$intensity"
+			"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+				echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms churn_intensity=$intensity" >&2
+			echo ""
+			continue
+		fi
 		echo ""
 
 		echo "--- Running churn probe ---"
@@ -186,15 +240,14 @@ for ms in "${MESH_SIZES[@]}"; do
 			--output-dir "$SWEEP_DIR"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-		# P0: a probe failure must NOT abort the multi-hour sweep. The churn probe owns
-		# its own per-iteration TSV (002 writes rows into $SWEEP_DIR and self-tags
-		# POISONED_*/SCRAPE_INCOMPLETE/TIMEOUT_* per row), and 004-report-results.sh
-		# counts n_total from rows actually present per cell — so a crashed combo simply
-		# contributes no rows (it is visibly absent), which is the honest signal here.
-		# We therefore log-and-continue rather than synthesize a single PROBE_FAILED row
-		# (which would misrepresent ITERATIONS planned as one attempt). Cleanup still runs.
+		# P0/B6: a probe failure must NOT abort the multi-hour sweep. The churn probe
+		# writes its own per-iteration rows into $SWEEP_DIR (self-tagging POISONED_*/
+		# SCRAPE_INCOMPLETE/TIMEOUT_*). If it crashed BEFORE writing any row, this combo
+		# would vanish from the report (indistinguishable from never-planned), so emit a
+		# placeholder row to keep the combo visible (n_total++, excluded from n_valid).
 		if ! "$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"; then
-			echo "warn: churn probe failed for mesh_size=$ms churn_intensity=$intensity; continuing to next combo (cleanup runs below)" >&2
+			echo "warn: churn probe failed for mesh_size=$ms churn_intensity=$intensity; recording PROBE_FAILED placeholder and continuing (cleanup runs below)" >&2
+			emit_churn_placeholder PROBE_FAILED "$ms" "$intensity"
 		fi
 		echo ""
 
