@@ -194,7 +194,9 @@ SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 # ($22), so ingesting it would report e.g. "200 services achieved" when 0 deployed.
 # Tolerates N/A: a key with no numeric observation reports `unknown`. Emits
 # space-separated key=value pairs. services_total is the configured service_count of
-# valid rows (controlplane has no distinct achieved-services metric) — best-effort.
+# valid rows (controlplane has no distinct achieved-services metric) — best-effort, so
+# the report surfaces it as `services_total [configured]` to flag it as intent, not a
+# measured achieved count (PL35: label a configured axis honestly).
 collect_achieved_scale() {
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	function isnum(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
@@ -253,6 +255,15 @@ preamble_get() {
 # NOTE: max(pods_scheduled) and max(pods_allocatable) are taken INDEPENDENTLY across
 # rows, so on a multi-context sweep they may come from different contexts — the
 # fraction is a fleet-level proxy, not a single-cluster paired ratio.
+# Count distinct contexts (col 2) among the VALID rows (istiod_restarted==0, NF>=40)
+# that feed the achieved-scale maxes. >1 means pods_scheduled/pods_allocatable can be
+# maxed from different clusters, so the coverage fraction is a fleet-level proxy rather
+# than a single-cluster paired ratio — surfaced via a `(fleet)` suffix.
+count_valid_contexts() {
+	cat "${TSV_FILES[@]}" | awk -F'\t' '
+		!/^#/ && !/^timestamp/ && NF>=40 && $31 == "0" { c[$2] = 1 }
+		END { n = 0; for (k in c) n++; print n }'
+}
 COVERAGE_STATUS="N/A"      # OK | UNDER | N/A
 COVERAGE_LINE=""
 compute_coverage() {
@@ -267,15 +278,19 @@ compute_coverage() {
 		COVERAGE_LINE="SCALE_COVERAGE: unknown (pods_scheduled or pods_allocatable unavailable)"
 		return 0
 	fi
+	# Fleet suffix: independent maxes across >1 context are not a single-cluster ratio.
+	local n_ctx fleet=""
+	n_ctx="$(count_valid_contexts)"
+	(( n_ctx > 1 )) && fleet=" (fleet: maxes taken independently across ${n_ctx} contexts)"
 	frac="$(awk -v s="$sched" -v a="$alloc" 'BEGIN{ if (a+0<=0){print "0"} else printf "%.3f", s/a }')"
 	local under
 	under="$(awk -v f="$frac" -v m="$min" 'BEGIN{ print (f+0 < m+0) ? 1 : 0 }')"
 	if (( under )); then
 		COVERAGE_STATUS="UNDER"
-		COVERAGE_LINE="SCALE_COVERAGE: UNDER (achieved ${sched}/${alloc} pods = ${frac} < min ${min}; enforce=${enforce})"
+		COVERAGE_LINE="SCALE_COVERAGE: UNDER (achieved ${sched}/${alloc} pods = ${frac} < min ${min}; enforce=${enforce})${fleet}"
 	else
 		COVERAGE_STATUS="OK"
-		COVERAGE_LINE="SCALE_COVERAGE: OK (achieved ${sched}/${alloc} pods = ${frac} >= min ${min})"
+		COVERAGE_LINE="SCALE_COVERAGE: OK (achieved ${sched}/${alloc} pods = ${frac} >= min ${min})${fleet}"
 	fi
 	return 0
 }
@@ -307,7 +322,10 @@ compute_coverage
 # 37 node_cpu_pct             38 node_mem_pct
 # 39 pods_scheduled           40 pods_allocatable
 #
-# Aggregated output (tab-separated, 34 columns):
+# Aggregated output (tab-separated, 34 columns). This width is INTENTIONALLY decoupled
+# from the 40-column input schema above: the 6 O9 capacity cols (35-40) are point-in-time
+# reads surfaced in the achieved-scale block, not aggregated, so the aggregate stays 34.
+# (Do not "sync" this to 40 — it is not the input width.)
 #   mesh_size service_count replicas namespace_count sidecar_scoping n_total n_valid
 #   mem_min mem_max mem_avg
 #   conv99_min conv99_max conv99_avg
@@ -425,7 +443,7 @@ report_text() {
 	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
 	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
 	echo "  connected_proxies (max):     $(as_get proxies)"
-	echo "  services_total (max):        $(as_get svc)"
+	echo "  services_total [configured] (max): $(as_get svc)"
 	echo "  istiod_cpu_pct_of_limit (max): $(as_pct istiod_cpu_pct)"
 	echo "  istiod_mem_pct_of_limit (max): $(as_pct istiod_mem_pct)"
 	echo "  node_cpu_pct (max):          $(as_pct node_cpu_pct)"
@@ -476,6 +494,11 @@ report_text() {
 report_csv() {
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG},HARNESS_SHA=${HARNESS_SHA_TAG},files_consumed=${FILES_CONSUMED},skipped_legacy=${FILES_SKIPPED}"
 	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE}"
+	# O9 achieved-scale provenance parity with text/markdown. Comment lines only, so the
+	# CSV row schema (the aggregate columns below) is byte-identical for row consumers.
+	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) (istiod limits per replica)"
+	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
+	echo "# ${COVERAGE_LINE}"
 	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
 }
 
@@ -507,7 +530,7 @@ report_markdown() {
 	echo "| node allocatable (cpu_m/mem_mi) | $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI) |"
 	echo "| istiod limit (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI) |"
 	echo "| connected_proxies (max) | $(as_get proxies) |"
-	echo "| services_total (max) | $(as_get svc) |"
+	echo "| services_total [configured] (max) | $(as_get svc) |"
 	echo "| istiod_cpu_pct_of_limit (max) | $(as_pct istiod_cpu_pct) |"
 	echo "| istiod_mem_pct_of_limit (max) | $(as_pct istiod_mem_pct) |"
 	echo "| node_cpu_pct (max) | $(as_pct node_cpu_pct) |"
@@ -607,12 +630,20 @@ EFFECT_HDR
 
 report_json() {
 	aggregate | awk -F'\t' -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
-		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" '
+		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" \
+		-v cap_ncpu="$(preamble_get NODE_ALLOC_CPU_M)" -v cap_nmem="$(preamble_get NODE_ALLOC_MEM_MI)" \
+		-v cap_icpu="$(preamble_get ISTIOD_CPU_LIMIT_M)" -v cap_imem="$(preamble_get ISTIOD_MEM_LIMIT_MI)" \
+		-v cap_tf="$(preamble_get SCALE_TARGET_FRACTION)" \
+		-v ach_prx="$(as_get proxies)" -v ach_svc="$(as_get svc)" \
+		-v ach_icpu="$(as_get istiod_cpu_pct)" -v ach_imem="$(as_get istiod_mem_pct)" \
+		-v ach_ncpu="$(as_get node_cpu_pct)" -v ach_nmem="$(as_get node_mem_pct)" \
+		-v ach_psched="$(as_get pods_sched)" -v ach_palloc="$(as_get pods_alloc)" \
+		-v cov="$COVERAGE_LINE" '
 	function cell(v) {
 		if (v == "overflow") return "null"
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"}},\n  \"results\": [", iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope }
+	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"istiod_limits_per_replica\":true},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\"},\n  \"results\": [", iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, ach_prx, ach_svc, ach_icpu, ach_imem, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
