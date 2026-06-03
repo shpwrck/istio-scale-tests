@@ -52,6 +52,11 @@
 #     --remote-contexts cluster-002,cluster-003 --mesh-size 3 --iterations 5
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
+# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# both run). Per-iteration faults are already captured as row statuses; this only
+# self-reports an UNEXPECTED abort.
+# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -461,7 +466,10 @@ start_envoy_port_forward() {
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" port-forward deploy/propagation-watcher "$local_port":15000 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
 	local attempts=0
-	while ! curl -s -o /dev/null "http://localhost:$local_port/clusters" 2>/dev/null; do
+	# P4: --max-time bounds the readiness probe so a stuck/half-open watcher PF can't
+	# block ~30s/attempt at scale (matches the istiod /metrics readiness curl at :444;
+	# the data-path /clusters curls at :944/:1029 already use --max-time "$METRICS_TIMEOUT").
+	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$local_port/clusters" 2>/dev/null; do
 		attempts=$((attempts + 1))
 		((attempts > 30)) && die "port-forward to watcher envoy on $ctx (port $local_port) failed to connect"
 		sleep 0.5
@@ -897,8 +905,10 @@ poll_p2_remote_eds_push() {
 		fi
 		# One fanned-out scrape+aggregate per tick (eds_count summed across pods).
 		# Skip the detection test on an incomplete scrape (a missing pod undercounts
-		# the summed eds_count delta).
-		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
+		# the summed eds_count delta). `|| true`: the aggregate wraps an inherently
+		# by-design-non-zero fanout_scrape_all; the .failed sidecar below is the gate
+		# (PL29). Bare under set -e would risk an abort (the #31 incident class).
+		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null || true
 		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
 			sleep "$POLL_INTERVAL_S"
 			continue
@@ -980,8 +990,10 @@ poll_p1_local_sync_histogram() {
 		fi
 		# One fanned-out scrape+aggregate per tick -> merged hist + kv. Skip the
 		# convergence test on an incomplete scrape (a missing pod undercounts the
-		# merged _count and would let P1 "converge" against a partial mesh).
-		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
+		# merged _count and would let P1 "converge" against a partial mesh). `|| true`:
+		# the aggregate wraps an inherently by-design-non-zero fanout_scrape_all; the
+		# .failed sidecar below is the gate (PL29). Bare under set -e risks an abort.
+		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null || true
 		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
 			sleep "$POLL_INTERVAL_S"
 			continue

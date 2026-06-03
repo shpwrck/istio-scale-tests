@@ -23,6 +23,10 @@
 #     --profiles 01-sidecar-scoping,06-xds-cache-tuning --suite controlplane
 # ci-dry-run-skip: needs yq and valid --suite directory with profiles
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-profile
+# probe failures are caught via PIPESTATUS below and degraded to warn+continue.
+# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -196,8 +200,22 @@ run_probe() {
 	sleep "$SETTLE_SEC"
 
 	echo "    Executing: $(basename "$PROBE_SCRIPT") --contexts ${CONTEXTS_CSV}"
+	# P0/P4: the probe is piped through tee, so the pipeline's `$?` is tee's (always 0)
+	# and a probe failure was silently swallowed — recording nothing and continuing as
+	# if the profile measured cleanly. `set -o pipefail` is on, but a bare failing
+	# pipeline under `set -e` would instead ABORT the whole multi-profile sweep. So we
+	# capture PIPESTATUS[0] (the probe's real exit) and treat non-zero as a failed
+	# profile: warn, drop a PROBE_FAILED marker in the result dir for 004-compare to see,
+	# and continue to the next profile. The probe owns its own per-suite TSV; on success
+	# it is copied below, on failure no TSV is copied (the profile is visibly absent).
 	"$PROBE_SCRIPT" --contexts "$CONTEXTS_CSV" \
 		2>&1 | tee "${result_dir}/probe-output.log"
+	local probe_rc="${PIPESTATUS[0]}"
+	if (( probe_rc != 0 )); then
+		echo "warn: probe for '${label}' exited ${probe_rc}; recording PROBE_FAILED and continuing to next profile" >&2
+		echo "PROBE_FAILED rc=${probe_rc} $(date -u -Iseconds)" > "${result_dir}/PROBE_FAILED"
+		return 0
+	fi
 
 	local suite_results="${SUITE_DIR}/results"
 	if [[ -d "$suite_results" ]]; then
@@ -229,19 +247,43 @@ for p in "${PROFILES[@]}"; do
 	state_dir="${SWEEP_DIR}/${p}/state"
 
 	echo "--- Applying profile ---"
-	"${TUNING_DIR}/001-apply-profile.sh" \
+	# R3-1 (B1 class): apply is the most probable per-profile failure at scale (a
+	# rollout-timeout when the tuned istiod won't go Ready). Bare under set -e it would
+	# abort the whole multi-profile sweep, discarding every completed profile (004-compare
+	# runs separately, post-sweep). On failure: warn, drop a SETUP_FAILED marker in the
+	# profile result dir (same mechanism as run_probe's PROBE_FAILED — 004-compare skips
+	# a marker-only dir, so the profile is visibly absent rather than silently aborting),
+	# ATTEMPT a best-effort revert (so istiod returns to default for the next profile),
+	# then continue. Reserve die for whole-run preconditions only.
+	if ! "${TUNING_DIR}/001-apply-profile.sh" \
 		--profile "$pfile" \
 		--contexts "$CONTEXTS_CSV" \
 		--state-dir "$state_dir" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT"
+		--rollout-timeout "$ROLLOUT_TIMEOUT"; then
+		echo "warn: [profile ${p}] apply failed; recording SETUP_FAILED and continuing to next profile" >&2
+		mkdir -p "${SWEEP_DIR}/${p}"
+		echo "SETUP_FAILED (001-apply-profile) $(date -u -Iseconds)" > "${SWEEP_DIR}/${p}/SETUP_FAILED"
+		echo "--- Best-effort revert after apply failure ---"
+		"${TUNING_DIR}/002-revert-profile.sh" \
+			--state-dir "$state_dir" \
+			--contexts "$CONTEXTS_CSV" \
+			--rollout-timeout "$ROLLOUT_TIMEOUT" || \
+			echo "warn: [profile ${p}] best-effort revert after apply failure also failed; istiod may be left in a non-default config (next profile re-applies)" >&2
+		((step++))
+		continue
+	fi
 
 	run_probe "$p"
 
 	echo "--- Reverting profile ---"
+	# R3-1: a bare revert failure under set -e would abort the sweep AND leave istiod
+	# stuck in this profile's non-default tuning. Warn and continue instead — the next
+	# profile's apply overwrites the config anyway. Never abort.
 	"${TUNING_DIR}/002-revert-profile.sh" \
 		--state-dir "$state_dir" \
 		--contexts "$CONTEXTS_CSV" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT"
+		--rollout-timeout "$ROLLOUT_TIMEOUT" || \
+		echo "warn: [profile ${p}] revert failed; istiod may be left in this profile's non-default config (next profile re-applies)" >&2
 
 	echo "--- Post-revert settle: ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"

@@ -90,11 +90,17 @@ suite records a per-context CSV (`ctx=N,...`) because it fans out over the sourc
 
 The `status` column is one of: `OK`, `TIMEOUT_LOCAL`, `TIMEOUT_REMOTE`,
 `POISONED_RESTART` (a mid-window istiod restart — local or remote — was detected,
-so the istiod-side counter/histogram deltas are emitted as `N/A`), or
+so the istiod-side counter/histogram deltas are emitted as `N/A`),
 `SCRAPE_INCOMPLETE` (a per-pod `/metrics` scrape was empty/unreachable, so the
-summed counters / merged histograms are undercounted). The report
+summed counters / merged histograms are undercounted), or `SETUP_FAILED` /
+`PROBE_FAILED`. The last two are **placeholder rows** the sweep
+(`003-run-sweep.sh`) writes — one per `(mesh_size, churn_intensity)` combo — when
+setup or the probe exited non-zero before the probe could write any iteration row;
+they keep that combo visible in the report (a planned combo that silently vanished
+would be indistinguishable from never-planned). The report
 (`004-report-results.sh`) aggregates numeric columns over `status==OK` rows only
-and shows `n_valid`/`n_total` so the filter rate is visible (PL13/PL15).
+and shows `n_valid`/`n_total` so the filter rate is visible (PL13/PL15); the
+placeholder rows are counted in `n_total`, excluded from `n_valid`.
 
 ### Multi-replica istiod fanout
 

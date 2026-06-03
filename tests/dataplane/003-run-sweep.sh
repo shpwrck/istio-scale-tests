@@ -10,12 +10,17 @@
 #   ./tests/dataplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
 # ci-dry-run:
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
+# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"  # B6: harness_sha for the placeholder TSV preamble
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -157,6 +162,33 @@ fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+HARNESS_SHA="$(harness_sha)"
+
+# B6: emit a minimal placeholder TSV for a mesh size whose setup/probe crashed before
+# the probe wrote any row. Without it the mesh size vanishes from the report (looks
+# like never-planned). 004-report-results.sh globs latency-*.tsv and counts
+# count_total per (mesh, qps, target_class) for NF>=17 rows, admitting only
+# status==OK && restart==0 to count_valid (PL15). The probe sweeps qps INTERNALLY, so
+# one placeholder row (qps=0, class=na) makes the MESH SIZE visible. Sorts AFTER the
+# real latency-<RUN_ID> files.
+# Usage: emit_dataplane_placeholder <status> <mesh_size> <source_ctx>
+emit_dataplane_placeholder() {
+	local status="$1" ms="$2" sctx="$3"
+	mkdir -p "$OUTPUT_DIR"
+	local f="${OUTPUT_DIR}/latency-zzfail-ms${ms}-${RUN_ID}.tsv"
+	{
+		echo "# Data-plane latency test (placeholder — mesh size failed before any row)"
+		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
+		# 17-col header (matches 002-run-latency-probe.sh).
+		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
+		# One degraded row: mesh in $2, qps_target=0, status sentinel in $14,
+		# restarted=unknown in $16, target_class=na in $17; numerics N/A (PL13).
+		printf '%s\t%s\t%s\tN/A\t0\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\t%s\tN/A\tunknown\tna\n' \
+			"$RUN_ID" "$ms" "$sctx" "$CONNECTIONS" "$DURATION" "$status"
+	} > "$f"
+}
 
 echo "=========================================="
 echo "  Data-Plane Latency Sweep"
@@ -210,9 +242,20 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "--- Setting up ---"
 	setup_args=(--source-context "$source_ctx")
 	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
-	"$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"
+	# B1/B6: setup is a probable per-combo failure at scale; bare under set -e it would
+	# abort the whole sweep. On failure record a placeholder row (so this mesh size is
+	# visible in the report), clean up, and continue to the next mesh size.
+	if ! "$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"; then
+		echo "warn: setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2
+		emit_dataplane_placeholder SETUP_FAILED "$ms" "$source_ctx"
+		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
+			echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms" >&2
+		echo ""
+		continue
+	fi
 	echo ""
 
+	dp_probe_failed=0
 	for ((rep = 1; rep <= REPETITIONS; rep++)); do
 		echo "--- Running latency probe (mesh_size=$ms, rep $rep/$REPETITIONS) ---"
 		probe_args=(
@@ -225,12 +268,28 @@ for ms in "${MESH_SIZES[@]}"; do
 			--output-dir "$OUTPUT_DIR"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-		"$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"
+		# P0/B6: a probe failure must NOT abort the multi-hour sweep. The latency probe
+		# writes its own rows into $OUTPUT_DIR (self-tagging non-OK status). If a rep
+		# crashes before writing any row, the mesh size could vanish from the report;
+		# we record (once per mesh size, after the rep loop) a placeholder so it stays
+		# visible. Log-and-continue per rep.
+		if ! "$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"; then
+			echo "warn: latency probe failed for mesh_size=$ms rep=$rep/$REPETITIONS; continuing to next rep/combo" >&2
+			dp_probe_failed=1
+		fi
 		echo ""
 	done
+	# B6: one placeholder per mesh size if any rep failed — keeps the size visible even
+	# if every rep crashed before writing a row (n_total++, excluded from n_valid).
+	if (( dp_probe_failed )); then
+		emit_dataplane_placeholder PROBE_FAILED "$ms" "$source_ctx"
+	fi
 
 	echo "--- Cleaning up ---"
-	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")"
+	# P0/PL23: a cleanup hiccup must not abort the sweep — the next combo's setup also
+	# cleans the namespace. Warn and continue.
+	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
+		echo "warn: cleanup reported failure for mesh_size=$ms; next combo's setup will re-clean" >&2
 
 	if ((INTER_COMBO_SETTLE > 0)); then
 		echo "Inter-combo settle: ${INTER_COMBO_SETTLE}s..."

@@ -8,6 +8,10 @@
 #       --source-context CTX [options]
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
+# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# both run). Self-reports an UNEXPECTED abort.
+# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091

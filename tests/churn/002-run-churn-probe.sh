@@ -229,7 +229,9 @@ start_envoy_port_forward() {
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" port-forward deploy/churn-watcher "$local_port":15000 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
 	local attempts=0
-	while ! curl -s -o /dev/null "http://localhost:$local_port/clusters" 2>/dev/null; do
+	# P4: --max-time bounds the readiness probe so a stuck/half-open watcher PF can't
+	# block ~30s/attempt at scale (same shape as the istiod /metrics readiness curls).
+	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$local_port/clusters" 2>/dev/null; do
 		attempts=$((attempts + 1))
 		((attempts > 30)) && die "port-forward to watcher envoy on $ctx (port $local_port) failed"
 		sleep 0.5
@@ -292,7 +294,7 @@ bucket_range() {
 # knows its OWN connected proxies, so we must query every source pod).
 _syncz_stale_count() {
 	local port="$1" syncz stale
-	syncz=$(curl -s "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }
+	syncz=$(curl -s --max-time 5 "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }  # P4: bound a stuck PF
 	stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { echo "ERR"; return; }
 	echo "$stale"
 }
@@ -360,7 +362,7 @@ poll_endpoint_count_converged() {
 		now_ms=$(( $(now_ns) / 1000000 ))
 		((now_ms > deadline)) && { echo "TIMEOUT" > "$result_file"; return; }
 		local clusters count
-		clusters=$(curl -s "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
+		clusters=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }  # P4: bound a stuck PF
 		count=$(echo "$clusters" | grep -c "churn-target.*health_flags::healthy" || true)
 		if ((count >= expected_count)); then
 			now_ns > "$result_file"
@@ -416,7 +418,11 @@ poll_remote_eds_converged() {
 		# at one tick's worth of files regardless of how many ticks elapse (R2-3) —
 		# the EDS/gauge values are consumed immediately below, no tick body needs to
 		# survive. The .failed/.skew sidecars are likewise overwritten in place.
-		fanout_scrape_all "$polldir" "tick" "${ports[@]}" >/dev/null
+		# `|| true`: fanout_scrape_all returns non-zero BY DESIGN on an incomplete
+		# scrape (PL29); under set -e a bare call here would abort the probe before the
+		# .failed sidecar check below (the #31 incident class — caught by the new
+		# verify.sh bare-scrape lint). The .failed count is the authoritative gate.
+		fanout_scrape_all "$polldir" "tick" "${ports[@]}" >/dev/null || true
 		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
 			# Skip the detection test on an incomplete scrape (a missing pod
 			# undercounts the summed eds delta, PL29).
@@ -592,7 +598,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	BASELINE_COUNTS=()
 	for i in "${!REMOTES[@]}"; do
 		envoy_port=$(( BASE_ENVOY_PF_PORT + i ))
-		bc=$(curl -s "http://localhost:$envoy_port/clusters" 2>/dev/null | grep -c "churn-target.*health_flags::healthy" || echo 0)
+		bc=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null | grep -c "churn-target.*health_flags::healthy" || echo 0)  # P4: bound a stuck PF
 		BASELINE_COUNTS+=("$bc")
 	done
 
