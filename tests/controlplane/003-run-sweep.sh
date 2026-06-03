@@ -259,8 +259,8 @@ SCRIPT_DIR="${ROOT}/tests/controlplane"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 
-# The 34-column TSV schema header (kept in one place so the pre-create + 002 agree).
-CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi"
+# The 40-column TSV schema header (kept in one place so the pre-create + 002 agree).
+CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable"
 
 # B4 (reproducibility): pre-create controlplane-${RUN_ID}.tsv with the FULL preamble
 # BEFORE the first combo, mirroring how churn-dataplane's orchestrator writes the
@@ -297,7 +297,7 @@ precreate_tsv_preamble() {
 
 # P0/PL15: a per-combo setup OR probe failure must be RECORDED (counted in the
 # report's n_total) and the sweep must CONTINUE — never abort the multi-hour run. The
-# control-plane report (004) counts every NF>=34 row in n_total and only admits a
+# control-plane report (004) counts every NF>=40 row in n_total and only admits a
 # row to n_valid when istiod_restarted ($31) == "0", so a degraded row with
 # $31=unknown and N/A numerics is counted-but-excluded (PL13/PL15). The TSV is
 # pre-created with the full preamble (see precreate_tsv_preamble), so this only
@@ -310,11 +310,12 @@ emit_failed_row() {
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
 		precreate_tsv_preamble
 	fi
-	# Degraded row: 34 cols, key cols populated, context column carries the status
+	# Degraded row: 40 cols, key cols populated, context column carries the status
 	# sentinel, restarted=unknown (column 31) so the report excludes it from n_valid;
-	# every numeric column N/A per PL13 (including push-by-type and config samples —
-	# nothing was measured, so 0/0/0 would be a misleading literal).
-	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A" >> "$tsv"
+	# every numeric column N/A per PL13 (including push-by-type, config samples, and the
+	# O9 capacity cols 35-40 — nothing was measured, so 0/0/0 would be a misleading
+	# literal).
+	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
 }
 
 {
