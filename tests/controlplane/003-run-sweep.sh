@@ -40,6 +40,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"  # B4: harness_sha / probe_kube_versions for the pre-created preamble
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -257,29 +259,62 @@ SCRIPT_DIR="${ROOT}/tests/controlplane"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 
-# P0/PL15: a per-combo probe failure must be RECORDED (counted in the report's
-# n_total) and the sweep must CONTINUE — never abort the multi-hour run. The
+# The 34-column TSV schema header (kept in one place so the pre-create + 002 agree).
+CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi"
+
+# B4 (reproducibility): pre-create controlplane-${RUN_ID}.tsv with the FULL preamble
+# BEFORE the first combo, mirroring how churn-dataplane's orchestrator writes the
+# header first. Without this, a baseline failure on the first combo would have the
+# fallback create a degenerate 3-line preamble (ISTIO_VERSION/HARNESS_SHA/KUBE_VERSIONS
+# missing); because 002 guards its real preamble on `! -f`, a later successful final
+# would NOT backfill it, and 004 would report ISTIO_VERSION=unknown for the whole
+# sweep (PL2/PL19/PL26 loss). With the file pre-created, both 002 and the failed-row
+# emitter just APPEND. Sweep-level scalars are correct; per-combo varying keys
+# (SIDECAR_SCOPING/SERVICE_COUNT/...) are recorded as the sweep CSV (004 collects
+# SIDECAR_SCOPING across all files anyway).
+precreate_tsv_preamble() {
+	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
+	[[ -f "$tsv" ]] && grep -q '^timestamp' "$tsv" 2>/dev/null && return 0
+	mkdir -p "$OUTPUT_DIR"
+	local harness kver
+	harness="$(harness_sha)"
+	kver="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
+	{
+		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		echo "# HARNESS_SHA=${harness}"
+		echo "# KUBE_VERSIONS=${kver}"
+		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		echo "# RUN_ID=${RUN_ID}"
+		echo "# PHASE=sweep"
+		echo "# SIDECAR_SCOPING=${SIDECAR_SCOPINGS_CSV}"
+		echo "# CONFIG_DUMP_SAMPLES=${CONFIG_DUMP_SAMPLES}"
+		echo "# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure"
+		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}"
+	} > "$tsv"
+	echo -e "$CONTROLPLANE_TSV_HEADER" >> "$tsv"
+}
+
+# P0/PL15: a per-combo setup OR probe failure must be RECORDED (counted in the
+# report's n_total) and the sweep must CONTINUE — never abort the multi-hour run. The
 # control-plane report (004) counts every NF>=34 row in n_total and only admits a
 # row to n_valid when istiod_restarted ($31) == "0", so a degraded row with
-# $31=unknown and N/A numerics is counted-but-excluded (PL13/PL15). The probe (002)
-# writes into ${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv on its `final` phase; if the
-# baseline phase failed the file may not exist yet, so create the header first.
-# Mirrors the 34-column schema and the per-pod N/A-row template in 002.
-emit_probe_failed_row() {
-	local ms="$1" sc="$2" rc="$3" nc="$4" scp="$5"
+# $31=unknown and N/A numerics is counted-but-excluded (PL13/PL15). The TSV is
+# pre-created with the full preamble (see precreate_tsv_preamble), so this only
+# appends. <status> is PROBE_FAILED or SETUP_FAILED.
+emit_failed_row() {
+	local status="$1" ms="$2" sc="$3" rc="$4" nc="$5" scp="$6"
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
-	mkdir -p "$OUTPUT_DIR"
+	# Defensive: ensure header exists (pre-create runs before the loop, but keep this
+	# idempotent guard so a row is never written into a header-less file).
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
-		{
-			echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-			echo "# RUN_ID=${RUN_ID}"
-			echo "# NOTE=created by 003-run-sweep.sh PROBE_FAILED fallback (probe wrote no header for this combo)"
-		} >> "$tsv"
-		echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi" >> "$tsv"
+		precreate_tsv_preamble
 	fi
-	# PROBE_FAILED degraded row: 34 cols, key cols populated, restarted=unknown
-	# (column 31) so the report excludes it from n_valid; every numeric N/A (PL13).
-	echo -e "$(date -u -Iseconds)\tPROBE_FAILED\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A" >> "$tsv"
+	# Degraded row: 34 cols, key cols populated, context column carries the status
+	# sentinel, restarted=unknown (column 31) so the report excludes it from n_valid;
+	# every numeric column N/A per PL13 (including push-by-type and config samples —
+	# nothing was measured, so 0/0/0 would be a misleading literal).
+	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A" >> "$tsv"
 }
 
 {
@@ -424,6 +459,13 @@ stop_peak_metrics_poller() {
 
 trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 
+# B4: pre-create the TSV with the full preamble before any combo runs (skipped in
+# dry-run — probe_kube_versions would touch clusters). Guarantees provenance even if
+# the very first combo's setup/baseline fails.
+if ((! DRY_RUN)); then
+	precreate_tsv_preamble
+fi
+
 combo_idx=0
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
@@ -469,7 +511,7 @@ for ms in "${MESH_SIZES[@]}"; do
 						# (never abort the sweep). The final phase is skipped (its state-dir
 						# baseline is missing/partial). Best-effort cleanup before continue.
 						echo "warn: [$combo_idx/$MATRIX_SIZE] baseline probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
-						emit_probe_failed_row "$ms" "$sc" "$rc" "$nc" "$scp"
+						emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
 						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
 							echo "warn: cleanup after baseline failure also reported failure for '$label'" >&2
 						rm -rf "$STATE_DIR_COMBO"
@@ -481,12 +523,26 @@ for ms in "${MESH_SIZES[@]}"; do
 					start_peak_metrics_poller "$STATE_DIR_COMBO"
 
 					echo "--- Deploying workloads (phase 2/3, scoping=$scp) ---"
-					"$SCRIPT_DIR/001-setup-controlplane-test.sh" \
+					# B1: setup is the MOST probable per-combo failure at scale (helm
+					# template|apply + label-selector waits across ~50 PFs). Bare under
+					# set -e it would abort the whole sweep AND leak the background peak
+					# poller started just above. So: stop the poller, record a SETUP_FAILED
+					# row (n_total++, excluded from n_valid), clean up, settle, continue.
+					if ! "$SCRIPT_DIR/001-setup-controlplane-test.sh" \
 						--contexts "$active_csv" \
 						--service-count "$sc" \
 						--replicas "$rc" \
 						--namespace-count "$nc" \
-						--sidecar-scoping "$scp"
+						--sidecar-scoping "$scp"; then
+						echo "warn: [$combo_idx/$MATRIX_SIZE] setup failed for '$label'; recording SETUP_FAILED row and continuing" >&2
+						stop_peak_metrics_poller   # MUST stop before continue — poller runs in background
+						emit_failed_row SETUP_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
+						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+							echo "warn: cleanup after setup failure also reported failure for '$label'" >&2
+						rm -rf "$STATE_DIR_COMBO"
+						if (( SETTLE_SEC > 0 )); then sleep "$SETTLE_SEC"; fi
+						continue
+					fi
 					echo ""
 
 					if (( SETTLE_SEC > 0 )); then
@@ -516,7 +572,7 @@ for ms in "${MESH_SIZES[@]}"; do
 						# + continue. (The probe may have emitted partial per-pod rows before
 						# failing; this fallback guarantees at least one combo row in n_total.)
 						echo "warn: [$combo_idx/$MATRIX_SIZE] final probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
-						emit_probe_failed_row "$ms" "$sc" "$rc" "$nc" "$scp"
+						emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
 					fi
 					rm -rf "$STATE_DIR_COMBO"
 					echo ""

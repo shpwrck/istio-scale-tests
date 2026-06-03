@@ -75,18 +75,82 @@ lint_bare_scrape_file() {
 	' "$file"
 }
 
+# B7: flag bare per-combo orchestrator-step calls.
+#
+# Why: a sweep orchestrator's per-combo step `"$SCRIPT_DIR/00N-*.sh" …` (setup / probe
+# / cleanup) returns non-zero on a per-combo failure; bare in statement position it
+# aborts the entire multi-hour sweep under `set -e`, discarding every completed combo
+# (this is the B1 regression class). Such a call must be captured, `|| …`'d, or used
+# as an `if`/`while` condition so the failure becomes a recorded row + continue.
+#
+# Scope/exemptions (deterministic — no fragile loop-depth tracking):
+#   - Only `*-run-sweep.sh` files are checked.
+#   - Only statement-position calls (the trimmed line STARTS with the
+#     "$SCRIPT_DIR/0NN-...sh" token — so captures `X="$(…)"` and `if !/while`
+#     conditions, which start with other tokens, are inherently excluded).
+#   - REPORT/aggregation steps are exempted by name: a post-loop report failure is
+#     acceptable (the sweep already produced its TSVs), and report scripts are
+#     conventionally the last call. Exempted suffixes: -report-results.sh,
+#     -collect-pilot-metrics.sh, -compare-profiles.sh.
+#   - Guarded (`|| …` / `&& …`) or function-tail calls pass.
+#
+# lint_bare_orchestrator_step_file <file>
+#   Only meaningful for *-run-sweep.sh; emits offenders, returns 1 if any.
+lint_bare_orchestrator_step_file() {
+	local file="$1"
+	[[ -f "$file" ]] || return 0
+	awk -v FILE="$file" '
+		BEGIN { offenders = 0 }
+		{ lines[NR] = $0 }
+		END {
+			for (n = 1; n <= NR; n++) {
+				line = lines[n]
+				t = line
+				sub(/^[ \t]+/, "", t)
+				if (t ~ /^#/ || t == "") continue
+				# Statement-position "$SCRIPT_DIR/0NN-...sh" call?
+				if (t !~ /^"\$SCRIPT_DIR(\/|")[^"]*0[0-9][0-9]-[^"]*\.sh"/) continue
+				# Exempt report/aggregation steps (post-loop; failure acceptable).
+				if (t ~ /-report-results\.sh"/ || t ~ /-collect-pilot-metrics\.sh"/ || t ~ /-compare-profiles\.sh"/) continue
+				# Guarded by || or && anywhere on the line -> OK.
+				if (t ~ /\|\|/ || t ~ /&&/) continue
+				# Function-tail (next non-blank, non-comment line is "}") -> OK.
+				is_tail = 0
+				for (m = n + 1; m <= NR; m++) {
+					nx = lines[m]; sub(/^[ \t]+/, "", nx)
+					if (nx == "" || nx ~ /^#/) continue
+					if (nx == "}" || nx ~ /^}[ \t]*(#.*)?$/) is_tail = 1
+					break
+				}
+				if (is_tail) continue
+				step = t; sub(/[ \t].*$/, "", step)
+				printf "%s:%d: bare orchestrator-step call %s (wrap with `if ! …; then warn; record; continue; fi` or `|| { … }`)\n", FILE, n, step
+				offenders++
+			}
+			exit (offenders > 0 ? 1 : 0)
+		}
+	' "$file"
+}
+
 # lint_bare_scrape_paths <path>...
 #   Recurses into directories for *.sh files; lints individual files directly.
-#   Returns 0 if all clean, 1 if any offender found.
+#   Runs the scrape-call lint on every *.sh, and the orchestrator-step lint on
+#   *-run-sweep.sh. Returns 0 if all clean, 1 if any offender found.
 lint_bare_scrape_paths() {
 	local rc=0 p f
 	for p in "$@"; do
 		if [[ -d "$p" ]]; then
 			while IFS= read -r f; do
 				lint_bare_scrape_file "$f" || rc=1
+				case "$f" in
+					*-run-sweep.sh) lint_bare_orchestrator_step_file "$f" || rc=1 ;;
+				esac
 			done < <(find "$p" -name '*.sh' -type f 2>/dev/null | sort)
 		elif [[ -f "$p" ]]; then
 			lint_bare_scrape_file "$p" || rc=1
+			case "$p" in
+				*-run-sweep.sh) lint_bare_orchestrator_step_file "$p" || rc=1 ;;
+			esac
 		fi
 	done
 	return "$rc"
