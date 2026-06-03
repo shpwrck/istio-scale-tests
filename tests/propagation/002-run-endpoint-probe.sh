@@ -89,6 +89,13 @@ CHART_DIR="${ROOT}/tests/propagation/chart"
 # drains the endpoint — a config-only mutation with no pod boot.
 CANARY_ACTIVE_LABEL_KEY="propagation-active"
 
+# R3-4: the warmed backer image is stamped into the TSV preamble so a row is
+# self-describing about the workload that was propagated. Sourced from
+# config/versions.env (above); default-guarded for `set -u`. Keep in sync with the
+# tag 001-setup passes via --set backer.image.tag.
+: "${HTTP_ECHO_VERSION:=1.0}"
+BACKER_IMAGE="hashicorp/http-echo:${HTTP_ECHO_VERSION}"
+
 
 usage() {
 	cat <<EOF
@@ -118,13 +125,17 @@ Measurement methodology:
                          delta-window p50/p99 (p1_conv_p50_ms / p1_conv_p99_ms).
                          Min-sample guard: p50 N/A if total < 10; p99 N/A if total < 30.
   P2 (remote discovery) — pilot_xds_pushes{type="eds"} counter delta on the
-                          remote istiod. Under the O1 label-flip topology the
-                          canary Service persists across iterations (t0 adds an
-                          endpoint, not a Service), so the EDS bump is called
-                          "clean" iff our canary became health_flags::healthy on
-                          this remote's watcher sidecar (the same signal P3 uses);
-                          an EDS bump WITHOUT that confirmation is flagged
-                          p2_dirty=1 as possible unrelated endpoint churn.
+                          remote istiod; p2_ms is stamped at the first EDS bump.
+                          Under the O1 label-flip topology the canary Service
+                          persists across iterations (t0 adds an endpoint, not a
+                          Service), so cleanliness is reconciled against P3's
+                          OUTCOME for the same remote: clean iff the canary became
+                          health_flags::healthy within the window (P3 succeeded),
+                          p2_dirty=1 iff EDS bumped but P3 timed out / never went
+                          healthy (the bump could not be attributed to our canary —
+                          likely unrelated endpoint churn). Reconciling against P3
+                          (not an instantaneous health read at the bump) avoids
+                          falsely flagging the necessary P3-after-P2 apply lag.
   P3 (remote sidecar)   — watcher Envoy /clusters, rate-limited; the only
                           available data-plane-side signal without a custom
                           xDS client.
@@ -374,12 +385,15 @@ if ((WRITE_TSV)); then
 		# the per-curl wait and therefore the worst-case skew the gate can measure.
 		echo "# FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}"
 		echo "# FANOUT_METRICS_TIMEOUT=${METRICS_TIMEOUT}"
+		echo "# BACKER_IMAGE=${BACKER_IMAGE}"
 		echo "# DATE=$(date -u -Iseconds)"
 	} > "$TSV_FILE"
 	# Columns (tab-separated). Old p1/p2/p3 cols preserved for back-compat with
-	# pre-branch readers. New columns are appended. p2_dirty (B1) is a 0/1 flag
-	# indicating the EDS push delta was not matched by a pilot_services delta
-	# (i.e. EDS bumped from unrelated endpoint churn). restarted is 0/1/unknown.
+	# pre-branch readers. New columns are appended. p2_dirty is a 0/1 flag set to 1
+	# (R3-1) when the EDS push bumped but the canary did NOT become health_flags::
+	# healthy on this remote's watcher within the window (P3 did not succeed) — i.e.
+	# the EDS bump could not be attributed to our canary (likely unrelated endpoint
+	# churn). restarted is 0/1/unknown.
 	echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms" >> "$TSV_FILE"
 fi
 
@@ -854,39 +868,36 @@ normalize_proxy_count() {
 # NOT change — svc_delta is 0 every iteration and the old check flagged p2_dirty=1
 # unconditionally, structurally always-dropping p2_ms in 005.
 #
-# New companion signal (option (b) in the brief): the EDS bump is "clean" iff our
-# canary endpoint actually became HEALTHY on this remote's watcher sidecar — the
-# exact same health_flags::healthy signal P3 detects. That is unambiguously OUR
-# change (an unrelated workload's endpoint churn never makes propagation-canary
-# healthy on the watcher). We check it via ONE watcher Envoy /clusters read at the
-# moment the EDS counter bumps (once per iteration per remote, NOT per tick), so no
-# extra cluster round-trips are added to the hot poll loop. When the EDS counter
-# bumped but the canary is NOT yet healthy on the sidecar, the bump is attributed
-# to churn and p2_dirty=1 is set; we still record the timestamp so legacy p2_ms
-# stays positionally comparable. envoy_port<=0 disables the check (clean by
-# default) for callers that do not pass a watcher port.
+# Round-2 reconciled cleanliness against an instantaneous health_flags::healthy
+# /clusters read AT THE EDS-BUMP INSTANT — but that is causally too early: istiod
+# increments pilot_xds_pushes{type=eds} when it ISSUES the push, and the sidecar
+# only reports health_flags::healthy after it APPLIES it (that lag IS the P3-P2 gap,
+# necessarily > 0). So a legitimately-clean iteration read "not healthy yet ->
+# dirty=1", re-collapsing the P2 column. R3-1 FIX: this poll loop no longer makes
+# the dirty decision at all — it only stamps the P2 LATENCY timestamp at the first
+# EDS bump. p2_dirty is reconciled by the CALLER against the SAME remote's P3
+# OUTCOME (clean iff the canary became health_flags::healthy within the window, i.e.
+# P3 succeeded; dirty iff EDS bumped but P3 timed out / never went healthy). P3's
+# own retrying poll already waits for that signal, so there is no second /clusters
+# consumer racing the P3 poller here.
 # Fanned out across the remote's istiod pods: eds_count + pushes_total SUM across
 # pods, restart via proc_start_sig.
 poll_p2_remote_eds_push() {
 	local polldir="$1" t0="$2" baseline_eds="$3" result_file="$4" restart_baseline="$5"
-	local envoy_port="$6" dirty_file="$7"
-	shift 7
+	shift 5
 	local -a ports=("$@")
 	local deadline_ms=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local ever_complete=0
 	mkdir -p "$polldir"
-	# Initialize dirty file to "0" (clean) until we see a dirty hit.
-	echo "0" > "$dirty_file"
 	while true; do
 		local now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			if (( ever_complete )); then echo "TIMEOUT" > "$result_file"; else echo "INCOMPLETE" > "$result_file"; fi
 			return
 		fi
-		# One fanned-out scrape+aggregate per tick (pilot_xds/eds summed across
-		# pods, pilot_services invariant). Returns the kv/hist aggregate files.
+		# One fanned-out scrape+aggregate per tick (eds_count summed across pods).
 		# Skip the detection test on an incomplete scrape (a missing pod undercounts
-		# the summed eds_count / pilot_services delta).
+		# the summed eds_count delta).
 		fanout_scrape_aggregate "$polldir" "tick" pilot_proxy_convergence_time "${ports[@]}" >/dev/null
 		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
 			sleep "$POLL_INTERVAL_S"
@@ -904,23 +915,9 @@ poll_p2_remote_eds_push() {
 		[[ -z "$cur_eds" ]] && cur_eds=0
 		# Counter could appear to "decrease" mid restart/deploy; treat as not-yet.
 		if (( cur_eds > baseline_eds )); then
-			# B1 (O1): clean iff our canary is HEALTHY on this remote's watcher
-			# sidecar (the same health_flags::healthy signal P3 uses) — that is OUR
-			# change, not unrelated endpoint churn that also bumped the EDS counter.
-			# One /clusters read at the bump (not per-tick). envoy_port<=0 disables
-			# the check (clean by default).
-			if (( envoy_port > 0 )); then
-				local clusters
-				if clusters=$(curl -fsS --max-time "$METRICS_TIMEOUT" \
-					"http://localhost:${envoy_port}/clusters" 2>/dev/null); then
-					echo "$clusters" | grep -Eq "propagation-canary[^[:space:]]*health_flags::healthy([^a-zA-Z_]|$)" \
-						|| echo "1" > "$dirty_file"
-				else
-					# Could not read the sidecar to confirm cleanliness — be honest
-					# and flag dirty rather than silently calling an unconfirmed bump clean.
-					echo "1" > "$dirty_file"
-				fi
-			fi
+			# R3-1: stamp the P2 latency timestamp at the FIRST EDS bump only. The
+			# cleanliness (p2_dirty) decision is made by the caller against P3's
+			# outcome for this remote — see the per-remote loop below.
 			now_ns > "$result_file"
 			return
 		fi
@@ -1214,27 +1211,22 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	P2_FILES=()
 	P3_FILES=()
-	P2_DIRTY_FILES=()
 	for i in "${!REMOTES[@]}"; do
 		p2f="$TMPDIR_RUN/p2_${iter}_${i}"
 		p3f="$TMPDIR_RUN/p3_${iter}_${i}"
-		p2dirtyf="$TMPDIR_RUN/p2dirty_${iter}_${i}"
 		: > "$p2f"
 		: > "$p3f"
-		: > "$p2dirtyf"
 		P2_FILES+=("$p2f")
 		P3_FILES+=("$p3f")
-		P2_DIRTY_FILES+=("$p2dirtyf")
 		baseline_eds=$(kv_get "$BASELINE_DIR/remote-${i}-kv" eds_count)
 		remote_start=$(kv_get "$BASELINE_DIR/remote-${i}-kv" proc_start_sig)
 		[[ -z "$baseline_eds" ]] && baseline_eds=0
 		_rip=()  # populated by load_rmt_istiod_ports via nameref
 		load_rmt_istiod_ports "$i" _rip
-		# B1 (O1): pass the remote's watcher Envoy port so the EDS-bump cleanliness
-		# check can confirm OUR canary went healthy on the sidecar (same port P3 uses).
+		# R3-1: P2 poll only stamps the EDS-bump latency timestamp; p2_dirty is
+		# reconciled against P3's outcome at row-write time (below), not here.
 		poll_p2_remote_eds_push "$TMPDIR_RUN/p2poll-${iter}-${i}" "$T0" \
 			"$baseline_eds" "$p2f" "$remote_start" \
-			"$(( BASE_ENVOY_PF_PORT + i ))" "$p2dirtyf" \
 			"${_rip[@]}" &
 		POLL_PIDS+=($!)
 		poll_p3_sidecar_endpoints $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$p3f" &
@@ -1384,11 +1376,23 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			if [[ "$p2_restarted" == "0" && "$remote_start" == "unknown" ]]; then
 				p2_restarted="unknown"
 			fi
+			# R3-1: p2_dirty is reconciled against THIS remote's P3 outcome, not an
+			# instantaneous health read at the EDS bump (which is causally too early —
+			# the sidecar only goes health_flags::healthy AFTER it applies the push the
+			# EDS counter already counted, so the P3-P2 gap would falsely read dirty).
+			# An EDS bump is "clean" iff the canary actually became healthy on this
+			# remote's watcher within the window (P3 succeeded -> p3_ms numeric), and
+			# "dirty" iff EDS bumped but P3 timed out / never went healthy (the bump
+			# could not be attributed to our canary => likely unrelated endpoint churn).
+			# When EDS never bumped (p2_ms non-numeric) there is no bump to attribute,
+			# so p2_dirty stays 0 (the non-numeric p2_ms is excluded from aggregation
+			# regardless). P3's own retrying poll is the single /clusters consumer.
 			p2_dirty="0"
-			[[ -s "${P2_DIRTY_FILES[i]}" ]] && p2_dirty=$(<"${P2_DIRTY_FILES[i]}")
-			[[ -z "$p2_dirty" ]] && p2_dirty="0"
+			if [[ "$p2_ms" =~ ^[0-9]+$ ]] && ! [[ "$p3_ms" =~ ^[0-9]+$ ]]; then
+				p2_dirty="1"
+			fi
 
-			echo "  P2 (remote istiod ${REMOTES[i]}, EDS push): ${p2_ms}ms  dirty=${p2_dirty}"
+			echo "  P2 (remote istiod ${REMOTES[i]}, EDS push): ${p2_ms}ms  dirty=${p2_dirty} (P3-reconciled)"
 			echo "  P3 (remote sidecar ${REMOTES[i]}):          ${p3_ms}ms"
 
 			if [[ "$p2_ms" =~ ^[0-9]+$ ]]; then
@@ -1489,10 +1493,12 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "- **P1** (local xDS push): \`pilot_proxy_convergence_time\` histogram delta on source istiod."
 	echo "  Converged when delta \`_count\` >= \`proxy_count\`. Reports wall-clock"
 	echo "  time-to-converged-count plus delta-window p50/p99 of the histogram itself."
-	echo "- **P2** (remote discovery): \`pilot_xds_pushes{type=\"eds\"}\` counter delta on each remote istiod;"
-	echo "  flagged \`p2_dirty=1\` unless our canary is confirmed \`health_flags::healthy\` on that"
-	echo "  remote's watcher sidecar (O1 label-flip: the Service persists across iterations, so a"
-	echo "  \`pilot_services\` delta is no longer the right \"our change\" signal)."
+	echo "- **P2** (remote discovery): \`pilot_xds_pushes{type=\"eds\"}\` counter delta on each remote"
+	echo "  istiod; \`p2_ms\` stamped at the first EDS bump. \`p2_dirty=1\` (R3-1) when the EDS bumped"
+	echo "  but our canary did NOT become \`health_flags::healthy\` on that remote's watcher within"
+	echo "  the window (P3 did not succeed) — i.e. the bump could not be attributed to our canary."
+	echo "  Reconciled against P3's outcome, not an instantaneous health read at the bump (which"
+	echo "  would falsely flag the necessary P3-after-P2 apply lag)."
 	echo "- **P3** (remote sidecar): watcher Envoy \`/clusters\` polled at >= 1 Hz for a"
 	echo "  healthy canary endpoint. t0 is a config-only active-label flip onto a"
 	echo "  pre-warmed backer pod, so P3 excludes pod boot / image pull / sidecar startup."
