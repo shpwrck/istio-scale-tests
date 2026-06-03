@@ -36,6 +36,10 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/config/options.env"  # O9: SCALE_SIZING_MODE / SCALE_* knobs (default-off)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/capacity.sh"  # O9: read-only capacity probes (auto sizing, gated)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -166,11 +170,73 @@ echo "Namespace count: $NAMESPACE_COUNT"
 echo "Namespaces:      ${NAMESPACES[*]}"
 echo "Sidecar scoping: $SIDECAR_SCOPING"
 ((DRY_RUN)) && echo "Mode:            dry-run"
+SCALE_SIZING_MODE="${SCALE_SIZING_MODE:-fixed}"
+[[ "$SCALE_SIZING_MODE" == auto ]] && echo "Sizing mode:     auto (O9 capacity-derived SERVICE_COUNT)"
 echo ""
+
+# O9 Phase 2 (DEFAULT-OFF): capacity-derived sizing. ONLY runs when the operator
+# opts in with SCALE_SIZING_MODE=auto. With the default `fixed` this whole block is
+# skipped and SERVICE_COUNT keeps its CLI/env value — behaviour is byte-identical to
+# pre-O9. Never runs in --dry-run (would touch the cluster).
+#
+# per_pod_cpu_m / per_pod_mem_mi: the dummy chart's container declares NO resources
+# block (tests/controlplane/chart/templates/dummy-deployment.yaml), so the app
+# container's request is effectively 0; the dominant cost is the injected istio-proxy
+# sidecar. We use a documented conservative constant (sidecar default ~100m / ~128Mi
+# plus headroom) until calibrated against a real cluster on the clean re-run. These
+# are intentionally generous so auto-sizing under-provisions rather than over-provisions.
+PER_POD_CPU_M=200
+PER_POD_MEM_MI=256
+if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
+	src_ctx="${CONTEXTS[0]}"
+	echo "Auto-sizing from capacity on source context $src_ctx (target_fraction=${SCALE_TARGET_FRACTION}, reserve=${SCALE_SYSTEM_RESERVE_FRACTION})..."
+	a_cpu="unknown"; a_mem="unknown"; a_pods="unknown"
+	# shellcheck disable=SC2207
+	nt=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${nt[@]}"; do
+		case "$kv" in
+			cpu_m=*) a_cpu="${kv#cpu_m=}" ;;
+			mem_mi=*) a_mem="${kv#mem_mi=}" ;;
+			pods=*) a_pods="${kv#pods=}" ;;
+		esac
+	done
+	i_cpu="unknown"; i_mem="unknown"; i_rep="unknown"
+	# shellcheck disable=SC2207
+	il=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${il[@]}"; do
+		case "$kv" in
+			cpu_m=*) i_cpu="${kv#cpu_m=}" ;;
+			mem_mi=*) i_mem="${kv#mem_mi=}" ;;
+			replicas=*) i_rep="${kv#replicas=}" ;;
+		esac
+	done
+	max_pods=$(cap_max_pods "$a_cpu" "$a_mem" "$a_pods" "$i_cpu" "$i_mem" "$i_rep" \
+		"$PER_POD_CPU_M" "$PER_POD_MEM_MI" "$SCALE_TARGET_FRACTION" "$SCALE_SYSTEM_RESERVE_FRACTION")
+	if [[ "$max_pods" == unknown ]]; then
+		echo "  WARN: capacity unreadable on $src_ctx; auto-sizing falls back to fixed SERVICE_COUNT=$SERVICE_COUNT" >&2
+	else
+		derived=$(( max_pods / REPLICAS ))
+		(( derived < 1 )) && derived=1
+		echo "  capacity-derived max_pods=$max_pods / replicas=$REPLICAS -> SERVICE_COUNT=$derived (was $SERVICE_COUNT)"
+		SERVICE_COUNT="$derived"
+		if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
+			echo "  note: clamping --namespace-count $NAMESPACE_COUNT down to derived SERVICE_COUNT $SERVICE_COUNT" >&2
+			NAMESPACE_COUNT="$SERVICE_COUNT"
+			NAMESPACES=()
+			if ((NAMESPACE_COUNT <= 1)); then NAMESPACES=("$NS")
+			else for ((n = 0; n < NAMESPACE_COUNT; n++)); do NAMESPACES+=("${NS}-${n}"); done
+			fi
+		fi
+	fi
+	echo ""
+fi
 
 # Capacity preflight: verify each cluster can schedule the planned pods before
 # deploying anything. Queries node allocatable.pods and current pod count; fails
-# early with an actionable message instead of hanging at the wait timeout.
+# early with an actionable message instead of hanging at the wait timeout. This is
+# the single ceiling-and-floor gate: it DIES on over-provision (O5) and, under
+# SCALE_SIZING_MODE=auto, additionally WARNs on under-provision (O9 coverage floor)
+# — hard-failing only when SCALE_COVERAGE_ENFORCE=1.
 if ! ((DRY_RUN)); then
 	NEEDED_PODS=$((SERVICE_COUNT * REPLICAS))
 	echo "Capacity preflight ($NEEDED_PODS pods needed per cluster)..."
@@ -184,6 +250,20 @@ if ! ((DRY_RUN)); then
 				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current running). Reduce --service-count or --replicas, or add nodes."
 			fi
 			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
+			# O9 under-provision coverage floor (auto mode only; informational unless
+			# SCALE_COVERAGE_ENFORCE=1). Achieved fraction = needed / allocatable.
+			if [[ "$SCALE_SIZING_MODE" == auto ]] && (( alloc > 0 )); then
+				min_frac="${SCALE_COVERAGE_MIN_FRACTION:-0.25}"
+				under=$(awk -v n="$NEEDED_PODS" -v a="$alloc" -v m="$min_frac" \
+					'BEGIN{ print ((n/a) < (m+0)) ? 1 : 0 }')
+				if (( under )); then
+					frac=$(awk -v n="$NEEDED_PODS" -v a="$alloc" 'BEGIN{ printf "%.3f", n/a }')
+					if [[ "${SCALE_COVERAGE_ENFORCE:-0}" == "1" ]]; then
+						die "context $ctx: SCALE_COVERAGE: UNDER ($NEEDED_PODS/$alloc pods = $frac < min $min_frac) and SCALE_COVERAGE_ENFORCE=1"
+					fi
+					echo "  WARN: $ctx: SCALE_COVERAGE: UNDER ($NEEDED_PODS/$alloc pods = $frac < min $min_frac) — under-scaled (set SCALE_SIZING_MODE=auto + more nodes, or SCALE_COVERAGE_ENFORCE=1 to fail)" >&2
+				fi
+			fi
 		else
 			echo "  $ctx: could not query capacity (alloc=$alloc, current=$current) — skipping preflight" >&2
 		fi

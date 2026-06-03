@@ -35,6 +35,10 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/config/options.env"  # O9: SCALE_TARGET_FRACTION (preamble key)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/capacity.sh"  # O9: read-only capacity probes (Phase-1 legibility)
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="${ROOT}/tests/controlplane/results"
@@ -279,6 +283,35 @@ for i in "${!CONTEXTS[@]}"; do
 done
 rm -rf "$KUBE_PROBE_DIR"
 
+# O9 Phase 1 (legibility): read the SOURCE context's node allocatable + istiod
+# resource limits once, for the preamble. These are cheap read-only kubectl gets
+# (cap_*.sh tolerates failure -> `unknown`). Per-row capacity columns are computed
+# separately near row assembly (outside the measurement-sensitive scrape window).
+# Skipped for --phase baseline (no preamble written then).
+PRE_NODE_ALLOC_CPU_M="unknown"
+PRE_NODE_ALLOC_MEM_MI="unknown"
+PRE_ISTIOD_CPU_LIMIT_M="unknown"
+PRE_ISTIOD_MEM_LIMIT_MI="unknown"
+if [[ "$PHASE" != baseline ]]; then
+	src_ctx="${CONTEXTS[0]}"
+	# shellcheck disable=SC2207
+	nt_kv=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${nt_kv[@]}"; do
+		case "$kv" in
+			cpu_m=*) PRE_NODE_ALLOC_CPU_M="${kv#cpu_m=}" ;;
+			mem_mi=*) PRE_NODE_ALLOC_MEM_MI="${kv#mem_mi=}" ;;
+		esac
+	done
+	# shellcheck disable=SC2207
+	il_kv=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${il_kv[@]}"; do
+		case "$kv" in
+			cpu_m=*) PRE_ISTIOD_CPU_LIMIT_M="${kv#cpu_m=}" ;;
+			mem_mi=*) PRE_ISTIOD_MEM_LIMIT_MI="${kv#mem_mi=}" ;;
+		esac
+	done
+fi
+
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	{
@@ -291,11 +324,16 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# PHASE=${PHASE}"
 		echo "# SIDECAR_SCOPING=${SIDECAR_SCOPING}"
 		echo "# CONFIG_DUMP_SAMPLES=${CONFIG_DUMP_SAMPLES}"
+		echo "# NODE_ALLOC_CPU_M=${PRE_NODE_ALLOC_CPU_M}"
+		echo "# NODE_ALLOC_MEM_MI=${PRE_NODE_ALLOC_MEM_MI}"
+		echo "# ISTIOD_CPU_LIMIT_M=${PRE_ISTIOD_CPU_LIMIT_M}"
+		echo "# ISTIOD_MEM_LIMIT_MI=${PRE_ISTIOD_MEM_LIMIT_MI}"
+		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING"
 	} > "$TSV_FILE"
 fi
 
-# Schema (TSV header — 34 columns):
+# Schema (TSV header — 40 columns):
 #   timestamp context mesh_size service_count replicas namespace_count sidecar_scoping
 #   istiod_mem_mi
 #   convergence_p50_ms convergence_p99_ms queue_p50_ms queue_p99_ms
@@ -307,8 +345,10 @@ fi
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #   istiod_cpu_m_delta
 #   go_heap_alloc_mi go_heap_inuse_mi
+#   (O9 cols 35-40) istiod_cpu_pct_of_limit istiod_mem_pct_of_limit
+#                   node_cpu_pct node_mem_pct pods_scheduled pods_allocatable
 if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
-	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi" >> "$TSV_FILE"
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
@@ -807,6 +847,83 @@ compute_skew_ms() {
 }
 
 # ---------------------------------------------------------------------------
+# O9 Phase 1: per-context capacity legibility (cols 35-40).
+# ---------------------------------------------------------------------------
+# Cheap read-only kubectl gets (NOT in the scrape window — called once per ctx at
+# row assembly). Each cap_* tolerates failure -> `unknown` -> we emit N/A so the
+# report's is_num/NF logic treats it like any other N/A column. Results cached
+# per ctx so multi-replica rows on the same ctx don't re-read.
+declare -A CAP_CACHE  # ctx -> "icpu_pct imem_pct ncpu_pct nmem_pct pods_sched pods_alloc"
+
+collect_capacity_for_ctx() {
+	local ctx="$1"
+	[[ -n "${CAP_CACHE[$ctx]:-}" ]] && return 0
+
+	local node_cpu_m="unknown" node_mem_mi="unknown" node_pods="unknown" worker_csv=""
+	local kv
+	# shellcheck disable=SC2207
+	local -a nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
+	for kv in "${nt[@]}"; do
+		case "$kv" in
+			cpu_m=*) node_cpu_m="${kv#cpu_m=}" ;;
+			mem_mi=*) node_mem_mi="${kv#mem_mi=}" ;;
+			pods=*) node_pods="${kv#pods=}" ;;
+			names=*) worker_csv="${kv#names=}" ;;
+		esac
+	done
+
+	local used_cpu_m="unknown" used_mem_mi="unknown"
+	# shellcheck disable=SC2207
+	local -a nu=($(cap_node_used "$ctx" "$worker_csv" "${KUBECTL[@]}"))
+	for kv in "${nu[@]}"; do
+		case "$kv" in
+			cpu_m=*) used_cpu_m="${kv#cpu_m=}" ;;
+			mem_mi=*) used_mem_mi="${kv#mem_mi=}" ;;
+		esac
+	done
+
+	local pods_sched="unknown"
+	# shellcheck disable=SC2207
+	local -a pc=($(cap_pod_count "$ctx" "$worker_csv" "${KUBECTL[@]}"))
+	for kv in "${pc[@]}"; do
+		case "$kv" in scheduled=*) pods_sched="${kv#scheduled=}" ;; esac
+	done
+
+	# Only the cpu/mem limits are needed here (replicas is not part of the per-row
+	# %-of-limit columns); cap_istiod_limits still emits a replicas= token we ignore.
+	local istd_cpu_m="unknown" istd_mem_mi="unknown"
+	# shellcheck disable=SC2207
+	local -a il=($(cap_istiod_limits "$ctx" "${KUBECTL[@]}"))
+	for kv in "${il[@]}"; do
+		case "$kv" in
+			cpu_m=*) istd_cpu_m="${kv#cpu_m=}" ;;
+			mem_mi=*) istd_mem_mi="${kv#mem_mi=}" ;;
+		esac
+	done
+
+	local istd_used_cpu_m="unknown" istd_used_mem_mi="unknown"
+	# shellcheck disable=SC2207
+	local -a iu=($(cap_istiod_used "$ctx" "${KUBECTL[@]}"))
+	for kv in "${iu[@]}"; do
+		case "$kv" in
+			cpu_m=*) istd_used_cpu_m="${kv#cpu_m=}" ;;
+			mem_mi=*) istd_used_mem_mi="${kv#mem_mi=}" ;;
+		esac
+	done
+
+	# Percent columns (N/A when any input unknown).
+	local icpu_pct imem_pct ncpu_pct nmem_pct
+	icpu_pct=$(cap_pct "$istd_used_cpu_m" "$istd_cpu_m"); [[ "$icpu_pct" == unknown ]] && icpu_pct="N/A"
+	imem_pct=$(cap_pct "$istd_used_mem_mi" "$istd_mem_mi"); [[ "$imem_pct" == unknown ]] && imem_pct="N/A"
+	ncpu_pct=$(cap_pct "$used_cpu_m" "$node_cpu_m"); [[ "$ncpu_pct" == unknown ]] && ncpu_pct="N/A"
+	nmem_pct=$(cap_pct "$used_mem_mi" "$node_mem_mi"); [[ "$nmem_pct" == unknown ]] && nmem_pct="N/A"
+	[[ "$pods_sched" == unknown ]] && pods_sched="N/A"
+	local pods_alloc="$node_pods"; [[ "$pods_alloc" == unknown ]] && pods_alloc="N/A"
+
+	CAP_CACHE[$ctx]="${icpu_pct} ${imem_pct} ${ncpu_pct} ${nmem_pct} ${pods_sched} ${pods_alloc}"
+}
+
+# ---------------------------------------------------------------------------
 # Main scrape_window: baseline + final + deltas + emit TSV rows.
 # ---------------------------------------------------------------------------
 
@@ -862,7 +979,11 @@ scrape_window() {
 			echo "warning: no final scrape for $ctx/${POD_NAMES[k]}; emitting N/A row" >&2
 			# PL13: push-by-type and config-sample columns are N/A (nothing measured),
 			# not literal 0/0/0 which would read as a real zero-push observation.
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A" >> "$TSV_FILE"
+			# O9 cols 35-40: the context is real, so capacity (read-only) is still
+			# meaningful; populate from the per-ctx cache (N/A when unreadable).
+			collect_capacity_for_ctx "$ctx"
+			cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
@@ -1054,7 +1175,12 @@ scrape_window() {
 			cd_samples="${got}/${attempted}"
 		fi
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}" >> "$TSV_FILE"
+		# O9 cols 35-40: per-context capacity legibility (read-only, cached per ctx,
+		# computed OUTSIDE the scrape window so it can't perturb the measurement timing).
+		collect_capacity_for_ctx "$ctx"
+		local cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
+
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}" >> "$TSV_FILE"
 		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 	done
 
@@ -1067,7 +1193,11 @@ scrape_window() {
 	local dctx
 	for dctx in "${DROPPED_CTXS[@]}"; do
 		echo "warning: context ${dctx}: dropped (zero istiod pods); emitting degraded N/A row" >&2
-		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A" >> "$TSV_FILE"
+		# O9 cols 35-40: node-level capacity is still readable even with zero istiod
+		# pods (istiod %-of-limit will be N/A, but node util / pod slots are valid).
+		collect_capacity_for_ctx "$dctx"
+		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
+		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
 	done
 }
 
@@ -1134,7 +1264,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo ""
 		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
 		echo "|---------|------|-----|------|----|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|----------|-------|-------|-------------------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=34 {
+		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=40 {
 			cfg_mb = ($24+0 > 0) ? sprintf("%.1f", $24/1048576) : "N/A"
 			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $33, $34, $10, $12, $22, $13, $16, $15, cfg_mb
 		}' "$TSV_FILE"
