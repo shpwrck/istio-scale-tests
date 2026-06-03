@@ -22,7 +22,10 @@ Drive the campaign end-to-end: verify mesh → preflight → dry-run all → run
 When you notice an issue that isn't breaking (a noisy metric, a suboptimal default, a fidelity caveat), **log it to `CAMPAIGN_STATUS.md`** and — if it warrants a fix — spawn a **subagent to investigate and draft a proposal** rather than fixing inline mid-campaign. Route harness code changes through `/scale-test-review` (see `docs/scale-test-team/`).
 
 ## Commands
-Use the exact Stage-2 (dry-run) and Stage-3 (live) commands from [`README.md`](README.md), with `CONTEXTS`/`MESH` set for your environment. Dry-run all five first; confirm matrices; then run serially.
+Use the exact Stage-2 (dry-run), Stage-3 (live), and **Stage-5 (teardown)** commands from [`README.md`](README.md), with `CONTEXTS`/`MESH` set for your environment. Dry-run all five first; confirm matrices; then run serially.
+
+## Teardown (always — Stage 5)
+The campaign isn't done until the test workloads are gone. Run **every** suite's `00X-cleanup.sh` (idempotent), then **poll until the `*-test` namespaces finish terminating** (deletion is async; sidecar-injected pods take up to ~a minute to drain) and verify none remain on any spoke. Do this on normal completion **and** whenever a suite dies mid-run before re-running it (a dead suite leaves its namespace `Active`). Cleanup removes only the test workloads — never the mesh.
 
 ## Definition of done
-All five suites COMPLETED (or clearly-marked FAILED with cause) in `CAMPAIGN_STATUS.md`; each suite's `results/sweep-<RUN_ID>/` has a markdown summary with non-empty rows per mesh size; all `*-test` namespaces cleaned up; the mesh still healthy (istiod ready, clusterz synced). Then post a final summary: headline metric per suite + any observations logged for follow-up.
+All five suites COMPLETED (or clearly-marked FAILED with cause) in `CAMPAIGN_STATUS.md`; each suite's `results/sweep-<RUN_ID>/` has a markdown summary with non-empty rows per mesh size; **the teardown ran and you verified zero `*-test` namespaces remain (post async termination) on every spoke**; the mesh still healthy (istiod ready, clusterz synced). Then post a final summary: headline metric per suite + which metrics are usable vs. failed/untrustworthy, + any observations logged for follow-up.
