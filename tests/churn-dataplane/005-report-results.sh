@@ -95,6 +95,11 @@ CHURN_DURATION_STR="$(extract_preamble_kv CHURN_DURATION_SEC)"
 QPS_STR="$(extract_preamble_kv QPS)"
 CONNECTIONS_STR="$(extract_preamble_kv CONNECTIONS)"
 NAMESPACE_STR="$(extract_preamble_kv NAMESPACE)"
+# R3-4: result-affecting scrape-skew knobs (PL2/PL19) so a report-only consumer can
+# see which ceiling produced the POISONED_SCRAPE drops, and the per-curl timeout
+# that bounds the skew the gate measures.
+FANOUT_MAX_SKEW_MS_STR="$(extract_preamble_kv FANOUT_MAX_SKEW_MS)"
+FANOUT_METRICS_TIMEOUT_STR="$(extract_preamble_kv FANOUT_METRICS_TIMEOUT)"
 
 # The core aggregation pass: build the joined per-(mesh_size, churn_rate) view
 # from baseline+churn pairs that share combo_id. Emit a single TSV stream that
@@ -231,6 +236,8 @@ emit_metadata_lines() {
 	printf '%s QPS=%s\n'                   "$prefix" "${QPS_STR:-unknown}"
 	printf '%s CONNECTIONS=%s\n'           "$prefix" "${CONNECTIONS_STR:-unknown}"
 	printf '%s NAMESPACE=%s\n'             "$prefix" "${NAMESPACE_STR:-unknown}"
+	printf '%s FANOUT_MAX_SKEW_MS=%s\n'    "$prefix" "${FANOUT_MAX_SKEW_MS_STR:-unknown}"
+	printf '%s FANOUT_METRICS_TIMEOUT=%s\n' "$prefix" "${FANOUT_METRICS_TIMEOUT_STR:-unknown}"
 }
 
 report_text() {
@@ -280,8 +287,10 @@ report_json() {
 		--arg qps              "${QPS_STR:-unknown}" \
 		--arg connections      "${CONNECTIONS_STR:-unknown}" \
 		--arg namespace        "${NAMESPACE_STR:-unknown}" \
+		--arg fanout_max_skew  "${FANOUT_MAX_SKEW_MS_STR:-unknown}" \
+		--arg fanout_metrics_timeout "${FANOUT_METRICS_TIMEOUT_STR:-unknown}" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace}, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout}, rows: $rows}'
 }
 
 report_md() {
@@ -300,6 +309,8 @@ report_md() {
 	echo "| QPS | ${QPS_STR:-unknown} |"
 	echo "| CONNECTIONS | ${CONNECTIONS_STR:-unknown} |"
 	echo "| NAMESPACE | \`${NAMESPACE_STR:-unknown}\` |"
+	echo "| FANOUT_MAX_SKEW_MS | ${FANOUT_MAX_SKEW_MS_STR:-unknown} |"
+	echo "| FANOUT_METRICS_TIMEOUT | ${FANOUT_METRICS_TIMEOUT_STR:-unknown} |"
 	echo ""
 	echo "| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 |"
 	echo "|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|------------------------|"

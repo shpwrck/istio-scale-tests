@@ -57,8 +57,8 @@ TSV columns consumed (positions are stable; new columns appended):
  17  p2_dirty         18  window_ms      19  scrape_skew_ms
 
 Phases emitted in the report:
-  P1_local_wall  wall-clock ms (p1_ms) from canary apply until histogram delta
-                 _count reached proxy_count.
+  P1_local_wall  wall-clock ms (p1_ms) from the t0 active-label flip until the
+                 histogram delta _count reached proxy_count.
   P1_conv_p50    p50 of delta-window pilot_proxy_convergence_time (ms).
   P1_conv_p99    p99 of delta-window pilot_proxy_convergence_time (ms).
   P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
@@ -67,10 +67,18 @@ Phases emitted in the report:
 Filtering policy (rows excluded from numeric aggregation):
   restarted == 1 or unknown
   p1_overflow == 1
-  status != OK   (TIMEOUT_*, DRAIN_TIMEOUT, RESTART)
+  status != OK   (TIMEOUT_*, DRAIN_TIMEOUT, RESTART, SCRAPE_INCOMPLETE)
+  scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS   (fallback: re-derives PRE-gate
+                 historical TSVs written status=OK with a high recorded skew, so
+                 they drop without a probe re-run; rows with no recorded skew kept)
 P2 values are additionally suppressed when p2_dirty == 1.
 
 n_total / n_valid: rows considered vs rows used after the above filtering.
+
+Environment:
+  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 fallback filter
+                      above (default 1000). Set it to the value the run was
+                      produced with to re-derive a historical sweep exactly.
 EOF
 }
 
@@ -123,7 +131,7 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_<KEY>[i]. Scalars are looked up via the first row (homogeneous by
 # definition); sequences iterate the rows in input order.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).

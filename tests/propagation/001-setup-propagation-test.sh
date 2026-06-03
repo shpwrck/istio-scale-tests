@@ -27,6 +27,11 @@ DRY_RUN=0
 CLEANUP=0
 WAIT_TIMEOUT=300
 WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
+# R3-2: pre-warmed backer image pin (O1). Sourced from config/versions.env; the
+# default guard keeps it bound under `set -u` if the pin is ever removed there.
+# Wired into the helm template below via --set so the chart values.yaml literal is
+# not the sole effective pin (mirrors tests/dataplane/001 --set fortioImage.tag).
+: "${HTTP_ECHO_VERSION:=1.0}"
 
 
 usage() {
@@ -134,6 +139,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		--set namespace="$NS" \
 		--set backer.enabled=true \
 		--set backer.active=false \
+		--set backer.image.tag="$HTTP_ECHO_VERSION" \
 		--set watcher.replicaCount="$WATCHER_REPLICAS" \
 		| "${apply[@]}" --context="$ctx" -f -
 done

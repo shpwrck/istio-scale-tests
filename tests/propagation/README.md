@@ -9,7 +9,7 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
 | Phase | What | How |
 |-------|------|-----|
 | P1 | Local istiod pushes xDS to local sidecars | Delta of `pilot_proxy_convergence_time` histogram on source istiod (converged when delta `_count` reaches connected proxy count). Reports both wall-clock detection time and delta-window p50/p99 of the histogram itself. |
-| P2 | Remote istiod discovers new endpoints | Delta of `pilot_xds_pushes{type="eds"}` counter on each remote istiod. First non-zero delta = remote learned about the new endpoint and pushed EDS. The bump is flagged `p2_dirty=1` unless our canary is confirmed `health_flags::healthy` on that remote's watcher sidecar at the moment of the bump (the same signal P3 uses) — otherwise it could be unrelated endpoint churn. |
+| P2 | Remote istiod discovers new endpoints | Delta of `pilot_xds_pushes{type="eds"}` counter on each remote istiod. First non-zero delta = remote learned about the new endpoint and pushed EDS (`p2_ms` is stamped here). The bump is flagged `p2_dirty=1` when the canary did **not** become `health_flags::healthy` on that remote's watcher within the window (i.e. P3 did not succeed) — reconciled against P3's outcome, since otherwise the bump could be unrelated endpoint churn. |
 | P3 | Remote sidecar has HEALTHY endpoints | Watcher pod's Envoy admin `/clusters` polled at >= 1 Hz (the only data-plane-side signal without a custom xDS client). |
 
 In multi-primary Istio, only endpoints propagate cross-cluster. VirtualService and DestinationRule are local config processed only by the istiod that owns the namespace.
@@ -137,13 +137,16 @@ Each TSV begins with `# KEY=VALUE` comment lines:
 # SETTLE_SEC=5
 # FANOUT_MAX_SKEW_MS=1000
 # FANOUT_METRICS_TIMEOUT=5
+# BACKER_IMAGE=hashicorp/http-echo:1.0
 # DATE=2025-05-20T10:15:30+00:00
 ```
 
 `FANOUT_MAX_SKEW_MS` and `FANOUT_METRICS_TIMEOUT` are both result-affecting (PL2):
 the former decides which rows are tagged `SCRAPE_INCOMPLETE` and dropped by `005`;
 the latter bounds the per-`/metrics` curl wait and therefore the worst-case skew
-the gate can observe.
+the gate can observe. `BACKER_IMAGE` records the pre-warmed workload image
+(`hashicorp/http-echo:$HTTP_ECHO_VERSION`) so a row is self-describing. All three
+are carried into the `005` report metadata (sweep-level scalars).
 
 `KUBE_VERSIONS` is probed concurrently with `--request-timeout=5s`; unreachable contexts emit `unreachable`, contexts that respond without parseable version emit `unknown`.
 
@@ -167,7 +170,7 @@ restarted  p2_dirty  window_ms  scrape_skew_ms
 | `p1_proxy_count` | `pilot_xds` gauge from the baseline scrape (connected proxies on source istiod). |
 | `p1_overflow` | `1` if the `+Inf` bucket gained more samples than any finite bucket (statistically unsafe — quantiles below). |
 | `restarted` | `0` / `1` / `unknown` — `1` if `process_start_time_seconds` on the source istiod changed mid-iteration; `unknown` if baseline or current `process_start_time_seconds` was missing (so we cannot tell). |
-| `p2_dirty` | `0` / `1` — `1` when the remote istiod's EDS push counter advanced **without** our canary being confirmed `health_flags::healthy` on that remote's watcher sidecar at the moment of the bump, i.e. the EDS bump could be unrelated endpoint churn rather than our canary. Under the O1 label-flip topology the canary Service persists across iterations (t0 adds an endpoint, not a Service), so a `pilot_services` gauge delta is no longer the right "our change" signal — the data-plane healthy-endpoint confirmation (the same signal P3 detects) is. `005` drops `p2_ms` from numeric aggregation when this is set. |
+| `p2_dirty` | `0` / `1` — `1` when the remote istiod's EDS push counter advanced (so `p2_ms` was stamped) but our canary did **not** become `health_flags::healthy` on that remote's watcher within the window (i.e. P3 did not succeed), so the EDS bump could not be attributed to our canary (likely unrelated endpoint churn). Reconciled against P3's **outcome**, not an instantaneous health read at the EDS-bump instant: istiod increments the EDS counter when it *issues* the push, while the sidecar reports `health_flags::healthy` only after it *applies* it — that lag is exactly the (positive) P3−P2 gap, so an instantaneous check would falsely flag every clean iteration. (Under the O1 label-flip topology the canary Service persists across iterations — t0 adds an endpoint, not a Service — so the pre-O1 `pilot_services` gauge delta is no longer the right "our change" signal.) `005` drops `p2_ms` from numeric aggregation when this is set. |
 | `window_ms` | Wall-clock duration of the per-iteration measurement window. |
 | `scrape_skew_ms` | `max(ts) - min(ts)` across the per-context baseline-scrape timestamps (recorded verbatim for provenance, even when it triggers the `SCRAPE_INCOMPLETE` skew gate). When this exceeds `FANOUT_MAX_SKEW_MS` (default 1000), the snapshot is incoherent and the row is tagged `SCRAPE_INCOMPLETE`. |
 
