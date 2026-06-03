@@ -5,6 +5,15 @@ suites under `tests/` against a real multi-cluster mesh; the raw sweep data live
 locally under each suite's `results/` dir (gitignored), so these markdown records are
 the durable, shareable artifact.
 
+## Writing a summary
+
+Start from [`TEMPLATE.md`](TEMPLATE.md). **Every summary must lead with the Scale
+envelope** — total proxies / endpoints / per-proxy config bytes and the control-plane
+resource headroom (istiod % of limit, node CPU), not just "mesh size 1→N". A cluster
+count is not a scale; the reader has to know how big the mesh really was and whether
+anything was near a limit, from screen one. The template lists the exact sweep-report
+field or command that feeds each cell.
+
 ## 2026-06-02 — workaround pass
 
 The first end-to-end campaign, run with the *workaround* configuration (istiod pinned
