@@ -207,6 +207,7 @@ conflate. TSV files carry a metadata preamble:
 # HARNESS_SHA=4139b50
 # KUBE_VERSIONS=cluster-001=v1.29.4, cluster-002=v1.29.4, cluster-003=v1.29.4
 # SIDECAR_SCOPING=none
+# CONTROLPLANE_SCHEMA=40
 # CONFIG_DUMP_SAMPLES=3
 # SETTLE_SEC=60
 # RUN_ID=20260520T183201Z-12345
@@ -222,6 +223,15 @@ value is either the apiserver `gitVersion` (e.g. `v1.30.4`), `unreachable`, or
 `unknown`. The `NODE_ALLOC_*` / `ISTIOD_*_LIMIT_*` / `SCALE_TARGET_FRACTION`
 keys (O9 scale-coverage legibility) are read once from the source context via
 read-only `kubectl get`; any may be `unknown` if the cluster is unreachable.
+`CONTROLPLANE_SCHEMA=40` marks the TSV column-schema version (O9 appended cols
+35-40); the report skips files whose width differs (with a counted stderr warning),
+so a 34-column pre-O9 file is never mixed into a 40-column aggregation.
+
+Note: `istiod_cpu_pct_of_limit` / `node_cpu_pct` are **point samples** taken once
+per context at row-assembly time (outside the measurement window), unlike the
+windowed `istiod_cpu_m_delta` (col 32) — don't compare the two as if both are
+window averages. The istiod %-of-limit denominator is the *aggregate* limit
+(per-replica limit × replica count), matching the across-replica usage numerator.
 
 Followed by the 40-column data schema:
 
