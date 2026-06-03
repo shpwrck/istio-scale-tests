@@ -247,19 +247,43 @@ for p in "${PROFILES[@]}"; do
 	state_dir="${SWEEP_DIR}/${p}/state"
 
 	echo "--- Applying profile ---"
-	"${TUNING_DIR}/001-apply-profile.sh" \
+	# R3-1 (B1 class): apply is the most probable per-profile failure at scale (a
+	# rollout-timeout when the tuned istiod won't go Ready). Bare under set -e it would
+	# abort the whole multi-profile sweep, discarding every completed profile (004-compare
+	# runs separately, post-sweep). On failure: warn, drop a SETUP_FAILED marker in the
+	# profile result dir (same mechanism as run_probe's PROBE_FAILED — 004-compare skips
+	# a marker-only dir, so the profile is visibly absent rather than silently aborting),
+	# ATTEMPT a best-effort revert (so istiod returns to default for the next profile),
+	# then continue. Reserve die for whole-run preconditions only.
+	if ! "${TUNING_DIR}/001-apply-profile.sh" \
 		--profile "$pfile" \
 		--contexts "$CONTEXTS_CSV" \
 		--state-dir "$state_dir" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT"
+		--rollout-timeout "$ROLLOUT_TIMEOUT"; then
+		echo "warn: [profile ${p}] apply failed; recording SETUP_FAILED and continuing to next profile" >&2
+		mkdir -p "${SWEEP_DIR}/${p}"
+		echo "SETUP_FAILED (001-apply-profile) $(date -u -Iseconds)" > "${SWEEP_DIR}/${p}/SETUP_FAILED"
+		echo "--- Best-effort revert after apply failure ---"
+		"${TUNING_DIR}/002-revert-profile.sh" \
+			--state-dir "$state_dir" \
+			--contexts "$CONTEXTS_CSV" \
+			--rollout-timeout "$ROLLOUT_TIMEOUT" || \
+			echo "warn: [profile ${p}] best-effort revert after apply failure also failed; istiod may be left in a non-default config (next profile re-applies)" >&2
+		((step++))
+		continue
+	fi
 
 	run_probe "$p"
 
 	echo "--- Reverting profile ---"
+	# R3-1: a bare revert failure under set -e would abort the sweep AND leave istiod
+	# stuck in this profile's non-default tuning. Warn and continue instead — the next
+	# profile's apply overwrites the config anyway. Never abort.
 	"${TUNING_DIR}/002-revert-profile.sh" \
 		--state-dir "$state_dir" \
 		--contexts "$CONTEXTS_CSV" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT"
+		--rollout-timeout "$ROLLOUT_TIMEOUT" || \
+		echo "warn: [profile ${p}] revert failed; istiod may be left in this profile's non-default config (next profile re-applies)" >&2
 
 	echo "--- Post-revert settle: ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"

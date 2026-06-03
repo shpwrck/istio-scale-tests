@@ -190,3 +190,54 @@ EOF
 	run lint_bare_scrape_paths "$FIX"
 	assert_success
 }
+
+# --- R3-2: generalized anchor catches non-$SCRIPT_DIR vars (e.g. ${TUNING_DIR}) ---
+
+@test "orchestrator-step lint flags a bare \${TUNING_DIR} apply call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	"${TUNING_DIR}/001-apply-profile.sh" --profile "$p"
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_failure
+	assert_output --partial "bare orchestrator-step call"
+	assert_output --partial "001-apply-profile.sh"
+}
+
+@test "orchestrator-step lint passes a wrapped (if !) \${TUNING_DIR} apply call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	if ! "${TUNING_DIR}/001-apply-profile.sh" --profile "$p"; then
+		echo warn; continue
+	fi
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+	[[ -z "$output" ]]
+}
+
+@test "orchestrator-step lint passes a || guarded \${TUNING_DIR} revert call" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	"${TUNING_DIR}/002-revert-profile.sh" --state-dir x || echo warn
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+}
+
+@test "orchestrator-step lint does not flag \"\$PROBE_SCRIPT\" (no /0NN-*.sh path)" {
+	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
+#!/usr/bin/env bash
+for p in a b; do
+	"$PROBE_SCRIPT" --contexts x | tee out.log
+done
+EOF
+	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
+	assert_success
+}
