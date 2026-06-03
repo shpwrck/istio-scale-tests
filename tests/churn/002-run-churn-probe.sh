@@ -16,6 +16,13 @@
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
+# Loud-fail diagnostics: a bare command failing under `set -e` otherwise aborts
+# silently (see the churn size-8 scrape abort: a bare `scrape_ctx` propagated
+# `fanout_scrape_all`'s by-design non-zero on an incomplete scrape). Surface the
+# line + command so any future abort is diagnosable instead of a truncated log.
+# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
+
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
@@ -464,7 +471,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# full per-pod baseline scrape of every source istiod immediately before
 	# scale-up so the delta window starts at the scale-up. pilot_xds (connected
 	# proxies) SUMS across replicas; histograms/counters aggregate per pod below.
-	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null
+	# `|| true`: scrape_ctx returns non-zero on an incomplete scrape (by design);
+	# incompleteness is captured on the next line, so it must not trip `set -e`.
+	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_PRE_FILES < <(ctx_metric_files "$ITER_DIR" "src-pre" "$SRC_NPORTS")
 	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-pre.podset" "${KUBECTL[@]}"
@@ -475,7 +484,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	for i in "${!REMOTES[@]}"; do
 		_rports=()  # populated by load_rmt_ports via nameref
 		load_rmt_ports "$i" _rports
-		scrape_ctx "$ITER_DIR" "rmt${i}-pre" "${_rports[@]}" >/dev/null
+		scrape_ctx "$ITER_DIR" "rmt${i}-pre" "${_rports[@]}" >/dev/null || true
 		(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 		mapfile -t _rfiles < <(ctx_metric_files "$ITER_DIR" "rmt${i}-pre" "${#_rports[@]}")
 		RMT_PRE_FILES_STR["$i"]="$(IFS=$'\n'; echo "${_rfiles[*]}")"
@@ -545,7 +554,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	fi
 
 	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
-	scrape_ctx "$ITER_DIR" "src-post" "${SRC_ISTIOD_PORTS[@]}" >/dev/null
+	scrape_ctx "$ITER_DIR" "src-post" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_POST_FILES < <(ctx_metric_files "$ITER_DIR" "src-post" "$SRC_NPORTS")
 	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-post.podset" "${KUBECTL[@]}"
@@ -583,7 +592,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		for i in "${!REMOTES[@]}"; do
 			_rports=()  # populated by load_rmt_ports via nameref
 			load_rmt_ports "$i" _rports
-			scrape_ctx "$ITER_DIR" "rmt${i}-post" "${_rports[@]}" >/dev/null
+			scrape_ctx "$ITER_DIR" "rmt${i}-post" "${_rports[@]}" >/dev/null || true
 			(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 			mapfile -t _rpost_files < <(ctx_metric_files "$ITER_DIR" "rmt${i}-post" "${#_rports[@]}")
 			fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-post.podset" "${KUBECTL[@]}"
