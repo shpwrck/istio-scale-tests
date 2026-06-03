@@ -29,6 +29,11 @@
 #     --contexts a,b,c --service-counts 10,100 --sidecar-scopings none,namespace
 # ci-dry-run:
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Coexists
+# with the EXIT/cleanup trap installed later (separate signal). Per-combo probe and
+# cleanup failures are caught explicitly below and degraded to a row status — they
+# do NOT fire this trap.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -252,6 +257,31 @@ SCRIPT_DIR="${ROOT}/tests/controlplane"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 
+# P0/PL15: a per-combo probe failure must be RECORDED (counted in the report's
+# n_total) and the sweep must CONTINUE — never abort the multi-hour run. The
+# control-plane report (004) counts every NF>=34 row in n_total and only admits a
+# row to n_valid when istiod_restarted ($31) == "0", so a degraded row with
+# $31=unknown and N/A numerics is counted-but-excluded (PL13/PL15). The probe (002)
+# writes into ${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv on its `final` phase; if the
+# baseline phase failed the file may not exist yet, so create the header first.
+# Mirrors the 34-column schema and the per-pod N/A-row template in 002.
+emit_probe_failed_row() {
+	local ms="$1" sc="$2" rc="$3" nc="$4" scp="$5"
+	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
+	mkdir -p "$OUTPUT_DIR"
+	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
+		{
+			echo "# Control-plane resource metrics — $(date -u -Iseconds)"
+			echo "# RUN_ID=${RUN_ID}"
+			echo "# NOTE=created by 003-run-sweep.sh PROBE_FAILED fallback (probe wrote no header for this combo)"
+		} >> "$tsv"
+		echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi" >> "$tsv"
+	fi
+	# PROBE_FAILED degraded row: 34 cols, key cols populated, restarted=unknown
+	# (column 31) so the report excludes it from n_valid; every numeric N/A (PL13).
+	echo -e "$(date -u -Iseconds)\tPROBE_FAILED\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\t0\t0\t0\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0/0\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A" >> "$tsv"
+}
+
 {
 	echo "=========================================="
 	echo "  Control-Plane Resource Sweep"
@@ -425,7 +455,7 @@ for ms in "${MESH_SIZES[@]}"; do
 					mkdir -p "$STATE_DIR_COMBO"
 
 					echo "--- Baseline metrics scrape (phase 1/3) ---"
-					"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+					if ! "$SCRIPT_DIR/002-collect-resource-metrics.sh" \
 						--phase baseline \
 						--state-dir "$STATE_DIR_COMBO" \
 						--contexts "$active_csv" \
@@ -434,7 +464,18 @@ for ms in "${MESH_SIZES[@]}"; do
 						--replicas "$rc" \
 						--namespace-count "$nc" \
 						--sidecar-scoping "$scp" \
-						--settle "$SETTLE_SEC"
+						--settle "$SETTLE_SEC"; then
+						# P0: baseline probe failed — record a degraded combo and move on
+						# (never abort the sweep). The final phase is skipped (its state-dir
+						# baseline is missing/partial). Best-effort cleanup before continue.
+						echo "warn: [$combo_idx/$MATRIX_SIZE] baseline probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
+						emit_probe_failed_row "$ms" "$sc" "$rc" "$nc" "$scp"
+						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+							echo "warn: cleanup after baseline failure also reported failure for '$label'" >&2
+						rm -rf "$STATE_DIR_COMBO"
+						if (( SETTLE_SEC > 0 )); then sleep "$SETTLE_SEC"; fi
+						continue
+					fi
 					echo ""
 
 					start_peak_metrics_poller "$STATE_DIR_COMBO"
@@ -457,7 +498,7 @@ for ms in "${MESH_SIZES[@]}"; do
 					stop_peak_metrics_poller
 
 					echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
-					"$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+					if ! "$SCRIPT_DIR/002-collect-resource-metrics.sh" \
 						--phase final \
 						--state-dir "$STATE_DIR_COMBO" \
 						--contexts "$active_csv" \
@@ -469,12 +510,23 @@ for ms in "${MESH_SIZES[@]}"; do
 						--config-dump-samples "$CONFIG_DUMP_SAMPLES" \
 						--settle "$SETTLE_SEC" \
 						--output-dir "$OUTPUT_DIR" \
-						--run-id "$RUN_ID"
+						--run-id "$RUN_ID"; then
+						# P0: final probe failed AFTER the deploy storm — the window is lost
+						# for this combo, but the workload exists, so still record + clean up
+						# + continue. (The probe may have emitted partial per-pod rows before
+						# failing; this fallback guarantees at least one combo row in n_total.)
+						echo "warn: [$combo_idx/$MATRIX_SIZE] final probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
+						emit_probe_failed_row "$ms" "$sc" "$rc" "$nc" "$scp"
+					fi
 					rm -rf "$STATE_DIR_COMBO"
 					echo ""
 
 					echo "--- Cleaning up ---"
-					"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
+					# P0/PL23: a cleanup hiccup must not abort the sweep — the next combo's
+					# setup also cleans the namespace, and the await-delete loop below is
+					# already non-fatal. Warn and continue past the combo.
+					"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+						echo "warn: [$combo_idx/$MATRIX_SIZE] cleanup reported failure for '$label'; next combo's setup will re-clean" >&2
 
 					if (( ${#KUBECTL[@]} )); then
 						wait_pids=()
