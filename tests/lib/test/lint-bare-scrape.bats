@@ -181,7 +181,7 @@ EOF
 	assert_success
 }
 
-@test "orchestrator-step lint via paths dispatches only to *-run-sweep.sh" {
+@test "orchestrator-step lint via paths dispatches only to *-sweep.sh orchestrators" {
 	# A non-sweep file with a bare step call is NOT checked by the step lint.
 	cat > "$FIX/002-probe.sh" <<'EOF'
 #!/usr/bin/env bash
