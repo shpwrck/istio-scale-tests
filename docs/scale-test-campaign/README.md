@@ -74,6 +74,25 @@ tests/churn-dataplane/004-run-sweep.sh --contexts "$CONTEXTS" --mesh-sizes "$MES
 ### Stage 4 — Collect results
 Each suite writes `tests/<suite>/results/sweep-<RUN_ID>/` containing per-run TSV(s) and an auto-generated **markdown summary** (re-generate manually with the suite's `004`/`005` report script if needed). The report scripts filter poisoned/incomplete rows and report `n_valid` vs `n_total` — check those footnotes when reading aggregates.
 
+### Stage 5 — Teardown / cleanup (always, even on failure)
+The campaign deploys workloads into `*-test` namespaces on every active spoke; leaving them behind wastes resources and pollutes the next run's baseline. Run **every** suite's cleanup (idempotent — safe if a namespace is already gone), then **wait out the async namespace termination** and verify nothing is left:
+```bash
+tests/churn-dataplane/006-cleanup.sh --contexts "$CONTEXTS"
+tests/churn/005-cleanup.sh           --contexts "$CONTEXTS"
+tests/controlplane/005-cleanup.sh    --contexts "$CONTEXTS"
+tests/dataplane/005-cleanup.sh       --contexts "$CONTEXTS"
+tests/propagation/007-cleanup.sh     --contexts "$CONTEXTS"
+
+# Namespace deletion is async — re-check until clear (Terminating can take a minute
+# while sidecar-injected pods drain). Expect NO output when fully clean:
+for ctx in ${CONTEXTS//,/ }; do
+  kubectl --context="$ctx" get ns 2>/dev/null \
+    | grep -E 'propagation-test|controlplane-test|dataplane-test|churn-test|churn-dataplane-test' \
+    && echo "  ^ still on $ctx"
+done
+```
+Run this after the campaign completes **and** any time a suite dies mid-run before re-running it. The mesh itself (istiod/gateways/Argo) is **not** torn down by this — only the test workloads.
+
 ## Pitfalls & how to handle them (hard-won)
 - **`FailedScheduling: Insufficient cpu`** → capacity. The pinned istiod's CPU *requests* + the suites' sidecar-injected pods exceed node allocatable. Add nodes/CPU, or reduce `--service-counts`/`--replica-counts` (controlplane) and `--deployment-count`/`--scale-to` (churn-dataplane) to fit. Lowering istiod's CPU **request** is measurement-neutral and frees scheduling room.
 - **A sweep dies/hangs mid-run.** Today a *single* probe-instance failure (a transient scrape returning non-zero, a stuck `kubectl port-forward`) can abort an entire multi-hour sweep under `set -euo pipefail`. **You must actively watch for this** — a hung port-forward looks like *no log growth while the process is still alive* (not a crash). On failure: run the suite's `00X-cleanup.sh`, then re-run only the remaining `--mesh-sizes`. (The harness-hardening work — record-and-continue per probe — removes this; until then, monitor.)
@@ -82,12 +101,13 @@ Each suite writes `tests/<suite>/results/sweep-<RUN_ID>/` containing per-run TSV
 - **Runtime.** Expect several hours total; churn-dataplane is the long pole (per-combo setup + teardown). Adding nodes (faster pod scheduling) and the deploy-once-per-mesh-size optimization shorten it without affecting fidelity.
 
 ## Mode A — Manual (no AI)
-Run Stages 0–4 above by hand. Concretely:
+Run Stages 0–5 above by hand. Concretely:
 1. Stage 0 + Stage 1 checks; fix any failures before proceeding.
 2. Stage 2: run all five `--dry-run`s; eyeball each matrix.
 3. Stage 3: launch suite 1; **watch it** — `tail -f` the output and periodically confirm the process is alive *and* the log is still growing. When it finishes, run Stage-0 + namespace-clean checks, then launch the next. Repeat for all five.
 4. If a suite dies: clean up (its `00X-cleanup.sh`), re-run remaining mesh sizes, continue.
 5. Stage 4: read the markdown summaries.
+6. **Stage 5: run the teardown cleanup and verify no `*-test` namespaces remain on any spoke.**
 Budget a full day of attended wall-clock; keep a notepad of which suites/sizes completed.
 
 ## Mode B — Agent-driven
