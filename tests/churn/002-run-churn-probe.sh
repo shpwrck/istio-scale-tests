@@ -68,6 +68,15 @@ Usage: $(basename "$0") [options]
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
+Output:
+  Three remote convergence signals per iteration:
+    convergence_local_ms          local syncz all-SYNCED time.
+    remote_endpoint_reachable_ms  data-plane reachability (Envoy health_flags,
+                                  includes pod scheduling + sidecar start).
+    convergence_remote_eds_ms     control-plane only — time to the FIRST remote
+                                  EDS push after t0 (pilot_xds_pushes{type=eds}
+                                  delta >= 1, pod-boot-free).
+
 Environment:
   SETUP_CONTEXTS               Default comma-separated contexts (see config/versions.env).
   CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
@@ -363,30 +372,38 @@ poll_endpoint_count_converged() {
 
 # CONTROL-PLANE-only convergence signal (the P2 analogue from the propagation
 # suite, tests/propagation/002-run-endpoint-probe.sh:poll_p2_remote_eds_push).
-# Times when a remote istiod's EDS pushes for this churn event cross a threshold,
-# using the existing pilot_xds_pushes{type="eds"} counter (fanned out + summed
-# across the remote's istiod pods via fanout_counter_by_label_sum). This is
-# pod-boot-free: it answers "how fast does the remote control plane learn the
-# churn and push EDS", independent of source-pod Ready time. Contrast with
+# Times the FIRST cross-cluster EDS push after t0 on a remote istiod, using the
+# existing pilot_xds_pushes{type="eds"} counter (fanned out + summed across the
+# remote's istiod pods via fanout_counter_by_label_sum). This is pod-boot-free:
+# it answers "how fast does the remote control plane learn the churn and push
+# EDS", independent of source-pod Ready time. Contrast with
 # poll_endpoint_count_converged, which gates on the new endpoints becoming
 # health_flags::healthy (and so includes pod scheduling + sidecar start).
 #
-# Threshold: Sigma eds_delta >= eds_delta_target (>= 1 EDS push per churned
-# deployment). Registry cross-check (B1, mirrors propagation P2 p2_dirty): an EDS
-# bump unaccompanied by a pilot_services gauge change is ambiguous (unrelated
-# churn on the remote can bump the counter), so we still record the crossing
-# timestamp but write "1" to <dirty_file>. pilot_services is replica-INVARIANT,
-# so we compare it via fanout_gauge_invariant (max across pods), NOT a sum.
+# Threshold: Sigma eds_delta >= 1 (R2-2/PL20). istiod debounces/coalesces, so
+# scaling N deployments concurrently commonly produces FEWER than N {type=eds}
+# pushes — a per-deployment threshold (>= DEPLOYMENT_COUNT) would spuriously
+# TIMEOUT on a fully-converged mesh. We therefore time the FIRST remote EDS push
+# after t0 (the control-plane scaling signal), NOT per-deployment fan-in. The
+# counter is mesh-wide, so this does NOT disambiguate a concurrent unrelated EDS
+# push; in a churn run the scale event is the dominant in-window activity, so
+# that is acceptable. NOTE: churn scales replicas of EXISTING deployments — no
+# Service is created/deleted — so pilot_services is invariant and there is NO
+# clean registry-delta cross-check available (unlike propagation P2, where t0
+# CREATES a Service); the dirty cross-check was removed (R2-1/PL31: a
+# zero-information always-dirty flag). NOTE: there is no in-poller restart guard
+# (unlike propagation P2's proc_start_sig check); this poller relies on the
+# post-hoc POISONED_RESTART poisoning in the main loop (a remote restart resets
+# the counter and N/As convergence_remote_eds_ms there).
 # Result file: crossing ns (compute_delta_ms), or TIMEOUT / INCOMPLETE.
 poll_remote_eds_converged() {
 	local polldir="$1" t0="$2" baseline_eds="$3" eds_delta_target="$4" \
-		baseline_services="$5" result_file="$6" dirty_file="$7"
-	shift 7
+		result_file="$5"
+	shift 5
 	local -a ports=("$@")
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
-	local ever_complete=0 tick=0
+	local ever_complete=0
 	mkdir -p "$polldir"
-	echo "0" > "$dirty_file"
 	while true; do
 		local now_ms
 		now_ms=$(( $(now_ns) / 1000000 ))
@@ -394,32 +411,29 @@ poll_remote_eds_converged() {
 			if ((ever_complete)); then echo "TIMEOUT" > "$result_file"; else echo "INCOMPLETE" > "$result_file"; fi
 			return
 		fi
-		# One fanned-out scrape per tick. Skip the detection test on an incomplete
-		# scrape (a missing pod undercounts the summed eds delta, PL29).
-		fanout_scrape_all "$polldir" "tick${tick}" "${ports[@]}" >/dev/null
-		if (( $(fanout_scrape_failed_count "$polldir" "tick${tick}") > 0 )); then
-			tick=$((tick + 1))
+		# One fanned-out scrape per tick. A FIXED prefix ("tick") means each tick
+		# OVERWRITES the prior tick's per-pod /metrics bodies, so disk stays bounded
+		# at one tick's worth of files regardless of how many ticks elapse (R2-3) —
+		# the EDS/gauge values are consumed immediately below, no tick body needs to
+		# survive. The .failed/.skew sidecars are likewise overwritten in place.
+		fanout_scrape_all "$polldir" "tick" "${ports[@]}" >/dev/null
+		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
+			# Skip the detection test on an incomplete scrape (a missing pod
+			# undercounts the summed eds delta, PL29).
 			sleep "$POLL_INTERVAL_S"
 			continue
 		fi
 		ever_complete=1
 		local -a tick_files=()
-		mapfile -t tick_files < <(ctx_metric_files "$polldir" "tick${tick}" "${#ports[@]}")
-		local cur_eds cur_svc
+		mapfile -t tick_files < <(ctx_metric_files "$polldir" "tick" "${#ports[@]}")
+		local cur_eds
 		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${tick_files[@]}")
-		cur_svc=$(fanout_gauge_invariant pilot_services "${tick_files[@]}")
 		[[ -z "$cur_eds" || ! "$cur_eds" =~ ^[0-9]+$ ]] && cur_eds=0
-		[[ -z "$cur_svc" || "$cur_svc" == "unknown" ]] && cur_svc="$baseline_services"
 		# Counter can appear to "decrease" mid restart/deploy; treat as not-yet.
 		if (( cur_eds - baseline_eds >= eds_delta_target )); then
-			# B1 registry cross-check: services gauge must have moved to call clean.
-			if (( cur_svc - baseline_services < 1 )); then
-				echo "1" > "$dirty_file"
-			fi
 			now_ns > "$result_file"
 			return
 		fi
-		tick=$((tick + 1))
 		sleep "$POLL_INTERVAL_S"
 	done
 }
@@ -522,9 +536,11 @@ reopen_istiod_fanouts_if_dead() {
 # control-plane-only signal (convergence_remote_eds_ms) is measured separately by
 # poll_remote_eds_converged off the istiod EDS push counter.
 ENDPOINT_THRESHOLD_DELTA=$DEPLOYMENT_COUNT
-# EDS-push convergence threshold: >= 1 EDS push per churned deployment on the
-# remote control plane (pod-boot-free).
-EDS_THRESHOLD_DELTA=$DEPLOYMENT_COUNT
+# EDS-push convergence threshold (R2-2/PL20): the FIRST remote EDS push after t0,
+# i.e. Sigma pilot_xds_pushes{type=eds} delta >= 1. NOT per-deployment fan-in —
+# istiod coalesces concurrent scales into FEWER than DEPLOYMENT_COUNT pushes, so
+# a per-deployment threshold would spuriously TIMEOUT a converged mesh.
+EDS_THRESHOLD_DELTA=1
 
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
@@ -555,12 +571,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	rmt_connected_proxies=0
 	declare -A RMT_PRE_FILES_STR=()
-	# Per-remote EDS-push + services baselines for the control-plane-only signal
+	# Per-remote EDS-push baseline for the control-plane-only signal
 	# (convergence_remote_eds_ms). Read from the SAME pre-scrape blob as the other
-	# baselines (PL21: no extra HTTP round-trip), summed/invariant-aggregated across
-	# the remote's istiod pods.
+	# baselines (PL21: no extra HTTP round-trip), summed across the remote's istiod
+	# pods. (No pilot_services baseline: churn has no clean registry-delta
+	# cross-check — see poll_remote_eds_converged, R2-1/PL31.)
 	declare -A RMT_PRE_EDS=()
-	declare -A RMT_PRE_SVC=()
 	for i in "${!REMOTES[@]}"; do
 		_rports=()  # populated by load_rmt_ports via nameref
 		load_rmt_ports "$i" _rports
@@ -571,9 +587,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-pre.podset" "${KUBECTL[@]}"
 		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds "${_rfiles[@]}") ))
 		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${_rfiles[@]}")
-		_psvc=$(fanout_gauge_invariant pilot_services "${_rfiles[@]}")
-		[[ "$_psvc" == "unknown" ]] && _psvc=0
-		RMT_PRE_SVC["$i"]="$_psvc"
 	done
 
 	BASELINE_COUNTS=()
@@ -607,7 +620,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	REMOTE_FILES=()
 	REMOTE_EDS_FILES=()
-	REMOTE_EDS_DIRTY_FILES=()
 	for i in "${!REMOTES[@]}"; do
 		rf="$TMPDIR_RUN/remote_${i}"
 		echo "" > "$rf"
@@ -619,15 +631,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		# Control-plane-only EDS-push convergence (the P2 analogue), fanned out over
 		# this remote's already-open istiod ports.
 		edsf="$TMPDIR_RUN/remote_eds_${i}"
-		edsdirtyf="$TMPDIR_RUN/remote_eds_dirty_${i}"
 		echo "" > "$edsf"
 		REMOTE_EDS_FILES+=("$edsf")
-		REMOTE_EDS_DIRTY_FILES+=("$edsdirtyf")
 		_rports=()  # populated by load_rmt_ports via nameref
 		load_rmt_ports "$i" _rports
 		poll_remote_eds_converged "$ITER_DIR/eds-poll-${i}" "$T0" \
-			"${RMT_PRE_EDS[$i]}" "$EDS_THRESHOLD_DELTA" "${RMT_PRE_SVC[$i]}" \
-			"$edsf" "$edsdirtyf" "${_rports[@]}" &
+			"${RMT_PRE_EDS[$i]}" "$EDS_THRESHOLD_DELTA" \
+			"$edsf" "${_rports[@]}" &
 		POLL_PIDS+=($!)
 	done
 
@@ -655,9 +665,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	# Control-plane-only EDS-push convergence (max across remotes; mirrors the
 	# conv_remote aggregation). A poller that never completed a clean scrape emits
-	# INCOMPLETE; one that crossed but lacked a services delta sets the dirty flag.
+	# INCOMPLETE (treated as TIMEOUT). No dirty cross-check: churn has no clean
+	# registry-delta denominator (R2-1/PL31).
 	conv_remote_eds="N/A"
-	eds_dirty=0
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_eds=0
 		eds_ok=1
@@ -668,7 +678,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			else
 				e=$(( (ev - T0) / 1000000 ))
 			fi
-			[[ -s "${REMOTE_EDS_DIRTY_FILES[i]}" && "$(<"${REMOTE_EDS_DIRTY_FILES[i]}")" == "1" ]] && eds_dirty=1
 			echo "  Convergence (remote ${REMOTES[i]}, EDS push): ${e}ms"
 			if [[ "$e" == "TIMEOUT" ]]; then
 				eds_ok=0
@@ -677,7 +686,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			fi
 		done
 		if ((eds_ok)); then conv_remote_eds="$max_eds"; else conv_remote_eds="TIMEOUT"; fi
-		((eds_dirty)) && echo "  Note: EDS convergence flagged dirty (no pilot_services delta — unrelated remote churn may have bumped the counter)" >&2
 	fi
 
 	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
