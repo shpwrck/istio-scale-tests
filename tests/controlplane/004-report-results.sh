@@ -18,6 +18,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/config/options.env"  # O9: SCALE_COVERAGE_* knobs (coverage floor)
 
 RESULTS_DIR="${ROOT}/tests/controlplane/results"
 FORMAT="text"
@@ -36,6 +38,12 @@ CPU/memory/convergence/queue/config-dump stats.
 
 Histogram cells whose target quantile falls in the +Inf overflow bucket are
 emitted as the string "overflow" in text/csv/markdown and as null in JSON.
+
+Environment (O9 scale-coverage floor; default-off):
+  SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
+                               "Achieved scale" block (default: 0.25).
+  SCALE_COVERAGE_ENFORCE        When 1, exit non-zero if achieved scale is under
+                               the floor (default: 0 — informational only).
 EOF
 }
 
@@ -77,13 +85,13 @@ if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Partition into "current schema" (34 columns) and "legacy" (anything else).
+# Partition into "current schema" (40 columns) and "legacy" (anything else).
 TSV_FILES=()
 LEGACY_FILES=()
 for f in "${ALL_TSV[@]}"; do
 	header=$(grep -m1 -v '^#' "$f" 2>/dev/null || true)
 	tabs=$(awk -F'\t' '{print NF}' <<<"$header")
-	if [[ "$tabs" == "34" ]]; then
+	if [[ "$tabs" == "40" ]]; then
 		TSV_FILES+=("$f")
 	else
 		LEGACY_FILES+=("$f")
@@ -98,7 +106,7 @@ if (( ${#LEGACY_FILES[@]} > 0 )); then
 fi
 
 if (( ${#TSV_FILES[@]} == 0 )); then
-	die "no TSV files with the current 34-column schema found in $RESULTS_DIR"
+	die "no TSV files with the current 40-column schema found in $RESULTS_DIR"
 fi
 
 # Pluck reproducibility tags from the first file's preamble.
@@ -161,7 +169,7 @@ collect_sweep_axes() {
 		bsort(out,n); return n
 	}
 	function join(arr, n,    s,i) { s=arr[1]; for(i=2;i<=n;i++) s=s","arr[i]; return s }
-	!/^#/ && !/^timestamp/ && NF>=34 {
+	!/^#/ && !/^timestamp/ && NF>=40 {
 		mesh[$3]=1; svc[$4]=1; rep[$5]=1; ns[$6]=1; scope[$7]=1
 	}
 	END {
@@ -179,11 +187,105 @@ SWEEP_REP="$(echo "$SWEEP_AXES" | grep '^replica_counts:' | cut -d' ' -f2-)"
 SWEEP_NS="$(echo "$SWEEP_AXES" | grep '^namespace_counts:' | cut -d' ' -f2-)"
 SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 
+# O9 "Achieved scale" — max of the per-row capacity columns (35-40) and
+# connected_proxies (22) across every VALID data row (istiod_restarted==0, col 31).
+# Mirroring the n_valid gate (PL13/PL15) is essential: a SETUP_FAILED / restarted row
+# still carries the CONFIGURED service_count ($4) and a mid-reconnect connected_proxies
+# ($22), so ingesting it would report e.g. "200 services achieved" when 0 deployed.
+# Tolerates N/A: a key with no numeric observation reports `unknown`. Emits
+# space-separated key=value pairs. services_total is the configured service_count of
+# valid rows (controlplane has no distinct achieved-services metric) — best-effort.
+collect_achieved_scale() {
+	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	function isnum(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	function upd(name, v) {
+		if (!isnum(v)) return
+		if (!(name in seen) || v+0 > mx[name]+0) { mx[name] = v+0; seen[name] = 1 }
+	}
+	!/^#/ && !/^timestamp/ && NF>=40 && $31 == "0" {
+		upd("proxies",  $22)
+		upd("svc",      $4)
+		upd("istiod_cpu_pct", $35)
+		upd("istiod_mem_pct", $36)
+		upd("node_cpu_pct",   $37)
+		upd("node_mem_pct",   $38)
+		upd("pods_sched",     $39)
+		upd("pods_alloc",     $40)
+	}
+	END {
+		split("proxies svc istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct pods_sched pods_alloc", ks, " ")
+		out = ""
+		for (i = 1; i <= 8; i++) {
+			k = ks[i]
+			v = (k in seen) ? mx[k] : "unknown"
+			out = out (out == "" ? "" : " ") k "=" v
+		}
+		print out
+	}'
+}
+ACHIEVED_SCALE="$(collect_achieved_scale)"
+as_get() {
+	# Pull one key=value out of ACHIEVED_SCALE; default unknown.
+	local key="$1" tok
+	for tok in $ACHIEVED_SCALE; do
+		[[ "$tok" == "${key}="* ]] && { echo "${tok#"${key}="}"; return; }
+	done
+	echo "unknown"
+}
+as_pct() {
+	# as_get + a trailing % on a numeric value (leaves unknown/N/A bare).
+	local v; v="$(as_get "$1")"
+	[[ "$v" =~ ^-?[0-9.]+$ ]] && echo "${v}%" || echo "$v"
+}
+# Pull a `# KEY=value` provenance line from the first TSV preamble (absolute
+# allocatable / istiod-limit context for the achieved-scale block); default unknown.
+preamble_get() {
+	local key="$1" v
+	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
+	v="${v#*=}"
+	[[ -n "$v" ]] && echo "$v" || echo "unknown"
+}
+
+# O9 coverage floor: achieved pods (pods_scheduled max) vs allocatable; the
+# achieved fraction is informational unless SCALE_COVERAGE_ENFORCE=1. We use
+# pods_scheduled/pods_allocatable as the achieved-vs-capacity proxy (the per-row
+# legibility columns), independent of the Phase-2 sizing math in 001.
+# NOTE: max(pods_scheduled) and max(pods_allocatable) are taken INDEPENDENTLY across
+# rows, so on a multi-context sweep they may come from different contexts — the
+# fraction is a fleet-level proxy, not a single-cluster paired ratio.
+COVERAGE_STATUS="N/A"      # OK | UNDER | N/A
+COVERAGE_LINE=""
+compute_coverage() {
+	local sched alloc
+	sched="$(as_get pods_sched)"
+	alloc="$(as_get pods_alloc)"
+	local frac min enforce
+	min="${SCALE_COVERAGE_MIN_FRACTION:-0.25}"
+	enforce="${SCALE_COVERAGE_ENFORCE:-0}"
+	if [[ "$sched" == unknown || "$alloc" == unknown ]]; then
+		COVERAGE_STATUS="N/A"
+		COVERAGE_LINE="SCALE_COVERAGE: unknown (pods_scheduled or pods_allocatable unavailable)"
+		return 0
+	fi
+	frac="$(awk -v s="$sched" -v a="$alloc" 'BEGIN{ if (a+0<=0){print "0"} else printf "%.3f", s/a }')"
+	local under
+	under="$(awk -v f="$frac" -v m="$min" 'BEGIN{ print (f+0 < m+0) ? 1 : 0 }')"
+	if (( under )); then
+		COVERAGE_STATUS="UNDER"
+		COVERAGE_LINE="SCALE_COVERAGE: UNDER (achieved ${sched}/${alloc} pods = ${frac} < min ${min}; enforce=${enforce})"
+	else
+		COVERAGE_STATUS="OK"
+		COVERAGE_LINE="SCALE_COVERAGE: OK (achieved ${sched}/${alloc} pods = ${frac} >= min ${min})"
+	fi
+	return 0
+}
+compute_coverage
+
 # Shared AWK aggregator. Groups by 5-tuple (mesh|svc|reps|ns|scoping) and
 # emits one record per unique key with min/max/avg for core metrics plus
 # sidecar config-dump aggregates.
 #
-# 34-column schema (1-indexed):
+# 40-column schema (1-indexed):
 #  1 timestamp          2 context            3 mesh_size        4 service_count
 #  5 replicas           6 namespace_count    7 sidecar_scoping
 #  8 istiod_mem_mi
@@ -199,6 +301,11 @@ SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
 # 30 settle_sec          31 istiod_restarted
 # 32 istiod_cpu_m_delta
 # 33 go_heap_alloc_mi    34 go_heap_inuse_mi
+# O9 capacity legibility (per-row; surfaced in the achieved-scale block, NOT
+# aggregated here — they are point-in-time capacity reads, not windowed metrics):
+# 35 istiod_cpu_pct_of_limit  36 istiod_mem_pct_of_limit
+# 37 node_cpu_pct             38 node_mem_pct
+# 39 pods_scheduled           40 pods_allocatable
 #
 # Aggregated output (tab-separated, 34 columns):
 #   mesh_size service_count replicas namespace_count sidecar_scoping n_total n_valid
@@ -238,7 +345,7 @@ aggregate() {
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
 	}
-	!/^#/ && !/^timestamp/ && NF>=34 {
+	!/^#/ && !/^timestamp/ && NF>=40 {
 		key = $3 "|" $4 "|" $5 "|" $6 "|" $7
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
 		# Gauge metrics (mem, proxies, heap) can always be ingested.
@@ -312,6 +419,20 @@ report_text() {
 	echo "=== Control-Plane Resource Scaling ==="
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}"
 	echo ""
+	# O9 achieved-scale block (clearly delimited; tolerates unknown). Pulled from
+	# the per-row capacity columns (max across rows) + the preamble.
+	echo "--- Achieved scale vs capacity (O9) ---"
+	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
+	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
+	echo "  connected_proxies (max):     $(as_get proxies)"
+	echo "  services_total (max):        $(as_get svc)"
+	echo "  istiod_cpu_pct_of_limit (max): $(as_pct istiod_cpu_pct)"
+	echo "  istiod_mem_pct_of_limit (max): $(as_pct istiod_mem_pct)"
+	echo "  node_cpu_pct (max):          $(as_pct node_cpu_pct)"
+	echo "  node_mem_pct (max):          $(as_pct node_mem_pct)"
+	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
+	echo "  ${COVERAGE_LINE}"
+	echo ""
 	echo "Sweep axes:"
 	echo "  mesh_sizes:        ${SWEEP_MESH}"
 	echo "  service_counts:    ${SWEEP_SVC}"
@@ -376,6 +497,24 @@ report_markdown() {
 	echo "---"
 	echo ""
 	echo "# Control-Plane Resource Scaling"
+	echo ""
+	# O9 achieved-scale block (clearly delimited; does not inject columns into the
+	# aggregate tables, so csv/json row consumers are unaffected).
+	echo "## Achieved scale vs capacity (O9)"
+	echo ""
+	echo "| Metric | Value |"
+	echo "|--------|-------|"
+	echo "| node allocatable (cpu_m/mem_mi) | $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI) |"
+	echo "| istiod limit (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI) |"
+	echo "| connected_proxies (max) | $(as_get proxies) |"
+	echo "| services_total (max) | $(as_get svc) |"
+	echo "| istiod_cpu_pct_of_limit (max) | $(as_pct istiod_cpu_pct) |"
+	echo "| istiod_mem_pct_of_limit (max) | $(as_pct istiod_mem_pct) |"
+	echo "| node_cpu_pct (max) | $(as_pct node_cpu_pct) |"
+	echo "| node_mem_pct (max) | $(as_pct node_mem_pct) |"
+	echo "| pods_scheduled / allocatable | $(as_get pods_sched) / $(as_get pods_alloc) |"
+	echo ""
+	echo "> ${COVERAGE_LINE}"
 	echo ""
 	echo "| Axis | Values |"
 	echo "|------|--------|"
@@ -500,3 +639,12 @@ csv)      report_csv ;;
 markdown) report_markdown ;;
 json)     report_json ;;
 esac
+
+# O9 coverage-floor enforcement (DEFAULT-OFF). Only fails the report when the
+# operator opted in via SCALE_COVERAGE_ENFORCE=1 AND achieved scale is under the
+# floor. With ENFORCE=0 (default) this is informational only — behaviour unchanged.
+if [[ "${SCALE_COVERAGE_ENFORCE:-0}" == "1" && "$COVERAGE_STATUS" == "UNDER" ]]; then
+	echo "${COVERAGE_LINE}" >&2
+	echo "  To fix: add cluster nodes, raise the workload size (SCALE_SIZING_MODE=auto, or a larger --service-count/--replicas), lower SCALE_COVERAGE_MIN_FRACTION, or unset SCALE_COVERAGE_ENFORCE to treat coverage as informational." >&2
+	die "scale coverage under floor (SCALE_COVERAGE_ENFORCE=1)"
+fi

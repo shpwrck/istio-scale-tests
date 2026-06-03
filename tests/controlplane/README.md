@@ -207,16 +207,33 @@ conflate. TSV files carry a metadata preamble:
 # HARNESS_SHA=4139b50
 # KUBE_VERSIONS=cluster-001=v1.29.4, cluster-002=v1.29.4, cluster-003=v1.29.4
 # SIDECAR_SCOPING=none
+# CONTROLPLANE_SCHEMA=40
 # CONFIG_DUMP_SAMPLES=3
 # SETTLE_SEC=60
 # RUN_ID=20260520T183201Z-12345
+# NODE_ALLOC_CPU_M=16000
+# NODE_ALLOC_MEM_MI=64000
+# ISTIOD_CPU_LIMIT_M=2000
+# ISTIOD_MEM_LIMIT_MI=8192
+# SCALE_TARGET_FRACTION=0.7
 ```
 
 The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each
 value is either the apiserver `gitVersion` (e.g. `v1.30.4`), `unreachable`, or
-`unknown`.
+`unknown`. The `NODE_ALLOC_*` / `ISTIOD_*_LIMIT_*` / `SCALE_TARGET_FRACTION`
+keys (O9 scale-coverage legibility) are read once from the source context via
+read-only `kubectl get`; any may be `unknown` if the cluster is unreachable.
+`CONTROLPLANE_SCHEMA=40` marks the TSV column-schema version (O9 appended cols
+35-40); the report skips files whose width differs (with a counted stderr warning),
+so a 34-column pre-O9 file is never mixed into a 40-column aggregation.
 
-Followed by the 34-column data schema:
+Note: `istiod_cpu_pct_of_limit` / `node_cpu_pct` are **point samples** taken once
+per context at row-assembly time (outside the measurement window), unlike the
+windowed `istiod_cpu_m_delta` (col 32) — don't compare the two as if both are
+window averages. The istiod %-of-limit denominator is the *aggregate* limit
+(per-replica limit × replica count), matching the across-replica usage numerator.
+
+Followed by the 40-column data schema:
 
 ```
 timestamp  context  mesh_size  service_count  replicas  namespace_count  sidecar_scoping
@@ -231,7 +248,18 @@ scrape_window_sec  scrape_skew_ms
 settle_sec  istiod_restarted
 istiod_cpu_m_delta
 go_heap_alloc_mi  go_heap_inuse_mi
+istiod_cpu_pct_of_limit  istiod_mem_pct_of_limit   (O9 cols 35-36)
+node_cpu_pct  node_mem_pct                         (O9 cols 37-38)
+pods_scheduled  pods_allocatable                   (O9 cols 39-40)
 ```
+
+The six O9 columns (35-40) are per-row read-only capacity legibility: istiod
+CPU/mem as a percent of its live `resources.limits` (CR-patched, read from the
+live Deployment), worker-node CPU/mem utilization percent (`kubectl top nodes`,
+worker nodes only), and worker pod-slot occupancy. Any column is `N/A` when the
+underlying read is unavailable (e.g. metrics-server absent). They are surfaced
+in the report's "Achieved scale vs capacity" block (text + markdown), not the
+csv/json aggregate rows.
 
 `go_heap_alloc_mi` (`go_memstats_alloc_bytes`) and `go_heap_inuse_mi`
 (`go_memstats_heap_inuse_bytes`) are point-in-time values from the final scrape,
@@ -249,7 +277,27 @@ visible. The byte count is piped through `wc -c` on the local side.
 namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
 `markdown` summaries via `--format`. The markdown format includes a "Sidecar
 scoping effect" table showing config size reduction percentages across modes.
-Legacy TSV files with a non-34-column schema are skipped with a stderr warning.
+The report also prints an **"Achieved scale vs capacity" (O9)** block at the top
+of the text + markdown formats: max connected proxies, istiod/node utilization
+percentages, and a `SCALE_COVERAGE:` line. Legacy TSV files with a non-40-column
+schema are skipped with a stderr warning.
+
+### Scale coverage (O9)
+
+By default the harness only *reports* achieved scale vs capacity (the six
+columns above + the achieved-scale block); no sizing or gating behaviour
+changes. Two DEFAULT-OFF knobs (in `config/options.env`) enable Phase 2:
+
+- `SCALE_SIZING_MODE=auto` — `001` derives `SERVICE_COUNT` from capacity
+  (`cap_max_pods / replicas`) on the source context instead of the fixed CLI/env
+  value. With the default `fixed`, sizing is unchanged.
+- `SCALE_COVERAGE_ENFORCE=1` — turns the under-provision coverage check (achieved
+  pods / allocatable `< SCALE_COVERAGE_MIN_FRACTION`) from a warning into a hard
+  failure, in both `001`'s preflight and `004`'s report. Default `0` = warn only.
+
+`SCALE_TARGET_FRACTION` (default `0.7`) is the explicit O9↔O8 throttle:
+larger = more pods = slower. `SCALE_SYSTEM_RESERVE_FRACTION` (default `0.15`)
+holds back node allocatable for system/daemonset/gateway overhead before sizing.
 
 ## Cleanup
 
