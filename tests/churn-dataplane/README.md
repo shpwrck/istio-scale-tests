@@ -220,7 +220,7 @@ The sweep:
 | 14 | `max_ms` | `DurationHistogram.Max * 1000` |
 | 15 | `delta_p99_ms` | `churn_p99 − baseline_p99` for the same `combo_id`. `N/A` on baseline rows. Only computed when the baseline row has `status=OK` (A3). |
 | 16 | `istiod_restarted` | `0` if `process_start_time_seconds` unchanged across window; `1` if changed; `unknown` if either probe failed (PL9) |
-| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE`, `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
+| 17 | `status` | `OK`, `FAILED`, `POISONED_RESTART`, `POISONED_SCRAPE` (a per-pod `/metrics` scrape came back empty/below `FANOUT_MIN_SCRAPE_BYTES`, **or** the pre/post `scrape_skew_ms` exceeded `FANOUT_MAX_SKEW_MS` — incoherent snapshot), `CLEANUP_TIMEOUT`, `CHURN_RATE_NOT_MET` |
 | 18 | `churn_ops_attempted` | Total scale-op iterations the driver attempted in the window (one log line per op). `N/A` on baseline / cleanup rows. (A4) |
 | 19 | `churn_ops_succeeded` | Subset of attempted ops where every parallel `kubectl scale` exited 0. `N/A` on baseline / cleanup rows. (A4) |
 | 20 | `xds_pushes_delta` | `pilot_xds_pushes` counter delta during measurement window. `N/A` when istiod restarted or scrape failed. |
@@ -237,17 +237,26 @@ way it filters `POISONED_RESTART`.
 
 `status=POISONED_SCRAPE` is set by 002/003 when a per-pod istiod `/metrics`
 fanout scrape comes back empty or below `FANOUT_MIN_SCRAPE_BYTES` (a dead/slow
-port-forward) and the undercounted deltas would be unreliable; 005 filters it
-like `POISONED_RESTART`. This is the same failure mode the `churn` and
-`propagation` suites tag `SCRAPE_INCOMPLETE`; the name differs because
+port-forward) and the undercounted deltas would be unreliable, **or** when the
+per-window `scrape_skew_ms` (the spread of per-pod scrape *completion*
+timestamps, max of the pre/post batches) exceeded `FANOUT_MAX_SKEW_MS` (default
+1000 ms) — meaning the pre/post bodies were read seconds apart and the
+istiod-side counter/histogram deltas are computed across an incoherent snapshot.
+005 filters it like `POISONED_RESTART`. This is the same failure mode the `churn`
+and `propagation` suites tag `SCRAPE_INCOMPLETE`; the name differs because
 churn-dataplane follows its `POISONED_*` prefix for rows whose metric deltas
-are deliberately N/A'd.
+are deliberately N/A'd. The raw `scrape_skew_ms` is preserved in the per-row
+`# combo=... scrape_skew_ms=...` marker line for provenance even when it
+triggers the gate.
 
 Preamble comment lines (PL2 / PL19) above the header carry: `RUN_ID`,
 `HARNESS_SHA`, `ISTIO_VERSION`, `KUBE_VERSIONS`, `ISTIOD_REPLICAS` (Running
 source istiod pod count discovered at preflight — provenance for the per-pod
 fanout), `SETTLE_SEC`, `BASELINE_DURATION_SEC`, `CHURN_DURATION_SEC`, `QPS`,
-`CONNECTIONS`, `NAMESPACE`, plus a `# combo=... phase=... window_start_ns=...
+`CONNECTIONS`, `NAMESPACE`, `FANOUT_MAX_SKEW_MS` (the scrape-skew ceiling that
+decides `POISONED_SCRAPE`) and `FANOUT_METRICS_TIMEOUT` (the per-curl `/metrics`
+wait that bounds the skew the gate measures) — both result-affecting (PL2),
+plus a `# combo=... phase=... window_start_ns=...
 window_end_ns=... istiod_replicas=... scrape_skew_ms=...` marker just before
 every data row (PL3 wall-clock window, PL8 fanned-out scrape skew). Churn rows
 additionally carry `churn_ops_attempted=... churn_ops_succeeded=...` in

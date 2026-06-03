@@ -69,6 +69,26 @@
 # /metrics payload is many KB; an empty or truncated body indicates a PF death or
 # a timed-out scrape, NOT a control plane legitimately reporting 0 for a metric).
 : "${FANOUT_MIN_SCRAPE_BYTES:=512}"
+# Per-batch scrape-skew ceiling (ms). A fanned-out batch whose skew exceeds this
+# is tagged HIGH so the caller can poison the row (same tag-and-filter pattern as
+# the .failed / SCRAPE_INCOMPLETE plumbing). The skew is the spread of per-pod
+# scrape COMPLETION timestamps (PL8): a wide spread means some bodies were read
+# seconds apart from others (e.g. one curl queued behind dozens of port-forward
+# proxies near FANOUT_METRICS_TIMEOUT), so the snapshot is not coherent and the
+# counter/histogram deltas computed across it are untrustworthy. Default 1000ms:
+# above the ~100-350ms normal spread and well below the multi-second outlier seen
+# at ~50 concurrent port-forwards, but above the ~2s P1/P2 signal so it does not
+# clip legitimate slow convergence.
+#
+# R2-2 (PROVISIONAL — post-merge live-validation item): the 1000ms ceiling is
+# extrapolated from a SINGLE 4043ms outlier, not from a measured .skew distribution
+# at the campaign's 10x3 topology (~50 concurrent port-forwards). At that scale the
+# typical within-batch completion spread may routinely exceed 1000ms, which would
+# mass-drop rows at the most interesting data point. Do NOT finalize this value here:
+# validate against real `.skew` sidecars from a 10x3 run after the node-resize, then
+# re-derive. Until then the probes emit a loud rows_dropped_skew tally so a silent
+# mass-drop is visible. See docs/scale-test-team/process-learnings.md PL8.
+: "${FANOUT_MAX_SKEW_MS:=1000}"
 
 # Compute the base local port for a context's per-pod port-forward block.
 # Usage: fanout_ctx_port_base <ctx_index>
@@ -199,7 +219,10 @@ _fanout_scrape_one() {
 # legitimately reporting 0 (which yields a full, multi-KB body).
 #
 # Echoes the per-batch scrape skew in ms = max(ts)-min(ts) (PL8), spanning pods
-# (and, when the caller loops contexts into one out_dir, pods x contexts).
+# (and, when the caller loops contexts into one out_dir, pods x contexts). The
+# skew is ALSO persisted to <out_dir>/<prefix>.skew so a caller that discards the
+# stdout (e.g. a poll tick that only cares about the failed count) can still read
+# it back via fanout_scrape_skew_high without re-deriving it.
 #
 # Usage:
 #   skew_ms=$(fanout_scrape_all <out_dir> <prefix> <port>...) || handle incompleteness
@@ -249,6 +272,7 @@ fanout_scrape_all() {
 		' "${ts_files[@]}" 2>/dev/null)
 	fi
 	[[ -z "$skew" ]] && skew=0
+	echo "$skew" > "${out_dir}/${prefix}.skew"
 	echo "$skew"
 	(( failed == 0 ))
 }
@@ -260,6 +284,41 @@ fanout_scrape_all() {
 fanout_scrape_failed_count() {
 	local f="${1}/${2}.failed"
 	if [[ -s "$f" ]]; then cat "$f"; else echo 0; fi
+}
+
+# Read the per-batch scrape skew (ms) recorded by the most recent fanout_scrape_all
+# for a given <out_dir>/<prefix>. Echoes 0 if no record exists.
+# Usage: fanout_scrape_skew_ms <out_dir> <prefix>
+# shellcheck disable=SC2329
+fanout_scrape_skew_ms() {
+	local f="${1}/${2}.skew"
+	if [[ -s "$f" ]]; then cat "$f"; else echo 0; fi
+}
+
+# Report whether a raw skew value (ms) exceeds FANOUT_MAX_SKEW_MS. Echoes 1 (high
+# — incoherent snapshot, caller should poison the row) or 0, using strict ">" so a
+# batch exactly at the ceiling is NOT high. A non-numeric / empty value is treated
+# as 0 (not high). This is the single comparison primitive both the sidecar-based
+# fanout_scrape_skew_high and callers holding an already-computed skew (e.g. the
+# propagation probe's MAX across the source+remote baseline batches) route through,
+# so the production gate and the unit-tested gate are the same code path.
+# Usage: fanout_skew_high_value <skew_ms>
+# shellcheck disable=SC2329
+fanout_skew_high_value() {
+	local skew="${1:-0}"
+	skew="${skew//[^0-9]/}"
+	if (( ${skew:-0} > FANOUT_MAX_SKEW_MS )); then echo 1; else echo 0; fi
+}
+
+# Report whether the most recent fanout_scrape_all batch for <out_dir>/<prefix>
+# exceeded FANOUT_MAX_SKEW_MS. Echoes 1 (high — incoherent snapshot, caller should
+# poison the row) or 0. A 0-skew or absent record is treated as 0 (not high), so a
+# single-pod context (skew is trivially 0) is never flagged. Mirrors
+# fanout_scrape_failed_count's tag-and-filter contract.
+# Usage: fanout_scrape_skew_high <out_dir> <prefix>
+# shellcheck disable=SC2329
+fanout_scrape_skew_high() {
+	fanout_skew_high_value "$(fanout_scrape_skew_ms "$1" "$2")"
 }
 
 # Record the sorted pod-name set for a context to a file (for restart detection).

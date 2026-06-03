@@ -1,4 +1,8 @@
-{{- if .Values.canary.enabled }}
+{{- if .Values.backer.enabled }}
+# The canary Service (O1) selects on BOTH the stable backer selectorLabels AND the
+# active-flip label, so it has ZERO endpoints until the probe stamps the active
+# label onto the backer pod at t0 — and drains the instant the label is removed.
+# It is created once in 001-setup and persists across probe iterations.
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,6 +13,7 @@ metadata:
 spec:
   selector:
     {{- include "propagation-test.canary.selectorLabels" . | nindent 4 }}
+    {{- include "propagation-test.canary.activeSelectorLabels" . | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.service.port }}
