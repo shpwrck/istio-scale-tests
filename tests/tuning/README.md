@@ -144,6 +144,13 @@ results/sweep-<RUN_ID>/
 └── sweep-comparison.md
 ```
 
+If a profile's apply or probe fails, the sweep does **not** abort — it records a
+marker file in that profile's directory (`SETUP_FAILED` for an apply/rollout failure,
+`PROBE_FAILED` for a probe failure) instead of a `.tsv`, attempts a best-effort revert
+(on apply failure) so istiod returns to default, and continues to the next profile.
+`004-compare-profiles.sh` skips marker-only directories, so a failed profile is visibly
+absent from the comparison table while the marker remains for operator inspection.
+
 ## Combining Profiles
 
 Profiles can be combined (stacked) by passing multiple profile names to the

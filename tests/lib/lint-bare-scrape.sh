@@ -75,19 +75,23 @@ lint_bare_scrape_file() {
 	' "$file"
 }
 
-# B7: flag bare per-combo orchestrator-step calls.
+# B7 / R3-2: flag bare per-combo / per-profile orchestrator-step calls.
 #
-# Why: a sweep orchestrator's per-combo step `"$SCRIPT_DIR/00N-*.sh" …` (setup / probe
-# / cleanup) returns non-zero on a per-combo failure; bare in statement position it
-# aborts the entire multi-hour sweep under `set -e`, discarding every completed combo
-# (this is the B1 regression class). Such a call must be captured, `|| …`'d, or used
-# as an `if`/`while` condition so the failure becomes a recorded row + continue.
+# Why: a sweep orchestrator's per-iteration step — e.g. `"$SCRIPT_DIR/00N-*.sh" …` or
+# `"${TUNING_DIR}/00N-*.sh" …` (setup / probe / cleanup / apply / revert) — returns
+# non-zero on a per-iteration failure; bare in statement position it aborts the entire
+# multi-hour sweep under `set -e`, discarding every completed iteration (the B1
+# regression class). Such a call must be captured, `|| …`'d, or used as an `if`/`while`
+# condition so the failure becomes a recorded marker/row + continue.
 #
 # Scope/exemptions (deterministic — no fragile loop-depth tracking):
 #   - Only `*-run-sweep.sh` files are checked.
-#   - Only statement-position calls (the trimmed line STARTS with the
-#     "$SCRIPT_DIR/0NN-...sh" token — so captures `X="$(…)"` and `if !/while`
-#     conditions, which start with other tokens, are inherently excluded).
+#   - Anchor (R3-2): the trimmed line STARTS with a `"${VAR}/…/0NN-name.sh"` token —
+#     ANY `$VAR`/`${VAR}`-prefixed path to an `0NN-`-numbered script, not just the
+#     literal `$SCRIPT_DIR` (the original anchor silently missed tuning's
+#     `${TUNING_DIR}/001-apply-profile.sh`). Statement-position only, so captures
+#     `X="$(…)"` and `if !/while` conditions (which start with other tokens) are
+#     inherently excluded.
 #   - REPORT/aggregation steps are exempted by name: a post-loop report failure is
 #     acceptable (the sweep already produced its TSVs), and report scripts are
 #     conventionally the last call. Exempted suffixes: -report-results.sh,
@@ -108,8 +112,9 @@ lint_bare_orchestrator_step_file() {
 				t = line
 				sub(/^[ \t]+/, "", t)
 				if (t ~ /^#/ || t == "") continue
-				# Statement-position "$SCRIPT_DIR/0NN-...sh" call?
-				if (t !~ /^"\$SCRIPT_DIR(\/|")[^"]*0[0-9][0-9]-[^"]*\.sh"/) continue
+				# Statement-position "${VAR}/.../0NN-name.sh" call (R3-2: any ${VAR}/
+				# or $VAR/ prefix, not just $SCRIPT_DIR)?
+				if (t !~ /^"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\/[^"]*0[0-9][0-9]-[^"]*\.sh"/) continue
 				# Exempt report/aggregation steps (post-loop; failure acceptable).
 				if (t ~ /-report-results\.sh"/ || t ~ /-collect-pilot-metrics\.sh"/ || t ~ /-compare-profiles\.sh"/) continue
 				# Guarded by || or && anywhere on the line -> OK.
