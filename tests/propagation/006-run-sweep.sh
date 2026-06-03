@@ -18,6 +18,9 @@
 #   ./tests/propagation/006-run-sweep.sh --dry-run
 # ci-dry-run:
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
+# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -274,12 +277,22 @@ for ms in "${MESH_SIZES[@]}"; do
 	if [[ -n "$remote_csv" ]]; then
 		endpoint_args+=(--remote-contexts "$remote_csv")
 	fi
-	"$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"
+	# P0: a probe failure must NOT abort the multi-hour sweep. The endpoint probe owns
+	# its own per-iteration TSV (002 writes rows into $SWEEP_DIR and self-tags
+	# TIMEOUT_*/DRAIN_TIMEOUT/RESTART/SCRAPE_INCOMPLETE per row), and 005-report-results.sh
+	# counts n_total[mesh_size] from rows present — a crashed mesh_size contributes no
+	# rows (visibly absent). Log-and-continue rather than synthesize one PROBE_FAILED
+	# row (which would misrepresent ITERATIONS planned as a single attempt).
+	if ! "$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"; then
+		echo "warn: endpoint probe failed for mesh_size=$ms; continuing to next mesh_size" >&2
+	fi
 	echo ""
 
 	if ((COLLECT_METRICS)); then
 		echo "--- Collecting pilot metrics (mesh_size=$ms) ---"
-		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$SWEEP_DIR"
+		# Non-fatal: optional supplementary collection must not abort the sweep.
+		"$SCRIPT_DIR/004-collect-pilot-metrics.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --output-dir "$SWEEP_DIR" || \
+			echo "warn: pilot metrics collection failed for mesh_size=$ms; continuing" >&2
 		echo ""
 	fi
 

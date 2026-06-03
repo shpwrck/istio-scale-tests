@@ -23,6 +23,10 @@
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
+# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# both run). Per-pod faults are degraded to N/A rows; this self-reports an
+# UNEXPECTED abort.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -339,12 +343,20 @@ resolve_pods() {
 		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
 			--field-selector=status.phase=Running \
 			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
-		[[ -z "$pods" ]] && die "context $ctx: no running istiod pods found in istio-system"
+		# P2/PL: a SINGLE context with zero istiod pods is a per-instance fault, not a
+		# whole-run precondition — warn and drop that context (its pods are absent from
+		# the manifest, so it contributes no rows and the final phase has nothing to
+		# emit for it). `die` is reserved for "zero istiod pods across ALL contexts".
+		if [[ -z "$pods" ]]; then
+			echo "warning: context $ctx: no running istiod pods in istio-system; dropping this context from the scrape set" >&2
+			continue
+		fi
 		for pod in $pods; do
 			POD_CTXS+=("$ctx")
 			POD_NAMES+=("$pod")
 		done
 	done
+	((${#POD_CTXS[@]})) || die "no running istiod pods found in istio-system across ANY context (${CONTEXTS[*]}) — cannot proceed"
 }
 
 save_pod_manifest() {
@@ -401,7 +413,17 @@ for k in "${!POD_CTXS[@]}"; do
 	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
 		if ((attempts > 20)); then
-			((restarts >= 3)) && die "port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed after ${restarts} restarts"
+			if ((restarts >= 3)); then
+				# P2/PL13/PL15: a single pod whose PF won't come up after 3 restarts is a
+				# per-instance fault, NOT a whole-run precondition. Stop waiting and leave
+				# this pod's PF dead: its scrape (scrape_all_parallel) then yields an empty
+				# final-${k}.metrics, and the existing "no final scrape -> N/A row" path
+				# (see scrape_window) emits a row with restarted=unknown and N/A numerics
+				# for this pod. The report (004) counts it in n_total, excludes from n_valid.
+				echo "warning: port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed after ${restarts} restarts; this pod will emit an N/A row (restarted=unknown)" >&2
+				kill "${PF_PIDS[k]}" 2>/dev/null || true
+				break
+			fi
 			restarts=$((restarts + 1))
 			attempts=0
 			# Kill the stuck PF (free its local port) and replace its slot before retrying.
@@ -698,7 +720,10 @@ scrape_one_context() {
 	local ctx="$1" port="$2" out="$3" ts_start="$4" ts_end="$5"
 	local body t_start t_end
 	t_start=$(now_ms)
-	body=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null) || return 1
+	# P4: --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
+	# (-> empty metrics file -> N/A row via scrape_window) instead of hanging the
+	# whole sweep. 10s is generous for a multi-MB /metrics body at 5k+ services.
+	body=$(curl -s --max-time 10 "http://localhost:${port}/metrics" 2>/dev/null) || return 1
 	t_end=$(now_ms)
 	printf '%s' "$body" > "$out"
 	printf '%s' "$t_start" > "$ts_start"

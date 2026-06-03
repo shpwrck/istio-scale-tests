@@ -12,6 +12,9 @@
 #   ./tests/churn/003-run-sweep.sh --churn-intensities 5,10,20
 # ci-dry-run:
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
+# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -183,11 +186,23 @@ for ms in "${MESH_SIZES[@]}"; do
 			--output-dir "$SWEEP_DIR"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-		"$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"
+		# P0: a probe failure must NOT abort the multi-hour sweep. The churn probe owns
+		# its own per-iteration TSV (002 writes rows into $SWEEP_DIR and self-tags
+		# POISONED_*/SCRAPE_INCOMPLETE/TIMEOUT_* per row), and 004-report-results.sh
+		# counts n_total from rows actually present per cell — so a crashed combo simply
+		# contributes no rows (it is visibly absent), which is the honest signal here.
+		# We therefore log-and-continue rather than synthesize a single PROBE_FAILED row
+		# (which would misrepresent ITERATIONS planned as one attempt). Cleanup still runs.
+		if ! "$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"; then
+			echo "warn: churn probe failed for mesh_size=$ms churn_intensity=$intensity; continuing to next combo (cleanup runs below)" >&2
+		fi
 		echo ""
 
 		echo "--- Cleaning up ---"
-		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv"
+		# P0/PL23: a cleanup hiccup must not abort the sweep — the next combo's setup also
+		# cleans the namespace. Warn and continue.
+		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+			echo "warn: cleanup reported failure for mesh_size=$ms churn_intensity=$intensity; next combo's setup will re-clean" >&2
 		echo ""
 	done
 done

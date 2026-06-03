@@ -11,6 +11,9 @@
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
 # ci-dry-run:
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
+# probe/cleanup failures are caught explicitly below and degraded to a row status.
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -305,7 +308,27 @@ for ms in "${MESH_SIZES[@]}"; do
 			--append
 		)
 		[[ -n "$remote_csv" ]] && baseline_args+=(--remote-contexts "$remote_csv")
-		"$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}"
+		# P0/PL15: a probe failure must be a RECORDED failed combo, not a sweep abort.
+		# 005-report-results.sh keys n_total on (mesh_size, churn_rate) via the baseline/
+		# churn rows' combo_id and only admits status=OK + restarted=0 rows to n_valid,
+		# so a phase=baseline status=PROBE_FAILED row is counted-but-excluded (PL13/PL15).
+		# 25-col layout mirrors the CLEANUP_TIMEOUT row below.
+		if ! "$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}"; then
+			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID; recording PROBE_FAILED row and continuing" >&2
+			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$ms" "$cr" "baseline" \
+				"0" "0" "0" \
+				"N/A" "N/A" "N/A" "N/A" "N/A" \
+				"N/A" "unknown" "PROBE_FAILED" \
+				"N/A" "N/A" \
+				"N/A" "N/A" "N/A" "N/A" "N/A" "N/A" >> "$TSV_FILE"
+			# Skip the churn phase for this combo (no baseline to delta against), clean
+			# up so the next combo is isolated, settle, and continue.
+			"$SCRIPT_DIR/006-cleanup.sh" --contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC" || \
+				echo "warn: cleanup after baseline failure also reported failure for $COMBO_ID" >&2
+			if (( COMBO_INDEX < MATRIX_SIZE )); then sleep "$INTER_COMBO_SETTLE_SEC"; fi
+			continue
+		fi
 
 		echo "--- churn phase ---"
 		churn_args=(
@@ -326,7 +349,19 @@ for ms in "${MESH_SIZES[@]}"; do
 			--baseline-file "$TSV_FILE"
 		)
 		[[ -n "$remote_csv" ]] && churn_args+=(--remote-contexts "$remote_csv")
-		"$SCRIPT_DIR/003-run-churn-probe.sh" "${churn_args[@]}"
+		# P0/PL15: failed churn phase → phase=churn status=PROBE_FAILED row (counted in
+		# n_total, excluded from n_valid because status!=OK). Fall through to cleanup so
+		# the next combo stays isolated.
+		if ! "$SCRIPT_DIR/003-run-churn-probe.sh" "${churn_args[@]}"; then
+			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] churn probe failed for $COMBO_ID; recording PROBE_FAILED row and continuing" >&2
+			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$ms" "$cr" "churn" \
+				"0" "0" "0" \
+				"N/A" "N/A" "N/A" "N/A" "N/A" \
+				"N/A" "unknown" "PROBE_FAILED" \
+				"N/A" "N/A" \
+				"N/A" "N/A" "N/A" "N/A" "N/A" "N/A" >> "$TSV_FILE"
+		fi
 
 		echo "--- cleanup ---"
 		cleanup_args=(--contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC")

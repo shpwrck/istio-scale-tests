@@ -23,6 +23,10 @@
 #     --profiles 01-sidecar-scoping,06-xds-cache-tuning --suite controlplane
 # ci-dry-run-skip: needs yq and valid --suite directory with profiles
 set -euo pipefail
+# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-profile
+# probe failures are caught via PIPESTATUS below and degraded to warn+continue.
+# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
+trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
@@ -196,8 +200,22 @@ run_probe() {
 	sleep "$SETTLE_SEC"
 
 	echo "    Executing: $(basename "$PROBE_SCRIPT") --contexts ${CONTEXTS_CSV}"
+	# P0/P4: the probe is piped through tee, so the pipeline's `$?` is tee's (always 0)
+	# and a probe failure was silently swallowed — recording nothing and continuing as
+	# if the profile measured cleanly. `set -o pipefail` is on, but a bare failing
+	# pipeline under `set -e` would instead ABORT the whole multi-profile sweep. So we
+	# capture PIPESTATUS[0] (the probe's real exit) and treat non-zero as a failed
+	# profile: warn, drop a PROBE_FAILED marker in the result dir for 004-compare to see,
+	# and continue to the next profile. The probe owns its own per-suite TSV; on success
+	# it is copied below, on failure no TSV is copied (the profile is visibly absent).
 	"$PROBE_SCRIPT" --contexts "$CONTEXTS_CSV" \
 		2>&1 | tee "${result_dir}/probe-output.log"
+	local probe_rc="${PIPESTATUS[0]}"
+	if (( probe_rc != 0 )); then
+		echo "warn: probe for '${label}' exited ${probe_rc}; recording PROBE_FAILED and continuing to next profile" >&2
+		echo "PROBE_FAILED rc=${probe_rc} $(date -u -Iseconds)" > "${result_dir}/PROBE_FAILED"
+		return 0
+	fi
 
 	local suite_results="${SUITE_DIR}/results"
 	if [[ -d "$suite_results" ]]; then
