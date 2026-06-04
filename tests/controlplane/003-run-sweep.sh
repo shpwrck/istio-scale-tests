@@ -39,7 +39,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/config/options.env"  # #45/#46: explicit re-source for legibility (versions.env already pulls it in) — SCALE_TARGET_FRACTION / SCALE_SIZING_MODE for the preamble
+source "${ROOT}/config/options.env"  # #45/#46: re-source for legibility (versions.env already pulls it in) — SCALE_* preamble keys
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
