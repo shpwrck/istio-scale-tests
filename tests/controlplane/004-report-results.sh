@@ -248,6 +248,22 @@ preamble_get() {
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
 
+# #44: the four utilization-% maxes (istiod_*_pct_of_limit, node_*_pct) are derived
+# from `kubectl top` (the metrics API). When the metrics API is unavailable on the
+# target clusters, all four come back N/A while the get-derived denominators
+# (allocatable, istiod limit, pod counts) still populate. Detect exactly that case —
+# every utilization-% max non-numeric — so an empty utilization headline reads as a
+# known environment limitation rather than a harness bug. Returns 0 when unavailable.
+METRICS_NOTE="utilization-% columns are N/A — kubectl top (metrics API) returned no usable data for this sweep; install/verify metrics-server on the target clusters to populate istiod_*_pct_of_limit and node_*_pct (see issue #44)."
+metrics_unavailable() {
+	local key v
+	for key in istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct; do
+		v="$(as_get "$key")"
+		[[ "$v" =~ ^-?[0-9.]+$ ]] && return 1   # any numeric max -> metrics present
+	done
+	return 0
+}
+
 # O9 coverage floor: achieved pods (pods_scheduled max) vs allocatable; the
 # achieved fraction is informational unless SCALE_COVERAGE_ENFORCE=1. We use
 # pods_scheduled/pods_allocatable as the achieved-vs-capacity proxy (the per-row
@@ -264,7 +280,7 @@ count_valid_contexts() {
 		!/^#/ && !/^timestamp/ && NF>=40 && $31 == "0" { c[$2] = 1 }
 		END { n = 0; for (k in c) n++; print n }'
 }
-COVERAGE_STATUS="N/A"      # OK | UNDER | N/A
+COVERAGE_STATUS="N/A"      # OK | UNDER | INFO (fixed-mode, non-enforcing) | N/A
 COVERAGE_LINE=""
 compute_coverage() {
 	local sched alloc
@@ -283,6 +299,19 @@ compute_coverage() {
 	n_ctx="$(count_valid_contexts)"
 	(( n_ctx > 1 )) && fleet=" (fleet: maxes taken independently across ${n_ctx} contexts)"
 	frac="$(awk -v s="$sched" -v a="$alloc" 'BEGIN{ if (a+0<=0){print "0"} else printf "%.3f", s/a }')"
+	# #46: the pods/allocatable floor is a yardstick for SCALE_SIZING_MODE=auto, where
+	# the harness deliberately fills the cluster toward a target fraction. A fixed-mode
+	# sweep pins service/replica/namespace counts and sweeps only mesh_size (it is NOT
+	# trying to pack nodes), so applying the floor there reads as a spurious UNDER. Read
+	# the mode from the preamble for reproducibility (cf #45), falling back to the env.
+	local sizing
+	sizing="$(preamble_get SCALE_SIZING_MODE)"
+	[[ "$sizing" == unknown ]] && sizing="${SCALE_SIZING_MODE:-fixed}"
+	if [[ "$sizing" != auto ]]; then
+		COVERAGE_STATUS="INFO"
+		COVERAGE_LINE="SCALE_COVERAGE: ${sched}/${alloc} pods = ${frac} (informational; fixed-workload sweep, floor applies only to SCALE_SIZING_MODE=auto)${fleet}"
+		return 0
+	fi
 	local under
 	under="$(awk -v f="$frac" -v m="$min" 'BEGIN{ print (f+0 < m+0) ? 1 : 0 }')"
 	if (( under )); then
@@ -455,6 +484,7 @@ report_text() {
 	echo "  node_mem_pct (max):          $(as_pct node_mem_pct)"
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
 	echo "  ${COVERAGE_LINE}"
+	metrics_unavailable && echo "  NOTE: ${METRICS_NOTE}"
 	echo ""
 	echo "Sweep axes:"
 	echo "  mesh_sizes:        ${SWEEP_MESH}"
@@ -543,6 +573,7 @@ report_markdown() {
 	echo "| pods_scheduled / allocatable | $(as_get pods_sched) / $(as_get pods_alloc) |"
 	echo ""
 	echo "> ${COVERAGE_LINE}"
+	metrics_unavailable && { echo ""; echo "> NOTE: ${METRICS_NOTE}"; }
 	echo ""
 	echo "| Axis | Values |"
 	echo "|------|--------|"
