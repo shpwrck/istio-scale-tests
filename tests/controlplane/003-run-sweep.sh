@@ -39,9 +39,13 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
+source "${ROOT}/config/options.env"  # #45/#46: SCALE_TARGET_FRACTION / SCALE_SIZING_MODE for the preamble
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # B4: harness_sha / probe_kube_versions for the pre-created preamble
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/capacity.sh"  # #45: cap_node_totals / cap_istiod_limits for the capacity provenance lines
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -279,6 +283,31 @@ precreate_tsv_preamble() {
 	local harness kver
 	harness="$(harness_sha)"
 	kver="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
+	# #45: capacity provenance. 003 now owns the preamble, so it must write the same
+	# capacity-legibility lines 002 used to (002 skips its block once the file exists).
+	# Read-only, source-context only; cap_*.sh tolerates failure -> `unknown`. These
+	# are the report's denominators for the "Achieved scale vs capacity" block and they
+	# read fine via get nodes / get deploy (independent of the metrics API; cf #44).
+	local src_ctx="${CONTEXTS[0]}"
+	local node_alloc_cpu_m="unknown" node_alloc_mem_mi="unknown"
+	local istiod_cpu_limit_m="unknown" istiod_mem_limit_mi="unknown"
+	local kv
+	# shellcheck disable=SC2207
+	local -a nt_kv=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${nt_kv[@]}"; do
+		case "$kv" in
+			cpu_m=*) node_alloc_cpu_m="${kv#cpu_m=}" ;;
+			mem_mi=*) node_alloc_mem_mi="${kv#mem_mi=}" ;;
+		esac
+	done
+	# shellcheck disable=SC2207
+	local -a il_kv=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${il_kv[@]}"; do
+		case "$kv" in
+			cpu_m=*) istiod_cpu_limit_m="${kv#cpu_m=}" ;;
+			mem_mi=*) istiod_mem_limit_mi="${kv#mem_mi=}" ;;
+		esac
+	done
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
@@ -289,6 +318,12 @@ precreate_tsv_preamble() {
 		echo "# PHASE=sweep"
 		echo "# SIDECAR_SCOPING=${SIDECAR_SCOPINGS_CSV}"
 		echo "# CONFIG_DUMP_SAMPLES=${CONFIG_DUMP_SAMPLES}"
+		echo "# NODE_ALLOC_CPU_M=${node_alloc_cpu_m}"
+		echo "# NODE_ALLOC_MEM_MI=${node_alloc_mem_mi}"
+		echo "# ISTIOD_CPU_LIMIT_M=${istiod_cpu_limit_m}"
+		echo "# ISTIOD_MEM_LIMIT_MI=${istiod_mem_limit_mi}"
+		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
+		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
 		echo "# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}"
 	} > "$tsv"

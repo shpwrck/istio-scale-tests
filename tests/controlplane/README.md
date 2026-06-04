@@ -317,6 +317,22 @@ changes. Two DEFAULT-OFF knobs (in `config/options.env`) enable Phase 2:
   pods / allocatable `< SCALE_COVERAGE_MIN_FRACTION`) from a warning into a hard
   failure, in both `001`'s preflight and `004`'s report. Default `0` = warn only.
 
+The coverage floor is a yardstick for `SCALE_SIZING_MODE=auto` (where the harness
+deliberately fills the cluster toward `SCALE_TARGET_FRACTION`). In the default
+`fixed` mode the sweep pins service/replica/namespace counts and sweeps only
+`mesh_size` — it is not trying to pack nodes — so `004` reports coverage as
+**informational** (`SCALE_COVERAGE: <n>/<n> pods = <frac> (informational; …)`),
+never `UNDER`, and `SCALE_COVERAGE_ENFORCE=1` does not hard-fail. The floor only
+fires (`UNDER` / enforced failure) in `auto` mode. `004` reads the mode from the
+TSV preamble (`# SCALE_SIZING_MODE=…`, recorded by `003`), falling back to the env.
+
+The utilization-% columns (`istiod_*_pct_of_limit`, `node_*_pct`) are derived from
+`kubectl top` (the metrics API); their denominators (allocatable, istiod limit)
+come from `kubectl get`. When the metrics API is unavailable on the target
+clusters, all four percentages are `N/A` while the get-derived capacity values
+still populate — `004` surfaces an explicit `NOTE` explaining this so the empty
+utilization headline is legible rather than mistaken for a harness bug.
+
 `SCALE_TARGET_FRACTION` (default `0.7`) is the explicit O9↔O8 throttle:
 larger = more pods = slower. `SCALE_SYSTEM_RESERVE_FRACTION` (default `0.15`)
 holds back node allocatable for system/daemonset/gateway overhead before sizing.
