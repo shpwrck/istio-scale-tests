@@ -47,7 +47,7 @@ OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 # NS must match what 001/002/003/006 use (COEXEC_TEST_NAMESPACE) so the O8 item-1
 # reset-to-base fidelity guard (`-n "$NS"`) targets the right namespace.
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-180}"
+NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}"
 MATRIX_CAP=64
 FORCE_LARGE_MATRIX=0
 DRY_RUN=0
@@ -77,6 +77,8 @@ Usage: $(basename "$0") [options]
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
   --output-dir DIR          Top-level results directory (default: tests/churn-dataplane/results).
   --ns-delete-timeout SEC   Bound on async namespace teardown wait (default: $NS_DELETE_TIMEOUT_SEC).
+                            Also bounds 001's pre-apply wait for the PRIOR mesh-size's
+                            namespace to finish Terminating (cleanup-cascade fix A).
   --force-large-matrix      Bypass the PL10 matrix cap of $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
@@ -254,7 +256,10 @@ if ! ((DRY_RUN)); then
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" \
 		"MATRIX_SIZE=$MATRIX_SIZE" \
-		"REPETITIONS=$REPETITIONS"
+		"REPETITIONS=$REPETITIONS" \
+		"SETUP_NS_WAIT_SEC=$NS_DELETE_TIMEOUT_SEC" \
+		"CLEANUP_GRACE_SEC=${COEXEC_CLEANUP_GRACE_SEC:-5}" \
+		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
@@ -366,6 +371,11 @@ for ms in "${MESH_SIZES[@]}"; do
 		--source-context "$source_ctx"
 		--deployment-count "$CHURN_DEPLOYMENT_COUNT_OPT"
 		--base-replicas "$CHURN_BASE_REPLICAS_OPT"
+		# Cleanup-cascade fix (A): bound 001's pre-apply wait for a still-Terminating
+		# namespace from the PREVIOUS mesh-size's cleanup to the SAME timeout 006 used
+		# (--ns-delete-timeout), so a slow teardown DELAYS this setup rather than failing
+		# the apply into a Terminating namespace and cascading to SETUP_FAILED.
+		--ns-wait-timeout "$NS_DELETE_TIMEOUT_SEC"
 	)
 	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
 
@@ -373,12 +383,13 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "=========================================="
 		echo "[mesh-size $ms] ctxs=${active_csv}"
 		echo "=========================================="
-		echo "  [dry-run] 001 --source-context $source_ctx --remote-contexts $remote_csv --deployment-count $CHURN_DEPLOYMENT_COUNT_OPT  # ONCE per mesh-size" >&2
+		echo "  [dry-run] 001 --source-context $source_ctx --remote-contexts $remote_csv --deployment-count $CHURN_DEPLOYMENT_COUNT_OPT --ns-wait-timeout $NS_DELETE_TIMEOUT_SEC  # ONCE per mesh-size; waits out a still-Terminating ns from the prior mesh-size before applying" >&2
 	else
 		echo "=========================================="
 		echo "[mesh-size $ms] setup ONCE  ctxs=${active_csv}"
 		echo "=========================================="
 		echo "--- setup (once per mesh-size) ---"
+		echo "    note: setup may wait up to ${NS_DELETE_TIMEOUT_SEC}s for the prior mesh-size's namespace ($NS) to finish Terminating before applying (Cleanup-cascade fix A)"
 		# B1/PL15/PL32: setup is the most probable per-combo failure at scale. A bare
 		# call under set -e would abort the whole sweep, discarding every completed
 		# combo (the report runs only after the loop). On failure: record SETUP_FAILED
