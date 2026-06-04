@@ -39,7 +39,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/config/options.env"  # #45/#46: SCALE_TARGET_FRACTION / SCALE_SIZING_MODE for the preamble
+source "${ROOT}/config/options.env"  # #45/#46: explicit re-source for legibility (versions.env already pulls it in) — SCALE_TARGET_FRACTION / SCALE_SIZING_MODE for the preamble
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
@@ -98,6 +98,8 @@ Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
+  SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (from config/options.env) are recorded
+  in the TSV preamble for the report's coverage calibration + capacity block.
 EOF
 }
 
@@ -310,6 +312,7 @@ precreate_tsv_preamble() {
 	done
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
+		echo "# CONTROLPLANE_SCHEMA=40"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# HARNESS_SHA=${harness}"
 		echo "# KUBE_VERSIONS=${kver}"

@@ -310,6 +310,11 @@ cap_pod_count() {
 }
 
 # cap_istiod_limits <ctx> <kubectl_argv...>
+# NOTE: targets the unsuffixed `istiod` Deployment — correct for a Sail
+# IstioRevision/default install (the default revision produces an unsuffixed
+# `istiod`, label app=istiod). A NON-default revision (e.g. default-v1-24) names
+# it `istiod-<rev>`, so `get deploy istiod` would 404 -> unknown limit. Hardening
+# the selector for revisioned installs is tracked in issue #44.
 # shellcheck disable=SC2329
 cap_istiod_limits() {
 	local ctx="$1"; shift
