@@ -57,6 +57,7 @@ CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
 OUTPUT_DIR_BASE="${ROOT}/tests/controlplane/results"
 SETTLE_SEC=60
 DRY_RUN=0
+METRICS_API_STATUS="unknown"  # #44: set by metrics_preflight; recorded in the preamble
 FORCE_LARGE_MATRIX=0
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 
@@ -100,6 +101,12 @@ Environment:
   CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
   SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (from config/options.env) are recorded
   in the TSV preamble for the report's coverage calibration + capacity block.
+  METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
+  pre-sweep metrics-API readiness gate — polls 'kubectl top nodes' per context,
+  records # METRICS_API= in the preamble, WARNs (never aborts) if unavailable.
+  CAP_TOP_TIMEOUT (default 15): request timeout for the slower kubectl top reads
+  (vs 5s for etcd get) — the primary #44 fix for top timing out under sweep load.
+  CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2): per-read retry for transient blips.
 EOF
 }
 
@@ -327,10 +334,54 @@ precreate_tsv_preamble() {
 		echo "# ISTIOD_MEM_LIMIT_MI=${istiod_mem_limit_mi}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
 		echo "# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}"
 	} > "$tsv"
 	echo -e "$CONTROLPLANE_TSV_HEADER" >> "$tsv"
+}
+
+# #44 prevention: metrics-API readiness gate. The O9 utilization-% columns are
+# sourced from `kubectl top` (metrics API), a path independent of the istiod
+# /metrics the sweep measures; a transient metrics-server outage (e.g. still
+# stabilizing right after a cluster/operator restart) silently N/As them for the
+# whole run. Before the loop, poll every context until `top nodes` serves data,
+# bounded by METRICS_READY_TIMEOUT. Records the verdict in METRICS_API_STATUS (which
+# precreate_tsv_preamble writes as `# METRICS_API=`) and WARNs — NEVER aborts
+# (utilization is observability, not the core measurement). METRICS_READY_TIMEOUT=0
+# disables the gate (status stays `unknown`, behaviour as before this change).
+metrics_preflight() {
+	local timeout="${METRICS_READY_TIMEOUT:-120}" interval="${METRICS_READY_INTERVAL:-10}"
+	if (( timeout <= 0 )); then
+		echo "Metrics-API preflight: disabled (METRICS_READY_TIMEOUT=0)." >&2
+		METRICS_API_STATUS="unknown"
+		return 0
+	fi
+	local deadline=$(( SECONDS + timeout ))
+	local -a pending=("${CONTEXTS[@]}")
+	echo "Metrics-API preflight: probing 'kubectl top nodes' on ${#pending[@]} context(s) (timeout ${timeout}s)..." >&2
+	while :; do
+		local -a still=()
+		local ctx
+		for ctx in "${pending[@]}"; do
+			[[ "$(cap_metrics_ready "$ctx" "${KUBECTL[@]}")" == ready ]] || still+=("$ctx")
+		done
+		pending=("${still[@]}")
+		(( ${#pending[@]} == 0 )) && break
+		(( SECONDS >= deadline )) && break
+		echo "  metrics not ready on ${#pending[@]} context(s): ${pending[*]}; retrying in ${interval}s..." >&2
+		sleep "$interval"
+	done
+	if (( ${#pending[@]} == 0 )); then
+		METRICS_API_STATUS="available"
+		echo "  metrics API available on all contexts." >&2
+	else
+		local csv; csv=$(IFS=,; echo "${pending[*]}")
+		METRICS_API_STATUS="unavailable:${csv}"
+		echo "  WARN: metrics API unavailable on ${csv} after ${timeout}s." >&2
+		echo "  WARN: utilization-% columns (istiod_*_pct_of_limit, node_*_pct) will be N/A for combos on those contexts;" >&2
+		echo "  WARN: the run PROCEEDS (utilization is observability) — verify metrics-server and re-run if you need utilization-%." >&2
+	fi
 }
 
 # P0/PL15: a per-combo setup OR probe failure must be RECORDED (counted in the
@@ -502,6 +553,7 @@ trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 # dry-run — probe_kube_versions would touch clusters). Guarantees provenance even if
 # the very first combo's setup/baseline fails.
 if ((! DRY_RUN)); then
+	metrics_preflight
 	precreate_tsv_preamble
 fi
 

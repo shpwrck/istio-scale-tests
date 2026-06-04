@@ -32,6 +32,15 @@
 #   cap_pod_count    <ctx> <worker_names_csv> <argv...>
 #   cap_istiod_limits <ctx> <argv...>
 #   cap_istiod_used  <ctx> <argv...>
+#   cap_metrics_ready <ctx> <argv...>   -> ready | unavailable (kubectl top probe)
+#
+# The three `kubectl top` reads (cap_node_used, cap_istiod_used, cap_metrics_ready)
+# use a longer request timeout (CAP_TOP_TIMEOUT, default 15s) than the etcd `get`
+# reads (5s): the aggregated metrics API is slower and, under the sweep's concurrent
+# multi-context load, a 5s `top` exceeded the timeout while `get` stayed under it —
+# the root cause of #44's all-N/A run (metrics-server itself was healthy throughout).
+# cap_node_used / cap_istiod_used additionally retry a brief empty result
+# CAP_TOP_ATTEMPTS times (CAP_TOP_BACKOFF_S apart) before degrading to `unknown`.
 #
 # Requires: tests/lib/common.sh (for die(), split_csv()), jq, awk.
 # All callers are expected to have run `set -euo pipefail`.
@@ -293,11 +302,29 @@ cap_node_totals() {
 		| cap_parse_node_totals
 }
 
+# _cap_retry_nonempty <cmd...>: run cmd up to CAP_TOP_ATTEMPTS times (CAP_TOP_BACKOFF_S
+# apart) until its stdout is non-empty, then echo that stdout. Rides through a BRIEF
+# metrics-API blip so a single bad moment doesn't N/A a combo (#44). On persistent
+# failure it echoes the last (empty) output so the downstream parser still yields
+# `unknown` — never fails the pipeline. Used only for the `kubectl top` reads, which
+# run OUTSIDE the scrape measurement window, so the retry latency is measurement-neutral.
+# shellcheck disable=SC2329
+_cap_retry_nonempty() {
+	local attempts="${CAP_TOP_ATTEMPTS:-3}" backoff="${CAP_TOP_BACKOFF_S:-1}" i out=""
+	for (( i = 1; i <= attempts; i++ )); do
+		out="$("$@" 2>/dev/null)" || out=""
+		if [[ -n "$out" ]]; then printf '%s\n' "$out"; return 0; fi
+		if (( i < attempts )); then sleep "$backoff" 2>/dev/null || true; fi
+	done
+	printf '%s\n' "$out"
+	return 0
+}
+
 # cap_node_used <ctx> <worker_names_csv> <kubectl_argv...>
 # shellcheck disable=SC2329
 cap_node_used() {
 	local ctx="$1" workers="$2"; shift 2
-	"$@" --context="$ctx" --request-timeout=5s top nodes --no-headers 2>/dev/null \
+	_cap_retry_nonempty "$@" --context="$ctx" --request-timeout="${CAP_TOP_TIMEOUT:-15}s" top nodes --no-headers \
 		| cap_parse_top_nodes "$workers"
 }
 
@@ -326,6 +353,21 @@ cap_istiod_limits() {
 # shellcheck disable=SC2329
 cap_istiod_used() {
 	local ctx="$1"; shift
-	"$@" --context="$ctx" --request-timeout=5s -n istio-system top pod -l app=istiod --no-headers 2>/dev/null \
+	_cap_retry_nonempty "$@" --context="$ctx" --request-timeout="${CAP_TOP_TIMEOUT:-15}s" -n istio-system top pod -l app=istiod --no-headers \
 		| cap_parse_istiod_used
+}
+
+# cap_metrics_ready <ctx> <kubectl_argv...>: "ready" if the metrics API serves
+# `top nodes` (>=1 row) within --request-timeout=${CAP_TOP_TIMEOUT:-15}s, else "unavailable". Single
+# attempt — the preflight gate (003 metrics_preflight) does its own poll-until-ready
+# loop, and this is also the predicate that loop checks each round. Node-level by
+# design: `top nodes` and `top pod` share one aggregated metrics API, so node
+# readiness implies pod readiness; a just-scheduled istiod pod's first-scrape lag is
+# covered by the per-read retry on cap_istiod_used, not this gate.
+# shellcheck disable=SC2329
+cap_metrics_ready() {
+	local ctx="$1"; shift
+	local out
+	out="$("$@" --context="$ctx" --request-timeout="${CAP_TOP_TIMEOUT:-15}s" top nodes --no-headers 2>/dev/null)" || out=""
+	[[ -n "$out" ]] && echo "ready" || echo "unavailable"
 }
