@@ -76,8 +76,15 @@ during the final phase, ensuring baseline and final scrapes always target the
 same physical process.
 
 If a pinned pod disappears between phases (e.g. HPA scale-down or restart),
-the row is emitted with `istiod_restarted=unknown` and counter/histogram
-deltas are excluded from aggregation.
+the row is emitted with `istiod_restarted=unknown`. When istiod restarts mid-window
+the row still scrapes real values but is marked `istiod_restarted=1`. In either case
+**all istiod-sourced metrics are excluded from aggregation** — not only the
+counter/histogram deltas (which reset across a restart) but also the gauges
+(memory, connected proxies, Go heap), since a restarted row carries a post-restart
+transient (a mid-reconnect proxy count, fresh-low memory) that is not a valid
+steady-state sample. Only the proxy-side config-dump bytes (independent of istiod
+restart) and the `n_total`/restart counts still ingest such a row. The aggregate's
+min/max/avg columns therefore mirror `n_valid` exactly (PL13/PL15/PL35).
 
 ## Fault-tolerance: degraded rows and the `context` sentinel
 
