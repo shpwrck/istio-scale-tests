@@ -195,6 +195,10 @@ no delta):
 ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 ```
 
+The O9 capacity columns (node/istiod utilization, pods scheduled) are re-read at
+the start of each watch window rather than memoized once, so a long-running watch
+tracks capacity changes instead of freezing them at the first window's reading.
+
 ## Results Format
 
 Each sweep gets its own subdirectory under `tests/controlplane/results/`:
@@ -225,7 +229,9 @@ keys (O9 scale-coverage legibility) are read once from the source context via
 read-only `kubectl get`; any may be `unknown` if the cluster is unreachable.
 `CONTROLPLANE_SCHEMA=40` marks the TSV column-schema version (O9 appended cols
 35-40); the report skips files whose width differs (with a counted stderr warning),
-so a 34-column pre-O9 file is never mixed into a 40-column aggregation.
+so a 34-column pre-O9 file is never aggregated alongside 40-column O9 files. (The
+aggregated *report* output is a separate 34-column shape — see `004`'s aggregate
+header — and is unrelated to the 40-column input width.)
 
 Note: `istiod_cpu_pct_of_limit` / `node_cpu_pct` are **point samples** taken once
 per context at row-assembly time (outside the measurement window), unlike the
@@ -279,8 +285,17 @@ namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
 scoping effect" table showing config size reduction percentages across modes.
 The report also prints an **"Achieved scale vs capacity" (O9)** block at the top
 of the text + markdown formats: max connected proxies, istiod/node utilization
-percentages, and a `SCALE_COVERAGE:` line. Legacy TSV files with a non-40-column
-schema are skipped with a stderr warning.
+percentages, and a `SCALE_COVERAGE:` line. The same provenance is carried in the
+other two formats so all four are at parity: `csv` emits it as `# capacity:` /
+`# achieved:` / `# SCALE_COVERAGE:` comment lines (the aggregate row schema is
+unchanged), and `json` nests `capacity`, `achieved_scale`, and `coverage` objects
+under `metadata` (the `results` array is unchanged). On a multi-context sweep the
+`SCALE_COVERAGE:` line is tagged `(fleet: …)` because `pods_scheduled`/`allocatable`
+are maxed independently across contexts, so the fraction is a fleet-level proxy
+rather than a single-cluster paired ratio. `services_total` is labelled
+`[configured]` — controlplane has no distinct achieved-services metric, so it
+surfaces the configured axis value, not a measured count. Legacy TSV files with a
+non-40-column schema are skipped with a stderr warning.
 
 ### Scale coverage (O9)
 

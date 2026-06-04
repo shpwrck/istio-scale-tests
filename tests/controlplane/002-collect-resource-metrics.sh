@@ -1215,6 +1215,12 @@ if ((WATCH)); then
 	while true; do
 		echo ""
 		echo "=== Window at $(date -u -Iseconds) ==="
+		# CAP_CACHE is a per-ctx memo so multi-replica rows in ONE window don't re-read
+		# capacity. In watch mode each window is a fresh point-in-time sample, so clear it
+		# between windows — otherwise the capacity columns (node util, istiod %-of-limit,
+		# pods scheduled) freeze at the first window's read and silently go stale. Reads
+		# are cheap, read-only, and outside the scrape window, so re-reading is safe.
+		CAP_CACHE=()
 		scrape_window "$INTERVAL"
 	done
 elif [[ "$PHASE" == baseline ]]; then
