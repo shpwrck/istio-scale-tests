@@ -294,9 +294,12 @@ The report also prints an **"Achieved scale vs capacity" (O9)** block at the top
 of the text + markdown formats: max connected proxies, istiod/node utilization
 percentages, and a `SCALE_COVERAGE:` line. The same provenance is carried in the
 other two formats so all four are at parity: `csv` emits it as `# capacity:` /
-`# achieved:` / `# SCALE_COVERAGE:` comment lines (the aggregate row schema is
-unchanged), and `json` nests `capacity`, `achieved_scale`, and `coverage` objects
-under `metadata` (the `results` array is unchanged). On a multi-context sweep the
+`# achieved:` / `# SCALE_COVERAGE:` / `# metrics:` comment lines (the aggregate row
+schema is unchanged), and `json` nests `capacity`, `achieved_scale`, `coverage`,
+and `metrics_note` under `metadata` (the `results` array is unchanged). The
+`# metrics:` line / `metrics_note` field carry the metrics-API-unavailable
+explanation (when applicable) so a csv/json consumer can tell why utilization-%
+is `N/A`. On a multi-context sweep the
 `SCALE_COVERAGE:` line is tagged `(fleet: …)` because `pods_scheduled`/`allocatable`
 are maxed independently across contexts, so the fraction is a fleet-level proxy
 rather than a single-cluster paired ratio. `services_total` is labelled
