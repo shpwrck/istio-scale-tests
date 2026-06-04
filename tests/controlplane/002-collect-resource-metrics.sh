@@ -330,6 +330,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# ISTIOD_CPU_LIMIT_M=${PRE_ISTIOD_CPU_LIMIT_M}"
 		echo "# ISTIOD_MEM_LIMIT_MI=${PRE_ISTIOD_MEM_LIMIT_MI}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
+		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING"
 	} > "$TSV_FILE"
 fi
