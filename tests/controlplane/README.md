@@ -336,24 +336,35 @@ clusters, all four percentages are `N/A` while the get-derived capacity values
 still populate — `004` surfaces an explicit `NOTE` explaining this so the empty
 utilization headline is legible rather than mistaken for a harness bug.
 
-**Metrics-API readiness gate (default-on, never aborts).** Because `kubectl top`
-is a path independent of the istiod `/metrics` the sweep measures, a transient
-metrics-server outage (e.g. still stabilizing right after a cluster/operator
-restart) would silently `N/A` the utilization columns for the whole run. Before
-the sweep loop, `003` polls `kubectl top nodes` on every context until the metrics
-API serves data, bounded by `METRICS_READY_TIMEOUT` (default `120`s; `0` disables
-the gate). The verdict is recorded as `# METRICS_API=available|unavailable:<ctxs>`
+**Metrics-API robustness (#44).** The all-`N/A` utilization in the 2026-06-04
+sweep was investigated (read-only): metrics-server was healthy throughout (up 46h,
+`metrics.k8s.io` `Available` the whole window) and `kubectl get` worked — only
+`kubectl top` returned nothing. `top` goes through the aggregated metrics API,
+which is slower than the etcd `get` path (~1.8s idle baseline here, dominated by
+the OAuth exec-credential round-trip); under the sweep's concurrent 10-context load
+it exceeded the old hardcoded `5s` timeout while `get` stayed under it. So the
+**primary fix** is a dedicated, generous timeout for the slower `top` reads,
+`CAP_TOP_TIMEOUT` (default `15`s; the etcd `get` reads keep `5s`). Two
+defense-in-depth guards back it up:
+
+- **Per-read retry** — `cap_node_used`/`cap_istiod_used` retry a brief empty `top`
+  result (`CAP_TOP_ATTEMPTS` × `CAP_TOP_BACKOFF_S`); outside the scrape window, so
+  measurement-neutral.
+- **Preflight gate** — before the sweep loop, `003` polls `kubectl top nodes` on
+  every context until the metrics API serves data, bounded by
+  `METRICS_READY_TIMEOUT` (default `120`s; `0` disables the gate). It catches a
+  *genuine* metrics-server-down-at-start, a different failure than the load-induced
+  timeout above (it probes idle, so it would not have caught the 07:25Z run — the
+  `CAP_TOP_TIMEOUT` bump is what addresses that). The verdict is recorded as
+  `# METRICS_API=available|unavailable:<ctxs>`
 in the TSV preamble (surfaced by `004` as `metrics API (preflight)` / the
 `metrics_api` field in all four formats) and **WARNed** — the run proceeds
 regardless, since utilization is observability, not the core measurement. The
 recorded value is three-state: `available` (gate passed), `unavailable:<ctxs>`
 (gate timed out on those contexts), or `unknown` (gate disabled via
-`METRICS_READY_TIMEOUT=0`, or a pre-gate / standalone-`002` TSV). The two
-per-row `kubectl top` reads (`cap_node_used`, `cap_istiod_used`) additionally
-retry a brief empty result (`CAP_TOP_ATTEMPTS` × `CAP_TOP_BACKOFF_S`) to ride
-through a mid-sweep blip; these reads run outside the scrape window, so the retry
-is measurement-neutral. If the preflight passed but utilization still came back
-`N/A`, the report's `NOTE` says so explicitly (the API degraded mid-sweep), so
+`METRICS_READY_TIMEOUT=0`, or a pre-gate / standalone-`002` TSV). If the preflight
+passed but utilization still came back `N/A`, the report's `NOTE` says so
+explicitly (the API degraded mid-sweep), so
 the two signals read as one story rather than a contradiction.
 
 `SCALE_TARGET_FRACTION` (default `0.7`) is the explicit O9↔O8 throttle:
