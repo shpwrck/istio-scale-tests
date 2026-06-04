@@ -354,9 +354,12 @@ cap_istiod_used() {
 }
 
 # cap_metrics_ready <ctx> <kubectl_argv...>: "ready" if the metrics API serves
-# `top nodes` (>=1 row) within the request timeout, else "unavailable". Single
+# `top nodes` (>=1 row) within --request-timeout=5s, else "unavailable". Single
 # attempt — the preflight gate (003 metrics_preflight) does its own poll-until-ready
-# loop, and this is also the predicate that loop checks each round.
+# loop, and this is also the predicate that loop checks each round. Node-level by
+# design: `top nodes` and `top pod` share one aggregated metrics API, so node
+# readiness implies pod readiness; a just-scheduled istiod pod's first-scrape lag is
+# covered by the per-read retry on cap_istiod_used, not this gate.
 # shellcheck disable=SC2329
 cap_metrics_ready() {
 	local ctx="$1"; shift

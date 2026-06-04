@@ -268,6 +268,21 @@ metrics_unavailable() {
 	return 0
 }
 
+# metrics_note_text: METRICS_NOTE plus a clause linking it to the preflight verdict
+# (003's recorded `# METRICS_API=`), so the two signals — start-of-sweep gate vs
+# end-of-sweep observed N/A — tell one coherent story instead of an apparently
+# contradictory "preflight: available" + "NOTE: N/A". Only called when
+# metrics_unavailable is already true. Output stays JSON-safe (no quotes/backslashes).
+metrics_note_text() {
+	local n="$METRICS_NOTE" recorded
+	recorded="$(preamble_get METRICS_API)"
+	case "$recorded" in
+		available)      n="$n (preflight recorded the metrics API available at sweep start, so it degraded mid-sweep.)" ;;
+		unavailable:*)  n="$n (preflight already flagged this at sweep start: ${recorded}.)" ;;
+	esac
+	printf '%s' "$n"
+}
+
 # O9 coverage floor: achieved pods (pods_scheduled max) vs allocatable; the
 # achieved fraction is informational unless SCALE_COVERAGE_ENFORCE=1. We use
 # pods_scheduled/pods_allocatable as the achieved-vs-capacity proxy (the per-row
@@ -489,7 +504,7 @@ report_text() {
 	echo "  node_mem_pct (max):          $(as_pct node_mem_pct)"
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
 	echo "  ${COVERAGE_LINE}"
-	metrics_unavailable && echo "  NOTE: ${METRICS_NOTE}"
+	metrics_unavailable && echo "  NOTE: $(metrics_note_text)"
 	echo ""
 	echo "Sweep axes:"
 	echo "  mesh_sizes:        ${SWEEP_MESH}"
@@ -539,7 +554,7 @@ report_csv() {
 	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) metrics_api=$(preamble_get METRICS_API) (istiod limits per replica)"
 	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
 	echo "# ${COVERAGE_LINE}"
-	metrics_unavailable && echo "# metrics: ${METRICS_NOTE}"
+	metrics_unavailable && echo "# metrics: $(metrics_note_text)"
 	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
 }
 
@@ -581,7 +596,7 @@ report_markdown() {
 	echo "| pods_scheduled / allocatable | $(as_get pods_sched) / $(as_get pods_alloc) |"
 	echo ""
 	echo "> ${COVERAGE_LINE}"
-	metrics_unavailable && { echo ""; echo "> NOTE: ${METRICS_NOTE}"; }
+	metrics_unavailable && { echo ""; echo "> NOTE: $(metrics_note_text)"; }
 	echo ""
 	echo "| Axis | Values |"
 	echo "|------|--------|"
@@ -682,7 +697,7 @@ report_json() {
 		-v ach_icpu="$(as_get istiod_cpu_pct)" -v ach_imem="$(as_get istiod_mem_pct)" \
 		-v ach_ncpu="$(as_get node_cpu_pct)" -v ach_nmem="$(as_get node_mem_pct)" \
 		-v ach_psched="$(as_get pods_sched)" -v ach_palloc="$(as_get pods_alloc)" \
-		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && printf '%s' "$METRICS_NOTE")" '
+		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && metrics_note_text)" '
 	function cell(v) {
 		if (v == "overflow") return "null"
 		return v + 0

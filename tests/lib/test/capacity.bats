@@ -224,3 +224,32 @@ JSON
 @test "cap_max_pods: zero per-pod cost -> unknown" {
 	[[ "$(cap_max_pods 16000 64000 500 2000 1024 1 0 256 0.7 0.15)" == "unknown" ]]
 }
+
+# ---------------------------------------------------------------------------
+# _cap_retry_nonempty (transient-blip retry for the kubectl top reads, #44)
+# ---------------------------------------------------------------------------
+
+@test "_cap_retry_nonempty: returns first non-empty without retrying" {
+	CAP_TOP_ATTEMPTS=3 CAP_TOP_BACKOFF_S=0 run _cap_retry_nonempty echo "hi"
+	[ "$status" -eq 0 ]
+	[[ "$output" == "hi" ]]
+}
+
+@test "_cap_retry_nonempty: retries empty results then returns the non-empty one" {
+	cnt="${BATS_TEST_TMPDIR}/cnt"; echo 0 > "$cnt"
+	_stub() {
+		local n; n=$(<"$cnt"); n=$((n + 1)); echo "$n" > "$cnt"
+		(( n < 3 )) && return 0   # first two calls emit nothing
+		echo "data"
+	}
+	CAP_TOP_ATTEMPTS=3 CAP_TOP_BACKOFF_S=0 run _cap_retry_nonempty _stub
+	[ "$status" -eq 0 ]
+	[[ "$output" == "data" ]]
+	[[ "$(<"$cnt")" == "3" ]]   # exactly 3 attempts consumed
+}
+
+@test "_cap_retry_nonempty: exhausts attempts -> empty output, still exit 0 (never fails the pipe)" {
+	CAP_TOP_ATTEMPTS=2 CAP_TOP_BACKOFF_S=0 run _cap_retry_nonempty true
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}
