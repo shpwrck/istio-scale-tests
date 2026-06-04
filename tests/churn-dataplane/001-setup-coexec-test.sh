@@ -36,6 +36,16 @@ WAIT_TIMEOUT=300
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-10}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
+# Cleanup-cascade fix (A): if the shared namespace from the PREVIOUS mesh-size is
+# still Terminating when this setup starts, applying the chart (which includes a
+# kind: Namespace) fails — you cannot create a Terminating Namespace nor namespaced
+# resources inside it. That turned a slow teardown into a SETUP_FAILED cascade. So
+# before applying, wait (bounded, PL4 poll-until-gone) for any pre-existing
+# namespace to fully disappear on EVERY active context. The wait lives in 001 so
+# the precondition travels WITH setup (a manual 001 after a manual 006 --no-wait
+# benefits too), not only inside the sweep orchestrator. Defaults to reuse the
+# same bound 006 uses for its own deletion wait.
+SETUP_NS_WAIT_SEC="${COEXEC_SETUP_NS_WAIT_SEC:-${COEXEC_NS_DELETE_TIMEOUT_SEC:-180}}"
 
 usage() {
 	cat <<EOF
@@ -47,12 +57,16 @@ Usage: $(basename "$0") [options]
   --deployment-count N     Number of churn-target Deployments (default: $CHURN_DEPLOYMENT_COUNT_OPT).
   --base-replicas N        Initial replicas per churn-target Deployment (default: $CHURN_BASE_REPLICAS_OPT).
   --wait-timeout N         Seconds to wait for Deployments to become Available (default: $WAIT_TIMEOUT).
+  --ns-wait-timeout N      Seconds to wait for a pre-existing (Terminating) namespace to
+                           fully disappear before applying (default: $SETUP_NS_WAIT_SEC).
   --dry-run                Pass --dry-run=client to oc apply; do not touch clusters.
   -h, --help               Show this help.
 
 Environment:
   SETUP_CONTEXTS, COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   COEXEC_ISTIOD_REPLICAS (expected istiod replica pin; warns on mismatch),
+  COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
+  defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 180),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
 EOF
 }
@@ -82,6 +96,11 @@ while [[ $# -gt 0 ]]; do
 	--wait-timeout)
 		[[ -n "${2:-}" ]] || die "--wait-timeout requires a value"
 		WAIT_TIMEOUT="$2"
+		shift 2
+		;;
+	--ns-wait-timeout)
+		[[ -n "${2:-}" ]] || die "--ns-wait-timeout requires a value"
+		SETUP_NS_WAIT_SEC="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -130,6 +149,42 @@ if ! ((DRY_RUN)); then
 		if [[ -n "$EXPECTED_REPLICAS" && "$replicas" != "$EXPECTED_REPLICAS" ]]; then
 			echo "warn: context $ctx has $replicas Running istiod pods, expected pin COEXEC_ISTIOD_REPLICAS=$EXPECTED_REPLICAS" >&2
 		fi
+	done
+fi
+
+# Cleanup-cascade fix (A): poll-until-gone (PL4) for a pre-existing namespace.
+# A slow teardown of the PREVIOUS mesh-size must DELAY this setup, never DESTROY
+# its data. Returns 0 once the namespace is absent (or never existed); returns 1
+# if it is still present after SETUP_NS_WAIT_SEC — at which point applying the
+# chart's kind: Namespace would fail anyway, so the caller (die below → 004's
+# SETUP_FAILED wrap) records a legitimate, now-rare, failure.
+wait_ns_gone() {
+	local ctx="$1" deadline now
+	if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+		return 0
+	fi
+	echo "  [$ctx] namespace $NS still present (Terminating?); waiting up to ${SETUP_NS_WAIT_SEC}s for it to clear before apply..." >&2
+	deadline=$(( $(date +%s) + SETUP_NS_WAIT_SEC ))
+	while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do
+		now=$(date +%s)
+		if (( now > deadline )); then
+			echo "  [$ctx] namespace $NS did not clear within ${SETUP_NS_WAIT_SEC}s; cannot apply into a Terminating namespace" >&2
+			return 1
+		fi
+		sleep 2
+	done
+	echo "  [$ctx] namespace $NS cleared; proceeding with apply." >&2
+	return 0
+}
+
+if ! ((DRY_RUN)); then
+	NS_WAIT_PIDS=()
+	for ctx in "${ALL_CTXS[@]}"; do
+		wait_ns_gone "$ctx" &
+		NS_WAIT_PIDS+=($!)
+	done
+	for pid in "${NS_WAIT_PIDS[@]}"; do
+		wait "$pid" || die "pre-existing namespace $NS did not clear within ${SETUP_NS_WAIT_SEC}s on one or more contexts; refusing to apply into a Terminating namespace"
 	done
 fi
 
