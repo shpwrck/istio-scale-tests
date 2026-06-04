@@ -258,7 +258,7 @@ preamble_get() {
 # (allocatable, istiod limit, pod counts) still populate. Detect exactly that case —
 # every utilization-% max non-numeric — so an empty utilization headline reads as a
 # known environment limitation rather than a harness bug. Returns 0 when unavailable.
-METRICS_NOTE="utilization-% columns are N/A — the metrics API (metrics-server) returned no usable data for this sweep; install/verify it for the target clusters to populate istiod_*_pct_of_limit and node_*_pct. Capacity denominators below come from kubectl get and are unaffected."
+METRICS_NOTE="utilization-% columns are N/A — the metrics API (kubectl top / metrics-server) returned no usable data during this sweep; verify metrics-server availability on the target clusters to populate istiod_*_pct_of_limit and node_*_pct. Capacity denominators below come from kubectl get and are unaffected."
 metrics_unavailable() {
 	local key v
 	for key in istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct; do
