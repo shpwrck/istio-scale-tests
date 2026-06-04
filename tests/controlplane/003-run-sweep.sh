@@ -104,7 +104,9 @@ Environment:
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
   pre-sweep metrics-API readiness gate — polls 'kubectl top nodes' per context,
   records # METRICS_API= in the preamble, WARNs (never aborts) if unavailable.
-  CAP_TOP_ATTEMPTS (3), CAP_TOP_BACKOFF_S (1): per-read retry for transient blips.
+  CAP_TOP_TIMEOUT (default 15): request timeout for the slower kubectl top reads
+  (vs 5s for etcd get) — the primary #44 fix for top timing out under sweep load.
+  CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2): per-read retry for transient blips.
 EOF
 }
 
