@@ -310,7 +310,7 @@ _cap_retry_nonempty() {
 	for (( i = 1; i <= attempts; i++ )); do
 		out="$("$@" 2>/dev/null)" || out=""
 		if [[ -n "$out" ]]; then printf '%s\n' "$out"; return 0; fi
-		(( i < attempts )) && sleep "$backoff" 2>/dev/null || true
+		if (( i < attempts )); then sleep "$backoff" 2>/dev/null || true; fi
 	done
 	printf '%s\n' "$out"
 	return 0
