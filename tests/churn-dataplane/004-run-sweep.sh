@@ -256,7 +256,10 @@ if ! ((DRY_RUN)); then
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" \
 		"MATRIX_SIZE=$MATRIX_SIZE" \
-		"REPETITIONS=$REPETITIONS"
+		"REPETITIONS=$REPETITIONS" \
+		"SETUP_NS_WAIT_SEC=$NS_DELETE_TIMEOUT_SEC" \
+		"CLEANUP_GRACE_SEC=${COEXEC_CLEANUP_GRACE_SEC:-5}" \
+		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
@@ -386,6 +389,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "[mesh-size $ms] setup ONCE  ctxs=${active_csv}"
 		echo "=========================================="
 		echo "--- setup (once per mesh-size) ---"
+		echo "    note: setup may wait up to ${NS_DELETE_TIMEOUT_SEC}s for the prior mesh-size's namespace ($NS) to finish Terminating before applying (Cleanup-cascade fix A)"
 		# B1/PL15/PL32: setup is the most probable per-combo failure at scale. A bare
 		# call under set -e would abort the whole sweep, discarding every completed
 		# combo (the report runs only after the loop). On failure: record SETUP_FAILED

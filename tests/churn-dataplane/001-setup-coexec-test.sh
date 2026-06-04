@@ -45,7 +45,7 @@ CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
 # the precondition travels WITH setup (a manual 001 after a manual 006 --no-wait
 # benefits too), not only inside the sweep orchestrator. Defaults to reuse the
 # same bound 006 uses for its own deletion wait.
-SETUP_NS_WAIT_SEC="${COEXEC_SETUP_NS_WAIT_SEC:-${COEXEC_NS_DELETE_TIMEOUT_SEC:-180}}"
+SETUP_NS_WAIT_SEC="${COEXEC_SETUP_NS_WAIT_SEC:-${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}}"
 
 usage() {
 	cat <<EOF
@@ -66,7 +66,7 @@ Environment:
   SETUP_CONTEXTS, COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   COEXEC_ISTIOD_REPLICAS (expected istiod replica pin; warns on mismatch),
   COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
-  defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 180),
+  defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 240),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
 EOF
 }
@@ -168,7 +168,7 @@ wait_ns_gone() {
 	while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do
 		now=$(date +%s)
 		if (( now > deadline )); then
-			echo "  [$ctx] namespace $NS did not clear within ${SETUP_NS_WAIT_SEC}s; cannot apply into a Terminating namespace" >&2
+			echo "  [$ctx] namespace $NS did not clear within ${SETUP_NS_WAIT_SEC}s; cannot apply into a Terminating namespace; check stuck finalizers: ${KUBECTL[*]} --context=$ctx get ns $NS -o jsonpath='{.spec.finalizers}'" >&2
 			return 1
 		fi
 		sleep 2
@@ -176,6 +176,12 @@ wait_ns_gone() {
 	echo "  [$ctx] namespace $NS cleared; proceeding with apply." >&2
 	return 0
 }
+
+if ((DRY_RUN)); then
+	# Mirror 006's dry-run plan style: make the pre-apply wait self-describing in
+	# the plan even though the actual wait below is correctly DRY_RUN-gated.
+	echo "  [dry-run] would wait up to ${SETUP_NS_WAIT_SEC}s for a pre-existing Terminating ns ($NS) on each context before apply" >&2
+fi
 
 if ! ((DRY_RUN)); then
 	NS_WAIT_PIDS=()
