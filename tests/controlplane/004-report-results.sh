@@ -366,12 +366,8 @@ aggregate() {
 	!/^#/ && !/^timestamp/ && NF>=40 {
 		key = $3 "|" $4 "|" $5 "|" $6 "|" $7
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
-		# Gauge metrics (mem, proxies, heap) can always be ingested.
-		ingest("mem",       $8,  key)
-		ingest("prx",       $22, key)
-		ingest("heap_alloc", $33, key)
-		ingest("heap_inuse", $34, key)
-		# Config-dump bytes are independent of istiod counters — always OK.
+		# Config-dump bytes are proxy-side (read from each proxy config dump,
+		# independent of istiod restart state) — always ingested.
 		if ($24 ~ /^[0-9.]+$/) { cfg_avg_n[key]++; cfg_avg_sum[key] += $24+0 }
 		if ($26 ~ /^[0-9.]+$/) {
 			if (!(key in cfg_max_val) || $26+0 > cfg_max_val[key]+0) cfg_max_val[key] = $26+0
@@ -379,9 +375,18 @@ aggregate() {
 		if ($31 == "1") restarts[key] += 1
 		else if ($31 == "unknown") unknowns[key] += 1
 		n_total[key]++
-		# Counter/histogram metrics are only valid when istiod did not
-		# restart (PL13/PL15). Skip ingestion for restarted/unknown rows.
+		# istiod-sourced metrics are only valid when istiod did NOT restart during the
+		# window — gauges (mem, proxies, heap) just as much as counters/histograms
+		# (conv, queue, cpu_delta). A restarted/unknown row carries a post-restart
+		# transient gauge (a mid-reconnect connected_proxies, fresh-low memory) exactly
+		# as it carries a reset counter, so gating only the counters leaks e.g. a
+		# mid-reconnect proxies value into proxies_min/max/avg. Gate ALL of them on
+		# istiod_restarted==0 so every numeric aggregate mirrors n_valid (PL13/PL15/PL35).
 		if ($31 == "0") {
+			ingest("mem",       $8,  key)
+			ingest("prx",       $22, key)
+			ingest("heap_alloc", $33, key)
+			ingest("heap_inuse", $34, key)
 			ingest("conv",      $10, key)
 			ingest("queue",     $12, key)
 			ingest("cpu_delta", $32, key)
