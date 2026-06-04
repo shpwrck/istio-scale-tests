@@ -345,10 +345,16 @@ API serves data, bounded by `METRICS_READY_TIMEOUT` (default `120`s; `0` disable
 the gate). The verdict is recorded as `# METRICS_API=available|unavailable:<ctxs>`
 in the TSV preamble (surfaced by `004` as `metrics API (preflight)` / the
 `metrics_api` field in all four formats) and **WARNed** — the run proceeds
-regardless, since utilization is observability, not the core measurement. The two
-`kubectl top` reads additionally retry a brief empty result (`CAP_TOP_ATTEMPTS`
-× `CAP_TOP_BACKOFF_S`) to ride through a mid-sweep blip; these reads run outside
-the scrape window, so the retry is measurement-neutral.
+regardless, since utilization is observability, not the core measurement. The
+recorded value is three-state: `available` (gate passed), `unavailable:<ctxs>`
+(gate timed out on those contexts), or `unknown` (gate disabled via
+`METRICS_READY_TIMEOUT=0`, or a pre-gate / standalone-`002` TSV). The two
+per-row `kubectl top` reads (`cap_node_used`, `cap_istiod_used`) additionally
+retry a brief empty result (`CAP_TOP_ATTEMPTS` × `CAP_TOP_BACKOFF_S`) to ride
+through a mid-sweep blip; these reads run outside the scrape window, so the retry
+is measurement-neutral. If the preflight passed but utilization still came back
+`N/A`, the report's `NOTE` says so explicitly (the API degraded mid-sweep), so
+the two signals read as one story rather than a contradiction.
 
 `SCALE_TARGET_FRACTION` (default `0.7`) is the explicit O9↔O8 throttle:
 larger = more pods = slower. `SCALE_SYSTEM_RESERVE_FRACTION` (default `0.15`)
