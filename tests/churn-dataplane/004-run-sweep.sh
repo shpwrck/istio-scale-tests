@@ -47,7 +47,7 @@ OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 # NS must match what 001/002/003/006 use (COEXEC_TEST_NAMESPACE) so the O8 item-1
 # reset-to-base fidelity guard (`-n "$NS"`) targets the right namespace.
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-180}"
+NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}"
 MATRIX_CAP=64
 FORCE_LARGE_MATRIX=0
 DRY_RUN=0
@@ -77,6 +77,8 @@ Usage: $(basename "$0") [options]
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
   --output-dir DIR          Top-level results directory (default: tests/churn-dataplane/results).
   --ns-delete-timeout SEC   Bound on async namespace teardown wait (default: $NS_DELETE_TIMEOUT_SEC).
+                            Also bounds 001's pre-apply wait for the PRIOR mesh-size's
+                            namespace to finish Terminating (cleanup-cascade fix A).
   --force-large-matrix      Bypass the PL10 matrix cap of $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
@@ -366,6 +368,11 @@ for ms in "${MESH_SIZES[@]}"; do
 		--source-context "$source_ctx"
 		--deployment-count "$CHURN_DEPLOYMENT_COUNT_OPT"
 		--base-replicas "$CHURN_BASE_REPLICAS_OPT"
+		# Cleanup-cascade fix (A): bound 001's pre-apply wait for a still-Terminating
+		# namespace from the PREVIOUS mesh-size's cleanup to the SAME timeout 006 used
+		# (--ns-delete-timeout), so a slow teardown DELAYS this setup rather than failing
+		# the apply into a Terminating namespace and cascading to SETUP_FAILED.
+		--ns-wait-timeout "$NS_DELETE_TIMEOUT_SEC"
 	)
 	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
 
@@ -373,7 +380,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "=========================================="
 		echo "[mesh-size $ms] ctxs=${active_csv}"
 		echo "=========================================="
-		echo "  [dry-run] 001 --source-context $source_ctx --remote-contexts $remote_csv --deployment-count $CHURN_DEPLOYMENT_COUNT_OPT  # ONCE per mesh-size" >&2
+		echo "  [dry-run] 001 --source-context $source_ctx --remote-contexts $remote_csv --deployment-count $CHURN_DEPLOYMENT_COUNT_OPT --ns-wait-timeout $NS_DELETE_TIMEOUT_SEC  # ONCE per mesh-size; waits out a still-Terminating ns from the prior mesh-size before applying" >&2
 	else
 		echo "=========================================="
 		echo "[mesh-size $ms] setup ONCE  ctxs=${active_csv}"

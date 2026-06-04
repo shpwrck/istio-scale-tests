@@ -206,8 +206,16 @@ The sweep (O8 deploy-once-per-mesh-size):
    `--inter-combo-settle` (default 15s) to drain the reset's EDS pushes before the
    baseline. (PL18) If a reset fails on any context the rate is recorded
    `RESET_FAILED` and skipped (not measured against a contaminated mesh).
-6. Sleeps `--inter-combo-settle` between mesh-sizes, after the once-per-mesh-size
-   namespace deletion completes (synchronous, PL4 via `006-cleanup.sh --wait-deletion`).
+6. Tears the workload down once per mesh-size (`006-cleanup`). `006` **fast-drains**
+   the sidecar-injected pods with a short grace period *before* deleting the
+   namespace so istio-proxy drain doesn't dominate the teardown window, then sleeps
+   `--inter-combo-settle` before the next mesh-size's setup, after the namespace
+   deletion completes (synchronous, PL4 via `006-cleanup.sh --wait-deletion`).
+   **The next mesh-size's `001` defensively waits out any still-Terminating
+   namespace before applying** (PL4, bounded by `--ns-delete-timeout`), so a slow
+   teardown delays — never destroys — the next mesh-size's data. (Together these
+   close the teardown-timeout → `SETUP_FAILED` cascade: a slow even-mesh-size
+   teardown used to fail the next mesh-size's apply into a Terminating namespace.)
 7. Calls `005-report-results.sh` at the end.
 
 Because each rate now starts from a *reset* rather than a fresh redeploy, same-combo
@@ -301,22 +309,38 @@ as the combo id, which only pairs probes within a single invocation.
 ```bash
 ./tests/churn-dataplane/006-cleanup.sh \
     --contexts cluster-001,cluster-002,cluster-003 \
-    --wait-deletion --timeout 180
+    --wait-deletion --timeout 240
 ```
 
+`006` first **fast-drains** the sidecar-injected workload pods with a short
+grace period (`--grace-period`, default 5s, env `COEXEC_CLEANUP_GRACE_SEC`)
+and only then deletes the namespace, so istio-proxy drain across up to
+deployment-count×scale-to pods doesn't dominate the teardown window — the
+overrun that previously cascaded into `SETUP_FAILED` rows on the next
+mesh-size. The fast-drain is best-effort; the namespace delete + PL4
+poll-until-gone wait remain the authoritative teardown.
+
 Use `--wait-deletion` between manual probe runs to avoid the next setup
-hitting an in-flight namespace teardown (PL4).
+hitting an in-flight namespace teardown (PL4). **`001` also waits this out
+defensively:** before applying the chart it polls (PL4, bounded by
+`--ns-wait-timeout` / `COEXEC_SETUP_NS_WAIT_SEC`, default
+`COEXEC_NS_DELETE_TIMEOUT_SEC`) for any pre-existing `churn-dataplane-test`
+namespace to fully disappear, since you cannot apply a `kind: Namespace` (or
+namespaced resources) into a Terminating namespace. A slow teardown therefore
+*delays* the next setup rather than failing it. Only if the namespace still
+hasn't cleared within the bound does the apply legitimately fail (recorded as
+`SETUP_FAILED` by the sweep).
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `001-setup-coexec-test.sh` | Render+apply the composite chart on every active context (server-side apply, PL5). `--dry-run` does not touch clusters. |
+| `001-setup-coexec-test.sh` | Render+apply the composite chart on every active context (server-side apply, PL5). Before applying, waits (PL4, `--ns-wait-timeout`) for any pre-existing namespace to finish Terminating so a slow prior teardown delays — not destroys — this setup. `--dry-run` does not touch clusters. |
 | `002-run-baseline-probe.sh` | Run one fortio measurement window with NO churn; emit `phase=baseline` TSV row with istiod metrics. |
 | `003-run-churn-probe.sh` | Run one fortio measurement window while the churn driver runs concurrently; emit `phase=churn` TSV row with istiod metrics plus `delta_p99_ms`. |
 | `004-run-sweep.sh` | Orchestrate the mesh_size × churn_rate × repetitions sweep with O8 deploy-once: `001` once per mesh-size → `[reset-to-base + settle → 002 → 003]` per rate → `006` once per mesh-size → inter-mesh-size settle; PL6 per-sweep dir, PL10 matrix cap. |
 | `005-report-results.sh` | Aggregate joined baseline+churn pairs by combo_id, filter poisoned rows, emit text/csv/json/md. |
-| `006-cleanup.sh` | Tear down the shared namespace; `--wait-deletion` for PL4 synchronous semantics. |
+| `006-cleanup.sh` | Tear down the shared namespace; fast-drains sidecar pods (`--grace-period`) before the namespace delete to bound istio-proxy drain; `--wait-deletion` for PL4 synchronous semantics. |
 
 ## Environment variables (defaults in `config/options.env`)
 
@@ -333,7 +357,9 @@ hitting an in-flight namespace teardown (PL4).
 | `COEXEC_CHURN_SEED` | `42` | PL16 deterministic-shuffle seed. |
 | `COEXEC_REPETITIONS` | `1` | Probe repetitions per combination in `004-run-sweep.sh`. |
 | `COEXEC_ISTIOD_PF_PORT` | `15014` | Local port for istiod scrapes. |
-| `COEXEC_NS_DELETE_TIMEOUT_SEC` | `180` | PL4 wait bound. |
+| `COEXEC_NS_DELETE_TIMEOUT_SEC` | `240` | PL4 wait bound for `006`'s namespace deletion AND (default) `001`'s pre-apply wait for a still-Terminating namespace. Raised from 180 alongside the cleanup-cascade fix. |
+| `COEXEC_SETUP_NS_WAIT_SEC` | `COEXEC_NS_DELETE_TIMEOUT_SEC` | `001-setup-coexec-test.sh` pre-apply wait for a pre-existing (Terminating) namespace to clear (cleanup-cascade fix A). |
+| `COEXEC_CLEANUP_GRACE_SEC` | `5` | `006-cleanup.sh` pod-delete grace period for the pre-delete fast-drain of sidecar-injected workloads (cleanup-cascade fix B). |
 | `COEXEC_SERVICE_PORT` | `8080` | Fortio target port. |
 
 Shared from `config/versions.env`: `SETUP_CONTEXTS`, `ISTIO_VERSION`.
@@ -345,7 +371,7 @@ Shared from `config/versions.env`: `SETUP_CONTEXTS`, `ISTIO_VERSION`.
 | PL1 (delta-window scraping) | N/A — fortio JSON already returns per-window aggregates; istiod is scraped only for restart detection. |
 | PL2 (preamble + concurrent kube-version probes) | APPLIED (`lib/preamble.sh` `write_preamble`, `probe_kube_versions`). |
 | PL3 (wall-clock window distinct from settle) | APPLIED — `WINDOW_START_NS` / `WINDOW_END_NS` markers, `--settle-sec` separate. |
-| PL4 (await async cluster ops) | APPLIED — `006-cleanup.sh --wait-deletion`; sweep always uses it. |
+| PL4 (await async cluster ops) | APPLIED — `006-cleanup.sh --wait-deletion` poll-until-gone; `001` reuses the same pattern to wait out a pre-existing Terminating namespace before applying (cleanup-cascade fix A); sweep always uses both. |
 | PL5 (server-side apply) | APPLIED in `001-setup-coexec-test.sh`. |
 | PL6 (per-sweep output subdir) | APPLIED — `sweep-${RUN_ID}/`. |
 | PL7 (plural CSV with singular alias warning) | APPLIED — `--churn-rates` plural, `--churn-rate` deprecated. |
