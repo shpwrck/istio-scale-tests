@@ -268,6 +268,21 @@ metrics_unavailable() {
 	return 0
 }
 
+# metrics_note_text: METRICS_NOTE plus a clause linking it to the preflight verdict
+# (003's recorded `# METRICS_API=`), so the two signals — start-of-sweep gate vs
+# end-of-sweep observed N/A — tell one coherent story instead of an apparently
+# contradictory "preflight: available" + "NOTE: N/A". Only called when
+# metrics_unavailable is already true. Output stays JSON-safe (no quotes/backslashes).
+metrics_note_text() {
+	local n="$METRICS_NOTE" recorded
+	recorded="$(preamble_get METRICS_API)"
+	case "$recorded" in
+		available)      n="$n (preflight recorded the metrics API available at sweep start, so it degraded mid-sweep.)" ;;
+		unavailable:*)  n="$n (preflight already flagged this at sweep start: ${recorded}.)" ;;
+	esac
+	printf '%s' "$n"
+}
+
 # O9 coverage floor: achieved pods (pods_scheduled max) vs allocatable; the
 # achieved fraction is informational unless SCALE_COVERAGE_ENFORCE=1. We use
 # pods_scheduled/pods_allocatable as the achieved-vs-capacity proxy (the per-row
@@ -480,6 +495,7 @@ report_text() {
 	echo "--- Achieved scale vs capacity (O9) ---"
 	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
 	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
+	echo "  metrics API (preflight):     $(preamble_get METRICS_API)"
 	echo "  connected_proxies (max):     $(as_get proxies)"
 	echo "  services_total [configured] (max): $(as_get svc)"
 	echo "  istiod_cpu_pct_of_limit (max): $(as_pct istiod_cpu_pct)"
@@ -488,7 +504,7 @@ report_text() {
 	echo "  node_mem_pct (max):          $(as_pct node_mem_pct)"
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
 	echo "  ${COVERAGE_LINE}"
-	metrics_unavailable && echo "  NOTE: ${METRICS_NOTE}"
+	metrics_unavailable && echo "  NOTE: $(metrics_note_text)"
 	echo ""
 	echo "Sweep axes:"
 	echo "  mesh_sizes:        ${SWEEP_MESH}"
@@ -535,10 +551,10 @@ report_csv() {
 	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE}"
 	# O9 achieved-scale provenance parity with text/markdown. Comment lines only, so the
 	# CSV row schema (the aggregate columns below) is byte-identical for row consumers.
-	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) (istiod limits per replica)"
+	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) metrics_api=$(preamble_get METRICS_API) (istiod limits per replica)"
 	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
 	echo "# ${COVERAGE_LINE}"
-	metrics_unavailable && echo "# metrics: ${METRICS_NOTE}"
+	metrics_unavailable && echo "# metrics: $(metrics_note_text)"
 	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
 }
 
@@ -556,6 +572,7 @@ report_markdown() {
 	echo "config_dump_samples: ${CONFIG_DUMP_SAMPLES_M:-N/A}"
 	echo "kube_versions: ${KUBE_VERSIONS_M:-N/A}"
 	echo "scale_sizing_mode: $(preamble_get SCALE_SIZING_MODE)"
+	echo "metrics_api: $(preamble_get METRICS_API)"
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "skipped_legacy: ${FILES_SKIPPED}"
 	echo "---"
@@ -579,7 +596,7 @@ report_markdown() {
 	echo "| pods_scheduled / allocatable | $(as_get pods_sched) / $(as_get pods_alloc) |"
 	echo ""
 	echo "> ${COVERAGE_LINE}"
-	metrics_unavailable && { echo ""; echo "> NOTE: ${METRICS_NOTE}"; }
+	metrics_unavailable && { echo ""; echo "> NOTE: $(metrics_note_text)"; }
 	echo ""
 	echo "| Axis | Values |"
 	echo "|------|--------|"
@@ -675,17 +692,17 @@ report_json() {
 		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" \
 		-v cap_ncpu="$(preamble_get NODE_ALLOC_CPU_M)" -v cap_nmem="$(preamble_get NODE_ALLOC_MEM_MI)" \
 		-v cap_icpu="$(preamble_get ISTIOD_CPU_LIMIT_M)" -v cap_imem="$(preamble_get ISTIOD_MEM_LIMIT_MI)" \
-		-v cap_tf="$(preamble_get SCALE_TARGET_FRACTION)" -v cap_mode="$(preamble_get SCALE_SIZING_MODE)" \
+		-v cap_tf="$(preamble_get SCALE_TARGET_FRACTION)" -v cap_mode="$(preamble_get SCALE_SIZING_MODE)" -v cap_metrics="$(preamble_get METRICS_API)" \
 		-v ach_prx="$(as_get proxies)" -v ach_svc="$(as_get svc)" \
 		-v ach_icpu="$(as_get istiod_cpu_pct)" -v ach_imem="$(as_get istiod_mem_pct)" \
 		-v ach_ncpu="$(as_get node_cpu_pct)" -v ach_nmem="$(as_get node_mem_pct)" \
 		-v ach_psched="$(as_get pods_sched)" -v ach_palloc="$(as_get pods_alloc)" \
-		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && printf '%s' "$METRICS_NOTE")" '
+		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && metrics_note_text)" '
 	function cell(v) {
 		if (v == "overflow") return "null"
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"istiod_limits_per_replica\":true},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"metrics_note\":\"%s\"},\n  \"results\": [", iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, ach_prx, ach_svc, ach_icpu, ach_imem, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, metrics_note }
+	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"metrics_note\":\"%s\"},\n  \"results\": [", iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, ach_prx, ach_svc, ach_icpu, ach_imem, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, metrics_note }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
