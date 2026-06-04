@@ -336,6 +336,20 @@ clusters, all four percentages are `N/A` while the get-derived capacity values
 still populate — `004` surfaces an explicit `NOTE` explaining this so the empty
 utilization headline is legible rather than mistaken for a harness bug.
 
+**Metrics-API readiness gate (default-on, never aborts).** Because `kubectl top`
+is a path independent of the istiod `/metrics` the sweep measures, a transient
+metrics-server outage (e.g. still stabilizing right after a cluster/operator
+restart) would silently `N/A` the utilization columns for the whole run. Before
+the sweep loop, `003` polls `kubectl top nodes` on every context until the metrics
+API serves data, bounded by `METRICS_READY_TIMEOUT` (default `120`s; `0` disables
+the gate). The verdict is recorded as `# METRICS_API=available|unavailable:<ctxs>`
+in the TSV preamble (surfaced by `004` as `metrics API (preflight)` / the
+`metrics_api` field in all four formats) and **WARNed** — the run proceeds
+regardless, since utilization is observability, not the core measurement. The two
+`kubectl top` reads additionally retry a brief empty result (`CAP_TOP_ATTEMPTS`
+× `CAP_TOP_BACKOFF_S`) to ride through a mid-sweep blip; these reads run outside
+the scrape window, so the retry is measurement-neutral.
+
 `SCALE_TARGET_FRACTION` (default `0.7`) is the explicit O9↔O8 throttle:
 larger = more pods = slower. `SCALE_SYSTEM_RESERVE_FRACTION` (default `0.15`)
 holds back node allocatable for system/daemonset/gateway overhead before sizing.
