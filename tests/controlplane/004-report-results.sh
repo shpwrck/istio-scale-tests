@@ -29,7 +29,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/controlplane/results).
-  --format FMT       Output format: text, csv, json, markdown (default: text).
+  --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
 Output groups by (mesh_size, service_count, replicas, namespace_count,
@@ -74,8 +74,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
-text|csv|json|markdown) ;;
-*) die "unknown format: $FORMAT (use text, csv, json, or markdown)" ;;
+text|csv|json|markdown|charts) ;;
+*) die "unknown format: $FORMAT (use text, csv, json, markdown, or charts)" ;;
 esac
 
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
@@ -723,11 +723,118 @@ report_json() {
 	}'
 }
 
+report_charts() {
+	local aggregated
+	aggregated=$(aggregate)
+
+	echo "---"
+	echo "istio_version: ${ISTIO_VERSION_TAG}"
+	echo "harness_sha: ${HARNESS_SHA_TAG}"
+	echo "files_consumed: ${FILES_CONSUMED}"
+	echo "generated: $(date -u -Iseconds)"
+	echo "---"
+	echo ""
+	echo "# Control-Plane Resource Scaling — Charts"
+	echo ""
+	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
+	# Chart 2: Per-proxy config dump size (MB) by scoping at largest mesh size.
+	awk -F'\t' '
+	NR == 1 { next }
+	{
+		ms = $1 + 0; scoping = $5
+		cpu = $24 + 0; cfg = $25 + 0
+		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
+		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
+		cpu_val[ms, scoping] = cpu
+		cfg_val[ms, scoping] = cfg
+		has[ms, scoping] = 1
+	}
+	END {
+		# Sort mesh sizes numerically.
+		for (i = 2; i <= n_ms; i++) {
+			tmp = ms_order[i]; j = i - 1
+			while (j >= 1 && ms_order[j]+0 > tmp+0) { ms_order[j+1] = ms_order[j]; j-- }
+			ms_order[j+1] = tmp
+		}
+		# Sort scopings lexically.
+		for (i = 2; i <= n_sc; i++) {
+			tmp = sc_order[i]; j = i - 1
+			while (j >= 1 && sc_order[j] > tmp) { sc_order[j+1] = sc_order[j]; j-- }
+			sc_order[j+1] = tmp
+		}
+
+		if (n_ms < 2) {
+			print "> Charts require at least two mesh sizes."
+			exit
+		}
+
+		# Chart 1: istiod CPU vs mesh size by scoping
+		printf "%% Chart 1: istiod CPU (m, per replica) vs mesh size, by sidecar scoping\n"
+		printf "%% Series order:"
+		for (s = 1; s <= n_sc; s++) printf " %s", sc_order[s]
+		printf "\n\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"istiod CPU vs Mesh Size by Sidecar Scoping\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_ms; i++) {
+			if (i > 1) printf ", "
+			printf "%s", ms_order[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"CPU (m, per replica)\"\n"
+		for (s = 1; s <= n_sc; s++) {
+			printf "    line ["; sep = ""
+			for (i = 1; i <= n_ms; i++) {
+				ms = ms_order[i]; sc = sc_order[s]
+				v = has[ms, sc] ? cpu_val[ms, sc] : 0
+				printf "%s%.0f", sep, v; sep = ", "
+			}
+			printf "]\n"
+		}
+		printf "```\n\n"
+		printf "> Series order:"
+		for (s = 1; s <= n_sc; s++) printf " **%s**", sc_order[s]
+		printf ".\n\n"
+
+		# Chart 2: Config dump size (MB) by scoping at largest mesh size
+		max_ms = ms_order[n_ms]
+		has_any_cfg = 0
+		for (s = 1; s <= n_sc; s++) {
+			if (has[max_ms, sc_order[s]] && cfg_val[max_ms, sc_order[s]] > 0) has_any_cfg = 1
+		}
+		if (!has_any_cfg) {
+			printf "> No config dump data available for bar chart.\n"
+			exit
+		}
+		printf "%% Chart 2: Per-proxy config dump size (MB) by scoping at mesh size %s\n", max_ms
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"Config Dump Size by Scoping (mesh size %s)\"\n", max_ms
+		printf "    x-axis \"Sidecar Scoping\" ["
+		for (s = 1; s <= n_sc; s++) {
+			if (s > 1) printf ", "
+			printf "\"%s\"", sc_order[s]
+		}
+		printf "]\n"
+		printf "    y-axis \"Size (MB)\"\n"
+		printf "    bar ["; sep = ""
+		for (s = 1; s <= n_sc; s++) {
+			sc = sc_order[s]
+			v = (has[max_ms, sc] && cfg_val[max_ms, sc] > 0) ? cfg_val[max_ms, sc] / 1048576 : 0
+			printf "%s%.1f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "```\n\n"
+		printf "> Config dump avg (MB) at the largest mesh size swept (%s).\n", max_ms
+	}' <<<"$aggregated"
+}
+
 case "$FORMAT" in
 text)     report_text ;;
 csv)      report_csv ;;
 markdown) report_markdown ;;
 json)     report_json ;;
+charts)   report_charts ;;
 esac
 
 # O9 coverage-floor enforcement (DEFAULT-OFF). Only fails the report when the
