@@ -275,3 +275,7 @@ echo "Generating report..."
 MD_FILE="${SWEEP_DIR}/sweep-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$MD_FILE"
 echo "Markdown summary written to $MD_FILE"
+
+CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
+echo "Charts written to $CHARTS_FILE"
