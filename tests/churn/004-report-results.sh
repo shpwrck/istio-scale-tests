@@ -20,7 +20,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/churn/results).
-  --format FMT       Output format: text, csv, markdown (default: text).
+  --format FMT       Output format: text, csv, markdown, charts (default: text).
   -h, --help         Show this help.
 EOF
 }
@@ -384,9 +384,157 @@ report_markdown() {
 	}'
 }
 
+report_charts() {
+	local harness_sha
+	harness_sha=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+	if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then harness_sha="${harness_sha}-dirty"; fi
+	local istio_version="${ISTIO_VERSION:-unknown}"
+
+	echo "---"
+	echo "istio_version: ${istio_version}"
+	echo "harness_sha: ${harness_sha}"
+	echo "files_consumed: ${#TSV_FILES[@]}"
+	echo "generated: $(date -u -Iseconds)"
+	echo "---"
+	echo ""
+	echo "# Churn Convergence — Charts"
+	echo ""
+	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
+		ms = $2 + 0
+		seen[ms] = 1
+		if($8!="TIMEOUT" && $8!="N/A") { cl_sum[ms]+=$8+0; cl_n[ms]++ }
+		if($9!="TIMEOUT" && $9!="N/A") { cr_sum[ms]+=$9+0; cr_n[ms]++ }
+		if($10!="TIMEOUT" && $10!="N/A") { cre_sum[ms]+=$10+0; cre_n[ms]++ }
+		if($13!="N/A") { sxp_sum[ms]+=$13+0; sxp_n[ms]++ }
+		if($14!="N/A") { rxp_sum[ms]+=$14+0; rxp_n[ms]++ }
+		if($11!="N/A" && $11+0 > 0 && $13!="N/A") {
+			amp_sum[ms] += ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11
+			amp_n[ms]++
+		}
+	}
+	function sort_ms(    i, j, tmp, k) {
+		n_ms = 0
+		for (k in seen) ms_arr[++n_ms] = k + 0
+		for (i = 2; i <= n_ms; i++) {
+			tmp = ms_arr[i]; j = i - 1
+			while (j >= 1 && ms_arr[j] > tmp) { ms_arr[j+1] = ms_arr[j]; j-- }
+			ms_arr[j+1] = tmp
+		}
+	}
+	END {
+		sort_ms()
+		if (n_ms < 2) {
+			print "> Charts require at least two mesh sizes."
+			exit
+		}
+		# Collect mesh sizes >= 2 for remote series.
+		n_remote = 0
+		for (i = 1; i <= n_ms; i++) {
+			if (ms_arr[i] >= 2) remote_arr[++n_remote] = ms_arr[i]
+		}
+		if (n_remote < 2) {
+			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
+			exit
+		}
+
+		# Chart 1: Convergence latency vs mesh size
+		printf "%% Chart 1: Convergence latency (ms) vs mesh size\n"
+		printf "%% Series order: local avg, remote reach avg, remote EDS avg\n"
+		printf "%% x-axis starts at mesh 2 (remote series undefined at mesh 1)\n"
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"Convergence Latency vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_remote; i++) {
+			if (i > 1) printf ", "
+			printf "%s", remote_arr[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Latency (ms)\"\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]
+			v = (cl_n[ms] > 0) ? cl_sum[ms]/cl_n[ms] : 0
+			printf "%s%.0f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]
+			v = (cr_n[ms] > 0) ? cr_sum[ms]/cr_n[ms] : 0
+			printf "%s%.0f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]
+			v = (cre_n[ms] > 0) ? cre_sum[ms]/cre_n[ms] : 0
+			printf "%s%.0f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "```\n\n"
+		printf "> Series order: **local avg**, **remote reach avg**, **remote EDS avg**.\n"
+		printf "> x-axis starts at mesh 2 — remote metrics are undefined at mesh size 1.\n\n"
+
+		# Chart 2: xDS pushes vs mesh size
+		printf "%% Chart 2: xDS pushes vs mesh size\n"
+		printf "%% Series order: source xDS pushes, remote xDS pushes\n"
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"xDS Pushes vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_remote; i++) {
+			if (i > 1) printf ", "
+			printf "%s", remote_arr[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Push count\"\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]
+			v = (sxp_n[ms] > 0) ? sxp_sum[ms]/sxp_n[ms] : 0
+			printf "%s%.0f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]
+			v = (rxp_n[ms] > 0) ? rxp_sum[ms]/rxp_n[ms] : 0
+			printf "%s%.0f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "```\n\n"
+		printf "> Series order: **source xDS pushes**, **remote xDS pushes**.\n\n"
+
+		# Chart 3: Push amplification vs mesh size
+		printf "%% Chart 3: Push amplification ratio vs mesh size\n"
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"Push Amplification vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_remote; i++) {
+			if (i > 1) printf ", "
+			printf "%s", remote_arr[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Amplification ratio\"\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]
+			v = (amp_n[ms] > 0) ? amp_sum[ms]/amp_n[ms] : 0
+			printf "%s%.1f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "```\n\n"
+		printf "> Series: **push amplification ratio** (total xDS pushes / source push triggers). Expected <= ~1.\n"
+	}'
+}
+
 case "$FORMAT" in
 text)     report_text ;;
 csv)      report_csv ;;
 markdown) report_markdown ;;
-*)        die "unknown format: $FORMAT (use text, csv, or markdown)" ;;
+charts)   report_charts ;;
+*)        die "unknown format: $FORMAT (use text, csv, markdown, or charts)" ;;
 esac

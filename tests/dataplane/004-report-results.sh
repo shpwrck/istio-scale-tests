@@ -26,7 +26,7 @@ Usage: $(basename "$0") [options]
   --results-dir DIR  Results directory (default: tests/dataplane/results).
                      A directory containing latency-*.tsv files; a sweep-*/
                      subdir from 003 also works.
-  --format FMT       Output format: text, csv, markdown, json (default: text).
+  --format FMT       Output format: text, csv, markdown, json, charts (default: text).
   -h, --help         Show this help.
 EOF
 }
@@ -54,8 +54,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
-text|csv|markdown|json) ;;
-*) die "unknown format: $FORMAT (use text, csv, markdown, or json)" ;;
+text|csv|markdown|json|charts) ;;
+*) die "unknown format: $FORMAT (use text, csv, markdown, json, or charts)" ;;
 esac
 
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
@@ -276,9 +276,134 @@ report_json() {
 		'{metadata: $metadata, summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped}, results: $results}'
 }
 
+report_charts() {
+	echo "---"
+	for kv in "${PREAMBLE[@]}"; do
+		k="${kv%%=*}"; v="${kv#*=}"
+		v_esc=${v//\\/\\\\}; v_esc=${v_esc//\"/\\\"}
+		echo "${k}: \"${v_esc}\""
+	done
+	echo "generated: \"$(date -u -Iseconds)\""
+	echo "---"
+	echo ""
+	echo "# Data-Plane Latency — Charts"
+	echo ""
+	# Chart 1: p50 vs mesh size at top QPS, local vs remote.
+	# Chart 2: p50 vs QPS at largest mesh size, local vs remote.
+	awk -F'\t' '
+	{
+		ms = $1 + 0; qps = $2 + 0; cls = $3; p50 = $6
+		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
+		if (qps > max_qps) max_qps = qps
+		if (ms > max_ms) max_ms = ms
+		if (!(qps in qps_seen)) { qps_order[++n_qps] = qps; qps_seen[qps] = 1 }
+		if (!(cls in cls_seen)) { cls_order[++n_cls] = cls; cls_seen[cls] = 1 }
+		p50_val[ms, qps, cls] = p50
+		has[ms, qps, cls] = 1
+	}
+	END {
+		# Sort mesh sizes numerically.
+		for (i = 2; i <= n_ms; i++) {
+			tmp = ms_order[i]; j = i - 1
+			while (j >= 1 && ms_order[j]+0 > tmp+0) { ms_order[j+1] = ms_order[j]; j-- }
+			ms_order[j+1] = tmp
+		}
+		# Sort QPS numerically.
+		for (i = 2; i <= n_qps; i++) {
+			tmp = qps_order[i]; j = i - 1
+			while (j >= 1 && qps_order[j]+0 > tmp+0) { qps_order[j+1] = qps_order[j]; j-- }
+			qps_order[j+1] = tmp
+		}
+		# Discover target classes (typically "local" and "remote").
+		local_cls = ""; remote_cls = ""
+		for (c = 1; c <= n_cls; c++) {
+			if (cls_order[c] == "local") local_cls = "local"
+			else remote_cls = cls_order[c]
+		}
+		if (local_cls == "" && n_cls >= 1) local_cls = cls_order[1]
+		if (remote_cls == "" && n_cls >= 2) remote_cls = cls_order[2]
+
+		# Collect mesh sizes >= 2 for charts that include remote.
+		n_remote_ms = 0
+		for (i = 1; i <= n_ms; i++) {
+			if (ms_order[i] >= 2) remote_ms[++n_remote_ms] = ms_order[i]
+		}
+
+		if (n_remote_ms < 2) {
+			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
+			exit
+		}
+
+		# Chart 1: p50 vs mesh size at top QPS
+		printf "%% Chart 1: p50 latency (ms) vs mesh size at QPS %s\n", max_qps
+		printf "%% Series order: %s, %s\n", local_cls, remote_cls
+		printf "%% x-axis starts at mesh 2 (remote undefined at mesh 1)\n"
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"p50 Latency vs Mesh Size (QPS %s)\"\n", max_qps
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_remote_ms; i++) {
+			if (i > 1) printf ", "
+			printf "%s", remote_ms[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Latency (ms)\"\n"
+		# Local series
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote_ms; i++) {
+			ms = remote_ms[i]
+			v = (has[ms, max_qps, local_cls] && p50_val[ms, max_qps, local_cls] != "N/A") ? p50_val[ms, max_qps, local_cls] + 0 : 0
+			printf "%s%.2f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		# Remote series
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote_ms; i++) {
+			ms = remote_ms[i]
+			v = (has[ms, max_qps, remote_cls] && p50_val[ms, max_qps, remote_cls] != "N/A") ? p50_val[ms, max_qps, remote_cls] + 0 : 0
+			printf "%s%.2f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "```\n\n"
+		printf "> Series order: **%s**, **%s**. The gap = cross-cluster overhead.\n\n", local_cls, remote_cls
+
+		# Chart 2: p50 vs QPS at largest mesh size
+		printf "%% Chart 2: p50 latency (ms) vs QPS at mesh size %s\n", max_ms
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"p50 Latency vs QPS (Mesh Size %s)\"\n", max_ms
+		printf "    x-axis \"QPS\" ["
+		for (i = 1; i <= n_qps; i++) {
+			if (i > 1) printf ", "
+			printf "%s", qps_order[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Latency (ms)\"\n"
+		# Local series
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_qps; i++) {
+			qps = qps_order[i]
+			v = (has[max_ms, qps, local_cls] && p50_val[max_ms, qps, local_cls] != "N/A") ? p50_val[max_ms, qps, local_cls] + 0 : 0
+			printf "%s%.2f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		# Remote series
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_qps; i++) {
+			qps = qps_order[i]
+			v = (has[max_ms, qps, remote_cls] && p50_val[max_ms, qps, remote_cls] != "N/A") ? p50_val[max_ms, qps, remote_cls] + 0 : 0
+			printf "%s%.2f", sep, v; sep = ", "
+		}
+		printf "]\n"
+		printf "```\n\n"
+		printf "> Series order: **%s**, **%s** at mesh size %s.\n", local_cls, remote_cls, max_ms
+	}' <<<"$AGG_TSV"
+}
+
 case "$FORMAT" in
 text)     report_text ;;
 csv)      report_csv ;;
 markdown) report_markdown ;;
 json)     report_json ;;
+charts)   report_charts ;;
 esac
