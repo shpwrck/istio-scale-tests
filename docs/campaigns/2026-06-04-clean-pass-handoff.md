@@ -8,7 +8,7 @@
 
 **Control plane:** istiod pinned to 3 replicas/spoke (`autoscaleEnabled=false`, no istiod HPA); CPU request 250m (O5 fix), mem req 2Gi / limit 8Gi.
 
-> **Status:** 4 of 5 suites complete and clean. The 5th (churn under data-plane load) is re-running on a harness fix (PR #50); partial results through mesh-size 3 are clean. The detailed per-suite sweep summaries follow this page.
+> **Status:** all 5 suites complete and clean. The 5th (churn under data-plane load) was re-run on the harness fix (PR #50) and finished a full clean 10×3 matrix. The detailed per-suite sweep summaries follow this page.
 
 ---
 
@@ -34,7 +34,7 @@
 | **2. Service/endpoint churn** | ✅ 10/10 stages, 0 errors | Local convergence ~2.4 → 3.7 s with mesh size; remote reach plateaus ~10–12 s; **push amplification stays ≤ ~1.1** (no push storm). Remote proxies scale linearly 24 → 216. |
 | **3. Control-plane scaling** | ✅ 30/30 combos, **0 restarts** | istiod CPU peaks ~0.4 cores at mesh 10 (unscoped) / ~0.31 (scoped); mem flat ~330–354 Mi; **sidecar scoping cuts per-proxy config ~87–89%** (3.8 MB → 0.4–0.5 MB). O5 fix validated at full 10×3. |
 | **4. Data-plane latency** | ✅ 10×4 QPS, **pct_200 = 100%** | Cross-cluster overhead **~0.5–1.0 ms at p50** (local ~2.0–2.8 ms vs remote ~2.8–3.6 ms), flat across mesh size; single-digit-ms p99 at scale; full target QPS to 1000. |
-| **5. Churn under data-plane load** | 🔄 re-running on PR #50 fix | *(partial, mesh 1–3)* idle p99 ~3–4 ms → under churn ~17–25 ms, i.e. **Δp99 ~13–21 ms added tail, flat** across mesh & rate; xDS pushes scale ~7 k → ~100 k with rate. 0 failures so far. |
+| **5. Churn under data-plane load** | ✅ 30/30 combos, 0 SETUP_FAILED, 0 restarts | idle p99 ~3.5–8 ms → under churn ~17–25 ms, i.e. **Δp99 ~13–21 ms added tail, flat** across mesh 1→10 & rate; EDS pushes scale ~7 k → ~85 k with rate. **6 `CLEANUP_TIMEOUT`s absorbed by the fix → 0 data loss** (the original run lost mesh 2/4/6). |
 
 ### Harness fix this campaign (suite 5)
 
@@ -48,7 +48,7 @@ The original churn-dataplane run lost **~40% of its matrix** to a setup/teardown
 | 2 | Service/endpoint churn convergence | `…043213Z-1465754` | ✅ 10/10 stages, 0 errors |
 | 3 | Control-plane resource scaling | `…072535Z-51665` | ✅ 30/30 combos, 0 restarts |
 | 4 | Data-plane latency | `…114908Z-831116` | ✅ 10×4 QPS, pct_200 = 100% |
-| 5 | Churn under data-plane load | `…170554Z-2030208` | 🔄 re-running on PR #50 fix — clean through mesh 3 |
+| 5 | Churn under data-plane load | `…170554Z-2030208` | ✅ 30/30 combos clean (re-run on PR #50 fix); 6 cleanup-timeouts absorbed, 0 data loss |
 
 **Other fixes applied this campaign:** O5 (istiod CPU request — unblocks full 10×3 control-plane scheduling) · O1 (propagation pre-warm so P3 measures propagation, not pod boot) · O10 / PR #50 (churn-dataplane cleanup-cascade).
 
@@ -407,4 +407,43 @@ istiod_restarted != 0 are excluded from numeric averages.
 
 # Sweep 5 — Churn Under Data-Plane Load
 
-_Sweep `20260604T170554Z-2030208` is still running on the PR #50 fix; its summary will be inserted here on completion. Partial results (mesh 1–3) are in the Overview above — all combinations `OK`, 0 failures._
+_Source summary: `sweep-20260604T170554Z-2030208/sweep-summary-20260604T170554Z-2030208.md` — re-run on the PR #50 fix._
+
+## Churn Under Data-Plane Load
+
+Added data-plane tail latency (Δp99) while the mesh churns under live fortio load. **Parameters:** mesh 1→10; churn rates 1/5/10 ops/s; 5 deployments scaling 1↔5; QPS 200; 8 connections; baseline 60 s + churn 60 s/combo; istiod 3 replicas. **Result: 30/30 combos `OK` (full clean 10×3), 0 SETUP_FAILED, 0 istiod restarts** — delivered despite **6 `CLEANUP_TIMEOUT`s** that the fix absorbed (each a slow per-mesh-size namespace GC the setup-wait waited out instead of failing on).
+
+| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 |
+|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|------------------------|
+| 1 | 1 | 15.99 | N/A | 1 | 1 | 3.54 | 19.53 | 2.33 | 2.71 | 199.99 | 199.99 | 6397 | 0-100ms |
+| 1 | 5 | 16.36 | N/A | 1 | 1 | 3.49 | 19.85 | 2.32 | 2.72 | 199.96 | 199.97 | 36680 | 0-100ms |
+| 1 | 10 | 16.80 | N/A | 1 | 1 | 3.00 | 19.80 | 2.20 | 2.94 | 199.99 | 199.97 | 76818 | 0-100ms |
+| 2 | 1 | 17.67 | N/A | 1 | 1 | 3.95 | 21.63 | 2.33 | 3.09 | 199.99 | 199.97 | 7327 | 0-100ms |
+| 2 | 5 | 15.26 | N/A | 1 | 1 | 3.95 | 19.21 | 2.35 | 2.99 | 199.99 | 199.96 | 46286 | 0-100ms |
+| 2 | 10 | 20.94 | N/A | 1 | 1 | 3.99 | 24.93 | 2.43 | 3.05 | 199.99 | 199.96 | 94748 | 0-100ms |
+| 3 | 1 | 13.49 | N/A | 1 | 1 | 3.98 | 17.46 | 2.35 | 2.92 | 199.99 | 199.98 | 8381 | 0-100ms |
+| 3 | 5 | 15.77 | N/A | 1 | 1 | 4.15 | 19.91 | 2.40 | 3.20 | 199.99 | 199.98 | 44749 | 0-100ms |
+| 3 | 10 | 16.09 | N/A | 1 | 1 | 3.98 | 20.07 | 2.46 | 3.24 | 199.99 | 199.97 | 98211 | 0-100ms |
+| 4 | 1 | 13.68 | N/A | 1 | 1 | 3.99 | 17.67 | 2.40 | 2.94 | 199.99 | 199.99 | 8075 | 0-100ms |
+| 4 | 5 | 15.51 | N/A | 1 | 1 | 4.12 | 19.63 | 2.43 | 3.15 | 199.99 | 199.98 | 47891 | 0-100ms |
+| 4 | 10 | 14.85 | N/A | 1 | 1 | 3.98 | 18.83 | 2.46 | 3.25 | 199.98 | 199.98 | 89248 | 0-100ms |
+| 5 | 1 | 12.83 | N/A | 1 | 1 | 4.63 | 17.46 | 2.45 | 3.04 | 199.99 | 199.96 | 8061 | 0-100ms |
+| 5 | 5 | 18.72 | N/A | 1 | 1 | 4.62 | 23.33 | 2.47 | 3.25 | 199.99 | 199.98 | 46119 | 0-100ms |
+| 5 | 10 | 18.24 | N/A | 1 | 1 | 4.94 | 23.18 | 2.45 | 3.27 | 199.99 | 199.96 | 88504 | 0-100ms |
+| 6 | 1 | 15.10 | N/A | 1 | 1 | 3.97 | 19.08 | 2.47 | 3.12 | 199.99 | 199.93 | 7909 | 0-100ms |
+| 6 | 5 | 17.29 | N/A | 1 | 1 | 3.99 | 21.28 | 2.51 | 3.28 | 199.99 | 199.90 | 40537 | 0-100ms |
+| 6 | 10 | 15.55 | N/A | 1 | 1 | 3.99 | 19.54 | 2.50 | 3.27 | 199.99 | 199.97 | 84614 | 0-100ms |
+| 7 | 1 | 16.58 | N/A | 1 | 1 | 3.99 | 20.57 | 2.51 | 3.34 | 199.99 | 199.99 | 7649 | 0-100ms |
+| 7 | 5 | 14.02 | N/A | 1 | 1 | 5.03 | 19.05 | 2.51 | 3.18 | 199.99 | 199.98 | 40547 | 0-100ms |
+| 7 | 10 | 15.54 | N/A | 1 | 1 | 4.76 | 20.30 | 2.51 | 3.23 | 199.99 | 199.98 | 81496 | 0-100ms |
+| 8 | 1 | 14.79 | N/A | 1 | 1 | 4.00 | 18.79 | 2.56 | 3.53 | 199.99 | 199.98 | 7507 | 0-100ms |
+| 8 | 5 | 10.71 | N/A | 1 | 1 | 7.96 | 18.67 | 2.52 | 3.29 | 199.99 | 199.96 | 37115 | 0-100ms |
+| 8 | 10 | 15.77 | N/A | 1 | 1 | 3.99 | 19.76 | 2.49 | 3.52 | 199.99 | 199.98 | 79166 | 0-100ms |
+| 9 | 1 | 14.13 | N/A | 1 | 1 | 4.94 | 19.08 | 3.07 | 3.25 | 199.99 | 199.98 | 6929 | 0-100ms |
+| 9 | 5 | 13.00 | N/A | 1 | 1 | 6.50 | 19.50 | 2.53 | 3.43 | 199.99 | 199.99 | 37755 | 0-100ms |
+| 9 | 10 | 15.08 | N/A | 1 | 1 | 5.82 | 20.90 | 2.58 | 3.56 | 199.99 | 199.98 | 80727 | 0-100ms |
+| 10 | 1 | 12.83 | N/A | 1 | 1 | 4.79 | 17.62 | 2.53 | 3.06 | 199.99 | 199.98 | 8240 | 0-100ms |
+| 10 | 5 | 15.56 | N/A | 1 | 1 | 5.26 | 20.82 | 2.57 | 3.37 | 199.99 | 199.99 | 36157 | 0-100ms |
+| 10 | 10 | 17.76 | N/A | 1 | 1 | 5.10 | 22.87 | 2.61 | 3.54 | 199.99 | 199.99 | 73073 | 0-100ms |
+
+*Read:* idle p99 ~3.5–8 ms → under churn p99 ~17–25 ms, i.e. **Δp99 ~13–21 ms added tail, flat across mesh size and churn rate** (no upward trend as the mesh scales 1→10); p50 barely moves (~2.3 → 3.6 ms). EDS push volume scales with churn rate (~7 k / ~40 k / ~85 k at rate 1/5/10), roughly flat per-rate across mesh size. Convergence p99 in the `0-100 ms` bucket on every combo. The 6 cleanup-timeouts are a real ROSA namespace-GC characteristic (>240 s under load), made non-fatal by the fix.
