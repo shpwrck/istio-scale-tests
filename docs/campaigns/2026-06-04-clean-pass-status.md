@@ -27,7 +27,11 @@ Launch mode: **live smoke first (propagation), then the rest if clean.** Context
 | 3b | controlplane (clean re-run) | ✅ DONE | **30/30 combos, 0 FailedScheduling/Insufficient-cpu** — O5 fully resolved at full 10×3 (the headline of this clean pass). Config dump avg 3.9MB; convergence p99 100–500ms; connected proxies 6–16; go heap ~114–158Mi. Namespaces auto-cleaned. Summary written. |
 | 4 | dataplane | ✅ DONE | sweep-20260604T114908Z-831116; **10×4 QPS, pct_200=100%**. Cross-cluster overhead ~1ms p50 (local ~2.4–2.8ms vs remote ~2.8–3.6ms), flat across mesh 1→10. Summary written. |
 | 5 | churn-dataplane | ❌ first run lost to O10 cascade | sweep-…1174742: ms1✅/ms2 SETUP_FAILED/ms3✅/ms4 SETUP_FAILED/ms5✅(ms5-cr5 PROBE_FAILED)/ms6 SETUP_FAILED, stopped at ms7, no summary. Even-size data lost. Verified against log — O10 diagnosis correct. DISCARD this sweep. |
-| 5b | churn-dataplane (PR #50 fix) | 🟢 RE-RUNNING clean | Fix validated first (reduced ms1-3×cr1 from worktree: **ms2 even-size now OK**, delta_p99=18.72ms, 0 fail-markers). Full **5×5** 30-combo re-run launched from worktree `../istio-scale-tests-cleanup-cascade` → sweep-20260604T170554Z-2030208. This is the trustworthy churn-dataplane data. |
+| 5b | churn-dataplane (PR #50 fix) | ✅ DONE | sweep-20260604T170554Z-2030208 (worktree). **30/30 combos all valid_runs=1 — every even mesh-size now has data** (ms2/4/6/8/10), 0 SETUP_FAILED. Δp99 10.7–20.9ms. CLEANUP_TIMEOUT at ms4–10 now BENIGN (fix A waits out Terminating ns → no data loss) = O11 follow-up. This is the trustworthy churn-dataplane data. |
+
+## CAMPAIGN COMPLETE — all 5 suites clean
+
+Final summary: [`2026-06-04-clean-pass-results.md`](2026-06-04-clean-pass-results.md). All test namespaces cleaned off all 10 spokes. **Morning actions:** (1) review/merge **PR #50** (churn-dataplane cleanup-cascade); (2) decide whether to land the O5 istiod `requests.cpu=250m` default in `charts/spoke-ossm/values.yaml` (currently live-only via CR patch, GitOps disabled); (3) O11 — investigate slow ns teardown at scale (`/scale-test-review`).
 
 ## Observations & issues (running log)
 

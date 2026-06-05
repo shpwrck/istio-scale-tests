@@ -8,7 +8,7 @@
 
 **Control plane:** istiod pinned to 3 replicas/spoke (`autoscaleEnabled=false`, no istiod HPA); CPU request 250m (O5 fix), mem req 2Gi / limit 8Gi.
 
-> **Status:** 4 of 5 suites complete and clean. The 5th (churn under data-plane load) is re-running on a harness fix (PR #50); partial results through mesh-size 3 are clean. The detailed per-suite sweep summaries follow this page.
+> **Status:** all 5 suites complete and clean. The 5th (churn under data-plane load) was re-run on the harness fix (PR #50) and finished a full clean 10×3 matrix. The detailed per-suite sweep summaries follow this page.
 
 ---
 
@@ -34,7 +34,7 @@
 | **2. Service/endpoint churn** | ✅ 10/10 stages, 0 errors | Local convergence ~2.4 → 3.7 s with mesh size; remote reach plateaus ~10–12 s; **push amplification stays ≤ ~1.1** (no push storm). Remote proxies scale linearly 24 → 216. |
 | **3. Control-plane scaling** | ✅ 30/30 combos, **0 restarts** | istiod CPU peaks ~0.4 cores at mesh 10 (unscoped) / ~0.31 (scoped); mem flat ~330–354 Mi; **sidecar scoping cuts per-proxy config ~87–89%** (3.8 MB → 0.4–0.5 MB). O5 fix validated at full 10×3. |
 | **4. Data-plane latency** | ✅ 10×4 QPS, **pct_200 = 100%** | Cross-cluster overhead **~0.5–1.0 ms at p50** (local ~2.0–2.8 ms vs remote ~2.8–3.6 ms), flat across mesh size; single-digit-ms p99 at scale; full target QPS to 1000. |
-| **5. Churn under data-plane load** | 🔄 re-running on PR #50 fix | *(partial, mesh 1–3)* idle p99 ~3–4 ms → under churn ~17–25 ms, i.e. **Δp99 ~13–21 ms added tail, flat** across mesh & rate; xDS pushes scale ~7 k → ~100 k with rate. 0 failures so far. |
+| **5. Churn under data-plane load** | ✅ 30/30 combos, 0 SETUP_FAILED, 0 restarts | idle p99 ~3.5–8 ms → under churn ~17–25 ms, i.e. **Δp99 ~13–21 ms added tail, flat** across mesh 1→10 & rate; EDS pushes scale ~7 k → ~85 k with rate. **6 `CLEANUP_TIMEOUT`s absorbed by the fix → 0 data loss** (the original run lost mesh 2/4/6). |
 
 ### Harness fix this campaign (suite 5)
 
@@ -48,7 +48,7 @@ The original churn-dataplane run lost **~40% of its matrix** to a setup/teardown
 | 2 | Service/endpoint churn convergence | `…043213Z-1465754` | ✅ 10/10 stages, 0 errors |
 | 3 | Control-plane resource scaling | `…072535Z-51665` | ✅ 30/30 combos, 0 restarts |
 | 4 | Data-plane latency | `…114908Z-831116` | ✅ 10×4 QPS, pct_200 = 100% |
-| 5 | Churn under data-plane load | `…170554Z-2030208` | 🔄 re-running on PR #50 fix — clean through mesh 3 |
+| 5 | Churn under data-plane load | `…170554Z-2030208` | ✅ 30/30 combos clean (re-run on PR #50 fix); 6 cleanup-timeouts absorbed, 0 data loss |
 
 **Other fixes applied this campaign:** O5 (istiod CPU request — unblocks full 10×3 control-plane scheduling) · O1 (propagation pre-warm so P3 measures propagation, not pod boot) · O10 / PR #50 (churn-dataplane cleanup-cascade).
 
