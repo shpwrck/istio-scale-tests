@@ -556,3 +556,7 @@ echo "Running 005-report-results.sh..."
 MD_FILE="${SWEEP_DIR}/sweep-summary-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format md > "$MD_FILE"
 echo "Markdown summary: $MD_FILE"
+
+CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
+"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
+echo "Charts written to $CHARTS_FILE"

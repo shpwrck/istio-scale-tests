@@ -46,7 +46,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/propagation/results).
-  --format FMT       Output format: text, csv, json, markdown (default: text).
+  --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
 TSV columns consumed (positions are stable; new columns appended):
@@ -638,6 +638,100 @@ report_endpoint_json() {
 	printf '}\n'
 }
 
+report_endpoint_charts() {
+	echo "---"
+	format_preamble_md
+	echo "generated: $(date -u -Iseconds)"
+	echo "---"
+	echo ""
+	echo "# Endpoint Propagation Latency — Charts"
+	echo ""
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
+	function chart_avg(src, ms, n,    arr, sum, i) {
+		if (n == 0) return -1
+		load(arr, src, ms, n)
+		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
+		return sum / n
+	}
+	END {
+		asorti_seen()
+		if (__n < 2) {
+			print "> Charts require at least two mesh sizes."
+			exit
+		}
+		# Collect mesh sizes >= 2 (remote series undefined at mesh 1).
+		n_remote = 0
+		for (s = 1; s <= __n; s++) {
+			ms = __sorted[s]
+			if (ms + 0 >= 2) {
+				n_remote++
+				remote_ms[n_remote] = ms
+			}
+		}
+		if (n_remote < 2) {
+			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
+			exit
+		}
+
+		# Chart 1: P1 wall + P2 EDS latency vs mesh size
+		printf "%% Chart 1: P1 local xDS + P2 remote istiod EDS latency\n"
+		printf "%% Series order: P1 wall avg (ms), P2 EDS avg (ms)\n"
+		printf "%% x-axis starts at mesh 2 (P2 undefined at mesh 1)\n"
+		printf "\n"
+		printf "```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"P1 + P2 Latency vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_remote; i++) {
+			if (i > 1) printf ", "
+			printf "%s", remote_ms[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Latency (ms)\"\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			v = chart_avg(p1_vals, remote_ms[i], p1_n[remote_ms[i]])
+			printf "%s%.0f", sep, (v < 0 ? 0 : v); sep = ", "
+		}
+		printf "]\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			v = chart_avg(p2_vals, remote_ms[i], p2_n[remote_ms[i]])
+			printf "%s%.0f", sep, (v < 0 ? 0 : v); sep = ", "
+		}
+		printf "]\n"
+		printf "```\n"
+		printf "\n"
+		printf "> Series order: **P1 wall avg** (ms), **P2 EDS avg** (ms).\n"
+		printf "> x-axis starts at mesh 2 — P2 is undefined at mesh size 1 (no remote cluster).\n"
+		printf "\n"
+
+		# Chart 2: P3 remote sidecar latency vs mesh size
+		printf "%% Chart 2: P3 remote sidecar apply latency\n"
+		printf "%% Series: P3 sidecar avg (ms)\n"
+		printf "\n"
+		printf "```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"P3 Remote Sidecar Latency vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_remote; i++) {
+			if (i > 1) printf ", "
+			printf "%s", remote_ms[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Latency (ms)\"\n"
+		printf "    line ["; sep = ""
+		for (i = 1; i <= n_remote; i++) {
+			v = chart_avg(p3_vals, remote_ms[i], p3_n[remote_ms[i]])
+			printf "%s%.0f", sep, (v < 0 ? 0 : v); sep = ", "
+		}
+		printf "]\n"
+		printf "```\n"
+		printf "\n"
+		printf "> Series: **P3 sidecar avg** (ms). Separate chart — P3 is typically ~10x P1/P2 scale.\n"
+	}'
+}
+
 case "$FORMAT" in
 text)
 	echo "Files: ${ENDPOINT_FILES[*]}"
@@ -653,7 +747,11 @@ markdown|md)
 	echo "Files: ${ENDPOINT_FILES[*]}" >&2
 	report_endpoint_markdown
 	;;
+charts)
+	echo "Files: ${ENDPOINT_FILES[*]}" >&2
+	report_endpoint_charts
+	;;
 *)
-	die "unknown format: $FORMAT (use text, csv, json, or markdown)"
+	die "unknown format: $FORMAT (use text, csv, json, markdown, or charts)"
 	;;
 esac

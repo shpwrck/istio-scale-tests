@@ -367,4 +367,8 @@ if ((WRITE_TSV)); then
 	COMBINED="${SWEEP_DIR}/sweep-summary.md"
 	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$COMBINED"
 	echo "Combined report: $COMBINED"
+
+	CHARTS_FILE="${SWEEP_DIR}/sweep-charts.md"
+	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
+	echo "Charts written to $CHARTS_FILE"
 fi
