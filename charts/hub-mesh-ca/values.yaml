@@ -24,7 +24,9 @@ global:
   placement:
     namespace: openshift-gitops
     name: acm-openshift-gitops-placement
-    # PlacementDecision metadata.name — OCM default is "<placement.name>-decision-1" unless decisionStrategy splits decisions; override if needed (oc get placementdecision -n openshift-gitops).
+    # Optional exact PlacementDecision metadata.name. Leave empty to look up all
+    # PlacementDecision resources labeled for name above; required for large fleets
+    # where OCM splits one Placement across multiple PlacementDecision resources.
     placementDecisionName: ""
 
 bootstrapIssuer:

@@ -36,9 +36,21 @@ spec:
 {{- $pl := $global.placement | default dict }}
 {{- $pdNs := $pl.namespace | default "openshift-gitops" }}
 {{- $placementName := $pl.name | default "acm-openshift-gitops-placement" }}
-{{- $pdName := $pl.placementDecisionName | default (printf "%s-decision-1" $placementName) }}
+{{- $pdName := $pl.placementDecisionName | default "" }}
+{{- $pds := list }}
+{{- if $pdName }}
 {{- $pd := lookup "cluster.open-cluster-management.io/v1beta1" "PlacementDecision" $pdNs $pdName }}
-{{- if $pd }}
+{{- if $pd }}{{- $pds = append $pds $pd }}{{- end }}
+{{- else }}
+{{- $pdList := lookup "cluster.open-cluster-management.io/v1beta1" "PlacementDecision" $pdNs "" }}
+{{- range $item := ($pdList.items | default list) }}
+{{- $labels := $item.metadata.labels | default dict }}
+{{- if eq (index $labels "cluster.open-cluster-management.io/placement") $placementName }}
+{{- $pds = append $pds $item }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $pd := $pds }}
 {{- $status := $pd.status | default dict }}
 {{- range $d := ($status.decisions | default list) }}
 {{- $cn := $d.clusterName }}

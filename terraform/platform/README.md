@@ -1,12 +1,13 @@
 # Platform Setup — Terraform
 
-Installs ACM (Red Hat Advanced Cluster Management), OpenShift GitOps (Argo CD), and deploys the full Istio mesh via GitOps on clusters provisioned by `terraform/rosa-hcp/`.
+Installs ACM (Red Hat Advanced Cluster Management), OpenShift GitOps (Argo CD), and deploys the full Istio mesh via GitOps. The module can read cluster metadata from `terraform/rosa-hcp/` state (`cluster_provider = "rosa"`) or from an existing kubeconfig (`cluster_provider = "kubeconfig"`).
 
 ## Prerequisites
 
 - Terraform >= 1.14.8.
-- `terraform/rosa-hcp/` applied first — this module reads its state via `terraform_remote_state` (local backend).
-- `KUBECONFIG` set to reach the hub cluster (first cluster from rosa-hcp).
+- For `cluster_provider = "rosa"`: `terraform/rosa-hcp/` applied first; this module reads its state via `terraform_remote_state` (local backend).
+- For `cluster_provider = "kubeconfig"`: a kubeconfig that can reach the hub and every spoke context.
+- `KUBECONFIG` or `kubeconfig_path` set to reach the hub cluster.
 
 ## Usage
 
@@ -22,6 +23,22 @@ terraform apply tfplan
 ```
 
 See `terraform.tfvars.example` for all configurable variables.
+
+### Existing-cluster kubeconfig mode
+
+Use this mode for a prebuilt testbed, including a 500-spoke bed. Keep real context names in local, gitignored `terraform.tfvars` only.
+
+```hcl
+cluster_provider      = "kubeconfig"
+kubeconfig_path       = "~/.kube/scale-test"
+hub_cluster_context   = "hub-cluster"
+spoke_cluster_contexts = [
+  "spoke-001",
+  "spoke-002",
+  # ...
+  "spoke-500",
+]
+```
 
 ## What it deploys
 
@@ -41,6 +58,19 @@ Mesh restart (istiod and gateways) is handled by the GitOps sync wave 30 chart (
 ## Incremental mesh deployment
 
 The `mesh_member_count` variable controls how many spokes get Istio (0 = all). See the main [README](../../README.md#incremental-mesh-deployment) for usage details.
+
+## Large fleet GitOps sizing
+
+For 500 spoke clusters on a 3-node hub, do not leave `argocd_clusters_per_shard` at the small-fleet default of `3` unless the hub is deliberately sized for the resulting 167 application-controller shards. Start with:
+
+```hcl
+gitops_operator_channel   = "gitops-1.20"
+mesh_member_count         = 500
+argocd_clusters_per_shard = 50
+argocd_max_shards         = 20
+```
+
+Terraform computes `minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard)` and renders `maxShards` as at least that value, so large fleets do not produce an invalid `minShards > maxShards` ArgoCD spec. Validate hub capacity before applying all mesh members; with the chart defaults, each controller shard requests 2 CPU and 4Gi memory.
 
 ## Outputs
 

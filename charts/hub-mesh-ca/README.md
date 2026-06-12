@@ -20,15 +20,15 @@ Placement-based intermediates still require a successful **`lookup`** on `Placem
 
 ## Argo CD: intermediates via ApplicationSet (recommended)
 
-Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-ocm-placement-appset`** with **`values-mesh-ca-intermediate.yaml`**, which combines **`clusterDecisionResource`** (GitOps **`Placement`**, spokes only) with a static **`list`** generator entry **`in-cluster`** for the hub intermediate **`Certificate`**.
+Argo CD cannot evaluate Helm **`lookup`** against the hub API. Use **`charts/gitops-hub-ocm-placement-appset`** with **`values-mesh-ca-intermediate.yaml`**, which uses **`clusterDecisionResource`** (GitOps **`Placement`**, spokes only) to create one hub-targeted Application per selected spoke.
 
 The **`hub-mesh-ca`** Application under `charts/gitops-hub-apps/applications/` passes **`intermediates.enabled: false`** so this chart only manages the root CA chain; intermediate CAs come from the ApplicationSet.
 
 ## Intermediate CAs: Placement (helm CLI / live API)
 
-With `intermediates.source: placement` (default), the chart uses Helm `lookup` on the **PlacementDecision** that matches **`global.placement`** — same namespace/name convention as `charts/acm-openshift-gitops-resources` (`Placement` `acm-openshift-gitops-placement` in `openshift-gitops`). Each entry in `status.decisions[].clusterName` becomes one intermediate (`mesh-intermediate-<clusterName>`).
+With `intermediates.source: placement` (default), the chart uses Helm `lookup` on **PlacementDecision** resources that match **`global.placement`** — same namespace and placement label used by `charts/acm-openshift-gitops-resources` (`Placement` `acm-openshift-gitops-placement` in `openshift-gitops`). Each entry in `status.decisions[].clusterName` becomes one intermediate (`mesh-intermediate-<clusterName>`).
 
-Override **`global.placement.placementDecisionName`** if your hub uses a different `PlacementDecision` (`oc get placementdecision -A`). When unset, the chart looks up **`<placement.name>-decision-1`** in **`global.placement.namespace`** (default **`openshift-gitops`**).
+Leave **`global.placement.placementDecisionName`** empty for large fleets so the chart reads every `PlacementDecision` labeled `cluster.open-cluster-management.io/placement=<placement.name>`. Set it only when you intentionally want one exact `PlacementDecision` (`oc get placementdecision -A`).
 
 Optional **`intermediates.clusterOverrides`** keys off ManagedCluster name for `commonName`, `duration`, `secretName`, or `privateKey`.
 

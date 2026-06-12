@@ -7,6 +7,9 @@ identity:
 
 placement:
   name: acm-openshift-gitops-placement
+  # Optional exact PlacementDecision name. Leave empty to select all
+  # PlacementDecision objects labeled for placement.name; required when OCM splits
+  # large placements across multiple PlacementDecision resources.
   placementDecisionName: ""
 
 inClusterGenerator:
@@ -20,6 +23,11 @@ generatorConfigMap:
 clusterDecisionResource:
   enabled: true
   requeueAfterSeconds: 30
+  # Optional override for the generated labelSelector used when
+  # placement.placementDecisionName is empty. Defaults to:
+  # matchLabels:
+  #   cluster.open-cluster-management.io/placement: <placement.name>
+  labelSelector: {}
 
 placementRbac:
   create: true
