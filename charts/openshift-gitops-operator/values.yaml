@@ -10,5 +10,5 @@ subscription:
   packageName: openshift-gitops-operator
   sourceNamespace: openshift-marketplace
   source: redhat-operators
-  channel: gitops-1.14
+  channel: gitops-1.20
   installPlanApproval: Automatic

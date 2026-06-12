@@ -20,7 +20,9 @@ placement:
   requireMeshMemberLabel: true
 
 # Shared duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource (charts/gitops-hub-*-appset).
-# Uses the same Placement / PlacementDecision as placement.name above (OCM names decisions "<name>-decision-1" by default).
+# Hub ApplicationSet charts select PlacementDecision resources by the
+# cluster.open-cluster-management.io/placement=<placement.name> label by default,
+# so large placements split across multiple PlacementDecision resources are all consumed.
 # Gated on argoServer.cluster. In the Terraform deployment argoServer.cluster is left empty
 # and Terraform creates this ConfigMap itself (kubernetes_manifest.placement_generator_configmap)
 # only after the cluster secrets exist, so ApplicationSets don't generate spoke apps too early.
