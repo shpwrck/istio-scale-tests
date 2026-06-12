@@ -2,6 +2,8 @@
 
 Standard Argo CD ApplicationSet for RHACM GitOps: `clusterDecisionResource` (shared duck-type ConfigMap from `charts/acm-openshift-gitops-resources`) plus optional list generator for the hub Argo cluster name (`in-cluster` by default).
 
+By default the chart selects all `PlacementDecision` objects labeled for `placement.name` (`cluster.open-cluster-management.io/placement=<placement.name>`). Keep `placement.placementDecisionName` empty for large fleets, because OCM can split one `Placement` across multiple `PlacementDecision` resources. Set `placement.placementDecisionName` only when you intentionally want one exact decision resource.
+
 Preset value files:
 
 - `values-external-secrets.yaml` — installs `charts/external-secrets-operator` on every cluster in Placement (`clusterDecisionResource`, typically spokes without `local-cluster`) plus the hub list entry (`in-cluster` default, `destination.mode: clusterName` on each Application).
