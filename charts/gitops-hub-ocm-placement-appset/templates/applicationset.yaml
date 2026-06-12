@@ -1,5 +1,5 @@
 {{- $pn := .Values.placement.name | default "acm-openshift-gitops-placement" }}
-{{- $pdec := .Values.placement.placementDecisionName | default (printf "%s-decision-1" $pn) }}
+{{- $pdec := .Values.placement.placementDecisionName | default "" }}
 {{- $mode := required "destination.mode must be clusterName or inClusterServer" .Values.destination.mode }}
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -14,7 +14,18 @@ spec:
 {{- if or (eq $cdrOn true) (eq ($cdrOn | toString) "true") }}
     - clusterDecisionResource:
         configMapRef: {{ .Values.generatorConfigMap.name | quote }}
+{{- if $pdec }}
         name: {{ $pdec | quote }}
+{{- else }}
+        labelSelector:
+{{- $selector := .Values.clusterDecisionResource.labelSelector | default dict }}
+{{- if $selector }}
+{{- toYaml $selector | nindent 10 }}
+{{- else }}
+          matchLabels:
+            cluster.open-cluster-management.io/placement: {{ $pn | quote }}
+{{- end }}
+{{- end }}
         requeueAfterSeconds: {{ .Values.clusterDecisionResource.requeueAfterSeconds }}
 {{- end }}
 {{- $hubOn := .Values.inClusterGenerator.enabled }}

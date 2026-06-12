@@ -137,7 +137,11 @@ resource "helm_release" "argocd_config" {
       # gets an empty controllerNamespace while dynamic scaling catches up.
       {
         name  = "argocd.controller.sharding.minShards"
-        value = tostring(ceil((length(local.spoke_cluster_keys) + 1) / var.argocd_clusters_per_shard))
+        value = tostring(local.argocd_computed_min_shards)
+      },
+      {
+        name  = "argocd.controller.sharding.maxShards"
+        value = tostring(local.argocd_effective_max_shards)
       },
     ],
     var.gitops_rhacm_appset_any_namespace ? [

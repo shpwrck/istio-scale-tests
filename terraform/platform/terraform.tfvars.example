@@ -12,10 +12,34 @@ gitops_app_repo_url = "https://github.com/shpwrck/istio-scale-tests.git"
 # gitops_app_repo_password        = ""   # HTTPS PAT/token
 # gitops_app_repo_ssh_private_key = ""   # SSH key (use SSH clone URL above)
 
+# --- Existing-cluster kubeconfig mode ---
+
+# Use when the hub/spokes already exist instead of being created by terraform/rosa-hcp.
+# Keep real context names in local terraform.tfvars only; do not commit them.
+# cluster_provider    = "kubeconfig"
+# kubeconfig_path     = "~/.kube/scale-test"
+# hub_cluster_context = "hub-cluster"
+# spoke_cluster_contexts = [
+#   "spoke-001",
+#   "spoke-002",
+#   # ...
+#   "spoke-500",
+# ]
+
 # --- Incremental mesh ---
 
 # Number of spokes that get Istio (0 = all, sorted order).
 # mesh_member_count = 0
+
+# --- Large fleet profile (example: 500 spokes on a 3-node hub) ---
+
+# Prefer an explicit member count for large staged rollouts.
+# mesh_member_count = 500
+
+# 500 spokes + in-cluster = 501 Argo CD clusters. With 50 clusters/shard,
+# Terraform computes minShards = 11 and renders maxShards >= 11.
+# argocd_clusters_per_shard = 50
+# argocd_max_shards         = 20
 
 # --- ACM (defaults rarely need changing) ---
 
@@ -26,7 +50,7 @@ gitops_app_repo_url = "https://github.com/shpwrck/istio-scale-tests.git"
 
 # --- OpenShift GitOps / Argo CD (defaults rarely need changing) ---
 
-# gitops_operator_channel        = "gitops-1.14"
+# gitops_operator_channel        = "gitops-1.20"
 # gitops_namespace               = "openshift-gitops"
 # gitops_argocd_cr_name          = "openshift-gitops"
 # gitops_app_repo_revision       = "main"
