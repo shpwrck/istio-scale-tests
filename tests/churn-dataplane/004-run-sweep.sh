@@ -240,6 +240,25 @@ else
 	KUBECTL=(kubectl) # placeholder for dry-run plan only
 fi
 
+# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
+# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — a sweep-wide
+# scalar (the mesh's tuning is identical across all combos). The sidecar-scoping /
+# discoverySelectors / telemetry levers directly change what the churn × data-plane
+# co-exec measures, so a run on the baked baseline is provenance-blind without these.
+# Threaded to 002/003 (--tuning-baseline / --sidecar-egress-hosts) AND emitted in this
+# pre-created preamble; 002/003 carry the same keys for their standalone path (PL36).
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
+if ! ((DRY_RUN)); then
+	tb_kv=""
+	while IFS= read -r tb_kv; do
+		case "$tb_kv" in
+			TUNING_BASELINE=*) TUNING_BASELINE="${tb_kv#TUNING_BASELINE=}" ;;
+			SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${tb_kv#SIDECAR_EGRESS_HOSTS=}" ;;
+		esac
+	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
+fi
+
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
@@ -249,6 +268,8 @@ if ! ((DRY_RUN)); then
 		"HARNESS_SHA=$HARNESS_SHA" \
 		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
+		"TUNING_BASELINE=$TUNING_BASELINE" \
+		"SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS" \
 		"SETTLE_SEC=$SETTLE_SEC" \
 		"BASELINE_DURATION_SEC=$BASELINE_DURATION" \
 		"CHURN_DURATION_SEC=$CHURN_DURATION" \
@@ -470,6 +491,8 @@ for ms in "${MESH_SIZES[@]}"; do
 			--connections "$CONNECTIONS"
 			--settle-sec "$SETTLE_SEC"
 			--output-file "$TSV_FILE"
+			--tuning-baseline "$TUNING_BASELINE"
+			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 			--append
 		)
 		[[ -n "$remote_csv" ]] && baseline_args+=(--remote-contexts "$remote_csv")
@@ -503,6 +526,8 @@ for ms in "${MESH_SIZES[@]}"; do
 			--seed "$CHURN_SEED"
 			--output-file "$TSV_FILE"
 			--baseline-file "$TSV_FILE"
+			--tuning-baseline "$TUNING_BASELINE"
+			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 		)
 		[[ -n "$remote_csv" ]] && churn_args+=(--remote-contexts "$remote_csv")
 		# P0/PL15: failed churn phase → phase=churn status=PROBE_FAILED row (counted in

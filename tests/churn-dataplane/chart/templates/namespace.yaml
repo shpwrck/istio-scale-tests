@@ -4,4 +4,9 @@ metadata:
   name: {{ .Values.namespace }}
   labels:
     istio.io/rev: default
+    # Required so istiod discovers this namespace under the campaign baseline's
+    # discoverySelectors (spoke-ossm tuningBaseline.discoverySelectors). Without
+    # it the workloads are invisible to the control plane and `kubectl wait`
+    # times out.
+    istio-discovery: enabled
     {{- include "churn-dataplane.labels" . | nindent 4 }}

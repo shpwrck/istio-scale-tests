@@ -171,6 +171,35 @@ SWEEP_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
 HARNESS_SHA="$(harness_sha)"
 
+# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
+# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — a sweep-wide
+# scalar (the mesh's tuning is identical regardless of how many clusters a combo
+# measures). The sidecar-scoping / discoverySelectors / telemetry levers directly
+# change what xDS/EDS propagation measures, so a run on the baked baseline is
+# provenance-blind without these. Threaded to 002 (--tuning-baseline /
+# --sidecar-egress-hosts) AND emitted by the placeholder writer above (PL36 contract).
+# Skipped in --dry-run (cluster read); stays "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
+if ((! DRY_RUN)); then
+	if command -v oc >/dev/null 2>&1; then
+		KUBECTL=(oc)
+	elif command -v kubectl >/dev/null 2>&1; then
+		KUBECTL=(kubectl)
+	else
+		KUBECTL=()
+	fi
+	if ((${#KUBECTL[@]})); then
+		tb_kv=""
+		while IFS= read -r tb_kv; do
+			case "$tb_kv" in
+				TUNING_BASELINE=*) TUNING_BASELINE="${tb_kv#TUNING_BASELINE=}" ;;
+				SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${tb_kv#SIDECAR_EGRESS_HOSTS=}" ;;
+			esac
+		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
+	fi
+fi
+
 # B6: emit a minimal placeholder TSV for a mesh size whose setup/probe crashed before
 # the probe could write its own rows. Without this, that size is absent from the
 # report and indistinguishable from "never planned". 005-report-results.sh globs
@@ -178,8 +207,9 @@ HARNESS_SHA="$(harness_sha)"
 # status from n_valid (PL15). Only meaningful when --tsv is set (the report runs only
 # then). The file is named so it sorts AFTER the real endpoint-<RUN_ID> files, and it
 # carries the SAME sweep-level scalar preamble keys (SWEEP_RUN_ID/HARNESS_SHA/
-# ISTIO_VERSION/SOURCE_CTX/ITERATIONS/TIMEOUT_SEC/SETTLE_SEC) so PL26 scalar
-# homogeneity holds; per-iteration RUN_ID/MESH_SIZE are this combo's.
+# ISTIO_VERSION/SOURCE_CTX/ITERATIONS/TIMEOUT_SEC/SETTLE_SEC/TUNING_BASELINE/
+# SIDECAR_EGRESS_HOSTS) so PL26 scalar homogeneity holds; per-iteration
+# RUN_ID/MESH_SIZE are this combo's.
 # Usage: emit_propagation_placeholder <status> <mesh_size> <source_ctx>
 emit_propagation_placeholder() {
 	((WRITE_TSV)) || return 0
@@ -197,6 +227,10 @@ emit_propagation_placeholder() {
 		echo "# ITERATIONS=${ITERATIONS}"
 		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		# PL36: emit the same tuning-baseline keys 002 writes so this placeholder file
+		# (potentially the report's first TSV) carries identical sweep-level provenance.
+		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
+		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms"
 		# One degraded row: status carries the sentinel, restarted=unknown -> filtered
@@ -317,6 +351,8 @@ for ms in "${MESH_SIZES[@]}"; do
 		--timeout "$TIMEOUT_SEC"
 		--settle-sec "$SETTLE_SEC"
 		--output-dir "$SWEEP_DIR"
+		--tuning-baseline "$TUNING_BASELINE"
+		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 	)
 	((WRITE_TSV)) && endpoint_args+=(--tsv)
 	if [[ -n "$remote_csv" ]]; then
