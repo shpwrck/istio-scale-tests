@@ -205,6 +205,14 @@ Two correctness notes specific to the baked baseline:
   baseline ORs a second selector matching
   `kubernetes.io/metadata.name=istio-system`. Suite namespaces are matched via
   `istio-discovery=enabled` (stamped by each suite's `namespace.yaml`).
+- **Run provenance: `TUNING_BASELINE` / `SIDECAR_EGRESS_HOSTS`.** Every suite's TSV
+  preamble records which levers were live at run time, **live-queried from the
+  cluster** (not read from chart defaults — the deployed state can diverge from a
+  GitOps/`--set` override). Each lever reads `on` | `off` | `unknown`; `unknown`
+  means istiod or the query was unreachable, **not** that the lever is off — a run
+  carrying any `unknown` is **not comparable** to a fully-resolved run (same caveat
+  as `istiod_restarted`'s `0|1|unknown`). `SIDECAR_EGRESS_HOSTS` records the live
+  root-Sidecar egress graph (`none` when no root Sidecar is applied).
 
 > **⚠️ LOUD WARNING — `egressHosts` namespace parts are EXACT matches, not
 > glob-prefixes.** An Istio Sidecar egress host `"<namespace>/<dnsName>"` matches
