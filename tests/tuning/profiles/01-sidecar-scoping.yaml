@@ -42,5 +42,17 @@ resources:
     spec:
       egress:
         - hosts:
+            # NOTE: "./*"-only (local-namespace) understates per-proxy config at
+            # campaign scale — each suite's workloads talk cross-namespace (and
+            # cross-cluster via the east-west gateway) to the other suites'
+            # Services. The realistic egress graph spans istio-system plus the
+            # five suite namespaces. The campaign BASELINE bakes this list into
+            # charts/spoke-ossm (tuningBaseline.sidecar.egressHosts); this
+            # runtime profile mirrors it so an A/B sweep measures the same graph.
             - "./*"
             - "istio-system/*"
+            - "churn-test/*"
+            - "churn-dataplane-test/*"
+            - "controlplane-test/*"
+            - "dataplane-test/*"
+            - "propagation-test/*"

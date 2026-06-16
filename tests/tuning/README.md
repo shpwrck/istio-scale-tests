@@ -173,6 +173,30 @@ some combinations may interact:
 | `004-compare-profiles.sh` | Compare results across profiles (text/csv/json/markdown) |
 | `005-cleanup.sh` | Remove all tuning test resources and revert any active profile |
 
+## Campaign baseline (baked supported-only profiles)
+
+For the 20-cluster / 10k-service campaign the mesh comes up
+**production-configured**: the four SUPPORTED levers — **01 sidecar-scoping**,
+**02 discovery-selectors**, **07 telemetry-filtering**, **08
+access-log-filtering** — are baked into `charts/spoke-ossm` (alongside the
+04/05 resource profiles from PR #62) rather than applied at runtime. Each is
+individually toggleable under `tuningBaseline.*` in
+`charts/spoke-ossm/values.yaml`. The runtime profiles under `profiles/` remain
+the A/B sweep mechanism and are unchanged in purpose.
+
+Two correctness notes specific to the baked baseline:
+
+- **Sidecar egress is the cross-namespace graph, not `./*`-only.** The runtime
+  profile's `./*`-local default understates per-proxy config at campaign scale
+  (workloads talk cross-namespace / cross-cluster). The baseline default spans
+  `istio-system` plus the five suite namespaces; widen/narrow via
+  `tuningBaseline.sidecar.egressHosts`.
+- **discoverySelectors must cover istio-system.** istiod does NOT auto-include
+  its own namespace, and the east-west / ingress gateways live there, so the
+  baseline ORs a second selector matching
+  `kubernetes.io/metadata.name=istio-system`. Suite namespaces are matched via
+  `istio-discovery=enabled` (stamped by each suite's `namespace.yaml`).
+
 ## Known Limitations
 
 - **Istio CR patches trigger an istiod restart**: most pilot env var changes
@@ -181,5 +205,8 @@ some combinations may interact:
 - **Discovery selectors (profile 02) require namespace labelling**: the
   apply script labels mesh namespaces, but namespaces created by other test
   suites may not have the label. Run setup scripts after applying this profile.
+  Note: each suite's `chart/templates/namespace.yaml` now stamps
+  `istio-discovery: enabled`, so suite namespaces created via their setup
+  scripts are discovered automatically (see "Campaign baseline" below).
 - **Gateway scoping (profile 09) has known upstream bugs**: #29131 and #37997
   can cause issues with ext_authz and EnvoyFilter references.
