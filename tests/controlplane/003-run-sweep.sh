@@ -736,10 +736,21 @@ echo "Markdown summary written to $MD_FILE"
 # failure (e.g. report produced no JSON) must NOT fail the sweep — the data is already
 # safely written above. Reads the per-sweep dir only (PL6).
 ENVELOPE_FILE="${OUTPUT_DIR}/scale-envelope-${RUN_ID}.md"
-if render_scale_envelope "$OUTPUT_DIR" "$SCRIPT_DIR/004-report-results.sh" \
-		"$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" > "$ENVELOPE_FILE" 2>/dev/null; then
+# B1: capture the render's stderr so its SPECIFIC die reason (results dir missing /
+# report produced no JSON / report not executable) survives onto the warning path —
+# this is the headline customer artifact, so swallowing the cause with a blanket
+# 2>/dev/null and asserting a possibly-wrong reason is exactly the wrong place to be terse.
+ENVELOPE_ERR="$(mktemp)"
+# Run in a SUBSHELL: render_scale_envelope's preconditions use die() (exit 1), which
+# in a direct call would abort THIS script — defeating the best-effort intent. The
+# subshell contains the exit so a render failure becomes a non-zero `if` branch (warn +
+# preserve the sweep data) instead of killing the sweep at the very end.
+if ( render_scale_envelope "$OUTPUT_DIR" "$SCRIPT_DIR/004-report-results.sh" \
+		"$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" ) > "$ENVELOPE_FILE" 2>"$ENVELOPE_ERR"; then
 	echo "Scale envelope written to $ENVELOPE_FILE"
 else
 	rm -f "$ENVELOPE_FILE"
-	echo "warning: scale-envelope generation skipped (report JSON unavailable)" >&2
+	echo "warning: scale-envelope generation failed (sweep data is safe above):" >&2
+	sed 's/^/  /' "$ENVELOPE_ERR" >&2
 fi
+rm -f "$ENVELOPE_ERR"

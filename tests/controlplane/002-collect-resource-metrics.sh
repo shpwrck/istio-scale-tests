@@ -316,16 +316,15 @@ if [[ "$PHASE" != baseline ]]; then
 	done
 fi
 
-# Cluster-infra block (additive): node allocatable, istiod req/lim/replicas,
-# network topology. Same shared emitter the 003 pre-creator uses (PL36) so a
-# standalone 002 run and a 003-orchestrated run write the identical key set.
-PRE_INFRA_KV=""
-if [[ "$PHASE" != baseline ]]; then
-	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
-fi
-
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
+	# Cluster-infra block (additive): istiod req/lim/replicas + network topology.
+	# F2: collect ONLY when we are actually going to write the preamble. In an
+	# orchestrated run 003 pre-creates the TSV, so this `! -f` block is skipped and the
+	# serial per-context env_collect_infra fan-out (up to 20 contexts) no longer runs on
+	# the post-settle critical path for every final-phase combo. Same shared emitter the
+	# 003 pre-creator uses (PL36) so a standalone 002 run and an orchestrated run agree.
+	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=40"

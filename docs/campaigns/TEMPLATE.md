@@ -71,14 +71,20 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 
 A normative pass/fail gate for the customer deliverable. Fill `observed` from the **peak
 mesh-size** point's n_valid-gated aggregates (the controlplane report's "Achieved scale"
-block / `sla` JSON object — never the configured axis values). `margin` is headroom to the
-target. The verdict per row:
+block / `sla` JSON object — never the configured axis values).
 
-- **PASS** — observed is comfortably within target (e.g. utilization < 75 % of limit).
-- **CAUTION** — within target but limited headroom (utilization 75–90 %), a metrics signal
-  is unavailable, or some samples were filtered (`n_valid < n_total`).
-- **FAIL** — at/over a limit (utilization ≥ 90 %), an istiod restart occurred inside a
-  measurement window, or no valid samples survived the filters.
+`Margin` = headroom to the target = `target_pct − observed_pct` (percentage points; a
+positive margin is headroom remaining, a negative margin means the target is breached).
+For the integrity rows (restarts, validity) there is no numeric margin — leave it `—`.
+
+The CAUTION/FAIL utilization bands are `SCALE_SLA_CAUTION_PCT` (default 75) and
+`SCALE_SLA_FAIL_PCT` (default 90) in `config/options.env`; the verdict per row:
+
+- **PASS** — observed < `SCALE_SLA_CAUTION_PCT` % (default < 75 %) of the limit.
+- **CAUTION** — observed in `[CAUTION, FAIL)` % (default 75–90 %), a metrics signal is
+  unavailable, or some samples were filtered (`n_valid < n_total`).
+- **FAIL** — observed ≥ `SCALE_SLA_FAIL_PCT` % (default ≥ 90 %), an istiod restart
+  occurred inside a measurement window, or no valid samples survived the filters.
 
 | Metric | Target | Observed | Margin | PASS/CAUTION/FAIL |
 |---|---|---|---|---|

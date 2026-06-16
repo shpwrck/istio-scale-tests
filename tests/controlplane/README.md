@@ -132,7 +132,22 @@ bound 500 ms — the actual value is somewhere in that interval.
 
 # 3. View results.
 ./tests/controlplane/004-report-results.sh
+
+# 4. Run a sweep (the real deliverable path) — iterates the axis cross-product,
+#    writes per-sweep results, a markdown summary, AND the customer scale envelope.
+./tests/controlplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003 \
+  --mesh-sizes 1,5,10 --service-counts 50
+
+# 5. Read the HEADLINE customer artifact — the generated scale envelope. RUN_ID is
+#    printed by 003 (and is the sweep-<RUN_ID> dir name).
+cat tests/controlplane/results/sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md
 ```
+
+The scale-envelope file leads with the **Customer SLA verdict** line
+(`PASS | CAUTION | FAIL — <reason>`) — that one line is the headline answer to
+"did this mesh stay within its limits?". The same verdict is in every
+`004-report-results.sh --format` output (markdown frontmatter `sla_verdict:` /
+`sla_headline:`, json `metadata.sla`, csv/text `# sla_verdict:`).
 
 ## Sweep Dimensions
 
@@ -228,14 +243,12 @@ conflate. TSV files carry a metadata preamble:
 # ISTIOD_MEM_LIMIT_MI=8192
 # SCALE_TARGET_FRACTION=0.7
 # CONTROLPLANE_INFRA_SCHEMA=1
-# NODE_ALLOC_CPU_M=16000
-# NODE_ALLOC_MEM_MI=64000
 # ISTIOD_REQ_CPU_M=1000
 # ISTIOD_REQ_MEM_MI=2048
 # ISTIOD_LIM_CPU_M=4000
 # ISTIOD_LIM_MEM_MI=8192
 # ISTIOD_REPLICAS=5
-# NETWORK_TOPOLOGY=multi-network:5
+# NETWORK_TOPOLOGY=multi-primary,multi-network:5
 ```
 
 The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each
@@ -248,8 +261,10 @@ The cluster-infra block (`CONTROLPLANE_INFRA_SCHEMA=1` and the keys below it) is
 **additive, backward-compatible** extension: it records istiod resource requests AND
 limits (`ISTIOD_REQ_*` / `ISTIOD_LIM_*`, distinct from the limits-only `ISTIOD_*_LIMIT_*`
 above), the istiod replica count, and the fleet network topology
-(`single-network` / `multi-network:<n>` / `unknown`, inferred from each context's
-`ISTIO_META_NETWORK`). These are emitted by **one shared helper**
+(`single-network` / `multi-primary,multi-network:<n>` / `unknown`, inferred from each
+context's `ISTIO_META_NETWORK`). Node allocatable is NOT repeated here — the
+`NODE_ALLOC_*` keys in the O9 capacity block above are the single source (F4). These are
+emitted by **one shared helper**
 (`tests/lib/preamble.sh:infra_preamble_lines`) that BOTH the `003` pre-creator and the
 `002` `! -f`-guarded collector call, so the two writers can never drift (PL36); a key
 the caller could not read is written as a legible `unknown`, never dropped. Legacy TSVs

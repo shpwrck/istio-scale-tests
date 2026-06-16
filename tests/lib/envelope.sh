@@ -26,11 +26,15 @@
 #                                                  -> integer percent of the CROSS-REPLICA
 #       limit (per-replica limit * replicas), matching numerator (a cross-replica
 #       `kubectl top` sum) to denominator scope (PL35). `unknown` if any arg bad.
-#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid>
+#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct]
 #                                                  -> "VERDICT|headline" — one of
 #       PASS / CAUTION / FAIL plus a one-line human headline. The verdict is computed
 #       only over the validity-gated aggregates the caller passes (the report's
-#       n_valid maxes), never configured axis values (PL35).
+#       n_valid maxes), never configured axis values (PL35). The CAUTION/FAIL utilization
+#       bands default from the env (SCALE_SLA_CAUTION_PCT=75 / SCALE_SLA_FAIL_PCT=90 in
+#       config/options.env) but accept args 8/9 so the function stays pure/unit-testable.
+#       The controlplane report (004) is the SINGLE authoritative compute site;
+#       render_scale_envelope reads the verdict back from the report JSON (C1).
 #
 # Exposes (thin kubectl wrappers — each takes <ctx> <kubectl_argv...>):
 #   env_istiod_resources <ctx> <argv...>
@@ -140,23 +144,26 @@ env_pct_of_limit() {
 	}'
 }
 
-# env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid>
+# env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct]
 # Computes the headline customer SLA verdict from the report's validity-gated
 # aggregates (already n_valid-filtered by the caller — never configured axis
-# values, PL35). Thresholds (utilization headroom + integrity):
+# values, PL35). The CAUTION/FAIL utilization bands default from the env
+# (SCALE_SLA_CAUTION_PCT=75 / SCALE_SLA_FAIL_PCT=90, both in config/options.env) but
+# can be passed in as args 8/9 so the function stays pure / unit-testable. Bands:
 #   FAIL    — any istiod restart in a valid window (restarts > 0), or zero valid
-#             samples (n_valid == 0 with n_total > 0), or any utilization >= 90%.
-#   CAUTION — any utilization in [75,90), or any utilization unknown (metrics API
-#             gap), or n_valid < n_total (some samples poisoned).
-#   PASS    — all utilizations < 75%, no restarts, every sample valid.
+#             samples (n_valid == 0 with n_total > 0), or any utilization >= fail_pct.
+#   CAUTION — any utilization in [caution_pct, fail_pct), or any utilization unknown
+#             (metrics API gap), or n_valid < n_total (some samples poisoned).
+#   PASS    — all utilizations < caution_pct, no restarts, every sample valid.
 # Emits "<VERDICT>|<one-line headline>". Pure.
 # shellcheck disable=SC2329
 env_sla_verdict() {
+	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}"
 	awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
-	    -v restarts="${5:-0}" -v ntotal="${6:-0}" -v nvalid="${7:-0}" '
+	    -v restarts="${5:-0}" -v ntotal="${6:-0}" -v nvalid="${7:-0}" \
+	    -v caution="$caution" -v fail="$fail" '
 	function isnum(x) { return x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	BEGIN {
-		split(icpu SUBSEP imem SUBSEP ncpu SUBSEP nmem, _, SUBSEP)
 		n_metrics = split(icpu "|" imem "|" ncpu "|" nmem, m, "|")
 		peak = -1; any_unknown = 0
 		for (i = 1; i <= n_metrics; i++) {
@@ -170,10 +177,10 @@ env_sla_verdict() {
 			verdict = "FAIL"; reason = "no valid samples survived the restart/status filter (n_valid=0)"
 		} else if ((restarts+0) > 0) {
 			verdict = "FAIL"; reason = sprintf("%d istiod restart(s) inside a measurement window — control plane not stable under load", restarts+0)
-		} else if (peak >= 90) {
-			verdict = "FAIL"; reason = sprintf("peak utilization %d%% >= 90%% — at/over a resource limit", peak)
-		} else if (peak >= 75) {
-			verdict = "CAUTION"; reason = sprintf("peak utilization %d%% in [75,90)%% — limited headroom", peak)
+		} else if (peak >= fail+0) {
+			verdict = "FAIL"; reason = sprintf("peak utilization %d%% >= %d%% — at/over a resource limit", peak, fail+0)
+		} else if (peak >= caution+0) {
+			verdict = "CAUTION"; reason = sprintf("peak utilization %d%% in [%d,%d)%% — limited headroom", peak, caution+0, fail+0)
 		} else if (any_unknown) {
 			verdict = "CAUTION"; reason = "one or more utilization signals unavailable (metrics API gap) — headroom not fully verified"
 		} else if ((ntotal+0) > 0 && (nvalid+0) < (ntotal+0)) {
@@ -181,7 +188,7 @@ env_sla_verdict() {
 		} else if (peak < 0) {
 			verdict = "CAUTION"; reason = "no utilization measured — headroom unverified"
 		} else {
-			verdict = "PASS"; reason = sprintf("peak utilization %d%% < 75%% across istiod + nodes, no restarts, all %d samples valid", peak, nvalid+0)
+			verdict = "PASS"; reason = sprintf("peak utilization %d%% < %d%% across istiod + nodes, no restarts, all %d samples valid", peak, caution+0, nvalid+0)
 		}
 		printf "%s|%s\n", verdict, reason
 	}'
@@ -212,32 +219,22 @@ env_network() {
 # env_collect_infra <contexts_csv> <kubectl_argv...>
 # Read-only collection of the cluster-infra values that feed the TSV preamble's
 # additive infra block (preamble.sh:infra_preamble_lines). Reads:
-#   - node allocatable cpu/mem from the SOURCE context (capacity.sh:cap_node_totals);
 #   - istiod req/lim/replicas from the SOURCE context (env_istiod_resources);
 #   - the network topology (single/multi-network) across ALL contexts (env_network).
-# istiod req/lim/replicas + network topology are sweep-level scalars (the pin and the
-# mesh wiring are homogeneous across a coherent run — PL26); node allocatable is the
-# source-context fleet read (per-iteration in spirit, recorded once here). Emits
-# space-separated `KEY=value` tokens on one line; every read degrades to `unknown`
-# independently so a missing metrics path never aborts the caller (mirrors capacity.sh).
+# These are sweep-level scalars (the pin and mesh wiring are homogeneous across a
+# coherent run — PL26). Node allocatable is NOT read here — the O9 capacity block in
+# 002/003 already emits NODE_ALLOC_* (single-source per key, F4). Emits space-separated
+# `KEY=value` tokens on one line; every read degrades to `unknown` independently so a
+# missing metrics path never aborts the caller (mirrors capacity.sh).
 # shellcheck disable=SC2329
 env_collect_infra() {
 	local contexts_csv="$1"; shift
 	local -a ctxs=()
 	split_csv "$contexts_csv" ctxs
 	local src_ctx="${ctxs[0]:-}"
-	local node_cpu="unknown" node_mem="unknown"
 	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown" reps="unknown"
 	local kv
 	if [[ -n "$src_ctx" ]]; then
-		# shellcheck disable=SC2207
-		local -a nt=($(cap_node_totals "$src_ctx" "$@"))
-		for kv in "${nt[@]}"; do
-			case "$kv" in
-				cpu_m=*) node_cpu="${kv#cpu_m=}" ;;
-				mem_mi=*) node_mem="${kv#mem_mi=}" ;;
-			esac
-		done
 		# shellcheck disable=SC2207
 		local -a rk=($(env_istiod_resources "$src_ctx" "$@"))
 		for kv in "${rk[@]}"; do
@@ -256,13 +253,16 @@ env_collect_infra() {
 		net="$(env_network "$ctx" "$@")"; net="${net#network=}"
 		[[ -z "$networks_csv" ]] && networks_csv="$net" || networks_csv="${networks_csv},${net}"
 	done
+	# F6: each distinct network is a separate context's own local istiod (multi-primary),
+	# so label >1 networks "multi-primary,multi-network:N" (comma, no spaces — this is a
+	# single preamble token; the report renders it verbatim).
 	local n_networks topology
 	n_networks="$(printf '%s' "$networks_csv" | tr ',' '\n' | grep -v '^unknown$' | sort -u | grep -c . || true)"
-	if [[ "${n_networks:-0}" -gt 1 ]]; then topology="multi-network:${n_networks}"
+	if [[ "${n_networks:-0}" -gt 1 ]]; then topology="multi-primary,multi-network:${n_networks}"
 	elif [[ "${n_networks:-0}" -eq 1 ]]; then topology="single-network"
 	else topology="unknown"; fi
-	printf 'NODE_ALLOC_CPU_M=%s NODE_ALLOC_MEM_MI=%s ISTIOD_REQ_CPU_M=%s ISTIOD_REQ_MEM_MI=%s ISTIOD_LIM_CPU_M=%s ISTIOD_LIM_MEM_MI=%s ISTIOD_REPLICAS=%s NETWORK_TOPOLOGY=%s\n' \
-		"$node_cpu" "$node_mem" "$req_cpu" "$req_mem" "$lim_cpu" "$lim_mem" "$reps" "$topology"
+	printf 'ISTIOD_REQ_CPU_M=%s ISTIOD_REQ_MEM_MI=%s ISTIOD_LIM_CPU_M=%s ISTIOD_LIM_MEM_MI=%s ISTIOD_REPLICAS=%s NETWORK_TOPOLOGY=%s\n' \
+		"$req_cpu" "$req_mem" "$lim_cpu" "$lim_mem" "$reps" "$topology"
 }
 
 # ---------------------------------------------------------------------------
@@ -287,10 +287,11 @@ render_scale_envelope() {
 	# (the report already applied the validity gate to these maxes — PL35).
 	jq_get() { printf '%s' "$json" | jq -r "$1 // \"unknown\"" 2>/dev/null || printf 'unknown'; }
 
-	local node_cpu_m node_mem_mi istio_version
+	local node_cpu_m node_mem_mi istio_version harness_sha
 	node_cpu_m="$(jq_get '.metadata.capacity.node_alloc_cpu_m')"
 	node_mem_mi="$(jq_get '.metadata.capacity.node_alloc_mem_mi')"
 	istio_version="$(jq_get '.metadata.istio_version')"
+	harness_sha="$(jq_get '.metadata.harness_sha')"
 
 	local proxies_peak istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct
 	proxies_peak="$(jq_get '.metadata.achieved_scale.connected_proxies_max')"
@@ -347,11 +348,14 @@ render_scale_envelope() {
 		net="${net#network=}"
 		[[ -z "$networks_csv" ]] && networks_csv="$net" || networks_csv="${networks_csv},${net}"
 	done
-	# Distinct non-unknown networks > 1 -> multi-network.
+	# Distinct non-unknown networks across the per-context istiod reads. F6: each
+	# distinct network came from a SEPARATE context's own local istiod (env_collect_infra
+	# iterates one istiod per context) — that per-cluster control plane IS the
+	# multi-primary signal — so label >1 networks "multi-primary, multi-network".
 	local n_networks topology
 	n_networks="$(printf '%s' "$networks_csv" | tr ',' '\n' | grep -v '^unknown$' | sort -u | grep -c . || true)"
 	if [[ "${n_networks:-0}" -gt 1 ]]; then
-		topology="multi-network (${n_networks} networks)"
+		topology="multi-primary, multi-network (${n_networks} networks)"
 	elif [[ "${n_networks:-0}" -eq 1 ]]; then
 		topology="single-network"
 	else
@@ -363,21 +367,18 @@ render_scale_envelope() {
 	total_svc="$(awk -v n="$peak_mesh" -v s="$peak_svc" 'function num(x){return x~/^[0-9]+$/} BEGIN{ if(num(n)&&num(s)) print n*s; else print "unknown" }')"
 	total_eps="$(awk -v n="$peak_mesh" -v s="$peak_svc" -v r="$peak_reps" 'function num(x){return x~/^[0-9]+$/} BEGIN{ if(num(n)&&num(s)&&num(r)) print n*s*r; else print "unknown" }')"
 
-	# Verdict (over the report's validity-gated maxes; restarts/n_* from report).
-	local restarts n_total n_valid
-	restarts="$(printf '%s' "$json" | jq -r '[(.results // [])[].istiod_restarted_rows] | add // 0' 2>/dev/null || echo 0)"
-	n_total="$(printf '%s' "$json" | jq -r '[(.results // [])[].n_total] | add // 0' 2>/dev/null || echo 0)"
-	n_valid="$(printf '%s' "$json" | jq -r '[(.results // [])[].n_valid] | add // 0' 2>/dev/null || echo 0)"
-	local verdict_raw verdict headline
-	verdict_raw="$(env_sla_verdict "$istiod_cpu_pct" "$istiod_mem_pct" "$node_cpu_pct" "$node_mem_pct" "$restarts" "$n_total" "$n_valid")"
-	verdict="${verdict_raw%%|*}"
-	headline="${verdict_raw#*|}"
+	# Verdict: C1 — read the single authoritative verdict the REPORT already computed
+	# (004 calls env_sla_verdict once with the env bands). Reading it back here removes a
+	# second compute site that would have to stay in sync if the SLA bands change.
+	local verdict headline
+	verdict="$(jq_get '.metadata.sla.verdict')"
+	headline="$(jq_get '.metadata.sla.headline')"
 
 	# ---- render ----
 	cat <<MD
 ## Scale envelope
 
-> Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\`.
+> Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`).
 > Measured columns are the report's n_valid-gated peaks (restarted/SETUP_FAILED rows excluded).
 
 ### 1. Mesh topology — what the peak mesh-size point actually contains
@@ -395,6 +396,8 @@ render_scale_envelope() {
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
 
+> Connected proxies is **summed across istiod replicas** (each proxy holds one istiod connection — PL28), so it is the mesh-wide proxy count, NOT endpoints; do not expect proxies ≈ total endpoints.
+
 ### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
 
 | Resource | Provisioned (req / lim) | Measured peak (% of cross-replica limit) | Source |
@@ -408,7 +411,7 @@ render_scale_envelope() {
 > Node allocatable (source ctx): ${node_cpu_m}m CPU / ${node_mem_mi}Mi memory.
 > istiod % is of the **cross-replica** limit (per-replica limit x ${istiod_replicas} replicas), so an idle R-replica plane does not read ~Rx100% (PL35).
 
-### Scale verdict — one line, up front
+### Customer SLA verdict — one line, up front
 
 > **${verdict}** — ${headline}
 MD

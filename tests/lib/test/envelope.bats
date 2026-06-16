@@ -139,3 +139,26 @@ JSON
 	run env_sla_verdict 10 20 30 40 0 12 9
 	[[ "$output" == CAUTION\|* ]]
 }
+
+# F1: bands default from SCALE_SLA_CAUTION_PCT / SCALE_SLA_FAIL_PCT (env), overridable
+# as args 8/9 so the function stays pure / unit-testable.
+
+@test "env_sla_verdict: bands read from env (SCALE_SLA_*_PCT)" {
+	# 60% utilization: PASS at default 75, but CAUTION if the env caution band drops to 50.
+	SCALE_SLA_CAUTION_PCT=50 SCALE_SLA_FAIL_PCT=90 run env_sla_verdict 60 20 30 40 0 12 12
+	[[ "$output" == CAUTION\|* ]]
+	SCALE_SLA_CAUTION_PCT=75 SCALE_SLA_FAIL_PCT=90 run env_sla_verdict 60 20 30 40 0 12 12
+	[[ "$output" == PASS\|* ]]
+}
+
+@test "env_sla_verdict: explicit threshold args 8/9 override env" {
+	# 60% utilization, args force fail band to 55 -> FAIL regardless of env.
+	SCALE_SLA_CAUTION_PCT=75 SCALE_SLA_FAIL_PCT=90 run env_sla_verdict 60 20 30 40 0 12 12 40 55
+	[[ "$output" == FAIL\|* ]]
+}
+
+@test "env_sla_verdict: default bands resolve to 75/90 when env unset" {
+	run env_sla_verdict 80 20 30 40 0 12 12
+	[[ "$output" == CAUTION\|* ]]
+	[[ "$output" == *"[75,90)"* ]]
+}

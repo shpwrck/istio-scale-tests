@@ -12,17 +12,18 @@
 #   istiod_start_time_seconds <port>               -> scrape process_start_time_seconds gauge
 #   write_preamble <title> <tsv> <kv pairs...>     -> write `# key=value` comment lines + RUN_ID/HARNESS_SHA (PL2, PL19)
 #   infra_preamble_lines <kv...>                   -> emit the cluster-infra `# KEY=value` block
-#       (node allocatable, istiod req/lim, network topology) for the TSV preamble.
+#       (istiod req/lim, replicas, network topology) for the TSV preamble.
 #       ONE shared emitter so the 003 pre-creator and the 002 `! -f`-guarded collector
 #       cannot drift (PL36). Caller passes the already-read values as `KEY=value` args;
 #       any omitted key defaults to `unknown` so a legacy/partial caller never silently
-#       drops a line. Keys (additive, backward-compatible — PL26 per-iteration vs scalar
-#       noted inline):
-#         NODE_ALLOC_CPU_M  NODE_ALLOC_MEM_MI   (per-iteration: source-ctx node fleet)
-#         ISTIOD_REQ_CPU_M  ISTIOD_REQ_MEM_MI   (sweep-level scalar: homogeneous pin)
-#         ISTIOD_LIM_CPU_M  ISTIOD_LIM_MEM_MI   (sweep-level scalar)
-#         ISTIOD_REPLICAS                       (sweep-level scalar)
-#         NETWORK_TOPOLOGY                      (sweep-level scalar: single/multi-network)
+#       drops a line. Keys (additive, backward-compatible — all sweep-level scalars: the
+#       pin and mesh wiring are homogeneous across a coherent run, PL26):
+#         ISTIOD_REQ_CPU_M  ISTIOD_REQ_MEM_MI   (istiod resource REQUESTS, per replica)
+#         ISTIOD_LIM_CPU_M  ISTIOD_LIM_MEM_MI   (istiod resource LIMITS, per replica)
+#         ISTIOD_REPLICAS                       (replica count)
+#         NETWORK_TOPOLOGY                      (single-network / multi-primary,multi-network:N)
+#       NODE_ALLOC_* are deliberately NOT here — the O9 capacity block in 002/003
+#       (NODE_ALLOC_CPU_M/NODE_ALLOC_MEM_MI) already emits them; single-source per key (F4).
 #
 # Requires: tests/lib/common.sh (for die(), split_csv())
 # All callers are expected to have run `set -euo pipefail`.
@@ -135,12 +136,12 @@ istiod_start_time_seconds() {
 # caller omitted it — so a required-but-missing infra key reads as a legible
 # `unknown` (distinguishable from a never-defined key, PL36) rather than absent.
 # Writes to stdout (caller redirects/appends into the TSV preamble).
-# Usage: infra_preamble_lines NODE_ALLOC_CPU_M=8000 ISTIOD_LIM_MEM_MI=8192 ...
+# Usage: infra_preamble_lines ISTIOD_LIM_CPU_M=4000 ISTIOD_REPLICAS=5 ...
 # shellcheck disable=SC2329
 infra_preamble_lines() {
 	# Canonical, ordered key set. Adding a key here propagates to BOTH writers.
+	# NODE_ALLOC_* intentionally excluded — emitted by the O9 capacity block (F4).
 	local -a keys=(
-		NODE_ALLOC_CPU_M NODE_ALLOC_MEM_MI
 		ISTIOD_REQ_CPU_M ISTIOD_REQ_MEM_MI
 		ISTIOD_LIM_CPU_M ISTIOD_LIM_MEM_MI
 		ISTIOD_REPLICAS

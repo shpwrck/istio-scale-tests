@@ -11,30 +11,39 @@ source "${ROOT}/tests/lib/preamble.sh"
 # ---------------------------------------------------------------------------
 
 @test "infra_preamble_lines: emits all keys, defaulting omitted ones to unknown" {
-	run infra_preamble_lines NODE_ALLOC_CPU_M=16000 ISTIOD_LIM_MEM_MI=8192
+	run infra_preamble_lines ISTIOD_REPLICAS=5 ISTIOD_LIM_MEM_MI=8192
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"# NODE_ALLOC_CPU_M=16000"* ]]
+	[[ "$output" == *"# ISTIOD_REPLICAS=5"* ]]
 	[[ "$output" == *"# ISTIOD_LIM_MEM_MI=8192"* ]]
 	# Omitted keys still present as unknown (PL36: missing-but-expected, not absent).
-	[[ "$output" == *"# NODE_ALLOC_MEM_MI=unknown"* ]]
 	[[ "$output" == *"# ISTIOD_REQ_CPU_M=unknown"* ]]
-	[[ "$output" == *"# ISTIOD_REPLICAS=unknown"* ]]
+	[[ "$output" == *"# ISTIOD_LIM_CPU_M=unknown"* ]]
 	[[ "$output" == *"# NETWORK_TOPOLOGY=unknown"* ]]
 }
 
-@test "infra_preamble_lines: no args -> all eight keys emitted as unknown" {
+@test "infra_preamble_lines: no args -> all six keys emitted as unknown" {
 	run infra_preamble_lines
 	[ "$status" -eq 0 ]
-	# Exactly the canonical key set, all unknown.
+	# Exactly the canonical key set, all unknown. F4: NODE_ALLOC_* dropped (single-source
+	# in the O9 capacity block), so 6 keys, not 8.
 	n=$(printf '%s\n' "$output" | grep -c '^# [A-Z_]*=unknown$')
-	[ "$n" -eq 8 ]
+	[ "$n" -eq 6 ]
+}
+
+@test "infra_preamble_lines: F4 — NODE_ALLOC_* are NOT emitted (single-source)" {
+	run infra_preamble_lines ISTIOD_REPLICAS=5
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"NODE_ALLOC_CPU_M"* ]]
+	[[ "$output" != *"NODE_ALLOC_MEM_MI"* ]]
 }
 
 @test "infra_preamble_lines: unrecognized key is ignored (not echoed verbatim)" {
-	run infra_preamble_lines BOGUS_KEY=123 NETWORK_TOPOLOGY=multi-network:5
+	# NODE_ALLOC_CPU_M is now unrecognized by the infra emitter (F4), so it too is dropped.
+	run infra_preamble_lines BOGUS_KEY=123 NODE_ALLOC_CPU_M=16000 NETWORK_TOPOLOGY=multi-primary,multi-network:5
 	[ "$status" -eq 0 ]
 	[[ "$output" != *"BOGUS_KEY"* ]]
-	[[ "$output" == *"# NETWORK_TOPOLOGY=multi-network:5"* ]]
+	[[ "$output" != *"NODE_ALLOC_CPU_M"* ]]
+	[[ "$output" == *"# NETWORK_TOPOLOGY=multi-primary,multi-network:5"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -72,4 +81,11 @@ source "${ROOT}/tests/lib/preamble.sh"
 @test "PL36: both controlplane writers route the infra block through infra_preamble_lines" {
 	grep -q 'infra_preamble_lines' "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
 	grep -q 'infra_preamble_lines' "${ROOT}/tests/controlplane/003-run-sweep.sh"
+}
+
+@test "C2: both controlplane writers emit CONTROLPLANE_INFRA_SCHEMA (read by 004's concordance guard)" {
+	grep -q 'echo "# CONTROLPLANE_INFRA_SCHEMA=' "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
+	grep -q 'echo "# CONTROLPLANE_INFRA_SCHEMA=' "${ROOT}/tests/controlplane/003-run-sweep.sh"
+	# And the report reads it (the mixed-version concordance warning).
+	grep -q 'CONTROLPLANE_INFRA_SCHEMA' "${ROOT}/tests/controlplane/004-report-results.sh"
 }

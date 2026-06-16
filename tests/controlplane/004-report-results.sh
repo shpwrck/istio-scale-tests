@@ -115,6 +115,26 @@ if (( ${#TSV_FILES[@]} == 0 )); then
 	die "no TSV files with the current 40-column schema found in $RESULTS_DIR"
 fi
 
+# C2: infra-schema concordance guard (mirrors the data-row width gate above). The
+# 40-column data schema is gated by `tabs == 40`, but the additive cluster-infra
+# preamble carries its OWN version marker (CONTROLPLANE_INFRA_SCHEMA). A future v2 bump
+# could change an infra key's SEMANTICS without changing the 40-col data width, so a
+# v1 file and a v2 file would pass the width gate and silently mix. Warn (don't die —
+# the data rows are still aggregable) if the consumed files disagree on the infra
+# schema, or if some carry it and others don't (a legacy 40-col file predating the
+# infra block reads as `unknown`).
+infra_schemas=""
+for f in "${TSV_FILES[@]}"; do
+	# `|| true`: a legacy 40-col file predating the infra block has no match; under
+	# `set -o pipefail` the grep|sed pipeline would otherwise fail the assignment.
+	v=$(grep -m1 '^# CONTROLPLANE_INFRA_SCHEMA=' "$f" 2>/dev/null | sed 's/^# CONTROLPLANE_INFRA_SCHEMA=//' || true)
+	[[ -z "$v" ]] && v="absent"
+	case " $infra_schemas " in *" $v "*) ;; *) infra_schemas="${infra_schemas:+$infra_schemas }$v" ;; esac
+done
+if [[ "$infra_schemas" == *" "* ]]; then
+	echo "warning: input TSVs disagree on CONTROLPLANE_INFRA_SCHEMA (${infra_schemas// /, }) — infra-preamble keys may carry mixed semantics; verify the sweep dir holds one coherent run" >&2
+fi
+
 # Pluck reproducibility tags from the first file's preamble.
 ISTIO_VERSION_TAG=$(grep -m1 '^# ISTIO_VERSION=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# ISTIO_VERSION=//' || echo unknown)
 HARNESS_SHA_TAG=$(grep -m1 '^# HARNESS_SHA=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# HARNESS_SHA=//' || echo unknown)
@@ -616,6 +636,10 @@ report_markdown() {
 	echo "istiod_replicas: $(preamble_get ISTIOD_REPLICAS)"
 	echo "network_topology: $(preamble_get NETWORK_TOPOLOGY)"
 	echo "sla_verdict: ${SLA_VERDICT}"
+	# F8: also carry the reason string (parity with the json `sla` object) so a
+	# frontmatter scraper sees the WHY, not just the enum. Double-quoted YAML scalar
+	# (the headline has no embedded double-quote/backslash — env_sla_verdict guarantees it).
+	echo "sla_headline: \"${SLA_HEADLINE}\""
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "skipped_legacy: ${FILES_SKIPPED}"
 	echo "---"
