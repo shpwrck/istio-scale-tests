@@ -46,11 +46,83 @@ accessLogEncoding: JSON
 
 meshNetworks: {}
 
+# ---------------------------------------------------------------------------
+# Campaign tuning baseline (supported-only Tier-1/2 profiles baked in)
+#
+# These mirror the runtime tuning *profiles* under tests/tuning/profiles/ but
+# bake the four SUPPORTED levers (01 sidecar-scoping, 02 discovery-selectors,
+# 07 telemetry-filtering, 08 access-log-filtering) into the mesh baseline so the
+# 20-cluster / 10k-service campaign comes up production-configured rather than
+# wide-open. Each lever is individually toggleable; the runtime profiles remain
+# the A/B sweep mechanism and are NOT replaced by this.
+# ---------------------------------------------------------------------------
+tuningBaseline:
+  # Profile 02 — discoverySelectors. When enabled, istiod only watches
+  # namespaces that match one of the selectors below; every other namespace is
+  # invisible to the control plane (no informers, no config, no push).
+  #
+  # CRITICAL coverage note: discoverySelectors makes istiod ignore ANY namespace
+  # that matches NONE of the selectors — INCLUDING its own root namespace
+  # (istio-system) and the east-west / ingress gateways, which all live in
+  # istio-system on this stack. Dropping istio-system would strip the gateway
+  # config and the root-namespace Sidecar (below), breaking cross-cluster
+  # traffic. Istio does NOT auto-include its own namespace under
+  # discoverySelectors. We therefore OR two selectors:
+  #   1. istio-discovery=enabled   — the test-workload namespaces (labelled by
+  #      each suite's namespace.yaml template).
+  #   2. kubernetes.io/metadata.name=istio-system — the immutable label every
+  #      namespace carries (NamespaceDefaultLabelName, GA since k8s 1.21), so we
+  #      guarantee istio-system is discovered WITHOUT mutating the
+  #      operator-owned istio-system namespace from this chart.
+  # Selectors are OR'd: a namespace is watched if it matches ANY entry.
+  discoverySelectors:
+    enabled: true
+    selectors:
+      - matchLabels:
+          istio-discovery: "enabled"
+      - matchLabels:
+          kubernetes.io/metadata.name: istio-system
+
+  # Profile 01 — root-namespace Sidecar scoping. A mesh-wide Sidecar CR in
+  # istio-system restricts every proxy's egress view, the primary istiod
+  # scaling lever (per-proxy config grows O(services x sidecars) without it).
+  sidecar:
+    enabled: true
+    # CRITICAL: the runtime profile ships egress.hosts = ["./*","istio-system/*"]
+    # (local-namespace-only). That is WRONG for this campaign: at 20c/10k the
+    # workloads in each suite's namespace talk CROSS-namespace (and cross-cluster
+    # via the east-west gateway) to the other suites' Services. Collapsing every
+    # proxy to "./*" understates per-proxy config and defeats the whole point of
+    # a realistic-scale run. The default below is the real cross-namespace graph:
+    # istio-system (gateways + control plane) plus the five suite namespaces.
+    # Operators can widen/narrow this list. "./*" keeps in-namespace traffic.
+    egressHosts:
+      - "./*"
+      - "istio-system/*"
+      - "churn-test/*"
+      - "churn-dataplane-test/*"
+      - "controlplane-test/*"
+      - "dataplane-test/*"
+      - "propagation-test/*"
+
+  # Profile 07 — telemetry filtering. Disable CLIENT-side request metrics to cut
+  # metric volume ~40-50% (server-side metrics retained).
+  telemetryFiltering:
+    enabled: true
+
+  # Profile 08 — access-log filtering. Log only server-side error responses
+  # (HTTP >= 400) via the Telemetry API; client-side access logging off.
+  accessLogFiltering:
+    enabled: true
+
 argoSyncWaves:
   enabled: true
   rbac: "-30"
   istioCni: "0"
   istio: "5"
+  # Sidecar + Telemetry CRs sync AFTER the Istio CR so istiod (and its CRDs)
+  # exist before the campaign tuning resources are applied.
+  tuning: "10"
 
 rbac:
   enabled: true

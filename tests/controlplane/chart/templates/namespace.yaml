@@ -8,5 +8,10 @@ metadata:
   name: {{ $ns }}
   labels:
     istio.io/rev: default
+    # Required so istiod discovers every controlplane-test namespace under the
+    # campaign baseline's discoverySelectors (spoke-ossm
+    # tuningBaseline.discoverySelectors). Applied to ALL namespaces in the range
+    # (namespaceCount > 1) so none is left invisible to the control plane.
+    istio-discovery: enabled
     {{- include "controlplane-test.labels" $ | nindent 4 }}
 {{- end }}

@@ -1,0 +1,66 @@
+{{- if .Values.tuningBaseline.telemetryFiltering.enabled }}
+{{- /*
+  Campaign baseline — Profile 07 (telemetry-filtering), baked in.
+  Disable CLIENT-side request metrics (server-side retained) to cut metric
+  volume ~40-50%. Mirrors tests/tuning/profiles/07-telemetry-filtering.yaml.
+*/}}
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: tuning-metrics
+  namespace: istio-system
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.tuning | quote }}
+  {{- end }}
+spec:
+  metrics:
+    - providers:
+        - name: prometheus
+      overrides:
+        - match:
+            mode: CLIENT
+            metric: REQUEST_COUNT
+          disabled: true
+        - match:
+            mode: CLIENT
+            metric: REQUEST_DURATION
+          disabled: true
+        - match:
+            mode: CLIENT
+            metric: REQUEST_SIZE
+          disabled: true
+        - match:
+            mode: CLIENT
+            metric: RESPONSE_SIZE
+          disabled: true
+{{- end }}
+{{- if .Values.tuningBaseline.accessLogFiltering.enabled }}
+{{- /*
+  Campaign baseline — Profile 08 (access-log-filtering), baked in.
+  Log only server-side error responses (HTTP >= 400); client-side access
+  logging off. Mirrors tests/tuning/profiles/08-access-log-filtering.yaml.
+*/}}
+---
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: tuning-access-log
+  namespace: istio-system
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.tuning | quote }}
+  {{- end }}
+spec:
+  accessLogging:
+    - providers:
+        - name: envoy
+      match:
+        mode: SERVER
+      filter:
+        expression: "response.code >= 400"
+{{- end }}
