@@ -195,6 +195,11 @@ Two correctness notes specific to the baked baseline:
   egress by `workloadSelector` Sidecars in
   `charts/spoke-ossm/templates/tuning-sidecar.yaml` so the cross-cluster
   mesh-verify path is not severed.
+  > **Forward-looking (10k scale):** because the gateway proxies carry a `*/*`
+  > (full-mesh) egress view while the sidecars are narrowed, at full 10k-service
+  > scale the gateway istio-proxy RSS / `xds_config` footprint can dominate. Watch
+  > the gateway pods' `memory.limits` (currently 1Gi in the gateway charts) — they
+  > may need raising even though the sidecars are scoped down.
 - **discoverySelectors must cover istio-system.** istiod does NOT auto-include
   its own namespace, and the east-west / ingress gateways live there, so the
   baseline ORs a second selector matching

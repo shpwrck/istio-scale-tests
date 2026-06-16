@@ -47,6 +47,11 @@ SETTLE_SEC="${CHURN_SETTLE_SEC:-3}"
 POLL_INTERVAL_S="0.$(printf '%03d' "${CHURN_POLL_INTERVAL_MS:-250}")"
 OUTPUT_DIR="${ROOT}/tests/churn/results"
 DRY_RUN=0
+# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
+# graph. The sweep (003-run-sweep.sh) queries them ONCE via tuning_baseline_state and
+# threads them in; standalone runs leave them "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
 NS="${CHURN_TEST_NAMESPACE:-churn-test}"
 # istiod is reached via tests/lib/fanout.sh (per-pod port block from FANOUT_PF_BASE,
 # default 21014). The envoy watcher PF block is unchanged.
@@ -65,6 +70,10 @@ Usage: $(basename "$0") [options]
   --timeout SEC            Timeout per iteration (default: $TIMEOUT_SEC).
   --settle SEC             Settle time after scale-down convergence (default: $SETTLE_SEC).
   --output-dir DIR         Results directory (default: tests/churn/results).
+  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
+                           (default: unknown; the sweep queries + threads this).
+  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
+                           (default: unknown; the sweep queries + threads this).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
@@ -140,6 +149,16 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR="$2"
 		shift 2
 		;;
+	--tuning-baseline)
+		[[ -n "${2:-}" ]] || die "--tuning-baseline requires a value"
+		TUNING_BASELINE="$2"
+		shift 2
+		;;
+	--sidecar-egress-hosts)
+		[[ -n "${2:-}" ]] || die "--sidecar-egress-hosts requires a value"
+		SIDECAR_EGRESS_HOSTS="$2"
+		shift 2
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -202,6 +221,8 @@ cat > "$TSV_FILE" <<EOF
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
+# TUNING_BASELINE=$TUNING_BASELINE
+# SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS
 EOF
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \

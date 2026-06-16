@@ -135,6 +135,34 @@ HARNESS_SHA="$(harness_sha)"
 # SAME (mesh,intensity,base_replicas,scale_to) cell the real probe rows would).
 CHURN_BASE_REPLICAS_DEFAULT="${CHURN_BASE_REPLICAS:-1}"
 
+# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
+# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — a sweep-wide
+# scalar (the mesh's tuning is identical across all combos). The sidecar-scoping /
+# discoverySelectors / telemetry levers directly change what churn convergence
+# measures, so a run on the baked baseline is provenance-blind without these. Threaded
+# to 002 (--tuning-baseline / --sidecar-egress-hosts) AND emitted by the placeholder
+# writer (PL36 contract). Skipped in --dry-run (cluster read); stays "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
+if ((! DRY_RUN)); then
+	if command -v oc >/dev/null 2>&1; then
+		KUBECTL=(oc)
+	elif command -v kubectl >/dev/null 2>&1; then
+		KUBECTL=(kubectl)
+	else
+		KUBECTL=()
+	fi
+	if ((${#KUBECTL[@]})); then
+		tb_kv=""
+		while IFS= read -r tb_kv; do
+			case "$tb_kv" in
+				TUNING_BASELINE=*) TUNING_BASELINE="${tb_kv#TUNING_BASELINE=}" ;;
+				SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${tb_kv#SIDECAR_EGRESS_HOSTS=}" ;;
+			esac
+		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
+	fi
+fi
+
 # B6: emit a minimal placeholder TSV for a combo whose setup/probe crashed before the
 # probe wrote any row. Without it the combo vanishes from the report (looks like
 # never-planned). 004-report-results.sh globs churn-*.tsv and counts n_total per
@@ -149,6 +177,10 @@ emit_churn_placeholder() {
 		echo "# Churn convergence test (placeholder — combo failed before any row)"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		# PL36: match 002's preamble key set so the placeholder file (which 004 may read
+		# as TSV_FILES[0]) carries the same tuning-baseline provenance.
+		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
+		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 21-col header (matches 002-run-churn-probe.sh).
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -207,7 +239,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		if ((DRY_RUN)); then
 			echo "  [dry-run] Would run:"
 			echo "    001-setup-churn-test.sh --contexts $active_csv --deployment-count $intensity"
-			echo "    002-run-churn-probe.sh --source-context $source_ctx --deployment-count $intensity --scale-to $SCALE_TO --output-dir $SWEEP_DIR"
+			echo "    002-run-churn-probe.sh --source-context $source_ctx --deployment-count $intensity --scale-to $SCALE_TO --output-dir $SWEEP_DIR --tuning-baseline <live> --sidecar-egress-hosts <live>"
 			echo "    005-cleanup.sh --contexts $active_csv"
 			echo ""
 			continue
@@ -238,6 +270,8 @@ for ms in "${MESH_SIZES[@]}"; do
 			--iterations "$ITERATIONS"
 			--timeout "$TIMEOUT_SEC"
 			--output-dir "$SWEEP_DIR"
+			--tuning-baseline "$TUNING_BASELINE"
+			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
 		# P0/B6: a probe failure must NOT abort the multi-hour sweep. The churn probe

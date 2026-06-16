@@ -88,6 +88,10 @@ RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
 KUBE_VERSIONS_STR="$(extract_preamble_kv KUBE_VERSIONS)"
+# Live-queried tuning-baseline provenance (PL2/PL19): the deployed levers + sidecar
+# egress graph that were live when the sweep ran. NOT reconstructable from env.
+TUNING_BASELINE_STR="$(extract_preamble_kv TUNING_BASELINE)"
+SIDECAR_EGRESS_HOSTS_STR="$(extract_preamble_kv SIDECAR_EGRESS_HOSTS)"
 ISTIOD_REPLICAS_STR="$(extract_preamble_kv ISTIOD_REPLICAS)"
 SETTLE_SEC_STR="$(extract_preamble_kv SETTLE_SEC)"
 BASELINE_DURATION_STR="$(extract_preamble_kv BASELINE_DURATION_SEC)"
@@ -229,6 +233,8 @@ emit_metadata_lines() {
 	printf '%s HARNESS_SHA=%s\n'           "$prefix" "${HARNESS_SHA:-unknown}"
 	printf '%s ISTIO_VERSION=%s\n'         "$prefix" "${ISTIO_VERSION_STR:-unknown}"
 	printf '%s KUBE_VERSIONS=%s\n'         "$prefix" "${KUBE_VERSIONS_STR:-unknown}"
+	printf '%s TUNING_BASELINE=%s\n'       "$prefix" "${TUNING_BASELINE_STR:-unknown}"
+	printf '%s SIDECAR_EGRESS_HOSTS=%s\n'  "$prefix" "${SIDECAR_EGRESS_HOSTS_STR:-unknown}"
 	printf '%s ISTIOD_REPLICAS=%s\n'       "$prefix" "${ISTIOD_REPLICAS_STR:-unknown}"
 	printf '%s SETTLE_SEC=%s\n'            "$prefix" "${SETTLE_SEC_STR:-unknown}"
 	printf '%s BASELINE_DURATION_SEC=%s\n' "$prefix" "${BASELINE_DURATION_STR:-unknown}"
@@ -280,6 +286,8 @@ report_json() {
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
 		--arg istio_version    "${ISTIO_VERSION_STR:-unknown}" \
 		--arg kube_versions    "${KUBE_VERSIONS_STR:-unknown}" \
+		--arg tuning_baseline  "${TUNING_BASELINE_STR:-unknown}" \
+		--arg sidecar_egress_hosts "${SIDECAR_EGRESS_HOSTS_STR:-unknown}" \
 		--arg istiod_replicas  "${ISTIOD_REPLICAS_STR:-unknown}" \
 		--arg settle_sec       "${SETTLE_SEC_STR:-unknown}" \
 		--arg baseline_dur     "${BASELINE_DURATION_STR:-unknown}" \
@@ -290,7 +298,7 @@ report_json() {
 		--arg fanout_max_skew  "${FANOUT_MAX_SKEW_MS_STR:-unknown}" \
 		--arg fanout_metrics_timeout "${FANOUT_METRICS_TIMEOUT_STR:-unknown}" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout}, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout}, rows: $rows}'
 }
 
 report_md() {
@@ -302,6 +310,8 @@ report_md() {
 	echo "| HARNESS_SHA | \`${HARNESS_SHA:-unknown}\` |"
 	echo "| ISTIO_VERSION | \`${ISTIO_VERSION_STR:-unknown}\` |"
 	echo "| KUBE_VERSIONS | \`${KUBE_VERSIONS_STR:-unknown}\` |"
+	echo "| TUNING_BASELINE | \`${TUNING_BASELINE_STR:-unknown}\` |"
+	echo "| SIDECAR_EGRESS_HOSTS | \`${SIDECAR_EGRESS_HOSTS_STR:-unknown}\` |"
 	echo "| ISTIOD_REPLICAS | \`${ISTIOD_REPLICAS_STR:-unknown}\` |"
 	echo "| SETTLE_SEC | ${SETTLE_SEC_STR:-unknown} |"
 	echo "| BASELINE_DURATION_SEC | ${BASELINE_DURATION_STR:-unknown} |"
