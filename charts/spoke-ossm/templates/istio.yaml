@@ -21,6 +21,10 @@ spec:
       meshNetworks:
         {{- toYaml .Values.meshNetworks | nindent 8 }}
       {{- end }}
+      {{- with .Values.proxy }}
+      proxy:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     pilot:
       cni:
         enabled: true

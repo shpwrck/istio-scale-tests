@@ -94,7 +94,7 @@ variable "gitops_operator_namespace" {
 
 variable "gitops_operator_channel" {
   type        = string
-  default     = "gitops-1.14"
+  default     = "gitops-1.20"
   description = "OLM subscription channel for the OpenShift GitOps operator."
 }
 
@@ -151,7 +151,23 @@ variable "gitops_rhacm_appset_any_namespace" {
 variable "argocd_clusters_per_shard" {
   type        = number
   default     = 3
-  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace."
+  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace. For large 3-node hubs, raise this value to keep controller shard count within hub capacity."
+
+  validation {
+    condition     = var.argocd_clusters_per_shard > 0 && var.argocd_clusters_per_shard == floor(var.argocd_clusters_per_shard)
+    error_message = "argocd_clusters_per_shard must be a positive whole number."
+  }
+}
+
+variable "argocd_max_shards" {
+  type        = number
+  default     = 20
+  description = "ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards."
+
+  validation {
+    condition     = var.argocd_max_shards > 0 && var.argocd_max_shards == floor(var.argocd_max_shards)
+    error_message = "argocd_max_shards must be a positive whole number."
+  }
 }
 
 variable "gitops_applicationset_source_namespaces" {

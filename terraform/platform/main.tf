@@ -63,4 +63,8 @@ locals {
 
   acm_local_cluster_name = coalesce(var.acm_local_cluster_name, local.first_cluster_key)
   gitops_enabled         = var.enable_gitops
+
+  argocd_cluster_count        = length(local.spoke_cluster_keys) + 1
+  argocd_computed_min_shards  = max(1, ceil(local.argocd_cluster_count / var.argocd_clusters_per_shard))
+  argocd_effective_max_shards = max(var.argocd_max_shards, local.argocd_computed_min_shards)
 }

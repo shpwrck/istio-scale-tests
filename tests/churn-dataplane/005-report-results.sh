@@ -29,8 +29,8 @@ Usage: $(basename "$0") [options]
                      including \`sweep-*\` subdirs. Default: \`tests/churn-dataplane/results\`
                      relative to the repo root (resolved at script start via
                      \$(cd "\$(dirname "\$0")/../.." && pwd)).
-  --format FMT       Output format: text | csv | json | md (default: text). PL19: all four
-                     propagate the preamble metadata.
+  --format FMT       Output format: text | csv | json | md | charts (default: text). PL19: all
+                     formats propagate the preamble metadata.
   -h, --help         Show this help.
 EOF
 }
@@ -319,10 +319,105 @@ report_md() {
 	}'
 }
 
+report_charts() {
+	echo "---"
+	emit_metadata_lines "##"
+	echo "generated: $(date -u -Iseconds)"
+	echo "---"
+	echo ""
+	echo "# Churn x Data-Plane — Charts"
+	echo ""
+	aggregate | awk -F'\t' '
+	{
+		ms = $1 + 0; cr = $2 + 0; dp99 = $3; valid = $6 + 0; eds = $13
+		if (valid <= 0) next
+		if (dp99 == "N/A") next
+		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
+		if (!(cr in cr_seen)) { cr_order[++n_cr] = cr; cr_seen[cr] = 1 }
+		dp99_val[ms, cr] = dp99 + 0
+		eds_val[ms, cr] = (eds != "N/A") ? eds + 0 : 0
+		has[ms, cr] = 1
+	}
+	END {
+		# Sort mesh sizes numerically.
+		for (i = 2; i <= n_ms; i++) {
+			tmp = ms_order[i]; j = i - 1
+			while (j >= 1 && ms_order[j]+0 > tmp+0) { ms_order[j+1] = ms_order[j]; j-- }
+			ms_order[j+1] = tmp
+		}
+		# Sort churn rates numerically.
+		for (i = 2; i <= n_cr; i++) {
+			tmp = cr_order[i]; j = i - 1
+			while (j >= 1 && cr_order[j]+0 > tmp+0) { cr_order[j+1] = cr_order[j]; j-- }
+			cr_order[j+1] = tmp
+		}
+
+		if (n_ms < 2) {
+			print "> Charts require at least two mesh sizes."
+			exit
+		}
+
+		# Chart 1: delta-p99 vs mesh size, one series per churn rate
+		printf "%% Chart 1: delta-p99 added tail latency (ms) under churn vs mesh size\n"
+		printf "%% Series order (by churn rate):"
+		for (c = 1; c <= n_cr; c++) printf " %s", cr_order[c]
+		printf "\n\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"Δp99 Tail Latency vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_ms; i++) {
+			if (i > 1) printf ", "
+			printf "%s", ms_order[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"Δp99 (ms)\"\n"
+		for (c = 1; c <= n_cr; c++) {
+			printf "    line ["; sep = ""
+			for (i = 1; i <= n_ms; i++) {
+				ms = ms_order[i]; cr = cr_order[c]
+				v = has[ms, cr] ? dp99_val[ms, cr] : 0
+				printf "%s%.2f", sep, v; sep = ", "
+			}
+			printf "]\n"
+		}
+		printf "```\n\n"
+		printf "> Series order (by churn rate):"
+		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
+		printf ". Expected: ~flat across mesh size.\n\n"
+
+		# Chart 2: istiod EDS pushes vs mesh size, one series per churn rate
+		printf "%% Chart 2: istiod EDS pushes during churn vs mesh size\n"
+		printf "\n```mermaid\n"
+		printf "xychart-beta\n"
+		printf "    title \"istiod EDS Pushes vs Mesh Size\"\n"
+		printf "    x-axis \"Mesh Size\" ["
+		for (i = 1; i <= n_ms; i++) {
+			if (i > 1) printf ", "
+			printf "%s", ms_order[i]
+		}
+		printf "]\n"
+		printf "    y-axis \"EDS push count\"\n"
+		for (c = 1; c <= n_cr; c++) {
+			printf "    line ["; sep = ""
+			for (i = 1; i <= n_ms; i++) {
+				ms = ms_order[i]; cr = cr_order[c]
+				v = has[ms, cr] ? eds_val[ms, cr] : 0
+				printf "%s%.0f", sep, v; sep = ", "
+			}
+			printf "]\n"
+		}
+		printf "```\n\n"
+		printf "> Series order (by churn rate):"
+		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
+		printf ". Expected: scales with churn rate, ~flat across mesh size.\n"
+	}'
+}
+
 case "$FORMAT" in
-text) report_text ;;
-csv)  report_csv ;;
-json) report_json ;;
-md)   report_md ;;
-*)    die "unknown format: $FORMAT (use text|csv|json|md)" ;;
+text)   report_text ;;
+csv)    report_csv ;;
+json)   report_json ;;
+md)     report_md ;;
+charts) report_charts ;;
+*)      die "unknown format: $FORMAT (use text|csv|json|md|charts)" ;;
 esac
