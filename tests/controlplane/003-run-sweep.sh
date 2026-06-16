@@ -317,6 +317,19 @@ precreate_tsv_preamble() {
 			mem_mi=*) istiod_mem_limit_mi="${kv#mem_mi=}" ;;
 		esac
 	done
+	# Resolved tuning-baseline state, queried from the LIVE source cluster (NOT
+	# chart defaults — a live/Argo override can diverge). PL2: sweep-wide scalar
+	# (the baseline is constant across all combos of one sweep), so it joins the
+	# capacity provenance block as a per-sweep scalar (PL26 classification).
+	# tuning_baseline_state emits two `KEY=VALUE` lines; degrades to `unknown`.
+	local tb_line="TUNING_BASELINE=unknown" eh_line="SIDECAR_EGRESS_HOSTS=unknown"
+	local tb_kv
+	while IFS= read -r tb_kv; do
+		case "$tb_kv" in
+			TUNING_BASELINE=*) tb_line="$tb_kv" ;;
+			SIDECAR_EGRESS_HOSTS=*) eh_line="$tb_kv" ;;
+		esac
+	done < <(tuning_baseline_state "$src_ctx" "${KUBECTL[@]}")
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=40"
@@ -334,6 +347,8 @@ precreate_tsv_preamble() {
 		echo "# ISTIOD_MEM_LIMIT_MI=${istiod_mem_limit_mi}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		echo "# ${tb_line}"
+		echo "# ${eh_line}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
 		echo "# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}"

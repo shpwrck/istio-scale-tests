@@ -16,6 +16,39 @@
     per-proxy config and defeats a realistic-scale run. The default egress graph
     (values.yaml tuningBaseline.sidecar.egressHosts) spans istio-system plus the
     five suite namespaces; it is values-driven so an operator can widen/narrow it.
+
+  WHY THE GATEWAYS ARE EXEMPTED (severance trap — see the gateway Sidecars below):
+    A root-namespace Sidecar with NO workloadSelector applies mesh-wide, INCLUDING
+    the injected ingress/east-west gateway pods (charts/spoke-ingress-gateway and
+    charts/spoke-east-west-gateway both carry inject.istio.io/templates: gateway,
+    so they are sidecar-injected proxies that the root Sidecar would otherwise
+    govern). Narrowing the gateways' egress to the suite namespaces strips the
+    cluster needed to reach mesh-verify-echo.mesh-verify cross-cluster (the
+    documented "Verify the mesh" path — charts/mesh-verify) AND, because the
+    east-west gateway's cross-network reachability depends on a full egress view,
+    can sever cross-cluster east-west traffic generally. The campaign's scaling
+    lever is the ~30k SIDECAR proxies, not the handful of gateways, so we exempt
+    the gateways: a workloadSelector Sidecar in istio-system grants them full
+    (all-namespaces) egress and OVERRIDES the root Sidecar for the matched pods.
+
+  ISTIO SEMANTICS RELIED ON:
+    1. Sidecar precedence: istiod selects the MOST-SPECIFIC Sidecar for a proxy —
+       a Sidecar WITH a workloadSelector matching the pod wins over the root-ns
+       Sidecar that has none. So the two gateway Sidecars below fully override the
+       narrowed root Sidecar for the gateway pods; all other (suite) sidecars keep
+       the narrowed graph. (Sidecar is not additive — exactly one applies per
+       proxy.)
+    2. The workloadSelector matches the gateway pod LABELS in their namespace.
+       Both gateways run in istio-system (same ns as this Sidecar — a
+       workloadSelector Sidecar only governs pods in its OWN namespace) and carry
+       a stable `istio: ingressgateway` / `istio: eastwestgateway` pod label
+       (charts/spoke-ingress-gateway/_helpers.tpl podLabels,
+       charts/spoke-east-west-gateway/_helpers.tpl labels).
+    3. The east-west gateway's cross-network role is a Gateway CR with TLS
+       AUTO_PASSTHROUGH on :15443 — passthrough routing is governed by the Gateway
+       CR, but the gateway proxy still needs the full egress/cluster view to
+       resolve the upstreams it passes through to, so all-namespaces egress is
+       correct here.
 */}}
 apiVersion: networking.istio.io/v1
 kind: Sidecar
@@ -34,4 +67,56 @@ spec:
         {{- range $h := .Values.tuningBaseline.sidecar.egressHosts }}
         - {{ $h | quote }}
         {{- end }}
+---
+{{- /*
+  Gateway-exempt Sidecar (ingress). workloadSelector matches the injected
+  north-south ingress gateway pods in istio-system and grants them FULL,
+  all-namespaces egress (hosts: star-slash-star), overriding the narrowed root
+  Sidecar above so the ingress gateway retains the cross-cluster reachability the
+  mesh-verify path depends on.
+*/}}
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: gateway-ingress-full-egress
+  namespace: istio-system
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.tuning | quote }}
+  {{- end }}
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  egress:
+    - hosts:
+        - "*/*"
+---
+{{- /*
+  Gateway-exempt Sidecar (east-west). workloadSelector matches the injected
+  east-west gateway pods carrying cross-cluster east-west traffic and grants them
+  FULL, all-namespaces egress (hosts: star-slash-star). Without this the narrowed
+  root Sidecar would strip the cross-cluster cluster set the east-west gateway
+  resolves upstreams against.
+*/}}
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: gateway-eastwest-full-egress
+  namespace: istio-system
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+  {{- if .Values.argoSyncWaves.enabled }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.tuning | quote }}
+  {{- end }}
+spec:
+  workloadSelector:
+    labels:
+      istio: eastwestgateway
+  egress:
+    - hosts:
+        - "*/*"
 {{- end }}
