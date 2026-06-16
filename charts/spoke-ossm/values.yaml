@@ -94,11 +94,32 @@ tuningBaseline:
     # via the east-west gateway) to the other suites' Services. Collapsing every
     # proxy to "./*" understates per-proxy config and defeats the whole point of
     # a realistic-scale run. The default below is the real cross-namespace graph:
-    # istio-system (gateways + control plane) plus the five suite namespaces.
-    # Operators can widen/narrow this list. "./*" keeps in-namespace traffic.
+    # istio-system (gateways + control plane) plus the suite + mesh-verify
+    # namespaces. Operators can widen/narrow this list; "./*" keeps in-namespace
+    # traffic. NOTE: this root Sidecar applies to the SIDECAR proxies only — the
+    # injected ingress/east-west gateways are exempted to "*/*" by the
+    # workloadSelector Sidecars in templates/tuning-sidecar.yaml (severance trap).
+    #
+    # !!! LOUD WARNING — egressHosts namespace parts are EXACT matches, NOT globs.
+    # An Istio Sidecar egress host of the form "<namespace>/<dnsName>" matches the
+    # namespace part EXACTLY; "controlplane-test/*" does NOT cover
+    # "controlplane-test-0/*". So when controlplane.namespaceCount > 1 the suite
+    # mints controlplane-test-0, controlplane-test-1, … and the bare
+    # "controlplane-test/*" entry below is DEAD (unused) for those workloads — you
+    # MUST add an explicit "controlplane-test-<i>/*" entry for each extra namespace
+    # or those proxies lose egress to the controlplane workloads. (Harmless at the
+    # default namespaceCount=1, where controlplane lands only in its primary
+    # namespace.) See tests/tuning/README.md "Campaign baseline" + "Adding a new
+    # mesh namespace".
+    #
+    # Adding a NEW mesh namespace requires TWO steps (see README checklist):
+    #   (a) label the namespace istio-discovery=enabled (else discoverySelectors
+    #       hide it from istiod entirely), and
+    #   (b) add "<ns>/*" here (else its sidecars cannot egress to it).
     egressHosts:
       - "./*"
       - "istio-system/*"
+      - "mesh-verify/*"
       - "churn-test/*"
       - "churn-dataplane-test/*"
       - "controlplane-test/*"

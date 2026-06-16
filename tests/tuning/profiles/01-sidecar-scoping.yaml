@@ -46,11 +46,17 @@ resources:
             # campaign scale — each suite's workloads talk cross-namespace (and
             # cross-cluster via the east-west gateway) to the other suites'
             # Services. The realistic egress graph spans istio-system plus the
-            # five suite namespaces. The campaign BASELINE bakes this list into
-            # charts/spoke-ossm (tuningBaseline.sidecar.egressHosts); this
-            # runtime profile mirrors it so an A/B sweep measures the same graph.
+            # suite + mesh-verify namespaces. The campaign BASELINE bakes this
+            # list into charts/spoke-ossm (tuningBaseline.sidecar.egressHosts);
+            # this runtime profile mirrors it so an A/B sweep measures the same
+            # graph. The baseline additionally exempts the injected ingress/
+            # east-west gateways to "*/*" via workloadSelector Sidecars (see
+            # charts/spoke-ossm/templates/tuning-sidecar.yaml) so cross-cluster
+            # mesh-verify reachability survives — this root-only profile does not
+            # touch the gateways, so a runtime A/B run leaves them at "*/*" too.
             - "./*"
             - "istio-system/*"
+            - "mesh-verify/*"
             - "churn-test/*"
             - "churn-dataplane-test/*"
             - "controlplane-test/*"
