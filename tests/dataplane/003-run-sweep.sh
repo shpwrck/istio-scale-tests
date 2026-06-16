@@ -164,6 +164,32 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 HARNESS_SHA="$(harness_sha)"
 
+# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
+# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — they are a
+# sweep-wide scalar (the mesh's tuning is identical regardless of how many clusters a
+# combo measures). Both 002's real preamble and the placeholder writer below emit the
+# same two keys (PL36 contract). Skipped in --dry-run (cluster read); stays "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
+if ((! DRY_RUN)); then
+	if command -v oc >/dev/null 2>&1; then
+		KUBECTL=(oc)
+	elif command -v kubectl >/dev/null 2>&1; then
+		KUBECTL=(kubectl)
+	else
+		KUBECTL=()
+	fi
+	if ((${#KUBECTL[@]})); then
+		tb_kv=""
+		while IFS= read -r tb_kv; do
+			case "$tb_kv" in
+				TUNING_BASELINE=*) TUNING_BASELINE="${tb_kv#TUNING_BASELINE=}" ;;
+				SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${tb_kv#SIDECAR_EGRESS_HOSTS=}" ;;
+			esac
+		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
+	fi
+fi
+
 # B6: emit a minimal placeholder TSV for a mesh size whose setup/probe crashed before
 # the probe wrote any row. Without it the mesh size vanishes from the report (looks
 # like never-planned). 004-report-results.sh globs latency-*.tsv and counts
@@ -180,6 +206,10 @@ emit_dataplane_placeholder() {
 		echo "# Data-plane latency test (placeholder — mesh size failed before any row)"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		# PL36: match 002's preamble key set so the placeholder file (which 004 may read
+		# as TSV_FILES[0]) carries the same tuning-baseline provenance.
+		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
+		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
@@ -266,6 +296,8 @@ for ms in "${MESH_SIZES[@]}"; do
 			--connections "$CONNECTIONS"
 			--settle "$SETTLE_SEC"
 			--output-dir "$OUTPUT_DIR"
+			--tuning-baseline "$TUNING_BASELINE"
+			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
 		# P0/B6: a probe failure must NOT abort the multi-hour sweep. The latency probe

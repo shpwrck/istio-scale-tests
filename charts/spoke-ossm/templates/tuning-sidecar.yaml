@@ -45,10 +45,15 @@
        (charts/spoke-ingress-gateway/_helpers.tpl podLabels,
        charts/spoke-east-west-gateway/_helpers.tpl labels).
     3. The east-west gateway's cross-network role is a Gateway CR with TLS
-       AUTO_PASSTHROUGH on :15443 — passthrough routing is governed by the Gateway
-       CR, but the gateway proxy still needs the full egress/cluster view to
-       resolve the upstreams it passes through to, so all-namespaces egress is
-       correct here.
+       AUTO_PASSTHROUGH on :15443. For PURE SNI passthrough the EW gateway forwards
+       by SNI WITHOUT resolving the upstream Service, so passthrough alone does not
+       by itself require all-namespaces egress. The load-bearing reason to exempt
+       the gateways is the INGRESS gateway's cross-cluster mesh-verify path (it must
+       reach mesh-verify-echo.mesh-verify across clusters — see the ingress Sidecar
+       below); we exempt BOTH gateways for symmetry and to avoid a future EW route
+       that DOES terminate/resolve quietly inheriting the narrowed graph. Keep the
+       exemption; do not "optimize it away" on the premise that passthrough resolves
+       its upstreams.
 */}}
 apiVersion: networking.istio.io/v1
 kind: Sidecar
@@ -97,9 +102,12 @@ spec:
 {{- /*
   Gateway-exempt Sidecar (east-west). workloadSelector matches the injected
   east-west gateway pods carrying cross-cluster east-west traffic and grants them
-  FULL, all-namespaces egress (hosts: star-slash-star). Without this the narrowed
-  root Sidecar would strip the cross-cluster cluster set the east-west gateway
-  resolves upstreams against.
+  FULL, all-namespaces egress (hosts: star-slash-star). For pure SNI AUTO_PASSTHROUGH
+  the EW gateway forwards by SNI without resolving the upstream Service, so this
+  exemption is held for symmetry with the ingress gateway (whose mesh-verify path
+  genuinely needs the full view) and as a guard against a future EW route that DOES
+  terminate/resolve silently inheriting the narrowed graph — not because passthrough
+  itself resolves upstreams.
 */}}
 apiVersion: networking.istio.io/v1
 kind: Sidecar

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Harness metadata and TSV preamble helpers. Sourced, never executed.
 #
-# Consumers: churn-dataplane
+# Consumers: controlplane, dataplane, propagation, churn, churn-dataplane
 #
 # Exposes:
 #   harness_sha                                   -> `git describe --always --dirty --abbrev=7` or "unknown"
@@ -121,9 +121,9 @@ istiod_start_time_seconds() {
 # context) and emit two preamble values describing which campaign levers are
 # actually live on the mesh, NOT what the chart default says (chart default and
 # deployed state can diverge via a live/Argo override or `--set`). PL2 class:
-# these four levers change measurable mesh behaviour but are otherwise invisible
-# in a TSV row, so a run with an identical HARNESS_SHA but a hand-patched mesh
-# would be silently non-comparable.
+# these probes (four tuning levers + the live sidecar egress host graph) change
+# measurable mesh behaviour but are otherwise invisible in a TSV row, so a run with
+# an identical HARNESS_SHA but a hand-patched mesh would be silently non-comparable.
 #
 # Probed (all read-only `get`, each bounded by --request-timeout=5s):
 #   - root-ns Sidecar `default` in istio-system   (Profile 01 sidecar-scoping)
