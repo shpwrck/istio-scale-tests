@@ -58,6 +58,17 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
+# Pull a `# KEY=value` provenance line from the first TSV's preamble. Used for
+# values that are LIVE-QUERIED at sweep time and therefore NOT reconstructable from
+# the environment (unlike istio_version / harness_sha) — notably the tuning-baseline
+# levers (TUNING_BASELINE / SIDECAR_EGRESS_HOSTS, PL2). Defaults to "unknown".
+preamble_get() {
+	local key="$1" v
+	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
+	v="${v#*=}"
+	[[ -n "$v" ]] && echo "$v" || echo "unknown"
+}
+
 # Backwards-compat: warn when a file predates the 21-column schema (the
 # convergence_remote_eds_ms split). Such rows are skipped by the NF>=21 awk guards
 # below; surface that so a silently-empty aggregation is not mistaken for "no data".
@@ -96,6 +107,10 @@ done
 
 report_text() {
 	echo "=== Churn Convergence Results ==="
+	echo ""
+	# PL19: live-queried tuning-baseline provenance from the TSV preamble.
+	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
+	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
@@ -192,6 +207,9 @@ report_text() {
 }
 
 report_csv() {
+	# PL19: live-queried tuning-baseline provenance as `# KEY=value` comment lines.
+	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
+	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# Only OK rows feed numeric aggregation (see report_text for rationale).
@@ -288,6 +306,9 @@ report_markdown() {
 	echo "istio_version: ${istio_version}"
 	echo "harness_sha: ${harness_sha}"
 	echo "files_consumed: ${#TSV_FILES[@]}"
+	# PL19: live-queried tuning-baseline provenance (from the TSV preamble).
+	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
+	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
 	echo "---"
 	echo ""
 	echo "# Churn Convergence"

@@ -48,6 +48,11 @@ OUTPUT_FILE=""
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 BASELINE_FILE=""
 DRY_RUN=0
+# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
+# graph. The sweep (004-run-sweep.sh) queries them ONCE via tuning_baseline_state and
+# threads them in; standalone runs leave them "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
 
 usage() {
 	cat <<EOF
@@ -70,6 +75,10 @@ Usage: $(basename "$0") [options]
   --output-file FILE       TSV file to append to (must already have header).
   --output-dir DIR         Default results dir if --output-file not given.
   --baseline-file FILE     Optional baseline TSV used to compute Δp99 vs same combo_id.
+  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
+                           (default: unknown; the sweep queries + threads this).
+  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
+                           (default: unknown; the sweep queries + threads this).
   --dry-run                Print plan only.
   -h, --help               Show this help.
 
@@ -143,6 +152,12 @@ while [[ $# -gt 0 ]]; do
 	--baseline-file)
 		[[ -n "${2:-}" ]] || die "--baseline-file requires a value"
 		BASELINE_FILE="$2"; shift 2 ;;
+	--tuning-baseline)
+		[[ -n "${2:-}" ]] || die "--tuning-baseline requires a value"
+		TUNING_BASELINE="$2"; shift 2 ;;
+	--sidecar-egress-hosts)
+		[[ -n "${2:-}" ]] || die "--sidecar-egress-hosts requires a value"
+		SIDECAR_EGRESS_HOSTS="$2"; shift 2 ;;
 	--dry-run)
 		DRY_RUN=1; shift ;;
 	-h | --help)
@@ -208,6 +223,8 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"HARNESS_SHA=$HARNESS_SHA" \
 		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
+		"TUNING_BASELINE=$TUNING_BASELINE" \
+		"SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS" \
 		"ISTIOD_REPLICAS=$SOURCE_REPLICAS" \
 		"SETTLE_SEC=$SETTLE_SEC" \
 		"BASELINE_DURATION_SEC=${COEXEC_BASELINE_DURATION_SEC:-$DURATION}" \

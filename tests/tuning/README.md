@@ -173,6 +173,82 @@ some combinations may interact:
 | `004-compare-profiles.sh` | Compare results across profiles (text/csv/json/markdown) |
 | `005-cleanup.sh` | Remove all tuning test resources and revert any active profile |
 
+## Campaign baseline (baked supported-only profiles)
+
+For the 20-cluster / 10k-service campaign the mesh comes up
+**production-configured**: the four SUPPORTED levers — **01 sidecar-scoping**,
+**02 discovery-selectors**, **07 telemetry-filtering**, **08
+access-log-filtering** — are baked into `charts/spoke-ossm` (alongside the
+04/05 resource profiles from PR #62) rather than applied at runtime. Each is
+individually toggleable under `tuningBaseline.*` in
+`charts/spoke-ossm/values.yaml`. The runtime profiles under `profiles/` remain
+the A/B sweep mechanism and are unchanged in purpose.
+
+Two correctness notes specific to the baked baseline:
+
+- **Sidecar egress is the cross-namespace graph, not `./*`-only.** The runtime
+  profile's `./*`-local default understates per-proxy config at campaign scale
+  (workloads talk cross-namespace / cross-cluster). The baseline default spans
+  `istio-system` plus the suite + `mesh-verify` namespaces; widen/narrow via
+  `tuningBaseline.sidecar.egressHosts`. The root Sidecar governs the SIDECAR
+  proxies only — the injected ingress/east-west gateways are exempted to `*/*`
+  egress by `workloadSelector` Sidecars in
+  `charts/spoke-ossm/templates/tuning-sidecar.yaml` so the cross-cluster
+  mesh-verify path is not severed.
+  > **Forward-looking (10k scale):** because the gateway proxies carry a `*/*`
+  > (full-mesh) egress view while the sidecars are narrowed, at full 10k-service
+  > scale the gateway istio-proxy RSS / `xds_config` footprint can dominate. Watch
+  > the gateway pods' `memory.limits` (currently 1Gi in the gateway charts) — they
+  > may need raising even though the sidecars are scoped down.
+- **discoverySelectors must cover istio-system.** istiod does NOT auto-include
+  its own namespace, and the east-west / ingress gateways live there, so the
+  baseline ORs a second selector matching
+  `kubernetes.io/metadata.name=istio-system`. Suite namespaces are matched via
+  `istio-discovery=enabled` (stamped by each suite's `namespace.yaml`).
+- **Run provenance: `TUNING_BASELINE` / `SIDECAR_EGRESS_HOSTS`.** Every suite's TSV
+  preamble records which levers were live at run time, **live-queried from the
+  cluster** (not read from chart defaults — the deployed state can diverge from a
+  GitOps/`--set` override). Each lever reads `on` | `off` | `unknown`; `unknown`
+  means istiod or the query was unreachable, **not** that the lever is off — a run
+  carrying any `unknown` is **not comparable** to a fully-resolved run (same caveat
+  as `istiod_restarted`'s `0|1|unknown`). `SIDECAR_EGRESS_HOSTS` records the live
+  root-Sidecar egress graph (`none` when no root Sidecar is applied).
+
+> **⚠️ LOUD WARNING — `egressHosts` namespace parts are EXACT matches, not
+> glob-prefixes.** An Istio Sidecar egress host `"<namespace>/<dnsName>"` matches
+> the namespace part **exactly**: `"controlplane-test/*"` does **NOT** cover
+> `"controlplane-test-0/*"`. So when `controlplane.namespaceCount > 1` the suite
+> mints `controlplane-test-0`, `controlplane-test-1`, … and the bare
+> `controlplane-test/*` entry in `tuningBaseline.sidecar.egressHosts` is **dead
+> (unused)** for those workloads. Raising `controlplane.namespaceCount` therefore
+> **requires adding a `controlplane-test-<i>/*` entry per extra namespace** — the
+> bare `controlplane-test/*` does not glob. (Harmless at the default
+> `namespaceCount=1`, where controlplane lands workloads only in its primary
+> namespace, but a forward-looking trap.)
+
+**Adding a new mesh namespace** (a namespace whose pods carry sidecars and must
+participate in the mesh):
+
+1. Label the namespace `istio-discovery=enabled` — otherwise the campaign
+   baseline's `discoverySelectors` make istiod ignore it entirely (no informers,
+   no proxy config, the workload never gets a sidecar config). Suite
+   `chart/templates/namespace.yaml` templates already stamp this.
+2. Add `"<ns>/*"` to `tuningBaseline.sidecar.egressHosts` — otherwise the
+   namespace is discovered but its sidecars have no egress to it under the root
+   Sidecar's narrowed graph.
+
+Both steps are required; doing only (1) gives a discovered-but-unreachable
+namespace, only (2) gives an egress entry istiod never watches.
+
+> **Do NOT "fix" `mesh-wiring-verify`'s missing labels.** The
+> `mesh-wiring-verify` namespace
+> (`charts/mesh-wiring-verify/templates/namespace.yaml`) is **intentionally**
+> left without `istio.io/rev` and without `istio-discovery=enabled`: it is the
+> always-on wiring health gate, holds **no mesh workloads / no sidecars**, and
+> must not be injected into the mesh it checks. istiod ignoring it under the
+> baseline `discoverySelectors` is correct and desired — adding the label would
+> needlessly pull a non-mesh namespace into istiod's watch set.
+
 ## Known Limitations
 
 - **Istio CR patches trigger an istiod restart**: most pilot env var changes
@@ -181,5 +257,8 @@ some combinations may interact:
 - **Discovery selectors (profile 02) require namespace labelling**: the
   apply script labels mesh namespaces, but namespaces created by other test
   suites may not have the label. Run setup scripts after applying this profile.
+  Note: each suite's `chart/templates/namespace.yaml` now stamps
+  `istio-discovery: enabled`, so suite namespaces created via their setup
+  scripts are discovered automatically (see "Campaign baseline" below).
 - **Gateway scoping (profile 09) has known upstream bugs**: #29131 and #37997
   can cause issues with ext_authz and EnvoyFilter references.

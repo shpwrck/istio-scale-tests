@@ -42,6 +42,14 @@ SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
 WARMUP_DURATION="${DATAPLANE_WARMUP_DURATION_SEC:-5}"
 OUTPUT_DIR="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
+# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
+# graph that were applied when this probe ran. These change what the data plane
+# measures (sidecar scoping / discoverySelectors / telemetry filtering directly alter
+# proxy config + push behaviour) yet are invisible in a TSV row. The sweep
+# (003-run-sweep.sh) queries them ONCE against the source context via
+# tuning_baseline_state and threads them in; standalone runs leave them "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
 FORTIO_TAG="${FORTIO_VERSION:-stable}"
 FORTIO_IMAGE_REPO="fortio/fortio"
@@ -60,6 +68,10 @@ Usage: $(basename "$0") [options]
   --settle SEC             Seconds to sleep before probing (default: $SETTLE_SEC).
   --warmup-duration SEC    Envoy upstream warmup duration, 0 to disable (default: $WARMUP_DURATION).
   --output-dir DIR         Results directory (default: tests/dataplane/results).
+  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
+                           (default: unknown; the sweep queries + threads this).
+  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
+                           (default: unknown; the sweep queries + threads this).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
@@ -123,6 +135,16 @@ while [[ $# -gt 0 ]]; do
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
+		shift 2
+		;;
+	--tuning-baseline)
+		[[ -n "${2:-}" ]] || die "--tuning-baseline requires a value"
+		TUNING_BASELINE="$2"
+		shift 2
+		;;
+	--sidecar-egress-hosts)
+		[[ -n "${2:-}" ]] || die "--sidecar-egress-hosts requires a value"
+		SIDECAR_EGRESS_HOSTS="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -235,6 +257,11 @@ done
 	echo "# REMOTE_CONTEXTS=${REMOTE_CONTEXTS_CSV}"
 	echo "# MESH_SIZE=${MESH_SIZE}"
 	echo "# NAMESPACE=${NS}"
+	# Tuning-baseline provenance (PL2): live mesh levers + sidecar egress graph,
+	# threaded in from the sweep (queried once via tuning_baseline_state); "unknown"
+	# on a standalone run.
+	echo "# TUNING_BASELINE=${TUNING_BASELINE}"
+	echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 } > "$TSV_FILE"
 # New TSV columns appended at the end of the old schema:
 #   pct_200, istiod_restarted, target_class

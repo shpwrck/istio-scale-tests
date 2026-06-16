@@ -72,6 +72,11 @@ SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
 MESH_SIZE=""
 SWEEP_RUN_ID=""
+# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
+# graph. The sweep (006-run-sweep.sh) queries them ONCE via tuning_baseline_state and
+# threads them in; standalone runs leave them "unknown".
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_MS="${PROPAGATION_POLL_INTERVAL_MS}"
@@ -116,6 +121,10 @@ Usage: $(basename "$0") [options]
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS=$POLL_INTERVAL_MS).
   --settle-sec SEC          Settle gap between iterations after drain (default: \$PROPAGATION_SETTLE_SEC=$SETTLE_SEC).
   --output-dir DIR          Results directory (default: tests/propagation/results).
+  --tuning-baseline STR     Live tuning-baseline levers for the TSV preamble
+                            (default: unknown; the sweep queries + threads this).
+  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
+                            (default: unknown; the sweep queries + threads this).
   --tsv                     Also write per-iteration rows to a TSV file.
   --dry-run                 Print the t0 backer active-label flip + drain commands
                             and render the backer Deployment / canary Service
@@ -201,6 +210,16 @@ while [[ $# -gt 0 ]]; do
 	--sweep-run-id)
 		[[ -n "${2:-}" ]] || die "--sweep-run-id requires a value"
 		SWEEP_RUN_ID="$2"
+		shift 2
+		;;
+	--tuning-baseline)
+		[[ -n "${2:-}" ]] || die "--tuning-baseline requires a value"
+		TUNING_BASELINE="$2"
+		shift 2
+		;;
+	--sidecar-egress-hosts)
+		[[ -n "${2:-}" ]] || die "--sidecar-egress-hosts requires a value"
+		SIDECAR_EGRESS_HOSTS="$2"
 		shift 2
 		;;
 	--iterations)
@@ -385,6 +404,11 @@ if ((WRITE_TSV)); then
 		echo "# POLL_INTERVAL_S=${POLL_INTERVAL_S}"
 		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
+		# Tuning-baseline provenance (PL2): live mesh levers + sidecar egress graph,
+		# threaded in from the sweep (queried once via tuning_baseline_state); "unknown"
+		# on a standalone run.
+		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
+		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		# PL2 (R2-4): both are result-affecting. FANOUT_MAX_SKEW_MS decides which
 		# rows are tagged SCRAPE_INCOMPLETE (dropped by 005); METRICS_TIMEOUT bounds
 		# the per-curl wait and therefore the worst-case skew the gate can measure.
