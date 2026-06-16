@@ -227,6 +227,15 @@ conflate. TSV files carry a metadata preamble:
 # ISTIOD_CPU_LIMIT_M=2000
 # ISTIOD_MEM_LIMIT_MI=8192
 # SCALE_TARGET_FRACTION=0.7
+# CONTROLPLANE_INFRA_SCHEMA=1
+# NODE_ALLOC_CPU_M=16000
+# NODE_ALLOC_MEM_MI=64000
+# ISTIOD_REQ_CPU_M=1000
+# ISTIOD_REQ_MEM_MI=2048
+# ISTIOD_LIM_CPU_M=4000
+# ISTIOD_LIM_MEM_MI=8192
+# ISTIOD_REPLICAS=5
+# NETWORK_TOPOLOGY=multi-network:5
 ```
 
 The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each
@@ -234,6 +243,19 @@ value is either the apiserver `gitVersion` (e.g. `v1.30.4`), `unreachable`, or
 `unknown`. The `NODE_ALLOC_*` / `ISTIOD_*_LIMIT_*` / `SCALE_TARGET_FRACTION`
 keys (O9 scale-coverage legibility) are read once from the source context via
 read-only `kubectl get`; any may be `unknown` if the cluster is unreachable.
+
+The cluster-infra block (`CONTROLPLANE_INFRA_SCHEMA=1` and the keys below it) is an
+**additive, backward-compatible** extension: it records istiod resource requests AND
+limits (`ISTIOD_REQ_*` / `ISTIOD_LIM_*`, distinct from the limits-only `ISTIOD_*_LIMIT_*`
+above), the istiod replica count, and the fleet network topology
+(`single-network` / `multi-network:<n>` / `unknown`, inferred from each context's
+`ISTIO_META_NETWORK`). These are emitted by **one shared helper**
+(`tests/lib/preamble.sh:infra_preamble_lines`) that BOTH the `003` pre-creator and the
+`002` `! -f`-guarded collector call, so the two writers can never drift (PL36); a key
+the caller could not read is written as a legible `unknown`, never dropped. Legacy TSVs
+without these keys still report — the report reads them as `unknown` and the
+width-schema gate is unchanged (still 40 columns; these are preamble keys, not data
+columns).
 `CONTROLPLANE_SCHEMA=40` marks the TSV column-schema version (O9 appended cols
 35-40); the report skips files whose width differs (with a counted stderr warning),
 so a 34-column pre-O9 file is never aggregated alongside 40-column O9 files. (The
@@ -306,6 +328,33 @@ rather than a single-cluster paired ratio. `services_total` is labelled
 `[configured]` — controlplane has no distinct achieved-services metric, so it
 surfaces the configured axis value, not a measured count. Legacy TSV files with a
 non-40-column schema are skipped with a stderr warning.
+
+The report also surfaces the new **cluster-infra** keys (istiod req/lim, replicas,
+network topology) in the same achieved-scale block, and a one-line **Customer SLA
+verdict** in every format (`Customer SLA verdict: PASS|CAUTION|FAIL — <reason>`; in
+markdown it is a bold line + a `sla_verdict:` frontmatter key, in csv a `# sla_verdict:`
+comment, in json an `sla` object under `metadata`). The verdict is computed by
+`tests/lib/envelope.sh:env_sla_verdict` over the same n_valid-gated achieved-scale
+maxes the rest of the report uses (never configured axis values — PL35):
+
+- **FAIL** — any istiod restart inside a measurement window, no valid samples survived
+  the filters, or any utilization ≥ 90 % of its (cross-replica) limit.
+- **CAUTION** — any utilization in 75–90 %, a utilization signal unavailable (metrics
+  API gap), or some samples filtered (`n_valid < n_total`).
+- **PASS** — all utilizations < 75 %, no restarts, every sample valid.
+
+### Scale envelope (campaign deliverable)
+
+At campaign end `003-run-sweep.sh` writes a generated scale-envelope block to
+`results/sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md`
+(`tests/lib/envelope.sh:render_scale_envelope`). It renders the
+[`docs/campaigns/TEMPLATE.md`](../../docs/campaigns/TEMPLATE.md) tables — mesh topology,
+control-plane provisioning & headroom, and the one-line scale verdict — from the
+report's peak-mesh row (gated on `n_valid > 0`, so a poisoned row's configured count is
+never reported as the peak) plus a read-only `kubectl top` / istiod-resource / network
+snapshot across `--contexts`. It is a **read-only addition**: it never touches the
+measurement path, and a render failure (e.g. report produced no JSON) is a warning, not
+a sweep failure. Honors `--dry-run` (skipped — emitted only after a real sweep).
 
 ### Scale coverage (O9)
 

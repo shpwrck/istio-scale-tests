@@ -20,6 +20,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # O9: SCALE_COVERAGE_* knobs (coverage floor)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline)
 
 RESULTS_DIR="${ROOT}/tests/controlplane/results"
 FORMAT="text"
@@ -344,6 +346,33 @@ compute_coverage() {
 }
 compute_coverage
 
+# Customer SLA / pass-fail verdict (headline). Computed over the SAME validity-gated
+# achieved-scale maxes the rest of the report uses (istiod_*_pct_of_limit, node_*_pct
+# are already n_valid-gated in collect_achieved_scale — PL35) plus the restart/sample
+# counts from the data rows. Never reads configured axis values. The verdict is a
+# sweep-level scalar, surfaced once in every format alongside COVERAGE_LINE.
+SLA_VERDICT="UNKNOWN"
+SLA_HEADLINE=""
+compute_sla_verdict() {
+	local restarts n_total n_valid
+	# Sum restart rows (istiod_restarted==1) and n_total/n_valid across all valid rows.
+	read -r restarts n_total n_valid < <(cat "${TSV_FILES[@]}" | awk -F'\t' '
+		!/^#/ && !/^timestamp/ && NF>=40 {
+			n_total++
+			if ($31 == "1") restarts++
+			else if ($31 == "0") n_valid++
+		}
+		END { printf "%d %d %d\n", restarts+0, n_total+0, n_valid+0 }')
+	local raw
+	raw="$(env_sla_verdict \
+		"$(as_get istiod_cpu_pct)" "$(as_get istiod_mem_pct)" \
+		"$(as_get node_cpu_pct)"   "$(as_get node_mem_pct)" \
+		"$restarts" "$n_total" "$n_valid")"
+	SLA_VERDICT="${raw%%|*}"
+	SLA_HEADLINE="${raw#*|}"
+}
+compute_sla_verdict
+
 # Shared AWK aggregator. Groups by 5-tuple (mesh|svc|reps|ns|scoping) and
 # emits one record per unique key with min/max/avg for core metrics plus
 # sidecar config-dump aggregates.
@@ -495,6 +524,9 @@ report_text() {
 	echo "--- Achieved scale vs capacity (O9) ---"
 	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
 	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
+	echo "  istiod request (cpu_m/mem_mi): $(preamble_get ISTIOD_REQ_CPU_M) / $(preamble_get ISTIOD_REQ_MEM_MI)  [per replica]"
+	echo "  istiod replicas:             $(preamble_get ISTIOD_REPLICAS)"
+	echo "  network topology:            $(preamble_get NETWORK_TOPOLOGY)"
 	echo "  metrics API (preflight):     $(preamble_get METRICS_API)"
 	echo "  connected_proxies (max):     $(as_get proxies)"
 	echo "  services_total [configured] (max): $(as_get svc)"
@@ -505,6 +537,8 @@ report_text() {
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
 	echo "  ${COVERAGE_LINE}"
 	metrics_unavailable && echo "  NOTE: $(metrics_note_text)"
+	echo ""
+	echo "Customer SLA verdict: ${SLA_VERDICT} — ${SLA_HEADLINE}"
 	echo ""
 	echo "Sweep axes:"
 	echo "  mesh_sizes:        ${SWEEP_MESH}"
@@ -552,8 +586,10 @@ report_csv() {
 	# O9 achieved-scale provenance parity with text/markdown. Comment lines only, so the
 	# CSV row schema (the aggregate columns below) is byte-identical for row consumers.
 	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) metrics_api=$(preamble_get METRICS_API) (istiod limits per replica)"
+	echo "# infra: istiod_req_cpu_m=$(preamble_get ISTIOD_REQ_CPU_M) istiod_req_mem_mi=$(preamble_get ISTIOD_REQ_MEM_MI) istiod_lim_cpu_m=$(preamble_get ISTIOD_LIM_CPU_M) istiod_lim_mem_mi=$(preamble_get ISTIOD_LIM_MEM_MI) istiod_replicas=$(preamble_get ISTIOD_REPLICAS) network_topology=$(preamble_get NETWORK_TOPOLOGY)"
 	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
 	echo "# ${COVERAGE_LINE}"
+	echo "# sla_verdict: ${SLA_VERDICT} — ${SLA_HEADLINE}"
 	metrics_unavailable && echo "# metrics: $(metrics_note_text)"
 	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
 }
@@ -573,6 +609,13 @@ report_markdown() {
 	echo "kube_versions: ${KUBE_VERSIONS_M:-N/A}"
 	echo "scale_sizing_mode: $(preamble_get SCALE_SIZING_MODE)"
 	echo "metrics_api: $(preamble_get METRICS_API)"
+	echo "istiod_req_cpu_m: $(preamble_get ISTIOD_REQ_CPU_M)"
+	echo "istiod_req_mem_mi: $(preamble_get ISTIOD_REQ_MEM_MI)"
+	echo "istiod_lim_cpu_m: $(preamble_get ISTIOD_LIM_CPU_M)"
+	echo "istiod_lim_mem_mi: $(preamble_get ISTIOD_LIM_MEM_MI)"
+	echo "istiod_replicas: $(preamble_get ISTIOD_REPLICAS)"
+	echo "network_topology: $(preamble_get NETWORK_TOPOLOGY)"
+	echo "sla_verdict: ${SLA_VERDICT}"
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "skipped_legacy: ${FILES_SKIPPED}"
 	echo "---"
@@ -587,6 +630,9 @@ report_markdown() {
 	echo "|--------|-------|"
 	echo "| node allocatable (cpu_m/mem_mi) | $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI) |"
 	echo "| istiod limit (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI) |"
+	echo "| istiod request (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_REQ_CPU_M) / $(preamble_get ISTIOD_REQ_MEM_MI) |"
+	echo "| istiod replicas | $(preamble_get ISTIOD_REPLICAS) |"
+	echo "| network topology | $(preamble_get NETWORK_TOPOLOGY) |"
 	echo "| connected_proxies (max) | $(as_get proxies) |"
 	echo "| services_total [configured] (max) | $(as_get svc) |"
 	echo "| istiod_cpu_pct_of_limit (max) | $(as_pct istiod_cpu_pct) |"
@@ -597,6 +643,8 @@ report_markdown() {
 	echo ""
 	echo "> ${COVERAGE_LINE}"
 	metrics_unavailable && { echo ""; echo "> NOTE: $(metrics_note_text)"; }
+	echo ""
+	echo "**Customer SLA verdict: ${SLA_VERDICT}** — ${SLA_HEADLINE}"
 	echo ""
 	echo "| Axis | Values |"
 	echo "|------|--------|"
@@ -693,6 +741,10 @@ report_json() {
 		-v cap_ncpu="$(preamble_get NODE_ALLOC_CPU_M)" -v cap_nmem="$(preamble_get NODE_ALLOC_MEM_MI)" \
 		-v cap_icpu="$(preamble_get ISTIOD_CPU_LIMIT_M)" -v cap_imem="$(preamble_get ISTIOD_MEM_LIMIT_MI)" \
 		-v cap_tf="$(preamble_get SCALE_TARGET_FRACTION)" -v cap_mode="$(preamble_get SCALE_SIZING_MODE)" -v cap_metrics="$(preamble_get METRICS_API)" \
+		-v inf_rcpu="$(preamble_get ISTIOD_REQ_CPU_M)" -v inf_rmem="$(preamble_get ISTIOD_REQ_MEM_MI)" \
+		-v inf_lcpu="$(preamble_get ISTIOD_LIM_CPU_M)" -v inf_lmem="$(preamble_get ISTIOD_LIM_MEM_MI)" \
+		-v inf_rep="$(preamble_get ISTIOD_REPLICAS)" -v inf_net="$(preamble_get NETWORK_TOPOLOGY)" \
+		-v sla_v="$SLA_VERDICT" -v sla_h="$SLA_HEADLINE" \
 		-v ach_prx="$(as_get proxies)" -v ach_svc="$(as_get svc)" \
 		-v ach_icpu="$(as_get istiod_cpu_pct)" -v ach_imem="$(as_get istiod_mem_pct)" \
 		-v ach_ncpu="$(as_get node_cpu_pct)" -v ach_nmem="$(as_get node_mem_pct)" \
@@ -702,7 +754,7 @@ report_json() {
 		if (v == "overflow") return "null"
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"metrics_note\":\"%s\"},\n  \"results\": [", iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, ach_prx, ach_svc, ach_icpu, ach_imem, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, metrics_note }
+	BEGIN { printf "{\n  \"metadata\": {\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, ach_prx, ach_svc, ach_icpu, ach_imem, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, sla_v, sla_h, metrics_note }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "

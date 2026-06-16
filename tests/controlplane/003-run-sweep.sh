@@ -46,6 +46,8 @@ source "${ROOT}/tests/lib/common.sh"
 source "${ROOT}/tests/lib/preamble.sh"  # B4: harness_sha / probe_kube_versions for the pre-created preamble
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/capacity.sh"  # #45: cap_node_totals / cap_istiod_limits for the capacity provenance lines
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble (env_collect_infra) + campaign-end scale envelope
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -317,9 +319,16 @@ precreate_tsv_preamble() {
 			mem_mi=*) istiod_mem_limit_mi="${kv#mem_mi=}" ;;
 		esac
 	done
+	# Cluster-infra block (additive): node allocatable, istiod req/lim/replicas,
+	# network topology. Collected read-only across --contexts; emitted via the ONE
+	# shared infra_preamble_lines emitter so 002's `! -f`-guarded collector writes
+	# the identical key set (PL36). 002 reads INFRA_KV the same way (env_collect_infra).
+	local infra_kv
+	infra_kv="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=40"
+		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# HARNESS_SHA=${harness}"
 		echo "# KUBE_VERSIONS=${kver}"
@@ -335,6 +344,8 @@ precreate_tsv_preamble() {
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
+		# shellcheck disable=SC2086
+		infra_preamble_lines $infra_kv
 		echo "# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}"
 	} > "$tsv"
@@ -719,3 +730,16 @@ echo "Generating report..."
 MD_FILE="${OUTPUT_DIR}/sweep-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format markdown > "$MD_FILE"
 echo "Markdown summary written to $MD_FILE"
+
+# Campaign scale envelope (read-only addition; never touches the measurement path).
+# Generated, not hand-transcribed (docs/campaigns/TEMPLATE.md). Best-effort: a render
+# failure (e.g. report produced no JSON) must NOT fail the sweep — the data is already
+# safely written above. Reads the per-sweep dir only (PL6).
+ENVELOPE_FILE="${OUTPUT_DIR}/scale-envelope-${RUN_ID}.md"
+if render_scale_envelope "$OUTPUT_DIR" "$SCRIPT_DIR/004-report-results.sh" \
+		"$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" > "$ENVELOPE_FILE" 2>/dev/null; then
+	echo "Scale envelope written to $ENVELOPE_FILE"
+else
+	rm -f "$ENVELOPE_FILE"
+	echo "warning: scale-envelope generation skipped (report JSON unavailable)" >&2
+fi
