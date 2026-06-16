@@ -10,15 +10,36 @@ istioVersion: v1.28.5
 # xDS load without OOM/CPU-throttling. Set autoscaleEnabled: true to restore the
 # operator's default HorizontalPodAutoscaler (min 1, max 5, 80% CPU).
 # GOMEMLIMIT is auto-derived by the istiod chart from limits.memory — do NOT set it manually.
+#
+# Sized for the 20-cluster / 10,000-service (mesh-wide) campaign. In multi-primary
+# every istiod caches ALL remote services/endpoints, so memory scales with the
+# WHOLE mesh, not the local cluster — istiod scales vertically, not horizontally
+# (extra replicas only distribute connected proxies, they do NOT shrink the cache).
+# 8Gi was sized for ~500-2000-pod meshes; 10k services / ~30k endpoints needs more.
 pilot:
   autoscaleEnabled: false
   replicaCount: 5
   resources:
     requests:
-      cpu: "1"
-      memory: 2Gi
+      cpu: "2"
+      memory: 4Gi
     limits:
-      memory: 8Gi
+      cpu: "4"
+      memory: 16Gi
+
+# Sidecar proxy (data-plane) resources. The OSSM/Istio default request is cpu: 10m,
+# which is NOT production-representative and causes proxy CPU throttling under load.
+# This is the production baseline (tuning profile 05-proxy-resources). It is also the
+# value that sizes the worker fleet: at 100m/proxy, the 30k injected proxies in the
+# 20c/10k campaign require ~3,000 vCPU of worker capacity.
+proxy:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
 
 accessLogFile: /dev/stdout
 accessLogEncoding: JSON
