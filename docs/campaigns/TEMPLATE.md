@@ -67,6 +67,41 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 
 ---
 
+## Customer SLA checklist
+
+A normative pass/fail gate for the customer deliverable. Fill `observed` from the **peak
+mesh-size** point's n_valid-gated aggregates (the controlplane report's "Achieved scale"
+block / `sla` JSON object — never the configured axis values).
+
+`Margin` = headroom to the target = `target_pct − observed_pct` (percentage points; a
+positive margin is headroom remaining, a negative margin means the target is breached).
+For the integrity rows (restarts, validity) there is no numeric margin — leave it `—`.
+
+The CAUTION/FAIL utilization bands are `SCALE_SLA_CAUTION_PCT` (default 75) and
+`SCALE_SLA_FAIL_PCT` (default 90) in `config/options.env`; the verdict per row:
+
+- **PASS** — observed < `SCALE_SLA_CAUTION_PCT` % (default < 75 %) of the limit.
+- **CAUTION** — observed in `[CAUTION, FAIL)` % (default 75–90 %), a metrics signal is
+  unavailable, or some samples were filtered (`n_valid < n_total`).
+- **FAIL** — observed ≥ `SCALE_SLA_FAIL_PCT` % (default ≥ 90 %), an istiod restart
+  occurred inside a measurement window, or no valid samples survived the filters.
+
+| Metric | Target | Observed | Margin | PASS/CAUTION/FAIL |
+|---|---|---|---|---|
+| istiod CPU (% of cross-replica limit) | < 75 % | _…%_ | _…_ | _…_ |
+| istiod memory (% of cross-replica limit) | < 75 % | _…%_ | _…_ | _…_ |
+| Worker-node CPU | < 75 % | _…%_ | _…_ | _…_ |
+| Worker-node memory | < 75 % | _…%_ | _…_ | _…_ |
+| istiod restarts in-window | 0 | _…_ | — | _…_ |
+| Sample validity (`n_valid` / `n_total`) | all valid | _…/…_ | — | _…_ |
+
+The controlplane report (`004-report-results.sh`) emits a **one-line headline verdict** in
+every format (`Customer SLA verdict: PASS|CAUTION|FAIL — <reason>`), and the sweep
+orchestrator writes the full **Scale envelope** block (above) to
+`sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md` at campaign end — generated, not hand-filled.
+
+---
+
 ## Worked example — 2026-06-02 workaround pass
 
 Demonstrates the envelope filled from that run's reports (see
@@ -85,9 +120,13 @@ That verdict is exactly what belonged on screen one and didn't have a home befor
 
 ---
 
-## Future enhancement
+## Generated, not hand-transcribed
 
 The Scale-envelope tables are mechanical — every measured cell maps to a sweep-report field
-or a `kubectl top` call. A `tests/lib` helper could roll the per-suite headers + a `kubectl
-top` snapshot into this block automatically at campaign end, so the summary's scale section
-is generated, not hand-transcribed. Until then, fill it by hand from the peak-mesh sweep.
+or a `kubectl top` call — so they are now **auto-generated**. `tests/lib/envelope.sh`
+(`render_scale_envelope`) rolls the controlplane report's peak-mesh row + capacity metadata
+together with a read-only `kubectl top` / istiod-resource / network snapshot across
+`--contexts` into the Scale-envelope block. `003-run-sweep.sh` writes it to
+`sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md` at campaign end. Paste that block in here rather
+than transcribing by hand; fill the Customer SLA checklist from the same report's `sla`
+verdict. (For older sweeps without the generator, fill by hand from the peak-mesh sweep.)

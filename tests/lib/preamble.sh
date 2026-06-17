@@ -13,6 +13,19 @@
 #   tuning_baseline_state <ctx> <kubectl_argv...>  -> two lines (TUNING_BASELINE=, SIDECAR_EGRESS_HOSTS=)
 #                                                     queried from the LIVE mesh, on|off|unknown (PL2)
 #   write_preamble <title> <tsv> <kv pairs...>     -> write `# key=value` comment lines + RUN_ID/HARNESS_SHA (PL2, PL19)
+#   infra_preamble_lines <kv...>                   -> emit the cluster-infra `# KEY=value` block
+#       (istiod req/lim, replicas, network topology) for the TSV preamble.
+#       ONE shared emitter so the 003 pre-creator and the 002 `! -f`-guarded collector
+#       cannot drift (PL36). Caller passes the already-read values as `KEY=value` args;
+#       any omitted key defaults to `unknown` so a legacy/partial caller never silently
+#       drops a line. Keys (additive, backward-compatible — all sweep-level scalars: the
+#       pin and mesh wiring are homogeneous across a coherent run, PL26):
+#         ISTIOD_REQ_CPU_M  ISTIOD_REQ_MEM_MI   (istiod resource REQUESTS, per replica)
+#         ISTIOD_LIM_CPU_M  ISTIOD_LIM_MEM_MI   (istiod resource LIMITS, per replica)
+#         ISTIOD_REPLICAS                       (replica count)
+#         NETWORK_TOPOLOGY                      (single-network / multi-primary,multi-network:N)
+#       NODE_ALLOC_* are deliberately NOT here — the O9 capacity block in 002/003
+#       (NODE_ALLOC_CPU_M/NODE_ALLOC_MEM_MI) already emits them; single-source per key (F4).
 #
 # Requires: tests/lib/common.sh (for die(), split_csv())
 # All callers are expected to have run `set -euo pipefail`.
@@ -115,6 +128,38 @@ istiod_start_time_seconds() {
 		else        printf "unknown\n"
 	}' "$tmpfile"
 	rm -f "$tmpfile"
+}
+
+# Emit the additive cluster-infra `# KEY=value` preamble block (PL36: ONE shared
+# emitter for both the 003 pre-creator and the 002 `! -f`-guarded collector, so a
+# key added to one writer can never silently vanish from the other). The caller
+# passes whatever it has already read as `KEY=value` tokens; every infra key the
+# downstream report expects is ALWAYS emitted, defaulting to `unknown` when the
+# caller omitted it — so a required-but-missing infra key reads as a legible
+# `unknown` (distinguishable from a never-defined key, PL36) rather than absent.
+# Writes to stdout (caller redirects/appends into the TSV preamble).
+# Usage: infra_preamble_lines ISTIOD_LIM_CPU_M=4000 ISTIOD_REPLICAS=5 ...
+# shellcheck disable=SC2329
+infra_preamble_lines() {
+	# Canonical, ordered key set. Adding a key here propagates to BOTH writers.
+	# NODE_ALLOC_* intentionally excluded — emitted by the O9 capacity block (F4).
+	local -a keys=(
+		ISTIOD_REQ_CPU_M ISTIOD_REQ_MEM_MI
+		ISTIOD_LIM_CPU_M ISTIOD_LIM_MEM_MI
+		ISTIOD_REPLICAS
+		NETWORK_TOPOLOGY
+	)
+	# Seed all to unknown, then overlay caller-supplied values.
+	declare -A vals=()
+	local k kv
+	for k in "${keys[@]}"; do vals[$k]="unknown"; done
+	for kv in "$@"; do
+		k="${kv%%=*}"
+		[[ -n "${vals[$k]+set}" ]] && vals[$k]="${kv#*=}"
+	done
+	for k in "${keys[@]}"; do
+		printf '# %s=%s\n' "$k" "${vals[$k]}"
+	done
 }
 
 # Query the LIVE deployed tuning-baseline state on ONE context (the source

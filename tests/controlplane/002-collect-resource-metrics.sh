@@ -40,7 +40,9 @@ source "${ROOT}/config/options.env"  # O9: SCALE_TARGET_FRACTION (preamble key)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/capacity.sh"  # O9: read-only capacity probes (Phase-1 legibility)
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state (live-mesh tuning provenance, PL2)
+source "${ROOT}/tests/lib/preamble.sh"  # infra_preamble_lines (PL36) + tuning_baseline_state (live-mesh tuning provenance, PL2)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="${ROOT}/tests/controlplane/results"
@@ -333,9 +335,17 @@ fi
 
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
+	# Cluster-infra block (additive): istiod req/lim/replicas + network topology.
+	# F2: collect ONLY when we are actually going to write the preamble. In an
+	# orchestrated run 003 pre-creates the TSV, so this `! -f` block is skipped and the
+	# serial per-context env_collect_infra fan-out (up to 20 contexts) no longer runs on
+	# the post-settle critical path for every final-phase combo. Same shared emitter the
+	# 003 pre-creator uses (PL36) so a standalone 002 run and an orchestrated run agree.
+	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=40"
+		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
@@ -350,6 +360,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# ISTIOD_MEM_LIMIT_MI=${PRE_ISTIOD_MEM_LIMIT_MI}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		# shellcheck disable=SC2086
+		infra_preamble_lines $PRE_INFRA_KV
 		echo "# ${PRE_TUNING_BASELINE}"
 		echo "# ${PRE_SIDECAR_EGRESS_HOSTS}"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING"
