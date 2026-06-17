@@ -560,14 +560,28 @@ extract_histogram_quantile() {
 		total = lastp[2] + 0
 		if (total <= 0) { print "N/A"; exit }
 		target = total * q
+		# Linear interpolation WITHIN the matched bucket (Prometheus
+		# histogram_quantile semantics: uniform distribution assumed within a
+		# bucket). Buckets are cumulative and ascending by le; the lower bound
+		# of the first bucket is 0. Emitting the bucket upper bound (le) instead
+		# floors the quantile and understates the tail when mass sits inside a
+		# coarse bucket (FINDING #5 — convergence floored to 100ms at small scale).
+		prev_le = 0; prev_cum = 0
 		for(i=1;i<=n;i++) {
 			split(buckets[i], parts, " ")
-			if(parts[2]+0 >= target) {
-				le_val = parts[1]
-				if(le_val == "+Inf") { print "overflow"; exit }
-				printf "%.0f\n", le_val * 1000
+			cum = parts[2] + 0
+			if(cum >= target) {
+				if(parts[1] == "+Inf") { print "overflow"; exit }
+				le_val = parts[1] + 0
+				if(cum > prev_cum)
+					val = prev_le + (le_val - prev_le) * (target - prev_cum) / (cum - prev_cum)
+				else
+					val = le_val
+				printf "%.0f\n", val * 1000
 				exit
 			}
+			prev_le = parts[1] + 0
+			prev_cum = cum
 		}
 		print "N/A"
 	}'
