@@ -60,10 +60,11 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 
 @test "delta_histogram_p99: normal case with known distribution" {
 	result=$(delta_histogram_p99 "$FIXTURES/histogram_pre.txt" "$FIXTURES/histogram_post.txt" "pilot_proxy_queue_time")
-	# 200 new observations: 10 in <=0.01, 90 in <=0.1, 100 in <=0.5, 10 in <=1, 5 in <=5
-	# p99 of 200 = 198th observation, which falls in the 0.5 bucket
-	# Output is bucket boundary * 1000 = 500.00
-	[[ "$result" == "500.00" ]]
+	# 200 new observations (cumulative delta): 10 <=0.01, 100 <=0.1, 200 <=0.5 (flat above)
+	# p99 of 200 = 198th observation, 98% of the way into the [0.1,0.5] bucket.
+	# Prometheus linear interpolation: 0.1 + (0.5-0.1)*(198-100)/(200-100) = 0.492s -> 492.00ms
+	# (was 500.00 when this emitted the bucket ceiling; FINDING #5 interpolation fix)
+	[[ "$result" == "492.00" ]]
 }
 
 @test "delta_histogram_p99: missing histogram returns N/A" {
@@ -104,5 +105,7 @@ pilot_proxy_queue_time_bucket{le="+Inf"} 100
 EOF
 	result=$(delta_histogram_p99 "$tmppre" "$tmppost" "pilot_proxy_queue_time")
 	rm -f "$tmppre" "$tmppost"
-	[[ "$result" == "100.00" ]]
+	# All 100 obs in the [0,0.1] bucket; interpolated p99 = 0.1*0.99 = 0.099s -> 99.00ms
+	# (was 100.00 when this emitted the bucket ceiling; FINDING #5 interpolation fix)
+	[[ "$result" == "99.00" ]]
 }
