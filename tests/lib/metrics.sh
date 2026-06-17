@@ -152,12 +152,25 @@ delta_histogram_p99() {
 		total = deltas[n]
 		if (total <= 0) { print "N/A"; exit }
 		target = total * q
+		# Linear interpolation WITHIN the matched bucket (Prometheus
+		# histogram_quantile semantics: uniform-within-bucket). deltas[] are
+		# cumulative, sortable[] ascending by le; first bucket lower bound = 0.
+		# Emitting the bucket upper bound (le) floors the quantile and understates
+		# the tail (FINDING #5 — cross-suite convergence-histogram floor).
+		prev_le = 0; prev_cum = 0
 		for (i = 1; i <= n; i++) {
 			if (deltas[i]+0 >= target) {
 				if (sortable[i] == "+Inf") { print "overflow"; exit }
-				printf "%.2f\n", sortable[i] * 1000
+				le_val = sortable[i] + 0
+				if (deltas[i] > prev_cum)
+					val = prev_le + (le_val - prev_le) * (target - prev_cum) / (deltas[i] - prev_cum)
+				else
+					val = le_val
+				printf "%.2f\n", val * 1000
 				exit
 			}
+			prev_le = sortable[i] + 0
+			prev_cum = deltas[i] + 0
 		}
 		print "N/A"
 	}' "$baseline" "$final"
