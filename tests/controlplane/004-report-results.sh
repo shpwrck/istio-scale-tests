@@ -891,17 +891,32 @@ report_charts() {
 	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
 	# Chart 2: Per-proxy config dump size (MB) by scoping at largest mesh size.
 	awk -F'\t' '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	NR == 1 { next }
 	{
-		ms = $1 + 0; scoping = $5
-		cpu = $24 + 0; cfg = $25 + 0
+		ms = $1 + 0; scoping = $5; n_valid = $7 + 0
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
-		cpu_val[ms, scoping] = cpu
-		cfg_val[ms, scoping] = cfg
+		# PL13/PL15 + PL8 gate (mirrors the markdown/json n_valid + overflow handling):
+		# a cell with no valid samples (every row restart-poisoned/unknown so n_valid==0,
+		# where the aggregate emit3 returned a synthetic zero) or whose charted column
+		# carries the overflow sentinel (cpu_delta_avg $24 / cfg_dump_avg $25) is ABSENT,
+		# not a real 0 data point. Coercing it (awk $24 + 0) would plot a poisoned/overflow
+		# cell as the LOWEST CPU point, the inverse of reality. Count it as dropped and
+		# leave has[] unset so it is never charted as 0.
+		cells_total++
+		if (n_valid <= 0 || $24 == "overflow" || $25 == "overflow" || !is_num($24) || !is_num($25)) {
+			cells_dropped++
+			next
+		}
+		cpu_val[ms, scoping] = $24 + 0
+		cfg_val[ms, scoping] = $25 + 0
 		has[ms, scoping] = 1
 	}
 	END {
+		if (cells_dropped > 0) {
+			printf "> %d of %d cells dropped (no valid samples / restart-poisoned / overflow) — not plotted.\n\n", cells_dropped, cells_total
+		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
 			tmp = ms_order[i]; j = i - 1

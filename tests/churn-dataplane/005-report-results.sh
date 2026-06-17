@@ -340,8 +340,11 @@ report_charts() {
 	aggregate | awk -F'\t' '
 	{
 		ms = $1 + 0; cr = $2 + 0; dp99 = $3; valid = $6 + 0; eds = $13
-		if (valid <= 0) next
-		if (dp99 == "N/A") next
+		# PL13/PL15 gate (mirrors report_md): a cell with no valid baseline+churn pairs
+		# (valid_runs==0) or whose delta_p99 is N/A is ABSENT, not a real 0 data point.
+		# Count it as dropped and leave has[] unset so it is never charted as 0.
+		cells_total++
+		if (valid <= 0 || dp99 == "N/A") { cells_dropped++; next }
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(cr in cr_seen)) { cr_order[++n_cr] = cr; cr_seen[cr] = 1 }
 		dp99_val[ms, cr] = dp99 + 0
@@ -349,6 +352,9 @@ report_charts() {
 		has[ms, cr] = 1
 	}
 	END {
+		if (cells_dropped > 0) {
+			printf "> %d of %d cells dropped (no valid samples / restart-poisoned) — not plotted.\n\n", cells_dropped, cells_total
+		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
 			tmp = ms_order[i]; j = i - 1

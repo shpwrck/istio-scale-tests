@@ -292,16 +292,24 @@ report_charts() {
 	# Chart 2: p50 vs QPS at largest mesh size, local vs remote.
 	awk -F'\t' '
 	{
-		ms = $1 + 0; qps = $2 + 0; cls = $3; p50 = $6
+		ms = $1 + 0; qps = $2 + 0; cls = $3; n_valid = $5 + 0; p50 = $6
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (qps > max_qps) max_qps = qps
 		if (ms > max_ms) max_ms = ms
 		if (!(qps in qps_seen)) { qps_order[++n_qps] = qps; qps_seen[qps] = 1 }
 		if (!(cls in cls_seen)) { cls_order[++n_cls] = cls; cls_seen[cls] = 1 }
+		# PL13/PL15 gate (mirrors the markdown drop summary): a cell with no valid samples
+		# (n_valid==0 -> favg returned "N/A") is ABSENT, not a real 0 data point. Count it
+		# as dropped and leave has[] unset so it is never charted as 0.
+		cells_total++
+		if (n_valid <= 0 || p50 == "N/A") { cells_dropped++; next }
 		p50_val[ms, qps, cls] = p50
 		has[ms, qps, cls] = 1
 	}
 	END {
+		if (cells_dropped > 0) {
+			printf "> %d of %d cells dropped (no valid samples / restart-poisoned) — not plotted.\n\n", cells_dropped, cells_total
+		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
 			tmp = ms_order[i]; j = i - 1

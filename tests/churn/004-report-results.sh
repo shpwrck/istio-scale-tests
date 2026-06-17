@@ -421,6 +421,14 @@ report_charts() {
 	echo "# Churn Convergence — Charts"
 	echo ""
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	# PL13/PL15 gate: charts aggregate per mesh size over VALID rows only ($21=="OK").
+	# Count total vs valid rows so a dropped (restart-poisoned / non-OK) row never lands
+	# as a 0 data point silently — a per-mesh-size series point with zero valid rows is
+	# ABSENT (cl_n[ms]==0 -> not plotted), and the caption mirrors the markdown footnote.
+	!/^#/ && !/^run_id/ && NF>=21 {
+		rows_total++
+		if ($21 != "OK") { rows_dropped++; next }
+	}
 	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
 		ms = $2 + 0
 		seen[ms] = 1
@@ -444,6 +452,9 @@ report_charts() {
 		}
 	}
 	END {
+		if (rows_dropped > 0) {
+			printf "> %d of %d rows dropped (no valid samples / restart-poisoned; status != OK) — excluded from the charted averages.\n\n", rows_dropped, rows_total
+		}
 		sort_ms()
 		if (n_ms < 2) {
 			print "> Charts require at least two mesh sizes."

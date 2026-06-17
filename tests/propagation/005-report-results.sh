@@ -686,6 +686,23 @@ report_endpoint_charts() {
 			exit
 		}
 
+		# PL13/PL15 gate: each charted phase point is the mean over n_valid samples
+		# (p{1,2,3}_n[ms]). A phase/mesh cell with zero valid samples is ABSENT (chart_avg
+		# returns -1, rendered as the structural 0 filler the mermaid xychart requires),
+		# not a real 0 latency point. Count those dropped cells across the plotted grid
+		# (P1, P2, P3 x remote mesh sizes) and caption it, mirroring the markdown footnote.
+		cells_total = 0; cells_dropped = 0
+		for (i = 1; i <= n_remote; i++) {
+			m = remote_ms[i]
+			cells_total += 3
+			if (p1_n[m] + 0 == 0) cells_dropped++
+			if (p2_n[m] + 0 == 0) cells_dropped++
+			if (p3_n[m] + 0 == 0) cells_dropped++
+		}
+		if (cells_dropped > 0) {
+			printf "> %d of %d charted cells dropped (no valid samples / restart-poisoned / overflow) — not plotted.\n\n", cells_dropped, cells_total
+		}
+
 		# Chart 1: P1 wall + P2 EDS latency vs mesh size
 		printf "%% Chart 1: P1 local xDS + P2 remote istiod EDS latency\n"
 		printf "%% Series order: P1 wall avg (ms), P2 EDS avg (ms)\n"
