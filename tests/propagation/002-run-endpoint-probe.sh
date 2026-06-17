@@ -178,8 +178,9 @@ Robustness:
 Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
   PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_SETTLE_SEC,
-  PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics; default 5s — bump
-  for large meshes where /metrics may take longer to render),
+  PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics; defaults from the
+  shared METRICS_SCRAPE_TIMEOUT, default 30s — bump for large meshes where
+  /metrics may take longer to render),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
   FANOUT_CTX_STRIDE (per-context port stride; default 20),
   FANOUT_MAX_SKEW_MS (baseline scrape_skew ceiling in ms; default 1000 — a row

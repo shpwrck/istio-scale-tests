@@ -125,6 +125,14 @@ and routes to the existing `SETUP_FAILED` path (it does not hang or swallow). Th
 wait is skipped entirely under `--dry-run` (no cluster calls). Override per run
 with `001-setup --ns-wait-timeout N`.
 
+### Override knobs (defaults in `config/options.env`)
+
+| Env var | Default | Used by |
+| --- | --- | --- |
+| `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` | `300` | PL4 wait bound for `005`'s namespace-termination wait AND (default) `001`'s pre-apply poll-until-gone wait — the shared PL37 contract, so an override applies symmetrically to cleanup and the next setup. |
+| `CONTROLPLANE_SETUP_NS_WAIT_SEC` | `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` | `001-setup` pre-apply wait for a pre-existing (Terminating) namespace to clear before applying (`--ns-wait-timeout N` overrides per run). |
+| `METRICS_SCRAPE_TIMEOUT` | `30` | `curl --max-time` ceiling for every istiod `/metrics` **body** fetch in `002` (primary scrape + peak-metrics poll). Raise for MB-class `/metrics` bodies at 10k services. |
+
 ## Histogram Bucket Ranges
 
 Convergence and queue-time p99 values are reported as **bucket ranges**

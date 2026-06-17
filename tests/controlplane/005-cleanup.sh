@@ -83,6 +83,7 @@ fi
 # (CONTROLPLANE_SETUP_NS_WAIT_SEC defaults from this), so an operator override
 # applies symmetrically to cleanup and the next setup.
 TERMINATION_TIMEOUT="${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}"
+is_pos_int "$TERMINATION_TIMEOUT" || die "CONTROLPLANE_NS_DELETE_TIMEOUT_SEC must be a positive integer (got: $TERMINATION_TIMEOUT)"
 
 run_delete() {
 	if ((DRY_RUN)); then
