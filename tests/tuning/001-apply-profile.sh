@@ -366,6 +366,35 @@ for ctx in "${CONTEXTS[@]}"; do
 		> "${STATE_DIR}/istio-baseline-${ctx}.yaml" 2>/dev/null \
 		|| die "Failed to get Istio CR on context ${ctx}"
 
+	# Issue #19 — baseline-integrity hazard: the snapshot is captured from the LIVE
+	# Istio CR, so if a prior sweep was interrupted before its revert (or any out-of-band
+	# patch left a tuning override active) that override is baked INTO this baseline. A
+	# later "revert" then faithfully restores the DIRTY state and the mesh is never
+	# actually returned to default — the root-cause class behind #19 (a leaked
+	# meshConfig.discoverySelectors broke istio-ca-root-cert distribution). We cannot
+	# distinguish a leaked override from legitimate config purely offline, so we DETECT
+	# the known override fields and WARN loudly; we never silently rewrite the snapshot.
+	# The ideal fix is to capture from the GitOps/Argo source of truth (see README +
+	# PR notes); this detect+warn is the in-suite guard until then.
+	if command -v yq >/dev/null 2>&1; then
+		# shellcheck disable=SC2206  # intentional word-split of the space-separated list
+		_dirty_paths=(${TUNING_REVERT_DIRTY_PATHS:-.spec.values.meshConfig.discoverySelectors .spec.values.pilot.env.PILOT_ENABLE_CDS_CACHE})
+		_dirty_found=0
+		for _dp in "${_dirty_paths[@]}"; do
+			_dv="$(yq -r "${_dp} // \"\"" "${STATE_DIR}/istio-baseline-${ctx}.yaml" 2>/dev/null)" || _dv=""
+			if [[ -n "$_dv" && "$_dv" != "null" ]]; then
+				echo "  WARN  ${ctx}: captured baseline already contains tuning-override field ${_dp} (= ${_dv})" >&2
+				_dirty_found=1
+			fi
+		done
+		if ((_dirty_found)); then
+			echo "  WARN  ${ctx}: the mesh was NOT at a clean default when this baseline was" >&2
+			echo "        captured — reverting to it will restore the override, not remove it (#19)." >&2
+			echo "        Restore the mesh to default (or capture from the GitOps source of truth)" >&2
+			echo "        before relying on this baseline for revert." >&2
+		fi
+	fi
+
 	if [[ -n "$PATCH_FILE" ]]; then
 		echo "--- ${ctx}: patching Istio CR ---"
 		$KUBECTL --context="$ctx" patch istio "$ISTIO_CR_NAME" \

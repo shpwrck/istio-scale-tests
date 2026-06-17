@@ -46,6 +46,59 @@ OUTPUT_DIR_BASE="${TUNING_DIR}/results"
 INCLUDE_BASELINE=1
 ROLLOUT_TIMEOUT=300
 
+# Issue #19: track the state dir of the profile currently applied to the mesh so the
+# guaranteed-revert trap below knows what to undo. Empty string = no profile active
+# (baseline measurement, or already reverted) -> the trap is a safe no-op. Set right
+# before a profile's apply and cleared right after its revert succeeds.
+ACTIVE_STATE_DIR=""
+
+# Guaranteed revert (issue #19): a sweep that is interrupted (Ctrl-C / SIGTERM) or that
+# aborts on an unexpected error between a profile's apply and its revert would otherwise
+# leave the Istio CR mutated — the exact failure that left meshConfig.discoverySelectors
+# active and stopped istio-ca-root-cert from distributing to new namespaces, breaking
+# every later suite. This EXIT/INT/TERM trap reverts whatever profile is currently active,
+# idempotently: it does nothing when no profile is active, and the underlying
+# 002-revert-profile.sh is itself safe to re-run (apply --server-side of the baseline +
+# ignore-not-found deletes). The trap NEVER aborts (it tolerates a failing revert and a
+# missing cluster) so it cannot mask the original exit status.
+# shellcheck disable=SC2329
+revert_active_profile() {
+	local sd="$ACTIVE_STATE_DIR"
+	[[ -n "$sd" ]] || return 0          # no profile active -> nothing to revert
+	[[ -d "$sd" ]] || return 0          # state dir gone -> nothing to revert
+	[[ -f "${sd}/active-profile" ]] || return 0  # already reverted -> idempotent no-op
+	echo "" >&2
+	echo ">>> [trap] reverting active profile (state: ${sd}) to leave the mesh clean (#19)" >&2
+	"${TUNING_DIR}/002-revert-profile.sh" \
+		--state-dir "$sd" \
+		--contexts "$CONTEXTS_CSV" \
+		--rollout-timeout "$ROLLOUT_TIMEOUT" >&2 \
+		|| echo "warn: [trap] revert of ${sd} failed; mesh may be left dirty — inspect the Istio CR manually (#19)" >&2
+	ACTIVE_STATE_DIR=""
+}
+
+# shellcheck disable=SC2329
+on_signal() {
+	local sig="$1"
+	echo "" >&2
+	echo ">>> [trap] sweep interrupted by SIG${sig} — reverting active profile before exit (#19)" >&2
+	# Explicitly exit (128+signo) so the EXIT trap fires and runs the revert exactly once.
+	# A bare INT/TERM handler that just returned would NOT terminate the script under bash.
+	case "$sig" in
+	INT) exit 130 ;;
+	TERM) exit 143 ;;
+	*) exit 1 ;;
+	esac
+}
+
+# INT/TERM log the interruption then exit, which fires the EXIT trap that does the revert,
+# so the revert runs exactly once regardless of whether we exit normally, on error, or on
+# a signal. DRY_RUN installs the traps too but exits before any apply (ACTIVE_STATE_DIR
+# stays empty -> revert is a no-op), so dry-run never touches a cluster.
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+trap revert_active_profile EXIT
+
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
@@ -245,6 +298,9 @@ for p in "${PROFILES[@]}"; do
 	echo "=== [${step}/${total}] Profile: ${p} ==="
 
 	state_dir="${SWEEP_DIR}/${p}/state"
+	# Issue #19: mark this profile active BEFORE apply so the EXIT/INT/TERM trap can
+	# revert it if the apply, probe, or revert is interrupted or aborts mid-way.
+	ACTIVE_STATE_DIR="$state_dir"
 
 	echo "--- Applying profile ---"
 	# R3-1 (B1 class): apply is the most probable per-profile failure at scale (a
@@ -269,6 +325,9 @@ for p in "${PROFILES[@]}"; do
 			--contexts "$CONTEXTS_CSV" \
 			--rollout-timeout "$ROLLOUT_TIMEOUT" || \
 			echo "warn: [profile ${p}] best-effort revert after apply failure also failed; istiod may be left in a non-default config (next profile re-applies)" >&2
+		# Best-effort revert attempted (002 removes active-profile on success); clear the
+		# trap's active-profile marker so EXIT does not double-revert (#19).
+		ACTIVE_STATE_DIR=""
 		((step++))
 		continue
 	fi
@@ -284,6 +343,9 @@ for p in "${PROFILES[@]}"; do
 		--contexts "$CONTEXTS_CSV" \
 		--rollout-timeout "$ROLLOUT_TIMEOUT" || \
 		echo "warn: [profile ${p}] revert failed; istiod may be left in this profile's non-default config (next profile re-applies)" >&2
+	# Revert attempted for this profile; clear the trap marker so a later interrupt
+	# (e.g. during the settle/next profile) does not redundantly re-revert it (#19).
+	ACTIVE_STATE_DIR=""
 
 	echo "--- Post-revert settle: ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"
