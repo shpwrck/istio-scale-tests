@@ -74,7 +74,7 @@ On the machine where you run repo commands:
 | `istioctl` | For mesh verification; align the build with `ISTIO_VERSION` in `config/versions.env`. Place at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
 | `jq`, `curl` | `jq` for Terraform JSON, `curl` for ingress checks. |
 
-Configuration: version pins and mesh identity live in `config/versions.env`; operational defaults (namespaces, logging, test params) are in `config/options.env`, sourced automatically. Current defaults target OpenShift `4.21.11`, ACM `release-2.16`, OpenShift GitOps `gitops-1.20`, and Istio `v1.28.5`.
+Configuration: version pins and mesh identity live in `config/versions.env`; operational defaults (namespaces, logging, test params) are in `config/options.env`, sourced automatically. Current defaults target OpenShift `4.21.11`, ACM `release-2.16` (a floating channel — set `ACM_MCE_VERSION` to pin a concrete MCE operator CSV for the GO run, since MCE's clusterview OpenAPI validity gates ArgoCD; see BLOCKER #1), OpenShift GitOps `gitops-1.20`, and Istio `v1.28.5`.
 
 ---
 
