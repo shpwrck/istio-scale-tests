@@ -203,6 +203,23 @@ When `--namespace-count > 1`, the suite mints `controlplane-test-0`, `controlpla
 
 `003-run-sweep.sh` prints a **capacity plan check** before the matrix: for the largest planned combo it computes the requested per-cluster sidecar CPU (`max(service-counts) × max(replica-counts) × SCALE_PER_POD_CPU_M`, from `config/options.env`). On a real run it also reads node allocatable CPU and the istiod baseline (`cap_node_totals` / `cap_istiod_limits`, source context, read-only) and **WARNs** with the services-that-fit estimate when the largest combo exceeds free CPU (turning FINDING #3's ~46-svc arithmetic into a runtime guard). In `--dry-run` it prints only the requested cores (no cluster contact). It is a WARN — `001`'s per-context preflight remains the hard gate.
 
+### Resuming an interrupted sweep (`--resume`)
+
+A multi-hour 20-context sweep that dies partway (a crashed workstation, a credential expiry, a fatal abort at combo 40/64) does **not** have to restart the whole matrix. Re-run `003-run-sweep.sh` with the **same axes** plus `--resume <sweep dir>`:
+
+```bash
+./tests/controlplane/003-run-sweep.sh \
+  --contexts "$CONTEXTS" --mesh-sizes "$MESH" \
+  --sidecar-scopings none,namespace,explicit --force-large-matrix \
+  --resume tests/controlplane/results/sweep-20260617T124130Z-12345
+```
+
+On `--resume` the orchestrator **reuses the existing sweep dir and its `RUN_ID`** (appending to the same `controlplane-<RUN_ID>.tsv`, not minting a new dir/identity) and **skips any combo that already has a valid row** — `NF>=40` and `istiod_restarted==0` — for its `(mesh_size, service_count, replicas, namespace_count, sidecar_scoping)` key. The skip mirrors the report's `n_valid` gate, so a `SETUP_FAILED`/restarted placeholder row from the interrupted run is **not** counted as done and is re-run. `--resume` is mutually exclusive with `--output-dir` (it already names the full dir) and is rejected with `--dry-run` (nothing to resume in a plan-only run). At the end it regenerates the report/markdown/charts/scale-envelope from the now-complete TSV.
+
+### Cleanup fast-drain & apply resilience (scale)
+
+At 10k sidecar-pods, `005-cleanup.sh` **fast-drains** the workload pods with a short grace period (`CONTROLPLANE_CLEANUP_GRACE_SEC`, default 5s; `--grace-period`) **before** deleting the namespace, so istio-proxy drain doesn't serialize teardown past `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` and cascade into the next combo's `SETUP_FAILED` (PL37). `001-setup` applies the rendered chart **server-side in chunks** (`CONTROLPLANE_APPLY_CHUNK_OBJECTS`, default 200; the `Namespace` doc is always applied first) with a **bounded retry** (`CONTROLPLANE_APPLY_ATTEMPTS`/`CONTROLPLANE_APPLY_BACKOFF_S`, default 3×5s) so a large `explicit`-scoping render (~3 objects/service) and transient apiserver 429s don't hard-fail the combo. All `oc`/`kubectl` calls carry the shared client rate-limit flags `--qps`/`--burst` (`KUBE_CLIENT_QPS`/`KUBE_CLIENT_BURST`, default 30/60) — raise them only if the apiserver has headroom.
+
 ## Sweep Examples
 
 ```bash
@@ -367,7 +384,20 @@ namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
 scoping effect" table showing config size reduction percentages across modes.
 The report also prints an **"Achieved scale vs capacity" (O9)** block at the top
 of the text + markdown formats: max connected proxies, istiod/node utilization
-percentages, and a `SCALE_COVERAGE:` line. The same provenance is carried in the
+percentages, and a `SCALE_COVERAGE:` line. It additionally surfaces
+`istiod_rss_pct_of_limit` (P1-4) — the peak `process_resident_memory_bytes` as a %
+of the **per-replica** istiod memory limit. Unlike `istiod_mem_pct_of_limit` (the
+`kubectl top` path, which N/As during a metrics-API gap), the RSS signal is always
+available from the /metrics scrape, so it surfaces **OOM-mid-sweep risk** even when
+`top` is down; it is folded into the SLA verdict as the max of the two memory
+signals. In multi-primary each istiod caches the whole mesh, so an RSS % near 100
+is the OOM signal — and the istiod memory **request** should be sized to the
+measured steady-state RSS at target scale before GO (this only surfaces it).
+Convergence/queue p99 cells that are **single-bucket-pinned** (P1-6 — all delta
+mass in the coarsest 0-100ms bucket, so the interpolated quantile is a
+uniform-within-bucket assumption, not resolved) are flagged: a `[SINGLE-BUCKET-PINNED]`
+note in text, a `†` cell + footnote in markdown, and a `convergence_p99_single_bucket_pinned`
+/ `queue_p99_single_bucket_pinned` boolean per result in json. The same provenance is carried in the
 other two formats so all four are at parity: `csv` emits it as `# capacity:` /
 `# achieved:` / `# SCALE_COVERAGE:` / `# metrics:` comment lines (the aggregate row
 schema is unchanged), and `json` nests `capacity`, `achieved_scale`, `coverage`,

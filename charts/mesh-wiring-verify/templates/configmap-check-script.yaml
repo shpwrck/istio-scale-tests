@@ -56,7 +56,18 @@ data:
         echo "NotReady: istiod manages ${managed} clusters (local=${local_n:-0} remote=${remote_n:-0}) < expected ${EXPECTED}" >&2
         exit 1
       fi
-      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED}"
+      # Remote fan-out is O(N^2): each of N primaries must ingest the OTHER N-1 as
+      # REMOTE clusters. The aggregate `managed >= EXPECTED` gate above can be
+      # satisfied with a wrong split (e.g. a double-counted local plus a short
+      # remote count), masking exactly the missing-remote-secret case that silently
+      # breaks cross-cluster discovery. Assert the remote count directly: this spoke
+      # must see EXPECTED-1 remotes (every member but itself). Only when EXPECTED is
+      # a real mesh size (>1; a single-member mesh legitimately has 0 remotes).
+      if [ "$EXPECTED" -gt 1 ] && [ "${remote_n:-0}" -lt "$(( EXPECTED - 1 ))" ]; then
+        echo "NotReady: istiod sees ${remote_n:-0} remote clusters < expected $(( EXPECTED - 1 )) (N-1); a remote secret for some mesh member is missing or not ingested — cross-cluster discovery is silently broken" >&2
+        exit 1
+      fi
+      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED} (remote>=$([ "$EXPECTED" -gt 1 ] && echo $(( EXPECTED - 1 )) || echo 0))"
       exit 0
     fi
 

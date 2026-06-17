@@ -59,6 +59,18 @@ SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
 # a manual 005 benefits too). Defaults to reuse the same bound 005 uses for its own
 # namespace-termination wait (same contract).
 SETUP_NS_WAIT_SEC="${CONTROLPLANE_SETUP_NS_WAIT_SEC:-${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}}"
+# P1-1: bounded retry on the server-side-apply path so a transient apiserver 429
+# (or any non-zero apply exit) under sweep load doesn't hard-fail the combo to
+# SETUP_FAILED on the first hiccup. P1-3: chunk the rendered object stream so a
+# large `explicit`-scoping render (~3 objects/service) is applied in batches per
+# context instead of one giant single SSA stream that throttles/partial-fails.
+APPLY_ATTEMPTS="${CONTROLPLANE_APPLY_ATTEMPTS:-3}"
+APPLY_BACKOFF_S="${CONTROLPLANE_APPLY_BACKOFF_S:-5}"
+# Objects per server-side-apply batch (P1-3). The namespace doc(s) are always
+# applied FIRST as their own batch so namespaced objects land into an existing
+# namespace; the remaining Services/Deployments/Sidecars are applied in batches
+# of this size. <= 0 disables chunking (single stream, legacy behaviour).
+APPLY_CHUNK_OBJECTS="${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-200}"
 
 usage() {
 	cat <<EOF
@@ -89,6 +101,12 @@ Environment:
   CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to
   clear; defaults to CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300).
+  KUBE_CLIENT_QPS / KUBE_CLIENT_BURST (client rate-limit flags appended to every
+  oc/kubectl call; defaults 30/60). CONTROLPLANE_APPLY_ATTEMPTS (default 3) /
+  CONTROLPLANE_APPLY_BACKOFF_S (default 5): bounded retry on the server-side-apply
+  path so a transient 429 doesn't hard-fail the combo. CONTROLPLANE_APPLY_CHUNK_OBJECTS
+  (default 200; <=0 disables): objects per server-side-apply batch for large
+  (explicit-scoping) renders.
 
   O9 scale-coverage (DEFAULT-OFF — fixed/0 means behaviour is unchanged):
   SCALE_SIZING_MODE (fixed|auto; auto derives SERVICE_COUNT from cluster capacity),
@@ -154,19 +172,20 @@ is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPL
 is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
 is_nonneg_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a non-negative integer (got: $WAIT_TIMEOUT)"
 is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "--ns-wait-timeout must be a non-negative integer (got: $SETUP_NS_WAIT_SEC)"
+is_pos_int "$APPLY_ATTEMPTS" || die "CONTROLPLANE_APPLY_ATTEMPTS must be a positive integer (got: $APPLY_ATTEMPTS)"
+is_nonneg_int "$APPLY_BACKOFF_S" || die "CONTROLPLANE_APPLY_BACKOFF_S must be a non-negative integer (got: $APPLY_BACKOFF_S)"
+[[ "$APPLY_CHUNK_OBJECTS" =~ ^-?[0-9]+$ ]] || die "CONTROLPLANE_APPLY_CHUNK_OBJECTS must be an integer (got: $APPLY_CHUNK_OBJECTS)"
 validate_scoping "$SIDECAR_SCOPING"
 
 if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
 	die "--namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces would be empty. Reduce --namespace-count to at most --service-count."
 fi
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+# P1-1: resolve_kubectl appends the shared --qps/--burst client rate-limit flags
+# (KUBE_CLIENT_QPS/BURST) so the 20-context apply path doesn't throttle at the
+# client-go 5/10 default.
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
@@ -411,6 +430,77 @@ apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
+# P1-1: apply a manifest file with a bounded retry so a transient apiserver 429
+# (or any non-zero apply exit) under sweep load retries with a short backoff
+# before failing the combo. <manifest_file> <ctx> <label>.
+apply_with_retry() {
+	local manifest="$1" ctx="$2" label="$3" attempt=1
+	while :; do
+		if "${apply[@]}" --context="$ctx" -f "$manifest"; then
+			return 0
+		fi
+		if (( attempt >= APPLY_ATTEMPTS )); then
+			echo "error: apply failed on $ctx (${label}) after ${attempt} attempt(s)" >&2
+			return 1
+		fi
+		echo "warn: apply hiccup on $ctx (${label}), attempt ${attempt}/${APPLY_ATTEMPTS}; retrying in ${APPLY_BACKOFF_S}s (transient 429?)" >&2
+		attempt=$((attempt + 1))
+		(( APPLY_BACKOFF_S > 0 )) && sleep "$APPLY_BACKOFF_S"
+	done
+}
+
+# P1-3: split a rendered chart stream into per-document temp files, apply the
+# Namespace doc(s) FIRST (so namespaced objects land into an existing namespace),
+# then apply the remaining objects in batches of APPLY_CHUNK_OBJECTS — one giant
+# SSA stream of ~3 objects/service (explicit scoping × 500 svc ≈ 1500 objects)
+# throttles/partial-fails per context at scale. Each batch carries the P1-1 retry.
+# <rendered_file> <ctx> <workdir>.
+apply_chunked() {
+	local rendered="$1" ctx="$2" workdir="$3"
+	# Split on YAML document separators into one object per file (NNNNN.yaml),
+	# skipping empty docs. csplit-free awk so no new tool dependency.
+	awk -v dir="$workdir" '
+		function flush() {
+			if (buf ~ /[^[:space:]]/) { printf "%s", buf > sprintf("%s/%05d.yaml", dir, ++n) }
+			buf = ""
+		}
+		/^---[[:space:]]*$/ { flush(); next }
+		{ buf = buf $0 "\n" }
+		END { flush() }
+	' "$rendered"
+	local -a ns_docs=() obj_docs=() f
+	for f in "$workdir"/*.yaml; do
+		[[ -e "$f" ]] || continue
+		if grep -qE '^kind:[[:space:]]*Namespace[[:space:]]*$' "$f"; then
+			ns_docs+=("$f")
+		else
+			obj_docs+=("$f")
+		fi
+	done
+	# Namespace batch first (idempotent; ensures the ns exists before objects).
+	if ((${#ns_docs[@]})); then
+		cat "${ns_docs[@]}" > "$workdir/_batch_ns.yaml"
+		apply_with_retry "$workdir/_batch_ns.yaml" "$ctx" "namespaces" || return 1
+	fi
+	# Remaining objects in chunks. APPLY_CHUNK_OBJECTS <= 0 -> single batch.
+	local chunk="$APPLY_CHUNK_OBJECTS" total="${#obj_docs[@]}" i=0 b=0
+	(( chunk <= 0 )) && chunk="$total"
+	(( chunk <= 0 )) && return 0   # nothing to apply
+	while (( i < total )); do
+		b=$((b + 1))
+		local batch="$workdir/_batch_${b}.yaml"
+		: > "$batch"
+		local j=0
+		while (( j < chunk && i < total )); do
+			cat "${obj_docs[i]}" >> "$batch"
+			printf -- '---\n' >> "$batch"
+			i=$((i + 1)); j=$((j + 1))
+		done
+		apply_with_retry "$batch" "$ctx" "objects batch ${b} ($((i<total?i:total))/${total})" || return 1
+	done
+	return 0
+}
+
 # O8 item 3: apply each context's chart concurrently — setup-only, disjoint
 # contexts, fidelity-neutral. A non-zero exit in ANY context fails the join below,
 # preserving the original `set -e` abort semantics.
@@ -418,6 +508,9 @@ APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING})"
+		rendered="$(mktemp)"
+		workdir="$(mktemp -d)"
+		trap 'rm -rf "$workdir" "$rendered"' EXIT
 		helm template controlplane-test "$CHART_DIR" \
 			--set clusterName="$ctx" \
 			--set namespacePrefix="$NS" \
@@ -425,8 +518,17 @@ for ctx in "${CONTEXTS[@]}"; do
 			--set serviceCount="$SERVICE_COUNT" \
 			--set replicasPerService="$REPLICAS" \
 			--set sidecarScoping="$SIDECAR_SCOPING" \
-			| "${apply[@]}" --context="$ctx" -f - \
-			|| { echo "error: apply failed on $ctx" >&2; exit 1; }
+			> "$rendered" \
+			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
+		if ((DRY_RUN)); then
+			# Dry-run never touches the cluster: a single client-side dry-run of the
+			# whole render is sufficient (no throttle, no retry needed).
+			"${apply[@]}" --context="$ctx" -f "$rendered" \
+				|| { echo "error: dry-run apply failed on $ctx" >&2; exit 1; }
+		else
+			apply_chunked "$rendered" "$ctx" "$workdir" \
+				|| { echo "error: apply failed on $ctx" >&2; exit 1; }
+		fi
 	) &
 	APPLY_PIDS+=($!)
 done
