@@ -301,6 +301,35 @@ report_json() {
 		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout}, rows: $rows}'
 }
 
+# Metric glossary appended to the END of the markdown summary (#17). Definitions are
+# pulled from tests/churn-dataplane/README.md; units/source/caveats mirror it, not invented.
+glossary_section() {
+	cat <<'GLOSSARY'
+
+## Glossary
+
+Definitions for every metric column in the results table above. Sourced from
+`tests/churn-dataplane/README.md`. Each row pairs a **baseline** phase (no churn) with a
+**churn** phase under concurrent endpoint scaling; `delta_*` = churn − baseline. A row is
+**valid** only when BOTH phases are `status == OK` and not restart-poisoned
+(`istiod_restarted == 0`); `valid_runs < total_runs` means some pairs were dropped.
+
+| Column | Units | Source | Definition / caveats |
+|--------|-------|--------|----------------------|
+| `mesh_size` | clusters | sweep axis | Mesh size (number of clusters / deployments). |
+| `churn_rate` | scale-ops/s | sweep axis | Endpoint churn rate applied during the churn phase; baseline rows are `0`. |
+| `delta_p99_ms` | ms | Fortio JSON, derived | `churn_p99 − baseline_p99` — added tail latency under churn; `N/A` unless a valid baseline+churn pair exists. |
+| `stdev_delta_p99` | ms | Welford (internal) | Standard deviation of `delta_p99_ms` across valid repetitions; `N/A` when `valid_runs < 2`. |
+| `total_runs` | runs | internal | All baseline+churn pairs for the cell, including poisoned/failed. |
+| `valid_runs` | runs | internal | Pairs where both phases are OK and not restart-poisoned; used in every average. |
+| `baseline_p99_ms` / `churn_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | p99 latency in the baseline / churn phase. |
+| `baseline_p50_ms` / `churn_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | p50 latency in the baseline / churn phase. |
+| `baseline_qps` / `churn_qps` | queries/s | Fortio JSON `ActualQPS` | Achieved QPS in the baseline / churn phase; churn QPS may drop under control-plane contention. |
+| `churn_eds_pushes` | count (delta) | `pilot_xds_pushes{type="eds"}` counter delta | EDS pushes triggered during the churn phase; `N/A` if istiod restarted or the scrape failed. |
+| `churn_convergence_p99` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence during churn, reported as a **bucket range** (e.g. `0-100ms`), not an exact value; `N/A` if istiod restarted or the scrape failed. |
+GLOSSARY
+}
+
 report_md() {
 	echo "# sweep-summary"
 	echo ""
@@ -327,6 +356,9 @@ report_md() {
 	aggregate | awk -F'\t' '{
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
 	}'
+
+	# #17: metric glossary at the very end of the markdown summary.
+	glossary_section
 }
 
 report_charts() {
@@ -340,8 +372,11 @@ report_charts() {
 	aggregate | awk -F'\t' '
 	{
 		ms = $1 + 0; cr = $2 + 0; dp99 = $3; valid = $6 + 0; eds = $13
-		if (valid <= 0) next
-		if (dp99 == "N/A") next
+		# PL13/PL15 gate (mirrors report_md): a cell with no valid baseline+churn pairs
+		# (valid_runs==0) or whose delta_p99 is N/A is ABSENT, not a real 0 data point.
+		# Count it as dropped and leave has[] unset so it is never charted as 0.
+		cells_total++
+		if (valid <= 0 || dp99 == "N/A") { cells_dropped++; next }
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(cr in cr_seen)) { cr_order[++n_cr] = cr; cr_seen[cr] = 1 }
 		dp99_val[ms, cr] = dp99 + 0
@@ -349,6 +384,9 @@ report_charts() {
 		has[ms, cr] = 1
 	}
 	END {
+		if (cells_dropped > 0) {
+			printf "> %d of %d cells dropped (no valid samples / restart-poisoned) — not plotted.\n\n", cells_dropped, cells_total
+		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
 			tmp = ms_order[i]; j = i - 1

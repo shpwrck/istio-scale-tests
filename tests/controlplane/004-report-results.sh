@@ -678,6 +678,49 @@ report_csv() {
 	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
 }
 
+# Metric glossary appended to the END of the markdown summary (#17). Definitions are
+# pulled from tests/controlplane/README.md ("What Gets Measured" + the 40-column schema
+# notes); units/source/caveats mirror the README, not invented here.
+glossary_section() {
+	cat <<'GLOSSARY'
+
+## Glossary
+
+Definitions for every metric column in the results tables above. Sourced from
+`tests/controlplane/README.md`. All histogram/counter metrics are **deltas over a
+wall-clock scrape window**; istiod-sourced columns are gated on `istiod_restarted==0`
+so a restart-poisoned row is excluded from every numeric aggregate (`n_valid` mirrors this).
+
+| Column | Units | Source | Definition / caveats |
+|--------|-------|--------|----------------------|
+| `mesh_size` | clusters | sweep axis | Number of clusters participating in the mesh. |
+| `svc` (service_count) | services | sweep axis | Total dummy services per cluster. |
+| `reps` (replicas) | pods/service | sweep axis | Pods per service (drives endpoint/EDS count). |
+| `ns` (namespace_count) | namespaces | sweep axis | Namespaces holding the services. |
+| `scoping` (sidecar_scoping) | enum | sweep axis | `Sidecar` CR mode: `none` / `namespace` / `explicit`. |
+| `n_total` | rows | internal | All rows for the cell, including restart-poisoned/`unknown` and degraded (`SETUP_FAILED`/`PROBE_FAILED`/`ZERO_PODS`) rows. |
+| `n_valid` | rows | internal | Rows with `istiod_restarted==0` used in numeric aggregation; `n_valid < n_total` means some rows were dropped as poisoned. |
+| `cpu_avg (m)` | millicores (per replica) | `process_cpu_seconds_total` delta ÷ window × 1000 | istiod CPU over the scrape window; `overflow` if it exceeds the histogram top bucket; `N/A` on restart/missing baseline. |
+| `mem_avg (Mi)` | MiB (per replica) | `process_resident_memory_bytes` (istiod `/metrics`) | Peak RSS of (baseline, 5 s polled samples, final scrape) over the window. |
+| `heap_alloc (Mi)` | MiB | `go_memstats_alloc_bytes` | Go heap allocated — point-in-time at final scrape, not a peak. |
+| `heap_inuse (Mi)` | MiB | `go_memstats_heap_inuse_bytes` | Go heap in use — point-in-time at final scrape; steady-state signal independent of RSS (which stays inflated after GC via `MADV_FREE`). |
+| `conv_p99 (ms)` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence reported as a **bucket range** (e.g. `100-500`), not an exact value — istiod buckets are 100/500/1000/3000/5000/10000/20000/30000 ms. `†` = SINGLE-BUCKET-PINNED (all delta mass in the 0-100 ms bucket; a uniform-within-bucket assumption, unresolved below 100 ms). |
+| `queue_p99 (ms)` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 time pushes waited in istiod's queue; same bucket-range / `†` semantics as `conv_p99`. |
+| `proxies` (connected_proxies) | proxies | `pilot_xds` gauge (final scrape) | Connected proxy count; gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
+| `cfg_dump_avg (MB)` | MB | `pilot-agent request /config_dump?include_eds` → `wc -c` | Real per-proxy config-dump size (EDS included by design — the cost `Sidecar` scoping reduces); proxy-side, so ingested regardless of istiod restart state. |
+| `restarts` | rows | `istiod_restarted==1` | Rows where `process_start_time_seconds` moved forward between baseline and final scrape; counters/histograms for those samples may under-report. |
+| `unk_restarts` | rows | `istiod_restarted==unknown` | Rows where restart state was undetectable (a pinned pod disappeared / missing `process_start_time_seconds`). |
+
+The "Sidecar scoping effect" table reuses `cfg_dump_avg` (per-proxy `/config_dump` MB)
+and renders the reduction percentage of `namespace`/`explicit` relative to `none`
+(`none->ns`, `none->explicit`); `N/A` where a scoping mode was not swept for that base combo.
+The "Achieved scale vs capacity (O9)" block reports point-in-time capacity reads (node
+allocatable, istiod limits/requests per replica, `*_pct_of_limit`/`node_*_pct` utilization
+from `kubectl top`, `istiod_rss_pct_of_limit` from peak RSS, pods scheduled/allocatable) —
+maxes over `n_valid`-gated rows, not windowed aggregates.
+GLOSSARY
+}
+
 report_markdown() {
 	local aggregated
 	aggregated=$(aggregate)
@@ -829,6 +872,9 @@ EFFECT_HDR
 				ns_r, ex_r
 		}
 	}' <<<"$aggregated"
+
+	# #17: metric glossary at the very end of the markdown summary.
+	glossary_section
 }
 
 report_json() {
@@ -891,17 +937,32 @@ report_charts() {
 	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
 	# Chart 2: Per-proxy config dump size (MB) by scoping at largest mesh size.
 	awk -F'\t' '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	NR == 1 { next }
 	{
-		ms = $1 + 0; scoping = $5
-		cpu = $24 + 0; cfg = $25 + 0
+		ms = $1 + 0; scoping = $5; n_valid = $7 + 0
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
-		cpu_val[ms, scoping] = cpu
-		cfg_val[ms, scoping] = cfg
+		# PL13/PL15 + PL8 gate (mirrors the markdown/json n_valid + overflow handling):
+		# a cell with no valid samples (every row restart-poisoned/unknown so n_valid==0,
+		# where the aggregate emit3 returned a synthetic zero) or whose charted column
+		# carries the overflow sentinel (cpu_delta_avg $24 / cfg_dump_avg $25) is ABSENT,
+		# not a real 0 data point. Coercing it (awk $24 + 0) would plot a poisoned/overflow
+		# cell as the LOWEST CPU point, the inverse of reality. Count it as dropped and
+		# leave has[] unset so it is never charted as 0.
+		cells_total++
+		if (n_valid <= 0 || $24 == "overflow" || $25 == "overflow" || !is_num($24) || !is_num($25)) {
+			cells_dropped++
+			next
+		}
+		cpu_val[ms, scoping] = $24 + 0
+		cfg_val[ms, scoping] = $25 + 0
 		has[ms, scoping] = 1
 	}
 	END {
+		if (cells_dropped > 0) {
+			printf "> %d of %d cells dropped (no valid samples / restart-poisoned / overflow) — not plotted.\n\n", cells_dropped, cells_total
+		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
 			tmp = ms_order[i]; j = i - 1

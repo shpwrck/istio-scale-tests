@@ -201,6 +201,36 @@ report_csv() {
 	done <<<"$AGG_TSV"
 }
 
+# Metric glossary appended to the END of the markdown summary (#17). Definitions are
+# pulled from tests/dataplane/README.md; units/source/caveats mirror it, not invented here.
+glossary_section() {
+	cat <<'GLOSSARY'
+
+## Glossary
+
+Definitions for every metric column in the results table above. Sourced from
+`tests/dataplane/README.md`. Latency percentiles come from each cell's **Fortio JSON**
+(`DurationHistogram.Percentiles` / `.Max`, seconds → ms); numeric averages are over
+**valid rows only** — rows with `status != OK` or `istiod_restarted != 0` are excluded
+(`n_valid < n_total` means some rows were dropped).
+
+| Column | Units | Source | Definition / caveats |
+|--------|-------|--------|----------------------|
+| `mesh_size` | clusters | sweep axis | Number of clusters in the mesh (`--mesh-size`). |
+| `qps_target` | queries/s | sweep axis | Target offered load for the Fortio run (`--qps-levels`). |
+| `target_class` | enum | internal | `local` (same cluster as the source, intra-cluster baseline) or `remote` (different cluster, routed via the east-west gateway). |
+| `n_total` | rows | internal | All rows for the cell, including poisoned/placeholder rows. |
+| `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages. |
+| `avg_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | Mean p50 latency over valid rows; `N/A` if the percentile was missing or every row was dropped. |
+| `avg_p90_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[90]` | Mean p90 latency over valid rows. |
+| `avg_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | Mean p99 latency over valid rows. |
+| `avg_p999_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99.9]` | Mean p99.9 latency over valid rows. |
+| `avg_max_ms` | ms | Fortio JSON `DurationHistogram.Max` | Mean of the per-run maximum observed latency over valid rows. |
+| `avg_actual_qps` | queries/s | Fortio JSON `ActualQPS` | Mean achieved QPS over valid rows; may fall below `qps_target` under load. |
+| `avg_pct_200` | fraction (0–1) | Fortio JSON `RetCodes` | Mean fraction of HTTP 200 responses (`count(200) / sum(all codes)`); below ~0.99 the run is tagged `ERROR_RATE_HIGH` and excluded from `n_valid`. |
+GLOSSARY
+}
+
 report_markdown() {
 	echo "---"
 	for kv in "${PREAMBLE[@]}"; do
@@ -232,6 +262,9 @@ report_markdown() {
 		printf '> \xe2\x9a\xa0 %s total / %s valid rows \xe2\x80\x94 %s dropped (poisoned).\n' \
 			"$TOTAL_ALL" "$VALID_ALL" "$DROPPED_ALL"
 	fi
+
+	# #17: metric glossary at the very end of the markdown summary.
+	glossary_section
 }
 
 report_json() {
@@ -292,16 +325,24 @@ report_charts() {
 	# Chart 2: p50 vs QPS at largest mesh size, local vs remote.
 	awk -F'\t' '
 	{
-		ms = $1 + 0; qps = $2 + 0; cls = $3; p50 = $6
+		ms = $1 + 0; qps = $2 + 0; cls = $3; n_valid = $5 + 0; p50 = $6
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (qps > max_qps) max_qps = qps
 		if (ms > max_ms) max_ms = ms
 		if (!(qps in qps_seen)) { qps_order[++n_qps] = qps; qps_seen[qps] = 1 }
 		if (!(cls in cls_seen)) { cls_order[++n_cls] = cls; cls_seen[cls] = 1 }
+		# PL13/PL15 gate (mirrors the markdown drop summary): a cell with no valid samples
+		# (n_valid==0 -> favg returned "N/A") is ABSENT, not a real 0 data point. Count it
+		# as dropped and leave has[] unset so it is never charted as 0.
+		cells_total++
+		if (n_valid <= 0 || p50 == "N/A") { cells_dropped++; next }
 		p50_val[ms, qps, cls] = p50
 		has[ms, qps, cls] = 1
 	}
 	END {
+		if (cells_dropped > 0) {
+			printf "> %d of %d cells dropped (no valid samples / restart-poisoned) — not plotted.\n\n", cells_dropped, cells_total
+		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
 			tmp = ms_order[i]; j = i - 1
