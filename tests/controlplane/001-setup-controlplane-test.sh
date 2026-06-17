@@ -49,6 +49,16 @@ SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
+# PL37 cleanup->setup cascade fix: if a namespace from the PREVIOUS combo is still
+# Terminating when this setup starts, applying the chart (which includes a
+# kind: Namespace) fails — you cannot create a Terminating Namespace nor namespaced
+# resources inside it — turning a slow 005 teardown into a SETUP_FAILED cascade
+# (~40% data loss, deterministic odd/even). So before applying, poll-until-gone
+# (PL4) for any pre-existing instance of EVERY target namespace on EVERY context.
+# The wait lives in 001 so the precondition travels WITH setup (a manual 001 after
+# a manual 005 benefits too). Defaults to reuse the same bound 005 uses for its own
+# namespace-termination wait (same contract).
+SETUP_NS_WAIT_SEC="${CONTROLPLANE_SETUP_NS_WAIT_SEC:-${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}}"
 
 usage() {
 	cat <<EOF
@@ -68,12 +78,17 @@ Usage: $(basename "$0") [options]
   --dry-run              Pass --dry-run=client to oc apply
                          (skips the --server-side path).
   --wait-timeout N       Seconds to wait for pods (default: 300).
+  --ns-wait-timeout N    Seconds to wait for a pre-existing (Terminating) namespace
+                         to fully disappear before applying (default: $SETUP_NS_WAIT_SEC).
+                         PL37 cleanup->setup cascade guard; skipped in --dry-run.
   -h, --help             Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
   CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
-  CONTROLPLANE_SIDECAR_SCOPING.
+  CONTROLPLANE_SIDECAR_SCOPING,
+  CONTROLPLANE_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to
+  clear; defaults to CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300).
 
   O9 scale-coverage (DEFAULT-OFF — fixed/0 means behaviour is unchanged):
   SCALE_SIZING_MODE (fixed|auto; auto derives SERVICE_COUNT from cluster capacity),
@@ -119,6 +134,11 @@ while [[ $# -gt 0 ]]; do
 		WAIT_TIMEOUT="$2"
 		shift 2
 		;;
+	--ns-wait-timeout)
+		[[ -n "${2:-}" ]] || die "--ns-wait-timeout requires a value"
+		SETUP_NS_WAIT_SEC="$2"
+		shift 2
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -133,6 +153,7 @@ is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (
 is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
 is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
 is_nonneg_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a non-negative integer (got: $WAIT_TIMEOUT)"
+is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "--ns-wait-timeout must be a non-negative integer (got: $SETUP_NS_WAIT_SEC)"
 validate_scoping "$SIDECAR_SCOPING"
 
 if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
@@ -280,6 +301,49 @@ if ! ((DRY_RUN)); then
 		fi
 	done
 	echo ""
+fi
+
+# PL37 cleanup->setup cascade fix: poll-until-gone (PL4) for any pre-existing
+# instance of EVERY target namespace before applying. A slow 005 teardown of the
+# previous combo must DELAY this setup, never DESTROY its data. Returns 0 once all
+# this context's target namespaces are absent (or never existed); returns 1 if any
+# is still present after SETUP_NS_WAIT_SEC — at which point applying the chart's
+# kind: Namespace would fail anyway, so the caller (die below -> 003's PL32
+# SETUP_FAILED wrap) records a legitimate, now-rare, failure rather than hanging.
+wait_ns_gone() {
+	local ctx="$1" ns deadline now
+	for ns in "${NAMESPACES[@]}"; do
+		"${KUBECTL[@]}" --context="$ctx" get namespace "$ns" >/dev/null 2>&1 || continue
+		echo "  [$ctx] namespace $ns still present (Terminating?); waiting up to ${SETUP_NS_WAIT_SEC}s for it to clear before apply..." >&2
+		deadline=$(( $(date +%s) + SETUP_NS_WAIT_SEC ))
+		while "${KUBECTL[@]}" --context="$ctx" get namespace "$ns" >/dev/null 2>&1; do
+			now=$(date +%s)
+			if (( now > deadline )); then
+				echo "  [$ctx] namespace $ns did not clear within ${SETUP_NS_WAIT_SEC}s; cannot apply into a Terminating namespace; check stuck finalizers: ${KUBECTL[*]} --context=$ctx get ns $ns -o jsonpath='{.spec.finalizers}'" >&2
+				return 1
+			fi
+			sleep 2
+		done
+		echo "  [$ctx] namespace $ns cleared; proceeding with apply." >&2
+	done
+	return 0
+}
+
+if ((DRY_RUN)); then
+	# Mirror the live wait's plan style; the actual wait below is DRY_RUN-gated so
+	# no cluster call happens in --dry-run.
+	echo "  [dry-run] would wait up to ${SETUP_NS_WAIT_SEC}s for any pre-existing Terminating namespace (${NAMESPACES[*]}) on each context before apply" >&2
+fi
+
+if ! ((DRY_RUN)); then
+	NS_WAIT_PIDS=()
+	for ctx in "${CONTEXTS[@]}"; do
+		wait_ns_gone "$ctx" &
+		NS_WAIT_PIDS+=($!)
+	done
+	for pid in "${NS_WAIT_PIDS[@]}"; do
+		wait "$pid" || die "a pre-existing namespace did not clear within ${SETUP_NS_WAIT_SEC}s on one or more contexts; refusing to apply into a Terminating namespace"
+	done
 fi
 
 # Use server-side apply so partial updates and field-manager ownership are
