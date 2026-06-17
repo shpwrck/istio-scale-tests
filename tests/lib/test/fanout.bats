@@ -83,13 +83,14 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 @test "fanout_merge_histogram + delta_histogram_p99: merged buckets land p99 on the expected bucket" {
 	# Merged convergence buckets (pod0+pod1) against a zero baseline:
 	#   le=0.5:40  le=1:90  le=3:120  +Inf:120 ; count=120
-	# target = 120 * 0.99 = 118.8 -> first cumulative bucket >= target is le=3
-	#   -> 3 * 1000 = 3000.00
+	# target = 120 * 0.99 = 118.8 -> crosses in the [1,3] bucket (cum 90->120).
+	# Linear interpolation: 1 + (3-1)*(118.8-90)/(120-90) = 2.92s -> 2920.00ms
+	# (was 3000.00 when this emitted the bucket ceiling; FINDING #5 interpolation fix)
 	merged=$(mktemp)
 	fanout_merge_histogram pilot_proxy_convergence_time "$merged" "$POD0" "$POD1"
 	result=$(delta_histogram_p99 "$ZERO" "$merged" pilot_proxy_convergence_time)
 	rm -f "$merged"
-	[ "$result" = "3000.00" ]
+	[ "$result" = "2920.00" ]
 }
 
 @test "fanout_merge_histogram: merged _count equals the sum of per-pod counts" {
@@ -106,8 +107,10 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	fanout_merge_histogram pilot_proxy_convergence_time "$merged" "$POD0"
 	result=$(delta_histogram_p99 "$ZERO" "$merged" pilot_proxy_convergence_time)
 	rm -f "$merged"
-	# pod0 alone: count 50, target 49.5; cumulative le=0.5:30 le=1:50>=49.5 -> 1*1000
-	[ "$result" = "1000.00" ]
+	# pod0 alone: count 50, target 49.5; crosses in [0.5,1] (cum 30->50).
+	# Linear interpolation: 0.5 + (1-0.5)*(49.5-30)/(50-30) = 0.9875s -> 987.50ms
+	# (was 1000.00 when this emitted the bucket ceiling; FINDING #5 interpolation fix)
+	[ "$result" = "987.50" ]
 }
 
 # --- empty / incomplete scrape detection -----------------------------------

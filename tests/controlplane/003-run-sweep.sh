@@ -367,6 +367,76 @@ precreate_tsv_preamble() {
 	echo -e "$CONTROLPLANE_TSV_HEADER" >> "$tsv"
 }
 
+# P0-h: pre-run capacity WARN (FINDING #3 arithmetic as a runtime guard). For the
+# LARGEST planned combo, estimate the per-cluster sidecar-CPU request and compare it
+# to free node CPU (node allocatable − istiod baseline). The dominant data-plane
+# capacity driver is the per-proxy sidecar CPU request × workload count, NOT istiod;
+# at the fixed-3-node rig this caps at ~40-46 services/cluster. This is a WARN only
+# (the existing per-context preflight in 001 is the hard gate); it surfaces the
+# ceiling at plan time so an operator can hand-cap --service-counts before burning a
+# multi-hour sweep. Uses SCALE_PER_POD_CPU_M (config/options.env) — never hardcoded.
+#
+# Dry-run NEVER contacts a cluster (AGENTS --dry-run rule): it prints only the
+# REQUESTED cores (which need no cluster). The free-capacity comparison + services-
+# that-fit estimate run only on the real plan path, reading the same cap_node_totals
+# / cap_istiod_limits the preamble uses (source context, read-only).
+capacity_plan_warn() {
+	local per_pod_cpu_m="${SCALE_PER_POD_CPU_M:-200}"
+	# Largest combo: max service_count × max replica_count.
+	local max_sc=0 max_rc=0 v
+	for v in "${SERVICE_COUNTS[@]}"; do (( v > max_sc )) && max_sc="$v"; done
+	for v in "${REPLICA_COUNTS[@]}"; do (( v > max_rc )) && max_rc="$v"; done
+	local needed_pods=$(( max_sc * max_rc ))
+	local needed_cpu_m=$(( needed_pods * per_pod_cpu_m ))
+	echo "--- Capacity plan check (largest combo: ${max_sc} svc × ${max_rc} rep) ---" >&2
+	echo "  requested: ${needed_pods} sidecar-pods × ${per_pod_cpu_m}m = ~$(( needed_cpu_m / 1000 )) cores/cluster (SCALE_PER_POD_CPU_M=${per_pod_cpu_m})" >&2
+
+	if ((DRY_RUN)); then
+		echo "  WARN: dry-run does not contact clusters; free-capacity comparison skipped. Run without --dry-run for the services-that-fit estimate." >&2
+		echo "" >&2
+		return 0
+	fi
+	(( ${#KUBECTL[@]} )) || { echo "  WARN: no oc/kubectl; cannot read node capacity for the fit estimate." >&2; echo "" >&2; return 0; }
+
+	local src_ctx="${CONTEXTS[0]}" alloc_cpu_m="" istiod_cpu_m="" istiod_rep="" kv
+	# shellcheck disable=SC2207
+	local -a nt=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${nt[@]}"; do case "$kv" in cpu_m=*) alloc_cpu_m="${kv#cpu_m=}" ;; esac; done
+	# shellcheck disable=SC2207
+	local -a il=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
+	for kv in "${il[@]}"; do
+		case "$kv" in
+			cpu_m=*) istiod_cpu_m="${kv#cpu_m=}" ;;
+			replicas=*) istiod_rep="${kv#replicas=}" ;;
+		esac
+	done
+	if ! [[ "$alloc_cpu_m" =~ ^[0-9]+$ ]]; then
+		echo "  WARN: node allocatable CPU unreadable on $src_ctx; cannot estimate services-that-fit." >&2
+		echo "" >&2
+		return 0
+	fi
+	# istiod baseline = per-replica istiod CPU limit × replicas (the aggregate control-
+	# plane reservation on the cluster). Unknown istiod limit -> baseline 0 (conservative
+	# overstate of free CPU; still flags the gross over-provision case).
+	local istiod_baseline_m=0
+	if [[ "$istiod_cpu_m" =~ ^[0-9]+$ && "$istiod_rep" =~ ^[0-9]+$ ]]; then
+		istiod_baseline_m=$(( istiod_cpu_m * istiod_rep ))
+	fi
+	local free_cpu_m=$(( alloc_cpu_m - istiod_baseline_m ))
+	(( free_cpu_m < 0 )) && free_cpu_m=0
+	local max_services=0
+	if (( max_rc > 0 && per_pod_cpu_m > 0 )); then
+		max_services=$(( free_cpu_m / (max_rc * per_pod_cpu_m) ))
+	fi
+	echo "  node alloc CPU: ~$(( alloc_cpu_m / 1000 )) cores; istiod baseline: ~$(( istiod_baseline_m / 1000 )) cores (${istiod_cpu_m:-unknown}m × ${istiod_rep:-unknown} rep) -> ~$(( free_cpu_m / 1000 )) cores free" >&2
+	if (( needed_cpu_m > free_cpu_m )); then
+		echo "  WARN: combo needs ~$(( needed_cpu_m / 1000 )) cores/cluster, ~$(( free_cpu_m / 1000 )) free -> ~${max_services} services max (at ${max_rc} replicas). Reduce --service-counts to <= ${max_services}, add nodes, or expect FailedScheduling/SETUP_FAILED on the largest combo." >&2
+	else
+		echo "  OK: largest combo fits (~$(( needed_cpu_m / 1000 )) needed <= ~$(( free_cpu_m / 1000 )) free; ~${max_services} services would fit at ${max_rc} replicas)." >&2
+	fi
+	echo "" >&2
+}
+
 # #44 prevention: metrics-API readiness gate. The O9 utilization-% columns are
 # sourced from `kubectl top` (metrics API), a path independent of the istiod
 # /metrics the sweep measures; a transient metrics-server outage (e.g. still
@@ -463,6 +533,10 @@ elif command -v kubectl >/dev/null 2>&1; then
 else
 	KUBECTL=()
 fi
+
+# P0-h capacity gate: print the plan-time capacity WARN (dry-run-safe: no cluster
+# contact in dry-run). Placed after KUBECTL resolution so the live read path works.
+capacity_plan_warn
 
 if ((DRY_RUN)); then
 	echo "--- Combinations (dry-run) ---" >&2

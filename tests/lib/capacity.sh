@@ -329,10 +329,17 @@ cap_node_used() {
 }
 
 # cap_pod_count <ctx> <worker_names_csv> <kubectl_argv...>
+# Counts pods scheduled on worker nodes that are Running/Pending. At 10k pods ×
+# 20 contexts a full `-A -o json` is a hundreds-of-MB serial response on the hot
+# path, so we (a) drop terminal pods server-side with a field selector (the parse
+# only counts Running/Pending anyway, so this is semantics-preserving) and (b)
+# page the list with --chunk-size so kubectl never buffers the whole set at once.
 # shellcheck disable=SC2329
 cap_pod_count() {
 	local ctx="$1" workers="$2"; shift 2
-	"$@" --context="$ctx" --request-timeout=5s get pods -A -o json 2>/dev/null \
+	"$@" --context="$ctx" --request-timeout=5s get pods -A -o json \
+		--field-selector=status.phase!=Succeeded,status.phase!=Failed \
+		--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null \
 		| cap_parse_pod_count "$workers"
 }
 

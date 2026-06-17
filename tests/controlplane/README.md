@@ -193,6 +193,16 @@ The sweep runs `mesh-sizes x service-counts x replica-counts x namespace-counts 
 
 Services are distributed deterministically: service `i` is created in namespace `i mod namespace-count`. When `namespace-count = 1` the single namespace keeps its legacy name (`controlplane-test`).
 
+### Sidecar egress-coverage precondition (`--namespace-count > 1`)
+
+When `--namespace-count > 1`, the suite mints `controlplane-test-0`, `controlplane-test-1`, … The campaign's root `Sidecar` (`charts/spoke-ossm` `tuningBaseline`) carries an egress allow-list whose namespace parts are **exact matches** — `controlplane-test/*` does **not** cover `controlplane-test-0/*`. An uncovered namespace silently strips those proxies' egress (no endpoints), which reads downstream as a dead measurement rather than a config error.
+
+`001-setup-controlplane-test.sh` therefore runs a **fail-fast precondition** (skipped in `--dry-run`): it live-queries each source context's root `Sidecar` egress hosts and **dies** if any generated namespace is not covered (unless egress is `*/*` or the Sidecar is absent), pointing you at `charts/spoke-ossm/values.yaml` `tuningBaseline.discoverySelectors.egressHosts` to add an explicit `<ns>/*` entry per extra namespace. Auto-generating the entries is out of scope; this is the GO-safe guard.
+
+### Pre-run capacity gate (plan time)
+
+`003-run-sweep.sh` prints a **capacity plan check** before the matrix: for the largest planned combo it computes the requested per-cluster sidecar CPU (`max(service-counts) × max(replica-counts) × SCALE_PER_POD_CPU_M`, from `config/options.env`). On a real run it also reads node allocatable CPU and the istiod baseline (`cap_node_totals` / `cap_istiod_limits`, source context, read-only) and **WARNs** with the services-that-fit estimate when the largest combo exceeds free CPU (turning FINDING #3's ~46-svc arithmetic into a runtime guard). In `--dry-run` it prints only the requested cores (no cluster contact). It is a WARN — `001`'s per-context preflight remains the hard gate.
+
 ## Sweep Examples
 
 ```bash
