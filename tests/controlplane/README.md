@@ -105,6 +105,26 @@ The sweep TSV preamble is pre-created by `003` before the first combo, so a
 first-combo `SETUP_FAILED`/`PROBE_FAILED` cannot strip the run's provenance
 (`ISTIO_VERSION`/`HARNESS_SHA`/`KUBE_VERSIONS`) — the metadata always survives.
 
+### Terminating-namespace pre-apply wait (PL37)
+
+The sweep recreates the same namespace every combo: `005-cleanup` deletes it, the
+sweep loops cleanup → next `001-setup`, and `001` server-side-applies the chart
+(which includes a `kind: Namespace`). At 10k the namespaces hold many
+sidecar-injected pods, so a slow teardown can leave the namespace `Terminating`
+when the next setup starts — and you cannot create a `Terminating` Namespace, so
+the next combo's apply would fail and cascade into `SETUP_FAILED` across the whole
+combo (the deterministic data-loss failure PL37 documents). To prevent this,
+`001-setup` runs a **bounded poll-until-gone precondition** (PL4) before applying:
+on every context it waits for any pre-existing instance of every target namespace
+to fully disappear, so a slow `005` teardown merely **delays** the next setup
+rather than destroying its data. The wait is bounded by
+`CONTROLPLANE_SETUP_NS_WAIT_SEC` (default: `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC`,
+then 300 s) — the **same contract** `005` uses for its own namespace-termination
+wait, so an operator override applies symmetrically. A wait that **exhausts** dies
+and routes to the existing `SETUP_FAILED` path (it does not hang or swallow). The
+wait is skipped entirely under `--dry-run` (no cluster calls). Override per run
+with `001-setup --ns-wait-timeout N`.
+
 ## Histogram Bucket Ranges
 
 Convergence and queue-time p99 values are reported as **bucket ranges**
