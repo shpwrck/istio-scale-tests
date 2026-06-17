@@ -16,9 +16,14 @@ istioVersion: v1.28.5
 # WHOLE mesh, not the local cluster — istiod scales vertically, not horizontally
 # (extra replicas only distribute connected proxies, they do NOT shrink the cache).
 # 8Gi was sized for ~500-2000-pod meshes; 10k services / ~30k endpoints needs more.
+# replicaCount=3 matches the 20c/10k production plan. Because istiod scales
+# vertically (above), extra replicas only add HA + distribute connected proxies —
+# they do NOT shrink the cache or raise capacity. On the fixed-3-node stress rig,
+# 5×2cpu requests = 10 of ~22.5 cores (44%), starving workload-pod scheduling
+# (see STRESS_TEST_STATUS.md FINDING #3); 3 keeps HA while freeing 4 cores.
 pilot:
   autoscaleEnabled: false
-  replicaCount: 5
+  replicaCount: 3
   resources:
     requests:
       cpu: "2"
