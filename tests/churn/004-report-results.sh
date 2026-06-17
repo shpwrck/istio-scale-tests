@@ -280,6 +280,40 @@ report_csv() {
 	}'
 }
 
+# Metric glossary appended to the END of the markdown summary (#17). Definitions are
+# pulled from tests/churn/README.md; units/source/caveats mirror it, not invented here.
+glossary_section() {
+	cat <<'GLOSSARY'
+
+## Glossary
+
+Definitions for every metric column in the results table above. Sourced from
+`tests/churn/README.md`. `src_`/`rmt_` prefixes are the **source** istiod (where churn is
+applied, summed across its replicas) vs the **remote** istiod pods (summed/maxed across all
+remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
+(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*`) are excluded but still counted in
+`n_total`. Histogram p99 columns are reported as **bucket ranges** (e.g. `0-100`), not exact
+values; `overflow` means the p99 fell in the `+Inf` bucket.
+
+| Column | Units | Source | Definition / caveats |
+|--------|-------|--------|----------------------|
+| `mesh` | clusters | sweep axis | Mesh size (number of clusters). |
+| `churn` | scale-ops | sweep axis | Churn intensity per iteration. |
+| `scale` | `base->target` | sweep axis | Endpoint scale range applied to the churn target (e.g. `1->5`). |
+| `n_valid` | rows | internal | Rows with `status == OK` used in the averages. |
+| `n_total` | rows | internal | All rows for the cell, including poisoned/timed-out rows. |
+| `local_avg (ms)` | ms | source istiod `/debug/syncz` poll | Local convergence: time until all source proxies report SYNCED. |
+| `remote_reach_avg (ms)` | ms | remote sidecar Envoy `/clusters` | Remote endpoint reachability — **includes** pod scheduling + sidecar startup (data-plane signal, analogous to propagation P3). |
+| `remote_eds_avg (ms)` | ms | remote `pilot_xds_pushes{type="eds"}` counter delta | Remote EDS convergence: time to the first remote EDS push after t0 — control-plane-only, **excludes** pod boot (analogous to propagation P2). |
+| `src_triggers` / `rmt_triggers` | count (delta) | `pilot_push_triggers` counter delta | Push triggers on the source / remote istiod during the churn event. |
+| `src_pushes` / `rmt_pushes` | count (delta) | `pilot_xds_pushes` (all types) counter delta | xDS pushes on the source / remote istiod. |
+| `src_queue_p99` / `rmt_queue_p99` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 queue wait on source / remote; bucket range, `overflow`/`N/A` possible. |
+| `src_proxies` / `rmt_proxies` | proxies | `pilot_xds` gauge | Connected proxy count on source / remote istiod at baseline. |
+| `src_push_p99` / `rmt_push_p99` | ms (bucket range) | `pilot_xds_push_time` histogram delta | p99 time to compute+send each xDS push, source / remote; bucket range, `overflow`/`N/A` possible. |
+| `amplification` | ratio | derived | `(src_pushes + rmt_pushes) / src_triggers` — mesh-wide push fan-out per source event; only computed when `src_triggers > 0`; expected ≤ ~1. |
+GLOSSARY
+}
+
 report_markdown() {
 	local harness_sha
 	harness_sha=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -403,6 +437,9 @@ report_markdown() {
 			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_*) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
+
+	# #17: metric glossary at the very end of the markdown summary.
+	glossary_section
 }
 
 report_charts() {
