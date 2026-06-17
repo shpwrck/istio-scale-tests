@@ -243,11 +243,18 @@ collect_achieved_scale() {
 		upd("node_mem_pct",   $38)
 		upd("pods_sched",     $39)
 		upd("pods_alloc",     $40)
+		# P1-4: peak istiod RSS (process_resident_memory_bytes -> col 8, per-replica
+		# MiB). Always available from the /metrics scrape (unlike $36, which is the
+		# kubectl-top path and N/As during a metrics-API gap), so it gives an OOM
+		# headroom signal even when top is down. Per-replica reading; the % is taken
+		# against the PER-REPLICA mem limit downstream (clean per-replica/per-replica
+		# ratio — PL35), NOT the cross-replica limit.
+		upd("istiod_rss_mem_mi", $8)
 	}
 	END {
-		split("proxies svc istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct pods_sched pods_alloc", ks, " ")
+		split("proxies svc istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct pods_sched pods_alloc istiod_rss_mem_mi", ks, " ")
 		out = ""
-		for (i = 1; i <= 8; i++) {
+		for (i = 1; i <= 9; i++) {
 			k = ks[i]
 			v = (k in seen) ? mx[k] : "unknown"
 			out = out (out == "" ? "" : " ") k "=" v
@@ -267,6 +274,12 @@ as_get() {
 as_pct() {
 	# as_get + a trailing % on a numeric value (leaves unknown/N/A bare).
 	local v; v="$(as_get "$1")"
+	[[ "$v" =~ ^-?[0-9.]+$ ]] && echo "${v}%" || echo "$v"
+}
+pct_or_bare() {
+	# Trailing % on a numeric value (leaves unknown/N/A bare). For pre-computed
+	# scalars (not in ACHIEVED_SCALE) like the P1-4 RSS mem pct.
+	local v="${1:-unknown}"
 	[[ "$v" =~ ^-?[0-9.]+$ ]] && echo "${v}%" || echo "$v"
 }
 # Pull a `# KEY=value` provenance line from the first TSV preamble (absolute
@@ -377,6 +390,20 @@ compute_coverage
 # sweep-level scalar, surfaced once in every format alongside COVERAGE_LINE.
 SLA_VERDICT="UNKNOWN"
 SLA_HEADLINE=""
+# P1-4: istiod memory headroom from RSS (process_resident_memory_bytes peak,
+# always available even when kubectl top is N/A) as % of the PER-REPLICA mem
+# limit. In multi-primary each istiod caches the WHOLE mesh (~30k endpoints at
+# 10k svc) — an RSS approaching the limit is the OOM-mid-sweep risk the brief
+# wants surfaced alongside CPU. unknown if the RSS peak or the limit is missing.
+as_istiod_rss_mem_pct() {
+	local rss lim
+	rss="$(as_get istiod_rss_mem_mi)"
+	lim="$(preamble_get ISTIOD_MEM_LIMIT_MI)"
+	# Per-replica RSS vs per-replica limit (clean ratio — env_pct_of_limit with
+	# replicas=1 so it does NOT scale the denominator by replica count).
+	env_pct_of_limit "$rss" "$lim" 1
+}
+ISTIOD_RSS_MEM_PCT="$(as_istiod_rss_mem_pct)"
 compute_sla_verdict() {
 	local restarts n_total n_valid
 	# Sum restart rows (istiod_restarted==1) and n_total/n_valid across all valid rows.
@@ -387,9 +414,24 @@ compute_sla_verdict() {
 			else if ($31 == "0") n_valid++
 		}
 		END { printf "%d %d %d\n", restarts+0, n_total+0, n_valid+0 }')
+	# P1-4: feed the istiod memory signal to the verdict as the MAX of the
+	# kubectl-top mem pct ($36-derived) and the RSS-derived pct — whichever memory
+	# headroom signal is present and higher drives the OOM verdict, so a metrics-API
+	# gap (top N/A) no longer hides an istiod that is near its mem limit by RSS.
+	local imem_top imem_eff
+	imem_top="$(as_get istiod_mem_pct)"
+	imem_eff="$(awk -v a="$imem_top" -v b="$ISTIOD_RSS_MEM_PCT" '
+		function isnum(x){ return x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+		BEGIN {
+			ha=isnum(a); hb=isnum(b)
+			if (ha && hb) { print (a+0>b+0)?a:b }
+			else if (ha) { print a }
+			else if (hb) { print b }
+			else { print "unknown" }
+		}')"
 	local raw
 	raw="$(env_sla_verdict \
-		"$(as_get istiod_cpu_pct)" "$(as_get istiod_mem_pct)" \
+		"$(as_get istiod_cpu_pct)" "$imem_eff" \
 		"$(as_get node_cpu_pct)"   "$(as_get node_mem_pct)" \
 		"$restarts" "$n_total" "$n_valid")"
 	SLA_VERDICT="${raw%%|*}"
@@ -521,8 +563,19 @@ aggregate() {
 			uu = (k in unknowns) ? unknowns[k] : 0
 			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "0"
 			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
-			conv_fp = (nv[("conv"), k]+0 > 0 && max[("conv"), k]+0 == 100) ? 1 : 0
-			queue_fp = (nv[("queue"), k]+0 > 0 && max[("queue"), k]+0 == 100) ? 1 : 0
+			# P1-6: SINGLE-BUCKET-PINNED detection. Now that the histogram p99
+			# INTERPOLATES within the matched bucket (P0/FINDING#5), the old
+			# max==100 floor test is stale: an interpolated value lands at e.g. 73ms,
+			# not exactly 100. The honest signal is that the whole delta mass sits in
+			# the FIRST (coarsest, 0-100ms) bucket, so the reported quantile is a
+			# uniform-WITHIN-bucket assumption (Prometheus histogram_quantile
+			# semantics), NOT a value resolved against a higher bucket boundary. At the
+			# report level the available proxy is: the n_valid-gated p99 max resolves at
+			# or below the first bucket upper bound (100ms) and is greater than 0, i.e.
+			# nothing in this cell ever climbed out of bucket 0. Flag it so the rendered
+			# p99 reads as unresolved-below-100ms, mirroring the restart footnote.
+			conv_fp = (nv[("conv"), k]+0 > 0 && max[("conv"), k]+0 > 0 && max[("conv"), k]+0 <= 100) ? 1 : 0
+			queue_fp = (nv[("queue"), k]+0 > 0 && max[("queue"), k]+0 > 0 && max[("queue"), k]+0 <= 100) ? 1 : 0
 			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
 				p[1], p[2], p[3], p[4], p[5], nt, nv_count,
 				emit3("mem",       k),
@@ -558,6 +611,8 @@ report_text() {
 	echo "  services_total [configured] (max): $(as_get svc)"
 	echo "  istiod_cpu_pct_of_limit (max): $(as_pct istiod_cpu_pct)"
 	echo "  istiod_mem_pct_of_limit (max): $(as_pct istiod_mem_pct)"
+	# P1-4: RSS-derived istiod mem headroom (always available; OOM risk signal).
+	echo "  istiod_rss_pct_of_limit (max): $(pct_or_bare "$ISTIOD_RSS_MEM_PCT")  [process_resident_memory_bytes peak / per-replica mem limit; OOM headroom]"
 	echo "  node_cpu_pct (max):          $(as_pct node_cpu_pct)"
 	echo "  node_mem_pct (max):          $(as_pct node_mem_pct)"
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
@@ -590,13 +645,15 @@ report_text() {
 	}
 	NR == 1 { next }
 	{
+		conv_pin = ($27+0 == 1) ? "  [SINGLE-BUCKET-PINNED: all delta mass in the 0-100ms bucket; value is a uniform-within-bucket assumption, unresolved below 100ms]" : ""
+		queue_pin = ($28+0 == 1) ? "  [SINGLE-BUCKET-PINNED: all delta mass in the 0-100ms bucket; value is a uniform-within-bucket assumption, unresolved below 100ms]" : ""
 		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s (n_total=%s n_valid=%s) ---\n", $1, $2, $3, $4, $5, $6, $7
 		printf "  istiod CPU avg (m):   min=%s max=%s avg=%s   [process_cpu_seconds_total delta over window]\n", $22, $23, $24
 		printf "  istiod Memory (Mi):   min=%s max=%s avg=%s   [process_resident_memory_bytes peak]\n", $8, $9, $10
 		printf "  Go heap alloc (Mi):   min=%s max=%s avg=%s   [go_memstats_alloc_bytes]\n", $29, $30, $31
 		printf "  Go heap inuse (Mi):   min=%s max=%s avg=%s   [go_memstats_heap_inuse_bytes]\n", $32, $33, $34
-		printf "  Convergence p99 (ms): %s\n", bucket_range($12)
-		printf "  Queue p99 (ms):       %s\n", bucket_range($15)
+		printf "  Convergence p99 (ms): %s%s\n", bucket_range($12), conv_pin
+		printf "  Queue p99 (ms):       %s%s\n", bucket_range($15), queue_pin
 		printf "  Connected proxies:    min=%s max=%s avg=%s\n",     $17, $18, $19
 		if ($25+0 > 0) printf "  Config dump avg (MB): %.1f   max: %.1f\n", $25/1048576, $26/1048576
 		else if ($6 > 0) printf "  Config dump avg (MB): N/A\n"
@@ -613,7 +670,7 @@ report_csv() {
 	# CSV row schema (the aggregate columns below) is byte-identical for row consumers.
 	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) metrics_api=$(preamble_get METRICS_API) (istiod limits per replica)"
 	echo "# infra: istiod_req_cpu_m=$(preamble_get ISTIOD_REQ_CPU_M) istiod_req_mem_mi=$(preamble_get ISTIOD_REQ_MEM_MI) istiod_lim_cpu_m=$(preamble_get ISTIOD_LIM_CPU_M) istiod_lim_mem_mi=$(preamble_get ISTIOD_LIM_MEM_MI) istiod_replicas=$(preamble_get ISTIOD_REPLICAS) network_topology=$(preamble_get NETWORK_TOPOLOGY)"
-	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
+	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) istiod_rss_pct_of_limit_max=$(pct_or_bare "$ISTIOD_RSS_MEM_PCT") node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
 	echo "# tuning_baseline: $(preamble_get TUNING_BASELINE) | sidecar_egress_hosts: $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# ${COVERAGE_LINE}"
 	echo "# sla_verdict: ${SLA_VERDICT} — ${SLA_HEADLINE}"
@@ -671,6 +728,7 @@ report_markdown() {
 	echo "| services_total [configured] (max) | $(as_get svc) |"
 	echo "| istiod_cpu_pct_of_limit (max) | $(as_pct istiod_cpu_pct) |"
 	echo "| istiod_mem_pct_of_limit (max) | $(as_pct istiod_mem_pct) |"
+	echo "| istiod_rss_pct_of_limit (max) | $(pct_or_bare "$ISTIOD_RSS_MEM_PCT") |"
 	echo "| node_cpu_pct (max) | $(as_pct node_cpu_pct) |"
 	echo "| node_mem_pct (max) | $(as_pct node_mem_pct) |"
 	echo "| pods_scheduled / allocatable | $(as_get pods_sched) / $(as_get pods_alloc) |"
@@ -710,8 +768,12 @@ report_markdown() {
 		cfg_mb = ($25+0 > 0) ? sprintf("%.1f", $25/1048576) : "N/A"
 		ha = ($31+0 > 0) ? sprintf("%.0f", $31) : "N/A"
 		hi = ($34+0 > 0) ? sprintf("%.0f", $34) : "N/A"
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, ha, hi, bucket_range($12), bucket_range($15), $19, cfg_mb, $20, $21
-	}' <<<"$aggregated"
+		# P1-6: dagger-mark a SINGLE-BUCKET-PINNED conv/queue p99 (cols 27/28).
+		cp = bucket_range($12); if ($27+0 == 1) { cp = cp " †"; any_pin = 1 }
+		qp = bucket_range($15); if ($28+0 == 1) { qp = qp " †"; any_pin = 1 }
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, ha, hi, cp, qp, $19, cfg_mb, $20, $21
+	}
+	END { if (any_pin) print "\n> † SINGLE-BUCKET-PINNED: all delta mass for that quantile sits in the coarsest (0-100ms) `pilot_proxy_convergence_time` bucket, so the reported value is a uniform-within-bucket assumption (Prometheus `histogram_quantile` semantics), NOT resolved below 100ms. Real sub-bucket signal only appears once convergence climbs into a higher bucket (e.g. at 10k-service scale)." }' <<<"$aggregated"
 	if (( total_restarts > 0 || total_unknowns > 0 )); then
 		echo ""
 		local parts=()
@@ -782,6 +844,7 @@ report_json() {
 		-v tb_levers="$(preamble_get TUNING_BASELINE)" -v tb_egress="$(preamble_get SIDECAR_EGRESS_HOSTS)" \
 		-v ach_prx="$(as_get proxies)" -v ach_svc="$(as_get svc)" \
 		-v ach_icpu="$(as_get istiod_cpu_pct)" -v ach_imem="$(as_get istiod_mem_pct)" \
+		-v ach_irss="$ISTIOD_RSS_MEM_PCT" \
 		-v ach_ncpu="$(as_get node_cpu_pct)" -v ach_nmem="$(as_get node_mem_pct)" \
 		-v ach_psched="$(as_get pods_sched)" -v ach_palloc="$(as_get pods_alloc)" \
 		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && metrics_note_text)" '
@@ -789,7 +852,7 @@ report_json() {
 		if (v == "overflow") return "null"
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_svc, ach_icpu, ach_imem, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, sla_v, sla_h, metrics_note }
+	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, sla_v, sla_h, metrics_note }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -798,7 +861,9 @@ report_json() {
 		printf "\"cpu_m_delta\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($22), cell($23), cell($24)
 		printf "\"mem_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($8), cell($9), cell($10)
 		printf "\"convergence_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($11), cell($12), cell($13)
+		printf "\"convergence_p99_single_bucket_pinned\":%s,", ($27+0==1) ? "true" : "false"
 		printf "\"queue_p99_ms\":{\"min\":%s,\"max\":%s,\"avg\":%s},",      cell($14), cell($15), cell($16)
+		printf "\"queue_p99_single_bucket_pinned\":%s,", ($28+0==1) ? "true" : "false"
 		printf "\"connected_proxies\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($17), cell($18), cell($19)
 		printf "\"istiod_restarted_rows\":%d,\"istiod_restarted_unknown_rows\":%d,", $20+0, $21+0
 		printf "\"sidecar_config_bytes_avg\":%s,\"sidecar_config_bytes_max\":%s,", cell($25), cell($26)

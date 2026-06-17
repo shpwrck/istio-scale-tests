@@ -71,13 +71,9 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+# P1-1: resolve_kubectl appends --qps/--burst (KUBE_CLIENT_QPS/BURST) to every call.
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
