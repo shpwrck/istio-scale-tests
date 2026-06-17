@@ -3,5 +3,31 @@ kind: MultiClusterHub
 metadata:
   name: {{ .Values.multiclusterHub.resourceName }}
   namespace: {{ .Release.Namespace }}
+{{- /*
+  Build the effective spec. `multiclusterHub.spec` is passed through verbatim
+  (existing behaviour, e.g. localClusterName). `multiclusterHub.disabledComponents`
+  is a convenience list of MCE/ACM component NAMES to turn OFF at install — it is
+  rendered into spec.overrides.components as `{name: <n>, enabled: false}` entries
+  and DEEP-MERGED on top of any explicit spec.overrides.components. Default is an
+  empty list => the overrides block is omitted entirely (no-op; byte-identical to
+  the previous `spec: {}` render). For the 20c/10k profile this disables
+  `server-foundation` (owns ocm-proxyserver/clusterview, the malformed
+  /openapi/v2 source — BLOCKER #1) at install so the hosted apiserver never caches
+  the poison; cluster-manager registration is unaffected.
+*/ -}}
+{{- $spec := deepCopy (.Values.multiclusterHub.spec | default dict) -}}
+{{- $disabled := .Values.multiclusterHub.disabledComponents | default list -}}
+{{- if $disabled -}}
+  {{- $overrides := (get $spec "overrides") | default dict -}}
+  {{- $components := (get $overrides "components") | default list -}}
+  {{- range $name := $disabled -}}
+    {{- $components = append $components (dict "name" $name "enabled" false) -}}
+  {{- end -}}
+  {{- $_ := set $overrides "components" $components -}}
+  {{- $_ := set $spec "overrides" $overrides -}}
+{{- end }}
 spec:
-{{ toYaml .Values.multiclusterHub.spec | indent 2 }}
+{{- if $spec }}
+{{ toYaml $spec | indent 2 }}
+{{- else }} {}
+{{- end }}

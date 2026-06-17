@@ -45,6 +45,11 @@ template:
     path: charts/spoke-istio-namespaces
     helm:
       releaseName: spoke-istio-namespaces
+      parameters:
+        # Per-cluster network identity for the istio-system topology.istio.io/network
+        # label (must match the east-west/ingress gateway network).
+        - name: clusterName
+          value: "{{clusterName}}"
 
 repo:
   url: ""

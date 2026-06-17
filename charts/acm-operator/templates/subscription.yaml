@@ -5,7 +5,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   channel: {{ .Values.subscription.channel | quote }}
+  {{- if .Values.subscription.startingCSV }}
+  # Concrete CSV pin (config/versions.env ACM_MCE_VERSION). Forces Manual approval so
+  # OLM cannot auto-upgrade past the asserted build (BLOCKER #1 GO gate).
+  startingCSV: {{ .Values.subscription.startingCSV | quote }}
+  installPlanApproval: Manual
+  {{- else }}
   installPlanApproval: {{ .Values.subscription.installPlanApproval }}
+  {{- end }}
   name: {{ .Values.subscription.packageName | quote }}
   source: {{ .Values.subscription.source | quote }}
   sourceNamespace: {{ .Values.subscription.sourceNamespace | quote }}
