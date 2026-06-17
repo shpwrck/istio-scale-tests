@@ -9,3 +9,8 @@ subscription:
   source: redhat-operators
   channel: release-2.16
   installPlanApproval: Automatic
+  # Concrete CSV pin (BLOCKER #1 GO gate). Single source of truth: config/versions.env
+  # ACM_MCE_VERSION. When non-empty, OLM is pinned to this CSV (startingCSV) and
+  # installPlanApproval is forced to Manual so it cannot float past the asserted build.
+  # Empty (default) = float on the channel with Automatic approval (legacy behaviour).
+  startingCSV: ""

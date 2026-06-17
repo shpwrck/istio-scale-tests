@@ -53,13 +53,18 @@ resource "kubernetes_manifest" "acm_subscription" {
       name      = "acm-operator-subscription"
       namespace = var.acm_namespace
     }
-    spec = {
-      channel             = var.acm_channel
-      installPlanApproval = "Automatic"
-      name                = "advanced-cluster-management"
-      source              = "redhat-operators"
-      sourceNamespace     = "openshift-marketplace"
-    }
+    spec = merge(
+      {
+        channel         = var.acm_channel
+        name            = "advanced-cluster-management"
+        source          = "redhat-operators"
+        sourceNamespace = "openshift-marketplace"
+        # Concrete CSV pin forces Manual approval so OLM cannot float past the
+        # asserted MCE build (BLOCKER #1 GO gate); empty = legacy Automatic float.
+        installPlanApproval = var.acm_mce_version != "" ? "Manual" : "Automatic"
+      },
+      var.acm_mce_version != "" ? { startingCSV = var.acm_mce_version } : {},
+    )
   }
 
   wait {
@@ -78,14 +83,14 @@ resource "kubernetes_manifest" "acm_subscription" {
 
 resource "terraform_data" "acm_csv_cleanup" {
   input = {
-    token_script      = local.token_script
-    hub_api_url       = local.hub_api_url
-    hub_admin_pass    = local.hub_admin_pass
-    kubeconfig_path   = local.kubeconfig
-    hub_context       = local.hub_cluster_key
-    sub_namespace     = var.acm_namespace
-    sub_name          = "acm-operator-subscription"
-    package_name      = "advanced-cluster-management"
+    token_script    = local.token_script
+    hub_api_url     = local.hub_api_url
+    hub_admin_pass  = local.hub_admin_pass
+    kubeconfig_path = local.kubeconfig
+    hub_context     = local.hub_cluster_key
+    sub_namespace   = var.acm_namespace
+    sub_name        = "acm-operator-subscription"
+    package_name    = "advanced-cluster-management"
   }
 
   provisioner "local-exec" {
@@ -130,6 +135,16 @@ resource "helm_release" "acm_multicluster_hub" {
       value = local.acm_local_cluster_name
     },
   ]
+
+  # Component disables (e.g. ["server-foundation"] for BLOCKER #1). Empty list =
+  # no set_list entry => chart default (no overrides). Mirrors the localClusterName
+  # --set pattern but as a list.
+  set_list = var.acm_disabled_components != [] ? [
+    {
+      name  = "multiclusterHub.disabledComponents"
+      value = var.acm_disabled_components
+    },
+  ] : []
 
   depends_on = [time_sleep.wait_acm_operator]
 }

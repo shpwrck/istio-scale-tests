@@ -4,3 +4,8 @@ metadata:
   name: {{ .Values.namespaces.istioSystem | quote }}
   labels:
     {{- include "spoke-istio-namespaces.labels" . | nindent 4 }}
+    {{- if .Values.clusterName }}
+    # Multi-network tag for locally-discovered workloads; must match the
+    # east-west/ingress gateway network ("<clusterName>-<networkSuffix>").
+    topology.istio.io/network: {{ printf "%s-%s" .Values.clusterName .Values.networkSuffix | quote }}
+    {{- end }}

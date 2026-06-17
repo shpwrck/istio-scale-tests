@@ -259,6 +259,56 @@ if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	echo ""
 fi
 
+# Sidecar egress-coverage precondition (P0-d). When NAMESPACE_COUNT > 1 the suite
+# mints controlplane-test-0, controlplane-test-1, … but the campaign's root Sidecar
+# (spoke-ossm tuningBaseline) carries an egress allow-list whose namespace parts are
+# EXACT matches — "controlplane-test/*" does NOT cover "controlplane-test-0/*". An
+# uncovered namespace silently strips those proxies' egress to the workloads (no
+# endpoints), which reads downstream as a dead measurement, not a config error. So
+# fail FAST here, pointing the operator at the egressHosts list to fix, instead of
+# proceeding into a silently-broken mesh. Read-only, live-queried per source context
+# (the deployed graph, not chart defaults — cf PL39); skipped in --dry-run.
+# Auto-generating the egress entries is out of scope; this is the GO-safe guard.
+if ! ((DRY_RUN)) && ((NAMESPACE_COUNT > 1)); then
+	echo "Sidecar egress-coverage precondition (namespaceCount=$NAMESPACE_COUNT > 1)..."
+	for ctx in "${CONTEXTS[@]}"; do
+		# Live root-Sidecar egress hosts (space-joined "<ns>/<dns>" entries), same
+		# query preamble.sh uses for SIDECAR_EGRESS_HOSTS.
+		hosts="$("${KUBECTL[@]}" --context="$ctx" --request-timeout=5s -n istio-system \
+			get sidecar.networking.istio.io default \
+			-o jsonpath='{.spec.egress[*].hosts[*]}' 2>/dev/null)" || hosts="__unreadable__"
+		if [[ "$hosts" == "__unreadable__" ]]; then
+			# No narrowing Sidecar (or it can't be read) -> egress is not restricted by
+			# this guard's target; cannot assert a problem we couldn't measure.
+			echo "  WARN: $ctx: could not read the root Sidecar egress hosts; cannot verify egress coverage for the $NAMESPACE_COUNT generated namespaces. If a narrowed egress allow-list IS deployed, confirm it lists each ${NS}-<i>/* before relying on this run." >&2
+			continue
+		fi
+		# A "*/*" entry (or an exact "<ns>/*"/"<ns>/<dns>") covers a namespace. Collect
+		# the namespace parts (before the first "/") of every egress host.
+		declare -A _covered_ns=()
+		global_egress=0
+		for h in $hosts; do
+			ns_part="${h%%/*}"
+			[[ "$ns_part" == "*" ]] && global_egress=1
+			_covered_ns["$ns_part"]=1
+		done
+		if ((global_egress)); then
+			unset _covered_ns
+			continue  # "*/*" egress covers everything
+		fi
+		missing=()
+		for ns in "${NAMESPACES[@]}"; do
+			[[ -n "${_covered_ns[$ns]:-}" ]] || missing+=("$ns")
+		done
+		unset _covered_ns
+		if ((${#missing[@]})); then
+			die "context $ctx: the deployed root Sidecar egress allow-list does NOT cover these controlplane-test namespaces: ${missing[*]}. egressHosts namespace parts are EXACT matches (\"controlplane-test/*\" does NOT cover \"controlplane-test-0/*\"). Add an explicit \"<ns>/*\" entry for each to charts/spoke-ossm/values.yaml tuningBaseline.discoverySelectors.egressHosts (and re-sync the mesh), or run with --namespace-count 1. Current egress hosts: ${hosts}"
+		fi
+		echo "  $ctx: all $NAMESPACE_COUNT generated namespaces covered by the Sidecar egress allow-list — OK"
+	done
+	echo ""
+fi
+
 # Capacity preflight: verify each cluster can schedule the planned pods before
 # deploying anything. Queries node allocatable.pods and current pod count; fails
 # early with an actionable message instead of hanging at the wait timeout. This is
@@ -271,7 +321,12 @@ if ! ((DRY_RUN)); then
 	for ctx in "${CONTEXTS[@]}"; do
 		alloc=$("${KUBECTL[@]}" --context="$ctx" get nodes -o json 2>/dev/null \
 			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
-		current=$("${KUBECTL[@]}" --context="$ctx" get pods --all-namespaces --no-headers 2>/dev/null | wc -l) || current=""
+		# Cheap cluster-wide pod count: `-o name` (names only, no specs) + server-side
+		# paging so a 10k-pod × 20-context preflight doesn't stream a huge table per
+		# cluster on the hot path. One line per pod -> `wc -l` is identical to the old
+		# --no-headers count (all phases, matching the allocatable.pods slot model).
+		current=$("${KUBECTL[@]}" --context="$ctx" get pods --all-namespaces -o name \
+			--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null | wc -l) || current=""
 		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
 			remaining=$((alloc - current))
 			if ((NEEDED_PODS > remaining)); then

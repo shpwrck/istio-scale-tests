@@ -2,3 +2,10 @@ multiclusterHub:
   resourceName: multiclusterhub
   disableHubSelfManagement: false
   spec: {}
+  # MCE/ACM component names to disable at install (rendered into
+  # spec.overrides.components as {name, enabled: false}). DEFAULT-OFF: empty list =
+  # no overrides block (no-op; byte-identical to `spec: {}`). For the 20c/10k
+  # profile set this to ["server-foundation"] to keep the hub's /openapi/v2 free of
+  # the malformed clusterview/UserPermission model that crashes ArgoCD (BLOCKER #1).
+  # Wired by Terraform from var.acm_disabled_components (set_list).
+  disabledComponents: []

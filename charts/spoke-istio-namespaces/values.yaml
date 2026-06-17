@@ -2,6 +2,16 @@ namespaces:
   istioSystem: istio-system
   istioCni: istio-cni
 
+# Multi-network identity for the istio-system namespace. istiod reads the
+# topology.istio.io/network label on its own namespace to tag locally-discovered
+# workloads with this network; without it remote istiods advertise these
+# endpoints as raw pod IPs and cross-network (multi-primary) routing through the
+# east-west gateway breaks. MUST match the network the EW/ingress gateways use
+# (spoke-east-west-gateway: "<clusterName>-<networkSuffix>"). clusterName is
+# threaded per-cluster by the spoke-istio-namespaces ApplicationSet preset.
+clusterName: ""
+networkSuffix: network
+
 rbac:
   enabled: true
   argocd:

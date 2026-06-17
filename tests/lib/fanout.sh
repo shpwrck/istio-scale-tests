@@ -56,10 +56,14 @@
 # Per-context port block allocation. Collision-free across pods x contexts:
 #   local_port = FANOUT_PF_BASE + ctx_index * FANOUT_CTX_STRIDE + pod_index
 # FANOUT_PF_BASE sits above the existing 15014 (istiod) / 15100 (envoy) blocks.
-# FANOUT_CTX_STRIDE leaves headroom above the 5-replica pin for restart churn;
-# 10 contexts (indices 0-9) x up to 5 pods -> ports 21014..21198 (ctx 9 base
-# 21194 + pod 4). Per-context blocks keep ports stable across a single context's
-# own pod restarts (the block is indexed by context, not by the global pod ordinal).
+# FANOUT_CTX_STRIDE (20) leaves headroom above the 5-replica pin for restart churn.
+# Dimensioned for the 20-cluster/10k campaign: 20 contexts (indices 0-19) x up to
+# 5 pods -> ports 21014..21398 (ctx 19 base 21394 + pod 4), all in the unprivileged
+# ephemeral range and clear of the 15014/15100 blocks. (At the old 10-context scale
+# it was 21014..21198.) Per-context blocks keep ports stable across a single
+# context's own pod restarts (the block is indexed by context, not the global pod
+# ordinal). To go beyond 20 contexts, raise FANOUT_PF_BASE/STRIDE so ctx_index *
+# STRIDE + 4 stays below the ephemeral ceiling.
 : "${FANOUT_PF_BASE:=21014}"
 : "${FANOUT_CTX_STRIDE:=20}"
 # Defaults from the shared METRICS_SCRAPE_TIMEOUT base (config/options.env) so all
@@ -83,14 +87,17 @@
 # at ~50 concurrent port-forwards, but above the ~2s P1/P2 signal so it does not
 # clip legitimate slow convergence.
 #
-# R2-2 (PROVISIONAL — post-merge live-validation item): the 1000ms ceiling is
-# extrapolated from a SINGLE 4043ms outlier, not from a measured .skew distribution
-# at the campaign's 10x3 topology (~50 concurrent port-forwards). At that scale the
-# typical within-batch completion spread may routinely exceed 1000ms, which would
-# mass-drop rows at the most interesting data point. Do NOT finalize this value here:
-# validate against real `.skew` sidecars from a 10x3 run after the node-resize, then
-# re-derive. Until then the probes emit a loud rows_dropped_skew tally so a silent
-# mass-drop is visible. See docs/scale-test-team/process-learnings.md PL8.
+# R2-2 (PROVISIONAL — pre-GO live-validation item, env-overridable knob): the
+# 1000ms ceiling is extrapolated from a SINGLE 4043ms outlier, NOT from a measured
+# .skew distribution at a high-context topology. For the 20-cluster/10k campaign a
+# scrape batch fans out across ~100 concurrent port-forwards (20 contexts x up to 5
+# istiod replicas), where the typical within-batch completion spread may routinely
+# exceed 1000ms and would mass-drop rows at the most interesting data point. This
+# value MUST be re-derived from real `.skew` sidecars off a high-context (~100-PF)
+# run BEFORE the 20c/10k GO — do NOT invent a replacement here. Until then the
+# probes emit a loud rows_dropped_skew tally so a silent mass-drop is visible, and
+# the ceiling stays overridable via FANOUT_MAX_SKEW_MS. See PL8 in
+# docs/scale-test-team/process-learnings.md.
 : "${FANOUT_MAX_SKEW_MS:=1000}"
 
 # Compute the base local port for a context's per-pod port-forward block.
@@ -162,27 +169,44 @@ fanout_open() {
 	mapfile -t pods < <(fanout_list_istiod_pods "$ctx" "${kubectl_argv[@]}")
 	(( ${#pods[@]} >= 1 )) || die "fanout_open: no Running istiod pods on context $ctx"
 
-	local base port pod i attempts ready ok=0
+	# Open every pod's port-forward FIRST, then probe all of them concurrently.
+	# A serial open-then-block-on-readiness made the whole open O(sum of per-pod
+	# readiness waits); at 20 contexts x up to 5 replicas (~100 port-forwards) the
+	# per-replica wait (up to FANOUT_PF_READY_ATTEMPTS x 0.5s) compounded into
+	# minutes per context. Backgrounding the readiness polls makes it O(slowest pod).
+	local base port pod i ok=0
 	base="$(fanout_ctx_port_base "$ctx_index")"
+	local -a ports=() probe_pids=() ready_dir
+	ready_dir="$(mktemp -d "${TMPDIR:-/tmp}/fanout-ready.XXXXXX")"
 	for i in "${!pods[@]}"; do
 		pod="${pods[i]}"
 		port=$(( base + i ))
+		ports[i]="$port"
 		"${kubectl_argv[@]}" --context="$ctx" -n istio-system \
 			port-forward "pod/${pod}" "${port}":15014 >/dev/null 2>&1 &
 		_out_pids+=($!)
-		attempts=0
-		ready=0
-		while ! curl -s -o /dev/null --max-time "$FANOUT_METRICS_TIMEOUT" \
-			"http://localhost:${port}/metrics" 2>/dev/null; do
-			attempts=$((attempts + 1))
-			(( attempts > FANOUT_PF_READY_ATTEMPTS )) && break
-			sleep 0.5
-		done
-		if curl -s -o /dev/null --max-time "$FANOUT_METRICS_TIMEOUT" \
-			"http://localhost:${port}/metrics" 2>/dev/null; then
-			ready=1
-		fi
-		if (( ready )); then
+		# Background a bounded readiness poll per pod; touch a marker on success.
+		(
+			a=0
+			while ! curl -s -o /dev/null --max-time "$FANOUT_METRICS_TIMEOUT" \
+				"http://localhost:${port}/metrics" 2>/dev/null; do
+				a=$((a + 1))
+				(( a > FANOUT_PF_READY_ATTEMPTS )) && exit 0
+				sleep 0.5
+			done
+			: > "${ready_dir}/${i}.ready"
+		) &
+		probe_pids+=($!)
+	done
+	# Join ONLY the readiness probes (the port-forwards run indefinitely, so a bare
+	# `wait` would block forever). O(slowest pod) instead of O(sum of waits).
+	for i in "${probe_pids[@]}"; do wait "$i" 2>/dev/null || true; done
+	# Collect ready pods in sorted-index order so port = base+i stays stable and a
+	# skipped pod leaves a gap rather than renumbering later pods' ports.
+	for i in "${!pods[@]}"; do
+		pod="${pods[i]}"
+		port="${ports[i]}"
+		if [[ -f "${ready_dir}/${i}.ready" ]]; then
 			_out_ports+=("$port")
 			_out_pods+=("$pod")
 			ok=$((ok + 1))
@@ -190,6 +214,7 @@ fanout_open() {
 			echo "warn: istiod pod $pod on $ctx (port $port) /metrics not reachable; skipping this replica for the scrape" >&2
 		fi
 	done
+	rm -rf "$ready_dir"
 	(( ok >= 1 )) || die "fanout_open: no istiod pod on context $ctx served /metrics (all ${#pods[@]} replica PF(s) failed)"
 }
 

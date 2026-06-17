@@ -41,10 +41,22 @@ variable "acm_channel" {
   description = "OLM subscription channel for the ACM operator. Align with openshift_version per RHACM support matrix."
 }
 
+variable "acm_mce_version" {
+  type        = string
+  default     = ""
+  description = "Concrete ACM/MCE CSV to pin the operator Subscription to (startingCSV), e.g. \"advanced-cluster-management.v2.16.3\". Mirrors config/versions.env ACM_MCE_VERSION (single source of truth). When set, installPlanApproval is forced to Manual so OLM cannot float past the asserted build — the GO gate for BLOCKER #1 (ArgoCD↔ACM clusterview OpenAPI). Empty = float on acm_channel with Automatic approval."
+}
+
 variable "acm_namespace" {
   type        = string
   default     = "open-cluster-management"
   description = "Namespace for the ACM operator, MultiClusterHub, and ManagedCluster resources."
+}
+
+variable "acm_disabled_components" {
+  type        = list(string)
+  default     = []
+  description = "MCE/ACM component names to disable at MultiClusterHub install (spec.overrides.components[].enabled=false). Default empty = no overrides. For the 20c/10k profile set [\"server-foundation\"] to keep the hub /openapi/v2 free of the malformed clusterview/UserPermission model that crashes ArgoCD (BLOCKER #1); cluster-manager registration is unaffected."
 }
 
 variable "acm_cluster_set" {
