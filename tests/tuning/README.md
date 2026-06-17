@@ -123,8 +123,13 @@ each profile. For each profile it:
 3. Waits for istiod to roll out the new configuration
 4. Runs the specified test suite probe(s)
 5. Collects results into `results/sweep-<RUN_ID>/<profile-name>/`
-6. Reverts the Istio CR and deletes profile resources
+6. Reverts the Istio CR and deletes profile resources, then runs the post-revert
+   mesh-health check (issue #19)
 7. Waits for istiod to stabilize before the next profile
+
+An **EXIT / INT / TERM trap** guarantees the currently-active profile is reverted even
+if the sweep is interrupted or aborts mid-way, so an interrupted run can never leave the
+mesh modified (see "Guaranteed revert on exit/failure/interrupt" below).
 
 The `--suite` flag accepts: `controlplane`, `propagation`, `dataplane`,
 `churn`, `churn-dataplane`, or a comma-separated combination.
@@ -151,6 +156,66 @@ marker file in that profile's directory (`SETUP_FAILED` for an apply/rollout fai
 `004-compare-profiles.sh` skips marker-only directories, so a failed profile is visibly
 absent from the comparison table while the marker remains for operator inspection.
 
+### Guaranteed revert on exit/failure/interrupt (issue #19)
+
+> **⚠️ Why this matters.** A tuning profile left active on the Istio CR after a
+> sweep is not a cosmetic leak. When a stale `meshConfig.discoverySelectors`
+> override survived an interrupted sweep, istiod stopped distributing the
+> `istio-ca-root-cert` configmap to newly-created namespaces, so every subsequent
+> suite's pods hung in `Init:0/2` — the whole harness broke until the override was
+> removed by hand.
+
+To make this impossible, `003-run-tuning-sweep.sh` installs an **EXIT / INT / TERM
+trap** that reverts whatever profile is currently active before the script exits —
+whether it exits normally, aborts on an unexpected error (`set -e`), or is
+interrupted with Ctrl-C / `kill`. The trap is **idempotent**: it tracks the active
+profile in `ACTIVE_STATE_DIR` (set right before each apply, cleared right after each
+successful revert), so it is a safe no-op when no profile is active and it never
+double-reverts an already-reverted profile. A signal handler exits with the
+conventional `128+signo` status so the EXIT trap fires exactly once.
+
+After every revert, `002-revert-profile.sh` runs a **post-revert mesh-health check**
+(issue #19) that asserts the mesh is actually back to default:
+
+1. **Always:** the known tuning-override fields (`TUNING_REVERT_DIRTY_PATHS` —
+   `meshConfig.discoverySelectors`, `pilot.env.PILOT_ENABLE_CDS_CACHE`, …) must be
+   **absent** from the live Istio CR. A surviving field FAILs the check.
+2. **Opt-in** (`TUNING_REVERT_HEALTHCHECK_NS_PROBE=1`): create a throwaway namespace,
+   label it `istio-discovery=enabled` so it is discoverable under the campaign
+   baseline, and confirm the `istio-ca-root-cert` configmap lands in it within
+   `TUNING_REVERT_HEALTHCHECK_TIMEOUT` — an end-to-end proof that cert distribution
+   to **new** namespaces works again. The namespace is deleted afterward.
+
+If the mesh is left dirty, `002` prints a loud banner and **exits 3** so the operator
+sees the mesh needs manual attention; the sweep and `005-cleanup.sh` both tolerate
+this exit code (they already wrap revert in `|| warn`). Both layers are
+`--dry-run`-safe and offline-safe to define (they only touch a cluster at revert
+time). Tune the gate via the `TUNING_REVERT_HEALTHCHECK_*` and
+`TUNING_REVERT_DIRTY_PATHS` knobs in `config/options.env`.
+
+### Baseline-integrity hazard (issue #19)
+
+> **⚠️ The baseline snapshot is captured from the LIVE Istio CR, which makes it
+> cumulative.** `001-apply-profile.sh` saves the *current* Istio CR as the baseline
+> just before patching. If the mesh was **already dirty** at capture time — e.g. a
+> prior sweep was interrupted before its revert, or an out-of-band patch left a
+> tuning override active — that override is **baked into the snapshot**. A later
+> "revert" then faithfully restores the dirty state, and the mesh is never actually
+> returned to default. This is the root-cause class behind issue #19.
+
+`001` (at capture) and `002` (at restore) both **detect and warn loudly** when a
+baseline YAML already contains a known tuning-override field
+(`TUNING_REVERT_DIRTY_PATHS`); they never silently rewrite the snapshot, because a
+leaked override cannot be distinguished from legitimate config purely offline. If you
+see this warning, restore the mesh to a clean default before re-capturing.
+
+> **Ideal fix (follow-up):** capture the baseline from the **GitOps / Argo source of
+> truth** (the rendered chart values the operator reconciles toward) rather than the
+> live CR, so a transiently-dirty live CR can never contaminate the baseline. The
+> mesh is GitOps-managed (see root `AGENTS.md`), so the canonical default lives in
+> the Argo `Application` source, not in the running CR. This is deferred as a
+> follow-up; the detect-and-warn guard above is the in-suite mitigation until then.
+
 ## Combining Profiles
 
 Profiles can be combined (stacked) by passing multiple profile names to the
@@ -168,7 +233,7 @@ some combinations may interact:
 | Script | Purpose |
 |--------|---------|
 | `001-apply-profile.sh` | Apply a tuning profile to the live mesh |
-| `002-revert-profile.sh` | Revert the mesh to its pre-profile baseline state |
+| `002-revert-profile.sh` | Revert the mesh to its pre-profile baseline state, then run the post-revert mesh-health check (#19) |
 | `003-run-tuning-sweep.sh` | Orchestrate apply → probe → revert for multiple profiles |
 | `004-compare-profiles.sh` | Compare results across profiles (text/csv/json/markdown) |
 | `005-cleanup.sh` | Remove all tuning test resources and revert any active profile |
