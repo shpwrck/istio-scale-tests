@@ -62,6 +62,12 @@ DRY_RUN=0
 METRICS_API_STATUS="unknown"  # #44: set by metrics_preflight; recorded in the preamble
 FORCE_LARGE_MATRIX=0
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
+# P1-5: resume an interrupted sweep. When set to an existing sweep dir, the
+# orchestrator reuses that dir + its RUN_ID (appending, not minting a new one)
+# and SKIPS any combo whose TSV already holds a valid row (NF>=40 && $31=="0")
+# for that (mesh,svc,rep,ns,scope) key — so a multi-hour 20c sweep that died at
+# combo 40/64 resumes from 41 instead of restarting the whole matrix.
+RESUME_DIR=""
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 
@@ -93,6 +99,12 @@ Other:
   --output-dir DIR            Results base directory; each sweep gets a
                               sweep-<RUN_ID>/ subdir under it
                               (default: tests/controlplane/results).
+  --resume DIR                Resume an interrupted sweep: reuse this existing
+                              sweep-<RUN_ID>/ dir + RUN_ID (append, don't mint a
+                              new one) and SKIP any combo that already has a valid
+                              row (NF>=40 && istiod_restarted==0) for its
+                              (mesh,svc,rep,ns,scope) key. Mutually exclusive with
+                              --output-dir. Not valid with --dry-run.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -190,6 +202,11 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR_BASE="$2"
 		shift 2
 		;;
+	--resume)
+		[[ -n "${2:-}" ]] || die "--resume requires a value (an existing sweep dir)"
+		RESUME_DIR="$2"
+		shift 2
+		;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1
 		shift
@@ -210,6 +227,11 @@ done
 
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
+# P1-5: --resume reuses an existing sweep dir, so a custom --output-dir base is
+# meaningless (and ambiguous) alongside it. Refuse the combination explicitly.
+if [[ -n "$RESUME_DIR" && "$OUTPUT_DIR_BASE" != "${ROOT}/tests/controlplane/results" ]]; then
+	die "--resume and --output-dir are mutually exclusive (--resume already names the full sweep dir)"
+fi
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -271,8 +293,42 @@ MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]
 
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+# P1-5: resume vs fresh sweep. On --resume, reuse the existing dir + its RUN_ID
+# (so the TSV/markdown/envelope keep one identity and 002 appends to the same
+# file); otherwise mint a fresh RUN_ID and a new sweep-<RUN_ID>/ subdir (PL6).
+if [[ -n "$RESUME_DIR" ]]; then
+	((DRY_RUN)) && die "--resume is not valid with --dry-run (nothing to resume in a plan-only run)"
+	[[ -d "$RESUME_DIR" ]] || die "--resume: sweep dir not found: $RESUME_DIR"
+	OUTPUT_DIR="$RESUME_DIR"
+	# Recover RUN_ID from the existing TSV (controlplane-<RUN_ID>.tsv); fall back to
+	# the sweep-<RUN_ID> dir name. RUN_ID must match so 002 appends to the same TSV
+	# and the report/envelope filenames line up with the originals.
+	_existing_tsv="$(find "$OUTPUT_DIR" -maxdepth 1 -name 'controlplane-*.tsv' -type f 2>/dev/null | sort | head -1)"
+	if [[ -n "$_existing_tsv" ]]; then
+		RUN_ID="$(basename "$_existing_tsv")"; RUN_ID="${RUN_ID#controlplane-}"; RUN_ID="${RUN_ID%.tsv}"
+	else
+		RUN_ID="$(basename "$OUTPUT_DIR")"; RUN_ID="${RUN_ID#sweep-}"
+	fi
+	[[ -n "$RUN_ID" ]] || die "--resume: could not recover RUN_ID from $RESUME_DIR (no controlplane-*.tsv and dir is not sweep-<RUN_ID>)"
+	echo "Resuming sweep RUN_ID=${RUN_ID} in ${OUTPUT_DIR} (completed combos will be skipped)" >&2
+else
+	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+	OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+fi
+
+# P1-5: combo_already_done <mesh> <svc> <rep> <ns> <scope> — true (0) if the
+# resume TSV already holds a VALID row (NF>=40 && istiod_restarted($31)==0) whose
+# (mesh,svc,rep,ns,scope) key matches. Mirrors the report's n_valid gate so a
+# SETUP_FAILED/restarted placeholder row does NOT count as "done" (it gets re-run).
+combo_already_done() {
+	[[ -n "$RESUME_DIR" ]] || return 1
+	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
+	[[ -f "$tsv" ]] || return 1
+	awk -F'\t' -v ms="$1" -v sc="$2" -v rc="$3" -v nc="$4" -v scp="$5" '
+		!/^#/ && !/^timestamp/ && NF>=40 && $31=="0" \
+			&& $3==ms && $4==sc && $5==rc && $6==nc && $7==scp { found=1; exit }
+		END { exit (found ? 0 : 1) }' "$tsv"
+}
 
 # The 40-column TSV schema header (kept in one place so the pre-create + 002 agree).
 CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable"
@@ -526,10 +582,16 @@ if ((MATRIX_SIZE > MAX_MATRIX)) && ! ((FORCE_LARGE_MATRIX)); then
 	die "matrix size $MATRIX_SIZE = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]} exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
 fi
 
+# P1-1: append the shared --qps/--burst client rate-limit flags (KUBE_CLIENT_QPS/
+# BURST). 003 tolerates NO cli (dry-run plan path), so it keeps the empty fallback
+# rather than resolve_kubectl (which dies); the flags are appended via the shared
+# kube_client_flags helper so the construction stays centralized.
+KUBE_FLAGS=()
+read -ra KUBE_FLAGS <<<"$(kube_client_flags)"
 if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
+	KUBECTL=(oc "${KUBE_FLAGS[@]}")
 elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
+	KUBECTL=(kubectl "${KUBE_FLAGS[@]}")
 else
 	KUBECTL=()
 fi
@@ -672,6 +734,13 @@ for ms in "${MESH_SIZES[@]}"; do
 					if ((DRY_RUN)); then
 						printf "  [%2d/%2d] %s  (clusters: %s)  Namespaces: %s\n" \
 							"$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}" "$ns_pattern" >&2
+						continue
+					fi
+
+					# P1-5: skip a combo already completed in the resumed sweep.
+					if combo_already_done "$ms" "$sc" "$rc" "$nc" "$scp"; then
+						printf "  [%d/%d] %s — already has a valid row; skipping (resume)\n" \
+							"$combo_idx" "$MATRIX_SIZE" "$label" >&2
 						continue
 					fi
 
