@@ -18,7 +18,14 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
 
 service:
-  type: NodePort
+  # LoadBalancer is required for cross-cluster east-west traffic on ROSA/AWS
+  # (multi-VPC, peering off): workers have no external IPs, so a NodePort is not
+  # reachable across clusters; a public NLB is. (Commit 235ea6d had set NodePort
+  # for a MetalLB homelab whose flat 172.16.x network made NodePort routable —
+  # that environment no longer points at this repo.) The nodePort below is still
+  # pinned: a LoadBalancer Service allocates nodePorts too, and pinning keeps the
+  # value stable across re-applies; it is harmless when type=LoadBalancer.
+  type: LoadBalancer
   annotations: {}
   nodePorts:
     tls: "31443"

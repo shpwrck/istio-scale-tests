@@ -18,6 +18,9 @@ settings.json
 /node_modules/
 /package-lock.json
 
+# Local tool binaries (e.g. a manually-downloaded istioctl for remote-clusters checks)
+/.bin/
+
 # Test results (TSV data, scraped metrics, reports)
 /tests/propagation/results/
 /tests/controlplane/results/
