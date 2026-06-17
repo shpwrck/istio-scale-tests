@@ -40,7 +40,7 @@ source "${ROOT}/config/options.env"  # O9: SCALE_TARGET_FRACTION (preamble key)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/capacity.sh"  # O9: read-only capacity probes (Phase-1 legibility)
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # infra_preamble_lines (shared infra block emitter, PL36)
+source "${ROOT}/tests/lib/preamble.sh"  # infra_preamble_lines (PL36) + tuning_baseline_state (live-mesh tuning provenance, PL2)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 
@@ -316,6 +316,23 @@ if [[ "$PHASE" != baseline ]]; then
 	done
 fi
 
+# Resolved tuning-baseline state from the LIVE source cluster (PL2). Must emit
+# the SAME keys as 003's precreate_tsv_preamble (PL36 writer-contract: when 003
+# pre-creates the file, 002's `! -f`-guarded block is skipped; when 002 runs
+# standalone it writes the preamble itself — both paths must produce the
+# identical key set). Degrades to `unknown` on query failure.
+PRE_TUNING_BASELINE="TUNING_BASELINE=unknown"
+PRE_SIDECAR_EGRESS_HOSTS="SIDECAR_EGRESS_HOSTS=unknown"
+if [[ "$PHASE" != baseline ]]; then
+	tb_kv=""
+	while IFS= read -r tb_kv; do
+		case "$tb_kv" in
+			TUNING_BASELINE=*) PRE_TUNING_BASELINE="$tb_kv" ;;
+			SIDECAR_EGRESS_HOSTS=*) PRE_SIDECAR_EGRESS_HOSTS="$tb_kv" ;;
+		esac
+	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
+fi
+
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	# Cluster-infra block (additive): istiod req/lim/replicas + network topology.
@@ -345,6 +362,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
 		# shellcheck disable=SC2086
 		infra_preamble_lines $PRE_INFRA_KV
+		echo "# ${PRE_TUNING_BASELINE}"
+		echo "# ${PRE_SIDECAR_EGRESS_HOSTS}"
 		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING"
 	} > "$TSV_FILE"
 fi

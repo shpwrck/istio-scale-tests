@@ -325,6 +325,19 @@ precreate_tsv_preamble() {
 	# the identical key set (PL36). 002 reads INFRA_KV the same way (env_collect_infra).
 	local infra_kv
 	infra_kv="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
+	# Resolved tuning-baseline state, queried from the LIVE source cluster (NOT
+	# chart defaults — a live/Argo override can diverge). PL2: sweep-wide scalar
+	# (the baseline is constant across all combos of one sweep), so it joins the
+	# capacity provenance block as a per-sweep scalar (PL26 classification).
+	# tuning_baseline_state emits two `KEY=VALUE` lines; degrades to `unknown`.
+	local tb_line="TUNING_BASELINE=unknown" eh_line="SIDECAR_EGRESS_HOSTS=unknown"
+	local tb_kv
+	while IFS= read -r tb_kv; do
+		case "$tb_kv" in
+			TUNING_BASELINE=*) tb_line="$tb_kv" ;;
+			SIDECAR_EGRESS_HOSTS=*) eh_line="$tb_kv" ;;
+		esac
+	done < <(tuning_baseline_state "$src_ctx" "${KUBECTL[@]}")
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=40"
@@ -343,6 +356,8 @@ precreate_tsv_preamble() {
 		echo "# ISTIOD_MEM_LIMIT_MI=${istiod_mem_limit_mi}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		echo "# ${tb_line}"
+		echo "# ${eh_line}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
 		# shellcheck disable=SC2086
 		infra_preamble_lines $infra_kv

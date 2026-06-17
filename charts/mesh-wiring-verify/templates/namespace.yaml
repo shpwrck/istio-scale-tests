@@ -5,3 +5,6 @@ metadata:
   labels:
     {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
     # No istio.io/rev: the health gate must not be injected into the mesh it checks.
+    # Intentionally NOT labelled istio-discovery=enabled: this namespace holds no
+    # mesh workloads (no sidecars), so istiod ignoring it under the campaign
+    # baseline's discoverySelectors is correct and desired.

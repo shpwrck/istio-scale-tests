@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Harness metadata and TSV preamble helpers. Sourced, never executed.
 #
-# Consumers: churn-dataplane
+# Consumers: controlplane, dataplane, propagation, churn, churn-dataplane
 #
 # Exposes:
 #   harness_sha                                   -> `git describe --always --dirty --abbrev=7` or "unknown"
@@ -10,6 +10,8 @@
 #                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
 #   istiod_restart_status <pre> <post>             -> "0" | "1" | "unknown" based on process_start_time_seconds (PL9)
 #   istiod_start_time_seconds <port>               -> scrape process_start_time_seconds gauge
+#   tuning_baseline_state <ctx> <kubectl_argv...>  -> two lines (TUNING_BASELINE=, SIDECAR_EGRESS_HOSTS=)
+#                                                     queried from the LIVE mesh, on|off|unknown (PL2)
 #   write_preamble <title> <tsv> <kv pairs...>     -> write `# key=value` comment lines + RUN_ID/HARNESS_SHA (PL2, PL19)
 #   infra_preamble_lines <kv...>                   -> emit the cluster-infra `# KEY=value` block
 #       (istiod req/lim, replicas, network topology) for the TSV preamble.
@@ -158,6 +160,89 @@ infra_preamble_lines() {
 	for k in "${keys[@]}"; do
 		printf '# %s=%s\n' "$k" "${vals[$k]}"
 	done
+}
+
+# Query the LIVE deployed tuning-baseline state on ONE context (the source
+# context) and emit two preamble values describing which campaign levers are
+# actually live on the mesh, NOT what the chart default says (chart default and
+# deployed state can diverge via a live/Argo override or `--set`). PL2 class:
+# these probes (four tuning levers + the live sidecar egress host graph) change
+# measurable mesh behaviour but are otherwise invisible in a TSV row, so a run with
+# an identical HARNESS_SHA but a hand-patched mesh would be silently non-comparable.
+#
+# Probed (all read-only `get`, each bounded by --request-timeout=5s):
+#   - root-ns Sidecar `default` in istio-system   (Profile 01 sidecar-scoping)
+#   - Telemetry `tuning-metrics` in istio-system   (Profile 07 telemetry-filtering)
+#   - Telemetry `tuning-access-log` in istio-system (Profile 08 access-log-filtering)
+#   - meshConfig.discoverySelectors on the Istio CR (Profile 02 discovery-selectors)
+#   - the live egress hosts on the root Sidecar     (the egress GRAPH that was applied)
+#
+# Emits two lines on stdout (the caller adds the leading "# "):
+#   TUNING_BASELINE=sidecar=on|off,discoverySelectors=on|off,telemetryFiltering=on|off,accessLogFiltering=on|off
+#   SIDECAR_EGRESS_HOSTS=<space-joined hosts | none>
+#
+# Degrades gracefully: if the cluster is unreachable / kubectl unavailable / a
+# query fails, the affected lever resolves to `unknown` (per the existing
+# unreachable/unknown preamble idioms) rather than a false "off".
+# Usage: tuning_baseline_state <ctx> <kubectl_argv...>
+# shellcheck disable=SC2329
+tuning_baseline_state() {
+	local ctx="$1"
+	shift
+	local -a k=("$@")
+	local sidecar="unknown" ds="unknown" telem="unknown" alog="unknown" hosts="unknown"
+
+	# Helper: does a named resource exist? echoes on|off, or unknown on query
+	# failure (so "unreachable" is never mistaken for "lever is off").
+	_tb_exists() {
+		local kind="$1" name="$2" out rc
+		out="$("${k[@]}" --context="$ctx" --request-timeout=5s -n istio-system \
+			get "$kind" "$name" -o name 2>/dev/null)" && rc=0 || rc=$?
+		if ((rc != 0)); then printf 'unknown\n'; return 0; fi
+		[[ -n "$out" ]] && printf 'on\n' || printf 'off\n'
+	}
+
+	sidecar="$(_tb_exists sidecar.networking.istio.io default)"
+	telem="$(_tb_exists telemetry.telemetry.istio.io tuning-metrics)"
+	alog="$(_tb_exists telemetry.telemetry.istio.io tuning-access-log)"
+
+	# discoverySelectors live on the Istio CR's meshConfig.
+	local dsout dsrc
+	dsout="$("${k[@]}" --context="$ctx" --request-timeout=5s \
+		get istio.sailoperator.io default \
+		-o jsonpath='{.spec.values.meshConfig.discoverySelectors}' 2>/dev/null)" && dsrc=0 || dsrc=$?
+	if ((dsrc != 0)); then
+		ds="unknown"
+	elif [[ -n "$dsout" && "$dsout" != "null" && "$dsout" != "[]" ]]; then
+		ds="on"
+	else
+		ds="off"
+	fi
+
+	# Live egress hosts on the root Sidecar (the actual applied graph). Only
+	# meaningful when the Sidecar exists; otherwise "none" (off) or "unknown".
+	if [[ "$sidecar" == "on" ]]; then
+		local hout hrc
+		hout="$("${k[@]}" --context="$ctx" --request-timeout=5s -n istio-system \
+			get sidecar.networking.istio.io default \
+			-o jsonpath='{.spec.egress[*].hosts[*]}' 2>/dev/null)" && hrc=0 || hrc=$?
+		if ((hrc != 0)); then
+			hosts="unknown"
+		elif [[ -n "$hout" ]]; then
+			hosts="$hout"
+		else
+			hosts="none"
+		fi
+	elif [[ "$sidecar" == "off" ]]; then
+		hosts="none"
+	else
+		hosts="unknown"
+	fi
+
+	unset -f _tb_exists
+	printf 'TUNING_BASELINE=sidecar=%s,discoverySelectors=%s,telemetryFiltering=%s,accessLogFiltering=%s\n' \
+		"$sidecar" "$ds" "$telem" "$alog"
+	printf 'SIDECAR_EGRESS_HOSTS=%s\n' "$hosts"
 }
 
 # Write the TSV preamble required by PL2 + PL19. Every comment line is `# key=value`.
