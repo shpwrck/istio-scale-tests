@@ -780,7 +780,7 @@ poll_peak_metrics() {
 			# Fetches the full /metrics body (mem + cpu parsed below), so it must honor
 			# the shared METRICS_SCRAPE_TIMEOUT (default 30s) like the primary scrape:
 			# a hardcoded 3s drops an MB-class 10k body and silently skips peak samples.
-			body=$(curl -s --max-time "$METRICS_SCRAPE_TIMEOUT" "http://localhost:${port}/metrics" 2>/dev/null) || continue
+			body=$(curl -s --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" 2>/dev/null) || continue
 
 			# Peak memory.
 			local mem_val
@@ -834,7 +834,7 @@ scrape_one_context() {
 	# the exact data-loss the configurable timeout closes. t_start/t_end wrap the curl
 	# so a slow-but-successful scrape stamps real completion times -> scrape_window_sec
 	# stays the true wall-clock window (PL3), not a settle-derived figure.
-	body=$(curl -s --max-time "$METRICS_SCRAPE_TIMEOUT" "http://localhost:${port}/metrics" 2>/dev/null) || return 1
+	body=$(curl -s --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" 2>/dev/null) || return 1
 	t_end=$(now_ms)
 	printf '%s' "$body" > "$out"
 	printf '%s' "$t_start" > "$ts_start"
