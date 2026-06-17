@@ -116,7 +116,10 @@ istiod_restart_status() {
 istiod_start_time_seconds() {
 	local port="$1" tmpfile
 	tmpfile="$(mktemp)"
-	if ! curl -fsS --max-time 5 "http://localhost:${port}/metrics" -o "$tmpfile" 2>/dev/null; then
+	# Shared, centralized scrape timeout (config/options.env METRICS_SCRAPE_TIMEOUT);
+	# inline default keeps this lib correct when sourced standalone (bats). MUST be
+	# raised at 10k scale — the /metrics body is MB-class and a 5s curl drops it.
+	if ! curl -fsS --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" -o "$tmpfile" 2>/dev/null; then
 		rm -f "$tmpfile"
 		printf '%s\n' "unknown"
 		return 0

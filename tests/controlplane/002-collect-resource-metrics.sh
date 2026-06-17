@@ -508,6 +508,11 @@ for k in "${!POD_CTXS[@]}"; do
 	# curl block ~30s/attempt, so one bad PF among 35-50 at scale hangs the sweep for
 	# minutes before failing. A transient kubectl port-forward failure is common at
 	# high concurrency, so restart this pod's PF (up to 3x) instead of dying outright.
+	# Intentionally NOT routed through METRICS_SCRAPE_TIMEOUT: this is a lightweight
+	# PF-liveness probe (-o /dev/null discards the body, so payload size is irrelevant)
+	# that must fail FAST to drive the PF-restart loop -- a 30s ceiling here would
+	# stall the loop for minutes. Only the body-fetch scrapes (scrape_one_context,
+	# poll_peak_metrics) honor the shared knob; this readiness check stays short.
 	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null; do
 		attempts=$((attempts + 1))
 		if ((attempts > 20)); then
@@ -772,7 +777,10 @@ poll_peak_metrics() {
 		for k in "${!POD_CTXS[@]}"; do
 			local port=$(( BASE_PF_PORT + k ))
 			local body
-			body=$(curl -s --max-time 3 "http://localhost:${port}/metrics" 2>/dev/null) || continue
+			# Fetches the full /metrics body (mem + cpu parsed below), so it must honor
+			# the shared METRICS_SCRAPE_TIMEOUT (default 30s) like the primary scrape:
+			# a hardcoded 3s drops an MB-class 10k body and silently skips peak samples.
+			body=$(curl -s --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" 2>/dev/null) || continue
 
 			# Peak memory.
 			local mem_val
@@ -820,8 +828,13 @@ scrape_one_context() {
 	t_start=$(now_ms)
 	# P4: --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
 	# (-> empty metrics file -> N/A row via scrape_window) instead of hanging the
-	# whole sweep. 10s is generous for a multi-MB /metrics body at 5k+ services.
-	body=$(curl -s --max-time 10 "http://localhost:${port}/metrics" 2>/dev/null) || return 1
+	# whole sweep. This is the PRIMARY body scrape feeding every TSV row, so it must
+	# honor the shared METRICS_SCRAPE_TIMEOUT knob (default 30s): a multi-MB /metrics
+	# body at 10k services can exceed a hardcoded 10s -> empty file -> silent N/A row,
+	# the exact data-loss the configurable timeout closes. t_start/t_end wrap the curl
+	# so a slow-but-successful scrape stamps real completion times -> scrape_window_sec
+	# stays the true wall-clock window (PL3), not a settle-derived figure.
+	body=$(curl -s --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" 2>/dev/null) || return 1
 	t_end=$(now_ms)
 	printf '%s' "$body" > "$out"
 	printf '%s' "$t_start" > "$ts_start"

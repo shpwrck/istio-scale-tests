@@ -62,7 +62,10 @@
 # own pod restarts (the block is indexed by context, not by the global pod ordinal).
 : "${FANOUT_PF_BASE:=21014}"
 : "${FANOUT_CTX_STRIDE:=20}"
-: "${FANOUT_METRICS_TIMEOUT:=5}"
+# Defaults from the shared METRICS_SCRAPE_TIMEOUT base (config/options.env) so all
+# /metrics scrape timeouts tune from one place; override FANOUT_METRICS_TIMEOUT to
+# tune only the hot-path fanout scrape.
+: "${FANOUT_METRICS_TIMEOUT:=${METRICS_SCRAPE_TIMEOUT:-30}}"
 # Per-pod /metrics readiness loop length (x 0.5s) when opening a port-forward.
 : "${FANOUT_PF_READY_ATTEMPTS:=30}"
 # A scrape shorter than this many bytes is treated as failed/incomplete (an istiod
