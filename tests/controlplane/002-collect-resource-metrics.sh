@@ -209,13 +209,9 @@ if ((WATCH)) && [[ "$PHASE" != combined ]]; then
 fi
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+# P1-1: resolve_kubectl appends --qps/--burst (KUBE_CLIENT_QPS/BURST) to every call.
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"

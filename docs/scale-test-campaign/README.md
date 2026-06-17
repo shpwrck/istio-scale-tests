@@ -140,6 +140,36 @@ Use the suite commands below as written for the first milestone campaign. That k
 
 The full `MESH="$(seq -s, 1 500)"` campaign is intentionally supported as a follow-up if you need every integer mesh size, but it is a very large, attended run: propagation alone is 5000 iterations at `--iterations 10`, and the data-plane/co-exec suites multiply each mesh size by QPS or churn-rate dimensions.
 
+## Capacity planning
+
+The dominant data-plane capacity driver is the **per-proxy sidecar CPU request × workload count**, not istiod. Every workload pod gets a tuned istio-proxy sidecar requesting ~`sidecar_request_m` (≈100m by default), and the dummy app container itself requests ~0, so the sidecar *is* the load. On a cluster with a **fixed** node count this caps how many services fit per cluster:
+
+```
+max_services_per_cluster ≈ (node_alloc_cpu − istiod_baseline) / (replicas × sidecar_request_m)
+```
+
+where `node_alloc_cpu` is the cluster's aggregate allocatable CPU (millicores), `istiod_baseline` is the pinned control-plane reservation (`per-replica istiod CPU limit × istiod replicas`), `replicas` is the workload replicas per service, and `sidecar_request_m` is the injected sidecar CPU request (the `controlplane` sweep reads it from `SCALE_PER_POD_CPU_M` in `config/options.env`).
+
+**Worked example (fixed 3-node ROSA rig).** Aggregate node allocatable ≈ 22,500m; pinned istiod baseline ≈ 8,600m (istiod + OpenShift system) → ≈ 13,900m free. At `replicas=3` and `sidecar_request_m≈100m`: `13,900 / (3 × 100) ≈ 46` → **~46 services/cluster max**. 40 services (120 pods, 12,000m) fits with margin; 50 (150 pods, 15,000m) overflows → `FailedScheduling: Insufficient cpu`, and on a `min=max=N` node group the autoscaler reports `NotTriggerScaleUp: max node group size reached`. High service counts therefore rely on the production **autoscaling** clusters; a fixed-node rig caps at ~40 services/cluster regardless of istiod sizing.
+
+`tests/controlplane/003-run-sweep.sh` turns this arithmetic into a **plan-time WARN** (the largest combo vs free node CPU), and `001-setup` enforces a hard per-context pod-slot preflight. Use the formula above to pick `--service-counts` before a multi-hour sweep rather than discovering the ceiling at the wait timeout.
+
+> **Let metrics-server settle after heavy churn before the next sweep (FINDING #4).** `kubectl top` goes through the aggregated metrics API, which lags `kubectl get` and is the source of the utilization-% columns (`istiod_*_pct_of_limit`, `node_*_pct`). Launching a sweep seconds after churning istiod replicas or deleting thousands of sidecar-pods can catch metrics-server still stabilizing, N/A-ing utilization for the whole run (the harness WARNs and proceeds — utilization is observability, not the core measurement). After any heavy istiod/namespace churn, wait for `kubectl top nodes` to return cleanly on every context (it settles in seconds once healthy) before starting the next sweep.
+
+### Campaign GO/NO-GO rollup (one screen)
+
+After the five suites complete, fill one row per suite from its generated markdown summary (each suite's `004`/`005` report emits a `Customer SLA verdict` / headline; the controlplane sweep also writes `scale-envelope-<RUN_ID>.md`). The campaign is **GO** only if every suite is usable and no SLA verdict is FAIL:
+
+| Suite | SLA verdict | Headline (one line) | Usable? |
+|-------|-------------|---------------------|---------|
+| propagation | PASS/CAUTION/FAIL | _e.g. P3 remote sidecar p99 X ms; histogram conv N/A at small n_ | yes/no |
+| churn | PASS/CAUTION/FAIL | _e.g. push amplification ~X_ | yes/no |
+| controlplane | PASS/CAUTION/FAIL | _from `scale-envelope-<RUN_ID>.md` verdict line_ | yes/no |
+| dataplane | PASS/CAUTION/FAIL | _e.g. cross-cluster p99 X ms at QPS Y_ | yes/no |
+| churn-dataplane | PASS/CAUTION/FAIL | _e.g. Δp99 under churn X ms_ | yes/no |
+
+> Read each suite's `n_valid` vs `n_total` footnote first — a CAUTION/FAIL on thin coverage (low `n_valid`) is a re-run signal, not a final verdict. A single FAIL or an unusable suite is a campaign **NO-GO** until fixed.
+
 ## Procedure (5 stages — same for both modes)
 
 ```bash

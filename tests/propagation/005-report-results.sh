@@ -79,6 +79,11 @@ Environment:
   FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 fallback filter
                       above (default 1000). Set it to the value the run was
                       produced with to re-derive a historical sweep exactly.
+  PROPAGATION_PERCENTILE_MIN_N  Minimum cross-run sample count for a TAIL
+                      percentile (p95/p99) to be reported (default 20; 0 disables).
+                      Below it, p95/p99 are N/A — the nearest-rank percentile() pins
+                      p99 to max(n) at small n, so a single worst sample would show
+                      as a real p99. p50 is always reported (robust at low n).
 EOF
 }
 
@@ -398,8 +403,16 @@ function sort_arr(arr, n,    i, j, tmp) {
 		arr[j+1] = tmp
 	}
 }
-function percentile(arr, n, pct,    idx) {
+function percentile(arr, n, pct,    idx, min_n) {
 	if (n == 0) return "N/A"
+	# P1-7: min-n gate for TAIL percentiles. percentile() is nearest-rank (no
+	# interpolation), so for a high pct at small n the index pins to the top
+	# element — p99 == max(n), a single worst sample masquerading as a tail
+	# quantile. Below PCT_MIN_N samples, refuse to report p95/p99 (emit N/A); p50
+	# is robust at low n so it is always returned. PCT_MIN_N defaults to 20 here
+	# and is threaded from PROPAGATION_PERCENTILE_MIN_N; 0 disables the gate.
+	min_n = (PCT_MIN_N == "" ? 20 : PCT_MIN_N + 0)
+	if (pct >= 95 && min_n > 0 && n < min_n) return "N/A"
 	idx = int(n * pct / 100)
 	if (idx < 1) idx = 1
 	if (idx > n) idx = n
@@ -437,7 +450,7 @@ report_endpoint_text() {
 	echo "Run metadata:"
 	format_preamble_text
 	echo ""
-	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function stats_line(label, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
@@ -488,7 +501,7 @@ report_endpoint_csv() {
 	format_preamble_csv_header
 	echo ""
 	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms"
-	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function csv_line(ms, phase, src, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "%s,%s,%d,%d,,,,,,\n", ms, phase, n_total[ms], 0
@@ -528,7 +541,7 @@ report_endpoint_markdown() {
 		echo "- \`$(basename "$f")\`"
 	done
 	echo ""
-	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function md_row(phase, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, n_total[ms], 0
@@ -609,7 +622,7 @@ report_endpoint_json() {
 	printf '{"metadata":'
 	format_preamble_json
 	printf ',"rows":'
-	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function json_obj(ms, phase, src, n,    arr, sum, i) {
 		if (n == 0) {
 			return sprintf("{\"mesh_size\":\"%s\",\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0}", ms, phase, n_total[ms])
@@ -646,7 +659,7 @@ report_endpoint_charts() {
 	echo ""
 	echo "# Endpoint Propagation Latency — Charts"
 	echo ""
-	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "$AWK_AGG"'
+	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function chart_avg(src, ms, n,    arr, sum, i) {
 		if (n == 0) return -1
 		load(arr, src, ms, n)

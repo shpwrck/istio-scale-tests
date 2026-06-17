@@ -293,10 +293,14 @@ render_scale_envelope() {
 	istio_version="$(jq_get '.metadata.istio_version')"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
 
-	local proxies_peak istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct
+	local proxies_peak istiod_cpu_pct istiod_mem_pct istiod_rss_pct node_cpu_pct node_mem_pct
 	proxies_peak="$(jq_get '.metadata.achieved_scale.connected_proxies_max')"
 	istiod_cpu_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_pct_of_limit_max')"
 	istiod_mem_pct="$(jq_get '.metadata.achieved_scale.istiod_mem_pct_of_limit_max')"
+	# P1-4: RSS-derived istiod mem headroom (% of per-replica mem limit). Always
+	# available from the /metrics scrape, so it surfaces OOM risk even when the
+	# kubectl-top mem pct above is N/A during a metrics-API gap.
+	istiod_rss_pct="$(jq_get '.metadata.achieved_scale.istiod_rss_pct_of_limit_max')"
 	node_cpu_pct="$(jq_get '.metadata.achieved_scale.node_cpu_pct_max')"
 	node_mem_pct="$(jq_get '.metadata.achieved_scale.node_mem_pct_max')"
 
@@ -404,12 +408,15 @@ render_scale_envelope() {
 |---|---|---|---|
 | istiod replicas | ${istiod_replicas} per cluster | — | live \`deploy/istiod\` |
 | istiod CPU | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_pct}% | report \`istiod_cpu_pct_of_limit_max\` |
-| istiod memory | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_mem_pct}% | report \`istiod_mem_pct_of_limit_max\` |
+| istiod memory (kubectl top) | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_mem_pct}% | report \`istiod_mem_pct_of_limit_max\` |
+| **istiod memory (RSS — OOM headroom)** | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_rss_pct}% | report \`istiod_rss_pct_of_limit_max\` (\`process_resident_memory_bytes\`) |
 | Worker-node CPU | — | ${node_cpu_pct}% | report \`node_cpu_pct_max\` (\`kubectl top nodes\`) |
 | Worker-node memory | — | ${node_mem_pct}% | report \`node_mem_pct_max\` (\`kubectl top nodes\`) |
 
 > Node allocatable (source ctx): ${node_cpu_m}m CPU / ${node_mem_mi}Mi memory.
-> istiod % is of the **cross-replica** limit (per-replica limit x ${istiod_replicas} replicas), so an idle R-replica plane does not read ~Rx100% (PL35).
+> istiod CPU/mem(top) % is of the **cross-replica** limit (per-replica limit x ${istiod_replicas} replicas), so an idle R-replica plane does not read ~Rx100% (PL35).
+> **istiod RSS %** is per-replica (peak \`process_resident_memory_bytes\` of one istiod / its per-replica mem limit) and is the OOM-risk signal: in multi-primary each istiod caches the WHOLE mesh (~N x services x replicas endpoints), so RSS grows with total mesh size. It is sourced from the /metrics scrape, so it stays populated even when \`kubectl top\` (the row above) is N/A during a metrics-API gap. An RSS % approaching 100 is OOM-mid-sweep risk.
+> **istiod mem REQUEST sizing (GO gate):** the chart's istiod mem *request* (${req_mem}Mi above) must be sized to the **measured steady-state RSS** at the target mesh scale before GO — it needs a measured number from a full-scale run, NOT a guessed default. The RSS % here is the input for that sizing. This change only SURFACES the headroom; it deliberately does not change the request value.
 
 ### Customer SLA verdict — one line, up front
 
