@@ -736,9 +736,14 @@ collect_config_dump_samples() {
 	while IFS='|' read -r ns pod; do
 		[[ -z "$pod" ]] && continue
 		attempted=$((attempted + 1))
-		local bytes
-		bytes="$("${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
-			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null | wc -c || true)"
+		# P2: bound the config_dump exec — at 10k services the dump is multi-MB and a
+		# wedged sidecar/exec must not stall the sweep. On timeout the dump is empty ->
+		# bytes=0 -> counted as a FAILED sample (got not incremented), never a partial/
+		# misleading byte count (capturing first lets us drop a timed-out exec cleanly).
+		local dump bytes
+		dump="$(timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
+			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null)" || dump=""
+		bytes="$(printf '%s' "$dump" | wc -c)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
 		if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
 			got=$((got + 1))
