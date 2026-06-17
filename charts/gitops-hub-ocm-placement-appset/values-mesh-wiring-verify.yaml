@@ -2,8 +2,9 @@
 # Reuses acm-openshift-gitops-placement (requireMeshMemberLabel=true), so it
 # targets exactly the istio-mesh-member set — the same clusters the mesh
 # components deploy to. Installed by Terraform (terraform/platform/
-# platform_gitops.tf), which overrides the expectedMembers parameter with
-# length(local.mesh_member_spoke_keys).
+# platform_gitops.tf), which overrides expectedMembers BY NAME via
+# template.source.helm.valuesObject.expectedMembers =
+# length(local.mesh_member_spoke_keys) — order-independent, see issue #28.
 applicationSetNamespace: openshift-gitops
 applicationSetControllerNamespace: openshift-gitops
 
@@ -50,14 +51,21 @@ template:
     path: charts/mesh-wiring-verify
     helm:
       releaseName: mesh-wiring-verify
+      # clusterName stays a positional parameter because its value is the Argo
+      # ApplicationSet generator placeholder {{clusterName}}, resolved per-spoke
+      # at generation time (not a static value).
       parameters:
         - name: clusterName
           value: "{{clusterName}}"
-        # Overridden by Terraform: template.source.helm.parameters[1].value =
-        # tostring(length(local.mesh_member_spoke_keys)). Left at 0 here so a
-        # standalone render (no Terraform) degrades to consistency-only checks.
-        - name: expectedMembers
-          value: "0"
+      # expectedMembers is delivered by NAME (not positional index) so reordering
+      # or inserting parameters can never misroute the mesh size — see issue #28.
+      # Overridden by Terraform:
+      #   template.source.helm.valuesObject.expectedMembers =
+      #     tostring(length(local.mesh_member_spoke_keys))
+      # Left at 0 here so a standalone render (no Terraform) degrades to
+      # consistency-only checks.
+      valuesObject:
+        expectedMembers: 0
 
 repo:
   url: ""
