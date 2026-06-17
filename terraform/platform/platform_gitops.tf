@@ -42,14 +42,14 @@ resource "terraform_data" "gitops_csv_cleanup" {
   count = local.gitops_enabled ? 1 : 0
 
   input = {
-    token_script      = local.token_script
-    hub_api_url       = local.hub_api_url
-    hub_admin_pass    = local.hub_admin_pass
-    kubeconfig_path   = local.kubeconfig
-    hub_context       = local.hub_cluster_key
-    sub_namespace     = var.gitops_operator_namespace
-    sub_name          = "openshift-gitops-operator"
-    package_name      = "openshift-gitops-operator"
+    token_script    = local.token_script
+    hub_api_url     = local.hub_api_url
+    hub_admin_pass  = local.hub_admin_pass
+    kubeconfig_path = local.kubeconfig
+    hub_context     = local.hub_cluster_key
+    sub_namespace   = var.gitops_operator_namespace
+    sub_name        = "openshift-gitops-operator"
+    package_name    = "openshift-gitops-operator"
   }
 
   provisioner "local-exec" {
@@ -424,9 +424,13 @@ resource "helm_release" "mesh_wiring_verify_appset" {
       type  = "string"
     },
     {
-      # parameters[0] = clusterName; parameters[1] = expectedMembers. Threaded
-      # into each per-spoke Application's Helm values by the ApplicationSet.
-      name  = "template.source.helm.parameters[1].value"
+      # Set expectedMembers BY NAME via Argo helm.valuesObject (not a positional
+      # parameters[N] index), so reordering/inserting parameter entries can never
+      # misroute the mesh size — see issue #28. The ApplicationSet template emits
+      # this map into each per-spoke Application's spec.source.helm.valuesObject,
+      # and Argo merges it into the mesh-wiring-verify child chart's Helm values
+      # (charts/mesh-wiring-verify reads .Values.expectedMembers).
+      name  = "template.source.helm.valuesObject.expectedMembers"
       value = tostring(length(local.mesh_member_spoke_keys))
       type  = "string"
     },
