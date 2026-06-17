@@ -527,6 +527,37 @@ report_endpoint_csv() {
 	}'
 }
 
+# Metric glossary appended to the END of the markdown summary (#17). Definitions are
+# pulled from tests/propagation/README.md; units/source/caveats mirror it, not invented here.
+glossary_section() {
+	cat <<'GLOSSARY'
+
+## Glossary
+
+Definitions for every phase and statistic column in the tables above. Sourced from
+`tests/propagation/README.md`. Each phase measures one stage of a single config change
+propagating across the mesh; all values are **milliseconds**. Remote phases (P2/P3) are
+undefined at mesh size 1 (no remote cluster). Rows are dropped (not counted in `n_valid`)
+when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additionally drops
+`p2_dirty=1` rows (an EDS bump not confirmed by the remote sidecar going healthy).
+
+| Phase | Units | Source | Definition / caveats |
+|-------|-------|--------|----------------------|
+| `P1_local_wall` | ms (wall clock) | timing + source `pilot_proxy_convergence_time` | Time from the t0 active-label flip until the source istiod has pushed the change to all connected proxies (delta `_count` reaches proxy count). |
+| `P1_conv_p50` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p50 of the per-bucket convergence-time delta in the window; bucket range (boundaries 100/500/1000/3000/5000/10000/20000/30000 ms), `overflow` if in `+Inf`; `N/A` if restarted or below the p50 min-sample floor. |
+| `P1_conv_p99` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p99 of the convergence-time delta; same bucket-range/`overflow` semantics; `N/A` if restarted or below the p99 min-sample floor (`PROPAGATION_PERCENTILE_MIN_N`). |
+| `P2_discovery` | ms (wall clock) | remote `pilot_xds_pushes{type="eds"}` counter delta | Time until the remote istiod pushes EDS for the new endpoint (control-plane discovery); excluded when `p2_dirty=1`. |
+| `P3_dataplane` | ms (wall clock) | remote watcher Envoy `/clusters` | Time until the remote sidecar reports the canary endpoint healthy (full data-plane apply); typically ~10× P1/P2. |
+
+| Stat column | Definition |
+|-------------|------------|
+| `n_total` | All rows considered for the phase/mesh size. |
+| `n_valid` | Rows surviving the drop filters above and used for the statistics. |
+| `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean latency across the `n_valid` samples. |
+| `p50_ms` / `p95_ms` / `p99_ms` | Nearest-rank percentiles across the `n_valid` samples; `p95`/`p99` are `N/A` below `PROPAGATION_PERCENTILE_MIN_N` samples (a single worst sample would otherwise masquerade as a tail quantile). |
+GLOSSARY
+}
+
 report_endpoint_markdown() {
 	echo "---"
 	format_preamble_md
@@ -615,6 +646,9 @@ report_endpoint_markdown() {
 			printf "\n"
 		}
 	}'
+
+	# #17: metric glossary at the very end of the markdown summary.
+	glossary_section
 }
 
 report_endpoint_json() {
@@ -684,6 +718,23 @@ report_endpoint_charts() {
 		if (n_remote < 2) {
 			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
 			exit
+		}
+
+		# PL13/PL15 gate: each charted phase point is the mean over n_valid samples
+		# (p{1,2,3}_n[ms]). A phase/mesh cell with zero valid samples is ABSENT (chart_avg
+		# returns -1, rendered as the structural 0 filler the mermaid xychart requires),
+		# not a real 0 latency point. Count those dropped cells across the plotted grid
+		# (P1, P2, P3 x remote mesh sizes) and caption it, mirroring the markdown footnote.
+		cells_total = 0; cells_dropped = 0
+		for (i = 1; i <= n_remote; i++) {
+			m = remote_ms[i]
+			cells_total += 3
+			if (p1_n[m] + 0 == 0) cells_dropped++
+			if (p2_n[m] + 0 == 0) cells_dropped++
+			if (p3_n[m] + 0 == 0) cells_dropped++
+		}
+		if (cells_dropped > 0) {
+			printf "> %d of %d charted cells dropped (no valid samples / restart-poisoned / overflow) — not plotted.\n\n", cells_dropped, cells_total
 		}
 
 		# Chart 1: P1 wall + P2 EDS latency vs mesh size
