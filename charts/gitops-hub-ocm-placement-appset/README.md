@@ -12,6 +12,8 @@ Preset value files:
 
 Override `repo.url` / `placement.name` / `generatorConfigMap` / RBAC names via Helm or Argo `parameters` as needed.
 
+Child Helm values can be supplied to the generated Application by **name** via `template.source.helm.valuesObject` (a YAML map) in addition to the positional `template.source.helm.parameters` list. The chart emits `valuesObject` verbatim into each Application's `spec.source.helm.valuesObject`, which Argo merges into the child chart's values. Prefer `valuesObject` for static, name-addressed values (e.g. `expectedMembers`) so reordering/inserting `parameters` entries cannot misroute them; keep `parameters` for values that must carry an ApplicationSet generator placeholder like `{{clusterName}}`. `values-mesh-wiring-verify.yaml` uses this split (Terraform sets `template.source.helm.valuesObject.expectedMembers` by name — see issue #28).
+
 `values-mesh-ca-intermediate.yaml` uses `destination.mode: inClusterServer`; the chart template emits the `clusterName` Helm parameter with a literal `{{clusterName}}` for ApplicationSet substitution (do not copy that string into another values file with `| quote` in a custom template). Per-cluster presets use `destination.mode: clusterName` and set `template.source.helm.releaseName` only for that mode so hub-only installs do not inherit an OLM `releaseName` from chart defaults.
 
 ```bash
