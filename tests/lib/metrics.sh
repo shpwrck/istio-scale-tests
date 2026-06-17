@@ -23,7 +23,10 @@
 # shellcheck disable=SC2329
 scrape_istiod_metrics() {
 	local port="$1" outfile="$2"
-	curl -fsS --max-time 5 "http://localhost:${port}/metrics" -o "$outfile" 2>/dev/null
+	# Shared, centralized scrape timeout (config/options.env METRICS_SCRAPE_TIMEOUT).
+	# Defaulted inline so this lib is correct when sourced standalone (bats) without
+	# config/options.env. MUST be raised at 10k scale — the /metrics body is MB-class.
+	curl -fsS --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" -o "$outfile" 2>/dev/null
 }
 
 # Sum all instances of a Prometheus counter.

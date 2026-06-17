@@ -79,7 +79,10 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
-TERMINATION_TIMEOUT=300
+# PL37 contract: same bound 001 reuses for its pre-apply poll-until-gone wait
+# (CONTROLPLANE_SETUP_NS_WAIT_SEC defaults from this), so an operator override
+# applies symmetrically to cleanup and the next setup.
+TERMINATION_TIMEOUT="${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}"
 
 run_delete() {
 	if ((DRY_RUN)); then

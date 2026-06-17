@@ -136,7 +136,7 @@ Each TSV begins with `# KEY=VALUE` comment lines:
 # TIMEOUT_SEC=120
 # SETTLE_SEC=5
 # FANOUT_MAX_SKEW_MS=1000
-# FANOUT_METRICS_TIMEOUT=5
+# FANOUT_METRICS_TIMEOUT=30
 # BACKER_IMAGE=hashicorp/http-echo:1.0
 # DATE=2025-05-20T10:15:30+00:00
 ```
@@ -243,7 +243,7 @@ The file contains:
 ### Known limitations
 
 - **Multi-replica istiod**: supported via per-pod fanout — see "Multi-replica istiod fanout" above. The probe requires only `>= 1` Running istiod pod per context and records the per-context replica counts in the TSV preamble (`ISTIOD_REPLICAS`).
-- **`/metrics` scrape timeout**: defaults to 5 s. On very large meshes (100k+ services) the istiod `/metrics` payload may take longer than 5 s to render — bump `PROPAGATION_METRICS_TIMEOUT` (seconds).
+- **`/metrics` scrape timeout**: defaults to 30 s, inherited from the shared `METRICS_SCRAPE_TIMEOUT` base in `config/options.env` (the ONE place to tune every `/metrics` scrape timeout). The default was raised from 5 s because at 10k+ services the istiod `/metrics` body is MB-class and a 5 s curl over a port-forward times out and silently drops the scrape. Bump `METRICS_SCRAPE_TIMEOUT` to raise all suites at once, or override `PROPAGATION_METRICS_TIMEOUT` / `FANOUT_METRICS_TIMEOUT` to tune just this suite. Small-scale runs finish well under 5 s, so the larger ceiling does not change their timing.
 - **Scrape-skew gate**: `FANOUT_MAX_SKEW_MS` (default 1000) is the baseline `scrape_skew_ms` ceiling above which a row is tagged `SCRAPE_INCOMPLETE`. The skew is the spread of per-pod/per-context scrape *completion* timestamps; a wide spread (e.g. one curl queued behind dozens of port-forward proxies near the metrics timeout) means the snapshot is not coherent. Raise it on a deliberately slow/large mesh where multi-second `/metrics` reads are expected, or lower it to tighten coherence.
 - **Min-sample floor for quantiles**: `p1_conv_p50_ms` requires ≥ 10 samples, `p1_conv_p99_ms` requires ≥ 30 samples. With the default 1 watcher replica (3 connected proxies: watcher + ingress-gw + east-west-gw), both columns will be `N/A`. Use `--watcher-replicas 30` on `001-setup` or `006-run-sweep` to reach the thresholds. For quick checks with few proxies, use the wall-clock `p1_ms` column instead.
 - **Histogram bucket resolution floor**: `pilot_proxy_convergence_time` bucket boundaries are compiled into istiod (0.1, 0.5, 1, 3, 5, 10, 20, 30 s). When all pushes complete in under 100 ms, conv_p50 and conv_p99 are pinned at 100 — the report annotates these rows with `*`. The actual latency is somewhere in 0-100 ms but cannot be resolved further without recompiling istiod with finer buckets.
