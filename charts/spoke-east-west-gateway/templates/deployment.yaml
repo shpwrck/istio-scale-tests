@@ -10,7 +10,12 @@ metadata:
   labels:
     {{- include "spoke-east-west-gateway.labels" . | nindent 4 }}
 spec:
+  {{- /* When the HPA is disabled (scale-test default), pin the deployment to a
+        fixed replicaCount. When the HPA is enabled, OMIT replicas so the HPA
+        owns the count — otherwise every GitOps sync resets it and fights the HPA. */}}
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "spoke-east-west-gateway.selectorLabels" . | nindent 6 }}
