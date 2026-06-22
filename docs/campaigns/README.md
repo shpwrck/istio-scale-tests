@@ -14,6 +14,15 @@ count is not a scale; the reader has to know how big the mesh really was and whe
 anything was near a limit, from screen one. The template lists the exact sweep-report
 field or command that feeds each cell.
 
+## 2026-06-22 — planned 20c/10k/10k peak campaign
+
+Budgeted execution plan for a 20-spoke, 10,000-Service, 10,000-endpoint peak-only
+campaign. The plan uses a 3-node spoke mesh-verification phase, scales spokes to
+fixed 8-node worker pools only after Istio is proven healthy, disables Terraform quota
+management, and carries a $1,500 incremental spend cap.
+
+- [`2026-06-22-20c-10k-10k-campaign-plan.md`](2026-06-22-20c-10k-10k-campaign-plan.md) — execution plan, budget guard, stop thresholds, staged scale-up, suite matrix, and artifact rules.
+
 ## 2026-06-04 — clean pass
 
 The hardened full-workload re-run the workaround pass planned. istiod pinned to **3**
