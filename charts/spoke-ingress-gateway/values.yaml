@@ -3,11 +3,10 @@ networkSuffix: network
 platform: openshift
 
 # Fixed replica count used when autoscaling.enabled=false (the scale-test default).
-# Pinned at 3 (matches the 3-node spoke pools for the traffic suites): deterministic,
-# never autoscales mid-measurement (which would confound data-plane/churn-dataplane
-# results), and sized to the node count so it is not wasteful. Raise for higher-
-# throughput sweeps on larger pools.
-replicaCount: 3
+# Pinned at 1: deterministic (never autoscales mid-measurement, which would confound
+# data-plane/churn-dataplane results) and minimal-footprint. Raise for higher-
+# throughput sweeps if a single gateway pod becomes the bottleneck.
+replicaCount: 1
 
 resources:
   requests:
