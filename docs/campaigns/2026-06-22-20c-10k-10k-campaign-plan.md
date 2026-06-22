@@ -5,7 +5,8 @@ Date: 2026-06-22
 This is the execution plan for a disposable full-lifecycle campaign on latest `main`.
 It provisions 21 ROSA HCP clusters, uses one hub plus 20 mesh-member spokes, verifies
 the full 20-cluster Istio mesh on small fixed worker pools first, scales the spokes up
-only after Istio works, then runs a peak-only campaign at `mesh_size=20`.
+only after Istio works, then runs the campaign at `mesh_size=20` (the control-plane
+proof ladders Service count up to the 10,000 peak).
 
 Target definition:
 
@@ -26,6 +27,37 @@ data-plane load is ~10,000 sidecars x ~100m CPU request ~= 1,000 cores mesh-wide
 (~50 cores per spoke), which fits the 8-node campaign pools. A 10-endpoints-per-Service
 variant would be ~10x that (~500 cores per spoke) and would not fit — it would need a
 fundamentally larger worker footprint.
+
+## Proof criteria
+
+This campaign exists to *prove* an organization can operate at 20 clusters / 10,000
+Services / 10,000 endpoints, so the bar is accurate, complete, attributable evidence —
+not realism. Declare the pass criteria before running; the outcome is an objective PASS
+or FAIL against them, not a narrative.
+
+PASS requires all of the following, each evidenced from a generated artifact:
+
+- **Scale actually reached.** All 10,000 Service objects and 10,000 endpoints created
+  and converged — 500 per spoke across all 20 spokes — with zero `Pending` pods. The
+  control-plane report's achieved-vs-capacity block is the evidence; a shortfall on any
+  cluster is a documented FAIL, never a silent gap.
+- **Full mesh formed.** Every spoke registers the other 19 (`istiod_managed_clusters
+  == 19` per cluster) and `mesh-wiring-verify` is Ready mesh-wide.
+- **Headroom, measured — not N/A.** At the peak, node CPU and istiod CPU stay under the
+  SLA-caution band (`SCALE_SLA_CAUTION_PCT`, default 75%) and istiod RSS stays under a
+  stated fraction of the 16Gi limit. A metrics-API gap that leaves utilization N/A is a
+  re-run trigger, not a PASS with "headroom unknown".
+- **Reproducible.** The headline control-plane peak is run at least twice (ideally 3x);
+  the PASS numbers hold across runs and run-to-run variance is reported. One sweep is an
+  anecdote, not proof.
+- **Every number valid.** Rows are `n_valid` (no istiod-restart / dropped-sample
+  poisoning); percentiles are reported only where the sample size supports them;
+  histogram-derived convergence is treated as non-load-bearing — the wall-clock
+  propagation measurements are the trustworthy signal.
+
+Record the concrete numeric thresholds (the RSS fraction, the convergence target, the
+acceptable variance) in `CAMPAIGN_STATUS.md` at execution start, before the first sweep,
+so the verdict is falsifiable.
 
 ## Budget guard
 
@@ -205,17 +237,27 @@ Run the control-plane suite **first**. It is the headline deliverable (the actua
 marquee result before any budget stop threshold can cut the run short. The remaining
 suites are lighter and follow in the order below.
 
-Control plane (run first):
+Control plane (run first — this is the proof):
+
+Ladder the service count so the result is a smooth scaling curve up to the 10k peak, not
+a single dot that cannot distinguish "sustainable" from "knife-edge". Run the whole
+sweep at least twice for reproducibility and report run-to-run variance.
 
 ```bash
 tests/controlplane/003-run-sweep.sh \
   --contexts "$SETUP_CONTEXTS" \
   --mesh-sizes 20 \
-  --service-counts 500 \
+  --service-counts 100,300,500 \
   --replica-counts 1 \
   --namespace-counts 1 \
   --sidecar-scopings none,namespace,explicit
 ```
+
+`--service-counts` is per spoke (peak `500 x 20 = 10,000`). Under budget pressure the
+minimum proof is `--service-counts 500` (the peak alone) run twice, optionally at a
+single representative `--sidecar-scopings`; the ladder and the full scoping sweep are
+stronger evidence and should be funded first — if needed by dropping the
+churn-plus-data-plane suite, not the ladder or the repeat.
 
 Data plane:
 
@@ -243,8 +285,11 @@ tests/churn/003-run-sweep.sh \
   --contexts "$SETUP_CONTEXTS" \
   --mesh-sizes 20 \
   --churn-intensities 5 \
-  --iterations 5
+  --iterations 20
 ```
+
+`--iterations` is 20 (not a token 5) so any reported convergence percentile clears the
+min-n gate; propagation's 30 already does.
 
 Churn plus data plane:
 
@@ -283,6 +328,30 @@ docs/campaigns/YYYY-MM-DD-20c-10k-10k-results.md
 The report must lead with the generated scale envelope and SLA verdict. Commit only the
 redacted campaign report and selected charts to a branch/PR. Never commit kubeconfigs,
 tfvars, raw secrets, account IDs, API hosts, real cluster names, or unredacted logs.
+
+Report fidelity (this is a proof, so every number must be defensible):
+
+- Lead with the scale-envelope artifact (`scale-envelope-*.md`): mesh topology
+  (clusters / Services / endpoints / measured proxies), the provisioning + headroom
+  table, and the one-line SLA verdict. That artifact is the proof; the per-suite reports
+  are its backing detail.
+- State the PASS/FAIL against the pre-declared proof criteria explicitly, naming the
+  evidencing cell for each (achieved-vs-capacity, `istiod_managed_clusters`, peak
+  utilization, RSS, run-to-run variance).
+- Use the wall-clock propagation measurements (P1/P2/P3) as the propagation result;
+  label histogram-derived convergence non-load-bearing where it is bucket-floored or
+  `n_valid=0`. Never present a floored value as a measured quantile.
+- Report coverage honestly: how many combos/rows were valid vs dropped (and why), and
+  the sample size behind every percentile.
+
+Bound the claim — what this proves and what it does not:
+
+- Proves: 20 mesh-member clusters, 10,000 Kubernetes Service objects, 10,000 endpoints
+  (1 per Service) formed one mesh and operated within the stated headroom.
+- Does not prove: multi-endpoint-per-Service fan-out (this run is 1 endpoint/Service),
+  10,000 globally unique hostnames (names repeat across clusters), or behavior under a
+  loaded-mesh data plane (the non-control-plane suites are isolated, unloaded baselines).
+  State these boundaries in the report so the result is not over-read.
 
 Final cleanup always runs:
 
