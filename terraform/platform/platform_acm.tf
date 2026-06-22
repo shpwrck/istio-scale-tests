@@ -136,10 +136,13 @@ resource "helm_release" "acm_multicluster_hub" {
     },
   ]
 
-  # Component disables (e.g. ["server-foundation"] for BLOCKER #1). Empty list =
-  # no set_list entry => chart default (no overrides). Mirrors the localClusterName
-  # --set pattern but as a list.
-  set_list = var.acm_disabled_components != [] ? [
+  # Component disables for BLOCKER #1. NOTE: on ACM 2.16 `server-foundation` is an
+  # MCE component the MCH webhook REJECTS — it is disabled on the pre-created
+  # MultiClusterEngine instead (see README / campaign plan), so this list is normally
+  # empty. Guard with length(): an empty list must pass NOTHING — `var != []` wrongly
+  # passes an empty value, which the helm provider renders as `--set-list key=` =>
+  # `[""]`, a nameless component the MCH webhook rejects ("is not a known component").
+  set_list = length(var.acm_disabled_components) > 0 ? [
     {
       name  = "multiclusterHub.disabledComponents"
       value = var.acm_disabled_components
