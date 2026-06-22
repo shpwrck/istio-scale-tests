@@ -2,7 +2,12 @@ clusterName: ""
 networkSuffix: network
 platform: openshift
 
-replicaCount: 1
+# Fixed replica count used when autoscaling.enabled=false (the scale-test default).
+# Pinned at 3 (matches the 3-node spoke pools for the traffic suites): deterministic,
+# never autoscales mid-measurement (which would confound data-plane/churn-dataplane
+# results), and sized to the node count so it is not wasteful. Raise for higher-
+# throughput sweeps on larger pools.
+replicaCount: 3
 
 resources:
   requests:
@@ -13,6 +18,10 @@ resources:
     memory: 1024Mi
 
 autoscaling:
+  # PINNED for scale tests: HPA OFF so the gateway holds a fixed replicaCount and
+  # does not autoscale mid-measurement (worker pools + istiod are pinned the same
+  # way). Set enabled=true to restore the HPA (min/max/target below) for non-test use.
+  enabled: false
   minReplicas: 1
   maxReplicas: 5
   targetCPUUtilizationPercentage: 80
