@@ -6,28 +6,44 @@ istioVersion: v1.28.5
 # istiod (pilot) control-plane topology + sizing.
 # For scale testing we pin a FIXED replica count (operator HPA disabled) so the
 # per-pod metric fanout in tests/lib/fanout.sh aggregates over a stable topology,
-# and bump resources so the fixed fleet comfortably carries the full multi-cluster
-# xDS load without OOM/CPU-throttling. Set autoscaleEnabled: true to restore the
-# operator's default HorizontalPodAutoscaler (min 1, max 5, 80% CPU).
+# and size resources so the fixed fleet carries the full multi-cluster xDS load
+# without OOM/CPU-throttling. Set autoscaleEnabled: true to restore the operator's
+# default HorizontalPodAutoscaler (min 1, max 5, 80% CPU).
 # GOMEMLIMIT is auto-derived by the istiod chart from limits.memory — do NOT set it manually.
 #
 # Sized for the 20-cluster / 10,000-service (mesh-wide) campaign. In multi-primary
 # every istiod caches ALL remote services/endpoints, so memory scales with the
 # WHOLE mesh, not the local cluster — istiod scales vertically, not horizontally
 # (extra replicas only distribute connected proxies, they do NOT shrink the cache).
-# 8Gi was sized for ~500-2000-pod meshes; 10k services / ~30k endpoints needs more.
-# replicaCount=3 matches the 20c/10k production plan. Because istiod scales
-# vertically (above), extra replicas only add HA + distribute connected proxies —
-# they do NOT shrink the cache or raise capacity. On the fixed-3-node stress rig,
-# 5×2cpu requests = 10 of ~22.5 cores (44%), starving workload-pod scheduling
-# (see STRESS_TEST_STATUS.md FINDING #3); 3 keeps HA while freeing 4 cores.
+# replicaCount=3 matches the 20c/10k production plan; because istiod scales
+# vertically, extra replicas only add HA + distribute connected proxies — they do
+# NOT shrink the cache or raise capacity. Per-replica load at 20c/10k: the whole-
+# mesh cache (~10k services / ~30k endpoints, replica-invariant) plus ~500 connected
+# proxies (1,500 local proxies / 3 replicas), each proxy's config bounded by the
+# baseline root-Sidecar egress scoping below.
+#
+# SIZING — Guaranteed QoS (requests == limits): istiod is NEVER evicted under node
+# memory pressure, the right call for a customer-facing run. Memory 16Gi: the prior
+# 4Gi request badly understated the working set (Istio's published reference is
+# ~1 vCPU + 1.5Gi per 1k services / 2k proxies single-cluster; a 10k-service whole-
+# mesh multi-cluster cache is realistically ~8-15Gi). GOMEMLIMIT auto-derives to
+# ~14.4Gi (90% of the 16Gi limit) so GC stays ahead of the hard limit. CAVEAT: 16Gi
+# is therefore a HARD ceiling — if the real 10k working set exceeds it, istiod
+# OOMKills rather than bursts, so CONFIRM 16Gi against measured RSS during the staged
+# `mesh_member_count` ramp (runbook gates) before trusting it at full scale; raise if
+# steady-state RSS approaches ~14Gi. CPU 4 (req == limit): no burst headroom, so
+# istiod throttles at 4 cores during full pushes — acceptable on the PRODUCTION
+# autoscaling clusters (4-24 nodes) this default targets. NOTE: this is heavier than
+# the fixed-3-node stress rig can carry (4cpu × 3 = 12 of ~22.5 cores reserved, worse
+# than the 5×2cpu that triggered STRESS_TEST_STATUS.md FINDING #3) — on a fixed-node
+# rig, lower the CPU request (measurement-neutral) to free workload scheduling room.
 pilot:
   autoscaleEnabled: false
   replicaCount: 3
   resources:
     requests:
-      cpu: "2"
-      memory: 4Gi
+      cpu: "4"
+      memory: 16Gi
     limits:
       cpu: "4"
       memory: 16Gi
