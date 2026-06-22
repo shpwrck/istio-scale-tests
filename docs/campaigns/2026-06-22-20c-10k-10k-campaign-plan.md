@@ -166,6 +166,34 @@ which costs budget and time).
 Before peak sweeps, calibrate `FANOUT_MAX_SKEW_MS` from a low-impact 20-context probe
 instead of trusting the provisional default.
 
+## Per-suite capacity
+
+Only the control-plane suite needs the 8-node spoke pools. It is the one suite whose
+footprint scales with its sweep axis: `--service-counts 500 --replica-counts 1` stands
+up ~500 sidecar-injected pods per spoke (~50 cores of proxy CPU request per spoke). The
+other four suites vary a traffic or churn *rate* (or an iteration count) against a
+small, fixed workload, so their per-spoke node footprint is roughly constant and small.
+The verification phase already proves the full 20-cluster mesh runs on 3-node spokes
+(istiod 3 x 4 CPU + gateways fit with room to spare), so the light suites fit there too.
+
+| Suite | Sweep axis | Steady workload per spoke | Needs 8-node pools? |
+|---|---|---|---|
+| Control plane | Service / pod **count** (500 x 1) | ~500 sidecar pods (~50 cores) | **Yes** |
+| Data plane | fortio **QPS** (10-1000, swept in-probe) | fortio server + client (fixed) | No |
+| Propagation | xDS push latency (30 iterations) | watcher + one canary endpoint | No |
+| Churn | churn **intensity/rate** | ~5 churn targets + watcher | No |
+| Churn + data plane | churn **rate** (1,5,10) under traffic | ~10 churn targets + fortio | No |
+
+Budget option: because only control plane needs the 8-node pools, run it first (as the
+matrix below already directs), then optionally scale the spoke pools back to fixed
+`3 x m5.4xlarge` for the remaining four suites. The instance type is unchanged, so this
+is an in-place machine-pool resize, and it drops the burn from the `$300/hour` 8-node
+meter to the `$125/hour` 3-node meter (~`$175/hour` saved for the rest of the campaign).
+The trade-off is one extra scale-down plus a mesh-health and metrics-settle re-check
+between control plane and the next suite; the simpler default is to hold 8 nodes through
+all five suites. After any scale-down, re-verify mesh health and let the metrics API
+settle before resuming.
+
 ## Campaign matrix
 
 Use `MESH=20` only. Run suites serially. Never run two suites or probes at the same
@@ -173,9 +201,9 @@ time because they share the same istiod metrics and xDS counters.
 
 Run the control-plane suite **first**. It is the headline deliverable (the actual
 10,000-Service / 10,000-endpoint measurement), it is the only suite that needs the
-8-node spoke pools, and running it first secures the marquee result before any budget
-stop threshold can cut the run short. The remaining suites are lighter and follow in
-the order below.
+8-node spoke pools (see Per-suite capacity above), and running it first secures the
+marquee result before any budget stop threshold can cut the run short. The remaining
+suites are lighter and follow in the order below.
 
 Control plane (run first):
 
