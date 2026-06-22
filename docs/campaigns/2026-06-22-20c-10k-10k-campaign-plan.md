@@ -11,13 +11,21 @@ Target definition:
 
 - 20 mesh-member spoke clusters.
 - 500 Kubernetes Services per spoke.
-- 1 workload replica per Service.
+- 1 workload replica per Service — one endpoint per Service. This is deliberately
+  **not** 10 endpoints per Service; the campaign sweeps Service-object count, not
+  endpoint fan-out.
 - 10,000 Kubernetes Service objects total.
 - 10,000 workload endpoints total.
 
 Repeated service names across clusters are acceptable for this campaign. The run is
 measuring the 10,000 Kubernetes Service object / endpoint shape, not 10,000 globally
 unique hostnames.
+
+The single-endpoint-per-Service shape is what sizes the worker pools below: peak
+data-plane load is ~10,000 sidecars x ~100m CPU request ~= 1,000 cores mesh-wide
+(~50 cores per spoke), which fits the 8-node campaign pools. A 10-endpoints-per-Service
+variant would be ~10x that (~500 cores per spoke) and would not fit — it would need a
+fundamentally larger worker footprint.
 
 ## Budget guard
 
@@ -75,11 +83,25 @@ Prepare local, gitignored Terraform variables.
 
 - `cluster_count = 21`.
 - `manage_service_quotas = false`.
-- Hub cluster: fixed `4 x m5.4xlarge`.
-- Spoke clusters, initial verification phase: fixed `3 x m5.4xlarge`.
-- Spoke clusters, campaign phase: fixed `8 x m5.4xlarge`.
+- Instance type: set `compute_machine_type = "m5.4xlarge"` **explicitly**. The rosa-hcp
+  default (`default_compute_machine_type`) is `m5.xlarge` (4 vCPU); leaving the type
+  unset under-provisions every worker ~4x and the 500-Service control-plane peak will
+  not fit.
+- Worker pools are modelled as `cluster_defaults` (applied to every cluster) plus
+  per-cluster `cluster_overrides` — there is no hub/spoke group abstraction. Express the
+  two shapes as:
+  - `cluster_defaults` = the spoke shape (20 of the 21 clusters), with
+    `compute_machine_type = "m5.4xlarge"`.
+  - a `cluster_overrides` entry for the hub (cluster-001) = `4 x m5.4xlarge`.
+- Hub cluster: fixed `4 x m5.4xlarge` (via the hub override).
+- Spoke clusters, initial verification phase: fixed `3 x m5.4xlarge` (via
+  `cluster_defaults`).
+- Spoke clusters, campaign phase: fixed `8 x m5.4xlarge` (raise the spoke
+  `cluster_defaults` node count to 8 and re-apply; leave the hub override at 4).
 - Fixed means `replicas`, `worker_autoscale_min`, and `worker_autoscale_max` are all
-  set to the same node count for the relevant cluster group.
+  set to the same node count for that cluster group.
+- Keep `compute_machine_type` constant across the 3 -> 8 scale-up so only the node
+  count changes — that is an in-place machine-pool resize, not a pool replacement.
 
 `terraform/platform/terraform.tfvars`:
 
@@ -102,10 +124,14 @@ Read-only preflight before any apply:
 ## Mesh bring-up and scale-up
 
 1. Apply ROSA HCP Terraform with 3-node spokes.
-2. Write kubeconfig locally and set `CONTEXTS=cluster-002,...,cluster-021`.
+2. Write kubeconfig locally and `export SETUP_CONTEXTS=cluster-002,...,cluster-021`
+   (the repo convention for the spoke context list; the sweep commands below pass it
+   through `--contexts`).
 3. Apply platform Terraform.
 4. Run `terraform/platform/scripts/001-openapi-preflight.sh` on the hub.
-5. Ramp mesh membership through `1 -> 5 -> 10 -> 20`.
+5. Ramp mesh membership through `1 -> 5 -> 10 -> 20` by re-applying platform Terraform
+   with `mesh_member_count` set to each step in turn (the tfvars value above is the
+   final `20`). Do not jump straight to 20 — clear the ramp gate below at each step.
 6. At every ramp gate, verify:
    - Argo applications are synced and healthy.
    - `mesh-wiring-verify` is ready.
@@ -125,8 +151,17 @@ Hard stop gates:
 - Failed remote-cluster sync.
 - Cross-cluster data plane not working.
 - Metrics API unable to stabilize before the control-plane suite.
-- Live capacity gate says `500 services x 1 replica` will not fit.
+- Capacity will not fit `500 services x 1 replica`. The plan-time check in
+  `controlplane/003-run-sweep.sh` (`capacity_plan_warn`) is a **WARN only**; the
+  blocking gate is the per-context preflight in `controlplane/001`, which fails the
+  combo at apply time. Treat the 003 WARN as a stop, and rely on 001 to hard-fail per
+  context.
 - istiod restart, OOM, or RSS approaching the 16Gi per-pod limit.
+
+istiod is sized at 4 CPU / 16Gi (Guaranteed QoS, `charts/spoke-ossm/values.yaml`); the
+16Gi limit is hard, so an istiod approaching it at the 10k-Service peak is a
+stop-and-report, not an in-run retune (raising it needs a chart change + mesh redeploy,
+which costs budget and time).
 
 Before peak sweeps, calibrate `FANOUT_MAX_SKEW_MS` from a low-impact 20-context probe
 instead of trusting the provisional default.
@@ -136,31 +171,17 @@ instead of trusting the provisional default.
 Use `MESH=20` only. Run suites serially. Never run two suites or probes at the same
 time because they share the same istiod metrics and xDS counters.
 
-Propagation:
+Run the control-plane suite **first**. It is the headline deliverable (the actual
+10,000-Service / 10,000-endpoint measurement), it is the only suite that needs the
+8-node spoke pools, and running it first secures the marquee result before any budget
+stop threshold can cut the run short. The remaining suites are lighter and follow in
+the order below.
 
-```bash
-tests/propagation/006-run-sweep.sh \
-  --contexts "$CONTEXTS" \
-  --mesh-sizes 20 \
-  --iterations 30 \
-  --tsv
-```
-
-Churn:
-
-```bash
-tests/churn/003-run-sweep.sh \
-  --contexts "$CONTEXTS" \
-  --mesh-sizes 20 \
-  --churn-intensities 5 \
-  --iterations 5
-```
-
-Control plane:
+Control plane (run first):
 
 ```bash
 tests/controlplane/003-run-sweep.sh \
-  --contexts "$CONTEXTS" \
+  --contexts "$SETUP_CONTEXTS" \
   --mesh-sizes 20 \
   --service-counts 500 \
   --replica-counts 1 \
@@ -172,16 +193,36 @@ Data plane:
 
 ```bash
 tests/dataplane/003-run-sweep.sh \
-  --contexts "$CONTEXTS" \
+  --contexts "$SETUP_CONTEXTS" \
   --mesh-sizes 20 \
   --qps-levels 10,100,500,1000
+```
+
+Propagation:
+
+```bash
+tests/propagation/006-run-sweep.sh \
+  --contexts "$SETUP_CONTEXTS" \
+  --mesh-sizes 20 \
+  --iterations 30 \
+  --tsv
+```
+
+Churn:
+
+```bash
+tests/churn/003-run-sweep.sh \
+  --contexts "$SETUP_CONTEXTS" \
+  --mesh-sizes 20 \
+  --churn-intensities 5 \
+  --iterations 5
 ```
 
 Churn plus data plane:
 
 ```bash
 tests/churn-dataplane/004-run-sweep.sh \
-  --contexts "$CONTEXTS" \
+  --contexts "$SETUP_CONTEXTS" \
   --mesh-sizes 20 \
   --churn-rates 1,5,10
 ```
