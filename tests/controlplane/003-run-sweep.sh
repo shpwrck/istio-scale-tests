@@ -588,10 +588,12 @@ fi
 # kube_client_flags helper so the construction stays centralized.
 KUBE_FLAGS=()
 read -ra KUBE_FLAGS <<<"$(kube_client_flags)"
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc "${KUBE_FLAGS[@]}")
-elif command -v kubectl >/dev/null 2>&1; then
+# Prefer kubectl: --qps/--burst (KUBE_FLAGS) are kubectl-only; `oc` rejects them
+# ("unknown flag: --qps") which silently breaks every call on OpenShift/ROSA.
+if command -v kubectl >/dev/null 2>&1; then
 	KUBECTL=(kubectl "${KUBE_FLAGS[@]}")
+elif command -v oc >/dev/null 2>&1; then
+	KUBECTL=(oc "${KUBE_FLAGS[@]}")
 else
 	KUBECTL=()
 fi

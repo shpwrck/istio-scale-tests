@@ -60,8 +60,19 @@ validate_scoping() {
 # shellcheck disable=SC2329
 kube_client_flags() {
 	local qps="${KUBE_CLIENT_QPS:-30}" burst="${KUBE_CLIENT_BURST:-60}"
-	if [[ "$qps" =~ ^[1-9][0-9]*$ ]]; then printf -- '--qps=%s ' "$qps"; fi
-	if [[ "$burst" =~ ^[1-9][0-9]*$ ]]; then printf -- '--burst=%s ' "$burst"; fi
+	# --qps/--burst are NOT exposed as CLI flags by `oc`, and modern kubectl
+	# (v1.34: `kubectl options` lists neither) also rejects them — passing an
+	# unsupported flag aborts EVERY call with "unknown flag: --qps", silently
+	# breaking the whole suite on OpenShift/ROSA (resolve_pods -> no istiod ->
+	# PROBE_FAILED). So detect support on the preferred binary (same order as
+	# resolve_kubectl: kubectl, then oc) and only emit a flag the binary accepts.
+	local bin opts=""
+	if command -v kubectl >/dev/null 2>&1; then bin=kubectl
+	elif command -v oc >/dev/null 2>&1; then bin=oc
+	else return 0; fi
+	opts=$("$bin" options 2>/dev/null || true)
+	if [[ "$qps" =~ ^[1-9][0-9]*$ ]] && grep -q -- '--qps' <<<"$opts"; then printf -- '--qps=%s ' "$qps"; fi
+	if [[ "$burst" =~ ^[1-9][0-9]*$ ]] && grep -q -- '--burst' <<<"$opts"; then printf -- '--burst=%s ' "$burst"; fi
 }
 
 # resolve_kubectl <out_arrayname>: resolve the cluster CLI (prefer oc, then
@@ -77,11 +88,17 @@ resolve_kubectl() {
 	local -a _flags=()
 	# shellcheck disable=SC2046
 	read -ra _flags <<<"$(kube_client_flags)"
-	if command -v oc >/dev/null 2>&1; then
-		_kc=(oc "${_flags[@]}")
-	elif command -v kubectl >/dev/null 2>&1; then
+	# Prefer kubectl over oc: the shared client rate-limit flags (--qps/--burst,
+	# kube_client_flags / P1-1) are kubectl-only — `oc get` rejects them with
+	# "unknown flag: --qps", which silently breaks EVERY call on OpenShift/ROSA
+	# (resolve_pods finds no istiod -> baseline PROBE_FAILED). kubectl handles all
+	# the suites' get/exec/port-forward/apply needs identically, so prefer it
+	# whenever present and fall back to oc only if kubectl is absent.
+	if command -v kubectl >/dev/null 2>&1; then
 		_kc=(kubectl "${_flags[@]}")
+	elif command -v oc >/dev/null 2>&1; then
+		_kc=(oc "${_flags[@]}")
 	else
-		die "neither oc nor kubectl found on PATH"
+		die "neither kubectl nor oc found on PATH"
 	fi
 }
