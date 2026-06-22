@@ -280,14 +280,43 @@ client retry budget docs.
 - The campaign sample report (PR #68) was CLOSED (too many data gaps to keep in-repo).
 
 **REMAINING for the real run (cannot be codified offline — runtime/decision items):**
-1. **MCE version selection** — set `ACM_MCE_VERSION` to a concrete CSV whose clusterview/UserPermission
-   OpenAPI is valid (BLOCKER #1). Verify against ACM release notes / a fresh hub before GO.
+1. **BLOCKER #1 — disable `server-foundation` at install is the PRIMARY remedy** (live-proven + deep-research-
+   corroborated 2026-06-21; see the dated section below). MCE-version selection is the BACKSTOP only, and the
+   2026-06-21 research pass came back **UNRESOLVED** for a concrete fixed `ACM_MCE_VERSION` — no errata found —
+   so do NOT count on a version bump; leave `ACM_MCE_VERSION` documented-but-unset and rely on the disable.
 2. **`FANOUT_MAX_SKEW_MS`** — re-derive from a real ~100-PF (20-context) skew distribution; do NOT run on
    the provisional 1000ms default.
 3. **istiod mem request** — size to measured steady-state cache (whole-mesh ~30k endpoints) before GO.
-4. **Validate** the server-foundation-disabled mesh still registers spokes + deploys ApplicationSets
-   (almost certainly fine — uses cluster-manager Placement + repo cluster secrets, not clusterview).
+4. **Validate** the server-foundation-disabled mesh on a fresh **ROSA-HCP** hub: the disable was empirically
+   proven on a self-managed OCP hub (poison removed, cluster-manager survives) but the end-to-end path —
+   ArgoCD hub cache recovers → app-of-apps/ApplicationSets deploy → spokes register — was never run to
+   completion (rig torn down). Confirm at-install on ROSA-HCP (can't purge post-hoc there). Also check Red Hat
+   SUPPORTED status of disabling server-foundation.
 5. Flip `terraform/rosa-hcp/terraform.tfvars` cluster_count 4→21 + autoscale 4/24; platform mesh_member_count→20.
+
+## 2026-06-21 — BLOCKER #1 deep-research corroboration (multi-source, adversarially verified)
+Ran the `deep-research` workflow (98-agent fan-out: search → fetch 15 sources → 3-vote refutation → cited
+synthesis) against the ACM/MCE `/openapi/v2` poison, WITHOUT giving the panel our live-test memory. It
+independently reached the same conclusion as our live hub test, raising confidence:
+- **THREAD A — disable `server-foundation`: GO (high confidence).** Primary-source-confirmed that the mesh's
+  critical path (ManagedCluster registration + OCM Placement/PlacementDecision + ArgoCD cluster secrets) is
+  owned by the separate **`cluster-manager`** core (upstream OCM = only cluster/work/addon/operator API
+  groups; clusterview/UserPermission are an ACM/MCE add-on), and Foundation depends on Cluster-Manager
+  one-way — so the disable cannot break registration/placement/secret generation.
+- **Mechanism confirmed at source:** gitops-engine `pkg/cache/cluster.go sync()` loads `/openapi/v2`
+  unconditionally + fatally; `ARGOCD_CLUSTER_CACHE_LOAD_OPEN_API_SCHEMA` has ZERO grep matches (the web
+  "env-var workaround" is a hallucination — matches our live finding). Same failure class fixed in **Kueue
+  v0.17.0** (kueue#8873/#9051) by correcting OpenAPI codegen.
+- **THREAD B — fixed MCE/ACM version: UNRESOLVED.** No concrete errata/release identified, so the disable is
+  the actionable remedy, not a fallback.
+- **Reconciliation with our live test:** the panel hedged that the exact `spec.overrides.components[].name`
+  string wasn't on a primary Red Hat docs page (MCE 2.11 docs citation refuted 0-3). Our live test already
+  applied `{name: server-foundation, enabled: false}` and it worked (ocm-proxyserver + both clusterview
+  APIServices removed, `/openapi/v2` UserPermissionStatus refs 3→0, cluster-manager survived 3/3) — so the
+  override key is empirically confirmed and trumps the docs gap.
+- **Net:** BLOCKER #1 de-risked to "very likely correct, pending one ROSA-HCP-at-install end-to-end
+  confirmation pass" (item #4 above). The fix stays codified (`charts/acm-multicluster-hub` disabledComponents,
+  TF `var.acm_disabled_components`, `terraform/platform/scripts/001-openapi-preflight.sh`).
 
 ## Repo fixes codified during the resume (working tree on `claude/scale-test/calib-metrics-timeout-ns-wait`, NOT yet committed)
 - `charts/spoke-east-west-gateway/values.yaml`: `service.type` NodePort → **LoadBalancer** (BLOCKER #2 durable
