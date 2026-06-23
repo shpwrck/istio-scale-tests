@@ -294,6 +294,43 @@ _round_p99() {
 	esac
 }
 
+# Emit a SETUP_FAILED placeholder row (21 cols, all-N/A metrics) for an iteration
+# that failed before it could produce a valid measurement. Mirrors the schema of
+# the main row printf and the SETUP_FAILED status that 003/004 already recognise:
+# 004 counts it in n_total but excludes it from n_valid (status != OK). Keeps a
+# transient failure to ONE lost row instead of aborting the whole sweep.
+emit_setup_failed_row() {
+	local iter="$1" t0="$2"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$RUN_ID" "$MESH_SIZE" "$DEPLOYMENT_COUNT" "$BASE_REPLICAS" "$SCALE_TO" \
+		"$iter" "$t0" "N/A" "N/A" "N/A" \
+		"N/A" "N/A" \
+		"N/A" "N/A" \
+		"N/A" "N/A" \
+		"N/A" "N/A" \
+		"N/A" "N/A" \
+		"SETUP_FAILED" >> "$TSV_FILE"
+}
+
+# Coerce an endpoint-count capture to a clean non-negative integer. A scrape of
+# Envoy /clusters under load can come back empty, multi-line, or non-numeric (a
+# dead PF, a partial body, or a `grep -c` that printed `0` AND exited 1 so a
+# trailing `|| echo 0` doubled the value into "0\n0"). Such a value, fed to
+# `$(( ))`, raises "arithmetic syntax error" and — under `set -e` — aborts the
+# whole probe. Keep only the FIRST run of digits; default to 0 otherwise. Never
+# returns non-zero, so it is safe to call unguarded under `set -e`.
+sanitize_count() {
+	local raw="${1:-}" digits
+	digits="${raw//[!0-9 $'\n']/}"   # drop anything that is not a digit/space/newline
+	digits="${digits%%$'\n'*}"        # keep only the first line
+	digits="${digits//[!0-9]/}"       # then keep only its digits
+	if [[ -n "$digits" ]]; then
+		printf '%s\n' "$((10#$digits))"  # strip leading zeros, force base-10
+	else
+		printf '0\n'
+	fi
+}
+
 bucket_range() {
 	local v="${1:-0}"
 	[[ "$v" == "N/A" ]]      && { echo "N/A"; return; }
@@ -616,11 +653,17 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${_rfiles[@]}")
 	done
 
+	# Reset every iteration so indices track REMOTES, never carry stale values.
 	BASELINE_COUNTS=()
 	for i in "${!REMOTES[@]}"; do
 		envoy_port=$(( BASE_ENVOY_PF_PORT + i ))
-		bc=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null | grep -c "churn-target.*health_flags::healthy" || echo 0)  # P4: bound a stuck PF
-		BASELINE_COUNTS+=("$bc")
+		# `grep -c` prints `0` AND exits 1 on a no-match over non-empty input; a
+		# trailing `|| echo 0` would then double it into the multi-line "0\n0" that
+		# breaks the `$(( ))` at the threshold below. Use `|| true` (matching the
+		# poller) and sanitize to a clean non-negative integer. P4: --max-time
+		# bounds a stuck PF; an empty/failed scrape sanitizes to 0.
+		bc=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null | grep -c "churn-target.*health_flags::healthy" || true)
+		BASELINE_COUNTS+=("$(sanitize_count "$bc")")
 	done
 
 	# Counter baselines summed across source pods.
@@ -628,6 +671,18 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	src_pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_PRE_FILES[@]}")
 
 	T0=$(now_ns)
+	# Run the scale-up + measurement + row-emit as a guarded subshell so a genuine
+	# mid-iteration failure costs ONE row, not the whole sweep. `set -e` is RE-armed
+	# inside (a subshell on the left of an `if`/`||` would otherwise have it
+	# disabled), preserving every `|| true` / poisoning guard; on success the row is
+	# appended in-subshell. We capture $? out-of-condition (set +e around the call)
+	# so the parent survives the failure, records a SETUP_FAILED placeholder, and
+	# still scales back down. The ERR trap keeps the failing line visible — failures
+	# are surfaced, not swallowed.
+	iter_rc=0
+	set +e
+	(
+		set -e
 	echo "  Scaling $DEPLOYMENT_COUNT deployments to $SCALE_TO replicas on all clusters..."
 	SCALE_PIDS=()
 	for ctx in "${ALL_CTXS[@]}"; do
@@ -651,7 +706,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		rf="$TMPDIR_RUN/remote_${i}"
 		echo "" > "$rf"
 		REMOTE_FILES+=("$rf")
-		expected=$(( BASELINE_COUNTS[i] + ENDPOINT_THRESHOLD_DELTA ))
+		# Defensive: re-sanitize the per-remote baseline at the point of use so one
+		# malformed capture can never raise an arithmetic error that aborts the whole
+		# probe under `set -e`. Semantics unchanged: expected = baseline + delta.
+		baseline_i="$(sanitize_count "${BASELINE_COUNTS[i]:-0}")"
+		expected=$(( baseline_i + ENDPOINT_THRESHOLD_DELTA ))
 		poll_endpoint_count_converged $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$expected" "$rf" &
 		POLL_PIDS+=($!)
 
@@ -700,7 +759,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		eds_ok=1
 		for i in "${!REMOTES[@]}"; do
 			ev=$(<"${REMOTE_EDS_FILES[i]}")
-			if [[ "$ev" == "TIMEOUT" || "$ev" == "INCOMPLETE" || -z "${ev// }" ]]; then
+			# Treat TIMEOUT/INCOMPLETE/empty AND any non-integer crossing-ns (a
+			# truncated/garbled result file) as TIMEOUT, so the arithmetic below can
+			# never raise a syntax error that aborts the probe under `set -e`.
+			if [[ "$ev" == "TIMEOUT" || "$ev" == "INCOMPLETE" || ! "$ev" =~ ^[0-9]+$ ]]; then
 				e="TIMEOUT"
 			else
 				e=$(( (ev - T0) / 1000000 ))
@@ -860,6 +922,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		"$src_connected_proxies" "$rmt_connected_proxies" \
 		"$src_push_time_p99" "$rmt_push_time_p99" \
 		"$status" >> "$TSV_FILE"
+	)
+	iter_rc=$?
+	set -e
+	if (( iter_rc != 0 )); then
+		echo "  Warning: iteration $iter failed (rc=$iter_rc) before producing a valid row; recording SETUP_FAILED and continuing." >&2
+		emit_setup_failed_row "$iter" "$T0"
+	fi
 
 	echo "  Scaling back to $BASE_REPLICAS replicas..."
 	SCALE_PIDS=()
