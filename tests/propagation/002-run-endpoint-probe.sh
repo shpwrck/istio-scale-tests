@@ -82,6 +82,10 @@ TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 POLL_INTERVAL_MS="${PROPAGATION_POLL_INTERVAL_MS}"
 POLL_INTERVAL_S="0.$(printf '%03d' "${POLL_INTERVAL_MS}")"
 SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
+# Inter-iteration drain is cleanup, not a measured quantity: bound it short and
+# never reuse the full measurement TIMEOUT_SEC. Removal detection beyond ~20s is
+# unreliable, so a missed drain is flagged (DRAIN_TIMEOUT) rather than waited out.
+DRAIN_TIMEOUT_SEC="${PROPAGATION_DRAIN_TIMEOUT_SEC:-20}"
 METRICS_TIMEOUT="${PROPAGATION_METRICS_TIMEOUT}"
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
 DRY_RUN=0
@@ -178,6 +182,9 @@ Robustness:
 Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
   PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_SETTLE_SEC,
+  PROPAGATION_DRAIN_TIMEOUT_SEC (bound per-cluster inter-iteration drain wait in
+  seconds; default 20 — cleanup only, runs in parallel across clusters and does
+  NOT use the measurement PROPAGATION_TIMEOUT_SEC),
   PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics; defaults from the
   shared METRICS_SCRAPE_TIMEOUT, default 30s — bump for large meshes where
   /metrics may take longer to render),
@@ -404,6 +411,7 @@ if ((WRITE_TSV)); then
 		echo "# ITERATIONS=${ITERATIONS}"
 		echo "# POLL_INTERVAL_S=${POLL_INTERVAL_S}"
 		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
+		echo "# DRAIN_TIMEOUT_SEC=${DRAIN_TIMEOUT_SEC}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		# Tuning-baseline provenance (PL2): live mesh levers + sidecar egress graph,
 		# threaded in from the sweep (queried once via tuning_baseline_state); "unknown"
@@ -1060,7 +1068,8 @@ compute_delta_ms() {
 
 wait_sidecar_endpoint_removed() {
 	local port="$1"
-	local deadline=$(( $(date +%s) + TIMEOUT_SEC ))
+	local timeout_s="${2:-$TIMEOUT_SEC}"
+	local deadline=$(( $(date +%s) + timeout_s ))
 	while (($(date +%s) <= deadline)); do
 		local data
 		data=$(curl -fsS --max-time "$METRICS_TIMEOUT" "http://localhost:$port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }
@@ -1343,12 +1352,22 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	drain_timeout="0"
 	if ((iter < ITERATIONS)); then
 		echo "  Waiting for canary endpoints to drain..."
-		if ! wait_sidecar_endpoint_removed "$SOURCE_ENVOY_PF_PORT"; then
+		# Bounded + PARALLEL drain: this is inter-iteration CLEANUP, not a measured
+		# quantity, so each wait uses the short DRAIN_TIMEOUT_SEC (NOT the 120s
+		# measurement TIMEOUT_SEC) and all ~N clusters drain concurrently. Each call
+		# curls a DIFFERENT localhost port (its own port-forward), so parallel is
+		# safe. (Was serial x TIMEOUT_SEC/cluster -> ~11 x 120s per iteration.)
+		src_pid=""; remote_pids=()
+		wait_sidecar_endpoint_removed "$SOURCE_ENVOY_PF_PORT" "$DRAIN_TIMEOUT_SEC" & src_pid=$!
+		for i in "${!REMOTES[@]}"; do
+			wait_sidecar_endpoint_removed $(( BASE_ENVOY_PF_PORT + i )) "$DRAIN_TIMEOUT_SEC" & remote_pids[i]=$!
+		done
+		if ! wait "$src_pid"; then
 			echo "  Warning: timeout waiting for $SOURCE_CTX sidecar endpoint removal"
 			drain_timeout="1"
 		fi
 		for i in "${!REMOTES[@]}"; do
-			if ! wait_sidecar_endpoint_removed $(( BASE_ENVOY_PF_PORT + i )); then
+			if ! wait "${remote_pids[i]}"; then
 				echo "  Warning: timeout waiting for ${REMOTES[i]} sidecar endpoint removal"
 				drain_timeout="1"
 			fi
