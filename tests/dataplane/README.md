@@ -2,6 +2,44 @@
 
 Measure request latency and throughput through Istio east-west gateways using fortio.
 
+## Architecture
+
+> Diagram conventions (arrow styles, box colors) are shared across all suites — see
+> [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
+
+```mermaid
+graph TB
+    subgraph SRC["source cluster (cluster-001)"]
+        direction LR
+        FC["fortio client<br/>QPS sweep 10 / 100 / 500 / 1000<br/>+ Envoy warmup"]
+        SS["dataplane-server<br/>local endpoint"]
+        SEW["east-west-gw :15443"]
+        FC -->|"intra-cluster baseline<br/>sidecar → sidecar"| SS
+        FC -->|"cross-cluster target · dataplane-server-(remote)<br/>no local endpoint"| SEW
+    end
+
+    subgraph RMT["remote spoke (one of 19)"]
+        direction LR
+        REW["east-west-gw :15443"]
+        RS["dataplane-server-(remote)<br/>Envoy sidecar"]
+        REW --> RS
+    end
+
+    SEW <-->|"cross-network mTLS"| REW
+    FC ==> OUT["measured at the fortio client, per QPS level:<br/>p50 / p90 / p99 · actual QPS · HTTP-200 rate"]
+
+    classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
+    classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
+    classDef namespace fill:#ffebee,stroke:#e53935,color:#000;
+    classDef controlplane fill:#e3f2fd,stroke:#1e88e5,color:#000;
+    classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
+    classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
+    classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
+    class SRC,RMT cluster;
+    class FC,SS,SEW,REW,RS dataplane;
+    class OUT output;
+```
+
 ## What Gets Measured
 
 | Metric | How |

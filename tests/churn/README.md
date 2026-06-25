@@ -2,6 +2,46 @@
 
 Measure control-plane convergence time under simultaneous endpoint churn across clusters.
 
+## Architecture
+
+> Diagram conventions (arrow styles, box colors) are shared across all suites — see
+> [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
+
+```mermaid
+graph TB
+    DRV["churn driver · scale all churn-target-N deployments<br/>1 → scale-to replicas, fired concurrently per iteration<br/>(default: 5 deployments, 1 → 5 replicas)"]
+
+    subgraph SRC["source cluster"]
+        direction TB
+        SP["local istiod x3<br/>poll /debug/syncz"]
+        LSC["local sidecars"]
+    end
+    subgraph RMT["remote cluster"]
+        direction TB
+        RP["remote istiod x3"]
+        WENV["watcher Envoy /clusters"]
+    end
+
+    DRV -->|"Endpoint add / remove"| SP
+    SP -->|"local convergence — all proxies SYNCED<br/>poll /debug/syncz"| LSC
+    SP -->|"cross-cluster"| RP
+    RP -->|"remote EDS converged — control-plane only<br/>first remote pilot_xds_pushes type=eds"| WENV
+    WENV ==>|"remote endpoint reachable — data-plane healthy<br/>Envoy health_flags::healthy"| OUT["push amplification =<br/>(source + remote xDS pushes) / source triggers"]
+
+    classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
+    classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
+    classDef namespace fill:#ffebee,stroke:#e53935,color:#000;
+    classDef controlplane fill:#e3f2fd,stroke:#1e88e5,color:#000;
+    classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
+    classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
+    classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
+    class DRV harness;
+    class SRC,RMT cluster;
+    class SP,RP controlplane;
+    class LSC,WENV dataplane;
+    class OUT output;
+```
+
 ## What Gets Measured
 
 | Metric | How |
