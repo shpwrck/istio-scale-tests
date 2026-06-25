@@ -8,8 +8,9 @@ Automated measurement of how quickly Istio's multi-cluster control plane propaga
 > [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
 
 ```mermaid
+%%{init: {'flowchart': {'wrappingWidth': 520}}}%%
 graph TB
-    FLIP["t0 · label flip · propagation-active=true<br/>config-only onto pre-warmed backer"]
+    FLIP["t0 · the trigger that starts the clock<br/>A single label flip (propagation-active=true) turns an already-running,<br/>sidecar-ready pod into a live endpoint of a Service that was pre-created but empty.<br/>No pod scheduling / image pull / sidecar startup is in the clock,<br/>so P1–P3 below measure pure xDS propagation, not workload startup."]
 
     subgraph SRC["source cluster"]
         direction TB
@@ -23,10 +24,10 @@ graph TB
     end
 
     FLIP --> SP
-    SP -->|"P1 · local sidecars converged<br/>pilot_proxy_convergence_time"| LSC
-    SP -->|"cross-cluster"| RP
-    RP -->|"P2 · remote EDS push<br/>pilot_xds_pushes type=eds"| WENV
-    WENV ==>|"P3 · endpoint HEALTHY, served by remote sidecar"| OUT["mesh-wide config freshness<br/>measured as P1 → P2 → P3 each iteration"]
+    SP -->|"P1 · local convergence — source sidecars get the new endpoint<br/>(metric: pilot_proxy_convergence_time)"| LSC
+    SP -->|"cross-cluster — remote istiod learns the endpoint"| RP
+    RP -->|"P2 · remote control plane pushes EDS to its proxies<br/>(metric: pilot_xds_pushes type=eds)"| WENV
+    WENV ==>|"P3 · endpoint now serves HEALTHY at the remote sidecar"| OUT["mesh-wide config freshness<br/>measured as P1 → P2 → P3 each iteration"]
 
     classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
     classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
