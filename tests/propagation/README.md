@@ -2,6 +2,46 @@
 
 Automated measurement of how quickly Istio's multi-cluster control plane propagates endpoint changes across clusters.
 
+## Architecture
+
+> Diagram conventions (arrow styles, box colors) are shared across all suites — see
+> [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
+
+```mermaid
+graph TB
+    FLIP["t0 · label flip · propagation-active=true<br/>config-only onto pre-warmed backer"]
+
+    subgraph SRC["source cluster"]
+        direction TB
+        SP["local istiod x3"]
+        LSC["local sidecars"]
+    end
+    subgraph RMT["remote cluster — watcher Envoy pool"]
+        direction TB
+        RP["remote istiod x3"]
+        WENV["watcher Envoy<br/>polls /clusters"]
+    end
+
+    FLIP --> SP
+    SP -->|"P1 · local sidecars converged<br/>pilot_proxy_convergence_time"| LSC
+    SP -->|"cross-cluster"| RP
+    RP -->|"P2 · remote EDS push<br/>pilot_xds_pushes type=eds"| WENV
+    WENV ==>|"P3 · endpoint HEALTHY, served by remote sidecar"| OUT["mesh-wide config freshness<br/>measured as P1 → P2 → P3 each iteration"]
+
+    classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
+    classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
+    classDef namespace fill:#ffebee,stroke:#e53935,color:#000;
+    classDef controlplane fill:#e3f2fd,stroke:#1e88e5,color:#000;
+    classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
+    classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
+    classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
+    class SRC,RMT cluster;
+    class SP,RP controlplane;
+    class LSC,WENV dataplane;
+    class FLIP harness;
+    class OUT output;
+```
+
 ## What Gets Measured
 
 ### Endpoint Propagation (002)
