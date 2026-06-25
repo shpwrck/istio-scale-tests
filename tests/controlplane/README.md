@@ -3,6 +3,51 @@
 Measure istiod CPU, memory, and xDS metrics as a function of mesh size, workload
 density, namespace cardinality, and `Sidecar` CR scoping.
 
+## Architecture
+
+> Diagram conventions (arrow styles, box colors) are shared across all suites — see
+> [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
+
+```mermaid
+graph TB
+    B["controlplane sweep (003) · 3-phase delta window<br/>1 · baseline scrape — before deploy"]
+    DEP["2 · deploy 500 svc/cluster + settle 60 s"]
+
+    subgraph MESH["20-spoke mesh"]
+        direction LR
+        subgraph NSIS["namespace · istio-system"]
+            PILOT["istiod x3 replicas<br/>fan-out: port-forward every pod"]
+        end
+        subgraph NSWL["namespace · controlplane-test"]
+            W["500 Services x 1 endpoint<br/>Sidecar scoping: none / namespace / explicit"]
+        end
+        PILOT -->|"xDS push — EDS-dominated"| W
+    end
+
+    F["3 · final scrape + emit<br/>delta over whole window"]
+    OUT["TSV per istiod pod:<br/>CPU · RSS · xDS push rate + by type<br/>convergence / queue p50·p99 · per-proxy config MB · restarts"]
+
+    B --> DEP
+    DEP -.->|"helm deploy workloads"| W
+    PILOT -.->|"scrape /metrics (Prometheus)"| F
+    W -.->|"exec istio-proxy · pilot-agent request<br/>/config_dump?include_eds — per-proxy size"| F
+    F ==> OUT
+
+    classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
+    classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
+    classDef namespace fill:#ffebee,stroke:#e53935,color:#000;
+    classDef controlplane fill:#e3f2fd,stroke:#1e88e5,color:#000;
+    classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
+    classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
+    classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
+    class MESH mesh;
+    class B,DEP,F harness;
+    class NSIS,NSWL namespace;
+    class PILOT controlplane;
+    class W dataplane;
+    class OUT output;
+```
+
 ## What Gets Measured
 
 All histogram and counter metrics are computed as **deltas over a wall-clock

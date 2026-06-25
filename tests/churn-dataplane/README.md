@@ -12,6 +12,46 @@ shared namespace**, runs two paired measurement windows — baseline (no
 churn) and endpoint-churn (load + Deployment scale events) — and reports
 the delta.
 
+## Architecture
+
+> Diagram conventions (arrow styles, box colors) are shared across all suites — see
+> [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
+
+```mermaid
+graph TB
+    DRV["churn driver<br/>scale churn-target-N @ 1 / 5 / 10 ops/s"]
+
+    subgraph NS["shared namespace · churn-dataplane-test (sidecar-injected)"]
+        direction LR
+        FC["fortio client<br/>steady load @ 200 QPS"]
+        FS["fortio-server"]
+        CT["churn-target-N<br/>deployments"]
+        FC -->|"echo traffic (constant)"| FS
+    end
+
+    PILOT["istiod x3<br/>namespace · istio-system"]
+
+    OUT["Δp99 = under-churn p99 − baseline p99<br/>measured at the fortio client"]
+
+    DRV -->|"scale — Endpoint flux"| CT
+    CT -->|"EDS churn"| PILOT
+    PILOT -->|"xDS push while serving load"| FS
+    FC ==>|"paired windows: baseline vs under-churn"| OUT
+
+    classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
+    classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
+    classDef namespace fill:#ffebee,stroke:#e53935,color:#000;
+    classDef controlplane fill:#e3f2fd,stroke:#1e88e5,color:#000;
+    classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
+    classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
+    classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
+    class DRV harness;
+    class NS namespace;
+    class FC,FS,CT dataplane;
+    class PILOT controlplane;
+    class OUT output;
+```
+
 ## What we measure / what we don't
 
 The churn driver scales `churn-target-N` Deployments between
