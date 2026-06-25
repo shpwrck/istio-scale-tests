@@ -94,10 +94,16 @@ graph TB
                 EW["east-west-gw<br/>:15443 / nodePort 31443"]
                 IN["ingress-gw"]
             end
-            subgraph NSWL["workload namespaces"]
-                W["five per-suite namespaces:<br/>controlplane-test · dataplane-test · churn-test<br/>churn-dataplane-test · propagation-test<br/>— — —<br/>500 Services x 1 endpoint · Envoy sidecar each"]
-                MV["mesh-verify · standalone cross-cluster<br/>wiring / echo probe (own ApplicationSet, not a suite)"]
+            subgraph NSWL["workload namespaces — one per suite (sidecar-injected)"]
+                direction LR
+                NSCP["namespace:<br/>controlplane-test<br/>500 Services x 1 endpoint"]
+                NSDP["namespace:<br/>dataplane-test"]
+                NSCH["namespace:<br/>churn-test"]
+                NSCD["namespace:<br/>churn-dataplane-test"]
+                NSPR["namespace:<br/>propagation-test"]
+                NSCP ~~~ NSDP ~~~ NSCH ~~~ NSCD ~~~ NSPR
             end
+            MV["namespace: mesh-verify<br/>standalone cross-cluster wiring / echo probe<br/>(own ApplicationSet — not a suite)"]
         end
         OTHERS["spoke-003 … spoke-021<br/>19 more identical spokes"]
     end
@@ -116,12 +122,14 @@ graph TB
     classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
     classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
     classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
+    classDef group fill:#ffffff,stroke:#b0bec5,stroke-dasharray:2 3,color:#37474f;
     class MESH mesh;
     class HUB,SREP,OTHERS cluster;
     class ARGO,ACM,CA,ESO harness;
-    class NSIS,NSWL namespace;
+    class NSIS,NSCP,NSDP,NSCH,NSCD,NSPR,MV namespace;
+    class NSWL group;
     class PILOT,D1,D2,D3 controlplane;
-    class EW,IN,W,MV dataplane;
+    class EW,IN dataplane;
 ```
 
 - The **hub** (`cluster-1`) is GitOps/ACM control infrastructure only — never labeled
