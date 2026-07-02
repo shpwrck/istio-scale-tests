@@ -1,0 +1,5 @@
+apiVersion: v2
+name: mesh-cluster-switch
+description: Mesh-wide traffic switch — one root-namespace DestinationRule that pins 100% of meshed traffic to a chosen cluster (by node region), or restores balanced cross-cluster load balancing.
+type: application
+version: 0.1.0

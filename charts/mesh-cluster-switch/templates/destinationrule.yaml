@@ -1,0 +1,31 @@
+{{- $active := required "activeCluster is required (\"balanced\" or a region name)" .Values.activeCluster }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: mesh-cluster-switch
+  {{- /* Root namespace: a DR here is the mesh-wide default for every client
+        sidecar, overridable by more specific per-namespace DRs. */}}
+  namespace: istio-system
+  labels:
+    {{- include "mesh-cluster-switch.labels" . | nindent 4 }}
+spec:
+  host: {{ .Values.host | quote }}
+  trafficPolicy:
+    outlierDetection:
+      consecutive5xxErrors: {{ .Values.outlierDetection.consecutive5xxErrors }}
+      interval: {{ .Values.outlierDetection.interval }}
+      baseEjectionTime: {{ .Values.outlierDetection.baseEjectionTime }}
+    loadBalancer:
+      localityLbSetting:
+        {{- if eq $active "balanced" }}
+        enabled: false
+        {{- else }}
+        enabled: true
+        distribute:
+          {{- /* from "*" matches every client locality, so the switch does not
+                depend on client proxies' bootstrap-time locality (pods started
+                before the nodes were region-labeled still obey it). */}}
+          - from: "*"
+            to:
+              {{ printf "%s/*" $active | quote }}: 100
+        {{- end }}

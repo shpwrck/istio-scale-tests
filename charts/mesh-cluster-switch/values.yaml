@@ -1,0 +1,30 @@
+# Which cluster receives all meshed traffic. One of:
+#   "balanced"      — locality load balancing disabled; traffic spreads across all
+#                     clusters' endpoints (default endpoint-proportional behavior).
+#   <region name>   — 100% of traffic from every meshed client (on every cluster
+#                     the chart is applied to) is steered to endpoints whose nodes
+#                     carry topology.kubernetes.io/region=<region name>. With the
+#                     one-time node labeling in README.md, region == clusterName.
+#
+# The rendered DestinationRule exists in ALL states so every transition is a plain
+# `oc apply` — no deletes. Remove the switch entirely with:
+#   oc delete destinationrule mesh-cluster-switch -n istio-system
+activeCluster: balanced
+
+# Host scope of the switch. The default covers every in-mesh Kubernetes service.
+# NOTE (no merging in Istio): any DestinationRule with a more specific host — in
+# the client namespace, the service namespace, or the root namespace — fully
+# SHADOWS this one for that host; it does not inherit or merge the switch policy.
+host: "*.svc.cluster.local"
+
+# Envoy only activates locality load balancing for clusters that have outlier
+# detection configured, so the switch must carry one. These defaults are
+# deliberately LAX so health-based ejection stays out of the way of the
+# deterministic pin: ejection needs 100 consecutive 5xx within a 10s window.
+# CAVEAT — the pin is deterministic only while the pinned side answers: if every
+# endpoint in the pinned region is ejected, Envoy redistributes the weight to the
+# surviving localities rather than failing all requests.
+outlierDetection:
+  consecutive5xxErrors: 100
+  interval: 10s
+  baseEjectionTime: 30s

@@ -130,6 +130,7 @@ The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops
 | `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
 | `charts/spoke-mesh-restart/` | Helm chart: restart Job for istiod and gateways after mesh GitOps sync completes (wave 30). |
 | `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app). |
+| `charts/mesh-cluster-switch/` | Helm chart: mesh-wide traffic switch — pins all meshed traffic to one cluster or restores balanced LB (not in root app). |
 | `charts/istiod-monitor/` | Helm chart: OpenShift UWM ServiceMonitor + PrometheusRule for istiod pilot metrics. |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD ApplicationSet + RBAC for ACM Placement; preset value files per component. |
 | `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD Application `hub-gitops-root` (directory sync of child Applications). |
