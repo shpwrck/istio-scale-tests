@@ -3,13 +3,8 @@ app.kubernetes.io/name: controlplane-test
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{- define "controlplane-test.selectorLabels" -}}
-app.kubernetes.io/name: controlplane-test
-{{- end }}
-
 {{/*
-Validate sidecarScoping is one of the supported values. Fails the render with a
-clear message so operators get a single source-of-truth list.
+Validate sidecarScoping is one of the supported values.
 */}}
 {{- define "controlplane-test.validateSidecarScoping" -}}
 {{- $v := .Values.sidecarScoping | default "none" -}}
@@ -19,70 +14,40 @@ clear message so operators get a single source-of-truth list.
 {{- end -}}
 
 {{/*
-  Effective namespace prefix. `namespacePrefix` takes precedence; otherwise
-  fall back to the legacy `namespace` value. Defaults to "controlplane-test"
-  if both are empty.
-*/}}
-{{- define "controlplane-test.namespacePrefix" -}}
-{{- if .Values.namespacePrefix -}}
-{{ .Values.namespacePrefix }}
-{{- else if .Values.namespace -}}
-{{ .Values.namespace }}
-{{- else -}}
-controlplane-test
-{{- end -}}
-{{- end -}}
+Namespace name for a zero-based index `i`: `<namespace>` when
+namespaceCount <= 1, otherwise `<namespace>-<i>`.
 
-{{/*
-Return the ordered list of workload namespaces this chart manages.
-namespace          -> the primary namespace value
-namespace-1, ...   -> additional namespaces when namespaceCount > 1
-*/}}
-{{- define "controlplane-test.namespaces" -}}
-{{- $base := .Values.namespace -}}
-{{- $n := int (default 1 .Values.namespaceCount) -}}
-{{- if lt $n 1 -}}{{- $n = 1 -}}{{- end -}}
-{{- if le $n 1 -}}
-{{- toYaml (list $base) -}}
-{{- else -}}
-{{- $out := list -}}
-{{- range $i, $_ := until $n -}}
-{{- $out = append $out (printf "%s-%d" $base $i) -}}
-{{- end -}}
-{{- toYaml $out -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-  Namespace name for a given zero-based index `i`.
-  Backwards-compat: when namespaceCount == 1, the single namespace is named
-  exactly `${namespacePrefix}` (e.g. `controlplane-test`). When namespaceCount > 1,
-  the name is `${namespacePrefix}-${i}`.
-
-  Usage: {{ include "controlplane-test.namespaceName" (dict "ctx" $ "i" $i) }}
+Usage: {{ include "controlplane-test.namespaceName" (dict "ctx" $ "i" $i) }}
 */}}
 {{- define "controlplane-test.namespaceName" -}}
 {{- $ctx := .ctx -}}
-{{- $i := .i -}}
-{{- $count := $ctx.Values.namespaceCount | int -}}
-{{- $prefix := include "controlplane-test.namespacePrefix" $ctx -}}
-{{- if le $count 1 -}}
-{{ $prefix }}
+{{- $base := $ctx.Values.namespace | default "controlplane-test" -}}
+{{- if le ($ctx.Values.namespaceCount | int) 1 -}}
+{{ $base }}
 {{- else -}}
-{{ $prefix }}-{{ $i }}
+{{ $base }}-{{ .i }}
 {{- end -}}
 {{- end -}}
 
 {{/*
-  Namespace name for a service index `idx`. Service `idx` lives in namespace
-  `idx mod namespaceCount`.
+Ordered list (YAML) of every workload namespace this chart manages.
+*/}}
+{{- define "controlplane-test.namespaces" -}}
+{{- $n := max (.Values.namespaceCount | int) 1 | int -}}
+{{- $out := list -}}
+{{- range $i := until $n -}}
+{{- $out = append $out (include "controlplane-test.namespaceName" (dict "ctx" $ "i" $i)) -}}
+{{- end -}}
+{{- toYaml $out -}}
+{{- end -}}
 
-  Usage: {{ include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i) }}
+{{/*
+Namespace for service index `idx` (service idx lives in namespace idx mod namespaceCount).
+
+Usage: {{ include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i) }}
 */}}
 {{- define "controlplane-test.namespaceForService" -}}
 {{- $ctx := .ctx -}}
-{{- $idx := .idx | int -}}
 {{- $count := max ($ctx.Values.namespaceCount | int) 1 -}}
-{{- $nsIdx := mod $idx $count -}}
-{{ include "controlplane-test.namespaceName" (dict "ctx" $ctx "i" $nsIdx) }}
+{{- include "controlplane-test.namespaceName" (dict "ctx" $ctx "i" (mod (.idx | int) $count)) -}}
 {{- end -}}

@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
-# Orchestrate endpoint propagation probes across multiple mesh sizes for comparison.
-# Runs endpoint probes at each mesh size (1, 2, 3, ... N clusters),
-# producing results tagged by cluster count for side-by-side analysis.
+# Run the endpoint propagation probe at each mesh size (1, 2, ... N clusters)
+# and write one per-sweep results directory for side-by-side comparison.
 #
 # Usage:
 #   ./tests/propagation/006-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [--iterations N] [options]
 #
 # Examples:
-#   # Sweep 1, 2, 3 clusters:
-#   ./tests/propagation/006-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
-#
-#   # Sweep specific sizes with fewer iterations:
-#   ./tests/propagation/006-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003 \
-#     --mesh-sizes 1,3 --iterations 5
+#   # Sweep 1 and 2 clusters:
+#   ./tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --tsv
 #
 #   # Dry-run to see what would be executed:
-#   ./tests/propagation/006-run-sweep.sh --dry-run
+#   ./tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --dry-run
 # ci-dry-run:
 set -euo pipefail
-# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
-# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+# Loud ERR trap for unexpected aborts; per-step failures are handled below.
+# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -28,7 +23,7 @@ source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # B6: harness_sha for the placeholder TSV preamble
+source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -50,14 +45,13 @@ Usage: $(basename "$0") [options]
 
   --contexts CSV         All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV       Cluster counts to test (default: "1,2,...,len(contexts)").
-  --mesh-size N          DEPRECATED single-size alias (prints warning to stderr).
   --watcher-replicas N   Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --iterations N         Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC          Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
-  --settle-sec SEC       Settle gap after cleanup between mesh-size steps (default: $SETTLE_SEC).
+  --settle-sec SEC       Settle gap between iterations and between mesh-size steps (default: $SETTLE_SEC).
   --output-dir DIR       Results root (default: tests/propagation/results). A new
                          per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
-  --tsv                  Also write per-iteration TSV files (enables 005 report).
+  --tsv                  Write per-iteration TSVs and the 005 reports (sweep-summary.md).
   --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
   --force-large-matrix   Bypass matrix safety cap (default: $MAX_MATRIX iterations).
   --dry-run              Print planned matrix to stderr; exit without touching clusters.
@@ -79,13 +73,6 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--mesh-sizes)
 		[[ -n "${2:-}" ]] || die "--mesh-sizes requires a value"
-		MESH_SIZES_CSV="$2"
-		shift 2
-		;;
-	--mesh-size)
-		# Deprecated singular alias — forward to --mesh-sizes.
-		[[ -n "${2:-}" ]] || die "--mesh-size requires a value"
-		echo "warning: --mesh-size is deprecated; use --mesh-sizes CSV (treating as single-size sweep)" >&2
 		MESH_SIZES_CSV="$2"
 		shift 2
 		;;
@@ -158,8 +145,10 @@ else
 fi
 
 for ms in "${MESH_SIZES[@]}"; do
-	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
+	is_pos_int "$ms" || die "mesh-size must be a positive integer: $ms"
+	((ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
+is_pos_int "$ITERATIONS" || die "--iterations must be a positive integer (got: $ITERATIONS)"
 
 MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ITERATIONS ))
 if (( MATRIX_SIZE > MAX_MATRIX && !FORCE_LARGE_MATRIX )); then
@@ -171,14 +160,8 @@ SWEEP_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
 HARNESS_SHA="$(harness_sha)"
 
-# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
-# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — a sweep-wide
-# scalar (the mesh's tuning is identical regardless of how many clusters a combo
-# measures). The sidecar-scoping / discoverySelectors / telemetry levers directly
-# change what xDS/EDS propagation measures, so a run on the baked baseline is
-# provenance-blind without these. Threaded to 002 (--tuning-baseline /
-# --sidecar-egress-hosts) AND emitted by the placeholder writer above (PL36 contract).
-# Skipped in --dry-run (cluster read); stays "unknown".
+# Live tuning-baseline provenance, queried once on the source context and passed
+# to 002 and the placeholder writer. Skipped in --dry-run (stays "unknown").
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 if ((! DRY_RUN)); then
@@ -200,16 +183,9 @@ if ((! DRY_RUN)); then
 	fi
 fi
 
-# B6: emit a minimal placeholder TSV for a mesh size whose setup/probe crashed before
-# the probe could write its own rows. Without this, that size is absent from the
-# report and indistinguishable from "never planned". 005-report-results.sh globs
-# endpoint-*.tsv and counts n_total[mesh_size] for any NF>=10 row, excluding non-OK
-# status from n_valid (PL15). Only meaningful when --tsv is set (the report runs only
-# then). The file is named so it sorts AFTER the real endpoint-<RUN_ID> files, and it
-# carries the SAME sweep-level scalar preamble keys (SWEEP_RUN_ID/HARNESS_SHA/
-# ISTIO_VERSION/SOURCE_CTX/ITERATIONS/TIMEOUT_SEC/SETTLE_SEC/TUNING_BASELINE/
-# SIDECAR_EGRESS_HOSTS) so PL26 scalar homogeneity holds; per-iteration
-# RUN_ID/MESH_SIZE are this combo's.
+# Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
+# so the size still shows in the report (counted in n_total, excluded from n_valid).
+# Carries the same sweep-level preamble keys as 002. Only written with --tsv.
 # Usage: emit_propagation_placeholder <status> <mesh_size> <source_ctx>
 emit_propagation_placeholder() {
 	((WRITE_TSV)) || return 0
@@ -227,16 +203,42 @@ emit_propagation_placeholder() {
 		echo "# ITERATIONS=${ITERATIONS}"
 		echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
-		# PL36: emit the same tuning-baseline keys 002 writes so this placeholder file
-		# (potentially the report's first TSV) carries identical sweep-level provenance.
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms"
-		# One degraded row: status carries the sentinel, restarted=unknown -> filtered
-		# from n_valid; numerics N/A (PL13).
+		# One degraded row: status sentinel, restarted=unknown, numerics N/A.
 		echo -e "${SWEEP_RUN_ID}-failms${ms}\t${ms}\t0\t${sctx}\tN/A\tN/A\tN/A\tN/A\tN/A\t${status}\tN/A\tN/A\tN/A\tN/A\tN/A\tunknown\t0\tN/A\tN/A"
 	} > "$f"
+}
+
+# plan_mesh_size <ms>: set active_ctxs, inactive_ctxs, source_ctx, remote_csv and
+# endpoint_args (the exact 002 arguments) for one mesh size.
+plan_mesh_size() {
+	local ms="$1" c ac match
+	active_ctxs=("${CONTEXTS[@]:0:$ms}")
+	source_ctx="${active_ctxs[0]}"
+	remote_csv="$(IFS=,; echo "${active_ctxs[*]:1}")"
+	inactive_ctxs=()
+	for c in "${CONTEXTS[@]}"; do
+		match=0
+		for ac in "${active_ctxs[@]}"; do [[ "$c" == "$ac" ]] && { match=1; break; }; done
+		((match)) || inactive_ctxs+=("$c")
+	done
+	endpoint_args=(
+		--source-context "$source_ctx"
+		--mesh-size "$ms"
+		--sweep-run-id "$SWEEP_RUN_ID"
+		--iterations "$ITERATIONS"
+		--timeout "$TIMEOUT_SEC"
+		--settle-sec "$SETTLE_SEC"
+		--output-dir "$SWEEP_DIR"
+		--tuning-baseline "$TUNING_BASELINE"
+		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+	)
+	((WRITE_TSV)) && endpoint_args+=(--tsv)
+	[[ -n "$remote_csv" ]] && endpoint_args+=(--remote-contexts "$remote_csv")
+	return 0
 }
 
 # --- dry-run: print planned matrix to stderr, exit cleanly --------------------
@@ -253,20 +255,15 @@ if ((DRY_RUN)); then
 		echo "Output (would create): $SWEEP_DIR"
 		echo ""
 		for ms in "${MESH_SIZES[@]}"; do
-			active_ctxs=("${CONTEXTS[@]:0:$ms}")
-			source_ctx="${active_ctxs[0]}"
-			remote_ctxs=()
-			((ms > 1)) && remote_ctxs=("${active_ctxs[@]:1}")
-			remote_csv=""
-			for rc in "${remote_ctxs[@]}"; do
-				[[ -n "$remote_csv" ]] && remote_csv+=","
-				remote_csv+="$rc"
-			done
+			plan_mesh_size "$ms"
 			echo "--- Plan: mesh_size=$ms ---"
+			if ((${#inactive_ctxs[@]})); then
+				echo "  007-cleanup.sh --contexts $(IFS=,; echo "${inactive_ctxs[*]}")"
+			fi
 			echo "  001-setup-propagation-test.sh --contexts $(IFS=,; echo "${active_ctxs[*]}") --watcher-replicas $WATCHER_REPLICAS"
-			echo "  002-run-endpoint-probe.sh --source-context $source_ctx --remote-contexts $remote_csv --mesh-size $ms --sweep-run-id $SWEEP_RUN_ID --iterations $ITERATIONS --settle-sec $SETTLE_SEC"
+			echo "  002-run-endpoint-probe.sh ${endpoint_args[*]}"
 			if ((COLLECT_METRICS)); then
-				echo "  004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
+				echo "  004-collect-pilot-metrics.sh --contexts $(IFS=,; echo "${active_ctxs[*]}") --output-dir $SWEEP_DIR"
 			fi
 			echo ""
 		done
@@ -295,45 +292,26 @@ echo "Output: $SWEEP_DIR"
 echo ""
 
 for ms in "${MESH_SIZES[@]}"; do
-	active_ctxs=("${CONTEXTS[@]:0:$ms}")
-	source_ctx="${active_ctxs[0]}"
-	remote_ctxs=()
-	if ((ms > 1)); then
-		remote_ctxs=("${active_ctxs[@]:1}")
-	fi
-	remote_csv=""
-	for rc in "${remote_ctxs[@]}"; do
-		[[ -n "$remote_csv" ]] && remote_csv+=","
-		remote_csv+="$rc"
-	done
+	plan_mesh_size "$ms"
 
 	echo "=========================================="
 	echo "  Sweep: mesh_size=$ms"
 	echo "  Clusters: ${active_ctxs[*]}"
 	echo "  Source: $source_ctx"
-	echo "  Remotes: ${remote_ctxs[*]:-none}"
+	echo "  Remotes: ${remote_csv:-none}"
 	echo "=========================================="
 	echo ""
 
-	# Clean up watchers on contexts not active at this mesh size to prevent
-	# orphan sidecars from inflating histogram baselines (R5-S3).
-	inactive_ctxs=()
-	for c in "${CONTEXTS[@]}"; do
-		_match=0
-		for ac in "${active_ctxs[@]}"; do
-			[[ "$c" == "$ac" ]] && { _match=1; break; }
-		done
-		((_match)) || inactive_ctxs+=("$c")
-	done
+	# Remove watchers from contexts outside this mesh size so their sidecars do
+	# not count toward the source istiod's connected proxies.
 	if ((${#inactive_ctxs[@]} > 0)); then
-		echo "--- Cleaning up watchers on inactive contexts: ${inactive_ctxs[*]} ---"
-		"$SCRIPT_DIR/001-setup-propagation-test.sh" --cleanup --contexts "$(IFS=,; echo "${inactive_ctxs[*]}")" || true
+		echo "--- Cleaning up inactive contexts: ${inactive_ctxs[*]} ---"
+		"$SCRIPT_DIR/007-cleanup.sh" --contexts "$(IFS=,; echo "${inactive_ctxs[*]}")" || \
+			echo "warn: cleanup of inactive contexts failed for mesh_size=$ms; continuing" >&2
 	fi
 
 	echo "--- Setting up watchers ---"
-	# B1/B6: setup is a probable per-combo failure at scale; bare under set -e it would
-	# abort the whole sweep. On failure record a placeholder row (so this mesh size is
-	# visible in the report), then continue to the next mesh size.
+	# A setup failure records a placeholder row and moves to the next mesh size.
 	if ! "$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --watcher-replicas "$WATCHER_REPLICAS"; then
 		echo "warn: watcher setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2
 		emit_propagation_placeholder SETUP_FAILED "$ms" "$source_ctx"
@@ -343,28 +321,8 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo ""
 
 	echo "--- Running endpoint probe (mesh_size=$ms) ---"
-	endpoint_args=(
-		--source-context "$source_ctx"
-		--mesh-size "$ms"
-		--sweep-run-id "$SWEEP_RUN_ID"
-		--iterations "$ITERATIONS"
-		--timeout "$TIMEOUT_SEC"
-		--settle-sec "$SETTLE_SEC"
-		--output-dir "$SWEEP_DIR"
-		--tuning-baseline "$TUNING_BASELINE"
-		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
-	)
-	((WRITE_TSV)) && endpoint_args+=(--tsv)
-	if [[ -n "$remote_csv" ]]; then
-		endpoint_args+=(--remote-contexts "$remote_csv")
-	fi
-	# P0/B6: a probe failure must NOT abort the multi-hour sweep. The endpoint probe
-	# writes its own per-iteration rows into $SWEEP_DIR (self-tagging TIMEOUT_*/
-	# DRAIN_TIMEOUT/RESTART/SCRAPE_INCOMPLETE). If it crashed BEFORE writing any row,
-	# this mesh size would vanish from the report (indistinguishable from never-planned),
-	# so emit a placeholder row to make the combo visible (n_total++, excluded from
-	# n_valid). If the probe DID write rows, the placeholder is additive (one extra
-	# non-OK row in n_total) and still honest.
+	# A probe failure records a placeholder row (additive if the probe already wrote
+	# rows) and the sweep continues.
 	if ! "$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"; then
 		echo "warn: endpoint probe failed for mesh_size=$ms; recording PROBE_FAILED placeholder and continuing" >&2
 		emit_propagation_placeholder PROBE_FAILED "$ms" "$source_ctx"
@@ -394,12 +352,6 @@ if ((WRITE_TSV)); then
 	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
 	echo ""
 
-	# Markdown sweep summary is generated by the report script (AGENTS.md "Markdown
-	# Summary" rule). The report's YAML frontmatter carries the run metadata
-	# (RUN_ID, SOURCE_CTX, REMOTES, MESH_SIZE, ITERATIONS, TIMEOUT_SEC, SETTLE_SEC,
-	# DATE, HARNESS_SHA, ISTIO_VERSION, KUBE_VERSIONS) that the previous hand-rolled
-	# header surfaced; the cross-mesh-size comparison table lives at the bottom of
-	# the report's markdown output.
 	COMBINED="${SWEEP_DIR}/sweep-summary.md"
 	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$COMBINED"
 	echo "Combined report: $COMBINED"

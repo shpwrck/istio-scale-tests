@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Clean up all dataplane-test resources from target clusters.
+# Remove the dataplane-test namespace from target clusters.
 #
 # Usage:
 #   ./tests/dataplane/005-cleanup.sh [--contexts CSV] [--dry-run] [--no-wait-deletion]
@@ -24,8 +24,8 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --contexts CSV         Kube contexts to clean up (default: \$SETUP_CONTEXTS).
-  --dry-run              Show what would be deleted without deleting.
-  --no-wait-deletion     Return immediately after delete is accepted (default: wait).
+  --dry-run              Print the delete commands without contacting any cluster.
+  --no-wait-deletion     Return once the delete is accepted (default: wait).
   --deletion-timeout N   Seconds to wait for namespace termination (default: 180).
   -h, --help             Show this help.
 
@@ -67,13 +67,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -82,14 +77,6 @@ else
 	split_csv "$SETUP_CONTEXTS" CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
-
-run_delete() {
-	if ((DRY_RUN)); then
-		echo "  [dry-run] $*"
-	else
-		"$@" 2>/dev/null || true
-	fi
-}
 
 wait_for_ns_termination() {
 	local ctx="$1"
@@ -112,16 +99,23 @@ echo "Wait for deletion: $((WAIT_DELETION))"
 ((DRY_RUN)) && echo "Mode: dry-run"
 echo ""
 
+if ((DRY_RUN)); then
+	for ctx in "${CONTEXTS[@]}"; do
+		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace $NS --ignore-not-found=true --wait=false"
+		((WAIT_DELETION)) && echo "  [dry-run] wait up to ${DELETION_TIMEOUT}s for namespace $NS to disappear on $ctx"
+	done
+	exit 0
+fi
+
+# --ignore-not-found makes an absent namespace a no-op, so a failed delete means
+# the context itself failed. --wait=false so the bounded loop below is the only wait.
 PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "--- Cleaning up context: $ctx ---"
-		if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
-			echo "  [$ctx] Namespace $NS does not exist, skipping."
-			exit 0
-		fi
-		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
-		if ((WAIT_DELETION && !DRY_RUN)); then
+		"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=false \
+			|| { echo "  [$ctx] error: delete failed" >&2; exit 1; }
+		if ((WAIT_DELETION)); then
 			echo "  [$ctx] waiting for namespace termination (timeout ${DELETION_TIMEOUT}s)..."
 			wait_for_ns_termination "$ctx" || exit 1
 		fi

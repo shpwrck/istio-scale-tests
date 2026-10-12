@@ -6,7 +6,7 @@
 # dimension while the others are held constant.
 #
 # Usage:
-#   ./tests/controlplane/004-report-results.sh [--results-dir DIR]
+#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--format FMT]
 #
 # Examples:
 #   ./tests/controlplane/004-report-results.sh
@@ -31,7 +31,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/controlplane/results).
-  --format FMT       Output format: text, csv, json, markdown, charts (default: text).
+  --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
 Output groups by (mesh_size, service_count, replicas, namespace_count,
@@ -76,6 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
+md) FORMAT=markdown ;;
 text|csv|json|markdown|charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, json, markdown, or charts)" ;;
 esac
@@ -698,7 +699,7 @@ so a restart-poisoned row is excluded from every numeric aggregate (`n_valid` mi
 | `reps` (replicas) | pods/service | sweep axis | Pods per service (drives endpoint/EDS count). |
 | `ns` (namespace_count) | namespaces | sweep axis | Namespaces holding the services. |
 | `scoping` (sidecar_scoping) | enum | sweep axis | `Sidecar` CR mode: `none` / `namespace` / `explicit`. |
-| `n_total` | rows | internal | All rows for the cell, including restart-poisoned/`unknown` and degraded (`SETUP_FAILED`/`PROBE_FAILED`/`ZERO_PODS`) rows. |
+| `n_total` | rows | internal | All rows for the cell, including restart-poisoned/`unknown` and degraded (`SETUP_FAILED`/`PROBE_FAILED`, or a context with zero istiod pods) rows. |
 | `n_valid` | rows | internal | Rows with `istiod_restarted==0` used in numeric aggregation; `n_valid < n_total` means some rows were dropped as poisoned. |
 | `cpu_avg (m)` | millicores (per replica) | `process_cpu_seconds_total` delta ÷ window × 1000 | istiod CPU over the scrape window; `overflow` if it exceeds the histogram top bucket; `N/A` on restart/missing baseline. |
 | `mem_avg (Mi)` | MiB (per replica) | `process_resident_memory_bytes` (istiod `/metrics`) | Peak RSS of (baseline, 5 s polled samples, final scrape) over the window. |
@@ -706,7 +707,7 @@ so a restart-poisoned row is excluded from every numeric aggregate (`n_valid` mi
 | `heap_inuse (Mi)` | MiB | `go_memstats_heap_inuse_bytes` | Go heap in use — point-in-time at final scrape; steady-state signal independent of RSS (which stays inflated after GC via `MADV_FREE`). |
 | `conv_p99 (ms)` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence reported as a **bucket range** (e.g. `100-500`), not an exact value — istiod buckets are 100/500/1000/3000/5000/10000/20000/30000 ms. `†` = SINGLE-BUCKET-PINNED (all delta mass in the 0-100 ms bucket; a uniform-within-bucket assumption, unresolved below 100 ms). |
 | `queue_p99 (ms)` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 time pushes waited in istiod's queue; same bucket-range / `†` semantics as `conv_p99`. |
-| `proxies` (connected_proxies) | proxies | `pilot_xds` gauge (final scrape) | Connected proxy count; gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
+| `proxies` (connected_proxies) | proxies | `pilot_xds` gauge summed over its series (final scrape) | Connected proxy count; gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
 | `cfg_dump_avg (MB)` | MB | `pilot-agent request /config_dump?include_eds` → `wc -c` | Real per-proxy config-dump size (EDS included by design — the cost `Sidecar` scoping reduces); proxy-side, so ingested regardless of istiod restart state. |
 | `restarts` | rows | `istiod_restarted==1` | Rows where `process_start_time_seconds` moved forward between baseline and final scrape; counters/histograms for those samples may under-report. |
 | `unk_restarts` | rows | `istiod_restarted==unknown` | Rows where restart state was undetectable (a pinned pod disappeared / missing `process_start_time_seconds`). |
@@ -982,10 +983,7 @@ report_charts() {
 		}
 
 		# Chart 1: istiod CPU vs mesh size by scoping
-		printf "%% Chart 1: istiod CPU (m, per replica) vs mesh size, by sidecar scoping\n"
-		printf "%% Series order:"
-		for (s = 1; s <= n_sc; s++) printf " %s", sc_order[s]
-		printf "\n\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"istiod CPU vs Mesh Size by Sidecar Scoping\"\n"
 		printf "    x-axis \"Mesh Size\" ["
@@ -1019,8 +1017,7 @@ report_charts() {
 			printf "> No config dump data available for bar chart.\n"
 			exit
 		}
-		printf "%% Chart 2: Per-proxy config dump size (MB) by scoping at mesh size %s\n", max_ms
-		printf "\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"Config Dump Size by Scoping (mesh size %s)\"\n", max_ms
 		printf "    x-axis \"Sidecar Scoping\" ["

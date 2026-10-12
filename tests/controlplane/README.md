@@ -1,7 +1,7 @@
 # Control-Plane Resource Scaling Test Suite
 
-Measure istiod CPU, memory, and xDS metrics as a function of mesh size, workload
-density, namespace cardinality, and `Sidecar` CR scoping.
+Measures istiod CPU, memory and xDS activity as a function of mesh size, service count,
+replicas, namespace count and `Sidecar` CR scoping.
 
 ## Architecture
 
@@ -48,544 +48,98 @@ graph TB
     class OUT output;
 ```
 
-## What Gets Measured
+## What it measures
 
-All histogram and counter metrics are computed as **deltas over a wall-clock
-window**. The 003 sweep splits the window into three phases per combo so the
-work itself lands inside the measurement:
+One TSV row per istiod pod, computed as deltas over a wall-clock window:
 
-1. **Baseline scrape** — `002 --phase baseline` runs *before* 001 deploys.
-2. **Deploy + settle** — 001 creates the workloads; 003 then sleeps `--settle`.
-3. **Final scrape + emit** — `002 --phase final` reads the baseline back from
-   `--state-dir`, scrapes again, and writes one TSV row covering the entire
-   baseline → deploy → settle window.
+| Column(s) | Source |
+|-----------|--------|
+| `istiod_cpu_m_delta`, `istiod_mem_mi` | `process_cpu_seconds_total`, `process_resident_memory_bytes`; peak of window average and 5 s samples |
+| `convergence_*`, `queue_*` (p50/p99) | `pilot_proxy_convergence_time`, `pilot_proxy_queue_time` histogram deltas |
+| `xds_pushes_*` (total, rate, per type) | `pilot_xds_pushes` |
+| `k8s_events_*` | `pilot_k8s_cfg_events` |
+| `connected_proxies` | `pilot_xds`, summed over its series |
+| `sidecar_config_bytes_*` | `/config_dump?include_eds` size from sampled sidecars |
+| `istiod_restarted` | `process_start_time_seconds` (`0`, `1` or `unknown`) |
 
-This is why the rate denominators (`xds_pushes_rate`, `cpu_m_delta`,
-histogram quantile windows, etc.) are meaningful: they cover the period when
-istiod is actually pushing config to sidecars. Earlier versions ran 002 only
-*after* 001 returned, by which point the push storm was already over and the
-delta read ~0 even on a 60-service deploy.
-
-Standalone use of 002 (without 003) still works via the default
-`--phase combined`, which does baseline → sleep → final in one invocation.
-Operators just need to know that combined-mode measures the *settle window
-only*, not the deploy itself.
-
-| Metric | Source | What it shows |
-|--------|--------|---------------|
-| istiod CPU (millicores) | `process_cpu_seconds_total` delta over the scrape window | Peak of (window-average millicores, peak 5-second interval rate). The poller samples every 5 s during the settle window so deploy-time CPU spikes are captured even if they subside before the final scrape. `N/A` if istiod restarted (counter resets), baseline scrape was missing, or window was non-positive |
-| istiod Memory (MiB) | `process_resident_memory_bytes` from istiod `/metrics` | Peak of (baseline, polled samples, final scrape). A background poller samples every 5 s during the measurement window so memory spikes during the deploy storm are captured even if RSS settles before the final scrape |
-| `pilot_proxy_convergence_time` p50/p99 (delta) | istiod Prometheus | How fast config reaches all sidecars during the window |
-| `pilot_proxy_queue_time` p50/p99 (delta) | istiod Prometheus | How long pushes wait in istiod's queue during the window |
-| `pilot_xds_pushes` delta + rate | istiod Prometheus | xDS push count during the window (and per-second rate) |
-| `pilot_xds_pushes` by type | istiod Prometheus | One column per xDS type (cds, eds, lds, rds, nds) so EDS-vs-CDS scaling can be separated |
-| `pilot_k8s_cfg_events` delta + rate | istiod Prometheus | Kubernetes watch events during the window |
-| `pilot_xds` | istiod Prometheus | Connected proxy count (gauge — read from final scrape) |
-| `pilot_xds_config_size_bytes` avg | istiod Prometheus | Average xDS payload bytes during the window (histogram `_sum`/`_count` delta) |
-| Per-sidecar `/config_dump` size (MB) | `pilot-agent request` into istio-proxy | **Real** per-proxy config cost per scoping mode |
-| `scrape_window_sec` / `scrape_skew_ms` | Internal | Actual wall-clock window length and max clock skew across concurrent per-context scrapes |
-| `settle_sec` | Internal | Operator-supplied `--settle` value (intent — distinct from `scrape_window_sec` which is the observed elapsed window) |
-| `istiod_restarted` | istiod Prometheus | `1` if `process_start_time_seconds` moved forward between baseline and final scrape; `0` if both readings were present and equal; `unknown` if either side was missing |
-| `istiod_cpu_m_delta` | istiod Prometheus | CPU metric: `(final − baseline) ÷ scrape_window_sec × 1000` from `process_cpu_seconds_total` |
-
-Histogram cells whose target quantile lands in the `+Inf` overflow bucket are
-emitted as the literal string `overflow` in TSV/CSV/text/markdown outputs and
-as JSON `null` in JSON output.
-
-## Sidecar Scoping
-
-`Sidecar` CRs are istiod's primary scaling lever: they limit per-proxy
-configuration to only the upstream services the workload actually needs.
-Without them, every proxy gets every Service in the mesh, and per-proxy config
-grows `O(services × sidecars)`.
-
-This suite sweeps three modes:
-
-| Mode | Sidecar CRs | Effect |
-|------|-------------|--------|
-| `none` | 0 | Baseline / worst case: every proxy sees every Service in the mesh. |
-| `namespace` | 1 in the primary namespace (no `workloadSelector`) | Realistic operator config. `egress.hosts` restricts each proxy to its own namespace + `istio-system`. |
-| `explicit` | 1 per Deployment (with `workloadSelector.labels.app: dummy-svc-<i>`) | Maximum precision; many CRs, smallest per-proxy config. |
-
-Expected per-proxy config size ordering: `none` >> `namespace` >= `explicit`.
-The 003 sweep cross-products all five axes so 004 can render the reduction
-percentage in the markdown report.
-
-## Multi-Replica istiod
-
-The suite supports any number of istiod replicas. Each running istiod pod
-gets its own port-forward and emits its own TSV row, so per-replica resource
-consumption is visible. In split-phase mode (`003` orchestrator), a `pods.tsv`
-manifest is persisted to `--state-dir` during the baseline phase and reloaded
-during the final phase, ensuring baseline and final scrapes always target the
-same physical process.
-
-If a pinned pod disappears between phases (e.g. HPA scale-down or restart),
-the row is emitted with `istiod_restarted=unknown`. When istiod restarts mid-window
-the row still scrapes real values but is marked `istiod_restarted=1`. In either case
-**all istiod-sourced metrics are excluded from aggregation** — not only the
-counter/histogram deltas (which reset across a restart) but also the gauges
-(memory, connected proxies, Go heap), since a restarted row carries a post-restart
-transient (a mid-reconnect proxy count, fresh-low memory) that is not a valid
-steady-state sample. Only the proxy-side config-dump bytes (independent of istiod
-restart) and the `n_total`/restart counts still ingest such a row. The aggregate's
-min/max/avg columns therefore mirror `n_valid` exactly (PL13/PL15/PL35).
-
-## Fault-tolerance: degraded rows and the `context` sentinel
-
-The suite never aborts a multi-hour sweep on a single per-combo failure. Instead
-it records a **degraded row** that is counted in `n_total` but excluded from
-`n_valid` (the report admits a row to `n_valid` only when `istiod_restarted == 0`,
-so every degraded row carries `istiod_restarted=unknown` and `N/A` for all
-counter/histogram/gauge columns — PL13/PL15). The `context` column carries a
-sentinel naming the fault:
-
-| `context` sentinel | Emitted by | Meaning |
-| ------------------ | ---------- | ------- |
-| `SETUP_FAILED` | `003-run-sweep.sh` | `001-setup` exited non-zero for this combo; the background peak poller is stopped, a row is recorded, cleanup runs, and the sweep continues. |
-| `PROBE_FAILED` | `003-run-sweep.sh` | The baseline or final `002` scrape exited non-zero for this combo. |
-| `ZERO_PODS` | `002-collect-resource-metrics.sh` | A context had **zero running istiod pods** (whole-cluster istiod outage — a rolling restart normally leaves ≥1 Running replica, so it does NOT trip this). The context is dropped from the scrape set and this degraded row records that the combo measured fewer control planes than requested. `002` still `die`s only when **all** contexts are zero-pod. |
-
-The sweep TSV preamble is pre-created by `003` before the first combo, so a
-first-combo `SETUP_FAILED`/`PROBE_FAILED` cannot strip the run's provenance
-(`ISTIO_VERSION`/`HARNESS_SHA`/`KUBE_VERSIONS`) — the metadata always survives.
-
-### Terminating-namespace pre-apply wait (PL37)
-
-The sweep recreates the same namespace every combo: `005-cleanup` deletes it, the
-sweep loops cleanup → next `001-setup`, and `001` server-side-applies the chart
-(which includes a `kind: Namespace`). At 10k the namespaces hold many
-sidecar-injected pods, so a slow teardown can leave the namespace `Terminating`
-when the next setup starts — and you cannot create a `Terminating` Namespace, so
-the next combo's apply would fail and cascade into `SETUP_FAILED` across the whole
-combo (the deterministic data-loss failure PL37 documents). To prevent this,
-`001-setup` runs a **bounded poll-until-gone precondition** (PL4) before applying:
-on every context it waits for any pre-existing instance of every target namespace
-to fully disappear, so a slow `005` teardown merely **delays** the next setup
-rather than destroying its data. The wait is bounded by
-`CONTROLPLANE_SETUP_NS_WAIT_SEC` (default: `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC`,
-then 300 s) — the **same contract** `005` uses for its own namespace-termination
-wait, so an operator override applies symmetrically. A wait that **exhausts** dies
-and routes to the existing `SETUP_FAILED` path (it does not hang or swallow). The
-wait is skipped entirely under `--dry-run` (no cluster calls). Override per run
-with `001-setup --ns-wait-timeout N`.
-
-### Override knobs (defaults in `config/options.env`)
-
-| Env var | Default | Used by |
-| --- | --- | --- |
-| `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` | `300` | PL4 wait bound for `005`'s namespace-termination wait AND (default) `001`'s pre-apply poll-until-gone wait — the shared PL37 contract, so an override applies symmetrically to cleanup and the next setup. |
-| `CONTROLPLANE_SETUP_NS_WAIT_SEC` | `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` | `001-setup` pre-apply wait for a pre-existing (Terminating) namespace to clear before applying (`--ns-wait-timeout N` overrides per run). |
-| `METRICS_SCRAPE_TIMEOUT` | `30` | `curl --max-time` ceiling for every istiod `/metrics` **body** fetch in `002` (primary scrape + peak-metrics poll). Raise for MB-class `/metrics` bodies at 10k services. |
-
-## Histogram Bucket Ranges
-
-Convergence and queue-time p99 values are reported as **bucket ranges**
-(e.g. `0-100`) rather than point values, since the underlying Prometheus
-histograms only resolve to bucket boundaries. The bucket boundaries compiled
-into istiod are: 100, 500, 1000, 3000, 5000, 10000, 20000, 30000 ms
-(i.e. 0.1, 0.5, 1, 3, 5, 10, 20, 30 s).
-A reported range of `100-500` means the p99 fell in the bucket with upper
-bound 500 ms — the actual value is somewhere in that interval.
+In a sweep, `003` runs `002 --phase baseline` before deploying, `001` deploys and settles,
+then `002 --phase final` scrapes again, so the window covers the deploy push storm. Run
+standalone, `002` (`--phase combined`) measures only the `--settle` window.
 
 ## Prerequisites
 
 - `oc` or `kubectl`, `helm`, `jq`, `curl`
-- Multi-primary mesh deployed (see root README)
-- Kube contexts configured for each cluster
+- A multi-primary mesh (see the root README) and one kube context per mesh member
 
-## Quick Start
+## Quick start
 
 ```bash
-# 1. Deploy dummy workloads on all clusters (baseline; no Sidecar CRs).
-./tests/controlplane/001-setup-controlplane-test.sh --contexts cluster-001,cluster-002,cluster-003
+# 1. Deploy 10 services x 3 replicas on both clusters
+./tests/controlplane/001-setup-controlplane-test.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 
-# 2. Collect metrics snapshot (delta-window).
-./tests/controlplane/002-collect-resource-metrics.sh --contexts cluster-001,cluster-002,cluster-003
-
-# 3. View results.
+# 2. One 60 s collection window, then the report
+./tests/controlplane/002-collect-resource-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --settle 60
 ./tests/controlplane/004-report-results.sh
 
-# 4. Run a sweep (the real deliverable path) — iterates the axis cross-product,
-#    writes per-sweep results, a markdown summary, AND the customer scale envelope.
-./tests/controlplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,5,10 --service-counts 50
-
-# 5. Read the HEADLINE customer artifact — the generated scale envelope. RUN_ID is
-#    printed by 003 (and is the sweep-<RUN_ID> dir name).
-cat tests/controlplane/results/sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md
+# 3. Clean up
+./tests/controlplane/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
 
-The scale-envelope file leads with the **Customer SLA verdict** line
-(`PASS | CAUTION | FAIL — <reason>`) — that one line is the headline answer to
-"did this mesh stay within its limits?". The same verdict is in every
-`004-report-results.sh --format` output (markdown frontmatter `sla_verdict:` /
-`sla_headline:`, json `metadata.sla`, csv/text `# sla_verdict:`).
-
-## Sweep Dimensions
-
-`003-run-sweep.sh` iterates the **cross-product** of five independent axes:
-
-| Axis | Flag (CSV) | Singular alias | What it changes | Why it matters |
-|------|------------|----------------|-----------------|----------------|
-| Mesh size | `--mesh-sizes CSV` | (CSV only) | Number of clusters participating | Distinguishes "more clusters" from "more config" |
-| Service count | `--service-counts CSV` | `--service-count N` | Total dummy services per cluster | Push cost scales roughly with services x sidecars (CDS load) |
-| Replicas | `--replica-counts CSV` | `--replicas N` | Pods per service (endpoint count) | EDS push payload + endpoint update churn |
-| Namespace count | `--namespace-counts CSV` | `--namespace-count N` | Namespaces holding the services | Exposes namespace-informer overhead at high cardinality |
-| Sidecar scoping | `--sidecar-scopings CSV` | `--sidecar-scoping MODE` | Sidecar CR mode: none, namespace, explicit | Per-proxy config size / push cost reduction |
-
-The sweep runs `mesh-sizes x service-counts x replica-counts x namespace-counts x sidecar-scopings` combinations. To keep operators from accidentally launching a multi-day sweep, the script **refuses to run a matrix larger than `CONTROLPLANE_MAX_MATRIX` combinations** (default 64) unless `--force-large-matrix` is passed.
-
-Services are distributed deterministically: service `i` is created in namespace `i mod namespace-count`. When `namespace-count = 1` the single namespace keeps its legacy name (`controlplane-test`).
-
-### Sidecar egress-coverage precondition (`--namespace-count > 1`)
-
-When `--namespace-count > 1`, the suite mints `controlplane-test-0`, `controlplane-test-1`, … The campaign's root `Sidecar` (`charts/spoke-ossm` `tuningBaseline`) carries an egress allow-list whose namespace parts are **exact matches** — `controlplane-test/*` does **not** cover `controlplane-test-0/*`. An uncovered namespace silently strips those proxies' egress (no endpoints), which reads downstream as a dead measurement rather than a config error.
-
-`001-setup-controlplane-test.sh` therefore runs a **fail-fast precondition** (skipped in `--dry-run`): it live-queries each source context's root `Sidecar` egress hosts and **dies** if any generated namespace is not covered (unless egress is `*/*` or the Sidecar is absent), pointing you at `charts/spoke-ossm/values.yaml` `tuningBaseline.discoverySelectors.egressHosts` to add an explicit `<ns>/*` entry per extra namespace. Auto-generating the entries is out of scope; this is the GO-safe guard.
-
-### Pre-run capacity gate (plan time)
-
-`003-run-sweep.sh` prints a **capacity plan check** before the matrix: for the largest planned combo it computes the requested per-cluster sidecar CPU (`max(service-counts) × max(replica-counts) × SCALE_PER_POD_CPU_M`, from `config/options.env`). On a real run it also reads node allocatable CPU and the istiod baseline (`cap_node_totals` / `cap_istiod_limits`, source context, read-only) and **WARNs** with the services-that-fit estimate when the largest combo exceeds free CPU (turning FINDING #3's ~46-svc arithmetic into a runtime guard). In `--dry-run` it prints only the requested cores (no cluster contact). It is a WARN — `001`'s per-context preflight remains the hard gate.
-
-### Resuming an interrupted sweep (`--resume`)
-
-A multi-hour 20-context sweep that dies partway (a crashed workstation, a credential expiry, a fatal abort at combo 40/64) does **not** have to restart the whole matrix. Re-run `003-run-sweep.sh` with the **same axes** plus `--resume <sweep dir>`:
+## Sweep
 
 ```bash
-./tests/controlplane/003-run-sweep.sh \
-  --contexts "$CONTEXTS" --mesh-sizes "$MESH" \
-  --sidecar-scopings none,namespace,explicit --force-large-matrix \
-  --resume tests/controlplane/results/sweep-20260617T124130Z-12345
+./tests/controlplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+  --mesh-sizes 1,2 --service-counts 50 --sidecar-scopings none,namespace,explicit
 ```
 
-On `--resume` the orchestrator **reuses the existing sweep dir and its `RUN_ID`** (appending to the same `controlplane-<RUN_ID>.tsv`, not minting a new dir/identity) and **skips any combo that already has a valid row** — `NF>=40` and `istiod_restarted==0` — for its `(mesh_size, service_count, replicas, namespace_count, sidecar_scoping)` key. The skip mirrors the report's `n_valid` gate, so a `SETUP_FAILED`/restarted placeholder row from the interrupted run is **not** counted as done and is re-run. `--resume` is mutually exclusive with `--output-dir` (it already names the full dir) and is rejected with `--dry-run` (nothing to resume in a plan-only run). At the end it regenerates the report/markdown/charts/scale-envelope from the now-complete TSV.
+Add `--dry-run` to print the matrix without touching a cluster. The sweep runs the
+cross-product of these axes (one CSV flag each):
 
-### Cleanup fast-drain & apply resilience (scale)
+| Flag | Axis |
+|------|------|
+| `--mesh-sizes` | Clusters in the measurement (first N of `--contexts`) |
+| `--service-counts` | Dummy services per cluster |
+| `--replica-counts` | Pods per service |
+| `--namespace-counts` | Namespaces the services are spread over (service `i` in namespace `i mod N`) |
+| `--sidecar-scopings` | `none` (no Sidecar CRs), `namespace` (one per namespace), `explicit` (one per Deployment) |
 
-At 10k sidecar-pods, `005-cleanup.sh` **fast-drains** the workload pods with a short grace period (`CONTROLPLANE_CLEANUP_GRACE_SEC`, default 5s; `--grace-period`) **before** deleting the namespace, so istio-proxy drain doesn't serialize teardown past `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` and cascade into the next combo's `SETUP_FAILED` (PL37). `001-setup` applies the rendered chart **server-side in chunks** (`CONTROLPLANE_APPLY_CHUNK_OBJECTS`, default 200; the `Namespace` doc is always applied first) with a **bounded retry** (`CONTROLPLANE_APPLY_ATTEMPTS`/`CONTROLPLANE_APPLY_BACKOFF_S`, default 3×5s) so a large `explicit`-scoping render (~3 objects/service) and transient apiserver 429s don't hard-fail the combo. All `oc`/`kubectl` calls carry the shared client rate-limit flags `--qps`/`--burst` (`KUBE_CLIENT_QPS`/`KUBE_CLIENT_BURST`, default 30/60) — raise them only if the apiserver has headroom.
+More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matrix`.
+`--settle` (default 60 s) applies after the deploy and again after each cleanup.
+`--resume tests/controlplane/results/sweep-<RUN_ID>` continues an interrupted sweep and skips combos that
+already have a valid row. `--config-dump-samples 0` skips the per-sidecar exec.
 
-## Sweep Examples
+**More than one namespace:** namespaces are named `controlplane-test-0..N-1`. The root
+`Sidecar` egress hosts match namespaces exactly, so `001` stops unless each one is listed
+in `charts/spoke-ossm/values.yaml` `tuningBaseline.sidecar.egressHosts` (or egress is `*/*`).
+
+## Outputs
+
+Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID>/`):
+
+- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble, then the 40-column rows.
+- `sweep-<RUN_ID>.md`, `sweep-charts-<RUN_ID>.md`: report markdown and charts.
+- `scale-envelope-<RUN_ID>.md`: campaign scale envelope, led by the customer SLA verdict
+  (`PASS`, `CAUTION` at 75 % of a limit, `FAIL` at 90 % or on any istiod restart).
+
+`004-report-results.sh --format text|csv|json|markdown|md|charts` groups rows by the five
+axes; the markdown ends with a glossary of every column. Rows with `istiod_restarted` other
+than `0` are counted in `n_total` but excluded from the statistics (`n_valid`). A failed
+combo is recorded as a row whose `context` is `SETUP_FAILED` or `PROBE_FAILED`; a context
+with no running istiod pod gets an all-`N/A` row with `istiod_restarted=unknown`.
+
+## Watch mode
 
 ```bash
-# Default: sweep mesh sizes 1..N, single (10 svc x 3 replicas x 1 ns x none) point each
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003
-
-# Mesh-size x service-count grid (3 x 3 = 9 combos)
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,2,3 \
-  --service-counts 10,100,500
-
-# Full 3x3 sidecar scoping sweep
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,2,3 \
-  --sidecar-scopings none,namespace,explicit \
-  --service-count 50
-
-# Hold mesh fixed; sweep namespace cardinality to expose informer overhead
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 3 \
-  --service-counts 200 \
-  --namespace-counts 1,5,25,50
-
-# Dry-run prints the planned matrix and exits without touching clusters
-./tests/controlplane/003-run-sweep.sh --dry-run \
-  --contexts a,b,c --service-counts 10,100 --sidecar-scopings none,namespace
-
-# Disable config_dump sampling (faster sweep, no exec round-trips)
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001 --config-dump-samples 0
+./tests/controlplane/002-collect-resource-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --watch --interval 15
 ```
 
-`SETTLE_SEC` is applied at TWO points inside each combo: (1) between the
-deploy step (001) and the final scrape, (2) **after** the combo's namespace
-deletion in 005, before the next combo's 001. The post-cleanup settle lets
-istiod finish re-pushing the broader (no-Sidecar) config to remaining
-proxies, so the previous combo's post-cleanup settle serves as a de facto
-pre-baseline rest for subsequent combos.
+Each row is a per-window delta over `--interval` seconds.
 
-## Watch Mode
+## Limitations
 
-Monitor istiod metrics continuously during a load test (raw cumulative values,
-no delta):
-
-```bash
-./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
-```
-
-The O9 capacity columns (node/istiod utilization, pods scheduled) are re-read at
-the start of each watch window rather than memoized once, so a long-running watch
-tracks capacity changes instead of freezing them at the first window's reading.
-
-## Results Format
-
-Each sweep gets its own subdirectory under `tests/controlplane/results/`:
-`results/sweep-<RUN_ID>/controlplane-<RUN_ID>.tsv`. Back-to-back sweeps never
-conflate. TSV files carry a metadata preamble:
-
-```
-# Control-plane resource metrics — 2026-05-20T18:32:01+00:00
-# ISTIO_VERSION=1.24.0
-# HARNESS_SHA=4139b50
-# KUBE_VERSIONS=cluster-001=v1.29.4, cluster-002=v1.29.4, cluster-003=v1.29.4
-# SIDECAR_SCOPING=none
-# CONTROLPLANE_SCHEMA=40
-# CONFIG_DUMP_SAMPLES=3
-# SETTLE_SEC=60
-# RUN_ID=20260520T183201Z-12345
-# NODE_ALLOC_CPU_M=16000
-# NODE_ALLOC_MEM_MI=64000
-# ISTIOD_CPU_LIMIT_M=2000
-# ISTIOD_MEM_LIMIT_MI=8192
-# SCALE_TARGET_FRACTION=0.7
-# CONTROLPLANE_INFRA_SCHEMA=1
-# ISTIOD_REQ_CPU_M=1000
-# ISTIOD_REQ_MEM_MI=2048
-# ISTIOD_LIM_CPU_M=4000
-# ISTIOD_LIM_MEM_MI=8192
-# ISTIOD_REPLICAS=5
-# NETWORK_TOPOLOGY=multi-primary,multi-network:5
-```
-
-The `KUBE_VERSIONS` preamble records one entry per `--contexts` value. Each
-value is either the apiserver `gitVersion` (e.g. `v1.30.4`), `unreachable`, or
-`unknown`. The `NODE_ALLOC_*` / `ISTIOD_*_LIMIT_*` / `SCALE_TARGET_FRACTION`
-keys (O9 scale-coverage legibility) are read once from the source context via
-read-only `kubectl get`; any may be `unknown` if the cluster is unreachable.
-
-The cluster-infra block (`CONTROLPLANE_INFRA_SCHEMA=1` and the keys below it) is an
-**additive, backward-compatible** extension: it records istiod resource requests AND
-limits (`ISTIOD_REQ_*` / `ISTIOD_LIM_*`, distinct from the limits-only `ISTIOD_*_LIMIT_*`
-above), the istiod replica count, and the fleet network topology
-(`single-network` / `multi-primary,multi-network:<n>` / `unknown`, inferred from each
-context's `ISTIO_META_NETWORK`). Node allocatable is NOT repeated here — the
-`NODE_ALLOC_*` keys in the O9 capacity block above are the single source (F4). These are
-emitted by **one shared helper**
-(`tests/lib/preamble.sh:infra_preamble_lines`) that BOTH the `003` pre-creator and the
-`002` `! -f`-guarded collector call, so the two writers can never drift (PL36); a key
-the caller could not read is written as a legible `unknown`, never dropped. Legacy TSVs
-without these keys still report — the report reads them as `unknown` and the
-width-schema gate is unchanged (still 40 columns; these are preamble keys, not data
-columns).
-`CONTROLPLANE_SCHEMA=40` marks the TSV column-schema version (O9 appended cols
-35-40); the report skips files whose width differs (with a counted stderr warning),
-so a 34-column pre-O9 file is never aggregated alongside 40-column O9 files. (The
-aggregated *report* output is a separate 34-column shape — see `004`'s aggregate
-header — and is unrelated to the 40-column input width.)
-
-Note: `istiod_cpu_pct_of_limit` / `node_cpu_pct` are **point samples** taken once
-per context at row-assembly time (outside the measurement window), unlike the
-windowed `istiod_cpu_m_delta` (col 32) — don't compare the two as if both are
-window averages. The istiod %-of-limit denominator is the *aggregate* limit
-(per-replica limit × replica count), matching the across-replica usage numerator.
-
-Followed by the 40-column data schema:
-
-```
-timestamp  context  mesh_size  service_count  replicas  namespace_count  sidecar_scoping
-istiod_mem_mi
-convergence_p50_ms  convergence_p99_ms  queue_p50_ms  queue_p99_ms
-xds_pushes_delta  xds_pushes_rate
-xds_pushes_cds  xds_pushes_eds  xds_pushes_lds  xds_pushes_rds  xds_pushes_nds
-k8s_events_delta  k8s_events_rate
-connected_proxies  config_size_avg_bytes
-sidecar_config_bytes_avg  sidecar_config_bytes_p50  sidecar_config_bytes_max  sidecar_config_bytes_samples (got/attempted)
-scrape_window_sec  scrape_skew_ms
-settle_sec  istiod_restarted
-istiod_cpu_m_delta
-go_heap_alloc_mi  go_heap_inuse_mi
-istiod_cpu_pct_of_limit  istiod_mem_pct_of_limit   (O9 cols 35-36)
-node_cpu_pct  node_mem_pct                         (O9 cols 37-38)
-pods_scheduled  pods_allocatable                   (O9 cols 39-40)
-```
-
-The six O9 columns (35-40) are per-row read-only capacity legibility: istiod
-CPU/mem as a percent of its live `resources.limits` (CR-patched, read from the
-live Deployment), worker-node CPU/mem utilization percent (`kubectl top nodes`,
-worker nodes only), and worker pod-slot occupancy. Any column is `N/A` when the
-underlying read is unavailable (e.g. metrics-server absent). They are surfaced
-in the report's "Achieved scale vs capacity" block (text + markdown), not the
-csv/json aggregate rows.
-
-`go_heap_alloc_mi` (`go_memstats_alloc_bytes`) and `go_heap_inuse_mi`
-(`go_memstats_heap_inuse_bytes`) are point-in-time values from the final scrape,
-not peaks. They reveal steady-state memory independently of RSS, which stays
-inflated after GC due to `MADV_FREE`.
-
-**EDS is included in config_dump by design.** Envoy's default `/config_dump`
-omits the `EndpointsConfigDump`, but EDS is the dominant per-proxy size driver —
-exactly the cost that `Sidecar` scoping is designed to reduce. We request
-`/config_dump?include_eds` via `pilot-agent request` (works with distroless
-sidecar images) so the headline reduction (none -> namespace / explicit) is
-visible. The byte count is piped through `wc -c` on the local side.
-
-`004-report-results.sh` groups rows by `(mesh_size, service_count, replicas,
-namespace_count, sidecar_scoping)` and emits `text`, `csv`, `json`, or
-`markdown` summaries via `--format`. The markdown format includes a "Sidecar
-scoping effect" table showing config size reduction percentages across modes.
-The report also prints an **"Achieved scale vs capacity" (O9)** block at the top
-of the text + markdown formats: max connected proxies, istiod/node utilization
-percentages, and a `SCALE_COVERAGE:` line. It additionally surfaces
-`istiod_rss_pct_of_limit` (P1-4) — the peak `process_resident_memory_bytes` as a %
-of the **per-replica** istiod memory limit. Unlike `istiod_mem_pct_of_limit` (the
-`kubectl top` path, which N/As during a metrics-API gap), the RSS signal is always
-available from the /metrics scrape, so it surfaces **OOM-mid-sweep risk** even when
-`top` is down; it is folded into the SLA verdict as the max of the two memory
-signals. In multi-primary each istiod caches the whole mesh, so an RSS % near 100
-is the OOM signal — and the istiod memory **request** should be sized to the
-measured steady-state RSS at target scale before GO (this only surfaces it).
-Convergence/queue p99 cells that are **single-bucket-pinned** (P1-6 — all delta
-mass in the coarsest 0-100ms bucket, so the interpolated quantile is a
-uniform-within-bucket assumption, not resolved) are flagged: a `[SINGLE-BUCKET-PINNED]`
-note in text, a `†` cell + footnote in markdown, and a `convergence_p99_single_bucket_pinned`
-/ `queue_p99_single_bucket_pinned` boolean per result in json. The same provenance is carried in the
-other two formats so all four are at parity: `csv` emits it as `# capacity:` /
-`# achieved:` / `# SCALE_COVERAGE:` / `# metrics:` comment lines (the aggregate row
-schema is unchanged), and `json` nests `capacity`, `achieved_scale`, `coverage`,
-and `metrics_note` under `metadata` (the `results` array is unchanged). The
-`# metrics:` line / `metrics_note` field carry the metrics-API-unavailable
-explanation (when applicable) so a csv/json consumer can tell why utilization-%
-is `N/A`. On a multi-context sweep the
-`SCALE_COVERAGE:` line is tagged `(fleet: …)` because `pods_scheduled`/`allocatable`
-are maxed independently across contexts, so the fraction is a fleet-level proxy
-rather than a single-cluster paired ratio. `services_total` is labelled
-`[configured]` — controlplane has no distinct achieved-services metric, so it
-surfaces the configured axis value, not a measured count. Legacy TSV files with a
-non-40-column schema are skipped with a stderr warning.
-
-The report also surfaces the new **cluster-infra** keys (istiod req/lim, replicas,
-network topology) in the same achieved-scale block, and a one-line **Customer SLA
-verdict** in every format (`Customer SLA verdict: PASS|CAUTION|FAIL — <reason>`; in
-markdown it is a bold line + a `sla_verdict:` frontmatter key, in csv a `# sla_verdict:`
-comment, in json an `sla` object under `metadata`). The verdict is computed by
-`tests/lib/envelope.sh:env_sla_verdict` over the same n_valid-gated achieved-scale
-maxes the rest of the report uses (never configured axis values — PL35):
-
-- **FAIL** — any istiod restart inside a measurement window, no valid samples survived
-  the filters, or any utilization ≥ 90 % of its (cross-replica) limit.
-- **CAUTION** — any utilization in 75–90 %, a utilization signal unavailable (metrics
-  API gap), or some samples filtered (`n_valid < n_total`).
-- **PASS** — all utilizations < 75 %, no restarts, every sample valid.
-
-### Scale envelope (campaign deliverable)
-
-At campaign end `003-run-sweep.sh` writes a generated scale-envelope block to
-`results/sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md`
-(`tests/lib/envelope.sh:render_scale_envelope`). It renders the
-[`docs/campaigns/TEMPLATE.md`](../../docs/campaigns/TEMPLATE.md) tables — mesh topology,
-control-plane provisioning & headroom, and the one-line scale verdict — from the
-report's peak-mesh row (gated on `n_valid > 0`, so a poisoned row's configured count is
-never reported as the peak) plus a read-only `kubectl top` / istiod-resource / network
-snapshot across `--contexts`. It is a **read-only addition**: it never touches the
-measurement path, and a render failure (e.g. report produced no JSON) is a warning, not
-a sweep failure. Honors `--dry-run` (skipped — emitted only after a real sweep).
-
-### Scale coverage (O9)
-
-By default the harness only *reports* achieved scale vs capacity (the six
-columns above + the achieved-scale block); no sizing or gating behaviour
-changes. Two DEFAULT-OFF knobs (in `config/options.env`) enable Phase 2:
-
-- `SCALE_SIZING_MODE=auto` — `001` derives `SERVICE_COUNT` from capacity
-  (`cap_max_pods / replicas`) on the source context instead of the fixed CLI/env
-  value. With the default `fixed`, sizing is unchanged.
-- `SCALE_COVERAGE_ENFORCE=1` — turns the under-provision coverage check (achieved
-  pods / allocatable `< SCALE_COVERAGE_MIN_FRACTION`) from a warning into a hard
-  failure, in both `001`'s preflight and `004`'s report. Default `0` = warn only.
-
-The coverage floor is a yardstick for `SCALE_SIZING_MODE=auto` (where the harness
-deliberately fills the cluster toward `SCALE_TARGET_FRACTION`). In the default
-`fixed` mode the sweep pins service/replica/namespace counts and sweeps only
-`mesh_size` — it is not trying to pack nodes — so `004` reports coverage as
-**informational** (`SCALE_COVERAGE: <n>/<n> pods = <frac> (informational; …)`),
-never `UNDER`, and `SCALE_COVERAGE_ENFORCE=1` does not hard-fail. The floor only
-fires (`UNDER` / enforced failure) in `auto` mode. `004` reads the mode from the
-TSV preamble (`# SCALE_SIZING_MODE=…`, recorded by `003`), falling back to the env.
-
-The utilization-% columns (`istiod_*_pct_of_limit`, `node_*_pct`) are derived from
-`kubectl top` (the metrics API); their denominators (allocatable, istiod limit)
-come from `kubectl get`. When the metrics API is unavailable on the target
-clusters, all four percentages are `N/A` while the get-derived capacity values
-still populate — `004` surfaces an explicit `NOTE` explaining this so the empty
-utilization headline is legible rather than mistaken for a harness bug.
-
-**Metrics-API robustness (#44).** The all-`N/A` utilization in the 2026-06-04
-sweep was investigated (read-only): metrics-server was healthy throughout (up 46h,
-`metrics.k8s.io` `Available` the whole window) and `kubectl get` worked — only
-`kubectl top` returned nothing. `top` goes through the aggregated metrics API,
-which is slower than the etcd `get` path (~1.8s idle baseline here, dominated by
-the OAuth exec-credential round-trip); under the sweep's concurrent 10-context load
-it exceeded the old hardcoded `5s` timeout while `get` stayed under it. So the
-**primary fix** is a dedicated, generous timeout for the slower `top` reads,
-`CAP_TOP_TIMEOUT` (default `15`s; the etcd `get` reads keep `5s`). Two
-defense-in-depth guards back it up:
-
-- **Per-read retry** — `cap_node_used`/`cap_istiod_used` retry a brief empty `top`
-  result (`CAP_TOP_ATTEMPTS` × `CAP_TOP_BACKOFF_S`); outside the scrape window, so
-  measurement-neutral.
-- **Preflight gate** — before the sweep loop, `003` polls `kubectl top nodes` on
-  every context until the metrics API serves data, bounded by
-  `METRICS_READY_TIMEOUT` (default `120`s; `0` disables the gate). It catches a
-  *genuine* metrics-server-down-at-start, a different failure than the load-induced
-  timeout above (it probes idle, so it would not have caught the 07:25Z run — the
-  `CAP_TOP_TIMEOUT` bump is what addresses that). The verdict is recorded as
-  `# METRICS_API=available|unavailable:<ctxs>`
-in the TSV preamble (surfaced by `004` as `metrics API (preflight)` / the
-`metrics_api` field in all four formats) and **WARNed** — the run proceeds
-regardless, since utilization is observability, not the core measurement. The
-recorded value is three-state: `available` (gate passed), `unavailable:<ctxs>`
-(gate timed out on those contexts), or `unknown` (gate disabled via
-`METRICS_READY_TIMEOUT=0`, or a pre-gate / standalone-`002` TSV). If the preflight
-passed but utilization still came back `N/A`, the report's `NOTE` says so
-explicitly (the API degraded mid-sweep), so
-the two signals read as one story rather than a contradiction.
-
-`SCALE_TARGET_FRACTION` (default `0.7`) is the explicit O9↔O8 throttle:
-larger = more pods = slower. `SCALE_SYSTEM_RESERVE_FRACTION` (default `0.15`)
-holds back node allocatable for system/daemonset/gateway overhead before sizing.
-
-## Cleanup
-
-```bash
-./tests/controlplane/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
-```
-
-Cleanup deletes every namespace labelled `app.kubernetes.io/instance=controlplane-test`
-on each context — covering both single- and multi-namespace runs — plus the
-legacy unlabeled `controlplane-test` namespace if present. Post-deletion, it
-confirms no `Sidecar` CRs leaked.
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `001-setup-controlplane-test.sh` | Deploy dummy workloads + optional Sidecar CRs on target clusters |
-| `002-collect-resource-metrics.sh` | Delta-window scrape istiod metrics + optional per-pod /config_dump sampling |
-| `003-run-sweep.sh` | Orchestrate the 5-axis cross-product (mesh x svc x reps x ns x scoping) |
-| `004-report-results.sh` | Aggregate TSV rows by the five sweep axes (text/csv/json/markdown) |
-| `005-cleanup.sh` | Remove all controlplane-test resources |
-
-## Known Limitations
-
-- **`/config_dump` exec cost is O(N samples x clusters x combos)**: at default
-  `--config-dump-samples 3` and a 3x3 sweep with 3 clusters, that's 81
-  per-pod exec round-trips per full sweep. Set `--config-dump-samples 0` to
-  disable sampling entirely.
-- **Service distribution across namespaces is uniform**; real meshes are
-  long-tail (Zipf). Treat namespace-count results as a *lower bound* on
-  per-namespace push cost.
-- **No `--samples N` repeated scrapes per cell** — every sweep point is a
-  single (baseline + final) window. Re-run the sweep to get N samples per cell.
-- **Settle time is single-valued** across the entire sweep.
-- **Watch mode reports raw cumulative metrics**, not deltas. Use one-shot mode
-  for percentile / counter measurements over a defined window.
-- **`namespace-count` must be <= `service-count`**: the setup script rejects
-  configurations where namespaces would be empty (no services mapped to them).
-- **`namespaceCount > 1` with sidecar scoping**: Sidecar CRs are only emitted
-  into the primary namespace. Pods in additional namespaces have no Sidecar CR
-  and receive the full unscoped config. Config-dump sampling selects pods
-  across all test namespaces via the `app.kubernetes.io/instance` label.
+- Histogram quantiles resolve only to istiod's buckets (100, 500, 1000 ms, ...); the
+  report shows bucket ranges such as `100-500`.
+- Each sweep point is one window; rerun the sweep for more samples.
+- Services are spread evenly across namespaces; real meshes are skewed.
+- Utilization-% columns need the metrics API (`kubectl top`); without it they are `N/A`.
+- Raise `METRICS_SCRAPE_TIMEOUT` (default 30 s) if `/metrics` scrapes time out at scale.
