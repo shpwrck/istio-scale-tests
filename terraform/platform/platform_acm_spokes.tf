@@ -102,6 +102,10 @@ resource "helm_release" "acm_managed_cluster" {
         name  = "managedServiceAccount.name"
         value = var.gitops_managed_service_account_name
       },
+      {
+        name  = "keepOnUninstall"
+        value = tostring(var.acm_keep_managed_clusters_on_destroy)
+      },
     ],
     contains(local.mesh_member_spoke_set, each.key) ? [
       {

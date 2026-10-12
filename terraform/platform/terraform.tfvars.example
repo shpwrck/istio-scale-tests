@@ -20,16 +20,17 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # cluster_provider = "rosa"
 
 # --- Operators already installed on the hub ---
-# acm_install_operator    = false
-# acm_local_cluster_name  = "local-cluster"   # keep the existing MultiClusterHub value
-# gitops_install_operator = false
-# gitops_app_overrides = {
-#   "hub-cert-manager-operator" = { enabled = false }
-# }
+# acm_install_operator                 = false
+# acm_local_cluster_name               = "local-cluster" # keep the existing MultiClusterHub value
+# acm_keep_managed_clusters_on_destroy = true            # spokes were ACM-managed before Terraform
+# gitops_install_operator              = false
+# cert-manager already installed: keep the "hub-cert-manager-operator" key in the map below.
 
 # --- Per-environment chart values (no fork needed) ---
-# Example: small istiod for single-node clusters, and a MetalLB pool for the gateways.
+# One map: keys are child app names. Example: brownfield cert-manager, a small istiod for
+# single-node clusters, and a MetalLB pool for the gateways.
 # gitops_app_overrides = {
+#   "hub-cert-manager-operator" = { enabled = false }
 #   "spoke-ossm-appset" = {
 #     values = { template = { source = { helm = { valuesObject = {
 #       pilot = {

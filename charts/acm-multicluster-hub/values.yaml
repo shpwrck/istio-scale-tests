@@ -1,3 +1,6 @@
+# true: helm uninstall (terraform destroy) leaves the resource in place (helm.sh/resource-policy: keep).
+keepOnUninstall: false
+
 multiclusterHub:
   resourceName: multiclusterhub
   # Passed through verbatim as MultiClusterHub.spec (Terraform sets localClusterName).

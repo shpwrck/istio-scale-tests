@@ -3,6 +3,10 @@ kind: MultiClusterHub
 metadata:
   name: {{ .Values.multiclusterHub.resourceName }}
   namespace: {{ .Release.Namespace }}
+{{- if .Values.keepOnUninstall }}
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}
 spec:
 {{- with .Values.multiclusterHub.spec }}
 {{ toYaml . | indent 2 }}

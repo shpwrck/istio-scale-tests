@@ -54,3 +54,16 @@ deploys from itself. Edited charts roll out on the next apply.
 
 `terraform destroy` deletes the Argo CD apps first, then uninstalls the operators Terraform installed.
 For ROSA, then follow `terraform/rosa-hcp/README.md`.
+
+On an existing hub (`acm_install_operator = false`) destroy keeps the MultiClusterHub and the
+KlusterletConfig, but still deletes:
+
+- the spoke ManagedClusters, unless `acm_keep_managed_clusters_on_destroy = true`;
+- the spoke namespaces you imported. To keep them, first run
+  `terraform state rm 'kubernetes_manifest.spoke_namespace'`;
+- the OSSM operator on every spoke.
+
+Destroy leaves the Argo CD cluster Secrets, which hold spoke credentials. Delete them afterwards:
+`oc -n openshift-gitops delete secret <spoke>-argocd-gitops-cluster-secret` per spoke, or
+`oc -n openshift-gitops delete secret -l argocd.argoproj.io/secret-type=cluster` if that Argo CD
+manages no other clusters.

@@ -138,6 +138,11 @@ resource "helm_release" "acm_multicluster_hub" {
       name  = "multiclusterHub.spec.localClusterName"
       value = local.acm_local_cluster_name
     },
+    {
+      # An adopted hub (ACM installed before Terraform) keeps its MultiClusterHub on destroy.
+      name  = "keepOnUninstall"
+      value = tostring(!var.acm_install_operator)
+    },
   ]
 
   depends_on = [time_sleep.wait_acm_operator]
@@ -164,12 +169,20 @@ resource "helm_release" "acm_klusterlet_config" {
 
   values = [yamlencode({ chartChecksum = local.chart_checksum["acm-klusterlet-config"] })]
 
-  set = local.use_kubeconfig ? [
-    {
-      name  = "klusterletConfig.spec.hubKubeAPIServerConfig.serverVerificationStrategy"
-      value = "UseAutoDetectedCABundle"
-    },
-  ] : []
+  set = concat(
+    [
+      {
+        name  = "keepOnUninstall"
+        value = tostring(!var.acm_install_operator)
+      },
+    ],
+    local.use_kubeconfig ? [
+      {
+        name  = "klusterletConfig.spec.hubKubeAPIServerConfig.serverVerificationStrategy"
+        value = "UseAutoDetectedCABundle"
+      },
+    ] : [],
+  )
 
   depends_on = [time_sleep.wait_acm_multicluster_hub]
 }

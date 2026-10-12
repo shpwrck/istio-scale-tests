@@ -5,6 +5,9 @@ defaultLabels:
   cloud: auto-detect
   vendor: OpenShift
 
+# true: helm uninstall (terraform destroy) leaves the ManagedCluster in place (helm.sh/resource-policy: keep).
+keepOnUninstall: false
+
 managedCluster:
   name: ""
   labels: {}

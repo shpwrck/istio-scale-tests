@@ -1,3 +1,6 @@
+# true: helm uninstall (terraform destroy) leaves the resource in place (helm.sh/resource-policy: keep).
+keepOnUninstall: false
+
 # Cluster-scoped resource; metadata.name is typically "global".
 klusterletConfig:
   name: global

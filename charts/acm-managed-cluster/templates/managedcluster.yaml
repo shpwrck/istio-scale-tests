@@ -5,6 +5,10 @@ apiVersion: cluster.open-cluster-management.io/v1
 kind: ManagedCluster
 metadata:
   name: {{ .Values.managedCluster.name }}
+{{- if .Values.keepOnUninstall }}
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}
   labels:
 {{- $defaults := .Values.defaultLabels | default dict }}
 {{- $extra := .Values.managedCluster.labels | default dict }}
