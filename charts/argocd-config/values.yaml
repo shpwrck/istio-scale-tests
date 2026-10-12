@@ -52,10 +52,25 @@ argocd:
       cpu: "500m"
       memory: 1Gi
 
+  # Replaces Argo CD's built-in resource.exclusions, so it restates the 3.x
+  # defaults (high-churn kinds) plus Events. Without them the controller caches
+  # every EndpointSlice on every cluster and OOMs on a busy hub.
   resourceExclusions:
-    - apiGroups: ["events.k8s.io", "metrics.k8s.io"]
+    - apiGroups: ["", "events.k8s.io"]
       kinds: ["Event"]
+      clusters: ["*"]
+    - apiGroups: ["", "discovery.k8s.io"]
+      kinds: ["Endpoints", "EndpointSlice"]
       clusters: ["*"]
     - apiGroups: ["coordination.k8s.io"]
       kinds: ["Lease"]
+      clusters: ["*"]
+    - apiGroups: ["authentication.k8s.io", "authorization.k8s.io"]
+      kinds: ["SelfSubjectReview", "TokenReview", "LocalSubjectAccessReview", "SelfSubjectAccessReview", "SelfSubjectRulesReview", "SubjectAccessReview"]
+      clusters: ["*"]
+    - apiGroups: ["certificates.k8s.io"]
+      kinds: ["CertificateSigningRequest"]
+      clusters: ["*"]
+    - apiGroups: ["cert-manager.io"]
+      kinds: ["CertificateRequest"]
       clusters: ["*"]
