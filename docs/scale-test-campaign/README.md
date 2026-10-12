@@ -15,7 +15,7 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
 ## Prerequisites
 
 1. **A healthy multi-primary mesh** across your spoke clusters. The ACM hub is not a mesh member.
-   Verify per `AGENTS.md` → "Verify the mesh".
+   Verify per [README → Verify](../../README.md#verify).
 2. **istiod pinned to a fixed replica count** (HPA off) on every spoke: `charts/spoke-ossm`
    `pilot.autoscaleEnabled: false`, `pilot.replicaCount: <K>` (default 3). An autoscaling istiod
    changes topology mid-sweep and corrupts the xDS deltas.

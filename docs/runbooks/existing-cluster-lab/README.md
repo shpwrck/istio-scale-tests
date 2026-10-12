@@ -30,6 +30,7 @@ unrelated workloads, so only this repo's namespaces and the objects below are ow
   the OSSM operator Subscription on the members (Argo adopts it; deleting the
   `<member>-ossm-operator` Application uninstalls OSSM).
 - Lab overrides in `lab.tfvars`: `acm_install_operator = false`,
+  `acm_keep_managed_clusters_on_destroy = true` (destroy leaves the members registered in ACM),
   `gitops_install_operator = false`, `gitops_app_overrides` (cert-manager app
   disabled; istiod 1 replica at 1-2 CPU / 3Gi; gateway Services pinned to the
   MetalLB pool `gw-ingress` with `metallb.io/address-pool`), and
@@ -59,6 +60,7 @@ ACM namespaces imported:
 ./terraform/platform/scripts/001-openapi-preflight.sh --contexts <acm-hub-ctx>
 cd terraform/platform
 terraform init
+terraform workspace select default   # the rosa workspace is the other scope
 terraform import -var-file=lab.tfvars 'kubernetes_manifest.spoke_namespace["<mesh-a-ctx>"]' "apiVersion=v1,kind=Namespace,name=<mesh-a-ctx>"   # once per member, only if already ACM-managed
 terraform plan -var-file=lab.tfvars -out=plan.tfplan
 terraform apply plan.tfplan
@@ -73,7 +75,8 @@ returns 0 when there is no drift.
 - `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy (30 apps).
 - `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
-- Data plane: apply `charts/mesh-verify-appset.yaml` (point revision at your branch),
+- Data plane: apply `charts/mesh-verify-appset.yaml` (set both `targetRevision` and the
+  `repo.revision` parameter to your branch),
   curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
   `Host: mesh-verify.local`: answers alternate between both clusters. `oc delete -f` cascades.
 - Gate reports `ca=` mismatch (istiod started before cacerts): delete the
