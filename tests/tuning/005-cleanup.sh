@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Undo whatever an interrupted tuning run left behind:
-#   1. revert every profile still marked active under tests/tuning/results,
+#   1. revert every profile still marked active under the results directory,
 #   2. delete profile resources still on the clusters (found by label),
-#   3. resume Argo CD for every pause still recorded under tests/tuning/results.
+#   3. resume Argo CD for every pause still recorded under the results directory.
 #
 # Usage:
-#   ./tests/tuning/005-cleanup.sh [--contexts CSV] [--dry-run]
+#   ./tests/tuning/005-cleanup.sh [--contexts CSV] [--results-dir DIR] [--dry-run]
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
@@ -30,18 +30,23 @@ Usage: $(basename "$0") [options]
 Revert active profiles, delete leftover profile resources and resume Argo CD.
 
 Options:
-  --contexts CSV   Mesh member contexts for the resource sweep (default: \$SETUP_CONTEXTS).
-                   Reverts use the contexts recorded when each profile was applied.
-  --dry-run        Show what would be done; do not touch clusters.
-  -h, --help       Show this help.
+  --contexts CSV     Mesh member contexts for the resource sweep (default: \$SETUP_CONTEXTS).
+                     Reverts use the contexts recorded when each profile was applied.
+  --results-dir DIR  Where to look for revert state and Argo CD pause records
+                     (default: tests/tuning/results; use the sweep's --output-dir).
+  --dry-run          Show what would be done; do not touch clusters.
+  -h, --help         Show this help.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--contexts)
+	--contexts | --results-dir)
 		[[ -n "${2:-}" ]] || die "$1 requires a value"
-		CONTEXTS_CSV="$2"
+		case "$1" in
+		--contexts) CONTEXTS_CSV="$2" ;;
+		--results-dir) RESULTS="$2" ;;
+		esac
 		shift 2
 		;;
 	--dry-run) DRY_RUN=1; shift ;;

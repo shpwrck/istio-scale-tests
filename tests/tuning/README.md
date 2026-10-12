@@ -8,8 +8,8 @@ and writes a comparison table.
 
 - bash 4+, `kubectl` or `oc`, and `python3` with PyYAML.
 - The mesh deployed by GitOps (`charts/spoke-ossm`). Its baseline already has root
-  Sidecar scoping, discoverySelectors, client-metric and access-log filtering, istiod
-  at 4 CPU / 16Gi and sidecar limits. Profiles change things on top of that.
+  Sidecar scoping, discoverySelectors, and client-metric and access-log filtering.
+  Profiles change things on top of that.
 - Contexts for the mesh members and for the ACM hub (Argo CD runs there).
 
 ## Profiles
@@ -32,14 +32,18 @@ To measure a baseline lever (Sidecar scoping, discoverySelectors, telemetry), to
 
 ```bash
 ./tests/tuning/003-run-tuning-sweep.sh --suite churn \
-  --contexts <mesh-a-ctx>,<mesh-b-ctx> --gitops-context <acm-hub-ctx> --dry-run
+  --contexts <mesh-a-ctx>,<mesh-b-ctx> --gitops-context <acm-hub-ctx> \
+  --profiles 02-xds-cache-off --settle 30 --dry-run
 ```
 
 `--dry-run` prints every command and checks the probe arguments; remove it to run.
 `--suite` is one of `propagation`, `controlplane`, `dataplane`, `churn`,
 `churn-dataplane`. The first context is the source for suites that take one.
-Other options: `--profiles 01-push-throttling,04-connection-pools`, `--no-baseline`,
-`--skip-setup`, `--keep-workloads`, `--settle SEC`, `--churn-rate N` (see `--help`).
+Without `--profiles` the sweep runs every profile. Other options: `--no-baseline`,
+`--skip-setup`, `--keep-workloads`, `--churn-rate N` (see `--help`).
+
+The suite's setup and probes take their sizes from `config/options.env`. Override
+them in the environment, for example `CHURN_ITERATIONS=2 ./tests/tuning/003-run-tuning-sweep.sh ...`.
 
 The sweep:
 
@@ -48,7 +52,9 @@ The sweep:
 3. For the baseline and each profile: apply (001), wait `--settle`, run the probe,
    revert (002). A failed revert stops the sweep.
 4. Writes `sweep-comparison.md` (004), runs the suite's cleanup, resumes Argo CD.
-   On Ctrl-C or an error it still reverts the active profile and resumes Argo CD.
+
+On Ctrl-C or an error the sweep still reverts the active profile and resumes Argo CD.
+It leaves the suite's workloads; remove them with the suite's cleanup script.
 
 ## Results
 
@@ -61,7 +67,8 @@ tests/tuning/results/sweep-<RUN_ID>/
 ```
 
 `SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
-table. Re-render: `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format markdown`.
+table. Data-plane rows are split by target class (local or remote) and QPS. Re-render:
+`./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 ## One profile by hand
 
@@ -73,6 +80,8 @@ table. Re-render: `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-d
 ./tests/tuning/006-gitops-pause.sh --resume
 ```
 
+`006-gitops-pause.sh --gitops-context <acm-hub-ctx> --status` lists the sync windows.
+
 ## How apply, revert and the Argo CD pause work
 
 - **001** saves the Istio CR and builds a merge patch that restores the saved value,
@@ -80,20 +89,25 @@ table. Re-render: `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-d
   resource that already exists, so it never touches baseline objects.
 - **002** applies that patch, deletes the profile's resources, then checks that those
   paths and resources match the pre-apply state. On failure it exits 3 and keeps the
-  `active-profile` marker so it can be retried.
+  `active-profile` marker so it can be retried. With
+  `TUNING_REVERT_HEALTHCHECK_NS_PROBE=1` it also checks that istiod still delivers
+  `istio-ca-root-cert` to a new namespace.
 - **006** adds a deny sync window for the Applications to their AppProject (and
   removes it on resume). Patching an Application's `syncPolicy` would be undone by
   the ApplicationSet controller.
 
-## After an interrupted run
+## After a killed run
+
+If the sweep could not clean up (for example `kill -9` or a lost shell), run:
 
 ```bash
 ./tests/tuning/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
 
-Reverts profiles still marked active, deletes leftover profile resources (label
-`istio-scale-tests/tuning-profile`) and resumes recorded Argo CD pauses. Run the
-suite's own cleanup too if its workloads are still deployed.
+It reverts profiles still marked active, deletes leftover profile resources (label
+`istio-scale-tests/tuning-profile`) and resumes recorded Argo CD pauses. Add
+`--results-dir DIR` if the sweep used `--output-dir`. Then run the suite's cleanup.
+001 and 003 refuse to start while a profile is still marked active.
 
 ## Adding a profile
 
