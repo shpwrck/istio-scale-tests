@@ -4,7 +4,7 @@ description: Run the 7-agent scale-test improvement cycle on the current branch 
 
 # /scale-test-review
 
-You are the **orchestrator** of the 7-agent scale-test improvement team. Your job is to drive the cycle described in `docs/scale-test-team/process.md` to consensus.
+You are the **orchestrator** of the 7-agent scale-test improvement team. Your job is to drive the cycle below to consensus (overview: `docs/scale-test-team/README.md`).
 
 ## Inputs
 
@@ -16,8 +16,6 @@ If `$ARGUMENTS` is empty, prompt the user with a `AskUserQuestion` call asking w
 
 ## Cycle
 
-Follow the process exactly — see `docs/scale-test-team/process.md` for the rationale.
-
 1. **Set up the branch.** If creating, branch off `main`. Verify a clean working tree before starting.
 
 2. **Brief the implementer.** Read `docs/scale-test-team/process-learnings.md` and include the relevant PL list in your brief. Spawn the `scale-test-implementer` subagent with:
@@ -26,7 +24,7 @@ Follow the process exactly — see `docs/scale-test-team/process.md` for the rat
    - Verification commands to run
    - **Explicit instruction NOT to commit** — you handle commits
 
-3. **Commit implementer output.** When the implementer reports back, run a quick local sanity check (`bash -n`, `shellcheck -x` on modified scripts, the verification commands the implementer ran). Then `git add -A && git commit -m "wip(scale-test): implementer round N - <short>"` and `git push -u origin <branch>` if the branch isn't pushed yet.
+3. **Commit implementer output.** When the implementer reports back, run a quick local sanity check (`bash -n`, `shellcheck -x` on modified scripts, the verification commands the implementer ran). Then stage only the files the implementer listed under "Files changed" (`git add <file>...`, never `git add -A`), `git commit -m "wip(scale-test): implementer round N - <short>"`, and `git push -u origin <branch>` if the branch isn't pushed yet.
 
 4. **Fan out reviewers.** In **one message**, spawn all six reviewers as parallel subagent calls. Each gets:
    - The branch HEAD SHA
@@ -43,7 +41,7 @@ Follow the process exactly — see `docs/scale-test-team/process.md` for the rat
    - **Continue**: re-brief the implementer with the consolidated Round-N+1 fix list and go back to step 3.
    - **Cap**: 10 rounds. If you reach round 10 with substantive items still open, stop and report the unresolved set to the user — don't burn rounds in a flat trade.
 
-7. **Open or update the PR.** Use `mcp__github__create_pull_request` (or `update_pull_request` if it already exists). PR description should include:
+7. **Open or update the PR.** Use `gh -R shpwrck/istio-scale-tests pr create --base main --head <branch> --title <title> --body-file <file>`, or `gh -R shpwrck/istio-scale-tests pr edit <branch> --body-file <file>` if it already exists. PR description should include:
    - The proposal + scope
    - A round-by-round table (verdicts + new substantive count)
    - The headline fixes from review feedback
@@ -51,11 +49,11 @@ Follow the process exactly — see `docs/scale-test-team/process.md` for the rat
    - Known limitations explicitly punted with reviewer attribution
    - Branch-off-main conflict notes (which other in-flight branches share files)
 
-8. **Capture process learnings.** If this branch surfaced a *new* failure mode that the existing PL catalog didn't cover, append it to `docs/scale-test-team/process-learnings.md` as PL(N+1) in the same commit. This is how the team gets faster over time — Branch 2's 13-item Round-1 dropped to 0 items after Branch 1's PLs were preempted; Branch 3's 19-item Round-1 dropped to 0 after Branch 1+2's PLs were preempted. Carry forward.
+8. **Capture process learnings.** If this branch surfaced a *new* failure mode that the existing PL catalog didn't cover, append it to `docs/scale-test-team/process-learnings.md` as PL(N+1) in the same commit, so later implementer briefs can preempt it.
 
-## Subscription
+## Follow-up
 
-After opening the PR, ask the user via `AskUserQuestion` whether to subscribe to PR events for autofix/babysit, since further review comments are likely. If yes, call `subscribe_pr_activity` for the PR and end your turn.
+After opening the PR, give the user its URL. If this session has a PR-activity subscription tool, ask via `AskUserQuestion` whether to subscribe for follow-up review comments.
 
 ## What you should NOT do
 

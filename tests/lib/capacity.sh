@@ -304,13 +304,13 @@ cap_node_totals() {
 
 # _cap_retry_nonempty <cmd...>: run cmd up to CAP_TOP_ATTEMPTS times (CAP_TOP_BACKOFF_S
 # apart) until its stdout is non-empty, then echo that stdout. Rides through a BRIEF
-# metrics-API blip so a single bad moment doesn't N/A a combo (#44). On persistent
+# metrics-API blip so a single bad moment doesn't N/A a combo. On persistent
 # failure it echoes the last (empty) output so the downstream parser still yields
 # `unknown` — never fails the pipeline. Used only for the `kubectl top` reads, which
 # run OUTSIDE the scrape measurement window, so the retry latency is measurement-neutral.
 # shellcheck disable=SC2329
 _cap_retry_nonempty() {
-	local attempts="${CAP_TOP_ATTEMPTS:-3}" backoff="${CAP_TOP_BACKOFF_S:-1}" i out=""
+	local attempts="${CAP_TOP_ATTEMPTS:-2}" backoff="${CAP_TOP_BACKOFF_S:-2}" i out=""
 	for (( i = 1; i <= attempts; i++ )); do
 		out="$("$@" 2>/dev/null)" || out=""
 		if [[ -n "$out" ]]; then printf '%s\n' "$out"; return 0; fi
@@ -347,8 +347,7 @@ cap_pod_count() {
 # NOTE: targets the unsuffixed `istiod` Deployment — correct for a Sail
 # IstioRevision/default install (the default revision produces an unsuffixed
 # `istiod`, label app=istiod). A NON-default revision (e.g. default-v1-24) names
-# it `istiod-<rev>`, so `get deploy istiod` would 404 -> unknown limit. Hardening
-# the selector for revisioned installs is tracked in issue #44.
+# it `istiod-<rev>`, so `get deploy istiod` would 404 -> unknown limit.
 # shellcheck disable=SC2329
 cap_istiod_limits() {
 	local ctx="$1"; shift

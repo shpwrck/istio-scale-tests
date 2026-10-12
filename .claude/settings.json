@@ -1,150 +1,24 @@
 {
-  "allowedCommands": [
-    {
-      "command": "find . -type f -name '*.sh' | head -20",
-      "reason": "List bash scripts in repo"
-    },
-    {
-      "command": "find . -type f -name '*.yaml' -o -name '*.yml' | head -20",
-      "reason": "List YAML manifests and chart files"
-    },
-    {
-      "command": "find . -name 'Chart.yaml' -o -name 'values.yaml'",
-      "reason": "Locate Helm charts"
-    },
-    {
-      "command": "find <home>/workdir/istio-scale-tests/charts -type f",
-      "reason": "Browse Helm chart files"
-    },
-    {
-      "command": "find <home>/workdir/istio-scale-tests/istio-setup -type f -name '*.sh'",
-      "reason": "List mesh installation scripts"
-    },
-    {
-      "command": "find <home>/workdir/istio-scale-tests/platform-setup -type f -name '*.sh'",
-      "reason": "List platform setup scripts"
-    },
-    {
-      "command": "grep -r 'SETUP_CONTEXTS' <home>/workdir/istio-scale-tests --include='*.sh' | head -10",
-      "reason": "Search for context handling patterns in scripts"
-    },
-    {
-      "command": "grep -r 'DRY_RUN' <home>/workdir/istio-scale-tests --include='*.sh' | head -10",
-      "reason": "Search for dry-run patterns in scripts"
-    },
-    {
-      "command": "grep -r 'set -euo pipefail' <home>/workdir/istio-scale-tests --include='*.sh'",
-      "reason": "Verify bash safety patterns"
-    },
-    {
-      "command": "ls -la <home>/workdir/istio-scale-tests/.claude/",
-      "reason": "List Claude configuration directory"
-    },
-    {
-      "command": "ls -la <home>/workdir/istio-scale-tests/charts/",
-      "reason": "List Helm charts"
-    },
-    {
-      "command": "ls -la <home>/workdir/istio-scale-tests/istio-setup/",
-      "reason": "List mesh setup scripts"
-    },
-    {
-      "command": "ls -la <home>/workdir/istio-scale-tests/platform-setup/",
-      "reason": "List platform setup scripts"
-    },
-    {
-      "command": "ls -la <home>/workdir/istio-scale-tests/terraform/",
-      "reason": "List Terraform directories"
-    },
-    {
-      "command": "ls -la <home>/workdir/istio-scale-tests/config/",
-      "reason": "List configuration files"
-    },
-    {
-      "command": "ls <home>/workdir/istio-scale-tests/",
-      "reason": "List repo root contents"
-    },
-    {
-      "command": "git status",
-      "reason": "Check git working tree status"
-    },
-    {
-      "command": "git log --oneline -10",
-      "reason": "View recent commit history"
-    },
-    {
-      "command": "git log --oneline --graph --all -20",
-      "reason": "View commit history with graph"
-    },
-    {
-      "command": "git diff",
-      "reason": "View unstaged changes"
-    },
-    {
-      "command": "git diff --staged",
-      "reason": "View staged changes"
-    },
-    {
-      "command": "git branch -a",
-      "reason": "List all git branches"
-    },
-    {
-      "command": "git remote -v",
-      "reason": "Show git remote URLs"
-    },
-    {
-      "command": "helm lint <home>/workdir/istio-scale-tests/charts/*",
-      "reason": "Validate Helm chart syntax"
-    },
-    {
-      "command": "shellcheck <home>/workdir/istio-scale-tests/**/*.sh",
-      "reason": "Lint bash scripts"
-    },
-    {
-      "command": "terraform -chdir=<home>/workdir/istio-scale-tests/terraform/rosa-hcp validate",
-      "reason": "Validate Terraform configuration"
-    },
-    {
-      "command": "terraform -chdir=<home>/workdir/istio-scale-tests/terraform/rosa-hcp fmt -check",
-      "reason": "Check Terraform formatting"
-    },
-    {
-      "command": "cat <home>/workdir/istio-scale-tests/config/versions.env",
-      "reason": "View pinned versions and environment variables"
-    }
-  ],
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
-    "bash": {
-      "defaultAllow": false,
-      "allowPatterns": [
-        "^ls( -[a-zA-Z]+)? ",
-        "^find \\.",
-        "^grep ",
-        "^cat ",
-        "^head ",
-        "^tail ",
-        "^wc ",
-        "^tree ",
-        "^git status$",
-        "^git log ",
-        "^git diff",
-        "^git branch",
-        "^git remote",
-        "^which ",
-        "^command -v ",
-        "^type ",
-        "^helm version$",
-        "^terraform version$",
-        "^kubectl version$",
-        "^oc version$",
-        "^istioctl version$"
-      ]
-    }
-  },
-  "context": {
-    "alwaysInclude": [
-      "<home>/workdir/istio-scale-tests/AGENTS.md",
-      "<home>/workdir/istio-scale-tests/config/versions.env"
+    "allow": [
+      "Bash(bash -n *)",
+      "Bash(shellcheck *)",
+      "Bash(helm lint *)",
+      "Bash(helm template *)",
+      "Bash(helm version*)",
+      "Bash(terraform fmt -check *)",
+      "Bash(terraform version)",
+      "Bash(kubectl version --client*)",
+      "Bash(oc version --client*)",
+      "Bash(tests/lib/verify.sh)",
+      "Bash(tests/lib/verify.sh *)",
+      "Bash(tests/lib/test/bats-core/bin/bats *)"
+    ],
+    "deny": [
+      "Read(./terraform/**/*.tfstate)",
+      "Read(./terraform/**/*.tfstate.*)",
+      "Read(./terraform/rosa-hcp/kubeconfig)"
     ]
   }
 }

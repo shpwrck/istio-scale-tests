@@ -19,7 +19,7 @@ Given a brief from the orchestrator, produce a clean, well-verified pass of chan
 
 ## Constraints
 
-- **Numbered `NNN-` scripts** in `tests/<suite>/`; don't add unnumbered peers; don't renumber existing scripts; update callers in the same change.
+- **Numbered `NNN-` scripts** in `tests/<suite>/`; don't add unnumbered peers; renumber only as AGENTS.md allows, updating every caller and README in the same change.
 - **`set -euo pipefail`** on every modified bash script. `ROOT="$(cd "$(dirname "$0")/../.." && pwd)"` pattern + `source "${ROOT}/config/versions.env"`.
 - **`--dry-run`** must dry-run: 001/setup and 003/sweep should never touch a cluster in `--dry-run`.
 - **`--contexts CSV`** parsed via `split_csv` into both a string and an array; loop variable is `ctx`.
