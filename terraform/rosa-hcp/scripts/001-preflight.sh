@@ -25,7 +25,8 @@ AWS account linked to that org for billing, AWS quotas, and the OpenShift
 version. Read-only; prints a fix for each failure. Exit 1 if any check fails.
 
 Options:
-  --region REGION    AWS region (default: \$AWS_REGION, \$AWS_DEFAULT_REGION, then aws config)
+  --region REGION    AWS region (default: aws_region in terraform.tfvars, then \$AWS_REGION,
+                     \$AWS_DEFAULT_REGION, aws config)
   --version X.Y.Z    OpenShift version to check (default: openshift_version in terraform.tfvars)
   --dry-run          List the checks without running them
   -h, --help         Show this help
@@ -62,6 +63,10 @@ done
 
 if [[ -z "$VERSION" && -f "${TF_DIR}/terraform.tfvars" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*openshift_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${TF_DIR}/terraform.tfvars" | head -1)"
+fi
+# Check the region terraform will create the clusters in, not the profile's default.
+if [[ -z "$REGION" && -f "${TF_DIR}/terraform.tfvars" ]]; then
+  REGION="$(sed -n 's/^[[:space:]]*aws_region[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${TF_DIR}/terraform.tfvars" | head -1)"
 fi
 
 CHECKS=(
