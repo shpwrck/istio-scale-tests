@@ -5,24 +5,21 @@
 #   ./tests/churn/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
 #
 # Examples:
-#   # Sweep 1, 2, 3 clusters with default churn:
-#   ./tests/churn/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
-#
-#   # Sweep churn intensities (deployment counts):
-#   ./tests/churn/003-run-sweep.sh --churn-intensities 5,10,20
+#   ./tests/churn/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
+#   ./tests/churn/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --churn-intensities 5,10,20
 # ci-dry-run:
 set -euo pipefail
-# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
-# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+# Report the failing line on an unexpected abort. Per-combo setup/probe/cleanup
+# failures are handled below and do not stop the sweep.
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/common.sh"
-# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # B6: harness_sha for the placeholder TSV preamble
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -126,31 +123,25 @@ else
 	CHURN_INTENSITIES=("${CHURN_DEPLOYMENT_COUNT:-5}")
 fi
 
+is_pos_int "$SCALE_TO" || die "--scale-to must be a positive integer"
+((SCALE_TO > ${CHURN_BASE_REPLICAS:-1})) || die "--scale-to ($SCALE_TO) must be greater than CHURN_BASE_REPLICAS (${CHURN_BASE_REPLICAS:-1})"
+
 SCRIPT_DIR="${ROOT}/tests/churn"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 HARNESS_SHA="$(harness_sha)"
-# base_replicas the probe will use (matched here so the placeholder buckets into the
-# SAME (mesh,intensity,base_replicas,scale_to) cell the real probe rows would).
+# base_replicas the probe will use, so placeholder rows land in the same report cell.
 CHURN_BASE_REPLICAS_DEFAULT="${CHURN_BASE_REPLICAS:-1}"
 
-# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
-# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — a sweep-wide
-# scalar (the mesh's tuning is identical across all combos). The sidecar-scoping /
-# discoverySelectors / telemetry levers directly change what churn convergence
-# measures, so a run on the baked baseline is provenance-blind without these. Threaded
-# to 002 (--tuning-baseline / --sidecar-egress-hosts) AND emitted by the placeholder
-# writer (PL36 contract). Skipped in --dry-run (cluster read); stays "unknown".
+# Live tuning levers + sidecar egress hosts, read once from CONTEXTS[0] and passed
+# to every probe and placeholder row. Skipped in --dry-run (stays "unknown").
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 if ((! DRY_RUN)); then
-	if command -v oc >/dev/null 2>&1; then
-		KUBECTL=(oc)
-	elif command -v kubectl >/dev/null 2>&1; then
-		KUBECTL=(kubectl)
-	else
-		KUBECTL=()
+	KUBECTL=()
+	if command -v kubectl >/dev/null 2>&1 || command -v oc >/dev/null 2>&1; then
+		resolve_kubectl KUBECTL
 	fi
 	if ((${#KUBECTL[@]})); then
 		tb_kv=""
@@ -163,11 +154,8 @@ if ((! DRY_RUN)); then
 	fi
 fi
 
-# B6: emit a minimal placeholder TSV for a combo whose setup/probe crashed before the
-# probe wrote any row. Without it the combo vanishes from the report (looks like
-# never-planned). 004-report-results.sh globs churn-*.tsv and counts n_total per
-# (mesh,intensity,base_replicas,scale_to) for NF>=21 rows, excluding non-OK $21 from
-# n_valid (PL15). Named to sort AFTER the real churn-<RUN_ID> files.
+# Write a one-row placeholder TSV for a combo whose setup or probe failed before
+# any row was written, so the report still counts it (n_total, not n_valid).
 # Usage: emit_churn_placeholder <status> <mesh_size> <intensity>
 emit_churn_placeholder() {
 	local status="$1" ms="$2" intensity="$3"
@@ -177,8 +165,8 @@ emit_churn_placeholder() {
 		echo "# Churn convergence test (placeholder — combo failed before any row)"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
-		# PL36: match 002's preamble key set so the placeholder file (which 004 may read
-		# as TSV_FILES[0]) carries the same tuning-baseline provenance.
+		# Same preamble keys as 002 (004 may read this file first).
+		echo "# CHURN_SCALE_SCOPE=source"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
@@ -236,32 +224,6 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "  Clusters: ${active_ctxs[*]}"
 		echo "=========================================="
 
-		if ((DRY_RUN)); then
-			echo "  [dry-run] Would run:"
-			echo "    001-setup-churn-test.sh --contexts $active_csv --deployment-count $intensity"
-			echo "    002-run-churn-probe.sh --source-context $source_ctx --deployment-count $intensity --scale-to $SCALE_TO --output-dir $SWEEP_DIR --tuning-baseline <live> --sidecar-egress-hosts <live>"
-			echo "    005-cleanup.sh --contexts $active_csv"
-			echo ""
-			continue
-		fi
-
-		[[ -d "$SWEEP_DIR" ]] || mkdir -p "$SWEEP_DIR"
-
-		echo "--- Setting up ---"
-		# B1/B6: setup is a probable per-combo failure at scale; bare under set -e it
-		# would abort the whole sweep. On failure record a placeholder row (so this combo
-		# is visible in the report), clean up, and continue to the next combo.
-		if ! "$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"; then
-			echo "warn: setup failed for mesh_size=$ms churn_intensity=$intensity; recording SETUP_FAILED placeholder and continuing" >&2
-			emit_churn_placeholder SETUP_FAILED "$ms" "$intensity"
-			"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
-				echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms churn_intensity=$intensity" >&2
-			echo ""
-			continue
-		fi
-		echo ""
-
-		echo "--- Running churn probe ---"
 		probe_args=(
 			--source-context "$source_ctx"
 			--mesh-size "$ms"
@@ -274,11 +236,33 @@ for ms in "${MESH_SIZES[@]}"; do
 			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 		)
 		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-		# P0/B6: a probe failure must NOT abort the multi-hour sweep. The churn probe
-		# writes its own per-iteration rows into $SWEEP_DIR (self-tagging POISONED_*/
-		# SCRAPE_INCOMPLETE/TIMEOUT_*). If it crashed BEFORE writing any row, this combo
-		# would vanish from the report (indistinguishable from never-planned), so emit a
-		# placeholder row to keep the combo visible (n_total++, excluded from n_valid).
+
+		if ((DRY_RUN)); then
+			echo "  [dry-run] Would run:"
+			echo "    001-setup-churn-test.sh --contexts $active_csv --deployment-count $intensity"
+			echo "    002-run-churn-probe.sh ${probe_args[*]}"
+			echo "    005-cleanup.sh --contexts $active_csv"
+			echo ""
+			continue
+		fi
+
+		[[ -d "$SWEEP_DIR" ]] || mkdir -p "$SWEEP_DIR"
+
+		echo "--- Setting up ---"
+		# On setup failure: record a placeholder row, clean up, next combo.
+		if ! "$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"; then
+			echo "warn: setup failed for mesh_size=$ms churn_intensity=$intensity; recording SETUP_FAILED placeholder and continuing" >&2
+			emit_churn_placeholder SETUP_FAILED "$ms" "$intensity"
+			"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+				echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms churn_intensity=$intensity" >&2
+			echo ""
+			continue
+		fi
+		echo ""
+
+		echo "--- Running churn probe ---"
+		# A probe failure must not abort the sweep; record a placeholder row so the
+		# combo stays visible even if the probe wrote nothing.
 		if ! "$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"; then
 			echo "warn: churn probe failed for mesh_size=$ms churn_intensity=$intensity; recording PROBE_FAILED placeholder and continuing (cleanup runs below)" >&2
 			emit_churn_placeholder PROBE_FAILED "$ms" "$intensity"
@@ -286,10 +270,9 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo ""
 
 		echo "--- Cleaning up ---"
-		# P0/PL23: a cleanup hiccup must not abort the sweep — the next combo's setup also
-		# cleans the namespace. Warn and continue.
+		# A cleanup failure must not abort the sweep.
 		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
-			echo "warn: cleanup reported failure for mesh_size=$ms churn_intensity=$intensity; next combo's setup will re-clean" >&2
+			echo "warn: cleanup reported failure for mesh_size=$ms churn_intensity=$intensity; continuing" >&2
 		echo ""
 	done
 done
@@ -307,7 +290,7 @@ echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR"
 
 MD_FILE="${SWEEP_DIR}/sweep-${RUN_ID}.md"
-"$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$MD_FILE"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format md > "$MD_FILE"
 echo "Markdown summary written to $MD_FILE"
 
 CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"

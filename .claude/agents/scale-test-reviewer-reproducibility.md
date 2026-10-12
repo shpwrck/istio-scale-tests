@@ -30,7 +30,7 @@ You are the **reproducibility reviewer** on the 7-agent scale-test team for `shp
 6. **Report metadata propagation (PL19)**: the report's text/csv/markdown/json outputs must carry the TSV preamble forward (frontmatter / metadata object / `#`-prefixed lines), not just the data rows. A consumer of the report alone must be able to reconstruct what was measured.
 7. **Schema stability**: column count guarded in the report (`NF==<N>`); legacy files surfaced as `skipped_legacy` with a stderr warning; README schema doc states the current column count.
 8. **`combo_id` / pair-join semantics**: when the report joins rows (baseline vs churn, local vs remote, etc.), the join key must be deterministic given the args and documented in the README so a manual pairing is reproducible.
-9. **Non-resumability**: a fresh `RUN_ID` per invocation means re-running the same configuration lands in a different sweep subdir (no overwrite). Documented in README so operators understand "same combo → comparable distribution, not identical bytes".
+9. **Re-runs and resume**: each fresh invocation mints a new `RUN_ID` and sweep subdir (no overwrite); `--resume` (controlplane) deliberately reuses the existing one. Check that a resumed run skips only valid completed rows, and that the README explains both ("same combo → comparable distribution, not identical bytes").
 10. **Output filename collisions**: TSV filenames embed `RUN_ID` so simultaneous reruns don't overwrite.
 
 ## Output format — strict

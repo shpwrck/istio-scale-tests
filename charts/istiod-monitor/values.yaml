@@ -1,6 +1,9 @@
 istioNamespace: istio-system
 
-enableUserWorkloadMonitoring: true
+# Creates openshift-monitoring/cluster-monitoring-config with only
+# enableUserWorkload: true. Leave false if that ConfigMap already exists
+# (it holds other cluster monitoring settings); edit it instead.
+enableUserWorkloadMonitoring: false
 
 serviceMonitor:
   enabled: true

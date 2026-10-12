@@ -11,13 +11,17 @@ USERNAME="${2:?usage: $0 <api_server_url> <username> <password>}"
 PASSWORD="${3:?usage: $0 <api_server_url> <username> <password>}"
 
 oauth_authorize=$(curl -sk "${API_SERVER}/.well-known/oauth-authorization-server" \
-  | jq -r '.authorization_endpoint')
+  | jq -r '.authorization_endpoint // empty') || true
+if [[ -z "${oauth_authorize}" ]]; then
+  echo "ERROR: no OAuth authorization endpoint at ${API_SERVER}" >&2
+  exit 1
+fi
 
 location=$(curl -sk -u "${USERNAME}:${PASSWORD}" \
   "${oauth_authorize}?client_id=openshift-challenging-client&response_type=token" \
   -H "X-CSRF-Token: 1" \
   -D - -o /dev/null 2>/dev/null \
-  | grep -i '^location:')
+  | grep -i '^location:') || true
 
 token=$(echo "$location" | sed -n 's/.*access_token=\([^&]*\).*/\1/p' | tr -d '\r')
 

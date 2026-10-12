@@ -38,7 +38,8 @@
 #
 # Exposes (thin kubectl wrappers — each takes <ctx> <kubectl_argv...>):
 #   env_istiod_resources <ctx> <argv...>
-#   env_network          <ctx> <argv...>
+#   env_network          <ctx> <argv...>   (istiod env, else the istio-system
+#                                           topology.istio.io/network label)
 #
 # Exposes (campaign-end renderer):
 #   render_scale_envelope <results_dir> <report_script> <contexts_csv> <kubectl_argv...>
@@ -200,7 +201,7 @@ env_sla_verdict() {
 
 # env_istiod_resources <ctx> <kubectl_argv...>
 # Targets the unsuffixed `istiod` Deployment (default Sail revision) — same
-# caveat as capacity.sh:cap_istiod_limits for non-default revisions (#44).
+# caveat as capacity.sh:cap_istiod_limits for non-default revisions.
 # shellcheck disable=SC2329
 env_istiod_resources() {
 	local ctx="$1"; shift
@@ -209,11 +210,21 @@ env_istiod_resources() {
 }
 
 # env_network <ctx> <kubectl_argv...>
+# Reads the istiod env first; when it carries no network id (Istio 1.2x+ sets the
+# network only as the topology.istio.io/network label on istio-system), falls back
+# to that namespace label. Emits `network=<id>` or `network=unknown`.
 # shellcheck disable=SC2329
 env_network() {
 	local ctx="$1"; shift
-	"$@" --context="$ctx" --request-timeout=5s -n istio-system get deploy istiod -o json 2>/dev/null \
-		| env_parse_network
+	local net label
+	net="$("$@" --context="$ctx" --request-timeout=5s -n istio-system get deploy istiod -o json 2>/dev/null \
+		| env_parse_network)"
+	if [[ "$net" == "network=unknown" ]]; then
+		label="$("$@" --context="$ctx" --request-timeout=5s get namespace istio-system \
+			-o jsonpath='{.metadata.labels.topology\.istio\.io/network}' 2>/dev/null)" || label=""
+		[[ -n "$label" ]] && net="network=${label}"
+	fi
+	printf '%s\n' "$net"
 }
 
 # env_collect_infra <contexts_csv> <kubectl_argv...>
@@ -396,11 +407,11 @@ render_scale_envelope() {
 | **Total services in mesh** | ${total_svc} | derived (N x S) |
 | **Total endpoints in mesh** | ${total_eps} | derived (N x S x R) |
 | **Connected proxies (measured peak)** | ${proxies_peak} | report achieved-scale \`connected_proxies_max\` (n_valid-gated) |
-| Network topology | ${topology} | istiod \`ISTIO_META_NETWORK\` across contexts |
+| Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
 
-> Connected proxies is **summed across istiod replicas** (each proxy holds one istiod connection — PL28), so it is the mesh-wide proxy count, NOT endpoints; do not expect proxies ≈ total endpoints.
+> Connected proxies is the **per-istiod-replica peak** (max over the per-pod rows), not a mesh-wide sum and not endpoints; do not expect proxies ≈ total endpoints.
 
 ### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
 

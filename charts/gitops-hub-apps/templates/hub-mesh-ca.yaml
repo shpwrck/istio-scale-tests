@@ -1,0 +1,29 @@
+{{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "hub-mesh-ca") }}
+# Mesh root CA chain (cert-manager) on the hub.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-mesh-ca
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: hub-mesh-ca
+spec:
+  project: default
+  source:
+    repoURL: {{ include "gitops-hub-apps.repoURL" . }}
+    targetRevision: {{ include "gitops-hub-apps.revision" . }}
+    path: charts/hub-mesh-ca
+    helm:
+      releaseName: hub-mesh-ca
+      {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "hub-mesh-ca") }}{{ . | nindent 6 }}{{- end }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
+{{- end }}

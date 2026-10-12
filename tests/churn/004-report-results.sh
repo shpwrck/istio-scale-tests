@@ -2,17 +2,19 @@
 # Generate summary statistics from churn convergence TSV files.
 #
 # Usage:
-#   ./tests/churn/004-report-results.sh [--results-dir DIR]
+#   ./tests/churn/004-report-results.sh [--results-dir DIR] [--format FMT]
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/common.sh"
-# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 RESULTS_DIR="${ROOT}/tests/churn/results"
 FORMAT="text"
+DRY_RUN=0
 
 
 usage() {
@@ -20,7 +22,8 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/churn/results).
-  --format FMT       Output format: text, csv, markdown, charts (default: text).
+  --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
+  --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
 EOF
 }
@@ -37,6 +40,10 @@ while [[ $# -gt 0 ]]; do
 		FORMAT="$2"
 		shift 2
 		;;
+	--dry-run)
+		DRY_RUN=1
+		shift
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -46,6 +53,18 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+case "$FORMAT" in
+text | csv | md | markdown | charts) ;;
+*) die "unknown format: $FORMAT (use text, csv, md, or charts)" ;;
+esac
+
+if ((DRY_RUN)); then
+	n=0
+	[[ -d "$RESULTS_DIR" ]] && n=$(find "$RESULTS_DIR" -name 'churn-*.tsv' -type f | wc -l)
+	echo "[dry-run] would summarize $((n)) churn-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
+	exit 0
+fi
 
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
@@ -58,25 +77,14 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Pull a `# KEY=value` provenance line from the first TSV's preamble. Used for
-# values that are LIVE-QUERIED at sweep time and therefore NOT reconstructable from
-# the environment (unlike istio_version / harness_sha) — notably the tuning-baseline
-# levers (TUNING_BASELINE / SIDECAR_EGRESS_HOSTS, PL2). Defaults to "unknown".
+# Read a `# KEY=value` line from the first TSV's preamble (for values queried live
+# at sweep time, e.g. TUNING_BASELINE). Defaults to "unknown".
 preamble_get() {
 	local key="$1" v
 	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
 	v="${v#*=}"
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
-
-# Backwards-compat: warn when a file predates the 21-column schema (the
-# convergence_remote_eds_ms split). Such rows are skipped by the NF>=21 awk guards
-# below; surface that so a silently-empty aggregation is not mistaken for "no data".
-for f in "${TSV_FILES[@]}"; do
-	if awk -F'\t' '!/^#/ && !/^run_id/ && NF>0 && NF<21 { legacy=1 } END { exit (legacy ? 0 : 1) }' "$f"; then
-		echo "warning: $f has <21 data columns (pre-EDS-split schema); those rows are skipped" >&2
-	fi
-done
 
 # TSV schema (21 columns):
 #  $1  run_id
@@ -87,8 +95,8 @@ done
 #  $6  iteration
 #  $7  t0_epoch_ns
 #  $8  convergence_local_ms
-#  $9  remote_endpoint_reachable_ms   (data-plane: Envoy health_flags::healthy; incl pod/sidecar lifecycle)
-#  $10 convergence_remote_eds_ms      (control-plane only: remote istiod EDS-push crossing; pod-boot-free)
+#  $9  remote_endpoint_reachable_ms   (remote watcher sees a new Ready source pod per deployment)
+#  $10 convergence_remote_eds_ms      (first remote EDS push after t0; control plane only)
 #  $11 source_push_triggers_delta
 #  $12 remote_push_triggers_delta
 #  $13 source_xds_pushes_delta
@@ -100,15 +108,10 @@ done
 #  $19 source_push_time_p99_ms
 #  $20 remote_push_time_p99_ms
 #  $21 status
-#
-# Column count was bumped 20 -> 21 when convergence_remote_eds_ms was split out of
-# the old convergence_remote_ms (which is now remote_endpoint_reachable_ms, $9).
-# Pre-split TSVs (20 cols) are skipped by the NF>=21 guard with a stderr warning.
 
 report_text() {
 	echo "=== Churn Convergence Results ==="
 	echo ""
-	# PL19: live-queried tuning-baseline provenance from the TSV preamble.
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo ""
@@ -207,7 +210,6 @@ report_text() {
 }
 
 report_csv() {
-	# PL19: live-queried tuning-baseline provenance as `# KEY=value` comment lines.
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg"
@@ -280,37 +282,36 @@ report_csv() {
 	}'
 }
 
-# Metric glossary appended to the END of the markdown summary (#17). Definitions are
-# pulled from tests/churn/README.md; units/source/caveats mirror it, not invented here.
+# Metric glossary appended to the markdown summary; keep in sync with tests/churn/README.md.
 glossary_section() {
 	cat <<'GLOSSARY'
 
 ## Glossary
 
-Definitions for every metric column in the results table above. Sourced from
-`tests/churn/README.md`. `src_`/`rmt_` prefixes are the **source** istiod (where churn is
-applied, summed across its replicas) vs the **remote** istiod pods (summed/maxed across all
-remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
-(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*`) are excluded but still counted in
+Definitions for every metric column in the results table above. Only the **source**
+cluster is scaled; remotes stay at base replicas, so `remote_*` columns measure
+cross-cluster propagation. `src_`/`rmt_` prefixes are the source istiod (summed across its
+replicas) vs the remote istiod pods (summed/maxed across all remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
+(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*` / `*_FAILED`) are excluded but still counted in
 `n_total`. Histogram p99 columns are reported as **bucket ranges** (e.g. `0-100`), not exact
 values; `overflow` means the p99 fell in the `+Inf` bucket.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
 | `mesh` | clusters | sweep axis | Mesh size (number of clusters). |
-| `churn` | scale-ops | sweep axis | Churn intensity per iteration. |
-| `scale` | `base->target` | sweep axis | Endpoint scale range applied to the churn target (e.g. `1->5`). |
+| `churn` | deployments | sweep axis | Churn intensity: churn-target deployments scaled per iteration. |
+| `scale` | `base->target` | sweep axis | Replica range applied to each churn target on the source (e.g. `1->5`). |
 | `n_valid` | rows | internal | Rows with `status == OK` used in the averages. |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/timed-out rows. |
-| `local_avg (ms)` | ms | source istiod `/debug/syncz` poll | Local convergence: time until all source proxies report SYNCED. |
-| `remote_reach_avg (ms)` | ms | remote sidecar Envoy `/clusters` | Remote endpoint reachability — **includes** pod scheduling + sidecar startup (data-plane signal, analogous to propagation P3). |
-| `remote_eds_avg (ms)` | ms | remote `pilot_xds_pushes{type="eds"}` counter delta | Remote EDS convergence: time to the first remote EDS push after t0 — control-plane-only, **excludes** pod boot (analogous to propagation P2). |
+| `local_avg (ms)` | ms | source watcher `/clusters` + source istiod `/debug/syncz` | Time until the source watcher sees at least one new Ready pod per deployment and every source proxy reports SYNCED. **Includes** pod scheduling + sidecar startup. |
+| `remote_reach_avg (ms)` | ms | remote watcher Envoy `/clusters` | Time until every churn target on the remote watcher has more healthy endpoint weight than before t0 (at least one new Ready source pod per deployment). **Includes** pod scheduling + sidecar startup. |
+| `remote_eds_avg (ms)` | ms | remote `pilot_xds_pushes{type="eds"}` counter delta | Time to the first remote EDS push after t0. Control plane only; **excludes** pod boot. |
 | `src_triggers` / `rmt_triggers` | count (delta) | `pilot_push_triggers` counter delta | Push triggers on the source / remote istiod during the churn event. |
 | `src_pushes` / `rmt_pushes` | count (delta) | `pilot_xds_pushes` (all types) counter delta | xDS pushes on the source / remote istiod. |
 | `src_queue_p99` / `rmt_queue_p99` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 queue wait on source / remote; bucket range, `overflow`/`N/A` possible. |
 | `src_proxies` / `rmt_proxies` | proxies | `pilot_xds` gauge | Connected proxy count on source / remote istiod at baseline. |
 | `src_push_p99` / `rmt_push_p99` | ms (bucket range) | `pilot_xds_push_time` histogram delta | p99 time to compute+send each xDS push, source / remote; bucket range, `overflow`/`N/A` possible. |
-| `amplification` | ratio | derived | `(src_pushes + rmt_pushes) / src_triggers` — mesh-wide push fan-out per source event; only computed when `src_triggers > 0`; expected ≤ ~1. |
+| `amplification` | ratio | derived | `(src_pushes + rmt_pushes) / src_triggers` — mesh-wide push fan-out per source event; only computed when `src_triggers > 0`. `pilot_xds_pushes` counts one push per proxy connection per xDS type, so this scales with connected proxies: compare across mesh sizes, not against 1. |
 GLOSSARY
 }
 
@@ -340,7 +341,6 @@ report_markdown() {
 	echo "istio_version: ${istio_version}"
 	echo "harness_sha: ${harness_sha}"
 	echo "files_consumed: ${#TSV_FILES[@]}"
-	# PL19: live-queried tuning-baseline provenance (from the TSV preamble).
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
 	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
 	echo "---"
@@ -432,13 +432,12 @@ report_markdown() {
 				avg_hist(rpt2_sum[key], rpt2_n[key]), \
 				avg_ratio(amp_sum[key], amp_n[key])
 		}
-		# PL15: surface the filter rate when any cell dropped rows.
+		# Note the filter rate when any cell dropped rows.
 		if (any_filtered) {
-			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_*) are excluded from numeric aggregation but still counted in `n_total`.\n"
+			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_* / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
 
-	# #17: metric glossary at the very end of the markdown summary.
 	glossary_section
 }
 
@@ -458,26 +457,51 @@ report_charts() {
 	echo "# Churn Convergence — Charts"
 	echo ""
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
-	# PL13/PL15 gate: charts aggregate per mesh size over VALID rows only ($21=="OK").
-	# Count total vs valid rows so a dropped (restart-poisoned / non-OK) row never lands
-	# as a 0 data point silently — a per-mesh-size series point with zero valid rows is
-	# ABSENT (cl_n[ms]==0 -> not plotted), and the caption mirrors the markdown footnote.
+	# Charts average each series per mesh size over valid rows only ($21=="OK").
+	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,
+	# so a point with no samples is never plotted as 0: each chart keeps only the
+	# mesh sizes where every one of its series has samples and names what it left out.
+	function add(key, ms, v) { sum[key, ms] += v; cnt[key, ms]++ }
+	function chart(title, ytitle, keylist, labellist, fmt,    nk, keys, labels, ax, n_ax, i, j, ms, ok, miss) {
+		nk = split(keylist, keys, " "); split(labellist, labels, ",")
+		n_ax = 0; miss = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]; ok = 1
+			for (j = 1; j <= nk; j++) {
+				if (!((keys[j], ms) in cnt)) {
+					ok = 0
+					miss = miss (miss == "" ? "" : ", ") labels[j] " @ mesh " ms
+				}
+			}
+			if (ok) ax[++n_ax] = ms
+		}
+		if (n_ax < 2) {
+			printf "\n> Not charted: fewer than two mesh sizes have samples for every series (no samples: %s).\n\n", miss
+			return 0
+		}
+		printf "\n```mermaid\nxychart-beta\n    title \"%s\"\n    x-axis \"Mesh Size\" [", title
+		for (i = 1; i <= n_ax; i++) printf "%s%s", (i > 1 ? ", " : ""), ax[i]
+		printf "]\n    y-axis \"%s\"\n", ytitle
+		for (j = 1; j <= nk; j++) {
+			printf "    line ["
+			for (i = 1; i <= n_ax; i++) printf "%s" fmt, (i > 1 ? ", " : ""), sum[keys[j], ax[i]] / cnt[keys[j], ax[i]]
+			printf "]\n"
+		}
+		printf "```\n\n"
+		if (miss != "") printf "> Mesh sizes with a point that has no samples (e.g. all TIMEOUT) are left out: %s.\n", miss
+		return 1
+	}
 	!/^#/ && !/^run_id/ && NF>=21 {
 		rows_total++
 		if ($21 != "OK") { rows_dropped++; next }
-	}
-	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
 		ms = $2 + 0
 		seen[ms] = 1
-		if($8!="TIMEOUT" && $8!="N/A") { cl_sum[ms]+=$8+0; cl_n[ms]++ }
-		if($9!="TIMEOUT" && $9!="N/A") { cr_sum[ms]+=$9+0; cr_n[ms]++ }
-		if($10!="TIMEOUT" && $10!="N/A") { cre_sum[ms]+=$10+0; cre_n[ms]++ }
-		if($13!="N/A") { sxp_sum[ms]+=$13+0; sxp_n[ms]++ }
-		if($14!="N/A") { rxp_sum[ms]+=$14+0; rxp_n[ms]++ }
-		if($11!="N/A" && $11+0 > 0 && $13!="N/A") {
-			amp_sum[ms] += ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11
-			amp_n[ms]++
-		}
+		if($8!="TIMEOUT" && $8!="N/A") add("cl", ms, $8+0)
+		if($9!="TIMEOUT" && $9!="N/A") add("cr", ms, $9+0)
+		if($10!="TIMEOUT" && $10!="N/A") add("cre", ms, $10+0)
+		if($13!="N/A") add("sxp", ms, $13+0)
+		if($14!="N/A") add("rxp", ms, $14+0)
+		if($11!="N/A" && $11+0 > 0 && $13!="N/A") add("amp", ms, ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11)
 	}
 	function sort_ms(    i, j, tmp, k) {
 		n_ms = 0
@@ -507,103 +531,29 @@ report_charts() {
 			exit
 		}
 
-		# Chart 1: Convergence latency vs mesh size
 		printf "%% Chart 1: Convergence latency (ms) vs mesh size\n"
 		printf "%% Series order: local avg, remote reach avg, remote EDS avg\n"
 		printf "%% x-axis starts at mesh 2 (remote series undefined at mesh 1)\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"Convergence Latency vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_arr[i]
+		if (chart("Convergence Latency vs Mesh Size", "Latency (ms)", "cl cr cre", "local avg,remote reach avg,remote EDS avg", "%.0f")) {
+			printf "> Series order: **local avg**, **remote reach avg**, **remote EDS avg**.\n"
+			printf "> x-axis starts at mesh 2 — remote metrics are undefined at mesh size 1.\n\n"
 		}
-		printf "]\n"
-		printf "    y-axis \"Latency (ms)\"\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (cl_n[ms] > 0) ? cl_sum[ms]/cl_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (cr_n[ms] > 0) ? cr_sum[ms]/cr_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (cre_n[ms] > 0) ? cre_sum[ms]/cre_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series order: **local avg**, **remote reach avg**, **remote EDS avg**.\n"
-		printf "> x-axis starts at mesh 2 — remote metrics are undefined at mesh size 1.\n\n"
 
-		# Chart 2: xDS pushes vs mesh size
 		printf "%% Chart 2: xDS pushes vs mesh size\n"
 		printf "%% Series order: source xDS pushes, remote xDS pushes\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"xDS Pushes vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_arr[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"Push count\"\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (sxp_n[ms] > 0) ? sxp_sum[ms]/sxp_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (rxp_n[ms] > 0) ? rxp_sum[ms]/rxp_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series order: **source xDS pushes**, **remote xDS pushes**.\n\n"
+		if (chart("xDS Pushes vs Mesh Size", "Push count", "sxp rxp", "source xDS pushes,remote xDS pushes", "%.0f"))
+			printf "> Series order: **source xDS pushes**, **remote xDS pushes**.\n\n"
 
-		# Chart 3: Push amplification vs mesh size
 		printf "%% Chart 3: Push amplification ratio vs mesh size\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"Push Amplification vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_arr[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"Amplification ratio\"\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (amp_n[ms] > 0) ? amp_sum[ms]/amp_n[ms] : 0
-			printf "%s%.1f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series: **push amplification ratio** (total xDS pushes / source push triggers). Expected <= ~1.\n"
+		if (chart("Push Amplification vs Mesh Size", "Amplification ratio", "amp", "push amplification", "%.1f"))
+			printf "> Series: **push amplification ratio** (total xDS pushes / source push triggers). Scales with connected proxies x xDS types; compare across mesh sizes, not against 1.\n"
 	}'
 }
 
 case "$FORMAT" in
-text)     report_text ;;
-csv)      report_csv ;;
-markdown) report_markdown ;;
-charts)   report_charts ;;
-*)        die "unknown format: $FORMAT (use text, csv, markdown, or charts)" ;;
+text)          report_text ;;
+csv)           report_csv ;;
+md | markdown) report_markdown ;;
+charts)        report_charts ;;
+*)             die "unknown format: $FORMAT (use text, csv, md, or charts)" ;;
 esac

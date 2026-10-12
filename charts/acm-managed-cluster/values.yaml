@@ -1,9 +1,12 @@
-# Membership for ManagedClusterSetBinding + Placement (must match ACM_CLUSTER_SET / ManagedClusterSet in openshift-gitops chart).
+# ManagedClusterSet membership label. Must match clusterSet in charts/acm-openshift-gitops-resources.
 clustersetName: istio-scale-tests
 
 defaultLabels:
   cloud: auto-detect
   vendor: OpenShift
+
+# true: helm uninstall (terraform destroy) leaves the ManagedCluster in place (helm.sh/resource-policy: keep).
+keepOnUninstall: false
 
 managedCluster:
   name: ""

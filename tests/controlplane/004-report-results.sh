@@ -6,7 +6,7 @@
 # dimension while the others are held constant.
 #
 # Usage:
-#   ./tests/controlplane/004-report-results.sh [--results-dir DIR]
+#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--format FMT]
 #
 # Examples:
 #   ./tests/controlplane/004-report-results.sh
@@ -31,7 +31,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --results-dir DIR  Results directory (default: tests/controlplane/results).
-  --format FMT       Output format: text, csv, json, markdown, charts (default: text).
+  --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
 Output groups by (mesh_size, service_count, replicas, namespace_count,
@@ -40,6 +40,7 @@ CPU/memory/convergence/queue/config-dump stats.
 
 Histogram cells whose target quantile falls in the +Inf overflow bucket are
 emitted as the string "overflow" in text/csv/markdown and as null in JSON.
+A cell with no valid sample is N/A (null in JSON), never 0.
 
 Environment (O9 scale-coverage floor; default-off):
   SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
@@ -76,6 +77,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
+md) FORMAT=markdown ;;
 text|csv|json|markdown|charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, json, markdown, or charts)" ;;
 esac
@@ -500,8 +502,9 @@ aggregate() {
 		if ((metric, key) in ov) {
 			return "overflow\toverflow\toverflow"
 		}
+		# No valid sample: N/A, never a synthetic 0 that reads as a measurement.
 		if (!((metric, key) in nv) || nv[metric, key] == 0) {
-			return "0\t0\t0"
+			return "N/A\tN/A\tN/A"
 		}
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
@@ -561,8 +564,9 @@ aggregate() {
 			nv_count = (k in n_valid) ? n_valid[k] : 0
 			rr = (k in restarts) ? restarts[k] : 0
 			uu = (k in unknowns) ? unknowns[k] : 0
-			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "0"
-			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
+			# No proxy sampled (failed cell, or --config-dump-samples 0): N/A, not 0.
+			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "N/A"
+			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "N/A"
 			# P1-6: SINGLE-BUCKET-PINNED detection. Now that the histogram p99
 			# INTERPOLATES within the matched bucket (P0/FINDING#5), the old
 			# max==100 floor test is stale: an interpolated value lands at e.g. 73ms,
@@ -698,7 +702,7 @@ so a restart-poisoned row is excluded from every numeric aggregate (`n_valid` mi
 | `reps` (replicas) | pods/service | sweep axis | Pods per service (drives endpoint/EDS count). |
 | `ns` (namespace_count) | namespaces | sweep axis | Namespaces holding the services. |
 | `scoping` (sidecar_scoping) | enum | sweep axis | `Sidecar` CR mode: `none` / `namespace` / `explicit`. |
-| `n_total` | rows | internal | All rows for the cell, including restart-poisoned/`unknown` and degraded (`SETUP_FAILED`/`PROBE_FAILED`/`ZERO_PODS`) rows. |
+| `n_total` | rows | internal | All rows for the cell, including restart-poisoned/`unknown` and degraded (`SETUP_FAILED`/`PROBE_FAILED`, or a context with zero istiod pods) rows. |
 | `n_valid` | rows | internal | Rows with `istiod_restarted==0` used in numeric aggregation; `n_valid < n_total` means some rows were dropped as poisoned. |
 | `cpu_avg (m)` | millicores (per replica) | `process_cpu_seconds_total` delta ÷ window × 1000 | istiod CPU over the scrape window; `overflow` if it exceeds the histogram top bucket; `N/A` on restart/missing baseline. |
 | `mem_avg (Mi)` | MiB (per replica) | `process_resident_memory_bytes` (istiod `/metrics`) | Peak RSS of (baseline, 5 s polled samples, final scrape) over the window. |
@@ -706,7 +710,7 @@ so a restart-poisoned row is excluded from every numeric aggregate (`n_valid` mi
 | `heap_inuse (Mi)` | MiB | `go_memstats_heap_inuse_bytes` | Go heap in use — point-in-time at final scrape; steady-state signal independent of RSS (which stays inflated after GC via `MADV_FREE`). |
 | `conv_p99 (ms)` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence reported as a **bucket range** (e.g. `100-500`), not an exact value — istiod buckets are 100/500/1000/3000/5000/10000/20000/30000 ms. `†` = SINGLE-BUCKET-PINNED (all delta mass in the 0-100 ms bucket; a uniform-within-bucket assumption, unresolved below 100 ms). |
 | `queue_p99 (ms)` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 time pushes waited in istiod's queue; same bucket-range / `†` semantics as `conv_p99`. |
-| `proxies` (connected_proxies) | proxies | `pilot_xds` gauge (final scrape) | Connected proxy count; gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
+| `proxies` (connected_proxies) | proxies | `pilot_xds` gauge summed over its series (final scrape) | Connected proxy count; gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
 | `cfg_dump_avg (MB)` | MB | `pilot-agent request /config_dump?include_eds` → `wc -c` | Real per-proxy config-dump size (EDS included by design — the cost `Sidecar` scoping reduces); proxy-side, so ingested regardless of istiod restart state. |
 | `restarts` | rows | `istiod_restarted==1` | Rows where `process_start_time_seconds` moved forward between baseline and final scrape; counters/histograms for those samples may under-report. |
 | `unk_restarts` | rows | `istiod_restarted==unknown` | Rows where restart state was undetectable (a pinned pod disappeared / missing `process_start_time_seconds`). |
@@ -842,9 +846,11 @@ EFFECT_HDR
 		base = $1 "|" $2 "|" $3 "|" $4
 		scope = $5
 		cfg = $25 + 0
+		if (!(base in base_seen)) { bases[++nb] = base; base_seen[base] = 1 }
+		# No config-dump sample (0) is missing data, not a 100% reduction.
+		if (cfg <= 0) next
 		val[base, scope] = cfg
 		has[base, scope] = 1
-		if (!(base in base_seen)) { bases[++nb] = base; base_seen[base] = 1 }
 	}
 	END {
 		if (nb == 0) exit
@@ -895,7 +901,7 @@ report_json() {
 		-v ach_psched="$(as_get pods_sched)" -v ach_palloc="$(as_get pods_alloc)" \
 		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && metrics_note_text)" '
 	function cell(v) {
-		if (v == "overflow") return "null"
+		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
 	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, sla_v, sla_h, metrics_note }
@@ -936,27 +942,65 @@ report_charts() {
 	echo ""
 	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
 	# Chart 2: Per-proxy config dump size (MB) by scoping at largest mesh size.
-	awk -F'\t' '
+	# Both chart ONE service/replica/namespace workload, so a point never mixes cells
+	# from different workload sizes. Only cells with valid CPU data count: the largest
+	# combo is the one most likely to fail (SETUP_FAILED/PROBE_FAILED), and picking it
+	# blindly would chart nothing. Pick the largest workload (most pods = svc x rep,
+	# then namespaces) with valid data at >= 2 mesh sizes; else the largest valid one.
+	local max_svc max_rep max_ns pick_note
+	read -r max_svc max_rep max_ns pick_note < <(awk -F'\t' '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	function bigger(a, b,    x, y) {  # is tuple a larger than tuple b?
+		if (b == "") return 1
+		split(a, x, "|"); split(b, y, "|")
+		if (x[1] * x[2] != y[1] * y[2]) return x[1] * x[2] > y[1] * y[2]
+		if (x[1] + 0 != y[1] + 0) return x[1] + 0 > y[1] + 0
+		return x[3] + 0 > y[3] + 0
+	}
+	NR > 1 && $7 + 0 > 0 && is_num($24) {
+		t = ($2 + 0) "|" ($3 + 0) "|" ($4 + 0)
+		if (!((t, $1 + 0) in seen)) { seen[t, $1 + 0] = 1; n_ms[t]++ }
+	}
+	END {
+		best = ""; best2 = ""
+		for (t in n_ms) {
+			if (bigger(t, best)) best = t
+			if (n_ms[t] >= 2 && bigger(t, best2)) best2 = t
+		}
+		if (best2 != "") { split(best2, p, "|"); note = "largest with valid data at 2+ mesh sizes" }
+		else if (best != "") { split(best, p, "|"); note = "largest with valid data" }
+		else { print "0 0 0 none"; exit }
+		print p[1], p[2], p[3], note
+	}' <<<"$aggregated")
+	if [[ "$pick_note" == "none" ]]; then
+		echo "> No cell has valid samples — nothing to chart."
+		return 0
+	fi
+	echo "> Workload charted: ${max_svc} services x ${max_rep} replicas in ${max_ns} namespace(s) per cluster (${pick_note})."
+	echo ""
+	awk -F'\t' -v max_svc="$max_svc" -v max_rep="$max_rep" -v max_ns="$max_ns" '
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	NR == 1 { next }
+	$2+0 != max_svc || $3+0 != max_rep || $4+0 != max_ns { next }
 	{
 		ms = $1 + 0; scoping = $5; n_valid = $7 + 0
-		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
-		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
 		# PL13/PL15 + PL8 gate (mirrors the markdown/json n_valid + overflow handling):
 		# a cell with no valid samples (every row restart-poisoned/unknown so n_valid==0,
-		# where the aggregate emit3 returned a synthetic zero) or whose charted column
-		# carries the overflow sentinel (cpu_delta_avg $24 / cfg_dump_avg $25) is ABSENT,
-		# not a real 0 data point. Coercing it (awk $24 + 0) would plot a poisoned/overflow
-		# cell as the LOWEST CPU point, the inverse of reality. Count it as dropped and
-		# leave has[] unset so it is never charted as 0.
+		# where the aggregate emit3 returns N/A) or whose cpu_delta_avg ($24) is
+		# overflow/N/A is ABSENT, not a real 0 data point. Coercing it (awk $24 + 0) would
+		# plot a poisoned/overflow cell as the LOWEST CPU point, the inverse of reality.
+		# Count it as dropped and leave has[] unset so it is never charted as 0.
+		# Config dump ($25) is gated separately: it is N/A whenever no proxy was sampled
+		# (--config-dump-samples 0), which must not drop the cell from the CPU chart.
 		cells_total++
-		if (n_valid <= 0 || $24 == "overflow" || $25 == "overflow" || !is_num($24) || !is_num($25)) {
+		if (n_valid <= 0 || !is_num($24)) {
 			cells_dropped++
 			next
 		}
+		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
+		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
 		cpu_val[ms, scoping] = $24 + 0
-		cfg_val[ms, scoping] = $25 + 0
+		if (is_num($25)) cfg_val[ms, scoping] = $25 + 0
 		has[ms, scoping] = 1
 	}
 	END {
@@ -982,10 +1026,7 @@ report_charts() {
 		}
 
 		# Chart 1: istiod CPU vs mesh size by scoping
-		printf "%% Chart 1: istiod CPU (m, per replica) vs mesh size, by sidecar scoping\n"
-		printf "%% Series order:"
-		for (s = 1; s <= n_sc; s++) printf " %s", sc_order[s]
-		printf "\n\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"istiod CPU vs Mesh Size by Sidecar Scoping\"\n"
 		printf "    x-axis \"Mesh Size\" ["
@@ -1019,8 +1060,7 @@ report_charts() {
 			printf "> No config dump data available for bar chart.\n"
 			exit
 		}
-		printf "%% Chart 2: Per-proxy config dump size (MB) by scoping at mesh size %s\n", max_ms
-		printf "\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"Config Dump Size by Scoping (mesh size %s)\"\n", max_ms
 		printf "    x-axis \"Sidecar Scoping\" ["

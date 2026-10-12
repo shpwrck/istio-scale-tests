@@ -6,12 +6,11 @@
 #   ./tests/dataplane/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
 #
 # Examples:
-#   # Sweep 1, 2, 3 clusters:
-#   ./tests/dataplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
+#   # Sweep 1 and 2 clusters:
+#   ./tests/dataplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 # ci-dry-run:
 set -euo pipefail
-# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-combo
-# probe/cleanup failures are caught explicitly below and degraded to warn+continue.
+# Loud ERR trap for unexpected aborts; per-combo failures are handled below.
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -20,7 +19,7 @@ source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # B6: harness_sha for the placeholder TSV preamble
+source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -28,6 +27,7 @@ QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
 DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
+WARMUP_DURATION="${DATAPLANE_WARMUP_DURATION_SEC:-5}"
 MAX_MATRIX="${DATAPLANE_MAX_MATRIX:-64}"
 INTER_COMBO_SETTLE="${DATAPLANE_INTER_COMBO_SETTLE_SEC:-15}"
 REPETITIONS="${DATAPLANE_REPETITIONS:-1}"
@@ -46,6 +46,8 @@ Usage: $(basename "$0") [options]
   --duration SEC       Duration per QPS level (default: $DURATION).
   --connections N      Concurrent connections (default: $CONNECTIONS).
   --settle SEC         Seconds to sleep before probing (default: $SETTLE_SEC).
+  --warmup-duration SEC
+                       Envoy warmup per probe, 0 to disable (default: $WARMUP_DURATION).
   --output-dir DIR     Base results directory (default: tests/dataplane/results).
                        A per-sweep subdir sweep-\${RUN_ID}/ is created here.
   --repetitions N      Probe repetitions per mesh size (default: $REPETITIONS).
@@ -55,8 +57,8 @@ Usage: $(basename "$0") [options]
 
 Environment:
   SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
-  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_MAX_MATRIX,
-  DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS.
+  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
+  DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS.
 EOF
 }
 
@@ -96,6 +98,12 @@ while [[ $# -gt 0 ]]; do
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
 		[[ "$2" =~ ^[0-9]+$ ]] || die "--settle must be a non-negative integer"
 		SETTLE_SEC="$2"
+		shift 2
+		;;
+	--warmup-duration)
+		[[ -n "${2:-}" ]] || die "--warmup-duration requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--warmup-duration must be a non-negative integer"
+		WARMUP_DURATION="$2"
 		shift 2
 		;;
 	--output-dir)
@@ -164,11 +172,8 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 HARNESS_SHA="$(harness_sha)"
 
-# Tuning-baseline provenance (PL2/PL26): query the LIVE deployed tuning levers +
-# sidecar egress graph ONCE, against the source context (CONTEXTS[0]) — they are a
-# sweep-wide scalar (the mesh's tuning is identical regardless of how many clusters a
-# combo measures). Both 002's real preamble and the placeholder writer below emit the
-# same two keys (PL36 contract). Skipped in --dry-run (cluster read); stays "unknown".
+# Live tuning-baseline provenance, queried once on the source context and passed
+# to 002 and the placeholder writer. Skipped in --dry-run (stays "unknown").
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 if ((! DRY_RUN)); then
@@ -190,13 +195,9 @@ if ((! DRY_RUN)); then
 	fi
 fi
 
-# B6: emit a minimal placeholder TSV for a mesh size whose setup/probe crashed before
-# the probe wrote any row. Without it the mesh size vanishes from the report (looks
-# like never-planned). 004-report-results.sh globs latency-*.tsv and counts
-# count_total per (mesh, qps, target_class) for NF>=17 rows, admitting only
-# status==OK && restart==0 to count_valid (PL15). The probe sweeps qps INTERNALLY, so
-# one placeholder row (qps=0, class=na) makes the MESH SIZE visible. Sorts AFTER the
-# real latency-<RUN_ID> files.
+# Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
+# so the size still shows in the report (one qps=0, class=na row; counted in
+# n_total, excluded from n_valid).
 # Usage: emit_dataplane_placeholder <status> <mesh_size> <source_ctx>
 emit_dataplane_placeholder() {
 	local status="$1" ms="$2" sctx="$3"
@@ -206,15 +207,12 @@ emit_dataplane_placeholder() {
 		echo "# Data-plane latency test (placeholder — mesh size failed before any row)"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
-		# PL36: match 002's preamble key set so the placeholder file (which 004 may read
-		# as TSV_FILES[0]) carries the same tuning-baseline provenance.
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
-		# One degraded row: mesh in $2, qps_target=0, status sentinel in $14,
-		# restarted=unknown in $16, target_class=na in $17; numerics N/A (PL13).
+		# One degraded row: qps_target=0, status sentinel, restarted=unknown, class=na.
 		printf '%s\t%s\t%s\tN/A\t0\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\t%s\tN/A\tunknown\tna\n' \
 			"$RUN_ID" "$ms" "$sctx" "$CONNECTIONS" "$DURATION" "$status"
 	} > "$f"
@@ -228,7 +226,7 @@ echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "QPS levels: $QPS_LEVELS"
 echo "Repetitions: ${REPETITIONS}"
 echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
-echo "Settle: ${SETTLE_SEC}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
+echo "Settle: ${SETTLE_SEC}s | Warmup: ${WARMUP_DURATION}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
 echo ""
 
@@ -257,12 +255,26 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "  Source: $source_ctx  Remotes: ${remote_ctxs[*]:-none}"
 	echo "=========================================="
 
+	probe_args=(
+		--source-context "$source_ctx"
+		--mesh-size "$ms"
+		--qps-levels "$QPS_LEVELS"
+		--duration "$DURATION"
+		--connections "$CONNECTIONS"
+		--settle "$SETTLE_SEC"
+		--warmup-duration "$WARMUP_DURATION"
+		--output-dir "$OUTPUT_DIR"
+		--tuning-baseline "$TUNING_BASELINE"
+		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+	)
+	[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
+
 	if ((DRY_RUN)); then
 		{
 			echo "  mesh_size=$ms source=$source_ctx remotes=${remote_csv:-none} reps=${REPETITIONS}"
 			echo "    001-setup-dataplane-test.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv}"
 			for ((rep = 1; rep <= REPETITIONS; rep++)); do
-				echo "    [rep $rep/$REPETITIONS] 002-run-latency-probe.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv} --mesh-size $ms --settle $SETTLE_SEC --output-dir $OUTPUT_DIR"
+				echo "    [rep $rep/$REPETITIONS] 002-run-latency-probe.sh ${probe_args[*]}"
 			done
 			echo "    005-cleanup.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
 		} >&2
@@ -272,9 +284,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "--- Setting up ---"
 	setup_args=(--source-context "$source_ctx")
 	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
-	# B1/B6: setup is a probable per-combo failure at scale; bare under set -e it would
-	# abort the whole sweep. On failure record a placeholder row (so this mesh size is
-	# visible in the report), clean up, and continue to the next mesh size.
+	# A setup failure records a placeholder, cleans up and moves to the next size.
 	if ! "$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"; then
 		echo "warn: setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2
 		emit_dataplane_placeholder SETUP_FAILED "$ms" "$source_ctx"
@@ -288,40 +298,21 @@ for ms in "${MESH_SIZES[@]}"; do
 	dp_probe_failed=0
 	for ((rep = 1; rep <= REPETITIONS; rep++)); do
 		echo "--- Running latency probe (mesh_size=$ms, rep $rep/$REPETITIONS) ---"
-		probe_args=(
-			--source-context "$source_ctx"
-			--mesh-size "$ms"
-			--qps-levels "$QPS_LEVELS"
-			--duration "$DURATION"
-			--connections "$CONNECTIONS"
-			--settle "$SETTLE_SEC"
-			--output-dir "$OUTPUT_DIR"
-			--tuning-baseline "$TUNING_BASELINE"
-			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
-		)
-		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
-		# P0/B6: a probe failure must NOT abort the multi-hour sweep. The latency probe
-		# writes its own rows into $OUTPUT_DIR (self-tagging non-OK status). If a rep
-		# crashes before writing any row, the mesh size could vanish from the report;
-		# we record (once per mesh size, after the rep loop) a placeholder so it stays
-		# visible. Log-and-continue per rep.
+		# A probe failure is logged; one placeholder per mesh size is added below.
 		if ! "$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"; then
 			echo "warn: latency probe failed for mesh_size=$ms rep=$rep/$REPETITIONS; continuing to next rep/combo" >&2
 			dp_probe_failed=1
 		fi
 		echo ""
 	done
-	# B6: one placeholder per mesh size if any rep failed — keeps the size visible even
-	# if every rep crashed before writing a row (n_total++, excluded from n_valid).
 	if (( dp_probe_failed )); then
 		emit_dataplane_placeholder PROBE_FAILED "$ms" "$source_ctx"
 	fi
 
 	echo "--- Cleaning up ---"
-	# P0/PL23: a cleanup hiccup must not abort the sweep — the next combo's setup also
-	# cleans the namespace. Warn and continue.
+	# A cleanup failure only warns; check for a leftover namespace before the next run.
 	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
-		echo "warn: cleanup reported failure for mesh_size=$ms; next combo's setup will re-clean" >&2
+		echo "warn: cleanup reported failure for mesh_size=$ms; a leftover ${DATAPLANE_TEST_NAMESPACE:-dataplane-test} namespace may remain" >&2
 
 	if ((INTER_COMBO_SETTLE > 0)); then
 		echo "Inter-combo settle: ${INTER_COMBO_SETTLE}s..."

@@ -1,0 +1,27 @@
+{{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "hub-cert-manager-operator") }}
+# cert-manager operator (OLM) on the hub.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-cert-manager-operator
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: cert-manager-operator
+spec:
+  project: default
+  source:
+    repoURL: {{ include "gitops-hub-apps.repoURL" . }}
+    targetRevision: {{ include "gitops-hub-apps.revision" . }}
+    path: charts/cert-manager-operator
+    helm:
+      releaseName: cert-manager-operator-olm
+      {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "hub-cert-manager-operator") }}{{ . | nindent 6 }}{{- end }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager-operator
+  syncPolicy:
+    {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
+{{- end }}

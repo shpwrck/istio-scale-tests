@@ -1,33 +1,61 @@
 # Agent operator brief — driving the scale-test campaign
 
-Paste-able brief for a coding session (e.g. Claude Code) to run the campaign autonomously. Follow [`README.md`](README.md) for the 5-stage procedure; this file adds the **operational discipline** that makes an unattended multi-hour run safe. It was distilled from real runs where single-probe failures silently killed multi-hour sweeps.
+Paste-able brief for a coding session that runs the campaign unattended. Follow the stages in
+[`README.md`](README.md); this file adds the discipline that keeps a multi-hour run safe.
 
 ## Your job
-Drive the campaign end-to-end: verify mesh → preflight → dry-run all → run the five suites **serially** (propagation, churn, controlplane, dataplane, churn-dataplane) at the configured `--mesh-sizes` list → collect. Keep a `CAMPAIGN_STATUS.md` progress file at the repo root, updated after every step.
 
-For a 500-spoke bed, read the target profile in [`README.md`](README.md#500-spoke-target-profile-ocp-421--acm-216--gitops-120) first. Assume the spokes are pre-existing, already imported into ACM, already available as kubeconfig contexts, able to expose/reach east-west gateway traffic across all selected spokes, backed by credentials valid or refreshable for the full multi-hour run, and running istiod with HPA disabled at a fixed replica count; do not turn the campaign into cluster provisioning, import, network plumbing, credential-refresh, or control-plane autoscaling work. Keep the hub outside the mesh as ACM/GitOps control infrastructure only; `mesh_member_count` and `CONTEXTS` refer to spokes only. The `istio-mesh-member=true` label should select exactly the same 500 spokes named in `CONTEXTS`. The profile accepts OpenShift GitOps dynamic shard scaling as a Technology Preview dependency for this test bed. No-cluster dry-runs do not prove hub capacity, Placement pagination, PushSecret fan-out, gateway reachability, or istiod ingestion; close those through the live preflight and staged functional gates. If hub node sizes are unknown, collect aggregate allocatable CPU/memory from the live hub before applying all 500 mesh members; do not assume a 3-node hub can absorb the documented GitOps request envelope. The intended end state is all 500 spokes in the mesh, but every staged membership increase is a functional gate: if wiring, sampled `clusterz`, or `mesh-verify` breaks, stop at the last known-good member count and investigate before expanding further. Use the documented milestone mesh sizes (`1,10,50,100,250,500`) and current suite workload defaults as the default 500-spoke campaign; run the full `1..500` sweep or larger workload knobs only as explicit follow-ups if dense curve data or higher load is required.
+Drive the campaign end to end: verify mesh → preflight → dry-run all → run the five suites
+**one at a time** (propagation, churn, controlplane, dataplane, churn-dataplane) over the
+configured `--mesh-sizes` → collect → clean up. Keep a local progress file `CAMPAIGN_STATUS.md`
+at the repo root, updated after every step; do not commit it.
+
+For a 500-spoke bed, follow [`500-spoke-profile.md`](500-spoke-profile.md): keep the hub out of
+`CONTEXTS` and treat each membership step as a gate. Do not turn the campaign into cluster
+provisioning, import, networking or credential work.
 
 ## Non-negotiable discipline
-1. **Serial only.** Never run two suites (or two probes) concurrently — they measure the same istiod; concurrency contaminates the data. One sweep at a time.
-2. **Monitor for BOTH crash and stall.** A sweep failure is often *not* a crash — a hung `kubectl port-forward` shows as **the process still alive but the log not growing**. For every long sweep, watch:
-   - **Crash:** launch the sweep so its exit is reliably observed — either a harness-tracked background task, or track the PID and poll `kill -0 "$PID"`.
-   - **Stall:** if the log hasn't grown for longer than the suite's longest *legitimate* quiet stretch (setup deploy-waits up to ~300s + namespace cleanup up to ~180s → use a **≥600–1200s** threshold), flag it. A true hang is permanent; a generous threshold avoids false positives.
-   - **Pitfall:** do **not** detect liveness with a `pgrep -f '<pattern>'` whose pattern appears in the monitor's *own* command line — it self-matches and never fires. Track by **PID** (`kill -0`).
-3. **Record-and-continue at the suite level.** If a suite errors after you've tried to recover it, run its `00X-cleanup.sh`, mark it FAILED in `CAMPAIGN_STATUS.md` (with a **redacted** error — no cluster names/hosts/tokens), and continue to the next suite. One suite failing must not abort the campaign.
-4. **Breaking error → investigate, then fix, then retry.** Do not blind-retry. Find the root cause with concrete evidence (read the log tail, check pod scheduling/events, test the failing shell construct in isolation). Two real examples: a bare command returning non-zero by-design under `set -e` (fix: `|| true` where the next line already handles it), and a `curl` readiness probe with no `--max-time` hanging on a stuck port-forward (fix: `--max-time` + restart the PF). Re-run only the remaining `--mesh-sizes` after fixing.
-5. **Validate data sanity, not just exit status.** "status=OK" only means the probe finished. Spot-check that the numbers are physically sensible (e.g. local latency < remote latency; a metric is flat/rising as expected; aggregated gauges sum/peak correctly across the pinned istiod replicas) before trusting a suite's output.
-6. **Verify between suites.** Confirm the prior suite's `*-test` namespaces are gone on all spokes and istiod is healthy (clusterz synced) before launching the next.
-7. **Don't sit idle without a live detector.** If nothing is watching, a silent stall goes unnoticed. Keep a monitor armed whenever a sweep is running.
-8. **Redaction.** Never write real cluster/context names, API hostnames, or kubeconfig/token contents into commits, PRs, issues, or this repo (`AGENTS.md` rule 1). Use placeholders.
 
-## Non-blocking observations
-When you notice an issue that isn't breaking (a noisy metric, a suboptimal default, a fidelity caveat), **log it to `CAMPAIGN_STATUS.md`** and — if it warrants a fix — spawn a **subagent to investigate and draft a proposal** rather than fixing inline mid-campaign. Route harness code changes through `/scale-test-review` (see `docs/scale-test-team/`).
+1. **One suite at a time.** Never run two suites or probes concurrently; they measure the same istiod.
+2. **Watch for both crash and stall.** A hung `kubectl port-forward` shows as a live process
+   whose log stops growing.
+   - **Crash:** launch so the exit is observed — a harness-tracked background task, or poll `kill -0 "$PID"`.
+   - **Stall:** flag a sweep whose log has not grown for **≥1200s**. Legitimate quiet stretches
+     add up: namespace cleanup up to the suite's `*_NS_DELETE_TIMEOUT_SEC` (240–300s by default),
+     the same again while setup waits out a Terminating namespace, then deploy waits.
+   - Do **not** detect liveness with `pgrep -f '<pattern>'` when the pattern is in the monitor's
+     own command line; it matches itself. Track the PID.
+3. **Record and continue at the suite level.** Failed probes are recorded as `PROBE_FAILED` rows
+   and the sweep continues. If a whole suite fails after one recovery attempt, run its cleanup,
+   mark it FAILED in `CAMPAIGN_STATUS.md` with a redacted error, and move to the next suite.
+4. **Investigate a breaking error before retrying.** Find the cause with evidence (log tail, pod
+   events, the failing construct in isolation). Then re-run only the remaining `--mesh-sizes`
+   (controlplane: `--resume <sweep-dir>`).
+5. **Check the numbers, not just the exit code.** `status=OK` only means the probe finished.
+   Spot-check that values make sense (local latency < remote latency; expected trends; gauges
+   aggregate correctly across the pinned istiod replicas).
+6. **Verify between suites.** The previous suite's `*-test` namespaces are gone and istiod is
+   healthy (`clusterz` synced) before the next launch.
+7. **Always have a monitor armed** while a sweep runs.
+8. **Redact.** No real cluster/context names, API hostnames, kubeconfig or token contents in
+   commits, PRs, issues or this repo. Use placeholders.
+
+## Non-blocking issues
+
+Log noisy metrics, odd defaults or fidelity caveats in `CAMPAIGN_STATUS.md`. If one needs a fix,
+have a subagent draft a proposal instead of changing the harness mid-campaign; harness changes
+go through `/scale-test-review` ([`docs/scale-test-team/`](../scale-test-team/)).
 
 ## Commands
-Use the exact Stage-2 (dry-run), Stage-3 (live), and **Stage-5 (teardown)** commands from [`README.md`](README.md), with `CONTEXTS`/`MESH` set for your environment. Dry-run all five first; confirm matrices; then run serially.
 
-## Teardown (always — Stage 5)
-The campaign isn't done until the test workloads are gone. Run **every** suite's `00X-cleanup.sh` (idempotent), then **poll until the `*-test` namespaces finish terminating** (deletion is async; sidecar-injected pods take up to ~a minute to drain) and verify none remain on any spoke. Do this on normal completion **and** whenever a suite dies mid-run before re-running it (a dead suite leaves its namespace `Active`). Cleanup removes only the test workloads — never the mesh.
+Use the Stage 2 (dry-run), Stage 3 (live) and Stage 5 (cleanup) commands from
+[`README.md`](README.md) with `CONTEXTS`/`MESH` set for your environment.
 
 ## Definition of done
-All five suites COMPLETED (or clearly-marked FAILED with cause) in `CAMPAIGN_STATUS.md`; each suite's `results/sweep-<RUN_ID>/` has a markdown summary with non-empty rows per mesh size; **the teardown ran and you verified zero `*-test` namespaces remain (post async termination) on every spoke**; the mesh still healthy (istiod ready, clusterz synced). Then post a final summary: headline metric per suite + which metrics are usable vs. failed/untrustworthy, + any observations logged for follow-up.
+
+- All five suites COMPLETED, or FAILED with a stated cause, in `CAMPAIGN_STATUS.md`.
+- Each suite's `results/sweep-<RUN_ID>/` has a markdown summary with rows per mesh size.
+- Cleanup ran, and after async termination no `*-test` namespace remains on any spoke.
+- The mesh is still healthy (istiod ready, `clusterz` synced).
+- A final summary: headline metric per suite and which metrics are usable or untrustworthy,
+  plus any logged follow-ups.

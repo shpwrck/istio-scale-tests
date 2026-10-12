@@ -1,2 +1,34 @@
-# Default namespace for Argo CD Application CRs you add under templates/ (optional).
+# Namespace of the Argo CD instance; the child Applications are created here.
 gitopsNamespace: openshift-gitops
+
+# Git repo and revision every child Application (and the ApplicationSets they
+# render) syncs from. Set by the root Application (charts/gitops-hub-app-of-apps).
+repo:
+  url: ""
+  revision: main
+
+# One entry per child Application. enabled: false skips it (e.g. the operator is
+# already installed); values: becomes the Application's helm.valuesObject.
+apps:
+  hub-cert-manager-operator:
+    enabled: true
+  spoke-istio-namespaces-appset:
+    enabled: true
+  hub-mesh-ca:
+    enabled: true
+  spoke-ossm-operator-appset:
+    enabled: true
+  hub-external-secrets-operator-appset:
+    enabled: true
+  hub-mesh-ca-intermediate-appset:
+    enabled: true
+  hub-kubeconfig-from-argosecret-appset:
+    enabled: true
+  hub-mesh-push-secrets-appset:
+    enabled: true
+  spoke-ossm-appset:
+    enabled: true
+  spoke-ingress-gateway-appset:
+    enabled: true
+  spoke-east-west-gateway-appset:
+    enabled: true

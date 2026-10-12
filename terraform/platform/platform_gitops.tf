@@ -5,7 +5,7 @@
 # --- GitOps operator (OLM Subscription) ---
 
 resource "kubernetes_manifest" "gitops_subscription" {
-  count    = local.gitops_enabled ? 1 : 0
+  count    = local.gitops_enabled && var.gitops_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -39,7 +39,7 @@ resource "kubernetes_manifest" "gitops_subscription" {
 }
 
 resource "terraform_data" "gitops_csv_cleanup" {
-  count = local.gitops_enabled ? 1 : 0
+  count = local.gitops_enabled && var.gitops_install_operator ? 1 : 0
 
   input = {
     token_script    = local.token_script
@@ -73,42 +73,20 @@ resource "terraform_data" "gitops_csv_cleanup" {
 resource "time_sleep" "wait_gitops_operator" {
   count = local.gitops_enabled ? 1 : 0
 
-  depends_on      = [kubernetes_manifest.gitops_subscription]
-  create_duration = "60s"
+  # Through the cleanup hook, so on destroy the CSV cleanup runs only after the
+  # ArgoCD CR (whose finalizer the operator handles) and all apps are gone.
+  depends_on      = [terraform_data.gitops_csv_cleanup]
+  create_duration = var.gitops_install_operator ? "60s" : "0s"
 }
 
 resource "time_sleep" "wait_argocd_stabilized" {
   count = local.gitops_enabled ? 1 : 0
 
   depends_on      = [time_sleep.wait_gitops_operator]
-  create_duration = "300s"
+  create_duration = var.gitops_install_operator ? "300s" : "0s"
 }
 
 # --- ArgoCD configuration (resource limits + ApplicationSet) ---
-
-resource "terraform_data" "adopt_argocd_for_helm" {
-  count = local.gitops_enabled ? 1 : 0
-
-  provisioner "local-exec" {
-    command = <<-EOT
-      if [[ -n "${local.kubeconfig}" ]]; then
-        KC="kubectl --kubeconfig=${local.kubeconfig} --context=${local.hub_cluster_key}"
-      else
-        TOKEN=$("${local.token_script}" "${local.hub_api_url}" "cluster-admin" "${local.hub_admin_pass}" | jq -r '.status.token')
-        KC="kubectl --server=${local.hub_api_url} --token=$TOKEN --insecure-skip-tls-verify"
-      fi
-      $KC annotate argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
-        meta.helm.sh/release-name=argocd-config \
-        meta.helm.sh/release-namespace="${var.gitops_namespace}" \
-        --overwrite 2>/dev/null || true
-      $KC label argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
-        app.kubernetes.io/managed-by=Helm \
-        --overwrite 2>/dev/null || true
-    EOT
-  }
-
-  depends_on = [time_sleep.wait_argocd_stabilized]
-}
 
 resource "helm_release" "argocd_config" {
   count    = local.gitops_enabled ? 1 : 0
@@ -121,6 +99,8 @@ resource "helm_release" "argocd_config" {
   take_ownership   = true
   wait             = true
   timeout          = 300
+
+  values = [yamlencode(var.argocd_config_values), yamlencode({ chartChecksum = local.chart_checksum["argocd-config"] })]
 
   set = concat(
     [
@@ -169,7 +149,7 @@ resource "helm_release" "argocd_config" {
     }],
   )
 
-  depends_on = [terraform_data.adopt_argocd_for_helm]
+  depends_on = [time_sleep.wait_argocd_stabilized]
 }
 
 # --- RHACM ApplicationSet-in-any-namespace RBAC ---
@@ -287,6 +267,8 @@ resource "helm_release" "acm_gitops_resources" {
   wait             = true
   timeout          = 300
 
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-openshift-gitops-resources"] })]
+
   set = [
     {
       name  = "gitopsNamespace"
@@ -367,22 +349,14 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   wait             = true
   timeout          = 300
 
-  set = [
-    {
-      name  = "gitopsNamespace"
-      value = var.gitops_namespace
-    },
-    {
-      name  = "repo.url"
-      value = var.gitops_app_repo_url
-      type  = "string"
-    },
-    {
-      name  = "repo.revision"
-      value = var.gitops_app_repo_revision
-      type  = "string"
-    },
-  ]
+  values = [yamlencode({
+    gitopsNamespace = var.gitops_namespace
+    repo = {
+      url      = var.gitops_app_repo_url
+      revision = var.gitops_app_repo_revision
+    }
+    apps = var.gitops_app_overrides
+  }), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
 
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }
@@ -410,7 +384,7 @@ resource "helm_release" "mesh_wiring_verify_appset" {
   wait             = true
   timeout          = 300
 
-  values = [file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml")]
+  values = [file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml"), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-ocm-placement-appset"] })]
 
   set = [
     {

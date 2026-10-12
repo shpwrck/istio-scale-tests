@@ -1,5 +1,5 @@
 apiVersion: v2
 name: gitops-hub-app-of-apps
-description: Argo CD Applications for hub GitOps — root app-of-apps (directory sync of child Applications).
+description: Root Argo CD Application (hub-gitops-root) that renders charts/gitops-hub-apps.
 type: application
-version: 0.2.0
+version: 0.3.0

@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Aggregate one or more churn-dataplane TSV files into summary reports.
 #
-# - Filters rows with status != OK (POISONED_RESTART, CLEANUP_TIMEOUT, etc.)
-#   and rows with istiod_restarted in {1, unknown} (PL9, PL15).
-# - Reports both n_total and n_valid per combination (PL15).
-# - Δp99_ms aggregate is computed only over valid baseline/churn pairs that
-#   share a combo_id (PL15, PL20).
-# - All preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION, KUBE_VERSIONS,
-#   ISTIOD_REPLICAS, SETTLE_SEC, BASELINE_DURATION_SEC, CHURN_DURATION_SEC, QPS,
-#   CONNECTIONS, NAMESPACE) is propagated to all four output formats (PL19).
+# - Drops rows with status != OK or istiod_restarted in {1, unknown}.
+# - Reports n_total and n_valid per combination.
+# - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
+#   within one TSV file.
+# - Every output format carries the TSV preamble metadata.
 #
 # Usage:
-#   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR]
+#   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--format FMT]
+# ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -20,17 +18,16 @@ source "${ROOT}/tests/lib/common.sh"
 
 RESULTS_DIR="${ROOT}/tests/churn-dataplane/results"
 FORMAT="text"
+DRY_RUN=0
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Directory containing coexec-*.tsv files. Searched recursively,
-                     including \`sweep-*\` subdirs. Default: \`tests/churn-dataplane/results\`
-                     relative to the repo root (resolved at script start via
-                     \$(cd "\$(dirname "\$0")/../.." && pwd)).
-  --format FMT       Output format: text | csv | json | md | charts (default: text). PL19: all
-                     formats propagate the preamble metadata.
+  --results-dir DIR  Directory searched recursively for churn-dataplane-*.tsv
+                     (default: tests/churn-dataplane/results).
+  --format FMT       Output format: text | csv | json | md (or markdown) | charts (default: text).
+  --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
 EOF
 }
@@ -43,6 +40,8 @@ while [[ $# -gt 0 ]]; do
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
 		FORMAT="$2"; shift 2 ;;
+	--dry-run)
+		DRY_RUN=1; shift ;;
 	-h | --help)
 		usage; exit 0 ;;
 	*)
@@ -50,11 +49,23 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+case "$FORMAT" in
+text | csv | json | md | markdown | charts) ;;
+*) die "unknown format: $FORMAT (use text|csv|json|md|charts)" ;;
+esac
+
+if ((DRY_RUN)); then
+	n=0
+	[[ -d "$RESULTS_DIR" ]] && n=$(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | wc -l)
+	echo "[dry-run] would summarize $((n)) churn-dataplane-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
+	exit 0
+fi
+
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
 # Recurse into sweep-* subdirs as well.
 TSV_FILES=()
-while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find "$RESULTS_DIR" \( -name 'churn-dataplane-*.tsv' -o -name 'coexec-*.tsv' \) -type f 2>/dev/null | sort)
+while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f 2>/dev/null | sort)
 ((${#TSV_FILES[@]})) || die "no churn-dataplane-*.tsv files in $RESULTS_DIR"
 
 # Extract preamble metadata from the FIRST file (sweeps emit one preamble per file).
@@ -88,8 +99,7 @@ RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
 KUBE_VERSIONS_STR="$(extract_preamble_kv KUBE_VERSIONS)"
-# Live-queried tuning-baseline provenance (PL2/PL19): the deployed levers + sidecar
-# egress graph that were live when the sweep ran. NOT reconstructable from env.
+# Tuning levers + sidecar egress hosts queried live when the sweep ran.
 TUNING_BASELINE_STR="$(extract_preamble_kv TUNING_BASELINE)"
 SIDECAR_EGRESS_HOSTS_STR="$(extract_preamble_kv SIDECAR_EGRESS_HOSTS)"
 ISTIOD_REPLICAS_STR="$(extract_preamble_kv ISTIOD_REPLICAS)"
@@ -99,16 +109,14 @@ CHURN_DURATION_STR="$(extract_preamble_kv CHURN_DURATION_SEC)"
 QPS_STR="$(extract_preamble_kv QPS)"
 CONNECTIONS_STR="$(extract_preamble_kv CONNECTIONS)"
 NAMESPACE_STR="$(extract_preamble_kv NAMESPACE)"
-# R3-4: result-affecting scrape-skew knobs (PL2/PL19) so a report-only consumer can
-# see which ceiling produced the POISONED_SCRAPE drops, and the per-curl timeout
-# that bounds the skew the gate measures.
+# Scrape-skew ceiling and per-curl timeout behind any POISONED_SCRAPE drops.
 FANOUT_MAX_SKEW_MS_STR="$(extract_preamble_kv FANOUT_MAX_SKEW_MS)"
 FANOUT_METRICS_TIMEOUT_STR="$(extract_preamble_kv FANOUT_METRICS_TIMEOUT)"
 
 # The core aggregation pass: build the joined per-(mesh_size, churn_rate) view
 # from baseline+churn pairs that share combo_id. Emit a single TSV stream that
-# downstream formatters can render. Column order (A7 — Δp99 immediately after
-# the keys, then validity counts, then the underlying numbers):
+# downstream formatters can render. Column order (Δp99 right after the keys, then
+# validity counts, then the underlying numbers):
 #   mesh_size  churn_rate  delta_p99_ms  stdev_delta_p99  total_runs  valid_runs
 #   baseline_p99_ms  churn_p99_ms  baseline_p50_ms  churn_p50_ms
 #   baseline_qps  churn_qps  churn_eds_pushes  churn_convergence_p99
@@ -135,7 +143,8 @@ aggregate() {
 	}
 
 	!/^#/ && !/^run_id/ && NF >= 17 {
-		combo = $3; ms = $4; cr = $5; phase = $6
+		# Pair rows within one file: combo ids such as "ms1-cr1" repeat across sweeps.
+		combo = FILENAME SUBSEP $3; ms = $4; cr = $5; phase = $6
 		qps_actual = $9; p50 = $10; p99 = $12; restarted = $16; status = $17
 
 		# istiod-side metrics (columns 20-25, present when NF >= 25).
@@ -147,11 +156,11 @@ aggregate() {
 		if (phase == "baseline") {
 			bl_seen[combo] = 1
 			bl_status[combo] = (valid ? "ok" : "bad")
+			bl_ms[combo] = ms
 			if (valid) {
 				bl_p50[combo] = is_num(p50) ? p50 + 0 : "N/A"
 				bl_p99[combo] = is_num(p99) ? p99 + 0 : "N/A"
 				bl_qps[combo] = is_num(qps_actual) ? qps_actual + 0 : "N/A"
-				bl_ms[combo] = ms
 			}
 		} else if (phase == "churn") {
 			ch_seen[combo] = 1
@@ -227,7 +236,6 @@ aggregate() {
 }
 
 emit_metadata_lines() {
-	# PL19: every format gets all preamble metadata.
 	local prefix="${1:-#}"
 	printf '%s RUN_ID=%s\n'                "$prefix" "${RUN_ID:-unknown}"
 	printf '%s HARNESS_SHA=%s\n'           "$prefix" "${HARNESS_SHA:-unknown}"
@@ -370,18 +378,51 @@ report_charts() {
 	echo "# Churn x Data-Plane — Charts"
 	echo ""
 	aggregate | awk -F'\t' '
+	# Mermaid xychart cannot draw a gap, so a missing point is never plotted as 0:
+	# each chart keeps only the mesh sizes where every churn rate has a value and
+	# names the points it left out.
+	function chart(n, title, ytitle, key, fmt, expect,    i, c, ms, ok, ax, n_ax, miss) {
+		n_ax = 0; miss = ""
+		for (i = 1; i <= n_ms; i++) {
+			ms = ms_order[i]; ok = 1
+			for (c = 1; c <= n_cr; c++) {
+				if (!((key, ms, cr_order[c]) in val)) {
+					ok = 0
+					miss = miss (miss == "" ? "" : ", ") "rate " cr_order[c] " @ mesh " ms
+				}
+			}
+			if (ok) ax[++n_ax] = ms
+		}
+		printf "%% Chart %d: %s\n\n", n, title
+		if (n_ax < 2) {
+			printf "> Not charted: fewer than two mesh sizes have data for every churn rate (missing: %s).\n\n", miss
+			return 0
+		}
+		printf "```mermaid\nxychart-beta\n    title \"%s\"\n    x-axis \"Mesh Size\" [", title
+		for (i = 1; i <= n_ax; i++) printf "%s%s", (i > 1 ? ", " : ""), ax[i]
+		printf "]\n    y-axis \"%s\"\n", ytitle
+		for (c = 1; c <= n_cr; c++) {
+			printf "    line ["
+			for (i = 1; i <= n_ax; i++) printf "%s" fmt, (i > 1 ? ", " : ""), val[key, ax[i], cr_order[c]]
+			printf "]\n"
+		}
+		printf "```\n\n> Series order (by churn rate):"
+		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
+		printf ". Expected: %s\n", expect
+		if (miss != "") printf "> Mesh sizes with a missing point are left out (missing: %s).\n", miss
+		printf "\n"
+		return 1
+	}
 	{
 		ms = $1 + 0; cr = $2 + 0; dp99 = $3; valid = $6 + 0; eds = $13
-		# PL13/PL15 gate (mirrors report_md): a cell with no valid baseline+churn pairs
-		# (valid_runs==0) or whose delta_p99 is N/A is ABSENT, not a real 0 data point.
-		# Count it as dropped and leave has[] unset so it is never charted as 0.
+		# Same gate as report_md: a cell with no valid baseline+churn pairs
+		# (valid_runs==0) or whose delta_p99 is N/A is dropped, not charted.
 		cells_total++
 		if (valid <= 0 || dp99 == "N/A") { cells_dropped++; next }
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(cr in cr_seen)) { cr_order[++n_cr] = cr; cr_seen[cr] = 1 }
-		dp99_val[ms, cr] = dp99 + 0
-		eds_val[ms, cr] = (eds != "N/A") ? eds + 0 : 0
-		has[ms, cr] = 1
+		val["dp99", ms, cr] = dp99 + 0
+		if (eds != "N/A") val["eds", ms, cr] = eds + 0
 	}
 	END {
 		if (cells_dropped > 0) {
@@ -404,68 +445,16 @@ report_charts() {
 			print "> Charts require at least two mesh sizes."
 			exit
 		}
-
-		# Chart 1: delta-p99 vs mesh size, one series per churn rate
-		printf "%% Chart 1: delta-p99 added tail latency (ms) under churn vs mesh size\n"
-		printf "%% Series order (by churn rate):"
-		for (c = 1; c <= n_cr; c++) printf " %s", cr_order[c]
-		printf "\n\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"Δp99 Tail Latency vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_ms; i++) {
-			if (i > 1) printf ", "
-			printf "%s", ms_order[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"Δp99 (ms)\"\n"
-		for (c = 1; c <= n_cr; c++) {
-			printf "    line ["; sep = ""
-			for (i = 1; i <= n_ms; i++) {
-				ms = ms_order[i]; cr = cr_order[c]
-				v = has[ms, cr] ? dp99_val[ms, cr] : 0
-				printf "%s%.2f", sep, v; sep = ", "
-			}
-			printf "]\n"
-		}
-		printf "```\n\n"
-		printf "> Series order (by churn rate):"
-		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
-		printf ". Expected: ~flat across mesh size.\n\n"
-
-		# Chart 2: istiod EDS pushes vs mesh size, one series per churn rate
-		printf "%% Chart 2: istiod EDS pushes during churn vs mesh size\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"istiod EDS Pushes vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_ms; i++) {
-			if (i > 1) printf ", "
-			printf "%s", ms_order[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"EDS push count\"\n"
-		for (c = 1; c <= n_cr; c++) {
-			printf "    line ["; sep = ""
-			for (i = 1; i <= n_ms; i++) {
-				ms = ms_order[i]; cr = cr_order[c]
-				v = has[ms, cr] ? eds_val[ms, cr] : 0
-				printf "%s%.0f", sep, v; sep = ", "
-			}
-			printf "]\n"
-		}
-		printf "```\n\n"
-		printf "> Series order (by churn rate):"
-		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
-		printf ". Expected: scales with churn rate, ~flat across mesh size.\n"
+		chart(1, "Δp99 Tail Latency vs Mesh Size", "Δp99 (ms)", "dp99", "%.2f", "~flat across mesh size.")
+		chart(2, "istiod EDS Pushes vs Mesh Size", "EDS push count", "eds", "%.0f", "scales with churn rate, ~flat across mesh size.")
 	}'
 }
 
 case "$FORMAT" in
-text)   report_text ;;
-csv)    report_csv ;;
-json)   report_json ;;
-md)     report_md ;;
-charts) report_charts ;;
-*)      die "unknown format: $FORMAT (use text|csv|json|md|charts)" ;;
+text)          report_text ;;
+csv)           report_csv ;;
+json)          report_json ;;
+md | markdown) report_md ;;
+charts)        report_charts ;;
+*)             die "unknown format: $FORMAT (use text|csv|json|md|charts)" ;;
 esac

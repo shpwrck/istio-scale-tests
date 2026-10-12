@@ -4,15 +4,13 @@
 # Consumers: controlplane, dataplane, propagation, churn, churn-dataplane
 #
 # Exposes:
-#   harness_sha                                   -> `git describe --always --dirty --abbrev=7` or "unknown"
+#   harness_sha                                   -> `git -C "${ROOT:-.}" describe --always --dirty --abbrev=7` or "unknown"
 #   kube_versions <ctx> <kubectl_argv...>          -> kubectl server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
 #                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
-#   istiod_restart_status <pre> <post>             -> "0" | "1" | "unknown" based on process_start_time_seconds (PL9)
-#   istiod_start_time_seconds <port>               -> scrape process_start_time_seconds gauge
 #   tuning_baseline_state <ctx> <kubectl_argv...>  -> two lines (TUNING_BASELINE=, SIDECAR_EGRESS_HOSTS=)
 #                                                     queried from the LIVE mesh, on|off|unknown (PL2)
-#   write_preamble <title> <tsv> <kv pairs...>     -> write `# key=value` comment lines + RUN_ID/HARNESS_SHA (PL2, PL19)
+#   write_preamble <title> <tsv> <k=v...>          -> write `# <title>`, `# generated_at=`, then `# k=v` per arg (PL2, PL19)
 #   infra_preamble_lines <kv...>                   -> emit the cluster-infra `# KEY=value` block
 #       (istiod req/lim, replicas, network topology) for the TSV preamble.
 #       ONE shared emitter so the 003 pre-creator and the 002 `! -f`-guarded collector
@@ -34,7 +32,7 @@
 # shellcheck disable=SC2329
 harness_sha() {
 	local sha
-	sha="$(git describe --always --dirty --abbrev=7 2>/dev/null || true)"
+	sha="$(git -C "${ROOT:-.}" describe --always --dirty --abbrev=7 2>/dev/null || true)"
 	[[ -n "$sha" ]] || sha="unknown"
 	printf '%s\n' "$sha"
 }
@@ -72,65 +70,26 @@ probe_kube_versions() {
 	split_csv "$ctxs_csv" ctxs
 	local tmp
 	tmp="$(mktemp -d)"
-	local ctx pids=()
-	for ctx in "${ctxs[@]}"; do
+	# Temp files are named by index: context names can contain '/' (oc login style).
+	local i pids=()
+	for i in "${!ctxs[@]}"; do
 		(
-			v="$(kube_versions "$ctx" "$@")"
-			printf '%s=%s\n' "$ctx" "$v" > "${tmp}/${ctx}.kv"
+			v="$(kube_versions "${ctxs[i]}" "$@")"
+			printf '%s=%s\n' "${ctxs[i]}" "$v" > "${tmp}/${i}.kv"
 		) &
 		pids+=($!)
 	done
 	local p
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
 	local first=1 line out=""
-	for ctx in "${ctxs[@]}"; do
-		if [[ -r "${tmp}/${ctx}.kv" ]]; then
-			line="$(<"${tmp}/${ctx}.kv")"
+	for i in "${!ctxs[@]}"; do
+		if [[ -r "${tmp}/${i}.kv" ]]; then
+			line="$(<"${tmp}/${i}.kv")"
 			if ((first)); then out="$line"; first=0; else out+=",${line}"; fi
 		fi
 	done
 	rm -rf "$tmp"
 	printf '%s\n' "$out"
-}
-
-# Inspect istiod's process_start_time_seconds gauge to decide whether the
-# control plane restarted during the measurement window.
-# PL9: emit one of "0" / "1" / "unknown".
-# shellcheck disable=SC2329
-istiod_restart_status() {
-	local pre="$1" post="$2"
-	if [[ -z "$pre" || -z "$post" || "$pre" == "unknown" || "$post" == "unknown" ]]; then
-		printf '%s\n' "unknown"
-		return 0
-	fi
-	awk -v a="$pre" -v b="$post" 'BEGIN {
-		if (a+0 == 0 || b+0 == 0) { print "unknown"; exit }
-		if (a+0 == b+0)            { print "0"; exit }
-		print "1"
-	}'
-}
-
-# Scrape process_start_time_seconds once.
-# Usage: istiod_start_time_seconds <port>
-# shellcheck disable=SC2329
-istiod_start_time_seconds() {
-	local port="$1" tmpfile
-	tmpfile="$(mktemp)"
-	# Shared, centralized scrape timeout (config/options.env METRICS_SCRAPE_TIMEOUT);
-	# inline default keeps this lib correct when sourced standalone (bats). MUST be
-	# raised at 10k scale — the /metrics body is MB-class and a 5s curl drops it.
-	if ! curl -fsS --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" -o "$tmpfile" 2>/dev/null; then
-		rm -f "$tmpfile"
-		printf '%s\n' "unknown"
-		return 0
-	fi
-	awk '
-	/^process_start_time_seconds[ {]/ && !/^#/ { v=$NF; found=1 }
-	END {
-		if (found) printf "%s\n", v
-		else        printf "unknown\n"
-	}' "$tmpfile"
-	rm -f "$tmpfile"
 }
 
 # Emit the additive cluster-infra `# KEY=value` preamble block (PL36: ONE shared
@@ -174,10 +133,10 @@ infra_preamble_lines() {
 # an identical HARNESS_SHA but a hand-patched mesh would be silently non-comparable.
 #
 # Probed (all read-only `get`, each bounded by --request-timeout=5s):
-#   - root-ns Sidecar `default` in istio-system   (Profile 01 sidecar-scoping)
-#   - Telemetry `tuning-metrics` in istio-system   (Profile 07 telemetry-filtering)
-#   - Telemetry `tuning-access-log` in istio-system (Profile 08 access-log-filtering)
-#   - meshConfig.discoverySelectors on the Istio CR (Profile 02 discovery-selectors)
+#   - root-ns Sidecar `default` in istio-system   (sidecar egress scoping)
+#   - Telemetry `tuning-metrics` in istio-system   (client request metrics off)
+#   - Telemetry `tuning-access-log` in istio-system (access log on errors only)
+#   - meshConfig.discoverySelectors on the Istio CR (istiod namespace filter)
 #   - the live egress hosts on the root Sidecar     (the egress GRAPH that was applied)
 #
 # Emits two lines on stdout (the caller adds the leading "# "):

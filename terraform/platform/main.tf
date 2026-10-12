@@ -17,7 +17,7 @@ data "external" "cluster_api_url" {
 
   program = [
     "bash", "-c",
-    "CLUSTER=$(kubectl --kubeconfig \"$1\" config view -o json | jq -r --arg ctx \"$2\" '.contexts[] | select(.name==$ctx) | .context.cluster') && URL=$(kubectl --kubeconfig \"$1\" config view -o json | jq -r --arg c \"$CLUSTER\" '.clusters[] | select(.name==$c) | .cluster.server') && jq -n --arg url \"$URL\" '{url:$url}'",
+    "URL=$(kubectl --kubeconfig \"$1\" config view --minify --context \"$2\" -o jsonpath='{.clusters[0].cluster.server}') && [ -n \"$URL\" ] || { echo \"no API server URL for kubeconfig context '$2'\" >&2; exit 1; }; jq -n --arg url \"$URL\" '{url:$url}'",
     "--",
     pathexpand(var.kubeconfig_path),
     each.key,
@@ -26,6 +26,17 @@ data "external" "cluster_api_url" {
 
 locals {
   use_kubeconfig = var.cluster_provider == "kubeconfig"
+
+  # Content hash of each local chart, passed as a release value: the helm
+  # provider only upgrades on value or chart-version changes, so without this
+  # an edited chart file would never roll out on apply.
+  charts_dir = "${path.module}/../../charts"
+  chart_checksum = { for c in [
+    "acm-klusterlet-config", "acm-managed-cluster", "acm-multicluster-hub",
+    "acm-openshift-gitops-resources", "argocd-config", "gitops-hub-app-of-apps",
+    "gitops-hub-ocm-placement-appset",
+    ] : c => sha1(join("", [for f in sort(fileset("${local.charts_dir}/${c}", "**")) : filesha1("${local.charts_dir}/${c}/${f}")]))
+  }
 
   cluster_keys = (
     local.use_kubeconfig
@@ -42,7 +53,7 @@ locals {
   by_cluster = (
     local.use_kubeconfig
     ? { for ctx in local.cluster_keys : ctx => {
-        cluster_api_url = data.external.cluster_api_url[ctx].result.url
+      cluster_api_url = data.external.cluster_api_url[ctx].result.url
       }
     }
     : data.terraform_remote_state.rosa[0].outputs.by_cluster

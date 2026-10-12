@@ -6,15 +6,12 @@ driving `N` spoke clusters joined into one multi-primary, multi-network Istio me
 lives in its `tests/<suite>/README.md` (linked under [Per-suite diagrams](#per-suite-test-harness-diagrams)).
 
 The topology is identical at any size; only the spoke count and per-spoke workload change.
-The diagrams below are parameterized for an illustrative **20-spoke × 500-services-per-spoke
-(= 10,000 services)** run. The naming follows the repo convention — the hub is `cluster-1`
-and the mesh members are `spoke-002 … spoke-021` (as in the `rosa-002…` contexts from the
-2026-06-04 clean pass).
+The diagrams below show a **20-spoke × 500-services-per-spoke (= 10,000 services)** bed with
+Terraform default naming: the hub is `cluster-001` and the mesh members are
+`cluster-002 … cluster-021`.
 
-> These numbers are a parameterization, not a logged result. The recorded passes in
-> [`docs/campaigns/`](../campaigns/) are the **10-spoke** clean pass (100 services) and the
-> **500-spoke** target profile in [`README.md`](./README.md). Trust the *shapes* and
-> *cross-cluster overheads*, not these absolute magnitudes.
+> This shape matches the recorded run in
+> [`docs/campaigns/2026-06-22-20c-10k-10k-results.md`](../campaigns/2026-06-22-20c-10k-10k-results.md).
 
 ## Diagram conventions
 
@@ -74,14 +71,14 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph HUB["cluster-1 — ACM/GitOps HUB (NOT a mesh member)"]
+    subgraph HUB["cluster-001 — ACM/GitOps HUB (NOT a mesh member)"]
         ARGO["Argo CD<br/>app-of-apps + ApplicationSets"]
         ACM["ACM MultiClusterHub<br/>Placement to spoke selection"]
         CA["cert-manager<br/>root CA + ClusterIssuer<br/>+ per-cluster intermediates"]
-        ESO["External Secrets Operator<br/>PushSecrets: cacerts / kubeconfig / remote-secrets"]
+        ESO["External Secrets Operator<br/>PushSecrets: cacerts / remote-secrets"]
     end
 
-    subgraph MESH["mesh1 — multi-primary, multi-network · 20 identical spokes (spoke-002 … spoke-021)"]
+    subgraph MESH["mesh1 — multi-primary, multi-network · 20 identical spokes (cluster-002 … cluster-021)"]
         direction LR
         subgraph SREP["representative spoke — every spoke is identical (x20)"]
             direction TB
@@ -91,7 +88,7 @@ graph TB
                     D2["istiod-2"]
                     D3["istiod-3"]
                 end
-                EW["east-west-gw<br/>:15443 / nodePort 31443"]
+                EW["east-west-gw<br/>LoadBalancer :15443"]
                 IN["ingress-gw"]
             end
             subgraph NSWL["workload namespaces — one per suite (sidecar-injected)"]
@@ -105,7 +102,7 @@ graph TB
             end
             MV["namespace: mesh-verify<br/>standalone cross-cluster wiring / echo probe<br/>(own ApplicationSet — not a suite)"]
         end
-        OTHERS["spoke-003 … spoke-021<br/>19 more identical spokes"]
+        OTHERS["cluster-003 … cluster-021<br/>19 more identical spokes"]
     end
 
     ARGO -.->|"GitOps sync (Sail op, Istio CRs, gateways)"| MESH
@@ -132,7 +129,7 @@ graph TB
     class EW,IN dataplane;
 ```
 
-- The **hub** (`cluster-1`) is GitOps/ACM control infrastructure only — never labeled
+- The **hub** (`cluster-001`) is GitOps/ACM control infrastructure only — never labeled
   `istio-mesh-member=true`, never a mesh member.
 - Every spoke is identical, so only one is drawn in full: **istiod at 3 replicas** plus the
   east-west and ingress gateways in `istio-system`, and its workloads in per-suite namespaces

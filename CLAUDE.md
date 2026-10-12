@@ -1,5 +1,6 @@
 # Claude Code — istio-scale-tests
 
-All project conventions, implementation rules, and common tasks are in [AGENTS.md](AGENTS.md).
+@AGENTS.md
 
-Permissions are configured in `.claude/settings.json`.
+All project conventions, implementation rules, and common tasks are in `AGENTS.md`
+(imported above). Permissions are configured in `.claude/settings.json`.

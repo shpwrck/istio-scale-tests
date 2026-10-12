@@ -1,42 +1,14 @@
+# Required. Set per cluster by the ApplicationSet; the network is "<clusterName>-<networkSuffix>".
 clusterName: ""
 meshID: mesh1
 networkSuffix: network
-istioVersion: v1.28.5
+# Keep in sync with ISTIO_VERSION in config/versions.env. Must be in the installed
+# operator's Istio version enum (OSSM stable-3.4 serves v1.30.x).
+istioVersion: v1.30.5
 
-# istiod (pilot) control-plane topology + sizing.
-# For scale testing we pin a FIXED replica count (operator HPA disabled) so the
-# per-pod metric fanout in tests/lib/fanout.sh aggregates over a stable topology,
-# and size resources so the fixed fleet carries the full multi-cluster xDS load
-# without OOM/CPU-throttling. Set autoscaleEnabled: true to restore the operator's
-# default HorizontalPodAutoscaler (min 1, max 5, 80% CPU).
-# GOMEMLIMIT is auto-derived by the istiod chart from limits.memory — do NOT set it manually.
-#
-# Sized for the 20-cluster / 10,000-service (mesh-wide) campaign. In multi-primary
-# every istiod caches ALL remote services/endpoints, so memory scales with the
-# WHOLE mesh, not the local cluster — istiod scales vertically, not horizontally
-# (extra replicas only distribute connected proxies, they do NOT shrink the cache).
-# replicaCount=3 matches the 20c/10k production plan; because istiod scales
-# vertically, extra replicas only add HA + distribute connected proxies — they do
-# NOT shrink the cache or raise capacity. Per-replica load at 20c/10k: the whole-
-# mesh cache (~10k services / ~30k endpoints, replica-invariant) plus ~500 connected
-# proxies (1,500 local proxies / 3 replicas), each proxy's config bounded by the
-# baseline root-Sidecar egress scoping below.
-#
-# SIZING — Guaranteed QoS (requests == limits): istiod is NEVER evicted under node
-# memory pressure, the right call for a customer-facing run. Memory 16Gi: the prior
-# 4Gi request badly understated the working set (Istio's published reference is
-# ~1 vCPU + 1.5Gi per 1k services / 2k proxies single-cluster; a 10k-service whole-
-# mesh multi-cluster cache is realistically ~8-15Gi). GOMEMLIMIT auto-derives to
-# ~14.4Gi (90% of the 16Gi limit) so GC stays ahead of the hard limit. CAVEAT: 16Gi
-# is therefore a HARD ceiling — if the real 10k working set exceeds it, istiod
-# OOMKills rather than bursts, so CONFIRM 16Gi against measured RSS during the staged
-# `mesh_member_count` ramp (runbook gates) before trusting it at full scale; raise if
-# steady-state RSS approaches ~14Gi. CPU 4 (req == limit): no burst headroom, so
-# istiod throttles at 4 cores during full pushes — acceptable on the PRODUCTION
-# autoscaling clusters (4-24 nodes) this default targets. NOTE: this is heavier than
-# the fixed-3-node stress rig can carry (4cpu × 3 = 12 of ~22.5 cores reserved, worse
-# than the 5×2cpu that triggered STRESS_TEST_STATUS.md FINDING #3) — on a fixed-node
-# rig, lower the CPU request (measurement-neutral) to free workload scheduling room.
+# istiod sized for the 20-cluster / 10k-service campaign: fixed replicas (no HPA) and
+# Guaranteed QoS. Every replica caches the whole mesh, so extra replicas do not cut memory.
+# istiod sets GOMEMLIMIT to 90% of limits.memory. The defaults reserve 12 CPU / 48Gi.
 pilot:
   autoscaleEnabled: false
   replicaCount: 3
@@ -48,11 +20,8 @@ pilot:
       cpu: "4"
       memory: 16Gi
 
-# Sidecar proxy (data-plane) resources. The OSSM/Istio default request is cpu: 10m,
-# which is NOT production-representative and causes proxy CPU throttling under load.
-# This is the production baseline (tuning profile 05-proxy-resources). It is also the
-# value that sizes the worker fleet: at 100m/proxy, the 30k injected proxies in the
-# 20c/10k campaign require ~3,000 vCPU of worker capacity.
+# Sidecar resources. Requests equal the Istio default;
+# limits are lower than the default (2 CPU / 1Gi).
 proxy:
   resources:
     requests:
@@ -65,37 +34,13 @@ proxy:
 accessLogFile: /dev/stdout
 accessLogEncoding: JSON
 
+# Rendered into spec.values.global.meshNetworks only when non-empty.
 meshNetworks: {}
 
-# ---------------------------------------------------------------------------
-# Campaign tuning baseline (supported-only Tier-1/2 profiles baked in)
-#
-# These mirror the runtime tuning *profiles* under tests/tuning/profiles/ but
-# bake the four SUPPORTED levers (01 sidecar-scoping, 02 discovery-selectors,
-# 07 telemetry-filtering, 08 access-log-filtering) into the mesh baseline so the
-# 20-cluster / 10k-service campaign comes up production-configured rather than
-# wide-open. Each lever is individually toggleable; the runtime profiles remain
-# the A/B sweep mechanism and are NOT replaced by this.
-# ---------------------------------------------------------------------------
+# Campaign tuning baseline, on by default.
 tuningBaseline:
-  # Profile 02 — discoverySelectors. When enabled, istiod only watches
-  # namespaces that match one of the selectors below; every other namespace is
-  # invisible to the control plane (no informers, no config, no push).
-  #
-  # CRITICAL coverage note: discoverySelectors makes istiod ignore ANY namespace
-  # that matches NONE of the selectors — INCLUDING its own root namespace
-  # (istio-system) and the east-west / ingress gateways, which all live in
-  # istio-system on this stack. Dropping istio-system would strip the gateway
-  # config and the root-namespace Sidecar (below), breaking cross-cluster
-  # traffic. Istio does NOT auto-include its own namespace under
-  # discoverySelectors. We therefore OR two selectors:
-  #   1. istio-discovery=enabled   — the test-workload namespaces (labelled by
-  #      each suite's namespace.yaml template).
-  #   2. kubernetes.io/metadata.name=istio-system — the immutable label every
-  #      namespace carries (NamespaceDefaultLabelName, GA since k8s 1.21), so we
-  #      guarantee istio-system is discovered WITHOUT mutating the
-  #      operator-owned istio-system namespace from this chart.
-  # Selectors are OR'd: a namespace is watched if it matches ANY entry.
+  # discoverySelectors: istiod watches only namespaces that match a selector (OR'd).
+  # istio-system is not included automatically, so it is selected by name.
   discoverySelectors:
     enabled: true
     selectors:
@@ -104,39 +49,12 @@ tuningBaseline:
       - matchLabels:
           kubernetes.io/metadata.name: istio-system
 
-  # Profile 01 — root-namespace Sidecar scoping. A mesh-wide Sidecar CR in
-  # istio-system restricts every proxy's egress view, the primary istiod
-  # scaling lever (per-proxy config grows O(services x sidecars) without it).
+  # A mesh-wide Sidecar in istio-system limits each proxy's egress.
+  # The gateways get their own full-egress Sidecars (templates/tuning-sidecar.yaml).
   sidecar:
     enabled: true
-    # CRITICAL: the runtime profile ships egress.hosts = ["./*","istio-system/*"]
-    # (local-namespace-only). That is WRONG for this campaign: at 20c/10k the
-    # workloads in each suite's namespace talk CROSS-namespace (and cross-cluster
-    # via the east-west gateway) to the other suites' Services. Collapsing every
-    # proxy to "./*" understates per-proxy config and defeats the whole point of
-    # a realistic-scale run. The default below is the real cross-namespace graph:
-    # istio-system (gateways + control plane) plus the suite + mesh-verify
-    # namespaces. Operators can widen/narrow this list; "./*" keeps in-namespace
-    # traffic. NOTE: this root Sidecar applies to the SIDECAR proxies only — the
-    # injected ingress/east-west gateways are exempted to "*/*" by the
-    # workloadSelector Sidecars in templates/tuning-sidecar.yaml (severance trap).
-    #
-    # !!! LOUD WARNING — egressHosts namespace parts are EXACT matches, NOT globs.
-    # An Istio Sidecar egress host of the form "<namespace>/<dnsName>" matches the
-    # namespace part EXACTLY; "controlplane-test/*" does NOT cover
-    # "controlplane-test-0/*". So when controlplane.namespaceCount > 1 the suite
-    # mints controlplane-test-0, controlplane-test-1, … and the bare
-    # "controlplane-test/*" entry below is DEAD (unused) for those workloads — you
-    # MUST add an explicit "controlplane-test-<i>/*" entry for each extra namespace
-    # or those proxies lose egress to the controlplane workloads. (Harmless at the
-    # default namespaceCount=1, where controlplane lands only in its primary
-    # namespace.) See tests/tuning/README.md "Campaign baseline" + "Adding a new
-    # mesh namespace".
-    #
-    # Adding a NEW mesh namespace requires TWO steps (see README checklist):
-    #   (a) label the namespace istio-discovery=enabled (else discoverySelectors
-    #       hide it from istiod entirely), and
-    #   (b) add "<ns>/*" here (else its sidecars cannot egress to it).
+    # Namespace parts are exact matches, not globs. Every mesh namespace needs its own
+    # "<ns>/*" entry (e.g. controlplane-test-1/*) and the istio-discovery=enabled label.
     egressHosts:
       - "./*"
       - "istio-system/*"
@@ -147,27 +65,23 @@ tuningBaseline:
       - "dataplane-test/*"
       - "propagation-test/*"
 
-  # Profile 07 — telemetry filtering. Disable CLIENT-side request metrics to cut
-  # metric volume ~40-50% (server-side metrics retained).
+  # Disable client-side request metrics.
   telemetryFiltering:
     enabled: true
 
-  # Profile 08 — access-log filtering. Log only server-side error responses
-  # (HTTP >= 400) via the Telemetry API; client-side access logging off.
+  # Access-log only server-side responses with code >= 400.
   accessLogFiltering:
     enabled: true
 
+# PreSync Job that holds the Istio CR until cacerts is pushed from the hub.
+waitForCacerts:
+  enabled: true
+  timeoutSeconds: 1200
+  image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.21
+
 argoSyncWaves:
   enabled: true
-  rbac: "-30"
   istioCni: "0"
   istio: "5"
-  # Sidecar + Telemetry CRs sync AFTER the Istio CR so istiod (and its CRDs)
-  # exist before the campaign tuning resources are applied.
+  # After the Istio CR, so istiod is up before the Sidecar/Telemetry CRs.
   tuning: "10"
-
-rbac:
-  enabled: true
-  argocd:
-    namespace: openshift-gitops
-    serviceAccountName: openshift-gitops-argocd-application-controller

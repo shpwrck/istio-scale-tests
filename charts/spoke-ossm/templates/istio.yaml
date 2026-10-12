@@ -1,3 +1,4 @@
+{{- $clusterName := required "clusterName is required (set per cluster by the ApplicationSet)" .Values.clusterName }}
 apiVersion: sailoperator.io/v1
 kind: Istio
 metadata:
@@ -13,9 +14,9 @@ spec:
   values:
     global:
       meshID: {{ .Values.meshID | quote }}
-      network: {{ printf "%s-%s" .Values.clusterName .Values.networkSuffix | quote }}
+      network: {{ printf "%s-%s" $clusterName .Values.networkSuffix | quote }}
       multiCluster:
-        clusterName: {{ .Values.clusterName | quote }}
+        clusterName: {{ $clusterName | quote }}
       enableReaderRBAC: true
       {{- if .Values.meshNetworks }}
       meshNetworks:
@@ -40,12 +41,6 @@ spec:
       accessLogFile: {{ .Values.accessLogFile | quote }}
       accessLogEncoding: {{ .Values.accessLogEncoding | quote }}
       {{- if .Values.tuningBaseline.discoverySelectors.enabled }}
-      {{- /*
-        Profile 02 baked in. istiod watches ONLY namespaces matching one of
-        these selectors. See values.yaml tuningBaseline.discoverySelectors for
-        why istio-system is matched by kubernetes.io/metadata.name (it is NOT
-        auto-included under discoverySelectors and hosts the gateways).
-      */}}
       discoverySelectors:
         {{- toYaml .Values.tuningBaseline.discoverySelectors.selectors | nindent 8 }}
       {{- end }}

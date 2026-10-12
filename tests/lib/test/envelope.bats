@@ -63,6 +63,27 @@ JSON
 	[[ "$output" == "network=unknown" ]]
 }
 
+# env_network: Istio 1.2x+ sets the network only as the istio-system namespace
+# label, so the wrapper falls back to it when the istiod env has none.
+_net_kubectl() {
+	case "$*" in
+		*"get deploy istiod"*) echo '{"spec":{"template":{"spec":{"containers":[{"name":"discovery","env":[]}]}}}}' ;;
+		*"get namespace istio-system"*) printf '%s' "${NET_LABEL:-}" ;;
+	esac
+}
+
+@test "env_network: falls back to the istio-system network label" {
+	NET_LABEL=net-a run env_network ctx-a _net_kubectl
+	[ "$status" -eq 0 ]
+	[[ "$output" == "network=net-a" ]]
+}
+
+@test "env_network: no env and no label -> unknown" {
+	NET_LABEL="" run env_network ctx-a _net_kubectl
+	[ "$status" -eq 0 ]
+	[[ "$output" == "network=unknown" ]]
+}
+
 # ---------------------------------------------------------------------------
 # env_pct_of_limit — PL35 cross-replica scope. The R>1 path is the regression:
 # a single-replica fixture hides the per-replica-vs-cross-replica bug.

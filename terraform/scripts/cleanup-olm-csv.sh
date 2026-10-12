@@ -10,17 +10,6 @@ set -euo pipefail
 #
 # Required: SUB_NAMESPACE, SUB_NAME, PACKAGE_NAME
 
-# Also accept positional args for backwards compatibility
-if [[ $# -ge 6 ]]; then
-  TOKEN_SCRIPT="${1}"
-  API_URL="${2}"
-  ADMIN_PASS="${3}"
-  SUB_NAMESPACE="${4}"
-  SUB_NAME="${5}"
-  PACKAGE_NAME="${6}"
-  export TOKEN_SCRIPT API_URL ADMIN_PASS SUB_NAMESPACE SUB_NAME PACKAGE_NAME
-fi
-
 : "${SUB_NAMESPACE:?SUB_NAMESPACE is required}"
 : "${SUB_NAME:?SUB_NAME is required}"
 : "${PACKAGE_NAME:?PACKAGE_NAME is required}"

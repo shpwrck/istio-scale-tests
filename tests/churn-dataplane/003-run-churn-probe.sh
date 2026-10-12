@@ -37,20 +37,17 @@ DURATION="${COEXEC_CHURN_DURATION_SEC:-60}"
 QPS="${COEXEC_QPS:-200}"
 CONNECTIONS="${COEXEC_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${COEXEC_SETTLE_SEC:-10}"
-CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-10}"
+CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-5}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
-CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-3}"
+CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-5}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-# istiod is reached via tests/lib/fanout.sh, which allocates its own per-pod port
-# block from FANOUT_PF_BASE (default 21014); COEXEC_ISTIOD_PF_PORT is no longer used.
 OUTPUT_FILE=""
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 BASELINE_FILE=""
 DRY_RUN=0
-# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
-# graph. The sweep (004-run-sweep.sh) queries them ONCE via tuning_baseline_state and
-# threads them in; standalone runs leave them "unknown".
+# Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
+# them once and passes them in; standalone runs record "unknown".
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 
@@ -94,7 +91,7 @@ Churn-rate semantics:
   "Deployment scale operations per second". At rate=N for D seconds, exactly N*D
   scale operations are issued. Each operation alternates the replica count of the
   chosen churn-target Deployment between --base-replicas and --scale-to. The
-  order of target indices is a deterministic seeded shuffle (PL16) so two
+  order of target indices is a deterministic seeded shuffle so two
   identical configurations produce the same churn timeline.
 EOF
 }
@@ -170,14 +167,13 @@ done
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 [[ -n "$CHURN_RATE" ]] || die "--churn-rate is required"
 [[ "$CHURN_RATE" =~ ^[0-9]+$ ]] || die "--churn-rate must be a non-negative integer"
+is_pos_int "$DURATION" || die "--duration must be a positive integer"
+is_pos_int "$CHURN_DEPLOYMENT_COUNT_OPT" || die "--deployment-count must be a positive integer"
+is_nonneg_int "$CHURN_BASE_REPLICAS_OPT" || die "--base-replicas must be a non-negative integer"
+is_pos_int "$CHURN_SCALE_TO_OPT" || die "--scale-to must be a positive integer"
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
@@ -188,7 +184,6 @@ REMOTES=()
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ -z "$COMBO_ID" ]] && COMBO_ID="$RUN_ID"
 
-mkdir -p "$OUTPUT_DIR"
 [[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
 
 HARNESS_SHA="$(harness_sha)"
@@ -203,6 +198,7 @@ if ((DRY_RUN)); then
 	echo "RUN_ID=$RUN_ID  COMBO_ID=$COMBO_ID  HARNESS_SHA=$HARNESS_SHA"
 	exit 0
 fi
+mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # Preflight + record the source istiod replica count (PL2). The fanout
 # (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-replica
@@ -276,6 +272,7 @@ cleanup_all() {
 	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	rm -rf "${ISTIOD_DIR:-}"
+	rm -f "${CHURN_LOG:-}"
 }
 trap cleanup_all EXIT
 
@@ -288,7 +285,10 @@ PRE_PODSET="${ISTIOD_DIR}/pre.podset"
 PRE_SKEW_MS=0
 SCRAPE_INCOMPLETE=0
 if ((PF_OK)); then
-	fanout_record_podset "$SOURCE_CTX" "$PRE_PODSET" "${KUBECTL[@]}"
+	# Pre podset = the pods fanout_open reached, in scrape-file order, so
+	# fanout_restart_status pairs each pod with its own scrape. The post podset
+	# lists every Running pod, so a replaced or added istiod shows as a change.
+	printf '%s\n' "${ISTIOD_PODS[@]}" > "$PRE_PODSET"
 	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
@@ -571,3 +571,11 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t
 	"$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99" >> "$OUTPUT_FILE"
 
 echo "Wrote churn row to $OUTPUT_FILE"
+
+# The driver can leave targets at --scale-to (an odd number of toggles per target).
+# Put them back to base so a later baseline or churn window starts all-base.
+for ctx in "${ALL_CTXS[@]}"; do
+	"${KUBECTL[@]}" --context="$ctx" -n "$NS" --request-timeout=10s scale deployment \
+		-l churn-target=true --replicas="$CHURN_BASE_REPLICAS_OPT" >/dev/null \
+		|| echo "warn: could not reset churn targets to base on $ctx" >&2
+done

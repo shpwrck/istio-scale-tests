@@ -11,43 +11,35 @@
 #   ./tests/controlplane/003-run-sweep.sh [options]
 #
 # Examples:
-#   # Default sweep — mesh sizes 1..N with default (10 svc × 3 replicas × 1 ns):
-#   ./tests/controlplane/003-run-sweep.sh --contexts cluster-001,cluster-002,cluster-003
+#   # Default sweep: mesh sizes 1..N with 10 svc x 3 replicas x 1 ns:
+#   ./tests/controlplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 #
-#   # Two-axis sweep: service count × namespace count, fixed mesh size of 3:
-#   ./tests/controlplane/003-run-sweep.sh \
-#     --contexts cluster-001,cluster-002,cluster-003 \
-#     --mesh-sizes 3 --service-counts 10,100,500 --namespace-counts 1,5,25
-#
-#   # Cross-product mesh size with Sidecar scoping:
-#   ./tests/controlplane/003-run-sweep.sh \
-#     --contexts cluster-001,cluster-002,cluster-003 \
-#     --mesh-sizes 1,2,3 --sidecar-scopings none,namespace,explicit
+#   # Service count x Sidecar scoping at mesh size 2:
+#   ./tests/controlplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+#     --mesh-sizes 2 --service-counts 10,100 --sidecar-scopings none,namespace,explicit
 #
 #   # Dry-run to see the planned matrix:
-#   ./tests/controlplane/003-run-sweep.sh --dry-run \
-#     --contexts a,b,c --service-counts 10,100 --sidecar-scopings none,namespace
+#   ./tests/controlplane/003-run-sweep.sh --dry-run --contexts <mesh-a-ctx>,<mesh-b-ctx>
 # ci-dry-run:
 set -euo pipefail
-# P3: loud ERR trap so an unexpected abort self-reports the failing line. Coexists
-# with the EXIT/cleanup trap installed later (separate signal). Per-combo probe and
-# cleanup failures are caught explicitly below and degraded to a row status — they
-# do NOT fire this trap.
+# Loud ERR trap for unexpected aborts; per-combo failures become row statuses.
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/config/options.env"  # #45/#46: re-source for legibility (versions.env already pulls it in) — SCALE_* preamble keys
+source "${ROOT}/config/options.env"  # SCALE_* preamble keys
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # B4: harness_sha / probe_kube_versions for the pre-created preamble
+source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the peak poller
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/capacity.sh"  # #45: cap_node_totals / cap_istiod_limits for the capacity provenance lines
+source "${ROOT}/tests/lib/preamble.sh"  # harness_sha / probe_kube_versions for the pre-created preamble
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble (env_collect_infra) + campaign-end scale envelope
+source "${ROOT}/tests/lib/capacity.sh"  # cap_node_totals / cap_istiod_limits for the capacity lines
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble + campaign-end scale envelope
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -59,14 +51,11 @@ CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
 OUTPUT_DIR_BASE="${ROOT}/tests/controlplane/results"
 SETTLE_SEC=60
 DRY_RUN=0
-METRICS_API_STATUS="unknown"  # #44: set by metrics_preflight; recorded in the preamble
+METRICS_API_STATUS="unknown"  # set by metrics_preflight; recorded in the preamble
 FORCE_LARGE_MATRIX=0
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
-# P1-5: resume an interrupted sweep. When set to an existing sweep dir, the
-# orchestrator reuses that dir + its RUN_ID (appending, not minting a new one)
-# and SKIPS any combo whose TSV already holds a valid row (NF>=40 && $31=="0")
-# for that (mesh,svc,rep,ns,scope) key — so a multi-hour 20c sweep that died at
-# combo 40/64 resumes from 41 instead of restarting the whole matrix.
+# --resume: reuse an existing sweep dir + RUN_ID and skip combos that already
+# have a valid row (NF>=40 && istiod_restarted=="0").
 RESUME_DIR=""
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
@@ -84,13 +73,6 @@ Sweep dimensions (cross-product):
   --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,explicit
                               (default: \$CONTROLPLANE_SIDECAR_SCOPING or "none").
 
-Singular aliases (one CSV value each):
-  --service-count N           Alias for --service-counts N.
-  --replicas N                Alias for --replica-counts N.
-  --replicas-counts CSV       Deprecated alias for --replica-counts.
-  --namespace-count N         Alias for --namespace-counts N.
-  --sidecar-scoping VALUE     Alias for --sidecar-scopings VALUE.
-
 Other:
   --config-dump-samples N     Random pods per cluster to exec /config_dump on
                               (default: $CONFIG_DUMP_SAMPLES; 0 disables).
@@ -99,12 +81,10 @@ Other:
   --output-dir DIR            Results base directory; each sweep gets a
                               sweep-<RUN_ID>/ subdir under it
                               (default: tests/controlplane/results).
-  --resume DIR                Resume an interrupted sweep: reuse this existing
-                              sweep-<RUN_ID>/ dir + RUN_ID (append, don't mint a
-                              new one) and SKIP any combo that already has a valid
-                              row (NF>=40 && istiod_restarted==0) for its
-                              (mesh,svc,rep,ns,scope) key. Mutually exclusive with
-                              --output-dir. Not valid with --dry-run.
+  --resume DIR                Resume an interrupted sweep in this sweep-<RUN_ID>/
+                              dir: reuse its RUN_ID and skip combos that already
+                              have a valid row. Not valid with --output-dir or
+                              --dry-run.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -113,14 +93,12 @@ Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
-  SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (from config/options.env) are recorded
-  in the TSV preamble for the report's coverage calibration + capacity block.
+  SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (recorded in the TSV preamble).
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
-  pre-sweep metrics-API readiness gate — polls 'kubectl top nodes' per context,
-  records # METRICS_API= in the preamble, WARNs (never aborts) if unavailable.
-  CAP_TOP_TIMEOUT (default 15): request timeout for the slower kubectl top reads
-  (vs 5s for etcd get) — the primary #44 fix for top timing out under sweep load.
-  CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2): per-read retry for transient blips.
+  pre-sweep wait for 'kubectl top nodes'; warns (never aborts) if unavailable.
+  CAP_TOP_TIMEOUT (default 15), CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2):
+  timeout and retry for the kubectl top reads.
+  METRICS_SCRAPE_TIMEOUT (default 30): curl --max-time for istiod /metrics.
 EOF
 }
 
@@ -141,26 +119,8 @@ while [[ $# -gt 0 ]]; do
 		SERVICE_COUNTS_CSV="$2"
 		shift 2
 		;;
-	--service-count)
-		[[ -n "${2:-}" ]] || die "--service-count requires a value"
-		echo "warning: --service-count is deprecated; use --service-counts" >&2
-		SERVICE_COUNTS_CSV="$2"
-		shift 2
-		;;
 	--replica-counts)
 		[[ -n "${2:-}" ]] || die "--replica-counts requires a value"
-		REPLICA_COUNTS_CSV="$2"
-		shift 2
-		;;
-	--replicas-counts)
-		[[ -n "${2:-}" ]] || die "--replicas-counts requires a value"
-		echo "warning: --replicas-counts is deprecated; use --replica-counts" >&2
-		REPLICA_COUNTS_CSV="$2"
-		shift 2
-		;;
-	--replicas)
-		[[ -n "${2:-}" ]] || die "--replicas requires a value"
-		echo "warning: --replicas is deprecated; use --replica-counts" >&2
 		REPLICA_COUNTS_CSV="$2"
 		shift 2
 		;;
@@ -169,20 +129,8 @@ while [[ $# -gt 0 ]]; do
 		NAMESPACE_COUNTS_CSV="$2"
 		shift 2
 		;;
-	--namespace-count)
-		[[ -n "${2:-}" ]] || die "--namespace-count requires a value"
-		echo "warning: --namespace-count is deprecated; use --namespace-counts" >&2
-		NAMESPACE_COUNTS_CSV="$2"
-		shift 2
-		;;
 	--sidecar-scopings)
 		[[ -n "${2:-}" ]] || die "--sidecar-scopings requires a value"
-		SIDECAR_SCOPINGS_CSV="$2"
-		shift 2
-		;;
-	--sidecar-scoping)
-		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
-		echo "warning: --sidecar-scoping is deprecated; use --sidecar-scopings" >&2
 		SIDECAR_SCOPINGS_CSV="$2"
 		shift 2
 		;;
@@ -227,8 +175,7 @@ done
 
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
-# P1-5: --resume reuses an existing sweep dir, so a custom --output-dir base is
-# meaningless (and ambiguous) alongside it. Refuse the combination explicitly.
+# --resume already names the full sweep dir; refuse a custom --output-dir with it.
 if [[ -n "$RESUME_DIR" && "$OUTPUT_DIR_BASE" != "${ROOT}/tests/controlplane/results" ]]; then
 	die "--resume and --output-dir are mutually exclusive (--resume already names the full sweep dir)"
 fi
@@ -293,9 +240,8 @@ MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]
 
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
-# P1-5: resume vs fresh sweep. On --resume, reuse the existing dir + its RUN_ID
-# (so the TSV/markdown/envelope keep one identity and 002 appends to the same
-# file); otherwise mint a fresh RUN_ID and a new sweep-<RUN_ID>/ subdir (PL6).
+# Resume reuses the dir + RUN_ID (002 appends to the same TSV); otherwise mint a
+# fresh RUN_ID and sweep-<RUN_ID>/ subdir.
 if [[ -n "$RESUME_DIR" ]]; then
 	((DRY_RUN)) && die "--resume is not valid with --dry-run (nothing to resume in a plan-only run)"
 	[[ -d "$RESUME_DIR" ]] || die "--resume: sweep dir not found: $RESUME_DIR"
@@ -316,10 +262,8 @@ else
 	OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 fi
 
-# P1-5: combo_already_done <mesh> <svc> <rep> <ns> <scope> — true (0) if the
-# resume TSV already holds a VALID row (NF>=40 && istiod_restarted($31)==0) whose
-# (mesh,svc,rep,ns,scope) key matches. Mirrors the report's n_valid gate so a
-# SETUP_FAILED/restarted placeholder row does NOT count as "done" (it gets re-run).
+# combo_already_done <mesh> <svc> <rep> <ns> <scope>: true if the resume TSV has a
+# valid row for that key (same gate as the report's n_valid, so failed rows re-run).
 combo_already_done() {
 	[[ -n "$RESUME_DIR" ]] || return 1
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
@@ -333,16 +277,9 @@ combo_already_done() {
 # The 40-column TSV schema header (kept in one place so the pre-create + 002 agree).
 CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable"
 
-# B4 (reproducibility): pre-create controlplane-${RUN_ID}.tsv with the FULL preamble
-# BEFORE the first combo, mirroring how churn-dataplane's orchestrator writes the
-# header first. Without this, a baseline failure on the first combo would have the
-# fallback create a degenerate 3-line preamble (ISTIO_VERSION/HARNESS_SHA/KUBE_VERSIONS
-# missing); because 002 guards its real preamble on `! -f`, a later successful final
-# would NOT backfill it, and 004 would report ISTIO_VERSION=unknown for the whole
-# sweep (PL2/PL19/PL26 loss). With the file pre-created, both 002 and the failed-row
-# emitter just APPEND. Sweep-level scalars are correct; per-combo varying keys
-# (SIDECAR_SCOPING/SERVICE_COUNT/...) are recorded as the sweep CSV (004 collects
-# SIDECAR_SCOPING across all files anyway).
+# Pre-create controlplane-${RUN_ID}.tsv with the full preamble before the first
+# combo, so provenance survives a first-combo failure; 002 and the failed-row
+# emitter only append.
 precreate_tsv_preamble() {
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 	[[ -f "$tsv" ]] && grep -q '^timestamp' "$tsv" 2>/dev/null && return 0
@@ -350,11 +287,8 @@ precreate_tsv_preamble() {
 	local harness kver
 	harness="$(harness_sha)"
 	kver="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
-	# #45: capacity provenance. 003 now owns the preamble, so it must write the same
-	# capacity-legibility lines 002 used to (002 skips its block once the file exists).
-	# Read-only, source-context only; cap_*.sh tolerates failure -> `unknown`. These
-	# are the report's denominators for the "Achieved scale vs capacity" block and they
-	# read fine via get nodes / get deploy (independent of the metrics API; cf #44).
+	# Capacity provenance (read-only, source context; `unknown` on failure). These
+	# are the report's denominators for the "Achieved scale vs capacity" block.
 	local src_ctx="${CONTEXTS[0]}"
 	local node_alloc_cpu_m="unknown" node_alloc_mem_mi="unknown"
 	local istiod_cpu_limit_m="unknown" istiod_mem_limit_mi="unknown"
@@ -375,17 +309,10 @@ precreate_tsv_preamble() {
 			mem_mi=*) istiod_mem_limit_mi="${kv#mem_mi=}" ;;
 		esac
 	done
-	# Cluster-infra block (additive): node allocatable, istiod req/lim/replicas,
-	# network topology. Collected read-only across --contexts; emitted via the ONE
-	# shared infra_preamble_lines emitter so 002's `! -f`-guarded collector writes
-	# the identical key set (PL36). 002 reads INFRA_KV the same way (env_collect_infra).
+	# Cluster-infra block via the shared emitter (same key set as 002's standalone preamble).
 	local infra_kv
 	infra_kv="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
-	# Resolved tuning-baseline state, queried from the LIVE source cluster (NOT
-	# chart defaults — a live/Argo override can diverge). PL2: sweep-wide scalar
-	# (the baseline is constant across all combos of one sweep), so it joins the
-	# capacity provenance block as a per-sweep scalar (PL26 classification).
-	# tuning_baseline_state emits two `KEY=VALUE` lines; degrades to `unknown`.
+	# Live tuning-baseline state from the source cluster (sweep-wide scalar).
 	local tb_line="TUNING_BASELINE=unknown" eh_line="SIDECAR_EGRESS_HOSTS=unknown"
 	local tb_kv
 	while IFS= read -r tb_kv; do
@@ -423,19 +350,10 @@ precreate_tsv_preamble() {
 	echo -e "$CONTROLPLANE_TSV_HEADER" >> "$tsv"
 }
 
-# P0-h: pre-run capacity WARN (FINDING #3 arithmetic as a runtime guard). For the
-# LARGEST planned combo, estimate the per-cluster sidecar-CPU request and compare it
-# to free node CPU (node allocatable − istiod baseline). The dominant data-plane
-# capacity driver is the per-proxy sidecar CPU request × workload count, NOT istiod;
-# at the fixed-3-node rig this caps at ~40-46 services/cluster. This is a WARN only
-# (the existing per-context preflight in 001 is the hard gate); it surfaces the
-# ceiling at plan time so an operator can hand-cap --service-counts before burning a
-# multi-hour sweep. Uses SCALE_PER_POD_CPU_M (config/options.env) — never hardcoded.
-#
-# Dry-run NEVER contacts a cluster (AGENTS --dry-run rule): it prints only the
-# REQUESTED cores (which need no cluster). The free-capacity comparison + services-
-# that-fit estimate run only on the real plan path, reading the same cap_node_totals
-# / cap_istiod_limits the preamble uses (source context, read-only).
+# Plan-time capacity warning: compare the largest combo's sidecar CPU request
+# (services x replicas x SCALE_PER_POD_CPU_M) with free node CPU on the source
+# context. Warn only; 001's preflight is the hard gate. Dry-run prints only the
+# requested cores (no cluster contact).
 capacity_plan_warn() {
 	local per_pod_cpu_m="${SCALE_PER_POD_CPU_M:-200}"
 	# Largest combo: max service_count × max replica_count.
@@ -493,15 +411,9 @@ capacity_plan_warn() {
 	echo "" >&2
 }
 
-# #44 prevention: metrics-API readiness gate. The O9 utilization-% columns are
-# sourced from `kubectl top` (metrics API), a path independent of the istiod
-# /metrics the sweep measures; a transient metrics-server outage (e.g. still
-# stabilizing right after a cluster/operator restart) silently N/As them for the
-# whole run. Before the loop, poll every context until `top nodes` serves data,
-# bounded by METRICS_READY_TIMEOUT. Records the verdict in METRICS_API_STATUS (which
-# precreate_tsv_preamble writes as `# METRICS_API=`) and WARNs — NEVER aborts
-# (utilization is observability, not the core measurement). METRICS_READY_TIMEOUT=0
-# disables the gate (status stays `unknown`, behaviour as before this change).
+# Metrics-API readiness gate for the utilization-% columns (kubectl top). Polls
+# each context up to METRICS_READY_TIMEOUT, records METRICS_API_STATUS for the
+# preamble and warns; never aborts. METRICS_READY_TIMEOUT=0 disables it.
 metrics_preflight() {
 	local timeout="${METRICS_READY_TIMEOUT:-120}" interval="${METRICS_READY_INTERVAL:-10}"
 	if (( timeout <= 0 )); then
@@ -536,13 +448,9 @@ metrics_preflight() {
 	fi
 }
 
-# P0/PL15: a per-combo setup OR probe failure must be RECORDED (counted in the
-# report's n_total) and the sweep must CONTINUE — never abort the multi-hour run. The
-# control-plane report (004) counts every NF>=40 row in n_total and only admits a
-# row to n_valid when istiod_restarted ($31) == "0", so a degraded row with
-# $31=unknown and N/A numerics is counted-but-excluded (PL13/PL15). The TSV is
-# pre-created with the full preamble (see precreate_tsv_preamble), so this only
-# appends. <status> is PROBE_FAILED or SETUP_FAILED.
+# Record a failed combo as a degraded row (context column = status, restarted =
+# unknown, numerics N/A): counted in n_total, excluded from n_valid. The sweep
+# continues. <status> is PROBE_FAILED or SETUP_FAILED.
 emit_failed_row() {
 	local status="$1" ms="$2" sc="$3" rc="$4" nc="$5" scp="$6"
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
@@ -551,11 +459,6 @@ emit_failed_row() {
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
 		precreate_tsv_preamble
 	fi
-	# Degraded row: 40 cols, key cols populated, context column carries the status
-	# sentinel, restarted=unknown (column 31) so the report excludes it from n_valid;
-	# every numeric column N/A per PL13 (including push-by-type, config samples, and the
-	# O9 capacity cols 35-40 — nothing was measured, so 0/0/0 would be a misleading
-	# literal).
 	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
 }
 
@@ -582,24 +485,15 @@ if ((MATRIX_SIZE > MAX_MATRIX)) && ! ((FORCE_LARGE_MATRIX)); then
 	die "matrix size $MATRIX_SIZE = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]} exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
 fi
 
-# P1-1: append the shared --qps/--burst client rate-limit flags (KUBE_CLIENT_QPS/
-# BURST). 003 tolerates NO cli (dry-run plan path), so it keeps the empty fallback
-# rather than resolve_kubectl (which dies); the flags are appended via the shared
-# kube_client_flags helper so the construction stays centralized.
-KUBE_FLAGS=()
-read -ra KUBE_FLAGS <<<"$(kube_client_flags)"
-# Prefer kubectl: --qps/--burst (KUBE_FLAGS) are kubectl-only; `oc` rejects them
-# ("unknown flag: --qps") which silently breaks every call on OpenShift/ROSA.
+# The dry-run plan needs no CLI, so tolerate a missing one here (resolve_kubectl dies).
 if command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl "${KUBE_FLAGS[@]}")
+	KUBECTL=(kubectl)
 elif command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc "${KUBE_FLAGS[@]}")
+	KUBECTL=(oc)
 else
 	KUBECTL=()
 fi
 
-# P0-h capacity gate: print the plan-time capacity WARN (dry-run-safe: no cluster
-# contact in dry-run). Placed after KUBECTL resolution so the live read path works.
 capacity_plan_warn
 
 if ((DRY_RUN)); then
@@ -626,6 +520,7 @@ ensure_output_dir() {
 # ---------------------------------------------------------------------------
 # Runs between the baseline and final 002 invocations, using the same port
 # range (15014+k). Safe because 002-baseline has exited and freed its ports.
+# Same sampling as 002's poll_peak_metrics; results land in the state dir.
 PEAK_POLLER_PID=""
 PEAK_PF_PIDS=()
 BASE_PF_PORT=15014
@@ -658,8 +553,9 @@ start_peak_metrics_poller() {
 		while true; do
 			for k in "${!pod_ctxs[@]}"; do
 				local port=$(( BASE_PF_PORT + k ))
-				local body
-				body=$(curl -s --max-time 3 "http://localhost:${port}/metrics" 2>/dev/null) || continue
+				local body now_t
+				body=$(curl -s --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" 2>/dev/null) || continue
+				now_t=$(now_ms)
 
 				# Peak memory.
 				local mem_val
@@ -672,24 +568,23 @@ start_peak_metrics_poller() {
 					fi
 				fi
 
-				# Peak CPU rate (millicores over this interval).
+				# Peak CPU rate in millicores over the measured time between samples.
 				local cpu_val
 				cpu_val=$(echo "$body" | awk '/^process_cpu_seconds_total[{ ]/ && !/^#/ { print $NF+0 }')
 				if [[ -n "$cpu_val" && "$cpu_val" != "0" ]]; then
 					local prev_cpu_file="${state_dir}/prev-cpu-${k}.val"
 					if [[ -s "$prev_cpu_file" ]]; then
-						local prev_cpu
-						prev_cpu=$(<"$prev_cpu_file")
-						local rate_m
-						rate_m=$(awk -v c="$cpu_val" -v p="$prev_cpu" -v iv="$POLL_INTERVAL" \
-							'BEGIN{ d=(c-p)*1000/iv; if(d<0) d=0; printf "%.0f", d }')
+						local prev_cpu prev_t rate_m
+						read -r prev_cpu prev_t < "$prev_cpu_file" || true
+						rate_m=$(awk -v c="$cpu_val" -v p="$prev_cpu" -v dt="$(( now_t - prev_t ))" \
+							'BEGIN{ if (dt <= 0) { print 0; exit }; d=(c-p)*1000000/dt; if(d<0) d=0; printf "%.0f", d }')
 						local prev_peak=0
 						[[ -s "${state_dir}/peak-cpu-${k}.val" ]] && prev_peak=$(<"${state_dir}/peak-cpu-${k}.val")
 						if awk -v a="$rate_m" -v b="$prev_peak" 'BEGIN{ exit !(a+0 > b+0) }'; then
 							printf '%s' "$rate_m" > "${state_dir}/peak-cpu-${k}.val"
 						fi
 					fi
-					printf '%s' "$cpu_val" > "$prev_cpu_file"
+					printf '%s %s\n' "$cpu_val" "$now_t" > "$prev_cpu_file"
 				fi
 			done
 			sleep "$POLL_INTERVAL"
@@ -713,9 +608,7 @@ stop_peak_metrics_poller() {
 
 trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 
-# B4: pre-create the TSV with the full preamble before any combo runs (skipped in
-# dry-run — probe_kube_versions would touch clusters). Guarantees provenance even if
-# the very first combo's setup/baseline fails.
+# Pre-create the TSV preamble before any combo (skipped in dry-run).
 if ((! DRY_RUN)); then
 	metrics_preflight
 	precreate_tsv_preamble
@@ -739,7 +632,7 @@ for ms in "${MESH_SIZES[@]}"; do
 						continue
 					fi
 
-					# P1-5: skip a combo already completed in the resumed sweep.
+					# Skip a combo already completed in the resumed sweep.
 					if combo_already_done "$ms" "$sc" "$rc" "$nc" "$scp"; then
 						printf "  [%d/%d] %s — already has a valid row; skipping (resume)\n" \
 							"$combo_idx" "$MATRIX_SIZE" "$label" >&2
@@ -769,9 +662,7 @@ for ms in "${MESH_SIZES[@]}"; do
 						--namespace-count "$nc" \
 						--sidecar-scoping "$scp" \
 						--settle "$SETTLE_SEC"; then
-						# P0: baseline probe failed — record a degraded combo and move on
-						# (never abort the sweep). The final phase is skipped (its state-dir
-						# baseline is missing/partial). Best-effort cleanup before continue.
+						# Baseline failed: record the combo, clean up, move on.
 						echo "warn: [$combo_idx/$MATRIX_SIZE] baseline probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
 						emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
 						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
@@ -785,11 +676,7 @@ for ms in "${MESH_SIZES[@]}"; do
 					start_peak_metrics_poller "$STATE_DIR_COMBO"
 
 					echo "--- Deploying workloads (phase 2/3, scoping=$scp) ---"
-					# B1: setup is the MOST probable per-combo failure at scale (helm
-					# template|apply + label-selector waits across ~50 PFs). Bare under
-					# set -e it would abort the whole sweep AND leak the background peak
-					# poller started just above. So: stop the poller, record a SETUP_FAILED
-					# row (n_total++, excluded from n_valid), clean up, settle, continue.
+					# Setup failed: stop the poller, record SETUP_FAILED, clean up, move on.
 					if ! "$SCRIPT_DIR/001-setup-controlplane-test.sh" \
 						--contexts "$active_csv" \
 						--service-count "$sc" \
@@ -829,10 +716,7 @@ for ms in "${MESH_SIZES[@]}"; do
 						--settle "$SETTLE_SEC" \
 						--output-dir "$OUTPUT_DIR" \
 						--run-id "$RUN_ID"; then
-						# P0: final probe failed AFTER the deploy storm — the window is lost
-						# for this combo, but the workload exists, so still record + clean up
-						# + continue. (The probe may have emitted partial per-pod rows before
-						# failing; this fallback guarantees at least one combo row in n_total.)
+						# Final scrape failed: record PROBE_FAILED; cleanup still runs below.
 						echo "warn: [$combo_idx/$MATRIX_SIZE] final probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
 						emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
 					fi
@@ -840,24 +724,10 @@ for ms in "${MESH_SIZES[@]}"; do
 					echo ""
 
 					echo "--- Cleaning up ---"
-					# P0/PL23: a cleanup hiccup must not abort the sweep — the next combo's
-					# setup also cleans the namespace, and the await-delete loop below is
-					# already non-fatal. Warn and continue past the combo.
+					# 005 waits (bounded) for namespace termination. A failure only warns:
+					# the next 001 waits for any leftover namespace before applying.
 					"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
-						echo "warn: [$combo_idx/$MATRIX_SIZE] cleanup reported failure for '$label'; next combo's setup will re-clean" >&2
-
-					if (( ${#KUBECTL[@]} )); then
-						wait_pids=()
-						for ctx in "${active_ctxs[@]}"; do
-							"${KUBECTL[@]}" --context="$ctx" wait --for=delete \
-								namespace -l app.kubernetes.io/instance=controlplane-test \
-								--timeout=300s >/dev/null 2>&1 &
-							wait_pids+=($!)
-						done
-						for pid in "${wait_pids[@]}"; do
-							wait "$pid" 2>/dev/null || true
-						done
-					fi
+						echo "warn: [$combo_idx/$MATRIX_SIZE] cleanup reported failure for '$label'; next setup waits for the namespace to clear" >&2
 
 					# Post-cleanup settle: when 005 deletes the test namespace,
 					# istiod re-pushes a broader (no-Sidecar) config to remaining
@@ -895,20 +765,12 @@ CHARTS_FILE="${OUTPUT_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# Campaign scale envelope (read-only addition; never touches the measurement path).
-# Generated, not hand-transcribed (docs/campaigns/TEMPLATE.md). Best-effort: a render
-# failure (e.g. report produced no JSON) must NOT fail the sweep — the data is already
-# safely written above. Reads the per-sweep dir only (PL6).
+# Campaign scale envelope (docs/campaigns/TEMPLATE.md), best-effort: a render
+# failure warns but never fails the sweep.
 ENVELOPE_FILE="${OUTPUT_DIR}/scale-envelope-${RUN_ID}.md"
-# B1: capture the render's stderr so its SPECIFIC die reason (results dir missing /
-# report produced no JSON / report not executable) survives onto the warning path —
-# this is the headline customer artifact, so swallowing the cause with a blanket
-# 2>/dev/null and asserting a possibly-wrong reason is exactly the wrong place to be terse.
+# Keep the render's stderr so the warning shows the actual reason.
 ENVELOPE_ERR="$(mktemp)"
-# Run in a SUBSHELL: render_scale_envelope's preconditions use die() (exit 1), which
-# in a direct call would abort THIS script — defeating the best-effort intent. The
-# subshell contains the exit so a render failure becomes a non-zero `if` branch (warn +
-# preserve the sweep data) instead of killing the sweep at the very end.
+# Subshell: render_scale_envelope uses die(), which must not abort the sweep.
 if ( render_scale_envelope "$OUTPUT_DIR" "$SCRIPT_DIR/004-report-results.sh" \
 		"$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" ) > "$ENVELOPE_FILE" 2>"$ENVELOPE_ERR"; then
 	echo "Scale envelope written to $ENVELOPE_FILE"

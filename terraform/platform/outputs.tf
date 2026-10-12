@@ -14,12 +14,12 @@ output "acm_cluster_set" {
 }
 
 output "acm_local_cluster_name" {
-  description = "MultiClusterHub spec.localClusterName / GitOpsCluster argoServer.cluster."
+  description = "MultiClusterHub spec.localClusterName."
   value       = local.acm_local_cluster_name
 }
 
 output "gitops_namespace" {
-  description = "Namespace for Argo CD and ACM GitOps CRs."
+  description = "Namespace for Argo CD, the ACM Placement, and the ManagedClusterSetBinding."
   value       = var.gitops_namespace
 }
 

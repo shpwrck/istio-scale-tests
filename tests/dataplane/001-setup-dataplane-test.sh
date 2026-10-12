@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Deploy fortio server and client pods for cross-cluster data-plane latency testing.
+# Deploy fortio server pods on every cluster and the fortio client on the source.
 #
-# The chart emits two Services per cluster:
-#   - dataplane-server                  (generic; selects local pods under locality LB)
-#   - dataplane-server-${clusterName}   (per-cluster; forces cross-cluster routing)
+# Every cluster gets a Service dataplane-server-<ctx> for each context, selecting
+# only that cluster's server pod: the source's own Service is the local baseline,
+# the others force traffic through the east-west gateway.
 #
 # Usage:
 #   ./tests/dataplane/001-setup-dataplane-test.sh --source-context CTX [--remote-contexts CSV] [options]
 #
 # Examples:
-#   # Server on all clusters, client on cluster-001:
-#   ./tests/dataplane/001-setup-dataplane-test.sh --source-context cluster-001 --remote-contexts cluster-002,cluster-003
+#   # Server on both clusters, client on the first:
+#   ./tests/dataplane/001-setup-dataplane-test.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
@@ -25,7 +25,7 @@ REMOTE_CONTEXTS_CSV=""
 DRY_RUN=0
 WAIT_TIMEOUT=300
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
-FORTIO_TAG="${FORTIO_VERSION:-stable}"
+FORTIO_TAG="$FORTIO_VERSION"
 
 
 usage() {
@@ -38,8 +38,12 @@ Usage: $(basename "$0") [options]
   --wait-timeout N         Seconds to wait for pods (default: 300).
   -h, --help               Show this help.
 
+Context names are used in Service names (dataplane-server-<ctx>), so each must
+be a lowercase DNS label of at most 46 characters; rename others with
+'kubectl config rename-context'.
+
 Environment:
-  SETUP_CONTEXTS, DATAPLANE_TEST_NAMESPACE, FORTIO_VERSION.
+  DATAPLANE_TEST_NAMESPACE, FORTIO_VERSION.
 EOF
 }
 
@@ -79,14 +83,8 @@ done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
-
+KUBECTL=()
+resolve_kubectl KUBECTL
 command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 REMOTES=()
@@ -95,6 +93,12 @@ if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 fi
 
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+
+# "dataplane-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
+for ctx in "${ALL_CTXS[@]}"; do
+	[[ "$ctx" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ && ${#ctx} -le 46 ]] \
+		|| die "context '$ctx' is not a lowercase DNS label of <= 46 chars (used in Service name dataplane-server-<ctx>); rename it with: kubectl config rename-context '$ctx' <new-name>"
+done
 
 apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
@@ -114,11 +118,8 @@ if (( ${#ALL_CTXS[@]} > 10 )); then
 	echo "warn: ${#ALL_CTXS[@]} clusters creates ~$(( ${#ALL_CTXS[@]} * ${#ALL_CTXS[@]} )) Services (N² scaling); expect slower setup and higher istiod memory" >&2
 fi
 
-# O8 item 4: apply the fortio server to every context concurrently — setup-only,
-# disjoint contexts, fidelity-neutral. CRITICAL ORDERING (preserved): apply servers
-# to ALL contexts, JOIN (wait all), THEN apply role=both on the source. The
-# role=both render on the source supersedes its server-only render, so the both-apply
-# must not race the server batch.
+# Apply the server to every context concurrently, wait for all, THEN apply
+# role=both on the source (it supersedes the source's server-only render).
 echo "Deploying fortio server on all clusters (image tag: ${FORTIO_TAG})..."
 APPLY_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do
@@ -153,7 +154,6 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-# O8 item 4: parallelize the per-context readiness wait. Setup-only, fidelity-neutral.
 echo "Waiting for pods to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 WAIT_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do

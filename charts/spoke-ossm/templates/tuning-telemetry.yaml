@@ -1,9 +1,5 @@
 {{- if .Values.tuningBaseline.telemetryFiltering.enabled }}
-{{- /*
-  Campaign baseline — Profile 07 (telemetry-filtering), baked in.
-  Disable CLIENT-side request metrics (server-side retained) to cut metric
-  volume ~40-50%. Mirrors tests/tuning/profiles/07-telemetry-filtering.yaml.
-*/}}
+{{- /* Disable client-side request metrics. */}}
 apiVersion: telemetry.istio.io/v1
 kind: Telemetry
 metadata:
@@ -38,11 +34,7 @@ spec:
           disabled: true
 {{- end }}
 {{- if .Values.tuningBaseline.accessLogFiltering.enabled }}
-{{- /*
-  Campaign baseline — Profile 08 (access-log-filtering), baked in.
-  Log only server-side error responses (HTTP >= 400); client-side access
-  logging off. Mirrors tests/tuning/profiles/08-access-log-filtering.yaml.
-*/}}
+{{- /* Access-log only server-side responses >= 400. */}}
 ---
 apiVersion: telemetry.istio.io/v1
 kind: Telemetry

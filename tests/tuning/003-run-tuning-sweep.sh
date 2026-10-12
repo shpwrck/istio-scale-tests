@@ -1,30 +1,13 @@
 #!/usr/bin/env bash
-# Orchestrate tuning profile evaluation: for each profile, apply the profile
-# to the mesh, run the specified test suite probe(s), collect results into a
-# profile-tagged subdirectory, then revert the mesh to baseline.
+# Sweep tuning profiles against one test suite. Pauses Argo CD auto-sync of the
+# Istio CR Applications, runs the suite's setup once, then measures the baseline and
+# each profile (apply -> settle -> probe -> revert), writes sweep-comparison.md,
+# runs the suite's cleanup and resumes Argo CD.
 #
 # Usage:
-#   ./tests/tuning/003-run-tuning-sweep.sh --suite <suite> [--profiles CSV] [options]
-#
-# Examples:
-#   # Sweep two profiles against the controlplane suite:
-#   ./tests/tuning/003-run-tuning-sweep.sh \
-#     --contexts cluster-001,cluster-002,cluster-003 \
-#     --profiles 01-sidecar-scoping,03-push-throttling \
-#     --suite controlplane
-#
-#   # Sweep all supported profiles against propagation:
-#   ./tests/tuning/003-run-tuning-sweep.sh \
-#     --contexts cluster-001,cluster-002,cluster-003 \
-#     --suite propagation
-#
-#   # Dry-run to see the plan:
-#   ./tests/tuning/003-run-tuning-sweep.sh --dry-run \
-#     --profiles 01-sidecar-scoping,06-xds-cache-tuning --suite controlplane
-# ci-dry-run-skip: needs yq and valid --suite directory with profiles
+#   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
+# ci-dry-run: --suite churn-dataplane --contexts ci-dummy,ci-dummy2 --gitops-context ci-hub
 set -euo pipefail
-# P3: loud ERR trap so an unexpected abort self-reports the failing line. Per-profile
-# probe failures are caught via PIPESTATUS below and degraded to warn+continue.
 # shellcheck disable=SC2154  # rc is assigned at the head of the trap body
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
@@ -33,327 +16,359 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"
 
 TUNING_DIR="${ROOT}/tests/tuning"
-PROFILES_DIR="${TUNING_DIR}/profiles"
-
-PROFILES_CSV=""
 SUITE=""
 CONTEXTS_CSV=""
-DRY_RUN=0
-SETTLE_SEC="${TUNING_SETTLE_SEC:-60}"
-OUTPUT_DIR_BASE="${TUNING_DIR}/results"
+GITOPS_CTX="${TUNING_GITOPS_CONTEXT:-}"
+GITOPS_PAUSE=1
+PROFILES_CSV=""
 INCLUDE_BASELINE=1
+RUN_SETUP=1
+RUN_CLEANUP=1
+SETTLE_SEC="${TUNING_SETTLE_SEC:-60}"
+CHURN_RATE="${TUNING_COEXEC_CHURN_RATE:-5}"
+OUTPUT_BASE="${TUNING_DIR}/results"
 ROLLOUT_TIMEOUT=300
-
-# Issue #19: track the state dir of the profile currently applied to the mesh so the
-# guaranteed-revert trap below knows what to undo. Empty string = no profile active
-# (baseline measurement, or already reverted) -> the trap is a safe no-op. Set right
-# before a profile's apply and cleared right after its revert succeeds.
-ACTIVE_STATE_DIR=""
-
-# Guaranteed revert (issue #19): a sweep that is interrupted (Ctrl-C / SIGTERM) or that
-# aborts on an unexpected error between a profile's apply and its revert would otherwise
-# leave the Istio CR mutated — the exact failure that left meshConfig.discoverySelectors
-# active and stopped istio-ca-root-cert from distributing to new namespaces, breaking
-# every later suite. This EXIT/INT/TERM trap reverts whatever profile is currently active,
-# idempotently: it does nothing when no profile is active, and the underlying
-# 002-revert-profile.sh is itself safe to re-run (apply --server-side of the baseline +
-# ignore-not-found deletes). The trap NEVER aborts (it tolerates a failing revert and a
-# missing cluster) so it cannot mask the original exit status.
-# shellcheck disable=SC2329
-revert_active_profile() {
-	local sd="$ACTIVE_STATE_DIR"
-	[[ -n "$sd" ]] || return 0          # no profile active -> nothing to revert
-	[[ -d "$sd" ]] || return 0          # state dir gone -> nothing to revert
-	[[ -f "${sd}/active-profile" ]] || return 0  # already reverted -> idempotent no-op
-	echo "" >&2
-	echo ">>> [trap] reverting active profile (state: ${sd}) to leave the mesh clean (#19)" >&2
-	"${TUNING_DIR}/002-revert-profile.sh" \
-		--state-dir "$sd" \
-		--contexts "$CONTEXTS_CSV" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT" >&2 \
-		|| echo "warn: [trap] revert of ${sd} failed; mesh may be left dirty — inspect the Istio CR manually (#19)" >&2
-	ACTIVE_STATE_DIR=""
-}
-
-# shellcheck disable=SC2329
-on_signal() {
-	local sig="$1"
-	echo "" >&2
-	echo ">>> [trap] sweep interrupted by SIG${sig} — reverting active profile before exit (#19)" >&2
-	# Explicitly exit (128+signo) so the EXIT trap fires and runs the revert exactly once.
-	# A bare INT/TERM handler that just returned would NOT terminate the script under bash.
-	case "$sig" in
-	INT) exit 130 ;;
-	TERM) exit 143 ;;
-	*) exit 1 ;;
-	esac
-}
-
-# INT/TERM log the interruption then exit, which fires the EXIT trap that does the revert,
-# so the revert runs exactly once regardless of whether we exit normally, on error, or on
-# a signal. DRY_RUN installs the traps too but exits before any apply (ACTIVE_STATE_DIR
-# stays empty -> revert is a no-op), so dry-run never touches a cluster.
-trap 'on_signal INT' INT
-trap 'on_signal TERM' TERM
-trap revert_active_profile EXIT
+DRY_RUN=0
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [options]
+Usage: $(basename "$0") --suite SUITE --gitops-context CTX [options]
 
-Run the apply → probe → revert cycle for each tuning profile.
+For the baseline and each profile: apply, wait --settle seconds, run the suite's
+probe, revert. Writes sweep-comparison.md into the sweep directory.
 
 Options:
-  --profiles CSV         Profile names to sweep (without .yaml extension).
-                         Default: all supported profiles in profiles/.
-  --suite SUITE          Test suite to run: controlplane, propagation,
-                         dataplane, churn, churn-dataplane (required).
-  --contexts CSV         Kube contexts (default: \$SETUP_CONTEXTS).
-  --settle SEC           Seconds to wait after profile apply and after
-                         revert before probing (default: $SETTLE_SEC).
-  --output-dir DIR       Results base directory; sweep gets a sweep-<RUN_ID>/
-                         subdir (default: tests/tuning/results).
-  --no-baseline          Skip the initial baseline (no-profile) measurement.
-  --rollout-timeout N    Seconds to wait for istiod rollout (default: $ROLLOUT_TIMEOUT).
-  --dry-run              Print the plan and exit.
+  --suite SUITE          propagation | controlplane | dataplane | churn |
+                         churn-dataplane (required).
+  --contexts CSV         Mesh member contexts; the first is the source for suites
+                         that take one (default: \$SETUP_CONTEXTS).
+  --gitops-context CTX   ACM hub context running OpenShift GitOps, where Argo CD
+                         auto-sync is paused for the run (default: \$TUNING_GITOPS_CONTEXT).
+  --no-gitops-pause      Do not pause Argo CD (mesh not managed by GitOps).
+  --profiles CSV         Profile names (default: every profile in profiles/).
+  --no-baseline          Skip the no-profile pass.
+  --skip-setup           Do not run the suite's setup (workloads already deployed).
+  --keep-workloads       Do not run the suite's cleanup at the end.
+  --settle SEC           Wait after each apply before probing (default: ${SETTLE_SEC}).
+  --churn-rate N         churn-dataplane only: churn operations/s (default: ${CHURN_RATE}).
+  --output-dir DIR       Results base; the run writes sweep-<RUN_ID>/ there
+                         (default: tests/tuning/results).
+  --rollout-timeout N    Seconds to wait for istiod after apply/revert (default: ${ROLLOUT_TIMEOUT}).
+  --dry-run              Print the plan, check the probe arguments with each probe's
+                         own --dry-run, and exit. Touches no cluster.
   -h, --help             Show this help.
 
 Environment:
-  SETUP_CONTEXTS, TUNING_SETTLE_SEC.
+  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--profiles) PROFILES_CSV="$2"; shift 2 ;;
-	--suite) SUITE="$2"; shift 2 ;;
-	--contexts) CONTEXTS_CSV="$2"; shift 2 ;;
-	--settle) SETTLE_SEC="$2"; shift 2 ;;
-	--output-dir) OUTPUT_DIR_BASE="$2"; shift 2 ;;
+	--suite | --contexts | --gitops-context | --profiles | --settle | --churn-rate | --output-dir | --rollout-timeout)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		case "$1" in
+		--suite) SUITE="$2" ;;
+		--contexts) CONTEXTS_CSV="$2" ;;
+		--gitops-context) GITOPS_CTX="$2" ;;
+		--profiles) PROFILES_CSV="$2" ;;
+		--settle) SETTLE_SEC="$2" ;;
+		--churn-rate) CHURN_RATE="$2" ;;
+		--output-dir) OUTPUT_BASE="$2" ;;
+		--rollout-timeout) ROLLOUT_TIMEOUT="$2" ;;
+		esac
+		shift 2
+		;;
+	--no-gitops-pause) GITOPS_PAUSE=0; shift ;;
 	--no-baseline) INCLUDE_BASELINE=0; shift ;;
-	--rollout-timeout) ROLLOUT_TIMEOUT="$2"; shift 2 ;;
+	--skip-setup) RUN_SETUP=0; shift ;;
+	--keep-workloads) RUN_CLEANUP=0; shift ;;
 	--dry-run) DRY_RUN=1; shift ;;
 	-h | --help) usage; exit 0 ;;
-	*) die "Unknown option: $1" ;;
+	*) die "unknown option: $1 (try --help)" ;;
 	esac
 done
 
-[[ -n "$SUITE" ]] || die "--suite is required"
-
-CONTEXTS_CSV="${CONTEXTS_CSV:-$SETUP_CONTEXTS}"
-[[ -n "$CONTEXTS_CSV" ]] || die "No contexts (set --contexts or SETUP_CONTEXTS)"
-
+case "$SUITE" in
+propagation | controlplane | dataplane | churn | churn-dataplane) ;;
+"") die "--suite is required (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;
+*) die "unknown suite: $SUITE (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;
+esac
 SUITE_DIR="${ROOT}/tests/${SUITE}"
-[[ -d "$SUITE_DIR" ]] || die "Suite directory not found: ${SUITE_DIR}"
+is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer"
+is_pos_int "$CHURN_RATE" || die "--churn-rate must be a positive integer"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+if ((GITOPS_PAUSE)) && [[ -z "$GITOPS_CTX" ]]; then
+	die "--gitops-context is required: the ACM hub context whose Argo CD manages the Istio CRs (or pass --no-gitops-pause)"
+fi
 
-resolve_probe_script() {
-	local suite_dir="$1"
-	local probe=""
-	case "$(basename "$suite_dir")" in
-	controlplane)
-		probe="${suite_dir}/002-collect-resource-metrics.sh"
-		;;
-	propagation)
-		probe="${suite_dir}/002-run-endpoint-probe.sh"
-		;;
-	dataplane)
-		probe="${suite_dir}/002-run-latency-probe.sh"
-		;;
-	churn)
-		probe="${suite_dir}/002-run-churn-probe.sh"
-		;;
-	churn-dataplane)
-		probe="${suite_dir}/002-run-baseline-probe.sh"
-		;;
-	*)
-		die "Unknown suite: $(basename "$suite_dir")"
-		;;
-	esac
-	[[ -x "$probe" ]] || die "Probe script not found or not executable: $probe"
-	echo "$probe"
-}
-
-PROBE_SCRIPT="$(resolve_probe_script "$SUITE_DIR")"
+CONTEXTS=()
+split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
+((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
+CONTEXTS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
+SOURCE_CTX="${CONTEXTS[0]}"
+REMOTE_CSV="$(IFS=,; echo "${CONTEXTS[*]:1}")"
 
 PROFILES=()
 if [[ -n "$PROFILES_CSV" ]]; then
 	split_csv "$PROFILES_CSV" PROFILES
 else
-	while IFS= read -r f; do
-		name="$(basename "$f" .yaml)"
-		support="$(yq -r '.ossm_support // "unknown"' "$f")"
-		if [[ "$support" == "supported" || "$support" == "configurable" ]]; then
-			PROFILES+=("$name")
-		fi
-	done < <(find "$PROFILES_DIR" -maxdepth 1 -name '*.yaml' -type f | sort)
+	for f in "${TUNING_DIR}"/profiles/*.yaml; do
+		[[ -f "$f" ]] && PROFILES+=("$(basename "$f" .yaml)")
+	done
 fi
-
-[[ ${#PROFILES[@]} -gt 0 ]] || die "No profiles to sweep"
+((${#PROFILES[@]})) || die "no profiles to sweep"
+for i in "${!PROFILES[@]}"; do
+	PROFILES[i]="${PROFILES[i]%.yaml}"
+	[[ -f "${TUNING_DIR}/profiles/${PROFILES[i]}.yaml" ]] || die "profile not found: ${PROFILES[i]} (see tests/tuning/profiles/)"
+done
+PASSES=()
+((INCLUDE_BASELINE)) && PASSES+=(baseline)
+PASSES+=("${PROFILES[@]}")
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-SWEEP_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
+SWEEP_DIR="${OUTPUT_BASE}/sweep-${RUN_ID}"
+PAUSE_STATE="${SWEEP_DIR}/gitops-pause.json"
+TUNING_BASELINE="unknown"
+SIDECAR_EGRESS_HOSTS="unknown"
 
-echo "=== Tuning Sweep ==="
-echo "    RUN_ID:    ${RUN_ID}"
+# --- Per-suite commands -------------------------------------------------------
+remote_args=()
+[[ -n "$REMOTE_CSV" ]] && remote_args=(--remote-contexts "$REMOTE_CSV")
+case "$SUITE" in
+propagation)
+	SETUP_CMD=("${SUITE_DIR}/001-setup-propagation-test.sh" --contexts "$CONTEXTS_CSV")
+	CLEANUP_CMD=("${SUITE_DIR}/007-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
+controlplane)
+	SETUP_CMD=("${SUITE_DIR}/001-setup-controlplane-test.sh" --contexts "$CONTEXTS_CSV")
+	CLEANUP_CMD=("${SUITE_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
+dataplane)
+	SETUP_CMD=("${SUITE_DIR}/001-setup-dataplane-test.sh" --source-context "$SOURCE_CTX" "${remote_args[@]}")
+	CLEANUP_CMD=("${SUITE_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
+churn)
+	SETUP_CMD=("${SUITE_DIR}/001-setup-churn-test.sh" --contexts "$CONTEXTS_CSV")
+	CLEANUP_CMD=("${SUITE_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
+churn-dataplane)
+	SETUP_CMD=("${SUITE_DIR}/001-setup-coexec-test.sh" --source-context "$SOURCE_CTX" "${remote_args[@]}")
+	CLEANUP_CMD=("${SUITE_DIR}/006-cleanup.sh" --contexts "$CONTEXTS_CSV" --wait-deletion) ;;
+esac
+
+# Set PROBE_ARGV to the suite's n-th probe command for one pass (1-based);
+# return 1 when the suite has no n-th probe.
+probe_argv() {
+	local n="$1" label="$2" dir="$3"
+	local tb=(--tuning-baseline "$TUNING_BASELINE" --sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS")
+	local src=(--source-context "$SOURCE_CTX" "${remote_args[@]}")
+	local cd_file="${dir}/churn-dataplane-${label}.tsv"
+	case "${SUITE}:${n}" in
+	propagation:1) PROBE_ARGV=("${SUITE_DIR}/002-run-endpoint-probe.sh" "${src[@]}" --tsv --output-dir "$dir" "${tb[@]}") ;;
+	controlplane:1) PROBE_ARGV=("${SUITE_DIR}/002-collect-resource-metrics.sh" --contexts "$CONTEXTS_CSV" --output-dir "$dir") ;;
+	dataplane:1) PROBE_ARGV=("${SUITE_DIR}/002-run-latency-probe.sh" "${src[@]}" --output-dir "$dir" "${tb[@]}") ;;
+	churn:1) PROBE_ARGV=("${SUITE_DIR}/002-run-churn-probe.sh" "${src[@]}" --output-dir "$dir" "${tb[@]}") ;;
+	churn-dataplane:1) PROBE_ARGV=("${SUITE_DIR}/002-run-baseline-probe.sh" "${src[@]}" --combo-id "$label"
+		--run-id "$RUN_ID" --output-file "$cd_file" "${tb[@]}") ;;
+	churn-dataplane:2) PROBE_ARGV=("${SUITE_DIR}/003-run-churn-probe.sh" "${src[@]}" --combo-id "$label"
+		--run-id "$RUN_ID" --churn-rate "$CHURN_RATE" --output-file "$cd_file" --baseline-file "$cd_file" "${tb[@]}") ;;
+	*) return 1 ;;
+	esac
+}
+
+# Print a command with repo paths shortened.
+show() { local a=("${@//"${ROOT}"\//}"); echo "${a[*]}"; }
+
+echo "=== Tuning sweep ${RUN_ID} ==="
 echo "    Suite:     ${SUITE}"
-echo "    Probe:     $(basename "$PROBE_SCRIPT")"
-echo "    Contexts:  ${CONTEXTS_CSV}"
-echo "    Profiles:  ${PROFILES[*]}"
-echo "    Baseline:  $( ((INCLUDE_BASELINE)) && echo "yes" || echo "no" )"
+echo "    Contexts:  ${CONTEXTS_CSV} (source ${SOURCE_CTX})"
+echo "    Passes:    ${PASSES[*]}"
 echo "    Settle:    ${SETTLE_SEC}s"
+echo "    Argo CD:   $( ((GITOPS_PAUSE)) && echo "pause on ${GITOPS_CTX}" || echo "not paused")"
 echo "    Output:    ${SWEEP_DIR}/"
-echo ""
 
-total=$((INCLUDE_BASELINE + ${#PROFILES[@]}))
-echo "    Total measurement passes: ${total}"
-echo ""
+# A profile left applied by an interrupted run would contaminate every pass.
+# Checked before --dry-run exits, so CI (no results dir yet) runs this path too.
+for base in "${TUNING_DIR}/results" "$OUTPUT_BASE"; do
+	[[ -d "$base" ]] || continue
+	leftover="$(find "$base" -name active-profile -type f 2>/dev/null | head -1)"
+	[[ -n "$leftover" ]] || continue
+	hint="./tests/tuning/005-cleanup.sh --contexts ${CONTEXTS_CSV}"
+	[[ "$base" == "${TUNING_DIR}/results" ]] || hint+=" --results-dir ${base}"
+	die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ${hint} first"
+done
 
 if ((DRY_RUN)); then
-	echo "--- DRY RUN: Planned sweep ---"
-	step=1
-	if ((INCLUDE_BASELINE)); then
-		echo "  ${step}. [baseline] — no profile applied"
-		((step++))
+	echo ""
+	echo "--- Plan ---"
+	if ((GITOPS_PAUSE)); then
+		show "${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE"
 	fi
-	for p in "${PROFILES[@]}"; do
-		pfile="${PROFILES_DIR}/${p}.yaml"
-		if [[ -f "$pfile" ]]; then
-			support="$(yq -r '.ossm_support // "unknown"' "$pfile")"
-			desc="$(yq -r '.description // ""' "$pfile" | head -1)"
-			echo "  ${step}. [${p}] (${support}) — ${desc}"
-		else
-			echo "  ${step}. [${p}] — PROFILE NOT FOUND: ${pfile}"
+	if ((RUN_SETUP)); then show "${SETUP_CMD[@]}"; fi
+	for p in "${PASSES[@]}"; do
+		echo "# pass ${p}"
+		if [[ "$p" != baseline ]]; then
+			show "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
+				--state-dir "${SWEEP_DIR}/${p}/state" --rollout-timeout "$ROLLOUT_TIMEOUT"
 		fi
-		((step++))
+		if [[ "$SUITE" == churn-dataplane ]]; then
+			echo "kubectl scale deployment -l churn-target=true --replicas=${CHURN_BASE_REPLICAS:-1}  # each context"
+		fi
+		echo "sleep ${SETTLE_SEC}"
+		n=1
+		while probe_argv "$n" "$p" "${SWEEP_DIR}/${p}"; do show "${PROBE_ARGV[@]}"; n=$((n + 1)); done
+		if [[ "$p" != baseline ]]; then
+			show "${TUNING_DIR}/002-revert-profile.sh" --state-dir "${SWEEP_DIR}/${p}/state" \
+				--rollout-timeout "$ROLLOUT_TIMEOUT"
+		fi
 	done
+	show "${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown --output "${SWEEP_DIR}/sweep-comparison.md"
+	if ((RUN_CLEANUP)); then show "${CLEANUP_CMD[@]}"; fi
+	if ((GITOPS_PAUSE)); then
+		show "${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE"
+	fi
+	echo ""
+	echo "--- Checking probe arguments (each probe's --dry-run) ---"
+	check_dir="$(mktemp -d)"
+	n=1
+	while probe_argv "$n" baseline "$check_dir"; do
+		if ! "${PROBE_ARGV[@]}" --dry-run >"${check_dir}/check.log" 2>&1; then
+			cat "${check_dir}/check.log" >&2
+			rm -rf "$check_dir"
+			die "probe rejected its arguments: $(show "${PROBE_ARGV[@]}")"
+		fi
+		echo "  ok: $(basename "${PROBE_ARGV[0]}")"
+		n=$((n + 1))
+	done
+	rm -rf "$check_dir"
+	echo "=== Dry run complete ==="
 	exit 0
 fi
 
-mkdir -p "$SWEEP_DIR"
+# --- Live run -------------------------------------------------------------------
+python3 -I -c 'import yaml' 2>/dev/null \
+	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
+KUBECTL=()
+resolve_kubectl KUBECTL
 
-{
-	echo "# Tuning sweep — ${RUN_ID}"
-	echo "# SUITE=${SUITE}"
-	echo "# CONTEXTS=${CONTEXTS_CSV}"
-	echo "# PROFILES=${PROFILES[*]}"
-	echo "# SETTLE_SEC=${SETTLE_SEC}"
-	echo "# BASELINE=${INCLUDE_BASELINE}"
-} > "${SWEEP_DIR}/sweep-metadata.txt"
+ACTIVE_STATE_DIR=""
+GITOPS_PAUSED=0
 
-run_probe() {
-	local label="$1"
-	local result_dir="${SWEEP_DIR}/${label}"
-	mkdir -p "$result_dir"
-
-	echo ""
-	echo ">>> Running probe for: ${label}"
-	echo "    Settling for ${SETTLE_SEC}s..."
-	sleep "$SETTLE_SEC"
-
-	echo "    Executing: $(basename "$PROBE_SCRIPT") --contexts ${CONTEXTS_CSV}"
-	# P0/P4: the probe is piped through tee, so the pipeline's `$?` is tee's (always 0)
-	# and a probe failure was silently swallowed — recording nothing and continuing as
-	# if the profile measured cleanly. `set -o pipefail` is on, but a bare failing
-	# pipeline under `set -e` would instead ABORT the whole multi-profile sweep. So we
-	# capture PIPESTATUS[0] (the probe's real exit) and treat non-zero as a failed
-	# profile: warn, drop a PROBE_FAILED marker in the result dir for 004-compare to see,
-	# and continue to the next profile. The probe owns its own per-suite TSV; on success
-	# it is copied below, on failure no TSV is copied (the profile is visibly absent).
-	"$PROBE_SCRIPT" --contexts "$CONTEXTS_CSV" \
-		2>&1 | tee "${result_dir}/probe-output.log"
-	local probe_rc="${PIPESTATUS[0]}"
-	if (( probe_rc != 0 )); then
-		echo "warn: probe for '${label}' exited ${probe_rc}; recording PROBE_FAILED and continuing to next profile" >&2
-		echo "PROBE_FAILED rc=${probe_rc} $(date -u -Iseconds)" > "${result_dir}/PROBE_FAILED"
-		return 0
+# EXIT trap: revert a profile left applied, then resume Argo CD. Never aborts.
+on_exit() {
+	local sd="$ACTIVE_STATE_DIR"
+	if [[ -n "$sd" && -f "${sd}/active-profile" ]]; then
+		echo ">>> reverting $(<"${sd}/active-profile") before exit" >&2
+		"${TUNING_DIR}/002-revert-profile.sh" --state-dir "$sd" --rollout-timeout "$ROLLOUT_TIMEOUT" >&2 \
+			|| echo "warn: revert failed; re-run: ./tests/tuning/002-revert-profile.sh --state-dir ${sd}" >&2
 	fi
-
-	local suite_results="${SUITE_DIR}/results"
-	if [[ -d "$suite_results" ]]; then
-		local latest
-		latest="$(find "$suite_results" -maxdepth 1 -name '*.tsv' -newer "${result_dir}" -type f 2>/dev/null | head -1)"
-		if [[ -n "$latest" ]]; then
-			cp "$latest" "${result_dir}/"
-			echo "    Results copied to: ${result_dir}/$(basename "$latest")"
-		fi
+	if ((GITOPS_PAUSED)); then
+		"${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE" >&2 \
+			|| echo "warn: Argo CD still paused; run: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${PAUSE_STATE}" >&2
 	fi
 }
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-step=1
+mkdir -p "$SWEEP_DIR"
+{
+	echo "# SUITE=${SUITE}"
+	echo "# RUN_ID=${RUN_ID}"
+	echo "# CONTEXTS=${CONTEXTS_CSV}"
+	echo "# PASSES=$(IFS=,; echo "${PASSES[*]}")"
+	echo "# SETTLE_SEC=${SETTLE_SEC}"
+	if [[ "$SUITE" == churn-dataplane ]]; then echo "# CHURN_RATE=${CHURN_RATE}"; fi
+	echo "# HARNESS_SHA=$(harness_sha)"
+} >"${SWEEP_DIR}/sweep-metadata.txt"
 
-if ((INCLUDE_BASELINE)); then
-	echo ""
-	echo "=== [${step}/${total}] Baseline measurement (no profile) ==="
-	run_probe "baseline"
-	((step++))
+if ((GITOPS_PAUSE)); then
+	# Set first: a partial pause is still undone by the EXIT trap.
+	GITOPS_PAUSED=1
+	"${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE" \
+		|| die "could not pause Argo CD auto-sync"
 fi
 
-for p in "${PROFILES[@]}"; do
-	pfile="${PROFILES_DIR}/${p}.yaml"
-	[[ -f "$pfile" ]] || { echo "WARNING: profile not found: ${pfile} — skipping"; ((step++)); continue; }
+while IFS= read -r kv; do
+	case "$kv" in
+	TUNING_BASELINE=*) TUNING_BASELINE="${kv#*=}" ;;
+	SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
+	esac
+done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 
+if ((RUN_SETUP)); then
+	echo "--- Suite setup ---"
+	"${SETUP_CMD[@]}" || die "suite setup failed"
+fi
+
+# Run one pass's probe(s) into its result directory.
+run_pass() {
+	local label="$1" dir="${SWEEP_DIR}/$1" n=1 rc
+	mkdir -p "$dir"
+	if [[ "$SUITE" == churn-dataplane ]]; then
+		# A churn phase leaves churn-target replicas mixed; start each pass from base.
+		for ctx in "${CONTEXTS[@]}"; do
+			"${KUBECTL[@]}" --context="$ctx" -n "${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" scale deployment \
+				-l churn-target=true --replicas="${CHURN_BASE_REPLICAS:-1}" >/dev/null \
+				|| echo "warn: ${ctx}: churn-target reset failed" >&2
+		done
+	fi
+	echo "--- Settle ${SETTLE_SEC}s ---"
+	sleep "$SETTLE_SEC"
+	while probe_argv "$n" "$label" "$dir"; do
+		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
+		rc=0
+		"${PROBE_ARGV[@]}" 2>&1 | tee -a "${dir}/probe-output.log" || rc=${PIPESTATUS[0]}
+		if ((rc != 0)); then
+			echo "warn: probe for ${label} exited ${rc}; marking PROBE_FAILED" >&2
+			echo "PROBE_FAILED rc=${rc} $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${dir}/PROBE_FAILED"
+			return 0
+		fi
+		n=$((n + 1))
+	done
+}
+
+ABORTED=0
+step=0
+for p in "${PASSES[@]}"; do
+	step=$((step + 1))
 	echo ""
-	echo "=== [${step}/${total}] Profile: ${p} ==="
-
-	state_dir="${SWEEP_DIR}/${p}/state"
-	# Issue #19: mark this profile active BEFORE apply so the EXIT/INT/TERM trap can
-	# revert it if the apply, probe, or revert is interrupted or aborts mid-way.
-	ACTIVE_STATE_DIR="$state_dir"
-
-	echo "--- Applying profile ---"
-	# R3-1 (B1 class): apply is the most probable per-profile failure at scale (a
-	# rollout-timeout when the tuned istiod won't go Ready). Bare under set -e it would
-	# abort the whole multi-profile sweep, discarding every completed profile (004-compare
-	# runs separately, post-sweep). On failure: warn, drop a SETUP_FAILED marker in the
-	# profile result dir (same mechanism as run_probe's PROBE_FAILED — 004-compare skips
-	# a marker-only dir, so the profile is visibly absent rather than silently aborting),
-	# ATTEMPT a best-effort revert (so istiod returns to default for the next profile),
-	# then continue. Reserve die for whole-run preconditions only.
-	if ! "${TUNING_DIR}/001-apply-profile.sh" \
-		--profile "$pfile" \
-		--contexts "$CONTEXTS_CSV" \
-		--state-dir "$state_dir" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT"; then
-		echo "warn: [profile ${p}] apply failed; recording SETUP_FAILED and continuing to next profile" >&2
-		mkdir -p "${SWEEP_DIR}/${p}"
-		echo "SETUP_FAILED (001-apply-profile) $(date -u -Iseconds)" > "${SWEEP_DIR}/${p}/SETUP_FAILED"
-		echo "--- Best-effort revert after apply failure ---"
-		"${TUNING_DIR}/002-revert-profile.sh" \
-			--state-dir "$state_dir" \
-			--contexts "$CONTEXTS_CSV" \
-			--rollout-timeout "$ROLLOUT_TIMEOUT" || \
-			echo "warn: [profile ${p}] best-effort revert after apply failure also failed; istiod may be left in a non-default config (next profile re-applies)" >&2
-		# Best-effort revert attempted (002 removes active-profile on success); clear the
-		# trap's active-profile marker so EXIT does not double-revert (#19).
-		ACTIVE_STATE_DIR=""
-		((step++))
+	echo "=== [${step}/${#PASSES[@]}] ${p} ==="
+	if [[ "$p" == baseline ]]; then
+		run_pass baseline
 		continue
 	fi
-
-	run_probe "$p"
-
-	echo "--- Reverting profile ---"
-	# R3-1: a bare revert failure under set -e would abort the sweep AND leave istiod
-	# stuck in this profile's non-default tuning. Warn and continue instead — the next
-	# profile's apply overwrites the config anyway. Never abort.
-	"${TUNING_DIR}/002-revert-profile.sh" \
-		--state-dir "$state_dir" \
-		--contexts "$CONTEXTS_CSV" \
-		--rollout-timeout "$ROLLOUT_TIMEOUT" || \
-		echo "warn: [profile ${p}] revert failed; istiod may be left in this profile's non-default config (next profile re-applies)" >&2
-	# Revert attempted for this profile; clear the trap marker so a later interrupt
-	# (e.g. during the settle/next profile) does not redundantly re-revert it (#19).
+	state_dir="${SWEEP_DIR}/${p}/state"
+	ACTIVE_STATE_DIR="$state_dir"
+	if ! "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
+		--state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
+		echo "warn: applying ${p} failed; marking SETUP_FAILED" >&2
+		echo "SETUP_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/SETUP_FAILED"
+	else
+		run_pass "$p"
+	fi
+	if [[ -f "${state_dir}/active-profile" ]]; then
+		if ! "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
+			echo "REVERT_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/REVERT_FAILED"
+			echo "error: reverting ${p} failed; stopping the sweep so later passes are not contaminated" >&2
+			ABORTED=1
+			break
+		fi
+	fi
 	ACTIVE_STATE_DIR=""
-
-	echo "--- Post-revert settle: ${SETTLE_SEC}s ---"
-	sleep "$SETTLE_SEC"
-
-	((step++))
 done
 
 echo ""
-echo "=== Sweep complete ==="
-echo "    Results: ${SWEEP_DIR}/"
-echo "    Compare: ./tests/tuning/004-compare-profiles.sh --results-dir ${SWEEP_DIR}"
+"${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown \
+	--output "${SWEEP_DIR}/sweep-comparison.md" || echo "warn: comparison failed" >&2
+
+if ((RUN_CLEANUP)); then
+	echo "--- Suite cleanup ---"
+	"${CLEANUP_CMD[@]}" || echo "warn: suite cleanup failed; re-run: $(show "${CLEANUP_CMD[@]}")" >&2
+fi
+
+echo "=== Sweep ${RUN_ID} $( ((ABORTED)) && echo "STOPPED (revert failed)" || echo "complete") ==="
+echo "    Results:    ${SWEEP_DIR}/"
+echo "    Comparison: ${SWEEP_DIR}/sweep-comparison.md"
+if ((ABORTED)); then exit 1; fi

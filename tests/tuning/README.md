@@ -1,329 +1,120 @@
-# Performance Tuning Test Suite
+# Tuning profiles
 
-Apply Istio tuning profiles to a live mesh, measure their impact using the
-existing test suites, and compare results across profiles.
-
-## How It Works
-
-1. **001-apply-profile.sh** patches the Istio CR and deploys any additional
-   resources (Sidecar CRs, Telemetry API objects, DestinationRules) defined
-   by a profile.
-2. The operator runs one or more existing test suite probes (controlplane,
-   propagation, dataplane, churn, churn-dataplane) against the tuned mesh.
-3. **002-revert-profile.sh** restores the Istio CR to its pre-patch state
-   and deletes any resources the profile deployed.
-4. **003-run-tuning-sweep.sh** automates the full cycle: for each profile,
-   apply → run probes → collect results → revert.
-5. **004-compare-profiles.sh** reads results across profile-tagged
-   subdirectories and emits a side-by-side comparison.
-
-## Profiles
-
-Each profile is a YAML file under `profiles/` containing:
-
-- A human-readable description and expected impact
-- An `ossm_support` field indicating Red Hat support status
-- An `istio_cr_patch` (strategic-merge patch for the Istio CR)
-- A `resources` list (additional Kubernetes objects to apply)
-
-### OSSM Support Status
-
-| Status | Meaning |
-|--------|---------|
-| `supported` | Fully supported on OSSM 3.x. Documented by Red Hat as a standard Istio API or Sail operator field. |
-| `configurable` | Mechanically works via the Sail operator's Helm values passthrough (`spec.values.pilot.env`) but NOT explicitly documented by Red Hat for OSSM 3. Red Hat support coverage for issues caused by non-default values is uncertain. |
-| `not-supported-multicluster` | Supported on OSSM for single-cluster only. Not available for multicluster topologies. |
-| `not-supported` | Requires external projects not included in or supported by OSSM. |
-
-### Profile Summary
-
-| # | Profile | Tier | OSSM Support | Primary Lever | Expected Impact |
-|---|---------|------|-------------|---------------|-----------------|
-| 01 | sidecar-scoping | 1 | **Supported** | Sidecar CR in root namespace | 80-95% proxy config size reduction |
-| 02 | discovery-selectors | 1 | **Supported** | meshConfig.discoverySelectors | istiod ignores non-mesh namespaces |
-| 03 | push-throttling | 1 | **Configurable** | PILOT_DEBOUNCE_*, PILOT_PUSH_THROTTLE | Fewer push storms, lower CPU |
-| 04 | istiod-resources | 1 | **Supported** | pilot resources (GOMEMLIMIT auto-derived) | Prevents OOM, faster pushes |
-| 05 | proxy-resources | 1 | **Supported** | global.proxy.resources | Eliminates sidecar CPU throttling |
-| 06 | xds-cache-tuning | 2 | **Configurable** | Disable CDS/RDS cache | Lower propagation delay (CPU tradeoff) |
-| 07 | telemetry-filtering | 2 | **Supported** | Telemetry API metric overrides | 40-50% metric volume reduction |
-| 08 | access-log-filtering | 2 | **Supported** | Telemetry API access log filter | 95-99% log volume reduction |
-| 09 | gateway-scoping | 2 | **Configurable** (experimental upstream) | PILOT_FILTER_GATEWAY_CLUSTER_CONFIG | Gateway config size reduction |
-| 10 | envoy-concurrency | 3 | **Supported** | meshConfig.defaultConfig.concurrency | Match threads to CPU limits |
-| 11 | traffic-exclusions | 3 | **Supported** | proxy.excludeOutboundPorts | Bypass proxy for DB/cache ports |
-| 12 | connection-pools | 3 | **Supported** | DestinationRule connection pool | Circuit breaking + load distribution |
-| 13 | dns-proxy | 3 | **Supported** | DNS capture + auto-allocate | Reduced CoreDNS pressure |
-
-### Profiles Using Undocumented Pilot Env Vars (Configurable)
-
-**03-push-throttling**, **06-xds-cache-tuning**, and **09-gateway-scoping**
-use `PILOT_*` environment variables set through `spec.values.pilot.env` in
-the Sail operator Istio CR. The Sail operator passes all Helm chart values
-through to Istio, so these variables are mechanically configurable. However,
-Red Hat does not document individual pilot env vars for OSSM 3 — they defer
-to upstream Istio documentation.
-
-What this means in practice:
-- The variables **work** — they are standard upstream Istio features used in
-  production by Airbnb, Expedia, and many others.
-- Red Hat **support coverage** for issues caused by non-default pilot env var
-  values is uncertain. Red Hat may ask you to reproduce issues with default
-  values before investigating.
-- **09-gateway-scoping** uses `PILOT_FILTER_GATEWAY_CLUSTER_CONFIG`, which
-  is defined in `pilot/pkg/features/experimental.go` upstream and has known
-  stability issues (#29131, #37997, #44439). This is the highest-risk profile
-  in the configurable set.
-
-**04-istiod-resources** is fully GA (pilot resources are documented and
-supported). `GOMEMLIMIT` is auto-derived from `limits.memory` by the istiod
-Helm chart via a `resourceFieldRef`. Do **not** set `GOMEMLIMIT` manually via
-`pilot.env` — the Deployment will have both `value` and `valueFrom` on the
-same env var, which Kubernetes rejects, causing Sail operator reconciliation
-to fail silently (limits are dropped from the Deployment).
+Measure what an Istio tuning change does to a test suite. A sweep measures the
+GitOps baseline, then applies each profile, runs the suite's probe and reverts,
+and writes a comparison table.
 
 ## Prerequisites
 
-- `oc` or `kubectl`, `jq`, `yq` (v4+)
-- Multi-primary mesh deployed (see root README)
-- Kube contexts configured for each cluster
-- At least one existing test suite available to run probes
+- bash 4+, `kubectl` or `oc`, and `python3` with PyYAML.
+- The mesh deployed by GitOps (`charts/spoke-ossm`). Its baseline already has root
+  Sidecar scoping, discoverySelectors, and client-metric and access-log filtering.
+  Profiles change things on top of that.
+- Contexts for the mesh members and for the ACM hub (Argo CD runs there).
 
-## Quick Start
+## Profiles
+
+| Profile | Change | OSSM | Suites |
+| --- | --- | --- | --- |
+| `01-push-throttling` | istiod env `PILOT_DEBOUNCE_AFTER=200ms`, `PILOT_DEBOUNCE_MAX=15s`, `PILOT_PUSH_THROTTLE=20` | configurable | churn, churn-dataplane, propagation, controlplane |
+| `02-xds-cache-off` | istiod env `PILOT_ENABLE_CDS_CACHE=false`, `PILOT_ENABLE_RDS_CACHE=false` | configurable | propagation, churn, controlplane |
+| `03-gateway-cluster-filter` | istiod env `PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=true` (experimental) | configurable | controlplane, dataplane |
+| `04-connection-pools` | DestinationRule `tuning-connection-pool` in `istio-system` for `*.svc.cluster.local` | supported | dataplane, churn-dataplane |
+
+**supported**: a documented OSSM API. **configurable**: set through
+`spec.values.pilot.env` on the Istio CR; Red Hat does not document the variable.
+Each profile YAML lists the Istio 1.30 defaults it changes.
+
+To measure a baseline lever (Sidecar scoping, discoverySelectors, telemetry), toggle
+`tuningBaseline.*` in `charts/spoke-ossm/values.yaml` through Git.
+
+## Run a sweep
 
 ```bash
-# Apply a single profile and inspect what changed.
-./tests/tuning/001-apply-profile.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --profile profiles/01-sidecar-scoping.yaml
-
-# Run the controlplane probe to measure impact.
-./tests/controlplane/002-collect-resource-metrics.sh \
-  --contexts cluster-001,cluster-002,cluster-003
-
-# Revert the profile.
-./tests/tuning/002-revert-profile.sh \
-  --contexts cluster-001,cluster-002,cluster-003
-
-# Or use the sweep orchestrator to automate multiple profiles.
-./tests/tuning/003-run-tuning-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --profiles 01-sidecar-scoping,03-push-throttling,06-xds-cache-tuning \
-  --suite controlplane
-
-# Compare results across profiles.
-./tests/tuning/004-compare-profiles.sh --format markdown
+./tests/tuning/003-run-tuning-sweep.sh --suite churn \
+  --contexts <mesh-a-ctx>,<mesh-b-ctx> --gitops-context <acm-hub-ctx> \
+  --profiles 02-xds-cache-off --settle 30 --dry-run
 ```
 
-## Sweep Orchestrator
+`--dry-run` prints every command and checks the probe arguments; remove it to run.
+`--suite` is one of `propagation`, `controlplane`, `dataplane`, `churn`,
+`churn-dataplane`. The first context is the source for suites that take one.
+Without `--profiles` the sweep runs every profile. Other options: `--no-baseline`,
+`--skip-setup`, `--keep-workloads`, `--churn-rate N` (see `--help`).
 
-`003-run-tuning-sweep.sh` runs the full apply → probe → revert cycle for
-each profile. For each profile it:
+The suite's setup and probes take their sizes from `config/options.env`. Override
+them in the environment, for example `CHURN_ITERATIONS=2 ./tests/tuning/003-run-tuning-sweep.sh ...`.
 
-1. Saves the current Istio CR as a baseline snapshot
-2. Applies the profile patch + resources
-3. Waits for istiod to roll out the new configuration
-4. Runs the specified test suite probe(s)
-5. Collects results into `results/sweep-<RUN_ID>/<profile-name>/`
-6. Reverts the Istio CR and deletes profile resources, then runs the post-revert
-   mesh-health check (issue #19)
-7. Waits for istiod to stabilize before the next profile
+The sweep:
 
-An **EXIT / INT / TERM trap** guarantees the currently-active profile is reverted even
-if the sweep is interrupted or aborts mid-way, so an interrupted run can never leave the
-mesh modified (see "Guaranteed revert on exit/failure/interrupt" below).
+1. Pauses Argo CD auto-sync of the `<cluster>-ossm` Applications (006).
+2. Runs the suite's setup once.
+3. For the baseline and each profile: apply (001), wait `--settle`, run the probe,
+   revert (002). A failed revert stops the sweep.
+4. Writes `sweep-comparison.md` (004), runs the suite's cleanup, resumes Argo CD.
 
-The `--suite` flag accepts: `controlplane`, `propagation`, `dataplane`,
-`churn`, `churn-dataplane`, or a comma-separated combination.
+On Ctrl-C or an error the sweep still reverts the active profile and resumes Argo CD.
+It leaves the suite's workloads; remove them with the suite's cleanup script.
 
-## Results Format
-
-Results are organized by profile under the sweep directory:
+## Results
 
 ```
-results/sweep-<RUN_ID>/
-├── baseline/
-│   └── <suite>-<RUN_ID>.tsv
-├── 01-sidecar-scoping/
-│   └── <suite>-<RUN_ID>.tsv
-├── 03-push-throttling/
-│   └── <suite>-<RUN_ID>.tsv
-└── sweep-comparison.md
+tests/tuning/results/sweep-<RUN_ID>/
+├── sweep-metadata.txt
+├── sweep-comparison.md      # means of valid rows; profiles show % change vs baseline
+├── baseline/                # suite TSV + .md, probe-output.log
+└── 01-push-throttling/      # same, plus state/ (revert data)
 ```
 
-If a profile's apply or probe fails, the sweep does **not** abort — it records a
-marker file in that profile's directory (`SETUP_FAILED` for an apply/rollout failure,
-`PROBE_FAILED` for a probe failure) instead of a `.tsv`, attempts a best-effort revert
-(on apply failure) so istiod returns to default, and continues to the next profile.
-`004-compare-profiles.sh` skips marker-only directories, so a failed profile is visibly
-absent from the comparison table while the marker remains for operator inspection.
+`SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
+table. Data-plane rows are split by target class (local or remote) and QPS. Re-render:
+`./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
-### Guaranteed revert on exit/failure/interrupt (issue #19)
+## One profile by hand
 
-> **⚠️ Why this matters.** A tuning profile left active on the Istio CR after a
-> sweep is not a cosmetic leak. When a stale `meshConfig.discoverySelectors`
-> override survived an interrupted sweep, istiod stopped distributing the
-> `istio-ca-root-cert` configmap to newly-created namespaces, so every subsequent
-> suite's pods hung in `Init:0/2` — the whole harness broke until the override was
-> removed by hand.
+```bash
+./tests/tuning/006-gitops-pause.sh --gitops-context <acm-hub-ctx> --pause
+./tests/tuning/001-apply-profile.sh --profile 01-push-throttling --contexts <mesh-a-ctx>,<mesh-b-ctx>
+# ... run a suite probe ...
+./tests/tuning/002-revert-profile.sh --state-dir tests/tuning/results/state-01-push-throttling
+./tests/tuning/006-gitops-pause.sh --resume
+```
 
-To make this impossible, `003-run-tuning-sweep.sh` installs an **EXIT / INT / TERM
-trap** that reverts whatever profile is currently active before the script exits —
-whether it exits normally, aborts on an unexpected error (`set -e`), or is
-interrupted with Ctrl-C / `kill`. The trap is **idempotent**: it tracks the active
-profile in `ACTIVE_STATE_DIR` (set right before each apply, cleared right after each
-successful revert), so it is a safe no-op when no profile is active and it never
-double-reverts an already-reverted profile. A signal handler exits with the
-conventional `128+signo` status so the EXIT trap fires exactly once.
+`006-gitops-pause.sh --gitops-context <acm-hub-ctx> --status` lists the sync windows.
 
-After every revert, `002-revert-profile.sh` runs a **post-revert mesh-health check**
-(issue #19) that asserts the mesh is actually back to default:
+## How apply, revert and the Argo CD pause work
 
-1. **Always:** the known tuning-override fields (`TUNING_REVERT_DIRTY_PATHS` —
-   `meshConfig.discoverySelectors`, `pilot.env.PILOT_ENABLE_CDS_CACHE`, …) must be
-   **absent** from the live Istio CR. A surviving field FAILs the check.
-2. **Opt-in** (`TUNING_REVERT_HEALTHCHECK_NS_PROBE=1`): create a throwaway namespace,
-   label it `istio-discovery=enabled` so it is discoverable under the campaign
-   baseline, and confirm the `istio-ca-root-cert` configmap lands in it within
-   `TUNING_REVERT_HEALTHCHECK_TIMEOUT` — an end-to-end proof that cert distribution
-   to **new** namespaces works again. The namespace is deleted afterward.
+- **001** saves the Istio CR and builds a merge patch that restores the saved value,
+  or removes the key, at every path the profile sets. It refuses to overwrite a
+  resource that already exists, so it never touches baseline objects.
+- **002** applies that patch, deletes the profile's resources, then checks that those
+  paths and resources match the pre-apply state. On failure it exits 3 and keeps the
+  `active-profile` marker so it can be retried. With
+  `TUNING_REVERT_HEALTHCHECK_NS_PROBE=1` it also checks that istiod still delivers
+  `istio-ca-root-cert` to a new namespace.
+- **006** adds a deny sync window for the Applications to their AppProject. Resume
+  removes it from the context and namespace recorded at pause. Patching an
+  Application's `syncPolicy` would be undone by the ApplicationSet controller.
 
-If the mesh is left dirty, `002` prints a loud banner and **exits 3** so the operator
-sees the mesh needs manual attention; the sweep and `005-cleanup.sh` both tolerate
-this exit code (they already wrap revert in `|| warn`). Both layers are
-`--dry-run`-safe and offline-safe to define (they only touch a cluster at revert
-time). Tune the gate via the `TUNING_REVERT_HEALTHCHECK_*` and
-`TUNING_REVERT_DIRTY_PATHS` knobs in `config/options.env`.
+## After a killed run
 
-### Baseline-integrity hazard (issue #19)
+If the sweep could not clean up (for example `kill -9` or a lost shell), run:
 
-> **⚠️ The baseline snapshot is captured from the LIVE Istio CR, which makes it
-> cumulative.** `001-apply-profile.sh` saves the *current* Istio CR as the baseline
-> just before patching. If the mesh was **already dirty** at capture time — e.g. a
-> prior sweep was interrupted before its revert, or an out-of-band patch left a
-> tuning override active — that override is **baked into the snapshot**. A later
-> "revert" then faithfully restores the dirty state, and the mesh is never actually
-> returned to default. This is the root-cause class behind issue #19.
+```bash
+./tests/tuning/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
+```
 
-`001` (at capture) and `002` (at restore) both **detect and warn loudly** when a
-baseline YAML already contains a known tuning-override field
-(`TUNING_REVERT_DIRTY_PATHS`); they never silently rewrite the snapshot, because a
-leaked override cannot be distinguished from legitimate config purely offline. If you
-see this warning, restore the mesh to a clean default before re-capturing.
+It reverts profiles still marked active, deletes leftover profile resources (label
+`istio-scale-tests/tuning-profile`) and resumes recorded Argo CD pauses. Add
+`--results-dir DIR` if the sweep used `--output-dir`. Then run the suite's cleanup.
+001 and 003 refuse to start while a profile is still marked active.
 
-> **Ideal fix (follow-up):** capture the baseline from the **GitOps / Argo source of
-> truth** (the rendered chart values the operator reconciles toward) rather than the
-> live CR, so a transiently-dirty live CR can never contaminate the baseline. The
-> mesh is GitOps-managed (see root `AGENTS.md`), so the canonical default lives in
-> the Argo `Application` source, not in the running CR. This is deferred as a
-> follow-up; the detect-and-warn guard above is the in-suite mitigation until then.
+## Adding a profile
 
-## Combining Profiles
-
-Profiles can be combined (stacked) by passing multiple profile names to the
-apply script. They are applied in order; patches are merged. Be aware that
-some combinations may interact:
-
-- `01-sidecar-scoping` + `09-gateway-scoping` — complementary, both scope
-  different proxy types.
-- `03-push-throttling` + `06-xds-cache-tuning` — both reduce push overhead
-  via different mechanisms; effects may compound or overlap.
-- `04-istiod-resources` + `05-proxy-resources` — independent; no interaction.
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `001-apply-profile.sh` | Apply a tuning profile to the live mesh |
-| `002-revert-profile.sh` | Revert the mesh to its pre-profile baseline state, then run the post-revert mesh-health check (#19) |
-| `003-run-tuning-sweep.sh` | Orchestrate apply → probe → revert for multiple profiles |
-| `004-compare-profiles.sh` | Compare results across profiles (text/csv/json/markdown) |
-| `005-cleanup.sh` | Remove all tuning test resources and revert any active profile |
-
-## Campaign baseline (baked supported-only profiles)
-
-For the 20-cluster / 10k-service campaign the mesh comes up
-**production-configured**: the four SUPPORTED levers — **01 sidecar-scoping**,
-**02 discovery-selectors**, **07 telemetry-filtering**, **08
-access-log-filtering** — are baked into `charts/spoke-ossm` (alongside the
-04/05 resource profiles from PR #62) rather than applied at runtime. Each is
-individually toggleable under `tuningBaseline.*` in
-`charts/spoke-ossm/values.yaml`. The runtime profiles under `profiles/` remain
-the A/B sweep mechanism and are unchanged in purpose.
-
-Two correctness notes specific to the baked baseline:
-
-- **Sidecar egress is the cross-namespace graph, not `./*`-only.** The runtime
-  profile's `./*`-local default understates per-proxy config at campaign scale
-  (workloads talk cross-namespace / cross-cluster). The baseline default spans
-  `istio-system` plus the suite + `mesh-verify` namespaces; widen/narrow via
-  `tuningBaseline.sidecar.egressHosts`. The root Sidecar governs the SIDECAR
-  proxies only — the injected ingress/east-west gateways are exempted to `*/*`
-  egress by `workloadSelector` Sidecars in
-  `charts/spoke-ossm/templates/tuning-sidecar.yaml` so the cross-cluster
-  mesh-verify path is not severed.
-  > **Forward-looking (10k scale):** because the gateway proxies carry a `*/*`
-  > (full-mesh) egress view while the sidecars are narrowed, at full 10k-service
-  > scale the gateway istio-proxy RSS / `xds_config` footprint can dominate. Watch
-  > the gateway pods' `memory.limits` (currently 1Gi in the gateway charts) — they
-  > may need raising even though the sidecars are scoped down.
-- **discoverySelectors must cover istio-system.** istiod does NOT auto-include
-  its own namespace, and the east-west / ingress gateways live there, so the
-  baseline ORs a second selector matching
-  `kubernetes.io/metadata.name=istio-system`. Suite namespaces are matched via
-  `istio-discovery=enabled` (stamped by each suite's `namespace.yaml`).
-- **Run provenance: `TUNING_BASELINE` / `SIDECAR_EGRESS_HOSTS`.** Every suite's TSV
-  preamble records which levers were live at run time, **live-queried from the
-  cluster** (not read from chart defaults — the deployed state can diverge from a
-  GitOps/`--set` override). Each lever reads `on` | `off` | `unknown`; `unknown`
-  means istiod or the query was unreachable, **not** that the lever is off — a run
-  carrying any `unknown` is **not comparable** to a fully-resolved run (same caveat
-  as `istiod_restarted`'s `0|1|unknown`). `SIDECAR_EGRESS_HOSTS` records the live
-  root-Sidecar egress graph (`none` when no root Sidecar is applied).
-
-> **⚠️ LOUD WARNING — `egressHosts` namespace parts are EXACT matches, not
-> glob-prefixes.** An Istio Sidecar egress host `"<namespace>/<dnsName>"` matches
-> the namespace part **exactly**: `"controlplane-test/*"` does **NOT** cover
-> `"controlplane-test-0/*"`. So when `controlplane.namespaceCount > 1` the suite
-> mints `controlplane-test-0`, `controlplane-test-1`, … and the bare
-> `controlplane-test/*` entry in `tuningBaseline.sidecar.egressHosts` is **dead
-> (unused)** for those workloads. Raising `controlplane.namespaceCount` therefore
-> **requires adding a `controlplane-test-<i>/*` entry per extra namespace** — the
-> bare `controlplane-test/*` does not glob. (Harmless at the default
-> `namespaceCount=1`, where controlplane lands workloads only in its primary
-> namespace, but a forward-looking trap.)
-
-**Adding a new mesh namespace** (a namespace whose pods carry sidecars and must
-participate in the mesh):
-
-1. Label the namespace `istio-discovery=enabled` — otherwise the campaign
-   baseline's `discoverySelectors` make istiod ignore it entirely (no informers,
-   no proxy config, the workload never gets a sidecar config). Suite
-   `chart/templates/namespace.yaml` templates already stamp this.
-2. Add `"<ns>/*"` to `tuningBaseline.sidecar.egressHosts` — otherwise the
-   namespace is discovered but its sidecars have no egress to it under the root
-   Sidecar's narrowed graph.
-
-Both steps are required; doing only (1) gives a discovered-but-unreachable
-namespace, only (2) gives an egress entry istiod never watches.
-
-> **Do NOT "fix" `mesh-wiring-verify`'s missing labels.** The
-> `mesh-wiring-verify` namespace
-> (`charts/mesh-wiring-verify/templates/namespace.yaml`) is **intentionally**
-> left without `istio.io/rev` and without `istio-discovery=enabled`: it is the
-> always-on wiring health gate, holds **no mesh workloads / no sidecars**, and
-> must not be injected into the mesh it checks. istiod ignoring it under the
-> baseline `discoverySelectors` is correct and desired — adding the label would
-> needlessly pull a non-mesh namespace into istiod's watch set.
-
-## Known Limitations
-
-- **Istio CR patches trigger an istiod restart**: most pilot env var changes
-  require an istiod rollout. The sweep orchestrator waits for rollout
-  completion, but this adds ~60-90s per profile switch.
-- **Discovery selectors (profile 02) require namespace labelling**: the
-  apply script labels mesh namespaces, but namespaces created by other test
-  suites may not have the label. Run setup scripts after applying this profile.
-  Note: each suite's `chart/templates/namespace.yaml` now stamps
-  `istio-discovery: enabled`, so suite namespaces created via their setup
-  scripts are discovered automatically (see "Campaign baseline" below).
-- **Gateway scoping (profile 09) has known upstream bugs**: #29131 and #37997
-  can cause issues with ext_authz and EnvoyFilter references.
+A profile YAML has `description`, `ossm_support` (`supported` or `configurable`),
+optional `ossm_support_detail`, `istio_cr_patch` (under `spec` only; `pilot.env`
+values are quoted strings) and `resources` (DestinationRule, Sidecar, Telemetry or
+EnvoyFilter, with names the baseline does not use). It must change something the
+baseline does not already set. Skip proxy settings (`meshConfig.defaultConfig`,
+`global.proxy`): they only reach pods injected after the change, and the sweep does
+not restart workloads.

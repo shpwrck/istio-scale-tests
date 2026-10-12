@@ -38,7 +38,7 @@
 #     fanout_preflight_istiod, fanout_open, fanout_scrape_all, fanout_record_podset)
 #     depend ONLY on common.sh (die) + timestamp.sh (now_ns) + curl/awk/kubectl.
 #   - The AGGREGATION wrappers (fanout_counter_sum, fanout_counter_by_label_sum,
-#     fanout_gauge_sum, fanout_gauge_invariant, fanout_restart_status) call the
+#     fanout_gauge_sum, fanout_restart_status) call the
 #     metrics.sh extractors, so a consumer using them MUST source tests/lib/metrics.sh
 #     BEFORE tests/lib/fanout.sh. (Propagation uses only the primitives + its own
 #     extract_all_from_file, so it does not need metrics.sh.)
@@ -165,9 +165,11 @@ fanout_open() {
 	shift 5
 	local -a kubectl_argv=("$@")
 
-	local -a pods=()
-	mapfile -t pods < <(fanout_list_istiod_pods "$ctx" "${kubectl_argv[@]}")
-	(( ${#pods[@]} >= 1 )) || die "fanout_open: no Running istiod pods on context $ctx"
+	# _fo_ prefix: a local named like the caller's out-array (e.g. "pods") would
+	# shadow it, and the nameref would write into the local instead.
+	local -a _fo_pods=()
+	mapfile -t _fo_pods < <(fanout_list_istiod_pods "$ctx" "${kubectl_argv[@]}")
+	(( ${#_fo_pods[@]} >= 1 )) || die "fanout_open: no Running istiod pods on context $ctx"
 
 	# Open every pod's port-forward FIRST, then probe all of them concurrently.
 	# A serial open-then-block-on-readiness made the whole open O(sum of per-pod
@@ -176,12 +178,12 @@ fanout_open() {
 	# minutes per context. Backgrounding the readiness polls makes it O(slowest pod).
 	local base port pod i ok=0
 	base="$(fanout_ctx_port_base "$ctx_index")"
-	local -a ports=() probe_pids=() ready_dir
+	local -a _fo_ports=() probe_pids=() ready_dir
 	ready_dir="$(mktemp -d "${TMPDIR:-/tmp}/fanout-ready.XXXXXX")"
-	for i in "${!pods[@]}"; do
-		pod="${pods[i]}"
+	for i in "${!_fo_pods[@]}"; do
+		pod="${_fo_pods[i]}"
 		port=$(( base + i ))
-		ports[i]="$port"
+		_fo_ports[i]="$port"
 		"${kubectl_argv[@]}" --context="$ctx" -n istio-system \
 			port-forward "pod/${pod}" "${port}":15014 >/dev/null 2>&1 &
 		_out_pids+=($!)
@@ -203,9 +205,9 @@ fanout_open() {
 	for i in "${probe_pids[@]}"; do wait "$i" 2>/dev/null || true; done
 	# Collect ready pods in sorted-index order so port = base+i stays stable and a
 	# skipped pod leaves a gap rather than renumbering later pods' ports.
-	for i in "${!pods[@]}"; do
-		pod="${pods[i]}"
-		port="${ports[i]}"
+	for i in "${!_fo_pods[@]}"; do
+		pod="${_fo_pods[i]}"
+		port="${_fo_ports[i]}"
 		if [[ -f "${ready_dir}/${i}.ready" ]]; then
 			_out_ports+=("$port")
 			_out_pods+=("$pod")
@@ -215,7 +217,7 @@ fanout_open() {
 		fi
 	done
 	rm -rf "$ready_dir"
-	(( ok >= 1 )) || die "fanout_open: no istiod pod on context $ctx served /metrics (all ${#pods[@]} replica PF(s) failed)"
+	(( ok >= 1 )) || die "fanout_open: no istiod pod on context $ctx served /metrics (all ${#_fo_pods[@]} replica PF(s) failed)"
 }
 
 # Scrape one pod's /metrics to a file. Returns 0 only if the body is at least
@@ -250,7 +252,7 @@ _fanout_scrape_one() {
 # (and, when the caller loops contexts into one out_dir, pods x contexts). The
 # skew is ALSO persisted to <out_dir>/<prefix>.skew so a caller that discards the
 # stdout (e.g. a poll tick that only cares about the failed count) can still read
-# it back via fanout_scrape_skew_high without re-deriving it.
+# it back without re-deriving it.
 #
 # Usage:
 #   skew_ms=$(fanout_scrape_all <out_dir> <prefix> <port>...) || handle incompleteness
@@ -314,39 +316,17 @@ fanout_scrape_failed_count() {
 	if [[ -s "$f" ]]; then cat "$f"; else echo 0; fi
 }
 
-# Read the per-batch scrape skew (ms) recorded by the most recent fanout_scrape_all
-# for a given <out_dir>/<prefix>. Echoes 0 if no record exists.
-# Usage: fanout_scrape_skew_ms <out_dir> <prefix>
-# shellcheck disable=SC2329
-fanout_scrape_skew_ms() {
-	local f="${1}/${2}.skew"
-	if [[ -s "$f" ]]; then cat "$f"; else echo 0; fi
-}
-
 # Report whether a raw skew value (ms) exceeds FANOUT_MAX_SKEW_MS. Echoes 1 (high
 # — incoherent snapshot, caller should poison the row) or 0, using strict ">" so a
 # batch exactly at the ceiling is NOT high. A non-numeric / empty value is treated
-# as 0 (not high). This is the single comparison primitive both the sidecar-based
-# fanout_scrape_skew_high and callers holding an already-computed skew (e.g. the
-# propagation probe's MAX across the source+remote baseline batches) route through,
-# so the production gate and the unit-tested gate are the same code path.
+# as 0 (not high). Callers pass the skew echoed by fanout_scrape_all (or, in the
+# propagation probe, the MAX across the source+remote baseline batches).
 # Usage: fanout_skew_high_value <skew_ms>
 # shellcheck disable=SC2329
 fanout_skew_high_value() {
 	local skew="${1:-0}"
 	skew="${skew//[^0-9]/}"
 	if (( ${skew:-0} > FANOUT_MAX_SKEW_MS )); then echo 1; else echo 0; fi
-}
-
-# Report whether the most recent fanout_scrape_all batch for <out_dir>/<prefix>
-# exceeded FANOUT_MAX_SKEW_MS. Echoes 1 (high — incoherent snapshot, caller should
-# poison the row) or 0. A 0-skew or absent record is treated as 0 (not high), so a
-# single-pod context (skew is trivially 0) is never flagged. Mirrors
-# fanout_scrape_failed_count's tag-and-filter contract.
-# Usage: fanout_scrape_skew_high <out_dir> <prefix>
-# shellcheck disable=SC2329
-fanout_scrape_skew_high() {
-	fanout_skew_high_value "$(fanout_scrape_skew_ms "$1" "$2")"
 }
 
 # Record the sorted pod-name set for a context to a file (for restart detection).
@@ -411,30 +391,6 @@ fanout_gauge_sum() {
 		total=$(awk -v a="$total" -v b="$v" 'BEGIN { printf "%.0f", a + b }')
 	done
 	echo "$total"
-}
-
-# Replica-INVARIANT gauge across pods (pilot_services: mesh-global registry,
-# identical on every replica). Take each pod's within-pod TOTAL (extract_gauge_sum,
-# PL12 axis 1) then reduce with MAX across pods, NOT sum — summing would 5x a
-# 5-replica mesh and (in propagation P2) break the "services delta >= 1" check.
-# Returns "unknown" only if NO pod reported the gauge.
-# Usage: fanout_gauge_invariant <gauge_name> <metrics_file>...
-# shellcheck disable=SC2329
-fanout_gauge_invariant() {
-	local name="$1"
-	shift
-	local f best="unknown" v
-	for f in "$@"; do
-		[[ -s "$f" ]] || continue
-		v="$(extract_gauge_sum "$f" "$name")"
-		[[ "$v" == "unknown" ]] && continue
-		if [[ "$best" == "unknown" ]]; then
-			best="$v"
-		else
-			best=$(awk -v a="$best" -v b="$v" 'BEGIN { print (b + 0 > a + 0) ? b : a }')
-		fi
-	done
-	echo "$best"
 }
 
 # Merge a histogram across pods by SUMMING each bucket's count (and _sum/_count)

@@ -1,9 +1,5 @@
-{{- define "spoke-east-west-gateway.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
 {{- define "spoke-east-west-gateway.network" -}}
-{{- printf "%s-%s" .Values.clusterName .Values.networkSuffix }}
+{{- printf "%s-%s" (required "clusterName is required (set per cluster by the ApplicationSet)" .Values.clusterName) .Values.networkSuffix }}
 {{- end }}
 
 {{- define "spoke-east-west-gateway.labels" -}}

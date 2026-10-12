@@ -6,13 +6,10 @@
 #   - restarted == 1            (istiod restart mid-iteration; counters reset)
 #   - restarted == unknown      (process_start_time_seconds missing — can't tell)
 #   - p1_overflow == 1          (samples landed in +Inf bucket; quantiles unsafe)
-#   - status != OK              (TIMEOUT_* or DRAIN_TIMEOUT — drain leak)
-#   - scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 19; incoherent snapshot). Live
-#     runs already tag these SCRAPE_INCOMPLETE, but this fallback re-derives
-#     PRE-gate historical TSVs (status=OK with a high recorded skew) without a
-#     probe re-run. Override the ceiling via FANOUT_MAX_SKEW_MS (default 1000).
-# p2_ms values are also excluded when p2_dirty == 1 (EDS counter delta without a
-# confirmed healthy canary endpoint on the remote sidecar; could be unrelated churn).
+#   - status != OK              (TIMEOUT_*, DRAIN_TIMEOUT, RESTART, SCRAPE_INCOMPLETE)
+#   - scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 19; default 1000)
+# p2_ms values are also excluded when p2_dirty == 1 (EDS pushed but the canary
+# never went healthy on that remote's watcher; could be unrelated churn).
 # Reports both n_total (rows considered) and n_valid (rows used).
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION,
@@ -20,7 +17,7 @@
 # report formats.
 #
 # Usage:
-#   ./tests/propagation/005-report-results.sh [--results-dir DIR] [--format text|csv|json|markdown]
+#   ./tests/propagation/005-report-results.sh [--results-dir DIR] [--format text|csv|json|markdown|charts]
 #
 # Examples:
 #   # Default text report from all results:
@@ -68,22 +65,16 @@ Filtering policy (rows excluded from numeric aggregation):
   restarted == 1 or unknown
   p1_overflow == 1
   status != OK   (TIMEOUT_*, DRAIN_TIMEOUT, RESTART, SCRAPE_INCOMPLETE)
-  scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS   (fallback: re-derives PRE-gate
-                 historical TSVs written status=OK with a high recorded skew, so
-                 they drop without a probe re-run; rows with no recorded skew kept)
+  scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS
 P2 values are additionally suppressed when p2_dirty == 1.
 
 n_total / n_valid: rows considered vs rows used after the above filtering.
 
 Environment:
-  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 fallback filter
-                      above (default 1000). Set it to the value the run was
-                      produced with to re-derive a historical sweep exactly.
-  PROPAGATION_PERCENTILE_MIN_N  Minimum cross-run sample count for a TAIL
-                      percentile (p95/p99) to be reported (default 20; 0 disables).
-                      Below it, p95/p99 are N/A — the nearest-rank percentile() pins
-                      p99 to max(n) at small n, so a single worst sample would show
-                      as a real p99. p50 is always reported (robust at low n).
+  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 filter (default 1000).
+  PROPAGATION_PERCENTILE_MIN_N  Minimum sample count before p95/p99 are reported
+                      (default 20; 0 disables). Below it p95/p99 are N/A
+                      (null in JSON). p50 is always reported.
 EOF
 }
 
@@ -378,7 +369,7 @@ NF < 10 { next }
 	if (p1 != "TIMEOUT" && p1 != "N/A" && p1 ~ /^[0-9]+$/) {
 		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = p1 + 0
 	}
-	# Skip p2 sample if dirty (EDS bumped without a matching pilot_services delta).
+	# Skip p2 sample if dirty (EDS bumped but P3 did not succeed).
 	if (p2_dirty != "1" && p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) {
 		p2_n[ms]++; p2_vals[ms, p2_n[ms]] = p2 + 0
 	}
@@ -403,7 +394,7 @@ function sort_arr(arr, n,    i, j, tmp) {
 		arr[j+1] = tmp
 	}
 }
-function percentile(arr, n, pct,    idx, min_n) {
+function percentile(arr, n, pct,    idx, rank, min_n) {
 	if (n == 0) return "N/A"
 	# P1-7: min-n gate for TAIL percentiles. percentile() is nearest-rank (no
 	# interpolation), so for a high pct at small n the index pins to the top
@@ -413,7 +404,10 @@ function percentile(arr, n, pct,    idx, min_n) {
 	# and is threaded from PROPAGATION_PERCENTILE_MIN_N; 0 disables the gate.
 	min_n = (PCT_MIN_N == "" ? 20 : PCT_MIN_N + 0)
 	if (pct >= 95 && min_n > 0 && n < min_n) return "N/A"
-	idx = int(n * pct / 100)
+	# Nearest rank = ceil(n * pct / 100). Flooring it made p50 of 3 samples the minimum.
+	rank = n * pct / 100
+	idx = int(rank)
+	if (rank - idx > 1e-9) idx++
 	if (idx < 1) idx = 1
 	if (idx > n) idx = n
 	return arr[idx]
@@ -435,10 +429,11 @@ function asorti_seen(    i, k) {
 	delete __sorted
 	__n = 0
 	for (k in seen) { __sorted[++__n] = k }
-	# insertion sort
+	# insertion sort, numeric: keys are mesh sizes, and array subscripts are
+	# strings, so a plain > would order 10 before 2.
 	for (i = 2; i <= __n; i++) {
 		__tmp = __sorted[i]; j = i - 1
-		while (j >= 1 && __sorted[j] > __tmp) { __sorted[j+1] = __sorted[j]; j-- }
+		while (j >= 1 && __sorted[j]+0 > __tmp+0) { __sorted[j+1] = __sorted[j]; j-- }
 		__sorted[j+1] = __tmp
 	}
 }
@@ -527,15 +522,14 @@ report_endpoint_csv() {
 	}'
 }
 
-# Metric glossary appended to the END of the markdown summary (#17). Definitions are
-# pulled from tests/propagation/README.md; units/source/caveats mirror it, not invented here.
+# Metric glossary appended to the end of the markdown summary.
 glossary_section() {
 	cat <<'GLOSSARY'
 
 ## Glossary
 
-Definitions for every phase and statistic column in the tables above. Sourced from
-`tests/propagation/README.md`. Each phase measures one stage of a single config change
+Definitions for every phase and statistic column in the tables above (see also
+`tests/propagation/README.md`). Each phase measures one stage of a single config change
 propagating across the mesh; all values are **milliseconds**. Remote phases (P2/P3) are
 undefined at mesh size 1 (no remote cluster). Rows are dropped (not counted in `n_valid`)
 when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additionally drops
@@ -647,7 +641,7 @@ report_endpoint_markdown() {
 		}
 	}'
 
-	# #17: metric glossary at the very end of the markdown summary.
+	# Metric glossary at the very end of the markdown summary.
 	glossary_section
 }
 
@@ -657,6 +651,7 @@ report_endpoint_json() {
 	format_preamble_json
 	printf ',"rows":'
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
+	function jnum(v) { return (v == "N/A" ? "null" : v) }
 	function json_obj(ms, phase, src, n,    arr, sum, i) {
 		if (n == 0) {
 			return sprintf("{\"mesh_size\":\"%s\",\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0}", ms, phase, n_total[ms])
@@ -666,7 +661,7 @@ report_endpoint_json() {
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		return sprintf("{\"mesh_size\":\"%s\",\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":%d,\"min_ms\":%d,\"max_ms\":%d,\"avg_ms\":%d,\"p50_ms\":%s,\"p95_ms\":%s,\"p99_ms\":%s}",
 			ms, phase, n_total[ms], n, arr[1], arr[n], sum/n,
-			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99))
+			jnum(percentile(arr, n, 50)), jnum(percentile(arr, n, 95)), jnum(percentile(arr, n, 99)))
 	}
 	END {
 		printf "["
@@ -738,10 +733,6 @@ report_endpoint_charts() {
 		}
 
 		# Chart 1: P1 wall + P2 EDS latency vs mesh size
-		printf "%% Chart 1: P1 local xDS + P2 remote istiod EDS latency\n"
-		printf "%% Series order: P1 wall avg (ms), P2 EDS avg (ms)\n"
-		printf "%% x-axis starts at mesh 2 (P2 undefined at mesh 1)\n"
-		printf "\n"
 		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"P1 + P2 Latency vs Mesh Size\"\n"
@@ -771,9 +762,6 @@ report_endpoint_charts() {
 		printf "\n"
 
 		# Chart 2: P3 remote sidecar latency vs mesh size
-		printf "%% Chart 2: P3 remote sidecar apply latency\n"
-		printf "%% Series: P3 sidecar avg (ms)\n"
-		printf "\n"
 		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"P3 Remote Sidecar Latency vs Mesh Size\"\n"

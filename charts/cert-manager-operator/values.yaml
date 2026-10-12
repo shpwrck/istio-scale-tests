@@ -1,4 +1,4 @@
-# Operand / OLM namespace for the Red Hat cert-manager operator Subscription.
+# Namespace for the Red Hat cert-manager operator Subscription.
 namespace: cert-manager-operator
 
 operatorGroup:
@@ -11,3 +11,15 @@ subscription:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
+
+# oc image for the PreDelete cleanup Job. Match the tag to the cluster's OpenShift minor.
+image:
+  repository: registry.redhat.io/openshift4/ose-cli-rhel9
+  tag: v4.21
+
+# Role for the Argo CD application controller (creates the cleanup hook).
+rbac:
+  enabled: true
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller

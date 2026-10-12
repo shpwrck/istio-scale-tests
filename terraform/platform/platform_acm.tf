@@ -5,6 +5,7 @@
 # --- ACM namespace ---
 
 resource "kubernetes_manifest" "acm_namespace" {
+  count    = var.acm_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -26,6 +27,7 @@ resource "kubernetes_manifest" "acm_namespace" {
 # --- ACM operator (OLM OperatorGroup + Subscription) ---
 
 resource "kubernetes_manifest" "acm_operator_group" {
+  count    = var.acm_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -44,6 +46,7 @@ resource "kubernetes_manifest" "acm_operator_group" {
 }
 
 resource "kubernetes_manifest" "acm_subscription" {
+  count    = var.acm_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -53,18 +56,13 @@ resource "kubernetes_manifest" "acm_subscription" {
       name      = "acm-operator-subscription"
       namespace = var.acm_namespace
     }
-    spec = merge(
-      {
-        channel         = var.acm_channel
-        name            = "advanced-cluster-management"
-        source          = "redhat-operators"
-        sourceNamespace = "openshift-marketplace"
-        # Concrete CSV pin forces Manual approval so OLM cannot float past the
-        # asserted MCE build (BLOCKER #1 GO gate); empty = legacy Automatic float.
-        installPlanApproval = var.acm_mce_version != "" ? "Manual" : "Automatic"
-      },
-      var.acm_mce_version != "" ? { startingCSV = var.acm_mce_version } : {},
-    )
+    spec = {
+      channel             = var.acm_channel
+      installPlanApproval = "Automatic"
+      name                = "advanced-cluster-management"
+      source              = "redhat-operators"
+      sourceNamespace     = "openshift-marketplace"
+    }
   }
 
   wait {
@@ -82,6 +80,8 @@ resource "kubernetes_manifest" "acm_subscription" {
 }
 
 resource "terraform_data" "acm_csv_cleanup" {
+  count = var.acm_install_operator ? 1 : 0
+
   input = {
     token_script    = local.token_script
     hub_api_url     = local.hub_api_url
@@ -112,8 +112,10 @@ resource "terraform_data" "acm_csv_cleanup" {
 }
 
 resource "time_sleep" "wait_acm_operator" {
-  depends_on      = [kubernetes_manifest.acm_subscription]
-  create_duration = "60s"
+  # Through the cleanup hook, so on destroy the CSV cleanup runs only after
+  # everything that needs the operator (MultiClusterHub, spokes) is gone.
+  depends_on      = [terraform_data.acm_csv_cleanup]
+  create_duration = var.acm_install_operator ? "60s" : "0s"
 }
 
 # --- MultiClusterHub ---
@@ -129,25 +131,19 @@ resource "helm_release" "acm_multicluster_hub" {
   wait             = true
   timeout          = 1200
 
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-multicluster-hub"] })]
+
   set = [
     {
       name  = "multiclusterHub.spec.localClusterName"
       value = local.acm_local_cluster_name
     },
-  ]
-
-  # Component disables for BLOCKER #1. NOTE: on ACM 2.16 `server-foundation` is an
-  # MCE component the MCH webhook REJECTS — it is disabled on the pre-created
-  # MultiClusterEngine instead (see README / campaign plan), so this list is normally
-  # empty. Guard with length(): an empty list must pass NOTHING — `var != []` wrongly
-  # passes an empty value, which the helm provider renders as `--set-list key=` =>
-  # `[""]`, a nameless component the MCH webhook rejects ("is not a known component").
-  set_list = length(var.acm_disabled_components) > 0 ? [
     {
-      name  = "multiclusterHub.disabledComponents"
-      value = var.acm_disabled_components
+      # An adopted hub (ACM installed before Terraform) keeps its MultiClusterHub on destroy.
+      name  = "keepOnUninstall"
+      value = tostring(!var.acm_install_operator)
     },
-  ] : []
+  ]
 
   depends_on = [time_sleep.wait_acm_operator]
 }
@@ -171,12 +167,22 @@ resource "helm_release" "acm_klusterlet_config" {
   wait             = true
   timeout          = 600
 
-  set = local.use_kubeconfig ? [
-    {
-      name  = "klusterletConfig.spec.hubKubeAPIServerConfig.serverVerificationStrategy"
-      value = "UseAutoDetectedCABundle"
-    },
-  ] : []
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-klusterlet-config"] })]
+
+  set = concat(
+    [
+      {
+        name  = "keepOnUninstall"
+        value = tostring(!var.acm_install_operator)
+      },
+    ],
+    local.use_kubeconfig ? [
+      {
+        name  = "klusterletConfig.spec.hubKubeAPIServerConfig.serverVerificationStrategy"
+        value = "UseAutoDetectedCABundle"
+      },
+    ] : [],
+  )
 
   depends_on = [time_sleep.wait_acm_multicluster_hub]
 }

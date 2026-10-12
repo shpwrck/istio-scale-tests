@@ -23,9 +23,7 @@
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
-# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
-# both run). Per-pod faults are degraded to N/A rows; this self-reports an
-# UNEXPECTED abort.
+# Loud ERR trap for unexpected aborts (per-pod faults become N/A rows).
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,11 +34,13 @@ source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/config/options.env"  # O9: SCALE_TARGET_FRACTION (preamble key)
+source "${ROOT}/config/options.env"  # SCALE_* preamble keys
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/capacity.sh"  # O9: read-only capacity probes (Phase-1 legibility)
+source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # infra_preamble_lines (PL36) + tuning_baseline_state (live-mesh tuning provenance, PL2)
+source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_lines, tuning_baseline_state
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 
@@ -209,7 +209,6 @@ if ((WATCH)) && [[ "$PHASE" != combined ]]; then
 fi
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
-# P1-1: resolve_kubectl appends --qps/--burst (KUBE_CLIENT_QPS/BURST) to every call.
 KUBECTL=()
 resolve_kubectl KUBECTL
 
@@ -251,43 +250,11 @@ fi
 
 ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
 
-# Probe kube server versions per context concurrently (best-effort).
-# Use the array index (not the context name) as the per-probe filename —
-# OpenShift's auto-generated context names contain `/` (e.g.
-# `default/api-foo:443/user`) which would otherwise be interpreted as path
-# separators and fail with "No such file or directory".
-KUBE_PROBE_DIR="$(mktemp -d -t controlplane-002-kubever.XXXXXX)"
-KV_PIDS=()
-for i in "${!CONTEXTS[@]}"; do
-	ctx="${CONTEXTS[i]}"
-	(
-		out=$("${KUBECTL[@]}" --context="$ctx" version -o json --request-timeout=5s 2>/dev/null) \
-			&& v=$(printf '%s' "$out" | jq -r '.serverVersion.gitVersion // "unknown"' 2>/dev/null || echo unknown) \
-			|| v=unreachable
-		[[ -z "$v" ]] && v=unknown
-		printf '%s' "$v" > "${KUBE_PROBE_DIR}/${i}"
-	) &
-	KV_PIDS+=($!)
-done
-for pid in "${KV_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
-KUBE_VERSIONS_CSV=""
-for i in "${!CONTEXTS[@]}"; do
-	ctx="${CONTEXTS[i]}"
-	if [[ -s "${KUBE_PROBE_DIR}/${i}" ]]; then
-		v=$(<"${KUBE_PROBE_DIR}/${i}")
-	else
-		v=unreachable
-	fi
-	[[ -n "$KUBE_VERSIONS_CSV" ]] && KUBE_VERSIONS_CSV+=", "
-	KUBE_VERSIONS_CSV+="${ctx}=${v}"
-done
-rm -rf "$KUBE_PROBE_DIR"
+# Kube server version per context (concurrent, 5s timeout each).
+KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 
-# O9 Phase 1 (legibility): read the SOURCE context's node allocatable + istiod
-# resource limits once, for the preamble. These are cheap read-only kubectl gets
-# (cap_*.sh tolerates failure -> `unknown`). Per-row capacity columns are computed
-# separately near row assembly (outside the measurement-sensitive scrape window).
-# Skipped for --phase baseline (no preamble written then).
+# Source context's node allocatable + istiod limits for the preamble (read-only;
+# `unknown` on failure). Skipped for --phase baseline (no preamble written then).
 PRE_NODE_ALLOC_CPU_M="unknown"
 PRE_NODE_ALLOC_MEM_MI="unknown"
 PRE_ISTIOD_CPU_LIMIT_M="unknown"
@@ -312,11 +279,8 @@ if [[ "$PHASE" != baseline ]]; then
 	done
 fi
 
-# Resolved tuning-baseline state from the LIVE source cluster (PL2). Must emit
-# the SAME keys as 003's precreate_tsv_preamble (PL36 writer-contract: when 003
-# pre-creates the file, 002's `! -f`-guarded block is skipped; when 002 runs
-# standalone it writes the preamble itself — both paths must produce the
-# identical key set). Degrades to `unknown` on query failure.
+# Live tuning-baseline state from the source cluster. Keep the key set identical
+# to 003's precreate_tsv_preamble (002 writes the preamble only when standalone).
 PRE_TUNING_BASELINE="TUNING_BASELINE=unknown"
 PRE_SIDECAR_EGRESS_HOSTS="SIDECAR_EGRESS_HOSTS=unknown"
 if [[ "$PHASE" != baseline ]]; then
@@ -331,12 +295,8 @@ fi
 
 TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
-	# Cluster-infra block (additive): istiod req/lim/replicas + network topology.
-	# F2: collect ONLY when we are actually going to write the preamble. In an
-	# orchestrated run 003 pre-creates the TSV, so this `! -f` block is skipped and the
-	# serial per-context env_collect_infra fan-out (up to 20 contexts) no longer runs on
-	# the post-settle critical path for every final-phase combo. Same shared emitter the
-	# 003 pre-creator uses (PL36) so a standalone 002 run and an orchestrated run agree.
+	# Cluster-infra block, collected only when 002 writes the preamble itself
+	# (003 pre-creates it in a sweep). Same shared emitter as 003.
 	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
@@ -376,7 +336,7 @@ fi
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #   istiod_cpu_m_delta
 #   go_heap_alloc_mi go_heap_inuse_mi
-#   (O9 cols 35-40) istiod_cpu_pct_of_limit istiod_mem_pct_of_limit
+#   (cols 35-40) istiod_cpu_pct_of_limit istiod_mem_pct_of_limit
 #                   node_cpu_pct node_mem_pct pods_scheduled pods_allocatable
 if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
 	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable" >> "$TSV_FILE"
@@ -405,10 +365,9 @@ trap cleanup EXIT
 
 POD_CTXS=()
 POD_NAMES=()
-# B2: contexts dropped by resolve_pods because they had ZERO running istiod pods.
-# Persisted to the state-dir so the FINAL phase can emit one degraded N/A row per
-# dropped context (counted in n_total, excluded from n_valid) — so the report can
-# distinguish "measured N-1 control planes" from "measured all N".
+# Contexts with zero running istiod pods. Persisted to the state-dir so the final
+# phase emits one degraded N/A row per dropped context (counted in n_total,
+# excluded from n_valid).
 DROPPED_CTXS=()
 
 resolve_pods() {
@@ -419,13 +378,8 @@ resolve_pods() {
 		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
 			--field-selector=status.phase=Running \
 			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
-		# P2/PL: a SINGLE context with zero istiod pods is a per-instance fault, not a
-		# whole-run precondition — warn and drop that context. `die` is reserved for
-		# "zero istiod pods across ALL contexts". This fires only on a WHOLE-CLUSTER
-		# istiod outage (zero Running istiod pods for that context); a rolling restart
-		# normally leaves >=1 Running replica, so it does NOT trip this drop.
-		# B2: record the dropped context so the final phase emits a degraded N/A row
-		# (counted-but-excluded), consistent with the PF-dead sibling path.
+		# One context with zero istiod pods is dropped (degraded row later); only
+		# zero pods across ALL contexts is fatal.
 		if [[ -z "$pods" ]]; then
 			echo "warning: context $ctx: no running istiod pods in istio-system; dropping this context (will emit a degraded N/A row)" >&2
 			DROPPED_CTXS+=("$ctx")
@@ -444,7 +398,7 @@ save_pod_manifest() {
 	for k in "${!POD_CTXS[@]}"; do
 		printf '%d\t%s\t%s\n' "$k" "${POD_CTXS[k]}" "${POD_NAMES[k]}"
 	done > "${dir}/pods.tsv"
-	# B2: persist dropped (zero-pod) contexts so the final phase can emit N/A rows.
+	# Persist dropped (zero-pod) contexts so the final phase can emit N/A rows.
 	: > "${dir}/dropped-ctxs.tsv"
 	local dctx
 	for dctx in "${DROPPED_CTXS[@]}"; do
@@ -463,7 +417,7 @@ load_pod_manifest() {
 		POD_NAMES+=("$pod")
 	done < "$manifest"
 	((${#POD_CTXS[@]})) || die "pods.tsv in $dir is empty"
-	# B2: reload dropped contexts recorded at baseline.
+	# Reload dropped contexts recorded at baseline.
 	DROPPED_CTXS=()
 	if [[ -f "${dir}/dropped-ctxs.tsv" ]]; then
 		local dctx
@@ -513,12 +467,8 @@ for k in "${!POD_CTXS[@]}"; do
 		attempts=$((attempts + 1))
 		if ((attempts > 20)); then
 			if ((restarts >= 3)); then
-				# P2/PL13/PL15: a single pod whose PF won't come up after 3 restarts is a
-				# per-instance fault, NOT a whole-run precondition. Stop waiting and leave
-				# this pod's PF dead: its scrape (scrape_all_parallel) then yields an empty
-				# final-${k}.metrics, and the existing "no final scrape -> N/A row" path
-				# (see scrape_window) emits a row with restarted=unknown and N/A numerics
-				# for this pod. The report (004) counts it in n_total, excludes from n_valid.
+				# Give up on this pod: its empty final scrape becomes an N/A row
+				# (restarted=unknown), counted in n_total but not n_valid.
 				echo "warning: port-forward to istiod pod ${POD_NAMES[k]} on ${POD_CTXS[k]} (port $port) failed after ${restarts} restarts; this pod will emit an N/A row (restarted=unknown)" >&2
 				kill "${PF_PIDS[k]}" 2>/dev/null || true
 				break
@@ -589,40 +539,6 @@ extract_gauge_exact() {
 	BEGIN { pat = "^" name "(\\{| )" }
 	!/^#/ && $0 ~ pat { val = $NF+0 }
 	END { if (val == "") print "N/A"; else print val }
-	'
-}
-
-extract_counter_sum() {
-	local metrics="$1" name="$2"
-	echo "$metrics" | awk -v name="$name" '
-	BEGIN { pat = "^" name "(\\{| )" }
-	!/^#/ && $0 ~ pat { sum += $NF }
-	END { printf "%.0f\n", sum+0 }
-	'
-}
-
-extract_counter_by_label() {
-	local metrics="$1" name="$2" label="$3" value="$4"
-	echo "$metrics" | awk -v name="$name" -v lbl="$label" -v val="$value" '
-	BEGIN { pat = "^" name "\\{" }
-	!/^#/ && $0 ~ pat {
-		labels = $0
-		sub(/^[^{]*\{/, "", labels); sub(/\}.*$/, "", labels)
-		nkv = split(labels, kvs, ",")
-		hit = 0
-		for (k = 1; k <= nkv; k++) {
-			kv = kvs[k]
-			gsub(/^[ \t]+|[ \t]+$/, "", kv)
-			if (match(kv, "^" lbl "=\"") > 0) {
-				v = kv
-				sub("^" lbl "=\"", "", v)
-				sub(/".*$/, "", v)
-				if (v == val) { hit = 1; break }
-			}
-		}
-		if (hit) sum += $NF
-	}
-	END { printf "%.0f\n", sum+0 }
 	'
 }
 
@@ -779,8 +695,9 @@ aggregate_sample_bytes() {
 # Peak metrics poller (combined mode).
 # ---------------------------------------------------------------------------
 # Polls process_resident_memory_bytes and process_cpu_seconds_total every
-# POLL_INTERVAL seconds, tracking peak memory and peak per-interval CPU rate
-# per pod.  Results are written to ${TMP_DIR}/peak-{mem,cpu}-${k}.val.
+# POLL_INTERVAL seconds, tracking peak memory and peak CPU rate per pod. The rate
+# divides by the measured time between samples (a slow scrape stretches it).
+# Results are written to ${TMP_DIR}/peak-{mem,cpu}-${k}.val.
 POLL_INTERVAL=5
 
 poll_peak_metrics() {
@@ -792,10 +709,10 @@ poll_peak_metrics() {
 		for k in "${!POD_CTXS[@]}"; do
 			local port=$(( BASE_PF_PORT + k ))
 			local body
-			# Fetches the full /metrics body (mem + cpu parsed below), so it must honor
-			# the shared METRICS_SCRAPE_TIMEOUT (default 30s) like the primary scrape:
-			# a hardcoded 3s drops an MB-class 10k body and silently skips peak samples.
+			# Full /metrics body: honor METRICS_SCRAPE_TIMEOUT (MB-class at 10k services).
 			body=$(curl -s --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" 2>/dev/null) || continue
+			local now_t
+			now_t=$(now_ms)
 
 			# Peak memory.
 			local mem_val
@@ -808,24 +725,23 @@ poll_peak_metrics() {
 				fi
 			fi
 
-			# Peak CPU rate (millicores over this interval).
+			# Peak CPU rate in millicores: cpu-seconds delta / elapsed seconds * 1000.
 			local cpu_val
 			cpu_val=$(echo "$body" | awk '/^process_cpu_seconds_total[{ ]/ && !/^#/ { print $NF+0 }')
 			if [[ -n "$cpu_val" && "$cpu_val" != "0" ]]; then
 				local prev_cpu_file="${TMP_DIR}/prev-cpu-${k}.val"
 				if [[ -s "$prev_cpu_file" ]]; then
-					local prev_cpu
-					prev_cpu=$(<"$prev_cpu_file")
-					local rate_m
-					rate_m=$(awk -v c="$cpu_val" -v p="$prev_cpu" -v iv="$POLL_INTERVAL" \
-						'BEGIN{ d=(c-p)*1000/iv; if(d<0) d=0; printf "%.0f", d }')
+					local prev_cpu prev_t rate_m
+					read -r prev_cpu prev_t < "$prev_cpu_file" || true
+					rate_m=$(awk -v c="$cpu_val" -v p="$prev_cpu" -v dt="$(( now_t - prev_t ))" \
+						'BEGIN{ if (dt <= 0) { print 0; exit }; d=(c-p)*1000000/dt; if(d<0) d=0; printf "%.0f", d }')
 					local prev_peak=0
 					[[ -s "${TMP_DIR}/peak-cpu-${k}.val" ]] && prev_peak=$(<"${TMP_DIR}/peak-cpu-${k}.val")
 					if awk -v a="$rate_m" -v b="$prev_peak" 'BEGIN{ exit !(a+0 > b+0) }'; then
 						printf '%s' "$rate_m" > "${TMP_DIR}/peak-cpu-${k}.val"
 					fi
 				fi
-				printf '%s' "$cpu_val" > "$prev_cpu_file"
+				printf '%s %s\n' "$cpu_val" "$now_t" > "$prev_cpu_file"
 			fi
 		done
 		sleep "$POLL_INTERVAL"
@@ -910,7 +826,7 @@ compute_skew_ms() {
 }
 
 # ---------------------------------------------------------------------------
-# O9 Phase 1: per-context capacity legibility (cols 35-40).
+# Per-context capacity columns (35-40).
 # ---------------------------------------------------------------------------
 # Cheap read-only kubectl gets (NOT in the scrape window — called once per ctx at
 # row assembly). Each cap_* tolerates failure -> `unknown` -> we emit N/A so the
@@ -1050,8 +966,7 @@ scrape_window() {
 			echo "warning: no final scrape for $ctx/${POD_NAMES[k]}; emitting N/A row" >&2
 			# PL13: push-by-type and config-sample columns are N/A (nothing measured),
 			# not literal 0/0/0 which would read as a real zero-push observation.
-			# O9 cols 35-40: the context is real, so capacity (read-only) is still
-			# meaningful; populate from the per-ctx cache (N/A when unreadable).
+			# Capacity columns are still meaningful for a real context.
 			collect_capacity_for_ctx "$ctx"
 			cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
 			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
@@ -1080,9 +995,10 @@ scrape_window() {
 			mem_mi="N/A"
 		fi
 
-		# Connected proxies (gauge — read from final scrape).
+		# Connected proxies: pilot_xds summed across its label series (final scrape).
 		local connected_proxies
-		connected_proxies=$(extract_gauge_exact "$final" pilot_xds)
+		connected_proxies=$(extract_gauge_sum "$f_file" pilot_xds)
+		[[ "$connected_proxies" == "unknown" ]] && connected_proxies="N/A"
 
 		# Restart detection (must run before delta computations so the
 		# restart guard can protect counter/histogram columns — PL9/PL13).
@@ -1127,8 +1043,8 @@ scrape_window() {
 			evts_delta="N/A"; evts_rate="N/A"
 		else
 			local b_pushes f_pushes
-			b_pushes=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_xds_pushes || echo 0)
-			f_pushes=$(extract_counter_sum "$final" pilot_xds_pushes)
+			b_pushes=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_xds_pushes || echo 0)
+			f_pushes=$(extract_counter_sum "$f_file" pilot_xds_pushes)
 			pushes_delta=$(( f_pushes - b_pushes ))
 			(( pushes_delta < 0 )) && pushes_delta=0
 			if (( window_positive )); then
@@ -1138,8 +1054,8 @@ scrape_window() {
 			fi
 
 			local b_evts f_evts
-			b_evts=$([[ -n "$baseline" ]] && extract_counter_sum "$baseline" pilot_k8s_cfg_events || echo 0)
-			f_evts=$(extract_counter_sum "$final" pilot_k8s_cfg_events)
+			b_evts=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_k8s_cfg_events || echo 0)
+			f_evts=$(extract_counter_sum "$f_file" pilot_k8s_cfg_events)
 			evts_delta=$(( f_evts - b_evts ))
 			(( evts_delta < 0 )) && evts_delta=0
 			if (( window_positive )); then
@@ -1157,8 +1073,8 @@ scrape_window() {
 		else
 			for t in "${types[@]}"; do
 				local b_t f_t d_t
-				b_t=$([[ -n "$baseline" ]] && extract_counter_by_label "$baseline" pilot_xds_pushes type "$t" || echo 0)
-				f_t=$(extract_counter_by_label "$final" pilot_xds_pushes type "$t")
+				b_t=$([[ -s "$b_file" ]] && extract_counter_by_label "$b_file" pilot_xds_pushes type "$t" || echo 0)
+				f_t=$(extract_counter_by_label "$f_file" pilot_xds_pushes type "$t")
 				d_t=$(( f_t - b_t ))
 				(( d_t < 0 )) && d_t=0
 				push_by_type+=("$d_t")
@@ -1246,8 +1162,7 @@ scrape_window() {
 			cd_samples="${got}/${attempted}"
 		fi
 
-		# O9 cols 35-40: per-context capacity legibility (read-only, cached per ctx,
-		# computed OUTSIDE the scrape window so it can't perturb the measurement timing).
+		# Capacity columns (read-only, cached per ctx, outside the scrape window).
 		collect_capacity_for_ctx "$ctx"
 		local cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
 
@@ -1255,17 +1170,13 @@ scrape_window() {
 		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 	done
 
-	# B2: emit one degraded N/A row per dropped (zero-pod) context — context column
-	# carries a ZERO_PODS sentinel so the report can see that this combo measured fewer
-	# control planes than were requested. restarted=unknown + all-N/A numerics ->
-	# counted in n_total, excluded from n_valid (same shape as the PF-dead/no-final-
-	# scrape path above; PL13/PL15). All push-by-type and config-sample columns are N/A
-	# (nothing was measured), not literal 0.
+	# One degraded row per dropped (zero-pod) context: the context column keeps the
+	# context name, restarted=unknown and every numeric column is N/A, so the row is
+	# counted in n_total but excluded from n_valid.
 	local dctx
 	for dctx in "${DROPPED_CTXS[@]}"; do
 		echo "warning: context ${dctx}: dropped (zero istiod pods); emitting degraded N/A row" >&2
-		# O9 cols 35-40: node-level capacity is still readable even with zero istiod
-		# pods (istiod %-of-limit will be N/A, but node util / pod slots are valid).
+		# Node capacity is still readable with zero istiod pods.
 		collect_capacity_for_ctx "$dctx"
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
 		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"

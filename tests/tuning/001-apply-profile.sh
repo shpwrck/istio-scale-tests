@@ -1,27 +1,13 @@
 #!/usr/bin/env bash
-# Apply a tuning profile to the live mesh.
+# Apply one tuning profile to the mesh: merge-patch the Istio CR with the profile's
+# istio_cr_patch and server-side apply its resources. Saves what 002-revert-profile.sh
+# needs to undo exactly those changes.
 #
-# Patches the Istio CR (sailoperator.io/v1 Istio/default in istio-system) with
-# the profile's istio_cr_patch and applies any additional resources defined in
-# the profile's resources list.
-#
-# Before patching, the current Istio CR is saved to a state directory so
-# 002-revert-profile.sh can restore it.
+# Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
 #
 # Usage:
-#   ./tests/tuning/001-apply-profile.sh --profile <path> [--contexts CSV] [options]
-#
-# Examples:
-#   # Apply sidecar scoping on all clusters:
-#   ./tests/tuning/001-apply-profile.sh --profile profiles/01-sidecar-scoping.yaml
-#
-#   # Dry-run to see what would change:
-#   ./tests/tuning/001-apply-profile.sh --profile profiles/03-push-throttling.yaml --dry-run
-#
-#   # Apply with explicit state dir for later revert:
-#   ./tests/tuning/001-apply-profile.sh --profile profiles/04-istiod-resources.yaml \
-#     --state-dir results/my-run
-# ci-dry-run-skip: needs yq and a valid --profile path
+#   ./tests/tuning/001-apply-profile.sh --profile NAME|PATH [--contexts CSV] [options]
+# ci-dry-run-skip: needs python3 with PyYAML, which not every CI runner has
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -29,468 +15,197 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/tuning/lib/tuning.sh"
 
+TUNING_DIR="${ROOT}/tests/tuning"
+HELPER="${TUNING_DIR}/lib/tuning.py"
 PROFILE=""
 CONTEXTS_CSV=""
-DRY_RUN=0
 STATE_DIR=""
-ISTIO_CR_NAME="default"
-ISTIO_CR_NAMESPACE="istio-system"
 ROLLOUT_TIMEOUT=300
 SKIP_VERIFY=0
-KUBECTL="kubectl"
-
-VERIFY_PASS=0
-VERIFY_FAIL=0
-VERIFY_WARN=0
-verify_ok()   { VERIFY_PASS=$((VERIFY_PASS + 1)); echo "  PASS  $*"; }
-verify_fail() { VERIFY_FAIL=$((VERIFY_FAIL + 1)); echo "  FAIL  $*"; }
-verify_warn() { VERIFY_WARN=$((VERIFY_WARN + 1)); echo "  WARN  $*"; }
-
-# Verify that a jsonpath query on the Istio CR returns a non-empty value.
-verify_istio_cr_field() {
-	local ctx="$1" jsonpath="$2" label="$3"
-	local val
-	val="$($KUBECTL --context="$ctx" get istio "$ISTIO_CR_NAME" \
-		-n "$ISTIO_CR_NAMESPACE" -o jsonpath="{${jsonpath}}" 2>/dev/null)" || true
-	if [[ -n "$val" ]]; then
-		verify_ok "${ctx}: Istio CR ${label} = ${val}"
-	else
-		verify_fail "${ctx}: Istio CR ${label} — field empty or missing"
-	fi
-}
-
-# Verify a pilot env var appears on the istiod Deployment's discovery container.
-verify_pilot_env() {
-	local ctx="$1" var_name="$2" expected="$3"
-	local actual
-	actual="$($KUBECTL --context="$ctx" get deployment istiod \
-		-n "$ISTIO_CR_NAMESPACE" \
-		-o jsonpath="{.spec.template.spec.containers[?(@.name=='discovery')].env[?(@.name=='${var_name}')].value}" \
-		2>/dev/null)" || true
-	if [[ -z "$actual" ]]; then
-		actual="$($KUBECTL --context="$ctx" get deployment istiod \
-			-n "$ISTIO_CR_NAMESPACE" \
-			-o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='${var_name}')].value}" \
-			2>/dev/null)" || true
-	fi
-	if [[ "$actual" == "$expected" ]]; then
-		verify_ok "${ctx}: istiod env ${var_name}=${actual}"
-	elif [[ -n "$actual" ]]; then
-		verify_fail "${ctx}: istiod env ${var_name}=${actual} (expected ${expected})"
-	else
-		verify_warn "${ctx}: istiod env ${var_name} — not found on Deployment (may use compiled-in default)"
-	fi
-}
-
-# Verify a Kubernetes resource exists.
-verify_resource_exists() {
-	local ctx="$1" kind="$2" name="$3" ns="$4"
-	if $KUBECTL --context="$ctx" get "$kind" "$name" -n "$ns" \
-		>/dev/null 2>&1; then
-		verify_ok "${ctx}: ${kind}/${name} exists in ${ns}"
-	else
-		verify_fail "${ctx}: ${kind}/${name} not found in ${ns}"
-	fi
-}
-
-# Verify istiod container resource requests/limits.
-verify_container_resources() {
-	local ctx="$1" path="$2" expected="$3" label="$4"
-	local actual
-	actual="$($KUBECTL --context="$ctx" get deployment istiod \
-		-n "$ISTIO_CR_NAMESPACE" \
-		-o jsonpath="{.spec.template.spec.containers[?(@.name=='discovery')].resources.${path}}" \
-		2>/dev/null)" || true
-	if [[ -z "$actual" ]]; then
-		actual="$($KUBECTL --context="$ctx" get deployment istiod \
-			-n "$ISTIO_CR_NAMESPACE" \
-			-o jsonpath="{.spec.template.spec.containers[0].resources.${path}}" \
-			2>/dev/null)" || true
-	fi
-	if [[ -n "$actual" ]]; then
-		verify_ok "${ctx}: istiod ${label} = ${actual}"
-	else
-		verify_fail "${ctx}: istiod ${label} — not set on Deployment"
-	fi
-}
-
-# Run profile-specific verification checks on one context. Dispatches based
-# on the profile YAML contents (patch paths and resource kinds).
-verify_profile() {
-	local ctx="$1" profile_file="$2"
-
-	local patch_json resource_json
-	patch_json="$(python3 -c "
-import yaml, json, sys
-with open('${profile_file}') as f:
-    d = yaml.safe_load(f)
-print(json.dumps(d.get('istio_cr_patch') or {}))
-")"
-	resource_json="$(python3 -c "
-import yaml, json, sys
-with open('${profile_file}') as f:
-    d = yaml.safe_load(f)
-print(json.dumps(d.get('resources') or []))
-")"
-
-	# --- Verify Istio CR patch fields ---
-	# pilot.env
-	local env_keys
-	env_keys="$(echo "$patch_json" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-env = d.get('spec',{}).get('values',{}).get('pilot',{}).get('env',{})
-for k,v in env.items():
-    print(f'{k}={v}')
-" 2>/dev/null)" || true
-
-	local line var_name var_val
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		var_name="${line%%=*}"
-		var_val="${line#*=}"
-		verify_istio_cr_field "$ctx" \
-			".spec.values.pilot.env.${var_name}" \
-			"pilot.env.${var_name}"
-		verify_pilot_env "$ctx" "$var_name" "$var_val"
-	done <<<"$env_keys"
-
-	# pilot.resources
-	local has_pilot_resources
-	has_pilot_resources="$(echo "$patch_json" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-r = d.get('spec',{}).get('values',{}).get('pilot',{}).get('resources')
-print('yes' if r else 'no')
-" 2>/dev/null)" || true
-
-	if [[ "$has_pilot_resources" == "yes" ]]; then
-		verify_container_resources "$ctx" "requests.cpu" "" "resources.requests.cpu"
-		verify_container_resources "$ctx" "limits.memory" "" "resources.limits.memory"
-	fi
-
-	# meshConfig fields (non-env)
-	local mc_fields
-	mc_fields="$(echo "$patch_json" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-mc = d.get('spec',{}).get('values',{}).get('meshConfig',{})
-def walk(obj, path):
-    if isinstance(obj, dict):
-        for k,v in obj.items():
-            walk(v, f'{path}.{k}')
-    elif isinstance(obj, list):
-        print(f'{path}=LIST')
-    else:
-        print(f'{path}={obj}')
-walk(mc, '.spec.values.meshConfig')
-" 2>/dev/null)" || true
-
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		local field_path="${line%%=*}"
-		verify_istio_cr_field "$ctx" "$field_path" "${field_path#.spec.values.}"
-	done <<<"$mc_fields"
-
-	# global.proxy fields
-	local proxy_fields
-	proxy_fields="$(echo "$patch_json" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-gp = d.get('spec',{}).get('values',{}).get('global',{}).get('proxy',{})
-def walk(obj, path):
-    if isinstance(obj, dict):
-        for k,v in obj.items():
-            walk(v, f'{path}.{k}')
-    else:
-        print(f'{path}={obj}')
-walk(gp, '.spec.values.global.proxy')
-" 2>/dev/null)" || true
-
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		local field_path="${line%%=*}"
-		verify_istio_cr_field "$ctx" "$field_path" "${field_path#.spec.values.}"
-	done <<<"$proxy_fields"
-
-	# --- Verify additional resources exist ---
-	local res_lines
-	res_lines="$(echo "$resource_json" | python3 -c "
-import json, sys
-resources = json.load(sys.stdin)
-for r in resources:
-    kind = r.get('kind','')
-    name = r.get('metadata',{}).get('name','')
-    ns = r.get('metadata',{}).get('namespace','istio-system')
-    if kind and name:
-        print(f'{kind} {name} {ns}')
-" 2>/dev/null)" || true
-
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		local r_kind r_name r_ns
-		read -r r_kind r_name r_ns <<<"$line"
-		verify_resource_exists "$ctx" "$r_kind" "$r_name" "$r_ns"
-	done <<<"$res_lines"
-}
+DRY_RUN=0
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") --profile <path> [options]
+Usage: $(basename "$0") --profile NAME|PATH [options]
 
-Apply a tuning profile to the live mesh by patching the Istio CR and deploying
-any additional resources defined in the profile.
+Apply a tuning profile: patch the Istio CR and apply the profile's resources.
 
 Options:
-  --profile PATH         Path to the profile YAML file (required).
-  --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --state-dir DIR        Directory to save baseline state for revert
-                         (default: results/state-<profile-name>).
-  --rollout-timeout N    Seconds to wait for istiod rollout (default: $ROLLOUT_TIMEOUT).
-  --skip-verify          Skip post-apply verification checks.
-  --dry-run              Show what would be applied without changing clusters.
+  --profile NAME|PATH    Profile name (e.g. 01-push-throttling) or YAML path (required).
+  --contexts CSV         Mesh member contexts (default: \$SETUP_CONTEXTS).
+  --state-dir DIR        Where to save revert state
+                         (default: tests/tuning/results/state-<profile>).
+  --rollout-timeout N    Seconds to wait for the operator and istiod rollout
+                         (default: ${ROLLOUT_TIMEOUT}).
+  --skip-verify          Skip the post-apply checks.
+  --dry-run              Print the patch and resources; do not touch clusters.
   -h, --help             Show this help.
 
-Environment:
-  SETUP_CONTEXTS         Default cluster contexts (from config/versions.env).
+Exit status: 0 applied and verified, 1 error, 2 applied but verification failed.
+Requires python3 with PyYAML.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--profile) PROFILE="$2"; shift 2 ;;
-	--contexts) CONTEXTS_CSV="$2"; shift 2 ;;
-	--state-dir) STATE_DIR="$2"; shift 2 ;;
-	--rollout-timeout) ROLLOUT_TIMEOUT="$2"; shift 2 ;;
+	--profile | --contexts | --state-dir | --rollout-timeout)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		case "$1" in
+		--profile) PROFILE="$2" ;;
+		--contexts) CONTEXTS_CSV="$2" ;;
+		--state-dir) STATE_DIR="$2" ;;
+		--rollout-timeout) ROLLOUT_TIMEOUT="$2" ;;
+		esac
+		shift 2
+		;;
 	--skip-verify) SKIP_VERIFY=1; shift ;;
 	--dry-run) DRY_RUN=1; shift ;;
 	-h | --help) usage; exit 0 ;;
-	*) die "Unknown option: $1" ;;
+	*) die "unknown option: $1 (try --help)" ;;
 	esac
 done
 
 [[ -n "$PROFILE" ]] || die "--profile is required"
-[[ -f "$PROFILE" ]] || die "Profile not found: $PROFILE"
-
-command -v yq >/dev/null 2>&1 || die "yq (v4+) is required but not found in PATH"
-
-CONTEXTS_CSV="${CONTEXTS_CSV:-$SETUP_CONTEXTS}"
-[[ -n "$CONTEXTS_CSV" ]] || die "No contexts specified (set --contexts or SETUP_CONTEXTS)"
-
-IFS=',' read -ra CONTEXTS <<<"$CONTEXTS_CSV"
-
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+if [[ ! -f "$PROFILE" ]]; then
+	for cand in "${TUNING_DIR}/profiles/${PROFILE}" "${TUNING_DIR}/profiles/${PROFILE}.yaml"; do
+		[[ -f "$cand" ]] && { PROFILE="$cand"; break; }
+	done
+fi
+[[ -f "$PROFILE" ]] || die "profile not found: $PROFILE (see tests/tuning/profiles/)"
 PROFILE_NAME="$(basename "$PROFILE" .yaml)"
 
-if [[ -z "$STATE_DIR" ]]; then
-	STATE_DIR="${ROOT}/tests/tuning/results/state-${PROFILE_NAME}"
-fi
+CONTEXTS_CSV="${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}"
+CONTEXTS=()
+split_csv "$CONTEXTS_CSV" CONTEXTS
+((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
+STATE_DIR="${STATE_DIR:-${TUNING_DIR}/results/state-${PROFILE_NAME}}"
 
-OSSM_SUPPORT="$(yq -r '.ossm_support // "unknown"' "$PROFILE")"
-case "$OSSM_SUPPORT" in
-configurable)
-	echo "NOTE: Profile '${PROFILE_NAME}' uses features not explicitly documented by Red Hat."
-	detail="$(yq -r '.ossm_support_detail // ""' "$PROFILE")"
-	[[ -n "$detail" ]] && echo "      ${detail}"
-	echo ""
-	;;
-not-supported | not-supported-multicluster)
-	echo "WARNING: Profile '${PROFILE_NAME}' is ${OSSM_SUPPORT}."
-	detail="$(yq -r '.ossm_support_detail // ""' "$PROFILE")"
-	[[ -n "$detail" ]] && echo "         ${detail}"
-	echo ""
-	if ((DRY_RUN)); then
-		echo "(dry-run — continuing for inspection)"
-	else
-		echo "This profile cannot be applied automatically to an OSSM multicluster mesh."
-		echo "See the profile YAML for manual steps."
-		exit 1
-	fi
-	;;
-esac
+python3 -I -c 'import yaml' 2>/dev/null \
+	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
 
-HAS_PATCH="$(yq -r '.istio_cr_patch | length' "$PROFILE")"
-HAS_RESOURCES="$(yq -r '.resources | length' "$PROFILE")"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+python3 -I "$HELPER" load "$PROFILE" "$WORK"
+HAS_PATCH=0
+[[ "$(<"$WORK/patch.json")" != "{}" ]] && HAS_PATCH=1
+HAS_RESOURCES=0
+[[ -s "$WORK/resources.yaml" ]] && HAS_RESOURCES=1
 
-if [[ "$HAS_PATCH" == "0" ]] && [[ "$HAS_RESOURCES" == "0" ]]; then
-	die "Profile has no istio_cr_patch and no resources — nothing to apply"
-fi
-
-echo "=== Applying profile: ${PROFILE_NAME} ==="
-echo "    OSSM support: ${OSSM_SUPPORT}"
-echo "    Contexts:     ${CONTEXTS_CSV}"
+echo "=== Profile ${PROFILE_NAME} ==="
+echo "    $(<"$WORK/description")"
+echo "    OSSM support: $(<"$WORK/ossm_support")"
+detail="$(<"$WORK/ossm_support_detail")"
+[[ -n "$detail" ]] && echo "    ${detail}"
+echo "    Contexts:     ${CONTEXTS[*]}"
 echo "    State dir:    ${STATE_DIR}"
-echo ""
 
 if ((DRY_RUN)); then
-	echo "--- DRY RUN: Istio CR patch ---"
-	if [[ "$HAS_PATCH" != "0" ]]; then
-		yq -r '.istio_cr_patch' "$PROFILE"
-	else
-		echo "(no Istio CR patch)"
-	fi
 	echo ""
-	echo "--- DRY RUN: Additional resources ---"
-	if [[ "$HAS_RESOURCES" != "0" ]]; then
-		yq -r '.resources[]' "$PROFILE"
-	else
-		echo "(no additional resources)"
-	fi
-	echo ""
-	echo "--- DRY RUN: Would save baseline to ${STATE_DIR}/ ---"
+	echo "--- Istio CR merge patch ---"
+	if ((HAS_PATCH)); then cat "$WORK/patch.json"; else echo "(none)"; fi
+	echo "--- Resources (server-side apply) ---"
+	if ((HAS_RESOURCES)); then cat "$WORK/resources.yaml"; else echo "(none)"; fi
+	echo "--- Dry run: no cluster changes; would save revert state to ${STATE_DIR}/ ---"
 	exit 0
 fi
 
+KUBECTL=()
+resolve_kubectl KUBECTL
+
+# --- Preflight on every context before changing any of them ---
+RES_LINES=()
+if ((HAS_RESOURCES)); then
+	res_text="$(python3 -I "$HELPER" resources "$WORK/resources.yaml")"
+	mapfile -t RES_LINES <<<"$res_text"
+fi
+[[ ! -f "${STATE_DIR}/active-profile" ]] \
+	|| die "${STATE_DIR} already holds an applied profile; revert it first (002-revert-profile.sh --state-dir ${STATE_DIR})"
+# A profile left applied by an interrupted run would end up in this profile's revert state.
+# The results dir does not exist on a fresh clone.
+if [[ -d "${TUNING_DIR}/results" ]]; then
+	leftover="$(find "${TUNING_DIR}/results" -name active-profile -type f 2>/dev/null | head -1)"
+	[[ -z "$leftover" ]] \
+		|| die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ./tests/tuning/005-cleanup.sh first"
+fi
 mkdir -p "$STATE_DIR"
-
-PATCH_FILE=""
-if [[ "$HAS_PATCH" != "0" ]]; then
-	PATCH_FILE="$(mktemp)"
-	yq -r -o json '.istio_cr_patch' "$PROFILE" > "$PATCH_FILE"
-fi
-
-RESOURCES_FILE=""
-if [[ "$HAS_RESOURCES" != "0" ]]; then
-	RESOURCES_FILE="$(mktemp)"
-	yq -r '.resources[] | splitDoc' "$PROFILE" > "$RESOURCES_FILE"
-fi
-
 for ctx in "${CONTEXTS[@]}"; do
-	ctx="${ctx#"${ctx%%[![:space:]]*}"}"
-	ctx="${ctx%"${ctx##*[![:space:]]}"}"
-	[[ -z "$ctx" ]] && continue
-
-	echo "--- ${ctx}: saving baseline Istio CR ---"
-	$KUBECTL --context="$ctx" get istio "$ISTIO_CR_NAME" \
-		-n "$ISTIO_CR_NAMESPACE" -o yaml \
-		> "${STATE_DIR}/istio-baseline-${ctx}.yaml" 2>/dev/null \
-		|| die "Failed to get Istio CR on context ${ctx}"
-
-	# Issue #19 — baseline-integrity hazard: the snapshot is captured from the LIVE
-	# Istio CR, so if a prior sweep was interrupted before its revert (or any out-of-band
-	# patch left a tuning override active) that override is baked INTO this baseline. A
-	# later "revert" then faithfully restores the DIRTY state and the mesh is never
-	# actually returned to default — the root-cause class behind #19 (a leaked
-	# meshConfig.discoverySelectors broke istio-ca-root-cert distribution). We cannot
-	# distinguish a leaked override from legitimate config purely offline, so we DETECT
-	# the known override fields and WARN loudly; we never silently rewrite the snapshot.
-	# The ideal fix is to capture from the GitOps/Argo source of truth (see README +
-	# PR notes); this detect+warn is the in-suite guard until then.
-	if command -v yq >/dev/null 2>&1; then
-		# shellcheck disable=SC2206  # intentional word-split of the space-separated list
-		_dirty_paths=(${TUNING_REVERT_DIRTY_PATHS:-.spec.values.meshConfig.discoverySelectors .spec.values.pilot.env.PILOT_ENABLE_CDS_CACHE})
-		_dirty_found=0
-		for _dp in "${_dirty_paths[@]}"; do
-			_dv="$(yq -r "${_dp} // \"\"" "${STATE_DIR}/istio-baseline-${ctx}.yaml" 2>/dev/null)" || _dv=""
-			if [[ -n "$_dv" && "$_dv" != "null" ]]; then
-				echo "  WARN  ${ctx}: captured baseline already contains tuning-override field ${_dp} (= ${_dv})" >&2
-				_dirty_found=1
-			fi
-		done
-		if ((_dirty_found)); then
-			echo "  WARN  ${ctx}: the mesh was NOT at a clean default when this baseline was" >&2
-			echo "        captured — reverting to it will restore the override, not remove it (#19)." >&2
-			echo "        Restore the mesh to default (or capture from the GitOps source of truth)" >&2
-			echo "        before relying on this baseline for revert." >&2
+	key="$(ctx_key "$ctx")"
+	"${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json >"${STATE_DIR}/istio-before-${key}.json" \
+		|| die "${ctx}: cannot read Istio CR 'default'"
+	python3 -I "$HELPER" revert-patch "$WORK/patch.json" "${STATE_DIR}/istio-before-${key}.json" \
+		"${STATE_DIR}/istio-revert-${key}.json"
+	for line in "${RES_LINES[@]}"; do
+		read -r kind name ns <<<"$line"
+		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
+			die "${ctx}: ${kind}/${name} already exists in ${ns}; refusing to overwrite it (part of the GitOps baseline or a leftover? see 005-cleanup.sh)"
 		fi
-	fi
-
-	if [[ -n "$PATCH_FILE" ]]; then
-		echo "--- ${ctx}: patching Istio CR ---"
-		$KUBECTL --context="$ctx" patch istio "$ISTIO_CR_NAME" \
-			-n "$ISTIO_CR_NAMESPACE" \
-			--type=merge \
-			-p "$(cat "$PATCH_FILE")"
-	fi
-
-	if [[ -n "$RESOURCES_FILE" ]]; then
-		echo "--- ${ctx}: applying profile resources ---"
-		$KUBECTL --context="$ctx" apply --server-side --force-conflicts \
-			-f "$RESOURCES_FILE"
-	fi
-done
-
-echo "$PROFILE_NAME" > "${STATE_DIR}/active-profile"
-[[ -n "$RESOURCES_FILE" ]] && cp "$RESOURCES_FILE" "${STATE_DIR}/applied-resources.yaml"
-
-echo ""
-echo "=== Waiting for istiod rollout ==="
-for ctx in "${CONTEXTS[@]}"; do
-	ctx="${ctx#"${ctx%%[![:space:]]*}"}"
-	ctx="${ctx%"${ctx##*[![:space:]]}"}"
-	[[ -z "$ctx" ]] && continue
-
-	echo "--- ${ctx}: waiting up to ${ROLLOUT_TIMEOUT}s ---"
-	$KUBECTL --context="$ctx" rollout status deployment/istiod \
-		-n "$ISTIO_CR_NAMESPACE" \
-		--timeout="${ROLLOUT_TIMEOUT}s" 2>/dev/null || true
-done
-
-rm -f "$PATCH_FILE" "$RESOURCES_FILE"
-
-echo ""
-echo "=== Waiting for Sail operator reconciliation ==="
-for ctx in "${CONTEXTS[@]}"; do
-	ctx="${ctx#"${ctx%%[![:space:]]*}"}"
-	ctx="${ctx%"${ctx##*[![:space:]]}"}"
-	[[ -z "$ctx" ]] && continue
-
-	deadline=$(( $(date +%s) + ROLLOUT_TIMEOUT ))
-	reconciled=0
-	while (( $(date +%s) < deadline )); do
-		status="$($KUBECTL --context="$ctx" get istiorevision default \
-			-o jsonpath='{.status.conditions[?(@.type=="Reconciled")].status}' \
-			2>/dev/null)" || true
-		if [[ "$status" == "True" ]]; then
-			reconciled=1
-			break
-		fi
-		sleep 5
 	done
-	if ((reconciled)); then
-		echo "  ${ctx}: Sail operator reconciled"
-		$KUBECTL --context="$ctx" rollout status deployment/istiod \
-			-n "$ISTIO_CR_NAMESPACE" \
-			--timeout="${ROLLOUT_TIMEOUT}s" 2>/dev/null || true
-	else
-		echo "  ${ctx}: Sail operator reconciliation not confirmed (timed out or unsupported) — continuing"
+done
+
+# Record state before mutating so an interrupted apply can still be reverted.
+cp "$WORK/patch.json" "${STATE_DIR}/patch.json"
+cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
+(IFS=,; echo "${CONTEXTS[*]}") >"${STATE_DIR}/contexts"
+echo "$PROFILE_NAME" >"${STATE_DIR}/active-profile"
+
+for ctx in "${CONTEXTS[@]}"; do
+	if ((HAS_PATCH)); then
+		echo "--- ${ctx}: patching Istio CR ---"
+		"${KUBECTL[@]}" --context="$ctx" patch istio.sailoperator.io default --type=merge \
+			--patch-file="$WORK/patch.json"
+	fi
+	if ((HAS_RESOURCES)); then
+		echo "--- ${ctx}: applying resources ---"
+		"${KUBECTL[@]}" --context="$ctx" apply --server-side --field-manager=tuning-profile \
+			-f "$WORK/resources.yaml"
 	fi
 done
 
+if ((HAS_PATCH)); then
+	echo "--- Waiting for the operator and istiod rollout ---"
+	for ctx in "${CONTEXTS[@]}"; do
+		wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" || die "${ctx}: istiod did not roll out; revert with 002-revert-profile.sh --state-dir ${STATE_DIR}"
+	done
+fi
+
+REVERT_HINT="Revert: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"
 if ((SKIP_VERIFY)); then
-	echo ""
-	echo "=== Profile '${PROFILE_NAME}' applied (verification skipped) ==="
-	echo "    Revert with: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR} --contexts ${CONTEXTS_CSV}"
+	echo "=== ${PROFILE_NAME} applied (not verified) ==="
+	echo "    ${REVERT_HINT}"
 	exit 0
 fi
 
-echo ""
-echo "=== Verifying profile: ${PROFILE_NAME} ==="
-
+echo "--- Verifying ---"
+fail=0
 for ctx in "${CONTEXTS[@]}"; do
-	ctx="${ctx#"${ctx%%[![:space:]]*}"}"
-	ctx="${ctx%"${ctx##*[![:space:]]}"}"
-	[[ -z "$ctx" ]] && continue
-
-	echo ""
-	echo "--- ${ctx} ---"
-	verify_profile "$ctx" "$PROFILE"
+	echo "  ${ctx}:"
+	if ((HAS_PATCH)); then
+		"${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json >"$WORK/live.json"
+		rev="$("${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o jsonpath='{.status.activeRevisionName}')"
+		deploy="istiod"
+		[[ "$rev" != "default" ]] && deploy="istiod-${rev}"
+		"${KUBECTL[@]}" --context="$ctx" -n istio-system get deployment "$deploy" -o json >"$WORK/deploy.json"
+		python3 -I "$HELPER" check "$WORK/patch.json" "$WORK/live.json" "$WORK/deploy.json" || fail=1
+	fi
+	for line in "${RES_LINES[@]}"; do
+		read -r kind name ns <<<"$line"
+		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
+			echo "  PASS  ${kind}/${name} exists in ${ns}"
+		else
+			echo "  FAIL  ${kind}/${name} missing in ${ns}"
+			fail=1
+		fi
+	done
 done
 
-echo ""
-WARN_MSG=""
-((VERIFY_WARN > 0)) && WARN_MSG=", ${VERIFY_WARN} warned"
-if ((VERIFY_FAIL > 0)); then
-	echo "=== Profile '${PROFILE_NAME}' applied with verification issues ==="
-	echo "    ${VERIFY_PASS} passed, ${VERIFY_FAIL} failed${WARN_MSG}"
-	echo ""
-	echo "    Some checks failed. Possible causes:"
-	echo "      - The Sail operator has not yet reconciled the Istio CR"
-	echo "      - istiod has not finished rolling out the new configuration"
-	echo "      - The profile patch targets a field the operator does not propagate"
-	echo "    Re-run with --skip-verify to bypass, or wait and retry."
-else
-	echo "=== Profile '${PROFILE_NAME}' applied and verified ==="
-	echo "    ${VERIFY_PASS} passed${WARN_MSG}"
+if ((fail)); then
+	echo "=== ${PROFILE_NAME} applied, but verification FAILED ===" >&2
+	echo "    ${REVERT_HINT}" >&2
+	exit 2
 fi
-echo "    Revert with: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR} --contexts ${CONTEXTS_CSV}"
+echo "=== ${PROFILE_NAME} applied and verified ==="
+echo "    ${REVERT_HINT}"

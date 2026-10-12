@@ -5,7 +5,7 @@
 # rows are reported separately rather than averaged together.
 # Filters poisoned rows (status != OK, istiod_restarted != 0) from numeric
 # aggregation but still counts them in count_total and reports the gap.
-# Propagates the first TSV's preamble metadata into all four output formats.
+# Propagates the first TSV's preamble metadata into every output format.
 #
 # Usage:
 #   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT]
@@ -26,7 +26,7 @@ Usage: $(basename "$0") [options]
   --results-dir DIR  Results directory (default: tests/dataplane/results).
                      A directory containing latency-*.tsv files; a sweep-*/
                      subdir from 003 also works.
-  --format FMT       Output format: text, csv, markdown, json, charts (default: text).
+  --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
   -h, --help         Show this help.
 EOF
 }
@@ -54,6 +54,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
+md) FORMAT=markdown ;;
 text|csv|markdown|json|charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, markdown, json, or charts)" ;;
 esac
@@ -201,15 +202,14 @@ report_csv() {
 	done <<<"$AGG_TSV"
 }
 
-# Metric glossary appended to the END of the markdown summary (#17). Definitions are
-# pulled from tests/dataplane/README.md; units/source/caveats mirror it, not invented here.
+# Metric glossary appended to the end of the markdown summary.
 glossary_section() {
 	cat <<'GLOSSARY'
 
 ## Glossary
 
-Definitions for every metric column in the results table above. Sourced from
-`tests/dataplane/README.md`. Latency percentiles come from each cell's **Fortio JSON**
+Definitions for every metric column in the results table above (see also
+`tests/dataplane/README.md`). Latency percentiles come from each cell's **Fortio JSON**
 (`DurationHistogram.Percentiles` / `.Max`, seconds → ms); numeric averages are over
 **valid rows only** — rows with `status != OK` or `istiod_restarted != 0` are excluded
 (`n_valid < n_total` means some rows were dropped).
@@ -218,7 +218,7 @@ Definitions for every metric column in the results table above. Sourced from
 |--------|-------|--------|----------------------|
 | `mesh_size` | clusters | sweep axis | Number of clusters in the mesh (`--mesh-size`). |
 | `qps_target` | queries/s | sweep axis | Target offered load for the Fortio run (`--qps-levels`). |
-| `target_class` | enum | internal | `local` (same cluster as the source, intra-cluster baseline) or `remote` (different cluster, routed via the east-west gateway). |
+| `target_class` | enum | internal | `local` (the source cluster's own `dataplane-server-<source>` Service, intra-cluster baseline) or `remote` (another cluster's Service, routed via the east-west gateway). |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/placeholder rows. |
 | `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages. |
 | `avg_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | Mean p50 latency over valid rows; `N/A` if the percentile was missing or every row was dropped. |
@@ -263,7 +263,7 @@ report_markdown() {
 			"$TOTAL_ALL" "$VALID_ALL" "$DROPPED_ALL"
 	fi
 
-	# #17: metric glossary at the very end of the markdown summary.
+	# Metric glossary at the very end of the markdown summary.
 	glossary_section
 }
 
@@ -321,27 +321,25 @@ report_charts() {
 	echo ""
 	echo "# Data-Plane Latency — Charts"
 	echo ""
-	# Chart 1: p50 vs mesh size at top QPS, local vs remote.
-	# Chart 2: p50 vs QPS at largest mesh size, local vs remote.
+	# Chart 1: p50 vs mesh size at the top QPS (needs two mesh sizes with remote data).
+	# Chart 2: p50 vs QPS at the largest mesh size with remote data.
+	# Cells with no valid samples (failed, restart-poisoned, or a sweep placeholder
+	# with class "na") stay off the axes. Mermaid has no null point, so a cell that
+	# is missing on an axis other cells use is drawn as 0.
 	awk -F'\t' '
 	{
 		ms = $1 + 0; qps = $2 + 0; cls = $3; n_valid = $5 + 0; p50 = $6
-		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
-		if (qps > max_qps) max_qps = qps
-		if (ms > max_ms) max_ms = ms
-		if (!(qps in qps_seen)) { qps_order[++n_qps] = qps; qps_seen[qps] = 1 }
-		if (!(cls in cls_seen)) { cls_order[++n_cls] = cls; cls_seen[cls] = 1 }
-		# PL13/PL15 gate (mirrors the markdown drop summary): a cell with no valid samples
-		# (n_valid==0 -> favg returned "N/A") is ABSENT, not a real 0 data point. Count it
-		# as dropped and leave has[] unset so it is never charted as 0.
 		cells_total++
 		if (n_valid <= 0 || p50 == "N/A") { cells_dropped++; next }
+		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
+		if (!(qps in qps_seen)) { qps_order[++n_qps] = qps; qps_seen[qps] = 1 }
+		if (qps > max_qps) max_qps = qps
 		p50_val[ms, qps, cls] = p50
 		has[ms, qps, cls] = 1
 	}
 	END {
 		if (cells_dropped > 0) {
-			printf "> %d of %d cells dropped (no valid samples / restart-poisoned) — not plotted.\n\n", cells_dropped, cells_total
+			printf "> %d of %d cells have no valid samples and are left out (a gap in a line is drawn as 0).\n\n", cells_dropped, cells_total
 		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {
@@ -355,62 +353,58 @@ report_charts() {
 			while (j >= 1 && qps_order[j]+0 > tmp+0) { qps_order[j+1] = qps_order[j]; j-- }
 			qps_order[j+1] = tmp
 		}
-		# Discover target classes (typically "local" and "remote").
-		local_cls = ""; remote_cls = ""
-		for (c = 1; c <= n_cls; c++) {
-			if (cls_order[c] == "local") local_cls = "local"
-			else remote_cls = cls_order[c]
-		}
-		if (local_cls == "" && n_cls >= 1) local_cls = cls_order[1]
-		if (remote_cls == "" && n_cls >= 2) remote_cls = cls_order[2]
+		local_cls = "local"; remote_cls = "remote"
 
-		# Collect mesh sizes >= 2 for charts that include remote.
+		# Mesh sizes (ascending) with at least one valid remote cell.
 		n_remote_ms = 0
 		for (i = 1; i <= n_ms; i++) {
-			if (ms_order[i] >= 2) remote_ms[++n_remote_ms] = ms_order[i]
+			for (q = 1; q <= n_qps; q++) {
+				if (has[ms_order[i], qps_order[q], remote_cls]) { remote_ms[++n_remote_ms] = ms_order[i]; break }
+			}
 		}
 
-		if (n_remote_ms < 2) {
-			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
+		if (n_remote_ms < 1) {
+			print "> Charts need remote data (mesh size >= 2)."
 			exit
 		}
+		max_ms = remote_ms[n_remote_ms]
 
-		# Chart 1: p50 vs mesh size at top QPS
-		printf "%% Chart 1: p50 latency (ms) vs mesh size at QPS %s\n", max_qps
-		printf "%% Series order: %s, %s\n", local_cls, remote_cls
-		printf "%% x-axis starts at mesh 2 (remote undefined at mesh 1)\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"p50 Latency vs Mesh Size (QPS %s)\"\n", max_qps
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote_ms; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_ms[i]
+		if (n_remote_ms < 2) {
+			printf "> The mesh-size chart needs two mesh sizes with remote data; only the QPS chart is shown.\n\n"
+		} else {
+			# Chart 1: p50 vs mesh size at top QPS
+			printf "```mermaid\n"
+			printf "xychart-beta\n"
+			printf "    title \"p50 Latency vs Mesh Size (QPS %s)\"\n", max_qps
+			printf "    x-axis \"Mesh Size\" ["
+			for (i = 1; i <= n_remote_ms; i++) {
+				if (i > 1) printf ", "
+				printf "%s", remote_ms[i]
+			}
+			printf "]\n"
+			printf "    y-axis \"Latency (ms)\"\n"
+			# Local series
+			printf "    line ["; sep = ""
+			for (i = 1; i <= n_remote_ms; i++) {
+				ms = remote_ms[i]
+				v = (has[ms, max_qps, local_cls] && p50_val[ms, max_qps, local_cls] != "N/A") ? p50_val[ms, max_qps, local_cls] + 0 : 0
+				printf "%s%.2f", sep, v; sep = ", "
+			}
+			printf "]\n"
+			# Remote series
+			printf "    line ["; sep = ""
+			for (i = 1; i <= n_remote_ms; i++) {
+				ms = remote_ms[i]
+				v = (has[ms, max_qps, remote_cls] && p50_val[ms, max_qps, remote_cls] != "N/A") ? p50_val[ms, max_qps, remote_cls] + 0 : 0
+				printf "%s%.2f", sep, v; sep = ", "
+			}
+			printf "]\n"
+			printf "```\n\n"
+			printf "> Series order: **%s**, **%s**. The gap is the cross-cluster overhead.\n\n", local_cls, remote_cls
 		}
-		printf "]\n"
-		printf "    y-axis \"Latency (ms)\"\n"
-		# Local series
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote_ms; i++) {
-			ms = remote_ms[i]
-			v = (has[ms, max_qps, local_cls] && p50_val[ms, max_qps, local_cls] != "N/A") ? p50_val[ms, max_qps, local_cls] + 0 : 0
-			printf "%s%.2f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		# Remote series
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote_ms; i++) {
-			ms = remote_ms[i]
-			v = (has[ms, max_qps, remote_cls] && p50_val[ms, max_qps, remote_cls] != "N/A") ? p50_val[ms, max_qps, remote_cls] + 0 : 0
-			printf "%s%.2f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series order: **%s**, **%s**. The gap = cross-cluster overhead.\n\n", local_cls, remote_cls
 
 		# Chart 2: p50 vs QPS at largest mesh size
-		printf "%% Chart 2: p50 latency (ms) vs QPS at mesh size %s\n", max_ms
-		printf "\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"p50 Latency vs QPS (Mesh Size %s)\"\n", max_ms
 		printf "    x-axis \"QPS\" ["

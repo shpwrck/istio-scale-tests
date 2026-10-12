@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Scrape istiod Prometheus metrics via port-forward for passive analysis.
-# Supplements OpenShift User Workload Monitoring — useful when UWM is not yet enabled
-# or for quick point-in-time snapshots during load tests.
+# Snapshot istiod pilot_* metrics from every Running istiod pod via port-forward.
+# Useful when OpenShift User Workload Monitoring is not enabled, or for
+# point-in-time snapshots during a load test. Writes one .prom file per pod.
 #
 # Usage:
 #   ./tests/propagation/004-collect-pilot-metrics.sh [--contexts CSV] [--output-dir DIR] [--watch --interval SEC]
@@ -14,7 +14,7 @@
 #   ./tests/propagation/004-collect-pilot-metrics.sh --watch --interval 10
 #
 #   # Specific clusters:
-#   ./tests/propagation/004-collect-pilot-metrics.sh --contexts cluster-001,cluster-002
+#   ./tests/propagation/004-collect-pilot-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
@@ -23,13 +23,20 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/timestamp.sh"
+# Own port block so a snapshot can run while 002 (or another suite) holds the
+# FANOUT_PF_BASE block. Assigned after versions.env, which exports FANOUT_PF_BASE.
+# shellcheck disable=SC2034  # read by tests/lib/fanout.sh
+FANOUT_PF_BASE="${PROPAGATION_SNAPSHOT_PF_BASE:-22014}"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="${ROOT}/tests/propagation/results"
 WATCH=0
 INTERVAL=10
 DRY_RUN=0
-BASE_PF_PORT=15014
 
 
 usage() {
@@ -43,8 +50,12 @@ Usage: $(basename "$0") [options]
   --dry-run          Show what would be scraped without connecting.
   -h, --help         Show this help.
 
+Writes <ctx>-<pod>-<timestamp>.prom per istiod pod, filtered to pilot_* series.
+
 Environment:
-  SETUP_CONTEXTS.
+  SETUP_CONTEXTS, METRICS_SCRAPE_TIMEOUT (curl --max-time per scrape, default 30),
+  PROPAGATION_SNAPSHOT_PF_BASE (local port block base, default 22014; kept
+  apart from FANOUT_PF_BASE so this can run alongside 002).
 EOF
 }
 
@@ -84,15 +95,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
-
-command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
+is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -103,76 +106,100 @@ fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
 if ((DRY_RUN)); then
-	echo "Would scrape istiod metrics from: ${CONTEXTS[*]}"
-	echo "Output directory: $OUTPUT_DIR"
+	echo "Would scrape every Running istiod pod on: ${CONTEXTS[*]}"
+	echo "Output directory: $OUTPUT_DIR (one .prom file per pod per scrape)"
 	echo "Watch mode: $WATCH (interval: ${INTERVAL}s)"
+	echo "Local port block: $(fanout_ctx_port_base 0)+ (${FANOUT_CTX_STRIDE} ports per context)"
 	exit 0
 fi
+
+KUBECTL=()
+resolve_kubectl KUBECTL
+command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 mkdir -p "$OUTPUT_DIR"
 
 PILOT_METRICS_REGEX="^(pilot_proxy_convergence_time|pilot_proxy_queue_time|pilot_xds_push_time|pilot_xds_pushes|pilot_xds[^_]|pilot_k8s_cfg_events|pilot_push_triggers|pilot_xds_config_size_bytes|pilot_conflict)"
 
 PF_PIDS=()
+SCRAPE_DIR="$(mktemp -d)"
+declare -A CTX_PORTS=() CTX_PODS=()
 
-cleanup_port_forwards() {
+cleanup() {
+	local pid
 	for pid in "${PF_PIDS[@]}"; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
 	PF_PIDS=()
+	rm -rf "$SCRAPE_DIR"
 }
+trap cleanup EXIT
 
-trap cleanup_port_forwards EXIT
-
-echo "Starting port-forwards to istiod..."
-for i in "${!CONTEXTS[@]}"; do
-	ctx="${CONTEXTS[i]}"
-	port=$(( BASE_PF_PORT + i ))
-	"${KUBECTL[@]}" --context="$ctx" -n istio-system port-forward svc/istiod "$port":15014 >/dev/null 2>&1 &
-	PF_PIDS+=($!)
-done
-
-sleep 3
-
-for i in "${!CONTEXTS[@]}"; do
-	port=$(( BASE_PF_PORT + i ))
-	attempts=0
-	# P4: --max-time bounds the readiness probe so a stuck/half-open PF can't block.
-	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null; do
-		attempts=$((attempts + 1))
-		((attempts > 20)) && die "port-forward to istiod on ${CONTEXTS[i]} (port $port) failed"
-		sleep 0.5
+# (Re)open one port-forward per Running istiod pod on every context.
+open_all() {
+	local pid i ctx
+	for pid in "${PF_PIDS[@]}"; do
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
 	done
-done
-echo "Port-forwards ready."
-
-scrape_all() {
-	local ts
-	ts=$(date -Iseconds)
+	PF_PIDS=()
 	for i in "${!CONTEXTS[@]}"; do
 		ctx="${CONTEXTS[i]}"
-		port=$(( BASE_PF_PORT + i ))
-		outfile="${OUTPUT_DIR}/${ctx}-${ts}.prom"
-		curl -s --max-time 10 "http://localhost:$port/metrics" 2>/dev/null \
-			| grep -E "$PILOT_METRICS_REGEX" \
-			> "$outfile" || echo "warning: failed to scrape $ctx" >&2
-		echo "  Scraped $ctx -> $outfile ($(wc -l < "$outfile") lines)"
+		# Out-array names must not collide with fanout_open's own locals (ports/pods).
+		local -a ctx_ports=() ctx_pods=()
+		fanout_open "$ctx" "$i" PF_PIDS ctx_ports ctx_pods "${KUBECTL[@]}"
+		CTX_PORTS["$i"]="${ctx_ports[*]}"
+		CTX_PODS["$i"]="${ctx_pods[*]}"
 	done
 }
+
+# Scrape every pod; returns 1 if any pod's scrape failed.
+scrape_all() {
+	local ts i j ctx safe_ctx outfile failed=0
+	local -a ports=() pods=()
+	ts=$(date -u +%Y%m%dT%H%M%SZ)
+	for i in "${!CONTEXTS[@]}"; do
+		ctx="${CONTEXTS[i]}"
+		safe_ctx="${ctx//[^A-Za-z0-9._-]/_}"
+		read -ra ports <<<"${CTX_PORTS[$i]}"
+		read -ra pods <<<"${CTX_PODS[$i]}"
+		fanout_scrape_all "$SCRAPE_DIR" "ctx${i}" "${ports[@]}" >/dev/null || failed=1
+		for j in "${!pods[@]}"; do
+			outfile="${OUTPUT_DIR}/${safe_ctx}-${pods[j]}-${ts}.prom"
+			grep -E "$PILOT_METRICS_REGEX" "${SCRAPE_DIR}/ctx${i}-${j}.metrics" > "$outfile" || true
+			if [[ -s "$outfile" ]]; then
+				echo "  Scraped $ctx/${pods[j]} -> $outfile ($(wc -l < "$outfile") lines)"
+			else
+				echo "warning: no pilot_* metrics from $ctx/${pods[j]}" >&2
+				failed=1
+			fi
+		done
+	done
+	return "$failed"
+}
+
+echo "Starting port-forwards to every istiod pod..."
+open_all
+echo "Port-forwards ready."
 
 if ((WATCH)); then
 	echo "Watch mode: scraping every ${INTERVAL}s (Ctrl-C to stop)"
 	while true; do
 		echo ""
 		echo "=== Scrape at $(date -Iseconds) ==="
-		scrape_all
+		if ! scrape_all; then
+			echo "warning: re-opening port-forwards (pod restart or dead port-forward?)" >&2
+			open_all
+		fi
 		sleep "$INTERVAL"
 	done
 else
 	echo ""
 	echo "=== Scraping metrics ==="
-	scrape_all
+	rc=0
+	scrape_all || rc=$?
 	echo ""
 	echo "Done. Files in $OUTPUT_DIR"
+	exit "$rc"
 fi

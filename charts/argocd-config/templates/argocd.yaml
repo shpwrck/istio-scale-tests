@@ -57,3 +57,7 @@ spec:
         {{- end }}
     {{- end }}
   {{- end }}
+  {{- with .Values.argocd.resourceHealthChecks }}
+  resourceHealthChecks:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

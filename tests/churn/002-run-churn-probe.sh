@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
-# Measure control-plane convergence time under endpoint churn.
-# Simultaneously scales deployments on all clusters, then polls istiod and
-# sidecar admin endpoints to measure how long until the mesh converges.
+# Measure control-plane convergence under endpoint churn.
+# Scales the churn-target deployments on the source cluster only (remotes stay at
+# base), then times when the source watcher sees the new pods and every source
+# proxy is SYNCED, and how fast each remote sees the change: its first EDS push
+# and its watcher's view of the new endpoints.
 #
 # Usage:
 #   ./tests/churn/002-run-churn-probe.sh --source-context CTX [options]
 #
 # Examples:
-#   # 2-cluster churn test:
-#   ./tests/churn/002-run-churn-probe.sh --source-context cluster-001 --remote-contexts cluster-002
-#
-#   # Scale 10 deployments from 1 to 10 replicas:
-#   ./tests/churn/002-run-churn-probe.sh --source-context cluster-001 \
+#   ./tests/churn/002-run-churn-probe.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
+#   ./tests/churn/002-run-churn-probe.sh --source-context <mesh-a-ctx> \
 #     --deployment-count 10 --scale-to 10 --iterations 3
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
-# Loud-fail diagnostics: a bare command failing under `set -e` otherwise aborts
-# silently (see the churn size-8 scrape abort: a bare `scrape_ctx` propagated
-# `fanout_scrape_all`'s by-design non-zero on an incomplete scrape). Surface the
-# line + command so any future abort is diagnosable instead of a truncated log.
+# Report the failing line if an unguarded command aborts the probe under set -e.
 # shellcheck disable=SC2154  # rc is assigned at the head of the trap body
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
@@ -32,8 +30,6 @@ source "${ROOT}/tests/lib/timestamp.sh"
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
-# shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -44,18 +40,18 @@ SCALE_TO="${CHURN_SCALE_TO_REPLICAS:-5}"
 ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
 SETTLE_SEC="${CHURN_SETTLE_SEC:-3}"
-POLL_INTERVAL_S="0.$(printf '%03d' "${CHURN_POLL_INTERVAL_MS:-250}")"
+POLL_INTERVAL_MS="${CHURN_POLL_INTERVAL_MS:-250}"
 OUTPUT_DIR="${ROOT}/tests/churn/results"
 DRY_RUN=0
-# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
-# graph. The sweep (003-run-sweep.sh) queries them ONCE via tuning_baseline_state and
-# threads them in; standalone runs leave them "unknown".
+# Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
+# them once and passes them in; standalone runs record "unknown".
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 NS="${CHURN_TEST_NAMESPACE:-churn-test}"
-# istiod is reached via tests/lib/fanout.sh (per-pod port block from FANOUT_PF_BASE,
-# default 21014). The envoy watcher PF block is unchanged.
-BASE_ENVOY_PF_PORT=15100
+# istiod pods are port-forwarded by tests/lib/fanout.sh (FANOUT_PF_BASE). The
+# source watcher Envoy uses SRC_ENVOY_PF_PORT; remote i uses RMT_ENVOY_PF_BASE + i.
+SRC_ENVOY_PF_PORT=15100
+RMT_ENVOY_PF_BASE=15101
 
 usage() {
 	cat <<EOF
@@ -77,20 +73,21 @@ Usage: $(basename "$0") [options]
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
-Output:
-  Three remote convergence signals per iteration:
-    convergence_local_ms          local syncz all-SYNCED time.
-    remote_endpoint_reachable_ms  data-plane reachability (Envoy health_flags,
-                                  includes pod scheduling + sidecar start).
-    convergence_remote_eds_ms     control-plane only — time to the FIRST remote
-                                  EDS push after t0 (pilot_xds_pushes{type=eds}
-                                  delta >= 1, pod-boot-free).
+Only the source context is scaled; remotes stay at base replicas, so the remote
+columns measure cross-cluster propagation. Per iteration:
+  convergence_local_ms          the source watcher sees at least one new Ready pod
+                                per deployment and the source istiod reports every
+                                proxy SYNCED (includes pod scheduling and sidecar start).
+  remote_endpoint_reachable_ms  every churn target on the remote watcher has more
+                                healthy endpoint weight than before t0 (at least one
+                                new Ready source pod per deployment; includes pod
+                                scheduling and sidecar start).
+  convergence_remote_eds_ms     first remote EDS push after t0 (control plane only).
 
 Environment:
-  SETUP_CONTEXTS               Default comma-separated contexts (see config/versions.env).
   CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
   CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
-  CHURN_BASE_REPLICAS          Replica count targets scale back down to.
+  CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).
   CHURN_SCALE_TO_REPLICAS      Default --scale-to.
   CHURN_ITERATIONS             Default --iterations.
   CHURN_TIMEOUT_SEC            Default --timeout.
@@ -174,14 +171,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+is_pos_int "$DEPLOYMENT_COUNT" || die "--deployment-count must be a positive integer"
+is_nonneg_int "$BASE_REPLICAS" || die "CHURN_BASE_REPLICAS must be a non-negative integer"
+is_pos_int "$SCALE_TO" || die "--scale-to must be a positive integer"
+((SCALE_TO > BASE_REPLICAS)) || die "--scale-to ($SCALE_TO) must be greater than CHURN_BASE_REPLICAS ($BASE_REPLICAS)"
+is_pos_int "$ITERATIONS" || die "--iterations must be a positive integer"
+is_pos_int "$TIMEOUT_SEC" || die "--timeout must be a positive integer"
+is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer"
+is_pos_int "$POLL_INTERVAL_MS" || die "CHURN_POLL_INTERVAL_MS must be a positive integer"
+POLL_INTERVAL_S="$(awk -v ms="$POLL_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')"
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
@@ -192,22 +193,21 @@ if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 fi
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-mkdir -p "$OUTPUT_DIR"
 TSV_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.tsv"
 
 if ((DRY_RUN)); then
 	echo "=== Dry-run: churn probe ==="
 	echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE"
-	echo "Deployments: $DEPLOYMENT_COUNT | Scale: $BASE_REPLICAS -> $SCALE_TO | Iterations: $ITERATIONS"
+	echo "Deployments: $DEPLOYMENT_COUNT | Scale (source only): $BASE_REPLICAS -> $SCALE_TO | Iterations: $ITERATIONS"
+	echo "Output: $TSV_FILE"
 	exit 0
 fi
+mkdir -p "$OUTPUT_DIR"
 
-# Preflight every context: require >= 1 Running istiod pod. Multi-replica istiod
-# is supported via the per-pod fanout (tests/lib/fanout.sh); record the source
-# replica count for the TSV preamble (PL2).
+# Preflight every context: require >= 1 Running istiod pod (all pods are scraped
+# via tests/lib/fanout.sh). The source replica count goes into the preamble.
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
@@ -221,6 +221,7 @@ cat > "$TSV_FILE" <<EOF
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
+# CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
 # SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS
 EOF
@@ -312,25 +313,6 @@ emit_setup_failed_row() {
 		"SETUP_FAILED" >> "$TSV_FILE"
 }
 
-# Coerce an endpoint-count capture to a clean non-negative integer. A scrape of
-# Envoy /clusters under load can come back empty, multi-line, or non-numeric (a
-# dead PF, a partial body, or a `grep -c` that printed `0` AND exited 1 so a
-# trailing `|| echo 0` doubled the value into "0\n0"). Such a value, fed to
-# `$(( ))`, raises "arithmetic syntax error" and — under `set -e` — aborts the
-# whole probe. Keep only the FIRST run of digits; default to 0 otherwise. Never
-# returns non-zero, so it is safe to call unguarded under `set -e`.
-sanitize_count() {
-	local raw="${1:-}" digits
-	digits="${raw//[!0-9 $'\n']/}"   # drop anything that is not a digit/space/newline
-	digits="${digits%%$'\n'*}"        # keep only the first line
-	digits="${digits//[!0-9]/}"       # then keep only its digits
-	if [[ -n "$digits" ]]; then
-		printf '%s\n' "$((10#$digits))"  # strip leading zeros, force base-10
-	else
-		printf '0\n'
-	fi
-}
-
 bucket_range() {
 	local v="${1:-0}"
 	[[ "$v" == "N/A" ]]      && { echo "N/A"; return; }
@@ -371,21 +353,30 @@ _syncz_stale_total() {
 	echo "$total"
 }
 
-# Poll syncz across all source pods until total stale == 0 (or timeout).
+# convergence_local_ms: poll until the source watcher has more healthy weight
+# than at baseline on every churn target (the source istiod has pushed at least
+# one new Ready pod per deployment), then until every source istiod pod reports
+# 0 stale proxies. Without the watcher gate, syncz is already all-SYNCED before
+# the new pods exist, so the column would only time the scale call.
 poll_syncz_converged() {
-	local t0="$1" result_file="$2"
-	shift 2
+	local t0="$1" result_file="$2" envoy_port="$3" baseline_file="$4"
+	shift 4
 	local -a ports=("$@")
+	local cur_file="${baseline_file}.cur" body seen=0 now_ms total
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
-		local now_ms
 		now_ms=$(( $(now_ns) / 1000000 ))
 		((now_ms > deadline)) && { echo "TIMEOUT" > "$result_file"; return; }
-		local total
-		total="$(_syncz_stale_total "${ports[@]}")"
-		if [[ "$total" == "0" ]]; then
-			now_ns > "$result_file"
-			return
+		if ((!seen)) && body=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null); then
+			printf '%s\n' "$body" | churn_target_weights > "$cur_file"
+			(( $(count_grown_clusters "$baseline_file" "$cur_file") >= DEPLOYMENT_COUNT )) && seen=1
+		fi
+		if ((seen)); then
+			total="$(_syncz_stale_total "${ports[@]}")"
+			if [[ "$total" == "0" ]]; then
+				now_ns > "$result_file"
+				return
+			fi
 		fi
 		sleep "$POLL_INTERVAL_S"
 	done
@@ -406,56 +397,125 @@ wait_syncz_synced() {
 	return 1
 }
 
-# Wait for expected endpoint count (full convergence, not just first endpoint).
-# This is the DATA-PLANE reachability signal: the remote Envoy reports the new
-# endpoints as health_flags::healthy, which requires the source pods to be Ready
-# (scheduled + sidecar started). It therefore measures end-to-end churn
-# reachability (control-plane propagation + pod/sidecar lifecycle), NOT the
-# control plane in isolation — see poll_remote_eds_converged for that.
-poll_endpoint_count_converged() {
-	local envoy_port="$1" t0="$2" expected_count="$3" result_file="$4"
+# Print "<cluster> <weight>" for every outbound churn-target cluster in an Envoy
+# admin /clusters text dump (stdin): the summed weight of its healthy hosts.
+# istiod only sends Ready endpoints. On a multi-network mesh it replaces another
+# network's endpoints with east-west gateway hosts whose weight grows with that
+# network's Ready endpoint count, so a weight sum (not a host count) tracks new
+# source endpoints on both flat and multi-network meshes.
+churn_target_weights() {
+	awk -F'::' -v ns="$NS" '
+	NF == 4 && index($1, "outbound|") == 1 && $1 ~ ("[|][|]churn-target-[0-9]+[.]" ns "[.]svc[.]") {
+		c = $1
+		if (!(c in sum)) sum[c] = 0
+		k = c "::" $2
+		if ($3 == "health_flags") hf[k] = $4
+		else if ($3 == "weight") wt[k] = $4
+		else next
+		if ((k in hf) && (k in wt)) {
+			if (hf[k] == "healthy") sum[c] += wt[k]
+			delete hf[k]; delete wt[k]
+		}
+	}
+	END { for (c in sum) print c, sum[c] }' | sort
+}
+
+# Count clusters in <current> whose weight is above <baseline> (churn_target_weights files).
+count_grown_clusters() {
+	awk 'FILENAME == ARGV[1] { base[$1] = $2; next }
+		($1 in base) && $2 + 0 > base[$1] + 0 { n++ }
+		END { print n + 0 }' "$1" "$2"
+}
+
+# Write a remote watcher's churn-target weights to <out>. Retries until all
+# DEPLOYMENT_COUNT clusters are listed; returns 1 if they never are.
+capture_target_weights() {
+	local envoy_port="$1" out="$2" attempt body n
+	for attempt in 1 2 3 4 5; do
+		if body=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null); then
+			printf '%s\n' "$body" | churn_target_weights > "$out"
+			n=$(wc -l < "$out")
+			if ((n >= DEPLOYMENT_COUNT)); then return 0; fi
+		fi
+		if ((attempt < 5)); then sleep "$POLL_INTERVAL_S"; fi
+	done
+	return 1
+}
+
+# remote_endpoint_reachable_ms: poll a remote watcher until every churn-target
+# cluster has more healthy weight than at baseline, i.e. at least one new Ready
+# source pod per deployment is reachable from the remote. Includes pod scheduling
+# and sidecar start; poll_remote_eds_converged is the control-plane-only signal.
+poll_target_weights_grown() {
+	local envoy_port="$1" t0="$2" baseline_file="$3" result_file="$4"
+	local cur_file="${baseline_file}.cur" body now_ms grown
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	while true; do
-		local now_ms
 		now_ms=$(( $(now_ns) / 1000000 ))
 		((now_ms > deadline)) && { echo "TIMEOUT" > "$result_file"; return; }
-		local clusters count
-		clusters=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$POLL_INTERVAL_S"; continue; }  # P4: bound a stuck PF
-		count=$(echo "$clusters" | grep -c "churn-target.*health_flags::healthy" || true)
-		if ((count >= expected_count)); then
-			now_ns > "$result_file"
-			return
+		if body=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null); then
+			printf '%s\n' "$body" | churn_target_weights > "$cur_file"
+			grown=$(count_grown_clusters "$baseline_file" "$cur_file")
+			if ((grown >= DEPLOYMENT_COUNT)); then
+				now_ns > "$result_file"
+				return
+			fi
 		fi
 		sleep "$POLL_INTERVAL_S"
 	done
 }
 
-# CONTROL-PLANE-only convergence signal (the P2 analogue from the propagation
-# suite, tests/propagation/002-run-endpoint-probe.sh:poll_p2_remote_eds_push).
-# Times the FIRST cross-cluster EDS push after t0 on a remote istiod, using the
-# existing pilot_xds_pushes{type="eds"} counter (fanned out + summed across the
-# remote's istiod pods via fanout_counter_by_label_sum). This is pod-boot-free:
-# it answers "how fast does the remote control plane learn the churn and push
-# EDS", independent of source-pod Ready time. Contrast with
-# poll_endpoint_count_converged, which gates on the new endpoints becoming
-# health_flags::healthy (and so includes pod scheduling + sidecar start).
-#
-# Threshold: Sigma eds_delta >= 1 (R2-2/PL20). istiod debounces/coalesces, so
-# scaling N deployments concurrently commonly produces FEWER than N {type=eds}
-# pushes — a per-deployment threshold (>= DEPLOYMENT_COUNT) would spuriously
-# TIMEOUT on a fully-converged mesh. We therefore time the FIRST remote EDS push
-# after t0 (the control-plane scaling signal), NOT per-deployment fan-in. The
-# counter is mesh-wide, so this does NOT disambiguate a concurrent unrelated EDS
-# push; in a churn run the scale event is the dominant in-window activity, so
-# that is acceptable. NOTE: churn scales replicas of EXISTING deployments — no
-# Service is created/deleted — so pilot_services is invariant and there is NO
-# clean registry-delta cross-check available (unlike propagation P2, where t0
-# CREATES a Service); the dirty cross-check was removed (R2-1/PL31: a
-# zero-information always-dirty flag). NOTE: there is no in-poller restart guard
-# (unlike propagation P2's proc_start_sig check); this poller relies on the
-# post-hoc POISONED_RESTART poisoning in the main loop (a remote restart resets
-# the counter and N/As convergence_remote_eds_ms there).
-# Result file: crossing ns (compute_delta_ms), or TIMEOUT / INCOMPLETE.
+# After scale-down: wait until no churn-target cluster on the remote watcher is
+# above its pre-t0 baseline, so the next iteration starts from a quiet remote.
+wait_target_weights_settled() {
+	local envoy_port="$1" baseline_file="$2" timeout_sec="$3"
+	local cur_file="${baseline_file}.settle" body
+	local deadline=$(( $(date +%s) + timeout_sec ))
+	while (( $(date +%s) <= deadline )); do
+		if body=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null); then
+			printf '%s\n' "$body" | churn_target_weights > "$cur_file"
+			if (( $(count_grown_clusters "$baseline_file" "$cur_file") == 0 )); then return 0; fi
+		fi
+		sleep "$POLL_INTERVAL_S"
+	done
+	return 1
+}
+
+# After scale-down: wait until the source has no terminating churn-target pods, so
+# the next iteration's baseline (connected proxies, push counters) is quiet.
+wait_source_pods_settled() {
+	local timeout_sec="$1" want n
+	want=$(( DEPLOYMENT_COUNT * BASE_REPLICAS ))
+	local deadline=$(( $(date +%s) + timeout_sec ))
+	while (( $(date +%s) <= deadline )); do
+		if n=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pods -l churn-target=true \
+			--no-headers 2>/dev/null | wc -l); then
+			((n <= want)) && return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+# Scale every churn target on the source context only. Remotes stay at base, so
+# the remote columns move only on cross-cluster propagation.
+scale_source() {
+	local replicas="$1" d pid
+	local -a pids=()
+	for ((d = 0; d < DEPLOYMENT_COUNT; d++)); do
+		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" scale "deployment/churn-target-${d}" --replicas="$replicas" >/dev/null 2>&1 &
+		pids+=($!)
+	done
+	for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+}
+
+# convergence_remote_eds_ms: time to the first EDS push after t0 on a remote
+# istiod (pilot_xds_pushes{type="eds"} summed across its pods). Pod-boot-free,
+# and with only the source scaled the push can only come from cross-cluster
+# endpoint discovery. The counter is istiod-wide, so an unrelated EDS push in the
+# window would also count. Churn adds no Service, so there is no registry-delta
+# cross-check. A remote istiod restart is caught after the fact (POISONED_RESTART
+# N/As this column). Result file: crossing ns, or TIMEOUT / INCOMPLETE.
 poll_remote_eds_converged() {
 	local polldir="$1" t0="$2" baseline_eds="$3" eds_delta_target="$4" \
 		result_file="$5"
@@ -506,7 +566,8 @@ compute_delta_ms() {
 	local result_file="$1" t0="$2"
 	local ts
 	ts=$(<"$result_file")
-	if [[ "$ts" == "TIMEOUT" ]]; then echo "TIMEOUT"; return; fi
+	if [[ "$ts" == "N/A" ]]; then echo "N/A"; return; fi
+	if [[ ! "$ts" =~ ^[0-9]+$ ]]; then echo "TIMEOUT"; return; fi
 	echo $(( (ts - t0) / 1000000 ))
 }
 
@@ -519,37 +580,53 @@ echo ""
 TMPDIR_RUN=$(mktemp -d)
 trap 'cleanup; rm -rf "$TMPDIR_RUN"' EXIT
 
-# Per-remote istiod pod-port arrays, stored as newline strings keyed by remote idx
-# (bash has no array-of-arrays); split back with split_csv-style read when used.
-declare -A RMT_PORTS_STR=()
+# Per-remote istiod ports and pods (the ones fanout_open reached, same order),
+# stored as newline strings keyed by remote idx (bash has no array-of-arrays).
+declare -A RMT_PORTS_STR=() RMT_PODS_STR=()
 SRC_ISTIOD_PORTS=()
+SRC_ISTIOD_PODS=()
 
 # (Re)open one istiod port-forward per Running pod, per context. The source
 # context is ctx_index 0; remote i is ctx_index i+1 (collision-free blocks).
-# Re-listing pods on reopen picks up a pod-set change. Envoy watcher PFs are
-# opened once (open_envoy_fanouts) — they are not re-opened here.
+# The pods lists line up with the ports (and so with the scrape files): they
+# become each iteration's pre podset for fanout_restart_status.
 open_istiod_fanouts() {
-	# pods array is a required out-arg of fanout_open; not read directly here
-	# (restart detection uses the recorded .podset file).
-	# shellcheck disable=SC2034
-	local pods=()
 	SRC_ISTIOD_PORTS=()
-	fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS pods "${KUBECTL[@]}"
-	local i rp rpods
+	SRC_ISTIOD_PODS=()
+	fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS SRC_ISTIOD_PODS "${KUBECTL[@]}"
+	local i
+	local -a rp rpods
 	for i in "${!REMOTES[@]}"; do
 		rp=()
-		# shellcheck disable=SC2034  # required out-arg of fanout_open; podset recorded per-scrape
 		rpods=()
 		fanout_open "${REMOTES[i]}" $(( i + 1 )) PF_PIDS rp rpods "${KUBECTL[@]}"
 		RMT_PORTS_STR["$i"]="$(IFS=$'\n'; echo "${rp[*]}")"
+		RMT_PODS_STR["$i"]="$(IFS=$'\n'; echo "${rpods[*]}")"
+	done
+}
+
+# True when a context's Running istiod pods differ from the opened (newline-joined)
+# list, e.g. a replica was added or replaced. An empty listing (API hiccup) is
+# not a change.
+istiod_podset_changed() {
+	local ctx="$1" opened="$2" now
+	now="$(fanout_list_istiod_pods "$ctx" "${KUBECTL[@]}")"
+	[[ -n "$now" && "$now" != "$opened" ]]
+}
+
+# Port-forward every watcher Envoy: the source one gates convergence_local_ms,
+# the remote ones drive remote_endpoint_reachable_ms.
+open_envoy_port_forwards() {
+	local k
+	start_envoy_port_forward "$SOURCE_CTX" "$SRC_ENVOY_PF_PORT"
+	for k in "${!REMOTES[@]}"; do
+		start_envoy_port_forward "${REMOTES[k]}" $(( RMT_ENVOY_PF_BASE + k ))
 	done
 }
 
 echo "Starting port-forwards..."
 open_istiod_fanouts
-for i in "${!REMOTES[@]}"; do
-	start_envoy_port_forward "${REMOTES[i]}" $(( BASE_ENVOY_PF_PORT + i ))
-done
+open_envoy_port_forwards
 echo "Port-forwards ready."
 
 # Helper: load a remote's istiod ports into a named array.
@@ -561,17 +638,16 @@ load_rmt_ports() {
 	while IFS= read -r p; do [[ -n "$p" ]] && _arr+=("$p"); done <<<"${RMT_PORTS_STR[$idx]}"
 }
 
-# Per-iteration PF liveness check: if ANY istiod pod-port across any context is
-# unresponsive, kill the whole istiod PF set and re-open every context's block
-# (re-listing pods, so a pod-set change is picked up). Mirrors propagation's
-# fanout_reopen_if_dead. Envoy watcher PFs are left intact.
+# Per-iteration PF check: if any istiod or watcher port-forward is unresponsive,
+# or a context's Running istiod pods changed since the open, kill every
+# port-forward and re-open them all (re-listing istiod pods).
 reopen_istiod_fanouts_if_dead() {
-	local alive=1 port
+	local alive=1 port j
+	local -a _rp2=()
 	for port in "${SRC_ISTIOD_PORTS[@]}"; do
 		curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break; }
 	done
 	if ((alive)); then
-		local j _rp2=()
 		for j in "${!REMOTES[@]}"; do
 			load_rmt_ports "$j" _rp2
 			for port in "${_rp2[@]}"; do
@@ -579,31 +655,33 @@ reopen_istiod_fanouts_if_dead() {
 			done
 		done
 	fi
+	if ((alive)); then
+		curl -s -o /dev/null --max-time 2 "http://localhost:$SRC_ENVOY_PF_PORT/ready" 2>/dev/null || alive=0
+		for j in "${!REMOTES[@]}"; do
+			curl -s -o /dev/null --max-time 2 "http://localhost:$(( RMT_ENVOY_PF_BASE + j ))/ready" 2>/dev/null || { alive=0; break; }
+		done
+	fi
+	if ((alive)); then
+		if istiod_podset_changed "$SOURCE_CTX" "$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")"; then
+			alive=0
+		else
+			for j in "${!REMOTES[@]}"; do
+				istiod_podset_changed "${REMOTES[j]}" "${RMT_PODS_STR[$j]}" && { alive=0; break; }
+			done
+		fi
+	fi
 	((alive)) && return 0
-	echo "  istiod port-forward(s) unresponsive — re-opening fanout blocks..." >&2
+	echo "  port-forward(s) unresponsive or istiod pods changed — re-opening all port-forwards..." >&2
 	local pid
-	# Kill only the istiod PFs we can't selectively map, so re-open the lot; the
-	# envoy watcher PFs share PF_PIDS, so re-open those too to keep them alive.
 	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	open_istiod_fanouts
-	local k
-	for k in "${!REMOTES[@]}"; do
-		start_envoy_port_forward "${REMOTES[k]}" $(( BASE_ENVOY_PF_PORT + k ))
-	done
+	open_envoy_port_forwards
 }
 
-# Reachability threshold: at least 1 new health_flags::healthy endpoint per
-# deployment visible in the remote sidecar's /clusters. health_flags::healthy
-# requires the source pod to be Ready (scheduled + sidecar started), so this is
-# the end-to-end reachability signal (remote_endpoint_reachable_ms). The
-# control-plane-only signal (convergence_remote_eds_ms) is measured separately by
-# poll_remote_eds_converged off the istiod EDS push counter.
-ENDPOINT_THRESHOLD_DELTA=$DEPLOYMENT_COUNT
-# EDS-push convergence threshold (R2-2/PL20): the FIRST remote EDS push after t0,
-# i.e. Sigma pilot_xds_pushes{type=eds} delta >= 1. NOT per-deployment fan-in —
-# istiod coalesces concurrent scales into FEWER than DEPLOYMENT_COUNT pushes, so
-# a per-deployment threshold would spuriously TIMEOUT a converged mesh.
+# convergence_remote_eds_ms fires on the FIRST remote EDS push after t0. istiod
+# coalesces concurrent scales into fewer pushes than deployments, so a
+# per-deployment threshold would time out on a converged mesh.
 EDS_THRESHOLD_DELTA=1
 
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
@@ -630,7 +708,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_PRE_FILES < <(ctx_metric_files "$ITER_DIR" "src-pre" "$SRC_NPORTS")
-	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-pre.podset" "${KUBECTL[@]}"
+	# Pre podset = the scraped pods (lines up with SRC_PRE_FILES); post podset =
+	# every Running pod, so a replaced or added istiod shows up as a change.
+	printf '%s\n' "${SRC_ISTIOD_PODS[@]}" > "$ITER_DIR/src-pre.podset"
 	src_connected_proxies=$(fanout_gauge_sum pilot_xds "${SRC_PRE_FILES[@]}")
 
 	rmt_connected_proxies=0
@@ -648,22 +728,27 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 		mapfile -t _rfiles < <(ctx_metric_files "$ITER_DIR" "rmt${i}-pre" "${#_rports[@]}")
 		RMT_PRE_FILES_STR["$i"]="$(IFS=$'\n'; echo "${_rfiles[*]}")"
-		fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-pre.podset" "${KUBECTL[@]}"
+		printf '%s\n' "${RMT_PODS_STR[$i]}" > "$ITER_DIR/rmt${i}-pre.podset"
 		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds "${_rfiles[@]}") ))
 		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${_rfiles[@]}")
 	done
+	((${#REMOTES[@]})) || rmt_connected_proxies="N/A"
 
-	# Reset every iteration so indices track REMOTES, never carry stale values.
-	BASELINE_COUNTS=()
+	# Churn-target weight baselines on every watcher. A watcher that does not list
+	# every churn target makes its column N/A (source: convergence_local_ms).
+	SRC_WEIGHTS_OK=1
+	if ! capture_target_weights "$SRC_ENVOY_PF_PORT" "$ITER_DIR/src-weights.base"; then
+		echo "  Warning: $SOURCE_CTX watcher does not list all $DEPLOYMENT_COUNT churn-target clusters; convergence_local_ms will be N/A" >&2
+		SRC_WEIGHTS_OK=0
+	fi
+	RMT_WEIGHTS_OK=()
 	for i in "${!REMOTES[@]}"; do
-		envoy_port=$(( BASE_ENVOY_PF_PORT + i ))
-		# `grep -c` prints `0` AND exits 1 on a no-match over non-empty input; a
-		# trailing `|| echo 0` would then double it into the multi-line "0\n0" that
-		# breaks the `$(( ))` at the threshold below. Use `|| true` (matching the
-		# poller) and sanitize to a clean non-negative integer. P4: --max-time
-		# bounds a stuck PF; an empty/failed scrape sanitizes to 0.
-		bc=$(curl -s --max-time 2 "http://localhost:$envoy_port/clusters" 2>/dev/null | grep -c "churn-target.*health_flags::healthy" || true)
-		BASELINE_COUNTS+=("$(sanitize_count "$bc")")
+		if capture_target_weights $(( RMT_ENVOY_PF_BASE + i )) "$ITER_DIR/rmt${i}-weights.base"; then
+			RMT_WEIGHTS_OK+=(1)
+		else
+			echo "  Warning: ${REMOTES[i]} watcher does not list all $DEPLOYMENT_COUNT churn-target clusters; remote_endpoint_reachable_ms will be N/A" >&2
+			RMT_WEIGHTS_OK+=(0)
+		fi
 	done
 
 	# Counter baselines summed across source pods.
@@ -683,22 +768,21 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	set +e
 	(
 		set -e
-	echo "  Scaling $DEPLOYMENT_COUNT deployments to $SCALE_TO replicas on all clusters..."
-	SCALE_PIDS=()
-	for ctx in "${ALL_CTXS[@]}"; do
-		for ((d = 0; d < DEPLOYMENT_COUNT; d++)); do
-			"${KUBECTL[@]}" --context="$ctx" -n "$NS" scale deployment/churn-target-${d} --replicas="$SCALE_TO" >/dev/null 2>&1 &
-			SCALE_PIDS+=($!)
-		done
-	done
-	for pid in "${SCALE_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+	echo "  Scaling $DEPLOYMENT_COUNT deployments to $SCALE_TO replicas on $SOURCE_CTX..."
+	scale_source "$SCALE_TO"
 
 	LOCAL_FILE="$TMPDIR_RUN/local_conv"
 	echo "" > "$LOCAL_FILE"
+	POLL_PIDS=()
 	# syncz fanned out across ALL source istiod pods: each replica only knows its
 	# own connected proxies, so convergence requires every pod to report 0 stale.
-	poll_syncz_converged "$T0" "$LOCAL_FILE" "${SRC_ISTIOD_PORTS[@]}" &
-	POLL_PIDS=($!)
+	if ((SRC_WEIGHTS_OK)); then
+		poll_syncz_converged "$T0" "$LOCAL_FILE" "$SRC_ENVOY_PF_PORT" \
+			"$ITER_DIR/src-weights.base" "${SRC_ISTIOD_PORTS[@]}" &
+		POLL_PIDS+=($!)
+	else
+		echo "N/A" > "$LOCAL_FILE"
+	fi
 
 	REMOTE_FILES=()
 	REMOTE_EDS_FILES=()
@@ -706,16 +790,15 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		rf="$TMPDIR_RUN/remote_${i}"
 		echo "" > "$rf"
 		REMOTE_FILES+=("$rf")
-		# Defensive: re-sanitize the per-remote baseline at the point of use so one
-		# malformed capture can never raise an arithmetic error that aborts the whole
-		# probe under `set -e`. Semantics unchanged: expected = baseline + delta.
-		baseline_i="$(sanitize_count "${BASELINE_COUNTS[i]:-0}")"
-		expected=$(( baseline_i + ENDPOINT_THRESHOLD_DELTA ))
-		poll_endpoint_count_converged $(( BASE_ENVOY_PF_PORT + i )) "$T0" "$expected" "$rf" &
-		POLL_PIDS+=($!)
+		if (( RMT_WEIGHTS_OK[i] )); then
+			poll_target_weights_grown $(( RMT_ENVOY_PF_BASE + i )) "$T0" \
+				"$ITER_DIR/rmt${i}-weights.base" "$rf" &
+			POLL_PIDS+=($!)
+		else
+			echo "N/A" > "$rf"
+		fi
 
-		# Control-plane-only EDS-push convergence (the P2 analogue), fanned out over
-		# this remote's already-open istiod ports.
+		# Control-plane-only EDS-push convergence over this remote's istiod ports.
 		edsf="$TMPDIR_RUN/remote_eds_${i}"
 		echo "" > "$edsf"
 		REMOTE_EDS_FILES+=("$edsf")
@@ -733,20 +816,30 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	conv_local=$(compute_delta_ms "$LOCAL_FILE" "$T0")
 	echo "  Convergence (local syncz): ${conv_local}ms"
 
+	# Max across remotes; any TIMEOUT wins, then any N/A (incomplete baseline).
 	conv_remote="N/A"
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_remote=0
-		all_ok=1
+		any_timeout=0
+		any_na=0
 		for i in "${!REMOTES[@]}"; do
 			r=$(compute_delta_ms "${REMOTE_FILES[i]}" "$T0")
-			echo "  Convergence (remote ${REMOTES[i]}): ${r}ms"
+			echo "  Reachable (remote ${REMOTES[i]}): ${r}ms"
 			if [[ "$r" == "TIMEOUT" ]]; then
-				all_ok=0
+				any_timeout=1
+			elif [[ "$r" == "N/A" ]]; then
+				any_na=1
 			elif ((r > max_remote)); then
 				max_remote="$r"
 			fi
 		done
-		if ((all_ok)); then conv_remote="$max_remote"; else conv_remote="TIMEOUT"; fi
+		if ((any_timeout)); then
+			conv_remote="TIMEOUT"
+		elif ((any_na)); then
+			conv_remote="N/A"
+		else
+			conv_remote="$max_remote"
+		fi
 	fi
 
 	# Control-plane-only EDS-push convergence (max across remotes; mirrors the
@@ -879,10 +972,16 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		# NOT poisoned here — only its TIMEOUT is meaningful.
 		conv_remote_eds="N/A"
 	fi
+	# No remotes (mesh size 1): remote counters are N/A, not 0.
+	if [[ ${#REMOTES[@]} -eq 0 ]]; then
+		rmt_triggers_delta="N/A"; rmt_pushes_delta="N/A"
+	fi
 
-	# Amplification only when both deltas are numeric (restart poisons them to N/A).
+	# Amplification only when the deltas are numeric (restart poisons them to N/A).
 	if [[ "$src_pushes_delta" =~ ^-?[0-9]+$ && "$rmt_pushes_delta" =~ ^-?[0-9]+$ ]]; then
 		total_pushes=$(( src_pushes_delta + rmt_pushes_delta ))
+	elif [[ "$src_pushes_delta" =~ ^-?[0-9]+$ && ${#REMOTES[@]} -eq 0 ]]; then
+		total_pushes="$src_pushes_delta"
 	else
 		total_pushes="N/A"
 	fi
@@ -930,21 +1029,28 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		emit_setup_failed_row "$iter" "$T0"
 	fi
 
-	echo "  Scaling back to $BASE_REPLICAS replicas..."
-	SCALE_PIDS=()
-	for ctx in "${ALL_CTXS[@]}"; do
-		for ((d = 0; d < DEPLOYMENT_COUNT; d++)); do
-			"${KUBECTL[@]}" --context="$ctx" -n "$NS" scale deployment/churn-target-${d} --replicas="$BASE_REPLICAS" >/dev/null 2>&1 &
-			SCALE_PIDS+=($!)
-		done
-	done
-	for pid in "${SCALE_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+	echo "  Scaling back to $BASE_REPLICAS replicas on $SOURCE_CTX..."
+	scale_source "$BASE_REPLICAS"
 
 	if ((iter < ITERATIONS)); then
 		echo "  Waiting for scale-down convergence..."
+		if ! wait_source_pods_settled "$TIMEOUT_SEC"; then
+			echo "  Warning: $SOURCE_CTX still has terminating churn-target pods after ${TIMEOUT_SEC}s"
+		fi
 		if ! wait_syncz_synced "$TIMEOUT_SEC" "${SRC_ISTIOD_PORTS[@]}"; then
 			echo "  Warning: scale-down convergence timed out after ${TIMEOUT_SEC}s"
 		fi
+		if ((SRC_WEIGHTS_OK)) && ! wait_target_weights_settled "$SRC_ENVOY_PF_PORT" \
+			"$ITER_DIR/src-weights.base" "$TIMEOUT_SEC"; then
+			echo "  Warning: $SOURCE_CTX watcher still above its pre-t0 endpoint weight after ${TIMEOUT_SEC}s"
+		fi
+		for i in "${!REMOTES[@]}"; do
+			(( RMT_WEIGHTS_OK[i] )) || continue
+			if ! wait_target_weights_settled $(( RMT_ENVOY_PF_BASE + i )) \
+				"$ITER_DIR/rmt${i}-weights.base" "$TIMEOUT_SEC"; then
+				echo "  Warning: ${REMOTES[i]} watcher still above its pre-t0 endpoint weight after ${TIMEOUT_SEC}s"
+			fi
+		done
 		echo "  Settling for ${SETTLE_SEC}s..."
 		sleep "$SETTLE_SEC"
 	fi
@@ -965,7 +1071,7 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "| Remotes | ${REMOTES[*]:-none} |"
 	echo "| Mesh size | ${MESH_SIZE} |"
 	echo "| Deployments | ${DEPLOYMENT_COUNT} |"
-	echo "| Scale range | ${BASE_REPLICAS} -> ${SCALE_TO} |"
+	echo "| Scale range | ${BASE_REPLICAS} -> ${SCALE_TO} (source only; remotes stay at base) |"
 	echo "| Iterations | ${ITERATIONS} |"
 	echo "| Timeout | ${TIMEOUT_SEC}s |"
 	echo ""

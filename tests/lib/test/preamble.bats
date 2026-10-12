@@ -89,3 +89,45 @@ source "${ROOT}/tests/lib/preamble.sh"
 	# And the report reads it (the mixed-version concordance warning).
 	grep -q 'CONTROLPLANE_INFRA_SCHEMA' "${ROOT}/tests/controlplane/004-report-results.sh"
 }
+
+# ---------------------------------------------------------------------------
+# probe_kube_versions — concurrent per-context server version probe.
+# ---------------------------------------------------------------------------
+
+# Fake kubectl: prints a version JSON that echoes the --context value.
+_fake_kubectl() {
+	local ctx=""
+	for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
+	printf '{"serverVersion":{"gitVersion":"v1.34.0-%s"}}\n' "${ctx//\//_}"
+}
+
+@test "probe_kube_versions: keeps input order and handles contexts containing '/'" {
+	run probe_kube_versions "plain,default/api-x:6443/admin" _fake_kubectl
+	assert_success
+	assert_output "plain=v1.34.0-plain,default/api-x:6443/admin=v1.34.0-default_api-x:6443_admin"
+}
+
+@test "probe_kube_versions: unreachable context reports 'unreachable'" {
+	_fail_kubectl() { return 1; }
+	run probe_kube_versions "a,b" _fail_kubectl
+	assert_success
+	assert_output "a=unreachable,b=unreachable"
+}
+
+# ---------------------------------------------------------------------------
+# harness_sha — describes the harness repo at $ROOT, not the caller's cwd.
+# ---------------------------------------------------------------------------
+
+@test "harness_sha: describes \$ROOT even when called from another directory" {
+	expected="$(git -C "$ROOT" describe --always --dirty --abbrev=7)"
+	cd "$BATS_TEST_TMPDIR"
+	run harness_sha
+	[ "$status" -eq 0 ]
+	[ "$output" = "$expected" ]
+}
+
+@test "harness_sha: non-repo ROOT -> unknown" {
+	ROOT="$BATS_TEST_TMPDIR" run harness_sha
+	[ "$status" -eq 0 ]
+	[ "$output" = "unknown" ]
+}

@@ -8,9 +8,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/common.sh"
-# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -52,13 +52,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -67,14 +62,6 @@ else
 	split_csv "$SETUP_CONTEXTS" CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
-
-run_delete() {
-	if ((DRY_RUN)); then
-		echo "  [dry-run] $*"
-	else
-		"$@" 2>/dev/null || true
-	fi
-}
 
 echo "=== Churn test cleanup ==="
 echo "Contexts: ${CONTEXTS[*]}"
@@ -86,11 +73,22 @@ PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "--- Cleaning up context: $ctx ---"
-		if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+		if ((DRY_RUN)); then
+			echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace $NS --ignore-not-found=true"
+			exit 0
+		fi
+		# --ignore-not-found: a missing namespace is empty output; an unreachable
+		# context is an error, not "already clean".
+		if ! found=$("${KUBECTL[@]}" --context="$ctx" get namespace "$NS" --ignore-not-found -o name); then
+			echo "  [$ctx] error: could not query namespace $NS" >&2
+			exit 1
+		fi
+		if [[ -z "$found" ]]; then
 			echo "  [$ctx] Namespace $NS does not exist, skipping."
 			exit 0
 		fi
-		run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true \
+			|| { echo "  [$ctx] error: could not delete namespace $NS" >&2; exit 1; }
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)

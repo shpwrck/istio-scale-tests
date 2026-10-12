@@ -24,7 +24,7 @@ spec:
           # for `kubectl exec ... fortio load`. The client Deployment exists
           # purely as an exec target; outbound traffic is sourced by
           # `fortio load` runs from the test harness.
-          args: ["server", "-http-port", "8090", "-redirect-port", "-1"]
+          args: ["server", "-http-port", "8090", "-redirect-port", "disabled"]
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -1,42 +1,16 @@
-# Preset: mesh-wiring health gate on every Istio mesh member.
-# Reuses acm-openshift-gitops-placement (requireMeshMemberLabel=true), so it
-# targets exactly the istio-mesh-member set — the same clusters the mesh
-# components deploy to. Installed by Terraform (terraform/platform/
-# platform_gitops.tf), which overrides expectedMembers BY NAME via
-# template.source.helm.valuesObject.expectedMembers =
-# length(local.mesh_member_spoke_keys) — order-independent, see issue #28.
-applicationSetNamespace: openshift-gitops
-applicationSetControllerNamespace: openshift-gitops
-
+# Preset: mesh-wiring health gate on every mesh member. Installed by Terraform
+# (platform_gitops.tf), which sets
+# template.source.helm.valuesObject.expectedMembers to the mesh size.
 identity:
   component: mesh-wiring-verify
 
-placement:
-  name: acm-openshift-gitops-placement
-  placementDecisionName: ""
-
-inClusterGenerator:
-  enabled: false
-
-generatorConfigMap:
-  create: false
-  name: acm-gitops-placement-generator
-
-clusterDecisionResource:
-  requeueAfterSeconds: 30
-
 placementRbac:
-  create: true
   roleName: openshift-gitops-ocm-placement-mesh-wiring-verify
   roleBindingName: openshift-gitops-ocm-placement-mesh-wiring-verify
-  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
 
 argocdApplicationControllerRbac:
-  create: true
   roleName: gitops-mesh-wiring-verify-appset-argocd-sync
   roleBindingName: gitops-mesh-wiring-verify-appset-argocd-sync
-  serviceAccountName: openshift-gitops-argocd-application-controller
-  serviceAccountNamespace: openshift-gitops
 
 applicationSet:
   name: mesh-wiring-verify
@@ -51,22 +25,6 @@ template:
     path: charts/mesh-wiring-verify
     helm:
       releaseName: mesh-wiring-verify
-      # clusterName stays a positional parameter because its value is the Argo
-      # ApplicationSet generator placeholder {{clusterName}}, resolved per-spoke
-      # at generation time (not a static value).
-      parameters:
-        - name: clusterName
-          value: "{{clusterName}}"
-      # expectedMembers is delivered by NAME (not positional index) so reordering
-      # or inserting parameters can never misroute the mesh size — see issue #28.
-      # Overridden by Terraform:
-      #   template.source.helm.valuesObject.expectedMembers =
-      #     tostring(length(local.mesh_member_spoke_keys))
-      # Left at 0 here so a standalone render (no Terraform) degrades to
-      # consistency-only checks.
+      # 0 = consistency-only checks (no Terraform override).
       valuesObject:
         expectedMembers: 0
-
-repo:
-  url: ""
-  revision: main

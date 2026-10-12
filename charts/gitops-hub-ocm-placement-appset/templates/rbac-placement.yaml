@@ -2,7 +2,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ .Values.placementRbac.roleName | quote }}
+  name: {{ required "placementRbac.roleName is required" .Values.placementRbac.roleName | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
 {{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
@@ -14,7 +14,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Values.placementRbac.roleBindingName | quote }}
+  name: {{ required "placementRbac.roleBindingName is required" .Values.placementRbac.roleBindingName | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
 {{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
