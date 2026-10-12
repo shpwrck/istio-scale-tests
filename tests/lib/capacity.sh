@@ -54,8 +54,10 @@
 
 # ---------------------------------------------------------------------------
 # cap_parse_node_totals: `kubectl get nodes -o json` on stdin.
-# Sums allocatable cpu/memory/pods across WORKER nodes only (excludes any node
-# labelled control-plane / master / infra). Emits:
+# Sums allocatable cpu/memory/pods across WORKER nodes only. A worker is a node
+# labelled node-role.kubernetes.io/worker that is not infra (so single-node and
+# compact clusters, whose nodes carry control-plane + master + worker, count), or a
+# node with no control-plane / master / infra label at all. Emits:
 #   cpu_m=<int> mem_mi=<int> pods=<int> nodes=<int> names=<csv>
 # Zero workers or unparseable -> cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=
 # shellcheck disable=SC2329
@@ -79,7 +81,8 @@ cap_parse_node_totals() {
 			| ($l | has("node-role.kubernetes.io/control-plane")) as $cp
 			| ($l | has("node-role.kubernetes.io/master")) as $mas
 			| ($l | has("node-role.kubernetes.io/infra")) as $inf
-			| ($cp or $mas or $inf) | not;
+			| ($l | has("node-role.kubernetes.io/worker")) as $wrk
+			| ($wrk and ($inf | not)) or (($cp or $mas or $inf) | not);
 		[ .items[]? | select(is_worker) ] as $w
 		| ($w | length) as $n
 		| if $n == 0 then
@@ -138,10 +141,16 @@ cap_parse_top_nodes() {
 
 # cap_parse_pod_count <worker_names_csv>: `kubectl get pods -A -o json` on stdin.
 # Counts pods scheduled onto worker nodes (.spec.nodeName in worker set) whose
-# phase is Running or Pending. Emits scheduled=<int>; unparseable -> scheduled=unknown.
+# phase is Running or Pending. Emits scheduled=<int>; empty worker list or unparseable -> scheduled=unknown.
 # shellcheck disable=SC2329
 cap_parse_pod_count() {
 	local worker_csv="${1:-}"
+	# No known worker node -> nothing to count against (not a real zero).
+	if [[ -z "${worker_csv//,/}" ]]; then
+		cat >/dev/null
+		printf '%s\n' "scheduled=unknown"
+		return 0
+	fi
 	jq -r --arg workers "$worker_csv" '
 		($workers | split(",") | map(select(length > 0))) as $w
 		| ($w | reduce .[] as $n ({}; .[$n] = true)) as $set

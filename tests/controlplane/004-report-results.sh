@@ -40,6 +40,7 @@ CPU/memory/convergence/queue/config-dump stats.
 
 Histogram cells whose target quantile falls in the +Inf overflow bucket are
 emitted as the string "overflow" in text/csv/markdown and as null in JSON.
+A cell with no valid sample is N/A (null in JSON), never 0.
 
 Environment (O9 scale-coverage floor; default-off):
   SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
@@ -501,8 +502,9 @@ aggregate() {
 		if ((metric, key) in ov) {
 			return "overflow\toverflow\toverflow"
 		}
+		# No valid sample: N/A, never a synthetic 0 that reads as a measurement.
 		if (!((metric, key) in nv) || nv[metric, key] == 0) {
-			return "0\t0\t0"
+			return "N/A\tN/A\tN/A"
 		}
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
@@ -843,9 +845,11 @@ EFFECT_HDR
 		base = $1 "|" $2 "|" $3 "|" $4
 		scope = $5
 		cfg = $25 + 0
+		if (!(base in base_seen)) { bases[++nb] = base; base_seen[base] = 1 }
+		# No config-dump sample (0) is missing data, not a 100% reduction.
+		if (cfg <= 0) next
 		val[base, scope] = cfg
 		has[base, scope] = 1
-		if (!(base in base_seen)) { bases[++nb] = base; base_seen[base] = 1 }
 	}
 	END {
 		if (nb == 0) exit
@@ -896,7 +900,7 @@ report_json() {
 		-v ach_psched="$(as_get pods_sched)" -v ach_palloc="$(as_get pods_alloc)" \
 		-v cov="$COVERAGE_LINE" -v metrics_note="$(metrics_unavailable && metrics_note_text)" '
 	function cell(v) {
-		if (v == "overflow") return "null"
+		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
 	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, sla_v, sla_h, metrics_note }
@@ -937,16 +941,25 @@ report_charts() {
 	echo ""
 	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
 	# Chart 2: Per-proxy config dump size (MB) by scoping at largest mesh size.
-	awk -F'\t' '
+	# Both chart only the largest service/replica/namespace count swept, so a point
+	# never mixes cells from different workload sizes.
+	local max_svc max_rep max_ns
+	read -r max_svc max_rep max_ns < <(awk -F'\t' 'NR > 1 {
+		if ($2+0 > s) s = $2+0; if ($3+0 > r) r = $3+0; if ($4+0 > n) n = $4+0
+	} END { print s+0, r+0, n+0 }' <<<"$aggregated")
+	echo "> Workload charted: ${max_svc} services x ${max_rep} replicas in ${max_ns} namespace(s) per cluster (largest swept)."
+	echo ""
+	awk -F'\t' -v max_svc="$max_svc" -v max_rep="$max_rep" -v max_ns="$max_ns" '
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	NR == 1 { next }
+	$2+0 != max_svc || $3+0 != max_rep || $4+0 != max_ns { next }
 	{
 		ms = $1 + 0; scoping = $5; n_valid = $7 + 0
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
 		# PL13/PL15 + PL8 gate (mirrors the markdown/json n_valid + overflow handling):
 		# a cell with no valid samples (every row restart-poisoned/unknown so n_valid==0,
-		# where the aggregate emit3 returned a synthetic zero) or whose charted column
+		# where the aggregate emit3 returns N/A) or whose charted column
 		# carries the overflow sentinel (cpu_delta_avg $24 / cfg_dump_avg $25) is ABSENT,
 		# not a real 0 data point. Coercing it (awk $24 + 0) would plot a poisoned/overflow
 		# cell as the LOWEST CPU point, the inverse of reality. Count it as dropped and
