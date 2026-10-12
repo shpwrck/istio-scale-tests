@@ -51,7 +51,7 @@ variable "service_quota_iam_roles_per_new_cluster" {
 
 variable "default_compute_machine_type" {
   type        = string
-  default     = "m5.xlarge"
+  default     = "m7i.xlarge"
   description = "Instance type for the default worker pool when cluster_defaults.compute_machine_type is null (rhcs_hcp_machine_pool.aws_node_pool.instance_type is required)."
 }
 

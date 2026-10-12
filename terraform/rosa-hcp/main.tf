@@ -82,7 +82,9 @@ module "rosa_hcp" {
   # Pool-level min/max is managed by rhcs_hcp_machine_pool.default_workers in worker_pool.tf.
   # Do not enable rhcs_hcp_cluster_autoscaler via this module here: the provider often returns
   # a different ResourceLimits shape from Update vs Get, causing inconsistent apply/refresh.
-  compute_machine_type     = each.value.compute_machine_type
+  # Same value as the worker pool in worker_pool.tf; instance_type is immutable,
+  # so leaving this null (OCM's default) would conflict with the pool.
+  compute_machine_type     = coalesce(each.value.compute_machine_type, var.default_compute_machine_type)
   create_admin_user        = true
   ec2_metadata_http_tokens = each.value.ec2_metadata_http_tokens
   tags                     = merge(var.common_tags, each.value.tags)
