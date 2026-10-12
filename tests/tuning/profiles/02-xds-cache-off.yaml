@@ -1,0 +1,25 @@
+# Turn off istiod's CDS and RDS response caches (both on by default in Istio 1.30,
+# pilot/pkg/features/xds.go). istiod rebuilds clusters and routes on every push:
+# more istiod CPU, no cache lock contention. EDS caching stays on.
+# Upstream discussion: https://github.com/istio/istio/issues/40744
+#
+# Suites: propagation, churn, controlplane.
+
+description: >-
+  Disable the CDS and RDS xDS response caches. Trades istiod CPU for no cache
+  lock contention during concurrent pushes.
+
+ossm_support: configurable
+ossm_support_detail: >-
+  Set through spec.values.pilot.env on the Istio CR. Red Hat does not document
+  these variables for OSSM 3.
+
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        env:
+          PILOT_ENABLE_CDS_CACHE: "false"
+          PILOT_ENABLE_RDS_CACHE: "false"
+
+resources: []
