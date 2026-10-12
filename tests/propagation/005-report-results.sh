@@ -394,7 +394,7 @@ function sort_arr(arr, n,    i, j, tmp) {
 		arr[j+1] = tmp
 	}
 }
-function percentile(arr, n, pct,    idx, min_n) {
+function percentile(arr, n, pct,    idx, rank, min_n) {
 	if (n == 0) return "N/A"
 	# P1-7: min-n gate for TAIL percentiles. percentile() is nearest-rank (no
 	# interpolation), so for a high pct at small n the index pins to the top
@@ -404,7 +404,10 @@ function percentile(arr, n, pct,    idx, min_n) {
 	# and is threaded from PROPAGATION_PERCENTILE_MIN_N; 0 disables the gate.
 	min_n = (PCT_MIN_N == "" ? 20 : PCT_MIN_N + 0)
 	if (pct >= 95 && min_n > 0 && n < min_n) return "N/A"
-	idx = int(n * pct / 100)
+	# Nearest rank = ceil(n * pct / 100). Flooring it made p50 of 3 samples the minimum.
+	rank = n * pct / 100
+	idx = int(rank)
+	if (rank - idx > 1e-9) idx++
 	if (idx < 1) idx = 1
 	if (idx > n) idx = n
 	return arr[idx]
