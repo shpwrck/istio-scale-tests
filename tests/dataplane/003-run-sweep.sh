@@ -27,6 +27,7 @@ QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
 DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
+WARMUP_DURATION="${DATAPLANE_WARMUP_DURATION_SEC:-5}"
 MAX_MATRIX="${DATAPLANE_MAX_MATRIX:-64}"
 INTER_COMBO_SETTLE="${DATAPLANE_INTER_COMBO_SETTLE_SEC:-15}"
 REPETITIONS="${DATAPLANE_REPETITIONS:-1}"
@@ -45,6 +46,8 @@ Usage: $(basename "$0") [options]
   --duration SEC       Duration per QPS level (default: $DURATION).
   --connections N      Concurrent connections (default: $CONNECTIONS).
   --settle SEC         Seconds to sleep before probing (default: $SETTLE_SEC).
+  --warmup-duration SEC
+                       Envoy warmup per probe, 0 to disable (default: $WARMUP_DURATION).
   --output-dir DIR     Base results directory (default: tests/dataplane/results).
                        A per-sweep subdir sweep-\${RUN_ID}/ is created here.
   --repetitions N      Probe repetitions per mesh size (default: $REPETITIONS).
@@ -54,8 +57,8 @@ Usage: $(basename "$0") [options]
 
 Environment:
   SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
-  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_MAX_MATRIX,
-  DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS.
+  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
+  DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS.
 EOF
 }
 
@@ -95,6 +98,12 @@ while [[ $# -gt 0 ]]; do
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
 		[[ "$2" =~ ^[0-9]+$ ]] || die "--settle must be a non-negative integer"
 		SETTLE_SEC="$2"
+		shift 2
+		;;
+	--warmup-duration)
+		[[ -n "${2:-}" ]] || die "--warmup-duration requires a value"
+		[[ "$2" =~ ^[0-9]+$ ]] || die "--warmup-duration must be a non-negative integer"
+		WARMUP_DURATION="$2"
 		shift 2
 		;;
 	--output-dir)
@@ -217,7 +226,7 @@ echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "QPS levels: $QPS_LEVELS"
 echo "Repetitions: ${REPETITIONS}"
 echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
-echo "Settle: ${SETTLE_SEC}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
+echo "Settle: ${SETTLE_SEC}s | Warmup: ${WARMUP_DURATION}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
 echo ""
 
@@ -246,12 +255,26 @@ for ms in "${MESH_SIZES[@]}"; do
 	echo "  Source: $source_ctx  Remotes: ${remote_ctxs[*]:-none}"
 	echo "=========================================="
 
+	probe_args=(
+		--source-context "$source_ctx"
+		--mesh-size "$ms"
+		--qps-levels "$QPS_LEVELS"
+		--duration "$DURATION"
+		--connections "$CONNECTIONS"
+		--settle "$SETTLE_SEC"
+		--warmup-duration "$WARMUP_DURATION"
+		--output-dir "$OUTPUT_DIR"
+		--tuning-baseline "$TUNING_BASELINE"
+		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+	)
+	[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
+
 	if ((DRY_RUN)); then
 		{
 			echo "  mesh_size=$ms source=$source_ctx remotes=${remote_csv:-none} reps=${REPETITIONS}"
 			echo "    001-setup-dataplane-test.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv}"
 			for ((rep = 1; rep <= REPETITIONS; rep++)); do
-				echo "    [rep $rep/$REPETITIONS] 002-run-latency-probe.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv} --mesh-size $ms --settle $SETTLE_SEC --output-dir $OUTPUT_DIR"
+				echo "    [rep $rep/$REPETITIONS] 002-run-latency-probe.sh ${probe_args[*]}"
 			done
 			echo "    005-cleanup.sh --contexts $(IFS=,; echo "${active_ctxs[*]}")"
 		} >&2
@@ -275,18 +298,6 @@ for ms in "${MESH_SIZES[@]}"; do
 	dp_probe_failed=0
 	for ((rep = 1; rep <= REPETITIONS; rep++)); do
 		echo "--- Running latency probe (mesh_size=$ms, rep $rep/$REPETITIONS) ---"
-		probe_args=(
-			--source-context "$source_ctx"
-			--mesh-size "$ms"
-			--qps-levels "$QPS_LEVELS"
-			--duration "$DURATION"
-			--connections "$CONNECTIONS"
-			--settle "$SETTLE_SEC"
-			--output-dir "$OUTPUT_DIR"
-			--tuning-baseline "$TUNING_BASELINE"
-			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
-		)
-		[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
 		# A probe failure is logged; one placeholder per mesh size is added below.
 		if ! "$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"; then
 			echo "warn: latency probe failed for mesh_size=$ms rep=$rep/$REPETITIONS; continuing to next rep/combo" >&2
