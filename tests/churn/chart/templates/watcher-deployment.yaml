@@ -16,6 +16,7 @@ spec:
         {{- include "churn-test.watcher.labels" . | nindent 8 }}
         sidecar.istio.io/inject: "true"
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       containers:
         - name: sleep
           image: {{ .Values.watcher.image.repository }}:{{ .Values.watcher.image.tag }}

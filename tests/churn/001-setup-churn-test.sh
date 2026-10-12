@@ -131,15 +131,16 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-# One label-selector wait per context (targets and watcher share the instance label).
+# One label-selector rollout wait per context (targets and watcher share the
+# instance label). rollout status, not condition=Available, so a re-apply that
+# replaces pods finishes before the probe takes its baselines.
 echo "Waiting for deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 WAIT_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "  Waiting on context $ctx..."
-		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait \
-			--for=condition=Available deployment \
-			-l app.kubernetes.io/instance=churn-test \
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" rollout status \
+			deployment -l app.kubernetes.io/instance=churn-test \
 			--timeout="${WAIT_TIMEOUT}s" \
 			|| { echo "error: deployments not ready on $ctx" >&2; exit 1; }
 		echo "  All deployments ready on $ctx."

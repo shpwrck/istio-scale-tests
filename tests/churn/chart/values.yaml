@@ -4,6 +4,10 @@ deploymentCount: 5
 
 baseReplicas: 1
 
+# busybox `sleep` ignores SIGTERM, so a pod would wait out the default 30s. A short
+# grace lets scaled-down pods leave before the next iteration's baseline.
+terminationGracePeriodSeconds: 5
+
 # Keep in sync with BUSYBOX_VERSION in config/versions.env (001 passes it with --set).
 image:
   repository: busybox
