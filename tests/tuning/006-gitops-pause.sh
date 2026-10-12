@@ -18,8 +18,10 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 
 HELPER="${ROOT}/tests/tuning/lib/tuning.py"
-GITOPS_CTX="${TUNING_GITOPS_CONTEXT:-}"
-NS="${TUNING_GITOPS_NAMESPACE:-openshift-gitops}"
+# Explicit flags; --resume otherwise takes context and namespace from the state file.
+CTX_FLAG=""
+NS_FLAG=""
+NS_DEFAULT="${TUNING_GITOPS_NAMESPACE:-openshift-gitops}"
 APPSET="${TUNING_GITOPS_APPSET:-spoke-ossm}"
 APP_SUFFIX="ossm"
 STATE_FILE="${ROOT}/tests/tuning/results/gitops-pause.json"
@@ -38,13 +40,15 @@ Options:
   --resume               Remove the window recorded in --state-file.
   --status               List the Applications and their AppProject sync windows.
   --gitops-context CTX   ACM hub context running OpenShift GitOps
-                         (default: \$TUNING_GITOPS_CONTEXT; --resume falls back to
-                         the context recorded in --state-file).
+                         (default: \$TUNING_GITOPS_CONTEXT).
   --state-file FILE      Pause record (default: tests/tuning/results/gitops-pause.json).
-  --namespace NS         Argo CD namespace (default: ${NS}).
+  --namespace NS         Argo CD namespace (default: ${NS_DEFAULT}).
   --appset NAME          ApplicationSet that owns the Applications (default: ${APPSET}).
   --dry-run              Print what would change; do not touch clusters.
   -h, --help             Show this help.
+
+--resume uses the context and namespace recorded in --state-file; a flag that
+names a different one is an error.
 EOF
 }
 
@@ -53,9 +57,9 @@ while [[ $# -gt 0 ]]; do
 	--gitops-context | --state-file | --namespace | --appset)
 		[[ -n "${2:-}" ]] || die "$1 requires a value"
 		case "$1" in
-		--gitops-context) GITOPS_CTX="$2" ;;
+		--gitops-context) CTX_FLAG="$2" ;;
 		--state-file) STATE_FILE="$2" ;;
-		--namespace) NS="$2" ;;
+		--namespace) NS_FLAG="$2" ;;
 		--appset) APPSET="$2" ;;
 		esac
 		shift 2
@@ -72,15 +76,27 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$ACTION" ]] || die "one of --pause, --resume, --status is required"
-if [[ "$ACTION" == resume && -z "$GITOPS_CTX" && -f "$STATE_FILE" ]]; then
-	GITOPS_CTX="$(python3 -I "$HELPER" state-get "$STATE_FILE" context)"
+GITOPS_CTX="${CTX_FLAG:-${TUNING_GITOPS_CONTEXT:-}}"
+NS="${NS_FLAG:-$NS_DEFAULT}"
+# 1 when --resume targets the context and namespace the pause recorded.
+AT_RECORDED=0
+if [[ "$ACTION" == resume && -f "$STATE_FILE" ]]; then
+	rec_ctx="$(python3 -I "$HELPER" state-get "$STATE_FILE" context)"
+	rec_ns="$(python3 -I "$HELPER" state-get "$STATE_FILE" namespace)"
+	[[ -z "$CTX_FLAG" || "$CTX_FLAG" == "$rec_ctx" ]] \
+		|| die "--gitops-context ${CTX_FLAG} differs from the context recorded in ${STATE_FILE} (${rec_ctx})"
+	[[ -z "$NS_FLAG" || -z "$rec_ns" || "$NS_FLAG" == "$rec_ns" ]] \
+		|| die "--namespace ${NS_FLAG} differs from the namespace recorded in ${STATE_FILE} (${rec_ns})"
+	GITOPS_CTX="$rec_ctx"
+	NS="${rec_ns:-$NS}"
+	[[ -n "$rec_ns" || -n "$NS_FLAG" ]] && AT_RECORDED=1
 fi
 [[ -n "$GITOPS_CTX" ]] || die "--gitops-context is required: the ACM hub context that runs OpenShift GitOps (or set TUNING_GITOPS_CONTEXT)"
 
 if ((DRY_RUN)); then
 	case "$ACTION" in
 	pause) echo "[dry-run] ${GITOPS_CTX}: add a deny sync window for the Applications owned by ApplicationSet ${APPSET} in ${NS}; record it in ${STATE_FILE}" ;;
-	resume) echo "[dry-run] ${GITOPS_CTX}: remove the sync window recorded in ${STATE_FILE}" ;;
+	resume) echo "[dry-run] ${GITOPS_CTX}: remove the sync window recorded in ${STATE_FILE} from ${NS}" ;;
 	status) echo "[dry-run] ${GITOPS_CTX}: list Applications owned by ${APPSET} and their AppProject sync windows" ;;
 	esac
 	exit 0
@@ -137,6 +153,7 @@ pause)
 resume)
 	[[ -f "$STATE_FILE" ]] || die "no pause record at ${STATE_FILE}; nothing to resume"
 	projects="$(python3 -I "$HELPER" state-get "$STATE_FILE" projects)"
+	keep=0
 	for p in $projects; do
 		python3 -I "$HELPER" state-get "$STATE_FILE" "window:${p}" "$WORK/window.json"
 		"${K[@]}" get appprojects.argoproj.io "$p" -o json >"$WORK/project.json" \
@@ -144,7 +161,12 @@ resume)
 		rc=0
 		python3 -I "$HELPER" window-remove "$WORK/project.json" "$WORK/window.json" >"$WORK/patch.json" || rc=$?
 		if ((rc == 3)); then
-			echo "AppProject ${p}: sync window already gone"
+			if ((AT_RECORDED)); then
+				echo "AppProject ${p}: sync window already gone"
+			else
+				echo "AppProject ${p}: no such window in ${NS}" >&2
+				keep=1
+			fi
 			continue
 		fi
 		((rc == 0)) || die "building the resume patch for AppProject ${p} failed"
@@ -152,6 +174,9 @@ resume)
 			|| die "${GITOPS_CTX}: patching AppProject ${p} failed; still paused (state: ${STATE_FILE})"
 		echo "Resumed auto-sync (removed the deny sync window from AppProject ${p})"
 	done
+	if ((keep)); then
+		die "kept ${STATE_FILE}: it names no namespace and a window was not found in ${NS}; re-run --resume with --namespace"
+	fi
 	rm -f "$STATE_FILE"
 	;;
 esac

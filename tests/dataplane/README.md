@@ -95,8 +95,11 @@ size with a remote cluster; the p50-vs-mesh-size chart needs two.
 
 Before and after the load runs, `002` port-forwards every Running istiod pod on every
 context. If any pod's `process_start_time_seconds` advanced or the pod set changed, every
-row of the run gets `istiod_restarted=1`; if a context could not be measured it gets
-`unknown`. The report only aggregates rows with `status=OK` and `istiod_restarted=0`.
+row of the run gets `istiod_restarted=1`. A context with no Running istiod pod, or whose
+start times could not be read, gives `unknown`. If a context has Running istiod pods but
+none serves `/metrics` through port-forward, `002` aborts before any load runs, and the
+sweep records a `PROBE_FAILED` row. The report only aggregates rows with `status=OK` and
+`istiod_restarted=0`.
 
 ## Outputs
 

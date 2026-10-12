@@ -125,9 +125,12 @@ fi
 [[ ! -f "${STATE_DIR}/active-profile" ]] \
 	|| die "${STATE_DIR} already holds an applied profile; revert it first (002-revert-profile.sh --state-dir ${STATE_DIR})"
 # A profile left applied by an interrupted run would end up in this profile's revert state.
-leftover="$(find "${TUNING_DIR}/results" -name active-profile -type f 2>/dev/null | head -1)"
-[[ -z "$leftover" ]] \
-	|| die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ./tests/tuning/005-cleanup.sh first"
+# The results dir does not exist on a fresh clone.
+if [[ -d "${TUNING_DIR}/results" ]]; then
+	leftover="$(find "${TUNING_DIR}/results" -name active-profile -type f 2>/dev/null | head -1)"
+	[[ -z "$leftover" ]] \
+		|| die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ./tests/tuning/005-cleanup.sh first"
+fi
 mkdir -p "$STATE_DIR"
 for ctx in "${CONTEXTS[@]}"; do
 	key="$(ctx_key "$ctx")"

@@ -92,9 +92,9 @@ table. Data-plane rows are split by target class (local or remote) and QPS. Re-r
   `active-profile` marker so it can be retried. With
   `TUNING_REVERT_HEALTHCHECK_NS_PROBE=1` it also checks that istiod still delivers
   `istio-ca-root-cert` to a new namespace.
-- **006** adds a deny sync window for the Applications to their AppProject (and
-  removes it on resume). Patching an Application's `syncPolicy` would be undone by
-  the ApplicationSet controller.
+- **006** adds a deny sync window for the Applications to their AppProject. Resume
+  removes it from the context and namespace recorded at pause. Patching an
+  Application's `syncPolicy` would be undone by the ApplicationSet controller.
 
 ## After a killed run
 

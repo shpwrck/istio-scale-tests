@@ -429,10 +429,11 @@ function asorti_seen(    i, k) {
 	delete __sorted
 	__n = 0
 	for (k in seen) { __sorted[++__n] = k }
-	# insertion sort
+	# insertion sort, numeric: keys are mesh sizes, and array subscripts are
+	# strings, so a plain > would order 10 before 2.
 	for (i = 2; i <= __n; i++) {
 		__tmp = __sorted[i]; j = i - 1
-		while (j >= 1 && __sorted[j] > __tmp) { __sorted[j+1] = __sorted[j]; j-- }
+		while (j >= 1 && __sorted[j]+0 > __tmp+0) { __sorted[j+1] = __sorted[j]; j-- }
 		__sorted[j+1] = __tmp
 	}
 }

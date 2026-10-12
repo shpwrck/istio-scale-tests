@@ -378,18 +378,51 @@ report_charts() {
 	echo "# Churn x Data-Plane — Charts"
 	echo ""
 	aggregate | awk -F'\t' '
+	# Mermaid xychart cannot draw a gap, so a missing point is never plotted as 0:
+	# each chart keeps only the mesh sizes where every churn rate has a value and
+	# names the points it left out.
+	function chart(n, title, ytitle, key, fmt, expect,    i, c, ms, ok, ax, n_ax, miss) {
+		n_ax = 0; miss = ""
+		for (i = 1; i <= n_ms; i++) {
+			ms = ms_order[i]; ok = 1
+			for (c = 1; c <= n_cr; c++) {
+				if (!((key, ms, cr_order[c]) in val)) {
+					ok = 0
+					miss = miss (miss == "" ? "" : ", ") "rate " cr_order[c] " @ mesh " ms
+				}
+			}
+			if (ok) ax[++n_ax] = ms
+		}
+		printf "%% Chart %d: %s\n\n", n, title
+		if (n_ax < 2) {
+			printf "> Not charted: fewer than two mesh sizes have data for every churn rate (missing: %s).\n\n", miss
+			return 0
+		}
+		printf "```mermaid\nxychart-beta\n    title \"%s\"\n    x-axis \"Mesh Size\" [", title
+		for (i = 1; i <= n_ax; i++) printf "%s%s", (i > 1 ? ", " : ""), ax[i]
+		printf "]\n    y-axis \"%s\"\n", ytitle
+		for (c = 1; c <= n_cr; c++) {
+			printf "    line ["
+			for (i = 1; i <= n_ax; i++) printf "%s" fmt, (i > 1 ? ", " : ""), val[key, ax[i], cr_order[c]]
+			printf "]\n"
+		}
+		printf "```\n\n> Series order (by churn rate):"
+		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
+		printf ". Expected: %s\n", expect
+		if (miss != "") printf "> Mesh sizes with a missing point are left out (missing: %s).\n", miss
+		printf "\n"
+		return 1
+	}
 	{
 		ms = $1 + 0; cr = $2 + 0; dp99 = $3; valid = $6 + 0; eds = $13
 		# Same gate as report_md: a cell with no valid baseline+churn pairs
-		# (valid_runs==0) or whose delta_p99 is N/A is ABSENT, not a real 0 data point.
-		# Count it as dropped and leave has[] unset so it is never charted as 0.
+		# (valid_runs==0) or whose delta_p99 is N/A is dropped, not charted.
 		cells_total++
 		if (valid <= 0 || dp99 == "N/A") { cells_dropped++; next }
 		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
 		if (!(cr in cr_seen)) { cr_order[++n_cr] = cr; cr_seen[cr] = 1 }
-		dp99_val[ms, cr] = dp99 + 0
-		eds_val[ms, cr] = (eds != "N/A") ? eds + 0 : 0
-		has[ms, cr] = 1
+		val["dp99", ms, cr] = dp99 + 0
+		if (eds != "N/A") val["eds", ms, cr] = eds + 0
 	}
 	END {
 		if (cells_dropped > 0) {
@@ -412,60 +445,8 @@ report_charts() {
 			print "> Charts require at least two mesh sizes."
 			exit
 		}
-
-		# Chart 1: delta-p99 vs mesh size, one series per churn rate
-		printf "%% Chart 1: delta-p99 added tail latency (ms) under churn vs mesh size\n"
-		printf "%% Series order (by churn rate):"
-		for (c = 1; c <= n_cr; c++) printf " %s", cr_order[c]
-		printf "\n\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"Δp99 Tail Latency vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_ms; i++) {
-			if (i > 1) printf ", "
-			printf "%s", ms_order[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"Δp99 (ms)\"\n"
-		for (c = 1; c <= n_cr; c++) {
-			printf "    line ["; sep = ""
-			for (i = 1; i <= n_ms; i++) {
-				ms = ms_order[i]; cr = cr_order[c]
-				v = has[ms, cr] ? dp99_val[ms, cr] : 0
-				printf "%s%.2f", sep, v; sep = ", "
-			}
-			printf "]\n"
-		}
-		printf "```\n\n"
-		printf "> Series order (by churn rate):"
-		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
-		printf ". Expected: ~flat across mesh size.\n\n"
-
-		# Chart 2: istiod EDS pushes vs mesh size, one series per churn rate
-		printf "%% Chart 2: istiod EDS pushes during churn vs mesh size\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"istiod EDS Pushes vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_ms; i++) {
-			if (i > 1) printf ", "
-			printf "%s", ms_order[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"EDS push count\"\n"
-		for (c = 1; c <= n_cr; c++) {
-			printf "    line ["; sep = ""
-			for (i = 1; i <= n_ms; i++) {
-				ms = ms_order[i]; cr = cr_order[c]
-				v = has[ms, cr] ? eds_val[ms, cr] : 0
-				printf "%s%.0f", sep, v; sep = ", "
-			}
-			printf "]\n"
-		}
-		printf "```\n\n"
-		printf "> Series order (by churn rate):"
-		for (c = 1; c <= n_cr; c++) printf " **%s**", cr_order[c]
-		printf ". Expected: scales with churn rate, ~flat across mesh size.\n"
+		chart(1, "Δp99 Tail Latency vs Mesh Size", "Δp99 (ms)", "dp99", "%.2f", "~flat across mesh size.")
+		chart(2, "istiod EDS Pushes vs Mesh Size", "EDS push count", "eds", "%.0f", "scales with churn rate, ~flat across mesh size.")
 	}'
 }
 
