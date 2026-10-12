@@ -1,398 +1,111 @@
 # istio-scale-tests
 
-This repository holds automation and manifests used to scale-test Istio in a multi-cluster setup on OpenShift. The target pattern is multi-primary, multi-network mesh: several independent clusters share one logical mesh (common mesh id and trust), with Istio delivered via the Sail operator (`Istio` / `IstioCNI` CRs). Procedures follow [Red Hat OSSM 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies); pinned OpenShift / Kubernetes / Istio versions live in `config/versions.env`.
-
-Use it to reproduce installs, certificate wiring, remote secrets, east-west gateways, and sample workloads — then measure behavior under load or changing cluster counts.
+Deploy a multi-primary, multi-network Istio mesh on OpenShift (Red Hat OpenShift Service Mesh 3,
+Sail operator) across several clusters, then measure how it scales. One cluster is the ACM + Argo CD
+hub; every other cluster runs its own istiod and joins the mesh through east-west gateways, with a
+shared root CA.
 
 ```
-   Multi-primary, multi-network mesh — mesh-id: mesh1
-   Shared plug-in CA: cert-manager root + per-cluster intermediates
-
-     ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-     │  cluster-1   │    │  cluster-2   │    │  cluster-3   │
-     │  (ACM hub)   │    │  network-2   │    │  network-3   │
-     ├──────────────┤    ├──────────────┤    ├──────────────┤
-     │ Argo CD      │    │ istiod       │    │ istiod       │
-     │ cert-manager │    │ ingress-gw   │    │ ingress-gw   │
-     │ ESO          │    │ east-west-gw │◄─▶│ east-west-gw │
-     │              │    │  :15443      │    │  :15443      │
-     └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-            └── Argo CD ApplicationSets (ACM Placement) ──┘
-              Hub pushes cacerts + remote secrets via ESO
+            ┌──────────────────────────┐
+            │ hub (never a mesh member)│
+            │ ACM · Argo CD            │
+            │ cert-manager · ESO       │
+            └────────────┬─────────────┘
+       Argo CD ApplicationSets (ACM Placement) push charts;
+       ESO pushes cacerts + Istio remote secrets
+         ┌───────────────┴───────────────┐
+ ┌───────▼────────┐              ┌───────▼────────┐
+ │ mesh member A  │              │ mesh member B  │
+ │ istiod         │◄──:15443───►│ istiod         │
+ │ ingress gw     │  east-west   │ ingress gw     │
+ └────────────────┘              └────────────────┘
 ```
-
----
-
-## Quick start
-
-Provision clusters and deploy the full mesh with two Terraform modules:
-
-```bash
-# 1. Create ROSA HCP clusters
-cd terraform/rosa-hcp
-export RHCS_TOKEN='...'
-terraform init && terraform apply
-
-# 2. Get a merged kubeconfig for all clusters
-terraform output -raw kubeconfig > ~/.kube/rosa-config
-export KUBECONFIG=~/.kube/rosa-config
-
-# 3. Install ACM + GitOps + full mesh
-cd ../platform
-terraform init && terraform apply
-```
-
-The platform module installs ACM, imports spoke clusters, deploys OpenShift GitOps (Argo CD), and syncs the app-of-apps which rolls out the entire mesh: Sail operator, Istio CRs, cert-manager CAs, External Secrets for cacerts and remote secrets, ingress gateways, and east-west gateways.
-
-By default `mesh_member_count = 0` labels all spokes as mesh members. Set it to `1` to start with a single spoke and [incrementally add clusters](#incremental-mesh-deployment).
-
-No clusters yet? See [Provision clusters](#1-provision-clusters-terraform). Want to verify the mesh? See [Verify the mesh install](#verify-the-mesh-install).
-
----
-
-## End-to-end order
-
-1. Infrastructure — provision clusters with Terraform (`terraform/rosa-hcp/`).
-2. Platform + Mesh — apply the platform Terraform module (`terraform/platform/`). This installs ACM, GitOps, and the full Istio mesh via Argo CD ApplicationSets.
-3. Propagation testing — measure xDS propagation latency across clusters (`tests/propagation/`).
-4. Control-plane testing — measure istiod resource consumption as mesh size grows (`tests/controlplane/`).
-5. Data-plane testing — measure cross-cluster latency and throughput through east-west gateways (`tests/dataplane/`).
-6. Churn testing — measure control-plane convergence under endpoint churn (`tests/churn/`).
-7. Churn × data-plane co-execution — measure how p99 request latency degrades while endpoint churn runs (`tests/churn-dataplane/`).
-
----
 
 ## What you need
 
-On the machine where you run repo commands:
+- `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4+
+- `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
+- `python3` with PyYAML (tuning suite only)
+- Mesh members must be able to provision `type: LoadBalancer` Services (cloud provider or MetalLB).
 
-| Binary / runtime | Notes |
-| --- | --- |
-| `oc` or `kubectl` | With a kubeconfig that can reach every cluster; context names should match `cluster_name_format` in your Terraform config. |
-| `terraform` | To apply `terraform/rosa-hcp/` (pinned version: see `versions.tf`). |
-| `helm` | Helm 3 for charts under `charts/`. |
-| `istioctl` | For mesh verification; align the build with `ISTIO_VERSION` in `config/versions.env`. Place at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
-| `jq`, `curl` | `jq` for Terraform JSON, `curl` for ingress checks. |
+## Deploy
 
-Configuration: version pins and mesh identity live in `config/versions.env`; operational defaults (namespaces, logging, test params) are in `config/options.env`, sourced automatically. Current defaults target OpenShift `4.21.11`, ACM `release-2.16` (a floating channel — set `ACM_MCE_VERSION` to pin a concrete MCE operator CSV for the GO run, since MCE's clusterview OpenAPI validity gates ArgoCD; see BLOCKER #1), OpenShift GitOps `gitops-1.20`, and Istio `v1.28.5`.
+**Existing clusters:** use `terraform/platform` in kubeconfig mode. Name the hub context and the
+member contexts, and set the brownfield switches for anything already installed. See
+[terraform/platform/README.md](terraform/platform/README.md).
 
----
+**New ROSA clusters:** create them with [terraform/rosa-hcp](terraform/rosa-hcp/README.md) (it covers
+the one-time AWS and Red Hat account setup and a preflight check), then apply `terraform/platform`
+with `cluster_provider = "rosa"`.
 
-## 1. Provision clusters (Terraform)
-
-Use `terraform/rosa-hcp/` to create ROSA HCP clusters (upstream module `terraform-redhat/rosa-hcp/rhcs`). You set `cluster_count`, `cluster_name_format`, and `vpc_cidr_format` (plus pins such as `openshift_version`); each cluster gets its own VPC, OIDC stack, and IAM roles. Outputs include API URLs, a shared `cluster_admin_login`, and a merged `kubeconfig` (exec plugin auth). See `terraform/rosa-hcp/README.md`.
-
----
-
-## 2. Deploy the mesh (GitOps)
-
-After clusters exist, apply the platform module (`terraform/platform/`). This installs everything via GitOps:
-
-1. ACM operator + MultiClusterHub + spoke import
-2. OpenShift GitOps (Argo CD) + app-of-apps
-
-The app-of-apps (`hub-gitops-root`) syncs child Applications from `charts/gitops-hub-apps/applications/`, each deploying an ApplicationSet that targets spoke clusters via ACM Placement. The sync wave order ensures dependencies resolve correctly:
-
-| Wave | Component | Chart |
-| ---- | --------- | ----- |
-| 8    | Sail operator (OLM) | `charts/spoke-ossm-operator/` |
-| 10   | cert-manager operator (OLM) | `charts/cert-manager-operator/` |
-| 12   | External Secrets operator | `charts/external-secrets-operator/` |
-| 13   | Mesh root CA + ClusterIssuer | `charts/hub-mesh-ca/` |
-| 15   | Per-cluster intermediate CAs | `charts/hub-mesh-ca-intermediate/` |
-| 16   | Kubeconfig extraction from Argo secrets | `charts/hub-kubeconfig-from-argosecret/` |
-| 19   | Push cacerts + kubeconfigs + remote secrets to spokes | `charts/hub-mesh-push-secrets/` |
-| 21   | Istio + IstioCNI CRs | `charts/spoke-ossm/` |
-| 24   | North-south ingress gateway | `charts/spoke-ingress-gateway/` |
-| 27   | East-west gateway + cross-network Gateway CR | `charts/spoke-east-west-gateway/` |
-| 30   | Restart istiod and gateways | `charts/spoke-mesh-restart/` |
-
-
-<details>
-<summary>Repository layout — directories and Helm charts (click to expand)</summary>
-
-| Path | Role |
-| ---- | ---- |
-| `terraform/rosa-hcp/` | ROSA HCP cluster provisioning (VPCs, clusters, worker pools, VPC peering). |
-| `terraform/platform/` | ACM + OpenShift GitOps platform setup (reads rosa-hcp state via `terraform_remote_state`). |
-| `terraform/platform/platform_acm.tf` | ACM operator + MultiClusterHub + KlusterletConfig. |
-| `terraform/platform/platform_acm_spokes.tf` | Spoke ManagedCluster + auto-import-secret per non-hub cluster. |
-| `terraform/platform/platform_gitops.tf` | OpenShift GitOps operator + ArgoCD config + ACM GitOps wiring + app-of-apps. |
-| `charts/spoke-ossm-operator/` | Helm chart: OLM Subscription for Sail operator on each spoke. |
-| `charts/spoke-ossm/` | Helm chart: `Istio` + `IstioCNI` CRs per spoke (multi-primary, multi-network). |
-| `charts/spoke-ingress-gateway/` | Helm chart: north-south ingress gateway (LoadBalancer) per spoke. |
-| `charts/spoke-east-west-gateway/` | Helm chart: east-west gateway + cross-network Gateway CR per spoke. |
-| `charts/hub-mesh-ca/` | Helm chart: cert-manager root CA + ClusterIssuer on the hub. |
-| `charts/hub-mesh-ca-intermediate/` | Helm chart: one intermediate CA Certificate per spoke cluster. |
-| `charts/hub-mesh-push-secrets/` | Helm chart: ESO PushSecrets for cacerts, kubeconfigs, and Istio remote secrets to spokes. |
-| `charts/hub-kubeconfig-from-argosecret/` | Helm chart: ESO SecretStore + ExternalSecret extracting kubeconfigs from Argo cluster secrets. |
-| `charts/external-secrets-operator/` | Helm chart: OLM install for External Secrets Operator per spoke. |
-| `charts/cert-manager-operator/` | Helm chart: OLM install for cert-manager Operator on the hub. |
-| `charts/spoke-mesh-restart/` | Helm chart: restart Job for istiod and gateways after mesh GitOps sync completes (wave 30). |
-| `charts/mesh-verify/` | Helm chart: standalone echo workload for multicluster mesh verification (not in root app). |
-| `charts/istiod-monitor/` | Helm chart: OpenShift UWM ServiceMonitor + PrometheusRule for istiod pilot metrics. |
-| `charts/gitops-hub-ocm-placement-appset/` | Reusable Helm chart: Argo CD ApplicationSet + RBAC for ACM Placement; preset value files per component. |
-| `charts/gitops-hub-app-of-apps/` | Helm chart: Argo CD Application `hub-gitops-root` (directory sync of child Applications). |
-| `charts/gitops-hub-apps/` | Child Application manifests under `applications/`; synced by `hub-gitops-root`. |
-| `charts/acm-operator/` | Helm chart: OLM Subscription for ACM (Terraform `platform_acm.tf`). |
-| `charts/acm-multicluster-hub/` | Helm chart: MultiClusterHub CR (Terraform `platform_acm.tf`). |
-| `charts/acm-klusterlet-config/` | Helm chart: KlusterletConfig CR (Terraform `platform_acm.tf`). |
-| `charts/acm-managed-cluster/` | Helm chart: one ManagedCluster per spoke (Terraform `platform_acm_spokes.tf`). |
-| `charts/openshift-gitops-operator/` | Helm chart: OLM Subscription for OpenShift GitOps (Terraform `platform_gitops.tf`). |
-| `charts/acm-openshift-gitops-resources/` | Helm chart: ManagedClusterSetBinding and Placement for hub Argo CD. |
-| `charts/argocd-config/` | Helm chart: ArgoCD custom resource configuration. |
-| `config/versions.env` | Core version pins and mesh identity; sources `config/options.env` for operational defaults. |
-| `tests/propagation/` | Propagation latency test suite: scripts + `chart/` Helm chart. |
-| `tests/controlplane/` | Control-plane resource scaling test suite: scripts + `chart/` Helm chart. |
-| `tests/dataplane/` | Data-plane latency test suite: scripts + `chart/` Helm chart. |
-| `tests/churn/` | Churn/convergence test suite: scripts + `chart/` Helm chart. |
-| `tests/churn-dataplane/` | Endpoint-churn × data-plane co-execution test suite: emits `Δp99_ms` (latency delta while endpoint churn runs). Scripts + composite `chart/`. |
-
-</details>
-
-### ACM + GitOps (Terraform)
-
-After provisioning clusters, the platform module installs ACM and OpenShift GitOps:
+Either way the platform apply installs ACM and OpenShift GitOps (unless already present) and starts
+the app-of-apps. Argo CD then rolls out the mesh in sync waves ([charts/README.md](charts/README.md)).
+It's done when every Application on the hub is Synced/Healthy:
 
 ```bash
-cd terraform/platform
-cp terraform.tfvars.example terraform.tfvars   # edit as needed
-terraform init && terraform apply
-# This installs ACM, imports spokes, installs GitOps, deploys app-of-apps,
-# and rolls out the entire Istio mesh via Argo CD ApplicationSets.
+oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops
 ```
 
-See `terraform/platform/terraform.tfvars.example` for variables controlling ACM channel, GitOps config, and spoke import behavior.
+## Verify
 
----
+Every member runs `mesh-wiring-verify`, a gate that is Ready only when the member holds a remote
+secret for every member, istiod has ingested them all, and istiod signs with the shared root.
+Otherwise its Argo Application goes Degraded.
 
-## Incremental mesh deployment
+```bash
+oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared
+```
 
-The `mesh_member_count` variable (in `terraform/platform/`) controls how many spoke clusters participate in the Istio mesh. Spokes are labeled with `istio-mesh-member=true` in sorted key order; the ACM Placement selects only labeled spokes.
+End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
+from every member. Point `targetRevision` in the manifest at your branch if you're not on `main`.
 
-| `mesh_member_count` | Labeled spokes | Behavior |
+```bash
+oc --context <acm-hub-ctx> apply -f charts/mesh-verify-appset.yaml
+INGRESS=$(oc --context <mesh-a-ctx> get svc istio-ingressgateway -n istio-system \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')
+for i in $(seq 10); do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
+oc --context <acm-hub-ctx> delete -f charts/mesh-verify-appset.yaml
+```
+
+## Run tests
+
+Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
+`SETUP_CONTEXTS`), never the hub. Each suite writes TSV data plus a markdown summary under its
+`results/` directory, and each script has `--help` and `--dry-run`.
+
+| Suite | Measures | Start with |
 | --- | --- | --- |
-| `0` | All spokes | All spokes get Istio (default, backward-compatible) |
-| `1` | First spoke only | Single-cluster Istio, no multicluster |
-| `2` | First two spokes | Two-cluster mesh with cross-cluster discovery |
-| `N` | First N spokes | N-cluster mesh |
+| [propagation](tests/propagation/README.md) | How fast an endpoint change reaches the other clusters | `tests/propagation/006-run-sweep.sh` |
+| [controlplane](tests/controlplane/README.md) | istiod CPU/memory, xDS pushes and per-proxy config size vs mesh size and Sidecar scoping | `tests/controlplane/003-run-sweep.sh` |
+| [dataplane](tests/dataplane/README.md) | Same-cluster vs cross-cluster latency through the east-west gateways | `tests/dataplane/003-run-sweep.sh` |
+| [churn](tests/churn/README.md) | Convergence time when Deployments scale on one cluster | `tests/churn/003-run-sweep.sh` |
+| [churn-dataplane](tests/churn-dataplane/README.md) | p99 latency change while endpoint churn runs | `tests/churn-dataplane/004-run-sweep.sh` |
+| [tuning](tests/tuning/README.md) | Any suite above, with and without an istiod/proxy tuning profile | `tests/tuning/003-run-tuning-sweep.sh` |
 
 ```bash
-# Start with one cluster (in terraform/platform/)
-# In terraform.tfvars: mesh_member_count = 1
-terraform apply
-
-# Verify single-cluster Istio works (see next section)
-
-# Add a second cluster
-# In terraform.tfvars: mesh_member_count = 2
-terraform apply
-
-# Verify cross-cluster load balancing works
+tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 5 --dry-run
 ```
 
-For quick iteration without Terraform, label clusters directly:
+Settings and image pins live in `config/versions.env` and `config/options.env`. The deployed Istio
+version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
 
-```bash
-# Add a cluster to the mesh
-oc label managedcluster/<cluster-3> istio-mesh-member=true
+## Grow the mesh
 
-# Remove a cluster from the mesh
-oc label managedcluster/<cluster-3> istio-mesh-member-
-```
-
-Manual labels take effect immediately (next ACM reconciliation cycle). The next `terraform apply` reconciles labels to match `mesh_member_count`.
-
-Check which spokes are currently mesh members:
-
-```bash
-oc get managedcluster -l istio-mesh-member=true
-```
-
----
-
-## Verify the mesh install
-
-The `mesh-verify` chart (`charts/mesh-verify/`) deploys a lightweight echo workload for validating Istio. It runs an `http-echo` pod per cluster that returns its cluster name, exposed via an Istio VirtualService on `Host: mesh-verify.local`. A DestinationRule disables locality-aware load balancing so requests spread evenly across clusters.
-
-The chart is **not** part of the root app-of-apps — deploy it manually via a standalone ApplicationSet. It uses the same ACM Placement as the mesh components, so it only targets clusters with the `istio-mesh-member` label.
-
-### Deploy and test
-
-```bash
-# Deploy the mesh-verify ApplicationSet
-oc apply -f charts/mesh-verify-appset.yaml
-
-# Wait for Argo CD to sync (check the mesh-verify-appset Application in the UI,
-# or wait for pods to appear):
-oc get pods -n mesh-verify --context <cluster-2>
-```
-
-Once pods are running, curl any mesh member's ingress gateway:
-
-```bash
-INGRESS=$(oc get svc istio-ingressgateway -n istio-system --context <cluster-2> \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-
-for i in {1..10}; do
-  curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"
-done
-```
-
-### What to expect
-
-**Single cluster** (`mesh_member_count = 1`): all responses return the same cluster name. This confirms Istio, the ingress gateway, and sidecar injection are working on that cluster.
-
-**Multiple clusters** (`mesh_member_count >= 2`): responses should come from different cluster names. This confirms east-west gateways, remote secrets, and cross-cluster endpoint discovery are all functioning.
-
-### Deeper diagnostics
-
-```bash
-# Check that istiod discovers remote clusters
-istioctl remote-clusters --context <cluster-2>
-
-# Verify cross-cluster endpoints are visible to a sidecar
-istioctl proxy-config endpoints deploy/mesh-verify-echo -n mesh-verify \
-  --context <cluster-2> | grep mesh-verify
-
-# Check remote secrets exist on a spoke
-oc get secret -n istio-system -l istio/multiCluster=true --context <cluster-2>
-```
-
-### Clean up
-
-```bash
-oc delete -f charts/mesh-verify-appset.yaml
-```
-
-This removes the ApplicationSet and all generated Applications. The `mesh-verify` namespace and its resources are cleaned up on each spoke by Argo CD's prune policy.
-
-### Continuous wiring health gate (`charts/mesh-wiring-verify/`)
-
-`mesh-verify` is an on-demand data-plane check. `mesh-wiring-verify` is an **always-on control-plane gate**, installed on every mesh member by Terraform (`terraform/platform/platform_gitops.tf`) — no manual apply. Each member runs a pod whose readiness probe is Ready only when that spoke holds a remote secret for every mesh member **and** istiod reports it has ingested them all (`istiod_managed_clusters` on the unauthenticated istiod `/metrics`). When a member loses wiring, the pod goes NotReady and its Argo Application flips **Degraded**.
-
-This exists because a wiring failure is otherwise invisible to GitOps: Argo CD has no health check for ESO `PushSecret`, and ESO reports `Synced=True` even when a `PushSecret` pushed to only a subset of its target stores (a partial fan-out, e.g. after an ESO restart). Both layers show green while istiod silently loses cross-cluster discovery. The gate surfaces it in the same Argo view.
-
-`expectedMembers` is derived by Terraform from `length(local.mesh_member_spoke_keys)` — the same source of truth that applies the `istio-mesh-member` label — so changing `mesh_member_count` updates the gate automatically. The companion 5-minute `refreshInterval` on the hub push-secret charts bounds how long a silently-dropped push can persist before ESO retries it.
-
-```bash
-# See the gate's verdict on a spoke:
-oc get pods -n mesh-wiring-verify --context <cluster-2>
-oc logs -n mesh-wiring-verify deploy/mesh-wiring-verify --context <cluster-2>   # "Ready: secrets=N istiod_managed=N ..."
-```
-
----
-
-## 3. Propagation Latency Testing (`tests/propagation/`)
-
-Measure how quickly the multi-cluster control plane propagates endpoint and config changes across clusters. Two complementary approaches:
-
-- **Active probes** — deploy a canary Service, then compute deltas of `pilot_proxy_convergence_time` (histogram) and `pilot_xds_pushes{type="eds"}` (counter) on each istiod plus a watcher Envoy `/clusters` poll to derive wall-clock propagation times (see `tests/propagation/README.md` for the detection-threshold and filtering details)
-- **Passive metrics** — OpenShift User Workload Monitoring ServiceMonitor for istiod (`charts/istiod-monitor/`)
-
-Run the sweep to compare propagation latency across mesh sizes (1, 2, 3, ... N clusters):
-
-```bash
-./tests/propagation/006-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,2,3 --iterations 5 --watcher-replicas 30
-```
-
-See `tests/propagation/README.md` for full usage.
-
----
-
-## 4. Control-Plane Resource Testing (`tests/controlplane/`)
-
-Measure istiod CPU, memory, and xDS metrics as a function of mesh size **and `Sidecar` CR scoping**. Deploys dummy workloads to generate endpoint load, then scrapes istiod Prometheus `/metrics` directly (delta-window approach) and per-proxy `/config_dump?include_eds` size (MB) via `pilot-agent request` (distroless-compatible).
-
-```bash
-# Sweep across mesh sizes with 50 services per cluster (singular --service-count
-# is a one-value alias; the canonical flag is --service-counts CSV)
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --service-count 50
-
-# CSV form — sweep multiple values per axis
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --service-counts 10,100,500 --replica-counts 1,3 --namespace-counts 1,5
-
-# Cross-product mesh size with Sidecar scoping (none, namespace, explicit)
-# — measures the per-proxy config-size reduction that Sidecar CRs provide.
-./tests/controlplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,2,3 \
-  --sidecar-scopings none,namespace,explicit
-
-# Or collect a single snapshot
-./tests/controlplane/002-collect-resource-metrics.sh --contexts cluster-001,cluster-002
-```
-
-`--sidecar-scopings` accepts a CSV of `none`, `namespace`, and/or `explicit`; the report's headline is the percentage reduction in per-proxy config bytes versus the `none` baseline. See `tests/controlplane/README.md` for full usage.
-
----
-
-## 5. Data-Plane Latency Testing (`tests/dataplane/`)
-
-Measure cross-cluster request latency and throughput through east-west gateways using fortio. Compares same-cluster baseline with cross-cluster hops at multiple QPS levels.
-
-```bash
-# Sweep across mesh sizes
-./tests/dataplane/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --qps-levels 10,100,500,1000
-```
-
-See `tests/dataplane/README.md` for full usage.
-
----
-
-## 6. Churn / Convergence Testing (`tests/churn/`)
-
-Measure control-plane convergence time under simultaneous scaling events. Scales deployments across clusters and polls istiod `/debug/syncz` and sidecar endpoints to measure how quickly the mesh converges.
-
-```bash
-# Sweep across mesh sizes and churn intensities
-./tests/churn/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --churn-intensities 5,10,20
-```
-
-See `tests/churn/README.md` for full usage.
-
----
-
-## 7. Endpoint-Churn × Data-Plane Co-execution (`tests/churn-dataplane/`)
-
-Measure how p99 request latency degrades while endpoint churn (Deployment scale events → EDS pushes) is happening on the same clusters. Co-deploys fortio (server + client) and churn-target workloads in a single shared namespace; runs paired baseline / churn measurement windows and emits `Δp99_ms`.
-
-```bash
-# Sweep mesh sizes × churn rates (ops/s)
-./tests/churn-dataplane/004-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,2,3 \
-  --churn-rates 1,5,10
-```
-
-See `tests/churn-dataplane/README.md` for full usage (including the
-single-istiod-replica precondition).
-
----
+`mesh_member_count` in `terraform/platform` sets how many spokes join, in sorted order (0 = all).
+Raise it and re-apply; the wiring gate's expected size follows automatically.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| Remote secrets missing on spokes | ESO PushSecret not synced | Check `oc get pushsecret -n external-secrets-operator` on the hub; verify spoke SecretStores are healthy. |
-| Ingress LoadBalancer returns connection refused on ROSA AWS | NLB security groups missing | Set `AWS_LOAD_BALANCER_SECURITY_GROUPS` in `config/options.env`. |
-| `istioctl` errors on unrecognized API versions | Local `istioctl` doesn't match `ISTIO_VERSION` | Place a matching binary at `.bin/istioctl` and prefix `PATH="$PWD/.bin:$PATH"`. |
-| `proxy-status` only lists local endpoints | Remote secrets not labeled correctly | Check `oc get secret -n istio-system -l istio/multiCluster=true`; verify `hub-mesh-push-secrets` chart synced. |
-| Cross-cluster requests time out | Ingress gateway Service has `topology.istio.io/network` label | This label should only be on the east-west gateway Service, not the ingress gateway. |
+| Symptom | Fix |
+| --- | --- |
+| Gate says `istiod is not using the shared mesh root` | istiod started before `cacerts`. Delete the member's `<member>-ossm` Application on the hub (it's recreated and waits for `cacerts`), then restart that member's gateways. |
+| No `cacerts` or remote secrets on members | Check the ESO pods on the hub (`oc get pods -n external-secrets`); on a small hub lower the Argo CD requests with `argocd_config_values`. |
+| Gateway Service stays `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. |
+| `istioctl` errors on API versions | Use an `istioctl` that matches `ISTIO_VERSION`. |
 
----
+## More
 
-## References
-
-- [Red Hat OpenShift Service Mesh 3.3 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.3/html/installing/ossm-multi-cluster-topologies)
-- Coding agents: see [`AGENTS.md`](AGENTS.md) for project context, edit conventions, and keeping docs aligned with code changes.
+- [AGENTS.md](AGENTS.md): repo conventions for contributors and coding agents
+- [docs/scale-test-campaign](docs/scale-test-campaign/README.md): end-to-end campaign runbook; [docs/campaigns](docs/campaigns/README.md): recorded results
+- [docs/runbooks](docs/runbooks): operating a deployed lab or ROSA validation run
