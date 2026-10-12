@@ -15,12 +15,12 @@ graph TB
 
     subgraph SRC["source cluster"]
         direction TB
-        SP["local istiod x3"]
+        SP["local istiod (every replica)"]
         LSC["local sidecars"]
     end
     subgraph RMT["remote cluster — watcher Envoy pool"]
         direction TB
-        RP["remote istiod x3"]
+        RP["remote istiod (every replica)"]
         WENV["watcher Envoy<br/>polls /clusters"]
     end
 
@@ -79,7 +79,7 @@ measured as a whole. Removing the label drains the endpoint before the next iter
 ./tests/propagation/007-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
 
-Add `--dry-run` to `002`, `006` or `007` to print the plan without touching a cluster.
+Add `--dry-run` to `002`, `004`, `006` or `007` to print the plan without touching a cluster.
 
 ## Sweep across mesh sizes
 
@@ -98,19 +98,20 @@ from `005`. `--collect-metrics` also saves a `004` snapshot per mesh size.
 # One .prom file of pilot_* series per istiod pod (add --watch --interval 10 to repeat)
 ./tests/propagation/004-collect-pilot-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 
-# Or scrape continuously with OpenShift User Workload Monitoring
+# Or scrape continuously with OpenShift User Workload Monitoring (must already be enabled)
 helm install istiod-monitor charts/istiod-monitor -n istio-system --kube-context <mesh-a-ctx>
 ```
 
 ## Outputs
 
-Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>/`):
+Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>/`; change it with
+`--output-dir`):
 
 - `endpoint-<RUN_ID>.tsv` (with `--tsv`): preamble of `# KEY=value` provenance lines, then
   one row per iteration and remote. Columns are listed in `005-report-results.sh --help`.
 - `endpoint-<RUN_ID>.md`: per-run summary.
 - `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends
-  with a glossary of every column.
+  with a glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters.
 
 Row `status`: `OK`, `TIMEOUT_P1|P2|P3|ALL`, `RESTART` (istiod restarted mid-iteration),
 `DRAIN_TIMEOUT` (endpoint did not drain before the next iteration), `SCRAPE_INCOMPLETE`
@@ -126,5 +127,6 @@ with `p2_dirty=1` (EDS pushed but P3 never went healthy on that remote).
 - `pilot_proxy_convergence_time` buckets start at 100 ms, so sub-100 ms convergence shows
   as `0-100`. Use the wall-clock `p1_ms` for finer detail.
 - P3 polls `/clusters` at most once per second, so P3 has about 1 s resolution.
+- t0 is taken just before `kubectl label`, so every phase includes that call (about 0.3 s).
 - Large meshes: raise `METRICS_SCRAPE_TIMEOUT` (default 30 s) if `/metrics` scrapes time
   out, and `FANOUT_MAX_SKEW_MS` (default 1000) if many rows become `SCRAPE_INCOMPLETE`.

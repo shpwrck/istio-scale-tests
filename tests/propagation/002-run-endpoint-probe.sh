@@ -813,7 +813,8 @@ poll_p2_remote_eds_push() {
 	local ever_complete=0
 	mkdir -p "$polldir"
 	while true; do
-		local now_ms=$(now_ms)
+		local now_ms
+		now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			if (( ever_complete )); then echo "TIMEOUT" > "$result_file"; else echo "INCOMPLETE" > "$result_file"; fi
 			return
@@ -863,7 +864,8 @@ poll_p3_sidecar_endpoints() {
 		interval="1.0"
 	fi
 	while true; do
-		local now_ms=$(now_ms)
+		local now_ms
+		now_ms=$(now_ms)
 		((now_ms > deadline_ms)) && { echo "TIMEOUT" > "$result_file"; return; }
 		local clusters
 		clusters=$(curl -fsS --max-time "$METRICS_TIMEOUT" "http://localhost:$envoy_port/clusters" 2>/dev/null) || { sleep "$interval"; continue; }
@@ -895,7 +897,8 @@ poll_p1_local_sync_histogram() {
 	local delta_file ever_complete=0
 	delta_file=$(mktemp "$TMPDIR_RUN/tmp.XXXXXX")
 	while true; do
-		local now_ms=$(now_ms)
+		local now_ms
+		now_ms=$(now_ms)
 		if ((now_ms > deadline_ms)); then
 			# If we never once got a complete fanned-out scrape, the window is
 			# untrustworthy — report INCOMPLETE rather than a plain TIMEOUT.
