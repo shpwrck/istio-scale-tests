@@ -1,10 +1,8 @@
-clusterName: ""
-
 # Shared namespace for both fortio and churn-target resources.
 namespace: churn-dataplane-test
 
 # Number of churn-target Deployments to create (independent of fortio).
-churnDeploymentCount: 10
+churnDeploymentCount: 5
 
 # Initial replicas for each churn-target Deployment.
 churnBaseReplicas: 1
@@ -15,15 +13,17 @@ churnBaseReplicas: 1
 # - both:   both server and client
 fortioRole: both
 
-# Image used for churn-target workloads (busybox sleep pod).
+# Image used for churn-target workloads (busybox sleep pod). Keep in sync with
+# BUSYBOX_VERSION in config/versions.env (001 passes it with --set).
 churnImage:
   repository: busybox
   tag: "1.37.0"
 
-# Image used for fortio workloads.
+# Image used for fortio workloads. Keep in sync with FORTIO_VERSION in
+# config/versions.env (001 passes it with --set).
 fortioImage:
   repository: fortio/fortio
-  tag: "1.68.0"
+  tag: "1.75.3"
 
 # Service port for fortio-server and churn-target services.
 service:

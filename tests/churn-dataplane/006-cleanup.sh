@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tear down the shared churn-dataplane-test namespace on every active context.
 # By default issues an asynchronous delete; with --wait-deletion blocks until
-# the namespace is fully gone (PL4) up to --timeout seconds.
+# the namespace is fully gone, up to --timeout seconds.
 #
 # Usage:
 #   ./tests/churn-dataplane/006-cleanup.sh [--contexts CSV] [--wait-deletion] [--timeout SEC] [--dry-run]
@@ -21,14 +21,8 @@ DRY_RUN=0
 WAIT_DELETION=0
 TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-# Cleanup-cascade fix (B): the shared namespace holds up to
-# deployment-count×scale-to sidecar-injected churn-target pods plus fortio.
-# Deleting the namespace alone lets istio-proxy drain on every pod dominate the
-# teardown window (the observed >180s overrun that cascaded into SETUP_FAILED).
-# Pre-delete the workload pods with a SHORT grace period first so the proxy
-# drain is bounded, then delete the namespace. Default grace 5s — long enough
-# for a clean SIGTERM, short enough that 25 sidecars don't serialize into
-# minutes. 0 would SIGKILL (no graceful proxy shutdown); keep it small but > 0.
+# Delete the sidecar-injected pods with a short grace period before the namespace,
+# so istio-proxy drain does not dominate teardown. Keep it > 0 (0 would SIGKILL).
 FAST_DRAIN_GRACE_SEC="${COEXEC_CLEANUP_GRACE_SEC:-5}"
 
 usage() {
@@ -36,7 +30,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --contexts CSV     Kube contexts to clean up (default: \$SETUP_CONTEXTS).
-  --wait-deletion    Block until the namespace is fully removed on every context (PL4).
+  --wait-deletion    Block until the namespace is fully removed on every context.
   --timeout SEC      Maximum seconds to wait for deletion (default: $TIMEOUT_SEC).
   --grace-period SEC Pod-delete grace period for the pre-delete fast-drain of
                      sidecar-injected workloads (default: $FAST_DRAIN_GRACE_SEC).
@@ -71,7 +65,6 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# P1-1: resolve_kubectl appends --qps/--burst (KUBE_CLIENT_QPS/BURST) to every call.
 KUBECTL=()
 resolve_kubectl KUBECTL
 
@@ -100,12 +93,7 @@ clean_one() {
 		echo "  [$ctx] namespace $NS does not exist, skipping."
 		return 0
 	fi
-	# Fix (B): fast-drain the sidecar-injected workload pods FIRST with a short
-	# grace period so istio-proxy drain on up to deployment-count×scale-to pods
-	# doesn't dominate the namespace-delete window. Best-effort (|| true) — if
-	# there are no pods, or the delete races the namespace delete, we still fall
-	# through to the authoritative namespace delete + PL4 wait below. This is a
-	# speedup, not a correctness gate.
+	# Best-effort fast drain; the namespace delete (and wait) below is authoritative.
 	echo "  [$ctx] fast-draining workload pods (grace ${FAST_DRAIN_GRACE_SEC}s) before namespace delete..."
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" delete pods --all \
 		--grace-period="$FAST_DRAIN_GRACE_SEC" --wait=false >/dev/null 2>&1 || true
@@ -114,7 +102,7 @@ clean_one() {
 		echo "  [$ctx] delete issued (async)."
 		return 0
 	fi
-	# PL4: actively wait for the namespace to fully disappear.
+	# Wait for the namespace to fully disappear.
 	local deadline now
 	deadline=$(( $(date +%s) + TIMEOUT_SEC ))
 	while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do

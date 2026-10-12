@@ -37,20 +37,17 @@ DURATION="${COEXEC_CHURN_DURATION_SEC:-60}"
 QPS="${COEXEC_QPS:-200}"
 CONNECTIONS="${COEXEC_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${COEXEC_SETTLE_SEC:-10}"
-CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-10}"
+CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-5}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
-CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-3}"
+CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-5}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-# istiod is reached via tests/lib/fanout.sh, which allocates its own per-pod port
-# block from FANOUT_PF_BASE (default 21014); COEXEC_ISTIOD_PF_PORT is no longer used.
 OUTPUT_FILE=""
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 BASELINE_FILE=""
 DRY_RUN=0
-# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
-# graph. The sweep (004-run-sweep.sh) queries them ONCE via tuning_baseline_state and
-# threads them in; standalone runs leave them "unknown".
+# Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
+# them once and passes them in; standalone runs record "unknown".
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 
@@ -94,7 +91,7 @@ Churn-rate semantics:
   "Deployment scale operations per second". At rate=N for D seconds, exactly N*D
   scale operations are issued. Each operation alternates the replica count of the
   chosen churn-target Deployment between --base-replicas and --scale-to. The
-  order of target indices is a deterministic seeded shuffle (PL16) so two
+  order of target indices is a deterministic seeded shuffle so two
   identical configurations produce the same churn timeline.
 EOF
 }
@@ -171,13 +168,8 @@ done
 [[ -n "$CHURN_RATE" ]] || die "--churn-rate is required"
 [[ "$CHURN_RATE" =~ ^[0-9]+$ ]] || die "--churn-rate must be a non-negative integer"
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
@@ -188,7 +180,6 @@ REMOTES=()
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ -z "$COMBO_ID" ]] && COMBO_ID="$RUN_ID"
 
-mkdir -p "$OUTPUT_DIR"
 [[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
 
 HARNESS_SHA="$(harness_sha)"
@@ -203,6 +194,7 @@ if ((DRY_RUN)); then
 	echo "RUN_ID=$RUN_ID  COMBO_ID=$COMBO_ID  HARNESS_SHA=$HARNESS_SHA"
 	exit 0
 fi
+mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # Preflight + record the source istiod replica count (PL2). The fanout
 # (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-replica
