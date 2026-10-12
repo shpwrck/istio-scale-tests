@@ -1,20 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Authoritatively create (oc apply) the Argo CD cluster Secret for a spoke,
-# pointing at the spoke's direct external API URL.
-#
-# This REPLACES the old patch-argocd-cluster-secret.sh workaround. Previously
-# ACM's GitOpsCluster controller created these secrets and forced an
-# unreachable server URL (https://<name>-control-plane in gitops-addon/pull
-# mode, or a flaky cluster-proxy tunnel URL in push mode), and Terraform fought
-# it on every apply. We now own the secret outright: the GitOpsCluster has been
-# removed, so nothing reconciles the server field back to an internal value.
-#
-# The secret name and data keys match what ACM used and what the
-# hub-kubeconfig-from-argosecret ESO chart reads (name/server/config), so the
-# Argo CD push-sync AND the ESO mesh-CA distribution both resolve the spoke via
-# the same reliable external URL.
+# Create (oc apply) the Argo CD cluster Secret for a spoke, pointing at the
+# spoke's direct external API URL. Terraform owns this Secret; ACM's
+# GitOpsCluster is not used because it rewrites the server URL. The name and
+# keys (name/server/config) are what the hub-kubeconfig-from-argosecret chart reads.
 #
 # Auth modes (via environment variables):
 #   Kubeconfig: KUBECONFIG_PATH + HUB_CONTEXT + SPOKE_CONTEXT
@@ -48,37 +38,29 @@ if [[ -n "${KUBECONFIG_PATH:-}" ]] && [[ -n "${SPOKE_CONTEXT:-}" ]]; then
   CLIENT_CERT=$(echo "$SPOKE_KC_JSON" | jq -r '.users[0].user["client-certificate-data"] // empty')
   CLIENT_KEY=$(echo "$SPOKE_KC_JSON" | jq -r '.users[0].user["client-key-data"] // empty')
   CA_DATA=$(echo "$SPOKE_KC_JSON" | jq -r '.clusters[0].cluster["certificate-authority-data"] // empty')
-  SPOKE_TOKEN_VALUE=$(echo "$SPOKE_KC_JSON" | jq -r '.users[0].user.token // empty')
+  INSECURE=$(echo "$SPOKE_KC_JSON" | jq -r '.clusters[0].cluster["insecure-skip-tls-verify"] // false')
 
-  if [[ -n "$CLIENT_CERT" ]] && [[ -n "$CLIENT_KEY" ]]; then
-    # Create an SA token so spoke SecretStores can use bearer-token auth universally.
-    # The cert data is still included for kubeconfig generation (ESO template prefers certs).
-    SPOKE_TOKEN_VALUE=$(kubectl --kubeconfig="$KUBECONFIG_PATH" --context="$SPOKE_CONTEXT" \
-      create token "$MANAGED_SA_NAME" --namespace open-cluster-management-agent-addon --duration=87600h 2>/dev/null) || SPOKE_TOKEN_VALUE=""
+  # Prefer a long-lived token for the ManagedServiceAccount (ESO's spoke
+  # SecretStores use bearer-token auth). Fall back to the context's own token,
+  # which is usually a short-lived `oc login` token.
+  SPOKE_TOKEN_VALUE=$(kubectl --kubeconfig="$KUBECONFIG_PATH" --context="$SPOKE_CONTEXT" \
+    create token "$MANAGED_SA_NAME" --namespace open-cluster-management-agent-addon --duration=87600h 2>/dev/null) || SPOKE_TOKEN_VALUE=""
+  if [[ -z "$SPOKE_TOKEN_VALUE" ]]; then
+    SPOKE_TOKEN_VALUE=$(echo "$SPOKE_KC_JSON" | jq -r '.users[0].user.token // empty')
     if [[ -n "$SPOKE_TOKEN_VALUE" ]]; then
-      CONFIG_JSON=$(jq -nc \
-        --arg cert "$CLIENT_CERT" --arg key "$CLIENT_KEY" --arg ca "${CA_DATA:-}" --arg t "$SPOKE_TOKEN_VALUE" \
-        '{bearerToken: $t, tlsClientConfig: {certData: $cert, keyData: $key, caData: $ca, insecure: false}}')
+      echo "WARNING: could not create a $MANAGED_SA_NAME token on spoke $SPOKE_NAME; using the kubeconfig context token (it may expire)" >&2
     else
-      echo "WARNING: could not create SA token on spoke $SPOKE_NAME; cert-only config (spoke SecretStore may need authType=cert)"
-      CONFIG_JSON=$(jq -nc \
-        --arg cert "$CLIENT_CERT" --arg key "$CLIENT_KEY" --arg ca "${CA_DATA:-}" \
-        '{tlsClientConfig: {certData: $cert, keyData: $key, caData: $ca, insecure: false}}')
+      echo "WARNING: no bearer token for spoke $SPOKE_NAME; client-cert-only config" >&2
     fi
-  elif [[ -n "$SPOKE_TOKEN_VALUE" ]]; then
-    CONFIG_JSON=$(jq -nc \
-      --arg t "$SPOKE_TOKEN_VALUE" --arg ca "${CA_DATA:-}" \
-      '{bearerToken: $t, tlsClientConfig: {insecure: false, caData: $ca}}')
-  else
-    SPOKE_TOKEN_VALUE=$(kubectl --kubeconfig="$KUBECONFIG_PATH" --context="$SPOKE_CONTEXT" \
-      create token "$MANAGED_SA_NAME" --namespace open-cluster-management-agent-addon --duration=87600h 2>/dev/null) || {
-      echo "WARNING: could not create SA token on spoke $SPOKE_NAME, using empty token"
-      SPOKE_TOKEN_VALUE=""
-    }
-    CONFIG_JSON=$(jq -nc \
-      --arg t "$SPOKE_TOKEN_VALUE" --arg ca "${CA_DATA:-}" \
-      '{bearerToken: $t, tlsClientConfig: {insecure: false, caData: $ca}}')
   fi
+
+  CONFIG_JSON=$(jq -nc \
+    --arg t "$SPOKE_TOKEN_VALUE" --arg cert "$CLIENT_CERT" --arg key "$CLIENT_KEY" \
+    --arg ca "$CA_DATA" --argjson insecure "$INSECURE" \
+    '{tlsClientConfig: ({insecure: $insecure}
+        + (if $ca != "" and ($insecure | not) then {caData: $ca} else {} end)
+        + (if $cert != "" then {certData: $cert, keyData: $key} else {} end))}
+     + (if $t != "" then {bearerToken: $t} else {} end)')
 else
   # Token mode (ROSA): read the spoke's ManagedServiceAccount token from the hub
   # (namespace = spoke name, secret name = MANAGED_SA_NAME). The managed-serviceaccount

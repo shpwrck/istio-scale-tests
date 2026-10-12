@@ -22,7 +22,7 @@ provider "helm" {
     config_context = local.hub_cluster_key
     host           = null
     exec           = null
-  } : {
+    } : {
     config_path    = null
     config_context = null
     host           = local.hub_api_url

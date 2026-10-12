@@ -4,11 +4,11 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 6.41.0"
+      version = ">= 6.51.0"
     }
     rhcs = {
       source  = "terraform-redhat/rhcs"
-      version = ">= 1.7.6"
+      version = ">= 1.7.8"
     }
     random = {
       source  = "hashicorp/random"
@@ -17,6 +17,10 @@ terraform {
     time = {
       source  = "hashicorp/time"
       version = ">= 0.12.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = ">= 2.5.0"
     }
   }
 }

@@ -16,19 +16,29 @@ variable "cluster_provider" {
 variable "kubeconfig_path" {
   type        = string
   default     = ""
-  description = "Absolute path to a kubeconfig file. Required when cluster_provider = 'kubeconfig'."
+  description = "Path to a kubeconfig file (~ is expanded). Required when cluster_provider = 'kubeconfig'; $KUBECONFIG is not read."
+
+  validation {
+    condition     = var.cluster_provider != "kubeconfig" || var.kubeconfig_path != ""
+    error_message = "kubeconfig_path is required when cluster_provider = \"kubeconfig\"."
+  }
 }
 
 variable "hub_cluster_context" {
   type        = string
   default     = ""
-  description = "Kubeconfig context name for the ACM hub cluster. Required when cluster_provider = 'kubeconfig'."
+  description = "Kubeconfig context of the ACM + Argo CD management cluster (never a mesh member). Required when cluster_provider = 'kubeconfig'."
+
+  validation {
+    condition     = var.cluster_provider != "kubeconfig" || var.hub_cluster_context != ""
+    error_message = "hub_cluster_context is required when cluster_provider = \"kubeconfig\"."
+  }
 }
 
 variable "spoke_cluster_contexts" {
   type        = list(string)
   default     = []
-  description = "Kubeconfig context names for spoke clusters. Required when cluster_provider = 'kubeconfig'."
+  description = "Kubeconfig contexts of the spoke (mesh member) clusters. Context names become ManagedCluster names, so they must be DNS-1123 labels. Required when cluster_provider = 'kubeconfig'."
 }
 
 # --------------------------------------------------------------------------
@@ -37,26 +47,20 @@ variable "spoke_cluster_contexts" {
 
 variable "acm_channel" {
   type        = string
-  default     = "release-2.16"
+  default     = "release-2.17"
   description = "OLM subscription channel for the ACM operator. Align with openshift_version per RHACM support matrix."
 }
 
-variable "acm_mce_version" {
-  type        = string
-  default     = ""
-  description = "Concrete ACM/MCE CSV to pin the operator Subscription to (startingCSV), e.g. \"advanced-cluster-management.v2.16.3\". Mirrors config/versions.env ACM_MCE_VERSION (single source of truth). When set, installPlanApproval is forced to Manual so OLM cannot float past the asserted build — the GO gate for BLOCKER #1 (ArgoCD↔ACM clusterview OpenAPI). Empty = float on acm_channel with Automatic approval."
+variable "acm_install_operator" {
+  type        = bool
+  default     = true
+  description = "Install the ACM operator (namespace, OperatorGroup, Subscription). Set false when ACM is already installed on the hub; the existing MultiClusterHub is then adopted."
 }
 
 variable "acm_namespace" {
   type        = string
   default     = "open-cluster-management"
   description = "Namespace for the ACM operator, MultiClusterHub, and ManagedCluster resources."
-}
-
-variable "acm_disabled_components" {
-  type        = list(string)
-  default     = []
-  description = "MCE/ACM component names to disable at MultiClusterHub install (spec.overrides.components[].enabled=false). Default empty = no overrides. For the 20c/10k profile set [\"server-foundation\"] to keep the hub /openapi/v2 free of the malformed clusterview/UserPermission model that crashes ArgoCD (BLOCKER #1); cluster-manager registration is unaffected."
 }
 
 variable "acm_cluster_set" {
@@ -68,7 +72,7 @@ variable "acm_cluster_set" {
 variable "acm_local_cluster_name" {
   type        = string
   default     = null
-  description = "MultiClusterHub spec.localClusterName and GitOpsCluster argoServer.cluster. Max 34 characters. Defaults to the first Terraform cluster key when null."
+  description = "MultiClusterHub spec.localClusterName (the hub's own ManagedCluster name). Max 34 characters. Defaults to the hub cluster key when null; set it to the existing value (usually \"local-cluster\") when adopting an installed ACM."
 
   validation {
     condition     = var.acm_local_cluster_name == null || length(var.acm_local_cluster_name) <= 34
@@ -95,7 +99,13 @@ variable "enable_gitops" {
 variable "gitops_namespace" {
   type        = string
   default     = "openshift-gitops"
-  description = "Operand namespace for Argo CD and ACM GitOps CRs (GitOpsCluster, Placement, ManagedClusterSetBinding)."
+  description = "Operand namespace for Argo CD, the ACM Placement, and the ManagedClusterSetBinding."
+}
+
+variable "gitops_install_operator" {
+  type        = bool
+  default     = true
+  description = "Install the OpenShift GitOps operator Subscription. Set false when the operator is already installed on the hub."
 }
 
 variable "gitops_operator_namespace" {
@@ -106,7 +116,7 @@ variable "gitops_operator_namespace" {
 
 variable "gitops_operator_channel" {
   type        = string
-  default     = "gitops-1.20"
+  default     = "gitops-1.22"
   description = "OLM subscription channel for the OpenShift GitOps operator."
 }
 
@@ -126,6 +136,12 @@ variable "gitops_app_repo_revision" {
   type        = string
   default     = "main"
   description = "Branch/tag/commit for hub Argo CD Applications."
+}
+
+variable "gitops_app_overrides" {
+  type        = any
+  default     = {}
+  description = "Per-app overrides for the hub app-of-apps, keyed by child Application name (charts/gitops-hub-apps values.yaml). Each entry takes enabled (false skips the app, e.g. an operator already installed on the hub) and/or values (the Application's helm.valuesObject; for ApplicationSet apps put member-chart values under template.source.helm.valuesObject)."
 }
 
 variable "gitops_app_repo_username" {

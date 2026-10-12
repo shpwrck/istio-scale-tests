@@ -95,7 +95,6 @@ resource "helm_release" "acm_managed_cluster" {
       {
         name  = "managedServiceAccount.create"
         value = tostring(var.enable_gitops)
-        type  = "string"
       },
       {
         name  = "managedServiceAccount.name"
@@ -122,17 +121,22 @@ resource "kubernetes_secret_v1" "auto_import" {
   metadata {
     name      = "auto-import-secret"
     namespace = each.key
+    # Without this the import controller deletes the Secret after a successful
+    # import and every later plan would recreate it.
+    annotations = {
+      "managedcluster-import-controller.open-cluster-management.io/keeping-auto-import-secret" = ""
+    }
   }
 
   data = (
     local.use_kubeconfig
     ? {
-        kubeconfig = data.external.spoke_kubeconfig[each.key].result.kubeconfig
-      }
+      kubeconfig = data.external.spoke_kubeconfig[each.key].result.kubeconfig
+    }
     : {
-        server = local.by_cluster[each.key].cluster_api_url
-        token  = data.external.spoke_token[each.key].result.token
-      }
+      server = local.by_cluster[each.key].cluster_api_url
+      token  = data.external.spoke_token[each.key].result.token
+    }
   )
 
   type = "Opaque"

@@ -52,7 +52,7 @@ data "aws_availability_zones" "cluster" {
 # Pin: keep this version identical on both module blocks (Terraform allows only a literal here).
 module "vpc" {
   source  = "terraform-redhat/rosa-hcp/rhcs//modules/vpc"
-  version = "1.7.3"
+  version = "1.7.5"
 
   for_each = local.clusters
 
@@ -64,7 +64,7 @@ module "vpc" {
 
 module "rosa_hcp" {
   source  = "terraform-redhat/rosa-hcp/rhcs"
-  version = "1.7.3"
+  version = "1.7.5"
 
   for_each = local.clusters
 

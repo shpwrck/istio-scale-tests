@@ -5,7 +5,7 @@
 # --- GitOps operator (OLM Subscription) ---
 
 resource "kubernetes_manifest" "gitops_subscription" {
-  count    = local.gitops_enabled ? 1 : 0
+  count    = local.gitops_enabled && var.gitops_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -39,7 +39,7 @@ resource "kubernetes_manifest" "gitops_subscription" {
 }
 
 resource "terraform_data" "gitops_csv_cleanup" {
-  count = local.gitops_enabled ? 1 : 0
+  count = local.gitops_enabled && var.gitops_install_operator ? 1 : 0
 
   input = {
     token_script    = local.token_script
@@ -74,41 +74,17 @@ resource "time_sleep" "wait_gitops_operator" {
   count = local.gitops_enabled ? 1 : 0
 
   depends_on      = [kubernetes_manifest.gitops_subscription]
-  create_duration = "60s"
+  create_duration = var.gitops_install_operator ? "60s" : "0s"
 }
 
 resource "time_sleep" "wait_argocd_stabilized" {
   count = local.gitops_enabled ? 1 : 0
 
   depends_on      = [time_sleep.wait_gitops_operator]
-  create_duration = "300s"
+  create_duration = var.gitops_install_operator ? "300s" : "0s"
 }
 
 # --- ArgoCD configuration (resource limits + ApplicationSet) ---
-
-resource "terraform_data" "adopt_argocd_for_helm" {
-  count = local.gitops_enabled ? 1 : 0
-
-  provisioner "local-exec" {
-    command = <<-EOT
-      if [[ -n "${local.kubeconfig}" ]]; then
-        KC="kubectl --kubeconfig=${local.kubeconfig} --context=${local.hub_cluster_key}"
-      else
-        TOKEN=$("${local.token_script}" "${local.hub_api_url}" "cluster-admin" "${local.hub_admin_pass}" | jq -r '.status.token')
-        KC="kubectl --server=${local.hub_api_url} --token=$TOKEN --insecure-skip-tls-verify"
-      fi
-      $KC annotate argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
-        meta.helm.sh/release-name=argocd-config \
-        meta.helm.sh/release-namespace="${var.gitops_namespace}" \
-        --overwrite 2>/dev/null || true
-      $KC label argocd "${var.gitops_argocd_cr_name}" -n "${var.gitops_namespace}" \
-        app.kubernetes.io/managed-by=Helm \
-        --overwrite 2>/dev/null || true
-    EOT
-  }
-
-  depends_on = [time_sleep.wait_argocd_stabilized]
-}
 
 resource "helm_release" "argocd_config" {
   count    = local.gitops_enabled ? 1 : 0
@@ -169,7 +145,7 @@ resource "helm_release" "argocd_config" {
     }],
   )
 
-  depends_on = [terraform_data.adopt_argocd_for_helm]
+  depends_on = [time_sleep.wait_argocd_stabilized]
 }
 
 # --- RHACM ApplicationSet-in-any-namespace RBAC ---
@@ -367,22 +343,14 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   wait             = true
   timeout          = 300
 
-  set = [
-    {
-      name  = "gitopsNamespace"
-      value = var.gitops_namespace
-    },
-    {
-      name  = "repo.url"
-      value = var.gitops_app_repo_url
-      type  = "string"
-    },
-    {
-      name  = "repo.revision"
-      value = var.gitops_app_repo_revision
-      type  = "string"
-    },
-  ]
+  values = [yamlencode({
+    gitopsNamespace = var.gitops_namespace
+    repo = {
+      url      = var.gitops_app_repo_url
+      revision = var.gitops_app_repo_revision
+    }
+    apps = var.gitops_app_overrides
+  })]
 
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }
