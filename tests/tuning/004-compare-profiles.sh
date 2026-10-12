@@ -1,256 +1,235 @@
 #!/usr/bin/env bash
-# Compare tuning profile results from a sweep run.
-#
-# Reads TSV files from each profile-tagged subdirectory under a sweep results
-# directory and produces a side-by-side comparison showing deltas vs baseline.
+# Compare the passes of a tuning sweep (baseline + one directory per profile).
+# Reads each pass's suite TSV, finds columns by header name, averages the valid rows
+# and shows each profile's change against the baseline.
 #
 # Usage:
-#   ./tests/tuning/004-compare-profiles.sh [--results-dir DIR] [--format FMT]
-#
-# Examples:
-#   ./tests/tuning/004-compare-profiles.sh --results-dir results/sweep-20260528T120000Z-12345
-#   ./tests/tuning/004-compare-profiles.sh --results-dir results/sweep-20260528T120000Z-12345 --format markdown
+#   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|markdown] [--output FILE]
 set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
 
 RESULTS_DIR=""
 FORMAT="text"
 OUTPUT_FILE=""
 
-die() { echo "error: $*" >&2; exit 1; }
-
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [options]
+Usage: $(basename "$0") --results-dir DIR [options]
 
-Compare tuning profile results from a sweep run, showing deltas vs baseline.
+Compare tuning sweep passes. Values are means over valid rows (status OK, no
+istiod restart); each profile also shows its change against the baseline.
 
 Options:
-  --results-dir DIR  Sweep results directory (e.g. results/sweep-<RUN_ID>).
-                     Must contain subdirectories named after profiles, each
-                     containing TSV files from the probe run.
-  --format FMT       Output format: text, markdown (default: text).
-  --output FILE      Write output to FILE instead of stdout.
+  --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
+  --format FMT       text or markdown (default: text).
+  --output FILE      Write to FILE instead of stdout.
   -h, --help         Show this help.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--results-dir) RESULTS_DIR="$2"; shift 2 ;;
-	--format) FORMAT="$2"; shift 2 ;;
-	--output) OUTPUT_FILE="$2"; shift 2 ;;
+	--results-dir | --format | --output)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		case "$1" in
+		--results-dir) RESULTS_DIR="$2" ;;
+		--format) FORMAT="$2" ;;
+		--output) OUTPUT_FILE="$2" ;;
+		esac
+		shift 2
+		;;
 	-h | --help) usage; exit 0 ;;
-	*) die "Unknown option: $1" ;;
+	*) die "unknown option: $1 (try --help)" ;;
 	esac
 done
 
 [[ -n "$RESULTS_DIR" ]] || die "--results-dir is required"
-[[ -d "$RESULTS_DIR" ]] || die "Results directory not found: $RESULTS_DIR"
+[[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
+case "$FORMAT" in text | markdown) ;; *) die "--format must be text or markdown" ;; esac
 
-case "$FORMAT" in
-text | markdown) ;;
-*) die "Unknown format: $FORMAT (use text or markdown)" ;;
+META="${RESULTS_DIR}/sweep-metadata.txt"
+meta_get() { [[ -f "$META" ]] && sed -n "s/^# $1=//p" "$META" | head -1; return 0; }
+
+# Passes in sweep order (metadata), else baseline first then the rest.
+PASSES=()
+passes_csv="$(meta_get PASSES)"
+if [[ -n "$passes_csv" ]]; then
+	split_csv "$passes_csv" PASSES
+else
+	[[ -d "${RESULTS_DIR}/baseline" ]] && PASSES+=(baseline)
+	for d in "$RESULTS_DIR"/*/; do
+		n="$(basename "$d")"
+		[[ "$n" == baseline ]] || PASSES+=("$n")
+	done
+fi
+((${#PASSES[@]})) || die "no pass directories in $RESULTS_DIR"
+
+pass_tsvs() { find "${RESULTS_DIR}/$1" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | sort; }
+
+# Suite from metadata, else from a header column only that suite's TSV has.
+SUITE="$(meta_get SUITE)"
+if [[ -z "$SUITE" ]]; then
+	for p in "${PASSES[@]}"; do
+		f="$(pass_tsvs "$p" | head -1)"
+		[[ -n "$f" ]] || continue
+		hdr="$(grep -v '^#' "$f" | grep -m1 . || true)"
+		case $'\t'"$hdr"$'\t' in
+		*$'\tistiod_mem_mi\t'*) SUITE=controlplane ;;
+		*$'\tchurn_ops_attempted\t'*) SUITE=churn-dataplane ;;
+		*$'\tconvergence_local_ms\t'*) SUITE=churn ;;
+		*$'\ttarget_class\t'*) SUITE=dataplane ;;
+		*$'\tp3_ms\t'*) SUITE=propagation ;;
+		esac
+		break
+	done
+fi
+
+# Metrics per suite as "column|label"; GROUP splits rows by that column's value.
+GROUP=""
+case "$SUITE" in
+controlplane)
+	METRICS=("istiod_mem_mi|istiod memory (MiB)" "go_heap_inuse_mi|Go heap in use (MiB)"
+		"istiod_cpu_m_delta|istiod CPU (millicores)" "convergence_p99_ms|Convergence p99 (ms)"
+		"xds_pushes_delta|xDS pushes" "sidecar_config_bytes_avg|Sidecar config (bytes)"
+		"connected_proxies|Connected proxies") ;;
+propagation)
+	METRICS=("p1_ms|P1 local push (ms)" "p2_ms|P2 remote EDS (ms)" "p3_ms|P3 remote sidecar (ms)"
+		"p1_conv_p99_ms|P1 convergence p99 (ms)") ;;
+dataplane)
+	GROUP="qps_target"
+	METRICS=("p50_ms|p50 (ms)" "p90_ms|p90 (ms)" "p99_ms|p99 (ms)" "p999_ms|p99.9 (ms)"
+		"qps_actual|Actual QPS") ;;
+churn)
+	METRICS=("convergence_local_ms|Local convergence (ms)" "convergence_remote_eds_ms|Remote EDS (ms)"
+		"remote_endpoint_reachable_ms|Remote reachable (ms)" "source_xds_pushes_delta|Source xDS pushes"
+		"source_push_time_p99_ms|Source push time p99 (ms)") ;;
+churn-dataplane)
+	GROUP="phase"
+	METRICS=("p50_ms|p50 (ms)" "p99_ms|p99 (ms)" "p999_ms|p99.9 (ms)" "delta_p99_ms|p99 change vs baseline phase (ms)"
+		"qps_actual|Actual QPS" "xds_pushes_delta|xDS pushes" "eds_pushes_delta|EDS pushes") ;;
+*) die "cannot tell the suite (no '# SUITE=' in sweep-metadata.txt and no known TSV header)" ;;
 esac
 
-PROFILE_DIRS=()
-PROFILE_NAMES=()
+metric_cols=""
+for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 
-for d in "$RESULTS_DIR"/*/; do
-	[[ -d "$d" ]] || continue
-	name="$(basename "$d")"
-	tsvs="$(find "$d" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | head -1)"
-	[[ -n "$tsvs" ]] || continue
-	PROFILE_DIRS+=("$d")
-	PROFILE_NAMES+=("$name")
-done
-
-[[ ${#PROFILE_NAMES[@]} -gt 0 ]] || die "No profile subdirectories with TSV files found"
-
-extract_metric_avg() {
-	local tsv="$1"
-	local col_idx="$2"
-	awk -F'\t' -v col="$col_idx" '
-	!/^#/ && !/^timestamp/ && NF >= col {
-		v = $col
-		if (v != "" && v != "N/A" && v != "overflow" && v != "unknown" && v+0 == v) {
-			sum += v; n++
+# One pass -> lines "n<TAB>valid<TAB>total" and "v<TAB>group<TAB>column<TAB>mean".
+summarize() {
+	awk -F'\t' -v cols="$metric_cols" -v gcol="$GROUP" '
+	BEGIN { nm = split(cols, mc, ",") }
+	FNR == 1 { hdr = 0 }
+	/^#/ || NF == 0 { next }
+	!hdr { delete idx; for (i = 1; i <= NF; i++) idx[$i] = i; hdr = 1; next }
+	{
+		total++
+		if (("status" in idx) && $(idx["status"]) != "OK") next
+		if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
+		if (("restarted" in idx) && $(idx["restarted"]) != "0") next
+		valid++
+		g = (gcol != "" && (gcol in idx)) ? $(idx[gcol]) : "-"
+		for (j = 1; j <= nm; j++) {
+			c = mc[j]
+			if (c == "" || !(c in idx)) continue
+			v = $(idx[c])
+			if (v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) { sum[g SUBSEP c] += v; cnt[g SUBSEP c]++ }
 		}
 	}
 	END {
-		if (n > 0) printf "%.2f", sum/n
-		else printf "N/A"
-	}' "$tsv"
+		printf "n\t%d\t%d\n", valid, total
+		for (k in cnt) { split(k, a, SUBSEP); printf "v\t%s\t%s\t%.2f\n", a[1], a[2], sum[k] / cnt[k] }
+	}' "$@"
 }
 
-detect_suite() {
-	local dir="$1"
-	local tsv
-	tsv="$(find "$dir" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | head -1)"
-	[[ -n "$tsv" ]] || { echo "unknown"; return; }
-	local basename_f
-	basename_f="$(basename "$tsv")"
-	case "$basename_f" in
-	controlplane-*) echo "controlplane" ;;
-	propagation-*) echo "propagation" ;;
-	dataplane-*) echo "dataplane" ;;
-	churn-*dataplane*) echo "churn-dataplane" ;;
-	churn-*) echo "churn" ;;
-	*) echo "unknown" ;;
-	esac
-}
-
-SUITE="$(detect_suite "${PROFILE_DIRS[0]}")"
-
-output() {
-	if [[ -n "$OUTPUT_FILE" ]]; then
-		cat >> "$OUTPUT_FILE"
-	else
-		cat
+declare -A VAL NROWS STATUS
+GROUPS_SEEN=""
+for p in "${PASSES[@]}"; do
+	STATUS[$p]="ok"
+	for marker in SETUP_FAILED PROBE_FAILED REVERT_FAILED; do
+		[[ -f "${RESULTS_DIR}/${p}/${marker}" ]] && { STATUS[$p]="$marker"; break; }
+	done
+	mapfile -t files < <(pass_tsvs "$p")
+	if ((${#files[@]} == 0)); then
+		[[ "${STATUS[$p]}" == ok ]] && STATUS[$p]="no data"
+		continue
 	fi
-}
+	while IFS=$'\t' read -r kind a b c; do
+		case "$kind" in
+		n) NROWS[$p]="${a}/${b}" ;;
+		v) VAL["$p|$a|$b"]="$c"; GROUPS_SEEN+="${a}"$'\n' ;;
+		esac
+	done < <(summarize "${files[@]}")
+done
+mapfile -t GROUP_VALUES < <(printf '%s' "$GROUPS_SEEN" | grep . | LC_ALL=C sort -u | LC_ALL=C sort -n)
+((${#GROUP_VALUES[@]})) || GROUP_VALUES=("-")
 
-[[ -n "$OUTPUT_FILE" ]] && : > "$OUTPUT_FILE"
+BASE=""
+[[ " ${PASSES[*]} " == *" baseline "* ]] && BASE="baseline"
 
-METADATA_FILE="${RESULTS_DIR}/sweep-metadata.txt"
-
-if [[ "$FORMAT" == "markdown" ]]; then
-	{
-		echo "# Tuning Profile Comparison"
-		echo ""
-		if [[ -f "$METADATA_FILE" ]]; then
-			echo '```'
-			cat "$METADATA_FILE"
-			echo '```'
-			echo ""
-		fi
-		echo "## Suite: ${SUITE}"
-		echo ""
-		echo "| Metric | $(printf '%s | ' "${PROFILE_NAMES[@]}")"
-		echo "|--------|$(for _ in "${PROFILE_NAMES[@]}"; do printf -- '--------|'; done)"
-	} | output
-
-	case "$SUITE" in
-	controlplane)
-		metrics=("istiod_mem_mi:8:Memory RSS (MiB)"
-		         "go_heap_alloc_mi:33:Heap Alloc (MiB)"
-		         "go_heap_inuse_mi:34:Heap InUse (MiB)"
-		         "istiod_cpu_m_delta:32:CPU (millicores)"
-		         "convergence_p99_ms:10:Convergence P99"
-		         "xds_pushes_delta:13:xDS Pushes"
-		         "connected_proxies:22:Connected Proxies")
-		;;
-	propagation)
-		metrics=("p1_ms:4:P1 Local (ms)"
-		         "p2_ms:5:P2 Remote (ms)"
-		         "p3_ms:6:P3 E2E (ms)")
-		;;
-	dataplane)
-		metrics=("p50_ms:10:P50 Latency (ms)"
-		         "p99_ms:12:P99 Latency (ms)"
-		         "p999_ms:13:P99.9 Latency (ms)"
-		         "qps_actual:9:Actual QPS")
-		;;
-	*)
-		metrics=()
-		echo "| (raw TSV comparison — suite-specific metrics not configured) | |" | output
-		;;
-	esac
-
-	for m in "${metrics[@]}"; do
-		IFS=':' read -r _field col_idx label <<<"$m"
-		row="| ${label} |"
-		for dir in "${PROFILE_DIRS[@]}"; do
-			tsv="$(find "$dir" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | head -1)"
-			if [[ -n "$tsv" ]]; then
-				val="$(extract_metric_avg "$tsv" "$col_idx")"
-				row+=" ${val} |"
-			else
-				row+=" — |"
+# Rows: label, then one cell per pass.
+ROWS=()
+row() { local IFS=$'\t'; ROWS+=("$*"); }
+cells=("Pass status")
+for p in "${PASSES[@]}"; do cells+=("${STATUS[$p]}"); done
+row "${cells[@]}"
+cells=("Valid / total rows")
+for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
+row "${cells[@]}"
+for g in "${GROUP_VALUES[@]}"; do
+	for m in "${METRICS[@]}"; do
+		col="${m%%|*}" label="${m#*|}"
+		[[ "$g" != "-" ]] && label="${label} @ ${GROUP}=${g}"
+		cells=("$label")
+		any=0
+		for p in "${PASSES[@]}"; do
+			v="${VAL["$p|$g|$col"]:-}"
+			if [[ -z "$v" ]]; then cells+=("-"); continue; fi
+			any=1
+			b=""
+			[[ -n "$BASE" ]] && b="${VAL["$BASE|$g|$col"]:-}"
+			if [[ "$p" != "$BASE" && -n "$b" ]]; then
+				v="$(awk -v a="$v" -v b="$b" 'BEGIN { if (b == 0) { printf "%s", a; exit } d = (a - b) / b * 100; printf "%s (%+.1f%%)", a, d }')"
 			fi
+			cells+=("$v")
 		done
-		echo "$row" | output
+		((any)) && row "${cells[@]}"
 	done
+done
 
-	has_baseline=0
-	baseline_dir=""
-	for i in "${!PROFILE_NAMES[@]}"; do
-		if [[ "${PROFILE_NAMES[$i]}" == "baseline" ]]; then
-			has_baseline=1
-			baseline_dir="${PROFILE_DIRS[$i]}"
-			break
-		fi
-	done
-
-	if ((has_baseline)) && [[ ${#PROFILE_NAMES[@]} -gt 1 ]]; then
+render() {
+	if [[ "$FORMAT" == markdown ]]; then
+		echo "# Tuning sweep comparison"
+		echo ""
+		echo "- Suite: ${SUITE}"
+		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
+		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
+		echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
+		echo ""
+		local hdr="| Metric |" sep="|---|" r
+		for p in "${PASSES[@]}"; do hdr+=" ${p} |"; sep+="---|"; done
+		echo "$hdr"
+		echo "$sep"
+		for r in "${ROWS[@]}"; do echo "| ${r//$'\t'/ | } |"; done
+	else
+		echo "Tuning sweep comparison (suite: ${SUITE})"
+		echo "Means over valid rows; profiles show the change against the baseline."
+		echo ""
 		{
-			echo ""
-			echo "## Delta vs Baseline"
-			echo ""
-			non_baseline=()
-			for n in "${PROFILE_NAMES[@]}"; do
-				[[ "$n" != "baseline" ]] && non_baseline+=("$n")
-			done
-			echo "| Metric | $(printf '%s | ' "${non_baseline[@]}")"
-			echo "|--------|$(for _ in "${non_baseline[@]}"; do printf -- '--------|'; done)"
-		} | output
-
-		for m in "${metrics[@]}"; do
-			IFS=':' read -r _field col_idx label <<<"$m"
-			baseline_tsv="$(find "$baseline_dir" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | head -1)"
-			baseline_val=""
-			[[ -n "$baseline_tsv" ]] && baseline_val="$(extract_metric_avg "$baseline_tsv" "$col_idx")"
-
-			row="| ${label} |"
-			for i in "${!PROFILE_NAMES[@]}"; do
-				[[ "${PROFILE_NAMES[$i]}" == "baseline" ]] && continue
-				dir="${PROFILE_DIRS[$i]}"
-				tsv="$(find "$dir" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | head -1)"
-				if [[ -n "$tsv" ]] && [[ -n "$baseline_val" ]] && [[ "$baseline_val" != "N/A" ]]; then
-					val="$(extract_metric_avg "$tsv" "$col_idx")"
-					if [[ "$val" != "N/A" ]]; then
-						delta="$(awk -v a="$val" -v b="$baseline_val" 'BEGIN {
-							if (b+0 == 0) { printf "N/A"; exit }
-							d = ((a - b) / b) * 100
-							if (d >= 0) printf "+%.1f%%", d
-							else printf "%.1f%%", d
-						}')"
-						row+=" ${delta} |"
-					else
-						row+=" N/A |"
-					fi
-				else
-					row+=" — |"
-				fi
-			done
-			echo "$row" | output
-		done
+			printf 'Metric'
+			printf '\t%s' "${PASSES[@]}"
+			printf '\n'
+			printf '%s\n' "${ROWS[@]}"
+		} | awk -F'\t' '
+			{ for (i = 1; i <= NF; i++) { cell[NR, i] = $i; if (length($i) > w[i]) w[i] = length($i) } if (NF > nf) nf = NF }
+			END { for (r = 1; r <= NR; r++) { line = ""; for (i = 1; i <= nf; i++) line = line sprintf("%-" w[i] "s  ", cell[r, i]); sub(/ +$/, "", line); print line } }'
 	fi
+}
 
-	echo "" | output
-
-elif [[ "$FORMAT" == "text" ]]; then
-	{
-		echo "Tuning Profile Comparison"
-		echo "========================="
-		echo ""
-		if [[ -f "$METADATA_FILE" ]]; then
-			cat "$METADATA_FILE"
-			echo ""
-		fi
-		echo "Suite: ${SUITE}"
-		echo "Profiles: ${PROFILE_NAMES[*]}"
-		echo ""
-
-		echo "Raw TSV files per profile:"
-		for i in "${!PROFILE_NAMES[@]}"; do
-			tsv="$(find "${PROFILE_DIRS[$i]}" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | head -1)"
-			echo "  ${PROFILE_NAMES[$i]}: ${tsv:-none}"
-		done
-		echo ""
-		echo "Use --format markdown for tabular comparison."
-	} | output
+if [[ -n "$OUTPUT_FILE" ]]; then
+	render >"$OUTPUT_FILE"
+	echo "Comparison written to ${OUTPUT_FILE}" >&2
+else
+	render
 fi
-
-echo ""
-echo "=== Comparison complete ==="
-[[ -n "$OUTPUT_FILE" ]] && echo "    Written to: ${OUTPUT_FILE}"

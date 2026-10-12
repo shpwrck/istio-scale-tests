@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# Clean up any active tuning profile and remove tuning-specific resources.
-#
-# Reverts any active profile (if a state directory exists), then deletes
-# any tuning-related resources (Sidecar CRs, Telemetry objects,
-# DestinationRules) that may have been left behind.
+# Undo whatever an interrupted tuning run left behind:
+#   1. revert every profile still marked active under tests/tuning/results,
+#   2. delete profile resources still on the clusters (found by label),
+#   3. resume Argo CD for every pause still recorded under tests/tuning/results.
 #
 # Usage:
-#   ./tests/tuning/005-cleanup.sh [--contexts CSV] [options]
-#
-# Examples:
-#   ./tests/tuning/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
-#   ./tests/tuning/005-cleanup.sh --dry-run
+#   ./tests/tuning/005-cleanup.sh [--contexts CSV] [--dry-run]
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
@@ -21,86 +16,82 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 
 TUNING_DIR="${ROOT}/tests/tuning"
+RESULTS="${TUNING_DIR}/results"
 CONTEXTS_CSV=""
 DRY_RUN=0
-KUBECTL="kubectl"
+LABEL="istio-scale-tests/tuning-profile"
+# Every kind a profile may create (tests/tuning/lib/tuning.py ALLOWED_KINDS).
+KINDS="destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io"
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-Revert any active tuning profile and clean up tuning-specific resources.
+Revert active profiles, delete leftover profile resources and resume Argo CD.
 
 Options:
-  --contexts CSV   Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --dry-run        Show what would be cleaned without changing clusters.
+  --contexts CSV   Mesh member contexts for the resource sweep (default: \$SETUP_CONTEXTS).
+                   Reverts use the contexts recorded when each profile was applied.
+  --dry-run        Show what would be done; do not touch clusters.
   -h, --help       Show this help.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--contexts) CONTEXTS_CSV="$2"; shift 2 ;;
+	--contexts)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		CONTEXTS_CSV="$2"
+		shift 2
+		;;
 	--dry-run) DRY_RUN=1; shift ;;
 	-h | --help) usage; exit 0 ;;
-	*) die "Unknown option: $1" ;;
+	*) die "unknown option: $1 (try --help)" ;;
 	esac
 done
 
-CONTEXTS_CSV="${CONTEXTS_CSV:-$SETUP_CONTEXTS}"
-[[ -n "$CONTEXTS_CSV" ]] || die "No contexts (set --contexts or SETUP_CONTEXTS)"
+CONTEXTS=()
+split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
+((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
 
-IFS=',' read -ra CONTEXTS <<<"$CONTEXTS_CSV"
+run() {
+	if ((DRY_RUN)); then
+		echo "  [dry-run] ${*//"${ROOT}"\//}"
+	else
+		"$@"
+	fi
+}
 
-TUNING_NS="istio-system"
-TUNING_RESOURCES=(
-	"sidecar/default"
-	"sidecar/east-west-gateway"
-	"telemetry/tuning-metrics"
-	"telemetry/tuning-access-log"
-	"destinationrule/tuning-connection-pool"
-)
+fail=0
+echo "=== Tuning cleanup ==="
 
-active_states=()
-while IFS= read -r f; do
-	active_states+=("$(dirname "$f")")
-done < <(find "${TUNING_DIR}/results" -maxdepth 3 -name 'active-profile' -type f 2>/dev/null | sort -u)
+echo "--- Active profiles ---"
+found=0
+while IFS= read -r marker; do
+	found=1
+	sd="$(dirname "$marker")"
+	echo "  $(<"$marker") (${sd#"${ROOT}"/})"
+	run "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$sd" || fail=1
+done < <(find "$RESULTS" -name active-profile -type f 2>/dev/null | sort)
+((found)) || echo "  none"
 
-echo "=== Tuning Cleanup ==="
-echo "    Contexts: ${CONTEXTS_CSV}"
-echo ""
-
-if [[ ${#active_states[@]} -gt 0 ]]; then
-	echo "--- Active profiles found ---"
-	for s in "${active_states[@]}"; do
-		profile="$(<"${s}/active-profile")"
-		echo "    ${profile} (state: ${s})"
-		if ((DRY_RUN)); then
-			echo "    [dry-run] Would revert via 002-revert-profile.sh --state-dir ${s}"
-		else
-			"${TUNING_DIR}/002-revert-profile.sh" \
-				--state-dir "$s" \
-				--contexts "$CONTEXTS_CSV" || true
-		fi
-	done
-	echo ""
-fi
-
-echo "--- Cleaning up tuning resources ---"
+echo "--- Leftover profile resources (label ${LABEL}) ---"
+KUBECTL=(kubectl)
+((DRY_RUN)) || resolve_kubectl KUBECTL
 for ctx in "${CONTEXTS[@]}"; do
-	ctx="${ctx#"${ctx%%[![:space:]]*}"}"
-	ctx="${ctx%"${ctx##*[![:space:]]}"}"
-	[[ -z "$ctx" ]] && continue
-
-	for res in "${TUNING_RESOURCES[@]}"; do
-		if ((DRY_RUN)); then
-			echo "  [dry-run] ${ctx}: would delete ${res} -n ${TUNING_NS}"
-		else
-			$KUBECTL --context="$ctx" delete --ignore-not-found \
-				"$res" -n "$TUNING_NS" 2>/dev/null || true
-		fi
-	done
+	run "${KUBECTL[@]}" --context="$ctx" delete "$KINDS" -A -l "$LABEL" --ignore-not-found || fail=1
 done
 
-echo ""
+echo "--- Argo CD pauses ---"
+found=0
+while IFS= read -r state; do
+	found=1
+	run "${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$state" || fail=1
+done < <(find "$RESULTS" -name gitops-pause.json -type f 2>/dev/null | sort)
+((found)) || echo "  none"
+
+if ((fail)); then
+	echo "=== Cleanup finished with errors (see above) ===" >&2
+	exit 1
+fi
 echo "=== Cleanup complete ==="

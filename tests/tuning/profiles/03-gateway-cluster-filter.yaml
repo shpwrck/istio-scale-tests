@@ -1,0 +1,30 @@
+# Send gateways only the clusters their VirtualServices reference.
+#
+# With PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=true (default false, experimental in Istio
+# 1.30), istiod builds gateway clusters from the hosts referenced by VirtualServices
+# bound to the gateway's Gateways (pilot/pkg/networking/core/cluster.go). The
+# baseline gives both gateways full egress, so they otherwise get a cluster per mesh
+# service. The east-west gateway keeps its AUTO_PASSTHROUGH SNI clusters, which are
+# built from all services regardless of this flag.
+# Known issues: https://github.com/istio/istio/issues/29131,
+# https://github.com/istio/istio/issues/37997
+#
+# Suites: controlplane, dataplane.
+
+description: >-
+  Limit gateway clusters to hosts referenced by the gateway's VirtualServices
+  (PILOT_FILTER_GATEWAY_CLUSTER_CONFIG). Smaller gateway config and pushes.
+
+ossm_support: configurable
+ossm_support_detail: >-
+  Experimental upstream flag set through spec.values.pilot.env on the Istio CR.
+  Not documented by Red Hat for OSSM 3.
+
+istio_cr_patch:
+  spec:
+    values:
+      pilot:
+        env:
+          PILOT_FILTER_GATEWAY_CLUSTER_CONFIG: "true"
+
+resources: []
