@@ -1,16 +1,16 @@
-# Operand namespace where cert-manager runs and TLS secrets are stored (default OpenShift operand ns).
+# cert-manager operand namespace; the root CA Secret is stored here.
 namespace: cert-manager
 
-# Argo CD sync waves (lower numbers first). Ensures intermediates apply after bootstrap issuer, root Certificate, and CA ClusterIssuer.
+# Argo CD sync waves: RBAC, bootstrap issuer, root Certificate, root CA ClusterIssuer.
 argoSyncWaves:
   enabled: true
   rbac: -20
   bootstrapIssuer: 0
   rootCertificate: 1
   rootClusterIssuer: 2
-  intermediates: 3
 
-# Grant the Argo CD application controller permission to sync Certificate / Secret into namespace above and ClusterIssuer cluster-wide (OpenShift GitOps defaults).
+# Lets the Argo CD application controller manage Certificates/Secrets in namespace
+# and ClusterIssuers.
 rbac:
   enabled: true
   argocd:
@@ -18,16 +18,6 @@ rbac:
     serviceAccountName: openshift-gitops-argocd-application-controller
   labels: {}
   annotations: {}
-
-# Align with charts/acm-openshift-gitops-resources Placement (same cluster set and hub exclusion via local-cluster).
-global:
-  placement:
-    namespace: openshift-gitops
-    name: acm-openshift-gitops-placement
-    # Optional exact PlacementDecision metadata.name. Leave empty to look up all
-    # PlacementDecision resources labeled for name above; required for large fleets
-    # where OCM splits one Placement across multiple PlacementDecision resources.
-    placementDecisionName: ""
 
 bootstrapIssuer:
   enabled: true
@@ -45,27 +35,7 @@ rootCA:
     algorithm: ECDSA
     size: 256
 
-# Issuer that signs intermediate CA certs (references root secret after mesh-root-ca Certificate is Ready).
+# CA ClusterIssuer backed by the root Secret; signs the per-cluster intermediates
+# (charts/hub-mesh-ca-intermediate).
 rootClusterIssuer:
   enabled: true
-
-intermediates:
-  enabled: true
-  # placement — read cluster names from PlacementDecision status (global.placement); static — use clusters[] below.
-  source: placement
-  # Optional per-cluster-name overrides when source is placement (keys are ManagedCluster / decision clusterName).
-  clusterOverrides: {}
-  # cluster-001:
-  #   commonName: ""
-  #   duration: 8760h
-  #   secretName: ""
-  #   privateKey:
-  #     algorithm: ECDSA
-  #     size: 256
-  # Only used when source is static:
-  clusters: []
-  # - key: cluster-001
-  defaultDuration: 8760h
-  privateKey:
-    algorithm: ECDSA
-    size: 256

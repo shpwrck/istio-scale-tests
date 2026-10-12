@@ -1,9 +1,10 @@
-# Argo CD Application — ApplicationSet that installs OSSM 3 (Sail) operator and creates istio-system / istio-cni namespaces on every spoke cluster via ACM Placement.
+{{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "spoke-ossm-operator-appset") }}
+# ApplicationSet: OSSM 3 (Sail) operator on each mesh member.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: spoke-ossm-operator-appset
-  namespace: openshift-gitops
+  namespace: {{ .Values.gitopsNamespace | quote }}
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   annotations:
@@ -14,18 +15,19 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/shpwrck/istio-scale-tests.git
-    targetRevision: main
+    repoURL: {{ include "gitops-hub-apps.repoURL" . }}
+    targetRevision: {{ include "gitops-hub-apps.revision" . }}
     path: charts/gitops-hub-ocm-placement-appset
     helm:
       releaseName: gitops-spoke-ossm-operator-appset
+      {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "spoke-ossm-operator-appset") }}{{ . | nindent 6 }}{{- end }}
       valueFiles:
         - values-ossm-operator.yaml
       parameters:
         - name: repo.url
-          value: https://github.com/shpwrck/istio-scale-tests.git
+          value: {{ include "gitops-hub-apps.repoURL" . }}
         - name: repo.revision
-          value: main
+          value: {{ include "gitops-hub-apps.revision" . }}
         - name: placement.name
           value: acm-openshift-gitops-placement
   destination:
@@ -35,3 +37,4 @@ spec:
     automated:
       prune: false
       selfHeal: true
+{{- end }}

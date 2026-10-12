@@ -1,4 +1,3 @@
-{{- if and .Values.appOfApps.enabled .Values.repo.url }}
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -12,14 +11,17 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: {{ .Values.repo.url | quote }}
-    targetRevision: {{ .Values.repo.revision | quote }}
-    path: {{ .Values.repo.applicationsPath | quote }}
-    directory:
-      recurse: {{ .Values.repo.directory.recurse }}
-      {{- if .Values.repo.directory.exclude }}
-      exclude: {{ .Values.repo.directory.exclude | quote }}
-      {{- end }}
+    repoURL: {{ required "repo.url is required (the Git URL Argo CD syncs this repo from)" .Values.repo.url | quote }}
+    targetRevision: {{ required "repo.revision is required" .Values.repo.revision | quote }}
+    path: charts/gitops-hub-apps
+    helm:
+      valuesObject:
+        gitopsNamespace: {{ .Values.gitopsNamespace | quote }}
+        repo:
+          url: {{ .Values.repo.url | quote }}
+          revision: {{ .Values.repo.revision | quote }}
+        apps:
+          {{- toYaml (.Values.apps | default dict) | nindent 10 }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.gitopsNamespace | quote }}
@@ -27,4 +29,3 @@ spec:
     automated:
       prune: {{ .Values.syncPolicy.automated.prune }}
       selfHeal: {{ .Values.syncPolicy.automated.selfHeal }}
-{{- end }}

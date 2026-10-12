@@ -1,34 +1,28 @@
 {{- if .Values.rbac.enabled }}
----
+# Lets the Argo CD application controller create the PreDelete cleanup hook
+# (ServiceAccount + Job) in this namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
-  namespace: {{ .Values.operatorNamespace | quote }}
-  {{- if .Values.argoSyncWaves.enabled }}
+  namespace: {{ .Values.namespace | quote }}
   annotations:
-    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
-  {{- end }}
+    argocd.argoproj.io/sync-wave: "-20"
 rules:
-  - apiGroups: ["operators.coreos.com"]
-    resources: ["subscriptions", "operatorgroups"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ printf "%s-argocd-sync" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
-  namespace: {{ .Values.operatorNamespace | quote }}
-  {{- if .Values.argoSyncWaves.enabled }}
+  namespace: {{ .Values.namespace | quote }}
   annotations:
-    argocd.argoproj.io/sync-wave: {{ .Values.argoSyncWaves.rbac | quote }}
-  {{- end }}
+    argocd.argoproj.io/sync-wave: "-20"
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

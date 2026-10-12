@@ -4,7 +4,8 @@ namespace: mesh-verify
 
 image:
   repository: hashicorp/http-echo
-  tag: latest
+  # Keep in sync with HTTP_ECHO_VERSION in config/versions.env.
+  tag: "1.0"
 
 replicaCount: 1
 

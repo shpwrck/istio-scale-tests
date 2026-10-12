@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: wait-for-istiod-ingress-{{ now | date "20060102-150405" }}
+  name: wait-for-istiod-ingress
   namespace: istio-system
   annotations:
     argocd.argoproj.io/hook: PreSync
@@ -20,7 +20,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: wait
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          image: {{ .Values.waitForIstiod.image | quote }}
           command:
             - /bin/bash
             - -c
