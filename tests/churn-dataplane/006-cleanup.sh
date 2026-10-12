@@ -65,6 +65,9 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+is_pos_int "$TIMEOUT_SEC" || die "--timeout must be a positive integer"
+is_pos_int "$FAST_DRAIN_GRACE_SEC" || die "--grace-period must be a positive integer (0 would SIGKILL)"
+
 KUBECTL=()
 resolve_kubectl KUBECTL
 
@@ -86,34 +89,55 @@ echo "Fast-drain:  pods grace ${FAST_DRAIN_GRACE_SEC}s before namespace delete"
 clean_one() {
 	local ctx="$1"
 	if ((DRY_RUN)); then
-		echo "  [$ctx] [dry-run] delete pods --all --grace-period=${FAST_DRAIN_GRACE_SEC} (fast-drain), then delete namespace/$NS"
+		echo "  [$ctx] [dry-run] scale deployments to 0, delete pods --all --grace-period=${FAST_DRAIN_GRACE_SEC} (fast-drain), then delete namespace/$NS"
 		return 0
 	fi
-	if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+	# --ignore-not-found: a missing namespace is empty output; an unreachable
+	# context is an error, not "already clean".
+	local found start
+	if ! found=$("${KUBECTL[@]}" --context="$ctx" get namespace "$NS" --ignore-not-found -o name); then
+		echo "  [$ctx] error: could not query namespace $NS" >&2
+		return 1
+	fi
+	if [[ -z "$found" ]]; then
 		echo "  [$ctx] namespace $NS does not exist, skipping."
 		return 0
 	fi
+	start=$(date +%s)
 	# Best-effort fast drain; the namespace delete (and wait) below is authoritative.
+	# Scale to 0 first so the ReplicaSets do not recreate the deleted pods.
 	echo "  [$ctx] fast-draining workload pods (grace ${FAST_DRAIN_GRACE_SEC}s) before namespace delete..."
+	"${KUBECTL[@]}" --context="$ctx" -n "$NS" scale deployment --all --replicas=0 >/dev/null 2>&1 || true
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" delete pods --all \
 		--grace-period="$FAST_DRAIN_GRACE_SEC" --wait=false >/dev/null 2>&1 || true
-	"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+	if ((WAIT_DELETION)); then
+		# Let the pods go first: pods left when the namespace controller runs make it
+		# back off, and the empty namespace then lingers for tens of seconds.
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait --for=delete pods --all \
+			--timeout="${TIMEOUT_SEC}s" >/dev/null 2>&1 || true
+		echo "  [$ctx] pods drained after $(( $(date +%s) - start ))s; deleting namespace..."
+	fi
+	"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=false >/dev/null \
+		|| { echo "  [$ctx] error: could not delete namespace $NS" >&2; return 1; }
 	if ! ((WAIT_DELETION)); then
 		echo "  [$ctx] delete issued (async)."
 		return 0
 	fi
-	# Wait for the namespace to fully disappear.
-	local deadline now
-	deadline=$(( $(date +%s) + TIMEOUT_SEC ))
-	while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do
-		now=$(date +%s)
-		if (( now > deadline )); then
+	# Wait for the namespace to fully disappear. A failed query is retried until
+	# the deadline rather than read as "gone".
+	local deadline=$(( start + TIMEOUT_SEC ))
+	while :; do
+		if found=$("${KUBECTL[@]}" --context="$ctx" get namespace "$NS" --ignore-not-found -o name 2>/dev/null) \
+			&& [[ -z "$found" ]]; then
+			break
+		fi
+		if (( $(date +%s) > deadline )); then
 			echo "  [$ctx] timeout waiting for namespace $NS to delete (>${TIMEOUT_SEC}s)" >&2
 			return 1
 		fi
 		sleep 2
 	done
-	echo "  [$ctx] namespace $NS fully deleted."
+	echo "  [$ctx] namespace $NS fully deleted in $(( $(date +%s) - start ))s."
 	return 0
 }
 

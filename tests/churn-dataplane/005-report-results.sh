@@ -3,7 +3,8 @@
 #
 # - Drops rows with status != OK or istiod_restarted in {1, unknown}.
 # - Reports n_total and n_valid per combination.
-# - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id.
+# - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
+#   within one TSV file.
 # - Every output format carries the TSV preamble metadata.
 #
 # Usage:
@@ -142,7 +143,8 @@ aggregate() {
 	}
 
 	!/^#/ && !/^run_id/ && NF >= 17 {
-		combo = $3; ms = $4; cr = $5; phase = $6
+		# Pair rows within one file: combo ids such as "ms1-cr1" repeat across sweeps.
+		combo = FILENAME SUBSEP $3; ms = $4; cr = $5; phase = $6
 		qps_actual = $9; p50 = $10; p99 = $12; restarted = $16; status = $17
 
 		# istiod-side metrics (columns 20-25, present when NF >= 25).
@@ -154,11 +156,11 @@ aggregate() {
 		if (phase == "baseline") {
 			bl_seen[combo] = 1
 			bl_status[combo] = (valid ? "ok" : "bad")
+			bl_ms[combo] = ms
 			if (valid) {
 				bl_p50[combo] = is_num(p50) ? p50 + 0 : "N/A"
 				bl_p99[combo] = is_num(p99) ? p99 + 0 : "N/A"
 				bl_qps[combo] = is_num(qps_actual) ? qps_actual + 0 : "N/A"
-				bl_ms[combo] = ms
 			}
 		} else if (phase == "churn") {
 			ch_seen[combo] = 1

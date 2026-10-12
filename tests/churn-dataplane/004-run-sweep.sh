@@ -23,6 +23,8 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh" # FANOUT_* defaults + istiod preflight for the preamble
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -234,6 +236,7 @@ if ! ((DRY_RUN)); then
 	mkdir -p "$SWEEP_DIR"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+	ISTIOD_REPLICAS="$(fanout_preflight_istiod "${CONTEXTS[0]}" "${KUBECTL[@]}")"
 	write_preamble "churn-dataplane co-exec test" "$TSV_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
@@ -241,6 +244,7 @@ if ! ((DRY_RUN)); then
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
 		"SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS" \
+		"ISTIOD_REPLICAS=$ISTIOD_REPLICAS" \
 		"SETTLE_SEC=$SETTLE_SEC" \
 		"BASELINE_DURATION_SEC=$BASELINE_DURATION" \
 		"CHURN_DURATION_SEC=$CHURN_DURATION" \
@@ -251,7 +255,9 @@ if ! ((DRY_RUN)); then
 		"REPETITIONS=$REPETITIONS" \
 		"SETUP_NS_WAIT_SEC=$NS_DELETE_TIMEOUT_SEC" \
 		"CLEANUP_GRACE_SEC=${COEXEC_CLEANUP_GRACE_SEC:-5}" \
-		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC"
+		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC" \
+		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
+		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
@@ -301,9 +307,9 @@ combo_id_for() {
 }
 
 # reset_churn_targets_to_base <active_csv>
-#   003 leaves churn-targets in a mixed replica state and assumes all-base at start,
-#   so before each later rate's baseline scale every churn-target=true deployment
-#   back to base on every context. Returns non-zero if any context failed; the
+#   003 assumes all-base at start and resets the targets when it finishes; this
+#   guard repeats the reset (e.g. after an aborted 003) before each later rate's
+#   baseline, on every context. Returns non-zero if any context failed; the
 #   caller then records RESET_FAILED and skips that rate.
 reset_churn_targets_to_base() {
 	local csv="$1" rctx rpids=() rpid rc=0

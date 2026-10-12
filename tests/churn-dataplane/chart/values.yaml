@@ -7,6 +7,10 @@ churnDeploymentCount: 5
 # Initial replicas for each churn-target Deployment.
 churnBaseReplicas: 1
 
+# busybox `sleep` ignores SIGTERM, so a churn-target pod would wait out the default
+# 30s. A short grace lets scaled-down pods leave before the next baseline window.
+churnTerminationGracePeriodSeconds: 5
+
 # fortio deployment role: server, client, or both.
 # - server: only fortio-server Deployment+Service
 # - client: only fortio-client Deployment
