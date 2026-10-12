@@ -143,17 +143,22 @@ for i in "${!VPC_IDS[@]}"; do
     fi
   fi
 
-  # 3. Detach and delete ENIs
+  # 3. Detach and delete orphan ENIs. ENIs attached to EC2 instances belong to
+  # cluster nodes and are removed with them by terraform destroy; skip those.
   eni_ids="$("${AWS[@]}" ec2 describe-network-interfaces \
     --filters "Name=vpc-id,Values=${vpc}" \
-    --query 'NetworkInterfaces[].[NetworkInterfaceId,Attachment.AttachmentId,Status]' 2>/dev/null \
-    | jq -r '.[] | @tsv')" || eni_ids=""
+    --query 'NetworkInterfaces[].[NetworkInterfaceId,Attachment.AttachmentId,Status,Attachment.InstanceId]' 2>/dev/null \
+    | jq -r '.[] | map(. // "-") | @tsv')" || eni_ids=""
 
-  while IFS=$'\t' read -r eni_id attachment_id status; do
+  while IFS=$'\t' read -r eni_id attachment_id status instance_id; do
     [[ -z "${eni_id}" ]] && continue
+    if [[ "${instance_id}" != "-" ]]; then
+      echo "  skip ENI ${eni_id} (attached to instance ${instance_id}; removed with the cluster)"
+      continue
+    fi
     action "delete ENI ${eni_id} (status: ${status})"
     if (( ! DRY_RUN )); then
-      if [[ "${status}" == "in-use" && "${attachment_id}" != "null" && -n "${attachment_id}" ]]; then
+      if [[ "${status}" == "in-use" && "${attachment_id}" != "-" ]]; then
         "${AWS[@]}" ec2 detach-network-interface --attachment-id "${attachment_id}" --force 2>/dev/null || true
         sleep 2
       fi
