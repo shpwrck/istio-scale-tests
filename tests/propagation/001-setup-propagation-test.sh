@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Deploy propagation-test namespace and watcher pods on target clusters.
+# Deploy the propagation-test namespace, watcher pods and the pre-warmed backer
+# (canary Deployment + Service) on target clusters. Remove them with 007-cleanup.sh.
 #
 # Usage:
-#   ./tests/propagation/001-setup-propagation-test.sh [--contexts CSV] [--dry-run] [--cleanup]
+#   ./tests/propagation/001-setup-propagation-test.sh [--contexts CSV] [--dry-run]
 #
 # Examples:
 #   # Setup on all default clusters:
 #   ./tests/propagation/001-setup-propagation-test.sh
 #
 #   # Setup on specific clusters:
-#   ./tests/propagation/001-setup-propagation-test.sh --contexts cluster-001,cluster-002
-#
-#   # Tear down from all clusters:
-#   ./tests/propagation/001-setup-propagation-test.sh --cleanup
+#   ./tests/propagation/001-setup-propagation-test.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
@@ -24,14 +22,8 @@ source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
-CLEANUP=0
 WAIT_TIMEOUT=300
 WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
-# R3-2: pre-warmed backer image pin (O1). Sourced from config/versions.env; the
-# default guard keeps it bound under `set -u` if the pin is ever removed there.
-# Wired into the helm template below via --set so the chart values.yaml literal is
-# not the sole effective pin (mirrors tests/dataplane/001 --set fortioImage.tag).
-: "${HTTP_ECHO_VERSION:=1.0}"
 
 
 usage() {
@@ -41,13 +33,13 @@ Usage: $(basename "$0") [options]
   --contexts CSV        Kube contexts to target (default: \$SETUP_CONTEXTS).
   --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --dry-run             Pass --dry-run=client to oc apply.
-  --cleanup             Remove propagation-test namespace from all contexts.
-  --wait-timeout N      Seconds to wait for watcher pods AND the pre-warmed backer
-                        pod (propagation-canary) to become Ready (default: 300).
+  --wait-timeout N      Seconds to wait for the watcher and backer pods to become
+                        Ready (default: 300).
   -h, --help            Show this help.
 
 Environment:
-  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_WATCHER_REPLICAS.
+  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_WATCHER_REPLICAS,
+  BUSYBOX_VERSION, HTTP_ECHO_VERSION.
 EOF
 }
 
@@ -68,10 +60,6 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=1
 		shift
 		;;
-	--cleanup)
-		CLEANUP=1
-		shift
-		;;
 	--wait-timeout)
 		[[ -n "${2:-}" ]] || die "--wait-timeout requires a value"
 		WAIT_TIMEOUT="$2"
@@ -87,13 +75,12 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+is_pos_int "$WATCHER_REPLICAS" || die "--watcher-replicas must be a positive integer (got: $WATCHER_REPLICAS)"
+is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a positive integer (got: $WAIT_TIMEOUT)"
+
+KUBECTL=()
+resolve_kubectl KUBECTL
+command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -105,46 +92,25 @@ fi
 
 NS="${PROPAGATION_TEST_NAMESPACE}"
 
-if ((CLEANUP)); then
-	for ctx in "${CONTEXTS[@]}"; do
-		echo "Cleaning up namespace $NS on context $ctx"
-		if ((DRY_RUN)); then
-			"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --dry-run=client 2>/dev/null || true
-		else
-			"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
-		fi
-	done
-	echo "Cleanup complete."
-	exit 0
-fi
-
-command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
-
 apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 ((DRY_RUN)) && apply=("${KUBECTL[@]}" apply --dry-run=client)
 
 CHART_DIR="${ROOT}/tests/propagation/chart"
 
-# O8 item 5: apply each context's chart concurrently — setup-only, disjoint
-# contexts, fidelity-neutral. A non-zero exit in ANY context fails the join below,
-# preserving the original `set -e` abort semantics.
+# Apply each context concurrently; any failure fails the join below.
 APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "Setting up propagation-test on context $ctx"
-		# O1: render the pre-warmed backer Deployment + canary Service alongside the
-		# watcher. backer.enabled=true warms the http-echo pod (image pre-pulled,
-		# sidecar up, readinessProbe) and creates the canary Service; backer.active
-		# stays false so the Service has ZERO endpoints until the probe flips the
-		# active label at t0. The render is uniform across contexts — the source
-		# cluster's backer is the one the probe flips; on remotes the Service simply
-		# stays at zero endpoints (harmless).
+		# The backer is rendered on every context; only the source context's backer
+		# is flipped by the probe, so on remotes the canary Service stays empty.
 		helm template propagation-test "$CHART_DIR" \
 			--set clusterName="$ctx" \
 			--set namespace="$NS" \
 			--set backer.enabled=true \
 			--set backer.active=false \
 			--set backer.image.tag="$HTTP_ECHO_VERSION" \
+			--set watcher.image.tag="$BUSYBOX_VERSION" \
 			--set watcher.replicaCount="$WATCHER_REPLICAS" \
 			| "${apply[@]}" --context="$ctx" -f - \
 			|| { echo "error: apply failed on $ctx" >&2; exit 1; }
@@ -160,9 +126,6 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-# O8 item 5: parallelize the per-context readiness wait. Both named waits
-# (watcher + backer) stay serial within each context's subshell. Setup-only,
-# fidelity-neutral.
 echo "Waiting for watcher and backer pods to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 WAIT_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
@@ -171,8 +134,8 @@ for ctx in "${CONTEXTS[@]}"; do
 		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/propagation-watcher \
 			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" \
 			|| { echo "error: watcher not ready on $ctx" >&2; exit 1; }
-		# O1: the backer must be Available BEFORE any probe iteration so the t0 label
-		# flip is a pure config push with no pod boot inside P3's window.
+		# The backer must be Available before the first probe iteration so the t0
+		# label flip is a pure config push.
 		"${KUBECTL[@]}" --context="$ctx" -n "$NS" wait deployment/propagation-canary \
 			--for=condition=Available --timeout="${WAIT_TIMEOUT}s" \
 			|| { echo "error: backer not ready on $ctx" >&2; exit 1; }

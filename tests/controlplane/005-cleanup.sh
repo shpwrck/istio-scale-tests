@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Clean up all controlplane-test resources from target clusters.
 #
-# Approach: delete every namespace carrying the chart's instance label,
-# `app.kubernetes.io/instance=controlplane-test`. The chart stamps that label
-# on every namespace it creates (single or multi-namespace mode), so a single
-# label-selector delete covers both the legacy `controlplane-test` namespace
-# and all `${NS}-N` sweep namespaces in one call — robust against partially
-# completed setup runs and against namespaceCount drift between sweep steps.
+# Deletes every namespace labelled app.kubernetes.io/instance=controlplane-test
+# (the chart labels each namespace it creates, single or multi-namespace), plus
+# the plain $CONTROLPLANE_TEST_NAMESPACE if present, then waits (bounded) for
+# them to finish terminating.
 #
 # Usage:
 #   ./tests/controlplane/005-cleanup.sh [--contexts CSV] [--dry-run]
@@ -23,12 +21,8 @@ CONTEXTS_CSV=""
 DRY_RUN=0
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 LABEL_SELECTOR="app.kubernetes.io/instance=controlplane-test"
-# P1-2 fast-drain: pre-delete the sidecar-injected workload pods with a SHORT
-# grace period BEFORE deleting the namespace, so at 10k pods the istio-proxy drain
-# doesn't serialize the namespace teardown past CONTROLPLANE_NS_DELETE_TIMEOUT_SEC
-# and cascade into the next combo's SETUP_FAILED (PL37). Ported from
-# churn-dataplane 006 (COEXEC_CLEANUP_GRACE_SEC). Best-effort speedup; the
-# label-selector namespace delete + termination wait stay authoritative.
+# Short grace period for deleting the workload pods first, so istio-proxy drain
+# does not stretch the namespace teardown at scale.
 FAST_DRAIN_GRACE_SEC="${CONTROLPLANE_CLEANUP_GRACE_SEC:-5}"
 
 usage() {
@@ -36,21 +30,20 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --contexts CSV     Kube contexts to clean up (default: \$SETUP_CONTEXTS).
-  --grace-period SEC Pod-delete grace period for the pre-delete fast-drain of
-                     sidecar-injected workloads (default: $FAST_DRAIN_GRACE_SEC).
-  --dry-run          Show what would be deleted without deleting.
+  --grace-period SEC Grace period for deleting the workload pods before the
+                     namespace delete (default: $FAST_DRAIN_GRACE_SEC).
+  --dry-run          Print the delete commands without contacting any cluster.
   -h, --help         Show this help.
 
 Behavior:
-  Fast-drains the labelled workload pods with a short grace period (P1-2) so
-  istio-proxy drain doesn't dominate the teardown at scale, then deletes every
-  namespace labelled '${LABEL_SELECTOR}' on each context, plus the legacy single
-  namespace '\$CONTROLPLANE_TEST_NAMESPACE' (default 'controlplane-test') if it
-  lacks the label, and waits out async termination (PL4/PL37).
+  Deletes the workload pods with a short grace period, then every namespace
+  labelled '${LABEL_SELECTOR}' plus '\$CONTROLPLANE_TEST_NAMESPACE' (default
+  'controlplane-test'), and waits up to CONTROLPLANE_NS_DELETE_TIMEOUT_SEC for
+  them to disappear. A context that times out or cannot be reached fails.
 
 Environment:
-  SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_NS_DELETE_TIMEOUT_SEC,
-  CONTROLPLANE_CLEANUP_GRACE_SEC (pre-delete pod fast-drain grace; default 5).
+  SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_NS_DELETE_TIMEOUT_SEC
+  (default 300), CONTROLPLANE_CLEANUP_GRACE_SEC (default 5).
 EOF
 }
 
@@ -80,7 +73,6 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# P1-1: resolve_kubectl appends --qps/--burst (KUBE_CLIENT_QPS/BURST) to every call.
 KUBECTL=()
 resolve_kubectl KUBECTL
 
@@ -92,59 +84,46 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
-# PL37 contract: same bound 001 reuses for its pre-apply poll-until-gone wait
-# (CONTROLPLANE_SETUP_NS_WAIT_SEC defaults from this), so an operator override
-# applies symmetrically to cleanup and the next setup.
+# Same bound 001 uses for its pre-apply namespace wait.
 TERMINATION_TIMEOUT="${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}"
 is_pos_int "$TERMINATION_TIMEOUT" || die "CONTROLPLANE_NS_DELETE_TIMEOUT_SEC must be a positive integer (got: $TERMINATION_TIMEOUT)"
-is_nonneg_int "$FAST_DRAIN_GRACE_SEC" || die "--grace-period / CONTROLPLANE_CLEANUP_GRACE_SEC must be a non-negative integer (got: $FAST_DRAIN_GRACE_SEC)"
-
-run_delete() {
-	if ((DRY_RUN)); then
-		echo "  [dry-run] $*"
-		return 0
-	fi
-	"$@"
-}
-
-wait_ns_terminated() {
-	local ctx="$1"
-	local waited=0
-	while "${KUBECTL[@]}" --context="$ctx" get ns \
-			-l "$LABEL_SELECTOR" -o name 2>/dev/null | grep -q .; do
-		sleep 2
-		waited=$(( waited + 2 ))
-		if (( waited >= TERMINATION_TIMEOUT )); then
-			echo "  [$ctx] namespace termination timeout after ${TERMINATION_TIMEOUT}s" >&2
-			return 1
-		fi
-	done
-	return 0
-}
+# kubectl allows --grace-period=0 only with --force, so require >= 1.
+is_pos_int "$FAST_DRAIN_GRACE_SEC" || die "--grace-period / CONTROLPLANE_CLEANUP_GRACE_SEC must be a positive integer (got: $FAST_DRAIN_GRACE_SEC)"
 
 echo "=== Control-plane test cleanup ==="
 echo "Contexts:        ${CONTEXTS[*]}"
 echo "Label selector:  $LABEL_SELECTOR"
-echo "Legacy fallback: $NS"
-echo "Fast-drain:      pods grace ${FAST_DRAIN_GRACE_SEC}s before namespace delete"
+echo "Namespace:       $NS"
+echo "Pod grace:       ${FAST_DRAIN_GRACE_SEC}s"
 ((DRY_RUN)) && echo "Mode:            dry-run"
 echo ""
 
-# P1-2 fast-drain (ported from churn-dataplane 006): pre-delete the sidecar-
-# injected workload pods in a namespace with a SHORT grace period so the
-# istio-proxy drain doesn't dominate the subsequent namespace-delete window.
-# Best-effort (|| true): if there are no pods, or the delete races the namespace
-# delete, we still fall through to the authoritative namespace delete + PL4 wait.
-# --wait=false so we don't block on per-pod termination here (the namespace
-# termination wait below is the real gate).
-fast_drain_ns() {
-	local ctx="$1" ns="$2"
-	if ((DRY_RUN)); then
-		echo "  [$ctx] [dry-run] delete pods -n $ns --all --grace-period=${FAST_DRAIN_GRACE_SEC} (fast-drain)"
-		return 0
-	fi
-	"${KUBECTL[@]}" --context="$ctx" -n "$ns" delete pods --all \
-		--grace-period="$FAST_DRAIN_GRACE_SEC" --wait=false >/dev/null 2>&1 || true
+if ((DRY_RUN)); then
+	for ctx in "${CONTEXTS[@]}"; do
+		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete pods -A -l $LABEL_SELECTOR --grace-period=$FAST_DRAIN_GRACE_SEC --wait=false"
+		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace -l $LABEL_SELECTOR --wait=false"
+		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace $NS --ignore-not-found=true --wait=false"
+		echo "  [dry-run] wait up to ${TERMINATION_TIMEOUT}s for those namespaces to disappear"
+	done
+	exit 0
+fi
+
+# 0 when no labelled namespace and no $NS remain; 1 on timeout.
+wait_ns_terminated() {
+	local ctx="$1" waited=0 left
+	while :; do
+		left=$("${KUBECTL[@]}" --context="$ctx" get ns -l "$LABEL_SELECTOR" -o name 2>/dev/null || true)
+		if [[ "$left" != *"namespace/$NS"* ]] && "${KUBECTL[@]}" --context="$ctx" get ns "$NS" -o name >/dev/null 2>&1; then
+			left+=" namespace/$NS"
+		fi
+		[[ -z "${left// /}" ]] && return 0
+		if (( waited >= TERMINATION_TIMEOUT )); then
+			echo "  [$ctx] namespace termination timeout after ${TERMINATION_TIMEOUT}s: ${left//$'\n'/ }" >&2
+			return 1
+		fi
+		sleep 2
+		waited=$(( waited + 2 ))
+	done
 }
 
 PIDS=()
@@ -152,45 +131,30 @@ for ctx in "${CONTEXTS[@]}"; do
 	(
 		set -e
 		echo "--- Cleaning up context: $ctx ---"
-		matches=$("${KUBECTL[@]}" --context="$ctx" get namespace \
-			-l "$LABEL_SELECTOR" \
-			-o name 2>/dev/null || true)
+		# Reachability check: a failed get means the context is unusable.
+		matches=$("${KUBECTL[@]}" --context="$ctx" get namespace -l "$LABEL_SELECTOR" -o name) \
+			|| { echo "  [$ctx] error: cannot list namespaces" >&2; exit 1; }
 		if [[ -n "$matches" ]]; then
-			echo "  [$ctx] Labelled namespaces:"
+			echo "  [$ctx] Labelled namespaces: ${matches//$'\n'/ }"
+			# Best-effort fast pod drain; the namespace delete below is authoritative.
+			"${KUBECTL[@]}" --context="$ctx" delete pods -A -l "$LABEL_SELECTOR" \
+				--grace-period="$FAST_DRAIN_GRACE_SEC" --wait=false >/dev/null 2>&1 || true
 			# shellcheck disable=SC2086
-			printf '    %s\n' $matches
-			# P1-2: fast-drain each labelled namespace's pods (short grace) BEFORE
-			# the namespace delete so istio-proxy drain doesn't dominate teardown.
-			# shellcheck disable=SC2086
-			for m in $matches; do
-				fast_drain_ns "$ctx" "${m#namespace/}"
-			done
-			# shellcheck disable=SC2086
-			run_delete "${KUBECTL[@]}" --context="$ctx" delete $matches --ignore-not-found=true
+			"${KUBECTL[@]}" --context="$ctx" delete $matches --ignore-not-found=true --wait=false
 		else
 			echo "  [$ctx] No labelled namespaces found."
 		fi
+		"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=false
 
-		# Fallback: legacy single namespace from a pre-label deployment.
-		if "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
-			echo "  [$ctx] Removing legacy namespace $NS (no chart label)."
-			fast_drain_ns "$ctx" "$NS"
-			run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
+		echo "  [$ctx] Waiting for namespace termination (timeout ${TERMINATION_TIMEOUT}s)..."
+		wait_ns_terminated "$ctx"
+		# Sidecar CRs are namespaced; warn if any survived outside the deleted namespaces.
+		sc_left=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io \
+			-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
+		[[ -z "$sc_left" ]] && sc_left=0
+		if (( sc_left > 0 )); then
+			echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
 		fi
-
-		if ! ((DRY_RUN)); then
-			echo "  [$ctx] Waiting for namespace termination (timeout ${TERMINATION_TIMEOUT}s)..."
-			wait_ns_terminated "$ctx"
-			# Sidecar CRs are namespace-scoped and go away with the namespace.
-			# Confirm none leaked in a still-existing namespace.
-			sc_left=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io \
-				-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
-			[[ -z "$sc_left" ]] && sc_left=0
-			if (( sc_left > 0 )); then
-				echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
-			fi
-		fi
-
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)

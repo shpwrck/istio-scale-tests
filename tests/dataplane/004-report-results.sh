@@ -26,7 +26,7 @@ Usage: $(basename "$0") [options]
   --results-dir DIR  Results directory (default: tests/dataplane/results).
                      A directory containing latency-*.tsv files; a sweep-*/
                      subdir from 003 also works.
-  --format FMT       Output format: text, csv, markdown, json, charts (default: text).
+  --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
   -h, --help         Show this help.
 EOF
 }
@@ -54,6 +54,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FORMAT" in
+md) FORMAT=markdown ;;
 text|csv|markdown|json|charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, markdown, json, or charts)" ;;
 esac
@@ -201,15 +202,14 @@ report_csv() {
 	done <<<"$AGG_TSV"
 }
 
-# Metric glossary appended to the END of the markdown summary (#17). Definitions are
-# pulled from tests/dataplane/README.md; units/source/caveats mirror it, not invented here.
+# Metric glossary appended to the end of the markdown summary.
 glossary_section() {
 	cat <<'GLOSSARY'
 
 ## Glossary
 
-Definitions for every metric column in the results table above. Sourced from
-`tests/dataplane/README.md`. Latency percentiles come from each cell's **Fortio JSON**
+Definitions for every metric column in the results table above (see also
+`tests/dataplane/README.md`). Latency percentiles come from each cell's **Fortio JSON**
 (`DurationHistogram.Percentiles` / `.Max`, seconds → ms); numeric averages are over
 **valid rows only** — rows with `status != OK` or `istiod_restarted != 0` are excluded
 (`n_valid < n_total` means some rows were dropped).
@@ -218,7 +218,7 @@ Definitions for every metric column in the results table above. Sourced from
 |--------|-------|--------|----------------------|
 | `mesh_size` | clusters | sweep axis | Number of clusters in the mesh (`--mesh-size`). |
 | `qps_target` | queries/s | sweep axis | Target offered load for the Fortio run (`--qps-levels`). |
-| `target_class` | enum | internal | `local` (same cluster as the source, intra-cluster baseline) or `remote` (different cluster, routed via the east-west gateway). |
+| `target_class` | enum | internal | `local` (the source cluster's own `dataplane-server-<source>` Service, intra-cluster baseline) or `remote` (another cluster's Service, routed via the east-west gateway). |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/placeholder rows. |
 | `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages. |
 | `avg_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | Mean p50 latency over valid rows; `N/A` if the percentile was missing or every row was dropped. |
@@ -263,7 +263,7 @@ report_markdown() {
 			"$TOTAL_ALL" "$VALID_ALL" "$DROPPED_ALL"
 	fi
 
-	# #17: metric glossary at the very end of the markdown summary.
+	# Metric glossary at the very end of the markdown summary.
 	glossary_section
 }
 
@@ -376,10 +376,7 @@ report_charts() {
 		}
 
 		# Chart 1: p50 vs mesh size at top QPS
-		printf "%% Chart 1: p50 latency (ms) vs mesh size at QPS %s\n", max_qps
-		printf "%% Series order: %s, %s\n", local_cls, remote_cls
-		printf "%% x-axis starts at mesh 2 (remote undefined at mesh 1)\n"
-		printf "\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"p50 Latency vs Mesh Size (QPS %s)\"\n", max_qps
 		printf "    x-axis \"Mesh Size\" ["
@@ -406,11 +403,10 @@ report_charts() {
 		}
 		printf "]\n"
 		printf "```\n\n"
-		printf "> Series order: **%s**, **%s**. The gap = cross-cluster overhead.\n\n", local_cls, remote_cls
+		printf "> Series order: **%s**, **%s**. The gap = cross-cluster overhead. x-axis starts at mesh 2 (no remote at mesh 1).\n\n", local_cls, remote_cls
 
 		# Chart 2: p50 vs QPS at largest mesh size
-		printf "%% Chart 2: p50 latency (ms) vs QPS at mesh size %s\n", max_ms
-		printf "\n```mermaid\n"
+		printf "```mermaid\n"
 		printf "xychart-beta\n"
 		printf "    title \"p50 Latency vs QPS (Mesh Size %s)\"\n", max_ms
 		printf "    x-axis \"QPS\" ["

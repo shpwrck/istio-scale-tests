@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Clean up all propagation-test resources from target clusters.
-# Removes canary deployments, Istio config (VirtualService/DestinationRule),
-# watcher pods, and the propagation-test namespace.
-#
-# Safe to run at any time — all deletes use --ignore-not-found.
+# Remove the propagation-test namespace (watcher, backer, canary Service) from
+# target clusters. Safe to run at any time: the delete uses --ignore-not-found.
 #
 # Usage:
 #   ./tests/propagation/007-cleanup.sh [--contexts CSV] [--dry-run]
@@ -13,7 +10,7 @@
 #   ./tests/propagation/007-cleanup.sh
 #
 #   # Clean up specific clusters:
-#   ./tests/propagation/007-cleanup.sh --contexts istio-002,istio-003
+#   ./tests/propagation/007-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
@@ -32,7 +29,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
   --contexts CSV   Kube contexts to clean up (default: \$SETUP_CONTEXTS).
-  --dry-run        Show what would be deleted without deleting.
+  --dry-run        Print the delete commands without contacting any cluster.
   -h, --help       Show this help.
 
 Environment:
@@ -62,13 +59,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -80,47 +72,32 @@ fi
 
 NS="${PROPAGATION_TEST_NAMESPACE}"
 
-run_delete() {
-	if ((DRY_RUN)); then
-		echo "  [dry-run] $*"
-	else
-		"$@" 2>/dev/null || true
-	fi
-}
-
-cleanup_context() {
-	local ctx="$1"
-	echo "--- Cleaning up context: $ctx ---"
-
-	if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
-		echo "  [$ctx] Namespace $NS does not exist, skipping."
-		return 0
-	fi
-
-	echo "  [$ctx] Removing canary resources..."
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete virtualservice/propagation-canary --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete destinationrule/propagation-canary --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete deploy/propagation-canary --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete svc/propagation-canary --ignore-not-found=true
-
-	echo "  [$ctx] Removing watcher resources..."
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete deploy/propagation-watcher --ignore-not-found=true
-	run_delete "${KUBECTL[@]}" --context="$ctx" -n "$NS" delete svc/propagation-watcher --ignore-not-found=true
-
-	echo "  [$ctx] Deleting namespace $NS..."
-	run_delete "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true
-	echo "  [$ctx] Done."
-}
-
 echo "=== Propagation test cleanup ==="
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Namespace: $NS"
 ((DRY_RUN)) && echo "Mode: dry-run"
 echo ""
 
+if ((DRY_RUN)); then
+	for ctx in "${CONTEXTS[@]}"; do
+		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace $NS --ignore-not-found=true"
+	done
+	exit 0
+fi
+
+# Deleting the namespace removes everything the chart created. --ignore-not-found
+# makes an absent namespace a no-op, so a non-zero exit means the context itself
+# failed (unreachable, auth, ...).
 PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
-	cleanup_context "$ctx" &
+	(
+		echo "  [$ctx] Deleting namespace $NS..."
+		if ! "${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true; then
+			echo "  [$ctx] error: delete failed" >&2
+			exit 1
+		fi
+		echo "  [$ctx] Done."
+	) &
 	PIDS+=($!)
 done
 

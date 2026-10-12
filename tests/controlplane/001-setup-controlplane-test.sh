@@ -1,32 +1,22 @@
 #!/usr/bin/env bash
 # Deploy dummy workloads for measuring istiod control-plane resource consumption.
 #
-# Applies one workload configuration (single point in the sweep cube) to each
-# target cluster: SERVICE_COUNT services × REPLICAS pods, distributed across
-# NAMESPACE_COUNT namespaces (service `i` lands in namespace `i mod N`).
-#
-# Backwards compat: when --namespace-count is 1 (default), the single namespace
-# keeps its historical name `${NS}` (e.g. `controlplane-test`). When > 1,
-# namespaces are named `${NS}-0`, `${NS}-1`, ..., `${NS}-(N-1)`.
-#
-# Manifests are applied with server-side apply (`--server-side
-# --force-conflicts`); we use a label-selector wait per namespace instead of
-# looping per Deployment.
+# Applies one sweep point to each target cluster: SERVICE_COUNT services x
+# REPLICAS pods across NAMESPACE_COUNT namespaces (service i lands in namespace
+# i mod N). One namespace is named ${NS}; more are ${NS}-0 .. ${NS}-(N-1).
+# Manifests are applied server-side, in chunks, with a bounded retry.
 #
 # Usage:
 #   ./tests/controlplane/001-setup-controlplane-test.sh [--contexts CSV] [options]
 #
 # Examples:
-#   # Setup on all default clusters (single namespace, 10 services × 3 replicas):
+#   # Setup on all default clusters (single namespace, 10 services x 3 replicas):
 #   ./tests/controlplane/001-setup-controlplane-test.sh
-#
-#   # Setup with custom workload size:
-#   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 50 --replicas 5
 #
 #   # Spread 100 services across 10 namespaces:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --service-count 100 --namespace-count 10
 #
-#   # Setup with namespace-scoped Sidecar CRs:
+#   # Setup with one Sidecar CR per namespace:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --sidecar-scoping namespace
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
@@ -37,9 +27,9 @@ source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/config/options.env"  # O9: SCALE_SIZING_MODE / SCALE_* knobs (default-off)
+source "${ROOT}/config/options.env"  # SCALE_* knobs
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/capacity.sh"  # O9: read-only capacity probes (auto sizing, gated)
+source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -49,27 +39,15 @@ SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
-# PL37 cleanup->setup cascade fix: if a namespace from the PREVIOUS combo is still
-# Terminating when this setup starts, applying the chart (which includes a
-# kind: Namespace) fails — you cannot create a Terminating Namespace nor namespaced
-# resources inside it — turning a slow 005 teardown into a SETUP_FAILED cascade
-# (~40% data loss, deterministic odd/even). So before applying, poll-until-gone
-# (PL4) for any pre-existing instance of EVERY target namespace on EVERY context.
-# The wait lives in 001 so the precondition travels WITH setup (a manual 001 after
-# a manual 005 benefits too). Defaults to reuse the same bound 005 uses for its own
-# namespace-termination wait (same contract).
+# A namespace still Terminating from the previous combo cannot be re-created, so
+# wait for every target namespace to disappear before applying (same bound 005
+# uses for its own termination wait).
 SETUP_NS_WAIT_SEC="${CONTROLPLANE_SETUP_NS_WAIT_SEC:-${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}}"
-# P1-1: bounded retry on the server-side-apply path so a transient apiserver 429
-# (or any non-zero apply exit) under sweep load doesn't hard-fail the combo to
-# SETUP_FAILED on the first hiccup. P1-3: chunk the rendered object stream so a
-# large `explicit`-scoping render (~3 objects/service) is applied in batches per
-# context instead of one giant single SSA stream that throttles/partial-fails.
+# Bounded retry so a transient apiserver 429 does not fail the combo, and
+# chunked apply so a large explicit-scoping render is not one huge stream.
 APPLY_ATTEMPTS="${CONTROLPLANE_APPLY_ATTEMPTS:-3}"
 APPLY_BACKOFF_S="${CONTROLPLANE_APPLY_BACKOFF_S:-5}"
-# Objects per server-side-apply batch (P1-3). The namespace doc(s) are always
-# applied FIRST as their own batch so namespaced objects land into an existing
-# namespace; the remaining Services/Deployments/Sidecars are applied in batches
-# of this size. <= 0 disables chunking (single stream, legacy behaviour).
+# Objects per apply batch; Namespace docs always go first. <= 0 disables chunking.
 APPLY_CHUNK_OBJECTS="${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-200}"
 
 usage() {
@@ -85,34 +63,29 @@ Usage: $(basename "$0") [options]
                          service i lands in namespace (i mod N).
   --sidecar-scoping MODE Sidecar CR scoping: none|namespace|explicit (default: $SIDECAR_SCOPING).
                          none      - no Sidecar CRs (baseline; worst-case config size).
-                         namespace - one namespace-scoped Sidecar in the primary namespace.
+                         namespace - one Sidecar per workload namespace.
                          explicit  - one Sidecar per Deployment with workloadSelector.
   --dry-run              Pass --dry-run=client to oc apply
                          (skips the --server-side path).
   --wait-timeout N       Seconds to wait for pods (default: 300).
   --ns-wait-timeout N    Seconds to wait for a pre-existing (Terminating) namespace
-                         to fully disappear before applying (default: $SETUP_NS_WAIT_SEC).
-                         PL37 cleanup->setup cascade guard; skipped in --dry-run.
+                         to disappear before applying (default: $SETUP_NS_WAIT_SEC;
+                         skipped in --dry-run).
   -h, --help             Show this help.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
   CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
   CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to
-  clear; defaults to CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300).
-  KUBE_CLIENT_QPS / KUBE_CLIENT_BURST (client rate-limit flags appended to every
-  oc/kubectl call; defaults 30/60). CONTROLPLANE_APPLY_ATTEMPTS (default 3) /
-  CONTROLPLANE_APPLY_BACKOFF_S (default 5): bounded retry on the server-side-apply
-  path so a transient 429 doesn't hard-fail the combo. CONTROLPLANE_APPLY_CHUNK_OBJECTS
-  (default 200; <=0 disables): objects per server-side-apply batch for large
-  (explicit-scoping) renders.
+  CONTROLPLANE_SETUP_NS_WAIT_SEC (default: CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300),
+  CONTROLPLANE_APPLY_ATTEMPTS / CONTROLPLANE_APPLY_BACKOFF_S (apply retry, default 3 / 5s),
+  CONTROLPLANE_APPLY_CHUNK_OBJECTS (objects per apply batch, default 200; <=0 disables),
+  BUSYBOX_VERSION (dummy workload image tag).
 
-  O9 scale-coverage (DEFAULT-OFF — fixed/0 means behaviour is unchanged):
-  SCALE_SIZING_MODE (fixed|auto; auto derives SERVICE_COUNT from cluster capacity),
-  SCALE_TARGET_FRACTION, SCALE_SYSTEM_RESERVE_FRACTION, SCALE_PER_POD_CPU_M,
-  SCALE_PER_POD_MEM_MI (auto-sizing inputs), SCALE_COVERAGE_MIN_FRACTION,
-  SCALE_COVERAGE_ENFORCE (under-provision floor: warn by default, hard-fail when 1).
+  Scale coverage (off by default): SCALE_SIZING_MODE (fixed|auto; auto derives the
+  service count from cluster capacity), SCALE_TARGET_FRACTION,
+  SCALE_SYSTEM_RESERVE_FRACTION, SCALE_PER_POD_CPU_M, SCALE_PER_POD_MEM_MI,
+  SCALE_COVERAGE_MIN_FRACTION, SCALE_COVERAGE_ENFORCE (1 = fail when under-provisioned).
 EOF
 }
 
@@ -181,9 +154,6 @@ if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
 	die "--namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces would be empty. Reduce --namespace-count to at most --service-count."
 fi
 
-# P1-1: resolve_kubectl appends the shared --qps/--burst client rate-limit flags
-# (KUBE_CLIENT_QPS/BURST) so the 20-context apply path doesn't throttle at the
-# client-go 5/10 default.
 KUBECTL=()
 resolve_kubectl KUBECTL
 
@@ -197,8 +167,7 @@ else
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
-# Compute the list of namespaces to wait against. Mirror the chart's
-# backwards-compat rule (N=1 -> single namespace = $NS; N>1 -> $NS-i).
+# Namespaces the chart creates (mirrors chart/templates/_helpers.tpl).
 NAMESPACES=()
 if ((NAMESPACE_COUNT <= 1)); then
 	NAMESPACES=("$NS")
@@ -217,13 +186,10 @@ echo "Namespaces:      ${NAMESPACES[*]}"
 echo "Sidecar scoping: $SIDECAR_SCOPING"
 ((DRY_RUN)) && echo "Mode:            dry-run"
 SCALE_SIZING_MODE="${SCALE_SIZING_MODE:-fixed}"
-[[ "$SCALE_SIZING_MODE" == auto ]] && echo "Sizing mode:     auto (O9 capacity-derived SERVICE_COUNT)"
+[[ "$SCALE_SIZING_MODE" == auto ]] && echo "Sizing mode:     auto (capacity-derived SERVICE_COUNT)"
 echo ""
 
-# O9 Phase 2 (DEFAULT-OFF): capacity-derived sizing. ONLY runs when the operator
-# opts in with SCALE_SIZING_MODE=auto. With the default `fixed` this whole block is
-# skipped and SERVICE_COUNT keeps its CLI/env value — behaviour is byte-identical to
-# pre-O9. Never runs in --dry-run (would touch the cluster).
+# Capacity-derived sizing, only with SCALE_SIZING_MODE=auto and never in --dry-run.
 #
 # per_pod_cpu_m / per_pod_mem_mi: the dummy chart's container declares NO resources
 # block (tests/controlplane/chart/templates/dummy-deployment.yaml), so the app
@@ -278,16 +244,11 @@ if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	echo ""
 fi
 
-# Sidecar egress-coverage precondition (P0-d). When NAMESPACE_COUNT > 1 the suite
-# mints controlplane-test-0, controlplane-test-1, … but the campaign's root Sidecar
-# (spoke-ossm tuningBaseline) carries an egress allow-list whose namespace parts are
-# EXACT matches — "controlplane-test/*" does NOT cover "controlplane-test-0/*". An
-# uncovered namespace silently strips those proxies' egress to the workloads (no
-# endpoints), which reads downstream as a dead measurement, not a config error. So
-# fail FAST here, pointing the operator at the egressHosts list to fix, instead of
-# proceeding into a silently-broken mesh. Read-only, live-queried per source context
-# (the deployed graph, not chart defaults — cf PL39); skipped in --dry-run.
-# Auto-generating the egress entries is out of scope; this is the GO-safe guard.
+# Sidecar egress-coverage precondition. With NAMESPACE_COUNT > 1 the suite creates
+# ${NS}-0, ${NS}-1, ... but the root Sidecar's egress hosts match namespaces exactly
+# ("controlplane-test/*" does not cover "controlplane-test-0/*"), so uncovered
+# namespaces would silently lose egress. Fail fast instead. Read-only, live-queried,
+# skipped in --dry-run.
 if ! ((DRY_RUN)) && ((NAMESPACE_COUNT > 1)); then
 	echo "Sidecar egress-coverage precondition (namespaceCount=$NAMESPACE_COUNT > 1)..."
 	for ctx in "${CONTEXTS[@]}"; do
@@ -321,19 +282,16 @@ if ! ((DRY_RUN)) && ((NAMESPACE_COUNT > 1)); then
 		done
 		unset _covered_ns
 		if ((${#missing[@]})); then
-			die "context $ctx: the deployed root Sidecar egress allow-list does NOT cover these controlplane-test namespaces: ${missing[*]}. egressHosts namespace parts are EXACT matches (\"controlplane-test/*\" does NOT cover \"controlplane-test-0/*\"). Add an explicit \"<ns>/*\" entry for each to charts/spoke-ossm/values.yaml tuningBaseline.discoverySelectors.egressHosts (and re-sync the mesh), or run with --namespace-count 1. Current egress hosts: ${hosts}"
+			die "context $ctx: the deployed root Sidecar egress allow-list does NOT cover these controlplane-test namespaces: ${missing[*]}. egressHosts namespace parts are EXACT matches (\"controlplane-test/*\" does NOT cover \"controlplane-test-0/*\"). Add an explicit \"<ns>/*\" entry for each to charts/spoke-ossm/values.yaml tuningBaseline.sidecar.egressHosts (and re-sync the mesh), or run with --namespace-count 1. Current egress hosts: ${hosts}"
 		fi
 		echo "  $ctx: all $NAMESPACE_COUNT generated namespaces covered by the Sidecar egress allow-list — OK"
 	done
 	echo ""
 fi
 
-# Capacity preflight: verify each cluster can schedule the planned pods before
-# deploying anything. Queries node allocatable.pods and current pod count; fails
-# early with an actionable message instead of hanging at the wait timeout. This is
-# the single ceiling-and-floor gate: it DIES on over-provision (O5) and, under
-# SCALE_SIZING_MODE=auto, additionally WARNs on under-provision (O9 coverage floor)
-# — hard-failing only when SCALE_COVERAGE_ENFORCE=1.
+# Capacity preflight: die if a cluster lacks pod slots for the planned workload.
+# Under SCALE_SIZING_MODE=auto also warn on under-provision (fail only when
+# SCALE_COVERAGE_ENFORCE=1).
 if ! ((DRY_RUN)); then
 	NEEDED_PODS=$((SERVICE_COUNT * REPLICAS))
 	echo "Capacity preflight ($NEEDED_PODS pods needed per cluster)..."
@@ -352,8 +310,7 @@ if ! ((DRY_RUN)); then
 				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current running). Reduce --service-count or --replicas, or add nodes."
 			fi
 			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
-			# O9 under-provision coverage floor (auto mode only; informational unless
-			# SCALE_COVERAGE_ENFORCE=1). Achieved fraction = needed / allocatable.
+			# Under-provision coverage floor (auto mode only).
 			if [[ "$SCALE_SIZING_MODE" == auto ]] && (( alloc > 0 )); then
 				min_frac="${SCALE_COVERAGE_MIN_FRACTION:-0.25}"
 				under=$(awk -v n="$NEEDED_PODS" -v a="$alloc" -v m="$min_frac" \
@@ -377,13 +334,8 @@ if ! ((DRY_RUN)); then
 	echo ""
 fi
 
-# PL37 cleanup->setup cascade fix: poll-until-gone (PL4) for any pre-existing
-# instance of EVERY target namespace before applying. A slow 005 teardown of the
-# previous combo must DELAY this setup, never DESTROY its data. Returns 0 once all
-# this context's target namespaces are absent (or never existed); returns 1 if any
-# is still present after SETUP_NS_WAIT_SEC — at which point applying the chart's
-# kind: Namespace would fail anyway, so the caller (die below -> 003's PL32
-# SETUP_FAILED wrap) records a legitimate, now-rare, failure rather than hanging.
+# Wait until every target namespace is absent on this context; return 1 if one is
+# still present after SETUP_NS_WAIT_SEC (the apply would fail anyway).
 wait_ns_gone() {
 	local ctx="$1" ns deadline now
 	for ns in "${NAMESPACES[@]}"; do
@@ -430,9 +382,7 @@ apply=("${KUBECTL[@]}" apply --server-side --force-conflicts)
 
 CHART_DIR="${ROOT}/tests/controlplane/chart"
 
-# P1-1: apply a manifest file with a bounded retry so a transient apiserver 429
-# (or any non-zero apply exit) under sweep load retries with a short backoff
-# before failing the combo. <manifest_file> <ctx> <label>.
+# Apply a manifest with a bounded retry. <manifest_file> <ctx> <label>.
 apply_with_retry() {
 	local manifest="$1" ctx="$2" label="$3" attempt=1
 	while :; do
@@ -449,11 +399,8 @@ apply_with_retry() {
 	done
 }
 
-# P1-3: split a rendered chart stream into per-document temp files, apply the
-# Namespace doc(s) FIRST (so namespaced objects land into an existing namespace),
-# then apply the remaining objects in batches of APPLY_CHUNK_OBJECTS — one giant
-# SSA stream of ~3 objects/service (explicit scoping × 500 svc ≈ 1500 objects)
-# throttles/partial-fails per context at scale. Each batch carries the P1-1 retry.
+# Split a rendered stream into one file per object, apply the Namespace docs
+# first, then the rest in batches of APPLY_CHUNK_OBJECTS (each with retry).
 # <rendered_file> <ctx> <workdir>.
 apply_chunked() {
 	local rendered="$1" ctx="$2" workdir="$3"
@@ -501,9 +448,7 @@ apply_chunked() {
 	return 0
 }
 
-# O8 item 3: apply each context's chart concurrently — setup-only, disjoint
-# contexts, fidelity-neutral. A non-zero exit in ANY context fails the join below,
-# preserving the original `set -e` abort semantics.
+# Apply each context concurrently; any failure fails the join below.
 APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
@@ -513,7 +458,8 @@ for ctx in "${CONTEXTS[@]}"; do
 		trap 'rm -rf "$workdir" "$rendered"' EXIT
 		helm template controlplane-test "$CHART_DIR" \
 			--set clusterName="$ctx" \
-			--set namespacePrefix="$NS" \
+			--set namespace="$NS" \
+			--set image.tag="$BUSYBOX_VERSION" \
 			--set namespaceCount="$NAMESPACE_COUNT" \
 			--set serviceCount="$SERVICE_COUNT" \
 			--set replicasPerService="$REPLICAS" \
@@ -541,11 +487,8 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-# Wait per-namespace using a label selector — one kubectl call covers every
-# dummy-svc-* Deployment in that namespace, regardless of count. Much faster
-# than per-Deployment loops, and survives missing-name races during rollout.
-# O8 item 3: parallelize the per-context readiness wait (the per-namespace waits
-# stay serial within each context's subshell). Setup-only, fidelity-neutral.
+# One label-selector wait per namespace covers every dummy Deployment in it;
+# contexts are waited on concurrently.
 echo "Waiting for dummy deployments to be ready (timeout: ${WAIT_TIMEOUT}s)..."
 WAIT_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
@@ -566,20 +509,24 @@ for pid in "${WAIT_PIDS[@]}"; do
 	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 
-# Verify Sidecar CRs landed when scoping is enabled.
+# Verify the Sidecar CRs landed: one per namespace (namespace) or one per
+# service (explicit), across all target namespaces.
 if [[ "$SIDECAR_SCOPING" != "none" ]]; then
-	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING})..."
+	expected_sidecars="$NAMESPACE_COUNT"
+	[[ "$SIDECAR_SCOPING" == explicit ]] && expected_sidecars="$SERVICE_COUNT"
+	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING}, expecting ${expected_sidecars} per cluster)..."
 	for ctx in "${CONTEXTS[@]}"; do
 		deadline=$(( $(date +%s) + 30 ))
 		count=0
 		while (( $(date +%s) < deadline )); do
-			count=$("${KUBECTL[@]}" --context="$ctx" -n "$NS" get sidecars.networking.istio.io \
+			count=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io -A \
+				-l app.kubernetes.io/instance=controlplane-test \
 				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ') || count=0
 			[[ -z "$count" ]] && count=0
-			(( count > 0 )) && break
+			(( count >= expected_sidecars )) && break
 			sleep 1
 		done
-		(( count > 0 )) || die "no Sidecar CRs found on $ctx after 30s (expected >=1 for scoping=$SIDECAR_SCOPING)"
+		(( count >= expected_sidecars )) || die "found $count Sidecar CRs on $ctx after 30s (expected $expected_sidecars for scoping=$SIDECAR_SCOPING)"
 		echo "  [$ctx] Sidecar CR count: $count"
 	done
 fi

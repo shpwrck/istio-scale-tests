@@ -1,19 +1,9 @@
 {{- include "controlplane-test.validateSidecarScoping" . -}}
 {{- $scope := .Values.sidecarScoping | default "none" -}}
-{{- if ne $scope "none" }}
-{{- /*
-  B2: Sidecar CRs are only emitted into the PRIMARY namespace. Although
-  `namespaceCount > 1` requests multiple workload namespaces, the chart only
-  deploys dummy-svc-* Deployments in the primary namespace. Emitting Sidecar
-  CRs into namespaces with zero pods would inflate pilot_xds_pushes /
-  pilot_k8s_cfg_events with "extra empty CRs" rather than "more scoped
-  namespaces" and contaminate the measurement. The runtime sweep across
-  namespace counts is owned by a sibling branch; revisit when it lands.
-*/ -}}
-{{- $ns := .Values.namespace -}}
 {{- $extra := default (list) .Values.sidecarExtraEgressHosts -}}
 {{- if eq $scope "namespace" }}
-{{- /* One namespace-scoped Sidecar in the primary namespace (no workloadSelector). */ -}}
+{{- /* One namespace-wide Sidecar (no workloadSelector) per workload namespace. */ -}}
+{{- range $ns := fromYamlArray (include "controlplane-test.namespaces" .) }}
 ---
 apiVersion: networking.istio.io/v1
 kind: Sidecar
@@ -21,27 +11,26 @@ metadata:
   name: default
   namespace: {{ $ns }}
   labels:
-    {{- include "controlplane-test.labels" . | nindent 4 }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
     controlplane-test.scope: namespace
 spec:
   egress:
     - hosts:
         - "./*"
-        - "{{ $ns }}/*"
         - "istio-system/*"
         {{- range $h := $extra }}
         - {{ $h | quote }}
         {{- end }}
+{{- end }}
 {{- else if eq $scope "explicit" }}
-{{- /* One Sidecar per Deployment in the primary namespace with workloadSelector matching dummy-svc-<i>. */ -}}
-{{- $count := int .Values.serviceCount -}}
-{{- range $i := until $count }}
+{{- /* One Sidecar per Deployment, in the Deployment's namespace. */ -}}
+{{- range $i := until (.Values.serviceCount | int) }}
 ---
 apiVersion: networking.istio.io/v1
 kind: Sidecar
 metadata:
   name: dummy-svc-{{ $i }}
-  namespace: {{ $ns }}
+  namespace: {{ include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i) }}
   labels:
     app: dummy-svc-{{ $i }}
     {{- include "controlplane-test.labels" $ | nindent 4 }}
@@ -53,11 +42,9 @@ spec:
   egress:
     - hosts:
         - "./*"
-        - "{{ $ns }}/*"
         - "istio-system/*"
         {{- range $h := $extra }}
         - {{ $h | quote }}
         {{- end }}
-{{- end }}
 {{- end }}
 {{- end }}
