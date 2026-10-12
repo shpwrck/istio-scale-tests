@@ -9,7 +9,8 @@
 
 description: >-
   Wait 200ms (default 100ms) for more changes before pushing, debounce for up to
-  15s (default 10s), and allow at most 20 concurrent pushes (default 35 here).
+  15s (default 10s), and allow at most 20 concurrent pushes (default 35 with a
+  4-CPU istiod).
 
 ossm_support: configurable
 ossm_support_detail: >-

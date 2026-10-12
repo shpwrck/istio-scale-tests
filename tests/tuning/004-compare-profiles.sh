@@ -4,7 +4,7 @@
 # and shows each profile's change against the baseline.
 #
 # Usage:
-#   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|markdown] [--output FILE]
+#   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,7 +24,7 @@ istiod restart); each profile also shows its change against the baseline.
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
-  --format FMT       text or markdown (default: text).
+  --format FMT       text or md (or markdown) (default: text).
   --output FILE      Write to FILE instead of stdout.
   -h, --help         Show this help.
 EOF
@@ -48,7 +48,11 @@ done
 
 [[ -n "$RESULTS_DIR" ]] || die "--results-dir is required"
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
-case "$FORMAT" in text | markdown) ;; *) die "--format must be text or markdown" ;; esac
+case "$FORMAT" in
+text | markdown) ;;
+md) FORMAT=markdown ;;
+*) die "--format must be text or md" ;;
+esac
 
 META="${RESULTS_DIR}/sweep-metadata.txt"
 meta_get() { [[ -f "$META" ]] && sed -n "s/^# $1=//p" "$META" | head -1; return 0; }
@@ -87,7 +91,7 @@ if [[ -z "$SUITE" ]]; then
 	done
 fi
 
-# Metrics per suite as "column|label"; GROUP splits rows by that column's value.
+# Metrics per suite as "column|label"; GROUP (CSV of columns) splits rows by their values.
 GROUP=""
 case "$SUITE" in
 controlplane)
@@ -99,7 +103,7 @@ propagation)
 	METRICS=("p1_ms|P1 local push (ms)" "p2_ms|P2 remote EDS (ms)" "p3_ms|P3 remote sidecar (ms)"
 		"p1_conv_p99_ms|P1 convergence p99 (ms)") ;;
 dataplane)
-	GROUP="qps_target"
+	GROUP="target_class,qps_target"
 	METRICS=("p50_ms|p50 (ms)" "p90_ms|p90 (ms)" "p99_ms|p99 (ms)" "p999_ms|p99.9 (ms)"
 		"qps_actual|Actual QPS") ;;
 churn)
@@ -116,10 +120,11 @@ esac
 metric_cols=""
 for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 
-# One pass -> lines "n<TAB>valid<TAB>total" and "v<TAB>group<TAB>column<TAB>mean".
+# One pass -> lines "n<TAB>valid<TAB>total", "g<TAB>group" (first-seen order) and
+# "v<TAB>group<TAB>column<TAB>mean". A group is "col=value, col=value", or "-".
 summarize() {
-	awk -F'\t' -v cols="$metric_cols" -v gcol="$GROUP" '
-	BEGIN { nm = split(cols, mc, ",") }
+	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" '
+	BEGIN { nm = split(cols, mc, ","); ng = split(gcols, gc, ",") }
 	FNR == 1 { hdr = 0 }
 	/^#/ || NF == 0 { next }
 	!hdr { delete idx; for (i = 1; i <= NF; i++) idx[$i] = i; hdr = 1; next }
@@ -129,7 +134,10 @@ summarize() {
 		if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
 		if (("restarted" in idx) && $(idx["restarted"]) != "0") next
 		valid++
-		g = (gcol != "" && (gcol in idx)) ? $(idx[gcol]) : "-"
+		g = ""
+		for (j = 1; j <= ng; j++) if (gc[j] in idx) g = g (g == "" ? "" : ", ") gc[j] "=" $(idx[gc[j]])
+		if (g == "") g = "-"
+		if (!(g in seen)) { seen[g] = 1; order[++norder] = g }
 		for (j = 1; j <= nm; j++) {
 			c = mc[j]
 			if (c == "" || !(c in idx)) continue
@@ -139,12 +147,13 @@ summarize() {
 	}
 	END {
 		printf "n\t%d\t%d\n", valid, total
+		for (i = 1; i <= norder; i++) printf "g\t%s\n", order[i]
 		for (k in cnt) { split(k, a, SUBSEP); printf "v\t%s\t%s\t%.2f\n", a[1], a[2], sum[k] / cnt[k] }
 	}' "$@"
 }
 
-declare -A VAL NROWS STATUS
-GROUPS_SEEN=""
+declare -A VAL NROWS STATUS GSEEN
+GROUP_VALUES=()
 for p in "${PASSES[@]}"; do
 	STATUS[$p]="ok"
 	for marker in SETUP_FAILED PROBE_FAILED REVERT_FAILED; do
@@ -158,11 +167,11 @@ for p in "${PASSES[@]}"; do
 	while IFS=$'\t' read -r kind a b c; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
-		v) VAL["$p|$a|$b"]="$c"; GROUPS_SEEN+="${a}"$'\n' ;;
+		g) [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
+		v) VAL["$p|$a|$b"]="$c" ;;
 		esac
 	done < <(summarize "${files[@]}")
 done
-mapfile -t GROUP_VALUES < <(printf '%s' "$GROUPS_SEEN" | grep . | LC_ALL=C sort -u | LC_ALL=C sort -n)
 ((${#GROUP_VALUES[@]})) || GROUP_VALUES=("-")
 
 BASE=""
@@ -180,7 +189,7 @@ row "${cells[@]}"
 for g in "${GROUP_VALUES[@]}"; do
 	for m in "${METRICS[@]}"; do
 		col="${m%%|*}" label="${m#*|}"
-		[[ "$g" != "-" ]] && label="${label} @ ${GROUP}=${g}"
+		[[ "$g" != "-" ]] && label="${label} @ ${g}"
 		cells=("$label")
 		any=0
 		for p in "${PASSES[@]}"; do

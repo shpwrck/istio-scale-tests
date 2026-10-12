@@ -116,7 +116,7 @@ status)
 		"${K[@]}" get appprojects.argoproj.io "$p" -o jsonpath='{.spec.syncWindows}'
 		echo ""
 	done
-	[[ -f "$STATE_FILE" ]] && echo "Paused by this tool (state: ${STATE_FILE})"
+	if [[ -f "$STATE_FILE" ]]; then echo "Paused by this tool (state: ${STATE_FILE})"; fi
 	;;
 pause)
 	[[ ! -f "$STATE_FILE" ]] || die "already paused (state file ${STATE_FILE} exists); run --resume first"
