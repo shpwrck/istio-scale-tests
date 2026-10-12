@@ -54,20 +54,25 @@ command -v aws >/dev/null 2>&1 || die "aws CLI not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 command -v terraform >/dev/null 2>&1 || die "terraform not found"
 
-# --- Resolve VPC IDs and region from terraform output ---
-
-BY_CLUSTER="$(terraform -chdir="${TF_DIR}" output -json by_cluster 2>/dev/null)" \
-  || die "failed to read terraform output 'by_cluster' — is the rosa-hcp module initialized?"
+# --- Resolve VPC IDs from terraform output, or from state after a partial destroy ---
 
 VPC_IDS=()
 CLUSTER_NAMES=()
-while IFS= read -r key; do
-  vpc_id="$(echo "${BY_CLUSTER}" | jq -r --arg k "$key" '.[$k].vpc_id')"
-  VPC_IDS+=("$vpc_id")
-  CLUSTER_NAMES+=("$key")
-done < <(echo "${BY_CLUSTER}" | jq -r 'keys[]')
+if BY_CLUSTER="$(terraform -chdir="${TF_DIR}" output -json by_cluster 2>/dev/null)"; then
+  while IFS= read -r key; do
+    VPC_IDS+=("$(echo "${BY_CLUSTER}" | jq -r --arg k "$key" '.[$k].vpc_id')")
+    CLUSTER_NAMES+=("$key")
+  done < <(echo "${BY_CLUSTER}" | jq -r 'keys[]')
+else
+  # Outputs are gone once a destroy has started; the VPCs are still in state.
+  while IFS=$'\t' read -r key vpc_id; do
+    VPC_IDS+=("$vpc_id")
+    CLUSTER_NAMES+=("$key")
+  done < <(terraform -chdir="${TF_DIR}" show -json 2>/dev/null |
+    jq -r '.. | objects | select(.type? == "aws_vpc") | [(.address | capture("\\[\"(?<k>[^\"]+)\"\\]").k // .address), .values.id] | @tsv')
+fi
 
-[[ ${#VPC_IDS[@]} -gt 0 ]] || die "no VPCs found in terraform output"
+[[ ${#VPC_IDS[@]} -gt 0 ]] || die "no VPCs found in terraform output or state — is the rosa-hcp module initialized?"
 
 if [[ -z "${REGION}" ]]; then
   REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
