@@ -20,7 +20,7 @@ pilot:
       cpu: "4"
       memory: 16Gi
 
-# Sidecar resources (tuning profile 05). Requests equal the Istio default;
+# Sidecar resources. Requests equal the Istio default;
 # limits are lower than the default (2 CPU / 1Gi).
 proxy:
   resources:
@@ -37,9 +37,9 @@ accessLogEncoding: JSON
 # Rendered into spec.values.global.meshNetworks only when non-empty.
 meshNetworks: {}
 
-# Tuning profiles 01, 02, 07 and 08 (tests/tuning/profiles/) applied by default.
+# Campaign tuning baseline, on by default.
 tuningBaseline:
-  # Profile 02: istiod watches only namespaces that match a selector (OR'd).
+  # discoverySelectors: istiod watches only namespaces that match a selector (OR'd).
   # istio-system is not included automatically, so it is selected by name.
   discoverySelectors:
     enabled: true
@@ -49,7 +49,7 @@ tuningBaseline:
       - matchLabels:
           kubernetes.io/metadata.name: istio-system
 
-  # Profile 01: a mesh-wide Sidecar in istio-system limits each proxy's egress.
+  # A mesh-wide Sidecar in istio-system limits each proxy's egress.
   # The gateways get their own full-egress Sidecars (templates/tuning-sidecar.yaml).
   sidecar:
     enabled: true
@@ -65,11 +65,11 @@ tuningBaseline:
       - "dataplane-test/*"
       - "propagation-test/*"
 
-  # Profile 07: disable client-side request metrics.
+  # Disable client-side request metrics.
   telemetryFiltering:
     enabled: true
 
-  # Profile 08: access-log only server-side responses with code >= 400.
+  # Access-log only server-side responses with code >= 400.
   accessLogFiltering:
     enabled: true
 

@@ -113,3 +113,21 @@ _fake_kubectl() {
 	assert_success
 	assert_output "a=unreachable,b=unreachable"
 }
+
+# ---------------------------------------------------------------------------
+# harness_sha — describes the harness repo at $ROOT, not the caller's cwd.
+# ---------------------------------------------------------------------------
+
+@test "harness_sha: describes \$ROOT even when called from another directory" {
+	expected="$(git -C "$ROOT" describe --always --dirty --abbrev=7)"
+	cd "$BATS_TEST_TMPDIR"
+	run harness_sha
+	[ "$status" -eq 0 ]
+	[ "$output" = "$expected" ]
+}
+
+@test "harness_sha: non-repo ROOT -> unknown" {
+	ROOT="$BATS_TEST_TMPDIR" run harness_sha
+	[ "$status" -eq 0 ]
+	[ "$output" = "unknown" ]
+}

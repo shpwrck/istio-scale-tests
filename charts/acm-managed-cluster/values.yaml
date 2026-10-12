@@ -1,4 +1,4 @@
-# Membership for ManagedClusterSetBinding + Placement (must match ACM_CLUSTER_SET / ManagedClusterSet in openshift-gitops chart).
+# ManagedClusterSet membership label. Must match clusterSet in charts/acm-openshift-gitops-resources.
 clustersetName: istio-scale-tests
 
 defaultLabels:

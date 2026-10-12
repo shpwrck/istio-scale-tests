@@ -1,6 +1,6 @@
 {{- if .Values.tuningBaseline.sidecar.enabled }}
 {{- /*
-  Profile 01: the root-namespace Sidecar (no workloadSelector) limits every proxy's
+  The root-namespace Sidecar (no workloadSelector) limits every proxy's
   egress to egressHosts. The gateways are also injected proxies, so each gets a
   workloadSelector Sidecar with all-namespace egress, which takes precedence.
 */}}

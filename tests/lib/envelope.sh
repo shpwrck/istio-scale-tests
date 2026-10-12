@@ -400,7 +400,7 @@ render_scale_envelope() {
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
 
-> Connected proxies is **summed across istiod replicas** (each proxy holds one istiod connection — PL28), so it is the mesh-wide proxy count, NOT endpoints; do not expect proxies ≈ total endpoints.
+> Connected proxies is the **per-istiod-replica peak** (max over the per-pod rows), not a mesh-wide sum and not endpoints; do not expect proxies ≈ total endpoints.
 
 ### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
 

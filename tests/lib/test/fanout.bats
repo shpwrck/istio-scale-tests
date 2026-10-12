@@ -257,6 +257,40 @@ _mk_podset() { # <file> <podname>...
 	[ "$result" = "unknown" ]
 }
 
+# --- fanout_open out-arrays ---------------------------------------------------
+# Fake kubectl: `get pods` lists two istiod pods; port-forward returns at once.
+_fake_kubectl() {
+	case " $* " in
+		*" get pods "*) printf 'istiod-a\nistiod-b\n' ;;
+		*) : ;;
+	esac
+}
+
+@test "fanout_open: out-arrays named pods/ports are filled (no nameref shadowing)" {
+	_install_curl_stub
+	base=$(fanout_ctx_port_base 0)
+	echo x > "${CURL_BODY_DIR}/${base}"
+	echo x > "${CURL_BODY_DIR}/$(( base + 1 ))"
+	local -a pids=() ports=() pods=()
+	fanout_open ctx-a 0 pids ports pods _fake_kubectl
+	rm -rf "$CURL_BODY_DIR"
+	[ "${pods[*]}" = "istiod-a istiod-b" ]
+	[ "${ports[*]}" = "${base} $(( base + 1 ))" ]
+	[ "${#pids[@]}" -eq 2 ]
+}
+
+@test "fanout_open: an unreachable pod is skipped and keeps its port gap" {
+	_install_curl_stub
+	base=$(fanout_ctx_port_base 0)
+	echo x > "${CURL_BODY_DIR}/$(( base + 1 ))"
+	FANOUT_PF_READY_ATTEMPTS=0
+	local -a pids=() ports=() pods=()
+	fanout_open ctx-a 0 pids ports pods _fake_kubectl 2>/dev/null
+	rm -rf "$CURL_BODY_DIR"
+	[ "${pods[*]}" = "istiod-b" ]
+	[ "${ports[*]}" = "$(( base + 1 ))" ]
+}
+
 # --- port allocation (collision-free for 5 pods x 10 contexts) -------------
 
 @test "fanout port allocation: 5 pods x 10 contexts produce no overlapping ports" {

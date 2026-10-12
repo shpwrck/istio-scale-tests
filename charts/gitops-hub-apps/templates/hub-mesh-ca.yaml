@@ -25,7 +25,5 @@ spec:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
   syncPolicy:
-    automated:
-      prune: false
-      selfHeal: true
+    {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
 {{- end }}

@@ -21,6 +21,10 @@ built from `gitops-hub-ocm-placement-appset/`.
 | 24 | `spoke-ingress-gateway-appset` | `spoke-ingress-gateway/` | each mesh member |
 | 27 | `spoke-east-west-gateway-appset` | `spoke-east-west-gateway/` | each mesh member |
 
+Waves order creation only; they do not wait for a child to be healthy. The child and the
+generated per-cluster Applications retry a failed sync (10 tries, backoff up to 5 min), so
+one that needs a CRD from an earlier wave converges once that CRD exists.
+
 Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/`).
 
 ## All charts
