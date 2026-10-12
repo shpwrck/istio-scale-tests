@@ -74,3 +74,38 @@ argocd:
     - apiGroups: ["cert-manager.io"]
       kinds: ["CertificateRequest"]
       clusters: ["*"]
+
+  # Argo CD has no built-in health for Sail's Istio/IstioCNI, so it would call
+  # them Healthy at once and apply the next sync wave (Sidecars, Telemetry)
+  # before istiod's validating webhook serves. Healthy only when Ready.
+  resourceHealthChecks:
+    - group: sailoperator.io
+      kind: Istio
+      check: |
+        hs = {status = "Progressing", message = "Waiting for Ready"}
+        if obj.status ~= nil and obj.status.conditions ~= nil then
+          for _, c in ipairs(obj.status.conditions) do
+            if c.type == "Ready" and c.status == "True" then
+              hs.status = "Healthy"
+              hs.message = "Ready"
+            elseif c.type == "Reconciled" and c.status == "False" and c.reason == "ReconcileError" then
+              return {status = "Degraded", message = c.message or c.reason}
+            end
+          end
+        end
+        return hs
+    - group: sailoperator.io
+      kind: IstioCNI
+      check: |
+        hs = {status = "Progressing", message = "Waiting for Ready"}
+        if obj.status ~= nil and obj.status.conditions ~= nil then
+          for _, c in ipairs(obj.status.conditions) do
+            if c.type == "Ready" and c.status == "True" then
+              hs.status = "Healthy"
+              hs.message = "Ready"
+            elseif c.type == "Reconciled" and c.status == "False" and c.reason == "ReconcileError" then
+              return {status = "Degraded", message = c.message or c.reason}
+            end
+          end
+        end
+        return hs
