@@ -2,5 +2,9 @@ apiVersion: config.open-cluster-management.io/v1alpha1
 kind: KlusterletConfig
 metadata:
   name: {{ .Values.klusterletConfig.name }}
+{{- if .Values.keepOnUninstall }}
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}
 spec:
 {{ toYaml .Values.klusterletConfig.spec | indent 2 }}

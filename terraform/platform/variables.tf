@@ -86,6 +86,12 @@ variable "acm_install_klusterletconfig" {
   description = "Install the KlusterletConfig chart after the MultiClusterHub is running."
 }
 
+variable "acm_keep_managed_clusters_on_destroy" {
+  type        = bool
+  default     = false
+  description = "Leave the spoke ManagedClusters registered on destroy (helm.sh/resource-policy: keep). Set true when the spokes were ACM-managed before Terraform adopted them."
+}
+
 # --------------------------------------------------------------------------
 # OpenShift GitOps / Argo CD
 # --------------------------------------------------------------------------

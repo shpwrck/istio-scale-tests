@@ -9,6 +9,7 @@ Terraform (`terraform/platform/platform_acm_spokes.tf`) installs one `helm_relea
 - `managedCluster.name` (required) — must match the spoke’s kubectl/oc context name and the hub namespace RHACM creates for that cluster.
 - `clustersetName` (default `istio-scale-tests`) — sets label `cluster.open-cluster-management.io/clusterset=<name>` for ManagedClusterSet membership (must match `var.acm_cluster_set` and the `acm-openshift-gitops-resources` chart `clusterSet`).
 - `managedCluster.labels` — merged over `defaultLabels` and the clusterset label (can override membership if needed).
+- `keepOnUninstall` (default `false`) — adds `helm.sh/resource-policy: keep` so `helm uninstall` leaves the ManagedCluster registered. Terraform sets it from `acm_keep_managed_clusters_on_destroy`.
 
 ## Manual Helm
 
