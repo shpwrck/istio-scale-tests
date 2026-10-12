@@ -1,180 +1,125 @@
 # Churn / Convergence Test Suite
 
-Measure control-plane convergence time under simultaneous endpoint churn across clusters.
+Measures how fast the mesh converges under endpoint churn. The probe scales the
+churn-target deployments on one **source** cluster and times when the source istiod
+has synced every proxy and when each **remote** cluster sees the change. Remote
+clusters stay at base replicas, so the remote numbers are cross-cluster propagation only.
 
 ## Architecture
 
-> Diagram conventions (arrow styles, box colors) are shared across all suites — see
+> Diagram conventions are shared across suites — see
 > [`docs/scale-test-campaign/architecture.md`](../../docs/scale-test-campaign/architecture.md#diagram-conventions).
 
 ```mermaid
 graph TB
-    DRV["churn driver · scale all churn-target-N deployments<br/>1 → scale-to replicas, fired concurrently per iteration<br/>(default: 5 deployments, 1 → 5 replicas)"]
+    DRV["churn probe (002)<br/>scales churn-target-N on the source only<br/>base → scale-to, all deployments at t0"]
 
     subgraph SRC["source cluster"]
         direction TB
-        SP["local istiod x3<br/>poll /debug/syncz"]
+        CT["churn-target-N (scaled)"]
+        SP["istiod"]
         LSC["local sidecars"]
     end
-    subgraph RMT["remote cluster"]
+    subgraph RMT["remote cluster · churn targets stay at base"]
         direction TB
-        RP["remote istiod x3"]
-        WENV["watcher Envoy /clusters"]
+        RP["istiod"]
+        WENV["churn-watcher sidecar"]
     end
 
-    DRV -->|"Endpoint add / remove"| SP
-    SP -->|"local convergence — all proxies SYNCED<br/>poll /debug/syncz"| LSC
-    SP -->|"cross-cluster"| RP
-    RP -->|"remote EDS converged — control-plane only<br/>first remote pilot_xds_pushes type=eds"| WENV
-    WENV ==>|"remote endpoint reachable — data-plane healthy<br/>Envoy health_flags::healthy"| OUT["push amplification =<br/>(source + remote xDS pushes) / source triggers"]
+    DRV -->|"scale up / down"| CT
+    CT -->|"endpoint add / remove"| SP
+    SP -->|"xDS push"| LSC
+    CT -->|"cross-cluster endpoint watch"| RP
+    RP -->|"EDS push"| WENV
+    DRV -.->|"convergence_local_ms: /debug/syncz all SYNCED"| SP
+    DRV -.->|"convergence_remote_eds_ms: first EDS push"| RP
+    DRV -.->|"remote_endpoint_reachable_ms: /clusters"| WENV
 
-    classDef mesh fill:#ffffff,stroke:#5c6bc0,stroke-width:2px,stroke-dasharray:6 5,color:#000;
     classDef cluster fill:#eceff1,stroke:#90a4ae,color:#000;
-    classDef namespace fill:#ffebee,stroke:#e53935,color:#000;
     classDef controlplane fill:#e3f2fd,stroke:#1e88e5,color:#000;
     classDef dataplane fill:#e8f5e9,stroke:#43a047,color:#000;
     classDef harness fill:#f3e5f5,stroke:#8e24aa,color:#000;
-    classDef output fill:#fff8e1,stroke:#f9a825,color:#000;
     class DRV harness;
     class SRC,RMT cluster;
     class SP,RP controlplane;
-    class LSC,WENV dataplane;
-    class OUT output;
+    class CT,LSC,WENV dataplane;
 ```
 
-## What Gets Measured
+## What gets measured
 
-| Metric | How |
-|--------|-----|
-| Local convergence time | Time until all local proxies are SYNCED after scaling (poll istiod `/debug/syncz`). Cross-check with `source_push_triggers_delta` — a zero value means istiod hadn't processed the change yet. |
-| Remote endpoint reachable (`remote_endpoint_reachable_ms`) | **Data-plane reachability.** Time until remote sidecars report at least 1 new `health_flags::healthy` endpoint per deployment (poll watcher Envoy `/clusters`; threshold = `baseline + deployment_count`). `health_flags::healthy` requires the source pod to be **Ready** (scheduled + sidecar started), so this is a legitimate end-to-end churn-lifecycle number that **includes** pod scheduling and sidecar startup — not a pure control-plane signal. Analogous to propagation **P3**. (Was `convergence_remote_ms` before the EDS split.) |
-| Remote EDS converged (`convergence_remote_eds_ms`) | **Control-plane only.** Time to the **first** remote EDS push after t0 (`pilot_xds_pushes{type="eds"}` delta `>= 1`, summed across the remote's istiod pods). **Pod-boot-free** — answers "how fast does the remote control plane learn the churn and push EDS", the true cross-cluster xDS scaling signal. This times the first cross-cluster EDS push, **not** per-deployment fan-in: istiod debounces/coalesces concurrent scales into fewer than `deployment_count` pushes, so a per-deployment threshold would spuriously TIMEOUT a converged mesh. The counter is mesh-wide, so it does not disambiguate a concurrent unrelated EDS push (acceptable — in a churn run the scale event is the dominant in-window activity). Analogous to propagation **P2**. Churn scales replicas of existing deployments (no Service is created/deleted), so unlike propagation P2 there is **no** clean `pilot_services` registry-delta cross-check available. |
-| Push triggers delta (source) | `pilot_push_triggers` counter delta on the source cluster's istiod during the churn event |
-| Push triggers delta (remote) | `pilot_push_triggers` counter delta summed across all remote istiods |
-| xDS pushes delta (source) | `pilot_xds_pushes` counter delta on the source istiod (compare with triggers for coalescing ratio) |
-| xDS pushes delta (remote) | `pilot_xds_pushes` counter delta summed across all remote istiods |
-| Queue time p99 (source) | `pilot_proxy_queue_time` **delta-window** p99 on the source istiod — computed from pre/post histogram bucket subtraction, isolating only this churn event's queue times. Reported as a bucket range (e.g. `0-100`). |
-| Queue time p99 (remote) | `pilot_proxy_queue_time` delta-window p99, max across all remote istiods |
-| Connected proxies (source) | `pilot_xds` gauge on the source istiod — number of xDS-connected proxies at measurement time |
-| Connected proxies (remote) | `pilot_xds` gauge summed across all remote istiods |
-| Push time p99 (source) | `pilot_xds_push_time` delta-window p99 on the source istiod — time spent computing and sending each xDS push. Reported as a bucket range. |
-| Push time p99 (remote) | `pilot_xds_push_time` delta-window p99, max across all remote istiods |
-| Push amplification ratio | Derived: `(source_xds_pushes + remote_xds_pushes) / source_push_triggers`. Measures total mesh-wide push fan-out per source event — tracks whether adding clusters causes superlinear push growth. |
+One TSV row per iteration. istiod metrics are summed or merged across all istiod
+replicas. Remote times and p99s are the max across remote clusters; remote counters the sum.
 
-### Inter-iteration settling
+| Column | Meaning |
+|--------|---------|
+| `convergence_local_ms` | Source istiod reports every connected proxy SYNCED (`/debug/syncz`). |
+| `convergence_remote_eds_ms` | First EDS push on the remote istiod after t0 (`pilot_xds_pushes{type="eds"}`). Control plane only. |
+| `remote_endpoint_reachable_ms` | Every churn target on the remote watcher has more healthy endpoint weight than before t0: at least one new Ready source pod per deployment. Includes pod scheduling and sidecar start. |
+| `*_push_triggers_delta` | `pilot_push_triggers` increase during the iteration. |
+| `*_xds_pushes_delta` | `pilot_xds_pushes` increase (one per proxy connection per xDS type). |
+| `*_queue_time_p99_ms` / `*_push_time_p99_ms` | p99 of `pilot_proxy_queue_time` / `pilot_xds_push_time` for the iteration (histogram bucket bound). |
+| `*_connected_proxies` | `pilot_xds` gauge before scaling. |
+| `status` | See below. |
 
-After each scale-down, the probe waits for all proxies to reach SYNCED (via syncz polling) before starting the next iteration. This ensures scale-down push storms don't contaminate the next measurement window.
+On a multi-network mesh a remote sidecar reaches source pods through the east-west
+gateway: the gateway endpoint's weight, not the endpoint count, grows with the number of
+Ready source pods. The probe therefore sums healthy endpoint weight.
 
-## Prerequisites
+`status` values: `OK`; `TIMEOUT_LOCAL` / `TIMEOUT_REMOTE` (no convergence within
+`--timeout`); `POISONED_RESTART` (an istiod restarted mid-iteration, istiod columns are
+`N/A`); `SCRAPE_INCOMPLETE` (an istiod `/metrics` scrape failed, counters undercounted);
+`SETUP_FAILED` / `PROBE_FAILED` (placeholder for a failed iteration or sweep combo).
+The report averages `OK` rows only and shows `n_valid`/`n_total`.
 
-- `oc` or `kubectl`, `helm`, `jq`, `curl`
-- Multi-primary mesh deployed (see root README)
-- Kube contexts configured for each cluster
+The report's push amplification is `(source + remote xDS pushes) / source push triggers`.
+It grows with connected proxies, so compare it across mesh sizes, not against 1.
 
-## Quick Start
+## Quick start
+
+Needs `kubectl` or `oc`, `helm`, `jq`, `curl`, the deployed mesh (see the root README)
+and kube contexts for the mesh members (not the ACM hub).
 
 ```bash
-# 1. Deploy churn targets and watcher pods
-./tests/churn/001-setup-churn-test.sh --contexts cluster-001,cluster-002,cluster-003
+# 1. Deploy churn targets and a watcher on each mesh member
+./tests/churn/001-setup-churn-test.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 
-# 2. Run churn probe (scale 5 deployments from 1 to 5 replicas)
+# 2. Scale 5 deployments 1 -> 5 replicas on the source, 5 iterations
 ./tests/churn/002-run-churn-probe.sh \
-  --source-context cluster-001 --remote-contexts cluster-002 \
-  --iterations 5
+  --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --iterations 5
 
-# 3. View results
-./tests/churn/004-report-results.sh
+# 3. Summarize everything under tests/churn/results/
+./tests/churn/004-report-results.sh --format md
+
+# 4. Remove the test namespace
+./tests/churn/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
 
-## Sweep Across Mesh Sizes and Churn Intensities
+Add `--dry-run` to any script to see what it would do without changing the clusters.
+
+## Sweep
 
 ```bash
-# Sweep mesh sizes with default churn
-./tests/churn/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002,cluster-003 \
-  --mesh-sizes 1,2,3
-
-# Sweep churn intensities (5, 10, 20 deployments)
-./tests/churn/003-run-sweep.sh \
-  --contexts cluster-001,cluster-002 \
-  --churn-intensities 5,10,20
-
-# Dry-run
-./tests/churn/003-run-sweep.sh --dry-run
+./tests/churn/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --churn-intensities 5,10,20
 ```
 
-## Results Format
+For each mesh size (default `1..N`; the first context is the source) and each churn
+intensity (deployment count) the sweep runs setup, probe and cleanup. It writes the TSVs,
+`sweep-<run-id>.md` and `sweep-charts-<run-id>.md` to `tests/churn/results/sweep-<run-id>/`.
+A failed setup or probe becomes a placeholder row and the sweep moves on.
 
-TSV files in per-sweep subdirectories under `tests/churn/results/` (gitignored):
+## Settings
 
-```
-run_id  mesh_size  churn_intensity  base_replicas  scale_to  iteration  t0_epoch_ns  convergence_local_ms  remote_endpoint_reachable_ms  convergence_remote_eds_ms  source_push_triggers_delta  remote_push_triggers_delta  source_xds_pushes_delta  remote_xds_pushes_delta  source_queue_time_p99_ms  remote_queue_time_p99_ms  source_connected_proxies  remote_connected_proxies  source_push_time_p99_ms  remote_push_time_p99_ms  status
-```
-
-The remote convergence signal is **split into two columns** (mirroring the
-propagation suite's P2/P3 distinction):
-`remote_endpoint_reachable_ms` is the data-plane reachability time (Envoy
-`health_flags::healthy`, includes pod scheduling + sidecar start), and
-`convergence_remote_eds_ms` is the control-plane-only EDS-push time
-(time to the first `pilot_xds_pushes{type="eds"}` push after t0, delta `>= 1`,
-pod-boot-free). The column count is 21;
-the report (`004`) requires `NF >= 21` and prints a stderr warning when it
-encounters a pre-split (20-column) TSV, whose rows it skips.
-
-The preamble (`#`-comment lines above the header) records run metadata including
-`ISTIOD_REPLICAS=<n>` — the number of Running source istiod pods discovered at
-preflight (provenance for the per-pod fanout, PL2). Note: churn and
-churn-dataplane record this as a single source-context scalar; the propagation
-suite records a per-context CSV (`ctx=N,...`) because it fans out over the source
-**and** every remote context.
-
-The `status` column is one of: `OK`, `TIMEOUT_LOCAL`, `TIMEOUT_REMOTE`,
-`POISONED_RESTART` (a mid-window istiod restart — local or remote — was detected,
-so the istiod-side counter/histogram deltas are emitted as `N/A`),
-`SCRAPE_INCOMPLETE` (a per-pod `/metrics` scrape was empty/unreachable, so the
-summed counters / merged histograms are undercounted), or `SETUP_FAILED` /
-`PROBE_FAILED`. The last two are **placeholder rows** the sweep
-(`003-run-sweep.sh`) writes — one per `(mesh_size, churn_intensity)` combo — when
-setup or the probe exited non-zero before the probe could write any iteration row;
-they keep that combo visible in the report (a planned combo that silently vanished
-would be indistinguishable from never-planned). The report
-(`004-report-results.sh`) aggregates numeric columns over `status==OK` rows only
-and shows `n_valid`/`n_total` so the filter rate is visible (PL13/PL15); the
-placeholder rows are counted in `n_total`, excluded from `n_valid`.
-
-### Multi-replica istiod fanout
-
-The mesh runs a FIXED multi-replica istiod (HPA disabled). A single
-`kubectl port-forward svc/istiod` load-balances to one random replica, so a lone
-scrape sees only `~1/replicas` of the proxies/pushes. The probe instead
-port-forwards EVERY Running istiod pod per context (`tests/lib/fanout.sh`) and
-aggregates: `pilot_xds` (connected proxies) and the counter deltas
-(`pilot_push_triggers`, `pilot_xds_pushes`) are **summed** across replicas;
-`pilot_proxy_queue_time` / `pilot_xds_push_time` histogram buckets are
-**bucket-summed** across replicas before the delta/quantile; `/debug/syncz` is
-fanned out across all source pods (converged only when every replica reports 0
-stale); the `convergence_remote_eds_ms` poller fans out the
-`pilot_xds_pushes{type="eds"}` counter across each remote's istiod pods (summed)
-each tick (it reuses a fixed scrape prefix so each tick's per-pod `/metrics`
-bodies overwrite the prior tick's — disk stays bounded across the poll window).
-Restart detection uses a per-pod
-`process_start_time_seconds` signature (any pod's start advancing OR a pod-set
-change → `POISONED_RESTART`); a `POISONED_RESTART` row emits `N/A` for
-`convergence_remote_eds_ms` too (the remote EDS counter reset on restart). The
-probe requires only `>= 1` Running istiod pod per context.
-
-## Cleanup
-
-```bash
-./tests/churn/005-cleanup.sh --contexts cluster-001,cluster-002,cluster-003
-```
+Defaults live in `config/options.env` and flags override them: `CHURN_TEST_NAMESPACE`
+(`churn-test`), `CHURN_DEPLOYMENT_COUNT` (5), `CHURN_BASE_REPLICAS` (1),
+`CHURN_SCALE_TO_REPLICAS` (5, must exceed base), `CHURN_ITERATIONS` (5),
+`CHURN_TIMEOUT_SEC` (120), `CHURN_POLL_INTERVAL_MS` (250).
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `001-setup-churn-test.sh` | Deploy churn target workloads and watcher pods |
-| `002-run-churn-probe.sh` | Trigger scaling events and measure convergence |
-| `003-run-sweep.sh` | Orchestrate probes across mesh sizes and churn intensities |
-| `004-report-results.sh` | Generate summary statistics from TSV results |
-| `005-cleanup.sh` | Remove all churn-test resources |
+| `001-setup-churn-test.sh` | Deploy churn targets and the watcher on each context. |
+| `002-run-churn-probe.sh` | Scale the source, measure convergence, write one TSV row per iteration. |
+| `003-run-sweep.sh` | Run setup, probe and cleanup across mesh sizes and churn intensities. |
+| `004-report-results.sh` | Summarize TSVs as text, csv, md or charts. |
+| `005-cleanup.sh` | Delete the test namespace. |

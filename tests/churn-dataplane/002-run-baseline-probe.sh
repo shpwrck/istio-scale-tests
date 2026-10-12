@@ -37,15 +37,12 @@ QPS="${COEXEC_QPS:-200}"
 CONNECTIONS="${COEXEC_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${COEXEC_SETTLE_SEC:-10}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
-# istiod is reached via tests/lib/fanout.sh, which allocates its own per-pod port
-# block from FANOUT_PF_BASE (default 21014); COEXEC_ISTIOD_PF_PORT is no longer used.
 OUTPUT_FILE=""
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 APPEND=0
 DRY_RUN=0
-# Tuning-baseline provenance (PL2): the live mesh's tuning levers + sidecar egress
-# graph. The sweep (004-run-sweep.sh) queries them ONCE via tuning_baseline_state and
-# threads them in; standalone runs leave them "unknown".
+# Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
+# them once and passes them in; standalone runs record "unknown".
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 
@@ -62,7 +59,7 @@ Usage: $(basename "$0") [options]
   --qps N                  Target QPS (default: $QPS).
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle-sec N           Settle delay before measurement starts (default: $SETTLE_SEC).
-  --output-file FILE       TSV file to write/append to (default: tests/churn-dataplane/results/coexec-\$RUN_ID.tsv).
+  --output-file FILE       TSV file to write/append to (default: tests/churn-dataplane/results/churn-dataplane-\$RUN_ID.tsv).
   --output-dir DIR         Default results dir if --output-file not given.
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
@@ -136,13 +133,8 @@ done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 
-if command -v oc >/dev/null 2>&1; then
-	KUBECTL=(oc)
-elif command -v kubectl >/dev/null 2>&1; then
-	KUBECTL=(kubectl)
-else
-	die "neither oc nor kubectl found on PATH"
-fi
+KUBECTL=()
+resolve_kubectl KUBECTL
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
@@ -153,7 +145,6 @@ REMOTES=()
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ -z "$COMBO_ID" ]] && COMBO_ID="$RUN_ID"
 
-mkdir -p "$OUTPUT_DIR"
 [[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
 
 HARNESS_SHA="$(harness_sha)"
@@ -168,6 +159,7 @@ if ((DRY_RUN)); then
 	echo "RUN_ID=$RUN_ID  COMBO_ID=$COMBO_ID  HARNESS_SHA=$HARNESS_SHA"
 	exit 0
 fi
+mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # PL2: probe kube versions concurrently with 5s --request-timeout.
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
@@ -204,10 +196,8 @@ fi
 CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 [[ -n "$CLIENT_POD" ]] || die "no fortio-client pod found on $SOURCE_CTX (ns=$NS)"
 
-# Fan out a port-forward to EVERY Running istiod pod on the source context
-# (tests/lib/fanout.sh) for restart-detection and istiod-side xDS metrics.
-# ISTIOD_PF_PORT is no longer used directly — fanout allocates a collision-free
-# per-pod port block (source context = ctx_index 0).
+# Port-forward every Running istiod pod on the source context (tests/lib/fanout.sh)
+# for restart detection and istiod-side xDS metrics.
 PF_PIDS=()
 ISTIOD_PORTS=()
 ISTIOD_PODS=()
