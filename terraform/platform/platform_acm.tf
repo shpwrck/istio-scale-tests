@@ -112,7 +112,9 @@ resource "terraform_data" "acm_csv_cleanup" {
 }
 
 resource "time_sleep" "wait_acm_operator" {
-  depends_on      = [kubernetes_manifest.acm_subscription]
+  # Through the cleanup hook, so on destroy the CSV cleanup runs only after
+  # everything that needs the operator (MultiClusterHub, spokes) is gone.
+  depends_on      = [terraform_data.acm_csv_cleanup]
   create_duration = var.acm_install_operator ? "60s" : "0s"
 }
 
