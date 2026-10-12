@@ -1,6 +1,6 @@
 # Scale-test campaign — results summary (workaround pass, 2026-06-02/03)
 
-**Caveat up front:** this was the *workaround* run — istiod pinned to 5 replicas, controlplane reduced to **10×2** (not 10×3) and churn-dataplane to **3×5** for capacity (O5), and the mesh ran at **tiny scale relative to the infra** (see the Scale envelope below). So **trust the scaling _shapes_ and cross-cluster _overheads_, not the absolute magnitudes** — those characterize a small mesh, not the infra's capacity. Clean full-scale numbers come from the hardened re-run.
+**Caveat up front:** this was the *workaround* run — istiod pinned to 5 replicas, controlplane reduced to **10×2** (not 10×3) and churn-dataplane to **3×5** for capacity (O5), and the mesh ran at **tiny scale relative to the infra** (see the Scale envelope below). So **trust the scaling _shapes_ and cross-cluster _overheads_, not the absolute magnitudes** — those characterize a small mesh, not the infra's capacity. Clean full-scale numbers come from the hardened re-run: [2026-06-04 clean pass](2026-06-04-clean-pass-results.md). O-labels are defined in [`process-learnings.md`](../scale-test-team/process-learnings.md#observation-labels).
 
 ## Scale envelope
 

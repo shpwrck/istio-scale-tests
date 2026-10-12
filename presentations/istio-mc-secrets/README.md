@@ -37,7 +37,7 @@ Five hand-authored SVG animations. Each plays step-by-step as you press
 | B | cert-manager assembles `cacerts` | Hub root `Certificate` &rarr; `ClusterIssuer` &rarr; one intermediate `Certificate` per spoke &rarr; the four-key `cacerts` Secret (`ca-cert.pem`, `ca-key.pem`, `root-cert.pem`, `cert-chain.pem`) per cluster. |
 | C | ESO `PushSecret`: hub &rarr; each spoke | Hub-side `SecretStore` + `PushSecret` CRs shipping `cacerts` and `istio-remote-secret-{cluster}` Secrets into each spoke's `istio-system`, applying `istio/multiCluster=true`. |
 | D | How the remote secret drives discovery | istiod on cluster A reading the kubeconfig-shaped Secret in `istio-system`, watching cluster B's apiserver, and pushing cluster B endpoints into cluster A's sidecars via xDS. |
-| E | ACM &rarr; ManagedServiceAccount &rarr; Argo &rarr; ESO &rarr; kubeconfig | `ManagedCluster` registration &rarr; ACM `ManagedServiceAccount` mints SA + token on the spoke and mirrors back to hub &rarr; `GitOpsCluster` + ACM `Placement` causes Argo CD to write `{cluster}-application-manager-cluster-secret` &rarr; ESO `ExternalSecret` templates `kubeconfig-{cluster}` on the hub. |
+| E | ACM &rarr; ManagedServiceAccount &rarr; Terraform &rarr; ESO &rarr; kubeconfig | `ManagedCluster` registration &rarr; ACM `ManagedServiceAccount` `argocd-gitops` mints SA + token on the spoke and mirrors it back to the hub &rarr; Terraform (`terraform/scripts/create-argocd-cluster-secret.sh`) writes the Argo CD cluster Secret `{cluster}-argocd-gitops-cluster-secret` with that token &rarr; ESO `ExternalSecret` templates `kubeconfig-{cluster}` on the hub. |
 
 ## Repository layout
 
@@ -48,6 +48,9 @@ presentations/istio-mc-secrets/
   css/
     deck.css             # deck-local styles + visual language tokens
     step-controller.js   # tiny step-reveal helper for SVG diagrams (no animation libs)
+  scripts/
+    audit-text-overflow.js  # layout check: SVG text fits its box (needs playwright)
+    audit-line-overlap.js   # layout check: no connector line runs along a box border
   vendor/
     reveal.js/           # reveal.js 5.1.0, vendored. MIT licensed; see vendor/reveal.js/LICENSE
       dist/ plugin/notes/

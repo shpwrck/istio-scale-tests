@@ -625,8 +625,9 @@ data:
     PushSecret over Argo CD here because the data is sensitive — source of truth stays in real Secrets on
     the hub, never git, and a small operator copies it to each spoke.) Two source-Secret kinds on the hub:
     cacerts-X (assembled from cert-manager output, prior animation) and kubeconfig-X (we'll see how it's
-    produced next slide). ESO has a SecretStore per spoke authenticated using kubeconfig-X. Two kinds of
-    PushSecret then run: push-cacerts-X copies cacerts-X to spoke X as "cacerts". push-remote-secret-X is
+    produced next slide). ESO has a SecretStore per spoke authenticated using kubeconfig-X. The two that
+    matter here: push-cacerts-X copies cacerts-X to spoke X as "cacerts". (A third, push-kubeconfig-istio-X,
+    copies kubeconfig-X to spoke X itself.) push-remote-secret-X is
     more interesting — it reads kubeconfig-X but uses the v2 template feature to materialize a Secret named
     istio-remote-secret-X on the OTHER spoke, with label istio/multiCluster=true applied at template time.
     So kubeconfig-cluster-a crosses over to cluster-b, and vice-versa — the counter-intuitive bit worth
@@ -644,7 +645,7 @@ data:
   <h2>Building <code>kubeconfig-cluster-a</code></h2>
 
   <svg class="diagram" data-steps viewBox="0 0 1200 520" role="img"
-       aria-label="ACM ManagedCluster on the hub causes a klusterlet to register the spoke. ACM ManagedServiceAccount creates a ServiceAccount and token on the spoke and mirrors the token back into a Secret on the hub. ACM Placement plus GitOpsCluster cause Argo CD to materialize a cluster-application-manager-cluster-secret on the hub. ESO ExternalSecret reads that and templates a kubeconfig-cluster Secret on the hub.">
+       aria-label="ACM ManagedCluster on the hub causes a klusterlet to register the spoke. ACM ManagedServiceAccount argocd-gitops creates a ServiceAccount and token on the spoke and mirrors the token back into a Secret on the hub. Terraform uses that token to write the Argo CD cluster Secret cluster-argocd-gitops-cluster-secret on the hub. ESO ExternalSecret reads that and templates a kubeconfig-cluster Secret on the hub.">
     <defs>
       <marker id="arrow-acm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 Z" fill="var(--c-acm)"/>
@@ -685,12 +686,12 @@ data:
 
       <rect x="40" y="170" width="220" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="150" y="200" class="lbl" text-anchor="middle">ManagedServiceAccount</text>
-      <text x="150" y="220" class="lbl-c" text-anchor="middle">application-manager</text>
+      <text x="150" y="220" class="lbl-c" text-anchor="middle">argocd-gitops</text>
       <text x="150" y="240" class="lbl-s" text-anchor="middle" font-style="italic" style="font-size:13px;">(ACM CR — mints SA + token on spoke)</text>
 
       <rect x="860" y="170" width="310" height="80" rx="8" fill="#ffffff" stroke="var(--c-acm)" stroke-width="2"/>
       <text x="1015" y="195" class="lbl" text-anchor="middle">ServiceAccount + Token</text>
-      <text x="1015" y="215" class="lbl-c" text-anchor="middle">application-manager</text>
+      <text x="1015" y="215" class="lbl-c" text-anchor="middle">argocd-gitops</text>
       <text x="1015" y="237" class="lbl-s" text-anchor="middle" style="font-size:13px;">ns: open-cluster-management-agent-addon</text>
 
       <path d="M 260 210 L 860 210" stroke="var(--c-acm)" stroke-width="2" fill="none"
@@ -702,17 +703,17 @@ data:
       <text x="565" y="272" class="lbl-s" text-anchor="middle">mirrors token Secret back to hub</text>
     </g>
 
-    <!-- Step 2: GitOpsCluster + Placement -> Argo materializes cluster-application-manager-cluster-secret -->
+    <!-- Step 2: Terraform writes the Argo CD cluster Secret (<cluster>-argocd-gitops-cluster-secret) with the MSA token -->
     <g class="step" data-step="2">
       <rect x="40" y="295" width="270" height="100" rx="8" fill="#ffffff" stroke="var(--c-argo)" stroke-width="2"/>
-      <text x="175" y="322" class="lbl" text-anchor="middle">GitOpsCluster + Placement</text>
-      <text x="175" y="345" class="lbl-s" text-anchor="middle" font-style="italic">Placement selects clusters;</text>
-      <text x="175" y="362" class="lbl-s" text-anchor="middle" font-style="italic">GitOpsCluster binds Argo to it</text>
-      <text x="175" y="384" class="lbl-s" text-anchor="middle">selects cluster-a, cluster-b</text>
+      <text x="175" y="322" class="lbl" text-anchor="middle">Terraform</text>
+      <text x="175" y="345" class="lbl-c" text-anchor="middle" style="font-size:13px;">create-argocd-cluster-secret.sh</text>
+      <text x="175" y="364" class="lbl-s" text-anchor="middle" font-style="italic">uses the MSA token</text>
+      <text x="175" y="384" class="lbl-s" text-anchor="middle">one per spoke</text>
 
       <rect x="330" y="295" width="460" height="100" rx="8" fill="#ffffff" stroke="var(--c-argo)" stroke-width="2.5"/>
       <text x="560" y="322" class="lbl" text-anchor="middle">Argo CD cluster Secret</text>
-      <text x="560" y="350" class="lbl-c" text-anchor="middle" style="font-size:14px;">cluster-a-application-manager-cluster-secret</text>
+      <text x="560" y="350" class="lbl-c" text-anchor="middle" style="font-size:14px;">cluster-a-argocd-gitops-cluster-secret</text>
       <text x="560" y="375" class="lbl-s" text-anchor="middle">ns: openshift-gitops · server URL + CA + token</text>
 
       <path d="M 310 345 L 330 345" stroke="var(--c-argo)" stroke-width="2" fill="none"
@@ -743,9 +744,11 @@ data:
     Step 1: ACM ManagedCluster CR on the hub and the klusterlet on the spoke complete registration; then ACM
     ManagedServiceAccount (an addon) creates a ServiceAccount on the spoke, mints a bearer token, and mirrors
     the token Secret back to the hub. The ServiceAccount itself has no RBAC by default — a ClusterRoleBinding
-    is applied separately on the spoke to grant the needed permissions. Step 2: a GitOpsCluster CR plus an
-    ACM Placement tell Argo CD which managed clusters to register; for each one Argo CD writes a cluster Secret
-    in openshift-gitops named {cluster}-application-manager-cluster-secret. Step 3: an ESO ExternalSecret
+    is applied separately on the spoke to grant the needed permissions. Step 2: Terraform
+    (create-argocd-cluster-secret.sh) writes one Argo CD cluster Secret per spoke in openshift-gitops, named
+    {cluster}-argocd-gitops-cluster-secret, with the spoke's external API URL and the ManagedServiceAccount
+    token. The repo does not use ACM's GitOpsCluster here: it kept rewriting the server URL to an unreachable
+    address. ACM Placement still selects which spokes the ApplicationSets target. Step 3: an ESO ExternalSecret
     (chart hub-kubeconfig-from-argosecret) reads the server URL, CA data, and bearer token (or client cert/key)
     from that cluster Secret and templates a full kubeconfig into Secret kubeconfig-{cluster} on the hub.
     That last Secret is what the previous slide's per-spoke SecretStore authenticated with. Dependency chain closed.
