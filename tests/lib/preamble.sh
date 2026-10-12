@@ -4,7 +4,7 @@
 # Consumers: controlplane, dataplane, propagation, churn, churn-dataplane
 #
 # Exposes:
-#   harness_sha                                   -> `git describe --always --dirty --abbrev=7` or "unknown"
+#   harness_sha                                   -> `git -C "${ROOT:-.}" describe --always --dirty --abbrev=7` or "unknown"
 #   kube_versions <ctx> <kubectl_argv...>          -> kubectl server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
 #                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
@@ -32,7 +32,7 @@
 # shellcheck disable=SC2329
 harness_sha() {
 	local sha
-	sha="$(git describe --always --dirty --abbrev=7 2>/dev/null || true)"
+	sha="$(git -C "${ROOT:-.}" describe --always --dirty --abbrev=7 2>/dev/null || true)"
 	[[ -n "$sha" ]] || sha="unknown"
 	printf '%s\n' "$sha"
 }
@@ -133,10 +133,10 @@ infra_preamble_lines() {
 # an identical HARNESS_SHA but a hand-patched mesh would be silently non-comparable.
 #
 # Probed (all read-only `get`, each bounded by --request-timeout=5s):
-#   - root-ns Sidecar `default` in istio-system   (Profile 01 sidecar-scoping)
-#   - Telemetry `tuning-metrics` in istio-system   (Profile 07 telemetry-filtering)
-#   - Telemetry `tuning-access-log` in istio-system (Profile 08 access-log-filtering)
-#   - meshConfig.discoverySelectors on the Istio CR (Profile 02 discovery-selectors)
+#   - root-ns Sidecar `default` in istio-system   (sidecar egress scoping)
+#   - Telemetry `tuning-metrics` in istio-system   (client request metrics off)
+#   - Telemetry `tuning-access-log` in istio-system (access log on errors only)
+#   - meshConfig.discoverySelectors on the Istio CR (istiod namespace filter)
 #   - the live egress hosts on the root Sidecar     (the egress GRAPH that was applied)
 #
 # Emits two lines on stdout (the caller adds the leading "# "):

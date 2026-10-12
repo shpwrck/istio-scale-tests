@@ -25,11 +25,6 @@ template:
     path: charts/mesh-wiring-verify
     helm:
       releaseName: mesh-wiring-verify
-      # Generator placeholders must go in parameters; static values go in
-      # valuesObject so they are set by name.
-      parameters:
-        - name: clusterName
-          value: "{{clusterName}}"
       # 0 = consistency-only checks (no Terraform override).
       valuesObject:
         expectedMembers: 0

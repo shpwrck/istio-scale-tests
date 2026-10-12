@@ -28,3 +28,21 @@ valuesObject:
 {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end }}
+
+{{/*
+syncPolicy body shared by every child Application. retry matches the generated
+per-cluster Applications (charts/gitops-hub-ocm-placement-appset): auto-sync does
+not retry a failed sync of the same commit, e.g. a CRD that a lower wave has not
+installed yet.
+*/}}
+{{- define "gitops-hub-apps.syncPolicy" -}}
+automated:
+  prune: false
+  selfHeal: true
+retry:
+  limit: 10
+  backoff:
+    duration: 15s
+    maxDuration: 5m
+    factor: 2
+{{- end }}

@@ -1,5 +1,5 @@
 {{- if .Values.tuningBaseline.telemetryFiltering.enabled }}
-{{- /* Profile 07: disable client-side request metrics (tests/tuning/profiles/07-telemetry-filtering.yaml). */}}
+{{- /* Disable client-side request metrics. */}}
 apiVersion: telemetry.istio.io/v1
 kind: Telemetry
 metadata:
@@ -34,7 +34,7 @@ spec:
           disabled: true
 {{- end }}
 {{- if .Values.tuningBaseline.accessLogFiltering.enabled }}
-{{- /* Profile 08: access-log only server-side responses >= 400 (tests/tuning/profiles/08-access-log-filtering.yaml). */}}
+{{- /* Access-log only server-side responses >= 400. */}}
 ---
 apiVersion: telemetry.istio.io/v1
 kind: Telemetry

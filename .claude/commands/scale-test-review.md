@@ -37,7 +37,7 @@ If `$ARGUMENTS` is empty, prompt the user with a `AskUserQuestion` call asking w
 5. **Aggregate verdicts.** After all six reply, build a tally table (reviewer × verdict). Consolidate every `SUBSTANTIVE` item into a single Round-N+1 fix list. Note the verdict-line authority: a reviewer who voted APPROVE but listed substantive items has chosen to not block — treat their items as carry-overs you'll address opportunistically, NOT as Round-N+1 blockers.
 
 6. **Stop or loop.**
-   - **Stop condition**: zero SUBSTANTIVE items across all six reviewers in this round (i.e. all six voted APPROVE *or* the only items listed are flagged as already-addressed). When stopped, proceed to step 7.
+   - **Stop condition**: no reviewer returned `REQUEST_CHANGES` this round. Items listed under an APPROVE are carry-overs for the PR's future-work section. When stopped, proceed to step 7.
    - **Continue**: re-brief the implementer with the consolidated Round-N+1 fix list and go back to step 3.
    - **Cap**: 10 rounds. If you reach round 10 with substantive items still open, stop and report the unresolved set to the user — don't burn rounds in a flat trade.
 
