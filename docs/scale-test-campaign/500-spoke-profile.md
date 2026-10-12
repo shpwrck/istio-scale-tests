@@ -76,7 +76,7 @@ oc adm top pods -n openshift-gitops
 The mesh fan-out is quadratic. Expect roughly:
 
 - **500** hub intermediate CA Certificates.
-- **1500** hub PushSecrets from `hub-mesh-push-secrets` (cacerts, kubeconfig and remote-secret per member).
+- **1000** hub PushSecrets from `hub-mesh-push-secrets` (cacerts and remote-secret per member).
 - **250,000** remote-secret writes (500 remote-secret PushSecrets × 500 spoke SecretStores).
 - **500** `istio/multiCluster=true` remote secrets per spoke once fan-out completes.
 
@@ -142,7 +142,7 @@ done | sort | uniq -c
 oc adm top nodes
 oc adm top pods -n openshift-gitops
 
-# PushSecret count should be about 1500 once the mesh-push ApplicationSet is synced.
+# PushSecret count should be about 1000 once the mesh-push ApplicationSet is synced.
 oc -n external-secrets-operator get pushsecret --no-headers | wc -l
 
 # Spot-check remote-secret fan-out on early/middle/last spoke contexts.

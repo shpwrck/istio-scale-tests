@@ -75,7 +75,7 @@ graph TB
         ARGO["Argo CD<br/>app-of-apps + ApplicationSets"]
         ACM["ACM MultiClusterHub<br/>Placement to spoke selection"]
         CA["cert-manager<br/>root CA + ClusterIssuer<br/>+ per-cluster intermediates"]
-        ESO["External Secrets Operator<br/>PushSecrets: cacerts / kubeconfig / remote-secrets"]
+        ESO["External Secrets Operator<br/>PushSecrets: cacerts / remote-secrets"]
     end
 
     subgraph MESH["mesh1 — multi-primary, multi-network · 20 identical spokes (cluster-002 … cluster-021)"]

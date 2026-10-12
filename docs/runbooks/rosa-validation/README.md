@@ -28,8 +28,8 @@ OCM role, the user role and the `ManagedOpenShift-HCP-ROSA-*` account roles), so
   An AWS account's ROSA subscription can be linked to only one Red Hat account,
   and demo-platform sandbox accounts usually come pre-linked to someone else.
 - Terraform state: `terraform/rosa-hcp/terraform.tfstate` (local, gitignored) and the
-  platform's rosa-mode state (a separate workspace or checkout, never mixed with
-  kubeconfig-mode state). Inputs in `terraform.tfvars` / `rosa.tfvars` (gitignored).
+  platform's rosa-mode state in the `rosa` workspace of `terraform/platform` (the default
+  workspace holds the existing-cluster lab). Inputs in `terraform.tfvars` / `rosa.tfvars` (gitignored).
 - Cluster access: `terraform/rosa-hcp/kubeconfig` (mode 0600; exec plugin that logs in as
   `cluster-admin` with the Terraform-generated password).
 
@@ -46,7 +46,8 @@ export AWS_PROFILE=<profile>
 terraform/rosa-hcp/scripts/001-preflight.sh          # read-only; prints the fix for each failed check
 export RHCS_CLIENT_ID=ocm-cli RHCS_TOKEN="$(rosa token --refresh)"
 cd terraform/rosa-hcp && terraform init && terraform plan -out=rosa.tfplan && terraform apply rosa.tfplan
-cd ../platform && terraform plan -var-file=rosa.tfvars -out=platform.tfplan && terraform apply platform.tfplan
+cd ../platform && terraform init && terraform workspace select -or-create=true rosa   # never the lab's default
+terraform plan -var-file=rosa.tfvars -out=platform.tfplan && terraform apply platform.tfplan
 ```
 
 Sizing that fits and is cheap: the hub on m5.2xlarge, members on the default m7i.xlarge,
@@ -63,7 +64,7 @@ istiod is 3 × 4 CPU, which doesn't fit an m7i.xlarge pair).
 
 ```bash
 export AWS_PROFILE=<profile> RHCS_CLIENT_ID=ocm-cli RHCS_TOKEN="$(rosa token --refresh)"
-(cd terraform/platform && terraform destroy -var-file=rosa.tfvars)
+(cd terraform/platform && terraform workspace select rosa && terraform destroy -var-file=rosa.tfvars)
 terraform/rosa-hcp/scripts/002-pre-destroy-vpc-cleanup.sh       # removes load balancers the gateways created
 (cd terraform/rosa-hcp && terraform destroy)
 # If the VPCs fail with DependencyViolation: ROSA left a <cluster-id>-vpce-private-router

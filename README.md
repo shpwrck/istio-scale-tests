@@ -58,7 +58,8 @@ oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -
 ```
 
 End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
-from every member. Point `targetRevision` in the manifest at your branch if you're not on `main`.
+from every member. If you're not on `main`, set both `spec.source.targetRevision` and the
+`repo.revision` parameter in the manifest to your branch (and both repo URLs if you use a fork).
 
 ```bash
 oc --context <acm-hub-ctx> apply -f charts/mesh-verify-appset.yaml
@@ -72,7 +73,8 @@ oc --context <acm-hub-ctx> delete -f charts/mesh-verify-appset.yaml
 
 Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
 `SETUP_CONTEXTS`), never the hub. Each suite writes TSV data plus a markdown summary under its
-`results/` directory, and each script has `--help` and `--dry-run`.
+`results/` directory. Every script has `--help`, and scripts that change a cluster also accept
+`--dry-run`.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |

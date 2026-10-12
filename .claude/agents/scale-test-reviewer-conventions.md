@@ -27,7 +27,7 @@ You are the **repo-conventions auditor** on the 7-agent scale-test team for `shp
 10. **Pinned versions**: any new image tag in a chart must be a real version, not `latest` or `stable`; the version lives in `config/versions.env` and the harness passes `--set image.tag=$X` from 001.
 11. **PL7 (plural CSV on sweep scripts with singular alias + stderr deprecation warning)** when a multi-value flag is added to a sweep orchestrator.
 12. **Bash safety**: quoting of all variables; array expansion `"${arr[@]}"`; no inline YAML in bash (chart-based config).
-13. **Tools agents may assume** — only the tools AGENTS.md lists under that heading (bash 4+, oc/kubectl, helm, jq, curl, awk). Anything else (e.g. `shuf`) is a violation; flag for replacement with a bash/awk equivalent.
+13. **Tools agents may assume** — only the tools listed under `## Tools` in AGENTS.md. Anything else (e.g. `shuf`) is a violation; flag for replacement with a bash/awk equivalent.
 
 ## Output format — strict
 

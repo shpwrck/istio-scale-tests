@@ -54,6 +54,5 @@ Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/
 | `mesh-verify/` | `mesh-verify-appset.yaml` | Cross-cluster echo workload |
 | `istiod-monitor/` | manual `helm install` | ServiceMonitor + PrometheusRule for istiod |
 
-`mesh-verify-appset.yaml` is a standalone Application (`oc apply -f` / `oc delete -f`); set its
-repo URL and revision to your fork/branch. See
-[Verify the mesh install](../README.md#verify-the-mesh-install).
+`mesh-verify-appset.yaml` is a standalone Application (`oc apply -f` / `oc delete -f`); set both
+repo URLs and both revisions to your fork/branch. See [Verify](../README.md#verify).
