@@ -37,9 +37,11 @@ probe:
   failureThreshold: 2
   successThreshold: 1
 
+# oc is a large binary; its pages count against the memory limit. Below ~256Mi
+# every probe re-reads it from disk and the check overruns the probe timeout.
 resources:
   requests:
     cpu: 10m
-    memory: 32Mi
+    memory: 128Mi
   limits:
-    memory: 64Mi
+    memory: 256Mi
