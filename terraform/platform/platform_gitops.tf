@@ -73,7 +73,9 @@ resource "terraform_data" "gitops_csv_cleanup" {
 resource "time_sleep" "wait_gitops_operator" {
   count = local.gitops_enabled ? 1 : 0
 
-  depends_on      = [kubernetes_manifest.gitops_subscription]
+  # Through the cleanup hook, so on destroy the CSV cleanup runs only after the
+  # ArgoCD CR (whose finalizer the operator handles) and all apps are gone.
+  depends_on      = [terraform_data.gitops_csv_cleanup]
   create_duration = var.gitops_install_operator ? "60s" : "0s"
 }
 
