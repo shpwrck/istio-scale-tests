@@ -98,7 +98,7 @@ resource "helm_release" "argocd_config" {
   wait             = true
   timeout          = 300
 
-  values = [yamlencode(var.argocd_config_values)]
+  values = [yamlencode(var.argocd_config_values), yamlencode({ chartChecksum = local.chart_checksum["argocd-config"] })]
 
   set = concat(
     [
@@ -265,6 +265,8 @@ resource "helm_release" "acm_gitops_resources" {
   wait             = true
   timeout          = 300
 
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-openshift-gitops-resources"] })]
+
   set = [
     {
       name  = "gitopsNamespace"
@@ -352,7 +354,7 @@ resource "helm_release" "gitops_hub_app_of_apps" {
       revision = var.gitops_app_repo_revision
     }
     apps = var.gitops_app_overrides
-  })]
+  }), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
 
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }
@@ -380,7 +382,7 @@ resource "helm_release" "mesh_wiring_verify_appset" {
   wait             = true
   timeout          = 300
 
-  values = [file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml")]
+  values = [file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml"), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-ocm-placement-appset"] })]
 
   set = [
     {

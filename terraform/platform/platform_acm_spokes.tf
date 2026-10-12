@@ -78,6 +78,8 @@ resource "helm_release" "acm_managed_cluster" {
   wait             = true
   timeout          = 300
 
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-managed-cluster"] })]
+
   set = concat(
     [
       {

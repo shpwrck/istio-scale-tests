@@ -129,6 +129,8 @@ resource "helm_release" "acm_multicluster_hub" {
   wait             = true
   timeout          = 1200
 
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-multicluster-hub"] })]
+
   set = [
     {
       name  = "multiclusterHub.spec.localClusterName"
@@ -157,6 +159,8 @@ resource "helm_release" "acm_klusterlet_config" {
   take_ownership   = true
   wait             = true
   timeout          = 600
+
+  values = [yamlencode({ chartChecksum = local.chart_checksum["acm-klusterlet-config"] })]
 
   set = local.use_kubeconfig ? [
     {
