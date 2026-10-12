@@ -7,6 +7,24 @@ Each entry:
 - **Why** — what failure mode this prevents
 - **How to preempt** — concrete code/structure guidance for the implementer
 
+## Observation labels
+
+Code comments, PLs and the [campaign records](../campaigns/) cite these labels from the June 2026 campaigns.
+
+| Label | Meaning |
+|---|---|
+| O1 | Propagation P3 measured canary pod boot, not propagation. Fixed with a pre-warmed backer and a label flip at t0 (PL30). |
+| O2 | Thin P1 histogram quantiles at `--watcher-replicas 1`. Raise the watcher replica count for robust quantiles. |
+| O3 | Scrape-skew outliers at high port-forward counts. Fixed with the `FANOUT_MAX_SKEW_MS` ceiling (PL8). |
+| O4 | Churn `conv_remote` included scale-up pod readiness. Fixed by adding the control-plane-only `convergence_remote_eds_ms`. |
+| O5 | The istiod CPU request reserved node CPU the test pods needed (`FailedScheduling`). The request only affects scheduling, not measurements. |
+| O6 | Probe fault tolerance: record a failed probe or step as a row status and continue the sweep (PL32, PL40). |
+| O7 | Graded per-metric coverage: a partial scrape would N/A only the affected columns. Proposed, not implemented. |
+| O8 | Runtime pass: deploy once per mesh size and apply setup concurrently (PL34). |
+| O9 | Scale coverage: capacity and %-of-limit columns, the achieved-scale block, and the `SCALE_*` sizing knobs (PL35, PL36). |
+| O10 | A churn-dataplane cleanup timeout made the next mesh size's setup fail. Fixed by waiting out a Terminating namespace in setup (PL37). |
+| O11 | Namespace teardown still exceeds the cleanup bound at higher pod counts. Harmless since O10. |
+
 ---
 
 ## PL1 — Delta-window scraping for cumulative istiod metrics

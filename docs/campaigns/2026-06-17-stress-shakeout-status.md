@@ -1,48 +1,41 @@
-# Stress-test → 21-cluster go/no-go — autonomous run status
+# 2026-06-17 stress shakeout — findings log
 
-**Started:** 2026-06-17 (overnight autonomous run; operator asleep)
-**Goal:** prove the OSSM multi-primary **tuned** mesh + the test harness work end-to-end on
-real infra at small scale (4 clusters), then produce a **GO** readiness report for the
-21-cluster / 10k run — fixing anything (other than Istio itself) that blocks 20 clusters.
+A 4-cluster ROSA HCP stress test (1 hub + 3 mesh spokes, fixed 3 nodes each) that checked
+the tuned OSSM multi-primary mesh and the harness end to end before the 20-cluster / 10k run.
+Code comments cite the `BLOCKER #N` / `FINDING #N` labels defined here.
 
-## Standing mandate (operator-granted, full autonomy)
-- **Full authority to fix any test/chart/config, any size**, via branches + `/scale-test-review`.
-- **Phase 0:** if terraform fails and I can't fix it quickly → **destroy** the resources.
-- **Phase 1:** drive Argo to completion, **never abort**; the tuned mesh MUST deploy (not stock Istio).
-- **Phase 2:** fix what I can, report issues.
-- **Phase 3:** fix-forward small AND large issues with the scale-test-review panel.
-- **Phase 4:** produce a **GO**; anything non-Istio blocking 20 clusters gets fixed.
-- **Phase 5:** thorough wrap-up.
-- **End condition:** when I can go no further in any phase OR finish all 6 → **destroy the clusters.**
-- **Cost ceiling: $300.** Cluster burn ~$6–8/hr → ceiling ≈ 40h. Track elapsed below; destroy before breaching.
+> **Superseded remedy:** the `server-foundation` disable recommended below for BLOCKER #1 is
+> wrong — it breaks spoke imports. The 2026-06-22 run fixed the crash with MCE ≥ 2.11.3 and
+> nothing disabled; see [`2026-06-22-20c-10k-10k-results.md`](2026-06-22-20c-10k-10k-results.md#findings--fixes-codified).
+> BLOCKER #2, FINDING #3 and FINDING #5 fixes are on `main`.
 
-## Key facts / env
-- Repo: `/home/jskrzypek/repos/istio-scale-tests`. Bash cwd DRIFTS to claude-history-dashboard — anchor every op with absolute paths / `git -C`.
-- terraform v1.15.6; `terraform/rosa-hcp/` + `terraform/platform/` both init'd.
-- **RHCS_TOKEN** via `source ~/.bashrc` (must source in the SAME bash command; env doesn't persist across calls). AWS creds work.
-- Stress config: `terraform/rosa-hcp/terraform.tfvars` → cluster_count=4, fixed 3 nodes (min=max=3), manage_service_quotas=false. Production target (21, autoscale 4/24) preserved in comments.
-- Platform config: `terraform/platform/terraform.tfvars` → repo main, mesh_member_count=0, cluster_provider=rosa.
-- Contexts (expected): cluster-001 (hub/ACM/GitOps), cluster-002/003/004 (mesh spokes).
-- Tuned mesh confirmed: spoke-ossm tuningBaseline.{discoverySelectors,sidecar,telemetryFiltering,accessLogFiltering}.enabled all = true on main; profiles 04/05 unconditional.
-- Quota: 4 clusters fit current applied (EIP/NAT=5). The 3 pending (EIP/NAT/gw-ep→22) are NOT needed for 4.
-  **UPDATE 2026-06-17: ALL quota requests now APPROVED + APPLIED in us-east-2 (verified actual applied
-  values, not just request status): Running On-Demand Standard vCPUs=4000, EC2-VPC Elastic IPs=22, NAT
-  gateways/AZ=22, Gateway VPC endpoints/Region=22, Internet gateways/Region=22, VPCs/Region=22. Nothing
-  pending. The infra-quota gate for the 21-cluster/10k production run is CLEARED — it is no longer a
-  blocker (and is not a script-hardening item).**
+## Rig
+- `terraform/rosa-hcp`: cluster_count=4, fixed 3 nodes (min=max=3), manage_service_quotas=false.
+- `terraform/platform`: mesh_member_count=0 (all spokes), cluster_provider=rosa.
+- Contexts: cluster-001 (hub: ACM + GitOps), cluster-002/003/004 (mesh spokes).
+- Tuned mesh: spoke-ossm tuningBaseline.{discoverySelectors,sidecar,telemetryFiltering,accessLogFiltering}.enabled all true; profiles 04/05 unconditional.
+- AWS quotas for the 21-cluster run (us-east-2), all approved and applied: On-Demand Standard vCPUs=4000,
+  EC2-VPC Elastic IPs=22, NAT gateways/AZ=22, Gateway VPC endpoints/Region=22, Internet gateways/Region=22,
+  VPCs/Region=22.
 
-## Phase tracker
-| Phase | State | Gate / exit criterion | Evidence |
-|---|---|---|---|
-| 0 Cluster bring-up | **DONE** ✓ | 4 clusters Ready, 3 nodes each, contexts work, kubeconfig exported | apply exit 0; cluster-001..004 all nodes=3 ready=3; kubeconfig ~/.kube/rosa-config (contexts cluster-001..004) |
-| 1 Platform + tuned mesh (GitOps) | **MOSTLY DONE** (via bypass) | tuned istiod up on 3 spokes; cross-cluster trust pending | Platform applied (ACM 2.16.2, GitOps 1.20.4, 4 managed clusters AVAILABLE). app-of-apps BLOCKED by openapi bug (#1). Deployed tuned mesh via spoke ApplicationSets directly: operator/namespaces/ossm/ingress-gw/east-west-gw all Synced+Healthy on cluster-002/003/004. VERIFIED TUNED: Istio state=Healthy, 5 istiod replicas, discoverySelectors (2 selectors), istiod 2cpu/4Gi, 3 Sidecar CRs (root+2 gw-exempt), 2 Telemetry CRs, sidecar 100m. Gateways: ingress=1 eastwest=2 per spoke. REMAINING: shared CA (cacerts) + remote secrets for cross-cluster (hub CA/ESO chain is Argo-blocked → doing it directly). |
-| 2 Mesh verification | **DONE** ✓ | mesh-verify echo returns ≥2 distinct clusters (cross-cluster via east-west, peering off); istioctl remote-clusters OK | Control-plane: all 3 spokes see other 2 SYNCED. Data-plane: after fixing Blocker #2 (network labels + EW→LoadBalancer), in-mesh curl of mesh-verify-echo from cluster-002 returned EVEN 6/6/6 across cluster-002/003/004. Cross-cluster east-west routing (peering off, public NLB :15443 AUTO_PASSTHROUGH) PROVEN. cross-network-gateway CR present. |
-| 3 Harness shakeout | **IN PROGRESS** (resumed 2026-06-17 ~12:00Z after workstation crash) | all 5 suites complete + valid reports; hardened items exercised (30s scrape, PL37 ns-wait, tuning preamble) | controlplane sweep crashed mid-combo-6 (50-svc); see FINDING #3. Infra re-verified healthy post-crash (4 clusters ready, mesh Healthy istiod 5/5→3/3 on all 3 spokes after rig-align); rosa/OCM auth re-established via RHCS_TOKEN. **Capped controlplane sweep RELAUNCHED 2026-06-17 ~12:41Z** (mesh-sizes 1,2,3 × service-counts 10,40 = 6 combos, settle 60s) — running. Other 4 suites pending. |
-| 4 Readiness audit (multi-agent) | **DONE ✓ 2026-06-17** | GO report; non-Istio blockers fixed; tfvars/config deltas for 21x10k listed | 6-lens scale-test-reviewer panel run against the harness using shakeout data. Prioritized backlog below ("## Phase 4 readiness audit"). FINDING #5 FIXED (commit 58686fa). |
-| 5 Wrap + destroy | **DONE ✓ — rig fully destroyed 2026-06-17** | status report, memory updated, clusters destroyed | Sample campaign report committed (`5e7a3ba`) + PR #68. Destroy was LAUNCHED then **ABORTED mid-refresh** (platform timed out in refresh→wrapper started rosa-hcp refresh; TaskStop'd before ANY deletion). Verified: all 4 clusters ready, 3 nodes + istiod 3/3 per spoke, ACM+GitOps+app-controller alive — NOTHING destroyed. Orphaned tf locks cleared. **Reason: BLOCKER #1 (ArgoCD↔ACM OpenAPI) fix verification REQUIRES this live hub (ACM/MCE + OpenShift GitOps) to reproduce the LoadOpenAPISchema crash — can't be tested offline.** Burn RESUMED (~$6-8/hr). Re-run destroy when BLOCKER #1 work is done (force-unlock not needed; locks cleared). |
+## Phase summary
+| Phase | Result | Evidence |
+|---|---|---|
+| 0 Cluster bring-up | DONE | 4 clusters Ready, 3 nodes each, kubeconfig exported. |
+| 1 Platform + tuned mesh (GitOps) | DONE via bypass | ACM 2.16.2, GitOps 1.20.4, 4 managed clusters AVAILABLE. app-of-apps blocked by the openapi bug (BLOCKER #1), so the tuned mesh was deployed through the spoke ApplicationSets directly: operator/namespaces/ossm/ingress-gw/east-west-gw Synced+Healthy on cluster-002/003/004. Verified tuned: Istio Healthy, 5 istiod replicas, discoverySelectors (2 selectors), istiod 2cpu/4Gi, 3 Sidecar CRs (root + 2 gateway exemptions), 2 Telemetry CRs, sidecar 100m. Gateways: ingress=1, eastwest=2 per spoke. Shared CA (cacerts) and remote secrets applied directly (hub CA/ESO chain was Argo-blocked). |
+| 2 Mesh verification | DONE | All 3 spokes see the other 2 SYNCED. After the BLOCKER #2 fix (network labels + EW LoadBalancer), in-mesh curl of mesh-verify-echo from cluster-002 returned an even 6/6/6 across cluster-002/003/004: cross-cluster east-west routing proven with VPC peering off (public NLB :15443 AUTO_PASSTHROUGH). |
+| 3 Harness shakeout | DONE (capped) | Controlplane capped to mesh-sizes 1,2,3 × service-counts 10,40 (FINDING #3); see results below and FINDING #4/#5. |
+| 4 Readiness audit | DONE | 6-lens scale-test-reviewer panel; prioritized backlog below. |
+| 5 Wrap + destroy | DONE | Rig destroyed (see Teardown). |
 
-## Cost/time log
-- T0 apply start: ~01:3x UTC 2026-06-17. (update elapsed + est cost each phase)
+## Shakeout results (3 mesh spokes)
+- **controlplane** (`sweep-20260617T124130Z`): scale envelope 3 clusters / 40 svc per cluster / 120 services /
+  360 endpoints / 57 measured proxies; SLA verdict CAUTION (headroom not verified: metrics API gap, FINDING #4).
+  istiod CPU 537 → 586 → 608m by mesh size.
+- **propagation:** local xDS ~2.0s, remote EDS ~2.0s, remote sidecar (P3) 2.2 → 2.4s avg / p99 3.2 → 4.5s,
+  rising with mesh size. Histogram `conv_p50/p99` had n_valid=0 (FINDING #5).
+- **dataplane:** local ~2.3–3.2ms, remote ~3.4–4.5ms.
+- **churn:** push amplification ~0.3–0.4.
 
 ## Decisions / issues log
 - **BLOCKER #1 (Phase 1, MAJOR — must fix for 21-cluster GO): ArgoCD↔ACM openapi crash.**
@@ -213,11 +206,11 @@ real infra at small scale (4 clusters), then produce a **GO** readiness report f
   no rig NAT/EIP. **Rig billable footprint = $0.** Platform tf state cleaned to just the rosa remote-state data
   source (the 2 acm k8s-manifest entries state-rm'd — resources gone with the cluster).
 - ⚠️ **BILLING FLAG (NOT this repo's terraform — operator decision):** a CloudFormation stack
-  `rosa-network-stack-819720301660` (tags `service=ROSA`, `rosa_hcp_policies=true`) owns VPC
-  `vpc-08562fee0fa287c1d` (10.0.0.0/16) with a **NAT gateway (`nat-09c9452dca5612a86`) + 5 Interface VPC
+  `rosa-network-stack-<aws-account-id>` (tags `service=ROSA`, `rosa_hcp_policies=true`) owns VPC
+  `<vpc-id>` (10.0.0.0/16) with a **NAT gateway (`<nat-gateway-id>`) + 5 Interface VPC
   endpoints = ~$0.10/hr billable**. This is the ROSA-HCP account network stack (from `rosa create network` /
   account setup), separate from the per-cluster rig VPCs. NOT deleted (could be intentional/shared). If
-  abandoned, remove via `aws cloudformation delete-stack --stack-name rosa-network-stack-819720301660`.
+  abandoned, remove via `aws cloudformation delete-stack --stack-name rosa-network-stack-<aws-account-id>`.
 
 ## Phase 4 readiness audit — prioritized 20c/10k GO backlog (6-lens panel, 2026-06-17)
 Verdict: **NO-GO until the P0s below are codified.** The probe logic is sound and the harness is well-hardened
@@ -280,7 +273,7 @@ client retry budget docs.
 - The campaign sample report (PR #68) was CLOSED (too many data gaps to keep in-repo).
 
 **REMAINING for the real run (cannot be codified offline — runtime/decision items):**
-1. **BLOCKER #1 — disable `server-foundation` at install is the PRIMARY remedy** (live-proven + deep-research-
+1. **BLOCKER #1 — disable `server-foundation` at install is the PRIMARY remedy** (superseded — see the note at the top) (live-proven + deep-research-
    corroborated 2026-06-21; see the dated section below). MCE-version selection is the BACKSTOP only, and the
    2026-06-21 research pass came back **UNRESOLVED** for a concrete fixed `ACM_MCE_VERSION` — no errata found —
    so do NOT count on a version bump; leave `ACM_MCE_VERSION` documented-but-unset and rely on the disable.
@@ -295,6 +288,8 @@ client retry budget docs.
 5. Flip `terraform/rosa-hcp/terraform.tfvars` cluster_count 4→21 + autoscale 4/24; platform mesh_member_count→20.
 
 ## 2026-06-21 — BLOCKER #1 deep-research corroboration (multi-source, adversarially verified)
+> Superseded by the 2026-06-22 run: disabling `server-foundation` breaks spoke imports (see the note at the top).
+
 Ran the `deep-research` workflow (98-agent fan-out: search → fetch 15 sources → 3-vote refutation → cited
 synthesis) against the ACM/MCE `/openapi/v2` poison, WITHOUT giving the panel our live-test memory. It
 independently reached the same conclusion as our live hub test, raising confidence:
@@ -317,35 +312,3 @@ independently reached the same conclusion as our live hub test, raising confiden
 - **Net:** BLOCKER #1 de-risked to "very likely correct, pending one ROSA-HCP-at-install end-to-end
   confirmation pass" (item #4 above). The fix stays codified (`charts/acm-multicluster-hub` disabledComponents,
   TF `var.acm_disabled_components`, `terraform/platform/scripts/001-openapi-preflight.sh`).
-
-## Repo fixes codified during the resume (working tree on `claude/scale-test/calib-metrics-timeout-ns-wait`, NOT yet committed)
-- `charts/spoke-east-west-gateway/values.yaml`: `service.type` NodePort → **LoadBalancer** (BLOCKER #2 durable
-  fix; matches verified-live working NLB; resolves the `*-east-west-gateway` Argo apps' `OutOfSync` drift).
-  No homelab points at this repo any more, so the chart *default* is now the ROSA-correct value.
-- `charts/spoke-ossm/values.yaml`: istiod `pilot.replicaCount` 5 → **3** (FINDING #3; matches 20c/10k plan +
-  verified-live). NOTE: live istiod=3 is currently held by the `spoke-ossm` ApplicationSet helm-param override
-  (apps track `main`, which still has 5) — keep that override until this lands on `main`, THEN drop it.
-- `.gitignore`: ignore `/.bin/` (stray 103MB istioctl).
-- Both chart renders validated offline with `helm template` (LoadBalancer + replicaCount:3, no errors).
-
-## Deferred deliverable (user-requested 2026-06-17): sample campaign report, COMMITTED
-- After the 5-suite shakeout completes + reports verified, ASSEMBLE a sample campaign report and COMMIT it.
-- File: `docs/campaigns/2026-06-17-stress-shakeout-results.md` (matches existing `YYYY-MM-DD-<name>-results.md`).
-- Follow `docs/campaigns/TEMPLATE.md` EXACTLY: §"Scale envelope" first (1 mesh topology, 2 control-plane
-  provisioning & headroom, 3 workload/throughput axis), one-line Scale verdict up front, Customer SLA
-  checklist. Template rule: "Generated, not hand-transcribed" → assemble from the suites' auto-generated
-  artifacts (`scale-envelope-*.md`, `sweep-charts-*.md`, sweep summaries), not invented prose.
-  Copy key charts into `docs/campaigns/charts/` per convention.
-- Data sources (all on disk under tests/*/results/, gitignored): controlplane envelope (3c/40svc/120/360/57px,
-  CAUTION), dataplane latency (local~2.3-3.2ms / remote~3.4-4.5ms), propagation (P3 sidecar 2.2→2.4s),
-  churn (push amplification ~0.3-0.4, src/rmt pushes). Honestly note rig limits (4-cluster fixed-3-node,
-  cannot reach 10k) + convergence-histogram caveat (FINDING #5A). BUILD BEFORE destroy (report embeds the
-  numbers/charts; raw results dirs are NOT committed). User authorized the commit.
-  **DONE 2026-06-17: committed as `5e7a3ba` on branch claude/scale-test/calib-metrics-timeout-ns-wait**
-  (docs/campaigns/2026-06-17-stress-shakeout-results.md + 5 charts under docs/campaigns/charts/). Local
-  commit only — NOT pushed/merged. The 3 chart-default fixes + STRESS_TEST_STATUS.md remain uncommitted.
-
-## Resume instructions
-Read this file. Check bg tasks. Verify current cluster state with
-`terraform -chdir=/home/jskrzypek/repos/istio-scale-tests/terraform/rosa-hcp output` and
-`oc get managedcluster` on the hub. Continue from the first non-DONE phase.

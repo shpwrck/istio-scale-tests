@@ -1,6 +1,6 @@
 ---
 name: istio-scale-tests
-last_updated: 2026-05-29
+last_updated: 2026-10-12
 ---
 
 # istio-scale-tests Strategy
@@ -28,13 +28,13 @@ A full-lifecycle harness — provision, test, tune, report — where users can e
 
 ### Provisioning
 
-Automated cluster and mesh standup from zero — the target user is evaluating greenfield deployments and usually has no existing infrastructure to test on.
+Automated cluster and mesh standup from zero (ROSA HCP), or bring existing OpenShift clusters through a kubeconfig (`cluster_provider = "kubeconfig"`).
 
 _Why it serves the approach:_ The harness can't be full-lifecycle if the user has to manually build clusters before they can start.
 
 ### Tests
 
-Parameterized test suites covering scaling dimensions: xDS propagation, control-plane resources, data-plane latency, churn convergence.
+Parameterized test suites covering scaling dimensions: xDS propagation, control-plane resources, data-plane latency, churn convergence, and churn under data-plane load, plus a tuning suite that applies profiles and compares their results.
 
 _Why it serves the approach:_ The suites encode subject matter expertise about what to measure and how — knowledge the evaluating architect wouldn't have themselves.
 
@@ -53,4 +53,4 @@ _Why it serves the approach:_ Without clear reports, test results stay locked in
 ## Not working on
 
 - Ambient mesh support
-- Integration with external observability products (Prometheus, OpenTelemetry, Kiali)
+- Integration with external observability products (OpenTelemetry, Kiali); Prometheus support is limited to the optional `charts/istiod-monitor` ServiceMonitor and PrometheusRule

@@ -5,7 +5,9 @@ deferred. All five suites ran end-to-end against the live 10-spoke multi-primary
 **full workload** (controlplane 10×3, churn-dataplane 5×5) — enabled by fixing the O5 istiod
 CPU over-reservation that forced the workaround pass down to reduced sizing.
 
-Execution log: [`2026-06-04-clean-pass-status.md`](2026-06-04-clean-pass-status.md).
+Per-suite sweep tables: [`2026-06-04-clean-pass-sweep-detail.md`](2026-06-04-clean-pass-sweep-detail.md).
+Charts: [`charts/`](charts/) (propagation, churn, controlplane, dataplane, churn-dataplane).
+O-labels are defined in [`process-learnings.md`](../scale-test-team/process-learnings.md#observation-labels).
 
 ---
 
@@ -20,7 +22,7 @@ Execution log: [`2026-06-04-clean-pass-status.md`](2026-06-04-clean-pass-status.
 | Workload replicas / service | 3 | controlplane header |
 | **Total services in mesh** | 100 | derived |
 | **Total endpoints in mesh** | ~300 | derived (10×10×3) |
-| **Connected proxies (measured peak)** | ~20 per istiod; ~224 summed-remote (churn) | controlplane `connected_proxies max`; churn `Remote connected proxies` |
+| **Connected proxies (measured peak)** | ~20 per istiod; 216 remote (churn, mesh 10) | controlplane `connected_proxies max`; churn `rmt_proxies` |
 | Per-proxy config size | **3.9 MB** (no scoping) → **0.5 MB** (namespace/explicit) — 87% reduction | controlplane `cfg_dump_avg` |
 | Sidecar scoping | none / namespace / explicit (all three swept) | controlplane header |
 | Istio version | v1.28.5 (OSSM, Sail operator `servicemesh-operator3`) | sweep header |
@@ -54,7 +56,7 @@ Execution log: [`2026-06-04-clean-pass-status.md`](2026-06-04-clean-pass-status.
 
 ### Scale verdict — one line, up front
 
-> Peak mesh carried **~20 connected proxies per istiod (~224 summed-remote) / ~300 endpoints
+> Peak mesh carried **~20 connected proxies per istiod (216 remote in churn) / ~300 endpoints
 > per cluster / 3.9 MB config per proxy (no scoping)**; istiod ran at **~4.3 % of its 8Gi mem
 > limit** and ~400 m CPU, worker nodes at **2–15 % CPU** → **still under-scaled relative to the
 > infra (istiod barely stressed) → trust the scaling _shapes_ and cross-cluster _overheads_,
@@ -68,7 +70,7 @@ Execution log: [`2026-06-04-clean-pass-status.md`](2026-06-04-clean-pass-status.
 | Suite | Sweep | Status | Headline |
 |---|---|---|---|
 | propagation | `sweep-20260604T024318Z-1085945` | ✅ 10/10, 0 err | **P1 (local push) & P2 (remote EDS) flat ~2.0–2.2 s across mesh 1→10**; P2 tracks P1 (fanout solid); restarted=0; skew 7–34 ms. Cleaner than workaround pass (no `TIMEOUT_P3`, no skew outlier) — O1 P3-prewarm fix now active. |
-| churn | `sweep-20260604T043213Z-1465754` | ✅ 10/10, 0 err | Remote xDS ~2632 ms avg; push amplification ~0.6; connected proxies scale 8→28 src / 64→224 remote with mesh size. set-e abort gone (#31). |
+| churn | `sweep-20260604T043213Z-1465754` | ✅ 10/10, 0 err | Local convergence 2.4→3.7 s; remote reach 7.8–12.0 s; remote EDS 3.0–4.9 s; push amplification 0.1–1.1; connected proxies src 24–36 / remote 28→216 with mesh size (values from the sweep table). set-e abort gone (#31). |
 | controlplane | `sweep-20260604T072535Z-51665` | ✅ 30/30, 0 err | **Full 10×3, 0 FailedScheduling — O5 resolved.** Sidecar scoping cuts per-proxy config **3.9 MB → 0.5 MB (87 %)**; istiod cpu 310–402 m / mem 340–354 Mi; convergence p99 100–500 ms (none) vs 0–100 ms (scoped); 0 restarts. |
 | dataplane | `sweep-20260604T114908Z-831116` | ✅ 40, 100 % `pct_200` | **Cross-cluster overhead ~1 ms p50** (local ~2.4–2.8 ms vs remote ~2.8–3.6 ms), flat across mesh 1→10; modest p99 tail growth. |
 | churn-dataplane | `sweep-20260604T170554Z-2030208` (PR #50 worktree) | ✅ 30/30, all `valid_runs=1` | **Δp99 under churn 10.7–20.9 ms** (baseline p99 3–8 ms → churn p99 17–25 ms); rises with churn rate, flat-ish across mesh size. **Re-run on the PR #50 fix** — see O10. |
@@ -81,24 +83,19 @@ Execution log: [`2026-06-04-clean-pass-status.md`](2026-06-04-clean-pass-status.
 
 ---
 
-## Observations & follow-ups (for the morning)
+## Observations
 
-- **O5 — RESOLVED this pass** (istiod CPU request 1→250m). The fix is currently applied **live on
-  the clusters only** (via Istio CR patch, GitOps disabled). To make it durable, land the same
-  change in `charts/spoke-ossm/values.yaml` `pilot.resources.requests.cpu`. **Action: decide
-  whether to commit the 250m default.**
-- **O10 — churn-dataplane cleanup-cascade — FIX READY, NOT MERGED.** Root cause + fix in **PR #50**
-  (`claude/scale-test/churn-dataplane-cleanup-cascade`, 7-agent review, 6/6 approved). The clean
-  churn-dataplane data above was produced from that branch's worktree. **Action: review & merge
-  PR #50**, then this campaign's churn-dataplane numbers match `main`.
+- **O5 — resolved this pass** (istiod CPU request 1→250m), applied live via the Istio CR patch.
+  The chart default later moved to 4 CPU / 16Gi for production-sized clusters.
+- **O10 — churn-dataplane cleanup cascade.** Fixed in PR #50 (merged); the clean churn-dataplane
+  data above was produced from that branch.
 - **O11 — cleanup still exceeds 240s at scale (NEW, non-fatal).** Even with PR #50, the per-mesh-size
   namespace teardown logs `CLEANUP_TIMEOUT` at ms4–10. PR #50's fix A (setup waits out the
   Terminating ns) makes this **benign** — no data lost — but the teardown itself is genuinely slow
-  at higher pod counts (more sidecars × more clusters, finalizer-bound). **Follow-up: investigate
-  the slow ns finalizer / consider a higher bound or parallel teardown** as a `/scale-test-review`.
+  at higher pod counts (more sidecars × more clusters, finalizer-bound).
 - **Metadata gaps (minor):** controlplane O9 fields (`node allocatable`, `istiod limit`, `% of
-  limit`) and churn-dataplane `ISTIOD_REPLICAS` recorded `unknown` — the `SCALE_*` instrumentation
-  is default-off. Headroom numbers in this doc were filled by hand from `oc adm top`.
+  limit`) and churn-dataplane `ISTIOD_REPLICAS` recorded `unknown` — a preamble write-path bug,
+  since fixed (PL36). Headroom numbers in this doc were filled by hand from `oc adm top`.
 - **Still under-scaled** (istiod ~4 % of mem limit). For a run that actually stresses the control
   plane, the workload needs to grow ~20× (more services/endpoints), or the cluster shrink. The
   *shapes* and *cross-cluster overheads* here are trustworthy; the absolute magnitudes characterize
