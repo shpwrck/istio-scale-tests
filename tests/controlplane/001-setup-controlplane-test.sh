@@ -246,10 +246,12 @@ fi
 
 # Sidecar egress-coverage precondition. With NAMESPACE_COUNT > 1 the suite creates
 # ${NS}-0, ${NS}-1, ... but the root Sidecar's egress hosts match namespaces exactly
-# ("controlplane-test/*" does not cover "controlplane-test-0/*"), so uncovered
-# namespaces would silently lose egress. Fail fast instead. Read-only, live-queried,
+# ("controlplane-test/*" does not cover "controlplane-test-0/*"), so with scoping
+# `none` each proxy would silently see only its own namespace. Fail fast instead.
+# `namespace`/`explicit` scoping deploys its own Sidecar for every workload, which
+# replaces the root Sidecar, so the check does not apply. Read-only, live-queried,
 # skipped in --dry-run.
-if ! ((DRY_RUN)) && ((NAMESPACE_COUNT > 1)); then
+if ! ((DRY_RUN)) && ((NAMESPACE_COUNT > 1)) && [[ "$SIDECAR_SCOPING" == none ]]; then
 	echo "Sidecar egress-coverage precondition (namespaceCount=$NAMESPACE_COUNT > 1)..."
 	for ctx in "${CONTEXTS[@]}"; do
 		# Live root-Sidecar egress hosts (space-joined "<ns>/<dns>" entries), same
@@ -282,7 +284,7 @@ if ! ((DRY_RUN)) && ((NAMESPACE_COUNT > 1)); then
 		done
 		unset _covered_ns
 		if ((${#missing[@]})); then
-			die "context $ctx: the deployed root Sidecar egress allow-list does NOT cover these controlplane-test namespaces: ${missing[*]}. egressHosts namespace parts are EXACT matches (\"controlplane-test/*\" does NOT cover \"controlplane-test-0/*\"). Add an explicit \"<ns>/*\" entry for each to charts/spoke-ossm/values.yaml tuningBaseline.sidecar.egressHosts (and re-sync the mesh), or run with --namespace-count 1. Current egress hosts: ${hosts}"
+			die "context $ctx: the deployed root Sidecar egress allow-list does NOT cover these controlplane-test namespaces: ${missing[*]}. egressHosts namespace parts are EXACT matches (\"controlplane-test/*\" does NOT cover \"controlplane-test-0/*\"). Add an explicit \"<ns>/*\" entry for each to charts/spoke-ossm/values.yaml tuningBaseline.sidecar.egressHosts (and re-sync the mesh), or run with --namespace-count 1 or --sidecar-scoping namespace|explicit. Current egress hosts: ${hosts}"
 		fi
 		echo "  $ctx: all $NAMESPACE_COUNT generated namespaces covered by the Sidecar egress allow-list — OK"
 	done
@@ -334,15 +336,25 @@ if ! ((DRY_RUN)); then
 	echo ""
 fi
 
-# Wait until every target namespace is absent on this context; return 1 if one is
-# still present after SETUP_NS_WAIT_SEC (the apply would fail anyway).
+# Wait until no target namespace is Terminating on this context (an Active one is
+# re-applied in place); return 1 if one is still Terminating after SETUP_NS_WAIT_SEC
+# (the apply would fail anyway).
+ns_terminating() {
+	local phase
+	phase=$("${KUBECTL[@]}" --context="$1" get namespace "$2" -o jsonpath='{.status.phase}' 2>/dev/null) || return 1
+	[[ "$phase" == Terminating ]]
+}
 wait_ns_gone() {
 	local ctx="$1" ns deadline now
 	for ns in "${NAMESPACES[@]}"; do
-		"${KUBECTL[@]}" --context="$ctx" get namespace "$ns" >/dev/null 2>&1 || continue
-		echo "  [$ctx] namespace $ns still present (Terminating?); waiting up to ${SETUP_NS_WAIT_SEC}s for it to clear before apply..." >&2
+		if ! ns_terminating "$ctx" "$ns"; then
+			"${KUBECTL[@]}" --context="$ctx" get namespace "$ns" >/dev/null 2>&1 \
+				&& echo "  [$ctx] note: namespace $ns already exists; applying in place (run 005 first for a clean start)" >&2
+			continue
+		fi
+		echo "  [$ctx] namespace $ns is Terminating; waiting up to ${SETUP_NS_WAIT_SEC}s for it to clear before apply..." >&2
 		deadline=$(( $(date +%s) + SETUP_NS_WAIT_SEC ))
-		while "${KUBECTL[@]}" --context="$ctx" get namespace "$ns" >/dev/null 2>&1; do
+		while ns_terminating "$ctx" "$ns"; do
 			now=$(date +%s)
 			if (( now > deadline )); then
 				echo "  [$ctx] namespace $ns did not clear within ${SETUP_NS_WAIT_SEC}s; cannot apply into a Terminating namespace; check stuck finalizers: ${KUBECTL[*]} --context=$ctx get ns $ns -o jsonpath='{.spec.finalizers}'" >&2
@@ -426,7 +438,13 @@ apply_chunked() {
 	done
 	# Namespace batch first (idempotent; ensures the ns exists before objects).
 	if ((${#ns_docs[@]})); then
-		cat "${ns_docs[@]}" > "$workdir/_batch_ns.yaml"
+		# Separate the docs: a bare concatenation merges them into one YAML doc
+		# (only the last Namespace would be created).
+		: > "$workdir/_batch_ns.yaml"
+		for f in "${ns_docs[@]}"; do
+			cat "$f" >> "$workdir/_batch_ns.yaml"
+			printf -- '---\n' >> "$workdir/_batch_ns.yaml"
+		done
 		apply_with_retry "$workdir/_batch_ns.yaml" "$ctx" "namespaces" || return 1
 	fi
 	# Remaining objects in chunks. APPLY_CHUNK_OBJECTS <= 0 -> single batch.
@@ -510,24 +528,32 @@ for pid in "${WAIT_PIDS[@]}"; do
 done
 
 # Verify the Sidecar CRs landed: one per namespace (namespace) or one per
-# service (explicit), across all target namespaces.
+# service (explicit), and at least one in every target namespace.
 if [[ "$SIDECAR_SCOPING" != "none" ]]; then
 	expected_sidecars="$NAMESPACE_COUNT"
 	[[ "$SIDECAR_SCOPING" == explicit ]] && expected_sidecars="$SERVICE_COUNT"
-	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING}, expecting ${expected_sidecars} per cluster)..."
+	echo "Verifying Sidecar CRs (sidecar-scoping=${SIDECAR_SCOPING}, expecting ${expected_sidecars} per cluster across ${NAMESPACE_COUNT} namespace(s))..."
 	for ctx in "${CONTEXTS[@]}"; do
 		deadline=$(( $(date +%s) + 30 ))
 		count=0
-		while (( $(date +%s) < deadline )); do
-			count=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io -A \
+		ns_with=0
+		while :; do
+			# One line per labelled Sidecar: its namespace.
+			sc_ns=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io -A \
 				-l app.kubernetes.io/instance=controlplane-test \
-				--no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ') || count=0
-			[[ -z "$count" ]] && count=0
-			(( count >= expected_sidecars )) && break
+				-o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null) || sc_ns=""
+			count=$(grep -c . <<<"$sc_ns" || true)
+			ns_with=0
+			for svc_ns in "${NAMESPACES[@]}"; do
+				grep -qxF "$svc_ns" <<<"$sc_ns" && ns_with=$((ns_with + 1))
+			done
+			(( count >= expected_sidecars && ns_with == NAMESPACE_COUNT )) && break
+			(( $(date +%s) >= deadline )) && break
 			sleep 1
 		done
-		(( count >= expected_sidecars )) || die "found $count Sidecar CRs on $ctx after 30s (expected $expected_sidecars for scoping=$SIDECAR_SCOPING)"
-		echo "  [$ctx] Sidecar CR count: $count"
+		(( count >= expected_sidecars && ns_with == NAMESPACE_COUNT )) \
+			|| die "found $count Sidecar CRs in $ns_with/$NAMESPACE_COUNT namespace(s) on $ctx after 30s (expected $expected_sidecars across all ${NAMESPACE_COUNT} for scoping=$SIDECAR_SCOPING)"
+		echo "  [$ctx] Sidecar CRs: $count in $ns_with/$NAMESPACE_COUNT namespace(s)"
 	done
 fi
 

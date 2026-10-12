@@ -52,6 +52,20 @@ JSON
 	[[ "$output" == "cpu_m=4000 mem_mi=8192 pods=110 nodes=1 names=w-0" ]]
 }
 
+@test "cap_parse_node_totals: single-node / compact nodes (control-plane + worker) count" {
+	run cap_parse_node_totals <<'JSON'
+{"items":[
+  {"metadata":{"name":"sno-0","labels":{"node-role.kubernetes.io/control-plane":"","node-role.kubernetes.io/master":"","node-role.kubernetes.io/worker":""}},
+   "status":{"allocatable":{"cpu":"7500m","memory":"30Gi","pods":"250"}}},
+  {"metadata":{"name":"i-0","labels":{"node-role.kubernetes.io/infra":"","node-role.kubernetes.io/worker":""}},
+   "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}}
+]}
+JSON
+	[ "$status" -eq 0 ]
+	# The infra node stays excluded even with a worker label.
+	[[ "$output" == "cpu_m=7500 mem_mi=30720 pods=250 nodes=1 names=sno-0" ]]
+}
+
 @test "cap_parse_node_totals: zero worker nodes -> unknown" {
 	run cap_parse_node_totals <<'JSON'
 {"items":[
@@ -154,6 +168,14 @@ JSON
 JSON
 	[ "$status" -eq 0 ]
 	[[ "$output" == "scheduled=2" ]]
+}
+
+@test "cap_parse_pod_count: empty worker list -> unknown (not 0)" {
+	run cap_parse_pod_count "" <<'JSON'
+{"items":[{"spec":{"nodeName":"cp-0"},"status":{"phase":"Running"}}]}
+JSON
+	[ "$status" -eq 0 ]
+	[[ "$output" == "scheduled=unknown" ]]
 }
 
 @test "cap_parse_pod_count: unparseable -> unknown" {

@@ -108,9 +108,11 @@ More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matri
 `--resume tests/controlplane/results/sweep-<RUN_ID>` continues an interrupted sweep and skips combos that
 already have a valid row. `--config-dump-samples 0` skips the per-sidecar exec.
 
-**More than one namespace:** namespaces are named `controlplane-test-0..N-1`. The root
-`Sidecar` egress hosts match namespaces exactly, so `001` stops unless each one is listed
-in `charts/spoke-ossm/values.yaml` `tuningBaseline.sidecar.egressHosts` (or egress is `*/*`).
+**More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
+scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces
+exactly), so `001` stops unless they are in `charts/spoke-ossm/values.yaml`
+`tuningBaseline.sidecar.egressHosts` (or egress is `*/*`). `namespace` and `explicit`
+scoping bring their own `Sidecar`s, so they need no change.
 
 ## Outputs
 
@@ -142,4 +144,6 @@ Each row is a per-window delta over `--interval` seconds.
 - Each sweep point is one window; rerun the sweep for more samples.
 - Services are spread evenly across namespaces; real meshes are skewed.
 - Utilization-% columns need the metrics API (`kubectl top`); without it they are `N/A`.
+  Node columns count worker nodes, including control-plane nodes that also carry the
+  worker role (single-node and compact clusters).
 - Raise `METRICS_SCRAPE_TIMEOUT` (default 30 s) if `/metrics` scrapes time out at scale.

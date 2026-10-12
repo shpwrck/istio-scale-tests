@@ -144,7 +144,10 @@ for ctx in "${CONTEXTS[@]}"; do
 		else
 			echo "  [$ctx] No labelled namespaces found."
 		fi
-		"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=false
+		# The plain namespace, only if the labelled delete did not already cover it.
+		if [[ $'\n'"$matches"$'\n' != *$'\n'"namespace/$NS"$'\n'* ]]; then
+			"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true --wait=false
+		fi
 
 		echo "  [$ctx] Waiting for namespace termination (timeout ${TERMINATION_TIMEOUT}s)..."
 		wait_ns_terminated "$ctx"
