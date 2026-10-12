@@ -170,6 +170,12 @@ variable "gitops_app_repo_credentials_secret_name" {
   description = "Name of the Argo CD repository credentials Secret (label argocd.argoproj.io/secret-type=repository)."
 }
 
+variable "argocd_config_values" {
+  type        = any
+  default     = {}
+  description = "Extra values for charts/argocd-config (e.g. smaller argocd.controller/repo/server resources on a small hub). The chart defaults are sized for the 20-cluster campaign."
+}
+
 variable "gitops_rhacm_appset_any_namespace" {
   type        = bool
   default     = true
