@@ -1,27 +1,33 @@
+# ESO operand namespace on the hub (SecretStores, ExternalSecret, PushSecrets).
 namespace: external-secrets-operator
+# Hub namespace holding the intermediate CA Secrets (charts/hub-mesh-ca-intermediate).
 sourceSecretsNamespace: cert-manager
+# Namespace the Secrets are pushed to on each spoke.
 spokeTargetNamespace: istio-system
 
+# Set per cluster by the ApplicationSet.
 clusterName: ""
 clusterServer: ""
 
 nameOverride: ""
 fullnameOverride: ""
 
+# Istio cacerts built from mesh-intermediate-<clusterName>-material, pushed to this spoke.
 cacerts:
   enabled: true
   sourceSecretName: ""
   targetSecretName: ""
   refreshInterval: 5m
 
+# Istio remote secret istio-remote-secret-<clusterName>, pushed to every mesh member.
+# The hub Secret kubeconfig-<clusterName> (charts/hub-kubeconfig-from-argosecret) is
+# its source and also authenticates the spoke SecretStore.
 kubeconfig:
   enabled: true
   sourceSecretName: ""
-  # Also drives the kubeconfig + remote-secret PushSecrets (templates 05/06).
-  # Kept short: ESO marks a PushSecret Synced=True even when it pushed to only
-  # a subset of its label-selected target stores, so a target dropped during a
-  # reconcile (e.g. ESO restart) stays unwired until the next refresh. 5m bounds
-  # that silent window; scripts/001-verify-mesh-wiring.sh asserts full wiring.
+  # Kept short: ESO reports a PushSecret Synced even when only some target stores
+  # received it, so this bounds how long a missed member stays unwired.
+  # charts/mesh-wiring-verify reports missing remote secrets.
   refreshInterval: 5m
 
 kubernetesAPI:
@@ -44,8 +50,6 @@ spokeSecretStore:
 
 pushSecret:
   refreshInterval: 5m
-  storeMatchLabels:
-    hub-mesh-push-secrets/push-target: "true"
 
 rbac:
   enabled: true

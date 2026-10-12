@@ -1,36 +1,14 @@
-# Preset: istio-system and istio-cni namespaces on every ManagedCluster (destination.clusterName).
-applicationSetNamespace: openshift-gitops
-applicationSetControllerNamespace: openshift-gitops
-
+# Preset: istio-system and istio-cni namespaces on every mesh member.
 identity:
   component: spoke-istio-namespaces
 
-placement:
-  name: acm-openshift-gitops-placement
-  placementDecisionName: ""
-
-inClusterGenerator:
-  enabled: false
-
-generatorConfigMap:
-  create: false
-  name: acm-gitops-placement-generator
-
-clusterDecisionResource:
-  requeueAfterSeconds: 30
-
 placementRbac:
-  create: true
   roleName: openshift-gitops-ocm-placement-spoke-istio-namespaces
   roleBindingName: openshift-gitops-ocm-placement-spoke-istio-namespaces
-  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
 
 argocdApplicationControllerRbac:
-  create: true
   roleName: gitops-spoke-istio-namespaces-appset-argocd-sync
   roleBindingName: gitops-spoke-istio-namespaces-appset-argocd-sync
-  serviceAccountName: openshift-gitops-argocd-application-controller
-  serviceAccountNamespace: openshift-gitops
 
 applicationSet:
   name: spoke-istio-namespaces
@@ -46,11 +24,6 @@ template:
     helm:
       releaseName: spoke-istio-namespaces
       parameters:
-        # Per-cluster network identity for the istio-system topology.istio.io/network
-        # label (must match the east-west/ingress gateway network).
+        # Sets the istio-system topology.istio.io/network label.
         - name: clusterName
           value: "{{clusterName}}"
-
-repo:
-  url: ""
-  revision: main

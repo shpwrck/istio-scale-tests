@@ -2,7 +2,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ .Values.argocdApplicationControllerRbac.roleName | quote }}
+  name: {{ required "argocdApplicationControllerRbac.roleName is required" .Values.argocdApplicationControllerRbac.roleName | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
 {{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}
@@ -20,7 +20,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Values.argocdApplicationControllerRbac.roleBindingName | quote }}
+  name: {{ required "argocdApplicationControllerRbac.roleBindingName is required" .Values.argocdApplicationControllerRbac.roleBindingName | quote }}
   namespace: {{ .Values.applicationSetNamespace | quote }}
   labels:
 {{- include "gitops-hub-ocm-placement-appset.labels" . | nindent 4 }}

@@ -1,10 +1,10 @@
-# Argo CD Application — ApplicationSet that creates one hub-mesh-ca-intermediate Application per PlacementDecision cluster (clusterDecisionResource).
-# Same repo URL requirement as sibling manifests. Requires repo.url when installing the Helm chart (match GITOPS_APP_REPO_URL / fork).
+{{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "hub-mesh-ca-intermediate-appset") }}
+# ApplicationSet: one intermediate CA per mesh member (on the hub).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: hub-mesh-ca-intermediate-appset
-  namespace: openshift-gitops
+  namespace: {{ .Values.gitopsNamespace | quote }}
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   annotations:
@@ -15,19 +15,19 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/shpwrck/istio-scale-tests.git
-    targetRevision: main
+    repoURL: {{ include "gitops-hub-apps.repoURL" . }}
+    targetRevision: {{ include "gitops-hub-apps.revision" . }}
     path: charts/gitops-hub-ocm-placement-appset
     helm:
       releaseName: gitops-hub-mesh-ca-intermediate-appset
+      {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "hub-mesh-ca-intermediate-appset") }}{{ . | nindent 6 }}{{- end }}
       valueFiles:
         - values-mesh-ca-intermediate.yaml
       parameters:
         - name: repo.url
-          value: https://github.com/shpwrck/istio-scale-tests.git
+          value: {{ include "gitops-hub-apps.repoURL" . }}
         - name: repo.revision
-          value: main
-        # Align with charts/acm-openshift-gitops-resources placement.name / GITOPS_PLACEMENT_NAME when overriding.
+          value: {{ include "gitops-hub-apps.revision" . }}
         - name: placement.name
           value: acm-openshift-gitops-placement
   destination:
@@ -37,3 +37,4 @@ spec:
     automated:
       prune: false
       selfHeal: true
+{{- end }}

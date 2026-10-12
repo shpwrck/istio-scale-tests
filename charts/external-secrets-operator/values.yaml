@@ -1,12 +1,13 @@
-# Operand / OLM namespace for the Red Hat External Secrets operator Subscription.
+# Namespace for the Red Hat External Secrets operator Subscription.
 namespace: external-secrets-operator
 
-# Grant OpenShift GitOps application-controller permission to reconcile OLM objects in namespace (needed for hub in-cluster Applications and permissive setups).
 argoSyncWaves:
   enabled: true
   rbac: -20
   externalSecretsConfig: "5"
 
+# Roles for the Argo CD application controller (OLM objects, cleanup hook,
+# ExternalSecretsConfig, operand NetworkPolicy).
 rbac:
   enabled: true
   argocd:
@@ -21,9 +22,12 @@ operatorGroup:
 externalSecretsConfig:
   enabled: true
 
+# Extra egress for the ESO controller so hub PushSecrets reach the spoke API
+# servers (443 for ROSA HCP, 6443 for self-managed OpenShift).
 spokeEgress:
   enabled: true
   operandNamespace: external-secrets
+  ports: [443, 6443]
 
 subscription:
   name: openshift-external-secrets-operator
@@ -32,3 +36,8 @@ subscription:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
+
+# oc image for the PreDelete cleanup Job. Match the tag to the cluster's OpenShift minor.
+image:
+  repository: registry.redhat.io/openshift4/ose-cli-rhel9
+  tag: v4.21

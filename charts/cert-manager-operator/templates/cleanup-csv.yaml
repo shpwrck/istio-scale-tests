@@ -1,3 +1,7 @@
+{{- /*
+  PreDelete hook: delete the Subscription first (so OLM cannot reinstall the
+  CSV), then the CSV by its OLM label. Every step tolerates "not found".
+*/}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -5,31 +9,33 @@ metadata:
   namespace: {{ .Values.namespace | quote }}
   annotations:
     argocd.argoproj.io/hook: PreDelete
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: {{ printf "%s-%s-cleanup-csv" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  name: cleanup-csv
+  namespace: {{ .Values.namespace | quote }}
   annotations:
     argocd.argoproj.io/hook: PreDelete
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 rules:
   - apiGroups: ["operators.coreos.com"]
-    resources: ["clusterserviceversions"]
+    resources: ["subscriptions", "clusterserviceversions"]
     verbs: ["get", "list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ printf "%s-%s-cleanup-csv" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  name: cleanup-csv
+  namespace: {{ .Values.namespace | quote }}
   annotations:
     argocd.argoproj.io/hook: PreDelete
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ printf "%s-%s-cleanup-csv" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  kind: Role
+  name: cleanup-csv
 subjects:
   - kind: ServiceAccount
     name: cleanup-csv
@@ -42,7 +48,7 @@ metadata:
   namespace: {{ .Values.namespace | quote }}
   annotations:
     argocd.argoproj.io/hook: PreDelete
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 60
@@ -56,17 +62,17 @@ spec:
       restartPolicy: Never
       containers:
         - name: cleanup
-          image: registry.redhat.io/openshift4/ose-cli:latest
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
           command:
             - /bin/bash
             - -c
             - |
               set -euo pipefail
-              PACKAGE={{ .Values.subscription.package | quote }}
               NS={{ .Values.namespace | quote }}
-              echo "Cleaning up CSVs for package $PACKAGE in $NS..."
-              oc get csv -n "$NS" -o name 2>/dev/null | grep "$PACKAGE" | while read csv; do
-                echo "Deleting $csv..."
-                oc delete "$csv" -n "$NS" --wait=false
-              done
-              echo "CSV cleanup complete."
+              SUB={{ .Values.subscription.name | quote }}
+              PACKAGE={{ .Values.subscription.package | quote }}
+              echo "Deleting Subscription $SUB in $NS..."
+              oc delete subscription.operators.coreos.com "$SUB" -n "$NS" --ignore-not-found --wait=false || true
+              echo "Deleting CSVs labelled operators.coreos.com/${PACKAGE}.${NS} in $NS..."
+              oc delete csv -n "$NS" -l "operators.coreos.com/${PACKAGE}.${NS}" --ignore-not-found --wait=false || true
+              echo "Cleanup complete."

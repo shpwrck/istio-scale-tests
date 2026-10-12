@@ -18,6 +18,8 @@ spec:
   - Egress
   egress:
   - ports:
-    - port: 443
+    {{- range .Values.spokeEgress.ports }}
+    - port: {{ . }}
       protocol: TCP
+    {{- end }}
 {{- end }}

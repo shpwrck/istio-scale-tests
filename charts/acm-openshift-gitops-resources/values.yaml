@@ -1,44 +1,21 @@
-# Namespace for the Argo CD CR, Placement, and ManagedClusterSetBinding (e.g. openshift-gitops).
+# Namespace of the Argo CD instance; the Placement and ManagedClusterSetBinding live here.
 gitopsNamespace: openshift-gitops
 
-# ManagedClusterSet name + Binding + Placement.clusterSets; must match cluster.open-cluster-management.io/clusterset on spokes (charts/acm-managed-cluster).
+# ManagedClusterSet name; spokes carry cluster.open-cluster-management.io/clusterset=<clusterSet>
+# (charts/acm-managed-cluster clustersetName).
 clusterSet: istio-scale-tests
 
 managedClusterSet:
+  # Set false if the ManagedClusterSet already exists.
   create: true
 
 managedClusterSetBinding:
-  # metadata.name defaults to clusterSet when empty.
+  # Defaults to clusterSet when empty.
   name: ""
 
 placement:
   name: acm-openshift-gitops-placement
-  # Exclude the ACM hub (“first” cluster): RHACM labels only the hub ManagedCluster with local-cluster=true.
+  # Skip the ACM hub (the ManagedCluster labeled local-cluster).
   excludeHubLocalClusterLabel: true
-  # Require istio-mesh-member=true label on ManagedClusters for Placement selection.
-  # Enables incremental mesh deployment: label spokes one-by-one to add them to the mesh.
+  # Select only ManagedClusters labeled istio-mesh-member=true.
   requireMeshMemberLabel: true
-
-# Shared duck-type ConfigMap for Argo CD ApplicationSet clusterDecisionResource (charts/gitops-hub-*-appset).
-# Hub ApplicationSet charts select PlacementDecision resources by the
-# cluster.open-cluster-management.io/placement=<placement.name> label by default,
-# so large placements split across multiple PlacementDecision resources are all consumed.
-# Gated on argoServer.cluster. In the Terraform deployment argoServer.cluster is left empty
-# and Terraform creates this ConfigMap itself (kubernetes_manifest.placement_generator_configmap)
-# only after the cluster secrets exist, so ApplicationSets don't generate spoke apps too early.
-argocdPlacementDecisionGenerator:
-  create: true
-  configMapName: acm-gitops-placement-generator
-
-# Hub ManagedCluster name. When empty, the chart skips the ApplicationSet placement-generator
-# ConfigMap (Terraform leaves this empty and creates that ConfigMap itself; see above).
-argoServer:
-  cluster: ""
-
-# Grants openshift-gitops-argocd-application-controller permission to reconcile cluster-scoped ManagedClusterSet when this chart is synced by Argo CD.
-argocdApplicationControllerRbac:
-  create: true
-  clusterRoleName: acm-openshift-gitops-resources-argocd-managedclustersets
-  clusterRoleBindingName: acm-openshift-gitops-resources-argocd-managedclustersets
-  serviceAccountName: openshift-gitops-argocd-application-controller
-  serviceAccountNamespace: openshift-gitops

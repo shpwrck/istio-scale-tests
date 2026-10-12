@@ -4,7 +4,7 @@ metadata:
   name: mesh-verify-echo
   namespace: {{ .Values.namespace }}
 spec:
-  host: mesh-verify-echo.mesh-verify.svc.cluster.local
+  host: mesh-verify-echo.{{ .Values.namespace }}.svc.cluster.local
   trafficPolicy:
     loadBalancer:
       localityLbSetting:

@@ -1,9 +1,14 @@
-# cert-manager-operator (Helm)
+# cert-manager-operator
 
-Installs the **cert-manager Operator for Red Hat OpenShift** via OLM (Namespace, OperatorGroup AllNamespaces, Subscription).
+Installs the cert-manager Operator for Red Hat OpenShift on the hub through OLM (Namespace,
+OperatorGroup, Subscription). Synced by the Argo CD Application `hub-cert-manager-operator`
+(`charts/gitops-hub-apps`).
 
-Synced on the hub by the Argo CD `Application` `hub-cert-manager-operator` (declared in `charts/gitops-hub-apps/applications/cert-manager-operator.yaml`, applied when `hub-gitops-root` syncs).
+If the hub already runs the cert-manager operator, disable this app
+(`apps.hub-cert-manager-operator.enabled=false`); otherwise Argo adopts the existing
+Subscription and adds a second OperatorGroup to its namespace.
 
-Procedure reference: [Installing the cert-manager Operator for Red Hat OpenShift](https://docs.openshift.com/container-platform/latest/security/cert_manager_operator/index.html).
+Deleting the Application runs a PreDelete Job that deletes the Subscription and then the
+operator CSV (`image.repository`/`image.tag`, match the tag to the cluster's OpenShift minor).
 
-Override `values.yaml` keys (channel, catalog source) for disconnected mirrors or version pinning.
+Reference: [cert-manager Operator for Red Hat OpenShift](https://docs.redhat.com/en/documentation/openshift_container_platform/latest/html/security_and_compliance/cert-manager-operator-for-red-hat-openshift).

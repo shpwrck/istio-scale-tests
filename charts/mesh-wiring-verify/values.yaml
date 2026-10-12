@@ -1,30 +1,18 @@
-# Per-spoke mesh-wiring health gate. Pod is Ready iff this mesh member is fully
-# wired into the multi-primary mesh. Deployed per mesh member by the
-# mesh-wiring-verify ApplicationSet (see
-# charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml).
+# Per-cluster mesh-wiring gate: the pod is Ready only while this mesh member is
+# fully wired (remote secrets present and ingested by istiod).
 
-# Injected per-cluster by the ApplicationSet generator ({{clusterName}}).
-clusterName: ""
-
-# Namespace for the verifier workload. Intentionally NOT istio-injected: the
-# health gate must not depend on the sidecar/mesh it is checking.
+# Not istio-injected: the gate must not depend on the mesh it checks.
 namespace: mesh-wiring-verify
 
-# Expected number of mesh members (each member holds one istio/multiCluster
-# remote secret per member, including itself, and istiod syncs that many
-# clusters). Injected by Terraform from length(local.mesh_member_spoke_keys)
-# (terraform/platform/platform_gitops.tf) — the same source of truth that
-# decides istio-mesh-member labeling. 0 = skip the absolute-count gate and fall
-# back to consistency-only (secrets == istiod clusters, all synced); used for
-# helm lint / standalone renders.
+# Mesh size, set by Terraform. With N > 0: at least N remote secrets, istiod
+# manages at least N clusters, and at least N-1 of them are remote.
+# With 0: istiod must manage at least as many clusters as there are remote secrets.
 expectedMembers: 0
 
-# Namespace where Istio remote secrets and istiod live on the spoke.
+# Namespace with the Istio remote secrets and istiod.
 istioNamespace: istio-system
 
-# Second-stage gate: confirm istiod actually ingested the clusters (via the
-# istiod_managed_clusters metric on the unauthenticated /metrics endpoint), not
-# just that the secrets exist on disk.
+# Stage 2: read istiod_managed_clusters from istiod's /metrics.
 istiodCheck:
   enabled: true
   host: istiod.istio-system.svc
@@ -32,17 +20,16 @@ istiodCheck:
   curlTimeoutSeconds: 5
 
 image:
-  # The cluster's built-in CLI imagestream (oc + bash + curl). Internal registry,
-  # so it needs no external pull secret and is always version-matched to the
-  # cluster — no tag to pin/bump in config/versions.env.
+  # The cluster's "cli" imagestream (oc, bash, curl). Needs the internal image
+  # registry (managementState: Managed). Without it, use
+  # registry.redhat.io/openshift4/ose-cli-rhel9 with the cluster's OpenShift minor (e.g. v4.21).
   repository: image-registry.openshift-image-registry.svc:5000/openshift/cli
   tag: "latest"
   pullPolicy: IfNotPresent
 
 serviceAccountName: mesh-wiring-verify
 
-# Readiness probe cadence. failureThreshold > 1 avoids flapping on a single
-# transient API/istiod blip; a real wiring gap persists across probes.
+# failureThreshold > 1 rides out a single API or istiod blip.
 probe:
   initialDelaySeconds: 15
   periodSeconds: 30

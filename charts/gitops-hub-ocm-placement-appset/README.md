@@ -1,25 +1,30 @@
 # gitops-hub-ocm-placement-appset
 
-Standard Argo CD ApplicationSet for RHACM GitOps: `clusterDecisionResource` (shared duck-type ConfigMap from `charts/acm-openshift-gitops-resources`) plus optional list generator for the hub Argo cluster name (`in-cluster` by default).
+One Argo CD ApplicationSet driven by the ACM Placement `acm-openshift-gitops-placement`
+(`clusterDecisionResource` generator, ConfigMap created by Terraform). `values.yaml` holds
+the shared defaults; each preset sets only what differs.
 
-By default the chart selects all `PlacementDecision` objects labeled for `placement.name` (`cluster.open-cluster-management.io/placement=<placement.name>`). Keep `placement.placementDecisionName` empty for large fleets, because OCM can split one `Placement` across multiple `PlacementDecision` resources. Set `placement.placementDecisionName` only when you intentionally want one exact decision resource.
+| Preset | Deploys | Destination |
+| --- | --- | --- |
+| `values-istio-namespaces.yaml` | `charts/spoke-istio-namespaces` | each mesh member |
+| `values-ossm-operator.yaml` | `charts/spoke-ossm-operator` | each mesh member |
+| `values-external-secrets.yaml` | `charts/external-secrets-operator` | hub only (`in-cluster`) |
+| `values-mesh-ca-intermediate.yaml` | `charts/hub-mesh-ca-intermediate` | hub, one app per member |
+| `values-kubeconfig-from-argosecret.yaml` | `charts/hub-kubeconfig-from-argosecret` | hub, one app per member |
+| `values-mesh-push-secrets.yaml` | `charts/hub-mesh-push-secrets` | hub, one app per member |
+| `values-ossm.yaml` | `charts/spoke-ossm` | each mesh member |
+| `values-ingress-gateway.yaml` | `charts/spoke-ingress-gateway` | each mesh member |
+| `values-east-west-gateway.yaml` | `charts/spoke-east-west-gateway` | each mesh member |
+| `values-mesh-wiring-verify.yaml` | `charts/mesh-wiring-verify` (installed by Terraform) | each mesh member |
+| `values-mesh-verify.yaml` | `charts/mesh-verify` (via `charts/mesh-verify-appset.yaml`) | each mesh member |
 
-Preset value files:
-
-- `values-external-secrets.yaml` — installs `charts/external-secrets-operator` on every cluster in Placement (`clusterDecisionResource`, typically spokes without `local-cluster`) plus the hub list entry (`in-cluster` default, `destination.mode: clusterName` on each Application).
-- `values-kubeconfig-from-argosecret.yaml` — installs `charts/hub-kubeconfig-from-argosecret` on the hub only (`destination.mode: inClusterServer`), child Applications use `destination.namespace: external-secrets-operator` (SecretStore/ExternalSecret land where the ESO operand reconciles; Argo cluster Secrets are read from `openshift-gitops` via chart values).
-- `values-mesh-ca-intermediate.yaml` — installs `charts/hub-mesh-ca-intermediate` only on the hub API (`destination.mode: inClusterServer`).
-
-Override `repo.url` / `placement.name` / `generatorConfigMap` / RBAC names via Helm or Argo `parameters` as needed.
-
-Child Helm values can be supplied to the generated Application by **name** via `template.source.helm.valuesObject` (a YAML map) in addition to the positional `template.source.helm.parameters` list. The chart emits `valuesObject` verbatim into each Application's `spec.source.helm.valuesObject`, which Argo merges into the child chart's values. Prefer `valuesObject` for static, name-addressed values (e.g. `expectedMembers`) so reordering/inserting `parameters` entries cannot misroute them; keep `parameters` for values that must carry an ApplicationSet generator placeholder like `{{clusterName}}`. `values-mesh-wiring-verify.yaml` uses this split (Terraform sets `template.source.helm.valuesObject.expectedMembers` by name — see issue #28).
-
-`values-mesh-ca-intermediate.yaml` uses `destination.mode: inClusterServer`; the chart template emits the `clusterName` Helm parameter with a literal `{{clusterName}}` for ApplicationSet substitution (do not copy that string into another values file with `| quote` in a custom template). Per-cluster presets use `destination.mode: clusterName` and set `template.source.helm.releaseName` only for that mode so hub-only installs do not inherit an OLM `releaseName` from chart defaults.
+`destination.mode: clusterName` targets each Placement cluster by name;
+`inClusterServer` targets the hub API and passes `clusterName`/`clusterServer` to the
+child chart. Put generator placeholders such as `{{clusterName}}` in
+`template.source.helm.parameters`; put static values in `template.source.helm.valuesObject`.
 
 ```bash
-helm upgrade --install gitops-hub-ocm-placement-es ./charts/gitops-hub-ocm-placement-appset \
-  --namespace openshift-gitops \
-  -f charts/gitops-hub-ocm-placement-appset/values-external-secrets.yaml \
-  --set repo.url="https://github.com/example-org/istio-scale-tests.git" \
-  --set repo.revision=main
+helm template x charts/gitops-hub-ocm-placement-appset \
+  -f charts/gitops-hub-ocm-placement-appset/values-ossm.yaml \
+  --set repo.url=https://github.com/<org>/istio-scale-tests.git --set repo.revision=main
 ```

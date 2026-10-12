@@ -1,20 +1,13 @@
-# Namespace where OpenShift GitOps / Argo CD instance runs (Application CRs live here).
+# Namespace of the Argo CD instance (Applications live here).
 gitopsNamespace: openshift-gitops
 
-# Root Application syncs plain YAML from spec.repo (child Application manifests under repo.applicationsPath).
-appOfApps:
-  enabled: true
-
-# Git repository that contains this repo’s charts (fork URL). Required for Argo CD to sync.
+# Git repo the root and every child Application sync from (your fork/branch).
 repo:
   url: ""
   revision: main
-  # Directory in the Git repo whose manifests Argo applies (recursive Application app-of-apps).
-  applicationsPath: charts/gitops-hub-apps/applications
-  directory:
-    recurse: false
-    # Skip README and other docs in that directory (glob).
-    exclude: "*.md"
+
+# Passed to charts/gitops-hub-apps, e.g. {hub-cert-manager-operator: {enabled: false}}.
+apps: {}
 
 syncPolicy:
   automated:

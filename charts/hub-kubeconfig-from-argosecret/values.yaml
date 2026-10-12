@@ -1,39 +1,32 @@
-# Namespace for SecretStore, ExternalSecret, kubeconfig output Secret, and store ServiceAccount.
-# The Red Hat External Secrets operand reconciles namespaced CRs in this namespace (default) — not openshift-gitops.
+# Namespace for the SecretStore, ExternalSecret, output Secret and store ServiceAccount
+# (the ESO operand reconciles this namespace).
 namespace: external-secrets-operator
 
-# Namespace that holds ACM/GitOps Argo cluster Secrets.
+# Namespace holding the Terraform-created Argo CD cluster Secrets.
 sourceSecretsNamespace: openshift-gitops
 
-# ManagedCluster name matching the Argo cluster secret (for spokes e.g. cluster-002; for hub list entry use the hub ManagedCluster name e.g. cluster-001, not in-cluster).
+# ManagedCluster name (set per cluster by the ApplicationSet).
 clusterName: ""
-
-# Spoke cluster API server URL, injected by the ApplicationSet generator.
-clusterServer: ""
 
 nameOverride: ""
 fullnameOverride: ""
 
-# ManagedServiceAccount name used to construct the default source secret name.
-# Terraform creates the Argo CD cluster secrets as {clusterName}-{managedServiceAccountName}-cluster-secret
-# (create-argocd-cluster-secret.sh). This repo standardizes on argocd-gitops; the appset value file overrides
-# this to match terraform var.gitops_managed_service_account_name.
+# Source Secret is {clusterName}-{managedServiceAccountName}-cluster-secret unless
+# sourceSecretName is set; must match terraform var.gitops_managed_service_account_name.
 managedServiceAccountName: argocd-gitops
-
-# Source Argo cluster Secret name; default {clusterName}-{managedServiceAccountName}-cluster-secret.
 sourceSecretName: ""
 
-# Target Secret name holding key kubeconfig; default kubeconfig-{clusterName}.
+# Output Secret (keys kubeconfig, bearer-token, ca.crt, client-cert, client-key);
+# defaults to kubeconfig-{clusterName}. Read on the hub by charts/hub-mesh-push-secrets.
 targetSecretName: ""
 
-# Short so kubeconfig changes (and recovery from a partial push) propagate quickly.
-# See scripts/001-verify-mesh-wiring.sh and the hub-mesh-push-secrets values rationale.
+# Short so credential changes reach the push-secrets chart quickly
+# (charts/mesh-wiring-verify reports missing wiring).
 refreshInterval: 5m
 
-# In-cluster Kubernetes API client settings for the kubernetes provider (SecretStore validation + fetches).
-# Set caFromConfigMap.enabled to false only if the apiserver uses a public CA and validation succeeds without it.
+# Hub API client settings for the kubernetes provider SecretStore.
 kubernetesAPI:
-  # Optional override; empty uses ESO default (kubernetes.default.svc).
+  # Empty uses the ESO default (kubernetes.default.svc).
   serverURL: ""
   caFromConfigMap:
     enabled: true
@@ -41,27 +34,9 @@ kubernetesAPI:
     key: ca.crt
 
 secretStoreName: ""
-
-spokeSecretStore:
-  enabled: true
-  name: ""
-  remoteNamespace: ""
-  # Skip caProvider when spoke API uses a publicly-trusted CA (e.g. Let's Encrypt on ROSA HCP).
-  skipCAProvider: false
-  # Auth type for the spoke SecretStore: "token" (bearer token) or "cert" (client certificate).
-  authType: token
-  labels:
-    hub-kubeconfig-from-argosecret/push-target: "true"
-
-pushSecret:
-  enabled: true
-  refreshInterval: 5m
-  storeMatchLabels:
-    hub-kubeconfig-from-argosecret/push-target: "true"
-
 serviceAccountName: ""
 
-# Grant openshift-gitops-argocd-application-controller permission to reconcile ESO CRs and target Secret.
+# Lets the Argo CD application controller manage the ESO CRs and Secrets.
 rbac:
   enabled: true
   argocd:
@@ -75,5 +50,3 @@ argoSyncWaves:
   rbac: -30
   secretStore: -25
   externalSecret: 0
-  spokeSecretStore: 5
-  pushSecret: 10

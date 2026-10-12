@@ -1,11 +1,16 @@
-# Standalone Argo CD Application — deploys mesh-verify ApplicationSet on every spoke.
-# Apply manually: oc apply -f charts/mesh-verify-appset.yaml
-# Remove:         oc delete -f charts/mesh-verify-appset.yaml
+# Standalone Argo CD Application (not part of the app-of-apps): deploys the
+# mesh-verify echo workload on every mesh member.
+# Edit both repoURL fields and both revision fields to match your fork/branch.
+# Apply:  oc apply -f charts/mesh-verify-appset.yaml
+# Remove: oc delete -f charts/mesh-verify-appset.yaml (the finalizer also removes
+#         the ApplicationSet and the per-member mesh-verify workloads)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: mesh-verify-appset
   namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
   labels:
     app.kubernetes.io/name: mesh-verify
     app.kubernetes.io/component: mesh-verify-appset

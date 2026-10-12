@@ -1,19 +1,14 @@
 # hub-kubeconfig-from-argosecret
 
-Hub-only Helm chart: one `ExternalSecret` plus `SecretStore` (Kubernetes provider) that reads the Argo CD cluster Secret `{clusterName}-{managedServiceAccountName}-cluster-secret` (in this deployment `{clusterName}-argocd-gitops-cluster-secret`) from `sourceSecretsNamespace` (default `openshift-gitops`), and writes a `Secret` (default `kubeconfig-{clusterName}`) with key `kubeconfig` containing a full kubectl kubeconfig. That source Secret is created and owned by Terraform (`create-argocd-cluster-secret.sh`), not by ACM's GitOpsCluster controller.
+Hub-only chart, one release per mesh member (`values-kubeconfig-from-argosecret.yaml` in
+`charts/gitops-hub-ocm-placement-appset`). An ExternalSecret reads the Terraform-created
+Argo CD cluster Secret `{clusterName}-{managedServiceAccountName}-cluster-secret` in
+`openshift-gitops` and writes `kubeconfig-{clusterName}` in `external-secrets-operator`
+(keys `kubeconfig`, `bearer-token`, `ca.crt`, `client-cert`, `client-key`).
 
-CRs (`SecretStore`, `ExternalSecret`, store `ServiceAccount`, generated kubeconfig `Secret`) are installed into `namespace` (default `external-secrets-operator`) so the Red Hat External Secrets operand actually reconciles them. The operand subscribes with an OperatorGroup that scopes reconciliation to the operand namespace; `SecretStore` objects only in `openshift-gitops` are ignored. When `namespace` and `sourceSecretsNamespace` differ, the chart adds a `Role` + `RoleBinding` in `sourceSecretsNamespace` so the store `ServiceAccount` (living in `namespace`) can still `get` the Argo cluster Secrets.
+The Secret stays on the hub. `charts/hub-mesh-push-secrets` uses it to authenticate to the
+spoke and to build the Istio remote secret.
 
-Designed for `charts/gitops-hub-ocm-placement-appset` with `values-kubeconfig-from-argosecret.yaml`: child Applications use `destination.namespace: external-secrets-operator`. Set `inClusterGenerator.clusterName` to the hub `ManagedCluster.metadata.name` (not `in-cluster`) so the source Secret name matches the Terraform-created cluster Secret.
-
-Prerequisites on the hub: External Secrets Operator (for example via `hub-external-secrets-operator-appset`), and the Argo CD cluster Secrets (`*-<managedServiceAccountName>-cluster-secret`, created by Terraform) in `openshift-gitops`.
-
-Template logic lives in `files/eso-kubeconfig.tpl` (External Secrets engine v2 / sprig); Helm does not interpret that file so ESO `{{ ... }}` expressions pass through unchanged.
-
-`SecretStore` and `ExternalSecret` use `apiVersion: external-secrets.io/v1` for External Secrets Operator installs that expose the stable v1 API (for example Red Hat OpenShift).
-
-The kubernetes provider `SecretStore` sets `spec.provider.kubernetes.server.caProvider` to the platform root CA from a ConfigMap in the same namespace as the `SecretStore` (`kube-root-ca.crt` / `ca.crt` by default). It sets `auth.serviceAccount.namespace` next to `name`. The store `ServiceAccount` receives RBAC to read secrets in `sourceSecretsNamespace`.
-
-If `SecretStore` never reaches Ready: `kubectl describe secretstore -n external-secrets-operator`, confirm `kube-root-ca.crt` exists there, and ensure your Argo CD `AppProject` allows sync to both `external-secrets-operator` and `openshift-gitops` when those differ. You can set `namespace` and `sourceSecretsNamespace` to the same value (for example both `openshift-gitops`) only if your operand is configured to reconcile that namespace.
-
-Disable the CA block with `kubernetesAPI.caFromConfigMap.enabled: false` when the apiserver chain is already trusted by the operator image.
+Requires the hub External Secrets operator. If the SecretStore is not Ready, check
+`oc describe secretstore -n external-secrets-operator` and that `kube-root-ca.crt` exists
+there. Templates under `files/` are ESO templates; Helm passes them through unchanged.

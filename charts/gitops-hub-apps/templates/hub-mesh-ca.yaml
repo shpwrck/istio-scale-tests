@@ -1,9 +1,10 @@
-# Argo CD Application — mesh root + intermediate CAs (cert-manager). Same repo URL requirement as sibling manifests.
+{{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "hub-mesh-ca") }}
+# Mesh root CA chain (cert-manager) on the hub.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: hub-mesh-ca
-  namespace: openshift-gitops
+  namespace: {{ .Values.gitopsNamespace | quote }}
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   annotations:
@@ -14,14 +15,12 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/shpwrck/istio-scale-tests.git
-    targetRevision: main
+    repoURL: {{ include "gitops-hub-apps.repoURL" . }}
+    targetRevision: {{ include "gitops-hub-apps.revision" . }}
     path: charts/hub-mesh-ca
     helm:
       releaseName: hub-mesh-ca
-      parameters:
-        - name: intermediates.enabled
-          value: "false"
+      {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "hub-mesh-ca") }}{{ . | nindent 6 }}{{- end }}
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
@@ -29,3 +28,4 @@ spec:
     automated:
       prune: false
       selfHeal: true
+{{- end }}
