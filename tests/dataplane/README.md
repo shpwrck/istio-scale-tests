@@ -77,8 +77,8 @@ a Service `dataplane-server-<ctx>` for each context that selects only that pod:
 ```
 
 Tune the probe with `--qps-levels 50,200`, `--duration 60`, `--connections 16`,
-`--settle 60` and `--warmup-duration 0`. Add `--dry-run` to `002`, `003` or `005` to
-print the plan without touching a cluster.
+`--settle 60` and `--warmup-duration 0`; the sweep (`003`) takes the same flags. Add
+`--dry-run` to `002`, `003` or `005` to print the plan without touching a cluster.
 
 ## Sweep across mesh sizes
 
@@ -88,7 +88,8 @@ print the plan without touching a cluster.
 
 For each mesh size the sweep runs `001`, then `002` `--repetitions` times, then `005`,
 and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
-`sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`.
+`sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
+size with a remote cluster; the p50-vs-mesh-size chart needs two.
 
 ## istiod restart detection
 
@@ -111,7 +112,8 @@ duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms  status  pct_200  istiod_res
 (`pct_200 < 0.99`), or the sweep placeholders `SETUP_FAILED` / `PROBE_FAILED` (one row per
 failed mesh size, `target_class=na`). `004-report-results.sh --format text|csv|json|markdown|md|charts`
 averages valid rows per (mesh size, QPS, target class) and reports `n_total` / `n_valid`;
-the markdown ends with a glossary.
+the markdown ends with a glossary. It reads every `latency-*.tsv` under `--results-dir`,
+subdirectories included, so pass one `sweep-<RUN_ID>/` to report a single sweep.
 
 ## Limitations
 
