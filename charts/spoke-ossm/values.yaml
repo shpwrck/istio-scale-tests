@@ -73,6 +73,12 @@ tuningBaseline:
   accessLogFiltering:
     enabled: true
 
+# PreSync Job that holds the Istio CR until cacerts is pushed from the hub.
+waitForCacerts:
+  enabled: true
+  timeoutSeconds: 1200
+  image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.21
+
 argoSyncWaves:
   enabled: true
   istioCni: "0"

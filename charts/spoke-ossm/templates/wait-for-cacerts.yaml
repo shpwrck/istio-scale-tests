@@ -1,0 +1,92 @@
+{{- if .Values.waitForCacerts.enabled }}
+# PreSync gate: hold the Istio CR until the hub has pushed cacerts. istiod reads
+# cacerts only at startup; without it, it uses a self-signed root and the
+# members never trust each other.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wait-for-cacerts
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wait-for-cacerts
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["cacerts"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wait-for-cacerts
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wait-for-cacerts
+subjects:
+  - kind: ServiceAccount
+    name: wait-for-cacerts
+    namespace: istio-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wait-for-cacerts
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    {{- include "spoke-ossm.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wait-for-cacerts
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: wait-for-cacerts
+      restartPolicy: Never
+      containers:
+        - name: wait
+          image: {{ .Values.waitForCacerts.image | quote }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              for i in $(seq 1 {{ div (int .Values.waitForCacerts.timeoutSeconds) 10 }}); do
+                if oc get secret cacerts -n istio-system -o name >/dev/null 2>&1; then
+                  echo "cacerts present; installing Istio."
+                  exit 0
+                fi
+                echo "waiting for cacerts in istio-system ($((i * 10))s)"
+                sleep 10
+              done
+              echo "ERROR: cacerts not pushed after {{ .Values.waitForCacerts.timeoutSeconds }}s (check hub-mesh-push-secrets on the hub)"
+              exit 1
+{{- end }}

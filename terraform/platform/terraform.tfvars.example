@@ -53,10 +53,11 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # mesh_member_count = 0
 
 # --- Small hub ---
-# The Argo CD defaults are sized for the 20-cluster campaign; shrink them on a small hub.
+# The Argo CD defaults are sized for the 20-cluster campaign; shrink the requests on a small hub.
+# Keep the controller limit high: it caches every watched object (~3Gi on a busy 3-cluster hub).
 # argocd_config_values = {
 #   argocd = {
-#     controller = { resources = { requests = { cpu = "250m", memory = "1Gi" }, limits = { cpu = "2", memory = "3Gi" } } }
+#     controller = { resources = { requests = { cpu = "250m", memory = "1Gi" }, limits = { cpu = "2", memory = "6Gi" } } }
 #     repo       = { replicas = 1, resources = { requests = { cpu = "100m", memory = "256Mi" }, limits = { cpu = "1", memory = "1Gi" } } }
 #   }
 # }
