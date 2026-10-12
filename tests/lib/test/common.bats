@@ -139,3 +139,35 @@ load test_helper
 	assert_output --partial "error:"
 	assert_output --partial "none, namespace, explicit"
 }
+
+# --- resolve_kubectl() ---
+
+_stub_cli() {
+	local dir="$1" name="$2"
+	mkdir -p "$dir"
+	printf '#!/bin/sh\nexit 0\n' > "${dir}/${name}"
+	chmod +x "${dir}/${name}"
+}
+
+@test "resolve_kubectl: prefers kubectl when both CLIs exist" {
+	_stub_cli "$BATS_TEST_TMPDIR/bin" kubectl
+	_stub_cli "$BATS_TEST_TMPDIR/bin" oc
+	local -a kc=()
+	PATH="$BATS_TEST_TMPDIR/bin" resolve_kubectl kc
+	[[ "${kc[*]}" == "kubectl" ]]
+}
+
+@test "resolve_kubectl: falls back to oc and adds no extra flags" {
+	_stub_cli "$BATS_TEST_TMPDIR/bin" oc
+	local -a kc=()
+	PATH="$BATS_TEST_TMPDIR/bin" resolve_kubectl kc
+	[[ ${#kc[@]} -eq 1 && "${kc[0]}" == "oc" ]]
+}
+
+@test "resolve_kubectl: dies when neither CLI is on PATH" {
+	mkdir -p "$BATS_TEST_TMPDIR/empty"
+	local -a kc=()
+	PATH="$BATS_TEST_TMPDIR/empty" run resolve_kubectl kc
+	assert_failure 1
+	assert_output "error: neither kubectl nor oc found on PATH"
+}

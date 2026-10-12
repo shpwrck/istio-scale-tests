@@ -62,22 +62,6 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	[ "$result" = "12" ]
 }
 
-@test "fanout_gauge_invariant: pilot_services returns the value, NOT 2x" {
-	# Both pods report 42; INVARIANT must return 42, never the sum 84.
-	result=$(fanout_gauge_invariant pilot_services "$POD0" "$POD1")
-	[ "$result" = "42" ]
-}
-
-@test "fanout_gauge_invariant: returns MAX on a lagging replica (40 vs 42 -> 42)" {
-	result=$(fanout_gauge_invariant pilot_services "${FIXTURES}/istiod_pod1_lagging.txt" "$POD0")
-	[ "$result" = "42" ]
-}
-
-@test "fanout_gauge_invariant: unknown when no pod reports the gauge" {
-	result=$(fanout_gauge_invariant pilot_services "$ZERO")
-	[ "$result" = "unknown" ]
-}
-
 # --- histogram bucket-sum -> delta_histogram_p99 ---------------------------
 
 @test "fanout_merge_histogram + delta_histogram_p99: merged buckets land p99 on the expected bucket" {
@@ -183,8 +167,7 @@ _install_curl_stub() {
 # fanout_scrape_all stamps per-pod COMPLETION timestamps in backgrounded subshells
 # (so the absolute spread is not deterministic in a unit test), but it MUST persist
 # whatever skew it computed to <prefix>.skew so a caller that discards stdout can
-# read it back. The threshold readers are then exercised against synthetic .skew
-# sidecars (mirroring the way the existing .failed sidecar is unit-tested).
+# read it back.
 
 @test "fanout_scrape_all: persists the echoed batch skew to <prefix>.skew" {
 	_install_curl_stub
@@ -193,46 +176,11 @@ _install_curl_stub() {
 	d=$(mktemp -d)
 	skew=$(fanout_scrape_all "$d" tick 30000 30001)
 	# The persisted sidecar matches the value echoed on stdout (whatever it was).
-	[ "$(fanout_scrape_skew_ms "$d" tick)" = "$skew" ]
+	[ "$(cat "$d/tick.skew")" = "$skew" ]
 	rm -rf "$d" "$CURL_BODY_DIR"
 }
 
-@test "fanout_scrape_skew_high: 4043ms spread exceeds the 1000ms default -> 1" {
-	d=$(mktemp -d)
-	echo "4043" > "$d/tick.skew"
-	FANOUT_MAX_SKEW_MS=1000 run fanout_scrape_skew_high "$d" tick
-	[ "$output" = "1" ]
-	rm -rf "$d"
-}
-
-@test "fanout_scrape_skew_high: 300ms spread is below the ceiling -> 0" {
-	d=$(mktemp -d)
-	echo "300" > "$d/tick.skew"
-	FANOUT_MAX_SKEW_MS=1000 run fanout_scrape_skew_high "$d" tick
-	[ "$output" = "0" ]
-	rm -rf "$d"
-}
-
-@test "fanout_scrape_skew_high: exactly at the ceiling is NOT high (strict >)" {
-	d=$(mktemp -d)
-	echo "1000" > "$d/tick.skew"
-	FANOUT_MAX_SKEW_MS=1000 run fanout_scrape_skew_high "$d" tick
-	[ "$output" = "0" ]
-	rm -rf "$d"
-}
-
-@test "fanout_scrape_skew_high: absent .skew record -> 0 (never flags single-pod)" {
-	d=$(mktemp -d)
-	FANOUT_MAX_SKEW_MS=1000 run fanout_scrape_skew_high "$d" tick
-	[ "$output" = "0" ]
-	rm -rf "$d"
-}
-
-# --- R2-5: value-based gate is the SAME code path the probe uses inline ----
-# The propagation probe holds a MAX-across-batches skew (not tied to one .skew
-# sidecar) and must route its gate decision through fanout_skew_high_value so the
-# production path is the unit-tested path. These assert the value variant directly
-# and that the sidecar variant delegates to it (identical strict-"\>" semantics).
+# --- skew gate (fanout_skew_high_value, strict ">") -------------------------
 
 @test "fanout_skew_high_value: 4043ms over the 1000ms default -> 1" {
 	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value 4043
@@ -252,17 +200,6 @@ _install_curl_stub() {
 @test "fanout_skew_high_value: empty/non-numeric value -> 0 (treated as no skew)" {
 	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value ""
 	[ "$output" = "0" ]
-}
-
-@test "fanout_scrape_skew_high delegates to fanout_skew_high_value (same decision)" {
-	d=$(mktemp -d)
-	echo "1500" > "$d/tick.skew"
-	FANOUT_MAX_SKEW_MS=1000 run fanout_scrape_skew_high "$d" tick
-	sidecar="$output"
-	FANOUT_MAX_SKEW_MS=1000 run fanout_skew_high_value 1500
-	[ "$sidecar" = "$output" ]
-	[ "$sidecar" = "1" ]
-	rm -rf "$d"
 }
 
 # --- restart detection (pod-set change + per-pod start-time advance) --------

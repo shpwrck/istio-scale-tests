@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pre-merge verification gate for tests/lib/ shared helpers.
-# Runs syntax checks, static analysis, inline-definition audits, unit tests,
-# and optionally dry-run sweeps.
+# Runs syntax checks, shellcheck, inline-definition audits, bats unit tests, the
+# bare-scrape lint, and the CI dry-run smoke (every tests/ script annotated
+# `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
 # Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
 set -euo pipefail
@@ -69,7 +70,6 @@ EXTRACTED_PATTERNS=(
 	'is_nonneg_int() {'
 	'validate_scoping() {'
 	'_detect_now_ns() {'
-	'_detect_now_ms() {'
 	'now_ns() {'
 	'now_ms() {'
 	'extract_counter_sum() {'
@@ -77,12 +77,9 @@ EXTRACTED_PATTERNS=(
 	'extract_gauge() {'
 	'extract_gauge_sum() {'
 	'delta_histogram_p99() {'
-	'scrape_istiod_metrics() {'
 	'harness_sha() {'
 	'kube_versions() {'
 	'probe_kube_versions() {'
-	'istiod_restart_status() {'
-	'istiod_start_time_seconds() {'
 	'write_preamble() {'
 	'infra_preamble_lines() {'
 	'env_parse_istiod_resources() {'
@@ -103,11 +100,10 @@ EXTRACTED_PATTERNS=(
 	'fanout_counter_sum() {'
 	'fanout_counter_by_label_sum() {'
 	'fanout_gauge_sum() {'
-	'fanout_gauge_invariant() {'
 	'fanout_merge_histogram() {'
 	'fanout_restart_status() {'
 )
-EXCEPTIONS="tests/lib/|tests/tuning/004-compare-profiles.sh|tests/controlplane/002-collect-resource-metrics.sh|tests/propagation/002-run-endpoint-probe.sh"
+EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
 	matches=$(grep -rn "$pat" "$ROOT/tests/" --include='*.sh' | grep -vE "$EXCEPTIONS" || true)
 	if [[ -n "$matches" ]]; then
@@ -147,35 +143,25 @@ else
 	err "bare by-design-non-zero scrape call(s) found (capture, guard with || true, or use as if/while condition)"
 fi
 
-# 6. dry-run sweeps
+# 6. dry-run smoke — same discovery and args as CI (portability.yml).
 if ((SKIP_DRY_RUN)); then
-	step 6 "dry-run sweeps (SKIPPED)"
+	step 6 "dry-run smoke (SKIPPED)"
 else
-	step 6 "dry-run sweep scripts"
+	step 6 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
-	SWEEPS=(
-		"tests/churn/003-run-sweep.sh --dry-run --contexts ci-dummy"
-		"tests/controlplane/003-run-sweep.sh --dry-run --contexts ci-dummy"
-		"tests/dataplane/003-run-sweep.sh --dry-run --contexts ci-dummy"
-		"tests/propagation/006-run-sweep.sh --dry-run --contexts ci-dummy"
-		"tests/churn-dataplane/004-run-sweep.sh --dry-run --contexts ci-dummy"
-		"tests/tuning/003-run-tuning-sweep.sh --dry-run --contexts ci-dummy"
-	)
-	for sweep in "${SWEEPS[@]}"; do
-		script="${ROOT}/${sweep%% *}"
-		args="${sweep#* }"
-		if [[ -x "$script" ]]; then
-			# shellcheck disable=SC2086
-			if "$script" $args >/dev/null 2>&1; then
-				echo "    ok: $sweep"
-			else
-				echo "    FAIL: $sweep"
-				dry_fail=1
-			fi
+	empty_kubeconfig="$(mktemp)"
+	while IFS= read -r f; do
+		args=$(grep -m1 '^# ci-dry-run:' "$f" | sed 's/^# ci-dry-run://')
+		rel="${f#"$ROOT"/}"
+		# shellcheck disable=SC2086
+		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $args) >/dev/null 2>&1; then
+			echo "    ok: $rel --dry-run${args}"
 		else
-			echo "    SKIP (not executable): $sweep"
+			echo "    FAIL: $rel --dry-run${args}"
+			dry_fail=1
 		fi
-	done
+	done < <(grep -rl --exclude-dir='bats-*' '^# ci-dry-run:' "$ROOT/tests" --include='*.sh' | sort)
+	rm -f "$empty_kubeconfig"
 	if ((dry_fail)); then err "dry-run failures"; else ok; fi
 fi
 

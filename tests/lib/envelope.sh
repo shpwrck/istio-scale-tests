@@ -200,7 +200,7 @@ env_sla_verdict() {
 
 # env_istiod_resources <ctx> <kubectl_argv...>
 # Targets the unsuffixed `istiod` Deployment (default Sail revision) — same
-# caveat as capacity.sh:cap_istiod_limits for non-default revisions (#44).
+# caveat as capacity.sh:cap_istiod_limits for non-default revisions.
 # shellcheck disable=SC2329
 env_istiod_resources() {
 	local ctx="$1"; shift

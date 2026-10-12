@@ -4,7 +4,6 @@
 # Consumers: churn, churn-dataplane
 #
 # Exposes:
-#   scrape_istiod_metrics <port> <output_file>
 #   extract_counter_sum <metrics_file> <counter_name>
 #   extract_counter_by_label <metrics_file> <counter_name> <label> <value>
 #   extract_gauge <metrics_file> <gauge_name>
@@ -15,19 +14,8 @@
 # output is typically 10-50KB and piping through bash variables invites
 # quoting problems at scale.
 #
-# Requires: curl, awk. Callers must have sourced tests/lib/common.sh (for die()).
+# Requires: awk. Callers must have sourced tests/lib/common.sh (for die()).
 # shellcheck shell=bash
-
-# Scrape istiod /metrics to a file. Returns 0 on success, 1 on failure.
-# Usage: scrape_istiod_metrics <port> <output_file>
-# shellcheck disable=SC2329
-scrape_istiod_metrics() {
-	local port="$1" outfile="$2"
-	# Shared, centralized scrape timeout (config/options.env METRICS_SCRAPE_TIMEOUT).
-	# Defaulted inline so this lib is correct when sourced standalone (bats) without
-	# config/options.env. MUST be raised at 10k scale — the /metrics body is MB-class.
-	curl -fsS --max-time "${METRICS_SCRAPE_TIMEOUT:-30}" "http://localhost:${port}/metrics" -o "$outfile" 2>/dev/null
-}
 
 # Sum all instances of a Prometheus counter.
 # Usage: extract_counter_sum <metrics_file> <counter_name>
