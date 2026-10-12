@@ -292,18 +292,18 @@ Definitions for every metric column in the results table above. Only the **sourc
 cluster is scaled; remotes stay at base replicas, so `remote_*` columns measure
 cross-cluster propagation. `src_`/`rmt_` prefixes are the source istiod (summed across its
 replicas) vs the remote istiod pods (summed/maxed across all remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
-(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*`) are excluded but still counted in
+(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*` / `*_FAILED`) are excluded but still counted in
 `n_total`. Histogram p99 columns are reported as **bucket ranges** (e.g. `0-100`), not exact
 values; `overflow` means the p99 fell in the `+Inf` bucket.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
 | `mesh` | clusters | sweep axis | Mesh size (number of clusters). |
-| `churn` | scale-ops | sweep axis | Churn intensity per iteration. |
-| `scale` | `base->target` | sweep axis | Endpoint scale range applied to the churn target (e.g. `1->5`). |
+| `churn` | deployments | sweep axis | Churn intensity: churn-target deployments scaled per iteration. |
+| `scale` | `base->target` | sweep axis | Replica range applied to each churn target on the source (e.g. `1->5`). |
 | `n_valid` | rows | internal | Rows with `status == OK` used in the averages. |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/timed-out rows. |
-| `local_avg (ms)` | ms | source istiod `/debug/syncz` poll | Local convergence: time until all source proxies report SYNCED. |
+| `local_avg (ms)` | ms | source watcher `/clusters` + source istiod `/debug/syncz` | Time until the source watcher sees at least one new Ready pod per deployment and every source proxy reports SYNCED. **Includes** pod scheduling + sidecar startup. |
 | `remote_reach_avg (ms)` | ms | remote watcher Envoy `/clusters` | Time until every churn target on the remote watcher has more healthy endpoint weight than before t0 (at least one new Ready source pod per deployment). **Includes** pod scheduling + sidecar startup. |
 | `remote_eds_avg (ms)` | ms | remote `pilot_xds_pushes{type="eds"}` counter delta | Time to the first remote EDS push after t0. Control plane only; **excludes** pod boot. |
 | `src_triggers` / `rmt_triggers` | count (delta) | `pilot_push_triggers` counter delta | Push triggers on the source / remote istiod during the churn event. |
@@ -434,7 +434,7 @@ report_markdown() {
 		}
 		# Note the filter rate when any cell dropped rows.
 		if (any_filtered) {
-			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_*) are excluded from numeric aggregation but still counted in `n_total`.\n"
+			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_* / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
 

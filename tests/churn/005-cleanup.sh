@@ -77,11 +77,18 @@ for ctx in "${CONTEXTS[@]}"; do
 			echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace $NS --ignore-not-found=true"
 			exit 0
 		fi
-		if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+		# --ignore-not-found: a missing namespace is empty output; an unreachable
+		# context is an error, not "already clean".
+		if ! found=$("${KUBECTL[@]}" --context="$ctx" get namespace "$NS" --ignore-not-found -o name); then
+			echo "  [$ctx] error: could not query namespace $NS" >&2
+			exit 1
+		fi
+		if [[ -z "$found" ]]; then
 			echo "  [$ctx] Namespace $NS does not exist, skipping."
 			exit 0
 		fi
-		"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true 2>/dev/null || true
+		"${KUBECTL[@]}" --context="$ctx" delete namespace "$NS" --ignore-not-found=true \
+			|| { echo "  [$ctx] error: could not delete namespace $NS" >&2; exit 1; }
 		echo "  [$ctx] Done."
 	) &
 	PIDS+=($!)

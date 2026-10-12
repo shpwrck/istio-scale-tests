@@ -1,9 +1,9 @@
 # Churn / Convergence Test Suite
 
 Measures how fast the mesh converges under endpoint churn. The probe scales the
-churn-target deployments on one **source** cluster and times when the source istiod
-has synced every proxy and when each **remote** cluster sees the change. Remote
-clusters stay at base replicas, so the remote numbers are cross-cluster propagation only.
+churn-target deployments on one **source** cluster and times when the source sees
+the new pods and when each **remote** cluster sees them. Remote clusters stay at
+base replicas, so the remote numbers are cross-cluster propagation only.
 
 ## Architecture
 
@@ -19,6 +19,7 @@ graph TB
         CT["churn-target-N (scaled)"]
         SP["istiod"]
         LSC["local sidecars"]
+        SWENV["churn-watcher sidecar"]
     end
     subgraph RMT["remote cluster · churn targets stay at base"]
         direction TB
@@ -29,9 +30,11 @@ graph TB
     DRV -->|"scale up / down"| CT
     CT -->|"endpoint add / remove"| SP
     SP -->|"xDS push"| LSC
+    SP -->|"EDS push"| SWENV
     CT -->|"cross-cluster endpoint watch"| RP
     RP -->|"EDS push"| WENV
-    DRV -.->|"convergence_local_ms: /debug/syncz all SYNCED"| SP
+    DRV -.->|"convergence_local_ms: /clusters"| SWENV
+    DRV -.->|"then /debug/syncz all SYNCED"| SP
     DRV -.->|"convergence_remote_eds_ms: first EDS push"| RP
     DRV -.->|"remote_endpoint_reachable_ms: /clusters"| WENV
 
@@ -42,18 +45,19 @@ graph TB
     class DRV harness;
     class SRC,RMT cluster;
     class SP,RP controlplane;
-    class CT,LSC,WENV dataplane;
+    class CT,LSC,SWENV,WENV dataplane;
 ```
 
 ## What gets measured
 
 One TSV row per iteration. istiod metrics are summed or merged across all istiod
 replicas. Remote times and p99s are the max across remote clusters; remote counters the sum.
+With no remote (mesh size 1) the remote columns are `N/A`.
 
 | Column | Meaning |
 |--------|---------|
-| `convergence_local_ms` | Source istiod reports every connected proxy SYNCED (`/debug/syncz`). |
-| `convergence_remote_eds_ms` | First EDS push on the remote istiod after t0 (`pilot_xds_pushes{type="eds"}`). Control plane only. |
+| `convergence_local_ms` | The source watcher sees at least one new Ready pod per deployment and the source istiod reports every proxy SYNCED (`/debug/syncz`). Includes pod scheduling and sidecar start. |
+| `convergence_remote_eds_ms` | First EDS push on the remote istiod after t0 (`pilot_xds_pushes{type="eds"}`). Control plane only. Polled from `/metrics`, so it can trail `remote_endpoint_reachable_ms` by a poll tick. |
 | `remote_endpoint_reachable_ms` | Every churn target on the remote watcher has more healthy endpoint weight than before t0: at least one new Ready source pod per deployment. Includes pod scheduling and sidecar start. |
 | `*_push_triggers_delta` | `pilot_push_triggers` increase during the iteration. |
 | `*_xds_pushes_delta` | `pilot_xds_pushes` increase (one per proxy connection per xDS type). |
@@ -105,6 +109,7 @@ Add `--dry-run` to any script to see what it would do without changing the clust
 For each mesh size (default `1..N`; the first context is the source) and each churn
 intensity (deployment count) the sweep runs setup, probe and cleanup. It writes the TSVs,
 `sweep-<run-id>.md` and `sweep-charts-<run-id>.md` to `tests/churn/results/sweep-<run-id>/`.
+Charts need at least three contexts (two mesh sizes with a remote).
 A failed setup or probe becomes a placeholder row and the sweep moves on.
 
 ## Settings
