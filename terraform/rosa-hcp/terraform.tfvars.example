@@ -34,7 +34,7 @@ common_tags = {
 # Shared overrides for every cluster:
 # cluster_defaults = {
 #   replicas             = 2
-#   compute_machine_type = "m5.xlarge"
+#   compute_machine_type = "m7i.xlarge"
 #   worker_autoscale_min = 2
 #   worker_autoscale_max = 10
 # }
