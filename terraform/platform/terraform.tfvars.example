@@ -52,6 +52,15 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # Number of spokes labeled as mesh members, in sorted order (0 = all).
 # mesh_member_count = 0
 
+# --- Small hub ---
+# The Argo CD defaults are sized for the 20-cluster campaign; shrink them on a small hub.
+# argocd_config_values = {
+#   argocd = {
+#     controller = { resources = { requests = { cpu = "250m", memory = "1Gi" }, limits = { cpu = "2", memory = "3Gi" } } }
+#     repo       = { replicas = 1, resources = { requests = { cpu = "100m", memory = "256Mi" }, limits = { cpu = "1", memory = "1Gi" } } }
+#   }
+# }
+
 # --- Large fleets ---
 # Argo CD shards = ceil((spokes + 1) / argocd_clusters_per_shard).
 # argocd_clusters_per_shard = 50

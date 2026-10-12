@@ -98,6 +98,8 @@ resource "helm_release" "argocd_config" {
   wait             = true
   timeout          = 300
 
+  values = [yamlencode(var.argocd_config_values)]
+
   set = concat(
     [
       {
