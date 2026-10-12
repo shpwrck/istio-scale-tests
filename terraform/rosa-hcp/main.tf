@@ -9,12 +9,13 @@ locals {
         vpc_cidr     = format(var.vpc_cidr_format, idx + var.vpc_cidr_index_start)
       },
       {
+        # An override entry returns null for unset fields, so coalesce (not try) to reach the default.
+        # The outer try keeps null when neither sets the field (coalesce(null, null) errors).
         for field in ["replicas", "compute_machine_type"] :
-        field => try(
-          var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)][field],
-          var.cluster_defaults[field],
-          null,
-        )
+        field => try(coalesce(
+          try(var.cluster_overrides[format(var.cluster_name_format, idx + var.cluster_index_start)][field], null),
+          try(var.cluster_defaults[field], null),
+        ), null)
       },
       {
         ec2_metadata_http_tokens = coalesce(
