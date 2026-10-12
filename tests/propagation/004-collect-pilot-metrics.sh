@@ -25,8 +25,10 @@ source "${ROOT}/tests/lib/common.sh"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
-# Own port block (default 22014) so a snapshot can run while 002 holds 21014+.
-: "${FANOUT_PF_BASE:=22014}"
+# Own port block so a snapshot can run while 002 (or another suite) holds the
+# FANOUT_PF_BASE block. Assigned after versions.env, which exports FANOUT_PF_BASE.
+# shellcheck disable=SC2034  # read by tests/lib/fanout.sh
+FANOUT_PF_BASE="${PROPAGATION_SNAPSHOT_PF_BASE:-22014}"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
 
@@ -52,7 +54,8 @@ Writes <ctx>-<pod>-<timestamp>.prom per istiod pod, filtered to pilot_* series.
 
 Environment:
   SETUP_CONTEXTS, METRICS_SCRAPE_TIMEOUT (curl --max-time per scrape, default 30),
-  FANOUT_PF_BASE (local port block base, default 22014).
+  PROPAGATION_SNAPSHOT_PF_BASE (local port block base, default 22014; kept
+  apart from FANOUT_PF_BASE so this can run alongside 002).
 EOF
 }
 
@@ -106,6 +109,7 @@ if ((DRY_RUN)); then
 	echo "Would scrape every Running istiod pod on: ${CONTEXTS[*]}"
 	echo "Output directory: $OUTPUT_DIR (one .prom file per pod per scrape)"
 	echo "Watch mode: $WATCH (interval: ${INTERVAL}s)"
+	echo "Local port block: $(fanout_ctx_port_base 0)+ (${FANOUT_CTX_STRIDE} ports per context)"
 	exit 0
 fi
 

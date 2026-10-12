@@ -33,6 +33,8 @@ WAIT_TIMEOUT=300
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-5}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
+# fortio-server port; 002/003 send load to the same port.
+SERVICE_PORT="${COEXEC_SERVICE_PORT:-8080}"
 # Applying into a still-Terminating namespace fails, so wait (bounded) for a
 # namespace a previous run is still deleting to disappear first. An Active
 # namespace is re-applied in place.
@@ -57,6 +59,7 @@ Usage: $(basename "$0") [options]
 Environment:
   COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   COEXEC_ISTIOD_REPLICAS (expected istiod replica pin; warns on mismatch),
+  COEXEC_SERVICE_PORT (fortio-server port; default 8080),
   COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
   defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 240),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
@@ -110,6 +113,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+if ! is_pos_int "$SERVICE_PORT" || ((SERVICE_PORT > 65535)); then
+	die "COEXEC_SERVICE_PORT must be a port number (1-65535), got: $SERVICE_PORT"
+fi
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -192,6 +198,7 @@ render_for() {
 		--set fortioRole="$role" \
 		--set churnDeploymentCount="$CHURN_DEPLOYMENT_COUNT_OPT" \
 		--set churnBaseReplicas="$CHURN_BASE_REPLICAS_OPT" \
+		--set service.port="$SERVICE_PORT" \
 		--set churnImage.tag="$BUSYBOX_VERSION" \
 		--set fortioImage.tag="$FORTIO_VERSION"
 }

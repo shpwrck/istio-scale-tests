@@ -21,7 +21,7 @@ Profile commands need PyYAML; the others use the standard library only.
                                   it is not there
   state-add STATE CTX NS PROJECT WINDOW_JSON
                                   record a paused AppProject window in the STATE file
-  state-get STATE context|projects|window:PROJECT [OUT]
+  state-get STATE context|namespace|projects|window:PROJECT [OUT]
                                   read the STATE file
 """
 
@@ -275,10 +275,12 @@ def cmd_state_add(state_file, ctx, ns, project, window_file):
 
 
 def cmd_state_get(state_file, key, out=None):
-    """key: context | projects | window:<project> (written to OUT)."""
+    """key: context | namespace | projects | window:<project> (written to OUT)."""
     state = read_json(state_file)
     if key == "context":
         print(state["context"])
+    elif key == "namespace":
+        print(state.get("namespace", ""))
     elif key == "projects":
         print(" ".join(state["projects"]))
     elif key.startswith("window:") and out:

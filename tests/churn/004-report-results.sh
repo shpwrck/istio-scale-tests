@@ -457,26 +457,51 @@ report_charts() {
 	echo "# Churn Convergence — Charts"
 	echo ""
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
-	# Charts aggregate per mesh size over valid rows only ($21=="OK").
-	# Count total vs valid rows so a dropped (restart-poisoned / non-OK) row never lands
-	# as a 0 data point silently — a per-mesh-size series point with zero valid rows is
-	# ABSENT (cl_n[ms]==0 -> not plotted), and the caption mirrors the markdown footnote.
+	# Charts average each series per mesh size over valid rows only ($21=="OK").
+	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,
+	# so a point with no samples is never plotted as 0: each chart keeps only the
+	# mesh sizes where every one of its series has samples and names what it left out.
+	function add(key, ms, v) { sum[key, ms] += v; cnt[key, ms]++ }
+	function chart(title, ytitle, keylist, labellist, fmt,    nk, keys, labels, ax, n_ax, i, j, ms, ok, miss) {
+		nk = split(keylist, keys, " "); split(labellist, labels, ",")
+		n_ax = 0; miss = ""
+		for (i = 1; i <= n_remote; i++) {
+			ms = remote_arr[i]; ok = 1
+			for (j = 1; j <= nk; j++) {
+				if (!((keys[j], ms) in cnt)) {
+					ok = 0
+					miss = miss (miss == "" ? "" : ", ") labels[j] " @ mesh " ms
+				}
+			}
+			if (ok) ax[++n_ax] = ms
+		}
+		if (n_ax < 2) {
+			printf "\n> Not charted: fewer than two mesh sizes have samples for every series (no samples: %s).\n\n", miss
+			return 0
+		}
+		printf "\n```mermaid\nxychart-beta\n    title \"%s\"\n    x-axis \"Mesh Size\" [", title
+		for (i = 1; i <= n_ax; i++) printf "%s%s", (i > 1 ? ", " : ""), ax[i]
+		printf "]\n    y-axis \"%s\"\n", ytitle
+		for (j = 1; j <= nk; j++) {
+			printf "    line ["
+			for (i = 1; i <= n_ax; i++) printf "%s" fmt, (i > 1 ? ", " : ""), sum[keys[j], ax[i]] / cnt[keys[j], ax[i]]
+			printf "]\n"
+		}
+		printf "```\n\n"
+		if (miss != "") printf "> Mesh sizes with a point that has no samples (e.g. all TIMEOUT) are left out: %s.\n", miss
+		return 1
+	}
 	!/^#/ && !/^run_id/ && NF>=21 {
 		rows_total++
 		if ($21 != "OK") { rows_dropped++; next }
-	}
-	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
 		ms = $2 + 0
 		seen[ms] = 1
-		if($8!="TIMEOUT" && $8!="N/A") { cl_sum[ms]+=$8+0; cl_n[ms]++ }
-		if($9!="TIMEOUT" && $9!="N/A") { cr_sum[ms]+=$9+0; cr_n[ms]++ }
-		if($10!="TIMEOUT" && $10!="N/A") { cre_sum[ms]+=$10+0; cre_n[ms]++ }
-		if($13!="N/A") { sxp_sum[ms]+=$13+0; sxp_n[ms]++ }
-		if($14!="N/A") { rxp_sum[ms]+=$14+0; rxp_n[ms]++ }
-		if($11!="N/A" && $11+0 > 0 && $13!="N/A") {
-			amp_sum[ms] += ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11
-			amp_n[ms]++
-		}
+		if($8!="TIMEOUT" && $8!="N/A") add("cl", ms, $8+0)
+		if($9!="TIMEOUT" && $9!="N/A") add("cr", ms, $9+0)
+		if($10!="TIMEOUT" && $10!="N/A") add("cre", ms, $10+0)
+		if($13!="N/A") add("sxp", ms, $13+0)
+		if($14!="N/A") add("rxp", ms, $14+0)
+		if($11!="N/A" && $11+0 > 0 && $13!="N/A") add("amp", ms, ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11)
 	}
 	function sort_ms(    i, j, tmp, k) {
 		n_ms = 0
@@ -506,96 +531,22 @@ report_charts() {
 			exit
 		}
 
-		# Chart 1: Convergence latency vs mesh size
 		printf "%% Chart 1: Convergence latency (ms) vs mesh size\n"
 		printf "%% Series order: local avg, remote reach avg, remote EDS avg\n"
 		printf "%% x-axis starts at mesh 2 (remote series undefined at mesh 1)\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"Convergence Latency vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_arr[i]
+		if (chart("Convergence Latency vs Mesh Size", "Latency (ms)", "cl cr cre", "local avg,remote reach avg,remote EDS avg", "%.0f")) {
+			printf "> Series order: **local avg**, **remote reach avg**, **remote EDS avg**.\n"
+			printf "> x-axis starts at mesh 2 — remote metrics are undefined at mesh size 1.\n\n"
 		}
-		printf "]\n"
-		printf "    y-axis \"Latency (ms)\"\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (cl_n[ms] > 0) ? cl_sum[ms]/cl_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (cr_n[ms] > 0) ? cr_sum[ms]/cr_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (cre_n[ms] > 0) ? cre_sum[ms]/cre_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series order: **local avg**, **remote reach avg**, **remote EDS avg**.\n"
-		printf "> x-axis starts at mesh 2 — remote metrics are undefined at mesh size 1.\n\n"
 
-		# Chart 2: xDS pushes vs mesh size
 		printf "%% Chart 2: xDS pushes vs mesh size\n"
 		printf "%% Series order: source xDS pushes, remote xDS pushes\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"xDS Pushes vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_arr[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"Push count\"\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (sxp_n[ms] > 0) ? sxp_sum[ms]/sxp_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (rxp_n[ms] > 0) ? rxp_sum[ms]/rxp_n[ms] : 0
-			printf "%s%.0f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series order: **source xDS pushes**, **remote xDS pushes**.\n\n"
+		if (chart("xDS Pushes vs Mesh Size", "Push count", "sxp rxp", "source xDS pushes,remote xDS pushes", "%.0f"))
+			printf "> Series order: **source xDS pushes**, **remote xDS pushes**.\n\n"
 
-		# Chart 3: Push amplification vs mesh size
 		printf "%% Chart 3: Push amplification ratio vs mesh size\n"
-		printf "\n```mermaid\n"
-		printf "xychart-beta\n"
-		printf "    title \"Push Amplification vs Mesh Size\"\n"
-		printf "    x-axis \"Mesh Size\" ["
-		for (i = 1; i <= n_remote; i++) {
-			if (i > 1) printf ", "
-			printf "%s", remote_arr[i]
-		}
-		printf "]\n"
-		printf "    y-axis \"Amplification ratio\"\n"
-		printf "    line ["; sep = ""
-		for (i = 1; i <= n_remote; i++) {
-			ms = remote_arr[i]
-			v = (amp_n[ms] > 0) ? amp_sum[ms]/amp_n[ms] : 0
-			printf "%s%.1f", sep, v; sep = ", "
-		}
-		printf "]\n"
-		printf "```\n\n"
-		printf "> Series: **push amplification ratio** (total xDS pushes / source push triggers). Scales with connected proxies x xDS types; compare across mesh sizes, not against 1.\n"
+		if (chart("Push Amplification vs Mesh Size", "Amplification ratio", "amp", "push amplification", "%.1f"))
+			printf "> Series: **push amplification ratio** (total xDS pushes / source push triggers). Scales with connected proxies x xDS types; compare across mesh sizes, not against 1.\n"
 	}'
 }
 

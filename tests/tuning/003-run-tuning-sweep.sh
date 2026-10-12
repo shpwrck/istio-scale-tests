@@ -188,6 +188,17 @@ echo "    Settle:    ${SETTLE_SEC}s"
 echo "    Argo CD:   $( ((GITOPS_PAUSE)) && echo "pause on ${GITOPS_CTX}" || echo "not paused")"
 echo "    Output:    ${SWEEP_DIR}/"
 
+# A profile left applied by an interrupted run would contaminate every pass.
+# Checked before --dry-run exits, so CI (no results dir yet) runs this path too.
+for base in "${TUNING_DIR}/results" "$OUTPUT_BASE"; do
+	[[ -d "$base" ]] || continue
+	leftover="$(find "$base" -name active-profile -type f 2>/dev/null | head -1)"
+	[[ -n "$leftover" ]] || continue
+	hint="./tests/tuning/005-cleanup.sh --contexts ${CONTEXTS_CSV}"
+	[[ "$base" == "${TUNING_DIR}/results" ]] || hint+=" --results-dir ${base}"
+	die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ${hint} first"
+done
+
 if ((DRY_RUN)); then
 	echo ""
 	echo "--- Plan ---"
@@ -240,14 +251,6 @@ python3 -I -c 'import yaml' 2>/dev/null \
 	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
 KUBECTL=()
 resolve_kubectl KUBECTL
-# A profile left applied by an interrupted run would contaminate every pass.
-for base in "${TUNING_DIR}/results" "$OUTPUT_BASE"; do
-	leftover="$(find "$base" -name active-profile -type f 2>/dev/null | head -1)"
-	[[ -n "$leftover" ]] || continue
-	hint="./tests/tuning/005-cleanup.sh --contexts ${CONTEXTS_CSV}"
-	[[ "$base" == "${TUNING_DIR}/results" ]] || hint+=" --results-dir ${base}"
-	die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ${hint} first"
-done
 
 ACTIVE_STATE_DIR=""
 GITOPS_PAUSED=0

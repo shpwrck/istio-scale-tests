@@ -564,8 +564,9 @@ aggregate() {
 			nv_count = (k in n_valid) ? n_valid[k] : 0
 			rr = (k in restarts) ? restarts[k] : 0
 			uu = (k in unknowns) ? unknowns[k] : 0
-			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "0"
-			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "0"
+			# No proxy sampled (failed cell, or --config-dump-samples 0): N/A, not 0.
+			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "N/A"
+			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "N/A"
 			# P1-6: SINGLE-BUCKET-PINNED detection. Now that the histogram p99
 			# INTERPOLATES within the matched bucket (P0/FINDING#5), the old
 			# max==100 floor test is stale: an interpolated value lands at e.g. 73ms,
@@ -941,13 +942,41 @@ report_charts() {
 	echo ""
 	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
 	# Chart 2: Per-proxy config dump size (MB) by scoping at largest mesh size.
-	# Both chart only the largest service/replica/namespace count swept, so a point
-	# never mixes cells from different workload sizes.
-	local max_svc max_rep max_ns
-	read -r max_svc max_rep max_ns < <(awk -F'\t' 'NR > 1 {
-		if ($2+0 > s) s = $2+0; if ($3+0 > r) r = $3+0; if ($4+0 > n) n = $4+0
-	} END { print s+0, r+0, n+0 }' <<<"$aggregated")
-	echo "> Workload charted: ${max_svc} services x ${max_rep} replicas in ${max_ns} namespace(s) per cluster (largest swept)."
+	# Both chart ONE service/replica/namespace workload, so a point never mixes cells
+	# from different workload sizes. Only cells with valid CPU data count: the largest
+	# combo is the one most likely to fail (SETUP_FAILED/PROBE_FAILED), and picking it
+	# blindly would chart nothing. Pick the largest workload (most pods = svc x rep,
+	# then namespaces) with valid data at >= 2 mesh sizes; else the largest valid one.
+	local max_svc max_rep max_ns pick_note
+	read -r max_svc max_rep max_ns pick_note < <(awk -F'\t' '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	function bigger(a, b,    x, y) {  # is tuple a larger than tuple b?
+		if (b == "") return 1
+		split(a, x, "|"); split(b, y, "|")
+		if (x[1] * x[2] != y[1] * y[2]) return x[1] * x[2] > y[1] * y[2]
+		if (x[1] + 0 != y[1] + 0) return x[1] + 0 > y[1] + 0
+		return x[3] + 0 > y[3] + 0
+	}
+	NR > 1 && $7 + 0 > 0 && is_num($24) {
+		t = ($2 + 0) "|" ($3 + 0) "|" ($4 + 0)
+		if (!((t, $1 + 0) in seen)) { seen[t, $1 + 0] = 1; n_ms[t]++ }
+	}
+	END {
+		best = ""; best2 = ""
+		for (t in n_ms) {
+			if (bigger(t, best)) best = t
+			if (n_ms[t] >= 2 && bigger(t, best2)) best2 = t
+		}
+		if (best2 != "") { split(best2, p, "|"); note = "largest with valid data at 2+ mesh sizes" }
+		else if (best != "") { split(best, p, "|"); note = "largest with valid data" }
+		else { print "0 0 0 none"; exit }
+		print p[1], p[2], p[3], note
+	}' <<<"$aggregated")
+	if [[ "$pick_note" == "none" ]]; then
+		echo "> No cell has valid samples — nothing to chart."
+		return 0
+	fi
+	echo "> Workload charted: ${max_svc} services x ${max_rep} replicas in ${max_ns} namespace(s) per cluster (${pick_note})."
 	echo ""
 	awk -F'\t' -v max_svc="$max_svc" -v max_rep="$max_rep" -v max_ns="$max_ns" '
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
@@ -955,22 +984,23 @@ report_charts() {
 	$2+0 != max_svc || $3+0 != max_rep || $4+0 != max_ns { next }
 	{
 		ms = $1 + 0; scoping = $5; n_valid = $7 + 0
-		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
-		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
 		# PL13/PL15 + PL8 gate (mirrors the markdown/json n_valid + overflow handling):
 		# a cell with no valid samples (every row restart-poisoned/unknown so n_valid==0,
-		# where the aggregate emit3 returns N/A) or whose charted column
-		# carries the overflow sentinel (cpu_delta_avg $24 / cfg_dump_avg $25) is ABSENT,
-		# not a real 0 data point. Coercing it (awk $24 + 0) would plot a poisoned/overflow
-		# cell as the LOWEST CPU point, the inverse of reality. Count it as dropped and
-		# leave has[] unset so it is never charted as 0.
+		# where the aggregate emit3 returns N/A) or whose cpu_delta_avg ($24) is
+		# overflow/N/A is ABSENT, not a real 0 data point. Coercing it (awk $24 + 0) would
+		# plot a poisoned/overflow cell as the LOWEST CPU point, the inverse of reality.
+		# Count it as dropped and leave has[] unset so it is never charted as 0.
+		# Config dump ($25) is gated separately: it is N/A whenever no proxy was sampled
+		# (--config-dump-samples 0), which must not drop the cell from the CPU chart.
 		cells_total++
-		if (n_valid <= 0 || $24 == "overflow" || $25 == "overflow" || !is_num($24) || !is_num($25)) {
+		if (n_valid <= 0 || !is_num($24)) {
 			cells_dropped++
 			next
 		}
+		if (!(ms in ms_seen)) { ms_order[++n_ms] = ms; ms_seen[ms] = 1 }
+		if (!(scoping in sc_seen)) { sc_order[++n_sc] = scoping; sc_seen[scoping] = 1 }
 		cpu_val[ms, scoping] = $24 + 0
-		cfg_val[ms, scoping] = $25 + 0
+		if (is_num($25)) cfg_val[ms, scoping] = $25 + 0
 		has[ms, scoping] = 1
 	}
 	END {
