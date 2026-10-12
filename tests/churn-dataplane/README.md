@@ -108,23 +108,25 @@ succeeded), or a sweep placeholder: `SETUP_FAILED`, `PROBE_FAILED`, `RESET_FAILE
 `CLEANUP_TIMEOUT`.
 
 The report keeps rows with `status=OK` and `istiod_restarted=0`, pairs them by
-`combo_id`, and prints mean and stdev of `Δp99_ms` with `total_runs`/`valid_runs`
-for each `(mesh_size, churn_rate)`.
+`combo_id` within each TSV file, and prints mean and stdev of `Δp99_ms` with
+`total_runs`/`valid_runs` for each `(mesh_size, churn_rate)`.
 
 ## Settings
 
 Defaults are the `COEXEC_*` variables in `config/options.env` (durations, QPS, churn
 rates, settle times, repetitions, seed, cleanup timeouts); each script's `--help` shows
 them. Churn size comes from `CHURN_DEPLOYMENT_COUNT`, `CHURN_BASE_REPLICAS` and
-`CHURN_SCALE_TO_REPLICAS`, shared with the churn suite.
+`CHURN_SCALE_TO_REPLICAS`, shared with the churn suite. Churn-target pods use a 5 s
+termination grace period (chart value `churnTerminationGracePeriodSeconds`), so
+scaled-down pods are gone before the next baseline window.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `001-setup-coexec-test.sh` | Deploy fortio and churn targets; waits for a leftover namespace to finish deleting first. |
+| `001-setup-coexec-test.sh` | Deploy fortio and churn targets; re-applies in place, and waits first if the namespace is still deleting. |
 | `002-run-baseline-probe.sh` | One fortio window with no churn; writes a `baseline` row. |
-| `003-run-churn-probe.sh` | One fortio window while the churn driver runs; writes a `churn` row with `delta_p99_ms`. |
+| `003-run-churn-probe.sh` | One fortio window while the churn driver runs; writes a `churn` row with `delta_p99_ms`, then scales the churn targets back to base. |
 | `004-run-sweep.sh` | Run the mesh-size × churn-rate × repetition sweep and the report. |
 | `005-report-results.sh` | Summarize TSVs as text, csv, json, md or charts. |
-| `006-cleanup.sh` | Delete the namespace (pods first, with a short grace period). |
+| `006-cleanup.sh` | Scale to 0 and delete pods with a short grace period, then delete the namespace. |

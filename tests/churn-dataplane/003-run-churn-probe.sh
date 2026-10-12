@@ -167,6 +167,10 @@ done
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 [[ -n "$CHURN_RATE" ]] || die "--churn-rate is required"
 [[ "$CHURN_RATE" =~ ^[0-9]+$ ]] || die "--churn-rate must be a non-negative integer"
+is_pos_int "$DURATION" || die "--duration must be a positive integer"
+is_pos_int "$CHURN_DEPLOYMENT_COUNT_OPT" || die "--deployment-count must be a positive integer"
+is_nonneg_int "$CHURN_BASE_REPLICAS_OPT" || die "--base-replicas must be a non-negative integer"
+is_pos_int "$CHURN_SCALE_TO_OPT" || die "--scale-to must be a positive integer"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -268,6 +272,7 @@ cleanup_all() {
 	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	rm -rf "${ISTIOD_DIR:-}"
+	rm -f "${CHURN_LOG:-}"
 }
 trap cleanup_all EXIT
 
@@ -280,7 +285,10 @@ PRE_PODSET="${ISTIOD_DIR}/pre.podset"
 PRE_SKEW_MS=0
 SCRAPE_INCOMPLETE=0
 if ((PF_OK)); then
-	fanout_record_podset "$SOURCE_CTX" "$PRE_PODSET" "${KUBECTL[@]}"
+	# Pre podset = the pods fanout_open reached, in scrape-file order, so
+	# fanout_restart_status pairs each pod with its own scrape. The post podset
+	# lists every Running pod, so a replaced or added istiod shows as a change.
+	printf '%s\n' "${ISTIOD_PODS[@]}" > "$PRE_PODSET"
 	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
@@ -563,3 +571,11 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t
 	"$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99" >> "$OUTPUT_FILE"
 
 echo "Wrote churn row to $OUTPUT_FILE"
+
+# The driver can leave targets at --scale-to (an odd number of toggles per target).
+# Put them back to base so a later baseline or churn window starts all-base.
+for ctx in "${ALL_CTXS[@]}"; do
+	"${KUBECTL[@]}" --context="$ctx" -n "$NS" --request-timeout=10s scale deployment \
+		-l churn-target=true --replicas="$CHURN_BASE_REPLICAS_OPT" >/dev/null \
+		|| echo "warn: could not reset churn targets to base on $ctx" >&2
+done

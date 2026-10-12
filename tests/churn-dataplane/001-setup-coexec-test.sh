@@ -33,8 +33,9 @@ WAIT_TIMEOUT=300
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-5}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
-# Applying into a still-Terminating namespace fails, so wait (bounded) for any
-# namespace left by a previous run to disappear first.
+# Applying into a still-Terminating namespace fails, so wait (bounded) for a
+# namespace a previous run is still deleting to disappear first. An Active
+# namespace is re-applied in place.
 SETUP_NS_WAIT_SEC="${COEXEC_SETUP_NS_WAIT_SEC:-${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}}"
 
 usage() {
@@ -47,8 +48,8 @@ Usage: $(basename "$0") [options]
   --deployment-count N     Number of churn-target Deployments (default: $CHURN_DEPLOYMENT_COUNT_OPT).
   --base-replicas N        Initial replicas per churn-target Deployment (default: $CHURN_BASE_REPLICAS_OPT).
   --wait-timeout N         Seconds to wait for Deployments to become Available (default: $WAIT_TIMEOUT).
-  --ns-wait-timeout N      Seconds to wait for a pre-existing (Terminating) namespace to
-                           fully disappear before applying (default: $SETUP_NS_WAIT_SEC).
+  --ns-wait-timeout N      Seconds to wait for a Terminating namespace from a previous
+                           run to disappear before applying (default: $SETUP_NS_WAIT_SEC).
   --dry-run                Render the chart and run apply --dry-run=client; contexts
                            missing from the kubeconfig get the render only.
   -h, --help               Show this help.
@@ -134,15 +135,21 @@ if ! ((DRY_RUN)); then
 	done
 fi
 
-# Wait until the namespace is gone (0) or SETUP_NS_WAIT_SEC passes (1).
+# Print the namespace phase (Active, Terminating) or nothing when it is absent.
+ns_phase() {
+	"${KUBECTL[@]}" --context="$1" get namespace "$NS" --ignore-not-found \
+		-o jsonpath='{.status.phase}' 2>/dev/null
+}
+
+# Wait until the namespace is not Terminating (0) or SETUP_NS_WAIT_SEC passes (1).
 wait_ns_gone() {
 	local ctx="$1" deadline now
-	if ! "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; then
+	if [[ "$(ns_phase "$ctx")" != "Terminating" ]]; then
 		return 0
 	fi
-	echo "  [$ctx] namespace $NS still present (Terminating?); waiting up to ${SETUP_NS_WAIT_SEC}s for it to clear before apply..." >&2
+	echo "  [$ctx] namespace $NS is Terminating; waiting up to ${SETUP_NS_WAIT_SEC}s for it to clear before apply..." >&2
 	deadline=$(( $(date +%s) + SETUP_NS_WAIT_SEC ))
-	while "${KUBECTL[@]}" --context="$ctx" get namespace "$NS" >/dev/null 2>&1; do
+	while [[ "$(ns_phase "$ctx")" == "Terminating" ]]; do
 		now=$(date +%s)
 		if (( now > deadline )); then
 			echo "  [$ctx] namespace $NS did not clear within ${SETUP_NS_WAIT_SEC}s; cannot apply into a Terminating namespace; check stuck finalizers: ${KUBECTL[*]} --context=$ctx get ns $NS -o jsonpath='{.spec.finalizers}'" >&2
@@ -155,7 +162,7 @@ wait_ns_gone() {
 }
 
 if ((DRY_RUN)); then
-	echo "  [dry-run] would wait up to ${SETUP_NS_WAIT_SEC}s for a pre-existing Terminating ns ($NS) on each context before apply" >&2
+	echo "  [dry-run] would wait up to ${SETUP_NS_WAIT_SEC}s for a Terminating ns ($NS) on each context before apply" >&2
 fi
 
 if ! ((DRY_RUN)); then

@@ -222,7 +222,10 @@ PRE_PODSET="${ISTIOD_DIR}/pre.podset"
 PRE_SKEW_MS=0
 SCRAPE_INCOMPLETE=0
 if ((PF_OK)); then
-	fanout_record_podset "$SOURCE_CTX" "$PRE_PODSET" "${KUBECTL[@]}"
+	# Pre podset = the pods fanout_open reached, in scrape-file order, so
+	# fanout_restart_status pairs each pod with its own scrape. The post podset
+	# lists every Running pod, so a replaced or added istiod shows as a change.
+	printf '%s\n' "${ISTIOD_PODS[@]}" > "$PRE_PODSET"
 	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
