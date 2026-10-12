@@ -24,7 +24,7 @@ VPC IDs are read from: terraform -chdir=${TF_DIR} output -json by_cluster
 
 Options:
   --dry-run       Show what would be deleted without acting
-  --region REGION Override AWS region (default: from terraform output)
+  --region REGION Override AWS region (default: \$AWS_REGION, \$AWS_DEFAULT_REGION, then aws config)
   -h, --help      Show this help
 EOF
 }
@@ -70,8 +70,8 @@ done < <(echo "${BY_CLUSTER}" | jq -r 'keys[]')
 [[ ${#VPC_IDS[@]} -gt 0 ]] || die "no VPCs found in terraform output"
 
 if [[ -z "${REGION}" ]]; then
-  REGION="$(aws configure get region 2>/dev/null)" \
-    || die "could not determine AWS region — pass --region or set AWS_DEFAULT_REGION"
+  REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
+  [[ -n "${REGION}" ]] || die "could not determine AWS region — pass --region or set AWS_REGION"
 fi
 
 AWS=(aws --region "${REGION}" --output json)

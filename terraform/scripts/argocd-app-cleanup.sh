@@ -8,17 +8,6 @@ set -euo pipefail
 #   Token:      TOKEN_SCRIPT + API_URL + ADMIN_PASS
 #
 # Required: GITOPS_NS
-#
-# Also accepts positional args for backwards compatibility:
-#   argocd-app-cleanup.sh <token_script> <api_url> <admin_pass> <gitops_namespace>
-
-if [[ $# -ge 4 ]]; then
-  TOKEN_SCRIPT="${1}"
-  API_URL="${2}"
-  ADMIN_PASS="${3}"
-  GITOPS_NS="${4}"
-  export TOKEN_SCRIPT API_URL ADMIN_PASS GITOPS_NS
-fi
 
 : "${GITOPS_NS:?GITOPS_NS is required}"
 

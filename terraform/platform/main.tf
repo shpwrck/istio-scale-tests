@@ -17,7 +17,7 @@ data "external" "cluster_api_url" {
 
   program = [
     "bash", "-c",
-    "CLUSTER=$(kubectl --kubeconfig \"$1\" config view -o json | jq -r --arg ctx \"$2\" '.contexts[] | select(.name==$ctx) | .context.cluster') && URL=$(kubectl --kubeconfig \"$1\" config view -o json | jq -r --arg c \"$CLUSTER\" '.clusters[] | select(.name==$c) | .cluster.server') && jq -n --arg url \"$URL\" '{url:$url}'",
+    "URL=$(kubectl --kubeconfig \"$1\" config view --minify --context \"$2\" -o jsonpath='{.clusters[0].cluster.server}') && [ -n \"$URL\" ] || { echo \"no API server URL for kubeconfig context '$2'\" >&2; exit 1; }; jq -n --arg url \"$URL\" '{url:$url}'",
     "--",
     pathexpand(var.kubeconfig_path),
     each.key,
@@ -42,7 +42,7 @@ locals {
   by_cluster = (
     local.use_kubeconfig
     ? { for ctx in local.cluster_keys : ctx => {
-        cluster_api_url = data.external.cluster_api_url[ctx].result.url
+      cluster_api_url = data.external.cluster_api_url[ctx].result.url
       }
     }
     : data.terraform_remote_state.rosa[0].outputs.by_cluster
