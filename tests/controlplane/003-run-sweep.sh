@@ -24,6 +24,9 @@
 #
 #   # Dry-run to see the planned matrix:
 #   ./tests/controlplane/003-run-sweep.sh --dry-run --contexts <mesh-a-ctx>,<mesh-b-ctx>
+#
+#   # The whole sweep from a run config (axes, settle, results dir; flags still win):
+#   ./tests/controlplane/003-run-sweep.sh --config tests/controlplane/configs/smoke.env --dry-run
 # ci-dry-run: --traffic-configs none,vsdr
 set -euo pipefail
 # Loud ERR trap for unexpected aborts; per-combo failures become row statuses.
@@ -31,11 +34,17 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+# The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
+# per-combo flags it passes still win.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # SCALE_* preamble keys
-# shellcheck disable=SC1091
-source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the peak poller
 # shellcheck disable=SC1091
@@ -46,12 +55,13 @@ source "${ROOT}/tests/lib/capacity.sh"  # cap_node_totals / cap_istiod_limits fo
 source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble + campaign-end scale envelope
 
 CONTEXTS_CSV=""
-MESH_SIZES_CSV=""
-SERVICE_COUNTS_CSV="${CONTROLPLANE_SERVICE_COUNT:-10}"
-REPLICA_COUNTS_CSV="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
-NAMESPACE_COUNTS_CSV="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
-SIDECAR_SCOPINGS_CSV="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
-TRAFFIC_CONFIGS_CSV="${CONTROLPLANE_TRAFFIC_CONFIG:-none}"
+# Axes: the plural key (a CSV, PL7), else the singular key 001/002 use, else the default.
+MESH_SIZES_CSV="${CONTROLPLANE_MESH_SIZES:-}"
+SERVICE_COUNTS_CSV="${CONTROLPLANE_SERVICE_COUNTS:-${CONTROLPLANE_SERVICE_COUNT:-10}}"
+REPLICA_COUNTS_CSV="${CONTROLPLANE_REPLICA_COUNTS:-${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}}"
+NAMESPACE_COUNTS_CSV="${CONTROLPLANE_NAMESPACE_COUNTS:-${CONTROLPLANE_NAMESPACE_COUNT:-1}}"
+SIDECAR_SCOPINGS_CSV="${CONTROLPLANE_SIDECAR_SCOPINGS:-${CONTROLPLANE_SIDECAR_SCOPING:-none}}"
+TRAFFIC_CONFIGS_CSV="${CONTROLPLANE_TRAFFIC_CONFIGS:-${CONTROLPLANE_TRAFFIC_CONFIG:-none}}"
 VSDR_EVERY="${CONTROLPLANE_VSDR_EVERY:-1}"
 VSDR_SUBSETS="${CONTROLPLANE_VSDR_SUBSETS:-2}"
 # 1 when passed as a flag: --resume refuses a flag that conflicts with the resumed
@@ -59,8 +69,11 @@ VSDR_SUBSETS="${CONTROLPLANE_VSDR_SUBSETS:-2}"
 VSDR_EVERY_FLAG=0
 VSDR_SUBSETS_FLAG=0
 CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
-OUTPUT_DIR_BASE="${ROOT}/tests/controlplane/results"
-SETTLE_SEC=60
+OUTPUT_DIR_BASE="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
+# 1 when --output-dir is passed (--resume refuses it; a results dir from the
+# environment or --config does not count).
+OUTPUT_DIR_FROM_FLAG=0
+SETTLE_SEC="${CONTROLPLANE_SETTLE_SEC:-60}"
 DRY_RUN=0
 METRICS_API_STATUS="unknown"  # set by metrics_preflight; recorded in the preamble
 FORCE_LARGE_MATRIX=0
@@ -72,19 +85,27 @@ RESUME_DIR=""
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 
 usage() {
+	local mesh_sizes_default='"1,2,...,len(contexts)"'
+	[[ -z "$MESH_SIZES_CSV" ]] || mesh_sizes_default="$MESH_SIZES_CSV"
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+Run config:
+  --config FILE               Run config of KEY=value lines (config/options.env keys; see
+                              tests/controlplane/README.md, "Run config"). The steps the
+                              sweep runs inherit it. Precedence: flag > --config >
+                              environment > default.
+
 Sweep dimensions (cross-product):
   --contexts CSV              All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV            Cluster counts (default: "1,2,...,len(contexts)").
+  --mesh-sizes CSV            Cluster counts (default: ${mesh_sizes_default}).
   --service-counts CSV        Dummy services per cluster (default: $SERVICE_COUNTS_CSV).
   --replica-counts CSV        Replicas per service (default: $REPLICA_COUNTS_CSV).
   --namespace-counts CSV      Namespaces to spread services across (default: $NAMESPACE_COUNTS_CSV).
   --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,explicit
-                              (default: \$CONTROLPLANE_SIDECAR_SCOPING or "none").
+                              (default: $SIDECAR_SCOPINGS_CSV).
   --traffic-configs CSV       Traffic management per service: none,vsdr
-                              (default: \$CONTROLPLANE_TRAFFIC_CONFIG or "none").
+                              (default: $TRAFFIC_CONFIGS_CSV).
                               vsdr adds a VirtualService + DestinationRule per
                               configured service; innermost axis, so each none/vsdr
                               pair runs back to back. --traffic-config is an alias.
@@ -102,7 +123,7 @@ Other:
                               and final scrape (default: $SETTLE_SEC).
   --output-dir DIR            Results base directory; each sweep gets a
                               sweep-<RUN_ID>/ subdir under it
-                              (default: tests/controlplane/results).
+                              (default: ${CONTROLPLANE_RESULTS_DIR}).
   --resume DIR                Resume an interrupted sweep in this sweep-<RUN_ID>/
                               dir: reuse its RUN_ID and skip combos that already
                               have a valid row. Scalars recorded once in the TSV
@@ -110,6 +131,10 @@ Other:
                               includes vsdr, PROXY_CHECK_*) are taken from it; a
                               conflicting --vsdr-every/--vsdr-subsets flag is
                               refused. Not valid with --output-dir or --dry-run.
+                              With --config, warns when the config differs from the
+                              one the sweep started with; without it, refuses a
+                              sweep that started with one (add --config
+                              <DIR>/run-config-<RUN_ID>.env).
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -119,6 +144,12 @@ Environment:
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
+  Axis CSVs: CONTROLPLANE_MESH_SIZES, CONTROLPLANE_SERVICE_COUNTS,
+  CONTROLPLANE_REPLICA_COUNTS, CONTROLPLANE_NAMESPACE_COUNTS,
+  CONTROLPLANE_SIDECAR_SCOPINGS, CONTROLPLANE_TRAFFIC_CONFIGS (each, when empty, falls
+  back to the singular key above). CONTROLPLANE_SETTLE_SEC (--settle),
+  CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
+  CONTROLPLANE_WAIT_TIMEOUT_SEC (001's pod readiness wait).
   SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (recorded in the TSV preamble).
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
   pre-sweep wait for 'kubectl top nodes'; warns (never aborts) if unavailable.
@@ -133,6 +164,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -196,6 +232,7 @@ while [[ $# -gt 0 ]]; do
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR_BASE="$2"
+		OUTPUT_DIR_FROM_FLAG=1
 		shift 2
 		;;
 	--resume)
@@ -230,7 +267,7 @@ PROXY_CHECK_MIN_DIFF="${CONTROLPLANE_PROXY_CHECK_MIN_DIFF:-2}"
 is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT must be a non-negative integer percent (got: $PROXY_CHECK_TOL_PCT)"
 is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "CONTROLPLANE_PROXY_CHECK_MIN_DIFF must be a non-negative integer (got: $PROXY_CHECK_MIN_DIFF)"
 # --resume already names the full sweep dir; refuse a custom --output-dir with it.
-if [[ -n "$RESUME_DIR" && "$OUTPUT_DIR_BASE" != "${ROOT}/tests/controlplane/results" ]]; then
+if [[ -n "$RESUME_DIR" ]] && ((OUTPUT_DIR_FROM_FLAG)); then
 	die "--resume and --output-dir are mutually exclusive (--resume already names the full sweep dir)"
 fi
 
@@ -380,6 +417,31 @@ if [[ -n "$RESUME_DIR" ]]; then
 	fi
 fi
 
+# --resume keeps the TSV preamble the sweep started with, RUN_CONFIG* included. With
+# --config, warn when this config is not that one. Without --config, refuse a sweep that
+# started with one: the axes would fall back to env/defaults, so a different matrix would
+# be appended under the recorded RUN_CONFIG. The preamble decides; the snapshot (best
+# effort) only counts for a sweep whose TSV has no preamble yet.
+if [[ -n "$RESUME_DIR" ]]; then
+	_resume_snapshot="${OUTPUT_DIR}/run-config-${RUN_ID}.env"
+	_resume_cfg="" _resume_sha=""
+	if [[ -f "$_resume_tsv" ]]; then
+		_resume_cfg="$(awk -v k="# RUN_CONFIG=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
+		_resume_sha="$(awk -v k="# RUN_CONFIG_SHA256=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
+	fi
+	if [[ "${RUN_CONFIG:-none}" != none ]]; then
+		if [[ "$_resume_sha" != "${RUN_CONFIG_SHA256:-none}" ]]; then
+			echo "warning: --resume: --config ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12}) is not the config this sweep started with (RUN_CONFIG_SHA256=${_resume_sha:-not recorded}). The TSV keeps the original provenance, and values recorded only in its preamble (SETTLE_SEC, CONFIG_DUMP_SAMPLES, ...) may not match the new rows." >&2
+		fi
+	elif [[ ( -n "$_resume_cfg" && "$_resume_cfg" != none ) || ( -z "$_resume_cfg" && -f "$_resume_snapshot" ) ]]; then
+		if [[ -f "$_resume_snapshot" ]]; then
+			die "--resume: this sweep was started with --config ${_resume_cfg:-$(basename "$_resume_snapshot")}; without it the axes and settings fall back to the environment and defaults, and the new rows would not match the recorded RUN_CONFIG. To resume with the same values, add --config $(printf '%q' "$_resume_snapshot"):
+  $(printf '%q' "$0") --resume $(printf '%q' "$RESUME_DIR") --config $(printf '%q' "$_resume_snapshot")"
+		fi
+		die "--resume: this sweep was started with --config ${_resume_cfg} (RUN_CONFIG_SHA256=${_resume_sha:-not recorded}), and its snapshot ${_resume_snapshot} is missing. Pass --config with that file (the sha256 must match), or start a new sweep."
+	fi
+fi
+
 # Each DestinationRule subset needs at least one pod, at every replica count in the
 # sweep. Checked after --resume, which can adopt the recorded --vsdr-subsets.
 if ((HAS_VSDR)); then
@@ -455,6 +517,7 @@ precreate_tsv_preamble() {
 		echo "# TRAFFIC_CONFIG=${TRAFFIC_CONFIGS_CSV}"
 		echo "# VSDR_EVERY=${VSDR_EVERY}"
 		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
+		config_preamble_lines
 		echo "# ${tb_line}"
 		echo "# ${eh_line}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
@@ -598,6 +661,9 @@ emit_failed_row() {
 	echo "Settle time:       ${SETTLE_SEC}s"
 	echo "Run ID:            ${RUN_ID}"
 	echo "Output:            ${OUTPUT_DIR}"
+	if [[ "${RUN_CONFIG:-none}" != none ]]; then
+		echo "Run config:        ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+	fi
 	echo ""
 	echo "Planned matrix:    ${MATRIX_SIZE} = ${MATRIX_FACTORS} (mesh × svc × rep × ns × scope × traffic)"
 	echo ""
@@ -730,10 +796,13 @@ stop_peak_metrics_poller() {
 
 trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 
-# Pre-create the TSV preamble before any combo (skipped in dry-run).
+# Pre-create the TSV preamble before any combo (skipped in dry-run). A fresh sweep with
+# --config also gets the run-config-<RUN_ID>.env replay copy; a resumed one keeps the
+# config it started with.
 if ((! DRY_RUN)); then
 	metrics_preflight
 	precreate_tsv_preamble
+	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"
 fi
 
 combo_idx=0

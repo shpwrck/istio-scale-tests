@@ -4,15 +4,19 @@
 # the namespace is fully gone, up to --timeout seconds.
 #
 # Usage:
-#   ./tests/churn-dataplane/006-cleanup.sh [--contexts CSV] [--wait-deletion] [--timeout SEC] [--dry-run]
+#   ./tests/churn-dataplane/006-cleanup.sh [--config FILE] [--contexts CSV] [--wait-deletion] [--timeout SEC] [--dry-run]
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 
@@ -29,6 +33,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/churn-dataplane/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default.
   --contexts CSV     Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --wait-deletion    Block until the namespace is fully removed on every context.
   --timeout SEC      Maximum seconds to wait for deletion (default: $TIMEOUT_SEC).
@@ -45,6 +52,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2 ;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"; shift 2 ;;

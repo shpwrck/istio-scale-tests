@@ -7,15 +7,19 @@
 # them to finish terminating.
 #
 # Usage:
-#   ./tests/controlplane/005-cleanup.sh [--contexts CSV] [--dry-run]
+#   ./tests/controlplane/005-cleanup.sh [--config FILE] [--contexts CSV] [--dry-run]
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -29,6 +33,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/controlplane/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default.
   --contexts CSV     Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --grace-period SEC Grace period for deleting the workload pods before the
                      namespace delete (default: $FAST_DRAIN_GRACE_SEC).
@@ -49,6 +56,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"

@@ -5,12 +5,15 @@
 # - Reports n_total and n_valid per combination.
 # - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
 #   within one TSV file.
-# - Every output format carries the TSV preamble metadata.
+# - Every output format carries the TSV preamble metadata, and RUN_CONFIG /
+#   RUN_CONFIG_SHA256 (the --config behind the inputs) over all input TSVs.
 # - Every output format has a "Remote coverage" section from the reach-*.tsv files
 #   that 002's reachability check writes (tests/lib/reach.sh).
 #
 # Usage:
 #   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
+#   ./tests/churn-dataplane/005-report-results.sh --config tests/churn-dataplane/configs/smoke.env \
+#     --results-dir tests/churn-dataplane/results/smoke/sweep-<RUN_ID> --format md
 # ci-dry-run:
 set -euo pipefail
 
@@ -18,9 +21,17 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_report_value
+# --config FILE: export the file's keys before options.env fills in defaults.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/options.env"  # COEXEC_RESULTS_DIR
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 
-RESULTS_DIR="${ROOT}/tests/churn-dataplane/results"
+RESULTS_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
+# 1 when --results-dir is passed (gates the multi-run warning below).
+RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
 DRY_RUN=0
 FAIL_ON_UNREACHABLE=0
@@ -29,8 +40,12 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/churn-dataplane/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default. Without --results-dir, warns
+                     when the results dir holds more than one run.
   --results-dir DIR  Directory searched recursively for churn-dataplane-*.tsv
-                     (default: tests/churn-dataplane/results).
+                     (default: ${COEXEC_RESULTS_DIR}).
   --format FMT       Output format: text | csv | json | md (or markdown) | charts (default: text).
   --fail-on-unreachable
                      After the output, exit 3 when a remote's reach coverage is not
@@ -46,14 +61,21 @@ Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 20
 share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
 
 Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when the rule fired.
+
+Environment:
+  COEXEC_RESULTS_DIR  --results-dir default (relative to the repo root).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2 ;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
-		RESULTS_DIR="$2"; shift 2 ;;
+		RESULTS_DIR="$2"; RESULTS_DIR_FROM_FLAG=1; shift 2 ;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
 		FORMAT="$2"; shift 2 ;;
@@ -141,6 +163,15 @@ REACH_HTTP_TIMEOUT_SEC_STR="$(extract_preamble_kv REACH_HTTP_TIMEOUT_SEC)"
 REACH_ATTEMPTS_STR="$(extract_preamble_kv REACH_ATTEMPTS)"
 REACH_RETRY_SEC_STR="$(extract_preamble_kv REACH_RETRY_SEC)"
 ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
+# Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
+# `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
+RUN_CONFIG_STR="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
+RUN_CONFIG_SHA256_STR="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# PL6: a results dir from --config (or the default) is a base dir that can hold many
+# sweeps, and the report aggregates all of them.
+if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
+	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
+fi
 
 # Remote coverage over every reach-*.tsv under RESULTS_DIR (empty without any).
 REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
@@ -292,6 +323,8 @@ emit_metadata_lines() {
 	printf '%s REACH_ATTEMPTS=%s\n'        "$prefix" "${REACH_ATTEMPTS_STR:-unknown}"
 	printf '%s REACH_RETRY_SEC=%s\n'       "$prefix" "${REACH_RETRY_SEC_STR:-unknown}"
 	printf '%s ON_UNREACHABLE=%s\n'        "$prefix" "${ON_UNREACHABLE_STR:-unknown}"
+	printf '%s RUN_CONFIG=%s\n'            "$prefix" "${RUN_CONFIG_STR:-unknown}"
+	printf '%s RUN_CONFIG_SHA256=%s\n'     "$prefix" "${RUN_CONFIG_SHA256_STR:-unknown}"
 }
 
 report_text() {
@@ -355,10 +388,12 @@ report_json() {
 		--arg reach_attempts   "${REACH_ATTEMPTS_STR:-unknown}" \
 		--arg reach_retry_sec  "${REACH_RETRY_SEC_STR:-unknown}" \
 		--arg on_unreachable   "${ON_UNREACHABLE_STR:-unknown}" \
+		--arg run_config       "${RUN_CONFIG_STR:-unknown}" \
+		--arg run_config_sha256 "${RUN_CONFIG_SHA256_STR:-unknown}" \
 		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -431,6 +466,8 @@ report_md() {
 	echo "| REACH_ATTEMPTS | ${REACH_ATTEMPTS_STR:-unknown} |"
 	echo "| REACH_RETRY_SEC | ${REACH_RETRY_SEC_STR:-unknown} |"
 	echo "| ON_UNREACHABLE | ${ON_UNREACHABLE_STR:-unknown} |"
+	echo "| RUN_CONFIG | \`${RUN_CONFIG_STR:-unknown}\` |"
+	echo "| RUN_CONFIG_SHA256 | \`${RUN_CONFIG_SHA256_STR:-unknown}\` |"
 	echo ""
 	reach_coverage_render md <(printf '%s' "$REACH_ROWS")
 	echo ""

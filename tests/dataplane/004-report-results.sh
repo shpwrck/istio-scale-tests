@@ -12,19 +12,30 @@
 # reach-*.tsv checks (tests/lib/reach.sh) per remote, plus the remotes whose latency
 # rows are all or partly invalid, so an n_valid < n_total gap names its remotes.
 #
+# Every format also carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the
+# inputs) over all input TSVs: mixed:a,b with a warning when they differ (PL26).
+#
 # Usage:
 #   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
+#   ./tests/dataplane/004-report-results.sh --config tests/dataplane/configs/smoke.env \
+#     --results-dir tests/dataplane/results/smoke/sweep-<RUN_ID> --format markdown
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_report_value
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload dataplane "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"  # DATAPLANE_MIN_QPS_RATIO (fallback for TSVs without one)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 
-RESULTS_DIR="${ROOT}/tests/dataplane/results"
+RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
+# 1 when --results-dir is passed (gates the multi-run warning below).
+RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
 FAIL_ON_UNREACHABLE=0
 
@@ -33,7 +44,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: tests/dataplane/results).
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/dataplane/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default. Without --results-dir, warns
+                     when the results dir holds more than one run.
+  --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}).
                      A directory containing latency-*.tsv files; a sweep-*/
                      subdir from 003 also works.
   --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
@@ -60,6 +75,7 @@ preamble (recorded before the QPS_SHORTFALL check) can produce it.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
+  DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
 
 Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when a rule fired.
 EOF
@@ -67,9 +83,15 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
+		RESULTS_DIR_FROM_FLAG=1
 		shift 2
 		;;
 	--format)
@@ -124,6 +146,23 @@ done < <(awk '
 	}
 	/^[^#]/ { exit }
 ' "${TSV_FILES[0]}")
+
+# Which --config produced the inputs (PL2/PL19), over every input rather than the first
+# file: `none` without one, `unknown` for files written before the key existed,
+# mixed:a,b with a warning when they differ (PL26).
+_pre=()
+for kv in "${PREAMBLE[@]}"; do
+	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) _pre+=("$kv") ;; esac
+done
+PREAMBLE=("${_pre[@]}"
+	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
+	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
+unset _pre
+# PL6: a results dir from --config (or the default) is a base dir that can hold many
+# sweeps, and the report aggregates all of them.
+if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
+	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
+fi
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).
 # Counts:

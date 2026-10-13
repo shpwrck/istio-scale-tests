@@ -7,6 +7,7 @@
 load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
 source "${ROOT}/tests/lib/fortio.sh"
+source "${ROOT}/tests/lib/config.sh"  # config_preamble_lines (reach_write_header)
 source "${ROOT}/tests/lib/reach.sh"
 
 DP_PROBE="${ROOT}/tests/dataplane/002-run-latency-probe.sh"
@@ -177,6 +178,21 @@ rrow() {
 	[ "$(grep -vc '^#\|^run_id' "$f")" -eq 4 ]
 	run reach_check_all "${RES}/missing.tsv" x c1 2 ns pod "u{ctx}" ok-src ok-b _fake_kubectl
 	assert_failure
+}
+
+@test "reach_write_header: records RUN_CONFIG and RUN_CONFIG_SHA256 (PL36); refuses without config.sh" {
+	RUN_CONFIG=c.env RUN_CONFIG_SHA256=abc reach_write_header "${RES}/reach-c.tsv" RUN_ID=c
+	grep -qx '# RUN_CONFIG=c.env' "${RES}/reach-c.tsv"
+	grep -qx '# RUN_CONFIG_SHA256=abc' "${RES}/reach-c.tsv"
+	(unset RUN_CONFIG RUN_CONFIG_SHA256; reach_write_header "${RES}/reach-n.tsv" RUN_ID=n)
+	grep -qx '# RUN_CONFIG=none' "${RES}/reach-n.tsv"
+	grep -qx '# RUN_CONFIG_SHA256=none' "${RES}/reach-n.tsv"
+	# Without config.sh the header is not written, so the caller reports the check as not run.
+	run --separate-stderr bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/fortio.sh"
+		source "$1/tests/lib/reach.sh"; reach_write_header "$2" RUN_ID=z' _ "$ROOT" "${RES}/reach-z.tsv"
+	assert_failure
+	[[ "$stderr" == *"config_preamble_lines missing"* ]]
+	[ ! -e "${RES}/reach-z.tsv" ]
 }
 
 @test "reach_result_for / reach_not_reachable: listed remotes without a row count as UNKNOWN" {
@@ -388,6 +404,9 @@ _dp_probe() {
 	run grep -q 'fortio load -qps 10 -c 8 .*dataplane-server-ctx-c' "$STUB_LOG"
 	assert_success
 	ls "$RES"/reach-*.tsv
+	# The reach file records the run config like every other preamble (PL36).
+	grep -qx '# RUN_CONFIG=none' "$RES"/reach-*.tsv
+	grep -qx '# RUN_CONFIG_SHA256=none' "$RES"/reach-*.tsv
 	grep -q '## Remote coverage' "$RES"/latency-*.md
 }
 

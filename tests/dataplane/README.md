@@ -105,6 +105,34 @@ and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
 `sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
 size with a remote cluster; the p50-vs-mesh-size chart needs two.
 
+## Run config (`--config FILE`)
+
+Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
+rules: [Run config](../../README.md#run-config---config-file)).
+[`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
+QPS 10 and 100, 10 s per level):
+
+```bash
+./tests/dataplane/003-run-sweep.sh --config tests/dataplane/configs/smoke.env --dry-run
+./tests/dataplane/003-run-sweep.sh --config tests/dataplane/configs/smoke.env
+./tests/dataplane/004-report-results.sh --config tests/dataplane/configs/smoke.env \
+  --results-dir tests/dataplane/results/smoke/sweep-<RUN_ID> --format markdown
+./tests/dataplane/005-cleanup.sh --config tests/dataplane/configs/smoke.env
+```
+
+- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `DATAPLANE_*`, `REACH_*`,
+  `FANOUT_*` and `METRICS_SCRAPE_TIMEOUT`. `DATAPLANE_TEST_NAMESPACE` and
+  `DATAPLANE_MAX_MATRIX` stay environment only.
+- **Run keys:** `DATAPLANE_MESH_SIZES` (`003 --mesh-sizes`; empty: 1 to the number of
+  contexts), `DATAPLANE_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts
+  at the repo root, unlike the flags), `DATAPLANE_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`) and
+  `DATAPLANE_NS_DELETE_TIMEOUT_SEC` (`005 --deletion-timeout`). `DATAPLANE_QPS_LEVELS` is a
+  list for `002` and `003` alike.
+- **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`,
+  `--tuning-baseline` and `--sidecar-egress-hosts` (`001`/`002`; the sweep sets them),
+  `--fail-on-unreachable` (`004`), `--no-wait-deletion` (`005`), `--force-large-matrix`,
+  `--format` and `--dry-run`.
+
 ## Remote reachability
 
 A remote that the mesh cannot reach used to show up only as `n_valid < n_total` in the
@@ -129,7 +157,7 @@ the 200s among them, `top_code` the most frequent other code. For a target that 
 reply (`no healthy upstream`, `upstream connect error ... CERTIFICATE_VERIFY_FAILED`),
 with IPs and host names masked. It is a hint: Envoy's wording varies by version. The
 file has its own preamble (`REACH_SCHEMA`, `RUN_ID`, `HARNESS_SHA`, the `REACH_*` knobs,
-`ON_UNREACHABLE`), and stderr gets a per-target block ending in
+`ON_UNREACHABLE`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`), and stderr gets a per-target block ending in
 `WARNING: N of M remotes NOT reachable from <source>: ...`.
 
 What happens next depends on `--on-unreachable` (default `warn`,

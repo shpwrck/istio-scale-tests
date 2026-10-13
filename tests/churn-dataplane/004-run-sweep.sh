@@ -13,6 +13,8 @@
 #
 # Usage:
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
+#   # The whole sweep from a run config (mesh sizes, churn rates, durations; flags still win):
+#   ./tests/churn-dataplane/004-run-sweep.sh --config tests/churn-dataplane/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
 # Report the failing line on an unexpected abort. Per-combo failures are handled
@@ -21,9 +23,15 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+# The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
+# per-step flags it passes still win.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
@@ -34,7 +42,7 @@ source "${ROOT}/tests/lib/fortio.sh"
 source "${ROOT}/tests/lib/reach.sh" # REACH_EXIT_CODE, reach_validate
 
 CONTEXTS_CSV=""
-MESH_SIZES_CSV=""
+MESH_SIZES_CSV="${COEXEC_MESH_SIZES:-}"
 CHURN_RATES_CSV="${COEXEC_CHURN_RATES:-1,5,10}"
 BASELINE_DURATION="${COEXEC_BASELINE_DURATION_SEC:-60}"
 CHURN_DURATION="${COEXEC_CHURN_DURATION_SEC:-60}"
@@ -50,7 +58,7 @@ REPETITIONS="${COEXEC_REPETITIONS:-1}"
 MIN_PCT_200="${COEXEC_MIN_PCT_200:-0.99}"
 ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
 REACH_REQUESTS="${REACH_REQUESTS:-10}"
-OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
+OUTPUT_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 # Same namespace as 001/002/003/006; used by the reset-to-base step.
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}"
@@ -59,11 +67,17 @@ FORCE_LARGE_MATRIX=0
 DRY_RUN=0
 
 usage() {
+	local mesh_sizes_default="1..len(contexts)"
+	[[ -z "$MESH_SIZES_CSV" ]] || mesh_sizes_default="$MESH_SIZES_CSV"
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE             Run config of KEY=value lines (config/options.env keys; see
+                            tests/churn-dataplane/README.md, "Run config"). The steps the
+                            sweep runs inherit it. Precedence: flag > --config >
+                            environment > default.
   --contexts CSV            All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV          Mesh-size dimension (default: 1..len(contexts)).
+  --mesh-sizes CSV          Mesh-size dimension (default: ${mesh_sizes_default}).
   --churn-rates CSV         Churn rate dimension, "deployment scale ops/s" (default: $CHURN_RATES_CSV).
   --baseline-duration SEC   Baseline-phase fortio duration (default: $BASELINE_DURATION).
   --churn-duration SEC      Churn-phase fortio + churn duration (default: $CHURN_DURATION).
@@ -77,7 +91,7 @@ Usage: $(basename "$0") [options]
   --scale-to N              Scale-up replica count (default: $CHURN_SCALE_TO_OPT).
   --seed N                  Seed for the deterministic churn order (default: $CHURN_SEED).
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
-  --output-dir DIR          Top-level results directory (default: tests/churn-dataplane/results).
+  --output-dir DIR          Top-level results directory (default: ${COEXEC_RESULTS_DIR}).
   --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC); also bounds
                             001's wait for the previous mesh-size's namespace to go away.
   --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
@@ -102,7 +116,8 @@ Environment:
   COEXEC_NS_DELETE_TIMEOUT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003), REACH_ON_UNREACHABLE,
   REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC
-  (read by 002).
+  (read by 002). COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir;
+  relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC (read by 001).
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
@@ -110,6 +125,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2 ;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"; shift 2 ;;
@@ -236,6 +255,9 @@ echo "Settle:         ${SETTLE_SEC}s | Inter-combo: ${INTER_COMBO_SETTLE_SEC}s"
 echo "QPS:            $QPS  Connections: $CONNECTIONS"
 echo "Reach check:    ${REACH_REQUESTS} requests per target  On unreachable: ${ON_UNREACHABLE}  Min pct_200: ${MIN_PCT_200}"
 echo "Output:         $TSV_FILE"
+if [[ "${RUN_CONFIG:-none}" != none ]]; then
+	echo "Run config:     ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+fi
 ((DRY_RUN)) && echo "Mode:           dry-run"
 
 SCRIPT_DIR="${ROOT}/tests/churn-dataplane"
@@ -265,6 +287,7 @@ fi
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then
 	mkdir -p "$SWEEP_DIR"
+	config_snapshot "$SWEEP_DIR" "$RUN_ID"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 	ISTIOD_REPLICAS="$(fanout_preflight_istiod "${CONTEXTS[0]}" "${KUBECTL[@]}")"
@@ -296,6 +319,7 @@ if ! ((DRY_RUN)); then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
+	config_preamble_lines >> "$TSV_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 

@@ -83,6 +83,17 @@ source "${ROOT}/tests/lib/preamble.sh"
 	grep -q 'infra_preamble_lines' "${ROOT}/tests/controlplane/003-run-sweep.sh"
 }
 
+@test "PL36: both controlplane writers emit RUN_CONFIG* through config_preamble_lines; 004 reads them" {
+	# Inside the preamble block: after the VSDR_SUBSETS echo, before the header row.
+	for f in 002-collect-resource-metrics.sh 003-run-sweep.sh; do
+		awk '/echo "# VSDR_SUBSETS=/ { on = 1 } on && /^[[:space:]]*config_preamble_lines$/ { found = 1 }
+			/^[[:space:]]*\} > "\$(TSV_FILE|tsv)"/ { on = 0 } END { exit !found }' \
+			"${ROOT}/tests/controlplane/$f" || { echo "$f: no config_preamble_lines in the preamble block"; false; }
+	done
+	grep -q 'preamble_scalar RUN_CONFIG ' "${ROOT}/tests/controlplane/004-report-results.sh"
+	grep -q 'preamble_scalar RUN_CONFIG_SHA256 ' "${ROOT}/tests/controlplane/004-report-results.sh"
+}
+
 @test "C2: both controlplane writers emit CONTROLPLANE_INFRA_SCHEMA (read by 004's concordance guard)" {
 	grep -q 'echo "# CONTROLPLANE_INFRA_SCHEMA=' "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
 	grep -q 'echo "# CONTROLPLANE_INFRA_SCHEMA=' "${ROOT}/tests/controlplane/003-run-sweep.sh"

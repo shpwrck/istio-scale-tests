@@ -14,7 +14,8 @@
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION,
 # KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
-# report formats.
+# report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
+# over all input TSVs.
 #
 # Usage:
 #   ./tests/propagation/005-report-results.sh [--results-dir DIR] [--format text|csv|json|markdown|charts]
@@ -28,13 +29,25 @@
 #
 #   # Specific results directory:
 #   ./tests/propagation/005-report-results.sh --results-dir tests/propagation/results
+#
+#   # One sweep of a run config:
+#   ./tests/propagation/005-report-results.sh --config tests/propagation/configs/smoke.env \
+#     --results-dir tests/propagation/results/smoke/sweep-<RUN_ID> --format markdown
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_report_value
+# --config FILE: export the file's keys before options.env fills in defaults.
+config_preload propagation "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/options.env"  # PROPAGATION_RESULTS_DIR
 
-RESULTS_DIR="${ROOT}/tests/propagation/results"
+RESULTS_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
+# 1 when --results-dir is passed (gates the multi-run warning below).
+RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
 
 
@@ -42,7 +55,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: tests/propagation/results).
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/propagation/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default. Without --results-dir, warns
+                     when the results dir holds more than one run.
+  --results-dir DIR  Results directory (default: ${PROPAGATION_RESULTS_DIR}).
   --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
@@ -75,14 +92,21 @@ Environment:
   PROPAGATION_PERCENTILE_MIN_N  Minimum sample count before p95/p99 are reported
                       (default 20; 0 disables). Below it p95/p99 are N/A
                       (null in JSON). p50 is always reported.
+  PROPAGATION_RESULTS_DIR  --results-dir default (relative to the repo root).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
+		RESULTS_DIR_FROM_FLAG=1
 		shift 2
 		;;
 	--format)
@@ -127,7 +151,7 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_<KEY>[i]. Scalars are looked up via the first row (homogeneous by
 # definition); sequences iterate the rows in input order.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -156,6 +180,16 @@ for f in "${ENDPOINT_FILES[@]}"; do
 	done < <(grep -E '^# [A-Z_]+=' "$f" || true)
 	N_FILES=$((N_FILES + 1))
 done
+# Which --config produced the inputs (PL2/PL19), over every input rather than the last
+# file: `none` without one, `unknown` for files written before the key existed,
+# mixed:a,b with a warning when they differ (PL26).
+PREAMBLE[RUN_CONFIG]="$(config_report_value RUN_CONFIG "${ENDPOINT_FILES[@]}")"
+PREAMBLE[RUN_CONFIG_SHA256]="$(config_report_value RUN_CONFIG_SHA256 "${ENDPOINT_FILES[@]}")"
+# PL6: a results dir from --config (or the default) is a base dir that can hold many
+# sweeps, and the report aggregates all of them.
+if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
+	config_warn_multi_run "$RESULTS_DIR" "${ENDPOINT_FILES[@]}"
+fi
 
 # Helper: does any per-file row carry this key?
 preamble_has() {

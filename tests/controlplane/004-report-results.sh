@@ -13,24 +13,36 @@
 #   ./tests/controlplane/004-report-results.sh --format csv
 #   ./tests/controlplane/004-report-results.sh --format json
 #   ./tests/controlplane/004-report-results.sh --format markdown
+#   ./tests/controlplane/004-report-results.sh --config tests/controlplane/configs/smoke.env \
+#     --results-dir tests/controlplane/results/smoke/sweep-<RUN_ID>
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_repo_path
+# --config FILE: export the file's keys before options.env fills in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # O9: SCALE_COVERAGE_* knobs (coverage floor)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline)
 
-RESULTS_DIR="${ROOT}/tests/controlplane/results"
+RESULTS_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
+# 1 when --results-dir is passed (gates the multi-run warning below).
+RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: tests/controlplane/results).
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/controlplane/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default. Without --results-dir, warns
+                     when the results dir holds more than one run.
+  --results-dir DIR  Results directory (default: ${CONTROLPLANE_RESULTS_DIR}).
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
@@ -51,6 +63,9 @@ a WARNING line but never changes the exit code. Reads 40- and 51-column TSVs;
 40-column files add nothing to the per-cluster or traffic-management figures and
 their rows count as traffic_config none.
 
+Environment:
+  CONTROLPLANE_RESULTS_DIR      --results-dir default (relative to the repo root).
+
 Environment (O9 scale-coverage floor; default-off):
   SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
                                "Achieved scale" block (default: 0.25).
@@ -65,9 +80,15 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
+		RESULTS_DIR_FROM_FLAG=1
 		shift 2
 		;;
 	--format)
@@ -178,6 +199,18 @@ HARNESS_SHA_TAG=$(grep -m1 '^# HARNESS_SHA=' "${TSV_FILES[0]}" 2>/dev/null | sed
 # attributable to the sweep that produced them. Emitted in all four formats below.
 RUN_ID_TAG=$(grep -m1 '^# RUN_ID=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# RUN_ID=//' || echo unknown)
 [[ -n "$RUN_ID_TAG" ]] || RUN_ID_TAG=unknown
+
+# PL6: a results dir from --config (or the default) is a base dir that can hold many
+# runs, and the report aggregates all of them. Warn only with --config and without
+# --results-dir, so a report without --config prints what it always did.
+if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
+	run_ids="$(for f in "${TSV_FILES[@]}"; do grep -m1 '^# RUN_ID=' "$f" 2>/dev/null || echo "# RUN_ID=unknown"; done | sed 's/^# RUN_ID=//' | sort -u)"
+	n_runs="$(grep -c . <<<"$run_ids")"
+	if ((n_runs > 1)); then
+		run_list="$(awk 'NR <= 5 { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { if (NR > 5) printf ",..." }' <<<"$run_ids")"
+		echo "warning: ${RESULTS_DIR} holds ${n_runs} runs (RUN_IDs: ${run_list}); this report aggregates all of them. Pass --results-dir <dir>/sweep-<RUN_ID> to report one sweep." >&2
+	fi
+fi
 FILES_CONSUMED=${#TSV_FILES[@]}
 FILES_SKIPPED=${#LEGACY_FILES[@]}
 
@@ -329,17 +362,23 @@ preamble_get() {
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
 
-# preamble_scalar KEY [CONSEQUENCE]: a sweep-level `# KEY=value` read from EVERY
-# consumed TSV that has it, for keys that 40-column files lack (so the first file may
-# not carry them). One value -> that value; several -> `mixed:a,b` plus a stderr
+# preamble_scalar KEY [CONSEQUENCE] [MISSING]: a sweep-level `# KEY=value` read from
+# EVERY consumed TSV, for keys that 40-column files lack (so the first file may not
+# carry them). An input without the key is skipped, or, when MISSING is given, counts
+# as the value MISSING. One value -> that value; several -> `mixed:a,b` plus a stderr
 # warning ending in CONSEQUENCE (PL26: a sweep-level key must not silently take the
 # last value); none -> unknown.
 preamble_scalar() {
-	local key="$1" consequence="${2:-values are mixed}" f v vals=""
+	local key="$1" consequence="${2:-values are mixed}" missing="${3:-}" f v vals=""
 	for f in "${TSV_FILES[@]}"; do
 		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
-		[[ -n "$v" ]] || continue
-		v="${v#*=}"
+		if [[ -n "$v" ]]; then
+			v="${v#*=}"
+		elif [[ -n "$missing" ]]; then
+			v="$missing"
+		else
+			continue
+		fi
 		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
 	done
 	if [[ -z "$vals" ]]; then
@@ -357,6 +396,14 @@ PROXY_CHECK_MIN_DIFF_M="$(preamble_scalar PROXY_CHECK_MIN_DIFF "the proxy check 
 # vsdr cells non-comparable, so they print as mixed:a,b with a warning.
 VSDR_EVERY_M="$(preamble_scalar VSDR_EVERY "vsdr cells mix VS/DR densities")"
 VSDR_SUBSETS_M="$(preamble_scalar VSDR_SUBSETS "vsdr cells mix DestinationRule subset counts")"
+
+# Which --config produced the inputs (PL2/PL19): `none` without one, `unknown` for
+# files written before the key existed. Every input should share it (PL26). A file
+# without the key counts as unknown, so mixing it with a config-driven file prints
+# mixed:<file>,unknown instead of crediting its rows to that config.
+RUN_CONFIG_M="$(preamble_scalar RUN_CONFIG "the report mixes runs made with different --config files" unknown)"
+RUN_CONFIG_SHA256_M="$(preamble_scalar RUN_CONFIG_SHA256 "the report mixes runs made with different --config contents" unknown)"
+
 # Shown next to the traffic_configs axis only when vsdr cells exist.
 TRAFFIC_AXIS_NOTE=""
 [[ ",${SWEEP_TRAFFIC}," == *",vsdr,"* ]] && TRAFFIC_AXIS_NOTE="  (vsdr: every ${VSDR_EVERY_M}, ${VSDR_SUBSETS_M} subsets)"
@@ -819,7 +866,7 @@ report_text() {
 	aggregated=$(aggregate)
 	short="$(vsdr_ingest_short "$aggregated")"
 	echo "=== Control-Plane Resource Scaling ==="
-	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}"
+	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}"
 	echo ""
 	# O9 achieved-scale block (clearly delimited; tolerates unknown). Pulled from
 	# the per-row capacity columns (max across rows) + the preamble.
@@ -906,6 +953,7 @@ report_csv() {
 	aggregated=$(aggregate)
 	short="$(vsdr_ingest_short "$aggregated")"
 	echo "# RUN_ID=${RUN_ID_TAG},ISTIO_VERSION=${ISTIO_VERSION_TAG},HARNESS_SHA=${HARNESS_SHA_TAG},files_consumed=${FILES_CONSUMED},skipped_legacy=${FILES_SKIPPED}"
+	echo "# run_config: run_config=${RUN_CONFIG_M} run_config_sha256=${RUN_CONFIG_SHA256_M}"
 	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE} traffic_configs=${SWEEP_TRAFFIC}"
 	echo "# traffic_management: vsdr_every=${VSDR_EVERY_M} vsdr_subsets=${VSDR_SUBSETS_M}"
 	# O9 achieved-scale provenance parity with text/markdown. Comment lines only, so the
@@ -1000,6 +1048,8 @@ report_markdown() {
 	echo "run_id: ${RUN_ID_TAG}"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
+	echo "run_config: \"${RUN_CONFIG_M}\""
+	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
 	echo "sidecar_scoping: ${SIDECAR_SCOPING_M:-N/A}"
 	echo "traffic_configs: \"${SWEEP_TRAFFIC}\""
 	echo "vsdr_every: \"${VSDR_EVERY_M}\""
@@ -1263,6 +1313,7 @@ report_json() {
 	# ";mesh|svc|reps|ns|scoping;..." of the vsdr cells with an ingest shortfall.
 	shortkeys="$(vsdr_ingest_short "$aggregated" | awk -F'\t' '{ printf ";%s", $1 } END { print ";" }')"
 	awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
+		-v rc_path="$RUN_CONFIG_M" -v rc_sha="$RUN_CONFIG_SHA256_M" \
 		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" \
 		-v sw_traffic="$SWEEP_TRAFFIC" -v tm_every="$VSDR_EVERY_M" -v tm_subsets="$VSDR_SUBSETS_M" -v shortkeys="$shortkeys" \
 		-v cap_ncpu="$(preamble_get NODE_ALLOC_CPU_M)" -v cap_nmem="$(preamble_get NODE_ALLOC_MEM_MI)" \
@@ -1286,7 +1337,7 @@ report_json() {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note }
+	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -1320,6 +1371,8 @@ report_charts() {
 	echo "---"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
+	echo "run_config: \"${RUN_CONFIG_M}\""
+	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"

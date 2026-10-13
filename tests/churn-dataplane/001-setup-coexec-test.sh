@@ -14,14 +14,20 @@
 #     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
 #     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --dry-run
+#   ./tests/churn-dataplane/001-setup-coexec-test.sh --config tests/churn-dataplane/configs/smoke.env \
+#     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -32,7 +38,7 @@ source "${ROOT}/tests/lib/fanout.sh"
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${COEXEC_WAIT_TIMEOUT_SEC:-300}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-5}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
@@ -47,6 +53,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/churn-dataplane/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client is deployed (required).
   --remote-contexts CSV    Additional contexts that also receive fortio-server +
                            churn-target workloads (comma-separated).
@@ -69,12 +78,18 @@ Environment:
   COEXEC_SERVICE_PORT (fortio-server port; default 8080),
   COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
   defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 240),
+  COEXEC_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"
@@ -120,6 +135,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or COEXEC_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
 if ! is_pos_int "$SERVICE_PORT" || ((SERVICE_PORT > 65535)); then
 	die "COEXEC_SERVICE_PORT must be a port number (1-65535), got: $SERVICE_PORT"
 fi

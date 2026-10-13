@@ -15,12 +15,19 @@
 #
 #   # Specific clusters:
 #   ./tests/propagation/004-collect-pilot-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
+#
+#   # Contexts and results dir from a run config:
+#   ./tests/propagation/004-collect-pilot-metrics.sh --config tests/propagation/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload propagation "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
@@ -33,7 +40,7 @@ FANOUT_PF_BASE="${PROPAGATION_SNAPSHOT_PF_BASE:-22014}"
 source "${ROOT}/tests/lib/fanout.sh"
 
 CONTEXTS_CSV=""
-OUTPUT_DIR="${ROOT}/tests/propagation/results"
+OUTPUT_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
 WATCH=0
 INTERVAL=10
 DRY_RUN=0
@@ -43,8 +50,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/propagation/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default.
   --contexts CSV     Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --output-dir DIR   Results directory (default: tests/propagation/results).
+  --output-dir DIR   Results directory (default: ${PROPAGATION_RESULTS_DIR}).
   --watch            Loop continuously.
   --interval SEC     Seconds between scrapes in watch mode (default: 10).
   --dry-run          Show what would be scraped without connecting.
@@ -55,13 +65,19 @@ Writes <ctx>-<pod>-<timestamp>.prom per istiod pod, filtered to pilot_* series.
 Environment:
   SETUP_CONTEXTS, METRICS_SCRAPE_TIMEOUT (curl --max-time per scrape, default 30),
   PROPAGATION_SNAPSHOT_PF_BASE (local port block base, default 22014; kept
-  apart from FANOUT_PF_BASE so this can run alongside 002).
+  apart from FANOUT_PF_BASE so this can run alongside 002),
+  PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"

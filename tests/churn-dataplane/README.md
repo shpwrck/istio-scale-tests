@@ -171,6 +171,36 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
+## Run config (`--config FILE`)
+
+Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
+rules: [Run config](../../README.md#run-config---config-file)).
+[`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
+churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
+
+```bash
+./tests/churn-dataplane/004-run-sweep.sh --config tests/churn-dataplane/configs/smoke.env --dry-run
+./tests/churn-dataplane/004-run-sweep.sh --config tests/churn-dataplane/configs/smoke.env
+./tests/churn-dataplane/005-report-results.sh --config tests/churn-dataplane/configs/smoke.env \
+  --results-dir tests/churn-dataplane/results/smoke/sweep-<RUN_ID> --format md
+./tests/churn-dataplane/006-cleanup.sh --config tests/churn-dataplane/configs/smoke.env
+```
+
+- **Keys:** `SETUP_CONTEXTS`, the `config/options.env` keys `COEXEC_*`, `REACH_*`,
+  `FANOUT_*` and `METRICS_SCRAPE_TIMEOUT`, and the churn suite's `CHURN_DEPLOYMENT_COUNT`,
+  `CHURN_BASE_REPLICAS` and `CHURN_SCALE_TO_REPLICAS`. `COEXEC_TEST_NAMESPACE` stays
+  environment only.
+- **Run keys:** `COEXEC_MESH_SIZES` (`004 --mesh-sizes`; empty: 1 to the number of
+  contexts), `COEXEC_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts at
+  the repo root, unlike the flags), `COEXEC_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`) and
+  `COEXEC_ISTIOD_REPLICAS` (the expected istiod pod count `002`/`003` warn about; empty: no
+  check). `COEXEC_CHURN_RATES` is already the sweep's list.
+- **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`, `--churn-rate`,
+  `--combo-id`, `--run-id`, `--output-file`, `--baseline-file`, `--append`,
+  `--tuning-baseline` and `--sidecar-egress-hosts` (`001`-`003`; the sweep sets them),
+  `--fail-on-unreachable` (`005`), `--wait-deletion` (`006`), `--force-large-matrix`,
+  `--format` and `--dry-run`.
+
 ## Settings
 
 Defaults are the `COEXEC_*` variables in `config/options.env` (durations, QPS, churn

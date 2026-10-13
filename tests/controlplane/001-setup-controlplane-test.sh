@@ -21,14 +21,21 @@
 #
 #   # A VirtualService + DestinationRule (2 subsets) on every 3rd service:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --traffic-config vsdr --vsdr-every 3
+#
+#   # Everything from a run config (see tests/controlplane/README.md, "Run config"):
+#   ./tests/controlplane/001-setup-controlplane-test.sh --config tests/controlplane/configs/smoke.env
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # SCALE_* knobs
 # shellcheck disable=SC1091
@@ -36,7 +43,7 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 
 CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${CONTROLPLANE_WAIT_TIMEOUT_SEC:-300}"
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
@@ -63,6 +70,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE          Run config of KEY=value lines (config/options.env keys; see
+                         tests/controlplane/README.md, "Run config").
+                         Precedence: flag > --config > environment > default.
   --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
   --service-count N      Number of dummy services per cluster (default: $SERVICE_COUNT).
   --replicas N           Replicas per service (default: $REPLICAS).
@@ -87,7 +97,7 @@ Usage: $(basename "$0") [options]
                          an in-place re-apply leaves the other mode's Deployments behind.
   --dry-run              Pass --dry-run=client to oc apply
                          (skips the --server-side path).
-  --wait-timeout N       Seconds to wait for pods (default: 300).
+  --wait-timeout N       Seconds to wait for pods (default: $WAIT_TIMEOUT).
   --ns-wait-timeout N    Seconds to wait for a pre-existing (Terminating) namespace
                          to disappear before applying (default: $SETUP_NS_WAIT_SEC;
                          skipped in --dry-run).
@@ -101,6 +111,7 @@ Environment:
   CONTROLPLANE_SETUP_NS_WAIT_SEC (default: CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300),
   CONTROLPLANE_APPLY_ATTEMPTS / CONTROLPLANE_APPLY_BACKOFF_S (apply retry, default 3 / 5s),
   CONTROLPLANE_APPLY_CHUNK_OBJECTS (objects per apply batch, default 200; <=0 disables),
+  CONTROLPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
   BUSYBOX_VERSION (dummy workload image tag).
 
   Scale coverage (off by default): SCALE_SIZING_MODE (fixed|auto; auto derives the
@@ -112,6 +123,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"

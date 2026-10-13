@@ -128,6 +128,16 @@ EXTRACTED_PATTERNS=(
 	'reach_check_all() {'
 	'reach_coverage_rows() {'
 	'reach_coverage_render() {'
+	# run config: config.sh (--config FILE)
+	'config_suite_prefixes() {'
+	'config_allowed_keys() {'
+	'load_config() {'
+	'config_preload() {'
+	'config_preamble_lines() {'
+	'config_repo_path() {'
+	'config_snapshot() {'
+	'config_report_value() {'
+	'config_warn_multi_run() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

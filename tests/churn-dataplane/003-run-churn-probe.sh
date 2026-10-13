@@ -10,6 +10,8 @@
 # Usage:
 #   ./tests/churn-dataplane/003-run-churn-probe.sh \
 #       --source-context CTX --churn-rate 5 [options]
+#   ./tests/churn-dataplane/003-run-churn-probe.sh --config tests/churn-dataplane/configs/smoke.env \
+#       --source-context <mesh-a-ctx> --churn-rate 1
 # ci-dry-run: --source-context ci-dummy --churn-rate 5
 set -euo pipefail
 # P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
@@ -18,9 +20,13 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -54,7 +60,7 @@ MIN_PCT_200="${COEXEC_MIN_PCT_200:-0.99}"
 ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
 REACH_REQUESTS="${REACH_REQUESTS:-10}"
 OUTPUT_FILE=""
-OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
+OUTPUT_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 BASELINE_FILE=""
 DRY_RUN=0
 # Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
@@ -66,6 +72,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/churn-dataplane/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client runs (required).
   --remote-contexts CSV    Other contexts in the mesh (churn applies to ALL).
   --mesh-size N            Mesh-size tag (default: 1 + remotes).
@@ -98,7 +107,9 @@ and top_code.
 Environment:
   COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
   COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS (expected pin;
-  warns on mismatch), FANOUT_PF_BASE (per-pod istiod PF block base; default 21014),
+  warns on mismatch), COEXEC_RESULTS_DIR (--output-dir; relative to the repo root),
+  CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS,
+  FANOUT_PF_BASE (per-pod istiod PF block base; default 21014),
   FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
   whose pre/post fanout scrape skew exceeds this is tagged POISONED_SCRAPE because
   the istiod-side deltas are computed across an incoherent snapshot).
@@ -114,6 +125,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2 ;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"; shift 2 ;;
@@ -256,6 +271,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
+	config_preamble_lines >> "$OUTPUT_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 

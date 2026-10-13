@@ -7,18 +7,23 @@
 # Examples:
 #   ./tests/churn/001-setup-churn-test.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 #   ./tests/churn/001-setup-churn-test.sh --deployment-count 10 --base-replicas 1
+#   ./tests/churn/001-setup-churn-test.sh --config tests/churn/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${CHURN_WAIT_TIMEOUT_SEC:-300}"
 NS="${CHURN_TEST_NAMESPACE:-churn-test}"
 DEPLOYMENT_COUNT="${CHURN_DEPLOYMENT_COUNT:-5}"
 BASE_REPLICAS="${CHURN_BASE_REPLICAS:-1}"
@@ -28,22 +33,31 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE          Run config of KEY=value lines (config/options.env keys; see
+                         tests/churn/README.md, "Run config"). Precedence: flag >
+                         --config > environment > default.
   --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
   --deployment-count N   Number of churn target deployments (default: $DEPLOYMENT_COUNT).
   --base-replicas N      Initial replicas per deployment (default: $BASE_REPLICAS).
   --dry-run              Render the chart and run apply --dry-run=client; contexts
                          missing from the kubeconfig get the render only.
-  --wait-timeout N       Seconds to wait for pods (default: 300).
+  --wait-timeout N       Seconds to wait for pods (default: $WAIT_TIMEOUT).
   -h, --help             Show this help.
 
 Environment:
-  SETUP_CONTEXTS, CHURN_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS.
+  SETUP_CONTEXTS, CHURN_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
+  CHURN_WAIT_TIMEOUT_SEC (--wait-timeout default, 300).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -77,6 +91,8 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or CHURN_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
 
 KUBECTL=()
 resolve_kubectl KUBECTL

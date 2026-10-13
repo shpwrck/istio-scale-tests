@@ -11,6 +11,9 @@
 # Examples:
 #   # Sweep 1 and 2 clusters:
 #   ./tests/dataplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
+#
+#   # The whole sweep from a run config (mesh sizes, QPS levels, results dir; flags still win):
+#   ./tests/dataplane/003-run-sweep.sh --config tests/dataplane/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
 # Loud ERR trap for unexpected aborts; per-combo failures are handled below.
@@ -19,6 +22,12 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+# The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
+# per-step flags it passes still win.
+config_preload dataplane "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
@@ -29,7 +38,7 @@ source "${ROOT}/tests/lib/fortio.sh"
 source "${ROOT}/tests/lib/reach.sh"  # REACH_EXIT_CODE, reach_validate
 
 CONTEXTS_CSV=""
-MESH_SIZES_CSV=""
+MESH_SIZES_CSV="${DATAPLANE_MESH_SIZES:-}"
 QPS_LEVELS="${DATAPLANE_QPS_LEVELS:-10,100,500,1000}"
 DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
@@ -42,24 +51,30 @@ SERVER_REPLICAS="${DATAPLANE_SERVER_REPLICAS:-2}"
 MIN_QPS_RATIO="${DATAPLANE_MIN_QPS_RATIO:-0.95}"
 ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
 REACH_REQUESTS="${REACH_REQUESTS:-10}"
-OUTPUT_DIR_BASE="${ROOT}/tests/dataplane/results"
+OUTPUT_DIR_BASE="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
 
 
 usage() {
+	local mesh_sizes_default='"1,2,...,len(contexts)"'
+	[[ -z "$MESH_SIZES_CSV" ]] || mesh_sizes_default="$MESH_SIZES_CSV"
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE        Run config of KEY=value lines (config/options.env keys; see
+                       tests/dataplane/README.md, "Run config"). The steps the sweep
+                       runs inherit it. Precedence: flag > --config > environment >
+                       default.
   --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV     Cluster counts to test (default: "1,2,...,len(contexts)").
+  --mesh-sizes CSV     Cluster counts to test (default: ${mesh_sizes_default}).
   --qps-levels CSV     QPS levels to test (default: $QPS_LEVELS).
   --duration SEC       Duration per QPS level (default: $DURATION).
   --connections N      Concurrent connections (default: $CONNECTIONS).
   --settle SEC         Seconds to sleep before probing (default: $SETTLE_SEC).
   --warmup-duration SEC
                        Envoy warmup per probe, 0 to disable (default: $WARMUP_DURATION).
-  --output-dir DIR     Base results directory (default: tests/dataplane/results).
+  --output-dir DIR     Base results directory (default: ${DATAPLANE_RESULTS_DIR}).
                        A per-sweep subdir sweep-\${RUN_ID}/ is created here.
   --repetitions N      Probe repetitions per mesh size (default: $REPETITIONS).
   --server-replicas N  fortio server pods per cluster, passed to 001 (default: $SERVER_REPLICAS).
@@ -81,7 +96,9 @@ Environment:
   DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS,
   DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002),
   REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
+  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). DATAPLANE_MESH_SIZES (--mesh-sizes),
+  DATAPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
+  DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
@@ -90,6 +107,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -270,6 +292,7 @@ emit_dataplane_placeholder() {
 		echo "# REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}"
 		echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 		echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
+		config_preamble_lines
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
@@ -291,6 +314,9 @@ echo "Reach check: ${REACH_REQUESTS} requests per target | On unreachable: ${ON_
 echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
 echo "Settle: ${SETTLE_SEC}s | Warmup: ${WARMUP_DURATION}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
+if [[ "${RUN_CONFIG:-none}" != none ]]; then
+	echo "Run config: ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+fi
 echo ""
 
 # Per-mesh-size dry-run plan goes to stderr so > redirect of stdout still works.
@@ -298,7 +324,10 @@ if ((DRY_RUN)); then
 	echo "=== Planned matrix (dry-run) ===" >&2
 fi
 
-((DRY_RUN)) || mkdir -p "$OUTPUT_DIR"
+if ((! DRY_RUN)); then
+	mkdir -p "$OUTPUT_DIR"
+	config_snapshot "$OUTPUT_DIR" "$RUN_ID"
+fi
 
 # Set when a probe exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
 # after this mesh size's cleanup, the reports still run, and the sweep exits 3.

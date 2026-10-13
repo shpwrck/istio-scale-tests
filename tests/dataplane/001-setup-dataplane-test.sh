@@ -13,6 +13,10 @@
 # Examples:
 #   # Server on both clusters, client on the first:
 #   ./tests/dataplane/001-setup-dataplane-test.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
+#
+#   # Server replicas and wait timeout from a run config (README, "Run config"):
+#   ./tests/dataplane/001-setup-dataplane-test.sh --config tests/dataplane/configs/smoke.env \
+#     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
@@ -20,12 +24,16 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload dataplane "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${DATAPLANE_WAIT_TIMEOUT_SEC:-300}"
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
 FORTIO_TAG="$FORTIO_VERSION"
 SERVER_REPLICAS="${DATAPLANE_SERVER_REPLICAS:-2}"
@@ -35,10 +43,13 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/dataplane/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the client (required).
   --remote-contexts CSV    Remote cluster contexts for servers (comma-separated).
   --dry-run                Pass --dry-run=client to oc apply.
-  --wait-timeout N         Seconds to wait for pods (default: 300).
+  --wait-timeout N         Seconds to wait for pods (default: $WAIT_TIMEOUT).
   --server-replicas N      fortio server pods per cluster, local and remote alike
                            (default: $SERVER_REPLICAS).
   -h, --help               Show this help.
@@ -48,13 +59,19 @@ be a lowercase DNS label of at most 46 characters; rename others with
 'kubectl config rename-context'.
 
 Environment:
-  DATAPLANE_TEST_NAMESPACE, DATAPLANE_SERVER_REPLICAS, FORTIO_VERSION.
+  DATAPLANE_TEST_NAMESPACE, DATAPLANE_SERVER_REPLICAS, FORTIO_VERSION,
+  DATAPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"
@@ -92,6 +109,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or DATAPLANE_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
 is_pos_int "$SERVER_REPLICAS" || die "--server-replicas (or DATAPLANE_SERVER_REPLICAS) must be a positive integer; got '$SERVER_REPLICAS'"
 
 KUBECTL=()

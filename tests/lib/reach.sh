@@ -13,7 +13,7 @@
 #
 # Builds on tests/lib/fortio.sh, the one fortio JSON parser (PL41): this file only
 # classifies its output and aggregates coverage. Requires common.sh (split_csv,
-# is_pos_int, is_nonneg_int), fortio.sh, jq, awk, sed.
+# is_pos_int, is_nonneg_int), fortio.sh, config.sh (config_preamble_lines), jq, awk, sed.
 # In-process helpers never call die (PL40): a failed exec is an UNKNOWN row, and a
 # missing or malformed reach file renders as "no reachability data".
 #
@@ -179,18 +179,24 @@ reach_body_line() {
 }
 
 # reach_write_header <tsv> <K=V...>: the only writer of a reach TSV's preamble and
-# header, and only when the file does not exist yet (PL36). REACH_SCHEMA and the
-# REACH_* knobs are always written; callers add RUN_ID, HARNESS_SHA, SUITE,
-# NAMESPACE and ON_UNREACHABLE.
+# header, and only when the file does not exist yet (PL36). REACH_SCHEMA, the
+# REACH_* knobs and the run config (RUN_CONFIG, RUN_CONFIG_SHA256: config.sh) are
+# always written; callers add RUN_ID, HARNESS_SHA, SUITE, NAMESPACE and ON_UNREACHABLE.
+# Returns 1 (the caller reports the check as not run) when config.sh is not sourced.
 # shellcheck disable=SC2329
 reach_write_header() {
 	local tsv="$1" kv
 	shift
 	[[ -e "$tsv" ]] && return 0
+	if ! declare -F config_preamble_lines >/dev/null; then
+		echo "reach_write_header: config_preamble_lines missing (source tests/lib/config.sh)" >&2
+		return 1
+	fi
 	{
 		echo "# Remote reachability check (tests/lib/reach.sh)"
 		echo "# REACH_SCHEMA=${REACH_SCHEMA}"
 		for kv in "$@"; do echo "# ${kv}"; done
+		config_preamble_lines
 		echo "# REACH_REQUESTS=${REACH_REQUESTS:-10}"
 		echo "# REACH_QPS=${REACH_QPS:-10}"
 		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"

@@ -46,10 +46,18 @@ Prefer it over generic upstream Istio docs when they disagree.
 - `set -euo pipefail`. Repo root from a suite dir: `ROOT="$(cd "$(dirname "$0")/../.." && pwd)"`.
 - Source `"${ROOT}/config/versions.env"` first (it sources `options.env`), then the `tests/lib/*.sh`
   you need. Don't re-implement lib functions; `tests/lib/verify.sh` audits for inline copies.
+- Exception, scripts that take `--config FILE` (every suite but tuning): source `tests/lib/common.sh`
+  and `tests/lib/config.sh`, call `config_preload <suite> "$@"`, then source `versions.env` (or
+  `options.env`) and the other libs (`fanout.sh` reads its defaults when sourced). The
+  file's values must be in the environment before `options.env` fills in (and derives) defaults.
+  Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats` checks the order.
 - Contexts: env `SETUP_CONTEXTS` and flag `--contexts CSV` list **mesh members only**, never the
   ACM hub. Parse into `CONTEXTS_CSV`, split into `CONTEXTS[@]`, loop with `ctx`.
 - `DRY_RUN` (0/1) pairs with `--dry-run`; `--help` exits 0 and lists every flag the parser accepts.
-- Tunables get defaults in `config/options.env` (one short comment each), not only inline.
+- Tunables get defaults in `config/options.env` (one short comment each), not only inline. A flag
+  that shapes a run needs such a key, read before the flag parser: the `--config` vocabulary is the
+  `options.env` exports matching the suite's key list (`config_suite_prefixes`), so the key also
+  makes it config-settable. A sweep axis gets a plural CSV key that falls back to the singular one.
 
 ## Repository map
 
@@ -72,9 +80,9 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/mesh-wiring-verify/` | Always-on gate per member (remote secrets, istiod ingestion, shared root) |
 | `charts/mesh-verify/`, `charts/mesh-verify-appset.yaml` | On-demand cross-cluster echo check |
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
-| `tests/<suite>/` | Numbered scripts + `chart/`; see each suite README |
+| `tests/<suite>/` | Numbered scripts + `chart/` (all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`; bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`; bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |

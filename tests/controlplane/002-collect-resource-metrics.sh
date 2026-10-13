@@ -21,6 +21,9 @@
 #
 #   # Watch mode during load test (per-tick deltas at the interval cadence):
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
+#
+#   # Settle, results dir and metadata tags from a run config:
+#   ./tests/controlplane/002-collect-resource-metrics.sh --config tests/controlplane/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 # Loud ERR trap for unexpected aborts (per-pod faults become N/A rows).
@@ -28,9 +31,13 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -47,7 +54,7 @@ source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_ist
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 
 CONTEXTS_CSV=""
-OUTPUT_DIR="${ROOT}/tests/controlplane/results"
+OUTPUT_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
 MESH_SIZE=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
@@ -57,7 +64,7 @@ TRAFFIC_CONFIG="${CONTROLPLANE_TRAFFIC_CONFIG:-none}"
 VSDR_EVERY="${CONTROLPLANE_VSDR_EVERY:-1}"
 VSDR_SUBSETS="${CONTROLPLANE_VSDR_SUBSETS:-2}"
 CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
-SETTLE_SEC=60
+SETTLE_SEC="${CONTROLPLANE_SETTLE_SEC:-60}"
 WATCH=0
 INTERVAL=15
 DRY_RUN=0
@@ -71,6 +78,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE        Run config of KEY=value lines (config/options.env keys; see
+                       tests/controlplane/README.md, "Run config").
+                       Precedence: flag > --config > environment > default.
   --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
   --mesh-size N        Metadata tag for TSV output.
   --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
@@ -87,7 +97,7 @@ Usage: $(basename "$0") [options]
   --settle SEC         Delta-window length (seconds) between baseline and
                        final scrape (default: $SETTLE_SEC). Must match the
                        settle time used by the calling orchestrator.
-  --output-dir DIR     Results directory (default: tests/controlplane/results).
+  --output-dir DIR     Results directory (default: ${CONTROLPLANE_RESULTS_DIR}).
   --run-id ID          Reuse an existing sweep RUN_ID (writes into sweep-<ID>/).
   --watch              Loop continuously (delta window = --interval).
   --interval SEC       Seconds between scrapes in watch mode (default: 15).
@@ -112,7 +122,8 @@ Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
-  CONTROLPLANE_CONFIG_DUMP_SAMPLES.
+  CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_SETTLE_SEC (--settle),
+  CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root).
   CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
   (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
   over its istiod pods) and its Running sidecar pods differ by more than
@@ -122,6 +133,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -363,6 +379,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# TRAFFIC_CONFIG=${TRAFFIC_CONFIG}"
 		echo "# VSDR_EVERY=${VSDR_EVERY}"
 		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
+		config_preamble_lines
 		# shellcheck disable=SC2086
 		infra_preamble_lines $PRE_INFRA_KV
 		echo "# ${PRE_TUNING_BASELINE}"

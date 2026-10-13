@@ -28,6 +28,10 @@
 #   # Custom QPS levels and duration:
 #   ./tests/dataplane/002-run-latency-probe.sh --source-context <mesh-a-ctx> \
 #     --remote-contexts <mesh-b-ctx> --qps-levels 10,100,1000 --duration 60
+#
+#   # QPS levels, durations, thresholds and results dir from a run config:
+#   ./tests/dataplane/002-run-latency-probe.sh --config tests/dataplane/configs/smoke.env \
+#     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 # Loud ERR trap for unexpected aborts.
@@ -36,6 +40,10 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload dataplane "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
@@ -63,7 +71,7 @@ MIN_QPS_RATIO="${DATAPLANE_MIN_QPS_RATIO:-0.95}"
 MIN_PCT_200="${DATAPLANE_MIN_PCT_200:-0.99}"
 ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
 REACH_REQUESTS="${REACH_REQUESTS:-10}"
-OUTPUT_DIR="${ROOT}/tests/dataplane/results"
+OUTPUT_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
 DRY_RUN=0
 # Live tuning-baseline provenance; 003 passes it in, standalone runs record "unknown".
 TUNING_BASELINE="unknown"
@@ -77,6 +85,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/dataplane/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the fortio client (required).
   --remote-contexts CSV    Remote cluster contexts (comma-separated).
   --mesh-size N            Metadata tag for TSV (default: 1 + remotes).
@@ -92,7 +103,7 @@ Usage: $(basename "$0") [options]
                            UNREACHABLE or UNKNOWN, exit 3 (default: $ON_UNREACHABLE).
   --reach-requests N       Requests per target in the reach check; 0 turns it off
                            (default: $REACH_REQUESTS).
-  --output-dir DIR         Results directory (default: tests/dataplane/results).
+  --output-dir DIR         Results directory (default: ${DATAPLANE_RESULTS_DIR}).
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
   --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
@@ -130,13 +141,19 @@ Environment:
   DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200,
   REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC,
   REACH_ON_UNREACHABLE,
-  FORTIO_VERSION, METRICS_SCRAPE_TIMEOUT (istiod /metrics curl timeout, default 30).
+  FORTIO_VERSION, METRICS_SCRAPE_TIMEOUT (istiod /metrics curl timeout, default 30),
+  DATAPLANE_RESULTS_DIR (--output-dir; relative to the repo root).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"
@@ -362,6 +379,7 @@ trap cleanup_all EXIT
 	echo "# REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}"
 	echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 	echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
+	config_preamble_lines
 } > "$TSV_FILE"
 # New TSV columns appended at the end of the old schema:
 #   pct_200, istiod_restarted, target_class

@@ -128,6 +128,58 @@ exactly), so `001` stops unless they are in `charts/spoke-ossm/values.yaml`
 `tuningBaseline.sidecar.egressHosts` (or egress is `*/*`). `namespace` and `explicit`
 scoping bring their own `Sidecar`s, so they need no change.
 
+## Run config (`--config FILE`)
+
+Every script (`001`-`005`) takes `--config FILE`, a file of `KEY=value` lines, so one file
+describes a whole run: setup, collection, sweep, report and cleanup. The rules shared by every
+suite (syntax, precedence, environment-only keys, provenance) are in
+[Run config](../../README.md#run-config---config-file).
+[`configs/smoke.env`](configs/smoke.env) is a worked example (5 services × 1 replica, mesh
+sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
+
+```bash
+./tests/controlplane/003-run-sweep.sh --config tests/controlplane/configs/smoke.env --dry-run
+./tests/controlplane/003-run-sweep.sh --config tests/controlplane/configs/smoke.env
+./tests/controlplane/004-report-results.sh --config tests/controlplane/configs/smoke.env \
+  --results-dir tests/controlplane/results/smoke/sweep-<RUN_ID> --format markdown
+./tests/controlplane/005-cleanup.sh --config tests/controlplane/configs/smoke.env
+```
+
+- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
+  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`. A step ignores the keys it
+  does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
+  `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run) and
+  the version pins. Any other key, or any bad line, rejects the whole file before anything
+  runs, with `file:line` and the reason.
+- **Precedence:** flag > `--config` > environment > default. The file loads before
+  `options.env`, so the defaults derived there follow it: a config
+  `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` also sets `001`'s namespace wait unless
+  `CONTROLPLANE_SETUP_NS_WAIT_SEC` is set. Each key is logged on stderr, with the
+  environment value it overrides. `KEY=` (empty) means the built-in default.
+- **One value or a list:** `001` and `002` read one value per axis
+  (`CONTROLPLANE_SERVICE_COUNT`, `..._REPLICAS_PER_SERVICE`, `..._NAMESPACE_COUNT`,
+  `..._SIDECAR_SCOPING`, `..._TRAFFIC_CONFIG`). The sweep reads the CSV keys
+  `CONTROLPLANE_MESH_SIZES` (empty: 1 to the number of contexts), `..._SERVICE_COUNTS`,
+  `..._REPLICA_COUNTS`, `..._NAMESPACE_COUNTS`, `..._SIDECAR_SCOPINGS` and
+  `..._TRAFFIC_CONFIGS`; each falls back to its one-value key. A list key exported in the
+  environment beats a one-value key in the file.
+- **Other run keys:** `CONTROLPLANE_SETTLE_SEC` (`--settle`), `CONTROLPLANE_RESULTS_DIR`
+  (`--output-dir`, `--results-dir`; a relative path starts at the repo root, unlike the
+  flags) and `CONTROLPLANE_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`, which a sweep now
+  honors too).
+- **No key (flags only):** `--dry-run`, `--resume`, `--force-large-matrix`, `--format`,
+  `--phase`, `--state-dir`, `--run-id`, `--watch`, `--interval` and `--mesh-size`.
+- **Provenance:** the TSV preamble records `RUN_CONFIG` (the file's path from the repo root,
+  or only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and
+  every report format repeats them. A sweep also copies the file to
+  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`. `--resume` keeps the provenance the sweep
+  started with: it warns when `--config` is a different file, and it refuses to resume a
+  sweep that started with `--config` unless you pass one again (it names the snapshot:
+  `--config <sweep-dir>/run-config-<RUN_ID>.env`). The report prints `unknown` for files
+  written before these keys existed, and `mixed:<a>,<b>` with a warning when the inputs
+  disagree. With `--config` but no `--results-dir`, `004` warns when the results dir
+  holds more than one run.
+
 ## Traffic management (VS/DR)
 
 `--traffic-configs none,vsdr` measures what VirtualServices and DestinationRules add on
@@ -161,7 +213,8 @@ Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID
 
 - `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=51`,
   `PROXY_CHECK_TOLERANCE_PCT`, `PROXY_CHECK_MIN_DIFF`, `TRAFFIC_CONFIG`, `VSDR_EVERY`,
-  `VSDR_SUBSETS`, ...), then the 51-column rows.
+  `VSDR_SUBSETS`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`, ...), then the 51-column rows.
+- `run-config-<RUN_ID>.env` (sweep with `--config` only): a copy of the run config.
 - `sweep-<RUN_ID>.md`, `sweep-charts-<RUN_ID>.md`: report markdown and charts.
 - `scale-envelope-<RUN_ID>.md`: campaign scale envelope, led by the customer SLA verdict
   (`PASS`, `CAUTION` at 75 % of a limit, `FAIL` at 90 % or on any istiod restart).
