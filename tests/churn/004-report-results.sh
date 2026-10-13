@@ -20,6 +20,8 @@ source "${ROOT}/tests/lib/config.sh"  # config_preload, config_report_value
 config_preload churn "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -40,6 +42,10 @@ Usage: $(basename "$0") [options]
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
+
+text and md end with an "istiod restart diagnostics" section: the rows of every
+istiod-diag-*/index.tsv under the results dir (what changed, the cause, the evidence
+folder) and a tally by cause.
 
 Environment:
   CHURN_RESULTS_DIR  --results-dir default (relative to the repo root).
@@ -242,6 +248,7 @@ report_text() {
 			printf "\n"
 		}
 	}'
+	istiod_diag_report text "$RESULTS_DIR"
 }
 
 report_csv() {
@@ -476,6 +483,9 @@ report_markdown() {
 			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_* / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
+
+	echo ""
+	istiod_diag_report md "$RESULTS_DIR"
 
 	glossary_section
 }

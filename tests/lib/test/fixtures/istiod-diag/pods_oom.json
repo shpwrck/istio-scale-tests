@@ -1,0 +1,48 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {
+        "name": "istiod-abc-x1",
+        "namespace": "istio-system",
+        "creationTimestamp": "2024-05-28T23:59:30Z",
+        "labels": {"app": "istiod"},
+        "ownerReferences": [{"kind": "ReplicaSet", "name": "istiod-abc"}],
+        "managedFields": [{"manager": "kube-controller-manager"}]
+      },
+      "spec": {
+        "nodeName": "worker-node-a",
+        "containers": [
+          {
+            "name": "discovery",
+            "env": [{"name": "SECRET_ENV", "value": "do-not-copy"}],
+            "resources": {"limits": {"cpu": "2", "memory": "3Gi"}, "requests": {"memory": "1Gi"}}
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running",
+        "podIP": "192.0.2.21",
+        "hostIP": "192.0.2.5",
+        "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2024-05-29T00:10:05Z"}],
+        "containerStatuses": [
+          {
+            "name": "discovery",
+            "ready": true,
+            "restartCount": 1,
+            "state": {"running": {"startedAt": "2024-05-29T00:10:00Z"}},
+            "lastState": {
+              "terminated": {
+                "reason": "OOMKilled",
+                "exitCode": 137,
+                "startedAt": "2024-05-29T00:00:00Z",
+                "finishedAt": "2024-05-29T00:09:58Z"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

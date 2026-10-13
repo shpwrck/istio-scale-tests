@@ -1,0 +1,56 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {
+        "name": "istiod-abc-x1",
+        "namespace": "istio-system",
+        "creationTimestamp": "2024-05-28T23:59:30Z",
+        "ownerReferences": [{"kind": "ReplicaSet", "name": "istiod-abc"}]
+      },
+      "spec": {
+        "nodeName": "worker-node-a",
+        "containers": [{"name": "discovery", "resources": {"limits": {"memory": "3Gi"}}}]
+      },
+      "status": {
+        "phase": "Failed",
+        "reason": "Evicted",
+        "message": "The node was low on resource: memory. Pod 192.0.2.21 on ip-192-0-2-7.example.internal (worker-node-a) was using 2950Mi.",
+        "containerStatuses": [
+          {
+            "name": "discovery",
+            "ready": false,
+            "restartCount": 0,
+            "state": {"terminated": {"reason": "Error", "exitCode": 137, "finishedAt": "2024-05-29T00:09:58Z"}},
+            "lastState": {}
+          }
+        ]
+      }
+    },
+    {
+      "metadata": {
+        "name": "istiod-abc-y2",
+        "namespace": "istio-system",
+        "creationTimestamp": "2024-05-29T00:10:00Z",
+        "ownerReferences": [{"kind": "ReplicaSet", "name": "istiod-abc"}]
+      },
+      "spec": {
+        "nodeName": "worker-node-b",
+        "containers": [{"name": "discovery", "resources": {"limits": {"memory": "3Gi"}}}]
+      },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          {
+            "name": "discovery",
+            "ready": true,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "2024-05-29T00:10:03Z"}},
+            "lastState": {}
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -35,7 +35,8 @@
 #
 # Exposes:
 #   config_suite_prefixes <suite>  -> the suite's key list: prefixes (ending in _) and whole
-#                                     key names; die for a suite without a map
+#                                     key names, then CONFIG_SHARED_PREFIXES (ISTIOD_DIAG_,
+#                                     taken by every suite); die for a suite without a map
 #   config_allowed_keys <suite>    -> the keys a config may set, one per line, sorted
 #   load_config <file> <suite>     -> validate the whole file, then export its keys and
 #                                     RUN_CONFIG, RUN_CONFIG_SHA256, RUN_CONFIG_PATH
@@ -67,18 +68,25 @@
 # The suites' key lists. An entry ending in _ is a prefix; any other entry is one key.
 # FANOUT_* and METRICS_SCRAPE_TIMEOUT tune the istiod scrapes (tests/lib/fanout.sh), REACH_*
 # the reachability check (tests/lib/reach.sh); churn-dataplane also reads the churn
-# suite's workload-size keys.
+# suite's workload-size keys. Every list ends with CONFIG_SHARED_PREFIXES, the keys of
+# libraries that every suite runs.
 # shellcheck disable=SC2329
 config_suite_prefixes() {
+	local own
 	case "$1" in
-	controlplane) echo "CONTROLPLANE_ SCALE_ METRICS_ FANOUT_ CAP_" ;;
-	dataplane) echo "DATAPLANE_ REACH_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
-	churn) echo "CHURN_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
-	churn-dataplane) echo "COEXEC_ REACH_ FANOUT_ METRICS_SCRAPE_TIMEOUT CHURN_DEPLOYMENT_COUNT CHURN_BASE_REPLICAS CHURN_SCALE_TO_REPLICAS" ;;
-	propagation) echo "PROPAGATION_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
+	controlplane) own="CONTROLPLANE_ SCALE_ METRICS_ FANOUT_ CAP_" ;;
+	dataplane) own="DATAPLANE_ REACH_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
+	churn) own="CHURN_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
+	churn-dataplane) own="COEXEC_ REACH_ FANOUT_ METRICS_SCRAPE_TIMEOUT CHURN_DEPLOYMENT_COUNT CHURN_BASE_REPLICAS CHURN_SCALE_TO_REPLICAS" ;;
+	propagation) own="PROPAGATION_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
 	*) die "--config: the '$1' suite has no config key map yet (supported: controlplane, dataplane, churn, churn-dataplane, propagation)" ;;
 	esac
+	echo "${own} ${CONFIG_SHARED_PREFIXES}"
 }
+
+# Keys every suite takes: ISTIOD_DIAG_* tune the istiod restart evidence capture
+# (tests/lib/istiod-diag.sh). An unknown-key error names them after the suite's own list.
+CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -154,9 +162,13 @@ load_config() {
 	[[ -n "$file" ]] || die "--config requires a file"
 	[[ -f "$file" && -r "$file" ]] || die "--config: ${file}: not a readable file"
 
-	local prefixes allowed_desc="" p
+	local prefixes allowed_desc="" shared_desc="" p
 	prefixes="$(config_suite_prefixes "$suite")"
 	for p in $prefixes; do
+		if [[ " ${CONFIG_SHARED_PREFIXES} " == *" ${p} "* ]]; then
+			shared_desc="${shared_desc:+${shared_desc}, }${p}*"
+			continue
+		fi
 		case "$p" in *_) p="${p}*" ;; esac
 		allowed_desc="${allowed_desc:+${allowed_desc}, }${p}"
 	done
@@ -222,7 +234,7 @@ load_config() {
 			elif grep -qE "^export ${key}=" "${ROOT}/config/versions.env" 2>/dev/null; then
 				cfg_errors+=("${file}:${n}: ${key} is a version pin (config/versions.env), not settable from --config")
 			else
-				cfg_errors+=("${file}:${n}: unknown key ${key} for the ${suite} suite (allowed: SETUP_CONTEXTS and the config/options.env keys ${allowed_desc})")
+				cfg_errors+=("${file}:${n}: unknown key ${key} for the ${suite} suite (allowed: SETUP_CONTEXTS and the config/options.env keys ${allowed_desc}); every suite also takes ${shared_desc}")
 			fi
 			continue
 		fi

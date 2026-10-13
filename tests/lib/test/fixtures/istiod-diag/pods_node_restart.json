@@ -1,0 +1,30 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {
+        "name": "istiod-abc-x1",
+        "namespace": "istio-system",
+        "creationTimestamp": "2026-10-10T08:00:00Z",
+        "ownerReferences": [{"kind": "ReplicaSet", "name": "istiod-abc"}]
+      },
+      "spec": {
+        "nodeName": "worker-node-a",
+        "containers": [{"name": "discovery", "resources": {"limits": {"memory": "3Gi"}}}]
+      },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          {
+            "name": "discovery",
+            "ready": true,
+            "restartCount": 2,
+            "state": {"running": {"startedAt": "2026-10-13T12:23:10Z"}},
+            "lastState": {}
+          }
+        ]
+      }
+    }
+  ]
+}

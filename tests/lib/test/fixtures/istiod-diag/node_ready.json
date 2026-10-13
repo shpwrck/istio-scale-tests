@@ -1,0 +1,15 @@
+{
+  "apiVersion": "v1",
+  "kind": "Node",
+  "metadata": {"name": "worker-node-a"},
+  "status": {
+    "addresses": [{"type": "InternalIP", "address": "192.0.2.5"}, {"type": "Hostname", "address": "worker-node-a"}],
+    "allocatable": {"memory": "15Gi"},
+    "capacity": {"memory": "16Gi"},
+    "nodeInfo": {"bootID": "00000000-0000-0000-0000-000000000001", "kubeletVersion": "v1.31.0"},
+    "conditions": [
+      {"type": "MemoryPressure", "status": "False", "lastTransitionTime": "2026-10-13T12:23:00Z", "reason": "KubeletHasSufficientMemory", "message": "kubelet has sufficient memory available"},
+      {"type": "Ready", "status": "True", "lastTransitionTime": "2026-10-13T12:23:08Z", "reason": "KubeletReady", "message": "kubelet is posting ready status"}
+    ]
+  }
+}

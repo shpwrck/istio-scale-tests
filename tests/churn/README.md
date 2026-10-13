@@ -75,6 +75,14 @@ Ready source pods. The probe therefore sums healthy endpoint weight.
 `SETUP_FAILED` / `PROBE_FAILED` (placeholder for a failed iteration or sweep combo).
 The report averages `OK` rows only and shows `n_valid`/`n_total`.
 
+Every source or remote istiod status other than `0` also saves the restart evidence to
+`istiod-diag-<RUN_ID>/` next to the TSV, tag `iter<N>`, after the row is written; a failed
+capture never adds a `SETUP_FAILED` row. A pod replaced between iterations (scale-down,
+settle) is in no row; the next iteration's port-forward check sees the new pod set and
+captures it (trigger `podset_changed`, tag `before-iter<N>`). Contents, settings and
+redaction are in the [dataplane README](../dataplane/README.md#restart-evidence-istiod-diag-run_id);
+the report ends text and md with an "istiod restart diagnostics" section.
+
 The report's push amplification is `(source + remote xDS pushes) / source push triggers`.
 It grows with connected proxies, so compare it across mesh sizes, not against 1.
 
@@ -127,8 +135,9 @@ rules: [Run config](../../README.md#run-config---config-file)).
 ./tests/churn/005-cleanup.sh --config tests/churn/configs/smoke.env
 ```
 
-- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `CHURN_*`, `FANOUT_*` and
-  `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE` stays environment only.
+- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `CHURN_*`, `FANOUT_*`,
+  `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE`
+  stays environment only.
 - **One value or a list:** `001` and `002` read `CHURN_DEPLOYMENT_COUNT`; the sweep reads the
   CSV `CHURN_INTENSITIES` (`--churn-intensities`; empty: `CHURN_DEPLOYMENT_COUNT`) and
   `CHURN_MESH_SIZES` (`--mesh-sizes`; empty: 1 to the number of contexts). A list key exported

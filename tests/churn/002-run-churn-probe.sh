@@ -36,6 +36,12 @@ source "${ROOT}/tests/lib/timestamp.sh"
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh"  # harness_sha (istiod-diag index preamble)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -688,17 +694,50 @@ reopen_istiod_fanouts_if_dead() {
 	fi
 	((alive)) && return 0
 	echo "  port-forward(s) unresponsive or istiod pods changed — re-opening all port-forwards..." >&2
-	local pid
+	local pid old_src
+	local -A old_rmt=()
+	old_src="$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")"
+	for j in "${!RMT_PODS_STR[@]}"; do old_rmt[$j]="${RMT_PODS_STR[$j]}"; done
 	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	open_istiod_fanouts
 	open_envoy_port_forwards
+	# A pod replaced between two windows (scale-down, settle) is in no row: capture it here.
+	if ((iter > 1)); then
+		diag_podset_changed "$SOURCE_CTX" "$old_src" "$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")" src-pre
+		for j in "${!REMOTES[@]}"; do
+			diag_podset_changed "${REMOTES[j]}" "${old_rmt[$j]:-}" "${RMT_PODS_STR[$j]:-}" "rmt${j}-pre"
+		done
+	fi
+}
+
+# diag_podset_changed <ctx> <old_pods> <new_pods> <prefix>: after a re-open, capture
+# istiod restart evidence (tests/lib/istiod-diag.sh, trigger podset_changed) when the
+# context's istiod pods differ from those of the previous iteration's pre-window scrape
+# (<prefix>.podset and <prefix>-<j>.metrics in its iteration dir). Uses the listing the
+# re-open already made: no API call when the pods match. Always returns 0.
+diag_podset_changed() {
+	local ctx="$1" old="$2" new="$3" prefix="$4" prev csv="" n=0 p
+	[[ -n "$old" && "$old" != "$new" ]] || return 0
+	prev="${TMPDIR_RUN}/iter-$((iter - 1))"
+	[[ -s "${prev}/${prefix}.podset" ]] || return 0
+	while IFS= read -r p; do
+		[[ -n "$p" ]] || continue
+		csv+="${csv:+,}${prev}/${prefix}-${n}.metrics"
+		n=$((n + 1))
+	done < "${prev}/${prefix}.podset"
+	istiod_diag_capture "$DIAG_DIR" "before-iter${iter}" "$ctx" podset_changed \
+		"${prev}/${prefix}.podset" "$csv" "${KUBECTL[@]}"
+	return 0
 }
 
 # convergence_remote_eds_ms fires on the FIRST remote EDS push after t0. istiod
 # coalesces concurrent scales into fewer pushes than deployments, so a
 # per-deployment threshold would time out on a converged mesh.
 EDS_THRESHOLD_DELTA=1
+
+# istiod restart evidence goes to istiod-diag-<RUN_ID>/ next to the TSV (tests/lib/istiod-diag.sh).
+DIAG_DIR="$(istiod_diag_dir "$TSV_FILE" "$RUN_ID")"
 
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
@@ -917,6 +956,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	rmt_queue_p99="N/A"
 	rmt_push_time_p99="N/A"
 	restarted_remote="0"
+	# Per-remote restart status and pre-window scrapes, for the restart evidence below.
+	RMT_RESTART=()
+	RMT_PRE_CSV=()
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_rmt_q=0
 		has_rmt_q=0
@@ -938,6 +980,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				"$ITER_DIR/rmt${i}-pre.podset" "$ITER_DIR/rmt${i}-post.podset" \
 				"$rpre_csv" "$rpost_csv")"
 			[[ "$r_restart" != "0" ]] && restarted_remote="$r_restart"
+			RMT_RESTART[i]="$r_restart"
+			RMT_PRE_CSV[i]="$rpre_csv"
 
 			rmt_post_t=$(fanout_counter_sum pilot_push_triggers "${_rpost_files[@]}")
 			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes "${_rpost_files[@]}")
@@ -1037,6 +1081,19 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		"$src_connected_proxies" "$rmt_connected_proxies" \
 		"$src_push_time_p99" "$rmt_push_time_p99" \
 		"$status" >> "$TSV_FILE"
+
+	# istiod restart evidence (tests/lib/istiod-diag.sh) for the source and each remote
+	# whose status is not 0, after the row is written. The capture always returns 0, and
+	# `|| true` keeps it from ever turning this row into a second, SETUP_FAILED one (PL32).
+	if [[ "$restarted_local" != "0" ]]; then
+		istiod_diag_capture "$DIAG_DIR" "iter${iter}" "$SOURCE_CTX" "$restarted_local" \
+			"$ITER_DIR/src-pre.podset" "$src_pre_csv" "${KUBECTL[@]}" || true
+	fi
+	for i in "${!RMT_RESTART[@]}"; do
+		[[ "${RMT_RESTART[i]}" != "0" ]] || continue
+		istiod_diag_capture "$DIAG_DIR" "iter${iter}" "${REMOTES[i]}" "${RMT_RESTART[i]}" \
+			"$ITER_DIR/rmt${i}-pre.podset" "${RMT_PRE_CSV[i]}" "${KUBECTL[@]}" || true
+	done
 	)
 	iter_rc=$?
 	set -e

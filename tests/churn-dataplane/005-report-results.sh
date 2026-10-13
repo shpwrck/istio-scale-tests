@@ -28,6 +28,8 @@ config_preload churn-dataplane "$@"
 source "${ROOT}/config/options.env"  # COEXEC_RESULTS_DIR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -59,6 +61,12 @@ TSVs: per mesh size and source, how many remotes passed every reach check
 files (the check was off, or the TSV predates it) it says "no reachability data".
 Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 200
 share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
+
+text, md and json also carry an "istiod restart diagnostics" section: every
+istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
+changed, the cause, the evidence folder relative to the results dir) and a tally by
+cause; restarted_untimed rows (may predate the window) are counted apart (json key
+istiod_diag).
 
 Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when the rule fired.
 
@@ -347,6 +355,8 @@ report_text() {
 		printf "  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %22s\n", \
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 	}'
+	echo ""
+	istiod_diag_report text "$RESULTS_DIR"
 }
 
 report_csv() {
@@ -395,8 +405,9 @@ report_json() {
 		--arg run_config_sha256 "${RUN_CONFIG_SHA256_STR:-unknown}" \
 		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
+		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -482,6 +493,8 @@ report_md() {
 	aggregate | awk -F'\t' '{
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
 	}'
+	echo ""
+	istiod_diag_report md "$RESULTS_DIR"
 
 	# #17: metric glossary at the very end of the markdown summary.
 	glossary_section

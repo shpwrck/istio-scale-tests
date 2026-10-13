@@ -44,6 +44,8 @@ source "${ROOT}/tests/lib/config.sh"  # config_preload, config_report_value
 config_preload propagation "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # PROPAGATION_RESULTS_DIR
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -86,6 +88,12 @@ Filtering policy (rows excluded from numeric aggregation):
 P2 values are additionally suppressed when p2_dirty == 1.
 
 n_total / n_valid: rows considered vs rows used after the above filtering.
+
+text, markdown and json also carry an "istiod restart diagnostics" section: every
+istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
+changed, the cause, the evidence folder relative to the results dir) and a tally by
+cause; restarted_untimed rows (may predate the window) are counted apart (json key
+istiod_diag).
 
 Environment:
   FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 filter (default 1000).
@@ -524,6 +532,8 @@ report_endpoint_text() {
 			stats_line("P3 remote sidecar",      p3_vals,   ms_cur, p3_n[ms_cur])
 		}
 	}'
+	echo ""
+	istiod_diag_report text "$RESULTS_DIR"
 }
 
 report_endpoint_csv() {
@@ -675,6 +685,9 @@ report_endpoint_markdown() {
 		}
 	}'
 
+	istiod_diag_report md "$RESULTS_DIR"
+	echo ""
+
 	# Metric glossary at the very end of the markdown summary.
 	glossary_section
 }
@@ -711,6 +724,8 @@ report_endpoint_json() {
 		}
 		printf "]"
 	}'
+	printf ',"istiod_diag":'
+	istiod_diag_report json "$RESULTS_DIR"
 	printf '}\n'
 }
 

@@ -11,7 +11,7 @@ The original issue texts are in the appendix.
 | 1 | Namespace scaling factor (customer: thousands of namespaces, 1–5 services each) | Planned | lab for shape, ROSA for numbers |
 | 2 | Per-cluster connected-proxy count + sanity check (was #85) | Done, lab-validated with 3 istiod replicas | campaign-scale check optional (ROSA) |
 | 3 | East-west failures on some clusters (was #86) | Root cause confirmed on the lab (CA race); fix verified; harness reports unreachable remotes | AWS load-balancer checks (ROSA) |
-| 4 | Capture istiod restart diagnostics (was #87) | Not started | needs a scale run to reproduce |
+| 4 | Capture istiod restart diagnostics (was #87) | Capture done in every suite, verified offline (bats) | lab: force each cause; ROSA: passive capture, one pod-delete smoke |
 | 5 | Local baseline saturates one server replica (was #88) | Done, lab-validated | — |
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done, lab-validated (shape) | numbers at scale (ROSA) |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
@@ -74,16 +74,55 @@ per-cluster `fortio-server-<ctx>` Services and an `ERROR_RATE_HIGH` rule.
 hostname-based LB addresses and DNS propagation, quota-late provisioning, and the 3-cluster
 partial-mesh pattern (only pairs that include the bad cluster fail).
 
-## 4. Capture istiod restart diagnostics (was #87)
+## 4. Capture istiod restart diagnostics (was #87) — capture done, lab validation pending
 
-**Left:** when a suite detects an istiod restart (`istiod_restarted=1`, `POISONED_RESTART`), save the
-previous container's exit reason and code (`lastState.terminated`), its previous logs
-(`oc logs --previous`), the pod's events, and memory at the time, next to the run's TSV. Then try to
-reproduce under churn at mid scale (a few thousand services). The original restart happened at 20
-clusters × 10k services and may need that scale.
+**Done:** `tests/lib/istiod-diag.sh` saves the evidence when a suite detects an istiod restart.
+It runs at every detection point: controlplane 002 (after each window, from the rows it
+wrote), dataplane 002, churn 002 (source and remotes), churn-dataplane 002/003 and
+propagation 002; tuning runs them. Churn and propagation also capture a pod replaced
+between iterations, at the next port-forward re-open (trigger `podset_changed`).
+Evidence goes to `istiod-diag-<RUN_ID>/` next to the run's TSV:
+- `index.tsv` has one sanitized row per pod: what changed, the cause (`oom_killed`,
+  `probe_kill`, `crash`, `killed`, `exited`, `node_restart`, `evicted`, `preempted`,
+  `node_lost`, `rollout`, `deleted`, `scaled`, `no_restart_found`), `lastState.terminated`,
+  the restart count, the memory limit, and the suite's own pre-window RSS, heap, goroutines
+  and proxies.
+- One raw folder per capture: the previous container's log, events, Deployment and
+  ReplicaSet revisions, node conditions and events, the pre-window `/metrics`, and a
+  `summary.md` with the PromQL query for the memory history.
 
-**Validate:** force restarts (delete the pod, a low memory limit for an OOM, a failing probe) and
-check each cause is captured correctly.
+It costs nothing without a restart and is bounded otherwise
+(`ISTIOD_DIAG_*` in `config/options.env`). It never changes a row or fails a run. The
+dataplane, churn, churn-dataplane and propagation reports show it in text, md and json.
+Details are in the dataplane README, "Restart evidence".
+
+**Finding:** the Sail istiod Deployment on the lab has only a readiness probe (no liveness or
+startup probe, and the Istio CR has no field for one), so a probe cannot restart istiod as
+shipped. That rules out the "liveness timeout" explanation for #87 unless the Deployment was
+edited. `probe_kill` stays in the classifier for hand-edited Deployments and is validated
+offline only.
+
+**Validate (lab):**
+1. Read-only: capture the existing node-reboot evidence on `<mesh-a-ctx>`.
+2. Delete an istiod pod during a dataplane, controlplane and churn run on `<mesh-b-ctx>`.
+3. Force an OOM with a low memory limit on the Istio CR, under `006-gitops-pause`, then
+   restore it with `--resume` and the recovery gate.
+4. Force a failed capture with `ISTIOD_DIAG_REQUEST_TIMEOUT=1ms`; the run must continue.
+
+Check each row's cause and that the redaction grep finds nothing. On ROSA the capture is
+passive during the other runs; the plan adds one churn pod-delete smoke. ROSA cannot
+reproduce the original 20-cluster × 10k restart.
+
+**Follow-ups (task 4):**
+- Add the controlplane 004 report section once task 1 has merged (004 is task 1's file).
+- Restarts in place between measurement windows (churn scale-down and settle, propagation
+  drain) are still not seen; only a replaced pod is, at the next re-open.
+- Propagation keeps a timeout or `SCRAPE_INCOMPLETE` status on the row of a replaced pod; the
+  index has the cause, but the row is not relabeled `RESTART`.
+- churn-dataplane watches the source context's istiod only.
+- Fetch the memory history from cluster monitoring automatically (today: the PromQL query
+  in `summary.md`).
+- Move `reach_sanitize` into `common.sh` once task 1 has merged.
 
 ## 5. Local baseline saturates one server replica (was #88) — done
 
