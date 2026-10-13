@@ -19,20 +19,29 @@
 #
 # Knobs (config/options.env; read at call time, so a script's flag can override):
 #   REACH_REQUESTS (0 = check off), REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-#   REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE (warn|fail).
+#   REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC,
+#   REACH_ON_UNREACHABLE (warn|fail).
+#
+# Cost: the requests of one check go out over REACH_REQUESTS/2 parallel connections
+# (fortio runs at least two calls per connection) at REACH_QPS in total, so a check
+# of a target that never answers ends after two timeouts (three for an odd
+# REACH_REQUESTS) instead of REACH_REQUESTS of them. reach_worst_case_sec gives the
+# bound per run.
 #
 # Exposes:
 #   REACH_EXIT_CODE                       -> 3: the reachability gate stopped the run
 #   reach_validate <policy>               -> print the first bad knob, return 1
+#   reach_worst_case_sec                  -> seconds the check can spend on a target
+#                                            that never answers (all attempts)
 #   reach_plan_line <url_tmpl> <src> <remotes_csv> <policy>
 #                                         -> one dry-run line describing the check
 #   reach_summarize <json>                -> "ok total pct_200 top_code" from fortio JSON
 #                                            (pct_200 4 decimals; "0 0 N/A -" with no codes)
 #   reach_classify <ok> <total>           -> REACHABLE | UNREACHABLE | DEGRADED | UNKNOWN
-#   reach_sanitize <text>                 -> one line, IPv4s/hostnames masked, <= 256 chars
+#   reach_sanitize <text>                 -> one line, IPv4/IPv6/hostnames masked, <= 256 chars
 #   reach_body_line <stdout_f> <stderr_f> -> first body line of a `fortio curl` reply
 #   reach_write_header <tsv> <K=V...>     -> preamble + header, only when <tsv> is new (PL36)
-#   reach_check_target <out> <ctx> <ns> <pod> <url> <kubectl...>
+#   reach_check_target <out> <ctx> <ns> <pod> <url> <detail 0|1> <kubectl...>
 #                                         -> one check from <pod> on <ctx>; one result line
 #   reach_check_all <tsv> <run_id> <combo_id> <mesh_size> <ns> <pod> <url_tmpl> <src>
 #                   <remotes_csv> <kubectl...>
@@ -78,9 +87,34 @@ reach_validate() {
 	is_nonneg_int "${REACH_REQUESTS:-10}" || { echo "--reach-requests (or REACH_REQUESTS) must be a non-negative integer; got '${REACH_REQUESTS}'"; return 1; }
 	is_pos_int "${REACH_QPS:-10}" || { echo "REACH_QPS must be a positive integer; got '${REACH_QPS}'"; return 1; }
 	is_pos_int "${REACH_HTTP_TIMEOUT_SEC:-3}" || { echo "REACH_HTTP_TIMEOUT_SEC must be a positive integer; got '${REACH_HTTP_TIMEOUT_SEC}'"; return 1; }
+	is_pos_int "${REACH_DETAIL_TIMEOUT_SEC:-35}" || { echo "REACH_DETAIL_TIMEOUT_SEC must be a positive integer; got '${REACH_DETAIL_TIMEOUT_SEC}'"; return 1; }
 	is_pos_int "${REACH_ATTEMPTS:-3}" || { echo "REACH_ATTEMPTS must be a positive integer; got '${REACH_ATTEMPTS}'"; return 1; }
 	is_nonneg_int "${REACH_RETRY_SEC:-10}" || { echo "REACH_RETRY_SEC must be a non-negative integer; got '${REACH_RETRY_SEC}'"; return 1; }
 	return 0
+}
+
+# reach_worst_case_sec: the seconds the check can spend on a target that never
+# answers (packets dropped), excluding kubectl exec overhead. Targets are checked in
+# parallel, so this is also the cost per run. Per check: REACH_REQUESTS/REACH_QPS
+# (rounded up) plus one REACH_HTTP_TIMEOUT_SEC per call on the busiest connection
+# (2, or 3 for an odd REACH_REQUESTS); then (REACH_ATTEMPTS - 1) gaps of
+# REACH_RETRY_SEC; then one detail curl of REACH_DETAIL_TIMEOUT_SEC. 76 at the
+# defaults. Prints 0 when the check is off, `unknown` for a knob reach_validate
+# would reject (never fails: PL40).
+# shellcheck disable=SC2329
+reach_worst_case_sec() {
+	local n="${REACH_REQUESTS:-10}" q="${REACH_QPS:-10}" t="${REACH_HTTP_TIMEOUT_SEC:-3}"
+	local a="${REACH_ATTEMPTS:-3}" r="${REACH_RETRY_SEC:-10}" d="${REACH_DETAIL_TIMEOUT_SEC:-35}"
+	local c per v
+	for v in "$n" "$q" "$t" "$a" "$r" "$d"; do
+		is_nonneg_int "$v" || { echo unknown; return 0; }  # also no octal 09
+	done
+	if ((n == 0)); then echo 0; return 0; fi
+	((q > 0)) || { echo unknown; return 0; }
+	c=$((n / 2))
+	((c >= 1)) || c=1
+	per=$(((n + c - 1) / c))  # calls on the busiest connection
+	echo $((a * ((n + q - 1) / q + per * t) + (a - 1) * r + d))
 }
 
 # shellcheck disable=SC2329
@@ -91,7 +125,8 @@ reach_plan_line() {
 		return 0
 	fi
 	echo "Reach check: ${REACH_REQUESTS:-10} requests at ${REACH_QPS:-10} QPS per target" \
-		"(timeout ${REACH_HTTP_TIMEOUT_SEC:-3}s, up to ${REACH_ATTEMPTS:-3} attempts ${REACH_RETRY_SEC:-10}s apart)" \
+		"(timeout ${REACH_HTTP_TIMEOUT_SEC:-3}s, up to ${REACH_ATTEMPTS:-3} attempts ${REACH_RETRY_SEC:-10}s apart," \
+		"detail curl ${REACH_DETAIL_TIMEOUT_SEC:-35}s; at most about $(reach_worst_case_sec)s for a target that never answers)" \
 		"to ${tmpl} for ${src} (local)${remotes_csv:+ and ${remotes_csv}}; on unreachable: ${policy}"
 }
 
@@ -135,14 +170,22 @@ reach_classify() {
 }
 
 # reach_sanitize <text>: the detail column holds Envoy/fortio text, which can name
-# pod IPs and hosts. Mask IPv4 addresses and dotted hostnames, collapse tabs and
-# newlines, cut to 256 characters (an Envoy TLS failure reply runs about 225).
-# Reason tokens such as CERTIFICATE_VERIFY_FAILED have no dots and survive.
+# pod IPs and hosts. Mask IP addresses as <ip> and dotted hostnames as <host>,
+# collapse tabs and newlines, cut to 256 characters (an Envoy TLS failure reply runs
+# about 225). IPv6, in order: a bracketed literal ([fd00::1], [fe80::1%eth0]:8080);
+# then, after IPv4, an unbracketed one that has "::" next to a hex digit, or 4+
+# colon-separated hex groups (an uncompressed address has 8). Each unbracketed form
+# starts at the text start or after a non-alphanumeric character, so `code:-1`,
+# HH:MM:SS (3 groups), Envoy::Http and 268435581:SSL survive. Reason tokens such as
+# CERTIFICATE_VERIFY_FAILED have no dots and survive.
 # shellcheck disable=SC2329
 reach_sanitize() {
 	local out
 	out="$(printf '%s' "$1" | tr '\t\r\n' '   ' | sed -E \
+		-e 's/\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(%[0-9A-Za-z_.-]+)?]/<ip>/g' \
 		-e 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g' \
+		-e 's/(^|[^0-9A-Za-z_])[0-9A-Fa-f:]*([0-9A-Fa-f]::|::[0-9A-Fa-f])([0-9A-Fa-f:]*[0-9A-Fa-f])?(%[0-9A-Za-z_.-]+)?/\1<ip>/g' \
+		-e 's/(^|[^0-9A-Za-z_])([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}(%[0-9A-Za-z_.-]+)?/\1<ip>/g' \
 		-e 's/([A-Za-z0-9_-]+\.)+[A-Za-z][A-Za-z0-9-]*/<host>/g' \
 		-e 's/ +/ /g' -e 's/^ //' -e 's/ $//' 2>/dev/null)" || out=""
 	[[ -n "$out" ]] || out="-"
@@ -151,9 +194,12 @@ reach_sanitize() {
 
 # reach_body_line <stdout_file> <stderr_file>: `fortio curl` prints the status
 # line and headers, a blank line, then the body (an Envoy local reply such as
-# "no healthy upstream"). Prints the first body line, else the status line, else
-# the last stderr line that is not kubectl's "command terminated ..." (fortio logs
-# JSON there; its msg/err fields are used).
+# "no healthy upstream"). Prints the first body line, else the status line, else a
+# stderr line other than kubectl's "command terminated ...": fortio logs JSON there
+# and its msg/err fields are used. A socket failure logs the cause with an "err"
+# field ("Timeout error ...: read tcp ...: i/o timeout", "Unable to connect: dial
+# tcp ...") and then always ends with {"msg":"Error status -1"}, so the last line
+# with an "err" field wins over the last line.
 # shellcheck disable=SC2329
 reach_body_line() {
 	local line j
@@ -165,10 +211,15 @@ reach_body_line() {
 			if ($0 != "" && body == "") body = $0
 			next
 		}
-		$0 != "" && $0 !~ /^command terminated with exit code/ { err = $0 }
+		$0 != "" && $0 !~ /^command terminated with exit code/ {
+			err = $0
+			# "err": as a key (the "level":"err" value is followed by a comma).
+			if ($0 ~ /^\{/ && $0 ~ /"err":/) errf = $0
+		}
 		END {
 			if (body != "") print body
 			else if (status != "") print status
+			else if (errf != "") print errf
 			else if (err != "") print err
 		}' "$1" "$2" 2>/dev/null)" || line=""
 	if [[ "$line" == "{"* ]]; then
@@ -200,36 +251,51 @@ reach_write_header() {
 		echo "# REACH_REQUESTS=${REACH_REQUESTS:-10}"
 		echo "# REACH_QPS=${REACH_QPS:-10}"
 		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"
+		echo "# REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}"
 		echo "# REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}"
 		echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 		printf 'run_id\tcombo_id\tmesh_size\tsource_ctx\ttarget_ctx\ttarget_class\tattempts\trequests\tok\tpct_200\ttop_code\treach_status\tdetail\n'
 	} > "$tsv" 2>/dev/null || return 1
 }
 
-# reach_check_target <out_file> <ctx> <ns> <pod> <url> <kubectl...>: one check
-# from <pod> (container fortio) on <ctx>. Writes one line to <out_file>:
+# reach_check_target <out_file> <ctx> <ns> <pod> <url> <detail> <kubectl...>: one
+# check from <pod> (container fortio) on <ctx>. Writes one line to <out_file>:
 #   requests ok pct_200 top_code status detail
-# A failed kubectl exec gives UNKNOWN "exec failed" (PL9: never REACHABLE). A target
-# that is not REACHABLE gets one `fortio curl` for the detail column. fortio load
-# exits 0 even when every request fails, so the codes decide, not the exit status;
-# fortio curl exits 1 on a non-2xx reply, so its exit status is ignored.
+# A failed kubectl exec gives UNKNOWN "exec failed" (PL9: never REACHABLE). The
+# REACH_REQUESTS requests go out over REACH_REQUESTS/2 connections (fortio runs at
+# least two calls per connection), started evenly over the first period
+# (-uniform) so the total stays at REACH_QPS; the count of requests and 200s is the
+# same as on one connection, but a target that never answers costs two timeouts
+# (three for an odd count), not REACH_REQUESTS of them. With <detail> 1, a target
+# that is not REACHABLE gets one `fortio curl` for the detail column, with
+# REACH_DETAIL_TIMEOUT_SEC. The suites render no VirtualService, so the client
+# sidecar's route has Istio's default retry policy (2 retries, connect-failure among
+# the causes, no per-try timeout) and no route timeout: for a blackholed east-west
+# gateway Envoy replies only after three meshConfig.connectTimeout (10 s) connect
+# attempts, about 30 s. The 35 s default outlasts that, so the detail is Envoy's
+# "upstream connect error ... connection timeout"; a shorter timeout ends on the
+# client side as fortio's "Timeout error ...: i/o timeout". fortio load exits 0
+# even when every request fails, so the codes decide, not the exit status; fortio
+# curl exits 1 on a non-2xx reply, so its exit status is ignored.
 # shellcheck disable=SC2329
 reach_check_target() {
-	local out="$1" ctx="$2" ns="$3" pod="$4" url="$5"
-	shift 5
-	local json="" ok=0 total=0 pct="N/A" top="-" status="UNKNOWN" detail="-" d=""
+	local out="$1" ctx="$2" ns="$3" pod="$4" url="$5" want_detail="$6"
+	shift 6
+	local json="" ok=0 total=0 pct="N/A" top="-" status="UNKNOWN" detail="-" d="" conns
+	conns=$(( ${REACH_REQUESTS:-10} / 2 ))
+	((conns >= 1)) || conns=1
 	if json="$("$@" --context="$ctx" -n "$ns" exec "$pod" -c fortio -- \
-		fortio load -qps "${REACH_QPS:-10}" -n "${REACH_REQUESTS:-10}" -c 1 \
+		fortio load -qps "${REACH_QPS:-10}" -n "${REACH_REQUESTS:-10}" -c "$conns" -uniform \
 		-timeout "${REACH_HTTP_TIMEOUT_SEC:-3}s" -allow-initial-errors -json - -quiet "$url" 2>/dev/null)"; then
 		read -r ok total pct top <<<"$(reach_summarize "$json")" || true
 		status="$(reach_classify "$ok" "$total")"
 	else
 		detail="exec failed"
 	fi
-	if [[ "$status" != REACHABLE && "$detail" == "-" ]]; then
+	if [[ "$want_detail" == 1 && "$status" != REACHABLE && "$detail" == "-" ]]; then
 		if d="$(mktemp -d 2>/dev/null)"; then
 			"$@" --context="$ctx" -n "$ns" exec "$pod" -c fortio -- \
-				fortio curl -timeout "${REACH_HTTP_TIMEOUT_SEC:-3}s" "$url" >"${d}/out" 2>"${d}/err" || true
+				fortio curl -timeout "${REACH_DETAIL_TIMEOUT_SEC:-35}s" "$url" >"${d}/out" 2>"${d}/err" || true
 			detail="$(reach_sanitize "$(reach_body_line "${d}/out" "${d}/err")")"
 			rm -rf "$d"
 		fi
@@ -240,8 +306,10 @@ reach_check_target() {
 # reach_check_all: see the header. Targets are checked in parallel (one kubectl
 # exec each); a target that is not REACHABLE is re-checked, REACH_RETRY_SEC apart,
 # until REACH_ATTEMPTS checks, because cross-cluster endpoints can lag a fresh
-# setup. Rows are appended source first, then remotes in the given order. Returns 1
-# only when the check could not run at all (no reach TSV header, no temp dir).
+# setup. Only the last attempt runs the detail curl (the earlier ones would be
+# overwritten), so a target that never answers pays for it once. Rows are appended
+# source first, then remotes in the given order. Returns 1 only when the check
+# could not run at all (no reach TSV header, no temp dir).
 # shellcheck disable=SC2329
 reach_check_all() {
 	local tsv="$1" run_id="$2" combo_id="$3" mesh_size="$4" ns="$5" pod="$6" tmpl="$7" src="$8" remotes_csv="$9"
@@ -269,7 +337,7 @@ reach_check_all() {
 		for i in "${todo[@]}"; do
 			att[i]=$attempt
 			url="${tmpl//\{ctx\}/${targets[$i]}}"
-			reach_check_target "${tmp}/${i}" "$src" "$ns" "$pod" "$url" "$@" &
+			reach_check_target "${tmp}/${i}" "$src" "$ns" "$pod" "$url" "$((attempt == max ? 1 : 0))" "$@" &
 			pids+=($!)
 		done
 		for pid in "${pids[@]}"; do wait "$pid" || true; done

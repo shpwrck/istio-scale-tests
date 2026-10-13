@@ -13,7 +13,7 @@
 #   per-cluster max 34 (36 if the excluded scrape leaks)
 #   per-cluster avg 31 = (30+34+30)/3, once per scrape (32 if ingested once per pod row)
 #
-# Task 6 fixture fixtures/controlplane_vsdr.tsv (mesh 2, 10 svc, 2 reps, 1 ns; VSDR_EVERY 1,
+# VS/DR fixture fixtures/controlplane_vsdr.tsv (mesh 2, 10 svc, 2 reps, 1 ns; VSDR_EVERY 1,
 # VSDR_SUBSETS 2), two base cells, each swept with traffic none and vsdr:
 #   scoping none:     none VS 0, 30 clusters, 1 MiB dumps; vsdr VS 10, 50 clusters (+20 =
 #                     10 svc x 2 subsets), plus a restarted vsdr row (mem 999, VS 3) that
@@ -43,7 +43,7 @@ legacy40() {
 		| cut -f1-40 > "$1"
 }
 
-# vsdr_dir: a results dir holding only the Task 6 fixture.
+# vsdr_dir: a results dir holding only the VS/DR fixture.
 vsdr_dir() {
 	VRES="${BATS_TEST_TMPDIR}/v"
 	mkdir -p "$VRES"
@@ -179,7 +179,7 @@ vsdr_dir() {
 	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
 }
 
-# --- Task 6: VirtualService/DestinationRule traffic axis -------------------------------
+# --- VirtualService/DestinationRule traffic axis -------------------------------
 
 @test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields" {
 	vsdr_dir
@@ -270,4 +270,56 @@ vsdr_dir() {
 	run --separate-stderr render_scale_envelope "$VRES" "$REPORT" "mesh-a,mesh-b" false
 	assert_success
 	assert_output --partial "| Traffic management | vsdr |"
+}
+
+# fleet_replicas <out>: the fixture as an INFRA_SCHEMA 2 file whose members run 1 and 3
+# istiod replicas.
+fleet_replicas() {
+	awk '
+		$0 == "# CONTROLPLANE_INFRA_SCHEMA=1" { print "# CONTROLPLANE_INFRA_SCHEMA=2"; next }
+		$0 == "# ISTIOD_REPLICAS=3" { print "# ISTIOD_REPLICAS=1-3"; print "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=1,mesh-b=3"; next }
+		{ print }' "$FIXTURE" > "$1"
+}
+
+@test "report: istiod replicas that differ by member read 1-3 per cluster in every format" {
+	rm -f "${RES}"/*.tsv
+	fleet_replicas "${RES}/controlplane-fleet.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_output --partial "istiod replicas:             1-3 per cluster (varies by cluster)"
+	assert_output --partial "istiod replicas by context:  mesh-a=1,mesh-b=3"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_output --partial "| istiod replicas | 1-3 per cluster (varies by cluster) |"
+	assert_output --partial 'istiod_replicas_by_context: "mesh-a=1,mesh-b=3"'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_output --partial "istiod_replicas=1-3 istiod_replicas_by_context=mesh-a=1,mesh-b=3 "
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '.metadata.infra | [.istiod_replicas, .istiod_replicas_by_context]' <<<"$output")" = '["1-3","mesh-a=1,mesh-b=3"]' ]
+}
+
+@test "report: an INFRA_SCHEMA 1 file says its replica count is the first context's" {
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_output --partial "istiod replicas:             3 (first context only)"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.metadata.infra.istiod_replicas_by_context' <<<"$output")" = unknown ]
+}
+
+@test "envelope: istiod replicas probed on every context, no context names in the table" {
+	source "${ROOT}/tests/lib/capacity.sh"
+	source "${ROOT}/tests/lib/envelope.sh"
+	_rep_kubectl() {
+		local ctx="" a
+		for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
+		[[ "$*" == *"get deploy istiod"* ]] || return 1
+		case "$ctx" in
+		mesh-a) echo '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"discovery"}]}}}}' ;;
+		mesh-b) echo '{"spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"discovery"}]}}}}' ;;
+		esac
+	}
+	run --separate-stderr render_scale_envelope "$RES" "$REPORT" "mesh-a,mesh-b" _rep_kubectl
+	assert_success
+	assert_output --partial "| istiod replicas | 1-3 per cluster (varies by cluster) | — | live \`deploy/istiod\` on every context |"
+	assert_output --partial "per-replica limit x that cluster's istiod replicas"
+	refute_output --partial "mesh-b=3"
 }

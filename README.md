@@ -115,14 +115,18 @@ config" section in its README that lists its keys. Tuning does not take one yet.
   what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
   A standalone step still takes those on the command line.
 - **Sweeps:** the steps a sweep runs inherit the file's values; the flags it passes them still
-  win.
+  win. Before the first step a sweep checks its numeric knobs: the ones it passes its steps as
+  flags (durations, QPS, connections, settle times, ...) and the ones only its steps read (setup
+  and cleanup timeouts, poll intervals, ...). A value such as `5m` fails `--dry-run` instead of
+  every setup, every cleanup, or the probe window (fortio would read `5m` seconds as 5 ms).
 - **Context names:** keep real ones out of git. Copy an example to
   `tests/<suite>/configs/<name>.local.env` (gitignored) and set `SETUP_CONTEXTS` there.
 - **Provenance:** every TSV preamble records `RUN_CONFIG` (the file's path from the repo root, or
   only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and every
   report format repeats them: `unknown` for files written before these keys existed, and
   `mixed:<a>,<b>` with a warning when the inputs disagree. A sweep copies the file to
-  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`. With `--config` but no `--results-dir`, a report warns
+  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`, and every probe's per-run markdown summary has a
+  `Run config` row. With `--config` but no `--results-dir`, a report warns
   when the results dir holds more than one run (each `sweep-*` directory is one run; outside
   one, each `RUN_ID`).
 

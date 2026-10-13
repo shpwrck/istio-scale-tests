@@ -359,7 +359,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=51"
-		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
+		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
@@ -1489,6 +1489,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Phase | ${PHASE} |"
 		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
+		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
 		echo "| Mesh size | ${MESH_SIZE} |"

@@ -35,11 +35,21 @@
 #       config/options.env) but accept args 8/9 so the function stays pure/unit-testable.
 #       The controlplane report (004) is the SINGLE authoritative compute site;
 #       render_scale_envelope reads the verdict back from the report JSON (C1).
+#   env_replicas_summary <n...>                    -> the ISTIOD_REPLICAS token for
+#       per-context istiod replica counts: `3` when they agree, `1-3` when they vary,
+#       `unknown` when none was read.
+#   env_replicas_label <ISTIOD_REPLICAS> [ISTIOD_REPLICAS_BY_CONTEXT]
+#                                                  -> display form: `3 per cluster`,
+#       `1-3 per cluster (varies by cluster)`, `3 (first context only)` for a TSV
+#       written before every context was read.
 #
 # Exposes (thin kubectl wrappers — each takes <ctx> <kubectl_argv...>):
 #   env_istiod_resources <ctx> <argv...>
 #   env_network          <ctx> <argv...>   (istiod env, else the istio-system
 #                                           topology.istio.io/network label)
+#   env_istiod_scan <contexts_csv> <argv...>
+#                                         -> istiod req/lim of the first context plus
+#                                            the replica count of every context
 #
 # Exposes (campaign-end renderer):
 #   render_scale_envelope <results_dir> <report_script> <contexts_csv> <kubectl_argv...>
@@ -195,6 +205,56 @@ env_sla_verdict() {
 	}'
 }
 
+# env_replicas_summary <n...>: the ISTIOD_REPLICAS preamble token for per-context
+# istiod replica counts. One number when every numeric value is the same (`3`, the
+# form older TSVs carry), `min-max` when they differ (`1-3`), `unknown` when none is
+# numeric. A context whose read failed is left out of the range;
+# ISTIOD_REPLICAS_BY_CONTEXT names it. One token, no spaces. Pure.
+# shellcheck disable=SC2329
+env_replicas_summary() {
+	local v min="" max=""
+	for v in "$@"; do
+		[[ "$v" =~ ^[0-9]+$ ]] || continue
+		v=$((10#$v))
+		if [[ -z "$min" ]] || ((v < min)); then min="$v"; fi
+		if [[ -z "$max" ]] || ((v > max)); then max="$v"; fi
+	done
+	if [[ -z "$min" ]]; then
+		echo unknown
+	elif ((min == max)); then
+		echo "$min"
+	else
+		echo "${min}-${max}"
+	fi
+}
+
+# env_replicas_label <replicas> [by_context]: how reports print ISTIOD_REPLICAS.
+#   3   -> "3 per cluster"; 1-3 -> "1-3 per cluster (varies by cluster)"
+#   a number with no (or an `unknown`) by_context -> "3 (first context only)": a TSV
+#   written before every context was read (ISTIOD_REPLICAS_BY_CONTEXT absent)
+#   by_context naming a context as `unknown` adds "; not read on N of M contexts"
+#   anything else (unknown) is printed as-is. Pure.
+# shellcheck disable=SC2329
+env_replicas_label() {
+	local reps="${1:-unknown}" by="${2:-unknown}" label n_unknown n_ctx
+	if [[ "$reps" =~ ^[0-9]+$ ]]; then
+		if [[ "$by" == unknown || -z "$by" ]]; then
+			echo "${reps} (first context only)"
+			return 0
+		fi
+		label="${reps} per cluster"
+	elif [[ "$reps" =~ ^[0-9]+-[0-9]+$ ]]; then
+		label="${reps} per cluster (varies by cluster)"
+	else
+		echo "$reps"
+		return 0
+	fi
+	n_ctx="$(printf '%s' "$by" | tr ',' '\n' | grep -c . || true)"
+	n_unknown="$(printf '%s' "$by" | tr ',' '\n' | grep -c '=unknown$' || true)"
+	if ((n_unknown > 0)); then label+="; not read on ${n_unknown} of ${n_ctx} contexts"; fi
+	echo "$label"
+}
+
 # ---------------------------------------------------------------------------
 # Thin kubectl wrappers (read-only).
 # ---------------------------------------------------------------------------
@@ -207,6 +267,57 @@ env_istiod_resources() {
 	local ctx="$1"; shift
 	"$@" --context="$ctx" --request-timeout=5s -n istio-system get deploy istiod -o json 2>/dev/null \
 		| env_parse_istiod_resources
+}
+
+# env_istiod_scan <contexts_csv> <kubectl_argv...>
+# istiod req/lim from the SOURCE (first) context, which is the pin the preamble
+# records, plus the replica count of EVERY context, read concurrently (one
+# `get deploy istiod` each, 5 s timeout) so a 20-cluster mesh costs one read, not 20.
+# Members can run different replica counts, and the per-replica proxy figure is about
+# 1/R of the cluster figure, so R must not come from the first context alone. Emits:
+#   req_cpu_m=.. req_mem_mi=.. lim_cpu_m=.. lim_mem_mi=.. replicas=<summary> replicas_by_context=<ctx=n,...>
+# replicas is env_replicas_summary over the contexts; a failed read is `unknown` in
+# replicas_by_context (`unknown` as a whole with no contexts). Never dies (PL40).
+# shellcheck disable=SC2329
+env_istiod_scan() {
+	local contexts_csv="$1"; shift
+	local -a ctxs=() rep_list=() pids=() rk=()
+	split_csv "$contexts_csv" ctxs
+	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown"
+	local by="" kv i rep tmp="" p
+	if ((${#ctxs[@]})) && tmp="$(mktemp -d 2>/dev/null)"; then
+		# Temp files by index: context names can contain '/' (oc login style).
+		for i in "${!ctxs[@]}"; do
+			env_istiod_resources "${ctxs[i]}" "$@" > "${tmp}/${i}" 2>/dev/null &
+			pids+=($!)
+		done
+		for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+		for i in "${!ctxs[@]}"; do
+			rep="unknown"
+			# shellcheck disable=SC2207
+			rk=($(cat "${tmp}/${i}" 2>/dev/null))
+			for kv in ${rk[@]+"${rk[@]}"}; do
+				case "$kv" in
+					replicas=*) rep="${kv#replicas=}" ;;
+				esac
+				if ((i == 0)); then
+					case "$kv" in
+						req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
+						req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
+						lim_cpu_m=*) lim_cpu="${kv#lim_cpu_m=}" ;;
+						lim_mem_mi=*) lim_mem="${kv#lim_mem_mi=}" ;;
+					esac
+				fi
+			done
+			[[ -n "$rep" ]] || rep="unknown"
+			rep_list+=("$rep")
+			by="${by:+${by},}${ctxs[i]}=${rep}"
+		done
+		rm -rf "$tmp"
+	fi
+	printf 'req_cpu_m=%s req_mem_mi=%s lim_cpu_m=%s lim_mem_mi=%s replicas=%s replicas_by_context=%s\n' \
+		"$req_cpu" "$req_mem" "$lim_cpu" "$lim_mem" \
+		"$(env_replicas_summary ${rep_list[@]+"${rep_list[@]}"})" "${by:-unknown}"
 }
 
 # env_network <ctx> <kubectl_argv...>
@@ -230,7 +341,9 @@ env_network() {
 # env_collect_infra <contexts_csv> <kubectl_argv...>
 # Read-only collection of the cluster-infra values that feed the TSV preamble's
 # additive infra block (preamble.sh:infra_preamble_lines). Reads:
-#   - istiod req/lim/replicas from the SOURCE context (env_istiod_resources);
+#   - istiod req/lim from the SOURCE context and the replica count of EVERY context
+#     (env_istiod_scan): ISTIOD_REPLICAS is one number when the members agree,
+#     `min-max` when they differ, and ISTIOD_REPLICAS_BY_CONTEXT lists ctx=n;
 #   - the network topology (single/multi-network) across ALL contexts (env_network).
 # These are sweep-level scalars (the pin and mesh wiring are homogeneous across a
 # coherent run — PL26). Node allocatable is NOT read here — the O9 capacity block in
@@ -242,22 +355,20 @@ env_collect_infra() {
 	local contexts_csv="$1"; shift
 	local -a ctxs=()
 	split_csv "$contexts_csv" ctxs
-	local src_ctx="${ctxs[0]:-}"
-	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown" reps="unknown"
+	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown" reps="unknown" reps_by="unknown"
 	local kv
-	if [[ -n "$src_ctx" ]]; then
-		# shellcheck disable=SC2207
-		local -a rk=($(env_istiod_resources "$src_ctx" "$@"))
-		for kv in "${rk[@]}"; do
-			case "$kv" in
-				req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
-				req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
-				lim_cpu_m=*) lim_cpu="${kv#lim_cpu_m=}" ;;
-				lim_mem_mi=*) lim_mem="${kv#lim_mem_mi=}" ;;
-				replicas=*) reps="${kv#replicas=}" ;;
-			esac
-		done
-	fi
+	# shellcheck disable=SC2207
+	local -a rk=($(env_istiod_scan "$contexts_csv" "$@"))
+	for kv in "${rk[@]}"; do
+		case "$kv" in
+			req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
+			req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
+			lim_cpu_m=*) lim_cpu="${kv#lim_cpu_m=}" ;;
+			lim_mem_mi=*) lim_mem="${kv#lim_mem_mi=}" ;;
+			replicas=*) reps="${kv#replicas=}" ;;
+			replicas_by_context=*) reps_by="${kv#replicas_by_context=}" ;;
+		esac
+	done
 	# Network topology across all contexts.
 	local ctx networks_csv="" net
 	for ctx in "${ctxs[@]}"; do
@@ -272,8 +383,8 @@ env_collect_infra() {
 	if [[ "${n_networks:-0}" -gt 1 ]]; then topology="multi-primary,multi-network:${n_networks}"
 	elif [[ "${n_networks:-0}" -eq 1 ]]; then topology="single-network"
 	else topology="unknown"; fi
-	printf 'ISTIOD_REQ_CPU_M=%s ISTIOD_REQ_MEM_MI=%s ISTIOD_LIM_CPU_M=%s ISTIOD_LIM_MEM_MI=%s ISTIOD_REPLICAS=%s NETWORK_TOPOLOGY=%s\n' \
-		"$req_cpu" "$req_mem" "$lim_cpu" "$lim_mem" "$reps" "$topology"
+	printf 'ISTIOD_REQ_CPU_M=%s ISTIOD_REQ_MEM_MI=%s ISTIOD_LIM_CPU_M=%s ISTIOD_LIM_MEM_MI=%s ISTIOD_REPLICAS=%s ISTIOD_REPLICAS_BY_CONTEXT=%s NETWORK_TOPOLOGY=%s\n' \
+		"$req_cpu" "$req_mem" "$lim_cpu" "$lim_mem" "$reps" "$reps_by" "$topology"
 }
 
 # ---------------------------------------------------------------------------
@@ -356,26 +467,30 @@ render_scale_envelope() {
 		peak_mesh="unknown"; peak_svc="unknown"; peak_reps="unknown"; peak_ns="unknown"; peak_scope="unknown"; peak_traffic="unknown"
 	fi
 
-	# Live read-only snapshot: istiod resources (req/lim/replicas), network id,
-	# node top, across every context. Networks collected to infer multi-network.
+	# Live read-only snapshot: istiod resources (req/lim of the source context, the
+	# replica count of every context), network id, node top, across every context.
+	# Networks collected to infer multi-network.
 	local -a ctxs=()
 	split_csv "$contexts_csv" ctxs
 	local ctx kv
-	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown" istiod_replicas="unknown"
-	local networks_csv="" src_ctx="${ctxs[0]:-}"
-	if [[ -n "$src_ctx" ]]; then
-		# shellcheck disable=SC2207
-		local -a rk=($(env_istiod_resources "$src_ctx" "${kubectl_argv[@]}"))
-		for kv in "${rk[@]}"; do
-			case "$kv" in
-				req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
-				req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
-				lim_cpu_m=*) lim_cpu="${kv#lim_cpu_m=}" ;;
-				lim_mem_mi=*) lim_mem="${kv#lim_mem_mi=}" ;;
-				replicas=*) istiod_replicas="${kv#replicas=}" ;;
-			esac
-		done
-	fi
+	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown" istiod_replicas="unknown" replicas_by="unknown"
+	local networks_csv=""
+	# shellcheck disable=SC2207
+	local -a rk=($(env_istiod_scan "$contexts_csv" "${kubectl_argv[@]}"))
+	for kv in "${rk[@]}"; do
+		case "$kv" in
+			req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
+			req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
+			lim_cpu_m=*) lim_cpu="${kv#lim_cpu_m=}" ;;
+			lim_mem_mi=*) lim_mem="${kv#lim_mem_mi=}" ;;
+			replicas=*) istiod_replicas="${kv#replicas=}" ;;
+			replicas_by_context=*) replicas_by="${kv#replicas_by_context=}" ;;
+		esac
+	done
+	# Context names stay out of the envelope (it is pasted into campaign docs); the
+	# label says whether the members differ.
+	local replicas_label
+	replicas_label="$(env_replicas_label "$istiod_replicas" "$replicas_by")"
 	for ctx in "${ctxs[@]}"; do
 		local net
 		net="$(env_network "$ctx" "${kubectl_argv[@]}")"
@@ -439,7 +554,7 @@ render_scale_envelope() {
 
 | Resource | Provisioned (req / lim) | Measured peak (% of cross-replica limit) | Source |
 |---|---|---|---|
-| istiod replicas | ${istiod_replicas} per cluster | — | live \`deploy/istiod\` |
+| istiod replicas | ${replicas_label} | — | live \`deploy/istiod\` on every context |
 | istiod CPU | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_pct}% | report \`istiod_cpu_pct_of_limit_max\` |
 | istiod memory (kubectl top) | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_mem_pct}% | report \`istiod_mem_pct_of_limit_max\` |
 | **istiod memory (RSS — OOM headroom)** | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_rss_pct}% | report \`istiod_rss_pct_of_limit_max\` (\`process_resident_memory_bytes\`) |
@@ -447,7 +562,7 @@ render_scale_envelope() {
 | Worker-node memory | — | ${node_mem_pct}% | report \`node_mem_pct_max\` (\`kubectl top nodes\`) |
 
 > Node allocatable (source ctx): ${node_cpu_m}m CPU / ${node_mem_mi}Mi memory.
-> istiod CPU/mem(top) % is of the **cross-replica** limit (per-replica limit x ${istiod_replicas} replicas), so an idle R-replica plane does not read ~Rx100% (PL35).
+> istiod CPU/mem(top) % is of the **cross-replica** limit (per-replica limit x that cluster's istiod replicas), so an idle R-replica plane does not read ~Rx100% (PL35).
 > **istiod RSS %** is per-replica (peak \`process_resident_memory_bytes\` of one istiod / its per-replica mem limit) and is the OOM-risk signal: in multi-primary each istiod caches the WHOLE mesh (~N x services x replicas endpoints), so RSS grows with total mesh size. It is sourced from the /metrics scrape, so it stays populated even when \`kubectl top\` (the row above) is N/A during a metrics-API gap. An RSS % approaching 100 is OOM-mid-sweep risk.
 > **istiod mem REQUEST sizing (GO gate):** the chart's istiod mem *request* (${req_mem}Mi above) must be sized to the **measured steady-state RSS** at the target mesh scale before GO — it needs a measured number from a full-scale run, NOT a guessed default. The RSS % here is the input for that sizing. This change only SURFACES the headroom; it deliberately does not change the request value.
 

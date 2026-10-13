@@ -131,10 +131,10 @@ Other:
                               includes vsdr, PROXY_CHECK_*) are taken from it; a
                               conflicting --vsdr-every/--vsdr-subsets flag is
                               refused. Not valid with --output-dir or --dry-run.
-                              With --config, warns when the config differs from the
-                              one the sweep started with; without it, refuses a
-                              sweep that started with one (add --config
-                              <DIR>/run-config-<RUN_ID>.env).
+                              A sweep started with --config resumes only with the
+                              same file (same sha256; add --config
+                              <DIR>/run-config-<RUN_ID>.env); one started without
+                              it warns when --config is given.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -149,7 +149,11 @@ Environment:
   CONTROLPLANE_SIDECAR_SCOPINGS, CONTROLPLANE_TRAFFIC_CONFIGS (each, when empty, falls
   back to the singular key above). CONTROLPLANE_SETTLE_SEC (--settle),
   CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
-  CONTROLPLANE_WAIT_TIMEOUT_SEC (001's pod readiness wait).
+  CONTROLPLANE_WAIT_TIMEOUT_SEC (001's pod readiness wait). The sweep checks the knobs
+  only its steps read (CONTROLPLANE_WAIT_TIMEOUT_SEC, CONTROLPLANE_SETUP_NS_WAIT_SEC,
+  CONTROLPLANE_APPLY_*, CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S,
+  CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, CONTROLPLANE_CLEANUP_GRACE_SEC) before the first
+  setup, --dry-run included.
   SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (recorded in the TSV preamble).
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
   pre-sweep wait for 'kubectl top nodes'; warns (never aborts) if unavailable.
@@ -266,6 +270,18 @@ PROXY_CHECK_TOL_PCT="${CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT:-10}"
 PROXY_CHECK_MIN_DIFF="${CONTROLPLANE_PROXY_CHECK_MIN_DIFF:-2}"
 is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT must be a non-negative integer percent (got: $PROXY_CHECK_TOL_PCT)"
 is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "CONTROLPLANE_PROXY_CHECK_MIN_DIFF must be a non-negative integer (got: $PROXY_CHECK_MIN_DIFF)"
+is_nonneg_int "$CONFIG_DUMP_SAMPLES" || die "--config-dump-samples (or CONTROLPLANE_CONFIG_DUMP_SAMPLES) must be a non-negative integer (got: $CONFIG_DUMP_SAMPLES)"
+# So do 001, 002 and 005 with these; a typo would otherwise fail every setup or skip
+# every cleanup mid-sweep, and pass --dry-run.
+is_nonneg_int "${CONTROLPLANE_WAIT_TIMEOUT_SEC:-300}" || die "CONTROLPLANE_WAIT_TIMEOUT_SEC (read by 001) must be a non-negative integer (got: ${CONTROLPLANE_WAIT_TIMEOUT_SEC:-})"
+# The cleanup bound first: options.env defaults the setup wait to it.
+is_pos_int "${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}" || die "CONTROLPLANE_NS_DELETE_TIMEOUT_SEC (read by 005) must be a positive integer (got: ${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-})"
+is_nonneg_int "${CONTROLPLANE_SETUP_NS_WAIT_SEC:-${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}}" || die "CONTROLPLANE_SETUP_NS_WAIT_SEC (read by 001) must be a non-negative integer (got: ${CONTROLPLANE_SETUP_NS_WAIT_SEC:-})"
+is_pos_int "${CONTROLPLANE_APPLY_ATTEMPTS:-3}" || die "CONTROLPLANE_APPLY_ATTEMPTS (read by 001) must be a positive integer (got: ${CONTROLPLANE_APPLY_ATTEMPTS:-})"
+is_nonneg_int "${CONTROLPLANE_APPLY_BACKOFF_S:-5}" || die "CONTROLPLANE_APPLY_BACKOFF_S (read by 001) must be a non-negative integer (got: ${CONTROLPLANE_APPLY_BACKOFF_S:-})"
+[[ "${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-200}" =~ ^-?[0-9]+$ ]] || die "CONTROLPLANE_APPLY_CHUNK_OBJECTS (read by 001) must be an integer (got: ${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-})"
+is_pos_int "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}" || die "CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S (read by 002) must be a positive integer (got: ${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-})"
+is_pos_int "${CONTROLPLANE_CLEANUP_GRACE_SEC:-5}" || die "CONTROLPLANE_CLEANUP_GRACE_SEC (read by 005) must be a positive integer (got: ${CONTROLPLANE_CLEANUP_GRACE_SEC:-})"
 # --resume already names the full sweep dir; refuse a custom --output-dir with it.
 if [[ -n "$RESUME_DIR" ]] && ((OUTPUT_DIR_FROM_FLAG)); then
 	die "--resume and --output-dir are mutually exclusive (--resume already names the full sweep dir)"
@@ -417,28 +433,39 @@ if [[ -n "$RESUME_DIR" ]]; then
 	fi
 fi
 
-# --resume keeps the TSV preamble the sweep started with, RUN_CONFIG* included. With
-# --config, warn when this config is not that one. Without --config, refuse a sweep that
-# started with one: the axes would fall back to env/defaults, so a different matrix would
-# be appended under the recorded RUN_CONFIG. The preamble decides; the snapshot (best
-# effort) only counts for a sweep whose TSV has no preamble yet.
+# --resume keeps the TSV preamble the sweep started with, RUN_CONFIG* included, so the
+# new rows must come from that config. A sweep that started with --config resumes only
+# with the same file (same sha256): without --config the axes would fall back to
+# env/defaults, and another file would build a different matrix, either way appended
+# under the recorded RUN_CONFIG. The preamble decides; the snapshot (best effort) only
+# counts for a sweep whose TSV has no preamble yet. A sweep that started without one
+# (RUN_CONFIG=none) still resumes with any --config, with a warning.
 if [[ -n "$RESUME_DIR" ]]; then
 	_resume_snapshot="${OUTPUT_DIR}/run-config-${RUN_ID}.env"
-	_resume_cfg="" _resume_sha=""
+	_resume_cfg="" _resume_sha="" _resume_with_cfg=0
 	if [[ -f "$_resume_tsv" ]]; then
 		_resume_cfg="$(awk -v k="# RUN_CONFIG=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 		_resume_sha="$(awk -v k="# RUN_CONFIG_SHA256=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 	fi
-	if [[ "${RUN_CONFIG:-none}" != none ]]; then
-		if [[ "$_resume_sha" != "${RUN_CONFIG_SHA256:-none}" ]]; then
-			echo "warning: --resume: --config ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12}) is not the config this sweep started with (RUN_CONFIG_SHA256=${_resume_sha:-not recorded}). The TSV keeps the original provenance, and values recorded only in its preamble (SETTLE_SEC, CONFIG_DUMP_SAMPLES, ...) may not match the new rows." >&2
-		fi
-	elif [[ ( -n "$_resume_cfg" && "$_resume_cfg" != none ) || ( -z "$_resume_cfg" && -f "$_resume_snapshot" ) ]]; then
-		if [[ -f "$_resume_snapshot" ]]; then
-			die "--resume: this sweep was started with --config ${_resume_cfg:-$(basename "$_resume_snapshot")}; without it the axes and settings fall back to the environment and defaults, and the new rows would not match the recorded RUN_CONFIG. To resume with the same values, add --config $(printf '%q' "$_resume_snapshot"):
+	if [[ -n "$_resume_cfg" && "$_resume_cfg" != none ]]; then
+		_resume_with_cfg=1
+	elif [[ -z "$_resume_cfg" && -f "$_resume_snapshot" ]]; then
+		_resume_with_cfg=1
+		_resume_cfg="$(basename "$_resume_snapshot")"
+		_resume_sha="$(_config_sha256 "$_resume_snapshot")"
+	fi
+	_resume_hint=""
+	if [[ -f "$_resume_snapshot" ]]; then
+		_resume_hint=" To resume with the same values, add --config $(printf '%q' "$_resume_snapshot"):
   $(printf '%q' "$0") --resume $(printf '%q' "$RESUME_DIR") --config $(printf '%q' "$_resume_snapshot")"
-		fi
+	fi
+	if ((_resume_with_cfg)) && [[ "${RUN_CONFIG:-none}" == none ]]; then
+		[[ -f "$_resume_snapshot" ]] && die "--resume: this sweep was started with --config ${_resume_cfg}; without it the axes and settings fall back to the environment and defaults, and the new rows would not match the recorded RUN_CONFIG.${_resume_hint}"
 		die "--resume: this sweep was started with --config ${_resume_cfg} (RUN_CONFIG_SHA256=${_resume_sha:-not recorded}), and its snapshot ${_resume_snapshot} is missing. Pass --config with that file (the sha256 must match), or start a new sweep."
+	elif ((_resume_with_cfg)) && [[ "$_resume_sha" != "${RUN_CONFIG_SHA256:-none}" ]]; then
+		die "--resume: --config ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12}) is not the config this sweep started with (${_resume_cfg}, RUN_CONFIG_SHA256=${_resume_sha:-not recorded}); its rows would be credited to a config that did not produce them. Pass the original file, or start a new sweep.${_resume_hint}"
+	elif ((!_resume_with_cfg)) && [[ "${RUN_CONFIG:-none}" != none ]]; then
+		echo "warning: --resume: --config ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12}) is not the config this sweep started with (RUN_CONFIG_SHA256=${_resume_sha:-not recorded}). The TSV keeps the original provenance, and values recorded only in its preamble (SETTLE_SEC, CONFIG_DUMP_SAMPLES, ...) may not match the new rows." >&2
 	fi
 fi
 
@@ -497,7 +524,7 @@ precreate_tsv_preamble() {
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=51"
-		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
+		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# HARNESS_SHA=${harness}"
 		echo "# KUBE_VERSIONS=${kver}"
@@ -857,7 +884,8 @@ for ms in "${MESH_SIZES[@]}"; do
 							--traffic-config "$tc" \
 							--vsdr-every "$VSDR_EVERY" \
 							--vsdr-subsets "$VSDR_SUBSETS" \
-							--settle "$SETTLE_SEC"; then
+							--settle "$SETTLE_SEC" \
+							--run-id "$RUN_ID"; then
 							# Baseline failed: record the combo, clean up, move on.
 							echo "warn: [$combo_idx/$MATRIX_SIZE] baseline probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
 							emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp" "$tc"

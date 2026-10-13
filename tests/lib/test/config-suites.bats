@@ -2,8 +2,10 @@
 # `--config FILE` through the real scripts of dataplane, churn, churn-dataplane and
 # propagation (PL33): the worked examples, precedence, provenance in every TSV writer
 # (placeholders included, PL36) and in every report format (PL19/PL26), the sweep
-# snapshot, and the shared report helpers. No cluster: KUBECONFIG is an empty file, and the
-# few runs past the preflight use a stub kubectl.
+# snapshot, and the shared report helpers; and, for every suite's sweep (controlplane
+# included), the worked examples with the CI dry-run args and the up-front knob checks.
+# No cluster: KUBECONFIG is an empty file, and the few runs past the preflight use a stub
+# kubectl.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -197,6 +199,8 @@ formats_show() {
 	# The reach file next to it carries the same provenance (PL36).
 	grep -qx '# RUN_CONFIG=probe.env' "$res"/reach-*.tsv
 	grep -qx "# RUN_CONFIG_SHA256=$(sum "$f")" "$res"/reach-*.tsv
+	# So does the markdown summary next to it (PL19).
+	grep -qxF "| Run config | \`probe.env\` (sha256 \`$(sum "$f")\`) |" "$res"/latency-*.md
 	formats_show "$DP/004-report-results.sh" "$res" "probe.env" text csv markdown charts
 	run --separate-stderr bash "$DP/004-report-results.sh" --results-dir "$res" --format json
 	[ "$(jq -r '.metadata.RUN_CONFIG + " " + .metadata.RUN_CONFIG_SHA256' <<<"$output")" = "probe.env $(sum "$f")" ]
@@ -334,10 +338,41 @@ formats_show() {
 	assert_output --partial "Churn rates:    5 (ops/s)"
 }
 
+@test "churn-dataplane 004: 001's namespace wait is COEXEC_SETUP_NS_WAIT_SEC unless --ns-delete-timeout" {
+	local f
+	f="$(cfg w.env 'SETUP_CONTEXTS=ci-a' 'COEXEC_SETUP_NS_WAIT_SEC=600')"
+	KUBECONFIG="$EK" run --separate-stderr bash "$CD/004-run-sweep.sh" --dry-run --config "$f"
+	assert_success
+	[[ "$stderr" == *"001 --source-context ci-a "*"--ns-wait-timeout 600"* ]]
+	[[ "$stderr" == *"006 --contexts ci-a --wait-deletion --timeout 240"* ]]
+	# The flag sets both bounds (PL37).
+	KUBECONFIG="$EK" run --separate-stderr bash "$CD/004-run-sweep.sh" --dry-run --config "$f" --ns-delete-timeout 99
+	[[ "$stderr" == *"--ns-wait-timeout 99"* ]]
+	[[ "$stderr" == *"--wait-deletion --timeout 99"* ]]
+	# Without either, the cleanup bound (options.env).
+	f="$(cfg d.env 'SETUP_CONTEXTS=ci-a' 'COEXEC_NS_DELETE_TIMEOUT_SEC=300')"
+	KUBECONFIG="$EK" run --separate-stderr bash "$CD/004-run-sweep.sh" --dry-run --config "$f"
+	[[ "$stderr" == *"--ns-wait-timeout 300"* ]]
+}
+
+@test "churn-dataplane 004 and 003: --scale-to must exceed --base-replicas (as churn 003)" {
+	local f
+	f="$(cfg eq.env 'SETUP_CONTEXTS=ci-a' 'CHURN_BASE_REPLICAS=2' 'CHURN_SCALE_TO_REPLICAS=2')"
+	KUBECONFIG="$EK" run bash "$CD/004-run-sweep.sh" --dry-run --config "$f"
+	assert_failure 1
+	assert_output --partial "--scale-to (2) must be greater than --base-replicas (2)"
+	refute_output --partial "[dry-run] 001"
+	KUBECONFIG="$EK" run bash "$CD/003-run-churn-probe.sh" --dry-run --config "$f" --source-context ci-a --churn-rate 5
+	assert_failure 1
+	assert_output --partial "--scale-to (2) must be greater than --base-replicas (2)"
+	KUBECONFIG="$EK" run bash "$CD/004-run-sweep.sh" --dry-run --config "$f" --scale-to 3
+	assert_success
+}
+
 @test "churn-dataplane 004 with --config (stub kubectl): preamble, snapshot, every 005 format" {
 	local res="${BATS_TEST_TMPDIR}/res" f d
 	f="$(cfg cd.env 'SETUP_CONTEXTS=ci-a' 'COEXEC_CHURN_RATES=1' 'COEXEC_INTER_COMBO_SETTLE_SEC=0' \
-		"COEXEC_RESULTS_DIR=${res}")"
+		'COEXEC_SETUP_NS_WAIT_SEC=77' "COEXEC_RESULTS_DIR=${res}")"
 	# The stub serves one istiod pod for the preflight; every setup then fails (SETUP_FAILED).
 	STUB_ISTIOD=1 PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$CD/004-run-sweep.sh" --config "$f"
 	assert_success
@@ -345,6 +380,9 @@ formats_show() {
 	cmp "$f" "$d"/run-config-*.env
 	grep -qx '# RUN_CONFIG=cd.env' "$d"/churn-dataplane-*.tsv
 	grep -qx "# RUN_CONFIG_SHA256=$(sum "$f")" "$d"/churn-dataplane-*.tsv
+	# The setup wait the sweep passed to 001, next to the cleanup bound (PL37).
+	grep -qx '# SETUP_NS_WAIT_SEC=77' "$d"/churn-dataplane-*.tsv
+	grep -qx '# NS_DELETE_TIMEOUT_SEC=240' "$d"/churn-dataplane-*.tsv
 	formats_show "$CD/005-report-results.sh" "$d" "$(sum "$f")" text csv md charts
 	run --separate-stderr bash "$CD/005-report-results.sh" --results-dir "$d" --format json
 	[ "$(jq -r '.metadata.run_config' <<<"$output")" = "cd.env" ]
@@ -401,17 +439,125 @@ formats_show() {
 }
 
 # ---------------------------------------------------------------------------
+# Every suite's sweep (controlplane included): the worked examples with the CI dry-run
+# args, and the knobs only the steps read, checked before the first step.
+# ---------------------------------------------------------------------------
+
+@test "every configs/smoke.env runs each ci-dry-run script of its suite with the CI args" {
+	cd "$ROOT"
+	local c f args n=0
+	for c in tests/*/configs/smoke.env; do
+		for f in "${c%/configs/smoke.env}"/0*.sh; do
+			grep -q '^# ci-dry-run:' "$f" || continue
+			args="$(sed -n 's/^# ci-dry-run://p' "$f" | head -1)"
+			# shellcheck disable=SC2086  # the annotation's words, as verify.sh passes them
+			KUBECONFIG="$EK" run bash "$f" --dry-run --config "$c" $args
+			[ "$status" -eq 0 ] || { echo "$f --dry-run --config $c$args: exit $status"; echo "$output" | tail -3; false; }
+			n=$((n + 1))
+		done
+	done
+	# Five suites ship an example; each has several annotated scripts.
+	[ "$(find tests -path '*/configs/smoke.env' | wc -l)" -eq 5 ]
+	((n >= 15))
+}
+
+@test "every sweep rejects a bad step-only knob from --config under --dry-run, before any step" {
+	local sweep key f
+	while read -r sweep key; do
+		f="$(cfg "bad-${key}.env" "${key}=5m")"
+		KUBECONFIG="$EK" run bash "${ROOT}/tests/${sweep}" --dry-run --config "$f" --contexts ci-a
+		[ "$status" -eq 1 ] || { echo "${sweep} with ${key}=5m: exit ${status}"; echo "$output" | tail -3; false; }
+		[[ "$output" == *"${key} (read by "*"5m"* ]] || { echo "${sweep}: no '${key} (read by' error"; echo "$output" | tail -3; false; }
+		[[ "$output" != *"Dry-run complete"* && "$output" != *"[dry-run] 001"* ]]
+	done <<'LIST'
+dataplane/003-run-sweep.sh DATAPLANE_WAIT_TIMEOUT_SEC
+dataplane/003-run-sweep.sh DATAPLANE_NS_DELETE_TIMEOUT_SEC
+churn/003-run-sweep.sh CHURN_WAIT_TIMEOUT_SEC
+churn/003-run-sweep.sh CHURN_SETTLE_SEC
+churn/003-run-sweep.sh CHURN_POLL_INTERVAL_MS
+churn-dataplane/004-run-sweep.sh COEXEC_WAIT_TIMEOUT_SEC
+churn-dataplane/004-run-sweep.sh COEXEC_SETUP_NS_WAIT_SEC
+churn-dataplane/004-run-sweep.sh COEXEC_CLEANUP_GRACE_SEC
+churn-dataplane/004-run-sweep.sh COEXEC_SERVICE_PORT
+propagation/006-run-sweep.sh PROPAGATION_WAIT_TIMEOUT_SEC
+propagation/006-run-sweep.sh PROPAGATION_POLL_INTERVAL_MS
+propagation/006-run-sweep.sh PROPAGATION_DRAIN_TIMEOUT_SEC
+controlplane/003-run-sweep.sh CONTROLPLANE_WAIT_TIMEOUT_SEC
+controlplane/003-run-sweep.sh CONTROLPLANE_SETUP_NS_WAIT_SEC
+controlplane/003-run-sweep.sh CONTROLPLANE_APPLY_ATTEMPTS
+controlplane/003-run-sweep.sh CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S
+controlplane/003-run-sweep.sh CONTROLPLANE_NS_DELETE_TIMEOUT_SEC
+controlplane/003-run-sweep.sh CONTROLPLANE_CLEANUP_GRACE_SEC
+LIST
+}
+
+@test "dataplane and churn-dataplane sweeps reject a bad probe-window knob under --dry-run, from --config or the flag" {
+	local sweep key flag val f
+	# no_plan: the run stopped before the plan's first step.
+	no_plan() { [[ "$output" != *"Dry-run complete"* && "$output" != *"[dry-run] 001"* && "$output" != *"001-setup"* ]]; }
+	while read -r sweep key flag val; do
+		f="$(cfg "bad-${key}.env" "${key}=${val}")"
+		KUBECONFIG="$EK" run bash "${ROOT}/tests/${sweep}" --dry-run --config "$f" --contexts ci-a
+		[ "$status" -eq 1 ] || { echo "${sweep} with ${key}=${val}: exit ${status}"; echo "$output" | tail -3; false; }
+		[[ "$output" == *"${flag} (or ${key})"*"'${val}'"* ]] || { echo "${sweep}: no '${flag} (or ${key})' error naming '${val}'"; echo "$output" | tail -3; false; }
+		no_plan
+		KUBECONFIG="$EK" run bash "${ROOT}/tests/${sweep}" --dry-run --contexts ci-a "$flag" "$val"
+		[ "$status" -eq 1 ] || { echo "${sweep} ${flag} ${val}: exit ${status}"; echo "$output" | tail -3; false; }
+		[[ "$output" == *"${flag}"* ]]
+		no_plan
+	done <<'LIST'
+dataplane/003-run-sweep.sh DATAPLANE_DURATION_SEC --duration 5m
+dataplane/003-run-sweep.sh DATAPLANE_NUM_CONNECTIONS --connections x
+dataplane/003-run-sweep.sh DATAPLANE_SETTLE_SEC --settle 5m
+dataplane/003-run-sweep.sh DATAPLANE_WARMUP_DURATION_SEC --warmup-duration 5m
+dataplane/003-run-sweep.sh DATAPLANE_REPETITIONS --repetitions 0
+dataplane/003-run-sweep.sh DATAPLANE_QPS_LEVELS --qps-levels 10,5m
+churn-dataplane/004-run-sweep.sh COEXEC_BASELINE_DURATION_SEC --baseline-duration 5m
+churn-dataplane/004-run-sweep.sh COEXEC_CHURN_DURATION_SEC --churn-duration 5m
+churn-dataplane/004-run-sweep.sh COEXEC_QPS --qps abc
+churn-dataplane/004-run-sweep.sh COEXEC_NUM_CONNECTIONS --connections x
+churn-dataplane/004-run-sweep.sh COEXEC_SETTLE_SEC --settle-sec 5m
+churn-dataplane/004-run-sweep.sh COEXEC_INTER_COMBO_SETTLE_SEC --inter-combo-settle 5m
+churn-dataplane/004-run-sweep.sh COEXEC_CHURN_SEED --seed -1
+churn-dataplane/004-run-sweep.sh COEXEC_REPETITIONS --repetitions 5m
+LIST
+	# No flag for these two; DATAPLANE_MAX_MATRIX is environment-only.
+	f="$(cfg bad-ics.env 'DATAPLANE_INTER_COMBO_SETTLE_SEC=5m')"
+	KUBECONFIG="$EK" run bash "${ROOT}/tests/dataplane/003-run-sweep.sh" --dry-run --config "$f" --contexts ci-a
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"DATAPLANE_INTER_COMBO_SETTLE_SEC must be a non-negative integer; got '5m'"* ]]
+	no_plan
+	DATAPLANE_MAX_MATRIX=lots KUBECONFIG="$EK" run bash "${ROOT}/tests/dataplane/003-run-sweep.sh" --dry-run --contexts ci-a
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"DATAPLANE_MAX_MATRIX must be a positive integer; got 'lots'"* ]]
+	no_plan
+	# The probe steps check their own window too, for a standalone run.
+	KUBECONFIG="$EK" run bash "$CD/002-run-baseline-probe.sh" --dry-run --source-context ci-dummy --duration 5m
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"--duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '5m'"* ]]
+	COEXEC_QPS=abc KUBECONFIG="$EK" run bash "$CD/003-run-churn-probe.sh" --dry-run --source-context ci-dummy --churn-rate 5
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"--qps (or COEXEC_QPS) must be a positive integer; got 'abc'"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # PL36: every TSV writer of these suites emits RUN_CONFIG* through config_preamble_lines,
 # and every report reads it over all inputs.
 # ---------------------------------------------------------------------------
 
-# in_block <file> <start-regex> <end-regex>: config_preamble_lines runs between the first
-# line matching start and the next line matching end.
+# in_block <file> <start-regex> <end-regex> [text]: text (default config_preamble_lines)
+# appears between the first line matching start and the next line matching end.
 in_block() {
 	# The regexes go through ENVIRON, not -v, so awk does not eat their backslashes.
-	S="$2" E="$3" awk '$0 ~ ENVIRON["S"] { on = 1; next } on && $0 ~ ENVIRON["E"] { exit }
-		on && /config_preamble_lines/ { found = 1 } END { exit !found }' "$1" || { echo "$(basename "$1"): no config_preamble_lines between /$2/ and /$3/"; return 1; }
+	S="$2" E="$3" N="${4:-config_preamble_lines}" awk '$0 ~ ENVIRON["S"] { on = 1; next }
+		on && $0 ~ ENVIRON["E"] { exit }
+		on && index($0, ENVIRON["N"]) { found = 1 } END { exit !found }' "$1" \
+		|| { echo "$(basename "$1"): no '${4:-config_preamble_lines}' between /$2/ and /$3/"; return 1; }
 }
+
+# The Run config row of every per-run markdown summary (PL19).
+# shellcheck disable=SC2016  # the literal row as the scripts write it
+MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"'
 
 @test "PL36: every preamble writer (placeholders included) calls config_preamble_lines" {
 	in_block "$DP/002-run-latency-probe.sh" 'echo "# RUN_ID=' '^\} > "\$TSV_FILE"'
@@ -434,4 +580,11 @@ in_block() {
 		grep -q 'config_report_value RUN_CONFIG ' "$r"
 		grep -q 'config_report_value RUN_CONFIG_SHA256 ' "$r"
 	done
+	# The markdown summary each probe writes next to its TSV names the config too (PL19).
+	in_block "$DP/002-run-latency-probe.sh" '^write_run_md\(\)' '^\}$' "$MD_ROW"
+	in_block "$CH/002-run-churn-probe.sh" '^MD_FILE=.*/churn-' '^\} > "\$MD_FILE"' "$MD_ROW"
+	in_block "$PR/002-run-endpoint-probe.sh" '^MD_FILE=.*/endpoint-' '^\} > "\$MD_FILE"' "$MD_ROW"
+	in_block "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh" 'MD_FILE=.*/controlplane-' '\} > "\$MD_FILE"' "$MD_ROW"
+	run in_block "$CH/002-run-churn-probe.sh" '^MD_FILE=.*/churn-' '^\} > "\$MD_FILE"' 'no such row'
+	assert_failure
 }

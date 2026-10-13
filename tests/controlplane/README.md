@@ -134,7 +134,7 @@ Every script (`001`-`005`) takes `--config FILE`, a file of `KEY=value` lines, s
 describes a whole run: setup, collection, sweep, report and cleanup. The rules shared by every
 suite (syntax, precedence, environment-only keys, provenance) are in
 [Run config](../../README.md#run-config---config-file).
-[`configs/smoke.env`](configs/smoke.env) is a worked example (5 services × 1 replica, mesh
+[`configs/smoke.env`](configs/smoke.env) is a worked example (5 services × 2 replicas, mesh
 sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 
 ```bash
@@ -173,9 +173,11 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   or only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and
   every report format repeats them. A sweep also copies the file to
   `sweep-<RUN_ID>/run-config-<RUN_ID>.env`. `--resume` keeps the provenance the sweep
-  started with: it warns when `--config` is a different file, and it refuses to resume a
-  sweep that started with `--config` unless you pass one again (it names the snapshot:
-  `--config <sweep-dir>/run-config-<RUN_ID>.env`). The report prints `unknown` for files
+  started with, so a sweep that started with `--config` resumes only with the same file
+  (same sha256): it refuses no `--config` and a different one, and names the snapshot
+  (`--config <sweep-dir>/run-config-<RUN_ID>.env`); for another config, start a new sweep.
+  A sweep that started without `--config` (`RUN_CONFIG=none`) resumes with one after a
+  warning. The report prints `unknown` for files
   written before these keys existed, and `mixed:<a>,<b>` with a warning when the inputs
   disagree. With `--config` but no `--results-dir`, `004` warns when the results dir
   holds more than one run.
@@ -226,7 +228,10 @@ combo is recorded as a row whose `context` is `SETUP_FAILED` or `PROBE_FAILED`; 
 with no running istiod pod gets an all-`N/A` row with `istiod_restarted=unknown`.
 
 Connected proxies appear twice. `connected_proxies per istiod replica (max)` is the busiest
-single replica, so with R replicas it is about 1/R of the cluster. `connected_proxies per
+single replica, so with R replicas it is about 1/R of the cluster. R is read on every
+context: `istiod replicas` reads `3 per cluster`, or `1-3 per cluster (varies by cluster)`
+when the members differ, with the per-context counts in `ISTIOD_REPLICAS_BY_CONTEXT`
+(`CONTROLPLANE_INFRA_SCHEMA=2`; an older TSV says `(first context only)`). `connected_proxies per
 cluster (max)` is the peak `cluster_connected_proxies`, counted once per cluster scrape and
 only when no row of that scrape restarted. The proxy check tallies cluster scrapes as
 ok/low/high/n/a/excluded; any low or high prints a `WARNING` line naming

@@ -6,7 +6,8 @@
 #
 # Exposes:
 #   die <msg>                         -> exit 1 with stderr message
-#   split_csv <csv> <out_arrayname>   -> trim+split CSV into named array
+#   split_csv <csv> <out_arrayname>   -> trim+split CSV into named array; empty items
+#                                        (",", "a,,b", "a, ") are dropped; always returns 0
 #   is_pos_int <val>                  -> return 0 if val is a positive integer
 #   is_nonneg_int <val>               -> return 0 if val is a non-negative integer
 #   validate_scoping <val>            -> die if val is not none|namespace|explicit
@@ -38,6 +39,10 @@ split_csv() {
 		x="${x%"${x##*[![:space:]]}"}"
 		[[ -n "$x" ]] && _out+=("$x")
 	done
+	# The loop's last test fails when the last item is empty ("a,,", "a, ", ","):
+	# return 0 so a stray comma never kills a caller under set -e. A caller that
+	# needs at least one item checks the array length itself.
+	return 0
 }
 
 # shellcheck disable=SC2329
@@ -69,7 +74,7 @@ resolve_kubectl() {
 	fi
 }
 
-# --- Task 6: VirtualService/DestinationRule load axis (controlplane) ---
+# --- VirtualService/DestinationRule load axis (controlplane) ---
 
 # validate_traffic_config <val>: the controlplane traffic-management mode.
 # shellcheck disable=SC2329

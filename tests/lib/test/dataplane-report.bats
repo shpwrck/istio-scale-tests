@@ -122,6 +122,7 @@ tsv() {
 	run "$REPORT" --results-dir "$RES"
 	assert_success
 	assert_output --partial "Local baseline: MISSING mesh_size=2 reason=setup_failed (no local rows)"
+	assert_output --partial "Placeholder rows (no table cell): mesh_size=2 SETUP_FAILED=1"
 	run "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.local_baseline.verdict' <<<"$output")" = missing ]
 	[ "$(jq -r '.local_baseline.cells[0].reason' <<<"$output")" = setup_failed ]
@@ -136,6 +137,54 @@ tsv() {
 	EOF
 	run "$REPORT" --results-dir "$RES" --format charts
 	assert_output --partial "> Local baseline missing at mesh 3 (stopped_unreachable); its points are drawn as 0."
+	assert_output --partial "> Placeholder rows (no table cell): mesh_size=3 STOPPED_UNREACHABLE=1"
+}
+
+@test "004: a placeholder beside measured rows of the same mesh size is named in every format (PL15)" {
+	# REPETITIONS>1 with one failed rep, or a probe that died after some QPS levels:
+	# mesh 2 has valid local and remote rows AND a PROBE_FAILED placeholder, so the
+	# Local baseline is OK and only the placeholder lines can name the failure.
+	tsv "${RES}/latency-a.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2,ctx-b=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
+	EOF
+	tsv "${RES}/latency-zzfail-ms2.tsv" "SERVER_REPLICAS=unknown" "MIN_QPS_RATIO=0.95" <<-EOF
+	$(printf 'r1\t2\tctx-a\tN/A\t0\tN/A\t8\t30\tN/A\tN/A\tN/A\tN/A\tN/A\tPROBE_FAILED\tN/A\tunknown\tna')
+	$(printf 'r1\t3\tctx-a\tN/A\t0\tN/A\t8\t30\tN/A\tN/A\tN/A\tN/A\tN/A\tSETUP_FAILED\tN/A\tunknown\tna')
+	$(printf 'r1\t3\tctx-a\tN/A\t0\tN/A\t8\t30\tN/A\tN/A\tN/A\tN/A\tN/A\tPROBE_FAILED\tN/A\tunknown\tna')
+	EOF
+	run "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_output --partial "WARNING: 5 total / 2 valid rows — 3 dropped (poisoned)."
+	assert_line "Placeholder rows (no table cell): mesh_size=2 PROBE_FAILED=1"
+	assert_line "Placeholder rows (no table cell): mesh_size=3 SETUP_FAILED=1,PROBE_FAILED=1"
+	assert_output --partial "Local baseline: MISSING mesh_size=3 reason=setup_failed,probe_failed (no local rows)"
+	refute_output --partial "MISSING mesh_size=2"
+	run "$REPORT" --results-dir "$RES" --format md
+	assert_line "- Placeholder rows (no table cell): mesh_size=2 PROBE_FAILED=1"
+	refute_output --partial "| na |"
+	run "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# PLACEHOLDER=2:PROBE_FAILED:1"
+	assert_line "# PLACEHOLDER=3:SETUP_FAILED:1"
+	assert_line "# PLACEHOLDER=3:PROBE_FAILED:1"
+	assert_line "# ROWS n_total=5 n_valid=2 n_dropped=3 n_skipped_unreachable=0 n_placeholder=3"
+	refute_output --partial ",na,"
+	run "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '.summary.placeholders' <<<"$output")" = '[{"mesh_size":2,"status":"PROBE_FAILED","n_rows":1},{"mesh_size":3,"status":"SETUP_FAILED","n_rows":1},{"mesh_size":3,"status":"PROBE_FAILED","n_rows":1}]' ]
+	# The cells plus the placeholders add up to the summary total.
+	[ "$(jq '([.results[].n_total] | add) + .summary.n_placeholder == .summary.n_total' <<<"$output")" = true ]
+	[ "$(jq '.summary.n_placeholder' <<<"$output")" = 3 ]
+	run "$REPORT" --results-dir "$RES" --format charts
+	assert_output --partial "> Placeholder rows (no table cell): mesh_size=2 PROBE_FAILED=1"
+	# No placeholder: no line, n_placeholder 0, an empty list.
+	rm "${RES}/latency-zzfail-ms2.tsv"
+	run "$REPORT" --results-dir "$RES"
+	refute_output --partial "Placeholder rows"
+	run "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '.summary | [.n_placeholder, .placeholders]' <<<"$output")" = '[0,[]]' ]
+	run "$REPORT" --results-dir "$RES" --format csv
+	refute_output --partial "# PLACEHOLDER="
+	assert_line "# ROWS n_total=2 n_valid=2 n_dropped=0 n_skipped_unreachable=0 n_placeholder=0"
 }
 
 @test "004: one valid and one QPS_SHORTFALL repetition -> DEGRADED n_valid=1/2" {

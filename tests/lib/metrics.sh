@@ -166,7 +166,7 @@ delta_histogram_p99() {
 	}' "$baseline" "$final"
 }
 
-# --- Task 6: VirtualService/DestinationRule load axis (controlplane) ---
+# --- VirtualService/DestinationRule load axis (controlplane) ---
 
 # Per-proxy CDS/RDS breakdown of one Envoy config dump (pilot-agent request GET
 # /config_dump), in one jq pass. Prints

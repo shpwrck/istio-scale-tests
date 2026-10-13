@@ -66,7 +66,7 @@ Environment:
   empty: CHURN_DEPLOYMENT_COUNT), CHURN_SCALE_TO_REPLICAS, CHURN_ITERATIONS,
   CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
   CHURN_BASE_REPLICAS, CHURN_SETTLE_SEC, CHURN_POLL_INTERVAL_MS, CHURN_WAIT_TIMEOUT_SEC
-  (read by 001/002).
+  (read by 001/002; the sweep checks them before the first setup, --dry-run included).
 EOF
 }
 
@@ -138,6 +138,7 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do
 		MESH_SIZES+=("$i")
@@ -152,6 +153,7 @@ done
 INTENSITIES=()
 if [[ -n "$CHURN_INTENSITIES_CSV" ]]; then
 	split_csv "$CHURN_INTENSITIES_CSV" INTENSITIES
+	((${#INTENSITIES[@]})) || die "--churn-intensities produced an empty list (got '${CHURN_INTENSITIES_CSV}')"
 else
 	INTENSITIES=("${CHURN_DEPLOYMENT_COUNT:-5}")
 fi
@@ -160,7 +162,15 @@ for ci in "${INTENSITIES[@]}"; do
 done
 
 is_pos_int "$SCALE_TO" || die "--scale-to must be a positive integer"
+is_nonneg_int "${CHURN_BASE_REPLICAS:-1}" || die "CHURN_BASE_REPLICAS (read by 001/002) must be a non-negative integer; got '${CHURN_BASE_REPLICAS:-}'"
 ((SCALE_TO > ${CHURN_BASE_REPLICAS:-1})) || die "--scale-to ($SCALE_TO) must be greater than CHURN_BASE_REPLICAS (${CHURN_BASE_REPLICAS:-1})"
+is_pos_int "$ITERATIONS" || die "--iterations (or CHURN_ITERATIONS) must be a positive integer; got '$ITERATIONS'"
+is_pos_int "$TIMEOUT_SEC" || die "--timeout (or CHURN_TIMEOUT_SEC) must be a positive integer; got '$TIMEOUT_SEC'"
+# 001 and 002 read these themselves; reject a bad value before the first setup, also in
+# --dry-run, instead of a SETUP_FAILED or PROBE_FAILED row per combo.
+is_pos_int "${CHURN_WAIT_TIMEOUT_SEC:-300}" || die "CHURN_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer; got '${CHURN_WAIT_TIMEOUT_SEC:-}'"
+is_nonneg_int "${CHURN_SETTLE_SEC:-3}" || die "CHURN_SETTLE_SEC (read by 002) must be a non-negative integer; got '${CHURN_SETTLE_SEC:-}'"
+is_pos_int "${CHURN_POLL_INTERVAL_MS:-250}" || die "CHURN_POLL_INTERVAL_MS (read by 002) must be a positive integer; got '${CHURN_POLL_INTERVAL_MS:-}'"
 
 SCRIPT_DIR="${ROOT}/tests/churn"
 

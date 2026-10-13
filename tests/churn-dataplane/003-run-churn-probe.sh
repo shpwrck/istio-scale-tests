@@ -87,7 +87,8 @@ Usage: $(basename "$0") [options]
   --settle-sec N           Settle delay before measurement starts (default: $SETTLE_SEC).
   --deployment-count N     Churn-target Deployments to operate on (default: $CHURN_DEPLOYMENT_COUNT_OPT).
   --base-replicas N        Replicas value for "scale-down" operations (default: $CHURN_BASE_REPLICAS_OPT).
-  --scale-to N             Replicas value for "scale-up" operations (default: $CHURN_SCALE_TO_OPT).
+  --scale-to N             Replicas value for "scale-up" operations, above --base-replicas
+                           (default: $CHURN_SCALE_TO_OPT).
   --seed N                 Seed for the deterministic churn order (default: $CHURN_SEED).
   --output-file FILE       TSV file to append to (must already have header).
   --output-dir DIR         Default results dir if --output-file not given.
@@ -198,10 +199,18 @@ done
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 [[ -n "$CHURN_RATE" ]] || die "--churn-rate is required"
 [[ "$CHURN_RATE" =~ ^[0-9]+$ ]] || die "--churn-rate must be a non-negative integer"
-is_pos_int "$DURATION" || die "--duration must be a positive integer"
+is_pos_int "$DURATION" || die "--duration (or COEXEC_CHURN_DURATION_SEC) must be a positive integer; got '$DURATION'"
+is_pos_int "$QPS" || die "--qps (or COEXEC_QPS) must be a positive integer; got '$QPS'"
+is_pos_int "$CONNECTIONS" || die "--connections (or COEXEC_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or COEXEC_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
+is_nonneg_int "$CHURN_SEED" || die "--seed (or COEXEC_CHURN_SEED) must be a non-negative integer; got '$CHURN_SEED'"
 is_pos_int "$CHURN_DEPLOYMENT_COUNT_OPT" || die "--deployment-count must be a positive integer"
 is_nonneg_int "$CHURN_BASE_REPLICAS_OPT" || die "--base-replicas must be a non-negative integer"
 is_pos_int "$CHURN_SCALE_TO_OPT" || die "--scale-to must be a positive integer"
+# Otherwise the parity toggle scales every Deployment to the count it already has: no
+# churn, and the rows still read OK (as tests/churn).
+((CHURN_SCALE_TO_OPT > CHURN_BASE_REPLICAS_OPT)) \
+	|| die "--scale-to ($CHURN_SCALE_TO_OPT) must be greater than --base-replicas ($CHURN_BASE_REPLICAS_OPT)"
 is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
 	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
 
@@ -268,6 +277,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"REACH_REQUESTS=$REACH_REQUESTS" \
 		"REACH_QPS=${REACH_QPS:-10}" \
 		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}" \
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"

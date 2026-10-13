@@ -518,7 +518,7 @@ preload_order_ok() {
 		--config tests/controlplane/configs/smoke.env --contexts ci-a
 	assert_success
 	assert_output --partial "SETTLE_SEC=20"
-	assert_output --partial "Services: 5  Replicas: 1"
+	assert_output --partial "Services: 5  Replicas: 2"
 	assert_output --partial "ConfigDumpSamples: 1"
 }
 
@@ -648,9 +648,9 @@ with_run_config() {
 	awk -F'\t' '$2 == "PROBE_FAILED" { f = 1 } END { exit !f }' "$d"/controlplane-*.tsv
 	grep -qx "run_config_sha256: \"${sum}\"" "$d"/sweep-*.md
 	# --resume without --config refuses, naming the snapshot, and appends nothing (the
-	# axes would fall back to the environment under the recorded RUN_CONFIG); with
-	# another config it warns. (CONTROLPLANE_MAX_MATRIX=1 with two mesh sizes stops the
-	# runs that pass these checks right after them.)
+	# axes would fall back to the environment under the recorded RUN_CONFIG); so does
+	# another config (its rows would be credited to sweep.env). (CONTROLPLANE_MAX_MATRIX=1
+	# with two mesh sizes stops the runs that pass these checks right after them.)
 	local tsv before
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
 	before="$(cat "$tsv")"
@@ -665,16 +665,23 @@ with_run_config() {
 	g="$(cfg other.env 'CONTROLPLANE_SETTLE_SEC=1')"
 	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$g" --contexts ci-a,ci-b --mesh-sizes 1,2
 	assert_failure 1
-	assert_output --partial "is not the config this sweep started with (RUN_CONFIG_SHA256=${sum})"
+	assert_output --partial "is not the config this sweep started with (sweep.env, RUN_CONFIG_SHA256=${sum}); its rows would be credited"
+	assert_output --partial "start a new sweep. To resume with the same values, add --config ${d}/run-config-"
+	refute_output --partial "exceeds safety limit"
+	[ "$(cat "$tsv")" = "$before" ]
 	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$d"/run-config-*.env --contexts ci-a,ci-b --mesh-sizes 1,2
 	assert_failure 1
 	refute_output --partial "is not the config this sweep started with"
 	assert_output --partial "exceeds safety limit 1"
-	# The preamble decides, not the best-effort snapshot: without it, still refused.
+	# The preamble decides, not the best-effort snapshot: without it, still refused, and
+	# another config still is.
 	rm "$d"/run-config-*.env
 	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b
 	assert_failure 1
 	assert_output --partial "this sweep was started with --config sweep.env (RUN_CONFIG_SHA256=${sum}), and its snapshot ${d}/run-config-"
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$g" --contexts ci-a,ci-b
+	assert_failure 1
+	assert_output --partial "(sweep.env, RUN_CONFIG_SHA256=${sum}); its rows would be credited to a config that did not produce them. Pass the original file, or start a new sweep."
 	[ "$(cat "$tsv")" = "$before" ]
 }
 
@@ -689,5 +696,13 @@ with_run_config() {
 	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b --mesh-sizes 1,2
 	assert_failure 1
 	refute_output --partial "started with --config"
+	assert_output --partial "exceeds safety limit 1"
+	# Any --config only warns: the TSV says RUN_CONFIG=none.
+	local g
+	g="$(cfg late.env 'CONTROLPLANE_SETTLE_SEC=0')"
+	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$g" --contexts ci-a,ci-b --mesh-sizes 1,2
+	assert_failure 1
+	assert_output --partial "warning: --resume: --config late.env"
+	assert_output --partial "(RUN_CONFIG_SHA256=none)"
 	assert_output --partial "exceeds safety limit 1"
 }

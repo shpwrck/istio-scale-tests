@@ -62,6 +62,9 @@ OUTPUT_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 # Same namespace as 001/002/003/006; used by the reset-to-base step.
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}"
+# 001's wait for the previous mesh-size's namespace (PL37). options.env defaults it to
+# the cleanup bound; --ns-delete-timeout sets both.
+SETUP_NS_WAIT_SEC="${COEXEC_SETUP_NS_WAIT_SEC:-$NS_DELETE_TIMEOUT_SEC}"
 MATRIX_CAP=64
 FORCE_LARGE_MATRIX=0
 DRY_RUN=0
@@ -88,12 +91,13 @@ Usage: $(basename "$0") [options]
   --connections N           Concurrent fortio connections (default: $CONNECTIONS).
   --deployment-count N      Churn-target Deployments per cluster (default: $CHURN_DEPLOYMENT_COUNT_OPT).
   --base-replicas N         Scale-down replica count (default: $CHURN_BASE_REPLICAS_OPT).
-  --scale-to N              Scale-up replica count (default: $CHURN_SCALE_TO_OPT).
+  --scale-to N              Scale-up replica count, above --base-replicas (default: $CHURN_SCALE_TO_OPT).
   --seed N                  Seed for the deterministic churn order (default: $CHURN_SEED).
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
   --output-dir DIR          Top-level results directory (default: ${COEXEC_RESULTS_DIR}).
-  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC); also bounds
-                            001's wait for the previous mesh-size's namespace to go away.
+  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC). Also sets
+                            001's wait for the previous mesh-size's namespace to go away,
+                            which is otherwise COEXEC_SETUP_NS_WAIT_SEC (default: $SETUP_NS_WAIT_SEC).
   --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
                             fail, a remote that is UNREACHABLE or UNKNOWN before a baseline
                             records REMOTE_UNREACHABLE rows for that combo and stops the
@@ -113,11 +117,13 @@ Environment:
   SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
   COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
-  COEXEC_NS_DELETE_TIMEOUT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
+  COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_SETUP_NS_WAIT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003), REACH_ON_UNREACHABLE,
-  REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC
-  (read by 002). COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir;
-  relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC (read by 001).
+  REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_DETAIL_TIMEOUT_SEC,
+  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir;
+  relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
+  001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
+  them, and the flags that set them, before the first setup, --dry-run included.
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
@@ -178,7 +184,7 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR="$2"; shift 2 ;;
 	--ns-delete-timeout)
 		[[ -n "${2:-}" ]] || die "--ns-delete-timeout requires a value"
-		NS_DELETE_TIMEOUT_SEC="$2"; shift 2 ;;
+		NS_DELETE_TIMEOUT_SEC="$2"; SETUP_NS_WAIT_SEC="$2"; shift 2 ;;
 	--on-unreachable)
 		[[ -n "${2:-}" ]] || die "--on-unreachable requires a value"
 		ON_UNREACHABLE="$2"; shift 2 ;;
@@ -199,6 +205,32 @@ done
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
 	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
+# The churn shape 003 gets: scale-to must exceed base, or the churn phase scales every
+# Deployment to the count it already has and its rows still read OK (as tests/churn).
+is_pos_int "$CHURN_DEPLOYMENT_COUNT_OPT" || die "--deployment-count (or CHURN_DEPLOYMENT_COUNT) must be a positive integer; got '$CHURN_DEPLOYMENT_COUNT_OPT'"
+is_nonneg_int "$CHURN_BASE_REPLICAS_OPT" || die "--base-replicas (or CHURN_BASE_REPLICAS) must be a non-negative integer; got '$CHURN_BASE_REPLICAS_OPT'"
+is_pos_int "$CHURN_SCALE_TO_OPT" || die "--scale-to (or CHURN_SCALE_TO_REPLICAS) must be a positive integer; got '$CHURN_SCALE_TO_OPT'"
+((CHURN_SCALE_TO_OPT > CHURN_BASE_REPLICAS_OPT)) \
+	|| die "--scale-to ($CHURN_SCALE_TO_OPT) must be greater than --base-replicas ($CHURN_BASE_REPLICAS_OPT)"
+# The measurement window 002/003 get as flags. 002 builds `fortio -t "${DURATION}s"`, so
+# a duration of `5m` would run a 5 ms baseline that every Δp99 is computed against.
+is_pos_int "$BASELINE_DURATION" || die "--baseline-duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '$BASELINE_DURATION'"
+is_pos_int "$CHURN_DURATION" || die "--churn-duration (or COEXEC_CHURN_DURATION_SEC) must be a positive integer; got '$CHURN_DURATION'"
+is_pos_int "$QPS" || die "--qps (or COEXEC_QPS) must be a positive integer; got '$QPS'"
+is_pos_int "$CONNECTIONS" || die "--connections (or COEXEC_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or COEXEC_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
+is_nonneg_int "$INTER_COMBO_SETTLE_SEC" || die "--inter-combo-settle (or COEXEC_INTER_COMBO_SETTLE_SEC) must be a non-negative integer; got '$INTER_COMBO_SETTLE_SEC'"
+is_nonneg_int "$CHURN_SEED" || die "--seed (or COEXEC_CHURN_SEED) must be a non-negative integer; got '$CHURN_SEED'"
+is_pos_int "$REPETITIONS" || die "--repetitions (or COEXEC_REPETITIONS) must be a positive integer; got '$REPETITIONS'"
+is_pos_int "$NS_DELETE_TIMEOUT_SEC" || die "--ns-delete-timeout (or COEXEC_NS_DELETE_TIMEOUT_SEC) must be a positive integer; got '$NS_DELETE_TIMEOUT_SEC'"
+is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "COEXEC_SETUP_NS_WAIT_SEC (read by 001) must be a non-negative integer; got '$SETUP_NS_WAIT_SEC'"
+# 001 and 006 read these themselves; reject a bad value before the first setup, also in
+# --dry-run, instead of a SETUP_FAILED mesh size or a skipped cleanup.
+is_pos_int "${COEXEC_WAIT_TIMEOUT_SEC:-300}" || die "COEXEC_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer; got '${COEXEC_WAIT_TIMEOUT_SEC:-}'"
+if ! is_pos_int "${COEXEC_SERVICE_PORT:-8080}" || ((${COEXEC_SERVICE_PORT:-8080} > 65535)); then
+	die "COEXEC_SERVICE_PORT (read by 001) must be a port number (1-65535); got '${COEXEC_SERVICE_PORT:-}'"
+fi
+is_pos_int "${COEXEC_CLEANUP_GRACE_SEC:-5}" || die "COEXEC_CLEANUP_GRACE_SEC (read by 006) must be a positive integer (0 would SIGKILL); got '${COEXEC_CLEANUP_GRACE_SEC:-}'"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -211,6 +243,7 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do MESH_SIZES+=("$i"); done
 fi
@@ -307,7 +340,7 @@ if ! ((DRY_RUN)); then
 		"NAMESPACE=${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" \
 		"MATRIX_SIZE=$MATRIX_SIZE" \
 		"REPETITIONS=$REPETITIONS" \
-		"SETUP_NS_WAIT_SEC=$NS_DELETE_TIMEOUT_SEC" \
+		"SETUP_NS_WAIT_SEC=$SETUP_NS_WAIT_SEC" \
 		"CLEANUP_GRACE_SEC=${COEXEC_CLEANUP_GRACE_SEC:-5}" \
 		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC" \
 		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
@@ -316,6 +349,7 @@ if ! ((DRY_RUN)); then
 		"REACH_REQUESTS=$REACH_REQUESTS" \
 		"REACH_QPS=${REACH_QPS:-10}" \
 		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}" \
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
@@ -415,7 +449,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		--source-context "$source_ctx"
 		--deployment-count "$CHURN_DEPLOYMENT_COUNT_OPT"
 		--base-replicas "$CHURN_BASE_REPLICAS_OPT"
-		--ns-wait-timeout "$NS_DELETE_TIMEOUT_SEC"
+		--ns-wait-timeout "$SETUP_NS_WAIT_SEC"
 	)
 	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
 

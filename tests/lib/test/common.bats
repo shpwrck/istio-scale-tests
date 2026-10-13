@@ -65,6 +65,31 @@ load test_helper
 	[[ "${result[1]}" == "b" ]]
 }
 
+@test "split_csv: an empty last item returns 0 under set -e (no ERR-trap abort)" {
+	# The loop's last test used to fail on an empty last item, so `X=2,,` or `,` killed
+	# a sweep under set -e with a FATAL line instead of its own message.
+	run bash -c 'set -euo pipefail; source "$1/tests/lib/common.sh"
+		for csv in "2,," "2, " "," " " ""; do
+			split_csv "$csv" out
+			printf "[%s]=%s\n" "$csv" "${#out[@]}"
+		done' _ "$ROOT"
+	assert_success
+	assert_output $'[2,,]=1\n[2, ]=1\n[,]=0\n[ ]=0\n[]=0'
+}
+
+@test "split_csv: a sweep axis that splits to nothing names its flag" {
+	run env KUBECONFIG=/dev/null "${ROOT}/tests/churn/003-run-sweep.sh" --dry-run --contexts a,b --churn-intensities ,
+	assert_failure
+	assert_output --partial "error: --churn-intensities produced an empty list (got ',')"
+	refute_output --partial "FATAL"
+	run env KUBECONFIG=/dev/null "${ROOT}/tests/dataplane/003-run-sweep.sh" --dry-run --contexts a,b --mesh-sizes ,
+	assert_failure
+	assert_output --partial "error: --mesh-sizes produced an empty list (got ',')"
+	# A trailing comma is still fine.
+	run env KUBECONFIG=/dev/null "${ROOT}/tests/churn/003-run-sweep.sh" --dry-run --contexts a,b --churn-intensities 2,,
+	assert_success
+}
+
 # --- is_pos_int() ---
 
 @test "is_pos_int: accepts positive integers" {
@@ -172,7 +197,7 @@ _stub_cli() {
 	assert_output "error: neither kubectl nor oc found on PATH"
 }
 
-# --- Task 6: validate_traffic_config() / vsdr_service_count() ---
+# --- VirtualService/DestinationRule load axis: validate_traffic_config() / vsdr_service_count() ---
 
 @test "validate_traffic_config: accepts none and vsdr" {
 	run validate_traffic_config none

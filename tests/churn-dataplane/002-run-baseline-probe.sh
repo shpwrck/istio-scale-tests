@@ -109,9 +109,10 @@ top_code (the most frequent code other than 200).
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
 
 Environment:
-  COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_ATTEMPTS,
-  REACH_RETRY_SEC, REACH_ON_UNREACHABLE, COEXEC_SERVICE_PORT,
-  COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
+  COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
+  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
+  COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
+  COEXEC_SETTLE_SEC,
   COEXEC_TEST_NAMESPACE, COEXEC_ISTIOD_REPLICAS (expected pin; warns on mismatch),
   COEXEC_RESULTS_DIR (--output-dir; relative to the repo root),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
@@ -184,6 +185,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+# fortio gets -t "${DURATION}s": `5m` would be a 5 ms window, not an error.
+is_pos_int "$DURATION" || die "--duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '$DURATION'"
+is_pos_int "$QPS" || die "--qps (or COEXEC_QPS) must be a positive integer; got '$QPS'"
+is_pos_int "$CONNECTIONS" || die "--connections (or COEXEC_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or COEXEC_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
 is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
 	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
@@ -256,6 +262,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 		"REACH_REQUESTS=$REACH_REQUESTS" \
 		"REACH_QPS=${REACH_QPS:-10}" \
 		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}" \
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
@@ -276,7 +283,8 @@ if ((REACH_REQUESTS > 0)); then
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
 		reach_print_summary "$REACH_TSV" "$RUN_ID" "$COMBO_ID"
 		if reach_should_stop "$ON_UNREACHABLE" "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$REMOTE_CONTEXTS_CSV"; then
-			echo "STOPPED: --on-unreachable fail and remote(s) UNREACHABLE or UNKNOWN from ${SOURCE_CTX}: $(reach_not_reachable "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$REMOTE_CONTEXTS_CSV" | tr '\n' ' '); no baseline window ran (exit ${REACH_EXIT_CODE})" >&2
+			mapfile -t STOP_REMOTES < <(reach_not_reachable "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$REMOTE_CONTEXTS_CSV")
+			echo "STOPPED: --on-unreachable fail and ${#STOP_REMOTES[@]} remote(s) UNREACHABLE or UNKNOWN from ${SOURCE_CTX}: ${STOP_REMOTES[*]}; no baseline window ran (exit ${REACH_EXIT_CODE})" >&2
 			exit "$REACH_EXIT_CODE"
 		fi
 	else

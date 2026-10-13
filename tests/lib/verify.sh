@@ -102,10 +102,10 @@ EXTRACTED_PATTERNS=(
 	'fanout_gauge_sum() {'
 	'fanout_merge_histogram() {'
 	'fanout_restart_status() {'
-	# Task 2: per-cluster connected-proxy count + sanity check
+	# per-cluster connected-proxy count + sanity check
 	'fanout_gauge_sum_strict() {'
 	'cap_proxy_check() {'
-	# Task 6: VirtualService/DestinationRule load axis
+	# VirtualService/DestinationRule load axis
 	'validate_traffic_config() {'
 	'vsdr_service_count() {'
 	'config_dump_breakdown() {'
@@ -138,6 +138,11 @@ EXTRACTED_PATTERNS=(
 	'config_snapshot() {'
 	'config_report_value() {'
 	'config_warn_multi_run() {'
+	# validation fixes: istiod replicas over every context, reach-check cost bound
+	'env_replicas_summary() {'
+	'env_replicas_label() {'
+	'env_istiod_scan() {'
+	'reach_worst_case_sec() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

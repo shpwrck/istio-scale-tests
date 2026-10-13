@@ -110,7 +110,7 @@ EOF
 	[[ "$result" == "99.00" ]]
 }
 
-# --- config_dump_breakdown (Task 6) ---
+# --- config_dump_breakdown (VirtualService/DestinationRule load axis) ---
 
 @test "config_dump_breakdown: counts dynamic clusters and sizes the CDS and RDS sections" {
 	result=$(config_dump_breakdown "$FIXTURES/config_dump_small.json")

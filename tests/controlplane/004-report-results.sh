@@ -174,9 +174,11 @@ AWK_COMBO_KEY='function combo_key() { return $3 "|" $4 "|" $5 "|" $6 "|" $7 "|" 
 
 # C2: infra-schema concordance guard (mirrors the data-row width gate above). The
 # data schema is gated by header width (40 or 51), but the additive cluster-infra
-# preamble carries its OWN version marker (CONTROLPLANE_INFRA_SCHEMA). A future v2 bump
-# could change an infra key's SEMANTICS without changing the data width, so a
-# v1 file and a v2 file would pass the width gate and silently mix. Warn (don't die —
+# preamble carries its OWN version marker (CONTROLPLANE_INFRA_SCHEMA). A bump can
+# change an infra key's SEMANTICS without changing the data width (v2: ISTIOD_REPLICAS
+# covers every context and reads `1-3` when they differ, plus ISTIOD_REPLICAS_BY_CONTEXT;
+# v1 read the first context only), so a v1 file and a v2 file would pass the width
+# gate and silently mix. Warn (don't die —
 # the data rows are still aggregable) if the consumed files disagree on the infra
 # schema, or if some carry it and others don't (a legacy 40-col file predating the
 # infra block reads as `unknown`).
@@ -360,6 +362,13 @@ preamble_get() {
 	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
 	v="${v#*=}"
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
+}
+
+# istiod_replicas_label: ISTIOD_REPLICAS for people ("3 per cluster", "1-3 per cluster
+# (varies by cluster)", "3 (first context only)" for an INFRA_SCHEMA 1 file). The
+# csv/json/yaml metadata keep the raw value and ISTIOD_REPLICAS_BY_CONTEXT.
+istiod_replicas_label() {
+	env_replicas_label "$(preamble_get ISTIOD_REPLICAS)" "$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)"
 }
 
 # preamble_scalar KEY [CONSEQUENCE] [MISSING]: a sweep-level `# KEY=value` read from
@@ -874,7 +883,8 @@ report_text() {
 	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
 	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
 	echo "  istiod request (cpu_m/mem_mi): $(preamble_get ISTIOD_REQ_CPU_M) / $(preamble_get ISTIOD_REQ_MEM_MI)  [per replica]"
-	echo "  istiod replicas:             $(preamble_get ISTIOD_REPLICAS)"
+	echo "  istiod replicas:             $(istiod_replicas_label)"
+	echo "  istiod replicas by context:  $(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)"
 	echo "  network topology:            $(preamble_get NETWORK_TOPOLOGY)"
 	echo "  metrics API (preflight):     $(preamble_get METRICS_API)"
 	echo "  tuning baseline (live mesh): $(preamble_get TUNING_BASELINE)"
@@ -959,7 +969,7 @@ report_csv() {
 	# O9 achieved-scale provenance parity with text/markdown. Comment lines only, so the
 	# CSV row schema (the aggregate columns below) is byte-identical for row consumers.
 	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) metrics_api=$(preamble_get METRICS_API) (istiod limits per replica)"
-	echo "# infra: istiod_req_cpu_m=$(preamble_get ISTIOD_REQ_CPU_M) istiod_req_mem_mi=$(preamble_get ISTIOD_REQ_MEM_MI) istiod_lim_cpu_m=$(preamble_get ISTIOD_LIM_CPU_M) istiod_lim_mem_mi=$(preamble_get ISTIOD_LIM_MEM_MI) istiod_replicas=$(preamble_get ISTIOD_REPLICAS) network_topology=$(preamble_get NETWORK_TOPOLOGY)"
+	echo "# infra: istiod_req_cpu_m=$(preamble_get ISTIOD_REQ_CPU_M) istiod_req_mem_mi=$(preamble_get ISTIOD_REQ_MEM_MI) istiod_lim_cpu_m=$(preamble_get ISTIOD_LIM_CPU_M) istiod_lim_mem_mi=$(preamble_get ISTIOD_LIM_MEM_MI) istiod_replicas=$(preamble_get ISTIOD_REPLICAS) istiod_replicas_by_context=$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT) network_topology=$(preamble_get NETWORK_TOPOLOGY)"
 	echo "# achieved: connected_proxies_max=$(as_get proxies) connected_proxies_cluster_max=$(pc_get proxies_cluster) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) istiod_rss_pct_of_limit_max=$(pct_or_bare "$ISTIOD_RSS_MEM_PCT") node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
 	echo "# tuning_baseline: $(preamble_get TUNING_BASELINE) | sidecar_egress_hosts: $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# proxy_check: tolerance_pct=${PROXY_CHECK_TOL_M} min_diff=${PROXY_CHECK_MIN_DIFF_M} ok=$(pc_get pc_ok) low=$(pc_get pc_low) high=$(pc_get pc_high) na=$(pc_get pc_na) excluded=$(pc_get pc_excluded) flagged=$(pc_get pc_flagged)"
@@ -1063,6 +1073,7 @@ report_markdown() {
 	echo "istiod_lim_cpu_m: $(preamble_get ISTIOD_LIM_CPU_M)"
 	echo "istiod_lim_mem_mi: $(preamble_get ISTIOD_LIM_MEM_MI)"
 	echo "istiod_replicas: $(preamble_get ISTIOD_REPLICAS)"
+	echo "istiod_replicas_by_context: \"$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)\""
 	echo "network_topology: $(preamble_get NETWORK_TOPOLOGY)"
 	echo "proxy_check_tolerance_pct: \"${PROXY_CHECK_TOL_M}\""
 	echo "proxy_check_min_diff: \"${PROXY_CHECK_MIN_DIFF_M}\""
@@ -1088,7 +1099,8 @@ report_markdown() {
 	echo "| node allocatable (cpu_m/mem_mi) | $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI) |"
 	echo "| istiod limit (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI) |"
 	echo "| istiod request (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_REQ_CPU_M) / $(preamble_get ISTIOD_REQ_MEM_MI) |"
-	echo "| istiod replicas | $(preamble_get ISTIOD_REPLICAS) |"
+	echo "| istiod replicas | $(istiod_replicas_label) |"
+	echo "| istiod replicas by context | $(preamble_get ISTIOD_REPLICAS_BY_CONTEXT) |"
 	echo "| network topology | $(preamble_get NETWORK_TOPOLOGY) |"
 	echo "| connected_proxies per istiod replica (max) | $(as_get proxies) |"
 	echo "| connected_proxies per cluster (max) | $(pc_get proxies_cluster) |"
@@ -1321,7 +1333,8 @@ report_json() {
 		-v cap_tf="$(preamble_get SCALE_TARGET_FRACTION)" -v cap_mode="$(preamble_get SCALE_SIZING_MODE)" -v cap_metrics="$(preamble_get METRICS_API)" \
 		-v inf_rcpu="$(preamble_get ISTIOD_REQ_CPU_M)" -v inf_rmem="$(preamble_get ISTIOD_REQ_MEM_MI)" \
 		-v inf_lcpu="$(preamble_get ISTIOD_LIM_CPU_M)" -v inf_lmem="$(preamble_get ISTIOD_LIM_MEM_MI)" \
-		-v inf_rep="$(preamble_get ISTIOD_REPLICAS)" -v inf_net="$(preamble_get NETWORK_TOPOLOGY)" \
+		-v inf_rep="$(preamble_get ISTIOD_REPLICAS)" -v inf_rep_by="$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)" \
+		-v inf_net="$(preamble_get NETWORK_TOPOLOGY)" \
 		-v sla_v="$SLA_VERDICT" -v sla_h="$SLA_HEADLINE" \
 		-v tb_levers="$(preamble_get TUNING_BASELINE)" -v tb_egress="$(preamble_get SIDECAR_EGRESS_HOSTS)" \
 		-v ach_prx="$(as_get proxies)" -v ach_cprx="$(pc_get proxies_cluster)" -v ach_svc="$(as_get svc)" \
@@ -1337,7 +1350,7 @@ report_json() {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note }
+	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"istiod_replicas_by_context\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_rep_by, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "

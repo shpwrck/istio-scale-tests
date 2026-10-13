@@ -43,7 +43,7 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 
 | Resource | Provisioned (req / lim) | Measured peak | % of limit | Source |
 |---|---|---|---|---|
-| istiod replicas | _… per cluster_ | — | — | sweep header `istiod replicas` |
+| istiod replicas | _… per cluster (a range such as 1-3 when members differ)_ | — | — | sweep header `istiod replicas` (read on every context) |
 | istiod CPU | _req / lim_ | _… m_ | _…%_ | `kubectl top pod -n istio-system -l app=istiod`; controlplane `CPU avg (m)` |
 | istiod memory | _req / lim_ | _… Mi_ | _…%_ | controlplane `Mem RSS (Mi)` |
 | Worker-node CPU | — | _…%_ | _…%_ | `kubectl top nodes` at peak |
@@ -60,6 +60,17 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 | churn | churn deployments × scale range | _… × (1→N)_ | sweep header `Deployments`, `Scale range` |
 | churn-dataplane | churn rates | _… /s_ | sweep header `Churn rates` |
 | _(all)_ | repetitions | _…_ | run flag `--repetitions` |
+
+### 4. Data-plane coverage and run provenance
+
+`n_valid` / `n_total` says rows were dropped, not that a remote was unreachable or a
+local baseline cell is missing; read these before quoting any data-plane number.
+
+| Check | Value | Source |
+|---|---|---|
+| Remote coverage (dataplane / churn-dataplane) | all REACHABLE / _remotes not REACHABLE, with status (FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN)_ | report section `Remote coverage` (JSON `summary.remotes_not_reachable`); `004` / `005 --fail-on-unreachable` exits 3 when a remote is not REACHABLE |
+| Local baseline (dataplane) | OK / _cells DROPPED, DEGRADED, UNCHECKED or MISSING, with reason_ | dataplane report `Local baseline` (JSON `local_baseline`); rows below `MIN_QPS_RATIO` × target are `QPS_SHORTFALL`, dropped as reason `saturated` |
+| Run config | _path_ (sha256 _…_) / none | every report's `RUN_CONFIG` + `RUN_CONFIG_SHA256` (TSV preamble); the sweep dir keeps the file as `run-config-<RUN_ID>.env` |
 
 ### Scale verdict — one line, up front
 

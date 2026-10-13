@@ -76,7 +76,9 @@ Environment:
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
   PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
   (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),
-  PROPAGATION_WAIT_TIMEOUT_SEC (read by 001).
+  PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
+  PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
+  setup, --dry-run included.
 EOF
 }
 
@@ -160,6 +162,7 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do
 		MESH_SIZES+=("$i")
@@ -171,6 +174,14 @@ for ms in "${MESH_SIZES[@]}"; do
 	((ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 is_pos_int "$ITERATIONS" || die "--iterations must be a positive integer (got: $ITERATIONS)"
+is_pos_int "$TIMEOUT_SEC" || die "--timeout (or PROPAGATION_TIMEOUT_SEC) must be a positive integer (got: $TIMEOUT_SEC)"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or PROPAGATION_SETTLE_SEC) must be a non-negative integer (got: $SETTLE_SEC)"
+is_pos_int "$WATCHER_REPLICAS" || die "--watcher-replicas (or PROPAGATION_WATCHER_REPLICAS) must be a positive integer (got: $WATCHER_REPLICAS)"
+# 001 and 002 read these themselves; reject a bad value before the first setup, also in
+# --dry-run (without --tsv a failed step leaves no row behind).
+is_pos_int "${PROPAGATION_WAIT_TIMEOUT_SEC:-300}" || die "PROPAGATION_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer (got: ${PROPAGATION_WAIT_TIMEOUT_SEC:-})"
+is_pos_int "${PROPAGATION_POLL_INTERVAL_MS:-250}" || die "PROPAGATION_POLL_INTERVAL_MS (read by 002) must be a positive integer (got: ${PROPAGATION_POLL_INTERVAL_MS:-})"
+is_pos_int "${PROPAGATION_DRAIN_TIMEOUT_SEC:-20}" || die "PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002) must be a positive integer (got: ${PROPAGATION_DRAIN_TIMEOUT_SEC:-})"
 
 MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ITERATIONS ))
 if (( MATRIX_SIZE > MAX_MATRIX && !FORCE_LARGE_MATRIX )); then

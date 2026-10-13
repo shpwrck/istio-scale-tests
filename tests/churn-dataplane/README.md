@@ -126,9 +126,13 @@ ok  pct_200  top_code  reach_status  detail
 `reach_status` is `REACHABLE` (only HTTP 200s), `DEGRADED` (some), `UNREACHABLE` (none)
 or `UNKNOWN` (the `kubectl exec` failed). A target that is not `REACHABLE` is checked
 again `REACH_RETRY_SEC` (10 s) apart, up to `REACH_ATTEMPTS` (3) checks. `detail` is the
-first body line of a `fortio curl` to it (the Envoy reply, with IPs and host names
-masked). See the [dataplane README](../dataplane/README.md#remote-reachability) for the
-full column list.
+first body line of one `fortio curl` to it after the last check, with a
+`REACH_DETAIL_TIMEOUT_SEC` (35 s) timeout (the Envoy reply, else fortio's error, with IPv4
+and IPv6 addresses and dotted host names masked). 35 s outlasts the three 10 s connect timeouts after which Envoy
+answers for a blackholed east-west gateway (Istio's default two retries, no
+VirtualService). A target that never answers costs at most about 76 s per run at the
+defaults; see the [dataplane README](../dataplane/README.md#remote-reachability) for the
+formula, the retry details and the full column list.
 
 With `--on-unreachable warn` (default, `REACH_ON_UNREACHABLE`) the probe goes on. With
 `fail`, a remote that is `UNREACHABLE` or `UNKNOWN` stops `002` before its window with no
@@ -154,8 +158,9 @@ succeeded), or a sweep placeholder: `SETUP_FAILED`, `PROBE_FAILED`, `RESET_FAILE
 dataplane suite (`tests/lib/fortio.sh`) with the QPS-shortfall check off. Each row's
 `# combo=...` marker comment records `pct_200` and `top_code` (the most frequent code
 other than 200, `-` when there is none), and the preamble records `MIN_PCT_200`,
-`REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`, `REACH_ATTEMPTS`, `REACH_RETRY_SEC`
-and `ON_UNREACHABLE`; the sweep summary carries the same keys.
+`REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`, `REACH_DETAIL_TIMEOUT_SEC`,
+`REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE`; the sweep summary carries the same
+keys.
 
 The report keeps rows with `status=OK` and `istiod_restarted=0`, pairs them by
 `combo_id` within each TSV file, and prints mean and stdev of `Δp99_ms` with
@@ -192,7 +197,9 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
   environment only.
 - **Run keys:** `COEXEC_MESH_SIZES` (`004 --mesh-sizes`; empty: 1 to the number of
   contexts), `COEXEC_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts at
-  the repo root, unlike the flags), `COEXEC_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`) and
+  the repo root, unlike the flags), `COEXEC_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`),
+  `COEXEC_SETUP_NS_WAIT_SEC` (`001 --ns-wait-timeout`; the sweep passes it too, unless
+  `--ns-delete-timeout` sets both bounds; default: `COEXEC_NS_DELETE_TIMEOUT_SEC`) and
   `COEXEC_ISTIOD_REPLICAS` (the expected istiod pod count `002`/`003` warn about; empty: no
   check). `COEXEC_CHURN_RATES` is already the sweep's list.
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`, `--churn-rate`,
@@ -206,7 +213,8 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 Defaults are the `COEXEC_*` variables in `config/options.env` (durations, QPS, churn
 rates, settle times, repetitions, seed, cleanup timeouts); each script's `--help` shows
 them. Churn size comes from `CHURN_DEPLOYMENT_COUNT`, `CHURN_BASE_REPLICAS` and
-`CHURN_SCALE_TO_REPLICAS`, shared with the churn suite. Churn-target pods use a 5 s
+`CHURN_SCALE_TO_REPLICAS`, shared with the churn suite; as there, `004` and `003` refuse a
+scale-to that is not above base (the churn phase would scale nothing). Churn-target pods use a 5 s
 termination grace period (chart value `churnTerminationGracePeriodSeconds`), so
 scaled-down pods are gone before the next baseline window.
 

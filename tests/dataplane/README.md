@@ -138,9 +138,10 @@ QPS 10 and 100, 10 s per level):
 A remote that the mesh cannot reach used to show up only as `n_valid < n_total` in the
 report, with no name. Before the load, after the settle, `002` now checks every target
 from the source's client pod: `--reach-requests` requests (default 10,
-`REACH_REQUESTS`) at `REACH_QPS` (10) with a `REACH_HTTP_TIMEOUT_SEC` (3 s) timeout to
-each `dataplane-server-<ctx>` Service, the local one included. Each target gets one
-row in `reach-<RUN_ID>.tsv`:
+`REACH_REQUESTS`) at `REACH_QPS` (10) in total, over `REACH_REQUESTS / 2` parallel
+connections, with a `REACH_HTTP_TIMEOUT_SEC` (3 s) timeout to each
+`dataplane-server-<ctx>` Service, the local one included. Each target gets one row in
+`reach-<RUN_ID>.tsv`:
 
 ```
 run_id  combo_id  mesh_size  source_ctx  target_ctx  target_class  attempts  requests
@@ -152,13 +153,31 @@ ok  pct_200  top_code  reach_status  detail
 `REACHABLE` is checked again `REACH_RETRY_SEC` (10 s) apart, up to `REACH_ATTEMPTS` (3)
 checks, because cross-cluster endpoints can lag a fresh setup; `attempts` records how
 many ran. `requests` is the responses fortio counted (socket errors are code `-1`), `ok`
-the 200s among them, `top_code` the most frequent other code. For a target that is not
-`REACHABLE`, `detail` holds the first body line of one `fortio curl`, usually the Envoy
-reply (`no healthy upstream`, `upstream connect error ... CERTIFICATE_VERIFY_FAILED`),
-with IPs and host names masked. It is a hint: Envoy's wording varies by version. The
-file has its own preamble (`REACH_SCHEMA`, `RUN_ID`, `HARNESS_SHA`, the `REACH_*` knobs,
-`ON_UNREACHABLE`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`), and stderr gets a per-target block ending in
+the 200s among them, `top_code` the most frequent other code. For a target that is
+still not `REACHABLE` after the last check, `detail` holds the first body line of one
+`fortio curl` with a `REACH_DETAIL_TIMEOUT_SEC` (35 s) timeout, usually the Envoy reply
+(`no healthy upstream`, `upstream connect error ... CERTIFICATE_VERIFY_FAILED`, or
+`... connection timeout` for a blackholed east-west gateway); without a reply it holds
+fortio's error (`Timeout error ...: i/o timeout`, `Unable to connect ...`). IPv4 and IPv6
+addresses become `<ip>` and dotted host names `<host>`. It is a hint: Envoy's wording
+varies by version. The blackholed case needs the long timeout: the suite renders no
+VirtualService, so the client sidecar uses Istio's default retry policy (two retries,
+`connect-failure` among the causes, no per-try timeout) and no route timeout, and Envoy
+replies only after three 10 s connect timeouts (`meshConfig.connectTimeout`), about 30 s.
+A shorter `REACH_DETAIL_TIMEOUT_SEC` ends on the client side and reads as fortio's
+`i/o timeout`; on a mesh that sets `meshConfig.connectTimeout` or
+`defaultHttpRetryPolicy`, keep it above (1 + retries) x `connectTimeout`. The file has
+its own preamble (`REACH_SCHEMA`,
+`RUN_ID`, `HARNESS_SHA`, the `REACH_*` knobs, `ON_UNREACHABLE`, `RUN_CONFIG`,
+`RUN_CONFIG_SHA256`), and stderr gets a per-target block ending in
 `WARNING: N of M remotes NOT reachable from <source>: ...`.
+
+The check costs about `REACH_REQUESTS / REACH_QPS` (1 s) when every target answers. A
+target that never answers (packets dropped) costs at most `REACH_ATTEMPTS x
+(REACH_REQUESTS / REACH_QPS + 2 x REACH_HTTP_TIMEOUT_SEC) + (REACH_ATTEMPTS - 1) x
+REACH_RETRY_SEC + REACH_DETAIL_TIMEOUT_SEC`, about 76 s at the defaults (three timeouts
+per check for an odd `REACH_REQUESTS`), plus `kubectl exec` overhead. Targets are
+checked in parallel, so that is the cost per run; `--dry-run` prints it.
 
 What happens next depends on `--on-unreachable` (default `warn`,
 `REACH_ON_UNREACHABLE`):
@@ -212,7 +231,8 @@ sweep records a `PROBE_FAILED` row. The report only aggregates rows with `status
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
 thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,
-`REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the reach check that decides which
+`REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the
+reach check that decides which
 remotes are `UNREACHABLE`. Next to it, `reach-<RUN_ID>.tsv` holds the reach
 check ([Remote reachability](#remote-reachability)) and `latency-<RUN_ID>.md` a per-run
 summary with its Remote coverage section.
@@ -231,8 +251,19 @@ placeholders `SETUP_FAILED` / `PROBE_FAILED` (sweep, one row per failed mesh siz
 `code=count`, `-1` is a socket error) so an `ERROR_RATE_HIGH` row can be diagnosed.
 `004-report-results.sh --format text|csv|json|markdown|md|charts` averages valid rows per
 (mesh size, QPS, target class) and reports `n_total` / `n_valid`; the markdown ends with a
-glossary. It reads every `latency-*.tsv` under `--results-dir`, subdirectories included,
-so pass one `sweep-<RUN_ID>/` to report a single sweep.
+glossary. Placeholder rows (`target_class=na`) form no cell: a `Placeholder rows (no
+table cell): mesh_size=<n> <STATUS>=<count>` line under the table names them per mesh
+size, also when that mesh size has measured rows (a failed repetition, or a probe that
+died after some QPS levels); csv has `# PLACEHOLDER=<mesh>:<STATUS>:<count>`, json
+`summary.placeholders` and `summary.n_placeholder`, so `n_total` is the cells' `n_total`
+plus `n_placeholder`. A mesh size with no local row is also a Local baseline `MISSING`.
+Under the table, text and markdown count every row that is not valid as `dropped
+(poisoned)` (it ran and failed a check, or is a `SETUP_FAILED`/`PROBE_FAILED`
+placeholder) or `skipped (remote unreachable)` (`UNREACHABLE` rows and the
+`STOPPED_UNREACHABLE` placeholder: no load ran); csv (`# ROWS ...`) and json (`summary`:
+`n_dropped`, `n_skipped_unreachable`, `n_placeholder`) carry the same counts. It reads every
+`latency-*.tsv` under `--results-dir`, subdirectories included, so pass one
+`sweep-<RUN_ID>/` to report a single sweep.
 
 ## Local baseline verdict
 

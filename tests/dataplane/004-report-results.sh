@@ -73,6 +73,11 @@ placeholder status, e.g. setup_failed). UNCHECKED: every row is status=OK but so
 delivered less than the ratio x target; only TSVs without MIN_QPS_RATIO in the
 preamble (recorded before the QPS_SHORTFALL check) can produce it.
 
+Sweep placeholder rows (target_class na: SETUP_FAILED, PROBE_FAILED,
+STOPPED_UNREACHABLE) form no table cell; every format names them per mesh size
+("Placeholder rows", csv "# PLACEHOLDER=<mesh>:<STATUS>:<n>", json
+summary.placeholders), also when that mesh size has measured rows.
+
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
   DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
@@ -168,13 +173,18 @@ fi
 # Counts:
 #   count_total — any row with NF>=17
 #   count_valid — status==OK && istiod_restarted==0
-# Numeric aggregations use only valid rows.
+# Numeric aggregations use only valid rows. Sweep placeholder rows (target_class na:
+# SETUP_FAILED, PROBE_FAILED, STOPPED_UNREACHABLE) are no measurement cell and stay
+# out of the table; the row summary below counts them, PH_ROWS names them per mesh
+# size in every format, and the Local baseline also reports a mesh size with no
+# local row as MISSING (the placeholder status as reason).
 # shellcheck disable=SC2016
 AGG_SCRIPT='
 BEGIN { OFS="\t" }
 /^#/ { next }
 /^run_id\t/ { next }
 NF < 17 { next }
+$17 == "na" { next }
 {
 	mesh = $2; qps = $5; cls = $17
 	status = $14; restart = $16
@@ -227,15 +237,70 @@ END {
 
 AGG_TSV=$(cat "${TSV_FILES[@]}" | awk -F'\t' "$AGG_SCRIPT")
 
-# Compute drop summary: total rows, valid rows.
-read -r TOTAL_ALL VALID_ALL < <(awk -F'\t' '
+# Row summary over every data row, placeholders included (PL15): total, valid (the
+# AGG predicate), skipped (no load ran because the reach check found the remote
+# UNREACHABLE: UNREACHABLE rows and the STOPPED_UNREACHABLE placeholder) and dropped
+# (every other row that is not valid: poisoned, failed, or a SETUP_FAILED /
+# PROBE_FAILED placeholder). TOTAL_ALL = VALID_ALL + DROPPED_ALL + SKIPPED_ALL.
+read -r TOTAL_ALL VALID_ALL SKIPPED_ALL < <(cat "${TSV_FILES[@]}" | awk -F'\t' '
+	/^#/ || /^run_id\t/ || NF < 17 { next }
 	{
-		t += $4 + 0
-		v += $5 + 0
+		t++
+		if ($14 == "OK" && $16 == "0") v++
+		else if ($14 == "UNREACHABLE" || $14 == "STOPPED_UNREACHABLE") s++
 	}
-	END { print t, v }
-' <<<"$AGG_TSV")
-DROPPED_ALL=$(( TOTAL_ALL - VALID_ALL ))
+	END { print t + 0, v + 0, s + 0 }')
+DROPPED_ALL=$(( TOTAL_ALL - VALID_ALL - SKIPPED_ALL ))
+
+# rows_summary: "<T> total / <V> valid rows — <D> dropped (poisoned), <S> skipped
+# (remote unreachable)." with only the non-zero parts; text and markdown print it
+# when a row is not valid, csv and json carry the same counts.
+rows_summary() {
+	local parts=""
+	((DROPPED_ALL > 0)) && parts="${DROPPED_ALL} dropped (poisoned)"
+	((SKIPPED_ALL > 0)) && parts="${parts:+${parts}, }${SKIPPED_ALL} skipped (remote unreachable)"
+	printf '%s total / %s valid rows \xe2\x80\x94 %s.\n' "$TOTAL_ALL" "$VALID_ALL" "$parts"
+}
+
+# PH_ROWS: the placeholder rows (target_class na) per (mesh_size, status), mesh sizes
+# ascending, statuses in file order. They form no cell, so this is the only place a
+# placeholder shows when its mesh size also has measured rows (a failed repetition,
+# or a probe that died after some QPS levels). Every format names them, and
+# n_total = the cells' n_total + N_PLACEHOLDER (PL15). Tab-separated:
+#   mesh_size status n_rows
+PH_ROWS="$(cat "${TSV_FILES[@]}" | awk -F'\t' '
+	BEGIN { OFS = "\t" }
+	/^#/ || /^run_id\t/ || NF < 17 || $17 != "na" { next }
+	{
+		m = $2; st = $14
+		if (!(m in seen)) { seen[m] = 1; ms[++n] = m }
+		if (!((m, st) in c)) { if (m in sl) sl[m] = sl[m] SUBSEP st; else sl[m] = st }
+		c[m, st]++
+	}
+	END {
+		for (i = 2; i <= n; i++) {
+			t = ms[i]; j = i - 1
+			while (j >= 1 && ms[j] + 0 > t + 0) { ms[j + 1] = ms[j]; j-- }
+			ms[j + 1] = t
+		}
+		for (i = 1; i <= n; i++) {
+			k = split(sl[ms[i]], s, SUBSEP)
+			for (j = 1; j <= k; j++) print ms[i], s[j], c[ms[i], s[j]]
+		}
+	}')"
+N_PLACEHOLDER="$(awk -F'\t' 'NF >= 3 { n += $3 } END { print n + 0 }' <<<"$PH_ROWS")"
+
+# placeholder_lines: one line per mesh size with placeholder rows, e.g.
+# "Placeholder rows (no table cell): mesh_size=2 PROBE_FAILED=1". Nothing when there
+# are none. text prints them as-is, markdown as a list, charts as notes.
+placeholder_lines() {
+	awk -F'\t' '
+		NF >= 3 {
+			if ($1 in l) l[$1] = l[$1] "," $2 "=" $3
+			else { ms[++n] = $1; l[$1] = $2 "=" $3 }
+		}
+		END { for (i = 1; i <= n; i++) printf "Placeholder rows (no table cell): mesh_size=%s %s\n", ms[i], l[ms[i]] }' <<<"$PH_ROWS"
+}
 
 # --- Local baseline verdict --------------------------------------------------
 # One pass over the TSV files (not cat'ed, so FNR==1 marks each file and the
@@ -559,15 +624,17 @@ report_text() {
 	printf "  %-4s-+-%-6s-+-%-6s-+-%5s-+-%5s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s-+-%7s\n" \
 		"----" "------" "------" "-----" "-----" "----------" "----------" "----------" "----------" "----------" "-------"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 _p999 mx qa pct; do
+		[[ -n "$mesh" ]] || continue  # no measurement cell (only placeholder rows)
 		printf "  %-4s | %-6s | %-6s | %5s | %5s | %10s | %10s | %10s | %10s | %10s | %7s\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
 			"$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_val "$pct" 4)"
 	done <<<"$AGG_TSV"
 	echo ""
-	if (( DROPPED_ALL > 0 )); then
-		echo "WARNING: ${TOTAL_ALL} total / ${VALID_ALL} valid rows — ${DROPPED_ALL} dropped (poisoned)."
+	if (( DROPPED_ALL + SKIPPED_ALL > 0 )); then
+		echo "WARNING: $(rows_summary)"
 	fi
+	placeholder_lines
 	echo ""
 	local_baseline_lines
 	local_baseline_hint
@@ -586,9 +653,15 @@ report_csv() {
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "# LOCAL_BASELINE_CELL=${m}:-:missing:${reason}"
 	done
+	echo "# ROWS n_total=${TOTAL_ALL} n_valid=${VALID_ALL} n_dropped=${DROPPED_ALL} n_skipped_unreachable=${SKIPPED_ALL} n_placeholder=${N_PLACEHOLDER}"
+	local pm pst pn
+	while IFS=$'\t' read -r pm pst pn; do
+		if [[ -n "$pm" ]]; then echo "# PLACEHOLDER=${pm}:${pst}:${pn}"; fi
+	done <<<"$PH_ROWS"
 	remote_coverage_section csv
 	echo "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
+		[[ -n "$mesh" ]] || continue
 		printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
@@ -606,14 +679,22 @@ Definitions for every metric column in the results table above (see also
 `tests/dataplane/README.md`). Latency percentiles come from each cell's **Fortio JSON**
 (`DurationHistogram.Percentiles` / `.Max`, seconds → ms); numeric averages are over
 **valid rows only** — rows with `status != OK` or `istiod_restarted != 0` are excluded
-(`n_valid < n_total` means some rows were dropped).
+(`n_valid < n_total` means some rows were dropped). The line under the table counts
+every row: `dropped (poisoned)` are rows that ran and failed a check (or a
+`SETUP_FAILED`/`PROBE_FAILED` placeholder), `skipped (remote unreachable)` are
+`UNREACHABLE` rows and the `STOPPED_UNREACHABLE` placeholder, for which no load ran
+(JSON `summary`: `n_total = n_valid + n_dropped + n_skipped_unreachable`). Sweep
+placeholder rows (`target_class=na`: `SETUP_FAILED`, `PROBE_FAILED`,
+`STOPPED_UNREACHABLE`) form no cell; the `Placeholder rows` lines name them per mesh
+size, also when that mesh size has measured rows (CSV `# PLACEHOLDER=<mesh>:<STATUS>:<n>`,
+JSON `summary.placeholders`), so `n_total` = the cells' `n_total` + `n_placeholder`.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
 | `mesh_size` | clusters | sweep axis | Number of clusters in the mesh (`--mesh-size`). |
 | `qps_target` | queries/s | sweep axis | Target offered load for the Fortio run (`--qps-levels`). |
 | `target_class` | enum | internal | `local` (the source cluster's own `dataplane-server-<source>` Service, intra-cluster baseline) or `remote` (another cluster's Service, routed via the east-west gateway). |
-| `n_total` | rows | internal | All rows for the cell, including poisoned/placeholder rows. |
+| `n_total` | rows | internal | All rows for the cell, poisoned and `UNREACHABLE` rows included. Sweep placeholder rows (`target_class=na`) form no cell; the `Placeholder rows` lines under the table name them. |
 | `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages; `QPS_SHORTFALL`, `ERROR_RATE_HIGH`, `PERCENTILE_MISSING`, `FAILED` and `UNREACHABLE` rows are dropped. |
 | `avg_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | Mean p50 latency over valid rows; `N/A` if the percentile was missing or every row was dropped. |
 | `avg_p90_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[90]` | Mean p90 latency over valid rows. |
@@ -678,20 +759,24 @@ report_markdown() {
 	echo "| mesh_size | qps_target | target_class | n_total | n_valid | avg_p50_ms | avg_p90_ms | avg_p99_ms | avg_p999_ms | avg_max_ms | avg_actual_qps | avg_pct_200 |"
 	echo "|-----------|------------|--------------|---------|---------|------------|------------|------------|-------------|------------|----------------|-------------|"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
+		[[ -n "$mesh" ]] || continue
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
 			"$(fmt_val "$p999")" "$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_val "$pct" 4)"
 	done <<<"$AGG_TSV"
 	echo ""
-	if (( DROPPED_ALL > 0 )); then
-		printf '> \xe2\x9a\xa0 %s total / %s valid rows \xe2\x80\x94 %s dropped (poisoned).\n' \
-			"$TOTAL_ALL" "$VALID_ALL" "$DROPPED_ALL"
+	if (( DROPPED_ALL + SKIPPED_ALL > 0 )); then
+		printf '> \xe2\x9a\xa0 %s\n' "$(rows_summary)"
+	fi
+	local line
+	if [[ -n "$PH_ROWS" ]]; then
+		echo ""
+		while IFS= read -r line; do echo "- ${line}"; done < <(placeholder_lines)
 	fi
 	echo ""
 	echo "## Local baseline"
 	echo ""
-	local line
 	while IFS= read -r line; do echo "- ${line}"; done < <(local_baseline_lines)
 	while IFS= read -r line; do printf '\n%s\n' "$line"; done < <(local_baseline_hint)
 
@@ -764,6 +849,14 @@ report_json() {
 			files_without_min_qps_ratio: ($legacy | tonumber), cells: .}
 	')
 
+	# Placeholder rows per (mesh_size, status): no cell in results, so
+	# summary.n_total = sum(results[].n_total) + summary.n_placeholder (PL15).
+	local ph_json
+	ph_json=$(printf '%s\n' "$PH_ROWS" | jq -R -s '
+		split("\n") | map(select(length > 0) | split("\t") | select(length >= 3)
+			| {mesh_size: (.[0] | tonumber? // .[0]), status: .[1], n_rows: (.[2] | tonumber)})
+	')
+
 	# Remote coverage (reach checks) and per-remote latency-row validity.
 	local rc_json rv_json
 	rc_json="$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))"
@@ -783,10 +876,15 @@ report_json() {
 		--argjson n_total "$TOTAL_ALL" \
 		--argjson n_valid "$VALID_ALL" \
 		--argjson n_dropped "$DROPPED_ALL" \
+		--argjson n_skipped "$SKIPPED_ALL" \
+		--argjson n_placeholder "$N_PLACEHOLDER" \
+		--argjson placeholders "$ph_json" \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
 		'{metadata: $metadata,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
+		            n_skipped_unreachable: $n_skipped,
+		            n_placeholder: $n_placeholder, placeholders: $placeholders,
 		            remotes_not_reachable: $not_reachable, remotes_without_valid_rows: $no_valid},
 		  remote_coverage: $remote_coverage.remote_coverage,
 		  remote_validity: $remote_validity,
@@ -823,6 +921,11 @@ report_charts() {
 		echo "> Local baseline missing at mesh ${m} (${reason}); its points are drawn as 0."
 		lb_notes=1
 	done
+	while IFS= read -r c; do
+		[[ -n "$c" ]] || continue
+		echo "> ${c}"
+		lb_notes=1
+	done < <(placeholder_lines)
 	((lb_notes)) && echo ""
 	# Remote coverage: one line per source whose remotes were not all reachable, and
 	# one per source with remotes that have no valid latency row.
@@ -831,10 +934,11 @@ report_charts() {
 	[[ -n "$cov_notes" ]] && printf '%s\n\n' "$cov_notes"
 	# Chart 1: p50 vs mesh size at the top QPS (needs two mesh sizes with remote data).
 	# Chart 2: p50 vs QPS at the largest mesh size with remote data.
-	# Cells with no valid samples (failed, restart-poisoned, or a sweep placeholder
-	# with class "na") stay off the axes. Mermaid has no null point, so a cell that
+	# Cells with no valid samples (failed or restart-poisoned) stay off the axes; sweep
+	# placeholders (class "na") form no cell. Mermaid has no null point, so a cell that
 	# is missing on an axis other cells use is drawn as 0.
 	awk -F'\t' '
+	NF < 6 { next }
 	{
 		ms = $1 + 0; qps = $2 + 0; cls = $3; n_valid = $5 + 0; p50 = $6
 		cells_total++

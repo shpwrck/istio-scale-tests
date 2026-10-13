@@ -160,6 +160,7 @@ MIN_PCT_200_STR="$(extract_preamble_kv MIN_PCT_200)"
 REACH_REQUESTS_STR="$(extract_preamble_kv REACH_REQUESTS)"
 REACH_QPS_STR="$(extract_preamble_kv REACH_QPS)"
 REACH_HTTP_TIMEOUT_SEC_STR="$(extract_preamble_kv REACH_HTTP_TIMEOUT_SEC)"
+REACH_DETAIL_TIMEOUT_SEC_STR="$(extract_preamble_kv REACH_DETAIL_TIMEOUT_SEC)"
 REACH_ATTEMPTS_STR="$(extract_preamble_kv REACH_ATTEMPTS)"
 REACH_RETRY_SEC_STR="$(extract_preamble_kv REACH_RETRY_SEC)"
 ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
@@ -320,6 +321,7 @@ emit_metadata_lines() {
 	printf '%s REACH_REQUESTS=%s\n'        "$prefix" "${REACH_REQUESTS_STR:-unknown}"
 	printf '%s REACH_QPS=%s\n'             "$prefix" "${REACH_QPS_STR:-unknown}"
 	printf '%s REACH_HTTP_TIMEOUT_SEC=%s\n' "$prefix" "${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}"
+	printf '%s REACH_DETAIL_TIMEOUT_SEC=%s\n' "$prefix" "${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown}"
 	printf '%s REACH_ATTEMPTS=%s\n'        "$prefix" "${REACH_ATTEMPTS_STR:-unknown}"
 	printf '%s REACH_RETRY_SEC=%s\n'       "$prefix" "${REACH_RETRY_SEC_STR:-unknown}"
 	printf '%s ON_UNREACHABLE=%s\n'        "$prefix" "${ON_UNREACHABLE_STR:-unknown}"
@@ -385,6 +387,7 @@ report_json() {
 		--arg reach_requests   "${REACH_REQUESTS_STR:-unknown}" \
 		--arg reach_qps        "${REACH_QPS_STR:-unknown}" \
 		--arg reach_http_timeout_sec "${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}" \
+		--arg reach_detail_timeout_sec "${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown}" \
 		--arg reach_attempts   "${REACH_ATTEMPTS_STR:-unknown}" \
 		--arg reach_retry_sec  "${REACH_RETRY_SEC_STR:-unknown}" \
 		--arg on_unreachable   "${ON_UNREACHABLE_STR:-unknown}" \
@@ -393,7 +396,7 @@ report_json() {
 		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -415,7 +418,7 @@ Definitions for every metric column in the results table above. Sourced from
 | `churn_rate` | scale-ops/s | sweep axis | Endpoint churn rate applied during the churn phase; baseline rows are `0`. |
 | `delta_p99_ms` | ms | Fortio JSON, derived | `churn_p99 − baseline_p99` — added tail latency under churn; `N/A` unless a valid baseline+churn pair exists. |
 | `stdev_delta_p99` | ms | Welford (internal) | Standard deviation of `delta_p99_ms` across valid repetitions; `N/A` when `valid_runs < 2`. |
-| `total_runs` | runs | internal | All baseline+churn pairs for the cell, including poisoned/failed. |
+| `total_runs` | runs | internal | All baseline+churn pairs for the cell, including poisoned/failed ones and `REMOTE_UNREACHABLE` pairs (no window ran). |
 | `valid_runs` | runs | internal | Pairs where both phases are OK and not restart-poisoned; used in every average. |
 | `baseline_p99_ms` / `churn_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | p99 latency in the baseline / churn phase. |
 | `baseline_p50_ms` / `churn_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | p50 latency in the baseline / churn phase. |
@@ -463,6 +466,7 @@ report_md() {
 	echo "| REACH_REQUESTS | ${REACH_REQUESTS_STR:-unknown} |"
 	echo "| REACH_QPS | ${REACH_QPS_STR:-unknown} |"
 	echo "| REACH_HTTP_TIMEOUT_SEC | ${REACH_HTTP_TIMEOUT_SEC_STR:-unknown} |"
+	echo "| REACH_DETAIL_TIMEOUT_SEC | ${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown} |"
 	echo "| REACH_ATTEMPTS | ${REACH_ATTEMPTS_STR:-unknown} |"
 	echo "| REACH_RETRY_SEC | ${REACH_RETRY_SEC_STR:-unknown} |"
 	echo "| ON_UNREACHABLE | ${ON_UNREACHABLE_STR:-unknown} |"
@@ -543,7 +547,7 @@ report_charts() {
 	}
 	END {
 		if (cells_dropped > 0) {
-			printf "> %d of %d cells dropped (no valid samples / restart-poisoned) — not plotted.\n\n", cells_dropped, cells_total
+			printf "> %d of %d cells have no valid samples (failed, restart-poisoned, or skipped on an unreachable remote) — not plotted.\n\n", cells_dropped, cells_total
 		}
 		# Sort mesh sizes numerically.
 		for (i = 2; i <= n_ms; i++) {

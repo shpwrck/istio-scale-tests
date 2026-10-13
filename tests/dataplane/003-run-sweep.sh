@@ -96,9 +96,11 @@ Environment:
   DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS,
   DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002),
   REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). DATAPLANE_MESH_SIZES (--mesh-sizes),
+  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). DATAPLANE_MESH_SIZES (--mesh-sizes),
   DATAPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
+  The sweep checks every numeric one of them, and the flags that set them, before the
+  first setup, --dry-run included.
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
@@ -203,10 +205,23 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+# The probe window 002 gets as flags; from the environment or --config these reach 002
+# unchecked, and a bad one fails every probe.
+is_pos_int "$DURATION" || die "--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '$DURATION'"
+is_pos_int "$CONNECTIONS" || die "--connections (or DATAPLANE_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle (or DATAPLANE_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
+is_nonneg_int "$WARMUP_DURATION" || die "--warmup-duration (or DATAPLANE_WARMUP_DURATION_SEC) must be a non-negative integer; got '$WARMUP_DURATION'"
+is_nonneg_int "$INTER_COMBO_SETTLE" || die "DATAPLANE_INTER_COMBO_SETTLE_SEC must be a non-negative integer; got '$INTER_COMBO_SETTLE'"
+is_pos_int "$REPETITIONS" || die "--repetitions (or DATAPLANE_REPETITIONS) must be a positive integer; got '$REPETITIONS'"
+is_pos_int "$MAX_MATRIX" || die "DATAPLANE_MAX_MATRIX must be a positive integer; got '$MAX_MATRIX'"
 is_pos_int "$SERVER_REPLICAS" || die "--server-replicas (or DATAPLANE_SERVER_REPLICAS) must be a positive integer; got '$SERVER_REPLICAS'"
 is_ratio "$MIN_QPS_RATIO" || die "--min-qps-ratio (or DATAPLANE_MIN_QPS_RATIO) must be a decimal in (0,1]; got '$MIN_QPS_RATIO'"
 # 002 reads DATAPLANE_MIN_PCT_200 itself; reject a bad value before the first setup.
 is_ratio "${DATAPLANE_MIN_PCT_200:-0.99}" || die "DATAPLANE_MIN_PCT_200 must be a decimal in (0,1]; got '${DATAPLANE_MIN_PCT_200:-}'"
+# So do 001 and 005 with these; a typo would otherwise fail every setup and skip every
+# cleanup (the namespaces stay), and pass --dry-run.
+is_pos_int "${DATAPLANE_WAIT_TIMEOUT_SEC:-300}" || die "DATAPLANE_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer; got '${DATAPLANE_WAIT_TIMEOUT_SEC:-}'"
+is_pos_int "${DATAPLANE_NS_DELETE_TIMEOUT_SEC:-180}" || die "DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005) must be a positive integer; got '${DATAPLANE_NS_DELETE_TIMEOUT_SEC:-}'"
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 
 CONTEXTS=()
@@ -220,6 +235,7 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do
 		MESH_SIZES+=("$i")
@@ -236,6 +252,10 @@ SCRIPT_DIR="${ROOT}/tests/dataplane"
 # Count QPS levels for matrix size check.
 QPS_ARR_TMP=()
 split_csv "$QPS_LEVELS" QPS_ARR_TMP
+((${#QPS_ARR_TMP[@]})) || die "--qps-levels produced an empty list (got '${QPS_LEVELS}')"
+for q in "${QPS_ARR_TMP[@]}"; do
+	is_pos_int "$q" || die "--qps-levels (or DATAPLANE_QPS_LEVELS): '$q' is not a positive integer (got '${QPS_LEVELS}')"
+done
 MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#QPS_ARR_TMP[@]} * REPETITIONS ))
 if (( MATRIX_SIZE > MAX_MATRIX )) && (( !FORCE_LARGE_MATRIX )); then
 	die "matrix size ${MATRIX_SIZE} exceeds cap ${MAX_MATRIX} (${#MESH_SIZES[@]} mesh_sizes × ${#QPS_ARR_TMP[@]} qps_levels × ${REPETITIONS} reps); use --force-large-matrix to override"
@@ -289,6 +309,7 @@ emit_dataplane_placeholder() {
 		echo "# REACH_REQUESTS=${REACH_REQUESTS}"
 		echo "# REACH_QPS=${REACH_QPS:-10}"
 		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"
+		echo "# REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}"
 		echo "# REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}"
 		echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 		echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"

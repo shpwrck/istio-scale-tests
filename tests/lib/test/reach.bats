@@ -3,6 +3,8 @@
 # churn-dataplane entrypoints that use it: 002 skip/stop, 004/005 Remote coverage and
 # --fail-on-unreachable, flags, dry-runs. Fixtures are hand-written RetCodes objects:
 # raw fortio JSON carries the client hostname and IPs and must never be committed.
+# fixtures/fortio_curl_timeout.err is real fortio stderr with its IPs replaced by
+# documentation addresses (192.0.2.0/24, 198.51.100.0/24) and its names by mesh-b.
 
 load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
@@ -133,6 +135,31 @@ rrow() {
 	[ "$output" = "-" ]
 }
 
+@test "reach_sanitize: IPv6 literals masked (bracketed, compressed, full, zone, mapped)" {
+	run reach_sanitize "Unable to connect: dial tcp [fd00:10:96::1f]:8080: connect: connection refused"
+	assert_output "Unable to connect: dial tcp <ip>:8080: connect: connection refused"
+	run reach_sanitize "read tcp [::1]:43458->[2001:db8::20]:8080: i/o timeout"
+	assert_output "read tcp <ip>:43458-><ip>:8080: i/o timeout"
+	run reach_sanitize "dial tcp [fe80::1%eth0]:8080 then fe80::a%eth0"
+	assert_output "dial tcp <ip>:8080 then <ip>"
+	run reach_sanitize "upstreams fd00:10:244::5,fd00::2 and ::1"
+	assert_output "upstreams <ip>,<ip> and <ip>"
+	run reach_sanitize "addr:2001:db8:0:1:1:1:1:1 port"
+	assert_output "addr:<ip> port"
+	run reach_sanitize "mapped [::ffff:192.0.2.1]:80 and ::ffff:192.0.2.1"
+	assert_output "mapped <ip>:80 and <ip>:<ip>"
+	refute_output --partial "192"
+}
+
+@test "reach_sanitize: colon text that is not an address survives" {
+	local t
+	for t in "Error status -1 (code:-1)" "at 12:34:56 and 12:34:56.789Z, 2026-10-13T12:34:56Z" \
+		"Envoy::Http::Codec failed" "TLS_error:|268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED"; do
+		run reach_sanitize "$t"
+		assert_output "$t"
+	done
+}
+
 @test "reach_body_line: skips the fortio curl headers; falls back to the fortio log" {
 	printf 'HTTP/1.1 503 Service Unavailable\r\ncontent-length: 19\r\n\r\nno healthy upstream\n' > "${BATS_TEST_TMPDIR}/o"
 	: > "${BATS_TEST_TMPDIR}/e"
@@ -142,6 +169,23 @@ rrow() {
 	printf '{"level":"err","msg":"Unable to connect","err":"connect: connection refused"}\ncommand terminated with exit code 1\n' > "${BATS_TEST_TMPDIR}/e"
 	run reach_body_line "${BATS_TEST_TMPDIR}/o" "${BATS_TEST_TMPDIR}/e"
 	assert_output "Unable to connect: connect: connection refused"
+}
+
+@test "reach_body_line: a socket failure keeps fortio's err line, not the trailing 'Error status -1'" {
+	# fixtures/fortio_curl_timeout.err: the stderr of a real `fortio curl` (1.75.3) to a
+	# blackholed remote through kubectl exec, IPs and names replaced.
+	: > "${BATS_TEST_TMPDIR}/o"
+	run reach_body_line "${BATS_TEST_TMPDIR}/o" "${FX}/fortio_curl_timeout.err"
+	assert_output "Timeout error (incomplete/invalid response): read tcp 192.0.2.10:43458->198.51.100.20:8080: i/o timeout"
+	run reach_sanitize "$output"
+	assert_output "Timeout error (incomplete/invalid response): read tcp <ip>:43458-><ip>:8080: i/o timeout"
+	# No line with an "err" field: the last line still wins.
+	printf '%s\n' '{"level":"warn","msg":"Non ok http code","code":503}' '{"level":"err","msg":"Error status 503"}' > "${BATS_TEST_TMPDIR}/e"
+	run reach_body_line "${BATS_TEST_TMPDIR}/o" "${BATS_TEST_TMPDIR}/e"
+	assert_output "Error status 503"
+	printf '%s\n' '{"level":"err","msg":"Error status -1"}' 'command terminated with exit code 1' > "${BATS_TEST_TMPDIR}/e"
+	run reach_body_line "${BATS_TEST_TMPDIR}/o" "${BATS_TEST_TMPDIR}/e"
+	assert_output "Error status -1"
 }
 
 # --- reach_check_target / reach_check_all ---
@@ -178,6 +222,56 @@ rrow() {
 	[ "$(grep -vc '^#\|^run_id' "$f")" -eq 4 ]
 	run reach_check_all "${RES}/missing.tsv" x c1 2 ns pod "u{ctx}" ok-src ok-b _fake_kubectl
 	assert_failure
+}
+
+@test "reach_check_all: parallel connections, one detail curl on the last attempt, with its own timeout" {
+	# Logs every fake kubectl call, so the fortio arguments and the curl count are visible.
+	_log_kubectl() { printf '%s\n' "$*" >> "${BATS_TEST_TMPDIR}/calls"; _fake_kubectl "$@"; }
+	f="${RES}/reach-x.tsv"
+	reach_write_header "$f" RUN_ID=x
+	REACH_REQUESTS=10 REACH_ATTEMPTS=3 REACH_DETAIL_TIMEOUT_SEC=12 \
+		reach_check_all "$f" x c1 2 ns pod "http://s-{ctx}/echo" ok-src bad-b _log_kubectl
+	# 10 requests over 5 connections, started evenly, same total QPS and timeout.
+	[ "$(grep -c 'fortio load -qps 10 -n 10 -c 5 -uniform -timeout 3s ' "${BATS_TEST_TMPDIR}/calls")" -eq 4 ]
+	# bad-b was checked 3 times but curled once, with the detail timeout.
+	[ "$(grep -c 'fortio curl' "${BATS_TEST_TMPDIR}/calls")" -eq 1 ]
+	grep -q 'fortio curl -timeout 12s http://s-bad-b/echo' "${BATS_TEST_TMPDIR}/calls"
+	run awk -F'\t' '$5 == "bad-b" { print $7, $12, $13 }' "$f"
+	assert_output "3 UNREACHABLE no healthy upstream"
+	# One request: one connection.
+	: > "${BATS_TEST_TMPDIR}/calls"
+	REACH_REQUESTS=1 REACH_ATTEMPTS=1 reach_check_all "$f" x c2 2 ns pod "http://s-{ctx}/echo" ok-src bad-b _log_kubectl
+	[ "$(grep -c 'fortio load -qps 10 -n 1 -c 1 -uniform ' "${BATS_TEST_TMPDIR}/calls")" -eq 2 ]
+	[ "$(grep -c 'fortio curl' "${BATS_TEST_TMPDIR}/calls")" -eq 1 ]
+}
+
+@test "reach_worst_case_sec: the bound for a target that never answers, shown in the plan line" {
+	export REACH_RETRY_SEC=10  # setup() sets 0
+	run reach_worst_case_sec
+	# 3 x (10/10 + 2 x 3) + 2 x 10 + 35
+	assert_output "76"
+	REACH_REQUESTS=11 run reach_worst_case_sec
+	# 11 requests over 5 connections: the busiest one makes 3 calls.
+	assert_output "$((3 * (2 + 3 * 3) + 2 * 10 + 35))"
+	REACH_REQUESTS=0 run reach_worst_case_sec
+	assert_output "0"
+	# A knob reach_validate rejects gives unknown, never an arithmetic error.
+	REACH_QPS=0 run reach_worst_case_sec
+	assert_output "unknown"
+	REACH_HTTP_TIMEOUT_SEC=09 run reach_worst_case_sec
+	assert_output "unknown"
+	run reach_plan_line "http://s-{ctx}/echo" a b warn
+	assert_output --partial "detail curl 35s; at most about 76s for a target that never answers"
+}
+
+@test "options.env: the detail timeout outlasts Envoy's retried connect timeouts to a blackholed remote" {
+	# No VirtualService: Istio's default retry policy (2 retries on connect-failure, no
+	# per-try timeout) makes 1 + 2 connect attempts of meshConfig.connectTimeout (10 s)
+	# before Envoy's 503. A default at or below 30 s ends on the client side as an
+	# i/o timeout.
+	run bash -c 'unset REACH_DETAIL_TIMEOUT_SEC; source "$1/config/options.env"; echo "$REACH_DETAIL_TIMEOUT_SEC"' _ "$ROOT"
+	assert_success
+	[ "$output" -gt $(((1 + 2) * 10)) ]
 }
 
 @test "reach_write_header: records RUN_CONFIG and RUN_CONFIG_SHA256 (PL36); refuses without config.sh" {
@@ -227,6 +321,7 @@ rrow() {
 	run reach_validate maybe; assert_failure; assert_output --partial "--on-unreachable"
 	REACH_REQUESTS=-1 run reach_validate warn; assert_failure; assert_output --partial "--reach-requests"
 	REACH_ATTEMPTS=0 run reach_validate warn; assert_failure; assert_output --partial "REACH_ATTEMPTS"
+	REACH_DETAIL_TIMEOUT_SEC=0 run reach_validate warn; assert_failure; assert_output --partial "REACH_DETAIL_TIMEOUT_SEC"
 }
 
 # --- reach_coverage_rows / reach_coverage_render ---
@@ -395,6 +490,8 @@ _dp_probe() {
 	# the report copies them.
 	grep -qx '# REACH_QPS=10' "$f"
 	grep -qx '# REACH_HTTP_TIMEOUT_SEC=3' "$f"
+	grep -qx '# REACH_DETAIL_TIMEOUT_SEC=35' "$f"
+	grep -qx '# REACH_DETAIL_TIMEOUT_SEC=35' "$RES"/reach-*.tsv
 	grep -qx '# REACH_RETRY_SEC=0' "$f"
 	run "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.metadata | "\(.REACH_QPS) \(.REACH_HTTP_TIMEOUT_SEC) \(.REACH_RETRY_SEC)"' <<<"$output")" = "10 3 0" ]
@@ -421,6 +518,50 @@ _dp_probe() {
 	assert_failure
 	run "$DP_REPORT" --results-dir "$RES"
 	assert_output --partial "Local baseline: MISSING mesh_size=3 reason=stopped_unreachable (no local rows)"
+	# The 2 UNREACHABLE rows and the placeholder are skips, not poisoned rows, and the
+	# placeholder (class na) is no cell of the table.
+	assert_output --partial "WARNING: 3 total / 0 valid rows — 3 skipped (remote unreachable)."
+	refute_output --partial "dropped (poisoned)"
+	refute_output --regexp '\| na +\|'
+	[[ "$(printf '%s\n' "$output" | grep '[|] remote [|]' | wc -l)" -eq 2 ]]
+	run "$DP_REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[3,0,0,3]' ]
+	[ "$(jq '[.results[] | select(.target_class == "na")] | length' <<<"$output")" = 0 ]
+	run "$DP_REPORT" --results-dir "$RES" --format csv
+	assert_output --partial "# ROWS n_total=3 n_valid=0 n_dropped=0 n_skipped_unreachable=3"
+	refute_output --partial ",na,"
+	run "$DP_REPORT" --results-dir "$RES" --format md
+	assert_output --partial "3 total / 0 valid rows — 3 skipped (remote unreachable)."
+	refute_output --partial "| na |"
+}
+
+@test "004: poisoned rows and unreachable skips are counted apart in every format" {
+	{
+		echo "$LAT_HDR"
+		lrow 2 s 10 OK local
+		lrow 2 r1 10 ERROR_RATE_HIGH remote
+		lrow 2 r2 10 UNREACHABLE remote
+		lrow 2 r2 100 UNREACHABLE remote
+	} > "${RES}/latency-x.tsv"
+	run "$DP_REPORT" --results-dir "$RES"
+	assert_output --partial "WARNING: 4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
+	run "$DP_REPORT" --results-dir "$RES" --format md
+	assert_output --partial "4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
+	run "$DP_REPORT" --results-dir "$RES" --format csv
+	assert_output --partial "# ROWS n_total=4 n_valid=1 n_dropped=1 n_skipped_unreachable=2"
+	run "$DP_REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[4,1,1,2]' ]
+	# Per-cell n_total/n_valid are unchanged: the UNREACHABLE rows stay in their cells.
+	[ "$(jq -c '[.results[] | select(.target_class == "remote") | [.qps_target, .n_total, .n_valid]]' <<<"$output")" = '[[10,2,0],[100,1,0]]' ]
+	# Nothing to warn about when every row is valid.
+	ok="${BATS_TEST_TMPDIR}/ok"
+	mkdir -p "$ok"
+	{
+		echo "$LAT_HDR"
+		lrow 2 s 10 OK local
+	} > "${ok}/latency-x.tsv"
+	run "$DP_REPORT" --results-dir "$ok"
+	refute_output --partial "total / "
 }
 
 @test "002 --reach-requests 0: no check, no reach file, nothing skipped" {
@@ -462,6 +603,7 @@ crow() {
 		echo "# MIN_PCT_200=0.99"
 		echo "# REACH_QPS=20"
 		echo "# REACH_HTTP_TIMEOUT_SEC=1"
+		echo "# REACH_DETAIL_TIMEOUT_SEC=11"
 		echo "# REACH_RETRY_SEC=5"
 		printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n'
 		crow ms2-cr1 baseline 0 5 ERROR_RATE_HIGH
@@ -477,14 +619,17 @@ crow() {
 	[ "$(jq -r '.summary.remotes_not_reachable' <<<"$output")" = 1 ]
 	[ "$(jq -r '.metadata.min_pct_200' <<<"$output")" = 0.99 ]
 	[ "$(jq -r '.metadata | "\(.reach_qps) \(.reach_http_timeout_sec) \(.reach_retry_sec)"' <<<"$output")" = "20 1 5" ]
+	[ "$(jq -r '.metadata.reach_detail_timeout_sec' <<<"$output")" = 11 ]
 	run "$CD_REPORT" --results-dir "$RES" --format md
 	assert_output --partial "## Remote coverage"
 	assert_output --partial "| 2 | a | 0/1 |"
 	assert_output --partial "| MIN_PCT_200 | 0.99 |"
 	assert_output --partial "| REACH_HTTP_TIMEOUT_SEC | 1 |"
+	assert_output --partial "| REACH_DETAIL_TIMEOUT_SEC | 11 |"
 	run "$CD_REPORT" --results-dir "$RES" --format csv
 	assert_output --partial "# REACH_QPS=20"
 	assert_output --partial "# REACH_RETRY_SEC=5"
+	assert_output --partial "# REACH_DETAIL_TIMEOUT_SEC=11"
 	run "$CD_REPORT" --results-dir "$RES"
 	assert_output --partial "REMOTE COVERAGE mesh_size=2 source=a: 0/1 remotes reachable"
 	run --separate-stderr "$CD_REPORT" --results-dir "$RES" --fail-on-unreachable
@@ -527,8 +672,8 @@ crow() {
 }
 
 @test "PL36: dataplane 002 and the 003 placeholder both write the reach preamble keys" {
-	for k in REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_ATTEMPTS REACH_RETRY_SEC \
-		ON_UNREACHABLE; do
+	for k in REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_DETAIL_TIMEOUT_SEC REACH_ATTEMPTS \
+		REACH_RETRY_SEC ON_UNREACHABLE; do
 		grep -q "echo \"# ${k}=" "$DP_PROBE"
 		grep -q "echo \"# ${k}=" "$DP_SWEEP"
 	done

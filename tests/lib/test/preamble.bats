@@ -21,13 +21,14 @@ source "${ROOT}/tests/lib/preamble.sh"
 	[[ "$output" == *"# NETWORK_TOPOLOGY=unknown"* ]]
 }
 
-@test "infra_preamble_lines: no args -> all six keys emitted as unknown" {
+@test "infra_preamble_lines: no args -> all seven keys emitted as unknown" {
 	run infra_preamble_lines
 	[ "$status" -eq 0 ]
 	# Exactly the canonical key set, all unknown. F4: NODE_ALLOC_* dropped (single-source
-	# in the O9 capacity block), so 6 keys, not 8.
+	# in the O9 capacity block); ISTIOD_REPLICAS_BY_CONTEXT added with INFRA_SCHEMA 2.
 	n=$(printf '%s\n' "$output" | grep -c '^# [A-Z_]*=unknown$')
-	[ "$n" -eq 6 ]
+	[ "$n" -eq 7 ]
+	[[ "$output" == *"# ISTIOD_REPLICAS_BY_CONTEXT=unknown"* ]]
 }
 
 @test "infra_preamble_lines: F4 — NODE_ALLOC_* are NOT emitted (single-source)" {
@@ -197,7 +198,7 @@ _cd_preamble_keys() {
 			*) echo "unexpected 004-only key: $k"; false ;;
 		esac
 	done
-	for k in MIN_PCT_200 REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_ATTEMPTS \
+	for k in MIN_PCT_200 REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_DETAIL_TIMEOUT_SEC REACH_ATTEMPTS \
 		REACH_RETRY_SEC ON_UNREACHABLE; do
 		grep -qx "$k" <<<"$k2"
 	done

@@ -136,6 +136,7 @@ done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or COEXEC_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
+is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "--ns-wait-timeout (or COEXEC_SETUP_NS_WAIT_SEC) must be a non-negative integer; got '$SETUP_NS_WAIT_SEC'"
 if ! is_pos_int "$SERVICE_PORT" || ((SERVICE_PORT > 65535)); then
 	die "COEXEC_SERVICE_PORT must be a port number (1-65535), got: $SERVICE_PORT"
 fi
