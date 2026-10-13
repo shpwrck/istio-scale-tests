@@ -110,6 +110,15 @@ EXTRACTED_PATTERNS=(
 	'vsdr_service_count() {'
 	'config_dump_breakdown() {'
 	'resume_preamble_scalar() {'
+	# dataplane local baseline: fortio.sh + is_ratio
+	'is_ratio() {'
+	'fortio_percentile_ms() {'
+	'fortio_max_ms() {'
+	'fortio_actual_qps() {'
+	'fortio_pct_200() {'
+	'fortio_n_responses() {'
+	'fortio_ret_codes() {'
+	'fortio_row_status() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

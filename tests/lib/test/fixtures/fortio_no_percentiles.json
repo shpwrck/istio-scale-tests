@@ -1,0 +1,15 @@
+{
+  "RunType": "HTTP",
+  "RequestedQPS": "10",
+  "ActualQPS": 10,
+  "NumThreads": 8,
+  "DurationHistogram": {
+    "Count": 300,
+    "Min": 0.0009,
+    "Max": 0.004,
+    "Sum": 0.6,
+    "Avg": 0.002,
+    "StdDev": 0.0005
+  },
+  "RetCodes": { "200": 300 }
+}

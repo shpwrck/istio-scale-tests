@@ -1,5 +1,6 @@
 {{- if or (eq .Values.role "server") (eq .Values.role "both") }}
 {{- if not .Values.clusterName }}{{ fail "clusterName is required (pass --set clusterName=...)" }}{{ end }}
+{{- if lt (int .Values.server.replicas) 1 }}{{ fail "server.replicas must be >= 1" }}{{ end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,7 +10,7 @@ metadata:
     {{- include "dataplane-test.server.labels" . | nindent 4 }}
     cluster: {{ .Values.clusterName }}
 spec:
-  replicas: 1
+  replicas: {{ int .Values.server.replicas }}
   selector:
     matchLabels:
       {{- include "dataplane-test.server.selectorLabels" . | nindent 6 }}

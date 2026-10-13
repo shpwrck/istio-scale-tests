@@ -9,6 +9,8 @@
 #
 # Each cell is a single sample. Rerun the sweep to get multiple samples.
 # The local baseline is NOT a no-mesh baseline: both endpoints have sidecars.
+# A run that does not deliver its target QPS is tagged QPS_SHORTFALL, not OK, so
+# a saturated server cannot pass for a valid low-latency sample.
 #
 # Usage:
 #   ./tests/dataplane/002-run-latency-probe.sh --source-context CTX [options]
@@ -38,6 +40,8 @@ source "${ROOT}/tests/lib/preamble.sh"
 source "${ROOT}/tests/lib/metrics.sh"  # extract_gauge (used by fanout_restart_status)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fortio.sh"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -47,6 +51,8 @@ DURATION="${DATAPLANE_DURATION_SEC:-30}"
 CONNECTIONS="${DATAPLANE_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${DATAPLANE_SETTLE_SEC:-30}"
 WARMUP_DURATION="${DATAPLANE_WARMUP_DURATION_SEC:-5}"
+MIN_QPS_RATIO="${DATAPLANE_MIN_QPS_RATIO:-0.95}"
+MIN_PCT_200="${DATAPLANE_MIN_PCT_200:-0.99}"
 OUTPUT_DIR="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
 # Live tuning-baseline provenance; 003 passes it in, standalone runs record "unknown".
@@ -69,6 +75,8 @@ Usage: $(basename "$0") [options]
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle SEC             Seconds to sleep before probing (default: $SETTLE_SEC).
   --warmup-duration SEC    Envoy upstream warmup duration, 0 to disable (default: $WARMUP_DURATION).
+  --min-qps-ratio R        Tag a row QPS_SHORTFALL when actual QPS < R x target QPS;
+                           a decimal in (0,1] (default: $MIN_QPS_RATIO).
   --output-dir DIR         Results directory (default: tests/dataplane/results).
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
@@ -81,9 +89,20 @@ istiod restarts are detected on every context by port-forwarding each Running
 istiod pod before and after the load runs (process_start_time_seconds or a
 changed pod set -> istiod_restarted=1 on every row).
 
+Row status (TSV column 'status'), first match wins:
+  FAILED              the fortio exec failed
+  PERCENTILE_MISSING  p50/p90/p99/p99.9 missing from the fortio JSON
+  ERROR_RATE_HIGH     share of HTTP 200s below DATAPLANE_MIN_PCT_200 (default: $MIN_PCT_200),
+                      or no responses at all
+  QPS_SHORTFALL       actual QPS below --min-qps-ratio x target QPS (target not delivered)
+  OK
+The report counts only OK rows with istiod_restarted=0 as valid. The console line
+of each row also shows ret_codes (HTTP code=count; -1 is a socket error).
+
 Environment:
   DATAPLANE_TEST_NAMESPACE, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
+  DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200,
   FORTIO_VERSION, METRICS_SCRAPE_TIMEOUT (istiod /metrics curl timeout, default 30).
 EOF
 }
@@ -138,6 +157,11 @@ while [[ $# -gt 0 ]]; do
 		WARMUP_DURATION="$2"
 		shift 2
 		;;
+	--min-qps-ratio)
+		[[ -n "${2:-}" ]] || die "--min-qps-ratio requires a value"
+		MIN_QPS_RATIO="$2"
+		shift 2
+		;;
 	--output-dir)
 		[[ -n "${2:-}" ]] || die "--output-dir requires a value"
 		OUTPUT_DIR="$2"
@@ -168,6 +192,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+is_ratio "$MIN_QPS_RATIO" || die "--min-qps-ratio (or DATAPLANE_MIN_QPS_RATIO) must be a decimal in (0,1]; got '$MIN_QPS_RATIO'"
+is_ratio "$MIN_PCT_200" || die "DATAPLANE_MIN_PCT_200 must be a decimal in (0,1]; got '$MIN_PCT_200'"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -204,6 +230,8 @@ if ((DRY_RUN)); then
 	echo "=== Dry-run: data-plane latency probe ==="
 	echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE"
 	echo "QPS levels: ${QPS_ARR[*]} | Duration: ${DURATION}s | Connections: $CONNECTIONS | Settle: ${SETTLE_SEC}s"
+	echo "Min QPS ratio: ${MIN_QPS_RATIO} | Min pct_200: ${MIN_PCT_200}"
+	echo "Server replicas: queried live on: ${ALL_CTXS[*]}"
 	echo "Local target:        ${LOCAL_URL}"
 	for rc in "${REMOTES[@]}"; do
 		echo "Cross-cluster target ($rc): http://dataplane-server-${rc}.${NS}.svc.cluster.local:8080/echo"
@@ -214,6 +242,43 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
+
+# server_replicas_csv: "<ctx>=<ready>/<spec>,..." for the dataplane-server
+# Deployment on every context, read live and concurrently (PL39) before any load.
+# A failed read gives "<ctx>=unknown"; readyReplicas is omitted while 0 pods are Ready.
+server_replicas_csv() {
+	local tmp i v out=""
+	local -a pids=()
+	tmp="$(mktemp -d)"
+	for i in "${!ALL_CTXS[@]}"; do
+		(
+			v="$("${KUBECTL[@]}" --context="${ALL_CTXS[$i]}" -n "$NS" get deploy dataplane-server \
+				--request-timeout=10s -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null)" || v=""
+			[[ "$v" == /* ]] && v="0${v}"
+			[[ "$v" =~ ^[0-9]+/[0-9]+$ ]] || v="unknown"
+			printf '%s' "$v" > "${tmp}/${i}"
+		) &
+		pids+=($!)
+	done
+	for i in "${pids[@]}"; do wait "$i" || true; done
+	for i in "${!ALL_CTXS[@]}"; do
+		v="unknown"
+		[[ -s "${tmp}/${i}" ]] && v="$(<"${tmp}/${i}")"
+		out+="${out:+,}${ALL_CTXS[$i]}=${v}"
+	done
+	rm -rf "$tmp"
+	printf '%s\n' "$out"
+}
+SERVER_REPLICAS_CSV="$(server_replicas_csv)"
+IFS=',' read -ra _sr_pairs <<<"$SERVER_REPLICAS_CSV"
+for _sr in "${_sr_pairs[@]}"; do
+	_v="${_sr##*=}"
+	if [[ "$_v" == unknown ]]; then
+		echo "warning: could not read dataplane-server replicas on ${_sr%=*} (SERVER_REPLICAS records unknown)" >&2
+	elif [[ "${_v%/*}" != "${_v#*/}" ]]; then
+		echo "warning: dataplane-server on ${_sr%=*} has only ${_v} replicas Ready; its rows run on less server capacity" >&2
+	fi
+done
 
 PF_PIDS=()
 ISTIOD_DIR="$(mktemp -d)"
@@ -246,6 +311,9 @@ trap cleanup_all EXIT
 	echo "# NAMESPACE=${NS}"
 	echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 	echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
+	echo "# SERVER_REPLICAS=${SERVER_REPLICAS_CSV}"
+	echo "# MIN_QPS_RATIO=${MIN_QPS_RATIO}"
+	echo "# MIN_PCT_200=${MIN_PCT_200}"
 } > "$TSV_FILE"
 # New TSV columns appended at the end of the old schema:
 #   pct_200, istiod_restarted, target_class
@@ -259,6 +327,7 @@ echo "Source: $SOURCE_CTX (pod: $CLIENT_POD)"
 echo "Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE"
 echo "QPS levels: ${QPS_ARR[*]} | Duration: ${DURATION}s | Connections: $CONNECTIONS"
 echo "Settle: ${SETTLE_SEC}s | Fortio image: ${FORTIO_IMAGE}"
+echo "Server replicas (ready/spec): ${SERVER_REPLICAS_CSV} | Min QPS ratio: ${MIN_QPS_RATIO} | Min pct_200: ${MIN_PCT_200}"
 echo ""
 
 # istiod restart detection on every context: one port-forward per Running istiod
@@ -333,18 +402,6 @@ fi
 
 snapshot_istiod pre
 
-# Extract a percentile latency in ms from fortio JSON, tolerating floating-point
-# representations of the percentile target (e.g. 50 vs 50.0). Emits "N/A" if no
-# entry within tolerance is found.
-extract_percentile_ms() {
-	local json="$1" pct="$2"
-	echo "$json" | jq -r --argjson p "$pct" '
-		.DurationHistogram.Percentiles
-		| (map(select((.Percentile - $p) | fabs < 0.01)) | .[0])
-		| if . == null then "N/A" else (.Value * 1000 | tostring) end
-	' 2>/dev/null || echo "N/A"
-}
-
 run_fortio() {
 	local target_ctx="$1" target_url="$2" target_class="$3"
 	for qps in "${QPS_ARR[@]}"; do
@@ -360,40 +417,21 @@ run_fortio() {
 			continue
 		}
 
-		local qps_actual p50 p90 p99 p999 max_lat pct_200 total_ok status
-		qps_actual=$(echo "$json_output" | jq -r '.ActualQPS // 0' 2>/dev/null || echo 0)
-		p50=$(extract_percentile_ms "$json_output" 50)
-		p90=$(extract_percentile_ms "$json_output" 90)
-		p99=$(extract_percentile_ms "$json_output" 99)
-		p999=$(extract_percentile_ms "$json_output" 99.9)
-		max_lat=$(echo "$json_output" | jq -r '(.DurationHistogram.Max // 0) * 1000' 2>/dev/null || echo 0)
-
-		# Compute fraction of HTTP 200 responses from RetCodes.
-		# RetCodes is an object like {"200": 1234, "503": 5}.
-		pct_200=$(echo "$json_output" | jq -r '
-			(.RetCodes // {})
-			| (to_entries | map(.value) | add) as $total
-			| (.["200"] // 0) as $ok
-			| if ($total // 0) == 0 then "N/A"
-			  else ($ok / $total * 1.0 | tostring) end
-		' 2>/dev/null || echo "N/A")
-
-		# Track total responses for sanity.
-		total_ok=$(echo "$json_output" | jq -r '(.RetCodes // {}) | (to_entries | map(.value) | add) // 0' 2>/dev/null || echo 0)
-
-		# Determine status.
-		status="OK"
-		if [[ "$p50" == "N/A" || "$p90" == "N/A" || "$p99" == "N/A" || "$p999" == "N/A" ]]; then
-			status="PERCENTILE_MISSING"
-		elif [[ "$pct_200" != "N/A" ]] && awk "BEGIN { exit !($pct_200 < 0.99) }"; then
-			status="ERROR_RATE_HIGH"
-		elif [[ "$total_ok" == "0" ]]; then
-			status="ERROR_RATE_HIGH"
-		fi
+		# Parsing and the row status live in tests/lib/fortio.sh.
+		local qps_actual p50 p90 p99 p999 max_lat pct_200 ret_codes status
+		qps_actual=$(fortio_actual_qps "$json_output")
+		p50=$(fortio_percentile_ms "$json_output" 50)
+		p90=$(fortio_percentile_ms "$json_output" 90)
+		p99=$(fortio_percentile_ms "$json_output" 99)
+		p999=$(fortio_percentile_ms "$json_output" 99.9)
+		max_lat=$(fortio_max_ms "$json_output")
+		pct_200=$(fortio_pct_200 "$json_output")
+		ret_codes=$(fortio_ret_codes "$json_output")
+		status=$(fortio_row_status "$json_output" "$qps" "$MIN_QPS_RATIO" "$MIN_PCT_200")
 
 		# Pretty print (numeric values may be "N/A"; tolerate that).
-		printf "    actual_qps=%s p50=%sms p99=%sms max=%sms pct_200=%s status=%s\n" \
-			"$qps_actual" "$p50" "$p99" "$max_lat" "$pct_200" "$status"
+		printf "    actual_qps=%s p50=%sms p99=%sms max=%sms pct_200=%s ret_codes=%s status=%s\n" \
+			"$qps_actual" "$p50" "$p99" "$max_lat" "$pct_200" "$ret_codes" "$status"
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 			"$RUN_ID" "$MESH_SIZE" "$SOURCE_CTX" "$target_ctx" "$qps" "$qps_actual" \
 			"$CONNECTIONS" "$DURATION" "$p50" "$p90" "$p99" "$p999" "$max_lat" \
@@ -464,6 +502,9 @@ MD_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.md"
 	echo "| Connections | ${CONNECTIONS} |"
 	echo "| Settle | ${SETTLE_SEC}s |"
 	echo "| Warmup | ${WARMUP_DURATION}s |"
+	echo "| Server replicas (ready/spec) | ${SERVER_REPLICAS_CSV} |"
+	echo "| Min QPS ratio | ${MIN_QPS_RATIO} |"
+	echo "| Min pct_200 | ${MIN_PCT_200} |"
 	echo "| istiod_restarted | ${ISTIOD_RESTARTED} |"
 	echo ""
 	echo "Note: the local baseline is intra-cluster (sidecar-to-sidecar), NOT a no-mesh baseline."

@@ -31,6 +31,8 @@ WARMUP_DURATION="${DATAPLANE_WARMUP_DURATION_SEC:-5}"
 MAX_MATRIX="${DATAPLANE_MAX_MATRIX:-64}"
 INTER_COMBO_SETTLE="${DATAPLANE_INTER_COMBO_SETTLE_SEC:-15}"
 REPETITIONS="${DATAPLANE_REPETITIONS:-1}"
+SERVER_REPLICAS="${DATAPLANE_SERVER_REPLICAS:-2}"
+MIN_QPS_RATIO="${DATAPLANE_MIN_QPS_RATIO:-0.95}"
 OUTPUT_DIR_BASE="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
@@ -51,6 +53,9 @@ Usage: $(basename "$0") [options]
   --output-dir DIR     Base results directory (default: tests/dataplane/results).
                        A per-sweep subdir sweep-\${RUN_ID}/ is created here.
   --repetitions N      Probe repetitions per mesh size (default: $REPETITIONS).
+  --server-replicas N  fortio server pods per cluster, passed to 001 (default: $SERVER_REPLICAS).
+  --min-qps-ratio R    Below R x target QPS a row is QPS_SHORTFALL, passed to 002
+                       (default: $MIN_QPS_RATIO).
   --force-large-matrix Bypass the ${MAX_MATRIX}-combo matrix safety cap.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
@@ -58,7 +63,8 @@ Usage: $(basename "$0") [options]
 Environment:
   SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
-  DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS.
+  DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS,
+  DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002).
 EOF
 }
 
@@ -118,6 +124,16 @@ while [[ $# -gt 0 ]]; do
 		REPETITIONS="$2"
 		shift 2
 		;;
+	--server-replicas)
+		[[ -n "${2:-}" ]] || die "--server-replicas requires a value"
+		SERVER_REPLICAS="$2"
+		shift 2
+		;;
+	--min-qps-ratio)
+		[[ -n "${2:-}" ]] || die "--min-qps-ratio requires a value"
+		MIN_QPS_RATIO="$2"
+		shift 2
+		;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1
 		shift
@@ -135,6 +151,11 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+is_pos_int "$SERVER_REPLICAS" || die "--server-replicas (or DATAPLANE_SERVER_REPLICAS) must be a positive integer; got '$SERVER_REPLICAS'"
+is_ratio "$MIN_QPS_RATIO" || die "--min-qps-ratio (or DATAPLANE_MIN_QPS_RATIO) must be a decimal in (0,1]; got '$MIN_QPS_RATIO'"
+# 002 reads DATAPLANE_MIN_PCT_200 itself; reject a bad value before the first setup.
+is_ratio "${DATAPLANE_MIN_PCT_200:-0.99}" || die "DATAPLANE_MIN_PCT_200 must be a decimal in (0,1]; got '${DATAPLANE_MIN_PCT_200:-}'"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -209,6 +230,10 @@ emit_dataplane_placeholder() {
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
+		# Same keys as 002's preamble (PL36); replicas were never read live here.
+		echo "# SERVER_REPLICAS=unknown"
+		echo "# MIN_QPS_RATIO=${MIN_QPS_RATIO}"
+		echo "# MIN_PCT_200=${DATAPLANE_MIN_PCT_200:-0.99}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
@@ -225,6 +250,7 @@ echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "QPS levels: $QPS_LEVELS"
 echo "Repetitions: ${REPETITIONS}"
+echo "Server replicas: ${SERVER_REPLICAS} per cluster | Min QPS ratio: ${MIN_QPS_RATIO}"
 echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
 echo "Settle: ${SETTLE_SEC}s | Warmup: ${WARMUP_DURATION}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
@@ -266,13 +292,17 @@ for ms in "${MESH_SIZES[@]}"; do
 		--output-dir "$OUTPUT_DIR"
 		--tuning-baseline "$TUNING_BASELINE"
 		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+		--min-qps-ratio "$MIN_QPS_RATIO"
 	)
 	[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
+	setup_args=(--source-context "$source_ctx")
+	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
+	setup_args+=(--server-replicas "$SERVER_REPLICAS")
 
 	if ((DRY_RUN)); then
 		{
 			echo "  mesh_size=$ms source=$source_ctx remotes=${remote_csv:-none} reps=${REPETITIONS}"
-			echo "    001-setup-dataplane-test.sh --source-context $source_ctx${remote_csv:+ --remote-contexts $remote_csv}"
+			echo "    001-setup-dataplane-test.sh ${setup_args[*]}"
 			for ((rep = 1; rep <= REPETITIONS; rep++)); do
 				echo "    [rep $rep/$REPETITIONS] 002-run-latency-probe.sh ${probe_args[*]}"
 			done
@@ -282,8 +312,6 @@ for ms in "${MESH_SIZES[@]}"; do
 	fi
 
 	echo "--- Setting up ---"
-	setup_args=(--source-context "$source_ctx")
-	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
 	# A setup failure records a placeholder, cleans up and moves to the next size.
 	if ! "$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"; then
 		echo "warn: setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2

@@ -56,7 +56,7 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 | propagation | iterations | _…_ | sweep header `Iterations` |
 | controlplane | sidecar scopings | none, namespace, explicit | sweep header |
 | controlplane | traffic configs (optional) | none, vsdr | sweep header `TRAFFIC_CONFIG` (+ `VSDR_EVERY`, `VSDR_SUBSETS`) |
-| dataplane | QPS levels | _10 / 100 / 500 / 1000_ | sweep header `QPS levels` (+ `Duration`, `Connections`) |
+| dataplane | QPS levels | _10 / 100 / 500 / 1000_ | sweep header `QPS levels` (+ `Duration`, `Connections`, `Server replicas`) |
 | churn | churn deployments × scale range | _… × (1→N)_ | sweep header `Deployments`, `Scale range` |
 | churn-dataplane | churn rates | _… /s_ | sweep header `Churn rates` |
 | _(all)_ | repetitions | _…_ | run flag `--repetitions` |

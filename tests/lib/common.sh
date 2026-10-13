@@ -16,6 +16,7 @@
 #   resume_preamble_scalar <tsv> <KEY> <var> <flag> <explicit>
 #                                     -> on --resume, set var from the preamble's KEY;
 #                                        die if an explicit flag conflicts with it
+#   is_ratio <val>                    -> return 0 if val is a decimal in (0, 1]
 #
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -107,4 +108,13 @@ resume_preamble_scalar() {
 	fi
 	echo "note: --resume: using ${_rps_key}=${_rps_rec} from the resumed sweep's preamble (this run had ${_rps_val})" >&2
 	_rps_val="$_rps_rec"
+}
+
+# --- dataplane local baseline: ratio flags (--min-qps-ratio, DATAPLANE_MIN_PCT_200) ---
+
+# is_ratio <val>: true for a plain decimal in (0, 1], e.g. 0.95, .5, 1, 1.0.
+# shellcheck disable=SC2329
+is_ratio() {
+	[[ "$1" =~ ^([0-9]+(\.[0-9]+)?|\.[0-9]+)$ ]] || return 1
+	awk -v v="$1" 'BEGIN { exit !(v + 0 > 0 && v + 0 <= 1) }'
 }

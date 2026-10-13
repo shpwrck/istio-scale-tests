@@ -240,3 +240,19 @@ _stub_cli() {
 	assert_failure 1
 	assert_output --partial "has no '# VSDR_SUBSETS=' preamble line"
 }
+
+# --- is_ratio() (dataplane --min-qps-ratio, DATAPLANE_MIN_PCT_200) ---
+
+@test "is_ratio: accepts decimals in (0, 1]" {
+	for v in 0.95 1 1.0 .5 0.01; do
+		run is_ratio "$v"
+		assert_success
+	done
+}
+
+@test "is_ratio: rejects 0, > 1, negatives and non-numbers" {
+	for v in 0 0.0 1.01 2 -0.5 abc 0.9x "" " 0.5" 1. ; do
+		run is_ratio "$v"
+		assert_failure
+	done
+}

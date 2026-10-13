@@ -2,8 +2,10 @@
 # Deploy fortio server pods on every cluster and the fortio client on the source.
 #
 # Every cluster gets a Service dataplane-server-<ctx> for each context, selecting
-# only that cluster's server pod: the source's own Service is the local baseline,
-# the others force traffic through the east-west gateway.
+# only that cluster's server pods: the source's own Service is the local baseline,
+# the others force traffic through the east-west gateway. Every cluster runs the
+# same number of server pods (--server-replicas), so local and remote targets have
+# the same server capacity.
 #
 # Usage:
 #   ./tests/dataplane/001-setup-dataplane-test.sh --source-context CTX [--remote-contexts CSV] [options]
@@ -26,6 +28,7 @@ DRY_RUN=0
 WAIT_TIMEOUT=300
 NS="${DATAPLANE_TEST_NAMESPACE:-dataplane-test}"
 FORTIO_TAG="$FORTIO_VERSION"
+SERVER_REPLICAS="${DATAPLANE_SERVER_REPLICAS:-2}"
 
 
 usage() {
@@ -36,6 +39,8 @@ Usage: $(basename "$0") [options]
   --remote-contexts CSV    Remote cluster contexts for servers (comma-separated).
   --dry-run                Pass --dry-run=client to oc apply.
   --wait-timeout N         Seconds to wait for pods (default: 300).
+  --server-replicas N      fortio server pods per cluster, local and remote alike
+                           (default: $SERVER_REPLICAS).
   -h, --help               Show this help.
 
 Context names are used in Service names (dataplane-server-<ctx>), so each must
@@ -43,7 +48,7 @@ be a lowercase DNS label of at most 46 characters; rename others with
 'kubectl config rename-context'.
 
 Environment:
-  DATAPLANE_TEST_NAMESPACE, FORTIO_VERSION.
+  DATAPLANE_TEST_NAMESPACE, DATAPLANE_SERVER_REPLICAS, FORTIO_VERSION.
 EOF
 }
 
@@ -71,6 +76,11 @@ while [[ $# -gt 0 ]]; do
 		WAIT_TIMEOUT="$2"
 		shift 2
 		;;
+	--server-replicas)
+		[[ -n "${2:-}" ]] || die "--server-replicas requires a value"
+		SERVER_REPLICAS="$2"
+		shift 2
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -82,6 +92,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+is_pos_int "$SERVER_REPLICAS" || die "--server-replicas (or DATAPLANE_SERVER_REPLICAS) must be a positive integer; got '$SERVER_REPLICAS'"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -119,8 +130,10 @@ if (( ${#ALL_CTXS[@]} > 10 )); then
 fi
 
 # Apply the server to every context concurrently, wait for all, THEN apply
-# role=both on the source (it supersedes the source's server-only render).
+# role=both on the source (it supersedes the source's server-only render). Both
+# renders set server.replicas, or the role=both apply would reset it (PL27).
 echo "Deploying fortio server on all clusters (image tag: ${FORTIO_TAG})..."
+echo "Server replicas per cluster: ${SERVER_REPLICAS}"
 APPLY_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do
 	(
@@ -129,6 +142,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 			--set clusterName="$ctx" \
 			--set namespace="$NS" \
 			--set role=server \
+			--set server.replicas="$SERVER_REPLICAS" \
 			--set image.tag="$FORTIO_TAG" \
 			"${ALL_CN_SETS[@]}" \
 			| "${apply[@]}" --context="$ctx" -f - \
@@ -145,6 +159,7 @@ helm template dataplane-test "$CHART_DIR" \
 	--set clusterName="$SOURCE_CTX" \
 	--set namespace="$NS" \
 	--set role=both \
+	--set server.replicas="$SERVER_REPLICAS" \
 	--set image.tag="$FORTIO_TAG" \
 	"${ALL_CN_SETS[@]}" \
 	| "${apply[@]}" --context="$SOURCE_CTX" -f -
@@ -164,6 +179,11 @@ for ctx in "${ALL_CTXS[@]}"; do
 			-l app.kubernetes.io/instance=dataplane-test \
 			--timeout="${WAIT_TIMEOUT}s" \
 			|| { echo "error: deployment(s) not ready on $ctx" >&2; exit 1; }
+		# Available can be true before every server replica is Ready (and stays
+		# true while an in-place re-run scales up), so also wait for the rollout (PL4).
+		"${KUBECTL[@]}" --context="$ctx" -n "$NS" rollout status \
+			deployment/dataplane-server --timeout="${WAIT_TIMEOUT}s" \
+			|| { echo "error: dataplane-server rollout (${SERVER_REPLICAS} replicas) not complete on $ctx" >&2; exit 1; }
 	) &
 	WAIT_PIDS+=($!)
 done
@@ -171,4 +191,4 @@ for pid in "${WAIT_PIDS[@]}"; do
 	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 
-echo "Setup complete. Server on: ${ALL_CTXS[*]}  Client on: $SOURCE_CTX"
+echo "Setup complete. Server (${SERVER_REPLICAS} replicas each) on: ${ALL_CTXS[*]}  Client on: $SOURCE_CTX"

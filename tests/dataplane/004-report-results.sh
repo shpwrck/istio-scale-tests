@@ -6,6 +6,8 @@
 # Filters poisoned rows (status != OK, istiod_restarted != 0) from numeric
 # aggregation but still counts them in count_total and reports the gap.
 # Propagates the first TSV's preamble metadata into every output format.
+# Every format also carries a "Local baseline" verdict per (mesh_size, qps_target),
+# so a same-cluster number that was dropped or never measured is always visible.
 #
 # Usage:
 #   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT]
@@ -14,6 +16,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"  # DATAPLANE_MIN_QPS_RATIO (fallback for TSVs without one)
 
 RESULTS_DIR="${ROOT}/tests/dataplane/results"
 FORMAT="text"
@@ -28,6 +32,18 @@ Usage: $(basename "$0") [options]
                      subdir from 003 also works.
   --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
   -h, --help         Show this help.
+
+Every format includes a "Local baseline" verdict: OK when every local cell has all
+rows valid and none below the QPS ratio, else one line per
+dropped/degraded/unchecked/missing cell with the reason (saturated_unflagged,
+saturated, errors, percentile_missing, failed, istiod_restarted,
+istiod_restart_unknown, or for a mesh size without local rows the lower-cased
+placeholder status, e.g. setup_failed). UNCHECKED: every row is status=OK but some
+delivered less than the ratio x target; only TSVs without MIN_QPS_RATIO in the
+preamble (recorded before the QPS_SHORTFALL check) can produce it.
+
+Environment:
+  DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
 EOF
 }
 
@@ -160,6 +176,209 @@ read -r TOTAL_ALL VALID_ALL < <(awk -F'\t' '
 ' <<<"$AGG_TSV")
 DROPPED_ALL=$(( TOTAL_ALL - VALID_ALL ))
 
+# --- Local baseline verdict --------------------------------------------------
+# One pass over the TSV files (not cat'ed, so FNR==1 marks each file and the
+# per-file preamble keys SERVER_REPLICAS and MIN_QPS_RATIO apply to that file's
+# rows only, PL26). Output lines (tab-separated):
+#   ratio   <distinct MIN_QPS_RATIO values of files with local rows>
+#   legacy  <files with local rows and no valid MIN_QPS_RATIO line>
+#   cell    mesh qps n_total n_valid verdict reason qps_actual qps_ratio server_replicas remote statuses ok_below_ratio
+#   missing mesh reason
+# n_valid uses the AGG predicate (status OK, istiod_restarted 0) and is never
+# changed here. ok_below_ratio counts valid rows below MIN_QPS_RATIO x target:
+# only a TSV recorded before 002 had the QPS_SHORTFALL check (no MIN_QPS_RATIO
+# line, ratio = the env fallback) can hold one, and its numbers are in the AGG
+# averages. verdict is ok (all valid, none below the ratio), unchecked (all valid,
+# some below the ratio), degraded (some valid) or dropped (none). reason, first that
+# applies: saturated_unflagged (ok_below_ratio > 0), saturated (QPS_SHORTFALL, or
+# any row below MIN_QPS_RATIO x target), errors, percentile_missing, failed,
+# istiod_restarted, istiod_restart_unknown, other.
+# qps_actual is the worst delivered QPS (FAILED rows skipped). server_replicas is
+# the source context's <ready>/<spec> from each file's preamble ("|"-joined if
+# files differ). remote is n_valid/n_total of the remote cell at the same
+# mesh_size and qps_target, or none.
+# A mesh size with rows but no local row is "missing"; its reason is the
+# lower-cased status of its placeholder rows (class na), else "missing".
+# POSIX awk only: insertion sorts, no asorti or length(array).
+LB_DEFAULT_RATIO="${DATAPLANE_MIN_QPS_RATIO:-0.95}"
+if ! is_ratio "$LB_DEFAULT_RATIO"; then
+	echo "warning: DATAPLANE_MIN_QPS_RATIO='${LB_DEFAULT_RATIO}' is not a decimal in (0,1]; using 0.95" >&2
+	LB_DEFAULT_RATIO=0.95
+fi
+# shellcheck disable=SC2016
+LB_SCRIPT='
+function sr_lookup(s, ctx,    n, parts, i) {
+	if (s == "") return "unknown"
+	n = split(s, parts, ",")
+	for (i = 1; i <= n; i++) if (index(parts[i], ctx "=") == 1) return substr(parts[i], length(ctx) + 2)
+	return "unknown"
+}
+function addu(list, v) { return (list == "") ? v : list "," v }
+BEGIN { OFS = "\t" }
+FNR == 1 { sr = ""; fr = def_ratio; has_ratio = 0; file_local = 0 }
+/^# SERVER_REPLICAS=/ { sr = substr($0, 19); next }
+/^# MIN_QPS_RATIO=/ { v = substr($0, 17); if (v ~ /^([0-9]+(\.[0-9]+)?|\.[0-9]+)$/ && v + 0 > 0) { fr = v; has_ratio = 1 }; next }
+/^#/ { next }
+$1 == "run_id" { next }
+NF < 17 { next }
+{
+	mesh = $2; qps = $5; cls = $17; st = $14; rs = $16
+	if (!(mesh in mesh_seen)) { mesh_seen[mesh] = 1; mesh_order[++n_mesh] = mesh }
+	if (cls == "na") {
+		r = tolower(st)
+		if (!((mesh, r) in ph_seen)) { ph_seen[mesh, r] = 1; ph[mesh] = addu(ph[mesh], r) }
+		next
+	}
+	key = mesh "\t" qps
+	if (cls == "remote") { rt[key]++; if (st == "OK" && rs == "0") rv[key]++; next }
+	if (cls != "local") next
+	has_local[mesh] = 1
+	if (!file_local) { file_local = 1; if (!has_ratio) n_legacy++ }
+	if (!(fr in ratio_seen)) { ratio_seen[fr] = 1; ratios = addu(ratios, fr) }
+	if (!(key in lt)) keys[++n_keys] = key
+	lt[key]++
+	if (st == "OK" && rs == "0") lv[key]++
+	if (!((key, st) in stc)) stl[key] = addu(stl[key], st)
+	stc[key, st]++
+	if (st == "QPS_SHORTFALL") sat[key] = 1
+	if (st == "ERROR_RATE_HIGH") err[key] = 1
+	if (st == "PERCENTILE_MISSING") pm[key] = 1
+	if (st == "FAILED") fl[key] = 1
+	if (rs == "1") rst[key] = 1
+	else if (rs != "0") rsu[key] = 1
+	if (st != "FAILED" && $6 ~ /^[0-9]+(\.[0-9]+)?$/ && qps + 0 > 0) {
+		if (!(key in worst) || $6 + 0 < worst[key]) worst[key] = $6 + 0
+		if ($6 + 0 < fr * qps) { sat[key] = 1; if (st == "OK" && rs == "0") ubr[key]++ }
+	}
+	v = sr_lookup(sr, $3)
+	if (!((key, v) in sr_seen)) { sr_seen[key, v] = 1; srv[key] = (srv[key] == "") ? v : srv[key] "|" v }
+}
+END {
+	print "ratio", (ratios == "" ? def_ratio : ratios)
+	print "legacy", n_legacy + 0
+	for (i = 2; i <= n_keys; i++) {
+		t = keys[i]; split(t, b, "\t"); j = i - 1
+		while (j >= 1) {
+			split(keys[j], a, "\t")
+			if (a[1] + 0 > b[1] + 0 || (a[1] + 0 == b[1] + 0 && a[2] + 0 > b[2] + 0)) { keys[j + 1] = keys[j]; j-- }
+			else break
+		}
+		keys[j + 1] = t
+	}
+	for (i = 1; i <= n_keys; i++) {
+		k = keys[i]; split(k, p, "\t")
+		tot = lt[k]; val = lv[k] + 0
+		verdict = (val == tot) ? ((k in ubr) ? "unchecked" : "ok") : (val == 0 ? "dropped" : "degraded")
+		reason = "-"
+		if (verdict != "ok") {
+			if (k in ubr) reason = "saturated_unflagged"
+			else if (k in sat) reason = "saturated"
+			else if (k in err) reason = "errors"
+			else if (k in pm) reason = "percentile_missing"
+			else if (k in fl) reason = "failed"
+			else if (k in rst) reason = "istiod_restarted"
+			else if (k in rsu) reason = "istiod_restart_unknown"
+			else reason = "other"
+		}
+		qa = (k in worst) ? worst[k] : "N/A"
+		qr = (k in worst) ? sprintf("%.4f", worst[k] / p[2]) : "N/A"
+		remote = (k in rt) ? (rv[k] + 0) "/" rt[k] : "none"
+		ns = split(stl[k], sl, ","); sts = ""
+		for (j = 1; j <= ns; j++) sts = sts (j > 1 ? "," : "") sl[j] "=" stc[k, sl[j]]
+		print "cell", p[1], p[2], tot, val, verdict, reason, qa, qr, srv[k], remote, sts, ((k in ubr) ? ubr[k] : 0)
+	}
+	for (i = 2; i <= n_mesh; i++) {
+		t = mesh_order[i]; j = i - 1
+		while (j >= 1 && mesh_order[j] + 0 > t + 0) { mesh_order[j + 1] = mesh_order[j]; j-- }
+		mesh_order[j + 1] = t
+	}
+	for (i = 1; i <= n_mesh; i++) {
+		m = mesh_order[i]
+		if (m in has_local) continue
+		print "missing", m, ((m in ph) ? ph[m] : "missing")
+	}
+}
+'
+LB_RATIO="$LB_DEFAULT_RATIO"
+LB_LEGACY_FILES=0  # files with local rows whose preamble has no MIN_QPS_RATIO
+LB_CELLS=()    # "cell" lines without the tag
+LB_MISSING=()  # "missing" lines without the tag
+while IFS= read -r line; do
+	case "$line" in
+	ratio$'\t'*) LB_RATIO="${line#ratio$'\t'}" ;;
+	legacy$'\t'*) LB_LEGACY_FILES="${line#legacy$'\t'}" ;;
+	cell$'\t'*) LB_CELLS+=("${line#cell$'\t'}") ;;
+	missing$'\t'*) LB_MISSING+=("${line#missing$'\t'}") ;;
+	esac
+done < <(awk -F'\t' -v def_ratio="$LB_DEFAULT_RATIO" "$LB_SCRIPT" "${TSV_FILES[@]}")
+
+# Overall verdict: the worst cell (ok < degraded < unchecked < missing < dropped);
+# missing when there is no local row at all. unchecked ranks above degraded: a
+# degraded cell averages only rows that passed every check, an unchecked one
+# averages rows that missed the target QPS.
+LB_VERDICT="ok"
+lb_rank() { case "$1" in ok) echo 0 ;; degraded) echo 1 ;; unchecked) echo 2 ;; missing) echo 3 ;; dropped) echo 4 ;; esac; }
+lb_worse() { (( $(lb_rank "$1") > $(lb_rank "$LB_VERDICT") )) && LB_VERDICT="$1"; return 0; }
+LB_TOP_QPS=0
+for c in "${LB_CELLS[@]}"; do
+	IFS=$'\t' read -r _m q _t _v verdict _rest <<<"$c"
+	lb_worse "$verdict"
+	[[ "$q" =~ ^[0-9]+$ ]] && (( q > LB_TOP_QPS )) && LB_TOP_QPS="$q"
+done
+((${#LB_MISSING[@]})) && lb_worse missing
+((${#LB_CELLS[@]})) || LB_VERDICT="missing"
+
+# local_baseline_lines: the human-readable verdict, one line per bad cell (or one
+# OK line). Text prints them as-is, markdown as a list.
+local_baseline_lines() {
+	local c m q t v verdict reason qa qr srep remote sts nbr pct line legacy=""
+	if [[ "$LB_VERDICT" == ok ]]; then
+		local cells="${#LB_CELLS[@]} cells"
+		((${#LB_CELLS[@]} == 1)) && cells="1 cell"
+		# A TSV without MIN_QPS_RATIO was never checked at run time; say the report did it.
+		if ((LB_LEGACY_FILES > 0)); then
+			legacy=", applied by this report to ${LB_LEGACY_FILES} file"
+			((LB_LEGACY_FILES == 1)) || legacy+="s"
+			legacy+=" without MIN_QPS_RATIO"
+		fi
+		echo "Local baseline: OK at every QPS level (${cells}, top qps_target=${LB_TOP_QPS}, min_qps_ratio=${LB_RATIO}${legacy})"
+		return 0
+	fi
+	for c in "${LB_CELLS[@]}"; do
+		IFS=$'\t' read -r m q t v verdict reason qa qr srep remote sts nbr <<<"$c"
+		[[ "$verdict" == ok ]] && continue
+		pct="N/A"
+		[[ "$qr" != "N/A" ]] && pct="$(awk -v r="$qr" 'BEGIN { printf "%.1f%%", r * 100 }')"
+		line="Local baseline: ${verdict^^} mesh_size=${m} qps_target=${q} n_valid=${v}/${t} reason=${reason} qps_actual=${qa} (${pct} of target) server_replicas=${srep} remote=${remote} statuses=${sts}"
+		((nbr > 0)) && line+=" ok_below_ratio=${nbr}"
+		echo "$line"
+	done
+	for c in "${LB_MISSING[@]}"; do
+		IFS=$'\t' read -r m reason <<<"$c"
+		echo "Local baseline: MISSING mesh_size=${m} reason=${reason} (no local rows)"
+	done
+}
+
+# Reading aids, one line each: a local cell fell short of its target QPS
+# (saturated), or OK rows from a TSV recorded before the shortfall check did
+# (saturated_unflagged).
+local_baseline_hint() {
+	local c sat=0 unflagged=0 legacy=""
+	for c in "${LB_CELLS[@]}"; do
+		[[ "$c" == *$'\tsaturated\t'* ]] && sat=1
+		[[ "$c" == *$'\tsaturated_unflagged\t'* ]] && unflagged=1
+	done
+	# In a TSV without MIN_QPS_RATIO a remote OK row may have missed its target too.
+	((LB_LEGACY_FILES > 0)) && legacy=" In the ${LB_LEGACY_FILES} TSV(s) without MIN_QPS_RATIO, remote= counts status only: an OK remote row there may have missed its target too."
+	if ((sat)); then
+		echo "Hint: reason=saturated with every remote row valid (remote=n/n) means the local server ran out of capacity: raise --server-replicas. If remote rows dropped too, the client sidecar is the ceiling: lower --qps-levels. Thresholds: min_qps_ratio=${LB_RATIO}.${legacy}"
+	fi
+	if ((unflagged)); then
+		echo "Note: reason=saturated_unflagged marks status=OK rows that delivered less than min_qps_ratio=${LB_RATIO} x target. Only a TSV recorded without MIN_QPS_RATIO (before the QPS_SHORTFALL check) holds such rows; they still count in n_valid and in the averages above. Compare these cells only at QPS levels that reached the target.${legacy}"
+	fi
+	return 0
+}
+
 fmt_val() { # turn "N/A" or numeric into pretty string
 	local v="$1" digits="${2:-2}"
 	[[ "$v" == "N/A" ]] && { printf "N/A"; return; }
@@ -189,10 +408,24 @@ report_text() {
 	if (( DROPPED_ALL > 0 )); then
 		echo "WARNING: ${TOTAL_ALL} total / ${VALID_ALL} valid rows — ${DROPPED_ALL} dropped (poisoned)."
 	fi
+	echo ""
+	local_baseline_lines
+	local_baseline_hint
 }
 
 report_csv() {
 	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	echo "# LOCAL_BASELINE=${LB_VERDICT}"
+	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
+	local c m q _t _v verdict reason _rest
+	for c in "${LB_CELLS[@]}"; do
+		IFS=$'\t' read -r m q _t _v verdict reason _rest <<<"$c"
+		[[ "$verdict" == ok ]] || echo "# LOCAL_BASELINE_CELL=${m}:${q}:${verdict}:${reason}"
+	done
+	for c in "${LB_MISSING[@]}"; do
+		IFS=$'\t' read -r m reason <<<"$c"
+		echo "# LOCAL_BASELINE_CELL=${m}:-:missing:${reason}"
+	done
 	echo "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
 		printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
@@ -220,14 +453,28 @@ Definitions for every metric column in the results table above (see also
 | `qps_target` | queries/s | sweep axis | Target offered load for the Fortio run (`--qps-levels`). |
 | `target_class` | enum | internal | `local` (the source cluster's own `dataplane-server-<source>` Service, intra-cluster baseline) or `remote` (another cluster's Service, routed via the east-west gateway). |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/placeholder rows. |
-| `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages. |
+| `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages; `QPS_SHORTFALL`, `ERROR_RATE_HIGH`, `PERCENTILE_MISSING` and `FAILED` rows are dropped. |
 | `avg_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | Mean p50 latency over valid rows; `N/A` if the percentile was missing or every row was dropped. |
 | `avg_p90_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[90]` | Mean p90 latency over valid rows. |
 | `avg_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | Mean p99 latency over valid rows. |
 | `avg_p999_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99.9]` | Mean p99.9 latency over valid rows. |
 | `avg_max_ms` | ms | Fortio JSON `DurationHistogram.Max` | Mean of the per-run maximum observed latency over valid rows. |
-| `avg_actual_qps` | queries/s | Fortio JSON `ActualQPS` | Mean achieved QPS over valid rows; may fall below `qps_target` under load. |
-| `avg_pct_200` | fraction (0–1) | Fortio JSON `RetCodes` | Mean fraction of HTTP 200 responses (`count(200) / sum(all codes)`); below ~0.99 the run is tagged `ERROR_RATE_HIGH` and excluded from `n_valid`. |
+| `avg_actual_qps` | queries/s | Fortio JSON `ActualQPS` | Mean achieved QPS over valid rows. A row below `MIN_QPS_RATIO` × `qps_target` (default 0.95) is tagged `QPS_SHORTFALL` and left out, so this stays close to the target. Exception: a TSV without `MIN_QPS_RATIO` in its preamble was recorded before that check, so its short rows are still `OK` and averaged here; the Local baseline names those cells `UNCHECKED` (`saturated_unflagged`). |
+| `avg_pct_200` | fraction (0–1) | Fortio JSON `RetCodes` | Mean fraction of HTTP 200 responses (`count(200) / sum(all codes)`); below `MIN_PCT_200` (default 0.99) the run is tagged `ERROR_RATE_HIGH` and excluded from `n_valid`. |
+
+**Local baseline** (section above): one verdict per local `(mesh_size, qps_target)` cell.
+`DROPPED` means no valid row, `DEGRADED` some. `UNCHECKED` means every row is valid but
+`ok_below_ratio` of them are `status=OK` rows that delivered less than `MIN_QPS_RATIO` ×
+target: they come from a TSV recorded without `MIN_QPS_RATIO` (before the
+`QPS_SHORTFALL` check) and are in the averages above. `reason` is the first of
+`saturated_unflagged` (such rows), `saturated` (the run delivered less than
+`MIN_QPS_RATIO` × target), `errors`, `percentile_missing`, `failed`,
+`istiod_restarted`, `istiod_restart_unknown`. `server_replicas` is the source
+cluster's fortio server `ready/spec` from the TSV preamble (`SERVER_REPLICAS`).
+`remote=v/t` is the same cell for the remote targets: if remote rows stayed valid, the
+local server was the bottleneck (raise `--server-replicas`); if they dropped too, the
+client sidecar was (lower `--qps-levels`). `MISSING` means a mesh size has no local row
+at all; its reason is the placeholder status (`setup_failed`, `probe_failed`, ...).
 GLOSSARY
 }
 
@@ -262,6 +509,12 @@ report_markdown() {
 		printf '> \xe2\x9a\xa0 %s total / %s valid rows \xe2\x80\x94 %s dropped (poisoned).\n' \
 			"$TOTAL_ALL" "$VALID_ALL" "$DROPPED_ALL"
 	fi
+	echo ""
+	echo "## Local baseline"
+	echo ""
+	local line
+	while IFS= read -r line; do echo "- ${line}"; done < <(local_baseline_lines)
+	while IFS= read -r line; do printf '\n%s\n' "$line"; done < <(local_baseline_hint)
 
 	# Metric glossary at the very end of the markdown summary.
 	glossary_section
@@ -300,13 +553,45 @@ report_json() {
 		})
 	')
 
+	# Local baseline: every local cell (ok ones too), then the missing mesh sizes.
+	local lb_json
+	local c
+	lb_json=$( {
+		for c in "${LB_CELLS[@]}"; do printf 'cell\t%s\n' "$c"; done
+		for c in "${LB_MISSING[@]}"; do printf 'missing\t%s\n' "$c"; done
+	} | jq -R -s \
+		--arg verdict "$LB_VERDICT" --arg ratio "$LB_RATIO" --arg legacy "$LB_LEGACY_FILES" '
+		def num: if . == "N/A" or . == "" then null else (tonumber? // .) end;
+		split("\n") | map(select(length > 0) | split("\t"))
+		| map(select(length > 1)
+			| if .[0] == "cell" then {
+				mesh_size: (.[1] | num), qps_target: (.[2] | num),
+				n_total: (.[3] | tonumber), n_valid: (.[4] | tonumber),
+				verdict: .[5], reason: (if .[6] == "-" then null else .[6] end),
+				qps_actual: (.[7] | num), qps_ratio: (.[8] | num),
+				server_replicas: .[9],
+				remote_n_valid: (if .[10] == "none" then null else (.[10] | split("/")[0] | tonumber) end),
+				remote_n_total: (if .[10] == "none" then null else (.[10] | split("/")[1] | tonumber) end),
+				statuses: (.[11] | split(",") | map(split("=") | {(.[0]): (.[1] | tonumber)}) | add // {}),
+				ok_below_ratio: (.[12] | tonumber)
+			} else {
+				mesh_size: (.[1] | num), qps_target: null, n_total: 0, n_valid: 0,
+				verdict: "missing", reason: .[2], qps_actual: null, qps_ratio: null,
+				server_replicas: null, remote_n_valid: null, remote_n_total: null, statuses: {},
+				ok_below_ratio: 0
+			} end)
+		| {verdict: $verdict, min_qps_ratio: ($ratio | num),
+			files_without_min_qps_ratio: ($legacy | tonumber), cells: .}
+	')
+
 	jq -n \
 		--argjson metadata "$meta_json" \
 		--argjson results "$results_json" \
+		--argjson local_baseline "$lb_json" \
 		--argjson n_total "$TOTAL_ALL" \
 		--argjson n_valid "$VALID_ALL" \
 		--argjson n_dropped "$DROPPED_ALL" \
-		'{metadata: $metadata, summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped}, results: $results}'
+		'{metadata: $metadata, summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped}, local_baseline: $local_baseline, results: $results}'
 }
 
 report_charts() {
@@ -321,6 +606,25 @@ report_charts() {
 	echo ""
 	echo "# Data-Plane Latency — Charts"
 	echo ""
+	# Name every local point that is drawn as 0 because it has no valid sample, and
+	# every one that averages OK rows below the QPS ratio (legacy TSVs).
+	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr lb_notes=0
+	for c in "${LB_CELLS[@]}"; do
+		IFS=$'\t' read -r m q _t _v verdict reason _qa _qr _srep _remote _sts nbr <<<"$c"
+		if [[ "$verdict" == dropped ]]; then
+			echo "> Local baseline missing at mesh ${m} / QPS ${q} (${reason}); its point is drawn as 0."
+			lb_notes=1
+		elif ((nbr > 0)); then
+			echo "> Local point at mesh ${m} / QPS ${q} includes ${nbr} OK row(s) below min_qps_ratio x target (${reason}, TSV without MIN_QPS_RATIO)."
+			lb_notes=1
+		fi
+	done
+	for c in "${LB_MISSING[@]}"; do
+		IFS=$'\t' read -r m reason <<<"$c"
+		echo "> Local baseline missing at mesh ${m} (${reason}); its points are drawn as 0."
+		lb_notes=1
+	done
+	((lb_notes)) && echo ""
 	# Chart 1: p50 vs mesh size at the top QPS (needs two mesh sizes with remote data).
 	# Chart 2: p50 vs QPS at the largest mesh size with remote data.
 	# Cells with no valid samples (failed, restart-poisoned, or a sweep placeholder
