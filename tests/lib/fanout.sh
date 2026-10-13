@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Per-pod istiod metric fanout helpers. Sourced, never executed.
 #
-# Consumers: propagation, churn, churn-dataplane
+# Consumers: propagation, churn, churn-dataplane, controlplane (fanout_list_istiod_pods,
+# fanout_gauge_sum_strict for the per-cluster connected-proxy total)
 #
 # The mesh runs a FIXED, multi-replica istiod (HPA disabled, e.g. replicaCount=5).
 # Port-forwarding `svc/istiod` load-balances to ONE random replica per connection,
@@ -38,7 +39,7 @@
 #     fanout_preflight_istiod, fanout_open, fanout_scrape_all, fanout_record_podset)
 #     depend ONLY on common.sh (die) + timestamp.sh (now_ns) + curl/awk/kubectl.
 #   - The AGGREGATION wrappers (fanout_counter_sum, fanout_counter_by_label_sum,
-#     fanout_gauge_sum, fanout_restart_status) call the
+#     fanout_gauge_sum, fanout_gauge_sum_strict, fanout_restart_status) call the
 #     metrics.sh extractors, so a consumer using them MUST source tests/lib/metrics.sh
 #     BEFORE tests/lib/fanout.sh. (Propagation uses only the primitives + its own
 #     extract_all_from_file, so it does not need metrics.sh.)
@@ -388,6 +389,33 @@ fanout_gauge_sum() {
 		[[ -s "$f" ]] || continue
 		v="$(extract_gauge_sum "$f" "$name")"
 		[[ "$v" == "unknown" ]] && continue
+		total=$(awk -v a="$total" -v b="$v" 'BEGIN { printf "%.0f", a + b }')
+	done
+	echo "$total"
+}
+
+# STRICT cross-pod gauge sum (PL29): echoes `unknown` unless EVERY pod scrape is
+# complete. fanout_gauge_sum above skips an empty file, so one failed pod scrape
+# silently drops that pod's share of the total; that is wrong for a total that must
+# be complete, e.g. a cluster's connected proxies compared against its sidecar pods.
+# Echoes `unknown` when no file is given, or any file is missing, empty, or shorter
+# than FANOUT_MIN_SCRAPE_BYTES. In a complete body an absent series counts as 0: a
+# replica with no connected proxies emits no pilot_xds series at all. With one file
+# it is the per-pod value under the same completeness rule. Always returns 0.
+# Usage: fanout_gauge_sum_strict <gauge_name> <metrics_file>...
+# shellcheck disable=SC2329
+fanout_gauge_sum_strict() {
+	local name="$1"
+	shift
+	if (( $# == 0 )); then echo "unknown"; return 0; fi
+	local f sz total=0 v
+	for f in "$@"; do
+		if [[ ! -s "$f" ]]; then echo "unknown"; return 0; fi
+		sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+		sz="${sz//[^0-9]/}"
+		if (( ${sz:-0} < FANOUT_MIN_SCRAPE_BYTES )); then echo "unknown"; return 0; fi
+		v="$(extract_gauge_sum "$f" "$name")"
+		[[ "$v" == "unknown" ]] && v=0
 		total=$(awk -v a="$total" -v b="$v" 'BEGIN { printf "%.0f", a + b }')
 	done
 	echo "$total"

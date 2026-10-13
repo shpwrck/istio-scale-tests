@@ -62,6 +62,49 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	[ "$result" = "12" ]
 }
 
+# --- strict cross-pod gauge sum (PL29: complete or unknown) ----------------
+
+@test "fanout_gauge_sum_strict: sums both axes like fanout_gauge_sum (5+7=12)" {
+	result=$(fanout_gauge_sum_strict pilot_xds "$POD0" "$POD1")
+	[ "$result" = "12" ]
+}
+
+@test "fanout_gauge_sum_strict: an empty pod file -> unknown (lenient sum would undercount to 5)" {
+	empty="${BATS_TEST_TMPDIR}/empty.metrics"; : > "$empty"
+	[ "$(fanout_gauge_sum_strict pilot_xds "$POD0" "$empty")" = "unknown" ]
+	# The contrast that motivates the strict variant: the lenient sum drops the pod.
+	[ "$(fanout_gauge_sum pilot_xds "$POD0" "$empty")" = "5" ]
+}
+
+@test "fanout_gauge_sum_strict: a missing path or no files -> unknown" {
+	[ "$(fanout_gauge_sum_strict pilot_xds "$POD0" "${BATS_TEST_TMPDIR}/nope.metrics")" = "unknown" ]
+	[ "$(fanout_gauge_sum_strict pilot_xds)" = "unknown" ]
+}
+
+@test "fanout_gauge_sum_strict: a body below FANOUT_MIN_SCRAPE_BYTES -> unknown" {
+	short="${BATS_TEST_TMPDIR}/short.metrics"
+	printf 'pilot_xds{version="1.30.5"} 3\n' > "$short"
+	[ "$(fanout_gauge_sum_strict pilot_xds "$short")" = "unknown" ]
+	[ "$(fanout_gauge_sum_strict pilot_xds "$POD1" "$short")" = "unknown" ]
+}
+
+@test "fanout_gauge_sum_strict: a complete body with no pilot_xds series counts as 0" {
+	# A replica with no connected proxies emits no pilot_xds series at all.
+	idle="${BATS_TEST_TMPDIR}/idle.metrics"
+	grep -v '^pilot_xds[{ ]' "$POD0" > "$idle"
+	(( $(wc -c < "$idle") >= FANOUT_MIN_SCRAPE_BYTES ))
+	[ "$(fanout_gauge_sum_strict pilot_xds "$idle")" = "0" ]
+	[ "$(fanout_gauge_sum_strict pilot_xds "$idle" "$POD1")" = "7" ]
+}
+
+@test "fanout_gauge_sum_strict: live label shape (version=) with mixed proxy versions" {
+	live="${BATS_TEST_TMPDIR}/live.metrics"
+	grep -v '^pilot_xds[{ ]' "$POD0" > "$live"
+	printf 'pilot_xds{version="1.30.5"} 9\npilot_xds{version="1.29.0"} 1\n' >> "$live"
+	[ "$(fanout_gauge_sum_strict pilot_xds "$live")" = "10" ]
+	[ "$(fanout_gauge_sum_strict pilot_xds "$live" "$POD1")" = "17" ]
+}
+
 # --- histogram bucket-sum -> delta_histogram_p99 ---------------------------
 
 @test "fanout_merge_histogram + delta_histogram_p99: merged buckets land p99 on the expected bucket" {

@@ -91,6 +91,32 @@ source "${ROOT}/tests/lib/preamble.sh"
 }
 
 # ---------------------------------------------------------------------------
+# Controlplane TSV header: the literal is duplicated in 002 (standalone writer) and
+# 003 (pre-create). Both must be identical, have the schema's width, and both writers
+# must stamp the same CONTROLPLANE_SCHEMA. Extend the expected tail when appending.
+# ---------------------------------------------------------------------------
+
+@test "controlplane header: 002 and 003 literals match, 43 fields, schema 43" {
+	collector="${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
+	precreate="${ROOT}/tests/controlplane/003-run-sweep.sh"
+	h002=$(grep -m1 'echo -e "timestamp\\t' "$collector" | sed 's/.*echo -e "//; s/" >>.*//')
+	h003=$(grep -m1 '^CONTROLPLANE_TSV_HEADER="' "$precreate" | sed 's/^CONTROLPLANE_TSV_HEADER="//; s/"$//')
+	[ -n "$h002" ]
+	[ "$h002" = "$h003" ]
+	n=$(printf '%s' "$h003" | awk -F'\\\\t' '{ print NF }')
+	[ "$n" -eq 43 ]
+	[[ "$h003" == *'\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check' ]]
+	grep -q 'echo "# CONTROLPLANE_SCHEMA=43"' "$collector"
+	grep -q 'echo "# CONTROLPLANE_SCHEMA=43"' "$precreate"
+	# The proxy-check knobs are inline echoes in both writers (the PL36 key-set test
+	# above then covers their parity).
+	for k in PROXY_CHECK_TOLERANCE_PCT PROXY_CHECK_MIN_DIFF; do
+		grep -q "echo \"# ${k}=" "$collector"
+		grep -q "echo \"# ${k}=" "$precreate"
+	done
+}
+
+# ---------------------------------------------------------------------------
 # probe_kube_versions — concurrent per-context server version probe.
 # ---------------------------------------------------------------------------
 

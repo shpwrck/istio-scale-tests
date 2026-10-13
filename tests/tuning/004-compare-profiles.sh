@@ -95,10 +95,15 @@ fi
 GROUP=""
 case "$SUITE" in
 controlplane)
+	# Rows are per istiod pod: connected_proxies is per replica; cluster_connected_proxies
+	# repeats on each pod row of a cluster, so its mean weights clusters by replica
+	# count (same replicas everywhere -> the plain per-cluster mean). Absent in older
+	# 40-column TSVs, where it is skipped.
 	METRICS=("istiod_mem_mi|istiod memory (MiB)" "go_heap_inuse_mi|Go heap in use (MiB)"
 		"istiod_cpu_m_delta|istiod CPU (millicores)" "convergence_p99_ms|Convergence p99 (ms)"
 		"xds_pushes_delta|xDS pushes" "sidecar_config_bytes_avg|Sidecar config (bytes)"
-		"connected_proxies|Connected proxies") ;;
+		"connected_proxies|Connected proxies / istiod replica"
+		"cluster_connected_proxies|Connected proxies / cluster") ;;
 propagation)
 	METRICS=("p1_ms|P1 local push (ms)" "p2_ms|P2 remote EDS (ms)" "p3_ms|P3 remote sidecar (ms)"
 		"p1_conv_p99_ms|P1 convergence p99 (ms)") ;;

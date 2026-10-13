@@ -102,6 +102,9 @@ EXTRACTED_PATTERNS=(
 	'fanout_gauge_sum() {'
 	'fanout_merge_histogram() {'
 	'fanout_restart_status() {'
+	# Task 2: per-cluster connected-proxy count + sanity check
+	'fanout_gauge_sum_strict() {'
+	'cap_proxy_check() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

@@ -42,6 +42,8 @@ source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_li
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 
 CONTEXTS_CSV=""
@@ -102,6 +104,10 @@ Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES.
+  CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
+  (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
+  over its istiod pods) and its Running sidecar pods differ by more than
+  max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
 EOF
 }
 
@@ -208,6 +214,10 @@ if ((WATCH)) && [[ "$PHASE" != combined ]]; then
 	die "--watch is only valid with --phase combined"
 fi
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
+PROXY_CHECK_TOL_PCT="${CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT:-10}"
+PROXY_CHECK_MIN_DIFF="${CONTROLPLANE_PROXY_CHECK_MIN_DIFF:-2}"
+is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT must be a non-negative integer percent (got: $PROXY_CHECK_TOL_PCT)"
+is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "CONTROLPLANE_PROXY_CHECK_MIN_DIFF must be a non-negative integer (got: $PROXY_CHECK_MIN_DIFF)"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -235,6 +245,7 @@ HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null |
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
+echo "[002] Proxy check: warn when connected proxies and Running sidecar pods differ by > max(${PROXY_CHECK_TOL_PCT}%, ${PROXY_CHECK_MIN_DIFF}) per cluster"
 
 if ((DRY_RUN)); then
 	echo "Would scrape istiod metrics from: ${CONTEXTS[*]}"
@@ -300,7 +311,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-		echo "# CONTROLPLANE_SCHEMA=40"
+		echo "# CONTROLPLANE_SCHEMA=43"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
@@ -316,6 +327,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# ISTIOD_MEM_LIMIT_MI=${PRE_ISTIOD_MEM_LIMIT_MI}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		echo "# PROXY_CHECK_TOLERANCE_PCT=${PROXY_CHECK_TOL_PCT}"
+		echo "# PROXY_CHECK_MIN_DIFF=${PROXY_CHECK_MIN_DIFF}"
 		# shellcheck disable=SC2086
 		infra_preamble_lines $PRE_INFRA_KV
 		echo "# ${PRE_TUNING_BASELINE}"
@@ -324,7 +337,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	} > "$TSV_FILE"
 fi
 
-# Schema (TSV header — 40 columns):
+# Schema (TSV header — 43 columns; must equal 003's CONTROLPLANE_TSV_HEADER, which
+# tests/lib/test/preamble.bats checks):
 #   timestamp context mesh_size service_count replicas namespace_count sidecar_scoping
 #   istiod_mem_mi
 #   convergence_p50_ms convergence_p99_ms queue_p50_ms queue_p99_ms
@@ -338,8 +352,15 @@ fi
 #   go_heap_alloc_mi go_heap_inuse_mi
 #   (cols 35-40) istiod_cpu_pct_of_limit istiod_mem_pct_of_limit
 #                   node_cpu_pct node_mem_pct pods_scheduled pods_allocatable
+#   (cols 41-43) cluster_connected_proxies sidecar_pods proxy_check
+#     Per CONTEXT (same value on every row of that context in one window):
+#     cluster_connected_proxies = pilot_xds summed over the context's istiod pods from
+#     the same final batch (N/A when any pod scrape is incomplete or the Running istiod
+#     pod set changed); sidecar_pods = Running, non-terminating pods with the
+#     sidecar.istio.io/status annotation; proxy_check = OK|LOW|HIGH|N/A.
+#     connected_proxies (col 22) stays the per-pod (per-replica) value.
 if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
-	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable" >> "$TSV_FILE"
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
@@ -833,24 +854,51 @@ compute_skew_ms() {
 # report's is_num/NF logic treats it like any other N/A column. Results cached
 # per ctx so multi-replica rows on the same ctx don't re-read.
 declare -A CAP_CACHE  # ctx -> "icpu_pct imem_pct ncpu_pct nmem_pct pods_sched pods_alloc"
+# The node list and the pod list are read first, together, by read_pod_counts_for_ctx:
+# compute_cluster_proxies needs the sidecar count right after the final scrape (PL21),
+# before any slow `kubectl top` read. Raw key=value strings, parsed by their consumers.
+declare -A NODE_KV_CACHE  # ctx -> cap_node_totals output (cpu_m= mem_mi= pods= nodes= names=)
+declare -A POD_KV_CACHE   # ctx -> cap_pod_count output (scheduled= sidecars=)
+
+# kv_get <key> <kv_string>: one `key=value` token from a space-separated string, else unknown.
+kv_get() {
+	local key="$1" tok
+	for tok in $2; do
+		[[ "$tok" == "${key}="* ]] && { echo "${tok#"${key}="}"; return 0; }
+	done
+	echo "unknown"
+}
+
+# read_pod_counts_for_ctx <ctx>: fill NODE_KV_CACHE/POD_KV_CACHE once per window.
+# Must run in the main shell (not in $(...)), or the cache is lost.
+read_pod_counts_for_ctx() {
+	local ctx="$1"
+	[[ -n "${POD_KV_CACHE[$ctx]:-}" ]] && return 0
+	local nt="" pc="" worker_csv
+	# `|| true` keeps the parser's all-unknown line when kubectl fails (pipefail).
+	nt="$(cap_node_totals "$ctx" "${KUBECTL[@]}")" || true
+	NODE_KV_CACHE[$ctx]="$nt"
+	worker_csv="$(kv_get names "$nt")"
+	[[ "$worker_csv" == unknown ]] && worker_csv=""
+	pc="$(cap_pod_count "$ctx" "$worker_csv" "${KUBECTL[@]}")" || true
+	[[ -n "$pc" ]] || pc="scheduled=unknown sidecars=unknown"
+	POD_KV_CACHE[$ctx]="$pc"
+}
 
 collect_capacity_for_ctx() {
 	local ctx="$1"
 	[[ -n "${CAP_CACHE[$ctx]:-}" ]] && return 0
 
-	local node_cpu_m="unknown" node_mem_mi="unknown" node_pods="unknown" worker_csv=""
-	local kv
-	# shellcheck disable=SC2207
-	local -a nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
-	for kv in "${nt[@]}"; do
-		case "$kv" in
-			cpu_m=*) node_cpu_m="${kv#cpu_m=}" ;;
-			mem_mi=*) node_mem_mi="${kv#mem_mi=}" ;;
-			pods=*) node_pods="${kv#pods=}" ;;
-			names=*) worker_csv="${kv#names=}" ;;
-		esac
-	done
+	read_pod_counts_for_ctx "$ctx"
+	local node_cpu_m node_mem_mi node_pods worker_csv pods_sched
+	node_cpu_m="$(kv_get cpu_m "${NODE_KV_CACHE[$ctx]}")"
+	node_mem_mi="$(kv_get mem_mi "${NODE_KV_CACHE[$ctx]}")"
+	node_pods="$(kv_get pods "${NODE_KV_CACHE[$ctx]}")"
+	worker_csv="$(kv_get names "${NODE_KV_CACHE[$ctx]}")"
+	[[ "$worker_csv" == unknown ]] && worker_csv=""
+	pods_sched="$(kv_get scheduled "${POD_KV_CACHE[$ctx]}")"
 
+	local kv
 	local used_cpu_m="unknown" used_mem_mi="unknown"
 	# shellcheck disable=SC2207
 	local -a nu=($(cap_node_used "$ctx" "$worker_csv" "${KUBECTL[@]}"))
@@ -859,13 +907,6 @@ collect_capacity_for_ctx() {
 			cpu_m=*) used_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) used_mem_mi="${kv#mem_mi=}" ;;
 		esac
-	done
-
-	local pods_sched="unknown"
-	# shellcheck disable=SC2207
-	local -a pc=($(cap_pod_count "$ctx" "$worker_csv" "${KUBECTL[@]}"))
-	for kv in "${pc[@]}"; do
-		case "$kv" in scheduled=*) pods_sched="${kv#scheduled=}" ;; esac
 	done
 
 	# cap_istiod_limits returns the PER-REPLICA container limit + the replica count.
@@ -911,6 +952,88 @@ collect_capacity_for_ctx() {
 }
 
 # ---------------------------------------------------------------------------
+# Per-cluster connected proxies + sanity check (cols 41-43).
+# ---------------------------------------------------------------------------
+# connected_proxies (col 22) is per istiod pod. Each proxy holds one istiod
+# connection, so a cluster's total is pilot_xds summed over ALL its istiod pods
+# (PL28), taken from the same final batch (PL8). The sum is strict (PL29): an empty
+# or short pod scrape makes it N/A instead of a silent undercount, and so does a
+# change in the Running istiod pod set since the pods were resolved (a new replica's
+# proxies would be missing from the sum). The expected count is the context's
+# Running injected pods, read right after the batch, outside the window (PL21; the
+# few seconds between the two reads remain, which is why this is a warning with a
+# tolerance). LOW/HIGH never filters a row.
+declare -A CLUSTER_PROXIES  # ctx -> sum | N/A
+declare -A SIDECAR_PODS     # ctx -> Running injected pods | N/A
+declare -A PROXY_CHECK      # ctx -> OK | LOW | HIGH | N/A
+
+compute_cluster_proxies() {
+	local ctx k live scraped n_pods n_live total sidecars check
+	local -a ctxs=() files=()
+	local -A seen=()
+	for k in "${!POD_CTXS[@]}"; do
+		ctx="${POD_CTXS[k]}"
+		[[ -n "${seen[$ctx]:-}" ]] && continue
+		seen[$ctx]=1
+		ctxs+=("$ctx")
+	done
+	# Expected side first, for every context, so it lands as close to the batch as
+	# possible. Same node + pod lists the capacity columns use (no extra API call).
+	for ctx in "${ctxs[@]}" "${DROPPED_CTXS[@]}"; do
+		read_pod_counts_for_ctx "$ctx"
+		sidecars="$(kv_get sidecars "${POD_KV_CACHE[$ctx]}")"
+		[[ "$sidecars" =~ ^[0-9]+$ ]] || sidecars="N/A"
+		SIDECAR_PODS[$ctx]="$sidecars"
+	done
+	for ctx in "${ctxs[@]}"; do
+		files=()
+		scraped=""
+		for k in "${!POD_CTXS[@]}"; do
+			[[ "${POD_CTXS[k]}" == "$ctx" ]] || continue
+			files+=("${TMP_DIR}/final-${k}.metrics")
+			scraped+="${POD_NAMES[k]}"$'\n'
+		done
+		n_pods=${#files[@]}
+		scraped="$(printf '%s' "$scraped" | LC_ALL=C sort)"
+		# PL40: a failed read degrades to N/A; it never aborts the run.
+		live="$(fanout_list_istiod_pods "$ctx" "${KUBECTL[@]}")" || live=""
+		if [[ -z "$live" ]]; then
+			echo "warning: ${ctx}: could not list Running istiod pods after the final scrape; cluster_connected_proxies=N/A" >&2
+			total="N/A"
+		elif [[ "$live" != "$scraped" ]]; then
+			n_live="$(printf '%s\n' "$live" | grep -c .)" || n_live="?"
+			echo "warning: ${ctx}: Running istiod pod set changed during the window (scraped ${n_pods} pod(s), now ${n_live}); cluster_connected_proxies=N/A" >&2
+			total="N/A"
+		else
+			total="$(fanout_gauge_sum_strict pilot_xds "${files[@]}")"
+			if [[ "$total" == unknown ]]; then
+				echo "warning: ${ctx}: an istiod pod's final scrape is empty or short; cluster_connected_proxies=N/A (no partial sum)" >&2
+				total="N/A"
+			fi
+		fi
+		sidecars="${SIDECAR_PODS[$ctx]}"
+		check="$(cap_proxy_check "$total" "$sidecars" "$PROXY_CHECK_TOL_PCT" "$PROXY_CHECK_MIN_DIFF")"
+		CLUSTER_PROXIES[$ctx]="$total"
+		PROXY_CHECK[$ctx]="$check"
+		echo "  Cluster ${ctx}: connected_proxies=${total} over ${n_pods} istiod pod(s), sidecar_pods=${sidecars}, proxy_check=${check}"
+		if [[ "$check" == LOW || "$check" == HIGH ]]; then
+			echo "warning: ${ctx}: connected proxies ${total} (sum over ${n_pods} istiod pods) vs Running sidecar pods ${sidecars}: ${check} (differ by more than max(${PROXY_CHECK_TOL_PCT}%, ${PROXY_CHECK_MIN_DIFF}))" >&2
+		fi
+	done
+	# Dropped (zero-pod) contexts: no total, no check; the sidecar count was read above.
+	for ctx in "${DROPPED_CTXS[@]}"; do
+		CLUSTER_PROXIES[$ctx]="N/A"
+		PROXY_CHECK[$ctx]="N/A"
+	done
+}
+
+# cluster_fields <ctx>: cols 41-43 for a row of that context, tab-separated.
+cluster_fields() {
+	local ctx="$1"
+	printf '%s\t%s\t%s' "${CLUSTER_PROXIES[$ctx]:-N/A}" "${SIDECAR_PODS[$ctx]:-N/A}" "${PROXY_CHECK[$ctx]:-N/A}"
+}
+
+# ---------------------------------------------------------------------------
 # Main scrape_window: baseline + final + deltas + emit TSV rows.
 # ---------------------------------------------------------------------------
 
@@ -932,6 +1055,8 @@ scrape_window() {
 	echo "  Final scrape..."
 	final_skew_ms=$(scrape_all_parallel "${TMP_DIR}/final")
 	local total_skew_ms=$(( baseline_skew_ms > final_skew_ms ? baseline_skew_ms : final_skew_ms ))
+	# Per-cluster total + check (cols 41-43), right after the final batch.
+	compute_cluster_proxies
 
 	local b_max_ms="" f_min_ms="" ts_val
 	for k in "${!POD_CTXS[@]}"; do
@@ -967,9 +1092,10 @@ scrape_window() {
 			# PL13: push-by-type and config-sample columns are N/A (nothing measured),
 			# not literal 0/0/0 which would read as a real zero-push observation.
 			# Capacity columns are still meaningful for a real context.
+			# Cols 41-43 come from the cluster: its total is already N/A (strict sum).
 			collect_capacity_for_ctx "$ctx"
 			cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$ctx")" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
@@ -995,9 +1121,12 @@ scrape_window() {
 			mem_mi="N/A"
 		fi
 
-		# Connected proxies: pilot_xds summed across its label series (final scrape).
+		# Connected proxies on THIS pod (per replica): pilot_xds summed across its label
+		# series (PL12, final scrape). Same completeness rule as the cluster sum: a
+		# complete body with no pilot_xds series is 0 (a replica with no connections);
+		# an empty or short body stays N/A (PL29).
 		local connected_proxies
-		connected_proxies=$(extract_gauge_sum "$f_file" pilot_xds)
+		connected_proxies=$(fanout_gauge_sum_strict pilot_xds "$f_file")
 		[[ "$connected_proxies" == "unknown" ]] && connected_proxies="N/A"
 
 		# Restart detection (must run before delta computations so the
@@ -1166,8 +1295,8 @@ scrape_window() {
 		collect_capacity_for_ctx "$ctx"
 		local cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}" >> "$TSV_FILE"
-		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")" >> "$TSV_FILE"
+		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} cluster=${CLUSTER_PROXIES[$ctx]:-N/A} sidecars=${SIDECAR_PODS[$ctx]:-N/A} check=${PROXY_CHECK[$ctx]:-N/A} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 	done
 
 	# One degraded row per dropped (zero-pod) context: the context column keeps the
@@ -1179,7 +1308,7 @@ scrape_window() {
 		# Node capacity is still readable with zero istiod pods.
 		collect_capacity_for_ctx "$dctx"
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
-		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
+		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")" >> "$TSV_FILE"
 	done
 }
 
@@ -1193,7 +1322,13 @@ if ((WATCH)); then
 		# between windows — otherwise the capacity columns (node util, istiod %-of-limit,
 		# pods scheduled) freeze at the first window's read and silently go stale. Reads
 		# are cheap, read-only, and outside the scrape window, so re-reading is safe.
+		# The per-cluster proxy total, sidecar count and check are per window too.
 		CAP_CACHE=()
+		NODE_KV_CACHE=()
+		POD_KV_CACHE=()
+		CLUSTER_PROXIES=()
+		SIDECAR_PODS=()
+		PROXY_CHECK=()
 		scrape_window "$INTERVAL"
 	done
 elif [[ "$PHASE" == baseline ]]; then
@@ -1247,14 +1382,19 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Sidecar scoping | ${SIDECAR_SCOPING} |"
 		echo "| Config-dump samples | ${CONFIG_DUMP_SAMPLES} |"
 		echo "| Settle (s) | ${SETTLE_SEC} |"
+		echo "| Proxy check tolerance | ${PROXY_CHECK_TOL_PCT}% (min diff ${PROXY_CHECK_MIN_DIFF}) |"
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
-		echo "|---------|------|-----|------|----|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|----------|-------|-------|-------------------|"
+		echo "Proxies is per istiod pod; Cluster proxies sums them over the cluster's istiod pods."
+		echo ""
+		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Cluster proxies | Sidecar pods | Proxy check | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
+		echo "|---------|------|-----|------|----|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|-----------------|--------------|-------------|----------|-------|-------|-------------------|"
+		# Cols 41-43 exist only in 43-column rows (a reused older file has 40).
 		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=40 {
 			cfg_mb = ($24+0 > 0) ? sprintf("%.1f", $24/1048576) : "N/A"
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $33, $34, $10, $12, $22, $13, $16, $15, cfg_mb
+			cp = (NF >= 43) ? $41 : "N/A"; sp = (NF >= 43) ? $42 : "N/A"; pc = (NF >= 43) ? $43 : "N/A"
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $33, $34, $10, $12, $22, cp, sp, pc, $13, $16, $15, cfg_mb
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"

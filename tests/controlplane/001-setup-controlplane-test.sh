@@ -302,14 +302,16 @@ if ! ((DRY_RUN)); then
 			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
 		# Cheap cluster-wide pod count: `-o name` (names only, no specs) + server-side
 		# paging so a 10k-pod × 20-context preflight doesn't stream a huge table per
-		# cluster on the hot path. One line per pod -> `wc -l` is identical to the old
-		# --no-headers count (all phases, matching the allocatable.pods slot model).
+		# cluster on the hot path. One line per pod -> `wc -l`. Only non-terminal pods
+		# hold a slot (the scheduler and kubelet ignore Succeeded/Failed pods for
+		# allocatable.pods), so finished Job pods are excluded server-side.
 		current=$("${KUBECTL[@]}" --context="$ctx" get pods --all-namespaces -o name \
+			--field-selector=status.phase!=Succeeded,status.phase!=Failed \
 			--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null | wc -l) || current=""
 		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
 			remaining=$((alloc - current))
 			if ((NEEDED_PODS > remaining)); then
-				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current running). Reduce --service-count or --replicas, or add nodes."
+				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current non-terminal pods). Reduce --service-count or --replicas, or add nodes."
 			fi
 			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
 			# Under-provision coverage floor (auto mode only).

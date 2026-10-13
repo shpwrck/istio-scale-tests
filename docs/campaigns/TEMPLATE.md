@@ -26,7 +26,9 @@ the **peak** mesh-size point of the run (usually mesh-10), not mesh-1.
 | Workload replicas / service | _R_ | sweep header `Replicas` |
 | **Total services in mesh** | _N × S_ | derived |
 | **Total endpoints in mesh** | _N × S × R_ | derived; cross-check `istioctl proxy-config endpoints` or controlplane `EDS Δ` |
-| **Connected proxies (measured peak)** | _…_ | controlplane report `connected_proxies (max)` — the busiest istiod replica's measured count, not a mesh-wide sum and not the configured count |
+| **Connected proxies per cluster (measured peak)** | _…_ | controlplane report `connected_proxies per cluster (max)`: `pilot_xds` summed over one cluster's istiod replicas at one scrape. Should be about that cluster's Running injected pods (gateways included); not a mesh-wide sum |
+| Connected proxies per istiod replica (peak) | _…_ | controlplane report `connected_proxies per istiod replica (max)`: the busiest single replica, about 1/R of the cluster figure with R replicas |
+| Proxy check vs Running sidecar pods | ok / low / high / n/a / excluded | controlplane report `proxy check`; any `low`/`high` comes with a WARNING naming the cluster scrape. A large `n/a` or `excluded` share means most scrapes were not checked |
 | Per-proxy config size | _… KB/MB_ | controlplane `Cfg dump avg (MB)` (varies by sidecar scoping) |
 | Sidecar scoping | none / namespace / explicit | sweep header `Sidecar scoping` |
 | Istio version | _…_ | sweep header `Istio version` |

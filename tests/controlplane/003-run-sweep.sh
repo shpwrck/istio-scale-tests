@@ -99,6 +99,9 @@ Environment:
   CAP_TOP_TIMEOUT (default 15), CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2):
   timeout and retry for the kubectl top reads.
   METRICS_SCRAPE_TIMEOUT (default 30): curl --max-time for istiod /metrics.
+  CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
+  (default 2): warn when a cluster's connected proxies and its Running sidecar pods
+  differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
 EOF
 }
 
@@ -175,6 +178,12 @@ done
 
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
+# 002 reads the same two knobs per combo; validate once here so a typo fails the
+# sweep up front instead of turning every combo into PROBE_FAILED.
+PROXY_CHECK_TOL_PCT="${CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT:-10}"
+PROXY_CHECK_MIN_DIFF="${CONTROLPLANE_PROXY_CHECK_MIN_DIFF:-2}"
+is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT must be a non-negative integer percent (got: $PROXY_CHECK_TOL_PCT)"
+is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "CONTROLPLANE_PROXY_CHECK_MIN_DIFF must be a non-negative integer (got: $PROXY_CHECK_MIN_DIFF)"
 # --resume already names the full sweep dir; refuse a custom --output-dir with it.
 if [[ -n "$RESUME_DIR" && "$OUTPUT_DIR_BASE" != "${ROOT}/tests/controlplane/results" ]]; then
 	die "--resume and --output-dir are mutually exclusive (--resume already names the full sweep dir)"
@@ -274,8 +283,22 @@ combo_already_done() {
 		END { exit (found ? 0 : 1) }' "$tsv"
 }
 
-# The 40-column TSV schema header (kept in one place so the pre-create + 002 agree).
-CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable"
+# The 43-column TSV schema header. 002 writes the same literal when it runs
+# standalone; tests/lib/test/preamble.bats checks that the two are identical.
+CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check"
+CONTROLPLANE_TSV_WIDTH="$(echo -e "$CONTROLPLANE_TSV_HEADER" | awk -F'\t' '{ print NF }')"
+
+# --resume appends to the existing TSV, so its header must have this harness's width;
+# otherwise the file would mix row widths. Start a new sweep across a schema change.
+if [[ -n "$RESUME_DIR" ]]; then
+	_resume_tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
+	if [[ -f "$_resume_tsv" ]]; then
+		_resume_width="$(grep -m1 '^timestamp' "$_resume_tsv" | awk -F'\t' '{ print NF }')" || _resume_width=""
+		if [[ -n "$_resume_width" && "$_resume_width" != "$CONTROLPLANE_TSV_WIDTH" ]]; then
+			die "--resume: $_resume_tsv has a ${_resume_width}-column header, but this harness writes ${CONTROLPLANE_TSV_WIDTH} columns. Start a new sweep instead of resuming across a schema change."
+		fi
+	fi
+fi
 
 # Pre-create controlplane-${RUN_ID}.tsv with the full preamble before the first
 # combo, so provenance survives a first-combo failure; 002 and the failed-row
@@ -323,7 +346,7 @@ precreate_tsv_preamble() {
 	done < <(tuning_baseline_state "$src_ctx" "${KUBECTL[@]}")
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-		echo "# CONTROLPLANE_SCHEMA=40"
+		echo "# CONTROLPLANE_SCHEMA=43"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# HARNESS_SHA=${harness}"
@@ -339,6 +362,8 @@ precreate_tsv_preamble() {
 		echo "# ISTIOD_MEM_LIMIT_MI=${istiod_mem_limit_mi}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		echo "# PROXY_CHECK_TOLERANCE_PCT=${PROXY_CHECK_TOL_PCT}"
+		echo "# PROXY_CHECK_MIN_DIFF=${PROXY_CHECK_MIN_DIFF}"
 		echo "# ${tb_line}"
 		echo "# ${eh_line}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
@@ -459,7 +484,8 @@ emit_failed_row() {
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
 		precreate_tsv_preamble
 	fi
-	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
+	# 43 fields: cols 41-43 (cluster proxies, sidecar pods, proxy check) are N/A too.
+	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
 }
 
 {

@@ -304,8 +304,18 @@ render_scale_envelope() {
 	istio_version="$(jq_get '.metadata.istio_version')"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
 
-	local proxies_peak istiod_cpu_pct istiod_mem_pct istiod_rss_pct node_cpu_pct node_mem_pct
+	local proxies_peak proxies_cluster_peak proxy_check istiod_cpu_pct istiod_mem_pct istiod_rss_pct node_cpu_pct node_mem_pct
 	proxies_peak="$(jq_get '.metadata.achieved_scale.connected_proxies_max')"
+	# Per-cluster peak (pilot_xds summed over one cluster's istiod pods at one scrape)
+	# and the proxy check tally; `unknown` on a report without them. n/a and excluded
+	# are printed too, so a run where most scrapes land there does not read as a pass.
+	proxies_cluster_peak="$(jq_get '.metadata.achieved_scale.connected_proxies_cluster_max')"
+	proxy_check="$(printf '%s' "$json" | jq -r '
+		.metadata.proxy_check as $p
+		| if $p == null then "unknown"
+		  else "ok=\($p.ok // "unknown") low=\($p.low // "unknown") high=\($p.high // "unknown") n/a=\($p.na // "unknown") excluded=\($p.excluded // "unknown") (tolerance \($p.tolerance_pct // "unknown")%, min diff \($p.min_diff // "unknown"))"
+		  end' 2>/dev/null)" || proxy_check="unknown"
+	[[ -n "$proxy_check" ]] || proxy_check="unknown"
 	istiod_cpu_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_pct_of_limit_max')"
 	istiod_mem_pct="$(jq_get '.metadata.achieved_scale.istiod_mem_pct_of_limit_max')"
 	# P1-4: RSS-derived istiod mem headroom (% of per-replica mem limit). Always
@@ -406,12 +416,14 @@ render_scale_envelope() {
 | Workload replicas / service | ${peak_reps} | sweep peak \`replicas\` |
 | **Total services in mesh** | ${total_svc} | derived (N x S) |
 | **Total endpoints in mesh** | ${total_eps} | derived (N x S x R) |
-| **Connected proxies (measured peak)** | ${proxies_peak} | report achieved-scale \`connected_proxies_max\` (n_valid-gated) |
+| **Connected proxies per cluster (measured peak)** | ${proxies_cluster_peak} | report achieved-scale \`connected_proxies_cluster_max\` (n_valid-gated) |
+| Connected proxies per istiod replica (peak) | ${proxies_peak} | report achieved-scale \`connected_proxies_max\` (n_valid-gated) |
+| Proxy check vs Running sidecar pods | ${proxy_check} | report \`proxy_check\` (cluster scrapes by result) |
 | Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
 
-> Connected proxies is the **per-istiod-replica peak** (max over the per-pod rows), not a mesh-wide sum and not endpoints; do not expect proxies ≈ total endpoints.
+> **Connected proxies per cluster** is \`pilot_xds\` summed over one cluster's istiod replicas at one scrape. It should be about equal to that cluster's Running injected pods (gateways included), which the proxy check compares. It is still not a mesh-wide sum and not endpoints; do not expect it to equal total endpoints. **Per istiod replica** is the busiest single replica (max over the per-pod rows), about 1/R of the cluster figure with R replicas.
 
 ### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
 

@@ -58,9 +58,12 @@ One TSV row per istiod pod, computed as deltas over a wall-clock window:
 | `convergence_*`, `queue_*` (p50/p99) | `pilot_proxy_convergence_time`, `pilot_proxy_queue_time` histogram deltas |
 | `xds_pushes_*` (total, rate, per type) | `pilot_xds_pushes` |
 | `k8s_events_*` | `pilot_k8s_cfg_events` |
-| `connected_proxies` | `pilot_xds`, summed over its series |
+| `connected_proxies` | `pilot_xds` on this istiod pod, summed over its series. Per replica: a replica with no connections reads `0`; an empty or short scrape reads `N/A` |
 | `sidecar_config_bytes_*` | `/config_dump?include_eds` size from sampled sidecars |
 | `istiod_restarted` | `process_start_time_seconds` (`0`, `1` or `unknown`) |
+| `cluster_connected_proxies` | `pilot_xds` summed over every istiod pod of the context, from the same final scrape. Same value on each row of that context. `N/A` if any pod's scrape is empty or short, or the Running istiod pod set changed during the window |
+| `sidecar_pods` | Running, non-terminating pods with the `sidecar.istio.io/status` annotation on the context (injected gateways included), read right after the final scrape |
+| `proxy_check` | `OK`, `LOW` or `HIGH` when `cluster_connected_proxies` and `sidecar_pods` differ by more than max(`CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT`, default 10 %, `CONTROLPLANE_PROXY_CHECK_MIN_DIFF`, default 2); `N/A` if either side is `N/A`. A warning only: the row stays in every statistic |
 
 In a sweep, `003` runs `002 --phase baseline` before deploying, `001` deploys and settles,
 then `002 --phase final` scrapes again, so the window covers the deploy push storm. Run
@@ -118,7 +121,8 @@ scoping bring their own `Sidecar`s, so they need no change.
 
 Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID>/`):
 
-- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble, then the 40-column rows.
+- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=43`,
+  `PROXY_CHECK_TOLERANCE_PCT`, `PROXY_CHECK_MIN_DIFF`, ...), then the 43-column rows.
 - `sweep-<RUN_ID>.md`, `sweep-charts-<RUN_ID>.md`: report markdown and charts.
 - `scale-envelope-<RUN_ID>.md`: campaign scale envelope, led by the customer SLA verdict
   (`PASS`, `CAUTION` at 75 % of a limit, `FAIL` at 90 % or on any istiod restart).
@@ -128,6 +132,16 @@ axes; the markdown ends with a glossary of every column. Rows with `istiod_resta
 than `0` are counted in `n_total` but excluded from the statistics (`n_valid`). A failed
 combo is recorded as a row whose `context` is `SETUP_FAILED` or `PROBE_FAILED`; a context
 with no running istiod pod gets an all-`N/A` row with `istiod_restarted=unknown`.
+
+Connected proxies appear twice. `connected_proxies per istiod replica (max)` is the busiest
+single replica, so with R replicas it is about 1/R of the cluster. `connected_proxies per
+cluster (max)` is the peak `cluster_connected_proxies`, counted once per cluster scrape and
+only when no row of that scrape restarted. The proxy check tallies cluster scrapes as
+ok/low/high/n/a/excluded; any low or high prints a `WARNING` line naming
+`<context>@<timestamp>` (text and CSV, a `**Warning:**` note in markdown, `proxy_check` in
+JSON). It never changes the exit code. The report also reads 40-column TSVs from before this
+check; they add nothing to the per-cluster figures. `--resume` refuses a sweep whose TSV has
+a different column count.
 
 ## Watch mode
 
@@ -147,3 +161,7 @@ Each row is a per-window delta over `--interval` seconds.
   Node columns count worker nodes, including control-plane nodes that also carry the
   worker role (single-node and compact clusters).
 - Raise `METRICS_SCRAPE_TIMEOUT` (default 30 s) if `/metrics` scrapes time out at scale.
+- `sidecar_pods` is read a few seconds after the `pilot_xds` scrape, from the same 5 s pod
+  list as `pods_scheduled`. Pods starting or stopping in between, or proxies not yet
+  connected, can flag `LOW`/`HIGH`; a timed-out list makes `sidecar_pods` and `proxy_check`
+  `N/A`.
