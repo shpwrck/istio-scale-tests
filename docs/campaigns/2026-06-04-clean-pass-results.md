@@ -1,7 +1,7 @@
 # Scale-test campaign results — 2026-06-04 clean pass
 
-The **clean full-workload re-run** that the [2026-06-02 workaround pass](2026-06-02-workaround-pass-results.md)
-deferred. All five suites ran end-to-end against the live 10-spoke multi-primary mesh, at
+The **clean full-workload re-run** that an earlier reduced-workload pass (2026-06-02: istiod pinned to
+5 replicas, controlplane 10×2, churn-dataplane stopped at 11/30 combos) deferred. All five suites ran end-to-end against the live 10-spoke multi-primary mesh, at
 **full workload** (controlplane 10×3, churn-dataplane 5×5) — enabled by fixing the O5 istiod
 CPU over-reservation that forced the workaround pass down to reduced sizing.
 
