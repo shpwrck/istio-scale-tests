@@ -5,20 +5,32 @@ Sail operator) across several clusters, then measure how it scales. One cluster 
 hub; every other cluster runs its own istiod and joins the mesh through east-west gateways, with a
 shared root CA.
 
-```
-            ┌──────────────────────────┐
-            │ hub (never a mesh member)│
-            │ ACM · Argo CD            │
-            │ cert-manager · ESO       │
-            └────────────┬─────────────┘
-       Argo CD ApplicationSets (ACM Placement) push charts;
-       ESO pushes cacerts + Istio remote secrets
-         ┌───────────────┴───────────────┐
- ┌───────▼────────┐              ┌───────▼────────┐
- │ mesh member A  │              │ mesh member B  │
- │ istiod         │◄──:15443───►│ istiod         │
- │ ingress gw     │  east-west   │ ingress gw     │
- └────────────────┘              └────────────────┘
+```mermaid
+flowchart TB
+    hub["<b>hub</b><br/><i>never a mesh member</i><br/>ACM · Argo CD<br/>cert-manager · ESO"]
+
+    subgraph A["mesh member A"]
+        direction TB
+        istiodA["istiod"]
+        ingA["ingress gw"]
+        ewA["east-west gw"]
+    end
+
+    subgraph B["mesh member B"]
+        direction TB
+        istiodB["istiod"]
+        ingB["ingress gw"]
+        ewB["east-west gw"]
+    end
+
+    ew(["east-west :15443<br/>(cross-network mTLS)"])
+
+    hub -->|"charts: Argo CD ApplicationSets<br/>(ACM Placement)"| A
+    hub -.->|"ESO: cacerts +<br/>Istio remote secrets"| A
+    hub --> B
+    hub -.-> B
+    ewA <--> ew
+    ewB <--> ew
 ```
 
 ## What you need
