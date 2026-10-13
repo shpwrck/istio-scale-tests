@@ -37,7 +37,9 @@ Clusters take about 20 minutes. Outputs: `terraform output by_cluster` (API and 
 
 Sizing: workers default to m7i.xlarge with 2 nodes (the ROSA minimum). Use `cluster_overrides` for
 a bigger hub (for example m5.2xlarge), and `cluster_defaults.worker_autoscale_{min,max}` for autoscaling.
-`service_quotas.tf` raises the VPC/EIP/NAT/IAM quotas the clusters need. Set
+`service_quotas.tf` raises the VPC/EIP/NAT/IAM quotas the clusters need. It does not manage
+the On-Demand Standard vCPU quota: the 21-cluster run needed 4000 vCPUs (request it by hand), plus
+22 each of Elastic IPs, NAT gateways per AZ, gateway VPC endpoints, internet gateways and VPCs. Set
 `manage_service_quotas = false` if your org blocks quota changes.
 
 ## Tear down

@@ -800,7 +800,7 @@ ${AWK_HEADER_IX}"'
 			ca = (cfg_avg_n[k]+0 > 0) ? sprintf("%.0f", cfg_avg_sum[k] / cfg_avg_n[k]) : "N/A"
 			cm = (k in cfg_max_val) ? sprintf("%.0f", cfg_max_val[k]+0) : "N/A"
 			# P1-6: SINGLE-BUCKET-PINNED detection. Now that the histogram p99
-			# INTERPOLATES within the matched bucket (P0/FINDING#5), the old
+			# INTERPOLATES within the matched bucket (FINDING #5), the old
 			# max==100 floor test is stale: an interpolated value lands at e.g. 73ms,
 			# not exactly 100. The honest signal is that the whole delta mass sits in
 			# the FIRST (coarsest, 0-100ms) bucket, so the reported quantile is a

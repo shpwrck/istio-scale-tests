@@ -10,6 +10,8 @@ Each entry:
 ## Observation labels
 
 Code comments, PLs and the [campaign records](../campaigns/) cite these labels from the June 2026 campaigns.
+The BLOCKER and FINDING labels come from the 2026-06-17 4-cluster ROSA shakeout (1 hub + 3 spokes);
+its findings log was removed once every finding was fixed or superseded.
 
 | Label | Meaning |
 |---|---|
@@ -24,6 +26,11 @@ Code comments, PLs and the [campaign records](../campaigns/) cite these labels f
 | O9 | Scale coverage: capacity and %-of-limit columns, the achieved-scale block, and the `SCALE_*` sizing knobs (PL35, PL36). |
 | O10 | A churn-dataplane cleanup timeout made the next mesh size's setup fail. Fixed by waiting out a Terminating namespace in setup (PL37). |
 | O11 | Namespace teardown still exceeds the cleanup bound at higher pod counts. Harmless since O10. |
+| BLOCKER #1 | The Argo CD hub cluster cache failed on the malformed ACM/MCE 2.11.2 clusterview `UserPermission` model in `/openapi/v2`, so the app-of-apps never synced. Argo CD loads `/openapi/v2` unconditionally and no exclusion or setting skips it, so only MCE ≥ 2.11.3 fixes it (checked by `terraform/platform/scripts/001-openapi-preflight.sh`). Do not disable `server-foundation`: it breaks spoke import. |
+| BLOCKER #2 | Cross-cluster data plane failed on ROSA with VPC peering off: the istio-system `topology.istio.io/network` label was empty and the east-west gateway was a NodePort. Fixed by the namespace network label and a LoadBalancer east-west gateway (now the default). |
+| FINDING #3 | The controlplane sweep hit a capacity ceiling: the per-pod sidecar CPU request (100m) times the pod count, not istiod, is the binding constraint. The capacity formula is in [the campaign runbook](../scale-test-campaign/README.md). |
+| FINDING #4 | The metrics API was unavailable right after heavy istiod and namespace churn, so the utilization columns went N/A. Let metrics-server settle before a sweep. |
+| FINDING #5 | Convergence and queue histogram quantiles reported bucket floors (100 ms) at small scale. Fixed by interpolating within the matched bucket, plus a single-bucket caveat. |
 
 ---
 
