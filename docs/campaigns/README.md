@@ -14,6 +14,7 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 
 | Date | Run | Files |
 |---|---|---|
+| 2026-10-13 | Lab validation of backlog tasks 2, 3, 5, 6 (2 single-node members); CA-race root cause confirmed | [results](2026-10-13-lab-backlog-validation.md) |
 | 2026-06-22 | 20 clusters / 10k Services / 10k endpoints — **PASS** | [results](2026-06-22-20c-10k-10k-results.md) |
 | 2026-06-17 | 4-cluster stress shakeout (1 hub + 3 spokes); defines BLOCKER/FINDING labels | [findings log](2026-06-17-stress-shakeout-status.md) |
 | 2026-06-04 | 10-spoke clean pass, all five suites | [results](2026-06-04-clean-pass-results.md), [sweep tables](2026-06-04-clean-pass-sweep-detail.md), [charts](charts/) |
@@ -21,3 +22,8 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 
 The 10-spoke passes ran far below the infra's limits: trust their scaling shapes and
 cross-cluster overheads, not their absolute magnitudes.
+
+The data-plane numbers above ran one fortio server pod per cluster, and a run that missed
+its target QPS with only HTTP 200s still counted as valid. Later dataplane runs default to
+2 server pods (`SERVER_REPLICAS` in the TSV preamble) and tag such rows `QPS_SHORTFALL`;
+see [`tests/dataplane/README.md`](../../tests/dataplane/README.md#comparing-with-earlier-runs).

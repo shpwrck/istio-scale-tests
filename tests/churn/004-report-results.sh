@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
 # Generate summary statistics from churn convergence TSV files.
 #
+# Every format carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs),
+# over all input TSVs: mixed:a,b with a warning when they differ (PL26).
+#
 # Usage:
 #   ./tests/churn/004-report-results.sh [--results-dir DIR] [--format FMT]
+#   ./tests/churn/004-report-results.sh --config tests/churn/configs/smoke.env \
+#     --results-dir tests/churn/results/smoke/sweep-<RUN_ID> --format md
 # ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_report_value
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 
-RESULTS_DIR="${ROOT}/tests/churn/results"
+RESULTS_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
+# 1 when --results-dir is passed (gates the multi-run warning below).
+RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
 DRY_RUN=0
 
@@ -21,18 +32,31 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: tests/churn/results).
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/churn/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default. Without --results-dir, warns
+                     when the results dir holds more than one run.
+  --results-dir DIR  Results directory (default: ${CHURN_RESULTS_DIR}).
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
+
+Environment:
+  CHURN_RESULTS_DIR  --results-dir default (relative to the repo root).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
+		RESULTS_DIR_FROM_FLAG=1
 		shift 2
 		;;
 	--format)
@@ -86,6 +110,16 @@ preamble_get() {
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
 
+# Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
+# `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
+RUN_CONFIG_M="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
+RUN_CONFIG_SHA256_M="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# PL6: a results dir from --config (or the default) is a base dir that can hold many
+# sweeps, and the report aggregates all of them.
+if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
+	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
+fi
+
 # TSV schema (21 columns):
 #  $1  run_id
 #  $2  mesh_size
@@ -114,6 +148,7 @@ report_text() {
 	echo ""
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
+	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
@@ -212,6 +247,8 @@ report_text() {
 report_csv() {
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
+	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
+	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# Only OK rows feed numeric aggregation (see report_text for rationale).
@@ -343,6 +380,8 @@ report_markdown() {
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
 	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
+	echo "run_config: \"${RUN_CONFIG_M}\""
+	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
 	echo "---"
 	echo ""
 	echo "# Churn Convergence"
@@ -451,6 +490,8 @@ report_charts() {
 	echo "istio_version: ${istio_version}"
 	echo "harness_sha: ${harness_sha}"
 	echo "files_consumed: ${#TSV_FILES[@]}"
+	echo "run_config: \"${RUN_CONFIG_M}\""
+	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"
 	echo ""

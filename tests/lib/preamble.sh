@@ -20,7 +20,9 @@
 #       pin and mesh wiring are homogeneous across a coherent run, PL26):
 #         ISTIOD_REQ_CPU_M  ISTIOD_REQ_MEM_MI   (istiod resource REQUESTS, per replica)
 #         ISTIOD_LIM_CPU_M  ISTIOD_LIM_MEM_MI   (istiod resource LIMITS, per replica)
-#         ISTIOD_REPLICAS                       (replica count)
+#         ISTIOD_REPLICAS                       (replica count over every context: `3`, or
+#                                                `1-3` when the members differ; INFRA_SCHEMA 2)
+#         ISTIOD_REPLICAS_BY_CONTEXT            (ctx=n,... per context; INFRA_SCHEMA 2)
 #         NETWORK_TOPOLOGY                      (single-network / multi-primary,multi-network:N)
 #       NODE_ALLOC_* are deliberately NOT here — the O9 capacity block in 002/003
 #       (NODE_ALLOC_CPU_M/NODE_ALLOC_MEM_MI) already emits them; single-source per key (F4).
@@ -109,6 +111,7 @@ infra_preamble_lines() {
 		ISTIOD_REQ_CPU_M ISTIOD_REQ_MEM_MI
 		ISTIOD_LIM_CPU_M ISTIOD_LIM_MEM_MI
 		ISTIOD_REPLICAS
+		ISTIOD_REPLICAS_BY_CONTEXT
 		NETWORK_TOPOLOGY
 	)
 	# Seed all to unknown, then overlay caller-supplied values.

@@ -67,7 +67,9 @@ tests/tuning/results/sweep-<RUN_ID>/
 ```
 
 `SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
-table. Data-plane rows are split by target class (local or remote) and QPS. Re-render:
+table. Data-plane rows are split by target class (local or remote) and QPS; a row that
+missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers run
+`DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 ## One profile by hand

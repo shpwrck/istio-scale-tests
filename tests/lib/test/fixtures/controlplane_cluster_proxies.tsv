@@ -1,0 +1,43 @@
+# Control-plane resource metrics — bats fixture: per-cluster proxy check
+# CONTROLPLANE_SCHEMA=51
+# CONTROLPLANE_INFRA_SCHEMA=1
+# ISTIO_VERSION=1.30.5
+# HARNESS_SHA=fixture
+# KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8
+# SETTLE_SEC=30
+# RUN_ID=fixture-t2
+# PHASE=sweep
+# SIDECAR_SCOPING=none
+# CONFIG_DUMP_SAMPLES=0
+# NODE_ALLOC_CPU_M=19500
+# NODE_ALLOC_MEM_MI=95000
+# ISTIOD_CPU_LIMIT_M=2000
+# ISTIOD_MEM_LIMIT_MI=3072
+# SCALE_TARGET_FRACTION=0.7
+# SCALE_SIZING_MODE=fixed
+# PROXY_CHECK_TOLERANCE_PCT=10
+# PROXY_CHECK_MIN_DIFF=2
+# TRAFFIC_CONFIG=none
+# VSDR_EVERY=1
+# VSDR_SUBSETS=2
+# TUNING_BASELINE=unknown
+# SIDECAR_EGRESS_HOSTS=unknown
+# METRICS_API=available
+# ISTIOD_REQ_CPU_M=1000
+# ISTIOD_REQ_MEM_MI=3072
+# ISTIOD_LIM_CPU_M=2000
+# ISTIOD_LIM_MEM_MI=3072
+# ISTIOD_REPLICAS=3
+# NETWORK_TOPOLOGY=multi-primary,multi-network:2
+# Contexts: mesh-a mesh-b  Mesh sizes: 2  Services: 15  Replicas: 2  Namespaces: 1  Scopings: none  Traffic: none
+timestamp	context	mesh_size	service_count	replicas	namespace_count	sidecar_scoping	istiod_mem_mi	convergence_p50_ms	convergence_p99_ms	queue_p50_ms	queue_p99_ms	xds_pushes_delta	xds_pushes_rate	xds_pushes_cds	xds_pushes_eds	xds_pushes_lds	xds_pushes_rds	xds_pushes_nds	k8s_events_delta	k8s_events_rate	connected_proxies	config_size_avg_bytes	sidecar_config_bytes_avg	sidecar_config_bytes_p50	sidecar_config_bytes_max	sidecar_config_bytes_samples	scrape_window_sec	scrape_skew_ms	settle_sec	istiod_restarted	istiod_cpu_m_delta	go_heap_alloc_mi	go_heap_inuse_mi	istiod_cpu_pct_of_limit	istiod_mem_pct_of_limit	node_cpu_pct	node_mem_pct	pods_scheduled	pods_allocatable	cluster_connected_proxies	sidecar_pods	proxy_check	traffic_config	vsdr_services	istiod_virt_services	push_time_avg_ms	pushcontext_init_avg_ms	sidecar_clusters_avg	sidecar_cds_bytes_avg	sidecar_rds_bytes_avg
+2026-06-01T00:00:00+00:00	mesh-a	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	15	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	30	30	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:00:00+00:00	mesh-a	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	15	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	30	30	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:00:00+00:00	mesh-b	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	12	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	34	34	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:00:00+00:00	mesh-b	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	10	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	34	34	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:00:00+00:00	mesh-b	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	12	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	34	34	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:10:00+00:00	mesh-a	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	16	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	30	40	LOW	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:10:00+00:00	mesh-a	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	14	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	30	40	LOW	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:10:00+00:00	mesh-b	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	10	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	36	36	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:10:00+00:00	mesh-b	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	17	2048	N/A	N/A	N/A	0/0	30.0	100	30	1	150	200	250	10	15	40	50	180	250	36	36	OK	none	0	0	1.00	0.50	N/A	N/A	N/A
+2026-06-01T00:10:00+00:00	mesh-b	2	15	2	1	none	500	50	90	5	9	100	3.33	10	60	10	10	10	50	1.67	9	2048	N/A	N/A	N/A	0/0	30.0	100	30	0	150	200	250	10	15	40	50	180	250	36	36	OK	none	0	0	1.00	0.50	N/A	N/A	N/A

@@ -12,6 +12,8 @@
 #   ./tests/churn/002-run-churn-probe.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 #   ./tests/churn/002-run-churn-probe.sh --source-context <mesh-a-ctx> \
 #     --deployment-count 10 --scale-to 10 --iterations 3
+#   ./tests/churn/002-run-churn-probe.sh --config tests/churn/configs/smoke.env \
+#     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
@@ -21,9 +23,13 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -41,7 +47,7 @@ ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
 SETTLE_SEC="${CHURN_SETTLE_SEC:-3}"
 POLL_INTERVAL_MS="${CHURN_POLL_INTERVAL_MS:-250}"
-OUTPUT_DIR="${ROOT}/tests/churn/results"
+OUTPUT_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
 DRY_RUN=0
 # Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
 # them once and passes them in; standalone runs record "unknown".
@@ -57,6 +63,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/churn/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the source cluster (required).
   --remote-contexts CSV    Remote cluster contexts (comma-separated).
   --mesh-size N            Metadata tag (default: 1 + remotes).
@@ -65,7 +74,7 @@ Usage: $(basename "$0") [options]
   --iterations N           Number of churn iterations (default: $ITERATIONS).
   --timeout SEC            Timeout per iteration (default: $TIMEOUT_SEC).
   --settle SEC             Settle time after scale-down convergence (default: $SETTLE_SEC).
-  --output-dir DIR         Results directory (default: tests/churn/results).
+  --output-dir DIR         Results directory (default: ${CHURN_RESULTS_DIR}).
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
   --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
@@ -93,6 +102,7 @@ Environment:
   CHURN_TIMEOUT_SEC            Default --timeout.
   CHURN_SETTLE_SEC             Default --settle.
   CHURN_POLL_INTERVAL_MS       syncz / endpoint poll interval in ms.
+  CHURN_RESULTS_DIR            Default --output-dir (relative to the repo root).
   FANOUT_PF_BASE               Per-pod istiod port-forward block base (default 21014).
   FANOUT_CTX_STRIDE            Per-context port stride (default 20).
 EOF
@@ -101,6 +111,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"
@@ -225,6 +240,7 @@ cat > "$TSV_FILE" <<EOF
 # TUNING_BASELINE=$TUNING_BASELINE
 # SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS
 EOF
+config_preamble_lines >> "$TSV_FILE"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
 	convergence_local_ms remote_endpoint_reachable_ms convergence_remote_eds_ms \
@@ -1066,6 +1082,7 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "| Field | Value |"
 	echo "|-------|-------|"
 	echo "| Run ID | \`${RUN_ID}\` |"
+	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 	echo "| Date | $(date -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"
 	echo "| Remotes | ${REMOTES[*]:-none} |"

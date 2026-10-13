@@ -17,3 +17,10 @@ image:
 
 service:
   port: 8080
+
+server:
+  # fortio server pods per cluster. The per-cluster Service load-balances across
+  # them, so the local target and every cross-cluster target get the same server
+  # capacity. Keep in sync with DATAPLANE_SERVER_REPLICAS in config/options.env
+  # (001 passes --set server.replicas).
+  replicas: 2

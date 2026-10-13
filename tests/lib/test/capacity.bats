@@ -167,21 +167,79 @@ JSON
 ]}
 JSON
 	[ "$status" -eq 0 ]
-	[[ "$output" == "scheduled=2" ]]
+	[[ "$output" == "scheduled=2 sidecars=0" ]]
 }
 
-@test "cap_parse_pod_count: empty worker list -> unknown (not 0)" {
-	run cap_parse_pod_count "" <<'JSON'
-{"items":[{"spec":{"nodeName":"cp-0"},"status":{"phase":"Running"}}]}
+@test "cap_parse_pod_count: sidecars = Running, not terminating, injected, on any node" {
+	run cap_parse_pod_count "w-0,w-1" <<'JSON'
+{"items":[
+  {"metadata":{"annotations":{"sidecar.istio.io/status":"{}"}},"spec":{"nodeName":"w-0"},"status":{"phase":"Running"}},
+  {"metadata":{"annotations":{"sidecar.istio.io/status":"{}"}},"spec":{"nodeName":"cp-0"},"status":{"phase":"Running"}},
+  {"metadata":{"annotations":{"sidecar.istio.io/status":"{}"}},"spec":{"nodeName":"w-1"},"status":{"phase":"Pending"}},
+  {"metadata":{"deletionTimestamp":"2026-06-01T00:00:00Z","annotations":{"sidecar.istio.io/status":"{}"}},"spec":{"nodeName":"w-0"},"status":{"phase":"Running"}},
+  {"metadata":{"labels":{"security.istio.io/tlsMode":"istio"}},"spec":{"nodeName":"w-1"},"status":{"phase":"Running"}}
+]}
 JSON
 	[ "$status" -eq 0 ]
-	[[ "$output" == "scheduled=unknown" ]]
+	# scheduled: w-0 Running x2 (one terminating), w-1 Pending, w-1 Running = 4 (cp-0 not a worker).
+	# sidecars: the w-0 and cp-0 Running injected pods; not the Pending, terminating or
+	# label-only (no annotation) ones.
+	[[ "$output" == "scheduled=4 sidecars=2" ]]
 }
 
-@test "cap_parse_pod_count: unparseable -> unknown" {
+@test "cap_parse_pod_count: empty worker list -> scheduled unknown (not 0), sidecars still counted" {
+	run cap_parse_pod_count "" <<'JSON'
+{"items":[{"metadata":{"annotations":{"sidecar.istio.io/status":"{}"}},"spec":{"nodeName":"cp-0"},"status":{"phase":"Running"}}]}
+JSON
+	[ "$status" -eq 0 ]
+	[[ "$output" == "scheduled=unknown sidecars=1" ]]
+}
+
+@test "cap_parse_pod_count: unparseable or empty input -> both unknown" {
 	run cap_parse_pod_count "w-0" <<<'not json'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "scheduled=unknown" ]]
+	[[ "$output" == "scheduled=unknown sidecars=unknown" ]]
+	run cap_parse_pod_count "w-0" < /dev/null
+	[ "$status" -eq 0 ]
+	[[ "$output" == "scheduled=unknown sidecars=unknown" ]]
+}
+
+# ---------------------------------------------------------------------------
+# cap_proxy_check (connected proxies vs Running sidecar pods)
+# ---------------------------------------------------------------------------
+
+@test "cap_proxy_check: within tolerance -> OK; the campaign's ~1/3 reading -> LOW; more -> HIGH" {
+	[[ "$(cap_proxy_check 32 32 10 2)" == "OK" ]]
+	[[ "$(cap_proxy_check 35 32 10 2)" == "OK" ]]     # 9.4% apart
+	[[ "$(cap_proxy_check 11 32 10 2)" == "LOW" ]]    # one replica's share of three
+	[[ "$(cap_proxy_check 40 32 10 2)" == "HIGH" ]]
+}
+
+@test "cap_proxy_check: exactly at the tolerance is OK (strict >)" {
+	[[ "$(cap_proxy_check 44 40 10 0)" == "OK" ]]
+	[[ "$(cap_proxy_check 36 40 10 0)" == "OK" ]]
+	[[ "$(cap_proxy_check 45 40 10 0)" == "HIGH" ]]
+}
+
+@test "cap_proxy_check: min_diff keeps small clusters from flagging a one-proxy gap" {
+	[[ "$(cap_proxy_check 31 32 0 0)" == "LOW" ]]   # tolerance 0, no floor: any gap flags
+	[[ "$(cap_proxy_check 31 32 0 2)" == "OK" ]]
+	[[ "$(cap_proxy_check 3 5 10 2)" == "OK" ]]     # 40% apart but only 2 proxies
+	[[ "$(cap_proxy_check 2 5 10 2)" == "LOW" ]]
+	[[ "$(cap_proxy_check 31 32 0)" == "LOW" ]]     # min_diff defaults to 0
+}
+
+@test "cap_proxy_check: zero expected" {
+	[[ "$(cap_proxy_check 0 0 10 0)" == "OK" ]]
+	[[ "$(cap_proxy_check 3 0 10 0)" == "HIGH" ]]
+	[[ "$(cap_proxy_check 2 0 10 2)" == "OK" ]]
+}
+
+@test "cap_proxy_check: a non-numeric input -> N/A" {
+	[[ "$(cap_proxy_check N/A 32 10 2)" == "N/A" ]]
+	[[ "$(cap_proxy_check 32 unknown 10 2)" == "N/A" ]]
+	[[ "$(cap_proxy_check 32 32 x 2)" == "N/A" ]]
+	[[ "$(cap_proxy_check 32 32 10 -1)" == "N/A" ]]
 }
 
 # ---------------------------------------------------------------------------

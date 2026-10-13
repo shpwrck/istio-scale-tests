@@ -92,6 +92,34 @@ For each mesh size the sweep removes the suite from unused contexts (`007`), run
 and `002`, and settles. With `--tsv` it writes `sweep-summary.md` and `sweep-charts.md`
 from `005`. `--collect-metrics` also saves a `004` snapshot per mesh size.
 
+## Run config (`--config FILE`)
+
+Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
+rules: [Run config](../../README.md#run-config---config-file)).
+[`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
+3 iterations each):
+
+```bash
+./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --tsv --dry-run
+./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --tsv
+./tests/propagation/005-report-results.sh --config tests/propagation/configs/smoke.env \
+  --results-dir tests/propagation/results/smoke/sweep-<RUN_ID> --format markdown
+./tests/propagation/007-cleanup.sh --config tests/propagation/configs/smoke.env
+```
+
+- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `PROPAGATION_*`, `FANOUT_*`
+  and `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX`
+  stay environment only. `004` keeps its own port block (`PROPAGATION_SNAPSHOT_PF_BASE`), so
+  a `FANOUT_PF_BASE` in the file does not move it.
+- **Run keys:** `PROPAGATION_MESH_SIZES` (`006 --mesh-sizes`; empty: 1 to the number of
+  contexts), `PROPAGATION_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path
+  starts at the repo root, unlike the flags) and `PROPAGATION_WAIT_TIMEOUT_SEC`
+  (`001 --wait-timeout`).
+- **Flags only:** `--tsv` and `--collect-metrics` (add them to the command line),
+  `--source-context`, `--remote-contexts`, `--mesh-size`, `--sweep-run-id`,
+  `--tuning-baseline` and `--sidecar-egress-hosts` (`002`; the sweep sets them), `--watch`
+  and `--interval` (`004`), `--force-large-matrix`, `--format` and `--dry-run`.
+
 ## Passive istiod metrics
 
 ```bash

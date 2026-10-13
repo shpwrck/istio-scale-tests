@@ -26,9 +26,12 @@ the **peak** mesh-size point of the run (usually mesh-10), not mesh-1.
 | Workload replicas / service | _R_ | sweep header `Replicas` |
 | **Total services in mesh** | _N × S_ | derived |
 | **Total endpoints in mesh** | _N × S × R_ | derived; cross-check `istioctl proxy-config endpoints` or controlplane `EDS Δ` |
-| **Connected proxies (measured peak)** | _…_ | controlplane report `connected_proxies (max)` — the busiest istiod replica's measured count, not a mesh-wide sum and not the configured count |
+| **Connected proxies per cluster (measured peak)** | _…_ | controlplane report `connected_proxies per cluster (max)`: `pilot_xds` summed over one cluster's istiod replicas at one scrape. Should be about that cluster's Running injected pods (gateways included); not a mesh-wide sum |
+| Connected proxies per istiod replica (peak) | _…_ | controlplane report `connected_proxies per istiod replica (max)`: the busiest single replica, about 1/R of the cluster figure with R replicas |
+| Proxy check vs Running sidecar pods | ok / low / high / n/a / excluded | controlplane report `proxy check`; any `low`/`high` comes with a WARNING naming the cluster scrape. A large `n/a` or `excluded` share means most scrapes were not checked |
 | Per-proxy config size | _… KB/MB_ | controlplane `Cfg dump avg (MB)` (varies by sidecar scoping) |
 | Sidecar scoping | none / namespace / explicit | sweep header `Sidecar scoping` |
+| Traffic management | none / vsdr | controlplane envelope `Traffic management` (sweep peak `traffic_config`; none when both were swept) |
 | Istio version | _…_ | sweep header `Istio version` |
 | Kube version(s) | _…_ | sweep header `Kube versions` |
 
@@ -40,7 +43,7 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 
 | Resource | Provisioned (req / lim) | Measured peak | % of limit | Source |
 |---|---|---|---|---|
-| istiod replicas | _… per cluster_ | — | — | sweep header `istiod replicas` |
+| istiod replicas | _… per cluster (a range such as 1-3 when members differ)_ | — | — | sweep header `istiod replicas` (read on every context) |
 | istiod CPU | _req / lim_ | _… m_ | _…%_ | `kubectl top pod -n istio-system -l app=istiod`; controlplane `CPU avg (m)` |
 | istiod memory | _req / lim_ | _… Mi_ | _…%_ | controlplane `Mem RSS (Mi)` |
 | Worker-node CPU | — | _…%_ | _…%_ | `kubectl top nodes` at peak |
@@ -52,10 +55,22 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 |---|---|---|---|
 | propagation | iterations | _…_ | sweep header `Iterations` |
 | controlplane | sidecar scopings | none, namespace, explicit | sweep header |
-| dataplane | QPS levels | _10 / 100 / 500 / 1000_ | sweep header `QPS levels` (+ `Duration`, `Connections`) |
+| controlplane | traffic configs (optional) | none, vsdr | sweep header `TRAFFIC_CONFIG` (+ `VSDR_EVERY`, `VSDR_SUBSETS`) |
+| dataplane | QPS levels | _10 / 100 / 500 / 1000_ | sweep header `QPS levels` (+ `Duration`, `Connections`, `Server replicas`) |
 | churn | churn deployments × scale range | _… × (1→N)_ | sweep header `Deployments`, `Scale range` |
 | churn-dataplane | churn rates | _… /s_ | sweep header `Churn rates` |
 | _(all)_ | repetitions | _…_ | run flag `--repetitions` |
+
+### 4. Data-plane coverage and run provenance
+
+`n_valid` / `n_total` says rows were dropped, not that a remote was unreachable or a
+local baseline cell is missing; read these before quoting any data-plane number.
+
+| Check | Value | Source |
+|---|---|---|
+| Remote coverage (dataplane / churn-dataplane) | all REACHABLE / _remotes not REACHABLE, with status (FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN)_ | report section `Remote coverage` (JSON `summary.remotes_not_reachable`); `004` / `005 --fail-on-unreachable` exits 3 when a remote is not REACHABLE |
+| Local baseline (dataplane) | OK / _cells DROPPED, DEGRADED, UNCHECKED or MISSING, with reason_ | dataplane report `Local baseline` (JSON `local_baseline`); rows below `MIN_QPS_RATIO` × target are `QPS_SHORTFALL`, dropped as reason `saturated` |
+| Run config | _path_ (sha256 _…_) / none | every report's `RUN_CONFIG` + `RUN_CONFIG_SHA256` (TSV preamble); the sweep dir keeps the file as `run-config-<RUN_ID>.env` |
 
 ### Scale verdict — one line, up front
 

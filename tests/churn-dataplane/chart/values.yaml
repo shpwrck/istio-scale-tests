@@ -11,6 +11,17 @@ churnBaseReplicas: 1
 # 30s. A short grace lets scaled-down pods leave before the next baseline window.
 churnTerminationGracePeriodSeconds: 5
 
+# This cluster's name. When set, the fortio-server pod gets the label
+# cluster: <clusterName> (001 passes the kube context).
+clusterName: ""
+
+# Every cluster name in the mesh. Each gets a Service fortio-server-<name> that
+# selects only that cluster's fortio-server pod, so the harness can check each
+# remote on its own: the merged fortio-server Service spans every cluster, and
+# Istio retries a failed request on another endpoint, which hides a dead remote.
+# Empty renders no per-cluster Service (requires clusterName when set).
+allClusterNames: []
+
 # fortio deployment role: server, client, or both.
 # - server: only fortio-server Deployment+Service
 # - client: only fortio-client Deployment

@@ -7,6 +7,8 @@
 # Examples:
 #   ./tests/churn/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 #   ./tests/churn/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --churn-intensities 5,10,20
+#   # The whole sweep from a run config (mesh sizes, intensities, results dir; flags still win):
+#   ./tests/churn/003-run-sweep.sh --config tests/churn/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
 # Report the failing line on an unexpected abort. Per-combo setup/probe/cleanup
@@ -15,41 +17,67 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+# The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
+# per-step flags it passes still win.
+config_preload churn "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 
 CONTEXTS_CSV=""
-MESH_SIZES_CSV=""
-CHURN_INTENSITIES_CSV=""
+MESH_SIZES_CSV="${CHURN_MESH_SIZES:-}"
+# Deployment counts (CSV, PL7); empty = the singular CHURN_DEPLOYMENT_COUNT.
+CHURN_INTENSITIES_CSV="${CHURN_INTENSITIES:-}"
 SCALE_TO="${CHURN_SCALE_TO_REPLICAS:-5}"
 ITERATIONS="${CHURN_ITERATIONS:-5}"
 TIMEOUT_SEC="${CHURN_TIMEOUT_SEC:-120}"
-OUTPUT_DIR_BASE="${ROOT}/tests/churn/results"
+OUTPUT_DIR_BASE="$(config_repo_path "${CHURN_RESULTS_DIR}")"
 DRY_RUN=0
 
 
 usage() {
+	local mesh_sizes_default='"1,2,...,len(contexts)"' intensities_default="\$CHURN_DEPLOYMENT_COUNT"
+	[[ -z "$MESH_SIZES_CSV" ]] || mesh_sizes_default="$MESH_SIZES_CSV"
+	[[ -z "$CHURN_INTENSITIES_CSV" ]] || intensities_default="$CHURN_INTENSITIES_CSV"
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE             Run config of KEY=value lines (config/options.env keys; see
+                            tests/churn/README.md, "Run config"). The steps the sweep
+                            runs inherit it. Precedence: flag > --config > environment >
+                            default.
   --contexts CSV            All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV          Cluster counts to test (default: "1,2,...,len(contexts)").
-  --churn-intensities CSV   Deployment counts to test (default: \$CHURN_DEPLOYMENT_COUNT).
+  --mesh-sizes CSV          Cluster counts to test (default: ${mesh_sizes_default}).
+  --churn-intensities CSV   Deployment counts to test (default: ${intensities_default}).
   --scale-to N              Scale targets to N replicas (default: $SCALE_TO).
   --iterations N            Iterations per combination (default: $ITERATIONS).
   --timeout SEC             Timeout per iteration (default: $TIMEOUT_SEC).
-  --output-dir DIR          Results base directory (default: tests/churn/results).
+  --output-dir DIR          Results base directory (default: ${CHURN_RESULTS_DIR}).
   --dry-run                 Show plan without executing.
   -h, --help                Show this help.
+
+Environment:
+  SETUP_CONTEXTS, CHURN_MESH_SIZES (--mesh-sizes), CHURN_INTENSITIES (--churn-intensities;
+  empty: CHURN_DEPLOYMENT_COUNT), CHURN_SCALE_TO_REPLICAS, CHURN_ITERATIONS,
+  CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
+  CHURN_BASE_REPLICAS, CHURN_SETTLE_SEC, CHURN_POLL_INTERVAL_MS, CHURN_WAIT_TIMEOUT_SEC
+  (read by 001/002; the sweep checks them before the first setup, --dry-run included).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -110,21 +138,39 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do
 		MESH_SIZES+=("$i")
 	done
 fi
+# A mesh size above the context count would run with fewer remotes than its label says.
+for ms in "${MESH_SIZES[@]}"; do
+	is_pos_int "$ms" || die "mesh-size must be a positive integer: $ms"
+	((ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
+done
 
-CHURN_INTENSITIES=()
+INTENSITIES=()
 if [[ -n "$CHURN_INTENSITIES_CSV" ]]; then
-	split_csv "$CHURN_INTENSITIES_CSV" CHURN_INTENSITIES
+	split_csv "$CHURN_INTENSITIES_CSV" INTENSITIES
+	((${#INTENSITIES[@]})) || die "--churn-intensities produced an empty list (got '${CHURN_INTENSITIES_CSV}')"
 else
-	CHURN_INTENSITIES=("${CHURN_DEPLOYMENT_COUNT:-5}")
+	INTENSITIES=("${CHURN_DEPLOYMENT_COUNT:-5}")
 fi
+for ci in "${INTENSITIES[@]}"; do
+	is_pos_int "$ci" || die "churn intensity must be a positive integer (--churn-intensities, CHURN_INTENSITIES or CHURN_DEPLOYMENT_COUNT): $ci"
+done
 
 is_pos_int "$SCALE_TO" || die "--scale-to must be a positive integer"
+is_nonneg_int "${CHURN_BASE_REPLICAS:-1}" || die "CHURN_BASE_REPLICAS (read by 001/002) must be a non-negative integer; got '${CHURN_BASE_REPLICAS:-}'"
 ((SCALE_TO > ${CHURN_BASE_REPLICAS:-1})) || die "--scale-to ($SCALE_TO) must be greater than CHURN_BASE_REPLICAS (${CHURN_BASE_REPLICAS:-1})"
+is_pos_int "$ITERATIONS" || die "--iterations (or CHURN_ITERATIONS) must be a positive integer; got '$ITERATIONS'"
+is_pos_int "$TIMEOUT_SEC" || die "--timeout (or CHURN_TIMEOUT_SEC) must be a positive integer; got '$TIMEOUT_SEC'"
+# 001 and 002 read these themselves; reject a bad value before the first setup, also in
+# --dry-run, instead of a SETUP_FAILED or PROBE_FAILED row per combo.
+is_pos_int "${CHURN_WAIT_TIMEOUT_SEC:-300}" || die "CHURN_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer; got '${CHURN_WAIT_TIMEOUT_SEC:-}'"
+is_nonneg_int "${CHURN_SETTLE_SEC:-3}" || die "CHURN_SETTLE_SEC (read by 002) must be a non-negative integer; got '${CHURN_SETTLE_SEC:-}'"
+is_pos_int "${CHURN_POLL_INTERVAL_MS:-250}" || die "CHURN_POLL_INTERVAL_MS (read by 002) must be a positive integer; got '${CHURN_POLL_INTERVAL_MS:-}'"
 
 SCRIPT_DIR="${ROOT}/tests/churn"
 
@@ -169,6 +215,7 @@ emit_churn_placeholder() {
 		echo "# CHURN_SCALE_SCOPE=source"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
+		config_preamble_lines
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 21-col header (matches 002-run-churn-probe.sh).
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -199,10 +246,14 @@ echo "=========================================="
 echo "Run ID: $RUN_ID"
 echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
-echo "Churn intensities: ${CHURN_INTENSITIES[*]}"
+echo "Churn intensities: ${INTENSITIES[*]}"
 echo "Scale: -> $SCALE_TO replicas"
 echo "Output: $SWEEP_DIR"
+if [[ "${RUN_CONFIG:-none}" != none ]]; then
+	echo "Run config: ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+fi
 echo ""
+((DRY_RUN)) || config_snapshot "$SWEEP_DIR" "$RUN_ID"
 
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
@@ -218,7 +269,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		remote_csv+="$rc"
 	done
 
-	for intensity in "${CHURN_INTENSITIES[@]}"; do
+	for intensity in "${INTENSITIES[@]}"; do
 		echo "=========================================="
 		echo "  Sweep: mesh_size=$ms  churn_intensity=$intensity"
 		echo "  Clusters: ${active_ctxs[*]}"

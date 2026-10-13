@@ -24,6 +24,10 @@
 #
 #   # Single-cluster baseline (P1 only):
 #   ./tests/propagation/002-run-endpoint-probe.sh --source-context <mesh-a-ctx> --tsv
+#
+#   # Iterations, timeouts and results dir from a run config:
+#   ./tests/propagation/002-run-endpoint-probe.sh --config tests/propagation/configs/smoke.env \
+#     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --tsv
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 # Loud ERR trap for unexpected aborts (per-iteration faults become row statuses).
@@ -33,6 +37,11 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before fanout.sh and versions.env/options.env
+# fill in defaults.
+config_preload propagation "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -57,7 +66,7 @@ SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
 # missed drain (DRAIN_TIMEOUT) instead of waiting out TIMEOUT_SEC.
 DRAIN_TIMEOUT_SEC="${PROPAGATION_DRAIN_TIMEOUT_SEC:-20}"
 METRICS_TIMEOUT="${PROPAGATION_METRICS_TIMEOUT}"
-OUTPUT_DIR="${ROOT}/tests/propagation/results"
+OUTPUT_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
 DRY_RUN=0
 WRITE_TSV=0
 NS="${PROPAGATION_TEST_NAMESPACE}"
@@ -78,6 +87,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE             Run config of KEY=value lines (config/options.env keys; see
+                            tests/propagation/README.md, "Run config").
+                            Precedence: flag > --config > environment > default.
   --source-context CTX      Kube context for the source cluster (required).
   --remote-contexts CSV     Remote cluster contexts (comma-separated). Omit for single-cluster baseline.
   --mesh-size N             Metadata tag for TSV output (default: 1 + number of remotes).
@@ -87,7 +99,7 @@ Usage: $(basename "$0") [options]
   --timeout SEC             Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS=$POLL_INTERVAL_MS).
   --settle-sec SEC          Settle gap between iterations after drain (default: \$PROPAGATION_SETTLE_SEC=$SETTLE_SEC).
-  --output-dir DIR          Results directory (default: tests/propagation/results).
+  --output-dir DIR          Results directory (default: ${PROPAGATION_RESULTS_DIR}).
   --tuning-baseline STR     Live tuning-baseline levers for the TSV preamble
                             (default: unknown; the sweep queries + threads this).
   --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
@@ -118,13 +130,19 @@ Environment:
   PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics, default 30s),
   FANOUT_PF_BASE (istiod port-forward block base, default 21014),
   FANOUT_CTX_STRIDE (ports per context, default 20),
-  FANOUT_MAX_SKEW_MS (baseline scrape-skew ceiling, default 1000).
+  FANOUT_MAX_SKEW_MS (baseline scrape-skew ceiling, default 1000),
+  PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"
@@ -306,6 +324,7 @@ if ((WRITE_TSV)); then
 		echo "# FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}"
 		echo "# FANOUT_METRICS_TIMEOUT=${METRICS_TIMEOUT}"
 		echo "# BACKER_IMAGE=${BACKER_IMAGE}"
+		config_preamble_lines
 		echo "# DATE=$(date -u -Iseconds)"
 	} > "$TSV_FILE"
 	# Columns (tab-separated). Old p1/p2/p3 cols preserved for back-compat with
@@ -1416,6 +1435,7 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "|-------|-------|"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
+	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 	echo "| Istio version | ${ISTIO_VERSION} |"
 	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
 	echo "| istiod replicas | \`${ISTIOD_REPLICAS_CSV}\` |"

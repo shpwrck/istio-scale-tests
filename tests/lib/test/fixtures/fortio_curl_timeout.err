@@ -1,0 +1,4 @@
+{"ts":1791906335.507391,"level":"info","r":1,"file":"scli.go","line":124,"msg":"Starting","command":"Φορτίο","version":"1.75.3 h1:2et+WGrx6FHBEyQb2kYz07q+/AXzHIio7amwuDDn6vM= go1.25.14 amd64 linux","go-max-procs":20}
+{"ts":1791906338.513786,"level":"err","r":1,"file":"http_client.go","line":1138,"msg":"Timeout error (incomplete/invalid response)","err":"read tcp 192.0.2.10:43458->198.51.100.20:8080: i/o timeout","size":0,"header_len":0,"dest":{"IP":"198.51.100.20","Port":8080,"Zone":""},"url":"http://dataplane-server-mesh-b.dataplane-test.svc.cluster.local:8080/echo","thread":0,"run":0}
+{"ts":1791906338.513842,"level":"err","r":1,"file":"commonflags.go","line":160,"msg":"Error status -1"}
+command terminated with exit code 1

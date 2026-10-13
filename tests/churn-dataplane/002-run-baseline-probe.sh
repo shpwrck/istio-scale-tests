@@ -3,9 +3,21 @@
 # emitting a single baseline TSV row that captures p50/p99/p999/max latency and
 # actual QPS for later comparison against the churn phase.
 #
+# Before the window (and before the istiod port-forwards), a remote reachability
+# check (tests/lib/reach.sh) sends a few requests to each cluster's own
+# fortio-server-<ctx> Service and appends to reach-<RUN_ID>.tsv next to the output
+# TSV. The window itself targets the merged fortio-server Service, where Istio
+# retries a failed request on another endpoint, so it cannot name a dead remote.
+# Under --on-unreachable fail an UNREACHABLE or UNKNOWN remote stops the probe
+# before the window, with no row written (exit 3).
+# A window whose HTTP 200 share is below COEXEC_MIN_PCT_200 is ERROR_RATE_HIGH
+# (tests/lib/fortio.sh fortio_row_status, QPS-shortfall check off).
+#
 # Usage:
 #   ./tests/churn-dataplane/002-run-baseline-probe.sh \
 #       --source-context CTX [options]
+#   ./tests/churn-dataplane/002-run-baseline-probe.sh --config tests/churn-dataplane/configs/smoke.env \
+#       --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 # P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
@@ -15,9 +27,13 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -26,6 +42,10 @@ source "${ROOT}/tests/lib/preamble.sh"
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fortio.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -37,8 +57,11 @@ QPS="${COEXEC_QPS:-200}"
 CONNECTIONS="${COEXEC_NUM_CONNECTIONS:-8}"
 SETTLE_SEC="${COEXEC_SETTLE_SEC:-10}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
+MIN_PCT_200="${COEXEC_MIN_PCT_200:-0.99}"
+ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
+REACH_REQUESTS="${REACH_REQUESTS:-10}"
 OUTPUT_FILE=""
-OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
+OUTPUT_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 APPEND=0
 DRY_RUN=0
 # Live tuning levers + sidecar egress hosts for the TSV preamble. The sweep queries
@@ -50,8 +73,12 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/churn-dataplane/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client runs (required).
-  --remote-contexts CSV    Other contexts in the mesh (metadata only here).
+  --remote-contexts CSV    Other contexts in the mesh; each is reach-checked through
+                           its fortio-server-<ctx> Service before the window.
   --mesh-size N            Mesh-size tag (default: 1 + remotes).
   --combo-id ID            Stable id linking baseline+churn rows in 004 (default: \$RUN_ID).
   --run-id ID              Reuse a prior run_id (default: fresh timestamp).
@@ -59,19 +86,35 @@ Usage: $(basename "$0") [options]
   --qps N                  Target QPS (default: $QPS).
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle-sec N           Settle delay before measurement starts (default: $SETTLE_SEC).
-  --output-file FILE       TSV file to write/append to (default: tests/churn-dataplane/results/churn-dataplane-\$RUN_ID.tsv).
+  --output-file FILE       TSV file to write/append to (default: ${COEXEC_RESULTS_DIR}/churn-dataplane-\$RUN_ID.tsv).
   --output-dir DIR         Default results dir if --output-file not given.
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
   --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
+  --on-unreachable POLICY  warn: record a remote the reach check cannot reach and go
+                           on; fail: stop before the window when a remote is
+                           UNREACHABLE or UNKNOWN, exit 3 (default: $ON_UNREACHABLE).
+  --reach-requests N       Requests per target in the reach check; 0 turns it off
+                           (default: $REACH_REQUESTS).
   --append                 Append to --output-file without rewriting preamble/header.
   --dry-run                Print plan only.
   -h, --help               Show this help.
 
+Row status: FAILED (fortio exec failed), PERCENTILE_MISSING or ERROR_RATE_HIGH
+(HTTP 200 share below COEXEC_MIN_PCT_200, default $MIN_PCT_200; 0 turns the rule off),
+POISONED_RESTART, POISONED_SCRAPE, else OK. The marker comment records pct_200 and
+top_code (the most frequent code other than 200).
+
+Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
+
 Environment:
-  COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
+  COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
+  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
+  COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
+  COEXEC_SETTLE_SEC,
   COEXEC_TEST_NAMESPACE, COEXEC_ISTIOD_REPLICAS (expected pin; warns on mismatch),
+  COEXEC_RESULTS_DIR (--output-dir; relative to the repo root),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
   FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
   whose pre/post fanout scrape skew exceeds this is tagged POISONED_SCRAPE because
@@ -81,6 +124,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2 ;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"; shift 2 ;;
@@ -120,6 +167,12 @@ while [[ $# -gt 0 ]]; do
 	--sidecar-egress-hosts)
 		[[ -n "${2:-}" ]] || die "--sidecar-egress-hosts requires a value"
 		SIDECAR_EGRESS_HOSTS="$2"; shift 2 ;;
+	--on-unreachable)
+		[[ -n "${2:-}" ]] || die "--on-unreachable requires a value"
+		ON_UNREACHABLE="$2"; shift 2 ;;
+	--reach-requests)
+		[[ -n "${2:-}" ]] || die "--reach-requests requires a value"
+		REACH_REQUESTS="$2"; shift 2 ;;
 	--append)
 		APPEND=1; shift ;;
 	--dry-run)
@@ -132,6 +185,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+# fortio gets -t "${DURATION}s": `5m` would be a 5 ms window, not an error.
+is_pos_int "$DURATION" || die "--duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '$DURATION'"
+is_pos_int "$QPS" || die "--qps (or COEXEC_QPS) must be a positive integer; got '$QPS'"
+is_pos_int "$CONNECTIONS" || die "--connections (or COEXEC_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or COEXEC_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
+is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
+	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
+reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -146,6 +207,10 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ -z "$COMBO_ID" ]] && COMBO_ID="$RUN_ID"
 
 [[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
+# One reach file per RUN_ID: a sweep passes its RUN_ID, so every combo appends to
+# the same file (combo_id tells them apart) and 005 finds it next to the TSV.
+REACH_TSV="$(dirname "$OUTPUT_FILE")/reach-${RUN_ID}.tsv"
+REACH_URL_TEMPLATE="http://fortio-server-{ctx}.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
 
 HARNESS_SHA="$(harness_sha)"
 ALL_CTXS_CSV="$SOURCE_CTX"
@@ -157,6 +222,9 @@ if ((DRY_RUN)); then
 	echo "Duration: ${DURATION}s | QPS: $QPS | Connections: $CONNECTIONS | Settle: ${SETTLE_SEC}s"
 	echo "Output: $OUTPUT_FILE (append=$APPEND)"
 	echo "RUN_ID=$RUN_ID  COMBO_ID=$COMBO_ID  HARNESS_SHA=$HARNESS_SHA"
+	echo "Min pct_200: $MIN_PCT_200 (ERROR_RATE_HIGH below it; 0 = off)"
+	reach_plan_line "$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "$ON_UNREACHABLE"
+	echo "Reach TSV: $REACH_TSV"
 	exit 0
 fi
 mkdir -p "$(dirname "$OUTPUT_FILE")"
@@ -189,12 +257,46 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=$NS" \
 		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
-		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT"
+		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT" \
+		"MIN_PCT_200=$MIN_PCT_200" \
+		"REACH_REQUESTS=$REACH_REQUESTS" \
+		"REACH_QPS=${REACH_QPS:-10}" \
+		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}" \
+		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
+		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
+		"ON_UNREACHABLE=$ON_UNREACHABLE"
+	config_preamble_lines >> "$OUTPUT_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
 CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 [[ -n "$CLIENT_POD" ]] || die "no fortio-client pod found on $SOURCE_CTX (ns=$NS)"
+
+# Remote reachability check (tests/lib/reach.sh), before the istiod port-forwards
+# and the window, through each cluster's fortio-server-<ctx> Service.
+if ((REACH_REQUESTS > 0)); then
+	echo "Checking reachability of every cluster's fortio-server-<ctx> (${REACH_REQUESTS} requests each; details on stderr)..."
+	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" \
+		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
+		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
+			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
+		reach_print_summary "$REACH_TSV" "$RUN_ID" "$COMBO_ID"
+		if reach_should_stop "$ON_UNREACHABLE" "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$REMOTE_CONTEXTS_CSV"; then
+			mapfile -t STOP_REMOTES < <(reach_not_reachable "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$REMOTE_CONTEXTS_CSV")
+			echo "STOPPED: --on-unreachable fail and ${#STOP_REMOTES[@]} remote(s) UNREACHABLE or UNKNOWN from ${SOURCE_CTX}: ${STOP_REMOTES[*]}; no baseline window ran (exit ${REACH_EXIT_CODE})" >&2
+			exit "$REACH_EXIT_CODE"
+		fi
+	else
+		echo "warning: the reachability check could not run (${REACH_TSV} not writable?)" >&2
+		if [[ "$ON_UNREACHABLE" == fail ]]; then
+			echo "STOPPED: --on-unreachable fail and the reachability check could not run (every remote UNKNOWN); no baseline window ran (exit ${REACH_EXIT_CODE})" >&2
+			exit "$REACH_EXIT_CODE"
+		fi
+	fi
+elif [[ "$ON_UNREACHABLE" == fail ]]; then
+	echo "warning: --on-unreachable fail has no effect with --reach-requests 0" >&2
+fi
 
 # Port-forward every Running istiod pod on the source context (tests/lib/fanout.sh)
 # for restart detection and istiod-side xDS metrics.
@@ -346,7 +448,15 @@ if [[ "$STATUS" == "OK" && -n "$JSON_OUT" ]]; then
 	[[ -z "$P999" ]] && P999="N/A"
 	MAX_LAT="$(printf '%s' "$JSON_OUT" | jq -r '(.DurationHistogram.Max // empty) * 1000' 2>/dev/null)"
 	[[ -z "$MAX_LAT" ]] && MAX_LAT="N/A"
+	# Error rate (tests/lib/fortio.sh; QPS-shortfall check off): non-200 responses
+	# used to count as latency samples of an OK row.
+	if ! [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]]; then
+		FORTIO_STATUS="$(fortio_row_status "$JSON_OUT" "$QPS" 0 "$MIN_PCT_200")"
+		[[ "$FORTIO_STATUS" == OK ]] || STATUS="$FORTIO_STATUS"
+	fi
 fi
+# pct_200 / top_code for the marker comment ("N/A" / "-" without a fortio result).
+read -r _ok _total PCT_200 TOP_CODE <<<"$(reach_summarize "$JSON_OUT")"
 
 # PL13/PL14: if istiod restarted (or unknown), poison the latency-derived
 # quantiles in this row so 005 will filter it.
@@ -362,16 +472,16 @@ if [[ "$SCRAPE_INCOMPLETE" == "1" && "$STATUS" == "OK" ]]; then
 	STATUS="POISONED_SCRAPE"
 fi
 
-printf "Result: phase=baseline qps_actual=%s p50=%s p99=%s max=%s restarted=%s status=%s\n" \
-	"$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$RESTARTED" "$STATUS"
+printf "Result: phase=baseline qps_actual=%s p50=%s p99=%s max=%s pct_200=%s top_code=%s restarted=%s status=%s\n" \
+	"$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$PCT_200" "$TOP_CODE" "$RESTARTED" "$STATUS"
 printf "  istiod: xds_pushes=%s eds_pushes=%s triggers=%s conv_p99=%s queue_p99=%s push_time_p99=%s\n" \
 	"$XDS_PUSHES_DELTA" "$EDS_PUSHES_DELTA" "$PUSH_TRIGGERS_DELTA" "$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99"
 
 # PL3: emit wall-clock window in nanoseconds as a comment for downstream tooling.
 # PL8: scrape_skew_ms spans the fanned-out per-pod istiod scrapes (max of the
 # pre/post batch skews); recorded as a comment since the TSV schema is unchanged.
-printf '# combo=%s phase=baseline window_start_ns=%s window_end_ns=%s istiod_replicas=%s scrape_skew_ms=%s\n' \
-	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "${SOURCE_REPLICAS:-unknown}" "$SCRAPE_SKEW_MS" >> "$OUTPUT_FILE"
+printf '# combo=%s phase=baseline window_start_ns=%s window_end_ns=%s istiod_replicas=%s scrape_skew_ms=%s pct_200=%s top_code=%s\n' \
+	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "${SOURCE_REPLICAS:-unknown}" "$SCRAPE_SKEW_MS" "$PCT_200" "$TOP_CODE" >> "$OUTPUT_FILE"
 
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$MESH_SIZE" "0" "baseline" \

@@ -92,6 +92,44 @@ tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-s
 Settings and image pins live in `config/versions.env` and `config/options.env`. The deployed Istio
 version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
 
+### Run config (`--config FILE`)
+
+Every numbered script of propagation, controlplane, dataplane, churn and churn-dataplane takes
+`--config FILE`: one file of `KEY=value` lines (the suite's `config/options.env` keys plus
+`SETUP_CONTEXTS`) that describes a whole run, so setup, sweep, report and cleanup read the same
+values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`, and a "Run
+config" section in its README that lists its keys. Tuning does not take one yet.
+
+- **Precedence:** flag > `--config` > environment > default. The file loads before
+  `options.env`, so the defaults derived there follow it. Each key is logged on stderr, with the
+  environment value it overrides. `KEY=` (empty) means the built-in default.
+- **Syntax:** the file is parsed, never sourced, so it cannot run code:
+  `[export ]KEY=value [# comment]`, where the value is unquoted from `[A-Za-z0-9_.,:/@%+=-]`,
+  `'...'`, or `"..."` without `"`, `$`, `` ` `` and `\`. No spaces around `=`, each key once. A
+  bad line or a key outside the suite's list rejects the whole file before anything runs, with
+  `file:line` and the reason.
+- **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
+  `--force-large-matrix` acknowledgment stays per run) and the version pins in
+  `config/versions.env`.
+- **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
+  what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
+  A standalone step still takes those on the command line.
+- **Sweeps:** the steps a sweep runs inherit the file's values; the flags it passes them still
+  win. Before the first step a sweep checks its numeric knobs: the ones it passes its steps as
+  flags (durations, QPS, connections, settle times, ...) and the ones only its steps read (setup
+  and cleanup timeouts, poll intervals, ...). A value such as `5m` fails `--dry-run` instead of
+  every setup, every cleanup, or the probe window (fortio would read `5m` seconds as 5 ms).
+- **Context names:** keep real ones out of git. Copy an example to
+  `tests/<suite>/configs/<name>.local.env` (gitignored) and set `SETUP_CONTEXTS` there.
+- **Provenance:** every TSV preamble records `RUN_CONFIG` (the file's path from the repo root, or
+  only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and every
+  report format repeats them: `unknown` for files written before these keys existed, and
+  `mixed:<a>,<b>` with a warning when the inputs disagree. A sweep copies the file to
+  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`, and every probe's per-run markdown summary has a
+  `Run config` row. With `--config` but no `--results-dir`, a report warns
+  when the results dir holds more than one run (each `sweep-*` directory is one run; outside
+  one, each `RUN_ID`).
+
 ## Grow the mesh
 
 `mesh_member_count` in `terraform/platform` sets how many spokes join, in sorted order (0 = all).

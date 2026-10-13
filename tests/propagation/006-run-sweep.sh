@@ -11,6 +11,9 @@
 #
 #   # Dry-run to see what would be executed:
 #   ./tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --dry-run
+#
+#   # The whole sweep from a run config (mesh sizes, iterations, results dir; flags still win):
+#   ./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --tsv --dry-run
 # ci-dry-run:
 set -euo pipefail
 # Loud ERR trap for unexpected aborts; per-step failures are handled below.
@@ -21,17 +24,23 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+# The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
+# per-step flags it passes still win.
+config_preload propagation "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
 
 CONTEXTS_CSV=""
-MESH_SIZES_CSV=""
+MESH_SIZES_CSV="${PROPAGATION_MESH_SIZES:-}"
 ITERATIONS="${PROPAGATION_ITERATIONS}"
 TIMEOUT_SEC="${PROPAGATION_TIMEOUT_SEC}"
 SETTLE_SEC="${PROPAGATION_SETTLE_SEC}"
 MAX_MATRIX="${PROPAGATION_MAX_MATRIX:-64}"
-OUTPUT_DIR="${ROOT}/tests/propagation/results"
+OUTPUT_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
 WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
 DRY_RUN=0
 WRITE_TSV=0
@@ -40,16 +49,22 @@ FORCE_LARGE_MATRIX=0
 
 
 usage() {
+	local mesh_sizes_default='"1,2,...,len(contexts)"'
+	[[ -z "$MESH_SIZES_CSV" ]] || mesh_sizes_default="$MESH_SIZES_CSV"
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE          Run config of KEY=value lines (config/options.env keys; see
+                         tests/propagation/README.md, "Run config"). The steps the
+                         sweep runs inherit it. Precedence: flag > --config >
+                         environment > default.
   --contexts CSV         All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV       Cluster counts to test (default: "1,2,...,len(contexts)").
+  --mesh-sizes CSV       Cluster counts to test (default: ${mesh_sizes_default}).
   --watcher-replicas N   Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --iterations N         Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC          Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --settle-sec SEC       Settle gap between iterations and between mesh-size steps (default: $SETTLE_SEC).
-  --output-dir DIR       Results root (default: tests/propagation/results). A new
+  --output-dir DIR       Results root (default: ${PROPAGATION_RESULTS_DIR}). A new
                          per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
   --tsv                  Write per-iteration TSVs and the 005 reports (sweep-summary.md).
   --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
@@ -59,13 +74,22 @@ Usage: $(basename "$0") [options]
 
 Environment:
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
-  PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX.
+  PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
+  (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),
+  PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
+  PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
+  setup, --dry-run included.
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -138,6 +162,7 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do
 		MESH_SIZES+=("$i")
@@ -149,6 +174,14 @@ for ms in "${MESH_SIZES[@]}"; do
 	((ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
 done
 is_pos_int "$ITERATIONS" || die "--iterations must be a positive integer (got: $ITERATIONS)"
+is_pos_int "$TIMEOUT_SEC" || die "--timeout (or PROPAGATION_TIMEOUT_SEC) must be a positive integer (got: $TIMEOUT_SEC)"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or PROPAGATION_SETTLE_SEC) must be a non-negative integer (got: $SETTLE_SEC)"
+is_pos_int "$WATCHER_REPLICAS" || die "--watcher-replicas (or PROPAGATION_WATCHER_REPLICAS) must be a positive integer (got: $WATCHER_REPLICAS)"
+# 001 and 002 read these themselves; reject a bad value before the first setup, also in
+# --dry-run (without --tsv a failed step leaves no row behind).
+is_pos_int "${PROPAGATION_WAIT_TIMEOUT_SEC:-300}" || die "PROPAGATION_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer (got: ${PROPAGATION_WAIT_TIMEOUT_SEC:-})"
+is_pos_int "${PROPAGATION_POLL_INTERVAL_MS:-250}" || die "PROPAGATION_POLL_INTERVAL_MS (read by 002) must be a positive integer (got: ${PROPAGATION_POLL_INTERVAL_MS:-})"
+is_pos_int "${PROPAGATION_DRAIN_TIMEOUT_SEC:-20}" || die "PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002) must be a positive integer (got: ${PROPAGATION_DRAIN_TIMEOUT_SEC:-})"
 
 MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ITERATIONS ))
 if (( MATRIX_SIZE > MAX_MATRIX && !FORCE_LARGE_MATRIX )); then
@@ -205,6 +238,7 @@ emit_propagation_placeholder() {
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
+		config_preamble_lines
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms"
 		# One degraded row: status sentinel, restarted=unknown, numerics N/A.
@@ -253,6 +287,9 @@ if ((DRY_RUN)); then
 		echo "Total iterations: $MATRIX_SIZE (cap: $MAX_MATRIX)"
 		echo "Settle: ${SETTLE_SEC}s"
 		echo "Output (would create): $SWEEP_DIR"
+		if [[ "${RUN_CONFIG:-none}" != none ]]; then
+			echo "Run config: ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+		fi
 		echo ""
 		for ms in "${MESH_SIZES[@]}"; do
 			plan_mesh_size "$ms"
@@ -273,6 +310,7 @@ if ((DRY_RUN)); then
 fi
 
 mkdir -p "$SWEEP_DIR"
+config_snapshot "$SWEEP_DIR" "$SWEEP_RUN_ID"
 
 sweep_cleanup() {
 	echo ""
@@ -289,6 +327,9 @@ echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "Iterations per size: $ITERATIONS"
 echo "Settle: ${SETTLE_SEC}s"
 echo "Output: $SWEEP_DIR"
+if [[ "${RUN_CONFIG:-none}" != none ]]; then
+	echo "Run config: ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+fi
 echo ""
 
 for ms in "${MESH_SIZES[@]}"; do

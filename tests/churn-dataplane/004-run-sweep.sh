@@ -7,9 +7,14 @@
 #     baseline (002): fortio against a steady mesh
 #     churn    (003): fortio + concurrent churn; computes Δp99 vs baseline
 #   cleanup (006) once, then settle before the next mesh-size
+# Under --on-unreachable fail, a baseline that stops on an unreachable remote
+# (002 exit 3) records REMOTE_UNREACHABLE rows for its combo and ends the sweep
+# after that mesh size's cleanup; the reports still run and the sweep exits 3.
 #
 # Usage:
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
+#   # The whole sweep from a run config (mesh sizes, churn rates, durations; flags still win):
+#   ./tests/churn-dataplane/004-run-sweep.sh --config tests/churn-dataplane/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
 # Report the failing line on an unexpected abort. Per-combo failures are handled
@@ -18,16 +23,26 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+# The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
+# per-step flags it passes still win.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh" # FANOUT_* defaults + istiod preflight for the preamble
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fortio.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh" # REACH_EXIT_CODE, reach_validate
 
 CONTEXTS_CSV=""
-MESH_SIZES_CSV=""
+MESH_SIZES_CSV="${COEXEC_MESH_SIZES:-}"
 CHURN_RATES_CSV="${COEXEC_CHURN_RATES:-1,5,10}"
 BASELINE_DURATION="${COEXEC_BASELINE_DURATION_SEC:-60}"
 CHURN_DURATION="${COEXEC_CHURN_DURATION_SEC:-60}"
@@ -40,20 +55,32 @@ CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
 CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-5}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
 REPETITIONS="${COEXEC_REPETITIONS:-1}"
-OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
+MIN_PCT_200="${COEXEC_MIN_PCT_200:-0.99}"
+ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
+REACH_REQUESTS="${REACH_REQUESTS:-10}"
+OUTPUT_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 # Same namespace as 001/002/003/006; used by the reset-to-base step.
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 NS_DELETE_TIMEOUT_SEC="${COEXEC_NS_DELETE_TIMEOUT_SEC:-240}"
+# 001's wait for the previous mesh-size's namespace (PL37). options.env defaults it to
+# the cleanup bound; --ns-delete-timeout sets both.
+SETUP_NS_WAIT_SEC="${COEXEC_SETUP_NS_WAIT_SEC:-$NS_DELETE_TIMEOUT_SEC}"
 MATRIX_CAP=64
 FORCE_LARGE_MATRIX=0
 DRY_RUN=0
 
 usage() {
+	local mesh_sizes_default="1..len(contexts)"
+	[[ -z "$MESH_SIZES_CSV" ]] || mesh_sizes_default="$MESH_SIZES_CSV"
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE             Run config of KEY=value lines (config/options.env keys; see
+                            tests/churn-dataplane/README.md, "Run config"). The steps the
+                            sweep runs inherit it. Precedence: flag > --config >
+                            environment > default.
   --contexts CSV            All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV          Mesh-size dimension (default: 1..len(contexts)).
+  --mesh-sizes CSV          Mesh-size dimension (default: ${mesh_sizes_default}).
   --churn-rates CSV         Churn rate dimension, "deployment scale ops/s" (default: $CHURN_RATES_CSV).
   --baseline-duration SEC   Baseline-phase fortio duration (default: $BASELINE_DURATION).
   --churn-duration SEC      Churn-phase fortio + churn duration (default: $CHURN_DURATION).
@@ -64,12 +91,19 @@ Usage: $(basename "$0") [options]
   --connections N           Concurrent fortio connections (default: $CONNECTIONS).
   --deployment-count N      Churn-target Deployments per cluster (default: $CHURN_DEPLOYMENT_COUNT_OPT).
   --base-replicas N         Scale-down replica count (default: $CHURN_BASE_REPLICAS_OPT).
-  --scale-to N              Scale-up replica count (default: $CHURN_SCALE_TO_OPT).
+  --scale-to N              Scale-up replica count, above --base-replicas (default: $CHURN_SCALE_TO_OPT).
   --seed N                  Seed for the deterministic churn order (default: $CHURN_SEED).
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
-  --output-dir DIR          Top-level results directory (default: tests/churn-dataplane/results).
-  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC); also bounds
-                            001's wait for the previous mesh-size's namespace to go away.
+  --output-dir DIR          Top-level results directory (default: ${COEXEC_RESULTS_DIR}).
+  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC). Also sets
+                            001's wait for the previous mesh-size's namespace to go away,
+                            which is otherwise COEXEC_SETUP_NS_WAIT_SEC (default: $SETUP_NS_WAIT_SEC).
+  --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
+                            fail, a remote that is UNREACHABLE or UNKNOWN before a baseline
+                            records REMOTE_UNREACHABLE rows for that combo and stops the
+                            sweep after the mesh size's cleanup (exit 3).
+  --reach-requests N        Reach-check requests per target, passed to 002; 0 turns the
+                            check off (default: $REACH_REQUESTS).
   --force-large-matrix      Allow more than $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
@@ -83,13 +117,24 @@ Environment:
   SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
   COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
-  COEXEC_NS_DELETE_TIMEOUT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
-  CHURN_SCALE_TO_REPLICAS.
+  COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_SETUP_NS_WAIT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
+  CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003), REACH_ON_UNREACHABLE,
+  REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_DETAIL_TIMEOUT_SEC,
+  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir;
+  relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
+  001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
+  them, and the flags that set them, before the first setup, --dry-run included.
+
+Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2 ;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"; shift 2 ;;
@@ -139,7 +184,13 @@ while [[ $# -gt 0 ]]; do
 		OUTPUT_DIR="$2"; shift 2 ;;
 	--ns-delete-timeout)
 		[[ -n "${2:-}" ]] || die "--ns-delete-timeout requires a value"
-		NS_DELETE_TIMEOUT_SEC="$2"; shift 2 ;;
+		NS_DELETE_TIMEOUT_SEC="$2"; SETUP_NS_WAIT_SEC="$2"; shift 2 ;;
+	--on-unreachable)
+		[[ -n "${2:-}" ]] || die "--on-unreachable requires a value"
+		ON_UNREACHABLE="$2"; shift 2 ;;
+	--reach-requests)
+		[[ -n "${2:-}" ]] || die "--reach-requests requires a value"
+		REACH_REQUESTS="$2"; shift 2 ;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1; shift ;;
 	--dry-run)
@@ -150,6 +201,36 @@ while [[ $# -gt 0 ]]; do
 		die "unknown option: $1 (try --help)" ;;
 	esac
 done
+
+reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
+is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
+	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
+# The churn shape 003 gets: scale-to must exceed base, or the churn phase scales every
+# Deployment to the count it already has and its rows still read OK (as tests/churn).
+is_pos_int "$CHURN_DEPLOYMENT_COUNT_OPT" || die "--deployment-count (or CHURN_DEPLOYMENT_COUNT) must be a positive integer; got '$CHURN_DEPLOYMENT_COUNT_OPT'"
+is_nonneg_int "$CHURN_BASE_REPLICAS_OPT" || die "--base-replicas (or CHURN_BASE_REPLICAS) must be a non-negative integer; got '$CHURN_BASE_REPLICAS_OPT'"
+is_pos_int "$CHURN_SCALE_TO_OPT" || die "--scale-to (or CHURN_SCALE_TO_REPLICAS) must be a positive integer; got '$CHURN_SCALE_TO_OPT'"
+((CHURN_SCALE_TO_OPT > CHURN_BASE_REPLICAS_OPT)) \
+	|| die "--scale-to ($CHURN_SCALE_TO_OPT) must be greater than --base-replicas ($CHURN_BASE_REPLICAS_OPT)"
+# The measurement window 002/003 get as flags. 002 builds `fortio -t "${DURATION}s"`, so
+# a duration of `5m` would run a 5 ms baseline that every Δp99 is computed against.
+is_pos_int "$BASELINE_DURATION" || die "--baseline-duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '$BASELINE_DURATION'"
+is_pos_int "$CHURN_DURATION" || die "--churn-duration (or COEXEC_CHURN_DURATION_SEC) must be a positive integer; got '$CHURN_DURATION'"
+is_pos_int "$QPS" || die "--qps (or COEXEC_QPS) must be a positive integer; got '$QPS'"
+is_pos_int "$CONNECTIONS" || die "--connections (or COEXEC_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or COEXEC_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
+is_nonneg_int "$INTER_COMBO_SETTLE_SEC" || die "--inter-combo-settle (or COEXEC_INTER_COMBO_SETTLE_SEC) must be a non-negative integer; got '$INTER_COMBO_SETTLE_SEC'"
+is_nonneg_int "$CHURN_SEED" || die "--seed (or COEXEC_CHURN_SEED) must be a non-negative integer; got '$CHURN_SEED'"
+is_pos_int "$REPETITIONS" || die "--repetitions (or COEXEC_REPETITIONS) must be a positive integer; got '$REPETITIONS'"
+is_pos_int "$NS_DELETE_TIMEOUT_SEC" || die "--ns-delete-timeout (or COEXEC_NS_DELETE_TIMEOUT_SEC) must be a positive integer; got '$NS_DELETE_TIMEOUT_SEC'"
+is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "COEXEC_SETUP_NS_WAIT_SEC (read by 001) must be a non-negative integer; got '$SETUP_NS_WAIT_SEC'"
+# 001 and 006 read these themselves; reject a bad value before the first setup, also in
+# --dry-run, instead of a SETUP_FAILED mesh size or a skipped cleanup.
+is_pos_int "${COEXEC_WAIT_TIMEOUT_SEC:-300}" || die "COEXEC_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer; got '${COEXEC_WAIT_TIMEOUT_SEC:-}'"
+if ! is_pos_int "${COEXEC_SERVICE_PORT:-8080}" || ((${COEXEC_SERVICE_PORT:-8080} > 65535)); then
+	die "COEXEC_SERVICE_PORT (read by 001) must be a port number (1-65535); got '${COEXEC_SERVICE_PORT:-}'"
+fi
+is_pos_int "${COEXEC_CLEANUP_GRACE_SEC:-5}" || die "COEXEC_CLEANUP_GRACE_SEC (read by 006) must be a positive integer (0 would SIGKILL); got '${COEXEC_CLEANUP_GRACE_SEC:-}'"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -162,6 +243,7 @@ fi
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
 	split_csv "$MESH_SIZES_CSV" MESH_SIZES
+	((${#MESH_SIZES[@]})) || die "--mesh-sizes produced an empty list (got '${MESH_SIZES_CSV}')"
 else
 	for ((i = 1; i <= ${#CONTEXTS[@]}; i++)); do MESH_SIZES+=("$i"); done
 fi
@@ -204,7 +286,11 @@ echo "Matrix:         ${MATRIX_SIZE} combinations"
 echo "Baseline dur:   ${BASELINE_DURATION}s | Churn dur: ${CHURN_DURATION}s"
 echo "Settle:         ${SETTLE_SEC}s | Inter-combo: ${INTER_COMBO_SETTLE_SEC}s"
 echo "QPS:            $QPS  Connections: $CONNECTIONS"
+echo "Reach check:    ${REACH_REQUESTS} requests per target  On unreachable: ${ON_UNREACHABLE}  Min pct_200: ${MIN_PCT_200}"
 echo "Output:         $TSV_FILE"
+if [[ "${RUN_CONFIG:-none}" != none ]]; then
+	echo "Run config:     ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
+fi
 ((DRY_RUN)) && echo "Mode:           dry-run"
 
 SCRIPT_DIR="${ROOT}/tests/churn-dataplane"
@@ -234,6 +320,7 @@ fi
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then
 	mkdir -p "$SWEEP_DIR"
+	config_snapshot "$SWEEP_DIR" "$RUN_ID"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 	ISTIOD_REPLICAS="$(fanout_preflight_istiod "${CONTEXTS[0]}" "${KUBECTL[@]}")"
@@ -253,11 +340,20 @@ if ! ((DRY_RUN)); then
 		"NAMESPACE=${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}" \
 		"MATRIX_SIZE=$MATRIX_SIZE" \
 		"REPETITIONS=$REPETITIONS" \
-		"SETUP_NS_WAIT_SEC=$NS_DELETE_TIMEOUT_SEC" \
+		"SETUP_NS_WAIT_SEC=$SETUP_NS_WAIT_SEC" \
 		"CLEANUP_GRACE_SEC=${COEXEC_CLEANUP_GRACE_SEC:-5}" \
 		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC" \
 		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
-		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT"
+		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT" \
+		"MIN_PCT_200=$MIN_PCT_200" \
+		"REACH_REQUESTS=$REACH_REQUESTS" \
+		"REACH_QPS=${REACH_QPS:-10}" \
+		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC:-35}" \
+		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
+		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
+		"ON_UNREACHABLE=$ON_UNREACHABLE"
+	config_preamble_lines >> "$TSV_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
@@ -330,7 +426,12 @@ reset_churn_targets_to_base() {
 }
 
 COMBO_INDEX=0
+# Set when a baseline exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
+# after this mesh size's cleanup, the reports still run, and the sweep exits 3.
+REACH_GATE_STOP=0
+ms_done=0
 for ms in "${MESH_SIZES[@]}"; do
+	ms_done=$((ms_done + 1))
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	source_ctx="${active_ctxs[0]}"
 	remote_ctxs=()
@@ -348,7 +449,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		--source-context "$source_ctx"
 		--deployment-count "$CHURN_DEPLOYMENT_COUNT_OPT"
 		--base-replicas "$CHURN_BASE_REPLICAS_OPT"
-		--ns-wait-timeout "$NS_DELETE_TIMEOUT_SEC"
+		--ns-wait-timeout "$SETUP_NS_WAIT_SEC"
 	)
 	[[ -n "$remote_csv" ]] && setup_args+=(--remote-contexts "$remote_csv")
 
@@ -402,6 +503,8 @@ for ms in "${MESH_SIZES[@]}"; do
 			--output-file "$TSV_FILE"
 			--tuning-baseline "$TUNING_BASELINE"
 			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+			--on-unreachable "$ON_UNREACHABLE"
+			--reach-requests "$REACH_REQUESTS"
 			--append
 		)
 		churn_args=(
@@ -459,8 +562,17 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "--- baseline phase ---"
 		# A failed baseline records PROBE_FAILED rows for both phases (so 005 counts the
 		# combo in its real cell) and moves on; the workload stays for the next rate.
-		if ! "$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}"; then
-			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID; recording PROBE_FAILED rows and continuing" >&2
+		# Exit 3 is the reachability gate (--on-unreachable fail): REMOTE_UNREACHABLE
+		# rows for this combo, then leave both loops so the mesh size is cleaned up.
+		baseline_rc=0
+		"$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}" || baseline_rc=$?
+		if ((baseline_rc == REACH_EXIT_CODE)); then
+			echo "STOPPING SWEEP: [combo $COMBO_INDEX/$MATRIX_SIZE] $COMBO_ID stopped on an unreachable remote (--on-unreachable fail); recording REMOTE_UNREACHABLE rows, cleaning up this mesh size, skipping the rest, then writing the reports" >&2
+			emit_failed_rows REMOTE_UNREACHABLE "$COMBO_ID" "$ms" "$cr"
+			REACH_GATE_STOP=1
+			break 2
+		elif ((baseline_rc != 0)); then
+			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID (exit $baseline_rc); recording PROBE_FAILED rows and continuing" >&2
 			emit_failed_rows PROBE_FAILED "$COMBO_ID" "$ms" "$cr"
 			continue
 		fi
@@ -489,6 +601,11 @@ for ms in "${MESH_SIZES[@]}"; do
 			emit_cleanup_timeout_row "ms${ms}-cleanup" "$ms" "0"
 		}
 
+		if ((REACH_GATE_STOP)); then
+			not_run=("${MESH_SIZES[@]:ms_done}")
+			echo "Sweep stopped at mesh-size $ms; mesh sizes not run: ${not_run[*]:-none}" >&2
+			break
+		fi
 		# Settle before the next mesh-size's setup.
 		if (( COMBO_INDEX < MATRIX_SIZE )); then
 			echo "Inter-mesh-size settle ${INTER_COMBO_SETTLE_SEC}s..."
@@ -514,3 +631,8 @@ echo "Markdown summary: $MD_FILE"
 CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
+
+if ((REACH_GATE_STOP)); then
+	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2
+	exit "$REACH_EXIT_CODE"
+fi

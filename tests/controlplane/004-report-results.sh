@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Generate summary statistics from control-plane resource metrics TSV files.
 #
-# Groups by the five sweep axes — mesh_size, service_count, replicas,
-# namespace_count, sidecar_scoping — so the operator can compare any single
-# dimension while the others are held constant.
+# Groups by the six sweep axes — mesh_size, service_count, replicas,
+# namespace_count, sidecar_scoping, traffic_config — so the operator can compare any
+# single dimension while the others are held constant.
 #
 # Usage:
 #   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--format FMT]
@@ -13,34 +13,58 @@
 #   ./tests/controlplane/004-report-results.sh --format csv
 #   ./tests/controlplane/004-report-results.sh --format json
 #   ./tests/controlplane/004-report-results.sh --format markdown
+#   ./tests/controlplane/004-report-results.sh --config tests/controlplane/configs/smoke.env \
+#     --results-dir tests/controlplane/results/smoke/sweep-<RUN_ID>
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_repo_path
+# --config FILE: export the file's keys before options.env fills in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # O9: SCALE_COVERAGE_* knobs (coverage floor)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline)
 
-RESULTS_DIR="${ROOT}/tests/controlplane/results"
+RESULTS_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
+# 1 when --results-dir is passed (gates the multi-run warning below).
+RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --results-dir DIR  Results directory (default: tests/controlplane/results).
+  --config FILE      Run config of KEY=value lines (config/options.env keys; see
+                     tests/controlplane/README.md, "Run config"). Precedence: flag >
+                     --config > environment > default. Without --results-dir, warns
+                     when the results dir holds more than one run.
+  --results-dir DIR  Results directory (default: ${CONTROLPLANE_RESULTS_DIR}).
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
 Output groups by (mesh_size, service_count, replicas, namespace_count,
-sidecar_scoping) — every unique sweep point gets its own row of
-CPU/memory/convergence/queue/config-dump stats.
+sidecar_scoping, traffic_config) — every unique sweep point gets its own row of
+CPU/memory/convergence/queue/config-dump stats. When a cell was swept with both
+traffic configs (none and vsdr), the markdown adds a "Traffic management (VS/DR)
+effect" section that pairs them.
 
 Histogram cells whose target quantile falls in the +Inf overflow bucket are
 emitted as the string "overflow" in text/csv/markdown and as null in JSON.
 A cell with no valid sample is N/A (null in JSON), never 0.
+
+Connected proxies are shown per istiod replica (each pod row) and per cluster
+(summed over a cluster's istiod pods at one scrape). The proxy check compares
+the per-cluster count with the cluster's Running sidecar pods; LOW/HIGH prints
+a WARNING line but never changes the exit code. Reads 40- and 51-column TSVs;
+40-column files add nothing to the per-cluster or traffic-management figures and
+their rows count as traffic_config none.
+
+Environment:
+  CONTROLPLANE_RESULTS_DIR      --results-dir default (relative to the repo root).
 
 Environment (O9 scale-coverage floor; default-off):
   SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
@@ -56,9 +80,15 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
+		RESULTS_DIR_FROM_FLAG=1
 		shift 2
 		;;
 	--format)
@@ -93,35 +123,62 @@ if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Partition into "current schema" (40 columns) and "legacy" (anything else).
+# Partition by header width: 51 columns (current, CONTROLPLANE_SCHEMA=51) and 40
+# columns (before the per-cluster proxy check, cols 41-43, and the traffic-management
+# columns, cols 44-51). A 40-column file feeds every aggregate it always fed, counts
+# as traffic_config none, and adds nothing to the per-cluster proxy or traffic
+# figures, which read cols 41+ by header name. Any other width is legacy and skipped
+# (43 and 48 columns were intermediate layouts that never shipped).
 TSV_FILES=()
 LEGACY_FILES=()
+PRE_CHECK_FILES=0
 for f in "${ALL_TSV[@]}"; do
 	header=$(grep -m1 -v '^#' "$f" 2>/dev/null || true)
 	tabs=$(awk -F'\t' '{print NF}' <<<"$header")
-	if [[ "$tabs" == "40" ]]; then
-		TSV_FILES+=("$f")
-	else
-		LEGACY_FILES+=("$f")
-	fi
+	case "$tabs" in
+	51) TSV_FILES+=("$f") ;;
+	40) TSV_FILES+=("$f"); PRE_CHECK_FILES=$((PRE_CHECK_FILES + 1)) ;;
+	*) LEGACY_FILES+=("$f") ;;
+	esac
 done
 
 if (( ${#LEGACY_FILES[@]} > 0 )); then
-	echo "warning: skipping ${#LEGACY_FILES[@]} legacy TSV file(s) with old schema:" >&2
+	echo "warning: skipping ${#LEGACY_FILES[@]} legacy TSV file(s) with an unsupported schema (expected 40 or 51 columns):" >&2
 	for f in "${LEGACY_FILES[@]}"; do
 		echo "  $f" >&2
 	done
 fi
 
 if (( ${#TSV_FILES[@]} == 0 )); then
-	die "no TSV files with the current 40-column schema found in $RESULTS_DIR"
+	die "no TSV files with a supported schema (40 or 51 columns) found in $RESULTS_DIR"
+fi
+if (( PRE_CHECK_FILES > 0 )); then
+	echo "note: ${PRE_CHECK_FILES} TSV file(s) use the 40-column schema (no per-cluster proxy or traffic-management columns); their rows count as traffic_config none and add nothing to the per-cluster proxy figures, the proxy check or the VS/DR figures" >&2
 fi
 
+# Shared awk snippets, prepended to the programs that need them.
+# AWK_HEADER_IX: column lookup by header name for the appended columns (41+). The
+# index is rebuilt at each file's header line, so rows of a file whose header lacks a
+# name (a 40-column file) get col(name) == 0 and colv(name) == "" and contribute
+# nothing; traffic() reads such rows as none.
+# shellcheck disable=SC2016
+AWK_HEADER_IX='/^timestamp\t/ { delete ix; for (i = 1; i <= NF; i++) ix[$i] = i; next }
+function col(name) { return (name in ix) ? ix[name] : 0 }
+function colv(name,    c) { c = col(name); return (c && NF >= c) ? $c : "" }
+function traffic(    v) { v = colv("traffic_config"); return (v == "" ? "none" : v) }'
+# AWK_COMBO_KEY: the per-combo grouping key (needs AWK_HEADER_IX for traffic()).
+# aggregate() and collect_proxy_check must group identically, so a new sweep axis is
+# added here once (collect_sweep_axes reads the same traffic()).
+# shellcheck disable=SC2016
+AWK_COMBO_KEY='function combo_key() { return $3 "|" $4 "|" $5 "|" $6 "|" $7 "|" traffic() }'
+
 # C2: infra-schema concordance guard (mirrors the data-row width gate above). The
-# 40-column data schema is gated by `tabs == 40`, but the additive cluster-infra
-# preamble carries its OWN version marker (CONTROLPLANE_INFRA_SCHEMA). A future v2 bump
-# could change an infra key's SEMANTICS without changing the 40-col data width, so a
-# v1 file and a v2 file would pass the width gate and silently mix. Warn (don't die —
+# data schema is gated by header width (40 or 51), but the additive cluster-infra
+# preamble carries its OWN version marker (CONTROLPLANE_INFRA_SCHEMA). A bump can
+# change an infra key's SEMANTICS without changing the data width (v2: ISTIOD_REPLICAS
+# covers every context and reads `1-3` when they differ, plus ISTIOD_REPLICAS_BY_CONTEXT;
+# v1 read the first context only), so a v1 file and a v2 file would pass the width
+# gate and silently mix. Warn (don't die —
 # the data rows are still aggregable) if the consumed files disagree on the infra
 # schema, or if some carry it and others don't (a legacy 40-col file predating the
 # infra block reads as `unknown`).
@@ -144,6 +201,18 @@ HARNESS_SHA_TAG=$(grep -m1 '^# HARNESS_SHA=' "${TSV_FILES[0]}" 2>/dev/null | sed
 # attributable to the sweep that produced them. Emitted in all four formats below.
 RUN_ID_TAG=$(grep -m1 '^# RUN_ID=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# RUN_ID=//' || echo unknown)
 [[ -n "$RUN_ID_TAG" ]] || RUN_ID_TAG=unknown
+
+# PL6: a results dir from --config (or the default) is a base dir that can hold many
+# runs, and the report aggregates all of them. Warn only with --config and without
+# --results-dir, so a report without --config prints what it always did.
+if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
+	run_ids="$(for f in "${TSV_FILES[@]}"; do grep -m1 '^# RUN_ID=' "$f" 2>/dev/null || echo "# RUN_ID=unknown"; done | sed 's/^# RUN_ID=//' | sort -u)"
+	n_runs="$(grep -c . <<<"$run_ids")"
+	if ((n_runs > 1)); then
+		run_list="$(awk 'NR <= 5 { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { if (NR > 5) printf ",..." }' <<<"$run_ids")"
+		echo "warning: ${RESULTS_DIR} holds ${n_runs} runs (RUN_IDs: ${run_list}); this report aggregates all of them. Pass --results-dir <dir>/sweep-<RUN_ID> to report one sweep." >&2
+	fi
+fi
 FILES_CONSUMED=${#TSV_FILES[@]}
 FILES_SKIPPED=${#LEGACY_FILES[@]}
 
@@ -191,7 +260,7 @@ KUBE_VERSIONS_M="$(collect_kube_versions_meta)"
 
 # Extract unique sweep axis values from the TSV data rows.
 collect_sweep_axes() {
-	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	cat "${TSV_FILES[@]}" | awk -F'\t' "${AWK_HEADER_IX}"'
 	function bsort(arr, n,    i,j,t) {
 		for(i=1;i<n;i++) for(j=i+1;j<=n;j++)
 			if(arr[i]+0>arr[j]+0||(arr[i]+0==arr[j]+0 && arr[i]>arr[j])){t=arr[i];arr[i]=arr[j];arr[j]=t}
@@ -202,7 +271,7 @@ collect_sweep_axes() {
 	}
 	function join(arr, n,    s,i) { s=arr[1]; for(i=2;i<=n;i++) s=s","arr[i]; return s }
 	!/^#/ && !/^timestamp/ && NF>=40 {
-		mesh[$3]=1; svc[$4]=1; rep[$5]=1; ns[$6]=1; scope[$7]=1
+		mesh[$3]=1; svc[$4]=1; rep[$5]=1; ns[$6]=1; scope[$7]=1; tcs[traffic()]=1
 	}
 	END {
 		n=collect(mesh,a);  printf "mesh_sizes: %s\n", join(a,n)
@@ -210,6 +279,7 @@ collect_sweep_axes() {
 		n=collect(rep,a);   printf "replica_counts: %s\n", join(a,n)
 		n=collect(ns,a);    printf "namespace_counts: %s\n", join(a,n)
 		n=collect(scope,a); printf "sidecar_scopings: %s\n", join(a,n)
+		n=collect(tcs,a);   printf "traffic_configs: %s\n", join(a,n)
 	}'
 }
 SWEEP_AXES="$(collect_sweep_axes)"
@@ -218,6 +288,7 @@ SWEEP_SVC="$(echo "$SWEEP_AXES" | grep '^service_counts:' | cut -d' ' -f2-)"
 SWEEP_REP="$(echo "$SWEEP_AXES" | grep '^replica_counts:' | cut -d' ' -f2-)"
 SWEEP_NS="$(echo "$SWEEP_AXES" | grep '^namespace_counts:' | cut -d' ' -f2-)"
 SWEEP_SCOPE="$(echo "$SWEEP_AXES" | grep '^sidecar_scopings:' | cut -d' ' -f2-)"
+SWEEP_TRAFFIC="$(echo "$SWEEP_AXES" | grep '^traffic_configs:' | cut -d' ' -f2-)"
 
 # O9 "Achieved scale" — max of the per-row capacity columns (35-40) and
 # connected_proxies (22) across every VALID data row (istiod_restarted==0, col 31).
@@ -292,6 +363,118 @@ preamble_get() {
 	v="${v#*=}"
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
+
+# istiod_replicas_label: ISTIOD_REPLICAS for people ("3 per cluster", "1-3 per cluster
+# (varies by cluster)", "3 (first context only)" for an INFRA_SCHEMA 1 file). The
+# csv/json/yaml metadata keep the raw value and ISTIOD_REPLICAS_BY_CONTEXT.
+istiod_replicas_label() {
+	env_replicas_label "$(preamble_get ISTIOD_REPLICAS)" "$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)"
+}
+
+# preamble_scalar KEY [CONSEQUENCE] [MISSING]: a sweep-level `# KEY=value` read from
+# EVERY consumed TSV, for keys that 40-column files lack (so the first file may not
+# carry them). An input without the key is skipped, or, when MISSING is given, counts
+# as the value MISSING. One value -> that value; several -> `mixed:a,b` plus a stderr
+# warning ending in CONSEQUENCE (PL26: a sweep-level key must not silently take the
+# last value); none -> unknown.
+preamble_scalar() {
+	local key="$1" consequence="${2:-values are mixed}" missing="${3:-}" f v vals=""
+	for f in "${TSV_FILES[@]}"; do
+		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
+		if [[ -n "$v" ]]; then
+			v="${v#*=}"
+		elif [[ -n "$missing" ]]; then
+			v="$missing"
+		else
+			continue
+		fi
+		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
+	done
+	if [[ -z "$vals" ]]; then
+		echo "unknown"
+	elif [[ "$vals" == *,* ]]; then
+		echo "warning: input TSVs disagree on ${key} (${vals}); ${consequence}" >&2
+		echo "mixed:${vals}"
+	else
+		echo "$vals"
+	fi
+}
+PROXY_CHECK_TOL_M="$(preamble_scalar PROXY_CHECK_TOLERANCE_PCT "the proxy check mixes thresholds")"
+PROXY_CHECK_MIN_DIFF_M="$(preamble_scalar PROXY_CHECK_MIN_DIFF "the proxy check mixes thresholds")"
+# VS/DR knobs (sweep-level scalars, schema-51 files only). Inputs that disagree make
+# vsdr cells non-comparable, so they print as mixed:a,b with a warning.
+VSDR_EVERY_M="$(preamble_scalar VSDR_EVERY "vsdr cells mix VS/DR densities")"
+VSDR_SUBSETS_M="$(preamble_scalar VSDR_SUBSETS "vsdr cells mix DestinationRule subset counts")"
+
+# Which --config produced the inputs (PL2/PL19): `none` without one, `unknown` for
+# files written before the key existed. Every input should share it (PL26). A file
+# without the key counts as unknown, so mixing it with a config-driven file prints
+# mixed:<file>,unknown instead of crediting its rows to that config.
+RUN_CONFIG_M="$(preamble_scalar RUN_CONFIG "the report mixes runs made with different --config files" unknown)"
+RUN_CONFIG_SHA256_M="$(preamble_scalar RUN_CONFIG_SHA256 "the report mixes runs made with different --config contents" unknown)"
+
+# Shown next to the traffic_configs axis only when vsdr cells exist.
+TRAFFIC_AXIS_NOTE=""
+[[ ",${SWEEP_TRAFFIC}," == *",vsdr,"* ]] && TRAFFIC_AXIS_NOTE="  (vsdr: every ${VSDR_EVERY_M}, ${VSDR_SUBSETS_M} subsets)"
+
+# Per-cluster connected proxies + proxy check (TSV cols 41-43, read by header name).
+# One "cluster scrape" is the group of rows with the same timestamp ($1, one per
+# collection window), context ($2) and combo: every istiod pod row of that context in
+# that window, which all carry the same cluster columns. A group counts only when
+# EVERY row has istiod_restarted==0 (the n_valid gate, PL35); other groups are
+# tallied as `excluded`. proxy_check is a warning, never a filter (PL15). Emits
+#   proxies_cluster=<max over counted groups|unknown> pc_ok= pc_low= pc_high= pc_na=
+#   pc_excluded= pc_flagged=<ctx@ts:STATUS:connected/sidecars,...|none>
+# (at most 10 flagged entries, then `+N_more`).
+collect_proxy_check() {
+	cat "${TSV_FILES[@]}" | awk -F'\t' "${AWK_COMBO_KEY}
+${AWK_HEADER_IX}"'
+	function isnum(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	!/^#/ && !/^timestamp/ && NF >= 40 {
+		cc = col("cluster_connected_proxies"); cs = col("sidecar_pods"); ck = col("proxy_check")
+		if (!cc || !cs || !ck || NF < ck) next
+		g = $1 SUBSEP $2 SUBSEP combo_key()
+		if (!(g in gseen)) {
+			gseen[g] = 1; order[++ng] = g
+			gts[g] = $1; gctx[g] = $2; gval[g] = $cc; gsc[g] = $cs; gchk[g] = $ck
+		}
+		if ($31 != "0") gbad[g] = 1
+	}
+	END {
+		ok = 0; low = 0; high = 0; na = 0; excl = 0; nfl = 0; mx = ""; flagged = ""
+		for (i = 1; i <= ng; i++) {
+			g = order[i]
+			if (g in gbad) { excl++; continue }
+			if (isnum(gval[g]) && (mx == "" || gval[g] + 0 > mx + 0)) mx = gval[g] + 0
+			s = gchk[g]
+			if (s == "OK") ok++
+			else if (s == "LOW" || s == "HIGH") {
+				if (s == "LOW") low++; else high++
+				if (++nfl <= 10) flagged = flagged (flagged == "" ? "" : ",") gctx[g] "@" gts[g] ":" s ":" gval[g] "/" gsc[g]
+			}
+			else na++
+		}
+		if (nfl > 10) flagged = flagged ",+" (nfl - 10) "_more"
+		if (flagged == "") flagged = "none"
+		printf "proxies_cluster=%s pc_ok=%d pc_low=%d pc_high=%d pc_na=%d pc_excluded=%d pc_flagged=%s\n", \
+			(mx == "" ? "unknown" : mx), ok, low, high, na, excl, flagged
+	}'
+}
+PROXY_CHECK_SUMMARY="$(collect_proxy_check)"
+pc_get() {
+	# Pull one key=value out of PROXY_CHECK_SUMMARY; default unknown.
+	local key="$1" tok
+	for tok in $PROXY_CHECK_SUMMARY; do
+		[[ "$tok" == "${key}="* ]] && { echo "${tok#"${key}="}"; return; }
+	done
+	echo "unknown"
+}
+# One-line warning text when any counted cluster scrape is LOW or HIGH; empty otherwise.
+PROXY_CHECK_WARNING=""
+if (( $(pc_get pc_low) + $(pc_get pc_high) > 0 )); then
+	PROXY_CHECK_WARNING="connected proxies differ from Running sidecar pods by more than max(${PROXY_CHECK_TOL_M}%, ${PROXY_CHECK_MIN_DIFF_M}) on $(( $(pc_get pc_low) + $(pc_get pc_high) )) cluster scrape(s): $(pc_get pc_flagged)"
+fi
+PROXY_CHECK_TALLY="ok=$(pc_get pc_ok) low=$(pc_get pc_low) high=$(pc_get pc_high) n/a=$(pc_get pc_na) excluded=$(pc_get pc_excluded)"
 
 # #44: the four utilization-% maxes (istiod_*_pct_of_limit, node_*_pct) are derived
 # from `kubectl top` (the metrics API). When the metrics API is unavailable on the
@@ -441,11 +624,11 @@ compute_sla_verdict() {
 }
 compute_sla_verdict
 
-# Shared AWK aggregator. Groups by 5-tuple (mesh|svc|reps|ns|scoping) and
+# Shared AWK aggregator. Groups by 6-tuple (mesh|svc|reps|ns|scoping|traffic) and
 # emits one record per unique key with min/max/avg for core metrics plus
 # sidecar config-dump aggregates.
 #
-# 40-column schema (1-indexed):
+# 51-column schema (1-indexed; a 40-column file stops at col 40):
 #  1 timestamp          2 context            3 mesh_size        4 service_count
 #  5 replicas           6 namespace_count    7 sidecar_scoping
 #  8 istiod_mem_mi
@@ -466,11 +649,20 @@ compute_sla_verdict
 # 35 istiod_cpu_pct_of_limit  36 istiod_mem_pct_of_limit
 # 37 node_cpu_pct             38 node_mem_pct
 # 39 pods_scheduled           40 pods_allocatable
+# Per-cluster proxy check (same value on every row of one context in one window; read
+# by header name, never by position, so a 40-column file contributes nothing):
+# 41 cluster_connected_proxies  42 sidecar_pods  43 proxy_check
+# Traffic management (read by header name; a 40-column row is traffic_config none):
+# 44 traffic_config  45 vsdr_services  46 istiod_virt_services
+# 47 push_time_avg_ms  48 pushcontext_init_avg_ms
+# 49 sidecar_clusters_avg  50 sidecar_cds_bytes_avg  51 sidecar_rds_bytes_avg
 #
-# Aggregated output (tab-separated, 34 columns). This width is INTENTIONALLY decoupled
-# from the 40-column input schema above: the 6 O9 capacity cols (35-40) are point-in-time
-# reads surfaced in the achieved-scale block, not aggregated, so the aggregate stays 34.
-# (Do not "sync" this to 40 — it is not the input width.)
+# Aggregated output (tab-separated, 47 columns). This width is INTENTIONALLY decoupled
+# from the input schema above: the 6 O9 capacity cols (35-40) are point-in-time
+# reads surfaced in the achieved-scale block, not aggregated, and cols 42-43 feed the
+# proxy-check tally (collect_proxy_check). (Do not "sync" this to the input width.)
+# cluster_proxies_* take ONE value per cluster scrape (not per pod row), and only
+# from scrapes whose rows all have istiod_restarted==0.
 #   mesh_size service_count replicas namespace_count sidecar_scoping n_total n_valid
 #   mem_min mem_max mem_avg
 #   conv99_min conv99_max conv99_avg
@@ -482,8 +674,17 @@ compute_sla_verdict
 #   conv99_floor_pinned queue99_floor_pinned
 #   heap_alloc_min heap_alloc_max heap_alloc_avg
 #   heap_inuse_min heap_inuse_max heap_inuse_avg
+#   cluster_proxies_min cluster_proxies_max cluster_proxies_avg
+#   (38-47) traffic_config vsdr_services
+#   virt_services_avg push_time_avg pushctx_init_avg pushes_avg cfg_size_avg
+#   clusters_avg cds_bytes_avg rds_bytes_avg
+# virt_services/push_time/pushctx_init/pushes/cfg_size are istiod-sourced and gated on
+# istiod_restarted==0 like every istiod metric (PL35); clusters/cds/rds come from the
+# sampled sidecars' config dumps, so they are always ingested (like cfg_dump_*).
+# vsdr_services is the configured count (max over the cell's rows; 0 for none).
 aggregate() {
-	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	cat "${TSV_FILES[@]}" | awk -F'\t' "${AWK_COMBO_KEY}
+${AWK_HEADER_IX}"'
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	function ingest(metric, val, key,    m) {
 		if (val == "overflow") { ov[metric, key] = 1; return }
@@ -509,9 +710,32 @@ aggregate() {
 		a = min[metric, key]; b = max[metric, key]; c = sum[metric, key] / nv[metric, key]
 		return sprintf("%.0f\t%.0f\t%.0f", a+0, b+0, c+0)
 	}
+	# emit_avg: the average alone, N/A without a valid sample. fmt "count" prints a
+	# whole number bare and anything else with one decimal (replicas that disagree).
+	function emit_avg(metric, key, fmt,    v) {
+		if (!((metric, key) in nv) || nv[metric, key] == 0) return "N/A"
+		v = sum[metric, key] / nv[metric, key]
+		if (fmt == "count") return (v == int(v)) ? sprintf("%d", v) : sprintf("%.1f", v)
+		return sprintf(fmt, v)
+	}
 	!/^#/ && !/^timestamp/ && NF>=40 {
-		key = $3 "|" $4 "|" $5 "|" $6 "|" $7
+		key = combo_key()
 		if (!(key in seen)) { keys[++nkey] = key; seen[key] = 1 }
+		# Configured VS+DR services (same on every row of the cell, failed rows included).
+		vs = colv("vsdr_services")
+		if (is_num(vs) && (!(key in vsdr_svcs) || vs + 0 > vsdr_svcs[key] + 0)) vsdr_svcs[key] = vs + 0
+		# Sampled sidecar config-dump breakdown: proxy-side, always ingested.
+		ingest("clusters", colv("sidecar_clusters_avg"), key)
+		ingest("cds", colv("sidecar_cds_bytes_avg"), key)
+		ingest("rds", colv("sidecar_rds_bytes_avg"), key)
+		# Per-cluster proxies: one value per cluster scrape (timestamp|context|combo),
+		# ingested in END only if no row of that scrape is restarted/unknown.
+		cc = col("cluster_connected_proxies")
+		if (cc && NF >= cc) {
+			g = $1 SUBSEP $2 SUBSEP key
+			if (!(g in gkey)) { gkey[g] = key; gval[g] = $cc }
+			if ($31 != "0") gbad[g] = 1
+		}
 		# Config-dump bytes are proxy-side (read from each proxy config dump,
 		# independent of istiod restart state) — always ingested.
 		if ($24 ~ /^[0-9.]+$/) { cfg_avg_n[key]++; cfg_avg_sum[key] += $24+0 }
@@ -536,14 +760,21 @@ aggregate() {
 			ingest("conv",      $10, key)
 			ingest("queue",     $12, key)
 			ingest("cpu_delta", $32, key)
+			# Traffic-management istiod columns (cols 13 and 23 have always existed).
+			ingest("virt",      colv("istiod_virt_services"), key)
+			ingest("push_time", colv("push_time_avg_ms"), key)
+			ingest("pushctx",   colv("pushcontext_init_avg_ms"), key)
+			ingest("pushes",    $13, key)
+			ingest("cfg_size",  $23, key)
 			n_valid[key]++
 		}
 	}
 	END {
+		for (g in gkey) if (!(g in gbad)) ingest("cprx", gval[g], gkey[g])
 		for (i = 1; i <= nkey; i++) order[i] = keys[i]
-		# S9 sort fix: track `decided` flag so the string comparison
-		# for sidecar_scoping only fires when no numeric field resolved
-		# the ordering.
+		# S9 sort fix: track `decided` flag so the string comparisons
+		# (sidecar_scoping, then traffic_config) only fire when no numeric field
+		# resolved the ordering. none sorts before vsdr.
 		for (i = 1; i < nkey; i++) {
 			for (j = i + 1; j <= nkey; j++) {
 				split(order[i], a, "|"); split(order[j], b, "|")
@@ -552,11 +783,12 @@ aggregate() {
 					if (a[k]+0 < b[k]+0) { decided = 1; break }
 					if (a[k]+0 > b[k]+0) { swap = 1; decided = 1; break }
 				}
-				if (!decided && a[5] > b[5]) swap = 1
+				if (!decided && a[5] != b[5]) { decided = 1; if (a[5] > b[5]) swap = 1 }
+				if (!decided && a[6] > b[6]) swap = 1
 				if (swap) { t = order[i]; order[i] = order[j]; order[j] = t }
 			}
 		}
-		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn_total\tn_valid\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\tconv99_floor_pinned\tqueue99_floor_pinned\theap_alloc_min\theap_alloc_max\theap_alloc_avg\theap_inuse_min\theap_inuse_max\theap_inuse_avg\n"
+		printf "mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tn_total\tn_valid\tmem_min\tmem_max\tmem_avg\tconv99_min\tconv99_max\tconv99_avg\tqueue99_min\tqueue99_max\tqueue99_avg\tproxies_min\tproxies_max\tproxies_avg\trestarts\tunknown_restarts\tcpu_delta_min\tcpu_delta_max\tcpu_delta_avg\tcfg_dump_avg\tcfg_dump_max\tconv99_floor_pinned\tqueue99_floor_pinned\theap_alloc_min\theap_alloc_max\theap_alloc_avg\theap_inuse_min\theap_inuse_max\theap_inuse_avg\tcluster_proxies_min\tcluster_proxies_max\tcluster_proxies_avg\ttraffic_config\tvsdr_services\tvirt_services_avg\tpush_time_avg\tpushctx_init_avg\tpushes_avg\tcfg_size_avg\tclusters_avg\tcds_bytes_avg\trds_bytes_avg\n"
 		for (i = 1; i <= nkey; i++) {
 			k = order[i]
 			split(k, p, "|")
@@ -580,7 +812,9 @@ aggregate() {
 			# p99 reads as unresolved-below-100ms, mirroring the restart footnote.
 			conv_fp = (nv[("conv"), k]+0 > 0 && max[("conv"), k]+0 > 0 && max[("conv"), k]+0 <= 100) ? 1 : 0
 			queue_fp = (nv[("queue"), k]+0 > 0 && max[("queue"), k]+0 > 0 && max[("queue"), k]+0 <= 100) ? 1 : 0
-			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+			# A none cell with no vsdr_services column (40-column rows) configured none.
+			vsc = (k in vsdr_svcs) ? vsdr_svcs[k] : (p[6] == "none" ? 0 : "N/A")
+			printf "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				p[1], p[2], p[3], p[4], p[5], nt, nv_count,
 				emit3("mem",       k),
 				emit3("conv",      k),
@@ -591,14 +825,57 @@ aggregate() {
 				ca, cm,
 				conv_fp, queue_fp,
 				emit3("heap_alloc", k),
-				emit3("heap_inuse", k)
+				emit3("heap_inuse", k),
+				emit3("cprx",       k),
+				p[6], vsc,
+				emit_avg("virt", k, "count"),
+				emit_avg("push_time", k, "%.2f"),
+				emit_avg("pushctx", k, "%.2f"),
+				emit_avg("pushes", k, "%.0f"),
+				emit_avg("cfg_size", k, "%.0f"),
+				emit_avg("clusters", k, "%.0f"),
+				emit_avg("cds", k, "%.0f"),
+				emit_avg("rds", k, "%.0f")
 		}
 	}'
 }
 
+# vsdr_ingest_short <aggregated>: one `mesh|svc|reps|ns|scoping<TAB>detail` line per
+# vsdr cell whose istiod did not ingest every configured VirtualService (PL31: a
+# discriminator for "the VS/DR never reached istiod", e.g. a namespace outside
+# discoverySelectors). pilot_virt_services counts every VS istiod knows, so when the
+# paired none cell has a value the check uses the increase over it (pre-existing VS in
+# the mesh would otherwise hide a shortfall); without a pair it uses the absolute
+# count. Cells with no valid istiod sample are skipped (nothing to judge).
+vsdr_ingest_short() {
+	awk -F'\t' '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	NR == 1 { next }
+	{
+		base = $1 "|" $2 "|" $3 "|" $4 "|" $5
+		if ($38 == "none") none_virt[base] = $40
+		else if ($38 == "vsdr") { vb[++n] = base; vv[n] = $40; ve[n] = $39 }
+	}
+	END {
+		for (i = 1; i <= n; i++) {
+			b = vb[i]
+			if (!is_num(vv[i]) || !is_num(ve[i])) continue
+			if ((b in none_virt) && is_num(none_virt[b])) {
+				got = vv[i] - none_virt[b]
+				if (got < ve[i]) printf "%s\tistiod VirtualServices %s -> %s (+%s) < %s configured\n", b, none_virt[b], vv[i], got, ve[i]
+			} else if (vv[i] + 0 < ve[i] + 0) {
+				printf "%s\tistiod VirtualServices %s < %s configured\n", b, vv[i], ve[i]
+			}
+		}
+	}' <<<"$1"
+}
+
 report_text() {
+	local aggregated short
+	aggregated=$(aggregate)
+	short="$(vsdr_ingest_short "$aggregated")"
 	echo "=== Control-Plane Resource Scaling ==="
-	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}"
+	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}"
 	echo ""
 	# O9 achieved-scale block (clearly delimited; tolerates unknown). Pulled from
 	# the per-row capacity columns (max across rows) + the preamble.
@@ -606,12 +883,15 @@ report_text() {
 	echo "  node allocatable (cpu_m/mem_mi): $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI)"
 	echo "  istiod limit (cpu_m/mem_mi):  $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI)  [per replica]"
 	echo "  istiod request (cpu_m/mem_mi): $(preamble_get ISTIOD_REQ_CPU_M) / $(preamble_get ISTIOD_REQ_MEM_MI)  [per replica]"
-	echo "  istiod replicas:             $(preamble_get ISTIOD_REPLICAS)"
+	echo "  istiod replicas:             $(istiod_replicas_label)"
+	echo "  istiod replicas by context:  $(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)"
 	echo "  network topology:            $(preamble_get NETWORK_TOPOLOGY)"
 	echo "  metrics API (preflight):     $(preamble_get METRICS_API)"
 	echo "  tuning baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "  sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
-	echo "  connected_proxies (max):     $(as_get proxies)"
+	echo "  connected_proxies per istiod replica (max): $(as_get proxies)"
+	echo "  connected_proxies per cluster (max): $(pc_get proxies_cluster)  [pilot_xds summed over a cluster's istiod pods at one final scrape]"
+	echo "  proxy check vs Running sidecar pods (tolerance ${PROXY_CHECK_TOL_M}%, min diff ${PROXY_CHECK_MIN_DIFF_M}): ${PROXY_CHECK_TALLY}"
 	echo "  services_total [configured] (max): $(as_get svc)"
 	echo "  istiod_cpu_pct_of_limit (max): $(as_pct istiod_cpu_pct)"
 	echo "  istiod_mem_pct_of_limit (max): $(as_pct istiod_mem_pct)"
@@ -622,6 +902,7 @@ report_text() {
 	echo "  pods_scheduled / allocatable: $(as_get pods_sched) / $(as_get pods_alloc)"
 	echo "  ${COVERAGE_LINE}"
 	metrics_unavailable && echo "  NOTE: $(metrics_note_text)"
+	[[ -n "$PROXY_CHECK_WARNING" ]] && echo "  WARNING: ${PROXY_CHECK_WARNING}"
 	echo ""
 	echo "Customer SLA verdict: ${SLA_VERDICT} — ${SLA_HEADLINE}"
 	echo ""
@@ -631,10 +912,11 @@ report_text() {
 	echo "  replica_counts:    ${SWEEP_REP}"
 	echo "  namespace_counts:  ${SWEEP_NS}"
 	echo "  sidecar_scopings:  ${SWEEP_SCOPE}"
+	echo "  traffic_configs:   ${SWEEP_TRAFFIC}${TRAFFIC_AXIS_NOTE}"
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	aggregate | awk -F'\t' '
+	awk -F'\t' '
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
 		if (upper_ms+0 <= 100)   return "0-100"
@@ -651,39 +933,60 @@ report_text() {
 	{
 		conv_pin = ($27+0 == 1) ? "  [SINGLE-BUCKET-PINNED: all delta mass in the 0-100ms bucket; value is a uniform-within-bucket assumption, unresolved below 100ms]" : ""
 		queue_pin = ($28+0 == 1) ? "  [SINGLE-BUCKET-PINNED: all delta mass in the 0-100ms bucket; value is a uniform-within-bucket assumption, unresolved below 100ms]" : ""
-		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s (n_total=%s n_valid=%s) ---\n", $1, $2, $3, $4, $5, $6, $7
+		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s traffic_config=%s (n_total=%s n_valid=%s) ---\n", $1, $2, $3, $4, $5, $38, $6, $7
 		printf "  istiod CPU avg (m):   min=%s max=%s avg=%s   [process_cpu_seconds_total delta over window]\n", $22, $23, $24
 		printf "  istiod Memory (Mi):   min=%s max=%s avg=%s   [process_resident_memory_bytes peak]\n", $8, $9, $10
 		printf "  Go heap alloc (Mi):   min=%s max=%s avg=%s   [go_memstats_alloc_bytes]\n", $29, $30, $31
 		printf "  Go heap inuse (Mi):   min=%s max=%s avg=%s   [go_memstats_heap_inuse_bytes]\n", $32, $33, $34
 		printf "  Convergence p99 (ms): %s%s\n", bucket_range($12), conv_pin
 		printf "  Queue p99 (ms):       %s%s\n", bucket_range($15), queue_pin
-		printf "  Connected proxies:    min=%s max=%s avg=%s\n",     $17, $18, $19
+		printf "  Connected proxies / istiod replica: min=%s max=%s avg=%s\n", $17, $18, $19
+		printf "  Connected proxies / cluster:        min=%s max=%s avg=%s   [one value per cluster scrape]\n", $35, $36, $37
 		if ($25+0 > 0) printf "  Config dump avg (MB): %.1f   max: %.1f\n", $25/1048576, $26/1048576
 		else if ($6 > 0) printf "  Config dump avg (MB): N/A\n"
+		printf "  Traffic mgmt:         VS+DR services=%s istiod VirtualServices avg=%s push time avg (ms)=%s PushContext init avg (ms)=%s\n", $39, $40, $41, $42
+		printf "  xDS pushes avg=%s   xDS config size avg (bytes)=%s\n", $43, $44
+		printf "  Sampled sidecars:     CDS clusters avg=%s CDS bytes avg=%s RDS bytes avg=%s\n", $45, $46, $47
 		if ($20+0 > 0) printf "  ! istiod restarts:    %s row(s) had restarts during the scrape window\n", $20
 		if ($21+0 > 0) printf "  ? undetectable restart: %s row(s) had unknown restart state (missing process_start_time_seconds)\n", $21
 		printf "\n"
-	}'
+	}' <<<"$aggregated"
+	if [[ -n "$short" ]]; then
+		while IFS=$'\t' read -r cell detail; do
+			echo "WARNING: vsdr cell ${cell}: ${detail} — istiod did not ingest every VirtualService (check discoverySelectors and the namespace labels)"
+		done <<<"$short"
+	fi
 }
 
 report_csv() {
+	local aggregated short
+	aggregated=$(aggregate)
+	short="$(vsdr_ingest_short "$aggregated")"
 	echo "# RUN_ID=${RUN_ID_TAG},ISTIO_VERSION=${ISTIO_VERSION_TAG},HARNESS_SHA=${HARNESS_SHA_TAG},files_consumed=${FILES_CONSUMED},skipped_legacy=${FILES_SKIPPED}"
-	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE}"
+	echo "# run_config: run_config=${RUN_CONFIG_M} run_config_sha256=${RUN_CONFIG_SHA256_M}"
+	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE} traffic_configs=${SWEEP_TRAFFIC}"
+	echo "# traffic_management: vsdr_every=${VSDR_EVERY_M} vsdr_subsets=${VSDR_SUBSETS_M}"
 	# O9 achieved-scale provenance parity with text/markdown. Comment lines only, so the
 	# CSV row schema (the aggregate columns below) is byte-identical for row consumers.
 	echo "# capacity: node_alloc_cpu_m=$(preamble_get NODE_ALLOC_CPU_M) node_alloc_mem_mi=$(preamble_get NODE_ALLOC_MEM_MI) istiod_cpu_limit_m=$(preamble_get ISTIOD_CPU_LIMIT_M) istiod_mem_limit_mi=$(preamble_get ISTIOD_MEM_LIMIT_MI) scale_target_fraction=$(preamble_get SCALE_TARGET_FRACTION) scale_sizing_mode=$(preamble_get SCALE_SIZING_MODE) metrics_api=$(preamble_get METRICS_API) (istiod limits per replica)"
-	echo "# infra: istiod_req_cpu_m=$(preamble_get ISTIOD_REQ_CPU_M) istiod_req_mem_mi=$(preamble_get ISTIOD_REQ_MEM_MI) istiod_lim_cpu_m=$(preamble_get ISTIOD_LIM_CPU_M) istiod_lim_mem_mi=$(preamble_get ISTIOD_LIM_MEM_MI) istiod_replicas=$(preamble_get ISTIOD_REPLICAS) network_topology=$(preamble_get NETWORK_TOPOLOGY)"
-	echo "# achieved: connected_proxies_max=$(as_get proxies) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) istiod_rss_pct_of_limit_max=$(pct_or_bare "$ISTIOD_RSS_MEM_PCT") node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
+	echo "# infra: istiod_req_cpu_m=$(preamble_get ISTIOD_REQ_CPU_M) istiod_req_mem_mi=$(preamble_get ISTIOD_REQ_MEM_MI) istiod_lim_cpu_m=$(preamble_get ISTIOD_LIM_CPU_M) istiod_lim_mem_mi=$(preamble_get ISTIOD_LIM_MEM_MI) istiod_replicas=$(preamble_get ISTIOD_REPLICAS) istiod_replicas_by_context=$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT) network_topology=$(preamble_get NETWORK_TOPOLOGY)"
+	echo "# achieved: connected_proxies_max=$(as_get proxies) connected_proxies_cluster_max=$(pc_get proxies_cluster) services_configured_max=$(as_get svc) istiod_cpu_pct_of_limit_max=$(as_pct istiod_cpu_pct) istiod_mem_pct_of_limit_max=$(as_pct istiod_mem_pct) istiod_rss_pct_of_limit_max=$(pct_or_bare "$ISTIOD_RSS_MEM_PCT") node_cpu_pct_max=$(as_pct node_cpu_pct) node_mem_pct_max=$(as_pct node_mem_pct) pods_scheduled_max=$(as_get pods_sched) pods_allocatable_max=$(as_get pods_alloc)"
 	echo "# tuning_baseline: $(preamble_get TUNING_BASELINE) | sidecar_egress_hosts: $(preamble_get SIDECAR_EGRESS_HOSTS)"
+	echo "# proxy_check: tolerance_pct=${PROXY_CHECK_TOL_M} min_diff=${PROXY_CHECK_MIN_DIFF_M} ok=$(pc_get pc_ok) low=$(pc_get pc_low) high=$(pc_get pc_high) na=$(pc_get pc_na) excluded=$(pc_get pc_excluded) flagged=$(pc_get pc_flagged)"
+	[[ -n "$PROXY_CHECK_WARNING" ]] && echo "# WARNING: ${PROXY_CHECK_WARNING}"
 	echo "# ${COVERAGE_LINE}"
 	echo "# sla_verdict: ${SLA_VERDICT} — ${SLA_HEADLINE}"
 	metrics_unavailable && echo "# metrics: $(metrics_note_text)"
-	aggregate | awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }'
+	if [[ -n "$short" ]]; then
+		while IFS=$'\t' read -r cell detail; do
+			echo "# WARNING: vsdr cell ${cell}: ${detail}"
+		done <<<"$short"
+	fi
+	awk -F'\t' 'BEGIN{OFS=","} { $1=$1; print }' <<<"$aggregated"
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
-# pulled from tests/controlplane/README.md ("What Gets Measured" + the 40-column schema
+# pulled from tests/controlplane/README.md ("What Gets Measured" + the column schema
 # notes); units/source/caveats mirror the README, not invented here.
 glossary_section() {
 	cat <<'GLOSSARY'
@@ -710,24 +1013,43 @@ so a restart-poisoned row is excluded from every numeric aggregate (`n_valid` mi
 | `heap_inuse (Mi)` | MiB | `go_memstats_heap_inuse_bytes` | Go heap in use — point-in-time at final scrape; steady-state signal independent of RSS (which stays inflated after GC via `MADV_FREE`). |
 | `conv_p99 (ms)` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence reported as a **bucket range** (e.g. `100-500`), not an exact value — istiod buckets are 100/500/1000/3000/5000/10000/20000/30000 ms. `†` = SINGLE-BUCKET-PINNED (all delta mass in the 0-100 ms bucket; a uniform-within-bucket assumption, unresolved below 100 ms). |
 | `queue_p99 (ms)` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 time pushes waited in istiod's queue; same bucket-range / `†` semantics as `conv_p99`. |
-| `proxies` (connected_proxies) | proxies | `pilot_xds` gauge summed over its series (final scrape) | Connected proxy count; gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
+| `proxies/replica` (connected_proxies) | proxies per istiod pod | `pilot_xds` gauge summed over its series (final scrape) | Proxies connected to ONE istiod replica (each proxy holds one istiod connection, so with R replicas this is roughly 1/R of the cluster). A replica with no connections reads 0. Gated on `istiod_restarted==0` (a mid-reconnect transient is excluded). |
+| `proxies/cluster` (cluster_connected_proxies) | proxies per cluster | `pilot_xds` summed over every istiod pod of one cluster, same final scrape batch | One value per cluster scrape (avg over the cell's scrapes here). `N/A` when any pod scrape was empty or short, or the Running istiod pod set changed during the window. Counted only when every pod row of that scrape has `istiod_restarted==0`. |
+| `proxy check` (proxy_check) | OK / LOW / HIGH / N/A | `proxies/cluster` vs the cluster's Running, non-terminating pods with the `sidecar.istio.io/status` annotation (gateways included) | `LOW`/`HIGH` when they differ by more than max(`PROXY_CHECK_TOLERANCE_PCT` % of the sidecar pods, `PROXY_CHECK_MIN_DIFF`). A warning, never a filter: flagged scrapes stay in every aggregate. The pod count is read seconds after the scrape, so pods starting or stopping in between can flag a scrape. |
 | `cfg_dump_avg (MB)` | MB | `pilot-agent request /config_dump?include_eds` → `wc -c` | Real per-proxy config-dump size (EDS included by design — the cost `Sidecar` scoping reduces); proxy-side, so ingested regardless of istiod restart state. |
 | `restarts` | rows | `istiod_restarted==1` | Rows where `process_start_time_seconds` moved forward between baseline and final scrape; counters/histograms for those samples may under-report. |
 | `unk_restarts` | rows | `istiod_restarted==unknown` | Rows where restart state was undetectable (a pinned pod disappeared / missing `process_start_time_seconds`). |
+| `traffic` (traffic_config) | enum | sweep axis | `none` (no VirtualService/DestinationRule) or `vsdr` (one VirtualService and one DestinationRule per configured service; that service's replicas are split over one Deployment per subset, so the pod count is the same). Rows from 40-column TSVs count as `none`. |
+| `VS+DR svcs` (vsdr_services) | services | configured | Services given a VirtualService + DestinationRule (`--vsdr-every`); 0 for `none`. Configured intent, not a measurement. |
+| `istiod VS` (istiod_virt_services) | VirtualServices | `pilot_virt_services` gauge (final scrape) | Every VirtualService istiod knows, the test's and any already in the mesh. Same on every replica (never summed). Gated on `istiod_restarted==0`. |
+| `push time avg (ms)` | ms per push | `pilot_xds_push_time` Δsum ÷ Δcount, all xDS types | Average time istiod spent generating and sending one push in the window. `N/A` with no push or on a restarted row. |
+| `PushContext init avg (ms)` | ms | `pilot_pushcontext_init_seconds` Δsum ÷ Δcount | Average PushContext rebuild time in the window (VS/DR indexing lands here). `N/A` with no rebuild or on a restarted row. |
+| `xDS pushes` | pushes per istiod pod | `pilot_xds_pushes` delta | Pushes over the window (TSV `xds_pushes_delta`). |
+| `xDS config size avg` | bytes per push | `pilot_xds_config_size_bytes` Δsum ÷ Δcount | Average pushed resource size over all xDS types (TSV `config_size_avg_bytes`). |
+| `CDS clusters` | clusters per proxy | sampled `/config_dump` `dynamic_active_clusters` | CDS clusters on the sampled sidecars; each DestinationRule subset adds one per port. Proxy-side, so not restart-gated. |
+| `CDS (KB)` / `RDS (KB)` | KB per proxy | compact JSON length of the dump's `ClustersConfigDump` / `RoutesConfigDump` | A size signal for the CDS and RDS config (VirtualService routes land in RDS), not the xDS wire size. |
 
 The "Sidecar scoping effect" table reuses `cfg_dump_avg` (per-proxy `/config_dump` MB)
 and renders the reduction percentage of `namespace`/`explicit` relative to `none`
 (`none->ns`, `none->explicit`); `N/A` where a scoping mode was not swept for that base combo.
+It compares `traffic_config` `none` cells only.
+The "Traffic management (VS/DR) effect" tables pair each `vsdr` cell with the `none` cell
+of the same mesh, services, replicas, namespaces and scoping, as `none -> vsdr (change)`.
+`expected extra clusters` is VS+DR services × subsets: each subset adds one CDS cluster
+on every proxy that sees the service (not computed when scoping hides other namespaces).
 The "Achieved scale vs capacity (O9)" block reports point-in-time capacity reads (node
 allocatable, istiod limits/requests per replica, `*_pct_of_limit`/`node_*_pct` utilization
 from `kubectl top`, `istiod_rss_pct_of_limit` from peak RSS, pods scheduled/allocatable) —
-maxes over `n_valid`-gated rows, not windowed aggregates.
+maxes over `n_valid`-gated rows, not windowed aggregates. Its `connected_proxies per
+cluster (max)` is the peak `proxies/cluster` value, and the proxy-check row counts cluster
+scrapes by result (`excluded` = scrapes with a restarted or unknown row).
 GLOSSARY
 }
 
 report_markdown() {
-	local aggregated
+	local aggregated short
 	aggregated=$(aggregate)
+	short="$(vsdr_ingest_short "$aggregated")"
 	local total_restarts total_unknowns
 	total_restarts=$(awk -F'\t' 'NR>1 { s += $20+0 } END { printf "%d", s+0 }' <<<"$aggregated")
 	total_unknowns=$(awk -F'\t' 'NR>1 { s += $21+0 } END { printf "%d", s+0 }' <<<"$aggregated")
@@ -736,7 +1058,12 @@ report_markdown() {
 	echo "run_id: ${RUN_ID_TAG}"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
+	echo "run_config: \"${RUN_CONFIG_M}\""
+	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
 	echo "sidecar_scoping: ${SIDECAR_SCOPING_M:-N/A}"
+	echo "traffic_configs: \"${SWEEP_TRAFFIC}\""
+	echo "vsdr_every: \"${VSDR_EVERY_M}\""
+	echo "vsdr_subsets: \"${VSDR_SUBSETS_M}\""
 	echo "config_dump_samples: ${CONFIG_DUMP_SAMPLES_M:-N/A}"
 	echo "kube_versions: ${KUBE_VERSIONS_M:-N/A}"
 	echo "scale_sizing_mode: $(preamble_get SCALE_SIZING_MODE)"
@@ -746,7 +1073,10 @@ report_markdown() {
 	echo "istiod_lim_cpu_m: $(preamble_get ISTIOD_LIM_CPU_M)"
 	echo "istiod_lim_mem_mi: $(preamble_get ISTIOD_LIM_MEM_MI)"
 	echo "istiod_replicas: $(preamble_get ISTIOD_REPLICAS)"
+	echo "istiod_replicas_by_context: \"$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)\""
 	echo "network_topology: $(preamble_get NETWORK_TOPOLOGY)"
+	echo "proxy_check_tolerance_pct: \"${PROXY_CHECK_TOL_M}\""
+	echo "proxy_check_min_diff: \"${PROXY_CHECK_MIN_DIFF_M}\""
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
 	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
 	echo "sla_verdict: ${SLA_VERDICT}"
@@ -769,9 +1099,12 @@ report_markdown() {
 	echo "| node allocatable (cpu_m/mem_mi) | $(preamble_get NODE_ALLOC_CPU_M) / $(preamble_get NODE_ALLOC_MEM_MI) |"
 	echo "| istiod limit (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_CPU_LIMIT_M) / $(preamble_get ISTIOD_MEM_LIMIT_MI) |"
 	echo "| istiod request (cpu_m/mem_mi, per replica) | $(preamble_get ISTIOD_REQ_CPU_M) / $(preamble_get ISTIOD_REQ_MEM_MI) |"
-	echo "| istiod replicas | $(preamble_get ISTIOD_REPLICAS) |"
+	echo "| istiod replicas | $(istiod_replicas_label) |"
+	echo "| istiod replicas by context | $(preamble_get ISTIOD_REPLICAS_BY_CONTEXT) |"
 	echo "| network topology | $(preamble_get NETWORK_TOPOLOGY) |"
-	echo "| connected_proxies (max) | $(as_get proxies) |"
+	echo "| connected_proxies per istiod replica (max) | $(as_get proxies) |"
+	echo "| connected_proxies per cluster (max) | $(pc_get proxies_cluster) |"
+	echo "| proxy check vs Running sidecar pods (tolerance ${PROXY_CHECK_TOL_M}%, min diff ${PROXY_CHECK_MIN_DIFF_M}) | ${PROXY_CHECK_TALLY} |"
 	echo "| services_total [configured] (max) | $(as_get svc) |"
 	echo "| istiod_cpu_pct_of_limit (max) | $(as_pct istiod_cpu_pct) |"
 	echo "| istiod_mem_pct_of_limit (max) | $(as_pct istiod_mem_pct) |"
@@ -782,6 +1115,7 @@ report_markdown() {
 	echo ""
 	echo "> ${COVERAGE_LINE}"
 	metrics_unavailable && { echo ""; echo "> NOTE: $(metrics_note_text)"; }
+	[[ -n "$PROXY_CHECK_WARNING" ]] && { echo ""; echo "> **Warning:** ${PROXY_CHECK_WARNING}"; }
 	echo ""
 	echo "**Customer SLA verdict: ${SLA_VERDICT}** — ${SLA_HEADLINE}"
 	echo ""
@@ -792,11 +1126,12 @@ report_markdown() {
 	echo "| replica_counts | ${SWEEP_REP} |"
 	echo "| namespace_counts | ${SWEEP_NS} |"
 	echo "| sidecar_scopings | ${SWEEP_SCOPE} |"
+	echo "| traffic_configs | ${SWEEP_TRAFFIC}${TRAFFIC_AXIS_NOTE} |"
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	echo "| mesh_size | svc | reps | ns | scoping | n_total | n_valid | cpu_avg (m) | mem_avg (Mi) | heap_alloc (Mi) | heap_inuse (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies | cfg_dump_avg (MB) | restarts | unk_restarts |"
-	echo "|-----------|-----|------|----|---------|---------|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|-------------------|----------|--------------|"
+	echo "| mesh_size | svc | reps | ns | scoping | traffic | n_total | n_valid | cpu_avg (m) | mem_avg (Mi) | heap_alloc (Mi) | heap_inuse (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies/replica | proxies/cluster | cfg_dump_avg (MB) | restarts | unk_restarts |"
+	echo "|-----------|-----|------|----|---------|---------|---------|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|-----------------|-----------------|-------------------|----------|--------------|"
 	awk -F'\t' '
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
@@ -818,7 +1153,7 @@ report_markdown() {
 		# P1-6: dagger-mark a SINGLE-BUCKET-PINNED conv/queue p99 (cols 27/28).
 		cp = bucket_range($12); if ($27+0 == 1) { cp = cp " †"; any_pin = 1 }
 		qp = bucket_range($15); if ($28+0 == 1) { qp = qp " †"; any_pin = 1 }
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $24, $10, ha, hi, cp, qp, $19, cfg_mb, $20, $21
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $38, $6, $7, $24, $10, ha, hi, cp, qp, $19, $37, cfg_mb, $20, $21
 	}
 	END { if (any_pin) print "\n> † SINGLE-BUCKET-PINNED: all delta mass for that quantile sits in the coarsest (0-100ms) `pilot_proxy_convergence_time` bucket, so the reported value is a uniform-within-bucket assumption (Prometheus `histogram_quantile` semantics), NOT resolved below 100ms. Real sub-bucket signal only appears once convergence climbs into a higher bucket (e.g. at 10k-service scale)." }' <<<"$aggregated"
 	if (( total_restarts > 0 || total_unknowns > 0 )); then
@@ -838,10 +1173,13 @@ report_markdown() {
 ## Sidecar scoping effect on per-proxy config size
 
 Lower is better. The expected ordering is `none` > `namespace` >= `explicit`.
+Compares `traffic_config` `none` cells only.
 
 EFFECT_HDR
 	awk -F'\t' '
 	NR == 1 { next }
+	# vsdr cells share the base key; they are compared in the traffic-management section.
+	$38 != "none" { next }
 	{
 		base = $1 "|" $2 "|" $3 "|" $4
 		scope = $5
@@ -879,22 +1217,130 @@ EFFECT_HDR
 		}
 	}' <<<"$aggregated"
 
+	# Only when the sweep has vsdr cells; a none-only report is unchanged.
+	if awk -F'\t' 'NR > 1 && $38 == "vsdr" { f = 1 } END { exit !f }' <<<"$aggregated"; then
+		traffic_effect_section "$aggregated" "$short"
+	fi
+
 	# #17: metric glossary at the very end of the markdown summary.
 	glossary_section
 }
 
+# traffic_effect_section <aggregated> <vsdr_ingest_short output>: markdown tables that
+# pair each vsdr cell with the none cell of the same base (mesh|svc|reps|ns|scoping).
+traffic_effect_section() {
+	local aggregated="$1" short="$2"
+	cat <<'TM_HDR'
+
+## Traffic management (VS/DR) effect
+
+Each row pairs the `none` and `vsdr` cells of one base cell as `none -> vsdr (change)`.
+Only the traffic config differs: the vsdr cell adds a VirtualService and a DestinationRule
+per configured service and splits that service's replicas over one Deployment per subset
+(same pod count).
+
+TM_HDR
+	awk -F'\t' -v subsets="$VSDR_SUBSETS_M" '
+	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	# pair <none> <vsdr> <divisor> <fmt>: "n -> v (+x%)"; N/A unless both are numbers.
+	function pair(n, v, d, fmt,    s) {
+		if (!is_num(n) || !is_num(v)) return "N/A"
+		s = sprintf(fmt, n / d) " -> " sprintf(fmt, v / d)
+		if (n + 0 != 0) s = s sprintf(" (%+.1f%%)", 100 * (v - n) / n)
+		return s
+	}
+	NR == 1 { next }
+	$38 == "none" || $38 == "vsdr" {
+		base = $1 "|" $2 "|" $3 "|" $4 "|" $5
+		if (!(base in seen)) { seen[base] = 1; order[++nb] = base }
+		for (c = 1; c <= NF; c++) cell[base, $38, c] = $c
+		has[base, $38] = 1
+	}
+	END {
+		np = 0
+		for (i = 1; i <= nb; i++) if (has[order[i], "none"] && has[order[i], "vsdr"]) pb[++np] = order[i]
+		if (np == 0) {
+			print "(No base cell has both a none and a vsdr cell. Sweep `--traffic-configs none,vsdr` to compare.)"
+			exit
+		}
+		print "### istiod cost"
+		print ""
+		print "istiod-sourced and n_valid-gated: `N/A` when either cell has no valid sample."
+		print ""
+		print "| mesh | svc | reps | ns | scoping | n_valid (none/vsdr) | VS+DR svcs | istiod VS | CPU avg (m) | heap inuse (Mi) | RSS (Mi) | xDS pushes | push time avg (ms) | PushContext init avg (ms) | xDS config size avg (KB) |"
+		print "|------|-----|------|----|---------|---------------------|------------|-----------|-------------|-----------------|----------|------------|--------------------|---------------------------|--------------------------|"
+		for (i = 1; i <= np; i++) {
+			b = pb[i]; split(b, p, "|")
+			printf "| %s | %s | %s | %s | %s | %s/%s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+				p[1], p[2], p[3], p[4], p[5], cell[b, "none", 7], cell[b, "vsdr", 7], cell[b, "vsdr", 39], \
+				pair(cell[b, "none", 40], cell[b, "vsdr", 40], 1, "%.0f"), \
+				pair(cell[b, "none", 24], cell[b, "vsdr", 24], 1, "%.0f"), \
+				pair(cell[b, "none", 34], cell[b, "vsdr", 34], 1, "%.0f"), \
+				pair(cell[b, "none", 10], cell[b, "vsdr", 10], 1, "%.0f"), \
+				pair(cell[b, "none", 43], cell[b, "vsdr", 43], 1, "%.0f"), \
+				pair(cell[b, "none", 41], cell[b, "vsdr", 41], 1, "%.2f"), \
+				pair(cell[b, "none", 42], cell[b, "vsdr", 42], 1, "%.2f"), \
+				pair(cell[b, "none", 44], cell[b, "vsdr", 44], 1024, "%.1f")
+		}
+		print ""
+		print "### Per-proxy config (sampled sidecars)"
+		print ""
+		print "Proxy-side (`/config_dump` of the sampled pods), so not restart-gated; `N/A` when no sidecar was sampled."
+		print ""
+		print "| mesh | svc | reps | ns | scoping | VS+DR svcs | expected extra clusters | CDS clusters | clusters delta | CDS (KB) | RDS (KB) | cfg dump (MB) |"
+		print "|------|-----|------|----|---------|------------|-------------------------|--------------|----------------|----------|----------|---------------|"
+		for (i = 1; i <= np; i++) {
+			b = pb[i]; split(b, p, "|")
+			vs = cell[b, "vsdr", 39]
+			# Every proxy sees every service only with one namespace or scoping none.
+			exp_cl = (is_num(vs) && is_num(subsets) && (p[4] + 0 == 1 || p[5] == "none")) ? vs * subsets : "-"
+			cn = cell[b, "none", 45]; cv = cell[b, "vsdr", 45]
+			dcl = (is_num(cn) && is_num(cv)) ? sprintf("%+d", cv - cn) : "N/A"
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
+				p[1], p[2], p[3], p[4], p[5], vs, exp_cl, \
+				pair(cn, cv, 1, "%.0f"), dcl, \
+				pair(cell[b, "none", 46], cell[b, "vsdr", 46], 1024, "%.1f"), \
+				pair(cell[b, "none", 47], cell[b, "vsdr", 47], 1024, "%.1f"), \
+				pair(cell[b, "none", 25], cell[b, "vsdr", 25], 1048576, "%.2f")
+		}
+	}' <<<"$aggregated"
+	if [[ -n "$short" ]]; then
+		echo ""
+		while IFS=$'\t' read -r cell detail; do
+			echo "> **WARN:** istiod ingested fewer VirtualServices than configured in vsdr cell \`${cell}\`: ${detail}. The vsdr numbers may not include the full VS/DR load; check discoverySelectors and the test namespace labels."
+		done <<<"$short"
+	fi
+	cat <<'TM_NOTES'
+
+> Order bias: each vsdr cell runs right after its none cell, and istiod RSS does not shrink
+> after GC (`MADV_FREE`), so vsdr RSS can carry over from the none cell. Compare heap inuse,
+> or run a second sweep with `--traffic-configs vsdr,none`. Gateways also get the subset
+> clusters, but only workload sidecars are sampled.
+TM_NOTES
+}
+
 report_json() {
-	aggregate | awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
+	local aggregated shortkeys
+	aggregated=$(aggregate)
+	# ";mesh|svc|reps|ns|scoping;..." of the vsdr cells with an ingest shortfall.
+	shortkeys="$(vsdr_ingest_short "$aggregated" | awk -F'\t' '{ printf ";%s", $1 } END { print ";" }')"
+	awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
+		-v rc_path="$RUN_CONFIG_M" -v rc_sha="$RUN_CONFIG_SHA256_M" \
 		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" \
+		-v sw_traffic="$SWEEP_TRAFFIC" -v tm_every="$VSDR_EVERY_M" -v tm_subsets="$VSDR_SUBSETS_M" -v shortkeys="$shortkeys" \
 		-v cap_ncpu="$(preamble_get NODE_ALLOC_CPU_M)" -v cap_nmem="$(preamble_get NODE_ALLOC_MEM_MI)" \
 		-v cap_icpu="$(preamble_get ISTIOD_CPU_LIMIT_M)" -v cap_imem="$(preamble_get ISTIOD_MEM_LIMIT_MI)" \
 		-v cap_tf="$(preamble_get SCALE_TARGET_FRACTION)" -v cap_mode="$(preamble_get SCALE_SIZING_MODE)" -v cap_metrics="$(preamble_get METRICS_API)" \
 		-v inf_rcpu="$(preamble_get ISTIOD_REQ_CPU_M)" -v inf_rmem="$(preamble_get ISTIOD_REQ_MEM_MI)" \
 		-v inf_lcpu="$(preamble_get ISTIOD_LIM_CPU_M)" -v inf_lmem="$(preamble_get ISTIOD_LIM_MEM_MI)" \
-		-v inf_rep="$(preamble_get ISTIOD_REPLICAS)" -v inf_net="$(preamble_get NETWORK_TOPOLOGY)" \
+		-v inf_rep="$(preamble_get ISTIOD_REPLICAS)" -v inf_rep_by="$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)" \
+		-v inf_net="$(preamble_get NETWORK_TOPOLOGY)" \
 		-v sla_v="$SLA_VERDICT" -v sla_h="$SLA_HEADLINE" \
 		-v tb_levers="$(preamble_get TUNING_BASELINE)" -v tb_egress="$(preamble_get SIDECAR_EGRESS_HOSTS)" \
-		-v ach_prx="$(as_get proxies)" -v ach_svc="$(as_get svc)" \
+		-v ach_prx="$(as_get proxies)" -v ach_cprx="$(pc_get proxies_cluster)" -v ach_svc="$(as_get svc)" \
+		-v pc_tol="$PROXY_CHECK_TOL_M" -v pc_min="$PROXY_CHECK_MIN_DIFF_M" \
+		-v pc_ok="$(pc_get pc_ok)" -v pc_low="$(pc_get pc_low)" -v pc_high="$(pc_get pc_high)" \
+		-v pc_na="$(pc_get pc_na)" -v pc_excl="$(pc_get pc_excluded)" -v pc_flagged="$(pc_get pc_flagged)" \
 		-v ach_icpu="$(as_get istiod_cpu_pct)" -v ach_imem="$(as_get istiod_mem_pct)" \
 		-v ach_irss="$ISTIOD_RSS_MEM_PCT" \
 		-v ach_ncpu="$(as_get node_cpu_pct)" -v ach_nmem="$(as_get node_mem_pct)" \
@@ -904,7 +1350,7 @@ report_json() {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_net, tb_levers, tb_egress, ach_prx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, cov, sla_v, sla_h, metrics_note }
+	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"istiod_replicas_by_context\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\"},\n  \"results\": [", ri, iv, hs, rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_rep_by, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -920,11 +1366,15 @@ report_json() {
 		printf "\"istiod_restarted_rows\":%d,\"istiod_restarted_unknown_rows\":%d,", $20+0, $21+0
 		printf "\"sidecar_config_bytes_avg\":%s,\"sidecar_config_bytes_max\":%s,", cell($25), cell($26)
 		printf "\"go_heap_alloc_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($29), cell($30), cell($31)
-		printf "\"go_heap_inuse_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s}}", cell($32), cell($33), cell($34)
+		printf "\"go_heap_inuse_mi\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($32), cell($33), cell($34)
+		printf "\"connected_proxies_cluster\":{\"min\":%s,\"max\":%s,\"avg\":%s},", cell($35), cell($36), cell($37)
+		printf "\"traffic_config\":\"%s\",\"vsdr_services\":%s,\"istiod_virt_services_avg\":%s,\"push_time_avg_ms\":%s,\"pushcontext_init_avg_ms\":%s,", $38, cell($39), cell($40), cell($41), cell($42)
+		printf "\"xds_pushes_avg\":%s,\"config_size_avg_bytes\":%s,\"sidecar_clusters_avg\":%s,\"sidecar_cds_bytes_avg\":%s,\"sidecar_rds_bytes_avg\":%s,", cell($43), cell($44), cell($45), cell($46), cell($47)
+		printf "\"istiod_vs_ingest_short\":%s}", ($38 == "vsdr" && index(shortkeys, ";" $1 "|" $2 "|" $3 "|" $4 "|" $5 ";")) ? "true" : "false"
 	}
 	END {
 		if (printed) printf "\n  ]\n}\n"; else printf "]\n}\n"
-	}'
+	}' <<<"$aggregated"
 }
 
 report_charts() {
@@ -934,6 +1384,8 @@ report_charts() {
 	echo "---"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
+	echo "run_config: \"${RUN_CONFIG_M}\""
+	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"
@@ -983,7 +1435,9 @@ report_charts() {
 	NR == 1 { next }
 	$2+0 != max_svc || $3+0 != max_rep || $4+0 != max_ns { next }
 	{
-		ms = $1 + 0; scoping = $5; n_valid = $7 + 0
+		# One series per scoping, plus scoping/vsdr for the vsdr cells (otherwise a
+		# vsdr cell would overwrite the none cell of the same scoping).
+		ms = $1 + 0; scoping = ($38 == "vsdr") ? $5 "/vsdr" : $5; n_valid = $7 + 0
 		# PL13/PL15 + PL8 gate (mirrors the markdown/json n_valid + overflow handling):
 		# a cell with no valid samples (every row restart-poisoned/unknown so n_valid==0,
 		# where the aggregate emit3 returns N/A) or whose cpu_delta_avg ($24) is
@@ -1028,7 +1482,7 @@ report_charts() {
 		# Chart 1: istiod CPU vs mesh size by scoping
 		printf "```mermaid\n"
 		printf "xychart-beta\n"
-		printf "    title \"istiod CPU vs Mesh Size by Sidecar Scoping\"\n"
+		printf "    title \"istiod CPU vs Mesh Size by Sidecar Scoping (and traffic config)\"\n"
 		printf "    x-axis \"Mesh Size\" ["
 		for (i = 1; i <= n_ms; i++) {
 			if (i > 1) printf ", "

@@ -112,6 +112,34 @@ intensity (deployment count) the sweep runs setup, probe and cleanup. It writes 
 Charts need at least three contexts (two mesh sizes with a remote).
 A failed setup or probe becomes a placeholder row and the sweep moves on.
 
+## Run config (`--config FILE`)
+
+Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
+rules: [Run config](../../README.md#run-config---config-file)).
+[`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
+2 and 4 Deployments scaled 1 to 2, 2 iterations):
+
+```bash
+./tests/churn/003-run-sweep.sh --config tests/churn/configs/smoke.env --dry-run
+./tests/churn/003-run-sweep.sh --config tests/churn/configs/smoke.env
+./tests/churn/004-report-results.sh --config tests/churn/configs/smoke.env \
+  --results-dir tests/churn/results/smoke/sweep-<RUN_ID> --format md
+./tests/churn/005-cleanup.sh --config tests/churn/configs/smoke.env
+```
+
+- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `CHURN_*`, `FANOUT_*` and
+  `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE` stays environment only.
+- **One value or a list:** `001` and `002` read `CHURN_DEPLOYMENT_COUNT`; the sweep reads the
+  CSV `CHURN_INTENSITIES` (`--churn-intensities`; empty: `CHURN_DEPLOYMENT_COUNT`) and
+  `CHURN_MESH_SIZES` (`--mesh-sizes`; empty: 1 to the number of contexts). A list key exported
+  in the environment beats a one-value key in the file.
+- **Other run keys:** `CHURN_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path
+  starts at the repo root, unlike the flags) and `CHURN_WAIT_TIMEOUT_SEC`
+  (`001 --wait-timeout`).
+- **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`,
+  `--tuning-baseline` and `--sidecar-egress-hosts` (`002`; the sweep sets them),
+  `--format` and `--dry-run`.
+
 ## Settings
 
 Defaults live in `config/options.env` and flags override them: `CHURN_TEST_NAMESPACE`

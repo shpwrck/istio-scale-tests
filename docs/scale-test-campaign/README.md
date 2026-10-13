@@ -105,6 +105,8 @@ tests/churn/003-run-sweep.sh          --contexts "$CONTEXTS" --mesh-sizes "$MESH
 
 # 3. controlplane — istiod resource scaling (~1–2h)
 tests/controlplane/003-run-sweep.sh   --contexts "$CONTEXTS" --mesh-sizes "$MESH" --sidecar-scopings none,namespace,explicit --force-large-matrix
+#    Optional (off by default): add --traffic-configs none,vsdr to also measure a
+#    VirtualService + DestinationRule per service (doubles the matrix).
 
 # 4. dataplane — cross-cluster latency (~2h+)
 tests/dataplane/003-run-sweep.sh      --contexts "$CONTEXTS" --mesh-sizes "$MESH" --qps-levels 10,100,500,1000 --force-large-matrix
@@ -119,6 +121,11 @@ Between suites, confirm the previous suite's `*-test` namespaces are gone and re
 
 Read each suite's markdown summary (re-generate with its `004`/`005` report script if needed).
 Reports drop poisoned or incomplete rows and print `n_valid` vs `n_total`; read that first.
+For dataplane and churn-dataplane, also read the `Remote coverage` section (every remote
+REACHABLE?) and, for dataplane, the `Local baseline` verdict (OK at every QPS level?):
+`n_valid` vs `n_total` does not name an unreachable remote or a dropped local cell. To
+gate on coverage, run the report with `--fail-on-unreachable` (exit 3 names the remotes).
+Record the `Run config` (path + sha256) the sweeps ran with.
 Fill one row per suite:
 
 | Suite | SLA verdict | Headline (one line) | Usable? |

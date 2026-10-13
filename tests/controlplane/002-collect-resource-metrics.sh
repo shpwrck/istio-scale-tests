@@ -2,8 +2,8 @@
 # Collect istiod resource usage and Prometheus metrics for control-plane analysis.
 # Scrapes istiod /metrics, computes delta-window stats for the histograms and
 # counters that are cumulative since istiod start, and writes a TSV row per
-# cluster. Optionally samples per-sidecar /config_dump byte size for Sidecar CR
-# scoping analysis.
+# cluster. Optionally samples per-sidecar /config_dump byte size (plus CDS cluster
+# count and CDS/RDS size) for Sidecar CR scoping and VS/DR analysis.
 #
 # Delta-window approach (chosen because Prometheus UWM is not guaranteed to be
 # reachable from where this script runs): we take a *baseline* scrape on entry,
@@ -21,6 +21,9 @@
 #
 #   # Watch mode during load test (per-tick deltas at the interval cadence):
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
+#
+#   # Settle, results dir and metadata tags from a run config:
+#   ./tests/controlplane/002-collect-resource-metrics.sh --config tests/controlplane/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 # Loud ERR trap for unexpected aborts (per-pod faults become N/A rows).
@@ -28,9 +31,13 @@ trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BAS
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -42,17 +49,22 @@ source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_li
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 
 CONTEXTS_CSV=""
-OUTPUT_DIR="${ROOT}/tests/controlplane/results"
+OUTPUT_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
 MESH_SIZE=""
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
+TRAFFIC_CONFIG="${CONTROLPLANE_TRAFFIC_CONFIG:-none}"
+VSDR_EVERY="${CONTROLPLANE_VSDR_EVERY:-1}"
+VSDR_SUBSETS="${CONTROLPLANE_VSDR_SUBSETS:-2}"
 CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
-SETTLE_SEC=60
+SETTLE_SEC="${CONTROLPLANE_SETTLE_SEC:-60}"
 WATCH=0
 INTERVAL=15
 DRY_RUN=0
@@ -66,18 +78,26 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE        Run config of KEY=value lines (config/options.env keys; see
+                       tests/controlplane/README.md, "Run config").
+                       Precedence: flag > --config > environment > default.
   --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
   --mesh-size N        Metadata tag for TSV output.
   --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
   --replicas N         Metadata tag for TSV output (default: $REPLICAS).
   --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
   --sidecar-scoping M  Metadata tag: none|namespace|explicit (default: $SIDECAR_SCOPING).
+  --traffic-config M   Metadata tag: none|vsdr (default: $TRAFFIC_CONFIG). Must match
+                       what 001 deployed.
+  --vsdr-every N       Metadata tag: 001's --vsdr-every (default: $VSDR_EVERY). With
+                       --service-count it sets the vsdr_services column.
+  --vsdr-subsets N     Metadata tag: 001's --vsdr-subsets (default: $VSDR_SUBSETS).
   --config-dump-samples N  Random pods per cluster to exec /config_dump on
                        (default: $CONFIG_DUMP_SAMPLES; 0 disables).
   --settle SEC         Delta-window length (seconds) between baseline and
                        final scrape (default: $SETTLE_SEC). Must match the
                        settle time used by the calling orchestrator.
-  --output-dir DIR     Results directory (default: tests/controlplane/results).
+  --output-dir DIR     Results directory (default: ${CONTROLPLANE_RESULTS_DIR}).
   --run-id ID          Reuse an existing sweep RUN_ID (writes into sweep-<ID>/).
   --watch              Loop continuously (delta window = --interval).
   --interval SEC       Seconds between scrapes in watch mode (default: 15).
@@ -101,12 +121,23 @@ Usage: $(basename "$0") [options]
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_CONFIG_DUMP_SAMPLES.
+  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
+  CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_SETTLE_SEC (--settle),
+  CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root).
+  CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
+  (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
+  over its istiod pods) and its Running sidecar pods differ by more than
+  max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -135,6 +166,21 @@ while [[ $# -gt 0 ]]; do
 	--sidecar-scoping)
 		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
 		SIDECAR_SCOPING="$2"
+		shift 2
+		;;
+	--traffic-config)
+		[[ -n "${2:-}" ]] || die "--traffic-config requires a value"
+		TRAFFIC_CONFIG="$2"
+		shift 2
+		;;
+	--vsdr-every)
+		[[ -n "${2:-}" ]] || die "--vsdr-every requires a value"
+		VSDR_EVERY="$2"
+		shift 2
+		;;
+	--vsdr-subsets)
+		[[ -n "${2:-}" ]] || die "--vsdr-subsets requires a value"
+		VSDR_SUBSETS="$2"
 		shift 2
 		;;
 	--config-dump-samples)
@@ -197,6 +243,12 @@ is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integ
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
 is_nonneg_int "$CONFIG_DUMP_SAMPLES" || die "--config-dump-samples must be a non-negative integer (got: $CONFIG_DUMP_SAMPLES)"
 validate_scoping "$SIDECAR_SCOPING"
+validate_traffic_config "$TRAFFIC_CONFIG"
+is_pos_int "$VSDR_EVERY" || die "--vsdr-every must be a positive integer (got: $VSDR_EVERY)"
+is_pos_int "$VSDR_SUBSETS" || die "--vsdr-subsets must be a positive integer (got: $VSDR_SUBSETS)"
+# Services that carry a VS+DR (configured; same rule as the chart). 0 for none.
+VSDR_SERVICES=0
+[[ "$TRAFFIC_CONFIG" == vsdr ]] && VSDR_SERVICES="$(vsdr_service_count "$SERVICE_COUNT" "$VSDR_EVERY")"
 case "$PHASE" in
 combined|baseline|final) ;;
 *) die "--phase must be one of: combined, baseline, final (got: $PHASE)";;
@@ -208,6 +260,10 @@ if ((WATCH)) && [[ "$PHASE" != combined ]]; then
 	die "--watch is only valid with --phase combined"
 fi
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
+PROXY_CHECK_TOL_PCT="${CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT:-10}"
+PROXY_CHECK_MIN_DIFF="${CONTROLPLANE_PROXY_CHECK_MIN_DIFF:-2}"
+is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT must be a non-negative integer percent (got: $PROXY_CHECK_TOL_PCT)"
+is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "CONTROLPLANE_PROXY_CHECK_MIN_DIFF must be a non-negative integer (got: $PROXY_CHECK_MIN_DIFF)"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -235,6 +291,8 @@ HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null |
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
+echo "[002] Traffic: $TRAFFIC_CONFIG  VS+DR services: $VSDR_SERVICES  (every $VSDR_EVERY, $VSDR_SUBSETS subsets)"
+echo "[002] Proxy check: warn when connected proxies and Running sidecar pods differ by > max(${PROXY_CHECK_TOL_PCT}%, ${PROXY_CHECK_MIN_DIFF}) per cluster"
 
 if ((DRY_RUN)); then
 	echo "Would scrape istiod metrics from: ${CONTEXTS[*]}"
@@ -300,8 +358,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-		echo "# CONTROLPLANE_SCHEMA=40"
-		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
+		echo "# CONTROLPLANE_SCHEMA=51"
+		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
@@ -316,15 +374,22 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# ISTIOD_MEM_LIMIT_MI=${PRE_ISTIOD_MEM_LIMIT_MI}"
 		echo "# SCALE_TARGET_FRACTION=${SCALE_TARGET_FRACTION:-unknown}"
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
+		echo "# PROXY_CHECK_TOLERANCE_PCT=${PROXY_CHECK_TOL_PCT}"
+		echo "# PROXY_CHECK_MIN_DIFF=${PROXY_CHECK_MIN_DIFF}"
+		echo "# TRAFFIC_CONFIG=${TRAFFIC_CONFIG}"
+		echo "# VSDR_EVERY=${VSDR_EVERY}"
+		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
+		config_preamble_lines
 		# shellcheck disable=SC2086
 		infra_preamble_lines $PRE_INFRA_KV
 		echo "# ${PRE_TUNING_BASELINE}"
 		echo "# ${PRE_SIDECAR_EGRESS_HOSTS}"
-		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING"
+		echo "# Contexts: ${CONTEXTS[*]}  Mesh size: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  Traffic: $TRAFFIC_CONFIG"
 	} > "$TSV_FILE"
 fi
 
-# Schema (TSV header — 40 columns):
+# Schema (TSV header — 51 columns; must equal 003's CONTROLPLANE_TSV_HEADER, which
+# tests/lib/test/preamble.bats checks):
 #   timestamp context mesh_size service_count replicas namespace_count sidecar_scoping
 #   istiod_mem_mi
 #   convergence_p50_ms convergence_p99_ms queue_p50_ms queue_p99_ms
@@ -338,8 +403,26 @@ fi
 #   go_heap_alloc_mi go_heap_inuse_mi
 #   (cols 35-40) istiod_cpu_pct_of_limit istiod_mem_pct_of_limit
 #                   node_cpu_pct node_mem_pct pods_scheduled pods_allocatable
+#   (cols 41-43) cluster_connected_proxies sidecar_pods proxy_check
+#     Per CONTEXT (same value on every row of that context in one window):
+#     cluster_connected_proxies = pilot_xds summed over the context's istiod pods from
+#     the same final batch (N/A when any pod scrape is incomplete or the Running istiod
+#     pod set changed); sidecar_pods = Running, non-terminating pods with the
+#     sidecar.istio.io/status annotation; proxy_check = OK|LOW|HIGH|N/A.
+#     connected_proxies (col 22) stays the per-pod (per-replica) value.
+#   (cols 44-51) traffic_config vsdr_services istiod_virt_services
+#                push_time_avg_ms pushcontext_init_avg_ms
+#                sidecar_clusters_avg sidecar_cds_bytes_avg sidecar_rds_bytes_avg
+#     traffic_config / vsdr_services: what 001 deployed (none|vsdr; services with a
+#     VS+DR, 0 for none). istiod_virt_services = pilot_virt_services (final scrape;
+#     mesh-config gauge, identical on every replica, never summed across pods, PL28).
+#     push_time_avg_ms / pushcontext_init_avg_ms = 1000 * Δsum/Δcount of the
+#     pilot_xds_push_time / pilot_pushcontext_init_seconds histograms (PL11), N/A on a
+#     restarted/unknown row or with no observation in the window (PL13).
+#     sidecar_*: averages over the sampled config dumps (dynamic CDS clusters, compact
+#     JSON size of the CDS and RDS sections); N/A without a sample.
 if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
-	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable" >> "$TSV_FILE"
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
@@ -559,6 +642,23 @@ extract_hist_count() {
 	'
 }
 
+# hist_delta_avg_ms <baseline> <final> <name>: average observation over the window,
+# 1000 * Δ<name>_sum / Δ<name>_count (a seconds histogram -> ms), summed over all
+# label series (PL11). N/A when nothing was observed (Δcount <= 0) or Δsum < 0.
+hist_delta_avg_ms() {
+	local baseline="$1" final="$2" name="$3" b_sum f_sum b_cnt f_cnt
+	b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" "$name" || echo 0)
+	f_sum=$(extract_hist_sum "$final" "$name")
+	b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" "$name" || echo 0)
+	f_cnt=$(extract_hist_count "$final" "$name")
+	awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
+		BEGIN {
+			ds = fs - bs; dc = fc - bc
+			if (dc <= 0 || ds < 0) { print "N/A"; exit }
+			printf "%.2f", 1000 * ds / dc
+		}'
+}
+
 delta_histogram() {
 	local baseline="$1" final="$2" name="$3"
 	awk -v name="${name}_bucket" '
@@ -633,9 +733,13 @@ deterministic_pick() {
 	}'
 }
 
+# Prints "<bytes csv>|attempted=<n>|got=<n>|clusters=<csv>|cds=<csv>|rds=<csv>": per
+# sampled pod, the dump size and its config_dump_breakdown fields (N/A for a failed
+# sample or an unparseable dump).
 collect_config_dump_samples() {
 	local ctx="$1" samples="$2"
-	local out_csv="" got=0 attempted=0
+	local out_csv="" got=0 attempted=0 cl_csv="" cds_csv="" rds_csv=""
+	local dump_file="${TMP_DIR}/config-dump-sample.json"
 	if (( samples == 0 )); then
 		echo ""
 		return 0
@@ -656,20 +760,28 @@ collect_config_dump_samples() {
 		# wedged sidecar/exec must not stall the sweep. On timeout the dump is empty ->
 		# bytes=0 -> counted as a FAILED sample (got not incremented), never a partial/
 		# misleading byte count (capturing first lets us drop a timed-out exec cleanly).
-		local dump bytes
+		local dump bytes bd v
 		dump="$(timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
 			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null)" || dump=""
 		bytes="$(printf '%s' "$dump" | wc -c)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
+		bd="unknown"
 		if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
 			got=$((got + 1))
 			out_csv+="${bytes},"
+			# CDS/RDS breakdown of the same dump (one jq pass; unknown if unparseable).
+			printf '%s' "$dump" > "$dump_file"
+			bd="$(config_dump_breakdown "$dump_file")"
+			rm -f "$dump_file"
 		else
 			out_csv+="N/A,"
 		fi
+		v="$(kv_get clusters "$bd")"; [[ "$v" =~ ^[0-9]+$ ]] || v="N/A"; cl_csv+="${v},"
+		v="$(kv_get cds_bytes "$bd")"; [[ "$v" =~ ^[0-9]+$ ]] || v="N/A"; cds_csv+="${v},"
+		v="$(kv_get rds_bytes "$bd")"; [[ "$v" =~ ^[0-9]+$ ]] || v="N/A"; rds_csv+="${v},"
 	done <<<"$picked"
 	out_csv="${out_csv%,}"
-	echo "${out_csv}|attempted=${attempted}|got=${got}"
+	echo "${out_csv}|attempted=${attempted}|got=${got}|clusters=${cl_csv%,}|cds=${cds_csv%,}|rds=${rds_csv%,}"
 }
 
 aggregate_sample_bytes() {
@@ -833,24 +945,51 @@ compute_skew_ms() {
 # report's is_num/NF logic treats it like any other N/A column. Results cached
 # per ctx so multi-replica rows on the same ctx don't re-read.
 declare -A CAP_CACHE  # ctx -> "icpu_pct imem_pct ncpu_pct nmem_pct pods_sched pods_alloc"
+# The node list and the pod list are read first, together, by read_pod_counts_for_ctx:
+# compute_cluster_proxies needs the sidecar count right after the final scrape (PL21),
+# before any slow `kubectl top` read. Raw key=value strings, parsed by their consumers.
+declare -A NODE_KV_CACHE  # ctx -> cap_node_totals output (cpu_m= mem_mi= pods= nodes= names=)
+declare -A POD_KV_CACHE   # ctx -> cap_pod_count output (scheduled= sidecars=)
+
+# kv_get <key> <kv_string>: one `key=value` token from a space-separated string, else unknown.
+kv_get() {
+	local key="$1" tok
+	for tok in $2; do
+		[[ "$tok" == "${key}="* ]] && { echo "${tok#"${key}="}"; return 0; }
+	done
+	echo "unknown"
+}
+
+# read_pod_counts_for_ctx <ctx>: fill NODE_KV_CACHE/POD_KV_CACHE once per window.
+# Must run in the main shell (not in $(...)), or the cache is lost.
+read_pod_counts_for_ctx() {
+	local ctx="$1"
+	[[ -n "${POD_KV_CACHE[$ctx]:-}" ]] && return 0
+	local nt="" pc="" worker_csv
+	# `|| true` keeps the parser's all-unknown line when kubectl fails (pipefail).
+	nt="$(cap_node_totals "$ctx" "${KUBECTL[@]}")" || true
+	NODE_KV_CACHE[$ctx]="$nt"
+	worker_csv="$(kv_get names "$nt")"
+	[[ "$worker_csv" == unknown ]] && worker_csv=""
+	pc="$(cap_pod_count "$ctx" "$worker_csv" "${KUBECTL[@]}")" || true
+	[[ -n "$pc" ]] || pc="scheduled=unknown sidecars=unknown"
+	POD_KV_CACHE[$ctx]="$pc"
+}
 
 collect_capacity_for_ctx() {
 	local ctx="$1"
 	[[ -n "${CAP_CACHE[$ctx]:-}" ]] && return 0
 
-	local node_cpu_m="unknown" node_mem_mi="unknown" node_pods="unknown" worker_csv=""
-	local kv
-	# shellcheck disable=SC2207
-	local -a nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
-	for kv in "${nt[@]}"; do
-		case "$kv" in
-			cpu_m=*) node_cpu_m="${kv#cpu_m=}" ;;
-			mem_mi=*) node_mem_mi="${kv#mem_mi=}" ;;
-			pods=*) node_pods="${kv#pods=}" ;;
-			names=*) worker_csv="${kv#names=}" ;;
-		esac
-	done
+	read_pod_counts_for_ctx "$ctx"
+	local node_cpu_m node_mem_mi node_pods worker_csv pods_sched
+	node_cpu_m="$(kv_get cpu_m "${NODE_KV_CACHE[$ctx]}")"
+	node_mem_mi="$(kv_get mem_mi "${NODE_KV_CACHE[$ctx]}")"
+	node_pods="$(kv_get pods "${NODE_KV_CACHE[$ctx]}")"
+	worker_csv="$(kv_get names "${NODE_KV_CACHE[$ctx]}")"
+	[[ "$worker_csv" == unknown ]] && worker_csv=""
+	pods_sched="$(kv_get scheduled "${POD_KV_CACHE[$ctx]}")"
 
+	local kv
 	local used_cpu_m="unknown" used_mem_mi="unknown"
 	# shellcheck disable=SC2207
 	local -a nu=($(cap_node_used "$ctx" "$worker_csv" "${KUBECTL[@]}"))
@@ -859,13 +998,6 @@ collect_capacity_for_ctx() {
 			cpu_m=*) used_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) used_mem_mi="${kv#mem_mi=}" ;;
 		esac
-	done
-
-	local pods_sched="unknown"
-	# shellcheck disable=SC2207
-	local -a pc=($(cap_pod_count "$ctx" "$worker_csv" "${KUBECTL[@]}"))
-	for kv in "${pc[@]}"; do
-		case "$kv" in scheduled=*) pods_sched="${kv#scheduled=}" ;; esac
 	done
 
 	# cap_istiod_limits returns the PER-REPLICA container limit + the replica count.
@@ -911,6 +1043,94 @@ collect_capacity_for_ctx() {
 }
 
 # ---------------------------------------------------------------------------
+# Per-cluster connected proxies + sanity check (cols 41-43).
+# ---------------------------------------------------------------------------
+# connected_proxies (col 22) is per istiod pod. Each proxy holds one istiod
+# connection, so a cluster's total is pilot_xds summed over ALL its istiod pods
+# (PL28), taken from the same final batch (PL8). The sum is strict (PL29): an empty
+# or short pod scrape makes it N/A instead of a silent undercount, and so does a
+# change in the Running istiod pod set since the pods were resolved (a new replica's
+# proxies would be missing from the sum). The expected count is the context's
+# Running injected pods, read right after the batch, outside the window (PL21; the
+# few seconds between the two reads remain, which is why this is a warning with a
+# tolerance). LOW/HIGH never filters a row.
+declare -A CLUSTER_PROXIES  # ctx -> sum | N/A
+declare -A SIDECAR_PODS     # ctx -> Running injected pods | N/A
+declare -A PROXY_CHECK      # ctx -> OK | LOW | HIGH | N/A
+
+compute_cluster_proxies() {
+	local ctx k live scraped n_pods n_live total sidecars check
+	local -a ctxs=() files=()
+	local -A seen=()
+	for k in "${!POD_CTXS[@]}"; do
+		ctx="${POD_CTXS[k]}"
+		[[ -n "${seen[$ctx]:-}" ]] && continue
+		seen[$ctx]=1
+		ctxs+=("$ctx")
+	done
+	# Expected side first, for every context, so it lands as close to the batch as
+	# possible. Same node + pod lists the capacity columns use (no extra API call).
+	for ctx in "${ctxs[@]}" "${DROPPED_CTXS[@]}"; do
+		read_pod_counts_for_ctx "$ctx"
+		sidecars="$(kv_get sidecars "${POD_KV_CACHE[$ctx]}")"
+		[[ "$sidecars" =~ ^[0-9]+$ ]] || sidecars="N/A"
+		SIDECAR_PODS[$ctx]="$sidecars"
+	done
+	for ctx in "${ctxs[@]}"; do
+		files=()
+		scraped=""
+		for k in "${!POD_CTXS[@]}"; do
+			[[ "${POD_CTXS[k]}" == "$ctx" ]] || continue
+			files+=("${TMP_DIR}/final-${k}.metrics")
+			scraped+="${POD_NAMES[k]}"$'\n'
+		done
+		n_pods=${#files[@]}
+		scraped="$(printf '%s' "$scraped" | LC_ALL=C sort)"
+		# PL40: a failed read degrades to N/A; it never aborts the run.
+		live="$(fanout_list_istiod_pods "$ctx" "${KUBECTL[@]}")" || live=""
+		if [[ -z "$live" ]]; then
+			echo "warning: ${ctx}: could not list Running istiod pods after the final scrape; cluster_connected_proxies=N/A" >&2
+			total="N/A"
+		elif [[ "$live" != "$scraped" ]]; then
+			n_live="$(printf '%s\n' "$live" | grep -c .)" || n_live="?"
+			echo "warning: ${ctx}: Running istiod pod set changed during the window (scraped ${n_pods} pod(s), now ${n_live}); cluster_connected_proxies=N/A" >&2
+			total="N/A"
+		else
+			total="$(fanout_gauge_sum_strict pilot_xds "${files[@]}")"
+			if [[ "$total" == unknown ]]; then
+				echo "warning: ${ctx}: an istiod pod's final scrape is empty or short; cluster_connected_proxies=N/A (no partial sum)" >&2
+				total="N/A"
+			fi
+		fi
+		sidecars="${SIDECAR_PODS[$ctx]}"
+		check="$(cap_proxy_check "$total" "$sidecars" "$PROXY_CHECK_TOL_PCT" "$PROXY_CHECK_MIN_DIFF")"
+		CLUSTER_PROXIES[$ctx]="$total"
+		PROXY_CHECK[$ctx]="$check"
+		echo "  Cluster ${ctx}: connected_proxies=${total} over ${n_pods} istiod pod(s), sidecar_pods=${sidecars}, proxy_check=${check}"
+		if [[ "$check" == LOW || "$check" == HIGH ]]; then
+			echo "warning: ${ctx}: connected proxies ${total} (sum over ${n_pods} istiod pods) vs Running sidecar pods ${sidecars}: ${check} (differ by more than max(${PROXY_CHECK_TOL_PCT}%, ${PROXY_CHECK_MIN_DIFF}))" >&2
+		fi
+	done
+	# Dropped (zero-pod) contexts: no total, no check; the sidecar count was read above.
+	for ctx in "${DROPPED_CTXS[@]}"; do
+		CLUSTER_PROXIES[$ctx]="N/A"
+		PROXY_CHECK[$ctx]="N/A"
+	done
+}
+
+# cluster_fields <ctx>: cols 41-43 for a row of that context, tab-separated.
+cluster_fields() {
+	local ctx="$1"
+	printf '%s\t%s\t%s' "${CLUSTER_PROXIES[$ctx]:-N/A}" "${SIDECAR_PODS[$ctx]:-N/A}" "${PROXY_CHECK[$ctx]:-N/A}"
+}
+
+# traffic_na_fields: cols 44-51 for a row with nothing measured (no final scrape, or a
+# dropped context): the deployed traffic config, then N/A.
+traffic_na_fields() {
+	printf '%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A' "$TRAFFIC_CONFIG" "$VSDR_SERVICES"
+}
+
+# ---------------------------------------------------------------------------
 # Main scrape_window: baseline + final + deltas + emit TSV rows.
 # ---------------------------------------------------------------------------
 
@@ -932,6 +1152,8 @@ scrape_window() {
 	echo "  Final scrape..."
 	final_skew_ms=$(scrape_all_parallel "${TMP_DIR}/final")
 	local total_skew_ms=$(( baseline_skew_ms > final_skew_ms ? baseline_skew_ms : final_skew_ms ))
+	# Per-cluster total + check (cols 41-43), right after the final batch.
+	compute_cluster_proxies
 
 	local b_max_ms="" f_min_ms="" ts_val
 	for k in "${!POD_CTXS[@]}"; do
@@ -967,9 +1189,10 @@ scrape_window() {
 			# PL13: push-by-type and config-sample columns are N/A (nothing measured),
 			# not literal 0/0/0 which would read as a real zero-push observation.
 			# Capacity columns are still meaningful for a real context.
+			# Cols 41-43 come from the cluster: its total is already N/A (strict sum).
 			collect_capacity_for_ctx "$ctx"
 			cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$ctx")\t$(traffic_na_fields)" >> "$TSV_FILE"
 			continue
 		fi
 		local baseline final
@@ -995,9 +1218,12 @@ scrape_window() {
 			mem_mi="N/A"
 		fi
 
-		# Connected proxies: pilot_xds summed across its label series (final scrape).
+		# Connected proxies on THIS pod (per replica): pilot_xds summed across its label
+		# series (PL12, final scrape). Same completeness rule as the cluster sum: a
+		# complete body with no pilot_xds series is 0 (a replica with no connections);
+		# an empty or short body stays N/A (PL29).
 		local connected_proxies
-		connected_proxies=$(extract_gauge_sum "$f_file" pilot_xds)
+		connected_proxies=$(fanout_gauge_sum_strict pilot_xds "$f_file")
 		[[ "$connected_proxies" == "unknown" ]] && connected_proxies="N/A"
 
 		# Restart detection (must run before delta computations so the
@@ -1144,8 +1370,21 @@ scrape_window() {
 				}')
 		fi
 
+		# Traffic-management istiod columns (44-51 are appended below). pilot_virt_services
+		# is a gauge from the final scrape; the two timing averages are histogram deltas,
+		# so they follow the restart guard like every other counter/histogram (PL13).
+		local virt_services push_time_avg pushctx_avg
+		virt_services=$(extract_gauge_exact "$final" pilot_virt_services)
+		if (( restarted_or_unknown )); then
+			push_time_avg="N/A"; pushctx_avg="N/A"
+		else
+			push_time_avg=$(hist_delta_avg_ms "$baseline" "$final" pilot_xds_push_time)
+			pushctx_avg=$(hist_delta_avg_ms "$baseline" "$final" pilot_pushcontext_init_seconds)
+		fi
+
 		# Per-sidecar /config_dump sampling (only in final/combined phase).
 		local cd_avg="N/A" cd_p50="N/A" cd_max="N/A" cd_samples="0/0"
+		local sc_clusters="N/A" sc_cds="N/A" sc_rds="N/A"
 		if (( CONFIG_DUMP_SAMPLES > 0 )); then
 			local cd_out cd_csv cd_meta
 			cd_out="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
@@ -1160,14 +1399,20 @@ scrape_window() {
 			cd_p50="$(echo "$agg" | awk -F'|' '{print $2}')"
 			cd_max="$(echo "$agg" | awk -F'|' '{print $3}')"
 			cd_samples="${got}/${attempted}"
+			# Averages of the per-sample breakdown (first field of avg|p50|max).
+			[[ "$cd_meta" =~ (^|\|)clusters=([^|]*) ]] && { agg="$(aggregate_sample_bytes "${BASH_REMATCH[2]}")"; sc_clusters="${agg%%|*}"; }
+			[[ "$cd_meta" =~ (^|\|)cds=([^|]*) ]] && { agg="$(aggregate_sample_bytes "${BASH_REMATCH[2]}")"; sc_cds="${agg%%|*}"; }
+			[[ "$cd_meta" =~ (^|\|)rds=([^|]*) ]] && { agg="$(aggregate_sample_bytes "${BASH_REMATCH[2]}")"; sc_rds="${agg%%|*}"; }
 		fi
 
 		# Capacity columns (read-only, cached per ctx, outside the scrape window).
 		collect_capacity_for_ctx "$ctx"
 		local cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
 
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}" >> "$TSV_FILE"
-		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
+		local tm_fields="${TRAFFIC_CONFIG}\t${VSDR_SERVICES}\t${virt_services}\t${push_time_avg}\t${pushctx_avg}\t${sc_clusters}\t${sc_cds}\t${sc_rds}"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")\t${tm_fields}" >> "$TSV_FILE"
+		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} cluster=${CLUSTER_PROXIES[$ctx]:-N/A} sidecars=${SIDECAR_PODS[$ctx]:-N/A} check=${PROXY_CHECK[$ctx]:-N/A} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
+		echo "    traffic=${TRAFFIC_CONFIG} vsdr_services=${VSDR_SERVICES} istiod_virt_services=${virt_services} push_time_avg=${push_time_avg}ms pushctx_init_avg=${pushctx_avg}ms sidecar_clusters_avg=${sc_clusters} cds_bytes_avg=${sc_cds} rds_bytes_avg=${sc_rds}"
 	done
 
 	# One degraded row per dropped (zero-pod) context: the context column keeps the
@@ -1179,7 +1424,7 @@ scrape_window() {
 		# Node capacity is still readable with zero istiod pods.
 		collect_capacity_for_ctx "$dctx"
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
-		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}" >> "$TSV_FILE"
+		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)" >> "$TSV_FILE"
 	done
 }
 
@@ -1193,7 +1438,13 @@ if ((WATCH)); then
 		# between windows — otherwise the capacity columns (node util, istiod %-of-limit,
 		# pods scheduled) freeze at the first window's read and silently go stale. Reads
 		# are cheap, read-only, and outside the scrape window, so re-reading is safe.
+		# The per-cluster proxy total, sidecar count and check are per window too.
 		CAP_CACHE=()
+		NODE_KV_CACHE=()
+		POD_KV_CACHE=()
+		CLUSTER_PROXIES=()
+		SIDECAR_PODS=()
+		PROXY_CHECK=()
 		scrape_window "$INTERVAL"
 	done
 elif [[ "$PHASE" == baseline ]]; then
@@ -1238,6 +1489,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Phase | ${PHASE} |"
 		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
+		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
 		echo "| Mesh size | ${MESH_SIZE} |"
@@ -1245,16 +1497,25 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Replicas | ${REPLICAS} |"
 		echo "| Namespace count | ${NAMESPACE_COUNT} |"
 		echo "| Sidecar scoping | ${SIDECAR_SCOPING} |"
+		echo "| Traffic config | ${TRAFFIC_CONFIG} (VS+DR services ${VSDR_SERVICES}; every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets) |"
 		echo "| Config-dump samples | ${CONFIG_DUMP_SAMPLES} |"
 		echo "| Settle (s) | ${SETTLE_SEC} |"
+		echo "| Proxy check tolerance | ${PROXY_CHECK_TOL_PCT}% (min diff ${PROXY_CHECK_MIN_DIFF}) |"
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Context | mesh | svc | reps | ns | scoping | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Pushes Δ | EDS Δ | CDS Δ | Cfg dump avg (MB) |"
-		echo "|---------|------|-----|------|----|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|----------|-------|-------|-------------------|"
-		awk -F'\t' '!/^#/ && !/^timestamp/ && NF>=40 {
+		echo "Proxies is per istiod pod; Cluster proxies sums them over the cluster's istiod pods."
+		echo ""
+		echo "| Context | mesh | svc | reps | ns | scoping | traffic | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Cluster proxies | Sidecar pods | Proxy check | Pushes Δ | EDS Δ | CDS Δ | istiod VS | Cfg dump avg (MB) | Sidecar clusters |"
+		echo "|---------|------|-----|------|----|---------|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|-----------------|--------------|-------------|----------|-------|-------|-----------|-------------------|------------------|"
+		# Cols 41+ are read by header name: a reused older file (40 columns) has none.
+		awk -F'\t' '
+		/^timestamp\t/ { delete ix; for (i = 1; i <= NF; i++) ix[$i] = i; next }
+		function c(name) { return ((name in ix) && NF >= ix[name]) ? $(ix[name]) : "N/A" }
+		!/^#/ && NF>=40 {
 			cfg_mb = ($24+0 > 0) ? sprintf("%.1f", $24/1048576) : "N/A"
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, $32, $8, $33, $34, $10, $12, $22, $13, $16, $15, cfg_mb
+			tc = c("traffic_config"); if (tc == "N/A") tc = "none"
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, tc, $32, $8, $33, $34, $10, $12, $22, c("cluster_connected_proxies"), c("sidecar_pods"), c("proxy_check"), $13, $16, $15, c("istiod_virt_services"), cfg_mb, c("sidecar_clusters_avg")
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"

@@ -1,0 +1,7 @@
+{"configs":[
+ {"@type":"type.googleapis.com/envoy.admin.v3.BootstrapConfigDump","bootstrap":{"node":{"id":"fixture"}}},
+ {"@type":"type.googleapis.com/envoy.admin.v3.ClustersConfigDump","static_clusters":[{"cluster":{"name":"prometheus_stats"}}],"dynamic_active_clusters":[{"cluster":{"name":"outbound|8080||dummy-svc-0.controlplane-test.svc.cluster.local"}},{"cluster":{"name":"outbound|8080|v1|dummy-svc-0.controlplane-test.svc.cluster.local"}},{"cluster":{"name":"outbound|8080|v2|dummy-svc-0.controlplane-test.svc.cluster.local"}}]},
+ {"@type":"type.googleapis.com/envoy.admin.v3.ListenersConfigDump","dynamic_listeners":[]},
+ {"@type":"type.googleapis.com/envoy.admin.v3.RoutesConfigDump","dynamic_route_configs":[{"route_config":{"name":"8080","virtual_hosts":[{"name":"dummy-svc-0.controlplane-test.svc.cluster.local:8080","routes":[{"route":{"timeout":"5s"}}]}]}}]},
+ {"@type":"type.googleapis.com/envoy.admin.v3.EndpointsConfigDump","dynamic_endpoint_configs":[]}
+]}

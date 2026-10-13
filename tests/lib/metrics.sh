@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prometheus metric extraction helpers. Sourced, never executed.
 #
-# Consumers: churn, churn-dataplane
+# Consumers: churn, churn-dataplane, controlplane
 #
 # Exposes:
 #   extract_counter_sum <metrics_file> <counter_name>
@@ -9,12 +9,14 @@
 #   extract_gauge <metrics_file> <gauge_name>
 #   extract_gauge_sum <metrics_file> <gauge_name>
 #   delta_histogram_p99 <baseline_file> <final_file> <histogram_name>
+#   config_dump_breakdown <dump_file>   (Envoy /config_dump JSON, not /metrics)
 #
 # All functions take file paths rather than string variables — istiod /metrics
 # output is typically 10-50KB and piping through bash variables invites
 # quoting problems at scale.
 #
-# Requires: awk. Callers must have sourced tests/lib/common.sh (for die()).
+# Requires: awk (config_dump_breakdown: jq). Callers must have sourced
+# tests/lib/common.sh (for die()).
 # shellcheck shell=bash
 
 # Sum all instances of a Prometheus counter.
@@ -162,4 +164,32 @@ delta_histogram_p99() {
 		}
 		print "N/A"
 	}' "$baseline" "$final"
+}
+
+# --- VirtualService/DestinationRule load axis (controlplane) ---
+
+# Per-proxy CDS/RDS breakdown of one Envoy config dump (pilot-agent request GET
+# /config_dump), in one jq pass. Prints
+#   clusters=<n> cds_bytes=<n> rds_bytes=<n>
+# clusters = dynamic_active_clusters (istiod-pushed CDS clusters; one per DR subset
+# per port on top of the plain service cluster); cds_bytes / rds_bytes = UTF-8 length
+# of the compact JSON of the ClustersConfigDump / RoutesConfigDump section (a size
+# proxy for that config, not the xDS wire size). rds_bytes is `unknown` when the dump
+# has no RoutesConfigDump. Prints `unknown` for an empty or non-JSON file or one with
+# no ClustersConfigDump, so a failed or truncated dump is never a zero.
+# Usage: config_dump_breakdown <dump_file>
+# shellcheck disable=SC2329
+config_dump_breakdown() {
+	local file="$1" out=""
+	# jq prints nothing for empty input (no error), so guard it explicitly.
+	[[ -s "$file" ]] || { echo "unknown"; return 0; }
+	out="$(jq -r '
+		[(.configs? // [])[]? | objects] as $c
+		| ([$c[] | select((."@type" // "") | endswith(".ClustersConfigDump"))] | first) as $cl
+		| ([$c[] | select((."@type" // "") | endswith(".RoutesConfigDump"))] | first) as $rt
+		| if $cl == null then "unknown"
+		  else "clusters=\(($cl.dynamic_active_clusters // []) | length) cds_bytes=\($cl | tojson | utf8bytelength) rds_bytes=\(if $rt == null then "unknown" else ($rt | tojson | utf8bytelength) end)"
+		  end' "$file" 2>/dev/null)" || out=""
+	[[ "$out" == clusters=* ]] || out="unknown"
+	echo "$out"
 }

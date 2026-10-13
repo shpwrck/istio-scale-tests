@@ -1,0 +1,28 @@
+{{- if and (or (eq .Values.fortioRole "server") (eq .Values.fortioRole "both")) .Values.allClusterNames }}
+{{- if not .Values.clusterName }}{{ fail "clusterName is required when allClusterNames is set (pass --set clusterName=...)" }}{{ end }}
+{{- range $cn := .Values.allClusterNames }}
+---
+# Per-cluster Service: selects only the fortio-server pod labelled cluster={{ $cn }}.
+# From the {{ $cn }} cluster it is local; from any other cluster it has no local
+# endpoint, so traffic crosses the east-west gateway. The reachability check
+# (tests/lib/reach.sh) targets these, never the merged fortio-server Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fortio-server-{{ $cn }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: fortio-server
+    cluster: {{ $cn }}
+    {{- include "churn-dataplane.labels" $ | nindent 4 }}
+spec:
+  selector:
+    {{- include "churn-dataplane.fortio-server.selectorLabels" $ | nindent 4 }}
+    cluster: {{ $cn }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}
+{{- end }}

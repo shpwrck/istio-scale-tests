@@ -1,0 +1,21 @@
+{
+  "RunType": "HTTP",
+  "RequestedQPS": "1000",
+  "ActualQPS": 686.2,
+  "NumThreads": 8,
+  "DurationHistogram": {
+    "Count": 20586,
+    "Min": 0.0009,
+    "Max": 0.0912,
+    "Sum": 240.3,
+    "Avg": 0.01167,
+    "StdDev": 0.004,
+    "Percentiles": [
+      { "Percentile": 50, "Value": 0.0112 },
+      { "Percentile": 90, "Value": 0.0161 },
+      { "Percentile": 99, "Value": 0.0254 },
+      { "Percentile": 99.9, "Value": 0.0601 }
+    ]
+  },
+  "RetCodes": { "200": 20586 }
+}

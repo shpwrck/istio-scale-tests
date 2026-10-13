@@ -3,7 +3,7 @@
 # (canary Deployment + Service) on target clusters. Remove them with 007-cleanup.sh.
 #
 # Usage:
-#   ./tests/propagation/001-setup-propagation-test.sh [--contexts CSV] [--dry-run]
+#   ./tests/propagation/001-setup-propagation-test.sh [--config FILE] [--contexts CSV] [--dry-run]
 #
 # Examples:
 #   # Setup on all default clusters:
@@ -11,6 +11,9 @@
 #
 #   # Setup on specific clusters:
 #   ./tests/propagation/001-setup-propagation-test.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
+#
+#   # Watcher replicas and wait timeout from a run config (README, "Run config"):
+#   ./tests/propagation/001-setup-propagation-test.sh --config tests/propagation/configs/smoke.env
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
@@ -18,11 +21,15 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload propagation "$@"
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${PROPAGATION_WAIT_TIMEOUT_SEC:-300}"
 WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
 
 
@@ -30,22 +37,31 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE         Run config of KEY=value lines (config/options.env keys; see
+                        tests/propagation/README.md, "Run config"). Precedence: flag >
+                        --config > environment > default.
   --contexts CSV        Kube contexts to target (default: \$SETUP_CONTEXTS).
   --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --dry-run             Pass --dry-run=client to oc apply.
   --wait-timeout N      Seconds to wait for the watcher and backer pods to become
-                        Ready (default: 300).
+                        Ready (default: $WAIT_TIMEOUT).
   -h, --help            Show this help.
 
 Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_WATCHER_REPLICAS,
-  BUSYBOX_VERSION, HTTP_ECHO_VERSION.
+  BUSYBOX_VERSION, HTTP_ECHO_VERSION,
+  PROPAGATION_WAIT_TIMEOUT_SEC (--wait-timeout default, 300).
 EOF
 }
 
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -76,7 +92,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 is_pos_int "$WATCHER_REPLICAS" || die "--watcher-replicas must be a positive integer (got: $WATCHER_REPLICAS)"
-is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout must be a positive integer (got: $WAIT_TIMEOUT)"
+is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or PROPAGATION_WAIT_TIMEOUT_SEC) must be a positive integer (got: $WAIT_TIMEOUT)"
 
 KUBECTL=()
 resolve_kubectl KUBECTL

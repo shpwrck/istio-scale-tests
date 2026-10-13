@@ -19,9 +19,14 @@
 #   cap_parse_node_totals                          -> cpu_m mem_mi pods nodes names (worker nodes only)
 #   cap_parse_top_nodes <worker_names_csv>          -> cpu_m mem_mi (sum of named worker rows)
 #   cap_parse_pod_count <worker_names_csv>          -> scheduled (pods on worker nodes, Running/Pending)
+#                                                     sidecars (Running, not terminating, injected:
+#                                                     sidecar.istio.io/status annotation; any node)
 #   cap_parse_istiod_limits                        -> cpu_m mem_mi replicas (live istiod deploy limits/requests)
 #   cap_parse_istiod_used                          -> cpu_m mem_mi (sum of istiod pod top)
 #   cap_pct <used> <total>                          -> integer percent or `unknown`
+#   cap_proxy_check <connected> <expected> <tol_pct> [min_diff]
+#                                                  -> OK | LOW | HIGH | N/A (connected proxies vs
+#                                                     expected sidecar pods; pure, not a stdin parser)
 #
 # Exposes (Phase-2 sizing helper — pure, not a stdin parser):
 #   cap_max_pods <...>                             -> capacity-derived pod ceiling; `unknown`-propagating
@@ -140,26 +145,38 @@ cap_parse_top_nodes() {
 }
 
 # cap_parse_pod_count <worker_names_csv>: `kubectl get pods -A -o json` on stdin.
-# Counts pods scheduled onto worker nodes (.spec.nodeName in worker set) whose
-# phase is Running or Pending. Emits scheduled=<int>; empty worker list or unparseable -> scheduled=unknown.
+# One jq pass emits two counts:
+#   scheduled  pods on worker nodes (.spec.nodeName in the worker set) whose phase is
+#              Running or Pending. An empty worker list -> scheduled=unknown (nothing
+#              to count against; not a real zero).
+#   sidecars   pods on ANY node that are Running, have no deletionTimestamp, and carry
+#              the sidecar.istio.io/status annotation (set by injection). This is the
+#              expected connected-proxy count: injected gateways carry the annotation
+#              too, and each injected proxy holds one istiod connection (pilot_xds).
+# Emits `scheduled=<int|unknown> sidecars=<int|unknown>`; unparseable or empty input
+# -> both unknown.
 # shellcheck disable=SC2329
 cap_parse_pod_count() {
-	local worker_csv="${1:-}"
-	# No known worker node -> nothing to count against (not a real zero).
-	if [[ -z "${worker_csv//,/}" ]]; then
-		cat >/dev/null
-		printf '%s\n' "scheduled=unknown"
-		return 0
-	fi
-	jq -r --arg workers "$worker_csv" '
+	local worker_csv="${1:-}" out
+	out="$(jq -r --arg workers "$worker_csv" '
 		($workers | split(",") | map(select(length > 0))) as $w
 		| ($w | reduce .[] as $n ({}; .[$n] = true)) as $set
-		| [ .items[]?
-		    | select((.spec.nodeName // "") | in($set))
-		    | select((.status.phase // "") == "Running" or (.status.phase // "") == "Pending")
-		  ] | length
-		| "scheduled=\(.)"
-	' 2>/dev/null || printf '%s\n' "scheduled=unknown"
+		| [ .items[]? ] as $pods
+		| (if ($w | length) == 0 then "unknown"
+		   else ([ $pods[]
+		           | select((.spec.nodeName // "") | in($set))
+		           | select((.status.phase // "") == "Running" or (.status.phase // "") == "Pending")
+		         ] | length)
+		   end) as $sched
+		| ([ $pods[]
+		     | select((.status.phase // "") == "Running")
+		     | select(.metadata.deletionTimestamp == null)
+		     | select((.metadata.annotations // {}) | has("sidecar.istio.io/status"))
+		   ] | length) as $sidecars
+		| "scheduled=\($sched) sidecars=\($sidecars)"
+	' 2>/dev/null)" || out=""
+	[[ -n "$out" ]] || out="scheduled=unknown sidecars=unknown"
+	printf '%s\n' "$out"
 }
 
 # cap_parse_istiod_limits: `kubectl get deploy istiod -n istio-system -o json` on
@@ -241,6 +258,27 @@ cap_pct() {
 	BEGIN {
 		if (!isnum(u) || !isnum(t) || (t + 0) <= 0) { print "unknown"; exit }
 		printf "%d\n", int((100 * u / t) + 0.5)
+	}'
+}
+
+# cap_proxy_check <connected> <expected> <tol_pct> [min_diff]: compare a cluster's
+# connected proxies (pilot_xds summed over its istiod pods) with the proxies it should
+# have (Running injected pods). Flags only when |connected - expected| is strictly
+# greater than max(tol_pct% of expected, min_diff); min_diff (default 0) keeps small
+# clusters from flagging a one-proxy gap. Emits OK, LOW (fewer connected than
+# expected), HIGH (more), or N/A when any input is non-numeric. Pure.
+# shellcheck disable=SC2329
+cap_proxy_check() {
+	awk -v c="${1:-}" -v e="${2:-}" -v t="${3:-}" -v m="${4:-0}" '
+	function isnum(x) { return x ~ /^([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	BEGIN {
+		if (!isnum(c) || !isnum(e) || !isnum(t) || !isnum(m)) { print "N/A"; exit }
+		d = c - e
+		ad = (d < 0) ? -d : d
+		thr = t * e / 100
+		if (m + 0 > thr) thr = m + 0
+		if (ad > thr) print (d < 0) ? "LOW" : "HIGH"
+		else print "OK"
 	}'
 }
 
@@ -338,7 +376,9 @@ cap_node_used() {
 }
 
 # cap_pod_count <ctx> <worker_names_csv> <kubectl_argv...>
-# Counts pods scheduled on worker nodes that are Running/Pending. At 10k pods ×
+# Counts pods scheduled on worker nodes that are Running/Pending, and Running
+# injected (sidecar) pods on any node, from the same list (see cap_parse_pod_count;
+# emits `scheduled=.. sidecars=..`). At 10k pods ×
 # 20 contexts a full `-A -o json` is a hundreds-of-MB serial response on the hot
 # path, so we (a) drop terminal pods server-side with a field selector (the parse
 # only counts Running/Pending anyway, so this is semantics-preserving) and (b)

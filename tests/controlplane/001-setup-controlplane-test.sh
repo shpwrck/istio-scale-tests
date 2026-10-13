@@ -18,14 +18,24 @@
 #
 #   # Setup with one Sidecar CR per namespace:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --sidecar-scoping namespace
+#
+#   # A VirtualService + DestinationRule (2 subsets) on every 3rd service:
+#   ./tests/controlplane/001-setup-controlplane-test.sh --traffic-config vsdr --vsdr-every 3
+#
+#   # Everything from a run config (see tests/controlplane/README.md, "Run config"):
+#   ./tests/controlplane/001-setup-controlplane-test.sh --config tests/controlplane/configs/smoke.env
 # ci-dry-run-skip: needs valid kubeconfig context for kubectl apply --dry-run=client
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload controlplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/config/options.env"  # SCALE_* knobs
 # shellcheck disable=SC1091
@@ -33,12 +43,18 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 
 CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${CONTROLPLANE_WAIT_TIMEOUT_SEC:-300}"
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 SERVICE_COUNT="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICAS="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNT="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPING="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
+TRAFFIC_CONFIG="${CONTROLPLANE_TRAFFIC_CONFIG:-none}"
+VSDR_EVERY="${CONTROLPLANE_VSDR_EVERY:-1}"
+VSDR_SUBSETS="${CONTROLPLANE_VSDR_SUBSETS:-2}"
+# How long to wait for the VirtualService/DestinationRule counts after the readiness
+# wait (same bound as the Sidecar CR check).
+VSDR_VERIFY_SEC=30
 # A namespace still Terminating from the previous combo cannot be re-created, so
 # wait for every target namespace to disappear before applying (same bound 005
 # uses for its own termination wait).
@@ -54,6 +70,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE          Run config of KEY=value lines (config/options.env keys; see
+                         tests/controlplane/README.md, "Run config").
+                         Precedence: flag > --config > environment > default.
   --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
   --service-count N      Number of dummy services per cluster (default: $SERVICE_COUNT).
   --replicas N           Replicas per service (default: $REPLICAS).
@@ -65,9 +84,20 @@ Usage: $(basename "$0") [options]
                          none      - no Sidecar CRs (baseline; worst-case config size).
                          namespace - one Sidecar per workload namespace.
                          explicit  - one Sidecar per Deployment with workloadSelector.
+  --traffic-config MODE  Traffic management per service: none|vsdr (default: $TRAFFIC_CONFIG).
+                         none - no VirtualService/DestinationRule (baseline).
+                         vsdr - a VirtualService (weighted route over the subsets,
+                                timeout, retries) and a DestinationRule (subsets,
+                                connectionPool, outlierDetection) per configured service.
+                                Its replicas are split across one Deployment per subset
+                                (version=v1..vN); the pod count is unchanged.
+  --vsdr-every N         vsdr: configure service i when i mod N == 0 (default: $VSDR_EVERY).
+  --vsdr-subsets N       vsdr: DestinationRule subsets, at most --replicas (default: $VSDR_SUBSETS).
+                         Run 005 before switching --traffic-config on the same clusters:
+                         an in-place re-apply leaves the other mode's Deployments behind.
   --dry-run              Pass --dry-run=client to oc apply
                          (skips the --server-side path).
-  --wait-timeout N       Seconds to wait for pods (default: 300).
+  --wait-timeout N       Seconds to wait for pods (default: $WAIT_TIMEOUT).
   --ns-wait-timeout N    Seconds to wait for a pre-existing (Terminating) namespace
                          to disappear before applying (default: $SETUP_NS_WAIT_SEC;
                          skipped in --dry-run).
@@ -77,9 +107,11 @@ Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
   CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
   CONTROLPLANE_SIDECAR_SCOPING,
+  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
   CONTROLPLANE_SETUP_NS_WAIT_SEC (default: CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300),
   CONTROLPLANE_APPLY_ATTEMPTS / CONTROLPLANE_APPLY_BACKOFF_S (apply retry, default 3 / 5s),
   CONTROLPLANE_APPLY_CHUNK_OBJECTS (objects per apply batch, default 200; <=0 disables),
+  CONTROLPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
   BUSYBOX_VERSION (dummy workload image tag).
 
   Scale coverage (off by default): SCALE_SIZING_MODE (fixed|auto; auto derives the
@@ -91,6 +123,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--contexts)
 		[[ -n "${2:-}" ]] || die "--contexts requires a value"
 		CONTEXTS_CSV="$2"
@@ -114,6 +151,21 @@ while [[ $# -gt 0 ]]; do
 	--sidecar-scoping)
 		[[ -n "${2:-}" ]] || die "--sidecar-scoping requires a value"
 		SIDECAR_SCOPING="$2"
+		shift 2
+		;;
+	--traffic-config)
+		[[ -n "${2:-}" ]] || die "--traffic-config requires a value"
+		TRAFFIC_CONFIG="$2"
+		shift 2
+		;;
+	--vsdr-every)
+		[[ -n "${2:-}" ]] || die "--vsdr-every requires a value"
+		VSDR_EVERY="$2"
+		shift 2
+		;;
+	--vsdr-subsets)
+		[[ -n "${2:-}" ]] || die "--vsdr-subsets requires a value"
+		VSDR_SUBSETS="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -149,6 +201,12 @@ is_pos_int "$APPLY_ATTEMPTS" || die "CONTROLPLANE_APPLY_ATTEMPTS must be a posit
 is_nonneg_int "$APPLY_BACKOFF_S" || die "CONTROLPLANE_APPLY_BACKOFF_S must be a non-negative integer (got: $APPLY_BACKOFF_S)"
 [[ "$APPLY_CHUNK_OBJECTS" =~ ^-?[0-9]+$ ]] || die "CONTROLPLANE_APPLY_CHUNK_OBJECTS must be an integer (got: $APPLY_CHUNK_OBJECTS)"
 validate_scoping "$SIDECAR_SCOPING"
+validate_traffic_config "$TRAFFIC_CONFIG"
+is_pos_int "$VSDR_EVERY" || die "--vsdr-every must be a positive integer (got: $VSDR_EVERY)"
+is_pos_int "$VSDR_SUBSETS" || die "--vsdr-subsets must be a positive integer (got: $VSDR_SUBSETS)"
+if [[ "$TRAFFIC_CONFIG" == vsdr ]] && ((VSDR_SUBSETS > REPLICAS)); then
+	die "--vsdr-subsets ($VSDR_SUBSETS) > --replicas ($REPLICAS): each DestinationRule subset needs at least one pod. Lower --vsdr-subsets or raise --replicas."
+fi
 
 if ((NAMESPACE_COUNT > SERVICE_COUNT)); then
 	die "--namespace-count ($NAMESPACE_COUNT) > --service-count ($SERVICE_COUNT); some namespaces would be empty. Reduce --namespace-count to at most --service-count."
@@ -184,6 +242,11 @@ echo "Replicas/svc:    $REPLICAS"
 echo "Namespace count: $NAMESPACE_COUNT"
 echo "Namespaces:      ${NAMESPACES[*]}"
 echo "Sidecar scoping: $SIDECAR_SCOPING"
+if [[ "$TRAFFIC_CONFIG" == vsdr ]]; then
+	echo "Traffic config:  vsdr (every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets; VS+DR on $(vsdr_service_count "$SERVICE_COUNT" "$VSDR_EVERY") of ${SERVICE_COUNT} services)"
+else
+	echo "Traffic config:  none"
+fi
 ((DRY_RUN)) && echo "Mode:            dry-run"
 SCALE_SIZING_MODE="${SCALE_SIZING_MODE:-fixed}"
 [[ "$SCALE_SIZING_MODE" == auto ]] && echo "Sizing mode:     auto (capacity-derived SERVICE_COUNT)"
@@ -302,14 +365,16 @@ if ! ((DRY_RUN)); then
 			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
 		# Cheap cluster-wide pod count: `-o name` (names only, no specs) + server-side
 		# paging so a 10k-pod × 20-context preflight doesn't stream a huge table per
-		# cluster on the hot path. One line per pod -> `wc -l` is identical to the old
-		# --no-headers count (all phases, matching the allocatable.pods slot model).
+		# cluster on the hot path. One line per pod -> `wc -l`. Only non-terminal pods
+		# hold a slot (the scheduler and kubelet ignore Succeeded/Failed pods for
+		# allocatable.pods), so finished Job pods are excluded server-side.
 		current=$("${KUBECTL[@]}" --context="$ctx" get pods --all-namespaces -o name \
+			--field-selector=status.phase!=Succeeded,status.phase!=Failed \
 			--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null | wc -l) || current=""
 		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
 			remaining=$((alloc - current))
 			if ((NEEDED_PODS > remaining)); then
-				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current running). Reduce --service-count or --replicas, or add nodes."
+				die "context $ctx: need $NEEDED_PODS pods (${SERVICE_COUNT} svc × ${REPLICAS} replicas) but only $remaining slots available ($alloc allocatable − $current non-terminal pods). Reduce --service-count or --replicas, or add nodes."
 			fi
 			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
 			# Under-provision coverage floor (auto mode only).
@@ -470,7 +535,7 @@ apply_chunked() {
 APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
-		echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING})"
+		echo "Setting up controlplane-test on context $ctx (${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s), sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG})"
 		rendered="$(mktemp)"
 		workdir="$(mktemp -d)"
 		trap 'rm -rf "$workdir" "$rendered"' EXIT
@@ -482,6 +547,9 @@ for ctx in "${CONTEXTS[@]}"; do
 			--set serviceCount="$SERVICE_COUNT" \
 			--set replicasPerService="$REPLICAS" \
 			--set sidecarScoping="$SIDECAR_SCOPING" \
+			--set trafficConfig.mode="$TRAFFIC_CONFIG" \
+			--set trafficConfig.every="$VSDR_EVERY" \
+			--set trafficConfig.subsets="$VSDR_SUBSETS" \
 			> "$rendered" \
 			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
 		if ((DRY_RUN)); then
@@ -557,4 +625,30 @@ if [[ "$SIDECAR_SCOPING" != "none" ]]; then
 	done
 fi
 
-echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) (sidecar-scoping=${SIDECAR_SCOPING}) on: ${CONTEXTS[*]}"
+# Verify the VirtualServices and DestinationRules landed: one of each per configured
+# service. A shortfall dies, so a sweep records the combo as SETUP_FAILED instead of
+# measuring a vsdr cell that is missing part of its config.
+if [[ "$TRAFFIC_CONFIG" == vsdr ]]; then
+	expected_vsdr="$(vsdr_service_count "$SERVICE_COUNT" "$VSDR_EVERY")"
+	vsdr_selector="app.kubernetes.io/instance=controlplane-test,controlplane-test.traffic=vsdr"
+	echo "Verifying VirtualServices and DestinationRules (expecting ${expected_vsdr} of each per cluster)..."
+	for ctx in "${CONTEXTS[@]}"; do
+		deadline=$(( $(date +%s) + VSDR_VERIFY_SEC ))
+		n_vs=0
+		n_dr=0
+		while :; do
+			n_vs=$("${KUBECTL[@]}" --context="$ctx" get virtualservices.networking.istio.io -A \
+				-l "$vsdr_selector" -o name 2>/dev/null | grep -c .) || n_vs=0
+			n_dr=$("${KUBECTL[@]}" --context="$ctx" get destinationrules.networking.istio.io -A \
+				-l "$vsdr_selector" -o name 2>/dev/null | grep -c .) || n_dr=0
+			(( n_vs >= expected_vsdr && n_dr >= expected_vsdr )) && break
+			(( $(date +%s) >= deadline )) && break
+			sleep 1
+		done
+		echo "  [$ctx] VirtualServices: ${n_vs}/${expected_vsdr}, DestinationRules: ${n_dr}/${expected_vsdr}"
+		(( n_vs >= expected_vsdr && n_dr >= expected_vsdr )) \
+			|| die "found ${n_vs} VirtualService(s) and ${n_dr} DestinationRule(s) on $ctx after ${VSDR_VERIFY_SEC}s (expected ${expected_vsdr} of each for --traffic-config vsdr --vsdr-every ${VSDR_EVERY})"
+	done
+fi
+
+echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) (sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG}) on: ${CONTEXTS[*]}"

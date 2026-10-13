@@ -102,6 +102,47 @@ EXTRACTED_PATTERNS=(
 	'fanout_gauge_sum() {'
 	'fanout_merge_histogram() {'
 	'fanout_restart_status() {'
+	# per-cluster connected-proxy count + sanity check
+	'fanout_gauge_sum_strict() {'
+	'cap_proxy_check() {'
+	# VirtualService/DestinationRule load axis
+	'validate_traffic_config() {'
+	'vsdr_service_count() {'
+	'config_dump_breakdown() {'
+	'resume_preamble_scalar() {'
+	# dataplane local baseline: fortio.sh + is_ratio
+	'is_ratio() {'
+	'fortio_percentile_ms() {'
+	'fortio_max_ms() {'
+	'fortio_actual_qps() {'
+	'fortio_pct_200() {'
+	'fortio_n_responses() {'
+	'fortio_ret_codes() {'
+	'fortio_row_status() {'
+	# remote reachability: reach.sh + is_dns_label_for
+	'is_dns_label_for() {'
+	'reach_summarize() {'
+	'reach_classify() {'
+	'reach_sanitize() {'
+	'reach_check_target() {'
+	'reach_check_all() {'
+	'reach_coverage_rows() {'
+	'reach_coverage_render() {'
+	# run config: config.sh (--config FILE)
+	'config_suite_prefixes() {'
+	'config_allowed_keys() {'
+	'load_config() {'
+	'config_preload() {'
+	'config_preamble_lines() {'
+	'config_repo_path() {'
+	'config_snapshot() {'
+	'config_report_value() {'
+	'config_warn_multi_run() {'
+	# validation fixes: istiod replicas over every context, reach-check cost bound
+	'env_replicas_summary() {'
+	'env_replicas_label() {'
+	'env_istiod_scan() {'
+	'reach_worst_case_sec() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

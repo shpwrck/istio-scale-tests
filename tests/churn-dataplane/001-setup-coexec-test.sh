@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Deploy co-located fortio (server + client) and churn-target workloads in a
 # single shared namespace for measuring data-plane latency delta under churn.
+# Every cluster also gets a Service fortio-server-<ctx> per context that selects
+# only that cluster's fortio-server pod, so 002's reach check can test each remote
+# on its own (the merged fortio-server Service plus Istio retries would hide one).
 #
 # Usage:
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
@@ -11,14 +14,20 @@
 #     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
 #     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --dry-run
+#   ./tests/churn-dataplane/001-setup-coexec-test.sh --config tests/churn-dataplane/configs/smoke.env \
+#     --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"
+# --config FILE: export the file's keys before versions.env/options.env fill in defaults.
+config_preload churn-dataplane "$@"
+# shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
@@ -29,7 +38,7 @@ source "${ROOT}/tests/lib/fanout.sh"
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
 DRY_RUN=0
-WAIT_TIMEOUT=300
+WAIT_TIMEOUT="${COEXEC_WAIT_TIMEOUT_SEC:-300}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
 CHURN_DEPLOYMENT_COUNT_OPT="${CHURN_DEPLOYMENT_COUNT:-5}"
 CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
@@ -44,6 +53,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
+  --config FILE            Run config of KEY=value lines (config/options.env keys; see
+                           tests/churn-dataplane/README.md, "Run config").
+                           Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client is deployed (required).
   --remote-contexts CSV    Additional contexts that also receive fortio-server +
                            churn-target workloads (comma-separated).
@@ -56,18 +68,28 @@ Usage: $(basename "$0") [options]
                            missing from the kubeconfig get the render only.
   -h, --help               Show this help.
 
+Context names are used in Service names (fortio-server-<ctx>), so each must be a
+lowercase DNS label of at most 49 characters; rename others with
+'kubectl config rename-context'.
+
 Environment:
   COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
   COEXEC_ISTIOD_REPLICAS (expected istiod replica pin; warns on mismatch),
   COEXEC_SERVICE_PORT (fortio-server port; default 8080),
   COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
   defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 240),
+  COEXEC_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
   FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--config)
+		# Loaded by config_preload above.
+		[[ -n "${2:-}" ]] || die "--config requires a value"
+		shift 2
+		;;
 	--source-context)
 		[[ -n "${2:-}" ]] || die "--source-context requires a value"
 		SOURCE_CTX="$2"
@@ -113,6 +135,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or COEXEC_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
+is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "--ns-wait-timeout (or COEXEC_SETUP_NS_WAIT_SEC) must be a non-negative integer; got '$SETUP_NS_WAIT_SEC'"
 if ! is_pos_int "$SERVICE_PORT" || ((SERVICE_PORT > 65535)); then
 	die "COEXEC_SERVICE_PORT must be a port number (1-65535), got: $SERVICE_PORT"
 fi
@@ -127,6 +151,19 @@ if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
 fi
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+
+# "fortio-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
+for ctx in "${ALL_CTXS[@]}"; do
+	is_dns_label_for fortio-server- "$ctx" \
+		|| die "context '$ctx' is not a lowercase DNS label of <= 49 chars (used in Service name fortio-server-<ctx>); rename it with: kubectl config rename-context '$ctx' <new-name>"
+done
+
+# allClusterNames for every render: each cluster gets fortio-server-<ctx> for every
+# context, so the source resolves every remote's per-cluster Service locally.
+ALL_CN_SETS=()
+for i in "${!ALL_CTXS[@]}"; do
+	ALL_CN_SETS+=(--set "allClusterNames[$i]=${ALL_CTXS[$i]}")
+done
 
 # Preflight: require >= 1 Running istiod pod per context (002/003 scrape every
 # pod) and warn if the count differs from COEXEC_ISTIOD_REPLICAS. Skipped in --dry-run.
@@ -190,11 +227,13 @@ if ((DRY_RUN)); then
 	apply=("${KUBECTL[@]}" apply --dry-run=client)
 fi
 
-# render_for <role>: helm template the chart for one fortio role.
+# render_for <ctx> <role>: helm template the chart for one cluster and fortio role.
 render_for() {
-	local role="$1"
+	local ctx="$1" role="$2"
 	helm template churn-dataplane-test "$CHART_DIR" \
 		--set namespace="$NS" \
+		--set clusterName="$ctx" \
+		"${ALL_CN_SETS[@]}" \
 		--set fortioRole="$role" \
 		--set churnDeploymentCount="$CHURN_DEPLOYMENT_COUNT_OPT" \
 		--set churnBaseReplicas="$CHURN_BASE_REPLICAS_OPT" \
@@ -208,12 +247,12 @@ render_for() {
 apply_to() {
 	local ctx="$1" role="$2" objs
 	if ((DRY_RUN)) && ! "${KUBECTL[@]}" config get-contexts "$ctx" >/dev/null 2>&1; then
-		objs=$(render_for "$role" | awk '/^kind:/ { print $2 }' | sort | uniq -c | awk '{ printf "%s%s=%s", sep, $2, $1; sep = " " }') \
+		objs=$(render_for "$ctx" "$role" | awk '/^kind:/ { print $2 }' | sort | uniq -c | awk '{ printf "%s%s=%s", sep, $2, $1; sep = " " }') \
 			|| { echo "error: render failed for $ctx" >&2; return 1; }
 		echo "  [dry-run] $ctx is not in the kubeconfig; rendered only: $objs"
 		return 0
 	fi
-	render_for "$role" | "${apply[@]}" --context="$ctx" -f - \
+	render_for "$ctx" "$role" | "${apply[@]}" --context="$ctx" -f - \
 		|| { echo "error: apply failed on $ctx" >&2; return 1; }
 }
 
