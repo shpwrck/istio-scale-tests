@@ -119,6 +119,15 @@ EXTRACTED_PATTERNS=(
 	'fortio_n_responses() {'
 	'fortio_ret_codes() {'
 	'fortio_row_status() {'
+	# remote reachability: reach.sh + is_dns_label_for
+	'is_dns_label_for() {'
+	'reach_summarize() {'
+	'reach_classify() {'
+	'reach_sanitize() {'
+	'reach_check_target() {'
+	'reach_check_all() {'
+	'reach_coverage_rows() {'
+	'reach_coverage_render() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

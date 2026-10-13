@@ -17,6 +17,8 @@
 #                                     -> on --resume, set var from the preamble's KEY;
 #                                        die if an explicit flag conflicts with it
 #   is_ratio <val>                    -> return 0 if val is a decimal in (0, 1]
+#   is_dns_label_for <prefix> <ctx>   -> return 0 if ctx is a lowercase DNS-1035 label
+#                                        and <prefix><ctx> fits a 63-char Service name
 #
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -117,4 +119,15 @@ resume_preamble_scalar() {
 is_ratio() {
 	[[ "$1" =~ ^([0-9]+(\.[0-9]+)?|\.[0-9]+)$ ]] || return 1
 	awk -v v="$1" 'BEGIN { exit !(v + 0 > 0 && v + 0 <= 1) }'
+}
+
+# --- remote reachability: per-cluster Service names (dataplane-server-<ctx>, fortio-server-<ctx>) ---
+
+# is_dns_label_for <prefix> <ctx>: true when <ctx> is a lowercase DNS-1035 label
+# (a letter first, then letters, digits and '-', no '-' last) and <prefix><ctx>
+# is at most 63 characters, so it can name a per-cluster Service.
+# shellcheck disable=SC2329
+is_dns_label_for() {
+	local prefix="$1" ctx="$2"
+	[[ "$ctx" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] && (( ${#prefix} + ${#ctx} <= 63 ))
 }

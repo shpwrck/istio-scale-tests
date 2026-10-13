@@ -7,6 +7,9 @@
 #     baseline (002): fortio against a steady mesh
 #     churn    (003): fortio + concurrent churn; computes Δp99 vs baseline
 #   cleanup (006) once, then settle before the next mesh-size
+# Under --on-unreachable fail, a baseline that stops on an unreachable remote
+# (002 exit 3) records REMOTE_UNREACHABLE rows for its combo and ends the sweep
+# after that mesh size's cleanup; the reports still run and the sweep exits 3.
 #
 # Usage:
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
@@ -25,6 +28,10 @@ source "${ROOT}/tests/lib/common.sh"
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh" # FANOUT_* defaults + istiod preflight for the preamble
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fortio.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh" # REACH_EXIT_CODE, reach_validate
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -40,6 +47,9 @@ CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
 CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-5}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
 REPETITIONS="${COEXEC_REPETITIONS:-1}"
+MIN_PCT_200="${COEXEC_MIN_PCT_200:-0.99}"
+ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
+REACH_REQUESTS="${REACH_REQUESTS:-10}"
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 # Same namespace as 001/002/003/006; used by the reset-to-base step.
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
@@ -70,6 +80,12 @@ Usage: $(basename "$0") [options]
   --output-dir DIR          Top-level results directory (default: tests/churn-dataplane/results).
   --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC); also bounds
                             001's wait for the previous mesh-size's namespace to go away.
+  --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
+                            fail, a remote that is UNREACHABLE or UNKNOWN before a baseline
+                            records REMOTE_UNREACHABLE rows for that combo and stops the
+                            sweep after the mesh size's cleanup (exit 3).
+  --reach-requests N        Reach-check requests per target, passed to 002; 0 turns the
+                            check off (default: $REACH_REQUESTS).
   --force-large-matrix      Allow more than $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
@@ -84,7 +100,11 @@ Environment:
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
   COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
   COEXEC_NS_DELETE_TIMEOUT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
-  CHURN_SCALE_TO_REPLICAS.
+  CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003), REACH_ON_UNREACHABLE,
+  REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC
+  (read by 002).
+
+Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
 }
 
@@ -140,6 +160,12 @@ while [[ $# -gt 0 ]]; do
 	--ns-delete-timeout)
 		[[ -n "${2:-}" ]] || die "--ns-delete-timeout requires a value"
 		NS_DELETE_TIMEOUT_SEC="$2"; shift 2 ;;
+	--on-unreachable)
+		[[ -n "${2:-}" ]] || die "--on-unreachable requires a value"
+		ON_UNREACHABLE="$2"; shift 2 ;;
+	--reach-requests)
+		[[ -n "${2:-}" ]] || die "--reach-requests requires a value"
+		REACH_REQUESTS="$2"; shift 2 ;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1; shift ;;
 	--dry-run)
@@ -150,6 +176,10 @@ while [[ $# -gt 0 ]]; do
 		die "unknown option: $1 (try --help)" ;;
 	esac
 done
+
+reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
+is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
+	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -204,6 +234,7 @@ echo "Matrix:         ${MATRIX_SIZE} combinations"
 echo "Baseline dur:   ${BASELINE_DURATION}s | Churn dur: ${CHURN_DURATION}s"
 echo "Settle:         ${SETTLE_SEC}s | Inter-combo: ${INTER_COMBO_SETTLE_SEC}s"
 echo "QPS:            $QPS  Connections: $CONNECTIONS"
+echo "Reach check:    ${REACH_REQUESTS} requests per target  On unreachable: ${ON_UNREACHABLE}  Min pct_200: ${MIN_PCT_200}"
 echo "Output:         $TSV_FILE"
 ((DRY_RUN)) && echo "Mode:           dry-run"
 
@@ -257,7 +288,14 @@ if ! ((DRY_RUN)); then
 		"CLEANUP_GRACE_SEC=${COEXEC_CLEANUP_GRACE_SEC:-5}" \
 		"NS_DELETE_TIMEOUT_SEC=$NS_DELETE_TIMEOUT_SEC" \
 		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
-		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT"
+		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT" \
+		"MIN_PCT_200=$MIN_PCT_200" \
+		"REACH_REQUESTS=$REACH_REQUESTS" \
+		"REACH_QPS=${REACH_QPS:-10}" \
+		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
+		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
+		"ON_UNREACHABLE=$ON_UNREACHABLE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
@@ -330,7 +368,12 @@ reset_churn_targets_to_base() {
 }
 
 COMBO_INDEX=0
+# Set when a baseline exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
+# after this mesh size's cleanup, the reports still run, and the sweep exits 3.
+REACH_GATE_STOP=0
+ms_done=0
 for ms in "${MESH_SIZES[@]}"; do
+	ms_done=$((ms_done + 1))
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	source_ctx="${active_ctxs[0]}"
 	remote_ctxs=()
@@ -402,6 +445,8 @@ for ms in "${MESH_SIZES[@]}"; do
 			--output-file "$TSV_FILE"
 			--tuning-baseline "$TUNING_BASELINE"
 			--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+			--on-unreachable "$ON_UNREACHABLE"
+			--reach-requests "$REACH_REQUESTS"
 			--append
 		)
 		churn_args=(
@@ -459,8 +504,17 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "--- baseline phase ---"
 		# A failed baseline records PROBE_FAILED rows for both phases (so 005 counts the
 		# combo in its real cell) and moves on; the workload stays for the next rate.
-		if ! "$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}"; then
-			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID; recording PROBE_FAILED rows and continuing" >&2
+		# Exit 3 is the reachability gate (--on-unreachable fail): REMOTE_UNREACHABLE
+		# rows for this combo, then leave both loops so the mesh size is cleaned up.
+		baseline_rc=0
+		"$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}" || baseline_rc=$?
+		if ((baseline_rc == REACH_EXIT_CODE)); then
+			echo "STOPPING SWEEP: [combo $COMBO_INDEX/$MATRIX_SIZE] $COMBO_ID stopped on an unreachable remote (--on-unreachable fail); recording REMOTE_UNREACHABLE rows, cleaning up this mesh size, skipping the rest, then writing the reports" >&2
+			emit_failed_rows REMOTE_UNREACHABLE "$COMBO_ID" "$ms" "$cr"
+			REACH_GATE_STOP=1
+			break 2
+		elif ((baseline_rc != 0)); then
+			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID (exit $baseline_rc); recording PROBE_FAILED rows and continuing" >&2
 			emit_failed_rows PROBE_FAILED "$COMBO_ID" "$ms" "$cr"
 			continue
 		fi
@@ -489,6 +543,11 @@ for ms in "${MESH_SIZES[@]}"; do
 			emit_cleanup_timeout_row "ms${ms}-cleanup" "$ms" "0"
 		}
 
+		if ((REACH_GATE_STOP)); then
+			not_run=("${MESH_SIZES[@]:ms_done}")
+			echo "Sweep stopped at mesh-size $ms; mesh sizes not run: ${not_run[*]:-none}" >&2
+			break
+		fi
 		# Settle before the next mesh-size's setup.
 		if (( COMBO_INDEX < MATRIX_SIZE )); then
 			echo "Inter-mesh-size settle ${INTER_COMBO_SETTLE_SEC}s..."
@@ -514,3 +573,8 @@ echo "Markdown summary: $MD_FILE"
 CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
+
+if ((REACH_GATE_STOP)); then
+	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2
+	exit "$REACH_EXIT_CODE"
+fi

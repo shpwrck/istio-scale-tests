@@ -3,6 +3,9 @@
 # while a deterministic churn driver scales churn-target Deployments at a
 # configurable rate. Emits a churn-phase TSV row, and if --baseline-file points
 # at a TSV containing a matching baseline row, also computes Δp99_ms.
+# A window whose HTTP 200 share is below COEXEC_MIN_PCT_200 is ERROR_RATE_HIGH
+# (tests/lib/fortio.sh, same rule as 002). No reach check here: 002 runs it before
+# the baseline, and a baseline that is not OK already makes Δp99 N/A.
 #
 # Usage:
 #   ./tests/churn-dataplane/003-run-churn-probe.sh \
@@ -26,6 +29,10 @@ source "${ROOT}/tests/lib/preamble.sh"
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fortio.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_summarize (pct_200, top_code)
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -42,6 +49,10 @@ CHURN_BASE_REPLICAS_OPT="${CHURN_BASE_REPLICAS:-1}"
 CHURN_SCALE_TO_OPT="${CHURN_SCALE_TO_REPLICAS:-5}"
 CHURN_SEED="${COEXEC_CHURN_SEED:-42}"
 NS="${COEXEC_TEST_NAMESPACE:-churn-dataplane-test}"
+MIN_PCT_200="${COEXEC_MIN_PCT_200:-0.99}"
+# Recorded in a preamble this script bootstraps (same keys as 002/004, PL36).
+ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
+REACH_REQUESTS="${REACH_REQUESTS:-10}"
 OUTPUT_FILE=""
 OUTPUT_DIR="${ROOT}/tests/churn-dataplane/results"
 BASELINE_FILE=""
@@ -79,8 +90,13 @@ Usage: $(basename "$0") [options]
   --dry-run                Print plan only.
   -h, --help               Show this help.
 
+Row status: FAILED, PERCENTILE_MISSING or ERROR_RATE_HIGH (HTTP 200 share below
+COEXEC_MIN_PCT_200, default $MIN_PCT_200; 0 turns the rule off), POISONED_RESTART,
+POISONED_SCRAPE, CHURN_RATE_NOT_MET, else OK. The marker comment records pct_200
+and top_code.
+
 Environment:
-  COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
+  COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
   COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS (expected pin;
   warns on mismatch), FANOUT_PF_BASE (per-pod istiod PF block base; default 21014),
   FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
@@ -171,6 +187,8 @@ is_pos_int "$DURATION" || die "--duration must be a positive integer"
 is_pos_int "$CHURN_DEPLOYMENT_COUNT_OPT" || die "--deployment-count must be a positive integer"
 is_nonneg_int "$CHURN_BASE_REPLICAS_OPT" || die "--base-replicas must be a non-negative integer"
 is_pos_int "$CHURN_SCALE_TO_OPT" || die "--scale-to must be a positive integer"
+is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
+	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
 
 KUBECTL=()
 resolve_kubectl KUBECTL
@@ -196,6 +214,7 @@ if ((DRY_RUN)); then
 	echo "Replicas: ${CHURN_BASE_REPLICAS_OPT} <-> ${CHURN_SCALE_TO_OPT} | Seed: $CHURN_SEED"
 	echo "Output: $OUTPUT_FILE  Baseline: ${BASELINE_FILE:-none}"
 	echo "RUN_ID=$RUN_ID  COMBO_ID=$COMBO_ID  HARNESS_SHA=$HARNESS_SHA"
+	echo "Min pct_200: $MIN_PCT_200 (ERROR_RATE_HIGH below it; 0 = off)"
 	exit 0
 fi
 mkdir -p "$(dirname "$OUTPUT_FILE")"
@@ -229,7 +248,14 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"CONNECTIONS=$CONNECTIONS" \
 		"NAMESPACE=$NS" \
 		"FANOUT_MAX_SKEW_MS=$FANOUT_MAX_SKEW_MS" \
-		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT"
+		"FANOUT_METRICS_TIMEOUT=$FANOUT_METRICS_TIMEOUT" \
+		"MIN_PCT_200=$MIN_PCT_200" \
+		"REACH_REQUESTS=$REACH_REQUESTS" \
+		"REACH_QPS=${REACH_QPS:-10}" \
+		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}" \
+		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
+		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
+		"ON_UNREACHABLE=$ON_UNREACHABLE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
@@ -509,7 +535,14 @@ if [[ "$STATUS" == "OK" && -n "$JSON_OUT" ]]; then
 	[[ -z "$P999" ]] && P999="N/A"
 	MAX_LAT="$(printf '%s' "$JSON_OUT" | jq -r '(.DurationHistogram.Max // empty) * 1000' 2>/dev/null)"
 	[[ -z "$MAX_LAT" ]] && MAX_LAT="N/A"
+	# Error rate (tests/lib/fortio.sh; QPS-shortfall check off), same rule as 002.
+	if ! [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]]; then
+		FORTIO_STATUS="$(fortio_row_status "$JSON_OUT" "$QPS" 0 "$MIN_PCT_200")"
+		[[ "$FORTIO_STATUS" == OK ]] || STATUS="$FORTIO_STATUS"
+	fi
 fi
+# pct_200 / top_code for the marker comment ("N/A" / "-" without a fortio result).
+read -r _ok _total PCT_200 TOP_CODE <<<"$(reach_summarize "$JSON_OUT")"
 
 # PL13: istiod restarted (or unknown) -> emit N/A for derived quantiles
 # and istiod counter/histogram deltas.
@@ -551,15 +584,15 @@ if [[ -n "$BASELINE_FILE" && -f "$BASELINE_FILE" && "$P99" != "N/A" ]]; then
 	fi
 fi
 
-printf "Result: phase=churn rate=%s/s ops_attempted=%s ops_succeeded=%s qps_actual=%s p50=%s p99=%s max=%s Δp99=%s restarted=%s status=%s\n" \
-	"$CHURN_RATE" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$DELTA_P99" "$RESTARTED" "$STATUS"
+printf "Result: phase=churn rate=%s/s ops_attempted=%s ops_succeeded=%s qps_actual=%s p50=%s p99=%s max=%s Δp99=%s pct_200=%s top_code=%s restarted=%s status=%s\n" \
+	"$CHURN_RATE" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "$QPS_ACTUAL" "$P50" "$P99" "$MAX_LAT" "$DELTA_P99" "$PCT_200" "$TOP_CODE" "$RESTARTED" "$STATUS"
 printf "  istiod: xds_pushes=%s eds_pushes=%s triggers=%s conv_p99=%s queue_p99=%s push_time_p99=%s\n" \
 	"$XDS_PUSHES_DELTA" "$EDS_PUSHES_DELTA" "$PUSH_TRIGGERS_DELTA" "$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99"
 
 # PL8: scrape_skew_ms spans the fanned-out per-pod istiod scrapes (max of the
 # pre/post batch skews); recorded as a comment since the TSV schema is unchanged.
-printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops_attempted=%s churn_ops_succeeded=%s istiod_replicas=%s scrape_skew_ms=%s\n' \
-	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "${SOURCE_REPLICAS:-unknown}" "$SCRAPE_SKEW_MS" >> "$OUTPUT_FILE"
+printf '# combo=%s phase=churn window_start_ns=%s window_end_ns=%s churn_ops_attempted=%s churn_ops_succeeded=%s istiod_replicas=%s scrape_skew_ms=%s pct_200=%s top_code=%s\n' \
+	"$COMBO_ID" "$WINDOW_START_NS" "$WINDOW_END_NS" "$CHURN_OPS_ATTEMPTED" "$CHURN_OPS_SUCCEEDED" "${SOURCE_REPLICAS:-unknown}" "$SCRAPE_SKEW_MS" "$PCT_200" "$TOP_CODE" >> "$OUTPUT_FILE"
 
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	"$RUN_ID" "$HARNESS_SHA" "$COMBO_ID" "$MESH_SIZE" "$CHURN_RATE" "churn" \

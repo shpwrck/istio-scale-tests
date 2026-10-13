@@ -8,9 +8,12 @@
 # Propagates the first TSV's preamble metadata into every output format.
 # Every format also carries a "Local baseline" verdict per (mesh_size, qps_target),
 # so a same-cluster number that was dropped or never measured is always visible.
+# Every format also has a "Remote coverage" section, before the results table: the
+# reach-*.tsv checks (tests/lib/reach.sh) per remote, plus the remotes whose latency
+# rows are all or partly invalid, so an n_valid < n_total gap names its remotes.
 #
 # Usage:
-#   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT]
+#   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -18,9 +21,12 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"  # DATAPLANE_MIN_QPS_RATIO (fallback for TSVs without one)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 
 RESULTS_DIR="${ROOT}/tests/dataplane/results"
 FORMAT="text"
+FAIL_ON_UNREACHABLE=0
 
 
 usage() {
@@ -31,7 +37,17 @@ Usage: $(basename "$0") [options]
                      A directory containing latency-*.tsv files; a sweep-*/
                      subdir from 003 also works.
   --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
+  --fail-on-unreachable
+                     After the output, exit 3 when a remote's reach coverage is not
+                     REACHABLE (rule=reach_coverage) or a remote has no valid latency
+                     row (rule=no_valid_rows); stderr names the rule and the remotes.
   -h, --help         Show this help.
+
+Every format includes a "Remote coverage" section before the results table: per
+mesh size and source, how many remotes passed every reach check (reach-*.tsv from
+002, statuses REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN), and the remotes
+with no or only some valid latency rows (n_valid/n_total with their statuses). A
+TSV recorded before the reach check has no reach file: "no reachability data".
 
 Every format includes a "Local baseline" verdict: OK when every local cell has all
 rows valid and none below the QPS ratio, else one line per
@@ -44,6 +60,8 @@ preamble (recorded before the QPS_SHORTFALL check) can produce it.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
+
+Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when a rule fired.
 EOF
 }
 
@@ -58,6 +76,10 @@ while [[ $# -gt 0 ]]; do
 		[[ -n "${2:-}" ]] || die "--format requires a value"
 		FORMAT="$2"
 		shift 2
+		;;
+	--fail-on-unreachable)
+		FAIL_ON_UNREACHABLE=1
+		shift
 		;;
 	-h | --help)
 		usage
@@ -182,7 +204,7 @@ DROPPED_ALL=$(( TOTAL_ALL - VALID_ALL ))
 # rows only, PL26). Output lines (tab-separated):
 #   ratio   <distinct MIN_QPS_RATIO values of files with local rows>
 #   legacy  <files with local rows and no valid MIN_QPS_RATIO line>
-#   cell    mesh qps n_total n_valid verdict reason qps_actual qps_ratio server_replicas remote statuses ok_below_ratio
+#   cell    mesh qps n_total n_valid verdict reason qps_actual qps_ratio server_replicas remote statuses ok_below_ratio remote_unreachable
 #   missing mesh reason
 # n_valid uses the AGG predicate (status OK, istiod_restarted 0) and is never
 # changed here. ok_below_ratio counts valid rows below MIN_QPS_RATIO x target:
@@ -196,7 +218,10 @@ DROPPED_ALL=$(( TOTAL_ALL - VALID_ALL ))
 # qps_actual is the worst delivered QPS (FAILED rows skipped). server_replicas is
 # the source context's <ready>/<spec> from each file's preamble ("|"-joined if
 # files differ). remote is n_valid/n_total of the remote cell at the same
-# mesh_size and qps_target, or none.
+# mesh_size and qps_target, or none. It counts only remote rows that carried load:
+# UNREACHABLE rows (the reach check skipped that remote's load) are left out and
+# counted in remote_unreachable instead, so remote=n/n still tells a local-server
+# limit from a client-sidecar one (PL31). STOPPED_UNREACHABLE is class na.
 # A mesh size with rows but no local row is "missing"; its reason is the
 # lower-cased status of its placeholder rows (class na), else "missing".
 # POSIX awk only: insertion sorts, no asorti or length(array).
@@ -230,7 +255,11 @@ NF < 17 { next }
 		next
 	}
 	key = mesh "\t" qps
-	if (cls == "remote") { rt[key]++; if (st == "OK" && rs == "0") rv[key]++; next }
+	if (cls == "remote") {
+		if (st == "UNREACHABLE") { ru[key]++; next }
+		rt[key]++; if (st == "OK" && rs == "0") rv[key]++
+		next
+	}
 	if (cls != "local") next
 	has_local[mesh] = 1
 	if (!file_local) { file_local = 1; if (!has_ratio) n_legacy++ }
@@ -285,7 +314,7 @@ END {
 		remote = (k in rt) ? (rv[k] + 0) "/" rt[k] : "none"
 		ns = split(stl[k], sl, ","); sts = ""
 		for (j = 1; j <= ns; j++) sts = sts (j > 1 ? "," : "") sl[j] "=" stc[k, sl[j]]
-		print "cell", p[1], p[2], tot, val, verdict, reason, qa, qr, srv[k], remote, sts, ((k in ubr) ? ubr[k] : 0)
+		print "cell", p[1], p[2], tot, val, verdict, reason, qa, qr, srv[k], remote, sts, ((k in ubr) ? ubr[k] : 0), ru[k] + 0
 	}
 	for (i = 2; i <= n_mesh; i++) {
 		t = mesh_order[i]; j = i - 1
@@ -331,7 +360,7 @@ done
 # local_baseline_lines: the human-readable verdict, one line per bad cell (or one
 # OK line). Text prints them as-is, markdown as a list.
 local_baseline_lines() {
-	local c m q t v verdict reason qa qr srep remote sts nbr pct line legacy=""
+	local c m q t v verdict reason qa qr srep remote sts nbr unr pct line legacy=""
 	if [[ "$LB_VERDICT" == ok ]]; then
 		local cells="${#LB_CELLS[@]} cells"
 		((${#LB_CELLS[@]} == 1)) && cells="1 cell"
@@ -345,11 +374,13 @@ local_baseline_lines() {
 		return 0
 	fi
 	for c in "${LB_CELLS[@]}"; do
-		IFS=$'\t' read -r m q t v verdict reason qa qr srep remote sts nbr <<<"$c"
+		IFS=$'\t' read -r m q t v verdict reason qa qr srep remote sts nbr unr <<<"$c"
 		[[ "$verdict" == ok ]] && continue
 		pct="N/A"
 		[[ "$qr" != "N/A" ]] && pct="$(awk -v r="$qr" 'BEGIN { printf "%.1f%%", r * 100 }')"
-		line="Local baseline: ${verdict^^} mesh_size=${m} qps_target=${q} n_valid=${v}/${t} reason=${reason} qps_actual=${qa} (${pct} of target) server_replicas=${srep} remote=${remote} statuses=${sts}"
+		line="Local baseline: ${verdict^^} mesh_size=${m} qps_target=${q} n_valid=${v}/${t} reason=${reason} qps_actual=${qa} (${pct} of target) server_replicas=${srep} remote=${remote}"
+		((unr > 0)) && line+=" remote_unreachable=${unr}"
+		line+=" statuses=${sts}"
 		((nbr > 0)) && line+=" ok_below_ratio=${nbr}"
 		echo "$line"
 	done
@@ -363,19 +394,107 @@ local_baseline_lines() {
 # (saturated), or OK rows from a TSV recorded before the shortfall check did
 # (saturated_unflagged).
 local_baseline_hint() {
-	local c sat=0 unflagged=0 legacy=""
+	local c sat=0 unflagged=0 unr=0 legacy="" unr_note=""
 	for c in "${LB_CELLS[@]}"; do
 		[[ "$c" == *$'\tsaturated\t'* ]] && sat=1
 		[[ "$c" == *$'\tsaturated_unflagged\t'* ]] && unflagged=1
+		[[ "${c##*$'\t'}" =~ ^[1-9] ]] && unr=1
 	done
+	# UNREACHABLE remote rows carried no load, so remote= leaves them out.
+	((unr)) && unr_note=" remote= counts only remote rows that ran: remote_unreachable=N rows were skipped by the reach check (no load), and remote=none means no remote row ran at that cell."
 	# In a TSV without MIN_QPS_RATIO a remote OK row may have missed its target too.
 	((LB_LEGACY_FILES > 0)) && legacy=" In the ${LB_LEGACY_FILES} TSV(s) without MIN_QPS_RATIO, remote= counts status only: an OK remote row there may have missed its target too."
 	if ((sat)); then
-		echo "Hint: reason=saturated with every remote row valid (remote=n/n) means the local server ran out of capacity: raise --server-replicas. If remote rows dropped too, the client sidecar is the ceiling: lower --qps-levels. Thresholds: min_qps_ratio=${LB_RATIO}.${legacy}"
+		echo "Hint: reason=saturated with every remote row valid (remote=n/n) means the local server ran out of capacity: raise --server-replicas. If remote rows dropped too, the client sidecar is the ceiling: lower --qps-levels.${unr_note} Thresholds: min_qps_ratio=${LB_RATIO}.${legacy}"
 	fi
 	if ((unflagged)); then
 		echo "Note: reason=saturated_unflagged marks status=OK rows that delivered less than min_qps_ratio=${LB_RATIO} x target. Only a TSV recorded without MIN_QPS_RATIO (before the QPS_SHORTFALL check) holds such rows; they still count in n_valid and in the averages above. Compare these cells only at QPS levels that reached the target.${legacy}"
 	fi
+	return 0
+}
+
+# --- Remote coverage ----------------------------------------------------------
+# REACH_ROWS: reach_coverage_rows over every reach-*.tsv under RESULTS_DIR (empty
+# when there is none, e.g. a TSV recorded before the reach check).
+REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
+REACH_NOT_REACHABLE="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { n++ } END { print n + 0 }' <<<"$REACH_ROWS")"
+# RV_ROWS: per remote (mesh_size, source_ctx, target_ctx) the latency rows' n_total,
+# n_valid (the AGG predicate: status OK, istiod_restarted 0) and status counts, so
+# the global "N dropped" line names the remotes behind it. Tab-separated (an OK row
+# with istiod_restarted != 0 counts as "OK(istiod_restarted=<v>)"):
+#   mesh_size source_ctx target_ctx n_total n_valid statuses
+# shellcheck disable=SC2016
+RV_SCRIPT='
+BEGIN { OFS = "\t" }
+/^#/ || $1 == "run_id" || NF < 17 || $17 != "remote" { next }
+{
+	k = $2 SUBSEP $3 SUBSEP $4
+	if (!(k in tot)) { keys[++n] = k; ms[n] = $2 }
+	tot[k]++
+	if ($14 == "OK" && $16 == "0") val[k]++
+	# An OK row dropped by the restart check says so, e.g. OK(istiod_restarted=1).
+	st = ($14 == "OK" && $16 != "0") ? "OK(istiod_restarted=" $16 ")" : $14
+	if (!((k, st) in stc)) stl[k] = (stl[k] == "" ? "" : stl[k] ",") st
+	stc[k, st]++
+}
+END {
+	for (i = 2; i <= n; i++) {
+		t = keys[i]; tm = ms[i]; j = i - 1
+		while (j >= 1 && ms[j] + 0 > tm + 0) { keys[j + 1] = keys[j]; ms[j + 1] = ms[j]; j-- }
+		keys[j + 1] = t; ms[j + 1] = tm
+	}
+	for (i = 1; i <= n; i++) {
+		k = keys[i]; split(k, p, SUBSEP)
+		ns = split(stl[k], sl, ","); sts = ""
+		for (j = 1; j <= ns; j++) sts = sts (j > 1 ? "," : "") sl[j] "=" stc[k, sl[j]]
+		print p[1], p[2], p[3], tot[k], val[k] + 0, sts
+	}
+}
+'
+RV_ROWS="$(awk -F'\t' "$RV_SCRIPT" "${TSV_FILES[@]}")"
+RV_NO_VALID="$(awk -F'\t' 'NF >= 6 && $5 == 0 { n++ } END { print n + 0 }' <<<"$RV_ROWS")"
+
+# remote_validity_lines <kind>: one line per (mesh_size, source) listing the remotes
+# with no valid latency row (kind none) or only some (kind partial), each as
+# "<ctx> (n_valid/n_total; statuses)" (PL17). Nothing when there are none.
+remote_validity_lines() {
+	local kind="$1"
+	awk -F'\t' -v kind="$kind" '
+		NF >= 6 {
+			if (kind == "none" && $5 != 0) next
+			if (kind == "partial" && ($5 == 0 || $5 == $4)) next
+			g = $1 SUBSEP $2
+			if (!(g in l)) { gs[++ng] = g; gm[ng] = $1; gsrc[ng] = $2 }
+			l[g] = l[g] (l[g] == "" ? "" : ", ") sprintf("%s (%s/%s; %s)", $3, $5, $4, $6)
+		}
+		END {
+			label = (kind == "none") ? "Remotes with no valid latency rows" : "Remotes with partial valid latency rows"
+			for (i = 1; i <= ng; i++) printf "%s: mesh_size=%s from %s: %s\n", label, gm[i], gsrc[i], l[gs[i]]
+		}' <<<"$RV_ROWS"
+}
+
+# remote_coverage_section <fmt>: the reach coverage (tests/lib/reach.sh renderer)
+# plus the remote validity lines, for text, csv and markdown.
+remote_coverage_section() {
+	local fmt="$1" line
+	reach_coverage_render "$fmt" <(printf '%s' "$REACH_ROWS")
+	case "$fmt" in
+	text)
+		remote_validity_lines none
+		remote_validity_lines partial
+		;;
+	csv)
+		while IFS= read -r line; do echo "# REMOTE_NO_VALID_ROWS ${line#*: }"; done < <(remote_validity_lines none)
+		while IFS= read -r line; do echo "# REMOTE_PARTIAL_VALID_ROWS ${line#*: }"; done < <(remote_validity_lines partial)
+		;;
+	md)
+		local any=0
+		while IFS= read -r line; do
+			((any++)) || echo ""
+			echo "- ${line}"
+		done < <(remote_validity_lines none; remote_validity_lines partial)
+		;;
+	esac
 	return 0
 }
 
@@ -393,6 +512,8 @@ report_text() {
 	echo "Files: ${TSV_FILES[*]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Numeric averages exclude rows with"
 	echo "status != OK or istiod_restarted != 0. n_total and n_valid are reported per cell."
+	echo ""
+	remote_coverage_section text
 	echo ""
 	printf "  %-4s | %-6s | %-6s | %5s | %5s | %10s | %10s | %10s | %10s | %10s | %7s\n" \
 		"Sz" "QPS" "Class" "n_tot" "n_val" "p50 (ms)" "p90 (ms)" "p99 (ms)" "max (ms)" "actual QPS" "pct_200"
@@ -426,6 +547,7 @@ report_csv() {
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "# LOCAL_BASELINE_CELL=${m}:-:missing:${reason}"
 	done
+	remote_coverage_section csv
 	echo "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
 		printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
@@ -453,7 +575,7 @@ Definitions for every metric column in the results table above (see also
 | `qps_target` | queries/s | sweep axis | Target offered load for the Fortio run (`--qps-levels`). |
 | `target_class` | enum | internal | `local` (the source cluster's own `dataplane-server-<source>` Service, intra-cluster baseline) or `remote` (another cluster's Service, routed via the east-west gateway). |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/placeholder rows. |
-| `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages; `QPS_SHORTFALL`, `ERROR_RATE_HIGH`, `PERCENTILE_MISSING` and `FAILED` rows are dropped. |
+| `n_valid` | rows | internal | Rows with `status == OK` and `istiod_restarted == 0` used in the averages; `QPS_SHORTFALL`, `ERROR_RATE_HIGH`, `PERCENTILE_MISSING`, `FAILED` and `UNREACHABLE` rows are dropped. |
 | `avg_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | Mean p50 latency over valid rows; `N/A` if the percentile was missing or every row was dropped. |
 | `avg_p90_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[90]` | Mean p90 latency over valid rows. |
 | `avg_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | Mean p99 latency over valid rows. |
@@ -471,10 +593,24 @@ target: they come from a TSV recorded without `MIN_QPS_RATIO` (before the
 `MIN_QPS_RATIO` × target), `errors`, `percentile_missing`, `failed`,
 `istiod_restarted`, `istiod_restart_unknown`. `server_replicas` is the source
 cluster's fortio server `ready/spec` from the TSV preamble (`SERVER_REPLICAS`).
-`remote=v/t` is the same cell for the remote targets: if remote rows stayed valid, the
-local server was the bottleneck (raise `--server-replicas`); if they dropped too, the
-client sidecar was (lower `--qps-levels`). `MISSING` means a mesh size has no local row
-at all; its reason is the placeholder status (`setup_failed`, `probe_failed`, ...).
+`remote=v/t` is the same cell for the remote targets that carried load: if remote rows
+stayed valid, the local server was the bottleneck (raise `--server-replicas`); if they
+dropped too, the client sidecar was (lower `--qps-levels`). `UNREACHABLE` remote rows ran
+no load, so they are left out of `remote=` and counted as `remote_unreachable=N`.
+`MISSING` means a mesh size has no local row at all; its reason is the placeholder status
+(`setup_failed`, `probe_failed`, or `stopped_unreachable` when `--on-unreachable fail`
+stopped the run before the load).
+
+**Remote coverage** (section above the results): before the load, `002` sends a few
+requests from the source's client to every remote's `dataplane-server-<remote>`
+Service (`reach-*.tsv`). Per remote, `checks reachable` is how many of its checks
+(one per probe run) got only HTTP 200s; `coverage` is `REACHABLE` (all), `FLAPPING`
+(some), `DEGRADED` (none, but some 200s), `UNREACHABLE` (no 200 at all) or `UNKNOWN`
+(the check could not run). `top_code` and `detail` (the Envoy reply, IPs and hosts
+masked) come from the latest failing check. An `UNREACHABLE` remote's load is
+skipped: its rows have status `UNREACHABLE`. The lists below it name the remotes
+whose latency rows are all (`no valid latency rows`) or partly invalid, as
+`n_valid/n_total` with their statuses.
 GLOSSARY
 }
 
@@ -495,6 +631,10 @@ report_markdown() {
 	echo ""
 	echo "Aggregated by (mesh_size, qps_target, target_class). Rows with status != OK or"
 	echo "istiod_restarted != 0 are excluded from numeric averages."
+	echo ""
+	remote_coverage_section md
+	echo ""
+	echo "## Results"
 	echo ""
 	echo "| mesh_size | qps_target | target_class | n_total | n_valid | avg_p50_ms | avg_p90_ms | avg_p99_ms | avg_p999_ms | avg_max_ms | avg_actual_qps | avg_pct_200 |"
 	echo "|-----------|------------|--------------|---------|---------|------------|------------|------------|-------------|------------|----------------|-------------|"
@@ -573,25 +713,45 @@ report_json() {
 				remote_n_valid: (if .[10] == "none" then null else (.[10] | split("/")[0] | tonumber) end),
 				remote_n_total: (if .[10] == "none" then null else (.[10] | split("/")[1] | tonumber) end),
 				statuses: (.[11] | split(",") | map(split("=") | {(.[0]): (.[1] | tonumber)}) | add // {}),
-				ok_below_ratio: (.[12] | tonumber)
+				ok_below_ratio: (.[12] | tonumber),
+				remote_unreachable: ((.[13] // "0") | tonumber)
 			} else {
 				mesh_size: (.[1] | num), qps_target: null, n_total: 0, n_valid: 0,
 				verdict: "missing", reason: .[2], qps_actual: null, qps_ratio: null,
 				server_replicas: null, remote_n_valid: null, remote_n_total: null, statuses: {},
-				ok_below_ratio: 0
+				ok_below_ratio: 0, remote_unreachable: null
 			} end)
 		| {verdict: $verdict, min_qps_ratio: ($ratio | num),
 			files_without_min_qps_ratio: ($legacy | tonumber), cells: .}
+	')
+
+	# Remote coverage (reach checks) and per-remote latency-row validity.
+	local rc_json rv_json
+	rc_json="$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))"
+	rv_json=$(printf '%s\n' "$RV_ROWS" | jq -R -s '
+		split("\n") | map(select(length > 0) | split("\t") | select(length >= 6)
+			| {mesh_size: (.[0] | tonumber? // .[0]), source_ctx: .[1], target_ctx: .[2],
+			   n_total: (.[3] | tonumber), n_valid: (.[4] | tonumber),
+			   statuses: (.[5] | split(",") | map(capture("^(?<k>.*)=(?<v>[0-9]+)$") | {(.k): (.v | tonumber)}) | add // {})})
 	')
 
 	jq -n \
 		--argjson metadata "$meta_json" \
 		--argjson results "$results_json" \
 		--argjson local_baseline "$lb_json" \
+		--argjson remote_coverage "$rc_json" \
+		--argjson remote_validity "$rv_json" \
 		--argjson n_total "$TOTAL_ALL" \
 		--argjson n_valid "$VALID_ALL" \
 		--argjson n_dropped "$DROPPED_ALL" \
-		'{metadata: $metadata, summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped}, local_baseline: $local_baseline, results: $results}'
+		--argjson not_reachable "$REACH_NOT_REACHABLE" \
+		--argjson no_valid "$RV_NO_VALID" \
+		'{metadata: $metadata,
+		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
+		            remotes_not_reachable: $not_reachable, remotes_without_valid_rows: $no_valid},
+		  remote_coverage: $remote_coverage.remote_coverage,
+		  remote_validity: $remote_validity,
+		  local_baseline: $local_baseline, results: $results}'
 }
 
 report_charts() {
@@ -608,9 +768,9 @@ report_charts() {
 	echo ""
 	# Name every local point that is drawn as 0 because it has no valid sample, and
 	# every one that averages OK rows below the QPS ratio (legacy TSVs).
-	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr lb_notes=0
+	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr lb_notes=0
 	for c in "${LB_CELLS[@]}"; do
-		IFS=$'\t' read -r m q _t _v verdict reason _qa _qr _srep _remote _sts nbr <<<"$c"
+		IFS=$'\t' read -r m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr <<<"$c"
 		if [[ "$verdict" == dropped ]]; then
 			echo "> Local baseline missing at mesh ${m} / QPS ${q} (${reason}); its point is drawn as 0."
 			lb_notes=1
@@ -625,6 +785,11 @@ report_charts() {
 		lb_notes=1
 	done
 	((lb_notes)) && echo ""
+	# Remote coverage: one line per source whose remotes were not all reachable, and
+	# one per source with remotes that have no valid latency row.
+	local cov_notes
+	cov_notes="$(reach_coverage_render charts <(printf '%s' "$REACH_ROWS"); remote_validity_lines none | sed 's/^/> /')"
+	[[ -n "$cov_notes" ]] && printf '%s\n\n' "$cov_notes"
 	# Chart 1: p50 vs mesh size at the top QPS (needs two mesh sizes with remote data).
 	# Chart 2: p50 vs QPS at the largest mesh size with remote data.
 	# Cells with no valid samples (failed, restart-poisoned, or a sweep placeholder
@@ -746,3 +911,16 @@ markdown) report_markdown ;;
 json)     report_json ;;
 charts)   report_charts ;;
 esac
+
+# --fail-on-unreachable: after the output, exit 3 and name the rule that fired, so
+# a remote that was reachable but only ever QPS_SHORTFALL reads as such.
+if ((FAIL_ON_UNREACHABLE)); then
+	cov_bad="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { printf "  rule=reach_coverage mesh_size=%s from %s: %s (%s, %s/%s checks reachable, top_code=%s)\n", $1, $2, $3, $6, $5, $4, $7 }' <<<"$REACH_ROWS")"
+	nv_bad="$(awk -F'\t' 'NF >= 6 && $5 == 0 { printf "  rule=no_valid_rows mesh_size=%s from %s: %s (n_valid=%s/%s; %s)\n", $1, $2, $3, $5, $4, $6 }' <<<"$RV_ROWS")"
+	if [[ -n "$cov_bad" || -n "$nv_bad" ]]; then
+		echo "fail-on-unreachable: exit ${REACH_EXIT_CODE}" >&2
+		if [[ -n "$cov_bad" ]]; then printf '%s\n' "$cov_bad" >&2; fi
+		if [[ -n "$nv_bad" ]]; then printf '%s\n' "$nv_bad" >&2; fi
+		exit "$REACH_EXIT_CODE"
+	fi
+fi

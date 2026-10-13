@@ -6,19 +6,24 @@
 # - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
 #   within one TSV file.
 # - Every output format carries the TSV preamble metadata.
+# - Every output format has a "Remote coverage" section from the reach-*.tsv files
+#   that 002's reachability check writes (tests/lib/reach.sh).
 #
 # Usage:
-#   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--format FMT]
+#   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
 # ci-dry-run:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 
 RESULTS_DIR="${ROOT}/tests/churn-dataplane/results"
 FORMAT="text"
 DRY_RUN=0
+FAIL_ON_UNREACHABLE=0
 
 usage() {
 	cat <<EOF
@@ -27,8 +32,20 @@ Usage: $(basename "$0") [options]
   --results-dir DIR  Directory searched recursively for churn-dataplane-*.tsv
                      (default: tests/churn-dataplane/results).
   --format FMT       Output format: text | csv | json | md (or markdown) | charts (default: text).
+  --fail-on-unreachable
+                     After the output, exit 3 when a remote's reach coverage is not
+                     REACHABLE (stderr names the rule and the remotes).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
+
+Every format has a "Remote coverage" section from the reach-*.tsv files next to the
+TSVs: per mesh size and source, how many remotes passed every reach check
+(REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN per remote). Without reach
+files (the check was off, or the TSV predates it) it says "no reachability data".
+Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 200
+share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
+
+Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when the rule fired.
 EOF
 }
 
@@ -40,6 +57,8 @@ while [[ $# -gt 0 ]]; do
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
 		FORMAT="$2"; shift 2 ;;
+	--fail-on-unreachable)
+		FAIL_ON_UNREACHABLE=1; shift ;;
 	--dry-run)
 		DRY_RUN=1; shift ;;
 	-h | --help)
@@ -56,8 +75,10 @@ esac
 
 if ((DRY_RUN)); then
 	n=0
+	nr=0
 	[[ -d "$RESULTS_DIR" ]] && n=$(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | wc -l)
-	echo "[dry-run] would summarize $((n)) churn-dataplane-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
+	[[ -d "$RESULTS_DIR" ]] && nr=$(find "$RESULTS_DIR" -name 'reach-*.tsv' -type f | wc -l)
+	echo "[dry-run] would summarize $((n)) churn-dataplane-*.tsv file(s) and $((nr)) reach-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
 	exit 0
 fi
 
@@ -112,6 +133,18 @@ NAMESPACE_STR="$(extract_preamble_kv NAMESPACE)"
 # Scrape-skew ceiling and per-curl timeout behind any POISONED_SCRAPE drops.
 FANOUT_MAX_SKEW_MS_STR="$(extract_preamble_kv FANOUT_MAX_SKEW_MS)"
 FANOUT_METRICS_TIMEOUT_STR="$(extract_preamble_kv FANOUT_METRICS_TIMEOUT)"
+# Error-rate threshold and reach-check settings (absent before the reach check).
+MIN_PCT_200_STR="$(extract_preamble_kv MIN_PCT_200)"
+REACH_REQUESTS_STR="$(extract_preamble_kv REACH_REQUESTS)"
+REACH_QPS_STR="$(extract_preamble_kv REACH_QPS)"
+REACH_HTTP_TIMEOUT_SEC_STR="$(extract_preamble_kv REACH_HTTP_TIMEOUT_SEC)"
+REACH_ATTEMPTS_STR="$(extract_preamble_kv REACH_ATTEMPTS)"
+REACH_RETRY_SEC_STR="$(extract_preamble_kv REACH_RETRY_SEC)"
+ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
+
+# Remote coverage over every reach-*.tsv under RESULTS_DIR (empty without any).
+REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
+REACH_NOT_REACHABLE="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { n++ } END { print n + 0 }' <<<"$REACH_ROWS")"
 
 # The core aggregation pass: build the joined per-(mesh_size, churn_rate) view
 # from baseline+churn pairs that share combo_id. Emit a single TSV stream that
@@ -252,11 +285,20 @@ emit_metadata_lines() {
 	printf '%s NAMESPACE=%s\n'             "$prefix" "${NAMESPACE_STR:-unknown}"
 	printf '%s FANOUT_MAX_SKEW_MS=%s\n'    "$prefix" "${FANOUT_MAX_SKEW_MS_STR:-unknown}"
 	printf '%s FANOUT_METRICS_TIMEOUT=%s\n' "$prefix" "${FANOUT_METRICS_TIMEOUT_STR:-unknown}"
+	printf '%s MIN_PCT_200=%s\n'           "$prefix" "${MIN_PCT_200_STR:-unknown}"
+	printf '%s REACH_REQUESTS=%s\n'        "$prefix" "${REACH_REQUESTS_STR:-unknown}"
+	printf '%s REACH_QPS=%s\n'             "$prefix" "${REACH_QPS_STR:-unknown}"
+	printf '%s REACH_HTTP_TIMEOUT_SEC=%s\n' "$prefix" "${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}"
+	printf '%s REACH_ATTEMPTS=%s\n'        "$prefix" "${REACH_ATTEMPTS_STR:-unknown}"
+	printf '%s REACH_RETRY_SEC=%s\n'       "$prefix" "${REACH_RETRY_SEC_STR:-unknown}"
+	printf '%s ON_UNREACHABLE=%s\n'        "$prefix" "${ON_UNREACHABLE_STR:-unknown}"
 }
 
 report_text() {
 	echo "=== sweep-summary ==="
 	emit_metadata_lines "#"
+	echo ""
+	reach_coverage_render text <(printf '%s' "$REACH_ROWS")
 	echo ""
 	printf '  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %22s\n' \
 		"mesh_size" "churn_rate" "delta_p99_ms" "stdev_delta_p99" "total_runs" "valid_runs" \
@@ -274,6 +316,7 @@ report_text() {
 
 report_csv() {
 	emit_metadata_lines "#"
+	reach_coverage_render csv <(printf '%s' "$REACH_ROWS")
 	echo "mesh_size,churn_rate,delta_p99_ms,stdev_delta_p99,total_runs,valid_runs,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps,churn_qps,churn_eds_pushes,churn_convergence_p99"
 	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14 }'
 }
@@ -305,8 +348,17 @@ report_json() {
 		--arg namespace        "${NAMESPACE_STR:-unknown}" \
 		--arg fanout_max_skew  "${FANOUT_MAX_SKEW_MS_STR:-unknown}" \
 		--arg fanout_metrics_timeout "${FANOUT_METRICS_TIMEOUT_STR:-unknown}" \
+		--arg min_pct_200      "${MIN_PCT_200_STR:-unknown}" \
+		--arg reach_requests   "${REACH_REQUESTS_STR:-unknown}" \
+		--arg reach_qps        "${REACH_QPS_STR:-unknown}" \
+		--arg reach_http_timeout_sec "${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}" \
+		--arg reach_attempts   "${REACH_ATTEMPTS_STR:-unknown}" \
+		--arg reach_retry_sec  "${REACH_RETRY_SEC_STR:-unknown}" \
+		--arg on_unreachable   "${ON_UNREACHABLE_STR:-unknown}" \
+		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
+		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout}, rows: $rows}'
+		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -335,6 +387,20 @@ Definitions for every metric column in the results table above. Sourced from
 | `baseline_qps` / `churn_qps` | queries/s | Fortio JSON `ActualQPS` | Achieved QPS in the baseline / churn phase; churn QPS may drop under control-plane contention. |
 | `churn_eds_pushes` | count (delta) | `pilot_xds_pushes{type="eds"}` counter delta | EDS pushes triggered during the churn phase; `N/A` if istiod restarted or the scrape failed. |
 | `churn_convergence_p99` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence during churn, reported as a **bucket range** (e.g. `0-100ms`), not an exact value; `N/A` if istiod restarted or the scrape failed. |
+
+**Statuses** that leave a pair out of `valid_runs` include `ERROR_RATE_HIGH` (the
+window's HTTP 200 share was below `MIN_PCT_200`, default 0.99; non-200 responses used
+to count as latency samples) and `REMOTE_UNREACHABLE` (the sweep's reachability gate
+stopped at this combo under `--on-unreachable fail`; no window ran).
+
+**Remote coverage** (section above the results): before each baseline, `002` sends a
+few requests from the source's client to every remote's `fortio-server-<remote>`
+Service, which selects only that cluster's server (`reach-*.tsv`). The windows use the
+merged `fortio-server` Service, where Istio retries a failed request on another
+cluster, so a dead remote shows up there only as extra latency. Per remote, `checks
+reachable` is how many checks (one per combo) got only HTTP 200s; `coverage` is
+`REACHABLE` (all), `FLAPPING` (some), `DEGRADED` (none, but some 200s), `UNREACHABLE`
+(no 200) or `UNKNOWN` (the check could not run).
 GLOSSARY
 }
 
@@ -358,6 +424,17 @@ report_md() {
 	echo "| NAMESPACE | \`${NAMESPACE_STR:-unknown}\` |"
 	echo "| FANOUT_MAX_SKEW_MS | ${FANOUT_MAX_SKEW_MS_STR:-unknown} |"
 	echo "| FANOUT_METRICS_TIMEOUT | ${FANOUT_METRICS_TIMEOUT_STR:-unknown} |"
+	echo "| MIN_PCT_200 | ${MIN_PCT_200_STR:-unknown} |"
+	echo "| REACH_REQUESTS | ${REACH_REQUESTS_STR:-unknown} |"
+	echo "| REACH_QPS | ${REACH_QPS_STR:-unknown} |"
+	echo "| REACH_HTTP_TIMEOUT_SEC | ${REACH_HTTP_TIMEOUT_SEC_STR:-unknown} |"
+	echo "| REACH_ATTEMPTS | ${REACH_ATTEMPTS_STR:-unknown} |"
+	echo "| REACH_RETRY_SEC | ${REACH_RETRY_SEC_STR:-unknown} |"
+	echo "| ON_UNREACHABLE | ${ON_UNREACHABLE_STR:-unknown} |"
+	echo ""
+	reach_coverage_render md <(printf '%s' "$REACH_ROWS")
+	echo ""
+	echo "## Results"
 	echo ""
 	echo "| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 |"
 	echo "|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|------------------------|"
@@ -377,6 +454,9 @@ report_charts() {
 	echo ""
 	echo "# Churn x Data-Plane — Charts"
 	echo ""
+	local cov_notes
+	cov_notes="$(reach_coverage_render charts <(printf '%s' "$REACH_ROWS"))"
+	[[ -n "$cov_notes" ]] && printf '%s\n\n' "$cov_notes"
 	aggregate | awk -F'\t' '
 	# Mermaid xychart cannot draw a gap, so a missing point is never plotted as 0:
 	# each chart keeps only the mesh sizes where every churn rate has a value and
@@ -458,3 +538,13 @@ md | markdown) report_md ;;
 charts)        report_charts ;;
 *)             die "unknown format: $FORMAT (use text|csv|json|md|charts)" ;;
 esac
+
+# --fail-on-unreachable: after the output, exit 3 and name the rule and remotes.
+if ((FAIL_ON_UNREACHABLE)); then
+	cov_bad="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { printf "  rule=reach_coverage mesh_size=%s from %s: %s (%s, %s/%s checks reachable, top_code=%s)\n", $1, $2, $3, $6, $5, $4, $7 }' <<<"$REACH_ROWS")"
+	if [[ -n "$cov_bad" ]]; then
+		echo "fail-on-unreachable: exit ${REACH_EXIT_CODE}" >&2
+		printf '%s\n' "$cov_bad" >&2
+		exit "$REACH_EXIT_CODE"
+	fi
+fi

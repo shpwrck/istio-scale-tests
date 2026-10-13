@@ -107,7 +107,7 @@ ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 
 # "dataplane-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
 for ctx in "${ALL_CTXS[@]}"; do
-	[[ "$ctx" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ && ${#ctx} -le 46 ]] \
+	is_dns_label_for dataplane-server- "$ctx" \
 		|| die "context '$ctx' is not a lowercase DNS label of <= 46 chars (used in Service name dataplane-server-<ctx>); rename it with: kubectl config rename-context '$ctx' <new-name>"
 done
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Deploy co-located fortio (server + client) and churn-target workloads in a
 # single shared namespace for measuring data-plane latency delta under churn.
+# Every cluster also gets a Service fortio-server-<ctx> per context that selects
+# only that cluster's fortio-server pod, so 002's reach check can test each remote
+# on its own (the merged fortio-server Service plus Istio retries would hide one).
 #
 # Usage:
 #   ./tests/churn-dataplane/001-setup-coexec-test.sh \
@@ -55,6 +58,10 @@ Usage: $(basename "$0") [options]
   --dry-run                Render the chart and run apply --dry-run=client; contexts
                            missing from the kubeconfig get the render only.
   -h, --help               Show this help.
+
+Context names are used in Service names (fortio-server-<ctx>), so each must be a
+lowercase DNS label of at most 49 characters; rename others with
+'kubectl config rename-context'.
 
 Environment:
   COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
@@ -128,6 +135,19 @@ if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 fi
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 
+# "fortio-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
+for ctx in "${ALL_CTXS[@]}"; do
+	is_dns_label_for fortio-server- "$ctx" \
+		|| die "context '$ctx' is not a lowercase DNS label of <= 49 chars (used in Service name fortio-server-<ctx>); rename it with: kubectl config rename-context '$ctx' <new-name>"
+done
+
+# allClusterNames for every render: each cluster gets fortio-server-<ctx> for every
+# context, so the source resolves every remote's per-cluster Service locally.
+ALL_CN_SETS=()
+for i in "${!ALL_CTXS[@]}"; do
+	ALL_CN_SETS+=(--set "allClusterNames[$i]=${ALL_CTXS[$i]}")
+done
+
 # Preflight: require >= 1 Running istiod pod per context (002/003 scrape every
 # pod) and warn if the count differs from COEXEC_ISTIOD_REPLICAS. Skipped in --dry-run.
 if ! ((DRY_RUN)); then
@@ -190,11 +210,13 @@ if ((DRY_RUN)); then
 	apply=("${KUBECTL[@]}" apply --dry-run=client)
 fi
 
-# render_for <role>: helm template the chart for one fortio role.
+# render_for <ctx> <role>: helm template the chart for one cluster and fortio role.
 render_for() {
-	local role="$1"
+	local ctx="$1" role="$2"
 	helm template churn-dataplane-test "$CHART_DIR" \
 		--set namespace="$NS" \
+		--set clusterName="$ctx" \
+		"${ALL_CN_SETS[@]}" \
 		--set fortioRole="$role" \
 		--set churnDeploymentCount="$CHURN_DEPLOYMENT_COUNT_OPT" \
 		--set churnBaseReplicas="$CHURN_BASE_REPLICAS_OPT" \
@@ -208,12 +230,12 @@ render_for() {
 apply_to() {
 	local ctx="$1" role="$2" objs
 	if ((DRY_RUN)) && ! "${KUBECTL[@]}" config get-contexts "$ctx" >/dev/null 2>&1; then
-		objs=$(render_for "$role" | awk '/^kind:/ { print $2 }' | sort | uniq -c | awk '{ printf "%s%s=%s", sep, $2, $1; sep = " " }') \
+		objs=$(render_for "$ctx" "$role" | awk '/^kind:/ { print $2 }' | sort | uniq -c | awk '{ printf "%s%s=%s", sep, $2, $1; sep = " " }') \
 			|| { echo "error: render failed for $ctx" >&2; return 1; }
 		echo "  [dry-run] $ctx is not in the kubeconfig; rendered only: $objs"
 		return 0
 	fi
-	render_for "$role" | "${apply[@]}" --context="$ctx" -f - \
+	render_for "$ctx" "$role" | "${apply[@]}" --context="$ctx" -f - \
 		|| { echo "error: apply failed on $ctx" >&2; return 1; }
 }
 

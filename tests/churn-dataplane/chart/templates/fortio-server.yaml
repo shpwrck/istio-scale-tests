@@ -17,6 +17,11 @@ spec:
       labels:
         app: fortio-server
         {{- include "churn-dataplane.labels" . | nindent 8 }}
+        {{- with .Values.clusterName }}
+        # Selected by the per-cluster Service fortio-server-<name>. Not in the
+        # Deployment selector, which is immutable.
+        cluster: {{ . }}
+        {{- end }}
         sidecar.istio.io/inject: "true"
     spec:
       containers:

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Orchestrate data-plane latency probes across multiple mesh sizes.
 # Mints a sweep-${RUN_ID} subdirectory so each sweep's TSVs stay together.
+# Under --on-unreachable fail, a probe that stops on an unreachable remote (exit 3)
+# ends the sweep after that mesh size's cleanup; the reports still run and the
+# sweep exits 3.
 #
 # Usage:
 #   ./tests/dataplane/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
@@ -20,6 +23,10 @@ source "${ROOT}/tests/lib/common.sh"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fortio.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # REACH_EXIT_CODE, reach_validate
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV=""
@@ -33,6 +40,8 @@ INTER_COMBO_SETTLE="${DATAPLANE_INTER_COMBO_SETTLE_SEC:-15}"
 REPETITIONS="${DATAPLANE_REPETITIONS:-1}"
 SERVER_REPLICAS="${DATAPLANE_SERVER_REPLICAS:-2}"
 MIN_QPS_RATIO="${DATAPLANE_MIN_QPS_RATIO:-0.95}"
+ON_UNREACHABLE="${REACH_ON_UNREACHABLE:-warn}"
+REACH_REQUESTS="${REACH_REQUESTS:-10}"
 OUTPUT_DIR_BASE="${ROOT}/tests/dataplane/results"
 DRY_RUN=0
 FORCE_LARGE_MATRIX=0
@@ -56,6 +65,12 @@ Usage: $(basename "$0") [options]
   --server-replicas N  fortio server pods per cluster, passed to 001 (default: $SERVER_REPLICAS).
   --min-qps-ratio R    Below R x target QPS a row is QPS_SHORTFALL, passed to 002
                        (default: $MIN_QPS_RATIO).
+  --on-unreachable POLICY
+                       warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
+                       fail, a remote that is UNREACHABLE or UNKNOWN before the load
+                       stops the sweep after that mesh size's cleanup (exit 3).
+  --reach-requests N   Reach-check requests per target, passed to 002; 0 turns the
+                       check off (default: $REACH_REQUESTS).
   --force-large-matrix Bypass the ${MAX_MATRIX}-combo matrix safety cap.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
@@ -64,7 +79,11 @@ Environment:
   SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
   DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS,
-  DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002).
+  DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002),
+  REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
+  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
+
+Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
 }
 
@@ -134,6 +153,16 @@ while [[ $# -gt 0 ]]; do
 		MIN_QPS_RATIO="$2"
 		shift 2
 		;;
+	--on-unreachable)
+		[[ -n "${2:-}" ]] || die "--on-unreachable requires a value"
+		ON_UNREACHABLE="$2"
+		shift 2
+		;;
+	--reach-requests)
+		[[ -n "${2:-}" ]] || die "--reach-requests requires a value"
+		REACH_REQUESTS="$2"
+		shift 2
+		;;
 	--force-large-matrix)
 		FORCE_LARGE_MATRIX=1
 		shift
@@ -156,6 +185,7 @@ is_pos_int "$SERVER_REPLICAS" || die "--server-replicas (or DATAPLANE_SERVER_REP
 is_ratio "$MIN_QPS_RATIO" || die "--min-qps-ratio (or DATAPLANE_MIN_QPS_RATIO) must be a decimal in (0,1]; got '$MIN_QPS_RATIO'"
 # 002 reads DATAPLANE_MIN_PCT_200 itself; reject a bad value before the first setup.
 is_ratio "${DATAPLANE_MIN_PCT_200:-0.99}" || die "DATAPLANE_MIN_PCT_200 must be a decimal in (0,1]; got '${DATAPLANE_MIN_PCT_200:-}'"
+reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -234,6 +264,12 @@ emit_dataplane_placeholder() {
 		echo "# SERVER_REPLICAS=unknown"
 		echo "# MIN_QPS_RATIO=${MIN_QPS_RATIO}"
 		echo "# MIN_PCT_200=${DATAPLANE_MIN_PCT_200:-0.99}"
+		echo "# REACH_REQUESTS=${REACH_REQUESTS}"
+		echo "# REACH_QPS=${REACH_QPS:-10}"
+		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"
+		echo "# REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}"
+		echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
+		echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
@@ -251,6 +287,7 @@ echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "QPS levels: $QPS_LEVELS"
 echo "Repetitions: ${REPETITIONS}"
 echo "Server replicas: ${SERVER_REPLICAS} per cluster | Min QPS ratio: ${MIN_QPS_RATIO}"
+echo "Reach check: ${REACH_REQUESTS} requests per target | On unreachable: ${ON_UNREACHABLE}"
 echo "Matrix: ${MATRIX_SIZE} combos (cap: ${MAX_MATRIX})"
 echo "Settle: ${SETTLE_SEC}s | Warmup: ${WARMUP_DURATION}s | Inter-combo settle: ${INTER_COMBO_SETTLE}s"
 echo "Sweep output dir: $OUTPUT_DIR"
@@ -263,7 +300,12 @@ fi
 
 ((DRY_RUN)) || mkdir -p "$OUTPUT_DIR"
 
+# Set when a probe exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
+# after this mesh size's cleanup, the reports still run, and the sweep exits 3.
+REACH_GATE_STOP=0
+ms_done=0
 for ms in "${MESH_SIZES[@]}"; do
+	ms_done=$((ms_done + 1))
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	source_ctx="${active_ctxs[0]}"
 	remote_ctxs=()
@@ -293,6 +335,8 @@ for ms in "${MESH_SIZES[@]}"; do
 		--tuning-baseline "$TUNING_BASELINE"
 		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
 		--min-qps-ratio "$MIN_QPS_RATIO"
+		--on-unreachable "$ON_UNREACHABLE"
+		--reach-requests "$REACH_REQUESTS"
 	)
 	[[ -n "$remote_csv" ]] && probe_args+=(--remote-contexts "$remote_csv")
 	setup_args=(--source-context "$source_ctx")
@@ -327,8 +371,17 @@ for ms in "${MESH_SIZES[@]}"; do
 	for ((rep = 1; rep <= REPETITIONS; rep++)); do
 		echo "--- Running latency probe (mesh_size=$ms, rep $rep/$REPETITIONS) ---"
 		# A probe failure is logged; one placeholder per mesh size is added below.
-		if ! "$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}"; then
-			echo "warn: latency probe failed for mesh_size=$ms rep=$rep/$REPETITIONS; continuing to next rep/combo" >&2
+		# Exit 3 is the reachability gate: 002 already wrote its UNREACHABLE and
+		# STOPPED_UNREACHABLE rows, so no PROBE_FAILED placeholder for it.
+		probe_rc=0
+		"$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}" || probe_rc=$?
+		if ((probe_rc == REACH_EXIT_CODE)); then
+			echo "" >&2
+			echo "STOPPING SWEEP: mesh_size=$ms rep=$rep/$REPETITIONS stopped on an unreachable remote (--on-unreachable fail); cleaning up this mesh size, skipping the rest, then writing the reports" >&2
+			REACH_GATE_STOP=1
+			break
+		elif ((probe_rc != 0)); then
+			echo "warn: latency probe failed for mesh_size=$ms rep=$rep/$REPETITIONS (exit $probe_rc); continuing to next rep/combo" >&2
 			dp_probe_failed=1
 		fi
 		echo ""
@@ -342,6 +395,11 @@ for ms in "${MESH_SIZES[@]}"; do
 	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
 		echo "warn: cleanup reported failure for mesh_size=$ms; a leftover ${DATAPLANE_TEST_NAMESPACE:-dataplane-test} namespace may remain" >&2
 
+	if ((REACH_GATE_STOP)); then
+		not_run=("${MESH_SIZES[@]:ms_done}")
+		echo "Sweep stopped at mesh_size=$ms; mesh sizes not run: ${not_run[*]:-none}" >&2
+		break
+	fi
 	if ((INTER_COMBO_SETTLE > 0)); then
 		echo "Inter-combo settle: ${INTER_COMBO_SETTLE}s..."
 		sleep "$INTER_COMBO_SETTLE"
@@ -368,3 +426,8 @@ echo "Markdown summary written to $MD_FILE"
 CHARTS_FILE="${OUTPUT_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
+
+if ((REACH_GATE_STOP)); then
+	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2
+	exit "$REACH_EXIT_CODE"
+fi

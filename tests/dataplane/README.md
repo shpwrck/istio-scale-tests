@@ -88,8 +88,9 @@ server queues requests and can still answer with HTTP 200. `002` tags such a row
 ```
 
 Tune the probe with `--qps-levels 50,200`, `--duration 60`, `--connections 16`,
-`--settle 60`, `--warmup-duration 0` and `--min-qps-ratio 0.9`; the sweep (`003`) takes
-the same flags plus `--server-replicas` (passed to `001`). `001` re-run with a new
+`--settle 60`, `--warmup-duration 0`, `--min-qps-ratio 0.9`, `--on-unreachable fail`
+and `--reach-requests 0` (see [Remote reachability](#remote-reachability)); the sweep
+(`003`) takes the same flags plus `--server-replicas` (passed to `001`). `001` re-run with a new
 `--server-replicas` scales the servers in place and waits for the rollout. Add
 `--dry-run` to `002`, `003` or `005` to print the plan without touching a cluster.
 
@@ -103,6 +104,68 @@ For each mesh size the sweep runs `001`, then `002` `--repetitions` times, then 
 and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
 `sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
 size with a remote cluster; the p50-vs-mesh-size chart needs two.
+
+## Remote reachability
+
+A remote that the mesh cannot reach used to show up only as `n_valid < n_total` in the
+report, with no name. Before the load, after the settle, `002` now checks every target
+from the source's client pod: `--reach-requests` requests (default 10,
+`REACH_REQUESTS`) at `REACH_QPS` (10) with a `REACH_HTTP_TIMEOUT_SEC` (3 s) timeout to
+each `dataplane-server-<ctx>` Service, the local one included. Each target gets one
+row in `reach-<RUN_ID>.tsv`:
+
+```
+run_id  combo_id  mesh_size  source_ctx  target_ctx  target_class  attempts  requests
+ok  pct_200  top_code  reach_status  detail
+```
+
+`reach_status` is `REACHABLE` (every response an HTTP 200), `DEGRADED` (some),
+`UNREACHABLE` (none) or `UNKNOWN` (the `kubectl exec` failed). A target that is not
+`REACHABLE` is checked again `REACH_RETRY_SEC` (10 s) apart, up to `REACH_ATTEMPTS` (3)
+checks, because cross-cluster endpoints can lag a fresh setup; `attempts` records how
+many ran. `requests` is the responses fortio counted (socket errors are code `-1`), `ok`
+the 200s among them, `top_code` the most frequent other code. For a target that is not
+`REACHABLE`, `detail` holds the first body line of one `fortio curl`, usually the Envoy
+reply (`no healthy upstream`, `upstream connect error ... CERTIFICATE_VERIFY_FAILED`),
+with IPs and host names masked. It is a hint: Envoy's wording varies by version. The
+file has its own preamble (`REACH_SCHEMA`, `RUN_ID`, `HARNESS_SHA`, the `REACH_*` knobs,
+`ON_UNREACHABLE`), and stderr gets a per-target block ending in
+`WARNING: N of M remotes NOT reachable from <source>: ...`.
+
+What happens next depends on `--on-unreachable` (default `warn`,
+`REACH_ON_UNREACHABLE`):
+
+- `warn`: an `UNREACHABLE` remote skips its warmup and load and gets one row per QPS
+  level with `status=UNREACHABLE`, `qps_actual=0`, latency `N/A` and `pct_200` from the
+  check. `DEGRADED` and `UNKNOWN` remotes run as usual. The run exits 0.
+- `fail`: if any remote is `UNREACHABLE` or `UNKNOWN`, `002` writes the `UNREACHABLE`
+  rows, one `STOPPED_UNREACHABLE` row (`target_class=na`) and the per-run markdown,
+  runs no load and exits 3. `DEGRADED` only warns. The sweep treats exit 3 as a stop:
+  it records no `PROBE_FAILED` placeholder (the rows exist), cleans up that mesh size,
+  skips the remaining sizes, writes the reports and exits 3.
+
+`--reach-requests 0` turns the check off (no `reach-*.tsv`, nothing skipped). The check
+runs before the warmup and the istiod snapshot, so its few requests are outside the
+measured window. The data-plane Services must be in the root `Sidecar` egress hosts
+(`dataplane-test/*` is in the chart baseline): a `no healthy upstream` detail can also
+mean a narrowed egress (PL38), not a dead remote.
+
+The report's **Remote coverage** section, placed before the results table in every
+format, aggregates every `reach-*.tsv` per (mesh size, source, remote):
+`REMOTE COVERAGE mesh_size=3 source=<mesh-a-ctx>: 1/2 remotes reachable`, a
+`WARNING: remotes NOT reachable ...` line naming each remote with its coverage
+(`REACHABLE` on every check, `FLAPPING` on some, `DEGRADED`, `UNREACHABLE`, `UNKNOWN`),
+checks reachable/total, `top_code` and `detail`. Below it, the remotes whose latency
+rows are all or partly invalid are listed with `n_valid/n_total` and their statuses
+(`Remotes with no valid latency rows: ...`), so this works for TSVs recorded before the
+reach check too. Markdown has a `## Remote coverage` section with tables and a `> ⚠`
+callout, CSV `# REMOTE_COVERAGE ...`, `# REMOTE_COVERAGE_TARGET ...` and
+`# REMOTE_NO_VALID_ROWS ...` lines, JSON `remote_coverage`, `remote_validity`,
+`summary.remotes_not_reachable` and `summary.remotes_without_valid_rows`, and charts a
+`> ⚠` line. `004 --fail-on-unreachable` exits 3 after the output when a remote's
+coverage is not `REACHABLE` (`rule=reach_coverage`) or a remote has no valid latency row
+(`rule=no_valid_rows`); stderr names the rule and the remote, so a reachable remote
+whose rows are all `QPS_SHORTFALL` is not mistaken for an unreachable one.
 
 ## istiod restart detection
 
@@ -120,18 +183,23 @@ sweep records a `PROBE_FAILED` row. The report only aggregates rows with `status
 `KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
-thresholds behind `status`.
+thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,
+`REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the reach check that decides which
+remotes are `UNREACHABLE`. Next to it, `reach-<RUN_ID>.tsv` holds the reach
+check ([Remote reachability](#remote-reachability)) and `latency-<RUN_ID>.md` a per-run
+summary with its Remote coverage section.
 
 ```
 run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections
 duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms  status  pct_200  istiod_restarted  target_class
 ```
 
-`status` is the first that applies of `FAILED` (fortio exec failed), `PERCENTILE_MISSING`,
+`status` is `UNREACHABLE` for a remote the reach check could not reach (no load ran),
+else the first that applies of `FAILED` (fortio exec failed), `PERCENTILE_MISSING`,
 `ERROR_RATE_HIGH` (`pct_200 < DATAPLANE_MIN_PCT_200`, default 0.99, or no responses),
-`QPS_SHORTFALL` (actual QPS < `--min-qps-ratio` × target) and `OK`, or one of the sweep
-placeholders `SETUP_FAILED` / `PROBE_FAILED` (one row per failed mesh size,
-`target_class=na`). The console line of each row also prints `ret_codes` (HTTP
+`QPS_SHORTFALL` (actual QPS < `--min-qps-ratio` × target) and `OK`, or one of the
+placeholders `SETUP_FAILED` / `PROBE_FAILED` (sweep, one row per failed mesh size) and
+`STOPPED_UNREACHABLE` (`002 --on-unreachable fail`), all with `target_class=na`. The console line of each row also prints `ret_codes` (HTTP
 `code=count`, `-1` is a socket error) so an `ERROR_RATE_HIGH` row can be diagnosed.
 `004-report-results.sh --format text|csv|json|markdown|md|charts` averages valid rows per
 (mesh size, QPS, target class) and reports `n_total` / `n_valid`; the markdown ends with a
@@ -157,9 +225,12 @@ which only a TSV recorded before the `QPS_SHORTFALL` check can hold (see
 `saturated_unflagged` (such rows), `saturated` (a row below `MIN_QPS_RATIO` × target),
 `errors`, `percentile_missing`, `failed`, `istiod_restarted` and
 `istiod_restart_unknown`; for `MISSING` it is the
-placeholder status (`setup_failed`, `probe_failed`, ...). `server_replicas` is the source
+placeholder status (`setup_failed`, `probe_failed`, or `stopped_unreachable` when
+`--on-unreachable fail` stopped the run before the load). `server_replicas` is the source
 cluster's `ready/spec` from the TSV that holds the row. `remote=v/t` is the remote cell at
-the same mesh size and QPS:
+the same mesh size and QPS, counting only remote rows that carried load: `UNREACHABLE`
+rows (the reach check skipped that remote) are left out and shown as
+`remote_unreachable=N`, so one dead remote does not read as a dropped one:
 
 - `reason=saturated` with `remote` all valid: the local server ran out of capacity. Raise
   `--server-replicas`.
@@ -167,9 +238,9 @@ the same mesh size and QPS:
   Limitations). Lower `--qps-levels`.
 
 JSON has the verdict under `local_baseline` (`verdict`, `min_qps_ratio`,
-`files_without_min_qps_ratio`, `cells[]` with `ok_below_ratio`), CSV as
-`# LOCAL_BASELINE=` and `# LOCAL_BASELINE_CELL=<mesh>:<qps>:<verdict>:<reason>` lines,
-markdown in a `## Local baseline` section, and charts as a note per missing or
+`files_without_min_qps_ratio`, `cells[]` with `ok_below_ratio` and `remote_unreachable`),
+CSV as `# LOCAL_BASELINE=` and `# LOCAL_BASELINE_CELL=<mesh>:<qps>:<verdict>:<reason>`
+lines, markdown in a `## Local baseline` section, and charts as a note per missing or
 `UNCHECKED` point.
 
 ### Comparing with earlier runs
@@ -194,3 +265,6 @@ those files is by status only.
 - The report averages percentiles across runs rather than pooling fortio histograms.
 - Context names are used as Service names and as the `cluster` label (see Prerequisites).
 - Every cluster gets one Service per context, so the Service count grows as N².
+- The reach check runs one `kubectl exec` per target at once (about 20 at a 20-cluster
+  mesh size). An `UNREACHABLE` remote no longer has load rows at any QPS level, so its
+  "what would the load do" rows are gone by design.

@@ -149,6 +149,41 @@ tsv() {
 	assert_output --partial "Local baseline: DEGRADED mesh_size=1 qps_target=1000 n_valid=1/2 reason=saturated qps_actual=900 (90.0% of target) server_replicas=2/2 remote=none statuses=OK=1,QPS_SHORTFALL=1"
 }
 
+@test "004: saturated local + one OK and one UNREACHABLE remote -> remote=1/1, not 1/2 (PL31)" {
+	# ctx-c got no load (reach check UNREACHABLE), so it must not count as a remote
+	# that dropped: the one remote that ran hit its target, so the local server is
+	# the bottleneck. Row shapes as 002 writes them (emit_unreachable_rows).
+	tsv "${RES}/latency-u.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2,ctx-b=2/2,ctx-c=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
+	$(row 3 ctx-a ctx-a 1000 800.0 QPS_SHORTFALL 1 0 local)
+	$(row 3 ctx-a ctx-b 1000 999.0 OK 1 0 remote)
+	$(printf 'r1\t3\tctx-a\tctx-c\t1000\t0\t8\t30\tN/A\tN/A\tN/A\tN/A\tN/A\tUNREACHABLE\t0\t0\tremote')
+	EOF
+	run "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_output --partial "Local baseline: DROPPED mesh_size=3 qps_target=1000 n_valid=0/1 reason=saturated qps_actual=800 (80.0% of target) server_replicas=2/2 remote=1/1 remote_unreachable=1 statuses=QPS_SHORTFALL=1"
+	refute_output --partial "remote=1/2"
+	assert_output --partial "remote_unreachable=N rows were skipped by the reach check"
+	run "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.local_baseline.cells[0] | "\(.remote_n_valid)/\(.remote_n_total) \(.remote_unreachable)"' <<<"$output")" = "1/1 1" ]
+	run "$REPORT" --results-dir "$RES" --format md
+	assert_output --partial "remote=1/1 remote_unreachable=1"
+	# Only the unreachable remote at that cell: remote=none, still named.
+	tsv "${RES}/latency-u.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
+	$(row 2 ctx-a ctx-a 1000 800.0 QPS_SHORTFALL 1 0 local)
+	$(printf 'r1\t2\tctx-a\tctx-c\t1000\t0\t8\t30\tN/A\tN/A\tN/A\tN/A\tN/A\tUNREACHABLE\t0\t0\tremote')
+	EOF
+	run "$REPORT" --results-dir "$RES"
+	assert_output --partial "server_replicas=2/2 remote=none remote_unreachable=1 statuses=QPS_SHORTFALL=1"
+	# No unreachable row: the field and the hint sentence stay out.
+	tsv "${RES}/latency-u.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
+	$(row 2 ctx-a ctx-a 1000 800.0 QPS_SHORTFALL 1 0 local)
+	EOF
+	run "$REPORT" --results-dir "$RES"
+	refute_output --partial "remote_unreachable"
+	run "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.local_baseline.cells[0].remote_unreachable' <<<"$output")" = 0 ]
+}
+
 @test "004: remote dropped but local valid -> local OK, global WARNING still printed" {
 	tsv "${RES}/latency-f.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2,ctx-b=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
 	$(row 2 ctx-a ctx-a 1000 999.0 OK 1 0 local)
@@ -252,7 +287,7 @@ tsv() {
 # --- 002: row status through the real probe, against a stub kubectl ---
 
 _probe() {
-	PATH="${BIN}:${PATH}" STUB_LOCAL_JSON="$1" STUB_REMOTE_JSON="${FX}/fortio_ok.json" \
+	REACH_RETRY_SEC=0 PATH="${BIN}:${PATH}" STUB_LOCAL_JSON="$1" STUB_REMOTE_JSON="${FX}/fortio_ok.json" \
 		run "$PROBE" --source-context ctx-a --remote-contexts ctx-b --qps-levels 1000 \
 		--settle 0 --warmup-duration 0 --output-dir "$RES"
 }

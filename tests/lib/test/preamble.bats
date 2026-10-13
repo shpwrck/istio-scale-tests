@@ -160,6 +160,39 @@ _resume_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# PL36 for churn-dataplane: three writers build the same TSV preamble (004's
+# pre-create, then 002 and 003 when they bootstrap the file). Each key one writer
+# adds and another omits is lost whenever the other writer created the file.
+# ---------------------------------------------------------------------------
+
+# _cd_preamble_keys <script>: the KEY= args of its write_preamble call.
+_cd_preamble_keys() {
+	awk '/write_preamble "churn-dataplane/ { on = 1; next } on && /printf .run_id/ { exit } on' "$1" \
+		| grep -oE '"[A-Z][A-Z0-9_]*=' | tr -d '"=' | sort -u
+}
+
+@test "PL36: churn-dataplane 002, 003 and 004 write the same preamble key set" {
+	d="${ROOT}/tests/churn-dataplane"
+	k2="$(_cd_preamble_keys "$d/002-run-baseline-probe.sh")"
+	k3="$(_cd_preamble_keys "$d/003-run-churn-probe.sh")"
+	k4="$(_cd_preamble_keys "$d/004-run-sweep.sh")"
+	[ -n "$k2" ]
+	[ "$k2" = "$k3" ]
+	# 004 writes every 002 key, plus only the documented sweep-level extras.
+	[ -z "$(comm -23 <(printf '%s\n' "$k2") <(printf '%s\n' "$k4"))" ]
+	for k in $(comm -13 <(printf '%s\n' "$k2") <(printf '%s\n' "$k4")); do
+		case "$k" in
+			MATRIX_SIZE|REPETITIONS|SETUP_NS_WAIT_SEC|CLEANUP_GRACE_SEC|NS_DELETE_TIMEOUT_SEC) : ;;
+			*) echo "unexpected 004-only key: $k"; false ;;
+		esac
+	done
+	for k in MIN_PCT_200 REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_ATTEMPTS \
+		REACH_RETRY_SEC ON_UNREACHABLE; do
+		grep -qx "$k" <<<"$k2"
+	done
+}
+
+# ---------------------------------------------------------------------------
 # probe_kube_versions — concurrent per-context server version probe.
 # ---------------------------------------------------------------------------
 

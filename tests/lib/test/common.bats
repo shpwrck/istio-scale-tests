@@ -256,3 +256,25 @@ _stub_cli() {
 		assert_failure
 	done
 }
+
+# --- is_dns_label_for() (per-cluster Service names) ---
+
+@test "is_dns_label_for: a lowercase DNS label that fits the prefix" {
+	run is_dns_label_for dataplane-server- mesh-a
+	assert_success
+	# 46 chars + the 17-char prefix = 63, the limit.
+	run is_dns_label_for dataplane-server- "a$(printf 'b%.0s' {1..45})"
+	assert_success
+}
+
+@test "is_dns_label_for: uppercase, too long, leading digit, trailing '-', '/' all fail" {
+	for ctx in Mesh-A "a$(printf 'b%.0s' {1..49})" 1mesh mesh- "default/api:6443/admin" ""; do
+		run is_dns_label_for dataplane-server- "$ctx"
+		assert_failure
+	done
+	# A 49-char context fits the shorter fortio-server- prefix (14 + 49 = 63); 50 does not.
+	run is_dns_label_for fortio-server- "a$(printf 'b%.0s' {1..48})"
+	assert_success
+	run is_dns_label_for fortio-server- "a$(printf 'b%.0s' {1..49})"
+	assert_failure
+}

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Parse `fortio load -json` output and classify a load run. Sourced, never executed.
 #
-# Consumers: dataplane (002). churn-dataplane still has its own percentile/QPS
-# parsing and no error-rate or shortfall check; moving it here is a follow-up (PL41).
+# Consumers: dataplane (002); churn-dataplane (002, 003: fortio_row_status with the
+# shortfall check off, for ERROR_RATE_HIGH); tests/lib/reach.sh (fortio_ret_codes).
+# churn-dataplane still has its own percentile/QPS parsing and no shortfall check;
+# moving those here is a follow-up (PL41).
 #
 # Exposes (every function takes the fortio JSON as a string; jq and awk only):
 #   fortio_percentile_ms <json> <pct>  -> latency at percentile <pct> in ms

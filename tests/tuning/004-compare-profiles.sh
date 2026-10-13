@@ -71,7 +71,9 @@ else
 fi
 ((${#PASSES[@]})) || die "no pass directories in $RESULTS_DIR"
 
-pass_tsvs() { find "${RESULTS_DIR}/$1" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | sort; }
+# reach-*.tsv (the dataplane suites' reachability check, tests/lib/reach.sh) has no
+# status column and is not probe data, so it is left out.
+pass_tsvs() { find "${RESULTS_DIR}/$1" -maxdepth 1 -name '*.tsv' ! -name 'reach-*.tsv' -type f 2>/dev/null | sort; }
 
 # Suite from metadata, else from a header column only that suite's TSV has.
 SUITE="$(meta_get SUITE)"
