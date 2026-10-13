@@ -79,9 +79,14 @@ returns 0 when there is no drift.
   `repo.revision` parameter to your branch),
   curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
   `Host: mesh-verify.local`: answers alternate between both clusters. `oc delete -f` cascades.
-- Gate reports `ca=` mismatch (istiod started before cacerts): delete the
-  member's `<member>-ossm` Application on the hub. The ApplicationSet recreates it, and the
-  PreSync hook waits for cacerts. Then `oc rollout restart` the member's two gateway Deployments.
+- Gate reports `ca=` mismatch (istiod started before cacerts): once `cacerts` exists in
+  `istio-system`, restart istiod (`oc -n istio-system delete pod -l app=istiod`). istiod reads
+  `cacerts` only at startup, so it does not recover by itself. Then restart every pod that started
+  while istiod ran on the self-signed root, because it holds a certificate from that root. On a
+  fresh install that includes the two gateway Deployments; gateways that predate the race keep
+  working (lab-checked 2026-10-13). If `cacerts` is missing, delete the member's `<member>-ossm`
+  Application on the hub instead. The ApplicationSet recreates it, and the PreSync hook holds the
+  install until cacerts arrives.
 - ESO pods Pending / no cacerts pushed: the hub is out of memory. Lower
   `argocd_config_values` requests and re-apply. If an ESO Application is stuck
   "Retrying operation. Attempt #1" after an Argo controller restart, terminate the operation
@@ -110,6 +115,17 @@ returns 0 when there is no drift.
   (Terraform's AtLatestKnown wait would otherwise time out).
 - Per-environment chart values go through `gitops_app_overrides` /
   `argocd_config_values`, not forks: the chart defaults stay sized for the 20-cluster campaign.
+- Temporary experiments on mesh objects (more istiod replicas, a deleted `cacerts` or Istio CR,
+  a rebuilt gateway Service) run under a deny sync window from
+  `tests/tuning/006-gitops-pause.sh --appset <appset> --state-file <scratch>/<name>.json --pause`
+  so Argo does not undo them mid-test, and end with `--resume` on the same state file. Three istiod
+  replicas fit on one member at the lab sizing (1 CPU / 3Gi each): patch the member's Istio CR
+  `spec.values.pilot.replicaCount` under a `spoke-ossm` pause and patch it back before resuming.
+  The east-west and ingress Services share a two-address pool, so deleting both and recreating
+  east-west first swaps their addresses; recreate ingress first to keep the original assignment.
+  A deny NetworkPolicy used to make a remote unreachable only affects new connections on
+  OVN-Kubernetes: the east-west gateway's pooled connections survive it, so restart the target
+  pods after applying it or the remote still answers.
 
 ### How to drive it
 

@@ -14,6 +14,7 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 
 | Date | Run | Files |
 |---|---|---|
+| 2026-10-13 | Lab validation of backlog tasks 2, 3, 5, 6 (2 single-node members); CA-race root cause confirmed | [results](2026-10-13-lab-backlog-validation.md) |
 | 2026-06-22 | 20 clusters / 10k Services / 10k endpoints — **PASS** | [results](2026-06-22-20c-10k-10k-results.md) |
 | 2026-06-17 | 4-cluster stress shakeout (1 hub + 3 spokes); defines BLOCKER/FINDING labels | [findings log](2026-06-17-stress-shakeout-status.md) |
 | 2026-06-04 | 10-spoke clean pass, all five suites | [results](2026-06-04-clean-pass-results.md), [sweep tables](2026-06-04-clean-pass-sweep-detail.md), [charts](charts/) |
