@@ -30,3 +30,15 @@ image:
 
 service:
   port: 8080
+
+# Traffic-management load (off by default). mode: none | vsdr.
+#   vsdr: Service i gets a VirtualService (one weighted route across the subsets,
+#   timeout, retries) and a DestinationRule (`subsets` subsets, connectionPool,
+#   outlierDetection) when i mod `every` == 0. That Service's replicas are split
+#   across `subsets` Deployments labelled version=v1..vN so every subset selects
+#   real pods (needs subsets <= replicasPerService). The pod count is unchanged.
+#   none: nothing is rendered and Deployments are not split.
+trafficConfig:
+  mode: none
+  every: 1
+  subsets: 2

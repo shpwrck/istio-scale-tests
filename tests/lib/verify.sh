@@ -105,6 +105,11 @@ EXTRACTED_PATTERNS=(
 	# Task 2: per-cluster connected-proxy count + sanity check
 	'fanout_gauge_sum_strict() {'
 	'cap_proxy_check() {'
+	# Task 6: VirtualService/DestinationRule load axis
+	'validate_traffic_config() {'
+	'vsdr_service_count() {'
+	'config_dump_breakdown() {'
+	'resume_preamble_scalar() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

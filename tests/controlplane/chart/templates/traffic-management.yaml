@@ -1,0 +1,74 @@
+{{- include "controlplane-test.validateTrafficConfig" . -}}
+{{- /* trafficConfig.mode=vsdr: one VirtualService + one DestinationRule per configured
+       Service, in its namespace. Short hosts resolve to that namespace; no tls block,
+       so auto-mTLS still applies. Labelled controlplane-test.traffic=vsdr so 001 can
+       count them. */ -}}
+{{- range $i := until (.Values.serviceCount | int) }}
+{{- if include "controlplane-test.vsdrFor" (dict "ctx" $ "idx" $i) }}
+{{- $ns := include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i) }}
+{{- $s := int $.Values.trafficConfig.subsets }}
+{{- $w := div 100 $s }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $ns }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+    controlplane-test.traffic: vsdr
+spec:
+  hosts:
+    - dummy-svc-{{ $i }}
+  http:
+    - name: default
+      route:
+        {{- range $k := until $s }}
+        - destination:
+            host: dummy-svc-{{ $i }}
+            subset: v{{ add1 $k }}
+            port:
+              number: {{ $.Values.service.port }}
+          {{- /* 100/N each; the remainder goes to v1 so the weights sum to 100. */}}
+          weight: {{ ternary (sub 100 (mul $w (sub $s 1))) $w (eq $k 0) }}
+        {{- end }}
+      timeout: 5s
+      retries:
+        attempts: 3
+        perTryTimeout: 2s
+        retryOn: connect-failure,refused-stream,unavailable,5xx
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $ns }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+    controlplane-test.traffic: vsdr
+spec:
+  host: dummy-svc-{{ $i }}
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 2s
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+        maxRequestsPerConnection: 100
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    {{- range $k := until $s }}
+    - name: v{{ add1 $k }}
+      labels:
+        version: v{{ add1 $k }}
+    {{- end }}
+{{- end }}
+{{- end }}

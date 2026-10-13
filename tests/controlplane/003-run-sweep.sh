@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Orchestrate control-plane resource collection across the cross-product of
-# five sweep axes: mesh size × service count × replicas × namespace count
-# × sidecar scoping.
+# six sweep axes: mesh size × service count × replicas × namespace count
+# × sidecar scoping × traffic config (none / vsdr).
 #
 # For every combination, deploys dummy workloads, settles, scrapes istiod, and
 # cleans up before moving on. Uses split-phase metrics so the deploy-time
@@ -18,9 +18,13 @@
 #   ./tests/controlplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
 #     --mesh-sizes 2 --service-counts 10,100 --sidecar-scopings none,namespace,explicit
 #
+#   # Bare services vs a VirtualService + DestinationRule per service, back to back:
+#   ./tests/controlplane/003-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+#     --mesh-sizes 2 --service-counts 10 --replica-counts 2 --traffic-configs none,vsdr
+#
 #   # Dry-run to see the planned matrix:
 #   ./tests/controlplane/003-run-sweep.sh --dry-run --contexts <mesh-a-ctx>,<mesh-b-ctx>
-# ci-dry-run:
+# ci-dry-run: --traffic-configs none,vsdr
 set -euo pipefail
 # Loud ERR trap for unexpected aborts; per-combo failures become row statuses.
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
@@ -47,6 +51,13 @@ SERVICE_COUNTS_CSV="${CONTROLPLANE_SERVICE_COUNT:-10}"
 REPLICA_COUNTS_CSV="${CONTROLPLANE_REPLICAS_PER_SERVICE:-3}"
 NAMESPACE_COUNTS_CSV="${CONTROLPLANE_NAMESPACE_COUNT:-1}"
 SIDECAR_SCOPINGS_CSV="${CONTROLPLANE_SIDECAR_SCOPING:-none}"
+TRAFFIC_CONFIGS_CSV="${CONTROLPLANE_TRAFFIC_CONFIG:-none}"
+VSDR_EVERY="${CONTROLPLANE_VSDR_EVERY:-1}"
+VSDR_SUBSETS="${CONTROLPLANE_VSDR_SUBSETS:-2}"
+# 1 when passed as a flag: --resume refuses a flag that conflicts with the resumed
+# preamble, and otherwise adopts the preamble's value.
+VSDR_EVERY_FLAG=0
+VSDR_SUBSETS_FLAG=0
 CONFIG_DUMP_SAMPLES="${CONTROLPLANE_CONFIG_DUMP_SAMPLES:-3}"
 OUTPUT_DIR_BASE="${ROOT}/tests/controlplane/results"
 SETTLE_SEC=60
@@ -55,7 +66,7 @@ METRICS_API_STATUS="unknown"  # set by metrics_preflight; recorded in the preamb
 FORCE_LARGE_MATRIX=0
 MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 # --resume: reuse an existing sweep dir + RUN_ID and skip combos that already
-# have a valid row (NF>=40 && istiod_restarted=="0").
+# have a valid row (istiod_restarted=="0" for the same six axis values).
 RESUME_DIR=""
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
@@ -72,6 +83,17 @@ Sweep dimensions (cross-product):
   --namespace-counts CSV      Namespaces to spread services across (default: $NAMESPACE_COUNTS_CSV).
   --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,explicit
                               (default: \$CONTROLPLANE_SIDECAR_SCOPING or "none").
+  --traffic-configs CSV       Traffic management per service: none,vsdr
+                              (default: \$CONTROLPLANE_TRAFFIC_CONFIG or "none").
+                              vsdr adds a VirtualService + DestinationRule per
+                              configured service; innermost axis, so each none/vsdr
+                              pair runs back to back. --traffic-config is an alias.
+
+Traffic management (scalars, recorded in the TSV preamble):
+  --vsdr-every N              Configure service i when i mod N == 0 (default: $VSDR_EVERY).
+  --vsdr-subsets N            DestinationRule subsets; the service's replicas are split
+                              over this many Deployments, so it must be <= every
+                              --replica-counts value (default: $VSDR_SUBSETS).
 
 Other:
   --config-dump-samples N     Random pods per cluster to exec /config_dump on
@@ -83,8 +105,11 @@ Other:
                               (default: tests/controlplane/results).
   --resume DIR                Resume an interrupted sweep in this sweep-<RUN_ID>/
                               dir: reuse its RUN_ID and skip combos that already
-                              have a valid row. Not valid with --output-dir or
-                              --dry-run.
+                              have a valid row. Scalars recorded once in the TSV
+                              preamble (VSDR_EVERY and VSDR_SUBSETS when the run
+                              includes vsdr, PROXY_CHECK_*) are taken from it; a
+                              conflicting --vsdr-every/--vsdr-subsets flag is
+                              refused. Not valid with --output-dir or --dry-run.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -92,6 +117,7 @@ Other:
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
+  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
   CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
   SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (recorded in the TSV preamble).
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
@@ -135,6 +161,25 @@ while [[ $# -gt 0 ]]; do
 	--sidecar-scopings)
 		[[ -n "${2:-}" ]] || die "--sidecar-scopings requires a value"
 		SIDECAR_SCOPINGS_CSV="$2"
+		shift 2
+		;;
+	--traffic-configs | --traffic-config)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		# PL7: the singular form (001/002 spelling) is a one-value alias.
+		[[ "$1" == --traffic-config ]] && echo "note: --traffic-config is an alias; the sweep flag is --traffic-configs CSV" >&2
+		TRAFFIC_CONFIGS_CSV="$2"
+		shift 2
+		;;
+	--vsdr-every)
+		[[ -n "${2:-}" ]] || die "--vsdr-every requires a value"
+		VSDR_EVERY="$2"
+		VSDR_EVERY_FLAG=1
+		shift 2
+		;;
+	--vsdr-subsets)
+		[[ -n "${2:-}" ]] || die "--vsdr-subsets requires a value"
+		VSDR_SUBSETS="$2"
+		VSDR_SUBSETS_FLAG=1
 		shift 2
 		;;
 	--config-dump-samples)
@@ -223,6 +268,10 @@ SCOPINGS=()
 split_csv "$SIDECAR_SCOPINGS_CSV" SCOPINGS
 ((${#SCOPINGS[@]})) || die "--sidecar-scopings produced an empty list"
 
+TRAFFIC_CONFIGS=()
+split_csv "$TRAFFIC_CONFIGS_CSV" TRAFFIC_CONFIGS
+((${#TRAFFIC_CONFIGS[@]})) || die "--traffic-configs produced an empty list"
+
 for ms in "${MESH_SIZES[@]}"; do
 	is_pos_int "$ms" || die "mesh-size '$ms' is not a positive integer"
 	((ms >= 1 && ms <= ${#CONTEXTS[@]})) || die "mesh-size $ms out of range (have ${#CONTEXTS[@]} contexts)"
@@ -244,8 +293,16 @@ done
 for scp in "${SCOPINGS[@]}"; do
 	validate_scoping "$scp"
 done
+is_pos_int "$VSDR_EVERY" || die "--vsdr-every must be a positive integer (got: $VSDR_EVERY)"
+is_pos_int "$VSDR_SUBSETS" || die "--vsdr-subsets must be a positive integer (got: $VSDR_SUBSETS)"
+HAS_VSDR=0
+for tc in "${TRAFFIC_CONFIGS[@]}"; do
+	validate_traffic_config "$tc"
+	[[ "$tc" == vsdr ]] && HAS_VSDR=1
+done
 
-MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} * ${#SCOPINGS[@]} ))
+MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} * ${#SCOPINGS[@]} * ${#TRAFFIC_CONFIGS[@]} ))
+MATRIX_FACTORS="${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]}×${#TRAFFIC_CONFIGS[@]}"
 
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
@@ -271,21 +328,26 @@ else
 	OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 fi
 
-# combo_already_done <mesh> <svc> <rep> <ns> <scope>: true if the resume TSV has a
-# valid row for that key (same gate as the report's n_valid, so failed rows re-run).
+# combo_already_done <mesh> <svc> <rep> <ns> <scope> <traffic>: true if the resume TSV
+# has a valid row for that key (same gate as the report's n_valid, so failed rows
+# re-run). traffic_config is found by header name; --resume only accepts a TSV of
+# this harness's width (checked below), which has it. The VS/DR scalars are not part
+# of the key: --resume pins them to the preamble's values (below).
 combo_already_done() {
 	[[ -n "$RESUME_DIR" ]] || return 1
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 	[[ -f "$tsv" ]] || return 1
-	awk -F'\t' -v ms="$1" -v sc="$2" -v rc="$3" -v nc="$4" -v scp="$5" '
-		!/^#/ && !/^timestamp/ && NF>=40 && $31=="0" \
-			&& $3==ms && $4==sc && $5==rc && $6==nc && $7==scp { found=1; exit }
+	awk -F'\t' -v ms="$1" -v sc="$2" -v rc="$3" -v nc="$4" -v scp="$5" -v tc="$6" '
+		/^timestamp\t/ { tcol = 0; for (i = 1; i <= NF; i++) if ($i == "traffic_config") tcol = i; next }
+		!/^#/ && NF>=40 && $31=="0" \
+			&& $3==ms && $4==sc && $5==rc && $6==nc && $7==scp \
+			&& ((tcol && NF >= tcol) ? $tcol : "none") == tc { found=1; exit }
 		END { exit (found ? 0 : 1) }' "$tsv"
 }
 
-# The 43-column TSV schema header. 002 writes the same literal when it runs
+# The 51-column TSV schema header. 002 writes the same literal when it runs
 # standalone; tests/lib/test/preamble.bats checks that the two are identical.
-CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check"
+CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg"
 CONTROLPLANE_TSV_WIDTH="$(echo -e "$CONTROLPLANE_TSV_HEADER" | awk -F'\t' '{ print NF }')"
 
 # --resume appends to the existing TSV, so its header must have this harness's width;
@@ -297,7 +359,33 @@ if [[ -n "$RESUME_DIR" ]]; then
 		if [[ -n "$_resume_width" && "$_resume_width" != "$CONTROLPLANE_TSV_WIDTH" ]]; then
 			die "--resume: $_resume_tsv has a ${_resume_width}-column header, but this harness writes ${CONTROLPLANE_TSV_WIDTH} columns. Start a new sweep instead of resuming across a schema change."
 		fi
+		# Sweep-level scalars live only in the preamble (pre-create skips an existing
+		# one), so the resumed rows must use the recorded values; the report reads them
+		# for every row. The VS/DR pair matters only when this run has vsdr cells.
+		if [[ -n "$_resume_width" ]]; then
+			resume_preamble_scalar "$_resume_tsv" PROXY_CHECK_TOLERANCE_PCT PROXY_CHECK_TOL_PCT CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT 0
+			resume_preamble_scalar "$_resume_tsv" PROXY_CHECK_MIN_DIFF PROXY_CHECK_MIN_DIFF CONTROLPLANE_PROXY_CHECK_MIN_DIFF 0
+			is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "--resume: PROXY_CHECK_TOLERANCE_PCT in $_resume_tsv is not a non-negative integer: $PROXY_CHECK_TOL_PCT"
+			is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "--resume: PROXY_CHECK_MIN_DIFF in $_resume_tsv is not a non-negative integer: $PROXY_CHECK_MIN_DIFF"
+			# 002 reads these from the environment.
+			export CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT="$PROXY_CHECK_TOL_PCT"
+			export CONTROLPLANE_PROXY_CHECK_MIN_DIFF="$PROXY_CHECK_MIN_DIFF"
+			if ((HAS_VSDR)); then
+				resume_preamble_scalar "$_resume_tsv" VSDR_EVERY VSDR_EVERY --vsdr-every "$VSDR_EVERY_FLAG"
+				resume_preamble_scalar "$_resume_tsv" VSDR_SUBSETS VSDR_SUBSETS --vsdr-subsets "$VSDR_SUBSETS_FLAG"
+				is_pos_int "$VSDR_EVERY" || die "--resume: VSDR_EVERY in $_resume_tsv is not a positive integer: $VSDR_EVERY"
+				is_pos_int "$VSDR_SUBSETS" || die "--resume: VSDR_SUBSETS in $_resume_tsv is not a positive integer: $VSDR_SUBSETS"
+			fi
+		fi
 	fi
+fi
+
+# Each DestinationRule subset needs at least one pod, at every replica count in the
+# sweep. Checked after --resume, which can adopt the recorded --vsdr-subsets.
+if ((HAS_VSDR)); then
+	for rc in "${REPLICA_COUNTS[@]}"; do
+		(( VSDR_SUBSETS <= rc )) || die "--vsdr-subsets $VSDR_SUBSETS > replica-count $rc: each DestinationRule subset needs at least one pod. Lower --vsdr-subsets or drop replica counts below it."
+	done
 fi
 
 # Pre-create controlplane-${RUN_ID}.tsv with the full preamble before the first
@@ -346,7 +434,7 @@ precreate_tsv_preamble() {
 	done < <(tuning_baseline_state "$src_ctx" "${KUBECTL[@]}")
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-		echo "# CONTROLPLANE_SCHEMA=43"
+		echo "# CONTROLPLANE_SCHEMA=51"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=1"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# HARNESS_SHA=${harness}"
@@ -364,13 +452,16 @@ precreate_tsv_preamble() {
 		echo "# SCALE_SIZING_MODE=${SCALE_SIZING_MODE:-unknown}"
 		echo "# PROXY_CHECK_TOLERANCE_PCT=${PROXY_CHECK_TOL_PCT}"
 		echo "# PROXY_CHECK_MIN_DIFF=${PROXY_CHECK_MIN_DIFF}"
+		echo "# TRAFFIC_CONFIG=${TRAFFIC_CONFIGS_CSV}"
+		echo "# VSDR_EVERY=${VSDR_EVERY}"
+		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
 		echo "# ${tb_line}"
 		echo "# ${eh_line}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
 		# shellcheck disable=SC2086
 		infra_preamble_lines $infra_kv
 		echo "# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure"
-		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}"
+		echo "# Contexts: ${CONTEXTS[*]}  Mesh sizes: ${MESH_SIZES[*]}  Services: ${SERVICE_COUNTS_CSV}  Replicas: ${REPLICA_COUNTS_CSV}  Namespaces: ${NAMESPACE_COUNTS_CSV}  Scopings: ${SIDECAR_SCOPINGS_CSV}  Traffic: ${TRAFFIC_CONFIGS_CSV}"
 	} > "$tsv"
 	echo -e "$CONTROLPLANE_TSV_HEADER" >> "$tsv"
 }
@@ -477,15 +568,19 @@ metrics_preflight() {
 # unknown, numerics N/A): counted in n_total, excluded from n_valid. The sweep
 # continues. <status> is PROBE_FAILED or SETUP_FAILED.
 emit_failed_row() {
-	local status="$1" ms="$2" sc="$3" rc="$4" nc="$5" scp="$6"
+	local status="$1" ms="$2" sc="$3" rc="$4" nc="$5" scp="$6" tc="$7"
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
+	# Configured VS+DR services for the cell (0 for none), like service_count.
+	local vsdr_svcs=0
+	[[ "$tc" == vsdr ]] && vsdr_svcs="$(vsdr_service_count "$sc" "$VSDR_EVERY")"
 	# Defensive: ensure header exists (pre-create runs before the loop, but keep this
 	# idempotent guard so a row is never written into a header-less file).
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
 		precreate_tsv_preamble
 	fi
-	# 43 fields: cols 41-43 (cluster proxies, sidecar pods, proxy check) are N/A too.
-	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
+	# 51 fields: cols 41-43 (cluster proxies, sidecar pods, proxy check) are N/A too;
+	# cols 44-45 keep the cell's traffic config, cols 46-51 are N/A.
+	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${tc}\t${vsdr_svcs}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
 }
 
 {
@@ -498,17 +593,18 @@ emit_failed_row() {
 	echo "Replica counts:    ${REPLICA_COUNTS[*]}"
 	echo "Namespace counts:  ${NAMESPACE_COUNTS[*]}"
 	echo "Sidecar scopings:  ${SCOPINGS[*]}"
+	echo "Traffic configs:   ${TRAFFIC_CONFIGS[*]}  (vsdr: every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets)"
 	echo "Config-dump samples: ${CONFIG_DUMP_SAMPLES}"
 	echo "Settle time:       ${SETTLE_SEC}s"
 	echo "Run ID:            ${RUN_ID}"
 	echo "Output:            ${OUTPUT_DIR}"
 	echo ""
-	echo "Planned matrix:    ${MATRIX_SIZE} = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]} (mesh × svc × rep × ns × scope)"
+	echo "Planned matrix:    ${MATRIX_SIZE} = ${MATRIX_FACTORS} (mesh × svc × rep × ns × scope × traffic)"
 	echo ""
 } >&2
 
 if ((MATRIX_SIZE > MAX_MATRIX)) && ! ((FORCE_LARGE_MATRIX)); then
-	die "matrix size $MATRIX_SIZE = ${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]} exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
+	die "matrix size $MATRIX_SIZE = ${MATRIX_FACTORS} (mesh × svc × rep × ns × scope × traffic) exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
 fi
 
 # The dry-run plan needs no CLI, so tolerate a missing one here (resolve_kubectl dies).
@@ -648,122 +744,134 @@ for ms in "${MESH_SIZES[@]}"; do
 		for rc in "${REPLICA_COUNTS[@]}"; do
 			for nc in "${NAMESPACE_COUNTS[@]}"; do
 				for scp in "${SCOPINGS[@]}"; do
-					combo_idx=$((combo_idx + 1))
-					label="mesh=$ms svcs=$sc reps=$rc ns=$nc scope=$scp"
-					ns_pattern=$(fmt_ns_pattern "$nc")
+					# Innermost axis: a none/vsdr pair runs back to back on the same base cell.
+					for tc in "${TRAFFIC_CONFIGS[@]}"; do
+						combo_idx=$((combo_idx + 1))
+						label="mesh=$ms svcs=$sc reps=$rc ns=$nc scope=$scp traffic=$tc"
+						ns_pattern=$(fmt_ns_pattern "$nc")
 
-					if ((DRY_RUN)); then
-						printf "  [%2d/%2d] %s  (clusters: %s)  Namespaces: %s\n" \
-							"$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}" "$ns_pattern" >&2
-						continue
-					fi
+						if ((DRY_RUN)); then
+							printf "  [%2d/%2d] %s  (clusters: %s)  Namespaces: %s\n" \
+								"$combo_idx" "$MATRIX_SIZE" "$label" "${active_ctxs[*]}" "$ns_pattern" >&2
+							continue
+						fi
 
-					# Skip a combo already completed in the resumed sweep.
-					if combo_already_done "$ms" "$sc" "$rc" "$nc" "$scp"; then
-						printf "  [%d/%d] %s — already has a valid row; skipping (resume)\n" \
-							"$combo_idx" "$MATRIX_SIZE" "$label" >&2
-						continue
-					fi
+						# Skip a combo already completed in the resumed sweep.
+						if combo_already_done "$ms" "$sc" "$rc" "$nc" "$scp" "$tc"; then
+							printf "  [%d/%d] %s — already has a valid row; skipping (resume)\n" \
+								"$combo_idx" "$MATRIX_SIZE" "$label" >&2
+							continue
+						fi
 
-					ensure_output_dir
+						ensure_output_dir
 
-					echo "=========================================="
-					printf "  Sweep [%d/%d]: %s\n" "$combo_idx" "$MATRIX_SIZE" "$label"
-					echo "  Clusters:   ${active_ctxs[*]}"
-					echo "  Namespaces: ${ns_pattern}"
-					echo "=========================================="
-					echo ""
-
-					STATE_DIR_COMBO="${OUTPUT_DIR}/state-combo-${combo_idx}"
-					mkdir -p "$STATE_DIR_COMBO"
-
-					echo "--- Baseline metrics scrape (phase 1/3) ---"
-					if ! "$SCRIPT_DIR/002-collect-resource-metrics.sh" \
-						--phase baseline \
-						--state-dir "$STATE_DIR_COMBO" \
-						--contexts "$active_csv" \
-						--mesh-size "$ms" \
-						--service-count "$sc" \
-						--replicas "$rc" \
-						--namespace-count "$nc" \
-						--sidecar-scoping "$scp" \
-						--settle "$SETTLE_SEC"; then
-						# Baseline failed: record the combo, clean up, move on.
-						echo "warn: [$combo_idx/$MATRIX_SIZE] baseline probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
-						emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
-						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
-							echo "warn: cleanup after baseline failure also reported failure for '$label'" >&2
-						rm -rf "$STATE_DIR_COMBO"
-						if (( SETTLE_SEC > 0 )); then sleep "$SETTLE_SEC"; fi
-						continue
-					fi
-					echo ""
-
-					start_peak_metrics_poller "$STATE_DIR_COMBO"
-
-					echo "--- Deploying workloads (phase 2/3, scoping=$scp) ---"
-					# Setup failed: stop the poller, record SETUP_FAILED, clean up, move on.
-					if ! "$SCRIPT_DIR/001-setup-controlplane-test.sh" \
-						--contexts "$active_csv" \
-						--service-count "$sc" \
-						--replicas "$rc" \
-						--namespace-count "$nc" \
-						--sidecar-scoping "$scp"; then
-						echo "warn: [$combo_idx/$MATRIX_SIZE] setup failed for '$label'; recording SETUP_FAILED row and continuing" >&2
-						stop_peak_metrics_poller   # MUST stop before continue — poller runs in background
-						emit_failed_row SETUP_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
-						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
-							echo "warn: cleanup after setup failure also reported failure for '$label'" >&2
-						rm -rf "$STATE_DIR_COMBO"
-						if (( SETTLE_SEC > 0 )); then sleep "$SETTLE_SEC"; fi
-						continue
-					fi
-					echo ""
-
-					if (( SETTLE_SEC > 0 )); then
-						echo "--- Settling ${SETTLE_SEC}s for steady-state before final scrape ---"
-						sleep "$SETTLE_SEC"
+						echo "=========================================="
+						printf "  Sweep [%d/%d]: %s\n" "$combo_idx" "$MATRIX_SIZE" "$label"
+						echo "  Clusters:   ${active_ctxs[*]}"
+						echo "  Namespaces: ${ns_pattern}"
+						echo "=========================================="
 						echo ""
-					fi
 
-					stop_peak_metrics_poller
+						STATE_DIR_COMBO="${OUTPUT_DIR}/state-combo-${combo_idx}"
+						mkdir -p "$STATE_DIR_COMBO"
 
-					echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
-					if ! "$SCRIPT_DIR/002-collect-resource-metrics.sh" \
-						--phase final \
-						--state-dir "$STATE_DIR_COMBO" \
-						--contexts "$active_csv" \
-						--mesh-size "$ms" \
-						--service-count "$sc" \
-						--replicas "$rc" \
-						--namespace-count "$nc" \
-						--sidecar-scoping "$scp" \
-						--config-dump-samples "$CONFIG_DUMP_SAMPLES" \
-						--settle "$SETTLE_SEC" \
-						--output-dir "$OUTPUT_DIR" \
-						--run-id "$RUN_ID"; then
-						# Final scrape failed: record PROBE_FAILED; cleanup still runs below.
-						echo "warn: [$combo_idx/$MATRIX_SIZE] final probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
-						emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp"
-					fi
-					rm -rf "$STATE_DIR_COMBO"
-					echo ""
+						echo "--- Baseline metrics scrape (phase 1/3) ---"
+						if ! "$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+							--phase baseline \
+							--state-dir "$STATE_DIR_COMBO" \
+							--contexts "$active_csv" \
+							--mesh-size "$ms" \
+							--service-count "$sc" \
+							--replicas "$rc" \
+							--namespace-count "$nc" \
+							--sidecar-scoping "$scp" \
+							--traffic-config "$tc" \
+							--vsdr-every "$VSDR_EVERY" \
+							--vsdr-subsets "$VSDR_SUBSETS" \
+							--settle "$SETTLE_SEC"; then
+							# Baseline failed: record the combo, clean up, move on.
+							echo "warn: [$combo_idx/$MATRIX_SIZE] baseline probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
+							emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp" "$tc"
+							"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+								echo "warn: cleanup after baseline failure also reported failure for '$label'" >&2
+							rm -rf "$STATE_DIR_COMBO"
+							if (( SETTLE_SEC > 0 )); then sleep "$SETTLE_SEC"; fi
+							continue
+						fi
+						echo ""
 
-					echo "--- Cleaning up ---"
-					# 005 waits (bounded) for namespace termination. A failure only warns:
-					# the next 001 waits for any leftover namespace before applying.
-					"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
-						echo "warn: [$combo_idx/$MATRIX_SIZE] cleanup reported failure for '$label'; next setup waits for the namespace to clear" >&2
+						start_peak_metrics_poller "$STATE_DIR_COMBO"
 
-					# Post-cleanup settle: when 005 deletes the test namespace,
-					# istiod re-pushes a broader (no-Sidecar) config to remaining
-					# proxies. Without this sleep, the next combo's baseline scrape
-					# lands inside that push storm.
-					if (( SETTLE_SEC > 0 )); then
-						echo "--- Post-cleanup settle (${SETTLE_SEC}s) ---" >&2
-						sleep "$SETTLE_SEC"
-					fi
-					echo ""
+						echo "--- Deploying workloads (phase 2/3, scoping=$scp, traffic=$tc) ---"
+						# Setup failed: stop the poller, record SETUP_FAILED, clean up, move on.
+						if ! "$SCRIPT_DIR/001-setup-controlplane-test.sh" \
+							--contexts "$active_csv" \
+							--service-count "$sc" \
+							--replicas "$rc" \
+							--namespace-count "$nc" \
+							--sidecar-scoping "$scp" \
+							--traffic-config "$tc" \
+							--vsdr-every "$VSDR_EVERY" \
+							--vsdr-subsets "$VSDR_SUBSETS"; then
+							echo "warn: [$combo_idx/$MATRIX_SIZE] setup failed for '$label'; recording SETUP_FAILED row and continuing" >&2
+							stop_peak_metrics_poller   # MUST stop before continue — poller runs in background
+							emit_failed_row SETUP_FAILED "$ms" "$sc" "$rc" "$nc" "$scp" "$tc"
+							"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+								echo "warn: cleanup after setup failure also reported failure for '$label'" >&2
+							rm -rf "$STATE_DIR_COMBO"
+							if (( SETTLE_SEC > 0 )); then sleep "$SETTLE_SEC"; fi
+							continue
+						fi
+						echo ""
+
+						if (( SETTLE_SEC > 0 )); then
+							echo "--- Settling ${SETTLE_SEC}s for steady-state before final scrape ---"
+							sleep "$SETTLE_SEC"
+							echo ""
+						fi
+
+						stop_peak_metrics_poller
+
+						echo "--- Final metrics scrape + emit (phase 3/3) — window covers baseline → deploy → settle ---"
+						if ! "$SCRIPT_DIR/002-collect-resource-metrics.sh" \
+							--phase final \
+							--state-dir "$STATE_DIR_COMBO" \
+							--contexts "$active_csv" \
+							--mesh-size "$ms" \
+							--service-count "$sc" \
+							--replicas "$rc" \
+							--namespace-count "$nc" \
+							--sidecar-scoping "$scp" \
+							--traffic-config "$tc" \
+							--vsdr-every "$VSDR_EVERY" \
+							--vsdr-subsets "$VSDR_SUBSETS" \
+							--config-dump-samples "$CONFIG_DUMP_SAMPLES" \
+							--settle "$SETTLE_SEC" \
+							--output-dir "$OUTPUT_DIR" \
+							--run-id "$RUN_ID"; then
+							# Final scrape failed: record PROBE_FAILED; cleanup still runs below.
+							echo "warn: [$combo_idx/$MATRIX_SIZE] final probe failed for '$label'; recording PROBE_FAILED row and continuing" >&2
+							emit_failed_row PROBE_FAILED "$ms" "$sc" "$rc" "$nc" "$scp" "$tc"
+						fi
+						rm -rf "$STATE_DIR_COMBO"
+						echo ""
+
+						echo "--- Cleaning up ---"
+						# 005 waits (bounded) for namespace termination. A failure only warns:
+						# the next 001 waits for any leftover namespace before applying.
+						"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+							echo "warn: [$combo_idx/$MATRIX_SIZE] cleanup reported failure for '$label'; next setup waits for the namespace to clear" >&2
+
+						# Post-cleanup settle: when 005 deletes the test namespace,
+						# istiod re-pushes a broader (no-Sidecar) config to remaining
+						# proxies. Without this sleep, the next combo's baseline scrape
+						# lands inside that push storm.
+						if (( SETTLE_SEC > 0 )); then
+							echo "--- Post-cleanup settle (${SETTLE_SEC}s) ---" >&2
+							sleep "$SETTLE_SEC"
+						fi
+						echo ""
+					done
 				done
 			done
 		done

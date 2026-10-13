@@ -12,11 +12,21 @@
 #   per-replica max 16 (17 if the restarted row leaks)
 #   per-cluster max 34 (36 if the excluded scrape leaks)
 #   per-cluster avg 31 = (30+34+30)/3, once per scrape (32 if ingested once per pod row)
+#
+# Task 6 fixture fixtures/controlplane_vsdr.tsv (mesh 2, 10 svc, 2 reps, 1 ns; VSDR_EVERY 1,
+# VSDR_SUBSETS 2), two base cells, each swept with traffic none and vsdr:
+#   scoping none:     none VS 0, 30 clusters, 1 MiB dumps; vsdr VS 10, 50 clusters (+20 =
+#                     10 svc x 2 subsets), plus a restarted vsdr row (mem 999, VS 3) that
+#                     must stay out of the istiod aggregates (else VS avg 7.7 -> WARN).
+#   scoping explicit: none 0.5 MiB dumps; vsdr VS 6 of 10 -> ingest WARN, and 1 MiB dumps
+#                     that must stay out of the scoping-effect table (none->explicit 50.0%).
+# Both fixtures are generated at 51 columns (CONTROLPLANE_SCHEMA=51).
 
 bats_require_minimum_version 1.5.0
 load test_helper
 
 FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
+VSDR_FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_vsdr.tsv"
 REPORT="${ROOT}/tests/controlplane/004-report-results.sh"
 
 setup() {
@@ -25,12 +35,19 @@ setup() {
 	cp "$FIXTURE" "${RES}/controlplane-fixture-t2.tsv"
 }
 
-# legacy40 <out>: the fixture as an older file would be: schema 40, no proxy-check keys,
-# cols 1-40 only.
+# legacy40 <out>: the fixture as an older file would be: schema 40, no proxy-check or
+# traffic keys, cols 1-40 only.
 legacy40() {
-	grep -v '^# PROXY_CHECK_' "$FIXTURE" \
-		| sed 's/^# CONTROLPLANE_SCHEMA=43$/# CONTROLPLANE_SCHEMA=40/' \
+	grep -vE '^# (PROXY_CHECK_|TRAFFIC_CONFIG=|VSDR_)' "$FIXTURE" \
+		| sed 's/^# CONTROLPLANE_SCHEMA=51$/# CONTROLPLANE_SCHEMA=40/' \
 		| cut -f1-40 > "$1"
+}
+
+# vsdr_dir: a results dir holding only the Task 6 fixture.
+vsdr_dir() {
+	VRES="${BATS_TEST_TMPDIR}/v"
+	mkdir -p "$VRES"
+	cp "$VSDR_FIXTURE" "${VRES}/controlplane-fixture-t6.tsv"
 }
 
 @test "report json: per-replica vs per-cluster peaks and the proxy-check tally" {
@@ -70,14 +87,14 @@ legacy40() {
 	refute_output --partial "**Warning:**"
 }
 
-@test "report csv: rows gain cluster_proxies_* (37 columns) and a proxy_check comment" {
+@test "report csv: rows gain cluster_proxies_* and the traffic columns (47) and a proxy_check comment" {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	hdr=$(grep -v '^#' <<<"$output" | sed -n 1p)
 	row=$(grep -v '^#' <<<"$output" | sed -n 2p)
-	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 37 ]
-	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg" ]]
-	[[ "$row" == *",30,34,31" ]]
+	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 47 ]
+	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg,traffic_config,vsdr_services,"* ]]
+	[[ "$row" == *",30,34,31,none,0,"* ]]
 	assert_output --partial "# proxy_check: tolerance_pct=10 min_diff=2 ok=2 low=1 high=0 na=0 excluded=1"
 	assert_output --partial "connected_proxies_cluster_max=34"
 	assert_output --partial "# WARNING: connected proxies differ"
@@ -118,8 +135,12 @@ legacy40() {
 	assert_success
 	[[ "$stderr" == *"1 TSV file(s) use the 40-column schema"* ]]
 	[ "$(jq -c '[.metadata.files_consumed, .metadata.skipped_legacy]' <<<"$output")" = '[2,0]' ]
-	# Old columns: both files' rows are aggregated (n_total doubles).
+	# Old columns: both files' rows are aggregated (n_total doubles), and the 40-column
+	# rows join the traffic none cell.
+	[ "$(jq -r '.results | length' <<<"$output")" = "1" ]
 	[ "$(jq -r '.results[0].n_total' <<<"$output")" = "20" ]
+	[ "$(jq -c '[.results[0].traffic_config, .results[0].vsdr_services]' <<<"$output")" = '["none",0]' ]
+	[ "$(jq -r '.metadata.sweep.traffic_configs' <<<"$output")" = "none" ]
 	# New keys: unchanged; the 40-column rows contribute nothing.
 	[ "$(jq -r '.metadata.achieved_scale.connected_proxies_cluster_max' <<<"$output")" = "34" ]
 	[ "$(jq -c '.metadata.proxy_check | {tolerance_pct, ok, low, high, na, excluded}' <<<"$output")" = \
@@ -145,5 +166,108 @@ legacy40() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[[ "$stderr" == *"skipping 1 legacy TSV file(s)"* ]]
+	[[ "$stderr" == *"expected 40 or 51 columns"* ]]
 	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
+}
+
+@test "report: a 43-column TSV (an intermediate layout that never shipped) is skipped as legacy" {
+	cut -f1-43 "$FIXTURE" > "${RES}/controlplane-mid43.tsv"
+	[ "$(grep -m1 '^timestamp' "${RES}/controlplane-mid43.tsv" | awk -F'\t' '{ print NF }')" -eq 43 ]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[[ "$stderr" == *"skipping 1 legacy TSV file(s)"* ]]
+	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
+}
+
+# --- Task 6: VirtualService/DestinationRule traffic axis -------------------------------
+
+@test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields" {
+	vsdr_dir
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
+	assert_success
+	[ "$(jq -r '.metadata.sweep.traffic_configs' <<<"$output")" = "none,vsdr" ]
+	[ "$(jq -c '.metadata.traffic_management' <<<"$output")" = '{"vsdr_every":"1","vsdr_subsets":"2"}' ]
+	# Four cells: the traffic config is part of the grouping key (none sorts first).
+	[ "$(jq -c '[.results[] | "\(.sidecar_scoping)/\(.traffic_config)"]' <<<"$output")" = \
+		'["explicit/none","explicit/vsdr","none/none","none/vsdr"]' ]
+	[ "$(jq -c '.results[3] | [.vsdr_services, .istiod_virt_services_avg, .push_time_avg_ms, .pushcontext_init_avg_ms, .xds_pushes_avg, .config_size_avg_bytes]' <<<"$output")" = \
+		'[10,10,1.5,0.75,150,3072]' ]
+	[ "$(jq -c '.results[3] | [.sidecar_clusters_avg, .sidecar_cds_bytes_avg, .sidecar_rds_bytes_avg]' <<<"$output")" = '[50,102400,40960]' ]
+	[ "$(jq -c '[.results[] | .istiod_vs_ingest_short]' <<<"$output")" = '[false,true,false,false]' ]
+}
+
+@test "vsdr report: a restarted vsdr row stays out of the istiod aggregates but counts in n_total" {
+	vsdr_dir
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
+	assert_success
+	# mem 999 and VS 3 come only from the restarted row.
+	[ "$(jq -c '.results[3] | [.n_total, .n_valid, .mem_mi.max, .istiod_virt_services_avg]' <<<"$output")" = '[3,2,520,10]' ]
+}
+
+@test "vsdr report markdown: traffic-effect section pairs none and vsdr with expected clusters" {
+	vsdr_dir
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
+	assert_success
+	assert_output --partial 'traffic_configs: "none,vsdr"'
+	assert_output --partial 'vsdr_subsets: "2"'
+	assert_output --partial "| traffic_configs | none,vsdr  (vsdr: every 1, 2 subsets) |"
+	assert_output --partial "| 2 | 10 | 2 | 1 | none | vsdr | 3 | 2 | 120 |"
+	[ "$(grep -c '^## Traffic management (VS/DR) effect$' <<<"$output")" -eq 1 ]
+	assert_output --partial "| 2 | 10 | 2 | 1 | none | 2/2 | 10 | 0 -> 10 | 100 -> 120 (+20.0%) | 250 -> 260 (+4.0%) | 500 -> 520 (+4.0%) | 100 -> 150 (+50.0%) | 1.00 -> 1.50 (+50.0%) | 0.50 -> 0.75 (+50.0%) | 2.0 -> 3.0 (+50.0%) |"
+	assert_output --partial "| 2 | 10 | 2 | 1 | none | 10 | 20 | 30 -> 50 (+66.7%) | +20 | 50.0 -> 100.0 (+100.0%) | 20.0 -> 40.0 (+100.0%) | 1.00 -> 1.50 (+50.0%) |"
+	assert_output --partial "Order bias:"
+}
+
+@test "vsdr report: ingest WARN fires for the cell whose istiod saw 6 of 10 VirtualServices only" {
+	vsdr_dir
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
+	assert_success
+	[ "$(grep -c 'WARN:\*\* istiod ingested fewer VirtualServices' <<<"$output")" -eq 1 ]
+	assert_output --partial 'vsdr cell `2|10|2|1|explicit`: istiod VirtualServices 0 -> 6 (+6) < 10 configured'
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format text
+	assert_success
+	assert_output --partial "WARNING: vsdr cell 2|10|2|1|explicit: istiod VirtualServices 0 -> 6 (+6) < 10 configured"
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format csv
+	assert_success
+	assert_output --partial "# WARNING: vsdr cell 2|10|2|1|explicit:"
+	refute_output --partial "vsdr cell 2|10|2|1|none:"
+}
+
+@test "vsdr report markdown: the scoping-effect table compares none cells only" {
+	vsdr_dir
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
+	assert_success
+	# With the vsdr cells leaking in (last one wins) this row would read 1.5 / 1.0 / 33.3%.
+	assert_output --partial "| 2 | 10 | 2 | 1 | 1.0 | N/A | 0.5 | N/A | 50.0% |"
+}
+
+@test "report: a none-only sweep has no traffic-effect section and no vsdr note" {
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_success
+	refute_output --partial "## Traffic management (VS/DR) effect"
+	assert_output --partial "| traffic_configs | none |"
+}
+
+@test "vsdr report charts: vsdr cells get their own series instead of overwriting none" {
+	vsdr_dir
+	# A second mesh size (1) so the CPU chart renders.
+	awk 'BEGIN { FS = OFS = "\t" } !/^#/ && $1 != "timestamp" { $3 = 1 } !/^#/ && $1 != "timestamp" { print }' \
+		"$VSDR_FIXTURE" >> "${VRES}/controlplane-fixture-t6.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format charts
+	assert_success
+	assert_output --partial "> Series order: **explicit** **explicit/vsdr** **none** **none/vsdr**."
+}
+
+@test "envelope: traffic row prefers the none cell at the peak mesh size, else shows vsdr" {
+	source "${ROOT}/tests/lib/capacity.sh"
+	source "${ROOT}/tests/lib/envelope.sh"
+	vsdr_dir
+	run --separate-stderr render_scale_envelope "$VRES" "$REPORT" "mesh-a,mesh-b" false
+	assert_success
+	assert_output --partial "| Traffic management | none |"
+	# Only vsdr cells left: the peak is a vsdr cell and says so.
+	awk -F'\t' '/^#/ || $1 == "timestamp" || $44 == "vsdr"' "$VSDR_FIXTURE" > "${VRES}/controlplane-fixture-t6.tsv"
+	run --separate-stderr render_scale_envelope "$VRES" "$REPORT" "mesh-a,mesh-b" false
+	assert_success
+	assert_output --partial "| Traffic management | vsdr |"
 }

@@ -104,6 +104,7 @@ if ((DRY_RUN)); then
 		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace -l $LABEL_SELECTOR --wait=false"
 		echo "  [dry-run] ${KUBECTL[*]} --context=$ctx delete namespace $NS --ignore-not-found=true --wait=false"
 		echo "  [dry-run] wait up to ${TERMINATION_TIMEOUT}s for those namespaces to disappear"
+		echo "  [dry-run] warn on any Sidecar, VirtualService or DestinationRule still labelled $LABEL_SELECTOR"
 	done
 	exit 0
 fi
@@ -157,6 +158,14 @@ for ctx in "${CONTEXTS[@]}"; do
 		[[ -z "$sc_left" ]] && sc_left=0
 		if (( sc_left > 0 )); then
 			echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
+		fi
+		# Same for the --traffic-config vsdr VirtualServices/DestinationRules.
+		vsdr_left=$("${KUBECTL[@]}" --context="$ctx" get \
+			virtualservices.networking.istio.io,destinationrules.networking.istio.io \
+			-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
+		[[ -z "$vsdr_left" ]] && vsdr_left=0
+		if (( vsdr_left > 0 )); then
+			echo "  [$ctx] WARNING: ${vsdr_left} VirtualService/DestinationRule(s) still present" >&2
 		fi
 		echo "  [$ctx] Done."
 	) &

@@ -1,7 +1,8 @@
 # Control-Plane Resource Scaling Test Suite
 
 Measures istiod CPU, memory and xDS activity as a function of mesh size, service count,
-replicas, namespace count and `Sidecar` CR scoping.
+replicas, namespace count, `Sidecar` CR scoping and traffic management (bare services, or
+a VirtualService and DestinationRule per service).
 
 ## Architecture
 
@@ -64,6 +65,10 @@ One TSV row per istiod pod, computed as deltas over a wall-clock window:
 | `cluster_connected_proxies` | `pilot_xds` summed over every istiod pod of the context, from the same final scrape. Same value on each row of that context. `N/A` if any pod's scrape is empty or short, or the Running istiod pod set changed during the window |
 | `sidecar_pods` | Running, non-terminating pods with the `sidecar.istio.io/status` annotation on the context (injected gateways included), read right after the final scrape |
 | `proxy_check` | `OK`, `LOW` or `HIGH` when `cluster_connected_proxies` and `sidecar_pods` differ by more than max(`CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT`, default 10 %, `CONTROLPLANE_PROXY_CHECK_MIN_DIFF`, default 2); `N/A` if either side is `N/A`. A warning only: the row stays in every statistic |
+| `traffic_config`, `vsdr_services` | What `001` deployed: `none` or `vsdr`, and how many services got a VirtualService + DestinationRule (`0` for `none`) |
+| `istiod_virt_services` | `pilot_virt_services` at the final scrape: every VirtualService istiod knows, so a vsdr row should show at least `vsdr_services` |
+| `push_time_avg_ms`, `pushcontext_init_avg_ms` | Average per observation over the window: Δsum ÷ Δcount of `pilot_xds_push_time` and `pilot_pushcontext_init_seconds`. `N/A` with no observation or after a restart |
+| `sidecar_clusters_avg`, `sidecar_cds_bytes_avg`, `sidecar_rds_bytes_avg` | From the same sampled `/config_dump`s: dynamic CDS clusters, and the compact JSON size of the CDS and RDS sections |
 
 In a sweep, `003` runs `002 --phase baseline` before deploying, `001` deploys and settles,
 then `002 --phase final` scrapes again, so the window covers the deploy push storm. Run
@@ -105,11 +110,17 @@ cross-product of these axes (one CSV flag each):
 | `--replica-counts` | Pods per service |
 | `--namespace-counts` | Namespaces the services are spread over (service `i` in namespace `i mod N`) |
 | `--sidecar-scopings` | `none` (no Sidecar CRs), `namespace` (one per namespace), `explicit` (one per Deployment) |
+| `--traffic-configs` | `none` (bare services) or `vsdr` (a VirtualService + DestinationRule per configured service); innermost, so each pair runs back to back |
 
 More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matrix`.
 `--settle` (default 60 s) applies after the deploy and again after each cleanup.
 `--resume tests/controlplane/results/sweep-<RUN_ID>` continues an interrupted sweep and skips combos that
-already have a valid row. `--config-dump-samples 0` skips the per-sidecar exec.
+already have a valid row. Each row records its own axis values, but some scalars are recorded only
+once, in the TSV preamble, so they must match on resume: `--vsdr-every` and `--vsdr-subsets` (when
+the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep reads them from the
+preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
+`--vsdr-subsets` that differs. Pass the other options as in the original run.
+`--config-dump-samples 0` skips the per-sidecar exec.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
 scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces
@@ -117,17 +128,45 @@ exactly), so `001` stops unless they are in `charts/spoke-ossm/values.yaml`
 `tuningBaseline.sidecar.egressHosts` (or egress is `*/*`). `namespace` and `explicit`
 scoping bring their own `Sidecar`s, so they need no change.
 
+## Traffic management (VS/DR)
+
+`--traffic-configs none,vsdr` measures what VirtualServices and DestinationRules add on
+top of the same services. It is off by default (`none`), and a `none` render is the same
+as before. For each configured service (`--vsdr-every N`: service `i` when `i mod N == 0`,
+default every service) the chart adds, in the service's namespace:
+
+- a VirtualService with one route that splits traffic by weight across the subsets, a 5 s
+  timeout and 3 retries;
+- a DestinationRule with `--vsdr-subsets` subsets (default 2), a connection pool and
+  outlier detection.
+
+Each subset has to select real pods, so that service's replicas are split over one
+Deployment per subset (`dummy-svc-<i>-v1..vN`, label `version=v<k>`). The pod and endpoint
+counts do not change (only the pods' `version` label does), so `--vsdr-subsets` must be at
+most every `--replica-counts` value. `001` checks that the VirtualServices and
+DestinationRules exist (`SETUP_FAILED` otherwise).
+
+The markdown report pairs each vsdr cell with the none cell of the same mesh, services,
+replicas, namespaces and scoping (section "Traffic management (VS/DR) effect"): istiod
+cost, and per-proxy CDS clusters next to the expected extra clusters (VS+DR services ×
+subsets, one CDS cluster per subset). It warns when istiod knows fewer VirtualServices
+than were configured. The vsdr cell runs right after its none cell and istiod RSS does not
+shrink after GC, so compare heap in use, or run again with `--traffic-configs vsdr,none`.
+Run `005` before switching `--traffic-config` by hand with `001`: an in-place re-apply
+leaves the other mode's Deployments running.
+
 ## Outputs
 
 Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID>/`):
 
-- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=43`,
-  `PROXY_CHECK_TOLERANCE_PCT`, `PROXY_CHECK_MIN_DIFF`, ...), then the 43-column rows.
+- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=51`,
+  `PROXY_CHECK_TOLERANCE_PCT`, `PROXY_CHECK_MIN_DIFF`, `TRAFFIC_CONFIG`, `VSDR_EVERY`,
+  `VSDR_SUBSETS`, ...), then the 51-column rows.
 - `sweep-<RUN_ID>.md`, `sweep-charts-<RUN_ID>.md`: report markdown and charts.
 - `scale-envelope-<RUN_ID>.md`: campaign scale envelope, led by the customer SLA verdict
   (`PASS`, `CAUTION` at 75 % of a limit, `FAIL` at 90 % or on any istiod restart).
 
-`004-report-results.sh --format text|csv|json|markdown|md|charts` groups rows by the five
+`004-report-results.sh --format text|csv|json|markdown|md|charts` groups rows by the six
 axes; the markdown ends with a glossary of every column. Rows with `istiod_restarted` other
 than `0` are counted in `n_total` but excluded from the statistics (`n_valid`). A failed
 combo is recorded as a row whose `context` is `SETUP_FAILED` or `PROBE_FAILED`; a context
@@ -140,8 +179,8 @@ only when no row of that scrape restarted. The proxy check tallies cluster scrap
 ok/low/high/n/a/excluded; any low or high prints a `WARNING` line naming
 `<context>@<timestamp>` (text and CSV, a `**Warning:**` note in markdown, `proxy_check` in
 JSON). It never changes the exit code. The report also reads 40-column TSVs from before this
-check; they add nothing to the per-cluster figures. `--resume` refuses a sweep whose TSV has
-a different column count.
+check; they add nothing to the per-cluster or VS/DR figures and their rows count as traffic
+`none`. `--resume` refuses a sweep whose TSV has a different column count.
 
 ## Watch mode
 
@@ -165,3 +204,9 @@ Each row is a per-window delta over `--interval` seconds.
   list as `pods_scheduled`. Pods starting or stopping in between, or proxies not yet
   connected, can flag `LOW`/`HIGH`; a timed-out list makes `sidecar_pods` and `proxy_check`
   `N/A`.
+- VS/DR load grows only with pod-backed services, so a small cluster limits it (a lab of a
+  few dozen pods is a functional check, not a measurement of istiod cost).
+- With `--vsdr-every` a multiple of `--namespace-counts`, every configured service lands in
+  namespace 0 (service `i` lives in namespace `i mod N`).
+- Gateways also get the DestinationRule subset clusters, but only workload sidecars are
+  sampled.

@@ -1,4 +1,51 @@
+{{- include "controlplane-test.validateTrafficConfig" . -}}
 {{- range $i := until (.Values.serviceCount | int) }}
+{{- if include "controlplane-test.vsdrFor" (dict "ctx" $ "idx" $i) }}
+{{- /* VS+DR service: its replicas are split over one Deployment per DR subset
+       (version=v1..vN; the first R mod N get one extra), so every subset selects
+       real pods and the pod count stays replicasPerService. */ -}}
+{{- $s := int $.Values.trafficConfig.subsets }}
+{{- $r := int $.Values.replicasPerService }}
+{{- range $k := until $s }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-{{ $i }}-v{{ add1 $k }}
+  namespace: {{ include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i) }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    version: v{{ add1 $k }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ add (div $r $s) (ternary 1 0 (lt $k (mod $r $s))) }}
+  selector:
+    matchLabels:
+      app: dummy-svc-{{ $i }}
+      version: v{{ add1 $k }}
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-{{ $i }}
+        version: v{{ add1 $k }}
+        {{- include "controlplane-test.labels" $ | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: {{ $.Values.image.repository }}:{{ $.Values.image.tag }}
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: {{ $.Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}
+{{- else }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -33,4 +80,5 @@ spec:
               drop:
                 - ALL
             runAsNonRoot: true
+{{- end }}
 {{- end }}

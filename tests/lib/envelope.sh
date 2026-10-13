@@ -330,21 +330,30 @@ render_scale_envelope() {
 	# poisoned/restarted row (which still carries its CONFIGURED service_count, e.g.
 	# 999) cannot become the "peak" and misreport the topology as achieved fact. Fall
 	# back to all rows only if NO row is valid (so a fully-failed sweep still renders).
+	# A none and a vsdr cell at the same peak mesh size tie: prefer the none cell (the
+	# baseline; a report without traffic_config reads as none). Among other ties the
+	# last row wins, as max_by did.
 	local peak_json
 	peak_json="$(printf '%s' "$json" | jq -c '
 		(.results // []) as $all
 		| ([ $all[] | select((.n_valid // 0) > 0) ]) as $valid
 		| (if ($valid | length) > 0 then $valid else $all end)
-		| if length == 0 then null else (max_by(.mesh_size)) end' 2>/dev/null || printf 'null')"
-	local peak_mesh peak_svc peak_reps peak_ns peak_scope
+		| if length == 0 then null
+		  else (map(.mesh_size) | max) as $m
+		  | [ .[] | select(.mesh_size == $m) ] as $peak
+		  | [ $peak[] | select((.traffic_config // "none") == "none") ] as $peak_none
+		  | (if ($peak_none | length) > 0 then $peak_none else $peak end) | last
+		  end' 2>/dev/null || printf 'null')"
+	local peak_mesh peak_svc peak_reps peak_ns peak_scope peak_traffic
 	if [[ -n "$peak_json" && "$peak_json" != "null" ]]; then
 		peak_mesh="$(printf '%s' "$peak_json" | jq -r '.mesh_size // "unknown"')"
 		peak_svc="$(printf '%s' "$peak_json" | jq -r '.service_count // "unknown"')"
 		peak_reps="$(printf '%s' "$peak_json" | jq -r '.replicas // "unknown"')"
 		peak_ns="$(printf '%s' "$peak_json" | jq -r '.namespace_count // "unknown"')"
 		peak_scope="$(printf '%s' "$peak_json" | jq -r '.sidecar_scoping // "unknown"')"
+		peak_traffic="$(printf '%s' "$peak_json" | jq -r '.traffic_config // "none"')"
 	else
-		peak_mesh="unknown"; peak_svc="unknown"; peak_reps="unknown"; peak_ns="unknown"; peak_scope="unknown"
+		peak_mesh="unknown"; peak_svc="unknown"; peak_reps="unknown"; peak_ns="unknown"; peak_scope="unknown"; peak_traffic="unknown"
 	fi
 
 	# Live read-only snapshot: istiod resources (req/lim/replicas), network id,
@@ -421,6 +430,7 @@ render_scale_envelope() {
 | Proxy check vs Running sidecar pods | ${proxy_check} | report \`proxy_check\` (cluster scrapes by result) |
 | Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
+| Traffic management | ${peak_traffic} | sweep peak \`traffic_config\` (none preferred when a vsdr cell ties at the peak mesh size) |
 | Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
 
 > **Connected proxies per cluster** is \`pilot_xds\` summed over one cluster's istiod replicas at one scrape. It should be about equal to that cluster's Running injected pods (gateways included), which the proxy check compares. It is still not a mesh-wide sum and not endpoints; do not expect it to equal total endpoints. **Per istiod replica** is the busiest single replica (max over the per-pod rows), about 1/R of the cluster figure with R replicas.

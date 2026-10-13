@@ -96,7 +96,7 @@ source "${ROOT}/tests/lib/preamble.sh"
 # must stamp the same CONTROLPLANE_SCHEMA. Extend the expected tail when appending.
 # ---------------------------------------------------------------------------
 
-@test "controlplane header: 002 and 003 literals match, 43 fields, schema 43" {
+@test "controlplane header: 002 and 003 literals match, 51 fields, schema 51" {
 	collector="${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
 	precreate="${ROOT}/tests/controlplane/003-run-sweep.sh"
 	h002=$(grep -m1 'echo -e "timestamp\\t' "$collector" | sed 's/.*echo -e "//; s/" >>.*//')
@@ -104,16 +104,59 @@ source "${ROOT}/tests/lib/preamble.sh"
 	[ -n "$h002" ]
 	[ "$h002" = "$h003" ]
 	n=$(printf '%s' "$h003" | awk -F'\\\\t' '{ print NF }')
-	[ "$n" -eq 43 ]
-	[[ "$h003" == *'\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check' ]]
-	grep -q 'echo "# CONTROLPLANE_SCHEMA=43"' "$collector"
-	grep -q 'echo "# CONTROLPLANE_SCHEMA=43"' "$precreate"
-	# The proxy-check knobs are inline echoes in both writers (the PL36 key-set test
-	# above then covers their parity).
-	for k in PROXY_CHECK_TOLERANCE_PCT PROXY_CHECK_MIN_DIFF; do
+	[ "$n" -eq 51 ]
+	[[ "$h003" == *'\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg' ]]
+	grep -q 'echo "# CONTROLPLANE_SCHEMA=51"' "$collector"
+	grep -q 'echo "# CONTROLPLANE_SCHEMA=51"' "$precreate"
+	# The proxy-check and traffic-management knobs are inline echoes in both writers
+	# (the PL36 key-set test above then covers their parity).
+	for k in PROXY_CHECK_TOLERANCE_PCT PROXY_CHECK_MIN_DIFF TRAFFIC_CONFIG VSDR_EVERY VSDR_SUBSETS; do
 		grep -q "echo \"# ${k}=" "$collector"
 		grep -q "echo \"# ${k}=" "$precreate"
 	done
+}
+
+# ---------------------------------------------------------------------------
+# 003 --resume: the sweep-level scalars recorded only in the preamble (VSDR_EVERY,
+# VSDR_SUBSETS, PROXY_CHECK_*) must be the same for every row of the resumed TSV.
+# Each case stops before any cluster contact (a die, or the matrix-size guard).
+# ---------------------------------------------------------------------------
+
+_resume_dir() {
+	local subsets="$1" d="${BATS_TEST_TMPDIR}/sweep-fixture-t6"
+	mkdir -p "$d"
+	sed "s/^# VSDR_SUBSETS=.*/# VSDR_SUBSETS=${subsets}/" \
+		"${ROOT}/tests/lib/test/fixtures/controlplane_vsdr.tsv" > "${d}/controlplane-fixture-t6.tsv"
+	printf '%s' "$d"
+}
+
+@test "003 --resume: refuses an explicit --vsdr-subsets that differs from the preamble" {
+	d="$(_resume_dir 2)"
+	KUBECONFIG=/dev/null run "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" \
+		--contexts a,b --mesh-sizes 1 --replica-counts 3 --traffic-configs none,vsdr --vsdr-subsets 3
+	assert_failure 1
+	assert_output --partial "--vsdr-subsets 3 differs from VSDR_SUBSETS=2"
+}
+
+@test "003 --resume: adopts the recorded --vsdr-subsets, then validates it against replicas" {
+	d="$(_resume_dir 3)"
+	KUBECONFIG=/dev/null run "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" \
+		--contexts a,b --mesh-sizes 1 --replica-counts 2 --traffic-configs none,vsdr
+	assert_failure 1
+	assert_output --partial "using VSDR_SUBSETS=3 from the resumed sweep's preamble (this run had 2)"
+	assert_output --partial "--vsdr-subsets 3 > replica-count 2"
+}
+
+@test "003 --resume: adopts PROXY_CHECK_*; leaves the VS/DR pair alone without vsdr cells" {
+	d="$(_resume_dir 3)"
+	CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT=25 CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG=/dev/null \
+		run "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" \
+		--contexts a,b --mesh-sizes 1,2 --replica-counts 2 --traffic-configs none
+	assert_failure 1
+	assert_output --partial "using PROXY_CHECK_TOLERANCE_PCT=10 from the resumed sweep's preamble (this run had 25)"
+	refute_output --partial "VSDR_SUBSETS"
+	# Stopped by the matrix guard, i.e. after the resume checks and before any cluster call.
+	assert_output --partial "exceeds safety limit 1"
 }
 
 # ---------------------------------------------------------------------------

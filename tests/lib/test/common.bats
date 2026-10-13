@@ -171,3 +171,72 @@ _stub_cli() {
 	assert_failure 1
 	assert_output "error: neither kubectl nor oc found on PATH"
 }
+
+# --- Task 6: validate_traffic_config() / vsdr_service_count() ---
+
+@test "validate_traffic_config: accepts none and vsdr" {
+	run validate_traffic_config none
+	assert_success
+	run validate_traffic_config vsdr
+	assert_success
+}
+
+@test "validate_traffic_config: rejects VSDR, empty and bogus with die" {
+	for v in VSDR "" bogus; do
+		run validate_traffic_config "$v"
+		assert_failure 1
+		assert_output --partial "--traffic-config must be one of [none, vsdr]"
+	done
+}
+
+@test "vsdr_service_count: ceil(services / every), matching the chart's i mod every == 0" {
+	[[ "$(vsdr_service_count 10 1)" == 10 ]]
+	[[ "$(vsdr_service_count 10 3)" == 4 ]]
+	[[ "$(vsdr_service_count 9 3)" == 3 ]]
+	[[ "$(vsdr_service_count 1 5)" == 1 ]]
+	[[ "$(vsdr_service_count 0 2)" == 0 ]]
+}
+
+@test "vsdr_service_count: rejects every < 1 and a non-integer count" {
+	run vsdr_service_count 10 0
+	assert_failure 1
+	run vsdr_service_count x 2
+	assert_failure 1
+}
+
+@test "resume_preamble_scalar: adopts the recorded value when the flag was not passed" {
+	f="${BATS_TEST_TMPDIR}/resume.tsv"
+	printf '# VSDR_SUBSETS=3\ntimestamp\tcontext\n' > "$f"
+	local subsets=2
+	resume_preamble_scalar "$f" VSDR_SUBSETS subsets --vsdr-subsets 0 2> "${BATS_TEST_TMPDIR}/err"
+	[[ "$subsets" == 3 ]]
+	grep -q 'using VSDR_SUBSETS=3 from the resumed sweep' "${BATS_TEST_TMPDIR}/err"
+}
+
+@test "resume_preamble_scalar: silent no-op when the value already matches" {
+	f="${BATS_TEST_TMPDIR}/resume.tsv"
+	printf '# VSDR_EVERY=2\ntimestamp\tcontext\n' > "$f"
+	local every=2
+	resume_preamble_scalar "$f" VSDR_EVERY every --vsdr-every 1 2> "${BATS_TEST_TMPDIR}/err"
+	[[ "$every" == 2 ]]
+	[[ ! -s "${BATS_TEST_TMPDIR}/err" ]]
+}
+
+@test "resume_preamble_scalar: dies when an explicit flag conflicts with the preamble" {
+	f="${BATS_TEST_TMPDIR}/resume.tsv"
+	printf '# VSDR_SUBSETS=3\ntimestamp\tcontext\n' > "$f"
+	subsets=2
+	run resume_preamble_scalar "$f" VSDR_SUBSETS subsets --vsdr-subsets 1
+	assert_failure 1
+	assert_output --partial "--vsdr-subsets 2 differs from VSDR_SUBSETS=3"
+}
+
+@test "resume_preamble_scalar: dies when the key is missing, and reads the preamble only" {
+	f="${BATS_TEST_TMPDIR}/resume.tsv"
+	# A matching line after the header is not preamble.
+	printf '# VSDR_EVERY=1\ntimestamp\tcontext\n# VSDR_SUBSETS=3\n' > "$f"
+	subsets=2
+	run resume_preamble_scalar "$f" VSDR_SUBSETS subsets --vsdr-subsets 0
+	assert_failure 1
+	assert_output --partial "has no '# VSDR_SUBSETS=' preamble line"
+}

@@ -109,3 +109,40 @@ EOF
 	# (was 100.00 when this emitted the bucket ceiling; FINDING #5 interpolation fix)
 	[[ "$result" == "99.00" ]]
 }
+
+# --- config_dump_breakdown (Task 6) ---
+
+@test "config_dump_breakdown: counts dynamic clusters and sizes the CDS and RDS sections" {
+	result=$(config_dump_breakdown "$FIXTURES/config_dump_small.json")
+	# 3 dynamic clusters (the plain one plus subsets v1/v2); the static one is not counted.
+	[[ "$result" =~ ^clusters=3\ cds_bytes=([0-9]+)\ rds_bytes=([0-9]+)$ ]]
+	# Byte counts equal the compact JSON of each section.
+	cds=$(jq -c '.configs[] | select(."@type" | endswith(".ClustersConfigDump"))' "$FIXTURES/config_dump_small.json" | tr -d '\n' | wc -c | tr -d ' ')
+	rds=$(jq -c '.configs[] | select(."@type" | endswith(".RoutesConfigDump"))' "$FIXTURES/config_dump_small.json" | tr -d '\n' | wc -c | tr -d ' ')
+	[[ "${BASH_REMATCH[1]}" == "$cds" ]]
+	[[ "${BASH_REMATCH[2]}" == "$rds" ]]
+}
+
+@test "config_dump_breakdown: non-JSON (a truncated dump) is unknown, not zero" {
+	f="${BATS_TEST_TMPDIR}/bad.json"
+	head -c 120 "$FIXTURES/config_dump_small.json" > "$f"
+	[[ "$(config_dump_breakdown "$f")" == "unknown" ]]
+}
+
+@test "config_dump_breakdown: empty or missing file is unknown" {
+	: > "${BATS_TEST_TMPDIR}/empty.json"
+	[[ "$(config_dump_breakdown "${BATS_TEST_TMPDIR}/empty.json")" == "unknown" ]]
+	[[ "$(config_dump_breakdown "${BATS_TEST_TMPDIR}/missing.json")" == "unknown" ]]
+}
+
+@test "config_dump_breakdown: a dump without ClustersConfigDump is unknown" {
+	f="${BATS_TEST_TMPDIR}/noclusters.json"
+	jq -c '.configs |= map(select(."@type" | endswith(".ClustersConfigDump") | not))' "$FIXTURES/config_dump_small.json" > "$f"
+	[[ "$(config_dump_breakdown "$f")" == "unknown" ]]
+}
+
+@test "config_dump_breakdown: a dump without RoutesConfigDump keeps clusters, rds unknown" {
+	f="${BATS_TEST_TMPDIR}/noroutes.json"
+	jq -c '.configs |= map(select(."@type" | endswith(".RoutesConfigDump") | not))' "$FIXTURES/config_dump_small.json" > "$f"
+	[[ "$(config_dump_breakdown "$f")" =~ ^clusters=3\ cds_bytes=[0-9]+\ rds_bytes=unknown$ ]]
+}

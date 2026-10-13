@@ -31,6 +31,7 @@ the **peak** mesh-size point of the run (usually mesh-10), not mesh-1.
 | Proxy check vs Running sidecar pods | ok / low / high / n/a / excluded | controlplane report `proxy check`; any `low`/`high` comes with a WARNING naming the cluster scrape. A large `n/a` or `excluded` share means most scrapes were not checked |
 | Per-proxy config size | _… KB/MB_ | controlplane `Cfg dump avg (MB)` (varies by sidecar scoping) |
 | Sidecar scoping | none / namespace / explicit | sweep header `Sidecar scoping` |
+| Traffic management | none / vsdr | controlplane envelope `Traffic management` (sweep peak `traffic_config`; none when both were swept) |
 | Istio version | _…_ | sweep header `Istio version` |
 | Kube version(s) | _…_ | sweep header `Kube versions` |
 
@@ -54,6 +55,7 @@ small mesh, not capacity — say so explicitly here, not in a footnote.
 |---|---|---|---|
 | propagation | iterations | _…_ | sweep header `Iterations` |
 | controlplane | sidecar scopings | none, namespace, explicit | sweep header |
+| controlplane | traffic configs (optional) | none, vsdr | sweep header `TRAFFIC_CONFIG` (+ `VSDR_EVERY`, `VSDR_SUBSETS`) |
 | dataplane | QPS levels | _10 / 100 / 500 / 1000_ | sweep header `QPS levels` (+ `Duration`, `Connections`) |
 | churn | churn deployments × scale range | _… × (1→N)_ | sweep header `Deployments`, `Scale range` |
 | churn-dataplane | churn rates | _… /s_ | sweep header `Churn rates` |

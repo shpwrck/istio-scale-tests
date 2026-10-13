@@ -23,7 +23,8 @@ spec:
         {{- end }}
 {{- end }}
 {{- else if eq $scope "explicit" }}
-{{- /* One Sidecar per Deployment, in the Deployment's namespace. */ -}}
+{{- /* One Sidecar per service, in its namespace. The app=dummy-svc-<i> selector also
+       covers the version-split Deployments of trafficConfig.mode=vsdr. */ -}}
 {{- range $i := until (.Values.serviceCount | int) }}
 ---
 apiVersion: networking.istio.io/v1

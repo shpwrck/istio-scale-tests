@@ -105,6 +105,8 @@ tests/churn/003-run-sweep.sh          --contexts "$CONTEXTS" --mesh-sizes "$MESH
 
 # 3. controlplane — istiod resource scaling (~1–2h)
 tests/controlplane/003-run-sweep.sh   --contexts "$CONTEXTS" --mesh-sizes "$MESH" --sidecar-scopings none,namespace,explicit --force-large-matrix
+#    Optional (off by default): add --traffic-configs none,vsdr to also measure a
+#    VirtualService + DestinationRule per service (doubles the matrix).
 
 # 4. dataplane — cross-cluster latency (~2h+)
 tests/dataplane/003-run-sweep.sh      --contexts "$CONTEXTS" --mesh-sizes "$MESH" --qps-levels 10,100,500,1000 --force-large-matrix

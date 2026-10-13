@@ -51,3 +51,39 @@ Usage: {{ include "controlplane-test.namespaceForService" (dict "ctx" $ "idx" $i
 {{- $count := max ($ctx.Values.namespaceCount | int) 1 -}}
 {{- include "controlplane-test.namespaceName" (dict "ctx" $ctx "i" (mod (.idx | int) $count)) -}}
 {{- end -}}
+
+{{/*
+Validate trafficConfig: mode is none|vsdr, every >= 1, and with vsdr
+1 <= subsets <= replicasPerService (each subset must select at least one pod).
+Values are read without `default`, which would turn an explicit 0 into the default.
+*/}}
+{{- define "controlplane-test.validateTrafficConfig" -}}
+{{- $tc := .Values.trafficConfig | default dict -}}
+{{- $mode := $tc.mode | default "none" -}}
+{{- if not (has $mode (list "none" "vsdr")) -}}
+{{- fail (printf "trafficConfig.mode must be one of [none, vsdr]; got %q" $mode) -}}
+{{- end -}}
+{{- if lt (int $tc.every) 1 -}}
+{{- fail (printf "trafficConfig.every must be >= 1; got %v" $tc.every) -}}
+{{- end -}}
+{{- if eq $mode "vsdr" -}}
+{{- $s := int $tc.subsets -}}
+{{- if lt $s 1 -}}
+{{- fail (printf "trafficConfig.subsets must be >= 1; got %v" $tc.subsets) -}}
+{{- end -}}
+{{- if gt $s (int .Values.replicasPerService) -}}
+{{- fail (printf "trafficConfig.subsets (%d) must be <= replicasPerService (%d) so every subset selects at least one pod" $s (int .Values.replicasPerService)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when service `idx` gets a VirtualService + DestinationRule (mode vsdr and
+idx mod every == 0), else empty.
+
+Usage: {{ include "controlplane-test.vsdrFor" (dict "ctx" $ "idx" $i) }}
+*/}}
+{{- define "controlplane-test.vsdrFor" -}}
+{{- $tc := .ctx.Values.trafficConfig | default dict -}}
+{{- if and (eq ($tc.mode | default "none") "vsdr") (eq (mod (.idx | int) (int $tc.every)) 0) -}}true{{- end -}}
+{{- end -}}
