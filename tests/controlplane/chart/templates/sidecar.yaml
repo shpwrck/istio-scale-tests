@@ -1,8 +1,11 @@
 {{- include "controlplane-test.validateSidecarScoping" . -}}
+{{- include "controlplane-test.validateGrowth" . -}}
 {{- $scope := .Values.sidecarScoping | default "none" -}}
 {{- $extra := default (list) .Values.sidecarExtraEgressHosts -}}
-{{- if eq $scope "namespace" }}
-{{- /* One namespace-wide Sidecar (no workloadSelector) per workload namespace. */ -}}
+{{- if or (eq $scope "namespace") (eq $scope "wide") }}
+{{- /* One namespace-wide Sidecar (no workloadSelector) per workload namespace. wide
+       uses the same name with egress to every host ("*" over "*"), so a re-apply
+       switches the scoping in place. */ -}}
 {{- range $ns := fromYamlArray (include "controlplane-test.namespaces" .) }}
 ---
 apiVersion: networking.istio.io/v1
@@ -12,14 +15,18 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "controlplane-test.labels" $ | nindent 4 }}
-    controlplane-test.scope: namespace
+    controlplane-test.scope: {{ $scope }}
 spec:
   egress:
     - hosts:
+        {{- if eq $scope "wide" }}
+        - "*/*"
+        {{- else }}
         - "./*"
         - "istio-system/*"
         {{- range $h := $extra }}
         - {{ $h | quote }}
+        {{- end }}
         {{- end }}
 {{- end }}
 {{- else if eq $scope "explicit" }}

@@ -7,6 +7,8 @@ TF_DIR="${SCRIPT_DIR}/.."
 
 DRY_RUN=0
 REGION=""
+BY_CLUSTER_JSON=""
+DELETE_INTERFACE_ENDPOINTS=0
 POLL_TIMEOUT=120
 POLL_INTERVAL=5
 
@@ -16,17 +18,36 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Clean up orphan AWS resources (load balancers, ENIs, security groups) in VPCs
-managed by the rosa-hcp Terraform module. Run this before 'terraform destroy'
-to prevent VPC deletion failures.
+Clean up orphan AWS resources (load balancers, ENIs, security groups and, on
+request, interface VPC endpoints) in VPCs managed by the rosa-hcp Terraform
+module. Run this before 'terraform destroy' to prevent VPC deletion failures.
 
-VPC IDs are read from: terraform -chdir=${TF_DIR} output -json by_cluster
+VPC IDs come from every source available, merged:
+  - the saved copy given with --by-cluster-json (save it right after apply:
+    terraform -chdir=${TF_DIR} output -json by_cluster > <file>);
+  - terraform -chdir=${TF_DIR} output -json by_cluster;
+  - the aws_vpc resources in terraform state.
+After 'terraform destroy -target=module.rosa_hcp' the by_cluster output is empty,
+so the saved copy and the state are what still name the VPCs. An exported
+TF_WORKSPACE is ignored: rosa-hcp uses only the default workspace.
 
 Options:
-  --dry-run       Show what would be deleted without acting
-  --region REGION Override AWS region (default: the VPCs' region in terraform state, then
-                  \$AWS_REGION, \$AWS_DEFAULT_REGION, aws config)
-  -h, --help      Show this help
+  --by-cluster-json FILE        Saved 'terraform output -json by_cluster'
+  --delete-interface-endpoints  Also delete interface VPC endpoints that Terraform
+                                does not manage (ROSA's private-router endpoint),
+                                but only in a VPC with no instances left. Use it
+                                after the clusters are destroyed: while a cluster
+                                runs, its workers reach the hosted control plane
+                                through that endpoint.
+  --dry-run                     Show what would be deleted without acting
+  --region REGION               Override AWS region (default: the VPCs' region from
+                                terraform state or the saved by_cluster copy, then
+                                \$AWS_REGION, \$AWS_DEFAULT_REGION, aws config)
+  -h, --help                    Show this help
+
+A listed VPC that AWS no longer knows counts as already deleted when the region
+is certain (--region, or read from the state or the saved copy) or another listed
+VPC was found there; otherwise it is an error (probably the wrong region).
 EOF
 }
 
@@ -41,6 +62,15 @@ while [[ $# -gt 0 ]]; do
     REGION="$2"
     shift 2
     ;;
+  --by-cluster-json)
+    [[ -n "${2:-}" ]] || die "--by-cluster-json requires a file"
+    BY_CLUSTER_JSON="$2"
+    shift 2
+    ;;
+  --delete-interface-endpoints)
+    DELETE_INTERFACE_ENDPOINTS=1
+    shift
+    ;;
   -h | --help)
     usage
     exit 0
@@ -53,13 +83,47 @@ done
 
 command -v aws >/dev/null 2>&1 || die "aws CLI not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
-command -v terraform >/dev/null 2>&1 || die "terraform not found"
+
+# rosa-hcp has only the default workspace (terraform/platform reads ../rosa-hcp/terraform.tfstate
+# by path). A TF_WORKSPACE exported for the platform's 'rosa' workspace would make the state and
+# output below read as empty.
+if [[ -n "${TF_WORKSPACE:-}" ]]; then
+  [[ "${TF_WORKSPACE}" == "default" ]] ||
+    echo "note: ignoring TF_WORKSPACE=${TF_WORKSPACE}: terraform/rosa-hcp uses only the default workspace" >&2
+  unset TF_WORKSPACE
+fi
+HAVE_TERRAFORM=1
+if ! command -v terraform >/dev/null 2>&1; then
+  [[ -n "${BY_CLUSTER_JSON}" ]] || die "terraform not found (or pass --by-cluster-json)"
+  HAVE_TERRAFORM=0
+  echo "warning: terraform not found; using only ${BY_CLUSTER_JSON}" >&2
+fi
 
 # --- Selection logic (pure jq over raw AWS/terraform JSON) ---
 
 # Region of each aws_vpc in `terraform show -json` (from arn:aws:ec2:<region>:<acct>:vpc/<id>).
 state_vpc_regions() {
   jq -r '[.. | objects | select(.type? == "aws_vpc") | .values.arn? // empty | split(":")[3]] | unique | .[]'
+}
+
+# `terraform show -json` -> "<cluster key> <vpc id>" per aws_vpc.
+state_vpcs() {
+  jq -r '.. | objects | select(.type? == "aws_vpc") | [(.address | capture("\\[\"(?<k>[^\"]+)\"\\]").k // .address), .values.id] | @tsv'
+}
+
+# `terraform show -json` -> space-separated ids of the VPC endpoints Terraform manages.
+state_endpoint_ids() {
+  jq -r '[.. | objects | select(.type? == "aws_vpc_endpoint") | .values.id? // empty] | join(" ")'
+}
+
+# by_cluster JSON (the output, or its saved copy) -> "<cluster key> <vpc id>" per cluster.
+by_cluster_vpcs() {
+  jq -r 'to_entries[] | select((.value.vpc_id? // "") | length > 0) | [.key, .value.vpc_id] | @tsv'
+}
+
+# by_cluster JSON -> the aws_region each entry records (older copies have none).
+by_cluster_regions() {
+  jq -r '[.[] | .aws_region? // empty] | unique | .[]'
 }
 
 # describe-network-interfaces JSON -> "<eni> <action> <attachment|-> <status> <detail>" per ENI.
@@ -75,9 +139,28 @@ eni_plan() {
     ] | @tsv'
 }
 
-# ENIs that stay after step 3 (the ones eni_plan does not delete).
+# ENIs that stay after step 3 (the ones eni_plan does not delete), minus the
+# comma-separated ENIs in $1 (those of interface endpoints being deleted).
 eni_remaining() {
-  jq '{NetworkInterfaces: [.NetworkInterfaces[] | select(.Attachment.InstanceId or .RequesterManaged == true)]}'
+  jq --arg drop "${1:-}" '($drop | split(",") | map(select(. != ""))) as $d
+    | {NetworkInterfaces: [.NetworkInterfaces[]
+        | select(.Attachment.InstanceId or .RequesterManaged == true)
+        | select(.NetworkInterfaceId as $id | any($d[]; . == $id) | not)]}'
+}
+
+# describe-vpc-endpoints JSON -> "<endpoint> <action> <service> <eni,eni...>" per endpoint.
+# $1 = space-separated endpoint ids Terraform manages. Action: managed (Terraform deletes it),
+# gone (already deleting/deleted), or delete.
+endpoint_plan() {
+  jq -r --arg managed "${1:-}" '($managed | split(" ") | map(select(. != ""))) as $m
+    | .VpcEndpoints[] | .VpcEndpointId as $id | ((.State // "") | ascii_downcase) as $s
+    | [$id,
+       (if any($m[]; . == $id) then "managed"
+        elif ($s == "deleted" or $s == "deleting") then "gone"
+        else "delete" end),
+       (.ServiceName // "-"),
+       ((.NetworkInterfaceIds // []) | join(","))
+      ] | @tsv'
 }
 
 # stdin: describe-security-groups JSON, then remaining-ENIs JSON.
@@ -103,43 +186,108 @@ sg_revoke_rules() {
     | select(length > 0)'
 }
 
-# --- Resolve VPC IDs from terraform output, or from state after a partial destroy ---
+# --- Resolve VPC IDs: saved by_cluster copy, terraform output and state, merged ---
 
-STATE_JSON="$(terraform -chdir="${TF_DIR}" show -json 2>/dev/null)" || STATE_JSON="{}"
+STATE_JSON="{}"
+BY_CLUSTER=""
+if ((HAVE_TERRAFORM)); then
+  STATE_JSON="$(terraform -chdir="${TF_DIR}" show -json 2>/dev/null)" || STATE_JSON="{}"
+  BY_CLUSTER="$(terraform -chdir="${TF_DIR}" output -json by_cluster 2>/dev/null)" || BY_CLUSTER=""
+fi
+SAVED_JSON=""
+if [[ -n "${BY_CLUSTER_JSON}" ]]; then
+  [[ -r "${BY_CLUSTER_JSON}" ]] || die "--by-cluster-json: cannot read ${BY_CLUSTER_JSON}"
+  SAVED_JSON="$(cat "${BY_CLUSTER_JSON}")"
+  echo "${SAVED_JSON}" | jq -e 'type == "object"' >/dev/null 2>&1 ||
+    die "--by-cluster-json: ${BY_CLUSTER_JSON} is not a by_cluster JSON object"
+fi
 
 VPC_IDS=()
 CLUSTER_NAMES=()
-if BY_CLUSTER="$(terraform -chdir="${TF_DIR}" output -json by_cluster 2>/dev/null)"; then
-  while IFS= read -r key; do
-    VPC_IDS+=("$(echo "${BY_CLUSTER}" | jq -r --arg k "$key" '.[$k].vpc_id')")
-    CLUSTER_NAMES+=("$key")
-  done < <(echo "${BY_CLUSTER}" | jq -r 'keys[]')
-else
-  # Outputs are gone once a destroy has started; the VPCs are still in state.
+VPC_SOURCES=()
+declare -A VPC_INDEX=()
+add_vpc() {
+  local key="$1" vpc="$2" src="$3" idx
+  [[ -n "${vpc}" && "${vpc}" != "null" ]] || return 0
+  if [[ -n "${VPC_INDEX["${vpc}"]+x}" ]]; then
+    idx="${VPC_INDEX["${vpc}"]}"
+    [[ ",${VPC_SOURCES[idx]}," == *",${src},"* ]] || VPC_SOURCES[idx]+=",${src}"
+    return 0
+  fi
+  VPC_INDEX["${vpc}"]=${#VPC_IDS[@]}
+  VPC_IDS+=("${vpc}")
+  CLUSTER_NAMES+=("${key}")
+  VPC_SOURCES+=("${src}")
+}
+
+n_saved=0
+n_output=0
+n_state=0
+if [[ -n "${SAVED_JSON}" ]]; then
   while IFS=$'\t' read -r key vpc_id; do
-    VPC_IDS+=("$vpc_id")
-    CLUSTER_NAMES+=("$key")
-  done < <(echo "${STATE_JSON}" |
-    jq -r '.. | objects | select(.type? == "aws_vpc") | [(.address | capture("\\[\"(?<k>[^\"]+)\"\\]").k // .address), .values.id] | @tsv')
+    [[ -n "${key}" ]] || continue
+    add_vpc "${key}" "${vpc_id}" saved
+    n_saved=$((n_saved + 1))
+  done < <(echo "${SAVED_JSON}" | by_cluster_vpcs)
+fi
+if [[ -n "${BY_CLUSTER}" ]]; then
+  while IFS=$'\t' read -r key vpc_id; do
+    [[ -n "${key}" ]] || continue
+    add_vpc "${key}" "${vpc_id}" output
+    n_output=$((n_output + 1))
+  done < <(echo "${BY_CLUSTER}" | by_cluster_vpcs 2>/dev/null)
+fi
+# Outputs are empty or gone once a destroy has started; the VPCs are still in state.
+while IFS=$'\t' read -r key vpc_id; do
+  [[ -n "${key}" ]] || continue
+  add_vpc "${key}" "${vpc_id}" state
+  n_state=$((n_state + 1))
+done < <(echo "${STATE_JSON}" | state_vpcs 2>/dev/null)
+
+[[ ${#VPC_IDS[@]} -gt 0 ]] || die "no VPCs found in the saved by_cluster copy, terraform output or state — is the rosa-hcp module initialized?"
+
+# Check the saved copy against what terraform knows; the merged list covers both.
+if [[ -n "${SAVED_JSON}" ]] && ((n_state > 0)); then
+  for i in "${!VPC_IDS[@]}"; do
+    case ",${VPC_SOURCES[$i]}," in
+    *,saved,*) [[ ",${VPC_SOURCES[$i]}," == *,state,* ]] ||
+      echo "note: ${VPC_IDS[$i]} (${CLUSTER_NAMES[$i]}) is in the saved copy but not in terraform state (destroyed already, or state lost)" ;;
+    *) echo "warning: ${VPC_IDS[$i]} (${CLUSTER_NAMES[$i]}) is in terraform state but not in the saved copy (stale copy?)" ;;
+    esac
+  done
 fi
 
-[[ ${#VPC_IDS[@]} -gt 0 ]] || die "no VPCs found in terraform output or state — is the rosa-hcp module initialized?"
-
-if [[ -z "${REGION}" ]]; then
-  # The VPCs' own ARNs say where the clusters are; AWS_REGION may point elsewhere.
-  state_regions="$(echo "${STATE_JSON}" | state_vpc_regions 2>/dev/null)" || state_regions=""
-  if [[ $(grep -c . <<<"${state_regions}") -gt 1 ]]; then
-    die "VPCs in state span several regions ($(echo "${state_regions}" | tr '\n' ' ')) — pass --region"
+REGION_CERTAIN=0
+if [[ -n "${REGION}" ]]; then
+  REGION_CERTAIN=1
+else
+  # The VPCs' own ARNs (or the region saved with them) say where the clusters are;
+  # AWS_REGION may point elsewhere.
+  known_regions="$(
+    {
+      echo "${STATE_JSON}" | state_vpc_regions 2>/dev/null || true
+      [[ -z "${SAVED_JSON}" ]] || echo "${SAVED_JSON}" | by_cluster_regions 2>/dev/null || true
+      [[ -z "${BY_CLUSTER}" ]] || echo "${BY_CLUSTER}" | by_cluster_regions 2>/dev/null || true
+    } | grep . | sort -u
+  )" || known_regions=""
+  if [[ $(grep -c . <<<"${known_regions}") -gt 1 ]]; then
+    die "the VPCs span several regions ($(echo "${known_regions}" | tr '\n' ' ')) — pass --region"
   fi
-  REGION="${state_regions:-${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}}"
+  if [[ -n "${known_regions}" ]]; then
+    REGION="${known_regions}"
+    REGION_CERTAIN=1
+  else
+    REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
+  fi
   [[ -n "${REGION}" ]] || die "could not determine AWS region — pass --region or set AWS_REGION"
 fi
 
 AWS=(aws --region "${REGION}" --output json)
 
 echo "=== Pre-destroy VPC cleanup ==="
-echo "Region:  ${REGION}"
-echo "VPCs:    ${#VPC_IDS[@]}"
+echo "Region:  ${REGION}$( ((REGION_CERTAIN)) || echo " (from the environment)")"
+echo "VPCs:    ${#VPC_IDS[@]} (saved copy: ${n_saved}, terraform output: ${n_output}, state: ${n_state})"
+echo "Interface endpoints: $( ((DELETE_INTERFACE_ENDPOINTS)) && echo "delete unmanaged ones in VPCs without instances" || echo "report only")"
 echo "Dry run: $( (( DRY_RUN )) && echo "yes" || echo "no" )"
 echo ""
 
@@ -154,6 +302,25 @@ action() {
   fi
 }
 
+# --- Verify the list against AWS before touching anything ---
+
+# found | missing | error per VPC. A wrong region makes every lookup below come back empty,
+# so a missing VPC only counts as deleted when the region is certain or another VPC was found.
+VPC_STATUS=()
+FOUND_ANY=0
+for i in "${!VPC_IDS[@]}"; do
+  if err="$("${AWS[@]}" ec2 describe-vpcs --vpc-ids "${VPC_IDS[$i]}" 2>&1 >/dev/null)"; then
+    VPC_STATUS[i]="found"
+    FOUND_ANY=1
+  elif [[ "${err}" == *InvalidVpcID.NotFound* ]]; then
+    VPC_STATUS[i]="missing"
+  else
+    VPC_STATUS[i]="error: $(grep -v '^[[:space:]]*$' <<<"${err}" | head -1)"
+  fi
+done
+
+TF_ENDPOINT_IDS="$(echo "${STATE_JSON}" | state_endpoint_ids 2>/dev/null)" || TF_ENDPOINT_IDS=""
+
 # --- Per-VPC cleanup ---
 
 for i in "${!VPC_IDS[@]}"; do
@@ -161,16 +328,27 @@ for i in "${!VPC_IDS[@]}"; do
   cluster="${CLUSTER_NAMES[$i]}"
   vpc_deleted=0
 
-  echo "--- ${cluster} (${vpc}) ---"
+  echo "--- ${cluster} (${vpc}; from ${VPC_SOURCES[$i]}) ---"
 
-  # A VPC ID from state that this region does not know means the region is wrong; every
-  # lookup below would come back empty and the VPC would look clean.
-  if ! "${AWS[@]}" ec2 describe-vpcs --vpc-ids "${vpc}" >/dev/null 2>&1; then
-    echo "  error: VPC ${vpc} not found in ${REGION} (wrong region? pass --region)"
+  case "${VPC_STATUS[$i]}" in
+  found) ;;
+  missing)
+    if ((REGION_CERTAIN || FOUND_ANY)); then
+      echo "  already deleted (not found in ${REGION})"
+    else
+      echo "  error: VPC ${vpc} not found in ${REGION} (wrong region? pass --region)"
+      (( ERRORS++ )) || true
+    fi
+    echo ""
+    continue
+    ;;
+  *)
+    echo "  error: cannot look up VPC ${vpc}: ${VPC_STATUS[$i]#error: }"
     (( ERRORS++ )) || true
     echo ""
     continue
-  fi
+    ;;
+  esac
 
   # 1. Delete NLB/ALB load balancers
   lb_arns="$("${AWS[@]}" elbv2 describe-load-balancers \
@@ -195,6 +373,68 @@ for i in "${!VPC_IDS[@]}"; do
     fi
     (( vpc_deleted++ )) || true
   done
+
+  # 1c. Interface VPC endpoints Terraform does not manage (ROSA's private-router endpoint).
+  # Their requester-managed ENIs, and the <cluster-id>-vpce-private-router security group
+  # attached to them, block the subnet and VPC deletes if ROSA leaves them behind.
+  eps_json="$("${AWS[@]}" ec2 describe-vpc-endpoints \
+    --filters "Name=vpc-id,Values=${vpc}" "Name=vpc-endpoint-type,Values=Interface" 2>/dev/null)" ||
+    eps_json='{"VpcEndpoints":[]}'
+  ep_delete=""
+  ep_enis=""
+  ep_hold=""
+  if (( DELETE_INTERFACE_ENDPOINTS )); then
+    # Workers reach their hosted control plane through the endpoint: leave it while any
+    # instance is left in the VPC (or when that cannot be checked).
+    live="$("${AWS[@]}" ec2 describe-instances \
+      --filters "Name=vpc-id,Values=${vpc}" "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped" \
+      --query 'Reservations[].Instances[].InstanceId' 2>/dev/null | jq -r 'length')" || live="unknown"
+    [[ "${live}" == "0" ]] || ep_hold="${live}"
+  fi
+  while IFS=$'\t' read -r ep_id ep_action ep_service ep_eni_list; do
+    [[ -n "${ep_id}" ]] || continue
+    case "${ep_action}" in
+    managed) echo "  skip endpoint ${ep_id} (${ep_service}; managed by terraform)" ;;
+    gone) echo "  skip endpoint ${ep_id} (${ep_service}; already deleting)" ;;
+    delete)
+      if (( ! DELETE_INTERFACE_ENDPOINTS )); then
+        echo "  note: interface endpoint ${ep_id} (${ep_service}) left in place; it goes with the cluster."
+        echo "        If 'terraform destroy' then fails on this VPC, re-run with --delete-interface-endpoints."
+      elif [[ -n "${ep_hold}" ]]; then
+        echo "  skip endpoint ${ep_id} (${ep_service}): ${ep_hold} instance(s) still in the VPC; re-run once the cluster is gone"
+      else
+        action "delete interface endpoint ${ep_id} (${ep_service})"
+        ep_delete="${ep_delete} ${ep_id}"
+        ep_enis="${ep_enis},${ep_eni_list}"
+        (( vpc_deleted++ )) || true
+      fi
+      ;;
+    esac
+  done < <(echo "${eps_json}" | endpoint_plan "${TF_ENDPOINT_IDS}")
+
+  if [[ -n "${ep_delete}" ]] && (( ! DRY_RUN )); then
+    # shellcheck disable=SC2086 # word-split the endpoint id list
+    del_out="$("${AWS[@]}" ec2 delete-vpc-endpoints --vpc-endpoint-ids ${ep_delete} 2>&1)" || del_out='{"Unsuccessful":[{"Error":{"Message":"delete-vpc-endpoints failed"}}]}'
+    failed_eps="$(echo "${del_out}" | jq -r '(.Unsuccessful // [])[] | "\(.ResourceId // "-"): \(.Error.Message // "unknown")"' 2>/dev/null)" ||
+      failed_eps="${del_out}"
+    if [[ -n "${failed_eps}" ]]; then
+      echo "  warning: endpoint delete failed: ${failed_eps}"
+      (( ERRORS++ )) || true
+    fi
+    echo "  waiting for endpoint ENIs to release..."
+    elapsed=0
+    while (( elapsed < POLL_TIMEOUT )); do
+      ep_left="$("${AWS[@]}" ec2 describe-network-interfaces \
+        --filters "Name=vpc-id,Values=${vpc}" "Name=interface-type,Values=vpc_endpoint" \
+        --query 'NetworkInterfaces[].NetworkInterfaceId' 2>/dev/null | jq -r '.[]')" || ep_left=""
+      [[ -z "${ep_left}" ]] && break
+      sleep "${POLL_INTERVAL}"
+      (( elapsed += POLL_INTERVAL ))
+    done
+    if [[ -n "${ep_left}" ]]; then
+      echo "  warning: endpoint ENIs still present after ${POLL_TIMEOUT}s — continuing anyway"
+    fi
+  fi
 
   # 2. Wait for LB ENIs to release
   if [[ -n "${lb_arns}${classic_lbs}" ]] && (( ! DRY_RUN )); then
@@ -249,7 +489,8 @@ for i in "${!VPC_IDS[@]}"; do
   sgs_json="$("${AWS[@]}" ec2 describe-security-groups \
     --filters "Name=vpc-id,Values=${vpc}" 2>/dev/null)" || sgs_json='{"SecurityGroups":[]}'
   if (( DRY_RUN )); then
-    remaining_json="$(echo "${enis_json}" | eni_remaining)" || remaining_json="${enis_json}"
+    # The ENIs of endpoints that would be deleted would release their groups too.
+    remaining_json="$(echo "${enis_json}" | eni_remaining "${ep_enis}")" || remaining_json="${enis_json}"
   else
     # Re-read: an ENI that failed to delete still holds its groups.
     remaining_json="$("${AWS[@]}" ec2 describe-network-interfaces \

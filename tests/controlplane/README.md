@@ -2,7 +2,9 @@
 
 Measures istiod CPU, memory and xDS activity as a function of mesh size, service count,
 replicas, namespace count, `Sidecar` CR scoping and traffic management (bare services, or
-a VirtualService and DestinationRule per service).
+a VirtualService and DestinationRule per service). Growth mode measures how thousands of
+namespaces with a few services each drive istiod, proxy and gateway cost
+([Namespace scaling](#namespace-scaling-growth-mode)).
 
 ## Architecture
 
@@ -69,6 +71,10 @@ One TSV row per istiod pod, computed as deltas over a wall-clock window:
 | `istiod_virt_services` | `pilot_virt_services` at the final scrape: every VirtualService istiod knows, so a vsdr row should show at least `vsdr_services` |
 | `push_time_avg_ms`, `pushcontext_init_avg_ms` | Average per observation over the window: Δsum ÷ Δcount of `pilot_xds_push_time` and `pilot_pushcontext_init_seconds`. `N/A` with no observation or after a restart |
 | `sidecar_clusters_avg`, `sidecar_cds_bytes_avg`, `sidecar_rds_bytes_avg` | From the same sampled `/config_dump`s: dynamic CDS clusters, and the compact JSON size of the CDS and RDS sections |
+| `services_per_namespace`, `workload_mode`, `measurement_pods`, `outside_namespaces`, `outside_discovery`, `window_kind` | What the window measured (growth mode; a legacy row reads `0`, `pods`, services x replicas, `0`, `none`, `deploy`): `window_kind` is `deploy`, `grow`, `probe` or `outside` |
+| `istiod_services` | `pilot_services` at the final scrape (every Service istiod knows; identical on every replica, never summed) |
+| `istiod_cpu_s_delta` | Δ`process_cpu_seconds_total` over the window: the window's istiod CPU-seconds (`N/A` after a restart) |
+| `sidecar_mem_mi_avg`, `gateway_clusters_max`, `gateway_mem_mi_max`, `root_cert_configmaps` | Growth mode only (`N/A` otherwise): Envoy `server.memory_allocated` of the sampled pods; the largest ingress/east-west gateway's `cluster_manager.active_clusters` and `server.memory_allocated`; `istio-ca-root-cert` ConfigMaps on the context |
 
 In a sweep, `003` runs `002 --phase baseline` before deploying, `001` deploys and settles,
 then `002 --phase final` scrapes again, so the window covers the deploy push storm. Run
@@ -109,7 +115,7 @@ cross-product of these axes (one CSV flag each):
 | `--service-counts` | Dummy services per cluster |
 | `--replica-counts` | Pods per service |
 | `--namespace-counts` | Namespaces the services are spread over (service `i` in namespace `i mod N`) |
-| `--sidecar-scopings` | `none` (no Sidecar CRs), `namespace` (one per namespace), `explicit` (one per Deployment) |
+| `--sidecar-scopings` | `none` (no Sidecar CRs), `namespace` (one per namespace), `wide` (one per namespace with egress `*/*`), `explicit` (one per Deployment) |
 | `--traffic-configs` | `none` (bare services) or `vsdr` (a VirtualService + DestinationRule per configured service); innermost, so each pair runs back to back |
 
 More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matrix`.
@@ -180,7 +186,11 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   warning. The report prints `unknown` for files
   written before these keys existed, and `mixed:<a>,<b>` with a warning when the inputs
   disagree. With `--config` but no `--results-dir`, `004` warns when the results dir
-  holds more than one run.
+  holds more than one run. Every report also lists the distinct `RUN_ID`, `ISTIO_VERSION`
+  and `HARNESS_SHA` of all its input files (`run_ids`, `istio_versions`, `harness_shas` in
+  all four formats) and warns on stderr whenever it reads more than one run; `run_id` then
+  reads `multiple`. Inputs from different Istio versions or harness commits print a
+  `WARNING` (stderr and every format) and read `mixed:<a>,<b>`.
 
 ## Traffic management (VS/DR)
 
@@ -209,13 +219,143 @@ shrink after GC, so compare heap in use, or run again with `--traffic-configs vs
 Run `005` before switching `--traffic-config` by hand with `001`: an in-place re-apply
 leaves the other mode's Deployments running.
 
+## Namespace scaling (growth mode)
+
+How does namespace count drive istiod and proxy cost in a mesh of thousands of namespaces
+with one or a few services each? `--services-per-namespaces K` (any K > 0) turns `003`
+into growth series and `--namespace-counts` into the ladder of N. Namespace n holds
+`dummy-svc-0..K-1` (the chart's block layout), so adding namespaces never moves a Service.
+
+```bash
+./tests/controlplane/003-run-sweep.sh --config tests/controlplane/configs/ns-scaling-lab.env --contexts <mesh-a-ctx> --dry-run
+```
+
+- **In place** (`--growth in-place`, default). One series grows the namespaces
+  `controlplane-test-<series>-<n>` step by step. At each N:
+  - a `grow` window: baseline, `001` adds namespaces N_prev..N-1, settle, final. Grow rows
+    are always measured under `namespace` scoping (the series is switched back first);
+    the report divides their istiod CPU-seconds by the namespaces added (onboarding cost).
+  - per scoping (the one the series already has first): the series' Sidecars are switched
+    in place (`001 --parts sidecars`), the sweep settles, then a `probe` window: baseline,
+    one more namespace with K Services and the scoping's Sidecar but no pod (PL30),
+    `--probe-settle`, final. `005 --probe` then
+    deletes the probe's Services and Sidecar, drops its discovery labels and queues the
+    empty namespace's delete, and the probe settle runs again before the next baseline.
+    A probe window measures the cost of one more namespace at N, not a deploy storm
+    (PL24).
+  - after the last step come the outside phase and the M-sweep, then `--series-retire`.
+- **Fresh** (`--growth fresh`). Every N x scoping cell is deployed and deleted like the
+  legacy sweep (`window_kind=deploy`), each under its own series id. Use it at a small N
+  to check that in-place growth matches a fresh deploy (report table "Fresh vs in-place",
+  PL34) and for the pods-mode calibration.
+- **Scoping.** `namespace` (own namespace and `istio-system`); `wide` (a per-namespace
+  Sidecar with egress `*/*`: the unscoped worst case, without touching the GitOps root
+  Sidecar); `none` (no test Sidecar, so the live root Sidecar governs; `001` requires it to
+  keep `./*`, which makes `none` close to `namespace`, so skip it at scale). `explicit`
+  and `vsdr` are not supported in growth mode.
+- **Workload.** `config-only` runs Services without pods plus M measurement pods (one in
+  each of namespaces 0..M-1, istio-proxy limit `CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT`),
+  so thousands of namespaces fit a node's pod budget. It leaves out endpoint churn and
+  pushes to a proxy in every namespace: the report's "Pods vs config-only" table is
+  required and reads "not measured" until a `pods` cell exists at the same N, K and
+  scoping. Calibrate with two `--growth fresh` sweeps at one small N into the same results
+  base, one config-only and one `--workload-mode pods --replica-counts 1` (both with
+  `--namespace-counts 30 --sidecar-scopings namespace --outside-modes none`), then report
+  the base dir rather than one `sweep-<RUN_ID>`; `configs/ns-scaling-lab.env` has the
+  commands. That report names the runs behind each side of a pair (`run=` in the row
+  label, `config_only_run_ids`/`pods_run_ids` in JSON) and warns if the sweeps differ in
+  Istio version or harness commit. Window deltas (`istiod_cpu_s`, `xds_pushes`, `pushes_per_proxy`) are compared
+  only between cells of the same window kind; across kinds they read N/A and only the
+  gauges compare.
+- **M-sweep.** `--measurement-pod-counts 4,16` re-probes every scoping at the largest N
+  with 16 measurement pods. Heap that grows with M is a cost per namespace with proxies,
+  which config-only undercounts. The report takes it from `heap_inuse` summed over a
+  cluster's istiod replicas (a namespace's SidecarScope lives on the replica its proxy
+  connects to, so a per-replica average would read the cost / replicas) and prints the
+  istiod replica count next to the table.
+- **Outside the mesh** (`discoverySelectors`). `--outside-namespaces X --outside-modes
+  unlabeled,labeled` adds, at the largest N, X namespaces with K Services each and no
+  `istio.io/rev`: first without the `istio-discovery=enabled` label (istiod must not see
+  them), then labeled (istiod must gain X x K Services). Each phase has an `outside`
+  window and a probe per scoping, and the report checks the istiod Service count against
+  both expectations (PL31).
+- **Memory stop guard.** Before each step, scoping switch and outside phase, `003` samples
+  istiod heap (`go_memstats_heap_inuse_bytes` on every replica) and every gateway's Envoy
+  memory on each guard context: `--contexts` plus `SETUP_CONTEXTS` (or
+  `CONTROLPLANE_MEM_GUARD_CONTEXTS`), since every member ingests the Services through remote
+  discovery and gateways keep `*/*` (PL38). It projects `base + (current - base) x ratio`
+  from the series' starting baseline (`ratio²` for `wide`, from the last wide measurement);
+  the first step and changes that add no Services use the current value. A cell projected
+  above `CONTROLPLANE_MEM_STOP_PCT` (70 %) of a limit becomes a `SKIPPED_MEM_GUARD` row, and
+  a skipped grow ends the series. `mem-guard-<RUN_ID>.tsv` records every decision; prove
+  the guard fires with `--mem-stop-pct 5` (PL33).
+- **End of a series** (`--series-retire`). `undiscover` (default) deletes the measurement
+  pods and the series' Sidecars and drops `istio-discovery` and `istio.io/rev`, keeping
+  the namespaces (`005 --series ID --undiscover --no-delete`); `delete` also queues the
+  namespace deletes without waiting (lab only); `keep` leaves the series discovered.
+  OpenShift deletes namespaces at roughly 0.3-1 per second, so delete them later with
+  `005 [--series ID] --timeout <about 1 s per namespace>` (it prints the rate), never inside
+  a measurement window.
+- **Rows and failures.** Every step is wrapped (PL32): `GROW_FAILED` (ends the series; its
+  remaining cells read `SKIPPED_SERIES_STOPPED`), `SWITCH_FAILED`, `SETUP_FAILED`,
+  `PROBE_FAILED`, `SKIPPED_MEM_GUARD`. `--resume` is not supported for growth series.
+- **Plan.** `--dry-run` prints each series' steps and cells, the objects per step, the peak
+  and the later deletion time (`CONTROLPLANE_NS_DELETE_SEC_PER_NS`); the matrix cap
+  (`CONTROLPLANE_MAX_MATRIX`) counts growth cells.
+- **Lifecycle.** `ns-lifecycle-<RUN_ID>.tsv` records each apply, readiness wait, switch,
+  probe teardown and delete with its duration, objects/s and namespaces/s. 001 runs its
+  applies and Sidecar deletes at `kubectl -v=4`, because client-go retries an API 429
+  (with Retry-After, as API Priority and Fairness sends it) without printing anything at
+  the default verbosity: `api_429_retried` counts those retries, `api_429_exhausted` the
+  429s left after them, `client_throttle_waits` client-side rate-limiter waits. Readiness
+  waits and 005's deletes record `N/A` (not measured).
+- **Report.** A series is one sweep's RUN_ID x mesh size x K x workload (003 refuses a
+  repeated mesh size or K). Its cells, grow ladder (N_prev) and fits never pool with another
+  run's, even at the same N, so a base-dir report over several sweeps (a smoke run next to
+  the main series) fits each series on its own and labels it `run=<RUN_ID>` (`run_id` in
+  the JSON records, `series_run_id` per cell). Only the pods-vs-config-only and
+  fresh-vs-in-place tables pair cells of different sweeps, as they must; they name each
+  side's run and, when several runs have a candidate cell, take the latest.
+  The "Namespace scaling" section (all four formats) fits each series x
+  scoping x window against N: slope per 100 namespaces, intercept, R², n and the log-log
+  exponent (1 linear, 2 quadratic), with the raw points, for istiod heap and RSS, Services,
+  CPU-seconds, per-proxy config and Envoy memory, gateway clusters and memory, pushes,
+  pushes per proxy (per istiod replica), push KB, push time, PushContext init, convergence
+  p99 and root-cert ConfigMaps. A grow window adds N - N_prev namespaces, so its window
+  deltas are fitted per namespace added (`onboard_cpu_s_per_ns`, `onboard_pushes_per_ns`,
+  `onboard_pushes_per_proxy_per_ns`, `onboard_push_kb_per_ns`; N_prev is the previous grow
+  step of the same series, valid or not), never raw. The first grow window of a series (from 0 namespaces)
+  stays out of every grow fit of a window measurement (the `onboard_*` deltas, push time,
+  PushContext init, convergence p99): it also creates and waits for the M measurement pods
+  (certificates, initial full pushes, endpoint updates), which no later step repeats
+  (PL30); its gauges are fitted. Convergence p99 points need at least 120 xDS pushes per
+  istiod replica in the window, counted across xDS types: istiod counts a push once per
+  type a proxy watches (CDS, EDS, LDS, RDS, NDS) but records one convergence sample per
+  proxy push, so that is about 30 full pushes, at least about 24 samples. Then the tables
+  pods vs config-only, the M-sweep, discovery and fresh vs in-place, and "Cells not measured": every
+  `SKIPPED_MEM_GUARD`, `SKIPPED_SERIES_STOPPED` or failed cell with its N, window and
+  scoping (guard decisions are in `mem-guard-<RUN_ID>.tsv`). Those status rows are named
+  apart from istiod restarts in the per-cell table, its footnote and the SLA headline.
+  Fits use cells with `n_valid > 0` only and `heap_inuse` rather than RSS, which never
+  shrinks in place.
+- **Examples.** [`configs/ns-scaling-lab.env`](configs/ns-scaling-lab.env) (lab shape
+  check up to N=400 and 200 outside namespaces) and
+  [`configs/ns-scaling-rosa.env`](configs/ns-scaling-rosa.env) (customer scale: N up to
+  4000 and 2000 outside, istiod sized for it).
+
 ## Outputs
 
 Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID>/`):
 
-- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=51`,
+- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=63`,
   `PROXY_CHECK_TOLERANCE_PCT`, `PROXY_CHECK_MIN_DIFF`, `TRAFFIC_CONFIG`, `VSDR_EVERY`,
-  `VSDR_SUBSETS`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`, ...), then the 51-column rows.
+  `VSDR_SUBSETS`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`, the namespace-scaling keys
+  `SERVICES_PER_NAMESPACE`, `GROWTH_MODE`, `WORKLOAD_MODE`, `MEASUREMENT_PODS`,
+  `OUTSIDE_*`, `PROBE_SETTLE_SEC`, `MEM_STOP_PCT`, `MEM_GUARD_CONTEXTS`, `SERIES_RETIRE`,
+  `DISCOVERY_LABEL`, ...), then the 63-column rows. The report also reads the 51- and
+  40-column files of earlier versions.
+- `ns-lifecycle-<RUN_ID>.tsv`, `mem-guard-<RUN_ID>.tsv` (growth sweeps): namespace
+  lifecycle timings and the memory guard's decisions.
 - `run-config-<RUN_ID>.env` (sweep with `--config` only): a copy of the run config.
 - `sweep-<RUN_ID>.md`, `sweep-charts-<RUN_ID>.md`: report markdown and charts.
 - `scale-envelope-<RUN_ID>.md`: campaign scale envelope, led by the customer SLA verdict
@@ -281,3 +421,7 @@ Each row is a per-window delta over `--interval` seconds.
   namespace 0 (service `i` lives in namespace `i mod N`).
 - Gateways also get the DestinationRule subset clusters, but only workload sidecars are
   sampled.
+- Growth mode measures each cell once, and in config-only mode only a few proxies: per-proxy
+  values come from the measurement pods, and convergence quantiles from so few proxies are
+  thin (O2), so prefer push time and PushContext init. The pods-vs-config-only table bounds
+  what config-only leaves out.

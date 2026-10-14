@@ -1,3 +1,29 @@
+{{- if include "controlplane-test.growth" . }}
+{{- /* Block layout: namespace n holds dummy-svc-0..K-1, so growing namespaceCount adds
+       namespaces and never moves a Service. */ -}}
+{{- $k := int .Values.servicesPerNamespace }}
+{{- range $ns := fromYamlArray (include "controlplane-test.namespaces" .) }}
+{{- range $i := until $k }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $ns }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app: dummy-svc-{{ $i }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}
+{{- end }}
+{{- else }}
 {{- range $i := until (.Values.serviceCount | int) }}
 ---
 apiVersion: v1
@@ -16,4 +42,5 @@ spec:
       port: {{ $.Values.service.port }}
       protocol: TCP
       targetPort: {{ $.Values.service.port }}
+{{- end }}
 {{- end }}

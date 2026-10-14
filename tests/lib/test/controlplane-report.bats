@@ -87,14 +87,22 @@ vsdr_dir() {
 	refute_output --partial "**Warning:**"
 }
 
-@test "report csv: rows gain cluster_proxies_* and the traffic columns (47) and a proxy_check comment" {
+@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (64) and a proxy_check comment" {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	hdr=$(grep -v '^#' <<<"$output" | sed -n 1p)
 	row=$(grep -v '^#' <<<"$output" | sed -n 2p)
-	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 47 ]
+	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 64 ]
+	# heap_inuse summed per cluster scrape (500, 750, 500; the restarted mesh-b scrape is
+	# out) and the istiod pods per scrape (2, 3, 2); no status rows; a legacy cell has no
+	# series run (-).
+	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id" ]]
+	[[ "$row" == *",583.3,2.3,0,-,-" ]]
 	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg,traffic_config,vsdr_services,"* ]]
 	[[ "$row" == *",30,34,31,none,0,"* ]]
+	# A 51-column file reads as the legacy layout: K 0, pods, 15 svc x 2 reps, no outside, deploy.
+	[[ "$hdr" == *",services_per_namespace,workload_mode,measurement_pods,outside_namespaces,outside_discovery,window_kind,istiod_services_max,"* ]]
+	[[ "$row" == *",0,pods,30,0,none,deploy,N/A,"* ]]
 	assert_output --partial "# proxy_check: tolerance_pct=10 min_diff=2 ok=2 low=1 high=0 na=0 excluded=1"
 	assert_output --partial "connected_proxies_cluster_max=34"
 	assert_output --partial "# WARNING: connected proxies differ"
@@ -166,7 +174,7 @@ vsdr_dir() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[[ "$stderr" == *"skipping 1 legacy TSV file(s)"* ]]
-	[[ "$stderr" == *"expected 40 or 51 columns"* ]]
+	[[ "$stderr" == *"expected 40, 51 or 63 columns"* ]]
 	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
 }
 
@@ -322,4 +330,385 @@ fleet_replicas() {
 	assert_output --partial "| istiod replicas | 1-3 per cluster (varies by cluster) | — | live \`deploy/istiod\` on every context |"
 	assert_output --partial "per-replica limit x that cluster's istiod replicas"
 	refute_output --partial "mesh-b=3"
+}
+
+# --- Namespace scaling (growth cells) -----------------------------------------------
+# fixtures/controlplane_ns_growth.tsv (63 columns; mesh 1, K=2, config-only, M=4):
+#   grow (namespace)  N=100,200,400: heap 150/200/300, istiod services 2N+10, CPU-s 2/2/4
+#                     (0.02 CPU-s per added namespace)
+#   probe none/namespace N=100,200,400: heap 100+N/2, services 2N+12, flat proxy config
+#   probe wide        N=100,200,400: heap 0.004 N^2 (exponent 2), proxy config N KB (exponent 1)
+#   a restarted copy of the namespace probe at N=400 (heap/services 9999) that no fit may see
+#   N=800: SKIPPED_MEM_GUARD rows (grow + 3 probes) that no fit may see
+#   outside 50 namespaces at N=400: unlabeled (+0 services), labeled (+100 = 50 x 2)
+#   M-sweep at N=400 (outside labeled): 16 measurement pods, wide heap 660 -> 708 (+4 Mi per pod)
+#   fresh deploy N=100 namespace: config-only (heap 152, services 210) and pods (heap 260)
+#   xDS pushes (per replica, across xDS types): grow 400, probe 10 (120 for wide), so only
+#   grow and wide probe windows pass the conv_p99 floor (CONV_FIT_MIN_PUSHES=120)
+#   grow window fits of window measurements (onboard_*, push time, PushContext init,
+#   conv_p99) leave out the first grow window (N=100, from 0 namespaces)
+# Regenerate with care: the numbers below are hand-checked against these rules.
+# Column positions used by the variants below: 2 context, 6 namespace_count,
+# 7 sidecar_scoping, 22 connected_proxies, 31 istiod_restarted, 34 go_heap_inuse_mi,
+# 53 workload_mode, 54 measurement_pods, 57 window_kind.
+
+# growth_variant <awk program>: growth_dir, then rewrite its data rows with the program
+# (comment and header lines pass through untouched).
+growth_variant() {
+	growth_dir
+	f="${GRES}/controlplane-fixture-ns.tsv"
+	awk -F'\t' 'BEGIN { OFS = "\t" } /^#/ || $1 == "timestamp" { print; next } '"$1" "$f" > "${f}.tmp"
+	mv "${f}.tmp" "$f"
+}
+
+growth_dir() {
+	GRES="${BATS_TEST_TMPDIR}/g"
+	mkdir -p "$GRES"
+	cp "${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" "${GRES}/controlplane-fixture-ns.tsv"
+}
+
+# fit_of <json> <scoping> <window> <metric>: [per_100ns, r2, n, exponent, points].
+fit_of() {
+	jq -c --arg s "$2" --arg w "$3" --arg m "$4" \
+		'[.namespace_scaling.fits[] | select(.scoping == $s and .window == $w and .metric == $m)][0] | [.per_100ns, .r2, .n, .exponent, .points]' <<<"$1"
+}
+
+@test "growth report json: fits, exponents and points; restarted and skipped rows stay out" {
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(fit_of "$output" wide probe heap_inuse_mi)" = '[205.7,0.98,3,2,[[100,40],[200,160],[400,640]]]' ]
+	[ "$(fit_of "$output" wide probe proxy_config_kb)" = '[100,1,3,1,[[100,100],[200,200],[400,400]]]' ]
+	# The restarted N=400 copy (heap 9999) and the N=800 guard rows never reach a fit.
+	[ "$(fit_of "$output" namespace probe heap_inuse_mi)" = '[50,1,3,0.5,[[100,150],[200,200],[400,300]]]' ]
+	[ "$(fit_of "$output" namespace probe istiod_services)" = '[200,1,3,0.97,[[100,212],[200,412],[400,812]]]' ]
+	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,1,2,0,[[200,0.02],[400,0.02]]]' ]
+	# A single-N curve (the fresh cells) is not fitted.
+	[ "$(jq '[.namespace_scaling.fits[] | select(.window == "deploy")] | length' <<<"$output")" = 0 ]
+	# Per-cell growth keys; the guard rows count in n_total, not n_valid.
+	[ "$(jq -c '[.results[] | select(.namespace_count == 800)] | map([.window_kind, .n_total, .n_valid]) | unique' <<<"$output")" = '[["grow",1,0],["probe",1,0]]' ]
+	[ "$(jq -c '.metadata.growth | [.growth_mode, .services_per_namespace, .workload_modes]' <<<"$output")" = '["in-place","2","config-only,pods"]' ]
+}
+
+@test "growth report: pods vs config-only, M-sweep, discovery and fidelity pairings" {
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(jq -c '.namespace_scaling.pods_vs_config_only | [.missing, (.rows[] | select(.metric == "heap_inuse_mi") | [.config_only, .pods, .ratio])]' <<<"$output")" = '[null,[152,260,1.71]]' ]
+	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | select(.cell | test("wide")) | [.measurement_pods, .heap_inuse_mi, .heap_per_added_pod_mi]]' <<<"$output")" = '[[4,660,null],[16,708,4]]' ]
+	# PL31: labeled adds X x K = 100 Services, unlabeled adds none; no baseline-less row.
+	[ "$(jq -c '[.namespace_scaling.discovery[] | select(.cell | test("namespace")) | [.outside, .delta, .expected_delta, .check]]' <<<"$output")" = '[["none",null,null,"-"],["unlabeled",0,0,"OK"],["labeled",100,100,"OK"]]' ]
+	[ "$(jq -c '[.namespace_scaling.fresh_vs_in_place[] | select(.metric == "istiod_services") | [.fresh, .in_place, .diff]]' <<<"$output")" = '[[210,212,"+1.0%"]]' ]
+}
+
+@test "growth report markdown, text and csv carry the scaling section" {
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_success
+	assert_output --partial "## Namespace scaling"
+	assert_output --partial "| mesh=1 K=2 config-only | wide | probe | heap_inuse_mi | Mi | 205.7 | -200 | 0.980 | 3 | 2.00 | 100:40 200:160 400:640 |"
+	assert_output --partial "### Pods vs config-only (required)"
+	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy, pods deploy) | heap_inuse_mi | 152 | 260 | 1.71 |"
+	assert_output --partial "| mesh=1 K=2 config-only N=400 namespace | labeled | 50 | 912 | 100 | 100 |"
+	assert_output --partial 'window_kinds: "deploy,grow,outside,probe"'
+	# Growth cells get their key columns in the per-cell table; the legacy tables skip them.
+	assert_output --partial "| window | K | workload | M | outside |"
+	assert_output --partial "(No legacy-layout cell with traffic none to compare;"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format text
+	assert_success
+	assert_output --partial "--- Namespace scaling"
+	assert_output --partial "mesh=1 K=2 config-only scoping=wide window=probe heap_inuse_mi (Mi): per_100ns=205.7"
+	assert_output --partial "Growth cell:          window=grow services_per_namespace=2"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format csv
+	assert_success
+	assert_output --partial "# scaling_fit: series=mesh=1 K=2 config-only scoping=wide window=probe metric=heap_inuse_mi unit=Mi per_100ns=205.7"
+	assert_output --partial "# scaling_pods_vs_config_only: cell=mesh=1 K=2 N=100 namespace"
+	assert_output --partial "# growth: growth_mode=in-place"
+}
+
+@test "growth report: the pods-vs-config-only row says NOT MEASURED without a pods cell" {
+	growth_dir
+	f="${GRES}/controlplane-fixture-ns.tsv"
+	awk -F'\t' '/^#/ || $1 == "timestamp" || $53 != "pods"' "$f" > "${f}.tmp"
+	mv "${f}.tmp" "$f"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_success
+	assert_output --partial "> **Not measured:** not measured: every valid growth cell is config-only."
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	[[ "$(jq -r '.namespace_scaling.pods_vs_config_only.missing' <<<"$output")" == "not measured: every valid growth cell is config-only."* ]]
+	[ "$(jq -r '.namespace_scaling.measurement_pod_sweep.missing' <<<"$output")" = null ]
+}
+
+@test "growth report: a legacy-only report has no scaling section; mixed reports keep both" {
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_success
+	refute_output --partial "## Namespace scaling"
+	refute_output --partial "| window | K |"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq 'has("namespace_scaling")' <<<"$output")" = false ]
+	growth_dir
+	cp "$FIXTURE" "${GRES}/controlplane-fixture-t2.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	# The 51-column file keeps its own cell (legacy defaults) next to the growth cells.
+	[ "$(jq -c '[.results[] | select(.services_per_namespace == 0)] | map([.n_total, .window_kind, .workload_mode])' <<<"$output")" = '[[10,"deploy","pods"]]' ]
+	[ "$(jq '.namespace_scaling.fits | length > 0' <<<"$output")" = true ]
+}
+
+@test "growth report: cells not measured are named, apart from restarts, in every format" {
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(jq -c '[.namespace_scaling.not_measured[] | [.n, .window, .scoping, .statuses]] | unique' <<<"$output")" = '[[800,"grow","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","none",["SKIPPED_MEM_GUARD"]],[800,"probe","wide",["SKIPPED_MEM_GUARD"]]]' ]
+	[ "$(jq -c '[.results[] | select(.namespace_count == 800)] | map([.status_rows, .statuses]) | unique' <<<"$output")" = '[[1,["SKIPPED_MEM_GUARD"]]]' ]
+	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"(4 of the rows are status rows of cells skipped or failed, not restarts: SKIPPED_MEM_GUARD 4)" ]]
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_output --partial "### Cells not measured"
+	assert_output --partial "| mesh=1 K=2 config-only | 800 | grow | namespace | 4 | - | SKIPPED_MEM_GUARD | 1 |"
+	assert_output --partial "mem-guard-<RUN_ID>.tsv"
+	assert_output --partial "| 0 | 1 (1 status: SKIPPED_MEM_GUARD) | grow |"
+	# The restart footnote counts only the restarted row; the status rows get their own line.
+	assert_output --partial "> 1 row(s) had istiod restarts during the scrape window — counters"
+	refute_output --partial "undetectable restart state"
+	assert_output --partial "> 4 row(s) are status rows of cells that were skipped or failed (SKIPPED_MEM_GUARD 4), not restarts"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format text
+	assert_output --partial "mesh=1 K=2 config-only N=800 window=grow scoping=namespace M=4 outside=- status=SKIPPED_MEM_GUARD rows=1"
+	assert_output --partial "  - not measured: 1 status row(s) SKIPPED_MEM_GUARD (the cell was skipped or failed; not a restart)"
+	refute_output --partial "? undetectable restart"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format csv
+	assert_output --partial "# scaling_not_measured: series=mesh=1 K=2 config-only n=800 window=grow scoping=namespace measurement_pods=4 outside=- status=SKIPPED_MEM_GUARD rows=1"
+}
+
+@test "growth report: grow windows fit window deltas per namespace added, from the previous grow step even when it is invalid" {
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	# No raw window delta is fitted against N for grow windows (each adds N - N_prev).
+	[ "$(jq '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "istiod_cpu_s" or .metric == "xds_pushes" or .metric == "pushes_per_proxy" or .metric == "push_kb"))] | length' <<<"$output")" = 0 ]
+	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,1,2,-1,[[200,4],[400,2]]]' ]
+	# Probe windows keep the raw deltas (one namespace each).
+	[ "$(fit_of "$output" namespace probe istiod_cpu_s)" = '[0,1,3,0,[[100,0.5],[200,0.5],[400,0.5]]]' ]
+	# The N=200 grow restarted: N=400 still divides by 400 - 200 (0.02), not by 400 - 100
+	# (0.0133); the first grow window stays out, so one point is left and no slope.
+	growth_variant '$6 == 200 && $57 == "grow" { $31 = 1 } { print }'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[null,null,1,null,[[400,0.02]]]' ]
+}
+
+@test "growth report: the first grow window (it also boots the measurement pods) stays out of grow window-measurement fits" {
+	# PL30: the N=100 grow window starts from 0 namespaces, so it also creates and waits for
+	# the M measurement pods. Inflate it with that boot work (0.5 CPU-s, 20 pushes, slower
+	# pushes and convergence): the per-namespace fits must not move.
+	growth_variant '$6 == 100 && $57 == "grow" { $59 += 0.5; $13 += 20; $47 = 9; $48 = 9; $10 = 900 } { print }'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,1,2,0,[[200,0.02],[400,0.02]]]' ]
+	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,1,2,-1,[[200,4],[400,2]]]' ]
+	[ "$(jq -c '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "push_time_ms" or .metric == "pushcontext_init_ms" or .metric == "conv_p99_ms")) | [.metric, .points]]' <<<"$output")" = '[["push_time_ms",[[200,1],[400,1]]],["pushcontext_init_ms",[[200,0.5],[400,0.5]]],["conv_p99_ms",[[200,90],[400,90]]]]' ]
+	# Gauges keep the first grow window.
+	[ "$(fit_of "$output" namespace grow heap_inuse_mi)" = '[50,1,3,0.5,[[100,150],[200,200],[400,300]]]' ]
+	[ "$(jq -r '.namespace_scaling.fit_rules.grow_window_fits' <<<"$output")" = skip_first_step ]
+	[[ "$(jq -r '.namespace_scaling.fit_rules.text' <<<"$output")" == *"The first grow window of a series (from 0 namespaces) is left out"* ]]
+	# The rule is stated in every format.
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_output --partial "> The first grow window of a series (from 0 namespaces) is left out of every grow-window fit"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format text
+	assert_output --partial "  The first grow window of a series (from 0 namespaces) is left out"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format csv
+	assert_output --partial "grow_window_fits=skip_first_step"
+	assert_output --partial "# scaling_fit_rules: conv_p99_ms points come only from windows with at least 120 xDS pushes per istiod replica, counted across xDS types"
+}
+
+@test "growth report: conv_p99 fits skip windows below the push floor" {
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	# namespace/none probes have 10 pushes: no conv_p99 fit; wide probes (120) and grow (400)
+	# keep it (grow without its first window).
+	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms" and .window == "probe" and .scoping != "wide")] | length' <<<"$output")" = 0 ]
+	[ "$(fit_of "$output" wide probe conv_p99_ms)" = '[0,1,3,0,[[100,90],[200,90],[400,90]]]' ]
+	[ "$(fit_of "$output" namespace grow conv_p99_ms)" = '[0,1,2,0,[[200,90],[400,90]]]' ]
+	[ "$(jq '.namespace_scaling.fit_rules.conv_p99_min_pushes' <<<"$output")" = 120 ]
+	[ "$(jq -r '.namespace_scaling.fit_rules.conv_p99_push_count' <<<"$output")" = xds_pushes_per_replica_across_types ]
+	# 119 pushes (about 24-30 full pushes short of the floor) is not enough.
+	growth_variant '$7 == "wide" && $57 == "probe" && $13 == 120 { $13 = 119 } { print }'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms" and .window == "probe")] | length' <<<"$output")" = 0 ]
+	# Every format says the floor counts pushes across xDS types, not convergence samples.
+	for fmt in markdown text; do
+		run --separate-stderr "$REPORT" --results-dir "$GRES" --format "$fmt"
+		assert_output --partial "at least 120 xDS pushes per istiod replica, counted across xDS types (a full push to one proxy adds one push per xDS type it watches, typically 3-5, but one convergence sample)"
+		refute_output --partial "fewer samples make the p99 their maximum"
+	done
+}
+
+@test "growth report: pods vs config-only compares window deltas only within one window kind" {
+	# Without the config-only deploy cell, the config-only probe pairs with the pods deploy.
+	growth_variant '!($53 == "config-only" && $57 == "deploy")'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | [.metric, .config_only, .pods, .ratio]]' <<<"$output")" = '[["heap_inuse_mi",150,260,1.73],["istiod_cpu_s",null,null,null],["xds_pushes",null,null,null],["pushes_per_proxy",null,null,null],["proxy_config_kb",50,52,1.04],["proxy_envoy_mem_mi",5,8,1.6],["istiod_services",212,210,0.99]]' ]
+	[[ "$(jq -r '.namespace_scaling.pods_vs_config_only.note' <<<"$output")" == "istiod_cpu_s, xds_pushes and pushes_per_proxy are N/A where the pair has different window kinds"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only probe, pods deploy) | istiod_cpu_s | N/A | N/A | N/A |"
+	assert_output --partial "> **Note:** istiod_cpu_s, xds_pushes and pushes_per_proxy are N/A"
+	# Same-kind pairs (the full fixture: both deploy) compare every metric, with no note.
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | select(.metric == "istiod_cpu_s") | .ratio]' <<<"$output")" = '[2.4]' ]
+	[ "$(jq -r '.namespace_scaling.pods_vs_config_only.note' <<<"$output")" = null ]
+}
+
+@test "growth report: with two istiod replicas, per-replica pushes per proxy and the M-sweep from per-cluster heap" {
+	# Every data row becomes two istiod replicas, each serving half the proxies; at M=16 the
+	# new measurement pods' scopes land on one replica only (the other keeps its M=4 heap).
+	growth_variant '$2 != "mesh-a" { print; next } { $22 = $22 / 2; print; if ($54 == 16 && $7 == "wide") $34 = 660; else if ($54 == 16 && $7 == "namespace") $34 = 320; print }'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	# 10 pushes per replica / 3 proxies per replica (the cluster has 6).
+	[ "$(fit_of "$output" namespace probe pushes_per_proxy)" = '[0,1,3,0,[[100,3.333],[200,3.333],[400,3.333]]]' ]
+	# Per replica the heap grows 2 Mi per pod (cost / 2); per cluster 4 Mi, the scope cost.
+	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | select(.cell | test("wide")) | [.measurement_pods, .heap_inuse_mi, .heap_inuse_cluster_mi, .istiod_pods_per_cluster, .heap_per_added_pod_mi]]' <<<"$output")" = '[[4,660,1320,2,null],[16,684,1368,2,4]]' ]
+	[ "$(jq -r '.namespace_scaling.measurement_pod_sweep.istiod_replicas' <<<"$output")" = 1 ]
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_output --partial "| heap inuse / replica (Mi) | heap inuse / cluster (Mi) | istiod pods / cluster |"
+	assert_output --partial "> istiod replicas: 1 per cluster. Heap per added pod is the change in heap_inuse summed over"
+}
+
+@test "growth report: a base-dir report of two sweeps lists every run, warns, and names the runs behind each pods-vs-config-only side" {
+	local gfix="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" base a b
+	base="${BATS_TEST_TMPDIR}/base"
+	a="${base}/sweep-20261013T100000Z-111"
+	b="${base}/sweep-20261013T110000Z-222"
+	mkdir -p "$a" "$b"
+	# Sweep 1 holds the config-only cells; sweep 2 the pods calibration cell, measured on
+	# another Istio version from a dirty tree (PL2: both must surface).
+	awk -F'\t' '/^# RUN_ID=/ { print "# RUN_ID=20261013T100000Z-111"; next }
+		/^#/ || $1 == "timestamp" || $53 != "pods"' "$gfix" > "${a}/controlplane-20261013T100000Z-111.tsv"
+	awk -F'\t' '/^# RUN_ID=/ { print "# RUN_ID=20261013T110000Z-222"; next }
+		/^# ISTIO_VERSION=/ { print "# ISTIO_VERSION=1.31.0"; next }
+		/^# HARNESS_SHA=/ { print "# HARNESS_SHA=abc1234-dirty"; next }
+		/^#/ || $1 == "timestamp" || $53 == "pods"' "$gfix" > "${b}/controlplane-20261013T110000Z-222.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$base" --format json
+	assert_success
+	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .istio_versions, .harness_sha, .harness_shas, .files_consumed]' <<<"$output")" = \
+		'["multiple",["20261013T100000Z-111","20261013T110000Z-222"],"mixed:1.30.5,1.31.0",["1.30.5","1.31.0"],"mixed:fixture,abc1234-dirty",["fixture","abc1234-dirty"],2]' ]
+	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
+	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | select(.metric == "heap_inuse_mi") | [.config_only_run_ids, .pods_run_ids, .ratio]]' <<<"$output")" = \
+		'[[["20261013T100000Z-111"],["20261013T110000Z-222"],1.71]]' ]
+	# --results-dir no longer silences the multi-run warning; mixed versions and commits are loud.
+	[[ "$stderr" == *"warning: this report pools 2 runs from ${base} (RUN_IDs: 20261013T100000Z-111,20261013T110000Z-222)"* ]]
+	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
+	[[ "$stderr" == *"different harness commits (HARNESS_SHA fixture,abc1234-dirty)"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$base" --format markdown
+	assert_success
+	assert_output --partial 'run_ids: ["20261013T100000Z-111","20261013T110000Z-222"]'
+	assert_output --partial 'harness_shas: ["fixture","abc1234-dirty"]'
+	assert_output --partial "istio_version: mixed:1.30.5,1.31.0"
+	assert_output --partial "> **Warning:** The inputs were measured on different Istio versions"
+	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222) | heap_inuse_mi | 152 | 260 | 1.71 |"
+	run --separate-stderr "$REPORT" --results-dir "$base" --format text
+	assert_success
+	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  files_consumed=2"
+	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222  istio_versions=1.30.5,1.31.0  harness_shas=fixture,abc1234-dirty"
+	assert_output --partial "# WARNING: The inputs were measured on different Istio versions"
+	run --separate-stderr "$REPORT" --results-dir "$base" --format csv
+	assert_success
+	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222 istio_versions=1.30.5,1.31.0 harness_shas=fixture,abc1234-dirty"
+	assert_output --partial "config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222"
+	run --separate-stderr "$REPORT" --results-dir "$base" --format charts
+	assert_success
+	assert_output --partial 'istio_versions: ["1.30.5","1.31.0"]'
+	# One sweep: plain scalars, one-element lists, no warning, no run= in the labels.
+	run --separate-stderr "$REPORT" --results-dir "$a" --format json
+	assert_success
+	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .harness_shas, .provenance_warning]' <<<"$output")" = \
+		'["20261013T100000Z-111",["20261013T100000Z-111"],"1.30.5",["fixture"],null]' ]
+	[[ "$stderr" != *"pools"* && "$stderr" != *"WARNING"* ]]
+	growth_dir
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy, pods deploy) | heap_inuse_mi |"
+}
+
+# series_sweep <base> <run_id> <awk program>: base/sweep-<run_id>/controlplane-<run_id>.tsv
+# from the growth fixture, its RUN_ID replaced and its data rows rewritten by the program
+# (comment and header lines pass through).
+series_sweep() {
+	local d="$1/sweep-$2"
+	mkdir -p "$d"
+	awk -F'\t' -v rid="$2" 'BEGIN { OFS = "\t" } /^# RUN_ID=/ { print "# RUN_ID=" rid; next }
+		/^#/ || $1 == "timestamp" { print; next } '"$3" "${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" > "${d}/controlplane-$2.tsv"
+}
+
+# grow_fits <json> <metric>: [run_id, n, points] of every namespace-scoping grow fit of the metric.
+grow_fits() {
+	jq -c --arg m "$2" '[.namespace_scaling.fits[] | select(.scoping == "namespace" and .window == "grow" and .metric == $m) | [.run_id, .n, .points]]' <<<"$1"
+}
+
+@test "growth report: a base dir with a smoke and a main series fits each series on its own" {
+	# Smoke series (N=10,20: the fixture's N=100,200 grow and probe cells scaled down) and
+	# the main series (the fixture, N=100,200,400) in one results base. Pooled, the main
+	# series' first grow (N=100) would get N_prev=20 from the smoke ladder and enter the
+	# onboarding fit as 2 CPU-s / 80 namespaces, and both ladders would share one curve.
+	local base="${BATS_TEST_TMPDIR}/series" smoke=20261013T090000Z-101 main=20261013T110000Z-222
+	series_sweep "$base" "$smoke" '$2 == "mesh-a" && $31 == 0 && $55 == 0 && $54 == 4 && ($57 == "grow" || $57 == "probe") && ($6 == 100 || $6 == 200) { $6 = $6 / 10; $4 = $4 / 10; print }'
+	series_sweep "$base" "$main" '{ print }'
+	run --separate-stderr "$REPORT" --results-dir "$base" --format json
+	assert_success
+	# Each grow ladder starts at its own first step: the smoke N=20 grow added 10 namespaces
+	# (2 CPU-s / 10), the main series keeps its single-run fit (2 / 100, 4 / 200).
+	[ "$(grow_fits "$output" onboard_cpu_s_per_ns)" = "[[\"${smoke}\",1,[[20,0.2]]],[\"${main}\",2,[[200,0.02],[400,0.02]]]]" ]
+	[ "$(grow_fits "$output" onboard_pushes_per_ns)" = "[[\"${smoke}\",1,[[20,40]]],[\"${main}\",2,[[200,4],[400,2]]]]" ]
+	# Gauges: one curve per series, never one curve over N=10..400.
+	[ "$(grow_fits "$output" heap_inuse_mi)" = "[[\"${smoke}\",2,[[10,150],[20,200]]],[\"${main}\",3,[[100,150],[200,200],[400,300]]]]" ]
+	[ "$(jq -c --arg r "$main" '[.namespace_scaling.fits[] | select(.run_id == $r and .scoping == "wide" and .metric == "heap_inuse_mi")][0] | [.series, .per_100ns, .points]' <<<"$output")" = \
+		"[\"mesh=1 K=2 config-only run=${main}\",205.7,[[100,40],[200,160],[400,640]]]" ]
+	# No fit mixes the two ladders.
+	[ "$(jq '[.namespace_scaling.fits[] | select(([.points[][0]] | min) < 100 and ([.points[][0]] | max) >= 100)] | length' <<<"$output")" = 0 ]
+	[ "$(jq -c '.namespace_scaling.fit_rules.series_key' <<<"$output")" = '["run_id","mesh_size","services_per_namespace","workload_mode"]' ]
+	# Cells carry their series run; the main series' pairings and skipped cells keep theirs.
+	[ "$(jq -c '[.results[] | select(.window_kind == "grow" and .services_per_namespace == 2) | [.namespace_count, .series_run_id]] | sort' <<<"$output")" = \
+		"[[10,\"${smoke}\"],[20,\"${smoke}\"],[100,\"${main}\"],[200,\"${main}\"],[400,\"${main}\"],[800,\"${main}\"]]" ]
+	[ "$(jq -c '[.namespace_scaling.not_measured[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
+	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
+	[ "$(jq -c '[.namespace_scaling.discovery[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
+	# Every format labels the series and states the rule.
+	run --separate-stderr "$REPORT" --results-dir "$base" --format markdown
+	assert_success
+	assert_output --partial "| mesh=1 K=2 config-only run=${smoke} | namespace | grow | heap_inuse_mi | Mi |"
+	assert_output --partial "| mesh=1 K=2 config-only run=${main} | namespace | grow | onboard_cpu_s_per_ns | CPU-s |"
+	assert_output --partial "| window | K | workload | M | outside | run |"
+	assert_output --partial "| mesh=1 K=2 config-only run=${main} | 800 | grow | namespace |"
+	assert_output --partial "> A growth series is one RUN_ID x mesh size x K x workload"
+	run --separate-stderr "$REPORT" --results-dir "$base" --format text
+	assert_success
+	assert_output --partial "mesh=1 K=2 config-only run=${smoke} scoping=namespace window=grow heap_inuse_mi (Mi):"
+	assert_output --partial "series_run=${smoke}"
+	run --separate-stderr "$REPORT" --results-dir "$base" --format csv
+	assert_success
+	assert_output --partial "series_key=run_id+mesh_size+services_per_namespace+workload_mode"
+	assert_output --partial "# scaling_fit: series=mesh=1 K=2 config-only run=${smoke} scoping=namespace window=grow metric=onboard_cpu_s_per_ns"
+	[[ "$output" == *"points=20:0.2 run_id=${smoke}"* ]]
+	# One sweep of the two: no run= in the labels, no run column.
+	run --separate-stderr "$REPORT" --results-dir "${base}/sweep-${main}" --format markdown
+	assert_success
+	refute_output --partial "run=${main}"
+	refute_output --partial "| outside | run |"
+}
+
+@test "growth report: two series that share an N keep separate cells and ladders" {
+	# Series A grows 50 -> 100 (the fixture's grow cells at N=100,200 halved); series B is
+	# the fixture (100 -> 200 -> 400). At N=100 A's grow added 50 namespaces after N=50, B's
+	# is its first step: pooled into one cell, both would read N_prev=50 and average.
+	local base="${BATS_TEST_TMPDIR}/shared" a=20261013T090000Z-101 b=20261013T110000Z-222
+	series_sweep "$base" "$a" '$2 == "mesh-a" && $31 == 0 && $55 == 0 && $57 == "grow" && ($6 == 100 || $6 == 200) { $6 = $6 / 2; $4 = $4 / 2; print }'
+	series_sweep "$base" "$b" '{ print }'
+	run --separate-stderr "$REPORT" --results-dir "$base" --format json
+	assert_success
+	[ "$(jq -c '[.results[] | select(.window_kind == "grow" and .namespace_count == 100) | [.series_run_id, .n_total, .go_heap_inuse_mi.avg]]' <<<"$output")" = \
+		"[[\"${a}\",1,200],[\"${b}\",1,150]]" ]
+	[ "$(grow_fits "$output" onboard_cpu_s_per_ns)" = "[[\"${a}\",1,[[100,0.04]]],[\"${b}\",2,[[200,0.02],[400,0.02]]]]" ]
+	[ "$(grow_fits "$output" heap_inuse_mi)" = "[[\"${a}\",2,[[50,150],[100,200]]],[\"${b}\",3,[[100,150],[200,200],[400,300]]]]" ]
 }

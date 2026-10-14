@@ -22,9 +22,10 @@ output "first_cluster" {
 }
 
 output "by_cluster" {
-  description = "Per-cluster API endpoints, OCM id, and VPC id after apply."
+  description = "Per-cluster API endpoints, OCM id, VPC id and region after apply. Save a copy right after apply (terraform output -json by_cluster > <file>): scripts/002 and 003 read the VPC ids from it once a teardown has emptied this output."
   value = {
     for k, m in module.rosa_hcp : k => {
+      aws_region           = var.aws_region
       cluster_id           = m.cluster_id
       cluster_name         = local.clusters[k].cluster_name
       cluster_api_url      = m.cluster_api_url

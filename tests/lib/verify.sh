@@ -148,6 +148,24 @@ EXTRACTED_PATTERNS=(
 	'env_replicas_label() {'
 	'env_istiod_scan() {'
 	'reach_worst_case_sec() {'
+	# namespace scaling: fit.sh, growth.sh, the growth validators and preamble emitters
+	'fit_linear() {'
+	'fit_loglog() {'
+	'mem_guard_project() {'
+	'mem_guard_verdict() {'
+	'validate_workload_mode() {'
+	'validate_outside_mode() {'
+	'growth_preamble_lines() {'
+	'ns_lifecycle_init() {'
+	'ns_lifecycle_row() {'
+	'ns_lifecycle_api_counts() {'
+	'growth_parse_envoy_stats() {'
+	'growth_envoy_stats() {'
+	'growth_parse_gateway_pods() {'
+	'growth_gateway_pods() {'
+	'growth_gateway_summary() {'
+	'growth_root_cert_count() {'
+	'growth_istiod_heap_mi() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
