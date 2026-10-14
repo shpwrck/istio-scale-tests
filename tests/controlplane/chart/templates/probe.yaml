@@ -1,0 +1,66 @@
+{{- include "controlplane-test.validateSidecarScoping" . -}}
+{{- include "controlplane-test.validateGrowth" . -}}
+{{- /* Probe namespace (growth mode): the "onboard one namespace" window. One namespace
+       with servicesPerNamespace Services and the sidecarScoping Sidecar, and no pods, so
+       the window measures a config change and no pod boot (PL30). Everything carries
+       controlplane-test.probe=true, so 001's scoping switch and 005's series retire can
+       tell it from the series' own namespaces. */ -}}
+{{- $p := .Values.probe | default dict -}}
+{{- if and (include "controlplane-test.growth" .) $p.name }}
+{{- $scope := .Values.sidecarScoping | default "none" }}
+{{- $extra := default (list) .Values.sidecarExtraEgressHosts }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $p.name }}
+  labels:
+    istio.io/rev: default
+    istio-discovery: enabled
+    controlplane-test.probe: "true"
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+{{- range $s := until (int .Values.servicesPerNamespace) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-{{ $s }}
+  namespace: {{ $p.name }}
+  labels:
+    app: dummy-svc-{{ $s }}
+    controlplane-test.probe: "true"
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app: dummy-svc-{{ $s }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}
+{{- if or (eq $scope "namespace") (eq $scope "wide") }}
+---
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: {{ $p.name }}
+  labels:
+    controlplane-test.probe: "true"
+    controlplane-test.scope: {{ $scope }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  egress:
+    - hosts:
+        {{- if eq $scope "wide" }}
+        - "*/*"
+        {{- else }}
+        - "./*"
+        - "istio-system/*"
+        {{- range $h := $extra }}
+        - {{ $h | quote }}
+        {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

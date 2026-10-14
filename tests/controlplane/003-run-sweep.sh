@@ -53,6 +53,14 @@ source "${ROOT}/tests/lib/preamble.sh"  # harness_sha / probe_kube_versions for 
 source "${ROOT}/tests/lib/capacity.sh"  # cap_node_totals / cap_istiod_limits for the capacity lines
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble + campaign-end scale envelope
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/metrics.sh"  # extractors fanout.sh needs (growth memory guard)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fanout.sh"  # per-pod istiod port-forwards (growth memory guard)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/growth.sh"  # istiod heap, gateway Envoy memory (growth memory guard)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/fit.sh"  # mem_guard_project / mem_guard_verdict
 
 CONTEXTS_CSV=""
 # Axes: the plural key (a CSV, PL7), else the singular key 001/002 use, else the default.
@@ -81,6 +89,22 @@ MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 # --resume: reuse an existing sweep dir + RUN_ID and skip combos that already
 # have a valid row (istiod_restarted=="0" for the same six axis values).
 RESUME_DIR=""
+# 1 when --service-counts is passed (growth mode refuses it: services = N x K).
+SERVICE_COUNTS_FLAG=0
+
+# Namespace scaling (growth mode). CSV axes take the plural key (PL7), else the
+# singular one 001/002 read.
+SPN_CSV="${CONTROLPLANE_SERVICES_PER_NAMESPACES:-${CONTROLPLANE_SERVICES_PER_NAMESPACE:-0}}"
+GROWTH_MODE="${CONTROLPLANE_GROWTH_MODE:-in-place}"
+WORKLOAD_MODE="${CONTROLPLANE_WORKLOAD_MODE:-pods}"
+MEASUREMENT_POD_COUNTS_CSV="${CONTROLPLANE_MEASUREMENT_POD_COUNTS:-${CONTROLPLANE_MEASUREMENT_PODS:-4}}"
+OUTSIDE_NAMESPACES="${CONTROLPLANE_OUTSIDE_NAMESPACES:-0}"
+OUTSIDE_MODES_CSV="${CONTROLPLANE_OUTSIDE_MODES:-${CONTROLPLANE_OUTSIDE_MODE:-none}}"
+PROBE_SETTLE_SEC="${CONTROLPLANE_PROBE_SETTLE_SEC:-60}"
+MEM_STOP_PCT="${CONTROLPLANE_MEM_STOP_PCT:-70}"
+MEM_GUARD_CONTEXTS_CSV="${CONTROLPLANE_MEM_GUARD_CONTEXTS:-}"
+SERIES_RETIRE="${CONTROLPLANE_SERIES_RETIRE:-undiscover}"
+NS_DELETE_SEC_PER_NS="${CONTROLPLANE_NS_DELETE_SEC_PER_NS:-1.0}"
 
 NS="${CONTROLPLANE_TEST_NAMESPACE:-controlplane-test}"
 
@@ -102,8 +126,9 @@ Sweep dimensions (cross-product):
   --service-counts CSV        Dummy services per cluster (default: $SERVICE_COUNTS_CSV).
   --replica-counts CSV        Replicas per service (default: $REPLICA_COUNTS_CSV).
   --namespace-counts CSV      Namespaces to spread services across (default: $NAMESPACE_COUNTS_CSV).
-  --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,explicit
-                              (default: $SIDECAR_SCOPINGS_CSV).
+  --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,wide,explicit
+                              (default: $SIDECAR_SCOPINGS_CSV). wide = a per-namespace
+                              Sidecar with egress */* (unscoped).
   --traffic-configs CSV       Traffic management per service: none,vsdr
                               (default: $TRAFFIC_CONFIGS_CSV).
                               vsdr adds a VirtualService + DestinationRule per
@@ -115,6 +140,41 @@ Traffic management (scalars, recorded in the TSV preamble):
   --vsdr-subsets N            DestinationRule subsets; the service's replicas are split
                               over this many Deployments, so it must be <= every
                               --replica-counts value (default: $VSDR_SUBSETS).
+
+Namespace scaling (growth mode; README "Namespace scaling"). Any K > 0 switches the
+sweep to growth series: --namespace-counts is the ladder of N (ascending), services
+are N x K (so --service-counts is refused), one replica count, traffic none, no
+explicit scoping, no --resume.
+  --services-per-namespaces CSV
+                              K values, one growth series each (default: $SPN_CSV;
+                              0 = the legacy sweep). --services-per-namespace is an alias.
+  --growth MODE               in-place: grow one set of namespaces step by step and
+                              measure a grow window plus one probe window per scoping
+                              at each N; fresh: deploy and clean up every N x scoping
+                              cell (the PL34 fidelity check). Default: $GROWTH_MODE.
+  --workload-mode MODE        pods|config-only (default: $WORKLOAD_MODE). config-only:
+                              Services without pods plus M measurement pods.
+  --measurement-pod-counts CSV
+                              config-only: measurement pods M, ascending (default:
+                              $MEASUREMENT_POD_COUNTS_CSV). The first is the base; each further
+                              value re-probes every scoping at the largest N (the
+                              M-sweep: does istiod heap grow with M?). --measurement-pods
+                              is an alias.
+  --outside-namespaces X      Namespaces outside the mesh added at the largest N
+                              (default: $OUTSIDE_NAMESPACES).
+  --outside-modes CSV         unlabeled,labeled: the outside phases, in order (default:
+                              $OUTSIDE_MODES_CSV; none = no phase). --outside-mode is an alias.
+  --probe-settle SEC          Probe window: settle after a probe namespace is applied,
+                              and again after its teardown (default: $PROBE_SETTLE_SEC).
+  --mem-stop-pct PCT          Memory stop guard: skip a cell (SKIPPED_MEM_GUARD row) when
+                              projected istiod heap or gateway Envoy memory exceeds PCT %
+                              of its limit (default: $MEM_STOP_PCT; 0 disables).
+  --mem-guard-contexts CSV    Contexts the guard samples (default: --contexts plus
+                              \$SETUP_CONTEXTS: every member ingests the Services).
+  --series-retire MODE        End of a series: undiscover (drop discovery labels, keep
+                              the namespaces; 005 --undiscover --no-delete), delete (also
+                              queue the namespace deletes, no wait) or keep (default:
+                              $SERIES_RETIRE).
 
 Other:
   --config-dump-samples N     Random pods per cluster to exec /config_dump on
@@ -155,6 +215,13 @@ Environment:
   CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, CONTROLPLANE_CLEANUP_GRACE_SEC) before the first
   setup, --dry-run included.
   SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (recorded in the TSV preamble).
+  Growth mode: CONTROLPLANE_SERVICES_PER_NAMESPACES (else ..._SERVICES_PER_NAMESPACE),
+  CONTROLPLANE_GROWTH_MODE, CONTROLPLANE_WORKLOAD_MODE,
+  CONTROLPLANE_MEASUREMENT_POD_COUNTS (else ..._MEASUREMENT_PODS),
+  CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT, CONTROLPLANE_OUTSIDE_NAMESPACES,
+  CONTROLPLANE_OUTSIDE_MODES (else ..._OUTSIDE_MODE), CONTROLPLANE_PROBE_SETTLE_SEC,
+  CONTROLPLANE_MEM_STOP_PCT, CONTROLPLANE_MEM_GUARD_CONTEXTS, CONTROLPLANE_SERIES_RETIRE,
+  CONTROLPLANE_NS_DELETE_SEC_PER_NS (the plan's namespace-deletion estimate).
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
   pre-sweep wait for 'kubectl top nodes'; warns (never aborts) if unavailable.
   CAP_TOP_TIMEOUT (default 15), CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2):
@@ -186,6 +253,61 @@ while [[ $# -gt 0 ]]; do
 	--service-counts)
 		[[ -n "${2:-}" ]] || die "--service-counts requires a value"
 		SERVICE_COUNTS_CSV="$2"
+		SERVICE_COUNTS_FLAG=1
+		shift 2
+		;;
+	--services-per-namespaces | --services-per-namespace)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		# PL7: the singular form (001/002 spelling) is an alias.
+		[[ "$1" == --services-per-namespace ]] && echo "note: --services-per-namespace is an alias; the sweep flag is --services-per-namespaces CSV" >&2
+		SPN_CSV="$2"
+		shift 2
+		;;
+	--growth)
+		[[ -n "${2:-}" ]] || die "--growth requires a value"
+		GROWTH_MODE="$2"
+		shift 2
+		;;
+	--workload-mode)
+		[[ -n "${2:-}" ]] || die "--workload-mode requires a value"
+		WORKLOAD_MODE="$2"
+		shift 2
+		;;
+	--measurement-pod-counts | --measurement-pods)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		[[ "$1" == --measurement-pods ]] && echo "note: --measurement-pods is an alias; the sweep flag is --measurement-pod-counts CSV" >&2
+		MEASUREMENT_POD_COUNTS_CSV="$2"
+		shift 2
+		;;
+	--outside-namespaces)
+		[[ -n "${2:-}" ]] || die "--outside-namespaces requires a value"
+		OUTSIDE_NAMESPACES="$2"
+		shift 2
+		;;
+	--outside-modes | --outside-mode)
+		[[ -n "${2:-}" ]] || die "$1 requires a value"
+		[[ "$1" == --outside-mode ]] && echo "note: --outside-mode is an alias; the sweep flag is --outside-modes CSV" >&2
+		OUTSIDE_MODES_CSV="$2"
+		shift 2
+		;;
+	--probe-settle)
+		[[ -n "${2:-}" ]] || die "--probe-settle requires a value"
+		PROBE_SETTLE_SEC="$2"
+		shift 2
+		;;
+	--mem-stop-pct)
+		[[ -n "${2:-}" ]] || die "--mem-stop-pct requires a value"
+		MEM_STOP_PCT="$2"
+		shift 2
+		;;
+	--mem-guard-contexts)
+		[[ -n "${2:-}" ]] || die "--mem-guard-contexts requires a value"
+		MEM_GUARD_CONTEXTS_CSV="$2"
+		shift 2
+		;;
+	--series-retire)
+		[[ -n "${2:-}" ]] || die "--series-retire requires a value"
+		SERIES_RETIRE="$2"
 		shift 2
 		;;
 	--replica-counts)
@@ -338,11 +460,6 @@ done
 for nc in "${NAMESPACE_COUNTS[@]}"; do
 	is_pos_int "$nc" || die "namespace-count '$nc' is not a positive integer"
 done
-for sc in "${SERVICE_COUNTS[@]}"; do
-	for nc in "${NAMESPACE_COUNTS[@]}"; do
-		(( nc <= sc )) || die "namespace-count $nc > service-count $sc; some namespaces would be empty. Reduce --namespace-counts to at most --service-counts."
-	done
-done
 for scp in "${SCOPINGS[@]}"; do
 	validate_scoping "$scp"
 done
@@ -354,8 +471,101 @@ for tc in "${TRAFFIC_CONFIGS[@]}"; do
 	[[ "$tc" == vsdr ]] && HAS_VSDR=1
 done
 
-MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} * ${#SCOPINGS[@]} * ${#TRAFFIC_CONFIGS[@]} ))
-MATRIX_FACTORS="${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]}×${#TRAFFIC_CONFIGS[@]}"
+# Namespace scaling (growth mode): any K > 0 turns the sweep into growth series.
+SPNS=()
+split_csv "$SPN_CSV" SPNS
+((${#SPNS[@]})) || die "--services-per-namespaces produced an empty list"
+GROWTH=0
+for k in "${SPNS[@]}"; do
+	is_nonneg_int "$k" || die "services-per-namespace '$k' is not a non-negative integer"
+	((k > 0)) && GROWTH=1
+done
+M_LIST=()
+OUTSIDE_PHASES=()
+if ((GROWTH)); then
+	for k in "${SPNS[@]}"; do
+		((k > 0)) || die "--services-per-namespaces mixes 0 (the legacy sweep) with growth series; run them separately"
+	done
+	# One series per mesh size x K: the report keys a series by RUN_ID, mesh size, K and
+	# workload, so a repeated value would merge two series into one curve.
+	[[ "$(printf '%s\n' "${SPNS[@]}" | sort -u | grep -c .)" == "${#SPNS[@]}" ]] \
+		|| die "--services-per-namespaces repeats a value (${SPN_CSV}): each K is one growth series"
+	[[ "$(printf '%s\n' "${MESH_SIZES[@]}" | sort -u | grep -c .)" == "${#MESH_SIZES[@]}" ]] \
+		|| die "--mesh-sizes repeats a value ($(IFS=,; echo "${MESH_SIZES[*]}")): each mesh size is one growth series per K"
+	((SERVICE_COUNTS_FLAG)) && die "--service-counts conflicts with --services-per-namespaces: a growth series has namespaces x services-per-namespace services"
+	[[ -z "$RESUME_DIR" ]] || die "--resume is not supported for growth series; start a new sweep (one per series if needed)"
+	case "$GROWTH_MODE" in in-place | fresh) ;; *) die "--growth must be in-place or fresh (got: $GROWTH_MODE)" ;; esac
+	validate_workload_mode "$WORKLOAD_MODE"
+	split_csv "$MEASUREMENT_POD_COUNTS_CSV" M_LIST
+	((${#M_LIST[@]})) || die "--measurement-pod-counts produced an empty list"
+	prev_m=0
+	for m in "${M_LIST[@]}"; do
+		is_pos_int "$m" || die "measurement-pod count '$m' is not a positive integer"
+		((m > prev_m)) || die "--measurement-pod-counts must be strictly ascending (the M-sweep only adds measurement pods): ${MEASUREMENT_POD_COUNTS_CSV}"
+		prev_m="$m"
+	done
+	if ((${#M_LIST[@]} > 1)) && [[ "$WORKLOAD_MODE" != config-only || "$GROWTH_MODE" != in-place ]]; then
+		die "an M-sweep (several --measurement-pod-counts) needs --workload-mode config-only and --growth in-place"
+	fi
+	is_nonneg_int "$OUTSIDE_NAMESPACES" || die "--outside-namespaces must be a non-negative integer (got: $OUTSIDE_NAMESPACES)"
+	_omodes=()
+	split_csv "$OUTSIDE_MODES_CSV" _omodes
+	for om in "${_omodes[@]}"; do
+		validate_outside_mode "$om"
+		[[ "$om" == none ]] || OUTSIDE_PHASES+=("$om")
+	done
+	if ((${#OUTSIDE_PHASES[@]})); then
+		((OUTSIDE_NAMESPACES > 0)) || die "--outside-modes ${OUTSIDE_MODES_CSV} needs --outside-namespaces > 0"
+		[[ "$GROWTH_MODE" == in-place ]] || die "the outside phase (--outside-modes) runs with --growth in-place only"
+	elif ((OUTSIDE_NAMESPACES > 0)); then
+		echo "note: --outside-namespaces ${OUTSIDE_NAMESPACES} without an --outside-modes phase (unlabeled,labeled) adds nothing" >&2
+	fi
+	is_nonneg_int "$PROBE_SETTLE_SEC" || die "--probe-settle must be a non-negative integer (got: $PROBE_SETTLE_SEC)"
+	[[ "$MEM_STOP_PCT" =~ ^(0|[1-9][0-9]?|100)$ ]] || die "--mem-stop-pct must be an integer 0-100 (got: $MEM_STOP_PCT)"
+	case "$SERIES_RETIRE" in undiscover | delete | keep) ;; *) die "--series-retire must be undiscover, delete or keep (got: $SERIES_RETIRE)" ;; esac
+	[[ "$NS_DELETE_SEC_PER_NS" =~ ^([0-9]+(\.[0-9]+)?|\.[0-9]+)$ ]] || die "CONTROLPLANE_NS_DELETE_SEC_PER_NS must be a non-negative number (got: $NS_DELETE_SEC_PER_NS)"
+	for scp in "${SCOPINGS[@]}"; do
+		[[ "$scp" != explicit ]] || die "growth series do not support --sidecar-scopings explicit (use none, namespace and/or wide)"
+	done
+	for tc in "${TRAFFIC_CONFIGS[@]}"; do
+		[[ "$tc" == none ]] || die "growth series do not support --traffic-configs vsdr"
+	done
+	((${#REPLICA_COUNTS[@]} == 1)) || die "growth series take one --replica-counts value (got: ${REPLICA_COUNTS_CSV})"
+	[[ "${SCALE_SIZING_MODE:-fixed}" != auto ]] || die "SCALE_SIZING_MODE=auto derives service counts, which growth series do not use; set SCALE_SIZING_MODE=fixed"
+	# The ladder of N runs ascending (in place, each step adds namespaces).
+	_sorted_ns="$(printf '%s\n' "${NAMESPACE_COUNTS[@]}" | sort -n -u | awk '{ printf "%s%s", (NR > 1 ? "," : ""), $0 }')"
+	if [[ "$_sorted_ns" != "$(IFS=,; echo "${NAMESPACE_COUNTS[*]}")" ]]; then
+		echo "note: growth series run --namespace-counts ascending without repeats: ${_sorted_ns}" >&2
+	fi
+	split_csv "$_sorted_ns" NAMESPACE_COUNTS
+else
+	for sc in "${SERVICE_COUNTS[@]}"; do
+		for nc in "${NAMESPACE_COUNTS[@]}"; do
+			(( nc <= sc )) || die "namespace-count $nc > service-count $sc; some namespaces would be empty. Reduce --namespace-counts to at most --service-counts."
+		done
+	done
+fi
+
+if ((GROWTH)); then
+	# Cells per series: in-place = each step's grow window plus one probe per scoping,
+	# each outside phase's window plus its probes, and the M-sweep's probes; fresh =
+	# one deploy cell per N x scoping.
+	_S=${#SCOPINGS[@]}
+	_NN=${#NAMESPACE_COUNTS[@]}
+	_NO=${#OUTSIDE_PHASES[@]}
+	_NM=$(( ${#M_LIST[@]} - 1 ))
+	if [[ "$GROWTH_MODE" == in-place ]]; then
+		CELLS_PER_SERIES=$(( _NN * (1 + _S) + _NO * (1 + _S) + _NM * _S ))
+		MATRIX_FACTORS="${#MESH_SIZES[@]} mesh × ${#SPNS[@]} K × (${_NN} steps × (1 grow + ${_S} probes) + ${_NO} outside × (1 + ${_S}) + ${_NM} M-sweep × ${_S})"
+	else
+		CELLS_PER_SERIES=$(( _NN * _S ))
+		MATRIX_FACTORS="${#MESH_SIZES[@]} mesh × ${#SPNS[@]} K × ${_NN} N × ${_S} scope (fresh)"
+	fi
+	MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SPNS[@]} * CELLS_PER_SERIES ))
+else
+	MATRIX_SIZE=$(( ${#MESH_SIZES[@]} * ${#SERVICE_COUNTS[@]} * ${#REPLICA_COUNTS[@]} * ${#NAMESPACE_COUNTS[@]} * ${#SCOPINGS[@]} * ${#TRAFFIC_CONFIGS[@]} ))
+	MATRIX_FACTORS="${#MESH_SIZES[@]}×${#SERVICE_COUNTS[@]}×${#REPLICA_COUNTS[@]}×${#NAMESPACE_COUNTS[@]}×${#SCOPINGS[@]}×${#TRAFFIC_CONFIGS[@]}"
+fi
 
 SCRIPT_DIR="${ROOT}/tests/controlplane"
 
@@ -398,9 +608,9 @@ combo_already_done() {
 		END { exit (found ? 0 : 1) }' "$tsv"
 }
 
-# The 51-column TSV schema header. 002 writes the same literal when it runs
+# The 63-column TSV schema header. 002 writes the same literal when it runs
 # standalone; tests/lib/test/preamble.bats checks that the two are identical.
-CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg"
+CONTROLPLANE_TSV_HEADER="timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg\tservices_per_namespace\tworkload_mode\tmeasurement_pods\toutside_namespaces\toutside_discovery\twindow_kind\tistiod_services\tistiod_cpu_s_delta\tsidecar_mem_mi_avg\tgateway_clusters_max\tgateway_mem_mi_max\troot_cert_configmaps"
 CONTROLPLANE_TSV_WIDTH="$(echo -e "$CONTROLPLANE_TSV_HEADER" | awk -F'\t' '{ print NF }')"
 
 # --resume appends to the existing TSV, so its header must have this harness's width;
@@ -523,7 +733,7 @@ precreate_tsv_preamble() {
 	done < <(tuning_baseline_state "$src_ctx" "${KUBECTL[@]}")
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-		echo "# CONTROLPLANE_SCHEMA=51"
+		echo "# CONTROLPLANE_SCHEMA=63"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 		echo "# HARNESS_SHA=${harness}"
@@ -545,6 +755,17 @@ precreate_tsv_preamble() {
 		echo "# VSDR_EVERY=${VSDR_EVERY}"
 		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
 		config_preamble_lines
+		# Namespace-scaling keys through the emitter 002 uses too (PL36). A legacy sweep
+		# records GROWTH_MODE=off.
+		local growth_mode_key="off"
+		((GROWTH)) && growth_mode_key="$GROWTH_MODE"
+		growth_preamble_lines SERVICES_PER_NAMESPACE="$SPN_CSV" GROWTH_MODE="$growth_mode_key" \
+			WORKLOAD_MODE="$WORKLOAD_MODE" MEASUREMENT_PODS="$MEASUREMENT_POD_COUNTS_CSV" \
+			MEASUREMENT_PROXY_MEM_LIMIT="${CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT:-unknown}" \
+			OUTSIDE_NAMESPACES="$OUTSIDE_NAMESPACES" OUTSIDE_MODES="$OUTSIDE_MODES_CSV" \
+			PROBE_SETTLE_SEC="$PROBE_SETTLE_SEC" MEM_STOP_PCT="$MEM_STOP_PCT" \
+			MEM_GUARD_CONTEXTS="$(IFS=,; echo "${GUARD_CONTEXTS[*]:-}")" SERIES_RETIRE="$SERIES_RETIRE" \
+			DISCOVERY_LABEL=istio-discovery=enabled
 		echo "# ${tb_line}"
 		echo "# ${eh_line}"
 		echo "# METRICS_API=${METRICS_API_STATUS:-unknown}"
@@ -566,9 +787,24 @@ capacity_plan_warn() {
 	local max_sc=0 max_rc=0 v
 	for v in "${SERVICE_COUNTS[@]}"; do (( v > max_sc )) && max_sc="$v"; done
 	for v in "${REPLICA_COUNTS[@]}"; do (( v > max_rc )) && max_rc="$v"; done
-	local needed_pods=$(( max_sc * max_rc ))
+	local needed_pods=$(( max_sc * max_rc )) combo_label="${max_sc} svc × ${max_rc} rep"
+	if ((GROWTH)); then
+		# Growth series: pods mode runs every Service's pods at the largest step;
+		# config-only runs only the measurement pods.
+		local max_n=0 max_k=0 max_m="${M_LIST[${#M_LIST[@]}-1]}"
+		for v in "${NAMESPACE_COUNTS[@]}"; do (( v > max_n )) && max_n="$v"; done
+		for v in "${SPNS[@]}"; do (( v > max_k )) && max_k="$v"; done
+		if [[ "$WORKLOAD_MODE" == config-only ]]; then
+			needed_pods=$(( max_m < max_n ? max_m : max_n ))
+			combo_label="config-only: ${needed_pods} measurement pods"
+		else
+			needed_pods=$(( max_n * max_k * max_rc ))
+			combo_label="growth: ${max_n} namespaces × ${max_k} svc × ${max_rc} rep"
+		fi
+		max_sc=$(( max_n * max_k ))
+	fi
 	local needed_cpu_m=$(( needed_pods * per_pod_cpu_m ))
-	echo "--- Capacity plan check (largest combo: ${max_sc} svc × ${max_rc} rep) ---" >&2
+	echo "--- Capacity plan check (largest combo: ${combo_label}) ---" >&2
 	echo "  requested: ${needed_pods} sidecar-pods × ${per_pod_cpu_m}m = ~$(( needed_cpu_m / 1000 )) cores/cluster (SCALE_PER_POD_CPU_M=${per_pod_cpu_m})" >&2
 
 	if ((DRY_RUN)); then
@@ -656,9 +892,14 @@ metrics_preflight() {
 
 # Record a failed combo as a degraded row (context column = status, restarted =
 # unknown, numerics N/A): counted in n_total, excluded from n_valid. The sweep
-# continues. <status> is PROBE_FAILED or SETUP_FAILED.
+# continues. <status> is PROBE_FAILED or SETUP_FAILED; growth series also record
+# GROW_FAILED, SWITCH_FAILED, SKIPPED_MEM_GUARD and SKIPPED_SERIES_STOPPED.
+# Optional args 8-13 are the growth columns 52-57 (services_per_namespace,
+# workload_mode, measurement_pods, outside_namespaces, outside_discovery,
+# window_kind); a legacy cell defaults to 0 pods <svc x replicas> 0 none deploy.
 emit_failed_row() {
 	local status="$1" ms="$2" sc="$3" rc="$4" nc="$5" scp="$6" tc="$7"
+	local g_spn="${8:-0}" g_wm="${9:-pods}" g_mp="${10:-$(( $3 * $4 ))}" g_ox="${11:-0}" g_od="${12:-none}" g_wk="${13:-deploy}"
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 	# Configured VS+DR services for the cell (0 for none), like service_count.
 	local vsdr_svcs=0
@@ -668,10 +909,35 @@ emit_failed_row() {
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
 		precreate_tsv_preamble
 	fi
-	# 51 fields: cols 41-43 (cluster proxies, sidecar pods, proxy check) are N/A too;
-	# cols 44-45 keep the cell's traffic config, cols 46-51 are N/A.
-	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${tc}\t${vsdr_svcs}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
+	# 63 fields: cols 41-43 (cluster proxies, sidecar pods, proxy check) are N/A too;
+	# cols 44-45 keep the cell's traffic config, cols 46-51 are N/A; cols 52-57 keep
+	# the cell's growth metadata, cols 58-63 are N/A.
+	echo -e "$(date -u -Iseconds)\t${status}\t${ms}\t${sc}\t${rc}\t${nc}\t${scp}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${SETTLE_SEC}\tunknown\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${tc}\t${vsdr_svcs}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${g_spn}\t${g_wm}\t${g_mp}\t${g_ox}\t${g_od}\t${g_wk}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A" >> "$tsv"
 }
+
+# Growth memory guard contexts: every member whose istiod and gateways ingest the
+# series' Services through remote discovery (PL38), not only the measured ones.
+GUARD_CONTEXTS=()
+if ((GROWTH)); then
+	if [[ -n "$MEM_GUARD_CONTEXTS_CSV" ]]; then
+		split_csv "$MEM_GUARD_CONTEXTS_CSV" GUARD_CONTEXTS
+	else
+		_setup_ctxs=()
+		split_csv "${SETUP_CONTEXTS:-}" _setup_ctxs
+		declare -A _gseen=()
+		for _c in "${CONTEXTS[@]}" "${_setup_ctxs[@]}"; do
+			[[ -n "${_gseen[$_c]:-}" ]] && continue
+			_gseen[$_c]=1
+			GUARD_CONTEXTS+=("$_c")
+		done
+		unset _gseen
+	fi
+fi
+# Series ids: unique per run (namespaces of an earlier run may still exist,
+# undiscovered or Terminating), DNS-safe: s<MMDDhhmmss>-<n>.
+SERIES_PREFIX="s${RUN_ID:4:4}${RUN_ID:9:6}"
+LIFECYCLE_FILE="${OUTPUT_DIR}/ns-lifecycle-${RUN_ID}.tsv"
+GUARD_FILE="${OUTPUT_DIR}/mem-guard-${RUN_ID}.tsv"
 
 {
 	echo "=========================================="
@@ -679,9 +945,20 @@ emit_failed_row() {
 	echo "=========================================="
 	echo "Contexts:          ${CONTEXTS[*]}"
 	echo "Mesh sizes:        ${MESH_SIZES[*]}"
-	echo "Service counts:    ${SERVICE_COUNTS[*]}"
-	echo "Replica counts:    ${REPLICA_COUNTS[*]}"
-	echo "Namespace counts:  ${NAMESPACE_COUNTS[*]}"
+	if ((GROWTH)); then
+		echo "Growth series:     K=${SPNS[*]} services per namespace, ${GROWTH_MODE}, workload ${WORKLOAD_MODE}"
+		echo "Namespace counts:  ${NAMESPACE_COUNTS[*]} (ascending ladder)"
+		[[ "$WORKLOAD_MODE" == config-only ]] && echo "Measurement pods:  ${M_LIST[*]} (first = base$( ((${#M_LIST[@]} > 1)) && echo '; the rest = M-sweep at the largest N'))"
+		echo "Replicas:          ${REPLICA_COUNTS[*]}$([[ "$WORKLOAD_MODE" == config-only ]] && echo ' (pods mode only; measurement pods run 1)')"
+		echo "Outside:           ${OUTSIDE_NAMESPACES} namespace(s), phases: ${OUTSIDE_PHASES[*]:-none}"
+		echo "Probe settle:      ${PROBE_SETTLE_SEC}s"
+		echo "Memory guard:      stop at ${MEM_STOP_PCT}% of the istiod / gateway memory limit$( ((MEM_STOP_PCT == 0)) && echo ' (disabled)'); samples ${GUARD_CONTEXTS[*]}"
+		echo "Series retire:     ${SERIES_RETIRE}"
+	else
+		echo "Service counts:    ${SERVICE_COUNTS[*]}"
+		echo "Replica counts:    ${REPLICA_COUNTS[*]}"
+		echo "Namespace counts:  ${NAMESPACE_COUNTS[*]}"
+	fi
 	echo "Sidecar scopings:  ${SCOPINGS[*]}"
 	echo "Traffic configs:   ${TRAFFIC_CONFIGS[*]}  (vsdr: every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets)"
 	echo "Config-dump samples: ${CONFIG_DUMP_SAMPLES}"
@@ -692,11 +969,18 @@ emit_failed_row() {
 		echo "Run config:        ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
 	fi
 	echo ""
-	echo "Planned matrix:    ${MATRIX_SIZE} = ${MATRIX_FACTORS} (mesh × svc × rep × ns × scope × traffic)"
+	if ((GROWTH)); then
+		echo "Planned matrix:    ${MATRIX_SIZE} cells = ${MATRIX_FACTORS}"
+	else
+		echo "Planned matrix:    ${MATRIX_SIZE} = ${MATRIX_FACTORS} (mesh × svc × rep × ns × scope × traffic)"
+	fi
 	echo ""
 } >&2
 
 if ((MATRIX_SIZE > MAX_MATRIX)) && ! ((FORCE_LARGE_MATRIX)); then
+	if ((GROWTH)); then
+		die "growth plan has $MATRIX_SIZE cells = ${MATRIX_FACTORS}, above the safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
+	fi
 	die "matrix size $MATRIX_SIZE = ${MATRIX_FACTORS} (mesh × svc × rep × ns × scope × traffic) exceeds safety limit $MAX_MATRIX; re-run with --force-large-matrix to proceed"
 fi
 
@@ -711,7 +995,7 @@ fi
 
 capacity_plan_warn
 
-if ((DRY_RUN)); then
+if ((DRY_RUN)) && ! ((GROWTH)); then
 	echo "--- Combinations (dry-run) ---" >&2
 fi
 
@@ -830,9 +1114,582 @@ if ((! DRY_RUN)); then
 	metrics_preflight
 	precreate_tsv_preamble
 	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"
+	if ((GROWTH)); then
+		# Namespace-lifecycle timings (001/005 append) and the memory guard's decisions.
+		ns_lifecycle_init "$LIFECYCLE_FILE" "$RUN_ID"
+		write_preamble "Memory stop guard (controlplane growth mode)" "$GUARD_FILE" \
+			"RUN_ID=${RUN_ID}" "HARNESS_SHA=$(harness_sha)" "ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
+			"MEM_STOP_PCT=${MEM_STOP_PCT}" "MEM_GUARD_CONTEXTS=$(IFS=,; echo "${GUARD_CONTEXTS[*]}")" \
+			"NOTE=projected = base + (current - base) x ratio^power; istiod from go_memstats_heap_inuse_bytes (max over replicas) vs the per-replica memory limit, gateways from Envoy server.memory_allocated vs the istio-proxy limit; the first step and changes that add no Services use the current value (ratio 1)"
+		printf 'timestamp\tseries\tcell\tcontext\tcomponent\tcurrent_mi\tbase_mi\tratio\tpower\tprojected_mi\tlimit_mi\tstop_pct\tverdict\n' >> "$GUARD_FILE"
+	fi
 fi
 
+# ---------------------------------------------------------------------------
+# Namespace scaling (growth mode).
+# ---------------------------------------------------------------------------
+# One series per mesh size x K. In place, a series grows one set of namespaces up
+# the --namespace-counts ladder. At each N: switch back to namespace scoping (grow
+# rows are always scoping namespace), a grow window (baseline -> 001 adds namespaces
+# N_prev..N-1 -> settle -> final), then per scoping a switch (001 --parts sidecars)
+# and a probe window (baseline -> 001 --parts probe -> probe settle -> final); 005
+# --probe then retires the probe namespace (Services and Sidecar first) and the
+# probe settle runs again before the next baseline. At the largest N come the outside
+# phases and the M-sweep; the series ends per --series-retire. Every step is wrapped
+# (PL32): a failure becomes a status row and the sweep goes on; a failed grow stops
+# the series and its remaining cells are recorded as SKIPPED_SERIES_STOPPED. Before
+# each larger step the memory guard projects istiod heap and gateway memory on every
+# guard context and records a cell that would cross MEM_STOP_PCT % of a limit as
+# SKIPPED_MEM_GUARD.
+
+CELL_IDX=0
+PROBE_IDX=0
+declare -A GUARD_BASE=()  # "<ctx>|<component>" -> MiB at the series start
+declare -A GUARD_WIDE=()  # "<ctx>|istiod" -> heap MiB after the last wide probe
+GUARD_WIDE_N=0            # discovered namespaces at that measurement
+# Series state (set by run_growth_series / run_growth_fresh).
+G_SID=""
+G_K=0
+G_MS=0
+G_ACTIVE_CSV=""
+G_REPLICAS=1
+G_M=1
+G_CUR_SCOPE=""
+G_STOPPED=""
+G_WIDE_STOPPED=0
+
+# g_ratio <a> <b>: a / b (4 decimals); 1 when b is not positive.
+g_ratio() { awk -v a="$1" -v b="$2" 'BEGIN { if (b + 0 <= 0) print 1; else printf "%.4f\n", a / b }'; }
+
+# guard_sample_ctx <ctx> <ctx_index>: "istiod <heap_mi> <limit_mi>" (max
+# go_memstats_heap_inuse over the context's istiod pods, per-replica memory limit)
+# and one "gw:<pod> <envoy_mi> <limit_mi>" line per gateway. The port-forwards close
+# on return. A context without a reachable istiod prints no istiod line; nothing here
+# can abort the sweep (PL40).
+guard_sample_ctx() {
+	local ctx="$1" ci="$2"
+	(
+		local -a pids=() ports=() pods=()
+		local dir i h max="" lim="unknown" kv
+		dir="$(mktemp -d -t controlplane-guard.XXXXXX)"
+		trap 'for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$dir"' EXIT
+		fanout_open "$ctx" "$ci" pids ports pods "${KUBECTL[@]}" 2>/dev/null
+		fanout_scrape_all "$dir" g "${ports[@]}" >/dev/null 2>&1 || true
+		for i in "${!ports[@]}"; do
+			h="$(growth_istiod_heap_mi "${dir}/g-${i}.metrics")"
+			[[ "$h" =~ ^[0-9]+$ ]] || continue
+			if [[ -z "$max" ]] || ((h > max)); then max="$h"; fi
+		done
+		for kv in $(cap_istiod_limits "$ctx" "${KUBECTL[@]}"); do
+			[[ "$kv" == mem_mi=* ]] && lim="${kv#mem_mi=}"
+		done
+		[[ -n "$max" ]] && echo "istiod ${max} ${lim}"
+		exit 0
+	) || true
+	local pod plim kv mem
+	while IFS=$'\t' read -r pod plim; do
+		[[ -n "$pod" ]] || continue
+		kv="$(growth_envoy_stats "$ctx" istio-system "$pod" "${KUBECTL[@]}")"
+		mem="${kv#mem_mi=}"
+		mem="${mem%% *}"
+		[[ "$mem" =~ ^[0-9]+$ ]] && echo "gw:${pod} ${mem} ${plim}"
+	done < <(growth_gateway_pods "$ctx" "${KUBECTL[@]}")
+	return 0
+}
+
+# guard_collect <assoc_name>: sample every guard context into "<ctx>|<component>" ->
+# "<current_mi> <limit_mi>".
+guard_collect() {
+	local -n _gc="$1"
+	_gc=()
+	local ci comp cur lim
+	for ci in "${!GUARD_CONTEXTS[@]}"; do
+		while read -r comp cur lim; do
+			[[ -n "$comp" ]] || continue
+			_gc["${GUARD_CONTEXTS[ci]}|${comp}"]="${cur} ${lim}"
+		done < <(guard_sample_ctx "${GUARD_CONTEXTS[ci]}" "$ci")
+	done
+}
+
+# guard_log <cell> <ctx> <component> <cur> <base> <ratio> <power> <projected> <limit> <verdict>
+guard_log() {
+	[[ -f "$GUARD_FILE" ]] || return 0
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u -Iseconds)" "$G_SID" \
+		"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "$MEM_STOP_PCT" "${10}" >> "$GUARD_FILE"
+}
+
+# guard_baseline: the empty-mesh reference of a series (before its first step).
+guard_baseline() {
+	GUARD_BASE=()
+	GUARD_WIDE=()
+	GUARD_WIDE_N=0
+	((MEM_STOP_PCT > 0)) || return 0
+	local -A now=()
+	guard_collect now
+	local key cur lim ctx
+	for key in "${!now[@]}"; do
+		read -r cur lim <<<"${now[$key]}"
+		GUARD_BASE[$key]="$cur"
+	done
+	for ctx in "${GUARD_CONTEXTS[@]}"; do
+		[[ -n "${GUARD_BASE["${ctx}|istiod"]:-}" ]] \
+			|| echo "warn: memory guard: no istiod heap readable on ${ctx}; that context is not guarded" >&2
+	done
+	echo "Memory guard baseline: ${#GUARD_BASE[@]} component(s) on ${#GUARD_CONTEXTS[@]} context(s) (stop at ${MEM_STOP_PCT}% of a limit)"
+}
+
+# guard_check <cell> <istiod_ratio> <istiod_power> <gateway_ratio> <use_wide>: 0 to
+# run the cell, 1 to skip it. Projects each component to base + (current - base) x
+# ratio^power and stops when that exceeds MEM_STOP_PCT % of its limit. With use_wide,
+# istiod's "current" is its heap after the last wide probe (GUARD_WIDE), so a wide
+# cell projects quadratically from the last wide measurement. Ratio 1 = current usage
+# only (the first step, and changes that add no Services).
+guard_check() {
+	local cell="$1" ir="$2" ip="$3" gr="$4" use_wide="${5:-0}"
+	((MEM_STOP_PCT > 0)) || return 0
+	local -A now=()
+	guard_collect now
+	if ((${#now[@]} == 0)); then
+		echo "warn: memory guard: nothing could be sampled before '${cell}'; running it unguarded" >&2
+		guard_log "$cell" - - - - - - - - unknown
+		return 0
+	fi
+	local key cur lim base r p proj verdict stop=0 comp
+	for key in "${!now[@]}"; do
+		read -r cur lim <<<"${now[$key]}"
+		comp="${key#*|}"
+		base="${GUARD_BASE[$key]:-$cur}"
+		if [[ "$comp" == istiod ]]; then
+			r="$ir"
+			p="$ip"
+			if ((use_wide)) && [[ -n "${GUARD_WIDE[$key]:-}" ]]; then cur="${GUARD_WIDE[$key]}"; fi
+		else
+			r="$gr"
+			p=1
+		fi
+		proj="$(mem_guard_project "$cur" "$base" "$r" "$p")"
+		verdict="$(mem_guard_verdict "$proj" "$lim" "$MEM_STOP_PCT")"
+		guard_log "$cell" "${key%%|*}" "$comp" "$cur" "$base" "$r" "$p" "$proj" "$lim" "$verdict"
+		if [[ "$verdict" == stop ]]; then
+			echo "  memory guard: ${key}: projected ${proj} Mi > ${MEM_STOP_PCT}% of ${lim} Mi (now ${cur} Mi, base ${base} Mi, x ${r}^${p}); skipping '${cell}'" >&2
+			stop=1
+		fi
+	done
+	((stop == 0))
+}
+
+# guard_note_wide <discovered_namespaces>: remember istiod heap after a wide probe.
+guard_note_wide() {
+	((MEM_STOP_PCT > 0)) || return 0
+	local -A now=()
+	guard_collect now
+	local key cur lim
+	for key in "${!now[@]}"; do
+		[[ "${key#*|}" == istiod ]] || continue
+		read -r cur lim <<<"${now[$key]}"
+		GUARD_WIDE[$key]="$cur"
+	done
+	GUARD_WIDE_N="$1"
+}
+
+# g001 <args...>: 001 with the series' common arguments.
+g001() {
+	"$SCRIPT_DIR/001-setup-controlplane-test.sh" --contexts "$G_ACTIVE_CSV" \
+		--services-per-namespace "$G_K" --series "$G_SID" --workload-mode "$WORKLOAD_MODE" \
+		--replicas "${REPLICA_COUNTS[0]}" --lifecycle-file "$LIFECYCLE_FILE" "$@"
+}
+
+# g002 <phase> <state_dir> <n> <scoping> <window_kind> <outside_x> <outside_mode> <m> [args...]
+g002() {
+	local phase="$1" state="$2" n="$3" scp="$4" kind="$5" ox="$6" od="$7" m="$8"
+	shift 8
+	"$SCRIPT_DIR/002-collect-resource-metrics.sh" --phase "$phase" --state-dir "$state" \
+		--contexts "$G_ACTIVE_CSV" --mesh-size "$G_MS" \
+		--service-count "$(( n * G_K ))" --replicas "$G_REPLICAS" --namespace-count "$n" \
+		--sidecar-scoping "$scp" --traffic-config none \
+		--services-per-namespace "$G_K" --workload-mode "$WORKLOAD_MODE" --measurement-pods "$m" \
+		--outside-namespaces "$ox" --outside-mode "$od" --window-kind "$kind" --series "$G_SID" \
+		--run-id "$RUN_ID" "$@"
+}
+
+# g_row <status> <n> <scoping> <window_kind> <outside_x> <outside_mode> <m>: a status
+# row for a growth cell (same growth columns 002 writes).
+g_row() {
+	local status="$1" n="$2" scp="$3" kind="$4" ox="$5" od="$6" m="$7" mp
+	if [[ "$WORKLOAD_MODE" == config-only ]]; then
+		mp=$(( m < n ? m : n ))
+	else
+		mp=$(( n * G_K * G_REPLICAS ))
+	fi
+	((ox > 0)) || od=none
+	emit_failed_row "$status" "$G_MS" "$(( n * G_K ))" "$G_REPLICAS" "$n" "$scp" none \
+		"$G_K" "$WORKLOAD_MODE" "$mp" "$ox" "$od" "$kind"
+}
+
+# g_skip <status> <n> <scoping> <window_kind> <outside_x> <outside_mode> <m>: a planned
+# cell that does not run.
+g_skip() {
+	CELL_IDX=$((CELL_IDX + 1))
+	printf "  [%d/%d] series=%s N=%s %s scope=%s: %s\n" "$CELL_IDX" "$MATRIX_SIZE" "$G_SID" "$2" "$4" "$3" "$1" >&2
+	g_row "$@"
+}
+
+# g_window <window_kind> <n> <scoping> <outside_x> <outside_mode> <m> <settle>
+#          <fail_status> <001 args...>: one measured window around one 001 call.
+# Returns 1 when 001 failed (a <fail_status> row is recorded), else 0. A failed
+# baseline is recorded as PROBE_FAILED and 001 still runs, so the series goes on.
+g_window() {
+	local kind="$1" n="$2" scp="$3" ox="$4" od="$5" m="$6" settle="$7" fail_status="$8"
+	shift 8
+	CELL_IDX=$((CELL_IDX + 1))
+	local label="series=${G_SID} K=${G_K} N=${n} ${kind} scope=${scp} M=${m} outside=${ox}/${od}"
+	local state="${OUTPUT_DIR}/state-cell-${CELL_IDX}" measured=1
+	echo "=========================================="
+	printf "  Growth cell [%d/%d]: %s\n" "$CELL_IDX" "$MATRIX_SIZE" "$label"
+	echo "=========================================="
+	mkdir -p "$state"
+	if ! g002 baseline "$state" "$n" "$scp" "$kind" "$ox" "$od" "$m" --settle "$settle"; then
+		echo "warn: baseline probe failed for '${label}'; recording PROBE_FAILED and applying anyway" >&2
+		g_row PROBE_FAILED "$n" "$scp" "$kind" "$ox" "$od" "$m"
+		measured=0
+	fi
+	((measured)) && start_peak_metrics_poller "$state"
+	if ! g001 "$@"; then
+		stop_peak_metrics_poller
+		echo "warn: setup failed for '${label}'; recording ${fail_status}" >&2
+		((measured)) && g_row "$fail_status" "$n" "$scp" "$kind" "$ox" "$od" "$m"
+		rm -rf "$state"
+		return 1
+	fi
+	if ((settle > 0)); then
+		echo "--- Settling ${settle}s before the final scrape ---"
+		sleep "$settle"
+	fi
+	stop_peak_metrics_poller
+	if ((measured)); then
+		if ! g002 final "$state" "$n" "$scp" "$kind" "$ox" "$od" "$m" \
+			--config-dump-samples "$CONFIG_DUMP_SAMPLES" --settle "$settle" --output-dir "$OUTPUT_DIR"; then
+			echo "warn: final probe failed for '${label}'; recording PROBE_FAILED" >&2
+			g_row PROBE_FAILED "$n" "$scp" "$kind" "$ox" "$od" "$m"
+		fi
+	fi
+	rm -rf "$state"
+	return 0
+}
+
+# g_switch <scoping> <n>: switch the series' n namespaces to a scoping in place.
+g_switch() {
+	local scp="$1" n="$2"
+	echo "--- Scoping switch: series ${G_SID} -> ${scp} (${n} namespaces) ---"
+	if g001 --parts sidecars --namespace-count "$n" --sidecar-scoping "$scp" --measurement-pods "$G_M"; then
+		G_CUR_SCOPE="$scp"
+		if ((SETTLE_SEC > 0)); then sleep "$SETTLE_SEC"; fi
+		return 0
+	fi
+	G_CUR_SCOPE="?"
+	return 1
+}
+
+# g_probe <n> <scoping> <outside_x> <outside_mode> <m>: one probe window, then the
+# probe namespace's retirement and the probe settle (also after a failed apply).
+g_probe() {
+	local n="$1" scp="$2" ox="$3" od="$4" m="$5"
+	PROBE_IDX=$((PROBE_IDX + 1))
+	local pname="${NS}-${G_SID}-p${PROBE_IDX}"
+	g_window probe "$n" "$scp" "$ox" "$od" "$m" "$PROBE_SETTLE_SEC" SETUP_FAILED \
+		--parts probe --probe "$pname" --namespace-count "$n" --sidecar-scoping "$scp" --measurement-pods "$G_M" || true
+	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$G_ACTIVE_CSV" --probe "$pname" --lifecycle-file "$LIFECYCLE_FILE" \
+		|| echo "warn: retiring probe namespace ${pname} reported a failure" >&2
+	if ((PROBE_SETTLE_SEC > 0)); then
+		echo "--- Probe settle ${PROBE_SETTLE_SEC}s after the probe teardown ---"
+		sleep "$PROBE_SETTLE_SEC"
+	fi
+}
+
+# g_probe_scopings <n> <outside_x> <outside_mode> <m> <discovered_namespaces>: one
+# probe per scoping at the current step, each behind its own guard check. The scoping
+# the series already has goes first (after a grow that is namespace), which saves one
+# rewrite of every Sidecar of the series per step.
+g_probe_scopings() {
+	local n="$1" ox="$2" od="$3" m="$4" n_disc="$5" scp r
+	local -a order=()
+	for scp in "${SCOPINGS[@]}"; do [[ "$scp" == "$G_CUR_SCOPE" ]] && order+=("$scp"); done
+	for scp in "${SCOPINGS[@]}"; do [[ "$scp" == "$G_CUR_SCOPE" ]] || order+=("$scp"); done
+	for scp in "${order[@]}"; do
+		if [[ -n "$G_STOPPED" ]]; then
+			g_skip "$G_STOPPED" "$n" "$scp" probe "$ox" "$od" "$m"
+			continue
+		fi
+		if [[ "$scp" == wide ]] && ((G_WIDE_STOPPED)); then
+			g_skip SKIPPED_MEM_GUARD "$n" "$scp" probe "$ox" "$od" "$m"
+			continue
+		fi
+		if [[ "$scp" != "$G_CUR_SCOPE" ]]; then
+			if [[ "$scp" == wide ]]; then
+				r=1
+				((GUARD_WIDE_N > 0)) && r="$(g_ratio "$n_disc" "$GUARD_WIDE_N")"
+				if ! guard_check "probe wide N=${n}" "$r" 2 1 1; then
+					G_WIDE_STOPPED=1
+					g_skip SKIPPED_MEM_GUARD "$n" "$scp" probe "$ox" "$od" "$m"
+					continue
+				fi
+			elif ! guard_check "probe ${scp} N=${n}" 1 1 1 0; then
+				g_skip SKIPPED_MEM_GUARD "$n" "$scp" probe "$ox" "$od" "$m"
+				continue
+			fi
+			if ! g_switch "$scp" "$n"; then
+				g_skip SWITCH_FAILED "$n" "$scp" probe "$ox" "$od" "$m"
+				continue
+			fi
+		fi
+		g_probe "$n" "$scp" "$ox" "$od" "$m"
+		[[ "$scp" == wide ]] && guard_note_wide "$n_disc"
+	done
+	return 0
+}
+
+# g_retire: end a series per --series-retire (then the PL18 settle).
+g_retire() {
+	echo "--- Retiring series ${G_SID} (${SERIES_RETIRE}) ---"
+	case "$SERIES_RETIRE" in
+	undiscover)
+		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$G_ACTIVE_CSV" --series "$G_SID" --undiscover --no-delete \
+			--lifecycle-file "$LIFECYCLE_FILE" || echo "warn: series ${G_SID}: undiscover reported a failure" >&2
+		;;
+	delete)
+		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$G_ACTIVE_CSV" --series "$G_SID" --undiscover --no-wait \
+			--lifecycle-file "$LIFECYCLE_FILE" || echo "warn: series ${G_SID}: undiscover + delete reported a failure" >&2
+		;;
+	keep)
+		echo "Series ${G_SID} stays discovered (--series-retire keep); remove it later with 005 --series ${G_SID}."
+		;;
+	esac
+	if ((SETTLE_SEC > 0)); then sleep "$SETTLE_SEC"; fi
+}
+
+# run_growth_series <mesh_size> <K> <series_index>: one in-place series.
+run_growth_series() {
+	G_MS="$1"
+	G_K="$2"
+	G_SID="${SERIES_PREFIX}-$3"
+	local -a active=("${CONTEXTS[@]:0:$G_MS}")
+	G_ACTIVE_CSV="$(IFS=,; echo "${active[*]}")"
+	G_REPLICAS="${REPLICA_COUNTS[0]}"
+	[[ "$WORKLOAD_MODE" == config-only ]] && G_REPLICAS=1
+	G_M="${M_LIST[0]}"
+	G_CUR_SCOPE=""
+	G_STOPPED=""
+	G_WIDE_STOPPED=0
+	echo ""
+	echo "########## Growth series ${G_SID}: mesh=${G_MS} K=${G_K} on ${active[*]} ##########"
+	guard_baseline
+	local n n_prev=0 r
+	for n in "${NAMESPACE_COUNTS[@]}"; do
+		if [[ -z "$G_STOPPED" && -n "$G_CUR_SCOPE" && "$G_CUR_SCOPE" != namespace ]]; then
+			# Grow rows are always measured under namespace scoping (switch back first).
+			if ! g_switch namespace "$n_prev"; then
+				g_skip SWITCH_FAILED "$n" namespace grow 0 none "$G_M"
+				G_STOPPED=SKIPPED_SERIES_STOPPED
+				g_probe_scopings "$n" 0 none "$G_M" "$n"
+				continue
+			fi
+		fi
+		if [[ -n "$G_STOPPED" ]]; then
+			g_skip "$G_STOPPED" "$n" namespace grow 0 none "$G_M"
+			g_probe_scopings "$n" 0 none "$G_M" "$n"
+			continue
+		fi
+		r=1
+		((n_prev > 0)) && r="$(g_ratio "$n" "$n_prev")"
+		if ! guard_check "grow ${n_prev}->${n}" "$r" 1 "$r" 0; then
+			G_STOPPED=SKIPPED_MEM_GUARD
+			g_skip SKIPPED_MEM_GUARD "$n" namespace grow 0 none "$G_M"
+			g_probe_scopings "$n" 0 none "$G_M" "$n"
+			continue
+		fi
+		if ! g_window grow "$n" namespace 0 none "$G_M" "$SETTLE_SEC" GROW_FAILED \
+			--namespace-start "$n_prev" --namespace-count "$n" --sidecar-scoping namespace --measurement-pods "$G_M"; then
+			G_STOPPED=SKIPPED_SERIES_STOPPED
+			g_probe_scopings "$n" 0 none "$G_M" "$n"
+			continue
+		fi
+		G_CUR_SCOPE=namespace
+		n_prev="$n"
+		g_probe_scopings "$n" 0 none "$G_M" "$n"
+	done
+	local n_last="$n_prev" om ox_state=0 od_state=none n_disc="$n_prev"
+	# Outside phases at the largest N reached, in order (unlabeled, then the label flip).
+	for om in "${OUTSIDE_PHASES[@]}"; do
+		local stopped="${G_STOPPED:-}"
+		((n_last > 0)) || stopped="${stopped:-SKIPPED_SERIES_STOPPED}"
+		if [[ -z "$stopped" && "$G_CUR_SCOPE" != namespace ]] && ! g_switch namespace "$n_last"; then
+			stopped=SWITCH_FAILED
+		fi
+		r=1
+		[[ "$om" == labeled ]] && r="$(g_ratio "$(( n_last + OUTSIDE_NAMESPACES ))" "$n_last")"
+		if [[ -z "$stopped" ]] && ! guard_check "outside ${om} N=${n_last}" "$r" 1 "$r" 0; then
+			stopped=SKIPPED_MEM_GUARD
+		fi
+		if [[ -z "$stopped" ]] && ! g_window outside "$n_last" namespace "$OUTSIDE_NAMESPACES" "$om" "$G_M" "$SETTLE_SEC" SETUP_FAILED \
+			--parts outside --outside-namespaces "$OUTSIDE_NAMESPACES" --outside-mode "$om" \
+			--namespace-count "$n_last" --sidecar-scoping namespace --measurement-pods "$G_M"; then
+			# The window recorded SETUP_FAILED; its probes cannot run against an unknown state.
+			local scp
+			for scp in "${SCOPINGS[@]}"; do g_skip SKIPPED_SERIES_STOPPED "$n_last" "$scp" probe "$OUTSIDE_NAMESPACES" "$om" "$G_M"; done
+			continue
+		fi
+		if [[ -n "$stopped" ]]; then
+			g_skip "$stopped" "$n_last" namespace outside "$OUTSIDE_NAMESPACES" "$om" "$G_M"
+			local scp
+			for scp in "${SCOPINGS[@]}"; do g_skip "$stopped" "$n_last" "$scp" probe "$OUTSIDE_NAMESPACES" "$om" "$G_M"; done
+			continue
+		fi
+		G_CUR_SCOPE=namespace
+		ox_state="$OUTSIDE_NAMESPACES"
+		od_state="$om"
+		n_disc="$n_last"
+		[[ "$om" == labeled ]] && n_disc=$(( n_last + OUTSIDE_NAMESPACES ))
+		g_probe_scopings "$n_last" "$ox_state" "$od_state" "$G_M" "$n_disc"
+	done
+	# M-sweep at the largest N: more measurement pods, every scoping again.
+	local m
+	for m in "${M_LIST[@]:1}"; do
+		local mstop="${G_STOPPED:-}"
+		((n_last > 0)) || mstop="${mstop:-SKIPPED_SERIES_STOPPED}"
+		if [[ -z "$mstop" ]]; then
+			echo "--- M-sweep: measurement pods ${G_M} -> ${m} (N=${n_last}) ---"
+			if g001 --parts measurement --measurement-pods "$m" --namespace-count "$n_last" --sidecar-scoping namespace; then
+				G_M="$m"
+				if ((SETTLE_SEC > 0)); then sleep "$SETTLE_SEC"; fi
+			else
+				mstop=SETUP_FAILED
+			fi
+		fi
+		if [[ -n "$mstop" ]]; then
+			local scp
+			for scp in "${SCOPINGS[@]}"; do g_skip "$mstop" "$n_last" "$scp" probe "$ox_state" "$od_state" "$m"; done
+			continue
+		fi
+		g_probe_scopings "$n_last" "$ox_state" "$od_state" "$m" "$n_disc"
+	done
+	g_retire
+}
+
+# run_growth_fresh <mesh_size> <K> <series_index>: --growth fresh, one full deploy and
+# cleanup per N x scoping cell (each cell its own series id, so a Terminating
+# namespace of the previous cell never collides with the next).
+run_growth_fresh() {
+	G_MS="$1"
+	G_K="$2"
+	local base_sid="${SERIES_PREFIX}-$3" f=0 n scp timeout
+	local -a active=("${CONTEXTS[@]:0:$G_MS}")
+	G_ACTIVE_CSV="$(IFS=,; echo "${active[*]}")"
+	G_REPLICAS="${REPLICA_COUNTS[0]}"
+	[[ "$WORKLOAD_MODE" == config-only ]] && G_REPLICAS=1
+	G_M="${M_LIST[0]}"
+	G_STOPPED=""
+	echo ""
+	echo "########## Growth series ${base_sid} (fresh): mesh=${G_MS} K=${G_K} on ${active[*]} ##########"
+	G_SID="$base_sid"
+	guard_baseline
+	for n in "${NAMESPACE_COUNTS[@]}"; do
+		for scp in "${SCOPINGS[@]}"; do
+			f=$((f + 1))
+			G_SID="${base_sid}f${f}"
+			if ! guard_check "fresh N=${n} ${scp}" 1 1 1 0; then
+				g_skip SKIPPED_MEM_GUARD "$n" "$scp" deploy 0 none "$G_M"
+				continue
+			fi
+			g_window deploy "$n" "$scp" 0 none "$G_M" "$SETTLE_SEC" SETUP_FAILED \
+				--namespace-count "$n" --sidecar-scoping "$scp" --measurement-pods "$G_M" || true
+			# Bounded wait (PL4/PL37), scaled to the namespaces this cell deletes.
+			timeout="$(awk -v n="$n" -v s="$NS_DELETE_SEC_PER_NS" -v t="${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}" \
+				'BEGIN { v = int(2 * n * s + 60); print (v > t ? v : t) }')"
+			"$SCRIPT_DIR/005-cleanup.sh" --contexts "$G_ACTIVE_CSV" --series "$G_SID" --timeout "$timeout" \
+				--lifecycle-file "$LIFECYCLE_FILE" \
+				|| echo "warn: cleanup of fresh cell ${G_SID} reported a failure; the next cell uses new namespace names" >&2
+			if ((SETTLE_SEC > 0)); then
+				echo "--- Post-cleanup settle (${SETTLE_SEC}s) ---" >&2
+				sleep "$SETTLE_SEC"
+			fi
+		done
+	done
+}
+
+# print_growth_plan: the series, steps and cells; object and namespace counts; the
+# later namespace-deletion estimate. Printed before a live run and by --dry-run.
+print_growth_plan() {
+	local ms k idx=0 n prev probes pods peak_ns deletes=0 s_list="${SCOPINGS[*]}" x=0
+	((${#OUTSIDE_PHASES[@]})) && x="$OUTSIDE_NAMESPACES"
+	echo "--- Growth plan (${GROWTH_MODE}) ---"
+	for ms in "${MESH_SIZES[@]}"; do
+		for k in "${SPNS[@]}"; do
+			idx=$((idx + 1))
+			echo "  series ${SERIES_PREFIX}-${idx}: mesh=${ms} K=${k} workload=${WORKLOAD_MODE} on ${CONTEXTS[*]:0:$ms}"
+			if [[ "$GROWTH_MODE" == fresh ]]; then
+				for n in "${NAMESPACE_COUNTS[@]}"; do
+					echo "    N=${n}: one deploy cell per scoping (${s_list}): ${n} namespaces, $(( n * k )) Services each, then 005 deletes them and waits"
+					deletes=$(( deletes + n * ${#SCOPINGS[@]} ))
+				done
+				continue
+			fi
+			prev=0
+			probes=0
+			for n in "${NAMESPACE_COUNTS[@]}"; do
+				echo "    step N=${n}: +$(( n - prev )) namespaces, +$(( (n - prev) * k )) Services, +$(( n - prev )) Sidecars; cells: grow (namespace), probe ${s_list}"
+				prev="$n"
+				probes=$(( probes + ${#SCOPINGS[@]} ))
+			done
+			if ((${#OUTSIDE_PHASES[@]})); then
+				echo "    outside at N=${prev}: ${OUTSIDE_NAMESPACES} namespaces outside the mesh (+$(( OUTSIDE_NAMESPACES * k )) Services), phases ${OUTSIDE_PHASES[*]}; cells per phase: outside, probe ${s_list}"
+				probes=$(( probes + ${#OUTSIDE_PHASES[@]} * ${#SCOPINGS[@]} ))
+			fi
+			if ((${#M_LIST[@]} > 1)); then
+				echo "    M-sweep at N=${prev}: measurement pods ${M_LIST[*]:1}; cells per M: probe ${s_list}"
+				probes=$(( probes + (${#M_LIST[@]} - 1) * ${#SCOPINGS[@]} ))
+			fi
+			if [[ "$WORKLOAD_MODE" == config-only ]]; then
+				pods="${M_LIST[${#M_LIST[@]}-1]}"
+				((pods > prev)) && pods="$prev"
+				pods="${pods} measurement pod(s)"
+			else
+				pods="$(( prev * k * REPLICA_COUNTS[0] )) pod(s)"
+			fi
+			peak_ns=$(( prev + x + 1 ))
+			echo "    peak on the measured member(s): ${peak_ns} namespaces, $(( peak_ns * k )) Services, up to $(( prev + 1 )) Sidecars, ${pods}; ${probes} probe namespace(s) created and retired"
+			echo "    then: ${SERIES_RETIRE}"
+			# Probe namespaces are deleted during the run (each one empty).
+			deletes=$(( deletes + prev + x ))
+		done
+	done
+	echo "  namespaces left to delete afterwards: ~${deletes}, about $(awk -v n="$deletes" -v s="$NS_DELETE_SEC_PER_NS" 'BEGIN { printf "%.0f", n * s / 60 }') min at ${NS_DELETE_SEC_PER_NS} s each (CONTROLPLANE_NS_DELETE_SEC_PER_NS; calibrate with the rate 005 prints)"
+	echo ""
+}
+
+# run_growth_sweep: every series, in mesh-size then K order.
+run_growth_sweep() {
+	local ms k idx=0
+	for ms in "${MESH_SIZES[@]}"; do
+		for k in "${SPNS[@]}"; do
+			idx=$((idx + 1))
+			if [[ "$GROWTH_MODE" == fresh ]]; then
+				run_growth_fresh "$ms" "$k" "$idx"
+			else
+				run_growth_series "$ms" "$k" "$idx"
+			fi
+		done
+	done
+}
+
 combo_idx=0
+if ((GROWTH)); then
+	print_growth_plan >&2
+	if ! ((DRY_RUN)); then
+		run_growth_sweep
+	fi
+	combo_idx="$CELL_IDX"
+	((DRY_RUN)) && combo_idx="$MATRIX_SIZE"
+else
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	active_csv=$(IFS=,; echo "${active_ctxs[*]}")
@@ -974,6 +1831,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		done
 	done
 done
+fi
 
 if ((DRY_RUN)); then
 	echo "" >&2

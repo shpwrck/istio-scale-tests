@@ -16,8 +16,11 @@ replicasPerService: 3
 #   none      - no Sidecar CRs; proxies see every Service in the mesh.
 #   namespace - one Sidecar (no workloadSelector) in each workload namespace;
 #               egress limited to the own namespace and istio-system.
+#   wide      - one Sidecar `default` in each workload namespace with egress */*:
+#               the unscoped worst case, without touching the root Sidecar. Same name
+#               as the namespace one, so 001 switches between them in place.
 #   explicit  - one Sidecar per Deployment, selected by app=dummy-svc-<i>,
-#               in the Deployment's namespace.
+#               in the Deployment's namespace (legacy layout only).
 sidecarScoping: none
 
 # Extra egress hosts appended to every Sidecar CR (e.g. `monitoring/*`).
@@ -42,3 +45,44 @@ trafficConfig:
   mode: none
   every: 1
   subsets: 2
+
+# Namespace scaling (growth mode; README "Namespace scaling"). Off by default: with
+# servicesPerNamespace 0 everything below is ignored and the render above is unchanged.
+#   servicesPerNamespace K > 0: block layout. Namespace n (0..namespaceCount-1) holds
+#     dummy-svc-0..K-1, so a larger namespaceCount adds namespaces without moving any
+#     Service. serviceCount is ignored. Namespaces are <namespace>-<series>-<n>
+#     (<namespace>-<n> without a series). Not with sidecarScoping explicit or
+#     trafficConfig.mode vsdr.
+#   namespaceStart: render only namespaces n >= namespaceStart (a growth step applies
+#     the new namespaces only).
+#   series: id of one growth series (lowercase letters, digits, '-'). Every object gets
+#     the label controlplane-test.series=<series>.
+servicesPerNamespace: 0
+namespaceStart: 0
+series: ""
+
+# Workload of the block layout:
+#   pods        - one Deployment of replicasPerService pods per Service.
+#   config-only - Services without pods, plus one measurement Deployment (1 pod behind
+#                 dummy-svc-0, label controlplane-test.measurement=true) in each of
+#                 namespaces 0..measurementPods-1. Their istio-proxy memory limit is
+#                 raised to proxyMemoryLimit so a large (wide) scope does not OOM them.
+workload:
+  mode: pods
+  measurementPods: 4
+  proxyMemoryLimit: 2Gi
+
+# Namespaces outside the mesh (block layout only): <namespace>-<series>-out-<i> for
+# i < count, each with servicesPerNamespace Services, no pods and no istio.io/rev label.
+#   none      - not rendered.
+#   unlabeled - no istio-discovery label: invisible to istiod under discoverySelectors.
+#   labeled   - istio-discovery=enabled: discovered, not injected.
+outside:
+  count: 0
+  mode: none
+
+# Probe namespace (block layout only; 001 renders it with --show-only
+# templates/probe.yaml): one namespace with servicesPerNamespace Services and the
+# sidecarScoping Sidecar, no pods. Empty: not rendered.
+probe:
+  name: ""
