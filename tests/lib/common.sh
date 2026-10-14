@@ -2,7 +2,7 @@
 # Shared utility functions sourced by all test suites.
 # Sourced, never executed.
 #
-# Consumers: churn, churn-dataplane, controlplane, dataplane, propagation, tuning
+# Consumers: churn, churn-dataplane, controlplane, dataplane, propagation, tuning, gateway-api
 #
 # Exposes:
 #   die <msg>                         -> exit 1 with stderr message

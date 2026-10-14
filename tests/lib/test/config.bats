@@ -13,7 +13,7 @@ GOOD="${ROOT}/tests/lib/test/fixtures/config/good.env"
 SMOKE="${ROOT}/tests/controlplane/configs/smoke.env"
 CP="${ROOT}/tests/controlplane"
 # Every suite with a key map, and its script directory (same name).
-SUITES=(controlplane dataplane churn churn-dataplane propagation)
+SUITES=(controlplane dataplane churn churn-dataplane propagation gateway-api)
 REPORT_FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
 
 # The keys good.env sets, in file order.
@@ -235,6 +235,7 @@ reject() {
 		"churn|CHURN_DEPLOYMENT_COUNT CHURN_INTENSITIES CHURN_MESH_SIZES CHURN_RESULTS_DIR CHURN_WAIT_TIMEOUT_SEC FANOUT_PF_BASE METRICS_SCRAPE_TIMEOUT|CHURN_TEST_NAMESPACE REACH_REQUESTS COEXEC_QPS DATAPLANE_QPS_LEVELS"
 		"churn-dataplane|COEXEC_QPS COEXEC_MESH_SIZES COEXEC_RESULTS_DIR COEXEC_WAIT_TIMEOUT_SEC COEXEC_ISTIOD_REPLICAS REACH_REQUESTS CHURN_DEPLOYMENT_COUNT CHURN_BASE_REPLICAS CHURN_SCALE_TO_REPLICAS FANOUT_MAX_SKEW_MS METRICS_SCRAPE_TIMEOUT|COEXEC_TEST_NAMESPACE CHURN_TEST_NAMESPACE CHURN_ITERATIONS CHURN_INTENSITIES CHURN_SETTLE_SEC DATAPLANE_QPS_LEVELS"
 		"propagation|PROPAGATION_ITERATIONS PROPAGATION_MESH_SIZES PROPAGATION_RESULTS_DIR PROPAGATION_WAIT_TIMEOUT_SEC PROPAGATION_SNAPSHOT_PF_BASE FANOUT_CTX_STRIDE METRICS_SCRAPE_TIMEOUT|PROPAGATION_TEST_NAMESPACE PROPAGATION_MAX_MATRIX REACH_REQUESTS METRICS_READY_INTERVAL"
+		"gateway-api|GWAPI_WORKLOAD_CONTEXT GWAPI_HUB_CONTEXT GWAPI_INGRESS GWAPI_REQUESTS GWAPI_TIMEOUT_SEC GWAPI_DETAIL_TIMEOUT_SEC GWAPI_WAIT_TIMEOUT_SEC GWAPI_NAMESPACE GWAPI_RESULTS_DIR SETUP_CONTEXTS|REACH_REQUESTS FANOUT_PF_BASE METRICS_SCRAPE_TIMEOUT DATAPLANE_QPS_LEVELS PROPAGATION_TEST_NAMESPACE"
 	)
 	local c allowed yes no
 	for c in "${cases[@]}"; do
@@ -295,7 +296,7 @@ reads_ok() {
 			n=$((n + 1))
 		done
 	done
-	[ "$n" -eq 27 ]
+	[ "$n" -eq 28 ]
 	# The check fires on a script that reads a key outside its list.
 	f="${BATS_TEST_TMPDIR}/005-reads.sh"
 	printf '%s\n' '#!/usr/bin/env bash' 'echo "${COEXEC_QPS:-200}"' > "$f"
@@ -441,8 +442,8 @@ preload_order_ok() {
 			n=$((n + 1))
 		done
 	done
-	# controlplane 5, dataplane 5, churn 5, churn-dataplane 6, propagation 6
-	[ "$n" -eq 27 ]
+	# controlplane 5, dataplane 5, churn 5, churn-dataplane 6, propagation 6, gateway-api 1
+	[ "$n" -eq 28 ]
 	# Tuning has no key map yet: none of its scripts preloads.
 	! grep -l 'config_preload' "${ROOT}"/tests/tuning/0*.sh
 }

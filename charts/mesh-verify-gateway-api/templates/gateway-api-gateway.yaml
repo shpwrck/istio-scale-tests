@@ -1,0 +1,30 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gatewayApi.name }}
+  # A Gateway binds only to gateway Services in its own namespace.
+  namespace: istio-system
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" . | nindent 4 }}
+  # No topology.istio.io/network label: this is not an east-west gateway.
+spec:
+  gatewayClassName: istio
+  # Manual deployment: one address of explicit type Hostname binds the Gateway to the existing
+  # ingress Service, with no new Deployment or LoadBalancer IP. A missing type or an IPAddress
+  # makes it a managed Gateway that istiod would deploy itself.
+  addresses:
+    - type: Hostname
+      value: {{ printf "%s.istio-system.svc.%s" .Values.gatewayApi.ingressService .Values.clusterDomain }}
+  listeners:
+    # Port 80 is the ingress Service port (Envoy listens on 8080); a listener port that matches
+    # no Service port binds nothing.
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostname: "*.gwapi.test"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespace }}

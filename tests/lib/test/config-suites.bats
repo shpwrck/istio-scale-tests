@@ -456,8 +456,8 @@ formats_show() {
 			n=$((n + 1))
 		done
 	done
-	# Five suites ship an example; each has several annotated scripts.
-	[ "$(find tests -path '*/configs/smoke.env' | wc -l)" -eq 5 ]
+	# Six suites ship an example; each has at least one annotated script.
+	[ "$(find tests -path '*/configs/smoke.env' | wc -l)" -eq 6 ]
 	((n >= 15))
 }
 

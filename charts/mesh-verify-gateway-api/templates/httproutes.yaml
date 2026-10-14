@@ -1,0 +1,49 @@
+{{- /* S2-S5 and C1 on every member, C2 on the workload member only. Each route has its own
+     host and backend Service, so a scenario cannot change another's merged Service entry. */ -}}
+{{- $isWorkload := include "mesh-verify-gateway-api.isWorkload" . }}
+{{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
+{{- range $r := $sc.httpRoutes }}
+{{- if or (not $r.workloadOnly) $isWorkload }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $r.name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" $ | nindent 4 }}
+    mesh-verify-gwapi/scenario: {{ $r.id }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $.Values.gatewayApi.name }}
+      namespace: istio-system
+      sectionName: http
+  hostnames:
+    - {{ $r.host }}
+  rules:
+    - backendRefs:
+{{- if eq $r.kind "Service" }}
+        - group: ""
+          kind: Service
+          name: {{ $r.backend }}
+          port: {{ $.Values.service.port }}
+{{- else if eq $r.kind "Hostname" }}
+        # Istio-specific backend kind; no namespace field (istiod rejects one).
+        - group: networking.istio.io
+          kind: Hostname
+          name: {{ printf "%s.%s.svc.%s" $r.backend $.Values.namespace $.Values.clusterDomain }}
+          port: {{ $.Values.service.port }}
+{{- else if eq $r.kind "ServiceImport" }}
+        # No ServiceImport CRD or object is needed: with ENABLE_MCS_HOST=false (default) istiod
+        # treats it as kind Service.
+        - group: multicluster.x-k8s.io
+          kind: ServiceImport
+          name: {{ $r.backend }}
+          port: {{ $.Values.service.port }}
+{{- else }}
+{{- fail (printf "unknown backend kind %q in scenario %s" $r.kind $r.id) }}
+{{- end }}
+{{- end }}
+{{- end }}

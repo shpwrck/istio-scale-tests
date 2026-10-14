@@ -1,0 +1,24 @@
+{{- /* One template for every scenario Service: the S3 stub (other members) and the workload's
+     Services render identically, so ports and port names cannot drift. */ -}}
+{{- $isWorkload := include "mesh-verify-gateway-api.isWorkload" . }}
+{{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
+{{- range $s := $sc.services }}
+{{- if or (not $s.workloadOnly) $isWorkload }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $s.name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" $ | nindent 4 }}
+spec:
+  selector:
+    {{- include "mesh-verify-gateway-api.selectorLabels" $ | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}
+{{- end }}

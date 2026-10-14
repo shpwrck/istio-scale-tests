@@ -1,0 +1,40 @@
+{{- if include "mesh-verify-gateway-api.isWorkload" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gwapi-echo
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" . | nindent 4 }}
+    {{- include "mesh-verify-gateway-api.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mesh-verify-gateway-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mesh-verify-gateway-api.labels" . | nindent 8 }}
+        {{- include "mesh-verify-gateway-api.selectorLabels" . | nindent 8 }}
+        # The cross-network hop needs an mTLS-capable endpoint: istiod hands the other
+        # members this pod through the east-west gateway only when it has a sidecar.
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: http-echo
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          args:
+            - -listen=:{{ .Values.service.port }}
+            # The body names the member that answered.
+            - -text={{ .Values.clusterName }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}

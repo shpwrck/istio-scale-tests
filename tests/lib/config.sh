@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run-config files (`--config FILE`) for the suite scripts. Sourced, never executed.
 #
-# Consumers: every numbered script of controlplane, dataplane, churn, churn-dataplane and
-# propagation. Tuning (which chains the others) has no key map yet.
+# Consumers: every numbered script of controlplane, dataplane, churn, churn-dataplane,
+# propagation and gateway-api. Tuning (which chains the others) has no key map yet.
 #
 # A run config is a file of KEY=value lines. Its keys are the suite's knobs from
 # config/options.env (the `export NAME=` lines that match the suite's key list) plus
@@ -79,7 +79,8 @@ config_suite_prefixes() {
 	churn) own="CHURN_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
 	churn-dataplane) own="COEXEC_ REACH_ FANOUT_ METRICS_SCRAPE_TIMEOUT CHURN_DEPLOYMENT_COUNT CHURN_BASE_REPLICAS CHURN_SCALE_TO_REPLICAS" ;;
 	propagation) own="PROPAGATION_ FANOUT_ METRICS_SCRAPE_TIMEOUT" ;;
-	*) die "--config: the '$1' suite has no config key map yet (supported: controlplane, dataplane, churn, churn-dataplane, propagation)" ;;
+	gateway-api) own="GWAPI_" ;;
+	*) die "--config: the '$1' suite has no config key map yet (supported: controlplane, dataplane, churn, churn-dataplane, propagation, gateway-api)" ;;
 	esac
 	echo "${own} ${CONFIG_SHARED_PREFIXES}"
 }

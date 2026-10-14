@@ -1,0 +1,12 @@
+{{- include "mesh-verify-gateway-api.validate" . }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    istio.io/rev: default
+    # The campaign baseline's discoverySelectors (spoke-ossm tuningBaseline.discoverySelectors)
+    # need this label on every member: on a member without the workload so its istiod reads
+    # the HTTPRoutes here, and on the workload member so the OTHER members' istiods discover
+    # its Services (an istiod applies its own discoverySelectors to remote clusters too).
+    istio-discovery: enabled

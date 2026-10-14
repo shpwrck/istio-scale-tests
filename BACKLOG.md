@@ -15,6 +15,7 @@ The original issue texts are in the appendix.
 | 5 | Local baseline saturates one server replica (was #88) | Done, lab-validated | — |
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done, lab-validated (shape) | numbers at scale (ROSA) |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
+| 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service in every member? | Built (chart + read-only check), offline-verified; answer predicted from Istio 1.30.5 source | lab run (lab powered off) |
 
 ## 1. Namespace scaling factor
 
@@ -172,6 +173,22 @@ sha256, and each sweep keeps a copy of the config. Worked examples: `tests/<suit
 
 **Left:** the tuning suite (it chains the other suites), and centralizing the per-script flag
 parsers.
+
+## 8. Gateway API multicluster ingress check — built, lab run pending
+
+**Question:** with Gateway API (HTTPRoute), must every member carry the backend Service even
+without a local workload, so a request entering any member's ingress reaches the workload?
+
+**Done:** `charts/mesh-verify-gateway-api` (deployed with
+`charts/mesh-verify-gateway-api-appset.yaml`; routes on every member, echo workload on one) and `tests/gateway-api/001-run-ingress-check.sh`,
+which records status, traffic, endpoints and Argo CD health per member and leads its report with
+the answer. Predicted from the Istio 1.30.5 source: no Service needed for traffic, but the route's
+status says `BackendNotFound` where the Service is missing
+([`tests/gateway-api/README.md`](tests/gateway-api/README.md)).
+
+**Left:** the lab run (powered off since 2026-10-13); until then the answer and the production
+recommendation are predictions. It needs two members and no extra LoadBalancer IP, so it can also
+ride along the ROSA window.
 
 ## Follow-ups found during the 2026-10-13 work
 
