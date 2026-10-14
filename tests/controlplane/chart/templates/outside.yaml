@@ -1,0 +1,43 @@
+{{- include "controlplane-test.validateGrowth" . -}}
+{{- /* Namespaces outside the mesh (growth mode): no istio.io/rev label and no pods, each
+       with servicesPerNamespace Services. With outside.mode labeled they carry
+       istio-discovery=enabled, so istiod discovers their Services (discoverySelectors);
+       unlabeled ones stay invisible to it. Instance + series labels let 005 delete them. */ -}}
+{{- $o := .Values.outside | default dict -}}
+{{- if and (include "controlplane-test.growth" .) (gt (int $o.count) 0) (ne ($o.mode | default "none") "none") }}
+{{- $k := int .Values.servicesPerNamespace }}
+{{- $base := include "controlplane-test.nsBase" . }}
+{{- range $i := until (int $o.count) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $base }}-out-{{ $i }}
+  labels:
+    {{- if eq $o.mode "labeled" }}
+    istio-discovery: enabled
+    {{- end }}
+    controlplane-test.outside: "true"
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+{{- range $s := until $k }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-{{ $s }}
+  namespace: {{ $base }}-out-{{ $i }}
+  labels:
+    app: dummy-svc-{{ $s }}
+    controlplane-test.outside: "true"
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app: dummy-svc-{{ $s }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      protocol: TCP
+      targetPort: {{ $.Values.service.port }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,289 @@
+---
+# Source: controlplane-test/templates/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: controlplane-test-0
+  labels:
+    istio.io/rev: default
+    # Required so istiod discovers every controlplane-test namespace under the
+    # campaign baseline's discoverySelectors (spoke-ossm
+    # tuningBaseline.discoverySelectors). Applied to ALL namespaces in the range
+    # (namespaceCount > 1) so none is left invisible to the control plane.
+    istio-discovery: enabled
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+---
+# Source: controlplane-test/templates/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: controlplane-test-1
+  labels:
+    istio.io/rev: default
+    # Required so istiod discovers every controlplane-test namespace under the
+    # campaign baseline's discoverySelectors (spoke-ossm
+    # tuningBaseline.discoverySelectors). Applied to ALL namespaces in the range
+    # (namespaceCount > 1) so none is left invisible to the control plane.
+    istio-discovery: enabled
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+
+---
+# Source: controlplane-test/templates/dummy-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-0
+  namespace: controlplane-test-0
+  labels:
+    app: dummy-svc-0
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  selector:
+    app: dummy-svc-0
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+---
+# Source: controlplane-test/templates/dummy-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-1
+  namespace: controlplane-test-1
+  labels:
+    app: dummy-svc-1
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  selector:
+    app: dummy-svc-1
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+---
+# Source: controlplane-test/templates/dummy-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-2
+  namespace: controlplane-test-0
+  labels:
+    app: dummy-svc-2
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  selector:
+    app: dummy-svc-2
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+---
+# Source: controlplane-test/templates/dummy-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-svc-3
+  namespace: controlplane-test-1
+  labels:
+    app: dummy-svc-3
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  selector:
+    app: dummy-svc-3
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+
+---
+# Source: controlplane-test/templates/dummy-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-0
+  namespace: controlplane-test-0
+  labels:
+    app: dummy-svc-0
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dummy-svc-0
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-0
+        app.kubernetes.io/name: controlplane-test
+        app.kubernetes.io/instance: controlplane-test
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: busybox:1.37.0
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+---
+# Source: controlplane-test/templates/dummy-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-1
+  namespace: controlplane-test-1
+  labels:
+    app: dummy-svc-1
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dummy-svc-1
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-1
+        app.kubernetes.io/name: controlplane-test
+        app.kubernetes.io/instance: controlplane-test
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: busybox:1.37.0
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+---
+# Source: controlplane-test/templates/dummy-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-2
+  namespace: controlplane-test-0
+  labels:
+    app: dummy-svc-2
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dummy-svc-2
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-2
+        app.kubernetes.io/name: controlplane-test
+        app.kubernetes.io/instance: controlplane-test
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: busybox:1.37.0
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+---
+# Source: controlplane-test/templates/dummy-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-3
+  namespace: controlplane-test-1
+  labels:
+    app: dummy-svc-3
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dummy-svc-3
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-3
+        app.kubernetes.io/name: controlplane-test
+        app.kubernetes.io/instance: controlplane-test
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: sleep
+          image: busybox:1.37.0
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+
+---
+# Source: controlplane-test/templates/sidecar.yaml
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: controlplane-test-0
+  labels:
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+    controlplane-test.scope: namespace
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"
+---
+# Source: controlplane-test/templates/sidecar.yaml
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: controlplane-test-1
+  labels:
+    app.kubernetes.io/name: controlplane-test
+    app.kubernetes.io/instance: controlplane-test
+    controlplane-test.scope: namespace
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"

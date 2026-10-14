@@ -26,6 +26,18 @@
 #         NETWORK_TOPOLOGY                      (single-network / multi-primary,multi-network:N)
 #       NODE_ALLOC_* are deliberately NOT here — the O9 capacity block in 002/003
 #       (NODE_ALLOC_CPU_M/NODE_ALLOC_MEM_MI) already emits them; single-source per key (F4).
+#   growth_preamble_lines <kv...>                  -> emit the controlplane namespace-scaling
+#       `# KEY=value` block (SERVICES_PER_NAMESPACE, GROWTH_MODE, WORKLOAD_MODE, ...).
+#       ONE shared emitter for 003's pre-create and 002's standalone preamble (PL36);
+#       an omitted key reads `unknown`.
+#   ns_lifecycle_init <file> <run_id>             -> create the namespace-lifecycle TSV
+#       (preamble + header) if it does not exist yet; 001, 003 and 005 all call it (PL36)
+#   ns_lifecycle_row <file> <ctx> <series> <n> <action> <namespaces> <objects> <seconds>
+#                    <api_429_retried> <api_429_exhausted> <client_throttle_waits> <status>
+#                                                  -> append one row, with objects/s and
+#       namespaces/s derived from <seconds> (N/A when <seconds> is not > 0)
+#   ns_lifecycle_api_counts <stderr_file>         -> "<retried> <exhausted> <throttle_waits>"
+#       from the stderr of a `kubectl -v=4` call (see the function)
 #
 # Requires: tests/lib/common.sh (for die(), split_csv())
 # All callers are expected to have run `set -euo pipefail`.
@@ -224,4 +236,97 @@ write_preamble() {
 			echo "# ${kv}"
 		done
 	} > "$tsv"
+}
+
+# Emit the controlplane namespace-scaling `# KEY=value` preamble block (PL36: one
+# shared emitter for 003's pre-create and 002's standalone preamble, so a key added
+# here reaches both). Same contract as infra_preamble_lines: the caller passes the
+# values it has as `KEY=value` tokens; every key is always emitted, `unknown` when the
+# caller omitted it. All keys are sweep-level scalars (PL26).
+# Usage: growth_preamble_lines SERVICES_PER_NAMESPACE=2 WORKLOAD_MODE=config-only ...
+# shellcheck disable=SC2329
+growth_preamble_lines() {
+	local -a keys=(
+		SERVICES_PER_NAMESPACE GROWTH_MODE WORKLOAD_MODE
+		MEASUREMENT_PODS MEASUREMENT_PROXY_MEM_LIMIT
+		OUTSIDE_NAMESPACES OUTSIDE_MODES
+		PROBE_SETTLE_SEC MEM_STOP_PCT MEM_GUARD_CONTEXTS SERIES_RETIRE
+		DISCOVERY_LABEL
+	)
+	declare -A vals=()
+	local k kv
+	for k in "${keys[@]}"; do vals[$k]="unknown"; done
+	for kv in "$@"; do
+		k="${kv%%=*}"
+		[[ -n "${vals[$k]+set}" ]] && vals[$k]="${kv#*=}"
+	done
+	for k in "${keys[@]}"; do
+		printf '# %s=%s\n' "$k" "${vals[$k]}"
+	done
+}
+
+# Namespace-lifecycle TSV (controlplane growth mode): one row per apply, readiness
+# wait, scoping switch, probe teardown or delete, with its duration and the API
+# throttling it hit, so the namespace create/delete rate is measured, not assumed.
+NS_LIFECYCLE_HEADER=$'timestamp\tcontext\tseries\tnamespace_count\taction\tnamespaces\tobjects\tseconds\tobjects_per_s\tnamespaces_per_s\tapi_429_retried\tapi_429_exhausted\tclient_throttle_waits\tstatus'
+
+# ns_lifecycle_init <file> <run_id>: write the PL2 preamble and the header once. A
+# no-op when the file exists (the first writer wins; every writer uses this function).
+# shellcheck disable=SC2329
+ns_lifecycle_init() {
+	local file="$1" run_id="${2:-unknown}"
+	[[ -n "$file" ]] || return 0
+	[[ -f "$file" ]] && return 0
+	mkdir -p "$(dirname "$file")"
+	{
+		echo "# Namespace lifecycle (controlplane growth mode) — $(date -u -Iseconds)"
+		echo "# NS_LIFECYCLE_SCHEMA=2"
+		echo "# RUN_ID=${run_id}"
+		echo "# HARNESS_SHA=$(harness_sha)"
+		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
+		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"
+		echo "# NS_DELETE_TIMEOUT_SEC=${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-unknown}"
+		echo "# NOTE=001 runs its applies and Sidecar deletes at kubectl -v=4. api_429_retried counts client-go's 'Got a Retry-After response' lines (a 429 with Retry-After that client-go retried; at the default verbosity it prints nothing); api_429_exhausted counts TooManyRequests errors that reached kubectl after its retries; client_throttle_waits counts client-side rate-limiter waits over 50 ms (kubectl 1.34 showed none on server-side apply). N/A = not measured (readiness waits and 005's deletes)."
+		printf '%s\n' "$NS_LIFECYCLE_HEADER"
+	} > "$file"
+}
+
+# ns_lifecycle_row: append one lifecycle row (see the header above). A no-op without
+# a file, so a step run standalone records nothing.
+# shellcheck disable=SC2329
+ns_lifecycle_row() {
+	local file="$1"
+	[[ -n "$file" && -f "$file" ]] || return 0
+	local ctx="$2" series="${3:-none}" n="$4" action="$5" nss="$6" objs="$7" secs="$8" r429="$9" e429="${10}" thr="${11}" status="${12}"
+	local rates
+	rates="$(awk -v o="$objs" -v n="$nss" -v s="$secs" '
+		function isnum(x) { return x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+		BEGIN {
+			if (!isnum(s) || s + 0 <= 0) { print "N/A\tN/A"; exit }
+			printf "%s\t%s\n", (isnum(o) ? sprintf("%.2f", o / s) : "N/A"), (isnum(n) ? sprintf("%.3f", n / s) : "N/A")
+		}')"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u -Iseconds)" "$ctx" "${series:-none}" "$n" "$action" \
+		"$nss" "$objs" "$secs" "$rates" "$r429" "$e429" "$thr" "$status" >> "$file"
+}
+
+# ns_lifecycle_api_counts <stderr_file>: "<retried> <exhausted> <throttle_waits>" from the
+# stderr of a `kubectl -v=4` call. client-go retries a 429 that carries Retry-After (API
+# Priority and Fairness sends one) without printing anything at the default verbosity;
+# at -v=4 each retry logs `"Got a Retry-After response"`. A 429 left after its retries
+# reaches kubectl as `Error from server (TooManyRequests)` (or an `error:` line naming it).
+# Client-side rate-limiter waits log "client-side throttling" (-v=3+). Only those forms
+# count: request URLs, namespace and series names, klog timestamps and PIDs, which can
+# all contain "429", never do, and neither do dumped response bodies (indented lines).
+# 0 0 0 when the file is missing.
+# shellcheck disable=SC2329
+ns_lifecycle_api_counts() {
+	[[ -f "$1" ]] || { echo "0 0 0"; return 0; }
+	awk '
+		/Got a Retry-After/ { r++; next }
+		/client-side throttling/ { t++; next }
+		/^[IWEF][0-9][0-9][0-9][0-9] / || /^[[:space:]]/ { next }
+		/^Error from server \(TooManyRequests\)/ { e++; next }
+		/^error:/ && /TooManyRequests|[Tt]oo [Mm]any [Rr]equests/ { e++ }
+		END { printf "%d %d %d\n", r, e, t }' "$1"
 }

@@ -1,4 +1,64 @@
 {{- include "controlplane-test.validateTrafficConfig" . -}}
+{{- include "controlplane-test.validateGrowth" . -}}
+{{- if include "controlplane-test.growth" . }}
+{{- /* Block layout. pods: one Deployment per Service. config-only: measurement pods
+       only, one Deployment (1 pod, behind dummy-svc-0) in each namespace n < M. */ -}}
+{{- $k := int .Values.servicesPerNamespace }}
+{{- $start := int .Values.namespaceStart }}
+{{- $n := int .Values.namespaceCount }}
+{{- $configOnly := eq .Values.workload.mode "config-only" }}
+{{- $end := $n }}
+{{- if $configOnly }}{{- $end = min $n (int .Values.workload.measurementPods) | int }}{{- end }}
+{{- range $idx := untilStep $start $end 1 }}
+{{- $ns := include "controlplane-test.namespaceName" (dict "ctx" $ "i" $idx) }}
+{{- range $i := until (ternary 1 $k $configOnly) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-svc-{{ $i }}
+  namespace: {{ $ns }}
+  labels:
+    app: dummy-svc-{{ $i }}
+    {{- include "controlplane-test.labels" $ | nindent 4 }}
+    {{- if $configOnly }}
+    controlplane-test.measurement: "true"
+    {{- end }}
+spec:
+  replicas: {{ ternary 1 $.Values.replicasPerService $configOnly }}
+  selector:
+    matchLabels:
+      app: dummy-svc-{{ $i }}
+  template:
+    metadata:
+      labels:
+        app: dummy-svc-{{ $i }}
+        {{- include "controlplane-test.labels" $ | nindent 8 }}
+        sidecar.istio.io/inject: "true"
+        {{- if $configOnly }}
+        controlplane-test.measurement: "true"
+      annotations:
+        # The measurement proxy holds whatever its scope admits (all of the mesh
+        # under wide), so its memory limit is raised above the mesh default.
+        sidecar.istio.io/proxyMemoryLimit: {{ $.Values.workload.proxyMemoryLimit | quote }}
+        {{- end }}
+    spec:
+      containers:
+        - name: sleep
+          image: {{ $.Values.image.repository }}:{{ $.Values.image.tag }}
+          command: ["sleep", "infinity"]
+          ports:
+            - containerPort: {{ $.Values.service.port }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+{{- end }}
+{{- end }}
+{{- else }}
 {{- range $i := until (.Values.serviceCount | int) }}
 {{- if include "controlplane-test.vsdrFor" (dict "ctx" $ "idx" $i) }}
 {{- /* VS+DR service: its replicas are split over one Deployment per DR subset
@@ -80,5 +140,6 @@ spec:
               drop:
                 - ALL
             runAsNonRoot: true
+{{- end }}
 {{- end }}
 {{- end }}
