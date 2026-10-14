@@ -17,10 +17,13 @@ unrelated workloads, so only this repo's namespaces and the objects below are ow
 
 ### State and access
 
-- **Powered off since 2026-10-13** (graceful node shutdown of all three clusters, after the
-  backlog validation). The mesh, platform and Terraform state are unchanged; nothing was
-  torn down. Before the halt the lab was clean: no test namespaces, no sync windows, istiod
-  at 1 replica, all 30 Applications Synced/Healthy. Power-on steps are in "Verify and recover".
+- **Powered on again 2026-10-14** after a graceful shutdown on 2026-10-13 (power-on steps are in
+  "Verify and recover"). The mesh, platform and Terraform state were unchanged. After the
+  Gateway API check (backlog task 8) and its cleanup the lab is clean:
+  - no test namespaces and no sync windows;
+  - istiod at 1 replica;
+  - all 30 Applications Synced/Healthy and every cluster operator settled;
+  - both mesh-wiring gates `Ready ... ca=shared`.
 - Cluster access: the operator's kubeconfig (default `~/.kube/config`) holds one
   context per cluster, authenticated with each cluster's kube-admin client
   certificate. The API certificates are publicly trusted, so no CA data is needed. Credentials stay in that kubeconfig.
@@ -88,6 +91,12 @@ returns 0 when there is no drift.
   `oc get clusteroperators` settled, and restart the workstation's resolver if the API names don't
   resolve. Then run the checks below. `cacerts` is stored in each member's etcd, so istiod starts
   on the shared root without waiting for the hub.
+  - 2026-10-14 power-on: nodes were Ready within about 3 minutes after approving 6 node CSRs. One
+    of them was OVN-Kubernetes' per-node client certificate (`system:ovn-node:<node>`, signer
+    `kubernetes.io/kube-apiserver-client`). A member whose node goes Ready late keeps its pods in
+    ContainerCreating until OVN is up (about 8 more minutes here).
+  - The hub's External Secrets Application can read Degraded (`CatalogSourcesUnhealthy`) until the
+    catalog pods start; it recovers on its own.
 - `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy (30 apps).
 - `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.

@@ -15,11 +15,11 @@ member, the echo workload on one. [`001-run-ingress-check.sh`](001-run-ingress-c
 what each member resolved, sends traffic through every member's ingress, and writes a report
 that leads with both answers.
 
-**Status:** built and verified offline (bats with stub clusters). The lab run that confirms or
-refutes the predictions below is pending; the lab is powered off (`BACKLOG.md`, "Validation
-environment").
+**Status:** confirmed in the lab on 2026-10-14: 22 of 22 rows matched the predictions below,
+and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded
+([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)).
 
-## Predicted answer (Istio 1.30.5 / OSSM 3.4.3; not yet confirmed in the lab)
+## Answer (Istio 1.30.5 / OSSM 3.4.3; predicted from the source, confirmed in the lab 2026-10-14)
 
 **For traffic, no. For the HTTPRoute status, yes.** An HTTPRoute attached to a Gateway routes to a
 Service that exists only in another member; the only side effect is that the route's status on
@@ -53,7 +53,7 @@ the ingress member says the backend is missing. Citations are to the Istio 1.30.
 - **Where "deploy the Service everywhere" comes from:** DNS for in-mesh clients. The ingress routes
   by Host header to an EDS cluster and never needs a local ClusterIP.
 
-## Does the namespace have to exist locally? (predicted; S7–S9)
+## Does the namespace have to exist locally? (S7–S9; confirmed in the lab)
 
 S1–S5 keep every backend in `mesh-verify-gwapi`, which exists on every member, so they cannot
 tell whether the ingress member needs the backend's **namespace**. S7–S9 put their backends in
@@ -92,7 +92,7 @@ tell whether the ingress member needs the backend's **namespace**. S7–S9 put t
   grant exist on the ingress member, so S7b is what makes S7's "yes" mean "the namespace, for the
   ReferenceGrant", not "the Service".
 
-**Consequence for production (prediction):** with `kind: Service` backendRefs, every ingress
+**Consequence for production (confirmed in the lab):** with `kind: Service` backendRefs, every ingress
 member needs the backend's namespace (holding the HTTPRoute or a ReferenceGrant), though not the
 Service (S7 vs S7b). Without a local namespace, the options are a `Hostname` backendRef (status
 says `BackendNotFound` everywhere) or a classic VirtualService (no status at all).
@@ -497,8 +497,9 @@ unchanged.
 5. OSSM 3.4.3 matches upstream 1.30.5: no istiod overrides (preamble `ISTIOD_ENV`), GatewayClass
    `istio` Accepted, the Gateway Programmed. If S2 returns 500 instead of 200, a downstream patch
    to the local check is the first suspect.
-6. Argo CD: is the S2/S5 Application on a member without the workload Degraded? (Inferred from
-   Argo's upstream HTTPRoute health check, not verified for OpenShift GitOps.)
+6. Argo CD: is the S2/S5 Application on a member without the workload Degraded? Confirmed
+   2026-10-14 on OpenShift GitOps: every HTTPRoute with `ResolvedRefs=False` is Degraded (S2, S5,
+   S7, S7b, S8, C1 on the other member; S8 and C1 on the workload member too).
 7. No regression: mesh-verify still answers from every member, and its `http.8080` virtual host is
    unchanged.
 8. The namespace scenarios through A's ingress: S7 answers 500 with `RefNotPermitted`, its route
@@ -528,19 +529,20 @@ member, namespace `mesh-verify-gwapi-remote`. By hand, on each member: delete na
 `gateway` alone is ambiguous with Istio's), and on the workload member also namespace
 `mesh-verify-gwapi-remote`. Leave GatewayClass `istio` alone; istiod owns it.
 
-## Production recommendation (the prediction; confirm with the lab run first)
+## Production recommendation (confirmed in the lab 2026-10-14)
 
 1. **Apply the same Service manifest in every member and the Deployment only where the workload
    runs**, rendered from one chart so ports and port names cannot drift, plus the Gateway and
-   HTTPRoute in every member. Status reads `ResolvedRefs=True` everywhere, Argo CD stays Healthy,
+   HTTPRoute in every member. Status reads `ResolvedRefs=True` everywhere, Argo CD stays Healthy (S3),
    it conforms to the Gateway API spec, and it keeps working whichever way upstream resolves
    #60971. In-mesh DNS and GAMMA routes work too. Cost: one Service and one ClusterIP per service
    per member; at thousands of namespaces × 1–5 services, size the service CIDR for it.
 2. A `networking.istio.io/Hostname` backendRef is acceptable when a Service cannot exist in the
    ingress member. Its status is right only when the HTTPRoute lives in the Service's namespace
-   (istio/istio#62027); it is Istio-specific and does nothing for DNS or GAMMA.
+   (S4; istio/istio#62027); from another namespace it reads `BackendNotFound` and Argo CD shows
+   Degraded on every member (S8). It is Istio-specific and does nothing for DNS or GAMMA.
 3. Do not rely on a bare reference to a Service that exists only remotely: it routes on 1.30.5, but
-   the status says the backend is broken, Argo CD probably shows Degraded, and it contradicts the
+   the status says the backend is broken, Argo CD shows Degraded (S2, S5), and it contradicts the
    spec's 500 rule for invalid backends, so an upgrade can change it.
 4. Do not use ServiceImport/MCS for this: with default flags it behaves like `kind: Service`, and
    enabling MCS discovery makes endpoints cluster-local unless they are exported.
@@ -548,7 +550,7 @@ member, namespace `mesh-verify-gwapi-remote`. By hand, on each member: delete na
    status.
 6. Namespaces: with `kind: Service`, the backend's namespace must exist on every ingress member
    (it holds the HTTPRoute, or the ReferenceGrant for a route elsewhere), even where the Service
-   does not (S7 vs S7b; the grant-only branch rests on S7b until the lab run confirms it).
+   does not (S7 vs S7b, both confirmed in the lab).
    Recommendation 1 already gives you that. Without a local namespace, only a `Hostname`
    backendRef (status `BackendNotFound` everywhere, #62027) or a classic VirtualService routes.
 

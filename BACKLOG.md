@@ -15,7 +15,7 @@ The original issue texts are in the appendix.
 | 5 | Local baseline saturates one server replica (was #88) | Done, lab-validated | — |
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done, lab-validated (shape) | numbers at scale (ROSA) |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
-| 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Built (chart + read-only check), offline-verified; answers predicted from Istio 1.30.5 source | lab run (lab powered off) |
+| 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Done, lab-validated 2026-10-14 (22/22 predictions matched) | — |
 
 ## 1. Namespace scaling factor
 
@@ -174,7 +174,7 @@ sha256, and each sweep keeps a copy of the config. Worked examples: `tests/<suit
 **Left:** the tuning suite (it chains the other suites), and centralizing the per-script flag
 parsers.
 
-## 8. Gateway API multicluster ingress check — built, lab run pending
+## 8. Gateway API multicluster ingress check — done, lab-validated
 
 **Question:** with Gateway API (HTTPRoute), must every member carry the backend Service even
 without a local workload, so a request entering any member's ingress reaches the workload? And
@@ -189,9 +189,13 @@ namespace is needed (it holds the route or the ReferenceGrant, which istiod read
 but not the Service (S7 vs S7b), with a `Hostname` backendRef or a classic VirtualService it is not
 ([`tests/gateway-api/README.md`](tests/gateway-api/README.md)).
 
-**Left:** the lab run (powered off since 2026-10-13); until then the answer and the production
-recommendation are predictions. It needs two members and no extra LoadBalancer IP, so it can also
-ride along the ROSA window.
+**Validated:** on the lab, 2026-10-14: 22 of 22 rows matched
+([`docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`](docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)).
+Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded, so a remote-only backend
+routes but keeps its Application Degraded; a Service on every member avoids that.
+
+**Left:** nothing for the lab. Optional: run it on ROSA (it needs two members and no extra
+LoadBalancer IP).
 
 ## Follow-ups found during the 2026-10-13 work
 
