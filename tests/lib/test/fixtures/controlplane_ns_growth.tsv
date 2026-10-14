@@ -1,0 +1,75 @@
+# Control-plane resource metrics — bats fixture: namespace scaling (growth mode)
+# CONTROLPLANE_SCHEMA=63
+# CONTROLPLANE_INFRA_SCHEMA=2
+# ISTIO_VERSION=1.30.5
+# HARNESS_SHA=fixture
+# KUBE_VERSIONS=mesh-a=v1.34.8
+# SETTLE_SEC=60
+# RUN_ID=fixture-ns
+# PHASE=sweep
+# SIDECAR_SCOPING=none,namespace,wide
+# CONFIG_DUMP_SAMPLES=4
+# NODE_ALLOC_CPU_M=19500
+# NODE_ALLOC_MEM_MI=95000
+# ISTIOD_CPU_LIMIT_M=2000
+# ISTIOD_MEM_LIMIT_MI=3072
+# SCALE_TARGET_FRACTION=0.7
+# SCALE_SIZING_MODE=fixed
+# PROXY_CHECK_TOLERANCE_PCT=10
+# PROXY_CHECK_MIN_DIFF=2
+# TRAFFIC_CONFIG=none
+# VSDR_EVERY=1
+# VSDR_SUBSETS=2
+# RUN_CONFIG=none
+# RUN_CONFIG_SHA256=none
+# SERVICES_PER_NAMESPACE=2
+# GROWTH_MODE=in-place
+# WORKLOAD_MODE=config-only
+# MEASUREMENT_PODS=4,16
+# MEASUREMENT_PROXY_MEM_LIMIT=2Gi
+# OUTSIDE_NAMESPACES=50
+# OUTSIDE_MODES=unlabeled,labeled
+# PROBE_SETTLE_SEC=45
+# MEM_STOP_PCT=70
+# MEM_GUARD_CONTEXTS=mesh-a,mesh-b
+# SERIES_RETIRE=undiscover
+# DISCOVERY_LABEL=istio-discovery=enabled
+# TUNING_BASELINE=unknown
+# SIDECAR_EGRESS_HOSTS=unknown
+# METRICS_API=available
+# ISTIOD_REQ_CPU_M=1000
+# ISTIOD_REQ_MEM_MI=3072
+# ISTIOD_LIM_CPU_M=2000
+# ISTIOD_LIM_MEM_MI=3072
+# ISTIOD_REPLICAS=1
+# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=1,mesh-b=1
+# NETWORK_TOPOLOGY=multi-primary,multi-network:2
+# Contexts: mesh-a  Mesh sizes: 1  Growth: K=2 config-only N=100,200,400,800
+timestamp	context	mesh_size	service_count	replicas	namespace_count	sidecar_scoping	istiod_mem_mi	convergence_p50_ms	convergence_p99_ms	queue_p50_ms	queue_p99_ms	xds_pushes_delta	xds_pushes_rate	xds_pushes_cds	xds_pushes_eds	xds_pushes_lds	xds_pushes_rds	xds_pushes_nds	k8s_events_delta	k8s_events_rate	connected_proxies	config_size_avg_bytes	sidecar_config_bytes_avg	sidecar_config_bytes_p50	sidecar_config_bytes_max	sidecar_config_bytes_samples	scrape_window_sec	scrape_skew_ms	settle_sec	istiod_restarted	istiod_cpu_m_delta	go_heap_alloc_mi	go_heap_inuse_mi	istiod_cpu_pct_of_limit	istiod_mem_pct_of_limit	node_cpu_pct	node_mem_pct	pods_scheduled	pods_allocatable	cluster_connected_proxies	sidecar_pods	proxy_check	traffic_config	vsdr_services	istiod_virt_services	push_time_avg_ms	pushcontext_init_avg_ms	sidecar_clusters_avg	sidecar_cds_bytes_avg	sidecar_rds_bytes_avg	services_per_namespace	workload_mode	measurement_pods	outside_namespaces	outside_discovery	window_kind	istiod_services	istiod_cpu_s_delta	sidecar_mem_mi_avg	gateway_clusters_max	gateway_mem_mi_max	root_cert_configmaps
+2026-10-13T12:01:00+00:00	mesh-a	1	200	1	100	namespace	300	50	90	5	9	400	1.00	10	50	10	10	10	40	1.00	6	2048	50000	50000	50000	4/4	60.0	50	60	0	200	150	150	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	grow	210	2.00	5	250	60	120
+2026-10-13T12:02:00+00:00	mesh-a	1	200	1	100	none	300	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	61440	61440	61440	4/4	60.0	50	60	0	200	150	150	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	212	0.50	6	252	60	121
+2026-10-13T12:03:00+00:00	mesh-a	1	200	1	100	namespace	300	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	150	150	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	212	0.50	5	252	60	121
+2026-10-13T12:04:00+00:00	mesh-a	1	200	1	100	wide	190	50	90	5	9	120	1.00	10	15	10	10	10	40	1.00	6	2048	102400	102400	102400	4/4	60.0	50	60	0	200	40	40	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	212	0.10	10	252	60	121
+2026-10-13T12:05:00+00:00	mesh-a	1	400	1	200	namespace	350	50	90	5	9	400	1.00	10	50	10	10	10	40	1.00	6	2048	50000	50000	50000	4/4	60.0	50	60	0	200	200	200	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	grow	410	2.00	5	450	70	220
+2026-10-13T12:06:00+00:00	mesh-a	1	400	1	200	none	350	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	61440	61440	61440	4/4	60.0	50	60	0	200	200	200	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	412	0.50	6	452	70	221
+2026-10-13T12:07:00+00:00	mesh-a	1	400	1	200	namespace	350	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	200	200	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	412	0.50	5	452	70	221
+2026-10-13T12:08:00+00:00	mesh-a	1	400	1	200	wide	310	50	90	5	9	120	1.00	10	15	10	10	10	40	1.00	6	2048	204800	204800	204800	4/4	60.0	50	60	0	200	160	160	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	412	0.20	20	452	70	221
+2026-10-13T12:09:00+00:00	mesh-a	1	800	1	400	namespace	450	50	90	5	9	400	1.00	10	50	10	10	10	40	1.00	6	2048	50000	50000	50000	4/4	60.0	50	60	0	200	300	300	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	grow	810	4.00	5	850	90	420
+2026-10-13T12:10:00+00:00	mesh-a	1	800	1	400	none	450	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	61440	61440	61440	4/4	60.0	50	60	0	200	300	300	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	812	0.50	6	852	90	421
+2026-10-13T12:11:00+00:00	mesh-a	1	800	1	400	namespace	450	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	300	300	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	812	0.50	5	852	90	421
+2026-10-13T12:12:00+00:00	mesh-a	1	800	1	400	namespace	9999	50	90	5	9	9999	1.00	10	4999	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	1	200	9999	9999	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	9999	99.00	5	852	90	421
+2026-10-13T12:13:00+00:00	mesh-a	1	800	1	400	wide	790	50	90	5	9	120	1.00	10	15	10	10	10	40	1.00	6	2048	409600	409600	409600	4/4	60.0	50	60	0	200	640	640	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	probe	812	0.40	40	852	90	421
+2026-10-13T12:14:00+00:00	SKIPPED_MEM_GUARD	1	1600	1	800	namespace	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	60	unknown	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	none	0	N/A	N/A	N/A	N/A	N/A	N/A	2	config-only	4	0	none	grow	N/A	N/A	N/A	N/A	N/A	N/A
+2026-10-13T12:15:00+00:00	SKIPPED_MEM_GUARD	1	1600	1	800	none	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	60	unknown	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	none	0	N/A	N/A	N/A	N/A	N/A	N/A	2	config-only	4	0	none	probe	N/A	N/A	N/A	N/A	N/A	N/A
+2026-10-13T12:16:00+00:00	SKIPPED_MEM_GUARD	1	1600	1	800	namespace	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	60	unknown	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	none	0	N/A	N/A	N/A	N/A	N/A	N/A	2	config-only	4	0	none	probe	N/A	N/A	N/A	N/A	N/A	N/A
+2026-10-13T12:17:00+00:00	SKIPPED_MEM_GUARD	1	1600	1	800	wide	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	60	unknown	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	none	0	N/A	N/A	N/A	N/A	N/A	N/A	2	config-only	4	0	none	probe	N/A	N/A	N/A	N/A	N/A	N/A
+2026-10-13T12:18:00+00:00	mesh-a	1	800	1	400	namespace	450	50	90	5	9	20	1.00	10	10	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	300	300	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	50	unlabeled	outside	812	1.00	5	852	90	420
+2026-10-13T12:19:00+00:00	mesh-a	1	800	1	400	namespace	450	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	300	300	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	50	unlabeled	probe	812	0.50	5	852	90	421
+2026-10-13T12:20:00+00:00	mesh-a	1	800	1	400	wide	790	50	90	5	9	120	1.00	10	15	10	10	10	40	1.00	6	2048	409600	409600	409600	4/4	60.0	50	60	0	200	640	640	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	50	unlabeled	probe	812	0.40	40	852	90	421
+2026-10-13T12:21:00+00:00	mesh-a	1	800	1	400	namespace	470	50	90	5	9	40	1.00	10	20	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	320	320	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	50	labeled	outside	912	1.50	5	952	100	470
+2026-10-13T12:22:00+00:00	mesh-a	1	800	1	400	namespace	470	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	6	2048	51200	51200	51200	4/4	60.0	50	60	0	200	320	320	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	50	labeled	probe	912	0.50	5	952	100	471
+2026-10-13T12:23:00+00:00	mesh-a	1	800	1	400	wide	810	50	90	5	9	120	1.00	10	15	10	10	10	40	1.00	6	2048	460800	460800	460800	4/4	60.0	50	60	0	200	660	660	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	50	labeled	probe	912	0.45	45	952	100	471
+2026-10-13T12:24:00+00:00	mesh-a	1	800	1	400	namespace	480	50	90	5	9	10	1.00	10	5	10	10	10	40	1.00	18	2048	51200	51200	51200	4/4	60.0	50	60	0	200	330	330	10	15	40	50	120	250	18	18	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	16	50	labeled	probe	912	0.55	5	952	100	471
+2026-10-13T12:25:00+00:00	mesh-a	1	800	1	400	wide	858	50	90	5	9	120	1.00	10	15	10	10	10	40	1.00	18	2048	460800	460800	460800	4/4	60.0	50	60	0	200	708	708	10	15	40	50	120	250	18	18	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	16	50	labeled	probe	912	0.60	45	952	100	471
+2026-10-13T12:26:00+00:00	mesh-a	1	200	1	100	namespace	302	50	90	5	9	120	1.00	10	60	10	10	10	40	1.00	6	2048	50500	50500	50500	4/4	60.0	50	60	0	200	152	152	10	15	40	50	120	250	6	6	OK	none	0	0	1.00	0.50	30	51200	20480	2	config-only	4	0	none	deploy	210	2.50	5	250	60	120
+2026-10-13T12:27:00+00:00	mesh-a	1	200	1	100	namespace	410	50	90	5	9	400	1.00	10	200	10	10	10	40	1.00	202	2048	53248	53248	53248	4/4	60.0	50	60	0	200	260	260	10	15	40	50	120	250	202	202	OK	none	0	0	1.00	0.50	30	51200	20480	2	pods	200	0	none	deploy	210	6.00	8	250	60	120

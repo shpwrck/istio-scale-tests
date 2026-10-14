@@ -8,7 +8,7 @@ The original issue texts are in the appendix.
 
 | # | Task | Status | Left / validate on |
 | --- | --- | --- | --- |
-| 1 | Namespace scaling factor (customer: thousands of namespaces, 1–5 services each) | Planned | lab for shape, ROSA for numbers |
+| 1 | Namespace scaling factor (customer: thousands of namespaces, 1–5 services each) | Implemented (controlplane growth mode); offline-verified, not yet lab-validated | lab for shape (L1-L4), ROSA for numbers |
 | 2 | Per-cluster connected-proxy count + sanity check (was #85) | Done, lab-validated with 3 istiod replicas | campaign-scale check optional (ROSA) |
 | 3 | East-west failures on some clusters (was #86) | Root cause confirmed on the lab (CA race); fix verified; harness reports unreachable remotes | AWS load-balancer checks (ROSA) |
 | 4 | Capture istiod restart diagnostics (was #87) | Not started | needs a scale run to reproduce |
@@ -27,16 +27,31 @@ spread round-robin across N namespaces) × service count × replicas × mesh siz
 per-proxy config size. Multi-namespace runs were broken before #95 (only the last namespace was
 created), so older namespace results are invalid.
 
-**Plan (extend the controlplane suite, no new suite):**
-- `--services-per-namespace K` growth mode: N namespaces × K services, swept over N (e.g. 100, 500,
-  1000, 2000, 4000).
-- Config-only option: Services without backing pods plus a small fixed set of measurement pods, since
-  a node holds ~250 pods by default and the cost being measured is mostly config.
-- Report the scaling factor as linear fits with the raw points: istiod memory/CPU per 100
-  namespaces; per-proxy config size per namespace with and without per-namespace Sidecar scoping;
-  push volume and convergence p99 vs namespace count.
-- Open question for the customer: are all namespaces in the mesh? If not, also measure what
-  `discoverySelectors` saves (add namespaces outside the mesh, with and without the label).
+**Implemented (controlplane growth mode; see
+[`tests/controlplane/README.md`](tests/controlplane/README.md#namespace-scaling-growth-mode)):**
+- `003 --services-per-namespaces K` growth series: N namespaces × K services (block layout),
+  grown in place up the `--namespace-counts` ladder with a `grow` window per step (always under
+  `namespace` scoping) and a `probe` window per scoping (`none`, `namespace`, new `wide` = a
+  per-namespace `*/*` Sidecar); `--growth fresh` deploys and deletes every cell for the
+  in-place-vs-fresh check.
+- `--workload-mode config-only`: Services without pods plus M measurement pods;
+  `--measurement-pod-counts 4,16` re-probes at the largest N (does istiod heap grow with M?).
+- `--outside-namespaces X --outside-modes unlabeled,labeled`: namespaces outside the mesh, with and
+  without the discovery label (what `discoverySelectors` saves).
+- Memory stop guard (istiod heap and gateway Envoy memory on every member, projected per step;
+  `SKIPPED_MEM_GUARD` rows), a namespace-lifecycle TSV (apply/delete rates, HTTP 429s),
+  `005 --undiscover --no-delete` so thousands of namespaces leave the mesh without queueing deletes.
+- TSV schema 63 (columns 52-63) and a "Namespace scaling" report section in all formats: linear
+  fits per 100 namespaces with R², log-log exponent and raw points, one per series (a sweep's
+  RUN_ID x mesh size x K x workload, so a base-dir report never mixes series); pods vs
+  config-only (required row), M-sweep, discovery and fresh-vs-in-place tables.
+
+**Left:** lab validation (L1 calibration incl. the measured namespace-deletion rate and the
+pods-vs-config-only cell, L2 fresh-vs-in-place and L2b guard proof with `--mem-stop-pct 5`, L3 up
+to N=400 / X=200, L4 cleanup), then the ROSA runs (`configs/ns-scaling-rosa.env`, istiod sized for
+it). Not built yet: a fixed-per-namespace vs per-service split from two K values, charts for the
+growth cells, parallel apply. Open for the customer: are all namespaces in the mesh, and do they
+use Sidecars or a root Sidecar today?
 
 ## 2. Per-cluster connected-proxy count + sanity check (was #85) — done
 

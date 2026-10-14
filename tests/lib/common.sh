@@ -10,10 +10,12 @@
 #                                        (",", "a,,b", "a, ") are dropped; always returns 0
 #   is_pos_int <val>                  -> return 0 if val is a positive integer
 #   is_nonneg_int <val>               -> return 0 if val is a non-negative integer
-#   validate_scoping <val>            -> die if val is not none|namespace|explicit
+#   validate_scoping <val>            -> die if val is not none|namespace|explicit|wide
 #   resolve_kubectl <out_arrayname>   -> set the named array to (kubectl) or (oc)
 #   validate_traffic_config <val>     -> die if val is not none|vsdr
 #   vsdr_service_count <svc> <every>  -> services that get a VS+DR (i mod every == 0)
+#   validate_workload_mode <val>      -> die if val is not pods|config-only
+#   validate_outside_mode <val>       -> die if val is not none|unlabeled|labeled
 #   resume_preamble_scalar <tsv> <KEY> <var> <flag> <explicit>
 #                                     -> on --resume, set var from the preamble's KEY;
 #                                        die if an explicit flag conflicts with it
@@ -54,8 +56,8 @@ is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 # shellcheck disable=SC2329
 validate_scoping() {
 	case "$1" in
-	none | namespace | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit]; got '$1'" ;;
+	none | namespace | wide | explicit) return 0 ;;
+	*) die "--sidecar-scoping must be one of [none, namespace, explicit, wide]; got '$1'" ;;
 	esac
 }
 
@@ -94,6 +96,28 @@ vsdr_service_count() {
 	is_nonneg_int "$sc" || die "vsdr_service_count: service count must be a non-negative integer; got '$sc'"
 	is_pos_int "$every" || die "vsdr_service_count: every must be a positive integer; got '$every'"
 	echo $(( (sc + every - 1) / every ))
+}
+
+# --- namespace scaling (controlplane growth mode) ---
+
+# validate_workload_mode <val>: pods (a Deployment per Service) or config-only
+# (Services without pods plus a few measurement pods).
+# shellcheck disable=SC2329
+validate_workload_mode() {
+	case "$1" in
+	pods | config-only) return 0 ;;
+	*) die "--workload-mode must be one of [pods, config-only]; got '$1'" ;;
+	esac
+}
+
+# validate_outside_mode <val>: namespaces outside the mesh: none, unlabeled (not
+# discovered) or labeled (istio-discovery=enabled, discovered but not injected).
+# shellcheck disable=SC2329
+validate_outside_mode() {
+	case "$1" in
+	none | unlabeled | labeled) return 0 ;;
+	*) die "--outside-mode must be one of [none, unlabeled, labeled]; got '$1'" ;;
+	esac
 }
 
 # resume_preamble_scalar <tsv> <KEY> <var> <flag> <explicit>: reconcile a sweep-level
