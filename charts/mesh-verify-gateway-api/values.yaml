@@ -3,7 +3,8 @@
 clusterName: ""
 
 # ACM ManagedCluster name of the ONE member that runs the echo workload. The member whose
-# clusterName equals it also gets the workload-only Services and the C2 route. Set it in
+# clusterName equals it also gets the workload-only Services, the C2 route and the
+# remoteNamespace (with its echo Deployment, Services and ReferenceGrant). Set it in
 # charts/mesh-verify-gateway-api-appset.yaml (template.source.helm.valuesObject.workloadCluster).
 # Empty, or not a DNS label (such as the <workload-cluster> placeholder): a render with a
 # clusterName (an ApplicationSet sync) fails with a message, so a check without a workload is
@@ -13,7 +14,13 @@ workloadCluster: ""
 
 namespace: mesh-verify-gwapi
 
-# istiod's DNS domain suffix: used in the S4 Hostname backend and the Gateway's address.
+# Backend namespace of S7-S9, created on the workload member ONLY, so those scenarios show
+# whether the ingress member needs the backend's namespace (not just its Service). Their routes
+# stay in `namespace`. Must differ from `namespace`.
+remoteNamespace: mesh-verify-gwapi-remote
+
+# istiod's DNS domain suffix: used in the Hostname backends (S4, S8), the classic routes'
+# destinations and the Gateway's address.
 clusterDomain: cluster.local
 
 image:

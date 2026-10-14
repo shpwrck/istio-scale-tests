@@ -1,12 +1,18 @@
 {{- include "mesh-verify-gateway-api.validate" . }}
+{{- /* The test namespace on every member; the S7-S9 backend namespace (remoteNamespace) on the
+     workload member only, so an ingress member without the workload has no such namespace. */ -}}
+{{- range $ns := include "mesh-verify-gateway-api.namespaces" . | fromYamlArray }}
+---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.namespace }}
+  name: {{ $ns }}
   labels:
     istio.io/rev: default
     # The campaign baseline's discoverySelectors (spoke-ossm tuningBaseline.discoverySelectors)
-    # need this label on every member: on a member without the workload so its istiod reads
-    # the HTTPRoutes here, and on the workload member so the OTHER members' istiods discover
-    # its Services (an istiod applies its own discoverySelectors to remote clusters too).
+    # need this label: on a member without the workload so its istiod reads the HTTPRoutes in
+    # the test namespace, and on the workload member so the OTHER members' istiods discover its
+    # Services (an istiod applies its own discoverySelectors to remote clusters too) and its own
+    # istiod reads the ReferenceGrant in the backend namespace.
     istio-discovery: enabled
+{{- end }}

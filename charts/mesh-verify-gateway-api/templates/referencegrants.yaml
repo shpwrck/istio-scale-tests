@@ -1,0 +1,30 @@
+{{- /* S7: a kind Service backendRef across namespaces needs a ReferenceGrant in the backend's
+     namespace, and istiod reads grants from its own cluster only. The backend namespace exists
+     on the workload member only, so the grant does too: that is what S7 tests. One grant per
+     remoteNs kind Service route, allowing exactly that backend. */ -}}
+{{- if include "mesh-verify-gateway-api.isWorkload" . }}
+{{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
+{{- range $r := $sc.httpRoutes }}
+{{- if and $r.remoteNs (eq $r.kind "Service") }}
+---
+# v1beta1: the version istiod 1.30 watches.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ $r.name }}
+  namespace: {{ $.Values.remoteNamespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" $ | nindent 4 }}
+    mesh-verify-gwapi/scenario: {{ $r.id }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $.Values.namespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ $r.backend }}
+{{- end }}
+{{- end }}
+{{- end }}

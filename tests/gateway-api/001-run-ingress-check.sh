@@ -3,10 +3,11 @@
 #
 # Question: in this multi-primary, multi-network mesh, does an HTTPRoute need its backend
 # Service in every member, or does a request entering ANY member's ingress reach the workload
-# wherever it runs? charts/mesh-verify-gateway-api, deployed by GitOps through
-# charts/mesh-verify-gateway-api-appset.yaml, puts the routes on every member and the echo
-# workload on one. This script reads what each member resolved, sends traffic through every
-# member's ingress, and writes one TSV plus a markdown summary that leads with the answer.
+# wherever it runs? And does the ingress member need the backend's NAMESPACE (S7-S9: a backend
+# namespace that exists on the workload member only)? charts/mesh-verify-gateway-api, deployed by
+# GitOps through charts/mesh-verify-gateway-api-appset.yaml, puts the routes on every member and
+# the echo workload on one. This script reads what each member resolved, sends traffic through
+# every member's ingress, and writes one TSV plus a markdown summary that leads with the answers.
 # Scenarios, predictions and how to read the report: tests/gateway-api/README.md.
 #
 # Steps: (1) preflight: live Gateway API state per member, into the TSV preamble; stops when the
@@ -48,6 +49,7 @@ WAIT_TIMEOUT_SEC="${GWAPI_WAIT_TIMEOUT_SEC}"
 RESULTS_DIR="$(config_repo_path "${GWAPI_RESULTS_DIR}")"
 SKIP_PROXY_CONFIG="${GWAPI_SKIP_PROXY_CONFIG}"
 NS="${GWAPI_NAMESPACE}"
+NS_REMOTE="${GWAPI_REMOTE_NAMESPACE}"
 GW_NAME="${GWAPI_GATEWAY}"
 DRY_RUN=0
 INGRESS_FROM_FLAG=0
@@ -65,27 +67,33 @@ POLL_SEC=5
 GWAPI_SCHEMA=1
 
 # Predicted outcomes (tests/gateway-api/README.md, "Predictions"), one row per scenario:
-#   id|kind|host|route|backend kind|backend Service|status via W|status via O|HTTP via W|HTTP via O|
-#   endpoints via W|endpoints via O|confidence|why
-# W = the workload member, O = every other member; "via X" = on X / through X's ingress. Status
-# is the HTTPRoute's Accepted/ResolvedRefs from istio.io/gateway-controller ("present" = the S1
-# VirtualService exists, "absent" = no route on that member). Endpoints: the ingress's EDS
+#   id|kind|host|route|backend kind|backend Service|backend namespace|status via W|status via O|
+#   HTTP via W|HTTP via O|endpoints via W|endpoints via O|confidence|why
+# W = the workload member, O = every other member; "via X" = on X / through X's ingress. Backend
+# namespace: main (GWAPI_NAMESPACE, on every member; every route lives there) or remote
+# (GWAPI_REMOTE_NAMESPACE, on W only: the "is a local namespace needed?" scenarios). Status
+# is the HTTPRoute's Accepted/ResolvedRefs from istio.io/gateway-controller ("present" = the
+# classic VirtualService exists, "absent" = no route on that member). Endpoints: the ingress's EDS
 # endpoints for the backend: local-pod, remote-ewgw:15443 (the workload member's east-west
 # gateway) or none; "-" = not judged. Every expected 200 must carry the workload's echo text.
 # The chart (charts/mesh-verify-gateway-api/templates/_helpers.tpl) has the same ids, hosts,
 # routes and backends; tests/lib/test/gateway-api.bats checks that they agree.
 ST_OK="Accepted=True/ResolvedRefs=True"
 ST_BNF="Accepted=True/ResolvedRefs=False:BackendNotFound"
+ST_RNP="Accepted=True/ResolvedRefs=False:RefNotPermitted"
 EP_LOCAL=local-pod
 EP_REMOTE="remote-ewgw:15443"
 SCENARIOS=(
-	"S1|classic|s1.classic.test|s1|Service|echo-s1|present|present|200|200|${EP_LOCAL}|${EP_REMOTE}|high|classic Gateway + VirtualService: nothing checks that the Service exists"
-	"S2|httproute|s2.gwapi.test|s2|Service|echo-s2|${ST_OK}|${ST_BNF}|200|200|${EP_LOCAL}|${EP_REMOTE}|high|BackendNotFound is a soft error: the destination is still programmed and resolved against every member's Services"
-	"S3|httproute|s3.gwapi.test|s3|Service|echo-s3|${ST_OK}|${ST_OK}|200|200|${EP_LOCAL}|${EP_REMOTE}|high|the stub Service resolves the status and adds no endpoints"
-	"S4|httproute|s4.gwapi.test|s4|Hostname|echo-s4|${ST_OK}|${ST_OK}|200|200|${EP_LOCAL}|${EP_REMOTE}|medium-high|the Hostname lookup uses the merged registry; it reads BackendNotFound until istiod's first push"
-	"S5|httproute|s5.gwapi.test|s5|ServiceImport|echo-s5|${ST_OK}|${ST_BNF}|200|200|${EP_LOCAL}|${EP_REMOTE}|high|with ENABLE_MCS_HOST=false (default) a ServiceImport is handled exactly like kind Service"
-	"C1|httproute|neg.gwapi.test|c1|Service|echo-none|${ST_BNF}|${ST_BNF}|500|500|none|none|high|negative control: no Service anywhere, so no Envoy cluster, and Gateway API routes answer 500"
-	"C2|httproute|s6.gwapi.test|c2|Service|echo-s2|${ST_OK}|absent|200|404|${EP_LOCAL}|-|medium-high|route on the workload member only: routing config is per cluster, so the others answer 404"
+	"S1|classic|s1.classic.test|s1|Service|echo-s1|main|present|present|200|200|${EP_LOCAL}|${EP_REMOTE}|high|classic Gateway + VirtualService: nothing checks that the Service exists"
+	"S2|httproute|s2.gwapi.test|s2|Service|echo-s2|main|${ST_OK}|${ST_BNF}|200|200|${EP_LOCAL}|${EP_REMOTE}|high|BackendNotFound is a soft error: the destination is still programmed and resolved against every member's Services"
+	"S3|httproute|s3.gwapi.test|s3|Service|echo-s3|main|${ST_OK}|${ST_OK}|200|200|${EP_LOCAL}|${EP_REMOTE}|high|the stub Service resolves the status and adds no endpoints"
+	"S4|httproute|s4.gwapi.test|s4|Hostname|echo-s4|main|${ST_OK}|${ST_OK}|200|200|${EP_LOCAL}|${EP_REMOTE}|medium-high|the Hostname lookup uses the merged registry; it reads BackendNotFound until istiod's first push"
+	"S5|httproute|s5.gwapi.test|s5|ServiceImport|echo-s5|main|${ST_OK}|${ST_BNF}|200|200|${EP_LOCAL}|${EP_REMOTE}|high|with ENABLE_MCS_HOST=false (default) a ServiceImport is handled exactly like kind Service"
+	"S7|httproute|s7.gwapi.test|s7|Service|echo-s7|remote|${ST_OK}|${ST_RNP}|200|500|${EP_LOCAL}|${EP_REMOTE}|high|istiod reads ReferenceGrants from its own cluster only, and a grant can only live in the backend's namespace: without one the backendRef gets an empty destination (cluster UnknownService) and Gateway API's 500. The ingress still holds the backend's cluster with the workload member's east-west endpoint, so the 500 is the route's"
+	"S8|httproute|s8.gwapi.test|s8|Hostname|echo-s8|remote|${ST_BNF}|${ST_BNF}|200|200|${EP_LOCAL}|${EP_REMOTE}|medium-high|a Hostname backendRef has no namespace, so no grant check; its status lookup is keyed by the route's namespace, so it reads BackendNotFound on every member (istio/istio#62027), but the destination is still programmed"
+	"S9|classic|s9.classic.test|s9|Service|echo-s9|remote|present|present|200|200|${EP_LOCAL}|${EP_REMOTE}|high|a classic VirtualService may name any host: no namespace or grant check"
+	"C1|httproute|neg.gwapi.test|c1|Service|echo-none|main|${ST_BNF}|${ST_BNF}|500|500|none|none|high|negative control: no Service anywhere, so no Envoy cluster, and Gateway API routes answer 500"
+	"C2|httproute|s6.gwapi.test|c2|Service|echo-s2|main|${ST_OK}|absent|200|404|${EP_LOCAL}|-|medium-high|route on the workload member only: routing config is per cluster, so the others answer 404"
 )
 
 usage() {
@@ -93,7 +101,8 @@ usage() {
 Usage: $(basename "$0") --contexts CSV --workload-context CTX [options]
 
 Gateway API multicluster ingress check (read-only). Answers: does an HTTPRoute need its backend
-Service in every member, or does a request entering any member's ingress reach the workload?
+Service in every member, or does a request entering any member's ingress reach the workload? And
+does the ingress member need the backend's namespace?
 Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml; tests/gateway-api/README.md).
 
   --config FILE           Run config of KEY=value lines (SETUP_CONTEXTS and the GWAPI_* keys of
@@ -125,12 +134,13 @@ Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml; tests/gatewa
 
 Environment (config/options.env): GWAPI_DETAIL_TIMEOUT_SEC, GWAPI_KUBECTL_TIMEOUT_SEC
 (kubectl --request-timeout, default ${GWAPI_KUBECTL_TIMEOUT_SEC}), GWAPI_ISTIOCTL_TIMEOUT_SEC (limit per
-istioctl call, default ${GWAPI_ISTIOCTL_TIMEOUT_SEC}), GWAPI_NAMESPACE (${NS}), GWAPI_GATEWAY (${GW_NAME}),
-GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE}), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
+istioctl call, default ${GWAPI_ISTIOCTL_TIMEOUT_SEC}), GWAPI_NAMESPACE (${NS}), GWAPI_REMOTE_NAMESPACE
+(${NS_REMOTE}), GWAPI_GATEWAY (${GW_NAME}), GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE}),
+GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
-summary-<RUN_ID>.md (the answer first), and argocd-<RUN_ID>.tsv with --hub-context.
+summary-<RUN_ID>.md (the answers first), and argocd-<RUN_ID>.tsv with --hub-context.
 EOF
 }
 
@@ -229,9 +239,10 @@ is_pos_int "$GWAPI_KUBECTL_TIMEOUT_SEC" || die "GWAPI_KUBECTL_TIMEOUT_SEC must b
 is_pos_int "$GWAPI_ISTIOCTL_TIMEOUT_SEC" || die "GWAPI_ISTIOCTL_TIMEOUT_SEC must be a positive integer; got '${GWAPI_ISTIOCTL_TIMEOUT_SEC}'"
 [[ "$SKIP_PROXY_CONFIG" == 0 || "$SKIP_PROXY_CONFIG" == 1 ]] || die "GWAPI_SKIP_PROXY_CONFIG must be 0 or 1; got '${SKIP_PROXY_CONFIG}'"
 DNS_LABEL_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-for kv in "GWAPI_NAMESPACE=${NS}" "GWAPI_GATEWAY=${GW_NAME}" "GWAPI_ARGOCD_NAMESPACE=${GWAPI_ARGOCD_NAMESPACE}" "GWAPI_ARGOCD_APPSET=${GWAPI_ARGOCD_APPSET}"; do
+for kv in "GWAPI_NAMESPACE=${NS}" "GWAPI_REMOTE_NAMESPACE=${NS_REMOTE}" "GWAPI_GATEWAY=${GW_NAME}" "GWAPI_ARGOCD_NAMESPACE=${GWAPI_ARGOCD_NAMESPACE}" "GWAPI_ARGOCD_APPSET=${GWAPI_ARGOCD_APPSET}"; do
 	[[ "${kv#*=}" =~ $DNS_LABEL_RE ]] || die "${kv%%=*} must be a lowercase DNS label; got '${kv#*=}'"
 done
+[[ "$NS_REMOTE" != "$NS" ]] || die "GWAPI_REMOTE_NAMESPACE must differ from GWAPI_NAMESPACE (${NS}): S7-S9 need a backend namespace that exists on the workload member only"
 
 # Ingress overrides: CTX=ADDR[:PORT]; a context name may hold ':' and '/', so split at the last '='.
 declare -A INGRESS_ADDR=() INGRESS_SOURCE=()
@@ -252,22 +263,26 @@ done
 # role <ctx>: workload or other.
 role() { if [[ "$1" == "$WORKLOAD_CTX" ]]; then echo workload; else echo other; fi; }
 
+# bns_name <main|remote>: the backend namespace of a SCENARIOS row.
+bns_name() { if [[ "$1" == remote ]]; then echo "$NS_REMOTE"; else echo "$NS"; fi; }
+
 # The unique backend hosts, for the endpoint evidence (one istioctl call each per member).
 FQDNS=()
 declare -A SEEN_FQDN=()
 for line in "${SCENARIOS[@]}"; do
-	IFS='|' read -r _ _ _ _ _ backend _ <<<"$line"
-	fqdn="${backend}.${NS}.svc.${CLUSTER_DOMAIN}"
+	IFS='|' read -r _ _ _ _ _ backend bns _ <<<"$line"
+	fqdn="${backend}.$(bns_name "$bns").svc.${CLUSTER_DOMAIN}"
 	[[ -n "${SEEN_FQDN[$fqdn]:-}" ]] && continue
 	SEEN_FQDN[$fqdn]=1
 	FQDNS+=("$fqdn")
 done
 
-# backend_label <kind> <service>: the backendRef as the chart writes it.
+# backend_label <kind> <service> <main|remote>: the backendRef as the chart writes it; a backend
+# outside the routes' namespace as <namespace>/<service>.
 backend_label() {
 	case "$1" in
-	Hostname) echo "Hostname ${2}.${NS}.svc.${CLUSTER_DOMAIN}" ;;
-	*) echo "$1 $2" ;;
+	Hostname) echo "Hostname ${2}.$(bns_name "$3").svc.${CLUSTER_DOMAIN}" ;;
+	*) if [[ "$3" == remote ]]; then echo "$1 ${NS_REMOTE}/$2"; else echo "$1 $2"; fi ;;
 	esac
 }
 
@@ -280,7 +295,7 @@ if ((DRY_RUN)); then
 	((SKIP_PROXY_CONFIG)) || pc_worst=$((${#FQDNS[@]} * GWAPI_ISTIOCTL_TIMEOUT_SEC))
 	echo "=== Gateway API multicluster ingress check: dry run (no cluster is contacted) ==="
 	echo "Members:        ${CONTEXTS[*]} (workload: ${WORKLOAD_CTX})"
-	echo "Check objects:  namespace ${NS}, Gateway istio-system/${GW_NAME} (charts/mesh-verify-gateway-api)"
+	echo "Check objects:  namespace ${NS}, Gateway istio-system/${GW_NAME}; backend namespace ${NS_REMOTE} on ${WORKLOAD_CTX} only (charts/mesh-verify-gateway-api)"
 	for ctx in "${CONTEXTS[@]}"; do
 		if [[ -n "${INGRESS_ADDR[$ctx]:-}" ]]; then
 			echo "Ingress ${ctx}: the --ingress override"
@@ -288,8 +303,8 @@ if ((DRY_RUN)); then
 			echo "Ingress ${ctx}: LoadBalancer status of istio-system/${INGRESS_DEPLOY}"
 		fi
 	done
-	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels, istiod env overrides, echo Deployment, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s)"
-	echo "Wait:           up to ${WAIT_TIMEOUT_SEC} s for Gateway Programmed, echo Ready and every route's status (poll ${POLL_SEC} s)"
+	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels, ${NS_REMOTE} on the workload member only, istiod env overrides, both echo Deployments, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s)"
+	echo "Wait:           up to ${WAIT_TIMEOUT_SEC} s for Gateway Programmed, both echo Deployments Ready and every route's status (poll ${POLL_SEC} s)"
 	echo "Traffic:        ${REQUESTS} requests x ${#SCENARIOS[@]} hosts x ${#CONTEXTS[@]} ingresses, curl --max-time ${TIMEOUT_SEC}; one ${GWAPI_DETAIL_TIMEOUT_SEC} s detail request per cell with a timeout"
 	echo "Proxy evidence: ${proxy_plan}"
 	echo "Argo CD health: ${argo_plan}"
@@ -297,10 +312,10 @@ if ((DRY_RUN)); then
 	echo "Output:         ${RESULTS_DIR}/run-<RUN_ID>/gateway-api-<RUN_ID>.tsv, summary-<RUN_ID>.md"
 	echo ""
 	echo "Predictions (W = via the workload member ${WORKLOAD_CTX}, O = via every other member):"
-	printf '  %-3s %-16s %-28s %-50s %-50s %-10s %s\n' ID HOST BACKEND "STATUS W" "STATUS O" "HTTP W/O" "ENDPOINTS W / O"
+	printf '  %-3s %-16s %-49s %-49s %-8s %-30s %s\n' ID HOST "STATUS W" "STATUS O" "HTTP W/O" "ENDPOINTS W / O" BACKEND
 	for line in "${SCENARIOS[@]}"; do
-		IFS='|' read -r id _ host _ bkind backend st_w st_o code_w code_o ep_w ep_o _ _ <<<"$line"
-		printf '  %-3s %-16s %-28s %-50s %-50s %-10s %s\n' "$id" "$host" "$(backend_label "$bkind" "$backend" | cut -c1-28)" "$st_w" "$st_o" "${code_w}/${code_o}" "${ep_w} / ${ep_o}"
+		IFS='|' read -r id _ host _ bkind backend bns st_w st_o code_w code_o ep_w ep_o _ _ <<<"$line"
+		printf '  %-3s %-16s %-49s %-49s %-8s %-30s %s\n' "$id" "$host" "$st_w" "$st_o" "${code_w}/${code_o}" "${ep_w} / ${ep_o}" "$(backend_label "$bkind" "$backend" "$bns")"
 	done
 	echo ""
 	echo "Dry-run complete: nothing was contacted or written."
@@ -387,6 +402,7 @@ ISTIOD_ENV_FILTER='[.items[].spec.template.spec.containers[]? | select(.name == 
 ECHO_FILTER='if (.items | length) == 0 then "absent\t-" else (.items[0]
 	| "ready=\(.status.readyReplicas // 0)/\(.spec.replicas // 0)\t\(([.spec.template.spec.containers[]? | select(.name == "http-echo")
 	| .args[]? | select(startswith("-text=")) | sub("^-text="; "")][0]) // "-")") end'
+NS_LABEL_FILTER='"istio-discovery=\(.metadata.labels["istio-discovery"] // "unset");istio.io/rev=\(.metadata.labels["istio.io/rev"] // "unset")"'
 SIDECAR_FILTER='if (.items | length) == 0 then "no-pods" else ([.items[] | ((.spec.containers // []) + (.spec.initContainers // []))
 	| map(.name) | index("istio-proxy") != null] | if all then "yes" elif any then "partial" else "no" end) end'
 
@@ -398,8 +414,9 @@ preflight_member() {
 			get crd httproutes.gateway.networking.k8s.io)"
 		printf 'gatewayclass\t%s\n' "$(kval "$ctx" '"\(.spec.controllerName);Accepted=\(([.status.conditions[]? | select(.type == "Accepted")][0].status) // "missing")"' \
 			get gatewayclasses.gateway.networking.k8s.io istio)"
-		printf 'namespace\t%s\n' "$(kval "$ctx" '"istio-discovery=\(.metadata.labels["istio-discovery"] // "unset");istio.io/rev=\(.metadata.labels["istio.io/rev"] // "unset")"' \
-			get namespace "$NS")"
+		printf 'namespace\t%s\n' "$(kval "$ctx" "$NS_LABEL_FILTER" get namespace "$NS")"
+		# S7-S9's backend namespace: expected on the workload member only ("absent" elsewhere).
+		printf 'remote_namespace\t%s\n' "$(kval "$ctx" "$NS_LABEL_FILTER" get namespace "$NS_REMOTE")"
 		printf 'gateway\t%s\n' "$(kval "$ctx" '"present"' -n istio-system get gateways.gateway.networking.k8s.io "$GW_NAME")"
 		printf 'istiod_env\t%s\n' "$(kval "$ctx" "$ISTIOD_ENV_FILTER" -n istio-system get deploy -l app=istiod)"
 		printf 'istio_cr_version\t%s\n' "$(kval "$ctx" '.spec.version // "unset"' get istios.sailoperator.io default)"
@@ -412,6 +429,9 @@ preflight_member() {
 			printf 'echo_text\t-\n'
 		fi
 		printf 'echo_sidecar\t%s\n' "$(kval "$ctx" "$SIDECAR_FILTER" -n "$NS" get pods -l "$ECHO_SELECTOR")"
+		echo_line="$(kval "$ctx" "$ECHO_FILTER" -n "$NS_REMOTE" get deploy -l "$ECHO_SELECTOR")"
+		printf 'echo_remote\t%s\n' "${echo_line%%$'\t'*}"
+		printf 'echo_remote_sidecar\t%s\n' "$(kval "$ctx" "$SIDECAR_FILTER" -n "$NS_REMOTE" get pods -l "$ECHO_SELECTOR")"
 		# The address stays in memory and $WORK: results record only where it came from.
 		printf 'ingress_lb\t%s\n' "$(kval "$ctx" '.status.loadBalancer.ingress[0] // {} | .hostname // .ip // "pending"' \
 			-n istio-system get svc "$INGRESS_DEPLOY")"
@@ -430,7 +450,7 @@ for i in "${!CONTEXTS[@]}"; do
 done
 for p in "${pids[@]}"; do wait "$p" || true; done
 KUBE_VERSIONS="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
-PREFLIGHT_KEYS=(crd gatewayclass namespace gateway istiod_env istio_cr_version echo echo_text echo_sidecar ingress_lb tuning_baseline sidecar_egress_hosts)
+PREFLIGHT_KEYS=(crd gatewayclass namespace remote_namespace gateway istiod_env istio_cr_version echo echo_text echo_sidecar echo_remote echo_remote_sidecar ingress_lb tuning_baseline sidecar_egress_hosts)
 for i in "${!CONTEXTS[@]}"; do
 	ctx="${CONTEXTS[i]}"
 	for k in "${PREFLIGHT_KEYS[@]}"; do PRE["${ctx}|${k}"]=unknown; done
@@ -451,8 +471,21 @@ for ctx in "${CONTEXTS[@]}"; do
 	[[ "${PRE[$ctx|gateway]}" != absent ]] || problems+=("${ctx}: Gateway istio-system/${GW_NAME} is missing")
 	if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then
 		[[ "${PRE[$ctx|echo]}" != absent ]] || problems+=("${ctx} (--workload-context): no echo Deployment (${ECHO_SELECTOR}) in ${NS}; the chart's workloadCluster must be this member's ACM ManagedCluster name")
-	elif [[ "${PRE[$ctx|echo]}" != absent && "${PRE[$ctx|echo]}" != unknown ]]; then
-		problems+=("${ctx}: runs the echo Deployment, but --workload-context is ${WORKLOAD_CTX}; pass the member whose ManagedCluster name is the chart's workloadCluster")
+		if [[ "${PRE[$ctx|remote_namespace]}" == absent ]]; then
+			problems+=("${ctx} (--workload-context): namespace ${NS_REMOTE} (the S7-S9 backends) is missing; sync a chart revision that renders it")
+		elif [[ "${PRE[$ctx|echo_remote]}" == absent ]]; then
+			problems+=("${ctx} (--workload-context): no echo Deployment (${ECHO_SELECTOR}) in ${NS_REMOTE}")
+		fi
+	else
+		if [[ "${PRE[$ctx|echo]}" != absent && "${PRE[$ctx|echo]}" != unknown ]]; then
+			problems+=("${ctx}: runs the echo Deployment, but --workload-context is ${WORKLOAD_CTX}; pass the member whose ManagedCluster name is the chart's workloadCluster")
+		fi
+		# Not a stop: only S7-S9 depend on it, and their rows on this member say so.
+		case "${PRE[$ctx|remote_namespace]}" in
+		absent) ;;
+		unknown) warn "${ctx}: could not read whether namespace ${NS_REMOTE} exists; its S7-S9 rows say NS_SCENARIO_UNVERIFIED" ;;
+		*) warn "${ctx}: namespace ${NS_REMOTE} exists here, but S7-S9 need it on the workload member only; its S7-S9 rows say NS_SCENARIO_INVALID" ;;
+		esac
 	fi
 	for k in crd gatewayclass namespace gateway istiod_env echo; do
 		[[ "${PRE[$ctx|$k]}" != unknown ]] || warn "${ctx}: could not read ${k} (recorded as unknown)"
@@ -473,8 +506,8 @@ snap_get() {
 	echo "$rc" >"${2}.rc"
 }
 
-# snapshot_all <dir>: read every member's Gateway, routes, VirtualServices (and the echo
-# Deployment on the workload member) into <dir>/m<i>/, members in parallel.
+# snapshot_all <dir>: read every member's Gateway, routes, VirtualServices (and both echo
+# Deployments on the workload member) into <dir>/m<i>/, members in parallel.
 snapshot_all() {
 	local dir="$1" i ctx d p
 	local -a spids=()
@@ -488,6 +521,7 @@ snapshot_all() {
 			snap_get "$ctx" "${d}/vs.json" -n "$NS" get virtualservices.networking.istio.io
 			if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then
 				snap_get "$ctx" "${d}/echo.json" -n "$NS" get deploy -l "$ECHO_SELECTOR"
+				snap_get "$ctx" "${d}/echo-remote.json" -n "$NS_REMOTE" get deploy -l "$ECHO_SELECTOR"
 			fi
 		) 2>/dev/null &
 		spids+=("$!")
@@ -553,15 +587,15 @@ vs_status() {
 	jq -r --arg n "$2" 'if any(.items[]?; .metadata.name == $n) then "present" else "absent" end' "$f" 2>/dev/null || echo unknown
 }
 
-# echo_ready <member dir>: readyReplicas of the echo Deployment (0 when unreadable).
+# echo_ready <snapshot file>: readyReplicas of an echo Deployment (0 when unreadable).
 echo_ready() {
-	jq -r '[.items[]?.status.readyReplicas // 0] | add // 0' "$1/echo.json" 2>/dev/null || echo 0
+	jq -r '[.items[]?.status.readyReplicas // 0] | add // 0' "$1" 2>/dev/null || echo 0
 }
 
 # route_expected <ctx> <scenario line>: the route's expected status on that member.
 route_expected() {
 	local st_w st_o
-	IFS='|' read -r _ _ _ _ _ _ st_w st_o _ <<<"$2"
+	IFS='|' read -r _ _ _ _ _ _ _ st_w st_o _ <<<"$2"
 	if [[ "$1" == "$WORKLOAD_CTX" ]]; then echo "$st_w"; else echo "$st_o"; fi
 }
 
@@ -570,8 +604,9 @@ member_pending() {
 	local ctx="$2" d="$3/m$1" out="" st line kind route exp
 	st="$(gw_programmed "$d")"
 	[[ "$st" == True ]] || out="Gateway Programmed=${st}"
-	if [[ "$ctx" == "$WORKLOAD_CTX" ]] && (($(echo_ready "$d") < 1)); then
-		out="${out:+${out}, }echo not Ready"
+	if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then
+		(($(echo_ready "${d}/echo.json") >= 1)) || out="${out:+${out}, }echo not Ready"
+		(($(echo_ready "${d}/echo-remote.json") >= 1)) || out="${out:+${out}, }echo in ${NS_REMOTE} not Ready"
 	fi
 	for line in "${SCENARIOS[@]}"; do
 		IFS='|' read -r _ kind _ route _ <<<"$line"
@@ -707,7 +742,7 @@ if [[ -z "$EXPECTED_BODY" || "$EXPECTED_BODY" == - || "$EXPECTED_BODY" == unknow
 		[[ "${CONTEXTS[i]}" == "$WORKLOAD_CTX" ]] || continue
 		files=()
 		for s in "${!SCENARIOS[@]}"; do
-			IFS='|' read -r _ _ _ _ _ _ _ _ code_w _ <<<"${SCENARIOS[s]}"
+			IFS='|' read -r _ _ _ _ _ _ _ _ _ code_w _ <<<"${SCENARIOS[s]}"
 			[[ "$code_w" == 200 && -f "${WORK}/cell-${i}-${s}.txt" ]] && files+=("${WORK}/cell-${i}-${s}.txt")
 		done
 		((${#files[@]})) || continue
@@ -875,15 +910,33 @@ for i in "${!CONTEXTS[@]}"; do
 	ctx="${CONTEXTS[i]}"
 	rl="$(role "$ctx")"
 	for s in "${!SCENARIOS[@]}"; do
-		IFS='|' read -r id kind host route bkind backend st_w st_o code_w code_o ep_w ep_o _ _ <<<"${SCENARIOS[s]}"
+		IFS='|' read -r id kind host route bkind backend bns st_w st_o code_w code_o ep_w ep_o _ _ <<<"${SCENARIOS[s]}"
 		if [[ "$rl" == workload ]]; then
 			exp_status="$st_w" exp_code="$code_w" exp_ep="$ep_w"
 		else
 			exp_status="$st_o" exp_code="$code_o" exp_ep="$ep_o"
 		fi
-		fqdn="${backend}.${NS}.svc.${CLUSTER_DOMAIN}"
+		fqdn="${backend}.$(bns_name "$bns").svc.${CLUSTER_DOMAIN}"
 		flags=() notes=()
-		dev=0 unk=0
+		dev=0 unk=0 ns_invalid=0
+
+		# S7-S9 test an ingress member WITHOUT the backend namespace. Where it exists, or could not
+		# be read, the row cannot answer that, whatever it observes: UNKNOWN, never MATCH/DEVIATION.
+		if [[ "$bns" == remote && "$rl" != workload ]]; then
+			case "${PRE[$ctx|remote_namespace]}" in
+			absent) ;;
+			unknown)
+				ns_invalid=1
+				flags+=(NS_SCENARIO_UNVERIFIED)
+				notes+=("could not read whether namespace ${NS_REMOTE} exists on this member, so this row cannot show whether a local namespace is needed")
+				;;
+			*)
+				ns_invalid=1
+				flags+=(NS_SCENARIO_INVALID)
+				notes+=("namespace ${NS_REMOTE} exists on this member (expected on the workload member only), so this row cannot show whether a local namespace is needed")
+				;;
+			esac
+		fi
 
 		# Status.
 		if [[ "$kind" == classic ]]; then
@@ -940,17 +993,20 @@ for i in "${!CONTEXTS[@]}"; do
 					notes+=("HTTP: expected ${exp_code} on all ${n}, got ${codes} (most frequent body: ${top_body})")
 				fi
 			fi
-			if [[ "$exp_code" == 200 ]]; then
+			# Every 200 is matched against the echo text, also an unexpected one (S7 answering
+			# through another member is the namespace answer "no"); only an expected 200 can make
+			# the body a deviation of its own.
+			if [[ "$exp_code" == 200 ]] || ((n200 > 0)); then
 				if [[ "$EXPECTED_BODY" == unknown ]]; then
 					body_match=unknown
-					unk=1
+					[[ "$exp_code" != 200 ]] || unk=1
 				elif ((n200 == 0)); then
 					body_match="n/a"
 				elif ((nmatch == n200)); then
 					body_match=yes
 				else
 					if ((nmatch == 0)); then body_match=no; else body_match="partial:${nmatch}/${n200}"; fi
-					dev=1
+					[[ "$exp_code" != 200 ]] || dev=1
 					notes+=("body: ${nmatch}/${n200} of the 200s carry the workload's echo text (most frequent: ${top_body})")
 				fi
 			fi
@@ -979,7 +1035,10 @@ for i in "${!CONTEXTS[@]}"; do
 			esac
 		fi
 
-		if ((dev)); then
+		if ((ns_invalid)); then
+			verdict=UNKNOWN
+			n_unk=$((n_unk + 1))
+		elif ((dev)); then
 			verdict=DEVIATION
 			n_dev=$((n_dev + 1))
 		elif ((unk)); then
@@ -995,7 +1054,7 @@ for i in "${!CONTEXTS[@]}"; do
 		((${#notes[@]} == 0)) || detail="$(printf '%s; ' "${notes[@]}" | sed 's/; $//' | tr '\t\n' '  ')"
 		exp_body="-"
 		[[ "$exp_code" != 200 ]] || exp_body="$EXPECTED_BODY"
-		backend_l="$(backend_label "$bkind" "$backend")"
+		backend_l="$(backend_label "$bkind" "$backend" "$bns")"
 		printf '%s\n' "${RUN_ID}"$'\t'"${ctx}"$'\t'"${rl}"$'\t'"${id}"$'\t'"${kind}"$'\t'"${host}"$'\t'"${route}"$'\t'"${backend_l}"$'\t'"${exp_status}"$'\t'"${obs_status}"$'\t'"${exp_code}"$'\t'"${codes}"$'\t'"${exp_body}"$'\t'"${body_match}"$'\t'"${top_body}"$'\t'"${exp_ep}"$'\t'"${obs_ep}"$'\t'"${ep_healthy}"$'\t'"${verdict}"$'\t'"${row_status}"$'\t'"${detail}" >>"$ROWS"
 		for k in exp_status obs_status exp_code codes body_match top_body exp_ep obs_ep ep_healthy verdict row_status detail; do
 			R["${ctx}|${id}|${k}"]="${!k}"
@@ -1020,6 +1079,7 @@ emit_preamble() {
 	echo "# CHART_REVISION=${CHART_REVISION}"
 	echo "# HUB_CONTEXT=${HUB_CTX:-none}"
 	echo "# NAMESPACE=${NS}"
+	echo "# REMOTE_NAMESPACE=${NS_REMOTE}"
 	echo "# GATEWAY=istio-system/${GW_NAME}"
 	echo "# REQUESTS=${REQUESTS}"
 	echo "# TIMEOUT_SEC=${TIMEOUT_SEC}"
@@ -1039,9 +1099,11 @@ emit_preamble() {
 		echo "# GATEWAYCLASS[${ctx}]=${PRE[$ctx|gatewayclass]}"
 		echo "# GATEWAY_PROGRAMMED[${ctx}]=$(gw_programmed "${FINAL_SNAP}/m${GW_INDEX[$ctx]}")"
 		echo "# NAMESPACE_LABELS[${ctx}]=${PRE[$ctx|namespace]}"
+		echo "# REMOTE_NAMESPACE_LABELS[${ctx}]=${PRE[$ctx|remote_namespace]}"
 		echo "# ISTIOD_ENV[${ctx}]=${PRE[$ctx|istiod_env]}"
 		echo "# ISTIO_CR_VERSION[${ctx}]=${PRE[$ctx|istio_cr_version]}"
 		echo "# ECHO_DEPLOYMENT[${ctx}]=${PRE[$ctx|echo]};sidecar=${PRE[$ctx|echo_sidecar]}"
+		echo "# ECHO_REMOTE_DEPLOYMENT[${ctx}]=${PRE[$ctx|echo_remote]};sidecar=${PRE[$ctx|echo_remote_sidecar]}"
 		echo "# INGRESS_ADDRESS_SOURCE[${ctx}]=${INGRESS_SOURCE[$ctx]:-none}"
 		echo "# TUNING_BASELINE[${ctx}]=${PRE[$ctx|tuning_baseline]}"
 		echo "# SIDECAR_EGRESS_HOSTS[${ctx}]=${PRE[$ctx|sidecar_egress_hosts]}"
@@ -1073,7 +1135,7 @@ for ctx in "${CONTEXTS[@]}"; do [[ "$ctx" == "$WORKLOAD_CTX" ]] || OTHERS+=("$ct
 # answered 200 and none timed out), or unclear.
 cell_state() {
 	local codes="${R[$1|$2|codes]}" bm="${R[$1|$2|body_match]}" rs="${R[$1|$2|row_status]}"
-	case "$rs" in *NO_INGRESS_ADDR* | *INGRESS_UNREACHABLE*) echo unclear; return 0 ;; esac
+	case "$rs" in *NO_INGRESS_ADDR* | *INGRESS_UNREACHABLE* | *NS_SCENARIO_*) echo unclear; return 0 ;; esac
 	if [[ "$codes" == "200:${REQUESTS}" && "$bm" == yes ]]; then
 		echo ok
 	elif [[ "$codes" != "-" && "$codes" != *200:* && "$codes" != *000:* ]]; then
@@ -1083,40 +1145,101 @@ cell_state() {
 	fi
 }
 
-ok_list=() fail_list=() broken_list=() unclear_list=()
-for o in "${OTHERS[@]}"; do
-	s2="$(cell_state "$o" S2)"
-	s3="$(cell_state "$o" S3)"
-	case "$s2" in
-	ok) ok_list+=("$o") ;;
+# member_answer <ctx> <id> <reference id...>: ok (<id> answered), fail (<id> failed while a
+# reference scenario answered through the same ingress, so the failure is <id>'s own), broken
+# (<id> failed and no reference answered: the cross-cluster path itself), or unclear.
+member_answer() {
+	local ctx="$1" id="$2" r
+	shift 2
+	case "$(cell_state "$ctx" "$id")" in
+	ok) echo ok ;;
 	fail)
-		if [[ "$s3" == ok ]]; then fail_list+=("$o"); else broken_list+=("$o"); fi
+		for r in "$@"; do
+			if [[ "$(cell_state "$ctx" "$r")" == ok ]]; then
+				echo fail
+				return 0
+			fi
+		done
+		echo broken
 		;;
-	*) unclear_list+=("$o") ;;
+	*) echo unclear ;;
 	esac
-done
+}
+
+# answer_lists <id> <reference id...>: sorts the other members into ANS_OK, ANS_FAIL, ANS_BROKEN
+# and ANS_UNCLEAR by member_answer.
+answer_lists() {
+	local o
+	ANS_OK=() ANS_FAIL=() ANS_BROKEN=() ANS_UNCLEAR=()
+	for o in "${OTHERS[@]}"; do
+		case "$(member_answer "$o" "$@")" in
+		ok) ANS_OK+=("$o") ;;
+		fail) ANS_FAIL+=("$o") ;;
+		broken) ANS_BROKEN+=("$o") ;;
+		*) ANS_UNCLEAR+=("$o") ;;
+		esac
+	done
+}
 join_ticks() { local x out=""; for x in "$@"; do out="${out:+${out}, }\`${x}\`"; done; printf '%s' "$out"; }
 n_others=${#OTHERS[@]}
-if ((${#ok_list[@]} == n_others)); then
-	HEADLINE="**Service needed in every cluster for HTTPRoute traffic: NO** — S2 answered 200 (${REQUESTS}/${REQUESTS}, body \`${EXPECTED_BODY}\`) from the workload member \`${WORKLOAD_CTX}\` through $(join_ticks "${ok_list[@]}")'s ingress, with no \`echo-s2\` Service there."
-elif ((${#fail_list[@]} == n_others)); then
-	o="${fail_list[0]}"
-	HEADLINE="**Service needed in every cluster for HTTPRoute traffic: YES** — S2 (no \`echo-s2\` Service on the ingress member) returned \`${R[$o|S2|codes]}\` through $(join_ticks "${fail_list[@]}")'s ingress, while S3 (the same route plus a stub Service) answered 200 from the workload member \`${WORKLOAD_CTX}\`."
-elif ((${#broken_list[@]} == n_others)); then
-	o="${broken_list[0]}"
-	HEADLINE="**INCONCLUSIVE** — S2 and S3 both failed through $(join_ticks "${broken_list[@]}")'s ingress (S2 \`${R[$o|S2|codes]}\`, S3 \`${R[$o|S3|codes]}\`): the cross-cluster path itself is broken, Service or not. Check S1, mesh-verify and the east-west gateways first."
+
+# Answer 1: is the Service needed? S2 (no Service on the ingress member) against S3 (a stub there).
+answer_lists S2 S3
+if ((${#ANS_OK[@]} == n_others)); then
+	HEADLINE="**Service needed in every cluster for HTTPRoute traffic: NO** — S2 answered 200 (${REQUESTS}/${REQUESTS}, body \`${EXPECTED_BODY}\`) from the workload member \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, with no \`echo-s2\` Service there."
+elif ((${#ANS_FAIL[@]} == n_others)); then
+	o="${ANS_FAIL[0]}"
+	HEADLINE="**Service needed in every cluster for HTTPRoute traffic: YES** — S2 (no \`echo-s2\` Service on the ingress member) returned \`${R[$o|S2|codes]}\` through $(join_ticks "${ANS_FAIL[@]}")'s ingress, while S3 (the same route plus a stub Service) answered 200 from the workload member \`${WORKLOAD_CTX}\`."
+elif ((${#ANS_BROKEN[@]} == n_others)); then
+	o="${ANS_BROKEN[0]}"
+	HEADLINE="**INCONCLUSIVE** — S2 and S3 both failed through $(join_ticks "${ANS_BROKEN[@]}")'s ingress (S2 \`${R[$o|S2|codes]}\`, S3 \`${R[$o|S3|codes]}\`): the cross-cluster path itself is broken, Service or not. Check S1, mesh-verify and the east-west gateways first."
 else
 	why=""
-	((${#ok_list[@]} == 0)) || why="${why}S2 answered 200 through $(join_ticks "${ok_list[@]}"); "
-	((${#fail_list[@]} == 0)) || why="${why}S2 failed (S3 answered) through $(join_ticks "${fail_list[@]}"); "
-	((${#broken_list[@]} == 0)) || why="${why}S2 and S3 both failed through $(join_ticks "${broken_list[@]}"); "
-	for o in "${unclear_list[@]}"; do
+	((${#ANS_OK[@]} == 0)) || why="${why}S2 answered 200 through $(join_ticks "${ANS_OK[@]}"); "
+	((${#ANS_FAIL[@]} == 0)) || why="${why}S2 failed (S3 answered) through $(join_ticks "${ANS_FAIL[@]}"); "
+	((${#ANS_BROKEN[@]} == 0)) || why="${why}S2 and S3 both failed through $(join_ticks "${ANS_BROKEN[@]}"); "
+	for o in "${ANS_UNCLEAR[@]}"; do
 		why="${why}S2 through \`${o}\`: HTTP \`${R[$o|S2|codes]}\`, body match \`${R[$o|S2|body_match]}\`, row status \`${R[$o|S2|row_status]}\`; "
 	done
 	((WAIT_TIMED_OUT == 0)) || why="${why}the wait timed out; "
 	[[ "$EXPECTED_BODY" != unknown ]] || why="${why}the workload's echo text is unknown; "
 	HEADLINE="**INCONCLUSIVE** — ${why%; }. See the matrix and the deviations below."
 fi
+
+# ns_part <label> <id> <reference id...>: one answer of the namespace line. <id>'s backend
+# namespace exists on the workload member only; a reference is a scenario whose backend is in
+# the same namespace, so "<id> failed while a reference answered" pins the failure on <id>'s kind.
+ns_part() {
+	local label="$1" id="$2" refs o why="" rs
+	shift 2
+	refs="$(IFS=/; echo "$*")"
+	answer_lists "$id" "$@"
+	if ((${#ANS_OK[@]} == n_others)); then
+		echo "${label} — **NO** (${id} answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` there)"
+		return 0
+	fi
+	if ((${#ANS_FAIL[@]} == n_others)); then
+		o="${ANS_FAIL[0]}"
+		echo "${label} — **YES** (${id} returned \`${R[$o|$id|codes]}\` through $(join_ticks "${ANS_FAIL[@]}")'s ingress, while ${refs}, with the backend in the same namespace, answered 200)"
+		return 0
+	fi
+	((${#ANS_OK[@]} == 0)) || why="${why}${id} answered 200 through $(join_ticks "${ANS_OK[@]}"); "
+	((${#ANS_FAIL[@]} == 0)) || why="${why}${id} failed (${refs} answered) through $(join_ticks "${ANS_FAIL[@]}"); "
+	((${#ANS_BROKEN[@]} == 0)) || why="${why}${id} and ${refs} all failed through $(join_ticks "${ANS_BROKEN[@]}"): the path to \`${NS_REMOTE}\` itself is broken (its istio-discovery label on the workload member?); "
+	for o in "${ANS_UNCLEAR[@]}"; do
+		rs="${R[$o|$id|row_status]}"
+		case "$rs" in
+		*NS_SCENARIO_INVALID*) why="${why}\`${o}\` has a \`${NS_REMOTE}\` namespace itself; " ;;
+		*NS_SCENARIO_UNVERIFIED*) why="${why}could not read whether \`${o}\` has a \`${NS_REMOTE}\` namespace; " ;;
+		*) why="${why}${id} through \`${o}\`: HTTP \`${R[$o|$id|codes]}\`, body match \`${R[$o|$id|body_match]}\`, row status \`${rs}\`; " ;;
+		esac
+	done
+	echo "${label} — **INCONCLUSIVE** (${why%; })"
+}
+
+# Answer 2: is the backend's namespace needed on the ingress member? S7 (kind Service + a
+# ReferenceGrant that can only live in that namespace), S8 (Hostname) and S9 (classic).
+NS_HEADLINE="**Local namespace needed on the ingress cluster** (backend namespace \`${NS_REMOTE}\` only on \`${WORKLOAD_CTX}\`): $(ns_part "kind: Service" S7 S8 S9); $(ns_part "Hostname" S8 S9); $(ns_part "classic VirtualService" S9 S8)."
 
 PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 {
@@ -1136,8 +1259,11 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo ""
 	echo "$HEADLINE"
 	echo ""
+	echo "$NS_HEADLINE"
+	echo ""
 	for o in "${OTHERS[@]}"; do
 		echo "- HTTPRoute status on \`${o}\` for S2, whose Service exists only on the workload member: \`${R[$o|S2|obs_status]}\` (predicted \`${R[$o|S2|exp_status]}\`)."
+		echo "- Through \`${o}\`'s ingress, backend namespace \`${NS_REMOTE}\` $([[ "${PRE[$o|remote_namespace]}" == absent ]] && echo "absent there" || echo "state there: \`${PRE[$o|remote_namespace]}\`"): S7 HTTP \`${R[$o|S7|codes]}\`, status \`${R[$o|S7|obs_status]}\` (predicted \`${R[$o|S7|exp_status]}\`); S8 HTTP \`${R[$o|S8|codes]}\`, status \`${R[$o|S8|obs_status]}\`; S9 HTTP \`${R[$o|S9|codes]}\`."
 	done
 	echo "- Predictions: ${n_match} MATCH, ${n_dev} DEVIATION, ${n_unk} UNKNOWN of $((n_match + n_dev + n_unk)) rows."
 	if [[ -f "${WORK}/argo.rows" ]]; then
@@ -1150,14 +1276,14 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo ""
 	echo "## Matrix"
 	echo ""
-	echo "W = workload member. Status is the HTTPRoute's Accepted/ResolvedRefs (S1: the VirtualService exists). HTTP is code:count over ${REQUESTS} requests."
+	echo "W = workload member. Status is the HTTPRoute's Accepted/ResolvedRefs (S1, S9: the classic VirtualService exists). HTTP is code:count over ${REQUESTS} requests. S7-S9's backends are in \`${NS_REMOTE}\`, which only the workload member has."
 	echo ""
-	echo "| Ingress | Role | Scenario | Host | Status: expected → observed | HTTP: expected → observed | Body | Endpoints: expected → observed (healthy) | Verdict |"
-	echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+	echo "| Ingress | Role | Scenario | Host | Backend | Status: expected → observed | HTTP: expected → observed | Body | Endpoints: expected → observed (healthy) | Verdict |"
+	echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
 	for ctx in "${CONTEXTS[@]}"; do
 		for line in "${SCENARIOS[@]}"; do
-			IFS='|' read -r id _ host _ <<<"$line"
-			echo "| \`$(md_safe "$ctx")\` | $(role "$ctx") | ${id} | \`${host}\` | \`${R[$ctx|$id|exp_status]}\` → \`${R[$ctx|$id|obs_status]}\` | ${R[$ctx|$id|exp_code]} → \`${R[$ctx|$id|codes]}\` | ${R[$ctx|$id|body_match]} | ${R[$ctx|$id|exp_ep]} → ${R[$ctx|$id|obs_ep]} (${R[$ctx|$id|ep_healthy]}) | **${R[$ctx|$id|verdict]}** |"
+			IFS='|' read -r id _ host _ bkind backend bns _ <<<"$line"
+			echo "| \`$(md_safe "$ctx")\` | $(role "$ctx") | ${id} | \`${host}\` | $(backend_label "$bkind" "$backend" "$bns") | \`${R[$ctx|$id|exp_status]}\` → \`${R[$ctx|$id|obs_status]}\` | ${R[$ctx|$id|exp_code]} → \`${R[$ctx|$id|codes]}\` | ${R[$ctx|$id|body_match]} | ${R[$ctx|$id|exp_ep]} → ${R[$ctx|$id|obs_ep]} (${R[$ctx|$id|ep_healthy]}) | **${R[$ctx|$id|verdict]}** |"
 		done
 	done
 	echo ""
@@ -1166,7 +1292,7 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	nd=0
 	for ctx in "${CONTEXTS[@]}"; do
 		for line in "${SCENARIOS[@]}"; do
-			IFS='|' read -r id _ host _ _ _ _ _ _ _ _ _ conf why <<<"$line"
+			IFS='|' read -r id _ host _ _ _ _ _ _ _ _ _ _ conf why <<<"$line"
 			[[ "${R[$ctx|$id|verdict]}" != MATCH ]] || continue
 			nd=$((nd + 1))
 			echo "- **${R[$ctx|$id|verdict]}** \`$(md_safe "$ctx")\` ($(role "$ctx")) ${id} \`${host}\`: $(md_safe "${R[$ctx|$id|detail]}") (row status ${R[$ctx|$id|row_status]}). Prediction, ${conf} confidence: ${why}."
@@ -1176,11 +1302,11 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo ""
 	echo "## Preflight (live, per member)"
 	echo ""
-	echo "| Member | Role | Gateway API CRD (bundle/channel) | GatewayClass istio | Gateway Programmed | Namespace labels | Echo Deployment | Ingress address | Istio CR version |"
-	echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+	echo "| Member | Role | Gateway API CRD (bundle/channel) | GatewayClass istio | Gateway Programmed | Namespace labels | Echo Deployment | Backend namespace (S7-S9) | Echo there | Ingress address | Istio CR version |"
+	echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
 	for i in "${!CONTEXTS[@]}"; do
 		ctx="${CONTEXTS[i]}"
-		echo "| \`$(md_safe "$ctx")\` | $(role "$ctx") | ${PRE[$ctx|crd]} | ${PRE[$ctx|gatewayclass]} | $(gw_programmed "${FINAL_SNAP}/m${i}") | ${PRE[$ctx|namespace]} | ${PRE[$ctx|echo]}; sidecar=${PRE[$ctx|echo_sidecar]} | ${INGRESS_SOURCE[$ctx]:-none} | ${PRE[$ctx|istio_cr_version]} |"
+		echo "| \`$(md_safe "$ctx")\` | $(role "$ctx") | ${PRE[$ctx|crd]} | ${PRE[$ctx|gatewayclass]} | $(gw_programmed "${FINAL_SNAP}/m${i}") | ${PRE[$ctx|namespace]} | ${PRE[$ctx|echo]}; sidecar=${PRE[$ctx|echo_sidecar]} | ${PRE[$ctx|remote_namespace]} | ${PRE[$ctx|echo_remote]}; sidecar=${PRE[$ctx|echo_remote_sidecar]} | ${INGRESS_SOURCE[$ctx]:-none} | ${PRE[$ctx|istio_cr_version]} |"
 	done
 	echo ""
 	echo "istiod env overrides (\`unset\` = the Istio default):"
@@ -1217,6 +1343,7 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 
 echo ""
 echo "${HEADLINE//\*\*/}"
+echo "${NS_HEADLINE//\*\*/}"
 echo "Predictions: ${n_match} MATCH, ${n_dev} DEVIATION, ${n_unk} UNKNOWN."
 echo "TSV:     ${TSV}"
 echo "Summary: ${SUMMARY}"

@@ -10,7 +10,8 @@
 # Apply:  oc --context <acm-hub-ctx> apply -f charts/mesh-verify-gateway-api-appset.yaml
 # Remove: oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
 #         (the finalizers remove the ApplicationSet, the per-member Applications and all they
-#         deployed, including the Gateway API Gateway in istio-system)
+#         deployed, including the Gateway API Gateway in istio-system and the workload member's
+#         backend namespace mesh-verify-gwapi-remote)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

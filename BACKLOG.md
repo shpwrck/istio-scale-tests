@@ -15,7 +15,7 @@ The original issue texts are in the appendix.
 | 5 | Local baseline saturates one server replica (was #88) | Done, lab-validated | — |
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done, lab-validated (shape) | numbers at scale (ROSA) |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
-| 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service in every member? | Built (chart + read-only check), offline-verified; answer predicted from Istio 1.30.5 source | lab run (lab powered off) |
+| 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Built (chart + read-only check), offline-verified; answers predicted from Istio 1.30.5 source | lab run (lab powered off) |
 
 ## 1. Namespace scaling factor
 
@@ -177,13 +177,16 @@ parsers.
 ## 8. Gateway API multicluster ingress check — built, lab run pending
 
 **Question:** with Gateway API (HTTPRoute), must every member carry the backend Service even
-without a local workload, so a request entering any member's ingress reaches the workload?
+without a local workload, so a request entering any member's ingress reaches the workload? And
+must it carry the backend's namespace?
 
 **Done:** `charts/mesh-verify-gateway-api` (deployed with
 `charts/mesh-verify-gateway-api-appset.yaml`; routes on every member, echo workload on one) and `tests/gateway-api/001-run-ingress-check.sh`,
 which records status, traffic, endpoints and Argo CD health per member and leads its report with
-the answer. Predicted from the Istio 1.30.5 source: no Service needed for traffic, but the route's
-status says `BackendNotFound` where the Service is missing
+the answers. Predicted from the Istio 1.30.5 source: no Service needed for traffic, but the route's
+status says `BackendNotFound` where the Service is missing; with a `kind: Service` backendRef the
+namespace is needed (it holds the route or the ReferenceGrant, which istiod reads locally only),
+with a `Hostname` backendRef or a classic VirtualService it is not
 ([`tests/gateway-api/README.md`](tests/gateway-api/README.md)).
 
 **Left:** the lab run (powered off since 2026-10-13); until then the answer and the production

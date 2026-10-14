@@ -82,8 +82,8 @@ oc --context <acm-hub-ctx> delete -f charts/mesh-verify-appset.yaml
 ```
 
 Gateway API: [`tests/gateway-api`](tests/gateway-api/README.md) checks whether an HTTPRoute reaches a
-workload that runs in another member, with or without a Service in the ingress member
-(`charts/mesh-verify-gateway-api-appset.yaml` deploys it the same way).
+workload that runs in another member, with or without a Service, or the Service's namespace, in the
+ingress member (`charts/mesh-verify-gateway-api-appset.yaml` deploys it the same way).
 
 ## Run tests
 
@@ -100,7 +100,7 @@ Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-
 | [churn](tests/churn/README.md) | Convergence time when Deployments scale on one cluster | `tests/churn/003-run-sweep.sh` |
 | [churn-dataplane](tests/churn-dataplane/README.md) | p99 latency change while endpoint churn runs | `tests/churn-dataplane/004-run-sweep.sh` |
 | [tuning](tests/tuning/README.md) | Any suite above, with and without an istiod/proxy tuning profile | `tests/tuning/003-run-tuning-sweep.sh` |
-| [gateway-api](tests/gateway-api/README.md) | Whether an HTTPRoute needs its backend Service in every member (read-only check; deploy `charts/mesh-verify-gateway-api-appset.yaml` first) | `tests/gateway-api/001-run-ingress-check.sh` |
+| [gateway-api](tests/gateway-api/README.md) | Whether an HTTPRoute needs its backend Service, or its namespace, in every member (read-only check; deploy `charts/mesh-verify-gateway-api-appset.yaml` first) | `tests/gateway-api/001-run-ingress-check.sh` |
 
 ```bash
 tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 5 --dry-run
