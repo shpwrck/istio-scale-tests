@@ -1,0 +1,13 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {"name": "istiod-abc-x1.2", "creationTimestamp": "2024-05-29T00:09:58Z"},
+      "involvedObject": {"kind": "Pod", "name": "istiod-abc-x1"},
+      "type": "Warning", "reason": "Evicted", "count": 1,
+      "lastTimestamp": "2024-05-29T00:09:58Z",
+      "message": "The node was low on resource: memory. Pod 192.0.2.21 on ip-192-0-2-7.example.internal, IPv6 [2001:db8::21]:15014"
+    }
+  ]
+}

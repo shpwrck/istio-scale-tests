@@ -14,6 +14,7 @@
 #
 # Every format also carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the
 # inputs) over all input TSVs: mixed:a,b with a warning when they differ (PL26).
+# text, markdown and json add the istiod restart diagnostics (tests/lib/istiod-diag.sh).
 #
 # Usage:
 #   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
@@ -32,6 +33,8 @@ config_preload dataplane "$@"
 source "${ROOT}/config/versions.env"  # DATAPLANE_MIN_QPS_RATIO (fallback for TSVs without one)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -77,6 +80,12 @@ Sweep placeholder rows (target_class na: SETUP_FAILED, PROBE_FAILED,
 STOPPED_UNREACHABLE) form no table cell; every format names them per mesh size
 ("Placeholder rows", csv "# PLACEHOLDER=<mesh>:<STATUS>:<n>", json
 summary.placeholders), also when that mesh size has measured rows.
+
+text, markdown and json also carry an "istiod restart diagnostics" section: every
+istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
+changed, the cause, the evidence folder relative to the results dir) and a tally by
+cause; restarted_untimed rows (may predate the window) are counted apart (json key
+istiod_diag).
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
@@ -638,6 +647,8 @@ report_text() {
 	echo ""
 	local_baseline_lines
 	local_baseline_hint
+	echo ""
+	istiod_diag_report text "$RESULTS_DIR"
 }
 
 report_csv() {
@@ -779,6 +790,8 @@ report_markdown() {
 	echo ""
 	while IFS= read -r line; do echo "- ${line}"; done < <(local_baseline_lines)
 	while IFS= read -r line; do printf '\n%s\n' "$line"; done < <(local_baseline_hint)
+	echo ""
+	istiod_diag_report md "$RESULTS_DIR"
 
 	# Metric glossary at the very end of the markdown summary.
 	glossary_section
@@ -881,6 +894,7 @@ report_json() {
 		--argjson placeholders "$ph_json" \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
+		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
 		'{metadata: $metadata,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
@@ -888,6 +902,7 @@ report_json() {
 		            remotes_not_reachable: $not_reachable, remotes_without_valid_rows: $no_valid},
 		  remote_coverage: $remote_coverage.remote_coverage,
 		  remote_validity: $remote_validity,
+		  istiod_diag: $istiod_diag,
 		  local_baseline: $local_baseline, results: $results}'
 }
 

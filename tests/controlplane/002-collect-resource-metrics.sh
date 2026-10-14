@@ -54,6 +54,10 @@ source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by
 source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_after_window (restart evidence)
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
@@ -1594,6 +1598,11 @@ scrape_window() {
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
 		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$TSV_FILE"
 	done
+
+	# istiod restart evidence for the contexts whose rows above say istiod_restarted 1 or
+	# unknown (tests/lib/istiod-diag.sh, istiod-diag-<RUN_ID>/ next to the TSV). Reads the
+	# rows back; no API call without a restart, and it never fails the window.
+	istiod_diag_after_window "$ts"
 }
 
 if ((WATCH)); then

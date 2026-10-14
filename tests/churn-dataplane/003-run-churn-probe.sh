@@ -39,6 +39,8 @@ source "${ROOT}/tests/lib/fanout.sh"
 source "${ROOT}/tests/lib/fortio.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_summarize (pct_200, top_code)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -630,6 +632,14 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t
 	"$CONVERGENCE_P99" "$QUEUE_TIME_P99" "$PUSH_TIME_P99" >> "$OUTPUT_FILE"
 
 echo "Wrote churn row to $OUTPUT_FILE"
+
+# istiod restart evidence (tests/lib/istiod-diag.sh) after the row is written and before
+# the targets go back to base, into istiod-diag-<RUN_ID>/ next to the output TSV.
+# Best-effort: never changes the row or the exit status. Source context only.
+if [[ "$RESTARTED" != "0" ]]; then
+	istiod_diag_capture "$(istiod_diag_dir "$OUTPUT_FILE" "$RUN_ID")" "${COMBO_ID}-churn" "$SOURCE_CTX" \
+		"$RESTARTED" "$PRE_PODSET" "$(pre_metrics_csv)" "${KUBECTL[@]}"
+fi
 
 # The driver can leave targets at --scale-to (an odd number of toggles per target).
 # Put them back to base so a later baseline or churn window starts all-base.

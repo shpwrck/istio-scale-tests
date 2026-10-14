@@ -58,6 +58,8 @@ source "${ROOT}/tests/lib/fanout.sh"
 source "${ROOT}/tests/lib/fortio.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -434,18 +436,24 @@ snapshot_istiod() {
 	done
 }
 
+# ctx_metrics_csv <ctx_index> <pre|post>: the context's per-pod scrape files, comma-joined,
+# in pod-set order.
+ctx_metrics_csv() {
+	local i="$1" phase="$2" j csv=""
+	local -a st_pods=()
+	read -ra st_pods <<<"${CTX_PODS[$i]:-}"
+	for j in "${!st_pods[@]}"; do
+		csv+="${csv:+,}${ISTIOD_DIR}/${phase}-c${i}-${j}.metrics"
+	done
+	echo "$csv"
+}
+
 # ctx_restart_status <ctx_index>: 0 | 1 | unknown for one context.
 ctx_restart_status() {
-	local i="$1" j pre_csv="" post_csv=""
-	local -a st_pods=()
+	local i="$1"
 	[[ -n "${CTX_PODS[$i]:-}" ]] || { echo unknown; return 0; }
-	read -ra st_pods <<<"${CTX_PODS[$i]}"
-	for j in "${!st_pods[@]}"; do
-		pre_csv+="${pre_csv:+,}${ISTIOD_DIR}/pre-c${i}-${j}.metrics"
-		post_csv+="${post_csv:+,}${ISTIOD_DIR}/post-c${i}-${j}.metrics"
-	done
 	fanout_restart_status "${ISTIOD_DIR}/pre-c${i}.podset" "${ISTIOD_DIR}/post-c${i}.podset" \
-		"$pre_csv" "$post_csv"
+		"$(ctx_metrics_csv "$i" pre)" "$(ctx_metrics_csv "$i" post)"
 }
 
 if ((SETTLE_SEC > 0)); then
@@ -643,6 +651,21 @@ for i in "${!ALL_CTXS[@]}"; do
 	1) ISTIOD_RESTARTED="1"; echo "warning: istiod restarted on ${ALL_CTXS[$i]} during probe" >&2 ;;
 	unknown) [[ "$ISTIOD_RESTARTED" == "1" ]] || ISTIOD_RESTARTED="unknown" ;;
 	esac
+done
+
+# istiod restart evidence (tests/lib/istiod-diag.sh) for every context whose status is not
+# 0, into istiod-diag-<RUN_ID>/ next to the TSV, before the EXIT trap removes ISTIOD_DIR.
+# Best-effort: it never changes a row or the exit status. A context that had no Running
+# istiod pod at the start has no pre-window pod set (trigger no_running_pods).
+DIAG_DIR="$(istiod_diag_dir "$TSV_FILE" "$RUN_ID")"
+for i in "${!ALL_CTXS[@]}"; do
+	[[ "${CTX_RESTARTED[$i]}" == 0 ]] && continue
+	if [[ -n "${CTX_PODS[$i]:-}" ]]; then
+		istiod_diag_capture "$DIAG_DIR" "m${MESH_SIZE}" "${ALL_CTXS[$i]}" "${CTX_RESTARTED[$i]}" \
+			"${ISTIOD_DIR}/pre-c${i}.podset" "$(ctx_metrics_csv "$i" pre)" "${KUBECTL[@]}"
+	else
+		istiod_diag_capture "$DIAG_DIR" "m${MESH_SIZE}" "${ALL_CTXS[$i]}" no_running_pods "" "" "${KUBECTL[@]}"
+	fi
 done
 
 # Rewrite the istiod_restarted column (penultimate) for all data rows.

@@ -380,6 +380,19 @@ JSON). It never changes the exit code. The report also reads 40-column TSVs from
 check; they add nothing to the per-cluster or VS/DR figures and their rows count as traffic
 `none`. `--resume` refuses a sweep whose TSV has a different column count.
 
+After each window, `002` reads its rows back. For every context with `istiod_restarted` `1`
+or `unknown`, it saves the restart evidence to `istiod-diag-<RUN_ID>/` next to the TSV
+(`tests/lib/istiod-diag.sh`; contents, settings and redaction in the
+[dataplane README](../dataplane/README.md#restart-evidence-istiod-diag-run_id)). Here a
+replaced or deleted istiod pod shows as `unknown`, not `1`: the pod list is pinned at the
+baseline, so the old pod's final scrape fails and the new pod is never scraped. The index
+says which it was (`replaced_gone` plus `new_pod`, or `restarted_in_place`). Index rows
+join the TSV on context and window: the tag is `w<timestamp>` (the row's `timestamp`
+without `-`, `:` and the offset, for example `w20261013T122310Z`). A context with no
+istiod pod gets trigger `no_running_pods`. With every row `0` there is no extra API call.
+The report section is not in `004` yet. The capture's settings, the `ISTIOD_DIAG_*` keys,
+are also run-config keys here (`--config`), next to the prefixes listed under "Run config".
+
 ## Watch mode
 
 ```bash

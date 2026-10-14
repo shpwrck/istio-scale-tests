@@ -107,10 +107,11 @@ rules: [Run config](../../README.md#run-config---config-file)).
 ./tests/propagation/007-cleanup.sh --config tests/propagation/configs/smoke.env
 ```
 
-- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `PROPAGATION_*`, `FANOUT_*`
-  and `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX`
-  stay environment only. `004` keeps its own port block (`PROPAGATION_SNAPSHOT_PF_BASE`), so
-  a `FANOUT_PF_BASE` in the file does not move it.
+- **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `PROPAGATION_*`, `FANOUT_*`,
+  `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`.
+  `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
+  keeps its own port block (`PROPAGATION_SNAPSHOT_PF_BASE`), so a `FANOUT_PF_BASE` in the
+  file does not move it.
 - **Run keys:** `PROPAGATION_MESH_SIZES` (`006 --mesh-sizes`; empty: 1 to the number of
   contexts), `PROPAGATION_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path
   starts at the repo root, unlike the flags) and `PROPAGATION_WAIT_TIMEOUT_SEC`
@@ -147,6 +148,16 @@ Row `status`: `OK`, `TIMEOUT_P1|P2|P3|ALL`, `RESTART` (istiod restarted mid-iter
 and the sweep placeholders `SETUP_FAILED` / `PROBE_FAILED`. The report counts every row in
 `n_total` but aggregates only `OK` rows with `restarted=0` (`n_valid`). P2 also drops rows
 with `p2_dirty=1` (EDS pushed but P3 never went healthy on that remote).
+
+When the source or a remote istiod reads as restarted (`RESTART`, `restarted` `1` or
+`unknown`), `002` saves the restart evidence after the iteration's rows to
+`istiod-diag-<RUN_ID>/` in the output dir, tag `iter<N>`. A replaced istiod pod kills its
+port-forward, so that iteration's row usually reads as a timeout or `SCRAPE_INCOMPLETE`,
+not `RESTART`. The next iteration's port-forward re-open sees the new pod set and
+captures it against the previous baseline (trigger `podset_changed`, tag `iter<N-1>`).
+The row keeps its status. Contents, settings and redaction are in the
+[dataplane README](../dataplane/README.md#restart-evidence-istiod-diag-run_id); `005`
+text, markdown and json carry an "istiod restart diagnostics" section.
 
 ## Limitations
 

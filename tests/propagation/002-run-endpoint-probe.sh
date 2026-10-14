@@ -49,6 +49,10 @@ source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -346,6 +350,10 @@ TMPDIR_RUN=$(mktemp -d)
 # has no array-of-arrays); load_rmt_istiod_ports re-expands them.
 SRC_ISTIOD_PORTS=()
 declare -A RMT_ISTIOD_PORTS_STR=()
+# The pods behind those ports (same order): each iteration's pre-window pod set for the
+# istiod restart evidence (tests/lib/istiod-diag.sh).
+SRC_ISTIOD_PODS=()
+declare -A RMT_ISTIOD_PODS_STR=()
 
 cleanup() {
 	for pid in "${POLL_PIDS[@]}"; do
@@ -389,10 +397,50 @@ fanout_reopen_if_dead() {
 	# Kill the whole PF set and re-open every context (cheapest correct option:
 	# the PF_PIDS array is shared; we cannot selectively map pids to a context
 	# without more bookkeeping, and a re-list is needed anyway on pod churn).
-	local pid
+	local pid old_src i
+	local -A old_rmt=()
+	old_src="$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")"
+	for i in "${!RMT_ISTIOD_PODS_STR[@]}"; do old_rmt[$i]="${RMT_ISTIOD_PODS_STR[$i]}"; done
 	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	open_all_istiod_fanouts
+	# A replaced istiod pod kills its port-forward, so its iteration's row reads as a
+	# timeout or SCRAPE_INCOMPLETE, not RESTART. The re-open's listing shows the
+	# replacement: capture it against the previous iteration's baseline.
+	if ((iter > 1)); then
+		diag_podset_changed "$SOURCE_CTX" "$old_src" "$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")" source
+		for i in "${!REMOTES[@]}"; do
+			diag_podset_changed "${REMOTES[i]}" "${old_rmt[$i]:-}" "${RMT_ISTIOD_PODS_STR[$i]:-}" "remote-${i}"
+		done
+	fi
+}
+
+# diag_podset_changed <ctx> <old_pods> <new_pods> <prefix>: capture istiod restart evidence
+# (tests/lib/istiod-diag.sh, trigger podset_changed) when the context's istiod pods differ
+# from those of the previous iteration's baseline (<prefix>.podset and <prefix>-<j>.metrics
+# in its baseline dir). Uses the listing the re-open already made: no API call when the
+# pods match. Always returns 0.
+diag_podset_changed() {
+	local ctx="$1" old="$2" new="$3" prefix="$4" prev
+	[[ -n "$old" && "$old" != "$new" ]] || return 0
+	prev="${TMPDIR_RUN}/baseline-$((iter - 1))"
+	[[ -s "${prev}/${prefix}.podset" ]] || return 0
+	istiod_diag_capture "$DIAG_DIR" "iter$((iter - 1))" "$ctx" podset_changed \
+		"${prev}/${prefix}.podset" "$(podset_metrics_csv "$prev" "$prefix")" "${KUBECTL[@]}"
+	return 0
+}
+
+# podset_metrics_csv <dir> <prefix>: the per-pod scrapes <dir>/<prefix>-<j>.metrics, lined
+# up with <dir>/<prefix>.podset, comma-joined (empty without the pod set).
+podset_metrics_csv() {
+	local dir="$1" prefix="$2" csv="" n=0 p
+	[[ -f "${dir}/${prefix}.podset" ]] || return 0
+	while IFS= read -r p; do
+		[[ -n "$p" ]] || continue
+		csv+="${csv:+,}${dir}/${prefix}-${n}.metrics"
+		n=$((n + 1))
+	done < "${dir}/${prefix}.podset"
+	echo "$csv"
 }
 
 start_envoy_port_forward() {
@@ -1007,21 +1055,19 @@ echo "istiod replicas per context: ${ISTIOD_REPLICAS_CSV}"
 # Open every context's per-pod istiod fanout block. Idempotent re-open is used
 # by fanout_reopen_if_dead (rebuilds all blocks after a PF death / pod churn).
 open_all_istiod_fanouts() {
-	# pods/rpods are required out-array args of fanout_open; we only consume the
-	# port arrays here (the podset is recorded per-scrape), so mark them used.
-	# shellcheck disable=SC2034
-	local pods=()
+	# The pod lists line up with the ports (and so with the scrape files); they become
+	# each iteration's pre-window pod set for the istiod restart evidence.
 	SRC_ISTIOD_PORTS=()
-	fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS pods "${KUBECTL[@]}"
-	local i rp
-	# shellcheck disable=SC2034
-	local rpods
+	SRC_ISTIOD_PODS=()
+	fanout_open "$SOURCE_CTX" 0 PF_PIDS SRC_ISTIOD_PORTS SRC_ISTIOD_PODS "${KUBECTL[@]}"
+	local i
+	local -a rp rpods
 	for i in "${!REMOTES[@]}"; do
 		rp=()
-		# shellcheck disable=SC2034  # required out-arg of fanout_open; podset recorded per-scrape
 		rpods=()
 		fanout_open "${REMOTES[i]}" $(( i + 1 )) PF_PIDS rp rpods "${KUBECTL[@]}"
 		RMT_ISTIOD_PORTS_STR["$i"]="$(IFS=$'\n'; echo "${rp[*]}")"
+		RMT_ISTIOD_PODS_STR["$i"]="$(IFS=$'\n'; echo "${rpods[*]}")"
 	done
 }
 
@@ -1060,9 +1106,13 @@ tally_row() {  # <status>
 	return 0
 }
 
+# istiod restart evidence goes to istiod-diag-<RUN_ID>/ in the output dir (tests/lib/istiod-diag.sh).
+DIAG_DIR="$(istiod_diag_dir "$TSV_FILE" "$RUN_ID")"
+
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
+	RMT_OWN_RESTART=()
 
 	# H1: per-iteration PF liveness check across each context's fanout block. PFs
 	# can die silently between iterations (kubectl PF closes idle conns,
@@ -1081,6 +1131,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo "  Scraping baselines..."
 	BASELINE_DIR="$TMPDIR_RUN/baseline-${iter}"
 	mkdir -p "$BASELINE_DIR"
+	# Pre-window pod sets, lined up with the per-pod scrape files (istiod restart evidence).
+	printf '%s\n' "${SRC_ISTIOD_PODS[@]}" > "$BASELINE_DIR/source.podset"
+	for i in "${!REMOTES[@]}"; do
+		printf '%s\n' "${RMT_ISTIOD_PODS_STR[$i]:-}" > "$BASELINE_DIR/remote-${i}.podset"
+	done
 	BASELINE_INCOMPLETE=0
 	src_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "source" pilot_proxy_convergence_time "${SRC_ISTIOD_PORTS[@]}")"
 	(( $(fanout_scrape_failed_count "$BASELINE_DIR" "source") > 0 )) && BASELINE_INCOMPLETE=1
@@ -1335,6 +1390,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			if [[ "$p2_restarted" == "0" && "$remote_start" == "unknown" ]]; then
 				p2_restarted="unknown"
 			fi
+			# This remote's own istiod status (p2_restarted also carries the source's), for
+			# the restart evidence after the rows.
+			RMT_OWN_RESTART[i]=0
+			[[ "$remote_start" == "unknown" ]] && RMT_OWN_RESTART[i]=unknown
+			[[ "$p2_raw" == "RESTART" ]] && RMT_OWN_RESTART[i]=1
 			# R3-1: p2_dirty is reconciled against THIS remote's P3 outcome, not an
 			# instantaneous health read at the EDS bump (which is causally too early —
 			# the sidecar only goes health_flags::healthy AFTER it applies the push the
@@ -1386,6 +1446,20 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			fi
 		done
 	fi
+
+	# istiod restart evidence (tests/lib/istiod-diag.sh) for the source and each remote
+	# whose own status is not 0, after this iteration's rows; best-effort, never changes a
+	# row. A replaced pod usually reads as a timeout here; the re-open check at the next
+	# iteration's start catches it (diag_podset_changed).
+	if [[ "$restarted" != "0" ]]; then
+		istiod_diag_capture "$DIAG_DIR" "iter${iter}" "$SOURCE_CTX" "$restarted" \
+			"$BASELINE_DIR/source.podset" "$(podset_metrics_csv "$BASELINE_DIR" source)" "${KUBECTL[@]}"
+	fi
+	for i in "${!REMOTES[@]}"; do
+		[[ "${RMT_OWN_RESTART[i]:-0}" != "0" ]] || continue
+		istiod_diag_capture "$DIAG_DIR" "iter${iter}" "${REMOTES[i]}" "${RMT_OWN_RESTART[i]}" \
+			"$BASELINE_DIR/remote-${i}.podset" "$(podset_metrics_csv "$BASELINE_DIR" "remote-${i}")" "${KUBECTL[@]}"
+	done
 done
 
 echo ""

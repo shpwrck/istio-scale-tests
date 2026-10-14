@@ -102,6 +102,11 @@ EXTRACTED_PATTERNS=(
 	'fanout_gauge_sum() {'
 	'fanout_merge_histogram() {'
 	'fanout_restart_status() {'
+	# istiod restart diagnostics: istiod-diag.sh
+	'istiod_diag_dir() {'
+	'istiod_diag_capture() {'
+	'istiod_diag_after_window() {'
+	'istiod_diag_report() {'
 	# per-cluster connected-proxy count + sanity check
 	'fanout_gauge_sum_strict() {'
 	'cap_proxy_check() {'

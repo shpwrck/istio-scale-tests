@@ -1,0 +1,22 @@
+# Pre-window /metrics of istiod-abc-x1 (hand-written fixture). Start time
+# 1.7169408e+09 = 2024-05-29T00:00:00Z; RSS 300 MiB, heap in use 200 MiB,
+# 1234 goroutines, 5 connected proxies over two label series (PL12).
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.7169408e+09
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 3.145728e+08
+# HELP go_memstats_heap_inuse_bytes Number of heap bytes that are in use.
+# TYPE go_memstats_heap_inuse_bytes gauge
+go_memstats_heap_inuse_bytes 2.097152e+08
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 1234
+# HELP pilot_xds Number of endpoints connected to this pilot using XDS.
+# TYPE pilot_xds gauge
+pilot_xds{type="ads"} 3
+pilot_xds{type="grpc"} 2
+# HELP pilot_xds_pushes Pilot build and send errors for lds, rds, cds and eds.
+# TYPE pilot_xds_pushes counter
+pilot_xds_pushes{type="eds"} 200

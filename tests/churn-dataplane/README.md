@@ -162,6 +162,12 @@ other than 200, `-` when there is none), and the preamble records `MIN_PCT_200`,
 `REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE`; the sweep summary carries the same
 keys.
 
+A `POISONED_RESTART` row (or `istiod_restarted=unknown`) also saves the source context's
+restart evidence to `istiod-diag-<RUN_ID>/` next to the TSV, tag `<combo_id>-<phase>`
+(`baseline` or `churn`), after the row is written. Contents, settings and redaction are in
+the [dataplane README](../dataplane/README.md#restart-evidence-istiod-diag-run_id); the
+report's text, md and json carry an "istiod restart diagnostics" section.
+
 The report keeps rows with `status=OK` and `istiod_restarted=0`, pairs them by
 `combo_id` within each TSV file, and prints mean and stdev of `Δp99_ms` with
 `total_runs`/`valid_runs` for each `(mesh_size, churn_rate)`.
@@ -192,9 +198,9 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 ```
 
 - **Keys:** `SETUP_CONTEXTS`, the `config/options.env` keys `COEXEC_*`, `REACH_*`,
-  `FANOUT_*` and `METRICS_SCRAPE_TIMEOUT`, and the churn suite's `CHURN_DEPLOYMENT_COUNT`,
-  `CHURN_BASE_REPLICAS` and `CHURN_SCALE_TO_REPLICAS`. `COEXEC_TEST_NAMESPACE` stays
-  environment only.
+  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`, and the churn
+  suite's `CHURN_DEPLOYMENT_COUNT`, `CHURN_BASE_REPLICAS` and `CHURN_SCALE_TO_REPLICAS`.
+  `COEXEC_TEST_NAMESPACE` stays environment only.
 - **Run keys:** `COEXEC_MESH_SIZES` (`004 --mesh-sizes`; empty: 1 to the number of
   contexts), `COEXEC_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts at
   the repo root, unlike the flags), `COEXEC_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`),

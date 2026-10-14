@@ -121,8 +121,8 @@ QPS 10 and 100, 10 s per level):
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `DATAPLANE_*`, `REACH_*`,
-  `FANOUT_*` and `METRICS_SCRAPE_TIMEOUT`. `DATAPLANE_TEST_NAMESPACE` and
-  `DATAPLANE_MAX_MATRIX` stay environment only.
+  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below) and `METRICS_SCRAPE_TIMEOUT`.
+  `DATAPLANE_TEST_NAMESPACE` and `DATAPLANE_MAX_MATRIX` stay environment only.
 - **Run keys:** `DATAPLANE_MESH_SIZES` (`003 --mesh-sizes`; empty: 1 to the number of
   contexts), `DATAPLANE_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts
   at the repo root, unlike the flags), `DATAPLANE_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`) and
@@ -223,6 +223,114 @@ start times could not be read, gives `unknown`. If a context has Running istiod 
 none serves `/metrics` through port-forward, `002` aborts before any load runs, and the
 sweep records a `PROBE_FAILED` row. The report only aggregates rows with `status=OK` and
 `istiod_restarted=0`.
+
+### Restart evidence (`istiod-diag-<RUN_ID>/`)
+
+Restart evidence expires fast: events after a few hours, a previous container's log at
+the next restart or delete. So when a context's status is `1` or `unknown`, `002` saves
+the evidence right after the run, with `tests/lib/istiod-diag.sh`, into
+`istiod-diag-<RUN_ID>/` next to the TSV (tag `m<mesh_size>`). Every suite does the same
+at its own detection points (controlplane, churn, churn-dataplane and propagation, and
+tuning through them). The rows and their status do not change; the capture only adds
+evidence, and a failed capture never fails the run.
+
+- `index.tsv`: a `# KEY=value` preamble (`ISTIOD_DIAG_SCHEMA`, `RUN_ID`, `CREATED_BY`,
+  `HARNESS_SHA`, `DATE` and the six settings below), a header line, then one row per
+  affected pod (columns below).
+- `NNN-<tag>-<context>/`: the raw evidence of one capture: `summary.md`, the istiod pod
+  status, the Deployment and ReplicaSet revisions, the newest istio-system events of
+  istiod objects, the previous container's log (or the old pod's log; a new pod's startup
+  log), the pre-window `/metrics`, and the nodes' conditions and events.
+- Cost: no API call unless a status is not `0`. Then one pod list; with an affected pod
+  that has no folder yet, a few more reads (Deployments/ReplicaSets, events, one log per
+  pod up to 10, two reads per node up to 3). Every call carries `--request-timeout`.
+- A restart already captured gets a row with `evidence=already_captured`, not a second
+  folder. After `ISTIOD_DIAG_MAX_CAPTURES` folders a run writes rows only
+  (`budget_exhausted`). When `ISTIOD_DIAG_MAX_SEC` runs out, no more calls start
+  (`skipped_deadline`, or a partial folder). A restart that already has a row without a
+  folder gets another try at one, and `already_reported` when that fails too.
+
+`index.tsv` columns, in order (`ISTIOD_DIAG_SCHEMA=1`; `N/A` when a value is unknown):
+
+| # | Column | Values |
+|---|---|---|
+| 1 | `captured_at` | harness UTC time of the capture |
+| 2 | `tag` | where the suite captured: `m<mesh_size>` here; `iter<N>` or `before-iter<N>` (churn, propagation), `<combo_id>-baseline` or `-churn` (churn-dataplane), `w<timestamp>` (controlplane) |
+| 3 | `context` | the context name |
+| 4 | `trigger` | `1` or `unknown` (the suite's status), `podset_changed` (the istiod pod set changed between iterations), `no_running_pods` (no Running istiod at the start, so no pod set to compare) |
+| 5 | `pod` | the istiod pod; `-` on a row about the context (`no_change`, `no_pods`, `capture_failed`) |
+| 6 | `change` | see below |
+| 7 | `cause` | see below |
+| 8 | `restart_count` | the container's `restartCount` at the capture |
+| 9-11 | `exit_code`, `signal`, `term_reason` | the container's `lastState.terminated` (a pod that is not running: its current `state.terminated`); `signal` is `exit_code - 128` when the API gives none and the exit is above 128 |
+| 12-13 | `started_at`, `finished_at` | the current container's start and that termination's end (cluster clock) |
+| 14 | `mem_limit_mi` | the container's memory limit (a gone pod: its ReplicaSet's) |
+| 15-18 | `rss_pre_mi`, `heap_inuse_pre_mi`, `goroutines_pre`, `proxies_pre` | the suite's last pre-window scrape of the pod; `N/A` when that scrape was empty or short (PL29), never `0` |
+| 19 | `pre_scrape_at` | harness time of that scrape |
+| 20 | `rs_changed` | replaced and new pods: `1` when the ReplicaSets changed (a rollout), `0` when not, `N/A` when there is nothing to compare (in-place restarts) |
+| 21 | `node_ready_at` | the node's last Ready transition (cluster clock); read only for a capture with a folder |
+| 22 | `evidence` | the folder `NNN-<tag>-<context>`, or why there is none: `already_captured`, `already_reported`, `budget_exhausted`, `skipped_deadline`, `capture_failed`, `-` (nothing changed) |
+| 23 | `note` | sanitized free text: a panic line, a waiting reason, a fetch error, the restarts of a new pod |
+
+`change`:
+
+- `restarted_in_place`: the container started, or its last run ended, after the pre-window
+  `process_start_time_seconds` (both cluster clocks): it restarted in the window.
+- `restarted_untimed`: the pod has restarts, but there is no pre-window start time (the
+  scrape failed or was short, or there was no pod set), so **the restart may predate the
+  window**. The report lists it with `(untimed)` and keeps it out of the tally. A running
+  container that started more than 300 s before the failed scrape (harness clock, the
+  margin covers clock skew) restarted before the window: that pod is `no_change`.
+- `replaced_gone`, `replaced_failed`, `replaced_terminating`: a pre-window pod that is
+  gone, not Running, or being deleted. `new_pod`: a pod that was not in the pre-window
+  set. `not_running`: no pod set, and the pod is not Running.
+- `no_change` (cause `no_restart_found`), `no_pods` (`no_istiod_pods`), `capture_failed`
+  (`unknown`, with the error in `note`): one row for the context, no pod.
+
+`cause`:
+
+- In place or not running: `oom_killed` (`lastState` OOMKilled), `probe_kill` (a liveness
+  or startup probe failure event for the pod), `crash` (an exit other than 0, 137 and
+  143), `killed` (137 or 143 without OOMKilled), `exited` (exit 0), `node_restart` (no
+  `lastState`, and the node turned Ready at most 300 s before the container started),
+  `no_last_state` (no `lastState` and no node evidence).
+- Replaced: `evicted`, `preempted`, `node_lost`, `rollout` (`rs_changed=1`), `deleted` (a
+  `Killing` event), `scaled` (no new pod), `replaced_unknown`.
+- New pod: `rollout`, `replacement` (stands in for a replaced pod), `scaled`.
+- `no_restart_found`: the istiod pods neither restarted nor changed since the pre-window
+  scrape. Under trigger `unknown` the `unknown` most likely came from a failed scrape, not a
+  restart. Under trigger `1` the capture contradicts the detector: check the pod's
+  `restartCount` and the suite's restart columns by hand.
+
+| Setting (`config/options.env`, also from `--config`) | Default | Effect |
+|---|---|---|
+| `ISTIOD_DIAG_ENABLED` | `1` | `0` turns the capture off |
+| `ISTIOD_DIAG_REQUEST_TIMEOUT` | `15` | kubectl `--request-timeout`, passed unchanged (`15` = 15 s; `500ms`) |
+| `ISTIOD_DIAG_MAX_SEC` | `120` | wall-clock budget per capture |
+| `ISTIOD_DIAG_MAX_CAPTURES` | `20` | evidence folders per run |
+| `ISTIOD_DIAG_LOG_LINES` | `5000` | lines fetched per previous or old-pod log |
+| `ISTIOD_DIAG_LOG_BYTES` | `1048576` | bytes kept per log (the last ones), gzipped |
+
+Redaction: `index.tsv`, `summary.md` and the folder's `README.md` hold no IPs and no
+node names; free text has node and context names replaced (`<node>`, `<ctx>`). The
+`context` column holds the context name, as the TSVs do, so replace it before quoting a
+row. The raw evidence keeps host and node names (stack traces need them) and masks IPs,
+bearer tokens and JWTs. It lives under the gitignored `results/` and must never be
+committed; the folder's own `.gitignore` ignores everything in it, even under a tracked
+`--output-dir`.
+
+For the memory curve before an OOM, `summary.md` lists a PromQL query per pod to run in
+the OpenShift console (Observe > Metrics) at the pod's `finished_at`:
+`max_over_time(container_memory_working_set_bytes{namespace="istio-system",pod="<pod>",container="discovery"}[15m])`.
+The report (`004`) ends text and markdown with an "istiod restart diagnostics" section: a
+tally by cause, then one line per restart with its `run_id` and its evidence folder
+relative to the results dir (`istiod-diag-<RUN_ID>/NNN-...`). Each `002` run (each mesh
+size and rep of a sweep) has its own `RUN_ID`, so `run_id` and `tag` join a line to its
+`latency-<RUN_ID>.tsv` rows. A restart seen more than once (same context, pod,
+restart count and start time; a replaced or new pod by name) is listed once, preferring
+the row with a folder; the other rows count as repeats. json has the section as
+`istiod_diag` (`by_cause`, `untimed_by_cause`, `rows`, `repeat_rows`, `untimed_rows`, and
+`captures` with `run_id`, `evidence`, `repeat` and `untimed`); csv leaves it out.
 
 ## Outputs
 
