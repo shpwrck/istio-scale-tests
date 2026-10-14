@@ -1,18 +1,22 @@
 {{- include "mesh-verify-gateway-api.validate" . }}
-{{- /* The test namespace on every member; the S7-S9 backend namespace (remoteNamespace) on the
-     workload member only, so an ingress member without the workload has no such namespace. */ -}}
+{{- /* The test namespace and the S7b backend namespace (sharedNamespace) on every member; the
+     S7-S9 backend namespace (remoteNamespace) on the workload member only, so an ingress member
+     without the workload has no such namespace. */ -}}
 {{- range $ns := include "mesh-verify-gateway-api.namespaces" . | fromYamlArray }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ $ns }}
+  annotations:
+    # Which scenario set this chart revision deploys; the probe script records it (_helpers.tpl).
+    mesh-verify-gwapi/scenario-set: {{ include "mesh-verify-gateway-api.scenarioSet" $ | quote }}
   labels:
     istio.io/rev: default
     # The campaign baseline's discoverySelectors (spoke-ossm tuningBaseline.discoverySelectors)
-    # need this label: on a member without the workload so its istiod reads the HTTPRoutes in
-    # the test namespace, and on the workload member so the OTHER members' istiods discover its
-    # Services (an istiod applies its own discoverySelectors to remote clusters too) and its own
-    # istiod reads the ReferenceGrant in the backend namespace.
+    # need this label on every member, where istiod reads its own cluster's HTTPRoutes (test
+    # namespace) and ReferenceGrants (backend namespaces); on the workload member it also lets
+    # the OTHER members' istiods discover its Services (an istiod applies its own
+    # discoverySelectors to remote clusters too).
     istio-discovery: enabled
 {{- end }}

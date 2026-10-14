@@ -1,5 +1,6 @@
-{{- /* The echo workload, on the workload member only: one Deployment in the test namespace
-     (S1-S5, C2) and one in the S7-S9 backend namespace, from the same template. */ -}}
+{{- /* The echo workload, on the workload member only: one Deployment in each of the test
+     namespace (S1-S5, C2), the S7b backend namespace and the S7-S9 backend namespace, from the
+     same template. */ -}}
 {{- if include "mesh-verify-gateway-api.isWorkload" . }}
 {{- range $ns := include "mesh-verify-gateway-api.namespaces" . | fromYamlArray }}
 ---

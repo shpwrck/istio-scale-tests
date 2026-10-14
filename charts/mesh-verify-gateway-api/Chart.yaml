@@ -1,5 +1,5 @@
 apiVersion: v2
 name: mesh-verify-gateway-api
-description: On-demand Gateway API multicluster ingress check — HTTPRoutes on every member, echo workload (and the S7-S9 backend namespace) on one, to see whether a request entering any member's ingress reaches it.
+description: On-demand Gateway API multicluster ingress check — HTTPRoutes on every member, echo workload (and the S7-S9 backend namespace) on one, to see whether a request entering any member's ingress reaches it without a local Service or namespace.
 type: application
 version: 0.1.0

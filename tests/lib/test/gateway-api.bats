@@ -1,11 +1,13 @@
 #!/usr/bin/env bats
 # tests/gateway-api/001-run-ingress-check.sh (Gateway API multicluster ingress check) through
 # its real entrypoint (PL33): flags and --help, the dry run, the chart <-> prediction-table
-# contract, and whole runs against stub kubectl/curl/istioctl: the three Service answers, the
-# namespace answers (S7-S9) and their invalid-precondition rows, the not-deployed stops,
+# contract (scenario set included), and whole runs against stub kubectl/curl/istioctl: the Service
+# answers (M1: only a route in place counts; M2: the Service read directly), the namespace answers
+# (S7-S9, S7b) and their invalid-precondition rows, the not-deployed and unreachable-member stops
+# (U1), the data-plane gate (SC1), builds and restarts (R1, PL9), the scenario set (R2),
 # STATUS_TIMEOUT (PL23), an unreachable ingress, best-effort steps that fail without killing the
 # run (PL40), one preamble key set for every output (PL19, PL36), and no address in any output.
-# Stub addresses are documentation addresses (192.0.2.0/24).
+# Stub addresses are documentation addresses (192.0.2.0/24); the stub registry is example.invalid.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -22,11 +24,19 @@ setup() {
 	export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log" STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
 	: >"$STUB_LOG"
 	: >"$STUB_CURL_LOG"
+	# The scenario set the script expects; the stub chart stamps it unless told otherwise.
+	STUB_SCENARIO_SET="$(sed -n 's/^SCENARIO_SET=//p' "$GW")"
+	export STUB_SCENARIO_SET
 
 	# kubectl: ctx-a has no workload, ctx-b runs it (echo text member-b) and alone has the S7-S9
-	# backend namespace; hub is the ACM hub. STUB_NO_NS=<ctx>: the test namespace is missing there.
-	# STUB_NO_REMOTE_NS=1: the backend namespace is missing on ctx-b. STUB_REMOTE_NS_A=present|fail:
-	# ctx-a has it too, or its read fails. STUB_NOSTATUS=<route>: that route has no status on ctx-a.
+	# backend namespace; both have the S7b namespace and its ReferenceGrant; hub is the ACM hub; any
+	# other context does not exist. STUB_NO_NS=<ctx>: the test namespace is missing there.
+	# STUB_NO_REMOTE_NS=1 / STUB_NO_SHARED_NS=1: that backend namespace is missing on ctx-b.
+	# STUB_REMOTE_NS_A=present|fail: ctx-a has the S7-S9 namespace too, or its read fails.
+	# STUB_SHARED_A=absent|nogrant: ctx-a lacks the S7b namespace, or its ReferenceGrant.
+	# STUB_SVC_A=<csv>: more Services in ctx-a's test namespace; STUB_NO_S3_STUB=1: no echo-s3 there.
+	# STUB_NOSTATUS=<route>: that route has no status on ctx-a. STUB_SET_A/STUB_SET_B: the scenario
+	# set stamped on ctx-a/ctx-b. STUB_RESTART=istiod: ctx-a's istiod pod is new at the final read.
 	# STUB_HUB_FAIL=1: hub reads fail. Anything else fails.
 	cat >"${BIN}/kubectl" <<'STUB'
 #!/usr/bin/env bash
@@ -40,6 +50,10 @@ for a in "$@"; do
 	esac
 done
 cmd="${args[*]}"
+case "$ctx" in
+ctx-a | ctx-b | hub) ;;
+*) echo "error: context \"${ctx}\" does not exist" >&2; exit 1 ;;
+esac
 nf() { echo "Error from server (NotFound): $1 not found" >&2; exit 1; }
 route() {
 	if [[ "$1" == "${STUB_NOSTATUS:-}" && "$ctx" == ctx-a ]]; then
@@ -48,6 +62,23 @@ route() {
 	fi
 	printf '{"metadata":{"name":"%s","generation":1},"status":{"parents":[{"controllerName":"istio.io/gateway-controller","parentRef":{"name":"mesh-verify-gwapi"},"conditions":[{"type":"Accepted","status":"True","reason":"Accepted","observedGeneration":1},{"type":"ResolvedRefs","status":"%s","reason":"%s","observedGeneration":1}]}]}}' "$1" "$2" "$3"
 }
+set_of() { if [[ "$ctx" == ctx-a ]]; then echo "${STUB_SET_A:-$STUB_SCENARIO_SET}"; else echo "${STUB_SET_B:-$STUB_SCENARIO_SET}"; fi; }
+# names <csv>: a list whose items have these names.
+names() {
+	local n out="" IFS=,
+	for n in $1; do [[ -z "$n" ]] || out="${out:+${out},}{\"metadata\":{\"name\":\"${n}\"}}"; done
+	printf '{"items":[%s]}\n' "$out"
+}
+# pods <name prefix> <container> <image> <count> <start>: Running pods of one container.
+pods() {
+	local i out="" digest
+	digest="sha256:$(printf '%064d' 7)"
+	for ((i = 1; i <= $4; i++)); do
+		out="${out:+${out},}{\"metadata\":{\"name\":\"$1-p${i}\"},\"spec\":{\"containers\":[{\"name\":\"$2\",\"image\":\"$3\"}]},\"status\":{\"phase\":\"Running\",\"startTime\":\"$5\",\"containerStatuses\":[{\"name\":\"$2\",\"imageID\":\"${3%:*}@${digest}\",\"restartCount\":0}]}}"
+	done
+	printf '{"items":[%s]}\n' "$out"
+}
+LABELS='"labels":{"istio-discovery":"enabled","istio.io/rev":"default"}'
 if [[ "$ctx" == hub ]]; then
 	[[ -z "${STUB_HUB_FAIL:-}" ]] || { echo "Unable to connect to the server: dial tcp 192.0.2.50:6443: i/o timeout" >&2; exit 1; }
 	case "$cmd" in
@@ -72,30 +103,57 @@ case "$cmd" in
 	echo '{"spec":{"controllerName":"istio.io/gateway-controller"},"status":{"conditions":[{"type":"Accepted","status":"True"}]}}' ;;
 "get namespace mesh-verify-gwapi -o json")
 	[[ "${STUB_NO_NS:-}" != "$ctx" ]] || nf 'namespaces "mesh-verify-gwapi"'
-	echo '{"metadata":{"labels":{"istio-discovery":"enabled","istio.io/rev":"default"}}}' ;;
+	printf '{"metadata":{"annotations":{"mesh-verify-gwapi/scenario-set":"%s"},%s}}\n' "$(set_of)" "$LABELS" ;;
 "get namespace mesh-verify-gwapi-remote -o json")
 	if [[ "$ctx" == ctx-a && "${STUB_REMOTE_NS_A:-}" == fail ]]; then
 		echo "Unable to connect to the server: dial tcp 192.0.2.60:6443: i/o timeout" >&2
 		exit 1
 	fi
 	if [[ "$ctx" == ctx-b && -z "${STUB_NO_REMOTE_NS:-}" ]] || [[ "$ctx" == ctx-a && "${STUB_REMOTE_NS_A:-}" == present ]]; then
-		echo '{"metadata":{"labels":{"istio-discovery":"enabled","istio.io/rev":"default"}}}'
+		echo "{\"metadata\":{${LABELS}}}"
 	else
 		nf 'namespaces "mesh-verify-gwapi-remote"'
 	fi ;;
+"get namespace mesh-verify-gwapi-shared -o json")
+	if [[ "$ctx" == ctx-a && "${STUB_SHARED_A:-}" == absent ]] || [[ "$ctx" == ctx-b && -n "${STUB_NO_SHARED_NS:-}" ]]; then
+		nf 'namespaces "mesh-verify-gwapi-shared"'
+	fi
+	echo "{\"metadata\":{${LABELS}}}" ;;
+"-n mesh-verify-gwapi-shared get referencegrants.gateway.networking.k8s.io -o json")
+	if [[ "$ctx" == ctx-a && -n "${STUB_SHARED_A:-}" ]]; then names ""; else names s7b; fi ;;
+"-n mesh-verify-gwapi get svc -o json")
+	if [[ "$ctx" == ctx-b ]]; then
+		names echo-s1,echo-s2,echo-s3,echo-s4,echo-s5
+	else
+		names "$([[ -n "${STUB_NO_S3_STUB:-}" ]] || echo echo-s3),${STUB_SVC_A:-}"
+	fi ;;
+"-n mesh-verify-gwapi-shared get svc -o json")
+	if [[ "$ctx" == ctx-b ]]; then names echo-s7b; else names ""; fi ;;
 "-n istio-system get gateways.gateway.networking.k8s.io mesh-verify-gwapi -o json")
-	echo '{"metadata":{"generation":1},"status":{"conditions":[{"type":"Programmed","status":"True","reason":"Programmed","observedGeneration":1}]}}' ;;
+	printf '{"metadata":{"generation":1,"annotations":{"mesh-verify-gwapi/scenario-set":"%s"}},"status":{"conditions":[{"type":"Programmed","status":"True","reason":"Programmed","observedGeneration":1}]}}\n' "$(set_of)" ;;
 "-n istio-system get deploy -l app=istiod -o json")
 	echo '{"items":[{"spec":{"template":{"spec":{"containers":[{"name":"discovery","env":[{"name":"PILOT_ENABLE_GATEWAY_API","value":"true"}]}]}}}}]}' ;;
+"-n istio-system get pods -l app=istiod -o json")
+	n="$(cat "${STUB_LOG}.istiod-${ctx}" 2>/dev/null || echo 0)"
+	echo $((n + 1)) >"${STUB_LOG}.istiod-${ctx}"
+	start=2026-10-14T08:00:00Z
+	[[ "${STUB_RESTART:-}" != istiod || "$ctx" != ctx-a || "$n" -lt 1 ]] || start=2026-10-14T09:00:00Z
+	pods istiod-6c9d8f discovery registry.example.invalid/openshift-service-mesh/istio-pilot-rhel9:1.30.5 1 "$start" ;;
+"-n istio-system get pods -l istio=ingressgateway -o json")
+	pods istio-ingressgateway-5d8f7 istio-proxy registry.example.invalid/openshift-service-mesh/istio-proxyv2-rhel9:1.30.5 2 2026-10-14T08:00:00Z ;;
+"-n openshift-operators get clusterserviceversions.operators.coreos.com -o json")
+	echo '{"items":[{"metadata":{"name":"servicemeshoperator3.v3.4.3"},"spec":{"version":"3.4.3"},"status":{"phase":"Succeeded"}},{"metadata":{"name":"other-operator.v1.0.0"},"spec":{"version":"1.0.0"},"status":{"phase":"Succeeded"}}]}' ;;
 "get istios.sailoperator.io default -o json") echo '{"spec":{"version":"v1.30.5"}}' ;;
-"-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json")
-	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) ]]; then
+"-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json" | \
+	"-n mesh-verify-gwapi-shared get deploy -l app=gwapi-echo -o json")
+	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) && ( "$cmd" != *-shared* || -z "${STUB_NO_SHARED_NS:-}" ) ]]; then
 		echo '{"items":[{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"http-echo","args":["-listen=:8080","-text=member-b"]}]}}},"status":{"readyReplicas":1}}]}'
 	else
 		echo '{"items":[]}'
 	fi ;;
-"-n mesh-verify-gwapi get pods -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get pods -l app=gwapi-echo -o json")
-	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) ]]; then
+"-n mesh-verify-gwapi get pods -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get pods -l app=gwapi-echo -o json" | \
+	"-n mesh-verify-gwapi-shared get pods -l app=gwapi-echo -o json")
+	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) && ( "$cmd" != *-shared* || -z "${STUB_NO_SHARED_NS:-}" ) ]]; then
 		echo '{"items":[{"spec":{"containers":[{"name":"http-echo"}],"initContainers":[{"name":"istio-proxy"}]}}]}'
 	else
 		echo '{"items":[]}'
@@ -105,13 +163,14 @@ case "$cmd" in
 	echo "{\"status\":{\"loadBalancer\":{\"ingress\":[{\"ip\":\"${ip}\"}]}}}" ;;
 "-n mesh-verify-gwapi get httproutes.gateway.networking.k8s.io -o json")
 	if [[ "$ctx" == ctx-b ]]; then
-		printf '{"items":[%s,%s,%s,%s,%s,%s,%s,%s]}\n' "$(route s2 True ResolvedRefs)" "$(route s3 True ResolvedRefs)" \
+		printf '{"items":[%s,%s,%s,%s,%s,%s,%s,%s,%s]}\n' "$(route s2 True ResolvedRefs)" "$(route s3 True ResolvedRefs)" \
 			"$(route s4 True ResolvedRefs)" "$(route s5 True ResolvedRefs)" "$(route s7 True ResolvedRefs)" \
-			"$(route s8 False BackendNotFound)" "$(route c1 False BackendNotFound)" "$(route c2 True ResolvedRefs)"
+			"$(route s7b True ResolvedRefs)" "$(route s8 False BackendNotFound)" "$(route c1 False BackendNotFound)" \
+			"$(route c2 True ResolvedRefs)"
 	else
-		printf '{"items":[%s,%s,%s,%s,%s,%s,%s]}\n' "$(route s2 False BackendNotFound)" "$(route s3 True ResolvedRefs)" \
+		printf '{"items":[%s,%s,%s,%s,%s,%s,%s,%s]}\n' "$(route s2 False BackendNotFound)" "$(route s3 True ResolvedRefs)" \
 			"$(route s4 True ResolvedRefs)" "$(route s5 False BackendNotFound)" "$(route s7 False RefNotPermitted)" \
-			"$(route s8 False BackendNotFound)" "$(route c1 False BackendNotFound)"
+			"$(route s7b False BackendNotFound)" "$(route s8 False BackendNotFound)" "$(route c1 False BackendNotFound)"
 	fi ;;
 "-n mesh-verify-gwapi get virtualservices.networking.istio.io -o json") echo '{"items":[{"metadata":{"name":"s1"}},{"metadata":{"name":"s9"}}]}' ;;
 *) echo "error: stub: unexpected call: $cmd" >&2; exit 1 ;;
@@ -119,7 +178,8 @@ esac
 STUB
 
 	# curl: 192.0.2.1 = ctx-a's ingress, 192.0.2.2 = ctx-b's; answers as predicted unless
-	# STUB_S<n>_OTHER (a code for S2, S3, S7, S8 or S9 through ctx-a) or STUB_DEAD=a (no answer).
+	# STUB_S<n>_OTHER (a code for S1, S2, S3, S7, S7B, S8 or S9 through ctx-a) or STUB_DEAD=a (no
+	# answer).
 	cat >"${BIN}/curl" <<'STUB'
 #!/usr/bin/env bash
 out="" host="" url=""
@@ -143,9 +203,11 @@ code=200 body=member-b
 case "$host" in
 neg.gwapi.test) code=500 body="" ;;
 s6.gwapi.test) [[ "$m" == b ]] || { code=404; body=""; } ;;
+s1.classic.test) [[ "$m" == b || -z "${STUB_S1_OTHER:-}" ]] || { code="$STUB_S1_OTHER"; body="no healthy upstream"; } ;;
 s2.gwapi.test) [[ "$m" == b || -z "${STUB_S2_OTHER:-}" ]] || { code="$STUB_S2_OTHER"; body="no healthy upstream from 192.0.2.7"; } ;;
 s3.gwapi.test) [[ "$m" == b || -z "${STUB_S3_OTHER:-}" ]] || { code="$STUB_S3_OTHER"; body="no healthy upstream"; } ;;
 s7.gwapi.test) [[ "$m" == b ]] || { code="${STUB_S7_OTHER:-500}"; [[ "$code" == 200 ]] || body=""; } ;;
+s7b.gwapi.test) [[ "$m" == b || -z "${STUB_S7B_OTHER:-}" ]] || { code="$STUB_S7B_OTHER"; body=""; } ;;
 s8.gwapi.test) [[ "$m" == b || -z "${STUB_S8_OTHER:-}" ]] || { code="$STUB_S8_OTHER"; body=""; } ;;
 s9.classic.test) [[ "$m" == b || -z "${STUB_S9_OTHER:-}" ]] || { code="$STUB_S9_OTHER"; body=""; } ;;
 esac
@@ -153,8 +215,9 @@ printf '%s\n' "$body" >"$out"
 printf '%s' "$code"
 STUB
 
-	# istioctl: ctx-b sees the local pod (8080), ctx-a the east-west gateway (15443); echo-none
-	# has no endpoints. STUB_ISTIOCTL=fail|hang breaks every proxy-config call.
+	# istioctl: one endpoints dump per ingress: ctx-b sees the local pod (8080), ctx-a the
+	# east-west gateway (15443), for every backend but echo-none (no cluster), plus an unrelated
+	# cluster. STUB_ISTIOCTL=fail|hang breaks every proxy-config call.
 	cat >"${BIN}/istioctl" <<'STUB'
 #!/usr/bin/env bash
 case " $* " in *" version "*) echo '{"clientVersion":{"version":"1.30.5"}}'; exit 0 ;; esac
@@ -162,24 +225,29 @@ case "${STUB_ISTIOCTL:-}" in
 fail) echo "Error: failed to reach the proxy at 192.0.2.8:15000" >&2; exit 1 ;;
 hang) exec sleep 30 ;;
 esac
-ctx="" cluster=""
+printf '%s\n' "$*" >>"${STUB_LOG}.istioctl"
+ctx=""
 while (($#)); do
 	case "$1" in
 	--context) ctx="$2"; shift 2 ;;
-	--cluster) cluster="$2"; shift 2 ;;
 	*) shift ;;
 	esac
 done
-case "$cluster" in *echo-none*) echo '[]'; exit 0 ;; esac
 if [[ "$ctx" == ctx-b ]]; then port=8080; else port=15443; fi
-printf '[{"name":"%s","hostStatuses":[{"address":{"socketAddress":{"address":"192.0.2.9","portValue":%d}},"healthStatus":{"edsHealthStatus":"HEALTHY"}}]}]\n' "$cluster" "$port"
+out=""
+for c in echo-s1.mesh-verify-gwapi echo-s2.mesh-verify-gwapi echo-s3.mesh-verify-gwapi echo-s4.mesh-verify-gwapi \
+	echo-s5.mesh-verify-gwapi echo-s7.mesh-verify-gwapi-remote echo-s8.mesh-verify-gwapi-remote \
+	echo-s9.mesh-verify-gwapi-remote echo-s7b.mesh-verify-gwapi-shared; do
+	out="${out}{\"name\":\"outbound|8080||${c}.svc.cluster.local\",\"hostStatuses\":[{\"address\":{\"socketAddress\":{\"address\":\"192.0.2.9\",\"portValue\":${port}}},\"healthStatus\":{\"edsHealthStatus\":\"HEALTHY\"}}]},"
+done
+printf '[%s{"name":"outbound|80||unrelated.example.svc.cluster.local","hostStatuses":[{"address":{"socketAddress":{"address":"192.0.2.10","portValue":15443}}}]}]\n' "$out"
 STUB
 	chmod +x "${BIN}/kubectl" "${BIN}/curl" "${BIN}/istioctl"
 }
 
 # gw_run [args...]: a whole run against the stubs (ctx-a, ctx-b; workload ctx-b; hub).
 gw_run() {
-	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_ISTIOCTL_TIMEOUT_SEC="${GWAPI_ISTIOCTL_TIMEOUT_SEC:-5}" \
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_ISTIOCTL_TIMEOUT_SEC="${GWAPI_ISTIOCTL_TIMEOUT_SEC:-5}" GWAPI_SETTLE_SEC=0 \
 		run bash "$GW" --contexts ctx-a,ctx-b --workload-context ctx-b --requests 3 --wait-timeout 5 \
 		--results-dir "$OUT" "$@"
 }
@@ -198,10 +266,10 @@ cell() {
 	awk -F'\t' -v x="$1" -v s="$2" -v c="$c" '$2 == x && $4 == s { print $c }' "$(tsv)"
 }
 
-# no_addresses: no stub address reached any output.
+# no_addresses: no stub address or registry host reached any output.
 no_addresses() {
-	if grep -rE '192\.0\.2\.' "$OUT"; then
-		echo "an address reached the output"
+	if grep -rE '192\.0\.2\.|example\.invalid' "$OUT"; then
+		echo "an address or a registry host reached the output"
 		return 1
 	fi
 }
@@ -213,6 +281,7 @@ preamble_keys() {
 	*) awk '/^run_id\t/ { exit } /^# [A-Za-z_][^=]*=/ { l = substr($0, 3); print substr(l, 1, index(l, "=") - 1) }' "$1" ;;
 	esac
 }
+
 
 # ---------------------------------------------------------------------------
 # Flags, --help, --dry-run
@@ -228,6 +297,15 @@ preamble_keys() {
 	done
 	[ "$n" -eq 11 ]
 	assert_output --partial "-h, --help"
+	# Every flag's environment key, and the relative-path rule of each results-dir source.
+	local k
+	for k in SETUP_CONTEXTS GWAPI_WORKLOAD_CONTEXT GWAPI_HUB_CONTEXT GWAPI_INGRESS GWAPI_REQUESTS GWAPI_TIMEOUT_SEC \
+		GWAPI_WAIT_TIMEOUT_SEC GWAPI_RESULTS_DIR GWAPI_SKIP_PROXY_CONFIG GWAPI_SETTLE_SEC GWAPI_SHARED_NAMESPACE; do
+		assert_output --partial "$k"
+	done
+	assert_output --partial "relative value starts at the repo root"
+	assert_output --partial "starts at the current directory"
+	assert_output --partial "Exit status: 0 whenever the report is written"
 }
 
 @test "gateway-api: --dry-run with the CI args and smoke.env contacts nothing and shows every scenario" {
@@ -239,12 +317,15 @@ preamble_keys() {
 	assert_success
 	assert_output --partial "Dry-run complete"
 	local h
-	for h in s1.classic.test s2.gwapi.test s3.gwapi.test s4.gwapi.test s5.gwapi.test s7.gwapi.test s8.gwapi.test \
-		s9.classic.test neg.gwapi.test s6.gwapi.test; do
+	for h in s1.classic.test s2.gwapi.test s3.gwapi.test s4.gwapi.test s5.gwapi.test s7.gwapi.test s7b.gwapi.test \
+		s8.gwapi.test s9.classic.test neg.gwapi.test s6.gwapi.test; do
 		assert_output --partial "$h"
 	done
 	assert_output --partial "backend namespace mesh-verify-gwapi-remote on ci-b only"
 	assert_output --partial "Service mesh-verify-gwapi-remote/echo-s7"
+	assert_output --partial "Service mesh-verify-gwapi-shared/echo-s7b"
+	assert_output --partial "scenario set $STUB_SCENARIO_SET"
+	assert_output --partial "then s1.classic.test answering 200 through every ingress"
 	assert_output --partial "Proxy evidence: skipped (--skip-proxy-config)"
 	[ ! -s "$STUB_LOG" ]
 	[ ! -s "$STUB_CURL_LOG" ]
@@ -272,11 +353,19 @@ preamble_keys() {
 			[[ "$output" == *"$msg"* ]] || { echo "$args $dry: no '$msg' in: $output"; false; }
 		done
 	done
-	# The S7-S9 backend namespace must be another namespace than the routes'.
+	# The backend namespaces must differ from the routes' and from each other.
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_REMOTE_NAMESPACE=mesh-verify-gwapi \
 		run bash "$GW" --dry-run --contexts ctx-a,ctx-b --workload-context ctx-b
 	assert_failure
 	assert_output --partial "GWAPI_REMOTE_NAMESPACE must differ from GWAPI_NAMESPACE"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_SHARED_NAMESPACE=mesh-verify-gwapi-remote \
+		run bash "$GW" --dry-run --contexts ctx-a,ctx-b --workload-context ctx-b
+	assert_failure
+	assert_output --partial "GWAPI_SHARED_NAMESPACE must differ"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_SETTLE_SEC=-1 \
+		run bash "$GW" --dry-run --contexts ctx-a,ctx-b --workload-context ctx-b
+	assert_failure
+	assert_output --partial "GWAPI_SETTLE_SEC must be a non-negative integer"
 	[ ! -s "$STUB_LOG" ]
 }
 
@@ -311,25 +400,32 @@ rendered() {
 	' | LC_ALL=C sort
 }
 
-# predicted <role>: the same lines from the script's SCENARIOS table. The test namespace is on
-# every member; the backend namespace, both echo Deployments and the grants on the workload
-# member only. A Service exists on the workload member for every scenario that answers 200 there,
-# and on another member exactly when the table predicts a resolved Service-like backend there
-# (the S3 stub). A cross-namespace kind Service backend gets a grant in its namespace.
+# predicted <role>: the same lines from the script's SCENARIOS table. The test namespace and the
+# shared (S7b) backend namespace are on every member; the remote (S7-S9) backend namespace, the
+# echo Deployments and the remote grants on the workload member only. A Service exists on the
+# workload member for every scenario that answers 200 there, and on another member exactly when
+# the table predicts a resolved Service-like backend there (the S3 stub: the script's
+# svc_wanted_other rule). A cross-namespace kind Service backend gets a grant in its namespace,
+# wherever that namespace exists.
 predicted() {
 	local role="$1" line kind host route bkind backend bns st_w st_o code_w code_o st code ns name
 	{
 		echo "ns|mesh-verify-gwapi"
+		echo "ns|mesh-verify-gwapi-shared"
 		if [[ "$role" == workload ]]; then
 			echo "ns|mesh-verify-gwapi-remote"
 			echo "deploy|mesh-verify-gwapi/gwapi-echo"
 			echo "deploy|mesh-verify-gwapi-remote/gwapi-echo"
+			echo "deploy|mesh-verify-gwapi-shared/gwapi-echo"
 		fi
 		while IFS= read -r line; do
 			IFS='|' read -r _ kind host route bkind backend bns st_w st_o code_w code_o _ <<<"$line"
 			if [[ "$role" == workload ]]; then st="$st_w" code="$code_w"; else st="$st_o" code="$code_o"; fi
-			ns=mesh-verify-gwapi
-			[[ "$bns" != remote ]] || ns=mesh-verify-gwapi-remote
+			case "$bns" in
+			remote) ns=mesh-verify-gwapi-remote ;;
+			shared) ns=mesh-verify-gwapi-shared ;;
+			*) ns=mesh-verify-gwapi ;;
+			esac
 			if [[ "$role" == workload && "$code" == 200 ]] || [[ "$role" != workload && "$st" == *ResolvedRefs=True* && "$bkind" != Hostname ]]; then
 				echo "svc|${ns}/${backend}"
 			fi
@@ -340,13 +436,13 @@ predicted() {
 			fi
 			case "$bkind" in
 			Hostname) name="${backend}.${ns}.svc.cluster.local" ;;
-			*) name="$backend"; [[ "$bns" != remote ]] || name="${ns}/${backend}" ;;
+			*) name="$backend"; [[ "$bns" == main ]] || name="${ns}/${backend}" ;;
 			esac
 			echo "${route}|${host}|${bkind}|${name}"
-			if [[ "$role" == workload && "$bkind" == Service && "$bns" == remote ]]; then
+			if [[ "$bkind" == Service && "$bns" != main ]] && [[ "$bns" == shared || "$role" == workload ]]; then
 				echo "grant|${ns}|mesh-verify-gwapi|${backend}"
 			fi
-		done < <(sed -n 's/^[[:space:]]*"\([SC][0-9]|[^"]*\)"$/\1/p' "$GW" \
+		done < <(sed -n 's/^[[:space:]]*"\([SC][0-9][a-z]*|[^"]*\)"$/\1/p' "$GW" \
 			| sed 's/\${ST_OK}/Accepted=True\/ResolvedRefs=True/g; s/\${ST_BNF}/Accepted=True\/ResolvedRefs=False:BackendNotFound/g; s/\${ST_RNP}/Accepted=True\/ResolvedRefs=False:RefNotPermitted/g')
 	} | LC_ALL=C sort -u
 }
@@ -359,21 +455,35 @@ svc_doc() {
 		END { if (hit) printf "%s", doc }'
 }
 
-@test "gateway-api: the chart renders exactly the scenarios the prediction table describes" {
+@test "gateway-api: the chart renders exactly the scenarios the prediction table describes, with the script's scenario set" {
 	command -v helm >/dev/null 2>&1 || skip "helm not installed"
-	# The table has its ten rows, all routes on the workload member.
-	[ "$(predicted workload | grep -vcE '^(svc|ns|deploy|grant)\|')" -eq 10 ]
+	# The table has its eleven rows, all routes on the workload member.
+	[ "$(predicted workload | grep -vcE '^(svc|ns|deploy|grant)\|')" -eq 11 ]
 	diff <(rendered member-b) <(predicted workload)
 	diff <(rendered member-a) <(predicted other)
-	# The backend namespace and everything in it are on the workload member only.
+	# The S7-S9 backend namespace and everything in it are on the workload member only; the S7b
+	# namespace and its grant are everywhere, its Service on the workload member only.
 	rendered member-b | grep -qx 'grant|mesh-verify-gwapi-remote|mesh-verify-gwapi|echo-s7'
-	if rendered member-a | grep -E '^(ns|svc|deploy|grant)\|.*mesh-verify-gwapi-remote'; then
-		echo "the backend namespace reached a member without the workload"
+	rendered member-a | grep -qx 'grant|mesh-verify-gwapi-shared|mesh-verify-gwapi|echo-s7b'
+	if rendered member-a | grep -E '^(ns|svc|deploy|grant)\|.*mesh-verify-gwapi-remote|^svc\|mesh-verify-gwapi-shared/'; then
+		echo "a workload-only object reached a member without the workload"
 		false
 	fi
 	# The S3 stub on another member is byte-identical to the workload's Service.
 	[ -n "$(svc_doc member-a echo-s3)" ]
 	diff <(svc_doc member-a echo-s3) <(svc_doc member-b echo-s3)
+	# R2: every namespace and the Gateway carry the script's scenario set, and nothing else.
+	local m n_obj
+	for m in member-a member-b; do
+		# Every Namespace plus the one Gateway API Gateway (the classic Istio Gateway carries none).
+		n_obj="$(($(helm template t "$CHART" --set "clusterName=${m},workloadCluster=member-b" | grep -c '^kind: Namespace$') + 1))"
+		[ "$(helm template t "$CHART" --set "clusterName=${m},workloadCluster=member-b" \
+			| grep -c "^    mesh-verify-gwapi/scenario-set: \"${STUB_SCENARIO_SET}\"$")" -eq "$n_obj" ]
+		if helm template t "$CHART" --set "clusterName=${m},workloadCluster=member-b" | grep 'scenario-set:' | grep -v "\"${STUB_SCENARIO_SET}\""; then
+			echo "the chart stamps another scenario set than the script's ${STUB_SCENARIO_SET}"
+			false
+		fi
+	done
 }
 
 @test "gateway-api chart: an ApplicationSet render without a valid workloadCluster fails; helm lint's default render does not" {
@@ -386,11 +496,16 @@ svc_doc() {
 	run helm template t "$CHART" --set clusterName=member-b,workloadCluster=member-b,remoteNamespace=mesh-verify-gwapi
 	assert_failure
 	assert_output --partial "remoteNamespace \"mesh-verify-gwapi\" must differ from namespace"
+	run helm template t "$CHART" --set clusterName=member-b,workloadCluster=member-b,sharedNamespace=mesh-verify-gwapi-remote
+	assert_failure
+	assert_output --partial "sharedNamespace \"mesh-verify-gwapi-remote\" must differ"
 	run helm template t "$CHART"
 	assert_success
 	refute_output --partial "kind: Deployment"
-	refute_output --partial "kind: ReferenceGrant"
 	refute_output --partial "name: mesh-verify-gwapi-remote"
+	# Only S7b's grant: S7's lives in the workload member's remote namespace.
+	[ "$(grep -c '^kind: ReferenceGrant$' <<<"$output")" -eq 1 ]
+	assert_output --partial "name: echo-s7b"
 	# The preset passes the workload member through valuesObject.
 	run helm template x "${ROOT}/charts/gitops-hub-ocm-placement-appset" \
 		-f "${ROOT}/charts/gitops-hub-ocm-placement-appset/values-mesh-verify-gateway-api.yaml" \
@@ -404,73 +519,125 @@ svc_doc() {
 # Whole runs against the stubs
 # ---------------------------------------------------------------------------
 
-@test "gateway-api run: the predicted world gives NO, every row MATCH, one key set in every output, no address" {
+@test "gateway-api run: the predicted world gives NO, every row MATCH, builds and readiness recorded, one key set in every output, no address" {
 	gw_run --hub-context hub
 	assert_success
-	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: NO"
-	assert_output --partial "Local namespace needed on the ingress cluster (backend namespace \`mesh-verify-gwapi-remote\` only on \`ctx-b\`): kind: Service — YES (S7 returned \`500:3\`"
-	assert_output --partial "; Hostname — NO (S8 answered 200 from \`ctx-b\` through \`ctx-a\`'s ingress, without \`mesh-verify-gwapi-remote\` there)"
-	assert_output --partial "; classic VirtualService — NO (S9 answered 200"
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: NO — S2 answered 200 (3/3, body \`member-b\`) from the workload member \`ctx-b\` through \`ctx-a\`'s ingress, with no \`echo-s2\` Service there (read in the preflight)."
+	assert_output --partial "Local namespace needed on the ingress cluster (backend namespace \`mesh-verify-gwapi-remote\` only on \`ctx-b\`):"
+	assert_output --partial "  - kind: Service — YES, it needs the namespace (for the ReferenceGrant) but not the Service: S7 (no \`mesh-verify-gwapi-remote\` there) returned \`500:3\` through \`ctx-a\`'s ingress while S9/S8, with the backend in the same namespace, answered 200; S7b (namespace \`mesh-verify-gwapi-shared\` and its ReferenceGrant there, no Service) answered 200 from \`ctx-b\`."
+	assert_output --partial "  - Hostname — NO: S8 answered 200 from \`ctx-b\` through \`ctx-a\`'s ingress, without \`mesh-verify-gwapi-remote\` there."
+	assert_output --partial "  - classic VirtualService — NO: S9 answered 200"
+	assert_output --partial "Predictions: 22 MATCH, 0 DEVIATION, 0 UNKNOWN of 22 rows."
+	assert_output --partial "results will go to ${OUT}/run-"
+	assert_output --partial "Argo CD: ${OUT}/run-"
 	local t s a
 	t="$(tsv)"
 	s="$(summary)"
 	a="$(ls "$OUT"/run-*/argocd-*.tsv)"
-	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id"' "$t" | wc -l)" -eq 20 ]
+	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id"' "$t" | wc -l)" -eq 22 ]
+	# 21 columns, every row.
+	[ "$(awk -F'\t' '!/^#/ && NF != 21' "$t" | wc -l)" -eq 0 ]
 	[ "$(awk -F'\t' -v c="$(col verdict)" '!/^#/ && $1 != "run_id" && $c != "MATCH"' "$t" | wc -l)" -eq 0 ] \
 		|| { grep -v '^#' "$t"; false; }
 	[ "$(cell ctx-a S2 observed_status)" = "Accepted=True/ResolvedRefs=False:BackendNotFound" ]
 	[ "$(cell ctx-a S2 observed_codes)" = "200:3" ]
 	[ "$(cell ctx-a S2 body_match)" = yes ]
 	[ "$(cell ctx-a S2 observed_endpoints)" = "remote-ewgw:15443" ]
-	[ "$(cell ctx-b S2 observed_endpoints)" = local-pod ]
+	[ "$(cell ctx-b S2 observed_endpoints)" = direct ]
 	[ "$(cell ctx-a C1 observed_codes)" = "500:3" ]
+	[ "$(cell ctx-a C1 observed_endpoints)" = none ]
 	[ "$(cell ctx-a C2 observed_status)" = absent ]
 	[ "$(cell ctx-a C2 observed_codes)" = "404:3" ]
-	# The namespace scenarios: S7 needs the grant (so the namespace), S8 and S9 do not.
+	# The namespace scenarios: S7 needs the grant (so the namespace), S7b has it and works without
+	# the Service, S8 and S9 need neither.
 	[ "$(cell ctx-a S7 backend)" = "Service mesh-verify-gwapi-remote/echo-s7" ]
 	[ "$(cell ctx-a S7 observed_status)" = "Accepted=True/ResolvedRefs=False:RefNotPermitted" ]
 	[ "$(cell ctx-a S7 observed_codes)" = "500:3" ]
 	[ "$(cell ctx-a S7 observed_endpoints)" = "remote-ewgw:15443" ]
 	[ "$(cell ctx-b S7 observed_status)" = "Accepted=True/ResolvedRefs=True" ]
+	[ "$(cell ctx-a S7b backend)" = "Service mesh-verify-gwapi-shared/echo-s7b" ]
+	[ "$(cell ctx-a S7b observed_status)" = "Accepted=True/ResolvedRefs=False:BackendNotFound" ]
+	[ "$(cell ctx-a S7b observed_codes)" = "200:3" ]
+	[ "$(cell ctx-a S7b observed_endpoints)" = "remote-ewgw:15443" ]
 	[ "$(cell ctx-b S8 observed_status)" = "Accepted=True/ResolvedRefs=False:BackendNotFound" ]
 	[ "$(cell ctx-a S8 observed_codes)" = "200:3" ]
 	[ "$(cell ctx-a S8 body_match)" = yes ]
 	[ "$(cell ctx-a S9 observed_codes)" = "200:3" ]
 	[ "$(cell ctx-a S9 backend)" = "Service mesh-verify-gwapi-remote/echo-s9" ]
-	# Provenance: live state per member (PL39), the run config, the expected body.
+	# One istioctl dump per ingress, not one per backend.
+	[ "$(wc -l <"${STUB_LOG}.istioctl")" -eq 2 ]
+	grep -q 'proxy-config endpoints -n istio-system istio-ingressgateway-5d8f7-p1 -o json' "${STUB_LOG}.istioctl"
+	# Provenance: live state per member (PL39), builds that ran (R1), restarts (PL9), the
+	# data-plane gate (SC1), the scenario set (R2), the run config, the expected body.
+	grep -qx '# GWAPI_SCHEMA=2' "$t"
 	grep -qx '# GATEWAYCLASS\[ctx-a\]=istio.io/gateway-controller;Accepted=True' "$t"
-	grep -qx '# ISTIOD_ENV\[ctx-b\]=PILOT_ENABLE_GATEWAY_API=true;ENABLE_GATEWAY_API_MANUAL_DEPLOYMENT=unset;PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=unset;ENABLE_MCS_HOST=unset;ENABLE_MCS_SERVICE_DISCOVERY=unset' "$t"
+	grep -qx '# ISTIOD_ENV\[ctx-b\]=PILOT_ENABLE_GATEWAY_API=true;PILOT_ENABLE_GATEWAY_API_STATUS=unset;PILOT_GATEWAY_API_CONTROLLER_NAME=unset;ENABLE_GATEWAY_API_MANUAL_DEPLOYMENT=unset;PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=unset;PILOT_SCOPE_GATEWAY_TO_NAMESPACE=unset;PILOT_MULTI_NETWORK_DISCOVER_GATEWAY_API=unset;ENABLE_MCS_HOST=unset;ENABLE_MCS_SERVICE_DISCOVERY=unset;ENABLE_MCS_CLUSTER_LOCAL=unset' "$t"
+	local digest
+	digest="sha256:$(printf '%064d' 7)"
+	grep -qx "# ISTIOD_IMAGE\[ctx-a\]=istio-pilot-rhel9:1.30.5@${digest}" "$t"
+	grep -qx "# INGRESS_PROXY_IMAGE\[ctx-a\]=istio-proxyv2-rhel9:1.30.5@${digest}" "$t"
+	grep -qx '# OSSM_OPERATOR\[ctx-b\]=3.4.3/Succeeded' "$t"
+	grep -qx '# INGRESS_REPLICAS\[ctx-a\]=2' "$t"
+	grep -qx '# PROXY_CONFIG_POD\[ctx-a\]=istio-ingressgateway-5d8f7-p1' "$t"
+	grep -qx '# ISTIOD_RESTARTED\[ctx-a\]=0' "$t"
+	grep -qx '# INGRESS_RESTARTED\[ctx-b\]=0' "$t"
+	grep -qx '# DATAPLANE_READY_SEC\[ctx-a\]=0' "$t"
+	grep -qx '# DATAPLANE_GATE_HOST=s1.classic.test' "$t"
+	grep -qx '# SETTLE_SEC=0' "$t"
+	grep -qE '^# TRAFFIC_START=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$t"
+	grep -qE '^# TRAFFIC_END=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$t"
+	grep -qx "# SCENARIO_SET=${STUB_SCENARIO_SET}" "$t"
+	grep -qx "# SCENARIO_SET\[ctx-a\]=${STUB_SCENARIO_SET}" "$t"
+	grep -qx '# BACKEND_SERVICES\[ctx-a\]=mesh-verify-gwapi:echo-s3;mesh-verify-gwapi-shared:none' "$t"
+	grep -qx '# BACKEND_SERVICES\[ctx-b\]=mesh-verify-gwapi:echo-s1,echo-s2,echo-s3,echo-s4,echo-s5;mesh-verify-gwapi-shared:echo-s7b' "$t"
+	grep -qx '# SHARED_REFERENCEGRANTS\[ctx-a\]=s7b' "$t"
 	grep -qx '# ECHO_DEPLOYMENT\[ctx-b\]=ready=1/1;sidecar=yes' "$t"
 	grep -qx '# ECHO_DEPLOYMENT\[ctx-a\]=absent;sidecar=no-pods' "$t"
+	grep -qx '# ECHO_SHARED_DEPLOYMENT\[ctx-b\]=ready=1/1;sidecar=yes' "$t"
 	grep -qx '# REMOTE_NAMESPACE=mesh-verify-gwapi-remote' "$t"
+	grep -qx '# SHARED_NAMESPACE=mesh-verify-gwapi-shared' "$t"
 	grep -qx '# REMOTE_NAMESPACE_LABELS\[ctx-a\]=absent' "$t"
 	grep -qx '# REMOTE_NAMESPACE_LABELS\[ctx-b\]=istio-discovery=enabled;istio.io/rev=default' "$t"
+	grep -qx '# SHARED_NAMESPACE_LABELS\[ctx-a\]=istio-discovery=enabled;istio.io/rev=default' "$t"
 	grep -qx '# ECHO_REMOTE_DEPLOYMENT\[ctx-b\]=ready=1/1;sidecar=yes' "$t"
 	grep -qx '# GATEWAY_PROGRAMMED\[ctx-a\]=True' "$t"
 	grep -qx '# EXPECTED_BODY=member-b' "$t"
 	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-a\]=lb-status' "$t"
 	grep -qx '# RUN_CONFIG=none' "$t"
 	grep -qx '# WORKLOAD_CLUSTER=member-b' "$t"
-	# PL36 + PL19: the Argo TSV and the summary's frontmatter carry the TSV's key set.
+	# R2: the hub's revision is not this script's commit.
+	if grep -qx '# HARNESS_SHA=unknown' "$t"; then
+		grep -qx '# CHART_REVISION_VS_HARNESS=unknown' "$t"
+	else
+		grep -qx '# CHART_REVISION_VS_HARNESS=differs' "$t"
+		assert_output --partial "Argo CD synced the chart from 0123456789ab, not from this script's commit"
+	fi
+	# PL36 + PL19: the Argo TSV and the summary's frontmatter carry the TSV's key set, and the
+	# same generated_at.
 	diff <(preamble_keys "$t") <(preamble_keys "$a")
 	diff <(preamble_keys "$t") <(preamble_keys "$s")
+	[ "$(grep '^# generated_at=' "$t")" = "$(grep '^# generated_at=' "$a")" ]
 	# Argo CD: only the ApplicationSet's Applications, with the workload member's role.
 	[ "$(grep -vc '^#\|^run_id' "$a")" -eq 2 ]
 	grep -q $'\tmember-b-mesh-verify-gwapi\tmember-b\tworkload\tHealthy\tSynced\t0123456789ab\t-$' "$a"
 	grep -q $'\tmember-a-mesh-verify-gwapi\tmember-a\tother\tDegraded\tSynced\t0123456789ab\ts2=Degraded,s3=Healthy$' "$a"
 	grep -qx '# CHART_REVISION=0123456789ab' "$t"
-	# The summary leads with the two answers.
+	# The summary leads with the two answers, the namespace one a bullet per backend kind.
 	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | head -1)" = "$(grep -m1 'Service needed' "$s")" ]
 	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | sed -n 2p)" = "$(grep -m1 'Local namespace needed' "$s")" ]
+	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | sed -n 3p)" = "$(grep -m1 '^- kind: Service' "$s")" ]
+	grep -q '^- Hostname — \*\*NO\*\*' "$s"
 	grep -q '| Run config | `none` (sha256 `none`) |' "$s"
-	# No address reaches any output.
+	grep -q '| Traffic | ' "$s"
+	grep -q "istio-pilot-rhel9:1.30.5@${digest}" "$s"
+	# No address or registry host reaches any output.
 	no_addresses
 }
 
-@test "gateway-api run: S2 failing while the S3 stub works gives YES; both failing gives INCONCLUSIVE" {
+@test "gateway-api run: S2 failing while the S3 stub works gives YES; both failing while S1 answers blames the Gateway API path" {
 	STUB_S2_OTHER=500 gw_run
 	assert_success
-	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: YES"
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: YES — S2 (its route in place, no \`echo-s2\` Service on the ingress member) returned \`500:3\`"
 	[ "$(cell ctx-a S2 verdict)" = DEVIATION ]
 	[ "$(cell ctx-a S3 verdict)" = MATCH ]
 	# The answering body is in the row, its address masked.
@@ -479,16 +646,57 @@ svc_doc() {
 	rm -rf "$OUT"
 	STUB_S2_OTHER=503 STUB_S3_OTHER=503 gw_run
 	assert_success
-	assert_output --partial "INCONCLUSIVE"
-	assert_output --partial "the cross-cluster path itself is broken"
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE — 0 of 1 other members answered, 0 failed, 1 with a broken path, 0 unclear: S2 and S3 all failed through \`ctx-a\`: S1 (classic) answered there, so the Gateway API path is broken, not the Service."
 }
 
-@test "gateway-api run: S7 answering gives kind Service NO; S8 failing while S9 answers gives Hostname YES; all three failing is a broken path" {
+@test "gateway-api run: a failure on a route that is not in place is INCONCLUSIVE, never YES (M1)" {
+	STUB_NOSTATUS=s2 STUB_S2_OTHER=404 gw_run --wait-timeout 0
+	assert_success
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	refute_output --partial "traffic: YES"
+	assert_output --partial "S2's route on \`ctx-a\` was not in place (status \`no-status\`, row status \`STATUS_TIMEOUT"
+	[ "$(cell ctx-a S2 observed_codes)" = "404:3" ]
+	[[ "$(cell ctx-a S2 row_status)" == *STATUS_TIMEOUT* ]]
+	# The row is not a deviation either: the route had not been processed.
+	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	[[ "$(cell ctx-a S2 detail)" == *"not judged a deviation: the route had no current status from istio.io/gateway-controller (no-status)"* ]]
+	# The same for the namespace answer: S7 without a status does not make "kind: Service — YES".
+	rm -rf "$OUT"
+	STUB_NOSTATUS=s7 gw_run --wait-timeout 0
+	assert_success
+	assert_output --partial "  - kind: Service — INCONCLUSIVE"
+	assert_output --partial "S7's route on \`ctx-a\` was not in place"
+}
+
+@test "gateway-api run: the 'no local Service' precondition is read, not inferred: a Service where none belongs, or no S3 stub, is INCONCLUSIVE (M2)" {
+	STUB_SVC_A=echo-s2 gw_run
+	assert_success
+	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	[[ "$(cell ctx-a S2 row_status)" == *SVC_SCENARIO_INVALID* ]]
+	[[ "$(cell ctx-a S2 detail)" == *"Service mesh-verify-gwapi/echo-s2 is present on this member (the scenario needs it absent there)"* ]]
+	# C2 does not depend on the Service (no route there), so it stays judged.
+	[ "$(cell ctx-a C2 verdict)" = MATCH ]
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "S2 on \`ctx-a\`: Service mesh-verify-gwapi/echo-s2 is present on this member"
+	refute_output --partial "traffic: NO"
+	grep -qx '# BACKEND_SERVICES\[ctx-a\]=mesh-verify-gwapi:echo-s2,echo-s3;mesh-verify-gwapi-shared:none' "$(tsv)"
+	rm -rf "$OUT"
+	# Without the S3 stub, S3 is no control for a YES.
+	STUB_NO_S3_STUB=1 STUB_S2_OTHER=500 gw_run
+	assert_success
+	[[ "$(cell ctx-a S3 row_status)" == *SVC_SCENARIO_INVALID* ]]
+	[[ "$(cell ctx-a S3 detail)" == *"Service mesh-verify-gwapi/echo-s3 is absent on this member (the scenario needs it present there)"* ]]
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "S2 failed through \`ctx-a\`, but its reference cannot count: S3 on \`ctx-a\`"
+	refute_output --partial "traffic: YES"
+}
+
+@test "gateway-api run: S7 answering gives kind Service NO; S8 failing while S9 answers gives Hostname YES; all failing is a broken path" {
 	STUB_S7_OTHER=200 STUB_S8_OTHER=500 gw_run
 	assert_success
-	assert_output --partial "kind: Service — NO (S7 answered 200 from \`ctx-b\` through \`ctx-a\`'s ingress"
-	assert_output --partial "Hostname — YES (S8 returned \`500:3\` through \`ctx-a\`'s ingress, while S9, with the backend in the same namespace, answered 200)"
-	assert_output --partial "classic VirtualService — NO"
+	assert_output --partial "  - kind: Service — NO: S7 answered 200 from \`ctx-b\` through \`ctx-a\`'s ingress"
+	assert_output --partial "  - Hostname — YES: S8 returned \`500:3\` through \`ctx-a\`'s ingress, while S9, with the backend in the same namespace, answered 200."
+	assert_output --partial "  - classic VirtualService — NO"
 	[ "$(cell ctx-a S7 verdict)" = DEVIATION ]
 	[ "$(cell ctx-a S8 verdict)" = DEVIATION ]
 	# The Service answer does not depend on the namespace scenarios.
@@ -496,9 +704,31 @@ svc_doc() {
 	rm -rf "$OUT"
 	STUB_S7_OTHER=503 STUB_S8_OTHER=503 STUB_S9_OTHER=503 gw_run
 	assert_success
-	assert_output --partial "kind: Service — INCONCLUSIVE (S7 and S8/S9 all failed through \`ctx-a\`: the path to \`mesh-verify-gwapi-remote\` itself is broken"
-	assert_output --partial "Hostname — INCONCLUSIVE"
-	assert_output --partial "classic VirtualService — INCONCLUSIVE"
+	assert_output --partial "  - kind: Service — INCONCLUSIVE (0 of 1 other members answered, 0 failed, 1 with a broken path, 0 unclear): S7 and S9/S8 all failed through \`ctx-a\`: S7b or S1 answered there, so the path to \`mesh-verify-gwapi-remote\` is broken"
+	assert_output --partial "  - Hostname — INCONCLUSIVE"
+	assert_output --partial "  - classic VirtualService — INCONCLUSIVE"
+}
+
+@test "gateway-api run: S7b is the 'namespace yes, Service no' control: its failure, or a missing grant, leaves that part INCONCLUSIVE" {
+	STUB_S7B_OTHER=500 gw_run
+	assert_success
+	assert_output --partial "  - kind: Service — YES, it needs the namespace (for the ReferenceGrant): S7 (no \`mesh-verify-gwapi-remote\` there) returned \`500:3\` through \`ctx-a\`'s ingress while S9/S8, with the backend in the same namespace, answered 200. Whether it needs the Service too is INCONCLUSIVE"
+	assert_output --partial "S7b failed while S1 answered through \`ctx-a\`"
+	[ "$(cell ctx-a S7b verdict)" = DEVIATION ]
+	rm -rf "$OUT"
+	STUB_SHARED_A=nogrant gw_run
+	assert_success
+	[ "$(cell ctx-a S7b verdict)" = UNKNOWN ]
+	[[ "$(cell ctx-a S7b row_status)" == *NS_SCENARIO_INVALID* ]]
+	[[ "$(cell ctx-a S7b detail)" == *"ReferenceGrant mesh-verify-gwapi-shared/s7b is missing on this member"* ]]
+	assert_output --partial "Whether it needs the Service too is INCONCLUSIVE"
+	grep -qx '# SHARED_REFERENCEGRANTS\[ctx-a\]=none' "$(tsv)"
+	rm -rf "$OUT"
+	STUB_SHARED_A=absent gw_run
+	assert_success
+	assert_output --partial "ctx-a: namespace mesh-verify-gwapi-shared is missing here"
+	[[ "$(cell ctx-a S7b detail)" == *"namespace mesh-verify-gwapi-shared is missing on this member"* ]]
+	no_addresses
 }
 
 @test "gateway-api run: the backend namespace on another member makes its S7-S9 rows UNKNOWN, never MATCH, and that answer INCONCLUSIVE" {
@@ -513,17 +743,20 @@ svc_doc() {
 		[ "$(cell ctx-b "$id" verdict)" = MATCH ]
 	done
 	[ "$(cell ctx-a S2 verdict)" = MATCH ]
-	assert_output --partial "kind: Service — INCONCLUSIVE (\`ctx-a\` has a \`mesh-verify-gwapi-remote\` namespace itself)"
+	[ "$(cell ctx-a S7b verdict)" = MATCH ]
+	assert_output --partial "  - kind: Service — INCONCLUSIVE (0 of 1 other members answered, 0 failed, 0 with a broken path, 1 unclear): S7 on \`ctx-a\`: namespace mesh-verify-gwapi-remote exists on this member"
 	assert_output --partial "traffic: NO"
 	grep -qx '# REMOTE_NAMESPACE_LABELS\[ctx-a\]=istio-discovery=enabled;istio.io/rev=default' "$(tsv)"
 	rm -rf "$OUT"
-	# A failed read is not "absent": the rows say NS_SCENARIO_UNVERIFIED (PL39).
+	# A failed read is not "absent": the rows say NS_SCENARIO_UNVERIFIED (PL39), and the warning
+	# quotes kubectl's error, masked (U1).
 	STUB_REMOTE_NS_A=fail gw_run
 	assert_success
+	assert_output --partial "ctx-a: could not read remote_namespace (recorded as unknown): Unable to connect to the server: dial tcp <ip>:6443: i/o timeout"
 	[ "$(cell ctx-a S7 verdict)" = UNKNOWN ]
 	[[ "$(cell ctx-a S7 row_status)" == *NS_SCENARIO_UNVERIFIED* ]]
 	grep -qx '# REMOTE_NAMESPACE_LABELS\[ctx-a\]=unknown' "$(tsv)"
-	assert_output --partial "could not read whether \`ctx-a\` has a \`mesh-verify-gwapi-remote\` namespace"
+	assert_output --partial "could not read whether namespace mesh-verify-gwapi-remote exists on this member"
 	no_addresses
 }
 
@@ -539,11 +772,28 @@ svc_doc() {
 	assert_output --partial "ctx-a (--workload-context): no echo Deployment"
 	assert_output --partial "ctx-b: runs the echo Deployment, but --workload-context is ctx-a"
 	[ ! -e "$OUT" ]
-	# The S7-S9 backend namespace missing on the workload member (an older chart revision).
+	# A backend namespace missing on the workload member (an older chart revision).
 	STUB_NO_REMOTE_NS=1 gw_run
 	assert_failure
 	assert_output --partial "ctx-b (--workload-context): namespace mesh-verify-gwapi-remote (the S7-S9 backends) is missing"
 	[ ! -e "$OUT" ]
+	STUB_NO_SHARED_NS=1 gw_run
+	assert_failure
+	assert_output --partial "ctx-b (--workload-context): namespace mesh-verify-gwapi-shared (the S7b backend) is missing"
+	[ ! -e "$OUT" ]
+}
+
+@test "gateway-api run: a member that answers no preflight read stops the run fast, names it and quotes kubectl (U1)" {
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --contexts ctx-a,ctx-b,ctx-typo --workload-context ctx-b \
+		--wait-timeout 0 --results-dir "$OUT"
+	assert_failure
+	assert_output --partial "error: ctx-typo answered none of the preflight reads; first kubectl error: error: context \"ctx-typo\" does not exist"
+	assert_output --partial "kubectl config get-contexts"
+	assert_output --partial "Nothing was written."
+	refute_output --partial "ctx-a answered none"
+	[ ! -e "$OUT" ]
+	# Two reads and the version probe, not one timeout per preflight read.
+	[ "$(grep -c -- '--context=ctx-typo' "$STUB_LOG")" -le 3 ]
 }
 
 @test "gateway-api run: a route without status after the bounded wait reads STATUS_TIMEOUT, not a deviation (PL4, PL23)" {
@@ -559,13 +809,65 @@ svc_doc() {
 	assert_output --partial "traffic: NO"
 }
 
-@test "gateway-api run: an ingress that never answers is UNKNOWN (INGRESS_UNREACHABLE), and the answer INCONCLUSIVE" {
-	STUB_DEAD=a gw_run
+@test "gateway-api run: an ingress whose S1 never answers is DATAPLANE_NOT_READY: its failures are not blamed on a scenario (SC1)" {
+	STUB_S1_OTHER=503 STUB_S2_OTHER=503 gw_run --wait-timeout 1
 	assert_success
+	assert_output --partial "ctx-a: s1.classic.test did not answer 200 with the echo text through its ingress before the wait's deadline"
+	local t
+	t="$(tsv)"
+	grep -qx '# DATAPLANE_READY_SEC\[ctx-a\]=timeout' "$t"
+	grep -qE '^# DATAPLANE_READY_SEC\[ctx-b\]=[0-9]+$' "$t"
+	[[ "$(cell ctx-a S2 row_status)" == *DATAPLANE_NOT_READY* ]]
+	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	[[ "$(cell ctx-a S2 detail)" == *"not judged a deviation: s1.classic.test never answered 200 through this ingress"* ]]
+	[ "$(cell ctx-a S3 verdict)" = MATCH ]
+	[ "$(cell ctx-b S2 verdict)" = MATCH ]
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "the cross-cluster path through \`ctx-a\` was not ready"
+	refute_output --partial "traffic: YES"
+}
+
+@test "gateway-api run: a deployed chart of another scenario set makes the rows UNKNOWN with a clear message (R2)" {
+	STUB_SET_A=v0 gw_run
+	assert_success
+	assert_output --partial "ctx-a: the deployed chart is not the version this script expects: scenario set v0, expected ${STUB_SCENARIO_SET}"
+	[ "$(awk -F'\t' -v c="$(col row_status)" '$2 == "ctx-a" && $c !~ /SCENARIO_SET_MISMATCH/' "$(tsv)" | wc -l)" -eq 0 ]
+	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	[ "$(cell ctx-b S2 verdict)" = MATCH ]
+	grep -qx '# SCENARIO_SET\[ctx-a\]=v0' "$(tsv)"
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "the chart deployed on this member (scenario set v0) is not the version this script expects"
+	rm -rf "$OUT"
+	# On the workload member, which holds every backend, it voids every member's rows.
+	STUB_SET_B=v0 gw_run
+	assert_success
+	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	[[ "$(cell ctx-b S3 row_status)" == *SCENARIO_SET_MISMATCH* ]]
+	[[ "$(cell ctx-a S3 detail)" == *"the chart deployed on the workload member ctx-b (scenario set v0)"* ]]
+}
+
+@test "gateway-api run: an istiod restart during the run is recorded and turns a deviation into UNKNOWN (PL9)" {
+	STUB_RESTART=istiod STUB_S2_OTHER=500 gw_run
+	assert_success
+	assert_output --partial "ctx-a: an istiod pod restarted or was replaced during the run"
+	grep -qx '# ISTIOD_RESTARTED\[ctx-a\]=1' "$(tsv)"
+	grep -qx '# ISTIOD_RESTARTED\[ctx-b\]=0' "$(tsv)"
+	[[ "$(cell ctx-a S2 row_status)" == *ISTIOD_RESTARTED* ]]
+	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	[ "$(cell ctx-a S3 verdict)" = MATCH ]
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "istiod or the ingress on \`ctx-a\` restarted during the run"
+}
+
+@test "gateway-api run: an ingress that never answers is UNKNOWN (INGRESS_UNREACHABLE), and the answer INCONCLUSIVE" {
+	STUB_DEAD=a gw_run --wait-timeout 1
+	assert_success
+	assert_output --partial "pass --ingress ctx-a=ADDR[:PORT]"
 	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
 	[[ "$(cell ctx-a S2 row_status)" == *INGRESS_UNREACHABLE* ]]
 	[ "$(cell ctx-b S2 verdict)" = MATCH ]
-	assert_output --partial "INCONCLUSIVE"
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "\`ctx-a\`'s ingress never answered from here"
 	no_addresses
 }
 
@@ -574,33 +876,49 @@ svc_doc() {
 	assert_success
 	assert_output --partial "the Argo CD health read failed"
 	assert_output --partial "could not read ApplicationSet openshift-gitops/mesh-verify-gwapi on hub"
-	assert_output --partial "istioctl on ctx-a for echo-s2: exit 1"
+	assert_output --partial "istioctl on ctx-a: exit 1: Error: failed to reach the proxy at <ip>:15000"
 	[ "$(cell ctx-a S2 observed_endpoints)" = unknown ]
 	[[ "$(cell ctx-a S2 row_status)" == *PROXY_CONFIG_FAILED* ]]
 	[ "$(cell ctx-a S2 verdict)" = MATCH ]
+	assert_output --partial "Predictions: 22 MATCH (endpoints not read: 22 rows), 0 DEVIATION, 0 UNKNOWN of 22 rows."
 	ls "$OUT"/run-*/argocd-*.tsv 2>/dev/null && false
 	grep -q '^# ARGOCD=failed on hub' "$(tsv)"
 	grep -qx '# CHART_REVISION=unknown' "$(tsv)"
+	grep -qx '# CHART_REVISION_VS_HARNESS=unknown' "$(tsv)"
 	assert_output --partial "traffic: NO"
 	no_addresses
 	# A hanging istioctl is stopped at GWAPI_ISTIOCTL_TIMEOUT_SEC.
 	rm -rf "$OUT"
 	STUB_ISTIOCTL=hang GWAPI_ISTIOCTL_TIMEOUT_SEC=1 gw_run
 	assert_success
+	assert_output --partial "istioctl on ctx-a: no answer within GWAPI_ISTIOCTL_TIMEOUT_SEC (1 s)"
 	[ "$(cell ctx-a S2 observed_endpoints)" = timeout ]
 	[[ "$(cell ctx-a S2 row_status)" == *PROXY_CONFIG_FAILED* ]]
 }
 
-@test "gateway-api run: --ingress replaces the LoadBalancer read and is recorded as an override" {
-	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_INGRESS=ctx-b=192.0.2.99 \
+@test "gateway-api run: --ingress replaces the LoadBalancer read and is recorded as an override with its port only" {
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_INGRESS=ctx-b=192.0.2.99 GWAPI_SETTLE_SEC=0 \
 		run bash "$GW" --contexts ctx-a,ctx-b --workload-context ctx-b --requests 2 --wait-timeout 0 \
 		--skip-proxy-config --results-dir "$OUT" --ingress ctx-a=192.0.2.1
 	assert_success
 	# The first --ingress replaced GWAPI_INGRESS, so ctx-b kept its LoadBalancer address.
-	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-a\]=override' "$(tsv)"
+	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-a\]=override:port=80' "$(tsv)"
 	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-b\]=lb-status' "$(tsv)"
+	grep -qx '# PROXY_CONFIG_POD\[ctx-a\]=-' "$(tsv)"
 	grep -q '^http://192.0.2.1/ ' "$STUB_CURL_LOG"
 	if grep -q '192.0.2.99' "$STUB_CURL_LOG"; then echo "GWAPI_INGRESS was used despite --ingress"; false; fi
 	[ "$(cell ctx-a S2 observed_endpoints)" = skipped ]
+	assert_output --partial "(endpoints not read: 22 rows)"
+	no_addresses
+	# A port is kept, the host is not; a run config is copied into the run directory.
+	rm -rf "$OUT"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_SETTLE_SEC=0 \
+		run bash "$GW" --config "${ROOT}/tests/gateway-api/configs/smoke.env" --contexts ctx-a,ctx-b \
+		--workload-context ctx-b --requests 1 --wait-timeout 0 --results-dir "$OUT" --ingress ctx-a=192.0.2.1:8080
+	assert_success
+	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-a\]=override:port=8080' "$(tsv)"
+	grep -qx '# RUN_CONFIG=tests/gateway-api/configs/smoke.env' "$(tsv)"
+	ls "$OUT"/run-*/run-config-*.env
+	grep -q 'run-config-' "$(summary)"
 	no_addresses
 }

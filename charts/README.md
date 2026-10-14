@@ -56,6 +56,7 @@ Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/
 | `istiod-monitor/` | manual `helm install` | ServiceMonitor + PrometheusRule for istiod |
 
 `mesh-verify-appset.yaml` and `mesh-verify-gateway-api-appset.yaml` are standalone Applications
-(`oc apply -f` / `oc delete -f`); set both repo URLs and both revisions to your fork/branch, and in
-the second also the workload member's ManagedCluster name (`workloadCluster`). See
-[Verify](../README.md#verify).
+(`oc apply -f` / `oc delete -f`); set both repo URLs and both revisions to your fork/branch. The
+second also needs the workload member's ManagedCluster name (`workloadCluster`): fill in its
+`<workload-cluster>` placeholder with `sed` on the way to `oc apply -f -`, so the name stays out of
+git ([tests/gateway-api](../tests/gateway-api/README.md#deploy)). See [Verify](../README.md#verify).

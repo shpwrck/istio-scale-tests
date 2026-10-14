@@ -185,8 +185,8 @@ must it carry the backend's namespace?
 which records status, traffic, endpoints and Argo CD health per member and leads its report with
 the answers. Predicted from the Istio 1.30.5 source: no Service needed for traffic, but the route's
 status says `BackendNotFound` where the Service is missing; with a `kind: Service` backendRef the
-namespace is needed (it holds the route or the ReferenceGrant, which istiod reads locally only),
-with a `Hostname` backendRef or a classic VirtualService it is not
+namespace is needed (it holds the route or the ReferenceGrant, which istiod reads locally only)
+but not the Service (S7 vs S7b), with a `Hostname` backendRef or a classic VirtualService it is not
 ([`tests/gateway-api/README.md`](tests/gateway-api/README.md)).
 
 **Left:** the lab run (powered off since 2026-10-13); until then the answer and the production
@@ -210,6 +210,10 @@ ride along the ROSA window.
 - `reach_sanitize` masks an unbracketed IPv6 address without `::` only from 4 groups on (a
   3-group form is indistinguishable from HH:MM:SS).
 - `PROPAGATION_METRICS_TIMEOUT` is not checked up front by the propagation sweep.
+- `charts/spoke-ossm/templates/tuning-sidecar.yaml` says the gateway `workloadSelector` Sidecars
+  "take precedence", but Router proxies (gateways) never select a Sidecar in Istio 1.30.5
+  (`pilot/pkg/model/push_context.go:1178-1195`), so the two exemption Sidecars are inert and PL38's
+  premise needs re-checking against the deployed version (found by the Gateway API check's review).
 - controlplane `--resume` treats two `unknown` config hashes (no sha256 tool) as equal.
 
 ## Validation environment

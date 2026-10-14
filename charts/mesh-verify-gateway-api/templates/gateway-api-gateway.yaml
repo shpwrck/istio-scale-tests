@@ -7,6 +7,9 @@ metadata:
   labels:
     {{- include "mesh-verify-gateway-api.labels" . | nindent 4 }}
   # No topology.istio.io/network label: this is not an east-west gateway.
+  annotations:
+    # Which scenario set this chart revision deploys; the probe script records it (_helpers.tpl).
+    mesh-verify-gwapi/scenario-set: {{ include "mesh-verify-gateway-api.scenarioSet" . | quote }}
 spec:
   gatewayClassName: istio
   # Manual deployment: one address of explicit type Hostname binds the Gateway to the existing

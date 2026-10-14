@@ -3,13 +3,14 @@
 clusterName: ""
 
 # ACM ManagedCluster name of the ONE member that runs the echo workload. The member whose
-# clusterName equals it also gets the workload-only Services, the C2 route and the
-# remoteNamespace (with its echo Deployment, Services and ReferenceGrant). Set it in
+# clusterName equals it also gets the echo Deployments, the workload-only Services, the C2 route
+# and the remoteNamespace (with its Services and ReferenceGrant). Set it in
 # charts/mesh-verify-gateway-api-appset.yaml (template.source.helm.valuesObject.workloadCluster).
 # Empty, or not a DNS label (such as the <workload-cluster> placeholder): a render with a
 # clusterName (an ApplicationSet sync) fails with a message, so a check without a workload is
 # never deployed. A render without a clusterName (helm lint in CI) shows what a member without
-# the workload gets: namespace, both Gateways, the routes and the S3 stub Service.
+# the workload gets: both namespaces, both Gateways, the routes, the S7b ReferenceGrant and the
+# S3 stub Service.
 workloadCluster: ""
 
 namespace: mesh-verify-gwapi
@@ -19,8 +20,14 @@ namespace: mesh-verify-gwapi
 # stay in `namespace`. Must differ from `namespace`.
 remoteNamespace: mesh-verify-gwapi-remote
 
+# Backend namespace of S7b, created on EVERY member with its ReferenceGrant, while its Service
+# and echo Deployment exist on the workload member only: the namespace without the Service.
+# Must differ from `namespace` and `remoteNamespace`.
+sharedNamespace: mesh-verify-gwapi-shared
+
 # istiod's DNS domain suffix: used in the Hostname backends (S4, S8), the classic routes'
-# destinations and the Gateway's address.
+# destinations and the Gateway's address. Fixed: the probe script assumes cluster.local; do not
+# override it here.
 clusterDomain: cluster.local
 
 image:
@@ -31,8 +38,8 @@ image:
 replicaCount: 1
 
 service:
-  # Port of every scenario Service and of the echo container. The probe script reads the
-  # ingress cluster outbound|8080||<service FQDN>; change both together.
+  # Port of every scenario Service and of the echo container. Fixed: the probe script reads the
+  # ingress cluster outbound|8080||<service FQDN>; do not override it here.
   port: 8080
 
 # The Gateway API Gateway, bound to the existing ingress gateway (manual deployment: no new

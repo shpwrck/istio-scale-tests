@@ -1,11 +1,12 @@
 {{- /* One template for every scenario Service: the S3 stub (other members) and the workload's
-     Services render identically, so ports and port names cannot drift. A remoteNs Service lives
-     in remoteNamespace, which exists on the workload member only, so it must be workloadOnly. */ -}}
+     Services render identically, so ports and port names cannot drift. A backendNs remote Service
+     lives in remoteNamespace, which exists on the workload member only, so it must be
+     workloadOnly. */ -}}
 {{- $isWorkload := include "mesh-verify-gateway-api.isWorkload" . }}
 {{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
 {{- range $s := $sc.services }}
-{{- if and $s.remoteNs (not $s.workloadOnly) }}
-{{- fail (printf "Service %s: a remoteNs Service must be workloadOnly (its namespace exists on the workload member only)" $s.name) }}
+{{- if and (eq $s.backendNs "remote") (not $s.workloadOnly) }}
+{{- fail (printf "Service %s: a backendNs remote Service must be workloadOnly (its namespace exists on the workload member only)" $s.name) }}
 {{- end }}
 {{- if or (not $s.workloadOnly) $isWorkload }}
 ---

@@ -1,18 +1,19 @@
-{{- /* S7: a kind Service backendRef across namespaces needs a ReferenceGrant in the backend's
-     namespace, and istiod reads grants from its own cluster only. The backend namespace exists
-     on the workload member only, so the grant does too: that is what S7 tests. One grant per
-     remoteNs kind Service route, allowing exactly that backend. */ -}}
-{{- if include "mesh-verify-gateway-api.isWorkload" . }}
+{{- /* A kind Service backendRef across namespaces needs a ReferenceGrant in the backend's
+     namespace, and istiod reads grants from its own cluster only. One grant per such route,
+     allowing exactly that backend, wherever the backend namespace exists: S7's (remoteNamespace)
+     on the workload member only, so the other members have none (what S7 tests); S7b's
+     (sharedNamespace) on every member, so the others have the grant but not the Service (what
+     S7b tests). */ -}}
 {{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
 {{- range $r := $sc.httpRoutes }}
-{{- if and $r.remoteNs (eq $r.kind "Service") }}
+{{- if and (ne $r.backendNs "main") (eq $r.kind "Service") (include "mesh-verify-gateway-api.backendNsHere" (dict "s" $r "ctx" $)) }}
 ---
 # v1beta1: the version istiod 1.30 watches.
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
 metadata:
   name: {{ $r.name }}
-  namespace: {{ $.Values.remoteNamespace }}
+  namespace: {{ include "mesh-verify-gateway-api.backendNamespace" (dict "s" $r "Values" $.Values) }}
   labels:
     {{- include "mesh-verify-gateway-api.labels" $ | nindent 4 }}
     mesh-verify-gwapi/scenario: {{ $r.id }}
@@ -25,6 +26,5 @@ spec:
     - group: ""
       kind: Service
       name: {{ $r.backend }}
-{{- end }}
 {{- end }}
 {{- end }}
