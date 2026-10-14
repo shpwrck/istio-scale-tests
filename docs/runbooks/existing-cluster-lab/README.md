@@ -17,6 +17,10 @@ unrelated workloads, so only this repo's namespaces and the objects below are ow
 
 ### State and access
 
+- **Powered off since 2026-10-13** (graceful node shutdown of all three clusters, after the
+  backlog validation). The mesh, platform and Terraform state are unchanged; nothing was
+  torn down. Before the halt the lab was clean: no test namespaces, no sync windows, istiod
+  at 1 replica, all 30 Applications Synced/Healthy. Power-on steps are in "Verify and recover".
 - Cluster access: the operator's kubeconfig (default `~/.kube/config`) holds one
   context per cluster, authenticated with each cluster's kube-admin client
   certificate. The API certificates are publicly trusted, so no CA data is needed. Credentials stay in that kubeconfig.
@@ -72,6 +76,18 @@ returns 0 when there is no drift.
 
 ### Verify and recover
 
+- Shut down: first take an etcd backup on each node
+  (`oc debug node/<node> -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/assets/backup`),
+  then halt the members and the ACM hub last (`oc debug node/<node> -- chroot /host shutdown -h 1`).
+  Before a long shutdown, read the restart deadline:
+  `oc -n openshift-kube-apiserver-operator get secret kube-apiserver-to-kubelet-signer -o jsonpath='{.metadata.annotations.auth\.openshift\.io/certificate-not-after}'`.
+  For the 2026-10-13 shutdown it is September 2027. The backups stay on each node under
+  `/home/core/assets/backup`.
+- Power on: start all three hosts (any order). When the APIs answer, approve any pending CSRs
+  (`oc get csr`, then `oc adm certificate approve <name>`), wait for `oc get nodes` Ready and
+  `oc get clusteroperators` settled, and restart the workstation's resolver if the API names don't
+  resolve. Then run the checks below. `cacerts` is stored in each member's etcd, so istiod starts
+  on the shared root without waiting for the hub.
 - `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy (30 apps).
 - `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
