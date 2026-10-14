@@ -143,10 +143,18 @@ parsers.
 The lab covered tasks 2, 3 (except AWS load balancers), 5 and 6 at small size: 3 istiod replicas
 fit on one member at the lab's istiod sizing. What still needs ROSA: task 3's AWS load-balancer
 checks, task 6 numbers at hundreds to thousands of services, and task 1's customer-grade numbers.
-Plan: one concentrated window (`docs/runbooks/rosa-validation/`): 3 clusters, members on 3×
-m7i.xlarge, about $4–5/hour for 3–5 hours, torn down right after. Reproducing task 4's original
-restart, or confirming task 3 at the original 19-cluster scale, needs a 20-cluster run (about
-$25–30/hour); only do that if the small runs don't settle it.
+Plan: one concentrated window
+([`docs/runbooks/rosa-validation/window-plan.md`](docs/runbooks/rosa-validation/window-plan.md)):
+Tier C (owner decision, 2026-10-13). It is a hub plus 3 members: `<mesh-a-ctx>` on 3× r7i.2xlarge,
+the other two on 3× m7i.xlarge. It costs $8.25/hour: about $65 core and at most $77 extended (prices
+checked 2026-10-13). The worst case is about $81, under the owner's $100 hard cap, because
+`terraform/rosa-hcp/scripts/003-auto-teardown.sh` tears the clusters down on a timer at T0+8:15.
+Task 6 runs in pods mode at 150 and 250 services × 2 replicas on mesh-a. Tasks 1 and 4 get their
+first live runs there, because the lab was powered off; each starts with a smoke step and a go/no-go.
+Tier B ($6.75/hour, at most about $60) is the fallback. Reproducing task 4's original restart, or
+confirming task 3 at the original 19-cluster scale, needs a 20-cluster run (about $26/hour with 2×
+m7i.xlarge members, about $248/hour shaped like the June campaign); only do that if the small runs
+don't settle it.
 
 ---
 
