@@ -270,19 +270,25 @@ results will go, and:
    two retries), so the long timeout records Envoy's own verdict instead of a client timeout, and
    only once per such cell. Then the **re-probe**: the gate covers the main namespace's echo pod
    only, and the S7–S9 and S7b pods are others whose endpoints can reach an ingress later. Every
-   cell predicted 200 that did not answer 200 with the echo text on every request gets `--requests`
-   more after `GWAPI_REPROBE_DELAY_SEC` (15 s; `REPROBE_DELAY_SEC`; `REPROBE_CELLS` counts them),
-   except through an ingress whose gate never passed (its rows are tainted already). `detail`
-   records the re-probe's codes. If it passes then, the row says `LATE_ENDPOINT` and is `UNKNOWN`,
-   never a deviation, and it counts as answered for a NO; if it fails again, `REPROBE_FAILED`, and
-   its failure counts toward a YES only when the re-probe repeats it.
+   cell that did not answer 200 with the echo text on every request gets `--requests` more after
+   `GWAPI_REPROBE_DELAY_SEC` (15 s; `REPROBE_DELAY_SEC`; `REPROBE_CELLS` counts them) when it was
+   predicted 200, or when its failure makes a YES although predicted (S7 through the other
+   members), so every YES rests on two probes. Not through an ingress whose gate never passed
+   (its rows are tainted already). `detail` records the re-probe's codes. If it passes then, the
+   row says `LATE_ENDPOINT`: predicted 200, the row is `UNKNOWN`, never a deviation, and the cell
+   counts as answered for a NO; S7 answering then is unclear. If it fails again,
+   `REPROBE_FAILED`. Either way its failure counts toward a YES only when the re-probe repeats it,
+   and a re-probe that left no record (`REPROBE_NO_RECORD`) confirms nothing.
 4. **Endpoint evidence** (best effort; skipped by `--skip-proxy-config` or without `istioctl`):
    one `istioctl proxy-config endpoints` dump per ingress (limit `GWAPI_ISTIOCTL_TIMEOUT_SEC`),
    from the first Running ingress pod (`PROXY_CONFIG_POD`; curl may reach any replica), filtered
    in one `jq` pass for each backend's `outbound|8080||<FQDN>` cluster: a class (`direct`,
    `remote-ewgw:15443`, `mixed`, `none`), a count and a healthy count. Addresses are never recorded.
-   The dumps are read in parallel, but at most 4 are parsed at once: one pass over a 20k-cluster
-   dump peaks near 0.5 GB on the host running the script.
+   At most 4 ingresses are read and parsed at once: istioctl decodes Envoy's whole cluster dump, and
+   one `jq` pass over a 20k-cluster dump peaks near 0.5 GB on the host running the script. So on a
+   large mesh the last ingresses are read a few rounds after the first. The parse has the same
+   limit as the read, each dump is deleted once parsed, and an ingress whose turn does not come
+   within ⌈members / 4⌉ × 2 × that limit reads `timeout`.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
    content that was deployed (`CHART_REVISION`; `HARNESS_SHA` only describes the script); when it
@@ -314,24 +320,28 @@ The summary starts with two answers. Each one keeps its label in every outcome (
 specific failure the hypothesis predicts, through a route in place for the whole traffic window,
 for a scenario that works through the workload member; anything else is INCONCLUSIVE with the
 reason. A failure counts only as Envoy's empty-bodied reply for a dropped destination, on every
-request, repeated by the re-probe:
+request, repeated by the re-probe (every YES rests on two probes):
 
 - **HTTPRoute: 500 with an empty body.** An empty or unknown destination has no Envoy cluster, and
   Gateway API routes answer that with `ClusterNotFoundResponseCode=INTERNAL_SERVER_ERROR`
   (`route.go:617-621`), a local reply without a body. C1 is the reference: a 500 counts only where
-  C1 answered 500 through the same ingress. A 500 with a body is not that reply. A 503 means the
-  ingress has the backend's cluster but no healthy endpoint (EDS lag or the east-west path: the
-  destination was kept), and a 404 means the route had not reached that ingress's Envoy. All of
-  these are INCONCLUSIVE.
+  C1 answered the same empty-bodied 500 through the same ingress. A 500 with a body is not that
+  reply. For S7 the 500 must be the missing ReferenceGrant's: its route reads `RefNotPermitted`
+  after the traffic, else INCONCLUSIVE with the status it read. A 503 means the ingress has the
+  backend's cluster but no healthy endpoint (EDS lag or the east-west path: the destination was
+  kept), and a 404 means the route had not reached that ingress's Envoy. All of these are
+  INCONCLUSIVE.
 - **Classic VirtualService: 503 with an empty body** (Envoy's NC: no cluster for the host). A 503
   `no healthy upstream` (UH: the cluster is there, its endpoints are not) is INCONCLUSIVE.
-- **The re-probe must repeat it.** Every such failure on a cell predicted 200 was re-probed
-  (step 3). It counts only when the re-probe failed by the same rule. A re-probe that answered
+- **The re-probe must repeat it.** Every such failure was re-probed (step 3): on a cell predicted
+  200, and S7 through the other members, predicted 500. It counts only when the re-probe failed by
+  the same rule; a re-probe that left no record confirms nothing. A re-probe that answered
   otherwise makes it INCONCLUSIVE, "the failure was not stable": a 500 and then a 503 means the
-  cluster appeared, i.e. the remote Service was discovered late, not dropped. A cell that answered
-  200 with the echo text only on the re-probe (`LATE_ENDPOINT`) counts as answered for a NO, and
-  the NO says how many members answered only then; it never counts as a failure. Where the
-  workload member's own cell or a reference answered only on the re-probe, the INCONCLUSIVE says so.
+  cluster appeared, i.e. the remote Service was discovered late, not dropped. A cell predicted 200
+  that answered 200 with the echo text only on the re-probe (`LATE_ENDPOINT`) counts as answered
+  for a NO, and the NO says how many members answered only then; it never counts as a failure (S7
+  answering only then is INCONCLUSIVE). Where the workload member's own cell or a reference
+  answered only on the re-probe, the INCONCLUSIVE says so.
 
 The first answer, from S2 and S3:
 
@@ -341,18 +351,20 @@ The first answer, from S2 and S3:
   traffic window (`Accepted=True` both when the wait ended and after the traffic, no `STATUS_*`
   flag), on a path with no taint (gate passed, no late endpoint, no restart, verified), and
   again on the re-probe, while S2 answered 200 through the workload member itself, C1 answered
-  500 through the same other-member ingress, and S3 (the same route plus a stub Service) answered
-  200 from the workload member. It lists the codes per member and says what they mean.
+  an empty-bodied 500 through the same other-member ingress, and S3 (the same route plus a stub
+  Service) answered 200 from the workload member. It lists the codes per member, the re-probe's
+  codes, and says what they mean.
 - **INCONCLUSIVE**: anything else, with the reason: S2's route not in place for the whole window,
   another code than an empty-bodied 500 (with what it means), a re-probe that did not repeat the
-  failure, S2 failing through the workload member too (or answering there only on the re-probe), C1
-  not answering 500, S2 failing where S7b, on the same code path (its grant passes, the local
-  Service lookup misses, a soft error), answered 200, also only on the re-probe ("contradicts S7b"),
-  S2 and S3 both failing (S1 answering means the Gateway API path is broken; S1 failing too, the
-  cross-cluster path: check mesh-verify and the east-west gateways), a Service where none belongs or
-  no S3 stub, another or an unreadable scenario set, an ingress without an address or an answer, a
-  data path that was not ready, a late endpoint, a restart during the run or one that could not be
-  checked, members that disagree, or an unknown echo text.
+  failure or left no record, S2 failing through the workload member too (or answering there only on
+  the re-probe), C1 not answering an empty-bodied 500, S2 failing where S7b, on the same code path
+  (its grant passes, the local Service lookup misses, a soft error), answered 200, also only on
+  the re-probe ("contradicts S7b"), S2 and S3 both failing (S1 answering means the Gateway API
+  path is broken; S1 failing too, the cross-cluster path: check mesh-verify and the east-west
+  gateways), a Service where none belongs or no S3 stub, another or an unreadable scenario set, an
+  ingress without an address or an answer, a data path that was not ready, a late endpoint, a
+  restart during the run or one that could not be checked, members that disagree, or an unknown
+  echo text.
 
 When the echo Deployment's `-text` could not be read, the expected body is the workload ingress's
 own most frequent answer in the run (`EXPECTED_BODY_SOURCE=local-answer`), and the answer says so.
@@ -362,9 +374,10 @@ judged through every other member's ingress, which has no `mesh-verify-gwapi-rem
 
 - `kind: Service` from S7, `Hostname` from S8, classic VirtualService from S9.
 - **NO**: the scenario answered 200 with the workload's echo text on every request.
-- **YES**: it failed with the code above, under the same conditions as the first answer's YES
-  (route in place for the whole window, no taint, 200 through the workload member, C1's 500 for an
-  HTTPRoute), while another scenario with its backend in the same namespace (S9/S8 for S7, S9 for
+- **YES**: it failed with the code above, on both probes, under the same conditions as the first
+  answer's YES (route in place for the whole window, no taint, 200 through the workload member, C1's
+  empty-bodied 500 for an HTTPRoute; for S7 a route that reads `RefNotPermitted` after the
+  traffic), while another scenario with its backend in the same namespace (S9/S8 for S7, S9 for
   S8, S8 for S9) answered 200 through the same ingress, so the failure is the kind's own. For
   `kind: Service`, the line adds S7b: "it needs the namespace (for the ReferenceGrant) but not the
   Service" when S7b answered 200; "S7b failed like S2 … consistent with the first answer, so it
@@ -385,11 +398,11 @@ repeats every TSV preamble line.
 
 **Comparing re-runs:** each run writes a fresh `run-<RUN_ID>/`. Runs whose preambles match on
 `GWAPI_SCHEMA` (the rules that turn codes into answers), `SCENARIO_SET` (and `SCENARIO_SET[ctx]`),
-`ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `GATE_PASSES`,
-`SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable verdicts and answers; their codes and timings
-(`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
+`ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `TIMEOUT_SEC`: a
+reply slower than it is `000`, `GATE_PASSES`, `SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable
+verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
 
-TSV (`GWAPI_SCHEMA=4`; 21 tab-separated columns), one row per member × scenario: `run_id
+TSV (`GWAPI_SCHEMA=5`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code
 observed_codes expected_body body_match top_body expected_endpoints observed_endpoints
 endpoints_healthy verdict row_status detail`. Schema 2 added S7b, the `direct` endpoint class
@@ -402,7 +415,11 @@ failure needs its re-probe to repeat it, an HTTPRoute's 500 needs an empty body,
 answered only on the re-probe counts as answered for a NO. The re-probe waits
 `GWAPI_REPROBE_DELAY_SEC` (preamble `REPROBE_DELAY_SEC`; schema 3 reused the settle) and skips
 ingresses whose gate never passed; `detail` always has the re-probe's codes and, after a status
-change, the status the wait ended on. The columns are unchanged.
+change, the status the wait ended on. Schema 5 re-probes S7 through the other members too
+(`REPROBE_CELLS` counts it), so every YES rests on two probes; S7's failure counts only on a route
+that reads `RefNotPermitted` after the traffic; C1 is the 500 reference only with empty bodies;
+and a queued cell whose re-probe left no record is unclear (`REPROBE_NO_RECORD`). The columns are
+unchanged.
 
 - `backend` is the backendRef as the chart writes it; a backend in another namespace as
   `Service mesh-verify-gwapi-remote/echo-s7`.
@@ -422,7 +439,8 @@ change, the status the wait ended on. The columns are unchanged.
 - `expected_endpoints` / `observed_endpoints`: `direct`, `remote-ewgw:15443`, `mixed`, `none`;
   expected `-` = not judged (C2 off the workload member); observed `skipped` (no evidence:
   `--skip-proxy-config` or no istioctl), `unknown` (istioctl failed: its error is printed) or
-  `timeout` (the dump took longer than `GWAPI_ISTIOCTL_TIMEOUT_SEC`: raise it on a large mesh).
+  `timeout` (the dump or its parse took longer than `GWAPI_ISTIOCTL_TIMEOUT_SEC`, or its turn
+  did not come: raise it on a large mesh).
   `endpoints_healthy`: `healthy/total` endpoints, `-` when not read; it is recorded, not judged.
 - `verdict`: `UNKNOWN` if a precondition does not hold (the "voids" flags below), whatever was
   observed; else `DEVIATION` if any checked part differs from the prediction, unless a "taints"
@@ -447,8 +465,9 @@ change, the status the wait ended on. The columns are unchanged.
   | `INGRESS_UNREACHABLE` | no request through that ingress got an HTTP answer (from here) | not probed |
   | `NOT_PROBED` | the cell's traffic produced no record | not probed |
   | `CURL_TIMEOUT` | some requests got no answer in `--timeout`; the detail request is in `detail` | none |
-  | `LATE_ENDPOINT` | failed during the traffic, answered on the re-probe | taints; answered, for a NO |
-  | `REPROBE_FAILED` | failed during the traffic and again on the re-probe (codes in `detail`) | none; it counts only if both probes fail the same way |
+  | `LATE_ENDPOINT` | failed during the traffic, answered on the re-probe | taints; answered for a NO (S7: unclear) |
+  | `REPROBE_FAILED` | failed during the traffic and on the re-probe (codes in `detail`) | none; counts if both fail alike |
+  | `REPROBE_NO_RECORD` | queued for the re-probe, which left no record | none; its failure does not count |
   | `PROXY_CONFIG_FAILED` | the endpoint evidence could not be read (`unknown`/`timeout`) | none: endpoints not judged |
   | `DATAPLANE_NOT_READY` | the data-plane gate never passed through that ingress | taints |
   | `ISTIOD_RESTARTED` / `INGRESS_RESTARTED` | a pod restarted, was replaced or added during the run | taints |
