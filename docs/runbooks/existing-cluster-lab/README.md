@@ -6,46 +6,54 @@ status: current
 
 # Existing-cluster lab leave-behind
 
-The repo's platform and mesh are deployed onto three existing single-node
-OpenShift 4.21 clusters (bare metal, MetalLB for LoadBalancer Services) with
-`terraform/platform` in kubeconfig mode. Roles: `<acm-hub-ctx>` runs ACM and
-OpenShift GitOps and is never a mesh member; `<mesh-a-ctx>` and `<mesh-b-ctx>`
-are the two mesh members (OSSM 3.4 / Istio v1.30.5). The clusters are shared with
-unrelated workloads, so only this repo's namespaces and the objects below are owned here.
+The repo's platform and mesh run on three existing single-node OpenShift 4.21 clusters (bare
+metal, MetalLB for LoadBalancer Services), deployed by `terraform/platform` in kubeconfig mode.
+- `<acm-hub-ctx>` runs ACM and OpenShift GitOps. It is never a mesh member.
+- `<mesh-a-ctx>` and `<mesh-b-ctx>` are the two mesh members (OSSM 3.4 / Istio v1.30.5).
+
+The clusters are shared with unrelated workloads, so only this repo's namespaces and the objects
+below are owned here.
 
 ## Operability
 
 ### State and access
 
-- **Powered on again 2026-10-14** after a graceful shutdown on 2026-10-13 (power-on steps are in
-  "Verify and recover"). The mesh, platform and Terraform state were unchanged. After the
-  Gateway API check (backlog task 8) and its cleanup the lab is clean:
+- **Powered on again 2026-10-14** after a graceful shutdown on 2026-10-13. The power-on steps are
+  in "Verify and recover". The mesh, platform and Terraform state were unchanged. After the Gateway
+  API check (backlog task 8) and its cleanup, the lab is clean:
   - no test namespaces and no sync windows;
   - istiod at 1 replica;
   - all 30 Applications Synced/Healthy and every cluster operator settled;
   - both mesh-wiring gates `Ready ... ca=shared`.
-- Cluster access: the operator's kubeconfig (default `~/.kube/config`) holds one
-  context per cluster, authenticated with each cluster's kube-admin client
-  certificate. The API certificates are publicly trusted, so no CA data is needed. Credentials stay in that kubeconfig.
-- Terraform: local state in `terraform/platform/terraform.tfstate` (default
-  workspace, gitignored). Inputs in `terraform/platform/lab.tfvars` (gitignored),
-  always passed with `-var-file=lab.tfvars`. The `rosa` workspace belongs to the
-  separate `rosa-validation` scope.
+- Cluster access: the operator's kubeconfig (default `~/.kube/config`) holds one context per
+  cluster, each authenticated with that cluster's kube-admin client certificate. The API
+  certificates are publicly trusted, so no CA data is needed. Credentials stay in that kubeconfig.
+  - The ROSA validation scope uses its own kubeconfigs, not this file.
+  - Always pass `--context` explicitly.
+- Terraform: local state in `terraform/platform/terraform.tfstate` (default workspace,
+  gitignored). Inputs are in `terraform/platform/lab.tfvars` (gitignored), always passed with
+  `-var-file=lab.tfvars`. The `rosa` workspace belongs to the separate `rosa-validation` scope.
 - Argo CD syncs from the public GitHub repo at `gitops_app_repo_revision`.
-- Adopted, not installed (owned by the cluster owner): ACM and its MultiClusterHub
-  (`local-cluster`), the OpenShift GitOps operator, cert-manager on the hub, and
-  the OSSM operator Subscription on the members (Argo adopts it; deleting the
-  `<member>-ossm-operator` Application uninstalls OSSM).
-- Lab overrides in `lab.tfvars`: `acm_install_operator = false`,
-  `acm_keep_managed_clusters_on_destroy = true` (destroy leaves the members registered in ACM),
-  `gitops_install_operator = false`, `gitops_app_overrides` (cert-manager app
-  disabled; istiod 1 replica at 1-2 CPU / 3Gi; gateway Services pinned to the
-  MetalLB pool `gw-ingress` with `metallb.io/address-pool`), and
-  `argocd_config_values` (small Argo CD requests, 6Gi controller limit).
-- Removed earlier at the owner's request: a pre-existing, unrelated Istio mesh
-  (backup on the operator workstation under `~/backups/<prior-mesh>-<date>/`, mode 700).
-- MetalLB: each member keeps one two-address pool (`gw-ingress`,
-  autoAssign off). The ingress and east-west gateways use both addresses.
+- Adopted, not installed (owned by the cluster owner):
+  - ACM and its MultiClusterHub (`local-cluster`);
+  - the OpenShift GitOps operator;
+  - cert-manager on the hub;
+  - the OSSM operator Subscription on the members. Argo adopts it, so deleting the
+    `<member>-ossm-operator` Application uninstalls OSSM.
+- Lab overrides in `lab.tfvars`:
+  - `acm_install_operator = false`;
+  - `acm_keep_managed_clusters_on_destroy = true` (destroy leaves the members registered in ACM);
+  - `gitops_install_operator = false`;
+  - `gitops_app_overrides`: the cert-manager app disabled; istiod 1 replica at 1-2 CPU / 3Gi;
+    gateway Services pinned to the MetalLB pool `gw-ingress` with `metallb.io/address-pool`;
+  - `argocd_config_values`: small Argo CD requests, 6Gi controller limit.
+- Removed earlier at the owner's request: a pre-existing, unrelated Istio mesh. Its backup is on
+  the operator workstation under `~/backups/<prior-mesh>-<date>/` (mode 700).
+- MetalLB: each member keeps one two-address pool (`gw-ingress`, autoAssign off). The ingress and
+  east-west gateways use both addresses, so nothing that needs a new LoadBalancer IP can run here.
+- On-demand checks are not part of the app-of-apps: `mesh-verify` and the Gateway API check.
+  Each is an Application applied by hand on `<acm-hub-ctx>` and deleted after use. None is
+  deployed now.
 
 ### Template map
 
@@ -56,12 +64,15 @@ charts/gitops-hub-ocm-placement-appset/values-*.yaml -> ApplicationSets that ren
 charts/argocd-config -> ArgoCD CR `openshift-gitops` (sharding, resources, exclusions, Sail health checks)
 terraform/scripts/create-argocd-cluster-secret.sh -> Secret `<member>-argocd-gitops-cluster-secret` in `openshift-gitops`
 charts/acm-managed-cluster -> ManagedCluster `<member>` + `auto-import-secret` in namespace `<member>` on `<acm-hub-ctx>`
+charts/mesh-verify-appset.yaml -> on demand: Application `mesh-verify-appset` + per-member `mesh-verify` echo apps
+charts/mesh-verify-gateway-api-appset.yaml (workload member filled in by `sed` on the way to the hub) -> on demand: Application `mesh-verify-gateway-api-appset`, ApplicationSet `mesh-verify-gwapi`, per-member Applications `<member>-mesh-verify-gwapi`
+charts/mesh-verify-gateway-api -> on each member: namespaces `mesh-verify-gwapi` + `mesh-verify-gwapi-shared` and the Gateway API Gateway `istio-system/mesh-verify-gwapi`; on the workload member also `mesh-verify-gwapi-remote` and the echo Deployments
 
 ### Re-run
 
-Prerequisites: `kubectl`, `oc`, `jq`, `terraform >= 1.14.8`, a kubeconfig with the
-three contexts. First-time adoption of already-joined members also needs their
-ACM namespaces imported:
+Prerequisites: `kubectl`, `oc`, `jq`, `terraform >= 1.14.8`, and a kubeconfig with the three
+contexts. First-time adoption of members that are already joined also needs their ACM namespaces
+imported:
 
 ```bash
 ./terraform/platform/scripts/001-openapi-preflight.sh --contexts <acm-hub-ctx>
@@ -73,89 +84,145 @@ terraform plan -var-file=lab.tfvars -out=plan.tfplan
 terraform apply plan.tfplan
 ```
 
-The apply is convergent. Edited chart files roll out because each release carries
-its chart's checksum. A follow-up `terraform plan -var-file=lab.tfvars -detailed-exitcode`
-returns 0 when there is no drift.
+The apply is convergent. Edited chart files roll out because each release carries its chart's
+checksum. A follow-up `terraform plan -var-file=lab.tfvars -detailed-exitcode` returns 0 when
+there is no drift.
+
+Gateway API multicluster check, on demand. It is read-only apart from the Application. Use
+istioctl at the mesh's version.
+
+```bash
+sed -e 's/<workload-cluster>/<member-managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
+  | oc --context <acm-hub-ctx> apply -f -
+tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+  --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx>
+oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+```
+
+To pin the deployed chart to the commit you run the script from, also replace `main` in
+`targetRevision` and in the `repo.revision` value with that commit; the 2026-10-14 run did this.
 
 ### Verify and recover
 
-- Shut down: first take an etcd backup on each node
-  (`oc debug node/<node> -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/assets/backup`),
-  then halt the members and the ACM hub last (`oc debug node/<node> -- chroot /host shutdown -h 1`).
+- Shut down:
+  1. Take an etcd backup on each node:
+     `oc debug node/<node> -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/assets/backup`.
+     The backups stay on each node under `/home/core/assets/backup`.
+  2. Halt the members, and the ACM hub last: `oc debug node/<node> -- chroot /host shutdown -h 1`.
+
   Before a long shutdown, read the restart deadline:
   `oc -n openshift-kube-apiserver-operator get secret kube-apiserver-to-kubelet-signer -o jsonpath='{.metadata.annotations.auth\.openshift\.io/certificate-not-after}'`.
-  For the 2026-10-13 shutdown it is September 2027. The backups stay on each node under
-  `/home/core/assets/backup`.
-- Power on: start all three hosts (any order). When the APIs answer, approve any pending CSRs
-  (`oc get csr`, then `oc adm certificate approve <name>`), wait for `oc get nodes` Ready and
-  `oc get clusteroperators` settled, and restart the workstation's resolver if the API names don't
-  resolve. Then run the checks below. `cacerts` is stored in each member's etcd, so istiod starts
-  on the shared root without waiting for the hub.
-  - 2026-10-14 power-on: nodes were Ready within about 3 minutes after approving 6 node CSRs. One
-    of them was OVN-Kubernetes' per-node client certificate (`system:ovn-node:<node>`, signer
-    `kubernetes.io/kube-apiserver-client`). A member whose node goes Ready late keeps its pods in
-    ContainerCreating until OVN is up (about 8 more minutes here).
+  For the 2026-10-13 shutdown it is September 2027.
+- Power on:
+  1. Start all three hosts, in any order.
+  2. When the APIs answer, approve any pending CSRs (`oc get csr`, then
+     `oc adm certificate approve <name>`).
+  3. Wait for `oc get nodes` Ready and `oc get clusteroperators` settled.
+  4. If the API names don't resolve, restart the workstation's resolver.
+  5. Run the checks below. `cacerts` is stored in each member's etcd, so istiod starts on the shared
+     root without waiting for the hub.
+
+  Seen on the 2026-10-14 power-on:
+  - Nodes were Ready within about 3 minutes, after approving 6 node CSRs. One was OVN-Kubernetes'
+    per-node client certificate (`system:ovn-node:<node>`, signer
+    `kubernetes.io/kube-apiserver-client`).
+  - A member whose node goes Ready late keeps its pods in ContainerCreating until OVN is up (about
+    8 more minutes here).
   - The hub's External Secrets Application can read Degraded (`CatalogSourcesUnhealthy`) until the
     catalog pods start; it recovers on its own.
-- `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy (30 apps).
+- `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy
+  (30 apps when no on-demand check is deployed).
 - `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
-- Data plane: apply `charts/mesh-verify-appset.yaml` (set both `targetRevision` and the
-  `repo.revision` parameter to your branch),
-  curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
-  `Host: mesh-verify.local`: answers alternate between both clusters. `oc delete -f` cascades.
-- Gate reports `ca=` mismatch (istiod started before cacerts): once `cacerts` exists in
-  `istio-system`, restart istiod (`oc -n istio-system delete pod -l app=istiod`). istiod reads
-  `cacerts` only at startup, so it does not recover by itself. Then restart every pod that started
-  while istiod ran on the self-signed root, because it holds a certificate from that root. On a
-  fresh install that includes the two gateway Deployments; gateways that predate the race keep
-  working (lab-checked 2026-10-13). If `cacerts` is missing, delete the member's `<member>-ossm`
-  Application on the hub instead. The ApplicationSet recreates it, and the PreSync hook holds the
-  install until cacerts arrives.
-- ESO pods Pending / no cacerts pushed: the hub is out of memory. Lower
-  `argocd_config_values` requests and re-apply. If an ESO Application is stuck
-  "Retrying operation. Attempt #1" after an Argo controller restart, terminate the operation
-  (`oc patch app <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
-  and auto-sync starts a fresh one.
-- Argo controller OOMKilled in a loop: raise its limit in `argocd_config_values`
-  (it uses ~3Gi here even with the default exclusions).
-- Workstation can't resolve the API names after a lab power cycle: the local resolver
-  failed over to a public DNS server. Restart it (`systemctl restart systemd-resolved`).
-- Namespaces stuck Terminating behind a deleted CSI driver: run the driver's
-  DaemonSet in a scratch namespace until the kubelet unmounts, then delete it.
+- Data plane:
+  1. Apply `charts/mesh-verify-appset.yaml` (set both `targetRevision` and the `repo.revision`
+     parameter to your branch).
+  2. Curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
+     `Host: mesh-verify.local`. Answers alternate between both clusters.
+  3. Remove it with `oc delete -f`, which cascades.
+- Gateway API check:
+  - Expected result: `22 MATCH, 0 DEVIATION, 0 UNKNOWN` and the two answers recorded in
+    `docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`.
+  - While deployed, both member Applications read Degraded by design: C1's backend does not exist,
+    and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded.
+  - After `oc delete -f`, the finalizers remove everything within about 20 s. That includes the
+    `istio-system` Gateway, so `get ns mesh-verify-gwapi mesh-verify-gwapi-shared
+    mesh-verify-gwapi-remote` should find nothing on either member.
+  - If the Gateway survives, delete `gateways.gateway.networking.k8s.io/mesh-verify-gwapi` in
+    `istio-system`. Spell out the resource name: `gateway` alone is ambiguous with Istio's.
+- Gate reports a `ca=` mismatch (istiod started before cacerts):
+  1. Once `cacerts` exists in `istio-system`, restart istiod
+     (`oc -n istio-system delete pod -l app=istiod`). istiod reads `cacerts` only at startup, so it
+     does not recover by itself.
+  2. Restart every pod that started while istiod ran on the self-signed root, because it holds a
+     certificate from that root. On a fresh install that includes the two gateway Deployments;
+     gateways that predate the race keep working (lab-checked 2026-10-13).
+  3. If `cacerts` is missing, delete the member's `<member>-ossm` Application on the hub instead.
+     The ApplicationSet recreates it, and the PreSync hook holds the install until cacerts arrives.
+- ESO pods Pending, or no cacerts pushed: the hub is out of memory. Lower the
+  `argocd_config_values` requests and re-apply.
+  - If an ESO Application is stuck at "Retrying operation. Attempt #1" after an Argo controller
+    restart, terminate the operation
+    (`oc patch app <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
+    and auto-sync starts a fresh one.
+- Argo controller OOMKilled in a loop: raise its limit in `argocd_config_values`. It uses about 3Gi
+  here even with the default exclusions.
+- Workstation can't resolve the API names after a lab power cycle: the local resolver failed over
+  to a public DNS server. Restart it (`systemctl restart systemd-resolved`). This is
+  workstation-wide, so check first that no other session (for example a ROSA window) is
+  mid-operation.
+- Namespaces stuck Terminating behind a deleted CSI driver: run the driver's DaemonSet in a scratch
+  namespace until the kubelet unmounts, then delete it.
 
 ## Decision log
 
 ### Decisions
 
 - Prior mesh removed (owner decision): both meshes need the single cluster-wide `IstioCNI`.
-- Brownfield switches instead of importing ACM. Terraform's OperatorGroup and
-  Subscription names differ from the console's, and a second one breaks OLM.
-  `acm_local_cluster_name = "local-cluster"` keeps the MultiClusterHub unchanged.
-- cert-manager on the hub serves the cluster's own API and ingress certificates, so the
-  repo's cert-manager app is disabled there (its PreDelete hook would uninstall it).
-- On the hub, one Manual-approval Subscription in `openshift-operators` holds every
-  upgrade in that namespace. One pending InstallPlan was approved, with owner consent,
-  to reach GitOps 1.22. The Manual setting stays, so `gitops_install_operator = false`
-  (Terraform's AtLatestKnown wait would otherwise time out).
-- Per-environment chart values go through `gitops_app_overrides` /
-  `argocd_config_values`, not forks: the chart defaults stay sized for the 20-cluster campaign.
-- Temporary experiments on mesh objects (more istiod replicas, a deleted `cacerts` or Istio CR,
-  a rebuilt gateway Service) run under a deny sync window from
-  `tests/tuning/006-gitops-pause.sh --appset <appset> --state-file <scratch>/<name>.json --pause`
-  so Argo does not undo them mid-test, and end with `--resume` on the same state file. Three istiod
-  replicas fit on one member at the lab sizing (1 CPU / 3Gi each): patch the member's Istio CR
-  `spec.values.pilot.replicaCount` under a `spoke-ossm` pause and patch it back before resuming.
-  The east-west and ingress Services share a two-address pool, so deleting both and recreating
-  east-west first swaps their addresses; recreate ingress first to keep the original assignment.
-  A deny NetworkPolicy used to make a remote unreachable only affects new connections on
-  OVN-Kubernetes: the east-west gateway's pooled connections survive it, so restart the target
-  pods after applying it or the remote still answers.
+- Brownfield switches instead of importing ACM:
+  - Terraform's OperatorGroup and Subscription names differ from the console's, and a second one
+    breaks OLM.
+  - `acm_local_cluster_name = "local-cluster"` keeps the MultiClusterHub unchanged.
+- cert-manager on the hub serves the cluster's own API and ingress certificates. The repo's
+  cert-manager app is therefore disabled there, because its PreDelete hook would uninstall it.
+- On the hub, one Manual-approval Subscription in `openshift-operators` holds every upgrade in that
+  namespace.
+  - One pending InstallPlan was approved, with owner consent, to reach GitOps 1.22.
+  - The Manual setting stays, so `gitops_install_operator = false`; Terraform's AtLatestKnown wait
+    would otherwise time out.
+- Per-environment chart values go through `gitops_app_overrides` / `argocd_config_values`, not
+  forks. The chart defaults stay sized for the 20-cluster campaign.
+- Temporary experiments on mesh objects (more istiod replicas, a deleted `cacerts` or Istio CR, a
+  rebuilt gateway Service) run under a deny sync window, so Argo does not undo them mid-test.
+  - Open it with `tests/tuning/006-gitops-pause.sh --appset <appset> --state-file <scratch>/<name>.json --pause`
+    and end with `--resume` on the same state file.
+  - Three istiod replicas fit on one member at the lab sizing (1 CPU / 3Gi each). Patch the
+    member's Istio CR `spec.values.pilot.replicaCount` under a `spoke-ossm` pause, and patch it
+    back before resuming.
+  - The east-west and ingress Services share a two-address pool. Deleting both and recreating
+    east-west first swaps their addresses, so recreate ingress first to keep the original
+    assignment.
+  - On OVN-Kubernetes, a deny NetworkPolicy used to make a remote unreachable only affects new
+    connections. The east-west gateway's pooled connections survive it, so restart the target pods
+    after applying it, or the remote still answers.
+- The Gateway API check binds a Gateway API Gateway onto the existing `istio-ingressgateway` by
+  manual deployment (`spec.addresses` of type Hostname, Gateway in `istio-system`).
+  - An automated Gateway would need a third MetalLB address, and the pool has none.
+  - The check's namespaces need no `egressHosts` entry in `charts/spoke-ossm`: gateway proxies
+    never select a `Sidecar` in Istio 1.30.5.
+  - It answered: no Service is needed on every member for traffic, but with `kind: Service` the
+    namespace is. Argo CD flags remote-only backends as Degraded.
 
 ### How to drive it
 
-1. Edit charts or Terraform on a branch, push, set `gitops_app_repo_revision` to it in `lab.tfvars`.
-2. `terraform plan -var-file=lab.tfvars`, check that only intended resources change, then apply.
-3. Watch `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops -w` until Synced/Healthy, then run Verify.
+1. Edit charts or Terraform on a branch, push, and set `gitops_app_repo_revision` to that branch in
+   `lab.tfvars`.
+2. Run `terraform plan -var-file=lab.tfvars`, check that only the intended resources change, then
+   apply.
+3. Watch `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops -w` until
+   Synced/Healthy, then run Verify.
 4. Run suites against the members only: `--contexts <mesh-a-ctx>,<mesh-b-ctx>`.
-5. Record adopted or removed objects in State and access, and non-obvious choices in Decisions.
+5. For on-demand checks (mesh-verify, Gateway API), apply the Application, run the check, and
+   delete it before you finish. Then confirm the 30-app Synced/Healthy count again.
+6. Record adopted or removed objects in State and access, non-obvious choices in Decisions, and
+   any run results under `docs/campaigns/`.
