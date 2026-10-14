@@ -114,8 +114,8 @@ version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSIO
 Every numbered script of propagation, controlplane, dataplane, churn, churn-dataplane and
 gateway-api takes `--config FILE`: one file of `KEY=value` lines (the suite's `config/options.env`
 keys plus `SETUP_CONTEXTS`) that describes a whole run, so setup, sweep, report and cleanup read
-the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`, and a "Run
-config" section in its README that lists its keys. Tuning does not take one yet.
+the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`,
+and a "Run config" section in its README that lists its keys. Tuning does not take one yet.
 
 - **Precedence:** flag > `--config` > environment > default. The file loads before
   `options.env`, so the defaults derived there follow it. Each key is logged on stderr, with the

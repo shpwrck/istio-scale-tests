@@ -86,7 +86,8 @@ tell whether the ingress member needs the backend's **namespace**. S7–S9 put t
   `mesh-verify-gwapi-shared` exists on every member with a ReferenceGrant for the routes'
   namespace, while its Service and echo Deployment exist on the workload member only. The grant
   check passes locally; the local Service lookup misses, which is the soft BackendNotFound of S2
-  (`gw/conversion.go:1143-1169`). Predicted: `ResolvedRefs=False` / `BackendNotFound` on the other
+  (`gw/conversion.go:1143-1169`), and the host is returned with that soft error
+  (`gw/conversion.go:1262-1265`). Predicted: `ResolvedRefs=False` / `BackendNotFound` on the other
   members and 200 from the workload member. S7 and S7b differ only in whether the namespace and the
   grant exist on the ingress member, so S7b is what makes S7's "yes" mean "the namespace, for the
   ReferenceGrant", not "the Service".
@@ -103,8 +104,13 @@ W = the workload member, O = every other member. "Status" is the HTTPRoute's
 each backend Service serves one scenario (C2 reuses `echo-s2`: it tests the route, not the
 backend), so no scenario can change another's merged Service entry. The same table, as data, is
 `SCENARIOS` in the script; `tests/lib/test/gateway-api.bats` checks that the chart renders
-exactly these routes, Services, namespaces, Deployments and ReferenceGrants, and that the chart's
-scenario set id (`mesh-verify-gwapi/scenario-set`, now `v3`) equals the script's `SCENARIO_SET`.
+exactly these routes, Services, namespaces, Deployments and ReferenceGrants, that the chart's
+scenario set id (`mesh-verify-gwapi/scenario-set`, now `v3`) equals the script's `SCENARIO_SET`,
+and that the chart's render still has the sha256 pinned for that set (`RENDER_PIN` in the bats
+file). A change to the chart's output fails CI until the set is bumped: `SCENARIO_SET` in the
+script, `scenarioSet` in `_helpers.tpl` and `version` in `Chart.yaml` (`v3` = `0.3.0`) together,
+then `RENDER_PIN` to the new set and the sha256 the failing test prints. Never update the sha256
+alone.
 
 | ID | Host | Route → backend | Service exists on | Status on O | HTTP via O | HTTP via W | Endpoints via O | Confidence |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -222,7 +228,8 @@ results will go, and:
      backend Services in both shared namespaces (`BACKEND_SERVICES[ctx]`).
 
    It stops, writing nothing, when a member answers none of these reads (a mistyped context, an
-   API server it cannot reach, no access; the message quotes kubectl's first error), when the check
+   API server it cannot reach, no access; the first read is retried once before that, so one slow
+   API server is not a dead member; the message quotes kubectl's first error), when the check
    is not deployed (a backend namespace missing on the workload member included), or when
    `--workload-context` names the wrong member. A read that fails on its own is a warning with
    kubectl's error. These do not stop the run; the rows that depend on them become `UNKNOWN`:
@@ -234,16 +241,24 @@ results will go, and:
      turn `True`;
    - a member whose deployed scenario set is not the script's `SCENARIO_SET`
      (`SCENARIO_SET_MISMATCH`: "the deployed chart is not the version this script expects"; on the
-     workload member, which holds every backend, every member's rows).
+     workload member, which holds every backend, every member's rows). An unreadable stamp is not a
+     match either: `SCENARIO_SET_UNVERIFIED`, which leaves a match standing but makes a deviation
+     `UNKNOWN` and keeps a failure out of the answers.
 2. **Waits** up to `--wait-timeout` (180 s) for the Gateway's `Programmed=True`, the three echo
    Deployments and istio's status on every route (progress `[elapsed/bound s] pending: …` when it
-   changes). Rows still without status say `STATUS_TIMEOUT`. Then the **data-plane gate**: a
-   settled control plane does not mean every ingress has W's east-west endpoint yet, so S1 (whose
-   classic route answers whatever the question's answer) is requested through every ingress until
-   it answers 200 with the echo text, within the same deadline, then `GWAPI_SETTLE_SEC` (5 s) more
-   for the other backends. `DATAPLANE_READY_SEC[ctx]` is the time from the gate's start to that
-   200 (`timeout`: never; `unknown`: no ingress address). A member that timed out has
-   `DATAPLANE_NOT_READY` rows.
+   changes; `WAIT_SEC` is how long it took). Rows still without status say `STATUS_TIMEOUT`. Then
+   the **data-plane gate**: a settled control plane does not mean every ingress has W's east-west
+   endpoint yet. Each round requests S1 (classic) and S3 (HTTPRoute with a local stub Service),
+   whose 200s depend on neither question, through every ingress; S3's also shows the Gateway API
+   listener and routes reached that ingress. The gate passes after `GWAPI_GATE_PASSES` (3) rounds
+   in a row in which both answer 200 with the echo text (curl may reach any ingress replica, and
+   each istiod replica pushes on its own), one round per second. The same deadline ends it at the
+   first failed round after it; a streak already under way may finish. Then `GWAPI_SETTLE_SEC`
+   (5 s) more for the other backends (`SETTLE_SEC`). `DATAPLANE_GATE_SEC` is the gate's own
+   duration, without the settle. `DATAPLANE_READY_SEC[ctx]` is the time from the gate's start until
+   that ingress passed, to within one round (1 s plus curl's latency); `timeout`: never; `unknown`:
+   no ingress address. A member that timed out has `DATAPLANE_NOT_READY` rows, and the warning
+   says "no HTTP answer from this ingress" when no request got one.
 3. **Traffic:** `--requests` (10) requests per member ingress × scenario host
    (`curl -H "Host: …"`), with `--timeout` (5 s) each, between `TRAFFIC_START` and
    `TRAFFIC_END` (UTC). The ingress address comes from the LoadBalancer status, or
@@ -251,19 +266,28 @@ results will go, and:
    timed-out request gets one more request with `GWAPI_DETAIL_TIMEOUT_SEC` (35 s): Envoy answers a
    dead east-west hop only after 3 × 10 s connect timeouts (one try plus Istio's default two
    retries), so the long timeout records Envoy's own verdict instead of a client timeout, and only
-   once per such cell.
+   once per such cell. Then the **re-probe**: the gate covers the main namespace's echo pod only,
+   and the S7–S9 and S7b pods are others whose endpoints can reach an ingress later. Every cell
+   predicted 200 that did not answer 200 with the echo text on every request gets `--requests`
+   more after `GWAPI_SETTLE_SEC` (`REPROBE_CELLS` counts them). If it passes then, the row says
+   `LATE_ENDPOINT` and is `UNKNOWN`, never a deviation; if it fails again, `REPROBE_FAILED`.
 4. **Endpoint evidence** (best effort; skipped by `--skip-proxy-config` or without `istioctl`):
    one `istioctl proxy-config endpoints` dump per ingress (limit `GWAPI_ISTIOCTL_TIMEOUT_SEC`),
    from the first Running ingress pod (`PROXY_CONFIG_POD`; curl may reach any replica), filtered
-   for each backend's `outbound|8080||<FQDN>` cluster: a class (`direct`, `remote-ewgw:15443`,
-   `mixed`, `none`), a count and a healthy count. Addresses are never recorded.
+   in one `jq` pass for each backend's `outbound|8080||<FQDN>` cluster: a class (`direct`,
+   `remote-ewgw:15443`, `mixed`, `none`), a count and a healthy count. Addresses are never recorded.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
    content that was deployed (`CHART_REVISION`; `HARNESS_SHA` only describes the script); when it
-   is not the script's commit the run warns and records `CHART_REVISION_VS_HARNESS=differs`.
-6. Rereads the route status (S4's status depends on istiod's push timing) and the istiod and
-   ingress pods (`ISTIOD_RESTARTED` / `INGRESS_RESTARTED`: `1` = a pod restarted, was replaced or
-   added during the run, `0` = unchanged, `unknown` = a read failed), and writes
+   is not the script's commit the run warns and records `CHART_REVISION_VS_HARNESS=differs`
+   (`same` when it is, `same-dirty` when it is but the script's tree has uncommitted changes).
+6. Rereads the route status (S4's status depends on istiod's push timing; a route that was not
+   in place when the wait ended but is now says `STATUS_CHANGED`) and the istiod and ingress pods
+   (`ISTIOD_RESTARTED` / `INGRESS_RESTARTED`: `1` = a pod restarted, was replaced or added during
+   the run, `0` = unchanged, `unknown` = a read failed, which flags the rows
+   `*_RESTART_UNVERIFIED`). An ingress pod still Pending at the preflight (an HPA scale-out) gets
+   its start time later and reads as restarted: the safe side, `UNKNOWN` rather than a verdict on
+   a moving replica set. Then it writes
    `<results-dir>/run-<RUN_ID>/`: `gateway-api-<RUN_ID>.tsv`, `summary-<RUN_ID>.md`,
    `argocd-<RUN_ID>.tsv` with `--hub-context`, and `run-config-<RUN_ID>.env` (a copy of the run
    config) with `--config`.
@@ -278,20 +302,39 @@ not deployed, and then nothing is written.
 ## Read the report
 
 The summary starts with two answers. Each one keeps its label in every outcome (`… NO`, `… YES`,
-`… INCONCLUSIVE`), and an INCONCLUSIVE says how the other members split and why. The first, from
-S2 and S3:
+`… INCONCLUSIVE`), and an INCONCLUSIVE says how the other members split and why. A YES must be the
+specific failure the hypothesis predicts, through a route in place for the whole traffic window,
+for a scenario that works through the workload member; anything else is INCONCLUSIVE with the
+reason. A failure counts only as the code of a dropped destination, on every request:
+
+- **HTTPRoute: 500.** An empty or unknown destination has no Envoy cluster, and Gateway API routes
+  answer that with `ClusterNotFoundResponseCode=INTERNAL_SERVER_ERROR` (`route.go:617-621`). C1 is
+  the reference: a 500 counts only where C1 answered 500 through the same ingress. A 503 means the
+  ingress has the backend's cluster but no healthy endpoint (EDS lag or the east-west path: the
+  destination was kept), and a 404 means the route had not reached that ingress's Envoy; both are
+  INCONCLUSIVE.
+- **Classic VirtualService: 503 with an empty body** (Envoy's NC: no cluster for the host). A 503
+  `no healthy upstream` (UH: the cluster is there, its endpoints are not) is INCONCLUSIVE.
+
+The first answer, from S2 and S3:
 
 - **NO** (no Service needed for traffic): S2 answered 200 with the workload's echo text, on every
   request, through every other member's ingress, and the preflight read no `echo-s2` there.
-- **YES**: S2 failed through every other member's ingress, on a route that was in place there
-  (its status starts with `Accepted=True`, no `STATUS_*` flag), while S3 (the same route plus a
-  stub Service) answered 200 from the workload member.
-- **INCONCLUSIVE**: anything else, with the reason: S2's route not in place (a 404 from a route the
-  ingress never got says nothing about the Service), S2 and S3 both failed (S1 answering means the
-  Gateway API path is broken; S1 failing too, the cross-cluster path: check mesh-verify and the
-  east-west gateways), a Service where none belongs or no S3 stub, another scenario set, an
-  ingress without an address or an answer, a data path that was not ready, a restart during the
-  run, members that disagree, or an unknown echo text.
+- **YES**: through every other member's ingress S2 returned 500 on a route in place for the whole
+  traffic window (`Accepted=True` both when the wait ended and after the traffic, no `STATUS_*`
+  flag), on a path with no taint (gate passed, no late endpoint, no restart, verified), while S2
+  answered 200 through the workload member itself, C1 answered 500 there, and S3 (the same route
+  plus a stub Service) answered 200 from the workload member. It lists the codes per member and
+  says what they mean.
+- **INCONCLUSIVE**: anything else, with the reason: S2's route not in place for the whole window,
+  another code than 500 (with what it means), S2 failing through the workload member too, C1 not
+  answering 500, S2 failing where S7b, on the same code path (its grant passes, the local Service
+  lookup misses, a soft error), answered 200 ("contradicts S7b"), S2 and S3 both failing (S1
+  answering means the Gateway API path is broken; S1 failing too, the cross-cluster path: check
+  mesh-verify and the east-west gateways), a Service where none belongs or no S3 stub, another or
+  an unreadable scenario set, an ingress without an address or an answer, a data path that was not
+  ready, a late endpoint, a restart during the run or one that could not be checked, members that
+  disagree, or an unknown echo text.
 
 When the echo Deployment's `-text` could not be read, the expected body is the workload ingress's
 own most frequent answer in the run (`EXPECTED_BODY_SOURCE=local-answer`), and the answer says so.
@@ -301,15 +344,18 @@ judged through every other member's ingress, which has no `mesh-verify-gwapi-rem
 
 - `kind: Service` from S7, `Hostname` from S8, classic VirtualService from S9.
 - **NO**: the scenario answered 200 with the workload's echo text on every request.
-- **YES**: it failed on a route in place while another scenario with its backend in the same
-  namespace (S9/S8 for S7, S9 for S8, S8 for S9) answered 200 through the same ingress, so the
-  failure is the kind's own. For `kind: Service`, the line adds S7b: "it needs the namespace (for
-  the ReferenceGrant) but not the Service" when S7b answered 200, else whether the Service is
-  needed too stays INCONCLUSIVE with S7b's reason.
+- **YES**: it failed with the code above, under the same conditions as the first answer's YES
+  (route in place for the whole window, no taint, 200 through the workload member, C1's 500 for an
+  HTTPRoute), while another scenario with its backend in the same namespace (S9/S8 for S7, S9 for
+  S8, S8 for S9) answered 200 through the same ingress, so the failure is the kind's own. For
+  `kind: Service`, the line adds S7b: "it needs the namespace (for the ReferenceGrant) but not the
+  Service" when S7b answered 200, else whether the Service is needed too stays INCONCLUSIVE with
+  S7b's reason.
 - **INCONCLUSIVE**, with the reason: all of them failed (S7b or S1 answering means the path to the
-  backend namespace is broken: check its `istio-discovery` label on the workload member; both
-  failing, the cross-cluster path), members disagree, or a precondition does not hold (a member has
-  the namespace itself, or it could not be read).
+  backend namespace is broken: check its `istio-discovery` label on the workload member, whether
+  the echo pod there has a sidecar, and whether its endpoints were pushed yet; both failing, the
+  cross-cluster path), members disagree, any of the first answer's reasons, or a precondition does
+  not hold (a member has the namespace itself, or it could not be read).
 
 Then the S2 status and the S7–S9 and S7b results on each other member, the MATCH/DEVIATION/UNKNOWN
 counts (with "endpoints not read: N rows" when the endpoint evidence was skipped or failed), Argo
@@ -317,45 +363,71 @@ CD health, the matrix, every row that is not MATCH with its prediction and confi
 preflight tables (state, builds, pods, readiness), and the run settings. The YAML frontmatter
 repeats every TSV preamble line.
 
-TSV (`GWAPI_SCHEMA=2`; 21 tab-separated columns), one row per member × scenario: `run_id
+**Comparing re-runs:** each run writes a fresh `run-<RUN_ID>/`. Runs whose preambles match on
+`SCENARIO_SET` (and `SCENARIO_SET[ctx]`), `ISTIOD_IMAGE` and `OSSM_OPERATOR` have comparable
+verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
+
+TSV (`GWAPI_SCHEMA=3`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code
 observed_codes expected_body body_match top_body expected_endpoints observed_endpoints
 endpoints_healthy verdict row_status detail`. Schema 2 added S7b, the `direct` endpoint class
 (schema 1: `local-pod`), the precondition, scenario-set, data-plane and restart flags, and their
-preamble keys; the columns are unchanged.
+preamble keys. Schema 3 changed what counts toward an answer (above), added the
+`STATUS_CHANGED`, `LATE_ENDPOINT`, `REPROBE_FAILED` and `*_UNVERIFIED` flags, the preamble keys
+`DATAPLANE_GATE_HOSTS` (was `DATAPLANE_GATE_HOST`), `GATE_PASSES` and `REPROBE_CELLS`, and
+`DATAPLANE_GATE_SEC` no longer includes the settle. The columns are unchanged.
 
 - `backend` is the backendRef as the chart writes it; a backend in another namespace as
   `Service mesh-verify-gwapi-remote/echo-s7`.
 - `expected_status` / `observed_status`: `Accepted=<s>[:<reason>]/ResolvedRefs=<s>[:<reason>]`
-  from istio's parent entry for the Gateway; for a classic route `present`; `absent` = no route on
-  that member (C2 off the workload member); `no-status` = the route exists but istio wrote no
-  status for it; `stale` = the status is for an older generation; `unknown` = the read failed.
+  from istio's parent entry for the Gateway, read after the traffic; for a classic route
+  `present`; `absent` = no route on that member (C2 off the workload member); `no-status` = the
+  route exists but istio wrote no status for it; `stale` = the status is for an older generation;
+  `unknown` = the read failed. `detail` notes a status that differs from the one the wait ended on.
 - `expected_code`: one code; `observed_codes`: `code:count` by count (`200:10`, `200:7,503:3`),
   `000` = no HTTP answer within `--timeout`, `-` = not probed (no ingress address, an unreachable
   ingress). `expected_body`: the workload's echo text when 200 is expected, else `-`.
 - `body_match`: `yes`, `no`, `partial:k/n`, `n/a` (no 200s), `unknown` (the echo text is unknown),
   or `-` (not probed, or no 200 expected or seen). It is also filled for unexpected 200s (S7
   answering through another member), which then deviate on the code alone. `top_body`: the most
-  frequent first body line, masked.
+  frequent first body line, masked (`-` = empty).
 - `expected_endpoints` / `observed_endpoints`: `direct`, `remote-ewgw:15443`, `mixed`, `none`;
   expected `-` = not judged (C2 off the workload member); observed `skipped` (no evidence:
   `--skip-proxy-config` or no istioctl), `unknown` (istioctl failed: its error is printed) or
   `timeout` (the dump took longer than `GWAPI_ISTIOCTL_TIMEOUT_SEC`: raise it on a large mesh).
   `endpoints_healthy`: `healthy/total` endpoints, `-` when not read; it is recorded, not judged.
-- `verdict`: `UNKNOWN` if a precondition does not hold (`NS_SCENARIO_*`, `SVC_SCENARIO_*`,
-  `SCENARIO_SET_MISMATCH`), whatever was observed; else `DEVIATION` if any checked part differs
-  from the prediction, unless the route had no status yet, the data path was not ready or a pod
-  restarted (then `UNKNOWN`, with the reason in `detail`); else `UNKNOWN` if a part could not be
-  observed; else `MATCH`. Endpoints count only when they were read.
-- `row_status`: `OK`, or a comma list of `SCENARIO_SET_MISMATCH`, `NS_SCENARIO_INVALID` /
-  `NS_SCENARIO_UNVERIFIED` (S7–S9 on another member that has `mesh-verify-gwapi-remote`, or S7b on
-  one that lacks `mesh-verify-gwapi-shared` or its grant; or that could not be read),
-  `SVC_SCENARIO_INVALID` / `SVC_SCENARIO_UNVERIFIED` (the backend Service is there or not, against
-  the scenario's assumption; or could not be read), `STATUS_TIMEOUT` (no status when the wait
-  ended), `STATUS_PENDING`, `STATUS_UNREADABLE`, `NO_INGRESS_ADDR`, `INGRESS_UNREACHABLE` (no
-  request through that ingress got an HTTP answer: a path problem from where the script runs, not
-  a mesh result), `NOT_PROBED`, `CURL_TIMEOUT` (the detail request's answer is in `detail`),
-  `PROXY_CONFIG_FAILED`, `DATAPLANE_NOT_READY`, `ISTIOD_RESTARTED` and `INGRESS_RESTARTED`.
+- `verdict`: `UNKNOWN` if a precondition does not hold (the "voids" flags below), whatever was
+  observed; else `DEVIATION` if any checked part differs from the prediction, unless a "taints"
+  flag explains it (then `UNKNOWN`, with the reason in `detail`); else `UNKNOWN` if a part could not
+  be observed; else `MATCH`. A tainted row's MATCH stays a MATCH (it was observed regardless), but
+  its failure never counts toward an answer. Endpoints count only when they were read.
+- `row_status`: `OK`, or a comma list of these flags:
+
+  | Flag | Meaning | Effect |
+  | --- | --- | --- |
+  | `SCENARIO_SET_MISMATCH` | the member (or W) runs another scenario set than the script | voids |
+  | `SCENARIO_SET_UNVERIFIED` | the member's (or W's) scenario set stamp could not be read | taints |
+  | `NS_SCENARIO_INVALID` | S7–S9: the member has `mesh-verify-gwapi-remote`; S7b: it lacks `mesh-verify-gwapi-shared` or its grant | voids |
+  | `NS_SCENARIO_UNVERIFIED` | that namespace or grant could not be read | voids |
+  | `SVC_SCENARIO_INVALID` | the backend Service is there, or not, against the scenario's assumption | voids |
+  | `SVC_SCENARIO_UNVERIFIED` | the member's Services could not be read | voids |
+  | `STATUS_TIMEOUT` | the route still had no current status when the wait timed out | taints |
+  | `STATUS_PENDING` | the wait ended in time, but the final read found no current status | taints |
+  | `STATUS_UNREADABLE` | the final route read failed | unknown status |
+  | `STATUS_CHANGED` | not in place when the wait ended, in place by the final read | taints |
+  | `NO_INGRESS_ADDR` | no ingress address (LoadBalancer pending, no `--ingress`) | not probed |
+  | `INGRESS_UNREACHABLE` | no request through that ingress got an HTTP answer (from here) | not probed |
+  | `NOT_PROBED` | the cell's traffic produced no record | not probed |
+  | `CURL_TIMEOUT` | some requests got no answer in `--timeout`; the detail request is in `detail` | none |
+  | `LATE_ENDPOINT` | failed during the traffic, answered on the re-probe | taints |
+  | `REPROBE_FAILED` | failed during the traffic and again on the re-probe | none |
+  | `PROXY_CONFIG_FAILED` | the endpoint evidence could not be read (`unknown`/`timeout`) | none: endpoints not judged |
+  | `DATAPLANE_NOT_READY` | the data-plane gate never passed through that ingress | taints |
+  | `ISTIOD_RESTARTED` / `INGRESS_RESTARTED` | a pod restarted, was replaced or added during the run | taints |
+  | `ISTIOD_RESTART_UNVERIFIED` / `INGRESS_RESTART_UNVERIFIED` | whether one did could not be read | taints |
+
+  "Voids": the row is `UNKNOWN` and cannot count for or against an answer. "Taints": a deviation
+  becomes `UNKNOWN`, and a failure there does not count. "Not probed": no traffic, so `UNKNOWN`.
 - `detail`: the reasons, `; `-separated, or `-`.
 
 ## What the lab run must confirm
@@ -389,8 +461,9 @@ preamble keys; the columns are unchanged.
    `mesh-verify-gwapi-shared` and its ReferenceGrant on A (`SHARED_NAMESPACE_LABELS`,
    `SHARED_REFERENCEGRANTS`) and no `echo-s7b` there (`BACKEND_SERVICES`).
 10. The run is valid: `SCENARIO_SET[ctx]` equals `SCENARIO_SET` everywhere, `DATAPLANE_READY_SEC`
-    is a number for every member, `ISTIOD_RESTARTED` / `INGRESS_RESTARTED` are 0, and
-    `ISTIOD_IMAGE` / `OSSM_OPERATOR` name the build the answer applies to.
+    is a number for every member, `ISTIOD_RESTARTED` / `INGRESS_RESTARTED` are 0, no row says
+    `*_UNVERIFIED`, `STATUS_CHANGED` or `LATE_ENDPOINT`, and `ISTIOD_IMAGE` / `OSSM_OPERATOR` name
+    the build the answer applies to.
 
 ## Cleanup
 
@@ -434,8 +507,8 @@ member, namespace `mesh-verify-gwapi-remote`. By hand, on each member: delete na
 
 The script takes `--config FILE`, one file of `KEY=value` lines (shared rules:
 [Run config](../../README.md#run-config---config-file)).
-[`configs/smoke.env`](configs/smoke.env) is a worked example (5 requests per cell, a 120 s wait,
-no istioctl evidence):
+[`configs/smoke.env`](configs/smoke.env) is a worked example (5 requests per cell, a 120 s bound
+on the wait and the gate, no istioctl evidence):
 
 ```bash
 ./tests/gateway-api/001-run-ingress-check.sh --config tests/gateway-api/configs/smoke.env \
@@ -446,7 +519,7 @@ no istioctl evidence):
   `GWAPI_HUB_CONTEXT`, `GWAPI_INGRESS`, `GWAPI_REQUESTS`, `GWAPI_TIMEOUT_SEC`,
   `GWAPI_WAIT_TIMEOUT_SEC`, `GWAPI_SKIP_PROXY_CONFIG` and `GWAPI_RESULTS_DIR` back the flags
   (a relative `GWAPI_RESULTS_DIR` starts at the repo root, unlike `--results-dir`);
-  `GWAPI_SETTLE_SEC`, `GWAPI_DETAIL_TIMEOUT_SEC`, `GWAPI_KUBECTL_TIMEOUT_SEC`,
+  `GWAPI_GATE_PASSES`, `GWAPI_SETTLE_SEC`, `GWAPI_DETAIL_TIMEOUT_SEC`, `GWAPI_KUBECTL_TIMEOUT_SEC`,
   `GWAPI_ISTIOCTL_TIMEOUT_SEC`, `GWAPI_NAMESPACE`, `GWAPI_REMOTE_NAMESPACE` (the chart's
   `remoteNamespace`), `GWAPI_SHARED_NAMESPACE` (`sharedNamespace`), `GWAPI_GATEWAY`,
   `GWAPI_ARGOCD_NAMESPACE` and `GWAPI_ARGOCD_APPSET` have no flag.

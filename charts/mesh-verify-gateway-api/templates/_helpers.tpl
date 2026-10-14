@@ -38,8 +38,9 @@ label, so a check with no workload member is never deployed. helm lint (no clust
 Id of the scenario set below, stamped on the namespaces and the Gateway API Gateway
 (mesh-verify-gwapi/scenario-set) so a run can tell which chart content it measured. It must
 equal SCENARIO_SET in tests/gateway-api/001-run-ingress-check.sh (gateway-api.bats checks it);
-bump both together whenever a scenario, host, route, backend or namespace changes. Not a value:
-an override would defeat it.
+bump both together whenever a scenario, host, route, backend or namespace changes, with Chart.yaml's
+version (it mirrors the set) and the render pin in gateway-api.bats, which fails CI on any render
+change without a bump. Not a value: an override would defeat it.
 */}}
 {{- define "mesh-verify-gateway-api.scenarioSet" -}}
 v3
