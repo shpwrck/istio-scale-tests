@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Harness metadata and TSV preamble helpers. Sourced, never executed.
 #
-# Consumers: controlplane, dataplane, propagation, churn, churn-dataplane
+# Consumers: controlplane, dataplane, propagation, churn, churn-dataplane, gateway-api (001:
+# harness_sha, probe_kube_versions, tuning_baseline_state per member)
 #
 # Exposes:
 #   harness_sha                                   -> `git -C "${ROOT:-.}" describe --always --dirty --abbrev=7` or "unknown"

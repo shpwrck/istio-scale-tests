@@ -1,0 +1,35 @@
+# Preset: Gateway API multicluster ingress check on every mesh member, echo workload on one
+# (charts/mesh-verify-gateway-api-appset.yaml; tests/gateway-api/README.md).
+identity:
+  component: mesh-verify-gateway-api
+
+placementRbac:
+  roleName: openshift-gitops-ocm-placement-mesh-verify-gwapi
+  roleBindingName: openshift-gitops-ocm-placement-mesh-verify-gwapi
+
+argocdApplicationControllerRbac:
+  roleName: gitops-mesh-verify-gwapi-appset-argocd-sync
+  roleBindingName: gitops-mesh-verify-gwapi-appset-argocd-sync
+
+applicationSet:
+  name: mesh-verify-gwapi
+
+destination:
+  mode: clusterName
+  namespace: mesh-verify-gwapi
+
+template:
+  applicationNameSuffix: mesh-verify-gwapi
+  source:
+    path: charts/mesh-verify-gateway-api
+    helm:
+      releaseName: mesh-verify-gwapi
+      parameters:
+        - name: clusterName
+          value: "{{clusterName}}"
+      # The workload member's ACM ManagedCluster name, set by the Application in
+      # charts/mesh-verify-gateway-api-appset.yaml (helm parameter
+      # template.source.helm.valuesObject.workloadCluster). Left empty, every member's render
+      # fails with a message instead of deploying a check without a workload.
+      valuesObject:
+        workloadCluster: ""

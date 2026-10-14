@@ -52,7 +52,11 @@ Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/
 | `spoke-east-west-gateway/` | app-of-apps | East-west gateway + cross-network Gateway |
 | `mesh-wiring-verify/` | Terraform (`values-mesh-wiring-verify.yaml`) | Per-member health gate for remote secrets and istiod sync |
 | `mesh-verify/` | `mesh-verify-appset.yaml` | Cross-cluster echo workload |
+| `mesh-verify-gateway-api/` | `mesh-verify-gateway-api-appset.yaml` | Gateway API ingress check: HTTPRoutes on every member, echo on one ([tests/gateway-api](../tests/gateway-api/README.md)) |
 | `istiod-monitor/` | manual `helm install` | ServiceMonitor + PrometheusRule for istiod |
 
-`mesh-verify-appset.yaml` is a standalone Application (`oc apply -f` / `oc delete -f`); set both
-repo URLs and both revisions to your fork/branch. See [Verify](../README.md#verify).
+`mesh-verify-appset.yaml` and `mesh-verify-gateway-api-appset.yaml` are standalone Applications
+(`oc apply -f` / `oc delete -f`); set both repo URLs and both revisions to your fork/branch. The
+second also needs the workload member's ManagedCluster name (`workloadCluster`): fill in its
+`<workload-cluster>` placeholder with `sed` on the way to `oc apply -f -`, so the name stays out of
+git ([tests/gateway-api](../tests/gateway-api/README.md#deploy)). See [Verify](../README.md#verify).

@@ -17,6 +17,7 @@ the shared defaults; each preset sets only what differs.
 | `values-east-west-gateway.yaml` | `charts/spoke-east-west-gateway` | each mesh member |
 | `values-mesh-wiring-verify.yaml` | `charts/mesh-wiring-verify` (installed by Terraform) | each mesh member |
 | `values-mesh-verify.yaml` | `charts/mesh-verify` (via `charts/mesh-verify-appset.yaml`) | each mesh member |
+| `values-mesh-verify-gateway-api.yaml` | `charts/mesh-verify-gateway-api` (via `charts/mesh-verify-gateway-api-appset.yaml`; `valuesObject.workloadCluster`) | each mesh member |
 
 `destination.mode: clusterName` targets each Placement cluster by name;
 `inClusterServer` targets the hub API and passes `clusterName`/`clusterServer` to the

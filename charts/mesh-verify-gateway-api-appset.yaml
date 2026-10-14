@@ -1,0 +1,52 @@
+# Standalone Argo CD Application (not part of the app-of-apps): deploys the Gateway API
+# multicluster ingress check (charts/mesh-verify-gateway-api) on every mesh member, with the echo
+# workload on ONE member. What it answers and how to run it: tests/gateway-api/README.md.
+# Edit before applying:
+#   - spec.source.targetRevision and the repo.revision parameter: your branch (both);
+#   - spec.source.repoURL and the repo.url parameter: your fork (both);
+#   - the template.source.helm.valuesObject.workloadCluster parameter: the ACM ManagedCluster
+#     name of the member that runs the workload (oc --context <acm-hub-ctx> get managedclusters).
+#     Keep the placeholder in git and fill it in on the way to the hub (Apply). Applied as the
+#     placeholder, every member's Application fails to render with a message.
+# Apply:  sed 's/<workload-cluster>/<managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
+#           | oc --context <acm-hub-ctx> apply -f -
+# Remove: oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+#         (the finalizers remove the ApplicationSet, the per-member Applications and all they
+#         deployed, including the Gateway API Gateway in istio-system, the backend namespace
+#         mesh-verify-gwapi-shared and the workload member's mesh-verify-gwapi-remote)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mesh-verify-gateway-api-appset
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: mesh-verify-gateway-api
+    app.kubernetes.io/component: mesh-verify-gateway-api-appset
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shpwrck/istio-scale-tests.git
+    targetRevision: main
+    path: charts/gitops-hub-ocm-placement-appset
+    helm:
+      releaseName: gitops-mesh-verify-gateway-api-appset
+      valueFiles:
+        - values-mesh-verify-gateway-api.yaml
+      parameters:
+        - name: repo.url
+          value: https://github.com/shpwrck/istio-scale-tests.git
+        - name: repo.revision
+          value: main
+        - name: placement.name
+          value: acm-openshift-gitops-placement
+        - name: template.source.helm.valuesObject.workloadCluster
+          value: <workload-cluster>
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true

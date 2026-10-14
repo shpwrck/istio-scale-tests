@@ -1,0 +1,46 @@
+{{- /* Classic Istio Gateway + VirtualServices on every member. S1: backend echo-s1 in the test
+     namespace; S9: backend echo-s9 in remoteNamespace. Both backends exist on the workload member
+     only. */ -}}
+{{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: s1-classic
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+{{- range $v := $sc.virtualServices }}
+        - {{ $v.host }}
+{{- end }}
+{{- range $v := $sc.virtualServices }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ $v.name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" $ | nindent 4 }}
+    mesh-verify-gwapi/scenario: {{ $v.id }}
+spec:
+  hosts:
+    - {{ $v.host }}
+  gateways:
+    - s1-classic
+  http:
+    - route:
+        - destination:
+            # A classic destination may name any host: no namespace or ReferenceGrant check.
+            host: {{ printf "%s.%s.svc.%s" $v.backend (include "mesh-verify-gateway-api.backendNamespace" (dict "s" $v "Values" $.Values)) $.Values.clusterDomain }}
+            port:
+              number: {{ $.Values.service.port }}
+{{- end }}

@@ -359,3 +359,26 @@ The subshell contains the `die`'s `exit` so the orchestrator continues; capturin
 **How to preempt:** When a harness timeout must outlast a proxy-side timeout, compute it from the whole chain the proxy runs: `connectTimeout × (retries + 1)` plus margin, using the route's effective retry policy (default `attempts: 2`, `retryOn` including `connect-failure`), and put the arithmetic in the comment next to the knob. Keep such a long timeout off the hot path (one request, last attempt only) so a dead target does not multiply it.
 
 (PL42 was added after the 2026-10-13 backlog cycle: the validation-fix pass set `REACH_DETAIL_TIMEOUT_SEC=12`; the Istio lens caught that the default retries push Envoy's verdict to about 30 s, and round 2 set 35 s, used only on the last reach attempt.)
+
+## PL43 — A functional check's "YES, it is needed" must be the hypothesis's own failure signature, on config that was in place, seen twice, with the positive path proven
+
+**Why:** A check that answers a yes/no question from traffic (here `tests/gateway-api/`: "does an HTTPRoute need a local Service/namespace?") has many ways to print a YES that is really "not ready yet" or "broken everywhere": a 404 from a route not yet pushed to the ingress, a 503 from EDS lag, a 500 that is not Envoy's empty cluster-not-found reply, a route status that appeared only after the traffic, a scenario that also fails through the member that runs the workload, a transient the retry did not repeat, or a retry that never ran. Each looks like evidence for the hypothesis, and each appeared in a review round of the same branch.
+
+**How to preempt:** Derive the exact failure signature from the source (gateway-api: an HTTPRoute whose backend is dropped answers an empty-body 500, ClusterNotFound; a classic route an empty-body 503) and classify every other outcome as unclear, never as YES. A YES also needs:
+- the config in place (status Accepted) at both the start and the end of the traffic window;
+- the same scenario answering through the positive path (the workload member), and a negative control showing the signature through the same ingress;
+- a delayed re-probe repeating the same signature (a re-probe with no record is unclear);
+- no contradiction from a sibling scenario that runs the same code path;
+- traffic gated on a readiness probe whose result does not depend on the question.
+
+A NO may accept a late success (an answer with the workload's text proves the path whenever it arrives); a YES never may.
+
+(PL43 was added after the gateway-api multicluster check cycle: rounds 2 to 5 each found another way to print a false YES — 404/503 counted as failures, a route not in place, a failure through the workload member, a re-probe that disagreed or never ran — and each was closed by narrowing what counts as `fail`.)
+
+## PL44 — Never assert an exact elapsed-seconds value in bats
+
+**Why:** A duration computed as `SECONDS - start` reads 0 or 1 depending on whether the run crossed a second boundary. `tests/lib/test/gateway-api.bats` asserted `passed after 0 s` and failed 2 of 4 full runs on a reviewer's host, in a required CI check.
+
+**How to preempt:** Match measured durations with a pattern (`[0-9]+`) or a bounded range; assert exact values only for configured knobs. Run a new bats file that checks timings at least five times in a row before calling it green.
+
+(PL44 was added after the same cycle's round-4 usability review.)

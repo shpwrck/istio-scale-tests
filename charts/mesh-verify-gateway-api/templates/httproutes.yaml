@@ -1,0 +1,59 @@
+{{- /* S2-S5, S7, S7b, S8 and C1 on every member, C2 on the workload member only. Each route has
+     its own host, and each backend Service serves one scenario (C2 reuses echo-s2: it tests the
+     route, not the backend), so a scenario cannot change another's merged Service entry. Every
+     route lives in the test namespace; S7/S8's backends live in remoteNamespace, S7b's in
+     sharedNamespace. */ -}}
+{{- $isWorkload := include "mesh-verify-gateway-api.isWorkload" . }}
+{{- $sc := include "mesh-verify-gateway-api.scenarios" . | fromYaml }}
+{{- range $r := $sc.httpRoutes }}
+{{- $bns := include "mesh-verify-gateway-api.backendNamespace" (dict "s" $r "Values" $.Values) }}
+{{- if or (not $r.workloadOnly) $isWorkload }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $r.name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "mesh-verify-gateway-api.labels" $ | nindent 4 }}
+    mesh-verify-gwapi/scenario: {{ $r.id }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $.Values.gatewayApi.name }}
+      namespace: istio-system
+      sectionName: http
+  hostnames:
+    - {{ $r.host }}
+  rules:
+    - backendRefs:
+{{- if eq $r.kind "Service" }}
+        - group: ""
+          kind: Service
+          name: {{ $r.backend }}
+{{- if ne $r.backendNs "main" }}
+          # Cross-namespace: allowed only by a ReferenceGrant in the backend namespace
+          # (referencegrants.yaml), read by each member's istiod from its own cluster.
+          namespace: {{ $bns }}
+{{- end }}
+          port: {{ $.Values.service.port }}
+{{- else if eq $r.kind "Hostname" }}
+        # Istio-specific backend kind; no namespace field (istiod rejects one), so no
+        # ReferenceGrant applies.
+        - group: networking.istio.io
+          kind: Hostname
+          name: {{ printf "%s.%s.svc.%s" $r.backend $bns $.Values.clusterDomain }}
+          port: {{ $.Values.service.port }}
+{{- else if and (eq $r.kind "ServiceImport") (eq $r.backendNs "main") }}
+        # No ServiceImport CRD or object is needed: with ENABLE_MCS_HOST=false (default) istiod
+        # treats it as kind Service.
+        - group: multicluster.x-k8s.io
+          kind: ServiceImport
+          name: {{ $r.backend }}
+          port: {{ $.Values.service.port }}
+{{- else }}
+{{- fail (printf "backend kind %q (backendNs %v) is not supported in scenario %s" $r.kind $r.backendNs $r.id) }}
+{{- end }}
+{{- end }}
+{{- end }}

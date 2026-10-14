@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Remote reachability check and coverage report. Sourced, never executed.
 #
-# Consumers: dataplane (002, 003, 004), churn-dataplane (002, 003, 004, 005)
+# Consumers: dataplane (002, 003, 004), churn-dataplane (002, 003, 004, 005), gateway-api (001:
+# reach_sanitize only)
 #
 # Before any load, the suite's own fortio client sends REACH_REQUESTS low-QPS
 # requests to a single-endpoint per-cluster Service for every target (the source

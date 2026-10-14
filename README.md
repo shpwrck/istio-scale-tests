@@ -81,6 +81,10 @@ for i in $(seq 10); do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; 
 oc --context <acm-hub-ctx> delete -f charts/mesh-verify-appset.yaml
 ```
 
+Gateway API: [`tests/gateway-api`](tests/gateway-api/README.md) checks whether an HTTPRoute reaches a
+workload that runs in another member, with or without a Service, or the Service's namespace, in the
+ingress member (`charts/mesh-verify-gateway-api-appset.yaml` deploys it the same way).
+
 ## Run tests
 
 Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
@@ -96,6 +100,7 @@ Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-
 | [churn](tests/churn/README.md) | Convergence time when Deployments scale on one cluster | `tests/churn/003-run-sweep.sh` |
 | [churn-dataplane](tests/churn-dataplane/README.md) | p99 latency change while endpoint churn runs | `tests/churn-dataplane/004-run-sweep.sh` |
 | [tuning](tests/tuning/README.md) | Any suite above, with and without an istiod/proxy tuning profile | `tests/tuning/003-run-tuning-sweep.sh` |
+| [gateway-api](tests/gateway-api/README.md) | Whether an HTTPRoute needs its backend Service, or its namespace, in every member (read-only check; deploy `charts/mesh-verify-gateway-api-appset.yaml` first) | `tests/gateway-api/001-run-ingress-check.sh` |
 
 ```bash
 tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 5 --dry-run
@@ -106,11 +111,11 @@ version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSIO
 
 ### Run config (`--config FILE`)
 
-Every numbered script of propagation, controlplane, dataplane, churn and churn-dataplane takes
-`--config FILE`: one file of `KEY=value` lines (the suite's `config/options.env` keys plus
-`SETUP_CONTEXTS`) that describes a whole run, so setup, sweep, report and cleanup read the same
-values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`, and a "Run
-config" section in its README that lists its keys. Tuning does not take one yet.
+Every numbered script of propagation, controlplane, dataplane, churn, churn-dataplane and
+gateway-api takes `--config FILE`: one file of `KEY=value` lines (the suite's `config/options.env`
+keys plus `SETUP_CONTEXTS`) that describes a whole run, so setup, sweep, report and cleanup read
+the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`,
+and a "Run config" section in its README that lists its keys. Tuning does not take one yet.
 
 - **Precedence:** flag > `--config` > environment > default. The file loads before
   `options.env`, so the defaults derived there follow it. Each key is logged on stderr, with the

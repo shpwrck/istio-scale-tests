@@ -9,8 +9,8 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
    ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
    ApplicationSets through ACM Placement.
-4. `tests/`: six bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
-   tuning) plus a shared library in `tests/lib/`.
+4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
+   tuning, and the read-only gateway-api check) plus a shared library in `tests/lib/`.
 
 Source of truth for mesh procedures: [Red Hat OpenShift Service Mesh 3.4 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.4/html/installing/ossm-multi-cluster-topologies).
 Prefer it over generic upstream Istio docs when they disagree.
@@ -79,8 +79,9 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/spoke-ingress-gateway/`, `charts/spoke-east-west-gateway/` | Member gateways |
 | `charts/mesh-wiring-verify/` | Always-on gate per member (remote secrets, istiod ingestion, shared root) |
 | `charts/mesh-verify/`, `charts/mesh-verify-appset.yaml` | On-demand cross-cluster echo check |
+| `charts/mesh-verify-gateway-api/`, `charts/mesh-verify-gateway-api-appset.yaml` | On-demand Gateway API check: HTTPRoutes on every member, echo workload on one (`tests/gateway-api`) |
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
-| `tests/<suite>/` | Numbered scripts + `chart/` (all but tuning also `configs/`, example run configs); see each suite README |
+| `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
 | `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`; bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
