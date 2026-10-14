@@ -4,7 +4,8 @@
 # contract (scenario set and render pin included), and whole runs against stub
 # kubectl/curl/istioctl: the Service answers (M1/F2: only a route in place for the whole traffic
 # window counts; M2: the Service read directly; F1: only the code of a dropped destination is a
-# failure; F3: the scenario must work through the workload member; S7b contradicting S2), the
+# failure, with an empty body, repeated by the re-probe (G1); F3: the scenario must work through
+# the workload member; S7b contradicting S2; late endpoints answered for a NO), the
 # namespace answers (S7-S9, S7b) and their invalid-precondition rows, the not-deployed and
 # unreachable-member stops (U1, with one retry), the data-plane gate (SC1: S1 and S3, rounds in a
 # row) and the re-probe of late endpoints, builds and restarts (R1, PL9, unverified ones too), the
@@ -24,8 +25,11 @@ CHART="${ROOT}/charts/mesh-verify-gateway-api"
 # until the set is bumped: SCENARIO_SET in 001-run-ingress-check.sh, the scenarioSet define in
 # templates/_helpers.tpl and Chart.yaml's version (v<N> = 0.<N>.0) together, then this pin, to the
 # new set and the sha256 that test prints. A new render always needs a new set: never update the
-# sha256 alone. The render is helm 4 (CI pins v4.2.2); only "# Source:" lines are dropped.
+# sha256 alone. Only "# Source:" lines are dropped. The render is helm 4 output (CI pins v4.2.2),
+# RENDER_PIN_HELM_MAJOR: with another helm major version (AGENTS.md allows helm 3 or 4) the hash
+# is not compared (the test is skipped with a message); never re-pin from another major.
 RENDER_PIN="v3 ef2331e33be99cb2bbbe8383a92bc73a21e78f1786fac0b6833c586e29b1a1e8"
+RENDER_PIN_HELM_MAJOR=4
 
 setup() {
 	EK="${BATS_TEST_TMPDIR}/kubeconfig"
@@ -48,7 +52,8 @@ setup() {
 	# STUB_SHARED_A=absent|nogrant: ctx-a lacks the S7b namespace, or its ReferenceGrant.
 	# STUB_SVC_A=<csv>: more Services in ctx-a's test namespace; STUB_NO_S3_STUB=1: no echo-s3 there.
 	# STUB_NOSTATUS=<route>: that route has no status on ctx-a; STUB_NOSTATUS_ONCE=<route>: only in
-	# ctx-a's first route read (the wait's). STUB_SET_A/STUB_SET_B: the scenario set stamped on
+	# ctx-a's first route read (the wait's); STUB_ROUTES_FAIL_ONCE=1: that read fails.
+	# STUB_SET_A/STUB_SET_B: the scenario set stamped on
 	# ctx-a/ctx-b (STUB_SET_A=fail: ctx-a's test namespace read fails). STUB_RESTART=istiod: ctx-a's
 	# istiod pod is new at the final read; =unknown: that read fails. STUB_FLAKY_A=<n>: ctx-a's
 	# first n reads time out. STUB_HUB_FAIL=1: hub reads fail; STUB_REVISION: the revision the hub's
@@ -199,6 +204,11 @@ case "$cmd" in
 	if [[ "$ctx" == ctx-b ]]; then ip=192.0.2.2; else ip=192.0.2.1; fi
 	echo "{\"status\":{\"loadBalancer\":{\"ingress\":[{\"ip\":\"${ip}\"}]}}}" ;;
 "-n mesh-verify-gwapi get httproutes.gateway.networking.k8s.io -o json")
+	if [[ "$ctx" == ctx-a && -n "${STUB_ROUTES_FAIL_ONCE:-}" && ! -f "${STUB_LOG}.rfail" ]]; then
+		: >"${STUB_LOG}.rfail"
+		echo "Unable to connect to the server: dial tcp 192.0.2.64:6443: i/o timeout" >&2
+		exit 1
+	fi
 	# STUB_NOSTATUS_ONCE: from ctx-a's second route read on, the route has its status.
 	if [[ "$ctx" == ctx-a && -n "${STUB_NOSTATUS_ONCE:-}" ]]; then
 		n="$(cat "${STUB_LOG}.rcount" 2>/dev/null || echo 0)"
@@ -221,13 +231,15 @@ esac
 STUB
 
 	# curl: 192.0.2.1 = ctx-a's ingress, 192.0.2.2 = ctx-b's; answers as predicted unless
-	# STUB_S<n>_OTHER (a code for S1, S2, S3, S7, S7B, S8 or S9 through ctx-a; S9's body is
-	# STUB_S9_BODY, empty by default), STUB_S2_W (S2's code through ctx-b) or STUB_DEAD=a (no
-	# answer). Requests per member and host are sequential (gate, cell, re-probe), so counters say
-	# which request this is: STUB_S3_OK_FIRST=<n>: S3 through ctx-a answers 200 to its first n
-	# requests (the gate's) before STUB_S3_OTHER; STUB_S2_BAD_FIRST=<n>: STUB_S2_OTHER only for the
-	# first n (the traffic's), then 200 (the re-probe's); STUB_S1_FLAKY=1: S1 through ctx-a
-	# alternates 200 and 503.
+	# STUB_S<n>_OTHER (a code for S1, S2, S3, S7, S7B, S8 or S9 through ctx-a; S2's body is
+	# STUB_S2_BODY, by default "no healthy upstream" for a 503 and empty otherwise, like Envoy's
+	# local replies; S9's is STUB_S9_BODY, empty by default), STUB_S2_W (S2's code through ctx-b)
+	# or STUB_DEAD=a (no answer). Requests per member and host are sequential (gate, cell,
+	# re-probe), so counters say which request this is: STUB_S3_OK_FIRST=<n>: S3 through ctx-a
+	# answers 200 to its first n requests (the gate's) before STUB_S3_OTHER;
+	# STUB_<id>_REPROBE=<code> (S2, S7B, S8, S9 through ctx-a; S2_W through ctx-b): that code from
+	# the 4th request on, i.e. the re-probe of a 3-request run (none of them is a gate host);
+	# STUB_S1_FLAKY=1: S1 through ctx-a alternates 200 and 503.
 	cat >"${BIN}/curl" <<'STUB'
 #!/usr/bin/env bash
 out="" host="" url=""
@@ -251,20 +263,27 @@ code=200 body=member-b
 k="$(cat "${STUB_CURL_LOG}.${m}.${host}" 2>/dev/null || echo 0)"
 k=$((k + 1))
 echo "$k" >"${STUB_CURL_LOG}.${m}.${host}"
+# body_of <code>: Envoy's local reply body for that code (the echo text for a 200).
+body_of() { case "$1" in 200) echo member-b ;; 503) echo "no healthy upstream" ;; *) echo "" ;; esac; }
+# rp <code>: from the 4th request on (the re-probe), answer <code> instead.
+rp() { [[ -z "$1" || "$k" -le 3 ]] || { code="$1"; body="$(body_of "$1")"; }; }
 case "$host" in
 neg.gwapi.test) code=500 body="" ;;
 s6.gwapi.test) [[ "$m" == b ]] || { code=404; body=""; } ;;
 s1.classic.test) [[ "$m" == b || -z "${STUB_S1_OTHER:-}" ]] || { code="$STUB_S1_OTHER"; body="no healthy upstream"; }
 	[[ "$m" == b || -z "${STUB_S1_FLAKY:-}" ]] || (( k % 2 )) || { code=503; body="no healthy upstream"; } ;;
-s2.gwapi.test) [[ "$m" == b || -z "${STUB_S2_OTHER:-}" ]] || [[ -n "${STUB_S2_BAD_FIRST:-}" && "$k" -gt "${STUB_S2_BAD_FIRST}" ]] \
-		|| { code="$STUB_S2_OTHER"; body="no healthy upstream from 192.0.2.7"; }
-	[[ "$m" != b || -z "${STUB_S2_W:-}" ]] || { code="$STUB_S2_W"; body=""; } ;;
+s2.gwapi.test) [[ "$m" == b || -z "${STUB_S2_OTHER:-}" ]] || { code="$STUB_S2_OTHER"; body="${STUB_S2_BODY-$(body_of "$STUB_S2_OTHER")}"; }
+	[[ "$m" != b || -z "${STUB_S2_W:-}" ]] || { code="$STUB_S2_W"; body=""; }
+	if [[ "$m" == b ]]; then rp "${STUB_S2_W_REPROBE:-}"; else rp "${STUB_S2_REPROBE:-}"; fi ;;
 s3.gwapi.test) [[ "$m" == b || -z "${STUB_S3_OTHER:-}" ]] || [[ "$k" -le "${STUB_S3_OK_FIRST:-0}" ]] \
 		|| { code="$STUB_S3_OTHER"; body="no healthy upstream"; } ;;
 s7.gwapi.test) [[ "$m" == b ]] || { code="${STUB_S7_OTHER:-500}"; [[ "$code" == 200 ]] || body=""; } ;;
-s7b.gwapi.test) [[ "$m" == b || -z "${STUB_S7B_OTHER:-}" ]] || { code="$STUB_S7B_OTHER"; body=""; } ;;
-s8.gwapi.test) [[ "$m" == b || -z "${STUB_S8_OTHER:-}" ]] || { code="$STUB_S8_OTHER"; body=""; } ;;
-s9.classic.test) [[ "$m" == b || -z "${STUB_S9_OTHER:-}" ]] || { code="$STUB_S9_OTHER"; body="${STUB_S9_BODY:-}"; } ;;
+s7b.gwapi.test) [[ "$m" == b || -z "${STUB_S7B_OTHER:-}" ]] || { code="$STUB_S7B_OTHER"; body=""; }
+	[[ "$m" == b ]] || rp "${STUB_S7B_REPROBE:-}" ;;
+s8.gwapi.test) [[ "$m" == b || -z "${STUB_S8_OTHER:-}" ]] || { code="$STUB_S8_OTHER"; body=""; }
+	[[ "$m" == b ]] || rp "${STUB_S8_REPROBE:-}" ;;
+s9.classic.test) [[ "$m" == b || -z "${STUB_S9_OTHER:-}" ]] || { code="$STUB_S9_OTHER"; body="${STUB_S9_BODY:-}"; }
+	[[ "$m" == b ]] || rp "${STUB_S9_REPROBE:-}" ;;
 esac
 printf '%s\n' "$body" >"$out"
 printf '%s' "$code"
@@ -300,15 +319,16 @@ STUB
 	chmod +x "${BIN}/kubectl" "${BIN}/curl" "${BIN}/istioctl"
 }
 
-# gw_run [args...]: a whole run against the stubs (ctx-a, ctx-b; workload ctx-b; hub). One gate
-# round unless GWAPI_GATE_PASSES says otherwise (each more round is a GATE_POLL_SEC sleep); the
-# gate test runs the default. The stub logs and their request counters start empty.
+# gw_run [args...]: a whole run against the stubs (ctx-a, ctx-b; workload ctx-b; hub), with no
+# settle and no re-probe delay. One gate round unless GWAPI_GATE_PASSES says otherwise (each more
+# round is a GATE_POLL_SEC sleep); the gate test runs the default. The stub logs and their request
+# counters start empty.
 gw_run() {
 	rm -f "${STUB_LOG}".* "${STUB_CURL_LOG}".*
 	: >"$STUB_LOG"
 	: >"$STUB_CURL_LOG"
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_ISTIOCTL_TIMEOUT_SEC="${GWAPI_ISTIOCTL_TIMEOUT_SEC:-5}" GWAPI_SETTLE_SEC=0 \
-		GWAPI_GATE_PASSES="${GWAPI_GATE_PASSES:-1}" \
+		GWAPI_REPROBE_DELAY_SEC=0 GWAPI_GATE_PASSES="${GWAPI_GATE_PASSES:-1}" \
 		run bash "$GW" --contexts ctx-a,ctx-b --workload-context ctx-b --requests 3 --wait-timeout 5 \
 		--results-dir "$OUT" "$@"
 }
@@ -361,7 +381,8 @@ preamble_keys() {
 	# Every flag's environment key, and the relative-path rule of each results-dir source.
 	local k
 	for k in SETUP_CONTEXTS GWAPI_WORKLOAD_CONTEXT GWAPI_HUB_CONTEXT GWAPI_INGRESS GWAPI_REQUESTS GWAPI_TIMEOUT_SEC \
-		GWAPI_WAIT_TIMEOUT_SEC GWAPI_RESULTS_DIR GWAPI_SKIP_PROXY_CONFIG GWAPI_GATE_PASSES GWAPI_SETTLE_SEC GWAPI_SHARED_NAMESPACE; do
+		GWAPI_WAIT_TIMEOUT_SEC GWAPI_RESULTS_DIR GWAPI_SKIP_PROXY_CONFIG GWAPI_GATE_PASSES GWAPI_SETTLE_SEC GWAPI_REPROBE_DELAY_SEC \
+		GWAPI_SHARED_NAMESPACE; do
 		assert_output --partial "$k"
 	done
 	assert_output --partial "relative value starts at the repo root"
@@ -387,7 +408,7 @@ preamble_keys() {
 	assert_output --partial "Service mesh-verify-gwapi-shared/echo-s7b"
 	assert_output --partial "scenario set $STUB_SCENARIO_SET"
 	assert_output --partial "then s1.classic.test and s3.gwapi.test answering 200 with the echo text through every ingress 3 time(s) in a row"
-	assert_output --partial "is re-probed once (5 requests) after"
+	assert_output --partial "is re-probed once (5 requests) after 15 s (not through an ingress whose gate never passed)"
 	assert_output --partial "Proxy evidence: skipped (--skip-proxy-config)"
 	[ ! -s "$STUB_LOG" ]
 	[ ! -s "$STUB_CURL_LOG" ]
@@ -432,6 +453,14 @@ preamble_keys() {
 		run bash "$GW" --dry-run --contexts ctx-a,ctx-b --workload-context ctx-b
 	assert_failure
 	assert_output --partial "GWAPI_GATE_PASSES must be a positive integer"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_REPROBE_DELAY_SEC=x \
+		run bash "$GW" --dry-run --contexts ctx-a,ctx-b --workload-context ctx-b
+	assert_failure
+	assert_output --partial "GWAPI_REPROBE_DELAY_SEC must be a non-negative integer"
+	# Fewer than 3 requests: a warning, not an error.
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --dry-run --contexts ctx-a,ctx-b --workload-context ctx-b --requests 2
+	assert_success
+	assert_output --partial "warning: --requests 2 (or GWAPI_REQUESTS) is below 3: a YES then rests on 2 request(s)"
 	[ ! -s "$STUB_LOG" ]
 }
 
@@ -564,19 +593,23 @@ render_sha() {
 }
 
 @test "gateway-api chart: the chart render is pinned to the scenario set, and Chart.yaml's version mirrors it" {
-	command -v helm >/dev/null 2>&1 || skip "helm not installed"
-	local set="${RENDER_PIN%% *}" pinned="${RENDER_PIN#* }" got
-	[ "$set" = "$STUB_SCENARIO_SET" ] || {
-		echo "SCENARIO_SET is ${STUB_SCENARIO_SET} but RENDER_PIN is for ${set}: set RENDER_PIN to \"${STUB_SCENARIO_SET} $(render_sha)\""
-		false
-	}
-	got="$(render_sha)"
-	[ "$got" = "$pinned" ] || {
-		echo "the chart's render changed (sha256 ${got}, pinned ${pinned} for ${set}): bump SCENARIO_SET, the chart's scenarioSet and Chart.yaml's version together, then set RENDER_PIN to \"<new set> ${got}\""
-		false
-	}
+	local set="${RENDER_PIN%% *}" pinned="${RENDER_PIN#* }" got hv
+	# Without helm: the version and the pin's set still have to follow SCENARIO_SET.
 	grep -qx "version: 0\.${STUB_SCENARIO_SET#v}\.0" "${CHART}/Chart.yaml" || {
 		echo "charts/mesh-verify-gateway-api/Chart.yaml version must be 0.${STUB_SCENARIO_SET#v}.0 (scenario set ${STUB_SCENARIO_SET})"
+		false
+	}
+	[ "$set" = "$STUB_SCENARIO_SET" ] || {
+		echo "SCENARIO_SET is ${STUB_SCENARIO_SET} but RENDER_PIN is for ${set}: set RENDER_PIN to \"${STUB_SCENARIO_SET} <the sha256 this test prints with helm ${RENDER_PIN_HELM_MAJOR}>\""
+		false
+	}
+	command -v helm >/dev/null 2>&1 || skip "helm not installed"
+	hv="$(helm version --short 2>/dev/null)" || hv=""
+	[[ "$hv" == "v${RENDER_PIN_HELM_MAJOR}."* ]] \
+		|| skip "RENDER_PIN is helm ${RENDER_PIN_HELM_MAJOR} output and this helm is '${hv:-unknown}': the render hash is not compared (CI runs it)"
+	got="$(render_sha)"
+	[ "$got" = "$pinned" ] || {
+		echo "the chart's render changed (sha256 ${got}, pinned ${pinned} for ${set}; helm ${hv}): bump SCENARIO_SET, the chart's scenarioSet and Chart.yaml's version together, then set RENDER_PIN to \"<new set> ${got}\""
 		false
 	}
 }
@@ -625,6 +658,9 @@ render_sha() {
 	assert_output --partial "Predictions: 22 MATCH, 0 DEVIATION, 0 UNKNOWN of 22 rows."
 	assert_output --partial "results will go to ${OUT}/run-"
 	assert_output --partial "Argo CD: ${OUT}/run-"
+	# The gate's one line per member that passed.
+	assert_output --partial "  ctx-a: the data-plane gate passed after 0 s (1 round(s) in a row)"
+	assert_output --partial "  ctx-b: the data-plane gate passed after"
 	local t s a
 	t="$(tsv)"
 	s="$(summary)"
@@ -664,7 +700,7 @@ render_sha() {
 	grep -q 'proxy-config endpoints -n istio-system istio-ingressgateway-5d8f7-p1 -o json' "${STUB_LOG}.istioctl"
 	# Provenance: live state per member (PL39), builds that ran (R1), restarts (PL9), the
 	# data-plane gate (SC1), the scenario set (R2), the run config, the expected body.
-	grep -qx '# GWAPI_SCHEMA=3' "$t"
+	grep -qx '# GWAPI_SCHEMA=4' "$t"
 	grep -qx '# GATEWAYCLASS\[ctx-a\]=istio.io/gateway-controller;Accepted=True' "$t"
 	grep -qx '# ISTIOD_ENV\[ctx-b\]=PILOT_ENABLE_GATEWAY_API=true;PILOT_ENABLE_GATEWAY_API_STATUS=unset;PILOT_GATEWAY_API_CONTROLLER_NAME=unset;ENABLE_GATEWAY_API_MANUAL_DEPLOYMENT=unset;PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=unset;PILOT_SCOPE_GATEWAY_TO_NAMESPACE=unset;PILOT_MULTI_NETWORK_DISCOVER_GATEWAY_API=unset;ENABLE_MCS_HOST=unset;ENABLE_MCS_SERVICE_DISCOVERY=unset;ENABLE_MCS_CLUSTER_LOCAL=unset' "$t"
 	local digest
@@ -680,6 +716,7 @@ render_sha() {
 	grep -qx '# DATAPLANE_GATE_HOSTS=s1.classic.test,s3.gwapi.test' "$t"
 	grep -qx '# GATE_PASSES=1' "$t"
 	grep -qx '# REPROBE_CELLS=0' "$t"
+	grep -qx '# REPROBE_DELAY_SEC=0' "$t"
 	grep -qx '# SETTLE_SEC=0' "$t"
 	grep -qE '^# TRAFFIC_START=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$t"
 	grep -qE '^# TRAFFIC_END=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$t"
@@ -737,12 +774,13 @@ render_sha() {
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: YES — S2 (its route in place for the whole traffic window, no \`echo-s2\` Service on the ingress member) returned \`500:3\` through \`ctx-a\`'s ingress (500: Envoy had no cluster for the route's destination, i.e. istiod dropped it, as for C1), while S3 (the same route plus a stub Service there) answered 200 from the workload member \`ctx-b\` and S2 answered 200 through \`ctx-b\` itself."
 	[ "$(cell ctx-a S2 verdict)" = DEVIATION ]
 	[ "$(cell ctx-a S3 verdict)" = MATCH ]
-	# The failed predicted-200 cells were re-probed, and failed again.
+	# The failed predicted-200 cells were re-probed, and failed again the same way (G1).
 	[[ "$(cell ctx-a S2 row_status)" == *REPROBE_FAILED* ]]
 	[[ "$(cell ctx-a S2 detail)" == *"re-probed 0 s after the traffic: 500:3"* ]]
 	grep -qx '# REPROBE_CELLS=2' "$(tsv)"
-	# The answering body is in the row, its address masked.
-	grep -q 'HTTP: expected 200 on all 3, got 500:3 (most frequent body: no healthy upstream from <ip>)' "$(tsv)"
+	# S7b failing like S2 agrees with the YES: the kind: Service line says so, not INCONCLUSIVE.
+	assert_output --partial "S7b (namespace \`mesh-verify-gwapi-shared\` and its ReferenceGrant there, no Service) failed like S2, \`500:3\` through \`ctx-a\`'s ingress while S1 answered there: consistent with the first answer, so it needs the Service too."
+	refute_output --partial "Whether it needs the Service too is INCONCLUSIVE"
 	no_addresses
 	rm -rf "$OUT"
 	# S7b runs S2's code path: S2 failing where S7b answered is a contradiction, not a YES.
@@ -777,6 +815,48 @@ render_sha() {
 	assert_success
 	assert_output --partial "  - kind: Service — INCONCLUSIVE"
 	assert_output --partial "S7 through \`ctx-a\`: 503 on every request"
+	rm -rf "$OUT"
+	# A 500 with a body is not Envoy's empty reply for a route without a cluster.
+	STUB_S2_OTHER=500 STUB_S2_BODY="no healthy upstream from 192.0.2.7" STUB_S7B_OTHER=500 gw_run
+	assert_success
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "S2 through \`ctx-a\`: 500 with a body (\`no healthy upstream from <ip>\`), not Envoy's empty reply for a route without a cluster; the re-probe got \`500:3\`"
+	refute_output --partial "traffic: YES"
+	# The answering body is in the row, its address masked.
+	grep -q 'HTTP: expected 200 on all 3, got 500:3 (most frequent body: no healthy upstream from <ip>)' "$(tsv)"
+	no_addresses
+}
+
+@test "gateway-api run: a failure counts toward YES only when its re-probe fails the same way (G1)" {
+	# 500, then 503 "no healthy upstream" on the re-probe: the cluster appeared, so the remote
+	# Service was discovered late, not dropped.
+	STUB_S2_OTHER=500 STUB_S2_REPROBE=503 STUB_S7B_OTHER=500 gw_run
+	assert_success
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "S2 through \`ctx-a\`: \`500:3\` during the traffic, but the re-probe 0 s later answered \`503:3\` (body \`no healthy upstream\`): the failure was not stable (503: the backend's cluster was there by then, without a healthy endpoint, so its Service was discovered late, not dropped)"
+	refute_output --partial "traffic: YES"
+	[[ "$(cell ctx-a S2 row_status)" == *REPROBE_FAILED* ]]
+	[[ "$(cell ctx-a S2 detail)" == *"re-probed 0 s after the traffic: 503:3 (most frequent body: no healthy upstream)"* ]]
+	rm -rf "$OUT"
+	# A classic route: an empty 503 (no cluster), then "no healthy upstream" (the cluster is there).
+	STUB_S9_OTHER=503 STUB_S9_REPROBE=503 gw_run
+	assert_success
+	assert_output --partial "  - classic VirtualService — INCONCLUSIVE"
+	assert_output --partial "S9 through \`ctx-a\`: \`503:3\` during the traffic, but the re-probe 0 s later answered \`503:3\` (body \`no healthy upstream\`): the failure was not stable"
+	refute_output --partial "classic VirtualService — YES"
+	rm -rf "$OUT"
+	# 500, then no answer at all on the re-probe.
+	STUB_S2_OTHER=500 STUB_S2_REPROBE=000 STUB_S7B_OTHER=500 gw_run
+	assert_success
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "the re-probe 0 s later answered \`000:3\`: the failure was not stable (HTTP \`000:3\`: requests without an answer within 5 s)"
+	refute_output --partial "traffic: YES"
+	rm -rf "$OUT"
+	# 500 again on the re-probe: the failure is stable, and the YES stands.
+	STUB_S2_OTHER=500 STUB_S2_REPROBE=500 STUB_S7B_OTHER=500 gw_run
+	assert_success
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: YES — S2 (its route in place for the whole traffic window, no \`echo-s2\` Service on the ingress member) returned \`500:3\` through \`ctx-a\`'s ingress"
+	[[ "$(cell ctx-a S2 detail)" == *"re-probed 0 s after the traffic: 500:3"* ]]
 }
 
 @test "gateway-api run: a classic route counts as 'needed' only on a 503 with an empty body (no cluster); 'no healthy upstream' is INCONCLUSIVE (F1)" {
@@ -835,6 +915,23 @@ render_sha() {
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
 	refute_output --partial "traffic: YES"
 	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
+	rm -rf "$OUT"
+	# A MATCH row with STATUS_CHANGED keeps the status the wait ended on in detail.
+	STUB_NOSTATUS_ONCE=s2 gw_run --wait-timeout 0
+	assert_success
+	[ "$(cell ctx-a S2 verdict)" = MATCH ]
+	[[ "$(cell ctx-a S2 row_status)" == *STATUS_CHANGED* ]]
+	[ "$(cell ctx-a S2 detail)" = "status changed during the run (the wait ended on no-status)" ]
+	rm -rf "$OUT"
+	# A status that could not be read when the wait ended is "unread", not "not in place".
+	STUB_ROUTES_FAIL_ONCE=1 STUB_S2_OTHER=500 STUB_S7B_OTHER=500 gw_run --wait-timeout 0
+	assert_success
+	[[ "$(cell ctx-a S2 row_status)" == *STATUS_CHANGED* ]]
+	[[ "$(cell ctx-a S2 detail)" == *"status changed during the run (the wait ended on unread)"* ]]
+	[[ "$(cell ctx-a S2 detail)" == *"not judged a deviation: the route's status was unread when the wait ended"* ]]
+	assert_output --partial "S2's route on \`ctx-a\` was not in place for the whole traffic window (status when the wait ended \`unread\`"
+	refute_output --partial "traffic: YES"
+	no_addresses
 }
 
 @test "gateway-api run: the 'no local Service' precondition is read, not inferred: a Service where none belongs, or no S3 stub, is INCONCLUSIVE (M2)" {
@@ -1002,6 +1099,10 @@ render_sha() {
 	[[ "$(cell ctx-a S2 row_status)" == *DATAPLANE_NOT_READY* ]]
 	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
 	[[ "$(cell ctx-a S2 detail)" == *"not judged a deviation: s1.classic.test and s3.gwapi.test did not answer 200 through this ingress 1 time(s) in a row"* ]]
+	# Its failed cells are not re-probed: the rows are tainted anyway.
+	grep -qx '# REPROBE_CELLS=0' "$t"
+	[[ "$(cell ctx-a S2 row_status)" != *REPROBE* && "$(cell ctx-a S2 row_status)" != *LATE_ENDPOINT* ]]
+	refute_output --partial "Re-probe:"
 	[ "$(cell ctx-a S3 verdict)" = MATCH ]
 	[ "$(cell ctx-b S2 verdict)" = MATCH ]
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
@@ -1041,21 +1142,48 @@ render_sha() {
 	assert_output --partial "the cross-cluster path through \`ctx-a\` was not ready (s1.classic.test and s3.gwapi.test did not answer 200 there 1 time(s) in a row within the wait)"
 }
 
-@test "gateway-api run: a failed cell predicted 200 that answers on the re-probe is a late endpoint: UNKNOWN, never a DEVIATION or a YES" {
-	STUB_S2_OTHER=500 STUB_S2_BAD_FIRST=3 STUB_S7B_OTHER=500 gw_run
+@test "gateway-api run: a cell that answers only on the re-probe is a late endpoint: UNKNOWN, never a DEVIATION or a failure; answered for a NO, and named where it blocks a YES" {
+	STUB_S2_OTHER=500 STUB_S2_REPROBE=200 STUB_S7B_OTHER=500 gw_run
 	assert_success
 	assert_output --partial "Re-probe: 2 cell(s) predicted 200 did not answer 200 with the echo text"
 	[ "$(cell ctx-a S2 observed_codes)" = "500:3" ]
 	[[ "$(cell ctx-a S2 row_status)" == *LATE_ENDPOINT* ]]
 	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
-	[[ "$(cell ctx-a S2 detail)" == *"not judged a deviation: it answered 200 with the echo text when re-probed 0 s after the traffic (200:3): a late endpoint push, not the scenario"* ]]
+	[[ "$(cell ctx-a S2 detail)" == *"re-probed 0 s after the traffic: 200:3 (most frequent body: member-b)"* ]]
+	[[ "$(cell ctx-a S2 detail)" == *"not judged a deviation: it answered 200 with the echo text on the re-probe: a late endpoint push, not the scenario"* ]]
 	# S7b failed on the re-probe too: a deviation that stands.
 	[[ "$(cell ctx-a S7b row_status)" == *REPROBE_FAILED* ]]
 	[ "$(cell ctx-a S7b verdict)" = DEVIATION ]
 	grep -qx '# REPROBE_CELLS=2' "$(tsv)"
-	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
-	assert_output --partial "S2 through \`ctx-a\` is not judged: it answered 200 with the echo text when re-probed"
+	# S2 answered, if late: a NO that says so.
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: NO — S2 answered 200 (3/3, body \`member-b\`) from the workload member \`ctx-b\` through \`ctx-a\`'s ingress, with no \`echo-s2\` Service there (read in the preflight). 1 of the 1 other members (\`ctx-a\`) answered S2 only on the re-probe 0 s after the traffic (a late endpoint push), not during it."
 	refute_output --partial "traffic: YES"
+	rm -rf "$OUT"
+	# S7b answering only on the re-probe still contradicts an S2 failure (the safe side), and is
+	# its own late "not the Service".
+	STUB_S2_OTHER=500 STUB_S7B_OTHER=500 STUB_S7B_REPROBE=200 gw_run
+	assert_success
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE — 0 of 1 other members answered, 0 failed, 0 with a broken path, 1 unclear: S2 failed through \`ctx-a\` while S7b (the same code path: its grant passes, the local Service lookup misses, a soft error) answered 200 there on the re-probe: this contradicts S7b."
+	assert_output --partial "  - kind: Service — YES, it needs the namespace (for the ReferenceGrant) but not the Service:"
+	assert_output --partial "answered 200 from \`ctx-b\`. 1 of the 1 other members (\`ctx-a\`) answered S7b only on the re-probe"
+	rm -rf "$OUT"
+	# The workload member's own cell answering only on the re-probe is named as such.
+	STUB_S2_W=500 STUB_S2_W_REPROBE=200 STUB_S2_OTHER=500 STUB_S7B_OTHER=500 gw_run
+	assert_success
+	[[ "$(cell ctx-b S2 row_status)" == *LATE_ENDPOINT* ]]
+	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
+	assert_output --partial "S2 answered through the workload member \`ctx-b\` only on the re-probe (HTTP \`500:3\` during the traffic, \`200:3\` with the echo text on the re-probe 0 s later: a late endpoint push)"
+	refute_output --partial "also fails through the workload member"
+	rm -rf "$OUT"
+	# References that answered only on the re-probe are named, not "a broken path"; S8 and S9
+	# themselves count as answered.
+	STUB_S8_OTHER=500 STUB_S8_REPROBE=200 STUB_S9_OTHER=503 STUB_S9_REPROBE=200 gw_run
+	assert_success
+	assert_output --partial "  - kind: Service — INCONCLUSIVE (0 of 1 other members answered, 0 failed, 0 with a broken path, 1 unclear): S7 failed through \`ctx-a\`, but its reference answered there only on the re-probe: S9 (HTTP \`503:3\` during the traffic"
+	assert_output --partial "the path through \`ctx-a\` is not shown ready during the traffic"
+	refute_output --partial "all failed through"
+	assert_output --partial "  - Hostname — NO: S8 answered 200 from \`ctx-b\` through \`ctx-a\`'s ingress, without \`mesh-verify-gwapi-remote\` there. 1 of the 1 other members (\`ctx-a\`) answered S8 only on the re-probe"
+	assert_output --partial "  - classic VirtualService — NO: S9 answered 200"
 }
 
 @test "gateway-api run: a chart synced from this script's own commit is 'same', or 'same-dirty' from a modified tree" {
@@ -1168,7 +1296,7 @@ render_sha() {
 }
 
 @test "gateway-api run: --ingress replaces the LoadBalancer read and is recorded as an override with its port only" {
-	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_INGRESS=ctx-b=192.0.2.99 GWAPI_SETTLE_SEC=0 \
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_INGRESS=ctx-b=192.0.2.99 GWAPI_SETTLE_SEC=0 GWAPI_REPROBE_DELAY_SEC=0 \
 		run bash "$GW" --contexts ctx-a,ctx-b --workload-context ctx-b --requests 2 --wait-timeout 0 \
 		--skip-proxy-config --results-dir "$OUT" --ingress ctx-a=192.0.2.1
 	assert_success
@@ -1183,7 +1311,7 @@ render_sha() {
 	no_addresses
 	# A port is kept, the host is not; a run config is copied into the run directory.
 	rm -rf "$OUT"
-	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_SETTLE_SEC=0 \
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" GWAPI_SETTLE_SEC=0 GWAPI_REPROBE_DELAY_SEC=0 \
 		run bash "$GW" --config "${ROOT}/tests/gateway-api/configs/smoke.env" --contexts ctx-a,ctx-b \
 		--workload-context ctx-b --requests 1 --wait-timeout 0 --results-dir "$OUT" --ingress ctx-a=192.0.2.1:8080
 	assert_success

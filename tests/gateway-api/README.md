@@ -256,33 +256,41 @@ results will go, and:
    first failed round after it; a streak already under way may finish. Then `GWAPI_SETTLE_SEC`
    (5 s) more for the other backends (`SETTLE_SEC`). `DATAPLANE_GATE_SEC` is the gate's own
    duration, without the settle. `DATAPLANE_READY_SEC[ctx]` is the time from the gate's start until
-   that ingress passed, to within one round (1 s plus curl's latency); `timeout`: never; `unknown`:
-   no ingress address. A member that timed out has `DATAPLANE_NOT_READY` rows, and the warning
+   that ingress passed, to within one round (1 s plus curl's latency); it includes the
+   `GWAPI_GATE_PASSES` − 1 confirming rounds, so an ingress ready from the start reads about 2 s
+   with the default 3. `timeout`: never; `unknown`: no ingress address. Each ingress prints one
+   line when it passes. A member that timed out has `DATAPLANE_NOT_READY` rows, and the warning
    says "no HTTP answer from this ingress" when no request got one.
-3. **Traffic:** `--requests` (10) requests per member ingress × scenario host
-   (`curl -H "Host: …"`), with `--timeout` (5 s) each, between `TRAFFIC_START` and
-   `TRAFFIC_END` (UTC). The ingress address comes from the LoadBalancer status, or
-   `--ingress CTX=ADDR[:PORT]` (recorded as `override:port=N`, never the address). A cell with a
-   timed-out request gets one more request with `GWAPI_DETAIL_TIMEOUT_SEC` (35 s): Envoy answers a
-   dead east-west hop only after 3 × 10 s connect timeouts (one try plus Istio's default two
-   retries), so the long timeout records Envoy's own verdict instead of a client timeout, and only
-   once per such cell. Then the **re-probe**: the gate covers the main namespace's echo pod only,
-   and the S7–S9 and S7b pods are others whose endpoints can reach an ingress later. Every cell
-   predicted 200 that did not answer 200 with the echo text on every request gets `--requests`
-   more after `GWAPI_SETTLE_SEC` (`REPROBE_CELLS` counts them). If it passes then, the row says
-   `LATE_ENDPOINT` and is `UNKNOWN`, never a deviation; if it fails again, `REPROBE_FAILED`.
+3. **Traffic:** `--requests` (10) requests per member ingress × scenario host (`curl -H "Host: …"`),
+   with `--timeout` (5 s) each, between `TRAFFIC_START` and `TRAFFIC_END` (UTC). Below 3 requests
+   the run warns: a YES would rest on that few. The ingress address comes from the LoadBalancer
+   status, or `--ingress CTX=ADDR[:PORT]` (recorded as `override:port=N`, never the address). A cell
+   with a timed-out request gets one more request with `GWAPI_DETAIL_TIMEOUT_SEC` (35 s): Envoy
+   answers a dead east-west hop only after 3 × 10 s connect timeouts (one try plus Istio's default
+   two retries), so the long timeout records Envoy's own verdict instead of a client timeout, and
+   only once per such cell. Then the **re-probe**: the gate covers the main namespace's echo pod
+   only, and the S7–S9 and S7b pods are others whose endpoints can reach an ingress later. Every
+   cell predicted 200 that did not answer 200 with the echo text on every request gets `--requests`
+   more after `GWAPI_REPROBE_DELAY_SEC` (15 s; `REPROBE_DELAY_SEC`; `REPROBE_CELLS` counts them),
+   except through an ingress whose gate never passed (its rows are tainted already). `detail`
+   records the re-probe's codes. If it passes then, the row says `LATE_ENDPOINT` and is `UNKNOWN`,
+   never a deviation, and it counts as answered for a NO; if it fails again, `REPROBE_FAILED`, and
+   its failure counts toward a YES only when the re-probe repeats it.
 4. **Endpoint evidence** (best effort; skipped by `--skip-proxy-config` or without `istioctl`):
    one `istioctl proxy-config endpoints` dump per ingress (limit `GWAPI_ISTIOCTL_TIMEOUT_SEC`),
    from the first Running ingress pod (`PROXY_CONFIG_POD`; curl may reach any replica), filtered
    in one `jq` pass for each backend's `outbound|8080||<FQDN>` cluster: a class (`direct`,
    `remote-ewgw:15443`, `mixed`, `none`), a count and a healthy count. Addresses are never recorded.
+   The dumps are read in parallel, but at most 4 are parsed at once: one pass over a 20k-cluster
+   dump peaks near 0.5 GB on the host running the script.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
    content that was deployed (`CHART_REVISION`; `HARNESS_SHA` only describes the script); when it
    is not the script's commit the run warns and records `CHART_REVISION_VS_HARNESS=differs`
    (`same` when it is, `same-dirty` when it is but the script's tree has uncommitted changes).
 6. Rereads the route status (S4's status depends on istiod's push timing; a route that was not
-   in place when the wait ended but is now says `STATUS_CHANGED`) and the istiod and ingress pods
+   in place when the wait ended, or whose status was unread then, but is in place now says
+   `STATUS_CHANGED`; `detail` keeps the status the wait ended on) and the istiod and ingress pods
    (`ISTIOD_RESTARTED` / `INGRESS_RESTARTED`: `1` = a pod restarted, was replaced or added during
    the run, `0` = unchanged, `unknown` = a read failed, which flags the rows
    `*_RESTART_UNVERIFIED`). An ingress pod still Pending at the preflight (an HPA scale-out) gets
@@ -305,16 +313,25 @@ The summary starts with two answers. Each one keeps its label in every outcome (
 `… INCONCLUSIVE`), and an INCONCLUSIVE says how the other members split and why. A YES must be the
 specific failure the hypothesis predicts, through a route in place for the whole traffic window,
 for a scenario that works through the workload member; anything else is INCONCLUSIVE with the
-reason. A failure counts only as the code of a dropped destination, on every request:
+reason. A failure counts only as Envoy's empty-bodied reply for a dropped destination, on every
+request, repeated by the re-probe:
 
-- **HTTPRoute: 500.** An empty or unknown destination has no Envoy cluster, and Gateway API routes
-  answer that with `ClusterNotFoundResponseCode=INTERNAL_SERVER_ERROR` (`route.go:617-621`). C1 is
-  the reference: a 500 counts only where C1 answered 500 through the same ingress. A 503 means the
+- **HTTPRoute: 500 with an empty body.** An empty or unknown destination has no Envoy cluster, and
+  Gateway API routes answer that with `ClusterNotFoundResponseCode=INTERNAL_SERVER_ERROR`
+  (`route.go:617-621`), a local reply without a body. C1 is the reference: a 500 counts only where
+  C1 answered 500 through the same ingress. A 500 with a body is not that reply. A 503 means the
   ingress has the backend's cluster but no healthy endpoint (EDS lag or the east-west path: the
-  destination was kept), and a 404 means the route had not reached that ingress's Envoy; both are
-  INCONCLUSIVE.
+  destination was kept), and a 404 means the route had not reached that ingress's Envoy. All of
+  these are INCONCLUSIVE.
 - **Classic VirtualService: 503 with an empty body** (Envoy's NC: no cluster for the host). A 503
   `no healthy upstream` (UH: the cluster is there, its endpoints are not) is INCONCLUSIVE.
+- **The re-probe must repeat it.** Every such failure on a cell predicted 200 was re-probed
+  (step 3). It counts only when the re-probe failed by the same rule. A re-probe that answered
+  otherwise makes it INCONCLUSIVE, "the failure was not stable": a 500 and then a 503 means the
+  cluster appeared, i.e. the remote Service was discovered late, not dropped. A cell that answered
+  200 with the echo text only on the re-probe (`LATE_ENDPOINT`) counts as answered for a NO, and
+  the NO says how many members answered only then; it never counts as a failure. Where the
+  workload member's own cell or a reference answered only on the re-probe, the INCONCLUSIVE says so.
 
 The first answer, from S2 and S3:
 
@@ -322,19 +339,20 @@ The first answer, from S2 and S3:
   request, through every other member's ingress, and the preflight read no `echo-s2` there.
 - **YES**: through every other member's ingress S2 returned 500 on a route in place for the whole
   traffic window (`Accepted=True` both when the wait ended and after the traffic, no `STATUS_*`
-  flag), on a path with no taint (gate passed, no late endpoint, no restart, verified), while S2
-  answered 200 through the workload member itself, C1 answered 500 there, and S3 (the same route
-  plus a stub Service) answered 200 from the workload member. It lists the codes per member and
-  says what they mean.
+  flag), on a path with no taint (gate passed, no late endpoint, no restart, verified), and
+  again on the re-probe, while S2 answered 200 through the workload member itself, C1 answered
+  500 through the same other-member ingress, and S3 (the same route plus a stub Service) answered
+  200 from the workload member. It lists the codes per member and says what they mean.
 - **INCONCLUSIVE**: anything else, with the reason: S2's route not in place for the whole window,
-  another code than 500 (with what it means), S2 failing through the workload member too, C1 not
-  answering 500, S2 failing where S7b, on the same code path (its grant passes, the local Service
-  lookup misses, a soft error), answered 200 ("contradicts S7b"), S2 and S3 both failing (S1
-  answering means the Gateway API path is broken; S1 failing too, the cross-cluster path: check
-  mesh-verify and the east-west gateways), a Service where none belongs or no S3 stub, another or
-  an unreadable scenario set, an ingress without an address or an answer, a data path that was not
-  ready, a late endpoint, a restart during the run or one that could not be checked, members that
-  disagree, or an unknown echo text.
+  another code than an empty-bodied 500 (with what it means), a re-probe that did not repeat the
+  failure, S2 failing through the workload member too (or answering there only on the re-probe), C1
+  not answering 500, S2 failing where S7b, on the same code path (its grant passes, the local
+  Service lookup misses, a soft error), answered 200, also only on the re-probe ("contradicts S7b"),
+  S2 and S3 both failing (S1 answering means the Gateway API path is broken; S1 failing too, the
+  cross-cluster path: check mesh-verify and the east-west gateways), a Service where none belongs or
+  no S3 stub, another or an unreadable scenario set, an ingress without an address or an answer, a
+  data path that was not ready, a late endpoint, a restart during the run or one that could not be
+  checked, members that disagree, or an unknown echo text.
 
 When the echo Deployment's `-text` could not be read, the expected body is the workload ingress's
 own most frequent answer in the run (`EXPECTED_BODY_SOURCE=local-answer`), and the answer says so.
@@ -349,13 +367,15 @@ judged through every other member's ingress, which has no `mesh-verify-gwapi-rem
   HTTPRoute), while another scenario with its backend in the same namespace (S9/S8 for S7, S9 for
   S8, S8 for S9) answered 200 through the same ingress, so the failure is the kind's own. For
   `kind: Service`, the line adds S7b: "it needs the namespace (for the ReferenceGrant) but not the
-  Service" when S7b answered 200, else whether the Service is needed too stays INCONCLUSIVE with
-  S7b's reason.
+  Service" when S7b answered 200; "S7b failed like S2 … consistent with the first answer, so it
+  needs the Service too" when S7b failed through every other member and the first answer is YES;
+  else whether the Service is needed too stays INCONCLUSIVE with S7b's reason.
 - **INCONCLUSIVE**, with the reason: all of them failed (S7b or S1 answering means the path to the
   backend namespace is broken: check its `istio-discovery` label on the workload member, whether
   the echo pod there has a sidecar, and whether its endpoints were pushed yet; both failing, the
-  cross-cluster path), members disagree, any of the first answer's reasons, or a precondition does
-  not hold (a member has the namespace itself, or it could not be read).
+  cross-cluster path), a reference that answered only on the re-probe, members disagree, any of
+  the first answer's reasons, or a precondition does not hold (a member has the namespace itself,
+  or it could not be read).
 
 Then the S2 status and the S7–S9 and S7b results on each other member, the MATCH/DEVIATION/UNKNOWN
 counts (with "endpoints not read: N rows" when the endpoint evidence was skipped or failed), Argo
@@ -364,10 +384,12 @@ preflight tables (state, builds, pods, readiness), and the run settings. The YAM
 repeats every TSV preamble line.
 
 **Comparing re-runs:** each run writes a fresh `run-<RUN_ID>/`. Runs whose preambles match on
-`SCENARIO_SET` (and `SCENARIO_SET[ctx]`), `ISTIOD_IMAGE` and `OSSM_OPERATOR` have comparable
-verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
+`GWAPI_SCHEMA` (the rules that turn codes into answers), `SCENARIO_SET` (and `SCENARIO_SET[ctx]`),
+`ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `GATE_PASSES`,
+`SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable verdicts and answers; their codes and timings
+(`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
 
-TSV (`GWAPI_SCHEMA=3`; 21 tab-separated columns), one row per member × scenario: `run_id
+TSV (`GWAPI_SCHEMA=4`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code
 observed_codes expected_body body_match top_body expected_endpoints observed_endpoints
 endpoints_healthy verdict row_status detail`. Schema 2 added S7b, the `direct` endpoint class
@@ -375,7 +397,12 @@ endpoints_healthy verdict row_status detail`. Schema 2 added S7b, the `direct` e
 preamble keys. Schema 3 changed what counts toward an answer (above), added the
 `STATUS_CHANGED`, `LATE_ENDPOINT`, `REPROBE_FAILED` and `*_UNVERIFIED` flags, the preamble keys
 `DATAPLANE_GATE_HOSTS` (was `DATAPLANE_GATE_HOST`), `GATE_PASSES` and `REPROBE_CELLS`, and
-`DATAPLANE_GATE_SEC` no longer includes the settle. The columns are unchanged.
+`DATAPLANE_GATE_SEC` no longer includes the settle. Schema 4 changed what counts again: a
+failure needs its re-probe to repeat it, an HTTPRoute's 500 needs an empty body, and a cell that
+answered only on the re-probe counts as answered for a NO. The re-probe waits
+`GWAPI_REPROBE_DELAY_SEC` (preamble `REPROBE_DELAY_SEC`; schema 3 reused the settle) and skips
+ingresses whose gate never passed; `detail` always has the re-probe's codes and, after a status
+change, the status the wait ended on. The columns are unchanged.
 
 - `backend` is the backendRef as the chart writes it; a backend in another namespace as
   `Service mesh-verify-gwapi-remote/echo-s7`.
@@ -383,7 +410,8 @@ preamble keys. Schema 3 changed what counts toward an answer (above), added the
   from istio's parent entry for the Gateway, read after the traffic; for a classic route
   `present`; `absent` = no route on that member (C2 off the workload member); `no-status` = the
   route exists but istio wrote no status for it; `stale` = the status is for an older generation;
-  `unknown` = the read failed. `detail` notes a status that differs from the one the wait ended on.
+  `unknown` = the read failed. `detail` notes a status that differs from the one the wait ended on
+  ("unread" when that read failed).
 - `expected_code`: one code; `observed_codes`: `code:count` by count (`200:10`, `200:7,503:3`),
   `000` = no HTTP answer within `--timeout`, `-` = not probed (no ingress address, an unreachable
   ingress). `expected_body`: the workload's echo text when 200 is expected, else `-`.
@@ -414,13 +442,13 @@ preamble keys. Schema 3 changed what counts toward an answer (above), added the
   | `STATUS_TIMEOUT` | the route still had no current status when the wait timed out | taints |
   | `STATUS_PENDING` | the wait ended in time, but the final read found no current status | taints |
   | `STATUS_UNREADABLE` | the final route read failed | unknown status |
-  | `STATUS_CHANGED` | not in place when the wait ended, in place by the final read | taints |
+  | `STATUS_CHANGED` | not in place (or unread) when the wait ended, in place by the final read | taints |
   | `NO_INGRESS_ADDR` | no ingress address (LoadBalancer pending, no `--ingress`) | not probed |
   | `INGRESS_UNREACHABLE` | no request through that ingress got an HTTP answer (from here) | not probed |
   | `NOT_PROBED` | the cell's traffic produced no record | not probed |
   | `CURL_TIMEOUT` | some requests got no answer in `--timeout`; the detail request is in `detail` | none |
-  | `LATE_ENDPOINT` | failed during the traffic, answered on the re-probe | taints |
-  | `REPROBE_FAILED` | failed during the traffic and again on the re-probe | none |
+  | `LATE_ENDPOINT` | failed during the traffic, answered on the re-probe | taints; answered, for a NO |
+  | `REPROBE_FAILED` | failed during the traffic and again on the re-probe (codes in `detail`) | none; it counts only if both probes fail the same way |
   | `PROXY_CONFIG_FAILED` | the endpoint evidence could not be read (`unknown`/`timeout`) | none: endpoints not judged |
   | `DATAPLANE_NOT_READY` | the data-plane gate never passed through that ingress | taints |
   | `ISTIOD_RESTARTED` / `INGRESS_RESTARTED` | a pod restarted, was replaced or added during the run | taints |
@@ -428,6 +456,8 @@ preamble keys. Schema 3 changed what counts toward an answer (above), added the
 
   "Voids": the row is `UNKNOWN` and cannot count for or against an answer. "Taints": a deviation
   becomes `UNKNOWN`, and a failure there does not count. "Not probed": no traffic, so `UNKNOWN`.
+  "Unknown status": the status part is `UNKNOWN`, a code that differs still makes a `DEVIATION`,
+  and the row never counts toward an answer (its route is not shown in place).
 - `detail`: the reasons, `; `-separated, or `-`.
 
 ## What the lab run must confirm
@@ -519,10 +549,11 @@ on the wait and the gate, no istioctl evidence):
   `GWAPI_HUB_CONTEXT`, `GWAPI_INGRESS`, `GWAPI_REQUESTS`, `GWAPI_TIMEOUT_SEC`,
   `GWAPI_WAIT_TIMEOUT_SEC`, `GWAPI_SKIP_PROXY_CONFIG` and `GWAPI_RESULTS_DIR` back the flags
   (a relative `GWAPI_RESULTS_DIR` starts at the repo root, unlike `--results-dir`);
-  `GWAPI_GATE_PASSES`, `GWAPI_SETTLE_SEC`, `GWAPI_DETAIL_TIMEOUT_SEC`, `GWAPI_KUBECTL_TIMEOUT_SEC`,
-  `GWAPI_ISTIOCTL_TIMEOUT_SEC`, `GWAPI_NAMESPACE`, `GWAPI_REMOTE_NAMESPACE` (the chart's
-  `remoteNamespace`), `GWAPI_SHARED_NAMESPACE` (`sharedNamespace`), `GWAPI_GATEWAY`,
-  `GWAPI_ARGOCD_NAMESPACE` and `GWAPI_ARGOCD_APPSET` have no flag.
+  `GWAPI_GATE_PASSES`, `GWAPI_SETTLE_SEC`, `GWAPI_REPROBE_DELAY_SEC`, `GWAPI_DETAIL_TIMEOUT_SEC`,
+  `GWAPI_KUBECTL_TIMEOUT_SEC`, `GWAPI_ISTIOCTL_TIMEOUT_SEC`, `GWAPI_NAMESPACE`,
+  `GWAPI_REMOTE_NAMESPACE` (the chart's `remoteNamespace`), `GWAPI_SHARED_NAMESPACE`
+  (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` and `GWAPI_ARGOCD_APPSET` have
+  no flag.
 - The shared `ISTIOD_DIAG_*` keys are accepted and unused. The script copies the config into the
   run directory as `run-config-<RUN_ID>.env`.
 - **Flags only:** `--dry-run`. Keep context names in `configs/<name>.local.env` (gitignored).

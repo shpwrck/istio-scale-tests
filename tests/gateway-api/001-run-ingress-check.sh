@@ -16,11 +16,11 @@
 # for the Gateway, the echo Deployments and every route's status, then a data-plane gate (S1 and
 # S3 through every ingress, GWAPI_GATE_PASSES rounds in a row) and GWAPI_SETTLE_SEC. (3)
 # GWAPI_REQUESTS requests per member ingress x scenario host, and one re-probe of each failed
-# cell predicted 200. (4) Optional endpoint evidence (istioctl) and (5) Argo CD health
-# (--hub-context); both are best effort. (6) The TSV and the summary under
-# <results-dir>/run-<RUN_ID>/. A failure counts toward a "needed" answer only as the code of a
-# dropped destination, on a route in place for the whole traffic window, for a scenario that
-# works through the workload member (README, "Read the report").
+# cell predicted 200 after GWAPI_REPROBE_DELAY_SEC. (4) Optional endpoint evidence (istioctl)
+# and (5) Argo CD health (--hub-context); both are best effort. (6) The TSV and the summary
+# under <results-dir>/run-<RUN_ID>/. A failure counts toward a "needed" answer only as the code
+# of a dropped destination, repeated by the re-probe, on a route in place for the whole traffic
+# window, for a scenario that works through the workload member (README, "Read the report").
 #
 # Usage:
 #   ./tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
@@ -52,6 +52,7 @@ INGRESS_CSV="${GWAPI_INGRESS}"
 REQUESTS="${GWAPI_REQUESTS}"
 TIMEOUT_SEC="${GWAPI_TIMEOUT_SEC}"
 WAIT_TIMEOUT_SEC="${GWAPI_WAIT_TIMEOUT_SEC}"
+REPROBE_DELAY="${GWAPI_REPROBE_DELAY_SEC}"
 RESULTS_DIR="$(config_repo_path "${GWAPI_RESULTS_DIR}")"
 SKIP_PROXY_CONFIG="${GWAPI_SKIP_PROXY_CONFIG}"
 NS="${GWAPI_NAMESPACE}"
@@ -78,9 +79,12 @@ OSSM_PACKAGE=servicemeshoperator3
 # Fixed by this script (not knobs: the bounds they poll within are --wait-timeout and
 # GWAPI_GATE_PASSES). POLL_SEC: seconds between status polls in the wait (step 2).
 # GATE_POLL_SEC: seconds between the data-plane gate's rounds per ingress (step 2), so
-# DATAPLANE_READY_SEC resolves to this plus curl's latency.
+# DATAPLANE_READY_SEC resolves to this plus curl's latency. JQ_SLOTS: endpoint dumps parsed at
+# once (step 4): one jq pass over a 20k-cluster dump peaks near 0.5 GB, so 20 members in parallel
+# would need about 10 GB on this host; the istioctl reads themselves still run all at once.
 POLL_SEC=5
 GATE_POLL_SEC=1
+JQ_SLOTS=4
 # 2: S7b, the shared backend namespace, endpoint class "direct" (was "local-pod"), the
 # SVC_/SCENARIO_SET_/DATAPLANE_/RESTARTED row flags and their preamble keys. 3: a failure counts
 # toward "needed" only as the code the hypothesis predicts, on a route in place for the whole
@@ -88,8 +92,13 @@ GATE_POLL_SEC=1
 # GWAPI_GATE_PASSES times in a row; failed predicted-200 cells are re-probed; row flags
 # STATUS_CHANGED, LATE_ENDPOINT, REPROBE_FAILED and *_UNVERIFIED; preamble DATAPLANE_GATE_HOSTS
 # (was DATAPLANE_GATE_HOST), GATE_PASSES, REPROBE_CELLS; DATAPLANE_GATE_SEC no longer includes
-# the settle. Same 21 columns.
-GWAPI_SCHEMA=3
+# the settle. 4: a failure counts only when the re-probe repeats it (a fail on a re-probed cell
+# whose re-probe answered otherwise is unclear); an HTTPRoute's 500 counts only with an empty body
+# (Envoy's no-cluster reply); a cell that answered only on the re-probe counts as answered for a
+# NO; the re-probe waits GWAPI_REPROBE_DELAY_SEC (preamble REPROBE_DELAY_SEC) and skips members
+# whose gate never passed; detail always carries the re-probe's codes and, on a status change, the
+# status the wait ended on. Same 21 columns.
+GWAPI_SCHEMA=4
 # The scenario set this script describes. The chart stamps its own on the namespaces and the
 # Gateway (mesh-verify-gwapi/scenario-set, charts/mesh-verify-gateway-api/templates/_helpers.tpl);
 # gateway-api.bats checks they are equal, and pins a sha256 of the chart's render for this set, so
@@ -183,12 +192,14 @@ Environment:
   (--timeout), GWAPI_WAIT_TIMEOUT_SEC (--wait-timeout), GWAPI_RESULTS_DIR (--results-dir; a
   relative value starts at the repo root), GWAPI_SKIP_PROXY_CONFIG (--skip-proxy-config).
   No flag: GWAPI_GATE_PASSES (rounds in a row the data-plane gate needs, ${GWAPI_GATE_PASSES}),
-  GWAPI_SETTLE_SEC (pause after the gate, and before re-probing failed cells, ${GWAPI_SETTLE_SEC} s),
+  GWAPI_SETTLE_SEC (pause after the gate, ${GWAPI_SETTLE_SEC} s), GWAPI_REPROBE_DELAY_SEC (pause
+  after the traffic before failed cells predicted 200 are re-probed, ${REPROBE_DELAY} s),
   GWAPI_DETAIL_TIMEOUT_SEC, GWAPI_KUBECTL_TIMEOUT_SEC (kubectl --request-timeout,
   ${GWAPI_KUBECTL_TIMEOUT_SEC} s), GWAPI_ISTIOCTL_TIMEOUT_SEC (limit of the one istioctl dump per
-  ingress, ${GWAPI_ISTIOCTL_TIMEOUT_SEC} s), GWAPI_NAMESPACE (${NS}), GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}),
-  GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}), GWAPI_ARGOCD_NAMESPACE
-  (${GWAPI_ARGOCD_NAMESPACE}), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
+  ingress, ${GWAPI_ISTIOCTL_TIMEOUT_SEC} s), GWAPI_NAMESPACE (${NS}),
+  GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}),
+  GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
+  GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE}), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
@@ -294,6 +305,7 @@ is_pos_int "$GWAPI_DETAIL_TIMEOUT_SEC" || die "GWAPI_DETAIL_TIMEOUT_SEC must be 
 is_pos_int "$GWAPI_KUBECTL_TIMEOUT_SEC" || die "GWAPI_KUBECTL_TIMEOUT_SEC must be a positive integer; got '${GWAPI_KUBECTL_TIMEOUT_SEC}'"
 is_pos_int "$GWAPI_ISTIOCTL_TIMEOUT_SEC" || die "GWAPI_ISTIOCTL_TIMEOUT_SEC must be a positive integer; got '${GWAPI_ISTIOCTL_TIMEOUT_SEC}'"
 is_nonneg_int "$GWAPI_SETTLE_SEC" || die "GWAPI_SETTLE_SEC must be a non-negative integer; got '${GWAPI_SETTLE_SEC}'"
+is_nonneg_int "$REPROBE_DELAY" || die "GWAPI_REPROBE_DELAY_SEC must be a non-negative integer; got '${REPROBE_DELAY}'"
 is_pos_int "$GWAPI_GATE_PASSES" || die "GWAPI_GATE_PASSES must be a positive integer; got '${GWAPI_GATE_PASSES}'"
 [[ "$SKIP_PROXY_CONFIG" == 0 || "$SKIP_PROXY_CONFIG" == 1 ]] || die "GWAPI_SKIP_PROXY_CONFIG must be 0 or 1; got '${SKIP_PROXY_CONFIG}'"
 DNS_LABEL_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
@@ -302,6 +314,8 @@ for kv in "GWAPI_NAMESPACE=${NS}" "GWAPI_REMOTE_NAMESPACE=${NS_REMOTE}" "GWAPI_S
 done
 [[ "$NS_REMOTE" != "$NS" ]] || die "GWAPI_REMOTE_NAMESPACE must differ from GWAPI_NAMESPACE (${NS}): S7-S9 need a backend namespace that exists on the workload member only"
 [[ "$NS_SHARED" != "$NS" && "$NS_SHARED" != "$NS_REMOTE" ]] || die "GWAPI_SHARED_NAMESPACE must differ from GWAPI_NAMESPACE (${NS}) and GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}): S7b needs a backend namespace of its own"
+# Every answer needs a code on every request of a cell; with 1 or 2 requests a YES rests on that few.
+((REQUESTS >= 3)) || warn "--requests ${REQUESTS} (or GWAPI_REQUESTS) is below 3: a YES then rests on ${REQUESTS} request(s) per member ingress and scenario"
 
 # Ingress overrides: CTX=ADDR[:PORT]; a context name may hold ':' and '/', so split at the last '='.
 # The results record only the source and the port (override:port=N), never the address.
@@ -397,10 +411,10 @@ if ((DRY_RUN)); then
 	done
 	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels and scenario set, ${NS_REMOTE} on the workload member only, ${NS_SHARED} and its ReferenceGrant everywhere, the backend Services on the other members, istiod env overrides, istiod/ingress/operator builds and pods, the echo Deployments, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s)"
 	echo "Wait:           up to ${WAIT_TIMEOUT_SEC} s for Gateway Programmed, the echo Deployments Ready and every route's status (poll ${POLL_SEC} s), then ${GATE_DESC} answering 200 with the echo text through every ingress ${GWAPI_GATE_PASSES} time(s) in a row (same deadline; a streak under way may finish), then ${GWAPI_SETTLE_SEC} s settle"
-	echo "Traffic:        ${REQUESTS} requests x ${#SCENARIOS[@]} hosts x ${#CONTEXTS[@]} ingresses, curl --max-time ${TIMEOUT_SEC}; one ${GWAPI_DETAIL_TIMEOUT_SEC} s detail request per cell with a timeout; then each cell predicted 200 that did not answer 200 with the echo text is re-probed once (${REQUESTS} requests) after ${GWAPI_SETTLE_SEC} s"
+	echo "Traffic:        ${REQUESTS} requests x ${#SCENARIOS[@]} hosts x ${#CONTEXTS[@]} ingresses, curl --max-time ${TIMEOUT_SEC}; one ${GWAPI_DETAIL_TIMEOUT_SEC} s detail request per cell with a timeout; then each cell predicted 200 that did not answer 200 with the echo text is re-probed once (${REQUESTS} requests) after ${REPROBE_DELAY} s (not through an ingress whose gate never passed); a failure counts toward an answer only if its re-probe repeats it"
 	echo "Proxy evidence: ${proxy_plan}"
 	echo "Argo CD health: ${argo_plan}"
-	echo "Worst case:     about $((WAIT_TIMEOUT_SEC + GWAPI_GATE_PASSES * (${#GATE_HOSTS[@]} * TIMEOUT_SEC + GATE_POLL_SEC) + GWAPI_SETTLE_SEC + REQUESTS * TIMEOUT_SEC + GWAPI_DETAIL_TIMEOUT_SEC + GWAPI_SETTLE_SEC + REQUESTS * TIMEOUT_SEC + pc_worst)) s (wait and gate + settle + traffic + re-probe + evidence; cells and members run in parallel; kubectl reads not included)"
+	echo "Worst case:     about $((WAIT_TIMEOUT_SEC + GWAPI_GATE_PASSES * (${#GATE_HOSTS[@]} * TIMEOUT_SEC + GATE_POLL_SEC) + GWAPI_SETTLE_SEC + REQUESTS * TIMEOUT_SEC + GWAPI_DETAIL_TIMEOUT_SEC + REPROBE_DELAY + REQUESTS * TIMEOUT_SEC + pc_worst)) s (wait and gate + settle + traffic + re-probe + evidence; cells and members run in parallel, at most ${JQ_SLOTS} endpoint dumps parsed at once; kubectl reads not included)"
 	echo "Output:         ${RESULTS_DIR}/run-<RUN_ID>/gateway-api-<RUN_ID>.tsv, summary-<RUN_ID>.md"
 	echo ""
 	echo "Predictions (W = via the workload member ${WORKLOAD_CTX}, O = via every other member):"
@@ -821,6 +835,8 @@ vs_status() {
 # in_place_status <status>: whether a route_status/vs_status value means the route is in place:
 # an HTTPRoute that istio Accepted, or a classic VirtualService that exists.
 in_place_status() { [[ "$1" == Accepted=True* || "$1" == present ]]; }
+# status_text <status>: a status for the prose; a failed read ("unknown") was unread, not absent.
+status_text() { if [[ "$1" == unknown ]]; then echo unread; else echo "$1"; fi; }
 
 # echo_ready <snapshot file>: readyReplicas of an echo Deployment (0 when unreadable).
 echo_ready() {
@@ -916,8 +932,10 @@ done
 # The wait's deadline ends it at the first failed round after the deadline (at least one round
 # each; a streak under way may finish). Then GWAPI_SETTLE_SEC for the other backends' pushes.
 # DATAPLANE_READY_SEC: seconds from the gate's start until it passed, "timeout" when it never
-# did, "unknown" for an ingress without an address. A member that timed out has
-# DATAPLANE_NOT_READY rows, so a failure there is not blamed on a scenario.
+# did, "unknown" for an ingress without an address; it includes the GWAPI_GATE_PASSES - 1
+# confirming rounds, so an ingress ready from the start reads about that many rounds. A member
+# that timed out has DATAPLANE_NOT_READY rows, so a failure there is not blamed on a scenario.
+# Each member prints one line when it passes (the timeouts are warned about after the gate).
 GATE_BODY="${PRE[$WORKLOAD_CTX|echo_text]}"
 case "$GATE_BODY" in "" | - | unknown | absent) GATE_BODY="" ;; esac
 # gate_member <i> <ctx> <start>: writes the member's DATAPLANE_READY_SEC to $WORK/gate-<i>; on a
@@ -940,6 +958,7 @@ gate_member() {
 		if ((ok)); then passes=$((passes + 1)); else passes=0; fi
 		if ((passes >= GWAPI_GATE_PASSES)); then
 			echo "$((SECONDS - start))" >"${WORK}/gate-${i}"
+			echo "  ${ctx}: the data-plane gate passed after $((SECONDS - start)) s (${GWAPI_GATE_PASSES} round(s) in a row)" >&2
 			return 0
 		fi
 		if ((passes == 0 && SECONDS >= WAIT_DEADLINE)); then
@@ -1066,8 +1085,10 @@ fi
 # Late endpoints: the gate covers the main namespace's echo pod only; the S7-S9 and S7b pods are
 # others whose EDS pushes can land after the traffic started. Each cell predicted 200 that did not
 # answer 200 with the echo text on every request is re-probed once (REQUESTS requests) after
-# GWAPI_SETTLE_SEC, in parallel. A cell that passes then is UNKNOWN (LATE_ENDPOINT), never a
-# DEVIATION; one that fails again says so (REPROBE_FAILED).
+# GWAPI_REPROBE_DELAY_SEC, in parallel; not through an ingress whose gate never passed (its rows
+# are tainted anyway). A cell that passes then is UNKNOWN (LATE_ENDPOINT), never a DEVIATION, and
+# counts as answered for a NO; one that fails again says so (REPROBE_FAILED), and its failure
+# counts toward a YES only when the re-probe repeats it (cell_state).
 # cell_passed <cell file>: every request answered 200 with the echo text (when it is known).
 cell_passed() {
 	awk -F'\t' -v e="$EXPECTED_BODY" '{ n++; if ($1 != "200" || (e != "unknown" && $2 != e)) bad++ } END { exit !(n > 0 && bad == 0) }' "$1" 2>/dev/null
@@ -1075,7 +1096,7 @@ cell_passed() {
 REPROBE=()
 for i in "${!CONTEXTS[@]}"; do
 	ctx="${CONTEXTS[i]}"
-	[[ -n "${ADDR[$ctx]:-}" && -z "${INGRESS_DEAD[$ctx]:-}" ]] || continue
+	[[ -n "${ADDR[$ctx]:-}" && -z "${INGRESS_DEAD[$ctx]:-}" && "${DP_READY[$ctx]:-unknown}" != timeout ]] || continue
 	for s in "${!SCENARIOS[@]}"; do
 		IFS='|' read -r _ _ _ _ _ _ _ _ _ code_w code_o _ <<<"${SCENARIOS[s]}"
 		if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then exp_code="$code_w"; else exp_code="$code_o"; fi
@@ -1085,8 +1106,8 @@ for i in "${!CONTEXTS[@]}"; do
 done
 REPROBE_CELLS=${#REPROBE[@]}
 if ((REPROBE_CELLS)); then
-	echo "Re-probe: ${REPROBE_CELLS} cell(s) predicted 200 did not answer 200 with the echo text; once more after ${GWAPI_SETTLE_SEC} s..." >&2
-	((GWAPI_SETTLE_SEC == 0)) || sleep "$GWAPI_SETTLE_SEC"
+	echo "Re-probe: ${REPROBE_CELLS} cell(s) predicted 200 did not answer 200 with the echo text; once more after ${REPROBE_DELAY} s..." >&2
+	((REPROBE_DELAY == 0)) || sleep "$REPROBE_DELAY"
 	pids=()
 	for c in "${REPROBE[@]}"; do
 		i="${c%|*}" s="${c#*|}"
@@ -1140,12 +1161,27 @@ for ctx in "${CONTEXTS[@]}"; do
 	esac
 done
 
+# jq_slot: takes one of JQ_SLOTS parse slots (a directory: mkdir is atomic) and prints its
+# number; free it with rmdir "$WORK/jq-slot-<n>". Caps the memory of the parallel dump parses.
+jq_slot() {
+	local k
+	while :; do
+		for ((k = 1; k <= JQ_SLOTS; k++)); do
+			if mkdir "${WORK}/jq-slot-${k}" 2>/dev/null; then
+				echo "$k"
+				return 0
+			fi
+		done
+		sleep 1
+	done
+}
+
 # proxy_endpoints_member <i> <ctx>: ONE bounded istioctl dump of the ingress's endpoints (not one
 # per backend: each call fetches Envoy's whole clusters?format=json, which is large on a big
-# mesh), filtered for every backend host in one jq pass; "<fqdn>\t<class>\t<total>\t<healthy>"
-# lines in $WORK/pc-<i>.tsv.
+# mesh), filtered for every backend host in one jq pass (at most JQ_SLOTS at once);
+# "<fqdn>\t<class>\t<total>\t<healthy>" lines in $WORK/pc-<i>.tsv.
 proxy_endpoints_member() {
-	local i="$1" ctx="$2" fqdn out="${WORK}/pc-${1}.json" rc=0 v
+	local i="$1" ctx="$2" fqdn out="${WORK}/pc-${1}.json" rc=0 v slot
 	run_bounded "$GWAPI_ISTIOCTL_TIMEOUT_SEC" "$out" "${out}.err" \
 		istioctl --context "$ctx" proxy-config endpoints -n istio-system "${PC_POD[$ctx]}" -o json || rc=$?
 	if ((rc == 124)); then
@@ -1155,8 +1191,10 @@ proxy_endpoints_member() {
 	fi
 	# A dump that does not parse leaves every backend unknown (the reader's default).
 	if ((rc == 0)); then
+		slot="$(jq_slot)"
 		jq -r --argjson fqdns "$FQDNS_JSON" --arg port "$SVC_PORT" "$PC_FILTER" "$out" >"${WORK}/pc-${i}.tsv" 2>/dev/null \
 			|| { echo "istioctl on ${ctx}: the endpoints dump did not parse" >&2; : >"${WORK}/pc-${i}.tsv"; }
+		rmdir "${WORK}/jq-slot-${slot}"
 	else
 		if ((rc == 124)); then v=timeout; else v=unknown; fi
 		for fqdn in "${FQDNS[@]}"; do printf '%s\t%s\t-\t-\n' "$fqdn" "$v"; done >"${WORK}/pc-${i}.tsv"
@@ -1420,18 +1458,23 @@ for i in "${!CONTEXTS[@]}"; do
 			;;
 		esac
 		if [[ "$first_status" != "$obs_status" ]]; then
+			# The status the wait ended on stays in detail, also on a MATCH row.
+			notes+=("status changed during the run (the wait ended on $(status_text "$first_status"))")
 			if ! in_place_status "$first_status" && in_place_status "$obs_status"; then
-				# Not in place when the traffic started, so the traffic may have run without the
-				# route (a 404 or a 500 then says nothing about the backend): never a deviation.
+				# Not shown in place when the traffic started, so the traffic may have run without
+				# the route (a 404 or a 500 then says nothing about the backend): never a deviation.
 				flags+=(STATUS_CHANGED)
-				taint="${taint:+${taint}, }the route was not in place when the wait ended (status ${first_status}), only by the final read (${obs_status})"
-			else
-				notes+=("status changed during the run (the wait ended on ${first_status})")
+				if [[ "$first_status" == unknown ]]; then
+					taint="${taint:+${taint}, }the route's status was unread when the wait ended, so it is not shown in place before the traffic, only by the final read (${obs_status})"
+				else
+					taint="${taint:+${taint}, }the route was not in place when the wait ended (status ${first_status}), only by the final read (${obs_status})"
+				fi
 			fi
 		fi
 
 		# Traffic.
 		codes="-" body_match="-" top_body="-" nempty=0
+		reprobed=0 rcodes="-" rbm="-" rnempty=0 rtop="-"
 		if [[ -z "${ADDR[$ctx]:-}" ]]; then
 			flags+=(NO_INGRESS_ADDR)
 			unk=1
@@ -1476,15 +1519,29 @@ for i in "${!CONTEXTS[@]}"; do
 					notes+=("body: ${nmatch}/${n200} of the 200s carry the workload's echo text (most frequent: ${top_body})")
 				fi
 			fi
-			# The re-probe of a cell predicted 200 that failed (see "Late endpoints" above).
+			# The re-probe of a cell predicted 200 that failed (see "Late endpoints" above); its
+			# codes always reach detail, and cell_state judges the cell by both probes.
 			if [[ -s "${WORK}/reprobe-${i}-${s}.txt" ]]; then
-				IFS=$'\t' read -r rcodes _ <<<"$(cell_summary "${WORK}/reprobe-${i}-${s}.txt" "$EXPECTED_BODY")"
+				reprobed=1
+				IFS=$'\t' read -r rcodes _ rn200 _ rmatch rnempty rtop_raw <<<"$(cell_summary "${WORK}/reprobe-${i}-${s}.txt" "$EXPECTED_BODY")"
+				rtop="$(reach_sanitize "${rtop_raw:--}")"
+				if [[ "$EXPECTED_BODY" == unknown ]]; then
+					rbm=unknown
+				elif ((rn200 == 0)); then
+					rbm="n/a"
+				elif ((rmatch == rn200)); then
+					rbm=yes
+				elif ((rmatch == 0)); then
+					rbm=no
+				else
+					rbm="partial:${rmatch}/${rn200}"
+				fi
+				notes+=("re-probed ${REPROBE_DELAY} s after the traffic: ${rcodes}$([[ "$rtop" == - ]] || echo " (most frequent body: ${rtop})")")
 				if cell_passed "${WORK}/reprobe-${i}-${s}.txt"; then
 					flags+=(LATE_ENDPOINT)
-					taint="${taint:+${taint}, }it answered 200 with the echo text when re-probed ${GWAPI_SETTLE_SEC} s after the traffic (${rcodes}): a late endpoint push, not the scenario"
+					taint="${taint:+${taint}, }it answered 200 with the echo text on the re-probe: a late endpoint push, not the scenario"
 				else
 					flags+=(REPROBE_FAILED)
-					notes+=("re-probed ${GWAPI_SETTLE_SEC} s after the traffic: ${rcodes}")
 				fi
 			fi
 		fi
@@ -1577,7 +1634,7 @@ for i in "${!CONTEXTS[@]}"; do
 		[[ "$exp_code" != 200 ]] || exp_body="$EXPECTED_BODY"
 		backend_l="$(backend_label "$bkind" "$backend" "$bns")"
 		printf '%s\n' "${RUN_ID}"$'\t'"${ctx}"$'\t'"${rl}"$'\t'"${id}"$'\t'"${kind}"$'\t'"${host}"$'\t'"${route}"$'\t'"${backend_l}"$'\t'"${exp_status}"$'\t'"${obs_status}"$'\t'"${exp_code}"$'\t'"${codes}"$'\t'"${exp_body}"$'\t'"${body_match}"$'\t'"${top_body}"$'\t'"${exp_ep}"$'\t'"${obs_ep}"$'\t'"${ep_healthy}"$'\t'"${verdict}"$'\t'"${row_status}"$'\t'"${detail}" >>"$ROWS"
-		for k in kind exp_status obs_status first_status exp_code codes nempty body_match top_body exp_ep obs_ep ep_healthy verdict row_status detail taint; do
+		for k in kind exp_status obs_status first_status exp_code codes nempty body_match top_body reprobed rcodes rbm rnempty rtop exp_ep obs_ep ep_healthy verdict row_status detail taint; do
 			R["${ctx}|${id}|${k}"]="${!k}"
 		done
 	done
@@ -1620,6 +1677,7 @@ emit_preamble() {
 	echo "# SETTLE_SEC=${GWAPI_SETTLE_SEC}"
 	echo "# TRAFFIC_START=${TRAFFIC_START}"
 	echo "# TRAFFIC_END=${TRAFFIC_END}"
+	echo "# REPROBE_DELAY_SEC=${REPROBE_DELAY}"
 	echo "# REPROBE_CELLS=${REPROBE_CELLS}"
 	echo "# KUBECTL_TIMEOUT_SEC=${GWAPI_KUBECTL_TIMEOUT_SEC}"
 	echo "# PROXY_CONFIG=${PROXY_CONFIG_MODE}"
@@ -1681,25 +1739,30 @@ for ctx in "${CONTEXTS[@]}"; do [[ "$ctx" == "$WORKLOAD_CTX" ]] || OTHERS+=("$ct
 n_others=${#OTHERS[@]}
 join_ticks() { local x out=""; for x in "$@"; do out="${out:+${out}, }\`${x}\`"; done; printf '%s' "$out"; }
 
-# cell_state <ctx> <id>: the traffic alone, judged by what a dropped backend gives:
+# classify <kind> <codes> <body match> <n empty bodies> <top body>: one probe of a cell (the
+# traffic's or the re-probe's), judged by what a dropped backend gives:
 #   ok                every request answered 200 with the echo text;
-#   fail              every request got the code of a dropped destination: for an HTTPRoute 500
-#                     (no Envoy cluster for it, and Gateway API routes set
-#                     ClusterNotFoundResponseCode=INTERNAL_SERVER_ERROR, route.go:617-621; C1 is
-#                     the reference), for a classic VirtualService 503 with an empty body (Envoy's
-#                     NC: no cluster for the host);
+#   fail              every request got Envoy's reply for a dropped destination, with an empty
+#                     body: for an HTTPRoute 500 (no Envoy cluster for it, and Gateway API routes
+#                     set ClusterNotFoundResponseCode=INTERNAL_SERVER_ERROR, route.go:617-621; C1
+#                     is the reference), for a classic VirtualService 503 (Envoy's NC: no cluster
+#                     for the host);
 #   unclear<TAB>why   anything else, with what the codes say instead.
-cell_state() {
-	local codes="${R[$1|$2|codes]}" bm="${R[$1|$2|body_match]}" n="$REQUESTS" want
+classify() {
+	local kind="$1" codes="$2" bm="$3" ne="$4" top="$5" n="$REQUESTS" want
 	if [[ "$codes" == "200:${n}" && "$bm" == yes ]]; then
 		echo ok
 		return 0
 	fi
-	if [[ "${R[$1|$2|kind]}" == httproute ]]; then
-		want="a 500, the code of a dropped destination"
+	if [[ "$kind" == httproute ]]; then
+		want="a 500 with an empty body, Envoy's reply for a dropped destination"
 		case "$codes" in
 		"500:${n}")
-			echo fail
+			if [[ "$ne" == "$n" ]]; then
+				echo fail
+			else
+				printf 'unclear\t%s\n' "500 with a body (\`${top}\`), not Envoy's empty reply for a route without a cluster"
+			fi
 			return 0
 			;;
 		"503:${n}")
@@ -1714,10 +1777,10 @@ cell_state() {
 	else
 		want="a 503 with an empty body, the code of a missing host"
 		if [[ "$codes" == "503:${n}" ]]; then
-			if [[ "${R[$1|$2|nempty]}" == "$n" ]]; then
+			if [[ "$ne" == "$n" ]]; then
 				echo fail
 			else
-				printf 'unclear\t%s\n' "503 with a body (\`${R[$1|$2|top_body]}\`): Envoy has the cluster but no healthy endpoint (\"no healthy upstream\": EDS lag or the east-west path), not a missing host"
+				printf 'unclear\t%s\n' "503 with a body (\`${top}\`): Envoy has the cluster but no healthy endpoint (\"no healthy upstream\": EDS lag or the east-west path), not a missing host"
 			fi
 			return 0
 		fi
@@ -1727,6 +1790,50 @@ cell_state() {
 	*000:*) printf 'unclear\t%s\n' "HTTP \`${codes}\`: requests without an answer within ${TIMEOUT_SEC} s" ;;
 	"200:${n}") printf 'unclear\t%s\n' "HTTP 200, but body match \`${bm}\`" ;;
 	*) printf 'unclear\t%s\n' "HTTP \`${codes}\`, not ${want} on every request" ;;
+	esac
+}
+
+# cell_state <ctx> <id>: the cell judged by its traffic and, when it was re-probed (a cell
+# predicted 200 that failed), by the re-probe too:
+#   ok                the traffic answered (classify);
+#   late<TAB>why      the traffic did not, the re-probe answered 200 with the echo text on every
+#                     request: a late endpoint push (answered, for a NO; never a failure);
+#   fail              the traffic failed (classify), and so did the re-probe, by the same rule;
+#   unclear<TAB>why   anything else: a re-probe that answered otherwise makes the failure
+#                     unstable (a 500 and then a 503: the cluster appeared, i.e. the remote
+#                     Service was discovered late, not dropped).
+cell_state() {
+	local c="$1|$2" st rst why rdesc
+	st="$(classify "${R[$c|kind]}" "${R[$c|codes]}" "${R[$c|body_match]}" "${R[$c|nempty]}" "${R[$c|top_body]}")"
+	if [[ "$st" == ok || "${R[$c|reprobed]}" != 1 ]]; then
+		printf '%s\n' "$st"
+		return 0
+	fi
+	rst="$(classify "${R[$c|kind]}" "${R[$c|rcodes]}" "${R[$c|rbm]}" "${R[$c|rnempty]}" "${R[$c|rtop]}")"
+	case "$rst" in
+	ok)
+		printf 'late\t%s\n' "HTTP \`${R[$c|codes]}\` during the traffic, \`${R[$c|rcodes]}\` with the echo text on the re-probe ${REPROBE_DELAY} s later: a late endpoint push"
+		;;
+	fail)
+		if [[ "$st" == fail ]]; then
+			echo fail
+		else
+			printf '%s\n' "${st}; the re-probe got \`${R[$c|rcodes]}\`"
+		fi
+		;;
+	*)
+		if [[ "$st" != fail ]]; then
+			printf '%s\n' "${st}; the re-probe got \`${R[$c|rcodes]}\`"
+			return 0
+		fi
+		why="${rst#*$'\t'}"
+		if [[ "${R[$c|rcodes]}" == "503:${REQUESTS}" ]]; then
+			why="503: the backend's cluster was there by then, without a healthy endpoint, so its Service was discovered late, not dropped"
+		fi
+		rdesc="\`${R[$c|rcodes]}\`"
+		[[ "${R[$c|rtop]}" == - ]] || rdesc="${rdesc} (body \`${R[$c|rtop]}\`)"
+		printf 'unclear\t%s\n' "\`${R[$c|codes]}\` during the traffic, but the re-probe ${REPROBE_DELAY} s later answered ${rdesc}: the failure was not stable (${why})"
+		;;
 	esac
 }
 
@@ -1762,15 +1869,16 @@ route_in_place() {
 
 # member_answer <ctx> <id> <reference id...>: one line:
 #   ok               <id> answered 200 with the echo text on every request;
-#   fail             <id> got the code of a dropped destination (cell_state) on a route in place
-#                    for the whole traffic window, on a ready, stable and verified path; it
-#                    answered 200 through the workload member; for an HTTPRoute, C1 answered 500
-#                    through the same ingress; and a reference (a scenario whose 200 shows the same
-#                    path works) answered;
+#   late             it did so only on the re-probe (a late endpoint push): answered, for a NO;
+#   fail             <id> got the code of a dropped destination, and its re-probe again
+#                    (cell_state), on a route in place for the whole traffic window, on a ready,
+#                    stable and verified path; it answered 200 through the workload member; for
+#                    an HTTPRoute, C1 answered 500 through the same ingress; and a reference (a
+#                    scenario whose 200 shows the same path works) answered;
 #   broken           the same, but no reference answered;
 #   unclear<TAB>why  anything else, with the reason.
 member_answer() {
-	local ctx="$1" id="$2" r why blocked="" rs st w
+	local ctx="$1" id="$2" r why blocked="" rs st w late_refs=""
 	shift 2
 	why="$(blocking_reason "$ctx" "$id")"
 	if [[ -n "$why" ]]; then
@@ -1778,13 +1886,15 @@ member_answer() {
 		return 0
 	fi
 	st="$(cell_state "$ctx" "$id")"
-	if [[ "$st" == ok ]]; then
-		echo ok
+	case "$st" in
+	ok | late*)
+		echo "${st%%$'\t'*}"
 		return 0
-	fi
+		;;
+	esac
 	rs="${R[$ctx|$id|row_status]}"
 	if ! route_in_place "$ctx" "$id"; then
-		printf 'unclear\t%s\n' "${id}'s route on \`${ctx}\` was not in place for the whole traffic window (status when the wait ended \`${R[$ctx|$id|first_status]}\`, after the traffic \`${R[$ctx|$id|obs_status]}\`, row status \`${rs}\`), so its HTTP \`${R[$ctx|$id|codes]}\` says nothing about the backend"
+		printf 'unclear\t%s\n' "${id}'s route on \`${ctx}\` was not in place for the whole traffic window (status when the wait ended \`$(status_text "${R[$ctx|$id|first_status]}")\`, after the traffic \`${R[$ctx|$id|obs_status]}\`, row status \`${rs}\`), so its HTTP \`${R[$ctx|$id|codes]}\` says nothing about the backend"
 		return 0
 	fi
 	case "$rs" in
@@ -1813,10 +1923,17 @@ member_answer() {
 		return 0
 	fi
 	w="$(cell_state "$WORKLOAD_CTX" "$id")"
-	if [[ "$w" != ok ]]; then
+	case "$w" in
+	ok) ;;
+	late*)
+		printf 'unclear\t%s\n' "${id} answered through the workload member \`${WORKLOAD_CTX}\` only on the re-probe (${w#*$'\t'}), so it is not shown to work there during the traffic, and its failure through \`${ctx}\` is not shown to be the ingress member's"
+		return 0
+		;;
+	*)
 		printf 'unclear\t%s\n' "${id} also fails through the workload member \`${WORKLOAD_CTX}\` (HTTP \`${R[$WORKLOAD_CTX|$id|codes]}\`), so its failure through \`${ctx}\` is not the ingress member's"
 		return 0
-	fi
+		;;
+	esac
 	# An HTTPRoute's 500 is a dropped destination where C1 (no backend anywhere) answers 500 too.
 	if [[ "${R[$ctx|$id|kind]}" == httproute ]]; then
 		why="$(blocking_reason "$ctx" C1)"
@@ -1829,11 +1946,23 @@ member_answer() {
 		why="$(blocking_reason "$ctx" "$r")"
 		if [[ -n "$why" ]]; then
 			blocked="${blocked:+${blocked}; }${why}"
-		elif [[ "$(cell_state "$ctx" "$r")" == ok ]]; then
+			continue
+		fi
+		w="$(cell_state "$ctx" "$r")"
+		case "$w" in
+		ok)
 			echo fail
 			return 0
-		fi
+			;;
+		late*) late_refs="${late_refs:+${late_refs}, }${r} (${w#*$'\t'})" ;;
+		esac
 	done
+	# A reference that answered only on the re-probe shows the path came up late, not that it was
+	# broken during the traffic: the failure is not shown to be the scenario's either.
+	if [[ -n "$late_refs" ]]; then
+		printf 'unclear\t%s\n' "${id} failed through \`${ctx}\`, but its reference answered there only on the re-probe: ${late_refs}; the path through \`${ctx}\` is not shown ready during the traffic"
+		return 0
+	fi
 	if [[ -n "$blocked" ]]; then
 		printf 'unclear\t%s\n' "${id} failed through \`${ctx}\`, but its reference cannot count: ${blocked}"
 		return 0
@@ -1841,15 +1970,20 @@ member_answer() {
 	echo broken
 }
 
-# answer_lists <id> <reference id...>: sorts the other members into ANS_OK, ANS_FAIL, ANS_BROKEN
-# and ANS_UNCLEAR (reasons in ANS_WHY, same order) by member_answer.
+# answer_lists <id> <reference id...>: sorts the other members into ANS_OK (ANS_LATE: those that
+# answered only on the re-probe), ANS_FAIL, ANS_BROKEN and ANS_UNCLEAR (reasons in ANS_WHY, same
+# order) by member_answer.
 answer_lists() {
 	local o a
-	ANS_OK=() ANS_FAIL=() ANS_BROKEN=() ANS_UNCLEAR=() ANS_WHY=()
+	ANS_OK=() ANS_LATE=() ANS_FAIL=() ANS_BROKEN=() ANS_UNCLEAR=() ANS_WHY=()
 	for o in "${OTHERS[@]}"; do
 		a="$(member_answer "$o" "$@")"
 		case "$a" in
 		ok) ANS_OK+=("$o") ;;
+		late)
+			ANS_OK+=("$o")
+			ANS_LATE+=("$o")
+			;;
 		fail) ANS_FAIL+=("$o") ;;
 		broken) ANS_BROKEN+=("$o") ;;
 		*)
@@ -1861,15 +1995,17 @@ answer_lists() {
 }
 
 # contradicted_by <id> <ref> <what ref shares with id>: moves every ANS_FAIL member where <ref>
-# (a counting row) answered 200 with the echo text to ANS_UNCLEAR: the two run the same code path,
-# so one failing where the other answers contradicts itself.
+# (a counting row) answered 200 with the echo text, during the traffic or only on the re-probe
+# (the safe side), to ANS_UNCLEAR: the two run the same code path, so one failing where the other
+# answers contradicts itself.
 contradicted_by() {
-	local id="$1" ref="$2" what="$3" o
+	local id="$1" ref="$2" what="$3" o st
 	local -a keep=()
 	for o in "${ANS_FAIL[@]}"; do
-		if [[ -z "$(blocking_reason "$o" "$ref")" && "$(cell_state "$o" "$ref")" == ok ]]; then
+		st="$(cell_state "$o" "$ref")"
+		if [[ -z "$(blocking_reason "$o" "$ref")" ]] && [[ "$st" == ok || "$st" == late* ]]; then
 			ANS_UNCLEAR+=("$o")
-			ANS_WHY+=("${id} failed through \`${o}\` while ${ref} (${what}) answered 200 there: this contradicts ${ref}")
+			ANS_WHY+=("${id} failed through \`${o}\` while ${ref} (${what}) answered 200 there$([[ "$st" == ok ]] || echo " on the re-probe"): this contradicts ${ref}")
 		else
 			keep+=("$o")
 		fi
@@ -1895,8 +2031,17 @@ codes_through() {
 
 # ans_counts: how the other members split, for an INCONCLUSIVE answer at scale.
 ans_counts() {
-	printf '%s of %s other members answered, %s failed, %s with a broken path, %s unclear' \
-		"${#ANS_OK[@]}" "$n_others" "${#ANS_FAIL[@]}" "${#ANS_BROKEN[@]}" "${#ANS_UNCLEAR[@]}"
+	local late=""
+	((${#ANS_LATE[@]} == 0)) || late=" (${#ANS_LATE[@]} only on the re-probe)"
+	printf '%s of %s other members answered%s, %s failed, %s with a broken path, %s unclear' \
+		"${#ANS_OK[@]}" "$n_others" "$late" "${#ANS_FAIL[@]}" "${#ANS_BROKEN[@]}" "${#ANS_UNCLEAR[@]}"
+}
+
+# late_note <id>: for a NO, the members where <id> answered only on the re-probe, or nothing.
+late_note() {
+	((${#ANS_LATE[@]})) || return 0
+	printf ' %s of the %s other members (%s) answered %s only on the re-probe %s s after the traffic (a late endpoint push), not during it.' \
+		"${#ANS_LATE[@]}" "$n_others" "$(join_ticks "${ANS_LATE[@]}")" "$1" "$REPROBE_DELAY"
 }
 
 # broken_note <service|namespace> <ctx>: what a member where a scenario and its references all
@@ -1936,15 +2081,19 @@ fi
 # Answer 1: is the Service needed? S2 (no Service on the ingress member) against S3 (the same
 # route plus a stub Service there); S1 tells a broken Gateway API path from a broken mesh path.
 # S7b runs S2's code path (its grant passes, the local Service lookup misses, a soft error), so a
-# member where S7b answered cannot say YES for S2.
+# member where S7b answered cannot say YES for S2. ANSWER1 (no, yes, inconclusive) lets the
+# kind: Service line say when S7b failed the same way.
 L1="Service needed in every cluster for HTTPRoute traffic"
 answer_lists S2 S3
 contradicted_by S2 S7b "the same code path: its grant passes, the local Service lookup misses, a soft error"
 if ((${#ANS_OK[@]} == n_others)); then
-	HEADLINE="**${L1}: NO** — S2 answered 200 (${REQUESTS}/${REQUESTS}, body \`${EXPECTED_BODY}\`) from the workload member \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, with no \`echo-s2\` Service there (read in the preflight).${BODY_NOTE}"
+	ANSWER1=no
+	HEADLINE="**${L1}: NO** — S2 answered 200 (${REQUESTS}/${REQUESTS}, body \`${EXPECTED_BODY}\`) from the workload member \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, with no \`echo-s2\` Service there (read in the preflight).$(late_note S2)${BODY_NOTE}"
 elif ((${#ANS_FAIL[@]} == n_others)); then
+	ANSWER1=yes
 	HEADLINE="**${L1}: YES** — S2 (its route in place for the whole traffic window, no \`echo-s2\` Service on the ingress member) returned $(codes_through S2 "${ANS_FAIL[@]}") ($(fail_meaning S2)), while S3 (the same route plus a stub Service there) answered 200 from the workload member \`${WORKLOAD_CTX}\` and S2 answered 200 through \`${WORKLOAD_CTX}\` itself.${BODY_NOTE}"
 else
+	ANSWER1=inconclusive
 	why="$(inconclusive_why S2 S3 service)"
 	((WAIT_TIMED_OUT == 0)) || why="${why}; the wait timed out"
 	[[ "$EXPECTED_BODY" != unknown ]] || why="${why}; the workload's echo text is unknown"
@@ -1964,7 +2113,7 @@ ns_line() {
 	refs="$(IFS=/; echo "$*")"
 	answer_lists "$id" "$@"
 	if ((${#ANS_OK[@]} == n_others)); then
-		echo "- ${label} — **NO**: ${id} answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` there."
+		echo "- ${label} — **NO**: ${id} answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` there.$(late_note "$id")"
 	elif ((${#ANS_FAIL[@]} == n_others)); then
 		echo "- ${label} — **YES**: ${id} returned $(codes_through "$id" "${ANS_FAIL[@]}") ($(fail_meaning "$id")), while ${refs}, with the backend in the same namespace, answered 200 there and ${id} answered 200 through \`${WORKLOAD_CTX}\` itself."
 	else
@@ -1972,12 +2121,13 @@ ns_line() {
 	fi
 }
 
-# ns_line_service: the kind Service line, S7 judged against S9/S8, then S7b for "not the Service".
+# ns_line_service: the kind Service line, S7 judged against S9/S8, then S7b for "not the Service"
+# (when S7b failed like S2 under a YES first answer, the two answers agree: the Service too).
 ns_line_service() {
 	local label="kind: Service" s7_codes
 	answer_lists S7 S9 S8
 	if ((${#ANS_OK[@]} == n_others)); then
-		echo "- ${label} — **NO**: S7 answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` (or a ReferenceGrant) there."
+		echo "- ${label} — **NO**: S7 answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` (or a ReferenceGrant) there.$(late_note S7)"
 		return 0
 	fi
 	if ((${#ANS_FAIL[@]} != n_others)); then
@@ -1987,7 +2137,9 @@ ns_line_service() {
 	s7_codes="S7 (no \`${NS_REMOTE}\` there) returned $(codes_through S7 "${ANS_FAIL[@]}") ($(fail_meaning S7)) while S9/S8, with the backend in the same namespace, answered 200 there and S7 answered 200 through \`${WORKLOAD_CTX}\` itself"
 	answer_lists S7b S1
 	if ((${#ANS_OK[@]} == n_others)); then
-		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant) but not the Service: ${s7_codes}; S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant there, no Service) answered 200 from \`${WORKLOAD_CTX}\`."
+		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant) but not the Service: ${s7_codes}; S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant there, no Service) answered 200 from \`${WORKLOAD_CTX}\`.$(late_note S7b)"
+	elif [[ "$ANSWER1" == yes ]] && ((${#ANS_FAIL[@]} == n_others)); then
+		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant): ${s7_codes}. S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant there, no Service) failed like S2, $(codes_through S7b "${ANS_FAIL[@]}") while S1 answered there: consistent with the first answer, so it needs the Service too."
 	else
 		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant): ${s7_codes}. Whether it needs the Service too is **INCONCLUSIVE** ($(ans_counts)): $(inconclusive_why S7b S1 namespace)."
 	fi
@@ -2103,7 +2255,7 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo "| Requests per cell | ${REQUESTS}, curl --max-time ${TIMEOUT_SEC} s (detail ${GWAPI_DETAIL_TIMEOUT_SEC} s) |"
 	echo "| Scenario set | \`${SCENARIO_SET}\` (chart revision \`${CHART_REVISION}\`, $([[ "$CHART_REVISION_VS_HARNESS" == differs ]] && echo "not the script's commit" || echo "vs the script's commit: ${CHART_REVISION_VS_HARNESS}")) |"
 	echo "| Wait | ${WAIT_SEC} s of at most ${WAIT_TIMEOUT_SEC} s (timed out: ${WAIT_TIMED_OUT}); then the data-plane gate (${GATE_DESC}, ${GWAPI_GATE_PASSES} round(s) in a row) ${GATE_SEC} s; then settle ${GWAPI_SETTLE_SEC} s |"
-	echo "| Traffic | ${TRAFFIC_START} to ${TRAFFIC_END} (UTC); ${REPROBE_CELLS} failed cell(s) predicted 200 re-probed ${GWAPI_SETTLE_SEC} s later |"
+	echo "| Traffic | ${TRAFFIC_START} to ${TRAFFIC_END} (UTC); ${REPROBE_CELLS} failed cell(s) predicted 200 re-probed ${REPROBE_DELAY} s later |"
 	echo "| Endpoint evidence | ${PROXY_CONFIG_MODE} |"
 	echo "| Expected body | \`${EXPECTED_BODY}\` (${EXPECTED_BODY_SOURCE}) |"
 	echo "| Data | \`$(basename "$TSV")\`$([[ -f "$ARGO_TSV" ]] && echo ", \`$(basename "$ARGO_TSV")\`")$([[ -f "${OUT_DIR}/run-config-${RUN_ID}.env" ]] && echo ", \`run-config-${RUN_ID}.env\`") |"
