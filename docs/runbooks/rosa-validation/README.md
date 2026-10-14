@@ -8,10 +8,11 @@ status: current
 
 How to stand up the ROSA path end to end (`terraform/rosa-hcp`, then `terraform/platform` in rosa
 mode, then a mesh check), run one cost-capped validation window on it, and tear it all down again.
-**A window is running:** 4 clusters exist (Tier C, window commit `8150d4b`) since T0 = 2026-10-14
-12:42 UTC. The owner chose a no-cut run, so the auto-teardown was re-armed twice; it now fires at
-21:57 UTC (T0+9:15, worst case about $89), `rosa-warn` at 20:57 UTC, and the off-host check is at
-T0+10:15. The run
+**No ROSA clusters exist:** the 2026-10-14 window (Tier C, 4 clusters, window commit `8150d4b`,
+T0 12:42 UTC) was torn down with `003-auto-teardown.sh --now` at 21:37 UTC (clusters gone 21:54,
+`CLEAN` 22:01) and audited empty across all regions the same day; about $82. Its timers are
+disarmed and its platform `rosa` workspace was discarded. Only the free SNS topic `rosa-window`
+remains, for the T+1/T+2 cost checks. The run
 before it (3 HCP clusters, ~1h50m, 2026-10-12) was destroyed and verified empty. The account-level
 ROSA setup stays between windows (the OCM role, the user role and the
 `ManagedOpenShift-HCP-ROSA-*` account roles). The window is planned in
