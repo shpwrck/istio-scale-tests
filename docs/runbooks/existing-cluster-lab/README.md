@@ -18,13 +18,14 @@ below are owned here.
 
 ### State and access
 
-- **Powered on again 2026-10-14** after a graceful shutdown on 2026-10-13. The power-on steps are
-  in "Verify and recover". The mesh, platform and Terraform state were unchanged. After the Gateway
-  API check (backlog task 8) and its cleanup, the lab is clean:
-  - no test namespaces and no sync windows;
-  - istiod at 1 replica;
-  - all 30 Applications Synced/Healthy and every cluster operator settled;
-  - both mesh-wiring gates `Ready ... ca=shared`.
+- **Powered off since 2026-10-14, about 19:30 UTC.** All three clusters had a graceful node
+  shutdown, the ACM hub last, after the Gateway API check (backlog task 8). It was the second
+  power cycle in two days: off on 2026-10-13, on again for the check on 2026-10-14.
+  - Nothing was torn down; the mesh, platform and Terraform state are unchanged.
+  - The lab was clean before the halt: no test namespaces, no sync windows, no on-demand checks
+    deployed, istiod at 1 replica, all 30 Applications Synced/Healthy, every cluster operator
+    settled, and both mesh-wiring gates `Ready ... ca=shared`.
+  - Power-on steps and the restart deadline are in "Verify and recover".
 - Cluster access: the operator's kubeconfig (default `~/.kube/config`) holds one context per
   cluster, each authenticated with that cluster's kube-admin client certificate. The API
   certificates are publicly trusted, so no CA data is needed. Credentials stay in that kubeconfig.
@@ -109,10 +110,13 @@ To pin the deployed chart to the commit you run the script from, also replace `m
      `oc debug node/<node> -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/assets/backup`.
      The backups stay on each node under `/home/core/assets/backup`.
   2. Halt the members, and the ACM hub last: `oc debug node/<node> -- chroot /host shutdown -h 1`.
+     Wait until each API refuses connections; the hub answers with InternalError for about
+     20 s before it does.
 
   Before a long shutdown, read the restart deadline:
   `oc -n openshift-kube-apiserver-operator get secret kube-apiserver-to-kubelet-signer -o jsonpath='{.metadata.annotations.auth\.openshift\.io/certificate-not-after}'`.
-  For the 2026-10-13 shutdown it is September 2027.
+  For the 2026-10-14 shutdown it is 2027-09-15 on the ACM hub and 2027-09-24 on the members:
+  power on before the earliest. Each node holds backups from both 2026-10-13 and 2026-10-14.
 - Power on:
   1. Start all three hosts, in any order.
   2. When the APIs answer, approve any pending CSRs (`oc get csr`, then
@@ -212,17 +216,21 @@ To pin the deployed chart to the commit you run the script from, also replace `m
     never select a `Sidecar` in Istio 1.30.5.
   - It answered: no Service is needed on every member for traffic, but with `kind: Service` the
     namespace is. Argo CD flags remote-only backends as Degraded.
+- The owner powers the lab off between validation runs (2026-10-13, and again 2026-10-14). Each
+  power-off takes fresh etcd backups first and records the restart deadline here.
 
 ### How to drive it
 
-1. Edit charts or Terraform on a branch, push, and set `gitops_app_repo_revision` to that branch in
+1. Power on if needed ("Verify and recover"), then run the health checks.
+2. Edit charts or Terraform on a branch, push, and set `gitops_app_repo_revision` to that branch in
    `lab.tfvars`.
-2. Run `terraform plan -var-file=lab.tfvars`, check that only the intended resources change, then
+3. Run `terraform plan -var-file=lab.tfvars`, check that only the intended resources change, then
    apply.
-3. Watch `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops -w` until
+4. Watch `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops -w` until
    Synced/Healthy, then run Verify.
-4. Run suites against the members only: `--contexts <mesh-a-ctx>,<mesh-b-ctx>`.
-5. For on-demand checks (mesh-verify, Gateway API), apply the Application, run the check, and
+5. Run suites against the members only: `--contexts <mesh-a-ctx>,<mesh-b-ctx>`.
+6. For on-demand checks (mesh-verify, Gateway API), apply the Application, run the check, and
    delete it before you finish. Then confirm the 30-app Synced/Healthy count again.
-6. Record adopted or removed objects in State and access, non-obvious choices in Decisions, and
+7. Record adopted or removed objects in State and access, non-obvious choices in Decisions, and
    any run results under `docs/campaigns/`.
+8. When done, shut down: back up, halt the members, then the hub. Update the State line here.
