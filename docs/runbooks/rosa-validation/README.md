@@ -8,12 +8,19 @@ status: current
 
 How to stand up the ROSA path end to end (`terraform/rosa-hcp`, then `terraform/platform` in rosa
 mode, then a mesh check), run one cost-capped validation window on it, and tear it all down again.
-No ROSA clusters exist right now (2026-10-13): the last run (3 HCP clusters, ~1h50m, 2026-10-12)
-was destroyed and verified empty. Only the account-level ROSA setup remains (the OCM role, the user
-role and the `ManagedOpenShift-HCP-ROSA-*` account roles), so the next run can skip it. The next
-window is planned in [window-plan.md](window-plan.md). Its owner decisions were settled on
-2026-10-13: Tier C and a $100 hard cap. While a window runs, this paragraph says "4 clusters exist
-since <T0>, auto-teardown armed for <T0+8:15>"; afterwards, "destroyed and audited empty on <date>".
+**No ROSA clusters exist:** the 2026-10-14 window (Tier C, 4 clusters, window commit `8150d4b`,
+T0 12:42 UTC) was torn down with `003-auto-teardown.sh --now` at 21:37 UTC (clusters gone 21:54,
+`CLEAN` 22:01) and audited empty across all regions the same day; about $82 (an estimate until
+Cost Explorer confirms it). Its timers are disarmed and its platform `rosa` workspace was
+discarded. Left on purpose: the free SNS topic `rosa-window` and the `rosa-window-monthly` budget.
+Open: T+1 (2026-10-15) Cost Explorer by service and create `rosa-residual-daily`; T+2 (2026-10-16)
+Cost Explorer again; an off-laptop copy of the results (destination is the owner's choice). The run
+before it (3 HCP clusters, ~1h50m, 2026-10-12) was destroyed and verified empty. The account-level
+ROSA setup stays between windows (the OCM role, the user role and the
+`ManagedOpenShift-HCP-ROSA-*` account roles). The window is planned in
+[window-plan.md](window-plan.md); its owner decisions were settled on 2026-10-13: Tier C and a $100
+hard cap. While a window runs, this paragraph says "4 clusters exist since <T0>, auto-teardown armed
+for <T0+8:15>"; afterwards, "destroyed and audited empty on <date>".
 
 ## Operability
 
@@ -32,16 +39,21 @@ since <T0>, auto-teardown armed for <T0+8:15>"; afterwards, "destroyed and audit
   `rosa create ocm-role --mode auto --yes` and `rosa create user-role --mode auto --yes`.
   An AWS account's ROSA subscription can be linked to only one Red Hat account,
   and demo-platform sandbox accounts usually come pre-linked to someone else.
-- Window worktree: run a window from its own worktree at the pinned commit
-  (`git -C <repo> worktree add <repo>-rosa-window <window-sha>`), never by detaching the main
-  checkout. The main checkout's `terraform/platform` default workspace holds the existing-cluster
+- Old ROSA classic IAM: on 2026-10-14 the 4 classic account roles, 18 orphaned classic operator
+  roles from earlier clusters and their 10 customer-managed policies were deleted. Only the HCP
+  account roles, the OCM role and the user role remain. The deleted roles' trust policies and policy
+  documents are saved in `~/.rosa-window/iam-backup/` on the operator host.
+- Window worktree: run a window from its own worktree at the pinned commit, never by detaching the
+  main checkout. The 2026-10-14 window runs from `<repo>/.claude/worktrees/rosa-window`, detached at
+  `8150d4b` (`git -C <repo> worktree add <path> <window-sha>`; the plan's `<repo>-rosa-window` works
+  the same). The main checkout's `terraform/platform` default workspace holds the existing-cluster
   lab; the window worktree has no lab state, so no ROSA command there can touch the lab.
 - Terraform state, in the window worktree: `terraform/rosa-hcp/terraform.tfstate` and the
   platform's `rosa` workspace (`terraform/platform/terraform.tfstate.d/rosa/`), both local and
   gitignored. rosa-hcp uses only its default workspace (the platform reads
   `../rosa-hcp/terraform.tfstate` by path). Every platform command is prefixed with
   `TF_WORKSPACE=rosa`, never exported (Re-run). Inputs in `terraform.tfvars` / `rosa.tfvars`
-  (gitignored; copy them into the worktree).
+  (gitignored, mode 0600, in the window worktree).
 - Cluster access: `terraform/rosa-hcp/kubeconfig` (mode 0600; exec plugin that logs in as
   `cluster-admin` with the Terraform-generated password). Its contexts are the cluster keys:
   `cluster-001` is the ACM hub (`<acm-hub-ctx>`), `cluster-002` to `cluster-004` are
@@ -49,33 +61,43 @@ since <T0>, auto-teardown armed for <T0+8:15>"; afterwards, "destroyed and audit
 - Planned window: Tier C, owner-approved on 2026-10-13.
   - Hub on 2× m5.2xlarge, `<mesh-a-ctx>` on 3× r7i.2xlarge, and `<mesh-b-ctx>` and
     `<mesh-c-ctx>` on 3× m7i.xlarge, all with fixed worker counts, in us-east-2.
-  - Quotas: On-Demand Standard vCPUs (`L-1216C47A`) at least 64 (request at most 72), Classic LBs
-    at least 10, and the VPC, internet gateway, Elastic IP and NAT quotas from
-    `terraform/rosa-hcp/service_quotas.tf`, applied a day early. `rosa verify quota` (run by
-    `001-preflight.sh`) wants 100 vCPUs, so a quota held at 64-72 fails that one check by design:
-    read past it as in window-plan.md, P0, and do not request an increase.
+  - Quotas: On-Demand Standard vCPUs (`L-1216C47A`) at least 64, Classic LBs at least 10, and the
+    VPC, internet gateway, Elastic IP and NAT quotas from `terraform/rosa-hcp/service_quotas.tf`.
+    On 2026-10-14 the account already had all of them (vCPU quota 1848, Classic LBs 20, VPCs,
+    internet gateways and EIPs 10), so no increase was requested and `rosa verify quota` passed
+    outright. A quota that high caps nothing: the fixed worker pools are the only structural cap.
+    An account held at 64-72 vCPUs instead fails that one `rosa verify quota` check by design
+    (window-plan.md, P0).
   - Tiers B and A are the fallbacks (window-plan.md, Fallback tiers).
 - Budgets:
   - `rosa-window-monthly`: $100 limit (the owner's hard cap; nothing else bills in the account),
-    ACTUAL alerts at 50/80/100% and a FORECASTED alert at 100%.
+    ACTUAL alerts at 50/80/100% and a FORECASTED alert at 100%. An older account-wide $100 budget
+    exists alongside it and is left alone.
   - `rosa-residual-daily`: the post-window leak tripwire, created at T+1.
 - Alerts that reach the operator away from the host, both required:
-  - SNS topic `rosa-window` (us-east-2) with a confirmed email subscription. It gets an "armed"
-    email at T0 and the auto-teardown's result; `003-auto-teardown.sh --arm` refuses without it.
+  - SNS topic `rosa-window` (us-east-2) with a confirmed email subscription; its ARN is in
+    `~/.rosa-window/sns-topic-arn`. It gets an "armed" email at T0 and the auto-teardown's result;
+    `003-auto-teardown.sh --arm` refuses without it.
   - Phone alarms at T0+7:15, T0+7:45 and T0+9:15. The last is the off-host check that the
     auto-teardown worked, and the only alert left if the operator host dies.
 - Window files outside git, in `~/.rosa-window/`: `t0` (epoch seconds when apply started),
   `by_cluster.json` (saved `terraform output -json by_cluster`: the VPC and cluster ids that outlive
   the state), `teardown.log` and `teardown.result` (written by the auto-teardown), `status.md`
-  (phase progress, for a resumed session).
+  (phase progress and checkpoint times, for a resumed session), `window-sha`, `sns-topic-arn`, the
+  phase logs (`p0-*.log`, `p0-dryruns/`, `p1-*.log` to `p9-*`, `x*.log`), `x-runs.sh` and
+  `gw-extension.tfvars` (the 2026-10-14 extensions), `p9-audit.txt`, and the results archive
+  `results-<date>-rosa-window.tar.gz`.
 - systemd user units on the operator host: `rosa-autoteardown` (armed by
   `terraform/rosa-hcp/scripts/003-auto-teardown.sh --arm`; log in `journalctl --user -u rosa-autoteardown`
   and `teardown.log`) and `rosa-warn`. The tfstate is local, so the backstop lives on the same host.
   On WSL, systemd units do not keep the distro running: it stops about 15 s after the last terminal
   closes, and the timers with it, unless `%UserProfile%\.wslconfig` sets
-  `[general] instanceIdleTimeout=-1` (window-plan.md, P0).
-- Task 3's GitOps pause record: `tests/dataplane/results/rosa-lb/gitops-pause-ew.json` (gitignored),
-  released with `tests/tuning/006-gitops-pause.sh --resume --state-file <it>`.
+  `[general] instanceIdleTimeout=-1` (window-plan.md, P0). The operator host has it since
+  2026-10-14.
+- Task 3's GitOps pause records (`tests/dataplane/results/rosa-lb/gitops-pause-ew.json`, and
+  `gitops-pause-ingress.json` for an ingress experiment; gitignored) exist only while a pause is
+  held; release with `tests/tuning/006-gitops-pause.sh --resume --state-file <it>`. Both were
+  released on 2026-10-14.
 
 ### Template map
 
@@ -141,7 +163,8 @@ Sizing (prices checked 2026-10-13, sources in [window-plan.md](window-plan.md#2-
 - Every tier puts the hub on 2× m5.2xlarge and the members on 3 fixed workers
   (`worker_autoscale_min = worker_autoscale_max = 3`).
 - Tier C, the plan of record, gives `cluster-002` (`<mesh-a-ctx>`) 3× r7i.2xlarge through
-  `cluster_overrides`, and b and c 3× m7i.xlarge. It costs $8.25/h and needs 64 vCPUs.
+  `cluster_overrides`, and b and c 3× m7i.xlarge. It costs $8.25/h and needs 64 vCPUs. Its plan is
+  224 resources (2026-10-14).
 - The fallbacks: Tier B (all members m7i.xlarge) is $6.75/h and needs 52; Tier A (2 members) is
   $5.12/h and needs 40.
 - The `rosa.tfvars` override sets istiod to 1 replica with a 2 CPU / 8Gi request and a 4 CPU / 16Gi
@@ -158,6 +181,8 @@ Sizing (prices checked 2026-10-13, sources in [window-plan.md](window-plan.md#2-
   fallback tiers):
   `oc -n istio-system get pod -l app=istiod -o jsonpath='{..resources.requests.memory}/{..resources.limits.memory}'`.
 - mesh-verify through each member's ingress (`.status.loadBalancer.ingress[0].hostname` on AWS): answers come from every member.
+  Through Classic LBs this fails intermittently (BACKLOG 9.8); until that is fixed, verify through
+  the east-west path (a fortio client per member, as in P5) or an NLB ingress.
 - Load balancer inventory (A0) and the task 3 commands: [window-plan.md, P2 and P5](window-plan.md#5-run-order-tier-c).
   After any gateway Service experiment, the recovery gate must pass: the GitOps pause resumed, every
   Application Synced/Healthy, the Service back to the chart spec, `ca=shared` on all 3 gates, a probe
@@ -206,7 +231,8 @@ terraform -chdir=terraform/rosa-hcp destroy
     through that account); without such a machine, delete each cluster in OpenShift Cluster
     Manager (console.redhat.com/openshift: Options or Actions, Delete cluster). Once the host is
     back, wait for those deletions to finish before `003 --now`.
-- Audit after any teardown; every check must come back empty. The script's audit covers the state,
+- Audit after any teardown; every check must come back empty, except one pre-existing public
+  hosted zone in the account that is not the window's (any other zone is a leftover). The script's audit covers the state,
   the window's clusters, the saved VPCs and new unattached volumes; this list, across regions, is
   the authority (tag filters miss resources the clusters created with their own tags):
 
@@ -270,7 +296,7 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
     leave only about 2 vCPU free on 2 nodes.
   - mesh-a needs 3 nodes for its pods per node, not for CPU.
   - Fixed pools (min = max) are the structural cap on EC2 spend. A vCPU quota far above the need
-    caps nothing and cannot be lowered.
+    caps nothing and cannot be lowered; this account's (1848) is such a quota.
 - Mesh-wide values are baked in at provision time, so no istiod restart happens before task 4's
   planned one.
   - istiod: request 2 CPU / 8Gi, limit 4 CPU / 16Gi.
@@ -279,6 +305,9 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
     (GOMEMLIMIT 14.4 GiB, eviction above the 8Gi request), so task 1 watches their istiod by hand
     against 8Gi.
   - The proxy override changes scheduling only, and the campaign doc records it.
+  - Checked before the 2026-10-14 platform apply: the `spoke-ossm-appset` override reaches the
+    generated Applications' `helm.valuesObject` (with `clusterName` as a Helm parameter), and the
+    Istio CR renders 1 replica, 2 CPU / 8Gi requested, 4 CPU / 16Gi limit, proxy 20m / 64Mi.
 - Tasks 1 and 4 were never lab-validated. Their first ROSA runs start with a smoke step and a
   go/no-go before the expensive sweeps depend on them: task 4's read-only capture in P3, task 1's
   S1 in P6.
@@ -299,7 +328,9 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
     $248/h.
 - AWS Budget `rosa-window-monthly` has a $100 limit, not month-to-date spend plus a ceiling: the
   account is otherwise idle. Its FORECASTED alert needs about 5 weeks of history before it can fire,
-  so the ACTUAL alerts and the wall clock carry the load.
+  so the ACTUAL alerts and the wall clock carry the load. Month-to-date before the 2026-10-14
+  window was about $7, so its expected month totals are about $72 core, $84 extended and $88 worst
+  case (in `status.md`).
 - The wall clock is the spend meter: AWS Budgets refresh every 8-12 h, so they only catch leaks the
   next day. Hence T0 on disk, the spend estimate at every checkpoint, and an unattended,
   billing-first auto-teardown with both a monotonic and an absolute trigger.
@@ -324,11 +355,26 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
   - A phone alarm at T0+9:15, an hour after the timer fires. It also covers what nothing on the host
     can report: a dead host, where the timer never runs.
   - A manual teardown started by T0+10:30 still ends billing under $100.
-- The vCPU quota stays at 64-72, below the 100 that `rosa verify quota` wants (rosa sizes it for
-  five multi-AZ classic clusters). `001-preflight.sh` therefore fails that one check by design, and
-  the runbook reads the other quota lines instead of requesting an increase that can sit pending for
+- The vCPU quota is not raised for a window. An account held at 64-72 vCPUs fails the one
+  `rosa verify quota` check by design (rosa sizes it for five multi-AZ classic clusters), and the
+  runbook reads the other quota lines instead of requesting an increase that can sit pending for
   hours. Near the need, the quota still stops an accidental extra cluster, which a fixed pool does
-  not.
+  not; well above it (as on this account), the fixed pools alone cap EC2.
+- The orphaned ROSA classic roles and policies were removed on 2026-10-14 so the account holds only
+  what the HCP path uses; they are recoverable from `~/.rosa-window/iam-backup/`.
+- Learned in the 2026-10-14 window (record: `docs/campaigns/2026-10-14-rosa-validation.md`; the
+  plan's top section lists the run-time corrections):
+  - After the platform apply, an Application with no sync or health status means its cluster has no
+    Argo CD controller shard; restart the `openshift-gitops-application-controller` pods (until
+    BACKLOG 9.1 automates it).
+  - Mid-window value changes go in a second `-var-file` outside the worktree (for example
+    `~/.rosa-window/<name>.tfvars`). A later `-var-file` replaces a whole map variable, so it must
+    repeat every `gitops_app_overrides` entry, not only the new one; check the plan diff before apply.
+  - The timer can be moved any number of times (`--disarm`, then `--arm --fire-after <new>`); each
+    move re-sends the "armed" email. Keep the phone alarms in step with it.
+  - `003-auto-teardown.sh --now` is a sound primary teardown: 24.5 min to `CLEAN`, clusters gone
+    after 17 min. The Resource Groups Tagging API keeps listing terminated and deleted resources for
+    a while after; confirm each type's real state before treating it as a leftover.
 
 ### How to drive it
 
@@ -342,7 +388,7 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
 2. T0: write `t0`, arm `rosa-autoteardown` (T0+8:15, with `--sns-topic-arn`) and `rosa-warn`
    (T0+7:15), check that the "armed" email reached the phone, and set the phone alarms for T0+7:15,
    T0+7:45 and T0+9:15. Then apply rosa-hcp, save `by_cluster.json`, and apply the platform (Re-run
-   above).
+   above). Record T0 and the checkpoint clock times in `~/.rosa-window/status.md`.
 3. Verify (above) and take the A0 inventory.
 4. Run the phases in [window-plan.md, Run order](window-plan.md#5-run-order-tier-c).
    - At every checkpoint, announce the spend estimate and check `rosa whoami`.

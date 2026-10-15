@@ -6,6 +6,39 @@ apply, verify, recover) is in [README.md](README.md). Prices were checked on 202
 us-east-2. Context names are placeholders: `<acm-hub-ctx>` is `cluster-001`, and `<mesh-a-ctx>`,
 `<mesh-b-ctx>`, `<mesh-c-ctx>` are `cluster-002` to `cluster-004` in the generated kubeconfig.
 
+## Corrections from the 2026-10-14 window
+
+This plan ran on 2026-10-14
+([record](../../campaigns/2026-10-14-rosa-validation.md)). Read the plan below with these
+corrections; the fixes behind them are queued in [`BACKLOG.md`](../../../BACKLOG.md), section 9.
+
+- **After the platform apply, check every Application has a sync and health status.** One member
+  never got an Argo CD controller shard; restarting the
+  `openshift-gitops-application-controller` pods fixed it (9.1). Budget 30-40 min for this in P1.
+- **S1 and every P6 command take `--mem-guard-contexts <mesh-a-ctx>,<mesh-b-ctx>,<mesh-c-ctx>`.**
+  Without `--config`, the guard samples only `--contexts` and the `SETUP_CONTEXTS` default (9.6).
+- **S1's header check is 63 fields** (`CONTROLPLANE_SCHEMA=63`), not 62.
+- **After every growth series, check that it was retired:** `oc get ns -l istio-discovery` on the
+  measured member must be empty (or show only a series kept on purpose). A failed retire only warns
+  (9.3), and the kubeconfig's exec plugin fails intermittently under the harness's load (9.2).
+- **Reset the gateways before each growth series and before P7** (rollout restart of both
+  gateways on every member, nothing measuring): Envoy keeps memory after a series, which skews the
+  next series and the guard (9.4).
+- **The gateway memory limit (1Gi) caps task 1** near 5000 discovered Services, and a one-step
+  burst of 4000 Services exceeds it (9.9): R1's labeled-outside cells and R2's 2000 step become
+  `SKIPPED_MEM_GUARD` rows; set a higher limit in `gitops_app_overrides` before apply to measure
+  further.
+- **P5: the east-west gateway has no HPA** (`autoscaling.enabled: false`); A3 scales the
+  Deployment directly under the pause.
+- **Ingress checks through Classic LBs fail intermittently** (9.8); verify the mesh through the
+  east-west path (a fortio client per member) or an NLB ingress.
+- **The M-sweep needs M ascending with the base first:** `--measurement-pod-counts 8,16` keeps the
+  base at M=8 (as R1, R2); an M=4 point needs its own series.
+- **R2's series is retired by the sweep** (default `--series-retire undiscover`); pass
+  `--series-retire keep` on the last series if P7 should run at scale.
+- **Pace:** P4 ran in 45 min (P4a cells about 8 min), P5 in 42 min, S1 in 28 min, R1 in 93 min;
+  the teardown with `003-auto-teardown.sh --now` took 24.5 min to `CLEAN`.
+
 ## Owner decisions (settled 2026-10-13)
 
 These are binding for the window. Worker types and mesh-wide values cannot change once the clusters exist.
