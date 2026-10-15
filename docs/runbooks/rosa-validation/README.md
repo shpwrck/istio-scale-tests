@@ -353,6 +353,19 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
   not; well above it (as on this account), the fixed pools alone cap EC2.
 - The orphaned ROSA classic roles and policies were removed on 2026-10-14 so the account holds only
   what the HCP path uses; they are recoverable from `~/.rosa-window/iam-backup/`.
+- Learned in the 2026-10-14 window (record: `docs/campaigns/2026-10-14-rosa-validation.md`; the
+  plan's top section lists the run-time corrections):
+  - After the platform apply, an Application with no sync or health status means its cluster has no
+    Argo CD controller shard; restart the `openshift-gitops-application-controller` pods (until
+    BACKLOG 9.1 automates it).
+  - Mid-window value changes go in a second `-var-file` outside the worktree (for example
+    `~/.rosa-window/<name>.tfvars`). A later `-var-file` replaces a whole map variable, so it must
+    repeat every `gitops_app_overrides` entry, not only the new one; check the plan diff before apply.
+  - The timer can be moved any number of times (`--disarm`, then `--arm --fire-after <new>`); each
+    move re-sends the "armed" email. Keep the phone alarms in step with it.
+  - `003-auto-teardown.sh --now` is a sound primary teardown: 24.5 min to `CLEAN`, clusters gone
+    after 17 min. The Resource Groups Tagging API keeps listing terminated and deleted resources for
+    a while after; confirm each type's real state before treating it as a leftover.
 
 ### How to drive it
 
