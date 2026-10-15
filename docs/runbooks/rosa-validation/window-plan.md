@@ -32,9 +32,11 @@ corrections; the fixes behind them are queued in [`BACKLOG.md`](../../../BACKLOG
   Deployment directly under the pause.
 - **Ingress checks through Classic LBs fail intermittently** (9.8); verify the mesh through the
   east-west path (a fortio client per member) or an NLB ingress.
+- **The M-sweep needs M ascending with the base first:** `--measurement-pod-counts 8,16` keeps the
+  base at M=8 (as R1, R2); an M=4 point needs its own series.
 - **R2's series is retired by the sweep** (default `--series-retire undiscover`); pass
   `--series-retire keep` on the last series if P7 should run at scale.
-- **Pace:** P4 ran in 46 min (P4a cells about 8 min), P5 in 42 min, S1 in 28 min, R1 in 93 min;
+- **Pace:** P4 ran in 45 min (P4a cells about 8 min), P5 in 42 min, S1 in 28 min, R1 in 93 min;
   the teardown with `003-auto-teardown.sh --now` took 24.5 min to `CLEAN`.
 
 ## Owner decisions (settled 2026-10-13)

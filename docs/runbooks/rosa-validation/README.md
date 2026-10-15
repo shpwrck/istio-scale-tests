@@ -10,9 +10,11 @@ How to stand up the ROSA path end to end (`terraform/rosa-hcp`, then `terraform/
 mode, then a mesh check), run one cost-capped validation window on it, and tear it all down again.
 **No ROSA clusters exist:** the 2026-10-14 window (Tier C, 4 clusters, window commit `8150d4b`,
 T0 12:42 UTC) was torn down with `003-auto-teardown.sh --now` at 21:37 UTC (clusters gone 21:54,
-`CLEAN` 22:01) and audited empty across all regions the same day; about $82. Its timers are
-disarmed and its platform `rosa` workspace was discarded. Only the free SNS topic `rosa-window`
-remains, for the T+1/T+2 cost checks. The run
+`CLEAN` 22:01) and audited empty across all regions the same day; about $82 (an estimate until
+Cost Explorer confirms it). Its timers are disarmed and its platform `rosa` workspace was
+discarded. Left on purpose: the free SNS topic `rosa-window` and the `rosa-window-monthly` budget.
+Open: T+1 (2026-10-15) Cost Explorer by service and create `rosa-residual-daily`; T+2 (2026-10-16)
+Cost Explorer again; an off-laptop copy of the results (destination is the owner's choice). The run
 before it (3 HCP clusters, ~1h50m, 2026-10-12) was destroyed and verified empty. The account-level
 ROSA setup stays between windows (the OCM role, the user role and the
 `ManagedOpenShift-HCP-ROSA-*` account roles). The window is planned in
@@ -81,8 +83,10 @@ for <T0+8:15>"; afterwards, "destroyed and audited empty on <date>".
 - Window files outside git, in `~/.rosa-window/`: `t0` (epoch seconds when apply started),
   `by_cluster.json` (saved `terraform output -json by_cluster`: the VPC and cluster ids that outlive
   the state), `teardown.log` and `teardown.result` (written by the auto-teardown), `status.md`
-  (phase progress and checkpoint times, for a resumed session), `window-sha`, `sns-topic-arn`, and
-  the P0/P1 logs (`p0-*.log`, `p0-dryruns/`, `p1-*.log`).
+  (phase progress and checkpoint times, for a resumed session), `window-sha`, `sns-topic-arn`, the
+  phase logs (`p0-*.log`, `p0-dryruns/`, `p1-*.log` to `p9-*`, `x*.log`), `x-runs.sh` and
+  `gw-extension.tfvars` (the 2026-10-14 extensions), `p9-audit.txt`, and the results archive
+  `results-<date>-rosa-window.tar.gz`.
 - systemd user units on the operator host: `rosa-autoteardown` (armed by
   `terraform/rosa-hcp/scripts/003-auto-teardown.sh --arm`; log in `journalctl --user -u rosa-autoteardown`
   and `teardown.log`) and `rosa-warn`. The tfstate is local, so the backstop lives on the same host.
@@ -90,8 +94,10 @@ for <T0+8:15>"; afterwards, "destroyed and audited empty on <date>".
   closes, and the timers with it, unless `%UserProfile%\.wslconfig` sets
   `[general] instanceIdleTimeout=-1` (window-plan.md, P0). The operator host has it since
   2026-10-14.
-- Task 3's GitOps pause record: `tests/dataplane/results/rosa-lb/gitops-pause-ew.json` (gitignored),
-  released with `tests/tuning/006-gitops-pause.sh --resume --state-file <it>`.
+- Task 3's GitOps pause records (`tests/dataplane/results/rosa-lb/gitops-pause-ew.json`, and
+  `gitops-pause-ingress.json` for an ingress experiment; gitignored) exist only while a pause is
+  held; release with `tests/tuning/006-gitops-pause.sh --resume --state-file <it>`. Both were
+  released on 2026-10-14.
 
 ### Template map
 
@@ -175,6 +181,8 @@ Sizing (prices checked 2026-10-13, sources in [window-plan.md](window-plan.md#2-
   fallback tiers):
   `oc -n istio-system get pod -l app=istiod -o jsonpath='{..resources.requests.memory}/{..resources.limits.memory}'`.
 - mesh-verify through each member's ingress (`.status.loadBalancer.ingress[0].hostname` on AWS): answers come from every member.
+  Through Classic LBs this fails intermittently (BACKLOG 9.8); until that is fixed, verify through
+  the east-west path (a fortio client per member, as in P5) or an NLB ingress.
 - Load balancer inventory (A0) and the task 3 commands: [window-plan.md, P2 and P5](window-plan.md#5-run-order-tier-c).
   After any gateway Service experiment, the recovery gate must pass: the GitOps pause resumed, every
   Application Synced/Healthy, the Service back to the chart spec, `ca=shared` on all 3 gates, a probe
@@ -223,7 +231,8 @@ terraform -chdir=terraform/rosa-hcp destroy
     through that account); without such a machine, delete each cluster in OpenShift Cluster
     Manager (console.redhat.com/openshift: Options or Actions, Delete cluster). Once the host is
     back, wait for those deletions to finish before `003 --now`.
-- Audit after any teardown; every check must come back empty. The script's audit covers the state,
+- Audit after any teardown; every check must come back empty, except one pre-existing public
+  hosted zone in the account that is not the window's (any other zone is a leftover). The script's audit covers the state,
   the window's clusters, the saved VPCs and new unattached volumes; this list, across regions, is
   the authority (tag filters miss resources the clusters created with their own tags):
 
