@@ -53,7 +53,7 @@ esac
 EOF
 	chmod +x "${STUB_DIR}/bin/kubectl"
 	export PATH="${STUB_DIR}/bin:${PATH}"
-	export KUBECONFIG_PATH=/dev/null KUBE_CONTEXT=hub GITOPS_NS=openshift-gitops ARGOCD_NAME=openshift-gitops
+	export KUBECONFIG_PATH=/dev/null KUBE_CONTEXT=acm-hub GITOPS_NS=openshift-gitops ARGOCD_NAME=openshift-gitops
 	export SETTLE_SEC=0 POLL_SEC=0 STABLE_POLLS=2 ROLLOUT_TIMEOUT_SEC=2 APP_STATUS_TIMEOUT_SEC=1
 }
 
@@ -125,7 +125,7 @@ teardown() {
 
 @test "app-status: every Application has a sync and health status" {
 	cat >"${STUB_DIR}/apps.json" <<'EOF'
-{"items":[{"metadata":{"name":"hub-ossm"},"spec":{"destination":{"name":"hub"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
+{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"name":"in-cluster"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
 {"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"name":"mesh-b"}},"status":{"sync":{"status":"OutOfSync"},"health":{"status":"Progressing"}}}]}
 EOF
 	MODE=app-status run bash "$SCRIPT"
@@ -135,7 +135,7 @@ EOF
 
 @test "app-status: names the Applications without status and their destination cluster" {
 	cat >"${STUB_DIR}/apps.json" <<'EOF'
-{"items":[{"metadata":{"name":"hub-ossm"},"spec":{"destination":{"name":"hub"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
+{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"name":"in-cluster"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
 {"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"name":"mesh-b"}},"status":{}},
 {"metadata":{"name":"mesh-b-ingress"},"spec":{"destination":{"server":"https://api.mesh-b.example:6443"}},"status":{"sync":{"status":"Synced"}}}]}
 EOF
@@ -143,7 +143,7 @@ EOF
 	assert_failure
 	assert_output --partial "mesh-b-ossm (destination mesh-b)"
 	assert_output --partial "mesh-b-ingress (destination https://api.mesh-b.example:6443)"
-	refute_output --partial "hub-ossm"
+	refute_output --partial "in-cluster-ossm"
 }
 
 @test "app-status: no Applications at all is a failure, not a pass" {
