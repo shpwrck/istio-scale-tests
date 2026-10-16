@@ -18,7 +18,7 @@ The original issue texts are in the appendix.
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done; lab shape, ROSA numbers at 60-250 Services × 2 | convergence p99 question (9.11); thousands of Services |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
 | 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Done, lab-validated 2026-10-14 (22/22 predictions matched) | — |
-| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16; lab-validated where the lab can (see each item); 9.8/9.9 built as recommended, owner confirmation pending | ROSA: 9.1 greenfield race, 9.2 under load, 9.8 NLB, 9.9 at campaign scale, 9.11 at 150-250 Services; results backup destination (owner) |
+| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16; lab-validated where the lab can (see each item); 9.8/9.9 as recommended, confirmed by the owner 2026-10-16 | ROSA: 9.1 greenfield race, 9.2 under load, 9.8 NLB, 9.9 at campaign scale, 9.11 at 150-250 Services; results backup destination (owner) |
 
 ## 1. Namespace scaling factor
 
@@ -266,8 +266,8 @@ is listed in the record's ["Raw data"](docs/campaigns/2026-10-14-rosa-validation
 **Owner decisions pending:** 9.8 (NLB for the ingress), 9.9 (gateway memory defaults), and where to
 copy the window's results off the operator laptop.
 
-**Status 2026-10-16:** every item below is implemented (one branch, one commit per area); 9.8
-and 9.9 follow the proposals pending the owner's confirmation. Each item ends with **Done**,
+**Status 2026-10-16:** every item below is implemented (one branch, one commit per area); the
+owner confirmed 9.8 and 9.9 as proposed. Each item ends with **Done**,
 **Validated** and **Left**. The same pass fixed the report errors an audit of the window's
 reports found: istiod "CPU avg" was a per-window peak, "KB"/"MB" were KiB/MiB, the SLA headline
 and envelope read istiod CPU from one end-of-window `kubectl top` snapshot, two-point fits
@@ -470,7 +470,7 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   **Validated:** bats (parser, wrapper, 001 against a stub cluster); lab: "per pod: istio-cr on
   <member>", 100m. **Left:** ROSA: the 20m override should read 20m.
 
-### 9.8 Classic LBs break HTTP through the ingress gateway on AWS (findings 7, 11) — owner decision
+### 9.8 Classic LBs break HTTP through the ingress gateway on AWS (findings 7, 11) — decided 2026-10-16
 
 - **Seen:** through a Classic LB the ingress gateway receives each HTTP request followed by a FIN
   0.01 ms later and aborts it; clients get no response. The failing members varied over the day.
@@ -489,14 +489,14 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   97 s)?
 - **Accept:** on ROSA, mesh-verify through every member's ingress answers 100% for 10 min.
   **Test:** offline `helm template`; ROSA only.
-- **Done (proposal, pending the owner):** rosa-mode default `rosa_ingress_nlb = true` in
+- **Done (owner confirmed 2026-10-16):** rosa-mode default `rosa_ingress_nlb = true` in
   `terraform/platform`: its own values document before `gitops_app_overrides`, so Helm deep-merges
   an override of the same app into it; east-west stays on a Classic LB (no failure seen). README
   "Per-environment values" says how to switch an existing CLB Service (delete it once).
   **Validated:** `helm template` of the app of apps with the default and a MetalLB override
   renders both annotations; `terraform validate`. **Left:** ROSA (the accept test above).
 
-### 9.9 Gateway memory sizing (findings 8, 14, 17) — owner decision
+### 9.9 Gateway memory sizing (findings 8, 14, 17) — decided 2026-10-16
 
 - **Seen:** east-west gateway Envoy memory is +143-144 Mi allocated per 1000 discovered Services (2
   clusters per Service), whatever the namespace shape; the ingress gateway about +91 Mi (1 cluster per
@@ -519,7 +519,7 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   9.5's guard; a campaign-scale run without a gateway restart. **Test:** lab (burst reproduction at
   a few thousand Services; the lab gateways should show the same retention if it is Envoy-side),
   ROSA.
-- **Done (proposal, pending the owner):** chart defaults east-west limit 4Gi / request 1Gi,
+- **Done (owner confirmed 2026-10-16):** chart defaults east-west limit 4Gi / request 1Gi,
   ingress limit 2Gi; the sizing rule is in both charts' values and `docs/scale-test-campaign`
   ((10 + 145 × Services / 1000) Mi × 2.5 east-west, × 1.5 ingress with 91 Mi). **Validated (lab,
   1Gi limits, gateways restarted before each run):** 1000 Services in one step vs a ladder

@@ -140,7 +140,7 @@ b; 15:06-15:18 a 0/41, c 0/41, b 17/41). Isolation:
   ingress failed 36/36 over the same 5 minutes (15:52-15:57).
 
 East-west traffic (mTLS passthrough between Envoys) was unaffected on CLBs all day. Fix candidate:
-an NLB for the ingress Service on AWS (owner decision, backlog 9.8).
+an NLB for the ingress Service on AWS (backlog 9.8; adopted on 2026-10-16 as the rosa-mode default).
 
 ## Task 6: VS/DR load in pods mode (P4)
 
