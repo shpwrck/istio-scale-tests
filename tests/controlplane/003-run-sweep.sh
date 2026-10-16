@@ -243,10 +243,11 @@ Exit codes:
      that could not be retired (RETIRE_FAILED; the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (a status row
      instead of a measurement: SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED;
-     stderr ends with "N of M cells failed" by reason) or the Istio version changed
-     during the sweep (read again at its end). Cells the memory guard skipped
-     (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout, and do
-     not make it 4. The outcome is also in sweep-outcome.txt and the markdown report.
+     stderr ends with "N of M cells failed" by reason) or the Istio version or active
+     revision changed during the sweep (read again at its end). Cells the memory guard
+     skipped (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout,
+     and do not make it 4. The outcome is also in sweep-outcome.txt, the markdown report
+     and the scale envelope.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -1227,22 +1228,26 @@ fi
 # timeout/gtimeout; a live sweep without either stops here, before any cluster change,
 # instead of recording every sample N/A (R17). The plan (--dry-run) does not need it.
 ((DRY_RUN)) || require_timeout
+# --resume appends to a TSV whose preamble names the version the sweep started on: rows
+# measured on another one would be credited to it. Like the RUN_CONFIG rule, this stops
+# under either ISTIO_VERSION_CHECK policy (warn only lets a new run record what it finds).
+_resume_iv=""
+if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
+	_resume_iv="$(grep -m1 '^# ISTIO_VERSION=' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
+	_resume_iv="${_resume_iv#*=}"
+	# X6: unknown is never a match, not even unknown == unknown: the rows already recorded
+	# ran on a version nobody read, so no later read can vouch for the new ones. Y6: that is
+	# known from the TSV alone, so it stops before the live read (and its readiness wait).
+	case "/${_resume_iv#mixed:}/" in
+	*/unknown/*) die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}: a member's version could not be read or confirmed when it started (unreadable, its Istio CR not settled, or an istiod rollout in progress), so the version its rows ran on is not known and it cannot be resumed. Start a new sweep once every member's Istio CR is settled and Healthy." ;;
+	esac
+fi
 # R4: the Istio version every member runs, read once before any cluster change and
 # exported, so 001, 002 and 005 record it (ISTIO_VERSION_CHECK=fail stops here on a
 # mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Istio version:     $(istio_version_label)" >&2
-# --resume appends to a TSV whose preamble names the version the sweep started on: rows
-# measured on another one would be credited to it. Like the RUN_CONFIG rule, this stops
-# under either ISTIO_VERSION_CHECK policy (warn only lets a new run record what it finds).
 if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
-	_resume_iv="$(grep -m1 '^# ISTIO_VERSION=' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
-	_resume_iv="${_resume_iv#*=}"
-	# X6: unknown is never a match, not even unknown == unknown: the rows already recorded
-	# ran on a version nobody read, so no later read can vouch for the new ones.
-	case "/${_resume_iv#mixed:}/" in
-	*/unknown/*) die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}: a member's version could not be read when it started, so the version its rows ran on is not known and it cannot be resumed. Fix access to the member (kubeconfig, login, network) or wait until its Istio CR is settled, then start a new sweep." ;;
-	esac
 	case "/${ISTIO_VERSION#mixed:}/" in
 	*/unknown/*) [[ -z "$_resume_iv" ]] || die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the running version cannot be read now on every member (ISTIO_VERSION=${ISTIO_VERSION}; the members are listed above). Fix access to them (kubeconfig, login, network) or wait until their Istio CR is settled, then run the same --resume again." ;;
 	esac
@@ -1251,8 +1256,12 @@ if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
 	fi
 fi
 # A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
-# that far) no longer describes the sweep, and its reports must not show it meanwhile.
-[[ -z "$RESUME_DIR" ]] || rm -f "${OUTPUT_DIR}/sweep-outcome.txt"
+# that far) no longer describes the sweep, and its reports must not show it meanwhile. Y10:
+# kept as sweep-outcome.prev.txt (reports read only sweep-outcome.txt), so a resume that
+# then fails a preflight does not lose it.
+if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN)); then
+	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
+fi
 
 capacity_plan_warn
 guard_add_mesh_members
@@ -2270,7 +2279,7 @@ rm -f "$ENVELOPE_ERR"
 # context column is the status); count them by reason, the memory guard's SKIPPED_* apart
 # (skipped on purpose, not failed: C2), also in sweep-outcome.txt and the markdown
 # summary (C3). The RETIRE_FAILED stop (exit 1) wins over 4 (some cells failed, or the
-# Istio version changed under the sweep).
+# Istio version or active revision changed under the sweep).
 FAILED_CELLS=()
 mapfile -t FAILED_CELLS < <(awk -F'\t' '$1 != "timestamp" && !/^#/ && $2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ { print $2 }' \
 	"${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)

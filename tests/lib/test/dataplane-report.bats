@@ -262,21 +262,31 @@ tsv() {
 	assert_output --partial "mesh_size=2 qps_target=1000 n_valid=0/1 reason=istiod_restarted qps_actual=700 (70.0% of target) server_replicas=2/2 "
 }
 
-@test "004: a TSV written before R4 pooled with a live one reads mixed for the R4 keys, never live (B1)" {
+@test "004: a TSV written before R4 pooled with a live one reads mixed for the R4 and R2 keys, never live (B1)" {
 	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
 	tsv "${RES}/sweep-old/latency-o.tsv" "RUN_ID=ro" "ISTIO_VERSION=v1.30.5" <<-EOF
 	$(row 1 ctx-a ctx-a 100 100 OK 1 0 local)
 	EOF
 	tsv "${RES}/sweep-new/latency-n.tsv" "RUN_ID=rn" "ISTIO_VERSION=v1.30.5" "ISTIO_VERSION_PIN=v1.30.5" \
-		"ISTIO_VERSION_SOURCE=live" "ISTIO_VERSION_BY_CONTEXT=ctx-a=v1.30.5" <<-EOF
+		"ISTIO_VERSION_SOURCE=live" "ISTIO_VERSION_BY_CONTEXT=ctx-a=v1.30.5" \
+		"ISTIO_NOTREADY_AT_START=ctx-a=IstioCNINotHealthy" "ISTIO_READY_WAITED_SEC=60" <<-EOF
 	$(row 1 ctx-a ctx-a 100 100 OK 1 0 local)
 	EOF
 	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format json
 	assert_success
 	[ "$(jq -c '.metadata | [.ISTIO_VERSION, .ISTIO_VERSION_SOURCE, .ISTIO_VERSION_PIN, .ISTIO_VERSION_BY_CONTEXT]' <<<"$output")" = \
 		'["v1.30.5","mixed:live,unknown","mixed:v1.30.5,unknown","mixed:ctx-a=v1.30.5,unknown"]' ]
+	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC]' <<<"$output")" = \
+		'["mixed:ctx-a=IstioCNINotHealthy,unknown","mixed:60,unknown"]' ]
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = live ]
+	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = ctx-a=IstioCNINotHealthy ]
+	# R2 in every format.
+	for fmt in text csv markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format "$fmt"
+		assert_output --partial "ISTIO_NOTREADY_AT_START"
+		assert_output --partial "ctx-a=IstioCNINotHealthy"
+	done
 }
 
 @test "004: a restart that could not be checked is named apart from a real restart" {

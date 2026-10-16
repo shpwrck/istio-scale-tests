@@ -60,8 +60,8 @@ Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or
 precondition, a failed suite setup, a failed revert, or an unexpected error); `4` it
 finished, reverted every profile and wrote `sweep-comparison.md`, but some passes failed
 (`SETUP_FAILED`: the profile did not apply; `PROBE_FAILED`: the probe exited non-zero,
-including a reachability stop), or the Istio version changed during the sweep (read
-again after the last revert). The last line on stderr says how many, by reason;
+including a reachability stop), or the Istio version or active revision changed during
+the sweep (read again after the last revert). The last line on stderr says how many, by reason;
 `sweep-outcome.txt` and the end of `sweep-comparison.md` keep the outcome.
 `130` / `143`: interrupted, after reverting the active profile.
 
@@ -69,7 +69,7 @@ again after the last revert). The last line on stderr says how many, by reason;
 
 ```
 tests/tuning/results/sweep-<RUN_ID>/
-├── sweep-metadata.txt       # suite, passes, HARNESS_SHA, ISTIO_VERSION (read live once; every probe records it) and the pin
+├── sweep-metadata.txt       # suite, passes, HARNESS_SHA, ISTIO_VERSION (read live once; every probe records it), the pin, ISTIO_NOTREADY_AT_START
 ├── sweep-comparison.md      # means of valid rows with n and range (histogram p99s: worst bucket); % change vs baseline
 ├── baseline/                # suite TSV + .md, probe-output.log
 └── 01-push-throttling/      # same, plus state/ (revert data)
@@ -80,11 +80,15 @@ table. Data-plane rows are split by target class (local or remote) and QPS; a ro
 missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers run
 `DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Histogram p99 rows
 (convergence, push time) are never averaged: they show the worst bucket range a valid row
-hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the controlplane's
-`istiod CPU peak (m)` and `istiod memory peak (Mi)` are window peaks), the sidecar config
-in KiB. Under each metric, `n (got/attempted)` counts the valid rows with a value over
-every row the pass wrote (failed and timed-out rows included), and `range` gives its min
-to max. A profile whose n differs from the baseline's shows `(baseline n ...)` and the
+hit, or `overflow (N rows)` when N rows had their p99 in the +Inf bucket; propagation's P1
+convergence counts iterations instead, `overflow (N iterations)`: N iterations put a sample
+in the +Inf bucket (counted, although propagation 005 leaves them out of its means). Units:
+memory in Mi, CPU in millicores (the controlplane's `istiod CPU peak (m)` and
+`istiod memory peak (Mi)` are window peaks), the sidecar config in KiB. Under each metric,
+`n (got/attempted)` counts the valid samples with a value over what the pass's probe was
+configured to take, where its TSV records it (propagation: iterations for P1 and its
+convergence, iterations x remotes for P2 and P3; churn: iterations), else over every row
+the pass wrote (failed and timed-out rows included); `range` gives its min to max. A profile whose n differs from the baseline's shows `(baseline n ...)` and the
 page warns: its mean comes from other iterations, so a profile that timed out on the slow
 ones can look faster than it is. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.

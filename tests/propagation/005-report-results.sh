@@ -17,10 +17,10 @@
 # iterations (distinct run_id, iteration), as 002's summary does (M1).
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION and its
-# ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE / ISTIO_VERSION_BY_CONTEXT,
-# KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
-# report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
-# over all input TSVs.
+# ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE / ISTIO_VERSION_BY_CONTEXT, the start-of-run
+# readiness ISTIO_NOTREADY_AT_START / ISTIO_READY_WAITED_SEC, KUBE_VERSIONS, SETTLE_SEC,
+# POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all report formats, plus RUN_CONFIG /
+# RUN_CONFIG_SHA256 (the --config behind the inputs) over all input TSVs.
 #
 # Every endpoint-*.tsv under the results dir is read. More than one run there (several
 # sweep-* dirs, or standalone probes with different run ids) stops the report unless
@@ -120,6 +120,12 @@ changed, the cause, the evidence folder relative to the results dir) and a tally
 cause; restarted_untimed rows (may predate the window) are counted apart (json key
 istiod_diag).
 
+When the results dir holds sweep-outcome.txt (006 writes it at the end of a sweep),
+every format repeats it, with the run that recorded it: the failed cells by reason, its
+problems (the Istio version or active revision changed under the sweep) and notes
+(members not ready at its start or end); a sweep dir without it is a sweep that died
+before its end.
+
 Environment:
   FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 filter (default 1000).
   PROPAGATION_PERCENTILE_MIN_N  Minimum sample count before p95/p99 are reported
@@ -187,7 +193,7 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
 # over every input (config_merged_preamble): one value, or mixed:a,b with a warning.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -571,6 +577,7 @@ report_endpoint_text() {
 report_endpoint_csv() {
 	format_preamble_csv_header
 	config_multi_run_csv
+	sweep_outcome_recorded "$RESULTS_DIR" csv
 	echo ""
 	# worst_bucket: the bucket range of max_ms, for the histogram phases only.
 	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket"

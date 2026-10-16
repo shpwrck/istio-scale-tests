@@ -457,12 +457,12 @@ _in_path() {
 	grep -qx 'STOP_REASON=the reachability gate found an unreachable remote' "${d}/sweep-outcome.txt"
 	echo 'PROBLEM=the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"' >> "${d}/sweep-outcome.txt"
 	run sweep_outcome_recorded "$d" text
-	assert_line "SWEEP OUTCOME (recorded in sweep-outcome.txt, exit 3):"
+	assert_line "SWEEP OUTCOME (recorded in sweep-outcome.txt by run 20261016T100000Z-1, exit 3):"
 	assert_line '  error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"'
 	assert_line "  warning: istiod/CNI not ready at the end of the sweep, same Istio version (a: its state is IstioCNINotHealthy)"
 	assert_line "  stopped early: the reachability gate found an unreachable remote"
 	run sweep_outcome_recorded "$d" md
-	assert_line '> **Sweep outcome** (recorded in `sweep-outcome.txt`, exit 3):'
+	assert_line '> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `20261016T100000Z-1`, exit 3):'
 	assert_line '> - error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"'
 	run sweep_outcome_recorded "$d" json
 	[ "$(jq -c '[.exit, .run_id, .problems[0], (.notes | length), .stop_reason]' <<<"$output")" = \
@@ -478,5 +478,47 @@ _in_path() {
 	assert_output null
 	sweep_outcome --record "$d" 2 >/dev/null
 	run sweep_outcome_recorded "$d" md
+	assert_output ""
+}
+
+@test "sweep_outcome_recorded (Y5, Y9): failed cells, the record's run (warned when another), csv comment lines; the record's HARNESS_SHA is the sweep's" {
+	local d="${BATS_TEST_TMPDIR}/sweep-20261016T100000Z-2"
+	mkdir -p "$d"
+	harness_sha() { echo live-tree; }
+	# Y9: the record carries the HARNESS_SHA the sweep's TSVs record, not a fresh read.
+	HARNESS_SHA=abc1234 run --separate-stderr sweep_outcome --run-id 20261016T100000Z-2 --record "$d" \
+		--note "istiod or IstioCNI was not ready at the end of the sweep" 5 PROBE_FAILED SETUP_FAILED PROBE_FAILED
+	assert_failure 4
+	grep -qx 'HARNESS_SHA=abc1234' "${d}/sweep-outcome.txt"
+	# Y5: exit 4 is shown with the cells that failed, not only the note under it.
+	run --separate-stderr sweep_outcome_recorded "$d" text
+	assert_line --index 0 "SWEEP OUTCOME (recorded in sweep-outcome.txt by run 20261016T100000Z-2, exit 4):"
+	assert_line --index 1 "  error: 3 of 5 cells failed: PROBE_FAILED x2, SETUP_FAILED x1"
+	assert_line --index 2 "  warning: istiod or IstioCNI was not ready at the end of the sweep"
+	[ -z "$stderr" ]
+	run sweep_outcome_recorded "$d" md
+	assert_line '> - error: 3 of 5 cells failed: PROBE_FAILED x2, SETUP_FAILED x1'
+	run sweep_outcome_recorded "$d" json
+	[ "$(jq -c '[.exit, .failed, .failed_by]' <<<"$output")" = '[4,3,"PROBE_FAILED x2, SETUP_FAILED x1"]' ]
+	run sweep_outcome_recorded "$d" csv
+	assert_output "$(printf '%s\n' '# SWEEP_OUTCOME_RUN_ID=20261016T100000Z-2' '# SWEEP_OUTCOME_EXIT=4' '# SWEEP_OUTCOME_FAILED=3' \
+		'# SWEEP_OUTCOME_FAILED_BY=PROBE_FAILED x2, SETUP_FAILED x1' '# SWEEP_OUTCOME_NOTE=istiod or IstioCNI was not ready at the end of the sweep')"
+	# The report's run (config_check_multi_run's one sweep-* dir, or the argument): the same
+	# run is silent; another run is named in every format and on stderr.
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-20261016T100000Z-2 run --separate-stderr sweep_outcome_recorded "$d" text
+	[ -z "$stderr" ]
+	refute_output --partial "not from the run"
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-20261016T100000Z-9 run --separate-stderr sweep_outcome_recorded "$d" text
+	assert_line --index 1 "  warning: the record is from run 20261016T100000Z-2, not from the run this report reads (20261016T100000Z-9)"
+	[[ "$stderr" == "warning: ${d}/sweep-outcome.txt was recorded by run 20261016T100000Z-2, not by this report's run 20261016T100000Z-9"* ]]
+	run --separate-stderr sweep_outcome_recorded "$d" csv other-run
+	assert_line "# WARNING: sweep-outcome.txt: the record is from run 20261016T100000Z-2, not from the run this report reads (other-run)"
+	run --separate-stderr sweep_outcome_recorded "$d" json other-run
+	[ "$(jq -r '.other_run' <<<"$output")" = other-run ]
+	# A pooled report (several runs) compares nothing.
+	MULTI_RUN_N=2 MULTI_RUN_IDS=sweep-a,sweep-b run --separate-stderr sweep_outcome_recorded "$d" text
+	[ -z "$stderr" ]
+	# No record: no csv lines either.
+	run sweep_outcome_recorded "${d}/none" csv
 	assert_output ""
 }

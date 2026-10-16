@@ -50,12 +50,14 @@ Options:
   -h, --help         Show this help.
 
 When the sweep dir holds sweep-outcome.txt (003 writes it at the end of the sweep), the
-comparison repeats its errors and warnings; a sweep dir without it is a sweep that died
+comparison repeats it, with the run that recorded it: the failed passes by reason, its
+problems (the Istio version or active revision changed under the sweep) and notes
+(members not ready at its start or end); a sweep dir without it is a sweep that died
 before its end.
 
 Environment:
   FANOUT_MAX_SKEW_MS  propagation: the scrape-skew ceiling (ms) a row must be within to
-                      count, as in propagation 005 (default in config/options.env).
+                      count, as in propagation 005 (default 1000, set in config/options.env).
 EOF
 }
 
@@ -85,6 +87,13 @@ esac
 
 META="${RESULTS_DIR}/sweep-metadata.txt"
 meta_get() { [[ -f "$META" ]] && sed -n "s/^# $1=//p" "$META" | head -1; return 0; }
+# istio_start_kv <key>: an R2 start-of-run readiness key (ISTIO_NOTREADY_AT_START,
+# ISTIO_READY_WAITED_SEC) from sweep-metadata.txt; unknown for a sweep from before R2.
+istio_start_kv() {
+	local v
+	v="$(meta_get "$1")"
+	echo "${v:-unknown}"
+}
 
 # Passes in sweep order (metadata), else baseline first then the rest.
 PASSES=()
@@ -414,6 +423,7 @@ render() {
 		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
+		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		if [[ "$SUITE" == propagation ]]; then
 			echo "- Values are means over the samples the propagation report (005) counts: valid rows (status OK, no istiod restart, no overflow, scrape skew within FANOUT_MAX_SKEW_MS), P1 once per iteration. Profiles show the change against the baseline in brackets."
 		else
@@ -421,9 +431,9 @@ render() {
 		fi
 		echo "- Under each metric: n is got/attempted (valid samples with a value / what the probe was configured to take where its TSV records it, else every row the pass wrote, failed and timed-out rows included) and range is its min to max."
 		((N_DIFFERS)) && echo "- **A profile's n differs from the baseline's** (shown as \"(baseline n ...)\"): its mean is over other iterations, so a better mean can come from fewer, easier samples."
-		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket (propagation's P1 convergence: \"overflow (N iterations)\", counted although 005 leaves those iterations out of its means)."
+		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket (propagation's P1 convergence: \"overflow (N iterations)\" when N iterations put a sample in the +Inf bucket, whatever their p99; counted although 005 leaves those iterations out of its means)."
 		echo ""
-		sweep_outcome_recorded "$RESULTS_DIR" md
+		sweep_outcome_recorded "$RESULTS_DIR" md "$(meta_get RUN_ID)"
 		local hdr="| Metric |" sep="|---|" r
 		for p in "${PASSES[@]}"; do hdr+=" ${p} |"; sep+="---|"; done
 		echo "$hdr"
@@ -432,12 +442,13 @@ render() {
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
+		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		echo "Means over valid rows; profiles show the change against the baseline."
 		echo "n = got/attempted (valid samples with a value / configured samples, else rows written); range = min to max."
 		((N_DIFFERS)) && echo "WARNING: a profile's n differs from the baseline's (\"(baseline n ...)\"): its mean is over other iterations."
 		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."
 		echo ""
-		sweep_outcome_recorded "$RESULTS_DIR" text
+		sweep_outcome_recorded "$RESULTS_DIR" text "$(meta_get RUN_ID)"
 		{
 			printf 'Metric'
 			printf '\t%s' "${PASSES[@]}"

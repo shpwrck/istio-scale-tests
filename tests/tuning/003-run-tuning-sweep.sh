@@ -76,8 +76,8 @@ Exit codes:
   4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
      passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
      non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason) or the
-     Istio version changed during the sweep (read again at its end); the outcome is
-     also in sweep-outcome.txt and sweep-comparison.md
+     Istio version or active revision changed during the sweep (read again at its end);
+     the outcome is also in sweep-outcome.txt and sweep-comparison.md
   130/143  interrupted (Ctrl-C / TERM); the active profile is reverted first
 EOF
 }

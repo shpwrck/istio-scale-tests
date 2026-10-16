@@ -129,7 +129,7 @@ formats_show() {
 	[[ "$stderr" == *"holds 2 runs"* ]]
 	# Each with the commands that give it a directory of its own, then its report (B2, U1):
 	# its TSVs by path, then every file named after one of its ids.
-	[[ "$stderr" == *"  p2 (its files are in ${r}, outside a sweep-* dir, with another run's; move them into a directory of their own first):"$'\n'"    mkdir -p '${r}/run-p2'"$'\n'"    for f in '${r}/churn-p2.tsv'; do if [ -e \"\$f\" ]; then mv \"\$f\" '${r}/run-p2/'; fi; done"$'\n'"    find '${r}' -mindepth 1 -maxdepth 1 \\( -name '*p2*' \\) ! -name 'sweep-*' ! -name 'run-p2' -exec mv {} '${r}/run-p2/' \\;"$'\n'"    "*" --results-dir '${r}/run-p2'"$'\n'"  p1 ("* ]]
+	[[ "$stderr" == *"  p2 (its files are in ${r}, outside a sweep-* dir, with another run's files; move them into a directory of their own first):"$'\n'"    mkdir -p '${r}/run-p2'"$'\n'"    for f in '${r}/churn-p2.tsv'; do if [ -e \"\$f\" ]; then mv \"\$f\" '${r}/run-p2/'; fi; done"$'\n'"    find '${r}' -mindepth 1 -maxdepth 1 \\( -name '*p2*' \\) ! -name 'sweep-*' ! -name 'run-p2' -exec mv {} '${r}/run-p2/' \\;"$'\n'"    "*" --results-dir '${r}/run-p2'"$'\n'"  p1 ("* ]]
 	# Files of one standalone run (same RUN_ID) are one run; propagation's SWEEP_RUN_ID wins.
 	printf '# RUN_ID=p1\nrun_id\n' > "$r/latency-p1b.tsv"
 	printf '# SWEEP_RUN_ID=s9\n# RUN_ID=e1\nrun_id\n' > "$r/endpoint-e1.tsv"
@@ -227,8 +227,38 @@ formats_show() {
 	[[ "$stderr" == *"  20261014T100000Z-3 (alone in ${r}/run-20261014T100000Z-3):"$'\n'"    "*" --results-dir '${r}/run-20261014T100000Z-3'"* ]]
 	[[ "$stderr" != *"run-20261014T100000Z-3/run-"* ]]
 	# The standalone run beside the sweep dir and run-<id>/ moves; the find never takes them.
+	# Its directory holds no other run's file, only their directories below (Y13 wording).
+	[[ "$stderr" == *"  20261016T100000Z-2 (its files are in ${r}, outside a sweep-* dir, above another run's directory (sweep-20261015T100000Z-1); move them"* ]]
 	[[ "$stderr" == *"    mkdir -p '${r}/run-20261016T100000Z-2'"* ]]
 	[[ "$stderr" == *"! -name 'sweep-*' ! -name 'run-20261016T100000Z-2'"* ]]
+}
+
+@test "config_check_multi_run: a symlink such as latest -> sweep-X is that sweep; a sweep-Y symlink to any directory keeps its own key (Y7)" {
+	local r="${BATS_TEST_TMPDIR}/r6"
+	mkdir -p "$r/res/sweep-20261016T100000Z-7" "$r/store/data"
+	# Three per-probe TSVs of one sweep, each with its own RUN_ID.
+	printf '# RUN_ID=p1\nrun_id\np1\n' > "$r/res/sweep-20261016T100000Z-7/a.tsv"
+	printf '# RUN_ID=p2\nrun_id\np2\n' > "$r/res/sweep-20261016T100000Z-7/b.tsv"
+	printf '# RUN_ID=p3\nrun_id\np3\n' > "$r/res/sweep-20261016T100000Z-7/c.tsv"
+	ln -s sweep-20261016T100000Z-7 "$r/res/latest"
+	run --separate-stderr config_check_multi_run "$r/res/latest" 0 "$r/res/latest/a.tsv" "$r/res/latest/b.tsv" "$r/res/latest/c.tsv"
+	assert_success
+	config_check_multi_run "$r/res/latest" 0 "$r/res/latest/a.tsv" "$r/res/latest/b.tsv" "$r/res/latest/c.tsv"
+	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-7 ]
+	cd "$r/res/latest"
+	config_check_multi_run . 0 ./a.tsv b.tsv c.tsv
+	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-7 ]
+	cd "$r"
+	# sweep-Y -> a directory not named sweep-*: the link's own name is the key.
+	printf '# RUN_ID=q1\nrun_id\nq1\n' > "$r/store/data/a.tsv"
+	printf '# RUN_ID=q2\nrun_id\nq2\n' > "$r/store/data/b.tsv"
+	ln -s "$r/store/data" "$r/res/sweep-20261016T100000Z-8"
+	config_check_multi_run "$r/res/sweep-20261016T100000Z-8" 0 "$r/res/sweep-20261016T100000Z-8/a.tsv" "$r/res/sweep-20261016T100000Z-8/b.tsv"
+	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-8 ]
+	# A plain directory (no sweep-* on either side) still counts its ids.
+	run --separate-stderr config_check_multi_run "$r/store/data" 0 "$r/store/data/a.tsv" "$r/store/data/b.tsv"
+	assert_failure 1
+	[[ "$stderr" == *"holds 2 runs"* ]]
 }
 
 
@@ -252,6 +282,25 @@ formats_show() {
 	# (empty) in a mixed list; a key only one file has keeps its value; nothing after the
 	# header line is preamble.
 	[ "$output" = "$(printf '%s\n' 'RUN_ID=mixed:r1,r2' 'QPS=10' 'KUBE_VERSIONS=mixed:a=1.30,b=1.30 | a=1.31' 'HOSTS=mixed:(empty),h' 'ONLY_A=x' 'K[c]=1')" ]
+}
+
+@test "config_input_value and config_merged_preamble: an ISTIO_VERSION* value is one value whatever its leading v (Y11)" {
+	local a b c
+	a="$(cfg va.tsv '# ISTIO_VERSION=v1.30.5' '# ISTIO_VERSION_PIN=v1.30.5' '# ISTIO_VERSION_BY_CONTEXT=x=v1.30.5,y=v1.30.5' '# TAG=v1' 'run_id')"
+	b="$(cfg vb.tsv '# ISTIO_VERSION=1.30.5' '# ISTIO_VERSION_PIN=1.30.5' '# ISTIO_VERSION_BY_CONTEXT=x=1.30.5,y=1.30.5' '# TAG=1' 'run_id')"
+	c="$(cfg vc.tsv '# ISTIO_VERSION=mixed:1.30.5/v1.29.0' '# ISTIO_VERSION_PIN=1.30.5' '# ISTIO_VERSION_BY_CONTEXT=x=1.30.5,y=v1.29.0' '# TAG=1' 'run_id')"
+	run config_input_value ISTIO_VERSION "" "$a" "$b"
+	assert_output v1.30.5
+	run config_input_value ISTIO_VERSION_PIN "" "$b" "$a"
+	assert_output 1.30.5
+	run config_merged_preamble "$a" "$b"
+	assert_output "$(printf '%s\n' ISTIO_VERSION=v1.30.5 ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_BY_CONTEXT=x=v1.30.5,y=v1.30.5 TAG=mixed:v1,1)"
+	# A real difference still reads mixed, each version once (X13).
+	run config_input_value ISTIO_VERSION "" "$a" "$b" "$c"
+	assert_output mixed:v1.30.5,v1.29.0
+	run config_merged_preamble "$a" "$c"
+	assert_line "ISTIO_VERSION=mixed:v1.30.5,v1.29.0"
+	assert_line "ISTIO_VERSION_BY_CONTEXT=mixed:x=v1.30.5,y=v1.30.5 | x=1.30.5,y=v1.29.0"
 }
 
 @test "config_snapshot: a no-op without a config; a byte copy with one" {

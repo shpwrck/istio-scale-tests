@@ -82,8 +82,10 @@ them; inputs that differ read mixed:<value>,<value> with each distinct value onc
 istio_version is each member's active IstioRevision .spec.version as 002 read it
 (istio_version_by_context: which member ran which).
 When the results dir holds sweep-outcome.txt (003 writes it at the end of a sweep),
-text and md repeat its errors and warnings (a version change under the sweep); a
-sweep dir without it is a sweep that died before its end.
+text, csv and md repeat it, with the run that recorded it: the failed cells by reason, its
+problems (the Istio version or active revision changed under the sweep) and notes
+(members not ready at its start or end); a sweep dir without it is a sweep that died
+before its end.
 Histogram p99 columns (queue time, push time) show the worst bucket any valid row
 hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
 csv adds worst_bucket and n_overflow columns.
@@ -201,9 +203,10 @@ run_meta() {
 	local key="$1" f v n
 	v="$(config_input_value "$key" "unknown (not recorded)" "${TSV_FILES[@]}")"
 	[[ -n "$v" ]] || v="unknown (not recorded)"
-	# How many inputs differ: one file's own mixed:a/b is not a disagreement.
+	# How many inputs differ: one file's own mixed:a/b is not a disagreement, nor v1.30.5
+	# against 1.30.5 (config_input_value reads them as one, Y11).
 	n="$(for f in "${TSV_FILES[@]}"; do grep -m1 "^# ${key}=" "$f" 2>/dev/null || echo; done | sort -u | awk 'END { print NR }')"
-	((n < 2)) || echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
+	[[ "$v" != mixed:* ]] || ((n < 2)) || echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
 	echo "$v"
 }
 HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
@@ -214,6 +217,9 @@ ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
 ISTIO_VERSION_SOURCE_M="$(run_meta ISTIO_VERSION_SOURCE)"
 ISTIO_VERSION_PIN_M="$(run_meta ISTIO_VERSION_PIN)"
 ISTIO_VERSION_BY_CONTEXT_M="$(run_meta ISTIO_VERSION_BY_CONTEXT)"
+# R2: the members still not ready after the start's readiness wait, and how long it took.
+ISTIO_NOTREADY_AT_START_M="$(run_meta ISTIO_NOTREADY_AT_START)"
+ISTIO_READY_WAITED_SEC_M="$(run_meta ISTIO_READY_WAITED_SEC)"
 
 # Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
@@ -251,6 +257,7 @@ report_text() {
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
+	echo "# istio_notready_at_start: ${ISTIO_NOTREADY_AT_START_M}  istio_ready_waited_sec: ${ISTIO_READY_WAITED_SEC_M}"
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
@@ -361,11 +368,14 @@ report_csv() {
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
 	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
 	echo "# ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}"
+	echo "# ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}"
+	echo "# ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}"
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
 	config_multi_run_csv
+	sweep_outcome_recorded "$RESULTS_DIR" csv
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
@@ -527,6 +537,8 @@ report_markdown() {
 	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
 	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
 	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
+	echo "istio_notready_at_start: \"${ISTIO_NOTREADY_AT_START_M}\""
+	echo "istio_ready_waited_sec: \"${ISTIO_READY_WAITED_SEC_M}\""
 	echo "harness_sha: \"${harness_sha}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
@@ -661,6 +673,8 @@ report_charts() {
 	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
 	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
 	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
+	echo "istio_notready_at_start: \"${ISTIO_NOTREADY_AT_START_M}\""
+	echo "istio_ready_waited_sec: \"${ISTIO_READY_WAITED_SEC_M}\""
 	echo "harness_sha: \"${HARNESS_SHA_M}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: \"${RUN_CONFIG_M}\""

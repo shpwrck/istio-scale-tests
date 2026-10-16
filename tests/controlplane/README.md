@@ -136,19 +136,21 @@ preamble and prints a note when that changes a value. It refuses an explicit `--
 `--vsdr-subsets` that differs. It also refuses a mesh that now runs another Istio version than the
 `ISTIO_VERSION` the sweep recorded, under either `ISTIO_VERSION_CHECK` policy: the new rows would be
 credited to the old version, so start a new sweep. A sweep that recorded `unknown` (a member could
-not be read when it started) can never be resumed; when a member cannot be read now, fix access to
-it and run the same `--resume` again. Pass the other options as in the original run.
+not be read or confirmed when it started: unreadable, its Istio CR not settled, or an istiod rollout
+in progress) can never be resumed, and `--resume` says so before it reads the mesh; when a member
+cannot be read now, fix access to it and run the same `--resume` again. A resume keeps the earlier
+`sweep-outcome.txt` as `sweep-outcome.prev.txt` until it writes its own. Pass the other options as in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an
 unexpected error, or `RETIRE_FAILED`, after its reports); `4` it finished and wrote its
 reports, but some cells failed (a status row instead of a measurement: `SETUP_FAILED`,
-`PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`), or the Istio version changed during the
-sweep (read again before the reports). The last line on stderr says how many, by reason;
-`1` wins over `4`. Cells the memory guard skipped (`SKIPPED_MEM_GUARD`, and
-`SKIPPED_SERIES_STOPPED` after it) are counted apart, as skipped on purpose, and do not
-make it `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep
-the outcome.
+`PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`), or the Istio version or active revision
+changed during the sweep (read again before the reports). The last line on stderr says how
+many, by reason; `1` wins over `4`. Cells the memory guard skipped (`SKIPPED_MEM_GUARD`,
+and `SKIPPED_SERIES_STOPPED` after it) are counted apart, as skipped on purpose, and do
+not make it `4`. `sweep-outcome.txt` in the sweep dir, the end of the markdown summary and
+the end of the scale envelope keep the outcome.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
 scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces

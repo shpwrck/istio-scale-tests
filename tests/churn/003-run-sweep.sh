@@ -67,8 +67,8 @@ Exit codes:
   1  the sweep stopped: a bad flag or precondition, or an unexpected error
   4  the sweep finished and wrote its report, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
-     version changed during the sweep (read again at its end); the outcome is also in
-     sweep-outcome.txt and the markdown report
+     version or active revision changed during the sweep (read again at its end); the
+     outcome is also in sweep-outcome.txt and the markdown report
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and

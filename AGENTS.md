@@ -67,7 +67,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults, `ISTIO_VERSION_CHECK` |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults, `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | ACM, GitOps, spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy) |

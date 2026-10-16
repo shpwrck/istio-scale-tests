@@ -33,7 +33,7 @@ err()  { fail=$((fail + 1)); echo "    FAIL: $1"; }
 # 1. bash -n syntax check
 step 1 "bash -n on all test scripts"
 syntax_fail=0
-for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh; do
+for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh "$ROOT"/tests/tuning/lib/*.sh; do
 	if ! bash -n "$f" 2>/dev/null; then
 		echo "    syntax error: $f"
 		bash -n "$f" 2>&1 || true
@@ -50,8 +50,10 @@ else
 	if command -v shellcheck >/dev/null 2>&1; then
 		# One call over every file, as CI runs it: shellcheck then follows a `source` of a file
 		# on the same command line, so a name used as an array in a lib and as a scalar in a
-		# suite is caught here too, not only in CI (whose find also takes the bats fixtures).
-		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh; then
+		# suite is caught here too, not only in CI (whose find takes these files too, the bats
+		# fixtures and tests/tuning/lib included).
+		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh \
+			"$ROOT"/tests/tuning/lib/*.sh; then
 			ok
 		else
 			err "shellcheck violations found"
@@ -207,6 +209,7 @@ EXTRACTED_PATTERNS=(
 	'_istio_version_repro() {'
 	'_istio_version_marker() {'
 	'istio_version_resolve() {'
+	'_istio_notready_notes() {'
 	'istio_version_recheck() {'
 	'istio_version_kv() {'
 	'istio_version_label() {'
@@ -216,6 +219,7 @@ EXTRACTED_PATTERNS=(
 	'_config_run_key() {'
 	'_config_run_ids() {'
 	'_config_sq() {'
+	'_config_canon_dir() {'
 	'_config_distinct() {'
 	'_config_join_mixed() {'
 	# batch B: scrape completeness and per-replica counters (fanout.sh)

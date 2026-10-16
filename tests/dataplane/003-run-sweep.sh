@@ -114,8 +114,8 @@ Exit codes:
   3  --on-unreachable fail stopped the sweep (the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
-     version changed during the sweep (read again at its end); the outcome is also in
-     sweep-outcome.txt and the markdown report
+     version or active revision changed during the sweep (read again at its end); the
+     outcome is also in sweep-outcome.txt and the markdown report
 EOF
 }
 

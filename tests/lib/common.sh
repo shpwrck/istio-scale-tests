@@ -235,43 +235,80 @@ _sweep_outcome_by() {
 	printf '%s\n' "$@" | sort | uniq -c | awk '{ printf "%s%s x%d", (NR > 1 ? ", " : ""), $2, $1 }'
 }
 
-# sweep_outcome_recorded <results_dir> <text|md|json>: what the sweep recorded in
-# <results_dir>/sweep-outcome.txt (sweep_outcome --record), for a report re-generated after
-# the sweep (X3): text and md print the exit and every PROBLEM, NOTE and STOP_REASON line
-# (nothing when the file is absent or records none); json prints {"exit":N,"run_id":"...",
-# "problems":[...],"notes":[...],"stop_reason":"..."}, or null without the file.
+# sweep_outcome_recorded <results_dir> <text|md|json|csv> [<run_id>]: what the sweep
+# recorded in <results_dir>/sweep-outcome.txt (sweep_outcome --record), for a report
+# re-generated after the sweep (X3). text and md name the record's run and exit, then its
+# failed cells (FAILED_BY, Y5) and every PROBLEM, NOTE and STOP_REASON line (nothing when
+# the file is absent or records none of them); csv prints them as `# SWEEP_OUTCOME_<KEY>=`
+# comment lines (Y9; nothing without the file); json prints {"exit":N,"run_id":"...",
+# "failed":N,"failed_by":"...","problems":[...],"notes":[...],"stop_reason":"..."}, or null
+# without the file. <run_id> is the report's run (default: the one run
+# config_check_multi_run counted, a sweep-* dir's id; none for a pooled report): a record
+# from another run is named as such, in every format and on stderr (Y9).
 # shellcheck disable=SC2329
 sweep_outcome_recorded() {
-	local f="${1}/sweep-outcome.txt" fmt="$2"
+	local f="${1}/sweep-outcome.txt" fmt="$2" want="${3:-}" rid other=""
 	if [[ ! -f "$f" ]]; then
 		[[ "$fmt" != json ]] || echo null
 		return 0
 	fi
-	awk -v fmt="$fmt" '
+	if [[ -z "$want" && "${MULTI_RUN_N:-0}" == 1 ]]; then
+		want="${MULTI_RUN_IDS:-}"
+		want="${want#sweep-}"
+	fi
+	case "$want" in mixed:* | unknown*) want="" ;; esac
+	rid="$(sed -n 's/^RUN_ID=//p' "$f" 2>/dev/null | head -n 1)"
+	if [[ -n "$want" && -n "$rid" && "$rid" != unknown && "$rid" != "$want" ]]; then
+		other="$want"
+		echo "warning: ${f} was recorded by run ${rid}, not by this report's run ${want}; the outcome it repeats may not describe these rows" >&2
+	fi
+	awk -v fmt="$fmt" -v other="$other" '
 		function jstr(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); gsub(/\t/, "\\t", v); return "\"" v "\"" }
 		/^EXIT=/ { ex = substr($0, 6) }
 		/^RUN_ID=/ { rid = substr($0, 8) }
+		/^UNIT=/ { unit = substr($0, 6) }
+		/^TOTAL=/ { total = substr($0, 7) }
+		/^FAILED=/ { failed = substr($0, 8) }
+		/^FAILED_BY=/ { fby = substr($0, 11) }
 		/^STOP_REASON=/ { stop = substr($0, 13) }
 		/^PROBLEM=/ { pr[++np] = substr($0, 9) }
 		/^NOTE=/ { nt[++nn] = substr($0, 6) }
 		END {
+			if (rid == "") rid = "unknown"
+			if (unit == "") unit = "cells"
+			nf = (failed ~ /^[0-9]+$/) ? failed + 0 : 0
+			fl = sprintf("%d of %s %s failed: %s", nf, total, unit, fby)
+			ol = "the record is from run " rid ", not from the run this report reads (" other ")"
 			if (fmt == "json") {
-				printf "{\"exit\":%s,\"run_id\":%s,\"problems\":[", (ex ~ /^[0-9]+$/ ? ex : "null"), jstr(rid)
+				printf "{\"exit\":%s,\"run_id\":%s,\"failed\":%s,\"failed_by\":%s,\"problems\":[", (ex ~ /^[0-9]+$/ ? ex : "null"), jstr(rid), (failed ~ /^[0-9]+$/ ? failed : "null"), jstr(fby)
 				for (i = 1; i <= np; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(pr[i])
 				printf "],\"notes\":["
 				for (i = 1; i <= nn; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(nt[i])
-				printf "],\"stop_reason\":%s}\n", jstr(stop)
+				printf "],\"stop_reason\":%s%s}\n", jstr(stop), (other == "" ? "" : ",\"other_run\":" jstr(other))
 				exit
 			}
-			if (np + nn == 0 && stop == "") exit
+			if (fmt == "csv") {
+				printf "# SWEEP_OUTCOME_RUN_ID=%s\n# SWEEP_OUTCOME_EXIT=%s\n# SWEEP_OUTCOME_FAILED=%d\n", rid, ex, nf
+				if (fby != "") printf "# SWEEP_OUTCOME_FAILED_BY=%s\n", fby
+				for (i = 1; i <= np; i++) printf "# SWEEP_OUTCOME_PROBLEM=%s\n", pr[i]
+				for (i = 1; i <= nn; i++) printf "# SWEEP_OUTCOME_NOTE=%s\n", nt[i]
+				if (stop != "") printf "# SWEEP_OUTCOME_STOP_REASON=%s\n", stop
+				if (other != "") printf "# WARNING: sweep-outcome.txt: %s\n", ol
+				exit
+			}
+			if (np + nn + nf == 0 && stop == "" && other == "") exit
 			if (fmt == "md") {
-				printf "> **Sweep outcome** (recorded in `sweep-outcome.txt`, exit %s):\n", ex
+				printf "> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `%s`, exit %s):\n", rid, ex
+				if (other != "") printf "> - warning: %s\n", ol
+				if (nf > 0) printf "> - error: %s\n", fl
 				for (i = 1; i <= np; i++) printf "> - error: %s\n", pr[i]
 				for (i = 1; i <= nn; i++) printf "> - warning: %s\n", nt[i]
 				if (stop != "") printf "> - stopped early: %s\n", stop
 				printf "\n"
 			} else {
-				printf "SWEEP OUTCOME (recorded in sweep-outcome.txt, exit %s):\n", ex
+				printf "SWEEP OUTCOME (recorded in sweep-outcome.txt by run %s, exit %s):\n", rid, ex
+				if (other != "") printf "  warning: %s\n", ol
+				if (nf > 0) printf "  error: %s\n", fl
 				for (i = 1; i <= np; i++) printf "  error: %s\n", pr[i]
 				for (i = 1; i <= nn; i++) printf "  warning: %s\n", nt[i]
 				if (stop != "") printf "  stopped early: %s\n", stop
@@ -300,7 +337,8 @@ sweep_outcome_recorded() {
 #                    under it); printed, recorded and counted like a failed cell
 #   --note <msg>     a caveat; printed and recorded, not a failure
 #   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt (C3), with RUN_ID
-#                    (--run-id) and HARNESS_SHA (harness_sha, when preamble.sh is sourced)
+#                    (--run-id) and HARNESS_SHA (the sweep's HARNESS_SHA, as its TSVs
+#                    record it, else harness_sha when preamble.sh is sourced)
 #   --run-id <id>    the sweep's RUN_ID, for the record
 #   --md <file>      also append it to that markdown report, as a "Sweep outcome" section;
 #                    may be given more than once (the summary and the scale envelope, R1).
@@ -366,7 +404,7 @@ sweep_outcome() {
 			echo "# Sweep outcome (tests/lib/common.sh sweep_outcome)"
 			echo "# DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 			echo "RUN_ID=${run_id_r:-unknown}"
-			echo "HARNESS_SHA=$(declare -F harness_sha >/dev/null && harness_sha || echo unknown)"
+			echo "HARNESS_SHA=${HARNESS_SHA:-$(declare -F harness_sha >/dev/null && harness_sha || echo unknown)}"
 			echo "EXIT=${rc}"
 			echo "STOPPED=$([[ -n "$stop_rc" ]] && echo 1 || echo 0)"
 			echo "STOP_REASON=${stop_why}"

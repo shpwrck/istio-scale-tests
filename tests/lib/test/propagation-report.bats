@@ -136,6 +136,8 @@ fixture() {
 		echo "# ISTIO_VERSION_PIN=v1.30.5"
 		echo "# ISTIO_VERSION_SOURCE=live"
 		echo "# ISTIO_VERSION_BY_CONTEXT=src=v1.30.5,rmt=v1.30.5"
+		echo "# ISTIO_NOTREADY_AT_START=rmt=IstiodNotReady"
+		echo "# ISTIO_READY_WAITED_SEC=60"
 		echo "$HDR"
 		prow 2 1 1000 100
 	} > "${RES}/sweep-new/endpoint-rnew.tsv"
@@ -144,11 +146,18 @@ fixture() {
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "mixed:live,unknown" ]
 	[ "$(jq -r '.metadata.ISTIO_VERSION_PIN' <<<"$output")" = "mixed:v1.30.5,unknown" ]
 	[[ "$stderr" == *"input TSVs disagree on sweep-level ISTIO_VERSION_SOURCE (live,unknown)"* ]]
+	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "mixed:rmt=IstiodNotReady,unknown" ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format markdown
 	assert_output --partial "mixed:live,unknown"
-	# The new run alone reads live.
+	# The new run alone reads live, and carries R2 in every format.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
+	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC]' <<<"$output")" = '["rmt=IstiodNotReady","60"]' ]
+	for fmt in text csv markdown; do
+		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format "$fmt"
+		assert_output --partial "ISTIO_NOTREADY_AT_START"
+		assert_output --partial "rmt=IstiodNotReady"
+	done
 }
 
 # p1rows <run_id> <mesh> <iterations> <remotes...>: an OK row per (iteration, remote); P1

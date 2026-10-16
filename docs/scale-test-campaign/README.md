@@ -30,9 +30,11 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    from `ISTIO_VERSION` (`config/versions.env`), when members differ, or when one cannot be read;
    gateway-api, a read-only check, records it and goes on. Fix the pin (or the mesh);
    `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A member whose istiod
-   or IstioCNI is not ready is read again for up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s), then
-   recorded with a warning. A sweep reads it again at the end and exits 4 when it changed during
-   the sweep. Every sweep ends by writing `sweep-outcome.txt` to its results dir (exit code,
+   or IstioCNI is not ready, or whose istiod is rolling out, is read again for up to
+   `ISTIO_VERSION_READY_WAIT_SEC` (60 s), then recorded with a warning (a rollout still going
+   on reads as unknown); the members still not ready are in `ISTIO_NOTREADY_AT_START` in every
+   TSV preamble and report. A sweep reads it again at the end and exits 4 when the version or the
+   active revision changed during the sweep. Every sweep ends by writing `sweep-outcome.txt` to its results dir (exit code,
    failed cells, the version recheck), and its reports repeat those errors and warnings; a sweep
    dir without that file is a sweep that died before its end.
 
@@ -141,7 +143,7 @@ tests/churn-dataplane/004-run-sweep.sh --contexts "$CONTEXTS" --mesh-sizes "$MES
 Between suites, confirm the previous suite's `*-test` namespaces are gone and repeat Stage 0.
 Check each sweep's exit code: `4` means it finished and wrote its reports but some cells
 failed (the last stderr line says how many, by reason; their placeholder rows are in the
-report) or the Istio version changed during the sweep; `3` a reachability stop; `1` it
+report) or the Istio version or active revision changed during the sweep; `3` a reachability stop; `1` it
 stopped. `sweep-outcome.txt` in each sweep dir keeps the outcome. Each suite README lists
 its codes.
 

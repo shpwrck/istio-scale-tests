@@ -98,7 +98,8 @@ and `sweep-charts.md` from `005` (`--tsv` is still accepted and does nothing).
 Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition,
 or an unexpected error); `4` it finished and wrote its reports, but some mesh sizes
 failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder
-row), or the Istio version changed during the sweep (read again before the reports). The
+row), or the Istio version or active revision changed during the sweep (read again before
+the reports). The
 last line on stderr says how many, by reason; `sweep-outcome.txt` and the end of
 `sweep-summary.md` keep the outcome. Rows a probe wrote with a non-OK status are
 measurements, not failures: the report counts them in `n_total`.
@@ -160,7 +161,10 @@ Row `status`: `OK`, `TIMEOUT_P1|P2|P3|ALL`, `RESTART` (istiod restarted mid-iter
 `DRAIN_TIMEOUT` (endpoint did not drain before the next iteration), `SCRAPE_INCOMPLETE`
 (a pod's `/metrics` was unreachable, or baseline scrape skew exceeded `FANOUT_MAX_SKEW_MS`),
 and the sweep placeholders `SETUP_FAILED` / `PROBE_FAILED`. The report counts every row in
-`n_total` but aggregates only `OK` rows with `restarted=0` (`n_valid`). P2 also drops rows
+`n_total` but aggregates only `OK` rows with `restarted=0` (`n_valid`). P1 and its
+`conv_p50`/`conv_p99` are measured on the source once per iteration, so they take one sample
+per iteration (its first counting row): their `n_total` and `n_valid` count iterations, not
+rows. P2 also drops rows
 with `p2_dirty=1` (EDS pushed but P3 never went healthy on that remote). Averages are
 rounded to the nearest ms. The `P1 conv_p50`/`conv_p99` rows are histogram bucket
 bounds: text and markdown show bucket ranges with no average (`-`), so read `max` (the

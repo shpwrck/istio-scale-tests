@@ -99,6 +99,12 @@ The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv an
 json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
 A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
 
+When the results dir holds sweep-outcome.txt (003 writes it at the end of a sweep),
+every format repeats it, with the run that recorded it: the failed cells by reason, its
+problems (the Istio version or active revision changed under the sweep) and notes
+(members not ready at its start or end); a sweep dir without it is a sweep that died
+before its end.
+
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
   DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
@@ -670,6 +676,7 @@ report_text() {
 report_csv() {
 	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
 	config_multi_run_csv
+	sweep_outcome_recorded "$RESULTS_DIR" csv
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
 	local c m q _t _v verdict reason _rest

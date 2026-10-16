@@ -247,6 +247,10 @@ prop_row() {
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "${d}/sweep-metadata.txt"
 	grep -q '^# ISTIO_VERSION_PIN=.' "${d}/sweep-metadata.txt"
 	grep -qx '# ISTIO_VERSION_BY_CONTEXT=ci-a=unknown' "${d}/sweep-metadata.txt"
+	# R2: nothing was not ready (it could not be read at all), so nobody was waited for.
+	grep -qx '# ISTIO_NOTREADY_AT_START=none' "${d}/sweep-metadata.txt"
+	grep -qx '# ISTIO_READY_WAITED_SEC=0' "${d}/sweep-metadata.txt"
+	grep -qx -- '- Start-of-run readiness: ISTIO_NOTREADY_AT_START=none, ISTIO_READY_WAITED_SEC=0' "${d}/sweep-comparison.md"
 	# The probe inherited the sweep's reading: the Istio CR is read at the start and again
 	# at the end (A6), each a read and its one retry; never by the probe.
 	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 4 ]

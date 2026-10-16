@@ -139,8 +139,8 @@ A failed setup or probe becomes a placeholder row and the sweep moves on.
 
 Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag
 or precondition, or an unexpected error); `4` it finished and wrote its reports, but some
-cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio version changed
-during the sweep (read again before the reports). The last line on stderr says how many,
+cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio version or
+active revision changed during the sweep (read again before the reports). The last line on stderr says how many,
 by reason; `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep
 the outcome. Rows a probe wrote with a non-OK status (`TIMEOUT_*`,
 `MISSING_VALUE`, ...) are measurements, not failed cells: the report counts them in

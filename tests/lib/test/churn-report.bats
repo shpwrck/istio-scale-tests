@@ -38,23 +38,28 @@ tsv() {
 
 # --- 004: run provenance -------------------------------------------------------
 
-@test "004: harness_sha and istio_version come from the TSV preamble, in every format" {
-	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" <<-EOF
+@test "004: harness_sha, istio_version and the R2 start keys come from the TSV preamble, in every format" {
+	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" \
+		"ISTIO_NOTREADY_AT_START=ctx-b=IstiodNotReady" "ISTIO_READY_WAITED_SEC=60" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
 	EOF
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
 	assert_success
 	assert_output --partial 'harness_sha: "feed123-test"'
 	assert_output --partial 'istio_version: "1.99.0"'
+	assert_output --partial 'istio_notready_at_start: "ctx-b=IstiodNotReady"'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
 	assert_output --partial 'harness_sha: "feed123-test"'
 	assert_output --partial 'istio_version: "1.99.0"'
+	assert_output --partial 'istio_ready_waited_sec: "60"'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# HARNESS_SHA=feed123-test"
 	assert_line "# ISTIO_VERSION=1.99.0"
+	assert_line "# ISTIO_NOTREADY_AT_START=ctx-b=IstiodNotReady"
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_output --partial "# harness_sha (recorded by 002): feed123-test"
 	assert_output --partial "# istio_version (recorded by 002): 1.99.0"
+	assert_output --partial "# istio_notready_at_start: ctx-b=IstiodNotReady  istio_ready_waited_sec: 60"
 	[ -z "$stderr" ]
 }
 
@@ -218,6 +223,9 @@ STUB
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"
+	# R2: every member was ready at the start (the stub answers Healthy).
+	grep -qx "# ISTIO_NOTREADY_AT_START=none" "$f"
+	grep -qx "# ISTIO_READY_WAITED_SEC=0" "$f"
 	head -1 "$f" | grep -Eq '(\+00:00|Z)$'
 	grep -Eq '^\| Date \(UTC\) \| .*(\+00:00|Z) \|$' "$RES"/churn-*.md
 	grep -q '^| Harness SHA | ' "$RES"/churn-*.md

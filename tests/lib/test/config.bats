@@ -724,17 +724,20 @@ with_run_config() {
 	# is not known, so it can never be resumed, whatever the mesh answers now (not even
 	# unknown again): --resume refuses before any change, appends nothing and keeps the
 	# interrupted run's sweep-outcome.txt, under either ISTIO_VERSION_CHECK policy (R4, A5, X6).
+	# Y6: known from the TSV alone, so it stops before the live read.
 	grep -qx '# ISTIO_VERSION=unknown' "$d"/controlplane-*.tsv
 	[ -f "$d/sweep-outcome.txt" ]
 	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 1
-	assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read when it started, so the version its rows ran on is not known and it cannot be resumed. Fix access to the member"
+	assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read or confirmed when it started (unreadable, its Istio CR not settled, or an istiod rollout in progress), so the version its rows ran on is not known and it cannot be resumed. Start a new sweep"
+	refute_output --partial "Istio version:"
 	[ -f "$d/sweep-outcome.txt" ]
 	local bin="${BATS_TEST_TMPDIR}/bin" tsv before policy
 	mkdir -p "$bin"
 	printf '#!/bin/sh
+echo "$*" >> "%s/kubectl.log"
 case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
-' > "${bin}/kubectl"
+' "$BATS_TEST_TMPDIR" > "${bin}/kubectl"
 	chmod +x "${bin}/kubectl"
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
 	before="$(cat "$tsv")"
@@ -742,11 +745,12 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 		ISTIO_VERSION_CHECK="$policy" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" \
 			--contexts ci-a --mesh-sizes 1 --service-counts 5
 		assert_failure 1
-		assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read when it started"
+		assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read or confirmed when it started"
 		refute_output --partial "so its new rows would be credited to"
 		refute_output --partial "Capacity plan check"
 		[ "$(cat "$tsv")" = "$before" ]
 	done
+	[ "$(cat "${BATS_TEST_TMPDIR}/kubectl.log" 2>/dev/null | grep -c 'get istios.sailoperator.io' || true)" = 0 ]
 	# A sweep that recorded a version, resumed while a member cannot be read (warn lets the
 	# read go on): fix access and run the same --resume again, not "start a new sweep" (X6).
 	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
@@ -757,5 +761,13 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	assert_output --partial "then run the same --resume again."
 	refute_output --partial "Start a new sweep"
 	[ "$(cat "$tsv")" = "$before" ]
+	[ -f "$d/sweep-outcome.txt" ]
+	# Y10: a resume that gets past the version check keeps the interrupted run's record as
+	# sweep-outcome.prev.txt (reports read only sweep-outcome.txt); its own end writes a new one.
+	cp "$d/sweep-outcome.txt" "${BATS_TEST_TMPDIR}/old-outcome.txt"
+	ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
+		run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	refute_output --partial "--resume: this sweep recorded"
+	cmp -s "$d/sweep-outcome.prev.txt" "${BATS_TEST_TMPDIR}/old-outcome.txt"
 	[ -f "$d/sweep-outcome.txt" ]
 }
