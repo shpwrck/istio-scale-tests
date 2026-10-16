@@ -67,6 +67,10 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # Argo CD shards = ceil((spokes + 1) / argocd_clusters_per_shard).
 # argocd_clusters_per_shard = 50
 # argocd_max_shards         = 20
+# After the cluster secrets exist the apply restarts the controller pods once (so every cluster
+# gets a shard) and fails if an Application still has no sync/health status after 15 min.
+# argocd_restart_controller_after_cluster_secrets = true
+# argocd_app_status_timeout_sec                   = 900   # 0 disables the check
 
 # --- Channels (defaults track the tested versions) ---
 # acm_channel             = "release-2.17"

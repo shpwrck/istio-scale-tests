@@ -199,6 +199,23 @@ variable "argocd_clusters_per_shard" {
   }
 }
 
+variable "argocd_restart_controller_after_cluster_secrets" {
+  type        = bool
+  default     = true
+  description = "After the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh)."
+}
+
+variable "argocd_app_status_timeout_sec" {
+  type        = number
+  default     = 900
+  description = "Post-apply check: fail when an Argo CD Application still has an empty sync or health status after this many seconds (no controller shard owns its destination cluster). 0 disables the check."
+
+  validation {
+    condition     = var.argocd_app_status_timeout_sec == 0 || var.argocd_app_status_timeout_sec >= 600
+    error_message = "argocd_app_status_timeout_sec must be 0 (disabled) or at least 600: the member Applications can take several minutes to get their first status."
+  }
+}
+
 variable "argocd_max_shards" {
   type        = number
   default     = 20

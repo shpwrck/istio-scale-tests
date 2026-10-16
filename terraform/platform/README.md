@@ -26,6 +26,14 @@ terraform apply platform.tfplan
 Then watch the rollout: `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`
 until every application is Synced/Healthy (about 15–20 minutes).
 
+Two steps guard Argo CD's controller sharding. Once every cluster secret exists, the apply waits for
+the GitOps operator's own dynamic-scaling restart of the application controller to settle, then
+restarts the controller pods once: a controller that starts while the secrets change can leave a
+cluster without a shard, and that cluster's Applications never get a status. At the end, the apply
+fails if an Application still has an empty sync or health status after
+`argocd_app_status_timeout_sec` (default 900; 0 disables), naming its destination cluster. The fix
+is the same restart: `oc -n openshift-gitops delete pod -l app.kubernetes.io/name=openshift-gitops-application-controller`.
+
 ## Existing clusters
 
 | Already installed on the hub | Set |
