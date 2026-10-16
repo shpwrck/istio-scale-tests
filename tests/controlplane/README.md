@@ -57,7 +57,7 @@ One TSV row per istiod pod, computed as deltas over a wall-clock window:
 
 | Column(s) | Source |
 |-----------|--------|
-| `istiod_cpu_m_delta`, `istiod_mem_mi` | `process_cpu_seconds_total`, `process_resident_memory_bytes`; peak of window average and 5 s samples |
+| `istiod_cpu_m_delta`, `istiod_mem_mi` | `process_cpu_seconds_total`, `process_resident_memory_bytes`; peak of window average and 5 s samples (the report labels them `cpu_peak (m)` and `rss_peak (Mi)`; `cpu_avg (m)` there is `istiod_cpu_s_delta` / the window) |
 | `convergence_*`, `queue_*` (p50/p99) | `pilot_proxy_convergence_time`, `pilot_proxy_queue_time` histogram deltas |
 | `xds_pushes_*` (total, rate, per type) | `pilot_xds_pushes` |
 | `k8s_events_*` | `pilot_k8s_cfg_events` |
@@ -71,10 +71,12 @@ One TSV row per istiod pod, computed as deltas over a wall-clock window:
 | `istiod_virt_services` | `pilot_virt_services` at the final scrape: every VirtualService istiod knows, so a vsdr row should show at least `vsdr_services` |
 | `push_time_avg_ms`, `pushcontext_init_avg_ms` | Average per observation over the window: Δsum ÷ Δcount of `pilot_xds_push_time` and `pilot_pushcontext_init_seconds`. `N/A` with no observation or after a restart |
 | `sidecar_clusters_avg`, `sidecar_cds_bytes_avg`, `sidecar_rds_bytes_avg` | From the same sampled `/config_dump`s: dynamic CDS clusters, and the compact JSON size of the CDS and RDS sections |
-| `services_per_namespace`, `workload_mode`, `measurement_pods`, `outside_namespaces`, `outside_discovery`, `window_kind` | What the window measured (growth mode; a legacy row reads `0`, `pods`, services x replicas, `0`, `none`, `deploy`): `window_kind` is `deploy`, `grow`, `probe` or `outside` |
+| `services_per_namespace`, `workload_mode`, `measurement_pods`, `outside_namespaces`, `outside_discovery`, `window_kind` | What the window measured (growth mode; a legacy row reads `0`, `pods`, services x replicas, `0`, `none`, `deploy`): `window_kind` is `deploy`, `grow`, `probe`, `outside`, `traffic` (a legacy sweep with `--vsdr-apply split`) or `retire` (a `RETIRE_FAILED` status row) |
 | `istiod_services` | `pilot_services` at the final scrape (every Service istiod knows; identical on every replica, never summed) |
 | `istiod_cpu_s_delta` | Δ`process_cpu_seconds_total` over the window: the window's istiod CPU-seconds (`N/A` after a restart) |
 | `sidecar_mem_mi_avg`, `gateway_clusters_max`, `gateway_mem_mi_max`, `root_cert_configmaps` | Growth mode only (`N/A` otherwise): Envoy `server.memory_allocated` of the sampled pods; the largest ingress/east-west gateway's `cluster_manager.active_clusters` and `server.memory_allocated`; `istio-ca-root-cert` ConfigMaps on the context |
+| `gateway_physical_mi_max`, `gateway_ws_mi_max` | Growth mode only (schema 66): the largest gateway's Envoy `server.memory_physical_size` (the tcmalloc heap including freed pages it kept) and istio-proxy container working set (`kubectl top`; `N/A` without the metrics API). The working set is what the OOM killer acts on; on ROSA it ran 1.2-2.9x `gateway_mem_mi_max` after config bursts |
+| `leftover_test_namespaces` | Growth mode only (schema 66): `controlplane-test` namespaces on the context that are not this series' (earlier series or runs, discovered or not). They stay in istiod's informers, so its absolute heap and RSS are inflated; the report warns above `CONTROLPLANE_LEFTOVER_NS_WARN` (100) |
 
 In a sweep, `003` runs `002 --phase baseline` before deploying, `001` deploys and settles,
 then `002 --phase final` scrapes again, so the window covers the deploy push storm. Run
@@ -216,6 +218,15 @@ cost, and per-proxy CDS clusters next to the expected extra clusters (VS+DR serv
 subsets, one CDS cluster per subset). It warns when istiod knows fewer VirtualServices
 than were configured. The vsdr cell runs right after its none cell and istiod RSS does not
 shrink after GC, so compare heap in use, or run again with `--traffic-configs vsdr,none`.
+
+`--vsdr-apply split` (`CONTROLPLANE_VSDR_APPLY`) separates the VS/DR cost from pod
+startup: `001 --parts workloads` applies everything but the VirtualServices and
+DestinationRules and waits for Ready before the baseline, then the window covers only
+`001 --parts traffic` (rows `window_kind traffic`; a `none` cell's window is then idle over
+the same workloads). With the default `together`, the subset pods start while the VS/DR
+already exist, which can push the convergence p99 into a higher bucket; on ROSA the vsdr
+cells at 150-250 Services read 10-20 s (BACKLOG 9.11). Compare the two modes at the same
+size to tell a harness artifact from a real cost.
 Run `005` before switching `--traffic-config` by hand with `001`: an in-place re-apply
 leaves the other mode's Deployments running.
 
@@ -280,25 +291,56 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   window and a probe per scoping, and the report checks the istiod Service count against
   both expectations (PL31).
 - **Memory stop guard.** Before each step, scoping switch and outside phase, `003` samples
-  istiod heap (`go_memstats_heap_inuse_bytes` on every replica) and every gateway's Envoy
-  memory on each guard context: `--contexts` plus `SETUP_CONTEXTS` (or
-  `CONTROLPLANE_MEM_GUARD_CONTEXTS`), since every member ingests the Services through remote
-  discovery and gateways keep `*/*` (PL38). It projects `base + (current - base) x ratio`
-  from the series' starting baseline (`ratio²` for `wide`, from the last wide measurement);
-  the first step and changes that add no Services use the current value. A cell projected
-  above `CONTROLPLANE_MEM_STOP_PCT` (70 %) of a limit becomes a `SKIPPED_MEM_GUARD` row, and
-  a skipped grow ends the series. `mem-guard-<RUN_ID>.tsv` records every decision; prove
-  the guard fires with `--mem-stop-pct 5` (PL33).
+  every guard context: `--contexts` plus `SETUP_CONTEXTS` (or `CONTROLPLANE_MEM_GUARD_CONTEXTS`),
+  since every member ingests the Services through remote discovery and gateways keep `*/*`
+  (PL38). A live sweep also adds every member the measured contexts' Istio remote secrets
+  name (context names equal cluster names in the repo's kubeconfigs) and stops when a
+  member has no kube context of that name; with `--mem-guard-contexts` it only warns.
+  - What it compares with the limit is what the OOM killer acts on: istiod RSS
+    (`process_resident_memory_bytes`, max over replicas, per-replica limit) and each
+    gateway's istio-proxy container working set (`kubectl top`; else Envoy
+    `server.memory_physical_size`, else `server.memory_allocated`). On ROSA the east-west
+    gateway's working set ran 1.2-2.9x its allocated memory after config bursts.
+  - Two projections, the larger counts. Relative: `base + (current - base) x ratio` from
+    the series' starting baseline (`ratio²` for `wide`, from the last wide measurement);
+    ratio 1 for the first step and changes that add no Services. Absolute, for gateways:
+    `(CONTROLPLANE_GW_MI_INTERCEPT + Mi per 1000 Services x Services after the step / 1000)
+    x burst factor`, with the Services from istiod's `pilot_services` plus what the step adds
+    (east-west 145 Mi and x2.0, ingress 91 Mi and x1.2; `CONTROLPLANE_{EWGW,INGW}_*`), plus,
+    for a working-set reading, the container's memory outside Envoy's heap (working set
+    minus `server.memory_physical_size`: pilot-agent, the binary, page cache). The
+    absolute projection guards a series' first step (a 0 -> 4000-Service step left a 1.1 GiB
+    working set under a 1Gi limit on ROSA) and a base inflated by memory Envoy kept from an
+    earlier series. When a gateway's Envoy allocated memory at the series start is far above
+    the model for the Services the mesh has (x1.5 + 100 Mi), a WARNING says to restart the
+    gateways first.
+  - A cell projected above `CONTROLPLANE_MEM_STOP_PCT` (70 %) of a limit becomes a
+    `SKIPPED_MEM_GUARD` row, and a skipped grow ends the series. `mem-guard-<RUN_ID>.tsv`
+    (`GUARD_SCHEMA=2`) records every decision with both projections; prove the guard fires
+    with `--mem-stop-pct 5` (PL33).
+- **Leftover test namespaces.** A live growth sweep counts the `controlplane-test`
+  namespaces on the measured contexts first: one that is still discovered stops it (its
+  Services would be in every cell); undiscovered ones above `CONTROLPLANE_LEFTOVER_NS_WARN`
+  (100) warn, because istiod's informers keep them and its absolute heap and RSS read high
+  (deltas within a series stay valid). Each series start is logged
+  (`ns-lifecycle-<RUN_ID>.tsv` action `leftover-check`), every row carries
+  `leftover_test_namespaces`, and the report warns per run. Delete leftovers between sweeps
+  for absolute numbers.
 - **End of a series** (`--series-retire`). `undiscover` (default) deletes the measurement
   pods and the series' Sidecars and drops `istio-discovery` and `istio.io/rev`, keeping
   the namespaces (`005 --series ID --undiscover --no-delete`); `delete` also queues the
-  namespace deletes without waiting (lab only); `keep` leaves the series discovered.
-  OpenShift deletes namespaces at roughly 0.3-1 per second, so delete them later with
-  `005 [--series ID] --timeout <about 1 s per namespace>` (it prints the rate), never inside
-  a measurement window.
+  namespace deletes without waiting (lab only); `keep` leaves the series discovered (one
+  series per sweep only). `undiscover` and `delete` are retried
+  (`CONTROLPLANE_RETIRE_ATTEMPTS`, 3) and verified: if a namespace of the series is still
+  discovered afterwards, the sweep records `RETIRE_FAILED`, runs no later series and exits 1
+  after its report, which warns in every format. `--growth fresh` verifies each cell's
+  delete the same way. OpenShift deletes namespaces at roughly 0.3-1 per second, so delete
+  them later with `005 [--series ID] --timeout <about 1 s per namespace>` (it prints the
+  rate), never inside a measurement window.
 - **Rows and failures.** Every step is wrapped (PL32): `GROW_FAILED` (ends the series; its
   remaining cells read `SKIPPED_SERIES_STOPPED`), `SWITCH_FAILED`, `SETUP_FAILED`,
-  `PROBE_FAILED`, `SKIPPED_MEM_GUARD`. `--resume` is not supported for growth series.
+  `PROBE_FAILED`, `SKIPPED_MEM_GUARD`, `RETIRE_FAILED` (window `retire`; stops the sweep).
+  `--resume` is not supported for growth series.
 - **Plan.** `--dry-run` prints each series' steps and cells, the objects per step, the peak
   and the later deletion time (`CONTROLPLANE_NS_DELETE_SEC_PER_NS`); the matrix cap
   (`CONTROLPLANE_MAX_MATRIX`) counts growth cells.
@@ -319,11 +361,11 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   The "Namespace scaling" section (all four formats) fits each series x
   scoping x window against N: slope per 100 namespaces, intercept, R², n and the log-log
   exponent (1 linear, 2 quadratic), with the raw points, for istiod heap and RSS, Services,
-  CPU-seconds, per-proxy config and Envoy memory, gateway clusters and memory, pushes,
-  pushes per proxy (per istiod replica), push KB, push time, PushContext init, convergence
+  CPU-seconds, per-proxy config (KiB) and Envoy memory, gateway clusters and memory (allocated, physical, working set), pushes,
+  pushes per proxy (per istiod replica), push KiB, push time, PushContext init, convergence
   p99 and root-cert ConfigMaps. A grow window adds N - N_prev namespaces, so its window
   deltas are fitted per namespace added (`onboard_cpu_s_per_ns`, `onboard_pushes_per_ns`,
-  `onboard_pushes_per_proxy_per_ns`, `onboard_push_kb_per_ns`; N_prev is the previous grow
+  `onboard_pushes_per_proxy_per_ns`, `onboard_push_kib_per_ns`; N_prev is the previous grow
   step of the same series, valid or not), never raw. The first grow window of a series (from 0 namespaces)
   stays out of every grow fit of a window measurement (the `onboard_*` deltas, push time,
   PushContext init, convergence p99): it also creates and waits for the M measurement pods
@@ -347,13 +389,14 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
 
 Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID>/`):
 
-- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=63`,
+- `controlplane-<RUN_ID>.tsv`: `# KEY=value` provenance preamble (`CONTROLPLANE_SCHEMA=66`,
   `PROXY_CHECK_TOLERANCE_PCT`, `PROXY_CHECK_MIN_DIFF`, `TRAFFIC_CONFIG`, `VSDR_EVERY`,
-  `VSDR_SUBSETS`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`, the namespace-scaling keys
+  `VSDR_SUBSETS`, `VSDR_APPLY`, `RUN_CONFIG`, `RUN_CONFIG_SHA256`, the namespace-scaling keys
   `SERVICES_PER_NAMESPACE`, `GROWTH_MODE`, `WORKLOAD_MODE`, `MEASUREMENT_PODS`,
   `OUTSIDE_*`, `PROBE_SETTLE_SEC`, `MEM_STOP_PCT`, `MEM_GUARD_CONTEXTS`, `SERIES_RETIRE`,
-  `DISCOVERY_LABEL`, ...), then the 63-column rows. The report also reads the 51- and
-  40-column files of earlier versions.
+  `DISCOVERY_LABEL`, `LEFTOVER_TEST_NAMESPACES`, `LEFTOVER_NS_WARN`, ...), then the
+  66-column rows. The report also reads the 63-, 51- and 40-column files of earlier
+  versions (their newer columns read N/A).
 - `ns-lifecycle-<RUN_ID>.tsv`, `mem-guard-<RUN_ID>.tsv` (growth sweeps): namespace
   lifecycle timings and the memory guard's decisions.
 - `run-config-<RUN_ID>.env` (sweep with `--config` only): a copy of the run config.

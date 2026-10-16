@@ -252,7 +252,7 @@ growth_preamble_lines() {
 		MEASUREMENT_PODS MEASUREMENT_PROXY_MEM_LIMIT
 		OUTSIDE_NAMESPACES OUTSIDE_MODES
 		PROBE_SETTLE_SEC MEM_STOP_PCT MEM_GUARD_CONTEXTS SERIES_RETIRE
-		DISCOVERY_LABEL
+		DISCOVERY_LABEL LEFTOVER_TEST_NAMESPACES LEFTOVER_NS_WARN
 	)
 	declare -A vals=()
 	local k kv
@@ -288,7 +288,7 @@ ns_lifecycle_init() {
 		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
 		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"
 		echo "# NS_DELETE_TIMEOUT_SEC=${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-unknown}"
-		echo "# NOTE=001 runs its applies and Sidecar deletes at kubectl -v=4. api_429_retried counts client-go's 'Got a Retry-After response' lines (a 429 with Retry-After that client-go retried; at the default verbosity it prints nothing); api_429_exhausted counts TooManyRequests errors that reached kubectl after its retries; client_throttle_waits counts client-side rate-limiter waits over 50 ms (kubectl 1.34 showed none on server-side apply). N/A = not measured (readiness waits and 005's deletes)."
+		echo "# NOTE=001 runs its applies and Sidecar deletes at kubectl -v=4. api_429_retried counts client-go's 'Got a Retry-After response' lines (a 429 with Retry-After that client-go retried; at the default verbosity it prints nothing); api_429_exhausted counts TooManyRequests errors that reached kubectl after its retries; client_throttle_waits counts client-side rate-limiter waits over 50 ms (kubectl 1.34 showed none on server-side apply). N/A = not measured (readiness waits and 005's deletes). leftover-check rows (003, one per context at each series start): namespaces = the controlplane-test namespaces present, objects = how many of them are still discovered, status LEFTOVER above CONTROLPLANE_LEFTOVER_NS_WARN."
 		printf '%s\n' "$NS_LIFECYCLE_HEADER"
 	} > "$file"
 }

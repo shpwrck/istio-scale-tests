@@ -76,24 +76,8 @@ env_parse_istiod_resources() {
 		printf '%s\n' "req_cpu_m=unknown req_mem_mi=unknown lim_cpu_m=unknown lim_mem_mi=unknown replicas=unknown"
 		return 0
 	fi
-	printf '%s' "$body" | jq -r '
-		def cpu_to_m($q):
-			if $q == null then null
-			else
-				(if ($q | type) != "string" then ($q | tostring) else $q end)
-				| if test("m$") then (rtrimstr("m") | tonumber)
-				  else (tonumber * 1000) end
-			end;
-		def mem_to_mi($q):
-			if $q == null then null
-			else
-				($q | tostring) as $s
-				| if   ($s | test("Ki$")) then (($s | rtrimstr("Ki") | tonumber) / 1024)
-				  elif ($s | test("Mi$")) then  ($s | rtrimstr("Mi") | tonumber)
-				  elif ($s | test("Gi$")) then (($s | rtrimstr("Gi") | tonumber) * 1024)
-				  elif ($s | test("Ti$")) then (($s | rtrimstr("Ti") | tonumber) * 1024 * 1024)
-				  else (($s | tonumber) / 1048576) end
-			end;
+	# CAP_JQ_QTY (capacity.sh): the shared cpu_to_m / mem_to_mi (decimal and binary suffixes).
+	printf '%s' "$body" | jq -r "${CAP_JQ_QTY}"'
 		def show($v): if $v == null then "unknown" else ($v | floor) end;
 		( [ .spec.template.spec.containers[]?
 		    | select(.name == "discovery" or .name == "istiod") ] | first ) as $c
@@ -427,7 +411,11 @@ render_scale_envelope() {
 		  else "ok=\($p.ok // "unknown") low=\($p.low // "unknown") high=\($p.high // "unknown") n/a=\($p.na // "unknown") excluded=\($p.excluded // "unknown") (tolerance \($p.tolerance_pct // "unknown")%, min diff \($p.min_diff // "unknown"))"
 		  end' 2>/dev/null)" || proxy_check="unknown"
 	[[ -n "$proxy_check" ]] || proxy_check="unknown"
-	istiod_cpu_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_pct_of_limit_max')"
+	# The window peak CPU vs the per-replica limit; the kubectl-top snapshot
+	# (istiod_cpu_pct_of_limit_max) is read once at a window's end and misses bursts.
+	local istiod_cpu_top_pct
+	istiod_cpu_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_peak_pct_of_limit_max')"
+	istiod_cpu_top_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_pct_of_limit_max')"
 	istiod_mem_pct="$(jq_get '.metadata.achieved_scale.istiod_mem_pct_of_limit_max')"
 	# P1-4: RSS-derived istiod mem headroom (% of per-replica mem limit). Always
 	# available from the /metrics scrape, so it surfaces OOM risk even when the
@@ -455,7 +443,7 @@ render_scale_envelope() {
 		  | [ $peak[] | select((.traffic_config // "none") == "none") ] as $peak_none
 		  | (if ($peak_none | length) > 0 then $peak_none else $peak end) | last
 		  end' 2>/dev/null || printf 'null')"
-	local peak_mesh peak_svc peak_reps peak_ns peak_scope peak_traffic
+	local peak_mesh peak_svc peak_reps peak_ns peak_scope peak_traffic peak_wmode peak_mpods
 	if [[ -n "$peak_json" && "$peak_json" != "null" ]]; then
 		peak_mesh="$(printf '%s' "$peak_json" | jq -r '.mesh_size // "unknown"')"
 		peak_svc="$(printf '%s' "$peak_json" | jq -r '.service_count // "unknown"')"
@@ -463,8 +451,11 @@ render_scale_envelope() {
 		peak_ns="$(printf '%s' "$peak_json" | jq -r '.namespace_count // "unknown"')"
 		peak_scope="$(printf '%s' "$peak_json" | jq -r '.sidecar_scoping // "unknown"')"
 		peak_traffic="$(printf '%s' "$peak_json" | jq -r '.traffic_config // "none"')"
+		peak_wmode="$(printf '%s' "$peak_json" | jq -r '.workload_mode // "pods"')"
+		peak_mpods="$(printf '%s' "$peak_json" | jq -r '.measurement_pods // "unknown"')"
 	else
 		peak_mesh="unknown"; peak_svc="unknown"; peak_reps="unknown"; peak_ns="unknown"; peak_scope="unknown"; peak_traffic="unknown"
+		peak_wmode="pods"; peak_mpods="unknown"
 	fi
 
 	# Live read-only snapshot: istiod resources (req/lim of the source context, the
@@ -515,6 +506,13 @@ render_scale_envelope() {
 	local total_svc total_eps
 	total_svc="$(awk -v n="$peak_mesh" -v s="$peak_svc" 'function num(x){return x~/^[0-9]+$/} BEGIN{ if(num(n)&&num(s)) print n*s; else print "unknown" }')"
 	total_eps="$(awk -v n="$peak_mesh" -v s="$peak_svc" -v r="$peak_reps" 'function num(x){return x~/^[0-9]+$/} BEGIN{ if(num(n)&&num(s)&&num(r)) print n*s*r; else print "unknown" }')"
+	# Config-only growth cells run Services without pods (plus M measurement pods), so
+	# N x S x R endpoints never existed.
+	local reps_label="$peak_reps"
+	if [[ "$peak_wmode" == config-only ]]; then
+		total_eps="N/A (config-only: Services without pods; ${peak_mpods} measurement pod(s) per cluster)"
+		reps_label="N/A (config-only)"
+	fi
 
 	# Verdict: C1 — read the single authoritative verdict the REPORT already computed
 	# (004 calls env_sla_verdict once with the env bands). Reading it back here removes a
@@ -537,7 +535,7 @@ render_scale_envelope() {
 | Clusters (multi-primary) | ${peak_mesh} | sweep peak \`mesh_size\` |
 | Services / cluster | ${peak_svc} | sweep peak \`service_count\` |
 | Namespaces / cluster | ${peak_ns} | sweep peak \`namespace_count\` |
-| Workload replicas / service | ${peak_reps} | sweep peak \`replicas\` |
+| Workload replicas / service | ${reps_label} | sweep peak \`replicas\` |
 | **Total services in mesh** | ${total_svc} | derived (N x S) |
 | **Total endpoints in mesh** | ${total_eps} | derived (N x S x R) |
 | **Connected proxies per cluster (measured peak)** | ${proxies_cluster_peak} | report achieved-scale \`connected_proxies_cluster_max\` (n_valid-gated) |
@@ -552,10 +550,11 @@ render_scale_envelope() {
 
 ### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
 
-| Resource | Provisioned (req / lim) | Measured peak (% of cross-replica limit) | Source |
+| Resource | Provisioned (req / lim, per replica) | Measured (% of limit) | Source |
 |---|---|---|---|
 | istiod replicas | ${replicas_label} | — | live \`deploy/istiod\` on every context |
-| istiod CPU | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_pct}% | report \`istiod_cpu_pct_of_limit_max\` |
+| **istiod CPU (window peak)** | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_pct}% | report \`istiod_cpu_peak_pct_of_limit_max\`: one replica's peak (the larger of a window's average and its busiest 5 s poll) / the per-replica limit |
+| istiod CPU (kubectl top at window end) | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_top_pct}% | report \`istiod_cpu_pct_of_limit_max\`: one snapshot per window, summed over the replicas / their summed limit; misses bursts |
 | istiod memory (kubectl top) | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_mem_pct}% | report \`istiod_mem_pct_of_limit_max\` |
 | **istiod memory (RSS — OOM headroom)** | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_rss_pct}% | report \`istiod_rss_pct_of_limit_max\` (\`process_resident_memory_bytes\`) |
 | Worker-node CPU | — | ${node_cpu_pct}% | report \`node_cpu_pct_max\` (\`kubectl top nodes\`) |

@@ -86,7 +86,7 @@ CHART="${CP}/chart"
 @test "growth_preamble_lines: every key, unknown when omitted, values overlaid" {
 	run growth_preamble_lines SERVICES_PER_NAMESPACE=2 GROWTH_MODE=in-place BOGUS=1
 	assert_success
-	[ "$(grep -c '^# [A-Z_]*=' <<<"$output")" -eq 12 ]
+	[ "$(grep -c '^# [A-Z_]*=' <<<"$output")" -eq 14 ]
 	assert_output --partial "# SERVICES_PER_NAMESPACE=2"
 	assert_output --partial "# GROWTH_MODE=in-place"
 	assert_output --partial "# MEM_GUARD_CONTEXTS=unknown"
@@ -142,9 +142,9 @@ ERR
 
 @test "growth_parse_envoy_stats / growth_istiod_heap_mi / growth_parse_gateway_pods" {
 	run growth_parse_envoy_stats <<<$'cluster_manager.active_clusters: 123\nserver.memory_allocated: 52428800'
-	assert_output "mem_mi=50 clusters=123"
+	assert_output "mem_mi=50 clusters=123 physical_mi=unknown"
 	run growth_parse_envoy_stats <<<""
-	assert_output "mem_mi=unknown clusters=unknown"
+	assert_output "mem_mi=unknown clusters=unknown physical_mi=unknown"
 	printf 'go_memstats_heap_inuse_bytes 104857600\n' > "${BATS_TEST_TMPDIR}/m"
 	[ "$(growth_istiod_heap_mi "${BATS_TEST_TMPDIR}/m")" = 100 ]
 	[ "$(growth_istiod_heap_mi "${BATS_TEST_TMPDIR}/missing")" = unknown ]
@@ -152,7 +152,7 @@ ERR
 		{"metadata":{"name":"gw-a"},"status":{"phase":"Running"},"spec":{"containers":[{"name":"istio-proxy","resources":{"limits":{"memory":"1Gi"}}}]}},
 		{"metadata":{"name":"gw-b"},"status":{"phase":"Pending"},"spec":{"containers":[{"name":"istio-proxy"}]}},
 		{"metadata":{"name":"gw-c"},"status":{"phase":"Running"},"spec":{"containers":[{"name":"istio-proxy"}]}}]}'
-	assert_output $'gw-a\t1024\ngw-c\tunknown'
+	assert_output $'gw-a\t1024\tunknown\ngw-c\tunknown\tunknown'
 }
 
 @test "config: the growth keys, plural CSV ones included (PL7), are run-config keys" {
@@ -446,4 +446,133 @@ kinds() {
 	assert_success
 	assert_output --partial "delete namespace controlplane-test --ignore-not-found=true --wait=false"
 	assert_output --partial "wait up to 300s for those namespaces to disappear"
+}
+
+# ---------------------------------------------------------------------------
+# ROSA window fixes (BACKLOG 9.3-9.6, 9.10, 9.11)
+# ---------------------------------------------------------------------------
+
+@test "mem_guard_project_abs: (intercept + per-1000 x Services) x burst factor" {
+	# 4000 Services on an east-west gateway: (10 + 145 x 4) x 2.0 = 1180 Mi, above 70% of 1Gi
+	# (the X1 first step that the relative projection, ratio 1, let through).
+	[ "$(mem_guard_project_abs 4000 145 10 2.0)" = 1180 ]
+	[ "$(mem_guard_verdict 1180 1024 70)" = stop ]
+	[ "$(mem_guard_project_abs 6000 91 10 1.2)" = 667 ]
+	[ "$(mem_guard_project_abs N/A 145 10 2)" = unknown ]
+	[ "$(mem_guard_project_abs 100 145 10 x)" = unknown ]
+}
+
+@test "growth_parse_envoy_stats: physical heap; growth_parse_top_containers: istio-proxy working set" {
+	run growth_parse_envoy_stats <<<$'server.memory_allocated: 629145600\nserver.memory_physical_size: 1153433600\ncluster_manager.active_clusters: 8035'
+	assert_output "mem_mi=600 clusters=8035 physical_mi=1100"
+	run growth_parse_top_containers <<<$'gw-a   istio-proxy   12m   1075Mi\ngw-a   other   1m   5Mi\ngw-b   istio-proxy   3m   1Gi\ngw-c   istio-proxy   1m   weird'
+	assert_output $'gw-a\t1075\ngw-b\t1024'
+	run growth_parse_gateway_pods <<<'{"items":[{"metadata":{"name":"ew-1","labels":{"istio":"eastwestgateway"}},"status":{"phase":"Running"},"spec":{"containers":[{"name":"istio-proxy","resources":{"limits":{"memory":"3Gi"}}}]}}]}'
+	assert_output $'ew-1\t3072\teastwestgateway'
+}
+
+@test "growth_parse_remote_secrets / growth_mesh_members: members from the Istio remote secrets" {
+	rs_json='{"items":[
+		{"metadata":{"name":"istio-remote-secret-mesh-b","labels":{"istio/multiCluster":"true"},"annotations":{"networking.istio.io/cluster":"mesh-b"}}},
+		{"metadata":{"name":"istio-remote-secret-mesh-c","labels":{"istio/multiCluster":"true"}}},
+		{"metadata":{"name":"cacerts","labels":{}}}]}'
+	run growth_parse_remote_secrets <<<"$rs_json"
+	assert_output $'mesh-b\nmesh-c'
+	kubectl_stub() { printf '%s\n' "$rs_json"; }
+	run growth_mesh_members mesh-a kubectl_stub
+	assert_output $'mesh-a\nmesh-b\nmesh-c'
+	failing_stub() { return 1; }
+	run growth_mesh_members mesh-a failing_stub
+	assert_failure
+}
+
+@test "growth_test_ns_counts: every controlplane-test namespace and the discovered ones" {
+	kubectl_stub() { echo '{"items":[{"metadata":{"labels":{"istio-discovery":"enabled"}}},{"metadata":{"labels":{}}},{"metadata":{}}]}'; }
+	run growth_test_ns_counts mesh-a kubectl_stub
+	assert_output "total=3 discovered=1"
+	failing_stub() { return 1; }
+	run growth_test_ns_counts mesh-a failing_stub
+	assert_output "total=N/A discovered=N/A"
+}
+
+@test "growth_retire_verified: retries, then fails while a namespace of the series stays discovered" {
+	export STATE="${BATS_TEST_TMPDIR}/retire"
+	mkdir -p "$STATE"
+	echo 0 >"${STATE}/calls"
+	# kubectl stub: namespaces are discovered until the cleanup has run <fixed_after> times.
+	kubectl_stub() {
+		local fixed_after; fixed_after="$(cat "${STATE}/fixed_after")"
+		(( $(cat "${STATE}/calls") >= fixed_after )) && return 0
+		echo "namespace/cp-s1-0"
+	}
+	cleanup() { echo $(( $(cat "${STATE}/calls") + 1 )) >"${STATE}/calls"; return "${CLEANUP_RC:-0}"; }
+	KC=(kubectl_stub)
+	echo 2 >"${STATE}/fixed_after"
+	run growth_retire_verified KC mesh-a,mesh-b "app.kubernetes.io/instance=controlplane-test,controlplane-test.series=s1" 3 0 -- cleanup
+	assert_success
+	assert_output --partial "attempt 1/3: mesh-a: 1 namespace(s) still discovered"
+	[ "$(cat "${STATE}/calls")" -eq 2 ]
+	echo 0 >"${STATE}/calls"; echo 9 >"${STATE}/fixed_after"
+	run growth_retire_verified KC mesh-a "sel" 2 0 -- cleanup
+	assert_failure
+	assert_output --partial "error: series retire failed after 2 attempt(s): mesh-a: 1 namespace(s) still discovered, e.g. namespace/cp-s1-0"
+	# A failing cleanup command fails the attempt even when nothing is listed.
+	echo 0 >"${STATE}/calls"; echo 0 >"${STATE}/fixed_after"
+	CLEANUP_RC=1 run growth_retire_verified KC mesh-a "sel" 1 0 -- cleanup
+	assert_failure
+	assert_output --partial "the cleanup command failed"
+}
+
+@test "003 live growth run against an empty kubeconfig: RETIRE_FAILED row, exit 1 (BACKLOG 9.3)" {
+	command -v helm >/dev/null || skip "helm not installed"
+	out="${BATS_TEST_TMPDIR}/res"
+	CONTROLPLANE_RETIRE_ATTEMPTS=1 CONTROLPLANE_RETIRE_BACKOFF_S=0 METRICS_READY_TIMEOUT=0 KUBECONFIG=/dev/null \
+		run timeout 300 "${CP}/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --services-per-namespaces 1 \
+		--namespace-counts 2 --sidecar-scopings namespace --workload-mode config-only --settle 0 --probe-settle 0 \
+		--output-dir "$out"
+	assert_failure 1
+	assert_output --partial "ERROR: the sweep stopped early: series"
+	tsv="$(find "$out" -name 'controlplane-*.tsv')"
+	[ "$(awk -F'\t' '$2 == "RETIRE_FAILED" { print $57 }' "$tsv")" = retire ]
+	# Every row has the schema's width.
+	[ "$(awk -F'\t' '!/^#/ { print NF }' "$tsv" | sort -u)" = 66 ]
+}
+
+@test "003: --series-retire keep with more than one series, and --vsdr-apply checks" {
+	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1 --services-per-namespaces 1,2 --series-retire keep
+	assert_failure
+	assert_output --partial "--series-retire keep leaves a series discovered"
+	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1 --services-per-namespaces 1 --series-retire keep
+	assert_success
+	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1 --vsdr-apply sometimes
+	assert_failure
+	assert_output --partial "--vsdr-apply must be together or split"
+	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1 --services-per-namespaces 1 --vsdr-apply split
+	assert_failure
+	assert_output --partial "--vsdr-apply split is for the legacy sweep"
+	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1 --service-counts 4 --replica-counts 2 \
+		--traffic-configs none,vsdr --vsdr-apply split
+	assert_success
+	assert_output --partial "apply split: workloads before the baseline"
+	run "${CP}/003-run-sweep.sh" --help
+	assert_output --partial "--vsdr-apply MODE"
+	assert_output --partial "CONTROLPLANE_RETIRE_ATTEMPTS"
+}
+
+@test "001 --dry-run --parts workloads / traffic: the two halves of a vsdr apply (BACKLOG 9.11)" {
+	command -v helm >/dev/null || skip "helm not installed"
+	a=(--dry-run --contexts ci-dummy --service-count 4 --replicas 2 --traffic-config vsdr)
+	KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" "${a[@]}" --parts workloads
+	assert_success
+	assert_output --partial "render: 8 Deployment, 1 Namespace, 4 Service ("
+	refute_output --partial "VirtualService"
+	KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" "${a[@]}" --parts traffic
+	assert_success
+	assert_output --partial "render: 4 DestinationRule, 4 VirtualService (0 namespace batch(es)"
+	KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --dry-run --contexts ci-dummy --service-count 4 --replicas 2 --parts traffic
+	assert_failure
+	assert_output --partial "--parts traffic applies the VirtualServices and DestinationRules, so it needs --traffic-config vsdr"
+	KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --dry-run --contexts ci-dummy --services-per-namespace 2 --namespace-count 5 --parts workloads
+	assert_failure
+	assert_output --partial "--parts workloads is for the legacy layout"
 }

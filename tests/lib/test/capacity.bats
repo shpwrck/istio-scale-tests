@@ -333,3 +333,45 @@ JSON
 	[ "$status" -eq 0 ]
 	[[ -z "$output" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Shared quantity parsers (decimal suffixes), sidecar requests (BACKLOG 9.7)
+# ---------------------------------------------------------------------------
+
+@test "quantities: decimal and binary suffixes parse the same way in jq and awk" {
+	run cap_parse_istiod_limits <<'JSON'
+{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"discovery","resources":{"limits":{"cpu":"4","memory":"8G"}}}]}}}}
+JSON
+	# 8G = 8e9 bytes = 7629.39 Mi (floored); before the shared parser this was all unknown.
+	assert_output "cpu_m=4000 mem_mi=7629 replicas=1"
+	run cap_parse_node_totals <<'JSON'
+{"items":[{"metadata":{"name":"w-0","labels":{}},"status":{"allocatable":{"cpu":"2500000n","memory":"1000M","pods":"10"}}}]}
+JSON
+	assert_output "cpu_m=2 mem_mi=953 pods=10 nodes=1 names=w-0"
+	run awk "${CAP_AWK_QTY}"'BEGIN { printf "%d %d %d %d %d\n", mem_to_mi("512M"), mem_to_mi("2Gi"), mem_to_mi("1048576"), cpu_to_m("250m"), mem_to_mi("3x") }'
+	assert_output "488 2048 1 250 -1"
+}
+
+@test "cap_parse_proxy_requests: the Istio CR's sidecar requests, Istio's defaults, unreadable" {
+	run cap_parse_proxy_requests <<<'{"items":[{"metadata":{"name":"default"},"spec":{"values":{"global":{"proxy":{"resources":{"requests":{"cpu":"20m","memory":"64Mi"}}}}}}}]}'
+	assert_output "cpu_m=20 mem_mi=64 source=istio-cr"
+	run cap_parse_proxy_requests <<<'{"items":[{"metadata":{"name":"default"},"spec":{"values":{"global":{"proxy":{"resources":{"requests":{"cpu":"0.25"}}}}}}}]}'
+	assert_output "cpu_m=250 mem_mi=128 source=istio-cr"
+	run cap_parse_proxy_requests <<<'{"items":[{"metadata":{"name":"default"},"spec":{"values":{}}}]}'
+	assert_output "cpu_m=100 mem_mi=128 source=istio-default"
+	run cap_parse_proxy_requests <<<'{"items":[]}'
+	assert_output "cpu_m=unknown mem_mi=unknown source=unreadable"
+	run cap_parse_proxy_requests <<<''
+	assert_output "cpu_m=unknown mem_mi=unknown source=unreadable"
+}
+
+@test "cap_per_pod_requests: an explicit value wins, else the live CR, else Istio's defaults" {
+	kubectl_stub() { echo '{"items":[{"metadata":{"name":"default"},"spec":{"values":{"global":{"proxy":{"resources":{"requests":{"cpu":"20m","memory":"64Mi"}}}}}}}]}'; }
+	run cap_per_pod_requests mesh-a "" "" kubectl_stub
+	assert_output "cpu_m=20 mem_mi=64 cpu_src=istio-cr_on_mesh-a mem_src=istio-cr_on_mesh-a live=20/64"
+	run cap_per_pod_requests mesh-a 200 "" kubectl_stub
+	assert_output "cpu_m=200 mem_mi=64 cpu_src=SCALE_PER_POD_CPU_M mem_src=istio-cr_on_mesh-a live=20/64"
+	# No context (a dry run): Istio's defaults, said so.
+	run cap_per_pod_requests "" "" ""
+	assert_output "cpu_m=100 mem_mi=128 cpu_src=istio_default_(no_live_read) mem_src=istio_default_(no_live_read) live=none"
+}

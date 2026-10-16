@@ -27,6 +27,12 @@
 #   cap_proxy_check <connected> <expected> <tol_pct> [min_diff]
 #                                                  -> OK | LOW | HIGH | N/A (connected proxies vs
 #                                                     expected sidecar pods; pure, not a stdin parser)
+#   cap_parse_proxy_requests                       -> cpu_m mem_mi source (`get istios.sailoperator.io
+#                                                     -o json`: the first Istio CR's
+#                                                     spec.values.global.proxy.resources.requests;
+#                                                     source=istio-cr, or istio-default (100m / 128Mi,
+#                                                     Istio's injection defaults) when the CR sets none;
+#                                                     unknown + source=unreadable without a CR)
 #
 # Exposes (Phase-2 sizing helper — pure, not a stdin parser):
 #   cap_max_pods <...>                             -> capacity-derived pod ceiling; `unknown`-propagating
@@ -38,6 +44,12 @@
 #   cap_istiod_limits <ctx> <argv...>
 #   cap_istiod_used  <ctx> <argv...>
 #   cap_metrics_ready <ctx> <argv...>   -> ready | unavailable (kubectl top probe)
+#   cap_proxy_requests <ctx> <argv...>  -> the sidecar requests every injected pod
+#                                           schedules with (BACKLOG 9.7: the capacity plan
+#                                           and auto-sizing use them instead of a constant)
+#   cap_per_pod_requests <ctx> <cpu_m> <mem_mi> <argv...>
+#                                        -> per-pod CPU/memory: explicit value, else live
+#                                           Istio CR, else Istio's defaults, with the source
 #
 # The three `kubectl top` reads (cap_node_used, cap_istiod_used, cap_metrics_ready)
 # use a longer request timeout (CAP_TOP_TIMEOUT, default 15s) than the etcd `get`
@@ -52,10 +64,60 @@
 # shellcheck shell=bash
 
 # ---------------------------------------------------------------------------
-# Quantity helpers (pure awk; emit `unknown` on unparseable input).
+# Quantity helpers, shared by every parser below (one definition per language so a
+# limit written as `8G` or `512M` parses the same everywhere).
 # ---------------------------------------------------------------------------
-# Kubernetes CPU quantity -> millicores: `8`->8000, `7900m`->7900, `0.5`->500.
-# Kubernetes memory quantity -> Mi (floor): Ki/Mi/Gi/Ti suffix or plain bytes.
+# Kubernetes CPU quantity -> millicores: `8`->8000, `7900m`->7900, `0.5`->500,
+# `250000u`->250, `2500000n`->2.5.
+# Kubernetes memory quantity -> Mi: binary Ki/Mi/Gi/Ti/Pi, decimal k/M/G/T/P, or plain
+# bytes (`8G` = 8e9 bytes = 7629.4 Mi). Callers floor.
+# shellcheck disable=SC2016
+CAP_JQ_QTY='
+def cpu_to_m($q):
+	if $q == null then null
+	else (if ($q | type) != "string" then ($q | tostring) else $q end)
+		| if test("m$") then (rtrimstr("m") | tonumber)
+		  elif test("u$") then ((rtrimstr("u") | tonumber) / 1000)
+		  elif test("n$") then ((rtrimstr("n") | tonumber) / 1000000)
+		  else (tonumber * 1000) end
+	end;
+def mem_to_mi($q):
+	if $q == null then null
+	else ($q | tostring) as $s
+		| ({"Ki": 1024, "Mi": 1048576, "Gi": 1073741824, "Ti": 1099511627776, "Pi": 1125899906842624,
+		    "k": 1000, "M": 1000000, "G": 1000000000, "T": 1000000000000, "P": 1000000000000000}) as $u
+		| ($s | capture("^(?<v>[0-9.eE+-]+)(?<s>[A-Za-z]*)$")) as $p
+		| if $p.s == "" then ($p.v | tonumber) / 1048576
+		  elif ($u | has($p.s)) then ($p.v | tonumber) * $u[$p.s] / 1048576
+		  else error("unknown memory suffix \($p.s)") end
+	end;
+'
+# CAP_AWK_QTY: the same two in awk (-1 = unparseable). A bare memory number is bytes,
+# except where a caller documents otherwise (kubectl top prints Mi with a suffix).
+# shellcheck disable=SC2016
+CAP_AWK_QTY='
+function cpu_to_m(q) {
+	if (q ~ /m$/) { sub(/m$/, "", q); return q + 0 }
+	if (q ~ /u$/) { sub(/u$/, "", q); return (q + 0) / 1000 }
+	if (q ~ /n$/) { sub(/n$/, "", q); return (q + 0) / 1000000 }
+	if (q ~ /^[0-9.]+$/) return (q + 0) * 1000
+	return -1
+}
+function mem_to_mi(q,    v, s) {
+	if (!match(q, /^[0-9.]+/)) return -1
+	v = substr(q, 1, RLENGTH) + 0; s = substr(q, RLENGTH + 1)
+	if (s == "") return v / 1048576
+	if (s == "Ki") return v / 1024
+	if (s == "Mi") return v
+	if (s == "Gi") return v * 1024
+	if (s == "Ti") return v * 1048576
+	if (s == "k") return v * 1000 / 1048576
+	if (s == "M") return v * 1000000 / 1048576
+	if (s == "G") return v * 1000000000 / 1048576
+	if (s == "T") return v * 1000000000000 / 1048576
+	return -1
+}
+'
 
 # ---------------------------------------------------------------------------
 # cap_parse_node_totals: `kubectl get nodes -o json` on stdin.
@@ -67,20 +129,7 @@
 # Zero workers or unparseable -> cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=
 # shellcheck disable=SC2329
 cap_parse_node_totals() {
-	jq -r '
-		def cpu_to_m($q):
-			if ($q | type) != "string" then ($q | tostring) else $q end
-			| if test("m$") then (rtrimstr("m") | tonumber)
-			  else (tonumber * 1000)
-			  end;
-		def mem_to_mi($q):
-			($q | tostring) as $s
-			| if   ($s | test("Ki$")) then (($s | rtrimstr("Ki") | tonumber) / 1024)
-			  elif ($s | test("Mi$")) then  ($s | rtrimstr("Mi") | tonumber)
-			  elif ($s | test("Gi$")) then (($s | rtrimstr("Gi") | tonumber) * 1024)
-			  elif ($s | test("Ti$")) then (($s | rtrimstr("Ti") | tonumber) * 1024 * 1024)
-			  else (($s | tonumber) / 1048576)
-			  end;
+	jq -r "${CAP_JQ_QTY}"'
 		def is_worker:
 			(.metadata.labels // {}) as $l
 			| ($l | has("node-role.kubernetes.io/control-plane")) as $cp
@@ -109,19 +158,9 @@ cap_parse_node_totals() {
 # shellcheck disable=SC2329
 cap_parse_top_nodes() {
 	local worker_csv="${1:-}"
-	awk -v workers="$worker_csv" '
-	function cpu_to_m(q,   v) {
-		if (q ~ /m$/) { sub(/m$/, "", q); return q + 0 }
-		return (q + 0) * 1000
-	}
-	function mem_to_mi(q,   v) {
-		if (q ~ /Ki$/) { sub(/Ki$/, "", q); return (q + 0) / 1024 }
-		if (q ~ /Mi$/) { sub(/Mi$/, "", q); return (q + 0) }
-		if (q ~ /Gi$/) { sub(/Gi$/, "", q); return (q + 0) * 1024 }
-		if (q ~ /Ti$/) { sub(/Ti$/, "", q); return (q + 0) * 1024 * 1024 }
-		# kubectl top emits Mi for node memory; treat a bare number as Mi.
-		return (q + 0)
-	}
+	awk -v workers="$worker_csv" "${CAP_AWK_QTY}"'
+	# kubectl top prints Mi with a suffix; a bare number is read as Mi here.
+	function top_mi(q) { return (q ~ /^[0-9.]+$/) ? q + 0 : mem_to_mi(q) }
 	BEGIN {
 		n = split(workers, parts, ",")
 		for (i = 1; i <= n; i++) {
@@ -134,8 +173,10 @@ cap_parse_top_nodes() {
 	/^[ \t]*$/ { next }
 	{
 		if (!(($1) in want)) next
-		cpu_m += cpu_to_m($2)
-		mem_mi += mem_to_mi($4)
+		c = cpu_to_m($2); m = top_mi($4)
+		if (c < 0 || m < 0) next
+		cpu_m += c
+		mem_mi += m
 		rows++
 	}
 	END {
@@ -186,24 +227,7 @@ cap_parse_pod_count() {
 # Reads the LIVE deployment (the istiod resource pin is CR-patched live).
 # shellcheck disable=SC2329
 cap_parse_istiod_limits() {
-	jq -r '
-		def cpu_to_m($q):
-			if $q == null then null
-			else
-				(if ($q | type) != "string" then ($q | tostring) else $q end)
-				| if test("m$") then (rtrimstr("m") | tonumber)
-				  else (tonumber * 1000) end
-			end;
-		def mem_to_mi($q):
-			if $q == null then null
-			else
-				($q | tostring) as $s
-				| if   ($s | test("Ki$")) then (($s | rtrimstr("Ki") | tonumber) / 1024)
-				  elif ($s | test("Mi$")) then  ($s | rtrimstr("Mi") | tonumber)
-				  elif ($s | test("Gi$")) then (($s | rtrimstr("Gi") | tonumber) * 1024)
-				  elif ($s | test("Ti$")) then (($s | rtrimstr("Ti") | tonumber) * 1024 * 1024)
-				  else (($s | tonumber) / 1048576) end
-			end;
+	jq -r "${CAP_JQ_QTY}"'
 		( [ .spec.template.spec.containers[]?
 		    | select(.name == "discovery" or .name == "istiod") ] | first ) as $c
 		| if $c == null then
@@ -228,20 +252,11 @@ cap_parse_istiod_limits() {
 # istiod pods. CPU `1234m`/`1`->m; MEM `1234Mi`/`5Gi`->Mi. Empty -> unknown.
 # shellcheck disable=SC2329
 cap_parse_istiod_used() {
-	awk '
-	function cpu_to_m(q) {
-		if (q ~ /m$/) { sub(/m$/, "", q); return q + 0 }
-		return (q + 0) * 1000
-	}
-	function mem_to_mi(q) {
-		if (q ~ /Ki$/) { sub(/Ki$/, "", q); return (q + 0) / 1024 }
-		if (q ~ /Mi$/) { sub(/Mi$/, "", q); return (q + 0) }
-		if (q ~ /Gi$/) { sub(/Gi$/, "", q); return (q + 0) * 1024 }
-		if (q ~ /Ti$/) { sub(/Ti$/, "", q); return (q + 0) * 1024 * 1024 }
-		return (q + 0)
-	}
+	awk "${CAP_AWK_QTY}"'
+	# kubectl top prints Mi with a suffix; a bare number is read as Mi here.
+	function top_mi(q) { return (q ~ /^[0-9.]+$/) ? q + 0 : mem_to_mi(q) }
 	/^[ \t]*$/ { next }
-	NF >= 3 { cpu_m += cpu_to_m($2); mem_mi += mem_to_mi($3); rows++ }
+	NF >= 3 { c = cpu_to_m($2); m = top_mi($3); if (c >= 0 && m >= 0) { cpu_m += c; mem_mi += m; rows++ } }
 	END {
 		if (rows == 0) { print "cpu_m=unknown mem_mi=unknown"; exit }
 		printf "cpu_m=%d mem_mi=%d\n", cpu_m, mem_mi
@@ -280,6 +295,26 @@ cap_proxy_check() {
 		if (ad > thr) print (d < 0) ? "LOW" : "HIGH"
 		else print "OK"
 	}'
+}
+
+# cap_parse_proxy_requests: `kubectl get istios.sailoperator.io -o json` on stdin.
+# The test charts' app containers request nothing, so a test pod schedules with its
+# sidecar's requests: the Istio CR's global proxy requests, else Istio's injection
+# defaults (100m CPU, 128Mi memory). Emits
+#   cpu_m=<int|unknown> mem_mi=<int|unknown> source=istio-cr|istio-default|unreadable
+# (istio-cr when the CR sets either request; the other then takes the default).
+# shellcheck disable=SC2329
+cap_parse_proxy_requests() {
+	local out
+	out="$(jq -r "${CAP_JQ_QTY}"'
+		[.items[]?] | sort_by(.metadata.name) | first as $i
+		| if $i == null then "cpu_m=unknown mem_mi=unknown source=unreadable"
+		  else ($i.spec.values.global.proxy.resources.requests // {}) as $r
+			| "cpu_m=\((if $r.cpu == null then 100 else cpu_to_m($r.cpu) end) | floor) mem_mi=\((if $r.memory == null then 128 else mem_to_mi($r.memory) end) | floor) source=\(if ($r.cpu == null and $r.memory == null) then "istio-default" else "istio-cr" end)"
+		  end
+	' 2>/dev/null)" || out=""
+	[[ -n "$out" ]] || out="cpu_m=unknown mem_mi=unknown source=unreadable"
+	printf '%s\n' "$out"
 }
 
 # ---------------------------------------------------------------------------
@@ -410,6 +445,40 @@ cap_istiod_used() {
 	local ctx="$1"; shift
 	_cap_retry_nonempty "$@" --context="$ctx" --request-timeout="${CAP_TOP_TIMEOUT:-15}s" -n istio-system top pod -l app=istiod --no-headers \
 		| cap_parse_istiod_used
+}
+
+# cap_proxy_requests <ctx> <kubectl_argv...>
+# shellcheck disable=SC2329
+cap_proxy_requests() {
+	local ctx="$1"; shift
+	"$@" --context="$ctx" --request-timeout=5s get istios.sailoperator.io -o json 2>/dev/null \
+		| cap_parse_proxy_requests
+}
+
+# cap_per_pod_requests <ctx|""> <explicit_cpu_m> <explicit_mem_mi> <kubectl_argv...>:
+# the per-pod CPU and memory a test pod schedules with, for the capacity plan and
+# auto-sizing. An explicit value (SCALE_PER_POD_*) wins; otherwise the live Istio CR
+# (cap_proxy_requests); without a context or a readable CR, Istio's defaults. Emits
+#   cpu_m=<int> mem_mi=<int> cpu_src=<text> mem_src=<text> live=<cpu_m>/<mem_mi>|none
+# (the *_src values use '_' for spaces).
+# shellcheck disable=SC2329
+cap_per_pod_requests() {
+	local ctx="$1" ecpu="$2" emem="$3"
+	shift 3
+	local live="cpu_m=unknown mem_mi=unknown source=unreadable" lc lm ls cpu mem csrc msrc
+	[[ -n "$ctx" ]] && (($#)) && live="$(cap_proxy_requests "$ctx" "$@")"
+	lc="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^cpu_m=/) print substr($i, 7) }' <<<"$live")"
+	lm="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^mem_mi=/) print substr($i, 8) }' <<<"$live")"
+	ls="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^source=/) print substr($i, 8) }' <<<"$live")"
+	if [[ -n "$ecpu" ]]; then cpu="$ecpu"; csrc="SCALE_PER_POD_CPU_M"
+	elif [[ "$lc" =~ ^[0-9]+$ ]]; then cpu="$lc"; csrc="${ls}_on_${ctx}"
+	else cpu=100; csrc="istio_default_(no_live_read)"; fi
+	if [[ -n "$emem" ]]; then mem="$emem"; msrc="SCALE_PER_POD_MEM_MI"
+	elif [[ "$lm" =~ ^[0-9]+$ ]]; then mem="$lm"; msrc="${ls}_on_${ctx}"
+	else mem=128; msrc="istio_default_(no_live_read)"; fi
+	local lv="none"
+	[[ "$lc" =~ ^[0-9]+$ && "$lm" =~ ^[0-9]+$ ]] && lv="${lc}/${lm}"
+	printf 'cpu_m=%s mem_mi=%s cpu_src=%s mem_src=%s live=%s\n' "$cpu" "$mem" "$csrc" "$msrc" "$lv"
 }
 
 # cap_metrics_ready <ctx> <kubectl_argv...>: "ready" if the metrics API serves
