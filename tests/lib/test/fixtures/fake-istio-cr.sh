@@ -14,7 +14,7 @@ if [[ "$v" == fail ]]; then
 fi
 case " $* " in
 *" get istios.sailoperator.io default "*)
-	printf '%s\n' '{"metadata":{"name":"default","generation":2},"spec":{"version":"v1.30-latest"},"status":{"state":"Healthy","observedGeneration":2,"activeRevisionName":"default","revisions":{"total":1,"ready":1,"inUse":1}}}' ;;
+	printf '%s\n' '{"metadata":{"name":"default","generation":2},"spec":{"version":"v1.30-latest"},"status":{"state":"Healthy","observedGeneration":2,"activeRevisionName":"default","revisions":{"total":1,"ready":1,"inUse":1},"conditions":[{"type":"Reconciled","status":"True"},{"type":"Ready","status":"True"}]}}' ;;
 *" get istiorevisions.sailoperator.io default "*) printf '%s' "$v" ;;
 *) exit 1 ;;
 esac

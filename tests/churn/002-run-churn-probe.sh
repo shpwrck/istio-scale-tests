@@ -101,7 +101,9 @@ columns measure cross-cluster propagation. Per iteration:
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
   CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
   CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).

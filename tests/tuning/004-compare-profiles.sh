@@ -11,6 +11,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
+source "${ROOT}/config/versions.env"  # sources options.env: FANOUT_MAX_SKEW_MS, as in propagation 005 (C1)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/propagation.sh"  # PROP_ROW_AWK: the rows propagation 005 counts
@@ -34,7 +36,10 @@ rows included); "range" is its min to max. A profile whose n differs from the
 baseline's shows "(baseline n ...)": its mean is over other iterations, so compare
 it with care.
 Histogram p99 rows (convergence, push time) show the worst bucket a valid row hit,
-or "overflow (N rows)", never a mean. Memory is in Mi, CPU in millicores (the
+or "overflow (N rows)", never a mean; propagation's P1 convergence counts iterations,
+"overflow (N iterations)": an iteration whose window put a sample in +Inf is left out
+of the means (as 005 drops it) but counted here, so a profile that overflowed never
+looks better than it was. Memory is in Mi, CPU in millicores (the
 controlplane's istiod CPU and memory are window peaks), config sizes in KiB, and a
 count's mean prints bare when it is whole (438, not 438.00).
 
@@ -43,6 +48,14 @@ Options:
   --format FMT       text or md (or markdown) (default: text).
   --output FILE      Write to FILE instead of stdout.
   -h, --help         Show this help.
+
+When the sweep dir holds sweep-outcome.txt (003 writes it at the end of the sweep), the
+comparison repeats its errors and warnings; a sweep dir without it is a sweep that died
+before its end.
+
+Environment:
+  FANOUT_MAX_SKEW_MS  propagation: the scrape-skew ceiling (ms) a row must be within to
+                      count, as in propagation 005 (default in config/options.env).
 EOF
 }
 
@@ -113,7 +126,8 @@ fi
 # values. kind sets how a cell prints (fmt_metric): ms (mean, 2 decimals), count (mean,
 # a whole number bare, else 1 decimal), mi and m (mean in Mi / millicores, whole), kib
 # (a bytes mean shown in KiB, 1 decimal), qps (mean, 1 decimal), hist (a histogram
-# p99: never averaged, the worst bucket any valid row hit, or "overflow (N rows)").
+# p99: never averaged, the worst bucket any valid row hit, or "overflow (N rows)"),
+# histi (hist counted per iteration: "overflow (N iterations)"; propagation's P1, M2).
 GROUP=""
 case "$SUITE" in
 controlplane)
@@ -129,7 +143,7 @@ controlplane)
 		"cluster_connected_proxies|Connected proxies / cluster|count") ;;
 propagation)
 	METRICS=("p1_ms|P1 local push (ms)|ms" "p2_ms|P2 remote EDS (ms)|ms" "p3_ms|P3 remote sidecar (ms)|ms"
-		"p1_conv_p99_ms|P1 convergence p99 worst bucket (ms)|hist") ;;
+		"p1_conv_p99_ms|P1 convergence p99 worst bucket (ms)|histi") ;;
 dataplane)
 	GROUP="target_class,qps_target"
 	METRICS=("p50_ms|p50 (ms)|ms" "p90_ms|p90 (ms)|ms" "p99_ms|p99 (ms)|ms" "p999_ms|p99.9 (ms)|ms"
@@ -156,7 +170,11 @@ for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 # "overflow" (a histogram p99 in +Inf) is counted, not dropped. A propagation pass
 # counts what its 005 report counts (D2): the rows prop_drop_reason keeps, P1 and its
 # convergence p99 once per iteration, P2 without a dirty sample (tests/lib/propagation.sh,
-# with 005's skew ceiling FANOUT_MAX_SKEW_MS).
+# with 005's skew ceiling FANOUT_MAX_SKEW_MS). prop_drop_reason drops a p1_overflow=1
+# row, so an iteration that overflowed (status OK, istiod not restarted) is counted into
+# the convergence p99's overflow once (M2). "i<TAB>group<TAB>iterations": a propagation
+# pass's distinct (run_id, iteration) per group, what P1 is attempted against when the
+# TSV does not record ITERATIONS (X2).
 summarize() {
 	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" -v suite="$SUITE" -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
 	# prop_col_sample(c): whether this row carries a sample of propagation column c.
@@ -180,7 +198,13 @@ summarize() {
 		grows[g]++
 		for (j = 1; j <= nm; j++) if (mc[j] != "" && (mc[j] in idx)) has[g SUBSEP mc[j]] = 1
 		if (suite == "propagation") {
-			if (prop_drop_reason(MAXSKEW) != "") next
+			if (!((g, $1, $3) in iter_seen)) { iter_seen[g, $1, $3] = 1; giters[g]++ }
+			r = prop_drop_reason(MAXSKEW)
+			if (r == "p1_overflow" && ("p1_conv_p99_ms" in idx) && !((g, $1, $3) in ov_seen)) {
+				ov_seen[g, $1, $3] = 1
+				ov[g SUBSEP "p1_conv_p99_ms"]++
+			}
+			if (r != "") next
 		} else {
 			if (("status" in idx) && $(idx["status"]) != "OK") next
 			if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
@@ -203,6 +227,7 @@ summarize() {
 	END {
 		printf "n\t%d\t%d\n", valid, total
 		for (i = 1; i <= norder; i++) printf "g\t%s\t%d\n", order[i], grows[order[i]]
+		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "i\t%s\t%d\n", order[i], giters[order[i]]
 		for (k in has) {
 			split(k, a, SUBSEP)
 			if (k in cnt) printf "v\t%s\t%s\t%.6f\t%.6f\t%d\t%.6f\t%d\n", a[1], a[2], sum[k] / cnt[k], mx[k], ov[k] + 0, mn[k], cnt[k]
@@ -211,7 +236,8 @@ summarize() {
 	}' "$@"
 }
 
-# fmt_metric <kind> <mean> <max> <n_overflow> [baseline_mean]: one cell (see METRICS);
+# fmt_metric <kind> <mean> <max> <n_overflow> [baseline_mean]: one cell (see METRICS; hist
+# and histi print alike, but histi counts its overflow in iterations);
 # "-" (or empty) for a mean or max means none. The change against the baseline is on
 # the unrounded means; hist cells have none.
 fmt_metric() {
@@ -232,8 +258,9 @@ fmt_metric() {
 		if (m == "-") m = ""
 		if (mx == "-") mx = ""
 		if (b == "-") b = ""
-		if (k == "hist") {
-			if (ov + 0 > 0) printf "overflow (%d %s)", ov, (ov + 0 == 1 ? "row" : "rows")
+		if (k == "hist" || k == "histi") {
+			u = (k == "histi") ? "iteration" : "row"
+			if (ov + 0 > 0) printf "overflow (%d %s%s)", ov, u, (ov + 0 == 1 ? "" : "s")
 			else printf "%s", (mx == "" ? "-" : bucket_range(mx))
 			exit
 		}
@@ -253,7 +280,7 @@ fmt_metric() {
 # was in +Inf); "-" without a value.
 fmt_range() {
 	local kind="$1" mn="$2" mx="$3" ov="$4" lo hi
-	if [[ "$kind" == hist ]]; then
+	if [[ "$kind" == hist || "$kind" == histi ]]; then
 		[[ "$mn" == "-" && "$ov" == 0 ]] && { printf -- '-'; return; }
 		lo="$(fmt_metric hist "-" "$mn" 0)"
 		hi="$(fmt_metric hist "-" "$mx" 0)"
@@ -298,7 +325,7 @@ cfg_attempted() {
 	done
 }
 
-declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS NROWS STATUS GSEEN
+declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS NROWS STATUS GSEEN
 GROUP_VALUES=()
 for p in "${PASSES[@]}"; do
 	STATUS[$p]="ok"
@@ -315,6 +342,7 @@ for p in "${PASSES[@]}"; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
 		g) GROWS["$p|$a"]="$b"; [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
+		i) GITERS["$p|$a"]="$b" ;;
 		v)
 			VHAS["$p|$a|$b"]=1; VMAX["$p|$a|$b"]="$d"; VOV["$p|$a|$b"]="$e"
 			VMIN["$p|$a|$b"]="$f"; VCNT["$p|$a|$b"]="$h"
@@ -340,10 +368,13 @@ for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
 row "${cells[@]}"
 # metric_n <pass> <group> <column>: got/attempted (PL17): valid samples with a value
 # (overflow counts) / what the pass was configured to take (cfg_attempted), else every
-# row the pass wrote in the group.
+# row the pass wrote in the group; for propagation's P1 columns, else the iterations
+# it wrote (one P1 sample each, X2).
 metric_n() {
-	local k="$1|$2|$3"
-	echo "$(( ${VCNT[$k]:-0} + ${VOV[$k]:-0} ))/${ATT[$k]:-${GROWS["$1|$2"]:-0}}"
+	local k="$1|$2|$3" att
+	att="${GROWS["$1|$2"]:-0}"
+	case "$3" in p1_ms | p1_conv_p99_ms) att="${GITERS["$1|$2"]:-$att}" ;; esac
+	echo "$(( ${VCNT[$k]:-0} + ${VOV[$k]:-0} ))/${ATT[$k]:-$att}"
 }
 N_DIFFERS=0
 for g in "${GROUP_VALUES[@]}"; do
@@ -382,7 +413,7 @@ render() {
 		echo "- Suite: ${SUITE}"
 		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
-		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN))"
+		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		if [[ "$SUITE" == propagation ]]; then
 			echo "- Values are means over the samples the propagation report (005) counts: valid rows (status OK, no istiod restart, no overflow, scrape skew within FANOUT_MAX_SKEW_MS), P1 once per iteration. Profiles show the change against the baseline in brackets."
 		else
@@ -390,8 +421,9 @@ render() {
 		fi
 		echo "- Under each metric: n is got/attempted (valid samples with a value / what the probe was configured to take where its TSV records it, else every row the pass wrote, failed and timed-out rows included) and range is its min to max."
 		((N_DIFFERS)) && echo "- **A profile's n differs from the baseline's** (shown as \"(baseline n ...)\"): its mean is over other iterations, so a better mean can come from fewer, easier samples."
-		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket."
+		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket (propagation's P1 convergence: \"overflow (N iterations)\", counted although 005 leaves those iterations out of its means)."
 		echo ""
+		sweep_outcome_recorded "$RESULTS_DIR" md
 		local hdr="| Metric |" sep="|---|" r
 		for p in "${PASSES[@]}"; do hdr+=" ${p} |"; sep+="---|"; done
 		echo "$hdr"
@@ -399,12 +431,13 @@ render() {
 		for r in "${ROWS[@]}"; do echo "| ${r//$'\t'/ | } |"; done
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
-		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN))"
+		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		echo "Means over valid rows; profiles show the change against the baseline."
 		echo "n = got/attempted (valid samples with a value / configured samples, else rows written); range = min to max."
 		((N_DIFFERS)) && echo "WARNING: a profile's n differs from the baseline's (\"(baseline n ...)\"): its mean is over other iterations."
 		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."
 		echo ""
+		sweep_outcome_recorded "$RESULTS_DIR" text
 		{
 			printf 'Metric'
 			printf '\t%s' "${PASSES[@]}"

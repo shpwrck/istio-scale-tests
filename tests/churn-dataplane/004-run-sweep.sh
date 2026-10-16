@@ -117,7 +117,9 @@ rejected.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
   COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
@@ -664,8 +666,8 @@ echo "Charts written to $CHARTS_FILE"
 # sweep-outcome.txt and the markdown summary, C3). Exit 3 (the reach gate stopped the
 # sweep) wins over 4 (some cells failed, or the Istio version changed under the sweep).
 outcome_rc=0 stop_args=()
-((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE")
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --record "$SWEEP_DIR" --md "$MD_FILE" \
+((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE" --stop-reason "the reachability gate (--on-unreachable fail) found an unreachable remote; later mesh sizes did not run")
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$SWEEP_DIR" --md "$MD_FILE" \
 	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((REACH_GATE_STOP)); then
 	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2

@@ -135,7 +135,9 @@ the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep re
 preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
 `--vsdr-subsets` that differs. It also refuses a mesh that now runs another Istio version than the
 `ISTIO_VERSION` the sweep recorded, under either `ISTIO_VERSION_CHECK` policy: the new rows would be
-credited to the old version, so start a new sweep. Pass the other options as in the original run.
+credited to the old version, so start a new sweep. A sweep that recorded `unknown` (a member could
+not be read when it started) can never be resumed; when a member cannot be read now, fix access to
+it and run the same `--resume` again. Pass the other options as in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an
@@ -175,8 +177,9 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`. A step ignores the keys it
   does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
   `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run),
-  `ISTIO_VERSION_CHECK` and the version pins. Any other key, or any bad line, rejects the whole file before anything
-  runs, with `file:line` and the reason.
+  `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC` / `_POLL_SEC` and the version
+  pins. Any other key, or any bad line, rejects the whole file before anything runs, with
+  `file:line` and the reason.
 - **Precedence:** flag > `--config` > environment > default. The file loads before
   `options.env`, so the defaults derived there follow it: a config
   `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` also sets `001`'s namespace wait unless

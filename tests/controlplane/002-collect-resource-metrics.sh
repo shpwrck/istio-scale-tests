@@ -156,7 +156,9 @@ Usage: $(basename "$0") [options]
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,

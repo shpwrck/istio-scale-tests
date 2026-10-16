@@ -250,7 +250,9 @@ Exit codes:
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -1236,10 +1238,21 @@ echo "Istio version:     $(istio_version_label)" >&2
 if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
 	_resume_iv="$(grep -m1 '^# ISTIO_VERSION=' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
 	_resume_iv="${_resume_iv#*=}"
+	# X6: unknown is never a match, not even unknown == unknown: the rows already recorded
+	# ran on a version nobody read, so no later read can vouch for the new ones.
+	case "/${_resume_iv#mixed:}/" in
+	*/unknown/*) die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}: a member's version could not be read when it started, so the version its rows ran on is not known and it cannot be resumed. Fix access to the member (kubeconfig, login, network) or wait until its Istio CR is settled, then start a new sweep." ;;
+	esac
+	case "/${ISTIO_VERSION#mixed:}/" in
+	*/unknown/*) [[ -z "$_resume_iv" ]] || die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the running version cannot be read now on every member (ISTIO_VERSION=${ISTIO_VERSION}; the members are listed above). Fix access to them (kubeconfig, login, network) or wait until their Istio CR is settled, then run the same --resume again." ;;
+	esac
 	if [[ -n "$_resume_iv" && "${_resume_iv#v}" != "${ISTIO_VERSION#v}" ]]; then
 		die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the mesh now runs ${ISTIO_VERSION}, so its new rows would be credited to ${_resume_iv}. Start a new sweep: --resume never mixes Istio versions in one TSV, whatever ISTIO_VERSION_CHECK says."
 	fi
 fi
+# A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
+# that far) no longer describes the sweep, and its reports must not show it meanwhile.
+[[ -z "$RESUME_DIR" ]] || rm -f "${OUTPUT_DIR}/sweep-outcome.txt"
 
 capacity_plan_warn
 guard_add_mesh_members
@@ -2262,8 +2275,11 @@ FAILED_CELLS=()
 mapfile -t FAILED_CELLS < <(awk -F'\t' '$1 != "timestamp" && !/^#/ && $2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ { print $2 }' \
 	"${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)
 outcome_rc=0 stop_args=()
-[[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1)
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --record "$OUTPUT_DIR" --md "$MD_FILE" \
+[[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
+# The outcome also goes at the end of the scale envelope (R1), when it was written: a
+# campaign record pasted from it must show a version change or a failed sweep.
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$OUTPUT_DIR" \
+	--md "$MD_FILE" --md "$ENVELOPE_FILE" \
 	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if [[ -n "$SWEEP_STOPPED" ]]; then
 	echo "" >&2

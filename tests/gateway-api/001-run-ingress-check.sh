@@ -676,7 +676,7 @@ done
 # settled), never the Istio CR's requested .spec.version (ISTIO_CR_VERSION[ctx] keeps that
 # for reference) nor an absent CR. A read-only check records it and never stops on it
 # (--no-stop warns instead); ISTIO_VERSION_PIN keeps config/versions.env's value.
-istio_version_resolve --no-stop "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
+istio_version_resolve --no-stop "$CONTEXTS_CSV" 0 "${KUBECTL[@]}"
 
 # The deployed scenario set per member (R2): the chart's stamp on the test namespace and on the
 # Gateway. A member whose stamp differs runs other chart content than this script describes; its

@@ -127,8 +127,9 @@ formats_show() {
 	run --separate-stderr config_check_multi_run "$r" 0 "$r/latency-p1.tsv" "$r/churn-p2.tsv"
 	assert_failure 1
 	[[ "$stderr" == *"holds 2 runs"* ]]
-	# Each with the commands that give it a directory of its own, then its report (B2).
-	[[ "$stderr" == *"  p2 (its files are in ${r}, outside a sweep-* dir; move them into a directory of their own first):"$'\n'"    mkdir '${r}/.run-p2' && mv '${r}'/*'p2'* '${r}/.run-p2/' && mv '${r}/.run-p2' '${r}/run-p2'"$'\n'"    "*" --results-dir '${r}/run-p2'"$'\n'"  p1 ("* ]]
+	# Each with the commands that give it a directory of its own, then its report (B2, U1):
+	# its TSVs by path, then every file named after one of its ids.
+	[[ "$stderr" == *"  p2 (its files are in ${r}, outside a sweep-* dir, with another run's; move them into a directory of their own first):"$'\n'"    mkdir -p '${r}/run-p2'"$'\n'"    for f in '${r}/churn-p2.tsv'; do if [ -e \"\$f\" ]; then mv \"\$f\" '${r}/run-p2/'; fi; done"$'\n'"    find '${r}' -mindepth 1 -maxdepth 1 \\( -name '*p2*' \\) ! -name 'sweep-*' ! -name 'run-p2' -exec mv {} '${r}/run-p2/' \\;"$'\n'"    "*" --results-dir '${r}/run-p2'"$'\n'"  p1 ("* ]]
 	# Files of one standalone run (same RUN_ID) are one run; propagation's SWEEP_RUN_ID wins.
 	printf '# RUN_ID=p1\nrun_id\n' > "$r/latency-p1b.tsv"
 	printf '# SWEEP_RUN_ID=s9\n# RUN_ID=e1\nrun_id\n' > "$r/endpoint-e1.tsv"
@@ -142,7 +143,7 @@ formats_show() {
 	run --separate-stderr config_check_multi_run "$r" 0 "$r/latency-p1.tsv" "$r/empty.tsv"
 	assert_failure 1
 	[[ "$stderr" == *"  empty.tsv ("* && "$stderr" == *"  p1 ("* ]]
-	[[ "$stderr" == *"    mkdir '${r}/run-empty' && mv '${r}/empty.tsv' '${r}/run-empty/'"* ]]
+	[[ "$stderr" == *"    mkdir -p '${r}/run-empty'"$'\n'"    for f in '${r}/empty.tsv'; do if [ -e \"\$f\" ]; then mv \"\$f\" '${r}/run-empty/'; fi; done"$'\n'"    "*" --results-dir '${r}/run-empty'"* ]]
 	# More than five runs: the five newest, then how many more.
 	local i fs=()
 	for i in 1 2 3 4 5 6 7; do mkdir -p "$r/sweep-x$i"; : > "$r/sweep-x$i/t.tsv"; fs+=("$r/sweep-x$i/t.tsv"); done
@@ -160,10 +161,13 @@ formats_show() {
 	printf '# RUN_ID=20261016T110000Z-2\nrun_id\n' > "$r/latency-20261016T110000Z-2.tsv"
 	run --separate-stderr config_check_multi_run "$r" 0 "$r"/*.tsv
 	assert_failure 1
-	# Run each printed mkdir/mv line as the operator would paste it.
-	while IFS= read -r cmd; do
-		bash -c "$cmd"
-	done < <(sed -n 's/^    \(mkdir .*\)$/\1/p' <<<"$stderr")
+	# Run each printed mkdir/for/find line as the operator would paste it, twice (U1).
+	local pass
+	for pass in 1 2; do
+		while IFS= read -r cmd; do
+			bash -c "$cmd"
+		done < <(sed -n 's/^    \(mkdir .*\|for f in .*\|find .*\)$/\1/p' <<<"$stderr")
+	done
 	[ -f "$r/run-20261016T100000Z-1/latency-20261016T100000Z-1.tsv" ]
 	[ -f "$r/run-20261016T100000Z-1/latency-20261016T100000Z-1.md" ]
 	[ -d "$r/run-20261016T100000Z-1/istiod-diag-20261016T100000Z-1" ]
@@ -189,6 +193,42 @@ formats_show() {
 	assert_success
 	config_check_multi_run . 0 sweep-20261016T100000Z-9//a.tsv sweep-20261016T100000Z-9//b.tsv
 	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-9 ]
+}
+
+@test "config_check_multi_run: a symlinked sweep dir keeps its sweep key, also with CDPATH set (X9)" {
+	local r="${BATS_TEST_TMPDIR}/r4"
+	mkdir -p "$r/store/data" "$r/res"
+	printf '# RUN_ID=c1\nrun_id\nc1\n' > "$r/store/data/a.tsv"
+	printf '# RUN_ID=c2\nrun_id\nc2\n' > "$r/store/data/b.tsv"
+	ln -s "$r/store/data" "$r/res/sweep-20261016T100000Z-9"
+	export CDPATH="$r/store"
+	run --separate-stderr config_check_multi_run "$r/res/sweep-20261016T100000Z-9" 0 \
+		"$r/res/sweep-20261016T100000Z-9/a.tsv" "$r/res/sweep-20261016T100000Z-9/b.tsv"
+	assert_success
+	config_check_multi_run "$r/res/sweep-20261016T100000Z-9" 0 \
+		"$r/res/sweep-20261016T100000Z-9/a.tsv" "$r/res/sweep-20261016T100000Z-9/b.tsv"
+	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-9 ]
+	cd "$r/res/sweep-20261016T100000Z-9"
+	config_check_multi_run . 0 ./a.tsv b.tsv
+	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-9 ]
+}
+
+@test "config_check_multi_run: newest first by timestamp across sweeps and standalone runs; a run alone in its dir only gets its report (X8, U1)" {
+	local r="${BATS_TEST_TMPDIR}/r5"
+	mkdir -p "$r/sweep-20261015T100000Z-1" "$r/run-20261014T100000Z-3"
+	printf '# RUN_ID=c1\nrun_id\nc1\n' > "$r/sweep-20261015T100000Z-1/a.tsv"
+	printf '# RUN_ID=20261016T100000Z-2\nrun_id\n' > "$r/latency-20261016T100000Z-2.tsv"
+	printf '# RUN_ID=20261014T100000Z-3\nrun_id\n' > "$r/run-20261014T100000Z-3/latency-20261014T100000Z-3.tsv"
+	run --separate-stderr config_check_multi_run "$r" 0 "$r/sweep-20261015T100000Z-1/a.tsv" \
+		"$r/latency-20261016T100000Z-2.tsv" "$r/run-20261014T100000Z-3/latency-20261014T100000Z-3.tsv"
+	assert_failure 1
+	[[ "$stderr" == *"  20261016T100000Z-2 ("*"  sweep-20261015T100000Z-1:"*"  20261014T100000Z-3 ("* ]]
+	# The run already in run-<id>/ is never told to nest into run-<id>/run-<id>/.
+	[[ "$stderr" == *"  20261014T100000Z-3 (alone in ${r}/run-20261014T100000Z-3):"$'\n'"    "*" --results-dir '${r}/run-20261014T100000Z-3'"* ]]
+	[[ "$stderr" != *"run-20261014T100000Z-3/run-"* ]]
+	# The standalone run beside the sweep dir and run-<id>/ moves; the find never takes them.
+	[[ "$stderr" == *"    mkdir -p '${r}/run-20261016T100000Z-2'"* ]]
+	[[ "$stderr" == *"! -name 'sweep-*' ! -name 'run-20261016T100000Z-2'"* ]]
 }
 
 

@@ -112,7 +112,9 @@ Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
   REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
   COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,

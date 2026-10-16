@@ -72,7 +72,9 @@ Exit codes:
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   SETUP_CONTEXTS, CHURN_MESH_SIZES (--mesh-sizes), CHURN_INTENSITIES (--churn-intensities;
   empty: CHURN_DEPLOYMENT_COUNT), CHURN_SCALE_TO_REPLICAS, CHURN_ITERATIONS,
   CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
@@ -376,6 +378,6 @@ echo "Charts written to $CHARTS_FILE"
 # R19: the report is written; now say how many cells failed and exit non-zero if any did
 # (or the Istio version changed under the sweep), also in sweep-outcome.txt and the
 # markdown summary (C3).
-sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --record "$SWEEP_DIR" --md "$MD_FILE" \
+sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$SWEEP_DIR" --md "$MD_FILE" \
 	"$(( ${#MESH_SIZES[@]} * ${#INTENSITIES[@]} ))" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} \
 	|| exit "$SWEEP_FAILED_EXIT"

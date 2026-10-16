@@ -397,9 +397,10 @@ render_scale_envelope() {
 	node_cpu_m="$(jq_get '.metadata.capacity.node_alloc_cpu_m')"
 	node_mem_mi="$(jq_get '.metadata.capacity.node_alloc_mem_mi')"
 	istio_version="$(jq_get '.metadata.istio_version')"
-	# R4: live = read from every member's Istio CR; pin = config only (a dry run, or a
-	# TSV written before the live read: unknown).
-	istio_version_src="$(jq_get '.metadata.istio_version_source') (pin $(jq_get '.metadata.istio_version_pin'))"
+	# R4: live = each member's active IstioRevision .spec.version, read before the first
+	# step; pin = config only (a dry run, or a TSV written before the live read: unknown).
+	# The sweep reads it again at the end and appends its outcome below this envelope (R1).
+	istio_version_src="$(jq_get '.metadata.istio_version_source') (pin $(jq_get '.metadata.istio_version_pin'); by member $(jq_get '.metadata.istio_version_by_context'))"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
 
 	local proxies_peak proxies_cluster_peak proxy_check istiod_cpu_pct istiod_mem_pct istiod_rss_pct node_cpu_pct node_mem_pct
@@ -547,7 +548,7 @@ render_scale_envelope() {
 | Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Traffic management | ${peak_traffic} | sweep peak \`traffic_config\` (none preferred when a vsdr cell ties at the peak mesh size) |
-| Istio version | ${istio_version}, source ${istio_version_src} | sweep header \`ISTIO_VERSION\` (\`ISTIO_VERSION_SOURCE\` live: every member's Istio CR \`.spec.version\`) |
+| Istio version | ${istio_version}, source ${istio_version_src} | sweep header \`ISTIO_VERSION\` (\`ISTIO_VERSION_SOURCE\` live: each member's active IstioRevision \`.spec.version\` at the start; the end-of-sweep read is under "Sweep outcome" below when it found a change) |
 
 > **Connected proxies per cluster** is \`pilot_xds\` summed over one cluster's istiod replicas at one scrape. It should be about equal to that cluster's Running injected pods (gateways included), which the proxy check compares. It is still not a mesh-wide sum and not endpoints; do not expect it to equal total endpoints. **Per istiod replica** is the busiest single replica (max over the per-pod rows), about 1/R of the cluster figure with R replicas.
 

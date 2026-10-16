@@ -720,10 +720,16 @@ with_run_config() {
 	assert_output --partial "warning: --resume: --config late.env"
 	assert_output --partial "(RUN_CONFIG_SHA256=none)"
 	assert_output --partial "exceeds safety limit 1"
-	# The sweep recorded ISTIO_VERSION=unknown (nothing answered); a mesh that now answers
-	# the pin is another version than the rows already there: --resume refuses before any
-	# change and appends nothing, under either ISTIO_VERSION_CHECK policy (R4, A5).
+	# The sweep recorded ISTIO_VERSION=unknown (nothing answered): the version its rows ran on
+	# is not known, so it can never be resumed, whatever the mesh answers now (not even
+	# unknown again): --resume refuses before any change, appends nothing and keeps the
+	# interrupted run's sweep-outcome.txt, under either ISTIO_VERSION_CHECK policy (R4, A5, X6).
 	grep -qx '# ISTIO_VERSION=unknown' "$d"/controlplane-*.tsv
+	[ -f "$d/sweep-outcome.txt" ]
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read when it started, so the version its rows ran on is not known and it cannot be resumed. Fix access to the member"
+	[ -f "$d/sweep-outcome.txt" ]
 	local bin="${BATS_TEST_TMPDIR}/bin" tsv before policy
 	mkdir -p "$bin"
 	printf '#!/bin/sh
@@ -736,8 +742,20 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 		ISTIO_VERSION_CHECK="$policy" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" \
 			--contexts ci-a --mesh-sizes 1 --service-counts 5
 		assert_failure 1
-		assert_output --regexp "--resume: this sweep recorded ISTIO_VERSION=unknown, but the mesh now runs v?[0-9][^ ]*, so its new rows would be credited to unknown\. Start a new sweep: --resume never mixes Istio versions in one TSV, whatever ISTIO_VERSION_CHECK says\."
+		assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read when it started"
+		refute_output --partial "so its new rows would be credited to"
 		refute_output --partial "Capacity plan check"
 		[ "$(cat "$tsv")" = "$before" ]
 	done
+	# A sweep that recorded a version, resumed while a member cannot be read (warn lets the
+	# read go on): fix access and run the same --resume again, not "start a new sweep" (X6).
+	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
+	before="$(cat "$tsv")"
+	ISTIO_VERSION_CHECK=warn KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=v1.30.5, but the running version cannot be read now on every member (ISTIO_VERSION=unknown;"
+	assert_output --partial "then run the same --resume again."
+	refute_output --partial "Start a new sweep"
+	[ "$(cat "$tsv")" = "$before" ]
+	[ -f "$d/sweep-outcome.txt" ]
 }

@@ -75,7 +75,9 @@ Usage: $(basename "$0") [options]
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
   PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
   (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),
@@ -433,5 +435,5 @@ sweep_cleanup
 # R19: the reports are written; now say how many cells failed and exit non-zero if any
 # did (or the Istio version changed under the sweep), also in sweep-outcome.txt and the
 # summary (C3).
-sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --record "$SWEEP_DIR" --md "$COMBINED" \
+sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --run-id "$SWEEP_RUN_ID" --record "$SWEEP_DIR" --md "$COMBINED" \
 	"${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || exit "$SWEEP_FAILED_EXIT"

@@ -13,10 +13,11 @@
 # Reports both n_total (rows considered) and n_valid (rows used). The P1 phases
 # (P1_local_wall, P1_conv_*) take one sample per iteration, from its first valid row:
 # P1 is measured on the source once per iteration and repeated on every remote's row
-# (prop_p1_first in tests/lib/propagation.sh).
+# (prop_p1_first in tests/lib/propagation.sh), so their n_total and n_valid both count
+# iterations (distinct run_id, iteration), as 002's summary does (M1).
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION and its
-# ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE,
+# ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE / ISTIO_VERSION_BY_CONTEXT,
 # KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
 # report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
 # over all input TSVs.
@@ -81,8 +82,8 @@ Usage: $(basename "$0") [options]
   --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
-Example (one sweep, as 006 runs it):
-  $(basename "$0") --results-dir ${PROPAGATION_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
+Example (one sweep, as 006 runs it; from the repo root):
+  tests/propagation/$(basename "$0") --results-dir ${PROPAGATION_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
 TSV columns consumed (positions are stable; new columns appended):
   1  run_id            2  mesh_size       3  iteration       4  source_ctx
@@ -109,7 +110,8 @@ Filtering policy (rows excluded from numeric aggregation):
   scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS
 P2 values are additionally suppressed when p2_dirty == 1.
 
-n_total / n_valid: rows considered vs rows used after the above filtering.
+n_total / n_valid: rows considered vs rows used after the above filtering; for
+the P1 phases, iterations (P1 is one sample per iteration, as 002's summary counts it).
 Averages are rounded to the nearest ms; json mesh_size is a number.
 
 text, markdown and json also carry an "istiod restart diagnostics" section: every
@@ -185,7 +187,7 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
 # over every input (config_merged_preamble): one value, or mixed:a,b with a warning.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -417,6 +419,9 @@ NF < 10 { next }
 
 	n_total[ms]++
 	seen[ms] = 1
+	# P1 is one sample per iteration (D1), so its n_total counts iterations too (M1):
+	# distinct (run_id, iteration) per mesh size, kept or dropped, as the 002 summary does.
+	if (!((ms, $1, $3) in p1_iter_seen)) { p1_iter_seen[ms, $1, $3] = 1; p1_total[ms]++ }
 
 	# Which rows count: prop_drop_reason (tests/lib/propagation.sh), the definition
 	# 002 summarizes its own rows with (R6). It drops restarted=1|unknown, p1_overflow=1,
@@ -444,6 +449,8 @@ NF < 10 { next }
 		cp99_n[ms]++; cp99_vals[ms, cp99_n[ms]] = cp99 + 0
 	}
 }
+# phase_total: the n_total of a phase row: iterations for the P1 phases, rows otherwise.
+function phase_total(phase, ms) { return (phase ~ /^P1/) ? p1_total[ms] + 0 : n_total[ms] + 0 }
 function load(into, src, ms, n,    i) {
 	for (i = 1; i <= n; i++) into[i] = src[ms, i]
 }
@@ -508,6 +515,7 @@ report_endpoint_text() {
 	echo "=== Endpoint Propagation Latency ==="
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "Run metadata:"
 	format_preamble_text
 	echo ""
@@ -515,27 +523,27 @@ report_endpoint_text() {
 	function stats_line(label, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
 			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
-				ms, label, n_total[ms], "-", "-", "-", "-", "-", "-", "-"
+				ms, label, phase_total(label, ms), "-", "-", "-", "-", "-", "-", "-"
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		printf "  %-3s | %-26s | %5d | %5d | %11d | %11d | %11.0f | %11s | %11s | %11s\n",
-			ms, label, n_total[ms], n, arr[1], arr[n], sum/n,
+			ms, label, phase_total(label, ms), n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
 	# Histogram rows: no average (see bucket_range); max is the worst bucket.
 	function stats_line_hist(label, src, ms, n,    arr) {
 		if (n == 0) {
 			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
-				ms, label, n_total[ms], "-", "-", "-", "-", "-", "-", "-"
+				ms, label, phase_total(label, ms), "-", "-", "-", "-", "-", "-", "-"
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		printf "  %-3s | %-26s | %5d | %5d | %11s | %11s | %11s | %11s | %11s | %11s\n",
-			ms, label, n_total[ms], n,
+			ms, label, phase_total(label, ms), n,
 			bucket_range(arr[1]), bucket_range(arr[n]), "-",
 			bucket_range(percentile(arr, n, 50)),
 			bucket_range(percentile(arr, n, 95)),
@@ -569,14 +577,14 @@ report_endpoint_csv() {
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function csv_line(ms, phase, src, n, hist,    arr, sum, i) {
 		if (n == 0) {
-			printf "%s,%s,%d,%d,,,,,,,\n", ms, phase, n_total[ms], 0
+			printf "%s,%s,%d,%d,,,,,,,\n", ms, phase, phase_total(phase, ms), 0
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		printf "%s,%s,%d,%d,%d,%d,%.0f,%s,%s,%s,%s\n",
-			ms, phase, n_total[ms], n, arr[1], arr[n], sum/n,
+			ms, phase, phase_total(phase, ms), n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99),
 			(hist ? bucket_range(arr[n]) : "")
 	}
@@ -616,7 +624,7 @@ when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additi
 
 | Stat column | Definition |
 |-------------|------------|
-| `n_total` | All rows considered for the phase/mesh size. |
+| `n_total` | All rows considered for the phase/mesh size, kept or dropped. For the P1 phases, iterations (distinct run_id and iteration, as the probe's summary counts them), so a clean run reads `n_total == n_valid` and an overflowed iteration shows as one less `n_valid`. |
 | `n_valid` | Samples used for the statistics: rows surviving the drop filters above. For the P1 phases, iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so it counts once, from the iteration's first valid row. |
 | `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean (rounded to ms) latency across the `n_valid` samples. A histogram row (`P1 conv_*`) has no average (`-`): the mean of bucket bounds can land in a bucket no row hit, so read `max` (the worst bucket). CSV and JSON keep the numbers and add `worst_bucket`, the range of `max_ms`, for those phases. |
 | `p50_ms` / `p95_ms` / `p99_ms` | Nearest-rank percentiles across the `n_valid` samples; `p95`/`p99` are `N/A` below `PROPAGATION_PERCENTILE_MIN_N` samples (a single worst sample would otherwise masquerade as a tail quantile). |
@@ -632,6 +640,7 @@ report_endpoint_markdown() {
 	echo "# Endpoint Propagation Latency"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
 	echo ""
 	for f in "${ENDPOINT_FILES[@]}"; do
@@ -641,26 +650,26 @@ report_endpoint_markdown() {
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function md_row(phase, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
-			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, n_total[ms], 0
+			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, phase_total(phase, ms), 0
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		printf "| %s | %d | %d | %d | %d | %.0f | %s | %s | %s |\n",
-			phase, n_total[ms], n, arr[1], arr[n], sum/n,
+			phase, phase_total(phase, ms), n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
 	# Histogram rows: no average (see bucket_range); max is the worst bucket.
 	function md_row_hist(phase, src, ms, n,    arr) {
 		if (n == 0) {
-			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, n_total[ms], 0
+			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, phase_total(phase, ms), 0
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		printf "| %s | %d | %d | %s | %s | - | %s | %s | %s |\n",
-			phase, n_total[ms], n,
+			phase, phase_total(phase, ms), n,
 			bucket_range(arr[1]), bucket_range(arr[n]),
 			bucket_range(percentile(arr, n, 50)),
 			bucket_range(percentile(arr, n, 95)),
@@ -727,6 +736,7 @@ report_endpoint_json() {
 	printf '{"metadata":'
 	format_preamble_json
 	printf ',"pooled_runs":%s' "$(config_multi_run_json)"
+	printf ',"sweep_outcome":%s' "$(sweep_outcome_recorded "$RESULTS_DIR" json)"
 	printf ',"rows":'
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function jnum(v) { return (v == "N/A" ? "null" : v) }
@@ -735,13 +745,13 @@ report_endpoint_json() {
 	function jms(ms) { return (ms ~ /^[0-9]+$/) ? ms : sprintf("\"%s\"", ms) }
 	function json_obj(ms, phase, src, n, hist,    arr, sum, i) {
 		if (n == 0) {
-			return sprintf("{\"mesh_size\":%s,\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0,\"min_ms\":null,\"max_ms\":null,\"avg_ms\":null,\"p50_ms\":null,\"p95_ms\":null,\"p99_ms\":null,\"worst_bucket\":null}", jms(ms), phase, n_total[ms])
+			return sprintf("{\"mesh_size\":%s,\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0,\"min_ms\":null,\"max_ms\":null,\"avg_ms\":null,\"p50_ms\":null,\"p95_ms\":null,\"p99_ms\":null,\"worst_bucket\":null}", jms(ms), phase, phase_total(phase, ms))
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		return sprintf("{\"mesh_size\":%s,\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":%d,\"min_ms\":%d,\"max_ms\":%d,\"avg_ms\":%.0f,\"p50_ms\":%s,\"p95_ms\":%s,\"p99_ms\":%s,\"worst_bucket\":%s}",
-			jms(ms), phase, n_total[ms], n, arr[1], arr[n], sum/n,
+			jms(ms), phase, phase_total(phase, ms), n, arr[1], arr[n], sum/n,
 			jnum(percentile(arr, n, 50)), jnum(percentile(arr, n, 95)), jnum(percentile(arr, n, 99)),
 			(hist ? sprintf("\"%s\"", bucket_range(arr[n])) : "null"))
 	}

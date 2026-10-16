@@ -597,8 +597,41 @@ fit_of() {
 		'["mixed:v1.30.5/v1.29.0",["mixed:v1.30.5/v1.29.0"],["mixed:v1.30.5/v1.29.0"]]' ]
 	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION mixed:v1.30.5/v1.29.0)"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
-	assert_output --partial "ISTIO_VERSION=mixed:v1.30.5/v1.29.0,"
+	# One `# KEY=value` line per key (X5): a value with a comma or slash stays one value.
+	assert_line "# ISTIO_VERSION=mixed:v1.30.5/v1.29.0"
+	assert_line --regexp '^# ISTIO_VERSION_PIN=.+$'
+	assert_line --regexp '^# ISTIO_VERSION_BY_CONTEXT=.+$'
 	refute_output --partial "mixed:mixed:"
+	# Pooled with a run on one of those versions: each distinct version once (X13).
+	sed 's|^# RUN_ID=.*|# RUN_ID=other|' "$FIXTURE" > "${d}/controlplane-other.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$d" --allow-multi-run --format csv
+	assert_success
+	assert_line "# ISTIO_VERSION=mixed:v1.30.5,v1.29.0,1.30.5"
+	refute_output --partial "mixed:mixed:"
+}
+
+@test "a re-generated report repeats the sweep's recorded outcome (sweep-outcome.txt) in text, md and json; ISTIO_VERSION_BY_CONTEXT in every format (X3, X4)" {
+	local d="${BATS_TEST_TMPDIR}/outcome"
+	mkdir -p "$d"
+	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=v1.30.5\n# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5|' "$FIXTURE" > "${d}/controlplane-r.tsv"
+	printf '%s\n' '# Sweep outcome (tests/lib/common.sh sweep_outcome)' 'RUN_ID=r' 'EXIT=4' \
+		'PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)' > "${d}/sweep-outcome.txt"
+	run --separate-stderr "$REPORT" --results-dir "$d"
+	assert_success
+	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.txt, exit 4):"
+	assert_output --partial "#   error: the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	assert_output --partial "ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5"
+	run --separate-stderr "$REPORT" --results-dir "$d" --format markdown
+	assert_output --partial "> - error: the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
+	run --separate-stderr "$REPORT" --results-dir "$d" --format json
+	[ "$(jq -c '[.sweep_outcome.exit, .sweep_outcome.problems[0], .metadata.istio_version_by_context]' <<<"$output")" = \
+		'[4,"the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)","<mesh-a-ctx>=v1.30.5"]' ]
+	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
+	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
+	rm "${d}/sweep-outcome.txt"
+	run --separate-stderr "$REPORT" --results-dir "$d" --format json
+	[ "$(jq -c '.sweep_outcome' <<<"$output")" = null ]
 }
 
 @test "growth report: a base-dir report of two sweeps lists every run, warns, and names the runs behind each pods-vs-config-only side" {

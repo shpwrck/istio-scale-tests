@@ -121,15 +121,23 @@ version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSIO
 Before its first change, every suite reads the version each member runs: the IstioRevision its
 `istios.sailoperator.io default` CR names as active (`.status.activeRevisionName`), and that
 revision's `.spec.version`, which must be an exact version (an alias such as `v1.30-latest` is
-not). A CR that is not Healthy, not reconciled yet, or migrating between revisions reads as
-unknown. The suite records the result as `ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`),
+not). A CR that is not reconciled yet (generation, `Reconciled` condition), has no active
+revision, or is migrating between revisions reads as unknown. A CR whose only issue is readiness
+(its state is not Healthy because istiod or IstioCNI is not ready) still gives its version: the
+suite reads it again every `ISTIO_VERSION_READY_POLL_SEC` (5) for up to
+`ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, then records the version with a warning on stderr.
+The suite records the result as `ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`),
 `ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which reads nothing) and
 `ISTIO_VERSION_BY_CONTEXT`. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another
 version than the pin, members on different versions, or a member that cannot be read stop every
 suite but gateway-api (a read-only check that only records it) before it changes anything;
 `ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs (`mixed:<a>/<b>` or `unknown`
 when they differ or cannot be read). A sweep reads it again at the end and exits 4 when it
-changed. It is set in the environment, never in a `--config` file.
+changed; istiod or IstioCNI not ready at the end, on the same version, is a warning. The sweep
+writes that outcome to `sweep-outcome.txt` in its results dir, and every report re-generated
+from that dir repeats its errors and warnings; a sweep dir without `sweep-outcome.txt` is a
+sweep that died before its end. These keys are set in the environment, never in a `--config`
+file.
 
 ### Run config (`--config FILE`)
 
@@ -149,8 +157,8 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   bad line or a key outside the suite's list rejects the whole file before anything runs, with
   `file:line` and the reason.
 - **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
-  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK` (the version check
-  above) and the version pins in `config/versions.env`.
+  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK` and
+  `ISTIO_VERSION_READY_*` (the version check above) and the version pins in `config/versions.env`.
 - **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
   what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
   A standalone step still takes those on the command line.

@@ -68,13 +68,15 @@ characters; rename others with `kubectl config rename-context`.
 ./tests/churn-dataplane/001-setup-coexec-test.sh \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 
-# 2. Baseline window (60 s at 200 QPS)
-TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
-./tests/churn-dataplane/002-run-baseline-probe.sh \
+# 2. Baseline window (60 s at 200 QPS). One run id for 002 and 003, so the TSV, its
+#    reach-<id>.tsv and istiod-diag-<id>/ all name the same run.
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-smoke"
+TSV="tests/churn-dataplane/results/churn-dataplane-${RUN_ID}.tsv"
+./tests/churn-dataplane/002-run-baseline-probe.sh --run-id "$RUN_ID" \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --combo-id smoke --output-file "$TSV"
 
 # 3. Churn window (same load + 5 scale ops/s); computes Δp99 against the baseline row
-./tests/churn-dataplane/003-run-churn-probe.sh \
+./tests/churn-dataplane/003-run-churn-probe.sh --run-id "$RUN_ID" \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --combo-id smoke \
   --churn-rate 5 --baseline-file "$TSV" --output-file "$TSV"
 

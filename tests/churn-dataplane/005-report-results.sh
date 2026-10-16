@@ -62,8 +62,8 @@ Usage: $(basename "$0") [options]
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
 
-Example (one sweep, as 004 runs it):
-  $(basename "$0") --results-dir ${COEXEC_RESULTS_DIR}/sweep-<RUN_ID> --format md
+Example (one sweep, as 004 runs it; from the repo root):
+  tests/churn-dataplane/$(basename "$0") --results-dir ${COEXEC_RESULTS_DIR}/sweep-<RUN_ID> --format md
 
 Every format has a "Remote coverage" section from the reach-*.tsv files next to the
 TSVs: per mesh size and source, how many remotes passed every reach check
@@ -162,9 +162,11 @@ fi
 RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
-# R4: live (every member's Istio CR) or pin (config only), and the configured pin.
+# R4: live (each member's active IstioRevision) or pin (config only), the configured pin,
+# and which member ran which (X4, PL19).
 ISTIO_VERSION_SOURCE_STR="$(extract_preamble_kv ISTIO_VERSION_SOURCE)"
 ISTIO_VERSION_PIN_STR="$(extract_preamble_kv ISTIO_VERSION_PIN)"
+ISTIO_VERSION_BY_CONTEXT_STR="$(extract_preamble_kv ISTIO_VERSION_BY_CONTEXT)"
 KUBE_VERSIONS_STR="$(extract_preamble_kv KUBE_VERSIONS)"
 # Tuning levers + sidecar egress hosts queried live when the sweep ran.
 TUNING_BASELINE_STR="$(extract_preamble_kv TUNING_BASELINE)"
@@ -346,6 +348,7 @@ emit_metadata_lines() {
 	printf '%s ISTIO_VERSION=%s\n'         "$prefix" "${ISTIO_VERSION_STR:-unknown}"
 	printf '%s ISTIO_VERSION_SOURCE=%s\n'  "$prefix" "${ISTIO_VERSION_SOURCE_STR:-unknown}"
 	printf '%s ISTIO_VERSION_PIN=%s\n'     "$prefix" "${ISTIO_VERSION_PIN_STR:-unknown}"
+	printf '%s ISTIO_VERSION_BY_CONTEXT=%s\n' "$prefix" "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}"
 	printf '%s KUBE_VERSIONS=%s\n'         "$prefix" "${KUBE_VERSIONS_STR:-unknown}"
 	printf '%s TUNING_BASELINE=%s\n'       "$prefix" "${TUNING_BASELINE_STR:-unknown}"
 	printf '%s SIDECAR_EGRESS_HOSTS=%s\n'  "$prefix" "${SIDECAR_EGRESS_HOSTS_STR:-unknown}"
@@ -373,6 +376,7 @@ emit_metadata_lines() {
 report_text() {
 	echo "=== sweep-summary ==="
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" text
 	emit_metadata_lines "#"
 	echo ""
 	reach_coverage_render text <(printf '%s' "$REACH_ROWS")
@@ -424,6 +428,7 @@ report_json() {
 		--arg istio_version    "${ISTIO_VERSION_STR:-unknown}" \
 		--arg istio_version_source "${ISTIO_VERSION_SOURCE_STR:-unknown}" \
 		--arg istio_version_pin "${ISTIO_VERSION_PIN_STR:-unknown}" \
+		--arg istio_version_by_context "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}" \
 		--arg kube_versions    "${KUBE_VERSIONS_STR:-unknown}" \
 		--arg tuning_baseline  "${TUNING_BASELINE_STR:-unknown}" \
 		--arg sidecar_egress_hosts "${SIDECAR_EGRESS_HOSTS_STR:-unknown}" \
@@ -451,7 +456,8 @@ report_json() {
 		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
 		--argjson rows         "$rows" \
 		--argjson pooled_runs  "$(config_multi_run_json)" \
-		'{pooled_runs: $pooled_runs, metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
+		'{pooled_runs: $pooled_runs, sweep_outcome: $sweep_outcome, metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -501,6 +507,7 @@ report_md() {
 	echo "# sweep-summary"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "| Field | Value |"
 	echo "|-------|-------|"
 	echo "| RUN_ID | \`${RUN_ID:-unknown}\` |"
@@ -508,6 +515,7 @@ report_md() {
 	echo "| ISTIO_VERSION | \`${ISTIO_VERSION_STR:-unknown}\` |"
 	echo "| ISTIO_VERSION_SOURCE | \`${ISTIO_VERSION_SOURCE_STR:-unknown}\` |"
 	echo "| ISTIO_VERSION_PIN | \`${ISTIO_VERSION_PIN_STR:-unknown}\` |"
+	echo "| ISTIO_VERSION_BY_CONTEXT | \`${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}\` |"
 	echo "| KUBE_VERSIONS | \`${KUBE_VERSIONS_STR:-unknown}\` |"
 	echo "| TUNING_BASELINE | \`${TUNING_BASELINE_STR:-unknown}\` |"
 	echo "| SIDECAR_EGRESS_HOSTS | \`${SIDECAR_EGRESS_HOSTS_STR:-unknown}\` |"

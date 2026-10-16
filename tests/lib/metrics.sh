@@ -100,7 +100,7 @@ counter_delta() {
 		local which="final"
 		[[ "$b" == unscraped ]] && which="baseline"
 		[[ "$b" == unscraped && "$a" == unscraped ]] && which="baseline and final"
-		echo "warning: ${what}: the ${which} scrape is empty or unreadable (a failed scrape); delta N/A" >&2
+		echo "warning: ${what}: the ${which} scrape is empty, short or unreadable (a failed scrape); delta N/A" >&2
 		echo "N/A"
 	elif [[ "$a" =~ $num && "$b" =~ $num ]]; then
 		if (( a >= b )); then

@@ -64,7 +64,9 @@ Options:
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
 
 Exit codes:
@@ -352,7 +354,7 @@ run_pass() {
 	done
 }
 
-ABORTED=0
+ABORTED=0 ABORT_REASON=""
 step=0
 for p in "${PASSES[@]}"; do
 	step=$((step + 1))
@@ -377,7 +379,7 @@ for p in "${PASSES[@]}"; do
 		if ! "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
 			echo "REVERT_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/REVERT_FAILED"
 			echo "error: reverting ${p} failed; stopping the sweep so later passes are not contaminated" >&2
-			ABORTED=1
+			ABORTED=1 ABORT_REASON="REVERT_FAILED: reverting pass ${p} failed, so later passes did not run"
 			break
 		fi
 	fi
@@ -412,8 +414,8 @@ for p in "${PASSES[@]}"; do
 	done
 done
 outcome_rc=0 stop_args=()
-((ABORTED == 0)) || stop_args=(--stopped 1)
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --unit passes \
+((ABORTED == 0)) || stop_args=(--stopped 1 --stop-reason "$ABORT_REASON")
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --unit passes \
 	--where "Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it" \
 	--record "$SWEEP_DIR" --md "${SWEEP_DIR}/sweep-comparison.md" "${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((ABORTED)); then exit 1; fi

@@ -405,3 +405,78 @@ _in_path() {
 	grep -qx 'SKIPPED_BY=SKIPPED_MEM_GUARD x1' "${d}/sweep-outcome.txt"
 	grep -qx -- '- The sweep stopped early; it exits 1.' "$md"
 }
+
+@test "sweep_outcome under set -euo pipefail: FAILED, SKIPPED and their tallies, and with every list empty (X1)" {
+	local d="${BATS_TEST_TMPDIR}/setu"
+	mkdir -p "$d"
+	run --separate-stderr bash -c 'set -euo pipefail; ROOT="$1"; source "$1/tests/lib/common.sh"
+		sweep_outcome --record "$2" 5 PROBE_FAILED SETUP_FAILED SKIPPED_MEM_GUARD' _ "$ROOT" "$d"
+	assert_failure 4
+	assert_output "1 of 5 cells were skipped on purpose, not failed: SKIPPED_MEM_GUARD x1."
+	[[ "$stderr" == "error: 2 of 5 cells failed: PROBE_FAILED x1, SETUP_FAILED x1. "* ]]
+	grep -qx 'FAILED=2' "${d}/sweep-outcome.txt"
+	grep -qx 'FAILED_BY=PROBE_FAILED x1, SETUP_FAILED x1' "${d}/sweep-outcome.txt"
+	grep -qx 'SKIPPED=1' "${d}/sweep-outcome.txt"
+	grep -qx 'SKIPPED_BY=SKIPPED_MEM_GUARD x1' "${d}/sweep-outcome.txt"
+	run --separate-stderr bash -c 'set -euo pipefail; ROOT="$1"; source "$1/tests/lib/common.sh"
+		sweep_outcome --record "$2" --md "$2/none.md" 5' _ "$ROOT" "$d"
+	assert_success
+	[ -z "$stderr" ]
+	grep -qx 'FAILED=0' "${d}/sweep-outcome.txt"
+	grep -qx 'SKIPPED=0' "${d}/sweep-outcome.txt"
+}
+
+@test "sweep_outcome --md more than once: every existing file gets the outcome, a missing one is skipped (R1)" {
+	local d="${BATS_TEST_TMPDIR}/mds" f
+	mkdir -p "$d"
+	echo "# summary" > "${d}/sweep-x.md"
+	echo "# envelope" > "${d}/scale-envelope-x.md"
+	run --separate-stderr sweep_outcome --md "${d}/sweep-x.md" --md "${d}/missing.md" --md "${d}/scale-envelope-x.md" \
+		--problem "the Istio version changed during the sweep (a: v1 at the start, v2 at the end)" 3
+	assert_failure 4
+	for f in "${d}/sweep-x.md" "${d}/scale-envelope-x.md"; do
+		grep -qx '## Sweep outcome' "$f"
+		grep -q '^- error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end); exit 4\.$' "$f"
+	done
+	[ ! -e "${d}/missing.md" ]
+	# The scale envelope's Istio row points at that section.
+	grep -q 'the end-of-sweep read is under "Sweep outcome" below' "${ROOT}/tests/lib/envelope.sh"
+	grep -q -- '--md "$MD_FILE" --md "$ENVELOPE_FILE"' "${ROOT}/tests/controlplane/003-run-sweep.sh"
+}
+
+@test "sweep_outcome record: RUN_ID, HARNESS_SHA and why it stopped; sweep_outcome_recorded repeats it for a re-generated report (X3)" {
+	local d="${BATS_TEST_TMPDIR}/rec"
+	mkdir -p "$d"
+	harness_sha() { echo abc1234; }
+	run --separate-stderr sweep_outcome --stopped 3 --stop-reason "the reachability gate found an unreachable remote" \
+		--run-id 20261016T100000Z-1 --record "$d" --md "${d}/none.md" \
+		--note "istiod/CNI not ready at the end of the sweep, same Istio version (a: its state is IstioCNINotHealthy)" 4
+	assert_failure 3
+	grep -qx 'RUN_ID=20261016T100000Z-1' "${d}/sweep-outcome.txt"
+	grep -qx 'HARNESS_SHA=abc1234' "${d}/sweep-outcome.txt"
+	grep -qx 'STOP_REASON=the reachability gate found an unreachable remote' "${d}/sweep-outcome.txt"
+	echo 'PROBLEM=the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"' >> "${d}/sweep-outcome.txt"
+	run sweep_outcome_recorded "$d" text
+	assert_line "SWEEP OUTCOME (recorded in sweep-outcome.txt, exit 3):"
+	assert_line '  error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"'
+	assert_line "  warning: istiod/CNI not ready at the end of the sweep, same Istio version (a: its state is IstioCNINotHealthy)"
+	assert_line "  stopped early: the reachability gate found an unreachable remote"
+	run sweep_outcome_recorded "$d" md
+	assert_line '> **Sweep outcome** (recorded in `sweep-outcome.txt`, exit 3):'
+	assert_line '> - error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"'
+	run sweep_outcome_recorded "$d" json
+	[ "$(jq -c '[.exit, .run_id, .problems[0], (.notes | length), .stop_reason]' <<<"$output")" = \
+		'[3,"20261016T100000Z-1","the Istio version changed during the sweep (a: v1 at the start, v2 at the end) \"quoted\"",1,"the reachability gate found an unreachable remote"]' ]
+	# A stop with only its reason: the markdown line names it.
+	echo "# r" > "${d}/r.md"
+	run sweep_outcome --stopped 1 --stop-reason "REVERT_FAILED: reverting pass 01-x failed" --md "${d}/r.md" 2
+	grep -qx -- '- The sweep stopped early (REVERT_FAILED: reverting pass 01-x failed); it exits 1.' "${d}/r.md"
+	# No record: nothing in text or md, null in json; a clean record prints nothing either.
+	run sweep_outcome_recorded "${d}/none" text
+	assert_output ""
+	run sweep_outcome_recorded "${d}/none" json
+	assert_output null
+	sweep_outcome --record "$d" 2 >/dev/null
+	run sweep_outcome_recorded "$d" md
+	assert_output ""
+}

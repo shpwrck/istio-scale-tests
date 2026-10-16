@@ -113,7 +113,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 		"$(extract_counter_sum "$FIXTURES/prometheus_counters.txt" pilot_xds_pushes)" pilot_xds_pushes
 	assert_success
 	assert_output "N/A"
-	[[ "$stderr" == *"pilot_xds_pushes: the baseline scrape is empty or unreadable"* ]]
+	[[ "$stderr" == *"pilot_xds_pushes: the baseline scrape is empty, short or unreadable"* ]]
 	run --separate-stderr counter_delta 500 unscraped x
 	assert_output "N/A"
 	[[ "$stderr" == *"the final scrape is empty"* ]]

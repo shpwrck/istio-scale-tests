@@ -109,7 +109,9 @@ and top_code.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
   COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
   COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS (expected pin;
   warns on mismatch), COEXEC_RESULTS_DIR (--output-dir; relative to the repo root),

@@ -104,7 +104,7 @@ config_suite_prefixes() {
 # (tests/lib/istiod-diag.sh). An unknown-key error names them after the suite's own list.
 CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
-CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK"
+CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
 # unknown for a file without them (written before R4: its ISTIO_VERSION is the pin, unchecked).
 # shellcheck disable=SC2034
@@ -128,6 +128,7 @@ _config_env_only_reason() {
 	*_TEST_NAMESPACE) echo "cleanup deletes this namespace, so a typo in a file could delete a real one" ;;
 	*_MAX_MATRIX) echo "the large-matrix acknowledgment stays per invocation (PL10)" ;;
 	ISTIO_VERSION_CHECK) echo "running on a mesh whose Istio version is not the pin is acknowledged per invocation, like the pins themselves" ;;
+	ISTIO_VERSION_READY_*) echo "the version check's readiness wait is set per invocation, with ISTIO_VERSION_CHECK" ;;
 	esac
 }
 
@@ -366,12 +367,24 @@ _config_distinct() {
 
 # _config_join_mixed: stdin's lines (distinct values) as one value: the line itself when
 # there is one, else mixed:a,b (joined with " | " when a value holds a comma, as a
-# KUBE_VERSIONS list does; an empty value reads (empty)). No input, no output.
+# KUBE_VERSIONS list does; an empty value reads (empty)). A value that is itself mixed
+# (ISTIO_VERSION=mixed:a/b, a run whose members differed) adds its parts, so each
+# distinct value is listed once: mixed:a,b, never mixed:mixed:a/b,a (X13). No input, no
+# output.
 _config_join_mixed() {
 	awk '
-		{ v[++n] = $0; if (index($0, ",")) c = 1 }
+		{ raw[++r] = $0 }
 		END {
-			if (n == 0) exit
+			if (r == 0) exit
+			if (r == 1) { print raw[1]; exit }
+			for (i = 1; i <= r; i++) {
+				np = (raw[i] ~ /^mixed:/) ? split(substr(raw[i], 7), part, "/") : 0
+				if (!np) { np = 1; part[1] = raw[i] }
+				for (q = 1; q <= np; q++) if (!(part[q] in vseen)) {
+					vseen[part[q]] = 1; v[++n] = part[q]
+					if (index(part[q], ",")) c = 1
+				}
+			}
 			if (n == 1) { print v[1]; exit }
 			out = "mixed:"
 			for (i = 1; i <= n; i++) out = out (i > 1 ? (c ? " | " : ",") : "") (v[i] == "" ? "(empty)" : v[i])
@@ -453,9 +466,20 @@ config_merged_preamble() {
 				k = order[i]
 				if (!(k in real)) continue
 				if (nv[k] == 1) { print k "=" val[k, 1]; continue }
+				# A value that is itself mixed adds its parts, each listed once (X13,
+				# as _config_join_mixed).
+				nf = 0
+				delete fl
+				delete fseen
+				for (j = 1; j <= nv[k]; j++) {
+					np = (val[k, j] ~ /^mixed:/) ? split(substr(val[k, j], 7), part, "/") : 0
+					if (!np) { np = 1; part[1] = val[k, j] }
+					for (q = 1; q <= np; q++) if (!(part[q] in fseen)) { fseen[part[q]] = 1; fl[++nf] = part[q] }
+				}
+				if (nf == 1) { print k "=" fl[1]; continue }
 				out = ""
-				for (j = 1; j <= nv[k]; j++)
-					out = out (j > 1 ? ((k in comma) ? " | " : ",") : "") (val[k, j] == "" ? "(empty)" : val[k, j])
+				for (j = 1; j <= nf; j++)
+					out = out (j > 1 ? ((k in comma) ? " | " : ",") : "") (fl[j] == "" ? "(empty)" : fl[j])
 				print k "=mixed:" out
 			}
 		}' "$@"
@@ -498,29 +522,51 @@ _config_sq() {
 	printf "'%s'" "${1//\'/$q}"
 }
 
+# _config_run_ids <tsv>...: the distinct run ids the files carry (preamble SWEEP_RUN_ID and
+# RUN_ID, and the run_id column of every data row), one per line, for the find patterns
+# config_check_multi_run prints. An id holding a glob character, a slash or a space is left
+# out: it is no safe -name pattern.
+# shellcheck disable=SC2329
+_config_run_ids() {
+	awk -F'\t' '
+		function add(v) { if (v != "" && v !~ /[][*?\/ ]/ && !(v in seen)) { seen[v] = 1; print v } }
+		/^# SWEEP_RUN_ID=/ { add(substr($0, 16)); next }
+		/^# RUN_ID=/ { add(substr($0, 10)); next }
+		/^#/ || $1 == "run_id" || NF == 0 { next }
+		{ add($1) }' "$@" 2>/dev/null || true
+}
+
 # config_check_multi_run <results_dir> <allow 0|1> <tsv>...: a report pools every TSV
 # under its results dir (PL6), so count the runs among its inputs, with or without
 # --config and --results-dir: one per sweep-* dir and one per distinct sweep-level id
-# outside one (_config_run_key, on each file's canonical directory; the per-iteration
-# RUN_IDs of one sweep are one run, PL26). Sets MULTI_RUN_N, MULTI_RUN_IDS (sorted,
-# comma-separated) and MULTI_RUN_HARNESS_SHAS / MULTI_RUN_ISTIO_VERSIONS (distinct preamble
-# values in file order; unknown for a file without the line). More than one run with
-# <allow> 0 dies, listing the five newest runs with the commands that report each alone
-# (for files outside a sweep-* dir, first the commands that move them into a directory
-# of their own); with <allow> 1 (--allow-multi-run) it warns, and the report says so in
-# every format (config_multi_run_note, _csv, _json).
+# outside one (_config_run_key, on each file's directory; the per-iteration RUN_IDs of
+# one sweep are one run, PL26). The directory is the logical one (`cd` and `pwd`, not
+# `pwd -P`): `.` and a trailing slash still resolve, and a symlinked sweep-X keeps its
+# sweep key. Sets MULTI_RUN_N, MULTI_RUN_IDS (sorted, comma-separated) and
+# MULTI_RUN_HARNESS_SHAS / MULTI_RUN_ISTIO_VERSIONS (distinct preamble values in file
+# order; unknown for a file without the line). More than one run with <allow> 0 dies,
+# listing the five newest runs (by the timestamp their ids start with) with the commands
+# that report each alone. A run outside a sweep-* dir that shares its directory with
+# another run first gets commands that move it into a directory of its own, safe to paste
+# twice (U1): its input TSVs by path, then every file named after one of its ids
+# (_config_run_ids: istiod-diag-<id>/, reach-<id>.tsv, ...). A run alone in its directory
+# only gets its report command. With <allow> 1 (--allow-multi-run) it warns, and the
+# report says so in every format (config_multi_run_note, _csv, _json).
 # shellcheck disable=SC2329,SC2034
 config_check_multi_run() {
-	local dir="$1" allow="$2" f k d i=0 runs sq new
-	local -A run_dir=() canon=()
+	local dir="$1" allow="$2" f k d i=0 n runs new tgt cd_k alone id pat
+	local -A run_dir=() canon=() run_files=()
+	local -a mr_keys=() mr_dirs=() rfiles=()
 	shift 2
 	for f in "$@"; do
 		d=.
 		[[ "$f" == */* ]] && d="${f%/*}"
 		while [[ "$d" == */ && "$d" != / ]]; do d="${d%/}"; done
 		[[ -n "$d" ]] || d=/
-		[[ -n "${canon[$d]+x}" ]] || canon[$d]="$(cd "$d" 2>/dev/null && pwd -P || echo "$d")"
+		[[ -n "${canon[$d]+x}" ]] || canon[$d]="$(CDPATH='' cd -- "$d" 2>/dev/null && pwd || echo "$d")"
 		k="$(_config_run_key "$f" "${canon[$d]}")"
+		mr_keys+=("$k") mr_dirs+=("${canon[$d]}")
+		run_files[$k]+="${f}"$'\n'
 		[[ -z "${run_dir[$k]+x}" ]] || continue
 		run_dir[$k]="$d"
 	done
@@ -536,7 +582,8 @@ config_check_multi_run() {
 	fi
 	{
 		echo "error: ${dir} holds ${MULTI_RUN_N} runs, and a report pools every TSV under its results dir. Report one run (newest first; add your other flags):"
-		# Run ids start with a UTC timestamp, so the reverse sort is newest first.
+		# Newest first by the UTC timestamp a run id starts with (sweep- stripped), so a
+		# sweep and a standalone run sort together; ids without one come last (X8).
 		while IFS= read -r k; do
 			if ((++i > 5)); then
 				echo "  ... and $((MULTI_RUN_N - 5)) more"
@@ -547,22 +594,40 @@ config_check_multi_run() {
 			sweep-*)
 				echo "  ${k}:"
 				echo "    $0 --results-dir $(_config_sq "$d")"
-				;;
-			*)
-				# Every file of a run carries its id in its name (istiod-diag-<RUN_ID>/ too);
-				# the dot dir keeps the glob from matching the new directory itself.
-				new="run-${k%.tsv}"
-				echo "  ${k} (its files are in ${d}, outside a sweep-* dir; move them into a directory of their own first):"
-				sq="$(_config_sq "$d")"
-				if [[ "$k" == *.tsv ]]; then
-					echo "    mkdir $(_config_sq "${d}/${new}") && mv $(_config_sq "${d}/${k}") $(_config_sq "${d}/${new}/")"
-				else
-					echo "    mkdir $(_config_sq "${d}/.${new}") && mv ${sq}/*$(_config_sq "$k")* $(_config_sq "${d}/.${new}/") && mv $(_config_sq "${d}/.${new}") $(_config_sq "${d}/${new}")"
-				fi
-				echo "    $0 --results-dir $(_config_sq "${d}/${new}")"
+				continue
 				;;
 			esac
-		done < <(LC_ALL=C sort -r <<<"$runs")
+			# Alone: no other run's file sits in its directory or below it.
+			cd_k="${canon[$d]}" alone=1
+			for n in "${!mr_keys[@]}"; do
+				[[ "${mr_keys[n]}" != "$k" ]] || continue
+				if [[ "${mr_dirs[n]}" == "$cd_k" || "${mr_dirs[n]}" == "${cd_k%/}"/* ]]; then alone=0; break; fi
+			done
+			if ((alone)); then
+				echo "  ${k} (alone in ${d}):"
+				echo "    $0 --results-dir $(_config_sq "$d")"
+				continue
+			fi
+			new="run-${k%.tsv}"
+			tgt="${d%/}/${new}"
+			echo "  ${k} (its files are in ${d}, outside a sweep-* dir, with another run's; move them into a directory of their own first):"
+			mapfile -t rfiles <<<"${run_files[$k]%$'\n'}"
+			echo "    mkdir -p $(_config_sq "$tgt")"
+			printf '    for f in'
+			for f in "${rfiles[@]}"; do printf ' %s' "$(_config_sq "$f")"; done
+			# shellcheck disable=SC2016  # $f is the operator's shell variable
+			printf '; do if [ -e "$f" ]; then mv "$f" %s; fi; done\n' "$(_config_sq "${tgt}/")"
+			# Every file named after one of the run's ids (istiod-diag-<id>/, reach-<id>.tsv,
+			# a report .md): never a sweep-* dir, nor the new directory itself.
+			pat=""
+			while IFS= read -r id; do
+				[[ -z "$id" ]] || pat+="${pat:+ -o} -name $(_config_sq "*${id}*")"
+			done < <(_config_run_ids "${rfiles[@]}")
+			if [[ -n "$pat" ]]; then
+				echo "    find $(_config_sq "$d") -mindepth 1 -maxdepth 1 \\(${pat} \\) ! -name 'sweep-*' ! -name $(_config_sq "$new") -exec mv {} $(_config_sq "${tgt}/") \;"
+			fi
+			echo "    $0 --results-dir $(_config_sq "$tgt")"
+		done < <(awk '{ s = $0; sub(/^sweep-/, "", s); print (s ~ /^[0-9]/ ? 1 : 0) "\t" s "\t" $0 }' <<<"$runs" | LC_ALL=C sort -r | cut -f3)
 		echo "Or pass --allow-multi-run to pool them on purpose: every format then says it pools ${MULTI_RUN_N} runs and lists their HARNESS_SHA and ISTIO_VERSION values."
 	} >&2
 	exit 1

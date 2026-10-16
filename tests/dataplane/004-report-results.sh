@@ -66,8 +66,8 @@ Usage: $(basename "$0") [options]
                      row (rule=no_valid_rows); stderr names the rule and the remotes.
   -h, --help         Show this help.
 
-Example (one sweep, as 003 runs it):
-  $(basename "$0") --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
+Example (one sweep, as 003 runs it; from the repo root):
+  tests/dataplane/$(basename "$0") --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
 Every format includes a "Remote coverage" section before the results table: per
 mesh size and source, how many remotes passed every reach check (reach-*.tsv from
@@ -637,6 +637,7 @@ report_text() {
 	echo "=== Data-Plane Latency Results ==="
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "Files: ${TSV_FILES[*]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Numeric averages exclude rows with"
 	echo "status != OK or istiod_restarted != 0. n_total and n_valid are reported per cell."
@@ -779,6 +780,7 @@ report_markdown() {
 	echo "# Data-Plane Latency Results"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "Aggregated by (mesh_size, qps_target, target_class). Rows with status != OK or"
 	echo "istiod_restarted != 0 are excluded from numeric averages."
 	echo ""
@@ -918,7 +920,8 @@ report_json() {
 		--argjson no_valid "$RV_NO_VALID" \
 		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
 		--argjson pooled_runs "$(config_multi_run_json)" \
-		'{metadata: $metadata, pooled_runs: $pooled_runs,
+		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
+		'{metadata: $metadata, pooled_runs: $pooled_runs, sweep_outcome: $sweep_outcome,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
 		            n_placeholder: $n_placeholder, placeholders: $placeholders,

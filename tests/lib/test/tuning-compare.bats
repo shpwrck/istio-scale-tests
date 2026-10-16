@@ -131,7 +131,9 @@ prop_row() {
 	assert_output --partial "| P1 local push (ms) | 350.00 |"
 	assert_output --partial "| P2 remote EDS (ms) | 50.00 |"
 	run "$COMPARE" --results-dir "$P" --format md
-	[[ "$output" == *"| P1 local push (ms) | 350.00 |"$'\n'"|   n (got/attempted) | 6/17 |"* ]]
+	# Without ITERATIONS in the preamble, P1 is attempted once per iteration the pass
+	# wrote (7), not per row (17) (X2).
+	[[ "$output" == *"| P1 local push (ms) | 350.00 |"$'\n'"|   n (got/attempted) | 6/7 |"* ]]
 	[[ "$output" == *"| P2 remote EDS (ms) | 50.00 |"$'\n'"|   n (got/attempted) | 15/17 |"* ]]
 	# 005 on the same rows: the same n and mean.
 	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "${P}/baseline" --format json
@@ -173,6 +175,39 @@ prop_row() {
 	run "$COMPARE" --results-dir "$C" --format md
 	assert_success
 	[[ "$output" == *"| Local convergence (ms) | 150.00 |"$'\n'"|   n (got/attempted) | 2/5 |"* ]]
+}
+
+@test "tuning 004: a propagation profile whose P1 convergence overflowed shows overflow (N iterations), never a better bucket (M2)" {
+	P="${BATS_TEST_TMPDIR}/psweep5"
+	mkdir -p "${P}/baseline" "${P}/01-x"
+	printf '# SUITE=propagation\n# PASSES=baseline,01-x\n' > "${P}/sweep-metadata.txt"
+	local i r
+	{
+		echo "# RUN_ID=r1"
+		echo "$PROP_HDR"
+		for i in 1 2 3 4 5; do for r in b c; do prop_row "$i" "$r" 100 OK 1000; done; done
+	} > "${P}/baseline/endpoint-r1.tsv"
+	# Iterations 2, 3 and 4 overflowed (+Inf; every remote row carries p1_overflow=1); in
+	# iteration 5 istiod also restarted, which drops it before the overflow counts.
+	{
+		echo "# RUN_ID=r2"
+		echo "$PROP_HDR"
+		for i in 1 2 3 4 5; do for r in b c; do prop_row "$i" "$r" 100 OK 99; done; done \
+			| awk -F'\t' 'BEGIN { OFS = "\t" } $3 >= 2 && $3 <= 4 { $15 = 1 } $3 == 5 { $15 = 1; $16 = 1 } 1'
+	} > "${P}/01-x/endpoint-r2.tsv"
+	run "$COMPARE" --results-dir "$P" --format md
+	assert_success
+	# Without M2 the profile read 0-100 (better than the baseline's 500-1000) from its one
+	# clean iteration.
+	[[ "$output" == *"| P1 convergence p99 worst bucket (ms) | 500-1000 | overflow (3 iterations) |"$'\n'"|   n (got/attempted) | 5/5 | 4/5 (baseline n 5/5) |"* ]]
+	assert_output --partial "overflow (N iterations)"
+	run "$COMPARE" --results-dir "$P"
+	assert_output --regexp 'P1 convergence p99 worst bucket \(ms\) +500-1000 +overflow \(3 iterations\)'
+	# One overflowed iteration reads singular.
+	awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 3 || $3 == 4 { $15 = 0 } 1' "${P}/01-x/endpoint-r2.tsv" > "${P}/x.tsv"
+	mv "${P}/x.tsv" "${P}/01-x/endpoint-r2.tsv"
+	run "$COMPARE" --results-dir "$P" --format md
+	assert_output --partial "| overflow (1 iteration) |"
 }
 
 @test "tuning 004: an invalid (restarted) row counts as attempted in n (R12)" {

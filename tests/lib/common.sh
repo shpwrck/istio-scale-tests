@@ -235,6 +235,51 @@ _sweep_outcome_by() {
 	printf '%s\n' "$@" | sort | uniq -c | awk '{ printf "%s%s x%d", (NR > 1 ? ", " : ""), $2, $1 }'
 }
 
+# sweep_outcome_recorded <results_dir> <text|md|json>: what the sweep recorded in
+# <results_dir>/sweep-outcome.txt (sweep_outcome --record), for a report re-generated after
+# the sweep (X3): text and md print the exit and every PROBLEM, NOTE and STOP_REASON line
+# (nothing when the file is absent or records none); json prints {"exit":N,"run_id":"...",
+# "problems":[...],"notes":[...],"stop_reason":"..."}, or null without the file.
+# shellcheck disable=SC2329
+sweep_outcome_recorded() {
+	local f="${1}/sweep-outcome.txt" fmt="$2"
+	if [[ ! -f "$f" ]]; then
+		[[ "$fmt" != json ]] || echo null
+		return 0
+	fi
+	awk -v fmt="$fmt" '
+		function jstr(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); gsub(/\t/, "\\t", v); return "\"" v "\"" }
+		/^EXIT=/ { ex = substr($0, 6) }
+		/^RUN_ID=/ { rid = substr($0, 8) }
+		/^STOP_REASON=/ { stop = substr($0, 13) }
+		/^PROBLEM=/ { pr[++np] = substr($0, 9) }
+		/^NOTE=/ { nt[++nn] = substr($0, 6) }
+		END {
+			if (fmt == "json") {
+				printf "{\"exit\":%s,\"run_id\":%s,\"problems\":[", (ex ~ /^[0-9]+$/ ? ex : "null"), jstr(rid)
+				for (i = 1; i <= np; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(pr[i])
+				printf "],\"notes\":["
+				for (i = 1; i <= nn; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(nt[i])
+				printf "],\"stop_reason\":%s}\n", jstr(stop)
+				exit
+			}
+			if (np + nn == 0 && stop == "") exit
+			if (fmt == "md") {
+				printf "> **Sweep outcome** (recorded in `sweep-outcome.txt`, exit %s):\n", ex
+				for (i = 1; i <= np; i++) printf "> - error: %s\n", pr[i]
+				for (i = 1; i <= nn; i++) printf "> - warning: %s\n", nt[i]
+				if (stop != "") printf "> - stopped early: %s\n", stop
+				printf "\n"
+			} else {
+				printf "SWEEP OUTCOME (recorded in sweep-outcome.txt, exit %s):\n", ex
+				for (i = 1; i <= np; i++) printf "  error: %s\n", pr[i]
+				for (i = 1; i <= nn; i++) printf "  warning: %s\n", nt[i]
+				if (stop != "") printf "  stopped early: %s\n", stop
+				printf "\n"
+			}
+		}' "$f"
+}
+
 # sweep_outcome [options] <cells> [<reason>...]: the closing lines of a sweep, after its
 # reports. One <reason> argument per cell without a measurement: a SKIPPED_* reason (a
 # guard skipped the cell, or its series after such a skip) counts as skipped, any other
@@ -246,27 +291,38 @@ _sweep_outcome_by() {
 #   --stopped <rc>   the sweep stopped early and exits <rc> (1 or 3), which outranks 4: the
 #                    cells are still counted, "All cells ran" is never printed (they did
 #                    not), the lines name <rc>, and it returns <rc>
+#   --stop-reason <text>  why it stopped (RETIRE_FAILED, the reach gate, REVERT_FAILED, ...);
+#                    named in the record and the markdown
 #   --unit <noun>    what a cell is called, plural (default cells; tuning: passes)
 #   --where <text>   where a failed one shows in the results (default: the report's
 #                    placeholder rows, in n_total, not n_valid)
 #   --problem <msg>  the sweep failed although its cells ran (A6: the Istio version changed
 #                    under it); printed, recorded and counted like a failed cell
 #   --note <msg>     a caveat; printed and recorded, not a failure
-#   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt (C3)
-#   --md <file>      also append it to that markdown report, as a "Sweep outcome" section
+#   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt (C3), with RUN_ID
+#                    (--run-id) and HARNESS_SHA (harness_sha, when preamble.sh is sourced)
+#   --run-id <id>    the sweep's RUN_ID, for the record
+#   --md <file>      also append it to that markdown report, as a "Sweep outcome" section;
+#                    may be given more than once (the summary and the scale envelope, R1).
+#                    A file that does not exist is skipped.
+# A report re-generated later shows the record's PROBLEM and NOTE lines again
+# (sweep_outcome_recorded); a sweep dir without sweep-outcome.txt is a sweep that died
+# before its end.
 # shellcheck disable=SC2329
 sweep_outcome() {
-	local rc=0 stop_rc="" unit=cells where="" record="" md="" cells r by_fail="" by_skip=""
-	local -a problems=() notes=() failed_r=() skipped_r=() lines=()
+	local rc=0 stop_rc="" stop_why="" unit=cells where="" record="" run_id_r="" cells r by_fail="" by_skip=""
+	local -a problems=() notes=() failed_r=() skipped_r=() lines=() mds_r=()
 	while (($#)); do
 		case "$1" in
 		--stopped) stop_rc="$2"; shift 2 ;;
+		--stop-reason) stop_why="$2"; shift 2 ;;
+		--run-id) run_id_r="$2"; shift 2 ;;
 		--unit) unit="$2"; shift 2 ;;
 		--where) where="$2"; shift 2 ;;
 		--problem) problems+=("$2"); shift 2 ;;
 		--note) notes+=("$2"); shift 2 ;;
 		--record) record="$2"; shift 2 ;;
-		--md) md="$2"; shift 2 ;;
+		--md) mds_r+=("$2"); shift 2 ;;
 		*) break ;;
 		esac
 	done
@@ -295,7 +351,9 @@ sweep_outcome() {
 	for r in ${problems[@]+"${problems[@]}"}; do lines+=("err|error: ${r}${tail}"); done
 	for r in ${notes[@]+"${notes[@]}"}; do lines+=("err|warning: ${r}."); done
 	if [[ -n "$stop_rc" && ${#failed_r[@]} -eq 0 && ${#problems[@]} -eq 0 ]]; then
-		lines+=("rec|The sweep stopped early; it exits ${stop_rc}.")
+		lines+=("rec|The sweep stopped early${stop_why:+ (${stop_why})}; it exits ${stop_rc}.")
+	elif [[ -n "$stop_why" ]]; then
+		lines+=("rec|It stopped early: ${stop_why}.")
 	fi
 	for r in ${lines[@]+"${lines[@]}"}; do
 		case "$r" in
@@ -307,8 +365,11 @@ sweep_outcome() {
 		{
 			echo "# Sweep outcome (tests/lib/common.sh sweep_outcome)"
 			echo "# DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+			echo "RUN_ID=${run_id_r:-unknown}"
+			echo "HARNESS_SHA=$(declare -F harness_sha >/dev/null && harness_sha || echo unknown)"
 			echo "EXIT=${rc}"
 			echo "STOPPED=$([[ -n "$stop_rc" ]] && echo 1 || echo 0)"
+			echo "STOP_REASON=${stop_why}"
 			echo "UNIT=${unit}"
 			echo "TOTAL=${cells}"
 			echo "FAILED=${#failed_r[@]}"
@@ -320,7 +381,9 @@ sweep_outcome() {
 		} 2>/dev/null > "${record}/sweep-outcome.txt" \
 			|| echo "warning: could not write ${record}/sweep-outcome.txt" >&2
 	fi
-	if [[ -n "$md" && -f "$md" ]]; then
+	local md_r
+	for md_r in ${mds_r[@]+"${mds_r[@]}"}; do
+		[[ -f "$md_r" ]] || continue
 		{
 			echo ""
 			echo "## Sweep outcome"
@@ -328,7 +391,7 @@ sweep_outcome() {
 			echo "Exit ${rc}. $([[ -n "$record" ]] && echo "Also in \`sweep-outcome.txt\`.")"
 			echo ""
 			for r in ${lines[@]+"${lines[@]}"}; do echo "- ${r#*|}"; done
-		} 2>/dev/null >> "$md" || echo "warning: could not append the outcome to ${md}" >&2
-	fi
+		} 2>/dev/null >> "$md_r" || echo "warning: could not append the outcome to ${md_r}" >&2
+	done
 	return "$rc"
 }

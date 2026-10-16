@@ -181,19 +181,55 @@ p1rows() {
 	assert_output 1
 }
 
-@test "005: 10 iterations x 3 remotes: P1's n is 10 in every format, so its p99 stays under the percentile floor (D1)" {
+@test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor (D1, M1)" {
 	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
+	# P1 is one sample per iteration, so its n_total counts iterations too (M1).
 	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid, .p99_ms]}] | add' <<<"$output")" = \
-		'{"P1_local_wall":[30,10,null],"P1_conv_p50":[30,10,null],"P1_conv_p99":[30,10,null],"P2_discovery":[30,30,500],"P3_dataplane":[30,30,3000]}' ]
+		'{"P1_local_wall":[10,10,null],"P1_conv_p50":[10,10,null],"P1_conv_p99":[10,10,null],"P2_discovery":[30,30,500],"P3_dataplane":[30,30,3000]}' ]
 	# The P1 mean is over the 10 iterations (1001..1010).
 	[ "$(jq -r '.rows[] | select(.phase == "P1_local_wall") | .avg_ms' <<<"$output")" = 1006 ]
 	run "$REPORT" --results-dir "$RES" --format csv
-	assert_line --regexp '^4,P1_local_wall,30,10,1001,1010,1006,'
+	assert_line --regexp '^4,P1_local_wall,10,10,1001,1010,1006,'
+	assert_line --regexp '^4,P1_conv_p99,10,10,'
 	assert_line --regexp '^4,P2_discovery,30,30,'
 	run "$REPORT" --results-dir "$RES" --format markdown
 	assert_success
+	assert_output --partial "| P1 local xDS (wall) | 10 | 10 |"
+	assert_output --partial "| P2 remote istiod EDS | 30 | 30 |"
+	run "$REPORT" --results-dir "$RES"
+	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +10 \|'
+	assert_output --regexp 'P1 conv_p99 \(hist\) +\| +10 \| +10 \|'
 	run "$REPORT" --results-dir "$RES" --format charts
 	assert_success
+}
+
+@test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them (M1)" {
+	source "${ROOT}/tests/lib/propagation.sh"
+	# Every remote row of iterations 2, 5 and 9 carries p1_overflow=1 (P1 is source-side).
+	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d \
+		| awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 2 || $3 == 5 || $3 == 9 { $15 = 1 } 1'; } > "${RES}/endpoint-r1.tsv"
+	run "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid]}] | add' <<<"$output")" = \
+		'{"P1_local_wall":[10,7],"P1_conv_p50":[10,7],"P1_conv_p99":[10,7],"P2_discovery":[30,21],"P3_dataplane":[30,21]}' ]
+	run "$REPORT" --results-dir "$RES" --format csv
+	assert_line --regexp '^4,P1_local_wall,10,7,'
+	run "$REPORT" --results-dir "$RES" --format markdown
+	assert_output --partial "| P1 local xDS (wall) | 10 | 7 |"
+	assert_output --partial "| P1 conv_p99 (hist) | 10 | 7 |"
+	run "$REPORT" --results-dir "$RES"
+	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +7 \|'
+	# 002's summary over the same rows (its SUMMARY_KV program: P1 n = prop_p1_sample over
+	# the kept rows, of the distinct (run_id, iteration)): n=7/10.
+	run awk -F'\t' "${PROP_ROW_AWK}"'
+		/^#/ || $1 == "run_id" { next }
+		{
+			if (!(($1 SUBSEP $3) in seen)) { seen[$1 SUBSEP $3] = 1; iters++ }
+			if (prop_drop_reason(1000) != "") next
+			if (prop_p1_sample()) p1++
+		}
+		END { print p1 "/" iters }' "${RES}/endpoint-r1.tsv"
+	assert_output "7/10"
 }

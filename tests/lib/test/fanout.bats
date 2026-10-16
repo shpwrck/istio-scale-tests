@@ -32,7 +32,7 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	run --separate-stderr counter_delta "$(fanout_counter_sum pilot_xds_pushes "$POD0" "$empty")" \
 		"$(fanout_counter_sum pilot_xds_pushes "$POD0" "$POD1")" pilot_xds_pushes
 	assert_output "N/A"
-	[[ "$stderr" == *"baseline scrape is empty or unreadable"* ]]
+	[[ "$stderr" == *"baseline scrape is empty, short or unreadable"* ]]
 }
 
 @test "fanout_counter_by_label_sum: sums eds across pods" {

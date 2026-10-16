@@ -33,7 +33,7 @@ err()  { fail=$((fail + 1)); echo "    FAIL: $1"; }
 # 1. bash -n syntax check
 step 1 "bash -n on all test scripts"
 syntax_fail=0
-for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh; do
+for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh; do
 	if ! bash -n "$f" 2>/dev/null; then
 		echo "    syntax error: $f"
 		bash -n "$f" 2>&1 || true
@@ -50,8 +50,8 @@ else
 	if command -v shellcheck >/dev/null 2>&1; then
 		# One call over every file, as CI runs it: shellcheck then follows a `source` of a file
 		# on the same command line, so a name used as an array in a lib and as a scalar in a
-		# suite is caught here too, not only in CI.
-		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh; then
+		# suite is caught here too, not only in CI (whose find also takes the bats fixtures).
+		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh; then
 			ok
 		else
 			err "shellcheck violations found"
@@ -212,8 +212,12 @@ EXTRACTED_PATTERNS=(
 	'istio_version_label() {'
 	# batch B: sweep outcome record (common.sh), multi-run refusal (config.sh)
 	'_sweep_outcome_by() {'
+	'sweep_outcome_recorded() {'
 	'_config_run_key() {'
+	'_config_run_ids() {'
 	'_config_sq() {'
+	'_config_distinct() {'
+	'_config_join_mixed() {'
 	# batch B: scrape completeness and per-replica counters (fanout.sh)
 	'fanout_body_complete() {'
 	'fanout_counter_in_batch() {'

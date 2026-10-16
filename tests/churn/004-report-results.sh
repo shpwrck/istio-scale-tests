@@ -2,9 +2,10 @@
 # Generate summary statistics from churn convergence TSV files.
 #
 # Every format carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs),
-# and HARNESS_SHA / ISTIO_VERSION as 002 recorded them, over all input TSVs: mixed:a,b
-# with a warning when they differ (PL26). More than one run under the results dir stops
-# the report unless --allow-multi-run, and then every format says so (R3).
+# and HARNESS_SHA / ISTIO_VERSION (with ISTIO_VERSION_SOURCE, _PIN and _BY_CONTEXT) as
+# 002 recorded them, over all input TSVs: mixed:a,b with a warning when they differ
+# (PL26). More than one run under the results dir stops the report unless
+# --allow-multi-run, and then every format says so (R3).
 # Histogram p99 columns show the worst bucket a valid row hit, and "overflow (N rows)"
 # when a row's p99 was in the +Inf bucket; they are never averaged.
 #
@@ -52,8 +53,8 @@ Usage: $(basename "$0") [options]
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
 
-Example (one sweep, as 003 runs it):
-  $(basename "$0") --results-dir ${CHURN_RESULTS_DIR}/sweep-<RUN_ID> --format md
+Example (one sweep, as 003 runs it; from the repo root):
+  tests/churn/$(basename "$0") --results-dir ${CHURN_RESULTS_DIR}/sweep-<RUN_ID> --format md
 
 Row statuses (column 21): only OK rows feed the averages (n_valid); every row counts in
 n_total.
@@ -76,9 +77,16 @@ folder) and a tally by cause.
 
 harness_sha and istio_version come from the TSV preambles (what 002 recorded), never
 from this checkout: "unknown (not recorded)" for a TSV written before 002 recorded
-them, mixed:a,b when the inputs differ. Histogram p99 columns (queue time, push time)
-show the worst bucket any valid row hit, or "overflow (N rows)" when N rows had their
-p99 above the highest finite bucket; csv adds worst_bucket and n_overflow columns.
+them; inputs that differ read mixed:<value>,<value> with each distinct value once
+(mixed:v1.30.5,v1.29.0, also when one run's own value was mixed:v1.30.5/v1.29.0).
+istio_version is each member's active IstioRevision .spec.version as 002 read it
+(istio_version_by_context: which member ran which).
+When the results dir holds sweep-outcome.txt (003 writes it at the end of a sweep),
+text and md repeat its errors and warnings (a version change under the sweep); a
+sweep dir without it is a sweep that died before its end.
+Histogram p99 columns (queue time, push time) show the worst bucket any valid row
+hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
+csv adds worst_bucket and n_overflow columns.
 
 Environment:
   CHURN_RESULTS_DIR  --results-dir default (relative to the repo root).
@@ -187,29 +195,25 @@ preamble_get() {
 # run_meta <key>: a `# <key>=` value as 002 (or the 003 placeholder) recorded it, over
 # every input TSV, never read from this checkout or environment: the report may run on
 # another commit than the probe. A file without the line (written before 002 recorded
-# the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b plus a
-# stderr warning (PL26).
+# the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b
+# (config_input_value: each distinct value once, X13) plus a stderr warning (PL26).
 run_meta() {
-	local key="$1" f v vals=""
-	for f in "${TSV_FILES[@]}"; do
-		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
-		v="${v#*=}"
-		[[ -n "$v" ]] || v="unknown (not recorded)"
-		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
-	done
-	if [[ "$vals" == *,* ]]; then
-		echo "warning: input TSVs disagree on ${key} (${vals}); the report mixes runs" >&2
-		echo "mixed:${vals}"
-	else
-		echo "$vals"
-	fi
+	local key="$1" f v n
+	v="$(config_input_value "$key" "unknown (not recorded)" "${TSV_FILES[@]}")"
+	[[ -n "$v" ]] || v="unknown (not recorded)"
+	# How many inputs differ: one file's own mixed:a/b is not a disagreement.
+	n="$(for f in "${TSV_FILES[@]}"; do grep -m1 "^# ${key}=" "$f" 2>/dev/null || echo; done | sort -u | awk 'END { print NR }')"
+	((n < 2)) || echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
+	echo "$v"
 }
 HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
 ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
-# R4: where ISTIO_VERSION came from (live: every member's Istio CR; pin: config only)
-# and the configured pin; files written before R4 read "unknown (not recorded)".
+# R4: where ISTIO_VERSION came from (live: each member's active IstioRevision; pin:
+# config only), the configured pin and which member ran which (X4, PL19); files written
+# before R4 read "unknown (not recorded)".
 ISTIO_VERSION_SOURCE_M="$(run_meta ISTIO_VERSION_SOURCE)"
 ISTIO_VERSION_PIN_M="$(run_meta ISTIO_VERSION_PIN)"
+ISTIO_VERSION_BY_CONTEXT_M="$(run_meta ISTIO_VERSION_BY_CONTEXT)"
 
 # Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
@@ -243,8 +247,10 @@ report_text() {
 	echo "=== Churn Convergence Results ==="
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
+	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
@@ -354,6 +360,7 @@ report_csv() {
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
 	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
+	echo "# ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
@@ -473,7 +480,8 @@ p99s can land in a bucket no row hit. `overflow (N rows)` means N valid rows had
 in the `+Inf` bucket (above the histogram's highest finite bucket); `N/A` means no valid row had a
 p99. `harness_sha` and `istio_version` in the front matter are what `002` recorded in the
 TSVs (`unknown (not recorded)` for a TSV written before it recorded them, `mixed:a,b` when
-the inputs differ), not the commit or pin of the host that ran this report.
+the inputs differ, each distinct value once), not the commit or pin of the host that ran
+this report.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
@@ -518,6 +526,7 @@ report_markdown() {
 	echo "istio_version: \"${istio_version}\""
 	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
 	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
+	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
 	echo "harness_sha: \"${harness_sha}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
@@ -529,6 +538,7 @@ report_markdown() {
 	echo "# Churn Convergence"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "| Axis | Values |"
 	echo "|------|--------|"
 	echo "| mesh_sizes | ${sweep_mesh} |"
@@ -650,6 +660,7 @@ report_charts() {
 	echo "istio_version: \"${ISTIO_VERSION_M}\""
 	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
 	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
+	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
 	echo "harness_sha: \"${HARNESS_SHA_M}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: \"${RUN_CONFIG_M}\""

@@ -142,3 +142,50 @@ two_pairs() {
 	assert_success
 	[ "$(jq -c '[.pooled_runs.runs, .metadata.qps]' <<<"$output")" = '[1,"100"]' ]
 }
+
+@test "005: the quick start's runs (one TSV named smoke, 003's istiod-diag under its own id) separate with the printed commands, pasted twice, and each printed report runs (U1)" {
+	local id1=20261016T100000Z-1 id2=20261016T100500Z-2 id3=20261016T110000Z-3 cmd pass
+	# 002 and 003 of one quick start: the TSV is churn-dataplane-smoke.tsv (no id in its
+	# name), its rows carry 002's and 003's ids, and 003's istiod-diag folder has the second.
+	{
+		echo "# RUN_ID=${id1}"
+		echo "$HDR"
+		crow c1 0 baseline 50 2 5 OK N/A N/A | sed "s/^r1/${id1}/"
+		crow c1 1 churn 48 4 9 OK 30 99 | sed "s/^r1/${id2}/"
+	} > "${RES}/churn-dataplane-smoke.tsv"
+	mkdir -p "${RES}/istiod-diag-${id2}"
+	: > "${RES}/istiod-diag-${id2}/notes.txt"
+	{
+		echo "# RUN_ID=${id3}"
+		echo "$HDR"
+		crow c1 0 baseline 50 2 5 OK N/A N/A | sed "s/^r1/${id3}/"
+		crow c1 1 churn 48 4 9 OK 30 99 | sed "s/^r1/${id3}/"
+	} > "${RES}/churn-dataplane-other.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_failure 1
+	[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+	[[ "$stderr" == *"    for f in '${RES}/churn-dataplane-smoke.tsv'; do"* ]]
+	[[ "$stderr" == *"-name '*${id1}*' -o -name '*${id2}*'"* ]]
+	for pass in 1 2; do
+		while IFS= read -r cmd; do
+			bash -c "$cmd"
+		done < <(sed -n 's/^    \(mkdir .*\|for f in .*\|find .*\)$/\1/p' <<<"$stderr")
+	done
+	[ -f "${RES}/run-${id1}/churn-dataplane-smoke.tsv" ]
+	[ -f "${RES}/run-${id1}/istiod-diag-${id2}/notes.txt" ]
+	[ -f "${RES}/run-${id3}/churn-dataplane-other.tsv" ]
+	[ -z "$(find "$RES" -mindepth 1 -maxdepth 1 ! -name 'run-*')" ]
+	# Each printed report command (one per run) now succeeds.
+	[ "$(grep -c "^    ${REPORT} --results-dir '${RES}/run-" <<<"$stderr")" = 2 ]
+	while IFS= read -r cmd; do
+		run --separate-stderr bash -c "$cmd"
+		assert_success
+		assert_output --partial "sweep-summary"
+		assert_output --partial "valid_runs"
+	done < <(sed -n "s|^    \(${REPORT} --results-dir .*\)$|\1|p" <<<"$stderr")
+	# The parent still holds two runs, each alone in its run-<id>/: only report commands.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_failure 1
+	[[ "$stderr" == *"  ${id3} (alone in ${RES}/run-${id3}):"* && "$stderr" == *"  ${id1} (alone in ${RES}/run-${id1}):"* ]]
+	[[ "$stderr" != *"mkdir"* && "$stderr" != *"run-${id1}/run-"* ]]
+}
