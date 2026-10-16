@@ -75,6 +75,18 @@ locals {
   acm_local_cluster_name = coalesce(var.acm_local_cluster_name, local.first_cluster_key)
   gitops_enabled         = var.enable_gitops
 
+  # Per-provider child-app defaults, deep-merged under gitops_app_overrides (BACKLOG 9.8):
+  # on ROSA the ingress gateway gets an NLB. Behind a Classic LB it received each HTTP
+  # request followed by a FIN and aborted it, so mesh checks through the ingress failed
+  # intermittently; the same gateway behind an NLB answered 36/36 (2026-10-14).
+  provider_app_defaults = var.cluster_provider == "rosa" && var.rosa_ingress_nlb ? {
+    "spoke-ingress-gateway-appset" = {
+      values = { template = { source = { helm = { valuesObject = {
+        service = { annotations = { "service.beta.kubernetes.io/aws-load-balancer-type" = "nlb" } }
+      } } } } }
+    }
+  } : {}
+
   argocd_cluster_count        = length(local.spoke_cluster_keys) + 1
   argocd_computed_min_shards  = max(1, ceil(local.argocd_cluster_count / var.argocd_clusters_per_shard))
   argocd_effective_max_shards = max(var.argocd_max_shards, local.argocd_computed_min_shards)

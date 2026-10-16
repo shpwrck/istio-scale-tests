@@ -108,7 +108,7 @@ source "${ROOT}/tests/lib/preamble.sh"
 # must stamp the same CONTROLPLANE_SCHEMA. Extend the expected tail when appending.
 # ---------------------------------------------------------------------------
 
-@test "controlplane header: 002 and 003 literals match, 63 fields, schema 63" {
+@test "controlplane header: 002 and 003 literals match, 66 fields, schema 66" {
 	collector="${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
 	precreate="${ROOT}/tests/controlplane/003-run-sweep.sh"
 	h002=$(grep -m1 'echo -e "timestamp\\t' "$collector" | sed 's/.*echo -e "//; s/" >>.*//')
@@ -116,10 +116,10 @@ source "${ROOT}/tests/lib/preamble.sh"
 	[ -n "$h002" ]
 	[ "$h002" = "$h003" ]
 	n=$(printf '%s' "$h003" | awk -F'\\\\t' '{ print NF }')
-	[ "$n" -eq 63 ]
-	[[ "$h003" == *'\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg\tservices_per_namespace\tworkload_mode\tmeasurement_pods\toutside_namespaces\toutside_discovery\twindow_kind\tistiod_services\tistiod_cpu_s_delta\tsidecar_mem_mi_avg\tgateway_clusters_max\tgateway_mem_mi_max\troot_cert_configmaps' ]]
-	grep -q 'echo "# CONTROLPLANE_SCHEMA=63"' "$collector"
-	grep -q 'echo "# CONTROLPLANE_SCHEMA=63"' "$precreate"
+	[ "$n" -eq 66 ]
+	[[ "$h003" == *'\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg\tservices_per_namespace\tworkload_mode\tmeasurement_pods\toutside_namespaces\toutside_discovery\twindow_kind\tistiod_services\tistiod_cpu_s_delta\tsidecar_mem_mi_avg\tgateway_clusters_max\tgateway_mem_mi_max\troot_cert_configmaps\tgateway_physical_mi_max\tgateway_ws_mi_max\tleftover_test_namespaces' ]]
+	grep -q 'echo "# CONTROLPLANE_SCHEMA=66"' "$collector"
+	grep -q 'echo "# CONTROLPLANE_SCHEMA=66"' "$precreate"
 	# The namespace-scaling keys come from the one shared emitter in both writers (PL36).
 	grep -q '^[[:space:]]*growth_preamble_lines ' "$collector"
 	grep -q '^[[:space:]]*growth_preamble_lines ' "$precreate"
@@ -137,7 +137,7 @@ source "${ROOT}/tests/lib/preamble.sh"
 # Each case stops before any cluster contact (a die, or the matrix-size guard).
 # ---------------------------------------------------------------------------
 
-# _resume_dir <subsets>: the VS/DR fixture widened to this harness's 63 columns (the
+# _resume_dir <subsets>: the VS/DR fixture widened to this harness's 66 columns (the
 # legacy-layout growth columns), so --resume accepts its width.
 _resume_dir() {
 	local subsets="$1" d="${BATS_TEST_TMPDIR}/sweep-fixture-t6"
@@ -146,8 +146,8 @@ _resume_dir() {
 		"${ROOT}/tests/lib/test/fixtures/controlplane_vsdr.tsv" \
 		| awk 'BEGIN { FS = OFS = "\t" }
 			/^#/ { print; next }
-			$1 == "timestamp" { print $0, "services_per_namespace", "workload_mode", "measurement_pods", "outside_namespaces", "outside_discovery", "window_kind", "istiod_services", "istiod_cpu_s_delta", "sidecar_mem_mi_avg", "gateway_clusters_max", "gateway_mem_mi_max", "root_cert_configmaps"; next }
-			{ print $0, 0, "pods", $4 * $5, 0, "none", "deploy", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A" }' \
+			$1 == "timestamp" { print $0, "services_per_namespace", "workload_mode", "measurement_pods", "outside_namespaces", "outside_discovery", "window_kind", "istiod_services", "istiod_cpu_s_delta", "sidecar_mem_mi_avg", "gateway_clusters_max", "gateway_mem_mi_max", "root_cert_configmaps", "gateway_physical_mi_max", "gateway_ws_mi_max", "leftover_test_namespaces"; next }
+			{ print $0, 0, "pods", $4 * $5, 0, "none", "deploy", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A" }' \
 		> "${d}/controlplane-fixture-t6.tsv"
 	printf '%s' "$d"
 }

@@ -61,6 +61,11 @@ TSVs: per mesh size and source, how many remotes passed every reach check
 files (the check was off, or the TSV predates it) it says "no reachability data".
 Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 200
 share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
+Each average counts only the valid pairs with a number in that column (N/A when none).
+churn_convergence_p99 is the worst bucket a valid run hit (labels in ms, no unit
+suffix), or "overflow (N runs)"; csv and json split it into
+churn_convergence_p99_worst and churn_convergence_overflow_runs. json numbers are
+numbers and N/A is null.
 
 text, md and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
@@ -192,7 +197,14 @@ REACH_NOT_REACHABLE="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { n++ } END { pr
 # validity counts, then the underlying numbers):
 #   mesh_size  churn_rate  delta_p99_ms  stdev_delta_p99  total_runs  valid_runs
 #   baseline_p99_ms  churn_p99_ms  baseline_p50_ms  churn_p50_ms
-#   baseline_qps  churn_qps  churn_eds_pushes  churn_convergence_p99
+#   baseline_qps  churn_qps  churn_eds_pushes  churn_convergence_p99_worst
+#   churn_convergence_overflow_runs
+# Each average is over the valid pairs that have a number in that column (its own
+# count), so an N/A p50 or QPS is left out instead of counting as 0; N/A when none
+# has. churn_convergence_p99_worst is the highest bucket range (labels without a unit;
+# headers say ms) a valid pair's p99 hit, "overflow" when any valid pair's p99 was in
+# the +Inf bucket (churn_convergence_overflow_runs counts them). It is never averaged:
+# the mean of interpolated p99s can land in a bucket no run hit.
 aggregate() {
 	awk -F'\t' '
 	function is_valid_row(restarted, status) {
@@ -204,16 +216,17 @@ aggregate() {
 	function bucket_range(upper_ms) {
 		if (upper_ms == "N/A" || upper_ms == "overflow" || upper_ms == "") return upper_ms
 		if (upper_ms+0 <= 0)     return "N/A"
-		if (upper_ms+0 <= 100)   return "0-100ms"
-		if (upper_ms+0 <= 500)   return "100-500ms"
-		if (upper_ms+0 <= 1000)  return "500-1000ms"
-		if (upper_ms+0 <= 3000)  return "1000-3000ms"
-		if (upper_ms+0 <= 5000)  return "3000-5000ms"
-		if (upper_ms+0 <= 10000) return "5000-10000ms"
-		if (upper_ms+0 <= 20000) return "10000-20000ms"
-		if (upper_ms+0 <= 30000) return "20000-30000ms"
-		return ">30000ms"
+		if (upper_ms+0 <= 100)   return "0-100"
+		if (upper_ms+0 <= 500)   return "100-500"
+		if (upper_ms+0 <= 1000)  return "500-1000"
+		if (upper_ms+0 <= 3000)  return "1000-3000"
+		if (upper_ms+0 <= 5000)  return "3000-5000"
+		if (upper_ms+0 <= 10000) return "5000-10000"
+		if (upper_ms+0 <= 20000) return "10000-20000"
+		if (upper_ms+0 <= 30000) return "20000-30000"
+		return ">30000"
 	}
+	function avg_fmt(s, n, fmt) { return (n > 0) ? sprintf(fmt, s / n) : "N/A" }
 
 	!/^#/ && !/^run_id/ && NF >= 17 {
 		# Pair rows within one file: combo ids such as "ms1-cr1" repeat across sweeps.
@@ -245,7 +258,7 @@ aggregate() {
 				ch_p99[combo] = is_num(p99) ? p99 + 0 : "N/A"
 				ch_qps[combo] = is_num(qps_actual) ? qps_actual + 0 : "N/A"
 				ch_eds[combo] = is_num(eds_pushes) ? eds_pushes + 0 : "N/A"
-				ch_conv[combo] = is_num(conv_p99) ? conv_p99 + 0 : "N/A"
+				ch_conv[combo] = is_num(conv_p99) ? conv_p99 + 0 : (conv_p99 == "overflow" ? "overflow" : "N/A")
 			}
 		}
 	}
@@ -275,15 +288,18 @@ aggregate() {
 			mean_dp99[rk] += (dp99 - old_mean) / nv
 			m2_dp99[rk] += (dp99 - old_mean) * (dp99 - mean_dp99[rk])
 
-			s_bp50[rk] += (bl_p50[combo] == "N/A" ? 0 : bl_p50[combo])
+			# p99s are numeric here (gated above); p50 and QPS may be N/A, so each
+			# keeps its own count and an N/A never adds a 0.
 			s_bp99[rk] += bl_p99[combo]
-			s_cp50[rk] += (ch_p50[combo] == "N/A" ? 0 : ch_p50[combo])
 			s_cp99[rk] += ch_p99[combo]
-			s_bqps[rk] += (bl_qps[combo] == "N/A" ? 0 : bl_qps[combo])
-			s_cqps[rk] += (ch_qps[combo] == "N/A" ? 0 : ch_qps[combo])
+			if (bl_p50[combo] != "N/A") { s_bp50[rk] += bl_p50[combo]; n_bp50[rk]++ }
+			if (ch_p50[combo] != "N/A") { s_cp50[rk] += ch_p50[combo]; n_cp50[rk]++ }
+			if (bl_qps[combo] != "N/A") { s_bqps[rk] += bl_qps[combo]; n_bqps[rk]++ }
+			if (ch_qps[combo] != "N/A") { s_cqps[rk] += ch_qps[combo]; n_cqps[rk]++ }
 
 			if (ch_eds[combo] != "N/A") { s_ceds[rk] += ch_eds[combo]; n_ceds[rk]++ }
-			if (ch_conv[combo] != "N/A") { s_cconv[rk] += ch_conv[combo]; n_cconv[rk]++ }
+			if (ch_conv[combo] == "overflow") ov_cconv[rk]++
+			else if (ch_conv[combo] != "N/A" && (!(rk in mx_cconv) || ch_conv[combo] > mx_cconv[rk])) mx_cconv[rk] = ch_conv[combo]
 		}
 
 		for (rk in total) {
@@ -291,22 +307,31 @@ aggregate() {
 			nv = (rk in n_valid) ? n_valid[rk] : 0
 			if (nv > 0) {
 				stdev = (nv >= 2) ? sprintf("%.2f", sqrt(m2_dp99[rk] / (nv - 1))) : "N/A"
-				ch_eds_avg = (rk in n_ceds && n_ceds[rk] > 0) ? sprintf("%.0f", s_ceds[rk]/n_ceds[rk]) : "N/A"
-				ch_conv_avg = (rk in n_cconv && n_cconv[rk] > 0) ? bucket_range(s_cconv[rk]/n_cconv[rk]) : "N/A"
-				printf "%s\t%.2f\t%s\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
+				ch_eds_avg = avg_fmt(s_ceds[rk], n_ceds[rk] + 0, "%.0f")
+				ch_conv_worst = (ov_cconv[rk] + 0 > 0) ? "overflow" : ((rk in mx_cconv) ? bucket_range(mx_cconv[rk]) : "N/A")
+				printf "%s\t%.2f\t%s\t%d\t%d\t%.2f\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
 					rk,
 					s_dp99[rk]/nv, stdev,
 					tot_pairs, nv,
 					s_bp99[rk]/nv, s_cp99[rk]/nv,
-					s_bp50[rk]/nv, s_cp50[rk]/nv,
-					s_bqps[rk]/nv, s_cqps[rk]/nv,
-					ch_eds_avg, ch_conv_avg
+					avg_fmt(s_bp50[rk], n_bp50[rk] + 0, "%.2f"), avg_fmt(s_cp50[rk], n_cp50[rk] + 0, "%.2f"),
+					avg_fmt(s_bqps[rk], n_bqps[rk] + 0, "%.1f"), avg_fmt(s_cqps[rk], n_cqps[rk] + 0, "%.1f"),
+					ch_eds_avg, ch_conv_worst, ov_cconv[rk] + 0
 			} else {
-				printf "%s\tN/A\tN/A\t%d\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\n", rk, tot_pairs
+				printf "%s\tN/A\tN/A\t%d\t0\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t0\n", rk, tot_pairs
 			}
 		}
 	}' "${TSV_FILES[@]}" | sort -k1,1n -k2,2n
 }
+
+# conv_cell(worst, overflow_runs), appended to the text and md awk programs: the
+# worst convergence bucket, or "overflow (N runs)" when N valid runs overflowed.
+# shellcheck disable=SC2016
+CONV_CELL_AWK='
+function conv_cell(w, ov) {
+	if (ov + 0 > 0) return sprintf("overflow (%d %s)", ov, (ov + 0 == 1) ? "run" : "runs")
+	return w
+}'
 
 emit_metadata_lines() {
 	local prefix="${1:-#}"
@@ -343,18 +368,19 @@ report_text() {
 	echo ""
 	reach_coverage_render text <(printf '%s' "$REACH_ROWS")
 	echo ""
-	printf '  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %22s\n' \
+	printf '  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %33s\n' \
 		"mesh_size" "churn_rate" "delta_p99_ms" "stdev_delta_p99" "total_runs" "valid_runs" \
 		"baseline_p99_ms" "churn_p99_ms" "baseline_p50_ms" "churn_p50_ms" "baseline_qps" "churn_qps" \
-		"churn_eds_pushes" "churn_convergence_p99"
-	printf '  %-9s-+-%-10s-+-%14s-+-%15s-+-%-10s-+-%-10s-+-%15s-+-%15s-+-%15s-+-%15s-+-%12s-+-%12s-+-%18s-+-%22s\n' \
+		"churn_eds_pushes" "churn_convergence_p99 worst (ms)"
+	printf '  %-9s-+-%-10s-+-%14s-+-%15s-+-%-10s-+-%-10s-+-%15s-+-%15s-+-%15s-+-%15s-+-%12s-+-%12s-+-%18s-+-%33s\n' \
 		"---------" "----------" "--------------" "---------------" "----------" "----------" \
 		"---------------" "---------------" "---------------" "---------------" "------------" "------------" \
-		"------------------" "----------------------"
+		"------------------" "---------------------------------"
 	aggregate | awk -F'\t' '{
-		printf "  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %22s\n", \
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-	}'
+		printf "  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %33s\n", \
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, conv_cell($14, $15)
+	}
+	'"$CONV_CELL_AWK"
 	echo ""
 	istiod_diag_report text "$RESULTS_DIR"
 }
@@ -362,21 +388,26 @@ report_text() {
 report_csv() {
 	emit_metadata_lines "#"
 	reach_coverage_render csv <(printf '%s' "$REACH_ROWS")
-	echo "mesh_size,churn_rate,delta_p99_ms,stdev_delta_p99,total_runs,valid_runs,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps,churn_qps,churn_eds_pushes,churn_convergence_p99"
-	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14 }'
+	echo "mesh_size,churn_rate,delta_p99_ms,stdev_delta_p99,total_runs,valid_runs,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps,churn_qps,churn_eds_pushes,churn_convergence_p99_worst,churn_convergence_overflow_runs"
+	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15 }'
 }
 
 report_json() {
+	# Numbers are JSON numbers, N/A is null; the convergence bucket is a label string.
 	local rows
-	rows="$(aggregate | awk -F'\t' '
-		BEGIN { first=1; printf "[" }
-		{
-			if (!first) printf ",";
-			first=0
-			printf "{\"mesh_size\":%s,\"churn_rate\":%s,\"delta_p99_ms\":\"%s\",\"stdev_delta_p99\":\"%s\",\"total_runs\":%s,\"valid_runs\":%s,\"baseline_p99_ms\":\"%s\",\"churn_p99_ms\":\"%s\",\"baseline_p50_ms\":\"%s\",\"churn_p50_ms\":\"%s\",\"baseline_qps\":\"%s\",\"churn_qps\":\"%s\",\"churn_eds_pushes\":\"%s\",\"churn_convergence_p99\":\"%s\"}",
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
-		}
-		END { printf "]" }')"
+	rows="$(aggregate | jq -R -s '
+		def num: if . == "N/A" or . == "" then null else (tonumber? // null) end;
+		split("\n") | map(select(length > 0) | split("\t") | {
+			mesh_size: (.[0] | num), churn_rate: (.[1] | num),
+			delta_p99_ms: (.[2] | num), stdev_delta_p99: (.[3] | num),
+			total_runs: (.[4] | num), valid_runs: (.[5] | num),
+			baseline_p99_ms: (.[6] | num), churn_p99_ms: (.[7] | num),
+			baseline_p50_ms: (.[8] | num), churn_p50_ms: (.[9] | num),
+			baseline_qps: (.[10] | num), churn_qps: (.[11] | num),
+			churn_eds_pushes: (.[12] | num),
+			churn_convergence_p99_worst: (if .[13] == "N/A" then null else .[13] end),
+			churn_convergence_overflow_runs: (.[14] | num)
+		})')"
 	jq -n \
 		--arg run_id           "${RUN_ID:-unknown}" \
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
@@ -432,10 +463,10 @@ Definitions for every metric column in the results table above. Sourced from
 | `total_runs` | runs | internal | All baseline+churn pairs for the cell, including poisoned/failed ones and `REMOTE_UNREACHABLE` pairs (no window ran). |
 | `valid_runs` | runs | internal | Pairs where both phases are OK and not restart-poisoned; used in every average. |
 | `baseline_p99_ms` / `churn_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | p99 latency in the baseline / churn phase. |
-| `baseline_p50_ms` / `churn_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | p50 latency in the baseline / churn phase. |
-| `baseline_qps` / `churn_qps` | queries/s | Fortio JSON `ActualQPS` | Achieved QPS in the baseline / churn phase; churn QPS may drop under control-plane contention. |
+| `baseline_p50_ms` / `churn_p50_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[50]` | p50 latency in the baseline / churn phase; averaged over the valid pairs that have one (`N/A` when none has). |
+| `baseline_qps` / `churn_qps` | queries/s | Fortio JSON `ActualQPS` | Achieved QPS in the baseline / churn phase, averaged like p50; churn QPS may drop under control-plane contention. |
 | `churn_eds_pushes` | count (delta) | `pilot_xds_pushes{type="eds"}` counter delta | EDS pushes triggered during the churn phase; `N/A` if istiod restarted or the scrape failed. |
-| `churn_convergence_p99` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | p99 convergence during churn, reported as a **bucket range** (e.g. `0-100ms`), not an exact value; `N/A` if istiod restarted or the scrape failed. |
+| `churn_convergence_p99 worst` | ms (bucket range) | `pilot_proxy_convergence_time` histogram delta | The **worst** (highest) bucket range any valid run's p99 convergence hit during churn (e.g. `500-1000`), not an average: the mean of interpolated p99s can land in a bucket no run hit. `overflow (N runs)` when N valid runs had their p99 in the `+Inf` bucket; `N/A` if no valid run has a p99 (istiod restarted or the scrape failed). CSV/JSON: `churn_convergence_p99_worst` (`overflow` or the range) and `churn_convergence_overflow_runs`. |
 
 **Statuses** that leave a pair out of `valid_runs` include `ERROR_RATE_HIGH` (the
 window's HTTP 200 share was below `MIN_PCT_200`, default 0.99; non-200 responses used
@@ -488,11 +519,12 @@ report_md() {
 	echo ""
 	echo "## Results"
 	echo ""
-	echo "| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 |"
-	echo "|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|------------------------|"
+	echo "| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 worst (ms) |"
+	echo "|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|----------------------------------|"
 	aggregate | awk -F'\t' '{
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
-	}'
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,conv_cell($14, $15)
+	}
+	'"$CONV_CELL_AWK"
 	echo ""
 	istiod_diag_report md "$RESULTS_DIR"
 

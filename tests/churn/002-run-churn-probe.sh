@@ -37,7 +37,7 @@ source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # harness_sha (istiod-diag index preamble)
+source "${ROOT}/tests/lib/preamble.sh"  # harness_sha (TSV preamble, istiod-diag index preamble)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
@@ -237,10 +237,15 @@ for ctx in "${REMOTES[@]}"; do
 	echo "  [$ctx] Running istiod replicas: $r"
 done
 
+# HARNESS_SHA and ISTIO_VERSION are recorded here so 004 reports the run's commit and
+# Istio pin, not the report host's (the 003 placeholder writes the same two keys, PL36).
+HARNESS_SHA="$(harness_sha)"
 cat > "$TSV_FILE" <<EOF
-# Churn convergence test — $(date -Iseconds)
+# Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
+# HARNESS_SHA=${HARNESS_SHA}
+# ISTIO_VERSION=${ISTIO_VERSION:-unknown}
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
 # CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
@@ -1139,8 +1144,10 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "| Field | Value |"
 	echo "|-------|-------|"
 	echo "| Run ID | \`${RUN_ID}\` |"
+	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
+	echo "| Istio version | ${ISTIO_VERSION:-unknown} |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
-	echo "| Date | $(date -Iseconds) |"
+	echo "| Date (UTC) | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"
 	echo "| Remotes | ${REMOTES[*]:-none} |"
 	echo "| Mesh size | ${MESH_SIZE} |"

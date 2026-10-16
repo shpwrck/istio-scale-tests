@@ -183,8 +183,8 @@ What happens next depends on `--on-unreachable` (default `warn`,
 `REACH_ON_UNREACHABLE`):
 
 - `warn`: an `UNREACHABLE` remote skips its warmup and load and gets one row per QPS
-  level with `status=UNREACHABLE`, `qps_actual=0`, latency `N/A` and `pct_200` from the
-  check. `DEGRADED` and `UNKNOWN` remotes run as usual. The run exits 0.
+  level with `status=UNREACHABLE`, `qps_actual` and latency `N/A` (nothing was measured)
+  and `pct_200` from the check. `DEGRADED` and `UNKNOWN` remotes run as usual. The run exits 0.
 - `fail`: if any remote is `UNREACHABLE` or `UNKNOWN`, `002` writes the `UNREACHABLE`
   rows, one `STOPPED_UNREACHABLE` row (`target_class=na`) and the per-run markdown,
   runs no load and exits 3. `DEGRADED` only warns. The sweep treats exit 3 as a stop:
@@ -350,16 +350,24 @@ run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections
 duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms  status  pct_200  istiod_restarted  target_class
 ```
 
+`pct_200` and `DATAPLANE_MIN_PCT_200` are 0–1 ratios despite the name (`1` = every
+response was HTTP 200). A row that measured nothing (`FAILED`, `UNREACHABLE`, a missing
+fortio `Max` or `ActualQPS`) has `N/A` there, never `0`.
+
 `status` is `UNREACHABLE` for a remote the reach check could not reach (no load ran),
 else the first that applies of `FAILED` (fortio exec failed), `PERCENTILE_MISSING`,
 `ERROR_RATE_HIGH` (`pct_200 < DATAPLANE_MIN_PCT_200`, default 0.99, or no responses),
-`QPS_SHORTFALL` (actual QPS < `--min-qps-ratio` × target) and `OK`, or one of the
+`QPS_SHORTFALL` (actual QPS < `--min-qps-ratio` × target, or no `ActualQPS` in the
+fortio JSON) and `OK`, or one of the
 placeholders `SETUP_FAILED` / `PROBE_FAILED` (sweep, one row per failed mesh size) and
 `STOPPED_UNREACHABLE` (`002 --on-unreachable fail`), all with `target_class=na`. The console line of each row also prints `ret_codes` (HTTP
 `code=count`, `-1` is a socket error) so an `ERROR_RATE_HIGH` row can be diagnosed.
 `004-report-results.sh --format text|csv|json|markdown|md|charts` averages valid rows per
 (mesh size, QPS, target class) and reports `n_total` / `n_valid`; the markdown ends with a
-glossary. Placeholder rows (`target_class=na`) form no cell: a `Placeholder rows (no
+glossary. Text and markdown print the HTTP 200 share as a percentage (`avg_http_200 (%)`,
+e.g. `100.00%`); csv and json keep the 0–1 ratio as `avg_http_200_ratio` and, for
+existing readers, under the old name `avg_pct_200`. The per-run `latency-<RUN_ID>.md`
+rounds latencies to 0.01 ms and QPS to 0.1, and shows the HTTP 200 share as a percentage. Placeholder rows (`target_class=na`) form no cell: a `Placeholder rows (no
 table cell): mesh_size=<n> <STATUS>=<count>` line under the table names them per mesh
 size, also when that mesh size has measured rows (a failed repetition, or a probe that
 died after some QPS levels); csv has `# PLACEHOLDER=<mesh>:<STATUS>:<count>`, json

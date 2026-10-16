@@ -87,17 +87,18 @@ vsdr_dir() {
 	refute_output --partial "**Warning:**"
 }
 
-@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (64) and a proxy_check comment" {
+@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (68) and a proxy_check comment" {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	hdr=$(grep -v '^#' <<<"$output" | sed -n 1p)
 	row=$(grep -v '^#' <<<"$output" | sed -n 2p)
-	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 64 ]
+	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 68 ]
 	# heap_inuse summed per cluster scrape (500, 750, 500; the restarted mesh-b scrape is
 	# out) and the istiod pods per scrape (2, 3, 2); no status rows; a legacy cell has no
 	# series run (-).
-	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id" ]]
-	[[ "$row" == *",583.3,2.3,0,-,-" ]]
+	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id,gateway_physical_max,gateway_ws_max,leftover_ns_max,cpu_window_avg" ]]
+	# A 51-column file has no gateway physical/working-set, leftover or CPU-seconds column: N/A.
+	[[ "$row" == *",583.3,2.3,0,-,-,N/A,N/A,N/A,N/A" ]]
 	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg,traffic_config,vsdr_services,"* ]]
 	[[ "$row" == *",30,34,31,none,0,"* ]]
 	# A 51-column file reads as the legacy layout: K 0, pods, 15 svc x 2 reps, no outside, deploy.
@@ -174,7 +175,7 @@ vsdr_dir() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[[ "$stderr" == *"skipping 1 legacy TSV file(s)"* ]]
-	[[ "$stderr" == *"expected 40, 51 or 63 columns"* ]]
+	[[ "$stderr" == *"expected 40, 51, 63 or 66 columns"* ]]
 	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
 }
 
@@ -209,7 +210,7 @@ vsdr_dir() {
 	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
 	assert_success
 	# mem 999 and VS 3 come only from the restarted row.
-	[ "$(jq -c '.results[3] | [.n_total, .n_valid, .mem_mi.max, .istiod_virt_services_avg]' <<<"$output")" = '[3,2,520,10]' ]
+	[ "$(jq -c '.results[3] | [.n_total, .n_valid, .istiod_rss_peak_mi.max, .istiod_virt_services_avg]' <<<"$output")" = '[3,2,520,10]' ]
 }
 
 @test "vsdr report markdown: traffic-effect section pairs none and vsdr with expected clusters" {
@@ -246,7 +247,7 @@ vsdr_dir() {
 	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
 	assert_success
 	# With the vsdr cells leaking in (last one wins) this row would read 1.5 / 1.0 / 33.3%.
-	assert_output --partial "| 2 | 10 | 2 | 1 | 1.0 | N/A | 0.5 | N/A | 50.0% |"
+	assert_output --partial "| 2 | 10 | 2 | 1 | 1.00 | N/A | 0.50 | N/A | 50.0% |"
 }
 
 @test "report: a none-only sweep has no traffic-effect section and no vsdr note" {
@@ -378,11 +379,11 @@ fit_of() {
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
 	assert_success
 	[ "$(fit_of "$output" wide probe heap_inuse_mi)" = '[205.7,0.98,3,2,[[100,40],[200,160],[400,640]]]' ]
-	[ "$(fit_of "$output" wide probe proxy_config_kb)" = '[100,1,3,1,[[100,100],[200,200],[400,400]]]' ]
+	[ "$(fit_of "$output" wide probe proxy_config_kib)" = '[100,1,3,1,[[100,100],[200,200],[400,400]]]' ]
 	# The restarted N=400 copy (heap 9999) and the N=800 guard rows never reach a fit.
 	[ "$(fit_of "$output" namespace probe heap_inuse_mi)" = '[50,1,3,0.5,[[100,150],[200,200],[400,300]]]' ]
 	[ "$(fit_of "$output" namespace probe istiod_services)" = '[200,1,3,0.97,[[100,212],[200,412],[400,812]]]' ]
-	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,1,2,0,[[200,0.02],[400,0.02]]]' ]
+	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,null,2,0,[[200,0.02],[400,0.02]]]' ]
 	# A single-N curve (the fresh cells) is not fitted.
 	[ "$(jq '[.namespace_scaling.fits[] | select(.window == "deploy")] | length' <<<"$output")" = 0 ]
 	# Per-cell growth keys; the guard rows count in n_total, not n_valid.
@@ -485,7 +486,7 @@ fit_of() {
 	assert_success
 	# No raw window delta is fitted against N for grow windows (each adds N - N_prev).
 	[ "$(jq '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "istiod_cpu_s" or .metric == "xds_pushes" or .metric == "pushes_per_proxy" or .metric == "push_kb"))] | length' <<<"$output")" = 0 ]
-	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,1,2,-1,[[200,4],[400,2]]]' ]
+	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,null,2,-1,[[200,4],[400,2]]]' ]
 	# Probe windows keep the raw deltas (one namespace each).
 	[ "$(fit_of "$output" namespace probe istiod_cpu_s)" = '[0,1,3,0,[[100,0.5],[200,0.5],[400,0.5]]]' ]
 	# The N=200 grow restarted: N=400 still divides by 400 - 200 (0.02), not by 400 - 100
@@ -500,12 +501,14 @@ fit_of() {
 	# PL30: the N=100 grow window starts from 0 namespaces, so it also creates and waits for
 	# the M measurement pods. Inflate it with that boot work (0.5 CPU-s, 20 pushes, slower
 	# pushes and convergence): the per-namespace fits must not move.
-	growth_variant '$6 == 100 && $57 == "grow" { $59 += 0.5; $13 += 20; $47 = 9; $48 = 9; $10 = 900 } { print }'
+	# Convergence p99 of the later windows sits at 300 ms (bucket 100-500, not pinned in the
+	# first bucket, so it is fitted).
+	growth_variant '$10 == 90 { $10 = 300 } $6 == 100 && $57 == "grow" { $59 += 0.5; $13 += 20; $47 = 9; $48 = 9; $10 = 9000 } { print }'
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
 	assert_success
-	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,1,2,0,[[200,0.02],[400,0.02]]]' ]
-	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,1,2,-1,[[200,4],[400,2]]]' ]
-	[ "$(jq -c '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "push_time_ms" or .metric == "pushcontext_init_ms" or .metric == "conv_p99_ms")) | [.metric, .points]]' <<<"$output")" = '[["push_time_ms",[[200,1],[400,1]]],["pushcontext_init_ms",[[200,0.5],[400,0.5]]],["conv_p99_ms",[[200,90],[400,90]]]]' ]
+	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,null,2,0,[[200,0.02],[400,0.02]]]' ]
+	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,null,2,-1,[[200,4],[400,2]]]' ]
+	[ "$(jq -c '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "push_time_ms" or .metric == "pushcontext_init_ms" or .metric == "conv_p99_ms")) | [.metric, .points]]' <<<"$output")" = '[["push_time_ms",[[200,1],[400,1]]],["pushcontext_init_ms",[[200,0.5],[400,0.5]]],["conv_p99_ms",[[200,300],[400,300]]]]' ]
 	# Gauges keep the first grow window.
 	[ "$(fit_of "$output" namespace grow heap_inuse_mi)" = '[50,1,3,0.5,[[100,150],[200,200],[400,300]]]' ]
 	[ "$(jq -r '.namespace_scaling.fit_rules.grow_window_fits' <<<"$output")" = skip_first_step ]
@@ -524,15 +527,21 @@ fit_of() {
 	growth_dir
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
 	assert_success
-	# namespace/none probes have 10 pushes: no conv_p99 fit; wide probes (120) and grow (400)
-	# keep it (grow without its first window).
+	# The fixture's p99 is 90 ms everywhere: pinned in istiod's first bucket (0-100 ms), an
+	# interpolation, so no conv_p99 fit at all.
+	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms")] | length' <<<"$output")" = 0 ]
+	# At 300 ms (bucket 100-500): namespace/none probes have 10 pushes, so no conv_p99 fit;
+	# wide probes (120) and grow (400) keep it (grow without its first window).
+	growth_variant '$10 == 90 { $10 = 300 } { print }'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
 	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms" and .window == "probe" and .scoping != "wide")] | length' <<<"$output")" = 0 ]
-	[ "$(fit_of "$output" wide probe conv_p99_ms)" = '[0,1,3,0,[[100,90],[200,90],[400,90]]]' ]
-	[ "$(fit_of "$output" namespace grow conv_p99_ms)" = '[0,1,2,0,[[200,90],[400,90]]]' ]
+	[ "$(fit_of "$output" wide probe conv_p99_ms)" = '[0,1,3,0,[[100,300],[200,300],[400,300]]]' ]
+	[ "$(fit_of "$output" namespace grow conv_p99_ms)" = '[0,null,2,0,[[200,300],[400,300]]]' ]
 	[ "$(jq '.namespace_scaling.fit_rules.conv_p99_min_pushes' <<<"$output")" = 120 ]
 	[ "$(jq -r '.namespace_scaling.fit_rules.conv_p99_push_count' <<<"$output")" = xds_pushes_per_replica_across_types ]
 	# 119 pushes (about 24-30 full pushes short of the floor) is not enough.
-	growth_variant '$7 == "wide" && $57 == "probe" && $13 == 120 { $13 = 119 } { print }'
+	growth_variant '$10 == 90 { $10 = 300 } $7 == "wide" && $57 == "probe" && $13 == 120 { $13 = 119 } { print }'
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
 	assert_success
 	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms" and .window == "probe")] | length' <<<"$output")" = 0 ]
@@ -549,7 +558,7 @@ fit_of() {
 	growth_variant '!($53 == "config-only" && $57 == "deploy")'
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
 	assert_success
-	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | [.metric, .config_only, .pods, .ratio]]' <<<"$output")" = '[["heap_inuse_mi",150,260,1.73],["istiod_cpu_s",null,null,null],["xds_pushes",null,null,null],["pushes_per_proxy",null,null,null],["proxy_config_kb",50,52,1.04],["proxy_envoy_mem_mi",5,8,1.6],["istiod_services",212,210,0.99]]' ]
+	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | [.metric, .config_only, .pods, .ratio]]' <<<"$output")" = '[["heap_inuse_mi",150,260,1.73],["istiod_cpu_s",null,null,null],["xds_pushes",null,null,null],["pushes_per_proxy",null,null,null],["proxy_config_kib",50,52,1.04],["proxy_envoy_mem_mi",5,8,1.6],["istiod_services",212,210,0.99]]' ]
 	[[ "$(jq -r '.namespace_scaling.pods_vs_config_only.note' <<<"$output")" == "istiod_cpu_s, xds_pushes and pushes_per_proxy are N/A where the pair has different window kinds"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
 	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only probe, pods deploy) | istiod_cpu_s | N/A | N/A | N/A |"
@@ -678,7 +687,7 @@ grow_fits() {
 	run --separate-stderr "$REPORT" --results-dir "$base" --format markdown
 	assert_success
 	assert_output --partial "| mesh=1 K=2 config-only run=${smoke} | namespace | grow | heap_inuse_mi | Mi |"
-	assert_output --partial "| mesh=1 K=2 config-only run=${main} | namespace | grow | onboard_cpu_s_per_ns | CPU-s |"
+	assert_output --partial "| mesh=1 K=2 config-only run=${main} | namespace | grow | onboard_cpu_s_per_ns | CPU-s/ns |"
 	assert_output --partial "| window | K | workload | M | outside | run |"
 	assert_output --partial "| mesh=1 K=2 config-only run=${main} | 800 | grow | namespace |"
 	assert_output --partial "> A growth series is one RUN_ID x mesh size x K x workload"
@@ -711,4 +720,106 @@ grow_fits() {
 		"[[\"${a}\",1,200],[\"${b}\",1,150]]" ]
 	[ "$(grow_fits "$output" onboard_cpu_s_per_ns)" = "[[\"${a}\",1,[[100,0.04]]],[\"${b}\",2,[[200,0.02],[400,0.02]]]]" ]
 	[ "$(grow_fits "$output" heap_inuse_mi)" = "[[\"${a}\",2,[[50,150],[100,200]]],[\"${b}\",3,[[100,150],[200,200],[400,300]]]]" ]
+}
+
+# ---------------------------------------------------------------------------
+# ROSA window fixes: schema 66, data warnings, units (BACKLOG 9.3, 9.5, 9.10; report audit)
+# ---------------------------------------------------------------------------
+
+# growth66 [leftover]: the growth fixture widened to CONTROLPLANE_SCHEMA=66: gateway
+# physical heap 2 x and working set 3 x the allocated figure, gateway clusters x 8 (so a
+# point passes 1000), and <leftover> (default 0) leftover test namespaces per row.
+growth66() {
+	growth_dir
+	f="${GRES}/controlplane-fixture-ns.tsv"
+	awk -F'\t' -v lo="${1:-0}" 'BEGIN { OFS = "\t" }
+		/^# CONTROLPLANE_SCHEMA=/ { print "# CONTROLPLANE_SCHEMA=66"; next }
+		/^#/ { print; next }
+		$1 == "timestamp" { print $0, "gateway_physical_mi_max", "gateway_ws_mi_max", "leftover_test_namespaces"; next }
+		{ g = $62; if (g ~ /^[0-9]+$/) { p = 2 * g; w = 3 * g } else { p = "N/A"; w = "N/A" }
+		  if ($61 ~ /^[0-9]+$/) $61 = $61 * 8
+		  print $0, p, w, ($2 ~ /^[A-Z_]+$/ ? "N/A" : lo) }' "$f" > "${f}.tmp"
+	mv "${f}.tmp" "$f"
+}
+
+@test "report: a 66-column file adds gateway physical / working set and leftover namespaces" {
+	growth66 7
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	assert_success
+	r="$(jq -c '[.results[] | select(.window_kind == "probe" and .namespace_count == 400 and .sidecar_scoping == "wide" and .n_valid > 0)][0]' <<<"$output")"
+	[ "$(jq -c '[.gateway_mem_mi_max, .gateway_physical_mi_max, .gateway_ws_mi_max, .leftover_test_namespaces_max]' <<<"$r")" != '[null,null,null,null]' ]
+	[ "$(jq '.gateway_ws_mi_max / .gateway_mem_mi_max' <<<"$r")" = 3 ]
+	[ "$(jq '.leftover_test_namespaces_max' <<<"$r")" = 7 ]
+	# Both new gateway figures are fitted; JSON points never carry an exponent string.
+	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "gateway_ws_mi" or .metric == "gateway_physical_mi")] | length > 0' <<<"$output")" = true ]
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	refute_output --regexp '[0-9]e\+0[0-9]'
+	# 7 leftover namespaces is under the default threshold (100): no warning.
+	refute_output --partial "leftover controlplane-test namespaces"
+}
+
+@test "report: leftover test namespaces above LEFTOVER_NS_WARN warn in every format" {
+	growth66 2500
+	for fmt in text markdown csv; do
+		run --separate-stderr "$REPORT" --results-dir "$GRES" --format "$fmt"
+		assert_success
+		assert_output --partial "were measured with up to 2500 leftover controlplane-test namespaces"
+		[[ "$stderr" == *"WARNING: "*"up to 2500 leftover"* ]]
+	done
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"up to 2500 leftover controlplane-test namespaces"* ]]
+}
+
+@test "report: a RETIRE_FAILED row is listed as not measured and warns in every format" {
+	growth_variant '{ print } $2 == "SKIPPED_MEM_GUARD" && !done { done = 1; $1 = "2026-10-13T12:20:00+00:00"; $2 = "RETIRE_FAILED"; $6 = 400; $57 = "retire"; print }'
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_success
+	assert_output --partial "| retire | namespace |"
+	assert_output --partial "RETIRE_FAILED"
+	assert_output --partial "> **Warning:** RETIRE_FAILED (N=400"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	[ "$(jq '[.namespace_scaling.not_measured[] | select(.statuses == ["RETIRE_FAILED"])] | length' <<<"$output")" = 1 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == RETIRE_FAILED* ]]
+}
+
+@test "report: CPU peak and the window average are labelled apart; sizes in MiB; files relative" {
+	growth66
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
+	assert_success
+	assert_output --partial "| cpu_peak (m) | cpu_avg (m) | rss_peak (Mi) |"
+	assert_output --partial "| cfg_dump_avg (MiB) |"
+	refute_output --partial "cpu_avg (m) | mem_avg (Mi)"
+	refute_output --partial "(MB)"
+	refute_output --partial "(KB)"
+	assert_output --partial "Files: controlplane-fixture-ns.tsv (in results dir g)"
+	refute_output --partial "$BATS_TEST_TMPDIR"
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	# cpu_avg = istiod_cpu_s_delta x 1000 / scrape_window_sec, never the peak column.
+	[ "$(jq '[.results[] | select(.istiod_cpu_avg_m != null)] | length > 0' <<<"$output")" = true ]
+	[ "$(jq '[.results[] | select(.istiod_cpu_avg_m != null and .istiod_cpu_avg_m > .istiod_cpu_peak_m.avg)] | length' <<<"$output")" = 0 ]
+	# Two-point fits print no R² (2 points fit any line exactly).
+	[ "$(jq '[.namespace_scaling.fits[] | select(.n == 2 and .r2 != null)] | length' <<<"$output")" = 0 ]
+}
+
+@test "report: the SLA verdict uses the window CPU peak, not only the end-of-window top snapshot" {
+	vsdr_dir
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
+	assert_success
+	peak="$(jq -r '.metadata.achieved_scale.istiod_cpu_peak_pct_of_limit_max' <<<"$output")"
+	[[ "$peak" =~ ^[0-9]+$ ]]
+	run --separate-stderr "$REPORT" --results-dir "$VRES" --format text
+	assert_output --partial "istiod_cpu_peak_pct_of_limit (max): ${peak}%  [window peak CPU (cpu_peak) / per-replica CPU limit]"
+	assert_output --partial "[kubectl top snapshot at the end of each window; misses bursts]"
+}
+
+@test "envelope: config-only growth cells have no endpoints; CPU from the window peak" {
+	growth66
+	source "${ROOT}/tests/lib/capacity.sh"
+	source "${ROOT}/tests/lib/envelope.sh"
+	run --separate-stderr render_scale_envelope "$GRES" "$REPORT" "mesh-a" false
+	assert_success
+	assert_output --partial "| **Total endpoints in mesh** | N/A (config-only: Services without pods;"
+	assert_output --partial "| Workload replicas / service | N/A (config-only) |"
+	assert_output --partial "| **istiod CPU (window peak)** |"
+	assert_output --partial "| istiod CPU (kubectl top at window end) |"
 }

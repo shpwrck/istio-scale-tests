@@ -486,11 +486,12 @@ elif [[ "$ON_UNREACHABLE" == fail ]]; then
 fi
 
 # emit_unreachable_rows <remote_ctx>: one UNREACHABLE row per QPS level for a remote
-# whose load was skipped (qps_actual 0, latency N/A, pct_200 from the reach check).
+# whose load was skipped (qps_actual and latency N/A: nothing was measured; pct_200
+# from the reach check).
 emit_unreachable_rows() {
 	local ctx="$1" qps
 	for qps in "${QPS_ARR[@]}"; do
-		printf '%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tUNREACHABLE\t%s\t%s\tremote\n' \
+		printf '%s\t%s\t%s\t%s\t%s\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tUNREACHABLE\t%s\t%s\tremote\n' \
 			"$RUN_ID" "$MESH_SIZE" "$SOURCE_CTX" "$ctx" "$qps" "$CONNECTIONS" "$DURATION" \
 			"${REACH_PCT[$ctx]:-N/A}" "${ISTIOD_RESTARTED_TAG:-unknown}" >> "$TSV_FILE"
 	done
@@ -522,7 +523,7 @@ write_run_md() {
 		echo "| Warmup | ${WARMUP_DURATION}s |"
 		echo "| Server replicas (ready/spec) | ${SERVER_REPLICAS_CSV} |"
 		echo "| Min QPS ratio | ${MIN_QPS_RATIO} |"
-		echo "| Min pct_200 | ${MIN_PCT_200} |"
+		echo "| Min HTTP 200 share | $(awk -v r="$MIN_PCT_200" 'BEGIN { printf "%.2f%%", r * 100 }') (DATAPLANE_MIN_PCT_200=${MIN_PCT_200}) |"
 		echo "| Reach check | ${REACH_REQUESTS} requests per target, on unreachable: ${ON_UNREACHABLE} |"
 		echo "| istiod_restarted | ${ISTIOD_RESTARTED} |"
 		echo ""
@@ -532,10 +533,17 @@ write_run_md() {
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "| Target | Class | QPS Target | QPS Actual | p50 (ms) | p90 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) | pct_200 | Status |"
-		echo "|--------|-------|------------|------------|----------|----------|----------|------------|----------|---------|--------|"
-		awk -F'\t' '!/^#/ && !/^run_id/ && NF>=17 {
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $4, $17, $5, $6, $9, $10, $11, $12, $13, $15, $14
+		echo "| Target | Class | QPS Target | QPS Actual | p50 (ms) | p90 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) | HTTP 200 (%) | Status |"
+		echo "|--------|-------|------------|------------|----------|----------|----------|------------|----------|--------------|--------|"
+		# Latencies %.2f ms, QPS %.1f, the HTTP 200 share as a percentage; anything not
+		# a number (N/A) as-is. A placeholder row (class na) has no QPS target.
+		awk -F'\t' '
+		function isnum(v) { return v ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ }
+		function f(v, fmt) { return isnum(v) ? sprintf(fmt, v) : v }
+		function pct(v) { return isnum(v) ? sprintf("%.2f%%", v * 100) : v }
+		!/^#/ && !/^run_id/ && NF>=17 {
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $4, $17, ($17 == "na" ? "N/A" : $5), f($6, "%.1f"),
+				f($9, "%.2f"), f($10, "%.2f"), f($11, "%.2f"), f($12, "%.2f"), f($13, "%.2f"), pct($15), $14
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
@@ -591,7 +599,8 @@ run_fortio() {
 			fortio load -qps "$qps" -c "$CONNECTIONS" -t "${DURATION}s" -p '50,90,99,99.9' \
 			-json - -quiet "$target_url" 2>/dev/null) || {
 			echo "    FAILED"
-			printf '%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t0\t0\t0\t0\t0\tFAILED\tN/A\t%s\t%s\n' \
+			# Nothing was measured: qps_actual and every latency are N/A, never 0.
+			printf '%s\t%s\t%s\t%s\t%s\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tFAILED\tN/A\t%s\t%s\n' \
 				"$RUN_ID" "$MESH_SIZE" "$SOURCE_CTX" "$target_ctx" "$qps" \
 				"$CONNECTIONS" "$DURATION" "${ISTIOD_RESTARTED_TAG:-unknown}" "$target_class" >> "$TSV_FILE"
 			continue

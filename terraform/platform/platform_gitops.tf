@@ -349,14 +349,18 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   wait             = true
   timeout          = 300
 
+  # Provider defaults come as their own values document BEFORE the user overrides, so
+  # Helm deep-merges an override of the same app into them (Terraform's merge() is
+  # shallow, and a later -var-file replaces the whole gitops_app_overrides map).
   values = [yamlencode({
     gitopsNamespace = var.gitops_namespace
     repo = {
       url      = var.gitops_app_repo_url
       revision = var.gitops_app_repo_revision
     }
-    apps = var.gitops_app_overrides
-  }), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
+    }), yamlencode({ apps = local.provider_app_defaults }),
+    yamlencode({ apps = var.gitops_app_overrides }),
+  yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
 
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }
@@ -468,6 +472,93 @@ resource "terraform_data" "create_argocd_cluster_secret" {
   depends_on = [time_sleep.wait_spoke_registration, helm_release.acm_gitops_resources]
 }
 
+# --- Argo CD controller restart after the cluster secrets (BACKLOG 9.1) ---
+# With dynamicScalingEnabled the GitOps operator restarts the application controller
+# seconds after the cluster secrets appear. A controller that starts mid-change can log
+# "has no assigned shard" for a cluster and never pick it up: on the 2026-10-14 ROSA
+# window one member's Applications had no status for 35 min until the controller pods
+# were restarted by hand. Wait for the operator's reconcile to settle, then restart the
+# controller pods once, before the placement generator lets the ApplicationSets render
+# the member Applications. Re-runs whenever a cluster secret is re-created.
+
+resource "terraform_data" "argocd_controller_reshard" {
+  count = local.gitops_enabled && var.argocd_restart_controller_after_cluster_secrets && length(local.spoke_cluster_keys) > 0 ? 1 : 0
+
+  triggers_replace = [for k in sort(keys(local.spoke_cluster_keys)) : terraform_data.create_argocd_cluster_secret[k].id]
+
+  input = {
+    token_script     = local.token_script
+    hub_api_url      = local.hub_api_url
+    hub_admin_pass   = local.hub_admin_pass
+    kubeconfig_path  = local.kubeconfig
+    hub_context      = local.hub_cluster_key
+    gitops_namespace = var.gitops_namespace
+    argocd_name      = var.gitops_argocd_cr_name
+  }
+
+  provisioner "local-exec" {
+    command = "bash '${path.module}/../scripts/argocd-controller-reshard.sh'"
+    environment = {
+      MODE            = "reshard"
+      TOKEN_SCRIPT    = self.input.token_script
+      API_URL         = self.input.hub_api_url
+      ADMIN_PASS      = self.input.hub_admin_pass
+      KUBECONFIG_PATH = self.input.kubeconfig_path
+      KUBE_CONTEXT    = self.input.hub_context
+      GITOPS_NS       = self.input.gitops_namespace
+      ARGOCD_NAME     = self.input.argocd_name
+    }
+  }
+
+  depends_on = [terraform_data.create_argocd_cluster_secret, helm_release.argocd_config]
+}
+
+# --- Post-apply check: every Application has a sync and health status (BACKLOG 9.1) ---
+# An empty status means no controller shard processes the Application's destination
+# cluster. Fails the apply after argocd_app_status_timeout_sec, naming the cluster.
+
+resource "terraform_data" "argocd_app_status_check" {
+  count = local.gitops_enabled && var.gitops_app_repo_url != "" && var.argocd_app_status_timeout_sec > 0 ? 1 : 0
+
+  triggers_replace = [
+    helm_release.gitops_hub_app_of_apps[0].metadata.revision,
+    [for r in terraform_data.argocd_controller_reshard : r.id],
+  ]
+
+  input = {
+    token_script     = local.token_script
+    hub_api_url      = local.hub_api_url
+    hub_admin_pass   = local.hub_admin_pass
+    kubeconfig_path  = local.kubeconfig
+    hub_context      = local.hub_cluster_key
+    gitops_namespace = var.gitops_namespace
+    argocd_name      = var.gitops_argocd_cr_name
+    timeout_sec      = tostring(var.argocd_app_status_timeout_sec)
+  }
+
+  provisioner "local-exec" {
+    command = "bash '${path.module}/../scripts/argocd-controller-reshard.sh'"
+    environment = {
+      MODE                   = "app-status"
+      APP_STATUS_TIMEOUT_SEC = self.input.timeout_sec
+      TOKEN_SCRIPT           = self.input.token_script
+      API_URL                = self.input.hub_api_url
+      ADMIN_PASS             = self.input.hub_admin_pass
+      KUBECONFIG_PATH        = self.input.kubeconfig_path
+      KUBE_CONTEXT           = self.input.hub_context
+      GITOPS_NS              = self.input.gitops_namespace
+      ARGOCD_NAME            = self.input.argocd_name
+    }
+  }
+
+  depends_on = [
+    helm_release.gitops_hub_app_of_apps,
+    helm_release.mesh_wiring_verify_appset,
+    kubernetes_manifest.placement_generator_configmap,
+    terraform_data.argocd_controller_reshard,
+  ]
+}
+
 # --- Placement-generator ConfigMap (deferred until cluster secrets exist) ---
 # ApplicationSets use this ConfigMap to discover spoke clusters via ACM PlacementDecisions.
 # Created AFTER create_argocd_cluster_secret so that ApplicationSets only generate spoke
@@ -497,7 +588,7 @@ resource "kubernetes_manifest" "placement_generator_configmap" {
     force_conflicts = true
   }
 
-  depends_on = [terraform_data.create_argocd_cluster_secret]
+  depends_on = [terraform_data.create_argocd_cluster_secret, terraform_data.argocd_controller_reshard]
 }
 
 # --- Destroy-time cleanup: OSSM operator CSV on spoke clusters ---

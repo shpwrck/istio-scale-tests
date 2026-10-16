@@ -6,13 +6,17 @@ networkSuffix: network
 # A PodDisruptionBudget is rendered only with more than one replica.
 replicaCount: 1
 
+# Sized for the 20-cluster / 10k-Service campaign: Envoy here allocates about 91 Mi per
+# 1000 discovered Services (1 cluster per Service; ROSA 2026-10-14) and its working set
+# tracked that (x1.15, no burst retention), so 10k Services is about 1.1 GiB. Sizing
+# rule: limit >= (10 Mi + 91 Mi x Services / 1000) x 1.5.
 resources:
   requests:
     cpu: 100m
     memory: 128Mi
   limits:
     cpu: 2000m
-    memory: 1024Mi
+    memory: 2Gi
 
 autoscaling:
   enabled: false
@@ -24,6 +28,9 @@ service:
   # LoadBalancer needs an LB provider (a cloud LB or MetalLB). A MetalLB pool with
   # autoAssign: false serves only Services that request it by annotation:
   #   annotations: {metallb.io/address-pool: <pool>}
+  # On AWS use an NLB ({service.beta.kubernetes.io/aws-load-balancer-type: nlb}): behind a
+  # Classic LB the gateway saw each HTTP request followed by a FIN and aborted it
+  # (ROSA 2026-10-14). terraform/platform sets it in rosa mode (rosa_ingress_nlb).
   type: LoadBalancer
   annotations: {}
 

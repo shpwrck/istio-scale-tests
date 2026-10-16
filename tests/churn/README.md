@@ -61,7 +61,7 @@ With no remote (mesh size 1) the remote columns are `N/A`.
 | `remote_endpoint_reachable_ms` | Every churn target on the remote watcher has more healthy endpoint weight than before t0: at least one new Ready source pod per deployment. Includes pod scheduling and sidecar start. |
 | `*_push_triggers_delta` | `pilot_push_triggers` increase during the iteration. |
 | `*_xds_pushes_delta` | `pilot_xds_pushes` increase (one per proxy connection per xDS type). |
-| `*_queue_time_p99_ms` / `*_push_time_p99_ms` | p99 of `pilot_proxy_queue_time` / `pilot_xds_push_time` for the iteration (histogram bucket bound). |
+| `*_queue_time_p99_ms` / `*_push_time_p99_ms` | p99 of `pilot_proxy_queue_time` / `pilot_xds_push_time` for the iteration, interpolated within its histogram bucket and rounded to ms; `overflow` when it falls in the `+Inf` bucket. |
 | `*_connected_proxies` | `pilot_xds` gauge before scaling. |
 | `status` | See below. |
 
@@ -73,7 +73,15 @@ Ready source pods. The probe therefore sums healthy endpoint weight.
 `--timeout`); `POISONED_RESTART` (an istiod restarted mid-iteration, istiod columns are
 `N/A`); `SCRAPE_INCOMPLETE` (an istiod `/metrics` scrape failed, counters undercounted);
 `SETUP_FAILED` / `PROBE_FAILED` (placeholder for a failed iteration or sweep combo).
-The report averages `OK` rows only and shows `n_valid`/`n_total`.
+The report averages `OK` rows only and shows `n_total` and `n_valid`. The p99 columns are
+not averaged: the report shows the worst bucket range a valid row hit (e.g. `500-1000`),
+or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
+`worst_bucket` and `n_overflow` columns).
+
+The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty`) and
+`ISTIO_VERSION`; the report prints those, never the commit it runs on. A TSV written
+before they were recorded reads `unknown (not recorded)`, and inputs that differ read
+`mixed:a,b` with a warning. Timestamps are UTC.
 
 Every source or remote istiod status other than `0` also saves the restart evidence to
 `istiod-diag-<RUN_ID>/` next to the TSV, tag `iter<N>`, after the row is written; a failed

@@ -170,7 +170,13 @@ report's text, md and json carry an "istiod restart diagnostics" section.
 
 The report keeps rows with `status=OK` and `istiod_restarted=0`, pairs them by
 `combo_id` within each TSV file, and prints mean and stdev of `Δp99_ms` with
-`total_runs`/`valid_runs` for each `(mesh_size, churn_rate)`.
+`total_runs`/`valid_runs` for each `(mesh_size, churn_rate)`. Each other average (p50,
+p99, QPS, EDS pushes) counts only the valid pairs that have a number in that column, and
+is `N/A` when none has. `churn_convergence_p99` is not averaged: the report shows the
+worst bucket range a valid run's p99 hit (e.g. `500-1000`, in ms), or `overflow (N runs)`
+when N runs had their p99 in the `+Inf` bucket; csv and json carry it as
+`churn_convergence_p99_worst` and `churn_convergence_overflow_runs`. JSON row values are
+numbers, with `null` for `N/A`.
 
 ### Comparing with earlier sweeps
 

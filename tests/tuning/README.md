@@ -61,7 +61,7 @@ It leaves the suite's workloads; remove them with the suite's cleanup script.
 ```
 tests/tuning/results/sweep-<RUN_ID>/
 ├── sweep-metadata.txt
-├── sweep-comparison.md      # means of valid rows; profiles show % change vs baseline
+├── sweep-comparison.md      # means of valid rows (histogram p99s: worst bucket); % change vs baseline
 ├── baseline/                # suite TSV + .md, probe-output.log
 └── 01-push-throttling/      # same, plus state/ (revert data)
 ```
@@ -69,7 +69,11 @@ tests/tuning/results/sweep-<RUN_ID>/
 `SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
 table. Data-plane rows are split by target class (local or remote) and QPS; a row that
 missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers run
-`DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Re-render:
+`DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Histogram p99 rows
+(convergence, push time) are never averaged: they show the worst bucket range a valid row
+hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the controlplane's
+`istiod CPU peak (m)` and `istiod memory peak (Mi)` are window peaks), the sidecar config
+in KiB. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 ## One profile by hand

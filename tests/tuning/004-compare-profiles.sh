@@ -21,6 +21,10 @@ Usage: $(basename "$0") --results-dir DIR [options]
 
 Compare tuning sweep passes. Values are means over valid rows (status OK, no
 istiod restart); each profile also shows its change against the baseline.
+Histogram p99 rows (convergence, push time) show the worst bucket a valid row hit,
+or "overflow (N rows)", never a mean. Memory is in Mi, CPU in millicores (the
+controlplane's istiod CPU and memory are window peaks), config sizes in KiB, and a
+count's mean prints bare when it is whole (438, not 438.00).
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -93,34 +97,39 @@ if [[ -z "$SUITE" ]]; then
 	done
 fi
 
-# Metrics per suite as "column|label"; GROUP (CSV of columns) splits rows by their values.
+# Metrics per suite as "column|label|kind"; GROUP (CSV of columns) splits rows by their
+# values. kind sets how a cell prints (fmt_metric): ms (mean, 2 decimals), count (mean,
+# a whole number bare, else 1 decimal), mi and m (mean in Mi / millicores, whole), kib
+# (a bytes mean shown in KiB, 1 decimal), qps (mean, 1 decimal), hist (a histogram
+# p99: never averaged, the worst bucket any valid row hit, or "overflow (N rows)").
 GROUP=""
 case "$SUITE" in
 controlplane)
 	# Rows are per istiod pod: connected_proxies is per replica; cluster_connected_proxies
 	# repeats on each pod row of a cluster, so its mean weights clusters by replica
 	# count (same replicas everywhere -> the plain per-cluster mean). Absent in older
-	# 40-column TSVs, where it is skipped.
-	METRICS=("istiod_mem_mi|istiod memory (MiB)" "go_heap_inuse_mi|Go heap in use (MiB)"
-		"istiod_cpu_m_delta|istiod CPU (millicores)" "convergence_p99_ms|Convergence p99 (ms)"
-		"xds_pushes_delta|xDS pushes" "sidecar_config_bytes_avg|Sidecar config (bytes)"
-		"connected_proxies|Connected proxies / istiod replica"
-		"cluster_connected_proxies|Connected proxies / cluster") ;;
+	# 40-column TSVs, where it is skipped. istiod_mem_mi is the window's peak RSS and
+	# istiod_cpu_m_delta the larger of the window average and the polled 5 s peak.
+	METRICS=("istiod_mem_mi|istiod memory peak (Mi)|mi" "go_heap_inuse_mi|Go heap in use (Mi)|mi"
+		"istiod_cpu_m_delta|istiod CPU peak (m)|m" "convergence_p99_ms|Convergence p99 worst bucket (ms)|hist"
+		"xds_pushes_delta|xDS pushes|count" "sidecar_config_bytes_avg|Sidecar config (KiB)|kib"
+		"connected_proxies|Connected proxies / istiod replica|count"
+		"cluster_connected_proxies|Connected proxies / cluster|count") ;;
 propagation)
-	METRICS=("p1_ms|P1 local push (ms)" "p2_ms|P2 remote EDS (ms)" "p3_ms|P3 remote sidecar (ms)"
-		"p1_conv_p99_ms|P1 convergence p99 (ms)") ;;
+	METRICS=("p1_ms|P1 local push (ms)|ms" "p2_ms|P2 remote EDS (ms)|ms" "p3_ms|P3 remote sidecar (ms)|ms"
+		"p1_conv_p99_ms|P1 convergence p99 worst bucket (ms)|hist") ;;
 dataplane)
 	GROUP="target_class,qps_target"
-	METRICS=("p50_ms|p50 (ms)" "p90_ms|p90 (ms)" "p99_ms|p99 (ms)" "p999_ms|p99.9 (ms)"
-		"qps_actual|Actual QPS") ;;
+	METRICS=("p50_ms|p50 (ms)|ms" "p90_ms|p90 (ms)|ms" "p99_ms|p99 (ms)|ms" "p999_ms|p99.9 (ms)|ms"
+		"qps_actual|Actual QPS|qps") ;;
 churn)
-	METRICS=("convergence_local_ms|Local convergence (ms)" "convergence_remote_eds_ms|Remote EDS (ms)"
-		"remote_endpoint_reachable_ms|Remote reachable (ms)" "source_xds_pushes_delta|Source xDS pushes"
-		"source_push_time_p99_ms|Source push time p99 (ms)") ;;
+	METRICS=("convergence_local_ms|Local convergence (ms)|ms" "convergence_remote_eds_ms|Remote EDS (ms)|ms"
+		"remote_endpoint_reachable_ms|Remote reachable (ms)|ms" "source_xds_pushes_delta|Source xDS pushes|count"
+		"source_push_time_p99_ms|Source push time p99 worst bucket (ms)|hist") ;;
 churn-dataplane)
 	GROUP="phase"
-	METRICS=("p50_ms|p50 (ms)" "p99_ms|p99 (ms)" "p999_ms|p99.9 (ms)" "delta_p99_ms|p99 change vs baseline phase (ms)"
-		"qps_actual|Actual QPS" "xds_pushes_delta|xDS pushes" "eds_pushes_delta|EDS pushes") ;;
+	METRICS=("p50_ms|p50 (ms)|ms" "p99_ms|p99 (ms)|ms" "p999_ms|p99.9 (ms)|ms" "delta_p99_ms|p99 change vs baseline phase (ms)|ms"
+		"qps_actual|Actual QPS|qps" "xds_pushes_delta|xDS pushes|count" "eds_pushes_delta|EDS pushes|count") ;;
 *) die "cannot tell the suite (no '# SUITE=' in sweep-metadata.txt and no known TSV header)" ;;
 esac
 
@@ -128,7 +137,9 @@ metric_cols=""
 for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 
 # One pass -> lines "n<TAB>valid<TAB>total", "g<TAB>group" (first-seen order) and
-# "v<TAB>group<TAB>column<TAB>mean". A group is "col=value, col=value", or "-".
+# "v<TAB>group<TAB>column<TAB>mean<TAB>max<TAB>n_overflow" (mean and max "-" without
+# a numeric value: a tab IFS would merge empty fields). A group is "col=value,
+# col=value", or "-". "overflow" (a histogram p99 in +Inf) is counted, not dropped.
 summarize() {
 	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" '
 	BEGIN { nm = split(cols, mc, ","); ng = split(gcols, gc, ",") }
@@ -148,18 +159,63 @@ summarize() {
 		for (j = 1; j <= nm; j++) {
 			c = mc[j]
 			if (c == "" || !(c in idx)) continue
-			v = $(idx[c])
-			if (v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) { sum[g SUBSEP c] += v; cnt[g SUBSEP c]++ }
+			v = $(idx[c]); k = g SUBSEP c
+			if (v == "overflow") { ov[k]++; has[k] = 1; continue }
+			if (v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) {
+				if (!(k in cnt) || v + 0 > mx[k]) mx[k] = v + 0
+				sum[k] += v; cnt[k]++; has[k] = 1
+			}
 		}
 	}
 	END {
 		printf "n\t%d\t%d\n", valid, total
 		for (i = 1; i <= norder; i++) printf "g\t%s\n", order[i]
-		for (k in cnt) { split(k, a, SUBSEP); printf "v\t%s\t%s\t%.2f\n", a[1], a[2], sum[k] / cnt[k] }
+		for (k in has) {
+			split(k, a, SUBSEP)
+			if (k in cnt) printf "v\t%s\t%s\t%.6f\t%.6f\t%d\n", a[1], a[2], sum[k] / cnt[k], mx[k], ov[k] + 0
+			else printf "v\t%s\t%s\t-\t-\t%d\n", a[1], a[2], ov[k] + 0
+		}
 	}' "$@"
 }
 
-declare -A VAL NROWS STATUS GSEEN
+# fmt_metric <kind> <mean> <max> <n_overflow> [baseline_mean]: one cell (see METRICS);
+# "-" (or empty) for a mean or max means none. The change against the baseline is on
+# the unrounded means; hist cells have none.
+fmt_metric() {
+	awk -v k="$1" -v m="$2" -v mx="$3" -v ov="$4" -v b="${5:-}" '
+	function bucket_range(v) {
+		if (v + 0 <= 0)     return "N/A"
+		if (v + 0 <= 100)   return "0-100"
+		if (v + 0 <= 500)   return "100-500"
+		if (v + 0 <= 1000)  return "500-1000"
+		if (v + 0 <= 3000)  return "1000-3000"
+		if (v + 0 <= 5000)  return "3000-5000"
+		if (v + 0 <= 10000) return "5000-10000"
+		if (v + 0 <= 20000) return "10000-20000"
+		if (v + 0 <= 30000) return "20000-30000"
+		return ">30000"
+	}
+	BEGIN {
+		if (m == "-") m = ""
+		if (mx == "-") mx = ""
+		if (b == "-") b = ""
+		if (k == "hist") {
+			if (ov + 0 > 0) printf "overflow (%d %s)", ov, (ov + 0 == 1 ? "row" : "rows")
+			else printf "%s", (mx == "" ? "-" : bucket_range(mx))
+			exit
+		}
+		if (m == "") { printf "-"; exit }
+		v = (k == "kib") ? m / 1024 : m + 0
+		if (k == "ms") s = sprintf("%.2f", v)
+		else if (k == "kib" || k == "qps") s = sprintf("%.1f", v)
+		else if (k == "count") s = (v == int(v)) ? sprintf("%d", v) : sprintf("%.1f", v)
+		else s = sprintf("%.0f", v)
+		if (b != "" && b + 0 != 0) s = s sprintf(" (%+.1f%%)", (m - b) / b * 100)
+		printf "%s", s
+	}'
+}
+
+declare -A VAL VMAX VOV NROWS STATUS GSEEN
 GROUP_VALUES=()
 for p in "${PASSES[@]}"; do
 	STATUS[$p]="ok"
@@ -171,11 +227,11 @@ for p in "${PASSES[@]}"; do
 		[[ "${STATUS[$p]}" == ok ]] && STATUS[$p]="no data"
 		continue
 	fi
-	while IFS=$'\t' read -r kind a b c; do
+	while IFS=$'\t' read -r kind a b c d e; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
 		g) [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
-		v) VAL["$p|$a|$b"]="$c" ;;
+		v) VAL["$p|$a|$b"]="$c"; VMAX["$p|$a|$b"]="$d"; VOV["$p|$a|$b"]="$e" ;;
 		esac
 	done < <(summarize "${files[@]}")
 done
@@ -195,20 +251,18 @@ for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
 row "${cells[@]}"
 for g in "${GROUP_VALUES[@]}"; do
 	for m in "${METRICS[@]}"; do
-		col="${m%%|*}" label="${m#*|}"
+		col="${m%%|*}" rest="${m#*|}"
+		label="${rest%|*}" kind="${rest##*|}"
 		[[ "$g" != "-" ]] && label="${label} @ ${g}"
 		cells=("$label")
 		any=0
 		for p in "${PASSES[@]}"; do
-			v="${VAL["$p|$g|$col"]:-}"
-			if [[ -z "$v" ]]; then cells+=("-"); continue; fi
+			k="$p|$g|$col"
+			if [[ -z "${VAL[$k]:-}" ]]; then cells+=("-"); continue; fi
 			any=1
 			b=""
-			[[ -n "$BASE" ]] && b="${VAL["$BASE|$g|$col"]:-}"
-			if [[ "$p" != "$BASE" && -n "$b" ]]; then
-				v="$(awk -v a="$v" -v b="$b" 'BEGIN { if (b == 0) { printf "%s", a; exit } d = (a - b) / b * 100; printf "%s (%+.1f%%)", a, d }')"
-			fi
-			cells+=("$v")
+			[[ -n "$BASE" && "$p" != "$BASE" ]] && b="${VAL["$BASE|$g|$col"]:-}"
+			cells+=("$(fmt_metric "$kind" "${VAL[$k]}" "${VMAX[$k]}" "${VOV[$k]}" "$b")")
 		done
 		((any)) && row "${cells[@]}"
 	done
@@ -222,6 +276,7 @@ render() {
 		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
+		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket."
 		echo ""
 		local hdr="| Metric |" sep="|---|" r
 		for p in "${PASSES[@]}"; do hdr+=" ${p} |"; sep+="---|"; done
@@ -231,6 +286,7 @@ render() {
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		echo "Means over valid rows; profiles show the change against the baseline."
+		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."
 		echo ""
 		{
 			printf 'Metric'

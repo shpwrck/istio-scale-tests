@@ -165,6 +165,14 @@ Namespace scaling (growth mode; README "Namespace scaling"):
                                        and the scoping's Sidecar, no pods.
                          measurement - the measurement Deployments of namespaces
                                        0..M-1 (raise M in place).
+                         Legacy layout (no --services-per-namespace), for a two-phase
+                         VS/DR apply (BACKLOG 9.11; 003 --vsdr-apply split):
+                         workloads   - everything except the VirtualServices and
+                                       DestinationRules (namespaces, Services,
+                                       Sidecars, the per-subset Deployments).
+                         traffic     - only the VirtualServices and DestinationRules
+                                       (needs --traffic-config vsdr and the workloads
+                                       part applied first).
   --probe NAME           Probe namespace name (with --parts probe).
   --lifecycle-file FILE  Append apply/readiness timings, objects/s, namespaces/s and API
                          429s (retried by client-go and exhausted; applies run at
@@ -197,6 +205,11 @@ Environment:
   service count from cluster capacity; legacy layout only), SCALE_TARGET_FRACTION,
   SCALE_SYSTEM_RESERVE_FRACTION, SCALE_PER_POD_CPU_M, SCALE_PER_POD_MEM_MI,
   SCALE_COVERAGE_MIN_FRACTION, SCALE_COVERAGE_ENFORCE (1 = fail when under-provisioned).
+
+  Capacity preflight (always on in live runs): refuses when a member lacks pod slots, or
+  when the new pods' CPU requests exceed the workers' free requests (allocatable minus
+  what running pods request); SCALE_CPU_PREFLIGHT_ENFORCE=0 turns the CPU refusal into a
+  warning (default 1; for clusters with a node autoscaler).
 EOF
 }
 
@@ -344,8 +357,8 @@ is_nonneg_int "$OUTSIDE_NAMESPACES" || die "--outside-namespaces must be a non-n
 validate_workload_mode "$WORKLOAD_MODE"
 validate_outside_mode "$OUTSIDE_MODE"
 case "$PARTS" in
-all | sidecars | outside | probe | measurement) ;;
-*) die "--parts must be one of [all, sidecars, outside, probe, measurement]; got '$PARTS'" ;;
+all | sidecars | outside | probe | measurement | workloads | traffic) ;;
+*) die "--parts must be one of [all, sidecars, outside, probe, measurement, workloads, traffic]; got '$PARTS'" ;;
 esac
 SCALE_SIZING_MODE="${SCALE_SIZING_MODE:-fixed}"
 DNS_LABEL_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
@@ -353,6 +366,7 @@ DNS_LABEL_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 GROWTH=0
 ((SERVICES_PER_NAMESPACE > 0)) && GROWTH=1
 if ((GROWTH)); then
+	[[ "$PARTS" != workloads && "$PARTS" != traffic ]] || die "--parts $PARTS is for the legacy layout (no --services-per-namespace)"
 	[[ "$SIDECAR_SCOPING" != explicit ]] || die "--sidecar-scoping explicit is not supported with --services-per-namespace (use none, namespace or wide)"
 	[[ "$TRAFFIC_CONFIG" == none ]] || die "--traffic-config vsdr is not supported with --services-per-namespace"
 	[[ "$SCALE_SIZING_MODE" != auto ]] || die "SCALE_SIZING_MODE=auto derives --service-count, which growth mode does not use; set SCALE_SIZING_MODE=fixed"
@@ -374,7 +388,11 @@ if ((GROWTH)); then
 	# The services in the series' namespaces (recorded by 002 as service_count).
 	SERVICE_COUNT=$((NAMESPACE_COUNT * SERVICES_PER_NAMESPACE))
 else
-	[[ "$PARTS" == all ]] || die "--parts $PARTS needs --services-per-namespace > 0 (growth mode)"
+	case "$PARTS" in
+	all | workloads) ;;
+	traffic) [[ "$TRAFFIC_CONFIG" == vsdr ]] || die "--parts traffic applies the VirtualServices and DestinationRules, so it needs --traffic-config vsdr" ;;
+	*) die "--parts $PARTS needs --services-per-namespace > 0 (growth mode)" ;;
+	esac
 	[[ "$WORKLOAD_MODE" == pods ]] || die "--workload-mode $WORKLOAD_MODE needs --services-per-namespace > 0 (growth mode)"
 	((NAMESPACE_START == 0)) || die "--namespace-start needs --services-per-namespace > 0 (growth mode)"
 	[[ -z "$SERIES" ]] || die "--series needs --services-per-namespace > 0 (growth mode)"
@@ -442,13 +460,21 @@ if ((GROWTH)); then
 		;;
 	measurement) SHOW_ONLY="templates/dummy-deployment.yaml" ;;
 	esac
+elif [[ "$PARTS" == traffic ]]; then
+	# Only the VS/DR of namespaces the workloads part created: nothing to wait for.
+	SHOW_ONLY="templates/traffic-management.yaml"
 elif ((NAMESPACE_COUNT <= 1)); then
 	NAMESPACES=("$NS")
 else
 	for ((n = 0; n < NAMESPACE_COUNT; n++)); do NAMESPACES+=("${NS}-${n}"); done
 fi
+# Kinds the render drops before the apply (the workloads part of a two-phase VS/DR apply).
+SKIP_KINDS=""
+[[ "$PARTS" == workloads ]] && SKIP_KINDS="VirtualService,DestinationRule"
 # Lifecycle action name (003's ns-lifecycle TSV).
 case "$PARTS" in
+workloads) ACTION="apply-workloads" ;;
+traffic) ACTION="apply-traffic" ;;
 all) if ((GROWTH)); then ACTION=grow; else ACTION=apply; fi ;;
 sidecars) ACTION="switch-${SIDECAR_SCOPING}" ;;
 outside) ACTION="outside-${OUTSIDE_MODE}" ;;
@@ -489,15 +515,19 @@ echo ""
 # per_pod_cpu_m / per_pod_mem_mi: the dummy chart's container declares NO resources
 # block (tests/controlplane/chart/templates/dummy-deployment.yaml), so the app
 # container's request is effectively 0; the dominant cost is the injected istio-proxy
-# sidecar. We use a documented conservative constant (sidecar default ~100m / ~128Mi
-# plus headroom) until calibrated against a real cluster on the clean re-run. These
-# are intentionally generous so auto-sizing under-provisions rather than over-provisions.
-# Centralized in config/options.env (SCALE_PER_POD_*) for calibration consistency.
-PER_POD_CPU_M="${SCALE_PER_POD_CPU_M:-200}"
-PER_POD_MEM_MI="${SCALE_PER_POD_MEM_MI:-256}"
+# sidecar. SCALE_PER_POD_* (config/options.env) win when set; otherwise the live Istio
+# CR's sidecar requests on the source context, else Istio's defaults (100m / 128Mi)
+# (BACKLOG 9.7: a 200m constant flagged 250 x 2 pods as not fitting on ROSA, where the
+# sidecar requested 20m). SCALE_TARGET_FRACTION and the reserve keep the headroom.
 if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	src_ctx="${CONTEXTS[0]}"
+	[[ -z "${SCALE_PER_POD_CPU_M:-}" ]] || is_pos_int "$SCALE_PER_POD_CPU_M" || die "SCALE_PER_POD_CPU_M must be empty or a positive integer (got: $SCALE_PER_POD_CPU_M)"
+	[[ -z "${SCALE_PER_POD_MEM_MI:-}" ]] || is_pos_int "$SCALE_PER_POD_MEM_MI" || die "SCALE_PER_POD_MEM_MI must be empty or a positive integer (got: $SCALE_PER_POD_MEM_MI)"
+	ppr="$(cap_per_pod_requests "$src_ctx" "${SCALE_PER_POD_CPU_M:-}" "${SCALE_PER_POD_MEM_MI:-}" "${KUBECTL[@]}")"
+	PER_POD_CPU_M="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^cpu_m=/) print substr($i, 7) }' <<<"$ppr")"
+	PER_POD_MEM_MI="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^mem_mi=/) print substr($i, 8) }' <<<"$ppr")"
 	echo "Auto-sizing from capacity on source context $src_ctx (target_fraction=${SCALE_TARGET_FRACTION}, reserve=${SCALE_SYSTEM_RESERVE_FRACTION})..."
+	echo "  per pod: ${PER_POD_CPU_M}m CPU / ${PER_POD_MEM_MI}Mi ($(awk '{ for (i = 1; i <= NF; i++) { if ($i ~ /^cpu_src=/) c = substr($i, 9); if ($i ~ /^mem_src=/) m = substr($i, 9) } } END { gsub(/_/, " ", c); gsub(/_/, " ", m); printf "CPU: %s; memory: %s", c, m }' <<<"$ppr"))"
 	a_cpu="unknown"; a_mem="unknown"; a_pods="unknown"
 	# shellcheck disable=SC2207
 	nt=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
@@ -613,7 +643,9 @@ fi
 
 # Pods this run adds per cluster (the capacity preflight's demand).
 NEEDED_PODS=0
-if ! ((GROWTH)); then
+if ! ((GROWTH)) && [[ "$PARTS" == traffic ]]; then
+	NEEDED_PODS=0
+elif ! ((GROWTH)); then
 	NEEDED_PODS=$((SERVICE_COUNT * REPLICAS))
 elif [[ "$PARTS" == all && "$WORKLOAD_MODE" == pods ]]; then
 	NEEDED_PODS=$(( (NAMESPACE_COUNT - NAMESPACE_START) * SERVICES_PER_NAMESPACE * REPLICAS ))
@@ -629,6 +661,18 @@ fi
 # SCALE_COVERAGE_ENFORCE=1).
 if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 	echo "Capacity preflight ($NEEDED_PODS pods needed per cluster)..."
+	[[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" =~ ^[01]$ ]] || die "SCALE_CPU_PREFLIGHT_ENFORCE must be 0 or 1 (got: ${SCALE_CPU_PREFLIGHT_ENFORCE})"
+	# Per-pod CPU request: auto-sizing's reading when it ran, else the same reader.
+	if [[ -n "${PER_POD_CPU_M:-}" ]]; then
+		CPU_PER_POD_M="$PER_POD_CPU_M"; CPU_PER_POD_SRC="as auto-sizing read it"
+	else
+		[[ -z "${SCALE_PER_POD_CPU_M:-}" ]] || is_pos_int "$SCALE_PER_POD_CPU_M" || die "SCALE_PER_POD_CPU_M must be empty or a positive integer (got: $SCALE_PER_POD_CPU_M)"
+		ppr="$(cap_per_pod_requests "${CONTEXTS[0]}" "${SCALE_PER_POD_CPU_M:-}" "${SCALE_PER_POD_MEM_MI:-}" "${KUBECTL[@]}")"
+		CPU_PER_POD_M="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^cpu_m=/) print substr($i, 7) }' <<<"$ppr")"
+		CPU_PER_POD_SRC="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^cpu_src=/) print substr($i, 9) }' <<<"$ppr" | tr '_' ' ')"
+	fi
+	CPU_NEEDED_M=$(( NEEDED_PODS * CPU_PER_POD_M ))
+	cpu_cores() { awk -v m="$1" 'BEGIN { printf "%.1f", m / 1000 }'; }
 	for ctx in "${CONTEXTS[@]}"; do
 		alloc=$("${KUBECTL[@]}" --context="$ctx" get nodes -o json 2>/dev/null \
 			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
@@ -665,6 +709,37 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 			fi
 		else
 			echo "  $ctx: could not query capacity (alloc=$alloc, current=$current) — skipping preflight" >&2
+		fi
+		# CPU: a pod schedules only where its requests fit, so pods beyond the free
+		# requests stay Pending and the readiness wait fails minutes later. Free = worker
+		# allocatable − what every non-terminal pod already requests (summed over nodes,
+		# so per-node fragmentation can still leave a few Pending).
+		cpu_alloc=""; cpu_workers=""; cpu_req=""
+		# shellcheck disable=SC2207
+		nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
+		for kv in "${nt[@]}"; do
+			case "$kv" in
+				cpu_m=*) cpu_alloc="${kv#cpu_m=}" ;;
+				names=*) cpu_workers="${kv#names=}" ;;
+			esac
+		done
+		# shellcheck disable=SC2207
+		rq=($(cap_requested "$ctx" "$cpu_workers" "" "${KUBECTL[@]}"))
+		for kv in "${rq[@]}"; do case "$kv" in cpu_m=*) cpu_req="${kv#cpu_m=}" ;; esac; done
+		if [[ "$cpu_alloc" =~ ^[0-9]+$ && "$cpu_req" =~ ^[0-9]+$ ]]; then
+			cpu_free=$(( cpu_alloc > cpu_req ? cpu_alloc - cpu_req : 0 ))
+			cpu_line="~$(cpu_cores "$cpu_free") cores of CPU requests free on the workers ($(cpu_cores "$cpu_alloc") allocatable − $(cpu_cores "$cpu_req") requested), ~$(cpu_cores "$CPU_NEEDED_M") needed ($NEEDED_PODS pods × ${CPU_PER_POD_M}m, ${CPU_PER_POD_SRC})"
+			if (( CPU_NEEDED_M > cpu_free )); then
+				cpu_fit=$(( cpu_free / CPU_PER_POD_M ))
+				if [[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" == "1" ]]; then
+					die "context $ctx: ${cpu_line}; about ${cpu_fit} pods fit. Reduce --service-count, --replicas, --namespace-count or --measurement-pods, or add nodes (SCALE_CPU_PREFLIGHT_ENFORCE=0 only warns, for a node autoscaler)."
+				fi
+				echo "  WARN: $ctx: ${cpu_line}; about ${cpu_fit} pods fit; the rest stay Pending unless a node autoscaler adds capacity (SCALE_CPU_PREFLIGHT_ENFORCE=0)." >&2
+			else
+				echo "  $ctx: ${cpu_line} — OK"
+			fi
+		else
+			echo "  $ctx: could not read node CPU or pod requests (alloc=${cpu_alloc:-unknown}, requested=${cpu_req:-unknown}) — skipping the CPU check" >&2
 		fi
 	done
 	echo ""
@@ -790,8 +865,11 @@ apply_with_retry() {
 split_render() {
 	local rendered="$1" workdir="$2" chunk="$APPLY_CHUNK_OBJECTS"
 	(( chunk <= 0 )) && chunk=1000000000
-	awk -v dir="$workdir" -v chunk="$chunk" '
+	# SKIP_KINDS (CSV): kinds left out of every batch (the workloads part).
+	awk -v dir="$workdir" -v chunk="$chunk" -v skip="$SKIP_KINDS" '
+		BEGIN { ns = split(skip, sk, ","); for (i = 1; i <= ns; i++) if (sk[i] != "") SKIP[sk[i]] = 1 }
 		function flush() {
+			if (kind in SKIP) { buf = ""; kind = ""; return }
 			if (buf ~ /[^[:space:]]/ && kind != "") {
 				kinds[kind]++
 				if (kind == "Namespace") {
@@ -1004,7 +1082,7 @@ sidecar_ns_counts() {
 VERIFY_SIDECARS=0
 EXPECTED_NS_FILE="${WORKDIR_ROOT}/sidecar-namespaces"
 if ! ((GROWTH)); then
-	[[ "$SIDECAR_SCOPING" != none ]] && VERIFY_SIDECARS=1
+	[[ "$SIDECAR_SCOPING" != none && "$PARTS" != traffic ]] && VERIFY_SIDECARS=1
 	printf '%s\n' "${NAMESPACES[@]}" > "$EXPECTED_NS_FILE"
 	expected_sidecars="$NAMESPACE_COUNT"
 	[[ "$SIDECAR_SCOPING" == explicit ]] && expected_sidecars="$SERVICE_COUNT"
@@ -1057,7 +1135,7 @@ fi
 # Verify the VirtualServices and DestinationRules landed: one of each per configured
 # service. A shortfall dies, so a sweep records the combo as SETUP_FAILED instead of
 # measuring a vsdr cell that is missing part of its config.
-if [[ "$TRAFFIC_CONFIG" == vsdr ]]; then
+if [[ "$TRAFFIC_CONFIG" == vsdr && "$PARTS" != workloads ]]; then
 	expected_vsdr="$(vsdr_service_count "$SERVICE_COUNT" "$VSDR_EVERY")"
 	vsdr_selector="app.kubernetes.io/instance=controlplane-test,controlplane-test.traffic=vsdr"
 	echo "Verifying VirtualServices and DestinationRules (expecting ${expected_vsdr} of each per cluster)..."
@@ -1083,5 +1161,5 @@ fi
 if ((GROWTH)); then
 	echo "Setup complete. Series '${SERIES:-none}' part ${PARTS}: ${NAMESPACE_COUNT} namespace(s) x ${SERVICES_PER_NAMESPACE} service(s) (sidecar-scoping=${SIDECAR_SCOPING}, workload=${WORKLOAD_MODE}) on: ${CONTEXTS[*]}"
 else
-	echo "Setup complete. ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) (sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG}) on: ${CONTEXTS[*]}"
+	echo "Setup complete (part ${PARTS}). ${SERVICE_COUNT} services × ${REPLICAS} replicas across ${NAMESPACE_COUNT} namespace(s) (sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG}) on: ${CONTEXTS[*]}"
 fi

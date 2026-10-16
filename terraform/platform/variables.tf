@@ -13,6 +13,12 @@ variable "cluster_provider" {
   }
 }
 
+variable "rosa_ingress_nlb" {
+  type        = bool
+  default     = true
+  description = "rosa mode: give the ingress gateway Service an AWS NLB (service.beta.kubernetes.io/aws-load-balancer-type: nlb). Behind a Classic LB the gateway aborted HTTP requests (2026-10-14 ROSA window). The east-west gateway (mTLS passthrough) stays on a Classic LB. An existing CLB-backed Service must be deleted once (Argo CD recreates it) to switch."
+}
+
 variable "kubeconfig_path" {
   type        = string
   default     = ""
@@ -196,6 +202,23 @@ variable "argocd_clusters_per_shard" {
   validation {
     condition     = var.argocd_clusters_per_shard > 0 && var.argocd_clusters_per_shard == floor(var.argocd_clusters_per_shard)
     error_message = "argocd_clusters_per_shard must be a positive whole number."
+  }
+}
+
+variable "argocd_restart_controller_after_cluster_secrets" {
+  type        = bool
+  default     = true
+  description = "After the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh)."
+}
+
+variable "argocd_app_status_timeout_sec" {
+  type        = number
+  default     = 900
+  description = "Post-apply check: fail when an Argo CD Application still has an empty sync or health status after this many seconds (no controller shard owns its destination cluster). 0 disables the check."
+
+  validation {
+    condition     = var.argocd_app_status_timeout_sec == 0 || var.argocd_app_status_timeout_sec >= 600
+    error_message = "argocd_app_status_timeout_sec must be 0 (disabled) or at least 600: the member Applications can take several minutes to get their first status."
   }
 }
 

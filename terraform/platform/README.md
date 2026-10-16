@@ -26,6 +26,14 @@ terraform apply platform.tfplan
 Then watch the rollout: `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`
 until every application is Synced/Healthy (about 15–20 minutes).
 
+Two steps guard Argo CD's controller sharding. Once every cluster secret exists, the apply waits for
+the GitOps operator's own dynamic-scaling restart of the application controller to settle, then
+restarts the controller pods once: a controller that starts while the secrets change can leave a
+cluster without a shard, and that cluster's Applications never get a status. At the end, the apply
+fails if an Application still has an empty sync or health status after
+`argocd_app_status_timeout_sec` (default 900; 0 disables), naming its destination cluster. The fix
+is the same restart: `oc -n openshift-gitops delete pod -l app.kubernetes.io/name=openshift-gitops-application-controller`.
+
 ## Existing clusters
 
 | Already installed on the hub | Set |
@@ -46,6 +54,11 @@ The chart defaults are sized for the 20-cluster campaign. Override them per envi
 - `argocd_config_values`: Argo CD resources on a small hub. Keep the controller limit near 6Gi.
 - `mesh_member_count`: how many spokes join the mesh, in sorted order (0 = all).
 - Large fleets: `argocd_clusters_per_shard` / `argocd_max_shards`.
+- ROSA: the ingress gateway Service gets an AWS NLB (`rosa_ingress_nlb`, default true). Behind a
+  Classic LB it aborted HTTP requests (each arrived followed by a FIN); the east-west gateway
+  (mTLS passthrough) stays on a Classic LB. This default is merged under `gitops_app_overrides`,
+  so an override of `spoke-ingress-gateway-appset` adds to it. A Service created as a CLB does not
+  change type in place: delete it once and Argo CD recreates it as an NLB.
 
 The child apps sync from `gitops_app_repo_url` at `gitops_app_repo_revision`, so a fork or branch
 deploys from itself. Edited charts roll out on the next apply.

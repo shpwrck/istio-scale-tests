@@ -166,6 +166,20 @@ EXTRACTED_PATTERNS=(
 	'growth_gateway_summary() {'
 	'growth_root_cert_count() {'
 	'growth_istiod_heap_mi() {'
+	# ROSA window fixes (BACKLOG 9.3-9.7, 9.10)
+	'growth_discovered_ns() {'
+	'growth_retire_verified() {'
+	'growth_parse_top_containers() {'
+	'growth_gateway_ws() {'
+	'growth_parse_remote_secrets() {'
+	'growth_mesh_members() {'
+	'growth_test_ns_counts() {'
+	'mem_guard_project_abs() {'
+	'cap_parse_proxy_requests() {'
+	'cap_proxy_requests() {'
+	'cap_per_pod_requests() {'
+	'cap_parse_requested() {'
+	'cap_requested() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

@@ -18,7 +18,7 @@ The original issue texts are in the appendix.
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done; lab shape, ROSA numbers at 60-250 Services × 2 | convergence p99 question (9.11); thousands of Services |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
 | 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Done, lab-validated 2026-10-14 (22/22 predictions matched) | — |
-| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items: 11 open fixes, 9.12 done) | Specified below | implement 9.1-9.11; owner decisions 9.8, 9.9 and the results backup destination |
+| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16; lab-validated where the lab can (see each item); 9.8/9.9 as recommended, confirmed by the owner 2026-10-16 | ROSA: 9.1 greenfield race, 9.2 under load, 9.8 NLB, 9.9 at campaign scale, 9.11 at 150-250 Services; results backup destination (owner) |
 
 ## 1. Namespace scaling factor
 
@@ -54,8 +54,8 @@ created), so older namespace results are invalid.
 4000 namespaces + 2000 outside), R1b, R2 (K=4), R3 (pods mode) and the extensions X1 (K=4 to 8000
 Services, M-sweep) and X2 (6000 discovered). Per 1000: istiod heap about +100 Mi per 1000
 namespaces at K=1; east-west gateway clusters +2000 and Envoy memory +143-144 Mi per 1000 **Services**
-(K=1 and K=4 alike; ingress +1000 clusters, about +91 Mi); `wide` scoping costs every proxy +5.85 MB config and +117 Mi Envoy memory per
-1000 Services, while `namespace` scoping stays flat (351-369 KB). `discoverySelectors` keeps
+(K=1 and K=4 alike; ingress +1000 clusters, about +91 Mi); `wide` scoping costs every proxy +5.72 MiB config and +117 Mi Envoy memory per
+1000 Services, while `namespace` scoping stays flat (351-369 KiB). `discoverySelectors` keeps
 excluded namespaces out of xDS (Services, gateway clusters, root-cert ConfigMaps all +0) but not
 out of istiod's informer heap. The pods-vs-config-only row exists: per-proxy figures match;
 config-only does not model push fan-out (pushes 38× higher at 250 namespaces with one proxy per pod).
@@ -203,9 +203,9 @@ istiod cost deltas need hundreds to thousands of services (ROSA).
 
 **Validated (ROSA, 2026-10-14, pods mode):** at 150 and 250 Services × 2 on one member, vsdr
 added exactly 2 clusters per Service (+300 / +500), CDS +246-255%, RDS +125-128%, config dump
-1.40 → 3.60 MB and 2.11 → 5.78 MB, istiod heap in use -13% / +37% (RSS +56% / +78%, order-biased
+1.40 → 3.60 MiB and 2.11 → 5.78 MiB, istiod heap in use -13% / +37% (RSS +56% / +78%, order-biased
 per the report), xDS pushes +23-30%, push time 3-4×; at 60 × 2 per member across two members, CDS
-186 → 594 KB and push time 0.72 → 1.52 ms.
+186 → 594 KiB and push time 0.72 → 1.52 ms.
 **Left:** the convergence p99 jump at 150-250 Services (9.11); thousands of Services × 2 need more
 worker nodes (pod slots: 645 were free on the three nodes) or a `vsdr` config-only mode.
 
@@ -266,6 +266,18 @@ is listed in the record's ["Raw data"](docs/campaigns/2026-10-14-rosa-validation
 **Owner decisions pending:** 9.8 (NLB for the ingress), 9.9 (gateway memory defaults), and where to
 copy the window's results off the operator laptop.
 
+**Status 2026-10-16:** every item below is implemented (one branch, one commit per area); the
+owner confirmed 9.8 and 9.9 as proposed. Each item ends with **Done**,
+**Validated** and **Left**. The same pass fixed the report errors an audit of the window's
+reports found: istiod "CPU avg" was a per-window peak, "KB"/"MB" were KiB/MiB, the SLA headline
+and envelope read istiod CPU from one end-of-window `kubectl top` snapshot, two-point fits
+printed R² 1.000, exponents leaked into tables and JSON, config-only cells claimed endpoints, and
+the churn, churn-dataplane, dataplane, propagation and tuning reports averaged N/A as 0 or
+bucketed means of p99s (all fixed, with bats; the window record's units are corrected). Lab
+validation also found the capacity plan ignoring the CPU other pods request (fixed under 9.7).
+**Lab caveat:** the workstation's resolver failed over from the lab DNS twice mid-run; the lab
+runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` keeps TLS valid).
+
 ### 9.1 Argo CD leaves a member without a controller shard (finding 1) — fix decided
 
 - **Seen:** right after the platform apply, every cluster logged "has no assigned shard" (OpenShift
@@ -290,6 +302,17 @@ copy the window's results off the operator laptop.
   3 Argo CD clusters fit one shard at `clustersPerShard` 3: set `minShards` 2 or `clustersPerShard` 1
   through `argocd_config_values`), then re-register a member by deleting and recreating its cluster
   secret; ROSA next window.
+- **Done:** `terraform/scripts/argocd-controller-reshard.sh` (MODE=reshard) runs after the last
+  cluster secret and before the placement generator: it waits for the controller StatefulSet to
+  settle (Ready at its replica count, rollout complete, three polls in a row), deletes the
+  controller pods once and waits for Ready replacements. MODE=app-status runs at the end of the
+  apply and fails after `argocd_app_status_timeout_sec` (900, 0 disables) naming every
+  Application with an empty sync or health status and its destination cluster. Switch:
+  `argocd_restart_controller_after_cluster_secrets`. **Validated:** stub-kubectl bats (settle,
+  terminating pods, stale pods, replacements never Ready, app-status pass/fail/empty); live on the
+  lab hub (1 shard, settled in 3 polls, replacement Ready, all 30 Applications with status).
+  **Left:** the race itself needs a greenfield ROSA apply (the lab was not forced to 2 shards: the
+  hub's memory would not hold 2-3 controller replicas).
 
 ### 9.2 Kubeconfig exec plugin logs in on every `oc` call (finding 2)
 
@@ -307,6 +330,13 @@ copy the window's results off the operator laptop.
   `status.expirationTimestamp`, and retry the login a few times with backoff before failing.
 - **Accept:** 1000 consecutive `oc get ns` create at most one new OAuthAccessToken; a full sweep has
   no auth error. **Test:** offline bats with a stubbed `curl`; ROSA next window.
+- **Done:** as proposed: cache key sha256(API server, user, password; the password is never
+  written), 0600 file in a 0700 dir under `${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/oc-token-cache`,
+  atomic write, reuse until 300 s before `expires_in`, `status.expirationTimestamp`, a mkdir lock
+  (a dead owner's lock is broken), 4 login attempts with doubling backoff; `OC_TOKEN_CACHE=0`
+  restores the old behaviour. **Validated:** bats with a stubbed `curl` (50 calls → 1 login, 8
+  parallel callers → 1 login, retries, margin, no password on disk). **Left:** ROSA (the lab
+  authenticates with client certificates): count OAuthAccessTokens after a sweep.
 
 ### 9.3 A failed series retire passes silently (finding 3)
 
@@ -325,6 +355,14 @@ copy the window's results off the operator laptop.
   with a `RETIRE_FAILED` row → reported; a growth-mode live run against an empty kubeconfig exits
   non-zero with a `RETIRE_FAILED` row. **Test:** offline; lab (point the retire at an unreachable
   context).
+- **Done:** `growth_retire_verified` (`tests/lib/growth.sh`) runs the cleanup and checks that no
+  namespace of the series carries `istio-discovery` or `istio.io/rev`, `CONTROLPLANE_RETIRE_ATTEMPTS`
+  (3) times; on failure 003 records `RETIRE_FAILED` (window `retire`), runs no later series and
+  exits 1 after its report, and every report format warns. `--growth fresh` verifies each cell's
+  delete the same way; `--series-retire keep` with more than one series is refused. **Validated:**
+  all three acceptance tests (bats); live, twice by accident: the workstation lost the lab API's
+  DNS mid-run and both sweeps stopped with `RETIRE_FAILED` and exit 1; a normal lab series retired
+  and verified cleanly. **Left:** —
 
 ### 9.4 Memory guard: stale base and unguarded first step (findings 4, 15)
 
@@ -346,6 +384,21 @@ copy the window's results off the operator laptop.
   (stale gateway memory) and recommend a gateway restart.
 - **Accept:** bats cases for a first step and an inflated base. **Test:** offline; lab L2b
   (`--mem-stop-pct 5`, a one-step series).
+- **Done:** `mem_guard_project_abs` and the gateway branch of `guard_check`: projected =
+  max(relative, absolute), absolute = (intercept + Mi per 1000 Services × (istiod
+  `pilot_services` + Services the step adds) / 1000) × burst factor, plus the container's
+  non-heap memory (working set − Envoy physical heap) for a working-set reading. Keys:
+  `CONTROLPLANE_GW_MI_INTERCEPT` (10), `CONTROLPLANE_EWGW_MI_PER_1000_SVC` (145),
+  `CONTROLPLANE_EWGW_BURST_FACTOR` (2.0), `CONTROLPLANE_INGW_MI_PER_1000_SVC` (91),
+  `CONTROLPLANE_INGW_BURST_FACTOR` (1.2). A gateway whose Envoy allocated memory at the series
+  start exceeds 1.5 × the model + 100 Mi prints a WARNING (restart the gateways) and a
+  `stale_base` guard row. **Validated:** bats; lab L2b: `--mem-stop-pct 5` skipped the first step
+  (0 → 500 Services) on every component; lab ladder 500 → 1000 → 2000 Services: the absolute
+  projection stopped the 2000 step on the remote member's east-west gateway (770 Mi projected vs
+  717 Mi = 70% of 1Gi; working set then 359 Mi). The first version compared the working set with
+  a heap-only model and flagged the 40-200 Mi outside Envoy's heap as stale memory; fixed before
+  commit. **Left:** the model is conservative at small scale (about 250 Mi above the measured
+  working set at 2000 Services); recalibrate the factors on ROSA.
 
 ### 9.5 Memory guard and fits measure allocated memory, not the working set (finding 16)
 
@@ -362,6 +415,13 @@ copy the window's results off the operator laptop.
   record both (a TSV schema bump with new columns; the report labels each).
 - **Accept:** guard log lines show both figures and stop on the working set; bats for the parser and
   the new columns. **Test:** offline; lab burst (9.9).
+- **Done:** the guard reads istiod RSS (`process_resident_memory_bytes`) and each gateway's
+  istio-proxy working set (`kubectl top --containers`; else Envoy `server.memory_physical_size`,
+  else `server.memory_allocated`), and its TSV (`GUARD_SCHEMA=2`) names the metric. TSV schema 66
+  adds `gateway_physical_mi_max` and `gateway_ws_mi_max`; allocated stays the fit metric; 004
+  fits and labels all three. **Validated:** bats; lab: every guard row read `ws`, the TSV carried
+  allocated / physical / working set (80 / 107 / 206 Mi at 500 Services on the measured member).
+  **Left:** —
 
 ### 9.6 Memory guard misses members without `--config` (finding 5)
 
@@ -375,6 +435,11 @@ copy the window's results off the operator laptop.
   the missing ones to the guard set, or warn. The dry run keeps printing the configured set.
 - **Accept:** a live lab run with neither `--config` nor `--mem-guard-contexts` guards (or warns
   about) every member; offline bats on the parser that turns a remote-secret list into contexts.
+- **Done:** `growth_mesh_members` (the `networking.istio.io/cluster` annotation, else the secret
+  name); a live growth sweep adds every member with a kube context of that name and stops when one
+  has none (with `--mem-guard-contexts` it warns instead). **Validated:** bats; lab, with
+  `SETUP_CONTEXTS` set to the measured member only: "added mesh member(s) <other member>", and the
+  guard sampled its istiod and both gateways. **Left:** —
 
 ### 9.7 Capacity planner ignores real requests (finding 6)
 
@@ -389,8 +454,23 @@ copy the window's results off the operator laptop.
   the lab's default (100m), about 10 with ROSA's 20m override; offline bats on the Istio CR reader.
   The `options.env` default becomes empty so the fallback can tell "unset" apart; decide whether an
   explicit `SCALE_PER_POD_CPU_M` in a run config overrides the live reading.
+- **Done:** `cap_proxy_requests` / `cap_per_pod_requests` (`tests/lib/capacity.sh`): the first
+  Istio CR's `spec.values.global.proxy.resources.requests` (CPU and memory), Istio's 100m / 128Mi
+  when unset, used by 003's plan and 001's auto-sizing. `SCALE_PER_POD_CPU_M` / `_MEM_MI` default
+  empty; a set value wins (precedence flag > config > env) and the plan names the live value next
+  to it. One shared quantity parser now reads decimal suffixes too (`8G` broke the old jq).
+  Found in lab validation: the free side was wrong too. The plan took allocatable minus istiod's
+  limit on the first context (17.5 of 19.5 cores on the lab hub) while other pods already requested
+  14.6, so 30 × 2 "fit" and 11 pods stayed Pending until the 300 s wait recorded SETUP_FAILED.
+  `cap_requested` now sums what non-terminal pods on the workers request (the scheduler's rule for
+  init and native-sidecar containers, plus overhead); the plan checks every member against
+  allocatable minus the other pods' requests and names the tightest, and 001 refuses a step whose
+  pods' requests do not fit (`SCALE_CPU_PREFLIGHT_ENFORCE=0` only warns, for a node autoscaler).
+  The capacity wrappers no longer end a `set -e` caller when kubectl fails.
+  **Validated:** bats (parser, wrapper, 001 against a stub cluster); lab: "per pod: istio-cr on
+  <member>", 100m. **Left:** ROSA: the 20m override should read 20m.
 
-### 9.8 Classic LBs break HTTP through the ingress gateway on AWS (findings 7, 11) — owner decision
+### 9.8 Classic LBs break HTTP through the ingress gateway on AWS (findings 7, 11) — decided 2026-10-16
 
 - **Seen:** through a Classic LB the ingress gateway receives each HTTP request followed by a FIN
   0.01 ms later and aborts it; clients get no response. The failing members varied over the day.
@@ -409,8 +489,14 @@ copy the window's results off the operator laptop.
   97 s)?
 - **Accept:** on ROSA, mesh-verify through every member's ingress answers 100% for 10 min.
   **Test:** offline `helm template`; ROSA only.
+- **Done (owner confirmed 2026-10-16):** rosa-mode default `rosa_ingress_nlb = true` in
+  `terraform/platform`: its own values document before `gitops_app_overrides`, so Helm deep-merges
+  an override of the same app into it; east-west stays on a Classic LB (no failure seen). README
+  "Per-environment values" says how to switch an existing CLB Service (delete it once).
+  **Validated:** `helm template` of the app of apps with the default and a MetalLB override
+  renders both annotations; `terraform validate`. **Left:** ROSA (the accept test above).
 
-### 9.9 Gateway memory sizing (findings 8, 14, 17) — owner decision
+### 9.9 Gateway memory sizing (findings 8, 14, 17) — decided 2026-10-16
 
 - **Seen:** east-west gateway Envoy memory is +143-144 Mi allocated per 1000 discovered Services (2
   clusters per Service), whatever the namespace shape; the ingress gateway about +91 Mi (1 cluster per
@@ -433,6 +519,16 @@ copy the window's results off the operator laptop.
   9.5's guard; a campaign-scale run without a gateway restart. **Test:** lab (burst reproduction at
   a few thousand Services; the lab gateways should show the same retention if it is Envoy-side),
   ROSA.
+- **Done (owner confirmed 2026-10-16):** chart defaults east-west limit 4Gi / request 1Gi,
+  ingress limit 2Gi; the sizing rule is in both charts' values and `docs/scale-test-campaign`
+  ((10 + 145 × Services / 1000) Mi × 2.5 east-west, × 1.5 ingress with 91 Mi). **Validated (lab,
+  1Gi limits, gateways restarted before each run):** 1000 Services in one step vs a ladder
+  (200 → 400 → 1000) on the measured member: allocated 152 Mi both, physical 200 vs 184 Mi,
+  working set 239 vs 219 Mi. The burst keeps more memory, as on ROSA, but only about 9% at this
+  size (ROSA: 1.7-1.9× at 4000). The lab cannot go further: at 1Gi the guard stops the 2000-Service
+  step (9.4), and the charts' new limits reach the lab only after merge. **Left:** whether Envoy
+  can release the retained memory (tcmalloc release rate, overload manager); the burst at
+  campaign scale on ROSA; hypothesis H1 (task 3).
 
 ### 9.10 Leftover undiscovered namespaces distort later series (finding 13)
 
@@ -452,6 +548,16 @@ copy the window's results off the operator laptop.
   allows: 0.6-2.0 namespaces/s), and run the K split first on a fresh cluster.
 - **Accept:** the per-series count recorded and a report warning above the threshold. **Test:**
   offline (bats fixtures); lab.
+- **Done:** a live growth sweep counts the test namespaces on the measured members first: a
+  discovered one stops it, undiscovered ones above `CONTROLPLANE_LEFTOVER_NS_WARN` (100) warn
+  (preamble `LEFTOVER_TEST_NAMESPACES`, `LEFTOVER_NS_WARN`); each series start is a
+  `leftover-check` row in the namespace-lifecycle TSV; every growth row carries
+  `leftover_test_namespaces` (schema 66, namespaces not of this series); 004 warns in every format
+  above the threshold. **Validated:** bats; lab: 126, 376 and 626 leftovers recorded per series
+  and per row, with the warning in the sweep log and every report format; after a
+  `--series-retire keep` sweep, the next sweep stopped before its first cell (5 discovered
+  namespaces on the measured member, exit 1). **Left:** plan
+  clean-cluster series on ROSA for absolute numbers (unchanged).
 
 ### 9.11 VS/DR convergence p99 at 150-250 Services (finding 12) — analysis first
 
@@ -469,6 +575,15 @@ copy the window's results off the operator laptop.
   is growth-only and growth mode rejects `vsdr`, so `--parts traffic` must be allowed in legacy mode
   for `vsdr`), or document a manual split apply; then rerun `vsdr` on the lab at 50 / 100 / 150 Services. A fix only if it is a harness
   artifact.
+- **Done:** `003 --vsdr-apply split` (`CONTROLPLANE_VSDR_APPLY`, default `together`): `001 --parts
+  workloads` (everything but the VS/DR, Ready) before the baseline, then the window covers only
+  `001 --parts traffic`; rows carry `window_kind traffic` and the preamble `VSDR_APPLY`; the `none`
+  cell's window is idle over the same workloads, so the VS/DR effect table reads as the VS/DR cost
+  alone ("(split apply)"). **Validated:** bats; lab, 20 Services × 2 replicas on two members (the
+  hub's free CPU caps it near 24): `together` vsdr convergence p99 0-100 ms on both members (as
+  `none`), 866 pushes; `split` 0-100 ms on one member and 100-500 ms on the other, 208 pushes,
+  istiod CPU peak 12 → 46 m for the VS/DR alone. Nothing at this size reproduces the jump.
+  **Left:** ROSA: both modes at 150-250 Services to tell a harness artifact from a real cost.
 
 ### 9.12 Plan and doc corrections (findings 9, 10) — done in the window-record PR
 

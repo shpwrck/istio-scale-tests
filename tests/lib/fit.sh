@@ -19,6 +19,13 @@
 #                                       cur (a usage below the empty-mesh base projects as
 #                                       the base, the conservative side); "unknown" on a
 #                                       non-numeric input
+#   mem_guard_project_abs <services_after> <mi_per_1000_services> <intercept_mi> <factor>
+#                                    -> (intercept + mi_per_1000 x services / 1000) x factor:
+#                                       the absolute model of a gateway's memory once the
+#                                       mesh holds <services_after> Services (BACKLOG 9.4:
+#                                       covers a series' first step, which the relative
+#                                       projection cannot see, and a base inflated by
+#                                       memory Envoy kept); "unknown" on a non-numeric input
 #   mem_guard_verdict <value> <limit> <pct>
 #                                    -> "stop" when value > limit * pct / 100, "ok" when not,
 #                                       "unknown" when an input is missing or the limit <= 0
@@ -109,6 +116,17 @@ mem_guard_project() {
 		v = b + d * (r ^ p)
 		if (v < c) v = c
 		printf "%.0f\n", v
+	}'
+}
+
+# mem_guard_project_abs <services_after> <mi_per_1000_services> <intercept_mi> <factor>
+# shellcheck disable=SC2329
+mem_guard_project_abs() {
+	awk -v s="${1:-}" -v c="${2:-}" -v i="${3:-}" -v f="${4:-}" '
+	function isnum(x) { return x ~ /^([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
+	BEGIN {
+		if (!isnum(s) || !isnum(c) || !isnum(i) || !isnum(f)) { print "unknown"; exit }
+		printf "%.0f\n", (i + c * s / 1000) * f
 	}'
 }
 

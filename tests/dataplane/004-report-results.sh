@@ -87,6 +87,10 @@ changed, the cause, the evidence folder relative to the results dir) and a tally
 cause; restarted_untimed rows (may predate the window) are counted apart (json key
 istiod_diag).
 
+The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv and
+json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
+A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
+
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
   DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
@@ -617,6 +621,13 @@ fmt_val() { # turn "N/A" or numeric into pretty string
 	awk -v v="$v" -v d="$digits" 'BEGIN { printf "%.*f", d, v }'
 }
 
+# fmt_pct <ratio>: a 0-1 share as a percentage with two decimals ("100.00%"), N/A as-is.
+# The TSV column pct_200 and DATAPLANE_MIN_PCT_200 hold 0-1 ratios despite the name.
+fmt_pct() {
+	[[ "$1" == "N/A" ]] && { printf "N/A"; return; }
+	awk -v v="$1" 'BEGIN { printf "%.2f%%", v * 100 }'
+}
+
 report_text() {
 	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
 	[[ ${#PREAMBLE[@]} -gt 0 ]] && echo ""
@@ -628,16 +639,16 @@ report_text() {
 	echo ""
 	remote_coverage_section text
 	echo ""
-	printf "  %-4s | %-6s | %-6s | %5s | %5s | %10s | %10s | %10s | %10s | %10s | %7s\n" \
-		"Sz" "QPS" "Class" "n_tot" "n_val" "p50 (ms)" "p90 (ms)" "p99 (ms)" "max (ms)" "actual QPS" "pct_200"
-	printf "  %-4s-+-%-6s-+-%-6s-+-%5s-+-%5s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s-+-%7s\n" \
-		"----" "------" "------" "-----" "-----" "----------" "----------" "----------" "----------" "----------" "-------"
+	printf "  %-4s | %-6s | %-6s | %5s | %5s | %10s | %10s | %10s | %10s | %10s | %12s\n" \
+		"Sz" "QPS" "Class" "n_tot" "n_val" "p50 (ms)" "p90 (ms)" "p99 (ms)" "max (ms)" "actual QPS" "HTTP 200 (%)"
+	printf "  %-4s-+-%-6s-+-%-6s-+-%5s-+-%5s-+-%10s-+-%10s-+-%10s-+-%10s-+-%10s-+-%12s\n" \
+		"----" "------" "------" "-----" "-----" "----------" "----------" "----------" "----------" "----------" "------------"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 _p999 mx qa pct; do
 		[[ -n "$mesh" ]] || continue  # no measurement cell (only placeholder rows)
-		printf "  %-4s | %-6s | %-6s | %5s | %5s | %10s | %10s | %10s | %10s | %10s | %7s\n" \
+		printf "  %-4s | %-6s | %-6s | %5s | %5s | %10s | %10s | %10s | %10s | %10s | %12s\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
-			"$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_val "$pct" 4)"
+			"$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_pct "$pct")"
 	done <<<"$AGG_TSV"
 	echo ""
 	if (( DROPPED_ALL + SKIPPED_ALL > 0 )); then
@@ -670,13 +681,15 @@ report_csv() {
 		if [[ -n "$pm" ]]; then echo "# PLACEHOLDER=${pm}:${pst}:${pn}"; fi
 	done <<<"$PH_ROWS"
 	remote_coverage_section csv
-	echo "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200"
+	# avg_pct_200 (a 0-1 ratio, kept in place for existing readers) and the correctly
+	# named avg_http_200_ratio appended after it carry the same value.
+	echo "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200,avg_http_200_ratio"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
 		[[ -n "$mesh" ]] || continue
-		printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+		printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
-			"$(fmt_val "$p999")" "$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_val "$pct" 4)"
+			"$(fmt_val "$p999")" "$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_val "$pct" 4)" "$(fmt_val "$pct" 4)"
 	done <<<"$AGG_TSV"
 }
 
@@ -711,9 +724,9 @@ JSON `summary.placeholders`), so `n_total` = the cells' `n_total` + `n_placehold
 | `avg_p90_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[90]` | Mean p90 latency over valid rows. |
 | `avg_p99_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99]` | Mean p99 latency over valid rows. |
 | `avg_p999_ms` | ms | Fortio JSON `DurationHistogram.Percentiles[99.9]` | Mean p99.9 latency over valid rows. |
-| `avg_max_ms` | ms | Fortio JSON `DurationHistogram.Max` | Mean of the per-run maximum observed latency over valid rows. |
+| `avg_max_ms` | ms | Fortio JSON `DurationHistogram.Max` | Mean of the per-run maximum observed latency over valid rows; a run without a `Max` is `N/A` and left out (never a 0 ms max). |
 | `avg_actual_qps` | queries/s | Fortio JSON `ActualQPS` | Mean achieved QPS over valid rows. A row below `MIN_QPS_RATIO` × `qps_target` (default 0.95) is tagged `QPS_SHORTFALL` and left out, so this stays close to the target. Exception: a TSV without `MIN_QPS_RATIO` in its preamble was recorded before that check, so its short rows are still `OK` and averaged here; the Local baseline names those cells `UNCHECKED` (`saturated_unflagged`). |
-| `avg_pct_200` | fraction (0–1) | Fortio JSON `RetCodes` | Mean fraction of HTTP 200 responses (`count(200) / sum(all codes)`); below `MIN_PCT_200` (default 0.99) the run is tagged `ERROR_RATE_HIGH` and excluded from `n_valid`. |
+| `avg_http_200 (%)` | percent | Fortio JSON `RetCodes` | Mean share of HTTP 200 responses (`count(200) / sum(all codes)`), as a percentage (`100.00%`). A run below `MIN_PCT_200` (a 0–1 ratio, default 0.99 = 99%) is tagged `ERROR_RATE_HIGH` and excluded from `n_valid`. CSV and JSON carry it as a 0–1 ratio: `avg_http_200_ratio`, and `avg_pct_200` (same value, old name kept for existing readers). |
 
 **Local baseline** (section above): one verdict per local `(mesh_size, qps_target)` cell.
 `DROPPED` means no valid row, `DEGRADED` some. `UNCHECKED` means every row is valid but
@@ -767,14 +780,14 @@ report_markdown() {
 	echo ""
 	echo "## Results"
 	echo ""
-	echo "| mesh_size | qps_target | target_class | n_total | n_valid | avg_p50_ms | avg_p90_ms | avg_p99_ms | avg_p999_ms | avg_max_ms | avg_actual_qps | avg_pct_200 |"
-	echo "|-----------|------------|--------------|---------|---------|------------|------------|------------|-------------|------------|----------------|-------------|"
+	echo "| mesh_size | qps_target | target_class | n_total | n_valid | avg_p50_ms | avg_p90_ms | avg_p99_ms | avg_p999_ms | avg_max_ms | avg_actual_qps | avg_http_200 (%) |"
+	echo "|-----------|------------|--------------|---------|---------|------------|------------|------------|-------------|------------|----------------|------------------|"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
 		[[ -n "$mesh" ]] || continue
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
-			"$(fmt_val "$p999")" "$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_val "$pct" 4)"
+			"$(fmt_val "$p999")" "$(fmt_val "$mx")" "$(fmt_val "$qa" 1)" "$(fmt_pct "$pct")"
 	done <<<"$AGG_TSV"
 	echo ""
 	if (( DROPPED_ALL + SKIPPED_ALL > 0 )); then
@@ -826,7 +839,10 @@ report_json() {
 			avg_p999_ms: (if .[8] == "N/A" then null else (.[8] | tonumber) end),
 			avg_max_ms: (if .[9] == "N/A" then null else (.[9] | tonumber) end),
 			avg_actual_qps: (if .[10] == "N/A" then null else (.[10] | tonumber) end),
-			avg_pct_200: (if .[11] == "N/A" then null else (.[11] | tonumber) end)
+			# A 0-1 ratio: avg_pct_200 is kept for existing readers, avg_http_200_ratio
+			# is the same value under the right name.
+			avg_pct_200: (if .[11] == "N/A" then null else (.[11] | tonumber) end),
+			avg_http_200_ratio: (if .[11] == "N/A" then null else (.[11] | tonumber) end)
 		})
 	')
 

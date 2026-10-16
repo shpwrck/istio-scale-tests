@@ -116,10 +116,13 @@ Usage: $(basename "$0") [options]
   --outside-namespaces X  Namespaces outside the mesh present in the window (default:
                        $OUTSIDE_NAMESPACES).
   --outside-mode M     none|unlabeled|labeled (default: $OUTSIDE_MODE).
-  --window-kind K      deploy|grow|probe|outside: what the window measured (default:
-                       $WINDOW_KIND). deploy = a full deploy (the legacy sweep and
-                       --growth fresh); grow = namespaces added to a series; probe = one
-                       probe namespace onboarded; outside = outside namespaces applied.
+  --window-kind K      deploy|grow|probe|outside|traffic: what the window measured
+                       (default: $WINDOW_KIND). deploy = a full deploy (the legacy sweep
+                       and --growth fresh); grow = namespaces added to a series; probe = one
+                       probe namespace onboarded; outside = outside namespaces applied;
+                       traffic = only the VirtualServices/DestinationRules, applied after
+                       the workloads were Ready (003 --vsdr-apply split; none cells: an
+                       idle window over the same workloads).
   --series ID          Growth series id: the config-dump sampler draws only from its
                        pods.
 
@@ -325,8 +328,8 @@ is_pos_int "$MEASUREMENT_PODS" || die "--measurement-pods must be a positive int
 is_nonneg_int "$OUTSIDE_NAMESPACES" || die "--outside-namespaces must be a non-negative integer (got: $OUTSIDE_NAMESPACES)"
 validate_outside_mode "$OUTSIDE_MODE"
 case "$WINDOW_KIND" in
-deploy | grow | probe | outside) ;;
-*) die "--window-kind must be one of [deploy, grow, probe, outside]; got '$WINDOW_KIND'" ;;
+deploy | grow | probe | outside | traffic) ;;
+*) die "--window-kind must be one of [deploy, grow, probe, outside, traffic]; got '$WINDOW_KIND'" ;;
 esac
 [[ -z "$SERIES" || "$SERIES" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "--series must be lowercase letters, digits and '-' (got: $SERIES)"
 GROWTH=0
@@ -451,7 +454,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	PRE_INFRA_KV="$(env_collect_infra "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
-		echo "# CONTROLPLANE_SCHEMA=63"
+		echo "# CONTROLPLANE_SCHEMA=66"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
@@ -472,6 +475,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# TRAFFIC_CONFIG=${TRAFFIC_CONFIG}"
 		echo "# VSDR_EVERY=${VSDR_EVERY}"
 		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
+		# The sweep's VS/DR apply mode (003 --vsdr-apply); a standalone window has none.
+		echo "# VSDR_APPLY=n/a"
 		config_preamble_lines
 		# Namespace-scaling keys, same shared emitter as 003 (PL36). A standalone run is
 		# no growth sweep, so the sweep-only keys read n/a.
@@ -480,7 +485,8 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 			MEASUREMENT_PROXY_MEM_LIMIT="${CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT:-unknown}" \
 			OUTSIDE_NAMESPACES="$OUTSIDE_NAMESPACES" OUTSIDE_MODES="$OUTSIDE_MODE" \
 			PROBE_SETTLE_SEC=n/a MEM_STOP_PCT=n/a MEM_GUARD_CONTEXTS=n/a SERIES_RETIRE=n/a \
-			DISCOVERY_LABEL=istio-discovery=enabled
+			DISCOVERY_LABEL=istio-discovery=enabled LEFTOVER_TEST_NAMESPACES=n/a \
+			LEFTOVER_NS_WARN="${CONTROLPLANE_LEFTOVER_NS_WARN:-100}"
 		# shellcheck disable=SC2086
 		infra_preamble_lines $PRE_INFRA_KV
 		echo "# ${PRE_TUNING_BASELINE}"
@@ -489,7 +495,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	} > "$TSV_FILE"
 fi
 
-# Schema (TSV header — 63 columns; must equal 003's CONTROLPLANE_TSV_HEADER, which
+# Schema (TSV header — 66 columns; must equal 003's CONTROLPLANE_TSV_HEADER, which
 # tests/lib/test/preamble.bats checks):
 #   timestamp context mesh_size service_count replicas namespace_count sidecar_scoping
 #   istiod_mem_mi
@@ -537,8 +543,17 @@ fi
 #     gateway_* = max over the context's ingress/east-west gateways (Envoy
 #     cluster_manager.active_clusters, server.memory_allocated); root_cert_configmaps =
 #     istio-ca-root-cert ConfigMaps on the context (one per namespace istiod serves).
+#   (cols 64-66, CONTROLPLANE_SCHEMA=66; growth mode only, N/A otherwise):
+#                gateway_physical_mi_max gateway_ws_mi_max leftover_test_namespaces
+#     gateway_physical_mi_max = max Envoy server.memory_physical_size (the tcmalloc
+#     heap with the freed pages it kept) and gateway_ws_mi_max = max istio-proxy
+#     container working set (kubectl top; N/A without the metrics API) over the
+#     context's gateways: what the OOM killer acts on, which ran 1.2-2.9x the allocated
+#     figure on ROSA after config bursts (BACKLOG 9.5). leftover_test_namespaces =
+#     controlplane-test namespaces on the context that are not this series' (earlier
+#     series or runs, discovered or not; they stay in istiod's informers, BACKLOG 9.10).
 if [[ "$PHASE" != baseline ]] && ! grep -q '^timestamp' "$TSV_FILE" 2>/dev/null; then
-	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg\tservices_per_namespace\tworkload_mode\tmeasurement_pods\toutside_namespaces\toutside_discovery\twindow_kind\tistiod_services\tistiod_cpu_s_delta\tsidecar_mem_mi_avg\tgateway_clusters_max\tgateway_mem_mi_max\troot_cert_configmaps" >> "$TSV_FILE"
+	echo -e "timestamp\tcontext\tmesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\tistiod_mem_mi\tconvergence_p50_ms\tconvergence_p99_ms\tqueue_p50_ms\tqueue_p99_ms\txds_pushes_delta\txds_pushes_rate\txds_pushes_cds\txds_pushes_eds\txds_pushes_lds\txds_pushes_rds\txds_pushes_nds\tk8s_events_delta\tk8s_events_rate\tconnected_proxies\tconfig_size_avg_bytes\tsidecar_config_bytes_avg\tsidecar_config_bytes_p50\tsidecar_config_bytes_max\tsidecar_config_bytes_samples\tscrape_window_sec\tscrape_skew_ms\tsettle_sec\tistiod_restarted\tistiod_cpu_m_delta\tgo_heap_alloc_mi\tgo_heap_inuse_mi\tistiod_cpu_pct_of_limit\tistiod_mem_pct_of_limit\tnode_cpu_pct\tnode_mem_pct\tpods_scheduled\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg\tservices_per_namespace\tworkload_mode\tmeasurement_pods\toutside_namespaces\toutside_discovery\twindow_kind\tistiod_services\tistiod_cpu_s_delta\tsidecar_mem_mi_avg\tgateway_clusters_max\tgateway_mem_mi_max\troot_cert_configmaps\tgateway_physical_mi_max\tgateway_ws_mi_max\tleftover_test_namespaces" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
@@ -1263,30 +1278,41 @@ growth_meta_fields() {
 		"$OUTSIDE_NAMESPACES" "$OUTSIDE_DISCOVERY" "$WINDOW_KIND"
 }
 
-# growth_na_fields: cols 52-63 for a row with nothing measured.
+# growth_na_fields: cols 52-66 for a row with nothing measured.
 growth_na_fields() {
-	printf '%s\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A' "$(growth_meta_fields)"
+	printf '%s\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A' "$(growth_meta_fields)"
 }
 
-# Growth-mode context reads (cols 61-63): the gateways' Envoy clusters and memory and
-# the istio-ca-root-cert ConfigMap count, once per context per window, after the
-# final scrape (outside the window). N/A outside growth mode, so a legacy sweep pays
-# no extra exec. Must run in the main shell (the cache is a global).
-declare -A GROWTH_CTX_CACHE  # ctx -> "gw_clusters<TAB>gw_mem_mi<TAB>root_cert_cms"
+# Growth-mode context reads (cols 61-63 and 64-66): the gateways' Envoy clusters and
+# memory (allocated, physical, container working set), the istio-ca-root-cert
+# ConfigMap count and the leftover test namespaces, once per context per window,
+# after the final scrape (outside the window). N/A outside growth mode, so a legacy
+# sweep pays no extra exec. Must run in the main shell (the cache is a global).
+declare -A GROWTH_CTX_CACHE  # ctx -> "gw_clusters<TAB>gw_mem_mi<TAB>root_cert_cms" (cols 61-63)
+declare -A GROWTH_CTX_CACHE2 # ctx -> "gw_physical_mi<TAB>gw_ws_mi<TAB>leftover_ns" (cols 64-66)
 collect_growth_for_ctx() {
-	local ctx="$1" kv cl mem rc
+	local ctx="$1" kv cl mem phy ws rc left
 	[[ -n "${GROWTH_CTX_CACHE[$ctx]:-}" ]] && return 0
 	if ! ((GROWTH)); then
 		GROWTH_CTX_CACHE[$ctx]=$'N/A\tN/A\tN/A'
+		GROWTH_CTX_CACHE2[$ctx]=$'N/A\tN/A\tN/A'
 		return 0
 	fi
 	kv="$(growth_gateway_summary "$ctx" "${KUBECTL[@]}")" || kv=""
 	cl="$(kv_get clusters_max "$kv")"; [[ "$cl" =~ ^[0-9]+$ ]] || cl="N/A"
 	mem="$(kv_get mem_mi_max "$kv")"; [[ "$mem" =~ ^[0-9]+$ ]] || mem="N/A"
+	phy="$(kv_get physical_mi_max "$kv")"; [[ "$phy" =~ ^[0-9]+$ ]] || phy="N/A"
+	ws="$(kv_get ws_mi_max "$kv")"; [[ "$ws" =~ ^[0-9]+$ ]] || ws="N/A"
 	rc="$(growth_root_cert_count "$ctx" "${KUBECTL[@]}")" || rc="N/A"
 	[[ "$rc" =~ ^[0-9]+$ ]] || rc="N/A"
+	# Namespaces of this suite that are not this series' (the plain legacy namespace
+	# included); set-based != also matches a namespace without the series label.
+	left="$("${KUBECTL[@]}" --context="$ctx" --request-timeout=60s get namespaces \
+		-l "app.kubernetes.io/instance=controlplane-test,controlplane-test.series!=${SERIES:-none}" -o name 2>/dev/null | wc -l | tr -d ' ')" || left="N/A"
+	[[ "$left" =~ ^[0-9]+$ ]] || left="N/A"
 	GROWTH_CTX_CACHE[$ctx]="${cl}"$'\t'"${mem}"$'\t'"${rc}"
-	echo "  Cluster ${ctx}: gateways $(kv_get pods "$kv") (clusters max ${cl}, Envoy memory max ${mem} Mi), istio-ca-root-cert ConfigMaps ${rc}"
+	GROWTH_CTX_CACHE2[$ctx]="${phy}"$'\t'"${ws}"$'\t'"${left}"
+	echo "  Cluster ${ctx}: gateways $(kv_get pods "$kv") (clusters max ${cl}; Envoy allocated max ${mem} Mi, physical max ${phy} Mi; container working set max ${ws} Mi), istio-ca-root-cert ConfigMaps ${rc}, leftover test namespaces ${left}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1580,7 +1606,7 @@ scrape_window() {
 
 		local tm_fields="${TRAFFIC_CONFIG}\t${VSDR_SERVICES}\t${virt_services}\t${push_time_avg}\t${pushctx_avg}\t${sc_clusters}\t${sc_cds}\t${sc_rds}"
 		local gr_fields
-		gr_fields="$(growth_meta_fields)\t${istiod_services}\t${cpu_s_delta}\t${sc_mem}\t${GROWTH_CTX_CACHE[$ctx]}"
+		gr_fields="$(growth_meta_fields)\t${istiod_services}\t${cpu_s_delta}\t${sc_mem}\t${GROWTH_CTX_CACHE[$ctx]}\t${GROWTH_CTX_CACHE2[$ctx]}"
 		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")\t${tm_fields}\t${gr_fields}" >> "$TSV_FILE"
 		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} cluster=${CLUSTER_PROXIES[$ctx]:-N/A} sidecars=${SIDECAR_PODS[$ctx]:-N/A} check=${PROXY_CHECK[$ctx]:-N/A} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 		echo "    traffic=${TRAFFIC_CONFIG} vsdr_services=${VSDR_SERVICES} istiod_virt_services=${virt_services} push_time_avg=${push_time_avg}ms pushctx_init_avg=${pushctx_avg}ms sidecar_clusters_avg=${sc_clusters} cds_bytes_avg=${sc_cds} rds_bytes_avg=${sc_rds}"
@@ -1670,30 +1696,38 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
-		echo "| Mesh size | ${MESH_SIZE} |"
-		echo "| Service count | ${SERVICE_COUNT} |"
-		echo "| Replicas | ${REPLICAS} |"
-		echo "| Namespace count | ${NAMESPACE_COUNT} |"
-		echo "| Sidecar scoping | ${SIDECAR_SCOPING} |"
-		echo "| Traffic config | ${TRAFFIC_CONFIG} (VS+DR services ${VSDR_SERVICES}; every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets) |"
+		echo "| Last window written | mesh ${MESH_SIZE}, ${SERVICE_COUNT} services x ${REPLICAS} replicas in ${NAMESPACE_COUNT} namespace(s), scoping ${SIDECAR_SCOPING}, traffic ${TRAFFIC_CONFIG} (VS+DR services ${VSDR_SERVICES}; every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets) |"
 		echo "| Config-dump samples | ${CONFIG_DUMP_SAMPLES} |"
 		echo "| Settle (s) | ${SETTLE_SEC} |"
 		echo "| Proxy check tolerance | ${PROXY_CHECK_TOL_PCT}% (min diff ${PROXY_CHECK_MIN_DIFF}) |"
 		echo ""
 		echo "## Summary"
 		echo ""
-		echo "Proxies is per istiod pod; Cluster proxies sums them over the cluster's istiod pods."
+		echo "Every row of the TSV (one per istiod pod per window). Proxies is per istiod pod; Cluster proxies sums them over the cluster's istiod pods. CPU peak = the larger of the window average and the busiest 5 s poll; p99 values are istiod histogram buckets (ms), † = pinned in the first bucket (unresolved below 100 ms). MiB = 1024 x 1024 bytes."
 		echo ""
-		echo "| Context | mesh | svc | reps | ns | scoping | traffic | CPU avg (m) | Mem RSS (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Cluster proxies | Sidecar pods | Proxy check | Pushes Δ | EDS Δ | CDS Δ | istiod VS | Cfg dump avg (MB) | Sidecar clusters |"
-		echo "|---------|------|-----|------|----|---------|---------|-------------|--------------|-----------------|-----------------|---------------|----------------|---------|-----------------|--------------|-------------|----------|-------|-------|-----------|-------------------|------------------|"
+		echo "| Context | mesh | svc | reps | ns | scoping | traffic | CPU peak (m) | RSS peak (Mi) | Heap alloc (Mi) | Heap inuse (Mi) | Conv p99 (ms) | Queue p99 (ms) | Proxies | Cluster proxies | Sidecar pods | Proxy check | Pushes Δ | EDS Δ | CDS Δ | istiod VS | Cfg dump avg (MiB) | Sidecar clusters |"
+		echo "|---------|------|-----|------|----|---------|---------|--------------|---------------|-----------------|-----------------|---------------|----------------|---------|-----------------|--------------|-------------|----------|-------|-------|-----------|--------------------|------------------|"
 		# Cols 41+ are read by header name: a reused older file (40 columns) has none.
 		awk -F'\t' '
 		/^timestamp\t/ { delete ix; for (i = 1; i <= NF; i++) ix[$i] = i; next }
 		function c(name) { return ((name in ix) && NF >= ix[name]) ? $(ix[name]) : "N/A" }
+		function bucket(v) {
+			if (v == "overflow") return "overflow"
+			if (v !~ /^[0-9.]+$/ || v + 0 <= 0) return "N/A"
+			if (v + 0 <= 100) return "0-100 †"
+			if (v + 0 <= 500) return "100-500"
+			if (v + 0 <= 1000) return "500-1000"
+			if (v + 0 <= 3000) return "1000-3000"
+			if (v + 0 <= 5000) return "3000-5000"
+			if (v + 0 <= 10000) return "5000-10000"
+			if (v + 0 <= 20000) return "10000-20000"
+			if (v + 0 <= 30000) return "20000-30000"
+			return ">30000"
+		}
 		!/^#/ && NF>=40 {
-			cfg_mb = ($24+0 > 0) ? sprintf("%.1f", $24/1048576) : "N/A"
+			cfg_mb = ($24+0 > 0) ? sprintf("%.2f", $24/1048576) : "N/A"
 			tc = c("traffic_config"); if (tc == "N/A") tc = "none"
-			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, tc, $32, $8, $33, $34, $10, $12, $22, c("cluster_connected_proxies"), c("sidecar_pods"), c("proxy_check"), $13, $16, $15, c("istiod_virt_services"), cfg_mb, c("sidecar_clusters_avg")
+			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, tc, $32, $8, $33, $34, bucket($10), bucket($12), $22, c("cluster_connected_proxies"), c("sidecar_pods"), c("proxy_check"), $13, $16, $15, c("istiod_virt_services"), cfg_mb, c("sidecar_clusters_avg")
 		}' "$TSV_FILE"
 		echo ""
 		echo "## Raw Data"
