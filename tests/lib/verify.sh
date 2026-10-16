@@ -48,13 +48,14 @@ if ((SKIP_SHELLCHECK)); then
 else
 	step 2 "shellcheck on lib/ and suite scripts"
 	if command -v shellcheck >/dev/null 2>&1; then
-		sc_fail=0
-		for f in "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh; do
-			if ! shellcheck "$f"; then
-				sc_fail=1
-			fi
-		done
-		if ((sc_fail)); then err "shellcheck violations found"; else ok; fi
+		# One call over every file, as CI runs it: shellcheck then follows a `source` of a file
+		# on the same command line, so a name used as an array in a lib and as a scalar in a
+		# suite is caught here too, not only in CI.
+		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh; then
+			ok
+		else
+			err "shellcheck violations found"
+		fi
 	else
 		err "shellcheck not found on PATH (install it, or pass --skip-shellcheck to skip this step)"
 	fi

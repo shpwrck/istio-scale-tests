@@ -257,7 +257,7 @@ _sweep_outcome_by() {
 # shellcheck disable=SC2329
 sweep_outcome() {
 	local rc=0 stop_rc="" unit=cells where="" record="" md="" cells r by_fail="" by_skip=""
-	local -a problems=() notes=() failed=() skipped=() lines=()
+	local -a problems=() notes=() failed_r=() skipped_r=() lines=()
 	while (($#)); do
 		case "$1" in
 		--stopped) stop_rc="$2"; shift 2 ;;
@@ -274,27 +274,27 @@ sweep_outcome() {
 	shift
 	[[ -n "$where" ]] || where="The report includes them as placeholder rows (in n_total, not n_valid)"
 	for r in "$@"; do
-		if [[ "$r" == SKIPPED_* ]]; then skipped+=("$r"); else failed+=("$r"); fi
+		if [[ "$r" == SKIPPED_* ]]; then skipped_r+=("$r"); else failed_r+=("$r"); fi
 	done
-	((${#failed[@]} == 0)) || by_fail="$(_sweep_outcome_by "${failed[@]}")"
-	((${#skipped[@]} == 0)) || by_skip="$(_sweep_outcome_by "${skipped[@]}")"
-	if ((${#failed[@]} || ${#problems[@]})); then rc="$SWEEP_FAILED_EXIT"; fi
+	((${#failed_r[@]} == 0)) || by_fail="$(_sweep_outcome_by "${failed_r[@]}")"
+	((${#skipped_r[@]} == 0)) || by_skip="$(_sweep_outcome_by "${skipped_r[@]}")"
+	if ((${#failed_r[@]} || ${#problems[@]})); then rc="$SWEEP_FAILED_EXIT"; fi
 	[[ -z "$stop_rc" ]] || rc="$stop_rc"
 	# tail: how a failure line ends. lines: "out|", "err|" or "rec|" (the record and the
 	# markdown only) plus the text, in the order printed.
 	local tail="; exit ${SWEEP_FAILED_EXIT}."
 	[[ -z "$stop_rc" ]] || tail="; the sweep also stopped early, so it exits ${stop_rc}, not ${SWEEP_FAILED_EXIT}."
-	if [[ -z "$stop_rc" && ${#failed[@]} -eq 0 && ${#skipped[@]} -eq 0 ]]; then
+	if [[ -z "$stop_rc" && ${#failed_r[@]} -eq 0 && ${#skipped_r[@]} -eq 0 ]]; then
 		lines+=("out|All ${cells} ${unit} ran (their rows' own statuses are in the report).")
-	elif ((${#skipped[@]})); then
-		lines+=("out|${#skipped[@]} of ${cells} ${unit} were skipped on purpose, not failed: ${by_skip}.")
+	elif ((${#skipped_r[@]})); then
+		lines+=("out|${#skipped_r[@]} of ${cells} ${unit} were skipped on purpose, not failed: ${by_skip}.")
 	fi
-	if ((${#failed[@]})); then
-		lines+=("err|error: ${#failed[@]} of ${cells} ${unit} failed: ${by_fail}. ${where}${tail}")
+	if ((${#failed_r[@]})); then
+		lines+=("err|error: ${#failed_r[@]} of ${cells} ${unit} failed: ${by_fail}. ${where}${tail}")
 	fi
 	for r in ${problems[@]+"${problems[@]}"}; do lines+=("err|error: ${r}${tail}"); done
 	for r in ${notes[@]+"${notes[@]}"}; do lines+=("err|warning: ${r}."); done
-	if [[ -n "$stop_rc" && ${#failed[@]} -eq 0 && ${#problems[@]} -eq 0 ]]; then
+	if [[ -n "$stop_rc" && ${#failed_r[@]} -eq 0 && ${#problems[@]} -eq 0 ]]; then
 		lines+=("rec|The sweep stopped early; it exits ${stop_rc}.")
 	fi
 	for r in ${lines[@]+"${lines[@]}"}; do
@@ -311,9 +311,9 @@ sweep_outcome() {
 			echo "STOPPED=$([[ -n "$stop_rc" ]] && echo 1 || echo 0)"
 			echo "UNIT=${unit}"
 			echo "TOTAL=${cells}"
-			echo "FAILED=${#failed[@]}"
+			echo "FAILED=${#failed_r[@]}"
 			echo "FAILED_BY=${by_fail}"
-			echo "SKIPPED=${#skipped[@]}"
+			echo "SKIPPED=${#skipped_r[@]}"
 			echo "SKIPPED_BY=${by_skip}"
 			for r in ${problems[@]+"${problems[@]}"}; do echo "PROBLEM=${r}"; done
 			for r in ${notes[@]+"${notes[@]}"}; do echo "NOTE=${r}"; done
