@@ -1,7 +1,7 @@
 # Copy to terraform.tfvars (gitignored) and edit.
 
 # Git repo Argo CD syncs the mesh charts from. Required: without it no mesh is deployed.
-gitops_app_repo_url      = "https://github.com/shpwrck/istio-scale-tests.git"
+gitops_app_repo_url      = "https://github.com/<org>/istio-scale-tests.git"
 gitops_app_repo_revision = "main"
 
 # Private repo: set one (prefer TF_VAR_ env vars over this file).

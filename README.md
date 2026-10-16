@@ -70,11 +70,15 @@ oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -
 ```
 
 End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
-from every member. If you're not on `main`, set both `spec.source.targetRevision` and the
-`repo.revision` parameter in the manifest to your branch (and both repo URLs if you use a fork).
+from every member. The manifest keeps `<repo-url>` and `<revision>` placeholders; fill them in on the
+way to the hub from the repo and revision the hub already syncs, so the check runs the same charts
+as the mesh.
 
 ```bash
-oc --context <acm-hub-ctx> apply -f charts/mesh-verify-appset.yaml
+read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application hub-gitops-root \
+  -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" charts/mesh-verify-appset.yaml \
+  | oc --context <acm-hub-ctx> apply -f -
 INGRESS=$(oc --context <mesh-a-ctx> get svc istio-ingressgateway -n istio-system \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')
 for i in $(seq 10); do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
@@ -83,7 +87,8 @@ oc --context <acm-hub-ctx> delete -f charts/mesh-verify-appset.yaml
 
 Gateway API: [`tests/gateway-api`](tests/gateway-api/README.md) checks whether an HTTPRoute reaches a
 workload that runs in another member, with or without a Service, or the Service's namespace, in the
-ingress member (`charts/mesh-verify-gateway-api-appset.yaml` deploys it the same way).
+ingress member (`charts/mesh-verify-gateway-api-appset.yaml` deploys it the same way, with one more
+placeholder for the member that runs the workload).
 
 ## Run tests
 

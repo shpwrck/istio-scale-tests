@@ -41,7 +41,7 @@ If `$ARGUMENTS` is empty, prompt the user with a `AskUserQuestion` call asking w
    - **Continue**: re-brief the implementer with the consolidated Round-N+1 fix list and go back to step 3.
    - **Cap**: 10 rounds. If you reach round 10 with substantive items still open, stop and report the unresolved set to the user — don't burn rounds in a flat trade.
 
-7. **Open or update the PR.** Use `gh -R shpwrck/istio-scale-tests pr create --base main --head <branch> --title <title> --body-file <file>`, or `gh -R shpwrck/istio-scale-tests pr edit <branch> --body-file <file>` if it already exists. PR description should include:
+7. **Open or update the PR.** Use `gh pr create --base main --head <branch> --title <title> --body-file <file>` from the checkout (it targets the `origin` repo), or `gh pr edit <branch> --body-file <file>` if it already exists. PR description should include:
    - The proposal + scope
    - A round-by-round table (verdicts + new substantive count)
    - The headline fixes from review feedback

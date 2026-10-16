@@ -1,14 +1,17 @@
 # Standalone Argo CD Application (not part of the app-of-apps): deploys the Gateway API
 # multicluster ingress check (charts/mesh-verify-gateway-api) on every mesh member, with the echo
 # workload on ONE member. What it answers and how to run it: tests/gateway-api/README.md.
-# Edit before applying:
-#   - spec.source.targetRevision and the repo.revision parameter: your branch (both);
-#   - spec.source.repoURL and the repo.url parameter: your fork (both);
-#   - the template.source.helm.valuesObject.workloadCluster parameter: the ACM ManagedCluster
-#     name of the member that runs the workload (oc --context <acm-hub-ctx> get managedclusters).
-#     Keep the placeholder in git and fill it in on the way to the hub (Apply). Applied as the
-#     placeholder, every member's Application fails to render with a message.
-# Apply:  sed 's/<workload-cluster>/<managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
+# Three placeholders stay in git and are filled in on the way to the hub (Apply):
+#   - <repo-url> and <revision>: the repo and revision the hub's root Application syncs (set
+#     by terraform/platform), so the check deploys the same charts as the mesh. Applied as the
+#     placeholders, this Application shows a ComparisonError and deploys nothing;
+#   - <workload-cluster>: the ACM ManagedCluster name of the member that runs the workload
+#     (oc --context <acm-hub-ctx> get managedclusters). Applied as the placeholder, every
+#     member's Application fails to render with a message.
+# Apply:  read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application \
+#           hub-gitops-root -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+#         sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+#           -e 's|<workload-cluster>|<managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
 #           | oc --context <acm-hub-ctx> apply -f -
 # Remove: oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
 #         (the finalizers remove the ApplicationSet, the per-member Applications and all they
@@ -27,8 +30,8 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/shpwrck/istio-scale-tests.git
-    targetRevision: main
+    repoURL: <repo-url>
+    targetRevision: <revision>
     path: charts/gitops-hub-ocm-placement-appset
     helm:
       releaseName: gitops-mesh-verify-gateway-api-appset
@@ -36,9 +39,9 @@ spec:
         - values-mesh-verify-gateway-api.yaml
       parameters:
         - name: repo.url
-          value: https://github.com/shpwrck/istio-scale-tests.git
+          value: <repo-url>
         - name: repo.revision
-          value: main
+          value: <revision>
         - name: placement.name
           value: acm-openshift-gitops-placement
         - name: template.source.helm.valuesObject.workloadCluster

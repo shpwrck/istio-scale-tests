@@ -177,15 +177,22 @@ install the standard channel through the ingress operator; the script stops when
 missing), and the `istio` GatewayClass, which istiod creates.
 
 1. Pick the workload member: `oc --context <acm-hub-ctx> get managedclusters`.
-2. In [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
-   set both revisions (`spec.source.targetRevision`, `repo.revision`) and both repo URLs if you
-   use a fork. Leave the `<workload-cluster>` placeholder in the file: step 3 fills it in on the
-   way to the hub, so the cluster name never lands in git.
+2. Read the repo and revision the hub syncs the mesh from. [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
+   keeps `<repo-url>`, `<revision>` and `<workload-cluster>` placeholders: step 3 fills them in on
+   the way to the hub, so the check runs the same charts as the mesh and the cluster name never
+   lands in git.
+
+   ```bash
+   read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application hub-gitops-root \
+     -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+   ```
+
 3. Apply it on the hub with the workload member's ManagedCluster name, and wait for the per-member
    Applications:
 
    ```bash
-   sed 's/<workload-cluster>/<managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
+   sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+     -e 's|<workload-cluster>|<managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
      | oc --context <acm-hub-ctx> apply -f -
    oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops | grep mesh-verify-gwapi
    ```

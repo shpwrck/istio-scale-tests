@@ -743,7 +743,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 if ((${#problems[@]})); then
 	for p in "${problems[@]}"; do echo "error: ${p}" >&2; done
-	die "the check is not deployed as expected (above). Deploy it from the ACM hub: edit and apply charts/mesh-verify-gateway-api-appset.yaml (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
+	die "the check is not deployed as expected (above). Deploy it from the ACM hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
 fi
 
 # --- Step 2: bounded wait for the Gateway, the echo Deployments and every route's status (PL4),
