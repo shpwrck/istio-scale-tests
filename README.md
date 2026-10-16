@@ -161,8 +161,29 @@ Raise it and re-apply; the wiring gate's expected size follows automatically.
 | Gateway Service stays `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. |
 | `istioctl` errors on API versions | Use an `istioctl` that matches `ISTIO_VERSION`. |
 
+## Moving or forking the repo
+
+Nothing in the code names the repo's home, so a move is settings, not code:
+
+1. Point the platform at the new repo: set `gitops_app_repo_url` and `gitops_app_repo_revision` in
+   your tfvars (plus `gitops_app_repo_password` or `gitops_app_repo_ssh_private_key` for a private
+   repo) and re-apply `terraform/platform`. The on-demand checks read both from the hub when you
+   apply them ([Verify](#verify)), so they follow.
+2. Recreate CI: enable Actions, then protect `main` with a rule that requires a pull request and the
+   checks `validate (ubuntu-latest)` and `validate (macos-latest)`
+   ([portability.yml](.github/workflows/portability.yml); keep those job names).
+3. Name the owners in [.github/CODEOWNERS](.github/CODEOWNERS) and turn on "Require review from
+   Code Owners" in that rule.
+4. Tag the hand-over commit with an annotated tag (`git tag -a v1.0.0 -m "<note>"`, then
+   `git push origin v1.0.0`). Results record `git describe` as `HARNESS_SHA`, so runs from that
+   commit name the tag.
+
 ## More
 
 - [AGENTS.md](AGENTS.md): repo conventions for contributors and coding agents
 - [docs/scale-test-campaign](docs/scale-test-campaign/README.md): end-to-end campaign runbook; [docs/campaigns](docs/campaigns/README.md): recorded results
 - [docs/runbooks](docs/runbooks): operating a deployed lab or ROSA validation run
+
+## License
+
+[Apache License 2.0](LICENSE).
