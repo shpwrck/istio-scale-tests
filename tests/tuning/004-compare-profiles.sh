@@ -12,6 +12,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/propagation.sh"  # PROP_ROW_AWK: the rows propagation 005 counts
 
 RESULTS_DIR=""
 FORMAT="text"
@@ -22,11 +24,15 @@ usage() {
 Usage: $(basename "$0") --results-dir DIR [options]
 
 Compare tuning sweep passes. Values are means over valid rows (status OK, no
-istiod restart); each profile also shows its change against the baseline. Under
-each metric, "n" is got/attempted: the valid rows with a value for it / every row
-the pass wrote in that group (failed and timed-out rows included), and "range" its
-min to max. A profile whose n differs from the baseline's shows "(baseline n ...)":
-its mean is over other iterations, so compare it with care.
+istiod restart; a propagation pass counts exactly the rows and samples its 005
+report counts, P1 once per iteration); each profile also shows its change against
+the baseline. Under each metric, "n" is got/attempted: the valid samples with a
+value for it / what the pass's probe was configured to run, where its TSV records
+it (propagation: iterations for P1, iterations x remotes for P2 and P3; churn:
+iterations), else every row the pass wrote in that group (failed and timed-out
+rows included); "range" is its min to max. A profile whose n differs from the
+baseline's shows "(baseline n ...)": its mean is over other iterations, so compare
+it with care.
 Histogram p99 rows (convergence, push time) show the worst bucket a valid row hit,
 or "overflow (N rows)", never a mean. Memory is in Mi, CPU in millicores (the
 controlplane's istiod CPU and memory are window peaks), config sizes in KiB, and a
@@ -147,9 +153,20 @@ for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 # "v<TAB>group<TAB>column<TAB>mean<TAB>max<TAB>n_overflow<TAB>min<TAB>n_numeric" for
 # every metric column the TSV has (mean, max and min "-" without a numeric value: a
 # tab IFS would merge empty fields). A group is "col=value, col=value", or "-".
-# "overflow" (a histogram p99 in +Inf) is counted, not dropped.
+# "overflow" (a histogram p99 in +Inf) is counted, not dropped. A propagation pass
+# counts what its 005 report counts (D2): the rows prop_drop_reason keeps, P1 and its
+# convergence p99 once per iteration, P2 without a dirty sample (tests/lib/propagation.sh,
+# with 005's skew ceiling FANOUT_MAX_SKEW_MS).
 summarize() {
-	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" '
+	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" -v suite="$SUITE" -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
+	# prop_col_sample(c): whether this row carries a sample of propagation column c.
+	function prop_col_sample(c) {
+		if (c == "p1_ms") return prop_p1_sample()
+		if (c == "p2_ms") return prop_p2_sample()
+		if (c == "p3_ms") return prop_p3_sample()
+		if (c == "p1_conv_p99_ms") return prop_p1_first()
+		return 1
+	}
 	BEGIN { nm = split(cols, mc, ","); ng = split(gcols, gc, ",") }
 	FNR == 1 { hdr = 0 }
 	/^#/ || NF == 0 { next }
@@ -162,13 +179,18 @@ summarize() {
 		if (!(g in seen)) { seen[g] = 1; order[++norder] = g }
 		grows[g]++
 		for (j = 1; j <= nm; j++) if (mc[j] != "" && (mc[j] in idx)) has[g SUBSEP mc[j]] = 1
-		if (("status" in idx) && $(idx["status"]) != "OK") next
-		if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
-		if (("restarted" in idx) && $(idx["restarted"]) != "0") next
+		if (suite == "propagation") {
+			if (prop_drop_reason(MAXSKEW) != "") next
+		} else {
+			if (("status" in idx) && $(idx["status"]) != "OK") next
+			if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
+			if (("restarted" in idx) && $(idx["restarted"]) != "0") next
+		}
 		valid++
 		for (j = 1; j <= nm; j++) {
 			c = mc[j]
 			if (c == "" || !(c in idx)) continue
+			if (suite == "propagation" && !prop_col_sample(c)) continue
 			v = $(idx[c]); k = g SUBSEP c
 			if (v == "overflow") { ov[k]++; continue }
 			if (v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) {
@@ -244,6 +266,38 @@ fmt_range() {
 	printf '%s to %s' "$(fmt_metric "$kind" "$mn" "$mn" 0)" "$(fmt_metric "$kind" "$mx" "$mx" 0)"
 }
 
+# cfg_attempted <pass> <tsv>...: D3 (PL17). ATT[<pass>|-|<column>] = the samples the
+# pass's probes were configured to take, from their TSV preambles: propagation
+# ITERATIONS (P1 and its convergence p99: one per iteration) and ITERATIONS x the
+# remotes (P2, P3: one per remote and iteration); churn its Iterations (one row each).
+# Nothing when a file does not record it: metric_n then counts the rows written.
+declare -A ATT=()
+cfg_attempted() {
+	local p="$1" f it rem n1=0 n2=0 m
+	shift
+	case "$SUITE" in propagation | churn) ;; *) return 0 ;; esac
+	for f in "$@"; do
+		if [[ "$SUITE" == propagation ]]; then
+			it="$(sed -n 's/^# ITERATIONS=//p' "$f" | head -1)"
+			rem="$(sed -n 's/^# REMOTES=//p' "$f" | head -1)"
+			[[ "$it" =~ ^[0-9]+$ && -n "$rem" ]] || return 0
+			[[ "$rem" != none ]] || rem=""
+			n1=$((n1 + it))
+			n2=$((n2 + it * $(wc -w <<<"$rem")))
+		else
+			it="$(sed -n 's/^# Deployments: .* Iterations: \([0-9][0-9]*\)$/\1/p' "$f" | head -1)"
+			[[ -n "$it" ]] || return 0
+			n1=$((n1 + it))
+		fi
+	done
+	for m in "${METRICS[@]}"; do
+		case "${m%%|*}" in
+		p2_ms | p3_ms) ATT["$p|-|${m%%|*}"]="$n2" ;;
+		*) ATT["$p|-|${m%%|*}"]="$n1" ;;
+		esac
+	done
+}
+
 declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS NROWS STATUS GSEEN
 GROUP_VALUES=()
 for p in "${PASSES[@]}"; do
@@ -256,6 +310,7 @@ for p in "${PASSES[@]}"; do
 		[[ "${STATUS[$p]}" == ok ]] && STATUS[$p]="no data"
 		continue
 	fi
+	cfg_attempted "$p" "${files[@]}"
 	while IFS=$'\t' read -r kind a b c d e f h; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
@@ -283,11 +338,12 @@ row "${cells[@]}"
 cells=("Valid / total rows")
 for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
 row "${cells[@]}"
-# metric_n <pass> <group> <column>: got/attempted (PL17): valid rows with a value
-# (overflow counts) / every row the pass wrote in the group.
+# metric_n <pass> <group> <column>: got/attempted (PL17): valid samples with a value
+# (overflow counts) / what the pass was configured to take (cfg_attempted), else every
+# row the pass wrote in the group.
 metric_n() {
 	local k="$1|$2|$3"
-	echo "$(( ${VCNT[$k]:-0} + ${VOV[$k]:-0} ))/${GROWS["$1|$2"]:-0}"
+	echo "$(( ${VCNT[$k]:-0} + ${VOV[$k]:-0} ))/${ATT[$k]:-${GROWS["$1|$2"]:-0}}"
 }
 N_DIFFERS=0
 for g in "${GROUP_VALUES[@]}"; do
@@ -327,8 +383,12 @@ render() {
 		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN))"
-		echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
-		echo "- Under each metric: n is got/attempted (valid rows with a value / every row the pass wrote, failed and timed-out rows included) and range is its min to max."
+		if [[ "$SUITE" == propagation ]]; then
+			echo "- Values are means over the samples the propagation report (005) counts: valid rows (status OK, no istiod restart, no overflow, scrape skew within FANOUT_MAX_SKEW_MS), P1 once per iteration. Profiles show the change against the baseline in brackets."
+		else
+			echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
+		fi
+		echo "- Under each metric: n is got/attempted (valid samples with a value / what the probe was configured to take where its TSV records it, else every row the pass wrote, failed and timed-out rows included) and range is its min to max."
 		((N_DIFFERS)) && echo "- **A profile's n differs from the baseline's** (shown as \"(baseline n ...)\"): its mean is over other iterations, so a better mean can come from fewer, easier samples."
 		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket."
 		echo ""
@@ -341,7 +401,7 @@ render() {
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN))"
 		echo "Means over valid rows; profiles show the change against the baseline."
-		echo "n = got/attempted (valid rows with a value / every row the pass wrote); range = min to max."
+		echo "n = got/attempted (valid samples with a value / configured samples, else rows written); range = min to max."
 		((N_DIFFERS)) && echo "WARNING: a profile's n differs from the baseline's (\"(baseline n ...)\"): its mean is over other iterations."
 		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."
 		echo ""

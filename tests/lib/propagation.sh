@@ -10,14 +10,24 @@
 #                                         else why it is dropped: its status when not OK,
 #                                         else restarted=1|unknown, p1_overflow, or
 #                                         scrape_skew>MAX (pre-gate TSVs, field 19);
-#                                       prop_p1_sample(), prop_p3_sample() -> 1 when p1_ms /
-#                                         p3_ms is a number; prop_p2_sample() -> 1 when p2_ms
-#                                         is a number and p2_dirty is not 1 (EDS bumped but
-#                                         the canary never went healthy on that remote)
+#                                       prop_p1_first() -> 1 on the first counting row of
+#                                         its iteration, 0 on the others: P1 (p1_ms and the
+#                                         P1 convergence histogram) is measured once per
+#                                         iteration on the source and copied onto every
+#                                         remote's row, so it is one sample per (run_id,
+#                                         iteration), never one per row (D1)
+#                                       prop_p1_sample() -> 1 when prop_p1_first() and p1_ms
+#                                         is a number; prop_p3_sample() -> 1 when p3_ms is a
+#                                         number; prop_p2_sample() -> 1 when p2_ms is a
+#                                         number and p2_dirty is not 1 (EDS bumped but the
+#                                         canary never went healthy on that remote)
+#                                       Call the sample functions only on rows that
+#                                       prop_drop_reason keeps, in file order.
 #
-# 002 summarizes its own rows with it and 005 aggregates every TSV with it, so the
-# probe's summary and the report average the same rows (R6). Columns: 7 p1_ms, 8 p2_ms,
-# 9 p3_ms, 10 status, 15 p1_overflow, 16 restarted, 17 p2_dirty and 19 scrape_skew_ms
+# 002 summarizes its own rows with it and 005 (every format) and tuning 004 aggregate
+# every TSV with it, so the probe's summary and the reports average the same rows (R6).
+# Columns: 1 run_id, 3 iteration, 7 p1_ms, 8 p2_ms, 9 p3_ms, 10 status, 11-12 the P1
+# convergence p50/p99, 15 p1_overflow, 16 restarted, 17 p2_dirty and 19 scrape_skew_ms
 # (both absent from pre-fanout TSVs with 18 columns: p2_dirty reads 0, no skew gate).
 # shellcheck shell=bash
 
@@ -36,7 +46,16 @@ function prop_drop_reason(maxskew,    st, ov, rs, sk) {
 	if (sk >= 0 && sk > maxskew + 0) return "scrape_skew>" maxskew
 	return ""
 }
-function prop_p1_sample() { return ($7 ~ /^[0-9]+$/) }
+function prop_p1_first(    k) {
+	# Asking again about the same row gives the same answer.
+	if (NR == prop_p1_nr_) return prop_p1_is_first_
+	prop_p1_nr_ = NR
+	k = $1 SUBSEP $3
+	prop_p1_is_first_ = !(k in prop_p1_seen_)
+	prop_p1_seen_[k] = 1
+	return prop_p1_is_first_
+}
+function prop_p1_sample() { return (prop_p1_first() && $7 ~ /^[0-9]+$/) }
 function prop_p2_sample(    dirty) {
 	dirty = (NF >= 19 && $17 != "") ? $17 : "0"
 	return (dirty != "1" && $8 ~ /^[0-9]+$/)

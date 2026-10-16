@@ -17,7 +17,7 @@
 #   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT] [--fail-on-unreachable]
 #   ./tests/churn-dataplane/005-report-results.sh --config tests/churn-dataplane/configs/smoke.env \
 #     --results-dir tests/churn-dataplane/results/smoke/sweep-<RUN_ID> --format md
-# ci-dry-run:
+# ci-dry-run: --allow-multi-run
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -61,6 +61,9 @@ Usage: $(basename "$0") [options]
                      REACHABLE (stderr names the rule and the remotes).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
+
+Example (one sweep, as 004 runs it):
+  $(basename "$0") --results-dir ${COEXEC_RESULTS_DIR}/sweep-<RUN_ID> --format md
 
 Every format has a "Remote coverage" section from the reach-*.tsv files next to the
 TSVs: per mesh size and source, how many remotes passed every reach check
@@ -118,11 +121,13 @@ text | csv | json | md | markdown | charts) ;;
 esac
 
 if ((DRY_RUN)); then
-	n=0
+	DRY_FILES=()
 	nr=0
-	[[ -d "$RESULTS_DIR" ]] && n=$(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | wc -l)
+	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | sort)
 	[[ -d "$RESULTS_DIR" ]] && nr=$(find "$RESULTS_DIR" -name 'reach-*.tsv' -type f | wc -l)
-	echo "[dry-run] would summarize $((n)) churn-dataplane-*.tsv file(s) and $((nr)) reach-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
+	# The same refusal as the report (R3): a dir with more than one run is not summarized.
+	((${#DRY_FILES[@]} == 0)) || config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${DRY_FILES[@]}"
+	echo "[dry-run] would summarize ${#DRY_FILES[@]} churn-dataplane-*.tsv file(s) and $((nr)) reach-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
 	exit 0
 fi
 

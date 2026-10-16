@@ -125,20 +125,28 @@ cross-product of these axes (one CSV flag each):
 
 More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matrix`.
 `--settle` (default 60 s) applies after the deploy and again after each cleanup.
+`SCALE_SIZING_MODE=auto` stops the sweep before any change (also under `--dry-run`): `001`
+would deploy a capacity-derived service count while every row records `--service-counts`.
+Keep it `fixed` and pick `--service-counts`; auto is for a standalone `001`.
 `--resume tests/controlplane/results/sweep-<RUN_ID>` continues an interrupted sweep and skips combos that
 already have a valid row. Each row records its own axis values, but some scalars are recorded only
 once, in the TSV preamble, so they must match on resume: `--vsdr-every` and `--vsdr-subsets` (when
 the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep reads them from the
 preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
-`--vsdr-subsets` that differs. Pass the other options as in the original run.
+`--vsdr-subsets` that differs. It also refuses a mesh that now runs another Istio version than the
+`ISTIO_VERSION` the sweep recorded, under either `ISTIO_VERSION_CHECK` policy: the new rows would be
+credited to the old version, so start a new sweep. Pass the other options as in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an
 unexpected error, or `RETIRE_FAILED`, after its reports); `4` it finished and wrote its
-reports, but some cells have a status row instead of a measurement (`SETUP_FAILED`,
-`PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `SKIPPED_MEM_GUARD`,
-`SKIPPED_SERIES_STOPPED`). The last line on stderr says how many, by reason; `1` wins
-over `4`.
+reports, but some cells failed (a status row instead of a measurement: `SETUP_FAILED`,
+`PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`), or the Istio version changed during the
+sweep (read again before the reports). The last line on stderr says how many, by reason;
+`1` wins over `4`. Cells the memory guard skipped (`SKIPPED_MEM_GUARD`, and
+`SKIPPED_SERIES_STOPPED` after it) are counted apart, as skipped on purpose, and do not
+make it `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep
+the outcome.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
 scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces
@@ -166,8 +174,8 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
   `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`. A step ignores the keys it
   does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
-  `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run) and
-  the version pins. Any other key, or any bad line, rejects the whole file before anything
+  `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run),
+  `ISTIO_VERSION_CHECK` and the version pins. Any other key, or any bad line, rejects the whole file before anything
   runs, with `file:line` and the reason.
 - **Precedence:** flag > `--config` > environment > default. The file loads before
   `options.env`, so the defaults derived there follow it: a config
@@ -186,7 +194,8 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   flags) and `CONTROLPLANE_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`, which a sweep now
   honors too).
 - **No key (flags only):** `--dry-run`, `--resume`, `--force-large-matrix`, `--format`,
-  `--phase`, `--state-dir`, `--run-id`, `--watch`, `--interval` and `--mesh-size`.
+  `--allow-multi-run` (`004`), `--phase`, `--state-dir`, `--run-id`, `--watch`, `--interval`
+  and `--mesh-size`.
 - **Provenance:** the TSV preamble records `RUN_CONFIG` (the file's path from the repo root,
   or only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and
   every report format repeats them. A sweep also copies the file to

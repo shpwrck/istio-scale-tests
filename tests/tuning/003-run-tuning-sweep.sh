@@ -73,7 +73,9 @@ Exit codes:
      could not be reverted (REVERT_FAILED; later passes skipped), or an unexpected error
   4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
      passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
-     non-zero, PROBE_FAILED); stderr ends with "N of M cells failed" by reason
+     non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason) or the
+     Istio version changed during the sweep (read again at its end); the outcome is
+     also in sweep-outcome.txt and sweep-comparison.md
   130/143  interrupted (Ctrl-C / TERM); the active profile is reverted first
 EOF
 }
@@ -260,6 +262,9 @@ fi
 # --- Live run -------------------------------------------------------------------
 python3 -I -c 'import yaml' 2>/dev/null \
 	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
+# The controlplane probe bounds its config-dump and Envoy-stats reads with timeout or
+# gtimeout and stops without either (R17): check here, before any profile is applied.
+[[ "$SUITE" != controlplane ]] || require_timeout
 KUBECTL=()
 resolve_kubectl KUBECTL
 # R4: the Istio version every member runs, read once before the first profile or setup
@@ -299,7 +304,6 @@ mkdir -p "$SWEEP_DIR"
 	if [[ "$SUITE" == churn-dataplane ]]; then echo "# CHURN_RATE=${CHURN_RATE}"; fi
 	echo "# HARNESS_SHA=$(harness_sha)"
 	istio_version_kv | sed 's/^/# /'
-	echo "# ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT:-unknown}"
 } >"${SWEEP_DIR}/sweep-metadata.txt"
 
 if ((GITOPS_PAUSE)); then
@@ -381,6 +385,10 @@ for p in "${PASSES[@]}"; do
 done
 
 echo ""
+# A6: the Istio version again, after the last pass and its revert, before the comparison
+# (read-only).
+IV_END=()
+istio_version_recheck IV_END "${KUBECTL[@]}"
 "${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown \
 	--output "${SWEEP_DIR}/sweep-comparison.md" || echo "warn: comparison failed" >&2
 
@@ -395,7 +403,8 @@ echo "    Comparison: ${SWEEP_DIR}/sweep-comparison.md"
 
 # R19: a pass whose profile did not apply or whose probe exited non-zero has its marker
 # file (run_pass and the loop above never abort on one, so every profile was reverted
-# first, PL32). Count them by reason; a failed revert (exit 1) wins over 4.
+# first, PL32). Count them by reason, also in sweep-outcome.txt and the comparison (C3);
+# a failed revert (exit 1) wins over 4.
 FAILED_CELLS=()
 for p in "${PASSES[@]}"; do
 	for marker in SETUP_FAILED PROBE_FAILED; do
@@ -404,6 +413,8 @@ for p in "${PASSES[@]}"; do
 done
 outcome_rc=0 stop_args=()
 ((ABORTED == 0)) || stop_args=(--stopped 1)
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} "${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --unit passes \
+	--where "Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it" \
+	--record "$SWEEP_DIR" --md "${SWEEP_DIR}/sweep-comparison.md" "${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((ABORTED)); then exit 1; fi
 exit "$outcome_rc"

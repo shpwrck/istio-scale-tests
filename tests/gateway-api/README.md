@@ -226,10 +226,12 @@ results will go, and:
    - the builds that ran: istiod's `discovery` image (`ISTIOD_IMAGE`), the ingress `istio-proxy`
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
      ran (the registry host and path are dropped), and the OSSM operator CSV version and phase
-     (`OSSM_OPERATOR`); the Istio CR version (`ISTIO_CR_VERSION[ctx]`; `ISTIO_VERSION` is what the
-     members run, one value or `mixed:<a>,<b>`, next to the `config/versions.env` pin in
-     `ISTIO_VERSION_PIN`: this read-only check warns on a difference and never stops on it) and
-     the tuning baseline;
+     (`OSSM_OPERATOR`); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`, which can be
+     an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each active
+     IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
+     `unknown` for a member that cannot be read or whose Istio CR is not settled), with
+     `ISTIO_VERSION_BY_CONTEXT` and the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this
+     read-only check warns on a difference and never stops on it; and the tuning baseline;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),

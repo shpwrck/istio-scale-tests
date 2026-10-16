@@ -25,10 +25,12 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    valid for the whole multi-hour run.
 5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`, and GNU `timeout` (macOS: `brew install
    coreutils` for `gtimeout`; the controlplane suite stops at startup without one).
-6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite reads each member's Istio CR
-   version before its first change and stops when it differs from `ISTIO_VERSION`
-   (`config/versions.env`), when members differ, or when one cannot be read. Fix the pin (or the
-   mesh); `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs.
+6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite but gateway-api reads the version
+   each member runs (its active IstioRevision) before its first change and stops when it differs
+   from `ISTIO_VERSION` (`config/versions.env`), when members differ, or when one cannot be read;
+   gateway-api, a read-only check, records it and goes on. Fix the pin (or the mesh);
+   `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A sweep reads it again
+   at the end and exits 4 when it changed during the sweep.
 
 ## Capacity planning
 
@@ -135,7 +137,9 @@ tests/churn-dataplane/004-run-sweep.sh --contexts "$CONTEXTS" --mesh-sizes "$MES
 Between suites, confirm the previous suite's `*-test` namespaces are gone and repeat Stage 0.
 Check each sweep's exit code: `4` means it finished and wrote its reports but some cells
 failed (the last stderr line says how many, by reason; their placeholder rows are in the
-report); `3` a reachability stop; `1` it stopped. Each suite README lists its codes.
+report) or the Istio version changed during the sweep; `3` a reachability stop; `1` it
+stopped. `sweep-outcome.txt` in each sweep dir keeps the outcome. Each suite README lists
+its codes.
 
 ### Stage 4 — Collect results
 

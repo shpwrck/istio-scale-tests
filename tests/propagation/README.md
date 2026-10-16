@@ -98,8 +98,10 @@ and `sweep-charts.md` from `005` (`--tsv` is still accepted and does nothing).
 Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition,
 or an unexpected error); `4` it finished and wrote its reports, but some mesh sizes
 failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder
-row). The last line on stderr says how many, by reason. Rows a probe wrote with a
-non-OK status are measurements, not failures: the report counts them in `n_total`.
+row), or the Istio version changed during the sweep (read again before the reports). The
+last line on stderr says how many, by reason; `sweep-outcome.txt` and the end of
+`sweep-summary.md` keep the outcome. Rows a probe wrote with a non-OK status are
+measurements, not failures: the report counts them in `n_total`.
 
 ## Run config (`--config FILE`)
 
@@ -128,7 +130,8 @@ rules: [Run config](../../README.md#run-config---config-file)).
 - **Flags only:** `--tsv` (`002`) and `--collect-metrics` (add them to the command line),
   `--source-context`, `--remote-contexts`, `--mesh-size`, `--sweep-run-id`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`002`; the sweep sets them), `--watch`
-  and `--interval` (`004`), `--force-large-matrix`, `--format` and `--dry-run`.
+  and `--interval` (`004`), `--allow-multi-run` (`005`), `--force-large-matrix`, `--format`
+  and `--dry-run`.
 
 ## Passive istiod metrics
 

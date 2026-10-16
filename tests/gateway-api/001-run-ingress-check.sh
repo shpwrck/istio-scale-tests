@@ -671,21 +671,12 @@ for i in "${!CONTEXTS[@]}"; do
 	done <"${WORK}/pre-${i}.err"
 done
 
-# The Istio version the members run (R4, PL36: the suites' keys), from the Istio CR reads
-# above: one value, or mixed:a,b. A read-only check records it and never stops on it (the
-# suites' istio_version_resolve does); ISTIO_VERSION_PIN keeps config/versions.env's value.
-ISTIO_VERSION_PIN="${ISTIO_VERSION:-unknown}"
-iv_seen=""
-for ctx in "${CONTEXTS[@]}"; do
-	v="${PRE[$ctx|istio_cr_version]}"
-	case ",${iv_seen}," in *",${v},"*) ;; *) iv_seen="${iv_seen:+${iv_seen},}${v}" ;; esac
-done
-if [[ "$iv_seen" == *,* ]]; then ISTIO_VERSION="mixed:${iv_seen}"; else ISTIO_VERSION="$iv_seen"; fi
-# shellcheck disable=SC2034  # read by istio_version_kv (preamble.sh)
-ISTIO_VERSION_SOURCE=live
-if [[ "${ISTIO_VERSION#v}" != "${ISTIO_VERSION_PIN#v}" ]]; then
-	warn "the members run Istio ${ISTIO_VERSION}, but ISTIO_VERSION is ${ISTIO_VERSION_PIN} (config/versions.env); the results record ${ISTIO_VERSION} (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})"
-fi
+# The Istio version the members run (R4, PL36): the suites' one reader, the active
+# IstioRevision's version on every member (unknown when unreadable or the Istio CR is not
+# settled), never the Istio CR's requested .spec.version (ISTIO_CR_VERSION[ctx] keeps that
+# for reference) nor an absent CR. A read-only check records it and never stops on it
+# (--no-stop warns instead); ISTIO_VERSION_PIN keeps config/versions.env's value.
+istio_version_resolve --no-stop "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 
 # The deployed scenario set per member (R2): the chart's stamp on the test namespace and on the
 # Gateway. A member whose stamp differs runs other chart content than this script describes; its

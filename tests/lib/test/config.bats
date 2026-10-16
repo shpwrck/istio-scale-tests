@@ -628,7 +628,7 @@ with_run_config() {
 	assert_failure 1
 	[ -z "$output" ]
 	[[ "$stderr" == *"error: ${d} holds 2 runs"* ]]
-	[[ "$stderr" == *"run-a: its files are in ${d}, outside a sweep-* dir"* ]]
+	[[ "$stderr" == *"run-a (its files are in ${d}, outside a sweep-* dir"* ]]
 	[[ "$stderr" == *"Or pass --allow-multi-run"* ]]
 	run --separate-stderr bash "$CP/004-report-results.sh" --config "$f" --results-dir "$d" --format json
 	assert_failure 1
@@ -638,7 +638,8 @@ with_run_config() {
 	[[ "$stderr" == *"holds 2 runs"* ]]
 	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
 	assert_success
-	[ "$(jq -c '.metadata.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"]}' ]
+	# At the top level, as in every suite's JSON (B5).
+	[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"]}' ]
 }
 
 @test "003 with --config, no cluster: snapshot, preamble and report provenance; --resume checks the config" {
@@ -721,20 +722,22 @@ with_run_config() {
 	assert_output --partial "exceeds safety limit 1"
 	# The sweep recorded ISTIO_VERSION=unknown (nothing answered); a mesh that now answers
 	# the pin is another version than the rows already there: --resume refuses before any
-	# change and appends nothing, unless ISTIO_VERSION_CHECK=warn (R4).
+	# change and appends nothing, under either ISTIO_VERSION_CHECK policy (R4, A5).
 	grep -qx '# ISTIO_VERSION=unknown' "$d"/controlplane-*.tsv
-	local bin="${BATS_TEST_TMPDIR}/bin" tsv before
+	local bin="${BATS_TEST_TMPDIR}/bin" tsv before policy
 	mkdir -p "$bin"
 	printf '#!/bin/sh
-case "$*" in *"get istios.sailoperator.io default"*) printf %%s "$ISTIO_VERSION" ;; *) exit 1 ;; esac
+case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
 ' > "${bin}/kubectl"
 	chmod +x "${bin}/kubectl"
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
 	before="$(cat "$tsv")"
-	ISTIO_VERSION_CHECK=fail PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" \
-		--contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --regexp "--resume: this sweep recorded ISTIO_VERSION=unknown, but the mesh now runs v?[0-9][^ ]*, so its new rows would be credited to unknown\. Start a new sweep \(or set ISTIO_VERSION_CHECK=warn to resume anyway\)\."
-	refute_output --partial "Capacity plan check"
-	[ "$(cat "$tsv")" = "$before" ]
+	for policy in fail warn; do
+		ISTIO_VERSION_CHECK="$policy" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" \
+			--contexts ci-a --mesh-sizes 1 --service-counts 5
+		assert_failure 1
+		assert_output --regexp "--resume: this sweep recorded ISTIO_VERSION=unknown, but the mesh now runs v?[0-9][^ ]*, so its new rows would be credited to unknown\. Start a new sweep: --resume never mixes Istio versions in one TSV, whatever ISTIO_VERSION_CHECK says\."
+		refute_output --partial "Capacity plan check"
+		[ "$(cat "$tsv")" = "$before" ]
+	done
 }

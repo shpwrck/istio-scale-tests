@@ -97,7 +97,9 @@ Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-
 `SETUP_CONTEXTS`), never the hub. Each suite writes TSV data plus a markdown summary under its
 `results/` directory; a sweep writes its TSVs and reports into its own `results/sweep-<RUN_ID>/`.
 A sweep whose setup or probe failed for some cells still writes its report, then ends with
-`N of M cells failed` (by reason) and exit code 4; each suite README lists its exit codes.
+`N of M cells failed` (by reason) and exit code 4, as it does when the Istio version changed
+during the sweep; `sweep-outcome.txt` in the sweep dir keeps the outcome. Each suite README
+lists its exit codes.
 Every script has `--help`, and scripts that change a cluster also accept `--dry-run`.
 
 | Suite | Measures | Start with |
@@ -116,20 +118,25 @@ tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-s
 
 Settings and image pins live in `config/versions.env` and `config/options.env`. The deployed Istio
 version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
-Before its first change, every suite reads the version each member's Istio CR runs
-(`istios.sailoperator.io default`, `.spec.version`) and records that as `ISTIO_VERSION`, next to
-the pin (`ISTIO_VERSION_PIN`) and `ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which
-reads nothing). With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than
-the pin, members on different versions, or a member whose CR cannot be read stop the run before
-it changes anything; `ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs
-(`mixed:<a>,<b>` or `unknown` when they differ or cannot be read). It is set in the environment,
-never in a `--config` file.
+Before its first change, every suite reads the version each member runs: the IstioRevision its
+`istios.sailoperator.io default` CR names as active (`.status.activeRevisionName`), and that
+revision's `.spec.version`, which must be an exact version (an alias such as `v1.30-latest` is
+not). A CR that is not Healthy, not reconciled yet, or migrating between revisions reads as
+unknown. The suite records the result as `ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`),
+`ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which reads nothing) and
+`ISTIO_VERSION_BY_CONTEXT`. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another
+version than the pin, members on different versions, or a member that cannot be read stop every
+suite but gateway-api (a read-only check that only records it) before it changes anything;
+`ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs (`mixed:<a>/<b>` or `unknown`
+when they differ or cannot be read). A sweep reads it again at the end and exits 4 when it
+changed. It is set in the environment, never in a `--config` file.
 
 ### Run config (`--config FILE`)
 
 Every numbered script of propagation, controlplane, dataplane, churn, churn-dataplane and
-gateway-api takes `--config FILE`: one file of `KEY=value` lines (the suite's `config/options.env`
-keys plus `SETUP_CONTEXTS`) that describes a whole run, so setup, sweep, report and cleanup read
+gateway-api takes `--config FILE`: one file of `KEY=value` lines (`SETUP_CONTEXTS` and the suite's
+keys in `config/options.env`, the ones its README lists; not every key there, see "Environment
+only" below) that describes a whole run, so setup, sweep, report and cleanup read
 the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`,
 and a "Run config" section in its README that lists its keys. Tuning does not take one yet.
 
@@ -142,8 +149,8 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   bad line or a key outside the suite's list rejects the whole file before anything runs, with
   `file:line` and the reason.
 - **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
-  `--force-large-matrix` acknowledgment stays per run) and the version pins in
-  `config/versions.env`.
+  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK` (the version check
+  above) and the version pins in `config/versions.env`.
 - **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
   what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
   A standalone step still takes those on the command line.

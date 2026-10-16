@@ -12,7 +12,7 @@
 #   ./tests/churn/004-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT]
 #   ./tests/churn/004-report-results.sh --config tests/churn/configs/smoke.env \
 #     --results-dir tests/churn/results/smoke/sweep-<RUN_ID> --format md
-# ci-dry-run:
+# ci-dry-run: --allow-multi-run
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -51,6 +51,24 @@ Usage: $(basename "$0") [options]
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
+
+Example (one sweep, as 003 runs it):
+  $(basename "$0") --results-dir ${CHURN_RESULTS_DIR}/sweep-<RUN_ID> --format md
+
+Row statuses (column 21): only OK rows feed the averages (n_valid); every row counts in
+n_total.
+  OK                  every measured column has a number
+  TIMEOUT_LOCAL       the source watcher did not see the scale-up in --timeout
+  TIMEOUT_REMOTE      a remote watcher did not see it in --timeout
+  TIMEOUT_REMOTE_EDS  the remote EDS push never came (convergence_remote_eds_ms)
+  POISONED_RESTART    an istiod restarted in the window (or its state is unknown)
+  SCRAPE_INCOMPLETE   a per-pod istiod scrape failed, so the summed deltas undercount
+  MISSING_VALUE       another measured column has no number (a watcher that did not
+                      list every churn target, or a push counter in neither scrape)
+  SETUP_FAILED        an iteration failed before it measured (002)
+  PROBE_FAILED        the probe failed for the whole cell (003 placeholder)
+A row an older 002 wrote as OK without a number in a measured column is counted as
+TIMEOUT_REMOTE_EDS or MISSING_VALUE, with a warning on stderr.
 
 text and md end with an "istiod restart diagnostics" section: the rows of every
 istiod-diag-*/index.tsv under the results dir (what changed, the cause, the evidence
@@ -108,9 +126,11 @@ text | csv | md | markdown | charts) ;;
 esac
 
 if ((DRY_RUN)); then
-	n=0
-	[[ -d "$RESULTS_DIR" ]] && n=$(find "$RESULTS_DIR" -name 'churn-*.tsv' -type f | wc -l)
-	echo "[dry-run] would summarize $((n)) churn-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
+	DRY_FILES=()
+	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find "$RESULTS_DIR" -name 'churn-*.tsv' -type f | sort)
+	# The same refusal as the report (R3): a dir with more than one run is not summarized.
+	((${#DRY_FILES[@]} == 0)) || config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${DRY_FILES[@]}"
+	echo "[dry-run] would summarize ${#DRY_FILES[@]} churn-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
 	exit 0
 fi
 
@@ -129,6 +149,31 @@ fi
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
+
+# Every format reads the rows through churn_rows, which re-derives the status of a row
+# an older 002 wrote as OK with no number in a measured column (before R12), so it
+# cannot count in n_valid. 002's rule: with remotes (mesh size > 1), no number in
+# convergence_remote_eds_ms is TIMEOUT_REMOTE_EDS; no number in convergence_local_ms,
+# the source push deltas, or (with remotes) remote_endpoint_reachable_ms and the
+# remote push deltas is MISSING_VALUE. Rows 002 writes today pass through unchanged.
+# shellcheck disable=SC2016  # an awk program, not shell expansions
+CHURN_ROWS_AWK='
+function num(v) { return v ~ /^[0-9]+$/ }
+!/^#/ && !/^run_id/ && NF >= 21 && $21 == "OK" {
+	rem = ($2 + 0 > 1)
+	if (rem && !num($10)) { $21 = "TIMEOUT_REMOTE_EDS"; fixed++ }
+	else if (!num($8) || !num($11) || !num($13) || (rem && (!num($9) || !num($12) || !num($14)))) {
+		$21 = "MISSING_VALUE"; fixed++
+	}
+}
+count { next }
+{ print }
+END { if (count) print fixed + 0 }'
+churn_rows() { awk -F'\t' -v OFS='\t' -v count=0 "$CHURN_ROWS_AWK" "${TSV_FILES[@]}"; }
+_rederived="$(awk -F'\t' -v OFS='\t' -v count=1 "$CHURN_ROWS_AWK" "${TSV_FILES[@]}")"
+if (( ${_rederived:-0} > 0 )); then
+	echo "warning: ${_rederived} row(s) written as OK by an older 002 have no number in a measured column; counted as TIMEOUT_REMOTE_EDS or MISSING_VALUE (in n_total, not n_valid)" >&2
+fi
 
 # A `# KEY=value` preamble value (values queried live at sweep time, e.g.
 # TUNING_BASELINE) over every input that has the line: one value, or mixed:a,b when they
@@ -206,7 +251,7 @@ report_text() {
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
-	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	churn_rows | awk -F'\t' '
 	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE/MISSING_VALUE
 	# rows carry N/A or undercounted istiod-side deltas and must NOT leak into
 	# column means. Per-column "N/A"!= guards also stop "N/A"+0 -> 0 fabrication.
@@ -317,7 +362,7 @@ report_csv() {
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
-	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	churn_rows | awk -F'\t' '
 	# Only OK rows feed numeric aggregation (see report_text for rationale).
 	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
@@ -455,7 +500,7 @@ report_markdown() {
 
 	# Extract sweep axes from TSV data.
 	local axes
-	axes=$(cat "${TSV_FILES[@]}" | awk -F'\t' '
+	axes=$(churn_rows | awk -F'\t' '
 	!/^#/ && !/^run_id/ && NF>=21 {
 		ms[$2]=1; ci[$3]=1; sc[$4"->"$5]=1
 	}
@@ -498,7 +543,7 @@ report_markdown() {
 	echo ""
 	echo "| mesh | churn | scale | n_total | n_valid | local_avg (ms) | remote_reach_avg (ms) | remote_eds_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 worst (ms) | rmt_queue_p99 worst (ms) | src_proxies | rmt_proxies | src_push_p99 worst (ms) | rmt_push_p99 worst (ms) | amplification |"
 	echo "|------|-------|-------|---------|---------|----------------|-----------------------|---------------------|--------------|--------------|------------|------------|--------------------------|--------------------------|-------------|-------------|-------------------------|-------------------------|---------------|"
-	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	churn_rows | awk -F'\t' '
 	# The hist_add arrays exist before the first call: some awks will not turn an
 	# unused name into an array inside a function.
 	BEGIN {
@@ -615,7 +660,7 @@ report_charts() {
 	echo "# Churn Convergence — Charts"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	churn_rows | awk -F'\t' '
 	# Charts average each series per mesh size over valid rows only ($21=="OK").
 	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,
 	# so a point with no samples is never plotted as 0: each chart keeps only the

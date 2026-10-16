@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 source "${ROOT}/tests/lib/timestamp.sh"
 source "${ROOT}/tests/lib/metrics.sh"
 source "${ROOT}/tests/lib/fanout.sh"
@@ -18,11 +19,20 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	[ "$result" = "620" ]
 }
 
-@test "fanout_counter_sum: skips an empty (failed-scrape) pod file" {
-	empty=$(mktemp); : > "$empty"
-	result=$(fanout_counter_sum pilot_xds_pushes "$POD0" "$empty")
-	rm -f "$empty"
-	[ "$result" = "400" ]
+@test "fanout_counter_sum: an empty, short or missing pod file is unscraped, never a partial sum (PL29)" {
+	empty="${BATS_TEST_TMPDIR}/empty.metrics"; : > "$empty"
+	short="${BATS_TEST_TMPDIR}/short.metrics"
+	printf 'pilot_xds_pushes{type="eds"} 5\n' > "$short"
+	for f in "$empty" "$short" "${BATS_TEST_TMPDIR}/nope.metrics"; do
+		[ "$(fanout_counter_sum pilot_xds_pushes "$POD0" "$f")" = "unscraped" ]
+		[ "$(fanout_counter_by_label_sum pilot_xds_pushes type eds "$f" "$POD0")" = "unscraped" ]
+	done
+	[ "$(fanout_counter_sum pilot_xds_pushes)" = "unscraped" ]
+	# A failed baseline never yields the counter's lifetime total as a window delta.
+	run --separate-stderr counter_delta "$(fanout_counter_sum pilot_xds_pushes "$POD0" "$empty")" \
+		"$(fanout_counter_sum pilot_xds_pushes "$POD0" "$POD1")" pilot_xds_pushes
+	assert_output "N/A"
+	[[ "$stderr" == *"baseline scrape is empty or unreadable"* ]]
 }
 
 @test "fanout_counter_by_label_sum: sums eds across pods" {
@@ -38,21 +48,72 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	[ "$result" = "unknown" ]
 }
 
-@test "fanout_counter_sum: every scrape failed (all files empty) is unknown, not 0 (R10, PL29)" {
+@test "fanout_counter_sum: every scrape failed (all files empty) is unscraped, not 0 (R10, PL29)" {
 	e1=$(mktemp); e2=$(mktemp)
 	result=$(fanout_counter_sum pilot_xds_pushes "$e1" "$e2")
 	r2=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "$e1" "$e2")
 	rm -f "$e1" "$e2"
-	[ "$result" = "unknown" ]
-	[ "$r2" = "unknown" ]
+	[ "$result" = "unscraped" ]
+	[ "$r2" = "unscraped" ]
+}
+
+# A complete body (>= FANOUT_MIN_SCRAPE_BYTES) from a replica that never pushed: no
+# pilot_xds_pushes sample and no # TYPE/HELP line for it, as istiod writes it.
+_idle_body() {
+	grep -v '^pilot_xds_pushes[{ ]\|^# [A-Z]* pilot_xds_pushes ' "$POD0" > "$1"
+	(( $(wc -c < "$1") >= FANOUT_MIN_SCRAPE_BYTES ))
+	! grep -q 'pilot_xds_pushes' "$1"
 }
 
 @test "fanout_counter_sum: a pod that has not registered the counter yet adds 0" {
-	other=$(mktemp)
-	printf 'process_start_time_seconds 1716940800\n' > "$other"
+	other="${BATS_TEST_TMPDIR}/idle.metrics"
+	_idle_body "$other"
 	result=$(fanout_counter_sum pilot_xds_pushes "$POD0" "$other")
-	rm -f "$other"
 	[ "$result" = "400" ]
+}
+
+# --- per-replica counters (istio D4) ------------------------------------------
+
+@test "fanout_replica_counter: an idle replica among busy ones is a real 0, not renamed" {
+	idle="${BATS_TEST_TMPDIR}/idle.metrics"
+	_idle_body "$idle"
+	in_batch=$(fanout_counter_in_batch pilot_xds_pushes "$idle" "$POD0" "$idle" "$POD1")
+	[ "$in_batch" = "1" ]
+	[ "$(fanout_replica_counter "$in_batch" "$idle" pilot_xds_pushes)" = "0" ]
+	[ "$(fanout_replica_counter "$in_batch" "$idle" pilot_xds_pushes type eds)" = "0" ]
+	# The busy replicas read as before.
+	[ "$(fanout_replica_counter "$in_batch" "$POD0" pilot_xds_pushes)" = "400" ]
+	[ "$(fanout_replica_counter "$in_batch" "$POD1" pilot_xds_pushes type eds)" = "120" ]
+	# Its window delta is 0, with no "renamed" warning.
+	run --separate-stderr counter_delta "$(fanout_replica_counter "$in_batch" "$idle" pilot_xds_pushes)" \
+		"$(fanout_replica_counter "$in_batch" "$idle" pilot_xds_pushes)" pilot_xds_pushes
+	assert_output "0"
+	[ -z "$stderr" ]
+}
+
+@test "fanout_replica_counter: absent from every replica stays unknown (renamed?), N/A with a warning" {
+	i1="${BATS_TEST_TMPDIR}/idle1.metrics"; i2="${BATS_TEST_TMPDIR}/idle2.metrics"
+	_idle_body "$i1"; _idle_body "$i2"
+	in_batch=$(fanout_counter_in_batch pilot_xds_pushes "$i1" "$i2")
+	[ "$in_batch" = "0" ]
+	[ "$(fanout_replica_counter "$in_batch" "$i1" pilot_xds_pushes)" = "unknown" ]
+	[ "$(fanout_replica_counter "$in_batch" "$i1" pilot_xds_pushes type eds)" = "unknown" ]
+	run --separate-stderr counter_delta "$(fanout_replica_counter "$in_batch" "$i1" pilot_xds_pushes)" \
+		"$(fanout_replica_counter "$in_batch" "$i2" pilot_xds_pushes)" pilot_xds_pushes
+	assert_output "N/A"
+	[[ "$stderr" == *"neither scrape"* ]]
+}
+
+@test "fanout_counter_in_batch / fanout_replica_counter: an incomplete body counts for nothing" {
+	short="${BATS_TEST_TMPDIR}/short.metrics"
+	printf 'pilot_xds_pushes{type="eds"} 5\n' > "$short"
+	idle="${BATS_TEST_TMPDIR}/idle.metrics"
+	_idle_body "$idle"
+	# A short body with the counter does not prove the counter exists in this batch.
+	[ "$(fanout_counter_in_batch pilot_xds_pushes "$short" "$idle" "${BATS_TEST_TMPDIR}/nope")" = "0" ]
+	# And one replica's short or missing body is unscraped, whatever the batch says.
+	[ "$(fanout_replica_counter 1 "$short" pilot_xds_pushes)" = "unscraped" ]
+	[ "$(fanout_replica_counter 1 "${BATS_TEST_TMPDIR}/nope" pilot_xds_pushes type eds)" = "unscraped" ]
 }
 
 # --- gauge SUM vs INVARIANT (the load-bearing distinction) ------------------

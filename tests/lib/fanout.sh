@@ -2,7 +2,8 @@
 # Per-pod istiod metric fanout helpers. Sourced, never executed.
 #
 # Consumers: propagation, churn, churn-dataplane, controlplane (fanout_list_istiod_pods,
-# fanout_gauge_sum_strict for the per-cluster connected-proxy total)
+# fanout_gauge_sum_strict for the per-cluster connected-proxy total, fanout_counter_in_batch
+# and fanout_replica_counter for the per-replica push counters)
 #
 # The mesh runs a FIXED, multi-replica istiod (HPA disabled, e.g. replicaCount=5).
 # Port-forwarding `svc/istiod` load-balances to ONE random replica per connection,
@@ -13,7 +14,8 @@
 #
 #   counters   (pilot_xds_pushes, {type=eds}, pilot_push_triggers, k8s events)
 #              -> SUM(after) - SUM(before) across pods  (each event from one replica),
-#                 via counter_delta; `unknown` (never 0) when no scrape has the counter
+#                 via counter_delta; `unknown` (never 0) when no scrape has the counter,
+#                 `unscraped` when any pod's scrape is incomplete (PL29)
 #   pilot_xds  (connected_proxies gauge)
 #              -> SUM across replicas (each proxy = exactly one istiod connection)
 #   pilot_services (gauge)
@@ -40,7 +42,8 @@
 #     fanout_preflight_istiod, fanout_open, fanout_scrape_all, fanout_record_podset)
 #     depend ONLY on common.sh (die) + timestamp.sh (now_ns) + curl/awk/kubectl.
 #   - The AGGREGATION wrappers (fanout_counter_sum, fanout_counter_by_label_sum,
-#     fanout_gauge_sum, fanout_gauge_sum_strict, fanout_restart_status) call the
+#     fanout_counter_in_batch, fanout_replica_counter, fanout_gauge_sum,
+#     fanout_gauge_sum_strict, fanout_restart_status) call the
 #     metrics.sh extractors, so a consumer using them MUST source tests/lib/metrics.sh
 #     BEFORE tests/lib/fanout.sh. (Propagation uses only the primitives + its own
 #     extract_all_from_file, so it does not need metrics.sh.)
@@ -343,21 +346,37 @@ fanout_record_podset() {
 # --- aggregation wrappers over the per-pod scrape files --------------------
 # Each takes a list of per-pod metrics files (the .metrics outputs of
 # fanout_scrape_all) plus the metric name and reuses the single-file extractors
-# from tests/lib/metrics.sh. Skips empty files (a failed scrape).
+# from tests/lib/metrics.sh.
+
+# fanout_body_complete <metrics_file>: true when the file is a complete scrape, i.e.
+# readable and at least FANOUT_MIN_SCRAPE_BYTES (fanout_scrape_all's rule; a failed
+# scrape leaves an empty or short file, PL29).
+# shellcheck disable=SC2329
+fanout_body_complete() {
+	local f="$1" sz
+	[[ -s "$f" && -r "$f" ]] || return 1
+	sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+	sz="${sz//[^0-9]/}"
+	(( ${sz:-0} >= FANOUT_MIN_SCRAPE_BYTES ))
+}
 
 # SUM a counter across pods; the caller takes the window delta with counter_delta
 # (metrics.sh). A pod whose scrape lacks the counter adds 0 (istiod registers it at
-# its first increment); `unknown` when no non-empty scrape has it at all (R10: renamed,
-# or every scrape failed), so a missing metric never reads as 0.
+# its first increment); `unknown` when no scrape has it at all (R10: renamed), so a
+# missing metric never reads as 0. `unscraped` when no file is given or any pod's
+# scrape is incomplete (fanout_body_complete): skipping it would undercount the sum,
+# and a short baseline would turn its share of the counter into window pushes (PL29).
 # Usage: fanout_counter_sum <counter_name> <metrics_file>...
 # shellcheck disable=SC2329
 fanout_counter_sum() {
 	local name="$1"
 	shift
+	(( $# )) || { echo unscraped; return 0; }
 	local f total=0 v seen=0
 	for f in "$@"; do
-		[[ -s "$f" ]] || continue
+		fanout_body_complete "$f" || { echo unscraped; return 0; }
 		v="$(extract_counter_sum "$f" "$name")"
+		[[ "$v" == unscraped ]] && { echo unscraped; return 0; }
 		[[ "$v" =~ ^[0-9]+$ ]] || continue
 		seen=1
 		total=$(( total + v ))
@@ -365,21 +384,62 @@ fanout_counter_sum() {
 	if ((seen)); then echo "$total"; else echo unknown; fi
 }
 
-# SUM a counter filtered by label across pods; `unknown` as fanout_counter_sum.
+# SUM a counter filtered by label across pods; `unknown` and `unscraped` as
+# fanout_counter_sum.
 # Usage: fanout_counter_by_label_sum <counter_name> <label> <value> <metrics_file>...
 # shellcheck disable=SC2329
 fanout_counter_by_label_sum() {
 	local name="$1" label="$2" value="$3"
 	shift 3
+	(( $# )) || { echo unscraped; return 0; }
 	local f total=0 v seen=0
 	for f in "$@"; do
-		[[ -s "$f" ]] || continue
+		fanout_body_complete "$f" || { echo unscraped; return 0; }
 		v="$(extract_counter_by_label "$f" "$name" "$label" "$value")"
+		[[ "$v" == unscraped ]] && { echo unscraped; return 0; }
 		[[ "$v" =~ ^[0-9]+$ ]] || continue
 		seen=1
 		total=$(( total + v ))
 	done
 	if ((seen)); then echo "$total"; else echo unknown; fi
+}
+
+# Per-replica counters (one istiod replica's own delta, not the cross-pod sum).
+# istiod creates a counter series at its first increment and writes no `# TYPE` line
+# before that, so a replica that never served a proxy has no pilot_xds_pushes at all.
+# Whether a counter missing from one replica is renamed or just idle is decided once
+# per scrape batch: fanout_counter_in_batch over every baseline and final body of the
+# batch, then fanout_replica_counter for each replica's file with that answer.
+
+# fanout_counter_in_batch <counter_name> <metrics_file>...: 1 when any complete body
+# among the files has the counter (a sample or a `# TYPE` line), else 0.
+# shellcheck disable=SC2329
+fanout_counter_in_batch() {
+	local name="$1" f
+	shift
+	for f in "$@"; do
+		fanout_body_complete "$f" || continue
+		[[ "$(extract_counter_sum "$f" "$name")" =~ ^[0-9]+$ ]] && { echo 1; return 0; }
+	done
+	echo 0
+}
+
+# fanout_replica_counter <in_batch> <metrics_file> <counter_name> [<label> <value>]:
+# one replica's counter (summed over its series, or only those with <label>=<value>):
+# a number; `unscraped` when the body is incomplete; and for a complete body without
+# the counter, 0 when <in_batch> is 1 (another replica has it: this one is idle),
+# `unknown` when it is 0 (no replica has it: renamed, counter_delta warns).
+# shellcheck disable=SC2329
+fanout_replica_counter() {
+	local in_batch="$1" f="$2" name="$3" v
+	fanout_body_complete "$f" || { echo unscraped; return 0; }
+	if (( $# >= 5 )); then
+		v="$(extract_counter_by_label "$f" "$name" "$4" "$5")"
+	else
+		v="$(extract_counter_sum "$f" "$name")"
+	fi
+	[[ "$v" == unknown && "$in_batch" == 1 ]] && v=0
+	echo "$v"
 }
 
 # SUM a gauge across pods (pilot_xds: each proxy is one istiod connection).
@@ -416,12 +476,9 @@ fanout_gauge_sum_strict() {
 	local name="$1"
 	shift
 	if (( $# == 0 )); then echo "unknown"; return 0; fi
-	local f sz total=0 v
+	local f total=0 v
 	for f in "$@"; do
-		if [[ ! -s "$f" ]]; then echo "unknown"; return 0; fi
-		sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-		sz="${sz//[^0-9]/}"
-		if (( ${sz:-0} < FANOUT_MIN_SCRAPE_BYTES )); then echo "unknown"; return 0; fi
+		fanout_body_complete "$f" || { echo "unknown"; return 0; }
 		v="$(extract_gauge_sum "$f" "$name")"
 		[[ "$v" == "unknown" ]] && v=0
 		total=$(awk -v a="$total" -v b="$v" 'BEGIN { printf "%.0f", a + b }')

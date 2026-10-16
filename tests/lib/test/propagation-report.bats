@@ -102,7 +102,7 @@ fixture() {
 		assert_failure 1
 		[ -z "$output" ]
 		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
-		[[ "$stderr" == *"  sweep-b: ${REPORT} --results-dir ${RES}/sweep-b"* ]]
+		[[ "$stderr" == *"  sweep-b:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-b'"* ]]
 		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
 		assert_success
 		# The last file's ITERATIONS is not the report's (it was last-wins).
@@ -118,4 +118,82 @@ fixture() {
 	assert_success
 	[ "$(jq -r '.metadata.ITERATIONS + " " + (.pooled_runs.runs | tostring)' <<<"$output")" = "3 1" ]
 	[ -z "$stderr" ]
+}
+
+@test "005: a TSV written before R4 pooled with a live one reads mixed for the R4 keys, never live (B1)" {
+	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
+	{
+		echo "# SWEEP_RUN_ID=sold"
+		echo "# RUN_ID=rold"
+		echo "# ISTIO_VERSION=v1.30.5"
+		echo "$HDR"
+		prow 2 1 1000 100
+	} > "${RES}/sweep-old/endpoint-rold.tsv"
+	{
+		echo "# SWEEP_RUN_ID=snew"
+		echo "# RUN_ID=rnew"
+		echo "# ISTIO_VERSION=v1.30.5"
+		echo "# ISTIO_VERSION_PIN=v1.30.5"
+		echo "# ISTIO_VERSION_SOURCE=live"
+		echo "# ISTIO_VERSION_BY_CONTEXT=src=v1.30.5,rmt=v1.30.5"
+		echo "$HDR"
+		prow 2 1 1000 100
+	} > "${RES}/sweep-new/endpoint-rnew.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format json
+	assert_success
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "mixed:live,unknown" ]
+	[ "$(jq -r '.metadata.ISTIO_VERSION_PIN' <<<"$output")" = "mixed:v1.30.5,unknown" ]
+	[[ "$stderr" == *"input TSVs disagree on sweep-level ISTIO_VERSION_SOURCE (live,unknown)"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format markdown
+	assert_output --partial "mixed:live,unknown"
+	# The new run alone reads live.
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
+}
+
+# p1rows <run_id> <mesh> <iterations> <remotes...>: an OK row per (iteration, remote); P1
+# (p1_ms 1000 + iteration, conv p99 500) is the source's, the same on every remote's row.
+p1rows() {
+	local run="$1" ms="$2" n="$3" i r
+	shift 3
+	for ((i = 1; i <= n; i++)); do
+		for r in "$@"; do
+			printf '%s\t%s\t%s\tsrc\t%s\t0\t%s\t500\t3000\tOK\t100\t500\t40/40\t40\t0\t0\t0\t5000\t10\n' "$run" "$ms" "$i" "$r" "$((1000 + i))"
+		done
+	done
+}
+
+@test "PROP_ROW_AWK: P1 is one sample per (run_id, iteration), from its first counting row; P2 and P3 one per row (D1)" {
+	source "${ROOT}/tests/lib/propagation.sh"
+	{ echo "$HDR"; p1rows r1 4 10 b c d; p1rows r2 4 2 b c d; } > "${RES}/rows.tsv"
+	run awk -F'\t' "${PROP_ROW_AWK}"'
+		NR == 1 { next }
+		prop_drop_reason(1000) == "" {
+			p1 += prop_p1_sample(); p2 += prop_p2_sample(); p3 += prop_p3_sample()
+			# Asking twice about one row does not move the state.
+			if (prop_p1_first() != prop_p1_first()) bad++
+		}
+		END { print p1, p2, p3, bad + 0 }' "${RES}/rows.tsv"
+	assert_output "12 36 36 0"
+	# A dropped first row: the iteration counts from its next counting row.
+	{ echo "$HDR"; p1rows r1 4 1 b c d; } | awk -F'\t' 'BEGIN { OFS = "\t" } NR == 2 { $10 = "TIMEOUT_P2" } 1' > "${RES}/rows2.tsv"
+	run awk -F'\t' "${PROP_ROW_AWK}"'NR > 1 && prop_drop_reason(1000) == "" { p1 += prop_p1_sample() } END { print p1 }' "${RES}/rows2.tsv"
+	assert_output 1
+}
+
+@test "005: 10 iterations x 3 remotes: P1's n is 10 in every format, so its p99 stays under the percentile floor (D1)" {
+	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
+	run "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid, .p99_ms]}] | add' <<<"$output")" = \
+		'{"P1_local_wall":[30,10,null],"P1_conv_p50":[30,10,null],"P1_conv_p99":[30,10,null],"P2_discovery":[30,30,500],"P3_dataplane":[30,30,3000]}' ]
+	# The P1 mean is over the 10 iterations (1001..1010).
+	[ "$(jq -r '.rows[] | select(.phase == "P1_local_wall") | .avg_ms' <<<"$output")" = 1006 ]
+	run "$REPORT" --results-dir "$RES" --format csv
+	assert_line --regexp '^4,P1_local_wall,30,10,1001,1010,1006,'
+	assert_line --regexp '^4,P2_discovery,30,30,'
+	run "$REPORT" --results-dir "$RES" --format markdown
+	assert_success
+	run "$REPORT" --results-dir "$RES" --format charts
+	assert_success
 }

@@ -127,7 +127,7 @@ two_pairs() {
 		assert_failure 1
 		[ -z "$output" ]
 		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
-		[[ "$stderr" == *"  sweep-a: ${REPORT} --results-dir ${RES}/sweep-a"* ]]
+		[[ "$stderr" == *"  sweep-a:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-a'"* ]]
 		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
 		assert_success
 		if [[ "$fmt" == json ]]; then

@@ -130,8 +130,9 @@ SCRAPE_INCOMPLETE (a pod's /metrics was unreachable, or baseline scrape skew
 exceeded FANOUT_MAX_SKEW_MS).
 
 Summary (stdout and endpoint-<RUN_ID>.md): averages over the rows 005 counts
-(status OK, restarted=0, no +Inf overflow), as n_valid/n_total, with the other
-rows tallied by reason. One definition decides for both: tests/lib/propagation.sh.
+(status OK, restarted=0, no +Inf overflow), as valid samples/rows (P1: /iterations,
+one sample each), with the other rows tallied by reason. One definition decides for
+both: tests/lib/propagation.sh.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -1458,7 +1459,8 @@ fi
 echo ""
 # R6: average exactly the rows 005 counts (prop_drop_reason, tests/lib/propagation.sh:
 # status OK, istiod not restarted or unknown, no +Inf overflow, skew within
-# FANOUT_MAX_SKEW_MS), per row like 005, and tally the others by reason. Output lines:
+# FANOUT_MAX_SKEW_MS), per row like 005 (P1 once per iteration, prop_p1_first), and
+# tally the others by reason. Output lines:
 # "T total valid dropped", "S phase n min max avg" (min/max/avg "-" without a sample)
 # and "D reason count".
 SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
@@ -1469,6 +1471,7 @@ SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AW
 	}
 	{
 		total++
+		if (!(($1 SUBSEP $3) in iter_seen)) { iter_seen[$1 SUBSEP $3] = 1; iters++ }
 		r = prop_drop_reason(MAXSKEW)
 		if (r != "") { dropped++; drop[r]++; next }
 		valid++
@@ -1478,6 +1481,7 @@ SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AW
 	}
 	END {
 		printf "T\t%d\t%d\t%d\n", total, valid, dropped
+		printf "I\t%d\n", iters
 		split("P1 P2 P3", ph, " ")
 		for (i = 1; i <= 3; i++) {
 			p = ph[i]
@@ -1486,12 +1490,13 @@ SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AW
 		}
 		for (r in drop) printf "D\t%s\t%d\n", r, drop[r]
 	}' "$ROWS_FILE" | sort)"
-ROWS_TOTAL=0 ROWS_VALID=0 DROPPED_TOTAL=0
+ROWS_TOTAL=0 ROWS_VALID=0 DROPPED_TOTAL=0 ITERS_TOTAL=0
 declare -A PH_N=() PH_MIN=() PH_MAX=() PH_AVG=()
 DROP_REASONS=()
 while IFS=$'\t' read -r kind a b c d e; do
 	case "$kind" in
 	T) ROWS_TOTAL="$a" ROWS_VALID="$b" DROPPED_TOTAL="$c" ;;
+	I) ITERS_TOTAL="$a" ;;
 	S) PH_N[$a]="$b" PH_MIN[$a]="$c" PH_MAX[$a]="$d" PH_AVG[$a]="$e" ;;
 	D) DROP_REASONS+=("${a}"$'\t'"${b}") ;;
 	esac
@@ -1500,14 +1505,17 @@ done <<<"$SUMMARY_KV"
 SUMMARY_PHASES=(P1)
 ((${#REMOTES[@]})) && SUMMARY_PHASES+=(P2 P3)
 declare -A PH_LABEL=([P1]="P1 local xDS push" [P2]="P2 remote istiod EDS push" [P3]="P3 remote sidecar")
+# PH_OF: what n counts against: P1 is one sample per iteration (measured on the source
+# and repeated on every remote's row, D1), P2 and P3 one per row.
+declare -A PH_OF=([P1]="$ITERS_TOTAL" [P2]="$ROWS_TOTAL" [P3]="$ROWS_TOTAL")
 
-echo "Summary (${ROWS_VALID} of ${ROWS_TOTAL} rows count, as in 005; n = n_valid samples / n_total rows):"
+echo "Summary (${ROWS_VALID} of ${ROWS_TOTAL} rows count, as in 005; n = valid samples / rows, for P1 / iterations):"
 for ph in "${SUMMARY_PHASES[@]}"; do
 	if (( ${PH_N[$ph]:-0} > 0 )); then
-		printf "  %-27s n=%d/%d min=%dms max=%dms avg=%dms\n" "${PH_LABEL[$ph]}:" "${PH_N[$ph]}" "$ROWS_TOTAL" \
+		printf "  %-27s n=%d/%d min=%dms max=%dms avg=%dms\n" "${PH_LABEL[$ph]}:" "${PH_N[$ph]}" "${PH_OF[$ph]}" \
 			"${PH_MIN[$ph]}" "${PH_MAX[$ph]}" "${PH_AVG[$ph]}"
 	else
-		printf "  %-27s n=0/%d (no valid sample)\n" "${PH_LABEL[$ph]}:" "$ROWS_TOTAL"
+		printf "  %-27s n=0/%d (no valid sample)\n" "${PH_LABEL[$ph]}:" "${PH_OF[$ph]}"
 	fi
 done
 
@@ -1560,12 +1568,13 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo ""
 	echo "Averages over the rows the report (005) counts: status OK, \`restarted=0\` (not 1 or"
 	echo "unknown), no +Inf overflow, scrape skew within FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS};"
-	echo "P2 also leaves out a dirty sample (\`p2_dirty=1\`). n is n_valid samples / n_total rows."
+	echo "P2 also leaves out a dirty sample (\`p2_dirty=1\`). n is valid samples / rows; for P1, valid samples /"
+	echo "iterations: P1 is measured on the source once per iteration and repeated on every remote's row."
 	echo ""
-	echo "| Phase | n_valid / n_total | min (ms) | max (ms) | avg (ms) |"
-	echo "|-------|-------------------|----------|----------|----------|"
+	echo "| Phase | n (valid / attempted) | min (ms) | max (ms) | avg (ms) |"
+	echo "|-------|-----------------------|----------|----------|----------|"
 	for ph in "${SUMMARY_PHASES[@]}"; do
-		echo "| ${PH_LABEL[$ph]} | ${PH_N[$ph]:-0}/${ROWS_TOTAL} | ${PH_MIN[$ph]:--} | ${PH_MAX[$ph]:--} | ${PH_AVG[$ph]:--} |"
+		echo "| ${PH_LABEL[$ph]} | ${PH_N[$ph]:-0}/${PH_OF[$ph]} | ${PH_MIN[$ph]:--} | ${PH_MAX[$ph]:--} | ${PH_AVG[$ph]:--} |"
 	done
 	echo ""
 	if (( DROPPED_TOTAL > 0 )); then

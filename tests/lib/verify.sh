@@ -196,11 +196,27 @@ EXTRACTED_PATTERNS=(
 	'sweep_outcome() {'
 	# batch B: which propagation rows count (propagation.sh, awk)
 	'function prop_drop_reason('
-	# batch B: the Istio version the mesh runs (preamble.sh)
+	'function prop_p1_first('
+	'function prop_p1_sample('
+	'function prop_p2_sample('
+	'function prop_p3_sample('
+	# batch B: the Istio version the mesh runs, read at the start and the end (preamble.sh)
 	'istio_live_version() {'
+	'_istio_version_read_all() {'
+	'_istio_version_repro() {'
+	'_istio_version_marker() {'
 	'istio_version_resolve() {'
+	'istio_version_recheck() {'
 	'istio_version_kv() {'
 	'istio_version_label() {'
+	# batch B: sweep outcome record (common.sh), multi-run refusal (config.sh)
+	'_sweep_outcome_by() {'
+	'_config_run_key() {'
+	'_config_sq() {'
+	# batch B: scrape completeness and per-replica counters (fanout.sh)
+	'fanout_body_complete() {'
+	'fanout_counter_in_batch() {'
+	'fanout_replica_counter() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

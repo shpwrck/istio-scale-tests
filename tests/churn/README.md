@@ -77,13 +77,15 @@ measured column has no number: a watcher that did not list every churn target, o
 counter in neither istiod scrape, e.g. renamed; the probe's stderr names the column);
 `SETUP_FAILED` / `PROBE_FAILED` (placeholder for a failed iteration or sweep combo).
 An `OK` row has a number in every convergence column and push-counter delta.
-The report averages `OK` rows only and shows `n_total` and `n_valid`. The p99 columns are
+The report averages `OK` rows only and shows `n_total` and `n_valid` (`--help` lists the
+statuses). A row an older `002` wrote as `OK` with no number in a measured column counts as
+`TIMEOUT_REMOTE_EDS` or `MISSING_VALUE`, with a warning on stderr. The p99 columns are
 not averaged: the report shows the worst bucket range a valid row hit (e.g. `500-1000`),
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
 The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty`) and
-`ISTIO_VERSION` (what the members' Istio CRs run, next to `ISTIO_VERSION_PIN` and
+`ISTIO_VERSION` (what the members run, next to `ISTIO_VERSION_PIN` and
 `ISTIO_VERSION_SOURCE`; see the root README); the report prints those, never the commit it runs on. A TSV written
 before they were recorded reads `unknown (not recorded)`, and inputs that differ read
 `mixed:a,b` with a warning. Timestamps are UTC.
@@ -137,8 +139,10 @@ A failed setup or probe becomes a placeholder row and the sweep moves on.
 
 Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag
 or precondition, or an unexpected error); `4` it finished and wrote its reports, but some
-cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder). The last line on stderr
-says how many, by reason. Rows a probe wrote with a non-OK status (`TIMEOUT_*`,
+cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio version changed
+during the sweep (read again before the reports). The last line on stderr says how many,
+by reason; `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep
+the outcome. Rows a probe wrote with a non-OK status (`TIMEOUT_*`,
 `MISSING_VALUE`, ...) are measurements, not failed cells: the report counts them in
 `n_total`.
 
@@ -169,7 +173,7 @@ rules: [Run config](../../README.md#run-config---config-file)).
   (`001 --wait-timeout`).
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`002`; the sweep sets them),
-  `--format` and `--dry-run`.
+  `--allow-multi-run` (`004`), `--format` and `--dry-run`.
 
 ## Settings
 

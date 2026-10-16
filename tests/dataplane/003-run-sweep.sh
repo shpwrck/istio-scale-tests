@@ -111,7 +111,9 @@ Exit codes:
   1  the sweep stopped: a bad flag or precondition, or an unexpected error
   3  --on-unreachable fail stopped the sweep (the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
-     exited non-zero); stderr ends with "N of M cells failed" by reason
+     exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
+     version changed during the sweep (read again at its end); the outcome is also in
+     sweep-outcome.txt and the markdown report
 EOF
 }
 
@@ -485,6 +487,9 @@ echo "=========================================="
 echo "  Sweep finished"
 echo "=========================================="
 echo ""
+# A6: the Istio version again, after the last window and before the reports (read-only).
+IV_END=()
+istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
 
@@ -496,11 +501,13 @@ CHARTS_FILE="${OUTPUT_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# R19: the reports are written; now say how many cells failed. Exit 3 (the reach gate
-# stopped the sweep) wins over 4 (some cells failed).
+# R19: the reports are written; now say how many cells failed (also in
+# sweep-outcome.txt and the markdown summary, C3). Exit 3 (the reach gate stopped the
+# sweep) wins over 4 (some cells failed, or the Istio version changed under the sweep).
 outcome_rc=0 stop_args=()
 ((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE")
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} "${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --record "$OUTPUT_DIR" --md "$MD_FILE" \
+	"${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((REACH_GATE_STOP)); then
 	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2
 	exit "$REACH_EXIT_CODE"

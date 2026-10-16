@@ -88,7 +88,9 @@ Exit codes:
      counted in the report's n_total and left out of n_valid
   1  the sweep stopped: a bad flag or precondition, or an unexpected error
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
-     exited non-zero); stderr ends with "N of M cells failed" by reason
+     exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
+     version changed during the sweep (read again at its end); the outcome is also in
+     sweep-outcome.txt and sweep-summary.md
 EOF
 }
 
@@ -136,6 +138,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--tsv)
 		# No-op since R6: TSVs and reports are always written.
+		echo "note: --tsv is the default now (the sweep always writes the TSVs and the 005 reports); it changes nothing" >&2
 		shift
 		;;
 	--watcher-replicas)
@@ -408,6 +411,9 @@ echo "=========================================="
 echo "  Sweep finished"
 echo "=========================================="
 echo ""
+# A6: the Istio version again, after the last window and before the reports (read-only).
+IV_END=()
+istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Generating aggregated report..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
 echo ""
@@ -424,5 +430,8 @@ echo "Charts written to $CHARTS_FILE"
 trap - EXIT
 sweep_cleanup
 
-# R19: the reports are written; now say how many cells failed and exit non-zero if any did.
-sweep_outcome "${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || exit "$SWEEP_FAILED_EXIT"
+# R19: the reports are written; now say how many cells failed and exit non-zero if any
+# did (or the Istio version changed under the sweep), also in sweep-outcome.txt and the
+# summary (C3).
+sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --record "$SWEEP_DIR" --md "$COMBINED" \
+	"${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || exit "$SWEEP_FAILED_EXIT"

@@ -107,8 +107,10 @@ first), runs the baseline and churn windows, and finally cleans up. It writes on
 Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition,
 or an unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`,
 below; the reports are written); `4` it finished and wrote its reports, but some
-combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows). The last
-line on stderr says how many, by reason; `3` wins over `4`.
+combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the Istio
+version changed during the sweep (read again before the reports). The last line on stderr
+says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the
+end of the markdown summary keep the outcome.
 
 ## Remote reachability
 
@@ -225,8 +227,8 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`, `--churn-rate`,
   `--combo-id`, `--run-id`, `--output-file`, `--baseline-file`, `--append`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`001`-`003`; the sweep sets them),
-  `--fail-on-unreachable` (`005`), `--wait-deletion` (`006`), `--force-large-matrix`,
-  `--format` and `--dry-run`.
+  `--fail-on-unreachable` and `--allow-multi-run` (`005`), `--wait-deletion` (`006`),
+  `--force-large-matrix`, `--format` and `--dry-run`.
 
 ## Settings
 

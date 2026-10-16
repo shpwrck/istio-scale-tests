@@ -228,7 +228,10 @@ Other:
                               A sweep started with --config resumes only with the
                               same file (same sha256; add --config
                               <DIR>/run-config-<RUN_ID>.env); one started without
-                              it warns when --config is given.
+                              it warns when --config is given. The mesh must run
+                              the ISTIO_VERSION the sweep recorded, under either
+                              ISTIO_VERSION_CHECK policy; otherwise start a new
+                              sweep.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -238,10 +241,12 @@ Exit codes:
      counted in the report's n_total and left out of n_valid
   1  the sweep stopped: a bad flag or precondition, an unexpected error, or a series
      that could not be retired (RETIRE_FAILED; the reports are written)
-  4  the sweep finished and wrote its reports, but N cells have a status row instead of
-     a measurement (SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED,
-     SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED); stderr ends with "N of M cells failed"
-     by reason
+  4  the sweep finished and wrote its reports, but N cells failed (a status row
+     instead of a measurement: SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED;
+     stderr ends with "N of M cells failed" by reason) or the Istio version changed
+     during the sweep (read again at its end). Cells the memory guard skipped
+     (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout, and do
+     not make it 4. The outcome is also in sweep-outcome.txt and the markdown report.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -1226,14 +1231,13 @@ fi
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Istio version:     $(istio_version_label)" >&2
 # --resume appends to a TSV whose preamble names the version the sweep started on: rows
-# measured on another one would be credited to it.
+# measured on another one would be credited to it. Like the RUN_CONFIG rule, this stops
+# under either ISTIO_VERSION_CHECK policy (warn only lets a new run record what it finds).
 if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
 	_resume_iv="$(grep -m1 '^# ISTIO_VERSION=' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
 	_resume_iv="${_resume_iv#*=}"
 	if [[ -n "$_resume_iv" && "${_resume_iv#v}" != "${ISTIO_VERSION#v}" ]]; then
-		_resume_msg="--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the mesh now runs ${ISTIO_VERSION}, so its new rows would be credited to ${_resume_iv}"
-		[[ "${ISTIO_VERSION_CHECK:-fail}" == warn ]] || die "${_resume_msg}. Start a new sweep (or set ISTIO_VERSION_CHECK=warn to resume anyway)."
-		echo "warning: ${_resume_msg} (ISTIO_VERSION_CHECK=warn)." >&2
+		die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the mesh now runs ${ISTIO_VERSION}, so its new rows would be credited to ${_resume_iv}. Start a new sweep: --resume never mixes Istio versions in one TSV, whatever ISTIO_VERSION_CHECK says."
 	fi
 fi
 
@@ -2219,6 +2223,9 @@ else
 fi
 echo "=========================================="
 echo ""
+# A6: the Istio version again, after the last window and before the reports (read-only).
+IV_END=()
+istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
 
@@ -2247,14 +2254,17 @@ fi
 rm -f "$ENVELOPE_ERR"
 
 # R19: every cell without a measurement has the status row emit_failed_row wrote (its
-# context column is the status); count them by reason. The RETIRE_FAILED stop (exit 1)
-# wins over 4 (some cells failed).
+# context column is the status); count them by reason, the memory guard's SKIPPED_* apart
+# (skipped on purpose, not failed: C2), also in sweep-outcome.txt and the markdown
+# summary (C3). The RETIRE_FAILED stop (exit 1) wins over 4 (some cells failed, or the
+# Istio version changed under the sweep).
 FAILED_CELLS=()
 mapfile -t FAILED_CELLS < <(awk -F'\t' '$1 != "timestamp" && !/^#/ && $2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ { print $2 }' \
 	"${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1)
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} "$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --record "$OUTPUT_DIR" --md "$MD_FILE" \
+	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if [[ -n "$SWEEP_STOPPED" ]]; then
 	echo "" >&2
 	echo "ERROR: the sweep stopped early: ${SWEEP_STOPPED} (RETIRE_FAILED row in the report). The cells above it are valid; later series did not run." >&2

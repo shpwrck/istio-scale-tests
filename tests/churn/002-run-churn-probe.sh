@@ -559,6 +559,12 @@ poll_remote_eds_converged() {
 	local -a ports=("$@")
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local ever_complete=0
+	# A failed baseline scrape (PL29) leaves nothing to measure the delta from; reading
+	# it as 0 would count every earlier EDS push as this window's.
+	if [[ "$baseline_eds" == unscraped ]]; then
+		echo "INCOMPLETE" > "$result_file"
+		return
+	fi
 	mkdir -p "$polldir"
 	while true; do
 		local now_ms
@@ -589,8 +595,9 @@ poll_remote_eds_converged() {
 		local cur_eds base_eds="$baseline_eds"
 		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${tick_files[@]}")
 		# No EDS series in this tick (R10: `unknown`, not 0): not converged yet. One that
-		# was absent at the baseline was registered in the window, so it started at 0
-		# (counter_delta's rule). Absent all along, the poll ends TIMEOUT, never a 0.
+		# was absent at the baseline (`unknown`) was registered in the window, so it
+		# started at 0 (counter_delta's rule). Absent all along, the poll ends TIMEOUT,
+		# never a 0.
 		if [[ ! "$cur_eds" =~ ^[0-9]+$ ]]; then
 			sleep "$POLL_INTERVAL_S"
 			continue

@@ -60,7 +60,9 @@ Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or
 precondition, a failed suite setup, a failed revert, or an unexpected error); `4` it
 finished, reverted every profile and wrote `sweep-comparison.md`, but some passes failed
 (`SETUP_FAILED`: the profile did not apply; `PROBE_FAILED`: the probe exited non-zero,
-including a reachability stop). The last line on stderr says how many, by reason.
+including a reachability stop), or the Istio version changed during the sweep (read
+again after the last revert). The last line on stderr says how many, by reason;
+`sweep-outcome.txt` and the end of `sweep-comparison.md` keep the outcome.
 `130` / `143`: interrupted, after reverting the active profile.
 
 ## Results

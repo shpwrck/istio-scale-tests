@@ -31,7 +31,7 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
-*" get istios.sailoperator.io default "*) printf '%s' "$ISTIO_VERSION" ;;
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" get pods "*"-l app=istiod"*) [[ -n "${STUB_ISTIOD:-}" ]] && echo istiod-0 ;;
 *" exec "*) cat "$STUB_JSON" ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
@@ -104,12 +104,12 @@ formats_show() {
 	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-1 ]
 	[ -z "$(config_multi_run_note)" ] && [ -z "$(config_multi_run_csv)" ]
 	[ "$(config_multi_run_json)" = '{"runs":1,"run_ids":["sweep-1"],"harness_sha":["h1"],"istio_version":["v1"]}' ]
-	# Two sweeps: dies, naming each sweep dir and the command that reports it alone.
+	# Two sweeps: dies, naming each sweep dir (newest first) and the command that reports
+	# it alone, its path quoted.
 	run --separate-stderr config_check_multi_run "$r" 0 "$r/sweep-1/a.tsv" "$r/sweep-2/c.tsv"
 	assert_failure 1
-	[[ "$stderr" == *"error: ${r} holds 2 runs"* ]]
-	[[ "$stderr" == *"  sweep-1: "*" --results-dir ${r}/sweep-1"* ]]
-	[[ "$stderr" == *"  sweep-2: "*" --results-dir ${r}/sweep-2"* ]]
+	[[ "$stderr" == *"error: ${r} holds 2 runs"*"(newest first; add your other flags):"* ]]
+	[[ "$stderr" == *"  sweep-2:"$'\n'"    "*" --results-dir '${r}/sweep-2'"$'\n'"  sweep-1:"$'\n'"    "*" --results-dir '${r}/sweep-1'"* ]]
 	[[ "$stderr" == *"Or pass --allow-multi-run"* ]]
 	# Opted in: a warning, and the note, csv lines and json list both runs; a file without
 	# HARNESS_SHA / ISTIO_VERSION reads unknown.
@@ -127,8 +127,8 @@ formats_show() {
 	run --separate-stderr config_check_multi_run "$r" 0 "$r/latency-p1.tsv" "$r/churn-p2.tsv"
 	assert_failure 1
 	[[ "$stderr" == *"holds 2 runs"* ]]
-	[[ "$stderr" == *"  p1: its files are in ${r}, outside a sweep-* dir"* ]]
-	[[ "$stderr" == *"  p2: its files are in ${r}, outside a sweep-* dir"* ]]
+	# Each with the commands that give it a directory of its own, then its report (B2).
+	[[ "$stderr" == *"  p2 (its files are in ${r}, outside a sweep-* dir; move them into a directory of their own first):"$'\n'"    mkdir '${r}/.run-p2' && mv '${r}'/*'p2'* '${r}/.run-p2/' && mv '${r}/.run-p2' '${r}/run-p2'"$'\n'"    "*" --results-dir '${r}/run-p2'"$'\n'"  p1 ("* ]]
 	# Files of one standalone run (same RUN_ID) are one run; propagation's SWEEP_RUN_ID wins.
 	printf '# RUN_ID=p1\nrun_id\n' > "$r/latency-p1b.tsv"
 	printf '# SWEEP_RUN_ID=s9\n# RUN_ID=e1\nrun_id\n' > "$r/endpoint-e1.tsv"
@@ -141,15 +141,56 @@ formats_show() {
 	: > "$r/empty.tsv"
 	run --separate-stderr config_check_multi_run "$r" 0 "$r/latency-p1.tsv" "$r/empty.tsv"
 	assert_failure 1
-	[[ "$stderr" == *"  empty.tsv: "* && "$stderr" == *"  p1: "* ]]
-	# More than five runs: the first five, then how many more.
+	[[ "$stderr" == *"  empty.tsv ("* && "$stderr" == *"  p1 ("* ]]
+	[[ "$stderr" == *"    mkdir '${r}/run-empty' && mv '${r}/empty.tsv' '${r}/run-empty/'"* ]]
+	# More than five runs: the five newest, then how many more.
 	local i fs=()
 	for i in 1 2 3 4 5 6 7; do mkdir -p "$r/sweep-x$i"; : > "$r/sweep-x$i/t.tsv"; fs+=("$r/sweep-x$i/t.tsv"); done
 	run --separate-stderr config_check_multi_run "$r" 0 "${fs[@]}"
 	assert_failure 1
-	[[ "$stderr" == *"holds 7 runs"* && "$stderr" == *"  sweep-x5: "* && "$stderr" == *"  ... and 2 more"* ]]
-	[[ "$stderr" != *"sweep-x6:"* ]]
+	[[ "$stderr" == *"holds 7 runs"* && "$stderr" == *"  sweep-x7:"* && "$stderr" == *"  sweep-x3:"* && "$stderr" == *"  ... and 2 more"* ]]
+	[[ "$stderr" != *"sweep-x2:"* && "$stderr" != *"sweep-x1:"* ]]
 }
+
+@test "config_check_multi_run: the printed commands separate the runs, and the report then accepts each (B2)" {
+	local r="${BATS_TEST_TMPDIR}/r2" cmd
+	mkdir -p "$r/istiod-diag-20261016T100000Z-1"
+	printf '# RUN_ID=20261016T100000Z-1\nrun_id\n' > "$r/latency-20261016T100000Z-1.tsv"
+	: > "$r/latency-20261016T100000Z-1.md"
+	printf '# RUN_ID=20261016T110000Z-2\nrun_id\n' > "$r/latency-20261016T110000Z-2.tsv"
+	run --separate-stderr config_check_multi_run "$r" 0 "$r"/*.tsv
+	assert_failure 1
+	# Run each printed mkdir/mv line as the operator would paste it.
+	while IFS= read -r cmd; do
+		bash -c "$cmd"
+	done < <(sed -n 's/^    \(mkdir .*\)$/\1/p' <<<"$stderr")
+	[ -f "$r/run-20261016T100000Z-1/latency-20261016T100000Z-1.tsv" ]
+	[ -f "$r/run-20261016T100000Z-1/latency-20261016T100000Z-1.md" ]
+	[ -d "$r/run-20261016T100000Z-1/istiod-diag-20261016T100000Z-1" ]
+	[ -f "$r/run-20261016T110000Z-2/latency-20261016T110000Z-2.tsv" ]
+	[ -z "$(find "$r" -maxdepth 1 -type f)" ]
+	run --separate-stderr config_check_multi_run "$r/run-20261016T100000Z-1" 0 "$r/run-20261016T100000Z-1"/*.tsv
+	assert_success
+}
+
+@test "config_check_multi_run: --results-dir . inside a sweep dir, or sweep-X/ (find's sweep-X//file), is one run (B3)" {
+	local r="${BATS_TEST_TMPDIR}/r3"
+	mkdir -p "$r/sweep-20261016T100000Z-9"
+	printf '# RUN_ID=c1\nrun_id\nc1\n' > "$r/sweep-20261016T100000Z-9/a.tsv"
+	printf '# RUN_ID=c2\nrun_id\nc2\n' > "$r/sweep-20261016T100000Z-9/b.tsv"
+	cd "$r/sweep-20261016T100000Z-9"
+	run --separate-stderr config_check_multi_run . 0 ./a.tsv ./b.tsv
+	assert_success
+	run --separate-stderr config_check_multi_run . 0 a.tsv b.tsv
+	assert_success
+	cd "$r"
+	run --separate-stderr config_check_multi_run sweep-20261016T100000Z-9/ 0 \
+		sweep-20261016T100000Z-9//a.tsv sweep-20261016T100000Z-9//b.tsv
+	assert_success
+	config_check_multi_run . 0 sweep-20261016T100000Z-9//a.tsv sweep-20261016T100000Z-9//b.tsv
+	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-9 ]
+}
+
 
 @test "config_input_value and config_merged_preamble: every input, never the first or last file's (PL26)" {
 	local a b
@@ -267,7 +308,7 @@ formats_show() {
 	run --separate-stderr bash "$DP/004-report-results.sh" --config "$f" --format json
 	assert_failure 1
 	[[ "$stderr" == *"error: ${res} holds 2 runs"* ]]
-	[[ "$stderr" == *"  old: its files are in ${res}, outside a sweep-* dir"* ]]
+	[[ "$stderr" == *"  old (its files are in ${res}, outside a sweep-* dir"* ]]
 	# Without --config the probe records none.
 	rm "$res"/latency-*.tsv
 	PATH="${BIN}:${PATH}" DATAPLANE_RESULTS_DIR="$res" run bash "$DP/002-run-latency-probe.sh" \
@@ -299,7 +340,7 @@ formats_show() {
 	assert_failure 1
 	[ -z "$output" ]
 	[[ "$stderr" == *"error: ${res} holds 2 runs"* ]]
-	[[ "$stderr" == *"$(basename "$d"): ${DP}/004-report-results.sh --results-dir ${d}"* ]]
+	[[ "$stderr" == *"  $(basename "$d"):"$'\n'"    ${DP}/004-report-results.sh --results-dir '${d}'"* ]]
 	run --separate-stderr bash "$DP/004-report-results.sh" --config "$f" --results-dir "$res" --format json
 	assert_failure 1
 	run --separate-stderr bash "$DP/004-report-results.sh" --results-dir "$res" --format json
@@ -386,7 +427,7 @@ formats_show() {
 	cmp "$f" "$d"/run-config-*.env
 	grep -qx '# RUN_CONFIG=churn.env' "$d"/churn-zzfail-*.tsv
 	# No Istio CR answered: ISTIO_VERSION_CHECK=warn records that, never the pin (R4).
-	[[ "$stderr" == *"warning: cannot read the Istio version (istios.sailoperator.io default .spec.version) on ci-a"* ]]
+	[[ "$stderr" == *"warning: cannot read the running Istio version on 1 of 1 members:"*"  ci-a: "*"reproduce: "* ]]
 	grep -qx '# ISTIO_VERSION=unknown' "$d"/churn-zzfail-*.tsv
 	grep -qx "# ISTIO_VERSION_PIN=$(bash -c 'source "$1"; echo "$ISTIO_VERSION"' _ "${ROOT}/config/versions.env")" "$d"/churn-zzfail-*.tsv
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "$d"/churn-zzfail-*.tsv
@@ -498,9 +539,12 @@ formats_show() {
 	[[ "$stderr" == *"Total iterations: 6 (cap: 64)"* ]]
 	[[ "$stderr" == *"Run config: tests/propagation/configs/smoke.env (sha256 "* ]]
 	[[ "$stderr" == *"--iterations 3 --timeout 60 --settle-sec 3"* ]]
+	# E6: the no-op --tsv says so, once.
+	[ "$(grep -c 'note: --tsv is the default now' <<<"$stderr")" = 1 ]
 	KUBECONFIG="$EK" run --separate-stderr bash tests/propagation/006-run-sweep.sh --dry-run \
 		--config tests/propagation/configs/smoke.env --contexts ci-a,ci-b --iterations 2 --mesh-sizes 2
 	[[ "$stderr" == *"Total iterations: 2 (cap: 64)"* ]]
+	[[ "$stderr" != *"--tsv is the default"* ]]
 }
 
 @test "propagation 006 with --config, no cluster: TSVs without --tsv, every 005 format, then exit 4 (R6, R19)" {
@@ -670,7 +714,7 @@ MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA2
 	done
 	# No writer spells the key itself (a second spelling is how one drifts from the others);
 	# the reports echo what they read, and istio_version_kv is the one spelling.
-	run bash -c 'grep -nE "echo \"# ISTIO_VERSION=|\"ISTIO_VERSION=\\$" "$@" | grep -vE "report-results\.sh:|/lib/preamble\.sh:"' _ \
+	run bash -c 'grep -nE "echo \"# ISTIO_VERSION(_PIN|_SOURCE|_BY_CONTEXT)?=|\"ISTIO_VERSION(_PIN|_SOURCE|_BY_CONTEXT)?=\\$" "$@" | grep -vE "report-results\.sh:|/lib/preamble\.sh:"' _ \
 		"${ROOT}"/tests/*/0*.sh "${ROOT}"/tests/lib/*.sh
 	assert_output ""
 	# Each run resolves the version once, before its first change (PL39: every suite).

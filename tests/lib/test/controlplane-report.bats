@@ -587,6 +587,20 @@ fit_of() {
 	assert_output --partial "> istiod replicas: 1 per cluster. Heap per added pod is the change in heap_inuse summed over"
 }
 
+@test "a sweep whose members ran different Istio versions: its mixed:a/b value stays one item in every list, one tag, and warns (A4)" {
+	local d="${BATS_TEST_TMPDIR}/mixed"
+	mkdir -p "$d"
+	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=mixed:v1.30.5/v1.29.0|' "$FIXTURE" > "${d}/controlplane-mixed.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$d" --format json
+	assert_success
+	[ "$(jq -c '[.metadata.istio_version, .metadata.istio_versions, .pooled_runs.istio_version]' <<<"$output")" = \
+		'["mixed:v1.30.5/v1.29.0",["mixed:v1.30.5/v1.29.0"],["mixed:v1.30.5/v1.29.0"]]' ]
+	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION mixed:v1.30.5/v1.29.0)"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
+	assert_output --partial "ISTIO_VERSION=mixed:v1.30.5/v1.29.0,"
+	refute_output --partial "mixed:mixed:"
+}
+
 @test "growth report: a base-dir report of two sweeps lists every run, warns, and names the runs behind each pods-vs-config-only side" {
 	local gfix="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" base a b
 	base="${BATS_TEST_TMPDIR}/base"
@@ -607,11 +621,11 @@ fit_of() {
 	assert_failure 1
 	[ -z "$output" ]
 	[[ "$stderr" == *"error: ${base} holds 2 runs"* ]]
-	[[ "$stderr" == *"sweep-20261013T100000Z-111: ${REPORT} --results-dir ${a}"* ]]
-	[[ "$stderr" == *"sweep-20261013T110000Z-222: ${REPORT} --results-dir ${b}"* ]]
+	# Newest first, each with the command that reports it alone (B2).
+	[[ "$stderr" == *"sweep-20261013T110000Z-222:"$'\n'"    ${REPORT} --results-dir '${b}'"$'\n'"  sweep-20261013T100000Z-111:"$'\n'"    ${REPORT} --results-dir '${a}'"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
-	[ "$(jq -c '.metadata.pooled_runs' <<<"$output")" = \
+	[ "$(jq -c '.pooled_runs' <<<"$output")" = \
 		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"]}' ]
 	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .istio_versions, .harness_sha, .harness_shas, .files_consumed]' <<<"$output")" = \
 		'["multiple",["20261013T100000Z-111","20261013T110000Z-222"],"mixed:1.30.5,1.31.0",["1.30.5","1.31.0"],"mixed:fixture,abc1234-dirty",["fixture","abc1234-dirty"],2]' ]

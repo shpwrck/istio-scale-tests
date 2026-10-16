@@ -39,8 +39,9 @@ Prefer it over generic upstream Istio docs when they disagree.
   - test images and the `ISTIO_VERSION` pin: `config/versions.env`, with a
     keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`);
     `tests/lib/test/version-pins.bats` fails when they drift. Results record the version the
-    members' Istio CRs run (`ISTIO_VERSION`) next to the pin (`ISTIO_VERSION_PIN`), through
-    `istio_version_resolve` / `istio_version_kv` in `tests/lib/preamble.sh`.
+    members run (their active IstioRevision, `ISTIO_VERSION`) next to the pin
+    (`ISTIO_VERSION_PIN`), through `istio_version_resolve` / `istio_version_kv` in
+    `tests/lib/preamble.sh`.
 - **Reports:** every suite writes a markdown summary next to its TSV data. Sweeps call their report
   script with `--format markdown`.
 
@@ -66,7 +67,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults, `ISTIO_VERSION_CHECK` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | ACM, GitOps, spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy) |

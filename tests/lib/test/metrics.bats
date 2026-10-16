@@ -31,13 +31,13 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "0" ]]
 }
 
-@test "extract_counter_sum: empty or missing scrape file is unknown, never 0 (R10, PL29)" {
+@test "extract_counter_sum: empty or missing scrape file is unscraped, never 0 or unknown (R10, PL29)" {
 	f=$(mktemp)
 	result=$(extract_counter_sum "$f" pilot_xds_pushes)
 	rm -f "$f"
-	[[ "$result" == "unknown" ]]
+	[[ "$result" == "unscraped" ]]
 	result=$(extract_counter_sum "${BATS_TEST_TMPDIR}/no-such-file" pilot_xds_pushes)
-	[[ "$result" == "unknown" ]]
+	[[ "$result" == "unscraped" ]]
 }
 
 @test "extract_counter_sum: handles counters with and without labels" {
@@ -69,7 +69,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	f=$(mktemp)
 	result=$(extract_counter_by_label "$f" "pilot_xds_pushes" "type" "eds")
 	rm -f "$f"
-	[[ "$result" == "unknown" ]]
+	[[ "$result" == "unscraped" ]]
 }
 
 # --- counter_delta (R10) ---
@@ -105,6 +105,21 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	assert_success
 	assert_output "N/A"
 	[[ "$stderr" == *"missing from the final scrape"* ]]
+}
+
+@test "counter_delta: a failed (unscraped) baseline or final is N/A, never a lifetime total (PL29)" {
+	empty="${BATS_TEST_TMPDIR}/empty.metrics"; : > "$empty"
+	run --separate-stderr counter_delta "$(extract_counter_sum "$empty" pilot_xds_pushes)" \
+		"$(extract_counter_sum "$FIXTURES/prometheus_counters.txt" pilot_xds_pushes)" pilot_xds_pushes
+	assert_success
+	assert_output "N/A"
+	[[ "$stderr" == *"pilot_xds_pushes: the baseline scrape is empty or unreadable"* ]]
+	run --separate-stderr counter_delta 500 unscraped x
+	assert_output "N/A"
+	[[ "$stderr" == *"the final scrape is empty"* ]]
+	run --separate-stderr counter_delta unscraped unscraped x
+	assert_output "N/A"
+	[[ "$stderr" == *"the baseline and final scrape is empty"* ]]
 }
 
 @test "counter_delta: N/A is safe under set -e and never reaches \$(( ))" {

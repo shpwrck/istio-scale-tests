@@ -631,7 +631,7 @@ _stub_bin() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
-*" get istios.sailoperator.io default "*) printf '%s' "$ISTIO_VERSION" ;;  # the pin (R4)
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin (R4)
 *" fortio load "*" -json - "*) : > "$STUB_MARK"; cat "$FX/../fortio_ok.json" ;;
 *" get pod -l app=fortio-client "*) printf 'fortio-client-0' ;;
 *" exec "*) cat "$FX/../fortio_ok.json" ;;

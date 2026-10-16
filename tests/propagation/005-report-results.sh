@@ -10,7 +10,10 @@
 #   - scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 19; default 1000)
 # p2_ms values are also excluded when p2_dirty == 1 (EDS pushed but the canary
 # never went healthy on that remote's watcher; could be unrelated churn).
-# Reports both n_total (rows considered) and n_valid (rows used).
+# Reports both n_total (rows considered) and n_valid (rows used). The P1 phases
+# (P1_local_wall, P1_conv_*) take one sample per iteration, from its first valid row:
+# P1 is measured on the source once per iteration and repeated on every remote's row
+# (prop_p1_first in tests/lib/propagation.sh).
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION and its
 # ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE,
@@ -77,6 +80,9 @@ Usage: $(basename "$0") [options]
                      pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
   --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
+
+Example (one sweep, as 006 runs it):
+  $(basename "$0") --results-dir ${PROPAGATION_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
 TSV columns consumed (positions are stable; new columns appended):
   1  run_id            2  mesh_size       3  iteration       4  source_ctx
@@ -420,6 +426,7 @@ NF < 10 { next }
 
 	n_valid[ms]++
 
+	# P1 phases: one sample per iteration (prop_p1_first), not one per remote row (D1).
 	if (prop_p1_sample()) {
 		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = $7 + 0
 	}
@@ -430,10 +437,10 @@ NF < 10 { next }
 	if (prop_p3_sample()) {
 		p3_n[ms]++; p3_vals[ms, p3_n[ms]] = $9 + 0
 	}
-	if (cp50 != "N/A" && cp50 != "overflow" && cp50 ~ /^[0-9]+$/) {
+	if (prop_p1_first() && cp50 ~ /^[0-9]+$/) {
 		cp50_n[ms]++; cp50_vals[ms, cp50_n[ms]] = cp50 + 0
 	}
-	if (cp99 != "N/A" && cp99 != "overflow" && cp99 ~ /^[0-9]+$/) {
+	if (prop_p1_first() && cp99 ~ /^[0-9]+$/) {
 		cp99_n[ms]++; cp99_vals[ms, cp99_n[ms]] = cp99 + 0
 	}
 }
@@ -610,7 +617,7 @@ when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additi
 | Stat column | Definition |
 |-------------|------------|
 | `n_total` | All rows considered for the phase/mesh size. |
-| `n_valid` | Rows surviving the drop filters above and used for the statistics. |
+| `n_valid` | Samples used for the statistics: rows surviving the drop filters above. For the P1 phases, iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so it counts once, from the iteration's first valid row. |
 | `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean (rounded to ms) latency across the `n_valid` samples. A histogram row (`P1 conv_*`) has no average (`-`): the mean of bucket bounds can land in a bucket no row hit, so read `max` (the worst bucket). CSV and JSON keep the numbers and add `worst_bucket`, the range of `max_ms`, for those phases. |
 | `p50_ms` / `p95_ms` / `p99_ms` | Nearest-rank percentiles across the `n_valid` samples; `p95`/`p99` are `N/A` below `PROPAGATION_PERCENTILE_MIN_N` samples (a single worst sample would otherwise masquerade as a tail quantile). |
 GLOSSARY

@@ -135,6 +135,33 @@ tsv() {
 	assert_output --partial "| 2 | 5 | 1->5 | 3 | 1 |"
 }
 
+@test "004 (D6): an OK row from before R12 with no number in a measured column is re-derived, in every format" {
+	# Iteration 1 is a real OK row. 2: the remote EDS push never came (TIMEOUT) but the
+	# old 002 wrote OK. 3: a counter in neither scrape (N/A), also written OK.
+	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=x" "ISTIO_VERSION=y" <<-EOF
+	$(crow 1 99 N/A 10 N/A OK)
+	$(crow 2 99 N/A 10 N/A OK | awk -F'\t' -v OFS='\t' '{ $10 = "TIMEOUT"; print }')
+	$(crow 3 99 N/A 10 N/A OK | awk -F'\t' -v OFS='\t' '{ $11 = "N/A"; print }')
+	EOF
+	# A mesh of 1 has no remote columns to gate: its N/A remote values stay OK.
+	printf 'r1\t1\t5\t1\t5\t1\t0\t1000\tN/A\tN/A\t10\tN/A\t100\tN/A\t99\tN/A\t50\tN/A\t10\tN/A\tOK\n' >> "${RES}/churn-a.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_success
+	assert_output --partial "| 2 | 5 | 1->5 | 3 | 1 |"
+	assert_output --partial "| 1 | 5 | 1->5 | 1 | 1 |"
+	[[ "$stderr" == *"warning: 2 row(s) written as OK by an older 002"* ]]
+	[ "$(grep -c 'written as OK' <<<"$stderr")" = 1 ]
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_output --partial "Rows (valid/total):            1/3"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_success
+	assert_line "2,5,1,5,rows_valid_of_total,1,1,3,1,,"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
+	assert_success
+	assert_output --partial "2 of 4 rows dropped"
+}
+
 # --- 002 / 003: the writers ----------------------------------------------------
 
 # Stub kubectl and curl for the churn probe: one istiod pod whose /metrics never
@@ -149,9 +176,8 @@ _stub_bin() {
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
 case " $* " in
-*" get istios.sailoperator.io default "*)
-	[[ "${STUB_ISTIO_VERSION:-}" != fail ]] || exit 1
-	printf '%s' "${STUB_ISTIO_VERSION:-$ISTIO_VERSION}" ;;
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "*)
+	exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*) printf 'istiod-abc-x1\n' ;;
 *" scale "*) : ;;
 *" get pods "*) : ;;
@@ -258,17 +284,17 @@ STUB
 	STUB_ISTIO_VERSION=fail CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
 		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
 	assert_failure 1
-	[[ "$stderr" == *"cannot read the Istio version (istios.sailoperator.io default .spec.version) on ctx-a"* ]]
+	[[ "$stderr" == *"cannot read the running Istio version on 1 of 1 members:"*"ctx-a: error: You must be logged in to the server (Unauthorized)"*"reproduce: "*"--context ctx-a get istios.sailoperator.io default -o yaml"* ]]
 	# warn: the run goes on and records what the mesh runs, next to the pin.
 	ISTIO_VERSION_CHECK=warn CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
 		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
 	assert_success
-	[[ "$stderr" == *"warning: the mesh runs Istio v1.29.0"*"ISTIO_VERSION_CHECK=warn, so the results record ISTIO_VERSION=v1.29.0 (ISTIO_VERSION_PIN=${ISTIO_VERSION})"* ]]
+	[[ "$stderr" == *"warning: the mesh runs Istio v1.29.0"*"Going on (ISTIO_VERSION_CHECK=warn): the results record ISTIO_VERSION=v1.29.0 (ISTIO_VERSION_PIN=${ISTIO_VERSION})"* ]]
 	f="$(ls "$RES"/churn-*.tsv)"
 	grep -qx "# ISTIO_VERSION=v1.29.0" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"
-	grep -q "^| Istio version | v1.29.0 (read live; pin ${ISTIO_VERSION}) |" "$RES"/churn-*.md
+	grep -q "^| Istio version | v1.29.0 (read live on every member; pin ${ISTIO_VERSION}) |" "$RES"/churn-*.md
 	run "$REPORT" --results-dir "$RES" --format md
 	assert_output --partial 'istio_version: "v1.29.0"'
 	assert_output --partial 'istio_version_source: "live"'
@@ -294,7 +320,7 @@ STUB
 		assert_failure 1
 		[ -z "$output" ]
 		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
-		[[ "$stderr" == *"  sweep-a: ${REPORT} --results-dir ${RES}/sweep-a"* ]]
+		[[ "$stderr" == *"  sweep-a:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-a'"* ]]
 		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
 		assert_success
 		assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: h1, h2. ISTIO_VERSION: 1.30.5. These differ"
@@ -302,6 +328,14 @@ STUB
 		[[ "$fmt" == charts ]] || assert_output --partial "mixed:none,./*"
 		[[ "$fmt" != csv ]] || assert_line "# POOLED_RUNS=2"
 	done
+	# --dry-run refuses the same way (B4), and counts the files once allowed.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --dry-run
+	assert_failure 1
+	[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+	refute_output --partial "would summarize"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --dry-run --allow-multi-run
+	assert_success
+	assert_output "[dry-run] would summarize 2 churn-*.tsv file(s) under ${RES} as text"
 	# One sweep reports alone, with its own value.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-b" --format csv
 	assert_success

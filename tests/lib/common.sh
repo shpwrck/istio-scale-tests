@@ -223,37 +223,112 @@ run_timeout() {
 # Exit codes every sweep shares: 0 every cell ran; 1 the run stopped (a precondition, an
 # unexpected abort, or a suite's own stop such as controlplane's RETIRE_FAILED); 3 a
 # reachability gate stopped it (dataplane, churn-dataplane); 4 it finished and wrote its
-# report, but at least one cell failed (its setup or probe step exited non-zero, and its
-# placeholder row names the reason). A stop wins: 1 and 3 are not replaced by 4.
+# report, but at least one cell failed (its setup or probe step exited non-zero, and the
+# results name the reason) or the Istio version changed under it. A stop wins: 1 and 3
+# are not replaced by 4. A cell a guard skipped on purpose (controlplane's memory guard)
+# is reported apart and is not a failure.
 # shellcheck disable=SC2034  # read by the sweeps that source this file
 SWEEP_FAILED_EXIT=4
 
-# sweep_outcome [--stopped <rc>] <cells> [<reason>...]: the closing line of a sweep, after
-# its report: "All <cells> cells ran." (stdout) or "<N> of <cells> cells failed: <REASON>
-# x<k>, ..." (stderr), one <reason> argument per failed cell. Returns SWEEP_FAILED_EXIT
-# when any cell failed, so a sweep ends with: sweep_outcome ... || exit "$SWEEP_FAILED_EXIT".
-# --stopped <rc>: the sweep stopped early and exits <rc> (1 or 3), which outranks 4: the
-# failed cells are still counted, the line names <rc>, "All cells ran" is never printed
-# (they did not), and it returns <rc>.
+# _sweep_outcome_by <reason>...: "A x2, B x1" (sorted by reason).
+_sweep_outcome_by() {
+	printf '%s\n' "$@" | sort | uniq -c | awk '{ printf "%s%s x%d", (NR > 1 ? ", " : ""), $2, $1 }'
+}
+
+# sweep_outcome [options] <cells> [<reason>...]: the closing lines of a sweep, after its
+# reports. One <reason> argument per cell without a measurement: a SKIPPED_* reason (a
+# guard skipped the cell, or its series after such a skip) counts as skipped, any other
+# as failed. Prints "All <cells> cells ran." (stdout), "<k> of <cells> cells were skipped
+# on purpose, not failed: SKIPPED_<X> x<k>" (stdout) and "error: <n> of <cells> cells
+# failed: <REASON> x<k>, .... <where>; exit 4." (stderr). Returns SWEEP_FAILED_EXIT when a
+# cell failed or a --problem was given, else 0, so a sweep ends with:
+# sweep_outcome ... || exit "$SWEEP_FAILED_EXIT".
+#   --stopped <rc>   the sweep stopped early and exits <rc> (1 or 3), which outranks 4: the
+#                    cells are still counted, "All cells ran" is never printed (they did
+#                    not), the lines name <rc>, and it returns <rc>
+#   --unit <noun>    what a cell is called, plural (default cells; tuning: passes)
+#   --where <text>   where a failed one shows in the results (default: the report's
+#                    placeholder rows, in n_total, not n_valid)
+#   --problem <msg>  the sweep failed although its cells ran (A6: the Istio version changed
+#                    under it); printed, recorded and counted like a failed cell
+#   --note <msg>     a caveat; printed and recorded, not a failure
+#   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt (C3)
+#   --md <file>      also append it to that markdown report, as a "Sweep outcome" section
 # shellcheck disable=SC2329
 sweep_outcome() {
-	local rc="$SWEEP_FAILED_EXIT" stopped=0 cells by
-	if [[ "${1:-}" == --stopped ]]; then
-		rc="$2" stopped=1
-		shift 2
-	fi
+	local rc=0 stop_rc="" unit=cells where="" record="" md="" cells r by_fail="" by_skip=""
+	local -a problems=() notes=() failed=() skipped=() lines=()
+	while (($#)); do
+		case "$1" in
+		--stopped) stop_rc="$2"; shift 2 ;;
+		--unit) unit="$2"; shift 2 ;;
+		--where) where="$2"; shift 2 ;;
+		--problem) problems+=("$2"); shift 2 ;;
+		--note) notes+=("$2"); shift 2 ;;
+		--record) record="$2"; shift 2 ;;
+		--md) md="$2"; shift 2 ;;
+		*) break ;;
+		esac
+	done
 	cells="$1"
 	shift
-	if (($# == 0)); then
-		((stopped)) && return "$rc"
-		echo "All ${cells} cells ran (their rows' own statuses are in the report)."
-		return 0
+	[[ -n "$where" ]] || where="The report includes them as placeholder rows (in n_total, not n_valid)"
+	for r in "$@"; do
+		if [[ "$r" == SKIPPED_* ]]; then skipped+=("$r"); else failed+=("$r"); fi
+	done
+	((${#failed[@]} == 0)) || by_fail="$(_sweep_outcome_by "${failed[@]}")"
+	((${#skipped[@]} == 0)) || by_skip="$(_sweep_outcome_by "${skipped[@]}")"
+	if ((${#failed[@]} || ${#problems[@]})); then rc="$SWEEP_FAILED_EXIT"; fi
+	[[ -z "$stop_rc" ]] || rc="$stop_rc"
+	# tail: how a failure line ends. lines: "out|", "err|" or "rec|" (the record and the
+	# markdown only) plus the text, in the order printed.
+	local tail="; exit ${SWEEP_FAILED_EXIT}."
+	[[ -z "$stop_rc" ]] || tail="; the sweep also stopped early, so it exits ${stop_rc}, not ${SWEEP_FAILED_EXIT}."
+	if [[ -z "$stop_rc" && ${#failed[@]} -eq 0 && ${#skipped[@]} -eq 0 ]]; then
+		lines+=("out|All ${cells} ${unit} ran (their rows' own statuses are in the report).")
+	elif ((${#skipped[@]})); then
+		lines+=("out|${#skipped[@]} of ${cells} ${unit} were skipped on purpose, not failed: ${by_skip}.")
 	fi
-	by="$(printf '%s\n' "$@" | sort | uniq -c | awk '{ printf "%s%s x%d", (NR > 1 ? ", " : ""), $2, $1 }')"
-	if ((stopped)); then
-		echo "error: $# of ${cells} cells failed: ${by}. The report includes them as placeholder rows (in n_total, not n_valid); the sweep also stopped early, so it exits ${rc}, not ${SWEEP_FAILED_EXIT}." >&2
-	else
-		echo "error: $# of ${cells} cells failed: ${by}. The report includes them as placeholder rows (in n_total, not n_valid); exit ${SWEEP_FAILED_EXIT}." >&2
+	if ((${#failed[@]})); then
+		lines+=("err|error: ${#failed[@]} of ${cells} ${unit} failed: ${by_fail}. ${where}${tail}")
+	fi
+	for r in ${problems[@]+"${problems[@]}"}; do lines+=("err|error: ${r}${tail}"); done
+	for r in ${notes[@]+"${notes[@]}"}; do lines+=("err|warning: ${r}."); done
+	if [[ -n "$stop_rc" && ${#failed[@]} -eq 0 && ${#problems[@]} -eq 0 ]]; then
+		lines+=("rec|The sweep stopped early; it exits ${stop_rc}.")
+	fi
+	for r in ${lines[@]+"${lines[@]}"}; do
+		case "$r" in
+		err\|*) echo "${r#err|}" >&2 ;;
+		out\|*) echo "${r#out|}" ;;
+		esac
+	done
+	if [[ -n "$record" ]]; then
+		{
+			echo "# Sweep outcome (tests/lib/common.sh sweep_outcome)"
+			echo "# DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+			echo "EXIT=${rc}"
+			echo "STOPPED=$([[ -n "$stop_rc" ]] && echo 1 || echo 0)"
+			echo "UNIT=${unit}"
+			echo "TOTAL=${cells}"
+			echo "FAILED=${#failed[@]}"
+			echo "FAILED_BY=${by_fail}"
+			echo "SKIPPED=${#skipped[@]}"
+			echo "SKIPPED_BY=${by_skip}"
+			for r in ${problems[@]+"${problems[@]}"}; do echo "PROBLEM=${r}"; done
+			for r in ${notes[@]+"${notes[@]}"}; do echo "NOTE=${r}"; done
+		} 2>/dev/null > "${record}/sweep-outcome.txt" \
+			|| echo "warning: could not write ${record}/sweep-outcome.txt" >&2
+	fi
+	if [[ -n "$md" && -f "$md" ]]; then
+		{
+			echo ""
+			echo "## Sweep outcome"
+			echo ""
+			echo "Exit ${rc}. $([[ -n "$record" ]] && echo "Also in \`sweep-outcome.txt\`.")"
+			echo ""
+			for r in ${lines[@]+"${lines[@]}"}; do echo "- ${r#*|}"; done
+		} 2>/dev/null >> "$md" || echo "warning: could not append the outcome to ${md}" >&2
 	fi
 	return "$rc"
 }

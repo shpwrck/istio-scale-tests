@@ -49,9 +49,9 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_lines, tuning_baseline_state
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
+source "${ROOT}/tests/lib/metrics.sh"  # counter_delta, extract_gauge_sum
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
+source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_replica_counter, fanout_list_istiod_pods (needs metrics.sh first)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 # shellcheck disable=SC1091
@@ -1376,6 +1376,20 @@ scrape_window() {
 	local ts
 	ts=$(date -u -Iseconds)
 
+	# Per-replica pilot_xds_pushes (istio D4): a replica that never pushed has no series
+	# and no `# TYPE` line, so "renamed or idle" is decided once over the whole batch
+	# (every baseline and final body, all members: one Istio version, checked at the
+	# start). Any complete body with the counter makes a complete body without it a
+	# real 0; none with it leaves it unknown, and counter_delta warns "renamed?".
+	# pilot_k8s_cfg_events is not read this way: every replica's informers see every
+	# config event, so a replica without it has the counter missing, not idle.
+	local -a batch_files=()
+	for k in "${!POD_CTXS[@]}"; do
+		batch_files+=("${TMP_DIR}/baseline-${k}.metrics" "${TMP_DIR}/final-${k}.metrics")
+	done
+	local xds_pushes_in_batch
+	xds_pushes_in_batch=$(fanout_counter_in_batch pilot_xds_pushes "${batch_files[@]}")
+
 	for k in "${!POD_CTXS[@]}"; do
 		ctx="${POD_CTXS[k]}"
 
@@ -1461,22 +1475,23 @@ scrape_window() {
 
 		# Counter deltas (xds pushes + k8s events). counter_delta (metrics.sh, R10): a
 		# counter missing from both scrapes, or one that went backwards, is N/A with a
-		# warning, never 0; one first registered in the window counts from 0.
+		# warning, never 0; one first registered in the window counts from 0; an
+		# incomplete scrape (`unscraped`, PL29) is N/A. Pushes: see xds_pushes_in_batch.
 		local pushes_delta pushes_rate evts_delta evts_rate
 		if (( restarted_or_unknown )); then
 			pushes_delta="N/A"; pushes_rate="N/A"
 			evts_delta="N/A"; evts_rate="N/A"
 		else
-			pushes_delta=$(counter_delta "$(extract_counter_sum "$b_file" pilot_xds_pushes)" \
-				"$(extract_counter_sum "$f_file" pilot_xds_pushes)" "pilot_xds_pushes on ${ctx}/${POD_NAMES[k]}")
+			pushes_delta=$(counter_delta "$(fanout_replica_counter "$xds_pushes_in_batch" "$b_file" pilot_xds_pushes)" \
+				"$(fanout_replica_counter "$xds_pushes_in_batch" "$f_file" pilot_xds_pushes)" "pilot_xds_pushes on ${ctx}/${POD_NAMES[k]}")
 			if (( window_positive )) && [[ "$pushes_delta" != "N/A" ]]; then
 				pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				pushes_rate="N/A"
 			fi
 
-			evts_delta=$(counter_delta "$(extract_counter_sum "$b_file" pilot_k8s_cfg_events)" \
-				"$(extract_counter_sum "$f_file" pilot_k8s_cfg_events)" "pilot_k8s_cfg_events on ${ctx}/${POD_NAMES[k]}")
+			evts_delta=$(counter_delta "$(fanout_replica_counter 0 "$b_file" pilot_k8s_cfg_events)" \
+				"$(fanout_replica_counter 0 "$f_file" pilot_k8s_cfg_events)" "pilot_k8s_cfg_events on ${ctx}/${POD_NAMES[k]}")
 			if (( window_positive )) && [[ "$evts_delta" != "N/A" ]]; then
 				evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
@@ -1485,15 +1500,16 @@ scrape_window() {
 		fi
 
 		# Per-type xds_pushes deltas. A type with no series while pilot_xds_pushes itself
-		# is in the scrape is a real 0 (extract_counter_by_label); N/A as above.
+		# is in the scrape is a real 0 (extract_counter_by_label), as is an idle replica's
+		# (xds_pushes_in_batch); N/A as above.
 		local types=(cds eds lds rds nds)
 		local push_by_type=()
 		if (( restarted_or_unknown )); then
 			push_by_type=("N/A" "N/A" "N/A" "N/A" "N/A")
 		else
 			for t in "${types[@]}"; do
-				push_by_type+=("$(counter_delta "$(extract_counter_by_label "$b_file" pilot_xds_pushes type "$t")" \
-					"$(extract_counter_by_label "$f_file" pilot_xds_pushes type "$t")" "pilot_xds_pushes{type=${t}} on ${ctx}/${POD_NAMES[k]}")")
+				push_by_type+=("$(counter_delta "$(fanout_replica_counter "$xds_pushes_in_batch" "$b_file" pilot_xds_pushes type "$t")" \
+					"$(fanout_replica_counter "$xds_pushes_in_batch" "$f_file" pilot_xds_pushes type "$t")" "pilot_xds_pushes{type=${t}} on ${ctx}/${POD_NAMES[k]}")")
 			done
 		fi
 

@@ -66,7 +66,9 @@ Exit codes:
      measurement outcomes, counted in the report's n_total and left out of n_valid
   1  the sweep stopped: a bad flag or precondition, or an unexpected error
   4  the sweep finished and wrote its report, but N cells failed (setup or probe
-     exited non-zero); stderr ends with "N of M cells failed" by reason
+     exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
+     version changed during the sweep (read again at its end); the outcome is also in
+     sweep-outcome.txt and the markdown report
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -357,6 +359,9 @@ echo "=========================================="
 echo "  Sweep finished"
 echo "=========================================="
 echo ""
+# A6: the Istio version again, after the last window and before the reports (read-only).
+IV_END=()
+istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR"
 
@@ -368,6 +373,9 @@ CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# R19: the report is written; now say how many cells failed and exit non-zero if any did.
-sweep_outcome "$(( ${#MESH_SIZES[@]} * ${#INTENSITIES[@]} ))" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} \
+# R19: the report is written; now say how many cells failed and exit non-zero if any did
+# (or the Istio version changed under the sweep), also in sweep-outcome.txt and the
+# markdown summary (C3).
+sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --record "$SWEEP_DIR" --md "$MD_FILE" \
+	"$(( ${#MESH_SIZES[@]} * ${#INTENSITIES[@]} ))" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} \
 	|| exit "$SWEEP_FAILED_EXIT"

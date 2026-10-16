@@ -361,3 +361,47 @@ _in_path() {
 	[ -z "$output" ]
 	[ -z "$stderr" ]
 }
+
+@test "sweep_outcome: SKIPPED_* cells are skipped on purpose, not failures; --unit and --where name the caller's own (C2, C4)" {
+	run --separate-stderr sweep_outcome 6 SKIPPED_MEM_GUARD SKIPPED_SERIES_STOPPED SKIPPED_SERIES_STOPPED
+	assert_success
+	assert_output "3 of 6 cells were skipped on purpose, not failed: SKIPPED_MEM_GUARD x1, SKIPPED_SERIES_STOPPED x2."
+	[ -z "$stderr" ]
+	run --separate-stderr sweep_outcome 6 SKIPPED_MEM_GUARD PROBE_FAILED
+	assert_failure 4
+	assert_output "1 of 6 cells were skipped on purpose, not failed: SKIPPED_MEM_GUARD x1."
+	[[ "$stderr" == "error: 1 of 6 cells failed: PROBE_FAILED x1. "* ]]
+	run --separate-stderr sweep_outcome --unit passes --where "Each has its marker file in its pass directory" 3 SETUP_FAILED
+	assert_failure 4
+	[ "$stderr" = "error: 1 of 3 passes failed: SETUP_FAILED x1. Each has its marker file in its pass directory; exit 4." ]
+	run --separate-stderr sweep_outcome --unit passes 3
+	assert_output "All 3 passes ran (their rows' own statuses are in the report)."
+}
+
+@test "sweep_outcome: --problem fails a sweep whose cells ran, --note does not; --record and --md keep the outcome with the results (A6, C3)" {
+	local d="${BATS_TEST_TMPDIR}/sweep" md
+	mkdir -p "$d"
+	md="${d}/sweep-x.md"
+	echo "# report" > "$md"
+	run --separate-stderr sweep_outcome --record "$d" --md "$md" --problem "the Istio version changed during the sweep (a: v1 at the start, v2 at the end)" \
+		--note "something unconfirmed" 2
+	assert_failure 4
+	assert_output "All 2 cells ran (their rows' own statuses are in the report)."
+	[[ "$stderr" == *"error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end); exit 4."* ]]
+	[[ "$stderr" == *"warning: something unconfirmed."* ]]
+	grep -qx 'EXIT=4' "${d}/sweep-outcome.txt"
+	grep -qx 'FAILED=0' "${d}/sweep-outcome.txt"
+	grep -qx 'PROBLEM=the Istio version changed during the sweep (a: v1 at the start, v2 at the end)' "${d}/sweep-outcome.txt"
+	grep -qx 'NOTE=something unconfirmed' "${d}/sweep-outcome.txt"
+	grep -qx '## Sweep outcome' "$md"
+	grep -q '^- error: the Istio version changed during the sweep' "$md"
+	# A note alone: exit 0. A stop: its code, recorded, nothing extra on the terminal.
+	run --separate-stderr sweep_outcome --note "n" 2
+	assert_success
+	run --separate-stderr sweep_outcome --stopped 1 --record "$d" --md "$md" 2 SKIPPED_MEM_GUARD
+	assert_failure 1
+	[ -z "$stderr" ]
+	grep -qx 'EXIT=1' "${d}/sweep-outcome.txt"
+	grep -qx 'SKIPPED_BY=SKIPPED_MEM_GUARD x1' "${d}/sweep-outcome.txt"
+	grep -qx -- '- The sweep stopped early; it exits 1.' "$md"
+}

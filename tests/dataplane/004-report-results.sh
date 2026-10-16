@@ -66,6 +66,9 @@ Usage: $(basename "$0") [options]
                      row (rule=no_valid_rows); stderr names the rule and the remotes.
   -h, --help         Show this help.
 
+Example (one sweep, as 003 runs it):
+  $(basename "$0") --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
+
 Every format includes a "Remote coverage" section before the results table: per
 mesh size and source, how many remotes passed every reach check (reach-*.tsv from
 002, statuses REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN), and the remotes

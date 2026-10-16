@@ -105,6 +105,10 @@ config_suite_prefixes() {
 CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
 CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK"
+# CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
+# unknown for a file without them (written before R4: its ISTIO_VERSION is the pin, unchecked).
+# shellcheck disable=SC2034
+CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -409,12 +413,26 @@ config_report_value() {
 # preamble line of the inputs, the lines before a file's first data or header line. Keys
 # come in first-seen order; each value is merged over the files that carry the key as
 # _config_join_mixed does (a file without the key adds nothing), so a report that shows
-# these never shows one file's value for a key that varies (PL26).
+# these never shows one file's value for a key that varies (PL26). Except the keys of
+# CONFIG_MERGED_UNKNOWN_IF_MISSING: a file written before they existed counts as unknown
+# for them, so a pooled report says mixed, never "live", when some rows were not read live
+# (a key no input carries stays out, as any other).
 # shellcheck disable=SC2329
 config_merged_preamble() {
 	(($#)) || return 0
-	awk '
-		FNR == 1 { fid++; inpre = 1 }
+	awk -v must="$CONFIG_MERGED_UNKNOWN_IF_MISSING" '
+		function add(k, v) {
+			if (!(k in nv)) { order[++n] = k; nv[k] = 0 }
+			if (!((k, v) in seen)) {
+				seen[k, v] = 1
+				val[k, ++nv[k]] = v
+				if (index(v, ",")) comma[k] = 1
+			}
+		}
+		# fin: the keys a file must carry and does not, as unknown.
+		function fin(    i) { for (i = 1; i <= nm; i++) if (!((fid, m[i]) in infile)) add(m[i], "unknown") }
+		BEGIN { nm = split(must, m, " ") }
+		FNR == 1 { if (fid) fin(); fid++; inpre = 1 }
 		!inpre { next }
 		/^# / {
 			line = substr($0, 3)
@@ -423,20 +441,17 @@ config_merged_preamble() {
 			sub(/=.*/, "", k)
 			if ((fid, k) in infile) next
 			infile[fid, k] = 1
-			v = substr(line, length(k) + 2)
-			if (!(k in nv)) { order[++n] = k; nv[k] = 0 }
-			if (!((k, v) in seen)) {
-				seen[k, v] = 1
-				val[k, ++nv[k]] = v
-				if (index(v, ",")) comma[k] = 1
-			}
+			real[k] = 1
+			add(k, substr(line, length(k) + 2))
 			next
 		}
 		/^#/ || /^$/ { next }
 		{ inpre = 0 }
 		END {
+			if (fid) fin()
 			for (i = 1; i <= n; i++) {
 				k = order[i]
+				if (!(k in real)) continue
 				if (nv[k] == 1) { print k "=" val[k, 1]; continue }
 				out = ""
 				for (j = 1; j <= nv[k]; j++)
@@ -446,17 +461,22 @@ config_merged_preamble() {
 		}' "$@"
 }
 
-# _config_run_key <tsv>: the run a report input belongs to. A file in a sweep-* dir
-# belongs to that sweep (its combos carry their own RUN_IDs); any other file to the
+# _config_run_key <tsv> [<dir>]: the run a report input belongs to. A file in a sweep-*
+# dir belongs to that sweep (its combos carry their own RUN_IDs); any other file to the
 # preamble's SWEEP_RUN_ID (propagation), else its RUN_ID, else the run_id column of its
-# first data row; a file with none of these counts as a run of its own.
+# first data row; a file with none of these counts as a run of its own. <dir> is the
+# file's directory, canonical (config_check_multi_run passes it, so `--results-dir .`
+# inside a sweep dir, or a path find printed as sweep-X//file, is still that sweep);
+# without it, the directory as the path spells it.
 # shellcheck disable=SC2329
 _config_run_key() {
-	local f="$1" d=. id
-	if [[ "$f" == */* ]]; then
-		d="${f%/*}"
-		d="${d##*/}"
+	local f="$1" d="${2:-}" id
+	if [[ -z "$d" ]]; then
+		d=.
+		[[ "$f" == */* ]] && d="${f%/*}"
 	fi
+	while [[ "$d" == */ && "$d" != / ]]; do d="${d%/}"; done
+	d="${d##*/}"
 	case "$d" in
 	sweep-*)
 		echo "$d"
@@ -472,25 +492,36 @@ _config_run_key() {
 	if [[ -n "$id" ]]; then echo "$id"; else echo "${f##*/}"; fi
 }
 
+# _config_sq <string>: the string single-quoted for a shell command line.
+_config_sq() {
+	local q="'\\''"
+	printf "'%s'" "${1//\'/$q}"
+}
+
 # config_check_multi_run <results_dir> <allow 0|1> <tsv>...: a report pools every TSV
 # under its results dir (PL6), so count the runs among its inputs, with or without
 # --config and --results-dir: one per sweep-* dir and one per distinct sweep-level id
-# outside one (_config_run_key; the per-iteration RUN_IDs of one sweep are one run, PL26).
-# Sets MULTI_RUN_N, MULTI_RUN_IDS (sorted, comma-separated) and MULTI_RUN_HARNESS_SHAS /
-# MULTI_RUN_ISTIO_VERSIONS (distinct preamble values in file order; unknown for a file
-# without the line). More than one run with <allow> 0 dies, listing the first five runs
-# and how to report each alone; with <allow> 1 (--allow-multi-run) it warns, and the
-# report says so in every format (config_multi_run_note, _csv, _json).
+# outside one (_config_run_key, on each file's canonical directory; the per-iteration
+# RUN_IDs of one sweep are one run, PL26). Sets MULTI_RUN_N, MULTI_RUN_IDS (sorted,
+# comma-separated) and MULTI_RUN_HARNESS_SHAS / MULTI_RUN_ISTIO_VERSIONS (distinct preamble
+# values in file order; unknown for a file without the line). More than one run with
+# <allow> 0 dies, listing the five newest runs with the commands that report each alone
+# (for files outside a sweep-* dir, first the commands that move them into a directory
+# of their own); with <allow> 1 (--allow-multi-run) it warns, and the report says so in
+# every format (config_multi_run_note, _csv, _json).
 # shellcheck disable=SC2329,SC2034
 config_check_multi_run() {
-	local dir="$1" allow="$2" f k d i=0 runs
-	local -A run_dir=()
+	local dir="$1" allow="$2" f k d i=0 runs sq new
+	local -A run_dir=() canon=()
 	shift 2
 	for f in "$@"; do
-		k="$(_config_run_key "$f")"
-		[[ -z "${run_dir[$k]+x}" ]] || continue
 		d=.
 		[[ "$f" == */* ]] && d="${f%/*}"
+		while [[ "$d" == */ && "$d" != / ]]; do d="${d%/}"; done
+		[[ -n "$d" ]] || d=/
+		[[ -n "${canon[$d]+x}" ]] || canon[$d]="$(cd "$d" 2>/dev/null && pwd -P || echo "$d")"
+		k="$(_config_run_key "$f" "${canon[$d]}")"
+		[[ -z "${run_dir[$k]+x}" ]] || continue
 		run_dir[$k]="$d"
 	done
 	runs="$(printf '%s\n' "${!run_dir[@]}" | LC_ALL=C sort)"
@@ -504,7 +535,8 @@ config_check_multi_run() {
 		return 0
 	fi
 	{
-		echo "error: ${dir} holds ${MULTI_RUN_N} runs, and a report pools every TSV under its results dir. Report one run (add your other flags):"
+		echo "error: ${dir} holds ${MULTI_RUN_N} runs, and a report pools every TSV under its results dir. Report one run (newest first; add your other flags):"
+		# Run ids start with a UTC timestamp, so the reverse sort is newest first.
 		while IFS= read -r k; do
 			if ((++i > 5)); then
 				echo "  ... and $((MULTI_RUN_N - 5)) more"
@@ -512,10 +544,25 @@ config_check_multi_run() {
 			fi
 			d="${run_dir[$k]}"
 			case "$k" in
-			sweep-*) echo "  ${k}: $0 --results-dir ${d}" ;;
-			*) echo "  ${k}: its files are in ${d}, outside a sweep-* dir; move them into a directory of their own and pass that as --results-dir" ;;
+			sweep-*)
+				echo "  ${k}:"
+				echo "    $0 --results-dir $(_config_sq "$d")"
+				;;
+			*)
+				# Every file of a run carries its id in its name (istiod-diag-<RUN_ID>/ too);
+				# the dot dir keeps the glob from matching the new directory itself.
+				new="run-${k%.tsv}"
+				echo "  ${k} (its files are in ${d}, outside a sweep-* dir; move them into a directory of their own first):"
+				sq="$(_config_sq "$d")"
+				if [[ "$k" == *.tsv ]]; then
+					echo "    mkdir $(_config_sq "${d}/${new}") && mv $(_config_sq "${d}/${k}") $(_config_sq "${d}/${new}/")"
+				else
+					echo "    mkdir $(_config_sq "${d}/.${new}") && mv ${sq}/*$(_config_sq "$k")* $(_config_sq "${d}/.${new}/") && mv $(_config_sq "${d}/.${new}") $(_config_sq "${d}/${new}")"
+				fi
+				echo "    $0 --results-dir $(_config_sq "${d}/${new}")"
+				;;
 			esac
-		done <<<"$runs"
+		done < <(LC_ALL=C sort -r <<<"$runs")
 		echo "Or pass --allow-multi-run to pool them on purpose: every format then says it pools ${MULTI_RUN_N} runs and lists their HARNESS_SHA and ISTIO_VERSION values."
 	} >&2
 	exit 1
