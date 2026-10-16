@@ -23,6 +23,12 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 The 10-spoke pass ran far below the infra's limits: trust its scaling shapes and
 cross-cluster overheads, not its absolute magnitudes.
 
+**Errata (2026-10-16).** Both June records predate the report fixes of PR 106 and carry an erratum
+box at the top. The 2026-06-22 verdict (GO, "comfortable headroom") is unconfirmed: its istiod CPU
+is an end-of-window snapshot, east-west gateway memory was not measured (BACKLOG 9.9 puts 10k
+Services at about 1.4 GiB against a 1Gi limit), and its data-plane root cause is contradicted by
+the 2026-10-14 window. In the 2026-06-04 records `cpu_avg` is a per-window peak and "MB" is MiB.
+
 The data-plane numbers above ran one fortio server pod per cluster, and a run that missed
 its target QPS with only HTTP 200s still counted as valid. Later dataplane runs default to
 2 server pods (`SERVER_REPLICAS` in the TSV preamble) and tag such rows `QPS_SHORTFALL`;
