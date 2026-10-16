@@ -6,6 +6,7 @@ validated on the existing-cluster lab
 ([`docs/campaigns/2026-10-13-lab-backlog-validation.md`](docs/campaigns/2026-10-13-lab-backlog-validation.md)),
 and the ROSA validation window of 2026-10-14 (tasks 1, 3, 4, 6), which also queued the fixes in
 section 9 ([`docs/campaigns/2026-10-14-rosa-validation.md`](docs/campaigns/2026-10-14-rosa-validation.md)).
+A second ROSA window on 2026-10-16 validated those fixes (section 9, "Validated on ROSA").
 The original issue texts are in the appendix.
 
 | # | Task | Status | Left / validate on |
@@ -18,7 +19,7 @@ The original issue texts are in the appendix.
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done; lab shape, ROSA numbers at 60-250 Services × 2 | convergence p99 question (9.11); thousands of Services |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
 | 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Done, lab-validated 2026-10-14 (22/22 predictions matched) | — |
-| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16; lab-validated where the lab can (see each item); 9.8/9.9 as recommended, confirmed by the owner 2026-10-16 | ROSA: 9.1 greenfield race, 9.2 under load, 9.8 NLB, 9.9 at campaign scale, 9.11 at 150-250 Services; results backup destination (owner) |
+| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16 and validated on ROSA the same day (9.1, 9.2, 9.7, 9.8, 9.9, 9.11; 9.4 recalibrated); two follow-ups fixed (9.1's status check, 9.4's factor) | owner: east-west limit 4Gi or 5Gi (9.9); results backup destination |
 
 ## 1. Namespace scaling factor
 
@@ -263,8 +264,9 @@ is listed in the record's ["Raw data"](docs/campaigns/2026-10-14-rosa-validation
 - **E** = 9.10 + 9.11, after C: 9.10 shares `003`, `004` and the growth preamble with C; 9.11 shares
   `001`, `002` and `003`'s legacy cell loop with C.
 
-**Owner decisions pending:** 9.8 (NLB for the ingress), 9.9 (gateway memory defaults), and where to
-copy the window's results off the operator laptop.
+**Owner decisions pending:** whether the east-west gateway limit stays 4Gi or becomes 5Gi (9.9,
+from the 2026-10-16 window), and where to copy the windows' results off the operator laptop. 9.8
+and 9.9's first decisions were settled on 2026-10-16.
 
 **Status 2026-10-16:** every item below is implemented (one branch, one commit per area); the
 owner confirmed 9.8 and 9.9 as proposed. Each item ends with **Done**,
@@ -277,6 +279,16 @@ bucketed means of p99s (all fixed, with bats; the window record's units are corr
 validation also found the capacity plan ignoring the CPU other pods request (fixed under 9.7).
 **Lab caveat:** the workstation's resolver failed over from the lab DNS twice mid-run; the lab
 runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` keeps TLS valid).
+
+**ROSA window 2026-10-16 (Tier C, the shape of 2026-10-14; window commit `12401a8`, main after
+PR 106):** a greenfield apply with no manual step, then 9.2 and 9.8, 9.11 in both apply modes,
+and 9.9 as a ladder and a one-step burst to 10000 Services. Every item below that needed ROSA now
+has a **Validated on ROSA** note. Two follow-ups were found and fixed: 9.1's post-apply check
+passed before the member Applications existed, and 9.4's east-west factor under-projected a
+burst. No istiod or gateway restarted, and no OOM, auth error or failed retire occurred. T0
+17:59Z; 4 clusters ready 18:18Z; `003-auto-teardown.sh --now` from 21:03Z, `CLEAN` at 21:27Z
+(3 h 28 min billed, about $30-35 at $8.25/h until Cost Explorer confirms it); the all-region audit
+came back empty. Results (gitignored) are in the operator host's window archive.
 
 ### 9.1 Argo CD leaves a member without a controller shard (finding 1) — fix decided
 
@@ -311,8 +323,20 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   `argocd_restart_controller_after_cluster_secrets`. **Validated:** stub-kubectl bats (settle,
   terminating pods, stale pods, replacements never Ready, app-status pass/fail/empty); live on the
   lab hub (1 shard, settled in 3 polls, replacement Ready, all 30 Applications with status).
-  **Left:** the race itself needs a greenfield ROSA apply (the lab was not forced to 2 shards: the
-  hub's memory would not hold 2-3 controller replicas).
+  **Validated on ROSA (2026-10-16, greenfield Tier C apply, window commit `12401a8`):** the race
+  happened and the fix cleared it with no manual step. The controller logs, kept through the apply,
+  show the operator scaling the controller to 2 replicas at 18:30:24Z; the two controllers then
+  disagreed (one moved two members from shard 1 to shard 0, the restarted other put them on shard 1),
+  so for about 38 s no controller owned those two members, the state that stranded a member for
+  35 min on 2026-10-14. The reshard step (1 min 28 s) waited for the StatefulSet to settle, restarted
+  both pods at 18:31:22Z, and both replacements agreed (members on shard 0, the hub on shard 1). All
+  40 Applications were Synced/Healthy at 18:38Z, 6 min after the apply and 39 min after T0.
+  **Found:** the post-apply check passed when only 13 of the 40 Applications existed: the
+  ApplicationSets generate the member Applications minutes after it runs, so it could not see a
+  stranded member. **Fixed:** the check now also waits until every spoke has an Application
+  (`EXPECTED_DESTINATIONS`, set by Terraform to the spoke keys) and names any that has none
+  (bats; live against the window's hub: pass for the 3 members, a named failure for a fourth).
+  **Left:** —
 
 ### 9.2 Kubeconfig exec plugin logs in on every `oc` call (finding 2)
 
@@ -335,8 +359,11 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   atomic write, reuse until 300 s before `expires_in`, `status.expirationTimestamp`, a mkdir lock
   (a dead owner's lock is broken), 4 login attempts with doubling backoff; `OC_TOKEN_CACHE=0`
   restores the old behaviour. **Validated:** bats with a stubbed `curl` (50 calls → 1 login, 8
-  parallel callers → 1 login, retries, margin, no password on disk). **Left:** ROSA (the lab
-  authenticates with client certificates): count OAuthAccessTokens after a sweep.
+  parallel callers → 1 login, retries, margin, no password on disk). **Validated on ROSA
+  (2026-10-16):** 1000 consecutive `oc get ns` through the generated kubeconfig took 317 s with 0
+  failures and created 0 OAuthAccessTokens; each of the 4 clusters held exactly 1 `cluster-admin`
+  token after the platform apply and still 1 after every sweep of the window, 3 h of harness
+  load (2026-10-14: 3843 on one member); no window log has an auth error. **Left:** —
 
 ### 9.3 A failed series retire passes silently (finding 3)
 
@@ -397,8 +424,23 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   projection stopped the 2000 step on the remote member's east-west gateway (770 Mi projected vs
   717 Mi = 70% of 1Gi; working set then 359 Mi). The first version compared the working set with
   a heap-only model and flagged the 40-200 Mi outside Envoy's heap as stale memory; fixed before
-  commit. **Left:** the model is conservative at small scale (about 250 Mi above the measured
-  working set at 2000 Services); recalibrate the factors on ROSA.
+  commit. **Recalibrated on ROSA (2026-10-16, 3 members, east-west 4Gi / ingress 2Gi, K=4
+  config-only on `<mesh-a-ctx>`, every member's gateways sampled every 30-60 s):**
+  - Allocated memory after each grow window: east-west 295 → 1435 Mi from 2000 to 10000
+    Services, **143 Mi per 1000** (the model's 145 holds); ingress 91-93 Mi per 1000 (91 holds).
+    Mid-update samples run higher (Envoy holds old and new clusters while a step lands).
+  - Peak working set at 10000 Services, east-west: 2970-3012 Mi after a 5-step ladder (2.0-2.1×
+    the model's 1460 Mi), **3257-3481 Mi after a one-step 0 → 10000 burst (2.2-2.4×)**; physical
+    heap 1.7-1.8× allocated in both, and 220-520 Mi outside Envoy's heap at the peak. Ingress:
+    976-1055 Mi (1.1×), so 1.2 holds.
+  - With the old 2.0 the guard projected the burst at 2934-2941 Mi from a fresh gateway, up to
+    540 Mi (16%) under the peak: the factor is applied to the heap model, and the non-heap part
+    it adds is read at the step start (20-40 Mi), not at the peak.
+  - **Done:** `CONTROLPLANE_EWGW_BURST_FACTOR` 2.0 → 2.5 (options.env and 003's fallback), the
+    charts' sizing rule: the burst now projects about 6% above its peak and a ladder about 30%
+    above. At the 70% stop a 4Gi east-west gateway guards up to about 7700 Services; 10k runs
+    need `--mem-stop-pct 90` (the window used 90) or a larger limit (9.9).
+  **Left:** —
 
 ### 9.5 Memory guard and fits measure allocated memory, not the working set (finding 16)
 
@@ -468,7 +510,10 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   pods' requests do not fit (`SCALE_CPU_PREFLIGHT_ENFORCE=0` only warns, for a node autoscaler).
   The capacity wrappers no longer end a `set -e` caller when kubectl fails.
   **Validated:** bats (parser, wrapper, 001 against a stub cluster); lab: "per pod: istio-cr on
-  <member>", 100m. **Left:** ROSA: the 20m override should read 20m.
+  <member>", 100m. ROSA (2026-10-16): "500 sidecar-pods × 20m = ~10.0 cores/cluster (per pod:
+  istio-cr on <mesh-a-ctx>)", against 17.9 of 22.5 cores free after the other pods' 4.6, and
+  "~447 services would fit at 2 replicas" (2026-10-14: "~46 services max"); 001's preflight read
+  the same 20m. **Left:** —
 
 ### 9.8 Classic LBs break HTTP through the ingress gateway on AWS (findings 7, 11) — decided 2026-10-16
 
@@ -494,7 +539,12 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   an override of the same app into it; east-west stays on a Classic LB (no failure seen). README
   "Per-environment values" says how to switch an existing CLB Service (delete it once).
   **Validated:** `helm template` of the app of apps with the default and a MetalLB override
-  renders both annotations; `terraform validate`. **Left:** ROSA (the accept test above).
+  renders both annotations; `terraform validate`. ROSA (2026-10-16), the accept test: every
+  member's ingress Service carried the annotation and got an NLB (east-west stayed on a Classic
+  LB); mesh-verify through all 3 ingresses, one request per ingress per second for 10 min, answered
+  1797 of 1797 with HTTP 200 (mean 83 ms, max 1.1 s), each ingress's answers split evenly across
+  the 3 members. A new NLB refuses connections for its first 2-3 min, until its targets turn
+  healthy: wait for `describe-target-health` before probing. **Left:** —
 
 ### 9.9 Gateway memory sizing (findings 8, 14, 17) — decided 2026-10-16
 
@@ -526,9 +576,23 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   (200 → 400 → 1000) on the measured member: allocated 152 Mi both, physical 200 vs 184 Mi,
   working set 239 vs 219 Mi. The burst keeps more memory, as on ROSA, but only about 9% at this
   size (ROSA: 1.7-1.9× at 4000). The lab cannot go further: at 1Gi the guard stops the 2000-Service
-  step (9.4), and the charts' new limits reach the lab only after merge. **Left:** whether Envoy
-  can release the retained memory (tcmalloc release rate, overload manager); the burst at
-  campaign scale on ROSA; hypothesis H1 (task 3).
+  step (9.4), and the charts' new limits reach the lab only after merge. **Validated on ROSA
+  (2026-10-16, the new defaults, 3 members, `--mem-stop-pct 90`):** both runs reached 10000
+  discovered Services with no gateway restart, no OOM and no SKIPPED_MEM_GUARD row, on every
+  member at once (each member's gateways carry every discovered Service):
+
+  | run | east-west peak working set | ingress peak working set | east-west after the window |
+  | --- | --- | --- | --- |
+  | ladder 2000 → 10000 in 5 steps, no restart between | 2970-3012 Mi (73% of 4Gi) | 1026-1055 Mi (52% of 2Gi) | 2868 Mi |
+  | one step 0 → 10000 (gateways restarted first) | 3257-3481 Mi (80-85% of 4Gi) | 976-1008 Mi (49% of 2Gi) | 2980 Mi |
+
+  The 4Gi limit holds a campaign-sized burst with 15% headroom; the sizing rule's
+  (10 + 145 × 10) × 2.5 = 3650 Mi is 5% above the measured peak. The default guard (70%) would
+  have skipped both 10000 steps, correctly given that headroom. **Owner decision pending:** keep
+  4Gi (campaign 10k steps run with `--mem-stop-pct 90`), or raise the east-west default to 5Gi:
+  the 2026-10-14 window saw 2.6-2.9× allocated after a second burst, which at 10k Services is
+  3.7-4.1 GiB. **Left:** whether Envoy can release the retained memory (tcmalloc release rate,
+  overload manager); hypothesis H1 (task 3).
 
 ### 9.10 Leftover undiscovered namespaces distort later series (finding 13)
 
@@ -583,7 +647,23 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   hub's free CPU caps it near 24): `together` vsdr convergence p99 0-100 ms on both members (as
   `none`), 866 pushes; `split` 0-100 ms on one member and 100-500 ms on the other, 208 pushes,
   istiod CPU peak 12 → 46 m for the VS/DR alone. Nothing at this size reproduces the jump.
-  **Left:** ROSA: both modes at 150-250 Services to tell a harness artifact from a real cost.
+  **Validated on ROSA (2026-10-16, `<mesh-a-ctx>` alone, 2 replicas per Service, one window per
+  cell): a real cost, not a harness artifact.**
+
+  | Services | apply | `none` conv / queue p99 | `vsdr` conv / queue p99 | `vsdr` xDS pushes | istiod CPU peak |
+  | --- | --- | --- | --- | --- | --- |
+  | 150 | together | 100-500 / 100-500 ms | 500-1000 / 100-500 ms | 50218 | 1497 m |
+  | 250 | together | 1-3 / 1-3 s | 10-20 / 10-20 s | 115575 | 2703 m |
+  | 150 | split | idle | 10-20 / 10-20 s | 7591 | 1930 m |
+  | 250 | split | idle | 3-5 / 5-10 s | 14231 | 1732 m |
+
+  `together` reproduces the window's jump at 250 Services. `split` applies only the 300-500 VS/DR
+  objects to proxies that are already Ready, and convergence still takes seconds, with queue time
+  in the same or the next bucket and 25-28 pushes per proxy: the time is pushes queueing in istiod
+  while every connected proxy receives the new subsets, not pod startup. The 150-vs-250 order in
+  `split` is noise (one window per cell, coarse buckets). No harness change. **Left:** whether
+  push throttling or debounce settings shorten it (a tuning profile), at more than one window per
+  cell.
 
 ### 9.12 Plan and doc corrections (findings 9, 10) — done in the window-record PR
 
@@ -631,8 +711,9 @@ covered task 3's AWS load balancers, task 6 at 60-250 Services, task 4 live and 
    `--mem-stop-pct 5` and a one-step burst), 9.9 (gateway burst retention: 0 → N Services in one
    step vs a ladder), 9.11 (`vsdr` at 50-150 Services).
 
-**ROSA only** (next window, after the fixes): 9.2 (exec plugin), 9.8 (ingress NLB), 9.1 on a
-greenfield apply, the 9.9 limits under a campaign-sized burst, and optionally task 8. Reproducing
+**ROSA only:** 9.1 (greenfield apply), 9.2 (exec plugin), 9.8 (ingress NLB), 9.9 (a
+campaign-sized burst) and 9.11 were validated in the 2026-10-16 window (Tier C, same shape and
+price as 2026-10-14). Optionally still: task 8 on ROSA. Reproducing
 task 4's original restart or task 3 at the original scale still needs a 20-cluster run (about $26/h
 with 2× m7i.xlarge members, about $248/h shaped like the June campaign).
 
