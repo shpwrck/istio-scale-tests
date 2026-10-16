@@ -29,7 +29,7 @@ the **peak** mesh-size point of the run (usually mesh-10), not mesh-1.
 | **Connected proxies per cluster (measured peak)** | _…_ | controlplane report `connected_proxies per cluster (max)`: `pilot_xds` summed over one cluster's istiod replicas at one scrape. Should be about that cluster's Running injected pods (gateways included); not a mesh-wide sum |
 | Connected proxies per istiod replica (peak) | _…_ | controlplane report `connected_proxies per istiod replica (max)`: the busiest single replica, about 1/R of the cluster figure with R replicas |
 | Proxy check vs Running sidecar pods | ok / low / high / n/a / excluded | controlplane report `proxy check`; any `low`/`high` comes with a WARNING naming the cluster scrape. A large `n/a` or `excluded` share means most scrapes were not checked |
-| Per-proxy config size | _… KB/MB_ | controlplane `Cfg dump avg (MB)` (varies by sidecar scoping) |
+| Per-proxy config size | _… KiB/MiB_ | controlplane `cfg_dump_avg (MiB)` (varies by sidecar scoping) |
 | Sidecar scoping | none / namespace / explicit | sweep header `Sidecar scoping` |
 | Traffic management | none / vsdr | controlplane envelope `Traffic management` (sweep peak `traffic_config`; none when both were swept) |
 | Istio version | _…_ | sweep header `Istio version` |
@@ -75,7 +75,7 @@ local baseline cell is missing; read these before quoting any data-plane number.
 ### Scale verdict — one line, up front
 
 > _One sentence stating the realized magnitude and the headroom, e.g.:_
-> "Peak mesh carried **~X connected proxies / ~Y endpoints / ~Z KB config per proxy**;
+> "Peak mesh carried **~X connected proxies / ~Y endpoints / ~Z KiB config per proxy**;
 > istiod ran at **~W % of its mem limit** and worker nodes at **~V % CPU** → **under-scaled
 > by ~Nx → trust the scaling _shapes_ and cross-cluster _overheads_, not the absolute
 > magnitudes.**"

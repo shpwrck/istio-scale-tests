@@ -10,7 +10,10 @@ git; where it lives is under [Raw data](#raw-data).
 Contexts are placeholders: `<acm-hub-ctx>` is the ACM hub, `<mesh-a-ctx>`, `<mesh-b-ctx>` and
 `<mesh-c-ctx>` are the three mesh members (`cluster-002` to `cluster-004` in the generated
 kubeconfig). No hostnames, addresses or account data are quoted. Memory is in Mi (MiB) as the tools
-print it; GiB = Mi / 1024.
+print it; GiB = Mi / 1024. Config sizes are KiB / MiB (1024-based): the reports of this window
+labelled them KB / MB, and an earlier version of this record mixed the two (corrected 2026-10-16;
+the wide-scoping slope is 5.72 MiB per 1000 Services, not 5.85 MB). istiod "CPU avg" in those
+reports is a per-window peak (the larger of the window average and the busiest 5 s poll).
 
 ## Rig
 
@@ -33,7 +36,7 @@ print it; GiB = Mi / 1024.
 | Discovered Services on `<mesh-a-ctx>` | 8007 (K=4 × 2000 namespaces, plus the probe namespace) | extension X1 |
 | Discovered namespaces | 6000 (4000 + 2000 labeled outside) | extension X2 |
 | Connected proxies per cluster (pods mode) | 502 | task 6, P4a |
-| Per-proxy config | 351 KB (`namespace` scoping, flat) to 47 MB (`wide` at 8000 Services) | R1, X1 |
+| Per-proxy config | 351 KiB (`namespace` scoping, flat) to 46.1 MiB (`wide` at 8000 Services) | R1, X1 |
 | istiod on `<mesh-a-ctx>` | RSS peak 2924 Mi: 18% of the 16Gi limit (X1: 2702 Mi, 16%) | X2 |
 | istiod on `<mesh-b-ctx>`, `<mesh-c-ctx>` (remote ingestion) | at most about 1844 Mi, under the 8Gi request | X2 |
 | East-west gateway (each member) | working set 2252-2514 Mi (2.20-2.46 GiB): **73-82% of the 3Gi limit** | X2 |
@@ -146,9 +149,9 @@ VirtualService + DestinationRule (2 subsets) per Service. Every cell `proxy_chec
 
 | Cell | CDS clusters / proxy | CDS bytes | RDS bytes | Config dump | istiod heap in use | xDS pushes | Push time avg |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 150 svc × 2, none → vsdr | 165 → 465 (+300) | 414 → 1435 KB (+246%) | 147 → 331 KB (+125%) | 1.40 → 3.60 MB | 392 → 342 Mi (-13%) | +30% | 4.4 → 13.9 ms |
-| 250 svc × 2, none → vsdr | 265 → 765 (+500) | 668 → 2370 KB (+255%) | 239 → 546 KB (+128%) | 2.11 → 5.78 MB | 456 → 626 Mi (+37%) | +23% | 7.6 → 29.1 ms |
-| 60 svc × 2 per member, mesh 2 | 75 → 195 (+120) | 186 → 594 KB (+220%) | 64 → 138 KB (+114%) | 0.83 → 1.84 MB | 232 → 210 Mi (-10%) | +32% | 0.72 → 1.52 ms |
+| 150 svc × 2, none → vsdr | 165 → 465 (+300) | 414 → 1435 KiB (+246%) | 147 → 331 KiB (+125%) | 1.40 → 3.60 MiB | 392 → 342 Mi (-13%) | +30% | 4.4 → 13.9 ms |
+| 250 svc × 2, none → vsdr | 265 → 765 (+500) | 668 → 2370 KiB (+255%) | 239 → 546 KiB (+128%) | 2.11 → 5.78 MiB | 456 → 626 Mi (+37%) | +23% | 7.6 → 29.1 ms |
+| 60 svc × 2 per member, mesh 2 | 75 → 195 (+120) | 186 → 594 KiB (+220%) | 64 → 138 KiB (+114%) | 0.83 → 1.84 MiB | 232 → 210 Mi (-10%) | +32% | 0.72 → 1.52 ms |
 
 istiod RSS rose +56% (654 → 1018 Mi) and +78% (828 → 1478 Mi) in P4a, but the report flags it as
 order-biased: each vsdr cell runs right after its none cell and RSS does not shrink after GC, so
@@ -180,8 +183,8 @@ projected istiod and both gateways on all three members.
 | Ingress gateway | clusters | +1000 per 1000 Services | 4020 at 4000; 6017 at 6000 | — |
 | East-west gateway | memory (Envoy allocated) | **+143-144 Mi per 1000 Services** (K=1 and K=4 alike) | 582 Mi at 4000; 1156 Mi at 8000 | R² 1.00 |
 | Ingress gateway | memory (Envoy allocated) | about +91 Mi per 1000 Services | 371 / 551 / 734 Mi at 4000 / 6000 / 8000 | linear, 3 points (guard TSVs) |
-| Sidecar, `namespace` scoping | config / Envoy memory | flat: 351-369 KB / +1 Mi | 14-18 Mi at 4000-8000 | — |
-| Sidecar, **`wide`** scoping (`*/*` per namespace) | config per proxy | **+5.85 MB per 1000 Services** | 23.8 MB at 4000; 47.2 MB at 8000 | R² 1.00 |
+| Sidecar, `namespace` scoping | config / Envoy memory | flat: 351-369 KiB / +1 Mi | 14-18 Mi at 4000-8000 | — |
+| Sidecar, **`wide`** scoping (`*/*` per namespace) | config per proxy | **+5.72 MiB per 1000 Services** | 23.2 MiB at 4000; 46.1 MiB at 8000 | R² 1.00 (R1, 4 points) |
 | Sidecar, **`wide`** scoping | Envoy memory per proxy | **+117 Mi per 1000 Services** | 480 Mi at 4000; 936 Mi at 8000 | R² 1.00 |
 | istiod on b/c | RSS (remote ingestion) | rough | 174-646 Mi during R1's cells (821 Mi during the undiscover); about 1.45 GiB at 8000 Services | from `oc adm top` |
 

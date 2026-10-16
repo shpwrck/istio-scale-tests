@@ -35,14 +35,21 @@ container requests ~0. On a fixed node count this caps services per cluster:
 max_services_per_cluster ≈ (node_alloc_cpu − istiod_cpu_limit × istiod_replicas) / (replicas × sidecar_request_m)
 ```
 
-`tests/controlplane/003-run-sweep.sh` prints a plan-time WARN for the largest combo using
-`SCALE_PER_POD_CPU_M` (default **200m**, a 2× margin over the real 100m request), and
-`001-setup` refuses to start when a cluster lacks pod slots. OpenShift system pods reduce the
-free CPU further.
+`tests/controlplane/003-run-sweep.sh` prints a plan-time WARN for the largest combo using the
+sidecar CPU request it reads from the live Istio CR (`spec.values.global.proxy.resources`; Istio's
+100m when unset), or `SCALE_PER_POD_CPU_M` when set, and `001-setup` refuses to start when a
+cluster lacks pod slots. OpenShift system pods reduce the free CPU further.
 
 Example with current defaults (istiod 3 × 4000m) on the 2026-06-22 spokes (124,000m allocatable):
-`(124,000 − 12,000) / (1 × 100) ≈ 1,120` services per cluster at 1 replica (≈560 by the 200m WARN).
-That run used 500.
+`(124,000 − 12,000) / (1 × 100) ≈ 1,120` services per cluster at 1 replica. That run used 500.
+
+**Gateway memory.** Every gateway keeps `*/*`, so its Envoy memory follows the Services in the
+whole mesh, not the cluster: the east-west gateway allocates about **145 Mi per 1000 Services**
+and the ingress gateway about **91 Mi** (ROSA, 2026-10-14). After config bursts the east-west
+gateway's working set ran 1.2-2.9× its allocated memory (tcmalloc keeps freed pages), so size
+its limit as `(10 + 145 × Services / 1000) Mi × 2.5` and the ingress as `(10 + 91 × Services /
+1000) Mi × 1.5`. For the 10k campaign that is about 3.6 GiB and 1.4 GiB: the chart defaults are
+4Gi and 2Gi. The controlplane sweep's memory guard uses the same model.
 
 > **Let metrics-server settle after heavy churn.** The utilization columns
 > (`istiod_*_pct_of_limit`, `node_*_pct`) come from `kubectl top`. Right after scaling istiod or

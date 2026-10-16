@@ -12,6 +12,16 @@ This plan ran on 2026-10-14
 ([record](../../campaigns/2026-10-14-rosa-validation.md)). Read the plan below with these
 corrections; the fixes behind them are queued in [`BACKLOG.md`](../../../BACKLOG.md), section 9.
 
+**Since 2026-10-16 the harness and platform do most of this themselves** (BACKLOG 9.1-9.11):
+the platform apply restarts the Argo CD controller after the cluster secrets and fails if an
+Application has no status; the kubeconfig exec plugin caches its OAuth token; a failed series
+retire stops the sweep (`RETIRE_FAILED`, exit 1); the memory guard adds the members it finds
+in the remote secrets, guards the first step with a per-Service model and compares working
+set, not allocated memory; the gateways default to 4Gi (east-west) and 2Gi (ingress) limits;
+the ingress gets an NLB in rosa mode; the header has 66 fields (`CONTROLPLANE_SCHEMA=66`). The
+bullets below still say what to check by eye; the first window after these fixes should
+confirm each one (BACKLOG section 9, "ROSA only").
+
 - **After the platform apply, check every Application has a sync and health status.** One member
   never got an Argo CD controller shard; restarting the
   `openshift-gitops-application-controller` pods fixed it (9.1). Budget 30-40 min for this in P1.
