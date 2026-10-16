@@ -138,14 +138,20 @@ tsv() {
 # --- 002 / 003: the writers ----------------------------------------------------
 
 # Stub kubectl and curl for the churn probe: one istiod pod whose /metrics never
-# changes, a watcher that lists no churn target (so the latencies are N/A).
+# changes, a watcher that lists no churn target (so the latencies are N/A). The Istio CR
+# answers the pin, or STUB_ISTIO_VERSION (unreadable when it is "fail"); every call is
+# logged to STUB_LOG.
 _stub_bin() {
 	BIN="${BATS_TEST_TMPDIR}/bin"
 	mkdir -p "$BIN"
-	export FX
+	export FX STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/usr/bin/env bash
+echo "$*" >> "$STUB_LOG"
 case " $* " in
+*" get istios.sailoperator.io default "*)
+	[[ "${STUB_ISTIO_VERSION:-}" != fail ]] || exit 1
+	printf '%s' "${STUB_ISTIO_VERSION:-$ISTIO_VERSION}" ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*) printf 'istiod-abc-x1\n' ;;
 *" scale "*) : ;;
 *" get pods "*) : ;;
@@ -163,7 +169,7 @@ while (($#)); do
 	esac
 done
 case "$url" in
-*/metrics) body="$FX/istiod-diag/pre_metrics.txt" ;;
+*/metrics) body="${STUB_METRICS:-$FX/istiod-diag/pre_metrics.txt}" ;;
 */clusters) body="$FX/fortio_ok.json" ;;
 */ready) echo LIVE; exit 0 ;;
 */debug/syncz) echo '[]'; exit 0 ;;
@@ -184,6 +190,8 @@ STUB
 	f="$(ls "$RES"/churn-*.tsv)"
 	grep -qx "# HARNESS_SHA=$(git -C "$ROOT" describe --always --dirty --abbrev=7)" "$f"
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
+	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
+	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"
 	head -1 "$f" | grep -Eq '(\+00:00|Z)$'
 	grep -Eq '^\| Date \(UTC\) \| .*(\+00:00|Z) \|$' "$RES"/churn-*.md
 	grep -q '^| Harness SHA | ' "$RES"/churn-*.md
@@ -192,12 +200,114 @@ STUB
 	assert_output --partial "istio_version: \"${ISTIO_VERSION}\""
 }
 
-@test "PL36: 002 and the 003 placeholder both write HARNESS_SHA and ISTIO_VERSION" {
-	for k in HARNESS_SHA ISTIO_VERSION; do
-		grep -q "^# ${k}=" "$PROBE"
-		grep -q "echo \"# ${k}=" "$SWEEP"
-	done
+@test "002 (R12): a remote EDS push that never came makes the row TIMEOUT_REMOTE_EDS; 004 counts it in n_total only" {
+	_stub_bin
+	# The stub istiod's eds counter never moves, so the remote EDS poll times out.
+	CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
+		--source-context ctx-a --remote-contexts ctx-b --iterations 1 --timeout 2 --settle 0 \
+		--deployment-count 1 --output-dir "$RES"
+	assert_success
+	f="$(ls "$RES"/churn-*.tsv)"
+	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $10 "/" $21 }' "$f")" = TIMEOUT/TIMEOUT_REMOTE_EDS ]
+	run "$REPORT" --results-dir "$RES" --format md
+	assert_success
+	assert_output --partial "| 2 | 1 | 1->5 | 1 | 0 |"
+}
+
+@test "002 (R10, R12): a push counter in neither scrape is N/A with a warning, and the row is MISSING_VALUE" {
+	_stub_bin
+	# A scrape without pilot_push_triggers (as if renamed): never a 0 delta.
+	STUB_METRICS="${BATS_TEST_TMPDIR}/no-triggers.txt"
+	grep -v 'pilot_push_triggers' "${FX}/istiod-diag/pre_metrics.txt" > "$STUB_METRICS"
+	export STUB_METRICS
+	CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
+		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 \
+		--output-dir "$RES"
+	assert_success
+	f="$(ls "$RES"/churn-*.tsv)"
+	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $11 "/" $13 "/" $21 }' "$f")" = N/A/0/MISSING_VALUE ]
+	[[ "$stderr" == *"pilot_push_triggers on ctx-a: counter is in neither scrape"* ]]
+	[[ "$stderr" == *"source_push_triggers_delta=N/A"* ]]
+	run "$REPORT" --results-dir "$RES" --format md
+	assert_output --partial "| 1 | 1 | 1->5 | 1 | 0 |"
+}
+
+@test "PL36: 002 and the 003 placeholder both write HARNESS_SHA and the Istio version keys" {
+	grep -q "^# HARNESS_SHA=" "$PROBE"
+	grep -q "echo \"# HARNESS_SHA=" "$SWEEP"
+	grep -q 'istio_version_kv | sed' "$PROBE"
+	grep -q 'istio_version_kv | sed' "$SWEEP"
 	# Every timestamp the probe writes is UTC.
 	run grep -nE 'date -I' "$PROBE"
 	refute_output --regexp 'date -I[a-z]'
+}
+
+@test "002 (R4): a mesh that runs another Istio version stops the probe before any change; warn records the live version" {
+	_stub_bin
+	export STUB_ISTIO_VERSION=v1.29.0
+	CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
+		--source-context ctx-a --remote-contexts ctx-b --iterations 1 --timeout 2 --settle 0 \
+		--deployment-count 1 --output-dir "$RES"
+	assert_failure 1
+	[[ "$stderr" == *"the mesh runs Istio v1.29.0 (ctx-a=v1.29.0,ctx-b=v1.29.0), but ISTIO_VERSION is ${ISTIO_VERSION}"* ]]
+	[[ "$stderr" == *"Nothing was changed"* ]]
+	run grep -c ' scale ' "$STUB_LOG"
+	assert_output 0
+	[ -z "$(ls "$RES"/churn-*.tsv 2>/dev/null)" ]
+	# A member whose Istio CR cannot be read stops it too.
+	STUB_ISTIO_VERSION=fail CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
+		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
+	assert_failure 1
+	[[ "$stderr" == *"cannot read the Istio version (istios.sailoperator.io default .spec.version) on ctx-a"* ]]
+	# warn: the run goes on and records what the mesh runs, next to the pin.
+	ISTIO_VERSION_CHECK=warn CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
+		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
+	assert_success
+	[[ "$stderr" == *"warning: the mesh runs Istio v1.29.0"*"ISTIO_VERSION_CHECK=warn, so the results record ISTIO_VERSION=v1.29.0 (ISTIO_VERSION_PIN=${ISTIO_VERSION})"* ]]
+	f="$(ls "$RES"/churn-*.tsv)"
+	grep -qx "# ISTIO_VERSION=v1.29.0" "$f"
+	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
+	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"
+	grep -q "^| Istio version | v1.29.0 (read live; pin ${ISTIO_VERSION}) |" "$RES"/churn-*.md
+	run "$REPORT" --results-dir "$RES" --format md
+	assert_output --partial 'istio_version: "v1.29.0"'
+	assert_output --partial 'istio_version_source: "live"'
+	assert_output --partial "istio_version_pin: \"${ISTIO_VERSION}\""
+	# A bad policy value is refused, not read as fail or warn.
+	ISTIO_VERSION_CHECK=yes PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
+		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
+	assert_failure 1
+	[[ "$stderr" == *"ISTIO_VERSION_CHECK must be fail or warn (got: yes)"* ]]
+}
+
+@test "004: two sweeps in one dir stop the report; --allow-multi-run says so in every format and shows a varying key as mixed (R3)" {
+	mkdir -p "${RES}/sweep-a" "${RES}/sweep-b"
+	tsv "${RES}/sweep-a/churn-a.tsv" "RUN_ID=a" "HARNESS_SHA=h1" "ISTIO_VERSION=1.30.5" "SIDECAR_EGRESS_HOSTS=none" <<-EOF
+	$(crow 1 99 N/A 10 N/A OK)
+	EOF
+	tsv "${RES}/sweep-b/churn-b.tsv" "RUN_ID=b" "HARNESS_SHA=h2" "ISTIO_VERSION=1.30.5" "SIDECAR_EGRESS_HOSTS=./*" <<-EOF
+	$(crow 1 99 N/A 10 N/A OK)
+	EOF
+	local fmt
+	for fmt in text csv md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_failure 1
+		[ -z "$output" ]
+		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+		[[ "$stderr" == *"  sweep-a: ${REPORT} --results-dir ${RES}/sweep-a"* ]]
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		assert_success
+		assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: h1, h2. ISTIO_VERSION: 1.30.5. These differ"
+		# charts has no SIDECAR_EGRESS_HOSTS line; the others never show one file's value.
+		[[ "$fmt" == charts ]] || assert_output --partial "mixed:none,./*"
+		[[ "$fmt" != csv ]] || assert_line "# POOLED_RUNS=2"
+	done
+	# One sweep reports alone, with its own value.
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-b" --format csv
+	assert_success
+	assert_line "# SIDECAR_EGRESS_HOSTS=./*"
+	refute_output --partial "pools"
+	# --help lists the flag.
+	run "$REPORT" --help
+	assert_output --partial "--allow-multi-run"
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
 load test_helper
 
 # --- die() ---
@@ -302,4 +303,61 @@ _stub_cli() {
 	assert_success
 	run is_dns_label_for fortio-server- "a$(printf 'b%.0s' {1..49})"
 	assert_failure
+}
+
+# --- timeout_cmd / run_timeout (R17) ---
+
+# _in_path <dir> <fn> [args...]: run a common.sh function with PATH set to <dir> alone.
+_in_path() {
+	local d="$1"
+	shift
+	bash -c 'source "$ROOT/tests/lib/common.sh"; PATH="$1"; shift; "$@"' _ "$d" "$@"
+}
+
+@test "timeout_cmd / run_timeout: timeout, else gtimeout (macOS coreutils), else exit 127 with the install hint (R17)" {
+	local d="${BATS_TEST_TMPDIR}/bin"
+	mkdir -p "$d"
+	printf '#!/bin/sh\necho "gtimeout $*"\n' > "${d}/gtimeout"
+	chmod +x "${d}/gtimeout"
+	run _in_path "$d" timeout_cmd
+	assert_success
+	assert_output gtimeout
+	run _in_path "$d" run_timeout 5s echo hi
+	assert_success
+	assert_output "gtimeout 5s echo hi"
+	printf '#!/bin/sh\necho "timeout $*"\n' > "${d}/timeout"
+	chmod +x "${d}/timeout"
+	run _in_path "$d" timeout_cmd
+	assert_output timeout
+	rm "${d}/timeout" "${d}/gtimeout"
+	run _in_path "$d" timeout_cmd
+	assert_failure 1
+	run -127 --separate-stderr _in_path "$d" run_timeout 5s true
+	[[ "$stderr" == *"neither 'timeout' nor 'gtimeout' (GNU coreutils) is on PATH; on macOS: brew install coreutils"* ]]
+	run --separate-stderr _in_path "$d" require_timeout
+	assert_failure 1
+	[[ "$stderr" == *"On macOS: brew install coreutils"* ]]
+}
+
+# --- sweep_outcome (R19) ---
+
+@test "sweep_outcome: all ran is exit 0 on stdout; failed cells are counted by reason on stderr, exit 4" {
+	run --separate-stderr sweep_outcome 6
+	assert_success
+	assert_output "All 6 cells ran (their rows' own statuses are in the report)."
+	[ -z "$stderr" ]
+	run --separate-stderr sweep_outcome 6 SETUP_FAILED PROBE_FAILED SETUP_FAILED
+	assert_failure 4
+	[ -z "$output" ]
+	[ "$stderr" = "error: 3 of 6 cells failed: PROBE_FAILED x1, SETUP_FAILED x2. The report includes them as placeholder rows (in n_total, not n_valid); exit 4." ]
+}
+
+@test "sweep_outcome --stopped: a stop's code outranks 4, the line names it, and 'All cells ran' is never claimed" {
+	run --separate-stderr sweep_outcome --stopped 3 4 PROBE_FAILED
+	assert_failure 3
+	[ "$stderr" = "error: 1 of 4 cells failed: PROBE_FAILED x1. The report includes them as placeholder rows (in n_total, not n_valid); the sweep also stopped early, so it exits 3, not 4." ]
+	run --separate-stderr sweep_outcome --stopped 1 4
+	assert_failure 1
+	[ -z "$output" ]
+	[ -z "$stderr" ]
 }

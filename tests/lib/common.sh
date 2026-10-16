@@ -22,6 +22,19 @@
 #   is_ratio <val>                    -> return 0 if val is a decimal in (0, 1]
 #   is_dns_label_for <prefix> <ctx>   -> return 0 if ctx is a lowercase DNS-1035 label
 #                                        and <prefix><ctx> fits a 63-char Service name
+#   timeout_cmd                       -> print the GNU timeout command on PATH (timeout,
+#                                        else gtimeout); return 1 when neither exists
+#   require_timeout                   -> die with an install hint when timeout_cmd finds
+#                                        none; sets TIMEOUT_CMD (live runs, at startup)
+#   run_timeout <duration> <cmd...>   -> cmd under timeout/gtimeout (TIMEOUT_CMD when set);
+#                                        exit 127 with a message when neither exists
+#   SWEEP_FAILED_EXIT (4)             -> a sweep's exit code when it finished and wrote its
+#                                        report but one or more cells failed
+#   sweep_outcome [--stopped <rc>] <cells> [<reason>...]
+#                                     -> print a sweep's closing line ("N of M cells
+#                                        failed: REASON xK, ..."), one reason per failed
+#                                        cell; return 0 when none failed, else SWEEP_FAILED_EXIT
+#                                        (<rc> when the sweep stopped early)
 #
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -166,4 +179,81 @@ is_ratio() {
 is_dns_label_for() {
 	local prefix="$1" ctx="$2"
 	[[ "$ctx" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] && (( ${#prefix} + ${#ctx} <= 63 ))
+}
+
+# --- bounded exec calls (GNU coreutils timeout; Homebrew installs it as gtimeout) ---
+
+# timeout_cmd: the timeout command to use: timeout, else gtimeout (stock macOS has
+# neither; `brew install coreutils` adds gtimeout). Return 1 when neither is on PATH.
+# shellcheck disable=SC2329
+timeout_cmd() {
+	if command -v timeout >/dev/null 2>&1; then
+		echo timeout
+	elif command -v gtimeout >/dev/null 2>&1; then
+		echo gtimeout
+	else
+		return 1
+	fi
+}
+
+# require_timeout: a live run that bounds calls with run_timeout calls this at startup.
+# The bounded calls discard stderr and read a failure as a missing sample, so without
+# the tool every sample would silently read N/A; this dies with the fix instead. Sets
+# TIMEOUT_CMD, which run_timeout uses.
+# shellcheck disable=SC2329
+require_timeout() {
+	TIMEOUT_CMD="$(timeout_cmd)" \
+		|| die "neither 'timeout' nor 'gtimeout' (GNU coreutils) is on PATH; the bounded config-dump and Envoy-stats reads need it. On macOS: brew install coreutils"
+}
+
+# run_timeout <duration> <cmd...>: run cmd bounded by <duration> (timeout syntax: 30s).
+# Exit 127 with a message on stderr when no timeout command exists.
+# shellcheck disable=SC2329
+run_timeout() {
+	local t="${TIMEOUT_CMD:-}"
+	[[ -n "$t" ]] || t="$(timeout_cmd)" || {
+		echo "error: neither 'timeout' nor 'gtimeout' (GNU coreutils) is on PATH; on macOS: brew install coreutils" >&2
+		return 127
+	}
+	"$t" "$@"
+}
+
+# --- sweep outcome (R19) ---
+
+# Exit codes every sweep shares: 0 every cell ran; 1 the run stopped (a precondition, an
+# unexpected abort, or a suite's own stop such as controlplane's RETIRE_FAILED); 3 a
+# reachability gate stopped it (dataplane, churn-dataplane); 4 it finished and wrote its
+# report, but at least one cell failed (its setup or probe step exited non-zero, and its
+# placeholder row names the reason). A stop wins: 1 and 3 are not replaced by 4.
+# shellcheck disable=SC2034  # read by the sweeps that source this file
+SWEEP_FAILED_EXIT=4
+
+# sweep_outcome [--stopped <rc>] <cells> [<reason>...]: the closing line of a sweep, after
+# its report: "All <cells> cells ran." (stdout) or "<N> of <cells> cells failed: <REASON>
+# x<k>, ..." (stderr), one <reason> argument per failed cell. Returns SWEEP_FAILED_EXIT
+# when any cell failed, so a sweep ends with: sweep_outcome ... || exit "$SWEEP_FAILED_EXIT".
+# --stopped <rc>: the sweep stopped early and exits <rc> (1 or 3), which outranks 4: the
+# failed cells are still counted, the line names <rc>, "All cells ran" is never printed
+# (they did not), and it returns <rc>.
+# shellcheck disable=SC2329
+sweep_outcome() {
+	local rc="$SWEEP_FAILED_EXIT" stopped=0 cells by
+	if [[ "${1:-}" == --stopped ]]; then
+		rc="$2" stopped=1
+		shift 2
+	fi
+	cells="$1"
+	shift
+	if (($# == 0)); then
+		((stopped)) && return "$rc"
+		echo "All ${cells} cells ran (their rows' own statuses are in the report)."
+		return 0
+	fi
+	by="$(printf '%s\n' "$@" | sort | uniq -c | awk '{ printf "%s%s x%d", (NR > 1 ? ", " : ""), $2, $1 }')"
+	if ((stopped)); then
+		echo "error: $# of ${cells} cells failed: ${by}. The report includes them as placeholder rows (in n_total, not n_valid); the sweep also stopped early, so it exits ${rc}, not ${SWEEP_FAILED_EXIT}." >&2
+	else
+		echo "error: $# of ${cells} cells failed: ${by}. The report includes them as placeholder rows (in n_total, not n_valid); exit ${SWEEP_FAILED_EXIT}." >&2
+	fi
+	return "$rc"
 }

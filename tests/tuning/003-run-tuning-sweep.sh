@@ -63,7 +63,18 @@ Options:
   -h, --help             Show this help.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
   SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
+
+Exit codes:
+  0  every pass (baseline and each profile) ran its probe
+  1  the sweep stopped: a bad flag or precondition, the suite setup failed, a profile
+     could not be reverted (REVERT_FAILED; later passes skipped), or an unexpected error
+  4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
+     passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
+     non-zero, PROBE_FAILED); stderr ends with "N of M cells failed" by reason
+  130/143  interrupted (Ctrl-C / TERM); the active profile is reverted first
 EOF
 }
 
@@ -251,11 +262,17 @@ python3 -I -c 'import yaml' 2>/dev/null \
 	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
 KUBECTL=()
 resolve_kubectl KUBECTL
+# R4: the Istio version every member runs, read once before the first profile or setup
+# and exported, so every probe of every pass records it (ISTIO_VERSION_CHECK=fail stops
+# here on a mismatch, before anything changes).
+istio_version_resolve "$CONTEXTS_CSV" 0 "${KUBECTL[@]}"
+echo "    Istio:     $(istio_version_label)"
 
 ACTIVE_STATE_DIR=""
 GITOPS_PAUSED=0
 
 # EXIT trap: revert a profile left applied, then resume Argo CD. Never aborts.
+# shellcheck disable=SC2329  # invoked by the EXIT trap below
 on_exit() {
 	local sd="$ACTIVE_STATE_DIR"
 	if [[ -n "$sd" && -f "${sd}/active-profile" ]]; then
@@ -281,6 +298,8 @@ mkdir -p "$SWEEP_DIR"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
 	if [[ "$SUITE" == churn-dataplane ]]; then echo "# CHURN_RATE=${CHURN_RATE}"; fi
 	echo "# HARNESS_SHA=$(harness_sha)"
+	istio_version_kv | sed 's/^/# /'
+	echo "# ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT:-unknown}"
 } >"${SWEEP_DIR}/sweep-metadata.txt"
 
 if ((GITOPS_PAUSE)); then
@@ -344,6 +363,8 @@ for p in "${PASSES[@]}"; do
 	if ! "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
 		--state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
 		echo "warn: applying ${p} failed; marking SETUP_FAILED" >&2
+		# 001 can fail before it creates the state dir, so the pass dir may not exist yet.
+		mkdir -p "${SWEEP_DIR}/${p}"
 		echo "SETUP_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/SETUP_FAILED"
 	else
 		run_pass "$p"
@@ -368,7 +389,21 @@ if ((RUN_CLEANUP)); then
 	"${CLEANUP_CMD[@]}" || echo "warn: suite cleanup failed; re-run: $(show "${CLEANUP_CMD[@]}")" >&2
 fi
 
-echo "=== Sweep ${RUN_ID} $( ((ABORTED)) && echo "STOPPED (revert failed)" || echo "complete") ==="
+echo "=== Sweep ${RUN_ID} $( ((ABORTED)) && echo "STOPPED (revert failed)" || echo "finished") ==="
 echo "    Results:    ${SWEEP_DIR}/"
 echo "    Comparison: ${SWEEP_DIR}/sweep-comparison.md"
+
+# R19: a pass whose profile did not apply or whose probe exited non-zero has its marker
+# file (run_pass and the loop above never abort on one, so every profile was reverted
+# first, PL32). Count them by reason; a failed revert (exit 1) wins over 4.
+FAILED_CELLS=()
+for p in "${PASSES[@]}"; do
+	for marker in SETUP_FAILED PROBE_FAILED; do
+		if [[ -f "${SWEEP_DIR}/${p}/${marker}" ]]; then FAILED_CELLS+=("$marker"); break; fi
+	done
+done
+outcome_rc=0 stop_args=()
+((ABORTED == 0)) || stop_args=(--stopped 1)
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} "${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((ABORTED)); then exit 1; fi
+exit "$outcome_rc"

@@ -36,6 +36,7 @@ flowchart TB
 ## What you need
 
 - `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4.3+ (macOS ships 3.2: `brew install bash`)
+- GNU coreutils `timeout` for live controlplane runs (macOS has none: `brew install coreutils`, which adds `gtimeout`)
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
 - `python3` with PyYAML (tuning suite only)
 - Mesh members must be able to provision `type: LoadBalancer` Services (cloud provider or MetalLB).
@@ -94,8 +95,10 @@ placeholder for the member that runs the workload).
 
 Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
 `SETUP_CONTEXTS`), never the hub. Each suite writes TSV data plus a markdown summary under its
-`results/` directory. Every script has `--help`, and scripts that change a cluster also accept
-`--dry-run`.
+`results/` directory; a sweep writes its TSVs and reports into its own `results/sweep-<RUN_ID>/`.
+A sweep whose setup or probe failed for some cells still writes its report, then ends with
+`N of M cells failed` (by reason) and exit code 4; each suite README lists its exit codes.
+Every script has `--help`, and scripts that change a cluster also accept `--dry-run`.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -113,6 +116,14 @@ tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-s
 
 Settings and image pins live in `config/versions.env` and `config/options.env`. The deployed Istio
 version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
+Before its first change, every suite reads the version each member's Istio CR runs
+(`istios.sailoperator.io default`, `.spec.version`) and records that as `ISTIO_VERSION`, next to
+the pin (`ISTIO_VERSION_PIN`) and `ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which
+reads nothing). With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than
+the pin, members on different versions, or a member whose CR cannot be read stop the run before
+it changes anything; `ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs
+(`mixed:<a>,<b>` or `unknown` when they differ or cannot be read). It is set in the environment,
+never in a `--config` file.
 
 ### Run config (`--config FILE`)
 
@@ -148,9 +159,13 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   report format repeats them: `unknown` for files written before these keys existed, and
   `mixed:<a>,<b>` with a warning when the inputs disagree. A sweep copies the file to
   `sweep-<RUN_ID>/run-config-<RUN_ID>.env`, and every probe's per-run markdown summary has a
-  `Run config` row. With `--config` but no `--results-dir`, a report warns
-  when the results dir holds more than one run (each `sweep-*` directory is one run; outside
-  one, each `RUN_ID`).
+  `Run config` row.
+- **One run per report:** a report reads every TSV under its results dir. When that dir holds
+  more than one run (each `sweep-*` directory is one run; outside one, each `RUN_ID`), it stops,
+  lists the runs and prints the `--results-dir <dir>/sweep-<RUN_ID>` that reports each alone.
+  `--allow-multi-run` pools them on purpose, and every format then says it pools N runs and
+  lists their `HARNESS_SHA` and `ISTIO_VERSION` values. A key that differs across the inputs
+  reads `mixed:<a>,<b>`, never one file's value.
 
 ## Grow the mesh
 

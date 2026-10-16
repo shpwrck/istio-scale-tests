@@ -83,6 +83,8 @@ server queues requests and can still answer with HTTP 200. `002` tags such a row
 ./tests/dataplane/002-run-latency-probe.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 
 # 3. Report, then clean up
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/dataplane/004-report-results.sh
 ./tests/dataplane/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
@@ -104,6 +106,12 @@ For each mesh size the sweep runs `001`, then `002` `--repetitions` times, then 
 and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
 `sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
 size with a remote cluster; the p50-vs-mesh-size chart needs two.
+
+Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition,
+or an unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`,
+see below; the reports are written); `4` it finished and wrote its reports, but some
+mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder). The last line on
+stderr says how many, by reason; `3` wins over `4`.
 
 ## Run config (`--config FILE`)
 
@@ -334,8 +342,8 @@ the row with a folder; the other rows count as repeats. json has the section as
 
 ## Outputs
 
-`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `ISTIO_VERSION`,
-`KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
+`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `ISTIO_VERSION` with
+`ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`, `KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
 thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,

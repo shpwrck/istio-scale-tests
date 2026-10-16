@@ -4,6 +4,7 @@
 # csv/json carry worst_bucket, and json mesh_size is a number.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/propagation/005-report-results.sh"
 HDR=$'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms'
@@ -80,4 +81,41 @@ fixture() {
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
+}
+
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (R3, PL26)" {
+	local d fmt
+	for d in a b; do
+		mkdir -p "${RES}/sweep-${d}"
+		{
+			echo "# SWEEP_RUN_ID=s${d}"
+			echo "# RUN_ID=r${d}"
+			echo "# HARNESS_SHA=h${d}"
+			echo "# ISTIO_VERSION=1.30.5"
+			echo "# ITERATIONS=$([[ $d == a ]] && echo 3 || echo 5)"
+			echo "$HDR"
+			prow 2 1 1000 100
+		} > "${RES}/sweep-${d}/endpoint-r${d}.tsv"
+	done
+	for fmt in text csv markdown json charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_failure 1
+		[ -z "$output" ]
+		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+		[[ "$stderr" == *"  sweep-b: ${REPORT} --results-dir ${RES}/sweep-b"* ]]
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		assert_success
+		# The last file's ITERATIONS is not the report's (it was last-wins).
+		assert_output --partial "mixed:3,5"
+		[[ "$stderr" == *"input TSVs disagree on sweep-level ITERATIONS (3,5)"* ]]
+		if [[ "$fmt" == json ]]; then
+			[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["sweep-a","sweep-b"],"harness_sha":["ha","hb"],"istio_version":["1.30.5"]}' ]
+		else
+			assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: ha, hb. ISTIO_VERSION: 1.30.5."
+		fi
+	done
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-a" --format json
+	assert_success
+	[ "$(jq -r '.metadata.ITERATIONS + " " + (.pooled_runs.runs | tostring)' <<<"$output")" = "3 1" ]
+	[ -z "$stderr" ]
 }

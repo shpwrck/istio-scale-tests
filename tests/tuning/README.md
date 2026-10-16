@@ -56,12 +56,19 @@ The sweep:
 On Ctrl-C or an error the sweep still reverts the active profile and resumes Argo CD.
 It leaves the suite's workloads; remove them with the suite's cleanup script.
 
+Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or
+precondition, a failed suite setup, a failed revert, or an unexpected error); `4` it
+finished, reverted every profile and wrote `sweep-comparison.md`, but some passes failed
+(`SETUP_FAILED`: the profile did not apply; `PROBE_FAILED`: the probe exited non-zero,
+including a reachability stop). The last line on stderr says how many, by reason.
+`130` / `143`: interrupted, after reverting the active profile.
+
 ## Results
 
 ```
 tests/tuning/results/sweep-<RUN_ID>/
-├── sweep-metadata.txt
-├── sweep-comparison.md      # means of valid rows (histogram p99s: worst bucket); % change vs baseline
+├── sweep-metadata.txt       # suite, passes, HARNESS_SHA, ISTIO_VERSION (read live once; every probe records it) and the pin
+├── sweep-comparison.md      # means of valid rows with n and range (histogram p99s: worst bucket); % change vs baseline
 ├── baseline/                # suite TSV + .md, probe-output.log
 └── 01-push-throttling/      # same, plus state/ (revert data)
 ```
@@ -73,7 +80,11 @@ missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers
 (convergence, push time) are never averaged: they show the worst bucket range a valid row
 hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the controlplane's
 `istiod CPU peak (m)` and `istiod memory peak (Mi)` are window peaks), the sidecar config
-in KiB. Re-render:
+in KiB. Under each metric, `n (got/attempted)` counts the valid rows with a value over
+every row the pass wrote (failed and timed-out rows included), and `range` gives its min
+to max. A profile whose n differs from the baseline's shows `(baseline n ...)` and the
+page warns: its mean comes from other iterations, so a profile that timed out on the slow
+ones can look faster than it is. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 ## One profile by hand

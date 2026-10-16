@@ -72,14 +72,19 @@ Ready source pods. The probe therefore sums healthy endpoint weight.
 `status` values: `OK`; `TIMEOUT_LOCAL` / `TIMEOUT_REMOTE` (no convergence within
 `--timeout`); `POISONED_RESTART` (an istiod restarted mid-iteration, istiod columns are
 `N/A`); `SCRAPE_INCOMPLETE` (an istiod `/metrics` scrape failed, counters undercounted);
+`TIMEOUT_REMOTE_EDS` (no remote EDS push within `--timeout`); `MISSING_VALUE` (another
+measured column has no number: a watcher that did not list every churn target, or a push
+counter in neither istiod scrape, e.g. renamed; the probe's stderr names the column);
 `SETUP_FAILED` / `PROBE_FAILED` (placeholder for a failed iteration or sweep combo).
+An `OK` row has a number in every convergence column and push-counter delta.
 The report averages `OK` rows only and shows `n_total` and `n_valid`. The p99 columns are
 not averaged: the report shows the worst bucket range a valid row hit (e.g. `500-1000`),
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
 The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty`) and
-`ISTIO_VERSION`; the report prints those, never the commit it runs on. A TSV written
+`ISTIO_VERSION` (what the members' Istio CRs run, next to `ISTIO_VERSION_PIN` and
+`ISTIO_VERSION_SOURCE`; see the root README); the report prints those, never the commit it runs on. A TSV written
 before they were recorded reads `unknown (not recorded)`, and inputs that differ read
 `mixed:a,b` with a warning. Timestamps are UTC.
 
@@ -107,7 +112,9 @@ and kube contexts for the mesh members (not the ACM hub).
 ./tests/churn/002-run-churn-probe.sh \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --iterations 5
 
-# 3. Summarize everything under tests/churn/results/
+# 3. Summarize tests/churn/results/
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/churn/004-report-results.sh --format md
 
 # 4. Remove the test namespace
@@ -127,6 +134,13 @@ intensity (deployment count) the sweep runs setup, probe and cleanup. It writes 
 `sweep-<run-id>.md` and `sweep-charts-<run-id>.md` to `tests/churn/results/sweep-<run-id>/`.
 Charts need at least three contexts (two mesh sizes with a remote).
 A failed setup or probe becomes a placeholder row and the sweep moves on.
+
+Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag
+or precondition, or an unexpected error); `4` it finished and wrote its reports, but some
+cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder). The last line on stderr
+says how many, by reason. Rows a probe wrote with a non-OK status (`TIMEOUT_*`,
+`MISSING_VALUE`, ...) are measurements, not failed cells: the report counts them in
+`n_total`.
 
 ## Run config (`--config FILE`)
 

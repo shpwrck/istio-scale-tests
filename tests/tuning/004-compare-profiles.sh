@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Compare the passes of a tuning sweep (baseline + one directory per profile).
 # Reads each pass's suite TSV, finds columns by header name, averages the valid rows
-# and shows each profile's change against the baseline.
+# and shows each profile's change against the baseline, with each metric's n (valid
+# samples / rows the pass attempted, PL17) and range, so a profile whose n differs from
+# the baseline's (say 7 of 10 iterations timed out) is visible and flagged.
 #
 # Usage:
 #   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
@@ -20,7 +22,11 @@ usage() {
 Usage: $(basename "$0") --results-dir DIR [options]
 
 Compare tuning sweep passes. Values are means over valid rows (status OK, no
-istiod restart); each profile also shows its change against the baseline.
+istiod restart); each profile also shows its change against the baseline. Under
+each metric, "n" is got/attempted: the valid rows with a value for it / every row
+the pass wrote in that group (failed and timed-out rows included), and "range" its
+min to max. A profile whose n differs from the baseline's shows "(baseline n ...)":
+its mean is over other iterations, so compare it with care.
 Histogram p99 rows (convergence, push time) show the worst bucket a valid row hit,
 or "overflow (N rows)", never a mean. Memory is in Mi, CPU in millicores (the
 controlplane's istiod CPU and memory are window peaks), config sizes in KiB, and a
@@ -136,10 +142,12 @@ esac
 metric_cols=""
 for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 
-# One pass -> lines "n<TAB>valid<TAB>total", "g<TAB>group" (first-seen order) and
-# "v<TAB>group<TAB>column<TAB>mean<TAB>max<TAB>n_overflow" (mean and max "-" without
-# a numeric value: a tab IFS would merge empty fields). A group is "col=value,
-# col=value", or "-". "overflow" (a histogram p99 in +Inf) is counted, not dropped.
+# One pass -> lines "n<TAB>valid<TAB>total", "g<TAB>group<TAB>rows" (first-seen
+# order; rows counts every row of the group, valid or not) and
+# "v<TAB>group<TAB>column<TAB>mean<TAB>max<TAB>n_overflow<TAB>min<TAB>n_numeric" for
+# every metric column the TSV has (mean, max and min "-" without a numeric value: a
+# tab IFS would merge empty fields). A group is "col=value, col=value", or "-".
+# "overflow" (a histogram p99 in +Inf) is counted, not dropped.
 summarize() {
 	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" '
 	BEGIN { nm = split(cols, mc, ","); ng = split(gcols, gc, ",") }
@@ -148,32 +156,35 @@ summarize() {
 	!hdr { delete idx; for (i = 1; i <= NF; i++) idx[$i] = i; hdr = 1; next }
 	{
 		total++
-		if (("status" in idx) && $(idx["status"]) != "OK") next
-		if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
-		if (("restarted" in idx) && $(idx["restarted"]) != "0") next
-		valid++
 		g = ""
 		for (j = 1; j <= ng; j++) if (gc[j] in idx) g = g (g == "" ? "" : ", ") gc[j] "=" $(idx[gc[j]])
 		if (g == "") g = "-"
 		if (!(g in seen)) { seen[g] = 1; order[++norder] = g }
+		grows[g]++
+		for (j = 1; j <= nm; j++) if (mc[j] != "" && (mc[j] in idx)) has[g SUBSEP mc[j]] = 1
+		if (("status" in idx) && $(idx["status"]) != "OK") next
+		if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
+		if (("restarted" in idx) && $(idx["restarted"]) != "0") next
+		valid++
 		for (j = 1; j <= nm; j++) {
 			c = mc[j]
 			if (c == "" || !(c in idx)) continue
 			v = $(idx[c]); k = g SUBSEP c
-			if (v == "overflow") { ov[k]++; has[k] = 1; continue }
+			if (v == "overflow") { ov[k]++; continue }
 			if (v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) {
 				if (!(k in cnt) || v + 0 > mx[k]) mx[k] = v + 0
-				sum[k] += v; cnt[k]++; has[k] = 1
+				if (!(k in cnt) || v + 0 < mn[k]) mn[k] = v + 0
+				sum[k] += v; cnt[k]++
 			}
 		}
 	}
 	END {
 		printf "n\t%d\t%d\n", valid, total
-		for (i = 1; i <= norder; i++) printf "g\t%s\n", order[i]
+		for (i = 1; i <= norder; i++) printf "g\t%s\t%d\n", order[i], grows[order[i]]
 		for (k in has) {
 			split(k, a, SUBSEP)
-			if (k in cnt) printf "v\t%s\t%s\t%.6f\t%.6f\t%d\n", a[1], a[2], sum[k] / cnt[k], mx[k], ov[k] + 0
-			else printf "v\t%s\t%s\t-\t-\t%d\n", a[1], a[2], ov[k] + 0
+			if (k in cnt) printf "v\t%s\t%s\t%.6f\t%.6f\t%d\t%.6f\t%d\n", a[1], a[2], sum[k] / cnt[k], mx[k], ov[k] + 0, mn[k], cnt[k]
+			else printf "v\t%s\t%s\t-\t-\t%d\t-\t0\n", a[1], a[2], ov[k] + 0
 		}
 	}' "$@"
 }
@@ -215,7 +226,25 @@ fmt_metric() {
 	}'
 }
 
-declare -A VAL VMAX VOV NROWS STATUS GSEEN
+# fmt_range <kind> <min> <max> <n_overflow>: "min to max" in the cell format of
+# <kind>; a hist metric gives its lowest and worst bucket (overflow when one row's p99
+# was in +Inf); "-" without a value.
+fmt_range() {
+	local kind="$1" mn="$2" mx="$3" ov="$4" lo hi
+	if [[ "$kind" == hist ]]; then
+		[[ "$mn" == "-" && "$ov" == 0 ]] && { printf -- '-'; return; }
+		lo="$(fmt_metric hist "-" "$mn" 0)"
+		hi="$(fmt_metric hist "-" "$mx" 0)"
+		[[ "$mn" == "-" ]] && lo="overflow"
+		(( ov > 0 )) && hi="overflow"
+		printf '%s to %s' "$lo" "$hi"
+		return
+	fi
+	[[ "$mn" == "-" ]] && { printf -- '-'; return; }
+	printf '%s to %s' "$(fmt_metric "$kind" "$mn" "$mn" 0)" "$(fmt_metric "$kind" "$mx" "$mx" 0)"
+}
+
+declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS NROWS STATUS GSEEN
 GROUP_VALUES=()
 for p in "${PASSES[@]}"; do
 	STATUS[$p]="ok"
@@ -227,11 +256,16 @@ for p in "${PASSES[@]}"; do
 		[[ "${STATUS[$p]}" == ok ]] && STATUS[$p]="no data"
 		continue
 	fi
-	while IFS=$'\t' read -r kind a b c d e; do
+	while IFS=$'\t' read -r kind a b c d e f h; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
-		g) [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
-		v) VAL["$p|$a|$b"]="$c"; VMAX["$p|$a|$b"]="$d"; VOV["$p|$a|$b"]="$e" ;;
+		g) GROWS["$p|$a"]="$b"; [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
+		v)
+			VHAS["$p|$a|$b"]=1; VMAX["$p|$a|$b"]="$d"; VOV["$p|$a|$b"]="$e"
+			VMIN["$p|$a|$b"]="$f"; VCNT["$p|$a|$b"]="$h"
+			# VAL only for a metric with a value: a mean, or a hist p99 that overflowed.
+			[[ "$c" != "-" || "$e" != 0 ]] && VAL["$p|$a|$b"]="$c"
+			;;
 		esac
 	done < <(summarize "${files[@]}")
 done
@@ -249,22 +283,39 @@ row "${cells[@]}"
 cells=("Valid / total rows")
 for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
 row "${cells[@]}"
+# metric_n <pass> <group> <column>: got/attempted (PL17): valid rows with a value
+# (overflow counts) / every row the pass wrote in the group.
+metric_n() {
+	local k="$1|$2|$3"
+	echo "$(( ${VCNT[$k]:-0} + ${VOV[$k]:-0} ))/${GROWS["$1|$2"]:-0}"
+}
+N_DIFFERS=0
 for g in "${GROUP_VALUES[@]}"; do
 	for m in "${METRICS[@]}"; do
 		col="${m%%|*}" rest="${m#*|}"
 		label="${rest%|*}" kind="${rest##*|}"
 		[[ "$g" != "-" ]] && label="${label} @ ${g}"
-		cells=("$label")
+		cells=("$label") ncells=("  n (got/attempted)") rcells=("  range (min to max)")
 		any=0
 		for p in "${PASSES[@]}"; do
 			k="$p|$g|$col"
-			if [[ -z "${VAL[$k]:-}" ]]; then cells+=("-"); continue; fi
+			# A metric is shown when any pass's TSV has its column, even with no value
+			# (every row timed out: n 0/10 says so instead of hiding the metric).
+			if [[ -z "${VHAS[$k]:-}" ]]; then cells+=("-"); ncells+=("-"); rcells+=("-"); continue; fi
 			any=1
+			n="$(metric_n "$p" "$g" "$col")"
+			if [[ -n "$BASE" && "$p" != "$BASE" && -n "${VHAS["$BASE|$g|$col"]:-}" ]]; then
+				bn="$(metric_n "$BASE" "$g" "$col")"
+				[[ "$n" != "$bn" ]] && { n="${n} (baseline n ${bn})"; N_DIFFERS=1; }
+			fi
+			ncells+=("$n")
+			rcells+=("$(fmt_range "$kind" "${VMIN[$k]}" "${VMAX[$k]}" "${VOV[$k]}")")
+			if [[ -z "${VAL[$k]:-}" ]]; then cells+=("-"); continue; fi
 			b=""
 			[[ -n "$BASE" && "$p" != "$BASE" ]] && b="${VAL["$BASE|$g|$col"]:-}"
 			cells+=("$(fmt_metric "$kind" "${VAL[$k]}" "${VMAX[$k]}" "${VOV[$k]}" "$b")")
 		done
-		((any)) && row "${cells[@]}"
+		((any)) && { row "${cells[@]}"; row "${ncells[@]}"; row "${rcells[@]}"; }
 	done
 done
 
@@ -275,7 +326,10 @@ render() {
 		echo "- Suite: ${SUITE}"
 		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
+		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN))"
 		echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
+		echo "- Under each metric: n is got/attempted (valid rows with a value / every row the pass wrote, failed and timed-out rows included) and range is its min to max."
+		((N_DIFFERS)) && echo "- **A profile's n differs from the baseline's** (shown as \"(baseline n ...)\"): its mean is over other iterations, so a better mean can come from fewer, easier samples."
 		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket."
 		echo ""
 		local hdr="| Metric |" sep="|---|" r
@@ -285,7 +339,10 @@ render() {
 		for r in "${ROWS[@]}"; do echo "| ${r//$'\t'/ | } |"; done
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
+		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN))"
 		echo "Means over valid rows; profiles show the change against the baseline."
+		echo "n = got/attempted (valid rows with a value / every row the pass wrote); range = min to max."
+		((N_DIFFERS)) && echo "WARNING: a profile's n differs from the baseline's (\"(baseline n ...)\"): its mean is over other iterations."
 		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."
 		echo ""
 		{

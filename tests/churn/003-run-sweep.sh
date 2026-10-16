@@ -61,7 +61,16 @@ Usage: $(basename "$0") [options]
   --dry-run                 Show plan without executing.
   -h, --help                Show this help.
 
+Exit codes:
+  0  every cell (mesh size x churn intensity) ran; rows with a non-OK status are
+     measurement outcomes, counted in the report's n_total and left out of n_valid
+  1  the sweep stopped: a bad flag or precondition, or an unexpected error
+  4  the sweep finished and wrote its report, but N cells failed (setup or probe
+     exited non-zero); stderr ends with "N of M cells failed" by reason
+
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
   SETUP_CONTEXTS, CHURN_MESH_SIZES (--mesh-sizes), CHURN_INTENSITIES (--churn-intensities;
   empty: CHURN_DEPLOYMENT_COUNT), CHURN_SCALE_TO_REPLICAS, CHURN_ITERATIONS,
   CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
@@ -184,11 +193,17 @@ CHURN_BASE_REPLICAS_DEFAULT="${CHURN_BASE_REPLICAS:-1}"
 # to every probe and placeholder row. Skipped in --dry-run (stays "unknown").
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
+KUBECTL=()
 if ((! DRY_RUN)); then
-	KUBECTL=()
 	if command -v kubectl >/dev/null 2>&1 || command -v oc >/dev/null 2>&1; then
 		resolve_kubectl KUBECTL
 	fi
+fi
+# R4: the Istio version every member runs, read once before the first setup and
+# exported, so 001, 002 and the placeholders record it (ISTIO_VERSION_CHECK=fail stops
+# here on a mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
+if ((! DRY_RUN)); then
 	if ((${#KUBECTL[@]})); then
 		tb_kv=""
 		while IFS= read -r tb_kv; do
@@ -210,7 +225,7 @@ emit_churn_placeholder() {
 	{
 		echo "# Churn convergence test (placeholder — combo failed before any row)"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		istio_version_kv | sed 's/^/# /'
 		# Same preamble keys as 002 (004 may read this file first).
 		echo "# CHURN_SCALE_SCOPE=source"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
@@ -245,6 +260,7 @@ echo "  Churn Convergence Sweep"
 echo "=========================================="
 echo "Run ID: $RUN_ID"
 echo "Contexts: ${CONTEXTS[*]}"
+echo "Istio: $(istio_version_label)"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "Churn intensities: ${INTENSITIES[*]}"
 echo "Scale: -> $SCALE_TO replicas"
@@ -255,6 +271,8 @@ fi
 echo ""
 ((DRY_RUN)) || config_snapshot "$SWEEP_DIR" "$RUN_ID"
 
+# One reason per cell whose setup or probe failed (R19): reported, then the exit code.
+FAILED_CELLS=()
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
 	active_csv=$(IFS=,; echo "${active_ctxs[*]}")
@@ -304,6 +322,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		if ! "$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"; then
 			echo "warn: setup failed for mesh_size=$ms churn_intensity=$intensity; recording SETUP_FAILED placeholder and continuing" >&2
 			emit_churn_placeholder SETUP_FAILED "$ms" "$intensity"
+			FAILED_CELLS+=(SETUP_FAILED)
 			"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
 				echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms churn_intensity=$intensity" >&2
 			echo ""
@@ -317,6 +336,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		if ! "$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"; then
 			echo "warn: churn probe failed for mesh_size=$ms churn_intensity=$intensity; recording PROBE_FAILED placeholder and continuing (cleanup runs below)" >&2
 			emit_churn_placeholder PROBE_FAILED "$ms" "$intensity"
+			FAILED_CELLS+=(PROBE_FAILED)
 		fi
 		echo ""
 
@@ -334,7 +354,7 @@ if ((DRY_RUN)); then
 fi
 
 echo "=========================================="
-echo "  Sweep complete"
+echo "  Sweep finished"
 echo "=========================================="
 echo ""
 echo "Generating report..."
@@ -347,3 +367,7 @@ echo "Markdown summary written to $MD_FILE"
 CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
+
+# R19: the report is written; now say how many cells failed and exit non-zero if any did.
+sweep_outcome "$(( ${#MESH_SIZES[@]} * ${#INTENSITIES[@]} ))" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} \
+	|| exit "$SWEEP_FAILED_EXIT"

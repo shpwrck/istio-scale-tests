@@ -36,9 +36,11 @@ Prefer it over generic upstream Istio docs when they disagree.
   - deployed Istio: `istioVersion` in `charts/spoke-ossm/values.yaml`; OSSM channel:
     `charts/spoke-ossm-operator/values.yaml`
   - ACM/GitOps channels: `terraform/platform/variables.tf`
-  - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
+  - test images and the `ISTIO_VERSION` pin: `config/versions.env`, with a
     keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`);
-    `tests/lib/test/version-pins.bats` fails when they drift.
+    `tests/lib/test/version-pins.bats` fails when they drift. Results record the version the
+    members' Istio CRs run (`ISTIO_VERSION`) next to the pin (`ISTIO_VERSION_PIN`), through
+    `istio_version_resolve` / `istio_version_kv` in `tests/lib/preamble.sh`.
 - **Reports:** every suite writes a markdown summary next to its TSV data. Sweeps call their report
   script with `--format markdown`.
 
@@ -84,7 +86,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`; bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`; bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |
@@ -104,7 +106,8 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 ## Tools
 
-`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`,
+`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
+`timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in `tests/lib/common.sh`),
 `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle

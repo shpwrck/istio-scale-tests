@@ -5,7 +5,9 @@
 # rows are reported separately rather than averaged together.
 # Filters poisoned rows (status != OK, istiod_restarted != 0) from numeric
 # aggregation but still counts them in count_total and reports the gap.
-# Propagates the first TSV's preamble metadata into every output format.
+# Propagates the TSV preamble metadata into every output format, each key merged over
+# every input (mixed:a,b when it varies, PL26). More than one run under the results dir
+# stops the report unless --allow-multi-run, and then every format says so (R3).
 # Every format also carries a "Local baseline" verdict per (mesh_size, qps_target),
 # so a same-cluster number that was dropped or never measured is always visible.
 # Every format also has a "Remote coverage" section, before the results table: the
@@ -17,7 +19,7 @@
 # text, markdown and json add the istiod restart diagnostics (tests/lib/istiod-diag.sh).
 #
 # Usage:
-#   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
+#   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT] [--fail-on-unreachable]
 #   ./tests/dataplane/004-report-results.sh --config tests/dataplane/configs/smoke.env \
 #     --results-dir tests/dataplane/results/smoke/sweep-<RUN_ID> --format markdown
 set -euo pipefail
@@ -37,9 +39,10 @@ source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_rende
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
-# 1 when --results-dir is passed (gates the multi-run warning below).
-RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
+# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# like --force-large-matrix, so no options.env key.
+ALLOW_MULTI_RUN=0
 FAIL_ON_UNREACHABLE=0
 
 
@@ -49,11 +52,13 @@ Usage: $(basename "$0") [options]
 
   --config FILE      Run config of KEY=value lines (config/options.env keys; see
                      tests/dataplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default. Without --results-dir, warns
-                     when the results dir holds more than one run.
-  --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}).
-                     A directory containing latency-*.tsv files; a sweep-*/
-                     subdir from 003 also works.
+                     --config > environment > default.
+  --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}). Every
+                     latency-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
+  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
+                     with different run ids). Without it the report stops, lists the
+                     runs and how to report each alone; with it every format says it
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
   --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
   --fail-on-unreachable
                      After the output, exit 3 when a remote's reach coverage is not
@@ -109,8 +114,11 @@ while [[ $# -gt 0 ]]; do
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
-		RESULTS_DIR_FROM_FLAG=1
 		shift 2
+		;;
+	--allow-multi-run)
+		ALLOW_MULTI_RUN=1
+		shift
 		;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
@@ -148,22 +156,19 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Collect preamble (# KEY=VALUE lines) from the first TSV. KUBE_VERSION[ctx]
-# keys are preserved as-is. Output is captured as an array of "KEY=VALUE"
-# strings to make formatting consistent across output formats.
+# R3/PL6: the report pools every TSV under the results dir; more than one run stops it
+# unless --allow-multi-run, and then every format says so (config_multi_run_note).
+config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
+POOLED_NOTE="$(config_multi_run_note)"
+
+# The preamble (# KEY=VALUE and # KEY[x]=VALUE lines) of every input, each key merged over
+# the files that carry it: one value, or mixed:a,b when it varies (per-probe keys such as
+# RUN_ID, DATE and MESH_SIZE do within a sweep), never the first file's (PL26). An array
+# of "KEY=VALUE" strings, so every output format renders the same list.
 PREAMBLE=()
 while IFS= read -r line; do
 	PREAMBLE+=("$line")
-done < <(awk '
-	/^# / && /=/ {
-		line = $0
-		sub(/^# /, "", line)
-		# Accept KEY=VALUE and KEY[ANY]=VALUE; reject pure comments like "# foo bar".
-		if (line ~ /^[A-Z][A-Z0-9_]*(\[[^]]+\])?=/) print line
-		next
-	}
-	/^[^#]/ { exit }
-' "${TSV_FILES[0]}")
+done < <(config_merged_preamble "${TSV_FILES[@]}")
 
 # Which --config produced the inputs (PL2/PL19), over every input rather than the first
 # file: `none` without one, `unknown` for files written before the key existed,
@@ -176,11 +181,6 @@ PREAMBLE=("${_pre[@]}"
 	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
 unset _pre
-# PL6: a results dir from --config (or the default) is a base dir that can hold many
-# sweeps, and the report aggregates all of them.
-if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
-	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
-fi
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).
 # Counts:
@@ -633,6 +633,7 @@ report_text() {
 	[[ ${#PREAMBLE[@]} -gt 0 ]] && echo ""
 	echo "=== Data-Plane Latency Results ==="
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	echo "Files: ${TSV_FILES[*]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Numeric averages exclude rows with"
 	echo "status != OK or istiod_restarted != 0. n_total and n_valid are reported per cell."
@@ -664,6 +665,7 @@ report_text() {
 
 report_csv() {
 	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	config_multi_run_csv
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
 	local c m q _t _v verdict reason _rest
@@ -773,6 +775,7 @@ report_markdown() {
 	echo ""
 	echo "# Data-Plane Latency Results"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Rows with status != OK or"
 	echo "istiod_restarted != 0 are excluded from numeric averages."
 	echo ""
@@ -911,7 +914,8 @@ report_json() {
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
 		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
-		'{metadata: $metadata,
+		--argjson pooled_runs "$(config_multi_run_json)" \
+		'{metadata: $metadata, pooled_runs: $pooled_runs,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
 		            n_placeholder: $n_placeholder, placeholders: $placeholders,
@@ -934,6 +938,7 @@ report_charts() {
 	echo ""
 	echo "# Data-Plane Latency — Charts"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	# Name every local point that is drawn as 0 because it has no valid sample, and
 	# every one that averages OK rows below the QPS ratio (legacy TSVs).
 	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr lb_notes=0

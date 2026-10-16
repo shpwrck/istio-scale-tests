@@ -78,7 +78,9 @@ TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --combo-id smoke \
   --churn-rate 5 --baseline-file "$TSV" --output-file "$TSV"
 
-# 4. Summarize every TSV under tests/churn-dataplane/results/
+# 4. Summarize tests/churn-dataplane/results/
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/churn-dataplane/005-report-results.sh --format md
 
 # 5. Tear down and wait for the namespace to go away
@@ -101,6 +103,12 @@ first), runs the baseline and churn windows, and finally cleans up. It writes on
 `sweep-summary-<run-id>.md` and `sweep-charts-<run-id>.md` to
 `tests/churn-dataplane/results/sweep-<run-id>/`. More than 64 combinations needs
 `--force-large-matrix`.
+
+Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition,
+or an unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`,
+below; the reports are written); `4` it finished and wrote its reports, but some
+combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows). The last
+line on stderr says how many, by reason; `3` wins over `4`.
 
 ## Remote reachability
 

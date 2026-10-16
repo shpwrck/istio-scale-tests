@@ -233,7 +233,19 @@ Other:
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
 
+Exit codes:
+  0  every cell ran; rows with istiod_restarted 1/unknown are measurement outcomes,
+     counted in the report's n_total and left out of n_valid
+  1  the sweep stopped: a bad flag or precondition, an unexpected error, or a series
+     that could not be retired (RETIRE_FAILED; the reports are written)
+  4  the sweep finished and wrote its reports, but N cells have a status row instead of
+     a measurement (SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED,
+     SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED); stderr ends with "N of M cells failed"
+     by reason
+
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -248,7 +260,8 @@ Environment:
   CONTROLPLANE_APPLY_*, CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S,
   CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, CONTROLPLANE_CLEANUP_GRACE_SEC) before the first
   setup, --dry-run included.
-  SCALE_SIZING_MODE, SCALE_TARGET_FRACTION (recorded in the TSV preamble).
+  SCALE_SIZING_MODE (must be fixed: the sweep refuses auto, which only standalone 001
+  supports), SCALE_TARGET_FRACTION (recorded in the TSV preamble).
   Growth mode: CONTROLPLANE_SERVICES_PER_NAMESPACES (else ..._SERVICES_PER_NAMESPACE),
   CONTROLPLANE_GROWTH_MODE, CONTROLPLANE_WORKLOAD_MODE,
   CONTROLPLANE_MEASUREMENT_POD_COUNTS (else ..._MEASUREMENT_PODS),
@@ -273,6 +286,10 @@ Environment:
   CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
+
+Requires GNU timeout for a live run (002's config-dump samples, the memory guard's
+Envoy-stats reads; on macOS: brew install coreutils, which installs gtimeout). Without
+it a live sweep stops before any cluster change; --dry-run does not need it.
 EOF
 }
 
@@ -442,6 +459,14 @@ PROXY_CHECK_MIN_DIFF="${CONTROLPLANE_PROXY_CHECK_MIN_DIFF:-2}"
 is_nonneg_int "$PROXY_CHECK_TOL_PCT" || die "CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT must be a non-negative integer percent (got: $PROXY_CHECK_TOL_PCT)"
 is_nonneg_int "$PROXY_CHECK_MIN_DIFF" || die "CONTROLPLANE_PROXY_CHECK_MIN_DIFF must be a non-negative integer (got: $PROXY_CHECK_MIN_DIFF)"
 is_nonneg_int "$CONFIG_DUMP_SAMPLES" || die "--config-dump-samples (or CONTROLPLANE_CONFIG_DUMP_SAMPLES) must be a non-negative integer (got: $CONFIG_DUMP_SAMPLES)"
+# SCALE_SIZING_MODE=auto makes 001 deploy a capacity-derived service count, while every
+# row would carry the sweep's --service-counts value: a flat, mislabelled scaling curve
+# (R16). Refused in every mode, before any cluster change; standalone 001 keeps auto.
+case "${SCALE_SIZING_MODE:-fixed}" in
+fixed) ;;
+auto) die "SCALE_SIZING_MODE=auto is for a standalone 001 setup: in a sweep, 001 would deploy a capacity-derived service count while every row records the --service-counts value. Set SCALE_SIZING_MODE=fixed (environment or --config) and choose --service-counts; the capacity plan check a live sweep prints at startup says how many services fit." ;;
+*) die "SCALE_SIZING_MODE must be fixed or auto (got: ${SCALE_SIZING_MODE})" ;;
+esac
 # Empty = read the live Istio CR's sidecar requests (capacity plan, 001 auto-sizing).
 [[ -z "${SCALE_PER_POD_CPU_M:-}" ]] || is_pos_int "$SCALE_PER_POD_CPU_M" || die "SCALE_PER_POD_CPU_M must be empty (read the live sidecar request) or a positive integer of millicores (got: $SCALE_PER_POD_CPU_M)"
 [[ -z "${SCALE_PER_POD_MEM_MI:-}" ]] || is_pos_int "$SCALE_PER_POD_MEM_MI" || die "SCALE_PER_POD_MEM_MI must be empty (read the live sidecar request) or a positive integer of Mi (got: $SCALE_PER_POD_MEM_MI)"
@@ -605,7 +630,6 @@ if ((GROWTH)); then
 	done
 	[[ "$VSDR_APPLY" == together ]] || die "--vsdr-apply split is for the legacy sweep (growth series have no VS/DR)"
 	((${#REPLICA_COUNTS[@]} == 1)) || die "growth series take one --replica-counts value (got: ${REPLICA_COUNTS_CSV})"
-	[[ "${SCALE_SIZING_MODE:-fixed}" != auto ]] || die "SCALE_SIZING_MODE=auto derives service counts, which growth series do not use; set SCALE_SIZING_MODE=fixed"
 	# The ladder of N runs ascending (in place, each step adds namespaces).
 	_sorted_ns="$(printf '%s\n' "${NAMESPACE_COUNTS[@]}" | sort -n -u | awk '{ printf "%s%s", (NR > 1 ? "," : ""), $0 }')"
 	if [[ "$_sorted_ns" != "$(IFS=,; echo "${NAMESPACE_COUNTS[*]}")" ]]; then
@@ -815,7 +839,7 @@ precreate_tsv_preamble() {
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=66"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${harness}"
 		echo "# KUBE_VERSIONS=${kver}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
@@ -1192,6 +1216,26 @@ elif command -v oc >/dev/null 2>&1; then
 else
 	KUBECTL=()
 fi
+# 002's config-dump samples and the growth memory guard's Envoy-stats reads run under
+# timeout/gtimeout; a live sweep without either stops here, before any cluster change,
+# instead of recording every sample N/A (R17). The plan (--dry-run) does not need it.
+((DRY_RUN)) || require_timeout
+# R4: the Istio version every member runs, read once before any cluster change and
+# exported, so 001, 002 and 005 record it (ISTIO_VERSION_CHECK=fail stops here on a
+# mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
+echo "Istio version:     $(istio_version_label)" >&2
+# --resume appends to a TSV whose preamble names the version the sweep started on: rows
+# measured on another one would be credited to it.
+if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
+	_resume_iv="$(grep -m1 '^# ISTIO_VERSION=' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
+	_resume_iv="${_resume_iv#*=}"
+	if [[ -n "$_resume_iv" && "${_resume_iv#v}" != "${ISTIO_VERSION#v}" ]]; then
+		_resume_msg="--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the mesh now runs ${ISTIO_VERSION}, so its new rows would be credited to ${_resume_iv}"
+		[[ "${ISTIO_VERSION_CHECK:-fail}" == warn ]] || die "${_resume_msg}. Start a new sweep (or set ISTIO_VERSION_CHECK=warn to resume anyway)."
+		echo "warning: ${_resume_msg} (ISTIO_VERSION_CHECK=warn)." >&2
+	fi
+fi
 
 capacity_plan_warn
 guard_add_mesh_members
@@ -1319,8 +1363,9 @@ if ((! DRY_RUN)); then
 	if ((GROWTH)); then
 		# Namespace-lifecycle timings (001/005 append) and the memory guard's decisions.
 		ns_lifecycle_init "$LIFECYCLE_FILE" "$RUN_ID"
+		mapfile -t _iv_kv < <(istio_version_kv)
 		write_preamble "Memory stop guard (controlplane growth mode)" "$GUARD_FILE" \
-			"RUN_ID=${RUN_ID}" "HARNESS_SHA=$(harness_sha)" "ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
+			"RUN_ID=${RUN_ID}" "HARNESS_SHA=$(harness_sha)" "${_iv_kv[@]}" \
 			"MEM_STOP_PCT=${MEM_STOP_PCT}" "MEM_GUARD_CONTEXTS=$(IFS=,; echo "${GUARD_CONTEXTS[*]}")" \
 			"GUARD_SCHEMA=2" "GW_MODEL=intercept ${GW_MI_INTERCEPT} Mi; eastwestgateway ${EWGW_MI_PER_1000} Mi per 1000 Services x ${EWGW_BURST}; ingressgateway ${INGW_MI_PER_1000} Mi per 1000 Services x ${INGW_BURST}" \
 			"NOTE=rel_projected = base + (current - base) x ratio^power from the series start (ratio 1: the first step and changes that add no Services); abs_projected (gateways) = (intercept + Mi per 1000 Services x services_after / 1000) x burst factor, plus the non-heap part of a working-set reading (ws - Envoy physical heap); services_after = the context's istiod pilot_services + the Services the step adds; projected = the larger, compared with stop_pct % of limit_mi. metric: rss = istiod process_resident_memory_bytes (max over replicas, per-replica limit); ws = the gateway container's working set (kubectl top), else physical = Envoy server.memory_physical_size, else allocated = server.memory_allocated (istio-proxy limit). verdict stale_base: a gateway's Envoy allocated memory exceeded 1.5 x the model + 100 Mi at the series start (memory kept from an earlier series)."
@@ -2170,7 +2215,7 @@ echo "=========================================="
 if [[ -n "$SWEEP_STOPPED" ]]; then
 	echo "  Sweep STOPPED early ($combo_idx cells; see the ERROR below)"
 else
-	echo "  Sweep complete ($combo_idx combinations)"
+	echo "  Sweep finished ($combo_idx combinations)"
 fi
 echo "=========================================="
 echo ""
@@ -2201,8 +2246,18 @@ else
 fi
 rm -f "$ENVELOPE_ERR"
 
+# R19: every cell without a measurement has the status row emit_failed_row wrote (its
+# context column is the status); count them by reason. The RETIRE_FAILED stop (exit 1)
+# wins over 4 (some cells failed).
+FAILED_CELLS=()
+mapfile -t FAILED_CELLS < <(awk -F'\t' '$1 != "timestamp" && !/^#/ && $2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ { print $2 }' \
+	"${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)
+outcome_rc=0 stop_args=()
+[[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1)
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} "$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if [[ -n "$SWEEP_STOPPED" ]]; then
 	echo "" >&2
 	echo "ERROR: the sweep stopped early: ${SWEEP_STOPPED} (RETIRE_FAILED row in the report). The cells above it are valid; later series did not run." >&2
 	exit 1
 fi
+exit "$outcome_rc"

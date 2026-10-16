@@ -100,6 +100,8 @@ columns measure cross-cluster propagation. Per iteration:
   convergence_remote_eds_ms     first remote EDS push after t0 (control plane only).
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
   CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
   CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
   CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).
@@ -237,15 +239,22 @@ for ctx in "${REMOTES[@]}"; do
 	echo "  [$ctx] Running istiod replicas: $r"
 done
 
-# HARNESS_SHA and ISTIO_VERSION are recorded here so 004 reports the run's commit and
-# Istio pin, not the report host's (the 003 placeholder writes the same two keys, PL36).
+# R4: the Istio version the members run, before the first scale-up (inherited when 003
+# runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
+# mismatch.
+ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
+
+# HARNESS_SHA and the Istio version keys are recorded here so 004 reports the run's
+# commit and Istio version, not the report host's (the 003 placeholder writes the same
+# keys, PL36).
 HARNESS_SHA="$(harness_sha)"
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # HARNESS_SHA=${HARNESS_SHA}
-# ISTIO_VERSION=${ISTIO_VERSION:-unknown}
+$(istio_version_kv | sed 's/^/# /')
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
 # CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
@@ -577,11 +586,18 @@ poll_remote_eds_converged() {
 		ever_complete=1
 		local -a tick_files=()
 		mapfile -t tick_files < <(ctx_metric_files "$polldir" "tick" "${#ports[@]}")
-		local cur_eds
+		local cur_eds base_eds="$baseline_eds"
 		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${tick_files[@]}")
-		[[ -z "$cur_eds" || ! "$cur_eds" =~ ^[0-9]+$ ]] && cur_eds=0
+		# No EDS series in this tick (R10: `unknown`, not 0): not converged yet. One that
+		# was absent at the baseline was registered in the window, so it started at 0
+		# (counter_delta's rule). Absent all along, the poll ends TIMEOUT, never a 0.
+		if [[ ! "$cur_eds" =~ ^[0-9]+$ ]]; then
+			sleep "$POLL_INTERVAL_S"
+			continue
+		fi
+		[[ "$base_eds" =~ ^[0-9]+$ ]] || base_eds=0
 		# Counter can appear to "decrease" mid restart/deploy; treat as not-yet.
-		if (( cur_eds - baseline_eds >= eds_delta_target )); then
+		if (( cur_eds - base_eds >= eds_delta_target )); then
 			now_ns > "$result_file"
 			return
 		fi
@@ -943,10 +959,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		"$ITER_DIR/src-pre.podset" "$ITER_DIR/src-post.podset" \
 		"$src_pre_csv" "$src_post_csv")"
 
+	# counter_delta (metrics.sh, R10): N/A with a warning when the counter is in neither
+	# scrape or went backwards, never 0 or negative.
 	src_post_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_POST_FILES[@]}")
 	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_POST_FILES[@]}")
-	src_triggers_delta=$((src_post_triggers - src_pre_triggers))
-	src_pushes_delta=$((src_post_pushes - src_pre_pushes))
+	src_triggers_delta=$(counter_delta "$src_pre_triggers" "$src_post_triggers" "pilot_push_triggers on ${SOURCE_CTX}")
+	src_pushes_delta=$(counter_delta "$src_pre_pushes" "$src_post_pushes" "pilot_xds_pushes on ${SOURCE_CTX}")
 
 	# PL11: merge buckets across source pods, then delta -> quantile.
 	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-pre-q.merged" "${SRC_PRE_FILES[@]}"
@@ -992,8 +1010,19 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes "${_rpost_files[@]}")
 			rmt_pre_t=$(fanout_counter_sum pilot_push_triggers "${_rpre_files[@]}")
 			rmt_pre_p=$(fanout_counter_sum pilot_xds_pushes "${_rpre_files[@]}")
-			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_t ))
-			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_p ))
+			# Summed over remotes; one remote's N/A makes the sum N/A (an undercount otherwise).
+			rmt_d=$(counter_delta "$rmt_pre_t" "$rmt_post_t" "pilot_push_triggers on ${REMOTES[i]}")
+			if [[ "$rmt_d" == "N/A" || "$rmt_triggers_delta" == "N/A" ]]; then
+				rmt_triggers_delta="N/A"
+			else
+				rmt_triggers_delta=$(( rmt_triggers_delta + rmt_d ))
+			fi
+			rmt_d=$(counter_delta "$rmt_pre_p" "$rmt_post_p" "pilot_xds_pushes on ${REMOTES[i]}")
+			if [[ "$rmt_d" == "N/A" || "$rmt_pushes_delta" == "N/A" ]]; then
+				rmt_pushes_delta="N/A"
+			else
+				rmt_pushes_delta=$(( rmt_pushes_delta + rmt_d ))
+			fi
 
 			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-pre-q.merged" "${_rpre_files[@]}"
 			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-post-q.merged" "${_rpost_files[@]}"
@@ -1076,6 +1105,32 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	if [[ "$status" == "OK" && "$ITER_SCRAPE_INCOMPLETE" == "1" ]]; then
 		status="SCRAPE_INCOMPLETE"
 	fi
+	# R12: an OK row has a number in every measured column, so the report's n_valid
+	# counts the same rows for every average (PL15). The remote EDS push that never
+	# came is TIMEOUT_REMOTE_EDS; any other non-numeric measured value (a watcher that
+	# did not list every churn target, a counter missing from both scrapes, R10) is
+	# MISSING_VALUE. Measured: the three convergence columns and the four push
+	# counter deltas (the remote ones only with remotes). Not gated: the queue and
+	# push-time p99s (N/A means no observation in the window, `overflow` is a value
+	# the report counts) and the connected-proxy gauges.
+	if [[ "$status" == "OK" && ${#REMOTES[@]} -gt 0 && ! "$conv_remote_eds" =~ ^[0-9]+$ ]]; then
+		status="TIMEOUT_REMOTE_EDS"
+	fi
+	if [[ "$status" == "OK" ]]; then
+		missing_cols=()
+		[[ "$conv_local" =~ ^[0-9]+$ ]] || missing_cols+=("convergence_local_ms=${conv_local}")
+		[[ "$src_triggers_delta" =~ ^[0-9]+$ ]] || missing_cols+=("source_push_triggers_delta=${src_triggers_delta}")
+		[[ "$src_pushes_delta" =~ ^[0-9]+$ ]] || missing_cols+=("source_xds_pushes_delta=${src_pushes_delta}")
+		if [[ ${#REMOTES[@]} -gt 0 ]]; then
+			[[ "$conv_remote" =~ ^[0-9]+$ ]] || missing_cols+=("remote_endpoint_reachable_ms=${conv_remote}")
+			[[ "$rmt_triggers_delta" =~ ^[0-9]+$ ]] || missing_cols+=("remote_push_triggers_delta=${rmt_triggers_delta}")
+			[[ "$rmt_pushes_delta" =~ ^[0-9]+$ ]] || missing_cols+=("remote_xds_pushes_delta=${rmt_pushes_delta}")
+		fi
+		if ((${#missing_cols[@]})); then
+			status="MISSING_VALUE"
+			echo "  Warning: iteration ${iter} has no number for ${missing_cols[*]}; status MISSING_VALUE (counted in n_total, not in n_valid)" >&2
+		fi
+	fi
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$RUN_ID" "$MESH_SIZE" "$DEPLOYMENT_COUNT" "$BASE_REPLICAS" "$SCALE_TO" \
@@ -1145,7 +1200,7 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "|-------|-------|"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
-	echo "| Istio version | ${ISTIO_VERSION:-unknown} |"
+	echo "| Istio version | $(istio_version_label) |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 	echo "| Date (UTC) | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"

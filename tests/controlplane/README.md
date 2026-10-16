@@ -85,6 +85,8 @@ standalone, `002` (`--phase combined`) measures only the `--settle` window.
 ## Prerequisites
 
 - `oc` or `kubectl`, `helm`, `jq`, `curl`
+- GNU `timeout` (on macOS: `brew install coreutils`, which installs it as `gtimeout`): it bounds
+  the config-dump and Envoy-stats reads, and a live `002`/`003` stops at startup without it
 - A multi-primary mesh (see the root README) and one kube context per mesh member
 
 ## Quick start
@@ -93,7 +95,8 @@ standalone, `002` (`--phase combined`) measures only the `--settle` window.
 # 1. Deploy 10 services x 3 replicas on both clusters
 ./tests/controlplane/001-setup-controlplane-test.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 
-# 2. One 60 s collection window, then the report
+# 2. One 60 s collection window, then the report (it reads every run under the results
+#    dir; with more than one there it stops and says how to report one)
 ./tests/controlplane/002-collect-resource-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --settle 60
 ./tests/controlplane/004-report-results.sh
 
@@ -129,6 +132,13 @@ the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep re
 preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
 `--vsdr-subsets` that differs. Pass the other options as in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
+
+Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an
+unexpected error, or `RETIRE_FAILED`, after its reports); `4` it finished and wrote its
+reports, but some cells have a status row instead of a measurement (`SETUP_FAILED`,
+`PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `SKIPPED_MEM_GUARD`,
+`SKIPPED_SERIES_STOPPED`). The last line on stderr says how many, by reason; `1` wins
+over `4`.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
 scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces
@@ -187,11 +197,12 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   A sweep that started without `--config` (`RUN_CONFIG=none`) resumes with one after a
   warning. The report prints `unknown` for files
   written before these keys existed, and `mixed:<a>,<b>` with a warning when the inputs
-  disagree. With `--config` but no `--results-dir`, `004` warns when the results dir
-  holds more than one run. Every report also lists the distinct `RUN_ID`, `ISTIO_VERSION`
-  and `HARNESS_SHA` of all its input files (`run_ids`, `istio_versions`, `harness_shas` in
-  all four formats) and warns on stderr whenever it reads more than one run; `run_id` then
-  reads `multiple`. Inputs from different Istio versions or harness commits print a
+  disagree. A results dir with more than one run (each `sweep-*` directory is one; outside
+  one, each `RUN_ID`) stops `004`, which lists the runs and the `--results-dir` that reports
+  each alone; `--allow-multi-run` pools them on purpose (the calibration below), and every
+  format then says it pools N runs. Every report also lists the distinct `RUN_ID`,
+  `ISTIO_VERSION` and `HARNESS_SHA` of all its input files (`run_ids`, `istio_versions`,
+  `harness_shas` in all four formats); with more than one run `run_id` reads `multiple`. Inputs from different Istio versions or harness commits print a
   `WARNING` (stderr and every format) and read `mixed:<a>,<b>`.
 
 ## Traffic management (VS/DR)
@@ -272,7 +283,8 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   scoping. Calibrate with two `--growth fresh` sweeps at one small N into the same results
   base, one config-only and one `--workload-mode pods --replica-counts 1` (both with
   `--namespace-counts 30 --sidecar-scopings namespace --outside-modes none`), then report
-  the base dir rather than one `sweep-<RUN_ID>`; `configs/ns-scaling-lab.env` has the
+  the base dir with `--allow-multi-run` rather than one `sweep-<RUN_ID>`;
+  `configs/ns-scaling-lab.env` has the
   commands. That report names the runs behind each side of a pair (`run=` in the row
   label, `config_only_run_ids`/`pods_run_ids` in JSON) and warns if the sweeps differ in
   Istio version or harness commit. Window deltas (`istiod_cpu_s`, `xds_pushes`, `pushes_per_proxy`) are compared
@@ -353,7 +365,7 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   waits and 005's deletes record `N/A` (not measured).
 - **Report.** A series is one sweep's RUN_ID x mesh size x K x workload (003 refuses a
   repeated mesh size or K). Its cells, grow ladder (N_prev) and fits never pool with another
-  run's, even at the same N, so a base-dir report over several sweeps (a smoke run next to
+  run's, even at the same N, so a base-dir report over several sweeps (`--allow-multi-run`; a smoke run next to
   the main series) fits each series on its own and labels it `run=<RUN_ID>` (`run_id` in
   the JSON records, `series_run_id` per cell). Only the pods-vs-config-only and
   fresh-vs-in-place tables pair cells of different sweeps, as they must; they name each

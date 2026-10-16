@@ -12,23 +12,29 @@
 # never went healthy on that remote's watcher; could be unrelated churn).
 # Reports both n_total (rows considered) and n_valid (rows used).
 #
-# Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION,
+# Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION and its
+# ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE,
 # KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
 # report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
 # over all input TSVs.
 #
+# Every endpoint-*.tsv under the results dir is read. More than one run there (several
+# sweep-* dirs, or standalone probes with different run ids) stops the report unless
+# --allow-multi-run, and then every format says it pools N runs (R3).
+#
 # Usage:
-#   ./tests/propagation/005-report-results.sh [--results-dir DIR] [--format text|csv|json|markdown|charts]
+#   ./tests/propagation/005-report-results.sh [--results-dir DIR] [--allow-multi-run]
+#     [--format text|csv|json|markdown|charts]
 #
 # Examples:
-#   # Default text report from all results:
-#   ./tests/propagation/005-report-results.sh
+#   # Text report of one sweep:
+#   ./tests/propagation/005-report-results.sh --results-dir tests/propagation/results/sweep-<RUN_ID>
 #
-#   # CSV output:
+#   # CSV output of the default results dir (one run in it):
 #   ./tests/propagation/005-report-results.sh --format csv
 #
-#   # Specific results directory:
-#   ./tests/propagation/005-report-results.sh --results-dir tests/propagation/results
+#   # Every run under the default results dir, pooled on purpose:
+#   ./tests/propagation/005-report-results.sh --allow-multi-run
 #
 #   # One sweep of a run config:
 #   ./tests/propagation/005-report-results.sh --config tests/propagation/configs/smoke.env \
@@ -46,11 +52,14 @@ config_preload propagation "$@"
 source "${ROOT}/config/options.env"  # PROPAGATION_RESULTS_DIR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/propagation.sh"  # PROP_ROW_AWK: which rows count (shared with 002)
 
 RESULTS_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
-# 1 when --results-dir is passed (gates the multi-run warning below).
-RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
+# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# like --force-large-matrix, so no options.env key.
+ALLOW_MULTI_RUN=0
 
 
 usage() {
@@ -59,9 +68,13 @@ Usage: $(basename "$0") [options]
 
   --config FILE      Run config of KEY=value lines (config/options.env keys; see
                      tests/propagation/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default. Without --results-dir, warns
-                     when the results dir holds more than one run.
-  --results-dir DIR  Results directory (default: ${PROPAGATION_RESULTS_DIR}).
+                     --config > environment > default.
+  --results-dir DIR  Results directory (default: ${PROPAGATION_RESULTS_DIR}). Every
+                     endpoint-*.tsv under it is read; a sweep-*/ dir from 006 is one run.
+  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
+                     with different run ids). Without it the report stops, lists the
+                     runs and how to report each alone; with it every format says it
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
   --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
@@ -118,8 +131,11 @@ while [[ $# -gt 0 ]]; do
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
-		RESULTS_DIR_FROM_FLAG=1
 		shift 2
+		;;
+	--allow-multi-run)
+		ALLOW_MULTI_RUN=1
+		shift
 		;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
@@ -161,16 +177,16 @@ fi
 #   still rendered as a one-element sequence so the schema is uniform.
 #
 # Implementation: for each input file we collect a row of key=value pairs into
-# PER_FILE_<KEY>[i]. Scalars are looked up via the first row (homogeneous by
-# definition); sequences iterate the rows in input order.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+# PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
+# over every input (config_merged_preamble): one value, or mixed:a,b with a warning.
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
 # shellcheck disable=SC2034
 PREAMBLE_KEYS=("${SWEEP_LEVEL_KEYS[@]}" "${PER_ITER_KEYS[@]}")
 
-declare -A PREAMBLE=()         # last-value-wins scalar map (sweep-level keys)
+declare -A PREAMBLE=()         # every key merged over all inputs (config_merged_preamble)
 declare -A PER_FILE_VALS=()    # KEY|idx -> value (per-iteration values)
 declare -a PER_FILE_INDICES=() # 0..N-1 indices for input files, in collection order
 N_FILES=0
@@ -184,7 +200,6 @@ for f in "${ENDPOINT_FILES[@]}"; do
 				key="${kv%%=*}"
 				val="${kv#*=}"
 				[[ "$key" == "$kv" ]] && continue
-				PREAMBLE["$key"]="$val"
 				PER_FILE_VALS["${key}|${idx}"]="$val"
 				;;
 			*) ;;
@@ -192,16 +207,26 @@ for f in "${ENDPOINT_FILES[@]}"; do
 	done < <(grep -E '^# [A-Z_]+=' "$f" || true)
 	N_FILES=$((N_FILES + 1))
 done
+# Sweep-level values over every input, never the first or the last file's (PL26): a key
+# that varies reads mixed:a,b, and a sweep-level one warns (it should not vary in a run).
+while IFS= read -r kv; do
+	PREAMBLE["${kv%%=*}"]="${kv#*=}"
+done < <(config_merged_preamble "${ENDPOINT_FILES[@]}")
+for k in "${SWEEP_LEVEL_KEYS[@]}"; do
+	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256) continue ;; esac
+	if [[ "${PREAMBLE[$k]:-}" == mixed:* ]]; then
+		echo "warning: input TSVs disagree on sweep-level ${k} (${PREAMBLE[$k]#mixed:}); the report shows it as mixed" >&2
+	fi
+done
 # Which --config produced the inputs (PL2/PL19), over every input rather than the last
 # file: `none` without one, `unknown` for files written before the key existed,
 # mixed:a,b with a warning when they differ (PL26).
 PREAMBLE[RUN_CONFIG]="$(config_report_value RUN_CONFIG "${ENDPOINT_FILES[@]}")"
 PREAMBLE[RUN_CONFIG_SHA256]="$(config_report_value RUN_CONFIG_SHA256 "${ENDPOINT_FILES[@]}")"
-# PL6: a results dir from --config (or the default) is a base dir that can hold many
-# sweeps, and the report aggregates all of them.
-if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
-	config_warn_multi_run "$RESULTS_DIR" "${ENDPOINT_FILES[@]}"
-fi
+# R3/PL6: the report pools every TSV under the results dir; more than one run stops it
+# unless --allow-multi-run, and then every format says so (config_multi_run_note).
+config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${ENDPOINT_FILES[@]}"
+POOLED_NOTE="$(config_multi_run_note)"
 
 # Helper: does any per-file row carry this key?
 preamble_has() {
@@ -374,53 +399,36 @@ format_preamble_json() {
 # Shared awk aggregation block. Uses SUBSEP-keyed single-dim arrays so it works
 # in mawk (no gawk multi-dim required). The $-style dollars are awk fields, not bash.
 # shellcheck disable=SC2016
-AWK_AGG='
+AWK_AGG="${PROP_ROW_AWK}"'
 BEGIN { FS = "\t"; SUBSEP = "\034"; if (MAXSKEW == "") MAXSKEW = 1000 }
 /^#/ { next }
 /^run_id/ { next }
 NF < 10 { next }
 {
 	ms = $2
-	status = $10
-	p1 = $7; p2 = $8; p3 = $9
 	cp50 = ($11 == "") ? "N/A" : $11
 	cp99 = ($12 == "") ? "N/A" : $12
-	overflow = ($15 == "") ? "0" : $15
-	restarted = ($16 == "") ? "0" : $16
-	# p2_dirty introduced mid-branch; pre-branch TSVs (NF=18) lack it.
-	if (NF >= 19) {
-		p2_dirty = ($17 == "") ? "0" : $17
-	} else {
-		p2_dirty = "0"
-	}
-	# scrape_skew_ms (field 19) — present on fanout-era TSVs (NF>=19).
-	skew = (NF >= 19 && $19 ~ /^[0-9]+$/) ? ($19 + 0) : -1
 
 	n_total[ms]++
 	seen[ms] = 1
 
-	# Filter: restarted=1 or unknown, overflow=1, or any non-OK status.
-	if (restarted == "1" || restarted == "unknown") next
-	if (overflow == "1") next
-	if (status != "" && status != "OK") next
-	# R2 reproducibility fallback: a row whose recorded scrape_skew_ms exceeds the
-	# current FANOUT_MAX_SKEW_MS is dropped here even if its status was written OK.
-	# Live runs already tag such rows SCRAPE_INCOMPLETE (caught above); this makes
-	# PRE-gate historical TSVs (status=OK, high skew in field 19) re-derivable
-	# without a probe re-run. -1 means "no skew recorded" (legacy NF<19) -> keep.
-	if (skew >= 0 && skew > MAXSKEW) next
+	# Which rows count: prop_drop_reason (tests/lib/propagation.sh), the definition
+	# 002 summarizes its own rows with (R6). It drops restarted=1|unknown, p1_overflow=1,
+	# any non-OK status, and (R2 reproducibility fallback) a pre-gate row written OK
+	# whose recorded scrape_skew_ms exceeds the current FANOUT_MAX_SKEW_MS.
+	if (prop_drop_reason(MAXSKEW) != "") next
 
 	n_valid[ms]++
 
-	if (p1 != "TIMEOUT" && p1 != "N/A" && p1 ~ /^[0-9]+$/) {
-		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = p1 + 0
+	if (prop_p1_sample()) {
+		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = $7 + 0
 	}
-	# Skip p2 sample if dirty (EDS bumped but P3 did not succeed).
-	if (p2_dirty != "1" && p2 != "TIMEOUT" && p2 != "N/A" && p2 ~ /^[0-9]+$/) {
-		p2_n[ms]++; p2_vals[ms, p2_n[ms]] = p2 + 0
+	# prop_p2_sample skips a dirty p2 (EDS bumped but P3 did not succeed).
+	if (prop_p2_sample()) {
+		p2_n[ms]++; p2_vals[ms, p2_n[ms]] = $8 + 0
 	}
-	if (p3 != "TIMEOUT" && p3 != "N/A" && p3 ~ /^[0-9]+$/) {
-		p3_n[ms]++; p3_vals[ms, p3_n[ms]] = p3 + 0
+	if (prop_p3_sample()) {
+		p3_n[ms]++; p3_vals[ms, p3_n[ms]] = $9 + 0
 	}
 	if (cp50 != "N/A" && cp50 != "overflow" && cp50 ~ /^[0-9]+$/) {
 		cp50_n[ms]++; cp50_vals[ms, cp50_n[ms]] = cp50 + 0
@@ -492,6 +500,7 @@ function asorti_seen(    i, k) {
 report_endpoint_text() {
 	echo "=== Endpoint Propagation Latency ==="
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	echo "Run metadata:"
 	format_preamble_text
 	echo ""
@@ -546,6 +555,7 @@ report_endpoint_text() {
 
 report_endpoint_csv() {
 	format_preamble_csv_header
+	config_multi_run_csv
 	echo ""
 	# worst_bucket: the bucket range of max_ms, for the histogram phases only.
 	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket"
@@ -614,6 +624,7 @@ report_endpoint_markdown() {
 	echo ""
 	echo "# Endpoint Propagation Latency"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
 	echo ""
 	for f in "${ENDPOINT_FILES[@]}"; do
@@ -708,6 +719,7 @@ report_endpoint_json() {
 	# Emit a single object: { metadata: {...}, rows: [...] }.
 	printf '{"metadata":'
 	format_preamble_json
+	printf ',"pooled_runs":%s' "$(config_multi_run_json)"
 	printf ',"rows":'
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function jnum(v) { return (v == "N/A" ? "null" : v) }
@@ -753,6 +765,7 @@ report_endpoint_charts() {
 	echo ""
 	echo "# Endpoint Propagation Latency — Charts"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function chart_avg(src, ms, n,    arr, sum, i) {
 		if (n == 0) return -1

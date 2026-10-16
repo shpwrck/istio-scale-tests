@@ -526,12 +526,16 @@ kinds() {
 @test "003 live growth run against an empty kubeconfig: RETIRE_FAILED row, exit 1 (BACKLOG 9.3)" {
 	command -v helm >/dev/null || skip "helm not installed"
 	out="${BATS_TEST_TMPDIR}/res"
-	CONTROLPLANE_RETIRE_ATTEMPTS=1 CONTROLPLANE_RETIRE_BACKOFF_S=0 METRICS_READY_TIMEOUT=0 KUBECONFIG=/dev/null \
+	# ISTIO_VERSION_CHECK=warn: no Istio CR answers either (R4); the run records unknown.
+	ISTIO_VERSION_CHECK=warn CONTROLPLANE_RETIRE_ATTEMPTS=1 CONTROLPLANE_RETIRE_BACKOFF_S=0 METRICS_READY_TIMEOUT=0 KUBECONFIG=/dev/null \
 		run timeout 300 "${CP}/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --services-per-namespaces 1 \
 		--namespace-counts 2 --sidecar-scopings namespace --workload-mode config-only --settle 0 --probe-settle 0 \
 		--output-dir "$out"
 	assert_failure 1
 	assert_output --partial "ERROR: the sweep stopped early: series"
+	# A stop is exit 1 even with failed cells, and the count line says so: 1 outranks 4 (R19).
+	assert_output --partial "the sweep also stopped early, so it exits 1, not 4."
+	refute_output --partial "exit 4"
 	tsv="$(find "$out" -name 'controlplane-*.tsv')"
 	[ "$(awk -F'\t' '$2 == "RETIRE_FAILED" { print $57 }' "$tsv")" = retire ]
 	# Every row has the schema's width.
@@ -605,4 +609,61 @@ EOF
 	KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --dry-run --contexts ci-dummy --services-per-namespace 2 --namespace-count 5 --parts workloads
 	assert_failure
 	assert_output --partial "--parts workloads is for the legacy layout"
+}
+@test "003 refuses SCALE_SIZING_MODE=auto in every mode, before any step and under --dry-run; 001 alone keeps it (R16)" {
+	local extra f
+	for extra in "" "--services-per-namespaces 1"; do
+		# shellcheck disable=SC2086  # extra is empty or two words
+		SCALE_SIZING_MODE=auto KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --dry-run \
+			--contexts a --mesh-sizes 1 $extra
+		assert_failure 1
+		[[ "$stderr" == *"error: SCALE_SIZING_MODE=auto is for a standalone 001 setup: in a sweep, 001 would deploy a capacity-derived service count while every row records the --service-counts value. Set SCALE_SIZING_MODE=fixed"* ]]
+		[ -z "$output" ]
+	done
+	# From --config too (SCALE_* is in the controlplane vocabulary).
+	f="${BATS_TEST_TMPDIR}/auto.env"
+	echo 'SCALE_SIZING_MODE=auto' > "$f"
+	KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --dry-run --config "$f" --contexts a --mesh-sizes 1
+	assert_failure 1
+	[[ "$stderr" == *"SCALE_SIZING_MODE=auto is for a standalone 001 setup"* ]]
+	SCALE_SIZING_MODE=sometimes KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1
+	assert_failure 1
+	[[ "$stderr" == *"SCALE_SIZING_MODE must be fixed or auto (got: sometimes)"* ]]
+	# A standalone 001 still sizes from capacity (live only; its dry run says so).
+	SCALE_SIZING_MODE=auto KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --dry-run --contexts ci-dummy
+	assert_success
+	assert_output --partial "Sizing mode:     auto (capacity-derived SERVICE_COUNT)"
+}
+
+@test "003 without timeout or gtimeout: a live run stops at startup with the install hint, before any kubectl call; --dry-run runs (R17)" {
+	# A PATH with every tool but timeout and gtimeout, and a kubectl that logs its calls.
+	local d="${BATS_TEST_TMPDIR}/path" p f n
+	mkdir -p "$d"
+	local IFS=:
+	for p in $PATH; do
+		[[ -d "$p" ]] || continue
+		for f in "$p"/*; do
+			n="${f##*/}"
+			[[ -x "$f" && ! -e "${d}/${n}" && "$n" != timeout && "$n" != gtimeout ]] && ln -s "$f" "${d}/${n}"
+		done
+	done
+	unset IFS
+	rm -f "${d}/kubectl" "${d}/oc"
+	export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+	printf '#!/bin/sh\necho "$*" >> "$STUB_LOG"\nexit 1\n' > "${d}/kubectl"
+	chmod +x "${d}/kubectl"
+	PATH="$d" KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 \
+		--output-dir "${BATS_TEST_TMPDIR}/res"
+	assert_failure 1
+	[[ "$stderr" == *"error: neither 'timeout' nor 'gtimeout' (GNU coreutils) is on PATH; the bounded config-dump and Envoy-stats reads need it. On macOS: brew install coreutils"* ]]
+	[ ! -s "$STUB_LOG" ]
+	[ -z "$(find "${BATS_TEST_TMPDIR}/res" -name '*.tsv' 2>/dev/null)" ]
+	PATH="$d" KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts ci-a --mesh-sizes 1
+	assert_success
+	[ ! -s "$STUB_LOG" ]
+	# 002 alone stops the same way.
+	PATH="$d" KUBECONFIG=/dev/null run --separate-stderr "${CP}/002-collect-resource-metrics.sh" --contexts ci-a \
+		--output-dir "${BATS_TEST_TMPDIR}/res"
+	assert_failure 1
+	[[ "$stderr" == *"brew install coreutils"* ]]
 }

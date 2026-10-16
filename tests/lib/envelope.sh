@@ -393,10 +393,13 @@ render_scale_envelope() {
 	# (the report already applied the validity gate to these maxes — PL35).
 	jq_get() { printf '%s' "$json" | jq -r "$1 // \"unknown\"" 2>/dev/null || printf 'unknown'; }
 
-	local node_cpu_m node_mem_mi istio_version harness_sha
+	local node_cpu_m node_mem_mi istio_version istio_version_src harness_sha
 	node_cpu_m="$(jq_get '.metadata.capacity.node_alloc_cpu_m')"
 	node_mem_mi="$(jq_get '.metadata.capacity.node_alloc_mem_mi')"
 	istio_version="$(jq_get '.metadata.istio_version')"
+	# R4: live = read from every member's Istio CR; pin = config only (a dry run, or a
+	# TSV written before the live read: unknown).
+	istio_version_src="$(jq_get '.metadata.istio_version_source') (pin $(jq_get '.metadata.istio_version_pin'))"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
 
 	local proxies_peak proxies_cluster_peak proxy_check istiod_cpu_pct istiod_mem_pct istiod_rss_pct node_cpu_pct node_mem_pct
@@ -544,7 +547,7 @@ render_scale_envelope() {
 | Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Traffic management | ${peak_traffic} | sweep peak \`traffic_config\` (none preferred when a vsdr cell ties at the peak mesh size) |
-| Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
+| Istio version | ${istio_version}, source ${istio_version_src} | sweep header \`ISTIO_VERSION\` (\`ISTIO_VERSION_SOURCE\` live: every member's Istio CR \`.spec.version\`) |
 
 > **Connected proxies per cluster** is \`pilot_xds\` summed over one cluster's istiod replicas at one scrape. It should be about equal to that cluster's Running injected pods (gateways included), which the proxy check compares. It is still not a mesh-wide sum and not endpoints; do not expect it to equal total endpoints. **Per istiod replica** is the busiest single replica (max over the per-pod rows), about 1/R of the cluster figure with R replicas.
 

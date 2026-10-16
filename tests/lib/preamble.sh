@@ -11,6 +11,16 @@
 #                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
 #   tuning_baseline_state <ctx> <kubectl_argv...>  -> two lines (TUNING_BASELINE=, SIDECAR_EGRESS_HOSTS=)
 #                                                     queried from the LIVE mesh, on|off|unknown (PL2)
+#   istio_live_version <ctx> <kubectl_argv...>     -> the member's Istio CR `default` .spec.version,
+#                                                     or unknown (bounded read, never a guess)
+#   istio_version_resolve <ctxs_csv> <dry_run> <kubectl_argv...>
+#                                                  -> R4/PL39: read the live version on every member
+#       once per run, check it against the pin (ISTIO_VERSION_CHECK=fail dies, warn warns) and
+#       export ISTIO_VERSION (what the results record), ISTIO_VERSION_PIN, ISTIO_VERSION_SOURCE
+#       and ISTIO_VERSION_BY_CONTEXT; a no-op when a parent sweep already resolved them
+#   istio_version_kv                               -> ISTIO_VERSION=, ISTIO_VERSION_PIN=,
+#       ISTIO_VERSION_SOURCE= lines for every preamble writer (PL36)
+#   istio_version_label                            -> the same for people (console, md rows)
 #   write_preamble <title> <tsv> <k=v...>          -> write `# <title>`, `# generated_at=`, then `# k=v` per arg (PL2, PL19)
 #   infra_preamble_lines <kv...>                   -> emit the cluster-infra `# KEY=value` block
 #       (istiod req/lim, replicas, network topology) for the TSV preamble.
@@ -223,6 +233,114 @@ tuning_baseline_state() {
 	printf 'SIDECAR_EGRESS_HOSTS=%s\n' "$hosts"
 }
 
+# istio_live_version <ctx> <kubectl_argv...>: the Istio version a mesh member runs, from
+# its Sail Istio CR `default` (.spec.version, the field gateway-api records as
+# ISTIO_CR_VERSION), bounded by --request-timeout=5s. `unknown` on any failure (no CR,
+# no access, unreachable) or a value that is not a version token, never a guess.
+# shellcheck disable=SC2329
+istio_live_version() {
+	local ctx="$1" out
+	shift
+	out="$("$@" --context="$ctx" --request-timeout=5s get istios.sailoperator.io default \
+		-o 'jsonpath={.spec.version}' 2>/dev/null)" || out=""
+	[[ "$out" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || out=unknown
+	printf '%s\n' "$out"
+}
+
+# istio_version_resolve <ctxs_csv> <dry_run 0|1> <kubectl_argv...>: R4 (PL39). The results
+# record the Istio version the mesh runs, not only the config/versions.env pin (an
+# existing cluster, a bumped istioVersion, or an ISTIO_VERSION left in the shell by
+# Istio's download script would mislabel them). Call it once per run, before any cluster
+# change and outside any measurement window: a sweep before its first step (its steps
+# inherit the exported result and return at once), a standalone probe before its first
+# mutation. Reads every member concurrently (istio_live_version) and exports:
+#   ISTIO_VERSION_PIN         the pin (ISTIO_VERSION as versions.env / the environment set it)
+#   ISTIO_VERSION_SOURCE      live, or pin under --dry-run (nothing is read)
+#   ISTIO_VERSION_BY_CONTEXT  ctx=version,... (unknown where unreadable)
+#   ISTIO_VERSION             what every preamble records: the live version every member
+#                             runs; under ISTIO_VERSION_CHECK=warn the truth when they do not
+#                             agree (unknown, or mixed:a,b); the pin under --dry-run
+# ISTIO_VERSION_CHECK=fail (default) dies when a member's version is unreadable, members
+# differ, or it differs from the pin (a leading v is ignored); warn prints the same
+# problem as a warning and goes on. Needs die() and split_csv() from common.sh.
+# shellcheck disable=SC2329
+istio_version_resolve() {
+	local ctxs_csv="$1" dry="$2" policy="${ISTIO_VERSION_CHECK:-fail}"
+	shift 2
+	# Resolved by the sweep that runs this step: inherit, never a second read mid-sweep.
+	if [[ -n "${ISTIO_VERSION_SOURCE:-}" && -n "${ISTIO_VERSION_PIN:-}" ]]; then
+		return 0
+	fi
+	case "$policy" in
+	fail | warn) ;;
+	*) die "ISTIO_VERSION_CHECK must be fail or warn (got: ${policy})" ;;
+	esac
+	export ISTIO_VERSION_PIN="${ISTIO_VERSION:-unknown}"
+	if ((dry)); then
+		export ISTIO_VERSION_SOURCE=pin ISTIO_VERSION_BY_CONTEXT=unchecked
+		export ISTIO_VERSION="$ISTIO_VERSION_PIN"
+		return 0
+	fi
+	local -a ctxs=() pids=()
+	split_csv "$ctxs_csv" ctxs
+	((${#ctxs[@]})) || die "istio_version_resolve: no mesh member contexts"
+	local tmp i p v by="" distinct="" unreadable="" live problem=""
+	tmp="$(mktemp -d)"
+	# Temp files are named by index: context names can contain '/' (oc login style).
+	for i in "${!ctxs[@]}"; do
+		istio_live_version "${ctxs[i]}" "$@" > "${tmp}/${i}" &
+		pids+=($!)
+	done
+	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+	for i in "${!ctxs[@]}"; do
+		v="$(cat "${tmp}/${i}" 2>/dev/null || true)"
+		[[ -n "$v" ]] || v=unknown
+		by="${by:+${by},}${ctxs[i]}=${v}"
+		if [[ "$v" == unknown ]]; then
+			unreadable="${unreadable:+${unreadable},}${ctxs[i]}"
+		fi
+		case ",${distinct}," in *",${v},"*) ;; *) distinct="${distinct:+${distinct},}${v}" ;; esac
+	done
+	rm -rf "$tmp"
+	if [[ "$distinct" == *,* ]]; then live="mixed:${distinct}"; else live="$distinct"; fi
+	if [[ -n "$unreadable" ]]; then
+		problem="cannot read the Istio version (istios.sailoperator.io default .spec.version) on ${unreadable}"
+	elif [[ "$distinct" == *,* ]]; then
+		problem="the mesh members run different Istio versions (${by})"
+	elif [[ "${live#v}" != "${ISTIO_VERSION_PIN#v}" ]]; then
+		problem="the mesh runs Istio ${live} (${by}), but ISTIO_VERSION is ${ISTIO_VERSION_PIN} (config/versions.env, or an ISTIO_VERSION exported in this shell)"
+	fi
+	if [[ -n "$problem" ]]; then
+		if [[ "$policy" == fail ]]; then
+			die "${problem}. Nothing was changed. Fix the pin or the mesh, or set ISTIO_VERSION_CHECK=warn to go on and record ISTIO_VERSION=${live}."
+		fi
+		echo "warning: ${problem}; ISTIO_VERSION_CHECK=warn, so the results record ISTIO_VERSION=${live} (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
+	fi
+	export ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT="$by"
+	export ISTIO_VERSION="$live"
+}
+
+# istio_version_kv: the Istio version keys every preamble writer records (PL36), as
+# KEY=value lines: ISTIO_VERSION, ISTIO_VERSION_PIN and ISTIO_VERSION_SOURCE (pin when
+# nothing resolved them: the value is then the pin, unchecked).
+# shellcheck disable=SC2329
+istio_version_kv() {
+	echo "ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+	echo "ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN:-${ISTIO_VERSION:-unknown}}"
+	echo "ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE:-pin}"
+}
+
+# istio_version_label: ISTIO_VERSION for people (console lines, per-run markdown rows):
+# "v1.30.5 (read live; pin v1.30.5)", or "v1.30.5 (the pin; not read live)".
+# shellcheck disable=SC2329
+istio_version_label() {
+	if [[ "${ISTIO_VERSION_SOURCE:-pin}" == live ]]; then
+		echo "${ISTIO_VERSION:-unknown} (read live; pin ${ISTIO_VERSION_PIN:-unknown})"
+	else
+		echo "${ISTIO_VERSION:-unknown} (the pin; not read live)"
+	fi
+}
+
 # Write the TSV preamble required by PL2 + PL19. Every comment line is `# key=value`.
 # Usage: write_preamble <title> <tsv_file> <key1=val1> <key2=val2> ...
 # shellcheck disable=SC2329
@@ -284,7 +402,7 @@ ns_lifecycle_init() {
 		echo "# NS_LIFECYCLE_SCHEMA=2"
 		echo "# RUN_ID=${run_id}"
 		echo "# HARNESS_SHA=$(harness_sha)"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
 		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"
 		echo "# NS_DELETE_TIMEOUT_SEC=${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-unknown}"

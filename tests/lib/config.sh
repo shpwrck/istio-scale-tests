@@ -47,13 +47,28 @@
 #   config_repo_path <path>        -> <path> if absolute, else ${ROOT}/<path>
 #   config_snapshot <dir> <run_id> -> a sweep's replay copy <dir>/run-config-<run_id>.env;
 #                                     no-op without a config, warns if the copy fails
+#   config_input_value <key> <missing> <tsv>...
+#                                  -> a `# <key>=` preamble value over every input of a
+#                                     report: one value, or mixed:a,b (PL26); a file without
+#                                     the line reads <missing> (empty: adds nothing)
 #   config_report_value <key> <tsv>...
 #                                  -> a report's RUN_CONFIG or RUN_CONFIG_SHA256 over all its
 #                                     inputs: one value, mixed:a,b with a warning (PL26), and
 #                                     unknown for a file written before the key existed
-#   config_warn_multi_run <dir> <tsv>...
-#                                  -> warn when a report's inputs come from more than one
-#                                     run: a sweep-* dir, or a RUN_ID outside one (PL6)
+#   config_merged_preamble <tsv>...
+#                                  -> KEY=value for every preamble key of the inputs, merged
+#                                     as config_input_value does (varying keys read mixed:)
+#   config_check_multi_run <dir> <allow> <tsv>...
+#                                  -> count the runs among a report's inputs (a sweep-* dir,
+#                                     or a run id outside one; PL6/PL26); more than one dies
+#                                     unless <allow> is 1 (--allow-multi-run). Sets
+#                                     MULTI_RUN_N, MULTI_RUN_IDS, MULTI_RUN_HARNESS_SHAS,
+#                                     MULTI_RUN_ISTIO_VERSIONS
+#   config_multi_run_note          -> the sentence a pooled report prints in every format
+#                                     (nothing for one run)
+#   config_multi_run_csv           -> `# POOLED_*=` lines for a csv (nothing for one run)
+#   config_multi_run_json          -> {"runs":N,"run_ids":[..],"harness_sha":[..],
+#                                     "istio_version":[..]} (also for one run)
 #
 # Provenance, exported so the steps a config-driven sweep runs inherit it:
 #   RUN_CONFIG         the file's path relative to the repo root, or its basename outside the
@@ -88,6 +103,8 @@ config_suite_prefixes() {
 # Keys every suite takes: ISTIOD_DIAG_* tune the istiod restart evidence capture
 # (tests/lib/istiod-diag.sh). An unknown-key error names them after the suite's own list.
 CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
+# Keys every suite reads that no --config sets (_config_env_only_reason says why).
+CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -99,13 +116,14 @@ _config_key_matches() {
 	esac
 }
 
-# _config_env_only_reason <key>: why a key with a suite prefix stays env-only; empty if it
-# does not.
+# _config_env_only_reason <key>: why a key with a suite prefix (or in CONFIG_SHARED_ENV_ONLY)
+# stays env-only; empty if it does not.
 # shellcheck disable=SC2329
 _config_env_only_reason() {
 	case "$1" in
 	*_TEST_NAMESPACE) echo "cleanup deletes this namespace, so a typo in a file could delete a real one" ;;
 	*_MAX_MATRIX) echo "the large-matrix acknowledgment stays per invocation (PL10)" ;;
+	ISTIO_VERSION_CHECK) echo "running on a mesh whose Istio version is not the pin is acknowledged per invocation, like the pins themselves" ;;
 	esac
 }
 
@@ -227,7 +245,7 @@ load_config() {
 		if [[ -z "${cfg_allowed[$key]:-}" ]]; then
 			reason="$(_config_env_only_reason "$key")"
 			env_only=0
-			for p in $prefixes; do
+			for p in $prefixes $CONFIG_SHARED_ENV_ONLY; do
 				[[ -n "$reason" ]] && _config_key_matches "$key" "$p" && env_only=1
 			done
 			if ((env_only)); then
@@ -326,27 +344,106 @@ config_snapshot() {
 	return 0
 }
 
+# _config_distinct <key> <missing> <tsv>...: the distinct `# <key>=` values of the files,
+# one per line in file order (an empty value as an empty line). A file without the line
+# reads <missing>, or adds nothing when <missing> is empty. <key> is a plain name.
+_config_distinct() {
+	local key="$1" missing="$2" f line
+	shift 2
+	for f in "$@"; do
+		line="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
+		if [[ -n "$line" ]]; then
+			printf '%s\n' "${line#*=}"
+		elif [[ -n "$missing" ]]; then
+			printf '%s\n' "$missing"
+		fi
+	done | awk '!seen[$0]++'
+}
+
+# _config_join_mixed: stdin's lines (distinct values) as one value: the line itself when
+# there is one, else mixed:a,b (joined with " | " when a value holds a comma, as a
+# KUBE_VERSIONS list does; an empty value reads (empty)). No input, no output.
+_config_join_mixed() {
+	awk '
+		{ v[++n] = $0; if (index($0, ",")) c = 1 }
+		END {
+			if (n == 0) exit
+			if (n == 1) { print v[1]; exit }
+			out = "mixed:"
+			for (i = 1; i <= n; i++) out = out (i > 1 ? (c ? " | " : ",") : "") (v[i] == "" ? "(empty)" : v[i])
+			print out
+		}'
+}
+
+# config_input_value <key> <missing> <tsv>...: a `# <key>=` preamble value over every input
+# of a report, never the first or the last file's (PL26): one distinct value -> it, several
+# -> mixed:a,b in file order. A file without the line reads <missing>, or adds nothing when
+# <missing> is empty. No output when no file contributes.
+# shellcheck disable=SC2329
+config_input_value() {
+	local key="$1" missing="$2"
+	shift 2
+	_config_distinct "$key" "$missing" "$@" | _config_join_mixed
+}
+
 # config_report_value <key> <tsv>...: the `# <key>=` preamble value (RUN_CONFIG or
 # RUN_CONFIG_SHA256) over every input of a report. A file without the line counts as
 # unknown (written before the key existed), so it is never credited to a config. One
 # value -> that value; several -> mixed:a,b plus a stderr warning (PL26).
 # shellcheck disable=SC2329
 config_report_value() {
-	local key="$1" f v vals=""
+	local key="$1" v
 	shift
-	for f in "$@"; do
-		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
-		if [[ -n "$v" ]]; then v="${v#*=}"; else v=unknown; fi
-		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
-	done
-	if [[ -z "$vals" ]]; then
+	v="$(config_input_value "$key" unknown "$@")"
+	if [[ -z "$v" ]]; then
 		echo unknown
-	elif [[ "$vals" == *,* ]]; then
-		echo "warning: input TSVs disagree on ${key} (${vals}); the report mixes runs made with different --config files" >&2
-		echo "mixed:${vals}"
+	elif [[ "$v" == mixed:* ]]; then
+		echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs made with different --config files" >&2
+		echo "$v"
 	else
-		echo "$vals"
+		echo "$v"
 	fi
+}
+
+# config_merged_preamble <tsv>...: KEY=value for every `# KEY=value` (or KEY[x]=value)
+# preamble line of the inputs, the lines before a file's first data or header line. Keys
+# come in first-seen order; each value is merged over the files that carry the key as
+# _config_join_mixed does (a file without the key adds nothing), so a report that shows
+# these never shows one file's value for a key that varies (PL26).
+# shellcheck disable=SC2329
+config_merged_preamble() {
+	(($#)) || return 0
+	awk '
+		FNR == 1 { fid++; inpre = 1 }
+		!inpre { next }
+		/^# / {
+			line = substr($0, 3)
+			if (line !~ /^[A-Z][A-Z0-9_]*(\[[^]]+\])?=/) next
+			k = line
+			sub(/=.*/, "", k)
+			if ((fid, k) in infile) next
+			infile[fid, k] = 1
+			v = substr(line, length(k) + 2)
+			if (!(k in nv)) { order[++n] = k; nv[k] = 0 }
+			if (!((k, v) in seen)) {
+				seen[k, v] = 1
+				val[k, ++nv[k]] = v
+				if (index(v, ",")) comma[k] = 1
+			}
+			next
+		}
+		/^#/ || /^$/ { next }
+		{ inpre = 0 }
+		END {
+			for (i = 1; i <= n; i++) {
+				k = order[i]
+				if (nv[k] == 1) { print k "=" val[k, 1]; continue }
+				out = ""
+				for (j = 1; j <= nv[k]; j++)
+					out = out (j > 1 ? ((k in comma) ? " | " : ",") : "") (val[k, j] == "" ? "(empty)" : val[k, j])
+				print k "=mixed:" out
+			}
+		}' "$@"
 }
 
 # _config_run_key <tsv>: the run a report input belongs to. A file in a sweep-* dir
@@ -375,18 +472,87 @@ _config_run_key() {
 	if [[ -n "$id" ]]; then echo "$id"; else echo "${f##*/}"; fi
 }
 
-# config_warn_multi_run <results_dir> <tsv>...: PL6 for a results dir that came from a
-# config (or the default): a base dir aggregates every run under it. Counts one run per
-# sweep-* dir and one per distinct RUN_ID among the files outside one (_config_run_key),
-# so two standalone probes into the same dir warn too. Callers warn only with --config
-# and without --results-dir, so a report without --config prints what it always did.
+# config_check_multi_run <results_dir> <allow 0|1> <tsv>...: a report pools every TSV
+# under its results dir (PL6), so count the runs among its inputs, with or without
+# --config and --results-dir: one per sweep-* dir and one per distinct sweep-level id
+# outside one (_config_run_key; the per-iteration RUN_IDs of one sweep are one run, PL26).
+# Sets MULTI_RUN_N, MULTI_RUN_IDS (sorted, comma-separated) and MULTI_RUN_HARNESS_SHAS /
+# MULTI_RUN_ISTIO_VERSIONS (distinct preamble values in file order; unknown for a file
+# without the line). More than one run with <allow> 0 dies, listing the first five runs
+# and how to report each alone; with <allow> 1 (--allow-multi-run) it warns, and the
+# report says so in every format (config_multi_run_note, _csv, _json).
+# shellcheck disable=SC2329,SC2034
+config_check_multi_run() {
+	local dir="$1" allow="$2" f k d i=0 runs
+	local -A run_dir=()
+	shift 2
+	for f in "$@"; do
+		k="$(_config_run_key "$f")"
+		[[ -z "${run_dir[$k]+x}" ]] || continue
+		d=.
+		[[ "$f" == */* ]] && d="${f%/*}"
+		run_dir[$k]="$d"
+	done
+	runs="$(printf '%s\n' "${!run_dir[@]}" | LC_ALL=C sort)"
+	MULTI_RUN_N="${#run_dir[@]}"
+	MULTI_RUN_IDS="$(awk 'NF { printf "%s%s", (n++ ? "," : ""), $0 }' <<<"$runs")"
+	MULTI_RUN_HARNESS_SHAS="$(_config_distinct HARNESS_SHA unknown "$@" | awk '{ printf "%s%s", (NR > 1 ? "," : ""), ($0 == "" ? "unknown" : $0) }')"
+	MULTI_RUN_ISTIO_VERSIONS="$(_config_distinct ISTIO_VERSION unknown "$@" | awk '{ printf "%s%s", (NR > 1 ? "," : ""), ($0 == "" ? "unknown" : $0) }')"
+	((MULTI_RUN_N > 1)) || return 0
+	if ((allow)); then
+		echo "warning: --allow-multi-run: this report pools ${MULTI_RUN_N} runs from ${dir} (${MULTI_RUN_IDS}); HARNESS_SHA ${MULTI_RUN_HARNESS_SHAS}; ISTIO_VERSION ${MULTI_RUN_ISTIO_VERSIONS}. Every format says so." >&2
+		return 0
+	fi
+	{
+		echo "error: ${dir} holds ${MULTI_RUN_N} runs, and a report pools every TSV under its results dir. Report one run (add your other flags):"
+		while IFS= read -r k; do
+			if ((++i > 5)); then
+				echo "  ... and $((MULTI_RUN_N - 5)) more"
+				break
+			fi
+			d="${run_dir[$k]}"
+			case "$k" in
+			sweep-*) echo "  ${k}: $0 --results-dir ${d}" ;;
+			*) echo "  ${k}: its files are in ${d}, outside a sweep-* dir; move them into a directory of their own and pass that as --results-dir" ;;
+			esac
+		done <<<"$runs"
+		echo "Or pass --allow-multi-run to pool them on purpose: every format then says it pools ${MULTI_RUN_N} runs and lists their HARNESS_SHA and ISTIO_VERSION values."
+	} >&2
+	exit 1
+}
+
+# config_multi_run_note: the sentence every format of a pooled report carries, after
+# config_check_multi_run. Nothing for a report of one run.
 # shellcheck disable=SC2329
-config_warn_multi_run() {
-	local dir="$1" runs n list f
-	shift
-	runs="$(for f in "$@"; do _config_run_key "$f"; done | LC_ALL=C sort -u)"
-	n="$(grep -c . <<<"$runs" || true)"
-	((n > 1)) || return 0
-	list="$(awk 'NR <= 5 { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { if (NR > 5) printf ",..." }' <<<"$runs")"
-	echo "warning: ${dir} holds ${n} runs (${list}); this report aggregates all of them. Pass --results-dir <dir>/sweep-<RUN_ID> to report one sweep." >&2
+config_multi_run_note() {
+	((${MULTI_RUN_N:-1} > 1)) || return 0
+	local differ=""
+	if [[ "${MULTI_RUN_HARNESS_SHAS}" == *,* || "${MULTI_RUN_ISTIO_VERSIONS}" == *,* ]]; then
+		differ=" These differ, so the pooled rows were not all measured with the same harness or Istio version."
+	fi
+	echo "This report pools ${MULTI_RUN_N} runs (--allow-multi-run): ${MULTI_RUN_IDS//,/, }. HARNESS_SHA: ${MULTI_RUN_HARNESS_SHAS//,/, }. ISTIO_VERSION: ${MULTI_RUN_ISTIO_VERSIONS//,/, }.${differ}"
+}
+
+# config_multi_run_csv: `# POOLED_*=` comment lines for a csv report. Nothing for one run.
+# shellcheck disable=SC2329
+config_multi_run_csv() {
+	((${MULTI_RUN_N:-1} > 1)) || return 0
+	echo "# POOLED_RUNS=${MULTI_RUN_N}"
+	echo "# POOLED_RUN_IDS=${MULTI_RUN_IDS}"
+	echo "# POOLED_HARNESS_SHAS=${MULTI_RUN_HARNESS_SHAS}"
+	echo "# POOLED_ISTIO_VERSIONS=${MULTI_RUN_ISTIO_VERSIONS}"
+	echo "# NOTE: $(config_multi_run_note)"
+}
+
+# config_multi_run_json: the pooled runs as a JSON object, for one run too.
+# shellcheck disable=SC2329
+config_multi_run_json() {
+	awk -v n="${MULTI_RUN_N:-1}" -v ids="${MULTI_RUN_IDS:-}" -v shas="${MULTI_RUN_HARNESS_SHAS:-}" -v vers="${MULTI_RUN_ISTIO_VERSIONS:-}" '
+		function arr(s,    a, k, i, o) {
+			k = split(s, a, ",")
+			o = "["
+			for (i = 1; i <= k; i++) { gsub(/["\\]/, "", a[i]); o = o (i > 1 ? "," : "") "\"" a[i] "\"" }
+			return o "]"
+		}
+		BEGIN { printf "{\"runs\":%d,\"run_ids\":%s,\"harness_sha\":%s,\"istio_version\":%s}\n", n, arr(ids), arr(shas), arr(vers) }'
 }

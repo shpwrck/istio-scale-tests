@@ -48,7 +48,8 @@ its findings log was removed once every finding was fixed or superseded.
 ```
 # RUN_ID=<timestamp + $$>
 # HARNESS_SHA=$(git describe --always --dirty --abbrev=7)
-# ISTIO_VERSION=<from config/versions.env>
+# ISTIO_VERSION=<what the members' Istio CRs run, read live once per run (istio_version_kv)>
+# ISTIO_VERSION_PIN=<from config/versions.env>   ISTIO_VERSION_SOURCE=<live | pin under --dry-run>
 # KUBE_VERSIONS[ctx]=<per-context, concurrent probes, --request-timeout=5s>
 # SETTLE_SEC=<value>
 # (any other knob that affects the result)

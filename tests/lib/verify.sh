@@ -142,7 +142,13 @@ EXTRACTED_PATTERNS=(
 	'config_repo_path() {'
 	'config_snapshot() {'
 	'config_report_value() {'
-	'config_warn_multi_run() {'
+	# batch B: one run per report, merged preambles (config.sh)
+	'config_input_value() {'
+	'config_merged_preamble() {'
+	'config_check_multi_run() {'
+	'config_multi_run_note() {'
+	'config_multi_run_csv() {'
+	'config_multi_run_json() {'
 	# validation fixes: istiod replicas over every context, reach-check cost bound
 	'env_replicas_summary() {'
 	'env_replicas_label() {'
@@ -180,6 +186,21 @@ EXTRACTED_PATTERNS=(
 	'cap_per_pod_requests() {'
 	'cap_parse_requested() {'
 	'cap_requested() {'
+	# batch B: bounded exec calls (common.sh)
+	'timeout_cmd() {'
+	'require_timeout() {'
+	'run_timeout() {'
+	# batch B: counter window deltas (metrics.sh)
+	'counter_delta() {'
+	# batch B: sweep outcome (common.sh)
+	'sweep_outcome() {'
+	# batch B: which propagation rows count (propagation.sh, awk)
+	'function prop_drop_reason('
+	# batch B: the Istio version the mesh runs (preamble.sh)
+	'istio_live_version() {'
+	'istio_version_resolve() {'
+	'istio_version_kv() {'
+	'istio_version_label() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

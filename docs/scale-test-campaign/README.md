@@ -23,7 +23,12 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
 4. **A kubeconfig with every mesh-member context.** Set `SETUP_CONTEXTS` in `config/versions.env`
    or pass `--contexts`: mesh members only, never the ACM hub. Token/OAuth credentials must stay
    valid for the whole multi-hour run.
-5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`.
+5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`, and GNU `timeout` (macOS: `brew install
+   coreutils` for `gtimeout`; the controlplane suite stops at startup without one).
+6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite reads each member's Istio CR
+   version before its first change and stops when it differs from `ISTIO_VERSION`
+   (`config/versions.env`), when members differ, or when one cannot be read. Fix the pin (or the
+   mesh); `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs.
 
 ## Capacity planning
 
@@ -110,7 +115,7 @@ completion:
 
 ```bash
 # 1. propagation — xDS propagation latency (~tens of min)
-tests/propagation/006-run-sweep.sh    --contexts "$CONTEXTS" --mesh-sizes "$MESH" --iterations 10 --force-large-matrix --tsv
+tests/propagation/006-run-sweep.sh    --contexts "$CONTEXTS" --mesh-sizes "$MESH" --iterations 10 --force-large-matrix
 
 # 2. churn — convergence under endpoint churn (~tens of min)
 tests/churn/003-run-sweep.sh          --contexts "$CONTEXTS" --mesh-sizes "$MESH"
@@ -128,10 +133,15 @@ tests/churn-dataplane/004-run-sweep.sh --contexts "$CONTEXTS" --mesh-sizes "$MES
 ```
 
 Between suites, confirm the previous suite's `*-test` namespaces are gone and repeat Stage 0.
+Check each sweep's exit code: `4` means it finished and wrote its reports but some cells
+failed (the last stderr line says how many, by reason; their placeholder rows are in the
+report); `3` a reachability stop; `1` it stopped. Each suite README lists its codes.
 
 ### Stage 4 — Collect results
 
-Read each suite's markdown summary (re-generate with its `004`/`005` report script if needed).
+Read each suite's markdown summary (re-generate it with the suite's `004`/`005` report script
+and `--results-dir tests/<suite>/results/sweep-<RUN_ID>`; a report of a dir with more than one
+run stops and lists them, unless `--allow-multi-run` pools them on purpose).
 Reports drop poisoned or incomplete rows and print `n_valid` vs `n_total`; read that first.
 For dataplane and churn-dataplane, also read the `Remote coverage` section (every remote
 REACHABLE?) and, for dataplane, the `Local baseline` verdict (OK at every QPS level?):

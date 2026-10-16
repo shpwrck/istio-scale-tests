@@ -159,6 +159,8 @@ reject() {
 	reject 1 'ISTIO_VERSION is a version pin' 'ISTIO_VERSION=v1.0.0'
 	reject 1 'CONTROLPLANE_TEST_NAMESPACE is not settable from --config' 'CONTROLPLANE_TEST_NAMESPACE=istio-system'
 	reject 1 'CONTROLPLANE_MAX_MATRIX is not settable from --config' 'CONTROLPLANE_MAX_MATRIX=9999'
+	# R4: every suite reads it; a file never turns the Istio version check off.
+	reject 1 'ISTIO_VERSION_CHECK is not settable from --config (env only: running on a mesh whose Istio version is not the pin' 'ISTIO_VERSION_CHECK=warn'
 }
 
 @test "load_config: one bad line rejects the whole file; nothing is exported" {
@@ -209,7 +211,7 @@ reject() {
 		grep -qx "$k" <<<"$output" || { echo "missing: $k"; false; }
 	done
 	for k in CONTROLPLANE_TEST_NAMESPACE CONTROLPLANE_MAX_MATRIX ISTIO_VERSION BUSYBOX_VERSION \
-		DATAPLANE_QPS_LEVELS METRICS_API_STATUS PATH; do
+		ISTIO_VERSION_CHECK DATAPLANE_QPS_LEVELS METRICS_API_STATUS PATH; do
 		! grep -qx "$k" <<<"$output" || { echo "unexpected: $k"; false; }
 	done
 	# Every listed key is an options.env export (or SETUP_CONTEXTS), so a key added
@@ -587,7 +589,7 @@ with_run_config() {
 	mkdir -p "$d"
 	with_run_config "$REPORT_FIXTURE" "$d/controlplane-a.tsv" run-a a.env aaa
 	with_run_config "$REPORT_FIXTURE" "$d/controlplane-b.tsv" run-b b.env bbb
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format json
+	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
 	assert_success
 	[ "$(jq -r '.metadata.run_config' <<<"$output")" = "mixed:a.env,b.env" ]
 	[[ "$stderr" == *"input TSVs disagree on RUN_CONFIG (a.env,b.env)"* ]]
@@ -600,14 +602,14 @@ with_run_config() {
 	# A file from before the key existed (no RUN_CONFIG* lines), e.g. an older lab run.
 	sed 's/^# RUN_ID=.*/# RUN_ID=run-old/' "$REPORT_FIXTURE" > "$d/controlplane-b.tsv"
 	! grep -q '^# RUN_CONFIG' "$d/controlplane-b.tsv"
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format json
+	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
 	assert_success
 	[ "$(jq -r '.metadata.run_config' <<<"$output")" = "mixed:smoke.env,unknown" ]
 	[ "$(jq -r '.metadata.run_config_sha256' <<<"$output")" = "mixed:abc123,unknown" ]
 	[[ "$stderr" == *"input TSVs disagree on RUN_CONFIG (smoke.env,unknown)"* ]]
 	[[ "$stderr" == *"input TSVs disagree on RUN_CONFIG_SHA256 (abc123,unknown)"* ]]
 	for t in text csv markdown charts; do
-		run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format "$t"
+		run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format "$t"
 		assert_success
 		assert_output --partial "mixed:smoke.env,unknown"
 		refute_output --regexp 'run_config[=:] "?smoke\.env'
@@ -616,21 +618,27 @@ with_run_config() {
 	[[ "$stderr" != *"disagree on PROXY_CHECK"* ]]
 }
 
-@test "004: with --config and no --results-dir, warns when the dir holds several runs (PL6)" {
+@test "004: a dir with several runs stops the report, with or without --config / --results-dir (R3, PL6)" {
 	local d="${BATS_TEST_TMPDIR}/multi" f
 	mkdir -p "$d"
 	with_run_config "$REPORT_FIXTURE" "$d/controlplane-a.tsv" run-a smoke.env abc
 	with_run_config "$REPORT_FIXTURE" "$d/controlplane-b.tsv" run-b smoke.env abc
 	f="$(cfg multi.env "CONTROLPLANE_RESULTS_DIR=${d}")"
 	run --separate-stderr bash "$CP/004-report-results.sh" --config "$f" --format json
-	assert_success
-	[[ "$stderr" == *"holds 2 runs (RUN_IDs: run-a,run-b)"* ]]
+	assert_failure 1
+	[ -z "$output" ]
+	[[ "$stderr" == *"error: ${d} holds 2 runs"* ]]
+	[[ "$stderr" == *"run-a: its files are in ${d}, outside a sweep-* dir"* ]]
+	[[ "$stderr" == *"Or pass --allow-multi-run"* ]]
 	run --separate-stderr bash "$CP/004-report-results.sh" --config "$f" --results-dir "$d" --format json
-	assert_success
-	[[ "$stderr" != *"holds 2 runs"* ]]
-	# Without --config the report prints what it always did.
+	assert_failure 1
+	[[ "$stderr" == *"holds 2 runs"* ]]
 	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format json
-	[[ "$stderr" != *"holds 2 runs"* ]]
+	assert_failure 1
+	[[ "$stderr" == *"holds 2 runs"* ]]
+	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
+	assert_success
+	[ "$(jq -c '.metadata.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"]}' ]
 }
 
 @test "003 with --config, no cluster: snapshot, preamble and report provenance; --resume checks the config" {
@@ -638,9 +646,12 @@ with_run_config() {
 	f="$(cfg sweep.env 'SETUP_CONTEXTS=ci-a,ci-b' 'CONTROLPLANE_SERVICE_COUNT=5' 'CONTROLPLANE_MESH_SIZES=1' \
 		'CONTROLPLANE_SETTLE_SEC=0' 'METRICS_READY_TIMEOUT=0' "CONTROLPLANE_RESULTS_DIR=${res}")"
 	sum="$(sha256sum "$f" | cut -d' ' -f1)"
-	# Every step fails fast against the empty kubeconfig: one PROBE_FAILED row, then the report.
+	# No Istio CR answers either: warn records ISTIO_VERSION=unknown and goes on (R4).
+	export ISTIO_VERSION_CHECK=warn
+	# Every step fails fast against the empty kubeconfig: one PROBE_FAILED row, then the
+	# report, then exit 4 (finished with a failed cell, R19).
 	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --config "$f"
-	assert_success
+	assert_failure 4
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
 	[ -n "$d" ]
 	cmp "$f" "$d"/run-config-*.env
@@ -688,9 +699,11 @@ with_run_config() {
 
 @test "003 --resume of a sweep started without --config runs as before (RUN_CONFIG=none)" {
 	local res="${BATS_TEST_TMPDIR}/res" d
+	export ISTIO_VERSION_CHECK=warn  # no Istio CR answers either (R4)
 	CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" \
 		run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_success
+	assert_failure 4  # its one cell is a PROBE_FAILED row (R19)
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes them as placeholder rows (in n_total, not n_valid); exit 4."
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
 	grep -qx '# RUN_CONFIG=none' "$d"/controlplane-*.tsv
 	[ -z "$(find "$d" -name 'run-config-*')" ]
@@ -706,4 +719,22 @@ with_run_config() {
 	assert_output --partial "warning: --resume: --config late.env"
 	assert_output --partial "(RUN_CONFIG_SHA256=none)"
 	assert_output --partial "exceeds safety limit 1"
+	# The sweep recorded ISTIO_VERSION=unknown (nothing answered); a mesh that now answers
+	# the pin is another version than the rows already there: --resume refuses before any
+	# change and appends nothing, unless ISTIO_VERSION_CHECK=warn (R4).
+	grep -qx '# ISTIO_VERSION=unknown' "$d"/controlplane-*.tsv
+	local bin="${BATS_TEST_TMPDIR}/bin" tsv before
+	mkdir -p "$bin"
+	printf '#!/bin/sh
+case "$*" in *"get istios.sailoperator.io default"*) printf %%s "$ISTIO_VERSION" ;; *) exit 1 ;; esac
+' > "${bin}/kubectl"
+	chmod +x "${bin}/kubectl"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	before="$(cat "$tsv")"
+	ISTIO_VERSION_CHECK=fail PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" \
+		--contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --regexp "--resume: this sweep recorded ISTIO_VERSION=unknown, but the mesh now runs v?[0-9][^ ]*, so its new rows would be credited to unknown\. Start a new sweep \(or set ISTIO_VERSION_CHECK=warn to resume anyway\)\."
+	refute_output --partial "Capacity plan check"
+	[ "$(cat "$tsv")" = "$before" ]
 }

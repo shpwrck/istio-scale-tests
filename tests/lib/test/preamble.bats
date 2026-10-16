@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
 load test_helper
 source "${ROOT}/tests/lib/preamble.sh"
 
@@ -254,4 +255,101 @@ _fake_kubectl() {
 	ROOT="$BATS_TEST_TMPDIR" run harness_sha
 	[ "$status" -eq 0 ]
 	[ "$output" = "unknown" ]
+}
+
+# ---------------------------------------------------------------------------
+# istio_version_resolve (R4): the results record the Istio version the mesh runs, read
+# once per run before any change; the config/versions.env pin is kept next to it.
+# ---------------------------------------------------------------------------
+
+# _iv_kubectl: a fake kubectl whose Istio CR on context <c> answers IV_<c> (unset: the
+# call fails). Logs every call to IV_LOG.
+_iv_kubectl() {
+	local ctx="" a v
+	for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
+	echo "$*" >> "$IV_LOG"
+	v="IV_${ctx}"
+	[[ -n "${!v:-}" ]] || return 1
+	printf '%s' "${!v}"
+}
+
+# _iv_run <ctxs_csv> <dry 0|1>: resolve in a subshell with pin ISTIO_VERSION (default
+# v1.30.5), then print what it exported.
+_iv_run() {
+	(
+		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT
+		export ISTIO_VERSION="${PIN-v1.30.5}"
+		istio_version_resolve "$1" "$2" _iv_kubectl
+		echo "V=${ISTIO_VERSION} PIN=${ISTIO_VERSION_PIN} SRC=${ISTIO_VERSION_SOURCE} BY=${ISTIO_VERSION_BY_CONTEXT}"
+	)
+}
+
+setup() {
+	export IV_LOG="${BATS_TEST_TMPDIR}/iv.log"
+	: > "$IV_LOG"
+	unset ISTIO_VERSION_CHECK
+}
+
+@test "istio_version_resolve: every member at the pin records the live value, a leading v aside" {
+	IV_a=v1.30.5 IV_b=v1.30.5 PIN=1.30.5 run --separate-stderr _iv_run a,b 0
+	assert_success
+	assert_output "V=v1.30.5 PIN=1.30.5 SRC=live BY=a=v1.30.5,b=v1.30.5"
+	[ -z "$stderr" ]
+	# One bounded read per member.
+	[ "$(grep -c -- '--request-timeout=5s get istios.sailoperator.io default' "$IV_LOG")" -eq 2 ]
+}
+
+@test "istio_version_resolve: another version than the pin dies under fail (the default), is recorded under warn" {
+	IV_a=v1.29.0 run --separate-stderr _iv_run a 0
+	assert_failure 1
+	[[ "$stderr" == *"the mesh runs Istio v1.29.0 (a=v1.29.0), but ISTIO_VERSION is v1.30.5"*"Nothing was changed."*"set ISTIO_VERSION_CHECK=warn to go on and record ISTIO_VERSION=v1.29.0."* ]]
+	ISTIO_VERSION_CHECK=warn IV_a=v1.29.0 run --separate-stderr _iv_run a 0
+	assert_success
+	assert_output "V=v1.29.0 PIN=v1.30.5 SRC=live BY=a=v1.29.0"
+	[[ "$stderr" == "warning: the mesh runs Istio v1.29.0"*"so the results record ISTIO_VERSION=v1.29.0 (ISTIO_VERSION_PIN=v1.30.5)." ]]
+}
+
+@test "istio_version_resolve: members that differ, or one that cannot be read, never record one member's value" {
+	IV_a=v1.30.5 IV_b=v1.29.0 run --separate-stderr _iv_run a,b 0
+	assert_failure 1
+	[[ "$stderr" == *"the mesh members run different Istio versions (a=v1.30.5,b=v1.29.0)"* ]]
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IV_b=v1.29.0 run --separate-stderr _iv_run a,b 0
+	assert_success
+	assert_output "V=mixed:v1.30.5,v1.29.0 PIN=v1.30.5 SRC=live BY=a=v1.30.5,b=v1.29.0"
+	IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0
+	assert_failure 1
+	[[ "$stderr" == *"cannot read the Istio version (istios.sailoperator.io default .spec.version) on b"* ]]
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0
+	assert_success
+	assert_output "V=mixed:v1.30.5,unknown PIN=v1.30.5 SRC=live BY=a=v1.30.5,b=unknown"
+	# An answer that is not a version token (an HTML error page, say) reads unknown.
+	ISTIO_VERSION_CHECK=warn IV_a='<html>' run --separate-stderr _iv_run a 0
+	assert_output "V=unknown PIN=v1.30.5 SRC=live BY=a=unknown"
+}
+
+@test "istio_version_resolve: --dry-run reads nothing and records the pin as the pin; a resolved run is inherited" {
+	run --separate-stderr _iv_run a,b 1
+	assert_success
+	assert_output "V=v1.30.5 PIN=v1.30.5 SRC=pin BY=unchecked"
+	[ ! -s "$IV_LOG" ]
+	# A step under a sweep that resolved already: no second read, nothing changes.
+	run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/preamble.sh"
+		_iv_kubectl() { echo "$*" >> "$IV_LOG"; printf v9; }
+		export ISTIO_VERSION=mixed:a,b ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live
+		istio_version_resolve a 0 _iv_kubectl
+		istio_version_kv; istio_version_label'
+	assert_success
+	assert_output "$(printf '%s\n' ISTIO_VERSION=mixed:a,b ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live 'mixed:a,b (read live; pin v1.30.5)')"
+	[ ! -s "$IV_LOG" ]
+	# Nothing resolved (a report host, say): the pin, labelled as such.
+	run bash -c 'source "$ROOT/tests/lib/preamble.sh"; unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN
+		ISTIO_VERSION=v1.30.5; istio_version_kv; istio_version_label'
+	assert_output "$(printf '%s\n' ISTIO_VERSION=v1.30.5 ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=pin 'v1.30.5 (the pin; not read live)')"
+}
+
+@test "istio_version_resolve: a policy other than fail or warn is refused" {
+	ISTIO_VERSION_CHECK=off IV_a=v1.30.5 run --separate-stderr _iv_run a 0
+	assert_failure 1
+	[[ "$stderr" == *"ISTIO_VERSION_CHECK must be fail or warn (got: off)"* ]]
+	[ ! -s "$IV_LOG" ]
 }

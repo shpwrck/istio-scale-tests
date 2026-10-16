@@ -60,6 +60,7 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
+*" get istios.sailoperator.io default "*) printf '%s' "$ISTIO_VERSION" ;;  # the pin (R4)
 *" fortio curl "*) printf 'HTTP/1.1 503 Service Unavailable\r\n\r\nno healthy upstream\n'; exit 1 ;;
 *" exec "*)
 	url="${*: -1}"

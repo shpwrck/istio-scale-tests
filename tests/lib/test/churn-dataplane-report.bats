@@ -5,6 +5,7 @@
 # an overflow count instead of the bucket of a mean.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/churn-dataplane/005-report-results.sh"
 HDR=$'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms'
@@ -105,4 +106,39 @@ two_pairs() {
 	[ "$(jq -c '.rows[1] | [.churn_rate, .valid_runs, .delta_p99_ms, .baseline_p50_ms, .churn_qps, .churn_convergence_p99_worst, .churn_convergence_overflow_runs]' <<<"$output")" = '[5,0,null,null,null,null,0]' ]
 	# No average is a string any more.
 	[ "$(jq '[.rows[] | to_entries[] | select(.key != "churn_convergence_p99_worst") | .value | strings] | length' <<<"$output")" = 0 ]
+}
+
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (R3, PL26)" {
+	local d fmt
+	for d in a b; do
+		mkdir -p "${RES}/sweep-${d}"
+		{
+			echo "# RUN_ID=r${d}"
+			echo "# HARNESS_SHA=h${d}"
+			echo "# ISTIO_VERSION=1.30.5"
+			echo "# QPS=$([[ $d == a ]] && echo 50 || echo 100)"
+			echo "$HDR"
+			crow c1 0 baseline 50 2 5 OK N/A N/A
+			crow c1 1 churn 48 4 9 OK 30 99
+		} > "${RES}/sweep-${d}/churn-dataplane-r${d}.tsv"
+	done
+	for fmt in text csv json md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_failure 1
+		[ -z "$output" ]
+		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+		[[ "$stderr" == *"  sweep-a: ${REPORT} --results-dir ${RES}/sweep-a"* ]]
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		assert_success
+		if [[ "$fmt" == json ]]; then
+			[ "$(jq -c '[.pooled_runs.runs, .pooled_runs.harness_sha, .metadata.qps, .metadata.run_id]' <<<"$output")" = '[2,["ha","hb"],"mixed:50,100","mixed:ra,rb"]' ]
+		else
+			assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: ha, hb. ISTIO_VERSION: 1.30.5."
+			# The first file's QPS is not the report's (it was first-wins).
+			assert_output --partial "mixed:50,100"
+		fi
+	done
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-b" --format json
+	assert_success
+	[ "$(jq -c '[.pooled_runs.runs, .metadata.qps]' <<<"$output")" = '[1,"100"]' ]
 }

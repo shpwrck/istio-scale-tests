@@ -6,14 +6,14 @@
 #   ./tests/propagation/006-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [--iterations N] [options]
 #
 # Examples:
-#   # Sweep 1 and 2 clusters:
-#   ./tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --tsv
+#   # Sweep 1 and 2 clusters (TSVs and the 005 reports are always written):
+#   ./tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 #
 #   # Dry-run to see what would be executed:
 #   ./tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --dry-run
 #
 #   # The whole sweep from a run config (mesh sizes, iterations, results dir; flags still win):
-#   ./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --tsv --dry-run
+#   ./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
 # Loud ERR trap for unexpected aborts; per-step failures are handled below.
@@ -43,7 +43,6 @@ MAX_MATRIX="${PROPAGATION_MAX_MATRIX:-64}"
 OUTPUT_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
 WATCHER_REPLICAS="${PROPAGATION_WATCHER_REPLICAS}"
 DRY_RUN=0
-WRITE_TSV=0
 COLLECT_METRICS=0
 FORCE_LARGE_MATRIX=0
 
@@ -66,19 +65,30 @@ Usage: $(basename "$0") [options]
   --settle-sec SEC       Settle gap between iterations and between mesh-size steps (default: $SETTLE_SEC).
   --output-dir DIR       Results root (default: ${PROPAGATION_RESULTS_DIR}). A new
                          per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
-  --tsv                  Write per-iteration TSVs and the 005 reports (sweep-summary.md).
+  --tsv                  Accepted for old command lines; does nothing. The sweep always
+                         writes per-iteration TSVs and the 005 reports (sweep-summary.md,
+                         sweep-charts.md).
   --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
   --force-large-matrix   Bypass matrix safety cap (default: $MAX_MATRIX iterations).
   --dry-run              Print planned matrix to stderr; exit without touching clusters.
   -h, --help             Show this help.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
   PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
   (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),
   PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
   PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
   setup, --dry-run included.
+
+Exit codes:
+  0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
+     counted in the report's n_total and left out of n_valid
+  1  the sweep stopped: a bad flag or precondition, or an unexpected error
+  4  the sweep finished and wrote its reports, but N cells failed (setup or probe
+     exited non-zero); stderr ends with "N of M cells failed" by reason
 EOF
 }
 
@@ -125,7 +135,7 @@ while [[ $# -gt 0 ]]; do
 		shift
 		;;
 	--tsv)
-		WRITE_TSV=1
+		# No-op since R6: TSVs and reports are always written.
 		shift
 		;;
 	--watcher-replicas)
@@ -178,7 +188,7 @@ is_pos_int "$TIMEOUT_SEC" || die "--timeout (or PROPAGATION_TIMEOUT_SEC) must be
 is_nonneg_int "$SETTLE_SEC" || die "--settle-sec (or PROPAGATION_SETTLE_SEC) must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$WATCHER_REPLICAS" || die "--watcher-replicas (or PROPAGATION_WATCHER_REPLICAS) must be a positive integer (got: $WATCHER_REPLICAS)"
 # 001 and 002 read these themselves; reject a bad value before the first setup, also in
-# --dry-run (without --tsv a failed step leaves no row behind).
+# --dry-run.
 is_pos_int "${PROPAGATION_WAIT_TIMEOUT_SEC:-300}" || die "PROPAGATION_WAIT_TIMEOUT_SEC (read by 001) must be a positive integer (got: ${PROPAGATION_WAIT_TIMEOUT_SEC:-})"
 is_pos_int "${PROPAGATION_POLL_INTERVAL_MS:-250}" || die "PROPAGATION_POLL_INTERVAL_MS (read by 002) must be a positive integer (got: ${PROPAGATION_POLL_INTERVAL_MS:-})"
 is_pos_int "${PROPAGATION_DRAIN_TIMEOUT_SEC:-20}" || die "PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002) must be a positive integer (got: ${PROPAGATION_DRAIN_TIMEOUT_SEC:-})"
@@ -197,14 +207,19 @@ HARNESS_SHA="$(harness_sha)"
 # to 002 and the placeholder writer. Skipped in --dry-run (stays "unknown").
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
+KUBECTL=()
 if ((! DRY_RUN)); then
 	if command -v oc >/dev/null 2>&1; then
 		KUBECTL=(oc)
 	elif command -v kubectl >/dev/null 2>&1; then
 		KUBECTL=(kubectl)
-	else
-		KUBECTL=()
 	fi
+fi
+# R4: the Istio version every member runs, read once before the first setup and
+# exported, so 001, 002 and the placeholders record it (ISTIO_VERSION_CHECK=fail stops
+# here on a mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
+if ((! DRY_RUN)); then
 	if ((${#KUBECTL[@]})); then
 		tb_kv=""
 		while IFS= read -r tb_kv; do
@@ -218,10 +233,9 @@ fi
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (counted in n_total, excluded from n_valid).
-# Carries the same sweep-level preamble keys as 002. Only written with --tsv.
+# Carries the same sweep-level preamble keys as 002.
 # Usage: emit_propagation_placeholder <status> <mesh_size> <source_ctx>
 emit_propagation_placeholder() {
-	((WRITE_TSV)) || return 0
 	local status="$1" ms="$2" sctx="$3"
 	mkdir -p "$SWEEP_DIR"
 	local f="${SWEEP_DIR}/endpoint-zzfail-ms${ms}-${SWEEP_RUN_ID}.tsv"
@@ -230,7 +244,7 @@ emit_propagation_placeholder() {
 		echo "# SWEEP_RUN_ID=${SWEEP_RUN_ID}"
 		echo "# RUN_ID=${SWEEP_RUN_ID}-failms${ms}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# SOURCE_CTX=${sctx}"
 		echo "# MESH_SIZE=${ms}"
 		echo "# ITERATIONS=${ITERATIONS}"
@@ -269,8 +283,8 @@ plan_mesh_size() {
 		--output-dir "$SWEEP_DIR"
 		--tuning-baseline "$TUNING_BASELINE"
 		--sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS"
+		--tsv
 	)
-	((WRITE_TSV)) && endpoint_args+=(--tsv)
 	[[ -n "$remote_csv" ]] && endpoint_args+=(--remote-contexts "$remote_csv")
 	return 0
 }
@@ -286,6 +300,7 @@ if ((DRY_RUN)); then
 		echo "Iterations per size: $ITERATIONS"
 		echo "Total iterations: $MATRIX_SIZE (cap: $MAX_MATRIX)"
 		echo "Settle: ${SETTLE_SEC}s"
+		echo "Istio: $(istio_version_label); live check ISTIO_VERSION_CHECK=${ISTIO_VERSION_CHECK:-fail} skipped in --dry-run"
 		echo "Output (would create): $SWEEP_DIR"
 		if [[ "${RUN_CONFIG:-none}" != none ]]; then
 			echo "Run config: ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
@@ -326,12 +341,15 @@ echo "Contexts: ${CONTEXTS[*]}"
 echo "Mesh sizes: ${MESH_SIZES[*]}"
 echo "Iterations per size: $ITERATIONS"
 echo "Settle: ${SETTLE_SEC}s"
+echo "Istio: $(istio_version_label)"
 echo "Output: $SWEEP_DIR"
 if [[ "${RUN_CONFIG:-none}" != none ]]; then
 	echo "Run config: ${RUN_CONFIG} (sha256 ${RUN_CONFIG_SHA256:0:12})"
 fi
 echo ""
 
+# One reason per cell whose setup or probe failed (R19): reported, then the exit code.
+FAILED_CELLS=()
 for ms in "${MESH_SIZES[@]}"; do
 	plan_mesh_size "$ms"
 
@@ -356,6 +374,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	if ! "$SCRIPT_DIR/001-setup-propagation-test.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" --watcher-replicas "$WATCHER_REPLICAS"; then
 		echo "warn: watcher setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2
 		emit_propagation_placeholder SETUP_FAILED "$ms" "$source_ctx"
+		FAILED_CELLS+=(SETUP_FAILED)
 		echo ""
 		continue
 	fi
@@ -367,6 +386,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	if ! "$SCRIPT_DIR/002-run-endpoint-probe.sh" "${endpoint_args[@]}"; then
 		echo "warn: endpoint probe failed for mesh_size=$ms; recording PROBE_FAILED placeholder and continuing" >&2
 		emit_propagation_placeholder PROBE_FAILED "$ms" "$source_ctx"
+		FAILED_CELLS+=(PROBE_FAILED)
 	fi
 	echo ""
 
@@ -385,19 +405,24 @@ for ms in "${MESH_SIZES[@]}"; do
 done
 
 echo "=========================================="
-echo "  Sweep complete"
+echo "  Sweep finished"
 echo "=========================================="
 echo ""
-if ((WRITE_TSV)); then
-	echo "Generating aggregated report..."
-	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
-	echo ""
+echo "Generating aggregated report..."
+"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
+echo ""
 
-	COMBINED="${SWEEP_DIR}/sweep-summary.md"
-	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$COMBINED"
-	echo "Combined report: $COMBINED"
+COMBINED="${SWEEP_DIR}/sweep-summary.md"
+"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format markdown > "$COMBINED"
+echo "Combined report: $COMBINED"
 
-	CHARTS_FILE="${SWEEP_DIR}/sweep-charts.md"
-	"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
-	echo "Charts written to $CHARTS_FILE"
-fi
+CHARTS_FILE="${SWEEP_DIR}/sweep-charts.md"
+"$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
+echo "Charts written to $CHARTS_FILE"
+
+# Final cleanup now, so the outcome below is the last thing the sweep prints.
+trap - EXIT
+sweep_cleanup
+
+# R19: the reports are written; now say how many cells failed and exit non-zero if any did.
+sweep_outcome "${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || exit "$SWEEP_FAILED_EXIT"

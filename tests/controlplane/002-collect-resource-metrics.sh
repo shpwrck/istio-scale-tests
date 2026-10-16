@@ -155,6 +155,8 @@ Usage: $(basename "$0") [options]
   -h, --help           Show this help.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when the members' Istio CR version is not ISTIO_VERSION.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -166,6 +168,10 @@ Environment:
   (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
   over its istiod pods) and its Running sidecar pods differ by more than
   max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
+
+Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
+on macOS: brew install coreutils, which installs gtimeout). Without it a live run
+stops at startup; --dry-run does not need it.
 EOF
 }
 
@@ -365,6 +371,9 @@ resolve_kubectl KUBECTL
 
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
+# The config-dump and Envoy-stats samples run under timeout/gtimeout; without either,
+# every sample would read N/A with no message (R17). --dry-run does not need it.
+((DRY_RUN)) || require_timeout
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
@@ -402,7 +411,10 @@ if [[ "$PHASE" != combined ]]; then
 	mkdir -p "$STATE_DIR"
 fi
 
-ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
+# R4: the Istio version the members run, before the first scrape (inherited when 003
+# runs this step; read here when it runs alone, a read-only API GET like the version
+# and capacity reads below). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 
 # Kube server version per context (concurrent, 5s timeout each).
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
@@ -456,7 +468,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=66"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
@@ -895,7 +907,7 @@ collect_config_dump_samples() {
 		# bytes=0 -> counted as a FAILED sample (got not incremented), never a partial/
 		# misleading byte count (capturing first lets us drop a timed-out exec cleanly).
 		local dump bytes bd v
-		dump="$(timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
+		dump="$(run_timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
 			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null)" || dump=""
 		bytes="$(printf '%s' "$dump" | wc -c)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
@@ -1447,48 +1459,41 @@ scrape_window() {
 			queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
 		fi
 
-		# Counter deltas (xds pushes + k8s events).
+		# Counter deltas (xds pushes + k8s events). counter_delta (metrics.sh, R10): a
+		# counter missing from both scrapes, or one that went backwards, is N/A with a
+		# warning, never 0; one first registered in the window counts from 0.
 		local pushes_delta pushes_rate evts_delta evts_rate
 		if (( restarted_or_unknown )); then
 			pushes_delta="N/A"; pushes_rate="N/A"
 			evts_delta="N/A"; evts_rate="N/A"
 		else
-			local b_pushes f_pushes
-			b_pushes=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_xds_pushes || echo 0)
-			f_pushes=$(extract_counter_sum "$f_file" pilot_xds_pushes)
-			pushes_delta=$(( f_pushes - b_pushes ))
-			(( pushes_delta < 0 )) && pushes_delta=0
-			if (( window_positive )); then
+			pushes_delta=$(counter_delta "$(extract_counter_sum "$b_file" pilot_xds_pushes)" \
+				"$(extract_counter_sum "$f_file" pilot_xds_pushes)" "pilot_xds_pushes on ${ctx}/${POD_NAMES[k]}")
+			if (( window_positive )) && [[ "$pushes_delta" != "N/A" ]]; then
 				pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				pushes_rate="N/A"
 			fi
 
-			local b_evts f_evts
-			b_evts=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_k8s_cfg_events || echo 0)
-			f_evts=$(extract_counter_sum "$f_file" pilot_k8s_cfg_events)
-			evts_delta=$(( f_evts - b_evts ))
-			(( evts_delta < 0 )) && evts_delta=0
-			if (( window_positive )); then
+			evts_delta=$(counter_delta "$(extract_counter_sum "$b_file" pilot_k8s_cfg_events)" \
+				"$(extract_counter_sum "$f_file" pilot_k8s_cfg_events)" "pilot_k8s_cfg_events on ${ctx}/${POD_NAMES[k]}")
+			if (( window_positive )) && [[ "$evts_delta" != "N/A" ]]; then
 				evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				evts_rate="N/A"
 			fi
 		fi
 
-		# Per-type xds_pushes deltas.
+		# Per-type xds_pushes deltas. A type with no series while pilot_xds_pushes itself
+		# is in the scrape is a real 0 (extract_counter_by_label); N/A as above.
 		local types=(cds eds lds rds nds)
 		local push_by_type=()
 		if (( restarted_or_unknown )); then
 			push_by_type=("N/A" "N/A" "N/A" "N/A" "N/A")
 		else
 			for t in "${types[@]}"; do
-				local b_t f_t d_t
-				b_t=$([[ -s "$b_file" ]] && extract_counter_by_label "$b_file" pilot_xds_pushes type "$t" || echo 0)
-				f_t=$(extract_counter_by_label "$f_file" pilot_xds_pushes type "$t")
-				d_t=$(( f_t - b_t ))
-				(( d_t < 0 )) && d_t=0
-				push_by_type+=("$d_t")
+				push_by_type+=("$(counter_delta "$(extract_counter_by_label "$b_file" pilot_xds_pushes type "$t")" \
+					"$(extract_counter_by_label "$f_file" pilot_xds_pushes type "$t")" "pilot_xds_pushes{type=${t}} on ${ctx}/${POD_NAMES[k]}")")
 			done
 		fi
 
@@ -1552,8 +1557,8 @@ scrape_window() {
 			cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
 				BEGIN {
 					ds = fs - bs; dc = fc - bc
-					if (ds < 0) ds = 0
-					if (dc <= 0) { print "N/A"; exit }
+					# Nothing observed, or the sum went backwards (a reset): N/A, not 0 (R10).
+					if (dc <= 0 || ds < 0) { print "N/A"; exit }
 					printf "%.0f", ds/dc
 				}')
 		fi
@@ -1691,7 +1696,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Run ID | \`${RUN_ID}\` |"
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Phase | ${PHASE} |"
-		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
+		echo "| Istio version | $(istio_version_label) |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"

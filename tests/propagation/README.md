@@ -75,6 +75,8 @@ measured as a whole. Removing the label drains the endpoint before the next iter
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --iterations 10 --tsv
 
 # 3. Report, then clean up
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/propagation/005-report-results.sh
 ./tests/propagation/007-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
@@ -85,12 +87,19 @@ Add `--dry-run` to `002`, `004`, `006` or `007` to print the plan without touchi
 
 ```bash
 ./tests/propagation/006-run-sweep.sh \
-  --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 10 --watcher-replicas 30 --tsv
+  --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 10 --watcher-replicas 30
 ```
 
 For each mesh size the sweep removes the suite from unused contexts (`007`), runs `001`
-and `002`, and settles. With `--tsv` it writes `sweep-summary.md` and `sweep-charts.md`
-from `005`. `--collect-metrics` also saves a `004` snapshot per mesh size.
+and `002` (with `--tsv`), and settles. It always writes the TSVs, then `sweep-summary.md`
+and `sweep-charts.md` from `005` (`--tsv` is still accepted and does nothing).
+`--collect-metrics` also saves a `004` snapshot per mesh size.
+
+Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition,
+or an unexpected error); `4` it finished and wrote its reports, but some mesh sizes
+failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder
+row). The last line on stderr says how many, by reason. Rows a probe wrote with a
+non-OK status are measurements, not failures: the report counts them in `n_total`.
 
 ## Run config (`--config FILE`)
 
@@ -100,8 +109,8 @@ rules: [Run config](../../README.md#run-config---config-file)).
 3 iterations each):
 
 ```bash
-./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --tsv --dry-run
-./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --tsv
+./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --dry-run
+./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env
 ./tests/propagation/005-report-results.sh --config tests/propagation/configs/smoke.env \
   --results-dir tests/propagation/results/smoke/sweep-<RUN_ID> --format markdown
 ./tests/propagation/007-cleanup.sh --config tests/propagation/configs/smoke.env
@@ -116,7 +125,7 @@ rules: [Run config](../../README.md#run-config---config-file)).
   contexts), `PROPAGATION_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path
   starts at the repo root, unlike the flags) and `PROPAGATION_WAIT_TIMEOUT_SEC`
   (`001 --wait-timeout`).
-- **Flags only:** `--tsv` and `--collect-metrics` (add them to the command line),
+- **Flags only:** `--tsv` (`002`) and `--collect-metrics` (add them to the command line),
   `--source-context`, `--remote-contexts`, `--mesh-size`, `--sweep-run-id`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`002`; the sweep sets them), `--watch`
   and `--interval` (`004`), `--force-large-matrix`, `--format` and `--dry-run`.
@@ -138,7 +147,9 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
 
 - `endpoint-<RUN_ID>.tsv` (with `--tsv`): preamble of `# KEY=value` provenance lines, then
   one row per iteration and remote. Columns are listed in `005-report-results.sh --help`.
-- `endpoint-<RUN_ID>.md`: per-run summary.
+- `endpoint-<RUN_ID>.md`: per-run summary. Its averages count the same rows as `005`
+  (one definition, `tests/lib/propagation.sh`), as `n_valid/n_total`, and it lists the
+  rows left out by reason (a status, `restarted=unknown`, `p1_overflow`, a high skew).
 - `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends
   with a glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters.
 

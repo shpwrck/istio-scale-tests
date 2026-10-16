@@ -3,12 +3,13 @@
 #
 # Every format carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs),
 # and HARNESS_SHA / ISTIO_VERSION as 002 recorded them, over all input TSVs: mixed:a,b
-# with a warning when they differ (PL26).
+# with a warning when they differ (PL26). More than one run under the results dir stops
+# the report unless --allow-multi-run, and then every format says so (R3).
 # Histogram p99 columns show the worst bucket a valid row hit, and "overflow (N rows)"
 # when a row's p99 was in the +Inf bucket; they are never averaged.
 #
 # Usage:
-#   ./tests/churn/004-report-results.sh [--results-dir DIR] [--format FMT]
+#   ./tests/churn/004-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT]
 #   ./tests/churn/004-report-results.sh --config tests/churn/configs/smoke.env \
 #     --results-dir tests/churn/results/smoke/sweep-<RUN_ID> --format md
 # ci-dry-run:
@@ -27,9 +28,10 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
-# 1 when --results-dir is passed (gates the multi-run warning below).
-RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
+# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# like --force-large-matrix, so no options.env key.
+ALLOW_MULTI_RUN=0
 DRY_RUN=0
 
 
@@ -39,9 +41,13 @@ Usage: $(basename "$0") [options]
 
   --config FILE      Run config of KEY=value lines (config/options.env keys; see
                      tests/churn/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default. Without --results-dir, warns
-                     when the results dir holds more than one run.
-  --results-dir DIR  Results directory (default: ${CHURN_RESULTS_DIR}).
+                     --config > environment > default.
+  --results-dir DIR  Results directory (default: ${CHURN_RESULTS_DIR}). Every
+                     churn-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
+  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
+                     with different run ids). Without it the report stops, lists the
+                     runs and how to report each alone; with it every format says it
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
@@ -71,8 +77,11 @@ while [[ $# -gt 0 ]]; do
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
-		RESULTS_DIR_FROM_FLAG=1
 		shift 2
+		;;
+	--allow-multi-run)
+		ALLOW_MULTI_RUN=1
+		shift
 		;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
@@ -116,12 +125,17 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Read a `# KEY=value` line from the first TSV's preamble (for values queried live
-# at sweep time, e.g. TUNING_BASELINE). Defaults to "unknown".
+# R3/PL6: the report pools every TSV under the results dir; more than one run stops it
+# unless --allow-multi-run, and then every format says so (config_multi_run_note).
+config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
+POOLED_NOTE="$(config_multi_run_note)"
+
+# A `# KEY=value` preamble value (values queried live at sweep time, e.g.
+# TUNING_BASELINE) over every input that has the line: one value, or mixed:a,b when they
+# differ, never the first file's (PL26). "unknown" when no input has it.
 preamble_get() {
-	local key="$1" v
-	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
-	v="${v#*=}"
+	local v
+	v="$(config_input_value "$1" "" "${TSV_FILES[@]}")"
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
 
@@ -147,16 +161,15 @@ run_meta() {
 }
 HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
 ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
+# R4: where ISTIO_VERSION came from (live: every member's Istio CR; pin: config only)
+# and the configured pin; files written before R4 read "unknown (not recorded)".
+ISTIO_VERSION_SOURCE_M="$(run_meta ISTIO_VERSION_SOURCE)"
+ISTIO_VERSION_PIN_M="$(run_meta ISTIO_VERSION_PIN)"
 
 # Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_M="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_M="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
-# PL6: a results dir from --config (or the default) is a base dir that can hold many
-# sweeps, and the report aggregates all of them.
-if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
-	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
-fi
 
 # TSV schema (21 columns):
 #  $1  run_id
@@ -184,8 +197,9 @@ fi
 report_text() {
 	echo "=== Churn Convergence Results ==="
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
-	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}"
+	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
@@ -193,7 +207,7 @@ report_text() {
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
-	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE
+	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE/MISSING_VALUE
 	# rows carry N/A or undercounted istiod-side deltas and must NOT leak into
 	# column means. Per-column "N/A"!= guards also stop "N/A"+0 -> 0 fabrication.
 	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
@@ -293,10 +307,13 @@ report_text() {
 report_csv() {
 	echo "# HARNESS_SHA=${HARNESS_SHA_M}"
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
+	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
+	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
+	config_multi_run_csv
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
@@ -404,7 +421,7 @@ Definitions for every metric column in the results table above. Only the **sourc
 cluster is scaled; remotes stay at base replicas, so `remote_*` columns measure
 cross-cluster propagation. `src_`/`rmt_` prefixes are the source istiod (summed across its
 replicas) vs the remote istiod pods (summed/maxed across all remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
-(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*` / `*_FAILED`) are excluded but still counted in
+(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*` / `MISSING_VALUE` / `*_FAILED`) are excluded but still counted in
 `n_total`. Histogram p99 columns (`*_queue_p99`, `*_push_p99`) show the **worst** (highest)
 bucket range any valid row hit (e.g. `100-500`), not an average: the mean of interpolated
 p99s can land in a bucket no row hit. `overflow (N rows)` means N valid rows had their p99
@@ -454,6 +471,8 @@ report_markdown() {
 
 	echo "---"
 	echo "istio_version: \"${istio_version}\""
+	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
+	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
 	echo "harness_sha: \"${harness_sha}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
@@ -464,6 +483,7 @@ report_markdown() {
 	echo ""
 	echo "# Churn Convergence"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	echo "| Axis | Values |"
 	echo "|------|--------|"
 	echo "| mesh_sizes | ${sweep_mesh} |"
@@ -570,7 +590,7 @@ report_markdown() {
 		}
 		# Note the filter rate when any cell dropped rows.
 		if (any_filtered) {
-			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_* / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
+			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_* / MISSING_VALUE / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
 
@@ -583,6 +603,8 @@ report_markdown() {
 report_charts() {
 	echo "---"
 	echo "istio_version: \"${ISTIO_VERSION_M}\""
+	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
+	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
 	echo "harness_sha: \"${HARNESS_SHA_M}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: \"${RUN_CONFIG_M}\""
@@ -592,6 +614,7 @@ report_charts() {
 	echo ""
 	echo "# Churn Convergence — Charts"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# Charts average each series per mesh size over valid rows only ($21=="OK").
 	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,

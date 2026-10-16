@@ -34,6 +34,7 @@ case " $* " in
 *" get deploy dataplane-server "*) printf '%s' "${STUB_SERVER_REPLICAS-1/1}" ;;
 *" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
 *" get pods "*) : ;;  # no Running istiod pod
+*" get istios.sailoperator.io default "*) printf '%s' "$ISTIO_VERSION" ;;  # the pin (R4)
 *) exit 1 ;;
 esac
 STUB
@@ -188,10 +189,12 @@ tsv() {
 }
 
 @test "004: one valid and one QPS_SHORTFALL repetition -> DEGRADED n_valid=1/2" {
-	tsv "${RES}/latency-e1.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
+	# Two probes of one sweep (its sweep-* dir is one run, whatever their RUN_IDs).
+	mkdir -p "${RES}/sweep-t"
+	tsv "${RES}/sweep-t/latency-e1.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
 	$(row 1 ctx-a ctx-a 1000 999.0 OK 1 0 local)
 	EOF
-	tsv "${RES}/latency-e2.tsv" "RUN_ID=r2" "SERVER_REPLICAS=ctx-a=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
+	tsv "${RES}/sweep-t/latency-e2.tsv" "RUN_ID=r2" "SERVER_REPLICAS=ctx-a=2/2" "MIN_QPS_RATIO=0.95" <<-EOF
 	$(row 1 ctx-a ctx-a 1000 900.0 QPS_SHORTFALL 1 0 local)
 	EOF
 	run "$REPORT" --results-dir "$RES"
@@ -245,11 +248,12 @@ tsv() {
 }
 
 @test "004: server_replicas and MIN_QPS_RATIO are read per file, not from the first TSV (PL26)" {
-	tsv "${RES}/latency-g1.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=1/1" "MIN_QPS_RATIO=0.95" <<-EOF
+	mkdir -p "${RES}/sweep-t"
+	tsv "${RES}/sweep-t/latency-g1.tsv" "RUN_ID=r1" "SERVER_REPLICAS=ctx-a=1/1" "MIN_QPS_RATIO=0.95" <<-EOF
 	$(row 1 ctx-a ctx-a 1000 700 QPS_SHORTFALL 1 0 local)
 	EOF
 	# ratio 0.5: 700/1000 is not a shortfall here, so the reason is the restart.
-	tsv "${RES}/latency-g2.tsv" "RUN_ID=r2" "SERVER_REPLICAS=ctx-a=2/2,ctx-b=2/2" "MIN_QPS_RATIO=0.5" <<-EOF
+	tsv "${RES}/sweep-t/latency-g2.tsv" "RUN_ID=r2" "SERVER_REPLICAS=ctx-a=2/2,ctx-b=2/2" "MIN_QPS_RATIO=0.5" <<-EOF
 	$(row 2 ctx-a ctx-a 1000 700 OK 1 1 local)
 	EOF
 	run "$REPORT" --results-dir "$RES"

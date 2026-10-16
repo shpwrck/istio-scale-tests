@@ -5,11 +5,15 @@
 # namespace_count, sidecar_scoping, traffic_config — so the operator can compare any
 # single dimension while the others are held constant.
 #
+# More than one run under the results dir stops the report unless --allow-multi-run
+# (the pods-vs-config-only calibration pools sweeps on purpose), and then every format
+# says so (R3).
+#
 # Usage:
-#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--format FMT]
+#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT]
 #
 # Examples:
-#   ./tests/controlplane/004-report-results.sh
+#   ./tests/controlplane/004-report-results.sh --results-dir tests/controlplane/results/sweep-<RUN_ID>
 #   ./tests/controlplane/004-report-results.sh --format csv
 #   ./tests/controlplane/004-report-results.sh --format json
 #   ./tests/controlplane/004-report-results.sh --format markdown
@@ -34,9 +38,10 @@ source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline
 source "${ROOT}/tests/lib/fit.sh"  # FIT_AWK (namespace-scaling fits)
 
 RESULTS_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
-# 1 when --results-dir is passed (picks the wording of the multi-run warning below).
-RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
+# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# like --force-large-matrix, so no options.env key.
+ALLOW_MULTI_RUN=0
 
 # Namespace-scaling fit rules (scaling_records; --help prints the floor).
 # A window's convergence p99 joins a fit only with at least this many xDS pushes per
@@ -59,16 +64,19 @@ Usage: $(basename "$0") [options]
 
   --config FILE      Run config of KEY=value lines (config/options.env keys; see
                      tests/controlplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default. Without --results-dir, warns
-                     when the results dir holds more than one run.
-  --results-dir DIR  Results directory (default: ${CONTROLPLANE_RESULTS_DIR}). A base dir
-                     reads every sweep under it: legacy cells pool across runs, while
-                     each growth series (RUN_ID x mesh size x K x workload) keeps its
-                     own cells and fits, labelled run=<RUN_ID>. The report lists each
-                     distinct RUN_ID, ISTIO_VERSION and HARNESS_SHA (run_ids,
-                     istio_versions, harness_shas), warns when it reads more than one
-                     run, and prints a WARNING when Istio versions or harness commits
-                     differ.
+                     --config > environment > default.
+  --results-dir DIR  Results directory (default: ${CONTROLPLANE_RESULTS_DIR}). Every
+                     controlplane-*.tsv under it is read; a sweep-*/ dir from 003 is
+                     one run. The report lists each distinct RUN_ID, ISTIO_VERSION and
+                     HARNESS_SHA (run_ids, istio_versions, harness_shas) and prints a
+                     WARNING when Istio versions or harness commits differ.
+  --allow-multi-run  Pool more than one run, as the pods-vs-config-only calibration does
+                     (a base dir with a pods sweep and a config-only sweep). Without it
+                     a dir with several runs stops the report, which lists them and how
+                     to report each alone. With it every format says it pools N runs
+                     and lists their HARNESS_SHA and ISTIO_VERSION values; legacy cells
+                     pool across runs, while each growth series (RUN_ID x mesh size x K
+                     x workload) keeps its own cells and fits, labelled run=<RUN_ID>.
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
@@ -137,8 +145,11 @@ while [[ $# -gt 0 ]]; do
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
-		RESULTS_DIR_FROM_FLAG=1
 		shift 2
+		;;
+	--allow-multi-run)
+		ALLOW_MULTI_RUN=1
+		shift
 		;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
@@ -331,19 +342,13 @@ json_list() {
 	awk -v s="$1" 'BEGIN { n = split(s, a, ","); printf "["; for (i = 1; i <= n; i++) { gsub(/["\\]/, "", a[i]); printf "%s\"%s\"", (i > 1 ? "," : ""), a[i] }; print "]" }'
 }
 
-# PL6: a results dir can hold many runs, and the report aggregates all of them. With
-# --config and without --results-dir the dir is the config's base dir; otherwise
-# (a base-dir report such as the pods-vs-config-only calibration) say which runs are
-# pooled. Either way a report of more than one RUN_ID warns.
-n_runs="$(tr ',' '\n' <<<"$RUN_IDS_M" | grep -c . || true)"
-if ((n_runs > 1)); then
-	run_list="$(tr ',' '\n' <<<"$RUN_IDS_M" | sort -u | awk 'NR <= 5 { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { if (NR > 5) printf ",..." }')"
-	if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
-		echo "warning: ${RESULTS_DIR} holds ${n_runs} runs (RUN_IDs: ${run_list}); this report aggregates all of them. Pass --results-dir <dir>/sweep-<RUN_ID> to report one sweep." >&2
-	else
-		echo "warning: this report pools ${n_runs} runs from ${RESULTS_DIR} (RUN_IDs: ${run_list}); the run_ids metadata lists them; growth series stay apart (their labels carry run=<RUN_ID>) and each pods-vs-config-only row names its runs. Pass --results-dir <dir>/sweep-<RUN_ID> to report one sweep." >&2
-	fi
-fi
+# R3/PL6: a results dir can hold many runs, and the report aggregates all of them. More
+# than one run (a sweep-* dir, or a RUN_ID outside one) stops it unless
+# --allow-multi-run (the pods-vs-config-only calibration pools a base dir on purpose);
+# then every format carries POOLED_NOTE. Growth series stay apart (their labels carry
+# run=<RUN_ID>) and each pods-vs-config-only row names its runs.
+config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
+POOLED_NOTE="$(config_multi_run_note)"
 FILES_CONSUMED=${#TSV_FILES[@]}
 FILES_SKIPPED=${#LEGACY_FILES[@]}
 
@@ -362,7 +367,8 @@ collect_scopings_meta() {
 	echo "$seen"
 }
 SIDECAR_SCOPING_M="$(collect_scopings_meta)"
-CONFIG_DUMP_SAMPLES_M=$(grep -m1 '^# CONFIG_DUMP_SAMPLES=' "${TSV_FILES[0]}" 2>/dev/null | sed 's/^# CONFIG_DUMP_SAMPLES=//' || echo "")
+# Over every input, mixed:a,b when they differ (PL26); empty when no input has it.
+CONFIG_DUMP_SAMPLES_M="$(config_input_value CONFIG_DUMP_SAMPLES "" "${TSV_FILES[@]}")"
 
 # Concatenate KUBE_VERSIONS lines into one readable string.
 # 002 writes: # KUBE_VERSIONS=ctx1=v1.29.4, ctx2=v1.29.4  (flat CSV)
@@ -497,14 +503,22 @@ pct_or_bare() {
 	local v="${1:-unknown}"
 	[[ "$v" =~ ^-?[0-9.]+$ ]] && echo "${v}%" || echo "$v"
 }
-# Pull a `# KEY=value` provenance line from the first TSV preamble (absolute
-# allocatable / istiod-limit context for the achieved-scale block); default unknown.
+# preamble_get KEY: a `# KEY=value` provenance line (absolute allocatable / istiod-limit
+# context for the achieved-scale block) over every input that has it: one value, or
+# mixed:a,b when they differ, never the first file's (PL26); unknown when none has it.
+# A mixed value is not a number, so a percentage built on it reads unknown.
+declare -A MERGED_PREAMBLE=()
+while IFS= read -r _kv; do
+	MERGED_PREAMBLE["${_kv%%=*}"]="${_kv#*=}"
+done < <(config_merged_preamble "${TSV_FILES[@]}")
 preamble_get() {
-	local key="$1" v
-	v="$(grep -m1 "^# ${key}=" "${TSV_FILES[0]}" 2>/dev/null | head -1)"
-	v="${v#*=}"
+	local v="${MERGED_PREAMBLE[$1]:-}"
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
+# R4: where ISTIO_VERSION came from (live: each member's Istio CR; pin: config only, as
+# in every file written before R4, which reads unknown here) and the configured pin.
+ISTIO_VERSION_PIN_M="$(preamble_get ISTIO_VERSION_PIN)"
+ISTIO_VERSION_SOURCE_M="$(preamble_get ISTIO_VERSION_SOURCE)"
 
 # istiod_replicas_label: ISTIOD_REPLICAS for people ("3 per cluster", "1-3 per cluster
 # (varies by cluster)", "3 (first context only)" for an INFRA_SCHEMA 1 file). The
@@ -1381,8 +1395,8 @@ scaling_records() {
 		}
 		if (nxkind > 0) printf "PODSNOTE\t%s\n", "istiod_cpu_s, xds_pushes and pushes_per_proxy are N/A where the pair has different window kinds or grow steps (a probe onboards one namespace, a deploy deploys all N); only the gauges compare. For a full row run --growth fresh once config-only and once with --workload-mode pods at the same N, K and scoping (configs/ns-scaling-lab.env shows the commands)."
 		if (npaired == 0) {
-			if (nconf > 0 && npods == 0) msg = "not measured: every valid growth cell is config-only. Run the calibration: --growth fresh at one small N, K and scoping (with --outside-modes none), once config-only and once with --workload-mode pods, into the same results base, then report that base dir rather than one sweep-<RUN_ID> (configs/ns-scaling-lab.env shows the commands). Config-only leaves out endpoint (EDS) churn and pushes to a proxy in every namespace, so its per-namespace costs are a lower bound until this row is filled."
-			else if (npods > 0 && nconf == 0) msg = "not measured: every valid growth cell runs pods. Add a --growth fresh config-only sweep at the same N, K and scoping into the same results base and report that base dir."
+			if (nconf > 0 && npods == 0) msg = "not measured: every valid growth cell is config-only. Run the calibration: --growth fresh at one small N, K and scoping (with --outside-modes none), once config-only and once with --workload-mode pods, into the same results base, then report that base dir with --allow-multi-run rather than one sweep-<RUN_ID> (configs/ns-scaling-lab.env shows the commands). Config-only leaves out endpoint (EDS) churn and pushes to a proxy in every namespace, so its per-namespace costs are a lower bound until this row is filled."
+			else if (npods > 0 && nconf == 0) msg = "not measured: every valid growth cell runs pods. Add a --growth fresh config-only sweep at the same N, K and scoping into the same results base and report that base dir with --allow-multi-run."
 			else if (npods > 0 && nconf > 0) msg = "not measured: the pods and config-only cells share no mesh, K, N and scoping. Run both with --growth fresh at the same N, K and scoping (configs/ns-scaling-lab.env shows the commands)."
 			else msg = "not measured: no growth cell has a valid sample."
 			printf "PODSMISSING\t%s\n", msg
@@ -1698,8 +1712,9 @@ report_text() {
 	aggregated=$(aggregate)
 	short="$(vsdr_ingest_short "$aggregated")"
 	echo "=== Control-Plane Resource Scaling ==="
-	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}"
+	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}  ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}  ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
 	echo "# runs: run_ids=${RUN_IDS_M}  istio_versions=${ISTIO_VERSIONS_M}  harness_shas=${HARNESS_SHAS_M}"
+	[[ -z "$POOLED_NOTE" ]] || echo "# POOLED RUNS: ${POOLED_NOTE}"
 	[[ -n "$PROVENANCE_WARNING" ]] && echo "# WARNING: ${PROVENANCE_WARNING}"
 	data_warnings_lines "# WARNING: "
 	if has_growth_cells "$aggregated"; then
@@ -1797,8 +1812,9 @@ report_csv() {
 	local aggregated short
 	aggregated=$(aggregate)
 	short="$(vsdr_ingest_short "$aggregated")"
-	echo "# RUN_ID=${RUN_ID_TAG},ISTIO_VERSION=${ISTIO_VERSION_TAG},HARNESS_SHA=${HARNESS_SHA_TAG},files_consumed=${FILES_CONSUMED},skipped_legacy=${FILES_SKIPPED}"
+	echo "# RUN_ID=${RUN_ID_TAG},ISTIO_VERSION=${ISTIO_VERSION_TAG},HARNESS_SHA=${HARNESS_SHA_TAG},files_consumed=${FILES_CONSUMED},skipped_legacy=${FILES_SKIPPED},ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M},ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
 	echo "# runs: run_ids=${RUN_IDS_M} istio_versions=${ISTIO_VERSIONS_M} harness_shas=${HARNESS_SHAS_M}"
+	config_multi_run_csv
 	[[ -n "$PROVENANCE_WARNING" ]] && echo "# WARNING: ${PROVENANCE_WARNING}"
 	data_warnings_lines "# WARNING: "
 	echo "# run_config: run_config=${RUN_CONFIG_M} run_config_sha256=${RUN_CONFIG_SHA256_M}"
@@ -1905,6 +1921,8 @@ report_markdown() {
 	echo "---"
 	echo "run_id: ${RUN_ID_TAG}"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
+	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
+	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
 	echo "run_ids: $(json_list "$RUN_IDS_M")"
 	echo "istio_versions: $(json_list "$ISTIO_VERSIONS_M")"
@@ -1949,6 +1967,7 @@ report_markdown() {
 	echo ""
 	echo "# Control-Plane Resource Scaling"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	[[ -n "$PROVENANCE_WARNING" ]] && { echo "> **Warning:** ${PROVENANCE_WARNING}"; echo ""; }
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "> **Warning:** "; echo ""; fi
 	# O9 achieved-scale block (clearly delimited; does not inject columns into the
@@ -2231,8 +2250,8 @@ report_json() {
 	shortkeys="$(vsdr_ingest_short "$aggregated" | awk -F'\t' '{ printf ";%s", $1 } END { print ";" }')"
 	local ns_scaling_json
 	ns_scaling_json="$(scaling_section json "$aggregated")"
-	NS_SCALING_JSON="$ns_scaling_json" awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
-		-v ri_list="$(json_list "$RUN_IDS_M")" -v iv_list="$(json_list "$ISTIO_VERSIONS_M")" -v hs_list="$(json_list "$HARNESS_SHAS_M")" -v prov_warn="${PROVENANCE_WARNING//[\"\\]/}" \
+	NS_SCALING_JSON="$ns_scaling_json" awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v iv_src="$ISTIO_VERSION_SOURCE_M" -v iv_pin="$ISTIO_VERSION_PIN_M" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
+		-v ri_list="$(json_list "$RUN_IDS_M")" -v iv_list="$(json_list "$ISTIO_VERSIONS_M")" -v hs_list="$(json_list "$HARNESS_SHAS_M")" -v prov_warn="${PROVENANCE_WARNING//[\"\\]/}" -v pooled="$(config_multi_run_json)" \
 		-v rc_path="$RUN_CONFIG_M" -v rc_sha="$RUN_CONFIG_SHA256_M" \
 		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" \
 		-v sw_traffic="$SWEEP_TRAFFIC" -v tm_every="$VSDR_EVERY_M" -v tm_subsets="$VSDR_SUBSETS_M" -v shortkeys="$shortkeys" \
@@ -2260,7 +2279,7 @@ report_json() {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"provenance_warning\":%s,\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"istiod_replicas_by_context\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_peak_pct_of_limit_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\",\"growth\":{\"growth_mode\":\"%s\",\"mem_stop_pct\":\"%s\",\"probe_settle_sec\":\"%s\",\"services_per_namespace\":\"%s\",\"workload_modes\":\"%s\",\"window_kinds\":\"%s\",\"leftover_test_namespaces_at_start\":\"%s\"},\"data_warnings\":[%s]},\n  \"results\": [", ri, iv, hs, ri_list, iv_list, hs_list, (prov_warn == "" ? "null" : "\"" prov_warn "\""), rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_rep_by, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu_peak, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note, gr_mode, gr_stop, gr_settle, gr_spn, gr_wm, gr_wk, leftover_start, data_warn }
+	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"istio_version_source\":\"%s\",\"istio_version_pin\":\"%s\",\"harness_sha\":\"%s\",\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"provenance_warning\":%s,\"pooled_runs\":%s,\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"istiod_replicas_by_context\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_peak_pct_of_limit_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\",\"growth\":{\"growth_mode\":\"%s\",\"mem_stop_pct\":\"%s\",\"probe_settle_sec\":\"%s\",\"services_per_namespace\":\"%s\",\"workload_modes\":\"%s\",\"window_kinds\":\"%s\",\"leftover_test_namespaces_at_start\":\"%s\"},\"data_warnings\":[%s]},\n  \"results\": [", ri, iv, iv_src, iv_pin, hs, ri_list, iv_list, hs_list, (prov_warn == "" ? "null" : "\"" prov_warn "\""), pooled, rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_rep_by, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu_peak, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note, gr_mode, gr_stop, gr_settle, gr_spn, gr_wm, gr_wk, leftover_start, data_warn }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -2303,6 +2322,8 @@ report_charts() {
 
 	echo "---"
 	echo "istio_version: ${ISTIO_VERSION_TAG}"
+	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
+	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
 	echo "harness_sha: ${HARNESS_SHA_TAG}"
 	echo "run_ids: $(json_list "$RUN_IDS_M")"
 	echo "istio_versions: $(json_list "$ISTIO_VERSIONS_M")"
@@ -2315,6 +2336,7 @@ report_charts() {
 	echo ""
 	echo "# Control-Plane Resource Scaling — Charts"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "> **Warning:** "; echo ""; fi
 	# Chart 1: istiod CPU vs mesh size, one series per sidecar scoping.
 	# Chart 2: Per-proxy config dump size (MiB) by scoping at largest mesh size.
@@ -2481,6 +2503,6 @@ esac
 # floor. With ENFORCE=0 (default) this is informational only — behaviour unchanged.
 if [[ "${SCALE_COVERAGE_ENFORCE:-0}" == "1" && "$COVERAGE_STATUS" == "UNDER" ]]; then
 	echo "${COVERAGE_LINE}" >&2
-	echo "  To fix: add cluster nodes, raise the workload size (SCALE_SIZING_MODE=auto, or a larger --service-count/--replicas), lower SCALE_COVERAGE_MIN_FRACTION, or unset SCALE_COVERAGE_ENFORCE to treat coverage as informational." >&2
+	echo "  To fix: add cluster nodes, raise the workload size (larger --service-counts/--replica-counts; SCALE_SIZING_MODE=auto applies to a standalone 001 only), lower SCALE_COVERAGE_MIN_FRACTION, or unset SCALE_COVERAGE_ENFORCE to treat coverage as informational." >&2
 	die "scale coverage under floor (SCALE_COVERAGE_ENFORCE=1)"
 fi

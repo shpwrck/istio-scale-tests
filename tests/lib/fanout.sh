@@ -12,7 +12,8 @@
 # the per-pod scrapes with the correct semantics per metric class:
 #
 #   counters   (pilot_xds_pushes, {type=eds}, pilot_push_triggers, k8s events)
-#              -> SUM(after) - SUM(before) across pods  (each event from one replica)
+#              -> SUM(after) - SUM(before) across pods  (each event from one replica),
+#                 via counter_delta; `unknown` (never 0) when no scrape has the counter
 #   pilot_xds  (connected_proxies gauge)
 #              -> SUM across replicas (each proxy = exactly one istiod connection)
 #   pilot_services (gauge)
@@ -344,34 +345,41 @@ fanout_record_podset() {
 # fanout_scrape_all) plus the metric name and reuses the single-file extractors
 # from tests/lib/metrics.sh. Skips empty files (a failed scrape).
 
-# SUM a counter across pods (delta is computed by the caller as after-before).
+# SUM a counter across pods; the caller takes the window delta with counter_delta
+# (metrics.sh). A pod whose scrape lacks the counter adds 0 (istiod registers it at
+# its first increment); `unknown` when no non-empty scrape has it at all (R10: renamed,
+# or every scrape failed), so a missing metric never reads as 0.
 # Usage: fanout_counter_sum <counter_name> <metrics_file>...
 # shellcheck disable=SC2329
 fanout_counter_sum() {
 	local name="$1"
 	shift
-	local f total=0 v
+	local f total=0 v seen=0
 	for f in "$@"; do
 		[[ -s "$f" ]] || continue
 		v="$(extract_counter_sum "$f" "$name")"
+		[[ "$v" =~ ^[0-9]+$ ]] || continue
+		seen=1
 		total=$(( total + v ))
 	done
-	echo "$total"
+	if ((seen)); then echo "$total"; else echo unknown; fi
 }
 
-# SUM a counter filtered by label across pods.
+# SUM a counter filtered by label across pods; `unknown` as fanout_counter_sum.
 # Usage: fanout_counter_by_label_sum <counter_name> <label> <value> <metrics_file>...
 # shellcheck disable=SC2329
 fanout_counter_by_label_sum() {
 	local name="$1" label="$2" value="$3"
 	shift 3
-	local f total=0 v
+	local f total=0 v seen=0
 	for f in "$@"; do
 		[[ -s "$f" ]] || continue
 		v="$(extract_counter_by_label "$f" "$name" "$label" "$value")"
+		[[ "$v" =~ ^[0-9]+$ ]] || continue
+		seen=1
 		total=$(( total + v ))
 	done
-	echo "$total"
+	if ((seen)); then echo "$total"; else echo unknown; fi
 }
 
 # SUM a gauge across pods (pilot_xds: each proxy is one istiod connection).

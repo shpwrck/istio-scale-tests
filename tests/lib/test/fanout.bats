@@ -31,6 +31,30 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	[ "$result" = "320" ]
 }
 
+@test "fanout_counter_sum: counter in no pod's scrape is unknown, not 0 (R10)" {
+	result=$(fanout_counter_sum pilot_xds_pushes_renamed "$POD0" "$POD1")
+	[ "$result" = "unknown" ]
+	result=$(fanout_counter_by_label_sum pilot_xds_pushes_renamed type eds "$POD0" "$POD1")
+	[ "$result" = "unknown" ]
+}
+
+@test "fanout_counter_sum: every scrape failed (all files empty) is unknown, not 0 (R10, PL29)" {
+	e1=$(mktemp); e2=$(mktemp)
+	result=$(fanout_counter_sum pilot_xds_pushes "$e1" "$e2")
+	r2=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "$e1" "$e2")
+	rm -f "$e1" "$e2"
+	[ "$result" = "unknown" ]
+	[ "$r2" = "unknown" ]
+}
+
+@test "fanout_counter_sum: a pod that has not registered the counter yet adds 0" {
+	other=$(mktemp)
+	printf 'process_start_time_seconds 1716940800\n' > "$other"
+	result=$(fanout_counter_sum pilot_xds_pushes "$POD0" "$other")
+	rm -f "$other"
+	[ "$result" = "400" ]
+}
+
 # --- gauge SUM vs INVARIANT (the load-bearing distinction) ------------------
 
 @test "extract_gauge_sum: sums multiple label permutations WITHIN a pod (3+2=5)" {
