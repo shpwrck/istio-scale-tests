@@ -11,7 +11,12 @@ set -euo pipefail
 #   (StatefulSet at its replica count, rollout complete, STABLE_POLLS polls in a row),
 #   then delete the controller pods once and wait until every replacement is Ready.
 # MODE=app-status: fail when an Application still has an empty sync or health status
-#   after APP_STATUS_TIMEOUT_SEC, naming its destination cluster.
+#   after APP_STATUS_TIMEOUT_SEC, naming its destination cluster. With
+#   EXPECTED_DESTINATIONS (destination cluster names or servers, space or comma
+#   separated) it also waits until at least one Application targets each of them: the
+#   ApplicationSets generate the member Applications minutes after the apply, so
+#   without it the check can pass on the hub's own Applications alone (ROSA 2026-10-16:
+#   13 of 40 existed when it ran).
 #
 # Auth modes (via environment variables):
 #   Kubeconfig: KUBECONFIG_PATH + KUBE_CONTEXT
@@ -20,7 +25,8 @@ set -euo pipefail
 # Required: GITOPS_NS, ARGOCD_NAME (the ArgoCD CR; the StatefulSet is
 #   <ARGOCD_NAME>-application-controller)
 # Optional: MODE, SETTLE_SEC (30: let the operator see the new Secrets first),
-#   POLL_SEC (10), STABLE_POLLS (3), ROLLOUT_TIMEOUT_SEC (600), APP_STATUS_TIMEOUT_SEC (900)
+#   POLL_SEC (10), STABLE_POLLS (3), ROLLOUT_TIMEOUT_SEC (600), APP_STATUS_TIMEOUT_SEC (900),
+#   EXPECTED_DESTINATIONS (app-status; empty = no per-destination check)
 
 : "${GITOPS_NS:?GITOPS_NS is required}"
 : "${ARGOCD_NAME:?ARGOCD_NAME is required}"
@@ -30,6 +36,7 @@ POLL_SEC="${POLL_SEC:-10}"
 STABLE_POLLS="${STABLE_POLLS:-3}"
 ROLLOUT_TIMEOUT_SEC="${ROLLOUT_TIMEOUT_SEC:-600}"
 APP_STATUS_TIMEOUT_SEC="${APP_STATUS_TIMEOUT_SEC:-900}"
+EXPECTED_DESTINATIONS="${EXPECTED_DESTINATIONS:-}"
 
 for v in SETTLE_SEC POLL_SEC STABLE_POLLS ROLLOUT_TIMEOUT_SEC APP_STATUS_TIMEOUT_SEC; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "error: $v must be a non-negative integer (got: ${!v})" >&2; exit 1; }
@@ -144,27 +151,46 @@ app_status_missing() {
   '
 }
 
+# dests_without_apps: every EXPECTED_DESTINATIONS entry that no Application targets yet
+# (matched against destination.name and destination.server).
+dests_without_apps() {
+  [[ -n "$EXPECTED_DESTINATIONS" ]] || return 0
+  "${KC[@]}" -n "$GITOPS_NS" get applications.argoproj.io -o json | jq -r --arg want "$EXPECTED_DESTINATIONS" '
+    [.items[] | .spec.destination | (.name // empty), (.server // empty)] as $have
+    | ($want | gsub(","; " ") | split(" ") | map(select(. != ""))) - $have
+    | .[]
+  '
+}
+
 app_status() {
   echo "=== Checking that every Application has a sync and health status (timeout ${APP_STATUS_TIMEOUT_SEC}s) ==="
-  local deadline=$((SECONDS + APP_STATUS_TIMEOUT_SEC)) missing total
+  [[ -z "$EXPECTED_DESTINATIONS" ]] || echo "  and that each of these destinations has Applications: ${EXPECTED_DESTINATIONS}"
+  local deadline=$((SECONDS + APP_STATUS_TIMEOUT_SEC)) missing total absent=""
   while :; do
     if total="$("${KC[@]}" -n "$GITOPS_NS" get applications.argoproj.io -o name 2>/dev/null | wc -l | tr -d ' ')" \
-      && missing="$(app_status_missing 2>/dev/null)"; then
-      if [[ -z "$missing" ]] && ((total > 0)); then
-        echo "  all ${total} Application(s) have a sync and health status"
+      && missing="$(app_status_missing 2>/dev/null)" \
+      && absent="$(dests_without_apps 2>/dev/null)"; then
+      if [[ -z "$missing" && -z "$absent" ]] && ((total > 0)); then
+        echo "  all ${total} Application(s) have a sync and health status$([[ -z "$EXPECTED_DESTINATIONS" ]] || echo ", and every expected destination has Applications")"
         return 0
       fi
     else
       missing="(Applications not readable)"
     fi
     if ((SECONDS >= deadline)); then
-      if [[ -z "$missing" ]]; then
+      if [[ -z "$missing" && -z "$absent" ]]; then
         echo "error: no Applications found in ${GITOPS_NS} after ${APP_STATUS_TIMEOUT_SEC}s" >&2
         exit 1
       fi
-      echo "error: Applications without a sync or health status after ${APP_STATUS_TIMEOUT_SEC}s; no controller shard owns their destination cluster:" >&2
-      printf '%s\n' "$missing" | awk -F'\t' 'NF { printf "  %s (destination %s)\n", $1, $2 }' >&2
-      echo "  Fix: delete the ${STS} pods in ${GITOPS_NS} once the StatefulSet is settled, then re-run the apply." >&2
+      if [[ -n "$missing" ]]; then
+        echo "error: Applications without a sync or health status after ${APP_STATUS_TIMEOUT_SEC}s; no controller shard owns their destination cluster:" >&2
+        printf '%s\n' "$missing" | awk -F'\t' 'NF { printf "  %s (destination %s)\n", $1, $2 }' >&2
+        echo "  Fix: delete the ${STS} pods in ${GITOPS_NS} once the StatefulSet is settled, then re-run the apply." >&2
+      fi
+      if [[ -n "$absent" ]]; then
+        echo "error: no Application targets these destination clusters after ${APP_STATUS_TIMEOUT_SEC}s; their ApplicationSets have not generated them (check the ACM PlacementDecisions and the Argo CD cluster Secrets):" >&2
+        printf '%s\n' "$absent" | sed 's/^/  /' >&2
+      fi
       exit 1
     fi
     sleep "$POLL_SEC"

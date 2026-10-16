@@ -30,9 +30,12 @@ Two steps guard Argo CD's controller sharding. Once every cluster secret exists,
 the GitOps operator's own dynamic-scaling restart of the application controller to settle, then
 restarts the controller pods once: a controller that starts while the secrets change can leave a
 cluster without a shard, and that cluster's Applications never get a status. At the end, the apply
-fails if an Application still has an empty sync or health status after
-`argocd_app_status_timeout_sec` (default 900; 0 disables), naming its destination cluster. The fix
-is the same restart: `oc -n openshift-gitops delete pod -l app.kubernetes.io/name=openshift-gitops-application-controller`.
+waits until every spoke has Applications (the ApplicationSets generate them a few minutes after
+the apply's own Applications) and fails if one has none, or an Application still has an empty sync
+or health status, after `argocd_app_status_timeout_sec` (default 900; 0 disables), naming the
+destination cluster. For an empty status the fix is the same restart:
+`oc -n openshift-gitops delete pod -l app.kubernetes.io/name=openshift-gitops-application-controller`;
+for a spoke with no Applications, check its ACM PlacementDecision and its Argo CD cluster Secret.
 
 ## Existing clusters
 

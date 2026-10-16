@@ -12,13 +12,15 @@ replicaCount: 1
 # Services is about 1.45 GiB allocated and up to about 4 GiB working set. The 1Gi limit
 # capped the mesh near 5000 Services. Sizing rule: limit >= (10 Mi + 145 Mi x Services /
 # 1000) x 2.5; the request reserves the steady state. See docs/scale-test-campaign.
+# 5Gi, above the rule's 3.6 GiB at 10k: a one-step 0 -> 10k burst peaked at 3.4 GiB (85% of
+# the earlier 4Gi; ROSA 2026-10-16), and a second burst can keep 2.6-2.9x allocated.
 resources:
   requests:
     cpu: 100m
     memory: 1Gi
   limits:
     cpu: 2000m
-    memory: 4Gi
+    memory: 5Gi
 
 autoscaling:
   enabled: false

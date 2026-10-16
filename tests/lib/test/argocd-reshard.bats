@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # terraform/scripts/argocd-controller-reshard.sh (BACKLOG 9.1) against a stub kubectl: the
 # restart waits for the operator's reconcile to settle, deletes the controller pods once and
-# waits for Ready replacements; the app-status check names Applications without a status.
+# waits for Ready replacements; the app-status check names Applications without a status
+# and expected destinations that no Application targets yet.
 
 load test_helper
 
@@ -144,6 +145,32 @@ EOF
 	assert_output --partial "mesh-b-ossm (destination mesh-b)"
 	assert_output --partial "mesh-b-ingress (destination https://api.mesh-b.example:6443)"
 	refute_output --partial "in-cluster-ossm"
+}
+
+@test "app-status: waits for an Application on every expected destination (name or server)" {
+	cat >"${STUB_DIR}/apps.json" <<'EOF'
+{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"server":"https://kubernetes.default.svc"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
+{"metadata":{"name":"mesh-a-ossm"},"spec":{"destination":{"name":"mesh-a"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
+{"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"server":"https://api.mesh-b.example:6443"}},"status":{"sync":{"status":"OutOfSync"},"health":{"status":"Missing"}}}]}
+EOF
+	MODE=app-status EXPECTED_DESTINATIONS="mesh-a,https://api.mesh-b.example:6443" run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "all 3 Application(s) have a sync and health status, and every expected destination has Applications"
+}
+
+@test "app-status: an expected destination with no Application fails, named, even when every status is set" {
+	# The ApplicationSets have generated nothing for mesh-c yet: only the hub's own
+	# Applications and mesh-b's exist, all with a status (the 2026-10-16 timing).
+	cat >"${STUB_DIR}/apps.json" <<'EOF'
+{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"name":"in-cluster"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
+{"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"name":"mesh-b"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}}]}
+EOF
+	MODE=app-status EXPECTED_DESTINATIONS="mesh-b mesh-c" run bash "$SCRIPT"
+	assert_failure
+	assert_output --partial "no Application targets these destination clusters after 1s"
+	assert_output --partial "  mesh-c"
+	refute_output --partial "  mesh-b"
+	refute_output --partial "without a sync or health status"
 }
 
 @test "app-status: no Applications at all is a failure, not a pass" {
