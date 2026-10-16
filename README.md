@@ -35,7 +35,7 @@ flowchart TB
 
 ## What you need
 
-- `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4+
+- `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4.3+ (macOS ships 3.2: `brew install bash`)
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
 - `python3` with PyYAML (tuning suite only)
 - Mesh members must be able to provision `type: LoadBalancer` Services (cloud provider or MetalLB).

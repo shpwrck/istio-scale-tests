@@ -26,6 +26,13 @@
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
 
+# Every suite needs bash 4.3 or newer (namerefs, `local -n`); macOS ships 3.2, whose errors
+# would surface later as confusing syntax or "invalid option" messages.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+	echo "error: bash 4.3 or newer is required; this is bash ${BASH_VERSION}. On macOS: brew install bash, then put \"\$(brew --prefix)/bin\" first on PATH." >&2
+	exit 1
+fi
+
 # shellcheck disable=SC2329
 die() { echo "error: $*" >&2; exit 1; }
 

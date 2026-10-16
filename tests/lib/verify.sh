@@ -5,6 +5,7 @@
 # `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
 # Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
+# A missing shellcheck or bats-core fails the run; --skip-shellcheck skips that step on purpose.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -49,14 +50,13 @@ else
 	if command -v shellcheck >/dev/null 2>&1; then
 		sc_fail=0
 		for f in "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh; do
-			if ! shellcheck "$f" 2>/dev/null; then
+			if ! shellcheck "$f"; then
 				sc_fail=1
 			fi
 		done
 		if ((sc_fail)); then err "shellcheck violations found"; else ok; fi
 	else
-		echo "    WARNING: shellcheck not found, skipping"
-		pass=$((pass + 1))
+		err "shellcheck not found on PATH (install it, or pass --skip-shellcheck to skip this step)"
 	fi
 fi
 
@@ -228,18 +228,20 @@ else
 	step 6 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
 	empty_kubeconfig="$(mktemp)"
+	dry_out="$(mktemp)"
 	while IFS= read -r f; do
 		args=$(grep -m1 '^# ci-dry-run:' "$f" | sed 's/^# ci-dry-run://')
 		rel="${f#"$ROOT"/}"
 		# shellcheck disable=SC2086
-		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $args) >/dev/null 2>&1; then
+		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $args) >"$dry_out" 2>&1; then
 			echo "    ok: $rel --dry-run${args}"
 		else
-			echo "    FAIL: $rel --dry-run${args}"
+			echo "    FAIL: $rel --dry-run${args} (last 20 lines of its output):"
+			tail -n 20 "$dry_out" | sed 's/^/      | /'
 			dry_fail=1
 		fi
 	done < <(grep -rl --exclude-dir='bats-*' '^# ci-dry-run:' "$ROOT/tests" --include='*.sh' | sort)
-	rm -f "$empty_kubeconfig"
+	rm -f "$empty_kubeconfig" "$dry_out"
 	if ((dry_fail)); then err "dry-run failures"; else ok; fi
 fi
 

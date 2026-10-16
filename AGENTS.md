@@ -103,7 +103,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 ## Tools
 
-`bash` 4+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`,
+`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`,
 `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
