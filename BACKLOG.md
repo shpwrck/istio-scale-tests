@@ -273,7 +273,8 @@ reports found: istiod "CPU avg" was a per-window peak, "KB"/"MB" were KiB/MiB, t
 and envelope read istiod CPU from one end-of-window `kubectl top` snapshot, two-point fits
 printed R² 1.000, exponents leaked into tables and JSON, config-only cells claimed endpoints, and
 the churn, churn-dataplane, dataplane, propagation and tuning reports averaged N/A as 0 or
-bucketed means of p99s (all fixed, with bats; the window record's units are corrected).
+bucketed means of p99s (all fixed, with bats; the window record's units are corrected). Lab
+validation also found the capacity plan ignoring the CPU other pods request (fixed under 9.7).
 **Lab caveat:** the workstation's resolver failed over from the lab DNS twice mid-run; the lab
 runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` keeps TLS valid).
 
@@ -458,8 +459,16 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   when unset, used by 003's plan and 001's auto-sizing. `SCALE_PER_POD_CPU_M` / `_MEM_MI` default
   empty; a set value wins (precedence flag > config > env) and the plan names the live value next
   to it. One shared quantity parser now reads decimal suffixes too (`8G` broke the old jq).
-  **Validated:** bats; lab: "per pod: istio-cr on <member>", 100m. **Left:** ROSA: the 20m
-  override should read 20m.
+  Found in lab validation: the free side was wrong too. The plan took allocatable minus istiod's
+  limit on the first context (17.5 of 19.5 cores on the lab hub) while other pods already requested
+  14.6, so 30 × 2 "fit" and 11 pods stayed Pending until the 300 s wait recorded SETUP_FAILED.
+  `cap_requested` now sums what non-terminal pods on the workers request (the scheduler's rule for
+  init and native-sidecar containers, plus overhead); the plan checks every member against
+  allocatable minus the other pods' requests and names the tightest, and 001 refuses a step whose
+  pods' requests do not fit (`SCALE_CPU_PREFLIGHT_ENFORCE=0` only warns, for a node autoscaler).
+  The capacity wrappers no longer end a `set -e` caller when kubectl fails.
+  **Validated:** bats (parser, wrapper, 001 against a stub cluster); lab: "per pod: istio-cr on
+  <member>", 100m. **Left:** ROSA: the 20m override should read 20m.
 
 ### 9.8 Classic LBs break HTTP through the ingress gateway on AWS (findings 7, 11) — owner decision
 
@@ -545,7 +554,9 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   `leftover-check` row in the namespace-lifecycle TSV; every growth row carries
   `leftover_test_namespaces` (schema 66, namespaces not of this series); 004 warns in every format
   above the threshold. **Validated:** bats; lab: 126, 376 and 626 leftovers recorded per series
-  and per row, with the warning in the sweep log and every report format. **Left:** plan
+  and per row, with the warning in the sweep log and every report format; after a
+  `--series-retire keep` sweep, the next sweep stopped before its first cell (5 discovered
+  namespaces on the measured member, exit 1). **Left:** plan
   clean-cluster series on ROSA for absolute numbers (unchanged).
 
 ### 9.11 VS/DR convergence p99 at 150-250 Services (finding 12) — analysis first
@@ -564,6 +575,15 @@ runs used a scratch kubeconfig that pins the API addresses (`tls-server-name` ke
   is growth-only and growth mode rejects `vsdr`, so `--parts traffic` must be allowed in legacy mode
   for `vsdr`), or document a manual split apply; then rerun `vsdr` on the lab at 50 / 100 / 150 Services. A fix only if it is a harness
   artifact.
+- **Done:** `003 --vsdr-apply split` (`CONTROLPLANE_VSDR_APPLY`, default `together`): `001 --parts
+  workloads` (everything but the VS/DR, Ready) before the baseline, then the window covers only
+  `001 --parts traffic`; rows carry `window_kind traffic` and the preamble `VSDR_APPLY`; the `none`
+  cell's window is idle over the same workloads, so the VS/DR effect table reads as the VS/DR cost
+  alone ("(split apply)"). **Validated:** bats; lab, 20 Services × 2 replicas on two members (the
+  hub's free CPU caps it near 24): `together` vsdr convergence p99 0-100 ms on both members (as
+  `none`), 866 pushes; `split` 0-100 ms on one member and 100-500 ms on the other, 208 pushes,
+  istiod CPU peak 12 → 46 m for the VS/DR alone. Nothing at this size reproduces the jump.
+  **Left:** ROSA: both modes at 150-250 Services to tell a harness artifact from a real cost.
 
 ### 9.12 Plan and doc corrections (findings 9, 10) — done in the window-record PR
 
