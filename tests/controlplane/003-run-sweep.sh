@@ -262,7 +262,9 @@ Environment:
   CONTROLPLANE_LEFTOVER_NS_WARN.
   SCALE_PER_POD_CPU_M: per-pod CPU of the capacity plan; empty (default) = the live
   Istio CR's sidecar CPU request on the first context (Istio's 100m when the CR sets
-  none); a value wins over the live reading.
+  none); a value wins over the live reading. The plan compares the largest combo with
+  each member's free CPU (allocatable minus what other pods request); 001 refuses a step
+  that does not fit unless SCALE_CPU_PREFLIGHT_ENFORCE=0 (warn only, for a node autoscaler).
   METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
   pre-sweep wait for 'kubectl top nodes'; warns (never aborts) if unavailable.
   CAP_TOP_TIMEOUT (default 15), CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2):
@@ -446,6 +448,7 @@ is_nonneg_int "$CONFIG_DUMP_SAMPLES" || die "--config-dump-samples (or CONTROLPL
 # So do 001, 002 and 005 with these; a typo would otherwise fail every setup or skip
 # every cleanup mid-sweep, and pass --dry-run.
 is_nonneg_int "${CONTROLPLANE_WAIT_TIMEOUT_SEC:-300}" || die "CONTROLPLANE_WAIT_TIMEOUT_SEC (read by 001) must be a non-negative integer (got: ${CONTROLPLANE_WAIT_TIMEOUT_SEC:-})"
+[[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" =~ ^[01]$ ]] || die "SCALE_CPU_PREFLIGHT_ENFORCE (read by 001) must be 0 or 1 (got: ${SCALE_CPU_PREFLIGHT_ENFORCE:-})"
 # The cleanup bound first: options.env defaults the setup wait to it.
 is_pos_int "${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}" || die "CONTROLPLANE_NS_DELETE_TIMEOUT_SEC (read by 005) must be a positive integer (got: ${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-})"
 is_nonneg_int "${CONTROLPLANE_SETUP_NS_WAIT_SEC:-${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}}" || die "CONTROLPLANE_SETUP_NS_WAIT_SEC (read by 001) must be a non-negative integer (got: ${CONTROLPLANE_SETUP_NS_WAIT_SEC:-})"
@@ -857,7 +860,8 @@ precreate_tsv_preamble() {
 }
 
 # Plan-time capacity warning: compare the largest combo's sidecar CPU request
-# (pods x the per-pod request) with free node CPU on the source context. The per-pod
+# (pods x the per-pod request) with the free node CPU of the tightest measured member
+# (allocatable minus what other pods already request). The per-pod
 # request is SCALE_PER_POD_CPU_M when set, else the live Istio CR's sidecar request
 # (the test pods' app containers request nothing; BACKLOG 9.7), else Istio's 100m.
 # Warn only; 001's preflight is the hard gate. Dry-run prints only the requested cores
@@ -906,48 +910,79 @@ capacity_plan_warn() {
 	fi
 	(( ${#KUBECTL[@]} )) || { echo "  WARN: no oc/kubectl; cannot read node capacity for the fit estimate." >&2; echo "" >&2; return 0; }
 
-	local src_ctx="${CONTEXTS[0]}" alloc_cpu_m="" istiod_cpu_m="" istiod_rep="" kv
-	# shellcheck disable=SC2207
-	local -a nt=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${nt[@]}"; do case "$kv" in cpu_m=*) alloc_cpu_m="${kv#cpu_m=}" ;; esac; done
-	# shellcheck disable=SC2207
-	local -a il=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${il[@]}"; do
-		case "$kv" in
-			cpu_m=*) istiod_cpu_m="${kv#cpu_m=}" ;;
-			replicas=*) istiod_rep="${kv#replicas=}" ;;
-		esac
+	# cores <millicores>: one decimal (a few small pods must not read as "~0 cores").
+	cores() { awk -v m="$1" 'BEGIN { printf "%.1f", m / 1000 }'; }
+	# Free CPU per measured member = worker allocatable − the CPU other pods already
+	# request (what the scheduler sees: OpenShift, istiod, gateways, monitoring). The
+	# test's own pods are left out: needed_pods already counts the whole largest combo.
+	# The tightest member decides. When the pod list is unreadable, fall back to
+	# allocatable − istiod's limit × replicas, which overstates the free CPU.
+	local ctx kv alloc_cpu_m workers req_cpu_m istiod_cpu_m istiod_rep free_cpu_m min_free="" min_ctx=""
+	local -A seen=()
+	for ctx in "${CONTEXTS[@]}"; do
+		[[ -n "${seen[$ctx]:-}" ]] && continue
+		seen[$ctx]=1
+		alloc_cpu_m="" workers="" req_cpu_m="" istiod_cpu_m="" istiod_rep=""
+		# shellcheck disable=SC2207
+		local -a nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
+		for kv in "${nt[@]}"; do
+			case "$kv" in
+				cpu_m=*) alloc_cpu_m="${kv#cpu_m=}" ;;
+				names=*) workers="${kv#names=}" ;;
+			esac
+		done
+		if ! [[ "$alloc_cpu_m" =~ ^[0-9]+$ ]]; then
+			echo "  $ctx: WARN: node allocatable CPU unreadable; left out of the fit estimate." >&2
+			continue
+		fi
+		# shellcheck disable=SC2207
+		local -a rq=($(cap_requested "$ctx" "$workers" "app.kubernetes.io/instance=controlplane-test" "${KUBECTL[@]}"))
+		for kv in "${rq[@]}"; do case "$kv" in cpu_m=*) req_cpu_m="${kv#cpu_m=}" ;; esac; done
+		if [[ "$req_cpu_m" =~ ^[0-9]+$ ]]; then
+			free_cpu_m=$(( alloc_cpu_m - req_cpu_m ))
+			(( free_cpu_m < 0 )) && free_cpu_m=0
+			echo "  $ctx: node alloc CPU ~$(cores "$alloc_cpu_m") cores; requested by other pods ~$(cores "$req_cpu_m") -> ~$(cores "$free_cpu_m") cores free" >&2
+		else
+			# shellcheck disable=SC2207
+			local -a il=($(cap_istiod_limits "$ctx" "${KUBECTL[@]}"))
+			for kv in "${il[@]}"; do
+				case "$kv" in
+					cpu_m=*) istiod_cpu_m="${kv#cpu_m=}" ;;
+					replicas=*) istiod_rep="${kv#replicas=}" ;;
+				esac
+			done
+			local istiod_baseline_m=0
+			if [[ "$istiod_cpu_m" =~ ^[0-9]+$ && "$istiod_rep" =~ ^[0-9]+$ ]]; then
+				istiod_baseline_m=$(( istiod_cpu_m * istiod_rep ))
+			fi
+			free_cpu_m=$(( alloc_cpu_m - istiod_baseline_m ))
+			(( free_cpu_m < 0 )) && free_cpu_m=0
+			echo "  $ctx: node alloc CPU ~$(cores "$alloc_cpu_m") cores; pod requests unreadable, istiod baseline ~$(cores "$istiod_baseline_m") cores (${istiod_cpu_m:-unknown}m × ${istiod_rep:-unknown} rep) -> ~$(cores "$free_cpu_m") cores free (an overstatement)" >&2
+		fi
+		if [[ -z "$min_free" ]] || (( free_cpu_m < min_free )); then
+			min_free="$free_cpu_m"
+			min_ctx="$ctx"
+		fi
 	done
-	if ! [[ "$alloc_cpu_m" =~ ^[0-9]+$ ]]; then
-		echo "  WARN: node allocatable CPU unreadable on $src_ctx; cannot estimate services-that-fit." >&2
+	if [[ -z "$min_free" ]]; then
+		echo "  WARN: node allocatable CPU unreadable on every context; cannot estimate services-that-fit." >&2
 		echo "" >&2
 		return 0
 	fi
-	# istiod baseline = per-replica istiod CPU limit × replicas (the aggregate control-
-	# plane reservation on the cluster). Unknown istiod limit -> baseline 0 (conservative
-	# overstate of free CPU; still flags the gross over-provision case).
-	local istiod_baseline_m=0
-	if [[ "$istiod_cpu_m" =~ ^[0-9]+$ && "$istiod_rep" =~ ^[0-9]+$ ]]; then
-		istiod_baseline_m=$(( istiod_cpu_m * istiod_rep ))
-	fi
-	local free_cpu_m=$(( alloc_cpu_m - istiod_baseline_m ))
-	(( free_cpu_m < 0 )) && free_cpu_m=0
+	free_cpu_m="$min_free"
 	local max_services=0
 	if (( max_rc > 0 && per_pod_cpu_m > 0 )); then
 		max_services=$(( free_cpu_m / (max_rc * per_pod_cpu_m) ))
 	fi
-	# cores <millicores>: one decimal (a few small pods must not read as "~0 cores").
-	cores() { awk -v m="$1" 'BEGIN { printf "%.1f", m / 1000 }'; }
-	echo "  node alloc CPU: ~$(cores "$alloc_cpu_m") cores; istiod baseline: ~$(cores "$istiod_baseline_m") cores (${istiod_cpu_m:-unknown}m × ${istiod_rep:-unknown} rep) -> ~$(cores "$free_cpu_m") cores free" >&2
 	# Growth series in config-only mode run only measurement pods: report pods, not services.
 	local fit_label="~${max_services} services would fit at ${max_rc} replicas"
 	if ((GROWTH)) && [[ "$WORKLOAD_MODE" == config-only ]] && ((per_pod_cpu_m > 0)); then
 		fit_label="~$(( free_cpu_m / per_pod_cpu_m )) pods would fit"
 	fi
 	if (( needed_cpu_m > free_cpu_m )); then
-		echo "  WARN: combo needs ~$(cores "$needed_cpu_m") cores/cluster, ~$(cores "$free_cpu_m") free (${fit_label}). Reduce the workload, add nodes, or expect FailedScheduling/SETUP_FAILED on the largest combo." >&2
+		echo "  WARN: combo needs ~$(cores "$needed_cpu_m") cores/cluster, ~$(cores "$free_cpu_m") free on ${min_ctx} (${fit_label}). Reduce the workload, add nodes, or expect 001 to refuse (or FailedScheduling/SETUP_FAILED on) the largest combo." >&2
 	else
-		echo "  OK: largest combo fits (~$(cores "$needed_cpu_m") needed <= ~$(cores "$free_cpu_m") free; ${fit_label})." >&2
+		echo "  OK: largest combo fits (~$(cores "$needed_cpu_m") needed <= ~$(cores "$free_cpu_m") free on ${min_ctx}; ${fit_label})." >&2
 	fi
 	echo "" >&2
 }

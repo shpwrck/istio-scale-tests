@@ -205,6 +205,11 @@ Environment:
   service count from cluster capacity; legacy layout only), SCALE_TARGET_FRACTION,
   SCALE_SYSTEM_RESERVE_FRACTION, SCALE_PER_POD_CPU_M, SCALE_PER_POD_MEM_MI,
   SCALE_COVERAGE_MIN_FRACTION, SCALE_COVERAGE_ENFORCE (1 = fail when under-provisioned).
+
+  Capacity preflight (always on in live runs): refuses when a member lacks pod slots, or
+  when the new pods' CPU requests exceed the workers' free requests (allocatable minus
+  what running pods request); SCALE_CPU_PREFLIGHT_ENFORCE=0 turns the CPU refusal into a
+  warning (default 1; for clusters with a node autoscaler).
 EOF
 }
 
@@ -656,6 +661,18 @@ fi
 # SCALE_COVERAGE_ENFORCE=1).
 if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 	echo "Capacity preflight ($NEEDED_PODS pods needed per cluster)..."
+	[[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" =~ ^[01]$ ]] || die "SCALE_CPU_PREFLIGHT_ENFORCE must be 0 or 1 (got: ${SCALE_CPU_PREFLIGHT_ENFORCE})"
+	# Per-pod CPU request: auto-sizing's reading when it ran, else the same reader.
+	if [[ -n "${PER_POD_CPU_M:-}" ]]; then
+		CPU_PER_POD_M="$PER_POD_CPU_M"; CPU_PER_POD_SRC="as auto-sizing read it"
+	else
+		[[ -z "${SCALE_PER_POD_CPU_M:-}" ]] || is_pos_int "$SCALE_PER_POD_CPU_M" || die "SCALE_PER_POD_CPU_M must be empty or a positive integer (got: $SCALE_PER_POD_CPU_M)"
+		ppr="$(cap_per_pod_requests "${CONTEXTS[0]}" "${SCALE_PER_POD_CPU_M:-}" "${SCALE_PER_POD_MEM_MI:-}" "${KUBECTL[@]}")"
+		CPU_PER_POD_M="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^cpu_m=/) print substr($i, 7) }' <<<"$ppr")"
+		CPU_PER_POD_SRC="$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^cpu_src=/) print substr($i, 9) }' <<<"$ppr" | tr '_' ' ')"
+	fi
+	CPU_NEEDED_M=$(( NEEDED_PODS * CPU_PER_POD_M ))
+	cpu_cores() { awk -v m="$1" 'BEGIN { printf "%.1f", m / 1000 }'; }
 	for ctx in "${CONTEXTS[@]}"; do
 		alloc=$("${KUBECTL[@]}" --context="$ctx" get nodes -o json 2>/dev/null \
 			| jq '[.items[].status.allocatable.pods // "0" | tonumber] | add // 0' 2>/dev/null) || alloc=""
@@ -692,6 +709,37 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 			fi
 		else
 			echo "  $ctx: could not query capacity (alloc=$alloc, current=$current) — skipping preflight" >&2
+		fi
+		# CPU: a pod schedules only where its requests fit, so pods beyond the free
+		# requests stay Pending and the readiness wait fails minutes later. Free = worker
+		# allocatable − what every non-terminal pod already requests (summed over nodes,
+		# so per-node fragmentation can still leave a few Pending).
+		cpu_alloc=""; cpu_workers=""; cpu_req=""
+		# shellcheck disable=SC2207
+		nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
+		for kv in "${nt[@]}"; do
+			case "$kv" in
+				cpu_m=*) cpu_alloc="${kv#cpu_m=}" ;;
+				names=*) cpu_workers="${kv#names=}" ;;
+			esac
+		done
+		# shellcheck disable=SC2207
+		rq=($(cap_requested "$ctx" "$cpu_workers" "" "${KUBECTL[@]}"))
+		for kv in "${rq[@]}"; do case "$kv" in cpu_m=*) cpu_req="${kv#cpu_m=}" ;; esac; done
+		if [[ "$cpu_alloc" =~ ^[0-9]+$ && "$cpu_req" =~ ^[0-9]+$ ]]; then
+			cpu_free=$(( cpu_alloc > cpu_req ? cpu_alloc - cpu_req : 0 ))
+			cpu_line="~$(cpu_cores "$cpu_free") cores of CPU requests free on the workers ($(cpu_cores "$cpu_alloc") allocatable − $(cpu_cores "$cpu_req") requested), ~$(cpu_cores "$CPU_NEEDED_M") needed ($NEEDED_PODS pods × ${CPU_PER_POD_M}m, ${CPU_PER_POD_SRC})"
+			if (( CPU_NEEDED_M > cpu_free )); then
+				cpu_fit=$(( cpu_free / CPU_PER_POD_M ))
+				if [[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" == "1" ]]; then
+					die "context $ctx: ${cpu_line}; about ${cpu_fit} pods fit. Reduce --service-count, --replicas, --namespace-count or --measurement-pods, or add nodes (SCALE_CPU_PREFLIGHT_ENFORCE=0 only warns, for a node autoscaler)."
+				fi
+				echo "  WARN: $ctx: ${cpu_line}; about ${cpu_fit} pods fit; the rest stay Pending unless a node autoscaler adds capacity (SCALE_CPU_PREFLIGHT_ENFORCE=0)." >&2
+			else
+				echo "  $ctx: ${cpu_line} — OK"
+			fi
+		else
+			echo "  $ctx: could not read node CPU or pod requests (alloc=${cpu_alloc:-unknown}, requested=${cpu_req:-unknown}) — skipping the CPU check" >&2
 		fi
 	done
 	echo ""

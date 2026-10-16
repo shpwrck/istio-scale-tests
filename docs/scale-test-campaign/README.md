@@ -32,16 +32,21 @@ istio-proxy sidecar requesting **100m** (`charts/spoke-ossm` `proxy.resources`);
 container requests ~0. On a fixed node count this caps services per cluster:
 
 ```
-max_services_per_cluster ≈ (node_alloc_cpu − istiod_cpu_limit × istiod_replicas) / (replicas × sidecar_request_m)
+max_services_per_cluster ≈ (node_alloc_cpu − cpu_requested_by_other_pods) / (replicas × sidecar_request_m)
 ```
 
 `tests/controlplane/003-run-sweep.sh` prints a plan-time WARN for the largest combo using the
 sidecar CPU request it reads from the live Istio CR (`spec.values.global.proxy.resources`; Istio's
-100m when unset), or `SCALE_PER_POD_CPU_M` when set, and `001-setup` refuses to start when a
-cluster lacks pod slots. OpenShift system pods reduce the free CPU further.
+100m when unset), or `SCALE_PER_POD_CPU_M` when set, against each member's worker allocatable minus
+what its running pods (OpenShift, istiod, gateways, monitoring) already request; the tightest
+member decides. `001-setup` refuses a step when a member lacks pod slots or free CPU requests for
+it (`SCALE_CPU_PREFLIGHT_ENFORCE=0` warns instead, for a node autoscaler). On the lab hub the
+other pods requested 14.6 of 19.5 cores, so about 49 test pods fit, not the 175 that allocatable
+minus istiod suggested.
 
-Example with current defaults (istiod 3 × 4000m) on the 2026-06-22 spokes (124,000m allocatable):
-`(124,000 − 12,000) / (1 × 100) ≈ 1,120` services per cluster at 1 replica. That run used 500.
+Rough example counting only istiod (3 × 4000m) on the 2026-06-22 spokes (124,000m allocatable):
+`(124,000 − 12,000) / (1 × 100) ≈ 1,120` services per cluster at 1 replica; that run used 500.
+OpenShift's own pods lower it; the plan prints the real figure per member.
 
 **Gateway memory.** Every gateway keeps `*/*`, so its Envoy memory follows the Services in the
 whole mesh, not the cluster: the east-west gateway allocates about **145 Mi per 1000 Services**

@@ -178,6 +178,8 @@ EXTRACTED_PATTERNS=(
 	'cap_parse_proxy_requests() {'
 	'cap_proxy_requests() {'
 	'cap_per_pod_requests() {'
+	'cap_parse_requested() {'
+	'cap_requested() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

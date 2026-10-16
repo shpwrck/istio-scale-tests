@@ -205,6 +205,74 @@ JSON
 }
 
 # ---------------------------------------------------------------------------
+# cap_parse_requested (CPU/memory the scheduler has already handed out)
+# ---------------------------------------------------------------------------
+
+@test "cap_parse_requested: sums requests on workers with the scheduler's init and sidecar rules" {
+	run cap_parse_requested "w-0,w-1" <<'JSON'
+{"items":[
+  {"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"100m","memory":"128Mi"}}},{"resources":{}}],
+           "initContainers":[{"resources":{"requests":{"cpu":"500m","memory":"64Mi"}}}]},"status":{"phase":"Running"}},
+  {"spec":{"nodeName":"w-1","containers":[{"resources":{}}],
+           "initContainers":[{"restartPolicy":"Always","resources":{"requests":{"cpu":"100m","memory":"128Mi"}}},
+                             {"resources":{"requests":{"cpu":"50m","memory":"10Mi"}}}]},"status":{"phase":"Pending"}},
+  {"spec":{"nodeName":"w-1","containers":[{"resources":{"requests":{"cpu":"1","memory":"1Gi"}}}],"overhead":{"cpu":"250m","memory":"120Mi"}},
+   "metadata":{"deletionTimestamp":"2026-10-16T00:00:00Z"},"status":{"phase":"Running"}},
+  {"spec":{"nodeName":"cp-0","containers":[{"resources":{"requests":{"cpu":"4"}}}]},"status":{"phase":"Running"}},
+  {"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"2"}}}]},"status":{"phase":"Succeeded"}},
+  {"spec":{"containers":[{"resources":{"requests":{"cpu":"3"}}}]},"status":{"phase":"Pending"}}
+]}
+JSON
+	[ "$status" -eq 0 ]
+	# Pod 1: max(100 app, 500 init) = 500m; memory max(128, 64) = 128.
+	# Pod 2: native sidecar 100m runs through the 50m init (150m) and with the app (100m) = 150m;
+	#        memory max(128 + 10, 128) = 138.
+	# Pod 3: terminating still holds its requests: 1000 + 250 overhead = 1250m; 1024 + 120 Mi.
+	# Not counted: a control-plane node, a Succeeded pod, an unscheduled Pending pod.
+	[[ "$output" == "cpu_m=1900 mem_mi=1410 pods=3" ]]
+}
+
+@test "cap_parse_requested: the exclude label leaves the test's own pods out" {
+	run cap_parse_requested "w-0" "app.kubernetes.io/instance=controlplane-test" <<'JSON'
+{"items":[
+  {"metadata":{"labels":{"app.kubernetes.io/instance":"controlplane-test"}},"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"100m"}}}]},"status":{"phase":"Running"}},
+  {"metadata":{"labels":{"app.kubernetes.io/instance":"other"}},"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"300m"}}}]},"status":{"phase":"Running"}},
+  {"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"7900m","memory":"8G"}}}]},"status":{"phase":"Running"}}
+]}
+JSON
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=8200 mem_mi=7629 pods=2" ]]
+}
+
+@test "cap_parse_requested: no workers, unparseable or empty input -> unknown" {
+	run cap_parse_requested "" <<<'{"items":[]}'
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown" ]]
+	run cap_parse_requested "w-0" <<<'not json'
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown" ]]
+	run cap_parse_requested "w-0" < /dev/null
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown" ]]
+	run cap_parse_requested "w-0" <<<'{"items":[]}'
+	[[ "$output" == "cpu_m=0 mem_mi=0 pods=0" ]]
+}
+
+@test "cap_requested: pages the non-terminal pod list of the context and parses it" {
+	fake_kubectl() {
+		printf '%s\n' "$*" >"${BATS_TEST_TMPDIR}/args"
+		echo '{"items":[{"metadata":{"labels":{"app.kubernetes.io/instance":"controlplane-test"}},"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"100m"}}}]},"status":{"phase":"Running"}},{"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"2"}}}]},"status":{"phase":"Running"}}]}'
+	}
+	run cap_requested ctx-a "w-0" "app.kubernetes.io/instance=controlplane-test" fake_kubectl
+	[[ "$output" == "cpu_m=2000 mem_mi=0 pods=1" ]]
+	grep -q -- '--context=ctx-a' "${BATS_TEST_TMPDIR}/args"
+	grep -q -- '--field-selector=status.phase!=Succeeded,status.phase!=Failed' "${BATS_TEST_TMPDIR}/args"
+	grep -q -- '--chunk-size=' "${BATS_TEST_TMPDIR}/args"
+	# A failed read is unknown and exit 0: `arr=($(cap_requested ...))` must not end a
+	# `set -e -o pipefail` caller (nor may the other wrappers).
+	run bash -c 'set -euo pipefail; source "$1"; a=($(cap_requested c w-0 "" false)); b=($(cap_node_totals c false)); c=($(cap_istiod_limits c false)); echo "${a[*]} | survived"' _ "${ROOT}/tests/lib/capacity.sh"
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown | survived" ]]
+}
+
+# ---------------------------------------------------------------------------
 # cap_proxy_check (connected proxies vs Running sidecar pods)
 # ---------------------------------------------------------------------------
 

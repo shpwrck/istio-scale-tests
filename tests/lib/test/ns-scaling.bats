@@ -559,6 +559,36 @@ kinds() {
 	assert_output --partial "CONTROLPLANE_RETIRE_ATTEMPTS"
 }
 
+@test "001 capacity preflight: refuses pods whose CPU requests exceed what other pods leave free" {
+	command -v helm >/dev/null || skip "helm not installed"
+	local sd="${BATS_TEST_TMPDIR}/stub"
+	mkdir -p "$sd"
+	# One 2-core worker; running pods already request 1.5 cores and hold 3 of 250 slots.
+	cat >"$sd/kubectl" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+*" get nodes -o json "*) echo '{"items":[{"metadata":{"name":"w-0","labels":{"node-role.kubernetes.io/worker":""}},"status":{"allocatable":{"cpu":"2","memory":"8Gi","pods":"250"}}}]}' ;;
+*" get pods --all-namespaces -o name "*) printf 'pod/a\npod/b\npod/c\n' ;;
+*" get pods -A -o json "*) echo '{"items":[{"spec":{"nodeName":"w-0","containers":[{"resources":{"requests":{"cpu":"1500m"}}}]},"status":{"phase":"Running"}}]}' ;;
+*" get istios.sailoperator.io "*) echo '{"items":[]}' ;;
+*) exit 1 ;;
+esac
+EOF
+	chmod +x "$sd/kubectl"
+	a=(--contexts ci-a --service-count 10 --replicas 2)
+	PATH="$sd:$PATH" KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" "${a[@]}"
+	assert_failure
+	assert_output --partial "ci-a: 247 pod slots available (20 needed) — OK"
+	assert_output --partial "context ci-a: ~0.5 cores of CPU requests free on the workers (2.0 allocatable − 1.5 requested), ~2.0 needed (20 pods × 100m, istio default (no live read)); about 5 pods fit."
+	# Warn-only mode (a node autoscaler) lets the setup go on to the apply.
+	PATH="$sd:$PATH" KUBECONFIG=/dev/null SCALE_CPU_PREFLIGHT_ENFORCE=0 run "${CP}/001-setup-controlplane-test.sh" "${a[@]}"
+	assert_output --partial "WARN: ci-a: ~0.5 cores of CPU requests free"
+	refute_output --partial "about 5 pods fit. Reduce"
+	# 5 pods fit: OK.
+	PATH="$sd:$PATH" KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --contexts ci-a --service-count 5 --replicas 1
+	assert_output --partial "ci-a: ~0.5 cores of CPU requests free on the workers (2.0 allocatable − 1.5 requested), ~0.5 needed (5 pods × 100m, istio default (no live read)) — OK"
+}
+
 @test "001 --dry-run --parts workloads / traffic: the two halves of a vsdr apply (BACKLOG 9.11)" {
 	command -v helm >/dev/null || skip "helm not installed"
 	a=(--dry-run --contexts ci-dummy --service-count 4 --replicas 2 --traffic-config vsdr)

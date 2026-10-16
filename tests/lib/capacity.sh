@@ -21,6 +21,9 @@
 #   cap_parse_pod_count <worker_names_csv>          -> scheduled (pods on worker nodes, Running/Pending)
 #                                                     sidecars (Running, not terminating, injected:
 #                                                     sidecar.istio.io/status annotation; any node)
+#   cap_parse_requested <worker_names_csv> [label=value]
+#                                                  -> cpu_m mem_mi pods (requests already scheduled on
+#                                                     worker nodes; pods with the label skipped)
 #   cap_parse_istiod_limits                        -> cpu_m mem_mi replicas (live istiod deploy limits/requests)
 #   cap_parse_istiod_used                          -> cpu_m mem_mi (sum of istiod pod top)
 #   cap_pct <used> <total>                          -> integer percent or `unknown`
@@ -41,6 +44,7 @@
 #   cap_node_totals  <ctx> <argv...>
 #   cap_node_used    <ctx> <worker_names_csv> <argv...>
 #   cap_pod_count    <ctx> <worker_names_csv> <argv...>
+#   cap_requested    <ctx> <worker_names_csv> <exclude_label|""> <argv...>
 #   cap_istiod_limits <ctx> <argv...>
 #   cap_istiod_used  <ctx> <argv...>
 #   cap_metrics_ready <ctx> <argv...>   -> ready | unavailable (kubectl top probe)
@@ -220,6 +224,50 @@ cap_parse_pod_count() {
 	printf '%s\n' "$out"
 }
 
+# cap_parse_requested <worker_names_csv> [exclude_label=value]: `kubectl get pods -A
+# -o json` on stdin. Sums the CPU and memory requests the scheduler has already handed
+# out on the worker nodes: pods whose .spec.nodeName is a worker, not Succeeded/Failed.
+# A pod's request follows the scheduler's rule: app containers plus restartable
+# (native sidecar) init containers, or the largest init-phase request if that is
+# higher, plus .spec.overhead. Pods carrying the exclude label are skipped (the test's
+# own pods, when the caller counts them separately). Emits
+#   cpu_m=<int|unknown> mem_mi=<int|unknown> pods=<int|unknown>
+# An empty worker list or unparseable input -> all unknown.
+# shellcheck disable=SC2329
+cap_parse_requested() {
+	local worker_csv="${1:-}" exclude="${2:-}" out
+	out="$(jq -r --arg workers "$worker_csv" --arg ex "$exclude" "${CAP_JQ_QTY}"'
+		def req($f): (if $f == "cpu" then cpu_to_m(.resources.requests.cpu // null)
+		              else mem_to_mi(.resources.requests.memory // null) end) // 0;
+		def pod_req($f):
+			(reduce (.spec.initContainers // [])[] as $c ({side: 0, init: 0};
+				($c | req($f)) as $r
+				| if ($c.restartPolicy // "") == "Always"
+				  then .side += $r | .init = ([.init, .side] | max)
+				  else .init = ([.init, .side + $r] | max) end)) as $i
+			| ([ (.spec.containers // [])[] | req($f) ] | add // 0) as $main
+			| ([$main + $i.side, $i.init] | max)
+			  + ((if $f == "cpu" then cpu_to_m(.spec.overhead.cpu // null)
+			      else mem_to_mi(.spec.overhead.memory // null) end) // 0);
+		($workers | split(",") | map(select(length > 0))) as $w
+		| ($w | reduce .[] as $n ({}; .[$n] = true)) as $set
+		| ($ex | split("=")) as $kv
+		| ($kv[0] // "") as $ek
+		| ($kv[1:] | join("=")) as $ev
+		| if ($w | length) == 0 then "cpu_m=unknown mem_mi=unknown pods=unknown"
+		  else
+			[ .items[]?
+			  | select((.spec.nodeName // "") | in($set))
+			  | select((.status.phase // "") != "Succeeded" and (.status.phase // "") != "Failed")
+			  | select($ex == "" or ((.metadata.labels // {})[$ek] // "") != $ev)
+			] as $p
+			| "cpu_m=\([ $p[] | pod_req("cpu") ] | add // 0 | floor) mem_mi=\([ $p[] | pod_req("mem") ] | add // 0 | floor) pods=\($p | length)"
+		  end
+	' 2>/dev/null)" || out=""
+	[[ -n "$out" ]] || out="cpu_m=unknown mem_mi=unknown pods=unknown"
+	printf '%s\n' "$out"
+}
+
 # cap_parse_istiod_limits: `kubectl get deploy istiod -n istio-system -o json` on
 # stdin. Reads the istiod/discovery container .resources.limits (falls back to
 # .requests if no limits) cpu->m, mem->Mi; replicas from .spec.replicas. Emits:
@@ -373,14 +421,15 @@ cap_max_pods() {
 # ---------------------------------------------------------------------------
 # Thin kubectl wrappers (read-only). Each composes a kubectl read | a parser;
 # on kubectl failure the parser still emits its all-unknown line (the read is
-# the first stage of the pipe and an empty body parses to unknown).
+# the first stage of the pipe and an empty body parses to unknown) and the wrapper
+# returns 0, so `arr=($(cap_...))` under `set -e -o pipefail` does not end the caller.
 # ---------------------------------------------------------------------------
 
 # cap_node_totals <ctx> <kubectl_argv...>
 # shellcheck disable=SC2329
 cap_node_totals() {
 	local ctx="$1"; shift
-	"$@" --context="$ctx" --request-timeout=5s get nodes -o json 2>/dev/null \
+	{ "$@" --context="$ctx" --request-timeout=5s get nodes -o json 2>/dev/null || true; } \
 		| cap_parse_node_totals
 }
 
@@ -421,10 +470,22 @@ cap_node_used() {
 # shellcheck disable=SC2329
 cap_pod_count() {
 	local ctx="$1" workers="$2"; shift 2
-	"$@" --context="$ctx" --request-timeout=5s get pods -A -o json \
+	{ "$@" --context="$ctx" --request-timeout=5s get pods -A -o json \
 		--field-selector=status.phase!=Succeeded,status.phase!=Failed \
-		--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null \
+		--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null || true; } \
 		| cap_parse_pod_count "$workers"
+}
+
+# cap_requested <ctx> <worker_names_csv> <exclude_label|""> <kubectl_argv...>: CPU and
+# memory already requested on the worker nodes (cap_parse_requested), read the same
+# paged way as cap_pod_count.
+# shellcheck disable=SC2329
+cap_requested() {
+	local ctx="$1" workers="$2" exclude="$3"; shift 3
+	{ "$@" --context="$ctx" --request-timeout=5s get pods -A -o json \
+		--field-selector=status.phase!=Succeeded,status.phase!=Failed \
+		--chunk-size="${CAP_POD_CHUNK_SIZE:-500}" 2>/dev/null || true; } \
+		| cap_parse_requested "$workers" "$exclude"
 }
 
 # cap_istiod_limits <ctx> <kubectl_argv...>
@@ -435,7 +496,7 @@ cap_pod_count() {
 # shellcheck disable=SC2329
 cap_istiod_limits() {
 	local ctx="$1"; shift
-	"$@" --context="$ctx" --request-timeout=5s -n istio-system get deploy istiod -o json 2>/dev/null \
+	{ "$@" --context="$ctx" --request-timeout=5s -n istio-system get deploy istiod -o json 2>/dev/null || true; } \
 		| cap_parse_istiod_limits
 }
 
@@ -451,7 +512,7 @@ cap_istiod_used() {
 # shellcheck disable=SC2329
 cap_proxy_requests() {
 	local ctx="$1"; shift
-	"$@" --context="$ctx" --request-timeout=5s get istios.sailoperator.io -o json 2>/dev/null \
+	{ "$@" --context="$ctx" --request-timeout=5s get istios.sailoperator.io -o json 2>/dev/null || true; } \
 		| cap_parse_proxy_requests
 }
 
