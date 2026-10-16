@@ -37,7 +37,8 @@ Prefer it over generic upstream Istio docs when they disagree.
     `charts/spoke-ossm-operator/values.yaml`
   - ACM/GitOps channels: `terraform/platform/variables.tf`
   - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
-    keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`).
+    keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`);
+    `tests/lib/test/version-pins.bats` fails when they drift.
 - **Reports:** every suite writes a markdown summary next to its TSV data. Sweeps call their report
   script with `--format markdown`.
 

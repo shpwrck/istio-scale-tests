@@ -176,7 +176,9 @@ Nothing in the code names the repo's home, so a move is settings, not code:
    apply them ([Verify](#verify)), so they follow.
 2. Recreate CI: enable Actions, then protect `main` with a rule that requires a pull request and the
    checks `validate (ubuntu-latest)` and `validate (macos-latest)`
-   ([portability.yml](.github/workflows/portability.yml); keep those job names).
+   ([portability.yml](.github/workflows/portability.yml); keep those job names). CI also runs on
+   every push to `main`, weekly, and on demand (Actions, "Run workflow"), so drift shows up
+   without a PR.
 3. Name the owners in [.github/CODEOWNERS](.github/CODEOWNERS) and turn on "Require review from
    Code Owners" in that rule.
 4. Tag the hand-over commit with an annotated tag (`git tag -a v1.0.0 -m "<note>"`, then

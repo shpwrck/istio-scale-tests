@@ -2,10 +2,17 @@ name: Cross-platform script validation
 
 # No `paths:` filter: `validate (ubuntu-latest)` and `validate (macos-latest)` are
 # required checks on `main`, so the job must always report a status. The "Detect
-# relevant changes" step decides whether the work steps run; doc-only PRs pass in
-# seconds.
+# relevant changes" step decides whether the work steps run on a pull request;
+# doc-only PRs pass in seconds. A push to main, the weekly run and a manual run
+# ("Run workflow") check everything, so drift (a moved image, a runner or tool
+# change) shows up without waiting for the next PR.
 on:
   pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -26,7 +33,13 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
         run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "Event ${EVENT}: checking everything."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           echo "Changed files:"
           echo "$changed"
@@ -35,7 +48,7 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              tests/*.sh|tests/*.bats|tests/lib/test/*|tests/*/chart/*|tests/*/configs/*|charts/*|terraform/*.sh|terraform/*.tf|terraform/*.hcl|config/*.env|.gitmodules|.shellcheckrc|.github/workflows/portability.yml)
+              tests/*.sh|tests/*.bats|tests/*.py|tests/lib/test/*|tests/*/chart/*|tests/*/configs/*|tests/tuning/profiles/*|charts/*|terraform/*.sh|terraform/*.tf|terraform/*.hcl|config/*.env|.gitmodules|.shellcheckrc|.github/workflows/portability.yml)
                 relevant=true ;;
             esac
           done <<< "$changed"
@@ -240,6 +253,36 @@ jobs:
             helm lint "$c" || status=1
           done
           exit $status
+
+      # `helm lint` renders each chart with its defaults only. Argo CD renders the ApplicationSet
+      # chart with one preset per component and the app-of-apps with the repo values, so render
+      # those the same way: a broken preset otherwise fails only on a live hub.
+      - name: helm template (ApplicationSet presets, app-of-apps)
+        if: runner.os == 'Linux' && steps.changes.outputs.relevant == 'true'
+        run: |
+          status=0
+          repo=(--set repo.url=https://example.invalid/istio-scale-tests.git --set repo.revision=main)
+          for v in charts/gitops-hub-ocm-placement-appset/values-*.yaml; do
+            echo "--- $v ---"
+            helm template preset charts/gitops-hub-ocm-placement-appset -f "$v" "${repo[@]}" >/dev/null || status=1
+          done
+          for c in charts/gitops-hub-app-of-apps charts/gitops-hub-apps; do
+            echo "--- $c ---"
+            helm template root "$c" "${repo[@]}" >/dev/null || status=1
+          done
+          exit $status
+
+      - name: Tuning profiles (python3 + PyYAML)
+        if: runner.os == 'Linux' && steps.changes.outputs.relevant == 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pyyaml
+          "$RUNNER_TEMP/py/bin/python" -m py_compile tests/tuning/lib/tuning.py
+          for p in tests/tuning/profiles/*.yaml; do
+            out="$(mktemp -d)"
+            "$RUNNER_TEMP/py/bin/python" -I tests/tuning/lib/tuning.py load "$p" "$out"
+            echo "ok: $p: $(cat "$out/description")"
+          done
 
       - name: terraform fmt / validate
         if: runner.os == 'Linux' && steps.changes.outputs.relevant == 'true'
