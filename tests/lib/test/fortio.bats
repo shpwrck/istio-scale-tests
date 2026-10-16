@@ -45,18 +45,35 @@ setup() {
 
 # --- fortio_max_ms / fortio_actual_qps ---
 
-@test "fortio_max_ms: Max in ms; missing -> 0" {
+@test "fortio_max_ms: Max in ms; missing or invalid -> N/A, never a 0 latency" {
 	run fortio_max_ms "$OK_JSON"
 	assert_output "12.5"
 	run fortio_max_ms '{}'
-	assert_output "0"
+	assert_output "N/A"
+	run fortio_max_ms '{"DurationHistogram": {"Count": 0}}'
+	assert_output "N/A"
+	run fortio_max_ms "not json"
+	assert_success
+	assert_output "N/A"
 }
 
-@test "fortio_actual_qps: ActualQPS; missing -> 0" {
+@test "fortio_actual_qps: ActualQPS; missing or invalid -> N/A, never 0 QPS" {
 	run fortio_actual_qps "$SAT_JSON"
 	assert_output "686.2"
 	run fortio_actual_qps '{}'
+	assert_output "N/A"
+	run fortio_actual_qps "not json"
+	assert_success
+	assert_output "N/A"
+	# A real 0 stays 0.
+	run fortio_actual_qps '{"ActualQPS": 0}'
 	assert_output "0"
+}
+
+@test "fortio_row_status: a run without ActualQPS cannot show delivery -> QPS_SHORTFALL" {
+	json="$(jq -c 'del(.ActualQPS)' <<<"$OK_JSON")"
+	run fortio_row_status "$json" 1000 0.95 0.99
+	assert_output "QPS_SHORTFALL"
 }
 
 # --- fortio_pct_200 / fortio_n_responses / fortio_ret_codes ---

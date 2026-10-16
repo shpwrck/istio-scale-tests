@@ -147,7 +147,11 @@ Row `status`: `OK`, `TIMEOUT_P1|P2|P3|ALL`, `RESTART` (istiod restarted mid-iter
 (a pod's `/metrics` was unreachable, or baseline scrape skew exceeded `FANOUT_MAX_SKEW_MS`),
 and the sweep placeholders `SETUP_FAILED` / `PROBE_FAILED`. The report counts every row in
 `n_total` but aggregates only `OK` rows with `restarted=0` (`n_valid`). P2 also drops rows
-with `p2_dirty=1` (EDS pushed but P3 never went healthy on that remote).
+with `p2_dirty=1` (EDS pushed but P3 never went healthy on that remote). Averages are
+rounded to the nearest ms. The `P1 conv_p50`/`conv_p99` rows are histogram bucket
+bounds: text and markdown show bucket ranges with no average (`-`), so read `max` (the
+worst bucket; the cross-mesh comparison shows `P1 conv_p99 worst`), while csv and json
+keep the numbers and add `worst_bucket`. json `mesh_size` is a number.
 
 When the source or a remote istiod reads as restarted (`RESTART`, `restarted` `1` or
 `unknown`), `002` saves the restart evidence after the iteration's rows to

@@ -333,7 +333,62 @@ tsv() {
 	assert_output --partial "# LOCAL_BASELINE=unchecked"
 }
 
+@test "004: the HTTP 200 share is a percentage in text and markdown, a 0-1 ratio in csv and json" {
+	tsv "${RES}/latency-p.tsv" "RUN_ID=r1" "MIN_QPS_RATIO=0.95" <<-EOF
+	$(row 1 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 1 ctx-a ctx-a 100 100 OK 0.995 0 local)
+	EOF
+	run "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_output --partial "| HTTP 200 (%)"
+	assert_output --regexp '\| +100\.00%'
+	assert_output --regexp '\| +99\.50%'
+	refute_output --partial "1.0000"
+	run "$REPORT" --results-dir "$RES" --format md
+	assert_output --partial "| avg_actual_qps | avg_http_200 (%) |"
+	assert_output --partial "| 10.0 | 100.00% |"
+	assert_output --partial "| 100.0 | 99.50% |"
+	refute_output --partial "| 1.0000 |"
+	run "$REPORT" --results-dir "$RES" --format csv
+	assert_line "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200,avg_http_200_ratio"
+	assert_line "1,10,local,1,1,2.00,2.50,5.00,11.00,12.50,10.0,1.0000,1.0000"
+	run "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq '.results[0] | .avg_pct_200 == 1 and .avg_http_200_ratio == 1' <<<"$output")" = true ]
+	[ "$(jq '.results[1].avg_http_200_ratio' <<<"$output")" = 0.995 ]
+}
+
 # --- 002: row status through the real probe, against a stub kubectl ---
+
+@test "002: per-run md rounds latency and QPS and shows the 200 share as %; a FAILED run is N/A, never 0" {
+	REACH_RETRY_SEC=0 PATH="${BIN}:${PATH}" STUB_LOCAL_JSON="${FX}/fortio_float_noise.json" \
+		STUB_REMOTE_JSON="${BATS_TEST_TMPDIR}/missing.json" \
+		run "$PROBE" --source-context ctx-a --remote-contexts ctx-b --qps-levels 10 \
+		--settle 0 --warmup-duration 0 --reach-requests 0 --output-dir "$RES"
+	assert_success
+	f="$(ls "$RES"/latency-*.tsv)"
+	# The remote exec failed: nothing was measured.
+	[ "$(awk -F'\t' '$17 == "remote" { print $6, $9, $10, $11, $12, $13, $14 }' "$f")" = "N/A N/A N/A N/A N/A N/A FAILED" ]
+	md="$(ls "$RES"/latency-*.md)"
+	grep -qxF '| ctx-a | local | 10 | 10.0 | 3.72 | 3.90 | 4.10 | 4.50 | 4.56 | 100.00% | OK |' "$md"
+	grep -qxF '| ctx-b | remote | 10 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | FAILED |' "$md"
+	grep -qxF '| Min HTTP 200 share | 99.00% (DATAPLANE_MIN_PCT_200=0.99) |' "$md"
+	grep -qF '| Max (ms) | HTTP 200 (%) | Status |' "$md"
+	# The report leaves the FAILED row out of every average.
+	run "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '[.results[] | select(.target_class == "remote") | .n_valid, .avg_max_ms, .avg_actual_qps]' <<<"$output")" = '[0,null,null]' ]
+}
+
+@test "002: an UNREACHABLE remote's rows have qps_actual N/A (no load ran), not 0" {
+	printf '{"RetCodes":{"503":10}}' > "${BATS_TEST_TMPDIR}/dead.json"
+	REACH_RETRY_SEC=0 PATH="${BIN}:${PATH}" STUB_LOCAL_JSON="${FX}/fortio_ok.json" \
+		STUB_REMOTE_JSON="${BATS_TEST_TMPDIR}/dead.json" \
+		run "$PROBE" --source-context ctx-a --remote-contexts ctx-b --qps-levels 1000 \
+		--settle 0 --warmup-duration 0 --output-dir "$RES"
+	assert_success
+	f="$(ls "$RES"/latency-*.tsv)"
+	[ "$(awk -F'\t' '$17 == "remote" { print $6, $9, $13, $14 }' "$f")" = "N/A N/A N/A UNREACHABLE" ]
+	grep -qF '| ctx-b | remote | 1000 | N/A | N/A |' "$RES"/latency-*.md
+}
 
 _probe() {
 	REACH_RETRY_SEC=0 PATH="${BIN}:${PATH}" STUB_LOCAL_JSON="$1" STUB_REMOTE_JSON="${FX}/fortio_ok.json" \

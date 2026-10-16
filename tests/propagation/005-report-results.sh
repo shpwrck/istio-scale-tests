@@ -77,6 +77,9 @@ Phases emitted in the report:
                  histogram delta _count reached proxy_count.
   P1_conv_p50    p50 of delta-window pilot_proxy_convergence_time (ms).
   P1_conv_p99    p99 of delta-window pilot_proxy_convergence_time (ms).
+                 Both are histogram bucket bounds: text and markdown show bucket
+                 ranges with no average (max is the worst bucket); csv and json
+                 keep the numbers and add worst_bucket.
   P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
   P3_dataplane   watcher Envoy /clusters detection (ms).
 
@@ -88,6 +91,7 @@ Filtering policy (rows excluded from numeric aggregation):
 P2 values are additionally suppressed when p2_dirty == 1.
 
 n_total / n_valid: rows considered vs rows used after the above filtering.
+Averages are rounded to the nearest ms; json mesh_size is a number.
 
 text, markdown and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
@@ -454,6 +458,10 @@ function percentile(arr, n, pct,    idx, rank, min_n) {
 	if (idx > n) idx = n
 	return arr[idx]
 }
+# Histogram phases (P1_conv_*) hold bucket upper bounds in ms; bucket_range turns one
+# into its range label. Their mean can land in a bucket no row hit, so the text and
+# markdown tables never bucket an average: the avg cell of a histogram row is "-" and
+# max is the worst bucket. csv/json keep the numbers and add worst_bucket.
 function bucket_range(upper_ms) {
 	if (upper_ms+0 <= 0)     return "N/A"
 	if (upper_ms+0 <= 100)   return "0-100"
@@ -497,11 +505,12 @@ report_endpoint_text() {
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "  %-3s | %-26s | %5d | %5d | %11d | %11d | %11d | %11s | %11s | %11s\n",
+		printf "  %-3s | %-26s | %5d | %5d | %11d | %11d | %11.0f | %11s | %11s | %11s\n",
 			ms, label, n_total[ms], n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
-	function stats_line_hist(label, src, ms, n,    arr, sum, i) {
+	# Histogram rows: no average (see bucket_range); max is the worst bucket.
+	function stats_line_hist(label, src, ms, n,    arr) {
 		if (n == 0) {
 			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
 				ms, label, n_total[ms], "-", "-", "-", "-", "-", "-", "-"
@@ -509,10 +518,9 @@ report_endpoint_text() {
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
-		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
 		printf "  %-3s | %-26s | %5d | %5d | %11s | %11s | %11s | %11s | %11s | %11s\n",
 			ms, label, n_total[ms], n,
-			bucket_range(arr[1]), bucket_range(arr[n]), bucket_range(sum/n),
+			bucket_range(arr[1]), bucket_range(arr[n]), "-",
 			bucket_range(percentile(arr, n, 50)),
 			bucket_range(percentile(arr, n, 95)),
 			bucket_range(percentile(arr, n, 99))
@@ -539,29 +547,31 @@ report_endpoint_text() {
 report_endpoint_csv() {
 	format_preamble_csv_header
 	echo ""
-	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms"
+	# worst_bucket: the bucket range of max_ms, for the histogram phases only.
+	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket"
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
-	function csv_line(ms, phase, src, n,    arr, sum, i) {
+	function csv_line(ms, phase, src, n, hist,    arr, sum, i) {
 		if (n == 0) {
-			printf "%s,%s,%d,%d,,,,,,\n", ms, phase, n_total[ms], 0
+			printf "%s,%s,%d,%d,,,,,,,\n", ms, phase, n_total[ms], 0
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "%s,%s,%d,%d,%d,%d,%d,%s,%s,%s\n",
+		printf "%s,%s,%d,%d,%d,%d,%.0f,%s,%s,%s,%s\n",
 			ms, phase, n_total[ms], n, arr[1], arr[n], sum/n,
-			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
+			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99),
+			(hist ? bucket_range(arr[n]) : "")
 	}
 	END {
 		asorti_seen()
 		for (s = 1; s <= __n; s++) {
 			m = __sorted[s]
-			csv_line(m, "P1_local_wall",   p1_vals,   p1_n[m])
-			csv_line(m, "P1_conv_p50",     cp50_vals, cp50_n[m])
-			csv_line(m, "P1_conv_p99",     cp99_vals, cp99_n[m])
-			csv_line(m, "P2_discovery",    p2_vals,   p2_n[m])
-			csv_line(m, "P3_dataplane",    p3_vals,   p3_n[m])
+			csv_line(m, "P1_local_wall",   p1_vals,   p1_n[m], 0)
+			csv_line(m, "P1_conv_p50",     cp50_vals, cp50_n[m], 1)
+			csv_line(m, "P1_conv_p99",     cp99_vals, cp99_n[m], 1)
+			csv_line(m, "P2_discovery",    p2_vals,   p2_n[m], 0)
+			csv_line(m, "P3_dataplane",    p3_vals,   p3_n[m], 0)
 		}
 	}'
 }
@@ -582,8 +592,8 @@ when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additi
 | Phase | Units | Source | Definition / caveats |
 |-------|-------|--------|----------------------|
 | `P1_local_wall` | ms (wall clock) | timing + source `pilot_proxy_convergence_time` | Time from the t0 active-label flip until the source istiod has pushed the change to all connected proxies (delta `_count` reaches proxy count). |
-| `P1_conv_p50` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p50 of the per-bucket convergence-time delta in the window; bucket range (boundaries 100/500/1000/3000/5000/10000/20000/30000 ms), `overflow` if in `+Inf`; `N/A` if restarted or below the p50 min-sample floor. |
-| `P1_conv_p99` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p99 of the convergence-time delta; same bucket-range/`overflow` semantics; `N/A` if restarted or below the p99 min-sample floor (`PROPAGATION_PERCENTILE_MIN_N`). |
+| `P1_conv_p50` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p50 of the per-bucket convergence-time delta in the window; bucket range (boundaries 100/500/1000/3000/5000/10000/20000/30000 ms); `N/A` if restarted or below the p50 min-sample floor. A row whose window put any sample in `+Inf` (`p1_overflow=1`) is dropped, so `overflow` never reaches this table: it shows as `n_valid < n_total`. |
+| `P1_conv_p99` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p99 of the convergence-time delta; same bucket-range and overflow handling; `N/A` if restarted or below the p99 min-sample floor (`PROPAGATION_PERCENTILE_MIN_N`). |
 | `P2_discovery` | ms (wall clock) | remote `pilot_xds_pushes{type="eds"}` counter delta | Time until the remote istiod pushes EDS for the new endpoint (control-plane discovery); excluded when `p2_dirty=1`. |
 | `P3_dataplane` | ms (wall clock) | remote watcher Envoy `/clusters` | Time until the remote sidecar reports the canary endpoint healthy (full data-plane apply); typically ~10× P1/P2. |
 
@@ -591,7 +601,7 @@ when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additi
 |-------------|------------|
 | `n_total` | All rows considered for the phase/mesh size. |
 | `n_valid` | Rows surviving the drop filters above and used for the statistics. |
-| `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean latency across the `n_valid` samples. |
+| `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean (rounded to ms) latency across the `n_valid` samples. A histogram row (`P1 conv_*`) has no average (`-`): the mean of bucket bounds can land in a bucket no row hit, so read `max` (the worst bucket). CSV and JSON keep the numbers and add `worst_bucket`, the range of `max_ms`, for those phases. |
 | `p50_ms` / `p95_ms` / `p99_ms` | Nearest-rank percentiles across the `n_valid` samples; `p95`/`p99` are `N/A` below `PROPAGATION_PERCENTILE_MIN_N` samples (a single worst sample would otherwise masquerade as a tail quantile). |
 GLOSSARY
 }
@@ -619,21 +629,21 @@ report_endpoint_markdown() {
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "| %s | %d | %d | %d | %d | %d | %s | %s | %s |\n",
+		printf "| %s | %d | %d | %d | %d | %.0f | %s | %s | %s |\n",
 			phase, n_total[ms], n, arr[1], arr[n], sum/n,
 			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
-	function md_row_hist(phase, src, ms, n,    arr, sum, i) {
+	# Histogram rows: no average (see bucket_range); max is the worst bucket.
+	function md_row_hist(phase, src, ms, n,    arr) {
 		if (n == 0) {
 			printf "| %s | %d | %d | - | - | - | - | - | - |\n", phase, n_total[ms], 0
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
-		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "| %s | %d | %d | %s | %s | %s | %s | %s | %s |\n",
+		printf "| %s | %d | %d | %s | %s | - | %s | %s | %s |\n",
 			phase, n_total[ms], n,
-			bucket_range(arr[1]), bucket_range(arr[n]), bucket_range(sum/n),
+			bucket_range(arr[1]), bucket_range(arr[n]),
 			bucket_range(percentile(arr, n, 50)),
 			bucket_range(percentile(arr, n, 95)),
 			bucket_range(percentile(arr, n, 99))
@@ -642,13 +652,14 @@ report_endpoint_markdown() {
 		if (n == 0) return "-- (0)"
 		load(arr, src, ms, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		return sprintf("%d (%d)", sum/n, n)
+		return sprintf("%.0f (%d)", sum/n, n)
 	}
-	function cmp_avg_hist(src, ms, n,    arr, sum, i) {
+	# The worst bucket any valid row hit, never the bucket of the mean.
+	function cmp_worst_hist(src, ms, n,    arr) {
 		if (n == 0) return "-- (0)"
 		load(arr, src, ms, n)
-		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		return sprintf("%s (%d)", bucket_range(sum/n), n)
+		sort_arr(arr, n)
+		return sprintf("%s (%d)", bucket_range(arr[n]), n)
 	}
 	END {
 		asorti_seen()
@@ -669,15 +680,16 @@ report_endpoint_markdown() {
 			printf "## Comparison across mesh sizes\n\n"
 			printf "Averages over rows surviving the report filter (restarted in {1, unknown}, "
 			printf "p1_overflow=1, and status != OK are dropped; P2 also drops p2_dirty=1 rows). "
-			printf "Cells show `avg (n_valid)`; per-mesh-size tables above carry the full breakdown.\n\n"
-			printf "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 avg (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |\n"
-			printf "|-----------|------------------|----------------------|-----------------|---------------------|\n"
+			printf "Cells show `avg (n_valid)`, except P1 conv_p99: the worst bucket any valid row hit "
+			printf "`(n_valid)`, never averaged. Per-mesh-size tables above carry the full breakdown.\n\n"
+			printf "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 worst (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |\n"
+			printf "|-----------|------------------|------------------------|-----------------|---------------------|\n"
 			for (s = 1; s <= __n; s++) {
 				ms_cur = __sorted[s]
 				printf "| %s | %s | %s | %s | %s |\n",
 					ms_cur,
 					cmp_avg(p1_vals,   ms_cur, p1_n[ms_cur]),
-					cmp_avg_hist(cp99_vals, ms_cur, cp99_n[ms_cur]),
+					cmp_worst_hist(cp99_vals, ms_cur, cp99_n[ms_cur]),
 					cmp_avg(p2_vals,   ms_cur, p2_n[ms_cur]),
 					cmp_avg(p3_vals,   ms_cur, p3_n[ms_cur])
 			}
@@ -699,16 +711,20 @@ report_endpoint_json() {
 	printf ',"rows":'
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function jnum(v) { return (v == "N/A" ? "null" : v) }
-	function json_obj(ms, phase, src, n,    arr, sum, i) {
+	# mesh_size is a number (it was a string); worst_bucket (the range of max_ms) is set
+	# for the histogram phases, null for the wall-clock ones.
+	function jms(ms) { return (ms ~ /^[0-9]+$/) ? ms : sprintf("\"%s\"", ms) }
+	function json_obj(ms, phase, src, n, hist,    arr, sum, i) {
 		if (n == 0) {
-			return sprintf("{\"mesh_size\":\"%s\",\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0}", ms, phase, n_total[ms])
+			return sprintf("{\"mesh_size\":%s,\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":0,\"min_ms\":null,\"max_ms\":null,\"avg_ms\":null,\"p50_ms\":null,\"p95_ms\":null,\"p99_ms\":null,\"worst_bucket\":null}", jms(ms), phase, n_total[ms])
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		return sprintf("{\"mesh_size\":\"%s\",\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":%d,\"min_ms\":%d,\"max_ms\":%d,\"avg_ms\":%d,\"p50_ms\":%s,\"p95_ms\":%s,\"p99_ms\":%s}",
-			ms, phase, n_total[ms], n, arr[1], arr[n], sum/n,
-			jnum(percentile(arr, n, 50)), jnum(percentile(arr, n, 95)), jnum(percentile(arr, n, 99)))
+		return sprintf("{\"mesh_size\":%s,\"phase\":\"%s\",\"n_total\":%d,\"n_valid\":%d,\"min_ms\":%d,\"max_ms\":%d,\"avg_ms\":%.0f,\"p50_ms\":%s,\"p95_ms\":%s,\"p99_ms\":%s,\"worst_bucket\":%s}",
+			jms(ms), phase, n_total[ms], n, arr[1], arr[n], sum/n,
+			jnum(percentile(arr, n, 50)), jnum(percentile(arr, n, 95)), jnum(percentile(arr, n, 99)),
+			(hist ? sprintf("\"%s\"", bucket_range(arr[n])) : "null"))
 	}
 	END {
 		printf "["
@@ -716,11 +732,11 @@ report_endpoint_json() {
 		asorti_seen()
 		for (s = 1; s <= __n; s++) {
 			m = __sorted[s]
-			if (!first) printf ","; printf "%s", json_obj(m, "P1_local_wall", p1_vals,   p1_n[m]);   first = 0
-			printf ",";             printf "%s", json_obj(m, "P1_conv_p50",   cp50_vals, cp50_n[m])
-			printf ",";             printf "%s", json_obj(m, "P1_conv_p99",   cp99_vals, cp99_n[m])
-			printf ",";             printf "%s", json_obj(m, "P2_discovery",  p2_vals,   p2_n[m])
-			printf ",";             printf "%s", json_obj(m, "P3_dataplane",  p3_vals,   p3_n[m])
+			if (!first) printf ","; printf "%s", json_obj(m, "P1_local_wall", p1_vals,   p1_n[m], 0);   first = 0
+			printf ",";             printf "%s", json_obj(m, "P1_conv_p50",   cp50_vals, cp50_n[m], 1)
+			printf ",";             printf "%s", json_obj(m, "P1_conv_p99",   cp99_vals, cp99_n[m], 1)
+			printf ",";             printf "%s", json_obj(m, "P2_discovery",  p2_vals,   p2_n[m], 0)
+			printf ",";             printf "%s", json_obj(m, "P3_dataplane",  p3_vals,   p3_n[m], 0)
 		}
 		printf "]"
 	}'

@@ -820,6 +820,8 @@ histogram_quantile() {
 bucket_range() {
 	local v="${1:-0}"
 	[[ "$v" == "N/A" ]] && { echo "N/A"; return; }
+	# histogram_quantile's +Inf answer; bash arithmetic would read the word as 0 (N/A).
+	[[ "$v" == "overflow" ]] && { echo "overflow"; return; }
 	(( v <= 0 ))     && { echo "N/A"; return; }
 	(( v <= 100 ))   && { echo "0-100"; return; }
 	(( v <= 500 ))   && { echo "100-500"; return; }
@@ -1468,14 +1470,18 @@ if ((WRITE_TSV)); then
 fi
 echo ""
 echo "Summary:"
+# Averages are rounded to the nearest ms (half up), not truncated.
 if ((P1_COUNT > 0)); then
-	printf "  P1 local xDS push:     n=%d min=%dms max=%dms avg=%dms\n" "$P1_COUNT" "$P1_MIN" "$P1_MAX" "$((P1_SUM / P1_COUNT))"
+	P1_AVG=$(( (P1_SUM + P1_COUNT / 2) / P1_COUNT ))
+	printf "  P1 local xDS push:     n=%d min=%dms max=%dms avg=%dms\n" "$P1_COUNT" "$P1_MIN" "$P1_MAX" "$P1_AVG"
 fi
 if ((P2_COUNT > 0)); then
-	printf "  P2 remote istiod EDS:  n=%d min=%dms max=%dms avg=%dms\n" "$P2_COUNT" "$P2_MIN" "$P2_MAX" "$((P2_SUM / P2_COUNT))"
+	P2_AVG=$(( (P2_SUM + P2_COUNT / 2) / P2_COUNT ))
+	printf "  P2 remote istiod EDS:  n=%d min=%dms max=%dms avg=%dms\n" "$P2_COUNT" "$P2_MIN" "$P2_MAX" "$P2_AVG"
 fi
 if ((P3_COUNT > 0)); then
-	printf "  P3 remote sidecar:     n=%d min=%dms max=%dms avg=%dms\n" "$P3_COUNT" "$P3_MIN" "$P3_MAX" "$((P3_SUM / P3_COUNT))"
+	P3_AVG=$(( (P3_SUM + P3_COUNT / 2) / P3_COUNT ))
+	printf "  P3 remote sidecar:     n=%d min=%dms max=%dms avg=%dms\n" "$P3_COUNT" "$P3_MIN" "$P3_MAX" "$P3_AVG"
 fi
 if ((P1_COUNT == 0)); then
 	echo "  No successful measurements."
@@ -1543,13 +1549,13 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 		echo "| Phase | n | min (ms) | max (ms) | avg (ms) |"
 		echo "|-------|---|----------|----------|----------|"
 		if ((P1_COUNT > 0)); then
-			echo "| P1 local xDS push | ${P1_COUNT} | ${P1_MIN} | ${P1_MAX} | $((P1_SUM / P1_COUNT)) |"
+			echo "| P1 local xDS push | ${P1_COUNT} | ${P1_MIN} | ${P1_MAX} | ${P1_AVG} |"
 		fi
 		if ((P2_COUNT > 0)); then
-			echo "| P2 remote istiod EDS push | ${P2_COUNT} | ${P2_MIN} | ${P2_MAX} | $((P2_SUM / P2_COUNT)) |"
+			echo "| P2 remote istiod EDS push | ${P2_COUNT} | ${P2_MIN} | ${P2_MAX} | ${P2_AVG} |"
 		fi
 		if ((P3_COUNT > 0)); then
-			echo "| P3 remote sidecar | ${P3_COUNT} | ${P3_MIN} | ${P3_MAX} | $((P3_SUM / P3_COUNT)) |"
+			echo "| P3 remote sidecar | ${P3_COUNT} | ${P3_MIN} | ${P3_MAX} | ${P3_AVG} |"
 		fi
 	else
 		echo "No successful measurements."

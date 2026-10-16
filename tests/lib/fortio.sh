@@ -9,8 +9,9 @@
 # Exposes (every function takes the fortio JSON as a string; jq and awk only):
 #   fortio_percentile_ms <json> <pct>  -> latency at percentile <pct> in ms
 #                                         (50 matches 50.0; "N/A" when absent)
-#   fortio_max_ms <json>               -> DurationHistogram.Max in ms (0 when absent)
-#   fortio_actual_qps <json>           -> ActualQPS (0 when absent)
+#   fortio_max_ms <json>               -> DurationHistogram.Max in ms ("N/A" when absent
+#                                         or the JSON is invalid, never a 0 latency)
+#   fortio_actual_qps <json>           -> ActualQPS ("N/A" when absent or invalid)
 #   fortio_pct_200 <json>              -> HTTP 200s / all responses, "N/A" with no responses
 #   fortio_n_responses <json>          -> sum of RetCodes, 0 when there are none
 #   fortio_ret_codes <json>            -> "code=count,..." sorted numerically (-1 first),
@@ -19,7 +20,8 @@
 #       -> the first that applies, in this order:
 #          PERCENTILE_MISSING  any of p50/p90/p99/p99.9 is missing
 #          ERROR_RATE_HIGH     pct_200 < min_pct_200, or zero responses
-#          QPS_SHORTFALL       ActualQPS < min_qps_ratio * qps_target
+#          QPS_SHORTFALL       ActualQPS < min_qps_ratio * qps_target, or ActualQPS
+#                              missing (delivery cannot be shown)
 #          OK
 #       min_qps_ratio 0 disables the shortfall check (for callers that run at a
 #       fixed low QPS); a non-numeric or zero qps_target also skips it.
@@ -37,14 +39,19 @@ fortio_percentile_ms() {
 	' 2>/dev/null || echo "N/A"
 }
 
+# A missing value is "N/A", never 0: a 0 ms max or 0 QPS would read as a measurement.
 # shellcheck disable=SC2329
 fortio_max_ms() {
-	printf '%s' "$1" | jq -r '(.DurationHistogram.Max // 0) * 1000' 2>/dev/null || echo 0
+	local out
+	out="$(printf '%s' "$1" | jq -r '.DurationHistogram.Max // null | if . == null then "N/A" else . * 1000 end' 2>/dev/null)" || out=""
+	printf '%s\n' "${out:-N/A}"
 }
 
 # shellcheck disable=SC2329
 fortio_actual_qps() {
-	printf '%s' "$1" | jq -r '.ActualQPS // 0' 2>/dev/null || echo 0
+	local out
+	out="$(printf '%s' "$1" | jq -r '.ActualQPS // null | if . == null then "N/A" else . end' 2>/dev/null)" || out=""
+	printf '%s\n' "${out:-N/A}"
 }
 
 # RetCodes is an object like {"200": 1234, "503": 5, "-1": 2} (-1 = socket error).

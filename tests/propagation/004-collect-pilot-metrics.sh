@@ -203,7 +203,7 @@ if ((WATCH)); then
 	echo "Watch mode: scraping every ${INTERVAL}s (Ctrl-C to stop)"
 	while true; do
 		echo ""
-		echo "=== Scrape at $(date -Iseconds) ==="
+		echo "=== Scrape at $(date -u -Iseconds) ==="
 		if ! scrape_all; then
 			echo "warning: re-opening port-forwards (pod restart or dead port-forward?)" >&2
 			open_all

@@ -2,7 +2,10 @@
 # Generate summary statistics from churn convergence TSV files.
 #
 # Every format carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs),
-# over all input TSVs: mixed:a,b with a warning when they differ (PL26).
+# and HARNESS_SHA / ISTIO_VERSION as 002 recorded them, over all input TSVs: mixed:a,b
+# with a warning when they differ (PL26).
+# Histogram p99 columns show the worst bucket a valid row hit, and "overflow (N rows)"
+# when a row's p99 was in the +Inf bucket; they are never averaged.
 #
 # Usage:
 #   ./tests/churn/004-report-results.sh [--results-dir DIR] [--format FMT]
@@ -46,6 +49,12 @@ Usage: $(basename "$0") [options]
 text and md end with an "istiod restart diagnostics" section: the rows of every
 istiod-diag-*/index.tsv under the results dir (what changed, the cause, the evidence
 folder) and a tally by cause.
+
+harness_sha and istio_version come from the TSV preambles (what 002 recorded), never
+from this checkout: "unknown (not recorded)" for a TSV written before 002 recorded
+them, mixed:a,b when the inputs differ. Histogram p99 columns (queue time, push time)
+show the worst bucket any valid row hit, or "overflow (N rows)" when N rows had their
+p99 above the highest finite bucket; csv adds worst_bucket and n_overflow columns.
 
 Environment:
   CHURN_RESULTS_DIR  --results-dir default (relative to the repo root).
@@ -116,6 +125,29 @@ preamble_get() {
 	[[ -n "$v" ]] && echo "$v" || echo "unknown"
 }
 
+# run_meta <key>: a `# <key>=` value as 002 (or the 003 placeholder) recorded it, over
+# every input TSV, never read from this checkout or environment: the report may run on
+# another commit than the probe. A file without the line (written before 002 recorded
+# the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b plus a
+# stderr warning (PL26).
+run_meta() {
+	local key="$1" f v vals=""
+	for f in "${TSV_FILES[@]}"; do
+		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
+		v="${v#*=}"
+		[[ -n "$v" ]] || v="unknown (not recorded)"
+		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
+	done
+	if [[ "$vals" == *,* ]]; then
+		echo "warning: input TSVs disagree on ${key} (${vals}); the report mixes runs" >&2
+		echo "mixed:${vals}"
+	else
+		echo "$vals"
+	fi
+}
+HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
+ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
+
 # Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_M="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
@@ -152,6 +184,8 @@ fi
 report_text() {
 	echo "=== Churn Convergence Results ==="
 	echo ""
+	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
+	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}"
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
@@ -172,12 +206,13 @@ report_text() {
 		if($12!="N/A") { rpt[key, ++rpt_n[key]] = $12+0 }
 		if($13!="N/A") { sxp[key, ++sxp_n[key]] = $13+0 }
 		if($14!="N/A") { rxp[key, ++rxp_n[key]] = $14+0 }
-		if($15!="N/A" && $15!="overflow") { sqq[key, ++sqq_n[key]] = $15+0 }
-		if($16!="N/A" && $16!="overflow") { rqq[key, ++rqq_n[key]] = $16+0 }
+		# Histogram p99s: an overflow (p99 in +Inf) is counted, not dropped.
+		if($15=="overflow") sqq_ov[key]++; else if($15!="N/A") { sqq[key, ++sqq_n[key]] = $15+0 }
+		if($16=="overflow") rqq_ov[key]++; else if($16!="N/A") { rqq[key, ++rqq_n[key]] = $16+0 }
 		if($17!="N/A") { scp[key, ++scp_n[key]] = $17+0 }
 		if($18!="N/A") { rcp[key, ++rcp_n[key]] = $18+0 }
-		if($19!="N/A" && $19!="overflow") { spt2[key, ++spt2_n[key]] = $19+0 }
-		if($20!="N/A" && $20!="overflow") { rpt2[key, ++rpt2_n[key]] = $20+0 }
+		if($19=="overflow") spt2_ov[key]++; else if($19!="N/A") { spt2[key, ++spt2_n[key]] = $19+0 }
+		if($20=="overflow") rpt2_ov[key]++; else if($20!="N/A") { rpt2[key, ++rpt2_n[key]] = $20+0 }
 		if($11!="N/A" && $11+0 > 0 && $13!="N/A") { amp[key, ++amp_n[key]] = ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11 }
 	}
 	# Track totals/valids per cell so we can surface the filter rate.
@@ -209,11 +244,15 @@ report_text() {
 		if (upper_ms+0 <= 30000) return "20000-30000"
 		return ">30000"
 	}
-	function stats_hist(arr, key, n,    i, sum) {
-		if(n==0) return "N/A"
-		sort_vals(arr, key, n)
-		sum=0; for(i=1;i<=n;i++) sum+=arr[key,i]
-		return sprintf("n=%d min=%s max=%s avg=%s", n, bucket_range(arr[key,1]), bucket_range(arr[key,n]), bucket_range(sum/n))
+	# Histogram p99s: the lowest and the worst (highest) bucket a valid row hit. No
+	# average: the mean of interpolated p99s can fall in a bucket no row hit. ov rows
+	# had their p99 in the +Inf bucket; then the worst is "overflow (<ov> rows)".
+	function stats_hist(arr, key, n, ov,    lo, worst) {
+		if(n+ov==0) return "N/A"
+		if(n>0) sort_vals(arr, key, n)
+		lo = (n>0) ? bucket_range(arr[key,1]) : "overflow"
+		worst = (ov>0) ? sprintf("overflow (%d %s)", ov, ov==1 ? "row" : "rows") : bucket_range(arr[key,n])
+		return sprintf("n=%d min=%s worst=%s", n+ov, lo, worst)
 	}
 	function sort_keys(    i, j, tmp, k) {
 		n_keys = 0
@@ -238,12 +277,12 @@ report_text() {
 			printf "  Remote push triggers:          %s\n", stats(rpt, key, rpt_n[key])
 			printf "  Source xDS pushes:             %s\n", stats(sxp, key, sxp_n[key])
 			printf "  Remote xDS pushes:             %s\n", stats(rxp, key, rxp_n[key])
-			printf "  Source queue time p99 (ms):     %s\n", stats_hist(sqq, key, sqq_n[key])
-			printf "  Remote queue time p99 (ms):     %s\n", stats_hist(rqq, key, rqq_n[key])
+			printf "  Source queue time p99 (ms):    %s\n", stats_hist(sqq, key, sqq_n[key], sqq_ov[key]+0)
+			printf "  Remote queue time p99 (ms):    %s\n", stats_hist(rqq, key, rqq_n[key], rqq_ov[key]+0)
 			printf "  Source connected proxies:      %s\n", stats(scp, key, scp_n[key])
 			printf "  Remote connected proxies:      %s\n", stats(rcp, key, rcp_n[key])
-			printf "  Source push time p99 (ms):      %s\n", stats_hist(spt2, key, spt2_n[key])
-			printf "  Remote push time p99 (ms):      %s\n", stats_hist(rpt2, key, rpt2_n[key])
+			printf "  Source push time p99 (ms):     %s\n", stats_hist(spt2, key, spt2_n[key], spt2_ov[key]+0)
+			printf "  Remote push time p99 (ms):     %s\n", stats_hist(rpt2, key, rpt2_n[key], rpt2_ov[key]+0)
 			printf "  Push amplification ratio:      %s\n", stats_ratio(amp, key, amp_n[key])
 			printf "\n"
 		}
@@ -252,11 +291,15 @@ report_text() {
 }
 
 report_csv() {
+	echo "# HARNESS_SHA=${HARNESS_SHA_M}"
+	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
-	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg"
+	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
+	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
+	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# Only OK rows feed numeric aggregation (see report_text for rationale).
 	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
@@ -269,29 +312,54 @@ report_csv() {
 		if($12!="N/A") { rpt[key, ++rpt_n[key]] = $12+0 }
 		if($13!="N/A") { sxp[key, ++sxp_n[key]] = $13+0 }
 		if($14!="N/A") { rxp[key, ++rxp_n[key]] = $14+0 }
-		if($15!="N/A" && $15!="overflow") { sqq[key, ++sqq_n[key]] = $15+0 }
-		if($16!="N/A" && $16!="overflow") { rqq[key, ++rqq_n[key]] = $16+0 }
+		if($15=="overflow") sqq_ov[key]++; else if($15!="N/A") { sqq[key, ++sqq_n[key]] = $15+0 }
+		if($16=="overflow") rqq_ov[key]++; else if($16!="N/A") { rqq[key, ++rqq_n[key]] = $16+0 }
 		if($17!="N/A") { scp[key, ++scp_n[key]] = $17+0 }
 		if($18!="N/A") { rcp[key, ++rcp_n[key]] = $18+0 }
-		if($19!="N/A" && $19!="overflow") { spt2[key, ++spt2_n[key]] = $19+0 }
-		if($20!="N/A" && $20!="overflow") { rpt2[key, ++rpt2_n[key]] = $20+0 }
+		if($19=="overflow") spt2_ov[key]++; else if($19!="N/A") { spt2[key, ++spt2_n[key]] = $19+0 }
+		if($20=="overflow") rpt2_ov[key]++; else if($20!="N/A") { rpt2[key, ++rpt2_n[key]] = $20+0 }
 		if($11!="N/A" && $11+0 > 0 && $13!="N/A") { amp[key, ++amp_n[key]] = ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11 }
 	}
 	!/^#/ && !/^run_id/ && NF>=21 { tot_key = $2 "\t" $3 "\t" $4 "\t" $5; seen[tot_key]=1; n_total[tot_key]++; if($21=="OK") n_valid[tot_key]++ }
 	function sort_vals(arr, key, n,    i,j,tmp) {
 		for(i=2;i<=n;i++){tmp=arr[key,i];j=i-1;while(j>=1&&arr[key,j]>tmp){arr[key,j+1]=arr[key,j];j--}arr[key,j+1]=tmp}
 	}
+	function bucket_range(upper_ms) {
+		if (upper_ms+0 <= 0)     return "N/A"
+		if (upper_ms+0 <= 100)   return "0-100"
+		if (upper_ms+0 <= 500)   return "100-500"
+		if (upper_ms+0 <= 1000)  return "500-1000"
+		if (upper_ms+0 <= 3000)  return "1000-3000"
+		if (upper_ms+0 <= 5000)  return "3000-5000"
+		if (upper_ms+0 <= 10000) return "5000-10000"
+		if (upper_ms+0 <= 20000) return "10000-20000"
+		if (upper_ms+0 <= 30000) return "20000-30000"
+		return ">30000"
+	}
 	function csv_stats(ms, ci, br, st, metric, arr, key, n,    i, sum) {
 		if(n==0) return
 		sort_vals(arr, key, n)
 		sum=0; for(i=1;i<=n;i++) sum+=arr[key,i]
-		printf "%s,%s,%s,%s,%s,%d,%.0f,%.0f,%.0f\n", ms, ci, br, st, metric, n, arr[key,1], arr[key,n], sum/n
+		printf "%s,%s,%s,%s,%s,%d,%.0f,%.0f,%.0f,,\n", ms, ci, br, st, metric, n, arr[key,1], arr[key,n], sum/n
 	}
 	function csv_stats_ratio(ms, ci, br, st, metric, arr, key, n,    i, sum) {
 		if(n==0) return
 		sort_vals(arr, key, n)
 		sum=0; for(i=1;i<=n;i++) sum+=arr[key,i]
-		printf "%s,%s,%s,%s,%s,%d,%.1f,%.1f,%.1f\n", ms, ci, br, st, metric, n, arr[key,1], arr[key,n], sum/n
+		printf "%s,%s,%s,%s,%s,%d,%.1f,%.1f,%.1f,,\n", ms, ci, br, st, metric, n, arr[key,1], arr[key,n], sum/n
+	}
+	# Histogram p99: min/max/avg over the numeric rows (empty without one), plus the
+	# worst bucket and the overflow count. A cell whose only rows overflowed still prints.
+	function csv_stats_hist(ms, ci, br, st, metric, arr, key, n, ov,    i, sum) {
+		if(n+ov==0) return
+		if(n>0) {
+			sort_vals(arr, key, n)
+			sum=0; for(i=1;i<=n;i++) sum+=arr[key,i]
+			printf "%s,%s,%s,%s,%s,%d,%.0f,%.0f,%.0f,", ms, ci, br, st, metric, n, arr[key,1], arr[key,n], sum/n
+		} else {
+			printf "%s,%s,%s,%s,%s,0,,,,", ms, ci, br, st, metric
+		}
+		printf "%s,%d\n", (ov>0 ? "overflow" : bucket_range(arr[key,n])), ov
 	}
 	function sort_keys(    i, j, tmp, k) {
 		n_keys = 0
@@ -307,7 +375,7 @@ report_csv() {
 		for(k=1; k<=n_keys; k++) {
 			key = sorted_keys[k]; split(key, p, "\t")
 			# Row-validity census: n=n_valid, max=n_total so consumers see both.
-			printf "%s,%s,%s,%s,%s,%d,%d,%d,%d\n", p[1], p[2], p[3], p[4], "rows_valid_of_total", n_valid[key]+0, n_valid[key]+0, n_total[key]+0, n_valid[key]+0
+			printf "%s,%s,%s,%s,%s,%d,%d,%d,%d,,\n", p[1], p[2], p[3], p[4], "rows_valid_of_total", n_valid[key]+0, n_valid[key]+0, n_total[key]+0, n_valid[key]+0
 			csv_stats(p[1], p[2], p[3], p[4], "convergence_local_ms", cl, key, cl_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "remote_endpoint_reachable_ms", cr, key, cr_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "convergence_remote_eds_ms", cre, key, cre_n[key])
@@ -315,12 +383,12 @@ report_csv() {
 			csv_stats(p[1], p[2], p[3], p[4], "remote_push_triggers_delta", rpt, key, rpt_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "source_xds_pushes_delta", sxp, key, sxp_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "remote_xds_pushes_delta", rxp, key, rxp_n[key])
-			csv_stats(p[1], p[2], p[3], p[4], "source_queue_time_p99_ms", sqq, key, sqq_n[key])
-			csv_stats(p[1], p[2], p[3], p[4], "remote_queue_time_p99_ms", rqq, key, rqq_n[key])
+			csv_stats_hist(p[1], p[2], p[3], p[4], "source_queue_time_p99_ms", sqq, key, sqq_n[key], sqq_ov[key]+0)
+			csv_stats_hist(p[1], p[2], p[3], p[4], "remote_queue_time_p99_ms", rqq, key, rqq_n[key], rqq_ov[key]+0)
 			csv_stats(p[1], p[2], p[3], p[4], "source_connected_proxies", scp, key, scp_n[key])
 			csv_stats(p[1], p[2], p[3], p[4], "remote_connected_proxies", rcp, key, rcp_n[key])
-			csv_stats(p[1], p[2], p[3], p[4], "source_push_time_p99_ms", spt2, key, spt2_n[key])
-			csv_stats(p[1], p[2], p[3], p[4], "remote_push_time_p99_ms", rpt2, key, rpt2_n[key])
+			csv_stats_hist(p[1], p[2], p[3], p[4], "source_push_time_p99_ms", spt2, key, spt2_n[key], spt2_ov[key]+0)
+			csv_stats_hist(p[1], p[2], p[3], p[4], "remote_push_time_p99_ms", rpt2, key, rpt2_n[key], rpt2_ov[key]+0)
 			csv_stats_ratio(p[1], p[2], p[3], p[4], "push_amplification_ratio", amp, key, amp_n[key])
 		}
 	}'
@@ -337,33 +405,36 @@ cluster is scaled; remotes stay at base replicas, so `remote_*` columns measure
 cross-cluster propagation. `src_`/`rmt_` prefixes are the source istiod (summed across its
 replicas) vs the remote istiod pods (summed/maxed across all remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
 (`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*` / `*_FAILED`) are excluded but still counted in
-`n_total`. Histogram p99 columns are reported as **bucket ranges** (e.g. `0-100`), not exact
-values; `overflow` means the p99 fell in the `+Inf` bucket.
+`n_total`. Histogram p99 columns (`*_queue_p99`, `*_push_p99`) show the **worst** (highest)
+bucket range any valid row hit (e.g. `100-500`), not an average: the mean of interpolated
+p99s can land in a bucket no row hit. `overflow (N rows)` means N valid rows had their p99
+in the `+Inf` bucket (above the histogram's highest finite bucket); `N/A` means no valid row had a
+p99. `harness_sha` and `istio_version` in the front matter are what `002` recorded in the
+TSVs (`unknown (not recorded)` for a TSV written before it recorded them, `mixed:a,b` when
+the inputs differ), not the commit or pin of the host that ran this report.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
 | `mesh` | clusters | sweep axis | Mesh size (number of clusters). |
 | `churn` | deployments | sweep axis | Churn intensity: churn-target deployments scaled per iteration. |
 | `scale` | `base->target` | sweep axis | Replica range applied to each churn target on the source (e.g. `1->5`). |
-| `n_valid` | rows | internal | Rows with `status == OK` used in the averages. |
 | `n_total` | rows | internal | All rows for the cell, including poisoned/timed-out rows. |
+| `n_valid` | rows | internal | Rows with `status == OK` used in the averages. |
 | `local_avg (ms)` | ms | source watcher `/clusters` + source istiod `/debug/syncz` | Time until the source watcher sees at least one new Ready pod per deployment and every source proxy reports SYNCED. **Includes** pod scheduling + sidecar startup. |
 | `remote_reach_avg (ms)` | ms | remote watcher Envoy `/clusters` | Time until every churn target on the remote watcher has more healthy endpoint weight than before t0 (at least one new Ready source pod per deployment). **Includes** pod scheduling + sidecar startup. |
 | `remote_eds_avg (ms)` | ms | remote `pilot_xds_pushes{type="eds"}` counter delta | Time to the first remote EDS push after t0. Control plane only; **excludes** pod boot. |
 | `src_triggers` / `rmt_triggers` | count (delta) | `pilot_push_triggers` counter delta | Push triggers on the source / remote istiod during the churn event. |
 | `src_pushes` / `rmt_pushes` | count (delta) | `pilot_xds_pushes` (all types) counter delta | xDS pushes on the source / remote istiod. |
-| `src_queue_p99` / `rmt_queue_p99` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | p99 queue wait on source / remote; bucket range, `overflow`/`N/A` possible. |
+| `src_queue_p99 worst` / `rmt_queue_p99 worst` | ms (bucket range) | `pilot_proxy_queue_time` histogram delta | Worst per-row p99 queue wait on source / remote, as a bucket range; `overflow (N rows)`/`N/A` possible. |
 | `src_proxies` / `rmt_proxies` | proxies | `pilot_xds` gauge | Connected proxy count on source / remote istiod at baseline. |
-| `src_push_p99` / `rmt_push_p99` | ms (bucket range) | `pilot_xds_push_time` histogram delta | p99 time to compute+send each xDS push, source / remote; bucket range, `overflow`/`N/A` possible. |
+| `src_push_p99 worst` / `rmt_push_p99 worst` | ms (bucket range) | `pilot_xds_push_time` histogram delta | Worst per-row p99 time to compute+send each xDS push, source / remote, as a bucket range; `overflow (N rows)`/`N/A` possible. |
 | `amplification` | ratio | derived | `(src_pushes + rmt_pushes) / src_triggers` — mesh-wide push fan-out per source event; only computed when `src_triggers > 0`. `pilot_xds_pushes` counts one push per proxy connection per xDS type, so this scales with connected proxies: compare across mesh sizes, not against 1. |
 GLOSSARY
 }
 
 report_markdown() {
-	local harness_sha
-	harness_sha=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-	if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then harness_sha="${harness_sha}-dirty"; fi
-	local istio_version="${ISTIO_VERSION:-unknown}"
+	# Recorded by 002 at run time (run_meta), never this checkout's HEAD or env.
+	local harness_sha="$HARNESS_SHA_M" istio_version="$ISTIO_VERSION_M"
 
 	# Extract sweep axes from TSV data.
 	local axes
@@ -382,8 +453,8 @@ report_markdown() {
 	sweep_scale=$(echo "$axes" | sed -n 's/^scale: //p')
 
 	echo "---"
-	echo "istio_version: ${istio_version}"
-	echo "harness_sha: ${harness_sha}"
+	echo "istio_version: \"${istio_version}\""
+	echo "harness_sha: \"${harness_sha}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
 	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
@@ -405,9 +476,17 @@ report_markdown() {
 		echo "- \`$(basename "$f")\`"
 	done
 	echo ""
-	echo "| mesh | churn | scale | n_valid | n_total | local_avg (ms) | remote_reach_avg (ms) | remote_eds_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 | rmt_queue_p99 | src_proxies | rmt_proxies | src_push_p99 | rmt_push_p99 | amplification |"
-	echo "|------|-------|-------|---------|---------|----------------|-----------------------|---------------------|--------------|--------------|------------|------------|---------------|---------------|-------------|-------------|--------------|--------------|---------------|"
+	echo "| mesh | churn | scale | n_total | n_valid | local_avg (ms) | remote_reach_avg (ms) | remote_eds_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 worst (ms) | rmt_queue_p99 worst (ms) | src_proxies | rmt_proxies | src_push_p99 worst (ms) | rmt_push_p99 worst (ms) | amplification |"
+	echo "|------|-------|-------|---------|---------|----------------|-----------------------|---------------------|--------------|--------------|------------|------------|--------------------------|--------------------------|-------------|-------------|-------------------------|-------------------------|---------------|"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
+	# The hist_add arrays exist before the first call: some awks will not turn an
+	# unused name into an array inside a function.
+	BEGIN {
+		split("", sqq_max); split("", sqq_n); split("", sqq_ov)
+		split("", rqq_max); split("", rqq_n); split("", rqq_ov)
+		split("", spt2_max); split("", spt2_n); split("", spt2_ov)
+		split("", rpt2_max); split("", rpt2_n); split("", rpt2_ov)
+	}
 	# n_total counts EVERY row for the cell; numeric aggregation uses ONLY OK rows
 	# (POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE carry N/A or undercounted deltas).
 	!/^#/ && !/^run_id/ && NF>=21 {
@@ -423,13 +502,20 @@ report_markdown() {
 		if($12!="N/A") { rpt_sum[key]+=$12+0; rpt_n[key]++ }
 		if($13!="N/A") { sxp_sum[key]+=$13+0; sxp_n[key]++ }
 		if($14!="N/A") { rxp_sum[key]+=$14+0; rxp_n[key]++ }
-		if($15!="N/A" && $15!="overflow") { sqq_sum[key]+=$15+0; sqq_n[key]++ }
-		if($16!="N/A" && $16!="overflow") { rqq_sum[key]+=$16+0; rqq_n[key]++ }
+		# Histogram p99s keep the worst (max) row and count overflows; no average.
+		hist_add(sqq_max, sqq_n, sqq_ov, key, $15)
+		hist_add(rqq_max, rqq_n, rqq_ov, key, $16)
 		if($17!="N/A") { scp_sum[key]+=$17+0; scp_n[key]++ }
 		if($18!="N/A") { rcp_sum[key]+=$18+0; rcp_n[key]++ }
-		if($19!="N/A" && $19!="overflow") { spt2_sum[key]+=$19+0; spt2_n[key]++ }
-		if($20!="N/A" && $20!="overflow") { rpt2_sum[key]+=$20+0; rpt2_n[key]++ }
+		hist_add(spt2_max, spt2_n, spt2_ov, key, $19)
+		hist_add(rpt2_max, rpt2_n, rpt2_ov, key, $20)
 		if($11!="N/A" && $11+0 > 0 && $13!="N/A") { amp_sum[key]+=($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11; amp_n[key]++ }
+	}
+	function hist_add(mx, n, ov, key, v) {
+		if (v == "overflow") { ov[key]++; return }
+		if (v == "N/A" || v == "") return
+		if (!(key in n) || v + 0 > mx[key]) mx[key] = v + 0
+		n[key]++
 	}
 	function avg_or_na(s, n) { return n>0 ? sprintf("%.0f", s/n) : "N/A" }
 	function avg_ratio(s, n) { return n>0 ? sprintf("%.1f", s/n) : "N/A" }
@@ -445,7 +531,11 @@ report_markdown() {
 		if (upper_ms+0 <= 30000) return "20000-30000"
 		return ">30000"
 	}
-	function avg_hist(s, n) { return n>0 ? bucket_range(s/n) : "N/A" }
+	# Worst bucket over the valid rows; any overflow row makes it "overflow (N rows)".
+	function worst_hist(mx, n, ov) {
+		if (ov > 0) return sprintf("overflow (%d %s)", ov, ov == 1 ? "row" : "rows")
+		return n > 0 ? bucket_range(mx) : "N/A"
+	}
 	function sort_keys(    i, j, tmp, k) {
 		n_keys = 0
 		for (k in seen) sorted_keys[++n_keys] = k
@@ -462,7 +552,7 @@ report_markdown() {
 			key = sorted_keys[k]; split(key, p, "\t")
 			if ((n_valid[key]+0) < (n_total[key]+0)) any_filtered = 1
 			printf "| %s | %s | %s->%s | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
-				p[1], p[2], p[3], p[4], n_valid[key]+0, n_total[key]+0, \
+				p[1], p[2], p[3], p[4], n_total[key]+0, n_valid[key]+0, \
 				avg_or_na(cl_sum[key], cl_n[key]), \
 				avg_or_na(cr_sum[key], cr_n[key]), \
 				avg_or_na(cre_sum[key], cre_n[key]), \
@@ -470,12 +560,12 @@ report_markdown() {
 				avg_or_na(rpt_sum[key], rpt_n[key]), \
 				avg_or_na(sxp_sum[key], sxp_n[key]), \
 				avg_or_na(rxp_sum[key], rxp_n[key]), \
-				avg_hist(sqq_sum[key], sqq_n[key]), \
-				avg_hist(rqq_sum[key], rqq_n[key]), \
+				worst_hist(sqq_max[key], sqq_n[key]+0, sqq_ov[key]+0), \
+				worst_hist(rqq_max[key], rqq_n[key]+0, rqq_ov[key]+0), \
 				avg_or_na(scp_sum[key], scp_n[key]), \
 				avg_or_na(rcp_sum[key], rcp_n[key]), \
-				avg_hist(spt2_sum[key], spt2_n[key]), \
-				avg_hist(rpt2_sum[key], rpt2_n[key]), \
+				worst_hist(spt2_max[key], spt2_n[key]+0, spt2_ov[key]+0), \
+				worst_hist(rpt2_max[key], rpt2_n[key]+0, rpt2_ov[key]+0), \
 				avg_ratio(amp_sum[key], amp_n[key])
 		}
 		# Note the filter rate when any cell dropped rows.
@@ -491,14 +581,9 @@ report_markdown() {
 }
 
 report_charts() {
-	local harness_sha
-	harness_sha=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-	if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then harness_sha="${harness_sha}-dirty"; fi
-	local istio_version="${ISTIO_VERSION:-unknown}"
-
 	echo "---"
-	echo "istio_version: ${istio_version}"
-	echo "harness_sha: ${harness_sha}"
+	echo "istio_version: \"${ISTIO_VERSION_M}\""
+	echo "harness_sha: \"${HARNESS_SHA_M}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: \"${RUN_CONFIG_M}\""
 	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
