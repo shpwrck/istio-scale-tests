@@ -515,7 +515,9 @@ resource "terraform_data" "argocd_controller_reshard" {
 
 # --- Post-apply check: every Application has a sync and health status (BACKLOG 9.1) ---
 # An empty status means no controller shard processes the Application's destination
-# cluster. Fails the apply after argocd_app_status_timeout_sec, naming the cluster.
+# cluster. Fails the apply after argocd_app_status_timeout_sec, naming the cluster. It
+# also waits for every spoke to have Applications: the ApplicationSets generate them
+# minutes after this resource starts (ROSA 2026-10-16: 13 of 40 existed when it ran).
 
 resource "terraform_data" "argocd_app_status_check" {
   count = local.gitops_enabled && var.gitops_app_repo_url != "" && var.argocd_app_status_timeout_sec > 0 ? 1 : 0
@@ -534,6 +536,7 @@ resource "terraform_data" "argocd_app_status_check" {
     gitops_namespace = var.gitops_namespace
     argocd_name      = var.gitops_argocd_cr_name
     timeout_sec      = tostring(var.argocd_app_status_timeout_sec)
+    expected_dests   = join(" ", sort(keys(local.spoke_cluster_keys)))
   }
 
   provisioner "local-exec" {
@@ -541,6 +544,7 @@ resource "terraform_data" "argocd_app_status_check" {
     environment = {
       MODE                   = "app-status"
       APP_STATUS_TIMEOUT_SEC = self.input.timeout_sec
+      EXPECTED_DESTINATIONS  = self.input.expected_dests
       TOKEN_SCRIPT           = self.input.token_script
       API_URL                = self.input.hub_api_url
       ADMIN_PASS             = self.input.hub_admin_pass
