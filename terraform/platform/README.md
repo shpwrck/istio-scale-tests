@@ -54,6 +54,11 @@ The chart defaults are sized for the 20-cluster campaign. Override them per envi
 - `argocd_config_values`: Argo CD resources on a small hub. Keep the controller limit near 6Gi.
 - `mesh_member_count`: how many spokes join the mesh, in sorted order (0 = all).
 - Large fleets: `argocd_clusters_per_shard` / `argocd_max_shards`.
+- ROSA: the ingress gateway Service gets an AWS NLB (`rosa_ingress_nlb`, default true). Behind a
+  Classic LB it aborted HTTP requests (each arrived followed by a FIN); the east-west gateway
+  (mTLS passthrough) stays on a Classic LB. This default is merged under `gitops_app_overrides`,
+  so an override of `spoke-ingress-gateway-appset` adds to it. A Service created as a CLB does not
+  change type in place: delete it once and Argo CD recreates it as an NLB.
 
 The child apps sync from `gitops_app_repo_url` at `gitops_app_repo_revision`, so a fork or branch
 deploys from itself. Edited charts roll out on the next apply.

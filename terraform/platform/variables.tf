@@ -13,6 +13,12 @@ variable "cluster_provider" {
   }
 }
 
+variable "rosa_ingress_nlb" {
+  type        = bool
+  default     = true
+  description = "rosa mode: give the ingress gateway Service an AWS NLB (service.beta.kubernetes.io/aws-load-balancer-type: nlb). Behind a Classic LB the gateway aborted HTTP requests (2026-10-14 ROSA window). The east-west gateway (mTLS passthrough) stays on a Classic LB. An existing CLB-backed Service must be deleted once (Argo CD recreates it) to switch."
+}
+
 variable "kubeconfig_path" {
   type        = string
   default     = ""

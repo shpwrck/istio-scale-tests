@@ -349,14 +349,18 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   wait             = true
   timeout          = 300
 
+  # Provider defaults come as their own values document BEFORE the user overrides, so
+  # Helm deep-merges an override of the same app into them (Terraform's merge() is
+  # shallow, and a later -var-file replaces the whole gitops_app_overrides map).
   values = [yamlencode({
     gitopsNamespace = var.gitops_namespace
     repo = {
       url      = var.gitops_app_repo_url
       revision = var.gitops_app_repo_revision
     }
-    apps = var.gitops_app_overrides
-  }), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
+    }), yamlencode({ apps = local.provider_app_defaults }),
+    yamlencode({ apps = var.gitops_app_overrides }),
+  yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
 
   depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
 }

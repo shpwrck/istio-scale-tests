@@ -6,13 +6,19 @@ networkSuffix: network
 # A PodDisruptionBudget is rendered only with more than one replica.
 replicaCount: 1
 
+# Sized for the 20-cluster / 10k-Service campaign. Envoy here allocates about 145 Mi per
+# 1000 discovered Services (2 clusters per Service, mesh-wide; ROSA 2026-10-14), and after
+# config bursts its working set ran 1.2-2.9x that (tcmalloc keeps freed pages): 10k
+# Services is about 1.45 GiB allocated and up to about 4 GiB working set. The 1Gi limit
+# capped the mesh near 5000 Services. Sizing rule: limit >= (10 Mi + 145 Mi x Services /
+# 1000) x 2.5; the request reserves the steady state. See docs/scale-test-campaign.
 resources:
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 1Gi
   limits:
     cpu: 2000m
-    memory: 1024Mi
+    memory: 4Gi
 
 autoscaling:
   enabled: false
