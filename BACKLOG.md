@@ -19,7 +19,7 @@ The original issue texts are in the appendix.
 | 6 | VirtualService/DestinationRule load in controlplane (was #84) | Done; lab shape, ROSA numbers at 60-250 Services × 2 | convergence p99 question (9.11); thousands of Services |
 | 7 | Shared `--config FILE` library (was #91) | Done for controlplane, dataplane, churn, churn-dataplane, propagation | tuning suite (follow-up) |
 | 8 | Gateway API multicluster ingress check: does an HTTPRoute need its Service (or its namespace) in every member? | Done, lab-validated 2026-10-14 (22/22 predictions matched) | — |
-| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16 and validated on ROSA the same day (9.1, 9.2, 9.7, 9.8, 9.9, 9.11; 9.4 recalibrated); two follow-ups fixed (9.1's status check, 9.4's factor) | owner: east-west limit 4Gi or 5Gi (9.9); results backup destination |
+| 9 | Fixes from the 2026-10-14 ROSA window (17 issues → 12 items) | All 12 implemented 2026-10-16 and validated on ROSA the same day (9.1, 9.2, 9.7, 9.8, 9.9, 9.11; 9.4 recalibrated); two follow-ups fixed (9.1's status check, 9.4's factor); east-west limit raised to 5Gi (owner, 9.9) | owner: results backup destination |
 
 ## 1. Namespace scaling factor
 
@@ -264,9 +264,8 @@ is listed in the record's ["Raw data"](docs/campaigns/2026-10-14-rosa-validation
 - **E** = 9.10 + 9.11, after C: 9.10 shares `003`, `004` and the growth preamble with C; 9.11 shares
   `001`, `002` and `003`'s legacy cell loop with C.
 
-**Owner decisions pending:** whether the east-west gateway limit stays 4Gi or becomes 5Gi (9.9,
-from the 2026-10-16 window), and where to copy the windows' results off the operator laptop. 9.8
-and 9.9's first decisions were settled on 2026-10-16.
+**Owner decisions pending:** where to copy the windows' results off the operator laptop. 9.8 and
+9.9 were settled on 2026-10-16 (9.9's east-west limit raised to 5Gi after that day's window).
 
 **Status 2026-10-16:** every item below is implemented (one branch, one commit per area); the
 owner confirmed 9.8 and 9.9 as proposed. Each item ends with **Done**,
@@ -438,8 +437,9 @@ came back empty. Results (gitignored) are in the operator host's window archive.
     it adds is read at the step start (20-40 Mi), not at the peak.
   - **Done:** `CONTROLPLANE_EWGW_BURST_FACTOR` 2.0 → 2.5 (options.env and 003's fallback), the
     charts' sizing rule: the burst now projects about 6% above its peak and a ladder about 30%
-    above. At the 70% stop a 4Gi east-west gateway guards up to about 7700 Services; 10k runs
-    need `--mem-stop-pct 90` (the window used 90) or a larger limit (9.9).
+    above. At the 70% stop the 4Gi limit guarded up to about 7700 Services; with 9.9's 5Gi a
+    fresh step guards up to about 9700, and 10k-Service steps need `--mem-stop-pct 80` (the
+    window used 90 on 4Gi).
   **Left:** —
 
 ### 9.5 Memory guard and fits measure allocated memory, not the working set (finding 16)
@@ -588,11 +588,11 @@ came back empty. Results (gitignored) are in the operator host's window archive.
 
   The 4Gi limit holds a campaign-sized burst with 15% headroom; the sizing rule's
   (10 + 145 × 10) × 2.5 = 3650 Mi is 5% above the measured peak. The default guard (70%) would
-  have skipped both 10000 steps, correctly given that headroom. **Owner decision pending:** keep
-  4Gi (campaign 10k steps run with `--mem-stop-pct 90`), or raise the east-west default to 5Gi:
-  the 2026-10-14 window saw 2.6-2.9× allocated after a second burst, which at 10k Services is
-  3.7-4.1 GiB. **Left:** whether Envoy can release the retained memory (tcmalloc release rate,
-  overload manager); hypothesis H1 (task 3).
+  have skipped both 10000 steps, correctly given that headroom. **Decided (owner, 2026-10-16):**
+  the east-west default limit is now **5Gi**: the 2026-10-14 window saw 2.6-2.9× allocated after a
+  second burst, which at 10k Services is 3.7-4.1 GiB, at the old 4Gi limit; the measured burst
+  peak is 64-68% of 5Gi. **Left:** whether Envoy can release the retained memory (tcmalloc release
+  rate, overload manager); hypothesis H1 (task 3).
 
 ### 9.10 Leftover undiscovered namespaces distort later series (finding 13)
 

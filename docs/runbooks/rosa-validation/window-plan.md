@@ -17,10 +17,10 @@ the platform apply restarts the Argo CD controller after the cluster secrets and
 Application has no status; the kubeconfig exec plugin caches its OAuth token; a failed series
 retire stops the sweep (`RETIRE_FAILED`, exit 1); the memory guard adds the members it finds
 in the remote secrets, guards the first step with a per-Service model and compares working
-set, not allocated memory; the gateways default to 4Gi (east-west) and 2Gi (ingress) limits;
-the ingress gets an NLB in rosa mode; the header has 66 fields (`CONTROLPLANE_SCHEMA=66`). The
-bullets below still say what to check by eye; the first window after these fixes should
-confirm each one (BACKLOG section 9, "ROSA only").
+set, not allocated memory; the gateways default to 5Gi (east-west; 4Gi in the 2026-10-16
+window) and 2Gi (ingress) limits; the ingress gets an NLB in rosa mode; the header has 66 fields
+(`CONTROLPLANE_SCHEMA=66`). The bullets below still say what to check by eye; the 2026-10-16
+window confirmed each fix (BACKLOG section 9, "Validated on ROSA").
 
 - **After the platform apply, check every Application has a sync and health status.** One member
   never got an Argo CD controller shard; restarting the

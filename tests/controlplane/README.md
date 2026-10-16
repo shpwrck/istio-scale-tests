@@ -313,8 +313,9 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
     working set under a 1Gi limit on ROSA) and a base inflated by memory Envoy kept from an
     earlier series. Calibrated on ROSA at 10k Services: a one-step burst peaked at 2.4x the
     model's allocated memory in working set, a 5-step ladder at 2.1x, so x2.5 projects a burst
-    about 6% high and a ladder about 30% high; at the 70% stop a 4Gi east-west gateway
-    guards up to about 7700 Services (pass `--mem-stop-pct 90` to measure 10k knowingly). When a gateway's Envoy allocated memory at the series start is far above
+    about 6% high and a ladder about 30% high; at the 70% stop the chart's 5Gi east-west
+    gateway guards a fresh step up to about 9700 Services (10k Services, and a ladder's last
+    step with its non-heap memory added, need `--mem-stop-pct 80`). When a gateway's Envoy allocated memory at the series start is far above
     the model for the Services the mesh has (x1.5 + 100 Mi), a WARNING says to restart the
     gateways first.
   - A cell projected above `CONTROLPLANE_MEM_STOP_PCT` (70 %) of a limit becomes a
