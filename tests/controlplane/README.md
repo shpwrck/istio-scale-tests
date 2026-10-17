@@ -128,22 +128,25 @@ More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matri
 `SCALE_SIZING_MODE=auto` stops the sweep before any change (also under `--dry-run`): `001`
 would deploy a capacity-derived service count while every row records `--service-counts`.
 Keep it `fixed` and pick `--service-counts`; auto is for a standalone `001`.
-`--resume tests/controlplane/results/sweep-<RUN_ID>` continues an interrupted sweep and skips combos that
-already have a valid row. Each row records its own axis values, but some scalars are recorded only
-once, in the TSV preamble, so they must match on resume: `--vsdr-every` and `--vsdr-subsets` (when
-the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep reads them from the
-preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
-`--vsdr-subsets` that differs. It also refuses a mesh that now runs another Istio version than the
-`ISTIO_VERSION` the sweep recorded, under either `ISTIO_VERSION_CHECK` policy: the new rows would be
-credited to the old version, so start a new sweep. A sweep that recorded `unknown` (a member could
-not be read or confirmed when it started: unreadable, its Istio CR not settled, or an istiod rollout
-in progress) can never be resumed, and `--resume` says so before it reads the mesh; when a member
+`--resume tests/controlplane/results/sweep-<RUN_ID>` (or a symlink to it, such as `latest`; any
+other directory is refused) continues an interrupted sweep and skips combos that already have a
+valid row. Each row records its own axis values, but some scalars are recorded only once, in the
+TSV preamble, so they must match on resume: `--vsdr-every` and `--vsdr-subsets` (when the resumed
+run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep reads them from the preamble and
+prints a note when that changes a value. It refuses an explicit `--vsdr-every` or `--vsdr-subsets`
+that differs. It also refuses a mesh that now runs another Istio version than the `ISTIO_VERSION`
+the sweep recorded, under either `ISTIO_VERSION_CHECK` policy: the new rows would be credited to
+the old version, so start a new sweep. A sweep that recorded `unknown` (a member could not be read
+or confirmed when it started: unreadable, its Istio CR not settled, or an istiod rollout in
+progress) can never be resumed, and `--resume` says so before it reads the mesh; when a member
 cannot be read now, fix access to it and run the same `--resume` again. Once its preflights pass,
 a resume keeps the earlier `sweep-outcome.txt` as `sweep-outcome.prev.txt` until it writes its
-own. The TSV preamble keeps the first run's `ISTIO_NOTREADY_AT_START`; the resume's own start
-condition, `none` included, goes into its sweep outcome as `ISTIO_NOTREADY_AT_RESUME` with its
-UTC start time, so its first rows can be found by their timestamps. Pass the other options as
-in the original run.
+own. The TSV preamble keeps the first run's `ISTIO_NOTREADY_AT_START` and `HARNESS_SHA`. The
+resume's own start condition, `none` included, goes into a note of its sweep outcome
+(`ISTIO_NOTREADY_AT_RESUME=...`) with its start time, in the format of the rows' `timestamp`
+column, so its first rows can be found by it. A resume that runs another `HARNESS_SHA` than the
+preamble names warns, and its outcome notes from which time the rows are that harness's. Pass the
+other options as in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an

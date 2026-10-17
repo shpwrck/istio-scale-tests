@@ -126,20 +126,22 @@ no active revision, or is migrating between revisions reads as unknown. A CR who
 readiness (its state is not Healthy because istiod or IstioCNI is not ready) still gives its
 version: the suite reads it again every `ISTIO_VERSION_READY_POLL_SEC` (5) for up to
 `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, then records the version with a warning on stderr.
-An istiod rollout in progress (its Deployment has fewer updated pods than pods, or a generation
-not observed yet, also while the CR already reads Healthy) is waited for the same way, and reads
-as unknown if it outlasts the wait: old and new istiod pods both serve. A member stays in the
-wait until the deadline or until it is ready, so a CR that is briefly not settled meanwhile does
-not stop the run early; its answer at the deadline counts. The suite records the result as
-`ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in
-a `--dry-run`, which reads nothing), `ISTIO_VERSION_BY_CONTEXT`, and the members still not ready
-after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a
-sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was
-ready), `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an
-istiod rollout still in progress), `unchecked` (a `--dry-run`) or, in a report, `unknown` (a TSV
-written before the key existed). A controlplane `--resume` keeps the first run's value in the
-TSV, and records its own, with its UTC start time, as `ISTIO_NOTREADY_AT_RESUME` in the sweep
-outcome. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the
+An istiod rollout in progress (its Deployment has fewer updated pods than pods, a generation not
+observed yet, or pods still terminating, also while the CR already reads Healthy) is waited for
+the same way, and reads as unknown if it outlasts the wait: old and new istiod pods both serve. A
+rollout that ends on the last read before the deadline is read once more, one poll later. A member
+stays in the wait until the deadline or until it is ready, so a CR that is briefly not settled
+meanwhile does not stop the run early; its answer at the deadline counts. The suite records the
+result as `ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`;
+`pin` in a `--dry-run`, which reads nothing), `ISTIO_VERSION_BY_CONTEXT`, and the members still
+not ready after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`),
+which a sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member
+was ready), `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling`
+(an istiod rollout still in progress), `<ctx>=unreadable` (a rollout at the first read, then every
+re-read failed), `unchecked` (a `--dry-run`) or, in a report, `unknown` (a TSV written before the
+key existed). A controlplane `--resume` keeps the first run's value in the TSV, and records its
+own, with its UTC start time, in a note of the sweep outcome (`ISTIO_NOTREADY_AT_RESUME=...`).
+With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the
 pin, members on different versions, or a member that cannot be read stop every suite but
 gateway-api (a read-only check that only records it) before it changes anything;
 `ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs (`mixed:<a>/<b>` or `unknown`

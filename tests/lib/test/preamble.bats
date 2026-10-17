@@ -277,8 +277,11 @@ _fake_kubectl() {
 #   IVFLAKY_<c>  1: the first Istio CR read fails, the next ones answer
 #   IVFAILFROM_<c> N: the Nth Istio CR read and every later one fail
 #   IVROGEN_<c>  the IstioRevision's .status.observedGeneration (default 2, its generation)
-#   IVDEP_<c>    "generation observedGeneration replicas updatedReplicas" (or g:o:r:u) of
-#                the istiod Deployment (default "4 4 2 2": rolled out; fail: Forbidden);
+#   IVRFAIL_<c>  N: the next N IstioRevision reads fail (counted from when it is set);
+#                IVRFAILFROM_<c> N: the Nth IstioRevision read and every later one fail
+#   IVDEP_<c>    "generation observedGeneration replicas updatedReplicas [terminating]" (or
+#                g:o:r:u[:t]) of the istiod Deployment (default "4 4 2 2": rolled out, no
+#                .status.terminatingReplicas; fail: Forbidden);
 #                IVDEPSEQ_<c> "g:o:r:u ...": one per successive Deployment read (the last
 #                repeats)
 # The Deployment answers only under the name Sail gives it (istiodDeploymentKey: istiod
@@ -286,12 +289,12 @@ _fake_kubectl() {
 # istio-system. The CR's .spec.version is the alias v1.30-latest, which must never be
 # recorded. Logs each call.
 _iv_kubectl() {
-	local ctx="" a v rev state ogen inuse flaky recon seq st n failfrom rogen dep depseq vrev depname d g o r u
+	local ctx="" a v rev state ogen inuse flaky recon seq st n failfrom rogen dep depseq vrev depname d g o r u tr rfail rfrom
 	for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
 	echo "$*" >> "$IV_LOG"
 	v="IV_${ctx}" rev="IVREV_${ctx}" state="IVSTATE_${ctx}" ogen="IVOGEN_${ctx}" inuse="IVINUSE_${ctx}" flaky="IVFLAKY_${ctx}"
 	recon="IVRECON_${ctx}" seq="IVSTATESEQ_${ctx}" failfrom="IVFAILFROM_${ctx}" rogen="IVROGEN_${ctx}"
-	dep="IVDEP_${ctx}" depseq="IVDEPSEQ_${ctx}"
+	dep="IVDEP_${ctx}" depseq="IVDEPSEQ_${ctx}" rfail="IVRFAIL_${ctx}" rfrom="IVRFAILFROM_${ctx}"
 	if [[ -z "${!v:-}" ]]; then
 		echo "error: You must be logged in to the server (Unauthorized)" >&2
 		return 1
@@ -326,6 +329,22 @@ _iv_kubectl() {
 			                         {type: "DependenciesHealthy", status: (if $state == "IstioCNINotHealthy" then "False" else "True" end)}]}
 			  + (if $rev == "none" then {} else {activeRevisionName: $rev} end))}' ;;
 	*" get istiorevisions.sailoperator.io ${!rev:-default} -o json "*)
+		if [[ -n "${!rfail:-}" ]]; then
+			n="$(cat "${BATS_TEST_TMPDIR}/rn-${ctx}" 2>/dev/null || echo 0)"
+			echo $((n + 1)) > "${BATS_TEST_TMPDIR}/rn-${ctx}"
+			if ((n < ${!rfail})); then
+				echo "Unable to connect to the server: net/http: TLS handshake timeout" >&2
+				return 1
+			fi
+		fi
+		if [[ -n "${!rfrom:-}" ]]; then
+			n="$(cat "${BATS_TEST_TMPDIR}/rf-${ctx}" 2>/dev/null || echo 0)"
+			echo $((n + 1)) > "${BATS_TEST_TMPDIR}/rf-${ctx}"
+			if ((n + 1 >= ${!rfrom})); then
+				echo "Unable to connect to the server: net/http: TLS handshake timeout" >&2
+				return 1
+			fi
+		fi
 		jq -nc --arg v "${!v}" --arg vrev "$vrev" --argjson rogen "${!rogen:-2}" \
 			'{metadata: {generation: 2}, spec: {version: $v, namespace: "istio-system", values: {revision: $vrev}},
 			  status: {observedGeneration: $rogen}}' ;;
@@ -343,9 +362,10 @@ _iv_kubectl() {
 			echo 'Error from server (Forbidden): deployments.apps "istiod" is forbidden' >&2
 			return 1
 		fi
-		read -r g o r u <<<"$d"
-		jq -nc --argjson g "$g" --argjson o "$o" --argjson r "$r" --argjson u "$u" \
-			'{metadata: {generation: $g}, status: {observedGeneration: $o, replicas: $r, updatedReplicas: $u, readyReplicas: $r}}' ;;
+		read -r g o r u tr <<<"$d"
+		jq -nc --argjson g "$g" --argjson o "$o" --argjson r "$r" --argjson u "$u" --arg t "${tr:-}" \
+			'{metadata: {generation: $g}, status: ({observedGeneration: $o, replicas: $r, updatedReplicas: $u, readyReplicas: $r}
+			  + (if $t == "" then {} else {terminatingReplicas: ($t | tonumber)} end))}' ;;
 	*)
 		echo "Error from server (NotFound): not found" >&2
 		return 1 ;;
@@ -622,7 +642,7 @@ setup() {
 		ISTIO_VERSION_READY_WAIT_SEC=2 ISTIO_VERSION_READY_POLL_SEC=1 run --separate-stderr _iv_run a,b,c,d 0
 	assert_success
 	assert_line --index 0 "V=mixed:unknown/v1.30.5 PIN=v1.30.5 SRC=live BY=a=unknown,b=v1.30.5,c=v1.30.5,d=v1.30.5"
-	assert_line --index 1 --regexp '^NR=a=rolling,b=IstioCNINotHealthy,c=IstioCNINotHealthy,d=IstiodNotReady WAITED=[2-4]$'
+	assert_line --index 1 --regexp '^NR=a=unreadable,b=IstioCNINotHealthy,c=IstioCNINotHealthy,d=IstiodNotReady WAITED=[2-4]$'
 	[[ "$stderr" == *"cannot read the running Istio version on 1 of 4 members:"$'\n'"  a: every re-read during the wait failed (Unable to connect to the server: dial tcp <api-host>: i/o timeout); the first read saw: istiod is rolling out v1.30.5 (Deployment istio-system/istiod: 1 of 3 pods updated); its state is IstiodNotReady"$'\n'"    reproduce: _iv_kubectl --context a get istios.sailoperator.io default -o yaml"$'\n'"Fix access to those members"* ]]
 	[[ "$stderr" != *"still rolling out"* ]]
 	[[ "$stderr" == *"WARNING: istiod or IstioCNI is still not ready on 3 of 4 members after "*$'\n'"  IstioCNINotHealthy on 2 members (b, c)"$'\n'"    check (shown for b): _iv_kubectl --context b get istios.sailoperator.io default -o yaml"$'\n'"  IstiodNotReady on 1 member (d)"$'\n'"    check: _iv_kubectl --context d get istios.sailoperator.io default -o yaml"$'\n'"  every re-read during the wait failed on d: the state above is what the first read saw"$'\n'"The run goes on"* ]]
@@ -931,7 +951,7 @@ _iv_resume() {
 		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
 		unset ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC
 		export ISTIO_VERSION=v1.30.5
-		ISTIO_VERSION_READY_WAIT_SEC=0 istio_version_resolve --resumed-at 2026-10-17T10:00:00Z "$1" "${2:-0}" _iv_kubectl
+		ISTIO_VERSION_READY_WAIT_SEC=0 istio_version_resolve --resumed-at 2026-10-17T10:00:00+00:00 "$1" "${2:-0}" _iv_kubectl
 		local -a out=()
 		istio_version_recheck out _iv_kubectl
 		printf '%s\n' ${out[@]+"${out[@]}"}
@@ -941,21 +961,114 @@ _iv_resume() {
 @test "J2: a --resume records its own start condition and its start time in the sweep outcome, none included" {
 	IV_a=v1.30.5 IV_b=v1.30.5 run --separate-stderr _iv_resume a,b
 	assert_success
-	assert_output "$(printf '%s\n' --note "this --resume started at 2026-10-17T10:00:00Z with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's")"
+	# K6: an all-clear is an info line (note: on stdout, INFO= in the record), not a warning.
+	assert_output "$(printf '%s\n' --info "this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's")"
+	local -a args=()
+	mapfile -t args < <(IV_a=v1.30.5 IV_b=v1.30.5 _iv_resume a,b 2>/dev/null)
+	run --separate-stderr sweep_outcome "${args[@]}" --record "$BATS_TEST_TMPDIR" 3
+	assert_success
+	assert_line --index 1 "note: this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's."
+	[ -z "$stderr" ]
+	grep -q '^INFO=this --resume started at 2026-10-17T10:00:00+00:00 with every member ready' "${BATS_TEST_TMPDIR}/sweep-outcome.txt"
+	[ "$(grep -c '^NOTE=' "${BATS_TEST_TMPDIR}/sweep-outcome.txt" || true)" = 0 ]
 	# b not ready when the resume starts, ready at its end: the resume's own rows, by time.
 	rm -f "${BATS_TEST_TMPDIR}"/n-* "${BATS_TEST_TMPDIR}"/dn-*
 	IV_a=v1.30.5 IV_b=v1.30.5 IVSTATESEQ_b="IstioCNINotHealthy Healthy" run --separate-stderr _iv_resume a,b
 	assert_success
 	assert_line --index 0 -- "--note"
-	assert_line --index 1 "istiod or IstioCNI was still not ready when this --resume started at 2026-10-17T10:00:00Z, after waiting 0s (ISTIO_NOTREADY_AT_RESUME=b=IstioCNINotHealthy; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's): the first cells the resume ran (rows from 2026-10-17T10:00:00Z on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted"
+	assert_line --index 1 "istiod or IstioCNI was still not ready when this --resume started at 2026-10-17T10:00:00+00:00, after waiting 0s (ISTIO_NOTREADY_AT_RESUME=b=IstioCNINotHealthy; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's): the first cells the resume ran (rows from 2026-10-17T10:00:00+00:00 on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted"
 	assert_line --index 3 "not ready at the resume: IstioCNINotHealthy on 1 member (b)"
 	refute_output --partial "at the start of the sweep"
 	# Its warning says where the condition is recorded on a resume.
-	[[ "$stderr" == *"This --resume records them in sweep-outcome.txt as ISTIO_NOTREADY_AT_RESUME, with its start time (2026-10-17T10:00:00Z); the TSV preamble keeps the first run's ISTIO_NOTREADY_AT_START."* ]]
+	[[ "$stderr" == *"This --resume records them in sweep-outcome.txt as ISTIO_NOTREADY_AT_RESUME, with its start time (2026-10-17T10:00:00+00:00); the TSV preamble keeps the first run's ISTIO_NOTREADY_AT_START."* ]]
 	[[ "$stderr" != *"the preambles record"* ]]
 	# --dry-run reads nothing and notes nothing.
 	: > "$IV_LOG"
 	IV_a=v1.30.5 run --separate-stderr _iv_resume a 1
 	assert_output ""
 	[ ! -s "$IV_LOG" ]
+}
+
+@test "K1: an Istio CR not settled whose IstioRevision read fails is a failed read naming the revision: retried, then an honest note" {
+	IV_a=v1.30.5 IVSTATE_a=ReconcileError IVRFAIL_a=1 run istio_live_version a _iv_kubectl
+	assert_output "$(printf 'unknown\nread\nthe Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout\ndefault\n\nReconcileError')"
+	# A migration stays migrating (a problem whatever the revision reads), and says so too.
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	IV_a=v1.30.5 IVINUSE_a=2 IVRFAIL_a=1 run istio_live_version a _iv_kubectl
+	assert_line --index 1 migrating
+	assert_line --index 2 --partial "2 revisions are in use (a revision migration in progress); IstioRevision default: Unable to connect"
+	# At the start the failed read is retried once, like any failed read.
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	: > "$IV_LOG"
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVSTATE_a=ReconcileError IVRFAIL_a=1 run --separate-stderr _iv_run a 0
+	assert_output "V=unknown PIN=v1.30.5 SRC=live BY=a=unknown"
+	[ "$(grep -c 'get istiorevisions.sailoperator.io default' "$IV_LOG")" -eq 2 ]
+	[[ "$stderr" == *"  a: the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False"$'\n'* ]]
+	# End of a sweep: an upgrade to v1.30.6 that failed partway (ReconcileError), its
+	# revision read failing once: retried, so the version change is a problem (exit 4).
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	IV_a=v1.30.5 END="IV_a=v1.30.6 IVSTATE_a=ReconcileError IVRFAIL_a=1" run --separate-stderr _iv_recheck a
+	assert_line --index 0 -- "--problem"
+	assert_line --index 1 --partial "(a: v1.30.5 at the start, v1.30.6 at the end, its active revision's version (the Istio CR default is not settled"
+	# Failing twice: unconfirmed, and the note says the revision was not read.
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	IV_a=v1.30.5 END="IV_a=v1.30.6 IVSTATE_a=ReconcileError IVRFAIL_a=2" run --separate-stderr _iv_recheck a
+	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a could not be read again (v1.30.5 at the start): the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout")"
+	# In the start's wait, a CR that answers "not settled" is an answer (J4), also when its
+	# revision read then fails: unknown at the deadline (fail stops), never the not-ready
+	# member's earlier version.
+	rm -f "${BATS_TEST_TMPDIR}"/n-* "${BATS_TEST_TMPDIR}"/dn-* "${BATS_TEST_TMPDIR}"/rf-*
+	IV_a=v1.30.5 IVSTATESEQ_a="IstiodNotReady ReconcileError" IVRFAILFROM_a=2 \
+		ISTIO_VERSION_READY_WAIT_SEC=2 ISTIO_VERSION_READY_POLL_SEC=1 run --separate-stderr _iv_run a 0
+	assert_failure 1
+	[[ "$stderr" == *"  a: the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout"$'\n'* ]]
+	[[ "$stderr" != *"WARNING: istiod or IstioCNI is still not ready"* ]]
+}
+
+@test "K2: a rollout that ends on the last read before the deadline gets its extra read, one poll past the deadline" {
+	# POLL = WAIT: the first poll is before the deadline, the second at it, whatever the clock.
+	IV_a=v1.30.5 IVDEPSEQ_a="5:5:3:2 5:5:2:2" IV_SHOW_NR=1 \
+		ISTIO_VERSION_READY_WAIT_SEC=2 ISTIO_VERSION_READY_POLL_SEC=2 run --separate-stderr _iv_run a 0
+	assert_success
+	assert_line --index 0 "V=v1.30.5 PIN=v1.30.5 SRC=live BY=a=v1.30.5"
+	assert_line --index 1 --regexp '^NR=none WAITED=[3-8]$'
+	[ "$(grep -c 'get deployments.apps istiod ' "$IV_LOG")" -eq 3 ]
+	# The extra read sees a new rollout: rolling (unknown), not the version.
+	rm -f "${BATS_TEST_TMPDIR}"/n-* "${BATS_TEST_TMPDIR}"/dn-*
+	: > "$IV_LOG"
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVDEPSEQ_a="5:5:3:2 5:5:2:2 6:5:2:2" IV_SHOW_NR=1 \
+		ISTIO_VERSION_READY_WAIT_SEC=2 ISTIO_VERSION_READY_POLL_SEC=2 run --separate-stderr _iv_run a 0
+	assert_line --index 0 "V=unknown PIN=v1.30.5 SRC=live BY=a=unknown"
+	assert_line --index 1 --regexp '^NR=a=rolling WAITED=[3-8]$'
+	[ "$(grep -c 'get deployments.apps istiod ' "$IV_LOG")" -eq 3 ]
+}
+
+@test "K5: a member off an ISTIO_VERSION exported in the shell, next to an unknown one: unset it, not bump versions.env" {
+	PIN=1.24.0 IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0
+	assert_failure 1
+	[[ "$stderr" == *"Also, a runs v1.30.5, not ISTIO_VERSION=1.24.0, which is exported in this shell (config/versions.env pins v1.30.5): unset ISTIO_VERSION (a value left in the shell, for example by Istio's download script)."* ]]
+	[[ "$stderr" != *"bump ISTIO_VERSION in config/versions.env"* ]]
+}
+
+@test "K8: rolling members are grouped by Deployment and version at the start; at the end, members whose Deployment alone cannot be read are grouped by why" {
+	ISTIO_VERSION_CHECK=warn PIN=v1.30.6 IV_a=v1.30.6 IV_b=v1.30.6 IV_c=v1.30.6 IV_d=v1.30.6 IVREV_d=default-v1-30-6 \
+		IVDEP_a="5 5 3 1" IVDEP_b="5 5 3 2" IVDEP_c="6 5 2 2" IVDEP_d="5 5 3 1" IV_SHOW_NR=1 \
+		ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a,b,c,d 0
+	assert_success
+	assert_line --index 1 "NR=a=rolling,b=rolling,c=rolling,d=rolling WAITED=0"
+	[[ "$stderr" == *"cannot confirm the running Istio version on 4 of 4 members:"$'\n'"  istiod is rolling out v1.30.6 on 3 members (Deployment istio-system/istiod; still rolling out after 0s): a, b, c"$'\n'"    check (shown for a): _iv_kubectl --context a -n istio-system get deployments.apps istiod -o yaml"$'\n'"  d: istiod is rolling out v1.30.6 (Deployment istio-system/istiod-default-v1-30-6: 1 of 3 pods updated); its state is Healthy; still rolling out after 0s"$'\n'"    check: _iv_kubectl --context d -n istio-system get deployments.apps istiod-default-v1-30-6 -o yaml"$'\n'"Wait until"* ]]
+	# A rollout seen at the first read, then no answer, is recorded as unreadable (J14).
+	local -a o=()
+	_istio_notready_notes o start "a=unreadable,b=IstioCNINotHealthy" 2
+	[ "${o[3]}" = "not ready at the start: unreadable (an istiod rollout at the first read, then every re-read failed) on 1 member (a)" ]
+	# End: every Deployment read fails (RBAC, say) on the same version: one entry.
+	IV_a=v1.30.5 IV_b=v1.30.5 IV_c=v1.30.5 END="IVDEP_a=fail IVDEP_b=fail IVDEP_c=fail" run --separate-stderr _iv_recheck a,b,c
+	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a, b, c ran v1.30.5 at the start, and their active revisions read v1.30.5 at the end, but istiod Deployment istio-system/istiod: Error from server (Forbidden): deployments.apps \"istiod\" is forbidden")"
+}
+
+@test "K12: istiod pods still terminating (.status.terminatingReplicas, where the server has it) are a rollout in progress" {
+	IV_a=v1.30.6 IVDEP_a="5 5 2 2 1" run istio_live_version a _iv_kubectl
+	assert_output "$(printf 'v1.30.6\nrolling\nistiod is rolling out v1.30.6 (Deployment istio-system/istiod: 2 of 2 pods updated, 1 terminating); its state is Healthy\ndefault\nv1.30.6\nHealthy')"
+	IV_a=v1.30.6 IVDEP_a="5 5 2 2 0" run istio_live_version a _iv_kubectl
+	assert_line --index 1 ok
 }

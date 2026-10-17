@@ -770,9 +770,36 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	refute_output --partial "--resume: this sweep recorded"
 	cmp -s "$d/sweep-outcome.prev.txt" "${BATS_TEST_TMPDIR}/old-outcome.txt"
 	[ -f "$d/sweep-outcome.txt" ]
-	# J2: the resume's own start condition and time are in its outcome (none included); the
-	# TSV keeps the first run's. J7: one HARNESS_SHA for the run's preambles and outcome.
-	grep -Eq "^NOTE=this --resume started at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z with every member ready \(ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0\); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's$" "$d/sweep-outcome.txt"
+	# J2: the resume's own start condition and time are in its outcome (none included: an
+	# INFO line, K6; the time in the rows' timestamp format, K7); the TSV keeps the first
+	# run's. J7: one HARNESS_SHA for the run's preambles and outcome (K4: no harness note).
+	grep -Eq "^INFO=this --resume started at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00 with every member ready \(ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0\); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's$" "$d/sweep-outcome.txt"
 	grep -qx '# ISTIO_NOTREADY_AT_START=none' "$tsv"
 	[ "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")" ]
+	refute_output --partial "and this resume runs"
+	[ "$(grep -c '^NOTE=this --resume ran HARNESS_SHA' "$d/sweep-outcome.txt" || true)" = 0 ]
+	# K3: through a symlink (latest -> sweep-X, no trailing slash) the resume is that sweep:
+	# its RUN_ID and its TSV, never a second TSV the report would pool. K4: a TSV preamble
+	# that names another harness gets a warning, and a note from the resume's start on.
+	local res_d="${d%/*}" rid sha
+	rid="$(basename "$tsv" .tsv)"
+	rid="${rid#controlplane-}"
+	ln -s "${d##*/}" "${res_d}/latest"
+	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=0000000/' "$tsv" && rm -f "${tsv}.bak"
+	ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
+		run bash "$CP/003-run-sweep.sh" --resume "${res_d}/latest" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_output --partial "Resuming sweep RUN_ID=${rid} in "
+	[ "$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv' | wc -l)" -eq 1 ]
+	sha="$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")"
+	[ -n "$sha" ] && [ "$sha" != 0000000 ]
+	assert_output --partial "warning: --resume: this sweep started on harness 0000000 (the TSV preamble's HARNESS_SHA), and this resume runs ${sha}: the rows it adds (from "
+	grep -Eq "^NOTE=this --resume ran HARNESS_SHA=${sha}; the TSV preamble's HARNESS_SHA=0000000 is the first run's; rows from [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00 on are ${sha}'s$" "$d/sweep-outcome.txt"
+	grep -qx '# HARNESS_SHA=0000000' "$tsv"
+	# K3: a directory that is not a sweep, nor a symlink to one, is refused before anything.
+	mkdir "${res_d}/other"
+	cp "$tsv" "${res_d}/other/"
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "${res_d}/other" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: ${res_d}/other is not a sweep-<RUN_ID> directory, nor a symlink to one"
+	refute_output --partial "Resuming sweep"
 }

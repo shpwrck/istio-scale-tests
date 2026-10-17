@@ -523,6 +523,33 @@ _in_path() {
 	assert_output ""
 }
 
+@test "sweep_outcome --info (K6): a fact, not a caveat: note: on stdout, INFO= in the record, note: in every re-generated report" {
+	local d="${BATS_TEST_TMPDIR}/sweep-r6"
+	mkdir -p "$d"
+	echo "# r" > "${d}/r.md"
+	run --separate-stderr sweep_outcome --info "every member was ready" --run-id r6 --record "$d" --md "${d}/r.md" 2
+	assert_success
+	assert_output "$(printf '%s\n' "All 2 cells ran (their rows' own statuses are in the report)." "note: every member was ready.")"
+	[ -z "$stderr" ]
+	grep -qx 'INFO=every member was ready' "${d}/sweep-outcome.txt"
+	[ "$(grep -c '^NOTE=' "${d}/sweep-outcome.txt" || true)" = 0 ]
+	grep -qx -- '- note: every member was ready.' "${d}/r.md"
+	# An INFO line alone still shows, as a note, never as a warning.
+	run sweep_outcome_recorded "$d" text
+	assert_output "$(printf '%s\n' "SWEEP OUTCOME (recorded in sweep-outcome.txt by run r6, exit 0):" "  note: every member was ready" "")"
+	run sweep_outcome_recorded "$d" md
+	assert_line '> - note: every member was ready'
+	refute_output --partial warning
+	run sweep_outcome_recorded "$d" csv
+	assert_line '# SWEEP_OUTCOME_INFO=every member was ready'
+	run sweep_outcome_recorded "$d" json
+	[ "$(jq -c '[.notes, .info]' <<<"$output")" = '[[],["every member was ready"]]' ]
+	# A record without INFO lines (every record before K6): an empty list.
+	sed -i.bak '/^INFO=/d' "${d}/sweep-outcome.txt" && rm -f "${d}/sweep-outcome.txt.bak"
+	run sweep_outcome_recorded "$d" json
+	[ "$(jq -c '.info' <<<"$output")" = '[]' ]
+}
+
 @test "sweep_outcome_recorded (J6): the record matches its TSVs' sweep-level id, so a renamed sweep dir is still its sweep" {
 	local d="${BATS_TEST_TMPDIR}/sweep-june-a" e="${BATS_TEST_TMPDIR}/sweep-june-b"
 	mkdir -p "$d/sub" "$e"

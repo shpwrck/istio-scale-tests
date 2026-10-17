@@ -91,6 +91,8 @@ MAX_MATRIX="${CONTROLPLANE_MAX_MATRIX:-64}"
 # --resume: reuse an existing sweep dir + RUN_ID and skip combos that already
 # have a valid row (istiod_restarted=="0" for the same six axis values).
 RESUME_DIR=""
+# The resume's start time (K7: the rows' timestamp format), set with RESUME_DIR below.
+RESUME_AT=""
 # 1 when --service-counts is passed (growth mode refuses it: services = N x K).
 SERVICE_COUNTS_FLAG=0
 
@@ -219,7 +221,8 @@ Other:
                               sweep-<RUN_ID>/ subdir under it
                               (default: ${CONTROLPLANE_RESULTS_DIR}).
   --resume DIR                Resume an interrupted sweep in this sweep-<RUN_ID>/
-                              dir: reuse its RUN_ID and skip combos that already
+                              dir (or a symlink to one; any other dir is refused):
+                              reuse its RUN_ID and skip combos that already
                               have a valid row. Scalars recorded once in the TSV
                               preamble (VSDR_EVERY and VSDR_SUBSETS when the run
                               includes vsdr, PROXY_CHECK_*) are taken from it; a
@@ -232,9 +235,11 @@ Other:
                               the ISTIO_VERSION the sweep recorded, under either
                               ISTIO_VERSION_CHECK policy; otherwise start a new
                               sweep. The TSV keeps the first run's
-                              ISTIO_NOTREADY_AT_START; the sweep outcome records
-                              the resume's own (ISTIO_NOTREADY_AT_RESUME, none
-                              included) with its UTC start time.
+                              ISTIO_NOTREADY_AT_START and HARNESS_SHA; the resume
+                              records its own readiness, with its start time, in
+                              a note of the sweep outcome
+                              (ISTIO_NOTREADY_AT_RESUME=...), and warns and adds a
+                              note when it runs another HARNESS_SHA.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -684,11 +689,20 @@ SCRIPT_DIR="${ROOT}/tests/controlplane"
 if [[ -n "$RESUME_DIR" ]]; then
 	((DRY_RUN)) && die "--resume is not valid with --dry-run (nothing to resume in a plan-only run)"
 	[[ -d "$RESUME_DIR" ]] || die "--resume: sweep dir not found: $RESUME_DIR"
-	OUTPUT_DIR="$RESUME_DIR"
+	# K3: a symlink such as latest -> sweep-X resumes sweep-X (find -H reads through it);
+	# anything else that is not a sweep-<RUN_ID> dir is refused, since its rows would go
+	# into a second TSV next to the first one, and the report would pool them.
+	OUTPUT_DIR="$(_config_canon_dir "$RESUME_DIR")"
+	case "${OUTPUT_DIR##*/}" in
+	sweep-?*) ;;
+	*) die "--resume: ${RESUME_DIR} is not a sweep-<RUN_ID> directory, nor a symlink to one (pass the sweep dir 003 created, such as ${CONTROLPLANE_RESULTS_DIR}/sweep-<RUN_ID>)" ;;
+	esac
+	# K7: the rows' own timestamp format, so "rows from <this> on" finds them directly.
+	RESUME_AT="$(date -u -Iseconds)"
 	# Recover RUN_ID from the existing TSV (controlplane-<RUN_ID>.tsv); fall back to
 	# the sweep-<RUN_ID> dir name. RUN_ID must match so 002 appends to the same TSV
 	# and the report/envelope filenames line up with the originals.
-	_existing_tsv="$(find "$OUTPUT_DIR" -maxdepth 1 -name 'controlplane-*.tsv' -type f 2>/dev/null | sort | head -1)"
+	_existing_tsv="$(find -H "$OUTPUT_DIR" -maxdepth 1 -name 'controlplane-*.tsv' -type f 2>/dev/null | sort | head -1)"
 	if [[ -n "$_existing_tsv" ]]; then
 		RUN_ID="$(basename "$_existing_tsv")"; RUN_ID="${RUN_ID#controlplane-}"; RUN_ID="${RUN_ID%.tsv}"
 	else
@@ -1254,7 +1268,7 @@ fi
 # appends to a TSV whose preamble keeps the first run's ISTIO_NOTREADY_AT_START, so the
 # outcome records this resume's own start condition, with its UTC start time.
 _iv_resume_args=()
-[[ -z "$RESUME_DIR" ]] || _iv_resume_args=(--resumed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+[[ -z "$RESUME_DIR" ]] || _iv_resume_args=(--resumed-at "$RESUME_AT")
 istio_version_resolve ${_iv_resume_args[@]+"${_iv_resume_args[@]}"} "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Istio version:     $(istio_version_label)" >&2
 if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
@@ -1275,6 +1289,18 @@ leftover_preflight
 # preflights passed, so a resume that stops in one leaves the record where it was.
 if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN)); then
 	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
+fi
+# K4: the TSV preamble names the harness the sweep started on, and the resume appends rows
+# from this one: when they differ, say so now and in the sweep outcome, with the time from
+# which the rows are this harness's. (unknown on either side cannot be compared.)
+RESUME_NOTES=()
+if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]]; then
+	_resume_harness="$(awk -v k="# HARNESS_SHA=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
+	if [[ -n "$_resume_harness" && "$_resume_harness" != unknown && "$HARNESS_SHA" != unknown \
+		&& "$_resume_harness" != "$HARNESS_SHA" ]]; then
+		echo "warning: --resume: this sweep started on harness ${_resume_harness} (the TSV preamble's HARNESS_SHA), and this resume runs ${HARNESS_SHA}: the rows it adds (from ${RESUME_AT} on) come from another harness than the preamble names. The sweep outcome records it as a note; start a new sweep if the change matters to the results." >&2
+		RESUME_NOTES=(--note "this --resume ran HARNESS_SHA=${HARNESS_SHA}; the TSV preamble's HARNESS_SHA=${_resume_harness} is the first run's; rows from ${RESUME_AT} on are ${HARNESS_SHA}'s")
+	fi
 fi
 
 if ((DRY_RUN)) && ! ((GROWTH)); then
@@ -2297,7 +2323,8 @@ outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
 # The outcome also goes at the end of the scale envelope (R1), when it was written: a
 # campaign record pasted from it must show a version change or a failed sweep.
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$OUTPUT_DIR" \
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} \
+	--run-id "$RUN_ID" --record "$OUTPUT_DIR" \
 	--md "$MD_FILE" --md "$ENVELOPE_FILE" \
 	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if [[ -n "$SWEEP_STOPPED" ]]; then

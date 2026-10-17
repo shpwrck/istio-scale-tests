@@ -174,6 +174,22 @@ jobs:
           [[ "$decoded" == "hello world" ]] || { echo "FAIL: round-trip mismatch"; exit 1; }
           echo "PASS"
 
+      # The reports search a --results-dir that can be a symlink (latest -> sweep-X) with
+      # `find -H`, and tests/lib/common.sh stops reading a TSV at its header with awk's
+      # `nextfile`; bats runs on Linux only, so check both on BSD find and awk here too.
+      - name: Portable find -H and awk nextfile
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          d="$(mktemp -d)"
+          mkdir "$d/sweep-x"
+          printf 'a\nb\n' > "$d/sweep-x/x.tsv"
+          ln -s sweep-x "$d/latest"
+          n="$(find -H "$d/latest" -name 'x.tsv' -type f | wc -l | tr -d ' ')"
+          [ "$n" = 1 ] || { echo "FAIL: find -H found $n files through a symlinked dir, not 1"; exit 1; }
+          out="$(find -H "$d/latest" -name 'x.tsv' -type f -exec awk '{ print; nextfile }' {} +)"
+          [ "$out" = a ] || { echo "FAIL: awk nextfile printed '$out', not 'a'"; exit 1; }
+          echo "PASS"
+
       - name: No incompatible patterns outside helpers
         if: steps.changes.outputs.relevant == 'true'
         run: |

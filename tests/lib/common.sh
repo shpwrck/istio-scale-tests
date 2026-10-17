@@ -236,7 +236,8 @@ _sweep_outcome_by() {
 }
 
 # _sweep_outcome_sweep_ids <dir>: the distinct sweep-level ids of the TSVs under <dir>, one
-# per line: a file's SWEEP_RUN_ID preamble line, else its RUN_ID line (J6).
+# per line: a file's SWEEP_RUN_ID preamble line, else its RUN_ID line (J6). K10: nextfile
+# stops at the header (gawk, mawk 1.3.4, BSD awk); an awk without it skips the rows instead.
 _sweep_outcome_sweep_ids() {
 	find -H "$1" -name '*.tsv' -type f -exec awk '
 		FNR == 1 { if (NR > 1) pick(); s = ""; r = ""; pre = 1 }
@@ -245,17 +246,18 @@ _sweep_outcome_sweep_ids() {
 		/^# SWEEP_RUN_ID=/ { if (s == "") s = substr($0, 16); next }
 		/^# RUN_ID=/ { if (r == "") r = substr($0, 10); next }
 		/^#/ { next }
-		{ pre = 0 }
+		{ pre = 0; nextfile }
 		END { if (NR > 0) pick() }' {} + 2>/dev/null | awk '!seen[$0]++' || true
 }
 
 # sweep_outcome_recorded <results_dir> <text|md|json|csv> [<run_id>]: what the sweep
 # recorded in <results_dir>/sweep-outcome.txt (sweep_outcome --record), for a report
 # re-generated after the sweep (X3). text and md name the record's run and exit, then its
-# failed cells (FAILED_BY, Y5) and every PROBLEM, NOTE and STOP_REASON line (nothing when
-# the file is absent or records none of them); csv prints them as `# SWEEP_OUTCOME_<KEY>=`
-# comment lines (Y9; nothing without the file); json prints {"exit":N,"run_id":"...",
-# "failed":N,"failed_by":"...","problems":[...],"notes":[...],"stop_reason":"..."}, or null
+# failed cells (FAILED_BY, Y5) and every PROBLEM, NOTE, INFO (as note:, K6) and STOP_REASON
+# line (nothing when the file is absent or records none of them); csv prints them as
+# `# SWEEP_OUTCOME_<KEY>=` comment lines (Y9; nothing without the file); json prints
+# {"exit":N,"run_id":"...","failed":N,"failed_by":"...","problems":[...],"notes":[...],
+# "info":[...],"stop_reason":"..."}, or null
 # without the file. <run_id> is the report's run, compared with the record's RUN_ID (Y9). By
 # default (one run, as config_check_multi_run counted it; nothing is compared for a pooled
 # report) the record matches when its RUN_ID is the sweep-level id of a TSV under
@@ -300,6 +302,7 @@ sweep_outcome_recorded() {
 		/^STOP_REASON=/ { stop = substr($0, 13) }
 		/^PROBLEM=/ { pr[++np] = substr($0, 9) }
 		/^NOTE=/ { nt[++nn] = substr($0, 6) }
+		/^INFO=/ { inf[++ni] = substr($0, 6) }
 		END {
 			if (rid == "") rid = "unknown"
 			if (unit == "") unit = "cells"
@@ -311,6 +314,8 @@ sweep_outcome_recorded() {
 				for (i = 1; i <= np; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(pr[i])
 				printf "],\"notes\":["
 				for (i = 1; i <= nn; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(nt[i])
+				printf "],\"info\":["
+				for (i = 1; i <= ni; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(inf[i])
 				printf "],\"stop_reason\":%s%s}\n", jstr(stop), (other == "" ? "" : ",\"report_run_id\":" jstr(other))
 				exit
 			}
@@ -319,17 +324,19 @@ sweep_outcome_recorded() {
 				if (fby != "") printf "# SWEEP_OUTCOME_FAILED_BY=%s\n", fby
 				for (i = 1; i <= np; i++) printf "# SWEEP_OUTCOME_PROBLEM=%s\n", pr[i]
 				for (i = 1; i <= nn; i++) printf "# SWEEP_OUTCOME_NOTE=%s\n", nt[i]
+				for (i = 1; i <= ni; i++) printf "# SWEEP_OUTCOME_INFO=%s\n", inf[i]
 				if (stop != "") printf "# SWEEP_OUTCOME_STOP_REASON=%s\n", stop
 				if (other != "") printf "# WARNING: sweep-outcome.txt: %s\n", ol
 				exit
 			}
-			if (np + nn + nf == 0 && stop == "" && other == "") exit
+			if (np + nn + ni + nf == 0 && stop == "" && other == "") exit
 			if (fmt == "md") {
 				printf "> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `%s`, exit %s):\n", rid, ex
 				if (other != "") printf "> - warning: %s\n", ol
 				if (nf > 0) printf "> - error: %s\n", fl
 				for (i = 1; i <= np; i++) printf "> - error: %s\n", pr[i]
 				for (i = 1; i <= nn; i++) printf "> - warning: %s\n", nt[i]
+				for (i = 1; i <= ni; i++) printf "> - note: %s\n", inf[i]
 				if (stop != "") printf "> - stopped early: %s\n", stop
 				printf "\n"
 			} else {
@@ -338,6 +345,7 @@ sweep_outcome_recorded() {
 				if (nf > 0) printf "  error: %s\n", fl
 				for (i = 1; i <= np; i++) printf "  error: %s\n", pr[i]
 				for (i = 1; i <= nn; i++) printf "  warning: %s\n", nt[i]
+				for (i = 1; i <= ni; i++) printf "  note: %s\n", inf[i]
 				if (stop != "") printf "  stopped early: %s\n", stop
 				printf "\n"
 			}
@@ -363,6 +371,8 @@ sweep_outcome_recorded() {
 #   --problem <msg>  the sweep failed although its cells ran (A6: the Istio version changed
 #                    under it); printed, recorded and counted like a failed cell
 #   --note <msg>     a caveat; printed and recorded, not a failure
+#   --info <msg>     a fact worth keeping that is not a caveat (K6: a --resume whose members
+#                    were all ready); printed on stdout as "note: <msg>." and recorded
 #   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt (C3), with RUN_ID
 #                    (--run-id) and HARNESS_SHA (the sweep's HARNESS_SHA, as its TSVs
 #                    record it, else harness_sha when preamble.sh is sourced)
@@ -370,13 +380,13 @@ sweep_outcome_recorded() {
 #   --md <file>      also append it to that markdown report, as a "Sweep outcome" section;
 #                    may be given more than once (the summary and the scale envelope, R1).
 #                    A file that does not exist is skipped.
-# A report re-generated later shows the record's PROBLEM and NOTE lines again
+# A report re-generated later shows the record's PROBLEM, NOTE and INFO lines again
 # (sweep_outcome_recorded); a sweep dir without sweep-outcome.txt is a sweep that died
 # before its end.
 # shellcheck disable=SC2329
 sweep_outcome() {
 	local rc=0 stop_rc="" stop_why="" unit=cells where="" record="" run_id_r="" cells r by_fail="" by_skip=""
-	local -a problems=() notes=() failed_r=() skipped_r=() lines=() mds_r=()
+	local -a problems=() notes=() infos=() failed_r=() skipped_r=() lines=() mds_r=()
 	while (($#)); do
 		case "$1" in
 		--stopped) stop_rc="$2"; shift 2 ;;
@@ -386,6 +396,7 @@ sweep_outcome() {
 		--where) where="$2"; shift 2 ;;
 		--problem) problems+=("$2"); shift 2 ;;
 		--note) notes+=("$2"); shift 2 ;;
+		--info) infos+=("$2"); shift 2 ;;
 		--record) record="$2"; shift 2 ;;
 		--md) mds_r+=("$2"); shift 2 ;;
 		*) break ;;
@@ -415,6 +426,7 @@ sweep_outcome() {
 	fi
 	for r in ${problems[@]+"${problems[@]}"}; do lines+=("err|error: ${r}${tail}"); done
 	for r in ${notes[@]+"${notes[@]}"}; do lines+=("err|warning: ${r}."); done
+	for r in ${infos[@]+"${infos[@]}"}; do lines+=("out|note: ${r}."); done
 	if [[ -n "$stop_rc" && ${#failed_r[@]} -eq 0 && ${#problems[@]} -eq 0 ]]; then
 		lines+=("rec|The sweep stopped early${stop_why:+ (${stop_why})}; it exits ${stop_rc}.")
 	elif [[ -n "$stop_why" ]]; then
@@ -443,6 +455,7 @@ sweep_outcome() {
 			echo "SKIPPED_BY=${by_skip}"
 			for r in ${problems[@]+"${problems[@]}"}; do echo "PROBLEM=${r}"; done
 			for r in ${notes[@]+"${notes[@]}"}; do echo "NOTE=${r}"; done
+			for r in ${infos[@]+"${infos[@]}"}; do echo "INFO=${r}"; done
 		} 2>/dev/null > "${record}/sweep-outcome.txt" \
 			|| echo "warning: could not write ${record}/sweep-outcome.txt" >&2
 	fi
