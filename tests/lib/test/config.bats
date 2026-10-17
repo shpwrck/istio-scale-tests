@@ -995,22 +995,27 @@ STUB
 	# "All 1 cells ran", and the record says TOTAL=unknown.
 	realawk="$(command -v awk)"
 	mkdir -p "$fakeawk"
-	printf '#!/bin/sh\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) echo "awk: simulated: argument list too long" >&2; exit 2 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
+	printf '#!/bin/sh\nfor a; do last="$a"; done\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) echo "awk: simulated: argument list too long reading $last" >&2; exit 2 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
 	chmod +x "${fakeawk}/awk"
 	cat "${BATS_TEST_TMPDIR}/ok.row" >> "$tsv"
 	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long; the rows are intact: --resume "
-	assert_output --partial " counts them again; exit 4."
+	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/${tsv##*/}; the rows are intact: run the same --resume again (with this sweep's flags) to count them; exit 4."
 	refute_output --partial "cells ran"
-	grep -q "^PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long; the rows are intact: --resume .* counts them again$" "$d/sweep-outcome.txt"
+	grep -qx "PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/${tsv##*/}; the rows are intact: run the same --resume again (with this sweep's flags) to count them" "$d/sweep-outcome.txt"
 	grep -qx 'TOTAL=unknown' "$d/sweep-outcome.txt"
 	grep -qx 'FAILED=unknown' "$d/sweep-outcome.txt"
+	# F1: the sweep dir (a local path) is on stderr only: never in the record, the markdown
+	# summary or the scale envelope.
+	assert_output --partial "The sweep dir to resume: "
+	! grep -qF "$BATS_TEST_TMPDIR" "$d/sweep-outcome.txt"
+	! grep -qE '(^|[ :=(])/[A-Za-z]' "$d/sweep-outcome.txt"
+	! grep -h "could not count" "$d"/*.md | grep -qF "$BATS_TEST_TMPDIR"
 	# P2: a keys file the count cannot read is that problem too, not a count of the rows only.
 	printf '#!/bin/sh\nn=$#; i=0; for a in "$@"; do i=$((i + 1)); case "$a" in keys=*) a="keys=/nonexistent/keys" ;; esac; set -- "$@" "$a"; done; shift "$n"\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
 	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: cannot read the plan cell keys file /nonexistent/keys; the rows are intact"
+	assert_output --partial "error: could not count the sweep's cells: awk: cannot read the plan cell keys file; the rows are intact"
 	refute_output --partial "cells ran"
 	# P10: a resume stopped while it counts (TERM, as an interrupt) leaves no keys file
 	# behind; P4: until a resume writes its outcome, reports show the earlier one, from
@@ -1023,7 +1028,7 @@ STUB
 	[ ! -e "$d/sweep-outcome.txt" ]
 	run bash "$CP/004-report-results.sh" --results-dir "$d"
 	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.prev.txt by run "
-	assert_output --partial "#   warning: the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt"
+	assert_output --partial "#   warning: the last --resume of this sweep has not finished (it died, or still runs; if it died, run the same --resume again): this is the outcome before it, from sweep-outcome.prev.txt"
 	assert_output --partial "#   error: could not count the sweep's cells: awk: cannot read the plan cell keys file"
 	# That problem does not stop a resume, which counts again: the valid retry ran last,
 	# so every cell ran.
@@ -1097,7 +1102,7 @@ STUB
 	done
 }
 
-@test "003 --resume refuses other members than the sweep started on, in any order (P3); groups members by revision (P7)" {
+@test "003 --resume refuses other members than the sweep started on (P3), another order or a member twice (F2); groups members by revision (P7)" {
 	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" before t1
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
 	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
@@ -1113,20 +1118,30 @@ STUB
 	# A renamed member: refused before the mesh is read, nothing written.
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-c --mesh-sizes 1 --service-counts 5
 	assert_failure 1
-	assert_output --partial "--resume: these are not the members this sweep started on (started on, not given now: ci-b; given now, not started on: ci-c; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): the new rows would not come from the same mesh. Resume with the context names it started with (in any order), or start a new sweep."
+	assert_output --partial "--resume: these are not the members this sweep started on, in its order (started on, not given now: ci-b; given now, not started on: ci-c; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): mesh size N measures the first N contexts, so the new rows would not measure what the earlier ones did. Resume with --contexts ci-a,ci-b (that order), or start a new sweep (also to add members for a larger mesh size)."
 	refute_output --partial "Istio version:"
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 1
 	assert_output --partial "(started on, not given now: ci-b; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS)"
+	# F2: the same members in another order (mesh size 1 would measure ci-b), or one of
+	# them twice: refused too, with the order to paste.
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: these are not the members this sweep started on, in its order (given in another order: ci-b,ci-a; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): mesh size N measures the first N contexts"
+	assert_output --partial "Resume with --contexts ci-a,ci-b (that order)"
+	refute_output --partial "Istio version:"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b,ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "(given twice: ci-a; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS)"
 	[ "$(cat "$tsv")" = "$before" ]
 	[ ! -e "$d/resumes.txt" ]
 	[ -e "$d/sweep-outcome.txt" ]
-	# The same members in another order pass that check; P7: two members on the same old
+	# The same members in the same order pass that check; P7: two members on the same old
 	# and new revision are one entry of the N13 refusal.
 	sed -i.bak 's/^# ISTIO_ACTIVE_REVISIONS=.*/# ISTIO_ACTIVE_REVISIONS=ci-a=default-v1-30-5,ci-b=default-v1-30-5/' "$tsv" && rm -f "${tsv}.bak"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
 	assert_failure 1
-	assert_output --partial "(ci-b, ci-a: default-v1-30-5 when the sweep started, default now; activeRevisionName of their Istio CR)"
+	assert_output --partial "(ci-a, ci-b: default-v1-30-5 when the sweep started, default now; activeRevisionName of their Istio CR)"
 	refute_output --partial "not the members this sweep started on"
 	# ISTIO_VERSION_BY_CONTEXT lists them when ISTIO_ACTIVE_REVISIONS is absent.
 	sed -i.bak '/^# ISTIO_ACTIVE_REVISIONS=/d' "$tsv" && rm -f "${tsv}.bak"

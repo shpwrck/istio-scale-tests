@@ -257,16 +257,17 @@ _istio_version_errline() {
 
 # _istio_version_hostkey <why>: N4. <why> with URLs, the host after "lookup", the server of
 # "The connection to the server <host>:<port> was refused", IPv4 and IPv6 ([addr]) addresses
-# (with a port) and the context name kubectl does not find (P6) masked, as a grouping key:
-# members whose reads fail the same way on their own API hosts group into one entry. Never
-# printed.
+# (with a port) and the context name kubectl does not find (P6, F5: each of its messages)
+# masked, as a grouping key: members whose reads fail the same way on their own API hosts
+# group into one entry. Never printed.
 _istio_version_hostkey() {
 	sed -E -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^ "]*#<url>#g' -e 's#lookup [^ :]+#lookup <host>#g' \
 		-e 's#the server [^ ]+ was refused#the server <host> was refused#g' \
 		-e 's#\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\](:[0-9]+)?#<ip>#g' \
 		-e 's#(^|[^0-9.])[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?#\1<ip>#g' \
 		-e 's#context "[^"]*" does not exist#context "<ctx>" does not exist#g' \
-		-e 's#no context exists with the name: "[^"]*"#no context exists with the name: "<ctx>"#g' <<<"$1"
+		-e 's#no context exists with the name: "[^"]*"#no context exists with the name: "<ctx>"#g' \
+		-e 's#context was not found for specified context: [^ ]+#context was not found for specified context: <ctx>#g' <<<"$1"
 }
 
 # istio_live_version <ctx> <kubectl_argv...>: the Istio version a mesh member RUNS, as
@@ -623,7 +624,8 @@ istio_version_resolve() {
 		ivr_line="ISTIO_VERSION_CHECK=warn"
 		((nostop == 0)) || ivr_line="a read-only check never stops on this"
 		if [[ -n "$resumed" ]]; then
-			# P8: a --resume stops next on an unknown version, whatever the policy.
+			# P8: 003 refuses a --resume on an unknown version, whatever the policy, when its
+			# TSV records ISTIO_VERSION (every TSV this harness writes does), so no "Going on".
 			echo "warning: ${ivr_why}." >&2
 		else
 			echo "warning: ${ivr_why}."$'\n'"Going on (${ivr_line}): the results record ISTIO_VERSION=unknown (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
@@ -999,7 +1001,8 @@ _istio_version_resolve_live() {
 		why="ISTIO_VERSION_CHECK=warn"
 		((nostop == 0)) || why="a read-only check never stops on this"
 		case "${resumed:+r}/${live#mixed:}/" in
-		# P8: a --resume stops next on an unknown version, whatever the policy.
+		# P8: 003 refuses a --resume on an unknown version, whatever the policy, when its TSV
+		# records ISTIO_VERSION (every TSV this harness writes does), so no "Going on".
 		r/*/unknown/* | r/unknown/*) echo "warning: ${problem}${fix}" >&2 ;;
 		*) echo "warning: ${problem}${fix}"$'\n'"Going on (${why}): the results record ISTIO_VERSION=${live} (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2 ;;
 		esac

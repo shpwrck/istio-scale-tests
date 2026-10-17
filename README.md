@@ -141,11 +141,11 @@ be read; `unchecked` in a `--dry-run`, `unknown` after a version check that stop
 and, in a report, for a TSV written before the key existed; a controlplane `--resume` refuses a
 member whose active revision changed since the sweep started), and the members still not ready
 after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a
-sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready),
-`<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod
-rollout still in progress), `<ctx>=unreadable` (a rollout at the first read, then every re-read
-failed), `unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or, in a
-report, `unknown` (a TSV written before the key existed). A controlplane `--resume` keeps the
+sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was
+ready), `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an
+istiod rollout still in progress), `<ctx>=unreadable` (a rollout at the first read, then every
+re-read failed), `unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or, in
+a report, `unknown` (a TSV written before the key existed). A controlplane `--resume` keeps the
 first run's value in the TSV, and records its own, with its UTC start time, in a note of the sweep
 outcome (`ISTIO_NOTREADY_AT_RESUME=...`) and in the sweep dir's append-only `resumes.txt`, one
 line per resume. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than

@@ -128,7 +128,9 @@ every format but charts repeats it, with the run that recorded it: the failed ce
 reason, its problems (the Istio version or active revision changed under the sweep) and
 notes (members not ready at its start or end, the Istio version unconfirmed at the end,
 or a --resume's own readiness and harness change); a sweep dir without it is a sweep
-that died before its end.
+that died before its end. With only sweep-outcome.prev.txt there (a --resume moved the
+record and has not written its own: it died, or still runs), every format shows that
+one after a warning (json: "resume_unfinished": true).
 
 Environment:
   CONTROLPLANE_RESULTS_DIR      --results-dir default (relative to the repo root).

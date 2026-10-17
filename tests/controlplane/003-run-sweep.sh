@@ -234,12 +234,14 @@ Other:
                               file (same sha256; add --config
                               <DIR>/run-config-<RUN_ID>.env); one started without
                               it warns when --config is given. --contexts must
-                              name the members the sweep started on (in any
-                              order), the mesh must run the ISTIO_VERSION the
-                              sweep recorded, and each member the active revision
-                              it recorded (ISTIO_ACTIVE_REVISIONS), under either
+                              name the members the sweep started on, in the same
+                              order (mesh size N measures the first N), the mesh
+                              must run the ISTIO_VERSION the sweep recorded, and
+                              each member the active revision it recorded
+                              (ISTIO_ACTIVE_REVISIONS), under either
                               ISTIO_VERSION_CHECK policy; otherwise start a new
-                              sweep. Nor is a sweep resumed whose
+                              sweep (also to add members for a larger mesh
+                              size). Nor is a sweep resumed whose
                               sweep-outcome.txt (or .prev.txt) records a
                               PROBLEM (the version or active revision changed
                               under it, or the end-of-sweep version check
@@ -1310,9 +1312,11 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 		_resume_problem="$(awk -v c="PROBLEM=could not count the sweep's " '/^PROBLEM=/ && index($0, c) != 1 { print substr($0, 9); exit }' "${OUTPUT_DIR}/${_resume_rec}")"
 		[[ -z "$_resume_problem" ]] || die "--resume: this sweep's ${_resume_rec} records a problem (${_resume_problem}), so no later run can vouch for its rows, and a resume would write an outcome without it. Start a new sweep."
 	done
-	# P3: nor on other members than it started on (in any order): a renamed or other context
-	# would be compared with nothing below, and its rows would join another mesh's. The
-	# preamble lists them in ISTIO_ACTIVE_REVISIONS, else ISTIO_VERSION_BY_CONTEXT.
+	# P3: nor on other members than it started on: a renamed or other context would be
+	# compared with nothing below, and its rows would join another mesh's. F2: nor in another
+	# order, or with a member twice: mesh size N measures the first N contexts, and the first
+	# carries the capacity reads. The preamble lists them, in the first run's order, in
+	# ISTIO_ACTIVE_REVISIONS, else ISTIO_VERSION_BY_CONTEXT; the refusal prints that order.
 	_resume_set="$(awk -v a="# ISTIO_ACTIVE_REVISIONS=" -v b="# ISTIO_VERSION_BY_CONTEXT=" '
 		/^timestamp\t/ { exit }
 		index($0, a) == 1 { r = substr($0, length(a) + 1) }
@@ -1322,15 +1326,23 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	if [[ -n "$_resume_set" ]]; then
 		_resume_setdiff="$(awk -v s="${_resume_set#*$'\t'}" -v now="$(IFS=,; echo "${CONTEXTS[*]}")" 'BEGIN {
 			n = split(s, p, ",")
-			for (i = 1; i <= n; i++) if (match(p[i], /=[^=]*$/)) { c = substr(p[i], 1, RSTART - 1); was[c] = 1; wo[++nw] = c }
-			n = split(now, p, ",")
-			for (i = 1; i <= n; i++) { is[p[i]] = 1; if (!(p[i] in was)) add = add (add == "" ? "" : ", ") p[i] }
+			for (i = 1; i <= n; i++) if (match(p[i], /=[^=]*$/)) {
+				c = substr(p[i], 1, RSTART - 1); was[c] = 1; wo[++nw] = c; rec = rec (rec == "" ? "" : ",") c
+			}
+			m = split(now, q, ",")
+			for (i = 1; i <= m; i++) {
+				if (q[i] in is) dup = dup (dup == "" ? "" : ", ") q[i]
+				is[q[i]] = 1
+				if (!(q[i] in was)) add = add (add == "" ? "" : ", ") q[i]
+			}
 			for (i = 1; i <= nw; i++) if (!(wo[i] in is)) miss = miss (miss == "" ? "" : ", ") wo[i]
 			if (miss != "") out = "started on, not given now: " miss
 			if (add != "") out = out (out == "" ? "" : "; ") "given now, not started on: " add
-			print out
+			if (dup != "") out = out (out == "" ? "" : "; ") "given twice: " dup
+			if (out == "") for (i = 1; i <= nw; i++) if (wo[i] != q[i]) { out = "given in another order: " now; break }
+			if (out != "") print out "\037" rec
 		}')"
-		[[ -z "$_resume_setdiff" ]] || die "--resume: these are not the members this sweep started on (${_resume_setdiff}; its TSV preamble lists them in ${_resume_set%%$'\t'*}): the new rows would not come from the same mesh. Resume with the context names it started with (in any order), or start a new sweep."
+		[[ -z "$_resume_setdiff" ]] || die "--resume: these are not the members this sweep started on, in its order (${_resume_setdiff%%$'\037'*}; its TSV preamble lists them in ${_resume_set%%$'\t'*}): mesh size N measures the first N contexts, so the new rows would not measure what the earlier ones did. Resume with --contexts ${_resume_setdiff#*$'\037'} (that order), or start a new sweep (also to add members for a larger mesh size)."
 	else
 		echo "warning: --resume: this sweep's TSV records neither ISTIO_ACTIVE_REVISIONS nor ISTIO_VERSION_BY_CONTEXT, so whether it runs on the members it started on is not checked." >&2
 		RESUME_NOTES+=(--note "this sweep's TSV records neither ISTIO_ACTIVE_REVISIONS nor ISTIO_VERSION_BY_CONTEXT, so no --resume of it (the latest at ${RESUME_AT}) could check that it ran on the members the sweep started on")
@@ -1433,8 +1445,9 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 fi
 # A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
 # that far) no longer describes the sweep, and its reports must not show it meanwhile. Y10:
-# kept as sweep-outcome.prev.txt (reports read only sweep-outcome.txt); J8: only once the
-# preflights passed, so a resume that stops in one leaves the record where it was.
+# kept as sweep-outcome.prev.txt (P4: reports show it, after a warning, only while there is
+# no sweep-outcome.txt); J8: only once the preflights passed, so a resume that stops in one
+# leaves the record where it was.
 if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN)); then
 	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
 fi
@@ -2632,7 +2645,7 @@ awk -F'\t' -v growth="$GROWTH" -v keys="${_cells_dir}/keys" -v st="$CELL_STATUS_
 			k = f[1] SUBSEP f[2] SUBSEP f[3] SUBSEP f[4] SUBSEP f[5] SUBSEP f[6] SUBSEP f[7]
 			if (!(k in cell)) { cell[k] = 1; ncell++ }
 		}
-		if (r < 0) { print "awk: cannot read the plan cell keys file " keys > "/dev/stderr"; bad = 1; exit 2 }
+		if (r < 0) { print "awk: cannot read the plan cell keys file" > "/dev/stderr"; bad = 1; exit 2 }
 		close(keys)
 	}
 	/^timestamp\t/ { tcol = 0; wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") tcol = i; if ($i == "window_kind") wcol = i }; next }
@@ -2655,7 +2668,11 @@ awk -F'\t' -v growth="$GROWTH" -v keys="${_cells_dir}/keys" -v st="$CELL_STATUS_
 		print "PARTWAY\t" npw + 0
 	}' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" > "${_cells_dir}/out" 2> "${_cells_dir}/err" || _cells_rc=$?
 mapfile -t CELL_RESULT < "${_cells_dir}/out"
-_cells_why="$(head -n 1 "${_cells_dir}/err" | cut -c 1-200)"
+# F1: the why goes into the record: no local path in it (the temp dir, the sweep dir).
+_cells_why="$(head -n 1 "${_cells_dir}/err")"
+_cells_why="${_cells_why//"$_cells_dir"/<tmp>}"
+_cells_why="${_cells_why//"$OUTPUT_DIR"/<sweep dir>}"
+_cells_why="${_cells_why:0:200}"
 rm -rf "$_cells_dir"
 _cells_dir=""
 FAILED_CELLS=() CELL_COUNT_ARGS=()
@@ -2676,8 +2693,9 @@ if ((_cells_rc == 0)) && is_nonneg_int "$_cells_seen"; then
 	fi
 else
 	FAILED_CELLS=() CELLS_TOTAL="$MATRIX_SIZE"
-	# P8: the next step: the rows are intact, and a --resume counts them again.
-	CELL_COUNT_ARGS=(--uncounted "${_cells_why:-awk exited ${_cells_rc} with no count}; the rows are intact: --resume ${OUTPUT_DIR} counts them again")
+	# P8: the next step: the rows are intact, and a --resume counts them again. F1: the sweep
+	# dir (a local path) goes to stderr only, below, never into the record.
+	CELL_COUNT_ARGS=(--uncounted "${_cells_why:-awk exited ${_cells_rc} with no count}; the rows are intact: run the same --resume again (with this sweep's flags) to count them")
 fi
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
@@ -2688,6 +2706,7 @@ sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${CELL_COUNT_ARGS[@]+"${CELL_COU
 	--md "$MD_FILE" --md "$ENVELOPE_FILE" \
 	--where "$_cells_where" \
 	"$CELLS_TOTAL" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+((${#CELL_COUNT_ARGS[@]} == 0)) || echo "The sweep dir to resume: ${OUTPUT_DIR} (--resume it with the flags this sweep ran with)." >&2
 if [[ -n "$SWEEP_STOPPED" ]]; then
 	echo "" >&2
 	echo "ERROR: the sweep stopped early: ${SWEEP_STOPPED} (RETIRE_FAILED row in the report). The cells above it are valid; later series did not run." >&2

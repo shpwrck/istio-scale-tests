@@ -10,6 +10,11 @@ Start from [`TEMPLATE.md`](TEMPLATE.md) and lead with the **Scale envelope**: to
 endpoints, per-proxy config size, and control-plane headroom (istiod % of limit, node CPU). A
 cluster count alone is not a scale. The controlplane sweep generates the envelope block for you.
 
+Redact before you paste: the envelope, `sweep-outcome.txt` and the reports can name your kube
+contexts, and a note about a member that could not be read quotes kubectl's error, which can
+name its API host. Replace them with placeholders (`<mesh-a-ctx>`, `<api-host>`), as
+[AGENTS.md](../../AGENTS.md) requires for anything committed.
+
 ## Records
 
 | Date | Run | Files |

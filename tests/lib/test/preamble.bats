@@ -1270,6 +1270,7 @@ _iv_hostdep() {
 		refused) echo "The connection to the server api.${ctx}.example:6443 was refused - did you specify the right host or port?" >&2 ;;
 		ip6) echo "Unable to connect to the server: dial tcp [2001:db8::${#ctx}]:6443: connect: connection refused" >&2 ;;
 		ctx) echo "error: context \"${ctx}\" does not exist" >&2 ;;
+		ctx2) echo "error: Error in configuration: context was not found for specified context: ${ctx}" >&2 ;;
 		long) printf 'E1017 10:00:00.000000   %d memcache.go:265] "Unhandled Error" err="Get \\"https://api.%s.example:6443/api?timeout=32s\\": dial tcp: lookup api.%s.example on 192.0.2.53:53: no such host" logger="UnhandledError" %s\n' \
 			"$$" "$ctx" "$ctx" "$(printf 'tail%.0s' {1..40})" >&2 ;;
 		*) echo "Unable to connect to the server: dial tcp: lookup api.${ctx}.example: no such host" >&2 ;;
@@ -1329,7 +1330,7 @@ _iv_hostdep() {
 
 @test "P6: refused, IPv6, missing-context and long klog errors group across members whose names differ in length" {
 	local mode
-	for mode in refused ip6 ctx long; do
+	for mode in refused ip6 ctx ctx2 long; do
 		(
 			unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
 			export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_bbbb=v1.30.5 IV_cccccccccccccccc=v1.30.5 HOSTDEP="$mode"

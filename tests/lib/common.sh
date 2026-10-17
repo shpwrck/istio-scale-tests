@@ -316,7 +316,7 @@ sweep_outcome_recorded() {
 			nf = (failed ~ /^[0-9]+$/) ? failed + 0 : 0
 			fl = sprintf("%d of %s %s failed: %s", nf, total, unit, fby)
 			ol = "the record is from run " rid ", not from the run this report reads (" other ")"
-			ul = "the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt"
+			ul = "the last --resume of this sweep has not finished (it died, or still runs; if it died, run the same --resume again): this is the outcome before it, from sweep-outcome.prev.txt"
 			if (fmt == "json") {
 				printf "{\"exit\":%s,\"run_id\":%s,\"failed\":%s,\"failed_by\":%s,\"problems\":[", (ex ~ /^[0-9]+$/ ? ex : "null"), jstr(rid), (failed ~ /^[0-9]+$/ ? failed : "null"), jstr(fby)
 				for (i = 1; i <= np; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(pr[i])
