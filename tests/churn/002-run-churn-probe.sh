@@ -215,7 +215,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
@@ -929,31 +929,46 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	fi
 
 	# Control-plane-only EDS-push convergence (max across remotes; mirrors the
-	# conv_remote aggregation). A poller that never completed a clean scrape emits
-	# INCOMPLETE (treated as TIMEOUT). No dirty cross-check: churn has no clean
-	# registry-delta denominator (R2-1/PL31).
+	# conv_remote aggregation). No dirty cross-check: churn has no clean registry-delta
+	# denominator (R2-1/PL31). A poller that never completed a clean scrape (INCOMPLETE)
+	# measured nothing, so it is not a timeout (B3): with no remote timed out, the column
+	# is N/A and the row SCRAPE_INCOMPLETE_REMOTE_EDS. A remote that did time out (clean
+	# scrapes, no push) still makes the row TIMEOUT_REMOTE_EDS.
 	conv_remote_eds="N/A"
+	eds_incomplete=0
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_eds=0
 		eds_ok=1
 		for i in "${!REMOTES[@]}"; do
 			ev=$(<"${REMOTE_EDS_FILES[i]}")
-			# Treat TIMEOUT/INCOMPLETE/empty AND any non-integer crossing-ns (a
-			# truncated/garbled result file) as TIMEOUT, so the arithmetic below can
-			# never raise a syntax error that aborts the probe under `set -e`.
-			if [[ "$ev" == "TIMEOUT" || "$ev" == "INCOMPLETE" || ! "$ev" =~ ^[0-9]+$ ]]; then
+			# Treat TIMEOUT/empty AND any non-integer crossing-ns (a truncated/garbled
+			# result file) as TIMEOUT, so the arithmetic below can never raise a syntax
+			# error that aborts the probe under `set -e`.
+			if [[ "$ev" == "INCOMPLETE" ]]; then
+				e="INCOMPLETE"
+			elif [[ "$ev" == "TIMEOUT" || ! "$ev" =~ ^[0-9]+$ ]]; then
 				e="TIMEOUT"
 			else
 				e=$(( (ev - T0) / 1000000 ))
 			fi
-			echo "  Convergence (remote ${REMOTES[i]}, EDS push): ${e}ms"
+			if [[ "$e" == "INCOMPLETE" ]]; then
+				echo "  Convergence (remote ${REMOTES[i]}, EDS push): not measured (no complete scrape of its istiod)"
+			else
+				echo "  Convergence (remote ${REMOTES[i]}, EDS push): ${e}ms"
+			fi
 			if [[ "$e" == "TIMEOUT" ]]; then
 				eds_ok=0
+			elif [[ "$e" == "INCOMPLETE" ]]; then
+				eds_incomplete=1
 			elif ((e > max_eds)); then
 				max_eds="$e"
 			fi
 		done
-		if ((eds_ok)); then conv_remote_eds="$max_eds"; else conv_remote_eds="TIMEOUT"; fi
+		if ((!eds_ok)); then
+			conv_remote_eds="TIMEOUT"
+		elif ((!eds_incomplete)); then
+			conv_remote_eds="$max_eds"
+		fi
 	fi
 
 	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
@@ -1114,6 +1129,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# the row so the report (004) filters it from numeric aggregation.
 	if [[ "$status" == "OK" && "$ITER_SCRAPE_INCOMPLETE" == "1" ]]; then
 		status="SCRAPE_INCOMPLETE"
+	fi
+	# B3: a remote EDS poller that never completed a scrape measured nothing: its own
+	# status, counted in n_total and not in n_valid, never a TIMEOUT_REMOTE_EDS.
+	if [[ "$status" == "OK" && "$eds_incomplete" == 1 && "$conv_remote_eds" == "N/A" ]]; then
+		status="SCRAPE_INCOMPLETE_REMOTE_EDS"
 	fi
 	# R12: an OK row has a number in every measured column, so the report's n_valid
 	# counts the same rows for every average (PL15). The remote EDS push that never

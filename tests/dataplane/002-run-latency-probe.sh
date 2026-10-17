@@ -265,7 +265,7 @@ command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 QPS_ARR=()
@@ -288,7 +288,9 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-HARNESS_SHA=$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo "unknown")
+# A6: harness_sha (tests/lib/preamble.sh), as every sweep records it: a tree with
+# uncommitted changes reads <describe>-dirty.<8hex>.
+HARNESS_SHA="$(harness_sha)"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then

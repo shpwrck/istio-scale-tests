@@ -1280,9 +1280,10 @@ render_sha() {
 @test "gateway-api run: a chart synced from this script's own commit is 'same', or 'same-dirty' from a modified tree" {
 	local head expect
 	head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || skip "not a git checkout"
-	case "$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null)" in
-	"") skip "git describe does not work here" ;;
-	*-dirty) expect=same-dirty ;;
+	# A6: as the script reads it (harness_sha: a dirty tree is <describe>-dirty.<8hex>).
+	case "$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" in
+	"" | unknown) skip "git describe does not work here" ;;
+	*-dirty*) expect=same-dirty ;;
 	*) expect=same ;;
 	esac
 	STUB_REVISION="$head" gw_run --hub-context hub

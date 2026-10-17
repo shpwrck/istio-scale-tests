@@ -380,9 +380,9 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -394,7 +394,8 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
+# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
+HARNESS_SHA="$(harness_sha)"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
@@ -1050,6 +1051,12 @@ scrape_all_parallel() {
 		local m_out="${out_prefix}-${k}.metrics"
 		local t_out="${out_prefix}-${k}.ts"
 		local te_out="${out_prefix}-${k}.tsend"
+		# Empty this scrape's files first: a failed curl writes nothing, so in watch mode
+		# the previous window's body and timestamps would otherwise stand in for it (stale
+		# gauges, a backwards counter read as a reset). An empty file reads as no scrape.
+		: > "$m_out"
+		: > "$t_out"
+		: > "$te_out"
 		(
 			scrape_one_context "${POD_CTXS[k]}" "$port" "$m_out" "$t_out" "$te_out" || exit 1
 		) &
@@ -1673,6 +1680,9 @@ if ((WATCH)); then
 		SIDECAR_PODS=()
 		PROXY_CHECK=()
 		GROWTH_CTX_CACHE=()
+		# The polled peaks are this window's too: without this, istiod_mem_mi and the
+		# peak CPU keep the highest value of every earlier window.
+		rm -f "${TMP_DIR}"/peak-mem-*.val "${TMP_DIR}"/peak-cpu-*.val "${TMP_DIR}"/prev-cpu-*.val
 		scrape_window "$INTERVAL"
 	done
 elif [[ "$PHASE" == baseline ]]; then

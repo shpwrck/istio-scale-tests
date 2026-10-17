@@ -16,13 +16,14 @@
 #   ./tests/propagation/006-run-sweep.sh --config tests/propagation/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
-# Loud ERR trap for unexpected aborts; per-step failures are handled below.
-# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
-trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# Loud ERR trap for unexpected aborts; per-step failures are handled below.
+# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
 # --config FILE: export the file's keys before versions.env/options.env fill in defaults.
@@ -33,6 +34,8 @@ config_preload propagation "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/propagation.sh"  # PROP_TSV_HEADER, prop_placeholder_row (PL36)
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV="${PROPAGATION_MESH_SIZES:-}"
@@ -89,11 +92,16 @@ Environment:
 Exit codes:
   0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
      counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition, or an unexpected error
+  1  the sweep stopped: a bad flag or precondition, or an unexpected error; after its
+     start, sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
+     CUT_SHORT=1)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
      version or active revision changed during the sweep (read again at its end); the
      outcome is also in sweep-outcome.txt and sweep-summary.md
+  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to
+     the sweep's process alone waits for its current command (signal its process group)
 EOF
 }
 
@@ -169,9 +177,9 @@ done
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -260,9 +268,11 @@ emit_propagation_placeholder() {
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		config_preamble_lines
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
-		echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms"
-		# One degraded row: status sentinel, restarted=unknown, numerics N/A.
-		echo -e "${SWEEP_RUN_ID}-failms${ms}\t${ms}\t0\t${sctx}\tN/A\tN/A\tN/A\tN/A\tN/A\t${status}\tN/A\tN/A\tN/A\tN/A\tN/A\tunknown\t0\tN/A\tN/A"
+		# The schema 002 writes (PL36: one header, tests/lib/propagation.sh).
+		printf '%s\n' "$PROP_TSV_HEADER"
+		# One degraded row: the status in status, p1_status and remote_status,
+		# restarted=unknown, numerics N/A.
+		prop_placeholder_row "${SWEEP_RUN_ID}-failms${ms}" "$ms" "$sctx" "$status"
 	} > "$f"
 }
 
@@ -330,15 +340,23 @@ if ((DRY_RUN)); then
 	exit 0
 fi
 
-mkdir -p "$SWEEP_DIR"
-config_snapshot "$SWEEP_DIR" "$SWEEP_RUN_ID"
-
 sweep_cleanup() {
 	echo ""
 	echo "--- Final cleanup: all contexts ---"
 	"$SCRIPT_DIR/007-cleanup.sh" --contexts "$(IFS=,; echo "${CONTEXTS[*]}")" || true
 }
-trap sweep_cleanup EXIT
+# I5: the cleanup first, then a sweep that ends before its outcome (die, an unexpected
+# abort, Ctrl-C) says how in that record: stopped with its reason, or interrupted. Set
+# before sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
+_sweep_rc=0 # the trap's own $?, kept before its first step changes it
+trap '_sweep_rc=$?; sweep_cleanup || true; sweep_outcome_on_exit "$_sweep_rc" || true' EXIT
+
+mkdir -p "$SWEEP_DIR"
+config_snapshot "$SWEEP_DIR" "$SWEEP_RUN_ID"
+# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+# so the reports of a sweep that died say so.
+sweep_outcome_start "$SWEEP_DIR" "$SWEEP_RUN_ID" --next "if it died, run 007-cleanup.sh on its contexts, then the sweep again into a new dir (a propagation sweep has no --resume); the rows in this dir cover only the mesh sizes it finished"
+
 
 echo "=========================================="
 echo "  Propagation Latency Sweep"
@@ -417,6 +435,9 @@ echo ""
 # A6: the Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
+# A3: the outcome is written after the reports: they say so (the markdown gets a line
+# that sweep_outcome --md replaces).
+export _SWEEP_OUTCOME_PENDING=1
 echo "Generating aggregated report..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
 echo ""
@@ -429,8 +450,9 @@ CHARTS_FILE="${SWEEP_DIR}/sweep-charts.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# Final cleanup now, so the outcome below is the last thing the sweep prints.
-trap - EXIT
+# Final cleanup now, so the outcome below is the last thing the sweep prints (the EXIT
+# trap keeps only the I5 record, for a stop between here and the outcome).
+trap 'sweep_outcome_on_exit "$?" || true' EXIT
 sweep_cleanup
 
 # R19: the reports are written; now say how many cells failed and exit non-zero if any

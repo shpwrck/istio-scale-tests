@@ -233,8 +233,10 @@ p1rows() {
 		| awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 2 || $3 == 5 || $3 == 9 { $15 = 1 } 1'; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
+	# A source overflow is a P1 histogram: it never drops the remote's P2/P3 (I6), even in
+	# this 19-column TSV, whose rows cannot otherwise be split by side.
 	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid]}] | add' <<<"$output")" = \
-		'{"P1_local_wall":[10,7],"P1_conv_p50":[10,7],"P1_conv_p99":[10,7],"P2_discovery":[30,21],"P3_dataplane":[30,21]}' ]
+		'{"P1_local_wall":[10,7],"P1_conv_p50":[10,7],"P1_conv_p99":[10,7],"P2_discovery":[30,30],"P3_dataplane":[30,30]}' ]
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_line --regexp '^4,P1_local_wall,10,7,'
 	run "$REPORT" --results-dir "$RES" --format markdown
@@ -243,14 +245,16 @@ p1rows() {
 	run "$REPORT" --results-dir "$RES"
 	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +7 \|'
 	# 002's summary over the same rows (its SUMMARY_KV program: P1 n = prop_p1_sample over
-	# the kept rows, of the distinct (run_id, iteration)): n=7/10.
+	# every row, before the row filter, of the distinct (run_id, iteration)): n=7/10; P2
+	# from the rows prop_drop_reason keeps: 30.
 	run awk -F'\t' "${PROP_ROW_AWK}"'
 		/^#/ || $1 == "run_id" { next }
 		{
 			if (!(($1 SUBSEP $3) in seen)) { seen[$1 SUBSEP $3] = 1; iters++ }
+			if (prop_p1_sample(1000)) p1++
 			if (prop_drop_reason(1000) != "") next
-			if (prop_p1_sample()) p1++
+			if (prop_p2_sample()) p2++
 		}
-		END { print p1 "/" iters }' "${RES}/endpoint-r1.tsv"
-	assert_output "7/10"
+		END { print p1 "/" iters " " p2 }' "${RES}/endpoint-r1.tsv"
+	assert_output "7/10 30"
 }

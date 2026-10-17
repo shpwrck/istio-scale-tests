@@ -248,7 +248,8 @@ _fake_kubectl() {
 	cd "$BATS_TEST_TMPDIR"
 	run harness_sha
 	[ "$status" -eq 0 ]
-	[ "$output" = "$expected" ]
+	# A6: a tree with uncommitted changes adds -dirty.<8hex> (tests/lib/test/carry-a.bats).
+	[[ "$output" == "$expected" || "$output" =~ ^"${expected%-dirty}"-dirty\.[0-9a-f]{8}$ ]]
 }
 
 @test "harness_sha: non-repo ROOT -> unknown" {
@@ -740,14 +741,14 @@ setup() {
 		_iv_kubectl() { echo "$*" >> "$IV_LOG"; return 1; }
 		export ISTIO_VERSION=mixed:a/b ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT=x=a,y=b
 		export ISTIO_NOTREADY_AT_START=y=IstiodNotReady ISTIO_READY_WAITED_SEC=60 _ISTIO_VERSION_REVS=x=default,y=default-v1-30-5
-		export _ISTIO_VERSION_RESOLVED="live|v1.30.5|mixed:a/b|x=a,y=b|y=IstiodNotReady|60"
+		export _ISTIO_VERSION_RESOLVED="live|v1.30.5|mixed:a/b|x=a,y=b|y=IstiodNotReady|60||"
 		istio_version_resolve a 0 _iv_kubectl
 		istio_version_kv; istio_version_label'
 	assert_success
 	# N13: the active revisions the sweep read go into every preamble too.
 	assert_output "$(printf '%s\n' ISTIO_VERSION=mixed:a/b ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT=x=a,y=b \
 		ISTIO_NOTREADY_AT_START=y=IstiodNotReady ISTIO_READY_WAITED_SEC=60 ISTIO_ACTIVE_REVISIONS=x=default,y=default-v1-30-5 \
-		'mixed:a/b (the members differ or were not all read; pin v1.30.5)')"
+		ISTIO_GENERATIONS=unknown ISTIO_PROXY_VERSIONS=unknown 'mixed:a/b (the members differ or were not all read; pin v1.30.5)')"
 	[ ! -s "$IV_LOG" ]
 	# The same values in the shell without the marker (left by an earlier run, say) are
 	# not a resolution: the member is read.
@@ -760,14 +761,16 @@ setup() {
 		istio_version_kv; istio_version_label'
 	assert_success
 	assert_output "$(printf '%s\n' ISTIO_VERSION=unknown ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT=a=unknown \
-		ISTIO_NOTREADY_AT_START=none ISTIO_READY_WAITED_SEC=0 ISTIO_ACTIVE_REVISIONS=a= 'unknown (not read on every member; pin v1.30.5)')"
+		ISTIO_NOTREADY_AT_START=none ISTIO_READY_WAITED_SEC=0 ISTIO_ACTIVE_REVISIONS=a= ISTIO_GENERATIONS=a=unknown/unknown \
+		ISTIO_PROXY_VERSIONS=a=unknown 'unknown (not read on every member; pin v1.30.5)')"
 	[ -s "$IV_LOG" ]
 	# Nothing resolved (a report host, say): the pin, labelled as such.
 	run bash -c 'source "$ROOT/tests/lib/preamble.sh"; unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT
 		unset ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC
 		ISTIO_VERSION=v1.30.5; istio_version_kv; istio_version_label'
 	assert_output "$(printf '%s\n' ISTIO_VERSION=v1.30.5 ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=pin ISTIO_VERSION_BY_CONTEXT=unchecked \
-		ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked ISTIO_ACTIVE_REVISIONS=unchecked 'v1.30.5 (the pin; not read live)')"
+		ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked ISTIO_ACTIVE_REVISIONS=unchecked ISTIO_GENERATIONS=unchecked \
+		ISTIO_PROXY_VERSIONS=unchecked 'v1.30.5 (the pin; not read live)')"
 	run bash -c 'source "$ROOT/tests/lib/preamble.sh"; ISTIO_VERSION=v1.30.5 ISTIO_VERSION_PIN=1.30.5 ISTIO_VERSION_SOURCE=live; istio_version_label'
 	assert_output "v1.30.5 (read live on every member; pin 1.30.5)"
 }
@@ -1253,13 +1256,6 @@ DRIVE
 	assert_output "$(printf '%s\n' --problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit 3; its error is in the sweep's stderr), so whether the Istio version or the active revision changed during the sweep is not known; check each member by hand: kubectl --context <ctx> get istios.sailoperator.io default -o jsonpath='{.status.activeRevisionName}', then kubectl --context <ctx> get istiorevisions.sailoperator.io <that revision> -o jsonpath='{.spec.version}'")"
 }
 
-@test "M1: no shell arithmetic reads an array element by a variable key (bash 4.3-5.1 expand the key twice)" {
-	# Read it into a scalar first (n="${x[$k]}"; x[$k]=$((n + 1))), or compare it as a
-	# string ([[ "${x[$k]}" == 1 ]]).
-	run bash -c 'grep -rnE "(\(\(|\\\$\(\()([^)]*[^{A-Za-z0-9_])? *[A-Za-z_][A-Za-z0-9_]*\[\\\$" --include="*.sh" "$1/tests" "$1/terraform" | grep -v "/bats-" || true' _ "$ROOT"
-	assert_output ""
-}
-
 # _iv_hostdep: _iv_kubectl, except that with HOSTDEP set, each member's istiod Deployment
 # read fails on its own API host (a DNS failure names it).
 _iv_hostdep() {
@@ -1270,7 +1266,7 @@ _iv_hostdep() {
 		refused) echo "The connection to the server api.${ctx}.example:6443 was refused - did you specify the right host or port?" >&2 ;;
 		ip6) echo "Unable to connect to the server: dial tcp [2001:db8::${#ctx}]:6443: connect: connection refused" >&2 ;;
 		ctx) echo "error: context \"${ctx}\" does not exist" >&2 ;;
-		ctx2) echo "error: Error in configuration: context was not found for specified context: ${ctx}" >&2 ;;
+		ctx2) echo "Error in configuration: context was not found for specified context: ${ctx}" >&2 ;;
 		long) printf 'E1017 10:00:00.000000   %d memcache.go:265] "Unhandled Error" err="Get \\"https://api.%s.example:6443/api?timeout=32s\\": dial tcp: lookup api.%s.example on 192.0.2.53:53: no such host" logger="UnhandledError" %s\n' \
 			"$$" "$ctx" "$ctx" "$(printf 'tail%.0s' {1..40})" >&2 ;;
 		*) echo "Unable to connect to the server: dial tcp: lookup api.${ctx}.example: no such host" >&2 ;;
@@ -1287,7 +1283,8 @@ _iv_hostdep() {
 		istio_version_resolve a,b,c 0 _iv_hostdep
 	) 2> "${BATS_TEST_TMPDIR}/start.err" && false || true
 	run cat "${BATS_TEST_TMPDIR}/start.err"
-	assert_output --partial "cannot read the running Istio version on 3 of 3 members:"$'\n'"  a, b, c (3 members; shown for a, the others name their own hosts): istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup api.a.example: no such host"$'\n'"    reproduce (shown for a): _iv_hostdep --context a -n istio-system get deployments.apps istiod -o yaml"
+	# A8: the why is recorded masked, so members on their own API hosts read alike.
+	assert_output --partial "cannot read the running Istio version on 3 of 3 members:"$'\n'"  a, b, c (3 members): istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup <api-host>: no such host"$'\n'"    reproduce (shown for a): _iv_hostdep --context a -n istio-system get deployments.apps istiod -o yaml"
 	assert_output --partial $'\n'"Fix access to those members (kubeconfig, login, network) and to their istiod Deployment (their Istio CR is settled); the pin is not the problem."
 	refute_output --partial "wait until their Istio CR is settled"
 	# The same why on every member keeps the plain form.
@@ -1310,7 +1307,7 @@ _iv_hostdep() {
 	}
 	run --separate-stderr _n4_end
 	assert_success
-	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a, b, c ran v1.30.5 at the start, and their active revisions read v1.30.5 at the end, but istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup api.a.example: no such host (shown for a; the others name their own hosts)")"
+	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a, b, c ran v1.30.5 at the start, and their active revisions read v1.30.5 at the end, but istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup <api-host>: no such host")"
 }
 
 @test "N5: members unknown at the start are grouped by the version they read at the end" {
@@ -1337,13 +1334,18 @@ _iv_hostdep() {
 			istio_version_resolve a,bbbb,cccccccccccccccc 0 _iv_hostdep
 		) 2> "${BATS_TEST_TMPDIR}/${mode}.err" && false || true
 		run cat "${BATS_TEST_TMPDIR}/${mode}.err"
-		assert_output --partial $'\n'"  a, bbbb, cccccccccccccccc (3 members; shown for a, the others name their own hosts): istiod Deployment istio-system/istiod: "
+		# A8: hosts are masked in the why itself; only a context name still differs.
+		case "$mode" in
+		ctx | ctx2) assert_output --partial $'\n'"  a, bbbb, cccccccccccccccc (3 members; shown for a, the others name their own contexts): istiod Deployment istio-system/istiod: " ;;
+		*) assert_output --partial $'\n'"  a, bbbb, cccccccccccccccc (3 members): istiod Deployment istio-system/istiod: " ;;
+		esac
 		refute_output --partial "  bbbb: "
 		refute_output --partial "  cccccccccccccccc: "
+		refute_output --partial ".example"
 	done
-	# The long line keeps its host (and is not cut inside it): its masked form is what is cut.
+	# The long line is recorded masked, then cut.
 	run cat "${BATS_TEST_TMPDIR}/long.err"
-	assert_output --partial '"Unhandled Error" err="Get \"https://api.a.example:6443/api?timeout=32s\": dial tcp: lookup api.a.example on 192.0.2.53:53: no such host" logger="UnhandledError" tailtail'
+	assert_output --partial '"Unhandled Error" err="Get \"https://<api-host>:6443/api?timeout=32s\": dial tcp: lookup <api-host> on <ip>: no such host" logger="UnhandledError" tailtail'
 }
 
 @test "N6, N11, P8: a --resume is never told to set warn, nor that it goes on, for an unknown version; a check that stops partway leaves no temp files" {

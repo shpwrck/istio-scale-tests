@@ -94,7 +94,8 @@ placeholder for the member that runs the workload).
 ## Run tests
 
 Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
-`SETUP_CONTEXTS`), never the hub. Each suite writes TSV data plus a markdown summary under its
+`SETUP_CONTEXTS`), never the hub, each member once: a list that names one twice, or a
+`--remote-contexts` that names the source, stops before any cluster call. Each suite writes TSV data plus a markdown summary under its
 `results/` directory; a sweep writes its TSVs and reports into its own `results/sweep-<RUN_ID>/`.
 A sweep whose setup or probe failed for some cells still writes its report, then ends with
 `N of M cells failed` (by reason) and exit code 4, as it does when the Istio version or active
@@ -139,28 +140,48 @@ not stop the run early; its answer at the deadline counts. The suite records the
 `ISTIO_ACTIVE_REVISIONS` (`<ctx>=<revision>,...`, `<ctx>=` for a member whose Istio CR could not
 be read; `unchecked` in a `--dry-run`, `unknown` after a version check that stopped unexpectedly
 and, in a report, for a TSV written before the key existed; a controlplane `--resume` refuses a
-member whose active revision changed since the sweep started), and the members still not ready
-after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a
-sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was
-ready), `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an
-istiod rollout still in progress), `<ctx>=unreadable` (a rollout at the first read, then every
-re-read failed), `unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or, in
-a report, `unknown` (a TSV written before the key existed). A controlplane `--resume` keeps the
-first run's value in the TSV, and records its own, with its UTC start time, in a note of the sweep
-outcome (`ISTIO_NOTREADY_AT_RESUME=...`) and in the sweep dir's append-only `resumes.txt`, one
-line per resume. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than
-the pin, members on different versions, or a member that cannot be read stop every suite but
-gateway-api (a read-only check that only records it) before it changes anything;
-`ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs (`mixed:<a>/<b>` or `unknown`
-when they differ or cannot be read). A version check that stops unexpectedly counts as unknown:
-`fail` stops the run, `warn` records `unknown`, and at the end of a sweep it is a problem (exit
-4). A sweep reads it again at the end and exits 4 when the version or the active revision changed
-(also when the Istio CR is not settled at the end, or its istiod Deployment cannot be read, but
-its active revision reads another version); istiod or IstioCNI not ready at the end, on the same
-version, is a warning. The sweep writes that outcome to `sweep-outcome.txt` in its results dir,
-and every report re-generated from that dir repeats its errors, warnings and notes; a sweep dir
-without `sweep-outcome.txt` is a sweep that died before its end. These keys are set in the
-environment, never in a `--config` file.
+member whose active revision changed since the sweep started), `ISTIO_GENERATIONS` (`<ctx>=<Istio
+CR generation>/<active IstioRevision generation>`: a sweep compares them at its end, and a
+controlplane `--resume` against the first run's, so a spec edited and changed back during the
+sweep is a problem too), `ISTIO_PROXY_VERSIONS` (`<ctx>=<version>:<count>+...`: the proxies
+connected to each member's istiod by Istio version, from istiod's `pilot_xds` gauge, read through
+the API server's pod proxy; `none` or `unknown` per member; proxies on another version than their
+istiod, such as sidecars not restarted after an upgrade, are a warning and a note of the sweep
+outcome, never a stop), and the members still not ready after the wait in
+`ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a sweep's outcome repeats
+as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready), `<ctx>=<state>,...`
+(the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod rollout still in
+progress), `<ctx>=unreadable` (a rollout at the first read, then every re-read failed),
+`unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or, in a report,
+`unknown` (a TSV written before the key existed). A controlplane `--resume` keeps the first run's
+value in the TSV, and records its own, with its UTC start time, in a note of the sweep outcome
+(`ISTIO_NOTREADY_AT_RESUME=...`) and in the sweep dir's append-only `resumes.txt`, one line per
+resume. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the pin,
+members on different versions, or a member that cannot be read stop every suite but gateway-api (a
+read-only check that only records it) before it changes anything; `ISTIO_VERSION_CHECK=warn` goes
+on and records what the mesh runs (`mixed:<a>/<b>` or `unknown` when they differ or cannot be
+read). A version check that stops unexpectedly counts as unknown: `fail` stops the run, `warn`
+records `unknown`, and at the end of a sweep it is a problem (exit 4). A sweep reads it again at
+the end and exits 4 when the version, the active revision or the generation of the Istio CR or its
+active IstioRevision changed (also when the Istio CR is not settled at the end, or its istiod
+Deployment cannot be read, but its active revision reads another version); istiod or IstioCNI not
+ready at the end, on the same version, is a warning. From its start the sweep keeps a not-finished
+record in `sweep-outcome.txt` in its results dir (`EXIT=unfinished`), and every report of that dir
+says the sweep has not finished (it died, or still runs; json `sweep_outcome.unfinished`); at its
+end the sweep writes its outcome there, and every report re-generated from that dir repeats its
+errors, warnings and notes (json `"unfinished": false`). A sweep that ends between the two says
+how in that record: one that stops on an error (a check it makes, or an unexpected abort whose
+`FATAL:` line names the script, line and command) records a stop (`STOPPED=1`, the reason in
+`STOP_REASON`, `TOTAL=unknown`, `CUT_SHORT=1`; every report shows the stop and its reason; exit
+1, whatever code the failed command had); one interrupted (Ctrl-C, SIGTERM, or SIGHUP when its
+terminal closes) stays not finished and records when and by which signal (`ENDED_AT`,
+`ENDED_SIGNAL`; reports say "interrupted at ...", json `interrupted_at`, `interrupted_by`; exit
+130, 143 or 129); only one killed outright (SIGKILL, out of memory, a lost host) leaves the
+record as it was. A SIGTERM sent to the sweep's process alone takes effect when its current
+command returns; signal its process group to stop that too. A results dir without
+`sweep-outcome.txt` is from a sweep that stopped before its start (nothing ran) or from an older
+harness. A kubectl error quoted in a record or a report names the API server as `<api-host>` or
+`<ip>`, never its address. These keys are set in the environment, never in a `--config` file.
 
 ### Run config (`--config FILE`)
 
@@ -242,6 +263,7 @@ Nothing in the code names the repo's home, so a move is settings, not code:
 
 - [AGENTS.md](AGENTS.md): repo conventions for contributors and coding agents
 - [docs/scale-test-campaign](docs/scale-test-campaign/README.md): end-to-end campaign runbook; [docs/campaigns](docs/campaigns/README.md): recorded results
+  (paste from a copy that `tests/lib/redact-results.sh --out <dir> <results-dir>` redacted)
 - [docs/runbooks](docs/runbooks): operating a deployed lab or ROSA validation run
 
 ## License

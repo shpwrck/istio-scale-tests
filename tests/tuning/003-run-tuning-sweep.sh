@@ -8,14 +8,16 @@
 #   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
 # ci-dry-run: --suite churn-dataplane --contexts ci-dummy,ci-dummy2 --gitops-context ci-hub
 set -euo pipefail
-# shellcheck disable=SC2154  # rc is assigned at the head of the trap body
-trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# Loud ERR trap for unexpected aborts.
+# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 
@@ -73,13 +75,18 @@ Environment:
 Exit codes:
   0  every pass (baseline and each profile) ran its probe
   1  the sweep stopped: a bad flag or precondition, the suite setup failed, a profile
-     could not be reverted (REVERT_FAILED; later passes skipped), or an unexpected error
+     could not be reverted (REVERT_FAILED; later passes skipped), or an unexpected error;
+     after its start, sweep-outcome.txt records the stop and its reason (STOPPED=1,
+     STOP_REASON, CUT_SHORT=1), after the active profile is reverted
   4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
      passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
      non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason) or the
      Istio version or active revision changed during the sweep (read again at its end);
      the outcome is also in sweep-outcome.txt and sweep-comparison.md
-  130/143  interrupted (Ctrl-C / TERM); the active profile is reverted first
+  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM); the active profile is reverted
+     first, then sweep-outcome.txt stays "not finished" and says when and by which
+     signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to the sweep's process alone waits for
+     its current command (signal its process group)
 EOF
 }
 
@@ -123,7 +130,7 @@ if ((GITOPS_PAUSE)) && [[ -z "$GITOPS_CTX" ]]; then
 fi
 
 CONTEXTS=()
-split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
+split_contexts "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
 CONTEXTS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 SOURCE_CTX="${CONTEXTS[0]}"
@@ -281,23 +288,35 @@ echo "    Istio:     $(istio_version_label)"
 ACTIVE_STATE_DIR=""
 GITOPS_PAUSED=0
 
-# EXIT trap: revert a profile left applied, then resume Argo CD. Never aborts.
+# EXIT trap: revert a profile left applied, then resume Argo CD, then (I5, PL32: only
+# after the revert) a sweep that ends before its outcome says how in that record: stopped
+# with its reason (die, an unexpected abort), or interrupted (Ctrl-C, SIGTERM), with a note
+# for a revert or resume that failed here. Never aborts.
 # shellcheck disable=SC2329  # invoked by the EXIT trap below
 on_exit() {
-	local sd="$ACTIVE_STATE_DIR"
+	local rc=$? sd="$ACTIVE_STATE_DIR" prof
+	local -a notes=()
 	if [[ -n "$sd" && -f "${sd}/active-profile" ]]; then
-		echo ">>> reverting $(<"${sd}/active-profile") before exit" >&2
-		"${TUNING_DIR}/002-revert-profile.sh" --state-dir "$sd" --rollout-timeout "$ROLLOUT_TIMEOUT" >&2 \
-			|| echo "warn: revert failed; re-run: ./tests/tuning/002-revert-profile.sh --state-dir ${sd}" >&2
+		prof="$(<"${sd}/active-profile")"
+		echo ">>> reverting ${prof} before exit" >&2
+		if ! "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$sd" --rollout-timeout "$ROLLOUT_TIMEOUT" >&2; then
+			echo "warn: revert failed; re-run: ./tests/tuning/002-revert-profile.sh --state-dir ${sd}" >&2
+			notes+=(--note "REVERT_FAILED: profile ${prof} is still applied (its revert on exit failed): run 002-revert-profile.sh --state-dir on its pass dir's state before any other run")
+		fi
 	fi
 	if ((GITOPS_PAUSED)); then
-		"${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE" >&2 \
-			|| echo "warn: Argo CD still paused; run: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${PAUSE_STATE}" >&2
+		if ! "${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE" >&2; then
+			echo "warn: Argo CD still paused; run: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${PAUSE_STATE}" >&2
+			notes+=(--note "Argo CD auto-sync is still paused (its resume on exit failed): run 006-gitops-pause.sh --resume")
+		fi
 	fi
+	sweep_outcome_on_exit "$rc" ${notes[@]+"${notes[@]}"} || true
 }
-trap on_exit EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# `|| true`: set -e off inside, so an echo to a terminal that closed (SIGHUP) cannot
+# stop the trap before the revert.
+trap 'on_exit || true' EXIT
+# Ctrl-C, SIGTERM and SIGHUP: trapped by sweep_outcome_start below (sweep_trap_signals),
+# which runs this trap and dies of the signal; before it, bash runs this trap on them too.
 
 mkdir -p "$SWEEP_DIR"
 {
@@ -310,6 +329,9 @@ mkdir -p "$SWEEP_DIR"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
 	istio_version_kv | sed 's/^/# /'
 } >"${SWEEP_DIR}/sweep-metadata.txt"
+# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+# so the comparison of a sweep that died says so.
+sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --unit passes --next "if it died, check that no profile is still applied (005-cleanup.sh) and Argo CD auto-sync is resumed (006-gitops-pause.sh --resume), then run the sweep again into a new dir"
 
 if ((GITOPS_PAUSE)); then
 	# Set first: a partial pause is still undone by the EXIT trap.
@@ -394,6 +416,9 @@ echo ""
 # (read-only).
 IV_END=()
 istio_version_recheck IV_END "${KUBECTL[@]}"
+# A3: the outcome is written after the comparison: it says so (a line that sweep_outcome
+# --md replaces).
+export _SWEEP_OUTCOME_PENDING=1
 "${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown \
 	--output "${SWEEP_DIR}/sweep-comparison.md" || echo "warn: comparison failed" >&2
 

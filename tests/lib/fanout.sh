@@ -53,7 +53,7 @@
 # bash variables invites quoting problems. Mirrors tests/lib/metrics.sh.
 #
 # Requires: curl, awk, kubectl/oc. Callers must have sourced tests/lib/common.sh
-# (for die(), split_csv()) and tests/lib/timestamp.sh (for now_ns()); see the
+# (for die(), split_csv(), file_min_bytes()) and tests/lib/timestamp.sh (for now_ns()); see the
 # dependency contract above for which functions also need tests/lib/metrics.sh.
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -235,10 +235,7 @@ _fanout_scrape_one() {
 		: > "$outfile"
 		return 1
 	fi
-	local sz
-	sz=$(wc -c < "$outfile" 2>/dev/null || echo 0)
-	sz="${sz//[^0-9]/}"
-	(( ${sz:-0} >= FANOUT_MIN_SCRAPE_BYTES ))
+	fanout_body_complete "$outfile"
 }
 
 # Concurrently scrape /metrics from every pod-port in a context's block.
@@ -285,7 +282,7 @@ fanout_scrape_all() {
 	local failed=0 mf
 	for i in "${!ports[@]}"; do
 		mf="${out_dir}/${prefix}-${i}.metrics"
-		if [[ ! -s "$mf" ]] || (( $(wc -c < "$mf" 2>/dev/null || echo 0) < FANOUT_MIN_SCRAPE_BYTES )); then
+		if ! fanout_body_complete "$mf"; then
 			if ! _fanout_scrape_one "${ports[i]}" "$mf"; then
 				failed=$((failed + 1))
 			fi
@@ -350,14 +347,14 @@ fanout_record_podset() {
 
 # fanout_body_complete <metrics_file>: true when the file is a complete scrape, i.e.
 # readable and at least FANOUT_MIN_SCRAPE_BYTES (fanout_scrape_all's rule; a failed
-# scrape leaves an empty or short file, PL29).
+# scrape leaves an empty or short file, PL29). It runs for every replica's file on every
+# scrape and extraction, so it forks nothing for a complete body (B6): file_min_bytes
+# (common.sh, I8) reads the first FANOUT_MIN_SCRAPE_BYTES characters with the read
+# builtin, and counts bytes with wc only for a shorter one.
 # shellcheck disable=SC2329
 fanout_body_complete() {
-	local f="$1" sz
-	[[ -s "$f" && -r "$f" ]] || return 1
-	sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-	sz="${sz//[^0-9]/}"
-	(( ${sz:-0} >= FANOUT_MIN_SCRAPE_BYTES ))
+	[[ -s "$1" && -r "$1" ]] || return 1
+	file_min_bytes "$1" "$FANOUT_MIN_SCRAPE_BYTES"
 }
 
 # SUM a counter across pods; the caller takes the window delta with counter_delta

@@ -122,5 +122,8 @@ For a filled-in example see [`2026-06-22-20c-10k-10k-results.md`](2026-06-22-20c
 `tests/controlplane/003-run-sweep.sh` writes the Scale-envelope block to
 `sweep-<RUN_ID>/scale-envelope-<RUN_ID>.md` at campaign end (`render_scale_envelope` in
 `tests/lib/envelope.sh`). Paste that block in rather than transcribing by hand, and fill the
-Customer SLA checklist from the same report's `sla` verdict. For older sweeps without the
-generator, fill by hand from the peak-mesh sweep.
+Customer SLA checklist from the same report's `sla` verdict. Paste from a redacted copy:
+`tests/lib/redact-results.sh --out /tmp/redacted <results>/sweep-<RUN_ID>` (see
+[README](README.md), "Redact before you paste"), and read the copy, file names included,
+before you commit it (the README lists what the script has no pattern for). For older
+sweeps without the generator, fill by hand from the peak-mesh sweep.

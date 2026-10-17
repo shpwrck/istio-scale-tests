@@ -64,6 +64,10 @@ n_total.
   TIMEOUT_REMOTE_EDS  the remote EDS push never came (convergence_remote_eds_ms)
   POISONED_RESTART    an istiod restarted in the window (or its state is unknown)
   SCRAPE_INCOMPLETE   a per-pod istiod scrape failed, so the summed deltas undercount
+  SCRAPE_INCOMPLETE_REMOTE_EDS
+                      a remote's EDS poll never completed a scrape of its istiod, so
+                      convergence_remote_eds_ms was not measured (N/A), no remote
+                      timed out
   MISSING_VALUE       another measured column has no number (a watcher that did not
                       list every churn target, or a push counter in neither scrape)
   SETUP_FAILED        an iteration failed before it measured (002)
@@ -81,11 +85,15 @@ them; inputs that differ read mixed:<value>,<value> with each distinct value onc
 (mixed:v1.30.5,v1.29.0, also when one run's own value was mixed:v1.30.5/v1.29.0).
 istio_version is each member's active IstioRevision .spec.version as 002 read it
 (istio_version_by_context: which member ran which).
-When the results dir holds sweep-outcome.txt (003 writes it at the end of a sweep),
+When the results dir holds sweep-outcome.txt (003 writes it),
 text, csv and md repeat it, with the run that recorded it: the failed cells by reason, its
 problems (the Istio version or active revision changed under the sweep) and notes
-(members not ready at its start or end); a sweep dir without it is a sweep that died
-before its end.
+(members not ready at its start or end). The sweep writes it at its start as "not
+finished" (EXIT=unfinished) and replaces it at its end: a record still not finished is
+a sweep that died or still runs, or (I5) one interrupted, with when and by which signal;
+one that stopped on an error after its start shows the stop and its reason. A sweep dir
+without the file is from a sweep that stopped before its start (nothing ran), or from
+an older harness.
 Histogram p99 columns (queue time, push time) show the worst bucket any valid row
 hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
 csv adds worst_bucket and n_overflow columns.
@@ -200,12 +208,24 @@ preamble_get() {
 # the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b
 # (config_input_value: each distinct value once, X13) plus a stderr warning (PL26).
 run_meta() {
-	local key="$1" f v n
+	local key="$1" v n
 	v="$(config_input_value "$key" "unknown (not recorded)" "${TSV_FILES[@]}")"
 	[[ -n "$v" ]] || v="unknown (not recorded)"
 	# How many inputs differ: one file's own mixed:a/b is not a disagreement, nor v1.30.5
-	# against 1.30.5 (config_input_value reads them as one, Y11).
-	n="$(for f in "${TSV_FILES[@]}"; do grep -m1 "^# ${key}=" "$f" 2>/dev/null || echo; done | sort -u | awk 'END { print NR }')"
+	# against 1.30.5 (config_input_value reads them as one, Y11). The distinct first
+	# `# <key>=` lines (a file without one: an empty line), in one awk over every input
+	# (I8: no grep per file), each read up to that line as grep -m1 did.
+	n="$(_RM_KEY="$key" awk 'BEGIN {
+		p = "# " ENVIRON["_RM_KEY"] "="; lp = length(p)
+		for (i = 1; i < ARGC; i++) {
+			v = ""
+			while ((getline line < ARGV[i]) > 0) if (substr(line, 1, lp) == p) { v = line; break }
+			close(ARGV[i])
+			if (!(v in seen)) { seen[v] = 1; n++ }
+		}
+		print n + 0
+		exit
+	}' "${TSV_FILES[@]}")"
 	[[ "$v" != mixed:* ]] || ((n < 2)) || echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
 	echo "$v"
 }
@@ -220,6 +240,13 @@ ISTIO_VERSION_BY_CONTEXT_M="$(run_meta ISTIO_VERSION_BY_CONTEXT)"
 # R2: the members still not ready after the start's readiness wait, and how long it took.
 ISTIO_NOTREADY_AT_START_M="$(run_meta ISTIO_NOTREADY_AT_START)"
 ISTIO_READY_WAITED_SEC_M="$(run_meta ISTIO_READY_WAITED_SEC)"
+# N13/A5/A7: each member's active Istio revision, its Istio CR / active IstioRevision
+# generations (an edit of either shows as mixed across pooled runs, also when the version
+# reads the same) and the proxy versions connected to its istiod at the start (ctx=...);
+# files written before them read "unknown (not recorded)".
+ISTIO_ACTIVE_REVISIONS_M="$(run_meta ISTIO_ACTIVE_REVISIONS)"
+ISTIO_GENERATIONS_M="$(run_meta ISTIO_GENERATIONS)"
+ISTIO_PROXY_VERSIONS_M="$(run_meta ISTIO_PROXY_VERSIONS)"
 
 # Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
@@ -258,6 +285,9 @@ report_text() {
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# istio_notready_at_start: ${ISTIO_NOTREADY_AT_START_M}  istio_ready_waited_sec: ${ISTIO_READY_WAITED_SEC_M}"
+	echo "# istio_active_revisions: ${ISTIO_ACTIVE_REVISIONS_M}"
+	echo "# istio_generations: ${ISTIO_GENERATIONS_M}"
+	echo "# istio_proxy_versions: ${ISTIO_PROXY_VERSIONS_M}"
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
@@ -265,7 +295,7 @@ report_text() {
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
 	churn_rows | awk -F'\t' '
-	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE/MISSING_VALUE
+	# Only OK rows feed numeric aggregation; POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE*/MISSING_VALUE
 	# rows carry N/A or undercounted istiod-side deltas and must NOT leak into
 	# column means. Per-column "N/A"!= guards also stop "N/A"+0 -> 0 fabrication.
 	!/^#/ && !/^run_id/ && NF>=21 && $21=="OK" {
@@ -370,6 +400,9 @@ report_csv() {
 	echo "# ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}"
 	echo "# ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}"
+	echo "# ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}"
+	echo "# ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}"
+	echo "# ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
@@ -483,7 +516,7 @@ Definitions for every metric column in the results table above. Only the **sourc
 cluster is scaled; remotes stay at base replicas, so `remote_*` columns measure
 cross-cluster propagation. `src_`/`rmt_` prefixes are the source istiod (summed across its
 replicas) vs the remote istiod pods (summed/maxed across all remote pods). Averages are over `n_valid` rows only — rows with `status != OK`
-(`POISONED_RESTART` / `SCRAPE_INCOMPLETE` / `TIMEOUT_*` / `MISSING_VALUE` / `*_FAILED`) are excluded but still counted in
+(`POISONED_RESTART` / `SCRAPE_INCOMPLETE*` / `TIMEOUT_*` / `MISSING_VALUE` / `*_FAILED`) are excluded but still counted in
 `n_total`. Histogram p99 columns (`*_queue_p99`, `*_push_p99`) show the **worst** (highest)
 bucket range any valid row hit (e.g. `100-500`), not an average: the mean of interpolated
 p99s can land in a bucket no row hit. `overflow (N rows)` means N valid rows had their p99
@@ -539,6 +572,9 @@ report_markdown() {
 	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
 	echo "istio_notready_at_start: \"${ISTIO_NOTREADY_AT_START_M}\""
 	echo "istio_ready_waited_sec: \"${ISTIO_READY_WAITED_SEC_M}\""
+	echo "istio_active_revisions: \"${ISTIO_ACTIVE_REVISIONS_M}\""
+	echo "istio_generations: \"${ISTIO_GENERATIONS_M}\""
+	echo "istio_proxy_versions: \"${ISTIO_PROXY_VERSIONS_M}\""
 	echo "harness_sha: \"${harness_sha}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
@@ -560,7 +596,7 @@ report_markdown() {
 	echo "**Source files:** ${#TSV_FILES[@]} TSV file(s)"
 	echo ""
 	for f in "${TSV_FILES[@]}"; do
-		echo "- \`$(basename "$f")\`"
+		echo "- \`${f##*/}\`"
 	done
 	echo ""
 	echo "| mesh | churn | scale | n_total | n_valid | local_avg (ms) | remote_reach_avg (ms) | remote_eds_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 worst (ms) | rmt_queue_p99 worst (ms) | src_proxies | rmt_proxies | src_push_p99 worst (ms) | rmt_push_p99 worst (ms) | amplification |"
@@ -575,7 +611,7 @@ report_markdown() {
 		split("", rpt2_max); split("", rpt2_n); split("", rpt2_ov)
 	}
 	# n_total counts EVERY row for the cell; numeric aggregation uses ONLY OK rows
-	# (POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE carry N/A or undercounted deltas).
+	# (POISONED_*/TIMEOUT_*/SCRAPE_INCOMPLETE* carry N/A or undercounted deltas).
 	!/^#/ && !/^run_id/ && NF>=21 {
 		key = $2 "\t" $3 "\t" $4 "\t" $5
 		seen[key] = 1
@@ -657,7 +693,7 @@ report_markdown() {
 		}
 		# Note the filter rate when any cell dropped rows.
 		if (any_filtered) {
-			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE / TIMEOUT_* / MISSING_VALUE / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
+			printf "\n> \\* Some rows were filtered from the averages (`n_valid < n_total`): rows with `status != OK` (POISONED_RESTART / SCRAPE_INCOMPLETE* / TIMEOUT_* / MISSING_VALUE / *_FAILED) are excluded from numeric aggregation but still counted in `n_total`.\n"
 		}
 	}'
 
@@ -675,6 +711,9 @@ report_charts() {
 	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
 	echo "istio_notready_at_start: \"${ISTIO_NOTREADY_AT_START_M}\""
 	echo "istio_ready_waited_sec: \"${ISTIO_READY_WAITED_SEC_M}\""
+	echo "istio_active_revisions: \"${ISTIO_ACTIVE_REVISIONS_M}\""
+	echo "istio_generations: \"${ISTIO_GENERATIONS_M}\""
+	echo "istio_proxy_versions: \"${ISTIO_PROXY_VERSIONS_M}\""
 	echo "harness_sha: \"${HARNESS_SHA_M}\""
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: \"${RUN_CONFIG_M}\""

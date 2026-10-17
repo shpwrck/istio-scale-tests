@@ -87,18 +87,19 @@ vsdr_dir() {
 	refute_output --partial "**Warning:**"
 }
 
-@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (68) and a proxy_check comment" {
+@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (69) and a proxy_check comment" {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	hdr=$(grep -v '^#' <<<"$output" | sed -n 1p)
 	row=$(grep -v '^#' <<<"$output" | sed -n 2p)
-	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 68 ]
+	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 69 ]
 	# heap_inuse summed per cluster scrape (500, 750, 500; the restarted mesh-b scrape is
 	# out) and the istiod pods per scrape (2, 3, 2); no status rows; a legacy cell has no
 	# series run (-).
-	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id,gateway_physical_max,gateway_ws_max,leftover_ns_max,cpu_window_avg" ]]
-	# A 51-column file has no gateway physical/working-set, leftover or CPU-seconds column: N/A.
-	[[ "$row" == *",583.3,2.3,0,-,-,N/A,N/A,N/A,N/A" ]]
+	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id,gateway_physical_max,gateway_ws_max,leftover_ns_max,cpu_window_avg,pushes_n" ]]
+	# A 51-column file has no gateway physical/working-set, leftover or CPU-seconds column:
+	# N/A; all 9 valid rows have a push count (pushes_n, A10).
+	[[ "$row" == *",583.3,2.3,0,-,-,N/A,N/A,N/A,N/A,9" ]]
 	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg,traffic_config,vsdr_services,"* ]]
 	[[ "$row" == *",30,34,31,none,0,"* ]]
 	# A 51-column file reads as the legacy layout: K 0, pods, 15 svc x 2 reps, no outside, deploy.

@@ -17,12 +17,14 @@
 #   ./tests/dataplane/003-run-sweep.sh --config tests/dataplane/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
-# Loud ERR trap for unexpected aborts; per-combo failures are handled below.
-trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# Loud ERR trap for unexpected aborts; per-combo failures are handled below.
+# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
 # --config FILE: export the file's keys before versions.env/options.env fill in defaults.
@@ -111,12 +113,17 @@ Environment:
 Exit codes:
   0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
      counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition, or an unexpected error
+  1  the sweep stopped: a bad flag or precondition, or an unexpected error; after its
+     start, sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
+     CUT_SHORT=1)
   3  --on-unreachable fail stopped the sweep (the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
      version or active revision changed during the sweep (read again at its end); the
      outcome is also in sweep-outcome.txt and the markdown report
+  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to
+     the sweep's process alone waits for its current command (signal its process group)
 EOF
 }
 
@@ -240,9 +247,9 @@ reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -368,6 +375,13 @@ fi
 if ((! DRY_RUN)); then
 	mkdir -p "$OUTPUT_DIR"
 	config_snapshot "$OUTPUT_DIR" "$RUN_ID"
+	# I5: a sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
+	# that record: stopped with its reason, or interrupted (sweep_outcome_on_exit). Set before
+	# sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
+	trap 'sweep_outcome_on_exit "$?" || true' EXIT
+	# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+	# so the reports of a sweep that died say so.
+	sweep_outcome_start "$OUTPUT_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a dataplane sweep has no --resume); the rows in this dir cover only the mesh sizes it finished"
 fi
 
 # Set when a probe exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
@@ -493,6 +507,9 @@ echo ""
 # A6: the Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
+# A3: the outcome is written after the reports: they say so (the markdown gets a line
+# that sweep_outcome --md replaces).
+export _SWEEP_OUTCOME_PENDING=1
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
 

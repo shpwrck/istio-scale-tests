@@ -107,10 +107,12 @@ CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
 CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
 # unknown for a file without them (written before R4: its ISTIO_VERSION is the pin,
-# unchecked; before R2, which added the start-of-run readiness keys; or before N13, which
-# added ISTIO_ACTIVE_REVISIONS).
+# unchecked; before R2, which added the start-of-run readiness keys; before N13, which
+# added ISTIO_ACTIVE_REVISIONS; before A5, which added ISTIO_GENERATIONS; or before A7,
+# which added ISTIO_PROXY_VERSIONS). They are sweep-level (PL26): pooled inputs that
+# differ read mixed, never one file's value.
 # shellcheck disable=SC2034
-CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS"
+CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -372,18 +374,27 @@ _CONFIG_VKEY_AWK='
 # _config_distinct <key> <missing> <tsv>...: the distinct `# <key>=` values of the files,
 # one per line in file order (an empty value as an empty line; an ISTIO_VERSION* value
 # once whatever its leading v, _CONFIG_VKEY_AWK). A file without the line reads
-# <missing>, or adds nothing when <missing> is empty. <key> is a plain name.
+# <missing>, or adds nothing when <missing> is empty. <key> is a plain name. One awk for
+# every file (B6): it reads them with getline, so a missing, unreadable or empty file
+# reads <missing> and a path holding `=` is a path, never an awk assignment.
 _config_distinct() {
-	local key="$1" missing="$2" f line
+	local key="$1" missing="$2"
 	shift 2
-	for f in "$@"; do
-		line="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
-		if [[ -n "$line" ]]; then
-			printf '%s\n' "${line#*=}"
-		elif [[ -n "$missing" ]]; then
-			printf '%s\n' "$missing"
-		fi
-	done | awk -v k="$key" "${_CONFIG_VKEY_AWK}"'!seen[vkey(k, $0)]++'
+	(($#)) || return 0
+	_CD_KEY="$key" _CD_MISSING="$missing" awk "${_CONFIG_VKEY_AWK}"'
+		BEGIN {
+			k = ENVIRON["_CD_KEY"]; missing = ENVIRON["_CD_MISSING"]
+			p = "# " k "="; lp = length(p)
+			for (i = 1; i < ARGC; i++) {
+				found = 0
+				while ((getline line < ARGV[i]) > 0)
+					if (substr(line, 1, lp) == p) { v = substr(line, lp + 1); found = 1; break }
+				close(ARGV[i])
+				if (!found) { if (missing == "") continue; v = missing }
+				if (!seen[vkey(k, v)]++) print v
+			}
+			exit
+		}' "$@"
 }
 
 # _config_join_mixed: stdin's lines (distinct values) as one value: the line itself when
@@ -507,35 +518,36 @@ config_merged_preamble() {
 		}' "$@"
 }
 
-# _config_run_key <tsv> [<dir>]: the run a report input belongs to. A file in a sweep-*
-# dir belongs to that sweep (its combos carry their own RUN_IDs); any other file to the
-# preamble's SWEEP_RUN_ID (propagation), else its RUN_ID, else the run_id column of its
-# first data row; a file with none of these counts as a run of its own. <dir> is the
-# file's directory, canonical (config_check_multi_run passes it, so `--results-dir .`
-# inside a sweep dir, or a path find printed as sweep-X//file, is still that sweep);
-# without it, the directory as the path spells it.
+# _config_run_key <tsv>...: the run each report input outside a sweep-* dir belongs to,
+# one line per file in order: the preamble's SWEEP_RUN_ID (propagation), else its RUN_ID,
+# else the run_id column of its first data row; a file with none of these (or unreadable)
+# counts as a run of its own, named after the file. A file in a sweep-* dir belongs to that
+# sweep instead (its combos carry their own RUN_IDs); config_check_multi_run decides that
+# from the canonical directory before it calls this. One awk for every file (B6): getline
+# reads each, so a path holding `=` is a path, never an awk assignment.
 # shellcheck disable=SC2329
 _config_run_key() {
-	local f="$1" d="${2:-}" id
-	if [[ -z "$d" ]]; then
-		d=.
-		[[ "$f" == */* ]] && d="${f%/*}"
-	fi
-	while [[ "$d" == */ && "$d" != / ]]; do d="${d%/}"; done
-	d="${d##*/}"
-	case "$d" in
-	sweep-*)
-		echo "$d"
-		return 0
-		;;
-	esac
-	id="$(awk -F'\t' '
-		/^# SWEEP_RUN_ID=/ { if (s == "") s = substr($0, 16); next }
-		/^# RUN_ID=/ { if (r == "") r = substr($0, 10); next }
-		/^#/ || $1 == "run_id" { next }
-		{ c = $1; exit }
-		END { print (s != "" ? s : (r != "" ? r : c)) }' "$f" 2>/dev/null || true)"
-	if [[ -n "$id" ]]; then echo "$id"; else echo "${f##*/}"; fi
+	(($#)) || return 0
+	awk '
+		BEGIN {
+			for (i = 1; i < ARGC; i++) {
+				f = ARGV[i]; s = ""; r = ""; c = ""
+				while ((getline line < f) > 0) {
+					if (substr(line, 1, 15) == "# SWEEP_RUN_ID=") { if (s == "") s = substr(line, 16); continue }
+					if (substr(line, 1, 9) == "# RUN_ID=") { if (r == "") r = substr(line, 10); continue }
+					if (substr(line, 1, 1) == "#") continue
+					c = line
+					sub(/\t.*/, "", c)
+					if (c == "run_id") { c = ""; continue }
+					break
+				}
+				close(f)
+				id = (s != "" ? s : (r != "" ? r : c))
+				if (id == "") { id = f; sub(/.*\//, "", id) }
+				print id
+			}
+			exit
+		}' "$@"
 }
 
 # _config_canon_dir <dir>: the directory as `cd` and `pwd` name it (logical: `.` and a
@@ -573,7 +585,7 @@ _config_run_ids() {
 # config_check_multi_run <results_dir> <allow 0|1> <tsv>...: a report pools every TSV
 # under its results dir (PL6), so count the runs among its inputs, with or without
 # --config and --results-dir: one per sweep-* dir and one per distinct sweep-level id
-# outside one (_config_run_key, on each file's directory; the per-iteration RUN_IDs of
+# outside one (each file's directory, then _config_run_key; the per-iteration RUN_IDs of
 # one sweep are one run, PL26). The directory is the logical one (`cd` and `pwd`): `.`
 # and a trailing slash still resolve, and a symlink named sweep-Y keeps its sweep key; a
 # symlink such as latest -> sweep-X takes its target's (_config_canon_dir, Y7). Sets
@@ -589,17 +601,37 @@ _config_run_ids() {
 # report says so in every format (config_multi_run_note, _csv, _json).
 # shellcheck disable=SC2329,SC2034
 config_check_multi_run() {
-	local dir="$1" allow="$2" f k d i=0 n runs new tgt cd_k alone shared id pat
-	local -A run_dir=() canon=() run_files=()
-	local -a mr_keys=() mr_dirs=() rfiles=()
+	local dir="$1" allow="$2" f k d i=0 j=0 n runs new tgt cd_k alone shared id pat
+	local -A run_dir=() canon=() run_files=() dkey=()
+	local -a mr_keys=() mr_dirs=() rfiles=() fdirs=() cfiles=() ckeys=()
 	shift 2
+	local -a files=("$@")
+	# Each file's canonical directory (one cd per directory); a sweep-* one is the run.
+	# The files outside one get their keys from one awk (B6: no subshell per file).
 	for f in "$@"; do
 		d=.
 		[[ "$f" == */* ]] && d="${f%/*}"
 		while [[ "$d" == */ && "$d" != / ]]; do d="${d%/}"; done
 		[[ -n "$d" ]] || d=/
-		[[ -n "${canon[$d]+x}" ]] || canon[$d]="$(_config_canon_dir "$d")"
-		k="$(_config_run_key "$f" "${canon[$d]}")"
+		if [[ -z "${canon[$d]+x}" ]]; then
+			canon[$d]="$(_config_canon_dir "$d")"
+			k="${canon[$d]}"
+			while [[ "$k" == */ && "$k" != / ]]; do k="${k%/}"; done
+			k="${k##*/}"
+			case "$k" in sweep-*) dkey[$d]="$k" ;; *) dkey[$d]="" ;; esac
+		fi
+		fdirs+=("$d")
+		[[ -n "${dkey[$d]}" ]] || cfiles+=("$f")
+	done
+	((${#cfiles[@]} == 0)) || mapfile -t ckeys < <(_config_run_key "${cfiles[@]}")
+	for n in "${!fdirs[@]}"; do
+		f="${files[n]}"
+		d="${fdirs[n]}"
+		k="${dkey[$d]}"
+		if [[ -z "$k" ]]; then
+			k="${ckeys[j]:-}"
+			j=$((j + 1))
+		fi
 		mr_keys+=("$k") mr_dirs+=("${canon[$d]}")
 		# Y8: only a run outside a sweep-* dir needs its file list (the commands that move
 		# it); appending one per file of a large sweep is quadratic.

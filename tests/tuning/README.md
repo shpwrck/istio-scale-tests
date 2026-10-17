@@ -56,14 +56,25 @@ The sweep:
 On Ctrl-C or an error the sweep still reverts the active profile and resumes Argo CD.
 It leaves the suite's workloads; remove them with the suite's cleanup script.
 
-Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or
-precondition, a failed suite setup, a failed revert, or an unexpected error); `4` it
-finished, reverted every profile and wrote `sweep-comparison.md`, but some passes failed
-(`SETUP_FAILED`: the profile did not apply; `PROBE_FAILED`: the probe exited non-zero,
-including a reachability stop), or the Istio version or active revision changed during
-the sweep (read again after the last revert). The last line on stderr says how many, by reason;
-`sweep-outcome.txt` and the end of `sweep-comparison.md` keep the outcome.
-`130` / `143`: interrupted, after reverting the active profile.
+Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or precondition, a
+failed suite setup, a failed revert, or an unexpected error); `4` it finished, reverted every
+profile and wrote `sweep-comparison.md`, but some passes failed (`SETUP_FAILED`: the profile did
+not apply; `PROBE_FAILED`: the probe exited non-zero, including a reachability stop), or the
+Istio version, active revision or generation of the Istio CR or its active IstioRevision changed
+during the sweep (read again after the last revert). The last line on stderr says how many, by
+reason; `sweep-outcome.txt` and the end of `sweep-comparison.md` keep the outcome. From the
+sweep's start until it writes its outcome, `sweep-outcome.txt` holds a not-finished record
+(`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do), so a report of a
+sweep that died, or still runs, or (with when and by which signal) was interrupted says "this
+sweep has not finished" in every format (json `sweep_outcome`: `"exit": null`, `"unfinished":
+true`; a finished one reads `"unfinished": false`; one that stopped on an error after its start
+records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level
+README): when no sweep runs any more, check that no profile is still applied (`005-cleanup.sh`)
+and that Argo CD auto-sync is resumed (`006-gitops-pause.sh --resume`), then run the sweep again
+into a new dir. Proxies connected on another Istio version than their istiod at the start
+(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure. `130` / `143` / `129`:
+interrupted (Ctrl-C, SIGTERM, SIGHUP), after reverting the active profile; `sweep-outcome.txt`
+then says when and by which signal.
 
 ## Results
 
@@ -82,7 +93,10 @@ missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers
 (convergence, push time) are never averaged: they show the worst bucket range a valid row
 hit, or `overflow (N rows)` when N rows had their p99 in the +Inf bucket; propagation's P1
 convergence counts iterations instead, `overflow (N iterations)`: N iterations put a sample
-in the +Inf bucket (counted, although propagation 005 leaves them out of its means). Units:
+in the +Inf bucket (counted, although propagation 005 leaves them out of its means). The
+`P1 local push` cell adds `(N overflowed)` for the iterations its mean leaves out for that
+overflow; P1 is left out of an iteration only for a source-side reason, as in 005 (a remote
+that timed out or restarted keeps it). Units:
 memory in Mi, CPU in millicores (the controlplane's `istiod CPU peak (m)` and
 `istiod memory peak (Mi)` are window peaks), the sidecar config in KiB. Under each metric,
 `n (got/attempted)` counts the valid samples with a value over what the pass's probe was

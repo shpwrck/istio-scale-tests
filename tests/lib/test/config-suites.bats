@@ -789,7 +789,7 @@ MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA2
 	in_block "$CH/002-run-churn-probe.sh" '^cat > "\$TSV_FILE" <<EOF' 'run_id mesh_size churn_intensity' "$IV"
 	in_block "$CH/003-run-sweep.sh" '^emit_churn_placeholder\(\)' 'run_id mesh_size churn_intensity' "$IV"
 	in_block "$PR/002-run-endpoint-probe.sh" 'echo "# Endpoint propagation latency test"' '^[[:space:]]*\} > "\$TSV_FILE"' "$IV"
-	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'run_id.tmesh_size' "$IV"
+	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'PROP_TSV_HEADER' "$IV"
 	in_block "$CP/002-collect-resource-metrics.sh" 'echo "# Control-plane resource metrics' '\} > "\$TSV_FILE"' "$IV"
 	in_block "$CP/003-run-sweep.sh" '^precreate_tsv_preamble\(\)' '^\}' "$IV"
 	in_block "$CP/003-run-sweep.sh" 'ns_lifecycle_init "\$LIFECYCLE_FILE"' 'printf .timestamp' '"${_iv_kv[@]}"'
@@ -828,7 +828,7 @@ MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA2
 	in_block "$CD/003-run-churn-probe.sh" 'write_preamble "churn-dataplane' 'printf .run_id'
 	in_block "$CD/004-run-sweep.sh" 'write_preamble "churn-dataplane' 'printf .run_id'
 	in_block "$PR/002-run-endpoint-probe.sh" 'echo "# Endpoint propagation latency test"' '^[[:space:]]*\} > "\$TSV_FILE"'
-	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'run_id.tmesh_size'
+	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'PROP_TSV_HEADER'
 	# reach-<RUN_ID>.tsv (dataplane and churn-dataplane 002) through its one writer.
 	in_block "${ROOT}/tests/lib/reach.sh" 'echo "# Remote reachability check' 'printf .run_id'
 	# The check fires on a writer without it.

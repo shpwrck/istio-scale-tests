@@ -93,7 +93,7 @@
 # started more than _ISTIOD_DIAG_CLOCK_MARGIN_SEC before that scrape (harness clock)
 # restarted before the window, so the pod counts as no_change, not restarted_untimed.
 #
-# Requires: common.sh (is_nonneg_int, is_pos_int), reach.sh (reach_sanitize), jq, awk,
+# Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK), reach.sh (reach_sanitize), jq, awk,
 # sed, tail, mktemp; gzip when present (evidence stays uncompressed without it);
 # preamble.sh's harness_sha when sourced (else HARNESS_SHA=unknown). Callers run
 # `set -euo pipefail`.
@@ -313,12 +313,9 @@ _istiod_diag_ts_iso() {
 # proxies sums pilot_xds over its label series (PL12).
 # shellcheck disable=SC2329
 _istiod_diag_pre_values() {
-	local f="${1:-}" sz=0 out=""
-	if [[ -n "$f" && -s "$f" ]]; then
-		sz="$(wc -c < "$f" 2>/dev/null)" || sz=0
-		sz="${sz//[^0-9]/}"
-	fi
-	if (( ${sz:-0} >= ${FANOUT_MIN_SCRAPE_BYTES:-512} )); then
+	local f="${1:-}" out=""
+	# I8: no wc fork per file (file_min_bytes, common.sh); the same rule as before.
+	if [[ -n "$f" && -s "$f" ]] && file_min_bytes "$f" "${FANOUT_MIN_SCRAPE_BYTES:-512}"; then
 		out="$(awk '
 			function v(x, d) { return (x == "") ? "N/A" : sprintf("%.0f", x / d) }
 			/^#/ { next }
@@ -1173,7 +1170,8 @@ istiod_diag_report() {
 			|| printf '{"index_files":0,"rows":0,"repeat_rows":0,"untimed_rows":0,"by_cause":{},"untimed_by_cause":{},"captures":[]}\n'
 		;;
 	text | md | markdown)
-		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" -v files="${nfiles:-0}" '
+		# I7: every markdown cell through md_cell (MD_CELL_AWK, common.sh).
+		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" -v files="${nfiles:-0}" "$MD_CELL_AWK"'
 			function tl(o, a, c,    i, s) {
 				s = ""
 				for (i = 1; i <= c; i++) s = s (i > 1 ? ", " : "") o[i] "=" a[o[i]]
@@ -1213,7 +1211,7 @@ istiod_diag_report() {
 				for (i = 1; i <= n; i++) {
 					if (role[i] == "repeat") continue
 					c = cause[i] (role[i] == "untimed" ? " (untimed)" : "")
-					if (md) printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", rid[i], ctx[i], tag[i], pod[i], ch[i], c, ex[i], mem[i], ev[i]
+					if (md) printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", md_cell(rid[i]), md_cell(ctx[i]), md_cell(tag[i]), md_cell(pod[i]), md_cell(ch[i]), md_cell(c), md_cell(ex[i]), md_cell(mem[i]), md_cell(ev[i])
 					else printf "  %s | %s | %s | %s | %s | %s | exit=%s | rss_pre/limit=%s Mi | %s\n", rid[i], ctx[i], tag[i], pod[i], ch[i], c, ex[i], mem[i], ev[i]
 				}
 			}' || true

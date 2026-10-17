@@ -219,7 +219,8 @@ STUB
 		--output-dir "$RES"
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	grep -qx "# HARNESS_SHA=$(git -C "$ROOT" describe --always --dirty --abbrev=7)" "$f"
+	# A6: harness_sha (a dirty tree adds .<8hex> to -dirty).
+	grep -qx "# HARNESS_SHA=$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" "$f"
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"

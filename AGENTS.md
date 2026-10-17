@@ -29,7 +29,9 @@ Prefer it over generic upstream Istio docs when they disagree.
 - **Numbered scripts:** executable helpers in `tests/*/` and `terraform/*/scripts/` are named
   `NNN-kebab-case.sh` in execution order. When you add or renumber one, update every caller and
   README in the same change. Exception: `terraform/scripts/` holds helpers invoked by Terraform
-  `local-exec`; keep their names (generated kubeconfigs reference them).
+  `local-exec`; keep their names (generated kubeconfigs reference them). `tests/lib/` is not a
+  suite: its libraries and standalone tools (`verify.sh`, `redact-results.sh`) run in no order
+  and keep plain names.
 - **`--dry-run`:** scripts that change a cluster accept `--dry-run` and run it without a reachable
   cluster. Annotate with `# ci-dry-run: <args>` (or `# ci-dry-run-skip: <reason>`) so CI runs it.
 - **Version pins:**
@@ -87,7 +89,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`; bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`; bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |
@@ -95,8 +97,8 @@ Prefer it over generic upstream Istio docs when they disagree.
 ## Testing and verification
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
-  audit, bats, and every `# ci-dry-run:` script against an empty kubeconfig (no cluster needed).
-  Required before merging changes to `tests/lib/`.
+  audit, bats, the bare-scrape and keyed-array lints, and every `# ci-dry-run:` script against an
+  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.

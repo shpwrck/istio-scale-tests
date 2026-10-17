@@ -13,7 +13,35 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 Redact before you paste: the envelope, `sweep-outcome.txt` and the reports can name your kube
 contexts, and a note about a member that could not be read quotes kubectl's error, which can
 name its API host. Replace them with placeholders (`<mesh-a-ctx>`, `<api-host>`), as
-[AGENTS.md](../../AGENTS.md) requires for anything committed.
+[AGENTS.md](../../AGENTS.md) requires for anything committed:
+
+```bash
+tests/lib/redact-results.sh --dry-run tests/<suite>/results/sweep-<RUN_ID>   # what would change
+tests/lib/redact-results.sh --out /tmp/redacted tests/<suite>/results/sweep-<RUN_ID>
+```
+
+Paste from the copy under `/tmp/redacted`. It maps each context the TSV preambles name to
+`<mesh-a-ctx>`, `<mesh-b-ctx>`, ... (the mapping is printed on stderr only) and masks URLs, API
+and cluster host names, IPs, emails, AWS account ids and AWS resource ids (`vpc-`, `subnet-`,
+`sg-`, `i-`, `eni-`, `vol-`, `igw-`, `nat-`, `rtb-` with 8 or 17 hex digits). A file or dir
+whose name holds a context is renamed in the copy the same way, without the angle brackets
+(`istio-revert-mesh-a-ctx.json`); the renames are listed on stderr. It refuses (exit 1, file
+named) a file that still holds a context it was not told about; pass that one with
+`--context NAME`, and the hub with `--hub-context NAME`. Redact the whole sweep dir rather than
+one report, so the TSVs name every member. It never copies the raw `istiod-diag-*/NNN-*/`
+evidence.
+
+A person reads the copy, file names included, before it is committed. The script has no
+pattern for:
+
+- a context, cluster or node name that no metadata key names and no `--context` gives (in
+  prose, a log line or a file name);
+- host names and domains outside the suffixes it knows (`api.*`, `*.apps.*`,
+  `*.openshiftapps.com`, `*.amazonaws.com`, ...);
+- other AWS ids (`ami-`, `snap-`, `vpce-`, other lengths), the resource part of an ARN (only
+  its account id is masked), region and zone names;
+- user names outside `/home/<name>` and `/Users/<name>`;
+- tokens, passwords or other secrets that a log or an error message quotes.
 
 ## Records
 

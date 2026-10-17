@@ -227,7 +227,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
-[[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+[[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"

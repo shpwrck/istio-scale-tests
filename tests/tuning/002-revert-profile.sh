@@ -71,7 +71,7 @@ if [[ -z "$CONTEXTS_CSV" && -f "${STATE_DIR}/contexts" ]]; then
 	CONTEXTS_CSV="$(<"${STATE_DIR}/contexts")"
 fi
 CONTEXTS=()
-split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
+split_contexts "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS "--contexts (or SETUP_CONTEXTS, or the state dir's contexts file)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
 
 PROFILE_NAME="unknown"

@@ -5,7 +5,8 @@
 # harness_sha, probe_kube_versions, tuning_baseline_state per member)
 #
 # Exposes:
-#   harness_sha                                   -> `git -C "${ROOT:-.}" describe --always --dirty --abbrev=7` or "unknown"
+#   harness_sha                                   -> `git -C "${ROOT:-.}" describe --always --dirty --abbrev=7`,
+#       with `-dirty.<8hex>` naming the uncommitted content (A6), or "unknown"
 #   kube_versions <ctx> <kubectl_argv...>          -> kubectl server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
 #                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
@@ -23,8 +24,13 @@
 #                                                  -> A6: read it again at the end of a sweep;
 #       sweep_outcome arguments (--problem when the version or active revision changed,
 #       --note when unconfirmed or only readiness is off)
+#   istio_proxy_versions <ctxs_csv> <kubectl_argv...>
+#                                                  -> A7: ctx=<version>:<count>+...,... of the
+#       proxies connected to each member's istiod (pilot_xds by version), unknown per member
+#       when unreadable; istio_version_resolve exports it as ISTIO_PROXY_VERSIONS
 #   istio_version_kv                               -> ISTIO_VERSION=, ISTIO_VERSION_PIN=,
-#       ISTIO_VERSION_SOURCE=, ISTIO_VERSION_BY_CONTEXT= lines for every preamble writer (PL36)
+#       ISTIO_VERSION_SOURCE=, ISTIO_VERSION_BY_CONTEXT=, ... ISTIO_GENERATIONS=,
+#       ISTIO_PROXY_VERSIONS= lines for every preamble writer (PL36)
 #   istio_version_label                            -> the same for people (console, md rows)
 #   write_preamble <title> <tsv> <k=v...>          -> write `# <title>`, `# generated_at=`, then `# k=v` per arg (PL2, PL19)
 #   infra_preamble_lines <kv...>                   -> emit the cluster-infra `# KEY=value` block
@@ -59,12 +65,48 @@
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
 
+# harness_sha: the harness the run uses (PL2): `git -C "${ROOT:-.}" describe --always
+# --dirty --abbrev=7`, or unknown when git cannot name it. A6: a tree with uncommitted
+# changes (tracked files that differ from HEAD, or untracked files that are not ignored)
+# gets `-dirty.<8hex>`: `<describe>-dirty.<8hex>` (_harness_dirty_hash), so two different
+# uncommitted trees on one commit record two different values; the `-dirty` stays in it.
 # shellcheck disable=SC2329
 harness_sha() {
-	local sha
+	local sha h
 	sha="$(git -C "${ROOT:-.}" describe --always --dirty --abbrev=7 2>/dev/null || true)"
 	[[ -n "$sha" ]] || sha="unknown"
+	if [[ "$sha" != unknown ]]; then
+		h="$(_harness_dirty_hash)"
+		if [[ -n "$h" ]]; then
+			sha="${sha%-dirty}-dirty.${h}"
+		elif [[ "$sha" == *-dirty ]]; then
+			# The tree is dirty, but what makes it so could not be hashed.
+			sha+=".unknown"
+		fi
+	fi
 	printf '%s\n' "$sha"
+}
+
+# _harness_dirty_hash: 8 hex digits that name the uncommitted content of the tree under
+# ROOT: `git diff HEAD --binary` (every tracked change, staged or not, with fixed diff
+# options so a user's git config does not change it), then each untracked file that is not
+# ignored (`git ls-files -o --exclude-standard`), its path and its blob id, all through
+# `git hash-object --stdin` (git only: no sha256sum or shasum). Empty for a clean tree, and
+# when git fails.
+# shellcheck disable=SC2329
+_harness_dirty_hash() {
+	local root="${ROOT:-.}" d u f b h
+	d="$(git -C "$root" -c core.quotePath=true -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false \
+		diff HEAD --binary --no-ext-diff --no-textconv --no-color --no-renames 2>/dev/null | git hash-object --stdin 2>/dev/null)" || return 0
+	u="$(git -C "$root" ls-files -o --exclude-standard -z 2>/dev/null | while IFS= read -r -d '' f; do
+		b="$(git -C "$root" hash-object -- "$f" 2>/dev/null)" || b=unreadable
+		printf '%s\t%s\n' "$b" "$f"
+	done)" || return 0
+	# A clean tree: an empty diff and no untracked file.
+	[[ "$d" != "$(git hash-object --stdin </dev/null 2>/dev/null)" || -n "$u" ]] || return 0
+	h="$(printf 'diff %s\n%s\n' "$d" "$u" | git hash-object --stdin 2>/dev/null)" || return 0
+	[[ "$h" =~ ^[0-9a-f]{8} ]] || return 0
+	printf '%s\n' "${h:0:8}"
 }
 
 # Per-context Kubernetes server version probe. Honors PL2 semantics:
@@ -241,33 +283,49 @@ tuning_baseline_state() {
 # _istio_version_errline <file>: the first line of kubectl's stderr, as a why: without a
 # carriage return, without the klog prefix (M5: "E1017 10:00:00.000000   12345
 # memcache.go:265] ", different in every process, so members that fail alike group
-# together), at most 200 characters once its hosts are masked (P6: the line keeps them, and
-# is cut where its masked form is, so members whose host names differ in length still
-# group; at most 1000 characters in all).
+# together), with its API hosts and addresses masked (A8: _istio_version_mask; it goes into
+# the console, the outcome notes and the reports, never the host itself), at most 200
+# characters.
 _istio_version_errline() {
-	local ivel_raw ivel_key ivel_n
+	local ivel_raw
 	ivel_raw="$(head -n 1 "$1" | tr -d '\r' | sed -E 's/^[IWEF][0-9]{4} [0-9:.]+ +[0-9]+ [^]]+\] //')"
-	ivel_raw="${ivel_raw:0:1000}"
-	ivel_key="$(_istio_version_hostkey "$ivel_raw")"
-	ivel_n=$((${#ivel_raw} - ${#ivel_key} + 200))
-	((ivel_n > 0)) || ivel_n=200
-	((${#ivel_key} <= 200)) || ivel_raw="${ivel_raw:0:ivel_n}"
-	printf '%s\n' "$ivel_raw"
+	ivel_raw="$(_istio_version_mask "${ivel_raw:0:1000}")"
+	printf '%s\n' "${ivel_raw:0:200}"
 }
 
-# _istio_version_hostkey <why>: N4. <why> with URLs, the host after "lookup", the server of
-# "The connection to the server <host>:<port> was refused", IPv4 and IPv6 ([addr]) addresses
-# (with a port) and the context name kubectl does not find (P6, F5: each of its messages)
-# masked, as a grouping key: members whose reads fail the same way on their own API hosts
-# group into one entry. Never printed.
-_istio_version_hostkey() {
-	sed -E -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^ "]*#<url>#g' -e 's#lookup [^ :]+#lookup <host>#g' \
-		-e 's#the server [^ ]+ was refused#the server <host> was refused#g' \
-		-e 's#\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\](:[0-9]+)?#<ip>#g' \
+# _istio_version_mask <text>: A8. <text> with the hosts and addresses of kubectl's errors
+# masked, for anything that records it: a URL's host (https://<api-host>/...), the host
+# after "lookup" and after "dial tcp", the server of "The connection to the server
+# <host>:<port> was refused", any other host.domain:port, the names of an x509 "certificate
+# is valid for <names>, not <api-host>" (so members whose certificates differ group), IPv4
+# addresses and IPv6 ones in brackets (with :: or eight groups, so [a:b] or a bracketed
+# time stays) as <ip>. localhost and 127.0.0.1 stay as they are: "localhost:8080 was
+# refused" is kubectl without a kubeconfig context, not an API host refusing. Context
+# names stay (P6 masks them in the grouping key only).
+_istio_version_mask() {
+	sed -E -e 's#localhost#@LOCALHOST@#g' -e 's#127\.0\.0\.1#@LOOPBACK@#g' \
+		-e 's#([A-Za-z][A-Za-z0-9+.-]*://)(\[[0-9A-Fa-f:.]*\]|[^]/ "?:[]+)#\1<api-host>#g' \
+		-e 's#is valid for [^"]*, not [^ ",]+#is valid for <names>, not <api-host>#g' \
+		-e 's#lookup [^ :@]+#lookup <api-host>#g' \
+		-e 's#the server [^ @]+ was refused#the server <api-host> was refused#g' \
+		-e 's#\[[0-9A-Fa-f:.]*::[0-9A-Fa-f:.]*\](:[0-9]+)?#<ip>#g' \
+		-e 's#\[([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\](:[0-9]+)?#<ip>#g' \
+		-e 's#\[([0-9A-Fa-f]{1,4}:){6}[0-9]{1,3}(\.[0-9]{1,3}){3}\](:[0-9]+)?#<ip>#g' \
 		-e 's#(^|[^0-9.])[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?#\1<ip>#g' \
+		-e 's#dial tcp [A-Za-z][^ :]*#dial tcp <api-host>#g' \
+		-e 's#(^|[ ("'"'"'=])[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+:([0-9]+)#\1<api-host>:\3#g' \
+		-e 's#@LOCALHOST@#localhost#g' -e 's#@LOOPBACK@#127.0.0.1#g' <<<"$1"
+}
+
+# _istio_version_hostkey <why>: N4. <why> masked (_istio_version_mask: URLs, hosts, x509
+# names, IPv4 and IPv6 addresses) and with the context name kubectl does not find masked
+# too (P6, F5: each of its messages), as a grouping key: members whose reads fail the same
+# way on their own API hosts group into one entry. Never printed.
+_istio_version_hostkey() {
+	_istio_version_mask "$1" | sed -E \
 		-e 's#context "[^"]*" does not exist#context "<ctx>" does not exist#g' \
 		-e 's#no context exists with the name: "[^"]*"#no context exists with the name: "<ctx>"#g' \
-		-e 's#context was not found for specified context: [^ ]+#context was not found for specified context: <ctx>#g' <<<"$1"
+		-e 's#context was not found for specified context: [^ ]+#context was not found for specified context: <ctx>#g'
 }
 
 # istio_live_version <ctx> <kubectl_argv...>: the Istio version a mesh member RUNS, as
@@ -309,10 +367,27 @@ _istio_version_hostkey() {
 # that is not settled and whose IstioRevision read failed is kind read too (K1: its why
 # names the revision), unless it is migrating; so is a settled CR whose IstioRevision read
 # failed (its why starts "IstioRevision <rev>: ").
+# A5: with --generations, two more lines: the Istio CR's .metadata.generation and its
+# active IstioRevision's (empty when not read), from the same reads; a spec edit bumps
+# them (Sail's status.observedGeneration follows them), so istio_version_recheck sees an
+# edit that the version alone does not show (X->Y->X, a values change).
 # shellcheck disable=SC2329
 istio_live_version() {
-	local ctx="$1" errf out rc=0 gen ogen state inuse rev recon why="" kind=state ready="" rerr
-	local rver="" rv="" rns="" rvrev="" rgen="" rogen="" dep dgen dogen dreps dupd dterm
+	local ilv_gens=0 gen="" rgen=""
+	if [[ "${1:-}" == --generations ]]; then
+		ilv_gens=1
+		shift
+	fi
+	_istio_live_version_read "$@"
+	((ilv_gens == 0)) || printf '%s\n%s\n' "${gen//[^0-9]/}" "${rgen//[^0-9]/}"
+}
+
+# _istio_live_version_read <ctx> <kubectl_argv...>: istio_live_version's reads and its six
+# lines; sets the caller's gen and rgen.
+# shellcheck disable=SC2329
+_istio_live_version_read() {
+	local ctx="$1" errf out rc=0 ogen state inuse rev recon why="" kind=state ready="" rerr
+	local rver="" rv="" rns="" rvrev="" rogen="" dep dgen dogen dreps dupd dterm
 	shift
 	errf="$(mktemp)"
 	out="$("$@" --context="$ctx" --request-timeout=5s get istios.sailoperator.io default -o json 2>"$errf")" || rc=$?
@@ -434,7 +509,8 @@ istio_live_version() {
 }
 
 # _istio_version_read_all [--once] <dir> <ctxs_arrayname> <kubectl_argv...>:
-# istio_live_version for every member concurrently, into <dir>/<index> (index, not name: a
+# istio_live_version --generations for every member concurrently (its six lines, then the
+# two generations, A5), into <dir>/<index> (index, not name: a
 # context name can hold '/'). A member whose read failed (kind read) is read once more a
 # second later, unless --once (the readiness wait polls again anyway); a CR that answered
 # but is not settled is not retried (that is its state, not a blip).
@@ -449,7 +525,7 @@ _istio_version_read_all() {
 	local -a pids=() again=()
 	shift 2
 	for i in "${!_ivra_ctxs[@]}"; do
-		istio_live_version "${_ivra_ctxs[i]}" "$@" > "${dir}/${i}" &
+		istio_live_version --generations "${_ivra_ctxs[i]}" "$@" > "${dir}/${i}" &
 		pids+=($!)
 	done
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
@@ -462,7 +538,7 @@ _istio_version_read_all() {
 	sleep 1
 	pids=()
 	for i in "${again[@]}"; do
-		istio_live_version "${_ivra_ctxs[i]}" "$@" > "${dir}/${i}" &
+		istio_live_version --generations "${_ivra_ctxs[i]}" "$@" > "${dir}/${i}" &
 		pids+=($!)
 	done
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
@@ -496,8 +572,9 @@ _istio_version_repro() {
 # _istio_version_marker: the resolved values as one string. istio_version_resolve exports
 # it as _ISTIO_VERSION_RESOLVED; a step inherits a sweep's result only while it matches.
 _istio_version_marker() {
-	printf '%s|%s|%s|%s|%s|%s' "${ISTIO_VERSION_SOURCE:-}" "${ISTIO_VERSION_PIN:-}" "${ISTIO_VERSION:-}" \
-		"${ISTIO_VERSION_BY_CONTEXT:-}" "${ISTIO_NOTREADY_AT_START:-}" "${ISTIO_READY_WAITED_SEC:-}"
+	printf '%s|%s|%s|%s|%s|%s|%s|%s' "${ISTIO_VERSION_SOURCE:-}" "${ISTIO_VERSION_PIN:-}" "${ISTIO_VERSION:-}" \
+		"${ISTIO_VERSION_BY_CONTEXT:-}" "${ISTIO_NOTREADY_AT_START:-}" "${ISTIO_READY_WAITED_SEC:-}" \
+		"${ISTIO_GENERATIONS:-}" "${ISTIO_PROXY_VERSIONS:-}"
 }
 
 # istio_version_resolve [--no-stop] [--resumed-at <utc>] <ctxs_csv> <dry_run 0|1> <kubectl_argv...>:
@@ -522,6 +599,14 @@ _istio_version_marker() {
 #                             none when every member was ready, unchecked under --dry-run
 #                             (and when the check stopped unexpectedly, M1)
 #   ISTIO_READY_WAITED_SEC    how long that wait took (0 when nobody was waited for)
+#   ISTIO_GENERATIONS         A5: ctx=<Istio CR .metadata.generation>/<active IstioRevision
+#                             .metadata.generation>,... (unknown for a part not read;
+#                             unchecked under --dry-run), for istio_version_recheck and a
+#                             controlplane --resume (a spec edit bumps them)
+#   ISTIO_PROXY_VERSIONS      A7: the proxy versions connected to each member's istiod
+#                             (istio_proxy_versions; unchecked under --dry-run); a member
+#                             whose proxies are not all on its istiod's version gets a warning
+#                             here and a note in the sweep outcome (istio_version_recheck)
 # and, for istio_version_recheck, the private _ISTIO_VERSION_REVS (ctx=activeRevisionName,...).
 # --resumed-at <utc> (a controlplane --resume, J2): the run appends to a TSV whose preamble
 # keeps the first run's ISTIO_NOTREADY_AT_START, so istio_version_recheck reports this
@@ -538,7 +623,9 @@ _istio_version_marker() {
 # read keeps it in the wait; one more read after a rollout ends, J3, one poll past the
 # deadline when it ended on the last read before it, K2); its answer at the deadline
 # counts. A re-read that fails keeps its previous answer (Y2; a CR that answers not
-# settled is an answer, also when its IstioRevision read fails, K1). Still not ready:
+# settled is an answer, also when its IstioRevision read fails, K1), except the read that
+# confirms a rollout just ended (J3): without it the member is not ready, as
+# rollout-unconfirmed (A5), its version read, never the ok before it. Still not ready:
 # its version is recorded and a warning names the state, which never stops the run. Still
 # rolling: its version is unknown (old and new istiod pods both serve), which stops the
 # run under fail. Under fail, nothing is waited for when another member already stops the
@@ -582,6 +669,7 @@ istio_version_resolve() {
 	if ((dry)); then
 		export ISTIO_VERSION_SOURCE=pin ISTIO_VERSION_BY_CONTEXT=unchecked _ISTIO_VERSION_REVS=""
 		export ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked
+		export ISTIO_GENERATIONS=unchecked ISTIO_PROXY_VERSIONS=unchecked
 		export ISTIO_VERSION="$ISTIO_VERSION_PIN"
 		_ISTIO_VERSION_RESOLVED="$(_istio_version_marker)"
 		export _ISTIO_VERSION_RESOLVED
@@ -605,7 +693,7 @@ istio_version_resolve() {
 	if ((ivr_rc == 0)) && [[ "$(tail -n 1 "$ivr_res")" == END ]]; then
 		while IFS= read -r ivr_line; do
 			case "${ivr_line%%=*}" in
-			ISTIO_VERSION_SOURCE | ISTIO_VERSION_BY_CONTEXT | _ISTIO_VERSION_REVS | ISTIO_NOTREADY_AT_START | ISTIO_READY_WAITED_SEC | ISTIO_VERSION)
+			ISTIO_VERSION_SOURCE | ISTIO_VERSION_BY_CONTEXT | _ISTIO_VERSION_REVS | ISTIO_NOTREADY_AT_START | ISTIO_READY_WAITED_SEC | ISTIO_GENERATIONS | ISTIO_VERSION)
 				export "${ivr_line%%=*}=${ivr_line#*=}"
 				;;
 			esac
@@ -634,7 +722,12 @@ istio_version_resolve() {
 		for ivr_why in "${ivr_ctxs[@]}"; do ivr_line="${ivr_line:+${ivr_line},}${ivr_why}=unknown"; done
 		export ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT="$ivr_line" _ISTIO_VERSION_REVS=""
 		export ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked ISTIO_VERSION=unknown
+		export ISTIO_GENERATIONS="$ivr_line"
 	fi
+	# A7: the proxy versions each member's istiod serves, once the run goes on (never dies).
+	ISTIO_PROXY_VERSIONS="$(istio_proxy_versions "$ctxs_csv" "$@")"
+	export ISTIO_PROXY_VERSIONS
+	_istio_proxy_versions_warn
 	_ISTIO_VERSION_RESOLVED="$(_istio_version_marker)"
 	export _ISTIO_VERSION_RESOLVED
 }
@@ -673,7 +766,7 @@ _istio_version_resolve_live() {
 	split_csv "$ctxs_csv" ctxs
 	local tmp wtmp i j v kind prev why rev rver state by="" revs="" distinct="" bad=0 detail="" live problem="" fix="" envpin=""
 	local n_notready=0 n_rolling=0 n_read=0 n_unsettled=0 n_revread=0 n_depread=0 ivr_what nr_at_start="" t0 deadline elapsed=0 polls=0 nap doomed="" vset=""
-	local ivr_skipped=0 ivr_offpin="" ivr_stale="" allfail st rk label dre='Deployment ([a-z0-9.-]+)/([a-z0-9.-]+)'
+	local ivr_skipped=0 ivr_offpin="" ivr_stale="" allfail st rk label dre='Deployment ([a-z0-9.-]+)/([a-z0-9.-]+)' gens="" ivr_g1 ivr_g2
 	local ivr_over=0 ivr_rg ivr_rltail="" ivr_rlv ivr_rdg ivr_ok n_term=0 ivr_n ivr_rdep ivr_rdx
 	local -a ivr_sw=() ivr_rlk=() ivr_rdk=() ivr_opk=()
 	local -A ivr_rlm=() ivr_rlf=() ivr_rlw=() ivr_rlc=() ivr_rlt=() ivr_rdm=() ivr_rdf=() ivr_rdc=() ivr_opm=()
@@ -779,10 +872,16 @@ _istio_version_resolve_live() {
 	done
 	((polls == 0)) || elapsed=$((SECONDS - t0))
 	for i in "${!ctxs[@]}"; do
-		v="" kind="" why="" rev="" rver="" state=""
-		{ IFS= read -r v; IFS= read -r kind; IFS= read -r why; IFS= read -r rev; IFS= read -r rver; IFS= read -r state; } \
-			2>/dev/null < "${tmp}/${i}" || true
+		v="" kind="" why="" rev="" rver="" state="" ivr_g1="" ivr_g2=""
+		{ IFS= read -r v; IFS= read -r kind; IFS= read -r why; IFS= read -r rev; IFS= read -r rver; IFS= read -r state
+			IFS= read -r ivr_g1; IFS= read -r ivr_g2; } 2>/dev/null < "${tmp}/${i}" || true
 		[[ -n "$v" ]] || v=unknown
+		gens="${gens:+${gens},}${ctxs[i]}=${ivr_g1:-unknown}/${ivr_g2:-unknown}"
+		# K2 (A5): a rollout that ended, whose extra read (J3) never answered, is not ready:
+		# its old istiod pods may still serve; never the ok the read before it saw.
+		if [[ "$kind" == ok && -n "${ivr_settle[$i]:-}" ]]; then
+			kind=notready state=rollout-unconfirmed
+		fi
 		allfail=0
 		[[ -z "${ivr_rerr[$i]+x}" || -n "${ivr_rok[$i]:-}" ]] || allfail=1
 		if [[ "$kind" == rolling ]]; then
@@ -888,7 +987,7 @@ _istio_version_resolve_live() {
 			detail+=$'\n'"    reproduce: $(_istio_version_repro "${ivr_rdg%%|*}" "${ivr_rdf[$ivr_rdg]}" "$@")"
 		else
 			ivr_rdx=""
-			[[ -z "${ivr_rdd[$ivr_rdg]:-}" ]] || ivr_rdx="; shown for ${ivr_rdf[$ivr_rdg]}, the others name their own hosts"
+			[[ -z "${ivr_rdd[$ivr_rdg]:-}" ]] || ivr_rdx="; shown for ${ivr_rdf[$ivr_rdg]}, the others name their own contexts"
 			detail+=$'\n'"  ${ivr_rdm[$ivr_rdg]} (${ivr_rdc[$ivr_rdg]} members${ivr_rdx}): ${ivr_rdw[$ivr_rdg]}"
 			detail+=$'\n'"    reproduce (shown for ${ivr_rdf[$ivr_rdg]}): $(_istio_version_repro "${ivr_rdg%%|*}" "${ivr_rdf[$ivr_rdg]}" "$@")"
 		fi
@@ -1028,7 +1127,7 @@ _istio_version_resolve_live() {
 		} >&2
 	fi
 	printf '%s\n' "ISTIO_VERSION_SOURCE=live" "ISTIO_VERSION_BY_CONTEXT=${by}" "_ISTIO_VERSION_REVS=${revs}" \
-		"ISTIO_NOTREADY_AT_START=${nr_at_start:-none}" "ISTIO_READY_WAITED_SEC=${elapsed}" "ISTIO_VERSION=${live}" END
+		"ISTIO_NOTREADY_AT_START=${nr_at_start:-none}" "ISTIO_READY_WAITED_SEC=${elapsed}" "ISTIO_GENERATIONS=${gens}" "ISTIO_VERSION=${live}" END
 }
 
 # _istio_notready_notes <out_arrayname> <start|end|resume|first> <ctx=state,...>
@@ -1074,6 +1173,7 @@ _istio_notready_notes() {
 		label="$st"
 		[[ "$st" != rolling ]] || label="rolling (an istiod rollout in progress, or old istiod pods still terminating)"
 		[[ "$st" != unreadable ]] || label="unreadable (an istiod rollout at the first read, then every re-read failed)"
+		[[ "$st" != rollout-unconfirmed ]] || label="rollout-unconfirmed (an istiod rollout had just ended, and the read that confirms no old istiod pod still serves failed)"
 		n="${#pairs[@]} members"
 		((${#pairs[@]} > 1)) || n="1 member"
 		_inn_out+=(--note "not ready at the ${inn_at}: ${label} on ${n} (${members[$st]})")
@@ -1090,7 +1190,10 @@ _istio_notready_notes() {
 #                    reads another version: a version bump whose upgrade failed partway),
 #                    or is migrating between revisions (inUse > 1), or its revision's
 #                    version is not exact: its rows are not all from one version, a failed
-#                    sweep;
+#                    sweep; A5: or its Istio CR's or active IstioRevision's
+#                    .metadata.generation went up although the version and the revision
+#                    read the same (ISTIO_GENERATIONS at the start: a spec edit, also
+#                    X->Y->X);
 #   --note <msg>     R2: members still not ready (or rolling out) at the start, from
 #                    ISTIO_NOTREADY_AT_START (J2: at a --resume, its start time and its
 #                    own value as ISTIO_NOTREADY_AT_RESUME); the same version, but istiod
@@ -1100,7 +1203,8 @@ _istio_notready_notes() {
 #                    whose Istio CR is not settled at the end, or that was unknown at the
 #                    start (unconfirmed, not a failure; members are grouped by start
 #                    version and why: K8 for an istiod Deployment that alone could not be
-#                    read, L6 for the rest);
+#                    read, L6 for the rest); A7: proxies connected at the start on another
+#                    version than their istiod (ISTIO_PROXY_VERSIONS);
 #   --info <msg>     a --resume whose members were all ready when it started
 #                    (ISTIO_NOTREADY_AT_RESUME=none, with its start time; K6).
 # Nothing more when nothing was read live (ISTIO_VERSION_SOURCE pin, as under --dry-run).
@@ -1155,8 +1259,9 @@ _istio_version_recheck_live() {
 	[[ "${ISTIO_VERSION_SOURCE:-pin}" == live && -n "${ISTIO_VERSION_BY_CONTEXT:-}" ]] || return 0
 	{ (($#)) && command -v "$1" >/dev/null 2>&1; } || return 0
 	local -a ctxs=() start_v=() pairs=()
-	local -A start_rev=()
+	local -A start_rev=() start_gen=()
 	local pair tmp i v kind why rev rver state sv sr changed="" what="version" revonly=1 unconfirmed="" nr_end=""
+	local ivrc_g1 ivrc_g2 ivrc_sg ivrc_c0 ivrc_gch gchanged="" ivrc_off
 	local ivrc_k ivrc_m ivrc_w
 	local -a ivrc_dk=() ivrc_uk=()
 	local -A ivrc_dm=() ivrc_dw=() ivrc_dd=() ivrc_um=()
@@ -1168,14 +1273,16 @@ _istio_version_recheck_live() {
 	((${#ctxs[@]})) || return 0
 	IFS=, read -r -a pairs <<<"${_ISTIO_VERSION_REVS:-}"
 	for pair in ${pairs[@]+"${pairs[@]}"}; do start_rev["${pair%=*}"]="${pair##*=}"; done
+	IFS=, read -r -a pairs <<<"${ISTIO_GENERATIONS:-}"
+	for pair in ${pairs[@]+"${pairs[@]}"}; do [[ "$pair" != *=*/* ]] || start_gen["${pair%=*}"]="${pair##*=}"; done
 	tmp="$(mktemp -d)"
 	_istio_version_read_all "$tmp" ctxs "$@"
 	for i in "${!ctxs[@]}"; do
-		v="" kind="" why="" rev="" rver="" state=""
-		{ IFS= read -r v; IFS= read -r kind; IFS= read -r why; IFS= read -r rev; IFS= read -r rver; IFS= read -r state; } \
-			2>/dev/null < "${tmp}/${i}" || true
+		v="" kind="" why="" rev="" rver="" state="" ivrc_g1="" ivrc_g2=""
+		{ IFS= read -r v; IFS= read -r kind; IFS= read -r why; IFS= read -r rev; IFS= read -r rver; IFS= read -r state
+			IFS= read -r ivrc_g1; IFS= read -r ivrc_g2; } 2>/dev/null < "${tmp}/${i}" || true
 		[[ -n "$v" ]] || v=unknown
-		sv="${start_v[i]}" sr="${start_rev[${ctxs[i]}]:-}"
+		sv="${start_v[i]}" sr="${start_rev[${ctxs[i]}]:-}" ivrc_sg="${start_gen[${ctxs[i]}]:-}" ivrc_c0="$changed"
 		if [[ "$sv" == unknown ]]; then
 			# N5: grouped by the version they read at the end (one entry per version).
 			if [[ "$v" != unknown ]]; then
@@ -1241,6 +1348,19 @@ _istio_version_recheck_live() {
 			ivrc_dm[$ivrc_k]="${ivrc_dm[$ivrc_k]:+${ivrc_dm[$ivrc_k]}, }${ctxs[i]}"
 			;;
 		esac
+		# A5: the same version and active revision at both ends, but a spec edited between
+		# them (X->Y->X, a values change): its generation went up. A member already counted
+		# as changed, or a generation not read at either end, is not compared.
+		if [[ "$changed" == "$ivrc_c0" && "$ivrc_sg" == */* ]]; then
+			ivrc_gch=""
+			if [[ "${ivrc_sg%%/*}" =~ ^[0-9]+$ && "$ivrc_g1" =~ ^[0-9]+$ && "${ivrc_sg%%/*}" != "$ivrc_g1" ]]; then
+				ivrc_gch="its Istio CR default (generation ${ivrc_sg%%/*} at the start, ${ivrc_g1} at the end)"
+			fi
+			if [[ -n "$sr" && "$rev" == "$sr" && "${ivrc_sg#*/}" =~ ^[0-9]+$ && "$ivrc_g2" =~ ^[0-9]+$ && "${ivrc_sg#*/}" != "$ivrc_g2" ]]; then
+				ivrc_gch+="${ivrc_gch:+ and }its IstioRevision ${rev} (generation ${ivrc_sg#*/} at the start, ${ivrc_g2} at the end)"
+			fi
+			[[ -z "$ivrc_gch" ]] || gchanged+="${gchanged:+; }${ctxs[i]}: ${ivrc_gch}"
+		fi
 	done
 	rm -rf "$tmp"
 	for v in ${ivrc_uk[@]+"${ivrc_uk[@]}"}; do
@@ -1254,7 +1374,7 @@ _istio_version_recheck_live() {
 		kind="${ivrc_k%%|*}" why="${ivrc_k#*|}"
 		sv="${why%%|*}" why="${why#*|}"
 		rver="${why%%|*}" why="${ivrc_dw[$ivrc_k]:-}" ivrc_m="${ivrc_dm[$ivrc_k]}"
-		[[ -z "${ivrc_dd[$ivrc_k]:-}" ]] || why+=" (shown for ${ivrc_m%%, *}; the others name their own hosts)"
+		[[ -z "${ivrc_dd[$ivrc_k]:-}" ]] || why+=" (shown for ${ivrc_m%%, *}; the others name their own contexts)"
 		if [[ "$kind" == st ]]; then
 			unconfirmed+="${unconfirmed:+; }${ivrc_m} ran ${sv} at the start, and at the end ${why}"
 		elif [[ "$kind" == rd ]]; then
@@ -1269,11 +1389,142 @@ _istio_version_recheck_live() {
 	if [[ -n "$changed" ]]; then
 		_ivrc_out+=(--problem "the Istio ${what} changed during the sweep (${changed}); its rows are not all from ISTIO_VERSION=${ISTIO_VERSION}")
 	fi
+	if [[ -n "$gchanged" ]]; then
+		_ivrc_out+=(--problem "the Istio CR or its IstioRevision was edited during the sweep, though the version and active revision read the same at the end (${gchanged}; ISTIO_GENERATIONS): a version changed and changed back, or a values change, so its rows may not all come from one control-plane configuration")
+	fi
+	# A7: proxies on another version than their istiod at the start (a NOTE, never a stop).
+	ivrc_off="$(_istio_proxy_versions_off)"
+	if [[ -n "$ivrc_off" ]]; then
+		_ivrc_out+=(--note "proxies on another Istio version than their istiod were connected at the start (${ivrc_off}; ISTIO_PROXY_VERSIONS): a sidecar keeps the version it was injected with until its pod restarts, so part of the traffic and xDS load came from it")
+	fi
 	_istio_notready_notes _ivrc_out end "$nr_end"
 	if [[ -n "$unconfirmed" ]]; then
 		_ivrc_out+=(--note "the Istio version at the end of the sweep is unconfirmed: ${unconfirmed}")
 	fi
 	return 0
+}
+
+# istio_proxy_versions <ctxs_csv> <kubectl_argv...>: A7. The proxy (Envoy: sidecar and
+# gateway) versions connected to each member's istiod, as one line
+# ctx=<version>:<count>+<version>:<count>,... (most proxies first), the value of
+# ISTIO_PROXY_VERSIONS. Source: istiod's pilot_xds gauge, labelled version (istio/istio
+# 1.30.5 pilot/pkg/xds/monitoring.go: versionTag = monitoring.CreateLabel("version"),
+# xdsClients = monitoring.NewGauge("pilot_xds", ...); ads.go records it per connection with
+# the proxy's ISTIO_VERSION metadata, +1 on connect, -1 on close), summed over the member's
+# Running istiod pods (`-l app=istiod` in istio-system: a proxy connects to one replica;
+# every revision's istiod), each read through the API server's pod proxy (`kubectl get
+# --raw /api/v1/namespaces/istio-system/pods/<pod>:15014/proxy/metrics`, no port-forward)
+# bounded by --request-timeout (METRICS_SCRAPE_TIMEOUT, the pod list 5s). Series at 0 (their
+# proxies left) are left out; a proxy that reported no version counts as unset. A member
+# reads none when no proxy is connected, unknown when its istiod pods could not be listed,
+# it has none Running, or one pod's metrics could not be read (a partial sum could hide a
+# version). Members, and each member's pods, are read concurrently: one pod list, then one
+# read per pod, at the 20-member scale too. Never dies.
+# shellcheck disable=SC2329
+istio_proxy_versions() {
+	local ctxs_csv="$1" ipv_dir ipv_to="${METRICS_SCRAPE_TIMEOUT:-30}" i p v out=""
+	shift
+	local -a ipv_ctxs=() ipv_pids=()
+	split_csv "$ctxs_csv" ipv_ctxs
+	is_pos_int "$ipv_to" || ipv_to=30
+	if ! ipv_dir="$(mktemp -d 2>/dev/null)"; then
+		for i in "${!ipv_ctxs[@]}"; do out="${out:+${out},}${ipv_ctxs[i]}=unknown"; done
+		printf '%s\n' "$out"
+		return 0
+	fi
+	for i in "${!ipv_ctxs[@]}"; do
+		_istio_proxy_versions_one "${ipv_ctxs[i]}" "$ipv_to" "${ipv_dir}/${i}.d" "$@" > "${ipv_dir}/${i}" 2>/dev/null &
+		ipv_pids+=($!)
+	done
+	for p in ${ipv_pids[@]+"${ipv_pids[@]}"}; do wait "$p" 2>/dev/null || true; done
+	for i in "${!ipv_ctxs[@]}"; do
+		v="$(head -n 1 "${ipv_dir}/${i}" 2>/dev/null || true)"
+		[[ "$v" =~ ^(none|unknown|[A-Za-z0-9._-]+:[0-9]+(\+[A-Za-z0-9._-]+:[0-9]+)*)$ ]] || v=unknown
+		out="${out:+${out},}${ipv_ctxs[i]}=${v}"
+	done
+	rm -rf "$ipv_dir"
+	printf '%s\n' "$out"
+}
+
+# _istio_proxy_versions_one <ctx> <timeout_sec> <workdir> <kubectl_argv...>: one member's
+# value for istio_proxy_versions.
+# shellcheck disable=SC2329
+_istio_proxy_versions_one() {
+	local ctx="$1" to="$2" d="$3" pods p n=0 bad=0
+	shift 3
+	local -a pids=()
+	pods="$("$@" --context="$ctx" --request-timeout=5s -n istio-system get pods -l app=istiod \
+		--field-selector=status.phase=Running -o name 2>/dev/null)" || { echo unknown; return 0; }
+	mkdir -p "$d" 2>/dev/null || { echo unknown; return 0; }
+	while IFS= read -r p; do
+		p="${p#pod/}"
+		[[ -n "$p" ]] || continue
+		[[ "$p" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || { bad=1; continue; }
+		n=$((n + 1))
+		"$@" --context="$ctx" --request-timeout="${to}s" get --raw "/api/v1/namespaces/istio-system/pods/${p}:15014/proxy/metrics" > "${d}/${n}" 2>/dev/null &
+		pids+=($!)
+	done <<<"$pods"
+	for p in ${pids[@]+"${pids[@]}"}; do wait "$p" 2>/dev/null || bad=1; done
+	if ((n == 0 || bad)); then
+		echo unknown
+		return 0
+	fi
+	# Every body must be Prometheus text (an istiod with no proxy may export no pilot_xds).
+	for ((p = 1; p <= n; p++)); do grep -q '^# TYPE ' "${d}/${p}" 2>/dev/null || { echo unknown; return 0; }; done
+	cat "${d}"/* | awk '
+		/^pilot_xds[{ ]/ {
+			v = "unset"
+			if (match($0, /version="[^"]*"/)) v = substr($0, RSTART + 9, RLENGTH - 10)
+			if (v == "" || v !~ /^[A-Za-z0-9._-]+$/) v = (v == "" ? "unset" : "invalid")
+			line = $0
+			sub(/^[^ ]*\} */, "", line)
+			sub(/^pilot_xds +/, "", line)
+			split(line, f, " ")
+			if (!(v in sum)) order[++nv] = v
+			sum[v] += f[1] + 0
+		}
+		END {
+			for (i = 1; i <= nv; i++) if (sum[order[i]] >= 0.5) { k[++m] = order[i] }
+			for (i = 2; i <= m; i++) { x = k[i]; for (j = i - 1; j >= 1 && (sum[k[j]] < sum[x] || (sum[k[j]] == sum[x] && k[j] > x)); j--) k[j + 1] = k[j]; k[j + 1] = x }
+			if (m == 0) { print "none"; exit }
+			for (i = 1; i <= m; i++) printf "%s%s:%d", (i > 1 ? "+" : ""), k[i], sum[k[i]] + 0.5
+			printf "\n"
+		}'
+}
+
+# _istio_proxy_versions_off: A7. The members whose connected proxies are not all on the
+# version their istiod runs (ISTIO_PROXY_VERSIONS against ISTIO_VERSION_BY_CONTEXT, a
+# leading v ignored), as "ctx (istiod v): <count> on <version>, ...; ...", or nothing.
+# Members whose version or proxies are unknown are left out.
+# shellcheck disable=SC2329
+_istio_proxy_versions_off() {
+	awk -v pv="${ISTIO_PROXY_VERSIONS:-}" -v by="${ISTIO_VERSION_BY_CONTEXT:-}" 'BEGIN {
+		n = split(by, p, ",")
+		for (i = 1; i <= n; i++) if (match(p[i], /=[^=]*$/)) { v = substr(p[i], RSTART + 1); sub(/^v/, "", v); mv[substr(p[i], 1, RSTART - 1)] = v }
+		n = split(pv, p, ",")
+		for (i = 1; i <= n; i++) {
+			if (!match(p[i], /=[^=]*$/)) continue
+			c = substr(p[i], 1, RSTART - 1); l = substr(p[i], RSTART + 1)
+			if (!(c in mv) || mv[c] == "unknown" || mv[c] ~ /^mixed:/ || l == "none" || l == "unknown") continue
+			m = split(l, e, "+"); o = ""
+			for (j = 1; j <= m; j++) {
+				q = e[j]; k = q; sub(/:[0-9]+$/, "", k); cnt = substr(q, length(k) + 2)
+				kk = k; sub(/^v/, "", kk)
+				if (kk != mv[c]) o = o (o == "" ? "" : ", ") cnt " on " k
+			}
+			if (o != "") out = out (out == "" ? "" : "; ") c " (istiod " mv[c] "): " o
+		}
+		print out
+	}'
+}
+
+# _istio_proxy_versions_warn: A7. At the start, a warning (never a stop) for members whose
+# proxies are not all on their istiod's version.
+# shellcheck disable=SC2329
+_istio_proxy_versions_warn() {
+	local off
+	off="$(_istio_proxy_versions_off)"
+	[[ -z "$off" ]] || echo "warning: proxies on another Istio version than their istiod are connected (${off}; ISTIO_PROXY_VERSIONS): a sidecar keeps the version it was injected with until its pod restarts. The run goes on; the sweep outcome notes it, and the preambles record ISTIO_PROXY_VERSIONS." >&2
 }
 
 # istio_version_kv: the Istio version keys every preamble writer records (PL36), as
@@ -1284,11 +1535,16 @@ _istio_version_recheck_live() {
 # none; unchecked), ISTIO_READY_WAITED_SEC (how long the start waited; unchecked) and
 # ISTIO_ACTIVE_REVISIONS (N13: ctx=<activeRevisionName>,... as read at the start, empty
 # for a member whose Istio CR did not name one; unknown when nothing was read on a live
-# check that stopped unexpectedly; unchecked when not read live).
+# check that stopped unexpectedly; unchecked when not read live), ISTIO_GENERATIONS (A5:
+# ctx=<Istio CR generation>/<active IstioRevision generation>,...) and ISTIO_PROXY_VERSIONS
+# (A7: ctx=<version>:<count>+...,..., none or unknown per member; istio_proxy_versions),
+# both unchecked when not read live.
 # shellcheck disable=SC2329
 istio_version_kv() {
-	local ivk_revs=unchecked
-	if [[ "${ISTIO_VERSION_SOURCE:-pin}" == live ]]; then ivk_revs="${_ISTIO_VERSION_REVS:-unknown}"; fi
+	local ivk_revs=unchecked ivk_gens=unchecked ivk_pv=unchecked
+	if [[ "${ISTIO_VERSION_SOURCE:-pin}" == live ]]; then
+		ivk_revs="${_ISTIO_VERSION_REVS:-unknown}" ivk_gens="${ISTIO_GENERATIONS:-unknown}" ivk_pv="${ISTIO_PROXY_VERSIONS:-unknown}"
+	fi
 	echo "ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
 	echo "ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN:-${ISTIO_VERSION:-unknown}}"
 	echo "ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE:-pin}"
@@ -1296,6 +1552,8 @@ istio_version_kv() {
 	echo "ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START:-unchecked}"
 	echo "ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC:-unchecked}"
 	echo "ISTIO_ACTIVE_REVISIONS=${ivk_revs}"
+	echo "ISTIO_GENERATIONS=${ivk_gens}"
+	echo "ISTIO_PROXY_VERSIONS=${ivk_pv}"
 }
 
 # istio_version_label: ISTIO_VERSION for people (console lines, per-run markdown rows):

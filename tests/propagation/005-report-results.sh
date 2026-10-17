@@ -2,23 +2,31 @@
 # Post-process propagation test TSV files into summary statistics.
 # Groups results by mesh_size to compare propagation latency across cluster counts.
 #
-# Filtering policy (rows excluded from numeric aggregation):
-#   - restarted == 1            (istiod restart mid-iteration; counters reset)
-#   - restarted == unknown      (process_start_time_seconds missing — can't tell)
-#   - p1_overflow == 1          (samples landed in +Inf bucket; quantiles unsafe)
-#   - status != OK              (TIMEOUT_*, DRAIN_TIMEOUT, RESTART, SCRAPE_INCOMPLETE)
-#   - scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 19; default 1000)
+# Filtering policy (one definition, prop_drop_reason in tests/lib/propagation.sh). P2 and
+# P3 are measured on a remote, so a row's P2/P3 are excluded only for that remote's side:
+#   - remote_status != OK       (field 22: its istiod RESTART or RESTART_UNKNOWN, a P2/P3
+#                                timeout, its sidecar's DRAIN_TIMEOUT, SCRAPE_INCOMPLETE)
+#   - remote_scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 23; default 1000)
+# never for the source's restart, P1 timeout or p1_overflow (I6). A TSV from before fields
+# 22-23 cannot split the row by side: status != OK, restarted == 1|unknown, or
+# scrape_skew_ms (field 19) over the ceiling drop it, p1_overflow does not.
 # p2_ms values are also excluded when p2_dirty == 1 (EDS pushed but the canary
 # never went healthy on that remote's watcher; could be unrelated churn).
 # Reports both n_total (rows considered) and n_valid (rows used). The P1 phases
-# (P1_local_wall, P1_conv_*) take one sample per iteration, from its first valid row:
-# P1 is measured on the source once per iteration and repeated on every remote's row
-# (prop_p1_first in tests/lib/propagation.sh), so their n_total and n_valid both count
-# iterations (distinct run_id, iteration), as 002's summary does (M1).
+# (P1_local_wall, P1_conv_*) take one sample per iteration: P1 is measured on the source
+# once per iteration and repeated on every remote's row (prop_p1_first in
+# tests/lib/propagation.sh), so their n_total and n_valid both count iterations (distinct
+# run_id, iteration), as 002's summary does (M1). An iteration's P1 is left out only for a
+# source-side reason (fields 20 p1_status and 21 p1_scrape_skew_ms, and p1_overflow), never
+# because its remote rows failed (B2); a TSV from before field 20 takes it from the first row
+# with status OK, restarted=0, no p1_overflow and skew within the ceiling.
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION and its
 # ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE / ISTIO_VERSION_BY_CONTEXT, the start-of-run
-# readiness ISTIO_NOTREADY_AT_START / ISTIO_READY_WAITED_SEC, KUBE_VERSIONS, SETTLE_SEC,
+# readiness ISTIO_NOTREADY_AT_START / ISTIO_READY_WAITED_SEC, each member's active
+# revision ISTIO_ACTIVE_REVISIONS, its Istio CR / IstioRevision generations
+# ISTIO_GENERATIONS and connected proxy versions ISTIO_PROXY_VERSIONS (unknown for a TSV
+# written before them; mixed when pooled inputs differ), KUBE_VERSIONS, SETTLE_SEC,
 # POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all report formats, plus RUN_CONFIG /
 # RUN_CONFIG_SHA256 (the --config behind the inputs) over all input TSVs.
 #
@@ -90,7 +98,9 @@ TSV columns consumed (positions are stable; new columns appended):
   5  remote_ctx        6  t0_epoch_ns     7  p1_ms           8  p2_ms
   9  p3_ms            10  status         11  p1_conv_p50_ms 12  p1_conv_p99_ms
  13  p1_sample_count  14  p1_proxy_count 15  p1_overflow    16  restarted
- 17  p2_dirty         18  window_ms      19  scrape_skew_ms
+ 17  p2_dirty         18  window_ms      19  scrape_skew_ms 20  p1_status
+ 21  p1_scrape_skew_ms                  22  remote_status  23  remote_scrape_skew_ms
+(older TSVs: 18, 19 or 21 columns; 006's SETUP_FAILED/PROBE_FAILED rows use all 23)
 
 Phases emitted in the report:
   P1_local_wall  wall-clock ms (p1_ms) from the t0 active-label flip until the
@@ -103,12 +113,24 @@ Phases emitted in the report:
   P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
   P3_dataplane   watcher Envoy /clusters detection (ms).
 
-Filtering policy (rows excluded from numeric aggregation):
-  restarted == 1 or unknown
-  p1_overflow == 1
-  status != OK   (TIMEOUT_*, DRAIN_TIMEOUT, RESTART, SCRAPE_INCOMPLETE)
-  scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS
+Filtering policy (rows excluded from numeric aggregation): P2 and P3 are measured
+on a remote, so a row's P2/P3 are left out only for that remote's side:
+  remote_status (field 22) != OK   (its istiod RESTART or RESTART_UNKNOWN, a P2 or
+                                    P3 timeout, its sidecar's DRAIN_TIMEOUT,
+                                    SCRAPE_INCOMPLETE of its scrape)
+  remote_scrape_skew_ms (field 23) > FANOUT_MAX_SKEW_MS
+never for the source's restart, P1 timeout or p1_overflow. A row with no remote
+(remote_status N/A) measures P1 only. A TSV without field 22 (21 or fewer
+columns) cannot split a row by side: status != OK, restarted == 1 or unknown,
+or scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS drops it; p1_overflow does not.
 P2 values are additionally suppressed when p2_dirty == 1.
+P1 phases (one sample per iteration, measured on the source) use the source side
+only: an iteration's P1 is left out when p1_status (field 20) is not OK
+(TIMEOUT_P1, RESTART, RESTART_UNKNOWN, DRAIN_TIMEOUT of the source sidecar,
+SCRAPE_INCOMPLETE of a source scrape), p1_overflow == 1, or p1_scrape_skew_ms
+(field 21) > FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it. A
+TSV without field 20 (written before it) takes P1 from the iteration's first row
+with status OK, restarted 0, p1_overflow 0 and scrape_skew_ms within the ceiling.
 
 n_total / n_valid: rows considered vs rows used after the above filtering; for
 the P1 phases, iterations (P1 is one sample per iteration, as 002's summary counts it).
@@ -120,14 +142,19 @@ changed, the cause, the evidence folder relative to the results dir) and a tally
 cause; restarted_untimed rows (may predate the window) are counted apart (json key
 istiod_diag).
 
-When the results dir holds sweep-outcome.txt (006 writes it at the end of a sweep),
+When the results dir holds sweep-outcome.txt (006 writes it),
 every format repeats it, with the run that recorded it: the failed cells by reason, its
 problems (the Istio version or active revision changed under the sweep) and notes
-(members not ready at its start or end); a sweep dir without it is a sweep that died
-before its end.
+(members not ready at its start or end). The sweep writes it at its start as "not
+finished" (EXIT=unfinished) and replaces it at its end: a record still not finished is
+a sweep that died or still runs, or (I5) one interrupted, with when and by which signal;
+one that stopped on an error after its start shows the stop and its reason. A sweep dir
+without the file is from a sweep that stopped before its start (nothing ran), or from
+an older harness.
 
 Environment:
-  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the field-19 filter (default 1000).
+  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the skew filters above: fields 21 and
+                      23, or 19 in an older TSV (default 1000).
   PROPAGATION_PERCENTILE_MIN_N  Minimum sample count before p95/p99 are reported
                       (default 20; 0 disables). Below it p95/p99 are N/A
                       (null in JSON). p50 is always reported.
@@ -193,7 +220,7 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
 # over every input (config_merged_preamble): one value, or mixed:a,b with a warning.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -411,6 +438,8 @@ format_preamble_json() {
 #  11 p1_conv_p50_ms  12 p1_conv_p99_ms  13 p1_sample_count
 #  14 p1_proxy_count  15 p1_overflow     16 restarted
 #  17 p2_dirty (new)  18 window_ms       19 scrape_skew_ms
+#  20 p1_status       21 p1_scrape_skew_ms (B2: the source-side P1 verdict)
+#  22 remote_status   23 remote_scrape_skew_ms (I6: the remote-side P2/P3 verdict)
 #
 # Pre-branch TSVs have NF=18 (no p2_dirty column); the missing column is
 # default-filled to "0" (clean), which keeps legacy reports identical.
@@ -434,30 +463,33 @@ NF < 10 { next }
 	# distinct (run_id, iteration) per mesh size, kept or dropped, as the 002 summary does.
 	if (!((ms, $1, $3) in p1_iter_seen)) { p1_iter_seen[ms, $1, $3] = 1; p1_total[ms]++ }
 
-	# Which rows count: prop_drop_reason (tests/lib/propagation.sh), the definition
-	# 002 summarizes its own rows with (R6). It drops restarted=1|unknown, p1_overflow=1,
-	# any non-OK status, and (R2 reproducibility fallback) a pre-gate row written OK
-	# whose recorded scrape_skew_ms exceeds the current FANOUT_MAX_SKEW_MS.
+	# P1 phases, before the row filter: one sample per iteration (prop_p1_first), not one
+	# per remote row (D1), left out only for a source-side reason (B2).
+	if (prop_p1_sample(MAXSKEW)) {
+		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = $7 + 0
+	}
+	if (prop_p1_first(MAXSKEW) && cp50 ~ /^[0-9]+$/) {
+		cp50_n[ms]++; cp50_vals[ms, cp50_n[ms]] = cp50 + 0
+	}
+	if (prop_p1_first(MAXSKEW) && cp99 ~ /^[0-9]+$/) {
+		cp99_n[ms]++; cp99_vals[ms, cp99_n[ms]] = cp99 + 0
+	}
+
+	# Which rows count for P2/P3: prop_drop_reason (tests/lib/propagation.sh), the
+	# definition 002 summarizes its own rows with (R6). It reads the remote side only
+	# (remote_status, remote_scrape_skew_ms; I6); a TSV from before them: any non-OK
+	# status, restarted=1|unknown, and (R2 reproducibility fallback) a pre-gate row written
+	# OK whose recorded scrape_skew_ms exceeds the current FANOUT_MAX_SKEW_MS.
 	if (prop_drop_reason(MAXSKEW) != "") next
 
 	n_valid[ms]++
 
-	# P1 phases: one sample per iteration (prop_p1_first), not one per remote row (D1).
-	if (prop_p1_sample()) {
-		p1_n[ms]++; p1_vals[ms, p1_n[ms]] = $7 + 0
-	}
 	# prop_p2_sample skips a dirty p2 (EDS bumped but P3 did not succeed).
 	if (prop_p2_sample()) {
 		p2_n[ms]++; p2_vals[ms, p2_n[ms]] = $8 + 0
 	}
 	if (prop_p3_sample()) {
 		p3_n[ms]++; p3_vals[ms, p3_n[ms]] = $9 + 0
-	}
-	if (prop_p1_first() && cp50 ~ /^[0-9]+$/) {
-		cp50_n[ms]++; cp50_vals[ms, cp50_n[ms]] = cp50 + 0
-	}
-	if (prop_p1_first() && cp99 ~ /^[0-9]+$/) {
-		cp99_n[ms]++; cp99_vals[ms, cp99_n[ms]] = cp99 + 0
 	}
 }
 # phase_total: the n_total of a phase row: iterations for the P1 phases, rows otherwise.
@@ -622,14 +654,23 @@ glossary_section() {
 Definitions for every phase and statistic column in the tables above (see also
 `tests/propagation/README.md`). Each phase measures one stage of a single config change
 propagating across the mesh; all values are **milliseconds**. Remote phases (P2/P3) are
-undefined at mesh size 1 (no remote cluster). Rows are dropped (not counted in `n_valid`)
-when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additionally drops
-`p2_dirty=1` rows (an EDS bump not confirmed by the remote sidecar going healthy).
+undefined at mesh size 1 (no remote cluster). P2 and P3 are measured on a remote, so a row
+is dropped from them (not counted in `n_valid`) only for that remote's side: `remote_status
+!= OK` (its istiod restarted or unknown, a P2 or P3 timeout, its sidecar's drain timeout, its
+scrape incomplete) or `remote_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`, never for the
+source's restart, P1 timeout or `p1_overflow`. A TSV without `remote_status` cannot split a row
+by side: `status != OK`, `restarted ∈ {1, unknown}` or a high `scrape_skew_ms` drop it. P2
+additionally drops `p2_dirty=1` rows (an EDS bump not confirmed by the remote sidecar going
+healthy). The P1
+phases are measured on the source, so only the source side drops an iteration's P1:
+`p1_status != OK` (a P1 timeout, a source istiod restart or unknown restart state, a source
+sidecar drain timeout, a source scrape that failed), `p1_overflow=1`, or `p1_scrape_skew_ms`
+over `FANOUT_MAX_SKEW_MS`; a remote that timed out or restarted does not.
 
 | Phase | Units | Source | Definition / caveats |
 |-------|-------|--------|----------------------|
 | `P1_local_wall` | ms (wall clock) | timing + source `pilot_proxy_convergence_time` | Time from the t0 active-label flip until the source istiod has pushed the change to all connected proxies (delta `_count` reaches proxy count). |
-| `P1_conv_p50` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p50 of the per-bucket convergence-time delta in the window; bucket range (boundaries 100/500/1000/3000/5000/10000/20000/30000 ms); `N/A` if restarted or below the p50 min-sample floor. A row whose window put any sample in `+Inf` (`p1_overflow=1`) is dropped, so `overflow` never reaches this table: it shows as `n_valid < n_total`. |
+| `P1_conv_p50` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p50 of the per-bucket convergence-time delta in the window; bucket range (boundaries 100/500/1000/3000/5000/10000/20000/30000 ms); `N/A` if restarted or below the p50 min-sample floor. An iteration whose window put any sample in `+Inf` (`p1_overflow=1`) is dropped from the P1 phases (never from P2/P3), so `overflow` never reaches this table: it shows as `n_valid < n_total`. |
 | `P1_conv_p99` | ms (bucket range) | source `pilot_proxy_convergence_time` histogram delta | p99 of the convergence-time delta; same bucket-range and overflow handling; `N/A` if restarted or below the p99 min-sample floor (`PROPAGATION_PERCENTILE_MIN_N`). |
 | `P2_discovery` | ms (wall clock) | remote `pilot_xds_pushes{type="eds"}` counter delta | Time until the remote istiod pushes EDS for the new endpoint (control-plane discovery); excluded when `p2_dirty=1`. |
 | `P3_dataplane` | ms (wall clock) | remote watcher Envoy `/clusters` | Time until the remote sidecar reports the canary endpoint healthy (full data-plane apply); typically ~10× P1/P2. |
@@ -637,7 +678,7 @@ when `restarted ∈ {1, unknown}`, `p1_overflow=1`, or `status != OK`; P2 additi
 | Stat column | Definition |
 |-------------|------------|
 | `n_total` | All rows considered for the phase/mesh size, kept or dropped. For the P1 phases, iterations (distinct run_id and iteration, as the probe's summary counts them), so a clean run reads `n_total == n_valid` and an overflowed iteration shows as one less `n_valid`. |
-| `n_valid` | Samples used for the statistics: rows surviving the drop filters above. For the P1 phases, iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so it counts once, from the iteration's first valid row. |
+| `n_valid` | Samples used for the statistics: rows surviving the drop filters above. For the P1 phases, iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so it counts once per iteration whose source side is clean (from the iteration's first valid row in a TSV without `p1_status`). |
 | `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean (rounded to ms) latency across the `n_valid` samples. A histogram row (`P1 conv_*`) has no average (`-`): the mean of bucket bounds can land in a bucket no row hit, so read `max` (the worst bucket). CSV and JSON keep the numbers and add `worst_bucket`, the range of `max_ms`, for those phases. |
 | `p50_ms` / `p95_ms` / `p99_ms` | Nearest-rank percentiles across the `n_valid` samples; `p95`/`p99` are `N/A` below `PROPAGATION_PERCENTILE_MIN_N` samples (a single worst sample would otherwise masquerade as a tail quantile). |
 GLOSSARY
@@ -656,7 +697,7 @@ report_endpoint_markdown() {
 	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
 	echo ""
 	for f in "${ENDPOINT_FILES[@]}"; do
-		echo "- \`$(basename "$f")\`"
+		echo "- \`${f##*/}\`"
 	done
 	echo ""
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
@@ -717,8 +758,9 @@ report_endpoint_markdown() {
 		# Cross-mesh-size comparison (only meaningful when >1 mesh size was swept).
 		if (__n > 1) {
 			printf "## Comparison across mesh sizes\n\n"
-			printf "Averages over rows surviving the report filter (restarted in {1, unknown}, "
-			printf "p1_overflow=1, and status != OK are dropped; P2 also drops p2_dirty=1 rows). "
+			printf "Averages over rows surviving the report filter (P1: its source side, p1_status != OK, "
+			printf "p1_overflow=1 or a high source skew drop it; P2/P3: the remote side, remote_status != OK "
+			printf "or a high remote skew; P2 also drops p2_dirty=1 rows). "
 			printf "Cells show `avg (n_valid)`, except P1 conv_p99: the worst bucket any valid row hit "
 			printf "`(n_valid)`, never averaged. Per-mesh-size tables above carry the full breakdown.\n\n"
 			printf "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 worst (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |\n"

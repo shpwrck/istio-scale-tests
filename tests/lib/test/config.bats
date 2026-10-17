@@ -704,7 +704,7 @@ with_run_config() {
 	CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" \
 		run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4  # its one cell is a PROBE_FAILED row (R19)
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (one per failed attempt, in n_total, not n_valid); exit 4."
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt, in n_total, not n_valid); exit 4."
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
 	grep -qx '# RUN_CONFIG=none' "$d"/controlplane-*.tsv
 	[ -z "$(find "$d" -name 'run-config-*')" ]
@@ -773,7 +773,7 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	# failed cell (its last reason), not "2 of 1", and exit 4.
 	assert_failure 4
 	[ "$(awk -F'\t' '$2 == "PROBE_FAILED"' "$tsv" | wc -l)" -eq 2 ]
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (one per failed attempt"
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt"
 	grep -qx 'FAILED=1' "$d/sweep-outcome.txt"
 	[ -f "$d/sweep-outcome.txt" ]
 	# J2: the resume's own start condition and time are in its outcome (none included: an
@@ -785,8 +785,10 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	refute_output --partial "this resume runs harness"
 	[ "$(grep -c '^NOTE=the --resume at' "$d/sweep-outcome.txt" || true)" = 0 ]
 	# L2: resumes.txt has one line per resume past its preflights: its start time (the
-	# INFO's), HARNESS_SHA, ISTIO_NOTREADY_AT_RESUME and (M6) KUBE_VERSIONS.
-	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS')" ]
+	# INFO's), HARNESS_SHA, ISTIO_NOTREADY_AT_RESUME, (M6) KUBE_VERSIONS and (A1) TSV_LINES,
+	# the TSV's line count when it started (where its attempt starts).
+	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES')" ]
+	[[ "$(awk -F'\t' 'NR == 2 { print $5 }' "$d/resumes.txt")" =~ ^[1-9][0-9]*$ ]]
 	[ "$(wc -l < "$d/resumes.txt")" -eq 2 ]
 	[ "$(awk -F'\t' 'NR == 2 { print $2 "|" $3 "|" $4 }' "$d/resumes.txt")" = "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")|none|ci-a=unreachable" ]
 	grep -q "^INFO=this --resume started at $(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt") " "$d/sweep-outcome.txt"
@@ -868,7 +870,7 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	[ "$(wc -l < "$d/resumes.txt")" -eq 3 ]
-	[ "$(sed -n 2p "$d/resumes.txt")" = "$(printf '%s\t1111111\tnone\tci-a=unreachable' "$t1")" ]
+	[ "$(sed -n 2p "$d/resumes.txt" | cut -f 1-4)" = "$(printf '%s\t1111111\tnone\tci-a=unreachable' "$t1")" ]
 	t2="$(awk -F'\t' 'NR == 3 { print $1 }' "$d/resumes.txt")"
 	[ "$(awk -F'\t' 'NR == 3 { print $2 "|" $3 }' "$d/resumes.txt")" = "${sha}|none" ]
 	assert_output --partial "warning: --resume: this resume runs harness ${sha}, and the run before it ran 1111111 (the --resume at ${t1}): the rows it adds (from ${t2} on) come from another harness."
@@ -969,7 +971,7 @@ STUB
 	done
 }
 
-@test "003 --resume: a cell that failed partway says why it is not re-run (N2, P8); short lines are not cells (N9); a count that fails is a problem, never all ran, and does not stop a resume (N3, P2); an interrupted resume (P4, P10)" {
+@test "003 --resume: a cell that failed partway runs again and its earlier attempt is left out (A1, was N2/P8); short lines are not cells (N9); a count that fails is a problem, never all ran, and does not stop a resume (N3, P2); an interrupted resume (P4, P10, A3)" {
 	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" fakeawk="${BATS_TEST_TMPDIR}/fakeawk" realawk
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
 	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
@@ -988,9 +990,13 @@ STUB
 	printf '\nshort\tline\t9\t9\t9\t9\tnone\n' >> "$tsv"
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "[1/1] mesh=1 svcs=5 reps=3 ns=1 scope=none traffic=none — failed partway (a valid row, then PROBE_FAILED): --resume never re-runs a cell with a valid row (the report would pool two attempts), so it stays failed; to measure it again, start a new sweep with only this cell; skipping (resume)"
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (one per failed attempt, in n_total, not n_valid); 1 of them failed partway (a valid row, then a status row), and a --resume skips such a cell again: to measure one again, start a new sweep with only that cell; exit 4."
+	# A1: it runs again (the stub fails it again), and only that new attempt counts: its
+	# PROBE_FAILED row, not the earlier attempt's valid row.
+	assert_output --partial "[1/1] mesh=1 svcs=5 reps=3 ns=1 scope=none traffic=none — failed partway (a valid row, then PROBE_FAILED): running it again; the reports use only this new attempt (resume)"
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt, in n_total, not n_valid). 1 cell(s) that had failed partway in an earlier run ran again in this one; the reports use only that new attempt; exit 4."
 	grep -qx 'TOTAL=1' "$d/sweep-outcome.txt"
+	grep -q '^INFO=the counts and reports use each cell.s latest attempt: 3 row(s) of earlier attempts of 1 cell(s) ' "$d/sweep-outcome.txt"
+	[ "$(bash "$CP/004-report-results.sh" --results-dir "$d" --format json 2>/dev/null | jq -c '[.metadata.earlier_attempt_rows_left_out, .metadata.earlier_attempt_cells, .results[0].n_total, .results[0].n_valid]')" = '[3,1,1,0]' ]
 	# N3: the count's awk fails (as when it could not start): a problem, exit 4, never
 	# "All 1 cells ran", and the record says TOTAL=unknown.
 	realawk="$(command -v awk)"
@@ -1000,9 +1006,9 @@ STUB
 	cat "${BATS_TEST_TMPDIR}/ok.row" >> "$tsv"
 	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/${tsv##*/}; the rows are intact: run the same --resume again (with this sweep's flags) to count them; exit 4."
+	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long reading <tmp>/tsv; the rows are intact: run the same --resume again (with this sweep's flags) to count them; exit 4."
 	refute_output --partial "cells ran"
-	grep -qx "PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/${tsv##*/}; the rows are intact: run the same --resume again (with this sweep's flags) to count them" "$d/sweep-outcome.txt"
+	grep -qx "PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long reading <tmp>/tsv; the rows are intact: run the same --resume again (with this sweep's flags) to count them" "$d/sweep-outcome.txt"
 	grep -qx 'TOTAL=unknown' "$d/sweep-outcome.txt"
 	grep -qx 'FAILED=unknown' "$d/sweep-outcome.txt"
 	# F1: the sweep dir (a local path) is on stderr only: never in the record, the markdown
@@ -1025,10 +1031,13 @@ STUB
 	TMPDIR="${BATS_TEST_TMPDIR}/tmp10" PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 143
 	[ -z "$(find "${BATS_TEST_TMPDIR}/tmp10" -name keys -print -quit)" ]
-	[ ! -e "$d/sweep-outcome.txt" ]
+	# A3: the resume's not-finished record stays (its outcome never came); I5: it says when,
+	# and by which signal, the resume was interrupted.
+	grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt"
+	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/sweep-outcome.txt"
 	run bash "$CP/004-report-results.sh" --results-dir "$d"
 	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.prev.txt by run "
-	assert_output --partial "#   warning: the last --resume of this sweep has not finished (it died, or still runs; if it died, run the same --resume again): this is the outcome before it, from sweep-outcome.prev.txt"
+	assert_output --regexp "#   warning: the last --resume of this sweep \(started at [0-9T:+-]+\) has not finished \(it was interrupted at [0-9T:-]+Z by SIGTERM; run the same --resume again\): this is the outcome before it, from sweep-outcome.prev.txt"
 	assert_output --partial "#   error: could not count the sweep's cells: awk: cannot read the plan cell keys file"
 	# That problem does not stop a resume, which counts again: the valid retry ran last,
 	# so every cell ran.
@@ -1123,16 +1132,18 @@ STUB
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 1
 	assert_output --partial "(started on, not given now: ci-b; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS)"
-	# F2: the same members in another order (mesh size 1 would measure ci-b), or one of
-	# them twice: refused too, with the order to paste.
+	# F2: the same members in another order (mesh size 1 would measure ci-b): refused too,
+	# with the order to paste. One of them twice is refused when parsed (B8; I4: the resume
+	# check has no branch of its own for it).
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 1
-	assert_output --partial "--resume: these are not the members this sweep started on, in its order (given in another order: ci-b,ci-a; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): mesh size N measures the first N contexts"
+	assert_output --partial "--resume: these are the members this sweep started on, but not in its order (given in another order: ci-b,ci-a; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): mesh size N measures the first N contexts"
 	assert_output --partial "Resume with --contexts ci-a,ci-b (that order)"
 	refute_output --partial "Istio version:"
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b,ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 1
-	assert_output --partial "(given twice: ci-a; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS)"
+	# B8: split_contexts refuses the repeated member before the resume check runs.
+	assert_output --partial "--contexts lists ci-a twice (ci-a,ci-b,ci-a): list each mesh member once"
 	[ "$(cat "$tsv")" = "$before" ]
 	[ ! -e "$d/resumes.txt" ]
 	[ -e "$d/sweep-outcome.txt" ]

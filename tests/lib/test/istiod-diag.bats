@@ -864,10 +864,12 @@ _prop_run() {
 	[[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $7 }' "$f")" =~ ^[0-9]+$ ]]
 	assert_output --partial "P1 local xDS push:          n=0/1 (no valid sample)"
 	assert_output --partial "rows_dropped_total=1/1"
-	assert_output --regexp 'restarted=unknown +1'
+	# A row with no remote measures P1 only, so its source side decides (p1_status, I6).
+	[[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $20 "/" $22 }' "$f")" == RESTART_UNKNOWN/N/A ]]
+	assert_output --regexp 'RESTART_UNKNOWN +1'
 	grep -qxF '| P1 local xDS push | 0/1 | - | - | - |' "$RES"/endpoint-*.md
-	grep -qxF '| `restarted=unknown` | 1 |' "$RES"/endpoint-*.md
-	grep -qF 'counts: status OK, `restarted=0` (not 1 or' "$RES"/endpoint-*.md
+	grep -qxF '| `RESTART_UNKNOWN` | 1 |' "$RES"/endpoint-*.md
+	grep -qF "that remote's side leaves them out" "$RES"/endpoint-*.md
 	# 005 counts the same rows.
 	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "$RES" --format csv
 	assert_line "1,P1_local_wall,1,0,,,,,,,"

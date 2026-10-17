@@ -99,11 +99,18 @@ The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv an
 json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
 A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
 
-When the results dir holds sweep-outcome.txt (003 writes it at the end of a sweep),
-every format repeats it, with the run that recorded it: the failed cells by reason, its
-problems (the Istio version or active revision changed under the sweep) and notes
-(members not ready at its start or end); a sweep dir without it is a sweep that died
-before its end.
+When the results dir holds sweep-outcome.txt, every format repeats it, with the run that
+recorded it: the failed cells by reason, its problems (the Istio version, active revision
+or the Istio CR's generation changed under the sweep) and notes (members not ready at its
+start or end, proxies on another version). 003 writes it at its start as "not finished"
+(EXIT=unfinished) and replaces it at its end: while it says not finished (the sweep died,
+or still runs), every format says "this sweep has not finished" (json sweep_outcome:
+"exit": null, "unfinished": true, "started_at"; a finished one reads "unfinished":
+false); I5: one interrupted (Ctrl-C, SIGTERM, SIGHUP) says when and by which signal
+(json "interrupted_at", "interrupted_by"), and one that stopped on an error after its
+start shows the stop and its reason, as any stop. A sweep dir without the file is from
+a sweep that stopped before its start (nothing ran), or from an older harness. The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to
+each member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
@@ -178,6 +185,14 @@ PREAMBLE=()
 while IFS= read -r line; do
 	PREAMBLE+=("$line")
 done < <(config_merged_preamble "${TSV_FILES[@]}")
+# I3 (PL26): a sweep-level Istio key no input carries (every TSV predates it) reads unknown,
+# as in the other reports: not recorded, rather than absent.
+for _k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
+	_have=0
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do [[ "$kv" != "${_k}="* ]] || { _have=1; break; }; done
+	((_have)) || PREAMBLE+=("${_k}=unknown")
+done
+unset _k _have
 
 # Which --config produced the inputs (PL2/PL19), over every input rather than the first
 # file: `none` without one, `unknown` for files written before the key existed,

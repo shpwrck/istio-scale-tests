@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pre-merge verification gate for tests/lib/ shared helpers.
 # Runs syntax checks, shellcheck, inline-definition audits, bats unit tests, the
-# bare-scrape lint, and the CI dry-run smoke (every tests/ script annotated
+# bare-scrape and keyed-array lints, and the CI dry-run smoke (every tests/ script annotated
 # `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
 # Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
@@ -69,6 +69,7 @@ audit_fail=0
 EXTRACTED_PATTERNS=(
 	'die() {'
 	'split_csv() {'
+	'split_contexts() {'
 	'is_pos_int() {'
 	'is_nonneg_int() {'
 	'validate_scoping() {'
@@ -199,6 +200,7 @@ EXTRACTED_PATTERNS=(
 	'sweep_outcome() {'
 	# batch B: which propagation rows count (propagation.sh, awk)
 	'function prop_drop_reason('
+	'function prop_p1_drop_reason('
 	'function prop_p1_first('
 	'function prop_p1_sample('
 	'function prop_p2_sample('
@@ -224,6 +226,19 @@ EXTRACTED_PATTERNS=(
 	'_sweep_outcome_by() {'
 	'_sweep_outcome_sweep_ids() {'
 	'sweep_outcome_recorded() {'
+	# carry-over A: not-finished record, latest attempts (common.sh); dirty hash, masked
+	# errors, generations, proxy versions (preamble.sh); proxy summary (envelope.sh)
+	'sweep_outcome_unfinished() {'
+	'sweep_outcome_start() {'
+	'controlplane_latest_attempts() {'
+	'_harness_dirty_hash() {'
+	'_istio_version_mask() {'
+	'_istio_live_version_read() {'
+	'istio_proxy_versions() {'
+	'_istio_proxy_versions_one() {'
+	'_istio_proxy_versions_off() {'
+	'_istio_proxy_versions_warn() {'
+	'env_proxy_versions_summary() {'
 	'_config_run_key() {'
 	'_config_run_ids() {'
 	'_config_sq() {'
@@ -234,6 +249,22 @@ EXTRACTED_PATTERNS=(
 	'fanout_body_complete() {'
 	'fanout_counter_in_batch() {'
 	'fanout_replica_counter() {'
+	# carry-over B: the keyed-array arithmetic lint (lint-keyed-arith.sh)
+	'lint_keyed_arith_file() {'
+	'lint_keyed_arith_paths() {'
+	# carry-over integration: placeholder rows and the legacy schema (propagation.sh); a
+	# sweep that ends before its outcome, escaped markdown cells, a fork-free size check
+	# (common.sh)
+	'prop_placeholder_row() {'
+	'function prop_legacy_reason_('
+	'sweep_trap_signals() {'
+	'_sweep_on_signal() {'
+	'sweep_err_trap() {'
+	'sweep_outcome_cut_short() {'
+	'sweep_outcome_on_exit() {'
+	'md_cell() {'
+	'function md_cell('
+	'file_min_bytes() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
@@ -275,11 +306,23 @@ else
 	err "bare by-design-non-zero scrape call(s) found (capture, guard with || true, or use as if/while condition)"
 fi
 
-# 6. dry-run smoke — same discovery and args as CI (portability.yml).
-if ((SKIP_DRY_RUN)); then
-	step 6 "dry-run smoke (SKIPPED)"
+# 6. keyed-array arithmetic lint: bash 4.3-5.1 expand an array key twice in (( )), let,
+# [[ -gt ]] and -v, so a key with a quote stops the script or reads false.
+step 6 "keyed-array arithmetic lint"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/lint-keyed-arith.sh"
+if lint_out="$(lint_keyed_arith_paths "$ROOT/tests" "$ROOT/terraform")"; then
+	ok
 else
-	step 6 "dry-run smoke for scripts annotated '# ci-dry-run:'"
+	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
+	err "array element read by a variable key in shell arithmetic (read it into a scalar first)"
+fi
+
+# 7. dry-run smoke — same discovery and args as CI (portability.yml).
+if ((SKIP_DRY_RUN)); then
+	step 7 "dry-run smoke (SKIPPED)"
+else
+	step 7 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
 	empty_kubeconfig="$(mktemp)"
 	dry_out="$(mktemp)"

@@ -296,13 +296,10 @@ warn() { echo "warning: $*" >&2; }
 # --- Validation (before --dry-run returns, so the CI dry-run checks it too) ---
 
 CONTEXTS=()
-split_csv "$CONTEXTS_CSV" CONTEXTS
+split_contexts "$CONTEXTS_CSV" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]} >= 2)) || die "--contexts (or SETUP_CONTEXTS) needs at least two mesh members (one runs the workload, the others show the cross-cluster path); got '${CONTEXTS_CSV}'"
 declare -A IS_MEMBER=()
-for ctx in "${CONTEXTS[@]}"; do
-	[[ -z "${IS_MEMBER[$ctx]:-}" ]] || die "--contexts lists ${ctx} twice"
-	IS_MEMBER[$ctx]=1
-done
+for ctx in "${CONTEXTS[@]}"; do IS_MEMBER[$ctx]=1; done
 [[ -n "$WORKLOAD_CTX" ]] || die "--workload-context (or GWAPI_WORKLOAD_CONTEXT) is required: the member whose ACM ManagedCluster name is the chart's workloadCluster"
 [[ -n "${IS_MEMBER[$WORKLOAD_CTX]:-}" ]] || die "--workload-context ${WORKLOAD_CTX} is not one of --contexts (${CONTEXTS[*]})"
 if [[ -n "$HUB_CTX" && -n "${IS_MEMBER[$HUB_CTX]:-}" ]]; then
@@ -1324,7 +1321,8 @@ fi
 # (R2, PL39): say when it is not the commit the script runs from.
 HARNESS="$(harness_sha)"
 CHART_REVISION_VS_HARNESS=unknown
-hc="${HARNESS%-dirty}"
+# A6: a dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
+hc="${HARNESS%%-dirty*}"
 if [[ "$hc" =~ -g([0-9a-f]{7,})$ ]]; then
 	hc="${BASH_REMATCH[1]}"
 elif [[ ! "$hc" =~ ^[0-9a-f]{7,}$ ]]; then
@@ -1342,7 +1340,7 @@ if [[ -n "$hc" && "$CHART_REVISION" != unknown ]]; then
 	done
 	if [[ "$CHART_REVISION_VS_HARNESS" == differs ]]; then
 		warn "Argo CD synced the chart from ${CHART_REVISION}, not from this script's commit ${hc} (HARNESS_SHA ${HARNESS}): the deployed check may describe other scenarios than this script (preamble SCENARIO_SET per member)"
-	elif [[ "$CHART_REVISION_VS_HARNESS" == same && "$HARNESS" == *-dirty ]]; then
+	elif [[ "$CHART_REVISION_VS_HARNESS" == same && "$HARNESS" == *-dirty* ]]; then
 		# The commit matches, but the script runs from a tree with uncommitted changes.
 		CHART_REVISION_VS_HARNESS=same-dirty
 	fi

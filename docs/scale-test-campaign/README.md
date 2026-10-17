@@ -35,8 +35,11 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    on reads as unknown); the members still not ready are in `ISTIO_NOTREADY_AT_START` in every
    TSV preamble and report. A sweep reads it again at the end and exits 4 when the version or the
    active revision changed during the sweep. Every sweep ends by writing `sweep-outcome.txt` to its results dir (exit code,
-   failed cells, the version recheck), and its reports repeat those errors and warnings; a sweep
-   dir without that file is a sweep that died before its end.
+   failed cells, the version recheck), and its reports repeat those errors and warnings. Until
+   then the file holds a not-finished record, which says when the sweep stopped on an error
+   (`STOPPED=1`, `STOP_REASON`) or was interrupted (`ENDED_AT`, `ENDED_SIGNAL`); one killed
+   outright leaves it as it was. A sweep dir without that file is from a sweep that stopped
+   before its start (nothing ran) or from an older harness.
 
 ## Capacity planning
 
@@ -146,8 +149,8 @@ Between suites, confirm the previous suite's `*-test` namespaces are gone and re
 Check each sweep's exit code: `4` means it finished and wrote its reports but some cells
 failed (the last stderr line says how many, by reason; their placeholder rows are in the
 report) or the Istio version or active revision changed during the sweep; `3` a reachability stop; `1` it
-stopped. `sweep-outcome.txt` in each sweep dir keeps the outcome. Each suite README lists
-its codes.
+stopped; `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, a closed terminal).
+`sweep-outcome.txt` in each sweep dir keeps the outcome. Each suite README lists its codes.
 
 ### Stage 4 — Collect results
 
