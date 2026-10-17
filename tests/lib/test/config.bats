@@ -704,7 +704,7 @@ with_run_config() {
 	CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" \
 		run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4  # its one cell is a PROBE_FAILED row (R19)
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes them as placeholder rows (in n_total, not n_valid); exit 4."
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (one per failed attempt, in n_total, not n_valid); exit 4."
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
 	grep -qx '# RUN_CONFIG=none' "$d"/controlplane-*.tsv
 	[ -z "$(find "$d" -name 'run-config-*')" ]
@@ -773,7 +773,7 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	# failed cell (its last reason), not "2 of 1", and exit 4.
 	assert_failure 4
 	[ "$(awk -F'\t' '$2 == "PROBE_FAILED"' "$tsv" | wc -l)" -eq 2 ]
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes them"
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (one per failed attempt"
 	grep -qx 'FAILED=1' "$d/sweep-outcome.txt"
 	[ -f "$d/sweep-outcome.txt" ]
 	# J2: the resume's own start condition and time are in its outcome (none included: an
@@ -785,10 +785,10 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	refute_output --partial "this resume runs harness"
 	[ "$(grep -c '^NOTE=the --resume at' "$d/sweep-outcome.txt" || true)" = 0 ]
 	# L2: resumes.txt has one line per resume past its preflights: its start time (the
-	# INFO's), HARNESS_SHA and ISTIO_NOTREADY_AT_RESUME.
-	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME')" ]
+	# INFO's), HARNESS_SHA, ISTIO_NOTREADY_AT_RESUME and (M6) KUBE_VERSIONS.
+	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS')" ]
 	[ "$(wc -l < "$d/resumes.txt")" -eq 2 ]
-	[ "$(awk -F'\t' 'NR == 2 { print $2 "|" $3 }' "$d/resumes.txt")" = "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")|none" ]
+	[ "$(awk -F'\t' 'NR == 2 { print $2 "|" $3 "|" $4 }' "$d/resumes.txt")" = "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")|none|ci-a=unreachable" ]
 	grep -q "^INFO=this --resume started at $(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt") " "$d/sweep-outcome.txt"
 	# K3: through a symlink (latest -> sweep-X, no trailing slash) the resume is that sweep:
 	# its RUN_ID and its TSV, never a second TSV the report would pool. K4: a resume on
@@ -868,12 +868,144 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	[ "$(wc -l < "$d/resumes.txt")" -eq 3 ]
-	[ "$(sed -n 2p "$d/resumes.txt")" = "$(printf '%s\t1111111\tnone' "$t1")" ]
+	[ "$(sed -n 2p "$d/resumes.txt")" = "$(printf '%s\t1111111\tnone\tci-a=unreachable' "$t1")" ]
 	t2="$(awk -F'\t' 'NR == 3 { print $1 }' "$d/resumes.txt")"
 	[ "$(awk -F'\t' 'NR == 3 { print $2 "|" $3 }' "$d/resumes.txt")" = "${sha}|none" ]
 	assert_output --partial "warning: --resume: this resume runs harness ${sha}, and the run before it ran 1111111 (the --resume at ${t1}): the rows it adds (from ${t2} on) come from another harness."
-	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=1111111, after HARNESS_SHA=${sha} (the TSV preamble's, the first run's): rows from ${t1} on are 1111111's" "$d/sweep-outcome.txt"
+	# M6: the change that a later resume changed again says until when.
+	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=1111111, after HARNESS_SHA=${sha} (the TSV preamble's, the first run's): rows from ${t1} until ${t2} are 1111111's" "$d/sweep-outcome.txt"
 	grep -qx "NOTE=the --resume at ${t2} ran HARNESS_SHA=${sha}, after HARNESS_SHA=1111111 (the --resume at ${t1}): rows from ${t2} on are ${sha}'s" "$d/sweep-outcome.txt"
 	[ "$(grep -c '^NOTE=the --resume at' "$d/sweep-outcome.txt")" -eq 2 ]
 	grep -qx "# HARNESS_SHA=${sha}" "$tsv"
+}
+
+@test "003 --resume: the outcome notes earlier resumes that started not ready and resumes on an unknown harness (M6)" {
+	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" nogit="${BATS_TEST_TMPDIR}/nogit" sha t1 t2 t3
+	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
+	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	mkdir -p "$bin" "$nogit"
+	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
+	printf '#!/bin/sh\nexit 1\n' > "${nogit}/git"
+	chmod +x "${bin}/kubectl" "${nogit}/git"
+	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
+	sha="$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	# The first resume started with ci-a not ready, on a harness git could not name (it
+	# died, or its outcome was overwritten: only resumes.txt keeps it).
+	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
+	awk -F'\t' -v OFS='\t' 'NR == 2 { $2 = "unknown"; $3 = "ci-a=IstiodNotReady" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	t2="$(awk -F'\t' 'NR == 3 { print $1 }' "$d/resumes.txt")"
+	# This resume is ready (its INFO); the earlier one was not: a note with its start time.
+	grep -q "^INFO=this --resume started at ${t2} with every member ready" "$d/sweep-outcome.txt"
+	grep -qx "NOTE=istiod or IstioCNI was still not ready when the earlier --resume at ${t1} started (ISTIO_NOTREADY_AT_RESUME=ci-a=IstiodNotReady, in resumes.txt): the first cells it ran (rows from ${t1} on) may have run on a control plane that was not ready; check their status and istiod_restarted" "$d/sweep-outcome.txt"
+	# The unknown harness has a note of its own, until the next resume; the next one's
+	# rows are the first run's harness again, after unknown. Same as the last known one:
+	# no warning.
+	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=unknown (git describe failed there): rows from ${t1} until ${t2} cannot be tied to a harness" "$d/sweep-outcome.txt"
+	grep -qx "NOTE=the --resume at ${t2} ran HARNESS_SHA=${sha}, after HARNESS_SHA=unknown (the --resume at ${t1}): rows from ${t2} on are ${sha}'s" "$d/sweep-outcome.txt"
+	refute_output --partial "this resume runs"
+	# A resume on a harness git cannot name warns, and its note runs to the end; the
+	# earlier unknown resume's note is still there.
+	PATH="${nogit}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	t3="$(awk -F'\t' 'NR == 4 { print $1 }' "$d/resumes.txt")"
+	[ "$(awk -F'\t' 'NR == 4 { print $2 }' "$d/resumes.txt")" = unknown ]
+	assert_output --partial "warning: --resume: this resume runs HARNESS_SHA=unknown (git describe failed: no git, or not a checkout), so the rows it adds (from ${t3} on) cannot be tied to a harness."
+	grep -qx "NOTE=the --resume at ${t3} ran HARNESS_SHA=unknown (git describe failed there): rows from ${t3} on cannot be tied to a harness" "$d/sweep-outcome.txt"
+	grep -qx "NOTE=the --resume at ${t2} ran HARNESS_SHA=${sha}, after HARNESS_SHA=unknown (the --resume at ${t1}): rows from ${t2} until ${t3} are ${sha}'s" "$d/sweep-outcome.txt"
+	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=unknown (git describe failed there): rows from ${t1} until ${t2} cannot be tied to a harness" "$d/sweep-outcome.txt"
+	[ "$(grep -c '^NOTE=istiod or IstioCNI was still not ready when the earlier --resume' "$d/sweep-outcome.txt")" -eq 1 ]
+}
+
+@test "003: each cell is decided by its last row (M3), out of every cell of the TSV and the run (M4); repeated axis values are refused" {
+	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" row5 row6
+	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0
+	# M4: a repeated axis value would run one cell twice under one key.
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --dry-run --contexts ci-a --service-counts 5,5
+	assert_failure 1
+	assert_output --partial "error: --service-counts repeats a value (5,5): each value is one set of cells; list it once"
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --dry-run --contexts ci-a --traffic-configs none,vsdr,none
+	assert_failure 1
+	assert_output --partial "error: --traffic-configs repeats a value (none,vsdr,none)"
+	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5,6
+	assert_failure 4
+	assert_output --partial "error: 2 of 2 cells failed: PROBE_FAILED x2."
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
+	mkdir -p "$bin"
+	printf '#!/bin/sh
+case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
+' > "${bin}/kubectl"
+	chmod +x "${bin}/kubectl"
+	# _cp_row <svc> <istiod_restarted>: a measurement row for the cell svc=<svc>, made from its
+	# status row (a later timestamp).
+	_cp_row() {
+		awk -F'\t' -v OFS='\t' -v sc="$1" -v rs="$2" '$2 == "PROBE_FAILED" && $4 == sc { r = $0 } END { $0 = r; for (i = 8; i <= NF; i++) if ($i == "N/A") $i = 1; $1 = "2099-01-01T00:00:00+00:00"; $2 = "ci-a"; $31 = rs; print }' "$tsv"
+	}
+	row5="$(_cp_row 5 0)" row6="$(_cp_row 6 0)"
+	# svc=6 measured; svc=5: a context's valid row, then its status row (a cell that failed
+	# partway, as a fresh run writes it). A narrower --resume (svc=6, done) runs nothing,
+	# and the outcome still counts both cells of the TSV: svc=5 failed by its last row.
+	printf '%s\n' "$row6" "$row5" >> "$tsv"
+	awk -F'\t' '$2 == "PROBE_FAILED" && $4 == 5' "$tsv" | head -n 1 >> "$tsv"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 6
+	assert_failure 4
+	assert_output --partial "error: 1 of 2 cells failed: PROBE_FAILED x1."
+	grep -qx 'TOTAL=2' "$d/sweep-outcome.txt"
+	grep -qx 'FAILED=1' "$d/sweep-outcome.txt"
+	# svc=5 retried, and its last row is a measurement whose istiod restarted: not a failed
+	# cell, as in a fresh run (a measurement outcome, out of n_valid).
+	_cp_row 5 1 >> "$tsv"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 6
+	assert_success
+	assert_output --partial "All 2 cells ran"
+	grep -qx 'FAILED=0' "$d/sweep-outcome.txt"
+}
+
+@test "003 --resume refuses a sweep whose outcome records a problem: the Istio version changed under it (M2)" {
+	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" bin2="${BATS_TEST_TMPDIR}/bin2" vf="${BATS_TEST_TMPDIR}/ver" before
+	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
+	echo v1.30.5 > "$vf"
+	mkdir -p "$bin" "$bin2"
+	# Run 1: the members run v1.30.5 at the start; the cell's first other kubectl call
+	# moves them to v1.30.99 (an upgrade under the sweep).
+	cat > "${bin}/kubectl" <<STUB
+#!/bin/sh
+case "\$*" in
+*"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) STUB_ISTIO_VERSION="\$(cat ${vf})" exec "\$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "\$@" ;;
+*) echo v1.30.99 > ${vf}; exit 1 ;;
+esac
+STUB
+	chmod +x "${bin}/kubectl"
+	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin2}/kubectl"
+	chmod +x "${bin2}/kubectl"
+	CONTROLPLANE_RESULTS_DIR="$res" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	grep -qx '# ISTIO_VERSION=v1.30.5' "$tsv"
+	grep -q '^PROBLEM=the Istio version changed during the sweep (ci-a: v1.30.5 at the start, v1.30.99 at the end)' "$d/sweep-outcome.txt"
+	# The mesh is back on v1.30.5: the resume still refuses before it reads the mesh,
+	# appends nothing and keeps the record.
+	before="$(cat "$tsv")"
+	PATH="${bin2}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: this sweep's sweep-outcome.txt records a problem (the Istio version changed during the sweep (ci-a: v1.30.5 at the start, v1.30.99 at the end); its rows are not all from ISTIO_VERSION=v1.30.5), so no later run can vouch for its rows, and a resume would write an outcome without it. Start a new sweep."
+	refute_output --partial "Istio version:"
+	[ "$(cat "$tsv")" = "$before" ]
+	grep -q '^PROBLEM=' "$d/sweep-outcome.txt"
+	[ ! -e "$d/sweep-outcome.prev.txt" ] && [ ! -e "$d/resumes.txt" ]
+	# Only in sweep-outcome.prev.txt (a resume moved it, then died): refused the same way.
+	mv "$d/sweep-outcome.txt" "$d/sweep-outcome.prev.txt"
+	PATH="${bin2}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: this sweep's sweep-outcome.prev.txt records a problem (the Istio version changed during the sweep"
+	[ "$(cat "$tsv")" = "$before" ]
 }

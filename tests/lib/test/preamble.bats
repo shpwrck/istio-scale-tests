@@ -860,7 +860,7 @@ _iv_recheck() {
 	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a ran v1.30.5 at the start, and its active revision reads v1.30.5 at the end, but istiod Deployment istio-system/istiod: Error from server (Forbidden): deployments.apps \"istiod\" is forbidden")"
 	# J3 at the end: Healthy, but the same version still rolling out (old pods serving).
 	IV_a=v1.30.5 END="IVDEP_a=5:5:3:2" run --separate-stderr _iv_recheck a
-	assert_line --index 3 "not ready at the end: rolling (an istiod rollout in progress) on 1 member (a)"
+	assert_line --index 3 "not ready at the end: rolling (an istiod rollout in progress, or old istiod pods still terminating) on 1 member (a)"
 	refute_output --partial -- "--problem"
 }
 
@@ -881,7 +881,7 @@ _iv_recheck() {
 	assert_success
 	assert_line --index 3 "not ready at the end: IstioCNINotHealthy on 2 members (a, c)"
 	assert_line --index 5 "not ready at the end: IstiodNotReady on 1 member (b)"
-	assert_line --index 7 "not ready at the end: rolling (an istiod rollout in progress) on 1 member (d)"
+	assert_line --index 7 "not ready at the end: rolling (an istiod rollout in progress, or old istiod pods still terminating) on 1 member (d)"
 	refute_output --partial -- "--problem"
 	# Through sweep_outcome: warnings, exit 0.
 	local -a args=()
@@ -1080,14 +1080,20 @@ _iv_resume() {
 	# L3: at the start, old pods still terminating are named so, checked through the istiod
 	# pods, and are not a rollout to wait out; the member runs that version (the Also clause).
 	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVDEP_a="5 5 2 2 1" ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a 0
-	[[ "$stderr" == *"cannot confirm the running Istio version on 1 of 1 members:"$'\n'"  a: istiod pods still terminating after the rollout to v1.30.6 (Deployment istio-system/istiod: 2 of 2 pods updated, 1 terminating); its state is Healthy; still terminating after 0s"$'\n'"    check: _iv_kubectl --context a -n istio-system get pods -l app=istiod"$'\n'"Wait until their old istiod pods are gone (a pod stuck in Terminating, on a lost node say, needs a force delete) (or raise ISTIO_VERSION_READY_WAIT_SEC). Also, a runs v1.30.6, not the pin v1.30.5: "* ]]
+	[[ "$stderr" == *"cannot confirm the running Istio version on 1 of 1 members:"$'\n'"  a: istiod pods still terminating after the rollout to v1.30.6 (Deployment istio-system/istiod: 2 of 2 pods updated, 1 terminating); its state is Healthy; still terminating after 0s"$'\n'"    check: _iv_kubectl --context a -n istio-system get pods -l app=istiod,istio.io/rev=default"$'\n'"Wait until their old istiod pods are gone (a pod stuck in Terminating, on a lost node say, needs a force delete) (or raise ISTIO_VERSION_READY_WAIT_SEC). Also, a runs v1.30.6, not the pin v1.30.5: "* ]]
 	[[ "$stderr" != *"rolling out"* ]]
 	# With a member still rolling out, both are said, each in its own group.
 	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVDEP_a="5 5 2 2 1" IV_b=v1.30.6 IVDEP_b="5 5 3 1" IV_c=v1.30.6 IVDEP_c="5 5 2 2 1" \
 		ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a,b,c 0
-	[[ "$stderr" == *$'\n'"  istiod pods still terminating after the rollout to v1.30.6 on 2 members (Deployment istio-system/istiod; still terminating after 0s): a, c"$'\n'"    check (shown for a): _iv_kubectl --context a -n istio-system get pods -l app=istiod"$'\n'* ]]
+	[[ "$stderr" == *$'\n'"  istiod pods still terminating after the rollout to v1.30.6 on 2 members (Deployment istio-system/istiod; still terminating after 0s): a, c"$'\n'"    check (shown for a): _iv_kubectl --context a -n istio-system get pods -l app=istiod,istio.io/rev=default"$'\n'* ]]
 	[[ "$stderr" == *$'\n'"  b: istiod is rolling out v1.30.6 (Deployment istio-system/istiod: 1 of 3 pods updated); its state is Healthy; still rolling out after 0s"$'\n'* ]]
 	[[ "$stderr" == *$'\n'"Wait until their istiod rollout is complete and their old istiod pods are gone (or raise ISTIO_VERSION_READY_WAIT_SEC). Also, a, c run v1.30.6; b is rolling out v1.30.6, not the pin v1.30.5: "* ]]
+	# M7: a revision-based Deployment (istiod-<rev>): its pods carry istio.io/rev=<rev>.
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVREV_a=default-v1-30-6 IVDEP_a="5 5 2 2 1" ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a 0
+	[[ "$stderr" == *$'\n'"    check: _iv_kubectl --context a -n istio-system get pods -l app=istiod,istio.io/rev=default-v1-30-6"$'\n'* ]]
+	# M7: at the end, rolling also covers old pods still terminating.
+	IV_a=v1.30.5 END="IVDEP_a=5:5:2:2:1" run --separate-stderr _iv_recheck a
+	assert_line --index 3 "not ready at the end: rolling (an istiod rollout in progress, or old istiod pods still terminating) on 1 member (a)"
 }
 
 @test "L3: a settled Istio CR whose IstioRevision read fails names that read, once, and reproduces it" {
@@ -1096,6 +1102,13 @@ _iv_resume() {
 	rm -f "${BATS_TEST_TMPDIR}"/rn-*
 	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVRFAIL_a=2 run --separate-stderr _iv_run a 0
 	[[ "$stderr" == *$'\n'"  a: IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout"$'\n'"    reproduce: _iv_kubectl --context a get istiorevisions.sailoperator.io default -o yaml"$'\n'* ]]
+	# M7: the CR is settled, so there is nothing to wait for: the fix is access.
+	[[ "$stderr" == *$'\n'"Fix access to those members (kubeconfig, login, network) and to their IstioRevision (their Istio CR is settled); the pin is not the problem."$'\n'* ]]
+	[[ "$stderr" != *"wait until their Istio CR is settled"* ]]
+	# A CR that is not settled still gets the wait.
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVRFAIL_a=2 IV_b=v1.30.5 IVSTATE_b=ReconcileError run --separate-stderr _iv_run a,b 0
+	[[ "$stderr" == *$'\n'"Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled; the pin is not the problem."$'\n'* ]]
 	# An answer that is not JSON: the revision is named once, settled or not.
 	_iv_nojson() { case " $* " in *" get istiorevisions.sailoperator.io "*) echo "<html>" ;; *) _iv_kubectl "$@" ;; esac; }
 	IV_a=v1.30.5 run istio_live_version a _iv_nojson
@@ -1138,4 +1151,105 @@ _iv_resume() {
 	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVDEP_a="5 5 3 1" IV_b=v1.30.6 IVDEP_b="5 5 3 1" IV_c=v1.30.6 IV_d=v1.30.7 IV_e=v1.30.6 \
 		ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a,b,c,d,e 0
 	[[ "$stderr" == *"Also, a, b are rolling out v1.30.6; c, e run v1.30.6; d runs v1.30.7, not the pin v1.30.5: bump ISTIO_VERSION"* ]]
+}
+
+# _iv_compat51: true when `BASH_COMPAT=51 bash` expands an associative array's subscript a
+# second time in arithmetic, as bash 4.3 to 5.1 do (M1): a 5.2+ bash that emulates it, or
+# an older bash.
+_iv_compat51() {
+	! BASH_COMPAT=51 bash -c 'declare -A a=(); k="x'"'"'y"; a[$k]=1; : $((a[$k] + 1))' 2>/dev/null
+}
+
+# _iv_m1_stub: a kubectl in BATS_TEST_TMPDIR. Members in STUB_FAIL fail every read with the
+# first stderr line kubectl prints there: a, a klog line (unreachable); b, a member without
+# the Sail CRDs. Every other member answers through fake-istio-cr.sh (v1.30.5, settled).
+_iv_m1_stub() {
+	cat > "${BATS_TEST_TMPDIR}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+ctx=""
+for a in "$@"; do case "$a" in --context=*) ctx="${a#--context=}" ;; esac; done
+case ",${STUB_FAIL:-}," in
+*",${ctx},"*)
+	case "$ctx" in
+	a) echo 'E1017 10:00:00.000000   12345 memcache.go:265] couldn'"'"'t get current server API group list: Get "https://<api-host>:6443/api?timeout=5s": dial tcp: i/o timeout' >&2 ;;
+	*) echo 'error: the server doesn'"'"'t have a resource type "istios"' >&2 ;;
+	esac
+	exit 1
+	;;
+esac
+exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@"
+STUB
+	chmod +x "${BATS_TEST_TMPDIR}/kubectl"
+	cat > "${BATS_TEST_TMPDIR}/drive.sh" <<'DRIVE'
+set -euo pipefail
+source "$ROOT/tests/lib/common.sh"
+source "$ROOT/tests/lib/preamble.sh"
+export ISTIO_VERSION=v1.30.5 ISTIO_VERSION_READY_WAIT_SEC=0
+STUB_FAIL="${START_FAIL:-}" istio_version_resolve "$1" 0 "${BATS_TEST_TMPDIR}/kubectl"
+echo "V=${ISTIO_VERSION} BY=${ISTIO_VERSION_BY_CONTEXT}"
+IV=()
+STUB_FAIL="${END_FAIL:-}" istio_version_recheck IV "${BATS_TEST_TMPDIR}/kubectl"
+printf 'END %s\n' ${IV[@]+"${IV[@]}"}
+DRIVE
+}
+
+@test "M1: kubectl stderr with a quote or a klog ] never aborts the version check under bash 5.1 subscripts, at the start or the end" {
+	_iv_compat51 || skip "this bash cannot emulate bash 5.1's second expansion of array subscripts (BASH_COMPAT=51)"
+	_iv_m1_stub
+	# Start, fail: both members are listed (grouped apart: their whys differ; M5: no klog
+	# prefix), and the run stops; never the pin with exit 0.
+	START_FAIL=a,b BASH_COMPAT=51 run --separate-stderr bash "${BATS_TEST_TMPDIR}/drive.sh" a,b,c
+	assert_failure 1
+	assert_output ""
+	[[ "$stderr" == *"cannot read the running Istio version on 2 of 3 members:"$'\n'"  a: couldn't get current server API group list: Get \"https://<api-host>:6443/api?timeout=5s\": dial tcp: i/o timeout"$'\n'* ]]
+	[[ "$stderr" == *$'\n'"  b: error: the server doesn't have a resource type \"istios\""$'\n'* ]]
+	[[ "$stderr" != *"bad array subscript"* && "$stderr" != *"syntax error"* ]]
+	# Start, warn: recorded as read (unknown for a and b), and the end goes on.
+	ISTIO_VERSION_CHECK=warn START_FAIL=a,b BASH_COMPAT=51 run --separate-stderr bash "${BATS_TEST_TMPDIR}/drive.sh" a,b,c
+	assert_success
+	assert_line --index 0 "V=mixed:unknown/v1.30.5 BY=a=unknown,b=unknown,c=v1.30.5"
+	[[ "$stderr" != *"bad array subscript"* && "$stderr" != *"syntax error"* ]]
+	# End: every member read at the start, a and b fail at the end: one note, never silence.
+	END_FAIL=a,b BASH_COMPAT=51 run --separate-stderr bash "${BATS_TEST_TMPDIR}/drive.sh" a,b,c
+	assert_success
+	assert_line --index 0 "V=v1.30.5 BY=a=v1.30.5,b=v1.30.5,c=v1.30.5"
+	assert_line --index 1 "END --note"
+	assert_line --index 2 "END the Istio version at the end of the sweep is unconfirmed: a, b could not be read again (v1.30.5 at the start)"
+	[[ "$stderr" != *"bad array subscript"* && "$stderr" != *"syntax error"* ]]
+}
+
+@test "M1: a version check that stops unexpectedly fails closed: under fail the run stops, under warn it records unknown, at the end a problem" {
+	# Stands for any error that ends the check early (an unexpected exit, or bash aborting
+	# on a bad array subscript).
+	_istio_version_read_all() { exit 3; }
+	IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0
+	assert_failure 1
+	assert_output ""
+	[[ "$stderr" == *"error: the Istio version check stopped unexpectedly (exit 3; the error is above), so the version the members run is not known."$'\n'"Nothing was changed. To go on anyway and record ISTIO_VERSION=unknown, set ISTIO_VERSION_CHECK=warn."* ]]
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IV_SHOW_NR=1 run --separate-stderr _iv_run a,b 0
+	assert_success
+	assert_line --index 0 "V=unknown PIN=v1.30.5 SRC=live BY=a=unknown,b=unknown"
+	assert_line --index 1 "NR=unchecked WAITED=unchecked"
+	[[ "$stderr" == *"Going on (ISTIO_VERSION_CHECK=warn): the results record ISTIO_VERSION=unknown (ISTIO_VERSION_PIN=v1.30.5)."* ]]
+	IV_a=v1.30.5 run --separate-stderr _iv_run a 0 --no-stop
+	assert_success
+	[[ "$stderr" == *"Going on (a read-only check never stops on this)"* ]]
+	# A stop the check decides (fail, a member unreadable) is its own message, not this one.
+	source "$ROOT/tests/lib/preamble.sh"
+	run --separate-stderr _iv_run b 0
+	assert_failure 1
+	[[ "$stderr" == *"cannot read the running Istio version on 1 of 1 members:"* ]]
+	[[ "$stderr" != *"stopped unexpectedly"* ]]
+	# End: the recheck stops unexpectedly.
+	_istio_version_recheck_live() { exit 3; }
+	IV_a=v1.30.5 run --separate-stderr _iv_recheck a
+	assert_success
+	assert_output "$(printf '%s\n' --problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit 3; the error is on stderr above), so whether the Istio version or the active revision changed during the sweep is not known")"
+}
+
+@test "M1: no shell arithmetic reads an array element by a variable key (bash 4.3-5.1 expand the key twice)" {
+	# Read it into a scalar first (n="${x[$k]}"; x[$k]=$((n + 1))), or compare it as a
+	# string ([[ "${x[$k]}" == 1 ]]).
+	run bash -c 'grep -rnE "(\(\(|\\\$\(\()([^)]*[^{A-Za-z0-9_])? *[A-Za-z_][A-Za-z0-9_]*\[\\\$" --include="*.sh" "$1/tests" "$1/terraform" | grep -v "/bats-" || true' _ "$ROOT"
+	assert_output ""
 }

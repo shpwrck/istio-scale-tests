@@ -238,6 +238,14 @@ tuning_baseline_state() {
 	printf 'SIDECAR_EGRESS_HOSTS=%s\n' "$hosts"
 }
 
+# _istio_version_errline <file>: the first line of kubectl's stderr, as a why: without a
+# carriage return, without the klog prefix (M5: "E1017 10:00:00.000000   12345
+# memcache.go:265] ", different in every process, so members that fail alike group
+# together), at most 200 characters.
+_istio_version_errline() {
+	head -n 1 "$1" | tr -d '\r' | sed -E 's/^[IWEF][0-9]{4} [0-9:.]+ +[0-9]+ [^]]+\] //' | cut -c 1-200
+}
+
 # istio_live_version <ctx> <kubectl_argv...>: the Istio version a mesh member RUNS, as
 # six lines: the version (or unknown), a kind, why (empty when ok), the Istio CR's
 # .status.activeRevisionName (empty when not read), that revision's .spec.version as read
@@ -293,7 +301,7 @@ istio_live_version() {
 		[[ "$out" == *"|"* ]] || { rc=1; echo "the Istio CR read did not return JSON" > "$errf"; }
 	fi
 	if ((rc != 0)) || [[ -z "$out" ]]; then
-		why="$(head -n 1 "$errf" | tr -d '\r' | cut -c 1-200)"
+		why="$(_istio_version_errline "$errf")"
 		rm -f "$errf"
 		printf 'unknown\nread\n%s\n\n\n\n' "${why:-kubectl exited ${rc} with no output}"
 		return 0
@@ -333,7 +341,7 @@ istio_live_version() {
 			# K1: its IstioRevision could not be read either. Say so, and (but for a
 			# migration, which is a problem whatever the revision reads) make it a failed
 			# read, retried once, so a transient error does not hide the revision's version.
-			rerr="$(head -n 1 "$errf" | tr -d '\r' | cut -c 1-200)"
+			rerr="$(_istio_version_errline "$errf")"
 			why="${why}; IstioRevision ${rev}: ${rerr:-kubectl answered nothing}"
 			[[ "$kind" != state ]] || kind="read"
 		fi
@@ -343,7 +351,7 @@ istio_live_version() {
 	fi
 	if ((rc != 0)); then
 		# L3: the why names the read that failed (the CR answered).
-		why="$(head -n 1 "$errf" | tr -d '\r' | cut -c 1-200)"
+		why="$(_istio_version_errline "$errf")"
 		rm -f "$errf"
 		printf 'unknown\nread\nIstioRevision %s: %s\n%s\n\n%s\n' "$rev" "${why:-kubectl answered nothing}" "$rev" "$state"
 		return 0
@@ -380,7 +388,7 @@ istio_live_version() {
 		rc=1
 	fi
 	if ((rc != 0)); then
-		why="$(head -n 1 "$errf" | tr -d '\r' | cut -c 1-200)"
+		why="$(_istio_version_errline "$errf")"
 		rm -f "$errf"
 		printf 'unknown\nread\nistiod Deployment %s/%s: %s\n%s\n%s\n%s\n' "$rns" "$dep" "${why:-kubectl answered nothing}" "$rev" "$rver" "$state"
 		return 0
@@ -438,9 +446,9 @@ _istio_version_read_all() {
 
 # _istio_version_repro <kind> <ctx> <kubectl_argv...>: the command that shows an operator
 # what the read saw on <ctx>. <kind> deploy:<ns>/<name> is the istiod Deployment that was
-# read (J12); pods:<ns> its istiod pods (L3: old pods still terminating); revision:<name>
-# the IstioRevision whose read failed (L3); value the IstioRevisions; anything else the
-# Istio CR.
+# read (J12); pods:<ns>[/<rev>] its istiod pods (L3: old pods still terminating; M7: of
+# that revision, the istio.io/rev label, when known); revision:<name> the IstioRevision
+# whose read failed (L3); value the IstioRevisions; anything else the Istio CR.
 _istio_version_repro() {
 	local kind="$1" ctx
 	ctx="$(printf '%q' "$2")"
@@ -448,6 +456,10 @@ _istio_version_repro() {
 	case "$kind" in
 	value) echo "$* --context ${ctx} get istiorevisions.sailoperator.io -o yaml" ;;
 	revision:?*) echo "$* --context ${ctx} get istiorevisions.sailoperator.io ${kind#revision:} -o yaml" ;;
+	pods:?*/?*)
+		kind="${kind#pods:}"
+		echo "$* --context ${ctx} -n ${kind%%/*} get pods -l app=istiod,istio.io/rev=${kind#*/}"
+		;;
 	pods:?*) echo "$* --context ${ctx} -n ${kind#pods:} get pods -l app=istiod" ;;
 	deploy:*/*)
 		kind="${kind#deploy:}"
@@ -484,6 +496,7 @@ _istio_version_marker() {
 #                             wait below (rolling for an istiod rollout still in progress;
 #                             unreadable when one was seen and every re-read failed, K8),
 #                             none when every member was ready, unchecked under --dry-run
+#                             (and when the check stopped unexpectedly, M1)
 #   ISTIO_READY_WAITED_SEC    how long that wait took (0 when nobody was waited for)
 # and, for istio_version_recheck, the private _ISTIO_VERSION_REVS (ctx=activeRevisionName,...).
 # --resumed-at <utc> (a controlplane --resume, J2): the run appends to a TSV whose preamble
@@ -505,7 +518,9 @@ _istio_version_marker() {
 # its version is recorded and a warning names the state, which never stops the run. Still
 # rolling: its version is unknown (old and new istiod pods both serve), which stops the
 # run under fail. Under fail, nothing is waited for when another member already stops the
-# run (unknown, another version, or not the pin; Y3).
+# run (unknown, another version, or not the pin; Y3). M1: the reads and the verdict run in
+# a subshell; one that ends early for any other reason (bash 4.3-5.1 abort on a bad array
+# subscript) fails closed: fail stops the run, warn records unknown, never the pin.
 # Needs die(), split_csv() and is_nonneg_int() from common.sh.
 # shellcheck disable=SC2329
 istio_version_resolve() {
@@ -550,14 +565,80 @@ istio_version_resolve() {
 	fi
 	{ (($#)) && command -v "$1" >/dev/null 2>&1; } \
 		|| die "neither kubectl nor oc found on PATH, so the live Istio version cannot be read"
+	local -a ivr_ctxs=()
+	split_csv "$ctxs_csv" ivr_ctxs
+	((${#ivr_ctxs[@]})) || die "istio_version_resolve: no mesh member contexts"
+	# M1: the reads and the verdict run apart (_istio_version_isolated), and only a result
+	# that ends with END counts. Its own stop (fail) prints STOP before it dies. Anything
+	# else that ends it early, such as bash 4.3-5.1 aborting on a bad array subscript, fails
+	# closed: under fail the run stops here, under warn it records unknown, never the pin.
+	local ivr_res ivr_rc=0 ivr_line ivr_why
+	ivr_res="$(mktemp)"
+	_istio_version_isolated ivr_rc "$ivr_res" _istio_version_resolve_live "$ctxs_csv" "$policy" "$nostop" "$resumed" "$wait_max" "$poll" "$@"
+	if ((ivr_rc == 0)) && [[ "$(tail -n 1 "$ivr_res")" == END ]]; then
+		while IFS= read -r ivr_line; do
+			case "${ivr_line%%=*}" in
+			ISTIO_VERSION_SOURCE | ISTIO_VERSION_BY_CONTEXT | _ISTIO_VERSION_REVS | ISTIO_NOTREADY_AT_START | ISTIO_READY_WAITED_SEC | ISTIO_VERSION)
+				export "${ivr_line%%=*}=${ivr_line#*=}"
+				;;
+			esac
+		done < "$ivr_res"
+		rm -f "$ivr_res"
+	elif grep -qx STOP "$ivr_res" 2>/dev/null; then
+		rm -f "$ivr_res"
+		exit 1
+	else
+		rm -f "$ivr_res"
+		ivr_why="the Istio version check stopped unexpectedly (exit ${ivr_rc}; the error is above), so the version the members run is not known"
+		[[ "$policy" != fail ]] || die "${ivr_why}."$'\n'"Nothing was changed. To go on anyway and record ISTIO_VERSION=unknown, set ISTIO_VERSION_CHECK=warn."
+		ivr_line="ISTIO_VERSION_CHECK=warn"
+		((nostop == 0)) || ivr_line="a read-only check never stops on this"
+		echo "warning: ${ivr_why}."$'\n'"Going on (${ivr_line}): the results record ISTIO_VERSION=unknown (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
+		ivr_line=""
+		for ivr_why in "${ivr_ctxs[@]}"; do ivr_line="${ivr_line:+${ivr_line},}${ivr_why}=unknown"; done
+		export ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT="$ivr_line" _ISTIO_VERSION_REVS=""
+		export ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked ISTIO_VERSION=unknown
+	fi
+	_ISTIO_VERSION_RESOLVED="$(_istio_version_marker)"
+	export _ISTIO_VERSION_RESOLVED
+}
+
+# _istio_version_isolated <rc_var> <out_file> <fn> <args...>: M1. Run <fn> in a subshell
+# (under set -e when the caller has it), its stdout into <out_file>, and set <rc_var> to
+# its exit status. An error bash cannot recover from (a bad array subscript in bash 4.3 to
+# 5.1 aborts the whole command, and the run would go on) ends only the subshell, so the
+# caller can fail closed. Call it as a plain command, never in a || list or a condition:
+# set -e is ignored there, also inside the subshell. It always returns 0.
+_istio_version_isolated() {
+	local -n _ivi_rc="$1"
+	local _ivi_out="$2" _ivi_e=0
+	shift 2
+	[[ "$-" != *e* ]] || _ivi_e=1
+	set +e
+	(
+		((_ivi_e == 0)) || set -e
+		"$@"
+	) > "$_ivi_out"
+	_ivi_rc=$?
+	((_ivi_e == 0)) || set -e
+	return 0
+}
+
+# _istio_version_resolve_live <ctxs_csv> <policy> <nostop 0|1> <resumed_at> <wait_max>
+# <poll> <kubectl_argv...>: istio_version_resolve's reads, wait and verdict, run through
+# _istio_version_isolated. Prints KEY=value lines (the keys it exports), then END; under
+# fail, a problem prints STOP and dies.
+# shellcheck disable=SC2329
+_istio_version_resolve_live() {
+	local ctxs_csv="$1" policy="$2" nostop="$3" resumed="$4" wait_max="$5" poll="$6"
+	shift 6
 	local -a ctxs=() waitfor=() wctxs=() ivr_states=()
 	local -A ivr_inwait=() ivr_settle=() ivr_rerr=() ivr_rok=() ivr_nrm=() ivr_nrf=() ivr_nrc=()
 	split_csv "$ctxs_csv" ctxs
-	((${#ctxs[@]})) || die "istio_version_resolve: no mesh member contexts"
 	local tmp wtmp i j v kind prev why rev rver state by="" revs="" distinct="" bad=0 detail="" live problem="" fix="" envpin=""
-	local n_notready=0 n_rolling=0 n_read=0 n_unsettled=0 nr_at_start="" t0 deadline elapsed=0 polls=0 nap doomed="" vset=""
+	local n_notready=0 n_rolling=0 n_read=0 n_unsettled=0 n_revread=0 nr_at_start="" t0 deadline elapsed=0 polls=0 nap doomed="" vset=""
 	local ivr_skipped=0 ivr_offpin="" ivr_stale="" allfail st rk label dre='Deployment ([a-z0-9.-]+)/([a-z0-9.-]+)'
-	local ivr_over=0 ivr_rg ivr_rltail="" ivr_rlv ivr_rdg ivr_ok n_term=0
+	local ivr_over=0 ivr_rg ivr_rltail="" ivr_rlv ivr_rdg ivr_ok n_term=0 ivr_n ivr_rdep
 	local -a ivr_sw=() ivr_rlk=() ivr_rdk=() ivr_opk=()
 	local -A ivr_rlm=() ivr_rlf=() ivr_rlw=() ivr_rlc=() ivr_rlt=() ivr_rdm=() ivr_rdf=() ivr_rdc=() ivr_opm=()
 	tmp="$(mktemp -d)"
@@ -699,7 +780,8 @@ istio_version_resolve() {
 				ivr_rg="${BASH_REMATCH[1]:-?}/${BASH_REMATCH[2]:-?} ${rver}"
 				[[ "$ivr_rlv" != runs ]] || ivr_rg+=" terminating"
 				[[ -n "${ivr_rlc[$ivr_rg]:-}" ]] || { ivr_rlk+=("$ivr_rg"); ivr_rlf[$ivr_rg]="${ctxs[i]}"; ivr_rlw[$ivr_rg]="${why}; ${ivr_rltail}"; ivr_rlc[$ivr_rg]=0; ivr_rlt[$ivr_rg]="$ivr_rltail"; }
-				ivr_rlc[$ivr_rg]=$((ivr_rlc[$ivr_rg] + 1))
+				ivr_n="${ivr_rlc[$ivr_rg]}" # M1: never x[$key] in arithmetic (bash 4.3-5.1 expand the key twice)
+				ivr_rlc[$ivr_rg]=$((ivr_n + 1))
 				ivr_rlm[$ivr_rg]="${ivr_rlm[$ivr_rg]:+${ivr_rlm[$ivr_rg]}, }${ctxs[i]}"
 			fi
 		fi
@@ -721,11 +803,14 @@ istio_version_resolve() {
 				elif [[ "$kind" == read && -n "$rev" && ( "$why" == "IstioRevision ${rev}: "* \
 					|| ( "$why" == "the Istio CR default is not settled: "* && "$why" == *"; IstioRevision ${rev}: "* ) ) ]]; then
 					rk="revision:${rev}"
+					# M7: a settled CR whose IstioRevision read failed: waiting does not help.
+					[[ "$why" != "IstioRevision ${rev}: "* ]] || n_revread=$((n_revread + 1))
 				fi
 				# L6: grouped by that command's kind and why (one entry per group).
 				ivr_rdg="${rk}|${why:-no answer}"
 				[[ -n "${ivr_rdc[$ivr_rdg]:-}" ]] || { ivr_rdk+=("$ivr_rdg"); ivr_rdf[$ivr_rdg]="${ctxs[i]}"; ivr_rdc[$ivr_rdg]=0; }
-				ivr_rdc[$ivr_rdg]=$((ivr_rdc[$ivr_rdg] + 1))
+				ivr_n="${ivr_rdc[$ivr_rdg]}"
+				ivr_rdc[$ivr_rdg]=$((ivr_n + 1))
 				ivr_rdm[$ivr_rdg]="${ivr_rdm[$ivr_rdg]:+${ivr_rdm[$ivr_rdg]}, }${ctxs[i]}"
 			fi
 		else
@@ -740,7 +825,8 @@ istio_version_resolve() {
 				st="${state:-unknown}"
 				nr_at_start="${nr_at_start:+${nr_at_start},}${ctxs[i]}=${st}"
 				[[ -n "${ivr_nrc[$st]:-}" ]] || { ivr_states+=("$st"); ivr_nrf[$st]="${ctxs[i]}"; ivr_nrc[$st]=0; }
-				ivr_nrc[$st]=$((ivr_nrc[$st] + 1))
+				ivr_n="${ivr_nrc[$st]}"
+				ivr_nrc[$st]=$((ivr_n + 1))
 				ivr_nrm[$st]="${ivr_nrm[$st]:+${ivr_nrm[$st]}, }${ctxs[i]}"
 				((allfail == 0)) || ivr_stale="${ivr_stale:+${ivr_stale}, }${ctxs[i]}"
 			fi
@@ -751,7 +837,7 @@ istio_version_resolve() {
 	# L6: members whose version is unknown (not rolling), one entry per command kind and why,
 	# with the command that reproduces the read (shown for the first member of a group).
 	for ivr_rdg in ${ivr_rdk[@]+"${ivr_rdk[@]}"}; do
-		if ((ivr_rdc[$ivr_rdg] == 1)); then
+		if [[ "${ivr_rdc[$ivr_rdg]}" == 1 ]]; then
 			detail+=$'\n'"  ${ivr_rdf[$ivr_rdg]}: ${ivr_rdg#*|}"
 			detail+=$'\n'"    reproduce: $(_istio_version_repro "${ivr_rdg%%|*}" "${ivr_rdf[$ivr_rdg]}" "$@")"
 		else
@@ -766,13 +852,21 @@ istio_version_resolve() {
 		ivr_rlv="${ivr_rg#* }"
 		ivr_rlv="${ivr_rlv%% *}"
 		if [[ "$ivr_rg" == *" terminating" ]]; then
+			# M7: the pods of that revision: Sail's istiod-<rev> (istiod: default) Deployment
+			# labels them istio.io/rev=<rev>.
+			ivr_rdep="${ivr_rg%% *}"
+			ivr_rdep="${ivr_rdep#*/}"
 			rk="pods:${ivr_rg%%/*}"
+			case "$ivr_rdep" in
+			istiod) rk+="/default" ;;
+			istiod-?*) rk+="/${ivr_rdep#istiod-}" ;;
+			esac
 			label="istiod pods still terminating after the rollout to ${ivr_rlv}"
 		else
 			rk="deploy:${ivr_rg%% *}"
 			label="istiod is rolling out ${ivr_rlv}"
 		fi
-		if ((ivr_rlc[$ivr_rg] == 1)); then
+		if [[ "${ivr_rlc[$ivr_rg]}" == 1 ]]; then
 			detail+=$'\n'"  ${ivr_rlf[$ivr_rg]}: ${ivr_rlw[$ivr_rg]}"
 			detail+=$'\n'"    check: $(_istio_version_repro "$rk" "${ivr_rlf[$ivr_rg]}" "$@")"
 		else
@@ -807,7 +901,9 @@ istio_version_resolve() {
 			else
 				label="their istiod rollout is complete and their old istiod pods are gone"
 			fi
-			if ((n_read + n_unsettled)); then
+			if ((n_unsettled == 0 && n_read > 0 && n_read == n_revread)); then
+				fix="Fix access to those members (kubeconfig, login, network) and to their IstioRevision, or wait until ${label}"
+			elif ((n_read + n_unsettled)); then
 				fix="Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled and ${label}"
 			else
 				fix="Wait until ${label}"
@@ -816,6 +912,9 @@ istio_version_resolve() {
 		else
 			problem="cannot read the running Istio version on ${bad} of ${#ctxs[@]} members:${detail}"
 			fix="Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled"
+			# M7: only IstioRevision reads failed, on settled CRs: there is nothing to wait for.
+			((n_unsettled || n_read != n_revread)) \
+				|| fix="Fix access to those members (kubeconfig, login, network) and to their IstioRevision (their Istio CR is settled)"
 		fi
 		if [[ -z "$ivr_offpin" ]]; then
 			fix+="; the pin is not the problem."
@@ -839,6 +938,7 @@ istio_version_resolve() {
 	fi
 	if [[ -n "$problem" ]]; then
 		if [[ "$policy" == fail ]]; then
+			echo STOP
 			die "${problem}${fix}"$'\n'"Nothing was changed. To go on anyway and record ISTIO_VERSION=${live}, set ISTIO_VERSION_CHECK=warn."
 		fi
 		why="ISTIO_VERSION_CHECK=warn"
@@ -849,7 +949,7 @@ istio_version_resolve() {
 		{
 			echo "WARNING: istiod or IstioCNI is still not ready on ${n_notready} of ${#ctxs[@]} members after ${elapsed}s:"
 			for st in "${ivr_states[@]}"; do
-				if ((ivr_nrc[$st] > 1)); then
+				if [[ "${ivr_nrc[$st]}" != 1 ]]; then
 					echo "  ${st} on ${ivr_nrc[$st]} members (${ivr_nrm[$st]})"
 					echo "    check (shown for ${ivr_nrf[$st]}): $(_istio_version_repro state "${ivr_nrf[$st]}" "$@")"
 				else
@@ -865,11 +965,8 @@ istio_version_resolve() {
 			fi
 		} >&2
 	fi
-	export ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT="$by" _ISTIO_VERSION_REVS="$revs"
-	export ISTIO_NOTREADY_AT_START="${nr_at_start:-none}" ISTIO_READY_WAITED_SEC="$elapsed"
-	export ISTIO_VERSION="$live"
-	_ISTIO_VERSION_RESOLVED="$(_istio_version_marker)"
-	export _ISTIO_VERSION_RESOLVED
+	printf '%s\n' "ISTIO_VERSION_SOURCE=live" "ISTIO_VERSION_BY_CONTEXT=${by}" "_ISTIO_VERSION_REVS=${revs}" \
+		"ISTIO_NOTREADY_AT_START=${nr_at_start:-none}" "ISTIO_READY_WAITED_SEC=${elapsed}" "ISTIO_VERSION=${live}" END
 }
 
 # _istio_notready_notes <out_arrayname> <start|end|resume> <ctx=state,...> [<waited_sec>]
@@ -909,7 +1006,7 @@ _istio_notready_notes() {
 		pairs=()
 		IFS=, read -r -a pairs <<<"${members[$st]//, /,}"
 		label="$st"
-		[[ "$st" != rolling ]] || label="rolling (an istiod rollout in progress)"
+		[[ "$st" != rolling ]] || label="rolling (an istiod rollout in progress, or old istiod pods still terminating)"
 		[[ "$st" != unreadable ]] || label="unreadable (an istiod rollout at the first read, then every re-read failed)"
 		n="${#pairs[@]} members"
 		((${#pairs[@]} > 1)) || n="1 member"
@@ -941,8 +1038,44 @@ _istio_notready_notes() {
 #   --info <msg>     a --resume whose members were all ready when it started
 #                    (ISTIO_NOTREADY_AT_RESUME=none, with its start time; K6).
 # Nothing more when nothing was read live (ISTIO_VERSION_SOURCE pin, as under --dry-run).
+# M1: the check runs apart (_istio_version_isolated); one that stops unexpectedly (bash 4.3
+# to 5.1 abort on a bad array subscript) is a --problem, never silence.
 # shellcheck disable=SC2329
 istio_version_recheck() {
+	local -n _ivrc_res="$1"
+	shift
+	local ivrc_file ivrc_rc=0
+	local -a ivrc_lines=()
+	_ivrc_res=()
+	ivrc_file="$(mktemp)"
+	_istio_version_isolated ivrc_rc "$ivrc_file" _istio_version_recheck_emit "$@"
+	mapfile -t ivrc_lines < "$ivrc_file"
+	rm -f "$ivrc_file"
+	if ((ivrc_rc == 0 && ${#ivrc_lines[@]} > 0)) && [[ "${ivrc_lines[-1]}" == END ]]; then
+		unset 'ivrc_lines[-1]'
+		_ivrc_res=(${ivrc_lines[@]+"${ivrc_lines[@]}"})
+	else
+		_ivrc_res=(--problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit ${ivrc_rc}; the error is on stderr above), so whether the Istio version or the active revision changed during the sweep is not known")
+	fi
+	return 0
+}
+
+# _istio_version_recheck_emit <kubectl_argv...>: run through _istio_version_isolated, prints
+# _istio_version_recheck_live's arguments one per line (a newline in one becomes a
+# space), then END.
+# shellcheck disable=SC2329
+_istio_version_recheck_emit() {
+	local -a ivre_out=()
+	local ivre_a
+	_istio_version_recheck_live ivre_out "$@"
+	for ivre_a in ${ivre_out[@]+"${ivre_out[@]}"}; do printf '%s\n' "${ivre_a//$'\n'/ }"; done
+	echo END
+}
+
+# _istio_version_recheck_live <out_arrayname> <kubectl_argv...>: istio_version_recheck's
+# reads and comparison.
+# shellcheck disable=SC2329
+_istio_version_recheck_live() {
 	local -n _ivrc_out="$1"
 	shift
 	_ivrc_out=()

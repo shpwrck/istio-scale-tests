@@ -213,6 +213,12 @@ EXTRACTED_PATTERNS=(
 	'istio_version_recheck() {'
 	'istio_version_kv() {'
 	'istio_version_label() {'
+	# batch B M1/M5: the version check runs apart and fails closed; kubectl's why without klog
+	'_istio_version_isolated() {'
+	'_istio_version_resolve_live() {'
+	'_istio_version_recheck_emit() {'
+	'_istio_version_recheck_live() {'
+	'_istio_version_errline() {'
 	# batch B: sweep outcome record (common.sh), multi-run refusal (config.sh)
 	'_sweep_outcome_by() {'
 	'_sweep_outcome_sweep_ids() {'

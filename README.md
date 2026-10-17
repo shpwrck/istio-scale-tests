@@ -140,15 +140,16 @@ not ready after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_
 which a sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member
 was ready), `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling`
 (an istiod rollout still in progress), `<ctx>=unreadable` (a rollout at the first read, then every
-re-read failed), `unchecked` (a `--dry-run`) or, in a report, `unknown` (a TSV written before the
-key existed). A controlplane `--resume` keeps the first run's value in the TSV, and records its
-own, with its UTC start time, in a note of the sweep outcome (`ISTIO_NOTREADY_AT_RESUME=...`)
-and in the sweep dir's append-only `resumes.txt`, one line per resume.
-With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the
-pin, members on different versions, or a member that cannot be read stop every suite but
+re-read failed), `unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or,
+in a report, `unknown` (a TSV written before the key existed). A controlplane `--resume` keeps the
+first run's value in the TSV, and records its own, with its UTC start time, in a note of the
+sweep outcome (`ISTIO_NOTREADY_AT_RESUME=...`) and in the sweep dir's append-only `resumes.txt`,
+one line per resume. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version
+than the pin, members on different versions, or a member that cannot be read stop every suite but
 gateway-api (a read-only check that only records it) before it changes anything;
 `ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs (`mixed:<a>/<b>` or `unknown`
-when they differ or cannot be read). A sweep reads it again at the end and exits 4 when the
+when they differ or cannot be read). A version check that stops unexpectedly counts as unknown:
+`fail` stops the run, `warn` records `unknown`, and at the end of a sweep it is a problem (exit 4). A sweep reads it again at the end and exits 4 when the
 version or the active revision changed (also when the Istio CR is not settled at the end, or its
 istiod Deployment cannot be read, but its active revision reads another version); istiod or
 IstioCNI not ready at the end, on the same version, is a warning. The sweep writes that outcome
