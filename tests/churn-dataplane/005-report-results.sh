@@ -129,8 +129,8 @@ esac
 if ((DRY_RUN)); then
 	DRY_FILES=()
 	nr=0
-	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | sort)
-	[[ -d "$RESULTS_DIR" ]] && nr=$(find "$RESULTS_DIR" -name 'reach-*.tsv' -type f | wc -l)
+	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find -H "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | sort)
+	[[ -d "$RESULTS_DIR" ]] && nr=$(find -H "$RESULTS_DIR" -name 'reach-*.tsv' -type f | wc -l)
 	# The same refusal as the report (R3): a dir with more than one run is not summarized.
 	((${#DRY_FILES[@]} == 0)) || config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${DRY_FILES[@]}"
 	echo "[dry-run] would summarize ${#DRY_FILES[@]} churn-dataplane-*.tsv file(s) and $((nr)) reach-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
@@ -141,7 +141,7 @@ fi
 
 # Recurse into sweep-* subdirs as well.
 TSV_FILES=()
-while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f 2>/dev/null | sort)
+while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find -H "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f 2>/dev/null | sort)
 ((${#TSV_FILES[@]})) || die "no churn-dataplane-*.tsv files in $RESULTS_DIR"
 
 # R3/PL6: the report pools every TSV under the results dir; more than one run stops it

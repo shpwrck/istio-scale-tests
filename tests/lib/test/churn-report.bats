@@ -181,7 +181,7 @@ _stub_bin() {
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
 case " $* " in
-*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "*)
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*)
 	exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*) printf 'istiod-abc-x1\n' ;;
 *" scale "*) : ;;

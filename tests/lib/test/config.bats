@@ -736,7 +736,7 @@ with_run_config() {
 	mkdir -p "$bin"
 	printf '#!/bin/sh
 echo "$*" >> "%s/kubectl.log"
-case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
+case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
 ' "$BATS_TEST_TMPDIR" > "${bin}/kubectl"
 	chmod +x "${bin}/kubectl"
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
@@ -770,4 +770,9 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	refute_output --partial "--resume: this sweep recorded"
 	cmp -s "$d/sweep-outcome.prev.txt" "${BATS_TEST_TMPDIR}/old-outcome.txt"
 	[ -f "$d/sweep-outcome.txt" ]
+	# J2: the resume's own start condition and time are in its outcome (none included); the
+	# TSV keeps the first run's. J7: one HARNESS_SHA for the run's preambles and outcome.
+	grep -Eq "^NOTE=this --resume started at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z with every member ready \(ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0\); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's$" "$d/sweep-outcome.txt"
+	grep -qx '# ISTIO_NOTREADY_AT_START=none' "$tsv"
+	[ "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")" ]
 }

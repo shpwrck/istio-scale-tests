@@ -254,8 +254,9 @@ prop_row() {
 	# The probe inherited the sweep's reading: the Istio CR is read at the start and again
 	# at the end (A6), each a read and its one retry; never by the probe.
 	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 4 ]
-	# The outcome stays with the results (C3).
+	# The outcome stays with the results (C3), naming the harness the metadata names (J7).
 	grep -qx 'EXIT=4' "${d}/sweep-outcome.txt"
+	[ "$(sed -n 's/^HARNESS_SHA=//p' "${d}/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "${d}/sweep-metadata.txt")" ]
 	grep -qx 'UNIT=passes' "${d}/sweep-outcome.txt"
 	grep -qx '## Sweep outcome' "${d}/sweep-comparison.md"
 }

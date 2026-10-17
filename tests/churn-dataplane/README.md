@@ -110,9 +110,9 @@ Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or prec
 or an unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`,
 below; the reports are written); `4` it finished and wrote its reports, but some
 combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the Istio
-version or active revision changed during the sweep (read again before the reports). The last line on stderr
-says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the
-end of the markdown summary keep the outcome.
+version or active revision changed during the sweep (read again before the reports). The
+last line on stderr says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the
+sweep dir and the end of the markdown summary keep the outcome.
 
 ## Remote reachability
 

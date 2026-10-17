@@ -235,6 +235,20 @@ _sweep_outcome_by() {
 	printf '%s\n' "$@" | sort | uniq -c | awk '{ printf "%s%s x%d", (NR > 1 ? ", " : ""), $2, $1 }'
 }
 
+# _sweep_outcome_sweep_ids <dir>: the distinct sweep-level ids of the TSVs under <dir>, one
+# per line: a file's SWEEP_RUN_ID preamble line, else its RUN_ID line (J6).
+_sweep_outcome_sweep_ids() {
+	find -H "$1" -name '*.tsv' -type f -exec awk '
+		FNR == 1 { if (NR > 1) pick(); s = ""; r = ""; pre = 1 }
+		function pick() { v = (s != "" ? s : r); if (v != "" && !(v in seen)) { seen[v] = 1; print v } }
+		!pre { next }
+		/^# SWEEP_RUN_ID=/ { if (s == "") s = substr($0, 16); next }
+		/^# RUN_ID=/ { if (r == "") r = substr($0, 10); next }
+		/^#/ { next }
+		{ pre = 0 }
+		END { if (NR > 0) pick() }' {} + 2>/dev/null | awk '!seen[$0]++' || true
+}
+
 # sweep_outcome_recorded <results_dir> <text|md|json|csv> [<run_id>]: what the sweep
 # recorded in <results_dir>/sweep-outcome.txt (sweep_outcome --record), for a report
 # re-generated after the sweep (X3). text and md name the record's run and exit, then its
@@ -242,25 +256,38 @@ _sweep_outcome_by() {
 # the file is absent or records none of them); csv prints them as `# SWEEP_OUTCOME_<KEY>=`
 # comment lines (Y9; nothing without the file); json prints {"exit":N,"run_id":"...",
 # "failed":N,"failed_by":"...","problems":[...],"notes":[...],"stop_reason":"..."}, or null
-# without the file. <run_id> is the report's run (default: the one run
-# config_check_multi_run counted, a sweep-* dir's id; none for a pooled report): a record
-# from another run is named as such, in every format and on stderr (Y9).
+# without the file. <run_id> is the report's run, compared with the record's RUN_ID (Y9). By
+# default (one run, as config_check_multi_run counted it; nothing is compared for a pooled
+# report) the record matches when its RUN_ID is the sweep-level id of a TSV under
+# <results_dir> (SWEEP_RUN_ID, else RUN_ID: J6, so a renamed sweep dir is still its
+# sweep), else the sweep-* dir's own id, else when the dir holds that run's
+# sweep-<RUN_ID>.md (sweeps whose cells mint their own RUN_IDs). A record from another
+# run is named as such, in every format (json report_run_id) and on stderr.
 # shellcheck disable=SC2329
 sweep_outcome_recorded() {
-	local f="${1}/sweep-outcome.txt" fmt="$2" want="${3:-}" rid other=""
+	local f="${1}/sweep-outcome.txt" fmt="$2" want="${3:-}" rid other="" sids dkey=""
 	if [[ ! -f "$f" ]]; then
 		[[ "$fmt" != json ]] || echo null
 		return 0
 	fi
-	if [[ -z "$want" && "${MULTI_RUN_N:-0}" == 1 ]]; then
-		want="${MULTI_RUN_IDS:-}"
-		want="${want#sweep-}"
-	fi
 	case "$want" in mixed:* | unknown*) want="" ;; esac
 	rid="$(sed -n 's/^RUN_ID=//p' "$f" 2>/dev/null | head -n 1)"
-	if [[ -n "$want" && -n "$rid" && "$rid" != unknown && "$rid" != "$want" ]]; then
-		other="$want"
-		echo "warning: ${f} was recorded by run ${rid}, not by this report's run ${want}; the outcome it repeats may not describe these rows" >&2
+	if [[ -n "$rid" && "$rid" != unknown ]]; then
+		if [[ -n "$want" ]]; then
+			[[ "$rid" == "$want" ]] || other="$want"
+		elif [[ "${MULTI_RUN_N:-0}" == 1 ]]; then
+			sids="$(_sweep_outcome_sweep_ids "$1")"
+			dkey="${MULTI_RUN_IDS:-}"
+			dkey="${dkey#sweep-}"
+			case "$dkey" in mixed:* | unknown*) dkey="" ;; esac
+			if ! grep -qxF -- "$rid" <<<"$sids" && [[ "$rid" != "$dkey" && ! -f "${1}/sweep-${rid}.md" ]]; then
+				# Name the report's run by its TSVs when they agree on one, else by its dir.
+				if [[ -n "$sids" && "$sids" != *$'\n'* ]]; then other="$sids"; else other="${dkey:-its TSVs}"; fi
+			fi
+		fi
+	fi
+	if [[ -n "$other" ]]; then
+		echo "warning: ${f} was recorded by run ${rid}, not by this report's run ${other}; the outcome it repeats may not describe these rows" >&2
 	fi
 	awk -v fmt="$fmt" -v other="$other" '
 		function jstr(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); gsub(/\t/, "\\t", v); return "\"" v "\"" }
@@ -284,7 +311,7 @@ sweep_outcome_recorded() {
 				for (i = 1; i <= np; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(pr[i])
 				printf "],\"notes\":["
 				for (i = 1; i <= nn; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(nt[i])
-				printf "],\"stop_reason\":%s%s}\n", jstr(stop), (other == "" ? "" : ",\"other_run\":" jstr(other))
+				printf "],\"stop_reason\":%s%s}\n", jstr(stop), (other == "" ? "" : ",\"report_run_id\":" jstr(other))
 				exit
 			}
 			if (fmt == "csv") {

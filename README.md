@@ -98,8 +98,8 @@ Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-
 `results/` directory; a sweep writes its TSVs and reports into its own `results/sweep-<RUN_ID>/`.
 A sweep whose setup or probe failed for some cells still writes its report, then ends with
 `N of M cells failed` (by reason) and exit code 4, as it does when the Istio version or active
-revision changed during the sweep; `sweep-outcome.txt` in the sweep dir keeps the outcome. Each suite README
-lists its exit codes.
+revision changed during the sweep; `sweep-outcome.txt` in the sweep dir keeps the outcome. Each
+suite README lists its exit codes.
 Every script has `--help`, and scripts that change a cluster also accept `--dry-run`.
 
 | Suite | Measures | Start with |
@@ -127,23 +127,29 @@ readiness (its state is not Healthy because istiod or IstioCNI is not ready) sti
 version: the suite reads it again every `ISTIO_VERSION_READY_POLL_SEC` (5) for up to
 `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, then records the version with a warning on stderr.
 An istiod rollout in progress (its Deployment has fewer updated pods than pods, or a generation
-not observed yet) is waited for the same way, and reads as unknown if it outlasts the wait: old
-and new istiod pods both serve. The suite records the result as `ISTIO_VERSION`, next to the pin
-(`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which reads
-nothing), `ISTIO_VERSION_BY_CONTEXT`, and the members still not ready after the wait
-(`ISTIO_NOTREADY_AT_START`, `none` when every member was ready; the wait in
-`ISTIO_READY_WAITED_SEC`), which a sweep's outcome repeats as a note. With
-`ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the pin, members on
-different versions, or a member that cannot be read stop every suite but gateway-api (a read-only check that only records it) before it changes anything;
+not observed yet, also while the CR already reads Healthy) is waited for the same way, and reads
+as unknown if it outlasts the wait: old and new istiod pods both serve. A member stays in the
+wait until the deadline or until it is ready, so a CR that is briefly not settled meanwhile does
+not stop the run early; its answer at the deadline counts. The suite records the result as
+`ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in
+a `--dry-run`, which reads nothing), `ISTIO_VERSION_BY_CONTEXT`, and the members still not ready
+after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a
+sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was
+ready), `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an
+istiod rollout still in progress), `unchecked` (a `--dry-run`) or, in a report, `unknown` (a TSV
+written before the key existed). A controlplane `--resume` keeps the first run's value in the
+TSV, and records its own, with its UTC start time, as `ISTIO_NOTREADY_AT_RESUME` in the sweep
+outcome. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the
+pin, members on different versions, or a member that cannot be read stop every suite but
+gateway-api (a read-only check that only records it) before it changes anything;
 `ISTIO_VERSION_CHECK=warn` goes on and records what the mesh runs (`mixed:<a>/<b>` or `unknown`
 when they differ or cannot be read). A sweep reads it again at the end and exits 4 when the
-version or the active revision changed (also when the Istio CR is not settled at the end but its
-active revision reads another version); istiod or IstioCNI not ready at the end, on the same
-version, is a warning. The sweep
-writes that outcome to `sweep-outcome.txt` in its results dir, and every report re-generated
-from that dir repeats its errors and warnings; a sweep dir without `sweep-outcome.txt` is a
-sweep that died before its end. These keys are set in the environment, never in a `--config`
-file.
+version or the active revision changed (also when the Istio CR is not settled at the end, or its
+istiod Deployment cannot be read, but its active revision reads another version); istiod or
+IstioCNI not ready at the end, on the same version, is a warning. The sweep writes that outcome
+to `sweep-outcome.txt` in its results dir, and every report re-generated from that dir repeats
+its errors and warnings; a sweep dir without `sweep-outcome.txt` is a sweep that died before its
+end. These keys are set in the environment, never in a `--config` file.
 
 ### Run config (`--config FILE`)
 

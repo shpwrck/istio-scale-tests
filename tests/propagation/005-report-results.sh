@@ -171,7 +171,7 @@ done
 ENDPOINT_FILES=()
 while IFS= read -r f; do
 	ENDPOINT_FILES+=("$f")
-done < <(find "$RESULTS_DIR" -name 'endpoint-*.tsv' -type f 2>/dev/null | sort)
+done < <(find -H "$RESULTS_DIR" -name 'endpoint-*.tsv' -type f 2>/dev/null | sort)
 
 if [[ ${#ENDPOINT_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
@@ -226,6 +226,11 @@ done
 while IFS= read -r kv; do
 	PREAMBLE["${kv%%=*}"]="${kv#*=}"
 done < <(config_merged_preamble "${ENDPOINT_FILES[@]}")
+# J13: a key every input predates (the Istio version keys, the R2 readiness keys) reads
+# unknown, as in the other reports: not recorded, rather than absent.
+for k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
+	[[ -n "${PREAMBLE[$k]:-}" ]] || PREAMBLE[$k]=unknown
+done
 for k in "${SWEEP_LEVEL_KEYS[@]}"; do
 	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256) continue ;; esac
 	if [[ "${PREAMBLE[$k]:-}" == mixed:* ]]; then

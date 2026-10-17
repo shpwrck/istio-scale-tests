@@ -137,7 +137,7 @@ esac
 
 if ((DRY_RUN)); then
 	DRY_FILES=()
-	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find "$RESULTS_DIR" -name 'churn-*.tsv' -type f | sort)
+	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find -H "$RESULTS_DIR" -name 'churn-*.tsv' -type f | sort)
 	# The same refusal as the report (R3): a dir with more than one run is not summarized.
 	((${#DRY_FILES[@]} == 0)) || config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${DRY_FILES[@]}"
 	echo "[dry-run] would summarize ${#DRY_FILES[@]} churn-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
@@ -149,7 +149,7 @@ fi
 TSV_FILES=()
 while IFS= read -r f; do
 	TSV_FILES+=("$f")
-done < <(find "$RESULTS_DIR" -name 'churn-*.tsv' -type f 2>/dev/null | sort)
+done < <(find -H "$RESULTS_DIR" -name 'churn-*.tsv' -type f 2>/dev/null | sort)
 
 if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"

@@ -215,6 +215,7 @@ EXTRACTED_PATTERNS=(
 	'istio_version_label() {'
 	# batch B: sweep outcome record (common.sh), multi-run refusal (config.sh)
 	'_sweep_outcome_by() {'
+	'_sweep_outcome_sweep_ids() {'
 	'sweep_outcome_recorded() {'
 	'_config_run_key() {'
 	'_config_run_ids() {'

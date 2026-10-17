@@ -66,7 +66,8 @@ Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
   record what the mesh runs, when a member's active IstioRevision version is not
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
 
 Exit codes:
@@ -147,6 +148,8 @@ PASSES+=("${PROFILES[@]}")
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_BASE}/sweep-${RUN_ID}"
+# J7: read once, so sweep-metadata.txt and sweep-outcome.txt name the same harness.
+HARNESS_SHA="$(harness_sha)"
 PAUSE_STATE="${SWEEP_DIR}/gitops-pause.json"
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
@@ -304,7 +307,7 @@ mkdir -p "$SWEEP_DIR"
 	echo "# PASSES=$(IFS=,; echo "${PASSES[*]}")"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
 	if [[ "$SUITE" == churn-dataplane ]]; then echo "# CHURN_RATE=${CHURN_RATE}"; fi
-	echo "# HARNESS_SHA=$(harness_sha)"
+	echo "# HARNESS_SHA=${HARNESS_SHA}"
 	istio_version_kv | sed 's/^/# /'
 } >"${SWEEP_DIR}/sweep-metadata.txt"
 

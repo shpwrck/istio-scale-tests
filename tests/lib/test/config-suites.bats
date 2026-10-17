@@ -31,7 +31,7 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
-*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" get pods "*"-l app=istiod"*) [[ -n "${STUB_ISTIOD:-}" ]] && echo istiod-0 ;;
 *" exec "*) cat "$STUB_JSON" ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;

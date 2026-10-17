@@ -640,6 +640,12 @@ fit_of() {
 	assert_line "# ISTIO_READY_WAITED_SEC=60"
 	assert_line "# SWEEP_OUTCOME_EXIT=4"
 	assert_line "# SWEEP_OUTCOME_PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	# J10: through a symlink to the results dir (no trailing slash), the same report.
+	ln -s "$d" "${BATS_TEST_TMPDIR}/latest"
+	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
+	assert_success
+	[ "$(jq -c '[.sweep_outcome.exit, .metadata.istio_notready_at_start]' <<<"$output")" = '[4,"<mesh-a-ctx>=IstioCNINotHealthy"]' ]
+	[[ "$stderr" != *"was recorded by run"* ]]
 	rm "${d}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format json
 	[ "$(jq -c '.sweep_outcome' <<<"$output")" = null ]

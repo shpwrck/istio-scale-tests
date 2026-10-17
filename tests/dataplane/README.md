@@ -110,10 +110,10 @@ size with a remote cluster; the p50-vs-mesh-size chart needs two.
 Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition,
 or an unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`,
 see below; the reports are written); `4` it finished and wrote its reports, but some
-mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio version
-changed during the sweep (read again before the reports). The last line on stderr says how
-many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the
-markdown summary keep the outcome.
+mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio version or
+active revision changed during the sweep (read again before the reports). The last line on
+stderr says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and
+the end of the markdown summary keep the outcome.
 
 ## Run config (`--config FILE`)
 

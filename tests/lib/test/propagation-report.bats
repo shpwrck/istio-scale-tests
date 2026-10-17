@@ -158,6 +158,18 @@ fixture() {
 		assert_output --partial "ISTIO_NOTREADY_AT_START"
 		assert_output --partial "rmt=IstiodNotReady"
 	done
+	# J13: the old run alone was never checked: unknown in every format, not absent.
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format json
+	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC, .ISTIO_VERSION_SOURCE]' <<<"$output")" = '["unknown","unknown","unknown"]' ]
+	for fmt in text csv markdown; do
+		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format "$fmt"
+		assert_output --regexp 'ISTIO_NOTREADY_AT_START[^A-Za-z0-9]*unknown'
+	done
+	# J10: --results-dir through a symlink (results/latest -> sweep-new), no trailing slash.
+	ln -s "${RES}/sweep-new" "${BATS_TEST_TMPDIR}/latest"
+	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
+	assert_success
+	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "rmt=IstiodNotReady" ]
 }
 
 # p1rows <run_id> <mesh> <iterations> <remotes...>: an OK row per (iteration, remote); P1

@@ -207,8 +207,9 @@ Environment:
   GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
   GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE}), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
   Environment only (the Istio version read; this read-only check warns and never stops on it):
-  ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready is read
-  again, ${ISTIO_VERSION_READY_WAIT_SEC:-60} s), ISTIO_VERSION_READY_POLL_SEC (every
+  ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out, is read again, ${ISTIO_VERSION_READY_WAIT_SEC:-60} s; a rollout
+  still running then reads as unknown), ISTIO_VERSION_READY_POLL_SEC (every
   ${ISTIO_VERSION_READY_POLL_SEC:-5} s).
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs

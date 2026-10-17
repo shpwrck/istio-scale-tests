@@ -1111,7 +1111,7 @@ _istiod_diag_report_rows() {
 	local rdir="${1:-.}" f
 	local -a files=()
 	[[ "$rdir" == / ]] || rdir="${rdir%/}"
-	while IFS= read -r f; do files+=("$f"); done < <(find "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | LC_ALL=C sort)
+	while IFS= read -r f; do files+=("$f"); done < <(find -H "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | LC_ALL=C sort)
 	((${#files[@]})) || return 0
 	awk -F'\t' -v want="${#_ISTIOD_DIAG_HEADER[@]}" -v pfx="${rdir%/}/" '
 		FNR == 1 {
@@ -1153,7 +1153,7 @@ istiod_diag_report() {
 	local fmt="${1:-text}" rdir="${2:-.}" rows nfiles
 	[[ "$fmt" == csv ]] && return 0
 	rows="$(_istiod_diag_report_rows "$rdir")" || rows=""
-	nfiles="$(find "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | awk 'END { print NR }')" || nfiles=0
+	nfiles="$(find -H "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | awk 'END { print NR }')" || nfiles=0
 	case "$fmt" in
 	json)
 		# Fields after the three prefixes: index column j is .[j + 2].

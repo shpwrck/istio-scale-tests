@@ -77,7 +77,8 @@ Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
   record what the mesh runs, when a member's active IstioRevision version is not
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
   PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
   (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),

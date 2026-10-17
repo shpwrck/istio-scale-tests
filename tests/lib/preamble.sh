@@ -258,16 +258,19 @@ tuning_baseline_state() {
 #      v1.30-latest); only ^v?N.N.N$ counts, anything else is kind value. Its
 #      .status.observedGeneration must equal its .metadata.generation, else kind state (Sail
 #      copies a revision's state into the CR before the revision's own Helm upgrade runs).
-#   3. Only when readiness alone is off: the istiod Deployment Sail runs for that revision
-#      (its istiodDeploymentKey: `istiod`, or `istiod-<.spec.values.revision>` when that is
-#      set, in the revision's .spec.namespace). .status.observedGeneration below
-#      .metadata.generation, or .status.updatedReplicas below .status.replicas, is an
-#      istiod rollout in progress, old and new pods both serving (I2): kind rolling, with
-#      the version it rolls out to. Otherwise kind notready (a pod restart, an HPA scale-up,
-#      IstioCNI not healthy): the version, with the state as why.
-# Kind ok when the state is Healthy. Kind read: kubectl failed or answered nothing (no CR,
-# no access, unreachable); the reason is the first line of its stderr, and a caller may
-# retry it.
+#   3. The istiod Deployment Sail runs for that revision (its istiodDeploymentKey:
+#      `istiod`, or `istiod-<.spec.values.revision>` when that is set, in the revision's
+#      .spec.namespace), also when the state is Healthy (J3: Sail's Ready only compares
+#      readyReplicas with replicas, so a Deployment whose status has not moved yet, or
+#      whose old ReplicaSet is not scaled down yet, still serves old pods).
+#      .status.observedGeneration below .metadata.generation, or .status.updatedReplicas
+#      below .status.replicas, is an istiod rollout in progress, old and new pods both
+#      serving (I2): kind rolling, with the version it rolls out to. Otherwise kind ok when
+#      the state is Healthy, else notready (a pod restart, an HPA scale-up, IstioCNI not
+#      healthy): the version, with the state as why.
+# Kind read: kubectl failed or answered nothing (no CR, no access, unreachable); the
+# reason is the first line of its stderr, and a caller may retry it. A failed Deployment
+# read still returns the revision's version (line 5), for istio_version_recheck (J1).
 # shellcheck disable=SC2329
 istio_live_version() {
 	local ctx="$1" errf out rc=0 gen ogen state inuse rev recon why="" kind=state ready=""
@@ -342,12 +345,7 @@ istio_live_version() {
 			"$rev" "${rgen:-?}" "${rogen:-none}" "$rev" "$rver" "$state"
 		return 0
 	fi
-	if [[ -z "$ready" ]]; then
-		rm -f "$errf"
-		printf '%s\nok\n\n%s\n%s\n%s\n' "$rver" "$rev" "$rver" "$state"
-		return 0
-	fi
-	# I2: readiness alone is off. An istiod rollout in progress is not "only readiness".
+	# I2/J3: an istiod rollout in progress is neither Healthy nor "only readiness".
 	dep="istiod${rvrev:+-${rvrev}}"
 	rns="${rns:-istio-system}"
 	if [[ ! "$dep" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ || ! "$rns" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
@@ -378,6 +376,8 @@ istio_live_version() {
 		why="istiod is rolling out ${rver} (Deployment ${rns}/${dep}: ${dupd} of ${dreps} pods updated"
 		((dogen >= dgen)) || why+=", generation ${dgen} not observed yet"
 		printf '%s\nrolling\n%s); its state is %s\n%s\n%s\n%s\n' "$rver" "$why" "$state" "$rev" "$rver" "$state"
+	elif [[ -z "$ready" ]]; then
+		printf '%s\nok\n\n%s\n%s\n%s\n' "$rver" "$rev" "$rver" "$state"
 	else
 		printf '%s\nnotready\n%s\n%s\n%s\n%s\n' "$rver" "$ready" "$rev" "$rver" "$state"
 	fi
@@ -419,14 +419,18 @@ _istio_version_read_all() {
 }
 
 # _istio_version_repro <kind> <ctx> <kubectl_argv...>: the command that shows an operator
-# what the read saw on <ctx>.
+# what the read saw on <ctx>. <kind> deploy:<ns>/<name> is the istiod Deployment that was
+# read (J12); value the IstioRevisions; anything else the Istio CR.
 _istio_version_repro() {
 	local kind="$1" ctx
 	ctx="$(printf '%q' "$2")"
 	shift 2
 	case "$kind" in
 	value) echo "$* --context ${ctx} get istiorevisions.sailoperator.io -o yaml" ;;
-	rolling) echo "$* --context ${ctx} get deployments.apps -A -l app=istiod" ;;
+	deploy:*/*)
+		kind="${kind#deploy:}"
+		echo "$* --context ${ctx} -n ${kind%%/*} get deployments.apps ${kind#*/} -o yaml"
+		;;
 	*) echo "$* --context ${ctx} get istios.sailoperator.io default -o yaml" ;;
 	esac
 }
@@ -438,13 +442,13 @@ _istio_version_marker() {
 		"${ISTIO_VERSION_BY_CONTEXT:-}" "${ISTIO_NOTREADY_AT_START:-}" "${ISTIO_READY_WAITED_SEC:-}"
 }
 
-# istio_version_resolve [--no-stop] <ctxs_csv> <dry_run 0|1> <kubectl_argv...>: R4 (PL39).
-# The results record the Istio version the mesh runs, not only the config/versions.env
-# pin (an existing cluster, a bumped istioVersion, or an ISTIO_VERSION left in the shell
-# by Istio's download script would mislabel them). Call it once per run, before any
-# cluster change and outside any measurement window: a sweep before its first step (its
-# steps inherit the result through the private _ISTIO_VERSION_RESOLVED marker, never
-# because ISTIO_VERSION_* values happen to be in the environment), a standalone probe
+# istio_version_resolve [--no-stop] [--resumed-at <utc>] <ctxs_csv> <dry_run 0|1> <kubectl_argv...>:
+# R4 (PL39). The results record the Istio version the mesh runs, not only the
+# config/versions.env pin (an existing cluster, a bumped istioVersion, or an ISTIO_VERSION
+# left in the shell by Istio's download script would mislabel them). Call it once per run,
+# before any cluster change and outside any measurement window: a sweep before its first
+# step (its steps inherit the result through the private _ISTIO_VERSION_RESOLVED marker,
+# never because ISTIO_VERSION_* values happen to be in the environment), a standalone probe
 # before its first mutation. Reads every member concurrently (istio_live_version, one
 # retry for a failed read) and exports:
 #   ISTIO_VERSION_PIN         the pin (ISTIO_VERSION as versions.env / the environment set it)
@@ -459,6 +463,9 @@ _istio_version_marker() {
 #                             none when every member was ready, unchecked under --dry-run
 #   ISTIO_READY_WAITED_SEC    how long that wait took (0 when nobody was waited for)
 # and, for istio_version_recheck, the private _ISTIO_VERSION_REVS (ctx=activeRevisionName,...).
+# --resumed-at <utc> (a controlplane --resume, J2): the run appends to a TSV whose preamble
+# keeps the first run's ISTIO_NOTREADY_AT_START, so istio_version_recheck reports this
+# start as ISTIO_NOTREADY_AT_RESUME, with that time, in the sweep outcome.
 # ISTIO_VERSION_CHECK=fail (default) dies when a member's version is unknown, members
 # differ, or it differs from the pin (a leading v is ignored); warn prints the same
 # problem as a warning and goes on. --no-stop (gateway-api, a read-only check) always
@@ -466,19 +473,33 @@ _istio_version_marker() {
 # Readiness is not the version (I1): a member whose only issue is its state (istiod or
 # IstioCNI not ready, kind notready) or whose istiod is rolling out (kind rolling, I2) is
 # read again every ISTIO_VERSION_READY_POLL_SEC until ISTIO_VERSION_READY_WAIT_SEC have
-# passed (a SECONDS deadline); a re-read that fails keeps its previous answer. Still not
-# ready: its version is recorded and a warning names the state, which never stops the run.
-# Still rolling: its version is unknown (old and new istiod pods both serve), which stops
-# the run under fail. Under fail, nothing is waited for when another member already stops
-# the run (unknown, another version, or not the pin).
+# passed (a SECONDS deadline), or until it is settled and ready (J4: a transient unsettled
+# read keeps it in the wait; one more read after a rollout ends, J3); its answer at the
+# deadline counts. A re-read that fails keeps its previous answer (Y2). Still not ready:
+# its version is recorded and a warning names the state, which never stops the run. Still
+# rolling: its version is unknown (old and new istiod pods both serve), which stops the
+# run under fail. Under fail, nothing is waited for when another member already stops the
+# run (unknown, another version, or not the pin; Y3).
 # Needs die(), split_csv() and is_nonneg_int() from common.sh.
 # shellcheck disable=SC2329
 istio_version_resolve() {
-	local nostop=0
-	if [[ "${1:-}" == --no-stop ]]; then
-		nostop=1
-		shift
-	fi
+	local nostop=0 resumed=""
+	while (($#)); do
+		case "$1" in
+		--no-stop)
+			nostop=1
+			shift
+			;;
+		--resumed-at)
+			(($# >= 2)) || die "istio_version_resolve: --resumed-at needs a time"
+			resumed="$2"
+			shift 2
+			;;
+		*) break ;;
+		esac
+	done
+	# J2: this shell's own --resume start, for istio_version_recheck (never inherited).
+	_ISTIO_VERSION_RESUMED_AT="$resumed"
 	local ctxs_csv="$1" dry="$2" policy="${ISTIO_VERSION_CHECK:-fail}"
 	local wait_max="${ISTIO_VERSION_READY_WAIT_SEC:-60}" poll="${ISTIO_VERSION_READY_POLL_SEC:-5}"
 	shift 2
@@ -503,53 +524,66 @@ istio_version_resolve() {
 	fi
 	{ (($#)) && command -v "$1" >/dev/null 2>&1; } \
 		|| die "neither kubectl nor oc found on PATH, so the live Istio version cannot be read"
-	local -a ctxs=() waitfor=() wctxs=()
+	local -a ctxs=() waitfor=() wctxs=() ivr_states=()
+	local -A ivr_inwait=() ivr_settle=() ivr_rerr=() ivr_rok=() ivr_nrm=() ivr_nrf=() ivr_nrc=()
 	split_csv "$ctxs_csv" ctxs
 	((${#ctxs[@]})) || die "istio_version_resolve: no mesh member contexts"
-	local tmp wtmp i j v kind why rev rver state by="" revs="" distinct="" bad=0 detail="" live problem="" fix="" envpin=""
-	local notready="" n_notready=0 n_rolling=0 nr_at_start="" t0 deadline elapsed=0 polls=0 nap doomed="" vset=""
+	local tmp wtmp i j v kind prev why rev rver state by="" revs="" distinct="" bad=0 detail="" live problem="" fix="" envpin=""
+	local n_notready=0 n_rolling=0 n_read=0 n_unsettled=0 nr_at_start="" t0 deadline elapsed=0 polls=0 nap doomed="" vset=""
+	local ivr_skipped=0 ivr_offpin="" ivr_stale="" allfail st rk label dre='Deployment ([a-z0-9.-]+)/([a-z0-9.-]+)'
 	tmp="$(mktemp -d)"
 	_istio_version_read_all "$tmp" ctxs "$@"
 	# I1/I2: wait while only readiness is off or istiod is rolling out, until a SECONDS
-	# deadline (Y1), re-reading only those members.
+	# deadline (Y1). J4: a member that entered the wait is read again until the deadline or
+	# until it reads ok (and, right after a rollout, once more: J3).
+	for i in "${!ctxs[@]}"; do
+		case "$(sed -n 2p "${tmp}/${i}" 2>/dev/null || true)" in notready | rolling) ivr_inwait[$i]=1 ;; esac
+	done
 	t0=$SECONDS
 	deadline=$((t0 + wait_max))
-	while :; do
+	while ((${#ivr_inwait[@]})); do
 		waitfor=()
 		for i in "${!ctxs[@]}"; do
-			case "$(sed -n 2p "${tmp}/${i}" 2>/dev/null || true)" in notready | rolling) waitfor+=("$i") ;; esac
+			[[ -n "${ivr_inwait[$i]:-}" ]] || continue
+			kind="$(sed -n 2p "${tmp}/${i}" 2>/dev/null || true)"
+			[[ "$kind" == ok && -z "${ivr_settle[$i]:-}" ]] || waitfor+=("$i")
 		done
 		((${#waitfor[@]})) || break
 		((SECONDS < deadline)) || break
-		if ((polls == 0)); then
-			# Y3: under fail, a member that is unknown or on another version stops the run
-			# whatever readiness does; do not wait for it first.
-			if [[ "$policy" == fail ]]; then
-				vset=""
-				for i in "${!ctxs[@]}"; do
-					v="" kind=""
-					{ IFS= read -r v; IFS= read -r kind; } 2>/dev/null < "${tmp}/${i}" || true
-					case "$kind" in
-					ok | notready | rolling) ;;
-					*)
-						doomed="the version of ${ctxs[i]} is unknown"
-						break
-						;;
-					esac
-					case "/${vset}/" in */"${v}"/*) ;; *) vset="${vset:+${vset}/}${v}" ;; esac
-				done
-				if [[ -z "$doomed" && "$vset" == */* ]]; then
-					doomed="the members run different Istio versions"
-				elif [[ -z "$doomed" && "${vset#v}" != "${ISTIO_VERSION_PIN#v}" ]]; then
-					doomed="the mesh runs Istio ${vset}, not the pin ${ISTIO_VERSION_PIN}"
-				fi
-				if [[ -n "$doomed" ]]; then
-					echo "  not waiting for istiod or IstioCNI on ${#waitfor[@]} of ${#ctxs[@]} members: ${doomed}, which stops the run under ISTIO_VERSION_CHECK=fail anyway" >&2
+		if [[ "$policy" == fail ]]; then
+			# Y3: under fail, a member outside the wait whose version is unknown, members on
+			# different versions, or a version that is not the pin stop the run whatever
+			# readiness does; do not wait (any longer) first.
+			doomed="" vset=""
+			for i in "${!ctxs[@]}"; do
+				v="" kind=""
+				{ IFS= read -r v; IFS= read -r kind; } 2>/dev/null < "${tmp}/${i}" || true
+				case "$kind" in
+				ok | notready | rolling) ;;
+				*)
+					[[ -n "${ivr_inwait[$i]:-}" ]] && continue
+					doomed="the version of ${ctxs[i]} is unknown"
 					break
-				fi
+					;;
+				esac
+				case "/${vset}/" in */"${v}"/*) ;; *) vset="${vset:+${vset}/}${v}" ;; esac
+			done
+			if [[ -z "$doomed" && "$vset" == */* ]]; then
+				doomed="the members run different Istio versions"
+			elif [[ -z "$doomed" && -n "$vset" && "${vset#v}" != "${ISTIO_VERSION_PIN#v}" ]]; then
+				doomed="the mesh runs Istio ${vset}, not the pin ${ISTIO_VERSION_PIN}"
 			fi
-			echo "  istiod or IstioCNI is not ready (or istiod is rolling out) on ${#waitfor[@]} of ${#ctxs[@]} members; reading them again every ${poll}s for up to ${wait_max}s..." >&2
+			if [[ -n "$doomed" ]]; then
+				if ((polls == 0)); then
+					ivr_skipped=1
+					echo "  not waiting for istiod or IstioCNI on ${#waitfor[@]} of ${#ctxs[@]} members: ${doomed}, which stops the run under ISTIO_VERSION_CHECK=fail anyway" >&2
+				else
+					echo "  no longer waiting for istiod or IstioCNI after $((SECONDS - t0))s: ${doomed}, which stops the run under ISTIO_VERSION_CHECK=fail anyway" >&2
+				fi
+				break
+			fi
 		fi
+		((polls)) || echo "  istiod or IstioCNI is not ready (or istiod is rolling out) on ${#waitfor[@]} of ${#ctxs[@]} members; reading them again every ${poll}s for up to ${wait_max}s..." >&2
 		nap=$((deadline - SECONDS))
 		((nap <= poll)) || nap="$poll"
 		((nap > 0)) || nap=1
@@ -560,9 +594,22 @@ istio_version_resolve() {
 		wtmp="$(mktemp -d)"
 		_istio_version_read_all --once "$wtmp" wctxs "$@"
 		for j in "${!waitfor[@]}"; do
-			# Y2: a re-read that fails (kind read) keeps the member's previous answer.
-			case "$(sed -n 2p "${wtmp}/${j}" 2>/dev/null || true)" in
-			ok | notready | rolling | migrating | state | value) mv -f "${wtmp}/${j}" "${tmp}/${waitfor[j]}" ;;
+			i="${waitfor[j]}"
+			kind="$(sed -n 2p "${wtmp}/${j}" 2>/dev/null || true)"
+			case "$kind" in
+			ok | notready | rolling | migrating | state | value)
+				# J3: a rollout that just ended may still have old istiod pods draining their
+				# xDS streams (shutdownDuration): read it once more before it counts as ok.
+				prev="$(sed -n 2p "${tmp}/${i}" 2>/dev/null || true)"
+				if [[ "$prev" == rolling && "$kind" != rolling ]]; then ivr_settle[$i]=1; else unset 'ivr_settle[$i]'; fi
+				ivr_rok[$i]=1
+				unset 'ivr_rerr[$i]'
+				mv -f "${wtmp}/${j}" "${tmp}/${i}"
+				;;
+			*)
+				# Y2: a re-read that fails keeps the member's previous answer (J14 says so).
+				ivr_rerr[$i]="$(sed -n 3p "${wtmp}/${j}" 2>/dev/null || true)"
+				;;
 			esac
 		done
 		rm -rf "$wtmp"
@@ -573,39 +620,78 @@ istio_version_resolve() {
 		{ IFS= read -r v; IFS= read -r kind; IFS= read -r why; IFS= read -r rev; IFS= read -r rver; IFS= read -r state; } \
 			2>/dev/null < "${tmp}/${i}" || true
 		[[ -n "$v" ]] || v=unknown
+		allfail=0
+		[[ -z "${ivr_rerr[$i]+x}" || -n "${ivr_rok[$i]:-}" ]] || allfail=1
 		if [[ "$kind" == rolling ]]; then
 			# I2: still rolling out: old and new istiod pods both serve, so the run would
 			# not measure one version.
-			n_rolling=$((n_rolling + 1))
-			nr_at_start="${nr_at_start:+${nr_at_start},}${ctxs[i]}=rolling"
-			why="${why}; still rolling out after ${elapsed}s"
 			v=unknown
+			nr_at_start="${nr_at_start:+${nr_at_start},}${ctxs[i]}=rolling"
+			if ((allfail)); then
+				# J14: unreachable since its first read, not known to be still rolling out.
+				why="every re-read during the wait failed (${ivr_rerr[$i]:-no answer}); the first read saw: ${why}"
+				kind="read"
+			else
+				n_rolling=$((n_rolling + 1))
+				# J5: say so when the wait was skipped (Y3), not "after 0s".
+				if ((ivr_skipped)); then why="${why}; not waited for"; else why="${why}; still rolling out after ${elapsed}s"; fi
+				[[ "${rver#v}" == "${ISTIO_VERSION_PIN#v}" ]] || ivr_offpin="${ivr_offpin:+${ivr_offpin}, }${ctxs[i]} is rolling out ${rver}"
+			fi
 		fi
 		by="${by:+${by},}${ctxs[i]}=${v}"
 		revs="${revs:+${revs},}${ctxs[i]}=${rev}"
 		if [[ "$v" == unknown ]]; then
 			bad=$((bad + 1))
-			[[ "$why" != "istiod Deployment "* ]] || kind=rolling
+			case "$kind" in
+			rolling) ;;
+			state | migrating | value) n_unsettled=$((n_unsettled + 1)) ;;
+			*) n_read=$((n_read + 1)) ;;
+			esac
+			# J12: a rollout's command is a check, and names the Deployment that was read.
+			rk="${kind:-read}" label=reproduce
+			[[ "$kind" != rolling ]] || label=check
+			if [[ ("$kind" == rolling || "$why" == "istiod Deployment "*) && "$why" =~ $dre ]]; then
+				rk="deploy:${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+			fi
 			detail+=$'\n'"  ${ctxs[i]}: ${why:-no answer}"
-			detail+=$'\n'"    reproduce: $(_istio_version_repro "${kind:-read}" "${ctxs[i]}" "$@")"
-		elif [[ "$kind" == notready ]]; then
-			n_notready=$((n_notready + 1))
-			nr_at_start="${nr_at_start:+${nr_at_start},}${ctxs[i]}=${state:-unknown}"
-			notready+=$'\n'"  ${ctxs[i]}: ${why}"
-			notready+=$'\n'"    check: $(_istio_version_repro state "${ctxs[i]}" "$@")"
+			detail+=$'\n'"    ${label}: $(_istio_version_repro "$rk" "${ctxs[i]}" "$@")"
+		else
+			[[ "${v#v}" == "${ISTIO_VERSION_PIN#v}" ]] || ivr_offpin="${ivr_offpin:+${ivr_offpin}, }${ctxs[i]} runs ${v}"
+			if [[ "$kind" == notready ]]; then
+				# J14: grouped by state, as the end note is.
+				n_notready=$((n_notready + 1))
+				st="${state:-unknown}"
+				nr_at_start="${nr_at_start:+${nr_at_start},}${ctxs[i]}=${st}"
+				[[ -n "${ivr_nrc[$st]:-}" ]] || { ivr_states+=("$st"); ivr_nrf[$st]="${ctxs[i]}"; ivr_nrc[$st]=0; }
+				ivr_nrc[$st]=$((ivr_nrc[$st] + 1))
+				ivr_nrm[$st]="${ivr_nrm[$st]:+${ivr_nrm[$st]}, }${ctxs[i]}"
+				((allfail == 0)) || ivr_stale="${ivr_stale:+${ivr_stale}, }${ctxs[i]}"
+			fi
 		fi
 		case "/${distinct}/" in */"${v}"/*) ;; *) distinct="${distinct:+${distinct}/}${v}" ;; esac
 	done
 	rm -rf "$tmp"
 	if [[ "$distinct" == */* ]]; then live="mixed:${distinct}"; else live="$distinct"; fi
 	if ((bad)); then
+		# J5: only the fixes that can help.
 		if ((n_rolling)); then
 			problem="cannot confirm the running Istio version on ${bad} of ${#ctxs[@]} members:${detail}"
-			problem+=$'\n'"Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled and their istiod rollout is complete (or raise ISTIO_VERSION_READY_WAIT_SEC); the pin is not the problem."
+			if ((n_read + n_unsettled)); then
+				fix="Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled and their istiod rollout is complete"
+			else
+				fix="Wait until their istiod rollout is complete"
+			fi
+			((ivr_skipped)) || fix+=" (or raise ISTIO_VERSION_READY_WAIT_SEC)"
 		else
 			problem="cannot read the running Istio version on ${bad} of ${#ctxs[@]} members:${detail}"
-			problem+=$'\n'"Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled; the pin is not the problem."
+			fix="Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled"
 		fi
+		if [[ -z "$ivr_offpin" ]]; then
+			fix+="; the pin is not the problem."
+		else
+			fix+=". Also, ${ivr_offpin}, not the pin ${ISTIO_VERSION_PIN}: bump ISTIO_VERSION in config/versions.env with charts/spoke-ossm istioVersion when the mesh is upgraded on purpose."
+		fi
+		fix=$'\n'"${fix}"
 	elif [[ "$distinct" == */* ]]; then
 		problem="the mesh members run different Istio versions (${by})"
 		fix=$'\n'"Fix: bring every member to one version (an upgrade still rolling out?), or pass --contexts with only the members that run the same one."
@@ -631,7 +717,24 @@ istio_version_resolve() {
 		echo "warning: ${problem}${fix}"$'\n'"Going on (${why}): the results record ISTIO_VERSION=${live} (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
 	fi
 	if ((n_notready)); then
-		echo "WARNING: istiod or IstioCNI is still not ready on ${n_notready} of ${#ctxs[@]} members after ${elapsed}s:${notready}"$'\n'"The run goes on: their version was read (ISTIO_VERSION=${live}), and the preambles record ISTIO_NOTREADY_AT_START, but a control plane that is not ready can slow or skew the first measurements. Wait for the Istio CR to be Healthy, or raise ISTIO_VERSION_READY_WAIT_SEC." >&2
+		{
+			echo "WARNING: istiod or IstioCNI is still not ready on ${n_notready} of ${#ctxs[@]} members after ${elapsed}s:"
+			for st in "${ivr_states[@]}"; do
+				if ((ivr_nrc[$st] > 1)); then
+					echo "  ${st} on ${ivr_nrc[$st]} members (${ivr_nrm[$st]})"
+					echo "    check (shown for ${ivr_nrf[$st]}): $(_istio_version_repro state "${ivr_nrf[$st]}" "$@")"
+				else
+					echo "  ${st} on 1 member (${ivr_nrm[$st]})"
+					echo "    check: $(_istio_version_repro state "${ivr_nrf[$st]}" "$@")"
+				fi
+			done
+			[[ -z "$ivr_stale" ]] || echo "  every re-read during the wait failed on ${ivr_stale}: the state above is what the first read saw"
+			if [[ -n "$resumed" ]]; then
+				echo "The run goes on: their version was read (ISTIO_VERSION=${live}). This --resume records them in sweep-outcome.txt as ISTIO_NOTREADY_AT_RESUME, with its start time (${resumed}); the TSV preamble keeps the first run's ISTIO_NOTREADY_AT_START. A control plane that is not ready can slow or skew the first measurements of the resume. Wait for the Istio CR to be Healthy, or raise ISTIO_VERSION_READY_WAIT_SEC."
+			else
+				echo "The run goes on: their version was read (ISTIO_VERSION=${live}), and the preambles record ISTIO_NOTREADY_AT_START, but a control plane that is not ready can slow or skew the first measurements. Wait for the Istio CR to be Healthy, or raise ISTIO_VERSION_READY_WAIT_SEC."
+			fi
+		} >&2
 	fi
 	export ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT="$by" _ISTIO_VERSION_REVS="$revs"
 	export ISTIO_NOTREADY_AT_START="${nr_at_start:-none}" ISTIO_READY_WAITED_SEC="$elapsed"
@@ -640,17 +743,24 @@ istio_version_resolve() {
 	export _ISTIO_VERSION_RESOLVED
 }
 
-# _istio_notready_notes <out_arrayname> <start|end> <ctx=state,...> [<waited_sec>]: the
-# sweep_outcome --note arguments for members whose istiod or IstioCNI was not ready (the
-# list as ISTIO_NOTREADY_AT_START holds it; rolling for an istiod rollout in progress):
-# one line on what that means and what to check, then one line per state with its
-# members (Y4). Appends nothing for an empty list, none or unchecked.
+# _istio_notready_notes <out_arrayname> <start|end|resume> <ctx=state,...> [<waited_sec>]
+# [<resumed_at>]: the sweep_outcome --note arguments for members whose istiod or IstioCNI
+# was not ready (the list as ISTIO_NOTREADY_AT_START holds it; rolling for an istiod
+# rollout in progress): one line on what that means and what to check, then one line per
+# state with its members (Y4). Appends nothing for an empty list or unchecked, nor for
+# none, except at a resume (J2): the TSV preamble keeps the first run's value, so the
+# outcome records the resume's start time and its own value, none included.
 _istio_notready_notes() {
 	local -n _inn_out="$1"
-	local when="$2" list="$3" waited="${4:-}" pair st n label
+	local when="$2" list="$3" waited="${4:-}" at="${5:-}" pair st n label
 	local -a pairs=() states=()
 	local -A members=()
-	case "$list" in "" | none | unchecked) return 0 ;; esac
+	case "$list" in "" | unchecked) return 0 ;; esac
+	if [[ "$when" == resume && "$list" == none ]]; then
+		_inn_out+=(--note "this --resume started at ${at} with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=${waited:-0}); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's")
+		return 0
+	fi
+	[[ "$list" != none ]] || return 0
 	IFS=, read -r -a pairs <<<"$list"
 	for pair in "${pairs[@]}"; do
 		st="${pair##*=}"
@@ -660,6 +770,8 @@ _istio_notready_notes() {
 	case "$waited" in "" | unchecked) waited="" ;; *) waited=", after waiting ${waited}s" ;; esac
 	if [[ "$when" == start ]]; then
 		_inn_out+=(--note "istiod or IstioCNI was still not ready at the start of the sweep${waited} (ISTIO_NOTREADY_AT_START): the first cells may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted")
+	elif [[ "$when" == resume ]]; then
+		_inn_out+=(--note "istiod or IstioCNI was still not ready when this --resume started at ${at}${waited} (ISTIO_NOTREADY_AT_RESUME=${list}; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's): the first cells the resume ran (rows from ${at} on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted")
 	else
 		_inn_out+=(--note "istiod or IstioCNI was not ready at the end of the sweep, on the same Istio version: the last cells may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted")
 	fi
@@ -686,7 +798,9 @@ _istio_notready_notes() {
 #                    version is not exact: its rows are not all from one version, a failed
 #                    sweep;
 #   --note <msg>     R2: members still not ready (or rolling out) at the start, from
-#                    ISTIO_NOTREADY_AT_START; the same version, but istiod or IstioCNI not
+#                    ISTIO_NOTREADY_AT_START (J2: at a --resume, its start time and its
+#                    own value as ISTIO_NOTREADY_AT_RESUME, none included); the same
+#                    version, but istiod or IstioCNI not
 #                    ready (or istiod rolling out) at the end, grouped by state (I1, Y4:
 #                    readiness, not a version change); or a member that could not be read
 #                    again, whose Istio CR is not settled at the end, or that was unknown at
@@ -697,7 +811,11 @@ istio_version_recheck() {
 	local -n _ivrc_out="$1"
 	shift
 	_ivrc_out=()
-	_istio_notready_notes _ivrc_out start "${ISTIO_NOTREADY_AT_START:-}" "${ISTIO_READY_WAITED_SEC:-}"
+	if [[ -n "${_ISTIO_VERSION_RESUMED_AT:-}" ]]; then
+		_istio_notready_notes _ivrc_out resume "${ISTIO_NOTREADY_AT_START:-}" "${ISTIO_READY_WAITED_SEC:-}" "$_ISTIO_VERSION_RESUMED_AT"
+	else
+		_istio_notready_notes _ivrc_out start "${ISTIO_NOTREADY_AT_START:-}" "${ISTIO_READY_WAITED_SEC:-}"
+	fi
 	[[ "${ISTIO_VERSION_SOURCE:-pin}" == live && -n "${ISTIO_VERSION_BY_CONTEXT:-}" ]] || return 0
 	{ (($#)) && command -v "$1" >/dev/null 2>&1; } || return 0
 	local -a ctxs=() start_v=() pairs=()
@@ -740,16 +858,21 @@ istio_version_recheck() {
 			changed+="${changed:+; }${ctxs[i]}: ${sv} at the start, ${v} at the end (${why})"
 			revonly=0
 			;;
-		state)
-			# Not settled at the end (a ReconcileError, a generation not reconciled yet), but
-			# the active revision was read: another version is a change all the same.
+		state | read)
+			# Not settled at the end (a ReconcileError, a generation not reconciled yet), or
+			# a later read failed (the istiod Deployment, J1), but the active revision was
+			# read: another version is a change all the same (a mid-sweep upgrade).
 			if [[ -n "$rver" && "$rver" != "$sv" ]]; then
 				changed+="${changed:+; }${ctxs[i]}: ${sv} at the start, ${rver} at the end, its active revision's version (${why})"
 				revonly=0
 			elif [[ -n "$sr" && -n "$rev" && "$rev" != "$sr" ]]; then
 				changed+="${changed:+; }${ctxs[i]}: activeRevisionName ${sr} at the start, ${rev} at the end (${why})"
-			else
+			elif [[ "$kind" == state ]]; then
 				unconfirmed+="${unconfirmed:+; }${ctxs[i]} ran ${sv} at the start, and at the end ${why}"
+			elif [[ -n "$rver" ]]; then
+				unconfirmed+="${unconfirmed:+; }${ctxs[i]} ran ${sv} at the start, and its active revision reads ${rver} at the end, but ${why}"
+			else
+				unconfirmed+="${unconfirmed:+; }${ctxs[i]} could not be read again (${sv} at the start)"
 			fi
 			;;
 		*)

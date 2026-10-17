@@ -514,11 +514,44 @@ _in_path() {
 	run --separate-stderr sweep_outcome_recorded "$d" csv other-run
 	assert_line "# WARNING: sweep-outcome.txt: the record is from run 20261016T100000Z-2, not from the run this report reads (other-run)"
 	run --separate-stderr sweep_outcome_recorded "$d" json other-run
-	[ "$(jq -r '.other_run' <<<"$output")" = other-run ]
+	[ "$(jq -r '.report_run_id' <<<"$output")" = other-run ]
 	# A pooled report (several runs) compares nothing.
 	MULTI_RUN_N=2 MULTI_RUN_IDS=sweep-a,sweep-b run --separate-stderr sweep_outcome_recorded "$d" text
 	[ -z "$stderr" ]
 	# No record: no csv lines either.
 	run sweep_outcome_recorded "${d}/none" csv
 	assert_output ""
+}
+
+@test "sweep_outcome_recorded (J6): the record matches its TSVs' sweep-level id, so a renamed sweep dir is still its sweep" {
+	local d="${BATS_TEST_TMPDIR}/sweep-june-a" e="${BATS_TEST_TMPDIR}/sweep-june-b"
+	mkdir -p "$d/sub" "$e"
+	# Propagation: every probe TSV names the sweep (SWEEP_RUN_ID) next to its own RUN_ID.
+	printf '# SWEEP_RUN_ID=r2\n# RUN_ID=r2-ms1\nrun_id\tx\nr2-ms1\t1\n' > "$d/endpoint-1.tsv"
+	printf '# SWEEP_RUN_ID=r2\n# RUN_ID=r2-ms2\nrun_id\tx\nr2-ms2\t1\n' > "$d/sub/endpoint-2.tsv"
+	sweep_outcome --run-id r2 --record "$d" 2 >/dev/null
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-june-a run --separate-stderr sweep_outcome_recorded "$d" text
+	[ -z "$stderr" ]
+	refute_output --partial "not from the run"
+	# Controlplane: the sweep's RUN_ID.
+	rm -f "$d"/endpoint-1.tsv "$d"/sub/endpoint-2.tsv
+	printf '# RUN_ID=r2\ntimestamp\tx\n' > "$d/controlplane-r2.tsv"
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-june-a run --separate-stderr sweep_outcome_recorded "$d" json
+	[ -z "$stderr" ]
+	[ "$(jq -r '.report_run_id' <<<"$output")" = null ]
+	# Churn and dataplane cells mint their own RUN_IDs: the sweep's sweep-<RUN_ID>.md vouches.
+	printf '# RUN_ID=20261016T100501Z-7\nrun_id\tx\n' > "$e/churn-20261016T100501Z-7.tsv"
+	sweep_outcome --run-id r3 --record "$e" 2 >/dev/null
+	: > "$e/sweep-r3.md"
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-june-b run --separate-stderr sweep_outcome_recorded "$e" text
+	[ -z "$stderr" ]
+	# Without it nothing ties the record to these rows: warned, naming the TSVs' run.
+	rm -f "$e/sweep-r3.md"
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-june-b run --separate-stderr sweep_outcome_recorded "$e" csv
+	assert_line "# WARNING: sweep-outcome.txt: the record is from run r3, not from the run this report reads (20261016T100501Z-7)"
+	[[ "$stderr" == "warning: ${e}/sweep-outcome.txt was recorded by run r3, not by this report's run 20261016T100501Z-7"* ]]
+	# A record whose run neither the TSVs, the dir nor a sweep md names: warned, naming the TSVs' run.
+	printf '# RUN_ID=r9\ntimestamp\tx\n' > "$d/controlplane-r2.tsv"
+	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-june-a run --separate-stderr sweep_outcome_recorded "$d" json
+	[ "$(jq -r '.report_run_id' <<<"$output")" = r9 ]
 }

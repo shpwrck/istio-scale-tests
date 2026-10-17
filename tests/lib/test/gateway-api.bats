@@ -192,6 +192,8 @@ case "$cmd" in
 	echo '{"metadata":{"generation":1},"spec":{"version":"v1.30-latest"},"status":{"state":"Healthy","observedGeneration":1,"activeRevisionName":"default","revisions":{"total":1,"ready":1,"inUse":1}}}' ;;
 "get istiorevisions.sailoperator.io default -o json")
 	echo '{"metadata":{"generation":1},"spec":{"version":"v1.30.5","namespace":"istio-system"},"status":{"observedGeneration":1}}' ;;
+"-n istio-system get deployments.apps istiod -o json")
+	echo '{"metadata":{"generation":1},"status":{"observedGeneration":1,"replicas":1,"updatedReplicas":1,"readyReplicas":1}}' ;;
 "-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json" | \
 	"-n mesh-verify-gwapi-shared get deploy -l app=gwapi-echo -o json")
 	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) && ( "$cmd" != *-shared* || -z "${STUB_NO_SHARED_NS:-}" ) ]]; then

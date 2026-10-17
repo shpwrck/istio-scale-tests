@@ -186,7 +186,7 @@ esac
 ALL_TSV=()
 while IFS= read -r f; do
 	ALL_TSV+=("$f")
-done < <(find "$RESULTS_DIR" -name 'controlplane-*.tsv' -type f 2>/dev/null | sort)
+done < <(find -H "$RESULTS_DIR" -name 'controlplane-*.tsv' -type f 2>/dev/null | sort)
 
 if [[ ${#ALL_TSV[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"

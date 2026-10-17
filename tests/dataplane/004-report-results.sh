@@ -159,7 +159,7 @@ esac
 TSV_FILES=()
 while IFS= read -r f; do
 	TSV_FILES+=("$f")
-done < <(find "$RESULTS_DIR" -name 'latency-*.tsv' -type f 2>/dev/null | sort)
+done < <(find -H "$RESULTS_DIR" -name 'latency-*.tsv' -type f 2>/dev/null | sort)
 
 if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"

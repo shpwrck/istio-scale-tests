@@ -231,7 +231,10 @@ Other:
                               it warns when --config is given. The mesh must run
                               the ISTIO_VERSION the sweep recorded, under either
                               ISTIO_VERSION_CHECK policy; otherwise start a new
-                              sweep.
+                              sweep. The TSV keeps the first run's
+                              ISTIO_NOTREADY_AT_START; the sweep outcome records
+                              the resume's own (ISTIO_NOTREADY_AT_RESUME, none
+                              included) with its UTC start time.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -253,7 +256,8 @@ Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
   record what the mesh runs, when a member's active IstioRevision version is not
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready.
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -696,6 +700,9 @@ else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 	OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
 fi
+# J7: read once, so the preambles this run writes and its sweep-outcome.txt name the same
+# harness (a resume appends to a TSV whose preamble keeps the first run's).
+HARNESS_SHA="$(harness_sha)"
 
 # combo_already_done <mesh> <svc> <rep> <ns> <scope> <traffic>: true if the resume TSV
 # has a valid row for that key (same gate as the report's n_valid, so failed rows
@@ -806,8 +813,7 @@ precreate_tsv_preamble() {
 	local tsv="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 	[[ -f "$tsv" ]] && grep -q '^timestamp' "$tsv" 2>/dev/null && return 0
 	mkdir -p "$OUTPUT_DIR"
-	local harness kver
-	harness="$(harness_sha)"
+	local kver
 	kver="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 	# Capacity provenance (read-only, source context; `unknown` on failure). These
 	# are the report's denominators for the "Achieved scale vs capacity" block.
@@ -848,7 +854,7 @@ precreate_tsv_preamble() {
 		echo "# CONTROLPLANE_SCHEMA=66"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		istio_version_kv | sed 's/^/# /'
-		echo "# HARNESS_SHA=${harness}"
+		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${kver}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
@@ -1244,8 +1250,12 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 fi
 # R4: the Istio version every member runs, read once before any cluster change and
 # exported, so 001, 002 and 005 record it (ISTIO_VERSION_CHECK=fail stops here on a
-# mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
-istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
+# mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin. J2: a --resume
+# appends to a TSV whose preamble keeps the first run's ISTIO_NOTREADY_AT_START, so the
+# outcome records this resume's own start condition, with its UTC start time.
+_iv_resume_args=()
+[[ -z "$RESUME_DIR" ]] || _iv_resume_args=(--resumed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+istio_version_resolve ${_iv_resume_args[@]+"${_iv_resume_args[@]}"} "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Istio version:     $(istio_version_label)" >&2
 if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
 	case "/${ISTIO_VERSION#mixed:}/" in
@@ -1255,17 +1265,17 @@ if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
 		die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the mesh now runs ${ISTIO_VERSION}, so its new rows would be credited to ${_resume_iv}. Start a new sweep: --resume never mixes Istio versions in one TSV, whatever ISTIO_VERSION_CHECK says."
 	fi
 fi
-# A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
-# that far) no longer describes the sweep, and its reports must not show it meanwhile. Y10:
-# kept as sweep-outcome.prev.txt (reports read only sweep-outcome.txt), so a resume that
-# then fails a preflight does not lose it.
-if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN)); then
-	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
-fi
-
 capacity_plan_warn
 guard_add_mesh_members
 leftover_preflight
+
+# A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
+# that far) no longer describes the sweep, and its reports must not show it meanwhile. Y10:
+# kept as sweep-outcome.prev.txt (reports read only sweep-outcome.txt); J8: only once the
+# preflights passed, so a resume that stops in one leaves the record where it was.
+if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN)); then
+	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
+fi
 
 if ((DRY_RUN)) && ! ((GROWTH)); then
 	echo "--- Combinations (dry-run) ---" >&2
@@ -1391,7 +1401,7 @@ if ((! DRY_RUN)); then
 		ns_lifecycle_init "$LIFECYCLE_FILE" "$RUN_ID"
 		mapfile -t _iv_kv < <(istio_version_kv)
 		write_preamble "Memory stop guard (controlplane growth mode)" "$GUARD_FILE" \
-			"RUN_ID=${RUN_ID}" "HARNESS_SHA=$(harness_sha)" "${_iv_kv[@]}" \
+			"RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "${_iv_kv[@]}" \
 			"MEM_STOP_PCT=${MEM_STOP_PCT}" "MEM_GUARD_CONTEXTS=$(IFS=,; echo "${GUARD_CONTEXTS[*]}")" \
 			"GUARD_SCHEMA=2" "GW_MODEL=intercept ${GW_MI_INTERCEPT} Mi; eastwestgateway ${EWGW_MI_PER_1000} Mi per 1000 Services x ${EWGW_BURST}; ingressgateway ${INGW_MI_PER_1000} Mi per 1000 Services x ${INGW_BURST}" \
 			"NOTE=rel_projected = base + (current - base) x ratio^power from the series start (ratio 1: the first step and changes that add no Services); abs_projected (gateways) = (intercept + Mi per 1000 Services x services_after / 1000) x burst factor, plus the non-heap part of a working-set reading (ws - Envoy physical heap); services_after = the context's istiod pilot_services + the Services the step adds; projected = the larger, compared with stop_pct % of limit_mi. metric: rss = istiod process_resident_memory_bytes (max over replicas, per-replica limit); ws = the gateway container's working set (kubectl top), else physical = Envoy server.memory_physical_size, else allocated = server.memory_allocated (istio-proxy limit). verdict stale_base: a gateway's Envoy allocated memory exceeded 1.5 x the model + 100 Mi at the series start (memory kept from an earlier series)."

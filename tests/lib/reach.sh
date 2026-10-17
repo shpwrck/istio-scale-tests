@@ -422,7 +422,7 @@ reach_coverage_rows() {
 	local -a files=()
 	for p in "$@"; do
 		if [[ -d "$p" ]]; then
-			while IFS= read -r f; do files+=("$f"); done < <(find "$p" -name 'reach-*.tsv' -type f 2>/dev/null | sort)
+			while IFS= read -r f; do files+=("$f"); done < <(find -H "$p" -name 'reach-*.tsv' -type f 2>/dev/null | sort)
 		elif [[ -f "$p" ]]; then
 			files+=("$p")
 		fi

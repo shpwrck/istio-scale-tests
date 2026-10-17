@@ -138,8 +138,12 @@ preamble and prints a note when that changes a value. It refuses an explicit `--
 credited to the old version, so start a new sweep. A sweep that recorded `unknown` (a member could
 not be read or confirmed when it started: unreadable, its Istio CR not settled, or an istiod rollout
 in progress) can never be resumed, and `--resume` says so before it reads the mesh; when a member
-cannot be read now, fix access to it and run the same `--resume` again. A resume keeps the earlier
-`sweep-outcome.txt` as `sweep-outcome.prev.txt` until it writes its own. Pass the other options as in the original run.
+cannot be read now, fix access to it and run the same `--resume` again. Once its preflights pass,
+a resume keeps the earlier `sweep-outcome.txt` as `sweep-outcome.prev.txt` until it writes its
+own. The TSV preamble keeps the first run's `ISTIO_NOTREADY_AT_START`; the resume's own start
+condition, `none` included, goes into its sweep outcome as `ISTIO_NOTREADY_AT_RESUME` with its
+UTC start time, so its first rows can be found by their timestamps. Pass the other options as
+in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an
