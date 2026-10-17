@@ -17,7 +17,7 @@
 #                                       with FS="\t" over endpoint TSV rows, $0 = one row):
 #                                       prop_drop_reason(maxskew) -> "" when the row counts
 #                                         for P2 and P3, else why it is dropped, from the
-#                                         remote side only (I6): remote_status (22) when not
+#                                         remote side only: remote_status (22) when not
 #                                         OK, else remote_scrape_skew>MAX (23). A row with no
 #                                         remote (remote_status N/A) measures only P1, so
 #                                         prop_p1_drop_reason decides it. A TSV from before
@@ -27,7 +27,7 @@
 #                                         source histogram (on a row with no remote too)
 #                                       prop_p1_drop_reason(maxskew) -> "" when the row's
 #                                         iteration has a P1 sample, else why not, from the
-#                                         source-side columns only (B2): p1_status (20) when
+#                                         source-side columns only: p1_status (20) when
 #                                         not OK, else p1_overflow, else p1_scrape_skew>MAX
 #                                         (21); a TSV from before them (19 columns): the
 #                                         status, restarted, p1_overflow and skew of the row
@@ -36,10 +36,10 @@
 #                                         the P1 convergence histogram) is measured once per
 #                                         iteration on the source and copied onto every
 #                                         remote's row, so it is one sample per (run_id,
-#                                         iteration), never one per row (D1). That row is
+#                                         iteration), never one per row. That row is
 #                                         the iteration's first when prop_p1_drop_reason
 #                                         keeps it, so a remote that timed out or restarted
-#                                         never drops the source's P1 (B2); in a 19-column
+#                                         never drops the source's P1; in a 19-column
 #                                         TSV, the first row prop_p1_drop_reason keeps
 #                                       prop_p1_sample(maxskew) -> 1 when prop_p1_first() and
 #                                         p1_ms is a number; prop_p3_sample() -> 1 when p3_ms
@@ -52,18 +52,24 @@
 #                                       keeps.
 #
 # 002 summarizes its own rows with it and 005 (every format) and tuning 004 aggregate
-# every TSV with it, so the probe's summary and the reports average the same rows (R6).
+# every TSV with it, so the probe's summary and the reports average the same rows.
 # Columns: 1 run_id, 2 mesh_size, 3 iteration, 4 source_ctx, 5 remote_ctx (N/A: no remote),
 # 6 t0_epoch_ns, 7 p1_ms, 8 p2_ms, 9 p3_ms, 10 status (the row's: either side), 11-12 the P1
 # convergence p50/p99, 13 p1_sample_count, 14 p1_proxy_count, 15 p1_overflow, 16 restarted
 # (the source's or this remote's istiod), 17 p2_dirty, 18 window_ms, 19 scrape_skew_ms (the
 # widest of the source's and every remote's baseline), 20 p1_status and 21
-# p1_scrape_skew_ms (B2): the iteration's source-side verdict and source scrape skew, the
-# same on every row of the iteration, 22 remote_status and 23 remote_scrape_skew_ms (I6):
+# p1_scrape_skew_ms: the iteration's source-side verdict and source scrape skew, the
+# same on every row of the iteration, 22 remote_status and 23 remote_scrape_skew_ms:
 # this remote's own verdict for P2 and P3 (its istiod's restart, its P2 poll and baseline
 # scrape, its sidecar's drain, P2/P3 timeouts) and its baseline scrape skew; N/A on a row
 # with no remote. Older TSVs: 18 columns (no p2_dirty or skew: p2_dirty reads 0, no skew
-# gate), 19 (before B2), 21 (before I6).
+# gate), 19 (no p1_status or p1_scrape_skew_ms), 21 (no remote_status or
+# remote_scrape_skew_ms).
+# A status is OK or the reason the side is left out: TIMEOUT_P1/P2/P3/ALL, RESTART,
+# RESTART_UNKNOWN, DRAIN_TIMEOUT (the drain after the iteration timed out), NOT_DRAINED (a
+# canary endpoint was already healthy on that side's watcher before t0), SCRAPE_INCOMPLETE,
+# or a placeholder's SETUP_FAILED / PROBE_FAILED. Every rule below drops any status other
+# than OK, so a new status needs no change here.
 # shellcheck shell=bash
 
 # shellcheck disable=SC2034  # read by the scripts that source this file

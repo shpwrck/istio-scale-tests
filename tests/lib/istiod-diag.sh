@@ -93,10 +93,10 @@
 # started more than _ISTIOD_DIAG_CLOCK_MARGIN_SEC before that scrape (harness clock)
 # restarted before the window, so the pod counts as no_change, not restarted_untimed.
 #
-# Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK), reach.sh (reach_sanitize), jq, awk,
-# sed, tail, mktemp; gzip when present (evidence stays uncompressed without it);
-# preamble.sh's harness_sha when sourced (else HARNESS_SHA=unknown). Callers run
-# `set -euo pipefail`.
+# Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK, ctx_file_safe,
+# CTX_FILE_NAME_MAX), reach.sh (reach_sanitize), jq, awk, sed, tail, mktemp; gzip when
+# present (evidence stays uncompressed without it); common.sh's harness_sha (else
+# HARNESS_SHA=unknown). Callers run `set -euo pipefail`.
 # shellcheck shell=bash
 
 ISTIOD_DIAG_SCHEMA=1
@@ -203,16 +203,11 @@ _ISTIOD_DIAG_JQ_NODE='
 
 # --- small helpers ------------------------------------------------------------
 
-# _istiod_diag_safe <text> [max]: a file-name-safe token ([A-Za-z0-9._-], others -> _),
-# at most max (default 48) characters; never empty. No ':' or '+' (NTFS copies).
-# shellcheck disable=SC2329
-_istiod_diag_safe() {
-	local s="${1:-}" max="${2:-48}"
-	s="${s//[^A-Za-z0-9._-]/_}"
-	s="${s:0:max}"
-	[[ -n "$s" ]] || s=x
-	printf '%s\n' "$s"
-}
+# File and folder names: ctx_file_safe (tests/lib/common.sh), the one file-name form of a
+# context that tuning's state files and redact-results.sh's renames use too: every byte
+# outside [A-Za-z0-9._-] becomes _ in any locale (no ':' or '+', for NTFS copies). A
+# context in a folder name is cut to CTX_FILE_NAME_MAX characters; a run id to 64, a tag
+# to 48. An empty token reads x.
 
 # _istiod_diag_now: harness UTC time, ISO 8601 (portable: no GNU date flags).
 # shellcheck disable=SC2329
@@ -314,7 +309,7 @@ _istiod_diag_ts_iso() {
 # shellcheck disable=SC2329
 _istiod_diag_pre_values() {
 	local f="${1:-}" out=""
-	# I8: no wc fork per file (file_min_bytes, common.sh); the same rule as before.
+	# No wc fork per file (file_min_bytes, common.sh); the same rule as before.
 	if [[ -n "$f" && -s "$f" ]] && file_min_bytes "$f" "${FANOUT_MIN_SCRAPE_BYTES:-512}"; then
 		out="$(awk '
 			function v(x, d) { return (x == "") ? "N/A" : sprintf("%.0f", x / d) }
@@ -701,8 +696,10 @@ _istiod_diag_run() {
 	fi
 	if ((pending > 0)) && [[ -z "$skip" ]]; then
 		local num=$((nfold + 1))
-		while [[ -e "${dir}/$(printf '%03d' "$num")-${tag}-$(_istiod_diag_safe "$ctx" 40)" ]]; do num=$((num + 1)); done
-		folder="$(printf '%03d' "$num")-${tag}-$(_istiod_diag_safe "$ctx" 40)"
+		local cfs
+		cfs="$(ctx_file_safe "$ctx" "$CTX_FILE_NAME_MAX")"
+		while [[ -e "${dir}/$(printf '%03d' "$num")-${tag}-${cfs:-x}" ]]; do num=$((num + 1)); done
+		folder="$(printf '%03d' "$num")-${tag}-${cfs:-x}"
 		mkdir -p "${dir}/${folder}" || { echo "cannot create ${dir}/${folder}" >&2; _IDG_EXPLAINED=1; return 1; }
 	fi
 	for k in "${!A_POD[@]}"; do
@@ -995,9 +992,10 @@ _istiod_diag_run() {
 # istiod_diag_dir <tsv_file> <run_id>: the run's evidence folder, next to its TSV.
 # shellcheck disable=SC2329
 istiod_diag_dir() {
-	local d
+	local d t
 	d="$(dirname "${1:-.}")"
-	printf '%s/istiod-diag-%s\n' "$d" "$(_istiod_diag_safe "${2:-}" 64)"
+	t="$(ctx_file_safe "${2:-}" 64)"
+	printf '%s/istiod-diag-%s\n' "$d" "${t:-x}"
 }
 
 # istiod_diag_capture <diag_dir> <tag> <ctx> <trigger> <pre_podset|''> <pre_metrics_csv|''>
@@ -1014,7 +1012,8 @@ istiod_diag_capture() {
 		return 0
 	fi
 	local dir="$1" tag ctx="$3" trigger="$4" podset="$5" pre_csv="$6"
-	tag="$(_istiod_diag_safe "$2")"
+	tag="$(ctx_file_safe "$2" 48)"
+	tag="${tag:-x}"
 	shift 6
 	if ! mkdir -p "$dir" 2>/dev/null; then
 		echo "warning: istiod-diag: cannot create ${dir}; no restart evidence saved" >&2
@@ -1170,7 +1169,7 @@ istiod_diag_report() {
 			|| printf '{"index_files":0,"rows":0,"repeat_rows":0,"untimed_rows":0,"by_cause":{},"untimed_by_cause":{},"captures":[]}\n'
 		;;
 	text | md | markdown)
-		# I7: every markdown cell through md_cell (MD_CELL_AWK, common.sh).
+		# Every markdown cell through md_cell (MD_CELL_AWK, common.sh).
 		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" -v files="${nfiles:-0}" "$MD_CELL_AWK"'
 			function tl(o, a, c,    i, s) {
 				s = ""

@@ -47,7 +47,7 @@ its findings log was removed once every finding was fixed or superseded.
 **How to preempt:** Every TSV-writing script emits a preamble block:
 ```
 # RUN_ID=<timestamp + $$>
-# HARNESS_SHA=$(harness_sha)   # git describe --always --dirty --abbrev=7; a dirty tree: <describe>-dirty.<8hex>
+# HARNESS_SHA=$(harness_sha)   # git describe --always --abbrev=7; a dirty tree: <describe>-dirty.<8hex>
 # ISTIO_VERSION=<each member's active IstioRevision .spec.version, read live once per run
 #                (istio_version_resolve / istio_version_kv); never the pin passed off as live>
 # ISTIO_VERSION_PIN=<from config/versions.env>   ISTIO_VERSION_SOURCE=<live | pin under --dry-run>
@@ -56,7 +56,7 @@ its findings log was removed once every finding was fixed or superseded.
 # SETTLE_SEC=<value>
 # (any other knob that affects the result)
 ```
-Use `date -u -Iseconds` (UTC) for timestamps. `HARNESS_SHA` must include `--dirty` so a hacked-up working tree is visible, and the `.<8hex>` after it (`harness_sha` in `tests/lib/preamble.sh`: a hash of the uncommitted changes, tracked and untracked, from git alone) so two different hacked-up trees on one commit never read the same.
+Use `date -u -Iseconds` (UTC) for timestamps. `HARNESS_SHA` must carry `-dirty` so a hacked-up working tree is visible, and the `.<8hex>` after it (`harness_sha` in `tests/lib/common.sh`: a hash of the tree's uncommitted content, tracked and untracked, from git alone; submodules never count, and `git describe --dirty` is not used, since it fails when a submodule's gitdir is gone) so two different hacked-up trees on one commit never read the same.
 
 ## PL3 — Wall-clock window distinct from operator settle
 
@@ -326,7 +326,7 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 ## PL39 — Chart-baked, GitOps-deployed mesh config is invisible to `HARNESS_SHA` provenance; live-query the resolved state into the preamble
 
-**Why:** PL2 records a run's provenance from the harness git tree (`HARNESS_SHA = git describe --dirty`, plus a hash of the uncommitted changes). That captures probe/script state — but a **mesh configuration baked into a Helm chart and deployed by GitOps (ArgoCD) is reconciled independently of the probe scripts**. So a toggleable mesh lever (here `tuningBaseline.{sidecar,discoverySelectors,telemetryFiltering,accessLogFiltering}` + the Sidecar egress graph) can be flipped via an Argo override, a `--set`, or a live edit and produce a run with an **identical `HARNESS_SHA` but a materially different mesh** — invisible in provenance, and two such runs silently non-comparable. The chart *default* is the wrong thing to record: the deployed state can diverge from it, which is exactly the case the provenance must catch.
+**Why:** PL2 records a run's provenance from the harness git tree (`HARNESS_SHA`: `git describe`, plus `-dirty.<8hex>`, a hash of the uncommitted content). That captures probe/script state — but a **mesh configuration baked into a Helm chart and deployed by GitOps (ArgoCD) is reconciled independently of the probe scripts**. So a toggleable mesh lever (here `tuningBaseline.{sidecar,discoverySelectors,telemetryFiltering,accessLogFiltering}` + the Sidecar egress graph) can be flipped via an Argo override, a `--set`, or a live edit and produce a run with an **identical `HARNESS_SHA` but a materially different mesh** — invisible in provenance, and two such runs silently non-comparable. The chart *default* is the wrong thing to record: the deployed state can diverge from it, which is exactly the case the provenance must catch.
 
 **How to preempt:** For any mesh behavior that lives outside the harness git tree (chart-baked + GitOps/operator-reconciled), emit a preamble field **live-queried from the cluster**, not read from chart defaults: query the actually-applied resources (the `Sidecar`/`Telemetry` CRs, `meshConfig.discoverySelectors` on the Istio CR, the live egress hosts) per source context, once per sweep (outside the measurement window, `!DRY_RUN`-gated, bounded with `--request-timeout`), degrading to `unknown` on failure (never a false `off` — `unknown` means non-comparable, mirroring `istiod_restarted`'s `0|1|unknown`). Then propagate it like any preamble key: through ALL report formats (PL19), classified sweep-level-scalar vs per-iteration (PL26), with identical key sets across every writer (PL36). Apply it to **every** suite that runs against the configured mesh, not just the primary one — a partial roll-out reintroduces the gap for the omitted suites.
 
@@ -385,3 +385,11 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 **How to preempt:** Match measured durations with a pattern (`[0-9]+`) or a bounded range; assert exact values only for configured knobs. Run a new bats file that checks timings at least five times in a row before calling it green.
 
 (PL44 was added after the same cycle's round-4 usability review.)
+
+## PL45 — A sweep's signal trap waits for its foreground step: run steps in the background, exec them, and forward the signal
+
+**Why:** Bash runs a trap only after the foreground command returns. A `kill -TERM <sweep pid>` (a CI timeout, a scheduler, `kill` from another terminal) therefore waited for the running step, which can be a cell of an hour: the sweep did not stop, and its stop record was written only after the step's results were. Ctrl-C hides the problem (SIGINT goes to the whole process group, step included). Running the step in the background and `wait`ing for it lets the trap run at once, but a forwarded signal reaches only the process the shell started: a wrapper subshell or a pipeline stage passes it on to nobody, and a shell function cannot be started that way at all.
+
+**How to preempt:** Start each step through `sweep_step` (`tests/lib/common.sh`): `( trap - INT QUIT; exec "$@" ) &` plus `wait`, so the forwarded TERM reaches the step itself and SIGINT keeps its default there; pass a script, never a function or a pipeline. The orchestrator-step lint (`tests/lib/lint-bare-scrape.sh`) reads through a `sweep_step` prefix, so a step started this way still needs its `|| { ...; continue; }` guard (PL32). Prove it with bats through the real sweep: a stub step that sends SIGTERM to the sweep's process alone and then waits must not finish its wait, and the record must name SIGTERM; for SIGINT, run the sweep under `set -m` in `bash -c` so the group signal reaches it (a background job in bats ignores SIGINT).
+
+(PL45 was added after carry-over round 2: the usability lens found that a SIGTERM to a sweep waited for its step, as the sweeps' help said; round 2 forwarded it through `sweep_step`.)

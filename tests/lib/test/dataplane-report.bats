@@ -35,7 +35,7 @@ case " $* " in
 *" get deploy dataplane-server "*) printf '%s' "${STUB_SERVER_REPLICAS-1/1}" ;;
 *" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
 *" get pods "*) : ;;  # no Running istiod pod
-*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin (R4)
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin
 *) exit 1 ;;
 esac
 STUB
@@ -262,7 +262,7 @@ tsv() {
 	assert_output --partial "mesh_size=2 qps_target=1000 n_valid=0/1 reason=istiod_restarted qps_actual=700 (70.0% of target) server_replicas=2/2 "
 }
 
-@test "004: a TSV written before R4 pooled with a live one reads mixed for the R4 and R2 keys, never live (B1)" {
+@test "004: a TSV written before the live-version keys pooled with a live one reads mixed for them and the readiness keys, never live" {
 	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
 	tsv "${RES}/sweep-old/latency-o.tsv" "RUN_ID=ro" "ISTIO_VERSION=v1.30.5" <<-EOF
 	$(row 1 ctx-a ctx-a 100 100 OK 1 0 local)
@@ -281,7 +281,7 @@ tsv() {
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = live ]
 	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = ctx-a=IstioCNINotHealthy ]
-	# R2 in every format.
+	# The start-of-run readiness keys in every format.
 	for fmt in text csv markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format "$fmt"
 		assert_output --partial "ISTIO_NOTREADY_AT_START"

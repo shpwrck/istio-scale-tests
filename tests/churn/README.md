@@ -86,10 +86,11 @@ not averaged: the report shows the worst bucket range a valid row hit (e.g. `500
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
-The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty --abbrev=7`; a tree
-with uncommitted changes reads `<describe>-dirty.<8hex>`, a hash of them) and
-`ISTIO_VERSION` (what the members run, next to `ISTIO_VERSION_PIN` and
-`ISTIO_VERSION_SOURCE`; see the root README); the report prints those, never the commit it runs on. A TSV written
+The TSV preamble records `HARNESS_SHA` (`git describe --always --abbrev=7`; a tree with
+uncommitted changes, tracked or untracked and not ignored, reads `<describe>-dirty.<8hex>`, a
+hash of its content; submodules and ignored editor files never count) and `ISTIO_VERSION`
+(what the members run, next to `ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`; see the root
+README); the report prints those, never the commit it runs on. A TSV written
 before they were recorded reads `unknown (not recorded)`, and inputs that differ read
 `mixed:a,b` with a warning. Timestamps are UTC.
 
@@ -145,8 +146,8 @@ precondition, or an unexpected error); `130`, `143` or `129` it was interrupted 
 SIGHUP; `sweep-outcome.txt` says when and by which signal); `4` it finished and wrote its
 reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
 version, active revision or generation of the Istio CR or its active IstioRevision changed during
-the sweep (read again before the reports). The last line on stderr says how many, by reason;
-`sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the outcome. From
+the sweep (read again before the reports), or that check failed. The last line on stderr says how
+many, by reason; `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the outcome. From
 the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a not-finished record
 (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do), so a report of a
 sweep that died, or still runs, or (with when and by which signal) was interrupted says "this

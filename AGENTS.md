@@ -59,6 +59,11 @@ Prefer it over generic upstream Istio docs when they disagree.
   Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats` checks the order.
 - Contexts: env `SETUP_CONTEXTS` and flag `--contexts CSV` list **mesh members only**, never the
   ACM hub. Parse into `CONTEXTS_CSV`, split into `CONTEXTS[@]`, loop with `ctx`.
+- Arrays keyed by a variable (a context or file name): bash 4.3 to 5.1 expand the key twice inside
+  arithmetic and `-v`, so a key with a quote, `$` or `]` breaks. Never write `(( a[$k] ))`,
+  `$(( a[$k] + 1 ))`, `let`, `[[ a[$k] -gt N ]]` or `[[ -v a[$k] ]]`: read the element into a
+  scalar first (`n="${a[$k]:-0}"; a[$k]=$((n + 1))`) and test it with `[[ -n "${a[$k]+x}" ]]`.
+  `tests/lib/verify.sh` step 6 (`tests/lib/lint-keyed-arith.sh`) fails on these forms.
 - `DRY_RUN` (0/1) pairs with `--dry-run`; `--help` exits 0 and lists every flag the parser accepts.
 - Tunables get defaults in `config/options.env` (one short comment each), not only inline. A flag
   that shapes a run needs such a key, read before the flag parser: the `--config` vocabulary is the
@@ -89,7 +94,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`; bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |

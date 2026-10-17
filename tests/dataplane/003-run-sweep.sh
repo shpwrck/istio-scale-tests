@@ -4,7 +4,7 @@
 # Under --on-unreachable fail, a probe that stops on an unreachable remote (exit 3)
 # ends the sweep after that mesh size's cleanup; the reports still run and the
 # sweep exits 3. A mesh size whose setup or probe failed still gets its placeholder
-# row and the reports; the sweep then exits 4 (R19).
+# row and the reports; the sweep then exits 4.
 #
 # Usage:
 #   ./tests/dataplane/003-run-sweep.sh [--contexts CSV] [--mesh-sizes CSV] [options]
@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # Loud ERR trap for unexpected aborts; per-combo failures are handled below.
-# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
 # aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
@@ -34,7 +34,7 @@ config_preload dataplane "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
+source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fortio.sh"
 # shellcheck disable=SC1091
@@ -104,8 +104,9 @@ Environment:
   DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS,
   DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002),
   REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). DATAPLANE_MESH_SIZES (--mesh-sizes),
-  DATAPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
+  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
+  DATAPLANE_MESH_SIZES (--mesh-sizes), DATAPLANE_RESULTS_DIR (--output-dir; relative
+  to the repo root),
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
   The sweep checks every numeric one of them, and the flags that set them, before the
   first setup, --dry-run included.
@@ -118,12 +119,15 @@ Exit codes:
      CUT_SHORT=1)
   3  --on-unreachable fail stopped the sweep (the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
-     exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
-     version or active revision changed during the sweep (read again at its end); the
-     outcome is also in sweep-outcome.txt and the markdown report
+     exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
+     version, the active revision or the generation of the Istio CR or its active
+     IstioRevision changed during the sweep (read again at its end), or that
+     end-of-sweep check failed; the outcome is also in sweep-outcome.txt and the
+     markdown report
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
-     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to
-     the sweep's process alone waits for its current command (signal its process group)
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A SIGTERM
+     sent to the sweep's process alone reaches the step that runs (001, 002, 005) at
+     once; only a settle wait finishes first
 EOF
 }
 
@@ -284,7 +288,9 @@ fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
-HARNESS_SHA="$(harness_sha)"
+# The harness, once for the whole sweep: its steps record this value (harness_sha_for_sweep
+# exports it), and its own results under the output dir do not count.
+harness_sha_for_sweep "$OUTPUT_DIR_BASE"
 
 # Live tuning-baseline provenance, queried once on the source context and passed
 # to 002 and the placeholder writer. Skipped in --dry-run (stays "unknown").
@@ -298,7 +304,7 @@ if ((! DRY_RUN)); then
 		KUBECTL=(kubectl)
 	fi
 fi
-# R4: the Istio version every member runs, read once before the first setup and
+# The Istio version every member runs, read once before the first setup and
 # exported, so 001, 002 and the placeholders record it (ISTIO_VERSION_CHECK=fail stops
 # here on a mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
@@ -375,11 +381,11 @@ fi
 if ((! DRY_RUN)); then
 	mkdir -p "$OUTPUT_DIR"
 	config_snapshot "$OUTPUT_DIR" "$RUN_ID"
-	# I5: a sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
+	# A sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
 	# that record: stopped with its reason, or interrupted (sweep_outcome_on_exit). Set before
 	# sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
 	trap 'sweep_outcome_on_exit "$?" || true' EXIT
-	# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+	# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
 	# so the reports of a sweep that died say so.
 	sweep_outcome_start "$OUTPUT_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a dataplane sweep has no --resume); the rows in this dir cover only the mesh sizes it finished"
 fi
@@ -387,7 +393,7 @@ fi
 # Set when a probe exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
 # after this mesh size's cleanup, the reports still run, and the sweep exits 3.
 REACH_GATE_STOP=0
-# One reason per cell (mesh size) whose setup or probe failed (R19).
+# One reason per cell (mesh size) whose setup or probe failed.
 FAILED_CELLS=()
 ms_done=0
 for ms in "${MESH_SIZES[@]}"; do
@@ -443,11 +449,11 @@ for ms in "${MESH_SIZES[@]}"; do
 
 	echo "--- Setting up ---"
 	# A setup failure records a placeholder, cleans up and moves to the next size.
-	if ! "$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"; then
+	if ! sweep_step "$SCRIPT_DIR/001-setup-dataplane-test.sh" "${setup_args[@]}"; then
 		echo "warn: setup failed for mesh_size=$ms; recording SETUP_FAILED placeholder and continuing" >&2
 		emit_dataplane_placeholder SETUP_FAILED "$ms" "$source_ctx"
 		FAILED_CELLS+=(SETUP_FAILED)
-		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
+		sweep_step "$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
 			echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms" >&2
 		echo ""
 		continue
@@ -461,7 +467,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		# Exit 3 is the reachability gate: 002 already wrote its UNREACHABLE and
 		# STOPPED_UNREACHABLE rows, so no PROBE_FAILED placeholder for it.
 		probe_rc=0
-		"$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}" || probe_rc=$?
+		sweep_step "$SCRIPT_DIR/002-run-latency-probe.sh" "${probe_args[@]}" || probe_rc=$?
 		if ((probe_rc == REACH_EXIT_CODE)); then
 			echo "" >&2
 			echo "STOPPING SWEEP: mesh_size=$ms rep=$rep/$REPETITIONS stopped on an unreachable remote (--on-unreachable fail); cleaning up this mesh size, skipping the rest, then writing the reports" >&2
@@ -480,7 +486,7 @@ for ms in "${MESH_SIZES[@]}"; do
 
 	echo "--- Cleaning up ---"
 	# A cleanup failure only warns; check for a leftover namespace before the next run.
-	"$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
+	sweep_step "$SCRIPT_DIR/005-cleanup.sh" --contexts "$(IFS=,; echo "${active_ctxs[*]}")" || \
 		echo "warn: cleanup reported failure for mesh_size=$ms; a leftover ${DATAPLANE_TEST_NAMESPACE:-dataplane-test} namespace may remain" >&2
 
 	if ((REACH_GATE_STOP)); then
@@ -504,10 +510,10 @@ echo "=========================================="
 echo "  Sweep finished"
 echo "=========================================="
 echo ""
-# A6: the Istio version again, after the last window and before the reports (read-only).
+# The Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# A3: the outcome is written after the reports: they say so (the markdown gets a line
+# The outcome is written after the reports: they say so (the markdown gets a line
 # that sweep_outcome --md replaces).
 export _SWEEP_OUTCOME_PENDING=1
 echo "Generating report..."
@@ -521,8 +527,8 @@ CHARTS_FILE="${OUTPUT_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# R19: the reports are written; now say how many cells failed (also in
-# sweep-outcome.txt and the markdown summary, C3). Exit 3 (the reach gate stopped the
+# The reports are written; now say how many cells failed (also in
+# sweep-outcome.txt and the markdown summary). Exit 3 (the reach gate stopped the
 # sweep) wins over 4 (some cells failed, or the Istio version changed under the sweep).
 outcome_rc=0 stop_args=()
 ((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE" --stop-reason "the reachability gate (--on-unreachable fail) found an unreachable remote; later mesh sizes did not run")

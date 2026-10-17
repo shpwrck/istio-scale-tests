@@ -95,12 +95,17 @@ placeholder for the member that runs the workload).
 
 Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
 `SETUP_CONTEXTS`), never the hub, each member once: a list that names one twice, or a
-`--remote-contexts` that names the source, stops before any cluster call. Each suite writes TSV data plus a markdown summary under its
-`results/` directory; a sweep writes its TSVs and reports into its own `results/sweep-<RUN_ID>/`.
-A sweep whose setup or probe failed for some cells still writes its report, then ends with
-`N of M cells failed` (by reason) and exit code 4, as it does when the Istio version or active
-revision changed during the sweep; `sweep-outcome.txt` in the sweep dir keeps the outcome. Each
-suite README lists its exit codes.
+`--remote-contexts` that names the source, stops before any cluster call. Each suite writes
+TSV data plus a markdown summary under its `results/` directory; a sweep writes its TSVs and
+reports into its own `results/sweep-<RUN_ID>/`. A sweep whose setup or probe failed for some
+cells still writes its report, then ends with `N of M cells failed` (by reason) and exit code
+4, as it does when the mesh changed under it: the Istio version or active revision changed
+during the sweep, or the generation of a member's Istio CR or active IstioRevision went up
+(an edit with the same version, an OSSM operator upgrade, a TLS profile change), or that
+end-of-sweep check failed.
+`sweep-outcome.txt` in the sweep dir keeps the outcome. While a sweep runs, its dir holds a
+lock (`.sweep.lock`, its PID): another run into that dir, or a `--resume` of it, is refused
+until it ends. Each suite README lists its exit codes.
 Every script has `--help`, and scripts that change a cluster also accept `--dry-run`.
 
 | Suite | Measures | Start with |
@@ -177,8 +182,9 @@ how in that record: one that stops on an error (a check it makes, or an unexpect
 terminal closes) stays not finished and records when and by which signal (`ENDED_AT`,
 `ENDED_SIGNAL`; reports say "interrupted at ...", json `interrupted_at`, `interrupted_by`; exit
 130, 143 or 129); only one killed outright (SIGKILL, out of memory, a lost host) leaves the
-record as it was. A SIGTERM sent to the sweep's process alone takes effect when its current
-command returns; signal its process group to stop that too. A results dir without
+record as it was. A SIGTERM sent to the sweep's process alone (`kill <pid>`, a service manager)
+reaches the step that runs (a setup, a probe, a cleanup) at once, and the sweep ends once that
+step has; only a settle wait finishes first. A results dir without
 `sweep-outcome.txt` is from a sweep that stopped before its start (nothing ran) or from an older
 harness. A kubectl error quoted in a record or a report names the API server as `<api-host>` or
 `<ip>`, never its address. These keys are set in the environment, never in a `--config` file.

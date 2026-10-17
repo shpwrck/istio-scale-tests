@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Apply one tuning profile to the mesh: merge-patch the Istio CR with the profile's
 # istio_cr_patch and server-side apply its resources. Saves what 002-revert-profile.sh
-# needs to undo exactly those changes.
+# needs to undo exactly those changes, and the members' Istio CR and IstioRevision
+# generations once the apply settled (istio-generations-applied), which 002 compares
+# before its revert.
 #
 # Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
 #
@@ -15,6 +17,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh" # istio_generations_read
 # shellcheck disable=SC1091
 source "${ROOT}/tests/tuning/lib/tuning.sh"
 
@@ -171,6 +175,12 @@ if ((HAS_PATCH)); then
 		wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" || die "${ctx}: istiod did not roll out; revert with 002-revert-profile.sh --state-dir ${STATE_DIR}"
 	done
 fi
+
+# The generations this apply left (the patch raises the Istio CR's, and Sail the active
+# IstioRevision's): 002 reads them again before its revert, and a member whose generation
+# moved in between had its Istio CR edited by something else during the pass.
+istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" >"${STATE_DIR}/istio-generations-applied" \
+	|| echo "warn: could not write ${STATE_DIR}/istio-generations-applied; 002 cannot check that nothing else edited the Istio CR during the pass" >&2
 
 REVERT_HINT="Revert: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"
 if ((SKIP_VERIFY)); then

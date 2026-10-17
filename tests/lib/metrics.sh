@@ -21,7 +21,7 @@
 # tests/lib/common.sh (for die()).
 # shellcheck shell=bash
 
-# Counters (R10): a counter that is not in the scrape is `unknown`, never 0, so a metric
+# Counters: a counter that is not in the scrape is `unknown`, never 0, so a metric
 # renamed on another Istio version cannot read as zero pushes. The family counts as
 # present when the scrape has a sample of it (or a `# TYPE <name>` line, which other
 # exporters write; istiod's writes none for a counter that has no data point yet). A

@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # Report the failing line on an unexpected abort. Per-combo setup/probe/cleanup
 # failures are handled below and do not stop the sweep.
-# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
 # aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
@@ -70,12 +70,15 @@ Exit codes:
      start, sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
      CUT_SHORT=1)
   4  the sweep finished and wrote its report, but N cells failed (setup or probe
-     exited non-zero; stderr ends with "N of M cells failed" by reason) or the Istio
-     version or active revision changed during the sweep (read again at its end); the
-     outcome is also in sweep-outcome.txt and the markdown report
+     exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
+     version, the active revision or the generation of the Istio CR or its active
+     IstioRevision changed during the sweep (read again at its end), or that
+     end-of-sweep check failed; the outcome is also in sweep-outcome.txt and the
+     markdown report
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
-     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to
-     the sweep's process alone waits for its current command (signal its process group)
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A SIGTERM
+     sent to the sweep's process alone reaches the step that runs (001, 002, 005) at
+     once; only a settle wait finishes first
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -197,7 +200,9 @@ SCRIPT_DIR="${ROOT}/tests/churn"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
-HARNESS_SHA="$(harness_sha)"
+# The harness, once for the whole sweep: its steps record this value (harness_sha_for_sweep
+# exports it), and its own results under the output dir do not count.
+harness_sha_for_sweep "$OUTPUT_DIR_BASE"
 # base_replicas the probe will use, so placeholder rows land in the same report cell.
 CHURN_BASE_REPLICAS_DEFAULT="${CHURN_BASE_REPLICAS:-1}"
 
@@ -211,7 +216,7 @@ if ((! DRY_RUN)); then
 		resolve_kubectl KUBECTL
 	fi
 fi
-# R4: the Istio version every member runs, read once before the first setup and
+# The Istio version every member runs, read once before the first setup and
 # exported, so 001, 002 and the placeholders record it (ISTIO_VERSION_CHECK=fail stops
 # here on a mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
@@ -283,16 +288,16 @@ fi
 echo ""
 if ((! DRY_RUN)); then
 	config_snapshot "$SWEEP_DIR" "$RUN_ID"
-	# I5: a sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
+	# A sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
 	# that record: stopped with its reason, or interrupted (sweep_outcome_on_exit). Set before
 	# sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
 	trap 'sweep_outcome_on_exit "$?" || true' EXIT
-	# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+	# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
 	# so the reports of a sweep that died say so.
 	sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a churn sweep has no --resume); the rows in this dir cover only the cells it finished"
 fi
 
-# One reason per cell whose setup or probe failed (R19): reported, then the exit code.
+# One reason per cell whose setup or probe failed: reported, then the exit code.
 FAILED_CELLS=()
 for ms in "${MESH_SIZES[@]}"; do
 	active_ctxs=("${CONTEXTS[@]:0:$ms}")
@@ -340,11 +345,11 @@ for ms in "${MESH_SIZES[@]}"; do
 
 		echo "--- Setting up ---"
 		# On setup failure: record a placeholder row, clean up, next combo.
-		if ! "$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"; then
+		if ! sweep_step "$SCRIPT_DIR/001-setup-churn-test.sh" --contexts "$active_csv" --deployment-count "$intensity"; then
 			echo "warn: setup failed for mesh_size=$ms churn_intensity=$intensity; recording SETUP_FAILED placeholder and continuing" >&2
 			emit_churn_placeholder SETUP_FAILED "$ms" "$intensity"
 			FAILED_CELLS+=(SETUP_FAILED)
-			"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+			sweep_step "$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
 				echo "warn: cleanup after setup failure also reported failure for mesh_size=$ms churn_intensity=$intensity" >&2
 			echo ""
 			continue
@@ -354,7 +359,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "--- Running churn probe ---"
 		# A probe failure must not abort the sweep; record a placeholder row so the
 		# combo stays visible even if the probe wrote nothing.
-		if ! "$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"; then
+		if ! sweep_step "$SCRIPT_DIR/002-run-churn-probe.sh" "${probe_args[@]}"; then
 			echo "warn: churn probe failed for mesh_size=$ms churn_intensity=$intensity; recording PROBE_FAILED placeholder and continuing (cleanup runs below)" >&2
 			emit_churn_placeholder PROBE_FAILED "$ms" "$intensity"
 			FAILED_CELLS+=(PROBE_FAILED)
@@ -363,7 +368,7 @@ for ms in "${MESH_SIZES[@]}"; do
 
 		echo "--- Cleaning up ---"
 		# A cleanup failure must not abort the sweep.
-		"$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
+		sweep_step "$SCRIPT_DIR/005-cleanup.sh" --contexts "$active_csv" || \
 			echo "warn: cleanup reported failure for mesh_size=$ms churn_intensity=$intensity; continuing" >&2
 		echo ""
 	done
@@ -378,10 +383,10 @@ echo "=========================================="
 echo "  Sweep finished"
 echo "=========================================="
 echo ""
-# A6: the Istio version again, after the last window and before the reports (read-only).
+# The Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# A3: the outcome is written after the reports: they say so (the markdown gets a line
+# The outcome is written after the reports: they say so (the markdown gets a line
 # that sweep_outcome --md replaces).
 export _SWEEP_OUTCOME_PENDING=1
 echo "Generating report..."
@@ -395,9 +400,9 @@ CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# R19: the report is written; now say how many cells failed and exit non-zero if any did
+# The report is written; now say how many cells failed and exit non-zero if any did
 # (or the Istio version changed under the sweep), also in sweep-outcome.txt and the
-# markdown summary (C3).
+# markdown summary.
 sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$SWEEP_DIR" --md "$MD_FILE" \
 	"$(( ${#MESH_SIZES[@]} * ${#INTENSITIES[@]} ))" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} \
 	|| exit "$SWEEP_FAILED_EXIT"

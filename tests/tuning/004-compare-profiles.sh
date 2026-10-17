@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
-source "${ROOT}/config/versions.env"  # sources options.env: FANOUT_MAX_SKEW_MS, as in propagation 005 (C1)
+source "${ROOT}/config/versions.env"  # sources options.env: FANOUT_MAX_SKEW_MS, as in propagation 005
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
@@ -29,23 +29,28 @@ Usage: $(basename "$0") --results-dir DIR [options]
 
 Compare tuning sweep passes. Values are means over valid rows (status OK, no
 istiod restart; a propagation pass counts exactly the rows and samples its 005
-report counts, P1 once per iteration and left out only for a source-side reason, P2
-and P3 left out only for the remote's side);
-each profile also shows its change against the baseline. Under each metric, "n" is got/attempted: the valid samples with a
-value for it / what the pass's probe was configured to run, where its TSV records
-it (propagation: iterations for P1, iterations x remotes for P2 and P3; churn:
-iterations), else every row the pass wrote in that group (failed and timed-out
-rows included); "range" is its min to max. A profile whose n differs from the
-baseline's shows "(baseline n ...)": its mean is over other iterations, so compare
-it with care.
+report counts: P1 once per iteration and left out only for a source-side reason,
+P2 and P3 left out only for the remote's side, so a NOT_DRAINED or DRAIN_TIMEOUT
+side is left out like any other status that is not OK). Each profile also shows
+its change against the baseline. Under each metric, "n" is got/attempted: the
+valid samples with a value for it / what the pass's probe was configured to run,
+where its TSV records it (propagation: iterations for P1, iterations x remotes for
+P2 and P3; churn: iterations), else every row the pass wrote in that group (failed
+and timed-out rows included); "range" is its min to max. A profile whose n differs
+from the baseline's shows "(baseline n ...)": its mean is over other iterations,
+so compare it with care.
 Histogram p99 rows (convergence, push time) show the worst bucket a valid row hit,
 or "overflow (N rows)", never a mean; propagation's P1 convergence counts iterations,
 "overflow (N iterations)": an iteration whose window put a sample in +Inf is left out
 of the means (as 005 drops it) but counted here, so a profile that overflowed never
 looks better than it was; the P1 local push cell says "(N overflowed)" for the same
-iterations, which its mean leaves out. Memory is in Mi, CPU in millicores (the
-controlplane's istiod CPU and memory are window peaks), config sizes in KiB, and a
-count's mean prints bare when it is whole (438, not 438.00).
+iterations, which its mean leaves out ("- (N overflowed)" when every one did). Memory
+is in Mi, CPU in millicores (the controlplane's istiod CPU and memory are window
+peaks), config sizes in KiB, and a count's mean prints bare when it is whole (438,
+not 438.00).
+"TSV columns" gives the data rows' column count, per pass when the passes differ:
+then a WARNING says their rows were written by different harness versions (for
+propagation, filtered by different row rules).
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -53,19 +58,21 @@ Options:
   --output FILE      Write to FILE instead of stdout.
   -h, --help         Show this help.
 
-When the sweep dir holds sweep-outcome.txt (003 writes it), the
-comparison repeats it, with the run that recorded it: the failed passes by reason, its
-problems (the Istio version or active revision changed under the sweep) and notes
+When the sweep dir holds sweep-outcome.txt (003 writes it), the comparison repeats
+it, with the run that recorded it: the failed passes by reason, its problems (the
+Istio version, the active revision or the generation of the Istio CR or its active
+IstioRevision changed under the sweep, or the end-of-sweep check failed) and notes
 (members not ready at its start or end). The sweep writes it at its start as "not
-finished" (EXIT=unfinished) and replaces it at its end: a record still not finished is
-a sweep that died or still runs, or (I5) one interrupted, with when and by which signal;
-one that stopped on an error after its start shows the stop and its reason. A sweep dir
-without the file is from a sweep that stopped before its start (nothing ran), or from
-an older harness.
+finished" (EXIT=unfinished) and replaces it at its end: a record still not finished
+is a sweep that died or still runs, or one interrupted, with when and by which
+signal; one that stopped on an error after its start shows the stop and its reason.
+A sweep dir without the file is from a sweep that stopped before its start (nothing
+ran), or from an older harness.
 
 Environment:
   FANOUT_MAX_SKEW_MS  propagation: the scrape-skew ceiling (ms) a row must be within to
-                      count, as in propagation 005 (default 1000, set in config/options.env).
+                      count, as in propagation 005 (default 1000, set in
+                      config/options.env).
 EOF
 }
 
@@ -95,8 +102,8 @@ esac
 
 META="${RESULTS_DIR}/sweep-metadata.txt"
 meta_get() { [[ -f "$META" ]] && sed -n "s/^# $1=//p" "$META" | head -1; return 0; }
-# istio_start_kv <key>: an R2 start-of-run readiness key (ISTIO_NOTREADY_AT_START,
-# ISTIO_READY_WAITED_SEC) from sweep-metadata.txt; unknown for a sweep from before R2.
+# istio_start_kv <key>: a start-of-run readiness key (ISTIO_NOTREADY_AT_START,
+# ISTIO_READY_WAITED_SEC) from sweep-metadata.txt; unknown for a sweep from before these keys.
 istio_start_kv() {
 	local v
 	v="$(meta_get "$1")"
@@ -144,7 +151,7 @@ fi
 # a whole number bare, else 1 decimal), mi and m (mean in Mi / millicores, whole), kib
 # (a bytes mean shown in KiB, 1 decimal), qps (mean, 1 decimal), hist (a histogram
 # p99: never averaged, the worst bucket any valid row hit, or "overflow (N rows)"),
-# histi (hist counted per iteration: "overflow (N iterations)"; propagation's P1, M2).
+# histi (hist counted per iteration: "overflow (N iterations)"; propagation's P1).
 GROUP=""
 case "$SUITE" in
 controlplane)
@@ -179,21 +186,22 @@ esac
 metric_cols=""
 for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 
-# One pass -> lines "n<TAB>valid<TAB>total", "g<TAB>group<TAB>rows" (first-seen
+# One pass -> lines "n<TAB>valid<TAB>total", "w<TAB>columns<TAB>rows" (the data rows'
+# column counts), "g<TAB>group<TAB>rows" (first-seen
 # order; rows counts every row of the group, valid or not) and
 # "v<TAB>group<TAB>column<TAB>mean<TAB>max<TAB>n_overflow<TAB>min<TAB>n_numeric" for
 # every metric column the TSV has (mean, max and min "-" without a numeric value: a
 # tab IFS would merge empty fields). A group is "col=value, col=value", or "-".
 # "overflow" (a histogram p99 in +Inf) is counted, not dropped. A propagation pass
-# counts what its 005 report counts (D2): P2 and P3 from the rows prop_drop_reason keeps
-# (the remote side only, I6), P2 without a dirty sample, and P1 and its convergence p99 once per iteration, decided before the row
-# filter from the source side only (prop_p1_first, B2; tests/lib/propagation.sh, with
+# counts what its 005 report counts: P2 and P3 from the rows prop_drop_reason keeps
+# (the remote side only), P2 without a dirty sample, and P1 and its convergence p99 once per iteration, decided before the row
+# filter from the source side only (prop_p1_first, tests/lib/propagation.sh, with
 # 005's skew ceiling FANOUT_MAX_SKEW_MS). An iteration left out for a P1 overflow (its
-# source side otherwise clean) is counted into the convergence p99's overflow once (M2),
+# source side otherwise clean) is counted into the convergence p99's overflow once,
 # and "o<TAB>group<TAB>iterations" gives that count for the P1 local push cell's
-# "(N overflowed)" (B4). "i<TAB>group<TAB>iterations": a propagation pass's distinct
+# "(N overflowed)". "i<TAB>group<TAB>iterations": a propagation pass's distinct
 # (run_id, iteration) per group, what P1 is attempted against when the TSV does not
-# record ITERATIONS (X2).
+# record ITERATIONS.
 summarize() {
 	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" -v suite="$SUITE" -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
 	# prop_col_sample(c): whether a kept row carries a sample of propagation column c; the
@@ -220,6 +228,7 @@ summarize() {
 	!hdr { delete idx; for (i = 1; i <= NF; i++) idx[$i] = i; hdr = 1; next }
 	{
 		total++
+		widths[NF]++
 		g = ""
 		for (j = 1; j <= ng; j++) if (gc[j] in idx) g = g (g == "" ? "" : ", ") gc[j] "=" $(idx[gc[j]])
 		if (g == "") g = "-"
@@ -229,7 +238,7 @@ summarize() {
 		if (suite == "propagation") {
 			if (!((g, $1, $3) in iter_seen)) { iter_seen[g, $1, $3] = 1; giters[g]++ }
 			# P1 and its convergence p99: once per iteration, before the row filter, left
-			# out only for a source-side reason (B2), as 005 counts them.
+			# out only for a source-side reason, as 005 counts them.
 			if (prop_p1_first(MAXSKEW)) {
 				if (("p1_ms" in idx) && prop_p1_sample(MAXSKEW)) take(g, "p1_ms")
 				if ("p1_conv_p99_ms" in idx) take(g, "p1_conv_p99_ms")
@@ -255,6 +264,7 @@ summarize() {
 	}
 	END {
 		printf "n\t%d\t%d\n", valid, total
+		for (w in widths) printf "w\t%s\t%d\n", w, widths[w]
 		for (i = 1; i <= norder; i++) printf "g\t%s\t%d\n", order[i], grows[order[i]]
 		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "i\t%s\t%d\n", order[i], giters[order[i]]
 		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "o\t%s\t%d\n", order[i], p1ov[order[i]] + 0
@@ -323,7 +333,7 @@ fmt_range() {
 	printf '%s to %s' "$(fmt_metric "$kind" "$mn" "$mn" 0)" "$(fmt_metric "$kind" "$mx" "$mx" 0)"
 }
 
-# cfg_attempted <pass> <tsv>...: D3 (PL17). ATT[<pass>|-|<column>] = the samples the
+# cfg_attempted <pass> <tsv>... (PL17): ATT[<pass>|-|<column>] = the samples the
 # pass's probes were configured to take, from their TSV preambles: propagation
 # ITERATIONS (P1 and its convergence p99: one per iteration) and ITERATIONS x the
 # remotes (P2, P3: one per remote and iteration); churn its Iterations (one row each).
@@ -355,7 +365,7 @@ cfg_attempted() {
 	done
 }
 
-declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN
+declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS
 GROUP_VALUES=()
 ALL_TSVS=()
 for p in "${PASSES[@]}"; do
@@ -373,6 +383,7 @@ for p in "${PASSES[@]}"; do
 	while IFS=$'\t' read -r kind a b c d e f h; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
+		w) PWIDTHS[$p]="${PWIDTHS[$p]:+${PWIDTHS[$p]},}${a}" ;;
 		g) GROWS["$p|$a"]="$b"; [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
 		i) GITERS["$p|$a"]="$b" ;;
 		o) P1OV["$p|$a"]="$b" ;;
@@ -387,15 +398,45 @@ for p in "${PASSES[@]}"; do
 done
 ((${#GROUP_VALUES[@]})) || GROUP_VALUES=("-")
 
+# The TSV widths (data-row column counts) per pass: one value when every pass agrees,
+# else each pass's, with a warning: passes written by different harness versions. A
+# propagation TSV's width decides its row rules (tests/lib/propagation.sh).
+TSV_COLUMNS="" WIDTH_WARNING=""
+declare -A _wseen=()
+_wlist=() _wper=()
+for p in "${PASSES[@]}"; do
+	_pw="${PWIDTHS[$p]:-}"
+	[[ -n "$_pw" ]] || continue
+	# shellcheck disable=SC2086  # a comma list of numbers, split on purpose
+	_pw="$(printf '%s\n' ${_pw//,/ } | LC_ALL=C sort -n | awk '{ s = s (NR > 1 ? "," : "") $0 } END { print s }')"
+	_wper+=("${p} ${_pw}")
+	# shellcheck disable=SC2086
+	for _w in ${_pw//,/ }; do
+		[[ -n "${_wseen[$_w]+x}" ]] || { _wseen[$_w]=1; _wlist+=("$_w"); }
+	done
+done
+if ((${#_wlist[@]} <= 1)); then
+	TSV_COLUMNS="${_wlist[0]:-none}"
+else
+	TSV_COLUMNS="$(IFS=';'; echo "${_wper[*]}")"
+	TSV_COLUMNS="${TSV_COLUMNS//;/; }"
+	if [[ "$SUITE" == propagation ]]; then
+		WIDTH_WARNING="the passes' TSVs have different column counts (${TSV_COLUMNS}), so their rows are filtered by different rules (tests/lib/propagation.sh): one without remote_status (under 23 columns) drops a row's P2/P3 for either side's failure, one without p1_status (under 21) takes P1 from its iteration's first OK row, and an 18-column one has no p2_dirty or scrape-skew check. Compare those passes with care."
+	else
+		WIDTH_WARNING="the passes' TSVs have different column counts (${TSV_COLUMNS}): written by different harness versions, so a metric or filter column one of them lacks reads \"-\" or is not applied there. Compare those passes with care."
+	fi
+	echo "WARNING: ${WIDTH_WARNING}" >&2
+fi
+
 BASE=""
 [[ " ${PASSES[*]} " == *" baseline "* ]] && BASE="baseline"
 
-# istio_merged_kv <key>: N13/A5/A7, each member's active Istio revision
+# istio_merged_kv <key>: each member's active Istio revision
 # (ISTIO_ACTIVE_REVISIONS), its Istio CR / IstioRevision generations (ISTIO_GENERATIONS:
 # a CR edit between passes reads mixed, also at one version) and the proxy versions
 # connected to its istiod (ISTIO_PROXY_VERSIONS), over sweep-metadata.txt and every pass's
 # TSVs: one value, or mixed:a | b when they differ (PL26); a file without the key reads
-# unknown (I3: so a pass written before the key mixes in as unknown, never as the other
+# unknown (so a pass written before the key mixes in as unknown, never as the other
 # passes' value); unknown for a sweep from before them.
 META_INPUTS=()
 [[ -f "$META" ]] && META_INPUTS+=("$META")
@@ -421,7 +462,7 @@ row "${cells[@]}"
 # metric_n <pass> <group> <column>: got/attempted (PL17): valid samples with a value
 # (overflow counts) / what the pass was configured to take (cfg_attempted), else every
 # row the pass wrote in the group; for propagation's P1 columns, else the iterations
-# it wrote (one P1 sample each, X2).
+# it wrote (one P1 sample each).
 metric_n() {
 	local k="$1|$2|$3" att
 	att="${GROWS["$1|$2"]:-0}"
@@ -449,11 +490,18 @@ for g in "${GROUP_VALUES[@]}"; do
 			fi
 			ncells+=("$n")
 			rcells+=("$(fmt_range "$kind" "${VMIN[$k]}" "${VMAX[$k]}" "${VOV[$k]}")")
-			if [[ -z "${VAL[$k]:-}" ]]; then cells+=("-"); continue; fi
+			if [[ -z "${VAL[$k]:-}" ]]; then
+				# No mean: every sample overflowed, or none had a value. The P1 cell still
+				# says how many iterations it left out for a +Inf overflow.
+				cell="-"
+				[[ "$col" != p1_ms || "${P1OV["$p|$g"]:-0}" == 0 ]] || cell+=" (${P1OV["$p|$g"]} overflowed)"
+				cells+=("$cell")
+				continue
+			fi
 			b=""
 			[[ -n "$BASE" && "$p" != "$BASE" ]] && b="${VAL["$BASE|$g|$col"]:-}"
 			cell="$(fmt_metric "$kind" "${VAL[$k]}" "${VMAX[$k]}" "${VOV[$k]}" "$b")"
-			# B4: the P1 mean leaves out the iterations that overflowed; the cell says how many.
+			# The P1 mean leaves out the iterations that overflowed; the cell says how many.
 			[[ "$col" != p1_ms || "${P1OV["$p|$g"]:-0}" == 0 ]] || cell+=" (${P1OV["$p|$g"]} overflowed)"
 			cells+=("$cell")
 		done
@@ -470,7 +518,12 @@ render() {
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
+		# Each on its own line, as every other report prints the two.
+		echo "- HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
+		echo "- REPORT_HARNESS_SHA=$(report_harness_sha) (this report's own)"
 		echo "- Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+		echo "- TSV columns: ${TSV_COLUMNS}"
+		[[ -z "$WIDTH_WARNING" ]] || echo "- **Warning:** ${WIDTH_WARNING}"
 		if [[ "$SUITE" == propagation ]]; then
 			echo "- Values are means over the samples the propagation report (005) counts: P1 once per iteration, left out only for a source-side reason (p1_status not OK, a +Inf overflow, a source scrape skew over FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it), P2 and P3 per remote row, left out only for that remote's side (remote_status not OK, its scrape skew over FANOUT_MAX_SKEW_MS; the source's restart, P1 timeout or overflow keeps them); \"(N overflowed)\" in the P1 local push cell counts the iterations its mean leaves out for a +Inf overflow. Profiles show the change against the baseline in brackets."
 		else
@@ -481,16 +534,21 @@ render() {
 		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket (propagation's P1 convergence: \"overflow (N iterations)\" when N iterations put a sample in the +Inf bucket, whatever their p99; counted although 005 leaves those iterations out of its means)."
 		echo ""
 		sweep_outcome_recorded "$RESULTS_DIR" md "$(meta_get RUN_ID)"
-		local hdr="| Metric |" sep="|---|" r
-		for p in "${PASSES[@]}"; do hdr+=" ${p} |"; sep+="---|"; done
+		# Every cell through md_cell: a | in a pass name or a value would break the row.
+		local hdr="| Metric |" sep="|---|" r c
+		for p in "${PASSES[@]}"; do md_cell -v c "$p"; hdr+=" ${c} |"; sep+="---|"; done
 		echo "$hdr"
 		echo "$sep"
-		for r in "${ROWS[@]}"; do echo "| ${r//$'\t'/ | } |"; done
+		for r in "${ROWS[@]}"; do md_cell -v r "$r"; echo "| ${r//$'\t'/ | } |"; done
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
+		echo "HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
+		echo "REPORT_HARNESS_SHA=$(report_harness_sha) (this report's own)"
 		echo "Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+		echo "TSV columns: ${TSV_COLUMNS}"
+		[[ -z "$WIDTH_WARNING" ]] || echo "WARNING: ${WIDTH_WARNING}"
 		echo "Means over valid rows; profiles show the change against the baseline."
 		echo "n = got/attempted (valid samples with a value / configured samples, else rows written); range = min to max."
 		((N_DIFFERS)) && echo "WARNING: a profile's n differs from the baseline's (\"(baseline n ...)\"): its mean is over other iterations."

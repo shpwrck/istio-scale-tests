@@ -7,19 +7,26 @@
 # order (verify.sh, the lint-*.sh helpers, this file), so they keep plain names.
 #
 # What it replaces, in this order, on every line of a .tsv, .md, .txt, .csv or .json file
-# (the scale envelope md and sweep-outcome.txt included):
+# (the scale envelope md, sweep-outcome.txt, resumes.txt and planned-cells.txt included):
 #   1. kube context names -> <mesh-a-ctx>, <mesh-b-ctx>, ... (<hub-a-ctx> for the hub),
 #      one mapping for the whole run, printed on stderr only, never into the copy.
 #      Names come from the files' own metadata: the per-member keys
 #      (ISTIO_VERSION_BY_CONTEXT and every *_BY_CONTEXT key, ISTIO_ACTIVE_REVISIONS,
-#      ISTIO_PROXY_VERSIONS, ISTIO_NOTREADY_AT_*, KUBE_VERSIONS, ISTIOD_REPLICAS as
-#      ctx=value lists), the member lists (CONTEXTS, REMOTE_CONTEXTS, REMOTES, any
-#      *_CONTEXTS key), SOURCE_CTX, WORKLOAD_CONTEXT and any other *_CTX / *_CONTEXT
-#      key, HUB_CONTEXT (the hub), and the "# Contexts:" / "# Source: ... Remotes:"
-#      lines; plus every --context / --hub-context the operator names. A name matches
-#      only where no letter, digit or _ touches it on either side. The file-name form of
-#      a name (other characters as _, as tests/lib/istiod-diag.sh and the tuning state
-#      files write it; istiod-diag folders cut it to 40 chars) maps to the same placeholder.
+#      ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS, ISTIO_NOTREADY_AT_*, KUBE_VERSIONS,
+#      ISTIOD_REPLICAS as ctx=value lists, as keys or as resumes.txt's columns), the
+#      member lists (CONTEXTS, REMOTE_CONTEXTS, REMOTES, any *_CONTEXTS key), SOURCE_CTX,
+#      WORKLOAD_CONTEXT and any other *_CTX / *_CONTEXT key, HUB_CONTEXT (the hub), and
+#      the "# Contexts:" / "# Source: ... Remotes:" lines, and the "by member
+#      <ctx>=<value>,..." lists of the scale envelope and the tuning report; plus every
+#      --context / --hub-context the operator names. A name matches only where no
+#      letter, digit or _ touches it on either side. The file-name form of a name
+#      (ctx_file_safe in tests/lib/common.sh: other bytes as _, as the tuning state files
+#      and tests/lib/istiod-diag.sh write it; istiod-diag folders cut it to
+#      CTX_FILE_NAME_MAX chars) maps to the same placeholder.
+#      When no member is learned and none is given, it refuses the whole run (exit 1,
+#      nothing written): a lone report can name members in prose only. Metadata that
+#      names members by placeholder only (<mesh-a-ctx>: a copy redacted already) passes;
+#      --no-contexts says the files name no kube context at all.
 #   2. URLs -> <api-host> (in-cluster ones, *.svc[.cluster.local] and localhost, stay).
 #   3. 12-digit AWS account ids in ARNs -> <account>; emails -> <email>.
 #   4. API hosts (api.* / api-int.*) -> <api-host>; cluster host names (*.openshiftapps.com,
@@ -31,7 +38,10 @@
 #      after it) -> <vpc-id>, <subnet-id>, <sg-id>, <instance-id>, <eni-id>, <volume-id>,
 #      <igw-id>, <nat-id>, <rtb-id>.
 #   6. IPv4 and IPv6 addresses -> <ip>; /home/<name> and /Users/<name> -> <user>.
-# A TSV header line passes unchanged.
+# A TSV's header line is redacted like any other (its column names, read first, pick the
+# context columns the final scan checks). A tab-separated file's metadata columns (a
+# sweep's resumes.txt: KUBE_VERSIONS, ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS,
+# ISTIO_NOTREADY_AT_RESUME) teach names like the preamble keys of the same name.
 #
 # File and dir names: a mapped name in a copied file's path (below the given dir; a given
 # file's own name) is renamed the same way, without the angle brackets (mesh-a-ctx: no <
@@ -47,9 +57,11 @@
 # Columns are checked, not learned from: a member the metadata never names is a context
 # the script was not told about, so pass it with --context NAME.
 #
-# Files it skips (named on stderr, never copied): other file types, dot files, and the
-# raw istiod-diag evidence folders (istiod-diag-<RUN_ID>/NNN-*/), which keep host and
-# node names on purpose and must never be pasted. With --in-place they stay as they are,
+# Files it skips (named on stderr, never copied): other file types, dot files (a sweep's
+# .sweep.lock among them: a PID), the raw istiod-diag evidence folders
+# (istiod-diag-<RUN_ID>/NNN-*/), which keep host and node names on purpose and must never
+# be pasted, and a tuning sweep's raw copies of the Istio CR (istio-spec/*.json,
+# state/istio-before-*.json), which hold the cluster's own name. With --in-place they stay as they are,
 # and a skipped path that still holds a mapped name is listed on stderr.
 #
 # What it does not catch (a human reads the copy, names included, before committing it):
@@ -61,8 +73,9 @@
 # files it skips.
 #
 # Usage: tests/lib/redact-results.sh (--out DIR | --in-place | --dry-run) [options] PATH...
+# Environment: TMPDIR (where its work dir goes; default /tmp).
 # Needs bash 4.3+, awk, sed, find, sort, jq (for .json files). Never touches a cluster.
-# ci-dry-run-skip: reads result files only, never a cluster; tests/lib/test/carry-b.bats runs it
+# ci-dry-run-skip: reads result files only, never a cluster; tests/lib/test/redact-results.bats runs it
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -80,32 +93,46 @@ account ids in ARNs <account>; AWS resource ids (vpc-, subnet-, sg-, i-, eni-, v
 igw-, nat-, rtb- with 8 or 17 hex digits) <vpc-id>, <subnet-id>, ...; cluster host names
 <host>; home dirs /home/<user>. A file or dir name that holds a context is renamed the
 same way, without the angle brackets (mesh-a-ctx). The context mapping and the renames go
-to stderr only. Handles .tsv .md .txt .csv .json; skips other files and the raw
-istiod-diag evidence folders (named on stderr, never copied).
+to stderr only. Handles .tsv .md .txt .csv .json (a sweep's resumes.txt and
+planned-cells.txt among them); skips other files, dot files (.sweep.lock), the raw
+istiod-diag evidence folders and a tuning sweep's raw copies of the Istio CR
+(istio-spec/, state/istio-before-*.json), each named on stderr, never copied.
 
-Modes (one of them):
+Modes (--out or --in-place; --dry-run alone or with either):
   --out DIR         write the copy under DIR (new or empty, outside every PATH): a dir
                     PATH lands at DIR/<its name>/..., a file PATH at DIR/<its name>,
                     renamed where a name holds a context
   --in-place        rewrite the files where they are (only a file that passes the scan),
                     and rename the files and dirs below a dir PATH, and a file PATH, whose
                     names hold a context (a dir PATH whose own name holds one is refused)
-  --dry-run         write nothing; list per file what would change, then run the scan
+  --dry-run         write nothing; list per file what would change, then run the scan.
+                    With --out or --in-place it checks that mode's preconditions (an
+                    empty --out DIR, --in-place renames) and still writes nothing.
 
 Options:
   --context NAME    a kube context to map, besides the ones the files' metadata names
-                    (repeatable; NAME may be a comma list). Named ones take the first
-                    letters, in the order given; the rest follow in sorted order.
+                    (repeatable; NAME may be a comma list, no spaces). Named ones take the
+                    first letters, in the order given; the rest follow in sorted order.
   --hub-context NAME
-                    the ACM hub's context (repeatable): maps to <hub-a-ctx>, ...
+                    the ACM hub's context (repeatable, comma list): maps to <hub-a-ctx>, ...
+  --no-contexts     the files name no kube context at all: run even though no member was
+                    learned from their metadata or given with --context
   -h, --help        this help
 
-Exit 1 when a file fails the final scan (a mapped name left in its text or path, a context
-column or field holding a name it was not told about, or a .json file that no longer
-parses): that file is not written, and stderr names it. Also exit 1, before anything is
-written, when two files would land at one path once renamed, or (--in-place) a dir PATH's
-own name holds a context or a rename would meet a path that exists. Redact a whole results
-dir rather than a lone report: the TSV preambles name every member.
+Environment:
+  TMPDIR            where the work dir (removed at exit) goes; default /tmp
+
+Exit 1, before anything is written, when no member context was learned from the files'
+metadata and none was given (a lone report, such as the scale envelope or a summary, can
+name members in prose only): pass --context NAME for each member, or --no-contexts when
+the files name none. Metadata that names members by placeholder only (a copy redacted
+already) passes. Exit 1 when a file fails the final scan (a mapped name left in its
+text or path, a context column or field holding a name it was not told about, or a .json
+file that no longer parses): that file is not written, and stderr names it. Also exit 1,
+before anything is written, when two files would land at one path once renamed, or
+(--in-place) a dir PATH's own name holds a context or a rename would meet a path that
+exists. Redact a whole results dir rather than a lone report: the TSV preambles name every
+member.
 
 What it does not catch, so read the copy, file names included, before you commit it: a
 context, cluster or node name that no metadata key names and no --context gives (in
@@ -118,14 +145,16 @@ the files it skips.
 Examples:
   tests/lib/redact-results.sh --dry-run tests/controlplane/results/sweep-<RUN_ID>
   tests/lib/redact-results.sh --out /tmp/redacted tests/controlplane/results/sweep-<RUN_ID>
-  tests/lib/redact-results.sh --out /tmp/redacted --hub-context <hub-ctx> report.md
+  tests/lib/redact-results.sh --out /tmp/redacted --context <mesh-a-ctx>,<mesh-b-ctx> \
+      --hub-context <hub-ctx> report.md
 EOF
 }
 
 OUT_DIR=""
 IN_PLACE=0
 DRY_RUN=0
-declare -a NAMED_CTX=() HUB_CTX=() INPUTS=()
+NO_CONTEXTS=0
+declare -a NAMED_CTX=() HUB_CTX=() INPUTS=() _parts=()
 
 while (($#)); do
 	case "$1" in
@@ -136,13 +165,14 @@ while (($#)); do
 	--dry-run) DRY_RUN=1; shift ;;
 	--context|--hub-context)
 		[[ $# -ge 2 && -n "$2" ]] || die "$1 needs a context name"
-		IFS=',' read -r -a _parts <<<"$2"
-		for _p in ${_parts[@]+"${_parts[@]}"}; do
-			[[ -n "$_p" ]] || continue
-			[[ "$_p" != *[[:space:]]* ]] || die "$1 ${_p}: a context name has no spaces"
+		split_csv "$2" _parts
+		((${#_parts[@]} > 0)) || die "$1 needs a context name"
+		for _p in "${_parts[@]}"; do
+			[[ "$_p" != *[[:space:]]* ]] || die "$1 '${_p}': a context name has no spaces"
 			if [[ "$1" == --context ]]; then NAMED_CTX+=("$_p"); else HUB_CTX+=("$_p"); fi
 		done
 		shift 2 ;;
+	--no-contexts) NO_CONTEXTS=1; shift ;;
 	-h|--help) usage; exit 0 ;;
 	--) shift; INPUTS+=("$@"); break ;;
 	-*) die "unknown option: $1 (see --help)" ;;
@@ -210,9 +240,19 @@ add_file() {
 	if [[ "$src" == *$'\t'* || "$src" == *$'\n'* ]]; then
 		SKIPPED+=("${src} (a tab or newline in the name)"); return 0
 	fi
+	if [[ "$base" == .sweep.lock ]]; then
+		SKIPPED+=("${src} (a sweep's lock file: the PID of the run that held the dir)"); return 0
+	fi
 	if [[ "$base" == .* ]]; then SKIPPED+=("${src} (dot file)"); return 0; fi
 	if [[ "/${rel}" =~ /istiod-diag-[^/]+/[0-9][0-9][0-9]-[^/]+/ ]]; then
 		SKIPPED+=("${src} (raw istiod-diag evidence: keeps host and node names, never paste it)"); return 0
+	fi
+	# A tuning sweep's copies of the Istio CR: its spec at the start and the end
+	# (istio-spec/) and the whole CR a pass's apply saved (state/istio-before-<ctx>.json).
+	# They hold the cluster's own name (multiCluster.clusterName, network), which no
+	# metadata key names.
+	if [[ "/${rel}" =~ /istio-spec/[^/]+$ || "$base" == istio-before-*.json ]]; then
+		SKIPPED+=("${src} (a raw copy of an Istio CR: keeps the cluster and network names, never paste it)"); return 0
 	fi
 	case "$base" in
 	*.tsv) kind=tsv ;;
@@ -260,8 +300,8 @@ function lower(s) { return tolower(s) }
 # keyclass <lowercased key> -> kv (ctx=value list), list (member list), single, hub or "".
 function keyclass(k) {
 	if (k ~ /_by_context$/) return "kv"
-	if (k == "istio_active_revisions" || k == "istio_proxy_versions" || k == "kube_versions" \
-		|| k == "istiod_replicas" || k ~ /^istio_notready_at_(start|end|resume)$/) return "kv"
+	if (k == "istio_active_revisions" || k == "istio_proxy_versions" || k == "istio_generations" \
+		|| k == "kube_versions" || k == "istiod_replicas" || k ~ /^istio_notready_at_(start|end|resume)$/) return "kv"
 	if (k == "contexts" || k == "remotes" || k ~ /_contexts$/) return "list"
 	if (k == "hub_context" || k == "hub_ctx") return "hub"
 	if (k == "context" || k == "ctx" || k ~ /_ctx$/ || k ~ /_context$/) return "single"
@@ -279,7 +319,8 @@ function isname(t) {
 	return (t ~ /^[A-Za-z0-9][A-Za-z0-9_.:\/@+-]*$/)
 }
 # emit_names <value> <class>: each name in a metadata value (a pooled value reads
-# mixed:a,b or mixed:a | b).
+# mixed:a,b or mixed:a | b). A member placeholder there (<mesh-a-ctx>) says the files
+# name their members but are redacted already: recorded as P.
 function emit_names(v, cls,    n, T, i, t, p) {
 	gsub(/\\/, " ", v)
 	n = split(v, T, /[ ,|]+/)
@@ -287,6 +328,7 @@ function emit_names(v, cls,    n, T, i, t, p) {
 		t = T[i]; sub(/^mixed:/, "", t)
 		if (cls == "kv") { p = index(t, "="); if (!p) continue; t = substr(t, 1, p - 1) }
 		if (isname(t)) LEARN[(cls == "hub" ? "H" : "M") SUBSEP t] = 1
+		else if (cls != "hub" && t ~ /^<mesh-[a-z]+-ctx>$/) REDACTED_SEEN = 1
 	}
 }
 # cut_value <text after the separator> <mode>: the value, up to its end. A quoted value
@@ -324,6 +366,13 @@ function learn(L,    s, k, lk, cls, pre, post, rest, sep, off, m, key, quoted, v
 		emit_names(t, "single")
 		if (match(L, /[ \t|]Remotes:[ \t]+/)) emit_names(cut_value(substr(L, RSTART + RLENGTH), "words"), "list")
 	}
+	# "by member a=v1.30.5,b=v1.30.5" (ISTIO_VERSION_BY_CONTEXT on the Istio line of the
+	# scale envelope and of the tuning report): a ctx=value list in prose.
+	s = L
+	while (match(s, /(^|[^A-Za-z0-9_])by member[ \t]+/)) {
+		s = substr(s, RSTART + RLENGTH)
+		emit_names(cut_value(s, "word"), "kv")
+	}
 	# KEY=value, KEY: value, "key": "value", | KEY | `value` |
 	s = L; off = 0
 	while (match(s, /[A-Za-z_][A-Za-z0-9_]*["`*]*[ \t]*[=:|]/)) {
@@ -351,6 +400,29 @@ function learn(L,    s, k, lk, cls, pre, post, rest, sep, off, m, key, quoted, v
 		v = cut_value(rest, (lk == "remotes") ? "words" : "word")
 		emit_names(v, cls)
 	}
+}
+# header <raw header line> <kind>: the first line of a file that is not a # comment, when
+# it is a tab-separated header (always in a .tsv): its context columns (single or hub
+# class, CCOL: checked by the final scan, never learned from) and its metadata columns
+# (kv or list class, MCOL: KUBE_VERSIONS, ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS and
+# ISTIO_NOTREADY_AT_RESUME in resumes.txt), whose values teach names like a preamble key.
+function header(L, kind,    n, F, i, c, cls) {
+	HSEEN = 1
+	if (kind != "tsv" && !index(L, "\t")) return 0
+	HDR = L
+	n = split(L, F, "\t")
+	for (i = 1; i <= n; i++) {
+		c = lower(F[i]); cls = keyclass(c)
+		if (kind == "tsv" && (cls == "single" || cls == "hub")) { CCOL[i] = F[i]; NC++ }
+		if (cls == "kv" || cls == "list") { MCOL[i] = cls; NM++ }
+	}
+	return 1
+}
+# learn_cols <row>: the names in the metadata columns (MCOL) of a data row.
+function learn_cols(L,    n, F, i) {
+	if (NM == 0 || L == HDR || substr(L, 1, 1) == "#") return
+	n = split(L, F, "\t")
+	for (i = 1; i <= n; i++) if (i in MCOL) emit_names(F[i], MCOL[i])
 }
 # findb <line> <name> <from>: first position >= from where name stands alone, else 0.
 function findb(L, n, from,    t, p, a, b) {
@@ -466,13 +538,14 @@ function valok(v,    n, T, i, t) {
 }
 function issue(line, why) { printf "I\t%d\t%d\t%s\n", FI, line, why }
 # scan <redacted line> <line number> <kind>: the final checks on one line.
-function scan(s, ln, kind,    t, i, n, F, v, k, rest) {
+function scan(s, ln, kind, ishdr,    t, i, n, F, v, k, rest) {
 	t = s; gsub(/<[a-z][a-z0-9-]*>/, " ", t)
 	for (i = 1; i <= NN; i++) if (findb(t, NAME[i], 1)) { issue(ln, "the mapped name " NAME[i] " is still there"); break }
 	delete LEARN
 	learn(s)
+	if (!ishdr) learn_cols(s)
 	for (k in LEARN) { split(k, F, SUBSEP); issue(ln, "metadata names " F[2] ", a context it was not told about (pass --context " F[2] ")") }
-	if (kind == "tsv" && NC > 0 && s != HDR && substr(s, 1, 1) != "#") {
+	if (kind == "tsv" && NC > 0 && !ishdr && substr(s, 1, 1) != "#") {
 		n = split(s, F, "\t")
 		for (i = 1; i <= n; i++) if ((i in CCOL) && !valok(F[i])) issue(ln, "column " CCOL[i] " holds " F[i] ", a context it was not told about (pass --context " F[i] ")")
 	}
@@ -531,25 +604,19 @@ BEGIN {
 			for (i = 1; i <= NN; i++) if (findb(t, NAME[i], 1)) { printf "N\t%d\tits path still holds the mapped name %s\n", FI, NAME[i]; break }
 			continue
 		}
-		HDR = ""; NC = 0; delete CCOL; delete K; changed = 0; ln = 0
+		HDR = ""; HSEEN = 0; NC = 0; NM = 0; delete CCOL; delete MCOL; delete K; changed = 0; ln = 0
 		while ((r = (getline L < src)) > 0) {
 			ln++
-			if (MODE == "learn") { learn(L); continue }
-			if (kind == "tsv" && HDR == "" && substr(L, 1, 1) != "#") {
-				HDR = L; s = L
-				n = split(L, F, "\t")
-				for (i = 1; i <= n; i++) {
-					c = lower(F[i])
-					if (keyclass(c) == "single" || keyclass(c) == "hub") { CCOL[i] = F[i]; NC++ }
-				}
-			} else if (kind == "tsv" && L == HDR) {
-				s = L
-			} else {
-				s = redact(L)
-			}
+			# The header (and a copy of it further down) is redacted like any line; its
+			# column names, read before that, pick the columns.
+			ishdr = 0
+			if (!HSEEN && substr(L, 1, 1) != "#") ishdr = header(L, kind)
+			else if (HDR != "" && L == HDR) ishdr = 1
+			if (MODE == "learn") { learn(L); if (!ishdr) learn_cols(L); continue }
+			s = redact(L)
 			if (s != L) changed++
 			print s > dst
-			scan(s, ln, kind)
+			scan(s, ln, kind, ishdr)
 		}
 		if (r < 0 && MODE == "redact") printf "I\t%d\t0\tcannot read the file\n", FI
 		close(src)
@@ -564,6 +631,7 @@ BEGIN {
 	}
 	close(LISTF)
 	if (MODE == "learn") for (k in LEARN) { split(k, F, SUBSEP); printf "%s\t%s\n", F[1], F[2] }
+	if (MODE == "learn" && REDACTED_SEEN) printf "P\tredacted\n"
 	exit 0
 }'
 
@@ -578,11 +646,20 @@ for _c in ${NAMED_CTX[@]+"${NAMED_CTX[@]}"}; do
 	[[ -n "${ROLE[$_c]+x}" ]] && continue
 	ROLE[$_c]=M; MEMBERS+=("$_c")
 done
+REDACTED_SEEN=0   # the metadata names members by placeholder only (an already redacted copy)
 while IFS=$'\t' read -r _role _c; do
+	if [[ "$_role" == P ]]; then REDACTED_SEEN=1; continue; fi
 	[[ -n "$_c" && -z "${ROLE[$_c]+x}" ]] || continue
 	ROLE[$_c]="$_role"
 	if [[ "$_role" == H ]]; then HUBS+=("$_c"); else MEMBERS+=("$_c"); fi
 done < <(awk -v MODE=learn -v LISTF="$LIST" "$REDACT_AWK" </dev/null | LC_ALL=C sort -t $'\t' -k1,1r -k2,2)
+# No member to map: a lone report (the scale envelope, a summary) can name members in prose
+# only, and the scan below finds no name it was not told about there. Refuse before
+# anything is written, unless the metadata names members by placeholder only (a copy
+# redacted already) or the operator says the files name none.
+if ((${#MEMBERS[@]} == 0 && !REDACTED_SEEN && !NO_CONTEXTS)); then
+	die "no member context found in the files' metadata and none given: pass --context NAME for each mesh member (a comma list works), or --no-contexts when the files name no kube context; nothing written"
+fi
 
 # letters <n>: a, b, ..., z, aa, ab, ...
 letters() {
@@ -591,9 +668,6 @@ letters() {
 	while :; do s="${a[n % 26]}${s}"; n=$((n / 26 - 1)); ((n >= 0)) || break; done
 	printf '%s\n' "$s"
 }
-# file_safe <name> [max]: the file-name form of a name: other characters as _ (ctx_key in
-# tests/tuning/lib/tuning.sh; _istiod_diag_safe "$ctx" 40 cuts it to 40 chars).
-file_safe() { local s="${1//[^A-Za-z0-9._-]/_}"; printf '%s\n' "${s:0:${2:-${#s}}}"; }
 
 MAP="${WORK}/map.tsv"
 : >"$MAP"
@@ -612,13 +686,16 @@ MAP="${WORK}/map.tsv"
 		printf '%s\t%s\n' "$_c" "$_ph" >>"$MAP"
 		printf '  %-16s %s\n' "$_ph" "$_c"
 	done
-	((${#MEMBERS[@]} + ${#HUBS[@]} > 0)) || echo "  (none found in the files' metadata; pass --context NAME for each member)"
+	if ((${#MEMBERS[@]} + ${#HUBS[@]} == 0)); then
+		if ((REDACTED_SEEN)); then echo "  (none: the files' metadata names members by placeholder only, redacted already)"
+		else echo "  (none: --no-contexts, the files name no kube context)"; fi
+	fi
 } >&2
-# The file-name forms of each name (whole, and cut to 40 chars for istiod-diag folders),
-# when they differ, map to the same placeholder.
+# The file-name forms of each name (ctx_file_safe: whole, and cut to CTX_FILE_NAME_MAX
+# chars for istiod-diag folders), when they differ, map to the same placeholder.
 while IFS=$'\t' read -r _c _ph; do
-	_s="$(file_safe "$_c")"
-	_s40="$(file_safe "$_c" 40)"
+	_s="$(ctx_file_safe "$_c")"
+	_s40="$(ctx_file_safe "$_c" "$CTX_FILE_NAME_MAX")"
 	[[ "$_s" == "$_c" || -n "${ROLE[$_s]+x}" ]] || printf '%s\t%s\n' "$_s" "$_ph"
 	[[ "$_s40" == "$_s" || "$_s40" == "$_c" || -n "${ROLE[$_s40]+x}" ]] || printf '%s\t%s\n' "$_s40" "$_ph"
 done <"$MAP" >"${WORK}/alias.tsv"

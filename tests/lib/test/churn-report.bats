@@ -38,7 +38,7 @@ tsv() {
 
 # --- 004: run provenance -------------------------------------------------------
 
-@test "004: harness_sha, istio_version and the R2 start keys come from the TSV preamble, in every format" {
+@test "004: harness_sha, istio_version and the start-of-run readiness keys come from the TSV preamble, in every format" {
 	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" \
 		"ISTIO_NOTREADY_AT_START=ctx-b=IstiodNotReady" "ISTIO_READY_WAITED_SEC=60" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -72,7 +72,8 @@ tsv() {
 	assert_success
 	assert_output --partial 'harness_sha: "unknown (not recorded)"'
 	assert_output --partial 'istio_version: "unknown (not recorded)"'
-	refute_output --partial "$head"
+	# Only the report's own harness (report_harness_sha) may name this checkout.
+	[[ "$(grep -v '^report_harness_sha: ' <<<"$output")" != *"$head"* ]]
 	refute_output --partial "istio_version: \"${ISTIO_VERSION}\""
 	# Beside a TSV that recorded them: mixed, with a warning naming the key.
 	tsv "${RES}/churn-new.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" <<-EOF
@@ -140,7 +141,7 @@ tsv() {
 	assert_output --partial "| 2 | 5 | 1->5 | 3 | 1 |"
 }
 
-@test "004 (D6): an OK row from before R12 with no number in a measured column is re-derived, in every format" {
+@test "004: an OK row an older 002 wrote with no number in a measured column is re-derived, in every format" {
 	# Iteration 1 is a real OK row. 2: the remote EDS push never came (TIMEOUT) but the
 	# old 002 wrote OK. 3: a counter in neither scrape (N/A), also written OK.
 	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=x" "ISTIO_VERSION=y" <<-EOF
@@ -219,12 +220,12 @@ STUB
 		--output-dir "$RES"
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	# A6: harness_sha (a dirty tree adds .<8hex> to -dirty).
+	# harness_sha (a dirty tree adds .<8hex> to -dirty).
 	grep -qx "# HARNESS_SHA=$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" "$f"
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"
-	# R2: every member was ready at the start (the stub answers Healthy).
+	# Every member was ready at the start (the stub answers Healthy).
 	grep -qx "# ISTIO_NOTREADY_AT_START=none" "$f"
 	grep -qx "# ISTIO_READY_WAITED_SEC=0" "$f"
 	head -1 "$f" | grep -Eq '(\+00:00|Z)$'
@@ -235,7 +236,7 @@ STUB
 	assert_output --partial "istio_version: \"${ISTIO_VERSION}\""
 }
 
-@test "002 (R12): a remote EDS push that never came makes the row TIMEOUT_REMOTE_EDS; 004 counts it in n_total only" {
+@test "002: a remote EDS push that never came makes the row TIMEOUT_REMOTE_EDS; 004 counts it in n_total only" {
 	_stub_bin
 	# The stub istiod's eds counter never moves, so the remote EDS poll times out.
 	CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
@@ -249,7 +250,7 @@ STUB
 	assert_output --partial "| 2 | 1 | 1->5 | 1 | 0 |"
 }
 
-@test "002 (R10, R12): a push counter in neither scrape is N/A with a warning, and the row is MISSING_VALUE" {
+@test "002: a push counter in neither scrape is N/A with a warning, and the row is MISSING_VALUE" {
 	_stub_bin
 	# A scrape without pilot_push_triggers (as if renamed): never a 0 delta.
 	STUB_METRICS="${BATS_TEST_TMPDIR}/no-triggers.txt"
@@ -277,7 +278,7 @@ STUB
 	refute_output --regexp 'date -I[a-z]'
 }
 
-@test "002 (R4): a mesh that runs another Istio version stops the probe before any change; warn records the live version" {
+@test "002: a mesh that runs another Istio version stops the probe before any change; warn records the live version" {
 	_stub_bin
 	export STUB_ISTIO_VERSION=v1.29.0
 	CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
@@ -315,7 +316,7 @@ STUB
 	[[ "$stderr" == *"ISTIO_VERSION_CHECK must be fail or warn (got: yes)"* ]]
 }
 
-@test "004: two sweeps in one dir stop the report; --allow-multi-run says so in every format and shows a varying key as mixed (R3)" {
+@test "004: two sweeps in one dir stop the report; --allow-multi-run says so in every format and shows a varying key as mixed" {
 	mkdir -p "${RES}/sweep-a" "${RES}/sweep-b"
 	tsv "${RES}/sweep-a/churn-a.tsv" "RUN_ID=a" "HARNESS_SHA=h1" "ISTIO_VERSION=1.30.5" "SIDECAR_EGRESS_HOSTS=none" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -337,7 +338,7 @@ STUB
 		[[ "$fmt" == charts ]] || assert_output --partial "mixed:none,./*"
 		[[ "$fmt" != csv ]] || assert_line "# POOLED_RUNS=2"
 	done
-	# --dry-run refuses the same way (B4), and counts the files once allowed.
+	# --dry-run refuses the same way, and counts the files once allowed.
 	run --separate-stderr "$REPORT" --results-dir "$RES" --dry-run
 	assert_failure 1
 	[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]

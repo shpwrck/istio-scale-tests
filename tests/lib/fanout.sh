@@ -348,8 +348,8 @@ fanout_record_podset() {
 # fanout_body_complete <metrics_file>: true when the file is a complete scrape, i.e.
 # readable and at least FANOUT_MIN_SCRAPE_BYTES (fanout_scrape_all's rule; a failed
 # scrape leaves an empty or short file, PL29). It runs for every replica's file on every
-# scrape and extraction, so it forks nothing for a complete body (B6): file_min_bytes
-# (common.sh, I8) reads the first FANOUT_MIN_SCRAPE_BYTES characters with the read
+# scrape and extraction, so it forks nothing for a complete body: file_min_bytes
+# (common.sh) reads the first FANOUT_MIN_SCRAPE_BYTES characters with the read
 # builtin, and counts bytes with wc only for a shorter one.
 # shellcheck disable=SC2329
 fanout_body_complete() {
@@ -359,7 +359,7 @@ fanout_body_complete() {
 
 # SUM a counter across pods; the caller takes the window delta with counter_delta
 # (metrics.sh). A pod whose scrape lacks the counter adds 0 (istiod registers it at
-# its first increment); `unknown` when no scrape has it at all (R10: renamed), so a
+# its first increment); `unknown` when no scrape has it at all (renamed), so a
 # missing metric never reads as 0. `unscraped` when no file is given or any pod's
 # scrape is incomplete (fanout_body_complete): skipping it would undercount the sum,
 # and a short baseline would turn its share of the counter into window pushes (PL29).

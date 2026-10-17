@@ -376,19 +376,25 @@ for ctx in "${CONTEXTS[@]}"; do
 		ns_lifecycle_row "$LIFECYCLE_FILE" "$ctx" "${SERIES:-none}" N/A delete "$n_ns" N/A "$secs" N/A N/A N/A "$status"
 		[[ "$status" == OK ]] || exit 1
 		# Sidecar CRs are namespaced; warn if any survived outside the deleted namespaces.
-		sc_left=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io \
-			-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
-		[[ -z "$sc_left" ]] && sc_left=0
-		if (( sc_left > 0 )); then
-			echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
+		# These reads only warn: one that fails (pipefail) says so and does not fail the
+		# cleanup, whose namespaces are gone.
+		if sc_left=$("${KUBECTL[@]}" --context="$ctx" get sidecars.networking.istio.io \
+			-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' '); then
+			if (( ${sc_left:-0} > 0 )); then
+				echo "  [$ctx] WARNING: ${sc_left} Sidecar CR(s) still present" >&2
+			fi
+		else
+			echo "  [$ctx] warn: could not list the Sidecar CRs labelled $LABEL_SELECTOR, so none left over is reported" >&2
 		fi
 		# Same for the --traffic-config vsdr VirtualServices/DestinationRules.
-		vsdr_left=$("${KUBECTL[@]}" --context="$ctx" get \
+		if vsdr_left=$("${KUBECTL[@]}" --context="$ctx" get \
 			virtualservices.networking.istio.io,destinationrules.networking.istio.io \
-			-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' ')
-		[[ -z "$vsdr_left" ]] && vsdr_left=0
-		if (( vsdr_left > 0 )); then
-			echo "  [$ctx] WARNING: ${vsdr_left} VirtualService/DestinationRule(s) still present" >&2
+			-A -l "$LABEL_SELECTOR" --no-headers --ignore-not-found 2>/dev/null | wc -l | tr -d ' '); then
+			if (( ${vsdr_left:-0} > 0 )); then
+				echo "  [$ctx] WARNING: ${vsdr_left} VirtualService/DestinationRule(s) still present" >&2
+			fi
+		else
+			echo "  [$ctx] warn: could not list the VirtualServices and DestinationRules labelled $LABEL_SELECTOR, so none left over is reported" >&2
 		fi
 		echo "  [$ctx] Done."
 	) &

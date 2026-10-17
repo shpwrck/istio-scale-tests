@@ -2,15 +2,15 @@
 # tests/gateway-api/001-run-ingress-check.sh (Gateway API multicluster ingress check) through
 # its real entrypoint (PL33): flags and --help, the dry run, the chart <-> prediction-table
 # contract (scenario set and render pin included), and whole runs against stub
-# kubectl/curl/istioctl: the Service answers (M1/F2: only a route in place for the whole traffic
-# window counts; M2: the Service read directly; F1: only the code of a dropped destination is a
-# failure, with an empty body, repeated by the re-probe (G1), S7's too, on a RefNotPermitted route,
-# against C1's empty 500; F3: the scenario must work through the workload member; S7b
+# kubectl/curl/istioctl: the Service answers (only a route in place for the whole traffic
+# window counts; the Service read directly; only the code of a dropped destination is a
+# failure, with an empty body, repeated by the re-probe, S7's too, on a RefNotPermitted route,
+# against C1's empty 500; the scenario must work through the workload member; S7b
 # contradicting S2; late endpoints answered for a NO), the
 # namespace answers (S7-S9, S7b) and their invalid-precondition rows, the not-deployed and
-# unreachable-member stops (U1, with one retry), the data-plane gate (SC1: S1 and S3, rounds in a
-# row) and the re-probe of late endpoints, builds and restarts (R1, PL9, unverified ones too), the
-# scenario set (R2, unreadable too), STATUS_TIMEOUT (PL23), an unreachable ingress, best-effort
+# unreachable-member stops (with one retry), the data-plane gate (S1 and S3, rounds in a
+# row) and the re-probe of late endpoints, builds and restarts (PL9; unverified ones too), the
+# scenario set (unreadable too), STATUS_TIMEOUT (PL23), an unreachable ingress, best-effort
 # steps that fail without killing the run (PL40), one preamble key set for every output (PL19,
 # PL36), and no address in any output.
 # Stub addresses are documentation addresses (192.0.2.0/24); the stub registry is example.invalid.
@@ -21,7 +21,7 @@ load test_helper
 GW="${ROOT}/tests/gateway-api/001-run-ingress-check.sh"
 CHART="${ROOT}/charts/mesh-verify-gateway-api"
 
-# The chart render that the script's SCENARIO_SET describes (R2): "<set> <sha256 of render_sha>".
+# The chart render that the script's SCENARIO_SET describes: "<set> <sha256 of render_sha>".
 # Any change to what the chart renders fails "the chart render is pinned to the scenario set"
 # until the set is bumped: SCENARIO_SET in 001-run-ingress-check.sh, the scenarioSet define in
 # templates/_helpers.tpl and Chart.yaml's version (v<N> = 0.<N>.0) together, then this pin, to the
@@ -597,7 +597,7 @@ svc_doc() {
 	# The S3 stub on another member is byte-identical to the workload's Service.
 	[ -n "$(svc_doc member-a echo-s3)" ]
 	diff <(svc_doc member-a echo-s3) <(svc_doc member-b echo-s3)
-	# R2: every namespace and the Gateway carry the script's scenario set, and nothing else.
+	# Every namespace and the Gateway carry the script's scenario set, and nothing else.
 	local m n_obj
 	for m in member-a member-b; do
 		# Every Namespace plus the one Gateway API Gateway (the classic Istio Gateway carries none).
@@ -715,7 +715,7 @@ render_sha() {
 	[ "$(cell ctx-a S7 observed_status)" = "Accepted=True/ResolvedRefs=False:RefNotPermitted" ]
 	[ "$(cell ctx-a S7 observed_codes)" = "500:3" ]
 	[ "$(cell ctx-a S7 observed_endpoints)" = "remote-ewgw:15443" ]
-	# S7's failure makes the YES, so it was re-probed: twice the grant's 500 (T4).
+	# S7's failure makes the YES, so it was re-probed: twice the grant's 500.
 	[ "$(cell ctx-a S7 row_status)" = REPROBE_FAILED ]
 	[ "$(cell ctx-a S7 detail)" = "re-probed 0 s after the traffic: 500:3" ]
 	[ "$(cell ctx-b S7 observed_status)" = "Accepted=True/ResolvedRefs=True" ]
@@ -731,8 +731,8 @@ render_sha() {
 	# One istioctl dump per ingress, not one per backend.
 	[ "$(wc -l <"${STUB_LOG}.istioctl")" -eq 2 ]
 	grep -q 'proxy-config endpoints -n istio-system istio-ingressgateway-5d8f7-p1 -o json' "${STUB_LOG}.istioctl"
-	# Provenance: live state per member (PL39), builds that ran (R1), restarts (PL9), the
-	# data-plane gate (SC1), the scenario set (R2), the run config, the expected body.
+	# Provenance: live state per member (PL39), builds that ran, restarts (PL9), the
+	# data-plane gate, the scenario set, the run config, the expected body.
 	grep -qx '# GWAPI_SCHEMA=5' "$t"
 	grep -qx '# GATEWAYCLASS\[ctx-a\]=istio.io/gateway-controller;Accepted=True' "$t"
 	grep -qx '# ISTIOD_ENV\[ctx-b\]=PILOT_ENABLE_GATEWAY_API=true;PILOT_ENABLE_GATEWAY_API_STATUS=unset;PILOT_GATEWAY_API_CONTROLLER_NAME=unset;ENABLE_GATEWAY_API_MANUAL_DEPLOYMENT=unset;PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=unset;PILOT_SCOPE_GATEWAY_TO_NAMESPACE=unset;PILOT_MULTI_NETWORK_DISCOVER_GATEWAY_API=unset;ENABLE_MCS_HOST=unset;ENABLE_MCS_SERVICE_DISCOVERY=unset;ENABLE_MCS_CLUSTER_LOCAL=unset' "$t"
@@ -741,7 +741,7 @@ render_sha() {
 	grep -qx "# ISTIOD_IMAGE\[ctx-a\]=istio-pilot-rhel9:1.30.5@${digest}" "$t"
 	grep -qx "# INGRESS_PROXY_IMAGE\[ctx-a\]=istio-proxyv2-rhel9:1.30.5@${digest}" "$t"
 	grep -qx '# OSSM_OPERATOR\[ctx-b\]=3.4.3/Succeeded' "$t"
-	# The version each member runs (its active IstioRevision), not the CR's alias (A1, A8).
+	# The version each member runs (its active IstioRevision), not the CR's alias.
 	grep -qx '# ISTIO_VERSION=v1.30.5' "$t"
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "$t"
 	grep -qx '# ISTIO_VERSION_BY_CONTEXT=ctx-a=v1.30.5,ctx-b=v1.30.5' "$t"
@@ -778,7 +778,7 @@ render_sha() {
 	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-a\]=lb-status' "$t"
 	grep -qx '# RUN_CONFIG=none' "$t"
 	grep -qx '# WORKLOAD_CLUSTER=member-b' "$t"
-	# R2: the hub's revision is not this script's commit.
+	# The hub's revision is not this script's commit.
 	if grep -qx '# HARNESS_SHA=unknown' "$t"; then
 		grep -qx '# CHART_REVISION_VS_HARNESS=unknown' "$t"
 	else
@@ -813,7 +813,7 @@ render_sha() {
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: YES — S2 (its route in place for the whole traffic window, no \`echo-s2\` Service on the ingress member) returned \`500:3\` through \`ctx-a\`'s ingress (500: Envoy had no cluster for the route's destination, i.e. istiod dropped it, as for C1) and again on the re-probe 0 s later (\`500:3\`), while S3 (the same route plus a stub Service there) answered 200 from the workload member \`ctx-b\` and S2 answered 200 through \`ctx-b\` itself."
 	[ "$(cell ctx-a S2 verdict)" = DEVIATION ]
 	[ "$(cell ctx-a S3 verdict)" = MATCH ]
-	# The failed predicted-200 cells were re-probed, and failed again the same way (G1).
+	# The failed predicted-200 cells were re-probed, and failed again the same way.
 	[[ "$(cell ctx-a S2 row_status)" == *REPROBE_FAILED* ]]
 	[[ "$(cell ctx-a S2 detail)" == *"re-probed 0 s after the traffic: 500:3"* ]]
 	# S2, S7b and S7 (predicted 500 there, but its failure makes a YES).
@@ -835,7 +835,7 @@ render_sha() {
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE — 0 of 1 other members answered, 0 failed, 1 with a broken path, 0 unclear: S2 and S3 all failed through \`ctx-a\`: S1 (classic) answered there, so the Gateway API path is broken, not the Service."
 }
 
-@test "gateway-api run: only a 500 counts as 'needed' for an HTTPRoute: a 503 or a 404 on an Accepted route is INCONCLUSIVE (F1)" {
+@test "gateway-api run: only a 500 counts as 'needed' for an HTTPRoute: a 503 or a 404 on an Accepted route is INCONCLUSIVE" {
 	STUB_S2_OTHER=503 STUB_S7B_OTHER=500 gw_run
 	assert_success
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
@@ -867,7 +867,7 @@ render_sha() {
 	no_addresses
 }
 
-@test "gateway-api run: a failure counts toward YES only when its re-probe fails the same way (G1)" {
+@test "gateway-api run: a failure counts toward YES only when its re-probe fails the same way" {
 	# 500, then 503 "no healthy upstream" on the re-probe: the cluster appeared, so the remote
 	# Service was discovered late, not dropped.
 	STUB_S2_OTHER=500 STUB_S2_REPROBE=503 STUB_S7B_OTHER=500 gw_run
@@ -950,7 +950,7 @@ render_sha() {
 	refute_output --partial "traffic: YES"
 }
 
-@test "gateway-api run: a classic route counts as 'needed' only on a 503 with an empty body (no cluster); 'no healthy upstream' is INCONCLUSIVE (F1)" {
+@test "gateway-api run: a classic route counts as 'needed' only on a 503 with an empty body (no cluster); 'no healthy upstream' is INCONCLUSIVE" {
 	STUB_S9_OTHER=503 gw_run
 	assert_success
 	assert_output --partial "  - classic VirtualService — YES: S9 returned \`503:3\` through \`ctx-a\`'s ingress (503 with an empty body: Envoy had no cluster for the host) and again on the re-probe 0 s later (\`503:3\`), while S8, with the backend in the same namespace, answered 200 there and S9 answered 200 through \`ctx-b\` itself."
@@ -961,7 +961,7 @@ render_sha() {
 	assert_output --partial "S9 through \`ctx-a\`: 503 with a body (\`no healthy upstream\`): Envoy has the cluster but no healthy endpoint"
 }
 
-@test "gateway-api run: a YES needs the scenario to work through the workload member (F3)" {
+@test "gateway-api run: a YES needs the scenario to work through the workload member" {
 	STUB_S2_W=500 STUB_S2_OTHER=500 gw_run
 	assert_success
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
@@ -970,7 +970,7 @@ render_sha() {
 	[ "$(cell ctx-b S2 verdict)" = DEVIATION ]
 }
 
-@test "gateway-api run: a failure on a route that is not in place for the whole traffic window is INCONCLUSIVE, never YES (M1, F2)" {
+@test "gateway-api run: a failure on a route that is not in place for the whole traffic window is INCONCLUSIVE, never YES" {
 	STUB_NOSTATUS=s2 STUB_S2_OTHER=404 gw_run --wait-timeout 0
 	assert_success
 	assert_output --partial "Service needed in every cluster for HTTPRoute traffic: INCONCLUSIVE"
@@ -988,7 +988,7 @@ render_sha() {
 	assert_output --partial "  - kind: Service — INCONCLUSIVE"
 	assert_output --partial "S7's route on \`ctx-a\` was not in place"
 	rm -rf "$OUT"
-	# F2: no status when the wait ended, Accepted by the final read: the traffic may have run
+	# No status when the wait ended, Accepted by the final read: the traffic may have run
 	# without the route. Never YES, and the row is UNKNOWN (STATUS_CHANGED), not a DEVIATION.
 	STUB_NOSTATUS_ONCE=s2 STUB_S2_OTHER=404 gw_run --wait-timeout 0
 	assert_success
@@ -1025,7 +1025,7 @@ render_sha() {
 	no_addresses
 }
 
-@test "gateway-api run: the 'no local Service' precondition is read, not inferred: a Service where none belongs, or no S3 stub, is INCONCLUSIVE (M2)" {
+@test "gateway-api run: the 'no local Service' precondition is read, not inferred: a Service where none belongs, or no S3 stub, is INCONCLUSIVE" {
 	STUB_SVC_A=echo-s2 gw_run
 	assert_success
 	[ "$(cell ctx-a S2 verdict)" = UNKNOWN ]
@@ -1109,7 +1109,7 @@ render_sha() {
 	grep -qx '# REMOTE_NAMESPACE_LABELS\[ctx-a\]=istio-discovery=enabled;istio.io/rev=default' "$(tsv)"
 	rm -rf "$OUT"
 	# A failed read is not "absent": the rows say NS_SCENARIO_UNVERIFIED (PL39), and the warning
-	# quotes kubectl's error, masked (U1).
+	# quotes kubectl's error, masked.
 	STUB_REMOTE_NS_A=fail gw_run
 	assert_success
 	assert_output --partial "ctx-a: could not read remote_namespace (recorded as unknown): Unable to connect to the server: dial tcp <ip>:6443: i/o timeout"
@@ -1143,7 +1143,7 @@ render_sha() {
 	[ ! -e "$OUT" ]
 }
 
-@test "gateway-api run: a member that answers no preflight read stops the run fast, names it and quotes kubectl (U1)" {
+@test "gateway-api run: a member that answers no preflight read stops the run fast, names it and quotes kubectl" {
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --contexts ctx-a,ctx-b,ctx-typo --workload-context ctx-b \
 		--wait-timeout 0 --results-dir "$OUT"
 	assert_failure
@@ -1179,7 +1179,7 @@ render_sha() {
 	assert_output --partial "traffic: NO"
 }
 
-@test "gateway-api run: an ingress whose gate never passes is DATAPLANE_NOT_READY: its failures are not blamed on a scenario (SC1)" {
+@test "gateway-api run: an ingress whose gate never passes is DATAPLANE_NOT_READY: its failures are not blamed on a scenario" {
 	STUB_S1_OTHER=503 STUB_S2_OTHER=500 gw_run --wait-timeout 1
 	assert_success
 	assert_output --partial "ctx-a: s1.classic.test and s3.gwapi.test did not answer 200 with the echo text through its ingress 1 time(s) in a row before the wait's deadline (last round: s1.classic.test 503, s3.gwapi.test 200)"
@@ -1201,7 +1201,7 @@ render_sha() {
 	refute_output --partial "traffic: YES"
 }
 
-@test "gateway-api run: the gate takes S1 and S3 GWAPI_GATE_PASSES rounds in a row through every ingress (SC1)" {
+@test "gateway-api run: the gate takes S1 and S3 GWAPI_GATE_PASSES rounds in a row through every ingress" {
 	# The default, 3 rounds: both hosts at least 3 times through each ingress before the traffic.
 	GWAPI_GATE_PASSES=3 gw_run
 	assert_success
@@ -1280,7 +1280,7 @@ render_sha() {
 @test "gateway-api run: a chart synced from this script's own commit is 'same', or 'same-dirty' from a modified tree" {
 	local head expect
 	head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || skip "not a git checkout"
-	# A6: as the script reads it (harness_sha: a dirty tree is <describe>-dirty.<8hex>).
+	# As the script reads it (harness_sha: a dirty tree is <describe>-dirty.<8hex>).
 	case "$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" in
 	"" | unknown) skip "git describe does not work here" ;;
 	*-dirty*) expect=same-dirty ;;
@@ -1293,7 +1293,7 @@ render_sha() {
 	grep -q "vs the script's commit: ${expect}" "$(summary)"
 }
 
-@test "gateway-api run: a deployed chart of another scenario set makes the rows UNKNOWN with a clear message (R2)" {
+@test "gateway-api run: a deployed chart of another scenario set makes the rows UNKNOWN with a clear message" {
 	STUB_SET_A=v0 gw_run
 	assert_success
 	assert_output --partial "ctx-a: the deployed chart is not the version this script expects: scenario set v0, expected ${STUB_SCENARIO_SET}"
@@ -1322,6 +1322,36 @@ render_sha() {
 	assert_output --partial "S2 through \`ctx-a\` is not judged: the scenario set deployed on this member could not be read"
 	refute_output --partial "traffic: YES"
 	no_addresses
+}
+
+# The summary's frontmatter is every `# KEY=value` preamble line of the TSV, as 001 reads them
+# (up to the header row), so a value with a quote and a backslash must read back as itself.
+@test "gateway-api run: the summary's frontmatter parses as YAML and reads back every TSV preamble value, a quote and a backslash included (PL19)" {
+	python3 -I -c 'import yaml' 2>/dev/null || skip "python3 with PyYAML is needed"
+	# The stub prints the stamp into its JSON as given: JSON-escaped here, read as
+	# v0: "q" #1 \b (": " and " #" would also end a plain YAML scalar).
+	STUB_SET_A='v0: \"q\" #1 \\b' gw_run
+	assert_success
+	grep -qxF '# SCENARIO_SET[ctx-a]=v0: "q" #1 \b' "$(tsv)"
+	python3 -I -c '
+import re, sys, yaml
+want = {}
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.rstrip("\n")
+    if line.startswith("run_id\t"):
+        break
+    m = re.match(r"^# ([A-Za-z_][^=]*)=(.*)$", line)
+    if m:
+        want[m.group(1)] = m.group(2)
+lines = open(sys.argv[2], encoding="utf-8").read().split("\n")
+if lines[0] != "---":
+    sys.exit("the summary has no frontmatter")
+got = yaml.safe_load("\n".join(lines[1:lines.index("---", 1)]))
+if got != want:
+    sys.exit("frontmatter %r\nTSV preamble %r" % (got, want))
+if got.get("SCENARIO_SET[ctx-a]") != "v0: \"q\" #1 \\b":
+    sys.exit("SCENARIO_SET[ctx-a] reads %r" % got.get("SCENARIO_SET[ctx-a]"))
+' "$(tsv)" "$(summary)"
 }
 
 @test "gateway-api run: an istiod restart during the run is recorded and turns a deviation into UNKNOWN (PL9)" {

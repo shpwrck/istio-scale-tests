@@ -13,7 +13,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "770" ]]
 }
 
-@test "extract_counter_sum: missing counter returns unknown, not 0 (R10)" {
+@test "extract_counter_sum: missing counter returns unknown, not 0" {
 	result=$(extract_counter_sum "$FIXTURES/prometheus_counters.txt" "nonexistent_counter")
 	[[ "$result" == "unknown" ]]
 }
@@ -23,7 +23,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "unknown" ]]
 }
 
-@test "extract_counter_sum: a declared counter with no sample yet is a real 0 (R10)" {
+@test "extract_counter_sum: a declared counter with no sample yet is a real 0" {
 	f=$(mktemp)
 	printf '# HELP pilot_k8s_cfg_events Events\n# TYPE pilot_k8s_cfg_events counter\nother_metric 5\n' > "$f"
 	result=$(extract_counter_sum "$f" pilot_k8s_cfg_events)
@@ -31,7 +31,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "0" ]]
 }
 
-@test "extract_counter_sum: empty or missing scrape file is unscraped, never 0 or unknown (R10, PL29)" {
+@test "extract_counter_sum: empty or missing scrape file is unscraped, never 0 or unknown (PL29)" {
 	f=$(mktemp)
 	result=$(extract_counter_sum "$f" pilot_xds_pushes)
 	rm -f "$f"
@@ -63,7 +63,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "0" ]]
 }
 
-@test "extract_counter_by_label: counter absent from the scrape returns unknown (R10)" {
+@test "extract_counter_by_label: counter absent from the scrape returns unknown" {
 	result=$(extract_counter_by_label "$FIXTURES/prometheus_counters.txt" "pilot_xds_pushes_renamed" "type" "eds")
 	[[ "$result" == "unknown" ]]
 	f=$(mktemp)
@@ -72,7 +72,7 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "unscraped" ]]
 }
 
-# --- counter_delta (R10) ---
+# --- counter_delta ---
 
 @test "counter_delta: after - before when both are numbers" {
 	run counter_delta 100 250 x

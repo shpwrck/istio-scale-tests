@@ -554,5 +554,5 @@ cap_metrics_ready() {
 	local ctx="$1"; shift
 	local out
 	out="$("$@" --context="$ctx" --request-timeout="${CAP_TOP_TIMEOUT:-15}s" top nodes --no-headers 2>/dev/null)" || out=""
-	[[ -n "$out" ]] && echo "ready" || echo "unavailable"
+	if [[ -n "$out" ]]; then echo "ready"; else echo "unavailable"; fi
 }

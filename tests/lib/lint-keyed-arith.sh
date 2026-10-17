@@ -36,7 +36,7 @@ lint_keyed_arith_file() {
 			# [ and an optional quote before the $ of the key.
 			el = "(^|[^{#!$A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*\\[\"?\\$"
 			if (match(t, /\(\(/)) {
-				# The text after each (( up to the next ), as the old M1 grep read it.
+				# The text after each (( up to the next ), as the grep this lint replaced read it.
 				s = t
 				while (match(s, /\(\(/)) {
 					s = substr(s, RSTART + 2)

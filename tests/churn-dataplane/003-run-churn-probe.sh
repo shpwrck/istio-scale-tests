@@ -14,7 +14,7 @@
 #       --source-context <mesh-a-ctx> --churn-rate 1
 # ci-dry-run: --source-context ci-dummy --churn-rate 5
 set -euo pipefail
-# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# A loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
 # both run). Self-reports an UNEXPECTED abort.
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
@@ -259,7 +259,7 @@ if [[ -n "${COEXEC_ISTIOD_REPLICAS:-}" && "$SOURCE_REPLICAS" != "$COEXEC_ISTIOD_
 	echo "warn: context $SOURCE_CTX has $SOURCE_REPLICAS Running istiod pods, expected pin COEXEC_ISTIOD_REPLICAS=$COEXEC_ISTIOD_REPLICAS" >&2
 fi
 
-# R4: the Istio version the members run, before any load or churn (inherited when 004
+# The Istio version the members run, before any load or churn (inherited when 004
 # runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
 # mismatch.
 ALL_CTXS_CSV="$SOURCE_CTX"
@@ -334,7 +334,7 @@ ISTIOD_DIR="$(mktemp -d)"
 PF_OK=0
 cleanup_all() {
 	if [[ -n "$DRIVER_PID" ]]; then kill "$DRIVER_PID" 2>/dev/null || true; wait "$DRIVER_PID" 2>/dev/null || true; fi
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	rm -rf "${ISTIOD_DIR:-}"
 	rm -f "${CHURN_LOG:-}"
@@ -431,7 +431,7 @@ run_churn_driver() {
 				--replicas="$replicas" >/dev/null 2>&1 &
 			scale_pids+=($!)
 		done
-		# Capture exit status for accounting (A4): non-zero on any kube-apiserver
+		# Capture exit status for accounting: non-zero on any kube-apiserver
 		# 429 / connection error / not-found / etc. Without this the TSV reports
 		# wc -l of the log and overstates actual churn at high rates.
 		exit_status=0
@@ -473,7 +473,7 @@ WINDOW_END_NS="$(now_ns)"
 # elapsed); otherwise the driver has finished its CHURN_RATE * DURATION ops
 # and is about to return on its own — `wait` lets it flush its final per-op
 # accounting write to $CHURN_LOG. Killing mid-`wait` on the scale fan-out
-# could otherwise bias churn_ops_attempted/succeeded low by up to one op (R2).
+# could otherwise bias churn_ops_attempted/succeeded low by up to one op.
 ELAPSED_NS=$(( WINDOW_END_NS - WINDOW_START_NS ))
 DURATION_NS=$(( DURATION * 1000000000 ))
 if [[ "$STATUS" == "FAILED" ]] || (( ELAPSED_NS < DURATION_NS )); then
@@ -521,7 +521,7 @@ if ((PF_OK)); then
 		"$(pre_metrics_csv)" "$(post_metrics_csv)")"
 fi
 
-# A4: churn-ops accounting. The driver log has one line per attempted op,
+# churn-ops accounting. The driver log has one line per attempted op,
 # each tab-prefixed with the exit status of the kubectl scale fan-out.
 CHURN_OPS_ATTEMPTED="$(wc -l < "$CHURN_LOG" 2>/dev/null || echo 0)"
 CHURN_OPS_ATTEMPTED="${CHURN_OPS_ATTEMPTED// /}"
@@ -536,7 +536,7 @@ CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 # An incomplete scrape (a pod's /metrics unreachable) undercounts the summed
 # counters / merged histograms, so the istiod-side deltas are not trustworthy.
 if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
-	# counter_delta (metrics.sh, R10): N/A with a warning when a counter is in neither
+	# counter_delta (metrics.sh): N/A with a warning when a counter is in neither
 	# scrape (renamed, never 0) or went backwards; one registered in the window counts from 0.
 	XDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")" \
 		"$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")" "pilot_xds_pushes on ${SOURCE_CTX}")
@@ -591,7 +591,7 @@ if [[ "$SCRAPE_INCOMPLETE" == "1" && "$STATUS" == "OK" ]]; then
 	STATUS="POISONED_SCRAPE"
 fi
 
-# A4: if the driver could not keep up (e.g. apiserver 429s), mark the row so
+# If the driver could not keep up (e.g. apiserver 429s), mark the row so
 # 005 filters it from numeric aggregation. Threshold matches the spec (<90%).
 # Skip this check when CHURN_RATE=0 (no ops are expected).
 if (( CHURN_RATE > 0 )) && (( CHURN_OPS_ATTEMPTED > 0 )); then
@@ -603,7 +603,7 @@ if (( CHURN_RATE > 0 )) && (( CHURN_OPS_ATTEMPTED > 0 )); then
 fi
 
 # Δp99: look up the matching baseline row in --baseline-file, by combo_id.
-# A3: gate on baseline status == "OK" (column 17). A baseline that ended in
+# Gate on baseline status == "OK" (column 17). A baseline that ended in
 # POISONED_RESTART / FAILED has malformed (or N/A) p99 and the resulting
 # delta would be nonsense even if NF >= 17 and $12 != "N/A".
 DELTA_P99="N/A"

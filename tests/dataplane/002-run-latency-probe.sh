@@ -288,7 +288,7 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-# A6: harness_sha (tests/lib/preamble.sh), as every sweep records it: a tree with
+# harness_sha (tests/lib/common.sh), as every sweep records it: a tree with
 # uncommitted changes reads <describe>-dirty.<8hex>.
 HARNESS_SHA="$(harness_sha)"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
@@ -310,7 +310,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
-# R4: the Istio version the members run, before any load (inherited when 003 runs this
+# The Istio version the members run, before any load (inherited when 003 runs this
 # probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
@@ -353,13 +353,17 @@ done
 
 PF_PIDS=()
 ISTIOD_DIR="$(mktemp -d)"
+tmp_tsv=""
+# Also on a SIGTERM the sweep forwards (sweep_step): bash runs the EXIT trap on a fatal
+# signal it does not trap and still dies of it (143). tmp_tsv sits next to the TSV.
 cleanup_all() {
 	local pid
-	for pid in "${PF_PIDS[@]}"; do
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
 	rm -rf "$ISTIOD_DIR"
+	rm -f "${tmp_tsv:-}"
 }
 trap cleanup_all EXIT
 
@@ -695,6 +699,7 @@ awk -F'\t' -v OFS='\t' -v r="$ISTIOD_RESTARTED" '
 	{ print }
 ' "$TSV_FILE" > "$tmp_tsv"
 mv "$tmp_tsv" "$TSV_FILE"
+tmp_tsv=""
 
 echo ""
 for i in "${!ALL_CTXS[@]}"; do

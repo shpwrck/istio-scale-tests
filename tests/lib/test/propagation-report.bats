@@ -37,7 +37,8 @@ fixture() {
 	fixture
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_success
-	assert_line "2,P1_local_wall,3,3,1000,1001,1001,1001,N/A,N/A,"
+	# The last column, n_attempted, is empty: the fixture records no ITERATIONS or REMOTES.
+	assert_line "2,P1_local_wall,3,3,1000,1001,1001,1001,N/A,N/A,,"
 	run "$REPORT" --results-dir "$RES" --format markdown
 	assert_output --partial "| P1 local xDS (wall) | 3 | 3 | 1000 | 1001 | 1001 |"
 	assert_output --partial "| 2 | 1001 (3) |"
@@ -64,8 +65,8 @@ fixture() {
 	fixture
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_success
-	assert_line "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket"
-	assert_line "2,P1_conv_p99,3,3,100,1000,400,100,N/A,N/A,500-1000"
+	assert_line "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket,n_attempted"
+	assert_line "2,P1_conv_p99,3,3,100,1000,400,100,N/A,N/A,500-1000,"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -c '[.rows[] | select(.mesh_size == 2) | {(.phase): .worst_bucket}] | add' <<<"$output")" = \
@@ -83,7 +84,7 @@ fixture() {
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
 }
 
-@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (R3, PL26)" {
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (PL26)" {
 	local d fmt
 	for d in a b; do
 		mkdir -p "${RES}/sweep-${d}"
@@ -120,7 +121,7 @@ fixture() {
 	[ -z "$stderr" ]
 }
 
-@test "005: a TSV written before R4 pooled with a live one reads mixed for the R4 keys, never live (B1)" {
+@test "005: a TSV written before the live-version keys pooled with a live one reads mixed for them, never live" {
 	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
 	{
 		echo "# SWEEP_RUN_ID=sold"
@@ -149,7 +150,7 @@ fixture() {
 	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "mixed:rmt=IstiodNotReady,unknown" ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format markdown
 	assert_output --partial "mixed:live,unknown"
-	# The new run alone reads live, and carries R2 in every format.
+	# The new run alone reads live, and carries the readiness keys in every format.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
 	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC]' <<<"$output")" = '["rmt=IstiodNotReady","60"]' ]
@@ -158,14 +159,14 @@ fixture() {
 		assert_output --partial "ISTIO_NOTREADY_AT_START"
 		assert_output --partial "rmt=IstiodNotReady"
 	done
-	# J13: the old run alone was never checked: unknown in every format, not absent.
+	# The old run alone was never checked: unknown in every format, not absent.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format json
 	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC, .ISTIO_VERSION_SOURCE]' <<<"$output")" = '["unknown","unknown","unknown"]' ]
 	for fmt in text csv markdown; do
 		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format "$fmt"
 		assert_output --regexp 'ISTIO_NOTREADY_AT_START[^A-Za-z0-9]*unknown'
 	done
-	# J10: --results-dir through a symlink (results/latest -> sweep-new), no trailing slash.
+	# --results-dir through a symlink (results/latest -> sweep-new), no trailing slash.
 	ln -s "${RES}/sweep-new" "${BATS_TEST_TMPDIR}/latest"
 	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
 	assert_success
@@ -184,7 +185,7 @@ p1rows() {
 	done
 }
 
-@test "PROP_ROW_AWK: P1 is one sample per (run_id, iteration), from its first counting row; P2 and P3 one per row (D1)" {
+@test "PROP_ROW_AWK: P1 is one sample per (run_id, iteration), from its first counting row; P2 and P3 one per row" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	{ echo "$HDR"; p1rows r1 4 10 b c d; p1rows r2 4 2 b c d; } > "${RES}/rows.tsv"
 	run awk -F'\t' "${PROP_ROW_AWK}"'
@@ -202,11 +203,11 @@ p1rows() {
 	assert_output 1
 }
 
-@test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor (D1, M1)" {
+@test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor" {
 	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
-	# P1 is one sample per iteration, so its n_total counts iterations too (M1).
+	# P1 is one sample per iteration, so its n_total counts iterations too.
 	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid, .p99_ms]}] | add' <<<"$output")" = \
 		'{"P1_local_wall":[10,10,null],"P1_conv_p50":[10,10,null],"P1_conv_p99":[10,10,null],"P2_discovery":[30,30,500],"P3_dataplane":[30,30,3000]}' ]
 	# The P1 mean is over the 10 iterations (1001..1010).
@@ -226,14 +227,14 @@ p1rows() {
 	assert_success
 }
 
-@test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them (M1)" {
+@test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	# Every remote row of iterations 2, 5 and 9 carries p1_overflow=1 (P1 is source-side).
 	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d \
 		| awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 2 || $3 == 5 || $3 == 9 { $15 = 1 } 1'; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
-	# A source overflow is a P1 histogram: it never drops the remote's P2/P3 (I6), even in
+	# A source overflow is a P1 histogram: it never drops the remote's P2/P3, even in
 	# this 19-column TSV, whose rows cannot otherwise be split by side.
 	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid]}] | add' <<<"$output")" = \
 		'{"P1_local_wall":[10,7],"P1_conv_p50":[10,7],"P1_conv_p99":[10,7],"P2_discovery":[30,30],"P3_dataplane":[30,30]}' ]

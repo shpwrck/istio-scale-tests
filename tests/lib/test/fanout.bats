@@ -41,14 +41,14 @@ ZERO="${FIXTURES}/istiod_zero_baseline.txt"
 	[ "$result" = "320" ]
 }
 
-@test "fanout_counter_sum: counter in no pod's scrape is unknown, not 0 (R10)" {
+@test "fanout_counter_sum: counter in no pod's scrape is unknown, not 0" {
 	result=$(fanout_counter_sum pilot_xds_pushes_renamed "$POD0" "$POD1")
 	[ "$result" = "unknown" ]
 	result=$(fanout_counter_by_label_sum pilot_xds_pushes_renamed type eds "$POD0" "$POD1")
 	[ "$result" = "unknown" ]
 }
 
-@test "fanout_counter_sum: every scrape failed (all files empty) is unscraped, not 0 (R10, PL29)" {
+@test "fanout_counter_sum: every scrape failed (all files empty) is unscraped, not 0 (PL29)" {
 	e1=$(mktemp); e2=$(mktemp)
 	result=$(fanout_counter_sum pilot_xds_pushes "$e1" "$e2")
 	r2=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "$e1" "$e2")
@@ -72,7 +72,7 @@ _idle_body() {
 	[ "$result" = "400" ]
 }
 
-# --- per-replica counters (istio D4) ------------------------------------------
+# --- per-replica counters ----------------------------------------------------
 
 @test "fanout_replica_counter: an idle replica among busy ones is a real 0, not renamed" {
 	idle="${BATS_TEST_TMPDIR}/idle.metrics"

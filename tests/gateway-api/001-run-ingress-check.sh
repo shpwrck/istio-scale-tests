@@ -126,7 +126,7 @@ SCENARIO_SET_ANNOTATION=mesh-verify-gwapi/scenario-set
 # endpoints for the backend: direct (any port but 15443: a pod address), remote-ewgw:15443 (the
 # workload member's east-west gateway) or none; "-" = not judged. Every expected 200 must carry
 # the workload's echo text. On O, a main or shared backend Service must exist exactly when the
-# status predicts a resolved Service-like backend there (S3's stub); the preflight reads it (M2).
+# status predicts a resolved Service-like backend there (S3's stub); the preflight reads it.
 # The chart (charts/mesh-verify-gateway-api/templates/_helpers.tpl) has the same ids, hosts,
 # routes and backends; tests/lib/test/gateway-api.bats checks that they agree.
 ST_OK="Accepted=True/ResolvedRefs=True"
@@ -491,7 +491,7 @@ kget() {
 # "<key>\t<value>" line per key: the filter's tab-separated fields in key order (no field is
 # empty), "absent" for NotFound, "unknown" for any other failure: never a false value for a query
 # that did not answer (PL39). A failed read also appends "<first key>\t<kubectl error, masked>"
-# to $PF_ERR, for the warnings and the stop on a member that answers nothing (U1).
+# to $PF_ERR, for the warnings and the stop on a member that answers nothing.
 pf() {
 	local keyspec="$1" ctx="$2" filter="$3" tmp rc=0 v k i=0
 	local -a pf_keys=() pf_fields=()
@@ -536,7 +536,7 @@ ECHO_FILTER='if (.items | length) == 0 then "absent\t-" else (.items[0]
 	| .args[]? | select(startswith("-text=")) | sub("^-text="; "")][0]) // "-")") end'
 CRD_FILTER='"\(.metadata.annotations["gateway.networking.k8s.io/bundle-version"] // "unversioned")/\(.metadata.annotations["gateway.networking.k8s.io/channel"] // "unknown-channel")"'
 NS_LABEL_FILTER='"istio-discovery=\(.metadata.labels["istio-discovery"] // "unset");istio.io/rev=\(.metadata.labels["istio.io/rev"] // "unset")"'
-# The test namespace: its labels, and the scenario set the chart stamped on it (R2).
+# The test namespace: its labels, and the scenario set the chart stamped on it.
 NS_FILTER="${NS_LABEL_FILTER}"' + "\t" + (.metadata.annotations["'"${SCENARIO_SET_ANNOTATION}"'"] // "unset")'
 GW_FILTER='"present\t" + (.metadata.annotations["'"${SCENARIO_SET_ANNOTATION}"'"] // "unset")'
 SIDECAR_FILTER='if (.items | length) == 0 then "no-pods" else ([.items[] | ((.spec.containers // []) + (.spec.initContainers // []))
@@ -596,11 +596,11 @@ preflight_member() {
 		pf shared_namespace "$ctx" "$NS_LABEL_FILTER" get namespace "$NS_SHARED"
 		pf shared_grants "$ctx" "$NAME_LIST_FILTER" -n "$NS_SHARED" get referencegrants.gateway.networking.k8s.io
 		# The backend Services the scenarios assume absent (or, S3's stub, present) on the other
-		# members: read directly, not inferred from a route status (M2).
+		# members: read directly, not inferred from a route status.
 		pf svc_main "$ctx" "$NAME_LIST_FILTER" -n "$NS" get svc
 		pf svc_shared "$ctx" "$NAME_LIST_FILTER" -n "$NS_SHARED" get svc
 		pf istiod_env "$ctx" "$ISTIOD_ENV_FILTER" -n istio-system get deploy -l "$ISTIOD_SELECTOR"
-		# The builds that ran (R1) and the pod fingerprints for restart detection (PL9).
+		# The builds that ran and the pod fingerprints for restart detection (PL9).
 		pf "istiod_image istiod_fp" "$ctx" "$(pod_filter discovery)" -n istio-system get pods -l "$ISTIOD_SELECTOR"
 		pf "ingress_image ingress_fp ingress_replicas ingress_pod" "$ctx" "$(pod_filter istio-proxy)" \
 			-n istio-system get pods -l "$INGRESS_SELECTOR"
@@ -645,7 +645,7 @@ for i in "${!CONTEXTS[@]}"; do
 done
 
 # A member that answered none of the reads (a mistyped context, an API server that cannot be
-# reached, no access) stops the run before anything is written, with kubectl's own words (U1).
+# reached, no access) stops the run before anything is written, with kubectl's own words.
 dead=()
 for i in "${!CONTEXTS[@]}"; do
 	ctx="${CONTEXTS[i]}"
@@ -672,14 +672,14 @@ for i in "${!CONTEXTS[@]}"; do
 	done <"${WORK}/pre-${i}.err"
 done
 
-# The Istio version the members run (R4, PL36): the suites' one reader, the active
+# The Istio version the members run (PL36): the suites' one reader, the active
 # IstioRevision's version on every member (unknown when unreadable or the Istio CR is not
 # settled), never the Istio CR's requested .spec.version (ISTIO_CR_VERSION[ctx] keeps that
 # for reference) nor an absent CR. A read-only check records it and never stops on it
 # (--no-stop warns instead); ISTIO_VERSION_PIN keeps config/versions.env's value.
 istio_version_resolve --no-stop "$CONTEXTS_CSV" 0 "${KUBECTL[@]}"
 
-# The deployed scenario set per member (R2): the chart's stamp on the test namespace and on the
+# The deployed scenario set per member: the chart's stamp on the test namespace and on the
 # Gateway. A member whose stamp differs runs other chart content than this script describes; its
 # rows say SCENARIO_SET_MISMATCH (every member's rows when it is the workload member, which
 # holds every backend). An unreadable stamp is recorded as unknown, not as a match: its rows say
@@ -690,11 +690,13 @@ set_mismatch_wl=0 set_unverified_wl=0
 for ctx in "${CONTEXTS[@]}"; do
 	a="${PRE[$ctx|scenario_set_ns]}" b="${PRE[$ctx|scenario_set_gw]}"
 	if [[ "$a" == "$b" ]]; then DEPLOYED_SET[$ctx]="$a"; else DEPLOYED_SET[$ctx]="namespace=${a};gateway=${b}"; fi
+	rows_of="its rows"
+	if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then rows_of="every member's rows"; fi
 	case "$a/$b" in
 	unknown/* | */unknown)
 		SET_UNVERIFIED[$ctx]=1
 		[[ "$ctx" != "$WORKLOAD_CTX" ]] || set_unverified_wl=1
-		warn "${ctx}: could not read the deployed scenario set (${DEPLOYED_SET[$ctx]}); $([[ "$ctx" == "$WORKLOAD_CTX" ]] && echo "every member's rows" || echo "its rows") say SCENARIO_SET_UNVERIFIED, and a deviation or a failure there is not judged"
+		warn "${ctx}: could not read the deployed scenario set (${DEPLOYED_SET[$ctx]}); ${rows_of} say SCENARIO_SET_UNVERIFIED, and a deviation or a failure there is not judged"
 		continue
 		;;
 	absent/* | */absent) continue ;;
@@ -702,7 +704,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	[[ "$a" != "$SCENARIO_SET" || "$b" != "$SCENARIO_SET" ]] || continue
 	SET_MISMATCH[$ctx]=1
 	[[ "$ctx" != "$WORKLOAD_CTX" ]] || set_mismatch_wl=1
-	warn "${ctx}: the deployed chart is not the version this script expects: scenario set ${DEPLOYED_SET[$ctx]}, expected ${SCENARIO_SET}. Sync the chart revision that matches this script (or run the script from the chart's revision); $([[ "$ctx" == "$WORKLOAD_CTX" ]] && echo "every member's rows" || echo "its rows") say SCENARIO_SET_MISMATCH."
+	warn "${ctx}: the deployed chart is not the version this script expects: scenario set ${DEPLOYED_SET[$ctx]}, expected ${SCENARIO_SET}. Sync the chart revision that matches this script (or run the script from the chart's revision); ${rows_of} say SCENARIO_SET_MISMATCH."
 done
 if ((set_mismatch_wl)); then
 	for ctx in "${CONTEXTS[@]}"; do SET_MISMATCH[$ctx]=1; done
@@ -942,7 +944,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	fi
 done
 
-# Data-plane gate (SC1). The control plane being settled does not mean every ingress already has
+# Data-plane gate. The control plane being settled does not mean every ingress already has
 # the workload member's east-west endpoint: that EDS push starts when the echo pod turns Ready
 # and can take seconds per member at scale. Each round requests S1 (classic) and S3 (HTTPRoute,
 # local stub Service), whose 200s depend on neither question, through every ingress, members in
@@ -1318,10 +1320,10 @@ if [[ -n "$HUB_CTX" ]]; then
 fi
 
 # Argo CD syncs the chart from its own revision, which can move independently of this script
-# (R2, PL39): say when it is not the commit the script runs from.
+# (PL39): say when it is not the commit the script runs from.
 HARNESS="$(harness_sha)"
 CHART_REVISION_VS_HARNESS=unknown
-# A6: a dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
+# A dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
 hc="${HARNESS%%-dirty*}"
 if [[ "$hc" =~ -g([0-9a-f]{7,})$ ]]; then
 	hc="${BASH_REMATCH[1]}"
@@ -1439,7 +1441,7 @@ for i in "${!CONTEXTS[@]}"; do
 		flags=() notes=()
 		dev=0 unk=0 invalid=0 taint=""
 
-		# The deployed chart is another scenario set than this script describes (R2).
+		# The deployed chart is another scenario set than this script describes.
 		if [[ -n "${SET_MISMATCH[$ctx]:-}" ]]; then
 			if ((set_mismatch_wl)); then
 				row_invalid SCENARIO_SET_MISMATCH "the chart deployed on the workload member ${WORKLOAD_CTX} (scenario set ${DEPLOYED_SET[$WORKLOAD_CTX]}) is not the version this script expects (${SCENARIO_SET})"
@@ -1467,7 +1469,7 @@ for i in "${!CONTEXTS[@]}"; do
 					;;
 				esac
 			fi
-			# The backend Service, read directly (M2): absent where the scenario asks "without a
+			# The backend Service, read directly: absent where the scenario asks "without a
 			# local Service", present for S3's stub. Not judged where the route itself is absent
 			# (C2) or for the remote namespace (its own check above).
 			if [[ "$bns" != remote && "$st_o" != absent ]]; then
@@ -1495,7 +1497,7 @@ for i in "${!CONTEXTS[@]}"; do
 		no-status | stale | *=missing*)
 			if ((WAIT_TIMED_OUT)); then flags+=(STATUS_TIMEOUT); else flags+=(STATUS_PENDING); fi
 			unk=1
-			# The route exists but istio had not processed it yet: its traffic is not judged (M1).
+			# The route exists but istio had not processed it yet: its traffic is not judged.
 			taint="the route had no current status from ${GW_CONTROLLER} (${obs_status})"
 			;;
 		unknown)
@@ -1709,7 +1711,7 @@ done
 # outputs must carry the same values, generated_at included.
 GENERATED_AT="$(date -u -Iseconds)"
 emit_preamble() {
-	local ctx
+	local ctx pc_pod
 	echo "# $1"
 	echo "# generated_at=${GENERATED_AT}"
 	echo "# GWAPI_SCHEMA=${GWAPI_SCHEMA}"
@@ -1767,7 +1769,9 @@ emit_preamble() {
 		echo "# ISTIOD_RESTARTED[${ctx}]=${ISTIOD_RESTARTED[$ctx]}"
 		echo "# INGRESS_RESTARTED[${ctx}]=${INGRESS_RESTARTED[$ctx]}"
 		echo "# INGRESS_REPLICAS[${ctx}]=${PRE[$ctx|ingress_replicas]}"
-		echo "# PROXY_CONFIG_POD[${ctx}]=$([[ "$PROXY_CONFIG_MODE" == istioctl* ]] && echo "${PC_POD[$ctx]}" || echo -)"
+		pc_pod="-"
+		if [[ "$PROXY_CONFIG_MODE" == istioctl* ]]; then pc_pod="${PC_POD[$ctx]}"; fi
+		echo "# PROXY_CONFIG_POD[${ctx}]=${pc_pod}"
 		echo "# ECHO_DEPLOYMENT[${ctx}]=${PRE[$ctx|echo]};sidecar=${PRE[$ctx|echo_sidecar]}"
 		echo "# ECHO_REMOTE_DEPLOYMENT[${ctx}]=${PRE[$ctx|echo_remote]};sidecar=${PRE[$ctx|echo_remote_sidecar]}"
 		echo "# ECHO_SHARED_DEPLOYMENT[${ctx}]=${PRE[$ctx|echo_shared]};sidecar=${PRE[$ctx|echo_shared_sidecar]}"
@@ -1948,7 +1952,7 @@ blocking_reason() {
 # traffic window: an HTTPRoute whose istio status starts with Accepted=True, or a classic
 # VirtualService that exists, both when the wait ended (before the traffic) and in the final read
 # (after it), with no STATUS_* flag on the row. Only then can a failure through that ingress be
-# the backend's (M1, F2): a route that reached the ingress late says nothing about the Service.
+# the backend's: a route that reached the ingress late says nothing about the Service.
 route_in_place() {
 	[[ "${R[$1|$2|row_status]}" != *STATUS_* ]] || return 1
 	in_place_status "${R[$1|$2|first_status]}" && in_place_status "${R[$1|$2|obs_status]}"
@@ -2009,7 +2013,7 @@ member_answer() {
 		printf 'unclear\t%s\n' "${id} failed through \`${ctx}\`, but its route there reads \`${R[$ctx|$id|obs_status]}\` after the traffic, not RefNotPermitted, so the 500 is not shown to be the missing ReferenceGrant's"
 		return 0
 	fi
-	# F3: "needed on the ingress member" only follows when the scenario works through the
+	# "needed on the ingress member" only follows when the scenario works through the
 	# workload member itself; else its backend is broken everywhere.
 	why="$(blocking_reason "$WORKLOAD_CTX" "$id")"
 	if [[ -n "$why" ]]; then
@@ -2266,14 +2270,15 @@ PRED_COUNTS="${n_match} MATCH$( ((n_ep_unread == 0)) || echo " (endpoints not re
 PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 {
 	echo "---"
-	# Frontmatter: every `# KEY=value` preamble line of the TSV (PL19), keys and values quoted.
+	# Frontmatter: every `# KEY=value` preamble line of the TSV (PL19), keys and values
+	# quoted and escaped (yaml_str).
 	while IFS= read -r line; do
 		[[ "$line" =~ $PREAMBLE_KV_RE ]] || continue
 		k="${BASH_REMATCH[1]}"
 		v="${BASH_REMATCH[2]}"
-		v="${v//\\/\\\\}"
-		v="${v//\"/\\\"}"
-		printf '"%s": "%s"\n' "$k" "$v"
+		yaml_str -v k "$k"
+		yaml_str -v v "$v"
+		printf '%s: %s\n' "$k" "$v"
 	done < <(awk '/^run_id\t/ { exit } { print }' "$TSV")
 	echo "---"
 	echo ""
@@ -2287,7 +2292,9 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo ""
 	for o in "${OTHERS[@]}"; do
 		echo "- HTTPRoute status on \`${o}\` for S2, whose Service exists only on the workload member: \`${R[$o|S2|obs_status]}\` (predicted \`${R[$o|S2|exp_status]}\`)."
-		echo "- Through \`${o}\`'s ingress, backend namespace \`${NS_REMOTE}\` $([[ "${PRE[$o|remote_namespace]}" == absent ]] && echo "absent there" || echo "state there: \`${PRE[$o|remote_namespace]}\`"): S7 HTTP \`${R[$o|S7|codes]}\`, status \`${R[$o|S7|obs_status]}\` (predicted \`${R[$o|S7|exp_status]}\`); S8 HTTP \`${R[$o|S8|codes]}\`, status \`${R[$o|S8|obs_status]}\`; S9 HTTP \`${R[$o|S9|codes]}\`. S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant expected there, no Service): HTTP \`${R[$o|S7b|codes]}\`, status \`${R[$o|S7b|obs_status]}\` (predicted \`${R[$o|S7b|exp_status]}\`)."
+		rn_state="state there: \`${PRE[$o|remote_namespace]}\`"
+		if [[ "${PRE[$o|remote_namespace]}" == absent ]]; then rn_state="absent there"; fi
+		echo "- Through \`${o}\`'s ingress, backend namespace \`${NS_REMOTE}\` ${rn_state}: S7 HTTP \`${R[$o|S7|codes]}\`, status \`${R[$o|S7|obs_status]}\` (predicted \`${R[$o|S7|exp_status]}\`); S8 HTTP \`${R[$o|S8|codes]}\`, status \`${R[$o|S8|obs_status]}\`; S9 HTTP \`${R[$o|S9|codes]}\`. S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant expected there, no Service): HTTP \`${R[$o|S7b|codes]}\`, status \`${R[$o|S7b|obs_status]}\` (predicted \`${R[$o|S7b|exp_status]}\`)."
 	done
 	echo "- Predictions: ${PRED_COUNTS}."
 	if [[ -f "${WORK}/argo.rows" ]]; then
@@ -2338,7 +2345,9 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo "| Member | istiod image | Ingress istio-proxy image | OSSM operator | Istio CR version | Ingress replicas (pod read by istioctl) | istiod / ingress restarted | Data-plane gate passed after (s) |"
 	echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
 	for ctx in "${CONTEXTS[@]}"; do
-		echo "| \`$(md_safe "$ctx")\` | \`$(md_safe "${PRE[$ctx|istiod_image]}")\` | \`$(md_safe "${PRE[$ctx|ingress_image]}")\` | ${PRE[$ctx|ossm_operator]} | ${PRE[$ctx|istio_cr_version]} | ${PRE[$ctx|ingress_replicas]} ($([[ "$PROXY_CONFIG_MODE" == istioctl* ]] && echo "\`${PC_POD[$ctx]}\`" || echo "not read")) | ${ISTIOD_RESTARTED[$ctx]} / ${INGRESS_RESTARTED[$ctx]} | ${DP_READY[$ctx]} |"
+		pc_cell="not read"
+		if [[ "$PROXY_CONFIG_MODE" == istioctl* ]]; then pc_cell="\`${PC_POD[$ctx]}\`"; fi
+		echo "| \`$(md_safe "$ctx")\` | \`$(md_safe "${PRE[$ctx|istiod_image]}")\` | \`$(md_safe "${PRE[$ctx|ingress_image]}")\` | ${PRE[$ctx|ossm_operator]} | ${PRE[$ctx|istio_cr_version]} | ${PRE[$ctx|ingress_replicas]} (${pc_cell}) | ${ISTIOD_RESTARTED[$ctx]} / ${INGRESS_RESTARTED[$ctx]} | ${DP_READY[$ctx]} |"
 	done
 	echo ""
 	echo "istiod env overrides (\`unset\` = the Istio default):"
@@ -2367,7 +2376,9 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 	echo "| Members | $(join_ticks "${CONTEXTS[@]}") (workload \`${WORKLOAD_CTX}\`) |"
 	echo "| Requests per cell | ${REQUESTS}, curl --max-time ${TIMEOUT_SEC} s (detail ${GWAPI_DETAIL_TIMEOUT_SEC} s) |"
-	echo "| Scenario set | \`${SCENARIO_SET}\` (chart revision \`${CHART_REVISION}\`, $([[ "$CHART_REVISION_VS_HARNESS" == differs ]] && echo "not the script's commit" || echo "vs the script's commit: ${CHART_REVISION_VS_HARNESS}")) |"
+	crv_note="vs the script's commit: ${CHART_REVISION_VS_HARNESS}"
+	if [[ "$CHART_REVISION_VS_HARNESS" == differs ]]; then crv_note="not the script's commit"; fi
+	echo "| Scenario set | \`${SCENARIO_SET}\` (chart revision \`${CHART_REVISION}\`, ${crv_note}) |"
 	echo "| Wait | ${WAIT_SEC} s of at most ${WAIT_TIMEOUT_SEC} s (timed out: ${WAIT_TIMED_OUT}); then the data-plane gate (${GATE_DESC}, ${GWAPI_GATE_PASSES} round(s) in a row) ${GATE_SEC} s; then settle ${GWAPI_SETTLE_SEC} s |"
 	echo "| Traffic | ${TRAFFIC_START} to ${TRAFFIC_END} (UTC); ${REPROBE_CELLS} cell(s) that did not answer (predicted 200, or S7 through the other members) re-probed ${REPROBE_DELAY} s later |"
 	echo "| Endpoint evidence | ${PROXY_CONFIG_MODE} |"

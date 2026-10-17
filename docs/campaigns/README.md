@@ -28,8 +28,12 @@ whose name holds a context is renamed in the copy the same way, without the angl
 (`istio-revert-mesh-a-ctx.json`); the renames are listed on stderr. It refuses (exit 1, file
 named) a file that still holds a context it was not told about; pass that one with
 `--context NAME`, and the hub with `--hub-context NAME`. Redact the whole sweep dir rather than
-one report, so the TSVs name every member. It never copies the raw `istiod-diag-*/NNN-*/`
-evidence.
+one report, so the TSVs name every member: a lone report (the scale envelope, a summary) can
+name members in prose only, so when the files' metadata names no member and no `--context`
+gives one, it refuses the whole run (exit 1, nothing written; `--no-contexts` for files that
+name no kube context at all). It never copies the raw `istiod-diag-*/NNN-*/` evidence, a
+tuning sweep's raw copies of the Istio CR (`istio-spec/`, `state/istio-before-*.json`: they
+hold the cluster's own name) or a sweep's `.sweep.lock`; each is named on stderr.
 
 A person reads the copy, file names included, before it is committed. The script has no
 pattern for:

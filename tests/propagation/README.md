@@ -58,6 +58,8 @@ then times three phases from that single t0:
 
 Every Running istiod pod is port-forwarded and scraped, so multi-replica istiod is
 measured as a whole. Removing the label drains the endpoint before the next iteration.
+Before each iteration's baseline, and again just before t0, every side's watcher must show no
+healthy canary endpoint; a side that still shows one is `NOT_DRAINED` for that iteration.
 
 ## Prerequisites
 
@@ -100,8 +102,8 @@ unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SI
 `sweep-outcome.txt` says when and by which signal); `4` it finished and wrote its reports, but
 some mesh sizes failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED`
 placeholder row), or the Istio version, active revision or generation of the Istio CR or its
-active IstioRevision changed during the sweep (read again before the reports). The last line on
-stderr says how many, by reason; `sweep-outcome.txt` and the end of `sweep-summary.md` keep the
+active IstioRevision changed during the sweep (read again before the reports), or that check
+failed. The last line on stderr says how many, by reason; `sweep-outcome.txt` and the end of `sweep-summary.md` keep the
 outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a
 not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do),
 so a report of a sweep that died, or still runs, or (with when and by which signal) was
@@ -112,7 +114,10 @@ the top-level README): when no sweep runs any more, run `007-cleanup.sh` on its 
 the sweep again into a new dir (a propagation sweep has no `--resume`). Proxies connected on
 another Istio version than their istiod at the start (`ISTIO_PROXY_VERSIONS`) are a note of the
 outcome, never a failure. Rows a probe wrote with a non-OK status are measurements, not failures:
-the report counts them in `n_total`.
+the report counts them in `n_total`. Its `n_attempted` column is what the probes were configured
+to run (each TSV's `ITERATIONS`: iterations for P1, times its remotes for P2 and P3, and what a
+failed mesh size's placeholder would have run); a mesh size that measured fewer iterations or
+rows than that warns in every format and on stderr.
 
 ## Run config (`--config FILE`)
 
@@ -169,27 +174,32 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   with a glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters.
 
 Row `status`: `OK`, `TIMEOUT_P1|P2|P3|ALL`, `RESTART` (istiod restarted mid-iteration),
-`DRAIN_TIMEOUT` (endpoint did not drain before the next iteration), `SCRAPE_INCOMPLETE`
-(a pod's `/metrics` was unreachable, or baseline scrape skew exceeded `FANOUT_MAX_SKEW_MS`),
-and the sweep placeholders `SETUP_FAILED` / `PROBE_FAILED` (written by `006` in the same 23
+`DRAIN_TIMEOUT` (endpoint did not drain within `PROPAGATION_DRAIN_TIMEOUT_SEC` after the
+iteration), `NOT_DRAINED` (before t0 a canary endpoint from an earlier iteration or run was
+still healthy on that side's watcher sidecar after a `PROPAGATION_DRAIN_TIMEOUT_SEC` wait, was
+healthy again just before t0, or its `/clusters` could not be read: its P3 would read about 0
+and a late removal push would shorten P2 or P1), `SCRAPE_INCOMPLETE` (a pod's `/metrics` was
+unreachable, or baseline scrape skew exceeded `FANOUT_MAX_SKEW_MS`), and the sweep placeholders `SETUP_FAILED` / `PROBE_FAILED` (written by `006` in the same 23
 columns as `002`'s rows, `tests/lib/propagation.sh`). `status` is the row's verdict over both
 sides; `p1_status` is the source side's alone and `remote_status` the remote's alone (`N/A` on a
 row with no remote), and only those decide. The report counts every row in `n_total`; P2 and P3
 (`n_valid`) come only from rows whose `remote_status` is `OK` (that remote's istiod not
-restarted or unknown, no P2 or P3 timeout, its sidecar drained, its scrape complete) and whose
+restarted or unknown, no P2 or P3 timeout, its sidecar drained after and before the iteration,
+its scrape complete) and whose
 `remote_scrape_skew_ms` is within `FANOUT_MAX_SKEW_MS`: the source's restart, P1 timeout or
 `+Inf` overflow never drops them. P1 and its
 `conv_p50`/`conv_p99` are measured on the source once per iteration, so they take one sample
 per iteration: their `n_total` and `n_valid` count iterations, not rows. Only the source side
 leaves an iteration's P1 out: its `p1_status` column (`TIMEOUT_P1`, `RESTART` or
-`RESTART_UNKNOWN` for the source istiod, `DRAIN_TIMEOUT` for the source sidecar,
-`SCRAPE_INCOMPLETE` for a source scrape that failed or skewed past `FANOUT_MAX_SKEW_MS`), a P1
+`RESTART_UNKNOWN` for the source istiod, `DRAIN_TIMEOUT` or `NOT_DRAINED` for the source
+sidecar, `SCRAPE_INCOMPLETE` for a source scrape that failed or skewed past `FANOUT_MAX_SKEW_MS`), a P1
 `+Inf` overflow, or `p1_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`. A remote that timed out or
 restarted drops its own P2/P3 row, never the iteration's P1. Older TSVs still report: one
 without `remote_status` (21 columns, or 19 before `p1_status`) drops P2/P3 for the row's
 `status`, `restarted` `1`/`unknown` or a high `scrape_skew_ms` (they cannot be split by
 side), never for `p1_overflow`; one without `p1_status` takes P1 from the iteration's first
-row with `status` `OK`, `restarted=0`, no overflow and a skew within the ceiling. P2 also drops rows
+row with `status` `OK`, `restarted=0`, no overflow and a skew within the ceiling. The report
+lists the column counts it read (`tsv_columns`) and warns when the inputs mix them. P2 also drops rows
 with `p2_dirty=1` (EDS pushed but P3 never went healthy on that remote). Averages are
 rounded to the nearest ms. The `P1 conv_p50`/`conv_p99` rows are histogram bucket
 bounds: text and markdown show bucket ranges with no average (`-`), so read `max` (the

@@ -1002,14 +1002,17 @@ T0+17:45 ([Fallback tiers](#fallback-tiers-b-and-a)).
   - `rosa-lb/`, with A0 and the pause state file;
   - any `istiod-diag-*` evidence, which stays out of git.
 - Write `docs/campaigns/<window-date>-rosa-validation.md` from `docs/campaigns/TEMPLATE.md`. Before
-  quoting anything, redact:
-  - context names (`<mesh-a-ctx>`);
-  - node names (`<node>`);
-  - LB hostnames (`<ew-lb-host>`);
-  - VPC and account ids (`<vpc-id>`, `<account>`);
-  - IPs.
+  quoting anything, write a redacted copy of each sweep dir with `tests/lib/redact-results.sh --out
+  /tmp/redacted tests/<suite>/results/sweep-<RUN_ID>` (add `--hub-context <hub-ctx>`; see
+  `docs/campaigns/README.md`) and quote from the copy. Its placeholders:
+  - context names: `<mesh-a-ctx>`, `<mesh-b-ctx>`, ... (the hub `<hub-a-ctx>`);
+  - API hosts and URLs: `<api-host>`; node names, LB hostnames and other cluster hosts: `<host>`;
+  - VPC, subnet and other AWS resource ids: `<vpc-id>`, `<subnet-id>`, ...; account ids:
+    `<account>`;
+  - IPs: `<ip>`.
 
-  Pod names are fine.
+  It has no pattern for a name the files' metadata does not hold (in prose or a log), nor for
+  other AWS ids, so read the copy, file names included, before you commit it. Pod names are fine.
 - Record in the campaign doc the tier, the proxy request override and the istiod sizing: 8Gi
   request, 16Gi limit, and the b/c note. They are part of the run's configuration, even though they
   only change scheduling and headroom. Record the smoke steps' go/no-go results too: they are tasks

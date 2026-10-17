@@ -112,8 +112,8 @@ unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SI
 (`--on-unreachable fail`, below; the reports are written); `4` it finished and wrote its reports,
 but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the
 Istio version, active revision or generation of the Istio CR or its active IstioRevision changed
-during the sweep (read again before the reports). The last line on stderr says how many, by
-reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown
+during the sweep (read again before the reports), or that check failed. The last line on stderr
+says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown
 summary keep the outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt`
 holds a not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what
 to do), so a report of a sweep that died, or still runs, or (with when and by which signal) was

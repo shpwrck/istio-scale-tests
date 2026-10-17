@@ -70,6 +70,7 @@ EXTRACTED_PATTERNS=(
 	'die() {'
 	'split_csv() {'
 	'split_contexts() {'
+	'ctx_file_safe() {'
 	'is_pos_int() {'
 	'is_nonneg_int() {'
 	'validate_scoping() {'
@@ -146,7 +147,7 @@ EXTRACTED_PATTERNS=(
 	'config_repo_path() {'
 	'config_snapshot() {'
 	'config_report_value() {'
-	# batch B: one run per report, merged preambles (config.sh)
+	# one run per report, merged preambles (config.sh)
 	'config_input_value() {'
 	'config_merged_preamble() {'
 	'config_check_multi_run() {'
@@ -190,22 +191,22 @@ EXTRACTED_PATTERNS=(
 	'cap_per_pod_requests() {'
 	'cap_parse_requested() {'
 	'cap_requested() {'
-	# batch B: bounded exec calls (common.sh)
+	# bounded exec calls (common.sh)
 	'timeout_cmd() {'
 	'require_timeout() {'
 	'run_timeout() {'
-	# batch B: counter window deltas (metrics.sh)
+	# counter window deltas (metrics.sh)
 	'counter_delta() {'
-	# batch B: sweep outcome (common.sh)
+	# sweep outcome (common.sh)
 	'sweep_outcome() {'
-	# batch B: which propagation rows count (propagation.sh, awk)
+	# which propagation rows count (propagation.sh, awk)
 	'function prop_drop_reason('
 	'function prop_p1_drop_reason('
 	'function prop_p1_first('
 	'function prop_p1_sample('
 	'function prop_p2_sample('
 	'function prop_p3_sample('
-	# batch B: the Istio version the mesh runs, read at the start and the end (preamble.sh)
+	# the Istio version the mesh runs, read at the start and the end (preamble.sh)
 	'istio_live_version() {'
 	'_istio_version_read_all() {'
 	'_istio_version_repro() {'
@@ -215,18 +216,18 @@ EXTRACTED_PATTERNS=(
 	'istio_version_recheck() {'
 	'istio_version_kv() {'
 	'istio_version_label() {'
-	# batch B M1/M5: the version check runs apart and fails closed; kubectl's why without klog
+	# the version check runs apart and fails closed; kubectl's why without klog
 	'_istio_version_isolated() {'
 	'_istio_version_resolve_live() {'
 	'_istio_version_recheck_emit() {'
 	'_istio_version_recheck_live() {'
 	'_istio_version_errline() {'
 	'_istio_version_hostkey() {'
-	# batch B: sweep outcome record (common.sh), multi-run refusal (config.sh)
+	# sweep outcome record (common.sh), multi-run refusal (config.sh)
 	'_sweep_outcome_by() {'
 	'_sweep_outcome_sweep_ids() {'
 	'sweep_outcome_recorded() {'
-	# carry-over A: not-finished record, latest attempts (common.sh); dirty hash, masked
+	# not-finished record, latest attempts (common.sh); dirty hash, masked
 	# errors, generations, proxy versions (preamble.sh); proxy summary (envelope.sh)
 	'sweep_outcome_unfinished() {'
 	'sweep_outcome_start() {'
@@ -245,14 +246,14 @@ EXTRACTED_PATTERNS=(
 	'_config_canon_dir() {'
 	'_config_distinct() {'
 	'_config_join_mixed() {'
-	# batch B: scrape completeness and per-replica counters (fanout.sh)
+	# scrape completeness and per-replica counters (fanout.sh)
 	'fanout_body_complete() {'
 	'fanout_counter_in_batch() {'
 	'fanout_replica_counter() {'
-	# carry-over B: the keyed-array arithmetic lint (lint-keyed-arith.sh)
+	# the keyed-array arithmetic lint (lint-keyed-arith.sh)
 	'lint_keyed_arith_file() {'
 	'lint_keyed_arith_paths() {'
-	# carry-over integration: placeholder rows and the legacy schema (propagation.sh); a
+	# placeholder rows and the legacy schema (propagation.sh); a
 	# sweep that ends before its outcome, escaped markdown cells, a fork-free size check
 	# (common.sh)
 	'prop_placeholder_row() {'
@@ -264,7 +265,27 @@ EXTRACTED_PATTERNS=(
 	'sweep_outcome_on_exit() {'
 	'md_cell() {'
 	'function md_cell('
+	'yaml_str() {'
 	'file_min_bytes() {'
+	# one run per sweep dir, signals reach a sweep's step, one harness
+	# per sweep and per report (common.sh); a controlplane cell's attempts and states
+	# (common.sh CP_CELL_AWK); the Istio CR generations a sweep reads again (preamble.sh)
+	'sweep_step() {'
+	'sweep_lock() {'
+	'_sweep_unlock() {'
+	'harness_sha_for_sweep() {'
+	'report_harness_sha() {'
+	'function cp_header('
+	'function cp_key('
+	'function cp_cell_row('
+	'function cp_cell_state('
+	'function cp_plan_load('
+	'istio_generation_causes() {'
+	'istio_generations_read() {'
+	'istio_generations_diff() {'
+	'istio_version_refresh() {'
+	'_istio_proxy_versions_run() {'
+	'_istio_proxy_versions_cleanup() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

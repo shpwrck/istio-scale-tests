@@ -305,7 +305,7 @@ _stub_cli() {
 	assert_failure
 }
 
-# --- timeout_cmd / run_timeout (R17) ---
+# --- timeout_cmd / run_timeout ---
 
 # _in_path <dir> <fn> [args...]: run a common.sh function with PATH set to <dir> alone.
 _in_path() {
@@ -314,7 +314,7 @@ _in_path() {
 	bash -c 'source "$ROOT/tests/lib/common.sh"; PATH="$1"; shift; "$@"' _ "$d" "$@"
 }
 
-@test "timeout_cmd / run_timeout: timeout, else gtimeout (macOS coreutils), else exit 127 with the install hint (R17)" {
+@test "timeout_cmd / run_timeout: timeout, else gtimeout (macOS coreutils), else exit 127 with the install hint" {
 	local d="${BATS_TEST_TMPDIR}/bin"
 	mkdir -p "$d"
 	printf '#!/bin/sh\necho "gtimeout $*"\n' > "${d}/gtimeout"
@@ -339,7 +339,7 @@ _in_path() {
 	[[ "$stderr" == *"On macOS: brew install coreutils"* ]]
 }
 
-# --- sweep_outcome (R19) ---
+# --- sweep_outcome ---
 
 @test "sweep_outcome: all ran is exit 0 on stdout; failed cells are counted by reason on stderr, exit 4" {
 	run --separate-stderr sweep_outcome 6
@@ -362,7 +362,7 @@ _in_path() {
 	[ -z "$stderr" ]
 }
 
-@test "sweep_outcome: SKIPPED_* cells are skipped on purpose, not failures; --unit and --where name the caller's own (C2, C4)" {
+@test "sweep_outcome: SKIPPED_* cells are skipped on purpose, not failures; --unit and --where name the caller's own" {
 	run --separate-stderr sweep_outcome 6 SKIPPED_MEM_GUARD SKIPPED_SERIES_STOPPED SKIPPED_SERIES_STOPPED
 	assert_success
 	assert_output "3 of 6 cells were skipped on purpose, not failed: SKIPPED_MEM_GUARD x1, SKIPPED_SERIES_STOPPED x2."
@@ -378,7 +378,7 @@ _in_path() {
 	assert_output "All 3 passes ran (their rows' own statuses are in the report)."
 }
 
-@test "sweep_outcome: --problem fails a sweep whose cells ran, --note does not; --record and --md keep the outcome with the results (A6, C3)" {
+@test "sweep_outcome: --problem fails a sweep whose cells ran, --note does not; --record and --md keep the outcome with the results" {
 	local d="${BATS_TEST_TMPDIR}/sweep" md
 	mkdir -p "$d"
 	md="${d}/sweep-x.md"
@@ -406,7 +406,7 @@ _in_path() {
 	grep -qx -- '- The sweep stopped early; it exits 1.' "$md"
 }
 
-@test "sweep_outcome under set -euo pipefail: FAILED, SKIPPED and their tallies, and with every list empty (X1)" {
+@test "sweep_outcome under set -euo pipefail: FAILED, SKIPPED and their tallies, and with every list empty" {
 	local d="${BATS_TEST_TMPDIR}/setu"
 	mkdir -p "$d"
 	run --separate-stderr bash -c 'set -euo pipefail; ROOT="$1"; source "$1/tests/lib/common.sh"
@@ -426,7 +426,7 @@ _in_path() {
 	grep -qx 'SKIPPED=0' "${d}/sweep-outcome.txt"
 }
 
-@test "sweep_outcome --md more than once: every existing file gets the outcome, a missing one is skipped (R1)" {
+@test "sweep_outcome --md more than once: every existing file gets the outcome, a missing one is skipped" {
 	local d="${BATS_TEST_TMPDIR}/mds" f
 	mkdir -p "$d"
 	echo "# summary" > "${d}/sweep-x.md"
@@ -444,7 +444,7 @@ _in_path() {
 	grep -q -- '--md "$MD_FILE" --md "$ENVELOPE_FILE"' "${ROOT}/tests/controlplane/003-run-sweep.sh"
 }
 
-@test "sweep_outcome record: RUN_ID, HARNESS_SHA and why it stopped; sweep_outcome_recorded repeats it for a re-generated report (X3)" {
+@test "sweep_outcome record: RUN_ID, HARNESS_SHA and why it stopped; sweep_outcome_recorded repeats it for a re-generated report" {
 	local d="${BATS_TEST_TMPDIR}/rec"
 	mkdir -p "$d"
 	harness_sha() { echo abc1234; }
@@ -457,12 +457,12 @@ _in_path() {
 	grep -qx 'STOP_REASON=the reachability gate found an unreachable remote' "${d}/sweep-outcome.txt"
 	echo 'PROBLEM=the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"' >> "${d}/sweep-outcome.txt"
 	run sweep_outcome_recorded "$d" text
-	assert_line "SWEEP OUTCOME (recorded in sweep-outcome.txt by run 20261016T100000Z-1, exit 3):"
+	assert_line "SWEEP OUTCOME (recorded in sweep-outcome.txt by run 20261016T100000Z-1, exit 3): STOPPED"
 	assert_line '  error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"'
 	assert_line "  warning: istiod/CNI not ready at the end of the sweep, same Istio version (a: its state is IstioCNINotHealthy)"
 	assert_line "  stopped early: the reachability gate found an unreachable remote"
 	run sweep_outcome_recorded "$d" md
-	assert_line '> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `20261016T100000Z-1`, exit 3):'
+	assert_line '> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `20261016T100000Z-1`, exit 3): **stopped**'
 	assert_line '> - error: the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"'
 	run sweep_outcome_recorded "$d" json
 	[ "$(jq -c '[.exit, .run_id, .problems[0], (.notes | length), .stop_reason]' <<<"$output")" = \
@@ -481,16 +481,16 @@ _in_path() {
 	assert_output ""
 }
 
-@test "sweep_outcome_recorded (Y5, Y9): failed cells, the record's run (warned when another), csv comment lines; the record's HARNESS_SHA is the sweep's" {
+@test "sweep_outcome_recorded: failed cells, the record's run (warned when another), csv comment lines; the record's HARNESS_SHA is the sweep's" {
 	local d="${BATS_TEST_TMPDIR}/sweep-20261016T100000Z-2"
 	mkdir -p "$d"
 	harness_sha() { echo live-tree; }
-	# Y9: the record carries the HARNESS_SHA the sweep's TSVs record, not a fresh read.
+	# The record carries the HARNESS_SHA the sweep's TSVs record, not a fresh read.
 	HARNESS_SHA=abc1234 run --separate-stderr sweep_outcome --run-id 20261016T100000Z-2 --record "$d" \
 		--note "istiod or IstioCNI was not ready at the end of the sweep" 5 PROBE_FAILED SETUP_FAILED PROBE_FAILED
 	assert_failure 4
 	grep -qx 'HARNESS_SHA=abc1234' "${d}/sweep-outcome.txt"
-	# Y5: exit 4 is shown with the cells that failed, not only the note under it.
+	# Exit 4 is shown with the cells that failed, not only the note under it.
 	run --separate-stderr sweep_outcome_recorded "$d" text
 	assert_line --index 0 "SWEEP OUTCOME (recorded in sweep-outcome.txt by run 20261016T100000Z-2, exit 4):"
 	assert_line --index 1 "  error: 3 of 5 cells failed: PROBE_FAILED x2, SETUP_FAILED x1"
@@ -523,7 +523,7 @@ _in_path() {
 	assert_output ""
 }
 
-@test "sweep_outcome --info (K6): a fact, not a caveat: note: on stdout, INFO= in the record, note: in every re-generated report" {
+@test "sweep_outcome --info: a fact, not a caveat: note: on stdout, INFO= in the record, note: in every re-generated report" {
 	local d="${BATS_TEST_TMPDIR}/sweep-r6"
 	mkdir -p "$d"
 	echo "# r" > "${d}/r.md"
@@ -544,14 +544,14 @@ _in_path() {
 	assert_line '# SWEEP_OUTCOME_INFO=every member was ready'
 	run sweep_outcome_recorded "$d" json
 	[ "$(jq -c '[.notes, .info]' <<<"$output")" = '[[],["every member was ready"]]' ]
-	# A record without INFO lines (every record before K6): an empty list.
+	# A record without INFO lines (every record of an older harness): an empty list.
 	sed -i.bak '/^INFO=/d' "${d}/sweep-outcome.txt" && rm -f "${d}/sweep-outcome.txt.bak"
 	run sweep_outcome_recorded "$d" json
 	[ "$(jq -c '.info' <<<"$output")" = '[]' ]
 }
 
 
-@test "sweep_outcome --uncounted (P2): TOTAL, FAILED and SKIPPED unknown; an unfinished --resume (P4) shows the record before it, from sweep-outcome.prev.txt" {
+@test "sweep_outcome --uncounted: TOTAL, FAILED and SKIPPED unknown; an unfinished --resume shows the record before it, from sweep-outcome.prev.txt" {
 	local d="${BATS_TEST_TMPDIR}/sweep-p2"
 	mkdir -p "$d"
 	run --separate-stderr sweep_outcome --uncounted "awk: simulated" --run-id p2 --record "$d" 3
@@ -567,7 +567,7 @@ _in_path() {
 	assert_line '# SWEEP_OUTCOME_FAILED=unknown'
 	run sweep_outcome_recorded "$d" text
 	refute_output --partial "cells failed"
-	# P4: a --resume moved the record and has not written its own (it died, or still runs):
+	# A --resume moved the record and has not written its own (it died, or still runs):
 	# every format says so and shows the earlier record; the sweep's own reports, which run
 	# just before its outcome is written, do not.
 	mv "${d}/sweep-outcome.txt" "${d}/sweep-outcome.prev.txt"
@@ -590,7 +590,7 @@ _in_path() {
 	run sweep_outcome_recorded "$d" text
 	assert_line --index 1 "  warning: the last --resume of this sweep has not finished (it died, or still runs; if it died, run the same --resume again): this is the outcome before it, from sweep-outcome.prev.txt"
 }
-@test "sweep_outcome_recorded (J6): the record matches its TSVs' sweep-level id, so a renamed sweep dir is still its sweep" {
+@test "sweep_outcome_recorded: the record matches its TSVs' sweep-level id, so a renamed sweep dir is still its sweep" {
 	local d="${BATS_TEST_TMPDIR}/sweep-june-a" e="${BATS_TEST_TMPDIR}/sweep-june-b"
 	mkdir -p "$d/sub" "$e"
 	# Propagation: every probe TSV names the sweep (SWEEP_RUN_ID) next to its own RUN_ID.
@@ -621,4 +621,58 @@ _in_path() {
 	printf '# RUN_ID=r9\ntimestamp\tx\n' > "$d/controlplane-r2.tsv"
 	MULTI_RUN_N=1 MULTI_RUN_IDS=sweep-june-a run --separate-stderr sweep_outcome_recorded "$d" json
 	[ "$(jq -r '.report_run_id' <<<"$output")" = r9 ]
+}
+
+# --- harness_sha: the harness a run records ---------------------------------------
+
+@test "harness_sha names a dirty tree's uncommitted content as -dirty.<8hex>: the same for the same changes, staged or not; another for other changes; untracked files count, ignored ones do not" {
+	local r="${BATS_TEST_TMPDIR}/repo" clean a b c
+	mkdir -p "$r"
+	git -C "$r" init -q
+	printf 'one\n' > "$r/f"
+	printf '*.log\n' > "$r/.gitignore"
+	git -C "$r" add f .gitignore
+	git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
+	clean="$(ROOT="$r" harness_sha)"
+	[[ "$clean" =~ ^[0-9a-f]{7}$ ]]
+	: > "$r/x.log"
+	[ "$(ROOT="$r" harness_sha)" = "$clean" ]
+	printf 'two\n' > "$r/f"
+	a="$(ROOT="$r" harness_sha)"
+	[[ "$a" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
+	[ "$(ROOT="$r" harness_sha)" = "$a" ]
+	git -C "$r" add f
+	[ "$(ROOT="$r" harness_sha)" = "$a" ]
+	printf 'three\n' > "$r/f"
+	b="$(ROOT="$r" harness_sha)"
+	[[ "$b" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
+	[ "$b" != "$a" ]
+	git -C "$r" checkout -q -- f 2>/dev/null || true
+	git -C "$r" reset -q --hard
+	[ "$(ROOT="$r" harness_sha)" = "$clean" ]
+	# An untracked file (which git describe --dirty would not see) makes it dirty; its content counts.
+	printf 'u1\n' > "$r/new"
+	c="$(ROOT="$r" harness_sha)"
+	[[ "$c" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
+	printf 'u2\n' > "$r/new"
+	[ "$(ROOT="$r" harness_sha)" != "$c" ]
+	# Readers keep the -dirty substring (PL2): the gateway-api check strips it to compare commits.
+	grep -q 'hc="${HARNESS%%-dirty\*}"' "${ROOT}/tests/gateway-api/001-run-ingress-check.sh"
+}
+
+@test "harness_sha is the only place that runs git describe; no script records a bare -dirty" {
+	# Every script that could record provenance (the suites, the libs, the Terraform helpers).
+	local -a files=()
+	local hits
+	mapfile -t files < <(find "${ROOT}/tests" "${ROOT}/terraform" -name '*.sh' -not -path '*/bats-*' -not -path '*/tests/lib/test/*')
+	[ "${#files[@]}" -gt 20 ]
+	# A command substitution that runs it, outside harness_sha (tests/lib/common.sh).
+	hits="$(grep -nE '\$\(git[^)]*describe' "${files[@]}" | grep -v '/tests/lib/common\.sh:' || true)"
+	[ -z "$hits" ] || { echo "$hits"; false; }
+	hits="$(grep -nE 'HARNESS(_SHA)?="?\$\(git' "${files[@]}" || true)"
+	[ -z "$hits" ] || { echo "$hits"; false; }
+	# The check fires on a script that does it (the line harness_sha replaced).
+	printf '%s\n' 'HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"' > "${BATS_TEST_TMPDIR}/old.sh"
+	grep -qE '\$\(git[^)]*describe' "${BATS_TEST_TMPDIR}/old.sh"
+	grep -qE 'HARNESS(_SHA)?="?\$\(git' "${BATS_TEST_TMPDIR}/old.sh"
 }

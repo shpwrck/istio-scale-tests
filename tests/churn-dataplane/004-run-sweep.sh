@@ -11,7 +11,7 @@
 # (002 exit 3) records REMOTE_UNREACHABLE rows for its combo and ends the sweep
 # after that mesh size's cleanup; the reports still run and the sweep exits 3. A
 # combo whose setup, reset or probe failed gets its failed rows and the reports
-# still run; the sweep then exits 4 (R19).
+# still run; the sweep then exits 4.
 #
 # Usage:
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # Report the failing line on an unexpected abort. Per-combo failures are handled
 # below and recorded as row statuses.
-# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
 # aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
@@ -126,11 +126,12 @@ Environment:
   SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
   COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
-  COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_SETUP_NS_WAIT_SEC, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
-  CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003), REACH_ON_UNREACHABLE,
-  REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_DETAIL_TIMEOUT_SEC,
-  REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002). COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir;
-  relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
+  COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_SETUP_NS_WAIT_SEC, CHURN_DEPLOYMENT_COUNT,
+  CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003),
+  REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
+  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
+  COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir; relative to the
+  repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
   001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
   them, and the flags that set them, before the first setup, --dry-run included.
 
@@ -143,11 +144,14 @@ Exit codes:
   3  --on-unreachable fail stopped the sweep (the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (setup, churn-target
      reset or a probe exited non-zero; stderr ends with "N of M cells failed" by
-     reason) or the Istio version or active revision changed during the sweep (read
-     again at its end); the outcome is also in sweep-outcome.txt and the markdown report
+     reason), or the Istio version, the active revision or the generation of the Istio
+     CR or its active IstioRevision changed during the sweep (read again at its end),
+     or that end-of-sweep check failed; the outcome is also in sweep-outcome.txt and
+     the markdown report
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
-     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to
-     the sweep's process alone waits for its current command (signal its process group)
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A SIGTERM
+     sent to the sweep's process alone reaches the step that runs (001, 002, 003, 006) at
+     once; only a settle wait finishes first
 EOF
 }
 
@@ -295,7 +299,9 @@ fi
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${RUN_ID}"
 TSV_FILE="${SWEEP_DIR}/churn-dataplane-${RUN_ID}.tsv"
-HARNESS_SHA="$(harness_sha)"
+# The harness, once for the whole sweep: its steps record this value (harness_sha_for_sweep
+# exports it), and its own results under the output dir do not count.
+harness_sha_for_sweep "$OUTPUT_DIR"
 
 echo "=========================================="
 echo "  churn-dataplane co-exec sweep"
@@ -325,7 +331,7 @@ else
 	KUBECTL=(kubectl) # placeholder for the dry-run plan only
 fi
 
-# R4: the Istio version every member runs, read once before the first setup and
+# The Istio version every member runs, read once before the first setup and
 # exported, so 001, 002, 003 and this preamble record it (ISTIO_VERSION_CHECK=fail stops
 # here on a mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" "${KUBECTL[@]}"
@@ -350,11 +356,11 @@ fi
 if ! ((DRY_RUN)); then
 	mkdir -p "$SWEEP_DIR"
 	config_snapshot "$SWEEP_DIR" "$RUN_ID"
-	# I5: a sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
+	# A sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
 	# that record: stopped with its reason, or interrupted (sweep_outcome_on_exit). Set before
 	# sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
 	trap 'sweep_outcome_on_exit "$?" || true' EXIT
-	# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+	# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
 	# so the reports of a sweep that died say so.
 	sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a churn-dataplane sweep has no --resume); the rows in this dir cover only the cells it finished"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
@@ -465,7 +471,7 @@ COMBO_INDEX=0
 # Set when a baseline exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
 # after this mesh size's cleanup, the reports still run, and the sweep exits 3.
 REACH_GATE_STOP=0
-# One reason per cell (combo) whose setup, reset or probe failed (R19).
+# One reason per cell (combo) whose setup, reset or probe failed.
 FAILED_CELLS=()
 ms_done=0
 for ms in "${MESH_SIZES[@]}"; do
@@ -503,7 +509,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		echo "--- setup (once per mesh-size) ---"
 		# On setup failure: record SETUP_FAILED rows for every (rate, rep) combo of this
 		# mesh-size, clean up, settle and move on.
-		if ! "$SCRIPT_DIR/001-setup-coexec-test.sh" "${setup_args[@]}"; then
+		if ! sweep_step "$SCRIPT_DIR/001-setup-coexec-test.sh" "${setup_args[@]}"; then
 			echo "warn: [mesh-size $ms] setup failed; recording SETUP_FAILED rows for all rates of this mesh-size and continuing" >&2
 			for cr in "${CHURN_RATES[@]}"; do
 				for ((rep = 1; rep <= REPETITIONS; rep++)); do
@@ -513,7 +519,7 @@ for ms in "${MESH_SIZES[@]}"; do
 					FAILED_CELLS+=(SETUP_FAILED)
 				done
 			done
-			"$SCRIPT_DIR/006-cleanup.sh" --contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC" || \
+			sweep_step "$SCRIPT_DIR/006-cleanup.sh" --contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC" || \
 				echo "warn: cleanup after setup failure also reported failure for mesh-size $ms" >&2
 			if (( COMBO_INDEX < MATRIX_SIZE )); then sleep "$INTER_COMBO_SETTLE_SEC"; fi
 			continue
@@ -605,7 +611,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		# Exit 3 is the reachability gate (--on-unreachable fail): REMOTE_UNREACHABLE
 		# rows for this combo, then leave both loops so the mesh size is cleaned up.
 		baseline_rc=0
-		"$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}" || baseline_rc=$?
+		sweep_step "$SCRIPT_DIR/002-run-baseline-probe.sh" "${baseline_args[@]}" || baseline_rc=$?
 		if ((baseline_rc == REACH_EXIT_CODE)); then
 			echo "STOPPING SWEEP: [combo $COMBO_INDEX/$MATRIX_SIZE] $COMBO_ID stopped on an unreachable remote (--on-unreachable fail); recording REMOTE_UNREACHABLE rows, cleaning up this mesh size, skipping the rest, then writing the reports" >&2
 			emit_failed_rows REMOTE_UNREACHABLE "$COMBO_ID" "$ms" "$cr"
@@ -620,7 +626,7 @@ for ms in "${MESH_SIZES[@]}"; do
 
 		echo "--- churn phase ---"
 		# A failed churn phase records one PROBE_FAILED churn row (the baseline row exists).
-		if ! "$SCRIPT_DIR/003-run-churn-probe.sh" "${churn_args[@]}"; then
+		if ! sweep_step "$SCRIPT_DIR/003-run-churn-probe.sh" "${churn_args[@]}"; then
 			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] churn probe failed for $COMBO_ID; recording PROBE_FAILED row and continuing" >&2
 			emit_cd_row PROBE_FAILED "$COMBO_ID" "$ms" "$cr" "churn"
 			FAILED_CELLS+=(PROBE_FAILED)
@@ -637,7 +643,7 @@ for ms in "${MESH_SIZES[@]}"; do
 	else
 		echo "--- cleanup (once per mesh-size) ---"
 		cleanup_args=(--contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC")
-		"$SCRIPT_DIR/006-cleanup.sh" "${cleanup_args[@]}" || {
+		sweep_step "$SCRIPT_DIR/006-cleanup.sh" "${cleanup_args[@]}" || {
 			echo "warn: cleanup reported failure for mesh-size $ms; recording CLEANUP_TIMEOUT row" >&2
 			# combo_id "ms<N>-cleanup"; 005 ignores phase=cleanup rows when bucketing.
 			emit_cleanup_timeout_row "ms${ms}-cleanup" "$ms" "0"
@@ -663,10 +669,10 @@ fi
 
 echo "=========================================="
 echo "Sweep finished: $TSV_FILE"
-# A6: the Istio version again, after the last window and before the reports (read-only).
+# The Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# A3: the outcome is written after the reports: they say so (the markdown gets a line
+# The outcome is written after the reports: they say so (the markdown gets a line
 # that sweep_outcome --md replaces).
 export _SWEEP_OUTCOME_PENDING=1
 echo "Running 005-report-results.sh..."
@@ -680,8 +686,8 @@ CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# R19: the reports are written; now say how many cells failed (also in
-# sweep-outcome.txt and the markdown summary, C3). Exit 3 (the reach gate stopped the
+# The reports are written; now say how many cells failed (also in
+# sweep-outcome.txt and the markdown summary). Exit 3 (the reach gate stopped the
 # sweep) wins over 4 (some cells failed, or the Istio version changed under the sweep).
 outcome_rc=0 stop_args=()
 ((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE" --stop-reason "the reachability gate (--on-unreachable fail) found an unreachable remote; later mesh sizes did not run")

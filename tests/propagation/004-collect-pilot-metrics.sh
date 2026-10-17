@@ -143,7 +143,7 @@ declare -A CTX_PORTS=() CTX_PODS=()
 
 cleanup() {
 	local pid
-	for pid in "${PF_PIDS[@]}"; do
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done

@@ -58,7 +58,7 @@ CHART="${CP}/chart"
 	[ "$(mem_guard_verdict 1800 3072 70)" = ok ]
 	[ "$(mem_guard_verdict 3400 3072 70)" = stop ]
 	[ "$(mem_guard_verdict 300 3072 70)" = ok ]
-	# The L2b proof setting (5%) stops even the first step at current usage.
+	# A 5% setting stops even the first step at current usage.
 	[ "$(mem_guard_verdict 300 3072 5)" = stop ]
 	[ "$(mem_guard_verdict 300 unknown 70)" = unknown ]
 	[ "$(mem_guard_verdict 300 0 70)" = unknown ]
@@ -454,7 +454,7 @@ kinds() {
 
 @test "mem_guard_project_abs: (intercept + per-1000 x Services) x burst factor" {
 	# 4000 Services on an east-west gateway: (10 + 145 x 4) x 2.0 = 1180 Mi, above 70% of 1Gi
-	# (the X1 first step that the relative projection, ratio 1, let through).
+	# (the first step, which a projection relative to current usage, ratio 1, let through).
 	[ "$(mem_guard_project_abs 4000 145 10 2.0)" = 1180 ]
 	[ "$(mem_guard_verdict 1180 1024 70)" = stop ]
 	[ "$(mem_guard_project_abs 6000 91 10 1.2)" = 667 ]
@@ -526,14 +526,14 @@ kinds() {
 @test "003 live growth run against an empty kubeconfig: RETIRE_FAILED row, exit 1 (BACKLOG 9.3)" {
 	command -v helm >/dev/null || skip "helm not installed"
 	out="${BATS_TEST_TMPDIR}/res"
-	# ISTIO_VERSION_CHECK=warn: no Istio CR answers either (R4); the run records unknown.
+	# ISTIO_VERSION_CHECK=warn: no Istio CR answers either; the run records unknown.
 	ISTIO_VERSION_CHECK=warn CONTROLPLANE_RETIRE_ATTEMPTS=1 CONTROLPLANE_RETIRE_BACKOFF_S=0 METRICS_READY_TIMEOUT=0 KUBECONFIG=/dev/null \
 		run timeout 300 "${CP}/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --services-per-namespaces 1 \
 		--namespace-counts 2 --sidecar-scopings namespace --workload-mode config-only --settle 0 --probe-settle 0 \
 		--output-dir "$out"
 	assert_failure 1
 	assert_output --partial "ERROR: the sweep stopped early: series"
-	# A stop is exit 1 even with failed cells, and the count line says so: 1 outranks 4 (R19).
+	# A stop is exit 1 even with failed cells, and the count line says so: 1 outranks 4.
 	assert_output --partial "the sweep also stopped early, so it exits 1, not 4."
 	refute_output --partial "exit 4"
 	tsv="$(find "$out" -name 'controlplane-*.tsv')"
@@ -610,7 +610,7 @@ EOF
 	assert_failure
 	assert_output --partial "--parts workloads is for the legacy layout"
 }
-@test "003 refuses SCALE_SIZING_MODE=auto in every mode, before any step and under --dry-run; 001 alone keeps it (R16)" {
+@test "003 refuses SCALE_SIZING_MODE=auto in every mode, before any step and under --dry-run; 001 alone keeps it" {
 	local extra f
 	for extra in "" "--services-per-namespaces 1"; do
 		# shellcheck disable=SC2086  # extra is empty or two words
@@ -635,7 +635,7 @@ EOF
 	assert_output --partial "Sizing mode:     auto (capacity-derived SERVICE_COUNT)"
 }
 
-@test "003 without timeout or gtimeout: a live run stops at startup with the install hint, before any kubectl call; --dry-run runs (R17)" {
+@test "003 without timeout or gtimeout: a live run stops at startup with the install hint, before any kubectl call; --dry-run runs" {
 	# A PATH with every tool but timeout and gtimeout, and a kubectl that logs its calls.
 	local d="${BATS_TEST_TMPDIR}/path" p f n
 	mkdir -p "$d"

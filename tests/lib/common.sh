@@ -6,13 +6,17 @@
 #
 # Exposes:
 #   die <msg>                         -> exit 1 with stderr message (and keep <msg> as the
-#                                        stop reason sweep_outcome_on_exit records, I5)
+#                                        stop reason sweep_outcome_on_exit records)
 #   split_csv <csv> <out_arrayname>   -> trim+split CSV into named array; empty items
 #                                        (",", "a,,b", "a, ") are dropped; always returns 0
 #   split_contexts <csv> <out_arrayname> <what> [<source_ctx>]
 #                                     -> split_csv for a list of mesh members; die naming
 #                                        <what> (the flag or variable) when a member is
 #                                        listed twice, or equals <source_ctx> when given
+#   ctx_file_safe <name> [<max>]      -> the file-name form of a context name: each byte
+#                                        outside A-Za-z0-9._- as _ (in every locale), at
+#                                        most <max> chars (CTX_FILE_NAME_MAX: the cut used
+#                                        inside folder names)
 #   is_pos_int <val>                  -> return 0 if val is a positive integer
 #   is_nonneg_int <val>               -> return 0 if val is a non-negative integer
 #   validate_scoping <val>            -> die if val is not none|namespace|explicit|wide
@@ -40,15 +44,15 @@
 #                                        failed: REASON xK, ..."), one reason per failed
 #                                        cell; return 0 when none failed, else SWEEP_FAILED_EXIT
 #                                        (<rc> when the sweep stopped early)
-#   sweep_outcome_start <dir> <run_id> [...] -> A3: the sweep's "not finished" record, at its start;
-#                                        I5: arms sweep_outcome_on_exit, traps the signals
-#   sweep_trap_signals                -> I5: trap HUP, INT, TERM: keep the name
+#   sweep_outcome_start <dir> <run_id> [...] -> the sweep's "not finished" record, at its start;
+#                                        Arms sweep_outcome_on_exit, traps the signals
+#   sweep_trap_signals                -> trap HUP, INT, TERM: keep the name
 #                                        (_SWEEP_SIGNAL), then die of the signal as before
 #   sweep_outcome_unfinished <file>   -> true when <file> is such a record
-#   sweep_err_trap <rc> <line> <cmd>  -> I5: a sweep's ERR trap: the FATAL line, kept as the
+#   sweep_err_trap <rc> <line> <cmd>  -> a sweep's ERR trap: the FATAL line, kept as the
 #                                        stop reason; exits 1 (a signal's 129/130/143 kept)
 #   sweep_outcome_on_exit <rc> [--note <msg>...]
-#                                     -> I5: from a sweep's EXIT trap: a sweep that ends
+#                                     -> from a sweep's EXIT trap: a sweep that ends
 #                                        before its outcome records why (stopped: die, the
 #                                        ERR trap, another non-zero exit; exit 1) or when
 #                                        (interrupted: Ctrl-C or a signal, ENDED_SIGNAL; still
@@ -58,11 +62,21 @@
 #   sweep_outcome_recorded [...] <dir> <fmt> [<run_id>]
 #                                     -> the recorded outcome, for a re-generated report
 #   controlplane_latest_attempts <tsv> <resumes_txt> <out_tsv>
-#                                     -> A1: the TSV without each cell's earlier attempts
-#   md_cell [-v <var>] <value>        -> I7: the value for a markdown table cell (each | as
+#                                     -> the TSV without each cell's earlier attempts
+#   CP_CELL_AWK                       -> awk functions for a controlplane cell's state
+#                                        (done, its status, INCOMPLETE) and the planned cells
+#   sweep_lock <dir>                  -> one run per sweep dir (.sweep.lock with the PID)
+#   sweep_step <cmd...>               -> run a long step so a signal reaches it at once
+#   harness_sha [--exclude <dir>]...  -> the harness the run uses: git describe, with
+#                                        -dirty.<8hex> naming the uncommitted content
+#   harness_sha_for_sweep [<dir>]     -> a sweep's harness, once, exported to its steps
+#   report_harness_sha                -> the harness a report itself runs (REPORT_HARNESS_SHA)
+#   md_cell [-v <var>] <value>        -> the value for a markdown table cell (each | as
 #                                        \|, a newline as a space)
-#   MD_CELL_AWK                       -> I7: the same as an awk function md_cell(s)
-#   file_min_bytes <file> <n>         -> I8: true when <file> holds at least <n> bytes; forks
+#   MD_CELL_AWK                       -> the same as an awk function md_cell(s)
+#   yaml_str [-v <var>] [-n] <value>  -> the value as a YAML double-quoted scalar, escaped
+#                                        (\ " and control characters), for frontmatter
+#   file_min_bytes <file> <n>         -> true when <file> holds at least <n> bytes; forks
 #                                        nothing when it does
 #
 # All callers are expected to have run `set -euo pipefail`.
@@ -75,7 +89,7 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); 
 	exit 1
 fi
 
-# die <msg>: stop with the message. I5: the message is also the stop reason a sweep records
+# die <msg>: stop with the message. The message is also the stop reason a sweep records
 # when it dies after its start (sweep_outcome_on_exit; _SWEEP_STOP_BY says it came from die).
 # shellcheck disable=SC2329
 die() { _SWEEP_STOP_WHY="$*" _SWEEP_STOP_BY=die; echo "error: $*" >&2; exit 1; }
@@ -116,6 +130,28 @@ split_contexts() {
 		_sc_seen[$_sc_x]=1
 	done
 	return 0
+}
+
+# CTX_FILE_NAME_MAX: the longest a context's file-name form gets inside a folder name
+# (istiod-diag evidence folders); redact-results.sh maps that cut form too.
+# shellcheck disable=SC2034
+CTX_FILE_NAME_MAX=40
+
+# ctx_file_safe <name> [<max>]: the one file-name form of a context name (state files,
+# evidence folders, redaction). Every byte outside A-Za-z0-9._- becomes _, byte by byte
+# in every locale (a 2-byte UTF-8 letter gives __), then at most <max> characters. The
+# list is spelled out: a [a-z] range follows the locale's collation before bash 5.0.
+# Forks nothing for a name that is already safe.
+# shellcheck disable=SC2329
+ctx_file_safe() {
+	local _cfs_s="${1-}" _cfs_max="${2-}"
+	case "$_cfs_s" in
+	*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*)
+		_cfs_s="$(printf '%s' "$_cfs_s" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')"
+		;;
+	esac
+	if [[ "$_cfs_max" =~ ^[0-9]+$ ]]; then _cfs_s="${_cfs_s:0:_cfs_max}"; fi
+	printf '%s\n' "$_cfs_s"
 }
 
 # shellcheck disable=SC2329
@@ -269,7 +305,7 @@ run_timeout() {
 	"$t" "$@"
 }
 
-# --- sweep outcome (R19) ---
+# --- sweep outcome ---
 
 # Exit codes every sweep shares: 0 every cell ran; 1 the run stopped (a precondition, an
 # unexpected abort, or a suite's own stop such as controlplane's RETIRE_FAILED); 3 a
@@ -288,7 +324,7 @@ _sweep_outcome_by() {
 
 # _sweep_outcome_sweep_ids <dir>: the distinct sweep-level ids of the TSVs under <dir>, one
 # per line as "<kind><TAB><id>": kind S for a file's SWEEP_RUN_ID preamble line, else R for
-# its RUN_ID line (J6). K10: nextfile stops at the header (gawk, mawk 1.3.4, BSD awk); an
+# its RUN_ID line. Nextfile stops at the header (gawk, mawk 1.3.4, BSD awk); an
 # awk without it skips the rows instead.
 _sweep_outcome_sweep_ids() {
 	find -H "$1" -name '*.tsv' -type f -exec awk '
@@ -316,15 +352,15 @@ sweep_outcome_unfinished() {
 }
 
 # sweep_outcome_start <dir> <run_id> [--unit <noun>] [--resumed-at <time>] [--next <text>]:
-# A3. A sweep calls it at its start, before its first cell (never under --dry-run): it
+# A sweep calls it at its start, before its first cell (never under --dry-run): it
 # writes <dir>/sweep-outcome.txt as the sweep's "not finished" record: RUN_ID, HARNESS_SHA
 # (as sweep_outcome --record writes it), EXIT=unfinished, STARTED_AT (UTC), UNIT,
 # RESUMED_AT (a controlplane --resume: its start, in the rows' timestamp format) and NEXT
-# (what to do if it died; no local path, F1). sweep_outcome --record replaces it at the
+# (what to do if it died; no local path). sweep_outcome --record replaces it at the
 # end, so a sweep that dies keeps it, and every report says the sweep has not finished
 # (sweep_outcome_recorded) instead of nothing. Creates <dir> when it does not exist yet (a
 # sweep may create it only with its first row). Warns, never dies, when it cannot write.
-# I5: it also arms sweep_outcome_on_exit for this shell (the record, its run and unit),
+# It also arms sweep_outcome_on_exit for this shell (the record, its run and unit),
 # and traps HUP, INT and TERM (sweep_trap_signals), so the record can tell an interrupt
 # from a stop. The sweep installs its EXIT trap (which calls sweep_outcome_on_exit) first.
 # shellcheck disable=SC2329
@@ -340,11 +376,13 @@ sweep_outcome_start() {
 		esac
 	done
 	mkdir -p "$dir" 2>/dev/null || true
+	# One run per sweep dir: refused (die) while another live run holds its lock.
+	sweep_lock "$dir"
 	{
 		echo "# Sweep outcome (tests/lib/common.sh sweep_outcome_start): this sweep has not finished; sweep_outcome replaces this record at its end"
 		echo "# DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		echo "RUN_ID=${rid:-unknown}"
-		echo "HARNESS_SHA=${HARNESS_SHA:-$(declare -F harness_sha >/dev/null && harness_sha || echo unknown)}"
+		echo "HARNESS_SHA=${HARNESS_SHA:-$(harness_sha)}"
 		echo "EXIT=unfinished"
 		echo "STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		echo "UNIT=${unit}"
@@ -358,7 +396,47 @@ sweep_outcome_start() {
 	return 0
 }
 
-# --- a sweep that ends before its outcome (I5) ---
+# sweep_lock <dir>: one run per sweep dir. Takes <dir>/.sweep.lock (it holds this shell's
+# PID); while the lock names a PID that is still alive, dies before anything in <dir>
+# changes, naming that PID and how to clear a stale lock, so a --resume cannot run beside
+# the run it resumes (two runs would append to one TSV and overwrite each other's outcome).
+# A lock whose PID is gone (that run died) is taken over. sweep_outcome_start takes it, so
+# every sweep does; controlplane 003 takes it earlier for a --resume, before it reads or
+# moves anything in the sweep dir. Taking it again from the same shell does nothing; the
+# sweep's EXIT trap removes it (sweep_outcome_on_exit, only the lock this shell took). Warns
+# and goes on when the lock cannot be written (a read-only dir fails later, loudly).
+# shellcheck disable=SC2329
+sweep_lock() {
+	local dir="$1" f me="${BASHPID:-$$}" pid i
+	f="${dir}/.sweep.lock"
+	[[ "${_SWEEP_LOCK_FILE:-}" != "$f" || "${_SWEEP_LOCK_PID:-}" != "$me" ]] || return 0
+	mkdir -p "$dir" 2>/dev/null || true
+	for i in 1 2; do
+		if (set -o noclobber; printf '%s\n' "$me" > "$f") 2>/dev/null; then
+			_SWEEP_LOCK_FILE="$f" _SWEEP_LOCK_PID="$me"
+			return 0
+		fi
+		pid="$(head -n 1 "$f" 2>/dev/null)" || pid=""
+		if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+			die "another run of this sweep (PID ${pid}) still runs in ${dir}: wait for it to end, or stop it, before you start or --resume a run there (nothing was changed). If no such run exists (the host restarted and that PID is another process now), remove ${f} and run again."
+		fi
+		[[ "$i" == 2 ]] || rm -f "$f" 2>/dev/null || true
+	done
+	echo "warning: could not take ${f} (the sweep dir's lock), so another run in this dir would not be refused" >&2
+	return 0
+}
+
+# _sweep_unlock: remove the lock sweep_lock took in this shell (sweep_outcome_on_exit).
+# shellcheck disable=SC2329
+_sweep_unlock() {
+	[[ -n "${_SWEEP_LOCK_FILE:-}" && "${_SWEEP_LOCK_PID:-}" == "${BASHPID:-$$}" ]] || return 0
+	local pid
+	pid="$(head -n 1 "$_SWEEP_LOCK_FILE" 2>/dev/null)" || pid=""
+	[[ "$pid" != "$_SWEEP_LOCK_PID" ]] || rm -f "$_SWEEP_LOCK_FILE" 2>/dev/null || true
+	_SWEEP_LOCK_FILE=""
+}
+
+# --- a sweep that ends before its outcome ---
 
 # sweep_trap_signals: trap HUP, INT and TERM in this shell (sweep_outcome_start calls it).
 # The handler keeps the signal's name in _SWEEP_SIGNAL, restores the signal's default and
@@ -369,9 +447,11 @@ sweep_outcome_start() {
 # this runs: bash catches the terminating signals once an EXIT trap is set, and the
 # default restored here is then that catch, which runs the EXIT trap (set after, SIGTERM
 # and SIGHUP would end the sweep without it; Ctrl-C would still run it). Like any trap,
-# the handler runs once the foreground command returns: Ctrl-C and a closed terminal
-# reach that command too, but a SIGTERM sent to the sweep's process alone waits for it
-# (signal the process group to stop both now).
+# the handler runs once the foreground command returns. A long step that runs through
+# sweep_step is not a foreground command: the signal ends the sweep's wait for it at once,
+# and the handler sends SIGTERM on to the step (Ctrl-C and a closed terminal reach it from
+# the terminal already, so SIGINT and SIGHUP are not sent twice), waits for it to end
+# (its own cleanup), then ends the sweep.
 # shellcheck disable=SC2329
 sweep_trap_signals() {
 	trap '_sweep_on_signal HUP' HUP
@@ -383,7 +463,43 @@ sweep_trap_signals() {
 _sweep_on_signal() {
 	_SWEEP_SIGNAL="$1"
 	trap - "$1"
+	if [[ -n "${_SWEEP_STEP_PID:-}" ]]; then
+		[[ "$1" != TERM ]] || kill -s TERM "$_SWEEP_STEP_PID" 2>/dev/null || true
+		wait "$_SWEEP_STEP_PID" 2>/dev/null || true
+		_SWEEP_STEP_PID=""
+	fi
 	kill -s "$1" "$$"
+}
+
+# sweep_step <command> [<arg>...]: run one long step of a sweep (a setup, a probe, a
+# cleanup, a profile apply or revert) so that a signal the sweep gets reaches it at once,
+# and return the step's exit status. Call it as the command itself, in the same place:
+#   if ! sweep_step "$SCRIPT_DIR/002-..." "${args[@]}"; then ...
+#   sweep_step "$SCRIPT_DIR/005-cleanup.sh" --contexts "$csv" || rc=$?
+# The step runs as a background job the sweep waits for: a trapped signal ends that wait
+# at once (a foreground command would delay the trap until it returned: a SIGTERM sent to
+# the sweep's process alone, by `kill <pid>` or a service manager, would wait 30-60 min
+# for a step at 10k services), and _sweep_on_signal forwards SIGTERM to the step and waits
+# for it. The step keeps the sweep's stdout and stderr and gets SIGINT and SIGQUIT back
+# (bash ignores them in a background job, so Ctrl-C still reaches it); its stdin is
+# /dev/null (no step reads the terminal). The command is exec'd in that job, so the
+# SIGTERM reaches the step itself (a script that then runs its EXIT trap, as bash does on
+# a signal it does not trap, and dies of it, writing no more rows), not a shell around
+# it: pass a script or a binary, never a function (exec fails on one, with exit 127) or a
+# pipeline (log a step's output with a redirection of the call, such as
+# `sweep_step "$probe" "${args[@]}" > >(tee -a "$log") 2>&1`). A settle `sleep` stays a
+# foreground command: it delays the signal by at most the settle.
+# shellcheck disable=SC2329
+sweep_step() {
+	local _ss_rc=0
+	(
+		trap - INT QUIT
+		exec "$@"
+	) &
+	_SWEEP_STEP_PID=$!
+	wait "$_SWEEP_STEP_PID" || _ss_rc=$?
+	_SWEEP_STEP_PID=""
+	return "$_ss_rc"
 }
 
 # sweep_err_trap <rc> <line> <command>: the body of a sweep's ERR trap (set -e is about to
@@ -412,44 +528,65 @@ sweep_outcome_cut_short() {
 	sweep_outcome_unfinished "$1" || { [[ -f "$1" ]] && grep -qx 'CUT_SHORT=1' "$1" 2>/dev/null; }
 }
 
-# sweep_outcome_on_exit <rc> [--note <msg>...]: I5. A sweep's EXIT trap calls it after its
-# own cleanup (a tuning profile is reverted first, PL32), as
-#   sweep_outcome_on_exit "$rc" ... || true
-# with <rc> the $? the trap started with. It does nothing unless sweep_outcome_start armed
-# it in this shell (never in a subshell) and <dir>/sweep-outcome.txt is still that start's
-# not-finished record: the sweep wrote its outcome at its end, or never started. Else the
-# sweep ended before its outcome, and the record says how:
+# sweep_outcome_on_exit <rc> [--note <msg>|--info <msg>...]: A sweep's EXIT trap calls
+# it after its own cleanup (a tuning profile is reverted first, PL32), as
+#   sweep_outcome_on_exit "$rc" ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} || true
+# with <rc> the $? the trap started with, and the notes the sweep gathered so far (a
+# controlplane --resume's harness, Kubernetes and readiness notes), which its reports
+# would otherwise lose. It first removes the sweep dir's lock this shell took (sweep_lock).
+# Then it does nothing unless sweep_outcome_start armed it in this shell
+# (never in a subshell) and <dir>/sweep-outcome.txt is still that start's not-finished
+# record: the sweep wrote its outcome at its end, or never started. Else the sweep ended
+# before its outcome, and the record says how:
 #   - interrupted: a signal sweep_trap_signals caught (Ctrl-C, SIGTERM, a closed terminal:
 #     _SWEEP_SIGNAL); the ERR trap for a command a signal killed (its exit 129, 130 or
 #     143); or exit 0 with no reason (no exit of this harness before its outcome is 0). The
-#     record stays not finished and gets ENDED_AT (UTC), ENDED_EXIT and, when known,
-#     ENDED_SIGNAL: the reports say the run was interrupted then, before its outcome (it
-#     does not still run).
+#     record stays not finished and gets ENDED_AT (UTC), ENDED_EXIT, when known
+#     ENDED_SIGNAL, and the notes as NOTE= and INFO= lines: the reports say the run was
+#     interrupted then, before its outcome (it does not still run), with those notes.
 #   - stopped: die (its message), the ERR trap (sweep_err_trap: the script, line and
 #     command), or any other non-zero exit ("it exited <rc> before its end": set -e in a
 #     function, which runs no ERR trap). sweep_outcome --stopped 1 --stop-reason <why>
 #     --uncounted <...> rewrites the record (EXIT=1, STOPPED=1, STOP_REASON, PROBLEM
-#     "could not count the sweep's <unit>: ...", TOTAL=unknown, each --note, and the
-#     start's NEXT as "next: ..."), then CUT_SHORT=1, STARTED_AT and ENDED_AT are added.
-#     Every report shows it as stopped, with the reason, and exit 1. A stop is exit 1, so
-#     another <rc> (4 or 3 would read as another outcome) ends the shell with exit 1 here.
-# A sweep killed outright (SIGKILL, out of memory, a lost host) runs no trap: its record
-# stays not finished without ENDED_AT ("it died, or still runs"). Never dies otherwise;
-# warns when it cannot write.
+#     "could not count the sweep's <unit>: ...", TOTAL=unknown, each note, and the
+#     start's NEXT as "next: ..."), then CUT_SHORT=1, STARTED_AT, the start's RESUMED_AT
+#     (a --resume that stopped: the reports then show the outcome before it too, from
+#     sweep-outcome.prev.txt) and ENDED_AT are added. The reason is recorded with the sweep
+#     dir as <sweep dir> and $HOME as ~ (the reports are shared; the console keeps the full
+#     text). Every report shows it as stopped, with the reason first, and exit 1. A stop is
+#     exit 1, so another <rc> (4 or 3 would read as another outcome) ends the shell with
+#     exit 1 here.
+# Either way the console (stderr only) then names the sweep dir and the next step (a stop's
+# next step is its "next:" note, printed with the outcome just before). A sweep
+# killed outright (SIGKILL, out of memory, a lost host) runs no trap: its record stays not
+# finished without ENDED_AT ("it died, or still runs"). Never dies otherwise; warns when it
+# cannot write.
+# An EXIT trap whose cleanup takes long (propagation's 007 over every member) calls
+#   sweep_outcome_on_exit --mark-end "$rc"
+# first: that adds ENDED_AT, ENDED_EXIT and ENDED_SIGNAL to the not-finished record at
+# once (a second Ctrl-C during the cleanup kills the trap, and the record still says when
+# and how the sweep ended) and keeps the time; the call after the cleanup then records the
+# rest with that time.
 # shellcheck disable=SC2329
 sweep_outcome_on_exit() {
+	local mark=0
+	if [[ "${1:-}" == --mark-end ]]; then
+		mark=1
+		shift
+	fi
 	local rc="${1:-0}" dir="${_SWEEP_OUTCOME_ARMED_DIR:-}" f why="${_SWEEP_STOP_WHY:-}" by="${_SWEEP_STOP_BY:-}"
-	local sig="${_SWEEP_SIGNAL:-}" now started next srid
+	local sig="${_SWEEP_SIGNAL:-}" now started next srid resumed k marked="${_SWEEP_ENDED_AT:-}"
 	(($#)) && shift
+	((mark)) || _sweep_unlock
 	[[ -n "$dir" && "${_SWEEP_OUTCOME_ARMED_PID:-}" == "${BASHPID:-$$}" ]] || return 0
 	f="${dir}/sweep-outcome.txt"
 	sweep_outcome_unfinished "$f" || return 0
 	srid="$(sed -n 's/^RUN_ID=//p' "$f" 2>/dev/null | head -n 1)"
 	[[ "$srid" == "${_SWEEP_OUTCOME_ARMED_RID:-}" ]] || return 0
 	# Once: a second EXIT (a trap that exits again) finds nothing to do.
-	_SWEEP_OUTCOME_ARMED_DIR=""
+	((mark)) || _SWEEP_OUTCOME_ARMED_DIR=""
 	is_nonneg_int "$rc" || rc=1
-	now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	now="${marked:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 	case "$sig" in
 	HUP) rc=129 ;;
 	INT) rc=130 ;;
@@ -460,20 +597,50 @@ sweep_outcome_on_exit() {
 	if [[ -z "$sig" && "$by" == err ]] && [[ "${_SWEEP_STOP_RC:-}" == 129 || "${_SWEEP_STOP_RC:-}" == 130 || "${_SWEEP_STOP_RC:-}" == 143 ]]; then
 		why="" rc="$_SWEEP_STOP_RC"
 	fi
-	if [[ -n "$sig" ]] || { [[ -z "$why" ]] && ((rc == 0 || rc == 129 || rc == 130 || rc == 143)); }; then
+	if ((mark)); then
+		[[ -z "$marked" ]] || return 0
+		_SWEEP_ENDED_AT="$now"
+		# A stop's exit is 1 (its record, written after the cleanup, replaces these lines).
+		if [[ -z "$sig" ]] && { [[ -n "$why" ]] || ((rc != 0 && rc != 129 && rc != 130 && rc != 143)); }; then rc=1; fi
 		{
 			printf 'ENDED_AT=%s\nENDED_EXIT=%s\n' "$now" "$rc"
 			[[ -z "$sig" ]] || printf 'ENDED_SIGNAL=SIG%s\n' "$sig"
 		} 2>/dev/null >> "$f" || echo "warning: could not add ENDED_AT to ${f}" >&2
-		echo "warning: the sweep was interrupted (${sig:+SIG${sig}, }exit ${rc}) before its outcome; sweep-outcome.txt says it has not finished" >&2
 		return 0
 	fi
-	local orc="$rc"
-	rc=1
-	[[ -n "$why" ]] || why="it exited ${orc} before its end (an unexpected failure: see its console output)"
 	started="$(sed -n 's/^STARTED_AT=//p' "$f" 2>/dev/null | head -n 1)"
+	resumed="$(sed -n 's/^RESUMED_AT=//p' "$f" 2>/dev/null | head -n 1)"
 	next="$(sed -n 's/^NEXT=//p' "$f" 2>/dev/null | head -n 1)"
 	next="${next#if it died, }"
+	if [[ -n "$sig" ]] || { [[ -z "$why" ]] && ((rc == 0 || rc == 129 || rc == 130 || rc == 143)); }; then
+		{
+			# --mark-end wrote the ENDED_ lines already.
+			if [[ -z "$marked" ]]; then
+				printf 'ENDED_AT=%s\nENDED_EXIT=%s\n' "$now" "$rc"
+				[[ -z "$sig" ]] || printf 'ENDED_SIGNAL=SIG%s\n' "$sig"
+			fi
+			# The sweep's notes so far (a --resume's): one line each, as sweep_outcome keeps them.
+			k=1
+			while ((k < $#)); do
+				case "${!k}" in
+				--note) k=$((k + 1)); printf 'NOTE=%s\n' "${!k//$'\n'/ }" ;;
+				--info) k=$((k + 1)); printf 'INFO=%s\n' "${!k//$'\n'/ }" ;;
+				esac
+				k=$((k + 1))
+			done
+		} 2>/dev/null >> "$f" || echo "warning: could not add ENDED_AT to ${f}" >&2
+		echo "warning: the sweep was interrupted (${sig:+SIG${sig}, }exit ${rc}) before its outcome; sweep-outcome.txt says it has not finished" >&2
+		echo "  sweep dir: ${dir}${next:+; next: ${next}}" >&2
+		return 0
+	fi
+	local orc="$rc" tilde='~' absdir
+	rc=1
+	[[ -n "$why" ]] || why="it exited ${orc} before its end (an unexpected failure: see its console output)"
+	# The record (and every report re-generated from it) is shared: no local path in it.
+	absdir="$(cd "$dir" 2>/dev/null && pwd)" || absdir=""
+	[[ -z "$absdir" ]] || why="${why//"$absdir"/<sweep dir>}"
+	why="${why//"$dir"/<sweep dir>}"
+	if [[ -n "${HOME:-}" && "$HOME" != / ]]; then why="${why//"$HOME"/"$tilde"}"; fi
 	local -a args=(--stopped "$rc" --stop-reason "$why" --unit "${_SWEEP_OUTCOME_ARMED_UNIT:-cells}"
 		--uncounted "it stopped before its end at ${now}, so no count vouches for its rows, which may be partial"
 		--record "$dir" --run-id "$srid" "$@")
@@ -482,45 +649,57 @@ sweep_outcome_on_exit() {
 	{
 		echo "CUT_SHORT=1"
 		[[ -z "$started" ]] || echo "STARTED_AT=${started}"
+		[[ -z "$resumed" ]] || echo "RESUMED_AT=${resumed}"
 		echo "ENDED_AT=${now}"
 	} 2>/dev/null >> "$f" || echo "warning: could not add CUT_SHORT to ${f}" >&2
+	# sweep_outcome printed the next step (its "next:" note) just above.
+	echo "  sweep dir: ${dir}" >&2
 	((orc == 1)) || exit 1
 	return 0
 }
 
 # sweep_outcome_recorded [--sweep-level-run-id] <results_dir> <text|md|json|csv> [<run_id>]:
 # what the sweep recorded in <results_dir>/sweep-outcome.txt (sweep_outcome --record), for
-# a report re-generated after the sweep (X3). text and md name the record's run and exit,
-# then its failed cells (FAILED_BY, Y5) and every PROBLEM, NOTE, INFO (as note:, K6) and
+# a report re-generated after the sweep. text and md name the record's run and exit,
+# then its failed cells (FAILED_BY) and every PROBLEM, NOTE, INFO (as note:) and
 # STOP_REASON line (nothing when the file is absent or records none of them); csv prints
-# them as `# SWEEP_OUTCOME_<KEY>=` comment lines (Y9; nothing without the file); json prints
+# them as `# SWEEP_OUTCOME_<KEY>=` comment lines (nothing without the file); json prints
 # {"exit":N,"run_id":"...","failed":N,"failed_by":"...","problems":[...],"notes":[...],
-# "info":[...],"stop_reason":"...","unfinished":false}, or null without the file.
-# A3: a sweep that has not finished (its sweep_outcome_start record: it died, or still
+# "info":[...],"stop_reason":"...","unfinished":false}, or null without the file. A sweep
+# that stopped (STOPPED=1: the stop record sweep_outcome_on_exit wrote, or a stop the sweep
+# counted, such as REVERT_FAILED) leads with its reason, under a STOPPED header (text
+# "...): STOPPED", then "stopped early: <reason>"; md "**stopped**"; json "stopped":true).
+# A sweep that has not finished (its sweep_outcome_start record: it died, or still
 # runs) says so in every format (text and md a warning with its start time and what to do,
 # csv `# SWEEP_OUTCOME_EXIT=unfinished`, json "exit":null and "unfinished":true with
-# "started_at"); I5: one whose EXIT trap ran (ENDED_AT: Ctrl-C or a signal) says it was
-# interrupted at that time, and by which signal when ENDED_SIGNAL names it (csv
-# `# SWEEP_OUTCOME_INTERRUPTED_AT=` and `_BY=`, json "interrupted_at" and "interrupted_by",
-# also for an unfinished --resume), and a stop record sweep_outcome_on_exit wrote reads as
-# any stop. P4: while a --resume has not finished (it moved the record to
-# sweep-outcome.prev.txt and has not written its own yet), that record is shown, from
-# sweep-outcome.prev.txt, after a warning that says so; A12: its json says
-# "unfinished":true and "resume_unfinished":true, with exit, failed, failed_by and
-# stop_reason null and empty lists at the top level (this run counted nothing yet), and the
-# earlier record's fields under "earlier". The sweep's own reports set
-# _SWEEP_OUTCOME_PENDING=1, as theirs is about to be written: md prints one line that ends
-# with SWEEP_OUTCOME_PENDING_MARK (sweep_outcome --md replaces it with the outcome; a
-# report left with it says the sweep died before its end), the other formats nothing (json
-# null). <run_id> is the report's run, compared with the record's RUN_ID (Y9). By default
-# (one run, as config_check_multi_run counted it; nothing is compared for a pooled report)
-# the record matches when its RUN_ID is the sweep-level id of a TSV under <results_dir>
-# (SWEEP_RUN_ID, else RUN_ID: J6, so a renamed sweep dir is still its sweep), else, only
-# when no TSV under it carries a sweep-level id (A11), the sweep-* dir's own id, else when
-# the dir holds that run's sweep-<RUN_ID>.md (sweeps whose cells mint their own RUN_IDs). A
-# TSV's id is sweep-level when it is a SWEEP_RUN_ID, or with --sweep-level-run-id (a suite
-# whose TSV RUN_ID is the sweep's: controlplane) its RUN_ID. A record from another run is
-# named as such, in every format (json report_run_id) and on stderr.
+# "started_at", and "resumed_at" for a --resume); one whose EXIT trap ran (ENDED_AT:
+# Ctrl-C or a signal) says it was interrupted at that time, and by which signal when
+# ENDED_SIGNAL names it (csv `# SWEEP_OUTCOME_INTERRUPTED_AT=` and `_BY=`, json
+# "interrupted_at" and "interrupted_by"), with the notes it gathered until then (its NOTE=
+# and INFO= lines). While a --resume has not finished (it moved the record to
+# sweep-outcome.prev.txt and has not written its own yet), every format says so, then shows
+# that record, the outcome before it: text and md after a warning; json "unfinished":true
+# and "resume_unfinished":true, with "started_at", "resumed_at", exit, failed, failed_by and
+# stop_reason null and no problem (this run counted nothing yet), its own notes so far, and
+# the earlier record's fields under "earlier"; csv `# SWEEP_OUTCOME_EXIT=unfinished`,
+# `# SWEEP_OUTCOME_RESUME_UNFINISHED=1`, STARTED_AT, RESUMED_AT and INTERRUPTED_AT/_BY as
+# this run's, then the earlier record as `# SWEEP_OUTCOME_EARLIER_<KEY>=` lines. A --resume
+# that stopped (a stop record, CUT_SHORT=1, with sweep-outcome.prev.txt beside it) shows its
+# stop, then the outcome before it the same way (json "resumed_at" and "earlier", csv
+# `# SWEEP_OUTCOME_RESUMED_AT=` and the EARLIER_ lines; text and md a second block). The
+# sweep's own reports set _SWEEP_OUTCOME_PENDING=1, as theirs is about to be written: md
+# prints one line that ends with SWEEP_OUTCOME_PENDING_MARK (sweep_outcome --md replaces it
+# with the outcome; a report left with it is from a sweep that did not finish, and its
+# sweep-outcome.txt says how it ended), the other formats nothing (json null). <run_id> is
+# the report's run, compared with the record's RUN_ID. By default (one run, as
+# config_check_multi_run counted it; nothing is compared for a pooled report) the record
+# matches when its RUN_ID is the sweep-level id of a TSV under <results_dir> (SWEEP_RUN_ID,
+# else RUN_ID, so a renamed sweep dir is still its sweep), else, only when no TSV under
+# it carries a sweep-level id, the sweep-* dir's own id, else when the dir holds that
+# run's sweep-<RUN_ID>.md (sweeps whose cells mint their own RUN_IDs). A TSV's id is
+# sweep-level when it is a SWEEP_RUN_ID, or with --sweep-level-run-id (a suite whose TSV
+# RUN_ID is the sweep's: controlplane) its RUN_ID. A record from another run is named as
+# such, in every format (json report_run_id) and on stderr.
 # shellcheck disable=SC2329
 sweep_outcome_recorded() {
 	local sweep_level=0
@@ -528,32 +707,38 @@ sweep_outcome_recorded() {
 		sweep_level=1
 		shift
 	fi
-	local f="${1}/sweep-outcome.txt" fmt="$2" want="${3:-}" rid other="" sids ids dkey="" mode=final
+	local f="${1}/sweep-outcome.txt" prev="${1}/sweep-outcome.prev.txt" fmt="$2" want="${3:-}" rid other="" sids ids dkey=""
+	local mode=final rf
 	local -a files=()
 	if sweep_outcome_unfinished "$f"; then
 		mode=first
 		if [[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]]; then
 			mode=pending
-		elif [[ -f "${1}/sweep-outcome.prev.txt" ]]; then
-			# The not-finished record first (its start), then the outcome it shows.
-			mode=resume files=("$f") f="${1}/sweep-outcome.prev.txt"
+		elif [[ -f "$prev" ]]; then
+			mode=resume
 		fi
-	elif [[ ! -f "$f" && -f "${1}/sweep-outcome.prev.txt" && "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
-		mode=resume f="${1}/sweep-outcome.prev.txt"
+	elif [[ ! -f "$f" && -f "$prev" && "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
+		mode=resume
+	elif [[ -f "$prev" ]] && grep -qx 'CUT_SHORT=1' "$f" 2>/dev/null; then
+		# A --resume that stopped: its stop record, then the outcome before it.
+		mode=stopres
 	fi
 	if [[ "$mode" == pending ]]; then
 		case "$fmt" in
 		json) echo null ;;
-		md) printf '%s\n\n' "> **Sweep outcome**: not written yet: this report was made while the sweep ran, and the sweep appends its outcome at its end. A report that still shows this line, with no \"Sweep outcome\" section below, is from a sweep that died before its end. ${SWEEP_OUTCOME_PENDING_MARK}" ;;
+		md) printf '%s\n\n' "> **Sweep outcome**: not written yet: this report was made while the sweep ran, and the sweep appends its outcome at its end. A report that still shows this line, with no \"Sweep outcome\" section below, is from a sweep that did not finish (it died, was interrupted or stopped): its sweep-outcome.txt says how it ended, and a report re-generated from the sweep dir shows it. ${SWEEP_OUTCOME_PENDING_MARK}" ;;
 		esac
 		return 0
 	fi
-	if [[ ! -f "$f" ]]; then
+	# rf: the record whose RUN_ID is checked (the outcome a resume shows is the earlier one).
+	rf="$f"
+	[[ "$mode" != resume ]] || rf="$prev"
+	if [[ ! -f "$rf" ]]; then
 		[[ "$fmt" != json ]] || echo null
 		return 0
 	fi
 	case "$want" in mixed:* | unknown*) want="" ;; esac
-	rid="$(sed -n 's/^RUN_ID=//p' "$f" 2>/dev/null | head -n 1)"
+	rid="$(sed -n 's/^RUN_ID=//p' "$rf" 2>/dev/null | head -n 1)"
 	if [[ -n "$rid" && "$rid" != unknown ]]; then
 		if [[ -n "$want" ]]; then
 			[[ "$rid" == "$want" ]] || other="$want"
@@ -563,7 +748,7 @@ sweep_outcome_recorded() {
 			dkey="${MULTI_RUN_IDS:-}"
 			dkey="${dkey#sweep-}"
 			case "$dkey" in mixed:* | unknown*) dkey="" ;; esac
-			# A11: the dir's own id only when no TSV under it names the sweep.
+			# The dir's own id only when no TSV under it names the sweep.
 			if grep -q '^S' <<<"$sids" || { ((sweep_level)) && [[ -n "$ids" ]]; }; then dkey=""; fi
 			if ! grep -qxF -- "$rid" <<<"$ids" && [[ "$rid" != "$dkey" && ! -f "${1}/sweep-${rid}.md" ]]; then
 				# Name the report's run by its TSVs when they agree on one, else by its dir.
@@ -577,118 +762,168 @@ sweep_outcome_recorded() {
 		fi
 	fi
 	if [[ -n "$other" ]]; then
-		echo "warning: ${f} was recorded by run ${rid}, not by this report's run ${other}; the outcome it repeats may not describe these rows" >&2
+		echo "warning: ${rf} was recorded by run ${rid}, not by this report's run ${other}; the outcome it repeats may not describe these rows" >&2
 	fi
-	files+=("$f")
-	awk -v fmt="$fmt" -v other="$other" -v mode="$mode" -v src="${f##*/}" -v mk="${files[0]}" -v nfiles="${#files[@]}" '
+	case "$mode" in
+	resume) [[ ! -f "$f" ]] || files+=("$f"); files+=("$prev") ;;
+	stopres) files=("$f" "$prev") ;;
+	*) files=("$f") ;;
+	esac
+	# Record 1 is sweep-outcome.txt (the current run's), record 2 sweep-outcome.prev.txt (the
+	# outcome before a --resume).
+	awk -v fmt="$fmt" -v other="$other" -v mode="$mode" -v prevf="$prev" '
 		function jstr(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); gsub(/\t/, "\\t", v); return "\"" v "\"" }
-		function jlist(a, n,    i, s) { s = "["; for (i = 1; i <= n; i++) s = s (i > 1 ? "," : "") jstr(a[i]); return s "]" }
-		# Of two files, the first is the not-finished record of a --resume (its start), the
-		# second the outcome it shows.
-		nfiles == 2 && FILENAME == mk {
-			if (/^STARTED_AT=/) mstart = substr($0, 12)
-			if (/^RESUMED_AT=/) mres = substr($0, 12)
-			if (/^ENDED_AT=/) mend = substr($0, 10)
-			if (/^ENDED_SIGNAL=/) msig = substr($0, 14)
-			if (/^NEXT=/) mnext = substr($0, 6)
-			if (/^RUN_ID=/) mrid = substr($0, 8)
-			next
+		function jl(r, k,    i, n, s) {
+			n = (k == "p") ? NP[r] : (k == "n") ? NN[r] : NI[r]
+			s = "["
+			for (i = 1; i <= n; i++) s = s (i > 1 ? "," : "") jstr(k == "p" ? PR[r, i] : (k == "n") ? NT[r, i] : INF[r, i])
+			return s "]"
 		}
-		/^EXIT=/ { ex = substr($0, 6) }
-		/^RUN_ID=/ { rid = substr($0, 8) }
-		/^UNIT=/ { unit = substr($0, 6) }
-		/^TOTAL=/ { total = substr($0, 7) }
-		/^FAILED=/ { failed = substr($0, 8) }
-		/^FAILED_BY=/ { fby = substr($0, 11) }
-		/^STOP_REASON=/ { stop = substr($0, 13) }
-		/^STARTED_AT=/ { start = substr($0, 12) }
-		/^RESUMED_AT=/ { res = substr($0, 12) }
-		/^ENDED_AT=/ { ended = substr($0, 10) }
-		/^ENDED_EXIT=/ { endex = substr($0, 12) }
-		/^ENDED_SIGNAL=/ { endsig = substr($0, 14) }
-		/^NEXT=/ { next_ = substr($0, 6) }
-		/^PROBLEM=/ { pr[++np] = substr($0, 9) }
-		/^NOTE=/ { nt[++nn] = substr($0, 6) }
-		/^INFO=/ { inf[++ni] = substr($0, 6) }
+		function num(v) { return v ~ /^[0-9]+$/ }
+		function ridr(r) { return RID[r] == "" ? "unknown" : RID[r] }
+		function unitr(r) { return UNIT[r] == "" ? "cells" : UNIT[r] }
+		function nfail(r) { return num(FAILED[r]) ? FAILED[r] + 0 : 0 }
+		function stopped(r) { return STOPPED[r] == "1" || CUT[r] }
+		function quiet(r) { return NP[r] + NN[r] + NI[r] + nfail(r) == 0 && STOP[r] == "" && !stopped(r) }
+		function rec(r) {
+			return sprintf("{\"exit\":%s,\"run_id\":%s,\"failed\":%s,\"failed_by\":%s,\"problems\":%s,\"notes\":%s,\"info\":%s,\"stop_reason\":%s,\"unfinished\":false%s}", (num(EX[r]) ? EX[r] : "null"), jstr(ridr(r)), (num(FAILED[r]) ? FAILED[r] : "null"), jstr(FBY[r]), jl(r, "p"), jl(r, "n"), jl(r, "i"), jstr(STOP[r]), (stopped(r) ? ",\"stopped\":true" : ""))
+		}
+		function csvrec(r, p,    i) {
+			printf "# SWEEP_OUTCOME_%sRUN_ID=%s\n# SWEEP_OUTCOME_%sEXIT=%s\n# SWEEP_OUTCOME_%sFAILED=%s\n", p, ridr(r), p, EX[r], p, (num(FAILED[r]) || FAILED[r] == "" ? nfail(r) : FAILED[r])
+			if (FBY[r] != "") printf "# SWEEP_OUTCOME_%sFAILED_BY=%s\n", p, FBY[r]
+			for (i = 1; i <= NP[r]; i++) printf "# SWEEP_OUTCOME_%sPROBLEM=%s\n", p, PR[r, i]
+			for (i = 1; i <= NN[r]; i++) printf "# SWEEP_OUTCOME_%sNOTE=%s\n", p, NT[r, i]
+			for (i = 1; i <= NI[r]; i++) printf "# SWEEP_OUTCOME_%sINFO=%s\n", p, INF[r, i]
+			if (STOP[r] != "") printf "# SWEEP_OUTCOME_%sSTOP_REASON=%s\n", p, STOP[r]
+		}
+		function li(kind, text) {
+			if (fmt == "md") printf "> - %s: %s\n", kind, text
+			else printf "  %s: %s\n", kind, text
+		}
+		function title(r, src, label) {
+			if (fmt == "md") printf "> **%s** (recorded in `%s` by run `%s`, exit %s):%s\n", label, src, ridr(r), EX[r], (stopped(r) ? " **stopped**" : "")
+			else printf "%s (recorded in %s by run %s, exit %s):%s\n", toupper(label), src, ridr(r), EX[r], (stopped(r) ? " STOPPED" : "")
+		}
+		# body: the lines of record r; a stopped one leads with its reason. The warnings in W[1..nw]
+		# (this report adds them) come right after the reason, before the lines of the record.
+		function body(r,    i, lead) {
+			lead = stopped(r)
+			if (lead && STOP[r] != "") li("stopped early", STOP[r])
+			for (i = 1; i <= nw; i++) li("warning", W[i])
+			nw = 0
+			if (nfail(r) > 0) li("error", sprintf("%d of %s %s failed: %s", nfail(r), TOTAL[r], unitr(r), FBY[r]))
+			for (i = 1; i <= NP[r]; i++) li("error", PR[r, i])
+			for (i = 1; i <= NN[r]; i++) li("warning", NT[r, i])
+			for (i = 1; i <= NI[r]; i++) li("note", INF[r, i])
+			if (!lead && STOP[r] != "") li("stopped early", STOP[r])
+		}
+		{ r = (FILENAME == prevf) ? 2 : 1 }
+		/^EXIT=/ { EX[r] = substr($0, 6) }
+		/^RUN_ID=/ { RID[r] = substr($0, 8) }
+		/^UNIT=/ { UNIT[r] = substr($0, 6) }
+		/^TOTAL=/ { TOTAL[r] = substr($0, 7) }
+		/^FAILED=/ { FAILED[r] = substr($0, 8) }
+		/^FAILED_BY=/ { FBY[r] = substr($0, 11) }
+		/^STOPPED=/ { STOPPED[r] = substr($0, 9) }
+		/^STOP_REASON=/ { STOP[r] = substr($0, 13) }
+		/^CUT_SHORT=1$/ { CUT[r] = 1 }
+		/^STARTED_AT=/ { START[r] = substr($0, 12) }
+		/^RESUMED_AT=/ { RES[r] = substr($0, 12) }
+		/^ENDED_AT=/ { ENDED[r] = substr($0, 10) }
+		/^ENDED_EXIT=/ { ENDEX[r] = substr($0, 12) }
+		/^ENDED_SIGNAL=/ { ENDSIG[r] = substr($0, 14) }
+		/^NEXT=/ { NXT[r] = substr($0, 6) }
+		/^PROBLEM=/ { PR[r, ++NP[r]] = substr($0, 9) }
+		/^NOTE=/ { NT[r, ++NN[r]] = substr($0, 6) }
+		/^INFO=/ { INF[r, ++NI[r]] = substr($0, 6) }
 		END {
-			if (rid == "") rid = "unknown"
-			if (unit == "") unit = "cells"
-			nf = (failed ~ /^[0-9]+$/) ? failed + 0 : 0
-			fl = sprintf("%d of %s %s failed: %s", nf, total, unit, fby)
-			ol = "the record is from run " rid ", not from the run this report reads (" other ")"
+			rr = (mode == "resume") ? 2 : 1
+			ol = "the record is from run " ridr(rr) ", not from the run this report reads (" other ")"
+			ro = (other == "" ? "" : ",\"report_run_id\":" jstr(other))
 			if (mode == "first") {
-				if (next_ == "") next_ = "if it died, run it again"
-				fw = "this sweep has not finished (it died, or still runs): " (res != "" ? "its --resume that started at " res : "the run that started at " start) " has written no outcome yet, so no cell count vouches for these results, which may be partial; " next_
-				# I5: its EXIT trap ran: it was interrupted (Ctrl-C or a signal), it does not still run.
-				if (ended != "") {
-					sub(/^if it died, /, "", next_)
-					fw = "this sweep has not finished: " (res != "" ? "its --resume that started at " res : "the run that started at " start) " was interrupted at " ended " (" (endsig == "SIGINT" ? "SIGINT: Ctrl-C" : endsig == "SIGHUP" ? "SIGHUP: its terminal closed" : endsig != "" ? endsig : "exit " endex ", no error recorded") ") before it wrote its outcome, so no cell count vouches for these results, which may be partial; next: " next_
+				nx = NXT[1]
+				if (nx == "") nx = "if it died, run it again"
+				fw = "this sweep has not finished (it died, or still runs): " (RES[1] != "" ? "its --resume that started at " RES[1] : "the run that started at " START[1]) " has written no outcome yet, so no cell count vouches for these results, which may be partial; " nx
+				# Its EXIT trap ran: it was interrupted (Ctrl-C or a signal), it does not still run.
+				if (ENDED[1] != "") {
+					sub(/^if it died, /, "", nx)
+					fw = "this sweep has not finished: " (RES[1] != "" ? "its --resume that started at " RES[1] : "the run that started at " START[1]) " was interrupted at " ENDED[1] " (" (ENDSIG[1] == "SIGINT" ? "SIGINT: Ctrl-C" : ENDSIG[1] == "SIGHUP" ? "SIGHUP: its terminal closed" : ENDSIG[1] != "" ? ENDSIG[1] : "exit " ENDEX[1] ", no error recorded") ") before it wrote its outcome, so no cell count vouches for these results, which may be partial; next: " nx
 				}
 			}
-			ul = "the last --resume of this sweep" (mres != "" ? " (started at " mres ")" : "") " has not finished (" (mend != "" ? "it was interrupted at " mend (msig != "" ? " by " msig : "") "; run the same --resume again" : "it died, or still runs; if it died, run the same --resume again") "): this is the outcome before it, from sweep-outcome.prev.txt"
+			# ul: an unfinished --resume, before the outcome it shows; sl: a --resume that stopped.
+			ul = "the last --resume of this sweep" (RES[1] != "" ? " (started at " RES[1] ")" : "") " has not finished (" (ENDED[1] != "" ? "it was interrupted at " ENDED[1] (ENDSIG[1] != "" ? " by " ENDSIG[1] : "") "; run the same --resume again" : "it died, or still runs; if it died, run the same --resume again") "): this is the outcome before it, from sweep-outcome.prev.txt"
+			sl = "this stop ended a --resume of the sweep" (RES[1] != "" ? " (started at " RES[1] ")" : "") ": the outcome before it, from sweep-outcome.prev.txt, follows; the rows that --resume added before it stopped are in the TSV, uncounted"
 			if (fmt == "json") {
-				rec = sprintf("{\"exit\":%s,\"run_id\":%s,\"failed\":%s,\"failed_by\":%s,\"problems\":%s,\"notes\":%s,\"info\":%s,\"stop_reason\":%s,\"unfinished\":false}", (ex ~ /^[0-9]+$/ ? ex : "null"), jstr(rid), (failed ~ /^[0-9]+$/ ? failed : "null"), jstr(fby), jlist(pr, np), jlist(nt, nn), jlist(inf, ni), jstr(stop))
-				ro = (other == "" ? "" : ",\"report_run_id\":" jstr(other))
 				if (mode == "first")
-					printf "{\"exit\":null,\"run_id\":%s,\"failed\":null,\"failed_by\":null,\"problems\":[],\"notes\":[],\"info\":[],\"stop_reason\":null,\"unfinished\":true,\"started_at\":%s%s%s%s}\n", jstr(rid), (start == "" ? "null" : jstr(start)), (res == "" ? "" : ",\"resumed_at\":" jstr(res)), (ended == "" ? "" : ",\"interrupted_at\":" jstr(ended) (endsig == "" ? "" : ",\"interrupted_by\":" jstr(endsig))), ro
+					printf "{\"exit\":null,\"run_id\":%s,\"failed\":null,\"failed_by\":null,\"problems\":[],\"notes\":%s,\"info\":%s,\"stop_reason\":null,\"unfinished\":true,\"started_at\":%s%s%s%s}\n", jstr(ridr(1)), jl(1, "n"), jl(1, "i"), (START[1] == "" ? "null" : jstr(START[1])), (RES[1] == "" ? "" : ",\"resumed_at\":" jstr(RES[1])), (ENDED[1] == "" ? "" : ",\"interrupted_at\":" jstr(ENDED[1]) (ENDSIG[1] == "" ? "" : ",\"interrupted_by\":" jstr(ENDSIG[1]))), ro
 				else if (mode == "resume")
-					printf "{\"exit\":null,\"run_id\":%s,\"failed\":null,\"failed_by\":null,\"problems\":[],\"notes\":[],\"info\":[],\"stop_reason\":null,\"unfinished\":true,\"resume_unfinished\":true,\"started_at\":%s%s%s,\"earlier\":%s}\n", jstr(mrid != "" ? mrid : rid), (mstart == "" ? "null" : jstr(mstart)), (mend == "" ? "" : ",\"interrupted_at\":" jstr(mend) (msig == "" ? "" : ",\"interrupted_by\":" jstr(msig))), ro, rec
-				else
-					printf "%s%s}\n", substr(rec, 1, length(rec) - 1), ro
+					printf "{\"exit\":null,\"run_id\":%s,\"failed\":null,\"failed_by\":null,\"problems\":[],\"notes\":%s,\"info\":%s,\"stop_reason\":null,\"unfinished\":true,\"resume_unfinished\":true,\"started_at\":%s,\"resumed_at\":%s%s%s,\"earlier\":%s}\n", jstr(RID[1] != "" ? RID[1] : ridr(2)), jl(1, "n"), jl(1, "i"), (START[1] == "" ? "null" : jstr(START[1])), (RES[1] == "" ? "null" : jstr(RES[1])), (ENDED[1] == "" ? "" : ",\"interrupted_at\":" jstr(ENDED[1]) (ENDSIG[1] == "" ? "" : ",\"interrupted_by\":" jstr(ENDSIG[1]))), ro, rec(2)
+				else if (mode == "stopres") {
+					s = rec(1)
+					printf "%s,\"resumed_at\":%s%s,\"earlier\":%s}\n", substr(s, 1, length(s) - 1), (RES[1] == "" ? "null" : jstr(RES[1])), ro, rec(2)
+				} else {
+					s = rec(1)
+					printf "%s%s}\n", substr(s, 1, length(s) - 1), ro
+				}
 				exit
 			}
 			if (fmt == "csv") {
-				if (mode == "first") {
-					printf "# SWEEP_OUTCOME_RUN_ID=%s\n# SWEEP_OUTCOME_EXIT=unfinished\n# SWEEP_OUTCOME_STARTED_AT=%s\n", rid, start
-					if (ended != "") printf "# SWEEP_OUTCOME_INTERRUPTED_AT=%s\n", ended
-					if (endsig != "") printf "# SWEEP_OUTCOME_INTERRUPTED_BY=%s\n", endsig
-					printf "# WARNING: %s\n", fw
+				if (mode == "first" || mode == "resume") {
+					if (mode == "resume") printf "# WARNING: %s\n", ul
+					printf "# SWEEP_OUTCOME_RUN_ID=%s\n# SWEEP_OUTCOME_EXIT=unfinished\n", (RID[1] != "" ? RID[1] : ridr(rr))
+					if (mode == "resume") printf "# SWEEP_OUTCOME_RESUME_UNFINISHED=1\n"
+					if (mode == "first" || START[1] != "") printf "# SWEEP_OUTCOME_STARTED_AT=%s\n", START[1]
+					if (RES[1] != "") printf "# SWEEP_OUTCOME_RESUMED_AT=%s\n", RES[1]
+					if (ENDED[1] != "") printf "# SWEEP_OUTCOME_INTERRUPTED_AT=%s\n", ENDED[1]
+					if (ENDSIG[1] != "") printf "# SWEEP_OUTCOME_INTERRUPTED_BY=%s\n", ENDSIG[1]
+					for (i = 1; i <= NN[1]; i++) printf "# SWEEP_OUTCOME_NOTE=%s\n", NT[1, i]
+					for (i = 1; i <= NI[1]; i++) printf "# SWEEP_OUTCOME_INFO=%s\n", INF[1, i]
+					if (mode == "first") printf "# WARNING: %s\n", fw
+					else csvrec(2, "EARLIER_")
 					if (other != "") printf "# WARNING: sweep-outcome.txt: %s\n", ol
 					exit
 				}
-				if (mode == "resume") printf "# WARNING: %s\n", ul
-				printf "# SWEEP_OUTCOME_RUN_ID=%s\n# SWEEP_OUTCOME_EXIT=%s\n# SWEEP_OUTCOME_FAILED=%s\n", rid, ex, (failed ~ /^[0-9]+$/ || failed == "" ? nf : failed)
-				if (fby != "") printf "# SWEEP_OUTCOME_FAILED_BY=%s\n", fby
-				for (i = 1; i <= np; i++) printf "# SWEEP_OUTCOME_PROBLEM=%s\n", pr[i]
-				for (i = 1; i <= nn; i++) printf "# SWEEP_OUTCOME_NOTE=%s\n", nt[i]
-				for (i = 1; i <= ni; i++) printf "# SWEEP_OUTCOME_INFO=%s\n", inf[i]
-				if (stop != "") printf "# SWEEP_OUTCOME_STOP_REASON=%s\n", stop
+				csvrec(1, "")
+				if (mode == "stopres") {
+					if (RES[1] != "") printf "# SWEEP_OUTCOME_RESUMED_AT=%s\n", RES[1]
+					printf "# WARNING: %s\n", sl
+					csvrec(2, "EARLIER_")
+				}
 				if (other != "") printf "# WARNING: sweep-outcome.txt: %s\n", ol
 				exit
 			}
 			if (mode == "first") {
-				if (fmt == "md") {
-					printf "> **Sweep outcome** (recorded in `%s` by run `%s`): **not finished**\n", src, rid
-					printf "> - warning: %s\n", fw
-					if (other != "") printf "> - warning: %s\n", ol
-				} else {
-					printf "SWEEP OUTCOME (recorded in %s by run %s): NOT FINISHED\n", src, rid
-					printf "  warning: %s\n", fw
-					if (other != "") printf "  warning: %s\n", ol
-				}
+				if (fmt == "md") printf "> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `%s`): **not finished**\n", ridr(1)
+				else printf "SWEEP OUTCOME (recorded in sweep-outcome.txt by run %s): NOT FINISHED\n", ridr(1)
+				li("warning", fw)
+				if (other != "") li("warning", ol)
+				for (i = 1; i <= NN[1]; i++) li("warning", NT[1, i])
+				for (i = 1; i <= NI[1]; i++) li("note", INF[1, i])
 				printf "\n"
 				exit
 			}
-			if (np + nn + ni + nf == 0 && stop == "" && other == "" && mode != "resume") exit
-			if (fmt == "md") {
-				printf "> **Sweep outcome** (recorded in `%s` by run `%s`, exit %s):\n", src, rid, ex
-				if (mode == "resume") printf "> - warning: %s\n", ul
-				if (other != "") printf "> - warning: %s\n", ol
-				if (nf > 0) printf "> - error: %s\n", fl
-				for (i = 1; i <= np; i++) printf "> - error: %s\n", pr[i]
-				for (i = 1; i <= nn; i++) printf "> - warning: %s\n", nt[i]
-				for (i = 1; i <= ni; i++) printf "> - note: %s\n", inf[i]
-				if (stop != "") printf "> - stopped early: %s\n", stop
+			if (mode == "resume") {
+				title(2, "sweep-outcome.prev.txt", "Sweep outcome")
+				nw = 0
+				W[++nw] = ul
+				for (i = 1; i <= NN[1]; i++) W[++nw] = NT[1, i] " (noted by that --resume)"
+				for (i = 1; i <= NI[1]; i++) W[++nw] = INF[1, i] " (noted by that --resume)"
+				if (other != "") W[++nw] = ol
+				body(2)
 				printf "\n"
-			} else {
-				printf "SWEEP OUTCOME (recorded in %s by run %s, exit %s):\n", src, rid, ex
-				if (mode == "resume") printf "  warning: %s\n", ul
-				if (other != "") printf "  warning: %s\n", ol
-				if (nf > 0) printf "  error: %s\n", fl
-				for (i = 1; i <= np; i++) printf "  error: %s\n", pr[i]
-				for (i = 1; i <= nn; i++) printf "  warning: %s\n", nt[i]
-				for (i = 1; i <= ni; i++) printf "  note: %s\n", inf[i]
-				if (stop != "") printf "  stopped early: %s\n", stop
+				exit
+			}
+			if (mode == "final" && quiet(1) && other == "") exit
+			title(1, "sweep-outcome.txt", "Sweep outcome")
+			nw = 0
+			if (mode == "stopres") W[++nw] = sl
+			if (other != "") W[++nw] = ol
+			body(1)
+			printf "\n"
+			if (mode == "stopres") {
+				title(2, "sweep-outcome.prev.txt", "Outcome before this --resume")
+				body(2)
+				if (quiet(2)) li("note", sprintf("all %s %s ran; nothing failed or was noted", TOTAL[2], unitr(2)))
 				printf "\n"
 			}
 		}' "${files[@]}"
@@ -710,26 +945,26 @@ sweep_outcome_recorded() {
 #   --unit <noun>    what a cell is called, plural (default cells; tuning: passes)
 #   --where <text>   where a failed one shows in the results (default: the report's
 #                    placeholder rows, in n_total, not n_valid)
-#   --problem <msg>  the sweep failed although its cells ran (A6: the Istio version changed
+#   --problem <msg>  the sweep failed although its cells ran (the Istio version changed
 #                    under it); printed, recorded and counted like a failed cell
-#   --uncounted <why>  N3: the sweep could not count its cells: a problem ("could not count
+#   --uncounted <why>  the sweep could not count its cells: a problem ("could not count
 #                    the sweep's <unit>: <why>"), "All cells ran" is never printed, and the
-#                    record says TOTAL=unknown, FAILED=unknown and SKIPPED=unknown (P2)
+#                    record says TOTAL=unknown, FAILED=unknown and SKIPPED=unknown
 #   --note <msg>     a caveat; printed and recorded, not a failure
-#   --info <msg>     a fact worth keeping that is not a caveat (K6: a --resume whose members
+#   --info <msg>     a fact worth keeping that is not a caveat (a --resume whose members
 #                    were all ready); printed on stdout as "note: <msg>." and recorded
-#   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt (C3), with RUN_ID
+#   --record <dir>   also write the outcome to <dir>/sweep-outcome.txt, with RUN_ID
 #                    (--run-id) and HARNESS_SHA (the sweep's HARNESS_SHA, as its TSVs
 #                    record it, else harness_sha when preamble.sh is sourced)
 #   --run-id <id>    the sweep's RUN_ID, for the record
 #   --md <file>      also append it to that markdown report, as a "Sweep outcome" section;
-#                    may be given more than once (the summary and the scale envelope, R1).
-#                    A file that does not exist is skipped. A3: the report's "not written
+#                    may be given more than once (the summary and the scale envelope).
+#                    A file that does not exist is skipped. The report's "not written
 #                    yet" line (SWEEP_OUTCOME_PENDING_MARK) is removed first.
 # A report re-generated later shows the record's PROBLEM, NOTE and INFO lines again
-# (sweep_outcome_recorded). A3: the record replaces the sweep's sweep_outcome_start record;
+# (sweep_outcome_recorded). The record replaces the sweep's sweep_outcome_start record;
 # a sweep dir that still holds that one is a sweep that was killed before its end (no trap
-# ran), was interrupted (I5: with ENDED_AT), or still runs; one that stopped with an error
+# ran), was interrupted (with ENDED_AT), or still runs; one that stopped with an error
 # after its start holds the stop record sweep_outcome_on_exit wrote (CUT_SHORT=1); and one
 # without sweep-outcome.txt is from a sweep that stopped before its start (a precondition:
 # nothing ran), or from an older harness.
@@ -779,10 +1014,12 @@ sweep_outcome() {
 	for r in ${problems[@]+"${problems[@]}"}; do lines+=("err|error: ${r}${tail}"); done
 	for r in ${notes[@]+"${notes[@]}"}; do lines+=("err|warning: ${r}."); done
 	for r in ${infos[@]+"${infos[@]}"}; do lines+=("out|note: ${r}."); done
+	# A stop leads the record's lines in the markdown (the reason first, under a
+	# "stopped" heading); the console printed it already.
 	if [[ -n "$stop_rc" && ${#failed_r[@]} -eq 0 && ${#problems[@]} -eq 0 ]]; then
-		lines+=("rec|The sweep stopped early${stop_why:+ (${stop_why})}; it exits ${stop_rc}.")
+		lines=("rec|The sweep stopped early${stop_why:+ (${stop_why})}; it exits ${stop_rc}." ${lines[@]+"${lines[@]}"})
 	elif [[ -n "$stop_why" ]]; then
-		lines+=("rec|It stopped early: ${stop_why}.")
+		lines=("rec|It stopped early: ${stop_why}." ${lines[@]+"${lines[@]}"})
 	fi
 	for r in ${lines[@]+"${lines[@]}"}; do
 		case "$r" in
@@ -791,19 +1028,24 @@ sweep_outcome() {
 		esac
 	done
 	if [[ -n "$record" ]]; then
+		local so_stopped=0 so_total=unknown so_failed=unknown so_skipped=unknown
+		if [[ -n "$stop_rc" ]]; then so_stopped=1; fi
+		if [[ -z "$uncounted" ]]; then
+			so_total="$cells" so_failed="${#failed_r[@]}" so_skipped="${#skipped_r[@]}"
+		fi
 		{
 			echo "# Sweep outcome (tests/lib/common.sh sweep_outcome)"
 			echo "# DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 			echo "RUN_ID=${run_id_r:-unknown}"
-			echo "HARNESS_SHA=${HARNESS_SHA:-$(declare -F harness_sha >/dev/null && harness_sha || echo unknown)}"
+			echo "HARNESS_SHA=${HARNESS_SHA:-$(harness_sha)}"
 			echo "EXIT=${rc}"
-			echo "STOPPED=$([[ -n "$stop_rc" ]] && echo 1 || echo 0)"
+			echo "STOPPED=${so_stopped}"
 			echo "STOP_REASON=${stop_why}"
 			echo "UNIT=${unit}"
-			echo "TOTAL=$([[ -z "$uncounted" ]] && echo "$cells" || echo unknown)"
-			echo "FAILED=$([[ -z "$uncounted" ]] && echo "${#failed_r[@]}" || echo unknown)"
+			echo "TOTAL=${so_total}"
+			echo "FAILED=${so_failed}"
 			echo "FAILED_BY=${by_fail}"
-			echo "SKIPPED=$([[ -z "$uncounted" ]] && echo "${#skipped_r[@]}" || echo unknown)"
+			echo "SKIPPED=${so_skipped}"
 			echo "SKIPPED_BY=${by_skip}"
 			for r in ${problems[@]+"${problems[@]}"}; do echo "PROBLEM=${r}"; done
 			for r in ${notes[@]+"${notes[@]}"}; do echo "NOTE=${r}"; done
@@ -821,7 +1063,7 @@ sweep_outcome() {
 		fi
 		{
 			echo ""
-			echo "## Sweep outcome"
+			echo "## Sweep outcome$([[ -z "$stop_rc" ]] || echo ": stopped")"
 			echo ""
 			echo "Exit ${rc}. $([[ -n "$record" ]] && echo "Also in \`sweep-outcome.txt\`.")"
 			echo ""
@@ -831,55 +1073,247 @@ sweep_outcome() {
 	return "$rc"
 }
 
-# --- controlplane cell attempts (A1) ---
+# --- the harness a run uses (PL2) ---
+
+# harness_sha [--exclude <dir>]...: the harness the run uses (PL2): `git -C "${ROOT:-.}"
+# describe --always --abbrev=7`, or unknown when git cannot name it. A tree with uncommitted
+# changes (tracked files that differ from HEAD, or untracked files that are not ignored)
+# gets `-dirty.<8hex>`: `<describe>-dirty.<8hex>` (_harness_dirty_hash), so two different
+# uncommitted trees on one commit record two different values, and one tree records one
+# value whatever the operator's git config. Submodules (the bats checkouts) never count, as
+# `--ignore-submodules`: one moved, copied without its .git or with its gitdir gone reads
+# clean. When the content cannot be hashed, a tree whose tracked files differ from HEAD
+# reads `-dirty.unknown`. Each --exclude <dir> under the checkout (a sweep's --output-dir
+# there: its own results) does not count. A sweep computes it once (harness_sha_for_sweep), and every step it runs reads
+# that value: HARNESS_SHA_SWEEP, exported with HARNESS_SHA_SWEEP_ROOT, the checkout it
+# names, is returned as it is while ROOT is that checkout, so one sweep records one value
+# even when a file changes during it.
+# shellcheck disable=SC2329
+harness_sha() {
+	local sha h root="${ROOT:-.}"
+	local -a hs_excl=()
+	while (($#)); do
+		case "$1" in
+		--exclude)
+			[[ -z "${2:-}" ]] || hs_excl+=("$2")
+			shift 2 || shift
+			;;
+		*) shift ;;
+		esac
+	done
+	if [[ -n "${HARNESS_SHA_SWEEP:-}" && "${HARNESS_SHA_SWEEP_ROOT:-}" == "$root" ]]; then
+		printf '%s\n' "$HARNESS_SHA_SWEEP"
+		return 0
+	fi
+	# No --dirty: it fails (exit 128) when a submodule's gitdir is gone, and counts a moved
+	# submodule; the content hash below says whether the tree is dirty.
+	sha="$(git -C "$root" describe --always --abbrev=7 2>/dev/null || true)"
+	[[ -n "$sha" ]] || sha="unknown"
+	if [[ "$sha" != unknown ]]; then
+		if h="$(_harness_dirty_hash ${hs_excl[@]+"${hs_excl[@]}"})"; then
+			[[ -z "$h" ]] || sha+="-dirty.${h}"
+		elif ! git -C "$root" diff --quiet --no-ext-diff --no-textconv --ignore-submodules=all HEAD -- 2>/dev/null; then
+			# The content could not be hashed, and the tracked files differ from HEAD (or git
+			# cannot tell): dirty, by what is unknown.
+			sha+="-dirty.unknown"
+		fi
+	fi
+	printf '%s\n' "$sha"
+}
+
+# harness_sha_for_sweep [<output_dir>]: a sweep's harness, once: sets HARNESS_SHA
+# (harness_sha --exclude <output_dir>) and exports it as HARNESS_SHA_SWEEP, with the
+# checkout as HARNESS_SHA_SWEEP_ROOT, so each step (a probe, a report) records that value,
+# never one of its own. Call it before the first step, as a plain command.
+# shellcheck disable=SC2329
+harness_sha_for_sweep() {
+	local hsfs_root="${ROOT:-.}"
+	unset HARNESS_SHA_SWEEP HARNESS_SHA_SWEEP_ROOT
+	if [[ -n "${1:-}" ]]; then
+		HARNESS_SHA="$(harness_sha --exclude "$1")"
+	else
+		HARNESS_SHA="$(harness_sha)"
+	fi
+	export HARNESS_SHA_SWEEP="$HARNESS_SHA" HARNESS_SHA_SWEEP_ROOT="$hsfs_root"
+}
+
+# _harness_dirty_hash [<exclude_dir>...]: 8 hex digits that name the uncommitted content of
+# the tree under ROOT, or nothing for a clean tree; returns 1 (prints nothing) when git
+# cannot hash it. The content,
+# never a diff (a diff's text follows the operator's git config: diff.context,
+# diff.orderFile, core.abbrev): the tree object id git would write for the working tree,
+# built in a temporary index (GIT_INDEX_FILE, never the operator's): `read-tree HEAD`, then
+# every tracked path and every untracked file that is not ignored (`ls-files --cached
+# --others --exclude-standard`) through `update-index --add --remove --info-only` (hashes
+# each file once, writes no object into the repository), then `write-tree --missing-ok`. A
+# clean tree is HEAD's own tree. core.autocrlf is pinned off, so line endings count as they
+# are. Ignored files never count: .gitignore (editor and Finder files: .DS_Store, *.swp,
+# *.swo, *~; the results/ dirs), .git/info/exclude, and the operator's global
+# core.excludesFile (a file that only it ignores reads clean for that operator). Each
+# <exclude_dir> under the checkout is left out (`:(exclude)` pathspec), and so is each
+# submodule of HEAD (its gitlink keeps HEAD's commit). The path list goes through a file,
+# never a pipe, so the result is the same with and without pipefail. git only: no
+# sha256sum or shasum.
+# shellcheck disable=SC2329
+_harness_dirty_hash() {
+	local root="${ROOT:-.}" top idx tree htree d rel ent
+	local -a hdh_spec=(.)
+	top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || return 1
+	htree="$(git -C "$top" rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null)" || return 1
+	for d in "$@"; do
+		d="$(cd "$d" 2>/dev/null && pwd -P)" || continue
+		rel="${d#"$(cd "$top" && pwd -P)"/}"
+		[[ "$rel" != "$d" && -n "$rel" ]] || continue
+		hdh_spec+=(":(exclude,top,literal)${rel}")
+	done
+	idx="$(mktemp "${TMPDIR:-/tmp}/harness-index.XXXXXX" 2>/dev/null)" || return 1
+	# HEAD's submodules (mode 160000 gitlinks): left out, as --ignore-submodules.
+	git -C "$top" ls-tree -r -z --full-tree HEAD > "$idx" 2>/dev/null || { rm -f "$idx"; return 1; }
+	while IFS= read -r -d '' ent; do
+		[[ "$ent" != 160000\ * ]] || hdh_spec+=(":(exclude,top,literal)${ent#*$'\t'}")
+	done < "$idx"
+	rm -f "$idx"
+	tree="$(
+		export GIT_INDEX_FILE="$idx"
+		git -C "$top" read-tree HEAD 2>/dev/null || exit 1
+		git -C "$top" -c core.quotePath=true ls-files -z --cached --others --exclude-standard -- "${hdh_spec[@]}" \
+			> "${idx}.paths" 2>/dev/null || exit 1
+		git -C "$top" -c core.autocrlf=false -c core.safecrlf=false update-index -z --add --remove --info-only --stdin \
+			< "${idx}.paths" 2>/dev/null || exit 1
+		git -C "$top" write-tree --missing-ok 2>/dev/null
+	)" || tree=""
+	rm -f "$idx" "${idx}.paths"
+	[[ "$tree" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+	# A clean tree: HEAD's own.
+	[[ "$tree" != "$htree" ]] || return 0
+	printf '%s\n' "${tree:0:8}"
+}
+
+# report_harness_sha: the harness a report itself runs, which every report prints in every
+# format as REPORT_HARNESS_SHA next to the HARNESS_SHA its inputs recorded: a report
+# re-generated later, or from another checkout, can count rows by other rules than the
+# harness that measured them. Under a sweep it is the sweep's (harness_sha_for_sweep).
+# shellcheck disable=SC2329
+report_harness_sha() {
+	harness_sha
+}
+
+# --- controlplane cell attempts and states ---
+
+# CP_CELL_AWK: awk functions that read a legacy controlplane cell from the rows of its
+# latest attempt (controlplane_latest_attempts), so 003 (which cells a --resume skips or
+# runs again, the cell count) and 004 (its data warnings and NOT_RUN count) decide by one
+# rule (PL41):
+#   cp_header()          call at the TSV header line: finds traffic_config and window_kind.
+#   cp_key()             the current row's cell key: columns 3-7, traffic_config and
+#                        window_kind (none and deploy when absent), joined by SUBSEP.
+#   cp_cell_row(k, st)   feed it each data row of cell k in file order (st: the status-row
+#                        regex, 003's CELL_STATUS_RE); returns 1 for a status row.
+#   cp_cell_state(k)     "" when the cell is done: its last row is a measurement row, and
+#                        the measurement rows since its last status row name as many
+#                        distinct members as its mesh_size; the status of its last row
+#                        when that is a status row; else INCOMPLETE: the run was cut short
+#                        while 002 wrote the cell's member rows (cp_nm[k] of its cp_ms[k]
+#                        members have one). Any key works (a caller may prefix the file).
+#   cp_valid[k]          set when the cell has a valid row (istiod_restarted 0).
+#   cp_after[k]          set when a measurement row follows a status row of the cell: two
+#                        attempts with no recorded boundary between them, so they pool.
+#   cp_plan_load(f)      the cells planned-cells.txt <f> lists into cp_plan[k] (its PLAN
+#                        number), in order cp_plan_order[1..n]; returns n, or -1 when <f>
+#                        cannot be read.
+# shellcheck disable=SC2016,SC2034  # awk source, read by the scripts that source this file
+CP_CELL_AWK='
+function cp_header(    i) { cp_tcol = 0; cp_wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") cp_tcol = i; if ($i == "window_kind") cp_wcol = i } }
+function cp_key() { return $3 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP ((cp_tcol && NF >= cp_tcol) ? $cp_tcol : "none") SUBSEP ((cp_wcol && NF >= cp_wcol) ? $cp_wcol : "deploy") }
+function cp_cell_row(k, st,    mk) {
+	cp_ms[k] = $3 + 0
+	if ($2 ~ st) { cp_last[k] = $2; cp_ep[k]++; cp_nm[k] = 0; return 1 }
+	if (cp_last[k] != "") cp_after[k] = 1
+	cp_last[k] = ""
+	if ($31 == "0") cp_valid[k] = 1
+	mk = k SUBSEP (cp_ep[k] + 0) SUBSEP $2
+	if (!(mk in cp_mem)) { cp_mem[mk] = 1; cp_nm[k]++ }
+	return 0
+}
+function cp_cell_state(k) {
+	if (cp_last[k] != "") return cp_last[k]
+	return (cp_nm[k] + 0 < cp_ms[k] + 0) ? "INCOMPLETE" : ""
+}
+function cp_plan_load(f,    r, line, p, n, fl, k) {
+	p = 0; n = 0
+	while ((r = (getline line < f)) > 0) {
+		if (line ~ /^# PLAN=[0-9]+ /) { p = substr(line, 8); sub(/ .*/, "", p); continue }
+		if (line ~ /^#/ || line ~ /^mesh_size\t/ || line == "") continue
+		if (split(line, fl, "\t") < 7) continue
+		k = fl[1] SUBSEP fl[2] SUBSEP fl[3] SUBSEP fl[4] SUBSEP fl[5] SUBSEP fl[6] SUBSEP fl[7]
+		if (!(k in cp_plan)) { cp_plan[k] = p; cp_plan_order[++n] = k }
+	}
+	close(f)
+	return (r < 0 ? -1 : n)
+}
+'
 
 # controlplane_latest_attempts <tsv> <resumes_txt> <out_tsv>: copy a controlplane TSV to
 # <out_tsv> without the rows of each cell's earlier attempts, so a report, the cell count
-# and the scale envelope never pool two attempts of one cell (PL15). A cell is keyed as
-# 003's combo_already_done keys it: columns 3-7, traffic_config and window_kind (by header
-# name; none and deploy when absent). An attempt is a run of the sweep: the first run, then
-# each --resume that resumes.txt lists, from the row its TSV_LINES column names on (the
-# TSV's line count when that resume started), else, in a file a harness before A1 wrote,
-# from its RESUMED_AT on (by the row's timestamp, which has the same format). A cell's
-# latest attempt is the last run that wrote a row of it; its rows from earlier runs are left
-# out. Comment, header and short lines (fewer than 40 columns) are copied as they are. A
-# TSV without resumes.txt (pass "" or a missing file: a first run, or a growth series, which
-# is never resumed) is copied whole. Prints "<rows left out><TAB><cells they belong to>";
-# returns non-zero, printing nothing, when awk fails.
+# and the scale envelope never pool two attempts of one cell (PL15). A cell is keyed as 003
+# keys it (CP_CELL_AWK cp_key). An attempt is a run of the sweep: the first run, then each
+# --resume. Where a --resume starts is read from both places 003 records it, so a TSV copied
+# without its resumes.txt still keeps its attempts apart: the TSV's own `# RESUMED_AT=<time>
+# TSV_LINES=<n> HARNESS_SHA=<sha>` line (the resume's first line in it), and resumes.txt's
+# TSV_LINES column (the TSV's line count when that resume started) or, in a resumes.txt a
+# harness without that column wrote, its RESUMED_AT (from the first row of that time on).
+# A resumes.txt row whose TSV column names another file is not this TSV's (a resumes.txt
+# applies only to its TSV); a row without the column applies. Both records of one start
+# count once. A cell's latest attempt is the last run that wrote a row of it; its rows from
+# earlier runs are left out. Comment, header and short lines (fewer than 40 columns) are
+# copied as they are. A TSV without a recorded resume (a first run, or a growth series,
+# which is never resumed) is copied whole. Prints "<rows left out><TAB><cells they belong
+# to>"; returns non-zero, printing nothing, when awk fails (resumes.txt unreadable).
 # shellcheck disable=SC2329
 controlplane_latest_attempts() {
 	local tsv="$1" res="${2:-}" out="$3"
 	[[ -n "$res" && -f "$res" ]] || res=/dev/null
 	: > "$out" || return 1
-	awk -F'\t' -v res="$res" -v out="$out" '
+	awk -F'\t' -v res="$res" -v out="$out" -v tname="${tsv##*/}" "${CP_CELL_AWK}"'
+		function addb(p) { if (!(p in bp)) { bp[p] = 1; nb++; bs[nb] = p } }
+		# seg(x): the attempt line x belongs to (0: the first run): the starts before it.
+		function seg(x,    s, i) { s = 0; for (i = 1; i <= nb; i++) if (x > bs[i]) s++; return s }
 		BEGIN {
 			while ((r = (getline line < res)) > 0) {
 				n = split(line, f, "\t")
-				if (f[1] == "RESUMED_AT") { lc = 0; for (i = 1; i <= n; i++) if (f[i] == "TSV_LINES") lc = i; continue }
+				if (f[1] == "RESUMED_AT") { lc = 0; tc = 0; for (i = 1; i <= n; i++) { if (f[i] == "TSV_LINES") lc = i; if (f[i] == "TSV") tc = i }; continue }
 				if (n < 2 || f[1] == "") continue
-				nb++
-				bt[nb] = substr(f[1], 1, 19)
-				bl[nb] = (lc && n >= lc && f[lc] ~ /^[0-9]+$/) ? f[lc] + 0 : -1
+				if (tc && n >= tc && f[tc] != "" && f[tc] != tname) continue
+				if (lc && n >= lc && f[lc] ~ /^[0-9]+$/) { addb(f[lc] + 0); continue }
+				nt++
+				bt[nt] = substr(f[1], 1, 19)
 			}
 			if (r < 0) { print "cannot read " res > "/dev/stderr"; bad = 1; exit 2 }
 			close(res)
 		}
-		function seg(    s, i) {
-			s = 0
-			for (i = 1; i <= nb; i++) if (bl[i] >= 0 ? FNR > bl[i] : substr($1, 1, 19) >= bt[i]) s = i
-			return s
+		FNR == 1 {
+			pass++
+			# Every start is known after the first pass: each row of it to its attempt.
+			if (pass == 2) for (i = 1; i <= nr; i++) { s = seg(rf[i]); if (!(rk[i] in top) || s > top[rk[i]]) top[rk[i]] = s }
 		}
-		FNR == 1 { pass++ }
-		/^timestamp\t/ { tcol = 0; wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") tcol = i; if ($i == "window_kind") wcol = i } }
+		pass == 1 && /^# RESUMED_AT=/ { addb(FNR - 1); next }
+		/^timestamp\t/ { cp_header() }
 		{ data = !(/^#/ || /^timestamp\t/ || NF < 40) }
-		data { k = $3 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP ((tcol && NF >= tcol) ? $tcol : "none") SUBSEP ((wcol && NF >= wcol) ? $wcol : "deploy") }
-		pass == 1 { if (data) { s = seg(); if (!(k in top) || s > top[k]) top[k] = s }; next }
-		data && seg() < top[k] { drop++; if (!(k in dk)) { dk[k] = 1; ndk++ }; next }
+		pass == 1 {
+			if (data) {
+				for (i = 1; i <= nt; i++) if (!(i in tdone) && substr($1, 1, 19) >= bt[i]) { tdone[i] = 1; addb(FNR - 1) }
+				nr++
+				rf[nr] = FNR
+				rk[nr] = cp_key()
+			}
+			next
+		}
+		data { k = cp_key(); if (seg(FNR) < top[k]) { drop++; if (!(k in dk)) { dk[k] = 1; ndk++ }; next } }
 		{ print > out }
 		END { if (bad) exit 2; close(out); printf "%d\t%d\n", drop, ndk }' "$tsv" "$tsv"
 }
 
-# --- markdown table cells (I7) ---
+# --- markdown table cells ---
 
 # md_cell [-v <var>] <value>: <value> as the text of a markdown table cell: each | as \|
 # (a mixed value joins per-member lists with " | ", which would split the cell) and each
@@ -919,10 +1353,65 @@ function md_cell(s,    out, i) {
 }
 '
 
-# --- file size without a fork (I8) ---
+# --- YAML frontmatter values ---
+
+# yaml_str [-v <var>] [-n] <value>: <value> as a YAML double-quoted scalar, for a report's
+# frontmatter (PL19): each \ and " escaped, a tab, newline and carriage return as \t, \n
+# and \r, any other control character as \xNN (\uNNNN above U+00FF), so a value from a
+# hand-edited TSV, a context name or a reason keeps the frontmatter parseable and reads
+# back as itself. With -n a plain decimal number (0, 12, 0.5, -3; no leading zero, which
+# YAML 1.1 reads as octal) stays bare, a YAML number. Printed without a newline, or with
+# -v stored in <var> (no subshell). A plain loop, no ${v//\\/...} (see md_cell).
+# shellcheck disable=SC2329
+yaml_str() {
+	local _ys_var="" _ys_num=0
+	if [[ "${1:-}" == -v ]]; then
+		_ys_var="$2"
+		shift 2
+	fi
+	if [[ "${1:-}" == -n && $# -gt 1 ]]; then
+		_ys_num=1
+		shift
+	fi
+	local _ys_s="${1-}" _ys_out='"' _ys_c _ys_x _ys_i
+	if ((_ys_num)) && [[ "$_ys_s" =~ ^-?(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then
+		_ys_out="$_ys_s"
+	elif [[ "$_ys_s" != *[\\\"[:cntrl:]]* ]]; then
+		_ys_out="\"${_ys_s}\""
+	else
+		for ((_ys_i = 0; _ys_i < ${#_ys_s}; _ys_i++)); do
+			_ys_c="${_ys_s:_ys_i:1}"
+			case "$_ys_c" in
+			"\\") _ys_out+="\\\\" ;;
+			'"') _ys_out+='\"' ;;
+			$'\t') _ys_out+='\t' ;;
+			$'\n') _ys_out+='\n' ;;
+			$'\r') _ys_out+='\r' ;;
+			[[:cntrl:]])
+				printf -v _ys_x '%d' "'${_ys_c}"
+				if ((_ys_x <= 255)); then
+					printf -v _ys_x '\\x%02x' "$_ys_x"
+				else
+					printf -v _ys_x '\\u%04x' "$_ys_x"
+				fi
+				_ys_out+="$_ys_x"
+				;;
+			*) _ys_out+="$_ys_c" ;;
+			esac
+		done
+		_ys_out+='"'
+	fi
+	if [[ -n "$_ys_var" ]]; then
+		printf -v "$_ys_var" '%s' "$_ys_out"
+	else
+		printf '%s' "$_ys_out"
+	fi
+}
+
+# --- file size without a fork ---
 
 # file_min_bytes <file> <n>: true when <file> is a readable regular file of at least <n>
-# bytes. It forks nothing when it is (B6, I8: it runs once per scrape file): the read
+# bytes. It forks nothing when it is (it runs once per scrape file): the read
 # builtin takes the first <n> characters, and as many characters are at least as many
 # bytes; fewer characters (a short file, NUL bytes, or multibyte text) are counted in
 # bytes with wc. False for a missing, unreadable or empty file, and for <n> not a number.

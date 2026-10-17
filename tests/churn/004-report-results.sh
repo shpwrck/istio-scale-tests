@@ -5,7 +5,7 @@
 # and HARNESS_SHA / ISTIO_VERSION (with ISTIO_VERSION_SOURCE, _PIN and _BY_CONTEXT) as
 # 002 recorded them, over all input TSVs: mixed:a,b with a warning when they differ
 # (PL26). More than one run under the results dir stops the report unless
-# --allow-multi-run, and then every format says so (R3).
+# --allow-multi-run, and then every format says so.
 # Histogram p99 columns show the worst bucket a valid row hit, and "overflow (N rows)"
 # when a row's p99 was in the +Inf bucket; they are never averaged.
 #
@@ -30,7 +30,7 @@ source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
 FORMAT="text"
-# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# --allow-multi-run: pool more than one run (else the report refuses). Per invocation
 # like --force-large-matrix, so no options.env key.
 ALLOW_MULTI_RUN=0
 DRY_RUN=0
@@ -85,15 +85,16 @@ them; inputs that differ read mixed:<value>,<value> with each distinct value onc
 (mixed:v1.30.5,v1.29.0, also when one run's own value was mixed:v1.30.5/v1.29.0).
 istio_version is each member's active IstioRevision .spec.version as 002 read it
 (istio_version_by_context: which member ran which).
-When the results dir holds sweep-outcome.txt (003 writes it),
-text, csv and md repeat it, with the run that recorded it: the failed cells by reason, its
-problems (the Istio version or active revision changed under the sweep) and notes
-(members not ready at its start or end). The sweep writes it at its start as "not
-finished" (EXIT=unfinished) and replaces it at its end: a record still not finished is
-a sweep that died or still runs, or (I5) one interrupted, with when and by which signal;
-one that stopped on an error after its start shows the stop and its reason. A sweep dir
-without the file is from a sweep that stopped before its start (nothing ran), or from
-an older harness.
+When the results dir holds sweep-outcome.txt (003 writes it), text, csv and md
+repeat it, with the run that recorded it: the failed cells by reason, its problems
+(the Istio version, the active revision or the generation of the Istio CR or its
+active IstioRevision changed under the sweep, or the end-of-sweep check failed) and
+notes (members not ready at its start or end). The sweep writes it at its start as
+"not finished" (EXIT=unfinished) and replaces it at its end: a record still not
+finished is a sweep that died or still runs, or one interrupted (Ctrl-C, SIGTERM,
+SIGHUP), with when and by which signal; one that stopped on an error after its start
+shows the stop and its reason. A sweep dir without the file is from a sweep that
+stopped before its start (nothing ran), or from an older harness.
 Histogram p99 columns (queue time, push time) show the worst bucket any valid row
 hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
 csv adds worst_bucket and n_overflow columns.
@@ -146,7 +147,7 @@ esac
 if ((DRY_RUN)); then
 	DRY_FILES=()
 	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find -H "$RESULTS_DIR" -name 'churn-*.tsv' -type f | sort)
-	# The same refusal as the report (R3): a dir with more than one run is not summarized.
+	# The same refusal as the report: a dir with more than one run is not summarized.
 	((${#DRY_FILES[@]} == 0)) || config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${DRY_FILES[@]}"
 	echo "[dry-run] would summarize ${#DRY_FILES[@]} churn-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
 	exit 0
@@ -163,13 +164,13 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# R3/PL6: the report pools every TSV under the results dir; more than one run stops it
+# PL6: the report pools every TSV under the results dir; more than one run stops it
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
 
 # Every format reads the rows through churn_rows, which re-derives the status of a row
-# an older 002 wrote as OK with no number in a measured column (before R12), so it
+# an older 002 wrote as OK with no number in a measured column, so it
 # cannot count in n_valid. 002's rule: with remotes (mesh size > 1), no number in
 # convergence_remote_eds_ms is TIMEOUT_REMOTE_EDS; no number in convergence_local_ms,
 # the source push deltas, or (with remotes) remote_endpoint_reachable_ms and the
@@ -199,22 +200,22 @@ fi
 preamble_get() {
 	local v
 	v="$(config_input_value "$1" "" "${TSV_FILES[@]}")"
-	[[ -n "$v" ]] && echo "$v" || echo "unknown"
+	if [[ -n "$v" ]]; then echo "$v"; else echo "unknown"; fi
 }
 
 # run_meta <key>: a `# <key>=` value as 002 (or the 003 placeholder) recorded it, over
 # every input TSV, never read from this checkout or environment: the report may run on
 # another commit than the probe. A file without the line (written before 002 recorded
 # the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b
-# (config_input_value: each distinct value once, X13) plus a stderr warning (PL26).
+# (config_input_value: each distinct value once) plus a stderr warning (PL26).
 run_meta() {
 	local key="$1" v n
 	v="$(config_input_value "$key" "unknown (not recorded)" "${TSV_FILES[@]}")"
 	[[ -n "$v" ]] || v="unknown (not recorded)"
 	# How many inputs differ: one file's own mixed:a/b is not a disagreement, nor v1.30.5
-	# against 1.30.5 (config_input_value reads them as one, Y11). The distinct first
+	# against 1.30.5 (config_input_value reads them as one). The distinct first
 	# `# <key>=` lines (a file without one: an empty line), in one awk over every input
-	# (I8: no grep per file), each read up to that line as grep -m1 did.
+	# (no grep per file), each read up to that line as grep -m1 did.
 	n="$(_RM_KEY="$key" awk 'BEGIN {
 		p = "# " ENVIRON["_RM_KEY"] "="; lp = length(p)
 		for (i = 1; i < ARGC; i++) {
@@ -231,16 +232,16 @@ run_meta() {
 }
 HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
 ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
-# R4: where ISTIO_VERSION came from (live: each member's active IstioRevision; pin:
-# config only), the configured pin and which member ran which (X4, PL19); files written
-# before R4 read "unknown (not recorded)".
+# Where ISTIO_VERSION came from (live: each member's active IstioRevision; pin:
+# config only), the configured pin and which member ran which (PL19); files written
+# before those keys read "unknown (not recorded)".
 ISTIO_VERSION_SOURCE_M="$(run_meta ISTIO_VERSION_SOURCE)"
 ISTIO_VERSION_PIN_M="$(run_meta ISTIO_VERSION_PIN)"
 ISTIO_VERSION_BY_CONTEXT_M="$(run_meta ISTIO_VERSION_BY_CONTEXT)"
-# R2: the members still not ready after the start's readiness wait, and how long it took.
+# The members still not ready after the start's readiness wait, and how long it took.
 ISTIO_NOTREADY_AT_START_M="$(run_meta ISTIO_NOTREADY_AT_START)"
 ISTIO_READY_WAITED_SEC_M="$(run_meta ISTIO_READY_WAITED_SEC)"
-# N13/A5/A7: each member's active Istio revision, its Istio CR / active IstioRevision
+# Each member's active Istio revision, its Istio CR / active IstioRevision
 # generations (an edit of either shows as mixed across pooled runs, also when the version
 # reads the same) and the proxy versions connected to its istiod at the start (ctx=...);
 # files written before them read "unknown (not recorded)".
@@ -282,6 +283,7 @@ report_text() {
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
+	echo "# report_harness_sha (this report's own): $(report_harness_sha)"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# istio_notready_at_start: ${ISTIO_NOTREADY_AT_START_M}  istio_ready_waited_sec: ${ISTIO_READY_WAITED_SEC_M}"
@@ -394,6 +396,7 @@ report_text() {
 
 report_csv() {
 	echo "# HARNESS_SHA=${HARNESS_SHA_M}"
+	echo "# REPORT_HARNESS_SHA=$(report_harness_sha)"
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
 	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
@@ -564,23 +567,28 @@ report_markdown() {
 	sweep_mesh=$(echo "$axes" | sed -n 's/^mesh_sizes: //p')
 	sweep_churn=$(echo "$axes" | sed -n 's/^churn_intensities: //p')
 	sweep_scale=$(echo "$axes" | sed -n 's/^scale: //p')
+	# The Axis table's cells through md_cell: a | in a hand-edited TSV value would break it.
+	md_cell -v sweep_mesh "$sweep_mesh"
+	md_cell -v sweep_churn "$sweep_churn"
+	md_cell -v sweep_scale "$sweep_scale"
 
 	echo "---"
-	echo "istio_version: \"${istio_version}\""
-	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
-	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
-	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
-	echo "istio_notready_at_start: \"${ISTIO_NOTREADY_AT_START_M}\""
-	echo "istio_ready_waited_sec: \"${ISTIO_READY_WAITED_SEC_M}\""
-	echo "istio_active_revisions: \"${ISTIO_ACTIVE_REVISIONS_M}\""
-	echo "istio_generations: \"${ISTIO_GENERATIONS_M}\""
-	echo "istio_proxy_versions: \"${ISTIO_PROXY_VERSIONS_M}\""
-	echo "harness_sha: \"${harness_sha}\""
+	echo "istio_version: $(yaml_str "${istio_version}")"
+	echo "istio_version_source: $(yaml_str "${ISTIO_VERSION_SOURCE_M}")"
+	echo "istio_version_pin: $(yaml_str "${ISTIO_VERSION_PIN_M}")"
+	echo "istio_version_by_context: $(yaml_str "${ISTIO_VERSION_BY_CONTEXT_M}")"
+	echo "istio_notready_at_start: $(yaml_str "${ISTIO_NOTREADY_AT_START_M}")"
+	echo "istio_ready_waited_sec: $(yaml_str "${ISTIO_READY_WAITED_SEC_M}")"
+	echo "istio_active_revisions: $(yaml_str "${ISTIO_ACTIVE_REVISIONS_M}")"
+	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
+	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
+	echo "harness_sha: $(yaml_str "${harness_sha}")"
+	echo "report_harness_sha: $(yaml_str "$(report_harness_sha)")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
-	echo "tuning_baseline: \"$(preamble_get TUNING_BASELINE)\""
-	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
-	echo "run_config: \"${RUN_CONFIG_M}\""
-	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
+	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
+	echo "sidecar_egress_hosts: $(yaml_str "$(preamble_get SIDECAR_EGRESS_HOSTS)")"
+	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
+	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
 	echo "---"
 	echo ""
 	echo "# Churn Convergence"
@@ -601,7 +609,8 @@ report_markdown() {
 	echo ""
 	echo "| mesh | churn | scale | n_total | n_valid | local_avg (ms) | remote_reach_avg (ms) | remote_eds_avg (ms) | src_triggers | rmt_triggers | src_pushes | rmt_pushes | src_queue_p99 worst (ms) | rmt_queue_p99 worst (ms) | src_proxies | rmt_proxies | src_push_p99 worst (ms) | rmt_push_p99 worst (ms) | amplification |"
 	echo "|------|-------|-------|---------|---------|----------------|-----------------------|---------------------|--------------|--------------|------------|------------|--------------------------|--------------------------|-------------|-------------|-------------------------|-------------------------|---------------|"
-	churn_rows | awk -F'\t' '
+	# The key cells (TSV values) through md_cell (MD_CELL_AWK, common.sh), as the Axis table.
+	churn_rows | awk -F'\t' "${MD_CELL_AWK}"'
 	# The hist_add arrays exist before the first call: some awks will not turn an
 	# unused name into an array inside a function.
 	BEGIN {
@@ -675,7 +684,7 @@ report_markdown() {
 			key = sorted_keys[k]; split(key, p, "\t")
 			if ((n_valid[key]+0) < (n_total[key]+0)) any_filtered = 1
 			printf "| %s | %s | %s->%s | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", \
-				p[1], p[2], p[3], p[4], n_total[key]+0, n_valid[key]+0, \
+				md_cell(p[1]), md_cell(p[2]), md_cell(p[3]), md_cell(p[4]), n_total[key]+0, n_valid[key]+0, \
 				avg_or_na(cl_sum[key], cl_n[key]), \
 				avg_or_na(cr_sum[key], cr_n[key]), \
 				avg_or_na(cre_sum[key], cre_n[key]), \
@@ -705,19 +714,20 @@ report_markdown() {
 
 report_charts() {
 	echo "---"
-	echo "istio_version: \"${ISTIO_VERSION_M}\""
-	echo "istio_version_source: \"${ISTIO_VERSION_SOURCE_M}\""
-	echo "istio_version_pin: \"${ISTIO_VERSION_PIN_M}\""
-	echo "istio_version_by_context: \"${ISTIO_VERSION_BY_CONTEXT_M}\""
-	echo "istio_notready_at_start: \"${ISTIO_NOTREADY_AT_START_M}\""
-	echo "istio_ready_waited_sec: \"${ISTIO_READY_WAITED_SEC_M}\""
-	echo "istio_active_revisions: \"${ISTIO_ACTIVE_REVISIONS_M}\""
-	echo "istio_generations: \"${ISTIO_GENERATIONS_M}\""
-	echo "istio_proxy_versions: \"${ISTIO_PROXY_VERSIONS_M}\""
-	echo "harness_sha: \"${HARNESS_SHA_M}\""
+	echo "istio_version: $(yaml_str "${ISTIO_VERSION_M}")"
+	echo "istio_version_source: $(yaml_str "${ISTIO_VERSION_SOURCE_M}")"
+	echo "istio_version_pin: $(yaml_str "${ISTIO_VERSION_PIN_M}")"
+	echo "istio_version_by_context: $(yaml_str "${ISTIO_VERSION_BY_CONTEXT_M}")"
+	echo "istio_notready_at_start: $(yaml_str "${ISTIO_NOTREADY_AT_START_M}")"
+	echo "istio_ready_waited_sec: $(yaml_str "${ISTIO_READY_WAITED_SEC_M}")"
+	echo "istio_active_revisions: $(yaml_str "${ISTIO_ACTIVE_REVISIONS_M}")"
+	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
+	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
+	echo "harness_sha: $(yaml_str "${HARNESS_SHA_M}")"
+	echo "report_harness_sha: $(yaml_str "$(report_harness_sha)")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
-	echo "run_config: \"${RUN_CONFIG_M}\""
-	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
+	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
+	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"
 	echo ""

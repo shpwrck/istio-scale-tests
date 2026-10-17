@@ -15,11 +15,13 @@ source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # Loud ERR trap for unexpected aborts.
-# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
 # aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/tuning/lib/tuning.sh" # ctx_key
 
 TUNING_DIR="${ROOT}/tests/tuning"
 SUITE=""
@@ -80,13 +82,25 @@ Exit codes:
      STOP_REASON, CUT_SHORT=1), after the active profile is reverted
   4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
      passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
-     non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason) or the
-     Istio version or active revision changed during the sweep (read again at its end);
-     the outcome is also in sweep-outcome.txt and sweep-comparison.md
+     non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason), or the
+     mesh changed under it (each an "error:" line on stderr):
+       - the Istio version or active revision changed during the sweep (read again at
+         its end), or a member's Istio CR or active IstioRevision generation went up
+         after the last revert (at the same version: an edit of the Istio CR, an OSSM
+         operator upgrade, or a change of the cluster's TLS security profile);
+       - the Istio CR changed during a pass, after its profile's apply settled and not
+         by that profile (002-revert-profile.sh compares the generations before its
+         revert), or between the start and the end of the suite setup;
+       - a member's Istio CR spec after the last revert differs from the sweep's start
+         (an incomplete revert: the paths that differ are named).
+     The sweep's own apply and revert raise the generations too: the sweep reads them
+     again after each, so those never count. The outcome is also in sweep-outcome.txt
+     and sweep-comparison.md
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM); the active profile is reverted
      first, then sweep-outcome.txt stays "not finished" and says when and by which
-     signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to the sweep's process alone waits for
-     its current command (signal its process group)
+     signal (ENDED_AT, ENDED_SIGNAL). A SIGTERM sent to the sweep's process alone
+     reaches the step that runs (an apply, a revert, a probe) at once; only a settle
+     wait (--settle) finishes first
 EOF
 }
 
@@ -155,8 +169,10 @@ PASSES+=("${PROFILES[@]}")
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_BASE}/sweep-${RUN_ID}"
-# J7: read once, so sweep-metadata.txt and sweep-outcome.txt name the same harness.
-HARNESS_SHA="$(harness_sha)"
+# The harness, once for the whole sweep: sweep-metadata.txt, sweep-outcome.txt and every
+# probe record this value (harness_sha_for_sweep exports it), and its own results under
+# the output dir do not count.
+harness_sha_for_sweep "$OUTPUT_BASE"
 PAUSE_STATE="${SWEEP_DIR}/gitops-pause.json"
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
@@ -210,7 +226,9 @@ echo "    Suite:     ${SUITE}"
 echo "    Contexts:  ${CONTEXTS_CSV} (source ${SOURCE_CTX})"
 echo "    Passes:    ${PASSES[*]}"
 echo "    Settle:    ${SETTLE_SEC}s"
-echo "    Argo CD:   $( ((GITOPS_PAUSE)) && echo "pause on ${GITOPS_CTX}" || echo "not paused")"
+_argo_line="not paused"
+if ((GITOPS_PAUSE)); then _argo_line="pause on ${GITOPS_CTX}"; fi
+echo "    Argo CD:   ${_argo_line}"
 echo "    Output:    ${SWEEP_DIR}/"
 
 # A profile left applied by an interrupted run would contaminate every pass.
@@ -275,11 +293,11 @@ fi
 python3 -I -c 'import yaml' 2>/dev/null \
 	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
 # The controlplane probe bounds its config-dump and Envoy-stats reads with timeout or
-# gtimeout and stops without either (R17): check here, before any profile is applied.
+# gtimeout and stops without either: check here, before any profile is applied.
 [[ "$SUITE" != controlplane ]] || require_timeout
 KUBECTL=()
 resolve_kubectl KUBECTL
-# R4: the Istio version every member runs, read once before the first profile or setup
+# The Istio version every member runs, read once before the first profile or setup
 # and exported, so every probe of every pass records it (ISTIO_VERSION_CHECK=fail stops
 # here on a mismatch, before anything changes).
 istio_version_resolve "$CONTEXTS_CSV" 0 "${KUBECTL[@]}"
@@ -288,7 +306,7 @@ echo "    Istio:     $(istio_version_label)"
 ACTIVE_STATE_DIR=""
 GITOPS_PAUSED=0
 
-# EXIT trap: revert a profile left applied, then resume Argo CD, then (I5, PL32: only
+# EXIT trap: revert a profile left applied, then resume Argo CD, then (PL32; only
 # after the revert) a sweep that ends before its outcome says how in that record: stopped
 # with its reason (die, an unexpected abort), or interrupted (Ctrl-C, SIGTERM), with a note
 # for a revert or resume that failed here. Never aborts.
@@ -329,14 +347,14 @@ mkdir -p "$SWEEP_DIR"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
 	istio_version_kv | sed 's/^/# /'
 } >"${SWEEP_DIR}/sweep-metadata.txt"
-# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
 # so the comparison of a sweep that died says so.
 sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --unit passes --next "if it died, check that no profile is still applied (005-cleanup.sh) and Argo CD auto-sync is resumed (006-gitops-pause.sh --resume), then run the sweep again into a new dir"
 
 if ((GITOPS_PAUSE)); then
 	# Set first: a partial pause is still undone by the EXIT trap.
 	GITOPS_PAUSED=1
-	"${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE" \
+	sweep_step "${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE" \
 		|| die "could not pause Argo CD auto-sync"
 fi
 
@@ -347,9 +365,47 @@ while IFS= read -r kv; do
 	esac
 done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 
+# The sweep edits the Istio CR itself (each profile's apply and revert raise the Istio CR's
+# and the active IstioRevision's generations), so it reads them again after each of its
+# own edits (istio_version_refresh: the probes that follow record what they run on, and
+# the end recheck covers only the span after the last revert). ISTIO_EDITS: the
+# sweep_outcome --problem arguments for an edit that was not the sweep's.
+ISTIO_EDITS=()
+# istio_checkpoint <from> <ours 0|1>: read the generations and proxy versions again, named
+# <from> ("after the revert of pass 02-x") in the end recheck's messages. With <ours> 0
+# (the sweep changed nothing since the last read) a generation that moved is an edit by
+# something else: a problem.
+istio_checkpoint() {
+	local from="$1" ours="$2" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-at the start}" moved tab=$'\t'
+	istio_version_refresh "$from" "$CONTEXTS_CSV" "${KUBECTL[@]}"
+	((ours == 0)) || return 0
+	moved="$(istio_generations_diff "$before" "${ISTIO_GENERATIONS:-}")"
+	[[ -n "$moved" ]] || return 0
+	ISTIO_EDITS+=(--problem "the Istio CR changed between ${prev} and ${from}, while the sweep changed nothing: ${moved#*"$tab"}; likely: $(istio_generation_causes "${moved%%"$tab"*}"); the passes after it may have measured another configuration")
+	echo "WARNING: ${ISTIO_EDITS[${#ISTIO_EDITS[@]}-1]}" >&2
+}
+
+# The members' Istio CR spec before the first profile, to check at the end that the last
+# revert restored it (an incomplete revert): istio-spec/start-<ctx>.json.
+SPEC_DIR="${SWEEP_DIR}/istio-spec"
+has_profile=0
+for p in "${PASSES[@]}"; do [[ "$p" == baseline ]] || has_profile=1; done
+if ((has_profile)); then
+	mkdir -p "$SPEC_DIR"
+	for ctx in "${CONTEXTS[@]}"; do
+		if ! "${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json 2>/dev/null \
+			| jq -S '.spec' >"${SPEC_DIR}/start-$(ctx_key "$ctx").json" 2>/dev/null; then
+			rm -f "${SPEC_DIR}/start-$(ctx_key "$ctx").json"
+			echo "warn: ${ctx}: could not read its Istio CR's spec; the end of the sweep cannot check that the last revert restored it" >&2
+		fi
+	done
+fi
+
 if ((RUN_SETUP)); then
 	echo "--- Suite setup ---"
-	"${SETUP_CMD[@]}" || die "suite setup failed"
+	sweep_step "${SETUP_CMD[@]}" || die "suite setup failed"
+	# Its sidecars are what the probes measure: their proxy versions, read again.
+	istio_checkpoint "after the suite setup" 0
 fi
 
 # Run one pass's probe(s) into its result directory.
@@ -369,7 +425,9 @@ run_pass() {
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
-		"${PROBE_ARGV[@]}" 2>&1 | tee -a "${dir}/probe-output.log" || rc=${PIPESTATUS[0]}
+		# Its output on the console and in the pass's log; the step is the probe itself, so a
+		# SIGTERM reaches it (sweep_step).
+		sweep_step "${PROBE_ARGV[@]}" > >(tee -a "${dir}/probe-output.log") 2>&1 || rc=$?
 		if ((rc != 0)); then
 			echo "warn: probe for ${label} exited ${rc}; marking PROBE_FAILED" >&2
 			echo "PROBE_FAILED rc=${rc} $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${dir}/PROBE_FAILED"
@@ -391,17 +449,27 @@ for p in "${PASSES[@]}"; do
 	fi
 	state_dir="${SWEEP_DIR}/${p}/state"
 	ACTIVE_STATE_DIR="$state_dir"
-	if ! "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
+	if ! sweep_step "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
 		--state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
 		echo "warn: applying ${p} failed; marking SETUP_FAILED" >&2
 		# 001 can fail before it creates the state dir, so the pass dir may not exist yet.
 		mkdir -p "${SWEEP_DIR}/${p}"
 		echo "SETUP_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/SETUP_FAILED"
 	else
+		# The apply raised the generations: the pass's probes record the new ones.
+		istio_checkpoint "after the apply of pass ${p}" 1
 		run_pass "$p"
 	fi
 	if [[ -f "${state_dir}/active-profile" ]]; then
-		if ! "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
+		revert_ok=1
+		sweep_step "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT" || revert_ok=0
+		# The revert raised them again (a failed one too): the end recheck starts here.
+		istio_checkpoint "after the revert of pass ${p}" 1
+		if [[ -s "${state_dir}/istio-edited-during-pass" ]]; then
+			edit="$(<"${state_dir}/istio-edited-during-pass")" tab=$'\t'
+			ISTIO_EDITS+=(--problem "the Istio CR changed during pass ${p}, after its apply settled and not by its profile: ${edit#*"$tab"}; likely: $(istio_generation_causes "${edit%%"$tab"*}"); its probes may have measured another configuration (002-revert-profile.sh, istio-edited-during-pass in its state dir)")
+		fi
+		if ((revert_ok == 0)); then
 			echo "REVERT_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/REVERT_FAILED"
 			echo "error: reverting ${p} failed; stopping the sweep so later passes are not contaminated" >&2
 			ABORTED=1 ABORT_REASON="REVERT_FAILED: reverting pass ${p} failed, so later passes did not run"
@@ -412,11 +480,32 @@ for p in "${PASSES[@]}"; do
 done
 
 echo ""
-# A6: the Istio version again, after the last pass and its revert, before the comparison
+# The Istio version again, after the last pass and its revert, before the comparison
 # (read-only).
 IV_END=()
 istio_version_recheck IV_END "${KUBECTL[@]}"
-# A3: the outcome is written after the comparison: it says so (a line that sweep_outcome
+# An incomplete revert: a member's Istio CR spec now, against the start's.
+if ((has_profile)); then
+	for ctx in "${CONTEXTS[@]}"; do
+		start_spec="${SPEC_DIR}/start-$(ctx_key "$ctx").json"
+		[[ -s "$start_spec" ]] || continue
+		end_spec="${SPEC_DIR}/end-$(ctx_key "$ctx").json"
+		if ! "${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json 2>/dev/null \
+			| jq -S '.spec' >"$end_spec" 2>/dev/null; then
+			rm -f "$end_spec"
+			IV_END+=(--note "could not read ${ctx}'s Istio CR spec at the end, so no check that the last revert restored it")
+			continue
+		fi
+		cmp -s "$start_spec" "$end_spec" && continue
+		spec_paths="$(jq -rn --slurpfile a "$start_spec" --slurpfile b "$end_spec" '
+			($a[0] // {}) as $x | ($b[0] // {}) as $y
+			| ([$x, $y] | map([paths(scalars)]) | add | unique)
+			| map(. as $p | select(($x | try getpath($p) catch null) != ($y | try getpath($p) catch null)) | map(tostring) | join("."))
+			| join(", ")' 2>/dev/null)" || spec_paths=""
+		IV_END+=(--problem "${ctx}'s Istio CR spec after the last revert differs from the sweep's start (an incomplete revert): ${spec_paths:-see istio-spec/ in the sweep dir}; the mesh is not as the sweep found it")
+	done
+fi
+# The outcome is written after the comparison: it says so (a line that sweep_outcome
 # --md replaces).
 export _SWEEP_OUTCOME_PENDING=1
 "${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown \
@@ -424,16 +513,18 @@ export _SWEEP_OUTCOME_PENDING=1
 
 if ((RUN_CLEANUP)); then
 	echo "--- Suite cleanup ---"
-	"${CLEANUP_CMD[@]}" || echo "warn: suite cleanup failed; re-run: $(show "${CLEANUP_CMD[@]}")" >&2
+	sweep_step "${CLEANUP_CMD[@]}" || echo "warn: suite cleanup failed; re-run: $(show "${CLEANUP_CMD[@]}")" >&2
 fi
 
-echo "=== Sweep ${RUN_ID} $( ((ABORTED)) && echo "STOPPED (revert failed)" || echo "finished") ==="
+_end_word="finished"
+if ((ABORTED)); then _end_word="STOPPED (revert failed)"; fi
+echo "=== Sweep ${RUN_ID} ${_end_word} ==="
 echo "    Results:    ${SWEEP_DIR}/"
 echo "    Comparison: ${SWEEP_DIR}/sweep-comparison.md"
 
-# R19: a pass whose profile did not apply or whose probe exited non-zero has its marker
+# A pass whose profile did not apply or whose probe exited non-zero has its marker
 # file (run_pass and the loop above never abort on one, so every profile was reverted
-# first, PL32). Count them by reason, also in sweep-outcome.txt and the comparison (C3);
+# first, PL32). Count them by reason, also in sweep-outcome.txt and the comparison;
 # a failed revert (exit 1) wins over 4.
 FAILED_CELLS=()
 for p in "${PASSES[@]}"; do
@@ -443,7 +534,7 @@ for p in "${PASSES[@]}"; do
 done
 outcome_rc=0 stop_args=()
 ((ABORTED == 0)) || stop_args=(--stopped 1 --stop-reason "$ABORT_REASON")
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --unit passes \
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} ${ISTIO_EDITS[@]+"${ISTIO_EDITS[@]}"} --run-id "$RUN_ID" --unit passes \
 	--where "Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it" \
 	--record "$SWEEP_DIR" --md "${SWEEP_DIR}/sweep-comparison.md" "${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((ABORTED)); then exit 1; fi

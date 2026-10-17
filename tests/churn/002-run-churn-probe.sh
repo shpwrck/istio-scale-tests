@@ -37,7 +37,7 @@ source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # harness_sha (TSV preamble, istiod-diag index preamble)
+source "${ROOT}/tests/lib/preamble.sh"  # istio_version_resolve and the rest of the TSV preamble
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
@@ -242,7 +242,7 @@ for ctx in "${REMOTES[@]}"; do
 	echo "  [$ctx] Running istiod replicas: $r"
 done
 
-# R4: the Istio version the members run, before the first scale-up (inherited when 003
+# The Istio version the members run, before the first scale-up (inherited when 003
 # runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
 # mismatch.
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
@@ -278,9 +278,9 @@ PF_PIDS=()
 POLL_PIDS=()
 
 cleanup() {
-	for pid in "${POLL_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${POLL_PIDS[@]+"${POLL_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	POLL_PIDS=()
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 }
 trap cleanup EXIT
@@ -290,7 +290,7 @@ start_envoy_port_forward() {
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" port-forward deploy/churn-watcher "$local_port":15000 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
 	local attempts=0
-	# P4: --max-time bounds the readiness probe so a stuck/half-open watcher PF can't
+	# --max-time bounds the readiness probe so a stuck/half-open watcher PF can't
 	# block ~30s/attempt at scale (same shape as the istiod /metrics readiness curls).
 	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$local_port/clusters" 2>/dev/null; do
 		attempts=$((attempts + 1))
@@ -373,7 +373,7 @@ bucket_range() {
 # knows its OWN connected proxies, so we must query every source pod).
 _syncz_stale_count() {
 	local port="$1" syncz stale
-	syncz=$(curl -s --max-time 5 "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }  # P4: bound a stuck PF
+	syncz=$(curl -s --max-time 5 "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }  # Bound a stuck PF
 	stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { echo "ERR"; return; }
 	echo "$stale"
 }
@@ -578,7 +578,7 @@ poll_remote_eds_converged() {
 		fi
 		# One fanned-out scrape per tick. A FIXED prefix ("tick") means each tick
 		# OVERWRITES the prior tick's per-pod /metrics bodies, so disk stays bounded
-		# at one tick's worth of files regardless of how many ticks elapse (R2-3) —
+		# at one tick's worth of files regardless of how many ticks elapse —
 		# the EDS/gauge values are consumed immediately below, no tick body needs to
 		# survive. The .failed/.skew sidecars are likewise overwritten in place.
 		# `|| true`: fanout_scrape_all returns non-zero BY DESIGN on an incomplete
@@ -597,7 +597,7 @@ poll_remote_eds_converged() {
 		mapfile -t tick_files < <(ctx_metric_files "$polldir" "tick" "${#ports[@]}")
 		local cur_eds base_eds="$baseline_eds"
 		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${tick_files[@]}")
-		# No EDS series in this tick (R10: `unknown`, not 0): not converged yet. One that
+		# No EDS series in this tick (`unknown`, not 0): not converged yet. One that
 		# was absent at the baseline (`unknown`) was registered in the window, so it
 		# started at 0 (counter_delta's rule). Absent all along, the poll ends TIMEOUT,
 		# never a 0.
@@ -930,8 +930,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	# Control-plane-only EDS-push convergence (max across remotes; mirrors the
 	# conv_remote aggregation). No dirty cross-check: churn has no clean registry-delta
-	# denominator (R2-1/PL31). A poller that never completed a clean scrape (INCOMPLETE)
-	# measured nothing, so it is not a timeout (B3): with no remote timed out, the column
+	# denominator (PL31). A poller that never completed a clean scrape (INCOMPLETE)
+	# measured nothing, so it is not a timeout: with no remote timed out, the column
 	# is N/A and the row SCRAPE_INCOMPLETE_REMOTE_EDS. A remote that did time out (clean
 	# scrapes, no push) still makes the row TIMEOUT_REMOTE_EDS.
 	conv_remote_eds="N/A"
@@ -984,7 +984,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		"$ITER_DIR/src-pre.podset" "$ITER_DIR/src-post.podset" \
 		"$src_pre_csv" "$src_post_csv")"
 
-	# counter_delta (metrics.sh, R10): N/A with a warning when the counter is in neither
+	# counter_delta (metrics.sh): N/A with a warning when the counter is in neither
 	# scrape or went backwards, never 0 or negative.
 	src_post_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_POST_FILES[@]}")
 	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_POST_FILES[@]}")
@@ -1130,15 +1130,15 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	if [[ "$status" == "OK" && "$ITER_SCRAPE_INCOMPLETE" == "1" ]]; then
 		status="SCRAPE_INCOMPLETE"
 	fi
-	# B3: a remote EDS poller that never completed a scrape measured nothing: its own
+	# A remote EDS poller that never completed a scrape measured nothing: its own
 	# status, counted in n_total and not in n_valid, never a TIMEOUT_REMOTE_EDS.
 	if [[ "$status" == "OK" && "$eds_incomplete" == 1 && "$conv_remote_eds" == "N/A" ]]; then
 		status="SCRAPE_INCOMPLETE_REMOTE_EDS"
 	fi
-	# R12: an OK row has a number in every measured column, so the report's n_valid
+	# An OK row has a number in every measured column, so the report's n_valid
 	# counts the same rows for every average (PL15). The remote EDS push that never
 	# came is TIMEOUT_REMOTE_EDS; any other non-numeric measured value (a watcher that
-	# did not list every churn target, a counter missing from both scrapes, R10) is
+	# did not list every churn target, a counter missing from both scrapes) is
 	# MISSING_VALUE. Measured: the three convergence columns and the four push
 	# counter deltas (the remote ones only with remotes). Not gated: the queue and
 	# push-time p99s (N/A means no observation in the window, `overflow` is a value

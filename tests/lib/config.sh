@@ -106,10 +106,9 @@ CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
 CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
-# unknown for a file without them (written before R4: its ISTIO_VERSION is the pin,
-# unchecked; before R2, which added the start-of-run readiness keys; before N13, which
-# added ISTIO_ACTIVE_REVISIONS; before A5, which added ISTIO_GENERATIONS; or before A7,
-# which added ISTIO_PROXY_VERSIONS). They are sweep-level (PL26): pooled inputs that
+# unknown for a file without them (written before the live-version keys: its
+# ISTIO_VERSION is the pin, unchecked; or before the start-of-run readiness keys,
+# ISTIO_ACTIVE_REVISIONS, ISTIO_GENERATIONS or ISTIO_PROXY_VERSIONS were added). They are sweep-level (PL26): pooled inputs that
 # differ read mixed, never one file's value.
 # shellcheck disable=SC2034
 CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS"
@@ -356,9 +355,30 @@ config_snapshot() {
 # _CONFIG_VKEY_AWK: awk function vkey(k, v), the form of value v of preamble key k that
 # pooling compares: an ISTIO_VERSION* value without the v in front of a version, so
 # v1.30.5 and 1.30.5 (or ctx=v1.30.5 and ctx=1.30.5) are one value, shown in the form seen
-# first (Y11); any other value as it is.
+# first; an ISTIO_PROXY_VERSIONS value (ctx=<version>:<count>+...,...) as its
+# version set (each member's versions, without their counts, sorted), so runs whose
+# members connected the same versions are one value whatever their proxy counts; any other
+# value as it is. vshow(k, a, b): the value to show for two values with one vkey, a shown
+# so far and b: a, except two ISTIO_PROXY_VERSIONS values whose counts differ, which show
+# their version set (no count of one run stands for the others, PL26).
 _CONFIG_VKEY_AWK='
-	function vkey(k, v,    o, i, n, c) {
+	function vkey(k, v,    o, i, n, c, m, p, e, q, j, x, nv) {
+		if (k == "ISTIO_PROXY_VERSIONS") {
+			if (v !~ /=/) return v
+			o = ""
+			n = split(v, p, ",")
+			for (i = 1; i <= n; i++) {
+				if (!match(p[i], /=[^=]*$/)) { o = o (i > 1 ? "," : "") p[i]; continue }
+				c = substr(p[i], 1, RSTART - 1)
+				nv = split(substr(p[i], RSTART + 1), e, "+")
+				for (j = 1; j <= nv; j++) sub(/:[0-9]+$/, "", e[j])
+				for (j = 2; j <= nv; j++) { x = e[j]; for (q = j - 1; q >= 1 && e[q] > x; q--) e[q + 1] = e[q]; e[q + 1] = x }
+				m = ""
+				for (j = 1; j <= nv; j++) m = m (j > 1 ? "+" : "") e[j]
+				o = o (i > 1 ? "," : "") c "=" m
+			}
+			return o
+		}
 		if (k !~ /^ISTIO_VERSION/) return v
 		o = ""
 		n = length(v)
@@ -369,13 +389,14 @@ _CONFIG_VKEY_AWK='
 		}
 		return o
 	}
+	function vshow(k, a, b) { return (k == "ISTIO_PROXY_VERSIONS" && a != b) ? vkey(k, a) : a }
 '
 
 # _config_distinct <key> <missing> <tsv>...: the distinct `# <key>=` values of the files,
 # one per line in file order (an empty value as an empty line; an ISTIO_VERSION* value
 # once whatever its leading v, _CONFIG_VKEY_AWK). A file without the line reads
 # <missing>, or adds nothing when <missing> is empty. <key> is a plain name. One awk for
-# every file (B6): it reads them with getline, so a missing, unreadable or empty file
+# every file: it reads them with getline, so a missing, unreadable or empty file
 # reads <missing> and a path holding `=` is a path, never an awk assignment.
 _config_distinct() {
 	local key="$1" missing="$2"
@@ -391,8 +412,10 @@ _config_distinct() {
 					if (substr(line, 1, lp) == p) { v = substr(line, lp + 1); found = 1; break }
 				close(ARGV[i])
 				if (!found) { if (missing == "") continue; v = missing }
-				if (!seen[vkey(k, v)]++) print v
+				kv = vkey(k, v)
+				if (!(kv in at)) { at[kv] = ++n; out[n] = v } else out[at[kv]] = vshow(k, out[at[kv]], v)
 			}
+			for (i = 1; i <= n; i++) print out[i]
 			exit
 		}' "$@"
 }
@@ -401,8 +424,8 @@ _config_distinct() {
 # there is one, else mixed:a,b (joined with " | " when a value holds a comma, as a
 # KUBE_VERSIONS list does; an empty value reads (empty)). A value that is itself mixed
 # (ISTIO_VERSION=mixed:a/b, a run whose members differed) adds its parts, so each
-# distinct value is listed once: mixed:a,b, never mixed:mixed:a/b,a (X13). [<key>]: the
-# preamble key, so an ISTIO_VERSION* value counts once whatever its leading v (Y11). No
+# distinct value is listed once: mixed:a,b, never mixed:mixed:a/b,a. [<key>]: the
+# preamble key, so an ISTIO_VERSION* value counts once whatever its leading v. No
 # input, no output.
 _config_join_mixed() {
 	awk -v key="${1:-}" "${_CONFIG_VKEY_AWK}"'
@@ -414,9 +437,9 @@ _config_join_mixed() {
 				np = (raw[i] ~ /^mixed:/) ? split(substr(raw[i], 7), part, "/") : 0
 				if (!np) { np = 1; part[1] = raw[i] }
 				for (q = 1; q <= np; q++) if (!(vkey(key, part[q]) in vseen)) {
-					vseen[vkey(key, part[q])] = 1; v[++n] = part[q]
+					vseen[vkey(key, part[q])] = ++n; v[n] = part[q]
 					if (index(part[q], ",")) c = 1
-				}
+				} else v[vseen[vkey(key, part[q])]] = vshow(key, v[vseen[vkey(key, part[q])]], part[q])
 			}
 			if (n == 1) { print v[1]; exit }
 			out = "mixed:"
@@ -467,13 +490,14 @@ config_report_value() {
 config_merged_preamble() {
 	(($#)) || return 0
 	awk -v must="$CONFIG_MERGED_UNKNOWN_IF_MISSING" "${_CONFIG_VKEY_AWK}"'
-		function add(k, v) {
+		function add(k, v,    kv) {
 			if (!(k in nv)) { order[++n] = k; nv[k] = 0 }
-			if (!((k, vkey(k, v)) in seen)) {
-				seen[k, vkey(k, v)] = 1
+			kv = vkey(k, v)
+			if (!((k, kv) in seen)) {
+				seen[k, kv] = nv[k] + 1
 				val[k, ++nv[k]] = v
 				if (index(v, ",")) comma[k] = 1
-			}
+			} else val[k, seen[k, kv]] = vshow(k, val[k, seen[k, kv]], v)
 		}
 		# fin: the keys a file must carry and does not, as unknown.
 		function fin(    i) { for (i = 1; i <= nm; i++) if (!((fid, m[i]) in infile)) add(m[i], "unknown") }
@@ -499,15 +523,18 @@ config_merged_preamble() {
 				k = order[i]
 				if (!(k in real)) continue
 				if (nv[k] == 1) { print k "=" val[k, 1]; continue }
-				# A value that is itself mixed adds its parts, each listed once (X13,
-				# as _config_join_mixed).
+				# A value that is itself mixed adds its parts, each listed once (as
+				# _config_join_mixed does).
 				nf = 0
 				delete fl
 				delete fseen
 				for (j = 1; j <= nv[k]; j++) {
 					np = (val[k, j] ~ /^mixed:/) ? split(substr(val[k, j], 7), part, "/") : 0
 					if (!np) { np = 1; part[1] = val[k, j] }
-					for (q = 1; q <= np; q++) if (!(vkey(k, part[q]) in fseen)) { fseen[vkey(k, part[q])] = 1; fl[++nf] = part[q] }
+					for (q = 1; q <= np; q++) {
+						if (!(vkey(k, part[q]) in fseen)) { fseen[vkey(k, part[q])] = ++nf; fl[nf] = part[q] }
+						else fl[fseen[vkey(k, part[q])]] = vshow(k, fl[fseen[vkey(k, part[q])]], part[q])
+					}
 				}
 				if (nf == 1) { print k "=" fl[1]; continue }
 				out = ""
@@ -523,7 +550,7 @@ config_merged_preamble() {
 # else the run_id column of its first data row; a file with none of these (or unreadable)
 # counts as a run of its own, named after the file. A file in a sweep-* dir belongs to that
 # sweep instead (its combos carry their own RUN_IDs); config_check_multi_run decides that
-# from the canonical directory before it calls this. One awk for every file (B6): getline
+# from the canonical directory before it calls this. One awk for every file: getline
 # reads each, so a path holding `=` is a path, never an awk assignment.
 # shellcheck disable=SC2329
 _config_run_key() {
@@ -553,7 +580,7 @@ _config_run_key() {
 # _config_canon_dir <dir>: the directory as `cd` and `pwd` name it (logical: `.` and a
 # trailing slash resolve, and a symlink named sweep-Y keeps its sweep key), unless that
 # basename is not sweep-* and the physical one (`pwd -P`) is: a symlink such as
-# latest -> sweep-X is that sweep (Y7). The directory itself when `cd` fails.
+# latest -> sweep-X is that sweep. The directory itself when `cd` fails.
 _config_canon_dir() {
 	local l p
 	l="$(CDPATH='' cd -- "$1" 2>/dev/null && pwd)" || { printf '%s\n' "$1"; return 0; }
@@ -588,14 +615,14 @@ _config_run_ids() {
 # outside one (each file's directory, then _config_run_key; the per-iteration RUN_IDs of
 # one sweep are one run, PL26). The directory is the logical one (`cd` and `pwd`): `.`
 # and a trailing slash still resolve, and a symlink named sweep-Y keeps its sweep key; a
-# symlink such as latest -> sweep-X takes its target's (_config_canon_dir, Y7). Sets
+# symlink such as latest -> sweep-X takes its target's (_config_canon_dir). Sets
 # MULTI_RUN_N, MULTI_RUN_IDS (sorted, comma-separated) and MULTI_RUN_HARNESS_SHAS /
 # MULTI_RUN_ISTIO_VERSIONS (distinct preamble values in file order; unknown for a file
 # without the line). More than one run with <allow> 0 dies,
 # listing the five newest runs (by the timestamp their ids start with) with the commands
 # that report each alone. A run outside a sweep-* dir that shares its directory with
 # another run first gets commands that move it into a directory of its own, safe to paste
-# twice (U1): its input TSVs by path, then every file named after one of its ids
+# twice: its input TSVs by path, then every file named after one of its ids
 # (_config_run_ids: istiod-diag-<id>/, reach-<id>.tsv, ...). A run alone in its directory
 # only gets its report command. With <allow> 1 (--allow-multi-run) it warns, and the
 # report says so in every format (config_multi_run_note, _csv, _json).
@@ -607,7 +634,7 @@ config_check_multi_run() {
 	shift 2
 	local -a files=("$@")
 	# Each file's canonical directory (one cd per directory); a sweep-* one is the run.
-	# The files outside one get their keys from one awk (B6: no subshell per file).
+	# The files outside one get their keys from one awk (no subshell per file).
 	for f in "$@"; do
 		d=.
 		[[ "$f" == */* ]] && d="${f%/*}"
@@ -633,7 +660,7 @@ config_check_multi_run() {
 			j=$((j + 1))
 		fi
 		mr_keys+=("$k") mr_dirs+=("${canon[$d]}")
-		# Y8: only a run outside a sweep-* dir needs its file list (the commands that move
+		# Only a run outside a sweep-* dir needs its file list (the commands that move
 		# it); appending one per file of a large sweep is quadratic.
 		[[ "$k" == sweep-* ]] || run_files[$k]+="${f}"$'\n'
 		[[ -z "${run_dir[$k]+x}" ]] || continue
@@ -652,7 +679,7 @@ config_check_multi_run() {
 	{
 		echo "error: ${dir} holds ${MULTI_RUN_N} runs, and a report pools every TSV under its results dir. Report one run (newest first; add your other flags):"
 		# Newest first by the UTC timestamp a run id starts with (sweep- stripped), so a
-		# sweep and a standalone run sort together; ids without one come last (X8).
+		# sweep and a standalone run sort together; ids without one come last.
 		while IFS= read -r k; do
 			if ((++i > 5)); then
 				echo "  ... and $((MULTI_RUN_N - 5)) more"

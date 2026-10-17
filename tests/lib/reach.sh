@@ -503,7 +503,7 @@ reach_coverage_render() {
 		' 2>/dev/null || echo '{"remote_coverage":{"data":false,"not_reachable":0,"groups":[]}}'
 		;;
 	*)
-		# Every markdown table cell goes through md_cell (MD_CELL_AWK, common.sh; I7).
+		# Every markdown table cell goes through md_cell (MD_CELL_AWK, common.sh).
 		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" "$MD_CELL_AWK"'
 			NF >= 8 {
 				g = $1 SUBSEP $2

@@ -375,7 +375,7 @@ resolve_kubectl KUBECTL
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 # The config-dump and Envoy-stats samples run under timeout/gtimeout; without either,
-# every sample would read N/A with no message (R17). --dry-run does not need it.
+# every sample would read N/A with no message. --dry-run does not need it.
 ((DRY_RUN)) || require_timeout
 
 CONTEXTS=()
@@ -415,7 +415,7 @@ if [[ "$PHASE" != combined ]]; then
 	mkdir -p "$STATE_DIR"
 fi
 
-# R4: the Istio version the members run, before the first scrape (inherited when 003
+# The Istio version the members run, before the first scrape (inherited when 003
 # runs this step; read here when it runs alone, a read-only API GET like the version
 # and capacity reads below). ISTIO_VERSION_CHECK=fail stops on a mismatch.
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
@@ -576,7 +576,7 @@ PF_PIDS=()
 TMP_DIR="$(mktemp -d -t controlplane-002.XXXXXX)"
 
 cleanup() {
-	for pid in "${PF_PIDS[@]}"; do
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
@@ -584,6 +584,9 @@ cleanup() {
 	rm -rf "$TMP_DIR"
 }
 
+# Also on a SIGTERM the sweep forwards (sweep_step): bash runs the EXIT trap on a fatal
+# signal it does not trap and still dies of it (143), at once. A TERM trap would wait for
+# the command in progress to end first.
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -794,9 +797,12 @@ extract_hist_count() {
 # label series (PL11). N/A when nothing was observed (Δcount <= 0) or Δsum < 0.
 hist_delta_avg_ms() {
 	local baseline="$1" final="$2" name="$3" b_sum f_sum b_cnt f_cnt
-	b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" "$name" || echo 0)
+	b_sum=0 b_cnt=0
+	if [[ -n "$baseline" ]]; then
+		b_sum=$(extract_hist_sum "$baseline" "$name")
+		b_cnt=$(extract_hist_count "$baseline" "$name")
+	fi
 	f_sum=$(extract_hist_sum "$final" "$name")
-	b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" "$name" || echo 0)
 	f_cnt=$(extract_hist_count "$final" "$name")
 	awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
 		BEGIN {
@@ -906,7 +912,7 @@ collect_config_dump_samples() {
 	while IFS='|' read -r ns pod; do
 		[[ -z "$pod" ]] && continue
 		attempted=$((attempted + 1))
-		# P2: bound the config_dump exec — at 10k services the dump is multi-MB and a
+		# Bound the config_dump exec — at 10k services the dump is multi-MB and a
 		# wedged sidecar/exec must not stall the sweep. On timeout the dump is empty ->
 		# bytes=0 -> counted as a FAILED sample (got not incremented), never a partial/
 		# misleading byte count (capturing first lets us drop a timed-out exec cleanly).
@@ -1026,7 +1032,7 @@ scrape_one_context() {
 	local ctx="$1" port="$2" out="$3" ts_start="$4" ts_end="$5"
 	local body t_start t_end
 	t_start=$(now_ms)
-	# P4: --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
+	# --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
 	# (-> empty metrics file -> N/A row via scrape_window) instead of hanging the
 	# whole sweep. This is the PRIMARY body scrape feeding every TSV row, so it must
 	# honor the shared METRICS_SCRAPE_TIMEOUT knob (default 30s): a multi-MB /metrics
@@ -1061,7 +1067,8 @@ scrape_all_parallel() {
 			scrape_one_context "${POD_CTXS[k]}" "$port" "$m_out" "$t_out" "$te_out" || exit 1
 		) &
 		pids+=($!)
-		ts_files+=("$t_out")
+		# PL8: the skew is the spread of the completion stamps (.tsend), not the starts.
+		ts_files+=("$te_out")
 	done
 	local rc=0
 	for pid in "${pids[@]}"; do
@@ -1083,11 +1090,14 @@ scrape_all_parallel() {
 	fi
 }
 
+# compute_skew_ms <prefix>: scrape_all_parallel's skew for a batch scraped earlier (the
+# baseline a --phase final reads from the state dir): the spread of its completion stamps
+# (.tsend, PL8), as scrape_all_parallel computes it.
 compute_skew_ms() {
 	local prefix="$1"
 	local min="" max="" t k
 	for k in "${!POD_CTXS[@]}"; do
-		local t_file="${prefix}-${k}.ts"
+		local t_file="${prefix}-${k}.tsend"
 		[[ -s "$t_file" ]] || continue
 		t=$(<"$t_file")
 		[[ -z "$min" || "$t" -lt "$min" ]] && min="$t"
@@ -1108,6 +1118,11 @@ compute_skew_ms() {
 # report's is_num/NF logic treats it like any other N/A column. Results cached
 # per ctx so multi-replica rows on the same ctx don't re-read.
 declare -A CAP_CACHE  # ctx -> "icpu_pct imem_pct ncpu_pct nmem_pct pods_sched pods_alloc"
+# The config_dump samples of a context, once per window (collect_config_dump_samples
+# output): every istiod replica's row of that context reads the same sampled proxies, so
+# a context with R replicas execs into the proxies once, not R times (300 execs per
+# mesh-20 cell with 3 replicas and 5 samples became 100).
+declare -A CD_CACHE
 # The node list and the pod list are read first, together, by read_pod_counts_for_ctx:
 # compute_cluster_proxies needs the sidecar count right after the final scrape (PL21),
 # before any slow `kubectl top` read. Raw key=value strings, parsed by their consumers.
@@ -1385,8 +1400,14 @@ scrape_window() {
 
 	local ts
 	ts=$(date -u -Iseconds)
+	# The window's rows go to one file first and into the TSV in one append at the end
+	# (degraded rows too), so a sweep cut short while this window writes leaves all of its
+	# member rows or none: a cell never reads as measured from some members' rows (003
+	# counts a cell whose rows name fewer members than its mesh size as INCOMPLETE).
+	local rows_file="${TMP_DIR}/rows"
+	: > "$rows_file"
 
-	# Per-replica pilot_xds_pushes (istio D4): a replica that never pushed has no series
+	# Per-replica pilot_xds_pushes: a replica that never pushed has no series
 	# and no `# TYPE` line, so "renamed or idle" is decided once over the whole batch
 	# (every baseline and final body, all members: one Istio version, checked at the
 	# start). Any complete body with the counter makes a complete body without it a
@@ -1413,18 +1434,19 @@ scrape_window() {
 			# Cols 41-43 come from the cluster: its total is already N/A (strict sum).
 			collect_capacity_for_ctx "$ctx"
 			cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$ctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$TSV_FILE"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$ctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 			continue
 		fi
 		local baseline final
-		baseline=$([[ -s "$b_file" ]] && cat "$b_file" || echo "")
+		baseline=""
+		if [[ -s "$b_file" ]]; then baseline="$(cat "$b_file" 2>/dev/null || true)"; fi
 		final=$(cat "$f_file")
 
 		# Memory: peak of (baseline, polled peaks, final) in MiB.
 		local final_mem_bytes baseline_mem_bytes peak_mem_bytes mem_mi
 		final_mem_bytes=$(extract_gauge_exact "$final" process_resident_memory_bytes)
-		baseline_mem_bytes=$([[ -n "$baseline" ]] \
-			&& extract_gauge_exact "$baseline" process_resident_memory_bytes || echo 0)
+		baseline_mem_bytes=0
+		if [[ -n "$baseline" ]]; then baseline_mem_bytes=$(extract_gauge_exact "$baseline" process_resident_memory_bytes); fi
 		peak_mem_bytes=0
 		[[ -s "${TMP_DIR}/peak-mem-${k}.val" ]] && peak_mem_bytes=$(<"${TMP_DIR}/peak-mem-${k}.val")
 		if [[ "$final_mem_bytes" != "N/A" ]]; then
@@ -1450,7 +1472,8 @@ scrape_window() {
 		# Restart detection (must run before delta computations so the
 		# restart guard can protect counter/histogram columns — PL9/PL13).
 		local b_pst f_pst istiod_restarted
-		b_pst=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_start_time_seconds || echo N/A)
+		b_pst=N/A
+		if [[ -n "$baseline" ]]; then b_pst=$(extract_gauge_exact "$baseline" process_start_time_seconds); fi
 		f_pst=$(extract_gauge_exact "$final" process_start_time_seconds)
 		istiod_restarted=$(awk -v b="$b_pst" -v f="$f_pst" '
 			BEGIN {
@@ -1483,7 +1506,7 @@ scrape_window() {
 			queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
 		fi
 
-		# Counter deltas (xds pushes + k8s events). counter_delta (metrics.sh, R10): a
+		# Counter deltas (xds pushes + k8s events). counter_delta (metrics.sh): a
 		# counter missing from both scrapes, or one that went backwards, is N/A with a
 		# warning, never 0; one first registered in the window counts from 0; an
 		# incomplete scrape (`unscraped`, PL29) is N/A. Pushes: see xds_pushes_in_batch.
@@ -1530,7 +1553,8 @@ scrape_window() {
 			cpu_m_delta="N/A"
 		else
 			local b_cpu_s f_cpu_s window_avg_m=0
-			b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
+			b_cpu_s=N/A
+			if [[ -n "$baseline" ]]; then b_cpu_s=$(extract_gauge_exact "$baseline" process_cpu_seconds_total); fi
 			f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
 			cpu_s_delta=$(awk -v b="$b_cpu_s" -v f="$f_cpu_s" '
 				BEGIN { if (b == "N/A" || f == "N/A" || f - b < 0) print "N/A"; else printf "%.2f", f - b }')
@@ -1576,14 +1600,17 @@ scrape_window() {
 			cs_avg="N/A"
 		else
 			local b_sum f_sum b_cnt f_cnt
-			b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" pilot_xds_config_size_bytes || echo 0)
+			b_sum=0 b_cnt=0
+			if [[ -n "$baseline" ]]; then
+				b_sum=$(extract_hist_sum "$baseline" pilot_xds_config_size_bytes)
+				b_cnt=$(extract_hist_count "$baseline" pilot_xds_config_size_bytes)
+			fi
 			f_sum=$(extract_hist_sum "$final" pilot_xds_config_size_bytes)
-			b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" pilot_xds_config_size_bytes || echo 0)
 			f_cnt=$(extract_hist_count "$final" pilot_xds_config_size_bytes)
 			cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
 				BEGIN {
 					ds = fs - bs; dc = fc - bc
-					# Nothing observed, or the sum went backwards (a reset): N/A, not 0 (R10).
+					# Nothing observed, or the sum went backwards (a reset): N/A, not 0.
 					if (dc <= 0 || ds < 0) { print "N/A"; exit }
 					printf "%.0f", ds/dc
 				}')
@@ -1610,7 +1637,10 @@ scrape_window() {
 		local sc_clusters="N/A" sc_cds="N/A" sc_rds="N/A" sc_mem="N/A"
 		if (( CONFIG_DUMP_SAMPLES > 0 )); then
 			local cd_out cd_csv cd_meta
-			cd_out="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
+			if [[ -z "${CD_CACHE[$ctx]+x}" ]]; then
+				CD_CACHE[$ctx]="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
+			fi
+			cd_out="${CD_CACHE[$ctx]}"
 			cd_csv="${cd_out%%|*}"
 			cd_meta="${cd_out#*|}"
 			local attempted=0 got=0
@@ -1638,7 +1668,7 @@ scrape_window() {
 		local tm_fields="${TRAFFIC_CONFIG}\t${VSDR_SERVICES}\t${virt_services}\t${push_time_avg}\t${pushctx_avg}\t${sc_clusters}\t${sc_cds}\t${sc_rds}"
 		local gr_fields
 		gr_fields="$(growth_meta_fields)\t${istiod_services}\t${cpu_s_delta}\t${sc_mem}\t${GROWTH_CTX_CACHE[$ctx]}\t${GROWTH_CTX_CACHE2[$ctx]}"
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")\t${tm_fields}\t${gr_fields}" >> "$TSV_FILE"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")\t${tm_fields}\t${gr_fields}" >> "$rows_file"
 		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} cluster=${CLUSTER_PROXIES[$ctx]:-N/A} sidecars=${SIDECAR_PODS[$ctx]:-N/A} check=${PROXY_CHECK[$ctx]:-N/A} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 		echo "    traffic=${TRAFFIC_CONFIG} vsdr_services=${VSDR_SERVICES} istiod_virt_services=${virt_services} push_time_avg=${push_time_avg}ms pushctx_init_avg=${pushctx_avg}ms sidecar_clusters_avg=${sc_clusters} cds_bytes_avg=${sc_cds} rds_bytes_avg=${sc_rds}"
 		echo "    window=${WINDOW_KIND} services_per_namespace=${SERVICES_PER_NAMESPACE} workload=${WORKLOAD_MODE} istiod_services=${istiod_services} cpu_s=${cpu_s_delta} sidecar_envoy_mem=${sc_mem}Mi"
@@ -1653,8 +1683,9 @@ scrape_window() {
 		# Node capacity is still readable with zero istiod pods.
 		collect_capacity_for_ctx "$dctx"
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
-		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$TSV_FILE"
+		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 	done
+	cat "$rows_file" >> "$TSV_FILE" || die "could not append the window's rows to ${TSV_FILE}"
 
 	# istiod restart evidence for the contexts whose rows above say istiod_restarted 1 or
 	# unknown (tests/lib/istiod-diag.sh, istiod-diag-<RUN_ID>/ next to the TSV). Reads the
@@ -1674,6 +1705,7 @@ if ((WATCH)); then
 		# are cheap, read-only, and outside the scrape window, so re-reading is safe.
 		# The per-cluster proxy total, sidecar count and check are per window too.
 		CAP_CACHE=()
+		CD_CACHE=()
 		NODE_KV_CACHE=()
 		POD_KV_CACHE=()
 		CLUSTER_PROXIES=()

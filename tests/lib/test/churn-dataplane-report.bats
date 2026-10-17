@@ -108,7 +108,7 @@ two_pairs() {
 	[ "$(jq '[.rows[] | to_entries[] | select(.key != "churn_convergence_p99_worst") | .value | strings] | length' <<<"$output")" = 0 ]
 }
 
-@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (R3, PL26)" {
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (PL26)" {
 	local d fmt
 	for d in a b; do
 		mkdir -p "${RES}/sweep-${d}"
@@ -143,7 +143,7 @@ two_pairs() {
 	[ "$(jq -c '[.pooled_runs.runs, .metadata.qps]' <<<"$output")" = '[1,"100"]' ]
 }
 
-@test "005: the quick start's runs (one TSV named smoke, 003's istiod-diag under its own id) separate with the printed commands, pasted twice, and each printed report runs (U1)" {
+@test "005: the quick start's runs (one TSV named smoke, 003's istiod-diag under its own id) separate with the printed commands, pasted twice, and each printed report runs" {
 	local id1=20261016T100000Z-1 id2=20261016T100500Z-2 id3=20261016T110000Z-3 cmd pass
 	# 002 and 003 of one quick start: the TSV is churn-dataplane-smoke.tsv (no id in its
 	# name), its rows carry 002's and 003's ids, and 003's istiod-diag folder has the second.
@@ -190,7 +190,7 @@ two_pairs() {
 	[[ "$stderr" != *"mkdir"* && "$stderr" != *"run-${id1}/run-"* ]]
 }
 
-@test "005: the R2 start-of-run keys and the recorded outcome (Y9) are in every format" {
+@test "005: the start-of-run readiness keys and the recorded outcome are in every format" {
 	{
 		echo "# RUN_ID=r1"
 		echo "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"

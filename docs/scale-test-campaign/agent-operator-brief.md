@@ -38,7 +38,10 @@ provisioning, import, networking or credential work.
    healthy (`clusterz` synced) before the next launch.
 7. **Always have a monitor armed** while a sweep runs.
 8. **Redact.** No real cluster/context names, API hostnames, kubeconfig or token contents in
-   commits, PRs, issues or this repo. Use placeholders.
+   commits, PRs, issues or this repo. Quote results from a copy written by
+   `tests/lib/redact-results.sh --out /tmp/redacted <results>/sweep-<RUN_ID>` (contexts become
+   `<mesh-a-ctx>`, API hosts `<api-host>`, other cluster hosts `<host>`, IPs `<ip>`; see
+   `docs/campaigns/README.md`), and read the copy before you quote it.
 
 ## Non-blocking issues
 

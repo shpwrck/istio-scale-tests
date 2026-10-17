@@ -161,7 +161,7 @@ _net_kubectl() {
 	[[ "$output" == CAUTION\|* ]]
 }
 
-# F1: bands default from SCALE_SLA_CAUTION_PCT / SCALE_SLA_FAIL_PCT (env), overridable
+# Bands default from SCALE_SLA_CAUTION_PCT / SCALE_SLA_FAIL_PCT (env), overridable
 # as args 8/9 so the function stays pure / unit-testable.
 
 @test "env_sla_verdict: bands read from env (SCALE_SLA_*_PCT)" {

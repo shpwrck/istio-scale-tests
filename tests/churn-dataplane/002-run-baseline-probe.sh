@@ -20,7 +20,7 @@
 #       --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
-# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# A loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
 # both run). Self-reports an UNEXPECTED abort.
 # shellcheck disable=SC2154  # rc is assigned at the head of the trap body
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
@@ -238,7 +238,7 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # PL2: probe kube versions concurrently with 5s --request-timeout.
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
-# R4: the Istio version the members run, before any load (inherited when 004 runs this
+# The Istio version the members run, before any load (inherited when 004 runs this
 # probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
 istio_version_resolve "$ALL_CTXS_CSV" 0 "${KUBECTL[@]}"
 mapfile -t IV_KV < <(istio_version_kv)
@@ -317,7 +317,7 @@ ISTIOD_PODS=()
 ISTIOD_DIR="$(mktemp -d)"
 PF_OK=0
 cleanup_pf() {
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	rm -rf "${ISTIOD_DIR:-}"
 }
@@ -421,7 +421,7 @@ fi
 XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
-	# counter_delta (metrics.sh, R10): N/A with a warning when a counter is in neither
+	# counter_delta (metrics.sh): N/A with a warning when a counter is in neither
 	# scrape (renamed, never 0) or went backwards; one registered in the window counts from 0.
 	XDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")" \
 		"$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")" "pilot_xds_pushes on ${SOURCE_CTX}")

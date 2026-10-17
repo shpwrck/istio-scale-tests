@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Revert a profile applied by 001-apply-profile.sh: delete its resources and
 # merge-patch the Istio CR back to the saved values at every path the profile set.
-# Then check that those paths and resources match the pre-apply state.
+# Then check that those paths and resources match the pre-apply state. Before it changes
+# anything, it compares the members' Istio CR and IstioRevision generations with the ones
+# 001 recorded once its apply settled: one that moved means something else edited the
+# Istio CR during the pass (warned, and written to istio-edited-during-pass in the state
+# dir, which 003-run-tuning-sweep.sh reports as a problem); the revert still runs.
 #
 # Usage:
 #   ./tests/tuning/002-revert-profile.sh --state-dir DIR [--contexts CSV] [options]
@@ -13,6 +17,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/preamble.sh" # istio_generations_read, istio_generations_diff
 # shellcheck disable=SC1091
 source "${ROOT}/tests/tuning/lib/tuning.sh"
 
@@ -42,6 +48,13 @@ Environment:
   TUNING_REVERT_HEALTHCHECK_NS_PROBE=1  Also create a probe namespace and wait up to
                                         TUNING_REVERT_HEALTHCHECK_TIMEOUT seconds for
                                         istio-ca-root-cert to appear in it.
+
+Before the revert it compares the members' Istio CR and IstioRevision generations with
+the ones 001 recorded after its apply (istio-generations-applied in the state dir). A
+generation that moved means something else edited the Istio CR during the pass (Argo CD
+not paused, another operator, an OSSM operator upgrade): it warns and writes
+istio-edited-during-pass in the state dir (003-run-tuning-sweep.sh then fails the sweep,
+exit 4), and the revert still runs. Its exit status does not change.
 
 Exit status: 0 reverted and checked, 1 error, 3 the post-revert check failed.
 EOF
@@ -115,6 +128,21 @@ ns_probe() {
 	"${KUBECTL[@]}" --context="$ctx" delete namespace "$ns" --wait=false >/dev/null 2>&1 || true
 	((ok))
 }
+
+# Did anything but this profile edit the Istio CR since 001's apply settled?
+rm -f "${STATE_DIR}/istio-edited-during-pass"
+if [[ -s "${STATE_DIR}/istio-generations-applied" ]]; then
+	gen_moved="$(istio_generations_diff "$(<"${STATE_DIR}/istio-generations-applied")" \
+		"$(istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")")"
+	if [[ -n "$gen_moved" ]]; then
+		printf '%s\n' "$gen_moved" >"${STATE_DIR}/istio-edited-during-pass" \
+			|| echo "warn: could not write ${STATE_DIR}/istio-edited-during-pass" >&2
+		tab=$'\t'
+		echo "WARNING: the Istio CR changed during the pass of ${PROFILE_NAME}, after its apply settled and not by this profile: ${gen_moved#*"$tab"}. Likely: $(istio_generation_causes "${gen_moved%%"$tab"*}"). The pass's probes may have measured another configuration. Reverting anyway." >&2
+	fi
+else
+	echo "    note: no istio-generations-applied in the state dir (001 stopped before its apply settled, or an older 001 wrote it): no check that the Istio CR was left alone during the pass"
+fi
 
 fail=0
 PATCHED=()

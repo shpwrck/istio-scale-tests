@@ -7,7 +7,7 @@
 # aggregation but still counts them in count_total and reports the gap.
 # Propagates the TSV preamble metadata into every output format, each key merged over
 # every input (mixed:a,b when it varies, PL26). More than one run under the results dir
-# stops the report unless --allow-multi-run, and then every format says so (R3).
+# stops the report unless --allow-multi-run, and then every format says so.
 # Every format also carries a "Local baseline" verdict per (mesh_size, qps_target),
 # so a same-cluster number that was dropped or never measured is always visible.
 # Every format also has a "Remote coverage" section, before the results table: the
@@ -40,7 +40,7 @@ source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
 FORMAT="text"
-# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# --allow-multi-run: pool more than one run (else the report refuses). Per invocation
 # like --force-large-matrix, so no options.env key.
 ALLOW_MULTI_RUN=0
 FAIL_ON_UNREACHABLE=0
@@ -59,7 +59,8 @@ Usage: $(basename "$0") [options]
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
                      pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
-  --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
+  --format FMT       Output format: text, csv, markdown (or md), json, charts
+                     (default: text).
   --fail-on-unreachable
                      After the output, exit 3 when a remote's reach coverage is not
                      REACHABLE (rule=reach_coverage) or a remote has no valid latency
@@ -67,7 +68,8 @@ Usage: $(basename "$0") [options]
   -h, --help         Show this help.
 
 Example (one sweep, as 003 runs it; from the repo root):
-  tests/dataplane/$(basename "$0") --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
+  tests/dataplane/$(basename "$0") \\
+    --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
 Every format includes a "Remote coverage" section before the results table: per
 mesh size and source, how many remotes passed every reach check (reach-*.tsv from
@@ -99,18 +101,22 @@ The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv an
 json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
 A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
 
-When the results dir holds sweep-outcome.txt, every format repeats it, with the run that
-recorded it: the failed cells by reason, its problems (the Istio version, active revision
-or the Istio CR's generation changed under the sweep) and notes (members not ready at its
-start or end, proxies on another version). 003 writes it at its start as "not finished"
-(EXIT=unfinished) and replaces it at its end: while it says not finished (the sweep died,
-or still runs), every format says "this sweep has not finished" (json sweep_outcome:
-"exit": null, "unfinished": true, "started_at"; a finished one reads "unfinished":
-false); I5: one interrupted (Ctrl-C, SIGTERM, SIGHUP) says when and by which signal
-(json "interrupted_at", "interrupted_by"), and one that stopped on an error after its
-start shows the stop and its reason, as any stop. A sweep dir without the file is from
-a sweep that stopped before its start (nothing ran), or from an older harness. The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to
-each member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
+When the results dir holds sweep-outcome.txt (003 writes it), every format repeats
+it, with the run that recorded it: the failed cells by reason, its problems (the Istio
+version, the active revision or the generation of the Istio CR or its active
+IstioRevision changed under the sweep, or the end-of-sweep check failed) and notes
+(members not ready at its start or end, proxies on another version). The sweep writes
+it at its start as "not finished" (EXIT=unfinished) and replaces it at its end: while
+it says not finished (the sweep died, or still runs), every format says "this sweep
+has not finished" (json sweep_outcome: "exit": null, "unfinished": true, "started_at";
+a finished one reads "unfinished": false). One interrupted (Ctrl-C, SIGTERM, SIGHUP)
+says when and by which signal (json "interrupted_at", "interrupted_by"), and one that
+stopped on an error after its start shows the stop and its reason, as any stop. A
+sweep dir without the file is from a sweep that stopped before its start (nothing
+ran), or from an older harness.
+
+The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to each
+member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
@@ -172,7 +178,7 @@ if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# R3/PL6: the report pools every TSV under the results dir; more than one run stops it
+# PL6: the report pools every TSV under the results dir; more than one run stops it
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
@@ -185,7 +191,7 @@ PREAMBLE=()
 while IFS= read -r line; do
 	PREAMBLE+=("$line")
 done < <(config_merged_preamble "${TSV_FILES[@]}")
-# I3 (PL26): a sweep-level Istio key no input carries (every TSV predates it) reads unknown,
+# A sweep-level Istio key no input carries (every TSV predates it) reads unknown,
 # as in the other reports: not recorded, rather than absent.
 for _k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
 	_have=0
@@ -205,6 +211,7 @@ PREAMBLE=("${_pre[@]}"
 	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
 unset _pre
+PREAMBLE+=("REPORT_HARNESS_SHA=$(report_harness_sha)") # this report's own harness, every format
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).
 # Counts:
@@ -786,16 +793,19 @@ whose latency rows are all (`no valid latency rows`) or partly invalid, as
 GLOSSARY
 }
 
+# A frontmatter key printed bare: a preamble key name, or KEY[x] with a plain x.
+FM_PLAIN_KEY_RE='^[A-Za-z_][A-Za-z0-9_]*(\[[A-Za-z0-9._/-]*\])?$'
+
 report_markdown() {
+	local k v_esc=""
 	echo "---"
 	for kv in "${PREAMBLE[@]}"; do
-		# Split at first '=' only; quote value to keep YAML literal.
+		# Split at the first '=' only; the value as a YAML string (yaml_str escapes it), and
+		# the key too when it is more than a name (a KEY[x] key of a hand-edited TSV).
 		k="${kv%%=*}"
-		v="${kv#*=}"
-		# Escape backslashes and double quotes in value.
-		v_esc=${v//\\/\\\\}
-		v_esc=${v_esc//\"/\\\"}
-		echo "${k}: \"${v_esc}\""
+		[[ "$k" =~ $FM_PLAIN_KEY_RE ]] || yaml_str -v k "$k"
+		yaml_str -v v_esc "${kv#*=}"
+		echo "${k}: ${v_esc}"
 	done
 	echo "---"
 	echo ""
@@ -814,6 +824,8 @@ report_markdown() {
 	echo "|-----------|------------|--------------|---------|---------|------------|------------|------------|-------------|------------|----------------|------------------|"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
 		[[ -n "$mesh" ]] || continue
+		# The key cells (TSV values) through md_cell: a | in one would break the row.
+		md_cell -v mesh "$mesh"; md_cell -v qps "$qps"; md_cell -v cls "$cls"
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
@@ -957,9 +969,10 @@ report_json() {
 report_charts() {
 	echo "---"
 	for kv in "${PREAMBLE[@]}"; do
-		k="${kv%%=*}"; v="${kv#*=}"
-		v_esc=${v//\\/\\\\}; v_esc=${v_esc//\"/\\\"}
-		echo "${k}: \"${v_esc}\""
+		k="${kv%%=*}"
+		[[ "$k" =~ $FM_PLAIN_KEY_RE ]] || yaml_str -v k "$k"
+		yaml_str -v v_esc "${kv#*=}"
+		echo "${k}: ${v_esc}"
 	done
 	echo "generated: \"$(date -u -Iseconds)\""
 	echo "---"

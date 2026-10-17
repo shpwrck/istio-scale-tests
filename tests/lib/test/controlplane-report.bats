@@ -98,7 +98,7 @@ vsdr_dir() {
 	# series run (-).
 	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id,gateway_physical_max,gateway_ws_max,leftover_ns_max,cpu_window_avg,pushes_n" ]]
 	# A 51-column file has no gateway physical/working-set, leftover or CPU-seconds column:
-	# N/A; all 9 valid rows have a push count (pushes_n, A10).
+	# N/A; all 9 valid rows have a push count (pushes_n).
 	[[ "$row" == *",583.3,2.3,0,-,-,N/A,N/A,N/A,N/A,9" ]]
 	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg,traffic_config,vsdr_services,"* ]]
 	[[ "$row" == *",30,34,31,none,0,"* ]]
@@ -450,7 +450,7 @@ fit_of() {
 	[ "$(jq 'has("namespace_scaling")' <<<"$output")" = false ]
 	growth_dir
 	cp "$FIXTURE" "${GRES}/controlplane-fixture-t2.tsv"
-	# Two runs (two RUN_IDs) in one dir: pooled on purpose (R3).
+	# Two runs (two RUN_IDs) in one dir: pooled on purpose.
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --allow-multi-run --format json
 	assert_success
 	# The 51-column file keeps its own cell (legacy defaults) next to the growth cells.
@@ -588,7 +588,7 @@ fit_of() {
 	assert_output --partial "> istiod replicas: 1 per cluster. Heap per added pod is the change in heap_inuse summed over"
 }
 
-@test "a sweep whose members ran different Istio versions: its mixed:a/b value stays one item in every list, one tag, and warns (A4)" {
+@test "a sweep whose members ran different Istio versions: its mixed:a/b value stays one item in every list, one tag, and warns" {
 	local d="${BATS_TEST_TMPDIR}/mixed"
 	mkdir -p "$d"
 	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=mixed:v1.30.5/v1.29.0|' "$FIXTURE" > "${d}/controlplane-mixed.tsv"
@@ -598,13 +598,13 @@ fit_of() {
 		'["mixed:v1.30.5/v1.29.0",["mixed:v1.30.5/v1.29.0"],["mixed:v1.30.5/v1.29.0"]]' ]
 	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION mixed:v1.30.5/v1.29.0)"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
-	# One `# KEY=value` line per key (X5): a value with a comma or slash stays one value.
+	# One `# KEY=value` line per key: a value with a comma or slash stays one value.
 	assert_line "# ISTIO_VERSION=mixed:v1.30.5/v1.29.0"
 	assert_line --regexp '^# ISTIO_VERSION_PIN=.+$'
 	assert_line --regexp '^# ISTIO_VERSION_BY_CONTEXT=.+$'
 	refute_output --partial "mixed:mixed:"
 	# Pooled with a run on one of those versions (1.30.5, without the v): each distinct
-	# version once (X13, Y11).
+	# version once.
 	sed 's|^# RUN_ID=.*|# RUN_ID=other|' "$FIXTURE" > "${d}/controlplane-other.tsv"
 	run --separate-stderr "$REPORT" --results-dir "$d" --allow-multi-run --format csv
 	assert_success
@@ -612,7 +612,7 @@ fit_of() {
 	refute_output --partial "mixed:mixed:"
 }
 
-@test "a re-generated report repeats the sweep's recorded outcome (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT and the R2 start keys in every format (X3, X4, Y9)" {
+@test "a re-generated report repeats the sweep's recorded outcome (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT and the start-of-run readiness keys in every format" {
 	local d="${BATS_TEST_TMPDIR}/outcome"
 	mkdir -p "$d"
 	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=v1.30.5\n# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5\n# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy\n# ISTIO_READY_WAITED_SEC=60|' \
@@ -641,7 +641,7 @@ fit_of() {
 	assert_line "# ISTIO_READY_WAITED_SEC=60"
 	assert_line "# SWEEP_OUTCOME_EXIT=4"
 	assert_line "# SWEEP_OUTCOME_PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
-	# J10: through a symlink to the results dir (no trailing slash), the same report.
+	# Through a symlink to the results dir (no trailing slash), the same report.
 	ln -s "$d" "${BATS_TEST_TMPDIR}/latest"
 	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
 	assert_success
@@ -667,12 +667,12 @@ fit_of() {
 		/^# HARNESS_SHA=/ { print "# HARNESS_SHA=abc1234-dirty"; next }
 		/^#/ || $1 == "timestamp" || $53 == "pods"' "$gfix" > "${b}/controlplane-20261013T110000Z-222.tsv"
 	# Without --allow-multi-run the base dir stops the report: it names each sweep and the
-	# command that reports it alone (R3).
+	# command that reports it alone.
 	run --separate-stderr "$REPORT" --results-dir "$base" --format json
 	assert_failure 1
 	[ -z "$output" ]
 	[[ "$stderr" == *"error: ${base} holds 2 runs"* ]]
-	# Newest first, each with the command that reports it alone (B2).
+	# Newest first, each with the command that reports it alone.
 	[[ "$stderr" == *"sweep-20261013T110000Z-222:"$'\n'"    ${REPORT} --results-dir '${b}'"$'\n'"  sweep-20261013T100000Z-111:"$'\n'"    ${REPORT} --results-dir '${a}'"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
@@ -692,7 +692,7 @@ fit_of() {
 	assert_output --partial "> **Pooled runs.** This report pools 2 runs (--allow-multi-run): sweep-20261013T100000Z-111, sweep-20261013T110000Z-222. HARNESS_SHA: fixture, abc1234-dirty. ISTIO_VERSION: 1.30.5, 1.31.0. These differ"
 	assert_output --partial 'run_ids: ["20261013T100000Z-111","20261013T110000Z-222"]'
 	assert_output --partial 'harness_shas: ["fixture","abc1234-dirty"]'
-	assert_output --partial "istio_version: mixed:1.30.5,1.31.0"
+	assert_output --partial 'istio_version: "mixed:1.30.5,1.31.0"'
 	assert_output --partial "> **Warning:** The inputs were measured on different Istio versions"
 	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222) | heap_inuse_mi | 152 | 260 | 1.71 |"
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
@@ -903,4 +903,48 @@ growth66() {
 	assert_output --partial "| Workload replicas / service | N/A (config-only) |"
 	assert_output --partial "| **istiod CPU (window peak)** |"
 	assert_output --partial "| istiod CPU (kubectl top at window end) |"
+}
+
+# --- the xDS push count of a cell and of the fit ------------------------------------
+
+@test "a valid row without a push count: a data warning, pushes_avg shown with got/n_valid in every format (csv pushes_n, json xds_pushes_n)" {
+	local r="${BATS_TEST_TMPDIR}/sweep-nopush"
+	mkdir -p "$r"
+	# The first valid row's xds_pushes_delta (column 13) is N/A.
+	awk -F'\t' -v OFS='\t' '!/^#/ && $1 != "timestamp" && !n++ { $13 = "N/A" } { print }' "$FIXTURE" > "${r}/controlplane-fixture-t2.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$r" --format json
+	assert_success
+	[ "$(jq -c '[.results[0].n_valid, .results[0].xds_pushes_n, .results[0].xds_pushes_avg]' <<<"$output")" = '[9,8,100]' ]
+	[[ "$(jq -r '.metadata.data_warnings | join(" ")' <<<"$output")" == *"1 valid row(s) of 1 cell(s) have no xDS push count"* ]]
+	[[ "$stderr" == *"1 valid row(s) of 1 cell(s) have no xDS push count"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$r" --format text
+	assert_output --partial "xDS pushes avg=100 (from 8/9 valid rows: the others have no push count)"
+	run --separate-stderr "$REPORT" --results-dir "$r" --format csv
+	[ "$(grep -v '^#' <<<"$output" | sed -n 2p | awk -F, '{ print $NF }')" = 8 ]
+	# Every valid row with a count: pushes_n is n_valid, no warning.
+	cp "$FIXTURE" "${r}/controlplane-fixture-t2.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$r" --format json
+	[ "$(jq -c '[.results[0].n_valid, .results[0].xds_pushes_n]' <<<"$output")" = '[9,9]' ]
+	[[ "$stderr" != *"no xDS push count"* ]]
+}
+
+@test "the conv_p99 fit's push gate says when it read pushes_avg from only some of a point's valid rows (FITNOTE in every format)" {
+	local g="${BATS_TEST_TMPDIR}/g" f
+	mkdir -p "$g"
+	f="${g}/controlplane-fixture-ns.tsv"
+	# The growth fixture at p99 300 ms (fitted), plus a second valid wide-probe row at N=400
+	# without a push count.
+	awk -F'\t' 'BEGIN { OFS = "\t" } /^#/ || $1 == "timestamp" { print; next }
+		$10 == 90 { $10 = 300 }
+		$7 == "wide" && $57 == "probe" && $6 == 400 && $31 == "0" && !d++ { print; $13 = "N/A" }
+		{ print }' "${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" > "$f"
+	run --separate-stderr "$REPORT" --results-dir "$g" --format json
+	assert_success
+	[[ "$(jq -r '.namespace_scaling.fit_note' <<<"$output")" == "the conv_p99_ms push gate (at least 120 xDS pushes per istiod replica) read pushes_avg from only some of the valid rows of 1 fitted point(s), the others having no push count: "*"N=400 (1/2 rows)" ]]
+	run --separate-stderr "$REPORT" --results-dir "$g" --format text
+	assert_output --partial "  NOTE: the conv_p99_ms push gate (at least 120 xDS pushes per istiod replica) read pushes_avg from only some of the valid rows of 1 fitted point(s)"
+	run --separate-stderr "$REPORT" --results-dir "$g" --format md
+	assert_output --partial "> **Note:** the conv_p99_ms push gate"
+	run --separate-stderr "$REPORT" --results-dir "$g" --format csv
+	assert_output --partial "# scaling_fit: NOTE: the conv_p99_ms push gate"
 }
