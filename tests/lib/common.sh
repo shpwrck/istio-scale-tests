@@ -370,6 +370,9 @@ sweep_outcome_recorded() {
 #                    placeholder rows, in n_total, not n_valid)
 #   --problem <msg>  the sweep failed although its cells ran (A6: the Istio version changed
 #                    under it); printed, recorded and counted like a failed cell
+#   --uncounted <why>  N3: the sweep could not count its cells: a problem ("could not count
+#                    the sweep's <unit>: <why>"), "All cells ran" is never printed, and the
+#                    record says TOTAL=unknown
 #   --note <msg>     a caveat; printed and recorded, not a failure
 #   --info <msg>     a fact worth keeping that is not a caveat (K6: a --resume whose members
 #                    were all ready); printed on stdout as "note: <msg>." and recorded
@@ -385,7 +388,7 @@ sweep_outcome_recorded() {
 # before its end.
 # shellcheck disable=SC2329
 sweep_outcome() {
-	local rc=0 stop_rc="" stop_why="" unit=cells where="" record="" run_id_r="" cells r by_fail="" by_skip=""
+	local rc=0 stop_rc="" stop_why="" unit=cells where="" record="" run_id_r="" cells r by_fail="" by_skip="" uncounted=""
 	local -a problems=() notes=() infos=() failed_r=() skipped_r=() lines=() mds_r=()
 	while (($#)); do
 		case "$1" in
@@ -395,6 +398,7 @@ sweep_outcome() {
 		--unit) unit="$2"; shift 2 ;;
 		--where) where="$2"; shift 2 ;;
 		--problem) problems+=("$2"); shift 2 ;;
+		--uncounted) uncounted="$2"; shift 2 ;;
 		--note) notes+=("$2"); shift 2 ;;
 		--info) infos+=("$2"); shift 2 ;;
 		--record) record="$2"; shift 2 ;;
@@ -404,6 +408,7 @@ sweep_outcome() {
 	done
 	cells="$1"
 	shift
+	[[ -z "$uncounted" ]] || problems=("could not count the sweep's ${unit}: ${uncounted}" ${problems[@]+"${problems[@]}"})
 	[[ -n "$where" ]] || where="The report includes them as placeholder rows (in n_total, not n_valid)"
 	for r in "$@"; do
 		if [[ "$r" == SKIPPED_* ]]; then skipped_r+=("$r"); else failed_r+=("$r"); fi
@@ -416,7 +421,7 @@ sweep_outcome() {
 	# markdown only) plus the text, in the order printed.
 	local tail="; exit ${SWEEP_FAILED_EXIT}."
 	[[ -z "$stop_rc" ]] || tail="; the sweep also stopped early, so it exits ${stop_rc}, not ${SWEEP_FAILED_EXIT}."
-	if [[ -z "$stop_rc" && ${#failed_r[@]} -eq 0 && ${#skipped_r[@]} -eq 0 ]]; then
+	if [[ -z "$stop_rc" && -z "$uncounted" && ${#failed_r[@]} -eq 0 && ${#skipped_r[@]} -eq 0 ]]; then
 		lines+=("out|All ${cells} ${unit} ran (their rows' own statuses are in the report).")
 	elif ((${#skipped_r[@]})); then
 		lines+=("out|${#skipped_r[@]} of ${cells} ${unit} were skipped on purpose, not failed: ${by_skip}.")
@@ -448,7 +453,7 @@ sweep_outcome() {
 			echo "STOPPED=$([[ -n "$stop_rc" ]] && echo 1 || echo 0)"
 			echo "STOP_REASON=${stop_why}"
 			echo "UNIT=${unit}"
-			echo "TOTAL=${cells}"
+			echo "TOTAL=$([[ -z "$uncounted" ]] && echo "$cells" || echo unknown)"
 			echo "FAILED=${#failed_r[@]}"
 			echo "FAILED_BY=${by_fail}"
 			echo "SKIPPED=${#skipped_r[@]}"

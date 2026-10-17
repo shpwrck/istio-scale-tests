@@ -381,6 +381,8 @@ _iv_run() {
 		export ISTIO_VERSION="${PIN-v1.30.5}"
 		if [[ "${3:-}" == --no-stop ]]; then
 			istio_version_resolve --no-stop "$1" "$2" _iv_kubectl
+		elif [[ "${3:-}" == --resumed-at ]]; then
+			istio_version_resolve --resumed-at "$4" "$1" "$2" _iv_kubectl
 		else
 			istio_version_resolve "$1" "$2" _iv_kubectl
 		fi
@@ -737,13 +739,15 @@ setup() {
 	run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/preamble.sh"
 		_iv_kubectl() { echo "$*" >> "$IV_LOG"; return 1; }
 		export ISTIO_VERSION=mixed:a/b ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT=x=a,y=b
-		export ISTIO_NOTREADY_AT_START=y=IstiodNotReady ISTIO_READY_WAITED_SEC=60
+		export ISTIO_NOTREADY_AT_START=y=IstiodNotReady ISTIO_READY_WAITED_SEC=60 _ISTIO_VERSION_REVS=x=default,y=default-v1-30-5
 		export _ISTIO_VERSION_RESOLVED="live|v1.30.5|mixed:a/b|x=a,y=b|y=IstiodNotReady|60"
 		istio_version_resolve a 0 _iv_kubectl
 		istio_version_kv; istio_version_label'
 	assert_success
+	# N13: the active revisions the sweep read go into every preamble too.
 	assert_output "$(printf '%s\n' ISTIO_VERSION=mixed:a/b ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT=x=a,y=b \
-		ISTIO_NOTREADY_AT_START=y=IstiodNotReady ISTIO_READY_WAITED_SEC=60 'mixed:a/b (the members differ or were not all read; pin v1.30.5)')"
+		ISTIO_NOTREADY_AT_START=y=IstiodNotReady ISTIO_READY_WAITED_SEC=60 ISTIO_ACTIVE_REVISIONS=x=default,y=default-v1-30-5 \
+		'mixed:a/b (the members differ or were not all read; pin v1.30.5)')"
 	[ ! -s "$IV_LOG" ]
 	# The same values in the shell without the marker (left by an earlier run, say) are
 	# not a resolution: the member is read.
@@ -756,14 +760,14 @@ setup() {
 		istio_version_kv; istio_version_label'
 	assert_success
 	assert_output "$(printf '%s\n' ISTIO_VERSION=unknown ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT=a=unknown \
-		ISTIO_NOTREADY_AT_START=none ISTIO_READY_WAITED_SEC=0 'unknown (not read on every member; pin v1.30.5)')"
+		ISTIO_NOTREADY_AT_START=none ISTIO_READY_WAITED_SEC=0 ISTIO_ACTIVE_REVISIONS=a= 'unknown (not read on every member; pin v1.30.5)')"
 	[ -s "$IV_LOG" ]
 	# Nothing resolved (a report host, say): the pin, labelled as such.
 	run bash -c 'source "$ROOT/tests/lib/preamble.sh"; unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT
 		unset ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC
 		ISTIO_VERSION=v1.30.5; istio_version_kv; istio_version_label'
 	assert_output "$(printf '%s\n' ISTIO_VERSION=v1.30.5 ISTIO_VERSION_PIN=v1.30.5 ISTIO_VERSION_SOURCE=pin ISTIO_VERSION_BY_CONTEXT=unchecked \
-		ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked 'v1.30.5 (the pin; not read live)')"
+		ISTIO_NOTREADY_AT_START=unchecked ISTIO_READY_WAITED_SEC=unchecked ISTIO_ACTIVE_REVISIONS=unchecked 'v1.30.5 (the pin; not read live)')"
 	run bash -c 'source "$ROOT/tests/lib/preamble.sh"; ISTIO_VERSION=v1.30.5 ISTIO_VERSION_PIN=1.30.5 ISTIO_VERSION_SOURCE=live; istio_version_label'
 	assert_output "v1.30.5 (read live on every member; pin 1.30.5)"
 }
@@ -917,6 +921,8 @@ _iv_recheck() {
 	run grep -x '# ISTIO_NOTREADY_AT_START=b=IstioCNINotHealthy' "${d}/run.tsv"
 	assert_success
 	run grep -x '# ISTIO_READY_WAITED_SEC=0' "${d}/run.tsv"
+	assert_success
+	run grep -x '# ISTIO_ACTIVE_REVISIONS=a=default,b=default' "${d}/run.tsv"
 	assert_success
 	run grep '^NOTE=' "${d}/sweep-outcome.txt"
 	assert_line --index 0 "NOTE=istiod or IstioCNI was still not ready at the start of the sweep, after waiting 0s (ISTIO_NOTREADY_AT_START): the first cells may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted"
@@ -1244,7 +1250,7 @@ DRIVE
 	_istio_version_recheck_live() { exit 3; }
 	IV_a=v1.30.5 run --separate-stderr _iv_recheck a
 	assert_success
-	assert_output "$(printf '%s\n' --problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit 3; the error is on stderr above), so whether the Istio version or the active revision changed during the sweep is not known")"
+	assert_output "$(printf '%s\n' --problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit 3; its error is in the sweep's stderr), so whether the Istio version or the active revision changed during the sweep is not known; check each member by hand: kubectl --context <ctx> get istios.sailoperator.io default -o jsonpath='{.status.activeRevisionName}', then that IstioRevision's .spec.version")"
 }
 
 @test "M1: no shell arithmetic reads an array element by a variable key (bash 4.3-5.1 expand the key twice)" {
@@ -1252,4 +1258,90 @@ DRIVE
 	# string ([[ "${x[$k]}" == 1 ]]).
 	run bash -c 'grep -rnE "(\(\(|\\\$\(\()([^)]*[^{A-Za-z0-9_])? *[A-Za-z_][A-Za-z0-9_]*\[\\\$" --include="*.sh" "$1/tests" "$1/terraform" | grep -v "/bats-" || true' _ "$ROOT"
 	assert_output ""
+}
+
+# _iv_hostdep: _iv_kubectl, except that with HOSTDEP set, each member's istiod Deployment
+# read fails on its own API host (a DNS failure names it).
+_iv_hostdep() {
+	local a ctx=""
+	for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
+	if [[ -n "${HOSTDEP:-}" && " $* " == *" get deployments.apps "* ]]; then
+		echo "Unable to connect to the server: dial tcp: lookup api.${ctx}.example: no such host" >&2
+		return 1
+	fi
+	_iv_kubectl "$@"
+}
+
+@test "N4, N14: members failing alike on their own API hosts are one entry, at the start and the end; a settled CR whose istiod Deployment read fails is not waited for" {
+	(
+		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
+		export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_b=v1.30.5 IV_c=v1.30.5 HOSTDEP=1
+		istio_version_resolve a,b,c 0 _iv_hostdep
+	) 2> "${BATS_TEST_TMPDIR}/start.err" && false || true
+	run cat "${BATS_TEST_TMPDIR}/start.err"
+	assert_output --partial "cannot read the running Istio version on 3 of 3 members:"$'\n'"  a, b, c (3 members; shown for a, the others name their own hosts): istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup api.a.example: no such host"$'\n'"    reproduce (shown for a): _iv_hostdep --context a -n istio-system get deployments.apps istiod -o yaml"
+	assert_output --partial $'\n'"Fix access to those members (kubeconfig, login, network) and to their istiod Deployment (their Istio CR is settled); the pin is not the problem."
+	refute_output --partial "wait until their Istio CR is settled"
+	# The same why on every member keeps the plain form.
+	(
+		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
+		export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_b=v1.30.5 IVDEP_a=fail IVDEP_b=fail
+		istio_version_resolve a,b 0 _iv_kubectl
+	) 2> "${BATS_TEST_TMPDIR}/start2.err" && false || true
+	run cat "${BATS_TEST_TMPDIR}/start2.err"
+	assert_output --partial $'\n'"  a, b (2 members): istiod Deployment istio-system/istiod: Error from server (Forbidden): deployments.apps \"istiod\" is forbidden"$'\n'
+	# End: read at the start, then each member's Deployment read fails on its own host.
+	_n4_end() {
+		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
+		export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_b=v1.30.5 IV_c=v1.30.5
+		istio_version_resolve a,b,c 0 _iv_hostdep 2>/dev/null
+		export HOSTDEP=1
+		local -a out=()
+		istio_version_recheck out _iv_hostdep
+		printf '%s\n' "${out[@]}"
+	}
+	run --separate-stderr _n4_end
+	assert_success
+	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a, b, c ran v1.30.5 at the start, and their active revisions read v1.30.5 at the end, but istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup api.a.example: no such host (shown for a; the others name their own hosts)")"
+}
+
+@test "N5: members unknown at the start are grouped by the version they read at the end" {
+	_n5_end() {
+		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
+		export ISTIO_VERSION=v1.30.5 IV_d=v1.30.5 ISTIO_VERSION_CHECK=warn
+		istio_version_resolve a,b,c,d 0 _iv_kubectl 2>/dev/null
+		export IV_a=v1.30.5 IV_b=v1.30.6 IV_c=v1.30.5
+		local -a out=()
+		istio_version_recheck out _iv_kubectl
+		printf '%s\n' "${out[@]}"
+	}
+	run --separate-stderr _n5_end
+	assert_success
+	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a, c were unknown at the start and read v1.30.5 at the end; b was unknown at the start and reads v1.30.6 at the end")"
+}
+
+@test "N6, N11: a --resume is never told to set warn for an unknown version; a check that stops partway leaves no temp files" {
+	local tmpd="${BATS_TEST_TMPDIR}/tmpd"
+	mkdir -p "$tmpd"
+	# A member that cannot be read, under fail, at a --resume: warn would not help.
+	IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
+	assert_failure 1
+	[[ "$stderr" == *$'\n'"Nothing was changed. A --resume never goes on with an unknown version (ISTIO_VERSION_CHECK=warn would not help): once every member can be read, run the same --resume again."* ]]
+	[[ "$stderr" != *"set ISTIO_VERSION_CHECK=warn"* ]]
+	# A version off the pin at a --resume keeps the advice: a sweep that recorded that
+	# version resumes under warn.
+	IV_a=v1.30.6 run --separate-stderr _iv_run a 0 --resumed-at 2026-01-01T00:00:00+00:00
+	assert_failure 1
+	[[ "$stderr" == *"To go on anyway and record ISTIO_VERSION=v1.30.6, set ISTIO_VERSION_CHECK=warn."* ]]
+	# The check stops unexpectedly, at the start and at the end: under fail at a --resume,
+	# no warn advice; and nothing is left in TMPDIR either way.
+	_istio_version_read_all() { exit 3; }
+	TMPDIR="$tmpd" IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
+	assert_failure 1
+	[[ "$stderr" == *"stopped unexpectedly (exit 3; the error is above), so the version the members run is not known."$'\n'"Nothing was changed. A --resume never goes on with an unknown version (ISTIO_VERSION_CHECK=warn would not help): fix what the error above shows, then run the same --resume again."* ]]
+	[ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]
+	TMPDIR="$tmpd" ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_recheck a,b
+	assert_success
+	assert_line --index 0 -- "--problem"
+	[ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]
 }

@@ -223,31 +223,39 @@ Other:
   --resume DIR                Resume an interrupted sweep in this sweep-<RUN_ID>/
                               dir (or a symlink to one; any other dir is refused):
                               reuse its RUN_ID and skip combos that already
-                              have a valid row. Scalars recorded once in the TSV
-                              preamble (VSDR_EVERY and VSDR_SUBSETS when the run
-                              includes vsdr, PROXY_CHECK_*) are taken from it; a
-                              conflicting --vsdr-every/--vsdr-subsets flag is
-                              refused. Not valid with --output-dir or --dry-run.
-                              A sweep started with --config resumes only with the
-                              same file (same sha256; add --config
+                              have a valid row (never re-run, also when one
+                              failed partway; its skip line says so). Scalars
+                              recorded once in the TSV preamble (VSDR_EVERY and
+                              VSDR_SUBSETS when the run includes vsdr,
+                              PROXY_CHECK_*) are taken from it; a conflicting
+                              --vsdr-every/--vsdr-subsets flag is refused. Not
+                              valid with --output-dir or --dry-run. A sweep
+                              started with --config resumes only with the same
+                              file (same sha256; add --config
                               <DIR>/run-config-<RUN_ID>.env); one started without
                               it warns when --config is given. The mesh must run
-                              the ISTIO_VERSION the sweep recorded, under either
+                              the ISTIO_VERSION the sweep recorded, and each
+                              member the active revision it recorded
+                              (ISTIO_ACTIVE_REVISIONS), under either
                               ISTIO_VERSION_CHECK policy; otherwise start a new
                               sweep. Nor is a sweep resumed whose
                               sweep-outcome.txt (or .prev.txt) records a
                               PROBLEM (the version or active revision changed
-                              under it). The TSV keeps the first run's
+                              under it, or the end-of-sweep version check
+                              failed; not a failed cell count, which every run
+                              redoes). An earlier run's notes about the end of
+                              the sweep are carried into the new outcome, once.
+                              The TSV keeps the first run's
                               ISTIO_NOTREADY_AT_START and HARNESS_SHA; the resume
                               records its own readiness, with its start time, in
                               a note of the sweep outcome
                               (ISTIO_NOTREADY_AT_RESUME=...), and warns when it
                               runs another HARNESS_SHA than the last known one
-                              before it, or unknown.
-                              resumes.txt in the sweep dir keeps one line per
-                              resume (start time, HARNESS_SHA, readiness, kube
-                              versions); the outcome notes each harness change in
-                              it, each resume on an unknown harness and each
+                              before it, or unknown. resumes.txt in the sweep
+                              dir keeps one line per resume (start time,
+                              HARNESS_SHA, readiness, kube versions); the outcome
+                              notes each harness change in it, each resume on an
+                              unknown harness or other kube versions, and each
                               earlier resume that started not ready.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
@@ -260,8 +268,9 @@ Exit codes:
      that could not be retired (RETIRE_FAILED; the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (a status row
      instead of a measurement: SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED;
-     stderr ends with "N of M cells failed" by reason) or the Istio version or active
-     revision changed during the sweep (read again at its end). A cell counts once, by
+     stderr ends with "N of M cells failed" by reason), or the Istio version or active
+     revision changed during the sweep (read again at its end), or that end-of-sweep
+     version check failed, or the cells could not be counted. A cell counts once, by
      its last row in the TSV: a status row fails it, with that reason; a measurement
      (a --resume's retry included) does not. M covers every cell of the TSV and of
      this run's matrix. Cells the memory guard skipped (SKIPPED_MEM_GUARD,
@@ -1279,6 +1288,7 @@ fi
 # measured on another one would be credited to it. Like the RUN_CONFIG rule, this stops
 # under either ISTIO_VERSION_CHECK policy (warn only lets a new run record what it finds).
 _resume_iv=""
+RESUME_NOTES=()
 if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	_resume_iv="$(grep -m1 '^# ISTIO_VERSION=' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
 	_resume_iv="${_resume_iv#*=}"
@@ -1292,9 +1302,10 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	# or active revision changing under it, or the end-of-sweep check failing): its rows
 	# are not all from one version, or that is not known, so no later read can vouch for
 	# them, and a resume would write an outcome without it (.prev too: a resume that died).
+	# N3: a cell count that failed is not one: every run counts again from the TSV.
 	for _resume_rec in sweep-outcome.txt sweep-outcome.prev.txt; do
 		[[ -f "${OUTPUT_DIR}/${_resume_rec}" ]] || continue
-		_resume_problem="$(awk '/^PROBLEM=/ { print substr($0, 9); exit }' "${OUTPUT_DIR}/${_resume_rec}")"
+		_resume_problem="$(awk -v c="PROBLEM=could not count the sweep's " '/^PROBLEM=/ && index($0, c) != 1 { print substr($0, 9); exit }' "${OUTPUT_DIR}/${_resume_rec}")"
 		[[ -z "$_resume_problem" ]] || die "--resume: this sweep's ${_resume_rec} records a problem (${_resume_problem}), so no later run can vouch for its rows, and a resume would write an outcome without it. Start a new sweep."
 	done
 fi
@@ -1309,16 +1320,67 @@ istio_version_resolve ${_iv_resume_args[@]+"${_iv_resume_args[@]}"} "$(IFS=,; ec
 echo "Istio version:     $(istio_version_label)" >&2
 if [[ -n "$RESUME_DIR" && "$ISTIO_VERSION_SOURCE" == live ]]; then
 	case "/${ISTIO_VERSION#mixed:}/" in
-	*/unknown/*) [[ -z "$_resume_iv" ]] || die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the running version cannot be read now on every member (ISTIO_VERSION=${ISTIO_VERSION}; the members are listed above). Fix access to them (kubeconfig, login, network) or wait until their Istio CR is settled, then run the same --resume again." ;;
+	*/unknown/*)
+		# N6: a check that stopped unexpectedly read nothing (ISTIO_READY_WAITED_SEC is
+		# unchecked only then, on a live read): say so, not "fix access".
+		[[ -z "$_resume_iv" || "${ISTIO_READY_WAITED_SEC:-}" != unchecked ]] \
+			|| die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the Istio version check stopped unexpectedly (its error is above), so the version the mesh runs now is not known. Fix what that error shows, then run the same --resume again."
+		[[ -z "$_resume_iv" ]] || die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the running version cannot be read now on every member (ISTIO_VERSION=${ISTIO_VERSION}; the members are listed above). Fix access to them (kubeconfig, login, network) or wait until their Istio CR is settled, then run the same --resume again."
+		;;
 	esac
 	if [[ -n "$_resume_iv" && "${_resume_iv#v}" != "${ISTIO_VERSION#v}" ]]; then
 		die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}, but the mesh now runs ${ISTIO_VERSION}, so its new rows would be credited to ${_resume_iv}. Start a new sweep: --resume never mixes Istio versions in one TSV, whatever ISTIO_VERSION_CHECK says."
 	fi
+	# N13: the same version on another active revision (a run killed before its end check,
+	# then InPlace moved to RevisionBased, or the Istio CR recreated) is another control
+	# plane. The preamble records each member's (ISTIO_ACTIVE_REVISIONS); a TSV from before
+	# it cannot be checked, which the outcome notes.
+	_resume_revs="$(awk -v k="# ISTIO_ACTIVE_REVISIONS=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)"
+	case "$_resume_revs" in
+	*=*)
+		_resume_revdiff="$(awk -v a="$_resume_revs" -v b="${_ISTIO_VERSION_REVS:-}" 'BEGIN {
+			n = split(a, p, ",")
+			for (i = 1; i <= n; i++) if (match(p[i], /=[^=]*$/)) s[substr(p[i], 1, RSTART - 1)] = substr(p[i], RSTART + 1)
+			n = split(b, p, ",")
+			for (i = 1; i <= n; i++) if (match(p[i], /=[^=]*$/)) {
+				c = substr(p[i], 1, RSTART - 1); v = substr(p[i], RSTART + 1)
+				if ((c in s) && s[c] != "" && v != "" && s[c] != v) out = out (out == "" ? "" : "; ") c ": " s[c] " when the sweep started, " v " now"
+			}
+			print out
+		}')"
+		[[ -z "$_resume_revdiff" ]] || die "--resume: the members' active Istio revision is not the one this sweep started on (${_resume_revdiff}; activeRevisionName of their Istio CR), at the same Istio version: another control plane, so the new rows would not be comparable with the earlier ones. Start a new sweep."
+		;;
+	*)
+		echo "warning: --resume: this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it), so whether one changed since it started, at the same version, is not checked." >&2
+		RESUME_NOTES+=(--note "this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it), so the --resume at ${RESUME_AT} could not check that each member still runs the revision the sweep started on")
+		;;
+	esac
 fi
 capacity_plan_warn
 guard_add_mesh_members
 leftover_preflight
 
+# N1: an earlier run's end notes (its Istio version unconfirmed at the end, istiod or
+# IstioCNI not ready at the end) are about rows that stay in the TSV: this run's outcome
+# carries them, from the newest record (sweep-outcome.txt, or sweep-outcome.prev.txt when
+# the resume after it died), as "an earlier run of this sweep (outcome of <DATE>) noted:
+# ...". A note that already starts so is carried as it is, so each is kept once.
+if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
+	_resume_rec="${OUTPUT_DIR}/sweep-outcome.txt"
+	[[ -f "$_resume_rec" ]] || _resume_rec="${OUTPUT_DIR}/sweep-outcome.prev.txt"
+	_resume_carry=()
+	[[ ! -f "$_resume_rec" ]] || mapfile -t _resume_carry < <(awk -v p="an earlier run of this sweep (outcome of " '
+		/^# DATE=/ { d = substr($0, 8) }
+		/^NOTE=/ {
+			n = substr($0, 6)
+			if (index(n, p) == 1) { print n; next }
+			if (index(n, "the Istio version at the end of the sweep is unconfirmed: ") == 1 \
+				|| index(n, "istiod or IstioCNI was not ready at the end of the sweep") == 1 \
+				|| index(n, "not ready at the end: ") == 1)
+				print p (d == "" ? "an unknown date" : d) ") noted: " n
+		}' "$_resume_rec")
+	for _resume_n in ${_resume_carry[@]+"${_resume_carry[@]}"}; do RESUME_NOTES+=(--note "$_resume_n"); done
+fi
 # A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
 # that far) no longer describes the sweep, and its reports must not show it meanwhile. Y10:
 # kept as sweep-outcome.prev.txt (reports read only sweep-outcome.txt); J8: only once the
@@ -1338,7 +1400,6 @@ fi
 # and until when when a later resume changed it again. unknown cannot be compared: each
 # resume that ran it gets a note of its own. This resume also warns when it runs unknown,
 # or a harness other than the last known one before it.
-RESUME_NOTES=()
 if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	_resumes_log="${OUTPUT_DIR}/resumes.txt"
 	[[ -s "$_resumes_log" ]] || printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\n' >> "$_resumes_log"
@@ -1348,19 +1409,38 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	fi
 	printf '%s\n' "$_resume_line" >> "$_resumes_log"
 	_resume_harness="$(awk -v k="# HARNESS_SHA=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
+	_resume_kv0="$(awk -v k="# KUBE_VERSIONS=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 	# One line each, fields split by \037 (a tab is IFS whitespace: read would merge the
-	# empty ones): R at notready (an earlier resume not ready), U at until (a resume on an
-	# unknown harness), C at new old old_at until (a change; old_at: the last run on old,
-	# empty: the first run), W old old_at gap (this resume differs from the last known
-	# harness; gap 1: an unknown one ran between them), WU (this resume's is unknown).
-	# until empty: up to the last row.
+	# empty ones): R at notready until (an earlier resume not ready), U at until (a resume
+	# on an unknown harness), C at new old old_at until (a change; old_at: the last run on
+	# old, empty: the first run), K at diffs until (N12: a resume that read other Kubernetes
+	# server versions than the preamble's, members unreachable or unknown left out), W old
+	# old_at gap (this resume differs from the last known harness; gap 1: an unknown one ran
+	# between them), WU (this resume's is unknown). until empty: up to the last row.
 	_resume_changes=()
-	mapfile -t _resume_changes < <(awk -F'\t' -v OFS='\037' -v h0="$_resume_harness" '
+	mapfile -t _resume_changes < <(awk -F'\t' -v OFS='\037' -v h0="$_resume_harness" -v kv0="$_resume_kv0" '
 		$1 == "RESUMED_AT" || NF < 2 { next }
-		{ n++; at[n] = $1; h[n] = ($2 == "" ? "unknown" : $2); nr[n] = $3 }
+		{ n++; at[n] = $1; h[n] = ($2 == "" ? "unknown" : $2); nr[n] = $3; kv[n] = (NF >= 4 ? $4 : "") }
 		END {
 			for (i = 1; i < n; i++)
-				if (nr[i] != "" && nr[i] != "none" && nr[i] != "unchecked") print "R", at[i], nr[i]
+				if (nr[i] != "" && nr[i] != "none" && nr[i] != "unchecked") print "R", at[i], nr[i], at[i + 1]
+			m = split(kv0, kq, ",")
+			for (j = 1; j <= m; j++) {
+				e = kq[j]; gsub(/^ +| +$/, "", e)
+				if (match(e, /=[^=]*$/)) k0[substr(e, 1, RSTART - 1)] = substr(e, RSTART + 1)
+			}
+			for (i = 1; i <= n; i++) {
+				d = ""
+				m = (kv[i] == "" ? 0 : split(kv[i], kq, ","))
+				for (j = 1; j <= m; j++) {
+					e = kq[j]; gsub(/^ +| +$/, "", e)
+					if (!match(e, /=[^=]*$/)) continue
+					c = substr(e, 1, RSTART - 1); v = substr(e, RSTART + 1)
+					if ((c in k0) && k0[c] != v && v !~ /^(unreachable|unknown)$/ && k0[c] !~ /^(unreachable|unknown)$/)
+						d = d (d == "" ? "" : "; ") c ": " k0[c] " at the start, " v " then"
+				}
+				if (d != "") print "K", at[i], d, (i < n ? at[i + 1] : "")
+			}
 			seg = 0; sh[0] = (h0 == "" ? "unknown" : h0); sat[0] = ""; slast[0] = ""
 			for (i = 1; i <= n; i++) {
 				if (h[i] != sh[seg] || h[i] == "unknown") { seg++; sh[seg] = h[i]; sat[seg] = at[i] }
@@ -1383,7 +1463,12 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 		IFS=$'\037' read -r _chg_kind _chg_a _chg_b _chg_c _chg_d _chg_e <<<"$_resume_chg"
 		case "$_chg_kind" in
 		R)
-			RESUME_NOTES+=(--note "istiod or IstioCNI was still not ready when the earlier --resume at ${_chg_a} started (ISTIO_NOTREADY_AT_RESUME=${_chg_b}, in resumes.txt): the first cells it ran (rows from ${_chg_a} on) may have run on a control plane that was not ready; check their status and istiod_restarted")
+			RESUME_NOTES+=(--note "istiod or IstioCNI was still not ready when the earlier --resume at ${_chg_a} started (ISTIO_NOTREADY_AT_RESUME=${_chg_b}, in resumes.txt): the first cells it ran (its rows, from ${_chg_a} until ${_chg_c}) may have run on a control plane that was not ready; check their status and istiod_restarted")
+			;;
+		K)
+			_chg_span="from ${_chg_a} on"
+			[[ -z "$_chg_c" ]] || _chg_span="from ${_chg_a} until ${_chg_c}"
+			RESUME_NOTES+=(--note "the --resume at ${_chg_a} read other Kubernetes server versions than the TSV preamble's KUBE_VERSIONS (${_chg_b}; in resumes.txt): rows ${_chg_span} ran on them")
 			;;
 		U)
 			_chg_span="from ${_chg_a} on"
@@ -2222,6 +2307,28 @@ legacy_failed() {
 	emit_failed_row "$1" "$ms" "$sc" "$rc" "$nc" "$scp" "$tc" 0 pods "$(( sc * rc ))" 0 none "$LEGACY_WINDOW_KIND"
 }
 
+# N2: a cell with a valid row whose last row is a status row failed partway, and the
+# outcome counts it failed (M3), but combo_already_done still skips it: a --resume never
+# re-runs a cell with a valid row (the report would pool the rows of two attempts). Its
+# skip line says so, and how to measure it again.
+declare -A PARTWAY_FAILED=()
+if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" ]] && ! ((GROWTH || DRY_RUN)); then
+	while IFS=$'\t' read -r _pw_key _pw_why; do
+		[[ -z "$_pw_key" ]] || PARTWAY_FAILED["$_pw_key"]="$_pw_why"
+	done < <(awk -F'\t' -v wk="$LEGACY_WINDOW_KIND" '
+		/^timestamp\t/ { tcol = 0; wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") tcol = i; if ($i == "window_kind") wcol = i }; next }
+		/^#/ || NF < 40 { next }
+		((wcol && NF >= wcol) ? $wcol : "deploy") != wk { next }
+		{
+			k = $3 "|" $4 "|" $5 "|" $6 "|" $7 "|" ((tcol && NF >= tcol) ? $tcol : "none")
+			if (!(k in last)) order[++n] = k
+		}
+		$2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ { last[k] = $2; next }
+		{ last[k] = ""; if ($31 == "0") valid[k] = 1 }
+		END { for (i = 1; i <= n; i++) if ((order[i] in valid) && last[order[i]] != "") print order[i] "\t" last[order[i]] }' \
+		"${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv")
+fi
+
 combo_idx=0
 if ((GROWTH)); then
 	print_growth_plan >&2
@@ -2252,8 +2359,14 @@ for ms in "${MESH_SIZES[@]}"; do
 
 						# Skip a combo already completed in the resumed sweep.
 						if combo_already_done "$ms" "$sc" "$rc" "$nc" "$scp" "$tc"; then
-							printf "  [%d/%d] %s — already has a valid row; skipping (resume)\n" \
-								"$combo_idx" "$MATRIX_SIZE" "$label" >&2
+							_pw="${PARTWAY_FAILED["${ms}|${sc}|${rc}|${nc}|${scp}|${tc}"]:-}"
+							if [[ -n "$_pw" ]]; then
+								printf "  [%d/%d] %s — failed partway (a valid row, then %s): --resume never re-runs a cell with a valid row (the report would pool two attempts), so it stays failed; to measure it again, start a new sweep with only this cell; skipping (resume)\n" \
+									"$combo_idx" "$MATRIX_SIZE" "$label" "$_pw" >&2
+							else
+								printf "  [%d/%d] %s — already has a valid row; skipping (resume)\n" \
+									"$combo_idx" "$MATRIX_SIZE" "$label" >&2
+							fi
 							continue
 						fi
 
@@ -2439,18 +2552,24 @@ if ! ((GROWTH)); then
 		done; done; done
 	done; done; done
 fi
+# N3: the plan's keys go in a file (in the environment, past about 4,200 cells, awk could
+# not even start), and a count that does not end with its TOTAL line is a problem, never
+# "all cells ran". N9: as the report, a line shorter than 40 columns is not a row.
 CELL_RESULT=()
-mapfile -t CELL_RESULT < <(CP_CELL_KEYS="$CELL_KEYS" awk -F'\t' -v growth="$GROWTH" '
+_cells_dir="$(mktemp -d)"
+printf '%s' "$CELL_KEYS" > "${_cells_dir}/keys"
+_cells_rc=0
+awk -F'\t' -v growth="$GROWTH" -v keys="${_cells_dir}/keys" '
 	BEGIN {
-		np = split(ENVIRON["CP_CELL_KEYS"], pl, "\n")
-		for (i = 1; i <= np; i++) if (pl[i] != "") {
-			split(pl[i], f, "\t")
+		while ((getline line < keys) > 0) if (line != "") {
+			split(line, f, "\t")
 			k = f[1] SUBSEP f[2] SUBSEP f[3] SUBSEP f[4] SUBSEP f[5] SUBSEP f[6] SUBSEP f[7]
 			if (!(k in cell)) { cell[k] = 1; ncell++ }
 		}
+		close(keys)
 	}
 	/^timestamp\t/ { tcol = 0; wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") tcol = i; if ($i == "window_kind") wcol = i }; next }
-	/^#/ { next }
+	/^#/ || NF < 40 { next }
 	{
 		k = $3 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP ((tcol && NF >= tcol) ? $tcol : "none") SUBSEP ((wcol && NF >= wcol) ? $wcol : "deploy")
 		if (!(k in cell)) { cell[k] = 1; ncell++ }
@@ -2465,21 +2584,30 @@ mapfile -t CELL_RESULT < <(CP_CELL_KEYS="$CELL_KEYS" awk -F'\t' -v growth="$GROW
 	END {
 		print "TOTAL\t" ncell
 		if (!growth) for (i = 1; i <= n; i++) if (last[order[i]] != "") print "FAILED\t" last[order[i]]
-	}' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)
-FAILED_CELLS=()
-CELLS_TOTAL="$MATRIX_SIZE"
+	}' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" > "${_cells_dir}/out" 2> "${_cells_dir}/err" || _cells_rc=$?
+mapfile -t CELL_RESULT < "${_cells_dir}/out"
+_cells_why="$(head -n 1 "${_cells_dir}/err" | cut -c 1-200)"
+rm -rf "$_cells_dir"
+FAILED_CELLS=() CELL_COUNT_ARGS=()
+CELLS_TOTAL="" _cells_seen=""
 for _cell_line in ${CELL_RESULT[@]+"${CELL_RESULT[@]}"}; do
 	case "$_cell_line" in
 	FAILED$'\t'*) FAILED_CELLS+=("${_cell_line#FAILED$'\t'}") ;;
-	TOTAL$'\t'*) ((GROWTH)) || CELLS_TOTAL="${_cell_line#TOTAL$'\t'}" ;;
+	TOTAL$'\t'*) _cells_seen="${_cell_line#TOTAL$'\t'}" ;;
 	esac
 done
-is_pos_int "$CELLS_TOTAL" || CELLS_TOTAL="$MATRIX_SIZE"
+if ((_cells_rc == 0)) && is_nonneg_int "$_cells_seen"; then
+	CELLS_TOTAL="$_cells_seen"
+	((GROWTH == 0 && CELLS_TOTAL > 0)) || CELLS_TOTAL="$MATRIX_SIZE"
+else
+	FAILED_CELLS=() CELLS_TOTAL="$MATRIX_SIZE"
+	CELL_COUNT_ARGS=(--uncounted "${_cells_why:-awk exited ${_cells_rc} with no count}")
+fi
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
 # The outcome also goes at the end of the scale envelope (R1), when it was written: a
 # campaign record pasted from it must show a version change or a failed sweep.
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} \
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${CELL_COUNT_ARGS[@]+"${CELL_COUNT_ARGS[@]}"} ${IV_END[@]+"${IV_END[@]}"} ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} \
 	--run-id "$RUN_ID" --record "$OUTPUT_DIR" \
 	--md "$MD_FILE" --md "$ENVELOPE_FILE" \
 	--where "The report includes their status rows as placeholder rows (one per failed attempt, in n_total, not n_valid)" \
