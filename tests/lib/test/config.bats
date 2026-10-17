@@ -969,7 +969,7 @@ STUB
 	done
 }
 
-@test "003 --resume: a cell that failed partway says why it is not re-run (N2); short lines are not cells (N9); a count that fails is a problem, never all ran, and does not stop a resume (N3)" {
+@test "003 --resume: a cell that failed partway says why it is not re-run (N2, P8); short lines are not cells (N9); a count that fails is a problem, never all ran, and does not stop a resume (N3, P2); an interrupted resume (P4, P10)" {
 	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" fakeawk="${BATS_TEST_TMPDIR}/fakeawk" realawk
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
 	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
@@ -989,7 +989,7 @@ STUB
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	assert_output --partial "[1/1] mesh=1 svcs=5 reps=3 ns=1 scope=none traffic=none — failed partway (a valid row, then PROBE_FAILED): --resume never re-runs a cell with a valid row (the report would pool two attempts), so it stays failed; to measure it again, start a new sweep with only this cell; skipping (resume)"
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1."
+	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (one per failed attempt, in n_total, not n_valid); 1 of them failed partway (a valid row, then a status row), and a --resume skips such a cell again: to measure one again, start a new sweep with only that cell; exit 4."
 	grep -qx 'TOTAL=1' "$d/sweep-outcome.txt"
 	# N3: the count's awk fails (as when it could not start): a problem, exit 4, never
 	# "All 1 cells ran", and the record says TOTAL=unknown.
@@ -1000,17 +1000,40 @@ STUB
 	cat "${BATS_TEST_TMPDIR}/ok.row" >> "$tsv"
 	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long; exit 4."
+	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long; the rows are intact: --resume "
+	assert_output --partial " counts them again; exit 4."
 	refute_output --partial "cells ran"
-	grep -qx "PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long" "$d/sweep-outcome.txt"
+	grep -q "^PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long; the rows are intact: --resume .* counts them again$" "$d/sweep-outcome.txt"
 	grep -qx 'TOTAL=unknown' "$d/sweep-outcome.txt"
+	grep -qx 'FAILED=unknown' "$d/sweep-outcome.txt"
+	# P2: a keys file the count cannot read is that problem too, not a count of the rows only.
+	printf '#!/bin/sh\nn=$#; i=0; for a in "$@"; do i=$((i + 1)); case "$a" in keys=*) a="keys=/nonexistent/keys" ;; esac; set -- "$@" "$a"; done; shift "$n"\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
+	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	assert_output --partial "error: could not count the sweep's cells: awk: cannot read the plan cell keys file /nonexistent/keys; the rows are intact"
+	refute_output --partial "cells ran"
+	# P10: a resume stopped while it counts (TERM, as an interrupt) leaves no keys file
+	# behind; P4: until a resume writes its outcome, reports show the earlier one, from
+	# sweep-outcome.prev.txt, and say so.
+	printf '#!/bin/sh\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) kill -TERM "$PPID"; exit 0 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
+	mkdir -p "${BATS_TEST_TMPDIR}/tmp10"
+	TMPDIR="${BATS_TEST_TMPDIR}/tmp10" PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 143
+	[ -z "$(find "${BATS_TEST_TMPDIR}/tmp10" -name keys -print -quit)" ]
+	[ ! -e "$d/sweep-outcome.txt" ]
+	run bash "$CP/004-report-results.sh" --results-dir "$d"
+	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.prev.txt by run "
+	assert_output --partial "#   warning: the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt"
+	assert_output --partial "#   error: could not count the sweep's cells: awk: cannot read the plan cell keys file"
 	# That problem does not stop a resume, which counts again: the valid retry ran last,
 	# so every cell ran.
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_success
 	assert_output --partial "All 1 cells ran"
+	refute_output --partial "has not finished"
 	grep -qx 'TOTAL=1' "$d/sweep-outcome.txt"
 	! grep -q '^PROBLEM=' "$d/sweep-outcome.txt"
+	! grep -q "has not finished" "$d"/*.md
 }
 
 @test "003 --resume refuses another active revision at the same version, notes a TSV that cannot tell (N13), and notes other Kubernetes versions (N12)" {
@@ -1041,10 +1064,109 @@ STUB
 	assert_failure 4
 	assert_output --partial "warning: --resume: this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it)"
 	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
-	grep -qx "NOTE=this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it), so the --resume at ${t1} could not check that each member still runs the revision the sweep started on" "$d/sweep-outcome.txt"
-	# N12: this resume read v1.31.2 where the sweep started on v1.30.4.
+	grep -qx "NOTE=this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it), so no --resume of it (the latest at ${t1}) could check that each member still runs the revision the sweep started on" "$d/sweep-outcome.txt"
+	# N12: this resume read v1.31.2 where the sweep started on v1.30.4; P7: it warns at its
+	# start too.
 	[ "$(awk -F'\t' 'NR == 2 { print $4 }' "$d/resumes.txt")" = "ci-a=v1.31.2" ]
-	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the TSV preamble's KUBE_VERSIONS (ci-a: v1.30.4 at the start, v1.31.2 then; in resumes.txt): rows from ${t1} on ran on them" "$d/sweep-outcome.txt"
+	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t1} on ran on them, up to a later change noted here" "$d/sweep-outcome.txt"
+	assert_output --partial "warning: --resume: this resume reads other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then): the rows it adds (from ${t1} on) run on them."
+}
+
+@test "003 --resume repeats a first run that started not ready, once, from the TSV preamble, also when that run died (P1)" {
+	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" d0 n
+	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
+	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	# The first run started with istiod not ready after a 60s wait, and died before its end.
+	sed -i.bak -e 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' -e 's/^# ISTIO_NOTREADY_AT_START=.*/# ISTIO_NOTREADY_AT_START=ci-a=IstiodNotReady/' \
+		-e 's/^# ISTIO_READY_WAITED_SEC=.*/# ISTIO_READY_WAITED_SEC=60/' "$tsv" && rm -f "${tsv}.bak"
+	rm -f "$d/sweep-outcome.txt"
+	d0="$(head -n 1 "$tsv" | awk '{ print $NF }')"
+	mkdir -p "$bin"
+	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
+	chmod +x "${bin}/kubectl"
+	for n in 1 2; do
+		PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+		assert_failure 4
+		assert_output --partial "warning: istiod or IstioCNI was still not ready when this sweep's first run started at ${d0}, after waiting 60s (ISTIO_NOTREADY_AT_START, in the TSV preamble)"
+		[ "$(grep -c "^NOTE=istiod or IstioCNI was still not ready when this sweep's first run started at ${d0}, after waiting 60s (ISTIO_NOTREADY_AT_START, in the TSV preamble): the first cells it ran may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted$" "$d/sweep-outcome.txt")" -eq 1 ]
+		[ "$(grep -c "^NOTE=not ready at the first run's start: IstiodNotReady on 1 member (ci-a)$" "$d/sweep-outcome.txt")" -eq 1 ]
+		grep -q "first run started at ${d0}" "$d"/sweep-*.md
+	done
+}
+
+@test "003 --resume refuses other members than the sweep started on, in any order (P3); groups members by revision (P7)" {
+	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" before t1
+	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
+	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	grep -qx '# ISTIO_ACTIVE_REVISIONS=ci-a=,ci-b=' "$tsv"
+	sed -i.bak 's/^# ISTIO_VERSION=.*/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
+	mkdir -p "$bin"
+	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
+	chmod +x "${bin}/kubectl"
+	before="$(cat "$tsv")"
+	# A renamed member: refused before the mesh is read, nothing written.
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-c --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "--resume: these are not the members this sweep started on (started on, not given now: ci-b; given now, not started on: ci-c; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): the new rows would not come from the same mesh. Resume with the context names it started with (in any order), or start a new sweep."
+	refute_output --partial "Istio version:"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "(started on, not given now: ci-b; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS)"
+	[ "$(cat "$tsv")" = "$before" ]
+	[ ! -e "$d/resumes.txt" ]
+	[ -e "$d/sweep-outcome.txt" ]
+	# The same members in another order pass that check; P7: two members on the same old
+	# and new revision are one entry of the N13 refusal.
+	sed -i.bak 's/^# ISTIO_ACTIVE_REVISIONS=.*/# ISTIO_ACTIVE_REVISIONS=ci-a=default-v1-30-5,ci-b=default-v1-30-5/' "$tsv" && rm -f "${tsv}.bak"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "(ci-b, ci-a: default-v1-30-5 when the sweep started, default now; activeRevisionName of their Istio CR)"
+	refute_output --partial "not the members this sweep started on"
+	# ISTIO_VERSION_BY_CONTEXT lists them when ISTIO_ACTIVE_REVISIONS is absent.
+	sed -i.bak '/^# ISTIO_ACTIVE_REVISIONS=/d' "$tsv" && rm -f "${tsv}.bak"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-c --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "(started on, not given now: ci-b; given now, not started on: ci-c; its TSV preamble lists them in ISTIO_VERSION_BY_CONTEXT)"
+	# Neither key: resumed, with a warning and a note.
+	sed -i.bak '/^# ISTIO_VERSION_BY_CONTEXT=/d' "$tsv" && rm -f "${tsv}.bak"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	assert_output --partial "warning: --resume: this sweep's TSV records neither ISTIO_ACTIVE_REVISIONS nor ISTIO_VERSION_BY_CONTEXT, so whether it runs on the members it started on is not checked."
+	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
+	grep -qx "NOTE=this sweep's TSV records neither ISTIO_ACTIVE_REVISIONS nor ISTIO_VERSION_BY_CONTEXT, so no --resume of it (the latest at ${t1}) could check that it ran on the members the sweep started on" "$d/sweep-outcome.txt"
+}
+
+@test "003 --resume notes other Kubernetes versions against the last known ones, grouped, once per change (P5, P7)" {
+	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" kf="${BATS_TEST_TMPDIR}/kver" t1 t2 n
+	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
+	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
+	assert_failure 4
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
+	# The first run could not read the API servers' versions.
+	sed -i.bak -e 's/^# ISTIO_VERSION=.*/# ISTIO_VERSION=v1.30.5/' -e 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=unreachable,ci-b=unreachable/' "$tsv" && rm -f "${tsv}.bak"
+	mkdir -p "$bin"
+	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *" version --output=json"*) echo "{\\"serverVersion\\":{\\"gitVersion\\":\\"$(cat %s)\\"}}" ;; *) exit 1 ;; esac\n' "$kf" > "${bin}/kubectl"
+	chmod +x "${bin}/kubectl"
+	# Resume 1 reads v1.30.4 (the first known value: no note), resume 2 an upgrade to v1.31.2
+	# (one note, both members in one entry), resume 3 v1.31.2 again (no new note).
+	for n in v1.30.4 v1.31.2 v1.31.2; do
+		echo "$n" > "$kf"
+		PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
+		assert_failure 4
+	done
+	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
+	t2="$(awk -F'\t' 'NR == 3 { print $1 }' "$d/resumes.txt")"
+	[ "$(grep -c 'Kubernetes server versions' "$d/sweep-outcome.txt")" -eq 1 ]
+	grep -qx "NOTE=the --resume at ${t2} read other Kubernetes server versions than the last known ones (ci-a, ci-b: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t2} on ran on them, up to a later change noted here" "$d/sweep-outcome.txt"
+	refute_output --partial "this resume reads other Kubernetes server versions"
+	! grep -q "resume at ${t1} read other Kubernetes" "$d/sweep-outcome.txt"
 }
 
 @test "003: each cell is decided by its last row (M3), out of every cell of the TSV and the run (M4); repeated axis values are refused" {

@@ -219,6 +219,7 @@ EXTRACTED_PATTERNS=(
 	'_istio_version_recheck_emit() {'
 	'_istio_version_recheck_live() {'
 	'_istio_version_errline() {'
+	'_istio_version_hostkey() {'
 	# batch B: sweep outcome record (common.sh), multi-run refusal (config.sh)
 	'_sweep_outcome_by() {'
 	'_sweep_outcome_sweep_ids() {'

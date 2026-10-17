@@ -136,10 +136,12 @@ wait until the deadline or until it is ready, so a CR that is briefly not settle
 not stop the run early; its answer at the deadline counts. The suite records the result as
 `ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in a
 `--dry-run`, which reads nothing), `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in
-`ISTIO_ACTIVE_REVISIONS` (`<ctx>=<revision>,...`; a controlplane `--resume` refuses a member whose
-active revision changed since the sweep started), and the members still not ready after the wait
-in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a sweep's outcome
-repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready),
+`ISTIO_ACTIVE_REVISIONS` (`<ctx>=<revision>,...`, `<ctx>=` for a member whose Istio CR could not
+be read; `unchecked` in a `--dry-run`, `unknown` after a version check that stopped unexpectedly
+and, in a report, for a TSV written before the key existed; a controlplane `--resume` refuses a
+member whose active revision changed since the sweep started), and the members still not ready
+after the wait in `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a
+sweep's outcome repeats as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready),
 `<ctx>=<state>,...` (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod
 rollout still in progress), `<ctx>=unreadable` (a rollout at the first read, then every re-read
 failed), `unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or, in a

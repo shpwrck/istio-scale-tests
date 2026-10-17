@@ -230,8 +230,9 @@ results will go, and:
      an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each active
      IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
      `unknown` for a member that cannot be read or whose Istio CR is not settled), with
-     `ISTIO_VERSION_BY_CONTEXT` and the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this
-     read-only check warns on a difference and never stops on it. A member whose istiod or
+     `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`, and
+     the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this read-only check warns on a
+     difference and never stops on it. A member whose istiod or
      IstioCNI is not ready (or whose istiod is rolling out) is read again every
      `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds,
      both set in the environment only; the members still not ready then are in

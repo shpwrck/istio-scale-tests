@@ -258,7 +258,11 @@ _sweep_outcome_sweep_ids() {
 # `# SWEEP_OUTCOME_<KEY>=` comment lines (Y9; nothing without the file); json prints
 # {"exit":N,"run_id":"...","failed":N,"failed_by":"...","problems":[...],"notes":[...],
 # "info":[...],"stop_reason":"..."}, or null
-# without the file. <run_id> is the report's run, compared with the record's RUN_ID (Y9). By
+# without the file. P4: while a --resume has not finished (it moved the record to
+# sweep-outcome.prev.txt and has not written its own yet: it died, or still runs), that
+# record is shown, from sweep-outcome.prev.txt, after a warning that says so (json
+# "resume_unfinished":true); the sweep's own reports set _SWEEP_OUTCOME_PENDING=1, as theirs
+# is about to be written. <run_id> is the report's run, compared with the record's RUN_ID (Y9). By
 # default (one run, as config_check_multi_run counted it; nothing is compared for a pooled
 # report) the record matches when its RUN_ID is the sweep-level id of a TSV under
 # <results_dir> (SWEEP_RUN_ID, else RUN_ID: J6, so a renamed sweep dir is still its
@@ -267,7 +271,10 @@ _sweep_outcome_sweep_ids() {
 # run is named as such, in every format (json report_run_id) and on stderr.
 # shellcheck disable=SC2329
 sweep_outcome_recorded() {
-	local f="${1}/sweep-outcome.txt" fmt="$2" want="${3:-}" rid other="" sids dkey=""
+	local f="${1}/sweep-outcome.txt" fmt="$2" want="${3:-}" rid other="" sids dkey="" unfinished=""
+	if [[ ! -f "$f" && -f "${1}/sweep-outcome.prev.txt" && "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
+		f="${1}/sweep-outcome.prev.txt" unfinished=1
+	fi
 	if [[ ! -f "$f" ]]; then
 		[[ "$fmt" != json ]] || echo null
 		return 0
@@ -291,7 +298,7 @@ sweep_outcome_recorded() {
 	if [[ -n "$other" ]]; then
 		echo "warning: ${f} was recorded by run ${rid}, not by this report's run ${other}; the outcome it repeats may not describe these rows" >&2
 	fi
-	awk -v fmt="$fmt" -v other="$other" '
+	awk -v fmt="$fmt" -v other="$other" -v unfinished="$unfinished" -v src="${f##*/}" '
 		function jstr(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); gsub(/\t/, "\\t", v); return "\"" v "\"" }
 		/^EXIT=/ { ex = substr($0, 6) }
 		/^RUN_ID=/ { rid = substr($0, 8) }
@@ -309,6 +316,7 @@ sweep_outcome_recorded() {
 			nf = (failed ~ /^[0-9]+$/) ? failed + 0 : 0
 			fl = sprintf("%d of %s %s failed: %s", nf, total, unit, fby)
 			ol = "the record is from run " rid ", not from the run this report reads (" other ")"
+			ul = "the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt"
 			if (fmt == "json") {
 				printf "{\"exit\":%s,\"run_id\":%s,\"failed\":%s,\"failed_by\":%s,\"problems\":[", (ex ~ /^[0-9]+$/ ? ex : "null"), jstr(rid), (failed ~ /^[0-9]+$/ ? failed : "null"), jstr(fby)
 				for (i = 1; i <= np; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(pr[i])
@@ -316,11 +324,12 @@ sweep_outcome_recorded() {
 				for (i = 1; i <= nn; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(nt[i])
 				printf "],\"info\":["
 				for (i = 1; i <= ni; i++) printf "%s%s", (i > 1 ? "," : ""), jstr(inf[i])
-				printf "],\"stop_reason\":%s%s}\n", jstr(stop), (other == "" ? "" : ",\"report_run_id\":" jstr(other))
+				printf "],\"stop_reason\":%s%s%s}\n", jstr(stop), (other == "" ? "" : ",\"report_run_id\":" jstr(other)), (unfinished == "" ? "" : ",\"resume_unfinished\":true")
 				exit
 			}
 			if (fmt == "csv") {
-				printf "# SWEEP_OUTCOME_RUN_ID=%s\n# SWEEP_OUTCOME_EXIT=%s\n# SWEEP_OUTCOME_FAILED=%d\n", rid, ex, nf
+				if (unfinished != "") printf "# WARNING: %s\n", ul
+				printf "# SWEEP_OUTCOME_RUN_ID=%s\n# SWEEP_OUTCOME_EXIT=%s\n# SWEEP_OUTCOME_FAILED=%s\n", rid, ex, (failed ~ /^[0-9]+$/ || failed == "" ? nf : failed)
 				if (fby != "") printf "# SWEEP_OUTCOME_FAILED_BY=%s\n", fby
 				for (i = 1; i <= np; i++) printf "# SWEEP_OUTCOME_PROBLEM=%s\n", pr[i]
 				for (i = 1; i <= nn; i++) printf "# SWEEP_OUTCOME_NOTE=%s\n", nt[i]
@@ -329,9 +338,10 @@ sweep_outcome_recorded() {
 				if (other != "") printf "# WARNING: sweep-outcome.txt: %s\n", ol
 				exit
 			}
-			if (np + nn + ni + nf == 0 && stop == "" && other == "") exit
+			if (np + nn + ni + nf == 0 && stop == "" && other == "" && unfinished == "") exit
 			if (fmt == "md") {
-				printf "> **Sweep outcome** (recorded in `sweep-outcome.txt` by run `%s`, exit %s):\n", rid, ex
+				printf "> **Sweep outcome** (recorded in `%s` by run `%s`, exit %s):\n", src, rid, ex
+				if (unfinished != "") printf "> - warning: %s\n", ul
 				if (other != "") printf "> - warning: %s\n", ol
 				if (nf > 0) printf "> - error: %s\n", fl
 				for (i = 1; i <= np; i++) printf "> - error: %s\n", pr[i]
@@ -340,7 +350,8 @@ sweep_outcome_recorded() {
 				if (stop != "") printf "> - stopped early: %s\n", stop
 				printf "\n"
 			} else {
-				printf "SWEEP OUTCOME (recorded in sweep-outcome.txt by run %s, exit %s):\n", rid, ex
+				printf "SWEEP OUTCOME (recorded in %s by run %s, exit %s):\n", src, rid, ex
+				if (unfinished != "") printf "  warning: %s\n", ul
 				if (other != "") printf "  warning: %s\n", ol
 				if (nf > 0) printf "  error: %s\n", fl
 				for (i = 1; i <= np; i++) printf "  error: %s\n", pr[i]
@@ -372,7 +383,7 @@ sweep_outcome_recorded() {
 #                    under it); printed, recorded and counted like a failed cell
 #   --uncounted <why>  N3: the sweep could not count its cells: a problem ("could not count
 #                    the sweep's <unit>: <why>"), "All cells ran" is never printed, and the
-#                    record says TOTAL=unknown
+#                    record says TOTAL=unknown, FAILED=unknown and SKIPPED=unknown (P2)
 #   --note <msg>     a caveat; printed and recorded, not a failure
 #   --info <msg>     a fact worth keeping that is not a caveat (K6: a --resume whose members
 #                    were all ready); printed on stdout as "note: <msg>." and recorded
@@ -454,9 +465,9 @@ sweep_outcome() {
 			echo "STOP_REASON=${stop_why}"
 			echo "UNIT=${unit}"
 			echo "TOTAL=$([[ -z "$uncounted" ]] && echo "$cells" || echo unknown)"
-			echo "FAILED=${#failed_r[@]}"
+			echo "FAILED=$([[ -z "$uncounted" ]] && echo "${#failed_r[@]}" || echo unknown)"
 			echo "FAILED_BY=${by_fail}"
-			echo "SKIPPED=${#skipped_r[@]}"
+			echo "SKIPPED=$([[ -z "$uncounted" ]] && echo "${#skipped_r[@]}" || echo unknown)"
 			echo "SKIPPED_BY=${by_skip}"
 			for r in ${problems[@]+"${problems[@]}"}; do echo "PROBLEM=${r}"; done
 			for r in ${notes[@]+"${notes[@]}"}; do echo "NOTE=${r}"; done

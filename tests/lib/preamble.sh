@@ -241,17 +241,32 @@ tuning_baseline_state() {
 # _istio_version_errline <file>: the first line of kubectl's stderr, as a why: without a
 # carriage return, without the klog prefix (M5: "E1017 10:00:00.000000   12345
 # memcache.go:265] ", different in every process, so members that fail alike group
-# together), at most 200 characters.
+# together), at most 200 characters once its hosts are masked (P6: the line keeps them, and
+# is cut where its masked form is, so members whose host names differ in length still
+# group; at most 1000 characters in all).
 _istio_version_errline() {
-	head -n 1 "$1" | tr -d '\r' | sed -E 's/^[IWEF][0-9]{4} [0-9:.]+ +[0-9]+ [^]]+\] //' | cut -c 1-200
+	local ivel_raw ivel_key ivel_n
+	ivel_raw="$(head -n 1 "$1" | tr -d '\r' | sed -E 's/^[IWEF][0-9]{4} [0-9:.]+ +[0-9]+ [^]]+\] //')"
+	ivel_raw="${ivel_raw:0:1000}"
+	ivel_key="$(_istio_version_hostkey "$ivel_raw")"
+	ivel_n=$((${#ivel_raw} - ${#ivel_key} + 200))
+	((ivel_n > 0)) || ivel_n=200
+	((${#ivel_key} <= 200)) || ivel_raw="${ivel_raw:0:ivel_n}"
+	printf '%s\n' "$ivel_raw"
 }
 
-# _istio_version_hostkey <why>: N4. <why> with URLs, the host after "lookup" and IPv4
-# addresses (with a port) masked, as a grouping key: members whose reads fail the same way
-# on their own API hosts group into one entry. Never printed.
+# _istio_version_hostkey <why>: N4. <why> with URLs, the host after "lookup", the server of
+# "The connection to the server <host>:<port> was refused", IPv4 and IPv6 ([addr]) addresses
+# (with a port) and the context name kubectl does not find (P6) masked, as a grouping key:
+# members whose reads fail the same way on their own API hosts group into one entry. Never
+# printed.
 _istio_version_hostkey() {
 	sed -E -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^ "]*#<url>#g' -e 's#lookup [^ :]+#lookup <host>#g' \
-		-e 's#(^|[^0-9.])[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?#\1<ip>#g' <<<"$1"
+		-e 's#the server [^ ]+ was refused#the server <host> was refused#g' \
+		-e 's#\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\](:[0-9]+)?#<ip>#g' \
+		-e 's#(^|[^0-9.])[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?#\1<ip>#g' \
+		-e 's#context "[^"]*" does not exist#context "<ctx>" does not exist#g' \
+		-e 's#no context exists with the name: "[^"]*"#no context exists with the name: "<ctx>"#g' <<<"$1"
 }
 
 # istio_live_version <ctx> <kubectl_argv...>: the Istio version a mesh member RUNS, as
@@ -607,7 +622,12 @@ istio_version_resolve() {
 		[[ "$policy" != fail ]] || die "${ivr_why}."$'\n'"Nothing was changed. To go on anyway and record ISTIO_VERSION=unknown, set ISTIO_VERSION_CHECK=warn."
 		ivr_line="ISTIO_VERSION_CHECK=warn"
 		((nostop == 0)) || ivr_line="a read-only check never stops on this"
-		echo "warning: ${ivr_why}."$'\n'"Going on (${ivr_line}): the results record ISTIO_VERSION=unknown (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
+		if [[ -n "$resumed" ]]; then
+			# P8: a --resume stops next on an unknown version, whatever the policy.
+			echo "warning: ${ivr_why}." >&2
+		else
+			echo "warning: ${ivr_why}."$'\n'"Going on (${ivr_line}): the results record ISTIO_VERSION=unknown (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
+		fi
 		ivr_line=""
 		for ivr_why in "${ivr_ctxs[@]}"; do ivr_line="${ivr_line:+${ivr_line},}${ivr_why}=unknown"; done
 		export ISTIO_VERSION_SOURCE=live ISTIO_VERSION_BY_CONTEXT="$ivr_line" _ISTIO_VERSION_REVS=""
@@ -978,7 +998,11 @@ _istio_version_resolve_live() {
 		fi
 		why="ISTIO_VERSION_CHECK=warn"
 		((nostop == 0)) || why="a read-only check never stops on this"
-		echo "warning: ${problem}${fix}"$'\n'"Going on (${why}): the results record ISTIO_VERSION=${live} (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2
+		case "${resumed:+r}/${live#mixed:}/" in
+		# P8: a --resume stops next on an unknown version, whatever the policy.
+		r/*/unknown/* | r/unknown/*) echo "warning: ${problem}${fix}" >&2 ;;
+		*) echo "warning: ${problem}${fix}"$'\n'"Going on (${why}): the results record ISTIO_VERSION=${live} (ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN})." >&2 ;;
+		esac
 	fi
 	if ((n_notready)); then
 		{
@@ -1004,20 +1028,22 @@ _istio_version_resolve_live() {
 		"ISTIO_NOTREADY_AT_START=${nr_at_start:-none}" "ISTIO_READY_WAITED_SEC=${elapsed}" "ISTIO_VERSION=${live}" END
 }
 
-# _istio_notready_notes <out_arrayname> <start|end|resume> <ctx=state,...> [<waited_sec>]
-# [<resumed_at>]: the sweep_outcome --note arguments for members whose istiod or IstioCNI
-# was not ready (the list as ISTIO_NOTREADY_AT_START holds it; rolling for an istiod
-# rollout in progress): one line on what that means and what to check, then one line per
-# state with its members (Y4). Appends nothing for an empty list or unchecked, nor for
-# none, except at a resume (J2): the TSV preamble keeps the first run's value, so the
-# outcome records the resume's start time and its own value, none included (an --info
-# line, K6: an all-clear is not a warning).
+# _istio_notready_notes <out_arrayname> <start|end|resume|first> <ctx=state,...>
+# [<waited_sec>] [<resumed_at>]: the sweep_outcome --note arguments for members whose istiod
+# or IstioCNI was not ready (the list as ISTIO_NOTREADY_AT_START holds it; rolling for an
+# istiod rollout in progress): one line on what that means and what to check, then one line
+# per state with its members (Y4). Appends nothing for an empty list, unchecked or unknown,
+# nor for none, except at a resume (J2): the TSV preamble keeps the first run's value, so
+# the outcome records the resume's start time and its own value, none included (an --info
+# line, K6: an all-clear is not a warning). P1: first is the first run's value, from the
+# TSV preamble, for a resume's outcome (<resumed_at>: the preamble's DATE).
 _istio_notready_notes() {
 	local -n _inn_out="$1"
-	local when="$2" list="$3" waited="${4:-}" at="${5:-}" pair st n label
+	local when="$2" list="$3" waited="${4:-}" at="${5:-}" pair st n label inn_at="$2"
 	local -a pairs=() states=()
 	local -A members=()
-	case "$list" in "" | unchecked) return 0 ;; esac
+	case "$list" in "" | unchecked | unknown) return 0 ;; esac
+	[[ "$when" != first ]] || inn_at="first run's start"
 	if [[ "$when" == resume && "$list" == none ]]; then
 		_inn_out+=(--info "this --resume started at ${at} with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=${waited:-0}); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's")
 		return 0
@@ -1032,6 +1058,8 @@ _istio_notready_notes() {
 	case "$waited" in "" | unchecked) waited="" ;; *) waited=", after waiting ${waited}s" ;; esac
 	if [[ "$when" == start ]]; then
 		_inn_out+=(--note "istiod or IstioCNI was still not ready at the start of the sweep${waited} (ISTIO_NOTREADY_AT_START): the first cells may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted")
+	elif [[ "$when" == first ]]; then
+		_inn_out+=(--note "istiod or IstioCNI was still not ready when this sweep's first run started${at:+ at ${at}}${waited} (ISTIO_NOTREADY_AT_START, in the TSV preamble): the first cells it ran may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted")
 	elif [[ "$when" == resume ]]; then
 		_inn_out+=(--note "istiod or IstioCNI was still not ready when this --resume started at ${at}${waited} (ISTIO_NOTREADY_AT_RESUME=${list}; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's): the first cells the resume ran (rows from ${at} on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted")
 	else
@@ -1045,7 +1073,7 @@ _istio_notready_notes() {
 		[[ "$st" != unreadable ]] || label="unreadable (an istiod rollout at the first read, then every re-read failed)"
 		n="${#pairs[@]} members"
 		((${#pairs[@]} > 1)) || n="1 member"
-		_inn_out+=(--note "not ready at the ${when}: ${label} on ${n} (${members[$st]})")
+		_inn_out+=(--note "not ready at the ${inn_at}: ${label} on ${n} (${members[$st]})")
 	done
 }
 
@@ -1092,7 +1120,7 @@ istio_version_recheck() {
 		unset 'ivrc_lines[-1]'
 		_ivrc_res=(${ivrc_lines[@]+"${ivrc_lines[@]}"})
 	else
-		_ivrc_res=(--problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit ${ivrc_rc}; its error is in the sweep's stderr), so whether the Istio version or the active revision changed during the sweep is not known; check each member by hand: kubectl --context <ctx> get istios.sailoperator.io default -o jsonpath='{.status.activeRevisionName}', then that IstioRevision's .spec.version")
+		_ivrc_res=(--problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit ${ivrc_rc}; its error is in the sweep's stderr), so whether the Istio version or the active revision changed during the sweep is not known; check each member by hand: kubectl --context <ctx> get istios.sailoperator.io default -o jsonpath='{.status.activeRevisionName}', then kubectl --context <ctx> get istiorevisions.sailoperator.io <that revision> -o jsonpath='{.spec.version}'")
 	fi
 	return 0
 }

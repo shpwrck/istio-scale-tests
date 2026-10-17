@@ -550,6 +550,46 @@ _in_path() {
 	[ "$(jq -c '.info' <<<"$output")" = '[]' ]
 }
 
+
+@test "sweep_outcome --uncounted (P2): TOTAL, FAILED and SKIPPED unknown; an unfinished --resume (P4) shows the record before it, from sweep-outcome.prev.txt" {
+	local d="${BATS_TEST_TMPDIR}/sweep-p2"
+	mkdir -p "$d"
+	run --separate-stderr sweep_outcome --uncounted "awk: simulated" --run-id p2 --record "$d" 3
+	assert_failure 4
+	[ -z "$output" ]
+	[[ "$stderr" == "error: could not count the sweep's cells: awk: simulated; exit 4." ]]
+	grep -qx 'TOTAL=unknown' "${d}/sweep-outcome.txt"
+	grep -qx 'FAILED=unknown' "${d}/sweep-outcome.txt"
+	grep -qx 'SKIPPED=unknown' "${d}/sweep-outcome.txt"
+	run sweep_outcome_recorded "$d" json
+	[ "$(jq -c '[.failed, .problems[0]]' <<<"$output")" = '[null,"could not count the sweep'"'"'s cells: awk: simulated"]' ]
+	run sweep_outcome_recorded "$d" csv
+	assert_line '# SWEEP_OUTCOME_FAILED=unknown'
+	run sweep_outcome_recorded "$d" text
+	refute_output --partial "cells failed"
+	# P4: a --resume moved the record and has not written its own (it died, or still runs):
+	# every format says so and shows the earlier record; the sweep's own reports, which run
+	# just before its outcome is written, do not.
+	mv "${d}/sweep-outcome.txt" "${d}/sweep-outcome.prev.txt"
+	run sweep_outcome_recorded "$d" text
+	assert_line --index 0 "SWEEP OUTCOME (recorded in sweep-outcome.prev.txt by run p2, exit 4):"
+	assert_line --index 1 "  warning: the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt"
+	assert_line --index 2 "  error: could not count the sweep's cells: awk: simulated"
+	run sweep_outcome_recorded "$d" md
+	assert_line '> - warning: the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt'
+	run sweep_outcome_recorded "$d" csv
+	assert_line --index 0 '# WARNING: the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt'
+	run sweep_outcome_recorded "$d" json
+	[ "$(jq -c '[.resume_unfinished, .run_id]' <<<"$output")" = '[true,"p2"]' ]
+	_SWEEP_OUTCOME_PENDING=1 run sweep_outcome_recorded "$d" text
+	assert_output ""
+	_SWEEP_OUTCOME_PENDING=1 run sweep_outcome_recorded "$d" json
+	assert_output null
+	# A clean earlier record still gets the warning.
+	printf '%s\n' "RUN_ID=p2" "EXIT=0" "TOTAL=3" "FAILED=0" > "${d}/sweep-outcome.prev.txt"
+	run sweep_outcome_recorded "$d" text
+	assert_line --index 1 "  warning: the last --resume of this sweep has not finished (it died, or still runs): this is the outcome before it, from sweep-outcome.prev.txt"
+}
 @test "sweep_outcome_recorded (J6): the record matches its TSVs' sweep-level id, so a renamed sweep dir is still its sweep" {
 	local d="${BATS_TEST_TMPDIR}/sweep-june-a" e="${BATS_TEST_TMPDIR}/sweep-june-b"
 	mkdir -p "$d/sub" "$e"

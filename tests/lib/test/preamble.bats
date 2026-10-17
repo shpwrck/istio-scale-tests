@@ -1250,7 +1250,7 @@ DRIVE
 	_istio_version_recheck_live() { exit 3; }
 	IV_a=v1.30.5 run --separate-stderr _iv_recheck a
 	assert_success
-	assert_output "$(printf '%s\n' --problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit 3; its error is in the sweep's stderr), so whether the Istio version or the active revision changed during the sweep is not known; check each member by hand: kubectl --context <ctx> get istios.sailoperator.io default -o jsonpath='{.status.activeRevisionName}', then that IstioRevision's .spec.version")"
+	assert_output "$(printf '%s\n' --problem "the end-of-sweep Istio version check failed: it stopped unexpectedly (exit 3; its error is in the sweep's stderr), so whether the Istio version or the active revision changed during the sweep is not known; check each member by hand: kubectl --context <ctx> get istios.sailoperator.io default -o jsonpath='{.status.activeRevisionName}', then kubectl --context <ctx> get istiorevisions.sailoperator.io <that revision> -o jsonpath='{.spec.version}'")"
 }
 
 @test "M1: no shell arithmetic reads an array element by a variable key (bash 4.3-5.1 expand the key twice)" {
@@ -1266,7 +1266,14 @@ _iv_hostdep() {
 	local a ctx=""
 	for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
 	if [[ -n "${HOSTDEP:-}" && " $* " == *" get deployments.apps "* ]]; then
-		echo "Unable to connect to the server: dial tcp: lookup api.${ctx}.example: no such host" >&2
+		case "$HOSTDEP" in
+		refused) echo "The connection to the server api.${ctx}.example:6443 was refused - did you specify the right host or port?" >&2 ;;
+		ip6) echo "Unable to connect to the server: dial tcp [2001:db8::${#ctx}]:6443: connect: connection refused" >&2 ;;
+		ctx) echo "error: context \"${ctx}\" does not exist" >&2 ;;
+		long) printf 'E1017 10:00:00.000000   %d memcache.go:265] "Unhandled Error" err="Get \\"https://api.%s.example:6443/api?timeout=32s\\": dial tcp: lookup api.%s.example on 192.0.2.53:53: no such host" logger="UnhandledError" %s\n' \
+			"$$" "$ctx" "$ctx" "$(printf 'tail%.0s' {1..40})" >&2 ;;
+		*) echo "Unable to connect to the server: dial tcp: lookup api.${ctx}.example: no such host" >&2 ;;
+		esac
 		return 1
 	fi
 	_iv_kubectl "$@"
@@ -1320,7 +1327,25 @@ _iv_hostdep() {
 	assert_output "$(printf '%s\n' --note "the Istio version at the end of the sweep is unconfirmed: a, c were unknown at the start and read v1.30.5 at the end; b was unknown at the start and reads v1.30.6 at the end")"
 }
 
-@test "N6, N11: a --resume is never told to set warn for an unknown version; a check that stops partway leaves no temp files" {
+@test "P6: refused, IPv6, missing-context and long klog errors group across members whose names differ in length" {
+	local mode
+	for mode in refused ip6 ctx long; do
+		(
+			unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
+			export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_bbbb=v1.30.5 IV_cccccccccccccccc=v1.30.5 HOSTDEP="$mode"
+			istio_version_resolve a,bbbb,cccccccccccccccc 0 _iv_hostdep
+		) 2> "${BATS_TEST_TMPDIR}/${mode}.err" && false || true
+		run cat "${BATS_TEST_TMPDIR}/${mode}.err"
+		assert_output --partial $'\n'"  a, bbbb, cccccccccccccccc (3 members; shown for a, the others name their own hosts): istiod Deployment istio-system/istiod: "
+		refute_output --partial "  bbbb: "
+		refute_output --partial "  cccccccccccccccc: "
+	done
+	# The long line keeps its host (and is not cut inside it): its masked form is what is cut.
+	run cat "${BATS_TEST_TMPDIR}/long.err"
+	assert_output --partial '"Unhandled Error" err="Get \"https://api.a.example:6443/api?timeout=32s\": dial tcp: lookup api.a.example on 192.0.2.53:53: no such host" logger="UnhandledError" tailtail'
+}
+
+@test "N6, N11, P8: a --resume is never told to set warn, nor that it goes on, for an unknown version; a check that stops partway leaves no temp files" {
 	local tmpd="${BATS_TEST_TMPDIR}/tmpd"
 	mkdir -p "$tmpd"
 	# A member that cannot be read, under fail, at a --resume: warn would not help.
@@ -1333,6 +1358,15 @@ _iv_hostdep() {
 	IV_a=v1.30.6 run --separate-stderr _iv_run a 0 --resumed-at 2026-01-01T00:00:00+00:00
 	assert_failure 1
 	[[ "$stderr" == *"To go on anyway and record ISTIO_VERSION=v1.30.6, set ISTIO_VERSION_CHECK=warn."* ]]
+	# P8: under warn, a --resume with an unknown version is not told "Going on" just before
+	# 003 refuses it; a new run still is.
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
+	assert_success
+	[[ "$stderr" == *"warning: cannot read the running Istio version on 1 of 2 members:"* ]]
+	[[ "$stderr" != *"Going on"* ]]
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0
+	assert_success
+	[[ "$stderr" == *"Going on (ISTIO_VERSION_CHECK=warn): the results record ISTIO_VERSION=mixed:"* ]]
 	# The check stops unexpectedly, at the start and at the end: under fail at a --resume,
 	# no warn advice; and nothing is left in TMPDIR either way.
 	_istio_version_read_all() { exit 3; }
@@ -1340,6 +1374,10 @@ _iv_hostdep() {
 	assert_failure 1
 	[[ "$stderr" == *"stopped unexpectedly (exit 3; the error is above), so the version the members run is not known."$'\n'"Nothing was changed. A --resume never goes on with an unknown version (ISTIO_VERSION_CHECK=warn would not help): fix what the error above shows, then run the same --resume again."* ]]
 	[ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]
+	TMPDIR="$tmpd" ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
+	assert_success
+	[[ "$stderr" == *"warning: the Istio version check stopped unexpectedly (exit 3; the error is above), so the version the members run is not known."* ]]
+	[[ "$stderr" != *"Going on"* ]]
 	TMPDIR="$tmpd" ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_recheck a,b
 	assert_success
 	assert_line --index 0 -- "--problem"
