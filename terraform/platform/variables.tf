@@ -219,7 +219,7 @@ variable "argocd_restart_controller_after_cluster_secrets" {
 variable "argocd_app_status_timeout_sec" {
   type        = number
   default     = 900
-  description = "Post-apply check: fail when an Argo CD Application still has an empty sync or health status after this many seconds (no controller shard owns its destination cluster). 0 disables the check."
+  description = "Post-apply check: fail when an Argo CD Application still has an empty sync or health status (no controller shard owns its destination cluster), or a spoke still has no Application (its ApplicationSets generated none), after this many seconds. 0 disables the check."
 
   validation {
     condition     = var.argocd_app_status_timeout_sec == 0 || var.argocd_app_status_timeout_sec >= 600

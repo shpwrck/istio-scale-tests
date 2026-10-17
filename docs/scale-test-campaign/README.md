@@ -67,7 +67,9 @@ and the ingress gateway about **91 Mi** (ROSA, 2026-10-14). After config bursts 
 gateway's working set ran 1.2-2.9× its allocated memory (tcmalloc keeps freed pages), so size
 its limit as `(10 + 145 × Services / 1000) Mi × 2.5` and the ingress as `(10 + 91 × Services /
 1000) Mi × 1.5`. For the 10k campaign that is about 3.6 GiB and 1.4 GiB: the chart defaults are
-4Gi and 2Gi. The controlplane sweep's memory guard uses the same model.
+5Gi and 2Gi. The east-west default sits above the rule because a one-step burst to 10k Services
+peaked at 3.4 GiB (ROSA, 2026-10-16) and a second burst keeps more. The controlplane sweep's
+memory guard uses the same model.
 
 > **Let metrics-server settle after heavy churn.** The utilization columns
 > (`istiod_*_pct_of_limit`, `node_*_pct`) come from `kubectl top`. Right after scaling istiod or

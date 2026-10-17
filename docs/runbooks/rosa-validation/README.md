@@ -8,13 +8,16 @@ status: current
 
 How to stand up the ROSA path end to end (`terraform/rosa-hcp`, then `terraform/platform` in rosa
 mode, then a mesh check), run one cost-capped validation window on it, and tear it all down again.
-**No ROSA clusters exist:** the 2026-10-14 window (Tier C, 4 clusters, window commit `8150d4b`,
-T0 12:42 UTC) was torn down with `003-auto-teardown.sh --now` at 21:37 UTC (clusters gone 21:54,
-`CLEAN` 22:01) and audited empty across all regions the same day; about $82 (an estimate until
-Cost Explorer confirms it). Its timers are disarmed and its platform `rosa` workspace was
-discarded. Left on purpose: the free SNS topic `rosa-window` and the `rosa-window-monthly` budget.
-Open: T+1 (2026-10-15) Cost Explorer by service and create `rosa-residual-daily`; T+2 (2026-10-16)
-Cost Explorer again; an off-laptop copy of the results (destination is the owner's choice). The run
+**No ROSA clusters exist:** the 2026-10-16 window (Tier C, 4 clusters, window commit `12401a8`,
+T0 17:59 UTC; it validated BACKLOG section 9) was torn down with `003-auto-teardown.sh --now`
+from 21:03 UTC (`CLEAN` 21:27) and audited empty across all regions the same day; about $30-35
+(an estimate until Cost Explorer confirms it). Its timers are disarmed and its platform `rosa`
+workspace was discarded. The 2026-10-14 window (Tier C, window commit `8150d4b`, T0 12:42 UTC,
+`CLEAN` 22:01) billed $94.62 in Cost Explorer ($79.21 on 2026-10-14 and $15.41 posted on
+2026-10-15), against its $82 estimate. Left on purpose: the free SNS topic `rosa-window` and the
+`rosa-window-monthly` budget, raised from $100 to $210 for the second window (October was at
+$105 before it). Open: Cost Explorer for 2026-10-16 and 2026-10-17, `rosa-residual-daily`, and an
+off-laptop copy of both windows' results (destination is the owner's choice). The run
 before it (3 HCP clusters, ~1h50m, 2026-10-12) was destroyed and verified empty. The account-level
 ROSA setup stays between windows (the OCM role, the user role and the
 `ManagedOpenShift-HCP-ROSA-*` account roles). The window is planned in

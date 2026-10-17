@@ -378,12 +378,16 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
     ratio 1 for the first step and changes that add no Services. Absolute, for gateways:
     `(CONTROLPLANE_GW_MI_INTERCEPT + Mi per 1000 Services x Services after the step / 1000)
     x burst factor`, with the Services from istiod's `pilot_services` plus what the step adds
-    (east-west 145 Mi and x2.0, ingress 91 Mi and x1.2; `CONTROLPLANE_{EWGW,INGW}_*`), plus,
+    (east-west 145 Mi and x2.5, ingress 91 Mi and x1.2; `CONTROLPLANE_{EWGW,INGW}_*`), plus,
     for a working-set reading, the container's memory outside Envoy's heap (working set
     minus `server.memory_physical_size`: pilot-agent, the binary, page cache). The
     absolute projection guards a series' first step (a 0 -> 4000-Service step left a 1.1 GiB
     working set under a 1Gi limit on ROSA) and a base inflated by memory Envoy kept from an
-    earlier series. When a gateway's Envoy allocated memory at the series start is far above
+    earlier series. Calibrated on ROSA at 10k Services: a one-step burst peaked at 2.4x the
+    model's allocated memory in working set, a 5-step ladder at 2.1x, so x2.5 projects a burst
+    about 6% high and a ladder about 30% high; at the 70% stop the chart's 5Gi east-west
+    gateway guards a fresh step up to about 9700 Services (10k Services, and a ladder's last
+    step with its non-heap memory added, need `--mem-stop-pct 80`). When a gateway's Envoy allocated memory at the series start is far above
     the model for the Services the mesh has (x1.5 + 100 Mi), a WARNING says to restart the
     gateways first.
   - A cell projected above `CONTROLPLANE_MEM_STOP_PCT` (70 %) of a limit becomes a
