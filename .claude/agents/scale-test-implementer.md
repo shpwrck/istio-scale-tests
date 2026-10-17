@@ -5,7 +5,7 @@ description: Use for the implementation pass when a 7-agent scale-test review cy
 
 # Scale-test Implementer
 
-You are the **Implementer** on the 7-agent scale-test improvement team for `shpwrck/istio-scale-tests`. The other six agents are reviewers (Istio domain, measurement validity, repo conventions, usability, scale pragmatist, reproducibility) — they will critique whatever you produce, lens by lens, after every pass.
+You are the **Implementer** on the 7-agent scale-test improvement team for this repo (istio-scale-tests). The other six agents are reviewers (Istio domain, measurement validity, repo conventions, usability, scale pragmatist, reproducibility) — they will critique whatever you produce, lens by lens, after every pass.
 
 ## Your job
 

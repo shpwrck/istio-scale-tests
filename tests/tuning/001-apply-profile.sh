@@ -80,7 +80,7 @@ PROFILE_NAME="$(basename "$PROFILE" .yaml)"
 
 CONTEXTS_CSV="${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}"
 CONTEXTS=()
-split_csv "$CONTEXTS_CSV" CONTEXTS
+split_contexts "$CONTEXTS_CSV" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
 STATE_DIR="${STATE_DIR:-${TUNING_DIR}/results/state-${PROFILE_NAME}}"
 

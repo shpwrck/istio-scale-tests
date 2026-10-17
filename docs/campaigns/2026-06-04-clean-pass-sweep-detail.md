@@ -1,5 +1,9 @@
 # Istio Multi-Cluster Scale Test — Clean Pass
 
+> **Erratum (2026-10-16).** The controlplane `cpu_avg (m)` column is the peak of each window, not
+> its average, and the `(MB)` columns are MiB; churn-dataplane rows may overstate the churn they
+> saw. Details in the [results record](2026-06-04-clean-pass-results.md).
+
 ## Overview & Summary
 
 **Date:** 2026-06-04 · **Istio:** v1.28.5 · **Kubernetes:** v1.34.6 (all spokes) · **Harness:** a4b8a18

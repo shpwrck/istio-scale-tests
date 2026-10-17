@@ -13,7 +13,7 @@
 # another endpoint, so a dead remote shows up only as extra latency.
 #
 # Builds on tests/lib/fortio.sh, the one fortio JSON parser (PL41): this file only
-# classifies its output and aggregates coverage. Requires common.sh (split_csv,
+# classifies its output and aggregates coverage. Requires common.sh (split_csv, MD_CELL_AWK,
 # is_pos_int, is_nonneg_int), fortio.sh, config.sh (config_preamble_lines), jq, awk, sed.
 # In-process helpers never call die (PL40): a failed exec is an UNKNOWN row, and a
 # missing or malformed reach file renders as "no reachability data".
@@ -422,7 +422,7 @@ reach_coverage_rows() {
 	local -a files=()
 	for p in "$@"; do
 		if [[ -d "$p" ]]; then
-			while IFS= read -r f; do files+=("$f"); done < <(find "$p" -name 'reach-*.tsv' -type f 2>/dev/null | sort)
+			while IFS= read -r f; do files+=("$f"); done < <(find -H "$p" -name 'reach-*.tsv' -type f 2>/dev/null | sort)
 		elif [[ -f "$p" ]]; then
 			files+=("$p")
 		fi
@@ -503,14 +503,8 @@ reach_coverage_render() {
 		' 2>/dev/null || echo '{"remote_coverage":{"data":false,"not_reachable":0,"groups":[]}}'
 		;;
 	*)
-		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" '
-			# Escape "|" for markdown tables without gsub (backslashes in a gsub
-			# replacement differ between awks).
-			function esc(s,    out, i) {
-				out = ""
-				while ((i = index(s, "|")) > 0) { out = out substr(s, 1, i - 1) "\\|"; s = substr(s, i + 1) }
-				return out s
-			}
+		# Every markdown table cell goes through md_cell (MD_CELL_AWK, common.sh; I7).
+		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" "$MD_CELL_AWK"'
 			NF >= 8 {
 				g = $1 SUBSEP $2
 				if (!(g in tot)) { gs[++ng] = g; gm[ng] = $1; gsrc[ng] = $2 }
@@ -547,7 +541,7 @@ reach_coverage_render() {
 					print "|-----------|--------|-------------------|---------------|"
 					for (i = 1; i <= ng; i++) {
 						g = gs[i]
-						printf "| %s | %s | %d/%d | %s |\n", gm[i], gsrc[i], ok[g] + 0, tot[g], ((g in bad) ? bad[g] : "-")
+						printf "| %s | %s | %d/%d | %s |\n", md_cell(gm[i]), md_cell(gsrc[i]), ok[g] + 0, tot[g], md_cell((g in bad) ? bad[g] : "-")
 					}
 					# Per-remote detail only for remotes that were not REACHABLE on every
 					# check, so a 20-cluster sweep does not print ~190 all-clear rows.
@@ -560,11 +554,11 @@ reach_coverage_render() {
 							print "| mesh_size | source | remote | checks reachable | coverage | top_code | detail |"
 							print "|-----------|--------|--------|------------------|----------|----------|--------|"
 						}
-						printf "| %s | %s | %s | %s/%s | %s | %s | %s |\n", f[1], f[2], f[3], f[5], f[4], f[6], esc(f[7]), esc(f[8])
+						printf "| %s | %s | %s | %s/%s | %s | %s | %s |\n", md_cell(f[1]), md_cell(f[2]), md_cell(f[3]), md_cell(f[5]), md_cell(f[4]), md_cell(f[6]), md_cell(f[7]), md_cell(f[8])
 					}
 					for (i = 1; i <= ng; i++) {
 						g = gs[i]
-						if (g in bad) printf "\n> \342\232\240 Remotes NOT reachable at mesh_size=%s from %s: %s\n", gm[i], gsrc[i], esc(why[g])
+						if (g in bad) printf "\n> \342\232\240 Remotes NOT reachable at mesh_size=%s from %s: %s\n", gm[i], gsrc[i], md_cell(why[g])
 					}
 				} else if (fmt == "charts") {
 					for (i = 1; i <= ng; i++) {

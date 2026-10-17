@@ -4,6 +4,7 @@
 # csv/json carry worst_bucket, and json mesh_size is a number.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/propagation/005-report-results.sh"
 HDR=$'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms'
@@ -80,4 +81,180 @@ fixture() {
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
+}
+
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (R3, PL26)" {
+	local d fmt
+	for d in a b; do
+		mkdir -p "${RES}/sweep-${d}"
+		{
+			echo "# SWEEP_RUN_ID=s${d}"
+			echo "# RUN_ID=r${d}"
+			echo "# HARNESS_SHA=h${d}"
+			echo "# ISTIO_VERSION=1.30.5"
+			echo "# ITERATIONS=$([[ $d == a ]] && echo 3 || echo 5)"
+			echo "$HDR"
+			prow 2 1 1000 100
+		} > "${RES}/sweep-${d}/endpoint-r${d}.tsv"
+	done
+	for fmt in text csv markdown json charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_failure 1
+		[ -z "$output" ]
+		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+		[[ "$stderr" == *"  sweep-b:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-b'"* ]]
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		assert_success
+		# The last file's ITERATIONS is not the report's (it was last-wins).
+		assert_output --partial "mixed:3,5"
+		[[ "$stderr" == *"input TSVs disagree on sweep-level ITERATIONS (3,5)"* ]]
+		if [[ "$fmt" == json ]]; then
+			[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["sweep-a","sweep-b"],"harness_sha":["ha","hb"],"istio_version":["1.30.5"]}' ]
+		else
+			assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: ha, hb. ISTIO_VERSION: 1.30.5."
+		fi
+	done
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-a" --format json
+	assert_success
+	[ "$(jq -r '.metadata.ITERATIONS + " " + (.pooled_runs.runs | tostring)' <<<"$output")" = "3 1" ]
+	[ -z "$stderr" ]
+}
+
+@test "005: a TSV written before R4 pooled with a live one reads mixed for the R4 keys, never live (B1)" {
+	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
+	{
+		echo "# SWEEP_RUN_ID=sold"
+		echo "# RUN_ID=rold"
+		echo "# ISTIO_VERSION=v1.30.5"
+		echo "$HDR"
+		prow 2 1 1000 100
+	} > "${RES}/sweep-old/endpoint-rold.tsv"
+	{
+		echo "# SWEEP_RUN_ID=snew"
+		echo "# RUN_ID=rnew"
+		echo "# ISTIO_VERSION=v1.30.5"
+		echo "# ISTIO_VERSION_PIN=v1.30.5"
+		echo "# ISTIO_VERSION_SOURCE=live"
+		echo "# ISTIO_VERSION_BY_CONTEXT=src=v1.30.5,rmt=v1.30.5"
+		echo "# ISTIO_NOTREADY_AT_START=rmt=IstiodNotReady"
+		echo "# ISTIO_READY_WAITED_SEC=60"
+		echo "$HDR"
+		prow 2 1 1000 100
+	} > "${RES}/sweep-new/endpoint-rnew.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format json
+	assert_success
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "mixed:live,unknown" ]
+	[ "$(jq -r '.metadata.ISTIO_VERSION_PIN' <<<"$output")" = "mixed:v1.30.5,unknown" ]
+	[[ "$stderr" == *"input TSVs disagree on sweep-level ISTIO_VERSION_SOURCE (live,unknown)"* ]]
+	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "mixed:rmt=IstiodNotReady,unknown" ]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format markdown
+	assert_output --partial "mixed:live,unknown"
+	# The new run alone reads live, and carries R2 in every format.
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
+	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC]' <<<"$output")" = '["rmt=IstiodNotReady","60"]' ]
+	for fmt in text csv markdown; do
+		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format "$fmt"
+		assert_output --partial "ISTIO_NOTREADY_AT_START"
+		assert_output --partial "rmt=IstiodNotReady"
+	done
+	# J13: the old run alone was never checked: unknown in every format, not absent.
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format json
+	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC, .ISTIO_VERSION_SOURCE]' <<<"$output")" = '["unknown","unknown","unknown"]' ]
+	for fmt in text csv markdown; do
+		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format "$fmt"
+		assert_output --regexp 'ISTIO_NOTREADY_AT_START[^A-Za-z0-9]*unknown'
+	done
+	# J10: --results-dir through a symlink (results/latest -> sweep-new), no trailing slash.
+	ln -s "${RES}/sweep-new" "${BATS_TEST_TMPDIR}/latest"
+	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
+	assert_success
+	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "rmt=IstiodNotReady" ]
+}
+
+# p1rows <run_id> <mesh> <iterations> <remotes...>: an OK row per (iteration, remote); P1
+# (p1_ms 1000 + iteration, conv p99 500) is the source's, the same on every remote's row.
+p1rows() {
+	local run="$1" ms="$2" n="$3" i r
+	shift 3
+	for ((i = 1; i <= n; i++)); do
+		for r in "$@"; do
+			printf '%s\t%s\t%s\tsrc\t%s\t0\t%s\t500\t3000\tOK\t100\t500\t40/40\t40\t0\t0\t0\t5000\t10\n' "$run" "$ms" "$i" "$r" "$((1000 + i))"
+		done
+	done
+}
+
+@test "PROP_ROW_AWK: P1 is one sample per (run_id, iteration), from its first counting row; P2 and P3 one per row (D1)" {
+	source "${ROOT}/tests/lib/propagation.sh"
+	{ echo "$HDR"; p1rows r1 4 10 b c d; p1rows r2 4 2 b c d; } > "${RES}/rows.tsv"
+	run awk -F'\t' "${PROP_ROW_AWK}"'
+		NR == 1 { next }
+		prop_drop_reason(1000) == "" {
+			p1 += prop_p1_sample(); p2 += prop_p2_sample(); p3 += prop_p3_sample()
+			# Asking twice about one row does not move the state.
+			if (prop_p1_first() != prop_p1_first()) bad++
+		}
+		END { print p1, p2, p3, bad + 0 }' "${RES}/rows.tsv"
+	assert_output "12 36 36 0"
+	# A dropped first row: the iteration counts from its next counting row.
+	{ echo "$HDR"; p1rows r1 4 1 b c d; } | awk -F'\t' 'BEGIN { OFS = "\t" } NR == 2 { $10 = "TIMEOUT_P2" } 1' > "${RES}/rows2.tsv"
+	run awk -F'\t' "${PROP_ROW_AWK}"'NR > 1 && prop_drop_reason(1000) == "" { p1 += prop_p1_sample() } END { print p1 }' "${RES}/rows2.tsv"
+	assert_output 1
+}
+
+@test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor (D1, M1)" {
+	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
+	run "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	# P1 is one sample per iteration, so its n_total counts iterations too (M1).
+	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid, .p99_ms]}] | add' <<<"$output")" = \
+		'{"P1_local_wall":[10,10,null],"P1_conv_p50":[10,10,null],"P1_conv_p99":[10,10,null],"P2_discovery":[30,30,500],"P3_dataplane":[30,30,3000]}' ]
+	# The P1 mean is over the 10 iterations (1001..1010).
+	[ "$(jq -r '.rows[] | select(.phase == "P1_local_wall") | .avg_ms' <<<"$output")" = 1006 ]
+	run "$REPORT" --results-dir "$RES" --format csv
+	assert_line --regexp '^4,P1_local_wall,10,10,1001,1010,1006,'
+	assert_line --regexp '^4,P1_conv_p99,10,10,'
+	assert_line --regexp '^4,P2_discovery,30,30,'
+	run "$REPORT" --results-dir "$RES" --format markdown
+	assert_success
+	assert_output --partial "| P1 local xDS (wall) | 10 | 10 |"
+	assert_output --partial "| P2 remote istiod EDS | 30 | 30 |"
+	run "$REPORT" --results-dir "$RES"
+	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +10 \|'
+	assert_output --regexp 'P1 conv_p99 \(hist\) +\| +10 \| +10 \|'
+	run "$REPORT" --results-dir "$RES" --format charts
+	assert_success
+}
+
+@test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them (M1)" {
+	source "${ROOT}/tests/lib/propagation.sh"
+	# Every remote row of iterations 2, 5 and 9 carries p1_overflow=1 (P1 is source-side).
+	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d \
+		| awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 2 || $3 == 5 || $3 == 9 { $15 = 1 } 1'; } > "${RES}/endpoint-r1.tsv"
+	run "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	# A source overflow is a P1 histogram: it never drops the remote's P2/P3 (I6), even in
+	# this 19-column TSV, whose rows cannot otherwise be split by side.
+	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid]}] | add' <<<"$output")" = \
+		'{"P1_local_wall":[10,7],"P1_conv_p50":[10,7],"P1_conv_p99":[10,7],"P2_discovery":[30,30],"P3_dataplane":[30,30]}' ]
+	run "$REPORT" --results-dir "$RES" --format csv
+	assert_line --regexp '^4,P1_local_wall,10,7,'
+	run "$REPORT" --results-dir "$RES" --format markdown
+	assert_output --partial "| P1 local xDS (wall) | 10 | 7 |"
+	assert_output --partial "| P1 conv_p99 (hist) | 10 | 7 |"
+	run "$REPORT" --results-dir "$RES"
+	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +7 \|'
+	# 002's summary over the same rows (its SUMMARY_KV program: P1 n = prop_p1_sample over
+	# every row, before the row filter, of the distinct (run_id, iteration)): n=7/10; P2
+	# from the rows prop_drop_reason keeps: 30.
+	run awk -F'\t' "${PROP_ROW_AWK}"'
+		/^#/ || $1 == "run_id" { next }
+		{
+			if (!(($1 SUBSEP $3) in seen)) { seen[$1 SUBSEP $3] = 1; iters++ }
+			if (prop_p1_sample(1000)) p1++
+			if (prop_drop_reason(1000) != "") next
+			if (prop_p2_sample()) p2++
+		}
+		END { print p1 "/" iters " " p2 }' "${RES}/endpoint-r1.tsv"
+	assert_output "7/10 30"
 }

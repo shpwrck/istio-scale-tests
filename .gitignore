@@ -48,5 +48,9 @@
 /terraform/**/tfplan
 /terraform/**/crash.log
 /terraform/**/crash.*.log
-/terraform/**/*.tfvars
+# tfvars and their JSON form anywhere (a copied rosa.tfvars at the repo root, *.auto.tfvars.json)
+*.tfvars
+*.tfvars.json
 !/terraform/**/*.tfvars.example
+# `terraform output -json by_cluster` (cluster API URLs, console URLs, account data)
+by_cluster*.json

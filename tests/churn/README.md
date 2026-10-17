@@ -72,14 +72,24 @@ Ready source pods. The probe therefore sums healthy endpoint weight.
 `status` values: `OK`; `TIMEOUT_LOCAL` / `TIMEOUT_REMOTE` (no convergence within
 `--timeout`); `POISONED_RESTART` (an istiod restarted mid-iteration, istiod columns are
 `N/A`); `SCRAPE_INCOMPLETE` (an istiod `/metrics` scrape failed, counters undercounted);
+`SCRAPE_INCOMPLETE_REMOTE_EDS` (a remote's EDS poll never completed a scrape of its istiod,
+so `convergence_remote_eds_ms` was not measured and reads `N/A`; no remote timed out);
+`TIMEOUT_REMOTE_EDS` (no remote EDS push within `--timeout`); `MISSING_VALUE` (another
+measured column has no number: a watcher that did not list every churn target, or a push
+counter in neither istiod scrape, e.g. renamed; the probe's stderr names the column);
 `SETUP_FAILED` / `PROBE_FAILED` (placeholder for a failed iteration or sweep combo).
-The report averages `OK` rows only and shows `n_total` and `n_valid`. The p99 columns are
+An `OK` row has a number in every convergence column and push-counter delta.
+The report averages `OK` rows only and shows `n_total` and `n_valid` (`--help` lists the
+statuses). A row an older `002` wrote as `OK` with no number in a measured column counts as
+`TIMEOUT_REMOTE_EDS` or `MISSING_VALUE`, with a warning on stderr. The p99 columns are
 not averaged: the report shows the worst bucket range a valid row hit (e.g. `500-1000`),
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
-The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty`) and
-`ISTIO_VERSION`; the report prints those, never the commit it runs on. A TSV written
+The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty --abbrev=7`; a tree
+with uncommitted changes reads `<describe>-dirty.<8hex>`, a hash of them) and
+`ISTIO_VERSION` (what the members run, next to `ISTIO_VERSION_PIN` and
+`ISTIO_VERSION_SOURCE`; see the root README); the report prints those, never the commit it runs on. A TSV written
 before they were recorded reads `unknown (not recorded)`, and inputs that differ read
 `mixed:a,b` with a warning. Timestamps are UTC.
 
@@ -107,7 +117,9 @@ and kube contexts for the mesh members (not the ACM hub).
 ./tests/churn/002-run-churn-probe.sh \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --iterations 5
 
-# 3. Summarize everything under tests/churn/results/
+# 3. Summarize tests/churn/results/
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/churn/004-report-results.sh --format md
 
 # 4. Remove the test namespace
@@ -127,6 +139,25 @@ intensity (deployment count) the sweep runs setup, probe and cleanup. It writes 
 `sweep-<run-id>.md` and `sweep-charts-<run-id>.md` to `tests/churn/results/sweep-<run-id>/`.
 Charts need at least three contexts (two mesh sizes with a remote).
 A failed setup or probe becomes a placeholder row and the sweep moves on.
+
+Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag or
+precondition, or an unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM,
+SIGHUP; `sweep-outcome.txt` says when and by which signal); `4` it finished and wrote its
+reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
+version, active revision or generation of the Istio CR or its active IstioRevision changed during
+the sweep (read again before the reports). The last line on stderr says how many, by reason;
+`sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the outcome. From
+the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a not-finished record
+(`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do), so a report of a
+sweep that died, or still runs, or (with when and by which signal) was interrupted says "this
+sweep has not finished" in every format (json `sweep_outcome`: `"exit": null`, `"unfinished":
+true`; a finished one reads `"unfinished": false`; one that stopped on an error after its start
+records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level
+README): when no sweep runs any more, run the sweep again into a new dir (a churn sweep has no
+`--resume`); the rows already in the dir cover only the cells it finished. Proxies connected on
+another Istio version than their istiod at the start (`ISTIO_PROXY_VERSIONS`) are a note of the
+outcome, never a failure. Rows a probe wrote with a non-OK status (`TIMEOUT_*`, `MISSING_VALUE`,
+...) are measurements, not failed cells: the report counts them in `n_total`.
 
 ## Run config (`--config FILE`)
 
@@ -155,7 +186,7 @@ rules: [Run config](../../README.md#run-config---config-file)).
   (`001 --wait-timeout`).
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`002`; the sweep sets them),
-  `--format` and `--dry-run`.
+  `--allow-multi-run` (`004`), `--format` and `--dry-run`.
 
 ## Settings
 

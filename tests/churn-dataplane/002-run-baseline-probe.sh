@@ -111,6 +111,11 @@ top_code (the most frequent code other than 200).
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
   REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
   COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
@@ -202,7 +207,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
-[[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+[[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -233,6 +238,10 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # PL2: probe kube versions concurrently with 5s --request-timeout.
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+# R4: the Istio version the members run, before any load (inherited when 004 runs this
+# probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$ALL_CTXS_CSV" 0 "${KUBECTL[@]}"
+mapfile -t IV_KV < <(istio_version_kv)
 
 # Preflight + record the source istiod replica count for the TSV preamble (PL2).
 # The fanout (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-
@@ -247,7 +256,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
-		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
+		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
 		"SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS" \
@@ -412,20 +421,14 @@ fi
 XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
-	pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")
-	post_pushes=$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")
-	XDS_PUSHES_DELTA=$(( post_pushes - pre_pushes ))
-	(( XDS_PUSHES_DELTA < 0 )) && XDS_PUSHES_DELTA="N/A"
-
-	pre_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${PRE_FILES[@]}")
-	post_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${POST_FILES[@]}")
-	EDS_PUSHES_DELTA=$(( post_eds - pre_eds ))
-	(( EDS_PUSHES_DELTA < 0 )) && EDS_PUSHES_DELTA="N/A"
-
-	pre_triggers=$(fanout_counter_sum pilot_push_triggers "${PRE_FILES[@]}")
-	post_triggers=$(fanout_counter_sum pilot_push_triggers "${POST_FILES[@]}")
-	PUSH_TRIGGERS_DELTA=$(( post_triggers - pre_triggers ))
-	(( PUSH_TRIGGERS_DELTA < 0 )) && PUSH_TRIGGERS_DELTA="N/A"
+	# counter_delta (metrics.sh, R10): N/A with a warning when a counter is in neither
+	# scrape (renamed, never 0) or went backwards; one registered in the window counts from 0.
+	XDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")" \
+		"$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")" "pilot_xds_pushes on ${SOURCE_CTX}")
+	EDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${PRE_FILES[@]}")" \
+		"$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${POST_FILES[@]}")" "pilot_xds_pushes{type=eds} on ${SOURCE_CTX}")
+	PUSH_TRIGGERS_DELTA=$(counter_delta "$(fanout_counter_sum pilot_push_triggers "${PRE_FILES[@]}")" \
+		"$(fanout_counter_sum pilot_push_triggers "${POST_FILES[@]}")" "pilot_push_triggers on ${SOURCE_CTX}")
 
 	for h in pilot_proxy_convergence_time pilot_proxy_queue_time pilot_xds_push_time; do
 		fanout_merge_histogram "$h" "${ISTIOD_DIR}/pre-${h}.merged" "${PRE_FILES[@]}"

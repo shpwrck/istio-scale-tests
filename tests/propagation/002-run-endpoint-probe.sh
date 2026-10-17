@@ -53,6 +53,8 @@ source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/propagation.sh"  # PROP_ROW_AWK: the summary counts the rows 005 counts
+# shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 
 SOURCE_CTX=""
@@ -125,9 +127,29 @@ Phases (all timed from the same t0 label flip):
 Row status: OK, TIMEOUT_P1/P2/P3/ALL, RESTART (istiod restarted mid-iteration),
 DRAIN_TIMEOUT (endpoint did not drain before the next iteration), or
 SCRAPE_INCOMPLETE (a pod's /metrics was unreachable, or baseline scrape skew
-exceeded FANOUT_MAX_SKEW_MS).
+exceeded FANOUT_MAX_SKEW_MS). status is the row's verdict over both sides;
+p1_status is the source side's alone and remote_status the remote's alone (N/A
+on a row with no remote), each also RESTART_UNKNOWN when that istiod's restart
+status could not be read.
+
+Summary (stdout and endpoint-<RUN_ID>.md): averages over the rows 005 counts, as valid
+samples/rows, with the other rows tallied by reason. P2 and P3 are left out only for the
+remote's side: its remote_status column (RESTART or RESTART_UNKNOWN for its istiod, a P2
+or P3 timeout, DRAIN_TIMEOUT for its sidecar, SCRAPE_INCOMPLETE for its scrape) or its
+remote_scrape_skew_ms over FANOUT_MAX_SKEW_MS; the source's restart, P1 timeout or +Inf
+overflow never drops them. P1 is one sample per iteration (/iterations), left out only for a
+source-side reason: its p1_status column (TIMEOUT_P1, RESTART or RESTART_UNKNOWN for the
+source istiod, DRAIN_TIMEOUT for the source sidecar, SCRAPE_INCOMPLETE for a source
+scrape that failed or skewed past FANOUT_MAX_SKEW_MS), or a P1 +Inf overflow; a remote
+that timed out or restarted never drops it. One definition decides for both:
+tests/lib/propagation.sh.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
   PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_SETTLE_SEC,
   PROPAGATION_DRAIN_TIMEOUT_SEC (drain wait per iteration, default 20s),
@@ -237,7 +259,7 @@ command -v awk >/dev/null 2>&1 || die "awk not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 if [[ -z "$MESH_SIZE" ]]; then
@@ -245,7 +267,8 @@ if [[ -z "$MESH_SIZE" ]]; then
 fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
+# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
+HARNESS_SHA="$(harness_sha)"
 TSV_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.tsv"
 
 if ((DRY_RUN)); then
@@ -284,6 +307,10 @@ mkdir -p "$OUTPUT_DIR"
 
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
+# R4: the Istio version the members run, before the first mutation (inherited when 006
+# runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
+# mismatch.
+istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
 # Preflight every context (tests/lib/fanout.sh): require >= 1 Running istiod pod.
 # Multi-replica istiod is supported via the per-pod fanout below. Record the
@@ -306,7 +333,7 @@ if ((WRITE_TSV)); then
 		[[ -n "$SWEEP_RUN_ID" ]] && echo "# SWEEP_RUN_ID=${SWEEP_RUN_ID}"
 		echo "# RUN_ID=${RUN_ID}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}"
 		echo "# SOURCE_CTX=${SOURCE_CTX}"
@@ -336,13 +363,21 @@ if ((WRITE_TSV)); then
 	# (R3-1) when the EDS push bumped but the canary did NOT become health_flags::
 	# healthy on this remote's watcher within the window (P3 did not succeed) — i.e.
 	# the EDS bump could not be attributed to our canary (likely unrelated endpoint
-	# churn). restarted is 0/1/unknown.
-	echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms" >> "$TSV_FILE"
+	# churn). restarted is 0/1/unknown. p1_status and p1_scrape_skew_ms (B2) are the
+	# iteration's source-side verdict and source scrape skew, the same on every row of
+	# the iteration: P1 is measured on the source, so only they decide whether it counts.
+	# remote_status and remote_scrape_skew_ms (I6) are the remote's own verdict and
+	# baseline skew: only they decide whether its P2 and P3 count. One header for every
+	# writer of these TSVs (PROP_TSV_HEADER, tests/lib/propagation.sh; 006's placeholders).
+	printf '%s\n' "$PROP_TSV_HEADER" >> "$TSV_FILE"
 fi
 
 PF_PIDS=()
 POLL_PIDS=()
 TMPDIR_RUN=$(mktemp -d)
+# Every row, with or without --tsv: the summary below is computed from it (R6).
+ROWS_FILE="${TMPDIR_RUN}/rows.tsv"
+: > "$ROWS_FILE"
 
 # Per-context istiod pod-port blocks (tests/lib/fanout.sh). The source context is
 # fanout ctx_index 0; remote i is ctx_index i+1 (collision-free port blocks).
@@ -481,6 +516,11 @@ export FANOUT_METRICS_TIMEOUT="$METRICS_TIMEOUT"
 #         eds_count            (sum of pilot_xds_pushes{type="eds"})
 #         pushes_total         (sum of pilot_xds_pushes across all label permutations)
 #         process_start        (integer seconds, or "unknown")
+#     eds_count is 0 when the series is absent, unlike metrics.sh's counters (R10,
+#     `unknown`). That is deliberate: it is never reported as a delta, only polled for
+#     its first increase over the baseline (P2). A series registered in the window
+#     counts from 0, and one absent all along never increases, so P2 ends TIMEOUT,
+#     never a 0 ms or 0-push result. Incomplete ticks are skipped (PL29).
 extract_all_from_file() {
 	local infile="$1" name="$2" out_hist="$3" out_kv="$4"
 	awk -v name="$name" -v HIST_OUT="$out_hist" -v KV_OUT="$out_kv" '
@@ -1041,7 +1081,7 @@ wait_sidecar_endpoint_removed() {
 }
 
 echo "=== Endpoint propagation probe ==="
-echo "Run: $RUN_ID  Harness: $HARNESS_SHA  Istio: $ISTIO_VERSION"
+echo "Run: $RUN_ID  Harness: $HARNESS_SHA  Istio: $(istio_version_label)"
 echo "Source: $SOURCE_CTX | Remotes: ${REMOTES[*]:-none} | Mesh size: $MESH_SIZE"
 echo "Iterations: $ITERATIONS | Timeout: ${TIMEOUT_SEC}s | Poll: ${POLL_INTERVAL_S}s | Settle: ${SETTLE_SEC}s"
 echo ""
@@ -1082,29 +1122,22 @@ for i in "${!REMOTES[@]}"; do
 done
 echo "Port-forwards ready."
 
-P1_SUM=0; P1_COUNT=0; P1_MIN=""; P1_MAX=""
-P2_SUM=0; P2_COUNT=0; P2_MIN=""; P2_MAX=""
-P3_SUM=0; P3_COUNT=0; P3_MIN=""; P3_MAX=""
-
-# R2-2: loud by-reason drop tally. The in-script P1/P2/P3 averages above sum
-# numeric p*_ms regardless of status, and the only thing dropping a mass of rows
-# is the downstream 005 status==OK filter — which is invisible from here. Count
-# every emitted row and tally the ones a status flag will drop (especially
-# SCRAPE_INCOMPLETE from the provisional FANOUT_MAX_SKEW_MS gate, which could
-# mass-drop the most interesting 10x3 data point) so the operator sees it now.
-ROWS_TOTAL=0
+# R2-2 / R6: the summary at the end averages only the rows 005 counts (the shared
+# prop_drop_reason, tests/lib/propagation.sh) and tallies the rest by reason, so a
+# mass drop (say SCRAPE_INCOMPLETE from the FANOUT_MAX_SKEW_MS gate at 10x3) shows
+# at the probe. Here only the skew attribution is kept: a row whose deciding status
+# (remote_status on a remote's row, p1_status on a row with no remote: what
+# prop_drop_reason reads, I6) is SCRAPE_INCOMPLETE because that side's baseline skew was
+# high (vs an unreachable pod).
 ROWS_DROPPED_SKEW=0
-declare -A ROWS_DROPPED_BY_STATUS=()
-# Record whether the current iteration's taint was specifically a high skew, so a
-# row tallied non-OK can be attributed to the skew gate vs an unreachable pod.
-tally_row() {  # <status>
-	local s="$1"
-	ROWS_TOTAL=$((ROWS_TOTAL + 1))
-	[[ "$s" == "OK" ]] && return 0
-	ROWS_DROPPED_BY_STATUS["$s"]=$(( ${ROWS_DROPPED_BY_STATUS["$s"]:-0} + 1 ))
-	# A SCRAPE_INCOMPLETE row caused by the skew gate (vs an unreachable pod) is the
-	# mass-drop the brief wants surfaced loudly; SCRAPE_SKEW_HIGH is per-iteration.
-	[[ "$s" == "SCRAPE_INCOMPLETE" && "$SCRAPE_SKEW_HIGH" == "1" ]] && ROWS_DROPPED_SKEW=$((ROWS_DROPPED_SKEW + 1))
+tally_row() {  # <deciding status> <that side's skew high: 0|1>
+	[[ "$1" == "SCRAPE_INCOMPLETE" && "$2" == "1" ]] && ROWS_DROPPED_SKEW=$((ROWS_DROPPED_SKEW + 1))
+	return 0
+}
+# emit_row <row>: one endpoint row to the summary's rows file and, with --tsv, the TSV.
+emit_row() {
+	printf '%s\n' "$1" >> "$ROWS_FILE"
+	if ((WRITE_TSV)); then printf '%s\n' "$1" >> "$TSV_FILE"; fi
 	return 0
 }
 
@@ -1114,7 +1147,9 @@ DIAG_DIR="$(istiod_diag_dir "$TSV_FILE" "$RUN_ID")"
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
-	RMT_OWN_RESTART=()
+	# Per remote, its own side of P2/P3 (I6): its istiod's restart status, its baseline
+	# scrape (failed, skew) and its sidecar's drain. remote_status is built from these only.
+	RMT_OWN_RESTART=() RMT_BASE_INC=() RMT_SKEW=() RMT_DRAIN=()
 
 	# H1: per-iteration PF liveness check across each context's fanout block. PFs
 	# can die silently between iterations (kubectl PF closes idle conns,
@@ -1138,15 +1173,19 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	for i in "${!REMOTES[@]}"; do
 		printf '%s\n' "${RMT_ISTIOD_PODS_STR[$i]:-}" > "$BASELINE_DIR/remote-${i}.podset"
 	done
-	BASELINE_INCOMPLETE=0
+	BASELINE_INCOMPLETE=0 SRC_INCOMPLETE=0
 	src_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "source" pilot_proxy_convergence_time "${SRC_ISTIOD_PORTS[@]}")"
-	(( $(fanout_scrape_failed_count "$BASELINE_DIR" "source") > 0 )) && BASELINE_INCOMPLETE=1
+	(( $(fanout_scrape_failed_count "$BASELINE_DIR" "source") > 0 )) && { BASELINE_INCOMPLETE=1; SRC_INCOMPLETE=1; }
+	[[ "$src_skew" =~ ^[0-9]+$ ]] || src_skew=0
 	MAX_SKEW="$src_skew"
 	for i in "${!REMOTES[@]}"; do
 		_rip=()  # populated by load_rmt_istiod_ports via nameref
 		load_rmt_istiod_ports "$i" _rip
 		r_skew="$(fanout_scrape_aggregate "$BASELINE_DIR" "remote-${i}" pilot_proxy_convergence_time "${_rip[@]}")"
-		(( $(fanout_scrape_failed_count "$BASELINE_DIR" "remote-${i}") > 0 )) && BASELINE_INCOMPLETE=1
+		RMT_BASE_INC[i]=0
+		(( $(fanout_scrape_failed_count "$BASELINE_DIR" "remote-${i}") > 0 )) && { BASELINE_INCOMPLETE=1; RMT_BASE_INC[i]=1; }
+		[[ "$r_skew" =~ ^[0-9]+$ ]] || r_skew=0
+		RMT_SKEW[i]="$r_skew"
 		(( r_skew > MAX_SKEW )) && MAX_SKEW="$r_skew"
 	done
 	SCRAPE_SKEW_MS="$MAX_SKEW"
@@ -1291,13 +1330,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	echo "  P1 (local xDS push):   wall=${p1_ms}ms  conv_p50=$(bucket_range "$p1_conv_p50")ms  conv_p99=$(bucket_range "$p1_conv_p99")ms  samples=${p1_sample_count}/${SOURCE_PROXY_COUNT}  overflow=${p1_overflow}  restarted=${restarted}"
 
-	if [[ "$p1_ms" =~ ^[0-9]+$ ]]; then
-		P1_SUM=$((P1_SUM + p1_ms))
-		P1_COUNT=$((P1_COUNT + 1))
-		[[ -z "$P1_MIN" || "$p1_ms" -lt "$P1_MIN" ]] && P1_MIN="$p1_ms"
-		[[ -z "$P1_MAX" || "$p1_ms" -gt "$P1_MAX" ]] && P1_MAX="$p1_ms"
-	fi
-
 	# O1: drain BEFORE the drain-wait so we can report DRAIN_TIMEOUT correctly.
 	# Flip the active label OFF (config-only) — the backer pod stays Ready and
 	# warm for the next iteration; only the Service endpoint goes away. The
@@ -1309,7 +1341,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# E1: track per-iteration drain timeout so we can flag the row with
 	# status=DRAIN_TIMEOUT. Without this, the next iteration's baseline
 	# includes an un-drained canary endpoint, contaminating the data silently.
-	drain_timeout="0"
+	drain_timeout="0" src_drain_timeout="0"
+	for i in "${!REMOTES[@]}"; do RMT_DRAIN[i]=0; done
 	if ((iter < ITERATIONS)); then
 		echo "  Waiting for canary endpoints to drain..."
 		# Bounded + PARALLEL drain: this is inter-iteration CLEANUP, not a measured
@@ -1324,12 +1357,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		done
 		if ! wait "$src_pid"; then
 			echo "  Warning: timeout waiting for $SOURCE_CTX sidecar endpoint removal"
-			drain_timeout="1"
+			drain_timeout="1" src_drain_timeout="1"
 		fi
 		for i in "${!REMOTES[@]}"; do
 			if ! wait "${remote_pids[i]}"; then
 				echo "  Warning: timeout waiting for ${REMOTES[i]} sidecar endpoint removal"
-				drain_timeout="1"
+				drain_timeout="1" RMT_DRAIN[i]=1
 			fi
 		done
 		echo "  Canary endpoints drained. Settling for ${SETTLE_SEC}s..."
@@ -1366,13 +1399,21 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	(( SCRAPE_SKEW_HIGH )) && row_incomplete=1
 	[[ -s "$P1_FILE" && "$(<"$P1_FILE")" == "INCOMPLETE" ]] && row_incomplete=1
 
+	# B2: P1's own verdict from the source side only (its istiod, its sidecar's drain, its
+	# baseline scrape and P1 poll, its scrape skew), written on every row of the iteration
+	# (p1_status, p1_scrape_skew_ms): a remote's timeout, restart or scrape never drops P1.
+	p1_incomplete="$SRC_INCOMPLETE"
+	[[ "$(fanout_skew_high_value "$src_skew")" == "1" ]] && p1_incomplete=1
+	[[ -s "$P1_FILE" && "$(<"$P1_FILE")" == "INCOMPLETE" ]] && p1_incomplete=1
+	p1_status="$(status_for_row "$p1_ms" "N/A" "N/A" "$restarted" "$src_drain_timeout" "$p1_incomplete")"
+	[[ "$p1_status" == OK && "$restarted" == unknown ]] && p1_status=RESTART_UNKNOWN
+
 	if [[ ${#REMOTES[@]} -eq 0 ]]; then
 		status=$(status_for_row "$p1_ms" "N/A" "N/A" "$restarted" "$drain_timeout" "$row_incomplete")
-		tally_row "$status"
-		if ((WRITE_TSV)); then
-			# F1: p1_sample_count is "got/attempted" (delta-_count first, proxy_count second).
-			echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\tN/A\t${T0}\t${p1_ms}\tN/A\tN/A\t${status}\t${p1_conv_p50}\t${p1_conv_p99}\t${p1_sample_count}/${SOURCE_PROXY_COUNT}\t${SOURCE_PROXY_COUNT}\t${p1_overflow}\t${restarted}\t0\t${WINDOW_MS}\t${SCRAPE_SKEW_MS}" >> "$TSV_FILE"
-		fi
+		tally_row "$p1_status" "$(fanout_skew_high_value "$src_skew")"
+		# F1: p1_sample_count is "got/attempted" (delta-_count first, proxy_count second).
+		# No remote: remote_status and remote_scrape_skew_ms are N/A (the row measures P1 only).
+		emit_row "$(echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\tN/A\t${T0}\t${p1_ms}\tN/A\tN/A\t${status}\t${p1_conv_p50}\t${p1_conv_p99}\t${p1_sample_count}/${SOURCE_PROXY_COUNT}\t${SOURCE_PROXY_COUNT}\t${p1_overflow}\t${restarted}\t0\t${WINDOW_MS}\t${SCRAPE_SKEW_MS}\t${p1_status}\t${src_skew}\tN/A\tN/A")"
 	else
 		for i in "${!REMOTES[@]}"; do
 			p2_ms=$(compute_delta_ms "${P2_FILES[i]}" "$T0")
@@ -1416,36 +1457,35 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			echo "  P2 (remote istiod ${REMOTES[i]}, EDS push): ${p2_ms}ms  dirty=${p2_dirty} (P3-reconciled)"
 			echo "  P3 (remote sidecar ${REMOTES[i]}):          ${p3_ms}ms"
 
-			if [[ "$p2_ms" =~ ^[0-9]+$ ]]; then
-				P2_SUM=$((P2_SUM + p2_ms))
-				P2_COUNT=$((P2_COUNT + 1))
-				[[ -z "$P2_MIN" || "$p2_ms" -lt "$P2_MIN" ]] && P2_MIN="$p2_ms"
-				[[ -z "$P2_MAX" || "$p2_ms" -gt "$P2_MAX" ]] && P2_MAX="$p2_ms"
-			fi
-			if [[ "$p3_ms" =~ ^[0-9]+$ ]]; then
-				P3_SUM=$((P3_SUM + p3_ms))
-				P3_COUNT=$((P3_COUNT + 1))
-				[[ -z "$P3_MIN" || "$p3_ms" -lt "$P3_MIN" ]] && P3_MIN="$p3_ms"
-				[[ -z "$P3_MAX" || "$p3_ms" -gt "$P3_MAX" ]] && P3_MAX="$p3_ms"
-			fi
-
 			# A P2 poll scrape that never completed cleanly also taints the remote row.
 			p2_incomplete="$row_incomplete"
-			[[ -s "${P2_FILES[i]}" && "$(<"${P2_FILES[i]}")" == "INCOMPLETE" ]] && p2_incomplete=1
+			p2_poll_inc=0
+			[[ -s "${P2_FILES[i]}" && "$(<"${P2_FILES[i]}")" == "INCOMPLETE" ]] && { p2_incomplete=1; p2_poll_inc=1; }
 			status=$(status_for_row "$p1_ms" "$p2_ms" "$p3_ms" "$p2_restarted" "$drain_timeout" "$p2_incomplete")
-			tally_row "$status"
+			# I6: this remote's own verdict for P2 and P3 (remote_status), from its side only:
+			# its istiod's restart (RESTART, RESTART_UNKNOWN), a P2 or P3 timeout, its sidecar's
+			# drain timeout, its baseline scrape or P2 poll incomplete, or its baseline skew
+			# over FANOUT_MAX_SKEW_MS. The source's restart, P1 timeout or overflow, drain and
+			# scrapes never drop P2 or P3: the remote istiod reads the source's API server,
+			# not its istiod. status (column 10) stays the row's verdict over both sides.
+			rmt_incomplete="${RMT_BASE_INC[i]:-0}"
+			((p2_poll_inc)) && rmt_incomplete=1
+			[[ "$(fanout_skew_high_value "${RMT_SKEW[i]:-0}")" == "1" ]] && rmt_incomplete=1
+			remote_status="$(status_for_row "N/A" "$p2_ms" "$p3_ms" "${RMT_OWN_RESTART[i]}" "${RMT_DRAIN[i]:-0}" "$rmt_incomplete")"
+			[[ "$remote_status" == OK && "${RMT_OWN_RESTART[i]}" == unknown ]] && remote_status=RESTART_UNKNOWN
+			tally_row "$remote_status" "$(fanout_skew_high_value "${RMT_SKEW[i]:-0}")"
 
-			# PL13: counter deltas are N/A on restart or unknown.
+			# PL13: P2 is read from this remote's istiod counters: N/A when that istiod
+			# restarted or its restart status is unknown (the source's does not reset them).
 			p2_out="$p2_ms"
-			if [[ "$p2_restarted" == "1" || "$p2_restarted" == "unknown" ]]; then
+			if [[ "${RMT_OWN_RESTART[i]}" != "0" ]]; then
 				p2_out="N/A"
 			fi
 
-			if ((WRITE_TSV)); then
-				# Trailing columns: p1_conv_p50, p1_conv_p99, p1_sample_count (got/attempted),
-				# p1_proxy_count, p1_overflow, restarted, p2_dirty, window_ms, scrape_skew_ms.
-				echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\t${REMOTES[i]}\t${T0}\t${p1_ms}\t${p2_out}\t${p3_ms}\t${status}\t${p1_conv_p50}\t${p1_conv_p99}\t${p1_sample_count}/${SOURCE_PROXY_COUNT}\t${SOURCE_PROXY_COUNT}\t${p1_overflow}\t${p2_restarted}\t${p2_dirty}\t${WINDOW_MS}\t${SCRAPE_SKEW_MS}" >> "$TSV_FILE"
-			fi
+			# Trailing columns: p1_conv_p50, p1_conv_p99, p1_sample_count (got/attempted),
+			# p1_proxy_count, p1_overflow, restarted, p2_dirty, window_ms, scrape_skew_ms,
+			# p1_status, p1_scrape_skew_ms, remote_status, remote_scrape_skew_ms.
+			emit_row "$(echo -e "${RUN_ID}\t${MESH_SIZE}\t${iter}\t${SOURCE_CTX}\t${REMOTES[i]}\t${T0}\t${p1_ms}\t${p2_out}\t${p3_ms}\t${status}\t${p1_conv_p50}\t${p1_conv_p99}\t${p1_sample_count}/${SOURCE_PROXY_COUNT}\t${SOURCE_PROXY_COUNT}\t${p1_overflow}\t${p2_restarted}\t${p2_dirty}\t${WINDOW_MS}\t${SCRAPE_SKEW_MS}\t${p1_status}\t${src_skew}\t${remote_status}\t${RMT_SKEW[i]:-0}")"
 		done
 	fi
 
@@ -1469,41 +1509,89 @@ if ((WRITE_TSV)); then
 	echo "=== Results written to $TSV_FILE ==="
 fi
 echo ""
-echo "Summary:"
-# Averages are rounded to the nearest ms (half up), not truncated.
-if ((P1_COUNT > 0)); then
-	P1_AVG=$(( (P1_SUM + P1_COUNT / 2) / P1_COUNT ))
-	printf "  P1 local xDS push:     n=%d min=%dms max=%dms avg=%dms\n" "$P1_COUNT" "$P1_MIN" "$P1_MAX" "$P1_AVG"
-fi
-if ((P2_COUNT > 0)); then
-	P2_AVG=$(( (P2_SUM + P2_COUNT / 2) / P2_COUNT ))
-	printf "  P2 remote istiod EDS:  n=%d min=%dms max=%dms avg=%dms\n" "$P2_COUNT" "$P2_MIN" "$P2_MAX" "$P2_AVG"
-fi
-if ((P3_COUNT > 0)); then
-	P3_AVG=$(( (P3_SUM + P3_COUNT / 2) / P3_COUNT ))
-	printf "  P3 remote sidecar:     n=%d min=%dms max=%dms avg=%dms\n" "$P3_COUNT" "$P3_MIN" "$P3_MAX" "$P3_AVG"
-fi
-if ((P1_COUNT == 0)); then
-	echo "  No successful measurements."
-fi
+# R6: average exactly the rows 005 counts (prop_drop_reason, tests/lib/propagation.sh:
+# P2/P3 from the remote side only, remote_status OK and remote skew within
+# FANOUT_MAX_SKEW_MS, I6), per row like 005, and tally the others by reason. P1 is once per
+# iteration and decided before the row filter from its source-side columns
+# (prop_p1_sample, B2), with the iterations it leaves out tallied by reason. Output lines:
+# "T total valid dropped", "S phase n min max avg" (min/max/avg "-" without a sample),
+# "D reason count" and "Q reason iterations".
+SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
+	function acc(ph, v) {
+		n[ph]++; sum[ph] += v
+		if (!(ph in mn) || v < mn[ph]) mn[ph] = v
+		if (!(ph in mx) || v > mx[ph]) mx[ph] = v
+	}
+	{
+		total++
+		if (!(($1 SUBSEP $3) in iter_seen)) {
+			iter_seen[$1 SUBSEP $3] = 1; iters++
+			q = prop_p1_drop_reason(MAXSKEW)
+			if (q != "") p1_drop[q]++
+		}
+		if (prop_p1_sample(MAXSKEW)) acc("P1", $7 + 0)
+		r = prop_drop_reason(MAXSKEW)
+		if (r != "") { dropped++; drop[r]++; next }
+		valid++
+		if (prop_p2_sample()) acc("P2", $8 + 0)
+		if (prop_p3_sample()) acc("P3", $9 + 0)
+	}
+	END {
+		printf "T\t%d\t%d\t%d\n", total, valid, dropped
+		printf "I\t%d\n", iters
+		split("P1 P2 P3", ph, " ")
+		for (i = 1; i <= 3; i++) {
+			p = ph[i]
+			if (n[p]) printf "S\t%s\t%d\t%d\t%d\t%.0f\n", p, n[p], mn[p], mx[p], sum[p] / n[p]
+			else printf "S\t%s\t0\t-\t-\t-\n", p
+		}
+		for (r in drop) printf "D\t%s\t%d\n", r, drop[r]
+		for (q in p1_drop) printf "Q\t%s\t%d\n", q, p1_drop[q]
+	}' "$ROWS_FILE" | sort)"
+ROWS_TOTAL=0 ROWS_VALID=0 DROPPED_TOTAL=0 ITERS_TOTAL=0
+declare -A PH_N=() PH_MIN=() PH_MAX=() PH_AVG=()
+DROP_REASONS=() P1_DROP_REASONS=()
+while IFS=$'\t' read -r kind a b c d e; do
+	case "$kind" in
+	T) ROWS_TOTAL="$a" ROWS_VALID="$b" DROPPED_TOTAL="$c" ;;
+	I) ITERS_TOTAL="$a" ;;
+	S) PH_N[$a]="$b" PH_MIN[$a]="$c" PH_MAX[$a]="$d" PH_AVG[$a]="$e" ;;
+	D) DROP_REASONS+=("${a}"$'\t'"${b}") ;;
+	Q) P1_DROP_REASONS+=("${a}"$'\t'"${b}") ;;
+	esac
+done <<<"$SUMMARY_KV"
+# Phases with data: P1 always, P2/P3 only with remotes (a single-cluster run has none).
+SUMMARY_PHASES=(P1)
+((${#REMOTES[@]})) && SUMMARY_PHASES+=(P2 P3)
+declare -A PH_LABEL=([P1]="P1 local xDS push" [P2]="P2 remote istiod EDS push" [P3]="P3 remote sidecar")
+# PH_OF: what n counts against: P1 is one sample per iteration (measured on the source
+# and repeated on every remote's row, D1; left out only for a source-side reason, B2), P2
+# and P3 one per row.
+declare -A PH_OF=([P1]="$ITERS_TOTAL" [P2]="$ROWS_TOTAL" [P3]="$ROWS_TOTAL")
 
-# R2-2: loud row-drop tally so a mass-drop (especially from the provisional
-# FANOUT_MAX_SKEW_MS skew gate at 10x3) is visible at the probe, not silently
-# absorbed by the downstream 005 status==OK filter. The in-script P1/P2/P3
-# averages above are over numeric p*_ms regardless of status; this tally reports
-# how many emitted rows a status flag will cause 005 to drop, by reason.
-DROPPED_TOTAL=0
-for s in "${!ROWS_DROPPED_BY_STATUS[@]}"; do
-	DROPPED_TOTAL=$(( DROPPED_TOTAL + ROWS_DROPPED_BY_STATUS["$s"] ))
+echo "Summary (${ROWS_VALID} of ${ROWS_TOTAL} rows count, as in 005; n = valid samples / rows, for P1 / iterations):"
+for ph in "${SUMMARY_PHASES[@]}"; do
+	if (( ${PH_N[$ph]:-0} > 0 )); then
+		printf "  %-27s n=%d/%d min=%dms max=%dms avg=%dms\n" "${PH_LABEL[$ph]}:" "${PH_N[$ph]}" "${PH_OF[$ph]}" \
+			"${PH_MIN[$ph]}" "${PH_MAX[$ph]}" "${PH_AVG[$ph]}"
+	else
+		printf "  %-27s n=0/%d (no valid sample)\n" "${PH_LABEL[$ph]}:" "${PH_OF[$ph]}"
+	fi
 done
+
 echo ""
-echo "Row-drop tally (rows 005 will drop from numeric aggregation):"
-printf "  rows_dropped_skew=%d/%d (scrape_skew_ms > FANOUT_MAX_SKEW_MS=%s)\n" \
-	"$ROWS_DROPPED_SKEW" "$ROWS_TOTAL" "$FANOUT_MAX_SKEW_MS"
+echo "Row-drop tally (rows left out of the averages above and by 005: a remote's row for its own side only, a row with no remote for the source's):"
 printf "  rows_dropped_total=%d/%d\n" "$DROPPED_TOTAL" "$ROWS_TOTAL"
-if (( DROPPED_TOTAL > 0 )); then
-	for s in "${!ROWS_DROPPED_BY_STATUS[@]}"; do
-		printf "    %-18s %d\n" "$s" "${ROWS_DROPPED_BY_STATUS["$s"]}"
+for r in "${DROP_REASONS[@]}"; do
+	printf "    %-24s %s\n" "${r%%$'\t'*}" "${r#*$'\t'}"
+done
+printf "  rows_dropped_skew=%d/%d (that side's baseline scrape skew > FANOUT_MAX_SKEW_MS=%s)\n" \
+	"$ROWS_DROPPED_SKEW" "$ROWS_TOTAL" "$FANOUT_MAX_SKEW_MS"
+# B2: P1 is left out only for its source side (p1_status, p1 overflow, source skew).
+if ((${#P1_DROP_REASONS[@]})); then
+	echo "P1 iterations left out (source side only; a remote's failure keeps P1):"
+	for r in "${P1_DROP_REASONS[@]}"; do
+		printf "    %-24s %s\n" "${r%%$'\t'*}" "${r#*$'\t'}"
 	done
 fi
 
@@ -1516,7 +1604,7 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
-	echo "| Istio version | ${ISTIO_VERSION} |"
+	echo "| Istio version | $(istio_version_label) |"
 	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
 	echo "| istiod replicas | \`${ISTIOD_REPLICAS_CSV}\` |"
 	echo "| Date | $(date -u -Iseconds) |"
@@ -1545,20 +1633,41 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo ""
 	echo "## Summary"
 	echo ""
-	if ((P1_COUNT > 0 || P2_COUNT > 0 || P3_COUNT > 0)); then
-		echo "| Phase | n | min (ms) | max (ms) | avg (ms) |"
-		echo "|-------|---|----------|----------|----------|"
-		if ((P1_COUNT > 0)); then
-			echo "| P1 local xDS push | ${P1_COUNT} | ${P1_MIN} | ${P1_MAX} | ${P1_AVG} |"
-		fi
-		if ((P2_COUNT > 0)); then
-			echo "| P2 remote istiod EDS push | ${P2_COUNT} | ${P2_MIN} | ${P2_MAX} | ${P2_AVG} |"
-		fi
-		if ((P3_COUNT > 0)); then
-			echo "| P3 remote sidecar | ${P3_COUNT} | ${P3_MIN} | ${P3_MAX} | ${P3_AVG} |"
-		fi
+	echo "Averages over the rows the report (005) counts. P2 and P3 are measured on a remote, so only"
+	echo "that remote's side leaves them out: \`remote_status\` not OK (its istiod restarted or unknown, a"
+	echo "P2 or P3 timeout, its sidecar's drain, its scrape incomplete) or its baseline scrape skew over"
+	echo "FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}, never the source's restart, P1 timeout or \`+Inf\` overflow."
+	echo "P2 also leaves out a dirty sample (\`p2_dirty=1\`). n is valid samples / rows; for P1, valid samples /"
+	echo "iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so"
+	echo "only the source side leaves it out (\`p1_status\` not OK, a P1 \`+Inf\` overflow, or a source scrape skew"
+	echo "over FANOUT_MAX_SKEW_MS), never a remote that timed out or restarted."
+	echo ""
+	echo "| Phase | n (valid / attempted) | min (ms) | max (ms) | avg (ms) |"
+	echo "|-------|-----------------------|----------|----------|----------|"
+	for ph in "${SUMMARY_PHASES[@]}"; do
+		echo "| ${PH_LABEL[$ph]} | ${PH_N[$ph]:-0}/${PH_OF[$ph]} | ${PH_MIN[$ph]:--} | ${PH_MAX[$ph]:--} | ${PH_AVG[$ph]:--} |"
+	done
+	echo ""
+	if (( DROPPED_TOTAL > 0 )); then
+		echo "**${DROPPED_TOTAL} of ${ROWS_TOTAL} rows left out of the P2/P3 averages**, by reason:"
+		echo ""
+		echo "| Reason | Rows |"
+		echo "|--------|------|"
+		for r in "${DROP_REASONS[@]}"; do
+			echo "| \`${r%%$'\t'*}\` | ${r#*$'\t'} |"
+		done
 	else
-		echo "No successful measurements."
+		echo "No rows left out (0 of ${ROWS_TOTAL})."
+	fi
+	if ((${#P1_DROP_REASONS[@]})); then
+		echo ""
+		echo "P1 iterations left out (source side only), by reason:"
+		echo ""
+		echo "| Reason | Iterations |"
+		echo "|--------|------------|"
+		for r in "${P1_DROP_REASONS[@]}"; do
+			echo "| \`${r%%$'\t'*}\` | ${r#*$'\t'} |"
+		done
 	fi
 	if ((WRITE_TSV)); then
 		echo ""

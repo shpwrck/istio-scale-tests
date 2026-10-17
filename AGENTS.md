@@ -29,15 +29,21 @@ Prefer it over generic upstream Istio docs when they disagree.
 - **Numbered scripts:** executable helpers in `tests/*/` and `terraform/*/scripts/` are named
   `NNN-kebab-case.sh` in execution order. When you add or renumber one, update every caller and
   README in the same change. Exception: `terraform/scripts/` holds helpers invoked by Terraform
-  `local-exec`; keep their names (generated kubeconfigs reference them).
+  `local-exec`; keep their names (generated kubeconfigs reference them). `tests/lib/` is not a
+  suite: its libraries and standalone tools (`verify.sh`, `redact-results.sh`) run in no order
+  and keep plain names.
 - **`--dry-run`:** scripts that change a cluster accept `--dry-run` and run it without a reachable
   cluster. Annotate with `# ci-dry-run: <args>` (or `# ci-dry-run-skip: <reason>`) so CI runs it.
 - **Version pins:**
   - deployed Istio: `istioVersion` in `charts/spoke-ossm/values.yaml`; OSSM channel:
     `charts/spoke-ossm-operator/values.yaml`
   - ACM/GitOps channels: `terraform/platform/variables.tf`
-  - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
-    keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`).
+  - test images and the `ISTIO_VERSION` pin: `config/versions.env`, with a
+    keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`);
+    `tests/lib/test/version-pins.bats` fails when they drift. Results record the version the
+    members run (their active IstioRevision, `ISTIO_VERSION`) next to the pin
+    (`ISTIO_VERSION_PIN`), through `istio_version_resolve` / `istio_version_kv` in
+    `tests/lib/preamble.sh`.
 - **Reports:** every suite writes a markdown summary next to its TSV data. Sweeps call their report
   script with `--format markdown`.
 
@@ -63,7 +69,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults, `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | ACM, GitOps, spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy) |
@@ -83,7 +89,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`; bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`; bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |
@@ -91,8 +97,8 @@ Prefer it over generic upstream Istio docs when they disagree.
 ## Testing and verification
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
-  audit, bats, and every `# ci-dry-run:` script against an empty kubeconfig (no cluster needed).
-  Required before merging changes to `tests/lib/`.
+  audit, bats, the bare-scrape and keyed-array lints, and every `# ci-dry-run:` script against an
+  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
@@ -103,7 +109,8 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 ## Tools
 
-`bash` 4+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`,
+`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
+`timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in `tests/lib/common.sh`),
 `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle

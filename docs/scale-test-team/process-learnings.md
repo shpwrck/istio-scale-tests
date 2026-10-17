@@ -47,13 +47,16 @@ its findings log was removed once every finding was fixed or superseded.
 **How to preempt:** Every TSV-writing script emits a preamble block:
 ```
 # RUN_ID=<timestamp + $$>
-# HARNESS_SHA=$(git describe --always --dirty --abbrev=7)
-# ISTIO_VERSION=<from config/versions.env>
+# HARNESS_SHA=$(harness_sha)   # git describe --always --dirty --abbrev=7; a dirty tree: <describe>-dirty.<8hex>
+# ISTIO_VERSION=<each member's active IstioRevision .spec.version, read live once per run
+#                (istio_version_resolve / istio_version_kv); never the pin passed off as live>
+# ISTIO_VERSION_PIN=<from config/versions.env>   ISTIO_VERSION_SOURCE=<live | pin under --dry-run>
+# ISTIO_VERSION_BY_CONTEXT=<ctx=version,... ; unknown where a member could not be read>
 # KUBE_VERSIONS[ctx]=<per-context, concurrent probes, --request-timeout=5s>
 # SETTLE_SEC=<value>
 # (any other knob that affects the result)
 ```
-Use `date -u -Iseconds` (UTC) for timestamps. `HARNESS_SHA` must include `--dirty` so a hacked-up working tree is visible.
+Use `date -u -Iseconds` (UTC) for timestamps. `HARNESS_SHA` must include `--dirty` so a hacked-up working tree is visible, and the `.<8hex>` after it (`harness_sha` in `tests/lib/preamble.sh`: a hash of the uncommitted changes, tracked and untracked, from git alone) so two different hacked-up trees on one commit never read the same.
 
 ## PL3 — Wall-clock window distinct from operator settle
 
@@ -323,7 +326,7 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 ## PL39 — Chart-baked, GitOps-deployed mesh config is invisible to `HARNESS_SHA` provenance; live-query the resolved state into the preamble
 
-**Why:** PL2 records a run's provenance from the harness git tree (`HARNESS_SHA = git describe --dirty`). That captures probe/script state — but a **mesh configuration baked into a Helm chart and deployed by GitOps (ArgoCD) is reconciled independently of the probe scripts**. So a toggleable mesh lever (here `tuningBaseline.{sidecar,discoverySelectors,telemetryFiltering,accessLogFiltering}` + the Sidecar egress graph) can be flipped via an Argo override, a `--set`, or a live edit and produce a run with an **identical `HARNESS_SHA` but a materially different mesh** — invisible in provenance, and two such runs silently non-comparable. The chart *default* is the wrong thing to record: the deployed state can diverge from it, which is exactly the case the provenance must catch.
+**Why:** PL2 records a run's provenance from the harness git tree (`HARNESS_SHA = git describe --dirty`, plus a hash of the uncommitted changes). That captures probe/script state — but a **mesh configuration baked into a Helm chart and deployed by GitOps (ArgoCD) is reconciled independently of the probe scripts**. So a toggleable mesh lever (here `tuningBaseline.{sidecar,discoverySelectors,telemetryFiltering,accessLogFiltering}` + the Sidecar egress graph) can be flipped via an Argo override, a `--set`, or a live edit and produce a run with an **identical `HARNESS_SHA` but a materially different mesh** — invisible in provenance, and two such runs silently non-comparable. The chart *default* is the wrong thing to record: the deployed state can diverge from it, which is exactly the case the provenance must catch.
 
 **How to preempt:** For any mesh behavior that lives outside the harness git tree (chart-baked + GitOps/operator-reconciled), emit a preamble field **live-queried from the cluster**, not read from chart defaults: query the actually-applied resources (the `Sidecar`/`Telemetry` CRs, `meshConfig.discoverySelectors` on the Istio CR, the live egress hosts) per source context, once per sweep (outside the measurement window, `!DRY_RUN`-gated, bounded with `--request-timeout`), degrading to `unknown` on failure (never a false `off` — `unknown` means non-comparable, mirroring `istiod_restarted`'s `0|1|unknown`). Then propagate it like any preamble key: through ALL report formats (PL19), classified sweep-level-scalar vs per-iteration (PL26), with identical key sets across every writer (PL36). Apply it to **every** suite that runs against the configured mesh, not just the primary one — a partial roll-out reintroduces the gap for the omitted suites.
 

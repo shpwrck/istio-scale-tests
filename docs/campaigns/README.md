@@ -10,6 +10,39 @@ Start from [`TEMPLATE.md`](TEMPLATE.md) and lead with the **Scale envelope**: to
 endpoints, per-proxy config size, and control-plane headroom (istiod % of limit, node CPU). A
 cluster count alone is not a scale. The controlplane sweep generates the envelope block for you.
 
+Redact before you paste: the envelope, `sweep-outcome.txt` and the reports can name your kube
+contexts, and a note about a member that could not be read quotes kubectl's error, which can
+name its API host. Replace them with placeholders (`<mesh-a-ctx>`, `<api-host>`), as
+[AGENTS.md](../../AGENTS.md) requires for anything committed:
+
+```bash
+tests/lib/redact-results.sh --dry-run tests/<suite>/results/sweep-<RUN_ID>   # what would change
+tests/lib/redact-results.sh --out /tmp/redacted tests/<suite>/results/sweep-<RUN_ID>
+```
+
+Paste from the copy under `/tmp/redacted`. It maps each context the TSV preambles name to
+`<mesh-a-ctx>`, `<mesh-b-ctx>`, ... (the mapping is printed on stderr only) and masks URLs, API
+and cluster host names, IPs, emails, AWS account ids and AWS resource ids (`vpc-`, `subnet-`,
+`sg-`, `i-`, `eni-`, `vol-`, `igw-`, `nat-`, `rtb-` with 8 or 17 hex digits). A file or dir
+whose name holds a context is renamed in the copy the same way, without the angle brackets
+(`istio-revert-mesh-a-ctx.json`); the renames are listed on stderr. It refuses (exit 1, file
+named) a file that still holds a context it was not told about; pass that one with
+`--context NAME`, and the hub with `--hub-context NAME`. Redact the whole sweep dir rather than
+one report, so the TSVs name every member. It never copies the raw `istiod-diag-*/NNN-*/`
+evidence.
+
+A person reads the copy, file names included, before it is committed. The script has no
+pattern for:
+
+- a context, cluster or node name that no metadata key names and no `--context` gives (in
+  prose, a log line or a file name);
+- host names and domains outside the suffixes it knows (`api.*`, `*.apps.*`,
+  `*.openshiftapps.com`, `*.amazonaws.com`, ...);
+- other AWS ids (`ami-`, `snap-`, `vpce-`, other lengths), the resource part of an ARN (only
+  its account id is masked), region and zone names;
+- user names outside `/home/<name>` and `/Users/<name>`;
+- tokens, passwords or other secrets that a log or an error message quotes.
+
 ## Records
 
 | Date | Run | Files |
@@ -22,6 +55,12 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 
 The 10-spoke pass ran far below the infra's limits: trust its scaling shapes and
 cross-cluster overheads, not its absolute magnitudes.
+
+**Errata (2026-10-16).** Both June records predate the report fixes of PR 106 and carry an erratum
+box at the top. The 2026-06-22 verdict (GO, "comfortable headroom") is unconfirmed: its istiod CPU
+is an end-of-window snapshot, east-west gateway memory was not measured (BACKLOG 9.9 puts 10k
+Services at about 1.4 GiB against a 1Gi limit), and its data-plane root cause is contradicted by
+the 2026-10-14 window. In the 2026-06-04 records `cpu_avg` is a per-window peak and "MB" is MiB.
 
 The data-plane numbers above ran one fortio server pod per cluster, and a run that missed
 its target QPS with only HTTP 200s still counted as valid. Later dataplane runs default to

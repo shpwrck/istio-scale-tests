@@ -83,6 +83,8 @@ server queues requests and can still answer with HTTP 200. `002` tags such a row
 ./tests/dataplane/002-run-latency-probe.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 
 # 3. Report, then clean up
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/dataplane/004-report-results.sh
 ./tests/dataplane/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
@@ -104,6 +106,25 @@ For each mesh size the sweep runs `001`, then `002` `--repetitions` times, then 
 and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
 `sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
 size with a remote cluster; the p50-vs-mesh-size chart needs two.
+
+Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, or an
+unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP;
+`sweep-outcome.txt` says when and by which signal); `3` the reachability gate stopped it
+(`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
+reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
+version, active revision or generation of the Istio CR or its active IstioRevision changed during
+the sweep (read again before the reports). The last line on stderr says how many, by reason; `3`
+wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the
+outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a
+not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do),
+so a report of a sweep that died, or still runs, or (with when and by which signal) was
+interrupted says "this sweep has not finished" in every format (json `sweep_outcome`: `"exit":
+null`, `"unfinished": true`; a finished one reads `"unfinished": false`; one that stopped on an
+error after its start records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see
+the top-level README): when no sweep runs any more, run the sweep again into a new dir (a
+dataplane sweep has no `--resume`); the rows already in the dir cover only the mesh sizes it
+finished. Proxies connected on another Istio version than their istiod at the start
+(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
 
 ## Run config (`--config FILE`)
 
@@ -130,8 +151,8 @@ QPS 10 and 100, 10 s per level):
   list for `002` and `003` alike.
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`001`/`002`; the sweep sets them),
-  `--fail-on-unreachable` (`004`), `--no-wait-deletion` (`005`), `--force-large-matrix`,
-  `--format` and `--dry-run`.
+  `--fail-on-unreachable` and `--allow-multi-run` (`004`), `--no-wait-deletion` (`005`),
+  `--force-large-matrix`, `--format` and `--dry-run`.
 
 ## Remote reachability
 
@@ -334,8 +355,8 @@ the row with a folder; the other rows count as repeats. json has the section as
 
 ## Outputs
 
-`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `ISTIO_VERSION`,
-`KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
+`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `ISTIO_VERSION` with
+`ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`, `KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
 thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,

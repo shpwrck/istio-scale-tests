@@ -206,6 +206,10 @@ Environment:
   GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}),
   GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
   GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE}), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
+  Environment only (the Istio version read; this read-only check warns and never stops on it):
+  ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out, is read again, ${ISTIO_VERSION_READY_WAIT_SEC:-60} s; a rollout still running then reads as
+  unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC:-5} s).
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
@@ -292,13 +296,10 @@ warn() { echo "warning: $*" >&2; }
 # --- Validation (before --dry-run returns, so the CI dry-run checks it too) ---
 
 CONTEXTS=()
-split_csv "$CONTEXTS_CSV" CONTEXTS
+split_contexts "$CONTEXTS_CSV" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]} >= 2)) || die "--contexts (or SETUP_CONTEXTS) needs at least two mesh members (one runs the workload, the others show the cross-cluster path); got '${CONTEXTS_CSV}'"
 declare -A IS_MEMBER=()
-for ctx in "${CONTEXTS[@]}"; do
-	[[ -z "${IS_MEMBER[$ctx]:-}" ]] || die "--contexts lists ${ctx} twice"
-	IS_MEMBER[$ctx]=1
-done
+for ctx in "${CONTEXTS[@]}"; do IS_MEMBER[$ctx]=1; done
 [[ -n "$WORKLOAD_CTX" ]] || die "--workload-context (or GWAPI_WORKLOAD_CONTEXT) is required: the member whose ACM ManagedCluster name is the chart's workloadCluster"
 [[ -n "${IS_MEMBER[$WORKLOAD_CTX]:-}" ]] || die "--workload-context ${WORKLOAD_CTX} is not one of --contexts (${CONTEXTS[*]})"
 if [[ -n "$HUB_CTX" && -n "${IS_MEMBER[$HUB_CTX]:-}" ]]; then
@@ -671,6 +672,13 @@ for i in "${!CONTEXTS[@]}"; do
 	done <"${WORK}/pre-${i}.err"
 done
 
+# The Istio version the members run (R4, PL36): the suites' one reader, the active
+# IstioRevision's version on every member (unknown when unreadable or the Istio CR is not
+# settled), never the Istio CR's requested .spec.version (ISTIO_CR_VERSION[ctx] keeps that
+# for reference) nor an absent CR. A read-only check records it and never stops on it
+# (--no-stop warns instead); ISTIO_VERSION_PIN keeps config/versions.env's value.
+istio_version_resolve --no-stop "$CONTEXTS_CSV" 0 "${KUBECTL[@]}"
+
 # The deployed scenario set per member (R2): the chart's stamp on the test namespace and on the
 # Gateway. A member whose stamp differs runs other chart content than this script describes; its
 # rows say SCENARIO_SET_MISMATCH (every member's rows when it is the workload member, which
@@ -743,7 +751,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 if ((${#problems[@]})); then
 	for p in "${problems[@]}"; do echo "error: ${p}" >&2; done
-	die "the check is not deployed as expected (above). Deploy it from the ACM hub: edit and apply charts/mesh-verify-gateway-api-appset.yaml (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
+	die "the check is not deployed as expected (above). Deploy it from the ACM hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
 fi
 
 # --- Step 2: bounded wait for the Gateway, the echo Deployments and every route's status (PL4),
@@ -1313,7 +1321,8 @@ fi
 # (R2, PL39): say when it is not the commit the script runs from.
 HARNESS="$(harness_sha)"
 CHART_REVISION_VS_HARNESS=unknown
-hc="${HARNESS%-dirty}"
+# A6: a dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
+hc="${HARNESS%%-dirty*}"
 if [[ "$hc" =~ -g([0-9a-f]{7,})$ ]]; then
 	hc="${BASH_REMATCH[1]}"
 elif [[ ! "$hc" =~ ^[0-9a-f]{7,}$ ]]; then
@@ -1331,7 +1340,7 @@ if [[ -n "$hc" && "$CHART_REVISION" != unknown ]]; then
 	done
 	if [[ "$CHART_REVISION_VS_HARNESS" == differs ]]; then
 		warn "Argo CD synced the chart from ${CHART_REVISION}, not from this script's commit ${hc} (HARNESS_SHA ${HARNESS}): the deployed check may describe other scenarios than this script (preamble SCENARIO_SET per member)"
-	elif [[ "$CHART_REVISION_VS_HARNESS" == same && "$HARNESS" == *-dirty ]]; then
+	elif [[ "$CHART_REVISION_VS_HARNESS" == same && "$HARNESS" == *-dirty* ]]; then
 		# The commit matches, but the script runs from a tree with uncommitted changes.
 		CHART_REVISION_VS_HARNESS=same-dirty
 	fi
@@ -1706,7 +1715,7 @@ emit_preamble() {
 	echo "# GWAPI_SCHEMA=${GWAPI_SCHEMA}"
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# HARNESS_SHA=${HARNESS}"
-	echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
+	istio_version_kv | sed 's/^/# /'
 	config_preamble_lines
 	echo "# SCENARIO_SET=${SCENARIO_SET}"
 	echo "# CONTEXTS=$(IFS=,; echo "${CONTEXTS[*]}")"

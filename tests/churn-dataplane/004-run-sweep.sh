@@ -9,7 +9,9 @@
 #   cleanup (006) once, then settle before the next mesh-size
 # Under --on-unreachable fail, a baseline that stops on an unreachable remote
 # (002 exit 3) records REMOTE_UNREACHABLE rows for its combo and ends the sweep
-# after that mesh size's cleanup; the reports still run and the sweep exits 3.
+# after that mesh size's cleanup; the reports still run and the sweep exits 3. A
+# combo whose setup, reset or probe failed gets its failed rows and the reports
+# still run; the sweep then exits 4 (R19).
 #
 # Usage:
 #   ./tests/churn-dataplane/004-run-sweep.sh [options]
@@ -17,13 +19,15 @@
 #   ./tests/churn-dataplane/004-run-sweep.sh --config tests/churn-dataplane/configs/smoke.env --dry-run
 # ci-dry-run:
 set -euo pipefail
-# Report the failing line on an unexpected abort. Per-combo failures are handled
-# below and recorded as row statuses.
-trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# Report the failing line on an unexpected abort. Per-combo failures are handled
+# below and recorded as row statuses.
+# I5: sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
+# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
 # --config FILE: export the file's keys before versions.env/options.env fill in defaults.
@@ -114,6 +118,11 @@ churn phase reports the same numbers as the baseline phase. Rates < 0 are
 rejected.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
   COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
   COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
@@ -125,7 +134,20 @@ Environment:
   001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
   them, and the flags that set them, before the first setup, --dry-run included.
 
-Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
+Exit codes:
+  0  every cell (mesh size x churn rate x repetition) ran; rows with a non-OK status
+     are measurement outcomes, counted in the report's n_total and left out of n_valid
+  1  the sweep stopped: a bad flag or precondition, or an unexpected error; after its
+     start, sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
+     CUT_SHORT=1)
+  3  --on-unreachable fail stopped the sweep (the reports are written)
+  4  the sweep finished and wrote its reports, but N cells failed (setup, churn-target
+     reset or a probe exited non-zero; stderr ends with "N of M cells failed" by
+     reason) or the Istio version or active revision changed during the sweep (read
+     again at its end); the outcome is also in sweep-outcome.txt and the markdown report
+  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL); a SIGTERM to
+     the sweep's process alone waits for its current command (signal its process group)
 EOF
 }
 
@@ -234,9 +256,9 @@ is_pos_int "${COEXEC_CLEANUP_GRACE_SEC:-5}" || die "COEXEC_CLEANUP_GRACE_SEC (re
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -303,6 +325,13 @@ else
 	KUBECTL=(kubectl) # placeholder for the dry-run plan only
 fi
 
+# R4: the Istio version every member runs, read once before the first setup and
+# exported, so 001, 002, 003 and this preamble record it (ISTIO_VERSION_CHECK=fail stops
+# here on a mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" "${KUBECTL[@]}"
+echo "Istio:          $(istio_version_label)"
+mapfile -t IV_KV < <(istio_version_kv)
+
 # Live tuning levers + sidecar egress hosts, read once from CONTEXTS[0] and passed
 # to 002/003 and this preamble. Skipped in --dry-run (stays "unknown").
 TUNING_BASELINE="unknown"
@@ -321,13 +350,20 @@ fi
 if ! ((DRY_RUN)); then
 	mkdir -p "$SWEEP_DIR"
 	config_snapshot "$SWEEP_DIR" "$RUN_ID"
+	# I5: a sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
+	# that record: stopped with its reason, or interrupted (sweep_outcome_on_exit). Set before
+	# sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
+	trap 'sweep_outcome_on_exit "$?" || true' EXIT
+	# A3: sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
+	# so the reports of a sweep that died say so.
+	sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a churn-dataplane sweep has no --resume); the rows in this dir cover only the cells it finished"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 	ISTIOD_REPLICAS="$(fanout_preflight_istiod "${CONTEXTS[0]}" "${KUBECTL[@]}")"
 	write_preamble "churn-dataplane co-exec test" "$TSV_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
-		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
+		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
 		"SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS" \
@@ -429,6 +465,8 @@ COMBO_INDEX=0
 # Set when a baseline exits REACH_EXIT_CODE (--on-unreachable fail): the sweep stops
 # after this mesh size's cleanup, the reports still run, and the sweep exits 3.
 REACH_GATE_STOP=0
+# One reason per cell (combo) whose setup, reset or probe failed (R19).
+FAILED_CELLS=()
 ms_done=0
 for ms in "${MESH_SIZES[@]}"; do
 	ms_done=$((ms_done + 1))
@@ -472,6 +510,7 @@ for ms in "${MESH_SIZES[@]}"; do
 					COMBO_INDEX=$((COMBO_INDEX + 1))
 					COMBO_ID="$(combo_id_for "$ms" "$cr" "$rep")"
 					emit_failed_rows SETUP_FAILED "$COMBO_ID" "$ms" "$cr"
+					FAILED_CELLS+=(SETUP_FAILED)
 				done
 			done
 			"$SCRIPT_DIR/006-cleanup.sh" --contexts "$active_csv" --wait-deletion --timeout "$NS_DELETE_TIMEOUT_SEC" || \
@@ -551,6 +590,7 @@ for ms in "${MESH_SIZES[@]}"; do
 			if ! reset_churn_targets_to_base "$active_csv"; then
 				echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] churn-target reset failed for $COMBO_ID; recording RESET_FAILED rows and skipping this rate's measurement" >&2
 				emit_failed_rows RESET_FAILED "$COMBO_ID" "$ms" "$cr"
+				FAILED_CELLS+=(RESET_FAILED)
 				meshsize_combo_seq=$((meshsize_combo_seq + 1))
 				continue
 			fi
@@ -574,6 +614,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		elif ((baseline_rc != 0)); then
 			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] baseline probe failed for $COMBO_ID (exit $baseline_rc); recording PROBE_FAILED rows and continuing" >&2
 			emit_failed_rows PROBE_FAILED "$COMBO_ID" "$ms" "$cr"
+			FAILED_CELLS+=(PROBE_FAILED)
 			continue
 		fi
 
@@ -582,6 +623,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		if ! "$SCRIPT_DIR/003-run-churn-probe.sh" "${churn_args[@]}"; then
 			echo "warn: [combo $COMBO_INDEX/$MATRIX_SIZE] churn probe failed for $COMBO_ID; recording PROBE_FAILED row and continuing" >&2
 			emit_cd_row PROBE_FAILED "$COMBO_ID" "$ms" "$cr" "churn"
+			FAILED_CELLS+=(PROBE_FAILED)
 		fi
 		done
 	done
@@ -620,7 +662,13 @@ if ((DRY_RUN)); then
 fi
 
 echo "=========================================="
-echo "Sweep complete: $TSV_FILE"
+echo "Sweep finished: $TSV_FILE"
+# A6: the Istio version again, after the last window and before the reports (read-only).
+IV_END=()
+istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
+# A3: the outcome is written after the reports: they say so (the markdown gets a line
+# that sweep_outcome --md replaces).
+export _SWEEP_OUTCOME_PENDING=1
 echo "Running 005-report-results.sh..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR"
 
@@ -632,7 +680,15 @@ CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
+# R19: the reports are written; now say how many cells failed (also in
+# sweep-outcome.txt and the markdown summary, C3). Exit 3 (the reach gate stopped the
+# sweep) wins over 4 (some cells failed, or the Istio version changed under the sweep).
+outcome_rc=0 stop_args=()
+((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE" --stop-reason "the reachability gate (--on-unreachable fail) found an unreachable remote; later mesh sizes did not run")
+sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$SWEEP_DIR" --md "$MD_FILE" \
+	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((REACH_GATE_STOP)); then
 	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2
 	exit "$REACH_EXIT_CODE"
 fi
+exit "$outcome_rc"

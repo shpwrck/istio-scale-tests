@@ -87,18 +87,19 @@ vsdr_dir() {
 	refute_output --partial "**Warning:**"
 }
 
-@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (68) and a proxy_check comment" {
+@test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (69) and a proxy_check comment" {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	hdr=$(grep -v '^#' <<<"$output" | sed -n 1p)
 	row=$(grep -v '^#' <<<"$output" | sed -n 2p)
-	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 68 ]
+	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 69 ]
 	# heap_inuse summed per cluster scrape (500, 750, 500; the restarted mesh-b scrape is
 	# out) and the istiod pods per scrape (2, 3, 2); no status rows; a legacy cell has no
 	# series run (-).
-	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id,gateway_physical_max,gateway_ws_max,leftover_ns_max,cpu_window_avg" ]]
-	# A 51-column file has no gateway physical/working-set, leftover or CPU-seconds column: N/A.
-	[[ "$row" == *",583.3,2.3,0,-,-,N/A,N/A,N/A,N/A" ]]
+	[[ "$hdr" == *",heap_inuse_cluster_avg,istiod_pods_avg,status_rows,statuses,series_run_id,gateway_physical_max,gateway_ws_max,leftover_ns_max,cpu_window_avg,pushes_n" ]]
+	# A 51-column file has no gateway physical/working-set, leftover or CPU-seconds column:
+	# N/A; all 9 valid rows have a push count (pushes_n, A10).
+	[[ "$row" == *",583.3,2.3,0,-,-,N/A,N/A,N/A,N/A,9" ]]
 	[[ "$hdr" == *",cluster_proxies_min,cluster_proxies_max,cluster_proxies_avg,traffic_config,vsdr_services,"* ]]
 	[[ "$row" == *",30,34,31,none,0,"* ]]
 	# A 51-column file reads as the legacy layout: K 0, pods, 15 svc x 2 reps, no outside, deploy.
@@ -449,7 +450,8 @@ fit_of() {
 	[ "$(jq 'has("namespace_scaling")' <<<"$output")" = false ]
 	growth_dir
 	cp "$FIXTURE" "${GRES}/controlplane-fixture-t2.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	# Two runs (two RUN_IDs) in one dir: pooled on purpose (R3).
+	run --separate-stderr "$REPORT" --results-dir "$GRES" --allow-multi-run --format json
 	assert_success
 	# The 51-column file keeps its own cell (legacy defaults) next to the growth cells.
 	[ "$(jq -c '[.results[] | select(.services_per_namespace == 0)] | map([.n_total, .window_kind, .workload_mode])' <<<"$output")" = '[[10,"deploy","pods"]]' ]
@@ -586,6 +588,70 @@ fit_of() {
 	assert_output --partial "> istiod replicas: 1 per cluster. Heap per added pod is the change in heap_inuse summed over"
 }
 
+@test "a sweep whose members ran different Istio versions: its mixed:a/b value stays one item in every list, one tag, and warns (A4)" {
+	local d="${BATS_TEST_TMPDIR}/mixed"
+	mkdir -p "$d"
+	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=mixed:v1.30.5/v1.29.0|' "$FIXTURE" > "${d}/controlplane-mixed.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$d" --format json
+	assert_success
+	[ "$(jq -c '[.metadata.istio_version, .metadata.istio_versions, .pooled_runs.istio_version]' <<<"$output")" = \
+		'["mixed:v1.30.5/v1.29.0",["mixed:v1.30.5/v1.29.0"],["mixed:v1.30.5/v1.29.0"]]' ]
+	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION mixed:v1.30.5/v1.29.0)"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
+	# One `# KEY=value` line per key (X5): a value with a comma or slash stays one value.
+	assert_line "# ISTIO_VERSION=mixed:v1.30.5/v1.29.0"
+	assert_line --regexp '^# ISTIO_VERSION_PIN=.+$'
+	assert_line --regexp '^# ISTIO_VERSION_BY_CONTEXT=.+$'
+	refute_output --partial "mixed:mixed:"
+	# Pooled with a run on one of those versions (1.30.5, without the v): each distinct
+	# version once (X13, Y11).
+	sed 's|^# RUN_ID=.*|# RUN_ID=other|' "$FIXTURE" > "${d}/controlplane-other.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$d" --allow-multi-run --format csv
+	assert_success
+	assert_line "# ISTIO_VERSION=mixed:v1.30.5,v1.29.0"
+	refute_output --partial "mixed:mixed:"
+}
+
+@test "a re-generated report repeats the sweep's recorded outcome (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT and the R2 start keys in every format (X3, X4, Y9)" {
+	local d="${BATS_TEST_TMPDIR}/outcome"
+	mkdir -p "$d"
+	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=v1.30.5\n# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5\n# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy\n# ISTIO_READY_WAITED_SEC=60|' \
+		"$FIXTURE" > "${d}/controlplane-r.tsv"
+	printf '%s\n' '# Sweep outcome (tests/lib/common.sh sweep_outcome)' 'RUN_ID=fixture-t2' 'EXIT=4' \
+		'PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)' > "${d}/sweep-outcome.txt"
+	run --separate-stderr "$REPORT" --results-dir "$d"
+	assert_success
+	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.txt by run fixture-t2, exit 4):"
+	[[ "$stderr" != *"was recorded by run"* ]]
+	assert_output --partial "#   error: the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	assert_output --partial "ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5"
+	assert_output --partial "ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy  ISTIO_READY_WAITED_SEC=60"
+	run --separate-stderr "$REPORT" --results-dir "$d" --format markdown
+	assert_output --partial "> - error: the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
+	assert_output --partial 'istio_notready_at_start: "<mesh-a-ctx>=IstioCNINotHealthy"'
+	run --separate-stderr "$REPORT" --results-dir "$d" --format json
+	[ "$(jq -c '[.sweep_outcome.exit, .sweep_outcome.problems[0], .metadata.istio_version_by_context, .metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec]' <<<"$output")" = \
+		'[4,"the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)","<mesh-a-ctx>=v1.30.5","<mesh-a-ctx>=IstioCNINotHealthy","60"]' ]
+	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
+	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
+	assert_output --partial 'istio_ready_waited_sec: "60"'
+	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
+	assert_line "# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy"
+	assert_line "# ISTIO_READY_WAITED_SEC=60"
+	assert_line "# SWEEP_OUTCOME_EXIT=4"
+	assert_line "# SWEEP_OUTCOME_PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	# J10: through a symlink to the results dir (no trailing slash), the same report.
+	ln -s "$d" "${BATS_TEST_TMPDIR}/latest"
+	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
+	assert_success
+	[ "$(jq -c '[.sweep_outcome.exit, .metadata.istio_notready_at_start]' <<<"$output")" = '[4,"<mesh-a-ctx>=IstioCNINotHealthy"]' ]
+	[[ "$stderr" != *"was recorded by run"* ]]
+	rm "${d}/sweep-outcome.txt"
+	run --separate-stderr "$REPORT" --results-dir "$d" --format json
+	[ "$(jq -c '.sweep_outcome' <<<"$output")" = null ]
+}
+
 @test "growth report: a base-dir report of two sweeps lists every run, warns, and names the runs behind each pods-vs-config-only side" {
 	local gfix="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" base a b
 	base="${BATS_TEST_TMPDIR}/base"
@@ -600,35 +666,50 @@ fit_of() {
 		/^# ISTIO_VERSION=/ { print "# ISTIO_VERSION=1.31.0"; next }
 		/^# HARNESS_SHA=/ { print "# HARNESS_SHA=abc1234-dirty"; next }
 		/^#/ || $1 == "timestamp" || $53 == "pods"' "$gfix" > "${b}/controlplane-20261013T110000Z-222.tsv"
+	# Without --allow-multi-run the base dir stops the report: it names each sweep and the
+	# command that reports it alone (R3).
 	run --separate-stderr "$REPORT" --results-dir "$base" --format json
+	assert_failure 1
+	[ -z "$output" ]
+	[[ "$stderr" == *"error: ${base} holds 2 runs"* ]]
+	# Newest first, each with the command that reports it alone (B2).
+	[[ "$stderr" == *"sweep-20261013T110000Z-222:"$'\n'"    ${REPORT} --results-dir '${b}'"$'\n'"  sweep-20261013T100000Z-111:"$'\n'"    ${REPORT} --results-dir '${a}'"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
+	[ "$(jq -c '.pooled_runs' <<<"$output")" = \
+		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"]}' ]
 	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .istio_versions, .harness_sha, .harness_shas, .files_consumed]' <<<"$output")" = \
 		'["multiple",["20261013T100000Z-111","20261013T110000Z-222"],"mixed:1.30.5,1.31.0",["1.30.5","1.31.0"],"mixed:fixture,abc1234-dirty",["fixture","abc1234-dirty"],2]' ]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
 	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | select(.metric == "heap_inuse_mi") | [.config_only_run_ids, .pods_run_ids, .ratio]]' <<<"$output")" = \
 		'[[["20261013T100000Z-111"],["20261013T110000Z-222"],1.71]]' ]
-	# --results-dir no longer silences the multi-run warning; mixed versions and commits are loud.
-	[[ "$stderr" == *"warning: this report pools 2 runs from ${base} (RUN_IDs: 20261013T100000Z-111,20261013T110000Z-222)"* ]]
+	# The opt-in still warns; mixed versions and commits are loud.
+	[[ "$stderr" == *"warning: --allow-multi-run: this report pools 2 runs from ${base} (sweep-20261013T100000Z-111,sweep-20261013T110000Z-222)"* ]]
 	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
 	[[ "$stderr" == *"different harness commits (HARNESS_SHA fixture,abc1234-dirty)"* ]]
-	run --separate-stderr "$REPORT" --results-dir "$base" --format markdown
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format markdown
 	assert_success
+	assert_output --partial "> **Pooled runs.** This report pools 2 runs (--allow-multi-run): sweep-20261013T100000Z-111, sweep-20261013T110000Z-222. HARNESS_SHA: fixture, abc1234-dirty. ISTIO_VERSION: 1.30.5, 1.31.0. These differ"
 	assert_output --partial 'run_ids: ["20261013T100000Z-111","20261013T110000Z-222"]'
 	assert_output --partial 'harness_shas: ["fixture","abc1234-dirty"]'
 	assert_output --partial "istio_version: mixed:1.30.5,1.31.0"
 	assert_output --partial "> **Warning:** The inputs were measured on different Istio versions"
 	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222) | heap_inuse_mi | 152 | 260 | 1.71 |"
-	run --separate-stderr "$REPORT" --results-dir "$base" --format text
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
 	assert_success
+	assert_output --partial "# POOLED RUNS: This report pools 2 runs (--allow-multi-run)"
 	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  files_consumed=2"
 	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222  istio_versions=1.30.5,1.31.0  harness_shas=fixture,abc1234-dirty"
 	assert_output --partial "# WARNING: The inputs were measured on different Istio versions"
-	run --separate-stderr "$REPORT" --results-dir "$base" --format csv
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format csv
 	assert_success
+	assert_line "# POOLED_RUNS=2"
+	assert_line "# POOLED_ISTIO_VERSIONS=1.30.5,1.31.0"
 	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222 istio_versions=1.30.5,1.31.0 harness_shas=fixture,abc1234-dirty"
 	assert_output --partial "config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222"
-	run --separate-stderr "$REPORT" --results-dir "$base" --format charts
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format charts
 	assert_success
+	assert_output --partial "> **Pooled runs.** This report pools 2 runs"
 	assert_output --partial 'istio_versions: ["1.30.5","1.31.0"]'
 	# One sweep: plain scalars, one-element lists, no warning, no run= in the labels.
 	run --separate-stderr "$REPORT" --results-dir "$a" --format json
@@ -664,7 +745,7 @@ grow_fits() {
 	local base="${BATS_TEST_TMPDIR}/series" smoke=20261013T090000Z-101 main=20261013T110000Z-222
 	series_sweep "$base" "$smoke" '$2 == "mesh-a" && $31 == 0 && $55 == 0 && $54 == 4 && ($57 == "grow" || $57 == "probe") && ($6 == 100 || $6 == 200) { $6 = $6 / 10; $4 = $4 / 10; print }'
 	series_sweep "$base" "$main" '{ print }'
-	run --separate-stderr "$REPORT" --results-dir "$base" --format json
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
 	# Each grow ladder starts at its own first step: the smoke N=20 grow added 10 namespaces
 	# (2 CPU-s / 10), the main series keeps its single-run fit (2 / 100, 4 / 200).
@@ -684,18 +765,18 @@ grow_fits() {
 	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
 	[ "$(jq -c '[.namespace_scaling.discovery[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
 	# Every format labels the series and states the rule.
-	run --separate-stderr "$REPORT" --results-dir "$base" --format markdown
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format markdown
 	assert_success
 	assert_output --partial "| mesh=1 K=2 config-only run=${smoke} | namespace | grow | heap_inuse_mi | Mi |"
 	assert_output --partial "| mesh=1 K=2 config-only run=${main} | namespace | grow | onboard_cpu_s_per_ns | CPU-s/ns |"
 	assert_output --partial "| window | K | workload | M | outside | run |"
 	assert_output --partial "| mesh=1 K=2 config-only run=${main} | 800 | grow | namespace |"
 	assert_output --partial "> A growth series is one RUN_ID x mesh size x K x workload"
-	run --separate-stderr "$REPORT" --results-dir "$base" --format text
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
 	assert_success
 	assert_output --partial "mesh=1 K=2 config-only run=${smoke} scoping=namespace window=grow heap_inuse_mi (Mi):"
 	assert_output --partial "series_run=${smoke}"
-	run --separate-stderr "$REPORT" --results-dir "$base" --format csv
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format csv
 	assert_success
 	assert_output --partial "series_key=run_id+mesh_size+services_per_namespace+workload_mode"
 	assert_output --partial "# scaling_fit: series=mesh=1 K=2 config-only run=${smoke} scoping=namespace window=grow metric=onboard_cpu_s_per_ns"
@@ -714,7 +795,7 @@ grow_fits() {
 	local base="${BATS_TEST_TMPDIR}/shared" a=20261013T090000Z-101 b=20261013T110000Z-222
 	series_sweep "$base" "$a" '$2 == "mesh-a" && $31 == 0 && $55 == 0 && $57 == "grow" && ($6 == 100 || $6 == 200) { $6 = $6 / 2; $4 = $4 / 2; print }'
 	series_sweep "$base" "$b" '{ print }'
-	run --separate-stderr "$REPORT" --results-dir "$base" --format json
+	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
 	[ "$(jq -c '[.results[] | select(.window_kind == "grow" and .namespace_count == 100) | [.series_run_id, .n_total, .go_heap_inuse_mi.avg]]' <<<"$output")" = \
 		"[[\"${a}\",1,200],[\"${b}\",1,150]]" ]

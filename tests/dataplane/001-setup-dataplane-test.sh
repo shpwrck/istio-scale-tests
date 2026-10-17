@@ -118,7 +118,7 @@ command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")

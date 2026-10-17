@@ -5,16 +5,19 @@
 # - Reports n_total and n_valid per combination.
 # - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
 #   within one TSV file.
-# - Every output format carries the TSV preamble metadata, and RUN_CONFIG /
-#   RUN_CONFIG_SHA256 (the --config behind the inputs) over all input TSVs.
+# - Every output format carries the TSV preamble metadata, each key merged over every
+#   input (mixed:a,b when it varies, PL26), and RUN_CONFIG / RUN_CONFIG_SHA256 (the
+#   --config behind the inputs).
+# - More than one run under the results dir stops the report unless
+#   --allow-multi-run, and then every format says so (R3).
 # - Every output format has a "Remote coverage" section from the reach-*.tsv files
 #   that 002's reachability check writes (tests/lib/reach.sh).
 #
 # Usage:
-#   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
+#   ./tests/churn-dataplane/005-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT] [--fail-on-unreachable]
 #   ./tests/churn-dataplane/005-report-results.sh --config tests/churn-dataplane/configs/smoke.env \
 #     --results-dir tests/churn-dataplane/results/smoke/sweep-<RUN_ID> --format md
-# ci-dry-run:
+# ci-dry-run: --allow-multi-run
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -32,9 +35,10 @@ source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_rende
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
-# 1 when --results-dir is passed (gates the multi-run warning below).
-RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
+# --allow-multi-run: pool more than one run (else the report refuses, R3). Per invocation
+# like --force-large-matrix, so no options.env key.
+ALLOW_MULTI_RUN=0
 DRY_RUN=0
 FAIL_ON_UNREACHABLE=0
 
@@ -44,16 +48,22 @@ Usage: $(basename "$0") [options]
 
   --config FILE      Run config of KEY=value lines (config/options.env keys; see
                      tests/churn-dataplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default. Without --results-dir, warns
-                     when the results dir holds more than one run.
+                     --config > environment > default.
   --results-dir DIR  Directory searched recursively for churn-dataplane-*.tsv
-                     (default: ${COEXEC_RESULTS_DIR}).
+                     (default: ${COEXEC_RESULTS_DIR}); a sweep-*/ dir from 004 is one run.
+  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
+                     with different run ids). Without it the report stops, lists the
+                     runs and how to report each alone; with it every format says it
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
   --format FMT       Output format: text | csv | json | md (or markdown) | charts (default: text).
   --fail-on-unreachable
                      After the output, exit 3 when a remote's reach coverage is not
                      REACHABLE (stderr names the rule and the remotes).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
+
+Example (one sweep, as 004 runs it; from the repo root):
+  tests/churn-dataplane/$(basename "$0") --results-dir ${COEXEC_RESULTS_DIR}/sweep-<RUN_ID> --format md
 
 Every format has a "Remote coverage" section from the reach-*.tsv files next to the
 TSVs: per mesh size and source, how many remotes passed every reach check
@@ -73,6 +83,16 @@ changed, the cause, the evidence folder relative to the results dir) and a tally
 cause; restarted_untimed rows (may predate the window) are counted apart (json key
 istiod_diag).
 
+When the results dir holds sweep-outcome.txt (004 writes it),
+every format repeats it, with the run that recorded it: the failed cells by reason, its
+problems (the Istio version or active revision changed under the sweep) and notes
+(members not ready at its start or end). The sweep writes it at its start as "not
+finished" (EXIT=unfinished) and replaces it at its end: a record still not finished is
+a sweep that died or still runs, or (I5) one interrupted, with when and by which signal;
+one that stopped on an error after its start shows the stop and its reason. A sweep dir
+without the file is from a sweep that stopped before its start (nothing ran), or from
+an older harness.
+
 Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when the rule fired.
 
 Environment:
@@ -88,7 +108,9 @@ while [[ $# -gt 0 ]]; do
 		shift 2 ;;
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
-		RESULTS_DIR="$2"; RESULTS_DIR_FROM_FLAG=1; shift 2 ;;
+		RESULTS_DIR="$2"; shift 2 ;;
+	--allow-multi-run)
+		ALLOW_MULTI_RUN=1; shift ;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
 		FORMAT="$2"; shift 2 ;;
@@ -109,11 +131,13 @@ text | csv | json | md | markdown | charts) ;;
 esac
 
 if ((DRY_RUN)); then
-	n=0
+	DRY_FILES=()
 	nr=0
-	[[ -d "$RESULTS_DIR" ]] && n=$(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | wc -l)
-	[[ -d "$RESULTS_DIR" ]] && nr=$(find "$RESULTS_DIR" -name 'reach-*.tsv' -type f | wc -l)
-	echo "[dry-run] would summarize $((n)) churn-dataplane-*.tsv file(s) and $((nr)) reach-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
+	[[ -d "$RESULTS_DIR" ]] && mapfile -t DRY_FILES < <(find -H "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f | sort)
+	[[ -d "$RESULTS_DIR" ]] && nr=$(find -H "$RESULTS_DIR" -name 'reach-*.tsv' -type f | wc -l)
+	# The same refusal as the report (R3): a dir with more than one run is not summarized.
+	((${#DRY_FILES[@]} == 0)) || config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${DRY_FILES[@]}"
+	echo "[dry-run] would summarize ${#DRY_FILES[@]} churn-dataplane-*.tsv file(s) and $((nr)) reach-*.tsv file(s) under $RESULTS_DIR as $FORMAT"
 	exit 0
 fi
 
@@ -121,39 +145,48 @@ fi
 
 # Recurse into sweep-* subdirs as well.
 TSV_FILES=()
-while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f 2>/dev/null | sort)
+while IFS= read -r f; do TSV_FILES+=("$f"); done < <(find -H "$RESULTS_DIR" -name 'churn-dataplane-*.tsv' -type f 2>/dev/null | sort)
 ((${#TSV_FILES[@]})) || die "no churn-dataplane-*.tsv files in $RESULTS_DIR"
 
-# Extract preamble metadata from the FIRST file (sweeps emit one preamble per file).
+# R3/PL6: the report pools every TSV under the results dir; more than one run stops it
+# unless --allow-multi-run, and then every format says so (config_multi_run_note).
+config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
+POOLED_NOTE="$(config_multi_run_note)"
+
+# Preamble metadata over every input (sweeps emit one preamble per file): each key
+# merged over the files that carry it, one value or mixed:a,b, never the first file's
+# (PL26). extract_preamble_kv <key> prints it (nothing when no file has the key).
+declare -A MERGED_PREAMBLE=()
+while IFS= read -r _kv; do
+	MERGED_PREAMBLE["${_kv%%=*}"]="${_kv#*=}"
+done < <(config_merged_preamble "${TSV_FILES[@]}")
 extract_preamble_kv() {
-	local key="$1" file
-	for file in "${TSV_FILES[@]}"; do
-		local v
-		v="$(awk -v k="$key" -F'=' '
-			/^# / && index($0, "# " k "=") == 1 {
-				sub(/^# /, "", $0); sub(/^[^=]*=/, "", $0); print; exit
-			}' "$file")"
-		if [[ -n "$v" ]]; then printf '%s\n' "$v"; return; fi
-	done
+	[[ -z "${MERGED_PREAMBLE[$1]+x}" ]] || printf '%s\n' "${MERGED_PREAMBLE[$1]}"
 }
 
-# Warn if multiple TSV files have mismatched preamble configs.
-if (( ${#TSV_FILES[@]} > 1 )); then
-	_first_qps="$(extract_preamble_kv QPS)"
-	_first_dur="$(extract_preamble_kv CHURN_DURATION_SEC)"
-	for _tsv in "${TSV_FILES[@]:1}"; do
-		_q="$(awk -F'=' '/^# QPS=/ { sub(/^# QPS=/, ""); print; exit }' "$_tsv")"
-		_d="$(awk -F'=' '/^# CHURN_DURATION_SEC=/ { sub(/^# CHURN_DURATION_SEC=/, ""); print; exit }' "$_tsv")"
-		if [[ -n "$_q" && "$_q" != "$_first_qps" ]] || [[ -n "$_d" && "$_d" != "$_first_dur" ]]; then
-			echo "warn: TSV files have mismatched preamble (QPS or DURATION); aggregation may conflate different configurations" >&2
-			break
-		fi
-	done
+# Warn if the TSV files have mismatched preamble configs.
+if [[ "$(extract_preamble_kv QPS)" == mixed:* || "$(extract_preamble_kv CHURN_DURATION_SEC)" == mixed:* ]]; then
+	echo "warn: TSV files have mismatched preamble (QPS or DURATION); aggregation may conflate different configurations" >&2
 fi
 
 RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
+# R4: live (each member's active IstioRevision) or pin (config only), the configured pin,
+# and which member ran which (X4, PL19).
+ISTIO_VERSION_SOURCE_STR="$(extract_preamble_kv ISTIO_VERSION_SOURCE)"
+ISTIO_VERSION_PIN_STR="$(extract_preamble_kv ISTIO_VERSION_PIN)"
+ISTIO_VERSION_BY_CONTEXT_STR="$(extract_preamble_kv ISTIO_VERSION_BY_CONTEXT)"
+# R2: the members still not ready after the start's readiness wait, and how long it took.
+ISTIO_NOTREADY_AT_START_STR="$(extract_preamble_kv ISTIO_NOTREADY_AT_START)"
+ISTIO_READY_WAITED_SEC_STR="$(extract_preamble_kv ISTIO_READY_WAITED_SEC)"
+# N13/A5/A7: each member's active Istio revision, its Istio CR / active IstioRevision
+# generations (an edit of either between pooled runs reads mixed, also at one version)
+# and the proxy versions connected to its istiod at the start (ctx=...); unknown for a
+# file written before them.
+ISTIO_ACTIVE_REVISIONS_STR="$(extract_preamble_kv ISTIO_ACTIVE_REVISIONS)"
+ISTIO_GENERATIONS_STR="$(extract_preamble_kv ISTIO_GENERATIONS)"
+ISTIO_PROXY_VERSIONS_STR="$(extract_preamble_kv ISTIO_PROXY_VERSIONS)"
 KUBE_VERSIONS_STR="$(extract_preamble_kv KUBE_VERSIONS)"
 # Tuning levers + sidecar egress hosts queried live when the sweep ran.
 TUNING_BASELINE_STR="$(extract_preamble_kv TUNING_BASELINE)"
@@ -181,11 +214,6 @@ ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_STR="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_STR="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
-# PL6: a results dir from --config (or the default) is a base dir that can hold many
-# sweeps, and the report aggregates all of them.
-if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
-	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
-fi
 
 # Remote coverage over every reach-*.tsv under RESULTS_DIR (empty without any).
 REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
@@ -338,6 +366,14 @@ emit_metadata_lines() {
 	printf '%s RUN_ID=%s\n'                "$prefix" "${RUN_ID:-unknown}"
 	printf '%s HARNESS_SHA=%s\n'           "$prefix" "${HARNESS_SHA:-unknown}"
 	printf '%s ISTIO_VERSION=%s\n'         "$prefix" "${ISTIO_VERSION_STR:-unknown}"
+	printf '%s ISTIO_VERSION_SOURCE=%s\n'  "$prefix" "${ISTIO_VERSION_SOURCE_STR:-unknown}"
+	printf '%s ISTIO_VERSION_PIN=%s\n'     "$prefix" "${ISTIO_VERSION_PIN_STR:-unknown}"
+	printf '%s ISTIO_VERSION_BY_CONTEXT=%s\n' "$prefix" "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}"
+	printf '%s ISTIO_NOTREADY_AT_START=%s\n' "$prefix" "${ISTIO_NOTREADY_AT_START_STR:-unknown}"
+	printf '%s ISTIO_READY_WAITED_SEC=%s\n' "$prefix" "${ISTIO_READY_WAITED_SEC_STR:-unknown}"
+	printf '%s ISTIO_ACTIVE_REVISIONS=%s\n' "$prefix" "${ISTIO_ACTIVE_REVISIONS_STR:-unknown}"
+	printf '%s ISTIO_GENERATIONS=%s\n'    "$prefix" "${ISTIO_GENERATIONS_STR:-unknown}"
+	printf '%s ISTIO_PROXY_VERSIONS=%s\n' "$prefix" "${ISTIO_PROXY_VERSIONS_STR:-unknown}"
 	printf '%s KUBE_VERSIONS=%s\n'         "$prefix" "${KUBE_VERSIONS_STR:-unknown}"
 	printf '%s TUNING_BASELINE=%s\n'       "$prefix" "${TUNING_BASELINE_STR:-unknown}"
 	printf '%s SIDECAR_EGRESS_HOSTS=%s\n'  "$prefix" "${SIDECAR_EGRESS_HOSTS_STR:-unknown}"
@@ -364,6 +400,8 @@ emit_metadata_lines() {
 
 report_text() {
 	echo "=== sweep-summary ==="
+	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" text
 	emit_metadata_lines "#"
 	echo ""
 	reach_coverage_render text <(printf '%s' "$REACH_ROWS")
@@ -387,6 +425,8 @@ report_text() {
 
 report_csv() {
 	emit_metadata_lines "#"
+	config_multi_run_csv
+	sweep_outcome_recorded "$RESULTS_DIR" csv
 	reach_coverage_render csv <(printf '%s' "$REACH_ROWS")
 	echo "mesh_size,churn_rate,delta_p99_ms,stdev_delta_p99,total_runs,valid_runs,baseline_p99_ms,churn_p99_ms,baseline_p50_ms,churn_p50_ms,baseline_qps,churn_qps,churn_eds_pushes,churn_convergence_p99_worst,churn_convergence_overflow_runs"
 	aggregate | awk -F'\t' '{ printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15 }'
@@ -412,6 +452,14 @@ report_json() {
 		--arg run_id           "${RUN_ID:-unknown}" \
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
 		--arg istio_version    "${ISTIO_VERSION_STR:-unknown}" \
+		--arg istio_version_source "${ISTIO_VERSION_SOURCE_STR:-unknown}" \
+		--arg istio_version_pin "${ISTIO_VERSION_PIN_STR:-unknown}" \
+		--arg istio_version_by_context "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}" \
+		--arg istio_notready_at_start "${ISTIO_NOTREADY_AT_START_STR:-unknown}" \
+		--arg istio_ready_waited_sec "${ISTIO_READY_WAITED_SEC_STR:-unknown}" \
+		--arg istio_active_revisions "${ISTIO_ACTIVE_REVISIONS_STR:-unknown}" \
+		--arg istio_generations "${ISTIO_GENERATIONS_STR:-unknown}" \
+		--arg istio_proxy_versions "${ISTIO_PROXY_VERSIONS_STR:-unknown}" \
 		--arg kube_versions    "${KUBE_VERSIONS_STR:-unknown}" \
 		--arg tuning_baseline  "${TUNING_BASELINE_STR:-unknown}" \
 		--arg sidecar_egress_hosts "${SIDECAR_EGRESS_HOSTS_STR:-unknown}" \
@@ -438,7 +486,9 @@ report_json() {
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		--argjson pooled_runs  "$(config_multi_run_json)" \
+		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
+		'{pooled_runs: $pooled_runs, sweep_outcome: $sweep_outcome, metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -484,36 +534,60 @@ reachable` is how many checks (one per combo) got only HTTP 200s; `coverage` is
 GLOSSARY
 }
 
+# _md_kv <field> <value> [plain]: one "| field | value |" row of report_md's run table, the
+# value through md_cell (I7), in a code span unless plain.
+_md_kv() {
+	local _v
+	md_cell -v _v "$2"
+	if [[ "${3:-}" == plain ]]; then
+		printf '| %s | %s |\n' "$1" "$_v"
+	else
+		# shellcheck disable=SC2016  # a markdown code span, not an expansion
+		printf '| %s | `%s` |\n' "$1" "$_v"
+	fi
+}
+
 report_md() {
 	echo "# sweep-summary"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "| Field | Value |"
 	echo "|-------|-------|"
-	echo "| RUN_ID | \`${RUN_ID:-unknown}\` |"
-	echo "| HARNESS_SHA | \`${HARNESS_SHA:-unknown}\` |"
-	echo "| ISTIO_VERSION | \`${ISTIO_VERSION_STR:-unknown}\` |"
-	echo "| KUBE_VERSIONS | \`${KUBE_VERSIONS_STR:-unknown}\` |"
-	echo "| TUNING_BASELINE | \`${TUNING_BASELINE_STR:-unknown}\` |"
-	echo "| SIDECAR_EGRESS_HOSTS | \`${SIDECAR_EGRESS_HOSTS_STR:-unknown}\` |"
-	echo "| ISTIOD_REPLICAS | \`${ISTIOD_REPLICAS_STR:-unknown}\` |"
-	echo "| SETTLE_SEC | ${SETTLE_SEC_STR:-unknown} |"
-	echo "| BASELINE_DURATION_SEC | ${BASELINE_DURATION_STR:-unknown} |"
-	echo "| CHURN_DURATION_SEC | ${CHURN_DURATION_STR:-unknown} |"
-	echo "| QPS | ${QPS_STR:-unknown} |"
-	echo "| CONNECTIONS | ${CONNECTIONS_STR:-unknown} |"
-	echo "| NAMESPACE | \`${NAMESPACE_STR:-unknown}\` |"
-	echo "| FANOUT_MAX_SKEW_MS | ${FANOUT_MAX_SKEW_MS_STR:-unknown} |"
-	echo "| FANOUT_METRICS_TIMEOUT | ${FANOUT_METRICS_TIMEOUT_STR:-unknown} |"
-	echo "| MIN_PCT_200 | ${MIN_PCT_200_STR:-unknown} |"
-	echo "| REACH_REQUESTS | ${REACH_REQUESTS_STR:-unknown} |"
-	echo "| REACH_QPS | ${REACH_QPS_STR:-unknown} |"
-	echo "| REACH_HTTP_TIMEOUT_SEC | ${REACH_HTTP_TIMEOUT_SEC_STR:-unknown} |"
-	echo "| REACH_DETAIL_TIMEOUT_SEC | ${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown} |"
-	echo "| REACH_ATTEMPTS | ${REACH_ATTEMPTS_STR:-unknown} |"
-	echo "| REACH_RETRY_SEC | ${REACH_RETRY_SEC_STR:-unknown} |"
-	echo "| ON_UNREACHABLE | ${ON_UNREACHABLE_STR:-unknown} |"
-	echo "| RUN_CONFIG | \`${RUN_CONFIG_STR:-unknown}\` |"
-	echo "| RUN_CONFIG_SHA256 | \`${RUN_CONFIG_SHA256_STR:-unknown}\` |"
+	# I7: every value escaped (_md_kv): a mixed value joins per-member lists with " | ".
+	_md_kv RUN_ID "${RUN_ID:-unknown}"
+	_md_kv HARNESS_SHA "${HARNESS_SHA:-unknown}"
+	_md_kv ISTIO_VERSION "${ISTIO_VERSION_STR:-unknown}"
+	_md_kv ISTIO_VERSION_SOURCE "${ISTIO_VERSION_SOURCE_STR:-unknown}"
+	_md_kv ISTIO_VERSION_PIN "${ISTIO_VERSION_PIN_STR:-unknown}"
+	_md_kv ISTIO_VERSION_BY_CONTEXT "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}"
+	_md_kv ISTIO_NOTREADY_AT_START "${ISTIO_NOTREADY_AT_START_STR:-unknown}"
+	_md_kv ISTIO_READY_WAITED_SEC "${ISTIO_READY_WAITED_SEC_STR:-unknown}" plain
+	_md_kv ISTIO_ACTIVE_REVISIONS "${ISTIO_ACTIVE_REVISIONS_STR:-unknown}"
+	_md_kv ISTIO_GENERATIONS "${ISTIO_GENERATIONS_STR:-unknown}"
+	_md_kv ISTIO_PROXY_VERSIONS "${ISTIO_PROXY_VERSIONS_STR:-unknown}"
+	_md_kv KUBE_VERSIONS "${KUBE_VERSIONS_STR:-unknown}"
+	_md_kv TUNING_BASELINE "${TUNING_BASELINE_STR:-unknown}"
+	_md_kv SIDECAR_EGRESS_HOSTS "${SIDECAR_EGRESS_HOSTS_STR:-unknown}"
+	_md_kv ISTIOD_REPLICAS "${ISTIOD_REPLICAS_STR:-unknown}"
+	_md_kv SETTLE_SEC "${SETTLE_SEC_STR:-unknown}" plain
+	_md_kv BASELINE_DURATION_SEC "${BASELINE_DURATION_STR:-unknown}" plain
+	_md_kv CHURN_DURATION_SEC "${CHURN_DURATION_STR:-unknown}" plain
+	_md_kv QPS "${QPS_STR:-unknown}" plain
+	_md_kv CONNECTIONS "${CONNECTIONS_STR:-unknown}" plain
+	_md_kv NAMESPACE "${NAMESPACE_STR:-unknown}"
+	_md_kv FANOUT_MAX_SKEW_MS "${FANOUT_MAX_SKEW_MS_STR:-unknown}" plain
+	_md_kv FANOUT_METRICS_TIMEOUT "${FANOUT_METRICS_TIMEOUT_STR:-unknown}" plain
+	_md_kv MIN_PCT_200 "${MIN_PCT_200_STR:-unknown}" plain
+	_md_kv REACH_REQUESTS "${REACH_REQUESTS_STR:-unknown}" plain
+	_md_kv REACH_QPS "${REACH_QPS_STR:-unknown}" plain
+	_md_kv REACH_HTTP_TIMEOUT_SEC "${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}" plain
+	_md_kv REACH_DETAIL_TIMEOUT_SEC "${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown}" plain
+	_md_kv REACH_ATTEMPTS "${REACH_ATTEMPTS_STR:-unknown}" plain
+	_md_kv REACH_RETRY_SEC "${REACH_RETRY_SEC_STR:-unknown}" plain
+	_md_kv ON_UNREACHABLE "${ON_UNREACHABLE_STR:-unknown}" plain
+	_md_kv RUN_CONFIG "${RUN_CONFIG_STR:-unknown}"
+	_md_kv RUN_CONFIG_SHA256 "${RUN_CONFIG_SHA256_STR:-unknown}"
 	echo ""
 	reach_coverage_render md <(printf '%s' "$REACH_ROWS")
 	echo ""
@@ -521,10 +595,11 @@ report_md() {
 	echo ""
 	echo "| mesh_size | churn_rate | delta_p99_ms | stdev_delta_p99 | total_runs | valid_runs | baseline_p99_ms | churn_p99_ms | baseline_p50_ms | churn_p50_ms | baseline_qps | churn_qps | churn_eds_pushes | churn_convergence_p99 worst (ms) |"
 	echo "|-----------|------------|--------------|-----------------|------------|------------|-----------------|--------------|-----------------|--------------|--------------|-----------|------------------|----------------------------------|"
+	# I7: every cell through md_cell (MD_CELL_AWK, common.sh), as the run table above.
 	aggregate | awk -F'\t' '{
-		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,conv_cell($14, $15)
+		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", md_cell($1), md_cell($2), md_cell($3), md_cell($4), md_cell($5), md_cell($6), md_cell($7), md_cell($8), md_cell($9), md_cell($10), md_cell($11), md_cell($12), md_cell($13), md_cell(conv_cell($14, $15))
 	}
-	'"$CONV_CELL_AWK"
+	'"$CONV_CELL_AWK$MD_CELL_AWK"
 	echo ""
 	istiod_diag_report md "$RESULTS_DIR"
 
@@ -540,6 +615,7 @@ report_charts() {
 	echo ""
 	echo "# Churn x Data-Plane — Charts"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	local cov_notes
 	cov_notes="$(reach_coverage_render charts <(printf '%s' "$REACH_ROWS"))"
 	[[ -n "$cov_notes" ]] && printf '%s\n\n' "$cov_notes"

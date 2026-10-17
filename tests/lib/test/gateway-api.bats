@@ -188,7 +188,12 @@ case "$cmd" in
 	pods istio-ingressgateway-5d8f7 istio-proxy registry.example.invalid/openshift-service-mesh/istio-proxyv2-rhel9:1.30.5 2 2026-10-14T08:00:00Z ;;
 "-n openshift-operators get clusterserviceversions.operators.coreos.com -o json")
 	echo '{"items":[{"metadata":{"name":"servicemeshoperator3.v3.4.3"},"spec":{"version":"3.4.3"},"status":{"phase":"Succeeded"}},{"metadata":{"name":"other-operator.v1.0.0"},"spec":{"version":"1.0.0"},"status":{"phase":"Succeeded"}}]}' ;;
-"get istios.sailoperator.io default -o json") echo '{"spec":{"version":"v1.30.5"}}' ;;
+"get istios.sailoperator.io default -o json")
+	echo '{"metadata":{"generation":1},"spec":{"version":"v1.30-latest"},"status":{"state":"Healthy","observedGeneration":1,"activeRevisionName":"default","revisions":{"total":1,"ready":1,"inUse":1}}}' ;;
+"get istiorevisions.sailoperator.io default -o json")
+	echo '{"metadata":{"generation":1},"spec":{"version":"v1.30.5","namespace":"istio-system"},"status":{"observedGeneration":1}}' ;;
+"-n istio-system get deployments.apps istiod -o json")
+	echo '{"metadata":{"generation":1},"status":{"observedGeneration":1,"replicas":1,"updatedReplicas":1,"readyReplicas":1}}' ;;
 "-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json" | \
 	"-n mesh-verify-gwapi-shared get deploy -l app=gwapi-echo -o json")
 	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) && ( "$cmd" != *-shared* || -z "${STUB_NO_SHARED_NS:-}" ) ]]; then
@@ -736,6 +741,12 @@ render_sha() {
 	grep -qx "# ISTIOD_IMAGE\[ctx-a\]=istio-pilot-rhel9:1.30.5@${digest}" "$t"
 	grep -qx "# INGRESS_PROXY_IMAGE\[ctx-a\]=istio-proxyv2-rhel9:1.30.5@${digest}" "$t"
 	grep -qx '# OSSM_OPERATOR\[ctx-b\]=3.4.3/Succeeded' "$t"
+	# The version each member runs (its active IstioRevision), not the CR's alias (A1, A8).
+	grep -qx '# ISTIO_VERSION=v1.30.5' "$t"
+	grep -qx '# ISTIO_VERSION_SOURCE=live' "$t"
+	grep -qx '# ISTIO_VERSION_BY_CONTEXT=ctx-a=v1.30.5,ctx-b=v1.30.5' "$t"
+	grep -qx '# ISTIO_NOTREADY_AT_START=none' "$t"
+	grep -qx '# ISTIO_CR_VERSION\[ctx-a\]=v1.30-latest' "$t"
 	grep -qx '# INGRESS_REPLICAS\[ctx-a\]=2' "$t"
 	grep -qx '# PROXY_CONFIG_POD\[ctx-a\]=istio-ingressgateway-5d8f7-p1' "$t"
 	grep -qx '# ISTIOD_RESTARTED\[ctx-a\]=0' "$t"
@@ -1269,9 +1280,10 @@ render_sha() {
 @test "gateway-api run: a chart synced from this script's own commit is 'same', or 'same-dirty' from a modified tree" {
 	local head expect
 	head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || skip "not a git checkout"
-	case "$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null)" in
-	"") skip "git describe does not work here" ;;
-	*-dirty) expect=same-dirty ;;
+	# A6: as the script reads it (harness_sha: a dirty tree is <describe>-dirty.<8hex>).
+	case "$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" in
+	"" | unknown) skip "git describe does not work here" ;;
+	*-dirty*) expect=same-dirty ;;
 	*) expect=same ;;
 	esac
 	STUB_REVISION="$head" gw_run --hub-context hub

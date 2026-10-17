@@ -5,6 +5,7 @@
 # an overflow count instead of the bucket of a mean.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/churn-dataplane/005-report-results.sh"
 HDR=$'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms'
@@ -105,4 +106,115 @@ two_pairs() {
 	[ "$(jq -c '.rows[1] | [.churn_rate, .valid_runs, .delta_p99_ms, .baseline_p50_ms, .churn_qps, .churn_convergence_p99_worst, .churn_convergence_overflow_runs]' <<<"$output")" = '[5,0,null,null,null,null,0]' ]
 	# No average is a string any more.
 	[ "$(jq '[.rows[] | to_entries[] | select(.key != "churn_convergence_p99_worst") | .value | strings] | length' <<<"$output")" = 0 ]
+}
+
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (R3, PL26)" {
+	local d fmt
+	for d in a b; do
+		mkdir -p "${RES}/sweep-${d}"
+		{
+			echo "# RUN_ID=r${d}"
+			echo "# HARNESS_SHA=h${d}"
+			echo "# ISTIO_VERSION=1.30.5"
+			echo "# QPS=$([[ $d == a ]] && echo 50 || echo 100)"
+			echo "$HDR"
+			crow c1 0 baseline 50 2 5 OK N/A N/A
+			crow c1 1 churn 48 4 9 OK 30 99
+		} > "${RES}/sweep-${d}/churn-dataplane-r${d}.tsv"
+	done
+	for fmt in text csv json md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_failure 1
+		[ -z "$output" ]
+		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+		[[ "$stderr" == *"  sweep-a:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-a'"* ]]
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		assert_success
+		if [[ "$fmt" == json ]]; then
+			[ "$(jq -c '[.pooled_runs.runs, .pooled_runs.harness_sha, .metadata.qps, .metadata.run_id]' <<<"$output")" = '[2,["ha","hb"],"mixed:50,100","mixed:ra,rb"]' ]
+		else
+			assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: ha, hb. ISTIO_VERSION: 1.30.5."
+			# The first file's QPS is not the report's (it was first-wins).
+			assert_output --partial "mixed:50,100"
+		fi
+	done
+	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-b" --format json
+	assert_success
+	[ "$(jq -c '[.pooled_runs.runs, .metadata.qps]' <<<"$output")" = '[1,"100"]' ]
+}
+
+@test "005: the quick start's runs (one TSV named smoke, 003's istiod-diag under its own id) separate with the printed commands, pasted twice, and each printed report runs (U1)" {
+	local id1=20261016T100000Z-1 id2=20261016T100500Z-2 id3=20261016T110000Z-3 cmd pass
+	# 002 and 003 of one quick start: the TSV is churn-dataplane-smoke.tsv (no id in its
+	# name), its rows carry 002's and 003's ids, and 003's istiod-diag folder has the second.
+	{
+		echo "# RUN_ID=${id1}"
+		echo "$HDR"
+		crow c1 0 baseline 50 2 5 OK N/A N/A | sed "s/^r1/${id1}/"
+		crow c1 1 churn 48 4 9 OK 30 99 | sed "s/^r1/${id2}/"
+	} > "${RES}/churn-dataplane-smoke.tsv"
+	mkdir -p "${RES}/istiod-diag-${id2}"
+	: > "${RES}/istiod-diag-${id2}/notes.txt"
+	{
+		echo "# RUN_ID=${id3}"
+		echo "$HDR"
+		crow c1 0 baseline 50 2 5 OK N/A N/A | sed "s/^r1/${id3}/"
+		crow c1 1 churn 48 4 9 OK 30 99 | sed "s/^r1/${id3}/"
+	} > "${RES}/churn-dataplane-other.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_failure 1
+	[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+	[[ "$stderr" == *"    for f in '${RES}/churn-dataplane-smoke.tsv'; do"* ]]
+	[[ "$stderr" == *"-name '*${id1}*' -o -name '*${id2}*'"* ]]
+	for pass in 1 2; do
+		while IFS= read -r cmd; do
+			bash -c "$cmd"
+		done < <(sed -n 's/^    \(mkdir .*\|for f in .*\|find .*\)$/\1/p' <<<"$stderr")
+	done
+	[ -f "${RES}/run-${id1}/churn-dataplane-smoke.tsv" ]
+	[ -f "${RES}/run-${id1}/istiod-diag-${id2}/notes.txt" ]
+	[ -f "${RES}/run-${id3}/churn-dataplane-other.tsv" ]
+	[ -z "$(find "$RES" -mindepth 1 -maxdepth 1 ! -name 'run-*')" ]
+	# Each printed report command (one per run) now succeeds.
+	[ "$(grep -c "^    ${REPORT} --results-dir '${RES}/run-" <<<"$stderr")" = 2 ]
+	while IFS= read -r cmd; do
+		run --separate-stderr bash -c "$cmd"
+		assert_success
+		assert_output --partial "sweep-summary"
+		assert_output --partial "valid_runs"
+	done < <(sed -n "s|^    \(${REPORT} --results-dir .*\)$|\1|p" <<<"$stderr")
+	# The parent still holds two runs, each alone in its run-<id>/: only report commands.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_failure 1
+	[[ "$stderr" == *"  ${id3} (alone in ${RES}/run-${id3}):"* && "$stderr" == *"  ${id1} (alone in ${RES}/run-${id1}):"* ]]
+	[[ "$stderr" != *"mkdir"* && "$stderr" != *"run-${id1}/run-"* ]]
+}
+
+@test "005: the R2 start-of-run keys and the recorded outcome (Y9) are in every format" {
+	{
+		echo "# RUN_ID=r1"
+		echo "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
+		echo "# ISTIO_READY_WAITED_SEC=60"
+		echo "$HDR"
+		crow c1 0 baseline 50 2 5 OK N/A N/A
+		crow c1 1 churn 48 4 9 OK 30 99
+	} > "${RES}/churn-dataplane-r1.tsv"
+	printf '%s\n' 'RUN_ID=r1' 'EXIT=0' 'NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)' > "${RES}/sweep-outcome.txt"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_success
+	assert_line "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
+	assert_line "# ISTIO_READY_WAITED_SEC=60"
+	assert_line "# SWEEP_OUTCOME_RUN_ID=r1"
+	assert_line "# SWEEP_OUTCOME_NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)"
+	[[ "$stderr" != *"was recorded by run"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '[.metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec, .sweep_outcome.notes[0]]' <<<"$output")" = \
+		'["c2=IstioCNINotHealthy","60","not ready at the start: IstioCNINotHealthy on 1 member (c2)"]' ]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_output --partial '| ISTIO_NOTREADY_AT_START | `c2=IstioCNINotHealthy` |'
+	assert_output --partial '> - warning: not ready at the start: IstioCNINotHealthy on 1 member (c2)'
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_output --partial "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
+	assert_output --partial "## ISTIO_READY_WAITED_SEC=60"
 }

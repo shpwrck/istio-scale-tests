@@ -68,17 +68,21 @@ characters; rename others with `kubectl config rename-context`.
 ./tests/churn-dataplane/001-setup-coexec-test.sh \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 
-# 2. Baseline window (60 s at 200 QPS)
-TSV=tests/churn-dataplane/results/churn-dataplane-smoke.tsv
-./tests/churn-dataplane/002-run-baseline-probe.sh \
+# 2. Baseline window (60 s at 200 QPS). One run id for 002 and 003, so the TSV, its
+#    reach-<id>.tsv and istiod-diag-<id>/ all name the same run.
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-smoke"
+TSV="tests/churn-dataplane/results/churn-dataplane-${RUN_ID}.tsv"
+./tests/churn-dataplane/002-run-baseline-probe.sh --run-id "$RUN_ID" \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --combo-id smoke --output-file "$TSV"
 
 # 3. Churn window (same load + 5 scale ops/s); computes Δp99 against the baseline row
-./tests/churn-dataplane/003-run-churn-probe.sh \
+./tests/churn-dataplane/003-run-churn-probe.sh --run-id "$RUN_ID" \
   --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx> --combo-id smoke \
   --churn-rate 5 --baseline-file "$TSV" --output-file "$TSV"
 
-# 4. Summarize every TSV under tests/churn-dataplane/results/
+# 4. Summarize tests/churn-dataplane/results/
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/churn-dataplane/005-report-results.sh --format md
 
 # 5. Tear down and wait for the namespace to go away
@@ -101,6 +105,25 @@ first), runs the baseline and churn windows, and finally cleans up. It writes on
 `sweep-summary-<run-id>.md` and `sweep-charts-<run-id>.md` to
 `tests/churn-dataplane/results/sweep-<run-id>/`. More than 64 combinations needs
 `--force-large-matrix`.
+
+Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, or an
+unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP;
+`sweep-outcome.txt` says when and by which signal); `3` the reachability gate stopped it
+(`--on-unreachable fail`, below; the reports are written); `4` it finished and wrote its reports,
+but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the
+Istio version, active revision or generation of the Istio CR or its active IstioRevision changed
+during the sweep (read again before the reports). The last line on stderr says how many, by
+reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown
+summary keep the outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt`
+holds a not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what
+to do), so a report of a sweep that died, or still runs, or (with when and by which signal) was
+interrupted says "this sweep has not finished" in every format (json `sweep_outcome`: `"exit":
+null`, `"unfinished": true`; a finished one reads `"unfinished": false`; one that stopped on an
+error after its start records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see
+the top-level README): when no sweep runs any more, run the sweep again into a new dir (a
+churn-dataplane sweep has no `--resume`); the rows already in the dir cover only the cells it
+finished. Proxies connected on another Istio version than their istiod at the start
+(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
 
 ## Remote reachability
 
@@ -217,8 +240,8 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`, `--churn-rate`,
   `--combo-id`, `--run-id`, `--output-file`, `--baseline-file`, `--append`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`001`-`003`; the sweep sets them),
-  `--fail-on-unreachable` (`005`), `--wait-deletion` (`006`), `--force-large-matrix`,
-  `--format` and `--dry-run`.
+  `--fail-on-unreachable` and `--allow-multi-run` (`005`), `--wait-deletion` (`006`),
+  `--force-large-matrix`, `--format` and `--dry-run`.
 
 ## Settings
 

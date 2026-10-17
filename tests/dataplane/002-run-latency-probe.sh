@@ -138,6 +138,11 @@ Under --on-unreachable fail a stopped run also writes one STOPPED_UNREACHABLE ro
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the run.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   DATAPLANE_TEST_NAMESPACE, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
   DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200,
@@ -260,7 +265,7 @@ command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 QPS_ARR=()
@@ -283,8 +288,9 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-HARNESS_SHA=$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo "unknown")
-ISTIO_VER="${ISTIO_VERSION:-unknown}"
+# A6: harness_sha (tests/lib/preamble.sh), as every sweep records it: a tree with
+# uncommitted changes reads <describe>-dirty.<8hex>.
+HARNESS_SHA="$(harness_sha)"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then
@@ -304,6 +310,9 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
+# R4: the Istio version the members run, before any load (inherited when 003 runs this
+# probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
 # server_replicas_csv: "<ctx>=<ready>/<spec>,..." for the dataplane-server
 # Deployment on every context, read live and concurrently (PL39) before any load.
@@ -359,7 +368,7 @@ trap cleanup_all EXIT
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# DATE=$(date -u -Iseconds)"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# ISTIO_VERSION=${ISTIO_VER}"
+	istio_version_kv | sed 's/^/# /'
 	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 	echo "# FORTIO_IMAGE=${FORTIO_IMAGE}"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
@@ -511,7 +520,7 @@ write_run_md() {
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
-		echo "| Istio version | ${ISTIO_VER} |"
+		echo "| Istio version | $(istio_version_label) |"
 		echo "| Fortio image | \`${FORTIO_IMAGE}\` |"
 		echo "| Source | ${SOURCE_CTX} |"
 		echo "| Remotes | ${REMOTES[*]:-none} |"

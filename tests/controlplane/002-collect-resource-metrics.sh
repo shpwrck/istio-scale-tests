@@ -49,9 +49,9 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_lines, tuning_baseline_state
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
+source "${ROOT}/tests/lib/metrics.sh"  # counter_delta, extract_gauge_sum
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
+source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_replica_counter, fanout_list_istiod_pods (needs metrics.sh first)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 # shellcheck disable=SC1091
@@ -155,6 +155,11 @@ Usage: $(basename "$0") [options]
   -h, --help           Show this help.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -166,6 +171,10 @@ Environment:
   (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
   over its istiod pods) and its Running sidecar pods differ by more than
   max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
+
+Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
+on macOS: brew install coreutils, which installs gtimeout). Without it a live run
+stops at startup; --dry-run does not need it.
 EOF
 }
 
@@ -365,12 +374,15 @@ resolve_kubectl KUBECTL
 
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
+# The config-dump and Envoy-stats samples run under timeout/gtimeout; without either,
+# every sample would read N/A with no message (R17). --dry-run does not need it.
+((DRY_RUN)) || require_timeout
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -382,7 +394,8 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
+# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
+HARNESS_SHA="$(harness_sha)"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
@@ -402,7 +415,10 @@ if [[ "$PHASE" != combined ]]; then
 	mkdir -p "$STATE_DIR"
 fi
 
-ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
+# R4: the Istio version the members run, before the first scrape (inherited when 003
+# runs this step; read here when it runs alone, a read-only API GET like the version
+# and capacity reads below). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 
 # Kube server version per context (concurrent, 5s timeout each).
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
@@ -456,7 +472,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=66"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
@@ -895,7 +911,7 @@ collect_config_dump_samples() {
 		# bytes=0 -> counted as a FAILED sample (got not incremented), never a partial/
 		# misleading byte count (capturing first lets us drop a timed-out exec cleanly).
 		local dump bytes bd v
-		dump="$(timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
+		dump="$(run_timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
 			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null)" || dump=""
 		bytes="$(printf '%s' "$dump" | wc -c)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
@@ -1035,6 +1051,12 @@ scrape_all_parallel() {
 		local m_out="${out_prefix}-${k}.metrics"
 		local t_out="${out_prefix}-${k}.ts"
 		local te_out="${out_prefix}-${k}.tsend"
+		# Empty this scrape's files first: a failed curl writes nothing, so in watch mode
+		# the previous window's body and timestamps would otherwise stand in for it (stale
+		# gauges, a backwards counter read as a reset). An empty file reads as no scrape.
+		: > "$m_out"
+		: > "$t_out"
+		: > "$te_out"
 		(
 			scrape_one_context "${POD_CTXS[k]}" "$port" "$m_out" "$t_out" "$te_out" || exit 1
 		) &
@@ -1364,6 +1386,20 @@ scrape_window() {
 	local ts
 	ts=$(date -u -Iseconds)
 
+	# Per-replica pilot_xds_pushes (istio D4): a replica that never pushed has no series
+	# and no `# TYPE` line, so "renamed or idle" is decided once over the whole batch
+	# (every baseline and final body, all members: one Istio version, checked at the
+	# start). Any complete body with the counter makes a complete body without it a
+	# real 0; none with it leaves it unknown, and counter_delta warns "renamed?".
+	# pilot_k8s_cfg_events is not read this way: every replica's informers see every
+	# config event, so a replica without it has the counter missing, not idle.
+	local -a batch_files=()
+	for k in "${!POD_CTXS[@]}"; do
+		batch_files+=("${TMP_DIR}/baseline-${k}.metrics" "${TMP_DIR}/final-${k}.metrics")
+	done
+	local xds_pushes_in_batch
+	xds_pushes_in_batch=$(fanout_counter_in_batch pilot_xds_pushes "${batch_files[@]}")
+
 	for k in "${!POD_CTXS[@]}"; do
 		ctx="${POD_CTXS[k]}"
 
@@ -1447,48 +1483,43 @@ scrape_window() {
 			queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
 		fi
 
-		# Counter deltas (xds pushes + k8s events).
+		# Counter deltas (xds pushes + k8s events). counter_delta (metrics.sh, R10): a
+		# counter missing from both scrapes, or one that went backwards, is N/A with a
+		# warning, never 0; one first registered in the window counts from 0; an
+		# incomplete scrape (`unscraped`, PL29) is N/A. Pushes: see xds_pushes_in_batch.
 		local pushes_delta pushes_rate evts_delta evts_rate
 		if (( restarted_or_unknown )); then
 			pushes_delta="N/A"; pushes_rate="N/A"
 			evts_delta="N/A"; evts_rate="N/A"
 		else
-			local b_pushes f_pushes
-			b_pushes=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_xds_pushes || echo 0)
-			f_pushes=$(extract_counter_sum "$f_file" pilot_xds_pushes)
-			pushes_delta=$(( f_pushes - b_pushes ))
-			(( pushes_delta < 0 )) && pushes_delta=0
-			if (( window_positive )); then
+			pushes_delta=$(counter_delta "$(fanout_replica_counter "$xds_pushes_in_batch" "$b_file" pilot_xds_pushes)" \
+				"$(fanout_replica_counter "$xds_pushes_in_batch" "$f_file" pilot_xds_pushes)" "pilot_xds_pushes on ${ctx}/${POD_NAMES[k]}")
+			if (( window_positive )) && [[ "$pushes_delta" != "N/A" ]]; then
 				pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				pushes_rate="N/A"
 			fi
 
-			local b_evts f_evts
-			b_evts=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_k8s_cfg_events || echo 0)
-			f_evts=$(extract_counter_sum "$f_file" pilot_k8s_cfg_events)
-			evts_delta=$(( f_evts - b_evts ))
-			(( evts_delta < 0 )) && evts_delta=0
-			if (( window_positive )); then
+			evts_delta=$(counter_delta "$(fanout_replica_counter 0 "$b_file" pilot_k8s_cfg_events)" \
+				"$(fanout_replica_counter 0 "$f_file" pilot_k8s_cfg_events)" "pilot_k8s_cfg_events on ${ctx}/${POD_NAMES[k]}")
+			if (( window_positive )) && [[ "$evts_delta" != "N/A" ]]; then
 				evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				evts_rate="N/A"
 			fi
 		fi
 
-		# Per-type xds_pushes deltas.
+		# Per-type xds_pushes deltas. A type with no series while pilot_xds_pushes itself
+		# is in the scrape is a real 0 (extract_counter_by_label), as is an idle replica's
+		# (xds_pushes_in_batch); N/A as above.
 		local types=(cds eds lds rds nds)
 		local push_by_type=()
 		if (( restarted_or_unknown )); then
 			push_by_type=("N/A" "N/A" "N/A" "N/A" "N/A")
 		else
 			for t in "${types[@]}"; do
-				local b_t f_t d_t
-				b_t=$([[ -s "$b_file" ]] && extract_counter_by_label "$b_file" pilot_xds_pushes type "$t" || echo 0)
-				f_t=$(extract_counter_by_label "$f_file" pilot_xds_pushes type "$t")
-				d_t=$(( f_t - b_t ))
-				(( d_t < 0 )) && d_t=0
-				push_by_type+=("$d_t")
+				push_by_type+=("$(counter_delta "$(fanout_replica_counter "$xds_pushes_in_batch" "$b_file" pilot_xds_pushes type "$t")" \
+					"$(fanout_replica_counter "$xds_pushes_in_batch" "$f_file" pilot_xds_pushes type "$t")" "pilot_xds_pushes{type=${t}} on ${ctx}/${POD_NAMES[k]}")")
 			done
 		fi
 
@@ -1552,8 +1583,8 @@ scrape_window() {
 			cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
 				BEGIN {
 					ds = fs - bs; dc = fc - bc
-					if (ds < 0) ds = 0
-					if (dc <= 0) { print "N/A"; exit }
+					# Nothing observed, or the sum went backwards (a reset): N/A, not 0 (R10).
+					if (dc <= 0 || ds < 0) { print "N/A"; exit }
 					printf "%.0f", ds/dc
 				}')
 		fi
@@ -1649,6 +1680,9 @@ if ((WATCH)); then
 		SIDECAR_PODS=()
 		PROXY_CHECK=()
 		GROWTH_CTX_CACHE=()
+		# The polled peaks are this window's too: without this, istiod_mem_mi and the
+		# peak CPU keep the highest value of every earlier window.
+		rm -f "${TMP_DIR}"/peak-mem-*.val "${TMP_DIR}"/peak-cpu-*.val "${TMP_DIR}"/prev-cpu-*.val
 		scrape_window "$INTERVAL"
 	done
 elif [[ "$PHASE" == baseline ]]; then
@@ -1691,7 +1725,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Run ID | \`${RUN_ID}\` |"
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Phase | ${PHASE} |"
-		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
+		echo "| Istio version | $(istio_version_label) |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
