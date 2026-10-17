@@ -667,7 +667,7 @@ while IFS=$'\t' read -r _src _rel _kind _anchor _sub; do
 		_p="${_p%/*}"
 		[[ -z "${NEW_SEEN[$_p]+x}" ]] || die "${_p} would be both a file and a dir once names are redacted: rename one of them and run again"
 	done
-	((IN_PLACE)) && [[ "$_nr" != "$_rel" ]] || continue
+	if ! ((IN_PLACE)) || [[ "$_nr" == "$_rel" ]]; then continue; fi
 	if [[ "$_sub" != "$_rel" && "${_nr%%/*}" != "${_rel%%/*}" ]]; then
 		die "--in-place: the dir ${_anchor} holds a context name in its own name, and --in-place renames only what is below it: rename it, or use --out DIR (its copy is renamed), and run again"
 	fi
