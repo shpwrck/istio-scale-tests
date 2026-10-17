@@ -144,9 +144,14 @@ a resume keeps the earlier `sweep-outcome.txt` as `sweep-outcome.prev.txt` until
 own. The TSV preamble keeps the first run's `ISTIO_NOTREADY_AT_START` and `HARNESS_SHA`. The
 resume's own start condition, `none` included, goes into a note of its sweep outcome
 (`ISTIO_NOTREADY_AT_RESUME=...`) with its start time, in the format of the rows' `timestamp`
-column, so its first rows can be found by it. A resume that runs another `HARNESS_SHA` than the
-preamble names warns, and its outcome notes from which time the rows are that harness's. Pass the
-other options as in the original run.
+column, so its first rows can be found by it. Each resume that passes its preflights also appends
+a line to `resumes.txt` in the sweep directory (`RESUMED_AT`, `HARNESS_SHA`,
+`ISTIO_NOTREADY_AT_RESUME`), which no later run rewrites, so every resume's start and harness
+survive the resumes after it, also when it died. A resume that runs another `HARNESS_SHA` than the run before it warns, and
+the outcome notes each such change from that file, with the time from which the rows are that
+harness's. `HARNESS_SHA` is `git describe --dirty`: two different uncommitted trees on the same
+commit both record `<sha>-dirty`, so this check cannot tell them apart; commit before a resume
+when that matters. Pass the other options as in the original run.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, an
@@ -154,9 +159,10 @@ unexpected error, or `RETIRE_FAILED`, after its reports); `4` it finished and wr
 reports, but some cells failed (a status row instead of a measurement: `SETUP_FAILED`,
 `PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`), or the Istio version or active revision
 changed during the sweep (read again before the reports). The last line on stderr says how
-many, by reason; `1` wins over `4`. Cells the memory guard skipped (`SKIPPED_MEM_GUARD`,
-and `SKIPPED_SERIES_STOPPED` after it) are counted apart, as skipped on purpose, and do
-not make it `4`. `sweep-outcome.txt` in the sweep dir, the end of the markdown summary and
+many, by reason: a cell counts once, with the reason of its last status row, and not at all
+once a `--resume` gave it a valid row. `1` wins over `4`. Cells the memory guard skipped
+(`SKIPPED_MEM_GUARD`, and `SKIPPED_SERIES_STOPPED` after it) are counted apart, as skipped on
+purpose, and do not make it `4`. `sweep-outcome.txt` in the sweep dir, the end of the markdown summary and
 the end of the scale envelope keep the outcome.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With

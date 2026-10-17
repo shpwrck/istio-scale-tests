@@ -485,7 +485,7 @@ setup() {
 	assert_line --index 0 "V=v1.30.5 PIN=v1.30.5 SRC=live BY=a=v1.30.5,b=v1.30.5"
 	# R2: nobody is left not ready; the wait is recorded.
 	assert_line --index 1 --regexp '^NR=none WAITED=[1-4]$'
-	[[ "$stderr" == *"istiod or IstioCNI is not ready (or istiod is rolling out) on 1 of 2 members; reading them again every 1s for up to 10s"* ]]
+	[[ "$stderr" == *"istiod or IstioCNI is not ready (or istiod is rolling out) on 1 of 2 members; reading them again every 1s for up to 10s (plus one poll)..."* ]]
 	[[ "$stderr" != *WARNING* ]]
 	# Only b is read again (a was ready), until it is.
 	[ "$(grep -c -- '--context=a .*get istios.sailoperator.io default' "$IV_LOG")" -eq 1 ]
@@ -1003,7 +1003,11 @@ _iv_resume() {
 	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVSTATE_a=ReconcileError IVRFAIL_a=1 run --separate-stderr _iv_run a 0
 	assert_output "V=unknown PIN=v1.30.5 SRC=live BY=a=unknown"
 	[ "$(grep -c 'get istiorevisions.sailoperator.io default' "$IV_LOG")" -eq 2 ]
-	[[ "$stderr" == *"  a: the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False"$'\n'* ]]
+	[[ "$stderr" == *"  a: the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False"$'\n'"    reproduce: _iv_kubectl --context a get istios.sailoperator.io default -o yaml"$'\n'* ]]
+	# L3: failing twice, its command reproduces the read that failed, the IstioRevision's.
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVSTATE_a=ReconcileError IVRFAIL_a=2 run --separate-stderr _iv_run a 0
+	[[ "$stderr" == *"  a: the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout"$'\n'"    reproduce: _iv_kubectl --context a get istiorevisions.sailoperator.io default -o yaml"$'\n'* ]]
 	# End of a sweep: an upgrade to v1.30.6 that failed partway (ReconcileError), its
 	# revision read failing once: retried, so the version change is a problem (exit 4).
 	rm -f "${BATS_TEST_TMPDIR}"/rn-*
@@ -1068,7 +1072,70 @@ _iv_resume() {
 
 @test "K12: istiod pods still terminating (.status.terminatingReplicas, where the server has it) are a rollout in progress" {
 	IV_a=v1.30.6 IVDEP_a="5 5 2 2 1" run istio_live_version a _iv_kubectl
-	assert_output "$(printf 'v1.30.6\nrolling\nistiod is rolling out v1.30.6 (Deployment istio-system/istiod: 2 of 2 pods updated, 1 terminating); its state is Healthy\ndefault\nv1.30.6\nHealthy')"
+	assert_output "$(printf 'v1.30.6\nrolling\nistiod pods still terminating after the rollout to v1.30.6 (Deployment istio-system/istiod: 2 of 2 pods updated, 1 terminating); its state is Healthy\ndefault\nv1.30.6\nHealthy')"
 	IV_a=v1.30.6 IVDEP_a="5 5 2 2 0" run istio_live_version a _iv_kubectl
 	assert_line --index 1 ok
+	IV_a=v1.30.6 IVDEP_a="5 5 3 2 1" run istio_live_version a _iv_kubectl
+	assert_line --index 2 "istiod is rolling out v1.30.6 (Deployment istio-system/istiod: 2 of 3 pods updated, 1 terminating); its state is Healthy"
+	# L3: at the start, old pods still terminating are named so, checked through the istiod
+	# pods, and are not a rollout to wait out; the member runs that version (the Also clause).
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVDEP_a="5 5 2 2 1" ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a 0
+	[[ "$stderr" == *"cannot confirm the running Istio version on 1 of 1 members:"$'\n'"  a: istiod pods still terminating after the rollout to v1.30.6 (Deployment istio-system/istiod: 2 of 2 pods updated, 1 terminating); its state is Healthy; still terminating after 0s"$'\n'"    check: _iv_kubectl --context a -n istio-system get pods -l app=istiod"$'\n'"Wait until their old istiod pods are gone (a pod stuck in Terminating, on a lost node say, needs a force delete) (or raise ISTIO_VERSION_READY_WAIT_SEC). Also, a runs v1.30.6, not the pin v1.30.5: "* ]]
+	[[ "$stderr" != *"rolling out"* ]]
+	# With a member still rolling out, both are said, each in its own group.
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVDEP_a="5 5 2 2 1" IV_b=v1.30.6 IVDEP_b="5 5 3 1" IV_c=v1.30.6 IVDEP_c="5 5 2 2 1" \
+		ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a,b,c 0
+	[[ "$stderr" == *$'\n'"  istiod pods still terminating after the rollout to v1.30.6 on 2 members (Deployment istio-system/istiod; still terminating after 0s): a, c"$'\n'"    check (shown for a): _iv_kubectl --context a -n istio-system get pods -l app=istiod"$'\n'* ]]
+	[[ "$stderr" == *$'\n'"  b: istiod is rolling out v1.30.6 (Deployment istio-system/istiod: 1 of 3 pods updated); its state is Healthy; still rolling out after 0s"$'\n'* ]]
+	[[ "$stderr" == *$'\n'"Wait until their istiod rollout is complete and their old istiod pods are gone (or raise ISTIO_VERSION_READY_WAIT_SEC). Also, a, c run v1.30.6; b is rolling out v1.30.6, not the pin v1.30.5: "* ]]
+}
+
+@test "L3: a settled Istio CR whose IstioRevision read fails names that read, once, and reproduces it" {
+	IV_a=v1.30.5 IVRFAIL_a=1 run istio_live_version a _iv_kubectl
+	assert_output "$(printf 'unknown\nread\nIstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout\ndefault\n\nHealthy')"
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 IVRFAIL_a=2 run --separate-stderr _iv_run a 0
+	[[ "$stderr" == *$'\n'"  a: IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout"$'\n'"    reproduce: _iv_kubectl --context a get istiorevisions.sailoperator.io default -o yaml"$'\n'* ]]
+	# An answer that is not JSON: the revision is named once, settled or not.
+	_iv_nojson() { case " $* " in *" get istiorevisions.sailoperator.io "*) echo "<html>" ;; *) _iv_kubectl "$@" ;; esac; }
+	IV_a=v1.30.5 run istio_live_version a _iv_nojson
+	assert_line --index 2 "IstioRevision default: the read did not return JSON"
+	IV_a=v1.30.5 IVSTATE_a=ReconcileError run istio_live_version a _iv_nojson
+	assert_line --index 2 "the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: the read did not return JSON"
+}
+
+@test "L6: at 20 members, the start's failed reads, the end's notes and the off-pin clause are one entry per why or version" {
+	local c ctxs=""
+	for c in $(seq 1 20); do
+		ctxs+="${ctxs:+,}c${c}"
+		export "IV_c${c}=v1.30.5" "IVSTATE_c${c}=ReconcileError" "IVRFAIL_c${c}=9"
+	done
+	ISTIO_VERSION_CHECK=warn run --separate-stderr _iv_run "$ctxs" 0
+	[[ "$stderr" == *"cannot read the running Istio version on 20 of 20 members:"$'\n'"  c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20 (20 members): the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout"$'\n'"    reproduce (shown for c1): _iv_kubectl --context c1 get istiorevisions.sailoperator.io default -o yaml"$'\n'"Fix access"* ]]
+	[ "$(grep -c '' <<<"$stderr")" -eq 5 ]
+	# End: every member not settled, their revision reads failing (K1), then only not settled.
+	local -a o=()
+	_ivl6_end() {
+		export ISTIO_VERSION_SOURCE=live ISTIO_VERSION=v1.30.5 _ISTIO_VERSION_REVS="" ISTIO_NOTREADY_AT_START=none
+		ISTIO_VERSION_BY_CONTEXT="$(sed 's/\(c[0-9]*\)/\1=v1.30.5/g' <<<"$ctxs")"
+		export ISTIO_VERSION_BY_CONTEXT
+		istio_version_recheck o _iv_kubectl
+	}
+	rm -f "${BATS_TEST_TMPDIR}"/rn-*
+	_ivl6_end
+	[ "${#o[@]}" -eq 2 ]
+	[ "${o[1]}" = "the Istio version at the end of the sweep is unconfirmed: c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20 could not be read again (v1.30.5 at the start): the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout" ]
+	for c in $(seq 1 20); do unset "IVRFAIL_c${c}"; done
+	_ivl6_end
+	[ "${o[1]}" = "the Istio version at the end of the sweep is unconfirmed: c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20 ran v1.30.5 at the start, and at the end the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False" ]
+	# Two whys: two entries, in the order the members are listed.
+	export IVSTATE_c3=Healthy IVROGEN_c3=1 IVSTATE_c4=Healthy IVROGEN_c4=1
+	_ivl6_end
+	[[ "${o[1]}" == *": c1, c2, c5, "*" ran v1.30.5 at the start, and at the end the Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; c3, c4 ran v1.30.5 at the start, and at the end the IstioRevision default is not settled: generation 2 is not reconciled yet (observedGeneration 1)" ]]
+}
+
+@test "L6: members off the pin are grouped by version in the Also clause" {
+	ISTIO_VERSION_CHECK=warn IV_a=v1.30.6 IVDEP_a="5 5 3 1" IV_b=v1.30.6 IVDEP_b="5 5 3 1" IV_c=v1.30.6 IV_d=v1.30.7 IV_e=v1.30.6 \
+		ISTIO_VERSION_READY_WAIT_SEC=0 run --separate-stderr _iv_run a,b,c,d,e 0
+	[[ "$stderr" == *"Also, a, b are rolling out v1.30.6; c, e run v1.30.6; d runs v1.30.7, not the pin v1.30.5: bump ISTIO_VERSION"* ]]
 }

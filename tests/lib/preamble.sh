@@ -266,14 +266,17 @@ tuning_baseline_state() {
 #      .status.observedGeneration below .metadata.generation, .status.updatedReplicas
 #      below .status.replicas, or .status.terminatingReplicas above 0 (K12; absent on an
 #      API server without it) is an istiod rollout in progress, old and new pods both
-#      serving (I2): kind rolling, with the version it rolls out to. Otherwise kind ok when
+#      serving (I2): kind rolling, with the version it rolls out to (its why starts "istiod
+#      pods still terminating" when every pod is updated and old ones are still
+#      terminating). Otherwise kind ok when
 #      the state is Healthy, else notready (a pod restart, an HPA scale-up, IstioCNI not
 #      healthy): the version, with the state as why.
 # Kind read: kubectl failed or answered nothing (no CR, no access, unreachable); the
 # reason is the first line of its stderr, and a caller may retry it. A failed Deployment
 # read still returns the revision's version (line 5), for istio_version_recheck (J1). A CR
 # that is not settled and whose IstioRevision read failed is kind read too (K1: its why
-# names the revision), unless it is migrating.
+# names the revision), unless it is migrating; so is a settled CR whose IstioRevision read
+# failed (its why starts "IstioRevision <rev>: ").
 # shellcheck disable=SC2329
 istio_live_version() {
 	local ctx="$1" errf out rc=0 gen ogen state inuse rev recon why="" kind=state ready="" rerr
@@ -316,7 +319,7 @@ istio_live_version() {
 		if ((rc == 0)) && [[ -n "$out" ]]; then
 			out="$(jq -r '[.spec.version, .spec.namespace, .spec.values.revision, .metadata.generation, .status.observedGeneration]
 				| map(. // "" | tostring | gsub("[|\r\n]"; "?")) | join("|")' <<<"$out" 2>/dev/null)" || rc=1
-			[[ "$out" == *"|"* ]] || { rc=1; echo "the IstioRevision ${rev} read did not return JSON" > "$errf"; }
+			[[ "$out" == *"|"* ]] || { rc=1; echo "the read did not return JSON" > "$errf"; }
 		fi
 		if ((rc == 0)) && [[ -n "$out" ]]; then
 			IFS='|' read -r rv rns rvrev rgen rogen <<<"$out"
@@ -339,9 +342,10 @@ istio_live_version() {
 		return 0
 	fi
 	if ((rc != 0)); then
+		# L3: the why names the read that failed (the CR answered).
 		why="$(head -n 1 "$errf" | tr -d '\r' | cut -c 1-200)"
 		rm -f "$errf"
-		printf 'unknown\nread\n%s\n%s\n\n%s\n' "${why:-IstioRevision ${rev}: kubectl exited ${rc} with no output}" "$rev" "$state"
+		printf 'unknown\nread\nIstioRevision %s: %s\n%s\n\n%s\n' "$rev" "${why:-kubectl answered nothing}" "$rev" "$state"
 		return 0
 	fi
 	if [[ -z "$rver" ]]; then
@@ -385,6 +389,8 @@ istio_live_version() {
 	IFS='|' read -r dgen dogen dreps dupd dterm <<<"$out"
 	if ((dogen < dgen || dupd < dreps || dterm > 0)); then
 		why="istiod is rolling out ${rver} (Deployment ${rns}/${dep}: ${dupd} of ${dreps} pods updated"
+		# L3: every pod updated, only old pods still terminating: say that, not "rolling out".
+		((dogen < dgen || dupd < dreps)) || why="istiod pods still terminating after the rollout to ${rver} (Deployment ${rns}/${dep}: ${dupd} of ${dreps} pods updated"
 		((dogen >= dgen)) || why+=", generation ${dgen} not observed yet"
 		((dterm == 0)) || why+=", ${dterm} terminating"
 		printf '%s\nrolling\n%s); its state is %s\n%s\n%s\n%s\n' "$rver" "$why" "$state" "$rev" "$rver" "$state"
@@ -432,13 +438,17 @@ _istio_version_read_all() {
 
 # _istio_version_repro <kind> <ctx> <kubectl_argv...>: the command that shows an operator
 # what the read saw on <ctx>. <kind> deploy:<ns>/<name> is the istiod Deployment that was
-# read (J12); value the IstioRevisions; anything else the Istio CR.
+# read (J12); pods:<ns> its istiod pods (L3: old pods still terminating); revision:<name>
+# the IstioRevision whose read failed (L3); value the IstioRevisions; anything else the
+# Istio CR.
 _istio_version_repro() {
 	local kind="$1" ctx
 	ctx="$(printf '%q' "$2")"
 	shift 2
 	case "$kind" in
 	value) echo "$* --context ${ctx} get istiorevisions.sailoperator.io -o yaml" ;;
+	revision:?*) echo "$* --context ${ctx} get istiorevisions.sailoperator.io ${kind#revision:} -o yaml" ;;
+	pods:?*) echo "$* --context ${ctx} -n ${kind#pods:} get pods -l app=istiod" ;;
 	deploy:*/*)
 		kind="${kind#deploy:}"
 		echo "$* --context ${ctx} -n ${kind%%/*} get deployments.apps ${kind#*/} -o yaml"
@@ -482,7 +492,8 @@ _istio_version_marker() {
 # ISTIO_VERSION_CHECK=fail (default) dies when a member's version is unknown, members
 # differ, or it differs from the pin (a leading v is ignored); warn prints the same
 # problem as a warning and goes on. --no-stop (gateway-api, a read-only check) always
-# warns. Every unknown member is listed with why and a command that reproduces the read.
+# warns. Every unknown member is listed with why and a command that reproduces the read
+# (L6: members with the same why share one entry, its command shown for the first).
 # Readiness is not the version (I1): a member whose only issue is its state (istiod or
 # IstioCNI not ready, kind notready) or whose istiod is rolling out (kind rolling, I2) is
 # read again every ISTIO_VERSION_READY_POLL_SEC until ISTIO_VERSION_READY_WAIT_SEC have
@@ -546,9 +557,9 @@ istio_version_resolve() {
 	local tmp wtmp i j v kind prev why rev rver state by="" revs="" distinct="" bad=0 detail="" live problem="" fix="" envpin=""
 	local n_notready=0 n_rolling=0 n_read=0 n_unsettled=0 nr_at_start="" t0 deadline elapsed=0 polls=0 nap doomed="" vset=""
 	local ivr_skipped=0 ivr_offpin="" ivr_stale="" allfail st rk label dre='Deployment ([a-z0-9.-]+)/([a-z0-9.-]+)'
-	local ivr_over=0 ivr_rg ivr_rltail=""
-	local -a ivr_sw=() ivr_rlk=()
-	local -A ivr_rlm=() ivr_rlf=() ivr_rlw=() ivr_rlc=()
+	local ivr_over=0 ivr_rg ivr_rltail="" ivr_rlv ivr_rdg ivr_ok n_term=0
+	local -a ivr_sw=() ivr_rlk=() ivr_rdk=() ivr_opk=()
+	local -A ivr_rlm=() ivr_rlf=() ivr_rlw=() ivr_rlc=() ivr_rlt=() ivr_rdm=() ivr_rdf=() ivr_rdc=() ivr_opm=()
 	tmp="$(mktemp -d)"
 	_istio_version_read_all "$tmp" ctxs "$@"
 	# I1/I2: wait while only readiness is off or istiod is rolling out, until a SECONDS
@@ -611,7 +622,7 @@ istio_version_resolve() {
 				break
 			fi
 		fi
-		((polls)) || echo "  istiod or IstioCNI is not ready (or istiod is rolling out) on ${#waitfor[@]} of ${#ctxs[@]} members; reading them again every ${poll}s for up to ${wait_max}s..." >&2
+		((polls)) || echo "  istiod or IstioCNI is not ready (or istiod is rolling out) on ${#waitfor[@]} of ${#ctxs[@]} members; reading them again every ${poll}s for up to ${wait_max}s (plus one poll)..." >&2
 		nap=$((deadline - SECONDS))
 		((nap <= poll)) || nap="$poll"
 		((nap > 0)) || nap=1
@@ -669,13 +680,25 @@ istio_version_resolve() {
 			else
 				nr_at_start="${nr_at_start:+${nr_at_start},}${ctxs[i]}=rolling"
 				n_rolling=$((n_rolling + 1))
+				# L3: every pod updated, only old pods still terminating (K12): its own group,
+				# wording and check (its pods), and it runs that version (L6, the Also clause).
+				ivr_rlv="is rolling out" ivr_rltail="still rolling out"
+				if [[ "$why" == "istiod pods still terminating "* ]]; then
+					ivr_rlv="runs" ivr_rltail="still terminating"
+					n_term=$((n_term + 1))
+				fi
 				# J5: say so when the wait was skipped (Y3), not "after 0s".
-				if ((ivr_skipped)); then ivr_rltail="not waited for"; else ivr_rltail="still rolling out after ${elapsed}s"; fi
-				[[ "${rver#v}" == "${ISTIO_VERSION_PIN#v}" ]] || ivr_offpin="${ivr_offpin:+${ivr_offpin}, }${ctxs[i]} is rolling out ${rver}"
+				if ((ivr_skipped)); then ivr_rltail="not waited for"; else ivr_rltail+=" after ${elapsed}s"; fi
+				if [[ "${rver#v}" != "${ISTIO_VERSION_PIN#v}" ]]; then
+					ivr_ok="${ivr_rlv}|${rver}"
+					[[ -n "${ivr_opm[$ivr_ok]+x}" ]] || ivr_opk+=("$ivr_ok")
+					ivr_opm[$ivr_ok]="${ivr_opm[$ivr_ok]:+${ivr_opm[$ivr_ok]}, }${ctxs[i]}"
+				fi
 				# K8: grouped by Deployment and version below (one line per group).
 				[[ "$why" =~ $dre ]] || true
 				ivr_rg="${BASH_REMATCH[1]:-?}/${BASH_REMATCH[2]:-?} ${rver}"
-				[[ -n "${ivr_rlc[$ivr_rg]:-}" ]] || { ivr_rlk+=("$ivr_rg"); ivr_rlf[$ivr_rg]="${ctxs[i]}"; ivr_rlw[$ivr_rg]="${why}; ${ivr_rltail}"; ivr_rlc[$ivr_rg]=0; }
+				[[ "$ivr_rlv" != runs ]] || ivr_rg+=" terminating"
+				[[ -n "${ivr_rlc[$ivr_rg]:-}" ]] || { ivr_rlk+=("$ivr_rg"); ivr_rlf[$ivr_rg]="${ctxs[i]}"; ivr_rlw[$ivr_rg]="${why}; ${ivr_rltail}"; ivr_rlc[$ivr_rg]=0; ivr_rlt[$ivr_rg]="$ivr_rltail"; }
 				ivr_rlc[$ivr_rg]=$((ivr_rlc[$ivr_rg] + 1))
 				ivr_rlm[$ivr_rg]="${ivr_rlm[$ivr_rg]:+${ivr_rlm[$ivr_rg]}, }${ctxs[i]}"
 			fi
@@ -690,16 +713,27 @@ istio_version_resolve() {
 			*) n_read=$((n_read + 1)) ;;
 			esac
 			if [[ "$kind" != rolling ]]; then
-				# J12: a failed Deployment read's command names the Deployment that was read.
-				rk="${kind:-read}" label=reproduce
+				# J12: a failed Deployment read's command names the Deployment that was read;
+				# L3: a failed IstioRevision read's, that revision.
+				rk="${kind:-read}"
 				if [[ "$why" == "istiod Deployment "* && "$why" =~ $dre ]]; then
 					rk="deploy:${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+				elif [[ "$kind" == read && -n "$rev" && ( "$why" == "IstioRevision ${rev}: "* \
+					|| ( "$why" == "the Istio CR default is not settled: "* && "$why" == *"; IstioRevision ${rev}: "* ) ) ]]; then
+					rk="revision:${rev}"
 				fi
-				detail+=$'\n'"  ${ctxs[i]}: ${why:-no answer}"
-				detail+=$'\n'"    ${label}: $(_istio_version_repro "$rk" "${ctxs[i]}" "$@")"
+				# L6: grouped by that command's kind and why (one entry per group).
+				ivr_rdg="${rk}|${why:-no answer}"
+				[[ -n "${ivr_rdc[$ivr_rdg]:-}" ]] || { ivr_rdk+=("$ivr_rdg"); ivr_rdf[$ivr_rdg]="${ctxs[i]}"; ivr_rdc[$ivr_rdg]=0; }
+				ivr_rdc[$ivr_rdg]=$((ivr_rdc[$ivr_rdg] + 1))
+				ivr_rdm[$ivr_rdg]="${ivr_rdm[$ivr_rdg]:+${ivr_rdm[$ivr_rdg]}, }${ctxs[i]}"
 			fi
 		else
-			[[ "${v#v}" == "${ISTIO_VERSION_PIN#v}" ]] || ivr_offpin="${ivr_offpin:+${ivr_offpin}, }${ctxs[i]} runs ${v}"
+			if [[ "${v#v}" != "${ISTIO_VERSION_PIN#v}" ]]; then
+				ivr_ok="runs|${v}"
+				[[ -n "${ivr_opm[$ivr_ok]+x}" ]] || ivr_opk+=("$ivr_ok")
+				ivr_opm[$ivr_ok]="${ivr_opm[$ivr_ok]:+${ivr_opm[$ivr_ok]}, }${ctxs[i]}"
+			fi
 			if [[ "$kind" == notready ]]; then
 				# J14: grouped by state, as the end note is.
 				n_notready=$((n_notready + 1))
@@ -714,16 +748,45 @@ istio_version_resolve() {
 		case "/${distinct}/" in */"${v}"/*) ;; *) distinct="${distinct:+${distinct}/}${v}" ;; esac
 	done
 	rm -rf "$tmp"
+	# L6: members whose version is unknown (not rolling), one entry per command kind and why,
+	# with the command that reproduces the read (shown for the first member of a group).
+	for ivr_rdg in ${ivr_rdk[@]+"${ivr_rdk[@]}"}; do
+		if ((ivr_rdc[$ivr_rdg] == 1)); then
+			detail+=$'\n'"  ${ivr_rdf[$ivr_rdg]}: ${ivr_rdg#*|}"
+			detail+=$'\n'"    reproduce: $(_istio_version_repro "${ivr_rdg%%|*}" "${ivr_rdf[$ivr_rdg]}" "$@")"
+		else
+			detail+=$'\n'"  ${ivr_rdm[$ivr_rdg]} (${ivr_rdc[$ivr_rdg]} members): ${ivr_rdg#*|}"
+			detail+=$'\n'"    reproduce (shown for ${ivr_rdf[$ivr_rdg]}): $(_istio_version_repro "${ivr_rdg%%|*}" "${ivr_rdf[$ivr_rdg]}" "$@")"
+		fi
+	done
 	# K8: rolling members, one line per Deployment and version, with a check command (J12:
-	# a rollout's command is a check, and names the Deployment that was read).
+	# a rollout's command is a check, and names the Deployment that was read; L3: for old
+	# pods still terminating, the istiod pods).
 	for ivr_rg in ${ivr_rlk[@]+"${ivr_rlk[@]}"}; do
+		ivr_rlv="${ivr_rg#* }"
+		ivr_rlv="${ivr_rlv%% *}"
+		if [[ "$ivr_rg" == *" terminating" ]]; then
+			rk="pods:${ivr_rg%%/*}"
+			label="istiod pods still terminating after the rollout to ${ivr_rlv}"
+		else
+			rk="deploy:${ivr_rg%% *}"
+			label="istiod is rolling out ${ivr_rlv}"
+		fi
 		if ((ivr_rlc[$ivr_rg] == 1)); then
 			detail+=$'\n'"  ${ivr_rlf[$ivr_rg]}: ${ivr_rlw[$ivr_rg]}"
-			detail+=$'\n'"    check: $(_istio_version_repro "deploy:${ivr_rg%% *}" "${ivr_rlf[$ivr_rg]}" "$@")"
+			detail+=$'\n'"    check: $(_istio_version_repro "$rk" "${ivr_rlf[$ivr_rg]}" "$@")"
 		else
-			detail+=$'\n'"  istiod is rolling out ${ivr_rg#* } on ${ivr_rlc[$ivr_rg]} members (Deployment ${ivr_rg%% *}; ${ivr_rltail}): ${ivr_rlm[$ivr_rg]}"
-			detail+=$'\n'"    check (shown for ${ivr_rlf[$ivr_rg]}): $(_istio_version_repro "deploy:${ivr_rg%% *}" "${ivr_rlf[$ivr_rg]}" "$@")"
+			detail+=$'\n'"  ${label} on ${ivr_rlc[$ivr_rg]} members (Deployment ${ivr_rg%% *}; ${ivr_rlt[$ivr_rg]}): ${ivr_rlm[$ivr_rg]}"
+			detail+=$'\n'"    check (shown for ${ivr_rlf[$ivr_rg]}): $(_istio_version_repro "$rk" "${ivr_rlf[$ivr_rg]}" "$@")"
 		fi
+	done
+	# L6: members off the pin, one entry per version (and whether it is still rolling out).
+	for ivr_ok in ${ivr_opk[@]+"${ivr_opk[@]}"}; do
+		ivr_rlv="${ivr_ok%%|*}"
+		if [[ "${ivr_opm[$ivr_ok]}" == *", "* ]]; then
+			case "$ivr_rlv" in runs) ivr_rlv="run" ;; *) ivr_rlv="are rolling out" ;; esac
+		fi
+		ivr_offpin="${ivr_offpin:+${ivr_offpin}; }${ivr_opm[$ivr_ok]} ${ivr_rlv} ${ivr_ok#*|}"
 	done
 	# Where the pin came from: an ISTIO_VERSION exported in the shell, or versions.env (K5:
 	# also for the advice about a member that is off the pin while another is unknown).
@@ -733,13 +796,21 @@ istio_version_resolve() {
 	[[ "$envpin" != "$ISTIO_VERSION_PIN" ]] || envpin=""
 	if [[ "$distinct" == */* ]]; then live="mixed:${distinct}"; else live="$distinct"; fi
 	if ((bad)); then
-		# J5: only the fixes that can help.
+		# J5: only the fixes that can help. L3: old istiod pods still terminating are not
+		# a rollout to wait out (one stuck in Terminating stays until it is force-deleted).
 		if ((n_rolling)); then
 			problem="cannot confirm the running Istio version on ${bad} of ${#ctxs[@]} members:${detail}"
-			if ((n_read + n_unsettled)); then
-				fix="Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled and their istiod rollout is complete"
+			if ((n_term == 0)); then
+				label="their istiod rollout is complete"
+			elif ((n_term == n_rolling)); then
+				label="their old istiod pods are gone (a pod stuck in Terminating, on a lost node say, needs a force delete)"
 			else
-				fix="Wait until their istiod rollout is complete"
+				label="their istiod rollout is complete and their old istiod pods are gone"
+			fi
+			if ((n_read + n_unsettled)); then
+				fix="Fix access to those members (kubeconfig, login, network), or wait until their Istio CR is settled and ${label}"
+			else
+				fix="Wait until ${label}"
 			fi
 			((ivr_skipped)) || fix+=" (or raise ISTIO_VERSION_READY_WAIT_SEC)"
 		else
@@ -864,8 +935,9 @@ _istio_notready_notes() {
 #                    state (I1, Y4: readiness, not a version change); or a member that
 #                    could not be read again (K1: with why, when its Istio CR answered),
 #                    whose Istio CR is not settled at the end, or that was unknown at the
-#                    start (unconfirmed, not a failure; members whose istiod Deployment
-#                    alone could not be read are grouped by why, K8);
+#                    start (unconfirmed, not a failure; members are grouped by start
+#                    version and why: K8 for an istiod Deployment that alone could not be
+#                    read, L6 for the rest);
 #   --info <msg>     a --resume whose members were all ready when it started
 #                    (ISTIO_NOTREADY_AT_RESUME=none, with its start time; K6).
 # Nothing more when nothing was read live (ISTIO_VERSION_SOURCE pin, as under --dry-run).
@@ -933,28 +1005,38 @@ istio_version_recheck() {
 				revonly=0
 			elif [[ -n "$sr" && -n "$rev" && "$rev" != "$sr" ]]; then
 				changed+="${changed:+; }${ctxs[i]}: activeRevisionName ${sr} at the start, ${rev} at the end (${why})"
-			elif [[ "$kind" == state ]]; then
-				unconfirmed+="${unconfirmed:+; }${ctxs[i]} ran ${sv} at the start, and at the end ${why}"
-			elif [[ -n "$rver" ]]; then
-				# K8: grouped by why below (every Deployment read failing: RBAC, say).
-				ivrc_k="${sv}|${rver}|${why}"
+			else
+				# K8, L6: grouped below by kind, start version and why (every Deployment
+				# read failing, RBAC say; every Istio CR not settled). K1: the Istio CR
+				# answered (it names a revision), so say what failed.
+				if [[ "$kind" == state ]]; then
+					ivrc_k="st|${sv}||${why}"
+				elif [[ -n "$rver" ]]; then
+					ivrc_k="dep|${sv}|${rver}|${why}"
+				else
+					ivrc_k="rd|${sv}||${rev:+${why}}"
+				fi
 				[[ -n "${ivrc_dm[$ivrc_k]+x}" ]] || ivrc_dk+=("$ivrc_k")
 				ivrc_dm[$ivrc_k]="${ivrc_dm[$ivrc_k]:+${ivrc_dm[$ivrc_k]}, }${ctxs[i]}"
-			else
-				# K1: the Istio CR answered (it names a revision), so say what failed.
-				unconfirmed+="${unconfirmed:+; }${ctxs[i]} could not be read again (${sv} at the start)${rev:+: ${why}}"
 			fi
 			;;
 		*)
-			unconfirmed+="${unconfirmed:+; }${ctxs[i]} could not be read again (${sv} at the start)"
+			ivrc_k="rd|${sv}||"
+			[[ -n "${ivrc_dm[$ivrc_k]+x}" ]] || ivrc_dk+=("$ivrc_k")
+			ivrc_dm[$ivrc_k]="${ivrc_dm[$ivrc_k]:+${ivrc_dm[$ivrc_k]}, }${ctxs[i]}"
 			;;
 		esac
 	done
 	rm -rf "$tmp"
 	for ivrc_k in ${ivrc_dk[@]+"${ivrc_dk[@]}"}; do
-		sv="${ivrc_k%%|*}" why="${ivrc_k#*|}"
+		kind="${ivrc_k%%|*}" why="${ivrc_k#*|}"
+		sv="${why%%|*}" why="${why#*|}"
 		rver="${why%%|*}" why="${why#*|}" ivrc_m="${ivrc_dm[$ivrc_k]}"
-		if [[ "$ivrc_m" == *", "* ]]; then
+		if [[ "$kind" == st ]]; then
+			unconfirmed+="${unconfirmed:+; }${ivrc_m} ran ${sv} at the start, and at the end ${why}"
+		elif [[ "$kind" == rd ]]; then
+			unconfirmed+="${unconfirmed:+; }${ivrc_m} could not be read again (${sv} at the start)${why:+: ${why}}"
+		elif [[ "$ivrc_m" == *", "* ]]; then
 			unconfirmed+="${unconfirmed:+; }${ivrc_m} ran ${sv} at the start, and their active revisions read ${rver} at the end, but ${why}"
 		else
 			unconfirmed+="${unconfirmed:+; }${ivrc_m} ran ${sv} at the start, and its active revision reads ${rver} at the end, but ${why}"

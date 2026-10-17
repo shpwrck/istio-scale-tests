@@ -238,8 +238,11 @@ Other:
                               ISTIO_NOTREADY_AT_START and HARNESS_SHA; the resume
                               records its own readiness, with its start time, in
                               a note of the sweep outcome
-                              (ISTIO_NOTREADY_AT_RESUME=...), and warns and adds a
-                              note when it runs another HARNESS_SHA.
+                              (ISTIO_NOTREADY_AT_RESUME=...), and warns when it
+                              runs another HARNESS_SHA than the run before it.
+                              resumes.txt in the sweep dir keeps one line per
+                              resume (start time, HARNESS_SHA, readiness); the
+                              outcome notes each harness change in it.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -251,11 +254,13 @@ Exit codes:
      that could not be retired (RETIRE_FAILED; the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (a status row
      instead of a measurement: SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED;
-     stderr ends with "N of M cells failed" by reason) or the Istio version or active
-     revision changed during the sweep (read again at its end). Cells the memory guard
-     skipped (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout,
-     and do not make it 4. The outcome is also in sweep-outcome.txt, the markdown report
-     and the scale envelope.
+     stderr ends with "N of M cells failed" by reason; a cell counts once, with the
+     reason of its last status row, and not at all once a --resume gave it a valid
+     row) or the Istio version or active revision changed during the sweep (read
+     again at its end).
+     Cells the memory guard skipped (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are
+     counted apart, on stdout, and do not make it 4. The outcome is also in
+     sweep-outcome.txt, the markdown report and the scale envelope.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -695,7 +700,14 @@ if [[ -n "$RESUME_DIR" ]]; then
 	OUTPUT_DIR="$(_config_canon_dir "$RESUME_DIR")"
 	case "${OUTPUT_DIR##*/}" in
 	sweep-?*) ;;
-	*) die "--resume: ${RESUME_DIR} is not a sweep-<RUN_ID> directory, nor a symlink to one (pass the sweep dir 003 created, such as ${CONTROLPLANE_RESULTS_DIR}/sweep-<RUN_ID>)" ;;
+	*)
+		# L3: a results dir holding sweeps (the usual mistake): name the newest (a RUN_ID
+		# starts with its UTC start time, so the last by name).
+		_resume_newest=""
+		for _resume_cand in "${RESUME_DIR%/}"/sweep-?*; do [[ ! -d "$_resume_cand" ]] || _resume_newest="$_resume_cand"; done
+		[[ -z "$_resume_newest" ]] || die "--resume: ${RESUME_DIR} is not a sweep-<RUN_ID> directory, nor a symlink to one. It holds sweep directories; the newest is ${_resume_newest}: pass that one (or another sweep-<RUN_ID> in it) to resume it."
+		die "--resume: ${RESUME_DIR} is not a sweep-<RUN_ID> directory, nor a symlink to one (pass the sweep dir 003 created, such as ${CONTROLPLANE_RESULTS_DIR}/sweep-<RUN_ID>)"
+		;;
 	esac
 	# K7: the rows' own timestamp format, so "rows from <this> on" finds them directly.
 	RESUME_AT="$(date -u -Iseconds)"
@@ -1290,17 +1302,35 @@ leftover_preflight
 if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN)); then
 	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
 fi
-# K4: the TSV preamble names the harness the sweep started on, and the resume appends rows
-# from this one: when they differ, say so now and in the sweep outcome, with the time from
-# which the rows are this harness's. (unknown on either side cannot be compared.)
+# K4, L2: the TSV preamble names the harness the sweep started on, and each resume appends
+# rows from its own. resumes.txt in the sweep dir is append-only: one line per resume that
+# passed its preflights (this one, and one that dies later, included), with its start time
+# in the format of the rows' timestamp column, its HARNESS_SHA and its own
+# ISTIO_NOTREADY_AT_RESUME. The outcome gets one note per resume whose harness differs from
+# the run before it (the first run's is the preamble's), with the time from which the rows
+# are that harness's; this resume also warns when it is one. unknown cannot be compared: it
+# is skipped, and the next known harness is compared with the last known one.
 RESUME_NOTES=()
-if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]]; then
+if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
+	_resumes_log="${OUTPUT_DIR}/resumes.txt"
+	[[ -s "$_resumes_log" ]] || printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\n' >> "$_resumes_log"
+	printf '%s\t%s\t%s\n' "$RESUME_AT" "$HARNESS_SHA" "${ISTIO_NOTREADY_AT_START:-unchecked}" >> "$_resumes_log"
 	_resume_harness="$(awk -v k="# HARNESS_SHA=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
-	if [[ -n "$_resume_harness" && "$_resume_harness" != unknown && "$HARNESS_SHA" != unknown \
-		&& "$_resume_harness" != "$HARNESS_SHA" ]]; then
-		echo "warning: --resume: this sweep started on harness ${_resume_harness} (the TSV preamble's HARNESS_SHA), and this resume runs ${HARNESS_SHA}: the rows it adds (from ${RESUME_AT} on) come from another harness than the preamble names. The sweep outcome records it as a note; start a new sweep if the change matters to the results." >&2
-		RESUME_NOTES=(--note "this --resume ran HARNESS_SHA=${HARNESS_SHA}; the TSV preamble's HARNESS_SHA=${_resume_harness} is the first run's; rows from ${RESUME_AT} on are ${HARNESS_SHA}'s")
-	fi
+	# Each change as at, new, old, and the start of the run that ran old (empty: the first).
+	_resume_changes=()
+	mapfile -t _resume_changes < <(awk -F'\t' -v h0="$_resume_harness" '
+		BEGIN { prev = (h0 == "unknown" ? "" : h0) }
+		$1 == "RESUMED_AT" || NF < 2 || $2 == "" || $2 == "unknown" { next }
+		prev != "" && $2 != prev { print $1 "\t" $2 "\t" prev "\t" pat }
+		{ prev = $2; pat = $1 }' "$_resumes_log")
+	for _resume_chg in ${_resume_changes[@]+"${_resume_changes[@]}"}; do
+		IFS=$'\t' read -r _chg_at _chg_new _chg_old _chg_from <<<"$_resume_chg"
+		_chg_by="the TSV preamble's, the first run's"
+		[[ -z "$_chg_from" ]] || _chg_by="the --resume at ${_chg_from}"
+		RESUME_NOTES+=(--note "the --resume at ${_chg_at} ran HARNESS_SHA=${_chg_new}, after HARNESS_SHA=${_chg_old} (${_chg_by}): rows from ${_chg_at} on are ${_chg_new}'s")
+		[[ "$_chg_at" != "$RESUME_AT" || "$_chg_new" != "$HARNESS_SHA" ]] \
+			|| echo "warning: --resume: this resume runs harness ${HARNESS_SHA}, and the run before it ran ${_chg_old} (${_chg_by}): the rows it adds (from ${RESUME_AT} on) come from another harness. The sweep outcome records it as a note, and ${_resumes_log} lists every resume; start a new sweep if the change matters to the results." >&2
+	done
 fi
 
 if ((DRY_RUN)) && ! ((GROWTH)); then
@@ -2315,9 +2345,25 @@ rm -f "$ENVELOPE_ERR"
 # context column is the status); count them by reason, the memory guard's SKIPPED_* apart
 # (skipped on purpose, not failed: C2), also in sweep-outcome.txt and the markdown
 # summary (C3). The RETIRE_FAILED stop (exit 1) wins over 4 (some cells failed, or the
-# Istio version or active revision changed under the sweep).
+# Istio version or active revision changed under the sweep). L1: once per cell, keyed as
+# combo_already_done keys it (the five axes, traffic_config, window_kind): a cell with a
+# valid row is not failed, even when an earlier attempt left a status row (--resume
+# retried it), and one without takes the reason of its last status row. A growth series
+# is never resumed, and its cells share that key (M-sweep, outside phases), so each of its
+# status rows is a cell of its own.
 FAILED_CELLS=()
-mapfile -t FAILED_CELLS < <(awk -F'\t' '$1 != "timestamp" && !/^#/ && $2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ { print $2 }' \
+mapfile -t FAILED_CELLS < <(awk -F'\t' -v growth="$GROWTH" '
+	/^timestamp\t/ { tcol = 0; wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") tcol = i; if ($i == "window_kind") wcol = i }; next }
+	/^#/ { next }
+	{ k = $3 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP ((tcol && NF >= tcol) ? $tcol : "none") SUBSEP ((wcol && NF >= wcol) ? $wcol : "deploy") }
+	$2 ~ /^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED)$/ {
+		if (growth) { print $2; next }
+		if (!(k in last)) order[++n] = k
+		last[k] = $2
+		next
+	}
+	NF >= 40 && $31 == "0" { valid[k] = 1 }
+	END { for (i = 1; i <= n; i++) if (!(order[i] in valid)) print last[order[i]] }' \
 	"${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true)
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")

@@ -126,8 +126,9 @@ across xDS types (about 30 full pushes).
 When the results dir holds sweep-outcome.txt (003 writes it at the end of a sweep),
 every format but charts repeats it, with the run that recorded it: the failed cells by
 reason, its problems (the Istio version or active revision changed under the sweep) and
-notes (members not ready at its start or end); a sweep dir without it is a sweep that
-died before its end.
+notes (members not ready at its start or end, the Istio version unconfirmed at the end,
+or a --resume's own readiness and harness change); a sweep dir without it is a sweep
+that died before its end.
 
 Environment:
   CONTROLPLANE_RESULTS_DIR      --results-dir default (relative to the repo root).
