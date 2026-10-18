@@ -20,10 +20,14 @@ spec:
     path: charts/hub-mesh-ca
     helm:
       releaseName: hub-mesh-ca
+      {{- if eq (include "gitops-hub-apps.platform" .) "openshift" }}
+      valueFiles:
+        - values-openshift.yaml
+      {{- end }}
       {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "hub-mesh-ca") }}{{ . | nindent 6 }}{{- end }}
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    namespace: {{ .Values.gitopsNamespace | quote }}
   syncPolicy:
     {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
 {{- end }}

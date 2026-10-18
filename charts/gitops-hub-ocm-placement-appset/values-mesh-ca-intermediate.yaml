@@ -15,7 +15,8 @@ applicationSet:
 
 destination:
   mode: inClusterServer
-  namespace: openshift-gitops
+  # The chart's namespace (its values.yaml namespace: cert-manager), on either platform.
+  namespace: cert-manager
 
 template:
   applicationNameSuffix: hub-mesh-ca-intermediate

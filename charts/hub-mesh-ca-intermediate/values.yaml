@@ -19,11 +19,11 @@ argoSyncWaves:
   rbac: -20
   wave: 3
 
-# Allow OpenShift GitOps application-controller to reconcile Certificate / Secret in namespace (needed when synced via ApplicationSet without hub-mesh-ca RBAC hooks).
+# Allow the Argo CD application controller to reconcile Certificate / Secret in namespace (needed when synced via ApplicationSet without hub-mesh-ca RBAC hooks).
 rbac:
   enabled: true
   argocd:
-    namespace: openshift-gitops
-    serviceAccountName: openshift-gitops-argocd-application-controller
+    namespace: argocd
+    serviceAccountName: argocd-application-controller
   labels: {}
   annotations: {}

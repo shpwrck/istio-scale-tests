@@ -8,6 +8,17 @@ true
 {{- end -}}
 {{- end }}
 
+{{/*
+The platform, kubernetes or openshift; any other value fails the render.
+*/}}
+{{- define "gitops-hub-apps.platform" -}}
+{{- $p := .Values.platform | default "kubernetes" -}}
+{{- if not (has $p (list "kubernetes" "openshift")) -}}
+{{- fail (printf "platform must be kubernetes or openshift, not %q" $p) -}}
+{{- end -}}
+{{- $p -}}
+{{- end }}
+
 {{- define "gitops-hub-apps.repoURL" -}}
 {{- required "repo.url is required (the Git URL Argo CD syncs this repo from)" .Values.repo.url | quote -}}
 {{- end }}

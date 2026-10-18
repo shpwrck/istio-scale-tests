@@ -1,0 +1,3 @@
+# Platform overlay: listed after values.yaml when the platform is openshift. This chart
+# runs only on openshift, so values.yaml already targets it.
+{}

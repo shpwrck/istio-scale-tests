@@ -24,7 +24,7 @@ spec:
           # Ready condition (and the owning Argo Application's health) tracks mesh
           # wiring continuously.
           command:
-            - /bin/bash
+            - /bin/sh
             - -c
             - 'trap "exit 0" TERM INT; while true; do sleep 3600 & wait $!; done'
           env:
@@ -43,7 +43,7 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /bin/bash
+                - /bin/sh
                 - /opt/check/readiness.sh
             initialDelaySeconds: {{ .Values.probe.initialDelaySeconds }}
             periodSeconds: {{ .Values.probe.periodSeconds }}
@@ -59,6 +59,9 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
+            {{- with .Values.runAsUser }}
+            runAsUser: {{ . }}
+            {{- end }}
             capabilities:
               drop:
                 - ALL

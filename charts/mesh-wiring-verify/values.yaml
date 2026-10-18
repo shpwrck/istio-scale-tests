@@ -19,13 +19,16 @@ istiodCheck:
   port: 15014
   curlTimeoutSeconds: 5
 
+# The check needs only a POSIX shell and curl. Same curl image as the gateways'
+# wait-for-istiod Jobs and charts/spoke-ossm waitForCacerts.
 image:
-  # The cluster's "cli" imagestream (oc, bash, curl). Needs the internal image
-  # registry (managementState: Managed). Without it, use
-  # registry.redhat.io/openshift4/ose-cli-rhel9 with the cluster's OpenShift minor (e.g. v4.21).
-  repository: image-registry.openshift-image-registry.svc:5000/openshift/cli
-  tag: "latest"
+  repository: docker.io/curlimages/curl
+  tag: "8.22.0"
   pullPolicy: IfNotPresent
+
+# The image's user (curl_user) is not numeric, so runAsNonRoot needs the UID.
+# values-openshift.yaml clears it: OpenShift assigns one from the namespace range.
+runAsUser: 100
 
 serviceAccountName: mesh-wiring-verify
 
@@ -37,8 +40,7 @@ probe:
   failureThreshold: 2
   successThreshold: 1
 
-# oc is a large binary; its pages count against the memory limit. Below ~256Mi
-# every probe re-reads it from disk and the check overruns the probe timeout.
+# Each probe holds istiod's /metrics body in memory.
 resources:
   requests:
     cpu: 10m

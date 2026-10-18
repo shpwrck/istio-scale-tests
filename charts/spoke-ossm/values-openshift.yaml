@@ -1,0 +1,4 @@
+# Platform overlay: listed after values.yaml when the platform is openshift.
+profile: openshift
+waitForCacerts:
+  runAsUser: null

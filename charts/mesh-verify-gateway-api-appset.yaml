@@ -1,16 +1,24 @@
 # Standalone Argo CD Application (not part of the app-of-apps): deploys the Gateway API
 # multicluster ingress check (charts/mesh-verify-gateway-api) on every mesh member, with the echo
 # workload on ONE member. What it answers and how to run it: tests/gateway-api/README.md.
-# Edit before applying:
-#   - spec.source.targetRevision and the repo.revision parameter: your branch (both);
-#   - spec.source.repoURL and the repo.url parameter: your fork (both);
-#   - the template.source.helm.valuesObject.workloadCluster parameter: the ACM ManagedCluster
-#     name of the member that runs the workload (oc --context <acm-hub-ctx> get managedclusters).
-#     Keep the placeholder in git and fill it in on the way to the hub (Apply). Applied as the
-#     placeholder, every member's Application fails to render with a message.
-# Apply:  sed 's/<workload-cluster>/<managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
-#           | oc --context <acm-hub-ctx> apply -f -
-# Remove: oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+# Five placeholders stay in git and are filled in on the way to the hub (Apply):
+#   - <repo-url> and <revision>: the repo and revision the hub's root Application syncs (set
+#     by terraform/platform), so the check deploys the same charts as the mesh. Applied as the
+#     placeholders, this Application shows a ComparisonError and deploys nothing;
+#   - <platform> and <gitops-namespace>: kubernetes and argocd, or openshift and
+#     openshift-gitops (terraform/platform output platform and gitops_namespace);
+#   - <workload-cluster>: the Argo CD cluster name of the member that runs the workload (its
+#     kubeconfig context, which terraform/platform registers; on openshift the ACM
+#     ManagedCluster name). Applied as the placeholder, every member's Application fails to
+#     render with a message.
+# Apply:  NS=argocd PLATFORM=kubernetes   # openshift: NS=openshift-gitops PLATFORM=openshift
+#         read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application \
+#           hub-gitops-root -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+#         sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+#           -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" \
+#           -e 's|<workload-cluster>|<member-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
+#           | kubectl --context <hub-ctx> apply -f -
+# Remove: the same sed, piped to kubectl --context <hub-ctx> delete -f -
 #         (the finalizers remove the ApplicationSet, the per-member Applications and all they
 #         deployed, including the Gateway API Gateway in istio-system, the backend namespace
 #         mesh-verify-gwapi-shared and the workload member's mesh-verify-gwapi-remote)
@@ -18,7 +26,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: mesh-verify-gateway-api-appset
-  namespace: openshift-gitops
+  namespace: <gitops-namespace>
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   labels:
@@ -27,25 +35,26 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/shpwrck/istio-scale-tests.git
-    targetRevision: main
+    repoURL: <repo-url>
+    targetRevision: <revision>
     path: charts/gitops-hub-ocm-placement-appset
     helm:
       releaseName: gitops-mesh-verify-gateway-api-appset
       valueFiles:
         - values-mesh-verify-gateway-api.yaml
+        - platform-<platform>.yaml
       parameters:
         - name: repo.url
-          value: https://github.com/shpwrck/istio-scale-tests.git
+          value: <repo-url>
         - name: repo.revision
-          value: main
+          value: <revision>
         - name: placement.name
           value: acm-openshift-gitops-placement
         - name: template.source.helm.valuesObject.workloadCluster
           value: <workload-cluster>
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    namespace: <gitops-namespace>
   syncPolicy:
     automated:
       prune: false

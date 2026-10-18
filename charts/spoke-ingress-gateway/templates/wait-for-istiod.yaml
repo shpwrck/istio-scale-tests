@@ -22,10 +22,10 @@ spec:
         - name: wait
           image: {{ .Values.waitForIstiod.image | quote }}
           command:
-            - /bin/bash
+            - /bin/sh
             - -c
             - |
-              set -euo pipefail
+              set -eu
               echo "Waiting for istiod to be ready..."
               ELAPSED=0
               while [ $ELAPSED -lt 600 ]; do
@@ -39,3 +39,14 @@ spec:
               done
               echo "ERROR: istiod not ready after 600s"
               exit 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            {{- with .Values.waitForIstiod.runAsUser }}
+            runAsUser: {{ . }}
+            {{- end }}
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

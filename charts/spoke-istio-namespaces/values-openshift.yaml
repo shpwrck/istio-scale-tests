@@ -1,0 +1,2 @@
+# Platform overlay: listed after values.yaml when the platform is openshift.
+istioCniLabels: null

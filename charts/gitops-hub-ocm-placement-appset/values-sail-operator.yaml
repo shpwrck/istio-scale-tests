@@ -1,0 +1,35 @@
+# Preset, platform kubernetes: the upstream Sail operator (Helm chart) on every mesh member.
+# OpenShift installs OSSM 3 with OLM instead (values-ossm-operator.yaml).
+identity:
+  component: spoke-sail-operator
+
+placementRbac:
+  roleName: gitops-ocm-placement-spoke-sail-operator
+  roleBindingName: gitops-ocm-placement-spoke-sail-operator
+
+argocdApplicationControllerRbac:
+  roleName: gitops-spoke-sail-operator-appset-argocd-sync
+  roleBindingName: gitops-spoke-sail-operator-appset-argocd-sync
+
+applicationSet:
+  name: spoke-sail-operator
+
+destination:
+  mode: clusterName
+  namespace: sail-operator
+
+template:
+  applicationNameSuffix: sail-operator
+  source:
+    # Version pin. The operator only installs the Istio versions it lists, so it must list
+    # charts/spoke-ossm istioVersion (1.31.1 lists v1.29.0 to v1.31.1).
+    repoURL: https://istio-ecosystem.github.io/sail-operator
+    chart: sail-operator
+    targetRevision: 1.31.1
+    helm:
+      releaseName: sail-operator
+  # The Istio and IstioRevision CRDs (about 780 KB each) are larger than the client-side
+  # apply annotation allows.
+  syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true

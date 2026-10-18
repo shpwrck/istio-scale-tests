@@ -76,17 +76,37 @@ spec:
         - name: wait
           image: {{ .Values.waitForCacerts.image | quote }}
           command:
-            - /bin/bash
+            - /bin/sh
             - -c
             - |
+              set -u
+              sa=/var/run/secrets/kubernetes.io/serviceaccount
+              url=https://kubernetes.default.svc/api/v1/namespaces/istio-system/secrets/cacerts
+              code=none
               for i in $(seq 1 {{ div (int .Values.waitForCacerts.timeoutSeconds) 10 }}); do
-                if oc get secret cacerts -n istio-system -o name >/dev/null 2>&1; then
+                # Metadata only: the CA key never reaches this pod.
+                code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --cacert "$sa/ca.crt" \
+                  -H "Authorization: Bearer $(cat "$sa/token")" \
+                  -H 'Accept: application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1' \
+                  "$url") || code="curl exit $?"
+                if [ "$code" = 200 ]; then
                   echo "cacerts present; installing Istio."
                   exit 0
                 fi
-                echo "waiting for cacerts in istio-system ($((i * 10))s)"
+                echo "waiting for cacerts in istio-system ($((i * 10))s, HTTP ${code})"
                 sleep 10
               done
-              echo "ERROR: cacerts not pushed after {{ .Values.waitForCacerts.timeoutSeconds }}s (check hub-mesh-push-secrets on the hub)"
+              echo "ERROR: cacerts not pushed after {{ .Values.waitForCacerts.timeoutSeconds }}s (last answer: HTTP ${code}; check hub-mesh-push-secrets on the hub)"
               exit 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            {{- with .Values.waitForCacerts.runAsUser }}
+            runAsUser: {{ . }}
+            {{- end }}
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
 {{- end }}

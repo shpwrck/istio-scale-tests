@@ -1,14 +1,22 @@
 # Standalone Argo CD Application (not part of the app-of-apps): deploys the
 # mesh-verify echo workload on every mesh member.
-# Edit both repoURL fields and both revision fields to match your fork/branch.
-# Apply:  oc apply -f charts/mesh-verify-appset.yaml
-# Remove: oc delete -f charts/mesh-verify-appset.yaml (the finalizer also removes
-#         the ApplicationSet and the per-member mesh-verify workloads)
+# Keep the <repo-url>, <revision>, <platform> and <gitops-namespace> placeholders in git
+# and fill them in on the way to the hub, from what the hub's root Application syncs (set
+# by terraform/platform), so the check deploys the same charts as the mesh. Applied as
+# the placeholders, this Application shows a ComparisonError and deploys nothing.
+# Apply:  NS=argocd PLATFORM=kubernetes   # openshift: NS=openshift-gitops PLATFORM=openshift
+#         read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application \
+#           hub-gitops-root -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+#         sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+#           -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" charts/mesh-verify-appset.yaml \
+#           | kubectl --context <hub-ctx> apply -f -
+# Remove: the same sed, piped to kubectl --context <hub-ctx> delete -f - (the finalizer
+#         also removes the ApplicationSet and the per-member mesh-verify workloads)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: mesh-verify-appset
-  namespace: openshift-gitops
+  namespace: <gitops-namespace>
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   labels:
@@ -17,23 +25,24 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/shpwrck/istio-scale-tests.git
-    targetRevision: main
+    repoURL: <repo-url>
+    targetRevision: <revision>
     path: charts/gitops-hub-ocm-placement-appset
     helm:
       releaseName: gitops-mesh-verify-appset
       valueFiles:
         - values-mesh-verify.yaml
+        - platform-<platform>.yaml
       parameters:
         - name: repo.url
-          value: https://github.com/shpwrck/istio-scale-tests.git
+          value: <repo-url>
         - name: repo.revision
-          value: main
+          value: <revision>
         - name: placement.name
           value: acm-openshift-gitops-placement
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    namespace: <gitops-namespace>
   syncPolicy:
     automated:
       prune: false

@@ -7,17 +7,40 @@ metadata:
     {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
 data:
   readiness.sh: |
-    #!/usr/bin/env bash
+    #!/bin/sh
     # Exit 0 (Ready) only if this cluster is fully wired into the mesh.
     # Stage 1 counts remote secrets; stage 2 reads istiod_managed_clusters from
     # istiod's unauthenticated /metrics (its /debug endpoints are not usable here).
-    set -uo pipefail
+    # POSIX sh and curl: the Kubernetes API is read with the pod's ServiceAccount token.
+    set -u
 
     NS="${ISTIO_NAMESPACE:-istio-system}"
     EXPECTED="${EXPECTED_MEMBERS:-0}"
+    SA=/var/run/secrets/kubernetes.io/serviceaccount
 
-    # Stage 1: remote secrets (-o name reads metadata only, never secret data).
-    n=$(oc get secret -n "$NS" -l istio/multiCluster=true -o name 2>/dev/null | wc -l || true)
+    # api_get PATH ACCEPT: sets BODY and CODE (000 when the request itself failed).
+    api_get() {
+      resp=$(curl -sS --max-time "${CURL_TIMEOUT:-5}" -A mesh-wiring-verify --cacert "$SA/ca.crt" \
+        -H "Authorization: Bearer $(cat "$SA/token")" -H "Accept: $2" \
+        -w '\n%{http_code}' "https://kubernetes.default.svc$1")
+      CODE=$(printf '%s\n' "$resp" | tail -n 1)
+      BODY=$(printf '%s\n' "$resp" | sed '$d')
+      resp=
+    }
+    # The value of the first "root-cert.pem" key in a JSON object.
+    root_cert_field() { sed -n 's/.*"root-cert\.pem": *"\([^"]*\)".*/\1/p' | head -n 1; }
+    # PEM (or a JSON string of it) to its base64 body: no markers, no line breaks.
+    pem_body() { tr -d '\r\n' | sed -e 's/\\n//g' -e 's/-----[A-Z ]*-----//g'; }
+
+    # Stage 1: remote secrets, counted from a Table listing (metadata only, never secret data).
+    api_get "/api/v1/namespaces/${NS}/secrets?labelSelector=istio%2FmultiCluster%3Dtrue&includeObject=None" \
+      'application/json;as=Table;g=meta.k8s.io;v=v1'
+    if [ "$CODE" != 200 ]; then
+      echo "NotReady: cannot list the remote secrets in ${NS} (HTTP ${CODE})" >&2
+      exit 1
+    fi
+    n=$(printf '%s' "$BODY" | grep -o '"cells":' | wc -l)
+    n=$((n + 0))
     if [ "$EXPECTED" -gt 0 ] && [ "$n" -lt "$EXPECTED" ]; then
       echo "NotReady: remote secrets ${n} < expected ${EXPECTED}" >&2
       exit 1
@@ -26,11 +49,26 @@ data:
     # Stage 3 (before 2, it needs no istiod): istiod must sign with the shared mesh
     # root from cacerts. istiod reads cacerts only at startup; started without it,
     # it falls back to a self-signed root and cross-cluster mTLS fails.
+    ca=unchecked
     if [ "${CA_CHECK_ENABLED:-true}" = "true" ]; then
-      want=$(oc get secret cacerts -n "$NS" -o jsonpath='{.data.root-cert\.pem}' 2>/dev/null | base64 -d 2>/dev/null | grep -v -- '-----' | tr -d '\n')
-      have=$(oc get configmap istio-ca-root-cert -n "$NS" -o jsonpath='{.data.root-cert\.pem}' 2>/dev/null | grep -v -- '-----' | tr -d '\n')
+      api_get "/api/v1/namespaces/${NS}/secrets/cacerts" application/json
+      case "$CODE" in
+        200) ;;
+        404) echo "NotReady: no cacerts secret in ${NS}" >&2; exit 1 ;;
+        *) echo "NotReady: cannot read cacerts in ${NS} (HTTP ${CODE})" >&2; exit 1 ;;
+      esac
+      want=$(printf '%s\n' "$BODY" | root_cert_field | base64 -d 2>/dev/null | pem_body)
+      # The response also holds the CA key; drop it.
+      BODY=
+      api_get "/api/v1/namespaces/${NS}/configmaps/istio-ca-root-cert" application/json
+      case "$CODE" in
+        200) ;;
+        404) echo "NotReady: no istio-ca-root-cert ConfigMap in ${NS} (istiod has not started)" >&2; exit 1 ;;
+        *) echo "NotReady: cannot read istio-ca-root-cert in ${NS} (HTTP ${CODE})" >&2; exit 1 ;;
+      esac
+      have=$(printf '%s\n' "$BODY" | root_cert_field | pem_body)
       if [ -z "$want" ]; then
-        echo "NotReady: no cacerts secret in ${NS}" >&2
+        echo "NotReady: cacerts in ${NS} has no root-cert.pem" >&2
         exit 1
       fi
       case "$have" in
@@ -38,6 +76,7 @@ data:
         *) echo "NotReady: istiod is not using the shared mesh root from cacerts (it started before cacerts existed; restart istiod)" >&2
            exit 1 ;;
       esac
+      ca=shared
     fi
 
     # Stage 2: clusters istiod has ingested (local + remote).
@@ -49,7 +88,7 @@ data:
       }
       get_metric() {
         # Value of the first matching sample, decimals stripped.
-        local line; line=$(printf '%s\n' "$body" | grep -E "^istiod_managed_clusters\{[^}]*cluster_type=\"$1\"" | head -1)
+        line=$(printf '%s\n' "$body" | grep -E "^istiod_managed_clusters\{[^}]*cluster_type=\"$1\"" | head -n 1)
         line="${line##* }"; printf '%s' "${line%%.*}"
       }
       local_n=$(get_metric local); remote_n=$(get_metric remote)
@@ -72,9 +111,9 @@ data:
         echo "NotReady: istiod sees ${remote_n:-0} remote clusters < expected $(( EXPECTED - 1 )) (N-1)" >&2
         exit 1
       fi
-      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED} ca=shared"
+      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED} ca=${ca}"
       exit 0
     fi
 
-    echo "Ready: secrets=${n} expected=${EXPECTED} (istiod check disabled)"
+    echo "Ready: secrets=${n} expected=${EXPECTED} ca=${ca} (istiod check disabled)"
     exit 0

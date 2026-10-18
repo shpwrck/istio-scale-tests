@@ -2,6 +2,12 @@ namespaces:
   istioSystem: istio-system
   istioCni: istio-cni
 
+# Extra labels on the istio-cni namespace. The CNI DaemonSet is privileged, so a cluster
+# whose Pod Security Admission default is baseline or restricted rejects it without this.
+# values-openshift.yaml clears it (OpenShift admits the DaemonSet through its SCC).
+istioCniLabels:
+  pod-security.kubernetes.io/enforce: privileged
+
 # Required. Set per cluster by the ApplicationSet. istiod reads the
 # topology.istio.io/network label on istio-system to assign local workloads to a
 # network; it must match the gateways' "<clusterName>-<networkSuffix>".
