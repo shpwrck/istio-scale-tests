@@ -1,5 +1,6 @@
 # Per-cluster mesh-wiring gate: the pod is Ready only while this mesh member is
-# fully wired (remote secrets present and ingested by istiod).
+# fully wired (remote secrets present, ingested and synced by istiod, the shared root,
+# an east-west gateway address).
 
 # Not istio-injected: the gate must not depend on the mesh it checks.
 namespace: mesh-wiring-verify
@@ -12,12 +13,23 @@ expectedMembers: 0
 # Namespace with the Istio remote secrets and istiod.
 istioNamespace: istio-system
 
-# Stage 2: read istiod_managed_clusters from istiod's /metrics.
+# Stage 2: read istiod_managed_clusters and istiod_remote_cluster_sync_status from
+# istiod's /metrics. curlTimeoutSeconds bounds each request of the check (API server
+# and istiod); the whole check stops at probe.timeoutSeconds - 2.
 istiodCheck:
   enabled: true
   host: istiod.istio-system.svc
   port: 15014
   curlTimeoutSeconds: 5
+  # At least N-1 remote clusters (every managed one with expectedMembers 0) must be
+  # synced. false only for an istiod without istiod_remote_cluster_sync_status (before 1.29).
+  requireRemoteSync: true
+
+# Stage 4: the east-west gateway Service (in istioNamespace) must have an address when it
+# is a LoadBalancer. Disable it only for a member without an east-west gateway.
+eastWestCheck:
+  enabled: true
+  service: istio-eastwestgateway
 
 # The check needs only a POSIX shell and curl. Same curl image as the gateways'
 # wait-for-istiod Jobs and charts/spoke-ossm waitForCacerts.
@@ -32,7 +44,8 @@ runAsUser: 100
 
 serviceAccountName: mesh-wiring-verify
 
-# failureThreshold > 1 rides out a single API or istiod blip.
+# failureThreshold > 1 rides out a single API or istiod blip. The check gives itself
+# timeoutSeconds - 2 (at least 1s) for all its requests.
 probe:
   initialDelaySeconds: 15
   periodSeconds: 30

@@ -3,11 +3,20 @@ clusterName: ""
 meshID: mesh1
 networkSuffix: network
 # Keep in sync with ISTIO_VERSION in config/versions.env. Must be in the installed
-# operator's Istio version enum (Sail operator 1.31.1 and OSSM stable-3.4 serve v1.30.5).
+# operator's Istio version enum (Sail operator 1.31.1, pinned in
+# charts/gitops-hub-ocm-placement-appset/values-sail-operator.yaml, and OSSM stable-3.4
+# serve v1.30.5).
 istioVersion: v1.30.5
 
 # Sail profile of the Istio and IstioCNI CRs. values-openshift.yaml sets openshift.
 profile: default
+
+# The IstioCNI CR's spec.values, as is (Sail's CNIValues: cni.*, global.platform). The
+# default profile writes the CNI plugin to /opt/cni/bin and its config to /etc/cni/net.d;
+# a distribution that keeps them elsewhere needs its platform, e.g. on k3s:
+#   istioCni: {values: {global: {platform: k3s}}}
+istioCni:
+  values: {}
 
 # istiod sized for the 20-cluster / 10k-service campaign: fixed replicas (no HPA) and
 # Guaranteed QoS. Every replica caches the whole mesh, so extra replicas do not cut memory.

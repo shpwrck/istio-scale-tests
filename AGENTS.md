@@ -8,7 +8,7 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
 2. `terraform/platform/`: ACM + OpenShift GitOps on the hub and spoke registration. Clusters come from
    ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
-   ApplicationSets through ACM Placement.
+   ApplicationSets (members by cluster-Secret label on Kubernetes, by ACM Placement on OpenShift).
 4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
    tuning, and the read-only gateway-api check) plus a shared library in `tests/lib/`.
 
@@ -18,8 +18,12 @@ and the upstream cert-manager, External Secrets and Sail operator charts. It is 
 ([docs/runbooks/kind-lab](docs/runbooks/kind-lab/README.md)). OpenShift (`platform = "openshift"`)
 is an optional, untested profile: ROSA, ACM, OpenShift GitOps, ACM Placement and OSSM through OLM
 belong to it only. Keep both working: a chart that differs by platform gets a
-`values-openshift.yaml` overlay (member charts, suite charts) or a `platform-*.yaml` preset (the
-ApplicationSet chart), and Kubernetes stays the default.
+`values-openshift.yaml` overlay (member charts, suite charts) or a `platform-*.yaml` overlay (the
+ApplicationSet chart, whose `values-*.yaml` are the per-component presets), and Kubernetes stays
+the default. Every repo chart an ApplicationSet deploys has a `values-openshift.yaml` (`{}` when
+nothing differs), since its OpenShift Applications list it (`tests/lib/test/chart-platforms.bats`
+checks). The suites add their chart's overlay when a member serves OpenShift's API groups
+(`tests/lib/platform.sh`; `TEST_PLATFORM` overrides the detection).
 
 Source of truth for mesh procedures: on Kubernetes, the [Sail operator multicluster docs](https://github.com/istio-ecosystem/sail-operator/blob/main/docs/deployment-models/multicluster.adoc)
 and upstream Istio's [multi-primary on different networks](https://istio.io/latest/docs/setup/install/multicluster/multi-primary_multi-network/);
@@ -44,12 +48,20 @@ which wins over the upstream docs there when they disagree.
   `local-exec`; keep their names (generated kubeconfigs reference them).
 - **`--dry-run`:** scripts that change a cluster accept `--dry-run` and run it without a reachable
   cluster. Annotate with `# ci-dry-run: <args>` (or `# ci-dry-run-skip: <reason>`) so CI runs it.
+  Exempt: the `terraform/scripts/` `local-exec` helpers. Terraform runs them, so `terraform plan`
+  is their dry run; test them with bats against a stub `kubectl` (`tests/lib/test/argocd-*.bats`).
+  The member's bootstrap credential (`create-argocd-cluster-secret.sh`) stays in that script, not
+  a chart: Argo CD needs it before it can reach the member.
 - **Version pins:**
   - deployed Istio: `istioVersion` in `charts/spoke-ossm/values.yaml`; Sail operator chart:
     `charts/gitops-hub-ocm-placement-appset/values-sail-operator.yaml` (it must list
     `istioVersion`); External Secrets chart: `values-external-secrets.yaml` there; cert-manager
     chart: `charts/gitops-hub-apps/values.yaml`; Argo CD chart: `argocd_chart_version` in
     `terraform/platform/variables.tf`; OSSM channel (OpenShift): `charts/spoke-ossm-operator/values.yaml`
+  - the curl image of the wiring gate and the wait Jobs (`docker.io/curlimages/curl:8.22.0`):
+    `charts/mesh-wiring-verify/values.yaml`, `waitForCacerts.image` in `charts/spoke-ossm/values.yaml`
+    and both gateways' `waitForIstiod.image`, each with a keep-in-sync comment naming the others
+    (`charts/spoke-east-west-gateway/README.md` repeats it)
   - ACM/GitOps channels: `terraform/platform/variables.tf`
   - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
     keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`).
@@ -73,6 +85,11 @@ which wins over the upstream docs there when they disagree.
   that shapes a run needs such a key, read before the flag parser: the `--config` vocabulary is the
   `options.env` exports matching the suite's key list (`config_suite_prefixes`), so the key also
   makes it config-settable. A sweep axis gets a plural CSV key that falls back to the singular one.
+- Platform record: every TSV writer and placeholder calls `platform_probe` before any window and
+  writes `platform_preamble_lines` next to `config_preamble_lines`; a run's markdown summary adds
+  `platform_md_row` after its `| Run config |` row; a report merges the record over its inputs with
+  `platform_report_values` (`tests/lib/platform.sh`; `tests/lib/test/config-suites.bats` checks the
+  pairing). `TEST_PLATFORM` is a key of every suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
 
 ## Repository map
 
@@ -92,7 +109,7 @@ which wins over the upstream docs there when they disagree.
 | `charts/hub-kubeconfig-from-argosecret/`, `charts/hub-mesh-push-secrets/` | ESO: member kubeconfigs on the hub; push `cacerts` + Istio remote secrets |
 | `charts/spoke-istio-namespaces/`, `charts/spoke-ossm-operator/`, `charts/spoke-ossm/` | Member namespaces, Sail operator (OSSM through OLM on OpenShift; the upstream chart on Kubernetes), Istio/IstioCNI (waits for `cacerts`) + tuning baseline |
 | `charts/spoke-ingress-gateway/`, `charts/spoke-east-west-gateway/` | Member gateways |
-| `charts/mesh-wiring-verify/` | Always-on gate per member (remote secrets, istiod ingestion, shared root) |
+| `charts/mesh-wiring-verify/` | Always-on gate per member (remote secrets, istiod ingestion and sync, shared root, east-west address) |
 | `charts/mesh-verify/`, `charts/mesh-verify-appset.yaml` | On-demand cross-cluster echo check |
 | `charts/mesh-verify-gateway-api/`, `charts/mesh-verify-gateway-api-appset.yaml` | On-demand Gateway API check: HTTPRoutes on every member, echo workload on one (`tests/gateway-api`) |
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
@@ -109,7 +126,8 @@ which wins over the upstream docs there when they disagree.
   audit, bats, and every `# ci-dry-run:` script against an empty kubeconfig (no cluster needed).
   Required before merging changes to `tests/lib/`.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
-  (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its `values-openshift.yaml`.
+  (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its `values-openshift.yaml`;
+  each ApplicationSet preset with both platform overlays (`platform-kubernetes.yaml`, `platform-openshift.yaml`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
 - CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks on
   macOS. The job names are required checks; don't rename them.

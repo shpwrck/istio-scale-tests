@@ -1,3 +1,10 @@
+# The hub's Argo CD tuning, set only here. openshift: this chart renders it into the ArgoCD CR.
+# kubernetes: terraform/platform/platform_gitops.tf (argocd_upstream_values) maps these keys onto
+# the argo-cd chart: controller.appSync, .processors, .kubernetesShardingAlgorithm and
+# .resources, repo.replicas and .resources, server.resources, applicationSetResources,
+# resourceExclusions and resourceHealthChecks. The rest (name, applicationSet,
+# controller.sharding, controller.shardingAlgorithm) is the CR's only; on kubernetes the
+# controller replica count comes from argocd_clusters_per_shard.
 argocd:
   name: openshift-gitops
   applicationSet:
@@ -12,7 +19,14 @@ argocd:
       minShards: 1
       maxShards: 20
       clustersPerShard: 3
+    # openshift: consistent-hashing, with terraform/platform's controller restart once the
+    # cluster Secrets exist (argocd_restart_controller_after_cluster_secrets; tested on ROSA).
     shardingAlgorithm: consistent-hashing
+    # kubernetes: round-robin. The replicas start before any Application exists, and
+    # consistent-hashing's bounded loads count Applications per destination server, so the
+    # replicas disagree on who owns a spoke and some spokes get no controller. Round-robin
+    # sorts the clusters and assigns index mod replicas, the same on every replica.
+    kubernetesShardingAlgorithm: round-robin
     processors:
       status: 50
       operation: 25
@@ -52,8 +66,10 @@ argocd:
       cpu: "500m"
       memory: 1Gi
 
-  # Replaces Argo CD's built-in resource.exclusions, so it restates the 3.x
-  # defaults (high-churn kinds) plus Events. Without them the controller caches
+  # Replaces Argo CD's built-in resource.exclusions (and the argo-cd chart's default list on
+  # kubernetes), so it restates the chart 10.9.6 defaults (keep in sync: argocd_chart_version
+  # in terraform/platform/variables.tf): high-churn kinds, Cilium's internal objects and
+  # Kyverno's reports, plus Events. Without them the controller caches
   # every EndpointSlice on every cluster and OOMs on a busy hub.
   resourceExclusions:
     - apiGroups: ["", "events.k8s.io"]
@@ -73,6 +89,12 @@ argocd:
       clusters: ["*"]
     - apiGroups: ["cert-manager.io"]
       kinds: ["CertificateRequest"]
+      clusters: ["*"]
+    - apiGroups: ["cilium.io"]
+      kinds: ["CiliumIdentity", "CiliumEndpoint", "CiliumEndpointSlice"]
+      clusters: ["*"]
+    - apiGroups: ["kyverno.io", "reports.kyverno.io", "wgpolicyk8s.io"]
+      kinds: ["PolicyReport", "ClusterPolicyReport", "EphemeralReport", "ClusterEphemeralReport", "AdmissionReport", "ClusterAdmissionReport", "BackgroundScanReport", "ClusterBackgroundScanReport", "UpdateRequest"]
       clusters: ["*"]
 
   # Argo CD has no built-in health for Sail's Istio/IstioCNI, so it would call

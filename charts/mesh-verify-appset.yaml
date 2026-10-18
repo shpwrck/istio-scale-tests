@@ -2,8 +2,9 @@
 # mesh-verify echo workload on every mesh member.
 # Keep the <repo-url>, <revision>, <platform> and <gitops-namespace> placeholders in git
 # and fill them in on the way to the hub, from what the hub's root Application syncs (set
-# by terraform/platform), so the check deploys the same charts as the mesh. Applied as
-# the placeholders, this Application shows a ComparisonError and deploys nothing.
+# by terraform/platform), so the check deploys the same charts as the mesh. Applied
+# unfilled, kubectl fails at once (namespaces "<gitops-namespace>" not found); with only
+# <repo-url> or <revision> left, the Application shows a ComparisonError and deploys nothing.
 # Apply:  NS=argocd PLATFORM=kubernetes   # openshift: NS=openshift-gitops PLATFORM=openshift
 #         read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application \
 #           hub-gitops-root -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')

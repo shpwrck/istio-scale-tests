@@ -6,7 +6,8 @@
 #     by terraform/platform), so the check deploys the same charts as the mesh. Applied as the
 #     placeholders, this Application shows a ComparisonError and deploys nothing;
 #   - <platform> and <gitops-namespace>: kubernetes and argocd, or openshift and
-#     openshift-gitops (terraform/platform output platform and gitops_namespace);
+#     openshift-gitops (terraform/platform output platform and gitops_namespace). With
+#     <gitops-namespace> left, kubectl fails at once (namespaces "<gitops-namespace>" not found);
 #   - <workload-cluster>: the Argo CD cluster name of the member that runs the workload (its
 #     kubeconfig context, which terraform/platform registers; on openshift the ACM
 #     ManagedCluster name). Applied as the placeholder, every member's Application fails to

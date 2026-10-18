@@ -8,26 +8,52 @@ metadata:
 data:
   readiness.sh: |
     #!/bin/sh
-    # Exit 0 (Ready) only if this cluster is fully wired into the mesh.
-    # Stage 1 counts remote secrets; stage 2 reads istiod_managed_clusters from
-    # istiod's unauthenticated /metrics (its /debug endpoints are not usable here).
-    # POSIX sh and curl: the Kubernetes API is read with the pod's ServiceAccount token.
+    # Exit 0 (Ready) only if this cluster is fully wired into the mesh. The stages, in order:
+    #   1. the remote secrets, counted from a Table listing (metadata only, never secret data);
+    #   3. istiod signs with the shared mesh root from cacerts (no istiod needed, so before 2);
+    #   4. the east-west gateway Service has an address (the other members reach this one there);
+    #   2. istiod has ingested the members (istiod_managed_clusters) and synced every remote
+    #      one (istiod_remote_cluster_sync_status), from its unauthenticated /metrics (its
+    #      /debug endpoints are not usable here).
+    # POSIX sh and curl: the Kubernetes API is read with the pod's ServiceAccount token. Every
+    # request gets at most what is left of CHECK_TIMEOUT (the deployment sets it below the
+    # probe's timeoutSeconds), so a slow API gives a NotReady reason, not a bare probe timeout.
     set -u
 
     NS="${ISTIO_NAMESPACE:-istio-system}"
     EXPECTED="${EXPECTED_MEMBERS:-0}"
     SA=/var/run/secrets/kubernetes.io/serviceaccount
+    CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
+    DEADLINE=$(( $(date +%s) + CHECK_TIMEOUT ))
+
+    # budget WHAT: sets MT, the seconds the next request may take (CURL_TIMEOUT, or less when
+    # less is left before DEADLINE); NotReady when nothing is left. Call it directly, never in
+    # $(...): its exit must end the script.
+    budget() {
+      left=$(( DEADLINE - $(date +%s) ))
+      if [ "$left" -lt 1 ]; then
+        echo "NotReady: the ${CHECK_TIMEOUT}s check budget ran out before ${1} (slow API server or istiod)" >&2
+        exit 1
+      fi
+      MT="${CURL_TIMEOUT:-5}"
+      if [ "$left" -lt "$MT" ]; then MT="$left"; fi
+    }
 
     # api_get PATH ACCEPT: sets BODY and CODE (000 when the request itself failed).
     api_get() {
-      resp=$(curl -sS --max-time "${CURL_TIMEOUT:-5}" -A mesh-wiring-verify --cacert "$SA/ca.crt" \
+      budget "GET $1"
+      resp=$(curl -sS --max-time "$MT" -A mesh-wiring-verify --cacert "$SA/ca.crt" \
         -H "Authorization: Bearer $(cat "$SA/token")" -H "Accept: $2" \
         -w '\n%{http_code}' "https://kubernetes.default.svc$1")
+      rc=$?
       CODE=$(printf '%s\n' "$resp" | tail -n 1)
       BODY=$(printf '%s\n' "$resp" | sed '$d')
       resp=
+      if [ "$rc" = 28 ]; then CODE="000, no answer within ${MT}s"; fi
     }
-    # The value of the first "root-cert.pem" key in a JSON object.
+    # The value of a "root-cert.pem" string key: the greedy .* takes the last one on the first
+    # line that has one. The API's JSON is one line, and managedFields' "f:root-cert.pem":{} is
+    # not a string, so that is the data key.
     root_cert_field() { sed -n 's/.*"root-cert\.pem": *"\([^"]*\)".*/\1/p' | head -n 1; }
     # PEM (or a JSON string of it) to its base64 body: no markers, no line breaks.
     pem_body() { tr -d '\r\n' | sed -e 's/\\n//g' -e 's/-----[A-Z ]*-----//g'; }
@@ -48,8 +74,10 @@ data:
 
     # Stage 3 (before 2, it needs no istiod): istiod must sign with the shared mesh
     # root from cacerts. istiod reads cacerts only at startup; started without it,
-    # it falls back to a self-signed root and cross-cluster mTLS fails.
-    ca=unchecked
+    # it falls back to a self-signed root and cross-cluster mTLS fails. root= is the
+    # first 16 hex digits of the root certificate's SHA-256: the same on every member
+    # when they share one root.
+    ca=unchecked root=unchecked
     if [ "${CA_CHECK_ENABLED:-true}" = "true" ]; then
       api_get "/api/v1/namespaces/${NS}/secrets/cacerts" application/json
       case "$CODE" in
@@ -57,9 +85,15 @@ data:
         404) echo "NotReady: no cacerts secret in ${NS}" >&2; exit 1 ;;
         *) echo "NotReady: cannot read cacerts in ${NS} (HTTP ${CODE})" >&2; exit 1 ;;
       esac
-      want=$(printf '%s\n' "$BODY" | root_cert_field | base64 -d 2>/dev/null | pem_body)
+      rootpem=$(printf '%s\n' "$BODY" | root_cert_field | base64 -d 2>/dev/null)
       # The response also holds the CA key; drop it.
       BODY=
+      want=$(printf '%s\n' "$rootpem" | pem_body)
+      first=$(printf '%s\n' "$rootpem" | awk '/-----BEGIN CERTIFICATE-----/ { f = 1 } f { print } /-----END CERTIFICATE-----/ { if (f) exit }' | pem_body)
+      root=unknown
+      if [ -n "$first" ] && printf '%s' "$first" | base64 -d >/dev/null 2>&1; then
+        root=$(printf '%s' "$first" | base64 -d | sha256sum | cut -c1-16)
+      fi
       api_get "/api/v1/namespaces/${NS}/configmaps/istio-ca-root-cert" application/json
       case "$CODE" in
         200) ;;
@@ -79,11 +113,36 @@ data:
       ca=shared
     fi
 
+    # Stage 4: the east-west gateway Service has an address. Without one (a LoadBalancer
+    # <pending>), the other members have nowhere to send this member's cross-network traffic.
+    eastwest=unchecked
+    if [ "${EASTWEST_CHECK_ENABLED:-true}" = "true" ]; then
+      svc="${EASTWEST_SERVICE:-istio-eastwestgateway}"
+      api_get "/api/v1/namespaces/${NS}/services/${svc}" application/json
+      case "$CODE" in
+        200) ;;
+        404) echo "NotReady: no east-west gateway Service ${NS}/${svc}" >&2; exit 1 ;;
+        *) echo "NotReady: cannot read the Service ${NS}/${svc} (HTTP ${CODE})" >&2; exit 1 ;;
+      esac
+      type=$(printf '%s' "$BODY" | grep -oE '"type": *"[A-Za-z]*"' | head -n 1 | sed 's/.*"\([A-Za-z]*\)"$/\1/')
+      if [ "$type" = LoadBalancer ]; then
+        eastwest=$(printf '%s' "$BODY" | grep -oE '"ingress": *\[\{"(ip|hostname)": *"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+        if [ -z "$eastwest" ]; then
+          echo "NotReady: the east-west gateway Service ${NS}/${svc} has no external address yet (LoadBalancer <pending>)" >&2
+          exit 1
+        fi
+      else
+        eastwest="${type:-unknown}"
+      fi
+    fi
+    BODY=
+
     # Stage 2: clusters istiod has ingested (local + remote).
     if [ "${ISTIOD_CHECK_ENABLED:-true}" = "true" ]; then
       url="http://${ISTIOD_HOST:-istiod.istio-system.svc}:${ISTIOD_PORT:-15014}/metrics"
-      body=$(curl -sf --max-time "${CURL_TIMEOUT:-5}" "$url") || {
-        echo "NotReady: istiod metrics unreachable at ${url}" >&2
+      budget "reading ${url}"
+      body=$(curl -sf --max-time "$MT" "$url") || {
+        echo "NotReady: istiod metrics unreachable at ${url} (no answer within ${MT}s, or an error)" >&2
         exit 1
       }
       get_metric() {
@@ -111,9 +170,35 @@ data:
         echo "NotReady: istiod sees ${remote_n:-0} remote clusters < expected $(( EXPECTED - 1 )) (N-1)" >&2
         exit 1
       fi
-      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED} ca=${ca}"
+      # Managed is not synced: istiod counts a remote cluster as soon as its secret parses. One
+      # whose API server it cannot reach or use (the URL, CA or token in the remote secret)
+      # stays syncing, then timeout, and istiod goes Ready anyway after
+      # PILOT_REMOTE_CLUSTER_TIMEOUT. So at least N-1 (with expectedMembers 0: every managed
+      # remote) must be synced. closed counts as synced: when a remote secret changes, istiod
+      # (1.30) syncs a new connection, then stops the old one, and that stop overwrites the
+      # metric; a new connection that cannot sync stays timeout and the old one keeps running.
+      # A deleted cluster reads 0 for every status. The metric is set on each (re)connect
+      # only, so a token revoked later still reads synced (istiod's log shows the errors).
+      synced=unchecked
+      if [ "${REQUIRE_REMOTE_SYNC:-true}" = "true" ]; then
+        if [ "$EXPECTED" -gt 0 ]; then need=$(( EXPECTED - 1 )); else need=${remote_n:-0}; fi
+        # "<cluster> <status>" for each status sample whose value is 1.
+        states=$(printf '%s\n' "$body" | grep -E '^istiod_remote_cluster_sync_status\{' |
+          awk '$NF + 0 == 1 { c = $0; sub(/.*[{,]cluster="/, "", c); sub(/".*/, "", c); s = $0; sub(/.*[{,]status="/, "", s); sub(/".*/, "", s); print c, s }')
+        if [ "$need" -gt 0 ] && ! printf '%s\n' "$body" | grep -q '^istiod_remote_cluster_sync_status{'; then
+          echo "NotReady: istiod exports no istiod_remote_cluster_sync_status (Istio before 1.29?), so the ${need} remote cluster(s) cannot be checked as synced; set istiodCheck.requireRemoteSync=false to skip this" >&2
+          exit 1
+        fi
+        synced=$(printf '%s\n' "$states" | awk '$2 == "synced" || $2 == "closed" { k++ } END { print k + 0 }')
+        if [ "$synced" -lt "$need" ]; then
+          pending=$(printf '%s\n' "$states" | awk '$1 != "" && $2 != "synced" && $2 != "closed" { printf "%s%s (%s)", (k++ ? ", " : ""), $1, $2 }')
+          echo "NotReady: istiod has synced ${synced} remote cluster(s) < ${need}; not synced: ${pending:-none reported}. This member's istiod must reach each member's API server at the URL in its remote secret" >&2
+          exit 1
+        fi
+      fi
+      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED} ca=${ca} synced=${synced} root=${root} eastwest=${eastwest}"
       exit 0
     fi
 
-    echo "Ready: secrets=${n} expected=${EXPECTED} ca=${ca} (istiod check disabled)"
+    echo "Ready: secrets=${n} expected=${EXPECTED} ca=${ca} root=${root} eastwest=${eastwest} (istiod check disabled)"
     exit 0

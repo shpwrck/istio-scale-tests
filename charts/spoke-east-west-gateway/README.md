@@ -25,5 +25,5 @@ A `LoadBalancer` Service with no address (`<pending>`) gives this symptom: `isti
 | `service.annotations` | `{}` | MetalLB pool or Istio node selector. |
 | `service.nodePorts.tls` | `"31443"` | Fixed nodePort for `15443`. |
 | `replicaCount` / `autoscaling.*` | `1` / off | A PodDisruptionBudget renders only with more than one replica. |
-| `waitForIstiod.image` | `curlimages/curl:8.22.0` | PreSync Job that waits for istiod. |
+| `waitForIstiod.image` | `docker.io/curlimages/curl:8.22.0` | PreSync Job that waits for istiod. |
 | `waitForIstiod.runAsUser` | `100` | The image's UID; `values-openshift.yaml` clears it (OpenShift assigns one). |

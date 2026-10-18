@@ -60,18 +60,18 @@ variable "hub_cluster_context" {
 variable "spoke_cluster_contexts" {
   type        = list(string)
   default     = []
-  description = "Kubeconfig contexts of the spoke (mesh member) clusters. Context names become the Argo CD cluster names (and ACM ManagedCluster names on openshift), so they must be DNS-1123 labels; the test suites' per-cluster Services allow at most 46 characters. Required when cluster_provider = 'kubeconfig'."
+  description = "Kubeconfig contexts of the spoke (mesh member) clusters. Context names become the Argo CD cluster names (and ACM ManagedCluster names on openshift), so they must be DNS-1123 labels of at most 44 characters: the hub's per-member objects push-remote-secret-<ctx> and <ctx>-spoke-istio-system must fit in 63 (the network label <ctx>-network too), and the test suites' per-cluster Services (dataplane-server-<ctx>) allow at most 46 and need a letter first. Required when cluster_provider = 'kubeconfig'."
 
   validation {
-    condition     = alltrue([for c in var.spoke_cluster_contexts : can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", c)) && length(c) <= 63])
-    error_message = "spoke_cluster_contexts must be DNS-1123 labels (lowercase letters, digits and '-', at most 63 characters): they name the Argo CD clusters and the Istio networks. Rename a context with kubectl config rename-context (aws eks update-kubeconfig --alias for an EKS ARN)."
+    condition     = alltrue([for c in var.spoke_cluster_contexts : can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", c)) && length(c) <= 44])
+    error_message = "spoke_cluster_contexts must be DNS-1123 labels (lowercase letters, digits and '-') of at most 44 characters: they name the Argo CD clusters, the Istio networks and per-member objects such as push-remote-secret-<ctx> (63 at most). Rename a context with kubectl config rename-context (aws eks update-kubeconfig --alias for an EKS ARN)."
   }
 }
 
 variable "cluster_api_url_overrides" {
   type        = map(string)
   default     = {}
-  description = "kubeconfig mode: the API URL the hub reaches a cluster at, keyed by context, when the kubeconfig's server URL works only from this machine. kind writes https://127.0.0.1:<port>; from the hub use https://<cluster>-control-plane:6443 on the kind Docker network. The URL goes into the Argo CD cluster Secret, and from there into the ESO SecretStores and the Istio remote secrets."
+  description = "kubeconfig mode: the API URL a member is registered at, keyed by context, when the kubeconfig's server URL works only from this machine (kind and kubeadm write https://127.0.0.1:<port>). The URL goes into the member's Argo CD cluster Secret, and from there into the ESO SecretStores and the Istio remote secrets, so the hub's pods and every other member's istiod must reach it. On kind use https://<cluster>-control-plane:6443 (the kind Docker network). A hub entry changes nothing: only the ROSA token path reads the hub's URL."
 
   validation {
     condition     = alltrue([for k, v in var.cluster_api_url_overrides : startswith(v, "https://")])
@@ -87,8 +87,13 @@ variable "cluster_api_url_overrides" {
 
 variable "spoke_service_account_namespace" {
   type        = string
-  default     = "kube-system"
-  description = "platform kubernetes: namespace of the ServiceAccount (gitops_managed_service_account_name) that Terraform creates on every spoke, bound to cluster-admin. Its token authenticates Argo CD, the ESO pushes and the Istio remote secrets to the spoke. Removed again on destroy."
+  default     = "istio-scale-tests-access"
+  description = "platform kubernetes: namespace of the ServiceAccount (gitops_managed_service_account_name) that Terraform creates on every spoke, bound to cluster-admin. Its token authenticates Argo CD, the ESO pushes and the Istio remote secrets to the spoke. Terraform creates the namespace when it does not exist (labelled istio-scale-tests/created-by) and deletes it on destroy only with that label. Not kube-system: its ServiceAccounts share the API server's workload-high priority level with the controllers the suites measure. Changing it moves the ServiceAccount on the next apply and removes the old one."
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.spoke_service_account_namespace)) && length(var.spoke_service_account_namespace) <= 63
+    error_message = "spoke_service_account_namespace must be a namespace name (a DNS-1123 label of at most 63 characters)."
+  }
 }
 
 # --------------------------------------------------------------------------
@@ -170,6 +175,8 @@ variable "argocd_chart_repository" {
   description = "platform kubernetes: Helm repository of the argo-cd chart (a mirror works)."
 }
 
+# Keep in sync: terraform.tfvars.example, and charts/argocd-config/values.yaml restates this
+# chart's resource exclusions.
 variable "argocd_chart_version" {
   type        = string
   default     = "10.9.6"
@@ -270,13 +277,13 @@ variable "argocd_clusters_per_shard" {
 variable "argocd_restart_controller_after_cluster_secrets" {
   type        = bool
   default     = true
-  description = "platform openshift: after the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh). Upstream Argo CD runs a fixed replica count, so kubernetes skips it."
+  description = "platform openshift: after the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh). On kubernetes the controllers run a fixed replica count with round-robin sharding, on which every replica agrees, so it is skipped."
 }
 
 variable "argocd_app_status_timeout_sec" {
   type        = number
   default     = 900
-  description = "Post-apply check: fail when an Argo CD Application still has an empty sync or health status (no controller shard owns its destination cluster), or a spoke still has no Application (its ApplicationSets generated none), after this many seconds. 0 disables the check."
+  description = "Post-apply check: fail when, after this many seconds, an Argo CD Application still has an empty sync or health status (no controller shard owns its destination cluster), a mesh member still has no Application (its ApplicationSets generated none), or Argo CD still cannot reach a cluster at its cluster-Secret URL (sync Unknown with a live-state ComparisonError), or has not compared an Application again since the check started (it requests one refresh of every Application, so a status from before the apply never counts). 0 disables the check."
 
   validation {
     condition     = var.argocd_app_status_timeout_sec == 0 || var.argocd_app_status_timeout_sec >= 600
@@ -287,7 +294,7 @@ variable "argocd_app_status_timeout_sec" {
 variable "argocd_max_shards" {
   type        = number
   default     = 20
-  description = "platform openshift: ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards."
+  description = "platform openshift: ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards. No effect on kubernetes, where the controller replica count is the computed minShards."
 
   validation {
     condition     = var.argocd_max_shards > 0 && var.argocd_max_shards == floor(var.argocd_max_shards)

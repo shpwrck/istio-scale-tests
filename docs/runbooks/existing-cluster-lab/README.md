@@ -42,6 +42,8 @@ below are owned here.
   - the OSSM operator Subscription on the members. Argo adopts it, so deleting the
     `<member>-ossm-operator` Application uninstalls OSSM.
 - Lab overrides in `lab.tfvars`:
+  - `platform = "openshift"`: kubeconfig mode defaults to `kubernetes`, and without this line the
+    plan stops at its hub platform check (terraform/platform/README.md);
   - `acm_install_operator = false`;
   - `acm_keep_managed_clusters_on_destroy = true` (destroy leaves the members registered in ACM);
   - `gitops_install_operator = false`;
@@ -93,15 +95,23 @@ Gateway API multicluster check, on demand. It is read-only apart from the Applic
 istioctl at the mesh's version.
 
 ```bash
-sed -e 's/<workload-cluster>/<member-managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
-  | oc --context <acm-hub-ctx> apply -f -
+NS=openshift-gitops PLATFORM=openshift WORKLOAD=<member-managed-cluster-name>
+read -r REPO REV < <(kubectl --context <acm-hub-ctx> -n "$NS" get application hub-gitops-root \
+  -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+  -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" \
+  -e "s|<workload-cluster>|${WORKLOAD:?}|g" charts/mesh-verify-gateway-api-appset.yaml; }
+fill | kubectl --context <acm-hub-ctx> apply -f -
 tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
   --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx>
-oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+fill | kubectl --context <acm-hub-ctx> delete -f -
 ```
 
-To pin the deployed chart to the commit you run the script from, also replace `main` in
-`targetRevision` and in the `repo.revision` value with that commit; the 2026-10-14 run did this.
+The check deploys the charts at the revision the hub syncs. To pin it to the commit you run the
+script from, set `gitops_app_repo_revision` to that commit and apply first (the `<revision>` then
+reads it); the 2026-10-14 run pinned its commit. This script and `tests/tuning/006-gitops-pause.sh`
+find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD_NAMESPACE` and
+`TUNING_GITOPS_NAMESPACE` override it.
 
 ### Verify and recover
 
@@ -134,16 +144,17 @@ To pin the deployed chart to the commit you run the script from, also replace `m
     8 more minutes here).
   - The hub's External Secrets Application can read Degraded (`CatalogSourcesUnhealthy`) until the
     catalog pods start; it recovers on its own.
-- `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy
+- `kubectl --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy
   (30 apps when no on-demand check is deployed).
-- `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`:
+- `kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
 - Data plane:
-  1. Apply `charts/mesh-verify-appset.yaml` (set both `targetRevision` and the `repo.revision`
-     parameter to your branch).
+  1. Apply `charts/mesh-verify-appset.yaml` with the `fill` recipe in the repo README's "Verify"
+     (`NS=openshift-gitops PLATFORM=openshift`); it deploys the revision the hub syncs.
   2. Curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
      `Host: mesh-verify.local`. Answers alternate between both clusters.
-  3. Remove it with `oc delete -f`, which cascades.
+  3. Remove it with the same `fill`, piped to `kubectl --context <acm-hub-ctx> delete -f -`; the
+     delete cascades.
 - Gateway API check:
   - Expected result: `22 MATCH, 0 DEVIATION, 0 UNKNOWN` and the two answers recorded in
     `docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`.

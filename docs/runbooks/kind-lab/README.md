@@ -4,6 +4,10 @@ A hub and two mesh members as three kind clusters on one Linux host, deployed by
 `terraform/platform` the same way as on any other Kubernetes clusters. Use it to try the repo,
 smoke-run the suites and develop the charts. Don't publish its numbers: the three clusters share
 one host's CPUs and network, so latencies and convergence times describe the host more than Istio.
+Capacity and headroom figures are void too (every node reports the whole host, which the three
+clusters share), and so are remote-path latencies and the remote-minus-local delta: both gateways
+sit behind cloud-provider-kind's Envoy (`ipMode: Proxy` on the Services), a hop that a cloud load
+balancer path does not have.
 
 Last run end to end on 2026-10-18 with kind v0.33.0 (node image `kindest/node:v1.34.11`),
 cloud-provider-kind v0.12.0, Argo CD v3.5.3 and Istio v1.30.5 through the Sail operator 1.31.1:
@@ -13,10 +17,20 @@ gateway-api check (all 22 predictions matched).
 
 ## What you need
 
-- A Linux host with Docker, at least 4 CPUs, 8 GiB of free memory and about 10 GB of free disk.
-  At rest the hub uses about 2.8 GiB of memory and each member about 1.8 GiB.
-- `kind`, [cloud-provider-kind](https://github.com/kubernetes-sigs/cloud-provider-kind), and the
-  tools in [What you need](../../../README.md#what-you-need).
+- A Linux host with Docker, at least 4 CPUs, about 12 GiB of free memory and 15 GB of free disk.
+  At rest the hub uses about 2.8 GiB of memory and each member about 1.8 GiB; during suite runs
+  the three nodes used about 7.3 GiB and their volumes 7.4 GB.
+- `kind` v0.33.0, [cloud-provider-kind](https://github.com/kubernetes-sigs/cloud-provider-kind)
+  v0.12.0, and the tools in [What you need](../../../README.md#what-you-need). On linux/amd64:
+
+  ```bash
+  curl -fsSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+  echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind" | sha256sum -c
+  curl -fsSLO https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.12.0/cloud-provider-kind_0.12.0_linux_amd64.tar.gz
+  echo "5716aca8f01a85172c12f3b6329c70f151bec02c91b6f600c9f230845ee138e6  cloud-provider-kind_0.12.0_linux_amd64.tar.gz" | sha256sum -c
+  tar -xzf cloud-provider-kind_0.12.0_linux_amd64.tar.gz cloud-provider-kind
+  chmod +x kind cloud-provider-kind && sudo mv kind cloud-provider-kind /usr/local/bin/
+  ```
 - Internet access from the host and from the kind nodes: GitHub, the chart repos (Argo CD,
   cert-manager, External Secrets, the Sail operator) and the image registries (Docker Hub,
   quay.io, ghcr.io, registry.k8s.io).
@@ -39,8 +53,10 @@ Put the same two keys in a file under `/etc/sysctl.d/` to keep them across reboo
 ## 2. Clusters
 
 ```bash
+# kind v0.33.0's v1.34 node image, pinned by digest.
+NODE_IMAGE=kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
 for c in hub mesh-1 mesh-2; do
-  kind create cluster --name "$c" --image kindest/node:v1.34.11 --wait 180s
+  kind create cluster --name "$c" --image "$NODE_IMAGE" --wait 180s
 done
 kubectl config get-contexts   # kind-hub, kind-mesh-1, kind-mesh-2
 ```
@@ -57,8 +73,19 @@ cloud-provider-kind
 ```
 
 It gives every `type: LoadBalancer` Service (the ingress and east-west gateways) an address on the
-kind Docker network, and installs the Gateway API CRDs (standard channel) in every kind cluster,
-which the gateway-api check needs.
+kind Docker network, and installs the Gateway API CRDs (v1.6.1, standard channel) in every kind
+cluster, which the gateway-api check needs.
+
+On a host kernel without IPv6 (no `/proc/sys/net/ipv6`) its load balancers never become ready,
+because their Envoy's admin port listens on `::`. Enable IPv6 on the host, or build
+cloud-provider-kind with that listener on IPv4 (the lab's host had no IPv6 and ran this build):
+
+```bash
+git clone --depth 1 --branch v0.12.0 https://github.com/kubernetes-sigs/cloud-provider-kind
+cd cloud-provider-kind
+sed -i -e 's/address: "::"/address: "0.0.0.0"/' -e '/ipv4_compat: true/d' pkg/loadbalancer/proxy.go
+make build   # bin/cloud-provider-kind
+```
 
 ## 4. Deploy
 
@@ -67,21 +94,21 @@ In `terraform/platform`, write `terraform.tfvars`:
 ```hcl
 platform         = "kubernetes"
 cluster_provider = "kubeconfig"
-kubeconfig_path  = "~/.kube/config"
+kubeconfig_path  = "~/.kube/config"   # the file kind wrote the contexts to (step 2)
 
 hub_cluster_context    = "kind-hub"
 spoke_cluster_contexts = ["kind-mesh-1", "kind-mesh-2"]
 
-# kind writes https://127.0.0.1:<port>, which works only from the host. The clusters reach each
-# other by node container name on the kind Docker network.
+# kind writes https://127.0.0.1:<port>, which works only from the host. The hub's pods and the
+# other member's istiod reach a member by its node container name on the kind Docker network.
+# The hub needs no entry: in kubeconfig mode nothing reads the hub's URL.
 cluster_api_url_overrides = {
-  "kind-hub"    = "https://hub-control-plane:6443"
   "kind-mesh-1" = "https://mesh-1-control-plane:6443"
   "kind-mesh-2" = "https://mesh-2-control-plane:6443"
 }
 
 gitops_app_repo_url      = "https://github.com/<org>/istio-scale-tests.git"
-gitops_app_repo_revision = "main"
+gitops_app_repo_revision = "<commit>"   # the commit under test: a branch can move under the lab
 
 # Small requests: one host runs all three clusters (the chart defaults are sized for 20).
 argocd_helm_values = {
@@ -124,8 +151,10 @@ kubectl --context kind-hub -n argocd get applications.argoproj.io
 for m in kind-mesh-1 kind-mesh-2; do
   kubectl --context "$m" exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
 done
-# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 root=<fingerprint> eastwest=<address>
 ```
+
+`root=` must read the same on both members.
 
 Then run the end to end echo check in [Verify](../../../README.md#verify) with `kind-hub` as
 `<hub-ctx>` and `kind-mesh-1` as `<mesh-a-ctx>`: answers come from both members. The ingress
@@ -133,24 +162,37 @@ address is on the kind Docker network, which a Linux host reaches directly.
 
 ## 6. Smoke-run a suite
 
-From the repo root:
+From the repo root (`config/versions.env` defaults to other context names):
 
 ```bash
+export SETUP_CONTEXTS=kind-mesh-1,kind-mesh-2
 tests/propagation/001-setup-propagation-test.sh --contexts kind-mesh-1,kind-mesh-2 --watcher-replicas 2
 tests/propagation/002-run-endpoint-probe.sh --source-context kind-mesh-1 --remote-contexts kind-mesh-2 --iterations 2 --tsv
 tests/propagation/005-report-results.sh --format markdown
 tests/propagation/007-cleanup.sh --contexts kind-mesh-1,kind-mesh-2
 ```
 
-The other suites run the same way; each suite's README starts with its steps. Keep runs small: a
-sweep sized for the 20-cluster campaign does not fit on one host.
+The other suites run the same way: the "Quick start" in each suite's README lists its steps
+(tuning: "Run a sweep"; gateway-api: "Deploy" and "Run"). Keep runs small: a sweep sized for the
+20-cluster campaign does not fit on one host.
 
-The controlplane suite's utilization-% columns read `kubectl top`, and kind has no metrics API.
-Install [metrics-server](https://github.com/kubernetes-sigs/metrics-server) on each member and add
-`--kubelet-insecure-tls` to its container args, because kind's kubelets serve self-signed
-certificates. Without it those columns read `N/A` and the rest of the run is unaffected. In the lab
-metrics-server scraped the kubelets this way, but the metrics API stayed unavailable behind the lab
-host's HTTPS proxy, so `kubectl top` on kind is untested.
+kind has no metrics API, so the controlplane report's four utilization-% columns
+(`istiod_*_pct_of_limit`, `node_*_pct`) read `N/A` and its memory guard reads the gateways' memory
+from Envoy's own stats instead of `kubectl top`; the rest of the run is unaffected. To fill them,
+install [metrics-server](https://github.com/kubernetes-sigs/metrics-server) on each member with
+`--kubelet-insecure-tls`, because kind's kubelets serve self-signed certificates:
+
+```bash
+for m in kind-mesh-1 kind-mesh-2; do
+  kubectl --context "$m" apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.1/components.yaml
+  kubectl --context "$m" -n kube-system patch deployment metrics-server --type=json \
+    -p '[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]'
+done
+```
+
+`node_*_pct` stays void on kind (each node reports the whole host). In the lab metrics-server
+scraped the kubelets this way, but the metrics API stayed unavailable behind the lab host's HTTPS
+proxy, so `kubectl top` on kind is untested.
 
 ## 7. Tear down
 
@@ -168,7 +210,8 @@ balancer container it left behind; remove those with `docker rm -f`.
 | --- | --- |
 | Pods crash with `too many open files` | The inotify limits are too low (step 1). |
 | An operator Application (External Secrets, the Sail operator) stays `Progressing` after it synced | Argo CD's health of the operator's new CRDs is catching up. It cleared by itself within about 10 minutes in the lab. |
-| Gateway Services stay `<pending>` | cloud-provider-kind is not running (step 3). If it runs and logs `SyncLoadBalancerFailed` with `connection reset by peer` on the load balancer's readiness, the host kernel has no IPv6: cloud-provider-kind's Envoy listens on `::`. |
+| Gateway Services stay `<pending>` | cloud-provider-kind is not running (step 3). If it runs and logs `SyncLoadBalancerFailed` with `connection reset by peer` on the load balancer's readiness, the host kernel has no IPv6: build it with the IPv4 admin listener (step 3). |
+| The apply fails: `Argo CD on the hub cannot load state from these clusters`, quoting `https://127.0.0.1:<port>` | That member has no `cluster_api_url_overrides` entry (step 4), so it is registered at the host's loopback, which the hub's pods cannot reach. Add `https://<cluster>-control-plane:6443` for it and apply again. |
 | Image pulls fail with `429 Too Many Requests` | Docker Hub's anonymous pull limit: each cluster pulls its own images. Pull an image once on the host and copy it in with `kind load docker-image <image> --name <cluster>`, or point the nodes' containerd at a mirror (kind's `containerdConfigPatches`). |
 | `kind create cluster` fails to start containers, with `oom_score_adj` errors in the kubelet log | The host is itself a restricted container. Create the clusters with a kind config whose `containerdConfigPatches` sets `restrict_oom_score_adj = true` under `[plugins."io.containerd.grpc.v1.cri"]`. |
 | An Application shows a ComparisonError about the repo | The hub's Argo CD cannot pull `gitops_app_repo_url` at `gitops_app_repo_revision`: check the URL and that the branch is pushed. |

@@ -30,15 +30,16 @@ locals {
       params = {
         "controller.status.processors"    = local.argocd_tuning.controller.processors.status
         "controller.operation.processors" = local.argocd_tuning.controller.processors.operation
-        "controller.sharding.algorithm"   = local.argocd_tuning.controller.shardingAlgorithm
+        "controller.sharding.algorithm"   = local.argocd_tuning.controller.kubernetesShardingAlgorithm
         # No chart needs the repo's git submodules (the bats test frameworks on github.com).
         # Cloning them for every render fails wherever github.com is unreachable (a git mirror).
         "reposerver.enable.git.submodule"               = "false"
         "applicationsetcontroller.enable.git.submodule" = "false"
       }
     }
-    # A fixed replica count: each controller shards the clusters by
-    # ARGOCD_CONTROLLER_REPLICAS, with no operator rescaling it mid-apply.
+    # A fixed replica count, ceil((spokes + 1) / argocd_clusters_per_shard), and round-robin
+    # sharding: every replica sorts the same cluster Secrets and takes every Nth cluster, so
+    # the replicas agree on each cluster's owner without the openshift reshard restart.
     controller = {
       replicas  = local.argocd_computed_min_shards
       resources = local.argocd_tuning.controller.resources
@@ -73,6 +74,15 @@ resource "helm_release" "argocd" {
       condition     = length(keys(var.argocd_config_values)) == 0
       error_message = "argocd_config_values sets the OpenShift GitOps ArgoCD CR (platform openshift). On platform kubernetes put the same settings in argocd_helm_values, in the argo-cd chart's schema (e.g. controller.resources)."
     }
+  }
+}
+
+# With gitops_install_operator = false there is no helm_release.argocd, so neither its
+# precondition nor argocd_helm_values applies: say so instead of ignoring them silently.
+check "argocd_values_unused" {
+  assert {
+    condition     = local.is_openshift || var.gitops_install_operator || (length(keys(var.argocd_helm_values)) == 0 && length(keys(var.argocd_config_values)) == 0)
+    error_message = "gitops_install_operator = false: Terraform installs no Argo CD on platform kubernetes, so it applies neither argocd_helm_values nor argocd_config_values. Give the existing Argo CD those settings yourself (terraform/platform/README.md, Existing clusters)."
   }
 }
 
@@ -498,10 +508,12 @@ resource "helm_release" "mesh_wiring_verify_appset" {
 
 # --- ArgoCD cluster secrets (direct external URL, Terraform-owned) ---
 # kubernetes: the cluster Secrets are how the spokes join at all. The script creates a
-# ServiceAccount bound to cluster-admin on each spoke (spoke_service_account_namespace)
-# and puts its token in the Secret; mesh members carry the istio-mesh-member label the
-# ApplicationSets select. A changed input re-applies the Secret in place;
-# spoke_access_cleanup removes the Secret and the ServiceAccount on destroy.
+# ServiceAccount bound to cluster-admin on each spoke (spoke_service_account_namespace, a
+# namespace it creates unless it exists) and puts its token in the Secret; mesh members
+# carry the istio-mesh-member label the ApplicationSets select. A changed trigger re-runs
+# the script, which updates the Secret in place; a new namespace moves the ServiceAccount
+# there and then removes the old one. spoke_access_cleanup removes the Secret and the
+# ServiceAccount on destroy.
 #
 # openshift: we create these secrets ourselves instead of letting ACM's GitOpsCluster
 # controller generate them. That controller only ever writes an unreachable
@@ -518,12 +530,14 @@ resource "helm_release" "mesh_wiring_verify_appset" {
 resource "terraform_data" "create_argocd_cluster_secret" {
   for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
 
-  triggers_replace = [
+  # The namespace only on kubernetes (it is unused on openshift), appended so that openshift
+  # state keeps its trigger list unchanged.
+  triggers_replace = concat([
     local.platform,
     local.by_cluster[each.key].cluster_api_url,
     contains(local.mesh_member_spoke_set, each.key),
     try(helm_release.acm_managed_cluster[each.key].metadata.revision, ""),
-  ]
+  ], local.is_openshift ? [] : [var.spoke_service_account_namespace])
 
   input = {
     platform           = local.platform
@@ -566,6 +580,7 @@ resource "terraform_data" "create_argocd_cluster_secret" {
 }
 
 # --- kubernetes, destroy-time cleanup: each spoke's cluster Secret and ServiceAccount ---
+# (and its namespace if the script created it; never kube-system or one it did not create).
 # The Secret holds a cluster-admin token for the spoke. A separate resource, so a re-run of
 # create_argocd_cluster_secret (any changed input) never deletes the Secret: that would
 # drop every Application of the spoke. argocd_app_cleanup depends on it, so on destroy the
@@ -647,8 +662,16 @@ resource "terraform_data" "argocd_controller_reshard" {
 # --- Post-apply check: every Application has a sync and health status (BACKLOG 9.1) ---
 # An empty status means no controller shard processes the Application's destination
 # cluster. Fails the apply after argocd_app_status_timeout_sec, naming the cluster. It
-# also waits for every spoke to have Applications: the ApplicationSets generate them
-# minutes after this resource starts (ROSA 2026-10-16: 13 of 40 existed when it ran).
+# also waits for every mesh member to have Applications: the ApplicationSets generate them
+# minutes after this resource starts (ROSA 2026-10-16: 13 of 40 existed when it ran). And it
+# fails when Argo CD cannot reach a cluster at its cluster-Secret URL (sync Unknown with a
+# live-state ComparisonError), quoting the error and naming cluster_api_url_overrides.
+# A status from before the check never counts: a registration change does not make Argo CD
+# compare again (kind, Argo CD 3.5: statuses stayed stale for minutes), so the check requests
+# one refresh of every Application and waits until each has been compared again.
+# Re-runs when the app-of-apps or any cluster Secret registration changes (a new spoke,
+# mesh_member_count, a new URL), and on kubernetes when the argo-cd release does (a new
+# controller replica count re-shards the clusters).
 
 resource "terraform_data" "argocd_app_status_check" {
   count = local.gitops_enabled && var.gitops_app_repo_url != "" && var.argocd_app_status_timeout_sec > 0 ? 1 : 0
@@ -656,6 +679,8 @@ resource "terraform_data" "argocd_app_status_check" {
   triggers_replace = [
     helm_release.gitops_hub_app_of_apps[0].metadata.revision,
     [for r in terraform_data.argocd_controller_reshard : r.id],
+    [for r in terraform_data.create_argocd_cluster_secret : r.id],
+    [for r in helm_release.argocd : r.metadata.revision],
   ]
 
   input = {
@@ -667,7 +692,8 @@ resource "terraform_data" "argocd_app_status_check" {
     gitops_namespace = local.gitops_namespace
     argocd_name      = local.is_openshift ? var.gitops_argocd_cr_name : "argocd"
     timeout_sec      = tostring(var.argocd_app_status_timeout_sec)
-    expected_dests   = join(" ", sort(keys(local.spoke_cluster_keys)))
+    # Only mesh members get Applications (mesh_member_count can leave spokes out).
+    expected_dests = join(" ", local.mesh_member_spoke_keys)
   }
 
   provisioner "local-exec" {
@@ -691,6 +717,7 @@ resource "terraform_data" "argocd_app_status_check" {
     helm_release.mesh_wiring_verify_appset,
     kubernetes_manifest.placement_generator_configmap,
     terraform_data.argocd_controller_reshard,
+    terraform_data.create_argocd_cluster_secret,
   ]
 }
 

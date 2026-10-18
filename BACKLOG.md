@@ -694,6 +694,30 @@ gateway resets are now listed at the top of
   premise needs re-checking against the deployed version (found by the Gateway API check's review).
 - controlplane `--resume` treats two `unknown` config hashes (no sha256 tool) as equal.
 
+## Follow-ups found while making Kubernetes the default
+
+- The Istio remote secrets carry the Argo CD token, which is cluster-admin on the member. Give
+  them a least-privilege reader token instead (a ServiceAccount bound to Istio's `istio-reader`
+  ClusterRole on each member), on both platforms: OpenShift's ManagedServiceAccount token is
+  cluster-admin too.
+- Token rotation on `kubernetes` recreates the ServiceAccount (terraform/platform/README.md,
+  "Rotating a member's token"): a legacy token Secret's token depends only on the ServiceAccount
+  (name and UID) and the Secret's name, so with an RSA signing key (kind's) recreating the Secret
+  brings back the same token. A new Secret name per rotation would rotate in place.
+- The wiring gate cannot see a member token revoked after istiod synced: istiod's
+  `istiod_remote_cluster_sync_status` changes only when it reconnects. Checking the remote secrets'
+  tokens (a TokenReview from the hub) would catch it.
+- Istio 1.30.5 reports a live remote cluster as `closed` after its remote secret changes: the swap
+  stops the old connection after the new one synced, and the old one's stop writes the shared
+  metric (`pkg/kube/multicluster`). The gate counts `closed` as synced; report it upstream. After
+  such a swap one istiod on the kind lab also kept a ConfigMap watch of the old connection running
+  with the revoked token (`watch error in cluster <ctx>: failed to list *v1.ConfigMap:
+  Unauthorized` every minute for over 30 minutes) while `istioctl remote-clusters` read `synced`:
+  report that too, with the remote mesh-config watcher new in 1.30 the first suspect.
+- After a move or a rotation, External Secrets takes up to about 10 minutes to give the other
+  members the new token. Forcing a refresh (the ExternalSecret's and the PushSecret's
+  `force-sync` annotation) could cut that; untested.
+
 ## Validation environment
 
 The lab covered tasks 2, 3 (except AWS load balancers), 5 and 6 at small size, and task 8. The ROSA

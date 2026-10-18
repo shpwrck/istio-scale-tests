@@ -7,7 +7,7 @@ with a shared root CA.
 
 Vanilla Kubernetes is the default (`platform = "kubernetes"`), with upstream Argo CD and the
 upstream Sail operator. It is tested on kind; other conformant clusters (kubeadm, EKS, ...) need
-only what [What you need](#what-you-need) lists. OpenShift is an optional profile
+what [What you need](#what-you-need) lists, its capacity included. OpenShift is an optional profile
 (`platform = "openshift"`): Red Hat OpenShift Service Mesh 3, OpenShift GitOps and ACM, on existing
 clusters or new ROSA ones. It is kept for teams that run OpenShift but is untested: its last end to
 end run (ROSA, October 2026) predates the switch to Kubernetes by default.
@@ -46,10 +46,28 @@ flowchart TB
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
 - `python3` with PyYAML (tuning suite only)
 - Mesh members must be able to provision `type: LoadBalancer` Services (a cloud provider, MetalLB,
-  or cloud-provider-kind on kind), and the hub must reach every member's API server.
-- The Gateway API CRDs on every member for the gateway-api check (OpenShift installs them).
-- The metrics API (metrics-server) on every member for the controlplane suite's utilization-%
-  columns (OpenShift ships it); without it those columns read `N/A`.
+  or cloud-provider-kind on kind). Each member is registered at one API server URL (its
+  kubeconfig context's server, or `cluster_api_url_overrides`): the hub's pods and every other
+  member's istiod must all reach it.
+- Capacity, at the chart defaults (sized for the 20-cluster campaign): each member requests about
+  12.2 CPU / 49 GiB (istiod 3 × 4 CPU / 16 GiB, the two gateways 0.2 CPU / 1.1 GiB). The hub's
+  Argo CD requests about 3 CPU / 6 GiB plus 2 CPU / 4 GiB per application controller, one per
+  3 clusters counting the hub (`argocd_clusters_per_shard`): 5 CPU / 10 GiB with 2 members,
+  17 CPU / 34 GiB with 20. Smaller clusters need the overrides in
+  [terraform.tfvars.example](terraform/platform/terraform.tfvars.example) (`gitops_app_overrides`
+  for istiod, `argocd_helm_values` for Argo CD), as the
+  [kind lab](docs/runbooks/kind-lab/README.md) sets them.
+- The CNI plugin and its config where the Sail `default` profile puts them (`/opt/cni/bin`,
+  `/etc/cni/net.d`). k3s, MicroK8s and other distributions that keep them elsewhere need
+  `istioCni.values` in `charts/spoke-ossm` (e.g. `global.platform: k3s`) through
+  `gitops_app_overrides` for `spoke-ossm-appset`.
+- The Gateway API CRDs on every member for the gateway-api check (OpenShift installs them; on
+  Kubernetes use the pinned install in [tests/gateway-api](tests/gateway-api/README.md#deploy)).
+- The metrics API (metrics-server) on every member for the controlplane report's utilization-%
+  columns (OpenShift ships it); without it `istiod_*_pct_of_limit` and `node_*_pct` read `N/A`
+  and the memory guard reads the gateways from Envoy's stats. kind: see its
+  [runbook](docs/runbooks/kind-lab/README.md#6-smoke-run-a-suite), which also lists the figures a
+  kind lab cannot give.
 
 ## Deploy
 
@@ -78,13 +96,18 @@ kubectl --context <hub-ctx> get applications.argoproj.io -n argocd
 ## Verify
 
 Every member runs `mesh-wiring-verify`, a gate that is Ready only when the member holds a remote
-secret for every member, istiod has ingested them all, and istiod signs with the shared root.
-Otherwise its Argo Application goes Degraded.
+secret for every member, istiod has ingested them all and synced every other member, istiod
+signs with the shared root, and the east-west gateway has an address. Otherwise its Argo
+Application goes Degraded, and the gate's output says why.
 
 ```bash
 kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
-# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 root=<fingerprint> eastwest=<address>
 ```
+
+`root=` is the first 16 hex digits of the shared root certificate's SHA-256, so it is the same on
+every member. `synced=` comes from istiod's metric, which changes only when istiod (re)connects:
+a member token revoked later still reads synced, and shows as errors in istiod's log.
 
 End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
 from every member. The manifest keeps placeholders for the repo, the revision, the platform and the
@@ -98,9 +121,15 @@ read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application hub-gi
 fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
   -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" charts/mesh-verify-appset.yaml; }
 fill | kubectl --context <hub-ctx> apply -f -
+# Wait for the echo workload on every member (Argo CD creates it within a few minutes).
+for ctx in <mesh-a-ctx> <mesh-b-ctx>; do
+  for i in $(seq 60); do kubectl --context "$ctx" -n mesh-verify get deploy mesh-verify-echo >/dev/null 2>&1 && break; sleep 5; done
+  kubectl --context "$ctx" -n mesh-verify rollout status deploy/mesh-verify-echo --timeout=300s
+done
 INGRESS=$(kubectl --context <mesh-a-ctx> get svc istio-ingressgateway -n istio-system \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')
-for i in $(seq 10); do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
+: "${INGRESS:?the ingress gateway Service has no address yet (see Troubleshooting)}"
+for i in $(seq 10); do curl -sS -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
 fill | kubectl --context <hub-ctx> delete -f -
 ```
 
@@ -131,6 +160,14 @@ tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-s
 
 Settings and image pins live in `config/versions.env` and `config/options.env`. The deployed Istio
 version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
+
+Every TSV, run summary and report also records what each member ran on: Kubernetes or OpenShift,
+the mesh operator build, the istiod and proxy images and the nodes' provider
+([tests/lib/platform.sh](tests/lib/platform.sh)). `TEST_PLATFORM` (`auto`, the default, asks each
+member; `kubernetes` or `openshift` records that value without asking) also picks each suite
+chart's OpenShift overlay. A report warns when its inputs differ on any of these, so compare results
+within one platform and mesh build. On kind every node reports the whole host, so the
+controlplane report flags its capacity figures.
 
 ### Run config (`--config FILE`)
 
@@ -181,7 +218,11 @@ Raise it and re-apply; the wiring gate's expected size follows automatically.
 | --- | --- |
 | Gate says `istiod is not using the shared mesh root` | istiod started before `cacerts`. Delete the member's `<member>-ossm` Application on the hub (it's recreated and waits for `cacerts`), then restart that member's gateways. |
 | No `cacerts` or remote secrets on members | Check the ESO pods on the hub (`kubectl get pods -n external-secrets-operator`); on a small hub lower the Argo CD requests with `argocd_helm_values` (`argocd_config_values` on OpenShift). |
-| Gateway Service stays `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. |
+| Pods stay `Pending` with `Insufficient cpu` or `Insufficient memory` (`kubectl describe pod`) | The chart defaults need the capacity in [What you need](#what-you-need). Lower istiod with `gitops_app_overrides` (`spoke-ossm-appset`) and Argo CD with `argocd_helm_values`, as in `terraform/platform/terraform.tfvars.example`. |
+| The apply fails on `helm_release.argocd` after 900 s (`context deadline exceeded`) | Usually the same: the Argo CD pods cannot schedule on the hub (`kubectl -n argocd get pods`, then `describe` a Pending one). Lower the requests with `argocd_helm_values` and apply again. |
+| The apply fails: `Argo CD on the hub cannot load state from these clusters` | The member's registered URL is not reachable from the hub's pods (a kubeconfig that points at `127.0.0.1`, a private endpoint). Set `cluster_api_url_overrides` to an address that the hub and every member reach, and apply again. `Unauthorized` or `Forbidden` in the quoted message is the member's token instead ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
+| Gate says `istiod has synced <n> remote cluster(s) < <need>` | This member's istiod cannot use the named member's remote secret: that member's API server URL is unreachable from here, or its token is wrong. `istioctl remote-clusters` lists each one's state, and `kubectl -n istio-system logs deploy/istiod \| grep <member>` says why: `remote cluster <member> failed to sync after 30s` (fix the URL with `cluster_api_url_overrides`) or `watch error in cluster <member>: Unauthorized` ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
+| Gateway Applications stay `Progressing`, the gateway Service `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. The gate says `has no external address yet` for the east-west gateway. |
 | `istioctl` errors on API versions | Use an `istioctl` that matches `ISTIO_VERSION`. |
 
 ## More

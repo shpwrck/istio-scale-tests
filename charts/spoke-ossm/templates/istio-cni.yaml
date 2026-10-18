@@ -10,3 +10,7 @@ spec:
   namespace: istio-cni
   profile: {{ required "profile is required (a Sail profile: default, openshift, ...)" .Values.profile }}
   version: {{ .Values.istioVersion | quote }}
+  {{- with .Values.istioCni.values }}
+  values:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

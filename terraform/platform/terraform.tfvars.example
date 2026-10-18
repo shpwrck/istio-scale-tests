@@ -22,8 +22,9 @@ kubeconfig_path        = "~/.kube/config"
 hub_cluster_context    = "<hub-ctx>"
 spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 
-# The API URL the hub's pods reach a cluster at, when the kubeconfig's URL works only from
-# this machine. kind (docs/runbooks/kind-lab): the containers' names on the kind network.
+# The API URL a member is registered at, when the kubeconfig's URL works only from this
+# machine: the hub's pods and every other member's istiod must reach it. kind
+# (docs/runbooks/kind-lab): the containers' names on the kind network.
 # cluster_api_url_overrides = {
 #   "<mesh-a-ctx>" = "https://<mesh-a>-control-plane:6443"
 #   "<mesh-b-ctx>" = "https://<mesh-b>-control-plane:6443"
@@ -85,16 +86,19 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # }
 
 # --- Large fleets ---
-# Argo CD shards = ceil((spokes + 1) / argocd_clusters_per_shard).
+# Argo CD shards = ceil((spokes + 1) / argocd_clusters_per_shard), the controller replicas on
+# kubernetes (round-robin sharding). argocd_max_shards: openshift only (dynamic scaling).
 # argocd_clusters_per_shard = 50
 # argocd_max_shards         = 20
-# After the cluster secrets exist the apply restarts the controller pods once (so every cluster
-# gets a shard) and fails if an Application still has no sync/health status after 15 min.
+# openshift: after the cluster secrets exist the apply restarts the controller pods once (so
+# every cluster gets a shard).
 # argocd_restart_controller_after_cluster_secrets = true
-# argocd_app_status_timeout_sec                   = 900   # 0 disables the check
+# Then the apply fails if, after 15 min, an Application has no sync/health status or no fresh
+# one, a mesh member has no Applications, or Argo CD cannot reach a member.
+# argocd_app_status_timeout_sec                   = 900   # 0 disables the check, else >= 600
 
 # --- Versions (defaults track the tested versions) ---
-# argocd_chart_version    = "10.9.6"         # kubernetes: the argo-cd chart
+# argocd_chart_version    = "10.9.6"         # kubernetes: the argo-cd chart (keep in sync: variables.tf)
 # argocd_chart_repository = "https://argoproj.github.io/argo-helm"   # or a mirror
 # acm_channel             = "release-2.17"   # openshift
 # gitops_operator_channel = "gitops-1.22"    # openshift

@@ -6,7 +6,8 @@ Application, `hub-gitops-root`, which Helm-renders `charts/gitops-hub-apps` from
 
 | Value | Default | Purpose |
 | --- | --- | --- |
-| `gitopsNamespace` | `openshift-gitops` | Argo CD namespace |
+| `platform` | `kubernetes` | `kubernetes` or `openshift`; passed to `charts/gitops-hub-apps` |
+| `gitopsNamespace` | `argocd` (`openshift-gitops` on OpenShift) | Argo CD namespace |
 | `repo.url` | `""` (required) | Git URL (your fork) |
 | `repo.revision` | `main` | Branch, tag or commit |
 | `apps` | `{}` | Per-app toggles, e.g. `{hub-cert-manager-operator: {enabled: false}}` |

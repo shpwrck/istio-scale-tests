@@ -40,6 +40,15 @@ spec:
               value: {{ .Values.istiodCheck.port | quote }}
             - name: CURL_TIMEOUT
               value: {{ .Values.istiodCheck.curlTimeoutSeconds | quote }}
+            - name: REQUIRE_REMOTE_SYNC
+              value: {{ .Values.istiodCheck.requireRemoteSync | quote }}
+            - name: EASTWEST_CHECK_ENABLED
+              value: {{ .Values.eastWestCheck.enabled | quote }}
+            - name: EASTWEST_SERVICE
+              value: {{ .Values.eastWestCheck.service | quote }}
+            # Inside the probe's timeout, so a slow API answers NotReady with a reason.
+            - name: CHECK_TIMEOUT
+              value: {{ max 1 (sub (int .Values.probe.timeoutSeconds) 2) | quote }}
           readinessProbe:
             exec:
               command:

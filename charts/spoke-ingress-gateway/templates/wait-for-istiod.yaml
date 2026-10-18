@@ -27,15 +27,15 @@ spec:
             - |
               set -eu
               echo "Waiting for istiod to be ready..."
-              ELAPSED=0
-              while [ $ELAPSED -lt 600 ]; do
-                if curl -sf http://istiod.istio-system.svc:15014/version >/dev/null 2>&1; then
+              # Real elapsed time: a request that hangs counts, and none hangs over 5s.
+              START=$(date +%s)
+              while [ $(($(date +%s) - START)) -lt 600 ]; do
+                if curl -sf --max-time 5 http://istiod.istio-system.svc:15014/version >/dev/null 2>&1; then
                   echo "istiod is ready. Gateway sync can proceed."
                   exit 0
                 fi
-                echo "istiod not yet ready (elapsed ${ELAPSED}s)..."
+                echo "istiod not yet ready (elapsed $(($(date +%s) - START))s)..."
                 sleep 10
-                ELAPSED=$((ELAPSED + 10))
               done
               echo "ERROR: istiod not ready after 600s"
               exit 1

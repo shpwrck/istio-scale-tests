@@ -11,7 +11,7 @@ Removing a member does not delete what was pushed (ESO `deletionPolicy` stays `N
 Delete its remote secret from each remaining member:
 
 ```bash
-oc --context <mesh-ctx> -n istio-system delete secret istio-remote-secret-<removed-member>
+kubectl --context <mesh-ctx> -n istio-system delete secret istio-remote-secret-<removed-member>
 ```
 
 `deletionPolicy: Delete` is not used: the remote-secret PushSecrets select every
