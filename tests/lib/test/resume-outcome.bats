@@ -19,6 +19,9 @@ CP="${ROOT}/tests/controlplane"
 REPORT="${CP}/004-report-results.sh"
 
 setup() {
+	# The test's own process (bats runs setup and the test in one): the CP_TERM stub looks for
+	# the sweep below it only, never in a shell that started bats.
+	export TEST_PID="$BASHPID"
 	EK="${BATS_TEST_TMPDIR}/kubeconfig"
 	: > "$EK"
 	BIN="${BATS_TEST_TMPDIR}/bin"
@@ -29,10 +32,10 @@ setup() {
 	# namespace's delete succeeds. 002's first read (its Running istiod pods) fails, and
 	# first: touches stale-seen when the file STALE names exists; under CP_TERM (once) lists
 	# TMPDIR into tmp-at-term, records its PID (stub-pid), starts a 30 s sleep (sleep-pid),
-	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor (the sweep process alone),
-	# closes its output and waits for the sleep before it touches stub-slept (a sweep that
-	# waited for its step would wait for it). Anything else fails, as against an empty
-	# kubeconfig.
+	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor below the test's process (the
+	# sweep process alone), closes its output and waits for the sleep before it touches
+	# stub-slept (a sweep that waited for its step would wait for it). Anything else fails,
+	# as against an empty kubeconfig.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
 d="$RO_DIR"
@@ -58,7 +61,7 @@ case "$*" in
 		sleep 30 >/dev/null 2>&1 3>&- &
 		echo "$!" > "$d/sleep-pid"
 		p=$PPID s=""
-		while [ "${p:-1}" -gt 1 ]; do
+		while [ "${p:-1}" -gt 1 ] && [ "$p" != "${TEST_PID:?}" ]; do
 			case "$(ps -o args= -p "$p" 2>/dev/null)" in *003-run-sweep.sh*) s="$p" ;; esac
 			p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
 		done
@@ -426,7 +429,10 @@ incomplete_dir() {
 	# Every format but json gives each attempt's rows as json does (rows, rows_kept).
 	c0="$(jq -r '.metadata.attempts[0] | "\(.rows) row(s), \(.rows_kept) in the figures"' <<<"$output")"
 	c1="$(jq -r '.metadata.attempts[1] | "\(.rows) row(s), \(.rows_kept) in the figures"' <<<"$output")"
-	local att="the rows come from more than one run: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (${c0}), then --resume at ${ra} HARNESS_SHA=abc1234 KUBE_VERSIONS=ci-a=v1.31.0,ci-b=v1.30.0 (${c1})"
+	# And the first run's values (the TSV preamble's), as json's attempts[0] has them.
+	local v0
+	v0="$(jq -r '.metadata.attempts[0] | "HARNESS_SHA=\(.harness_sha) KUBE_VERSIONS=\(.kube_versions)"' <<<"$output")"
+	local att="the rows come from more than one run: the first run ${v0} (${c0}), then --resume at ${ra} HARNESS_SHA=abc1234 KUBE_VERSIONS=ci-a=v1.31.0,ci-b=v1.30.0 (${c1})"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_line "# attempts: ${att}"
 	assert_output --partial "REPORT_HARNESS_SHA=${rh}"

@@ -123,7 +123,8 @@ Prefer it over generic upstream Istio docs when they disagree.
 `tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
 busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for
 it), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter
-bats, which skip without it), `aws` + `rosa` (ROSA only).
+bats, which skip without it; `python3` alone for the signal bats' pseudo-terminal test, which
+skips without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

@@ -43,7 +43,7 @@ cdp_tsv() {
 	$(row abc1234 ms2-cr20 0 baseline 5)
 	$(row abc1234 ms2-cr20 20 churn 8)
 	EOF
-	warn="the rows' harness_sha column (abc1234 3 rows, abc1234-dirty.ffffffff 1 row) differs from the TSV preamble's HARNESS_SHA (abc1234), the run's start: the harness changed during the run (HARNESS_CONTENT_KEY adds unknown: a row records none). Combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ms2-cr10 (mesh_size 2, churn_rate 10: baseline abc1234, churn abc1234-dirty.ffffffff)."
+	warn="the rows' harness_sha column (abc1234 3 rows, abc1234-dirty.ffffffff 1 row) differs from the TSV preamble's HARNESS_SHA (abc1234), the run's start: the harness, or only the commit name git describe gives, changed during the run (rows record no content key to tell the two apart; HARNESS_CONTENT_KEY adds unknown). Combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ms2-cr10 (mesh_size 2, churn_rate 10: baseline abc1234, churn abc1234-dirty.ffffffff)."
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
 	assert_success
 	assert_line "WARNING: ${warn}"
@@ -87,7 +87,7 @@ cdp_tsv() {
 	EOF
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
 	assert_success
-	assert_line "WARNING: the rows' harness_sha column (def5678 2 rows) differs from the TSV preamble's HARNESS_SHA (abc1234), the run's start: the harness changed during the run (HARNESS_CONTENT_KEY adds unknown: a row records none)."
+	assert_line "WARNING: the rows' harness_sha column (def5678 2 rows) differs from the TSV preamble's HARNESS_SHA (abc1234), the run's start: the harness, or only the commit name git describe gives, changed during the run (rows record no content key to tell the two apart; HARNESS_CONTENT_KEY adds unknown)."
 	# Each combo on one harness, the combos on two.
 	cdp_tsv "${RES}/churn-dataplane-r1.tsv" abc1234 <<-EOF
 	$(row abc1234 ms2-cr10 0 baseline 5)
@@ -118,7 +118,7 @@ cdp_tsv() {
 		run --separate-stderr "$COMPARE" --results-dir "$s" --format "$p"
 		assert_success
 		assert_output --regexp "Harness \(HARNESS_SHA\) +\|? *mixed:abc1234,abc1234-dirty\.ffffffff +\|? *abc1234"
-		assert_output --partial "Pass baseline's rows record more than one harness (harness_sha column and preamble: abc1234,abc1234-dirty.ffffffff), so the harness changed during that pass; combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ms2-cr10 (baseline abc1234, churn abc1234-dirty.ffffffff)."
+		assert_output --partial "Pass baseline's rows record more than one harness (harness_sha column and preamble: abc1234,abc1234-dirty.ffffffff), so the harness, or only the commit name git describe gives, changed during that pass (rows record no content key to tell the two apart); combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ms2-cr10 (baseline abc1234, churn abc1234-dirty.ffffffff)."
 		refute_output --partial "differ only in git describe"
 	done
 	# Rows on their preamble's harness: one value per pass, no warning.

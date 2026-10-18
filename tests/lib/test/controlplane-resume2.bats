@@ -16,6 +16,9 @@ CP="${ROOT}/tests/controlplane"
 REPORT="${CP}/004-report-results.sh"
 
 setup() {
+	# The test's own process (bats runs setup and the test in one): the CP_TERM stub looks for
+	# the sweep below it only, never in a shell that started bats.
+	export TEST_PID="$BASHPID"
 	EK="${BATS_TEST_TMPDIR}/kubeconfig"
 	: > "$EK"
 	BIN="${BATS_TEST_TMPDIR}/bin"
@@ -25,7 +28,8 @@ setup() {
 	# name` lists kube-contexts; a member's Istio remote secrets are remote.<ctx>; its
 	# controlplane-test namespaces are one while ns-left.<ctx> exists, and their delete
 	# removes it. 002's first read (its Running istiod pods) fails; under CP_TERM (once) it
-	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor, closes its output and waits.
+	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor below the test's process, closes
+	# its output and waits.
 	# Anything else fails, as against an empty kubeconfig.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
@@ -53,7 +57,7 @@ case "$*" in
 	if [ -n "${CP_TERM:-}" ] && [ ! -e "$d/term-sent" ]; then
 		: > "$d/term-sent"
 		p=$PPID s=""
-		while [ "${p:-1}" -gt 1 ]; do
+		while [ "${p:-1}" -gt 1 ] && [ "$p" != "${TEST_PID:?}" ]; do
 			case "$(ps -o args= -p "$p" 2>/dev/null)" in *003-run-sweep.sh*) s="$p" ;; esac
 			p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
 		done
@@ -191,7 +195,7 @@ FAKE
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
 	[[ "$stderr" != *"records a problem"* ]]
-	[ "$(grep -c "^PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats)$" "${D}/sweep-outcome.txt")" = 1 ]
+	[ "$(grep -c "^PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats) (kept: 1 row(s) of that run are in the figures)$" "${D}/sweep-outcome.txt")" = 1 ]
 	# Resumed again: the carried line is carried as it is, once.
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
@@ -202,7 +206,7 @@ FAKE
 	printf 'RUN_ID=x\nEXIT=unfinished\nSTARTED_AT=2030-01-01T00:00:00Z\nNOTE=the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats)\n' > "${D}/sweep-outcome.txt"
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
-	grep -qx 'PROBLEM=an earlier run of this sweep (started at 2030-01-01T00:00:00Z, not finished) recorded: the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats)' "${D}/sweep-outcome.txt"
+	grep -qx 'PROBLEM=an earlier run of this sweep (started at 2030-01-01T00:00:00Z, not finished) recorded: the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats) (kept: no row of that run is known to have run again)' "${D}/sweep-outcome.txt"
 	[ "$(grep -c '^PROBLEM=.*HARNESS_SHA=aaa1111' "${D}/sweep-outcome.txt")" = 1 ]
 	# A change of the mesh under the sweep still refuses the --resume.
 	echo 'PROBLEM=the Istio version changed during the sweep (bats)' >> "${D}/sweep-outcome.txt"

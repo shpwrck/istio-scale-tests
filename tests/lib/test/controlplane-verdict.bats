@@ -82,7 +82,9 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=2/2" 2
 	report json
 	[ "$(verdict)" = PASS ]
-	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
+	# Its sweep started at 3 (ISTIOD_REPLICAS_BY_CONTEXT): a data warning only.
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"(mesh-b wanted 2 istiod replicas, 3 at the sweep's start)"* ]]
 	# The window wrote 3 rows for mesh-b and the TSV holds 2: cut short, as before /<spec>.
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 2
 	report json
@@ -98,7 +100,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	report json
 	[ "$(verdict)" = PASS ]
 	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
-	[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" = "1 cell(s) have fewer rows for a member than its istiod replicas at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (mesh-b ran 2 of its 3 istiod replicas). Their WINDOW_ROWS lines do not record the replicas the Deployment wanted then (an older harness), so this is a replica evicted or Pending, or an HPA or a rollout that changed the replicas during the sweep; it does not change the verdict." ]
+	[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" = "1 cell(s) have fewer rows for a member than its istiod replicas at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (mesh-b ran 2 of its 3 istiod replicas). Their WINDOW_ROWS lines do not record the replicas the Deployment wanted then (an older harness, or 002 could not read the Deployment), so this is a replica evicted or Pending, or an HPA or a rollout that changed the replicas during the sweep; it does not change the verdict." ]
 	# A growth series' first window ran 1 of the 2 istiod pods its Deployment wanted.
 	mkdir -p "$g"
 	awk '!/^#/ && $1 != "timestamp" && !d++ { print "# WINDOW_ROWS=mesh-a=1/2" } { print }' "$GROWTH" > "${g}/controlplane-fixture-ns.tsv"
@@ -171,7 +173,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	printf "RUN_ID=run-b\nEXIT=4\nPROBLEM=c\nPROBLEM=could not count the sweep's cells: (bats)\n" > "${base}/sweep-b/sweep-outcome.prev.txt"
 	report json "$base" --allow-multi-run
 	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "the sweep outcome records 3 PROBLEM(s) (sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt, and .prev.txt before it: 2), so the figures"* ]]
+	[[ "$(headline)" == "the sweep outcomes record 3 PROBLEM(s) (sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt, and .prev.txt before it: 2), so the figures"* ]]
 	# One sweep alone: its record, and the one before it.
 	report json "${base}/sweep-b"
 	[[ "$(headline)" == "the sweep outcome records 2 PROBLEM(s) (sweep-outcome.txt, and .prev.txt before it), so the figures"* ]]
@@ -185,7 +187,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	report json
 	[ "$(jq -c '.metadata | [.harness_content_key, .harness_content_keys]' <<<"$output")" = '["111111111111",["111111111111"]]' ]
 	[ "$(jq -c '[.metadata.attempts[] | [.run, .rows, .rows_kept, .started_at]]' <<<"$output")" = '[["first run",6,6,"unknown"],["--resume at 2026-06-01T00:05:00Z",6,6,"2026-06-01T00:05:00Z"]]' ]
-	att="the rows come from more than one run: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (6 row(s), 6 in the figures), then --resume at 2026-06-01T00:05:00Z HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8 (6 row(s), 6 in the figures)"
+	att="the rows come from more than one run: the first run HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8 (6 row(s), 6 in the figures), then --resume at 2026-06-01T00:05:00Z HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8 (6 row(s), 6 in the figures)"
 	report text
 	assert_output --partial "  HARNESS_SHA=fixture  HARNESS_CONTENT_KEY=111111111111  "
 	assert_output --partial "  harness_shas=fixture  harness_content_keys=111111111111  "

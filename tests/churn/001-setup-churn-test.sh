@@ -141,6 +141,8 @@ done
 for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the churn-test apply"
 done
+# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
+harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."

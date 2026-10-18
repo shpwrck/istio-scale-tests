@@ -44,8 +44,8 @@ case " $* " in
 	esac
 	if [[ -e "$EXEC_FAILED" && ! -e "$LOAD_ENDED" ]]; then printf '%s\n' "$*" >> "$OVERLAP"; fi
 	cat "$FX/../fortio_ok.json" ;;
-*" get pod -l app=fortio-client "*) printf 'fortio-client-0' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=fortio-client "*) printf 'fortio-client-0\t\tTrue' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*) printf 'istiod-abc-x1\n' ;;
 *" scale "* | *" rollout status "*) : ;;
@@ -110,7 +110,7 @@ _waited_note() {
 	kill -s TERM "$p"
 	wait "$p" || rc=$?
 	[ "$rc" -eq 143 ] || { echo "status ${rc}: $(cat "${BATS_TEST_TMPDIR}/err")"; false; }
-	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG"
+	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --ignore-not-found --wait=false" "$STUB_LOG"
 	# The FAILED row was written before the wait.
 	awk -F'\t' '$5 == 10 && $14 == "FAILED" { f = 1 } END { exit !f }' "$RES"/latency-*.tsv
 }
@@ -134,18 +134,22 @@ _waited_note() {
 	done
 }
 
-@test "the probes' --help say that a failed exec's load is waited out, that a stop during a load deletes the client pod, and that a probe run by hand loads only a Running client pod not being deleted" {
-	local f h p
+@test "the probes' --help say that a failed exec's load is waited out, that a stop during a load deletes the client pod, and that a probe run by hand loads only a Ready client pod not being deleted" {
+	local f h p d
 	for f in dataplane/002-run-latency-probe.sh churn-dataplane/002-run-baseline-probe.sh churn-dataplane/003-run-churn-probe.sh; do
 		run --separate-stderr "${ROOT}/tests/${f}" --help
 		assert_success
 		h="$(tr '\n' ' ' <<<"$output" | tr -s ' ')"
+		# The wait is named by the probe's own flags, never fortio's -t.
+		d="--duration"
+		[[ "$f" != dataplane/* ]] || d="--duration (--warmup-duration for the warmup)"
 		for p in "The load runs in the fortio client pod, not in the kubectl exec that starts it." \
-			"so the probe waits until its -t and 5 s more have passed before going on." \
+			"so the probe waits until its ${d} and 5 s more have passed before going on, unless the client pod is gone (then no load runs)." \
 			"When the probe ends during a load (a stop, Ctrl-C), it deletes the client pod, so the load ends with it;" \
 			"which a sweep started right after waits for (its setup 001 waits until the Deployments are Available)." \
-			"Run by hand, the probe loads only a Running client pod that is not being deleted, and stops when there is none: run 001, or wait until the new pod is Ready."; do
+			"Run by hand, the probe loads only a Ready client pod that is not being deleted, and stops when there is none: run 001, or wait until the new pod is Ready."; do
 			[[ "$h" == *"$p"* ]] || { echo "${f} --help does not say: ${p}"; false; }
 		done
+		[[ "$h" != *"its -t "* ]] || { echo "${f} --help names fortio's -t"; false; }
 	done
 }

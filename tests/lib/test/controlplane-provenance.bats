@@ -117,7 +117,7 @@ resume_rows() {
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = "[\"old1234\",\"${live}\"]" ]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"; the harness changed during a run (HARNESS_CHANGED_AT), see the attempts)"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_output --partial "# attempts: the rows come from more than one run or harness: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (1 row(s), 1 in the figures), then harness changed at "
+	assert_output --partial "# attempts: the rows come from more than one run or harness: the first run HARNESS_SHA=old1234 KUBE_VERSIONS=ctx-a=unreachable (1 row(s), 1 in the figures), then harness changed at "
 	assert_output --partial "(in the first run) HARNESS_SHA=${live} (2 row(s), 2 in the figures)"
 }
 
@@ -151,7 +151,7 @@ resume_rows() {
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = '["h2res"]' ]
 	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_output --partial "# attempts: the rows come from one run (no other run's rows are in the figures): the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (its rows were all run again later), then --resume at 2030-01-02T00:00:00Z HARNESS_SHA=h2res KUBE_VERSIONS=ctx-a=v1.31.0 (1 row(s), 1 in the figures)"
+	assert_output --partial "# attempts: the rows come from one run (no other run's rows are in the figures): the first run HARNESS_SHA=${live} KUBE_VERSIONS=ctx-a=unreachable (its rows were all run again later), then --resume at 2030-01-02T00:00:00Z HARNESS_SHA=h2res KUBE_VERSIONS=ctx-a=v1.31.0 (1 row(s), 1 in the figures)"
 	refute_output --partial "ran on different harnesses"
 	[[ "$stderr" != *"ran on different harnesses"* ]]
 }

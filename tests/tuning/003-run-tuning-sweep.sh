@@ -405,9 +405,11 @@ done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 # own edits (istio_version_refresh: the probes that follow record what they run on, and
 # the end recheck covers only the span after the last revert). ISTIO_EDITS: the
 # sweep_outcome --problem arguments for an edit that was not the sweep's, and --note ones
-# for a span the sweep could not check.
+# for a span the sweep could not check. PASSES_SINCE_READ: the passes run since the last
+# read of the generations (run_pass adds each, istio_checkpoint clears it).
 ISTIO_EDITS=()
-# istio_checkpoint <from> <edits 0|1|-> [<record> <record_from>]: read the generations again
+PASSES_SINCE_READ=""
+# istio_checkpoint <from> <edits 0|1|-> <next> [<record> <record_from>]: read the generations again
 # (not the proxies: right after an apply or a revert, old istiod pods may still be
 # terminating; run_pass reads those after its settle), named <from> ("after the revert of
 # pass 02-x") in the end recheck's messages. <edits>: the sweep's own merge patches of each
@@ -420,39 +422,73 @@ ISTIO_EDITS=()
 # note: an edit in that span is not ruled out. <record> <record_from>: a step's own read in
 # this span (001's istio-generations-applied, once its apply settled), named <record_from>:
 # the span is split there, <edits> up to it and 0 after it (the sweep changed nothing
-# since), so an edit after the apply settled is compared in full, the IstioRevision too.
+# since), so an edit after the apply settled is compared in full, the IstioRevision too; a
+# member the sweep's read missed after it keeps 001's record, which 002 compares from. A
+# problem names the passes an edit may have changed: those run since the last read
+# (PASSES_SINCE_READ), and <next>, the pass that runs next (empty: none), with the passes
+# after it while the edit stays.
 istio_checkpoint() {
-	local from="$1" edits="$2" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-}"
+	local from="$1" edits="$2" next="$3" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-}"
+	local ran="${PASSES_SINCE_READ# }" effect="" cfg="its profile's"
 	[[ -n "$prev" ]] || prev="at the sweep's start"
 	istio_version_refresh --generations-only "$from" "$CONTEXTS_CSV" "${KUBECTL[@]}"
+	PASSES_SINCE_READ=""
 	[[ "$edits" != - ]] || return 0
-	if (($# > 3)); then
-		istio_span_check "$prev" "$before" "$4" "$3" "$edits"
-		prev="$4" before="$3" edits=0
+	[[ -z "$ran" ]] || effect="the passes run since that first read (${ran// /, }) may have measured another configuration"
+	if [[ -n "$next" ]]; then
+		[[ "$next" != baseline ]] || cfg="the baseline's"
+		effect="${effect:+${effect}, and }pass ${next} (and the passes after it, while the edit stays) may measure another configuration than ${cfg}"
 	fi
-	istio_span_check "$prev" "$before" "$from" "${ISTIO_GENERATIONS:-}" "$edits"
+	[[ -n "$effect" ]] || effect="no pass ran since that first read, and none runs after it"
+	if (($# > 4)); then
+		istio_span_check "$prev" "$before" "$5" "$4" "$edits" "$effect"
+		istio_span_check "$5" "$4" "$from" "${ISTIO_GENERATIONS:-}" 0 "$effect" \
+			"002 compares it from 001's record up to its revert, which covers this span"
+		return 0
+	fi
+	istio_span_check "$prev" "$before" "$from" "${ISTIO_GENERATIONS:-}" "$edits" "$effect"
 }
 
-# istio_span_check <prev> <before> <from> <after> <edits 0|1>: istio_checkpoint's check of
-# the span from the read named <prev> (generations <before>) to the one named <from>
-# (<after>).
+# istio_span_check <prev> <before> <from> <after> <edits 0|1> <effect> [<unchecked>]:
+# istio_checkpoint's check of the span from the read named <prev> (generations <before>) to
+# the one named <from> (<after>). <effect>: the passes an edit in it may have changed.
+# <unchecked>: what follows for a member it could not compare (default: an edit in that span
+# is not ruled out).
 istio_span_check() {
-	local prev="$1" before="$2" from="$3" after="$4" edits="$5" moved un tab=$'\t'
+	local prev="$1" before="$2" from="$3" after="$4" edits="$5" effect="$6" moved un tab=$'\t'
+	local unchecked="${7:-an edit of its Istio CR in that span by something other than the sweep is not ruled out}"
 	local -a cr=()
 	[[ "$edits" == 0 ]] || cr=(--cr-over "$edits")
 	un="$(istio_generations_diff ${cr[@]+"${cr[@]}"} --unchecked "$before" "$after")"
 	if [[ -n "$un" ]]; then
-		ISTIO_EDITS+=(--note "the Istio CR generations of a member could not be compared between the sweep's read ${prev} and its read ${from} (a read failed): ${un}; an edit of its Istio CR in that span by something other than the sweep is not ruled out")
+		ISTIO_EDITS+=(--note "the Istio CR generations of a member could not be compared between the sweep's read ${prev} and its read ${from} (a read failed): ${un}; ${unchecked}")
 		echo "warning: ${ISTIO_EDITS[${#ISTIO_EDITS[@]}-1]}" >&2
 	fi
 	moved="$(istio_generations_diff ${cr[@]+"${cr[@]}"} "$before" "$after")"
 	[[ -n "$moved" ]] || return 0
 	if [[ "$edits" == 0 ]]; then
-		ISTIO_EDITS+=(--problem "the Istio CR changed while the sweep changed nothing, between its read ${prev} and its read ${from}: ${moved#*"$tab"}; likely: $(istio_generation_causes "${moved%%"$tab"*}"); the passes run since that first read may have measured another configuration")
+		ISTIO_EDITS+=(--problem "the Istio CR changed while the sweep changed nothing, between its read ${prev} and its read ${from}: ${moved#*"$tab"}; likely: $(istio_generation_causes "${moved%%"$tab"*}"); ${effect}")
 	else
-		ISTIO_EDITS+=(--problem "the Istio CR changed beyond the sweep's own edit, between its read ${prev} and its read ${from}: ${moved#*"$tab"}, not the rise of at most ${edits} its merge patch accounts for; likely: $(istio_generation_causes 1); the passes run since that first read may have measured another configuration")
+		ISTIO_EDITS+=(--problem "the Istio CR changed beyond the sweep's own edit, between its read ${prev} and its read ${from}: ${moved#*"$tab"}, not the rise of at most ${edits} its merge patch accounts for; likely: $(istio_generation_causes 1); ${effect}")
 	fi
 	echo "WARNING: ${ISTIO_EDITS[${#ISTIO_EDITS[@]}-1]}" >&2
+}
+
+# generations_merge <sweep_read> <record>: the generations to keep for 002, member by
+# member (ctx=<cr>/<rev>,...): the sweep's read where it has no unknown part, else the
+# record's where that has none, else the sweep's.
+generations_merge() {
+	_GM_A="$1" _GM_B="$2" awk 'BEGIN {
+		n = split(ENVIRON["_GM_B"], y, ",")
+		for (i = 1; i <= n; i++) { if (y[i] !~ /=/) continue; k = y[i]; sub(/=[^=]*$/, "", k); v = y[i]; sub(/^.*=/, "", v); rec[k] = v }
+		m = split(ENVIRON["_GM_A"], x, ","); out = ""
+		for (i = 1; i <= m; i++) {
+			e = x[i]; k = e; sub(/=[^=]*$/, "", k); v = e; sub(/^.*=/, "", v)
+			if (e ~ /=/ && v ~ /unknown/ && (k in rec) && rec[k] !~ /unknown/) e = k "=" rec[k]
+			out = out (out == "" ? "" : ",") e
+		}
+		print out
+	}'
 }
 
 # profile_edits_cr <state_dir>: false when the pass's profile leaves the Istio CR alone
@@ -483,12 +519,13 @@ if ((RUN_SETUP)); then
 	echo "--- Suite setup ---"
 	sweep_step "${SETUP_CMD[@]}" || die "suite setup failed"
 	# The setup changes no Istio CR (its sidecars' proxy versions: run_pass reads them).
-	istio_checkpoint "after the suite setup" 0
+	istio_checkpoint "after the suite setup" 0 "${PASSES[0]:-}"
 fi
 
 # Run one pass's probe(s) into its result directory.
 run_pass() {
 	local label="$1" dir="${SWEEP_DIR}/$1" n=1 rc
+	PASSES_SINCE_READ+=" ${label}"
 	mkdir -p "$dir"
 	if [[ "$SUITE" == churn-dataplane ]]; then
 		# A churn phase leaves churn-target replicas mixed; start each pass from base.
@@ -531,7 +568,7 @@ for p in "${PASSES[@]}"; do
 	state_dir="${SWEEP_DIR}/${p}/state"
 	# Nothing the sweep did since its last read (a baseline pass, the last revert) moved the
 	# generations: one that moved now is an edit by something else.
-	istio_checkpoint "before the apply of pass ${p}" 0
+	istio_checkpoint "before the apply of pass ${p}" 0 "$p"
 	ACTIVE_STATE_DIR="$state_dir"
 	applied=1 what=apply
 	if ! sweep_step "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
@@ -548,20 +585,24 @@ for p in "${PASSES[@]}"; do
 	# revert's checkpoint counts its own patch only. When 001 recorded every member's
 	# generations once its apply settled (istio-generations-applied), the span is split
 	# there: an edit after that record is compared in full and reported once, here. This
-	# read then replaces 001's record, so 002 compares from it and does not report such an
-	# edit again (a read that failed for a member leaves 001's). An apply that failed before
-	# its record (its rollout may still go on) gets none: 002 notes that span unchecked.
-	edits=0 rec=""
+	# read then replaces 001's record member by member, so 002 compares from it and does not
+	# report such an edit again; a member this read missed keeps 001's record, which 002
+	# compares it from. An apply that failed before its record (its rollout may still go
+	# on) gets none: 002 notes that span unchecked. Next: the pass, or after a failed apply
+	# the one after it.
+	edits=0 rec="" next="$p"
+	((applied)) || next="${PASSES[step]:-}"
 	if [[ -f "${state_dir}/active-profile" ]] && profile_edits_cr "$state_dir"; then edits=1; fi
 	[[ ! -s "${state_dir}/istio-generations-applied" ]] || rec="$(<"${state_dir}/istio-generations-applied")"
 	if [[ "$edits" == 1 && "$rec" == *=* && "$rec" != *unknown* ]]; then
-		istio_checkpoint "after the ${what} of pass ${p}" 1 "$rec" "once the apply of pass ${p} settled (001's istio-generations-applied)"
+		istio_checkpoint "after the ${what} of pass ${p}" 1 "$next" "$rec" "once the apply of pass ${p} settled (001's istio-generations-applied)"
 	else
-		istio_checkpoint "after the ${what} of pass ${p}" "$edits"
+		istio_checkpoint "after the ${what} of pass ${p}" "$edits" "$next"
 	fi
 	if ((applied)) || [[ -n "$rec" ]]; then
-		if [[ "${ISTIO_GENERATIONS:-}" == *=* && "$ISTIO_GENERATIONS" != *unknown* ]]; then
-			printf '%s\n' "$ISTIO_GENERATIONS" >"${state_dir}/istio-generations-applied" \
+		gens="$(generations_merge "${ISTIO_GENERATIONS:-}" "$rec")"
+		if [[ "$gens" == *=* ]]; then
+			printf '%s\n' "$gens" >"${state_dir}/istio-generations-applied" \
 				|| echo "warn: could not write ${state_dir}/istio-generations-applied; 002 compares from 001's read" >&2
 		fi
 	fi
@@ -579,7 +620,7 @@ for p in "${PASSES[@]}"; do
 		elif ! profile_edits_cr "$state_dir"; then
 			edits=0
 		fi
-		istio_checkpoint "after the revert of pass ${p}" "$edits"
+		istio_checkpoint "after the revert of pass ${p}" "$edits" "${PASSES[step]:-}"
 		# 002's span: the pass, or for an apply that failed (no probe ran), up to its revert.
 		span="during pass ${p}" settled=", after its apply settled and" in_span="during the pass"
 		effect="its probes may have measured another configuration"

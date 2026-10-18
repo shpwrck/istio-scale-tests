@@ -171,11 +171,12 @@ env_pct_of_limit() {
 # lines of the sweep's outcome (sweep-outcome.txt: the harness or Istio changed during the
 # sweep, ...), which the figures cannot show: the same, as "the sweep outcome records N
 # PROBLEM(s) (<problems_src>)"; <problems_src> (arg 13, default sweep-outcome.txt) names
-# the records counted. <cautions> (arg 14, default none): other conditions the figures
-# cannot show (the rows ran on more than one harness, a cell ran on fewer istiod pods than
-# wanted), one clause per line, each the same: a PASS reads CAUTION "<clause>; the figures:
-# <reason>", and a CAUTION or FAIL headline adds "; also <clause>". Pass "" for args 8/9
-# to keep their defaults.
+# the records counted (several, "<file>: <n>; <file>: <n>", read "the sweep outcomes
+# record"). <cautions> (arg 14, default none): other conditions the figures cannot show
+# (the rows ran on more than one harness, a cell ran on fewer istiod pods than wanted), one
+# clause per line, each the same: a PASS reads CAUTION "<clause>; the figures: <reason>",
+# and a CAUTION or FAIL headline adds "; also <clause>". Pass "" for args 8/9 to keep
+# their defaults.
 # Emits "<VERDICT>|<one-line headline>". Pure.
 # shellcheck disable=SC2329
 env_sla_verdict() {
@@ -232,8 +233,10 @@ env_sla_verdict() {
 		# figure shows them.
 		if (problems + 0 > 0) {
 			src = ENVIRON["_ESV_SRC"]
-			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("the sweep outcome records %d PROBLEM(s) (%s), so the figures may not measure what they seem to; the figures: %s", problems, src, reason) }
-			else reason = sprintf("%s; also the sweep outcome records %d PROBLEM(s) (%s)", reason, problems, src)
+			# Several records ("<file>: <n>; <file>: <n>", a pooled report): plural.
+			rec = index(src, "; ") ? "the sweep outcomes record" : "the sweep outcome records"
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%s %d PROBLEM(s) (%s), so the figures may not measure what they seem to; the figures: %s", rec, problems, src, reason) }
+			else reason = sprintf("%s; also %s %d PROBLEM(s) (%s)", reason, rec, problems, src)
 		}
 		# Other conditions no figure shows, one clause per line.
 		nc = split(ENVIRON["_ESV_CAUTIONS"], cl, "\n")

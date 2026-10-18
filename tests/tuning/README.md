@@ -74,7 +74,8 @@ at the end covers only the time after the last revert; it reads the proxy versio
 old istiod pods may still be terminating; a pod being deleted is left out of that read, with a
 note). 001 records the generations once its apply settled (`istio-generations-applied` in the
 pass's `state/`); the sweep compares its own read after the apply with that record (the
-IstioRevision too), then writes its read there (not after an apply that failed before its
+IstioRevision too), then writes its read there member by member (a member its read missed keeps
+001's record, which 002 then compares it from; nothing after an apply that failed before its
 record: Sail may still be rendering); 002 compares them before its revert. The sweep reports
 these as problems (exit `4`, the revert still runs):
 

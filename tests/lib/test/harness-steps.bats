@@ -93,7 +93,7 @@ _values() {
 	assert_line "$dirty"
 	grep -qx 'EXIT=4' "$rec"
 	[ "$(grep -c '^PROBLEM=' "$rec")" -eq 1 ]
-	grep -qE "^PROBLEM=the harness changed during the sweep, and back: HARNESS_SHA=${clean} at its start and at its end, but 002-probe\.sh recorded HARNESS_SHA=${dirty//./\\.} at [0-9T:-]+Z, so the steps after that read may have run other code than ${clean}: " "$rec" \
+	grep -qE "^PROBLEM=the harness changed during the sweep, and back: HARNESS_SHA=${clean} at its start and at its end, but 002-probe\.sh recorded HARNESS_SHA=${dirty//./\\.} at [0-9T:-]+Z, so the step that read it, and the other steps run after the change, may have run other code than ${clean}: " "$rec" \
 		|| { cat "$rec"; false; }
 	# The record names the sweep's harness: HARNESS_CONTENT_KEY right after HARNESS_SHA.
 	[ "$(grep -A1 -x "HARNESS_SHA=${clean}" "$rec")" = "HARNESS_SHA=${clean}"$'\n'"HARNESS_CONTENT_KEY=${key}" ]
@@ -117,7 +117,7 @@ _values() {
 		sweep_outcome --run-id st-run --record "$1/tests/out/rec" 1'
 	[ "$status" -eq 4 ]
 	[ "$(grep -c '^WARNING: the harness changed during the sweep' <<<"$stderr")" -eq 1 ]
-	grep -qE "^PROBLEM=the harness changed during the sweep, and back: HARNESS_SHA=${clean} at its start and at its end, but ${dirty//./\\.} at [0-9T:-]+Z, before 003-cleanup\.sh; the read before that \(at [0-9T:-]+Z, the sweep's start\) still gave ${clean}; a step read other files earlier: 002-probe\.sh recorded HARNESS_SHA=${dirty//./\\.} at [0-9T:-]+Z \(the first of 2 step reads of other files\), so the steps after that read" "$rec" \
+	grep -qE "^PROBLEM=the harness changed during the sweep, and back: HARNESS_SHA=${clean} at its start and at its end, but ${dirty//./\\.} at [0-9T:-]+Z, before 003-cleanup\.sh; the read before that \(at [0-9T:-]+Z, the sweep's start\) still gave ${clean}; a step read other files earlier: 002-probe\.sh recorded HARNESS_SHA=${dirty//./\\.} at [0-9T:-]+Z \(the first of 2 step reads of other files\), so the step that read it, and the other steps run after the change, may have run other code than ${clean}: " "$rec" \
 		|| { cat "$rec"; false; }
 	# Still changed at the end.
 	rm -rf "$r/tests/out"
@@ -126,7 +126,7 @@ _values() {
 		"$STEP" "$ROOT" >/dev/null
 		sweep_outcome --run-id st-run --record "$1/tests/out/rec" 1'
 	[ "$status" -eq 4 ]
-	grep -qE "^PROBLEM=the harness changed during the sweep: HARNESS_SHA=${clean} at its start, ${dirty//./\\.} at its end \([0-9T:-]+Z\); the last read that gave ${clean} was at [0-9T:-]+Z, the sweep's start; a step read other files before the end: 002-probe\.sh recorded HARNESS_SHA=${dirty//./\\.} at [0-9T:-]+Z, so the steps after that read" "$rec" \
+	grep -qE "^PROBLEM=the harness changed during the sweep: HARNESS_SHA=${clean} at its start, ${dirty//./\\.} at its end \([0-9T:-]+Z\); the last read that gave ${clean} was at [0-9T:-]+Z, the sweep's start; a step read other files before the end: 002-probe\.sh recorded HARNESS_SHA=${dirty//./\\.} at [0-9T:-]+Z, so the step that read it, and the other steps run after the change, may have run other code than ${clean}: " "$rec" \
 		|| { cat "$rec"; false; }
 	[ -z "$(ls -A "$TMPDIR")" ]
 }

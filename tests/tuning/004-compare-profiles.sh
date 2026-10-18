@@ -456,7 +456,7 @@ for p in "${PASSES[@]}"; do
 			# unknown (a row records none), and HARNESS_WARNING names the pass.
 			PHS[$p]="mixed:${a}"
 			case ",${PHCK[$p]#mixed:}," in *,unknown,*) ;; *) PHCK[$p]="mixed:${PHCK[$p]#mixed:},unknown" ;; esac
-			PROWHS[$p]="pass ${p}'s rows record more than one harness (harness_sha column and preamble: ${a}), so the harness changed during that pass"
+			PROWHS[$p]="pass ${p}'s rows record more than one harness (harness_sha column and preamble: ${a}), so the harness, or only the commit name git describe gives, changed during that pass (rows record no content key to tell the two apart)"
 			[[ "$b" == - ]] || PROWHS[$p]+="; combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ${b}"
 			;;
 		w) PWIDTHS[$p]="${PWIDTHS[$p]:+${PWIDTHS[$p]},}${a}" ;;

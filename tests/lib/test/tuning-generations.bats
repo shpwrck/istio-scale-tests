@@ -12,6 +12,9 @@ load test_helper
 source "${ROOT}/tests/lib/preamble.sh"
 
 setup() {
+	# The test's own process (bats runs setup and the test in one): the TUN_TERM_ON stub looks
+	# for the sweep below it only, never in a shell that started bats.
+	export TEST_PID="$BASHPID"
 	EK="${BATS_TEST_TMPDIR}/kubeconfig"
 	: > "$EK"
 	BIN="${BATS_TEST_TMPDIR}/bin"
@@ -39,7 +42,8 @@ _need_yaml() {
 # rollout wait fails. TUN_CRJSON_FAIL_AT=<n>: the n-th full Istio CR read (the sweep's spec
 # read is the first, 001's read before its first patch the second) fails, and someone else
 # edits the Istio CR then. TUN_TERM_ON=<glob>: at the first call matching it, SIGTERM to
-# the sweep (the topmost ancestor running 003-run-tuning-sweep.sh), and that call fails.
+# the sweep (the topmost ancestor running 003-run-tuning-sweep.sh below the test's process,
+# TEST_PID), and that call fails.
 # Any other call fails (the probes then fail: PROBE_FAILED).
 _gen_stub() {
 	export TD="${BATS_TEST_TMPDIR}/tun"
@@ -58,7 +62,7 @@ if [ -n "${TUN_TERM_ON:-}" ] && [ ! -e "$d/term-sent" ]; then
 	case "$*" in $TUN_TERM_ON)
 		: > "$d/term-sent"
 		p=$PPID s=""
-		while [ "${p:-1}" -gt 1 ]; do
+		while [ "${p:-1}" -gt 1 ] && [ "$p" != "${TEST_PID:?}" ]; do
 			case "$(ps -o args= -p "$p" 2>/dev/null)" in *003-run-tuning-sweep.sh*) s="$p" ;; esac
 			p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
 		done
@@ -239,7 +243,7 @@ gen_sweep() {
 @test "a sweep interrupted after a generation check found a problem, or could not compare a member, keeps it in its not-finished record as a note, and the comparison repeats it (a stop record keeps a problem as one: sweep-stop.bats)" {
 	_need_yaml
 	_gen_stub
-	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read may have measured another configuration"
+	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read (baseline) may have measured another configuration, and pass 01-push-throttling (and the passes after it, while the edit stays) may measure another configuration than its profile's"
 	# An edit during the baseline pass (found at the read before the apply of 01), then a
 	# SIGTERM to the sweep during that apply's merge patch.
 	TUN_FOREIGN_AT=2 TUN_TERM_ON="* patch istio.sailoperator.io default --type=merge *" gen_sweep

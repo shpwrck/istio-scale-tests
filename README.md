@@ -121,15 +121,17 @@ unset, ignores; your other git settings, `.git/info/attributes` included, never 
 run's own results do not count). Next to it, `HARNESS_CONTENT_KEY` (12 hex characters) identifies
 the content of those files alone; the `<8hex>` is its start. A sweep reads them again before its
 steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default, `config/options.env`) and at its end,
-and each step's own read counts too. A file edited, added or removed there during the sweep (or a
-`git checkout`, `pull` or commit that changes one) is a problem in its outcome (exit 4) that names
-both values and when the change was first seen, also when it was undone before the sweep's next read
-and only a step read it; the rows measured after it carry the new value in their TSV (controlplane:
-a `# HARNESS_CHANGED_AT=` line in its one TSV; churn-dataplane: each row's `harness_sha`), while
-the sweep's own records (the TSV preamble, `sweep-outcome.txt`) keep the start's. A commit or tag
-that left those files as they were changes only the name `git describe` gives: a note, and every
-step keeps recording the start's `HARNESS_SHA`. Each report also records the harness it
-ran on as `REPORT_HARNESS_SHA`; the results dir it reads never counts as a change.
+and each probe's and setup step's own read counts too. A file edited, added or removed there during
+the sweep (or a `git checkout`, `pull` or commit that changes one) is a problem in its outcome
+(exit 4) when a read sees it, also when it was undone before the sweep's next read and only a step
+read it (an edit made after a step's only read and undone before the next read is not seen); the
+problem names both values and when the change was first seen, and the rows measured after it carry
+the new value in their TSV (controlplane: a `# HARNESS_CHANGED_AT=` line in its one TSV;
+churn-dataplane: each row's `harness_sha`), while the sweep's own records (the TSV preamble,
+`sweep-outcome.txt`) keep the start's. A commit or tag that left those files as they were changes
+only the name `git describe` gives: a note, and every step keeps recording the start's
+`HARNESS_SHA`. Each report also records the harness it ran on as `REPORT_HARNESS_SHA`; the results
+dir it reads never counts as a change.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -273,7 +275,11 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   `mixed:<a>,<b>`, never one file's value. `HARNESS_SHA` values that differ while every input
   records one `HARNESS_CONTENT_KEY` differ only in git describe: every report then gives a note
   ("differ only in git describe: every ... records HARNESS_CONTENT_KEY=..., the same harness files")
-  instead of a warning, which an input without the key keeps.
+  instead of a warning, which an input without the key keeps. A report repeats only its results
+  dir's own `sweep-outcome.txt`: the record of a `sweep-*` dir below it (a pooled run, or one
+  sweep reported from its parent dir) that has not finished, was interrupted, stopped early or
+  records a `PROBLEM` is named in a note (controlplane: a data warning, and its verdict counts the
+  `PROBLEM`s); report that sweep dir alone to see its outcome.
 
 ## Grow the mesh
 

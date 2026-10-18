@@ -434,12 +434,14 @@ istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 
 # Source context's node allocatable + istiod limits for the preamble (read-only;
-# `unknown` on failure). Skipped for --phase baseline (no preamble written then).
+# `unknown` on failure). Skipped when no preamble is written: --phase baseline, or a TSV
+# that exists (003 writes it before a sweep's first window).
+TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 PRE_NODE_ALLOC_CPU_M="unknown"
 PRE_NODE_ALLOC_MEM_MI="unknown"
 PRE_ISTIOD_CPU_LIMIT_M="unknown"
 PRE_ISTIOD_MEM_LIMIT_MI="unknown"
-if [[ "$PHASE" != baseline ]]; then
+if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	src_ctx="${CONTEXTS[0]}"
 	# shellcheck disable=SC2207
 	nt_kv=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
@@ -463,7 +465,7 @@ fi
 # to 003's precreate_tsv_preamble (002 writes the preamble only when standalone).
 PRE_TUNING_BASELINE="TUNING_BASELINE=unknown"
 PRE_SIDECAR_EGRESS_HOSTS="SIDECAR_EGRESS_HOSTS=unknown"
-if [[ "$PHASE" != baseline ]]; then
+if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	tb_kv=""
 	while IFS= read -r tb_kv; do
 		case "$tb_kv" in
@@ -473,7 +475,6 @@ if [[ "$PHASE" != baseline ]]; then
 	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 fi
 
-TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	# Cluster-infra block, collected only when 002 writes the preamble itself
 	# (003 pre-creates it in a sweep). Same shared emitter as 003.
@@ -619,21 +620,29 @@ DROPPED_CTXS=()
 # Each member's istiod Deployment .spec.replicas at the window's baseline (cap_istiod_limits;
 # unknown when unread), persisted with the pods: the WINDOW_ROWS line records it next to the
 # rows the member wrote, so a report tells a member that ran the cell on fewer istiod pods
-# than it wants (one evicted or Pending) from one that runs fewer replicas.
+# than it wants (one evicted or Pending) from one that runs fewer replicas. ISTIOD_LIMITS
+# keeps that read's whole line (its per-replica limits too) for the rows' %-of-limit
+# columns (collect_capacity_for_ctx), so a window reads each member's Deployment once.
 declare -A ISTIOD_SPEC=()
+declare -A ISTIOD_LIMITS=()
 
 resolve_pods() {
 	POD_CTXS=()
 	POD_NAMES=()
 	ISTIOD_SPEC=()
-	local spec kv n
+	ISTIOD_LIMITS=()
+	local spec kv n lim notready
 	for ctx in "${CONTEXTS[@]}"; do
 		local pods
+		# <name>=<its Ready condition> per Running pod (a pod name has no "="; a bare name is
+		# one whose condition was not read).
 		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
 			--field-selector=status.phase=Running \
-			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+			-o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null)
 		spec=unknown
-		for kv in $(cap_istiod_limits "$ctx" "${KUBECTL[@]}"); do [[ "$kv" != replicas=* ]] || spec="${kv#replicas=}"; done
+		lim="$(cap_istiod_limits "$ctx" "${KUBECTL[@]}")"
+		ISTIOD_LIMITS[$ctx]="$lim"
+		for kv in $lim; do [[ "$kv" != replicas=* ]] || spec="${kv#replicas=}"; done
 		[[ "$spec" =~ ^[0-9]+$ ]] || spec=unknown
 		ISTIOD_SPEC[$ctx]="$spec"
 		# One context with zero istiod pods is dropped (degraded row later); only
@@ -643,15 +652,20 @@ resolve_pods() {
 			DROPPED_CTXS+=("$ctx")
 			continue
 		fi
-		n=0
+		n=0 notready=""
 		for pod in $pods; do
+			[[ "$pod" != *=* || "${pod#*=}" == True ]] || notready+="${notready:+, }${pod%%=*}"
 			POD_CTXS+=("$ctx")
-			POD_NAMES+=("$pod")
+			POD_NAMES+=("${pod%%=*}")
 			n=$((n + 1))
 		done
 		if [[ "$spec" != unknown ]] && ((n < spec)); then
 			echo "warning: context $ctx: ${n} istiod pod(s) Running, but its Deployment wants ${spec} (one evicted or Pending?): this window measures it on ${n} replica(s), and its WINDOW_ROWS entry (${ctx}=${n}/${spec}) tells the reports so" >&2
 		fi
+		# A Running replica that is not Ready (a replacement still syncing its remote
+		# clusters) is scraped and writes a row, but serves no proxy yet.
+		[[ -z "$notready" ]] \
+			|| echo "warning: context $ctx: istiod pod(s) Running but not Ready: ${notready} (a replacement still syncing?): this window scrapes them, but they serve no proxies yet, so the other replicas carry the load" >&2
 	done
 	((${#POD_CTXS[@]})) || die "no running istiod pods found in istio-system across ANY context (${CONTEXTS[*]}) — cannot proceed"
 }
@@ -668,7 +682,7 @@ save_pod_manifest() {
 		printf '%s\n' "$dctx" >> "${dir}/dropped-ctxs.tsv"
 	done
 	for dctx in "${!ISTIOD_SPEC[@]}"; do
-		printf '%s\t%s\n' "$dctx" "${ISTIOD_SPEC[$dctx]}"
+		printf '%s\t%s\t%s\n' "$dctx" "${ISTIOD_SPEC[$dctx]}" "${ISTIOD_LIMITS[$dctx]:-}"
 	done > "${dir}/istiod-spec.tsv"
 }
 
@@ -691,12 +705,14 @@ load_pod_manifest() {
 			[[ -n "$dctx" ]] && DROPPED_CTXS+=("$dctx")
 		done < "${dir}/dropped-ctxs.tsv"
 	fi
-	# The baseline's istiod Deployment replicas (none from an older baseline: unknown).
+	# The baseline's istiod Deployment replicas and its read's line (none from an older
+	# baseline: unknown, and collect_capacity_for_ctx reads the Deployment itself).
 	ISTIOD_SPEC=()
+	ISTIOD_LIMITS=()
 	if [[ -f "${dir}/istiod-spec.tsv" ]]; then
-		local sctx sval
-		while IFS=$'\t' read -r sctx sval; do
-			[[ -z "$sctx" ]] || ISTIOD_SPEC[$sctx]="$sval"
+		local sctx sval slim
+		while IFS=$'\t' read -r sctx sval slim; do
+			[[ -z "$sctx" ]] || { ISTIOD_SPEC[$sctx]="$sval"; ISTIOD_LIMITS[$sctx]="$slim"; }
 		done < "${dir}/istiod-spec.tsv"
 	fi
 	for k in "${!POD_CTXS[@]}"; do
@@ -1226,10 +1242,13 @@ collect_capacity_for_ctx() {
 	# healthy R-replica control plane reads up to ~R×100%, and one with a Pending or evicted
 	# replica (counted in .spec.replicas, absent from top) reads low. The Deployment's
 	# replicas only when that count is unknown. (cf PL28 sum-vs-invariant scope, PL35.)
-	local istd_cpu_m="unknown" istd_mem_mi="unknown" istd_rep="unknown"
-	# shellcheck disable=SC2207
-	local -a il=($(cap_istiod_limits "$ctx" "${KUBECTL[@]}"))
-	for kv in ${il[@]+"${il[@]}"}; do
+	# The Deployment as resolve_pods read it at the window's baseline (ISTIOD_LIMITS), read
+	# again only when that read lacks a limit. A limit changed during the window rolls istiod
+	# out: its pods restart, and the restart guard marks the rows.
+	local istd_cpu_m="unknown" istd_mem_mi="unknown" istd_rep="unknown" lim_re='cpu_m=[0-9]+ mem_mi=[0-9]+'
+	local il="${ISTIOD_LIMITS[$ctx]:-}"
+	[[ "$il" =~ $lim_re ]] || il="$(cap_istiod_limits "$ctx" "${KUBECTL[@]}")"
+	for kv in $il; do
 		case "$kv" in
 			cpu_m=*) istd_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) istd_mem_mi="${kv#mem_mi=}" ;;
@@ -1787,6 +1806,9 @@ scrape_window() {
 			cat "$rows_file"
 			[[ -z "$HCL_AFTER" ]] || printf '%s\n' "$HCL_AFTER"
 		} > "$win_file" || die "could not write the window's rows to ${win_file}"
+		# A write cut short (a full disk, a step killed while it appended) leaves the TSV's
+		# last line without its newline: end it, so these lines do not merge onto it.
+		tsv_end_line "$TSV_FILE" || die "could not end the last line of ${TSV_FILE} (a write cut short left it without a newline), so the window's rows would merge with it"
 		cat "$win_file" >> "$TSV_FILE" || die "could not append the window's rows to ${TSV_FILE}"
 	fi
 

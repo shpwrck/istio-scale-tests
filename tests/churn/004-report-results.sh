@@ -45,15 +45,19 @@ Usage: $(basename "$0") [options]
                      --config > environment > default.
   --results-dir DIR  Results directory (default: ${CHURN_RESULTS_DIR}). Every
                      churn-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
+                     Run on the parent of one sweep dir (no sweep-outcome.txt of its
+                     own), the report repeats no outcome, but a note names that sweep's
+                     record when it did not end cleanly, as --allow-multi-run's does.
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
                      pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
                      (csv # POOLED_HARNESS_CONTENT_KEYS= also their HARNESS_CONTENT_KEY
                      values); its note says when the HARNESS_SHA values differ only in
-                     git describe (every run records one key). It does not read the
-                     sweep-outcome.txt of a sweep-* dir below the results dir: report
-                     each sweep alone to see it.
+                     git describe (every run records one key). It repeats no
+                     sweep-outcome.txt of a sweep-* dir below the results dir (report each
+                     sweep alone to see it), but its note names each one that has not
+                     finished, was interrupted, stopped early or records a PROBLEM.
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
@@ -184,11 +188,20 @@ config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
 # A pooled report repeats only its results dir's own sweep-outcome.txt
 # (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
-# (text, md, charts and csv).
+# and names each pooled sweep whose record has not finished, was interrupted, stopped early
+# or holds a PROBLEM (sweep_outcome_pooled): text, md, charts and csv.
+# One run on the parent dir of its sweep (no record of its own) repeats none either: the
+# same note, alone, names that sweep's record when it did not end cleanly.
 POOLED_OUTCOME_NOTE=""
+POOLED_SWEEP_OUTCOMES=""
 if [[ -n "$POOLED_NOTE" ]]; then
 	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
+	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
+	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE+=" Pooled sweep records that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
 	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/sweep-outcome.prev.txt" ]]; then
+	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
+	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
 fi
 
 # Every format reads the rows through churn_rows, which re-derives the status of a row
@@ -322,6 +335,7 @@ report_text() {
 	echo "=== Churn Convergence Results ==="
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
 	echo "# harness_content_key (recorded by 002): ${HARNESS_CONTENT_KEY_M}"
@@ -644,6 +658,7 @@ report_markdown() {
 	echo "# Churn Convergence"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "| Axis | Values |"
 	echo "|------|--------|"
@@ -785,6 +800,7 @@ report_charts() {
 	echo "# Churn Convergence — Charts"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	churn_rows | awk -F'\t' '
 	# Charts average each series per mesh size over valid rows only ($21=="OK").
 	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,

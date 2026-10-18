@@ -297,20 +297,20 @@ Other:
                               the --contexts members (005-cleanup.sh), then waits
                               --settle, so no cell runs on another's leftovers or
                               inside their deletion's pushes; it deletes nothing
-                              on the other members: when they hold some, it stops
-                              first and prints the 005 command for them. An
-                              earlier run's notes about the end of the sweep are
-                              carried into the new outcome, once. A resume that
-                              passes its checks marks the sweep's markdown pages
-                              (sweep-, sweep-charts- and
+                              on the other members: when they hold some,
+                              it stops first and prints the 005 command for
+                              them. An earlier run's notes about the end of
+                              the sweep are carried into the new outcome,
+                              once. A resume that passes its checks marks the
+                              sweep's markdown pages (sweep-, sweep-charts- and
                               scale-envelope-<RUN_ID>.md) as made before it (a
                               line under the title and one in place of the
                               outcome; front matter stale_since_resume), until it
                               writes them again at its end. The TSV keeps the
                               first run's ISTIO_NOTREADY_AT_START (the outcome
-                              repeats it as a note) and HARNESS_SHA; the resume
-                              records its own readiness, with its start time, in
-                              a note of the sweep outcome
+                              repeats it as a note) and HARNESS_SHA; the
+                              resume records its own readiness, with its
+                              start time, in a note of the sweep outcome
                               (ISTIO_NOTREADY_AT_RESUME=...), and warns when it
                               runs another harness (HARNESS_CONTENT_KEY; when
                               only git describe differs, an INFO) than the last
@@ -1416,6 +1416,10 @@ emit_failed_row() {
 	if ! grep -q '^timestamp' "$tsv" 2>/dev/null; then
 		precreate_tsv_preamble
 	fi
+	# A window write cut short (a full disk, a step killed while it appended) leaves the
+	# last line without its newline: end it, so this row is not merged onto a cut row (the
+	# merged line would read as that member's measurement, and the cell as done).
+	tsv_end_line "$tsv" || die "could not end the last line of ${tsv} (a write cut short left it without a newline), so the cell's ${status} row cannot start a line of its own. Fix the sweep dir (permissions, disk space)."
 	# 66 fields: cols 41-43 (cluster proxies, sidecar pods, proxy check) are N/A too;
 	# cols 44-45 keep the cell's traffic config, cols 46-51 are N/A; cols 52-57 keep
 	# the cell's growth metadata, cols 58-66 are N/A.
@@ -2056,6 +2060,8 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	fi
 	_resume_seen=()
 	for _resume_n in ${_resume_carry[@]+"${_resume_carry[@]}"}; do
+		# Why an earlier run kept a PROBLEM is its own: this run's end says it again.
+		_resume_n="${_resume_n% (kept: *)}"
 		for _resume_s in ${_resume_seen[@]+"${_resume_seen[@]}"}; do [[ "$_resume_s" != "$_resume_n" ]] || continue 2; done
 		_resume_seen+=("$_resume_n")
 		case "$_resume_n" in
@@ -2138,7 +2144,7 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	# A run killed while it appended a window can leave the TSV's last line without its
 	# newline: end that line first, so this resume's "# RESUMED_AT=" line starts one of its
 	# own and TSV_LINES counts it.
-	[[ -z "$(tail -c 1 "$_resume_tsv" 2>/dev/null)" ]] || printf '\n' >> "$_resume_tsv" \
+	tsv_end_line "$_resume_tsv" \
 		|| die "--resume: could not end the last line of ${_resume_tsv} (a run cut short left it without a newline); ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
 	# A TSV without its header line holds no row yet, and precreate_tsv_preamble writes it
 	# again: every row of it is this run's (0).
@@ -2466,17 +2472,45 @@ cell_interrupted_row() {
 		echo "note: the cell in progress (${label:-the last cell}) had written every member's rows before the sweep ended: it is done (no INTERRUPTED row), and a --resume keeps it" >&2
 		return 0
 	fi
-	"${cir[0]}" INTERRUPTED "${cir[@]:1}" 2>/dev/null \
+	# A subshell: emit_failed_row dies when it cannot end a cut last line, and an exit in
+	# this EXIT trap would skip the outcome record after it.
+	( "${cir[0]}" INTERRUPTED "${cir[@]:1}" ) 2>/dev/null \
 		|| echo "warning: could not write the INTERRUPTED row of the cell in progress; a --resume finds it by its rows" >&2
+}
+
+# resume_added_rows: the rows (status rows too) this --resume added to the TSV after the
+# line count it started at (_resume_lines); nothing when that is not known.
+resume_added_rows() {
+	[[ -n "$RESUME_DIR" && "${_resume_lines:-}" =~ ^[0-9]+$ ]] || return 0
+	awk -F'\t' -v s="$_resume_lines" "${CP_CELL_AWK}"'/^timestamp\t/ { cp_header(); next } FNR > s + 0 && !/^#/ && cp_isrow() { n++ } END { print n + 0 }' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null || true
+}
+# resume_own_notes_drop: drops this --resume's own notes (RESUME_OWN_NOTES: its harness or
+# Kubernetes change) from RESUME_NOTES, which holds pairs (--note|--info, text): a resume
+# that added no rows measured nothing on them.
+resume_own_notes_drop() {
+	local i own keep=()
+	for ((i = 0; i + 1 < ${#RESUME_NOTES[@]}; i += 2)); do
+		for own in ${RESUME_OWN_NOTES[@]+"${RESUME_OWN_NOTES[@]}"}; do [[ "${RESUME_NOTES[i + 1]}" != "$own" ]] || continue 2; done
+		keep+=("${RESUME_NOTES[i]}" "${RESUME_NOTES[i + 1]}")
+	done
+	RESUME_NOTES=(${keep[@]+"${keep[@]}"})
+	RESUME_OWN_NOTES=()
+}
+# resume_own_notes_at_exit: the EXIT trap's, for a --resume that stops or is interrupted
+# before it adds a row (the sweep's end does the same, then empties RESUME_OWN_NOTES).
+# shellcheck disable=SC2329  # invoked by the EXIT trap below
+resume_own_notes_at_exit() {
+	((${#RESUME_OWN_NOTES[@]})) || return 0
+	[[ "$(resume_added_rows)" != 0 ]] || resume_own_notes_drop
 }
 
 # A step that still runs first (sweep_step_kill: after a second signal, 002 may still be
 # writing rows), then the poller and scratch dir (SWEEP_TMP), then the cell in progress,
 # then a run that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
 # that record, stopped with its reason or interrupted, with the notes this run gathered so
-# far (a --resume's).
+# far (a --resume's, without its own when it added no row).
 _sweep_rc=0 # the trap's own $?, kept before its first step changes it
-trap '_sweep_rc=$?; sweep_step_kill || true; stop_peak_metrics_poller 2>/dev/null || true; rm -rf "$SWEEP_TMP" 2>/dev/null || true; cell_interrupted_row || true; sweep_outcome_on_exit "$_sweep_rc" ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} || true' EXIT
+trap '_sweep_rc=$?; sweep_step_kill || true; stop_peak_metrics_poller 2>/dev/null || true; rm -rf "$SWEEP_TMP" 2>/dev/null || true; cell_interrupted_row || true; resume_own_notes_at_exit || true; sweep_outcome_on_exit "$_sweep_rc" ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} || true' EXIT
 
 # Pre-create the TSV preamble before any combo (skipped in dry-run). A fresh sweep with
 # --config also gets the run-config-<RUN_ID>.env replay copy; a resumed one keeps the
@@ -3412,10 +3446,11 @@ istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
 # left out, a later attempt of each cell kept) and the rows the figures keep ran one
 # harness (harness_same on every pair, one known HARNESS_SHA or HARNESS_CONTENT_KEY: the
 # rule 004's verdict uses), so no figure comes from the changed harness. That run is the
-# one before this resume that started last at or before its record's date (its outcome's,
-# or its start for a record it did not finish; this resume can start in the second its
-# outcome was written), the first run when none did; a record with no date keeps the
-# PROBLEM.
+# one before this resume that started last before its outcome's date (a resume can start
+# in the second an outcome was written, this one or an earlier one), or at or before its
+# start for a record it did not finish, the first run when none did; a record with no date
+# keeps the PROBLEM. A PROBLEM it keeps ends with why, "(kept: ...)"; the NOTE drops the
+# PROBLEM's advice to run the sweep again (its rows were).
 if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	_cr_att="$(controlplane_attempts "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "${OUTPUT_DIR}/resumes.txt" 2>/dev/null)" || _cr_att=""
 	# The harness of each attempt with kept rows; each run's start, rows and kept rows.
@@ -3434,28 +3469,39 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 			harness_same "${_cr_a%%$'\t'*}" "${_cr_a#*$'\t'}" "${_cr_b%%$'\t'*}" "${_cr_b#*$'\t'}" || _cr_one=0
 		done
 	done
-	for ((_cr_i = 0; _cr_one && _cr_i + 1 < ${#RESUME_NOTES[@]}; _cr_i += 2)); do
+	for ((_cr_i = 0; _cr_i + 1 < ${#RESUME_NOTES[@]}; _cr_i += 2)); do
 		[[ "${RESUME_NOTES[_cr_i]}" == --problem ]] || continue
 		_cr_t="${RESUME_NOTES[_cr_i + 1]}"
 		[[ "$_cr_t" == "an earlier run of this sweep ("*") recorded: the harness changed during the sweep"* ]] || continue
 		_cr_d="${_cr_t#an earlier run of this sweep (}"
+		_cr_out=0
 		case "$_cr_d" in
-		"outcome of "*) _cr_d="${_cr_d#outcome of }"; _cr_d="${_cr_d%%) recorded: *}" ;;
+		"outcome of "*) _cr_d="${_cr_d#outcome of }"; _cr_d="${_cr_d%%) recorded: *}"; _cr_out=1 ;;
 		"started at "*) _cr_d="${_cr_d#started at }"; _cr_d="${_cr_d%%, not finished) recorded: *}" ;;
-		*) continue ;;
 		esac
-		[[ "$_cr_d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || continue
-		_cr_run="${_cr_runs[0]:-}"
-		for _cr_r in ${_cr_runs[@]+"${_cr_runs[@]}"}; do
-			_cr_s="${_cr_r%%$'\t'*}"
-			[[ "$_cr_s" == unknown || "$_cr_s" > "$_cr_d" || "$_cr_s" == "$RESUME_AT_Z" ]] || _cr_run="$_cr_r"
-		done
-		# Its rows, none kept.
-		_cr_rows="" _cr_kept=""
-		IFS=$'\t' read -r _ _cr_rows _cr_kept <<<"$_cr_run" || true
-		[[ "$_cr_rows" =~ ^[1-9][0-9]*$ && "$_cr_kept" == 0 ]] || continue
-		RESUME_NOTES[_cr_i]=--note
-		RESUME_NOTES[_cr_i + 1]="${_cr_t} (its rows were all run again later)"
+		_cr_why="its record names no date, so the run it is about is not known"
+		if [[ "$_cr_d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+			_cr_run="${_cr_runs[0]:-}"
+			for _cr_r in ${_cr_runs[@]+"${_cr_runs[@]}"}; do
+				_cr_s="${_cr_r%%$'\t'*}"
+				[[ "$_cr_s" == unknown || "$_cr_s" > "$_cr_d" || ("$_cr_out" == 1 && "$_cr_s" == "$_cr_d") || "$_cr_s" == "$RESUME_AT_Z" ]] || _cr_run="$_cr_r"
+			done
+			# Its rows, none kept, and the rows kept ran one harness.
+			_cr_rows="" _cr_kept=""
+			IFS=$'\t' read -r _ _cr_rows _cr_kept <<<"$_cr_run" || true
+			if [[ "$_cr_kept" =~ ^[1-9][0-9]*$ ]]; then
+				_cr_why="${_cr_kept} row(s) of that run are in the figures"
+			elif [[ ! "$_cr_rows" =~ ^[1-9][0-9]*$ ]]; then
+				_cr_why="no row of that run is known to have run again"
+			elif ! ((_cr_one)); then
+				_cr_why="the rows in the figures ran more than one harness, or one not recorded"
+			else
+				RESUME_NOTES[_cr_i]=--note
+				RESUME_NOTES[_cr_i + 1]="${_cr_t%; run the sweep again if the change matters} (its rows were all run again later)"
+				continue
+			fi
+		fi
+		RESUME_NOTES[_cr_i + 1]="${_cr_t} (kept: ${_cr_why})"
 	done
 fi
 # These reports come before this run's outcome is written; a resume's earlier one (in
@@ -3639,21 +3685,12 @@ fi
 # A --resume that added no rows (every cell of its axis flags was done) says so: the reports
 # then leave it out of the rows' provenance (its harness and Kubernetes versions measured
 # nothing; controlplane_attempts counts each run's rows).
-if [[ -n "$RESUME_DIR" && "${_resume_lines:-}" =~ ^[0-9]+$ ]]; then
-	_resume_added="$(awk -F'\t' -v s="$_resume_lines" "${CP_CELL_AWK}"'/^timestamp\t/ { cp_header(); next } FNR > s + 0 && !/^#/ && cp_isrow() { n++ } END { print n + 0 }' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null)" || _resume_added=""
-	if [[ "$_resume_added" == 0 ]]; then
-		# RESUME_NOTES holds pairs (--note|--info, text): drop the pairs of this resume's own.
-		if ((${#RESUME_OWN_NOTES[@]})); then
-			_rn_keep=()
-			for ((_rn_i = 0; _rn_i + 1 < ${#RESUME_NOTES[@]}; _rn_i += 2)); do
-				for _rn_own in "${RESUME_OWN_NOTES[@]}"; do [[ "${RESUME_NOTES[_rn_i + 1]}" != "$_rn_own" ]] || continue 2; done
-				_rn_keep+=("${RESUME_NOTES[_rn_i]}" "${RESUME_NOTES[_rn_i + 1]}")
-			done
-			RESUME_NOTES=(${_rn_keep[@]+"${_rn_keep[@]}"})
-		fi
-		RESUME_NOTES+=(--info "this --resume (at ${RESUME_AT_Z}) added no rows: every cell of its axis flags was already done, so the reports leave it out of the rows' provenance (harness_shas, KUBE_VERSIONS)")
-	fi
+if [[ "$(resume_added_rows)" == 0 ]]; then
+	resume_own_notes_drop
+	RESUME_NOTES+=(--info "this --resume (at ${RESUME_AT_Z}) added no rows: every cell of its axis flags was already done, so the reports leave it out of the rows' provenance (harness_shas, KUBE_VERSIONS)")
 fi
+# Counted: the EXIT trap need not count them again.
+RESUME_OWN_NOTES=()
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
 # The outcome also goes at the end of the scale envelope, when it was written: a

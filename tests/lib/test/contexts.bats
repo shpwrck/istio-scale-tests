@@ -37,7 +37,7 @@ printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
 *" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" fortio load "*" -json - "*) : > "$STUB_MARK"; cat "$FX/../fortio_ok.json" ;;
-*" get pod -l app=fortio-client "*) printf 'fortio-client-0' ;;
+*" get pod -l app=fortio-client "*) printf 'fortio-client-0\t\tTrue' ;;
 *" exec "*) cat "$FX/../fortio_ok.json" ;;
 *" scale "*" --replicas=1 "*) : ;;
 *" scale "*) : > "$STUB_MARK" ;;

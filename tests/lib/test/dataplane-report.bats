@@ -33,7 +33,7 @@ case " $* " in
 	esac
 	;;
 *" get deploy dataplane-server "*) printf '%s' "${STUB_SERVER_REPLICAS-1/1}" ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" get pods "*) : ;;  # no Running istiod pod
 *" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin
 *) exit 1 ;;

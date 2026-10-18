@@ -37,8 +37,8 @@ case " $* " in
 		fi ;;
 	esac
 	cat "$FX/../fortio_ok.json" ;;
-*" get pod -l app=fortio-client "*) printf 'fortio-client-0' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=fortio-client "*) printf 'fortio-client-0\t\tTrue' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*) printf 'istiod-abc-x1\n' ;;
 *" scale "* | *" rollout status "*) : ;;
@@ -91,7 +91,7 @@ _stop_during_load() {
 	_stop_during_load '* -json - *' "${ROOT}/tests/dataplane/002-run-latency-probe.sh" --source-context ctx-a \
 		--qps-levels 10 --settle 0 --warmup-duration 0 --reach-requests 0 --output-dir "$RES"
 	[ "$rc" -eq 143 ] || { echo "status ${rc}: $(cat "${BATS_TEST_TMPDIR}/err")"; false; }
-	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG" || { cat "$STUB_LOG"; false; }
+	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --ignore-not-found --wait=false" "$STUB_LOG" || { cat "$STUB_LOG"; false; }
 	grep -qF "note: ctx-a: deleting the fortio client pod dataplane-client-0, which still runs a load (its Deployment starts a new one)" "${BATS_TEST_TMPDIR}/err"
 	# The warmup's load (no -json).
 	rm -f "$LOAD_STARTED" "$POD_DELETED"
@@ -100,7 +100,7 @@ _stop_during_load() {
 		--qps-levels 10 --settle 0 --warmup-duration 1 --reach-requests 0 --output-dir "$RES"
 	[ "$rc" -eq 143 ]
 	grep -q -- " -t 1s -quiet " "$STUB_LOG"
-	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG"
+	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --ignore-not-found --wait=false" "$STUB_LOG"
 	# A run that ends on its own deletes nothing.
 	rm -f "$LOAD_STARTED" "$POD_DELETED"
 	: > "$STUB_LOG"
@@ -120,7 +120,7 @@ _stop_during_load() {
 		_stop_during_load '* -json - *' "${ROOT}/tests/churn-dataplane/"${p} --source-context ctx-a --combo-id c1 \
 			--duration 5 --settle-sec 0 --output-dir "$RES"
 		[ "$rc" -eq 143 ] || { echo "${p}: status ${rc}: $(cat "${BATS_TEST_TMPDIR}/err")"; false; }
-		grep -qx -- "--context=ctx-a --request-timeout=5s -n churn-dataplane-test delete pod fortio-client-0 --wait=false" "$STUB_LOG" \
+		grep -qx -- "--context=ctx-a --request-timeout=5s -n churn-dataplane-test delete pod fortio-client-0 --ignore-not-found --wait=false" "$STUB_LOG" \
 			|| { echo "${p}:"; grep -E 'delete|exec' "$STUB_LOG"; false; }
 		grep -qF "note: ctx-a: deleting the fortio client pod fortio-client-0, which still runs a load" "${BATS_TEST_TMPDIR}/err"
 	done
@@ -136,7 +136,7 @@ _stop_during_load() {
 case " $* " in
 *" get pod -l app="*"-client --field-selector=status.phase=Running "*)
 	printf '%s\n' "$*" >> "$STUB_LOG"
-	printf '%b' "${CLIENTS-old-client\t2030-01-01T00:00:00Z\nnew-client\t\n}"
+	printf '%b' "${CLIENTS-old-client\t2030-01-01T00:00:00Z\tTrue\nnew-client\t\tTrue\n}"
 	exit 0 ;;
 esac
 exec "$STUB_BIN/kubectl" "$@"
@@ -160,15 +160,15 @@ STUB
 	done
 	# Only the Terminating pod: no load runs, and the probe says why.
 	: > "$STUB_LOG"
-	CLIENTS='old-client\t2030-01-01T00:00:00Z\n' PATH="${w}:${BIN}:${PATH}" run --separate-stderr \
+	CLIENTS='old-client\t2030-01-01T00:00:00Z\tTrue\n' PATH="${w}:${BIN}:${PATH}" run --separate-stderr \
 		"${ROOT}/tests/dataplane/002-run-latency-probe.sh" --source-context ctx-a --qps-levels 10 --settle 0 \
 		--warmup-duration 0 --reach-requests 0 --output-dir "$RES"
 	assert_failure
-	[[ "$stderr" == *"no Running dataplane-client pod that is not being deleted on ctx-a (ns=dataplane-test): run 001, or wait until its Deployment's new pod is Ready"* ]]
+	[[ "$stderr" == *"no Ready dataplane-client pod that is not being deleted on ctx-a (ns=dataplane-test): run 001, or wait until its Deployment's new pod is Ready"* ]]
 	[ "$(grep -c -- ' exec ' "$STUB_LOG")" = 0 ]
-	CLIENTS='old-client\t2030-01-01T00:00:00Z\n' PATH="${w}:${BIN}:${PATH}" run --separate-stderr \
+	CLIENTS='old-client\t2030-01-01T00:00:00Z\tTrue\n' PATH="${w}:${BIN}:${PATH}" run --separate-stderr \
 		"${ROOT}/tests/churn-dataplane/003-run-churn-probe.sh" --churn-rate 1 --source-context ctx-a --combo-id c1 \
 		--duration 1 --settle-sec 0 --output-dir "$RES"
 	assert_failure
-	[[ "$stderr" == *"no Running fortio-client pod that is not being deleted on ctx-a (ns=churn-dataplane-test)"* ]]
+	[[ "$stderr" == *"no Ready fortio-client pod that is not being deleted on ctx-a (ns=churn-dataplane-test)"* ]]
 }

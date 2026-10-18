@@ -667,7 +667,7 @@ printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
 *" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin
 *" fortio load "*" -json - "*) : > "$STUB_MARK"; cat "$FX/../fortio_ok.json" ;;
-*" get pod -l app=fortio-client "*) printf 'fortio-client-0' ;;
+*" get pod -l app=fortio-client "*) printf 'fortio-client-0\t\tTrue' ;;
 *" exec "*) cat "$FX/../fortio_ok.json" ;;
 *" scale "*" --replicas=1 "*)
 	if [[ -n "${STUB_REPLACE_ON_SCALE_DOWN:-}" ]]; then : > "$STUB_REPLACED"; fi ;;
@@ -678,7 +678,7 @@ case " $* " in
 *" wait pod/"*) : ;;
 *" get pods -l app=propagation-canary "*) printf 'canary-backer-0\n' ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*)
 	if [[ -f "$STUB_REPLACED" ]]; then printf 'istiod-abc-y2\n'; else printf 'istiod-abc-x1\n'; fi ;;
 *" -n istio-system get pods -l app=istiod -o json "*)

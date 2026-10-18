@@ -110,13 +110,13 @@ POISONED_RESTART, POISONED_SCRAPE, else OK. The marker comment records pct_200 a
 top_code (the most frequent code other than 200).
 
 The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
-whose exec failed (a FAILED row) may run on there, so the probe waits until its -t and
-5 s more have passed before going on. When the probe ends during a load (a stop,
-Ctrl-C), it deletes the client pod, so the load ends with it; the pod's Deployment
-starts a new one, which a sweep started right after waits for (its setup 001 waits
-until the Deployments are Available). Run by hand, the probe loads only a Running client
-pod that is not being deleted, and stops when there is none: run 001, or wait until the
-new pod is Ready.
+whose exec failed (a FAILED row) may run on there, so the probe waits until its
+--duration and 5 s more have passed before going on, unless the client pod is gone
+(then no load runs). When the probe ends during a load (a stop, Ctrl-C), it deletes the
+client pod, so the load ends with it; the pod's Deployment starts a new one, which a
+sweep started right after waits for (its setup 001 waits until the Deployments are
+Available). Run by hand, the probe loads only a Ready client pod that is not being
+deleted, and stops when there is none: run 001, or wait until the new pod is Ready.
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
 
@@ -294,7 +294,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 fi
 
 CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" fortio-client "${KUBECTL[@]}")" \
-	|| die "no Running fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
+	|| die "no Ready fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 # Remote reachability check (tests/lib/reach.sh), before the istiod port-forwards
 # and the window, through each cluster's fortio-server-<ctx> Service.
@@ -391,7 +391,9 @@ fi
 WINDOW_END_NS="$(now_ns)"
 # The load can outlive its failed exec in the pod: wait it out, so the churn window (003)
 # that a sweep runs next does not run beside it.
-if [[ "$STATUS" == FAILED ]]; then fortio_load_wait_out "$WINDOW_START_NS" "$DURATION"; fi
+if [[ "$STATUS" == FAILED ]]; then
+	fortio_load_wait_out "$WINDOW_START_NS" "$DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
+fi
 LOAD_POD=""
 
 # Post-window scrape of every istiod pod (concurrent) + pod set.

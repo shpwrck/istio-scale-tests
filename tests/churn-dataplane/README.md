@@ -61,10 +61,11 @@ that starts it, so it can outlive that exec. When `002` or `003` ends during a l
 stop, Ctrl-C, an error), it deletes the client pod, so the load cannot run on into the
 next window: its Deployment starts a new pod, which a sweep started right after waits
 for (its setup `001` waits until the Deployments are Available). Run by hand, a probe
-loads only a Running client pod that is not being deleted, and stops when there is none:
+loads only a Ready client pod that is not being deleted, and stops when there is none:
 run `001`, or wait until the new pod is Ready. When a load's `kubectl exec` fails
-part-way (a `FAILED` row), the probe waits until that load's `-t` and 5 s more have
-passed before the next window starts.
+part-way (a `FAILED` row), the probe waits until that load's `--duration` and 5 s more
+have passed before the next window starts, unless the client pod is gone (then no load
+runs).
 
 ## Quick start
 
@@ -224,7 +225,8 @@ TSV written before it) is the content key of the harness files the rows ran on: 
 `HARNESS_SHA` differs but that share one key differ only in git describe (a commit or tag that left
 the harness files as they were), not in the harness. Each row also records the harness its probe ran
 (`harness_sha`; a sweep's TSV preamble keeps the sweep's start): when a TSV's rows record more than
-one, or another than its preamble's `HARNESS_SHA` (the harness changed during the sweep),
+one, or another than its preamble's `HARNESS_SHA` (the harness, or only the commit name git
+describe gives, changed during the sweep: rows record no content key to tell the two apart),
 `HARNESS_SHA` reads `mixed:`, `HARNESS_CONTENT_KEY` adds `unknown` (a row records no key), and a
 warning in every format (json `data_warnings`) names the combos whose baseline and churn rows ran
 different harnesses (their `Δp99` pairs the two). md and charts start with a YAML frontmatter of

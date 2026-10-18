@@ -50,7 +50,7 @@ _base() {
 		assert_output --partial " ${NOTE}"
 		run --separate-stderr "$rep" --results-dir "$d" --allow-multi-run --format csv
 		assert_success
-		assert_line "# NOTE: ${NOTE}"
+		assert_line "# NOTE: ${NOTE} Pooled sweep records that did not end cleanly: sweep-r1/sweep-outcome.txt: 1 PROBLEM(s)."
 		# One sweep: its own outcome is repeated, and nothing is said of pooled ones.
 		run --separate-stderr "$rep" --results-dir "${d}/sweep-r1" --format text
 		assert_success
@@ -59,7 +59,7 @@ _base() {
 	done
 }
 
-@test "every pooling report's --help names the pooled HARNESS_CONTENT_KEY values and that a sweep-* dir's own outcome is not read" {
+@test "every pooling report's --help names the pooled HARNESS_CONTENT_KEY values and that a sweep-* dir's own outcome is not repeated, only named" {
 	local f h
 	for f in dataplane/004-report-results.sh churn/004-report-results.sh churn-dataplane/005-report-results.sh \
 		propagation/005-report-results.sh; do
@@ -67,7 +67,7 @@ _base() {
 		assert_success
 		# The flag's paragraph, its lines joined.
 		h="$(awk '/^  --allow-multi-run/ { on = 1 } on && /^  --format/ { exit } on { sub(/^ +/, ""); printf "%s ", $0 }' <<<"$output")"
-		[[ "$h" == *"(csv # POOLED_HARNESS_CONTENT_KEYS="*"also their HARNESS_CONTENT_KEY values); its note says when the HARNESS_SHA values differ only in git describe (every run records one key). It does not read the sweep-outcome.txt of a sweep-* dir below the results dir: report each sweep alone to see it."* ]] \
+		[[ "$h" == *"(csv # POOLED_HARNESS_CONTENT_KEYS="*"also their HARNESS_CONTENT_KEY values); its note says when the HARNESS_SHA values differ only in git describe (every run records one key). It repeats no sweep-outcome.txt of a sweep-* dir below the results dir (report each sweep alone to see it), but its note names each one that has not finished, was interrupted, stopped early or records a PROBLEM"* ]] \
 			|| { echo "${f}: ${h}"; false; }
 	done
 }

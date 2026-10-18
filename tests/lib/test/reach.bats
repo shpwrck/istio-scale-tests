@@ -70,7 +70,7 @@ case " $* " in
 	esac
 	;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" get pods "*) : ;;
 *) exit 1 ;;
 esac

@@ -137,12 +137,13 @@ Under --on-unreachable fail a stopped run also writes one STOPPED_UNREACHABLE ro
 
 The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
 whose exec failed (a FAILED row, or a failed warmup) may run on there, so the probe
-waits until its -t and 5 s more have passed before going on. When the probe ends during
-a load (a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the pod's
-Deployment starts a new one, which a sweep started right after waits for (its setup 001
-waits until the Deployments are Available). Run by hand, the probe loads only a Running
-client pod that is not being deleted, and stops when there is none: run 001, or wait
-until the new pod is Ready.
+waits until its --duration (--warmup-duration for the warmup) and 5 s more have passed
+before going on, unless the client pod is gone (then no load runs). When the probe ends
+during a load (a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the
+pod's Deployment starts a new one, which a sweep started right after waits for (its
+setup 001 waits until the Deployments are Available). Run by hand, the probe loads only
+a Ready client pod that is not being deleted, and stops when there is none: run 001, or
+wait until the new pod is Ready.
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the run.
 
@@ -418,7 +419,7 @@ trap cleanup_all EXIT
 printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n' >> "$TSV_FILE"
 
 CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" dataplane-client "${KUBECTL[@]}")" \
-	|| die "no Running dataplane-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
+	|| die "no Ready dataplane-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 echo "=== Data-plane latency probe ==="
 echo "Source: $SOURCE_CTX (pod: $CLIENT_POD)"
@@ -615,7 +616,7 @@ if ((WARMUP_DURATION > 0)); then
 		if ! "${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" >/dev/null 2>&1; then
 			echo "  warn: warmup failed for $wurl" >&2
-			fortio_load_wait_out "$load_start_ns" "$WARMUP_DURATION"
+			fortio_load_wait_out "$load_start_ns" "$WARMUP_DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
 		fi
 		LOAD_POD=""
 	done
@@ -640,7 +641,7 @@ run_fortio() {
 				"$RUN_ID" "$MESH_SIZE" "$SOURCE_CTX" "$target_ctx" "$qps" \
 				"$CONNECTIONS" "$DURATION" "${ISTIOD_RESTARTED_TAG:-unknown}" "$target_class" >> "$TSV_FILE"
 			# The load can outlive its failed exec in the pod: wait it out before the next one.
-			fortio_load_wait_out "$load_start_ns" "$DURATION"
+			fortio_load_wait_out "$load_start_ns" "$DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
 			LOAD_POD=""
 			continue
 		}

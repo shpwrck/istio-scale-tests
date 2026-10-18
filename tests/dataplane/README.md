@@ -51,11 +51,12 @@ A load runs inside the client pod, not in the `kubectl exec` that starts it, so 
 outlive that exec. When `002` ends during a load (a stop, Ctrl-C, an error), it deletes
 the client pod, so the load cannot run on into the next run's first window: its
 Deployment starts a new pod, which a sweep started right after waits for (its setup `001`
-waits until the Deployments are Available). Run by hand, `002` loads only a Running
+waits until the Deployments are Available). Run by hand, `002` loads only a Ready
 client pod that is not being deleted, and stops when there is none: run `001`, or wait
 until the new pod is Ready. When a load's `kubectl exec` fails part-way (a `FAILED` row,
-or a failed warmup), `002` waits until that load's `-t` and 5 s more have passed before
-it starts the next load.
+or a failed warmup), `002` waits until that load's `--duration` (`--warmup-duration` for
+the warmup) and 5 s more have passed before it starts the next load, unless the client
+pod is gone (then no load runs).
 
 Every cluster runs `--server-replicas` fortio server pods (default 2,
 `DATAPLANE_SERVER_REPLICAS`) labelled `cluster=<ctx>`, and every cluster gets a Service

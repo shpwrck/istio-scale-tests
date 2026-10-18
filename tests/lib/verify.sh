@@ -265,6 +265,9 @@ EXTRACTED_PATTERNS=(
 	'_sweep_on_signal() {'
 	'sweep_err_trap() {'
 	'sweep_outcome_cut_short() {'
+	'sweep_outcome_brief() {'
+	'sweep_outcome_pooled() {'
+	'tsv_end_line() {'
 	'sweep_outcome_on_exit() {'
 	'md_cell() {'
 	'function md_cell('
@@ -326,7 +329,7 @@ EXTRACTED_PATTERNS=(
 	# an in-pod load stopped with its probe, or waited out after its exec failed (fortio.sh)
 	'fortio_client_stop() {'
 	'fortio_load_wait_out() {'
-	# the client pod a probe execs its loads in: Running, not being deleted (fortio.sh)
+	# the client pod a probe execs its loads in: Ready, not being deleted (fortio.sh)
 	'fortio_client_pod() {'
 )
 EXCEPTIONS="tests/lib/"

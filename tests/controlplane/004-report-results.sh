@@ -71,8 +71,9 @@ Usage: $(basename "$0") [options]
                      controlplane-*.tsv under it is read; a sweep-*/ dir from 003 is
                      one run. The report lists each distinct RUN_ID, ISTIO_VERSION,
                      HARNESS_SHA and HARNESS_CONTENT_KEY (run_ids, istio_versions,
-                     harness_shas, harness_content_keys) and prints a WARNING when Istio
-                     versions or harnesses differ.
+                     harness_shas, harness_content_keys); when Istio versions or
+                     harnesses differ it prints a WARNING, and a PASS verdict reads
+                     CAUTION (see Provenance below).
   --allow-multi-run  Pool more than one run, as the pods-vs-config-only calibration does
                      (a base dir with a pods sweep and a config-only sweep). Without it
                      a dir with several runs stops the report, which lists them and how
@@ -80,9 +81,12 @@ Usage: $(basename "$0") [options]
                      and lists their HARNESS_SHA and ISTIO_VERSION values (csv and json
                      also HARNESS_CONTENT_KEY: # POOLED_HARNESS_CONTENT_KEYS=,
                      pooled_runs.harness_content_key), and the verdict counts the
-                     PROBLEMs of each pooled sweep's outcome; legacy cells pool across
-                     runs, while each growth series (RUN_ID x mesh size x K x workload)
-                     keeps its own cells and fits, labelled run=<RUN_ID>.
+                     PROBLEMs of each pooled sweep's outcome. It repeats only the results
+                     dir's own sweep-outcome.txt: a pooled one that has not finished or
+                     was cut short gets a data warning (report each sweep alone to see
+                     its record). Legacy cells pool across runs, while each growth series
+                     (RUN_ID x mesh size x K x workload) keeps its own cells and fits,
+                     labelled run=<RUN_ID>.
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
@@ -152,11 +156,14 @@ format shows its own state, then the outcome before it (sweep-outcome.prev.txt):
 under "earlier"; csv # SWEEP_OUTCOME_RESUMED_AT= and the record as
 # SWEEP_OUTCOME_EARLIER_<KEY>= lines; text and markdown a second block. Each PROBLEM the
 outcome records (with a not-finished record, also the one before it) turns a PASS verdict
-into CAUTION ("the sweep outcome records N PROBLEM(s) (<the files>)"); a pooled report
-counts the record of each sweep it pools (the dir of each TSV) the same way, and names each
-record that holds one. A "could not count the sweep's cells" PROBLEM is left out of that
-count, as the report counts the cells itself; the sweep's own reports, made before it
-writes the outcome, count the PROBLEMs it will record, also without that one.
+into CAUTION ("the sweep outcome records N PROBLEM(s) (<the files>)"); the record of each
+sweep below the results dir (the dir of each TSV: a pooled sweep, or the one sweep of a
+parent dir) counts the same way, and the verdict names each record that holds one ("the
+sweep outcomes record" when several do). The report repeats only the results dir's own
+record: one below it that has not finished, was interrupted or stopped early gets a data
+warning instead. A "could not count the sweep's cells" PROBLEM is left out of that count,
+as the report counts the cells itself; the sweep's own reports, made before it writes the
+outcome, count the PROBLEMs it will record, also without that one.
 
 Each cell is read from its latest attempt (a --resume runs a failed cell again): the
 rows of earlier attempts are left out of every figure, count and verdict, and every
@@ -174,15 +181,20 @@ NOT_RUN one names the full command that resumes the sweep with the axis flags th
 planned them. So does a window that ran on fewer istiod pods than its member's istiod
 Deployment wants (a "# WINDOW_ROWS=" entry <member>=<n>/<spec>, <n> below <spec>: a
 replica evicted or Pending): its rows are valid, but their per-replica figures are not
-comparable with the other cells. An entry without /<spec> (an older harness) is compared
-with the member's ISTIOD_REPLICAS_BY_CONTEXT, read at the sweep's start (an HPA may have
-changed it since): a data warning only. An INCOMPLETE cell is also marked where its
+comparable with the other cells. An entry without /<spec> (an older harness, or 002 could
+not read the Deployment) is compared with the member's ISTIOD_REPLICAS_BY_CONTEXT, read at
+the sweep's start (an HPA may have changed it since): a data warning only. So is a <spec>
+other than that start value (an HPA, or a changed replicaCount: the cell ran another
+replica count than the sweep's start). An INCOMPLETE cell is also marked where its
 figures are shown: its text block header ("INCOMPLETE: rows of 1 of 2 members"), its
 n_total in the markdown cells table (‡, with a footnote) and its chart series (‡, with a
-note). A NOT_RUN or INCOMPLETE cell, or one that ran on fewer istiod pods than wanted, also
-turns a PASS verdict into CAUTION ("N planned cell(s) never ran", "N cell(s) are
-INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's istiod Deployment
-wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes from
+note); a legacy cell that ran on fewer istiod pods than wanted in its text block header
+("FEWER ISTIOD PODS: <member> ran 2 of its 3 istiod replicas") and its n_total in the
+markdown cells table (§, with a footnote). A report of several TSVs names each cell in a
+warning behind its TSV. A NOT_RUN or INCOMPLETE cell, or one that ran on fewer istiod pods
+than wanted, also turns a PASS verdict into CAUTION ("N planned cell(s) never ran", "N
+cell(s) are INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's istiod
+Deployment wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes from
 the valid rows with a push count: fewer than n_valid shows as got/n_valid (csv pushes_n,
 json xds_pushes_n), with a data warning.
 
@@ -192,24 +204,25 @@ lines) and from each "# HARNESS_CHANGED_AT=" line (002 writes one before the row
 window that ran other harness files than the TSV records). harness_shas and
 harness_content_keys list those of the runs and changes whose rows the figures use (a
 cell's latest attempt); HARNESS_SHA and HARNESS_CONTENT_KEY read mixed:<list> when there
-are several. A mix of harnesses prints a provenance warning and turns a PASS verdict into
-CAUTION; HARNESS_SHA values that differ only in git describe (one HARNESS_CONTENT_KEY) are
-one harness, and print a note. Every format lists the attempts (text and csv # attempts:,
-markdown "Attempts", json and frontmatter attempts): each run's or change's HARNESS_SHA,
-KUBE_VERSIONS and rows ("(N row(s), K in the figures)" in text, csv and markdown; json
-rows and rows_kept). One that added none is marked "(added no rows)", one whose rows a
-later --resume all ran again "(its rows were all run again later)", and either is left
-out of harness_shas, the Kubernetes change check and the provenance warning. Then each
-run's Istio state at its start (text and csv # attempts, Istio at each start:, markdown
-"Attempts, Istio at each start"; json attempts istio_notready, istio_generations,
-istio_proxy_versions, also started_at and harness_content_key). Every format also records
-REPORT_HARNESS_SHA (json report_harness_sha): the harness this report ran on, which can
-differ from HARNESS_SHA, the harness that measured the rows: a report made again later,
-or from another checkout, may count rows by other rules. The results dir it reads does
-not count as a change to it. The json namespace_scaling object holds the fits;
-namespace_scaling.fit_note (null when none) says when the conv_p99_ms push gate read
-pushes_avg from only some valid rows of a fitted point (the others had no push count),
-as the other formats' fit NOTE line does.
+are several. A mix of harnesses or of Istio versions prints a provenance warning and turns
+a PASS verdict into CAUTION, as do rows in the figures from a run that recorded neither
+HARNESS_SHA nor HARNESS_CONTENT_KEY (no git: run from a git checkout); HARNESS_SHA values
+that differ only in git describe (one HARNESS_CONTENT_KEY) are one harness, and print a
+note. Every format lists the attempts (text and csv # attempts:, markdown "Attempts", json
+and frontmatter attempts): each run's or change's HARNESS_SHA, KUBE_VERSIONS and rows ("(N
+row(s), K in the figures)" in text, csv and markdown; json rows and rows_kept). One that
+added none is marked "(added no rows)", one whose rows a later --resume all ran again "(its
+rows were all run again later)", and either is left out of harness_shas, the Kubernetes
+change check and the provenance warning. Then each run's Istio state at its start (text and
+csv # attempts, Istio at each start:, markdown "Attempts, Istio at each start"; json
+attempts istio_notready, istio_generations, istio_proxy_versions, also started_at and
+harness_content_key). Every format also records REPORT_HARNESS_SHA (json
+report_harness_sha): the harness this report ran on, which can differ from HARNESS_SHA, the
+harness that measured the rows: a report made again later, or from another checkout, may
+count rows by other rules. The results dir it reads does not count as a change to it. The
+json namespace_scaling object holds the fits; namespace_scaling.fit_note (null when none)
+says when the conv_p99_ms push gate read pushes_avg from only some valid rows of a fitted
+point (the others had no push count), as the other formats' fit NOTE line does.
 
 Environment:
   CONTROLPLANE_RESULTS_DIR      --results-dir default (relative to the repo root).
@@ -263,6 +276,9 @@ text|csv|json|markdown|charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, json, markdown, or charts)" ;;
 esac
 
+# Every trailing slash off (`/` stays): the paths below are compared and shown relative to
+# it, and `dir//` would make a TSV's dir (dirname) another string than the results dir.
+while [[ "$RESULTS_DIR" == */ && "$RESULTS_DIR" != / ]]; do RESULTS_DIR="${RESULTS_DIR%/}"; done
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
 ALL_TSV=()
@@ -484,11 +500,9 @@ while IFS=$'\037' read -r _af _arun _ah _ak _an _anr _apv _agen _aat _akept _ahk
 	fi
 	if [[ "$_arun" == "first run" ]]; then
 		ATTEMPTS_ISTIO+="${ATTEMPTS_ISTIO:+; }${_att_pre}the first run ISTIO_NOTREADY_AT_START=${_anr} ISTIO_GENERATIONS=${_agen} ISTIO_PROXY_VERSIONS=${_apv}"
-		if ((${#TSV_FILES[@]} == 1)); then
-			_att_lead="$(_att_mark "$_an" "$_akept")"
-		else
-			_att_lead+="${_att_lead:+; }${_att_pre}the first run$(_att_mark "$_an" "$_akept")"
-		fi
+		# Its values (the TSV preamble's), as a --resume's are named below: when its rows were
+		# all run again, no header value is the preamble's.
+		_att_lead+="${_att_lead:+; }${_att_pre}the first run HARNESS_SHA=${_ah} KUBE_VERSIONS=${_ak}$(_att_mark "$_an" "$_akept")"
 		continue
 	fi
 	if [[ "$_arun" == "harness changed at "* ]]; then
@@ -512,9 +526,9 @@ if [[ "$HARNESS_SHAS_M" == *,* && "$HARNESS_KEYS_M" != *,* && "$HARNESS_KEYS_M" 
 	_att_describe=1
 fi
 if [[ -n "$ATTEMPTS_NOTE" ]]; then
-	# The first run, with its rows; a several-file report names each file's.
-	_att_first="the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead}"
-	((${#TSV_FILES[@]} == 1)) || _att_first="each file's first run (the HARNESS_SHA and KUBE_VERSIONS of its TSV preamble): ${_att_lead}"
+	# The first run, with its values and rows; a several-file report names each file's.
+	_att_first="${_att_lead}"
+	((${#TSV_FILES[@]} == 1)) || _att_first="each file's first run: ${_att_lead}"
 	_att_or=""
 	((_att_hc_rows == 0)) || _att_or=" or harness"
 	if ((_att_multi)); then
@@ -627,6 +641,15 @@ json_list() {
 # run=<RUN_ID>) and each pods-vs-config-only row names its runs.
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
+# A pooled report repeats only its results dir's own sweep-outcome.txt
+# (sweep_outcome_recorded), as the other suites' reports do; it counts each pooled record's
+# PROBLEMs, and names one cut short in a data warning (OUTCOME_PROBLEMS below). The pooled
+# note says so (text, md, charts and csv).
+POOLED_OUTCOME_NOTE=""
+if [[ -n "$POOLED_NOTE" ]]; then
+	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: it counts their PROBLEMs in the verdict and names each one that has not finished or was cut short in a data warning; report each sweep alone to see its failed cells, problems and notes."
+	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+fi
 FILES_CONSUMED=${#TSV_FILES[@]}
 FILES_SKIPPED=${#LEGACY_FILES[@]}
 
@@ -1132,18 +1155,27 @@ ${AWK_HEADER_IX}"'
 #     cp_short; a growth window's own line too): a replica evicted or Pending. The rows are
 #     valid (not INCOMPLETE), but their per-replica figures are not comparable with the
 #     other cells: a data warning, and SHORT_CELLS makes a PASS verdict CAUTION. An entry
-#     without <spec> (an older harness) below the member's ISTIOD_REPLICAS_BY_CONTEXT
-#     (cp_shortw: read at the sweep's start, an HPA may have changed it since) is a data
-#     warning only (SHORTW).
+#     without <spec> (an older harness, or 002 could not read the Deployment) below the
+#     member's ISTIOD_REPLICAS_BY_CONTEXT (cp_shortw: read at the sweep's start, an HPA may
+#     have changed it since) is a data warning only (SHORTW);
+#   - SPECW: an entry whose <spec> is not the member's ISTIOD_REPLICAS_BY_CONTEXT (its
+#     Deployment's .spec.replicas at the sweep's start; cp_specw): an HPA or a changed
+#     replicaCount, so the cell ran another replica count than the sweep's start. A data
+#     warning only.
 # The INCOMPLETE cells are also marked where their figures are shown (CS_INC_KEYS: one
 # "<mesh>|<svcs>|<reps>|<ns>|<scope>|<traffic>|<window kind>\t<why>" line each): the text
-# block's header, the markdown cells table (‡) and the charts. A NOT_RUN warning names the
-# full command that resumes the sweep with the axis flags that planned those cells.
+# block's header, the markdown cells table (‡) and the charts; the SHORT legacy cells
+# (CS_SHORT_KEYS, the same form) in the text block's header and the markdown cells table
+# (§). A NOT_RUN warning names the full command that resumes the sweep with the axis flags
+# that planned those cells. In a report of several TSVs each cell is named behind its TSV
+# (relative to the results dir), as the attempts are: one cell of two sweeps is two cells.
 NOT_RUN_CELLS=0
-_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=()
-CS_INC_KEYS=""
+_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=() _cs_specw=()
+CS_INC_KEYS="" CS_SHORT_KEYS=""
 for _cs_i in "${!TSV_FILES[@]}"; do
 	_cs_tsv="${TSV_FILES[_cs_i]}"
+	_cs_pre=""
+	((${#TSV_FILES[@]} == 1)) || _cs_pre="${_cs_tsv#"${RESULTS_DIR%/}"/}: "
 	_cs_plan="$(dirname "$_cs_tsv")/planned-cells.txt"
 	[[ -f "$_cs_plan" ]] || _cs_plan=/dev/null
 	# The sweep's members, as its --resume names them (the TSV's "# Contexts:" line).
@@ -1153,12 +1185,14 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 		|| _cs_cfg="<sweep dir>/run-config-$(basename "$_cs_tsv" .tsv | sed 's/^controlplane-//').env"
 	while IFS=$'\t' read -r _cs_kind _cs_cell _cs_x; do
 		case "$_cs_kind" in
-		INCOMPLETE) _cs_inc+=("$_cs_cell") ;;
+		INCOMPLETE) _cs_inc+=("${_cs_pre}${_cs_cell}") ;;
 		INCKEY) CS_INC_KEYS+="${_cs_cell}"$'\t'"${_cs_x}"$'\n' ;;
-		POOLED) _cs_pool+=("$_cs_cell") ;;
-		NOTRUN) _cs_nr+=("$_cs_cell") ;;
-		SHORT) _cs_short+=("$_cs_cell") ;;
-		SHORTW) _cs_shortw+=("$_cs_cell") ;;
+		POOLED) _cs_pool+=("${_cs_pre}${_cs_cell}") ;;
+		NOTRUN) _cs_nr+=("${_cs_pre}${_cs_cell}") ;;
+		SHORT) _cs_short+=("${_cs_pre}${_cs_cell}") ;;
+		SHORTKEY) CS_SHORT_KEYS+="${_cs_cell}"$'\t'"${_cs_x}"$'\n' ;;
+		SHORTW) _cs_shortw+=("${_cs_pre}${_cs_cell}") ;;
+		SPECW) _cs_specw+=("${_cs_pre}${_cs_cell}") ;;
 		NRPLAN) _cs_cmds+=("$(controlplane_resume_cmd "<sweep dir>" "${_cs_ctx:-<its contexts>}" "$_cs_cell" "$_cs_cfg") (<sweep dir>: the directory of ${_cs_tsv#"${RESULTS_DIR%/}"/})") ;;
 		PLANERR) echo "warning: could not read ${_cs_plan}; planned cells that never ran (NOT_RUN) are not counted" >&2 ;;
 		PLANOTHER) echo "note: ${_cs_plan#"${RESULTS_DIR%/}"/} is the plan of ${_cs_cell}, not of ${_cs_tsv##*/}: its planned cells are not counted for ${_cs_tsv##*/}" >&2 ;;
@@ -1173,20 +1207,25 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 			while (np > 0 && (getline line < plan) > 0) if (line ~ /^# PLAN=[0-9]+ / && (q = index(line, ": --"))) { p = substr(line, 8); sub(/ .*/, "", p); pflags[p] = substr(line, q + 2) }
 			close(plan)
 		}
-		# gflush(): a growth window'"'"'s SHORT/SHORTW line, once its rows are read (gn: its
-		# WINDOW_ROWS entries; grd: its members with a row that has a reading). A member whose
-		# rows all have istiod_restarted unknown is left out, as cp_cell_state leaves it out.
-		function gflush(    j, m, w, gs, gw) {
-			gs = ""; gw = ""
+		# gflush(): a growth window'"'"'s SHORT/SHORTW/SPECW line, once its rows are read (gn:
+		# its WINDOW_ROWS entries; grd: its members with a row that has a reading). A member
+		# whose rows all have istiod_restarted unknown is left out, as cp_cell_state leaves it
+		# out.
+		function gflush(    j, m, w, gs, gw, gp) {
+			gs = ""; gw = ""; gp = ""
 			for (j = 1; j <= gn; j++) {
 				m = gm[j]
 				if (!(m in grd)) continue
 				w = m " ran " gnn[j] " of its "
-				if (gss[j] != "") { if (gnn[j] < gss[j]) gs = gs (gs == "" ? "" : ", ") w gss[j] " istiod replicas" }
+				if (gss[j] != "") {
+					if (gnn[j] < gss[j]) gs = gs (gs == "" ? "" : ", ") w gss[j] " istiod replicas"
+					if ((m in cp_rep) && gss[j] != cp_rep[m]) gp = gp (gp == "" ? "" : ", ") m " wanted " gss[j] " istiod replicas, " cp_rep[m] " at the sweep'"'"'s start"
+				}
 				else if ((m in cp_rep) && gnn[j] < cp_rep[m]) gw = gw (gw == "" ? "" : ", ") w cp_rep[m] " istiod replicas"
 			}
 			if (gs != "") print "SHORT\t" glbl " (" gs ")"
 			if (gw != "") print "SHORTW\t" glbl " (" gw ")"
+			if (gp != "") print "SPECW\t" glbl " (" gp ")"
 			gn = 0; split("", grd)
 		}
 		/^timestamp\t/ { if (gn) gflush(); cp_header(); sc = 0; for (i = 1; i <= NF; i++) if ($i == "services_per_namespace") sc = i; next }
@@ -1212,12 +1251,16 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 			for (i = 1; i <= n; i++) {
 				k = order[i]
 				cs = cp_cell_state(k)
-				if (cp_short[k] != "") print "SHORT\t" label(k) " (" cp_short[k] ")"
+				split(k, kp, SUBSEP)
+				if (cp_short[k] != "") {
+					print "SHORT\t" label(k) " (" cp_short[k] ")"
+					print "SHORTKEY\t" kp[1] "|" kp[2] "|" kp[3] "|" kp[4] "|" kp[5] "|" kp[6] "|" kp[7] "\t" cp_short[k]
+				}
 				if (cp_shortw[k] != "") print "SHORTW\t" label(k) " (" cp_shortw[k] ")"
+				if (cp_specw[k] != "") print "SPECW\t" label(k) " (" cp_specw[k] ")"
 				if ((phase == "" || phase == "sweep") && cs == "INCOMPLETE") {
 					why = (cp_why[k] != "" ? cp_why[k] : "rows of " (cp_nm[k] + 0) " of " cp_ms[k] " members")
 					print "INCOMPLETE\t" label(k) " (" why ")"
-					split(k, kp, SUBSEP)
 					print "INCKEY\t" kp[1] "|" kp[2] "|" kp[3] "|" kp[4] "|" kp[5] "|" kp[6] "|" kp[7] "\t" why
 				}
 				if (k in cp_after) print "POOLED\t" label(k)
@@ -1256,17 +1299,24 @@ if ((SHORT_CELLS)); then
 	_cs_w+="${_cs_nl}${SHORT_CELLS} cell(s) ran on fewer istiod pods than their member's istiod Deployment wants (its .spec.replicas at the window's baseline: a replica evicted, or Pending), so their per-replica figures are not comparable with the other cells; the rows are valid measurements of the pods that ran: $(cell_list "${_cs_short[@]}")."
 fi
 if ((${#_cs_shortw[@]})); then
-	_cs_w+="${_cs_nl}${#_cs_shortw[@]} cell(s) have fewer rows for a member than its istiod replicas at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): $(cell_list "${_cs_shortw[@]}"). Their WINDOW_ROWS lines do not record the replicas the Deployment wanted then (an older harness), so this is a replica evicted or Pending, or an HPA or a rollout that changed the replicas during the sweep; it does not change the verdict."
+	_cs_w+="${_cs_nl}${#_cs_shortw[@]} cell(s) have fewer rows for a member than its istiod replicas at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): $(cell_list "${_cs_shortw[@]}"). Their WINDOW_ROWS lines do not record the replicas the Deployment wanted then (an older harness, or 002 could not read the Deployment), so this is a replica evicted or Pending, or an HPA or a rollout that changed the replicas during the sweep; it does not change the verdict."
+fi
+if ((${#_cs_specw[@]})); then
+	_cs_w+="${_cs_nl}${#_cs_specw[@]} cell(s) have a window whose member's istiod Deployment wanted another replica count than at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): $(cell_list "${_cs_specw[@]}"). An HPA, or a changed replicaCount: their per-replica figures are not comparable with the cells run at the start's count; it does not change the verdict."
 fi
 if [[ -n "$_cs_w" ]]; then
 	DATA_WARNINGS="${DATA_WARNINGS:+${DATA_WARNINGS}${_cs_nl}}${_cs_w#"$_cs_nl"}"
 fi
-# INC_AWK: inc_load() reads CS_INC_KEYS (passed as ENVIRON _INC) into inc[<key>] = <why>;
-# inc_why() is the current aggregated row's INCOMPLETE why ("" when it is not one): a
-# legacy cell ($48 services_per_namespace 0) keyed by $1-$5, $38 traffic and $53 window kind.
+# INC_AWK: inc_load() reads CS_INC_KEYS (passed as ENVIRON _INC) into inc[<key>] = <why>,
+# and CS_SHORT_KEYS (ENVIRON _SHORT) into sht[<key>]; inc_why() / short_why() are the
+# current aggregated row's INCOMPLETE / SHORT why ("" when it is not one): a legacy cell
+# ($48 services_per_namespace 0) keyed by $1-$5, $38 traffic and $53 window kind.
 # shellcheck disable=SC2016  # awk source
-INC_AWK='function inc_load(    n, l, i, t, k, w) { n = split(ENVIRON["_INC"], l, "\n"); for (i = 1; i <= n; i++) if ((t = index(l[i], "\t"))) { k = substr(l[i], 1, t - 1); w = substr(l[i], t + 1); if (k in inc) w = inc[k] "; " w; inc[k] = w } }
-function inc_why(    k) { if ($48 + 0 != 0) return ""; k = $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $38 "|" $53; return (k in inc) ? inc[k] : "" }
+INC_AWK='function inc_add(s, a,    n, l, i, t, k, w) { n = split(s, l, "\n"); for (i = 1; i <= n; i++) if ((t = index(l[i], "\t"))) { k = substr(l[i], 1, t - 1); w = substr(l[i], t + 1); if (k in a) w = a[k] "; " w; a[k] = w } }
+function inc_load() { split("", inc); split("", sht); inc_add(ENVIRON["_INC"], inc); inc_add(ENVIRON["_SHORT"], sht) }
+function inc_key() { return ($48 + 0 != 0) ? "" : $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $38 "|" $53 }
+function inc_why(    k) { k = inc_key(); return (k != "" && (k in inc)) ? inc[k] : "" }
+function short_why(    k) { k = inc_key(); return (k != "" && (k in sht)) ? sht[k] : "" }
 '
 LEFTOVER_AT_START_M="$(tag_values LEFTOVER_TEST_NAMESPACES "")"
 [[ -n "$LEFTOVER_AT_START_M" ]] || LEFTOVER_AT_START_M="n/a"
@@ -1276,8 +1326,6 @@ data_warnings_lines() {
 	local w
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
-# On stderr, except in a sweep's own reports: their text report prints them on stdout.
-[[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]] || data_warnings_lines "WARNING: " >&2
 # STATUS_ROWS / STATUS_SUMMARY: their count and "SKIPPED_MEM_GUARD 4, GROW_FAILED 1"
 # (first-seen order) over every consumed TSV.
 read -r STATUS_ROWS STATUS_SUMMARY < <(cat "${DATA_FILES[@]}" | awk -F'\t' -v re="$STATUS_RE" '
@@ -1303,7 +1351,9 @@ STATUS_KINDS="skipped or failed"
 # (sweep-outcome.prev.txt: a --resume's), whose rows the figures use too; a finished one
 # already carries that outcome's PROBLEMs. "could not count the sweep's cells" is not
 # counted: this report counts the cells itself (NOT_RUN, INCOMPLETE, the status rows), and
-# 003 leaves it out of _SWEEP_OUTCOME_PROBLEMS for the same reason.
+# 003 leaves it out of _SWEEP_OUTCOME_PROBLEMS for the same reason. The record of a sweep
+# below the results dir (a pooled one) is repeated nowhere else, so when it is cut short
+# (not finished, interrupted, stopped early) a data warning names it (sweep_outcome_brief).
 OUTCOME_PROBLEMS=0 OUTCOME_SRC="sweep-outcome.txt"
 if [[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]]; then
 	OUTCOME_PROBLEMS="${_SWEEP_OUTCOME_PROBLEMS:-0}"
@@ -1316,6 +1366,9 @@ else
 	done
 	_op_src=()
 	for _op_d in "${_op_dirs[@]}"; do
+		if [[ "$_op_d" != "${RESULTS_DIR%/}" ]] && sweep_outcome_cut_short "${_op_d}/sweep-outcome.txt"; then
+			DATA_WARNINGS+="${DATA_WARNINGS:+${_cs_nl}}The record of a sweep below the results dir, ${_op_d#"${RESULTS_DIR%/}"/}/sweep-outcome.txt, $(sweep_outcome_brief "${_op_d}/sweep-outcome.txt"): that sweep's rows may be partial, and this report repeats only the results dir's own sweep-outcome.txt (report that sweep alone to see its failed cells, problems and notes)."
+		fi
 		_op_files=()
 		[[ ! -f "${_op_d}/sweep-outcome.txt" ]] || _op_files+=("${_op_d}/sweep-outcome.txt")
 		if [[ -f "${_op_d}/sweep-outcome.prev.txt" ]] && { [[ ! -f "${_op_d}/sweep-outcome.txt" ]] || sweep_outcome_unfinished "${_op_d}/sweep-outcome.txt"; }; then
@@ -1345,6 +1398,8 @@ else
 	fi
 fi
 is_nonneg_int "$OUTCOME_PROBLEMS" || OUTCOME_PROBLEMS=0
+# On stderr, except in a sweep's own reports: their text report prints them on stdout.
+[[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]] || data_warnings_lines "WARNING: " >&2
 compute_sla_verdict() {
 	local restarts n_total n_valid
 	# Sum restart rows (istiod_restarted==1) and n_total/n_valid across all valid rows.
@@ -2347,7 +2402,7 @@ report_text() {
 	echo ""
 	echo "Files: $(files_label)"
 	echo ""
-	_INC="$CS_INC_KEYS" awk -F'\t' "${INC_AWK}"'
+	_INC="$CS_INC_KEYS" _SHORT="$CS_SHORT_KEYS" awk -F'\t' "${INC_AWK}"'
 	BEGIN { inc_load() }
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
@@ -2365,8 +2420,8 @@ report_text() {
 	{
 		conv_pin = ($27+0 == 1) ? "  [SINGLE-BUCKET-PINNED: all delta mass in the 0-100ms bucket; value is a uniform-within-bucket assumption, unresolved below 100ms]" : ""
 		queue_pin = ($28+0 == 1) ? "  [SINGLE-BUCKET-PINNED: all delta mass in the 0-100ms bucket; value is a uniform-within-bucket assumption, unresolved below 100ms]" : ""
-		iw = inc_why()
-		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s traffic_config=%s (n_total=%s n_valid=%s%s) ---\n", $1, $2, $3, $4, $5, $38, $6, $7, (iw == "" ? "" : "; INCOMPLETE: " iw)
+		iw = inc_why(); fw = short_why()
+		printf "--- mesh_size=%s service_count=%s replicas=%s namespace_count=%s sidecar_scoping=%s traffic_config=%s (n_total=%s n_valid=%s%s%s) ---\n", $1, $2, $3, $4, $5, $38, $6, $7, (iw == "" ? "" : "; INCOMPLETE: " iw), (fw == "" ? "" : "; FEWER ISTIOD PODS: " fw)
 		printf "  istiod CPU peak (m):  min=%s max=%s avg=%s   [per row: the larger of the window average and the busiest 5 s poll]\n", $22, $23, $24
 		printf "  istiod CPU avg (m):   %s   [process_cpu_seconds_total delta / window, averaged over the rows]\n", ($68 == "" ? "N/A" : $68)
 		printf "  istiod RSS peak (Mi): min=%s max=%s avg=%s   [process_resident_memory_bytes peak per row]\n", $8, $9, $10
@@ -2392,6 +2447,7 @@ report_text() {
 			printf "  - not measured: %s status row(s) %s (%s; not a restart)\n", $62, st, sw
 		}
 		if (iw != "") printf "  ! INCOMPLETE: %s: cut short while its member rows were written, so these figures cover only the rows written (a --resume runs it again)\n", iw
+		if (fw != "") printf "  ! FEWER ISTIOD PODS: %s (its istiod Deployment'"'"'s .spec.replicas: a replica evicted or Pending), so these per-replica figures are not comparable with the other cells; the rows are valid\n", fw
 		printf "\n"
 	}' <<<"$aggregated"
 	if [[ -n "$short" ]]; then
@@ -2418,6 +2474,7 @@ report_csv() {
 	[[ -z "$ATTEMPTS_NOTE" ]] || echo "# attempts: ${ATTEMPTS_NOTE}"
 	[[ -z "$ATTEMPTS_ISTIO" ]] || echo "# attempts, Istio at each start: ${ATTEMPTS_ISTIO}"
 	config_multi_run_csv
+	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
 	sweep_outcome_recorded --sweep-level-run-id "$RESULTS_DIR" csv
 	[[ -n "$PROVENANCE_WARNING" ]] && echo "# WARNING: ${PROVENANCE_WARNING}"
 	data_warnings_lines "# WARNING: "
@@ -2655,7 +2712,7 @@ report_markdown() {
 	fi
 	echo "| mesh_size | svc | reps | ns | scoping | traffic | n_total | n_valid | cpu_peak (m) | cpu_avg (m) | rss_peak (Mi) | heap_alloc (Mi) | heap_inuse (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies/replica | proxies/cluster | cfg_dump_avg (MiB) | restarts | unk_restarts |${gh}"
 	echo "|-----------|-----|------|----|---------|---------|---------|---------|--------------|-------------|---------------|-----------------|-----------------|---------------|----------------|-----------------|-----------------|--------------------|----------|--------------|${gs}"
-	_INC="$CS_INC_KEYS" awk -F'\t' -v growth="$growth" -v gruns="$gruns" "${INC_AWK}"'
+	_INC="$CS_INC_KEYS" _SHORT="$CS_SHORT_KEYS" awk -F'\t' -v growth="$growth" -v gruns="$gruns" "${INC_AWK}"'
 	BEGIN { inc_load() }
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
@@ -2682,13 +2739,17 @@ report_markdown() {
 		# Status rows count in unk_restarts; say so in the cell.
 		unk = $21
 		if ($62 + 0 > 0) { st = $63; gsub(/\+/, ", ", st); unk = unk " (" $62 " status: " st ")" }
-		# double-dagger-mark an INCOMPLETE cell (its n_total), named in the footnote below.
-		nt = $6; iw = inc_why()
-		if (iw != "") { nt = nt " ‡"; incl = incl (incl == "" ? "" : "; ") "mesh=" $1 " svcs=" $2 " reps=" $3 " ns=" $4 " scope=" $5 " traffic=" $38 ($53 == "deploy" ? "" : " window=" $53) " (" iw ")" }
+		# double-dagger-mark an INCOMPLETE cell (its n_total), and section-mark one that ran on
+		# fewer istiod pods than wanted, each named in a footnote below.
+		nt = $6; iw = inc_why(); fw = short_why()
+		lbl = "mesh=" $1 " svcs=" $2 " reps=" $3 " ns=" $4 " scope=" $5 " traffic=" $38 ($53 == "deploy" ? "" : " window=" $53)
+		if (iw != "") { nt = nt " ‡"; incl = incl (incl == "" ? "" : "; ") lbl " (" iw ")" }
+		if (fw != "") { nt = nt " §"; shl = shl (shl == "" ? "" : "; ") lbl " (" fw ")" }
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |%s\n", $1, $2, $3, $4, $5, $38, nt, $7, $24, ($68 == "" ? "N/A" : $68), $10, ha, hi, cp, qp, $19, $37, cfg_mb, $20, unk, gcols
 	}
 	END {
 		if (incl != "") { gsub(/\|/, "\\|", incl); print "\n> ‡ INCOMPLETE: the sweep was cut short while these cells'"'"' member rows were written, so their figures cover only the rows written (the sweep counts these cells as failed, and a --resume runs them again): " incl "." }
+		if (shl != "") { gsub(/\|/, "\\|", shl); print "\n> § Fewer istiod pods: these cells ran on fewer istiod pods than their member'"'"'s istiod Deployment wanted (a replica evicted or Pending), so their per-replica figures are not comparable with the other cells; the rows are valid: " shl "." }
 		if (any_pin) print "\n> † SINGLE-BUCKET-PINNED: all delta mass for that quantile sits in the coarsest (0-100ms) `pilot_proxy_convergence_time` bucket, so the reported value is a uniform-within-bucket assumption (Prometheus `histogram_quantile` semantics), NOT resolved below 100ms. Real sub-bucket signal only appears once convergence climbs into a higher bucket (e.g. at 10k-service scale)."
 	}' <<<"$aggregated"
 	local real_unknowns=$(( total_unknowns - total_status ))

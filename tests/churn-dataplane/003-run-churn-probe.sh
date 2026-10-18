@@ -108,13 +108,13 @@ POISONED_SCRAPE, CHURN_RATE_NOT_MET, else OK. The marker comment records pct_200
 and top_code.
 
 The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
-whose exec failed (a FAILED row) may run on there, so the probe waits until its -t and
-5 s more have passed before going on. When the probe ends during a load (a stop,
-Ctrl-C), it deletes the client pod, so the load ends with it; the pod's Deployment
-starts a new one, which a sweep started right after waits for (its setup 001 waits
-until the Deployments are Available). Run by hand, the probe loads only a Running client
-pod that is not being deleted, and stops when there is none: run 001, or wait until the
-new pod is Ready.
+whose exec failed (a FAILED row) may run on there, so the probe waits until its
+--duration and 5 s more have passed before going on, unless the client pod is gone
+(then no load runs). When the probe ends during a load (a stop, Ctrl-C), it deletes the
+client pod, so the load ends with it; the pod's Deployment starts a new one, which a
+sweep started right after waits for (its setup 001 waits until the Deployments are
+Available). Run by hand, the probe loads only a Ready client pod that is not being
+deleted, and stops when there is none: run 001, or wait until the new pod is Ready.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -311,7 +311,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 fi
 
 CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" fortio-client "${KUBECTL[@]}")" \
-	|| die "no Running fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
+	|| die "no Ready fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 # PL16: deterministic seeded shuffle of churn-target indices [0, N).
 # Implemented in awk with a linear congruential generator so we don't depend on
@@ -502,7 +502,9 @@ wait "$DRIVER_PID" 2>/dev/null || true
 DRIVER_PID=""
 # The load can outlive its failed exec in the pod: wait it out (after the driver stopped),
 # so the next combo's baseline (002) does not run beside it.
-if [[ "$STATUS" == FAILED ]]; then fortio_load_wait_out "$WINDOW_START_NS" "$DURATION"; fi
+if [[ "$STATUS" == FAILED ]]; then
+	fortio_load_wait_out "$WINDOW_START_NS" "$DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
+fi
 LOAD_POD=""
 
 POST_PODSET="${ISTIOD_DIR}/post.podset"

@@ -189,6 +189,15 @@ is_pos_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 # shellcheck disable=SC2329
 is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 
+# tsv_end_line <file>: ends <file>'s last line with a newline when it has none (a write cut
+# short: a full disk, a run killed while it appended), so the next append starts a line of
+# its own instead of merging onto the cut one. Does nothing for a missing or empty file;
+# returns non-zero when it cannot write (the caller dies with what to fix).
+# shellcheck disable=SC2329
+tsv_end_line() {
+	[[ ! -s "$1" || -z "$(tail -c 1 "$1" 2>/dev/null)" ]] || printf '\n' >> "$1"
+}
+
 # shellcheck disable=SC2329
 validate_scoping() {
 	case "$1" in
@@ -435,7 +444,7 @@ sweep_outcome_start() {
 		if HARNESS_SWEEP_LOG="$(mktemp 2>/dev/null)"; then
 			export HARNESS_SWEEP_LOG
 		else
-			HARNESS_SWEEP_LOG=""
+			HARNESS_SWEEP_LOG="" _HARNESS_STEP_LOST="the sweep could not create the temp file they are added to (HARNESS_SWEEP_LOG) at its start"
 			echo "warning: could not create a temp file for the steps' harness reads: a harness change that only a step reads is not in the sweep's outcome" >&2
 		fi
 	fi
@@ -839,9 +848,15 @@ _sweep_step_stop() {
 	done
 	if ((${#sss_tree[@]})); then
 		_sweep_tree_freeze sss_tree "${sss_tree[@]}"
-		for k in ${sss_tree[@]+"${sss_tree[@]}"}; do
-			if kill -s KILL "${k%%@*}" 2>/dev/null; then n=$((n + 1)); fi
-		done
+		# The step's own process is reaped here, quietly: bash would print a "Killed" notice
+		# for it at the next command it waits for (the hint's substitution below). The wait
+		# is short: the step was just sent SIGKILL when it still ran (it is in the tree).
+		{
+			for k in ${sss_tree[@]+"${sss_tree[@]}"}; do
+				if kill -s KILL "${k%%@*}"; then n=$((n + 1)); fi
+			done
+			wait "$pid"
+		} 2>/dev/null || true
 		((n == 0)) || echo "warning: ${n} process(es) of the step still ran ${grace}s after SIG${sig}: sent SIGKILL ($(_sweep_kill_hint))" >&2 || true
 	fi
 	wait "$pid" 2>/dev/null || true
@@ -932,6 +947,60 @@ sweep_err_trap() {
 # shellcheck disable=SC2329
 sweep_outcome_cut_short() {
 	sweep_outcome_unfinished "$1" || { [[ -f "$1" ]] && grep -qx 'CUT_SHORT=1' "$1" 2>/dev/null; }
+}
+
+# sweep_outcome_brief <file>: what a report that pools sweep-* dirs names about one of their
+# records, or nothing for a finished outcome without a PROBLEM line (or no file): "has not
+# finished (it died, or still runs)", "was interrupted before it wrote its outcome" (a
+# not-finished record with ENDED_AT), or "stopped early" (CUT_SHORT=1), then "<n>
+# PROBLEM(s)" when the record has any, joined by ", with ". One line, no newline.
+# shellcheck disable=SC2329
+sweep_outcome_brief() {
+	local s="" n
+	[[ -f "$1" ]] || return 0
+	if sweep_outcome_unfinished "$1"; then
+		if grep -q '^ENDED_AT=' "$1" 2>/dev/null; then
+			s="was interrupted before it wrote its outcome"
+		else
+			s="has not finished (it died, or still runs)"
+		fi
+	elif grep -qx 'CUT_SHORT=1' "$1" 2>/dev/null; then
+		s="stopped early"
+	fi
+	n="$(grep -c '^PROBLEM=' "$1" 2>/dev/null)" || n=0
+	is_nonneg_int "$n" || n=0
+	if ((n > 0)); then s+="${s:+, with }${n} PROBLEM(s)"; fi
+	printf '%s' "$s"
+}
+
+# sweep_outcome_pooled <results_dir> <tsv>...: for a report that pools runs, one line per
+# sweep-* dir below <results_dir> that holds one of <tsv> and whose sweep-outcome.txt
+# sweep_outcome_brief names: "<dir>/sweep-outcome.txt: <brief>", <dir> relative to
+# <results_dir>, in the order of <tsv> (paths as `find <results_dir>` prints them). A TSV in
+# <results_dir> itself (the report repeats that record) or in a dir not named sweep-* adds
+# nothing. The pooled reports of dataplane, churn, churn-dataplane and propagation name
+# these records in their pooled note, and so does a report of one run whose results dir has
+# no record of its own (its sweep's parent dir).
+# shellcheck disable=SC2329
+sweep_outcome_pooled() {
+	local t="$1" pre f d rel b
+	local -A sop_seen=()
+	shift
+	while [[ "$t" == */ && "$t" != / ]]; do t="${t%/}"; done
+	pre="${t%/}/"
+	for f in "$@"; do
+		[[ "$f" == */* ]] || continue
+		d="${f%/*}"
+		[[ "$d" != "$t" && "${d##*/}" == sweep-* && -z "${sop_seen[$d]+x}" ]] || continue
+		sop_seen[$d]=1
+		rel="$d"
+		if [[ "$d" == "$pre"* ]]; then
+			rel="${d#"$pre"}"
+			while [[ "$rel" == /* ]]; do rel="${rel#/}"; done
+		fi
+		b="$(sweep_outcome_brief "${d}/sweep-outcome.txt")"
+		[[ -z "$b" ]] || printf '%s/sweep-outcome.txt: %s\n' "$rel" "$b"
+	done
 }
 
 # sweep_outcome_on_exit <rc> [--note <msg>|--info <msg>|--problem <msg>...]: A sweep's EXIT
@@ -1046,12 +1115,17 @@ sweep_outcome_on_exit() {
 			done
 		} 2>/dev/null >> "$f" || echo "warning: could not add ENDED_AT to ${f}" >&2
 		# A harness that changed during the sweep (harness_sha_check, the end check): a note;
-		# HEAD that moved with the same harness files: an INFO line.
-		local hs_changed="" hs_info=""
-		_harness_sha_sweep_end hs_changed hs_info
+		# HEAD that moved with the same harness files: an INFO line; the steps' reads that
+		# could not be checked: a note.
+		local hs_changed="" hs_info="" hs_note=""
+		_harness_sha_sweep_end hs_changed hs_info hs_note
 		if [[ -n "$hs_changed" ]]; then
 			printf 'NOTE=%s\n' "$hs_changed" 2>/dev/null >> "$f" || true
 			echo "warning: ${hs_changed}." >&2
+		fi
+		if [[ -n "$hs_note" ]]; then
+			printf 'NOTE=%s\n' "$hs_note" 2>/dev/null >> "$f" || true
+			echo "warning: ${hs_note}." >&2
 		fi
 		if [[ -n "$hs_info" ]]; then
 			printf 'INFO=%s\n' "$hs_info" 2>/dev/null >> "$f" || true
@@ -1412,7 +1486,8 @@ sweep_outcome_recorded() {
 # changed during the sweep (at its end, at a harness_sha_check before a step, or at a step's
 # own read) is a problem too, naming both values and when the change was first read; HEAD
 # that moved with the same files (a commit or tag that left the harness files as they were)
-# is an --info (_harness_sha_sweep_end).
+# is an --info, and steps' reads it could not check (their temp file was gone) a --note
+# (_harness_sha_sweep_end).
 #   --stopped <rc>   the sweep stopped early and exits <rc> (1 or 3), which outranks 4: the
 #                    cells are still counted, "All cells ran" is never printed (they did
 #                    not), the lines name <rc>, and it returns <rc>
@@ -1472,11 +1547,13 @@ sweep_outcome() {
 	shift
 	[[ -z "$uncounted" ]] || problems=("could not count the sweep's ${unit}: ${uncounted}" ${problems[@]+"${problems[@]}"})
 	# The sweep's harness at its end (harness_sha_for_sweep's shell only): a change of its
-	# files is a problem; HEAD that moved with the same files, a note.
-	local so_hs="" so_hi=""
-	_harness_sha_sweep_end so_hs so_hi
+	# files is a problem; HEAD that moved with the same files, an INFO; the steps' reads that
+	# could not be checked, a note.
+	local so_hs="" so_hi="" so_hn=""
+	_harness_sha_sweep_end so_hs so_hi so_hn
 	[[ -z "$so_hs" ]] || problems+=("$so_hs")
 	[[ -z "$so_hi" ]] || infos+=("$so_hi")
+	[[ -z "$so_hn" ]] || notes+=("$so_hn")
 	[[ -n "$where" ]] || where="The report includes them as placeholder rows (in n_total, not n_valid)"
 	for r in "$@"; do
 		if [[ "$r" == SKIPPED_* ]]; then skipped_r+=("$r"); else failed_r+=("$r"); fi
@@ -1619,7 +1696,8 @@ harness_content_key() {
 # start ones (harness_same) adds "<UTC Z> <script> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>"
 # to HARNESS_SWEEP_LOG while that file exists (sweep_outcome_start creates it, the end
 # check removes it: _harness_sha_sweep_end), so a change only a step read reaches the
-# sweep's outcome.
+# sweep's outcome. A setup step that renders harness files (a chart, a tuning profile)
+# reads the harness right after, for that line alone.
 # shellcheck disable=SC2329
 harness_read() {
 	local -n _hr_v="$1" _hr_k="$2"
@@ -1716,7 +1794,7 @@ harness_sha_for_sweep() {
 	_HARNESS_SHA_PID="${BASHPID:-$$}" _HARNESS_SHA_CHECKED="$SECONDS"
 	_HARNESS_SHA_OK_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" _HARNESS_SHA_OK_BEFORE="" _HARNESS_SHA_SEEN=""
 	_HARNESS_SHA_SEEN_AT="" _HARNESS_SHA_SEEN_BEFORE="" _HARNESS_SHA_END="" _HARNESS_KEY_END=""
-	_HARNESS_SHA_MOVED="" _HARNESS_SHA_MOVED_AT="" _HARNESS_SHA_MOVED_BEFORE=""
+	_HARNESS_SHA_MOVED="" _HARNESS_SHA_MOVED_AT="" _HARNESS_SHA_MOVED_BEFORE="" _HARNESS_STEP_LOST=""
 }
 
 # harness_same <value> <key> <value2> <key2>: true when two harness reads (harness_read)
@@ -1772,14 +1850,17 @@ harness_sha_check() {
 	return 0
 }
 
-# _harness_sha_sweep_end <problem_var> [<info_var>]: once per sweep, in the shell that ran
-# harness_sha_for_sweep: read the harness again (the end check) and set <problem_var> to the
-# problem sweep_outcome records when its files changed during the sweep (another content key
-# at the end, at a harness_sha_check before a step, or at a step's own read: the lines
-# harness_read added to HARNESS_SWEEP_LOG, which it reads and removes), naming each value and
-# when it was read; empty when they did not. <info_var>: the note (INFO) when they did not
-# change but HEAD moved (another value with the start's files, at a check or at the end);
-# else empty.
+# _harness_sha_sweep_end <problem_var> [<info_var> [<note_var>]]: once per sweep, in the shell
+# that ran harness_sha_for_sweep: read the harness again (the end check) and set <problem_var>
+# to the problem sweep_outcome records when its files changed during the sweep (another
+# content key at the end, at a harness_sha_check before a step, or at a step's own read: the
+# lines harness_read added to HARNESS_SWEEP_LOG, which it reads and removes), naming each
+# value and when it was read, and which steps may have run other code; empty when they did
+# not. <info_var>: the note (INFO) when they did not change but HEAD moved (another value
+# with the start's files, at a check or at the end); else empty. <note_var>: a NOTE when the
+# steps' own reads could not be checked (HARNESS_SWEEP_LOG was set but its file was gone at
+# the end check, as a temp-file cleaner leaves it, or sweep_outcome_start could not create
+# it); else empty.
 # The problem starts with "the harness changed during the sweep" (a controlplane --resume
 # reads that prefix), the note with "HEAD moved during the sweep". A second call returns
 # the first call's answers.
@@ -1791,8 +1872,12 @@ _harness_sha_sweep_end() {
 		local -n _hse_info="$2"
 		_hse_info=""
 	fi
+	if (($# > 2)); then
+		local -n _hse_note="$3"
+		_hse_note=""
+	fi
 	[[ -n "${_HARNESS_SHA_START:-}" && "${_HARNESS_SHA_PID:-}" == "${BASHPID:-$$}" ]] || return 0
-	local s="$_HARNESS_SHA_START" e ek last first hp st="" st_t st_l
+	local s="$_HARNESS_SHA_START" e ek last first hp st="" st_t st_l by_step=0
 	local -a st_lines=()
 	if [[ -z "${_HARNESS_SHA_END:-}" ]]; then
 		harness_read _HARNESS_SHA_END _HARNESS_KEY_END --live
@@ -1801,7 +1886,12 @@ _harness_sha_sweep_end() {
 			mapfile -t st_lines 2>/dev/null < "$HARNESS_SWEEP_LOG" || true
 			rm -f "$HARNESS_SWEEP_LOG"
 			_HARNESS_STEP_N="${#st_lines[@]}" _HARNESS_STEP_FIRST="${st_lines[0]:-}"
+		elif [[ -n "${HARNESS_SWEEP_LOG:-}" ]]; then
+			_HARNESS_STEP_LOST="the temp file they are added to (HARNESS_SWEEP_LOG) was gone at the end check (removed during the sweep, as a temp-file cleaner does)"
 		fi
+	fi
+	if (($# > 2)) && [[ -n "${_HARNESS_STEP_LOST:-}" ]]; then
+		_hse_note="the steps' own harness reads could not be checked: ${_HARNESS_STEP_LOST}, so a harness change that only a step read (undone before the sweep's next read) is not in this outcome"
 	fi
 	# The first step read of other files: "<UTC Z> <script> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>".
 	if [[ -n "${_HARNESS_STEP_FIRST:-}" ]]; then
@@ -1816,7 +1906,7 @@ _harness_sha_sweep_end() {
 	if [[ -n "${_HARNESS_SHA_SEEN:-}" ]]; then
 		first="${_HARNESS_SHA_SEEN} at ${_HARNESS_SHA_SEEN_AT}, before ${_HARNESS_SHA_SEEN_BEFORE}; the read before that (${last}) still gave ${s}"
 		# A step that read other files before this sweep read did: it saw the change first.
-		if [[ -n "$st" && "$st_t" < "$_HARNESS_SHA_SEEN_AT" ]]; then first+="; a step read other files earlier: ${st}"; fi
+		if [[ -n "$st" && "$st_t" < "$_HARNESS_SHA_SEEN_AT" ]]; then first+="; a step read other files earlier: ${st}" by_step=1; fi
 		if _harness_same_files "$e" "$ek"; then
 			_hse_out="the harness changed during the sweep, and back: HARNESS_SHA=${s} at its start and at its end"
 			[[ "$e" == "$s" ]] || _hse_out+=" (its files; HEAD moved, so the end read gave ${e})"
@@ -1826,12 +1916,12 @@ _harness_sha_sweep_end() {
 		fi
 	elif ! _harness_same_files "$e" "$ek"; then
 		_hse_out="the harness changed during the sweep: HARNESS_SHA=${s} at its start, ${e} at its end (${_HARNESS_SHA_END_AT}); the last read that gave ${s} was ${last}"
-		[[ -z "$st" ]] || _hse_out+="; a step read other files before the end: ${st}"
+		if [[ -n "$st" ]]; then _hse_out+="; a step read other files before the end: ${st}" by_step=1; fi
 	elif [[ -n "$st" ]]; then
 		# Only a step read other files (changed and back between two sweep reads).
 		_hse_out="the harness changed during the sweep, and back: HARNESS_SHA=${s} at its start and at its end"
 		[[ "$e" == "$s" ]] || _hse_out+=" (its files; HEAD moved, so the end read gave ${e})"
-		_hse_out+=", but ${st}"
+		_hse_out+=", but ${st}" by_step=1
 	else
 		# The same files throughout: a note when HEAD moved (at a check, or by the end).
 		if (($# > 1)) && [[ -n "${_HARNESS_SHA_MOVED:-}" || "$e" != "$s" ]]; then
@@ -1843,7 +1933,14 @@ _harness_sha_sweep_end() {
 		fi
 		return 0
 	fi
-	_hse_out+=", so the steps after that read may have run other code than ${s}: the rows after the change carry the new value in their TSV (controlplane: a HARNESS_CHANGED_AT line; churn-dataplane: each row's harness_sha), the sweep's own records (TSV preamble, sweep-outcome.txt) keep the start's; run the sweep again if the change matters"
+	# Which steps: after a step's read, those run since the change (which came at some time
+	# before that read); else those after the last read that still gave the start's value.
+	if ((by_step)); then
+		_hse_out+=", so the step that read it, and the other steps run after the change, may have run other code than ${s}"
+	else
+		_hse_out+=", so the steps after the last read that gave ${s} may have run other code than ${s}"
+	fi
+	_hse_out+=": the rows after the change carry the new value in their TSV (controlplane: a HARNESS_CHANGED_AT line; churn-dataplane: each row's harness_sha), the sweep's own records (TSV preamble, sweep-outcome.txt) keep the start's; run the sweep again if the change matters"
 	return 0
 }
 
@@ -2022,11 +2119,16 @@ report_harness_sha() {
 #                        ", "; cp_shortw[k] the same for an entry without <spec>, against its
 #                        ISTIOD_REPLICAS_BY_CONTEXT entry (read at the sweep's start: an HPA
 #                        or a rollout may have changed the replicas since, so only a hint).
+#                        cp_specw[k]: "<member> wanted <spec> istiod replicas, <rep> at the
+#                        sweep's start", one per member, when a window of the attempt has a
+#                        <spec> other than its ISTIOD_REPLICAS_BY_CONTEXT entry (an HPA, or a
+#                        changed replicaCount: the cell ran another replica count than the
+#                        sweep's start; the first such <spec>).
 #                        A member whose rows of the attempt all have istiod_restarted unknown
 #                        (no istiod pod Running: 002 writes one degraded N/A row, so its entry
 #                        reads <member>=1/<spec>; or none could be read) is in neither: no
 #                        figure has its rows, and the verdict already reads CAUTION for them
-#                        (n_valid below n_total).
+#                        (n_valid below n_total); nor in cp_specw.
 #   cp_valid[k]          set when the cell has a valid row (istiod_restarted 0).
 #   cp_after[k]          set when a measurement row follows a status row of the cell: two
 #                        attempts with no recorded boundary between them, so they pool.
@@ -2084,7 +2186,10 @@ function cp_cell_row(k, st,    mk, ep, n, i, m, wk) {
 			m = cp_wlm[i]; wk = k SUBSEP ep SUBSEP m
 			if (!(wk in cp_wx)) cp_wm[k, ep] = cp_wm[k, ep] "\t" m
 			cp_wx[wk] += cp_wln[i]
-			if (cp_wls[i] != "") { if (cp_wln[i] < cp_wls[i] && (!(wk in cp_rn) || cp_wln[i] < cp_rn[wk])) { cp_rn[wk] = cp_wln[i]; cp_rr[wk] = cp_wls[i] } }
+			if (cp_wls[i] != "") {
+				if (cp_wln[i] < cp_wls[i] && (!(wk in cp_rn) || cp_wln[i] < cp_rn[wk])) { cp_rn[wk] = cp_wln[i]; cp_rr[wk] = cp_wls[i] }
+				if ((m in cp_rep) && cp_wls[i] != cp_rep[m] && !(wk in cp_sd)) cp_sd[wk] = cp_wls[i]
+			}
 			else if ((m in cp_rep) && cp_wln[i] < cp_rep[m] && (!(wk in cp_qn) || cp_wln[i] < cp_qn[wk])) { cp_qn[wk] = cp_wln[i]; cp_qr[wk] = cp_rep[m] }
 		}
 	}
@@ -2106,13 +2211,14 @@ function cp_mxo(m, k,    i, o, x) {
 	return x
 }
 function cp_cell_state(k,    n, ml, i, m, mk, ex, ep) {
-	cp_why[k] = ""; cp_short[k] = ""; cp_shortw[k] = ""
+	cp_why[k] = ""; cp_short[k] = ""; cp_shortw[k] = ""; cp_specw[k] = ""
 	if (cp_last[k] != "") return cp_last[k]
 	ep = cp_ep[k] + 0
 	n = split(substr(cp_wm[k, ep], 2), ml, "\t")
 	for (i = 1; i <= n; i++) {
 		mk = k SUBSEP ep SUBSEP ml[i]
 		if (!(mk in cp_rd)) continue
+		if (mk in cp_sd) cp_specw[k] = cp_specw[k] (cp_specw[k] == "" ? "" : ", ") ml[i] " wanted " cp_sd[mk] " istiod replicas, " cp_rep[ml[i]] " at the sweep'"'"'s start"
 		if (mk in cp_rn) cp_short[k] = cp_short[k] (cp_short[k] == "" ? "" : ", ") ml[i] " ran " cp_rn[mk] " of its " cp_rr[mk] " istiod replicas"
 		else if (mk in cp_qn) cp_shortw[k] = cp_shortw[k] (cp_shortw[k] == "" ? "" : ", ") ml[i] " ran " cp_qn[mk] " of its " cp_qr[mk] " istiod replicas"
 	}

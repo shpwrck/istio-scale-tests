@@ -51,7 +51,10 @@ Usage: $(basename "$0") [options]
                      --config > environment > default.
   --results-dir DIR  Directory searched recursively for churn-dataplane-*.tsv
                      (default: ${COEXEC_RESULTS_DIR}); a sweep-*/ dir from 004
-                     is one run.
+                     is one run. Run on the parent of one sweep dir (no
+                     sweep-outcome.txt of its own), the report repeats no outcome, but
+                     a note names that sweep's record when it did not end cleanly, as
+                     --allow-multi-run's does.
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
@@ -59,8 +62,10 @@ Usage: $(basename "$0") [options]
                      (csv # POOLED_HARNESS_CONTENT_KEYS= and json harness_content_key
                      also their HARNESS_CONTENT_KEY values); its note says when the
                      HARNESS_SHA values differ only in git describe (every run records
-                     one key). It does not read the sweep-outcome.txt of a sweep-* dir
-                     below the results dir: report each sweep alone to see it.
+                     one key). It repeats no sweep-outcome.txt of a sweep-* dir below the
+                     results dir (report each sweep alone to see it), but its note names
+                     each one that has not finished, was interrupted, stopped early or
+                     records a PROBLEM (json pooled_sweep_outcomes).
   --format FMT       Output format: text | csv | json | md (or markdown) | charts
                      (default: text).
   --fail-on-unreachable
@@ -180,11 +185,20 @@ config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
 # A pooled report repeats only its results dir's own sweep-outcome.txt
 # (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
-# (text, md, charts and csv).
+# and names each pooled sweep whose record has not finished, was interrupted, stopped early
+# or holds a PROBLEM (sweep_outcome_pooled): text, md, charts, csv; json pooled_sweep_outcomes.
+# One run on the parent dir of its sweep (no record of its own) repeats none either: the
+# same note, alone, names that sweep's record when it did not end cleanly.
 POOLED_OUTCOME_NOTE=""
+POOLED_SWEEP_OUTCOMES=""
 if [[ -n "$POOLED_NOTE" ]]; then
 	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
+	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
+	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE+=" Pooled sweep records that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
 	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/sweep-outcome.prev.txt" ]]; then
+	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
+	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
 fi
 
 # Preamble metadata over every input (sweeps emit one preamble per file): each key
@@ -258,7 +272,7 @@ if [[ -n "$_rh" ]]; then
 	else
 		ROWS_HARNESS_WARNING="the rows' harness_sha column records more than one harness (${_rhl[1]:-})"
 	fi
-	ROWS_HARNESS_WARNING+=": the harness changed during the run (HARNESS_CONTENT_KEY adds unknown: a row records none)."
+	ROWS_HARNESS_WARNING+=": the harness, or only the commit name git describe gives, changed during the run (rows record no content key to tell the two apart; HARNESS_CONTENT_KEY adds unknown)."
 	if [[ -n "${_rhl[4]:-}" ]]; then
 		ROWS_HARNESS_WARNING+=" Combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ${_rhl[4]}."
 	elif ((${_rhl[3]:-0} > 1)); then
@@ -521,6 +535,7 @@ emit_frontmatter() {
 report_text() {
 	echo "=== sweep-summary ==="
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n' "$POOLED_OUTCOME_NOTE"; fi
 	[[ -z "$ROWS_HARNESS_WARNING" ]] || printf 'WARNING: %s\n' "$ROWS_HARNESS_WARNING"
 	sweep_outcome_recorded "$RESULTS_DIR" text
 	emit_metadata_lines "#"
@@ -612,9 +627,10 @@ report_json() {
 		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
 		--argjson rows         "$rows" \
 		--argjson pooled_runs  "$(config_multi_run_json)" \
+		--argjson pooled_sweep_outcomes "$(printf '%s' "$POOLED_SWEEP_OUTCOMES" | jq -Rn '[inputs]')" \
 		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
 		--arg rows_harness_warning "$ROWS_HARNESS_WARNING" \
-		'{pooled_runs: $pooled_runs, sweep_outcome: $sweep_outcome, data_warnings: (if $rows_harness_warning == "" then [] else [$rows_harness_warning] end), metadata: {run_id: $run_id, harness_sha: $harness_sha, harness_content_key: $harness_content_key, report_harness_sha: $report_harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		'{pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes, sweep_outcome: $sweep_outcome, data_warnings: (if $rows_harness_warning == "" then [] else [$rows_harness_warning] end), metadata: {run_id: $run_id, harness_sha: $harness_sha, harness_content_key: $harness_content_key, report_harness_sha: $report_harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -679,6 +695,7 @@ report_md() {
 	echo "# sweep-summary"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	[[ -z "$ROWS_HARNESS_WARNING" ]] || printf '> **Warning:** %s\n\n' "$ROWS_HARNESS_WARNING"
 	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "| Field | Value |"
@@ -744,6 +761,7 @@ report_charts() {
 	echo "# Churn x Data-Plane — Charts"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	[[ -z "$ROWS_HARNESS_WARNING" ]] || printf '> **Warning:** %s\n\n' "$ROWS_HARNESS_WARNING"
 	local cov_notes
 	cov_notes="$(reach_coverage_render charts <(printf '%s' "$REACH_ROWS"))"

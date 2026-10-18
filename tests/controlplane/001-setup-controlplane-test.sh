@@ -1000,6 +1000,8 @@ for ctx in "${CONTEXTS[@]}"; do
 		rendered="${ctx_dir}/rendered.yaml"
 		helm template controlplane-test "$CHART_DIR" --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
 			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
+		# Under a sweep, a chart file changed for this render reaches its outcome (harness_read).
+		harness_read _hs _hk
 		split_render "$rendered" "$ctx_dir"
 		read -r _ n_ns nsb _ ob < <(grep '^batches ' "${ctx_dir}/counts")
 		kind_count "$ctx_dir" Deployment > "$EXPECTED_DEPLOYS_FILE"

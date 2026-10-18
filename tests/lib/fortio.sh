@@ -26,15 +26,15 @@
 #       min_qps_ratio 0 disables the shortfall check (for callers that run at a
 #       fixed low QPS); a non-numeric or zero qps_target also skips it.
 #   fortio_client_pod <ctx> <ns> <app> <kubectl_argv...>
-#       -> the name of a Running client pod (label app=<app>) that is not being deleted;
+#       -> the name of a Ready client pod (label app=<app>) that is not being deleted;
 #          returns 1, printing nothing, when there is none
 #   fortio_client_stop <ctx> <ns> <pod> <kubectl_argv...>
 #       -> for a probe's EXIT trap during an in-pod `fortio load`: delete the client pod,
 #          so the load stops (a note on stderr; never dies)
-#   fortio_load_wait_out <start_ns> <duration_s>
+#   fortio_load_wait_out <start_ns> <duration_s> <ctx> <ns> <pod> <kubectl_argv...>
 #       -> after a load whose `kubectl exec` failed: sleep until the load it started may
-#          have ended (start + duration + 5 s), so the next load does not run beside it
-#          (a note on stderr; never dies)
+#          have ended (start + duration + 5 s), so the next load does not run beside it;
+#          not when the client pod is gone (a note on stderr; never dies)
 #
 # Requires: jq, awk (fortio_client_pod, fortio_client_stop: kubectl or oc;
 # fortio_load_wait_out: now_ns, tests/lib/timestamp.sh).
@@ -128,44 +128,50 @@ fortio_row_status() {
 # and its Deployment starts a new pod, which a setup's Available wait (001, which a sweep
 # runs first) waits for. Bounded: --wait=false, and 5 s per request (a delete with a cold
 # discovery cache makes up to three: 15 s, inside SWEEP_STOP_GRACE_SEC's 30); a warning
-# when the delete fails. Never dies.
+# when the delete fails (a pod already gone is no failure: --ignore-not-found). Never dies.
 fortio_client_stop() {
 	local ctx="$1" ns="$2" pod="$3"
 	shift 3
 	[[ -n "$pod" ]] || return 0
 	echo "note: ${ctx}: deleting the fortio client pod ${pod}, which still runs a load (its Deployment starts a new one)" >&2 || true
-	if ! "$@" --context="$ctx" --request-timeout=5s -n "$ns" delete pod "$pod" --wait=false >/dev/null 2>&1; then
+	if ! "$@" --context="$ctx" --request-timeout=5s -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1; then
 		echo "warning: ${ctx}: could not delete the fortio client pod ${pod}: its load runs on for up to its -t seconds; wait that long before the next run" >&2 || true
 	fi
 	return 0
 }
 
 # fortio_client_pod <ctx> <ns> <app> <kubectl_argv...>: the client pod a probe execs its loads
-# in: a Running pod labelled app=<app> without a deletionTimestamp, the first listed. After a
-# probe's stop deleted the pod (fortio_client_stop), the old one is Terminating while its
-# Deployment's new one starts: a load exec'd into the old one would fail. Prints nothing and
-# returns 1 when there is none (or the list fails).
+# in: a Running pod labelled app=<app> without a deletionTimestamp whose Ready condition is
+# True, the first listed. After a probe's stop deleted the pod (fortio_client_stop), the old
+# one is Terminating while its Deployment's new one starts: a load exec'd into the old one
+# would fail, and one into the new one before it is Ready could run through an istio-proxy
+# still waiting for its config (errors in the first window). Prints nothing and returns 1
+# when there is none (or the list fails).
 # shellcheck disable=SC2329
 fortio_client_pod() {
 	local ctx="$1" ns="$2" app="$3" fcp_out
 	shift 3
 	fcp_out="$("$@" --context="$ctx" -n "$ns" get pod -l "app=${app}" --field-selector=status.phase=Running \
-		-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null)" || return 1
-	fcp_out="$(awk -F'\t' '$1 != "" && $2 == "" { print $1; exit }' <<<"$fcp_out")"
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null)" || return 1
+	fcp_out="$(awk -F'\t' '$1 != "" && $2 == "" && $3 == "True" { print $1; exit }' <<<"$fcp_out")"
 	[[ -n "$fcp_out" ]] || return 1
 	printf '%s\n' "$fcp_out"
 }
 
-# fortio_load_wait_out <start_ns> <duration_s>: for a probe whose `kubectl exec ... fortio
-# load -t <duration_s>s` failed; <start_ns> is now_ns just before that exec. The load runs
-# in the client pod, not in the exec (fortio_client_stop): an exec stream that broke
-# part-way (an API server or kubelet hiccup) leaves it loading the servers for the rest of
-# its -t, so the probe's next load would run beside it. Sleep until <start_ns> +
-# <duration_s> + 5 s (the exec's start-up and fortio's last requests), with a note; not at
-# all once that has passed. The caller keeps its EXIT trap's pod (LOAD_POD) set meanwhile,
-# so a stop during the wait still deletes the pod. Never dies.
+# fortio_load_wait_out <start_ns> <duration_s> <ctx> <ns> <pod> <kubectl_argv...>: for a
+# probe whose `kubectl exec ... fortio load -t <duration_s>s` into <pod> failed; <start_ns>
+# is now_ns just before that exec. The load runs in the client pod, not in the exec
+# (fortio_client_stop): an exec stream that broke part-way (an API server or kubelet
+# hiccup) leaves it loading the servers for the rest of its -t, so the probe's next load
+# would run beside it. Sleep until <start_ns> + <duration_s> + 5 s (the exec's start-up and
+# fortio's last requests), with a note; not at all once that has passed, nor when <pod> is
+# gone (evicted, deleted: a `get pod --ignore-not-found` that answers nothing), as no load
+# runs then; an API error, or the pod still there (also Terminating), keeps the wait. The
+# caller keeps its EXIT trap's pod (LOAD_POD) set meanwhile, so a stop during the wait
+# still deletes the pod. Never dies.
 fortio_load_wait_out() {
-	local start_ns="$1" dur="$2" now left
+	local start_ns="$1" dur="$2" ctx="$3" ns="$4" pod="$5" now left out
+	shift 5
 	if ! [[ "$start_ns" =~ ^[0-9]+$ && "$dur" =~ ^[0-9]+$ ]]; then
 		echo "warning: fortio_load_wait_out: bad start (${start_ns}) or duration (${dur}): not waiting for the failed load to end" >&2 || true
 		return 0
@@ -174,6 +180,11 @@ fortio_load_wait_out() {
 	[[ "$now" =~ ^[0-9]+$ ]] || now="$start_ns"
 	left=$(((start_ns + (dur + 5) * 1000000000 - now + 999999999) / 1000000000))
 	((left > 0)) || return 0
+	if out="$("$@" --context="$ctx" --request-timeout=5s -n "$ns" get pod "$pod" --ignore-not-found -o name 2>/dev/null)" \
+		&& [[ -z "$out" ]]; then
+		echo "note: ${ctx}: the load's kubectl exec failed and the client pod ${pod} is gone (evicted or deleted), so no load of it runs: not waiting" >&2 || true
+		return 0
+	fi
 	echo "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting ${left}s (its -t ${dur}s and 5 s, from its start) before going on, so the next load does not run beside it" >&2 || true
 	sleep "$left" || true
 	return 0

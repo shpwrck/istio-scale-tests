@@ -35,7 +35,7 @@ case " $* " in
 *" get pods "*"-l app=istiod"*) [[ -n "${STUB_ISTIOD:-}" ]] && echo istiod-0 ;;
 *" exec "*) cat "$STUB_JSON" ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" get pods "*) : ;;
 *) exit 1 ;;
 esac

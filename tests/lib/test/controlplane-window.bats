@@ -188,7 +188,7 @@ cp_row() {
 	date="$(sed -n 's/^# DATE=//p' "${D}/sweep-outcome.txt")"
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
-	grep -qx "PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats)" "${D}/sweep-outcome.txt"
+	grep -qx "PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats) (kept: 2 row(s) of that run are in the figures)" "${D}/sweep-outcome.txt"
 	[ "$(grep -c 'its rows were all run again later' "${D}/sweep-outcome.txt")" = 0 ]
 	# A resume recorded the change, and a later one ran all its rows again: a NOTE when the
 	# rows in the figures ran one harness; a PROBLEM when the first run's kept row ran other
@@ -210,7 +210,7 @@ cp_row() {
 		cp_sweep --resume "$D" --contexts ci-a
 		[ "$status" -eq 4 ]
 		if ((mixed)); then
-			grep -qx "PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=ddd4444 at its start (bats)" "${D}/sweep-outcome.txt"
+			grep -qx "PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=ddd4444 at its start (bats) (kept: the rows in the figures ran more than one harness, or one not recorded)" "${D}/sweep-outcome.txt"
 		else
 			grep -qx "NOTE=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=ddd4444 at its start (bats) (its rows were all run again later)" "${D}/sweep-outcome.txt"
 		fi

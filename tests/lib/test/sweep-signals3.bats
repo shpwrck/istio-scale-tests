@@ -79,7 +79,7 @@ _pids() {
 # terminal (its stdin, its controlling terminal, and the sweep's group in its foreground),
 # stderr to <dir>/err; the exit status (128 + signal) in <out>. python3 drives the terminal.
 _pty() {
-	python3 - "$1" "$2" <<'PY'
+	python3 -I - "$1" "$2" <<'PY'
 import os, pty, select, signal, sys, time
 d, out = sys.argv[1], sys.argv[2]
 pid, fd = pty.fork()

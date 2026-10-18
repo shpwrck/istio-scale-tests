@@ -18,6 +18,9 @@ CP="${ROOT}/tests/controlplane"
 REPORT="${CP}/004-report-results.sh"
 
 setup() {
+	# The test's own process (bats runs setup and the test in one): the CP_TERM stub looks for
+	# the sweep below it only, never in a shell that started bats.
+	export TEST_PID="$BASHPID"
 	EK="${BATS_TEST_TMPDIR}/kubeconfig"
 	: > "$EK"
 	BIN="${BATS_TEST_TMPDIR}/bin"
@@ -29,8 +32,8 @@ setup() {
 	# delete removes it unless ns-stuck exists (then the delete fails); `version` answers
 	# kver (no file: it fails). 002's first read (its Running istiod pods) fails; under
 	# CP_TERM (once) it lists TMPDIR into tmp-at-term, sends SIGTERM to the topmost
-	# *003-run-sweep.sh ancestor, closes its output and waits. Anything else fails, as
-	# against an empty kubeconfig.
+	# *003-run-sweep.sh ancestor below the test's process, closes its output and waits.
+	# Anything else fails, as against an empty kubeconfig.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
 d="$RS_DIR"
@@ -62,7 +65,7 @@ case "$*" in
 		: > "$d/term-sent"
 		ls "${TMPDIR:-/tmp}" > "$d/tmp-at-term" 2>/dev/null || :
 		p=$PPID s=""
-		while [ "${p:-1}" -gt 1 ]; do
+		while [ "${p:-1}" -gt 1 ] && [ "$p" != "${TEST_PID:?}" ]; do
 			case "$(ps -o args= -p "$p" 2>/dev/null)" in *003-run-sweep.sh*) s="$p" ;; esac
 			p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
 		done

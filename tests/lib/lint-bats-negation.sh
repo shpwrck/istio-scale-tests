@@ -11,9 +11,11 @@
 # Flagged: a line that starts with `! ` inside a top-level block of a .bats file (an
 # @test, setup/teardown or a helper: a column-0 line ending in `{` or `{ # ...`, up to
 # the column-0 `}`) when it is not the block's last command and does not hand the
-# failure on with `|| false`, `|| return`, `|| exit`, `|| fail`, `|| flunk` or
+# failure on with `|| false`, `|| return`, `|| exit`, `|| fail` (bats-support) or
 # `|| { ...; false; }`.
 # Heredoc bodies (stub scripts) and comments are skipped; `\` continuations are joined.
+# A multi-line quoted script (`bash -c '...'`) is read as test lines: end such a line with
+# `|| false` too, or write the script as a heredoc.
 # A `!` after `;` or `&&` on a line is not read. Deterministic awk, no gawk extensions
 # (macOS awk too).
 #
@@ -56,7 +58,7 @@ lint_bats_negation_file() {
 				sub(/^[ \t]+/, "", t)
 				if (t != "" && t !~ /^#/) {
 					if (pn) flag()
-					if (t ~ /^![ \t]/ && t !~ /[|][|][ \t]*([{].*[;{ \t])?(false|return|exit|fail|flunk)([ \t;}]|$)/) {
+					if (t ~ /^![ \t]/ && t !~ /[|][|][ \t]*([{].*[;{ \t])?(false|return|exit|fail)([ \t;}]|$)/) {
 						pn = n
 						pt = t
 					}
