@@ -971,12 +971,12 @@ _iv_resume() {
 	IV_a=v1.30.5 IV_b=v1.30.5 run --separate-stderr _iv_resume a,b
 	assert_success
 	# An all-clear is an info line (note: on stdout, INFO= in the record), not a warning.
-	assert_output "$(printf '%s\n' --info "this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's")"
+	assert_output "$(printf '%s\n' --info "this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's (a resume's, when the first run wrote no TSV)")"
 	local -a args=()
 	mapfile -t args < <(IV_a=v1.30.5 IV_b=v1.30.5 _iv_resume a,b 2>/dev/null)
 	run --separate-stderr sweep_outcome "${args[@]}" --record "$BATS_TEST_TMPDIR" 3
 	assert_success
-	assert_line --index 1 "note: this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's."
+	assert_line --index 1 "note: this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's (a resume's, when the first run wrote no TSV)."
 	[ -z "$stderr" ]
 	grep -q '^INFO=this --resume started at 2026-10-17T10:00:00+00:00 with every member ready' "${BATS_TEST_TMPDIR}/sweep-outcome.txt"
 	[ "$(grep -c '^NOTE=' "${BATS_TEST_TMPDIR}/sweep-outcome.txt" || true)" = 0 ]
@@ -985,7 +985,7 @@ _iv_resume() {
 	IV_a=v1.30.5 IV_b=v1.30.5 IVSTATESEQ_b="IstioCNINotHealthy Healthy" run --separate-stderr _iv_resume a,b
 	assert_success
 	assert_line --index 0 -- "--note"
-	assert_line --index 1 "istiod or IstioCNI was still not ready when this --resume started at 2026-10-17T10:00:00+00:00, after waiting 0s (ISTIO_NOTREADY_AT_RESUME=b=IstioCNINotHealthy; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's): the first cells the resume ran (rows from 2026-10-17T10:00:00+00:00 on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted"
+	assert_line --index 1 "istiod or IstioCNI was still not ready when this --resume started at 2026-10-17T10:00:00+00:00, after waiting 0s (ISTIO_NOTREADY_AT_RESUME=b=IstioCNINotHealthy; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's (a resume's, when the first run wrote no TSV)): the first cells the resume ran (rows from 2026-10-17T10:00:00+00:00 on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted"
 	assert_line --index 3 "not ready at the resume: IstioCNINotHealthy on 1 member (b)"
 	refute_output --partial "at the start of the sweep"
 	# Its warning says where the condition is recorded on a resume.

@@ -53,7 +53,7 @@ Options:
   --gitops-context CTX   ACM hub context running OpenShift GitOps, where Argo CD
                          auto-sync is paused for the run (default: \$TUNING_GITOPS_CONTEXT).
   --no-gitops-pause      Do not pause Argo CD (mesh not managed by GitOps).
-  --profiles CSV         Profile names (default: every profile in profiles/).
+  --profiles CSV         Profile names, each once (default: every profile in profiles/).
   --no-baseline          Skip the no-profile pass.
   --skip-setup           Do not run the suite's setup (workloads already deployed).
   --keep-workloads       Do not run the suite's cleanup at the end.
@@ -107,7 +107,9 @@ Exit codes:
        - the harness (a file under tests/, config/, charts/ or terraform/) changed
          during the sweep (HARNESS_SHA read before the steps, by each step, at the end);
        - a member's Istio CR spec after the last revert differs from the sweep's start
-         (an incomplete revert: the paths that differ are named).
+         (an incomplete revert, or, when a check above found one, an edit by
+         something else that no revert undid: they restore only the profiles' keys;
+         the paths that differ are named).
      The sweep's own apply and revert raise the generations too: the sweep reads them
      again after each, so those never count. A member whose generations could not be
      read for one of these checks is a note (not ruled out), not a problem. The outcome
@@ -188,6 +190,12 @@ fi
 for i in "${!PROFILES[@]}"; do
 	PROFILES[i]="${PROFILES[i]%.yaml}"
 	[[ -f "${TUNING_DIR}/profiles/${PROFILES[i]}.yaml" ]] || die "profile not found: ${PROFILES[i]} (see tests/tuning/profiles/)"
+	# Each pass writes to a directory named after its profile, so a second one would mix
+	# into the first's.
+	for ((j = 0; j < i; j++)); do
+		[[ "${PROFILES[j]}" != "${PROFILES[i]}" ]] \
+			|| die "profile listed twice in --profiles: ${PROFILES[i]} (each pass writes to a directory named after its profile): list each once"
+	done
 done
 PASSES=()
 ((INCLUDE_BASELINE)) && PASSES+=(baseline)
@@ -426,7 +434,7 @@ PASSES_SINCE_READ=""
 # member the sweep's read missed after it keeps 001's record, which 002 compares from. A
 # problem names the passes an edit may have changed: those run since the last read
 # (PASSES_SINCE_READ), and <next>, the pass that runs next (empty: none), with the passes
-# after it while the edit stays.
+# after it while the edit stays (pass_may_measure).
 istio_checkpoint() {
 	local from="$1" edits="$2" next="$3" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-}"
 	local ran="${PASSES_SINCE_READ# }" effect="" cfg="its profile's"
@@ -437,7 +445,7 @@ istio_checkpoint() {
 	[[ -z "$ran" ]] || effect="the passes run since that first read (${ran// /, }) may have measured another configuration"
 	if [[ -n "$next" ]]; then
 		[[ "$next" != baseline ]] || cfg="the baseline's"
-		effect="${effect:+${effect}, and }pass ${next} (and the passes after it, while the edit stays) may measure another configuration than ${cfg}"
+		effect="${effect:+${effect}, and }$(pass_may_measure "$next" "$cfg")"
 	fi
 	[[ -n "$effect" ]] || effect="no pass ran since that first read, and none runs after it"
 	if (($# > 4)); then
@@ -447,6 +455,15 @@ istio_checkpoint() {
 		return 0
 	fi
 	istio_span_check "$prev" "$before" "$from" "${ISTIO_GENERATIONS:-}" "$edits" "$effect"
+}
+
+# pass_may_measure <next> <cfg>: "pass <next> (and the passes after it, while the edit
+# stays) may measure another configuration than <cfg>", the parenthesis left out when
+# <next> is the sweep's last pass.
+pass_may_measure() {
+	local after=" (and the passes after it, while the edit stays)"
+	[[ "$1" != "${PASSES[${#PASSES[@]} - 1]}" ]] || after=""
+	printf 'pass %s%s may measure another configuration than %s' "$1" "$after" "$2"
 }
 
 # istio_span_check <prev> <before> <from> <after> <edits 0|1> <effect> [<unchecked>]:
@@ -634,7 +651,7 @@ for p in "${PASSES[@]}"; do
 			effect="its probes did not run"
 		fi
 		if [[ -n "$next" ]]; then
-			effect+=", and pass ${next} (and the passes after it, while the edit stays) may measure another configuration than its profile's"
+			effect+=", and $(pass_may_measure "$next" "its profile's")"
 		elif ((applied == 0)); then
 			effect+=", and no pass runs after it"
 		fi
@@ -660,8 +677,17 @@ echo ""
 # (read-only).
 IV_END=()
 istio_version_recheck IV_END "${KUBECTL[@]}"
-# An incomplete revert: a member's Istio CR spec now, against the start's.
+# An incomplete revert: a member's Istio CR spec now, against the start's. Or, when a check
+# above found an edit by something else (a problem: during a pass, between passes, after the
+# last revert), that edit: the reverts restore only the profiles' keys.
 if ((has_profile)); then
+	spec_why="an incomplete revert"
+	for ie_arg in ${ISTIO_EDITS[@]+"${ISTIO_EDITS[@]}"} ${IV_END[@]+"${IV_END[@]}"}; do
+		if [[ "$ie_arg" == --problem ]]; then
+			spec_why+=", or an edit by something else that no revert undid: they restore only the profiles' keys"
+			break
+		fi
+	done
 	for ctx in "${CONTEXTS[@]}"; do
 		start_spec="${SPEC_DIR}/start-$(ctx_key "$ctx").json"
 		[[ -s "$start_spec" ]] || continue
@@ -678,7 +704,7 @@ if ((has_profile)); then
 			| ([$x, $y] | map([paths(scalars)]) | add | unique)
 			| map(. as $p | select(($x | try getpath($p) catch null) != ($y | try getpath($p) catch null)) | map(tostring) | join("."))
 			| join(", ")' 2>/dev/null)" || spec_paths=""
-		IV_END+=(--problem "${ctx}'s Istio CR spec after the last revert differs from the sweep's start (an incomplete revert): ${spec_paths:-see istio-spec/ in the sweep dir}; the mesh is not as the sweep found it")
+		IV_END+=(--problem "${ctx}'s Istio CR spec after the last revert differs from the sweep's start (${spec_why}): ${spec_paths:-see istio-spec/ in the sweep dir}; the mesh is not as the sweep found it")
 	done
 fi
 # The outcome is written after the comparison: it says so (a line that sweep_outcome

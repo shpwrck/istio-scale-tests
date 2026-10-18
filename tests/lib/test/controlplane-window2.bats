@@ -103,7 +103,7 @@ deploy_reads() {
 	mkdir -p "$sd"
 	STUB_READY="True False" cp_window --phase baseline --state-dir "$sd"
 	assert_success
-	[[ "$stderr" == *"warning: context ctx-a: istiod pod(s) Running but not Ready: istiod-b (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connections but keeps the ones it has (its connected_proxies column)"* ]]
+	[[ "$stderr" == *"warning: context ctx-a: istiod pod(s) Running but not Ready: istiod-b (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connection while not Ready (one shutting down also drops its own as it exits)"* ]]
 	[ "$(cut -f 3 "${sd}/pods.tsv" | tr '\n' ' ')" = "istiod-a istiod-b " ]
 	cp_window --phase final --state-dir "$sd"
 	assert_success

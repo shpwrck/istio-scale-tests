@@ -783,7 +783,7 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	# The resume's own start condition and time are in its outcome (none included: an
 	# INFO line, not a warning; the time in UTC with Z); the TSV keeps the first
 	# run's. One HARNESS_SHA for the run's preambles and outcome (no harness note).
-	grep -Eq "^INFO=this --resume started at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z with every member ready \(ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0\); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's$" "$d/sweep-outcome.txt"
+	grep -Eq "^INFO=this --resume started at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z with every member ready \(ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0\); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's \(a resume's, when the first run wrote no TSV\)$" "$d/sweep-outcome.txt"
 	grep -qx '# ISTIO_NOTREADY_AT_START=none' "$tsv"
 	[ "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")" ]
 	refute_output --partial "this resume runs harness"

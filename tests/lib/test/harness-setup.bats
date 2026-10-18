@@ -9,29 +9,11 @@
 
 bats_require_minimum_version 1.5.0
 load test_helper
+load harness_helper
 
 setup() {
 	export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
 	mkdir -p "$TMPDIR"
-}
-
-# _suite_copy <dir> <suite>: a git checkout holding a copy of this one's config/,
-# tests/lib/*.sh, tests/lib/test/fixtures/ and tests/<suite>/ (no results), committed.
-_suite_copy() {
-	local r="$1" s="$2"
-	mkdir -p "$r/tests/lib/test"
-	cp -R "${ROOT}/config" "$r/config"
-	cp "${ROOT}"/tests/lib/*.sh "$r/tests/lib/"
-	cp -R "${ROOT}/tests/lib/test/fixtures" "$r/tests/lib/test/fixtures"
-	(cd "${ROOT}/tests" && tar -cf - --exclude=results --exclude='*.local.env' "$s") | (cd "$r/tests" && tar -xf -)
-	cp "${ROOT}/.gitignore" "$r/.gitignore"
-	_commit "$r" init
-}
-
-_commit() {
-	git -C "$1" init -q
-	git -C "$1" add -A
-	git -C "$1" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m "$2"
 }
 
 # _problem <record> <clean> <step>: the record's PROBLEM names <step>'s read of a dirty

@@ -118,7 +118,7 @@ _proxy_settle_order() {
 	TUN_FOREIGN_WHEN=baseline tun_sweep 01-push-throttling 7
 	[ "$status" -eq 4 ]
 	grep -qx 'FOREIGN EDIT' "$KLOG"
-	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read (baseline) may have measured another configuration, and pass 01-push-throttling (and the passes after it, while the edit stays) may measure another configuration than its profile's"
+	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read (baseline) may have measured another configuration, and pass 01-push-throttling may measure another configuration than its profile's"
 	[[ "$stderr" == *"WARNING: ${want}"$'\n'* ]] || { echo "$stderr"; false; }
 	[[ "$stderr" == *"error: ${want}; exit 4."* ]]
 	grep -qxF "PROBLEM=${want}" "${TDIR}/sweep-outcome.txt"

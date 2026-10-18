@@ -69,7 +69,7 @@ setup() {
 	local flat
 	flat="$(tr '\n' ' ' <<<"$output" | tr -s ' ')"
 	[[ "$flat" == *"during a pass, after its apply settled and not by its profile"* ]]
-	[[ "$flat" == *"an incomplete revert: a member's Istio CR spec after the last revert differs from the sweep's start"* ]]
+	[[ "$flat" == *"an incomplete revert, or such an edit, which no revert undoes (they restore only the profiles' keys): a member's Istio CR spec after the last revert differs from the sweep's start"* ]]
 	[[ "$flat" == *"REPORT_HARNESS_SHA (every format, next to it) is the harness this report ran on"* ]]
 	[[ "$flat" == *'"none" when no pass wrote a TSV'* ]]
 }

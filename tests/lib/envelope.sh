@@ -64,9 +64,10 @@
 #   render_scale_envelope <results_dir> <report_script> <contexts_csv> <kubectl_argv...>
 #       -> renders the docs/campaigns/TEMPLATE.md scale-envelope tables (mesh topology,
 #          control-plane provisioning & headroom, scale verdict) as markdown to stdout.
-#          Reads the report's JSON (peak-mesh row + capacity metadata) and takes a
-#          read-only `kubectl top nodes` / `top pod -l app=istiod` snapshot across
-#          --contexts. Per-sweep dir only (PL6); never a flat glob.
+#          Reads the report's JSON (peak-mesh row + capacity metadata; its provenance
+#          warning, attempts and data warnings lead the block) and takes a read-only
+#          `kubectl top nodes` / `top pod -l app=istiod` snapshot across --contexts.
+#          Per-sweep dir only (PL6); never a flat glob.
 #
 # Requires: tests/lib/common.sh (die, split_csv), tests/lib/capacity.sh, jq, awk.
 # All callers are expected to have run `set -euo pipefail`.
@@ -510,6 +511,12 @@ render_scale_envelope() {
 	report_harness="$(jq_get '.metadata.report_harness_sha')"
 	prov_warn="$(printf '%s' "$json" | jq -r '.metadata.provenance_warning // empty' 2>/dev/null || true)"
 	[[ -z "$prov_warn" ]] || prov_line="> **Provenance warning:** ${prov_warn//$'\n'/ }"
+	# The report's data warnings (an istiod pod not Ready in a window, a member that ran
+	# fewer istiod replicas than wanted, ...): they qualify the figures below, so one line
+	# each, as every report format prints them. They can name members, as the "by member"
+	# list below does: paste a redacted copy (redact-results.sh maps them).
+	local dw_lines=""
+	dw_lines="$(printf '%s' "$json" | jq -r '(.metadata.data_warnings // [])[] | "> **Data warning:** " + (split("\n") | join(" "))' 2>/dev/null || true)"
 	# The attempts behind it, when a --resume ran or the harness changed during a run: each
 	# run's or change's HARNESS_SHA and rows, as 004 prints them (no KUBE_VERSIONS: they
 	# name the members).
@@ -671,6 +678,7 @@ render_scale_envelope() {
 ${prov_line:+${prov_line}
 }${att_line:+${att_line}
 }${earlier_line:+${earlier_line}
+}${dw_lines:+${dw_lines}
 }${pending_line:+
 ${pending_line}
 }

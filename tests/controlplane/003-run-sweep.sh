@@ -316,7 +316,10 @@ Other:
                               outcome; front matter stale_since_resume), until it
                               writes them again at its end. The TSV keeps the
                               first run's ISTIO_NOTREADY_AT_START (the outcome
-                              repeats it as a note) and HARNESS_SHA; the
+                              repeats it as a note) and HARNESS_SHA (when it
+                              died before it wrote the TSV, the resume that
+                              wrote it keeps its own there, and the reports
+                              list the first run's values as unknown); the
                               resume records its own readiness, with its
                               start time, in a note of the sweep outcome
                               (ISTIO_NOTREADY_AT_RESUME=...), and warns when it
@@ -2023,6 +2026,11 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 		index($0, a) == 1 { nr = substr($0, length(a) + 1) }
 		index($0, b) == 1 { w = substr($0, length(b) + 1) }
 		END { print nr, w, d }' "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null) || true
+	# A preamble that a --resume wrote (the first run died before its TSV) is that resume's,
+	# whose resumes.txt line notes its own start (below); controlplane_attempts then reads
+	# the first run's as unknown.
+	[[ -z "$_resume_nr0" || "$(controlplane_attempts "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "${OUTPUT_DIR}/resumes.txt" 2>/dev/null | awk -F'\t' 'NR == 1 { print $5 }')" != unknown ]] \
+		|| _resume_nr0=""
 	_istio_notready_notes RESUME_NOTES first "$_resume_nr0" "$_resume_w0" "$_resume_d0"
 fi
 # An earlier run's end notes (its Istio version unconfirmed at the end, istiod or
@@ -2063,14 +2071,18 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	# A run that was interrupted or stopped wrote its harness change and its steps' reads
 	# not checked in its not-finished or stop record (a NOTE or PROBLEM line), which this
 	# run replaces: carried too, the first as a PROBLEM, the second as a NOTE. So is what
-	# that run had carried, as it is: a harness change stays a PROBLEM unless it ends as
-	# the NOTE an end of the sweep made of it (below).
+	# that run had carried from a run not finished, as it is: a harness change stays a
+	# PROBLEM unless it ends as the NOTE an end of the sweep made of it (below). Not what it
+	# carried from a finished outcome ("(outcome of <DATE>) ..."): that outcome is
+	# sweep-outcome.prev.txt, carried above as it was written, and an end of the sweep in
+	# that run may have made a NOTE of its PROBLEM, so both copies would be kept.
 	if [[ "$_resume_rec" != "${OUTPUT_DIR}/sweep-outcome.txt" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]]; then
 		mapfile -t -O "${#_resume_carry[@]}" _resume_carry < <(awk -v p="an earlier run of this sweep (" \
 			-v h="the harness changed during the sweep" -v l="the steps' own harness reads could not be checked: " '
 			/^STARTED_AT=/ { d = substr($0, 12) }
 			/^(NOTE|PROBLEM)=/ {
 				x = substr($0, index($0, "=") + 1)
+				if (index(x, p "outcome of ") == 1) next
 				if (index(x, p) == 1) {
 					t[++k] = "N"
 					if (index(x, ") recorded: " h) && x !~ / \((its rows were all run again later|that run wrote no rows)\)$/) t[k] = "P"
@@ -2136,7 +2148,8 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 fi
 # The TSV preamble names the harness the sweep started on, and each resume appends
 # rows from its own. resumes.txt in the sweep dir is append-only: one line per resume that
-# passed its preflights (this one, and one that dies later, included), with its start time
+# passed its preflights (this one, and one that dies later, included; also one that finds
+# no TSV, as the first run died before it wrote it), with its start time
 # in the format of the rows' timestamp column, its HARNESS_SHA, its own
 # ISTIO_NOTREADY_AT_RESUME and its KUBE_VERSIONS (a file an older harness started
 # keeps its three columns). TSV_LINES, the TSV's line count when the resume started, where
@@ -2159,7 +2172,7 @@ fi
 # later resume changed it again. unknown cannot be compared: each resume that ran it gets
 # a note of its own. This resume also warns when it runs unknown, or a harness other than
 # the last known one before it.
-if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
+if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	_resumes_log="${OUTPUT_DIR}/resumes.txt"
 	[[ -s "$_resumes_log" ]] || printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\tHARNESS_CONTENT_KEY\n' >> "$_resumes_log" \
 		|| die "--resume: could not append to ${_resumes_log}, which tells this run's rows from earlier ones; ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
@@ -2168,8 +2181,9 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	# own and TSV_LINES counts it.
 	tsv_end_line "$_resume_tsv" \
 		|| die "--resume: could not end the last line of ${_resume_tsv} (a run cut short left it without a newline); ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
-	# A TSV without its header line holds no row yet, and precreate_tsv_preamble writes it
-	# again: every row of it is this run's (0).
+	# No TSV (the first run died before it wrote one), or one without its header line, holds
+	# no row yet, and precreate_tsv_preamble writes it, preamble included: every row of it is
+	# this run's (0; controlplane_attempts then reads no value of the first run from it).
 	_resume_lines=0
 	! grep -q '^timestamp' "$_resume_tsv" 2>/dev/null || _resume_lines="$(wc -l < "$_resume_tsv" | tr -d ' ')"
 	_resume_line="$(printf '%s\t%s\t%s' "$RESUME_AT" "$HARNESS_SHA" "${ISTIO_NOTREADY_AT_START:-unchecked}")"
@@ -2200,6 +2214,11 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 		"$RESUME_AT" "$_resume_lines" "$HARNESS_SHA" "${HARNESS_CONTENT_KEY:-unknown}" "${ISTIO_NOTREADY_AT_START:-unchecked}" \
 		"${ISTIO_GENERATIONS:-unchecked}" "${ISTIO_PROXY_VERSIONS:-unchecked}" "$_resume_kv" >> "$_resume_tsv" \
 		|| die "--resume: could not append the resume's start line to ${_resume_tsv}, which tells this run's rows from earlier ones; ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
+fi
+# The notes compare this resume with the runs before it, from the TSV it found: one that held
+# no row (above) holds no other run's rows, and its preamble will be this resume's, so there
+# is nothing to note (an earlier resume of it added no rows either).
+if [[ -n "$RESUME_DIR" && "${_resume_lines:-0}" != 0 ]] && ! ((DRY_RUN)); then
 	_resume_harness="$(awk -v k="# HARNESS_SHA=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 	_resume_hkey0="$(awk -v k="# HARNESS_CONTENT_KEY=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 	_resume_kv0="$(awk -v k="# KUBE_VERSIONS=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"

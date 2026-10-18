@@ -96,7 +96,7 @@ member_sweep() {
 	CTXS=ci-a,ci-b TUN_FAILCTX=ci-b TUN_CRBUMP_ON="--context=ci-a -n istio-system get deployment istiod -o json" member_sweep
 	[ "$status" -eq 4 ]
 	[ "$(grep -c '^PROBLEM=' "$OUT")" -eq 1 ] || { cat "$OUT"; false; }
-	grep -qxF "PROBLEM=the Istio CR changed while the sweep changed nothing, between its read once the apply of pass ${p} settled (001's istio-generations-applied) and its read after the apply of pass ${p}: ci-a (Istio CR generation 3 -> 4, IstioRevision generation 3 -> 4); likely: a version changed and changed back, or a values change (an edit of the Istio CR); pass ${p} (and the passes after it, while the edit stays) may measure another configuration than its profile's" "$OUT" \
+	grep -qxF "PROBLEM=the Istio CR changed while the sweep changed nothing, between its read once the apply of pass ${p} settled (001's istio-generations-applied) and its read after the apply of pass ${p}: ci-a (Istio CR generation 3 -> 4, IstioRevision generation 3 -> 4); likely: a version changed and changed back, or a values change (an edit of the Istio CR); pass ${p} may measure another configuration than its profile's" "$OUT" \
 		|| { cat "$OUT"; false; }
 	grep -qxF "NOTE=the Istio CR generations of a member could not be compared between the sweep's read once the apply of pass ${p} settled (001's istio-generations-applied) and its read after the apply of pass ${p} (a read failed): ci-b (3/3 -> unknown/unknown); 002 compares it from 001's record up to its revert, which covers this span" "$OUT" \
 		|| { cat "$OUT"; false; }
@@ -113,7 +113,7 @@ member_sweep() {
 	TUN_CRBUMP_ON="get sidecar.networking.istio.io default" member_sweep --no-baseline
 	[ "$status" -eq 4 ]
 	[ "$(grep -c '^PROBLEM=' "$OUT")" -eq 1 ] || { cat "$OUT"; false; }
-	grep -qxF "PROBLEM=the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass ${p}: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); pass ${p} (and the passes after it, while the edit stays) may measure another configuration than its profile's" "$OUT" \
+	grep -qxF "PROBLEM=the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass ${p}: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); pass ${p} may measure another configuration than its profile's" "$OUT" \
 		|| { cat "$OUT"; false; }
 }
 
@@ -138,7 +138,7 @@ member_sweep() {
 	_failed_apply edited
 	echo $(( $(<"${TD}/gen.ci-a") + 2 )) > "${TD}/gen.ci-a"
 	_revert
-	[[ "$stderr" == *"WARNING: the Istio CR changed ${span}, not by this profile: ci-a (Istio CR generation 3 -> 5, IstioRevision generation 3 -> 5). Likely: "*". Its probes did not run, but the passes after it (while the edit stays: this revert restores only the profile's keys) may measure another configuration. Reverting anyway."* ]] \
+	[[ "$stderr" == *"WARNING: the Istio CR changed ${span}, not by this profile: ci-a (Istio CR generation 3 -> 5, IstioRevision generation 3 -> 5). Likely: "*". Its probes did not run, but any passes after it (while the edit stays: this revert restores only the profile's keys) may measure another configuration. Reverting anyway."* ]] \
 		|| { echo "$stderr"; false; }
 	[ -s "${st}/istio-edited-during-pass" ]
 	# Run again after that revert finished (no active-profile left): the pass is named from

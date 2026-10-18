@@ -3,11 +3,13 @@
 # the checkout (PL33; no cluster: kubectl and curl are stubs, 001 and 005 stand-ins, 002
 # the real one): a harness change in a run that wrote no rows (interrupted before its first
 # cell) is a NOTE once the resume's rows ran one harness, also after a second interrupted
-# run; the note that the steps' own harness reads could not be checked is carried from a
-# finished and from an interrupted run.
+# run; one that a --resume made a NOTE before it was interrupted is carried once; the note
+# that the steps' own harness reads could not be checked is carried from a finished and
+# from an interrupted run.
 
 bats_require_minimum_version 1.5.0
 load test_helper
+load harness_helper
 
 setup() {
 	export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
@@ -17,7 +19,9 @@ setup() {
 	export CN_DIR="$BATS_TEST_TMPDIR"
 	_suite_copy "$R" controlplane
 	# 001: reads the harness as the real one does (CN_RMLOG: after removing the steps' log,
-	# as a temp-file cleaner would); 005: the leftover namespaces are gone.
+	# as a temp-file cleaner would), then adds the harness file CN_EDIT1 and fails under
+	# CN_FAIL; 004: under CN_TERM004, its first call sends the sweep (its parent) SIGTERM;
+	# 005: the leftover namespaces are gone.
 	cat > "$R/tests/controlplane/001-setup-controlplane-test.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -25,7 +29,16 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 [[ -z "${CN_RMLOG:-}" ]] || rm -f "${HARNESS_SWEEP_LOG:-/nonexistent}"
 harness_read _hs _hk
+[[ -z "${CN_EDIT1:-}" ]] || echo x > "$CN_EDIT1"
+[[ -z "${CN_FAIL:-}" ]] || exit 1
 EOF
+	{
+		echo '#!/usr/bin/env bash'
+		echo 'if [[ -n "${CN_TERM004:-}" && ! -e "$CN_DIR/term004-sent" ]]; then : > "$CN_DIR/term004-sent"; kill -TERM "$PPID"; exit 0; fi'
+		tail -n +2 "$R/tests/controlplane/004-report-results.sh"
+	} > "$R/tests/controlplane/004-report-results.sh.new"
+	mv "$R/tests/controlplane/004-report-results.sh.new" "$R/tests/controlplane/004-report-results.sh"
+	chmod +x "$R/tests/controlplane/004-report-results.sh"
 	printf '#!/bin/sh\nrm -f "$CN_DIR/ns-left"\n' > "$R/tests/controlplane/005-cleanup.sh"
 	git -C "$R" add -A
 	git -C "$R" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m stand-ins
@@ -79,25 +92,6 @@ STUB
 	} > "${BIN}/sleep"
 	chmod +x "${BIN}/kubectl" "${BIN}/curl" "${BIN}/sleep"
 	EDIT="$R/tests/controlplane/chart/zz-edit.yaml"
-}
-
-_commit() {
-	git -C "$1" init -q
-	git -C "$1" add -A
-	git -C "$1" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m "$2"
-}
-
-# _suite_copy <dir> <suite>: a git checkout holding a copy of this one's config/,
-# tests/lib/*.sh, tests/lib/test/fixtures/ and tests/<suite>/ (no results), committed.
-_suite_copy() {
-	local r="$1" s="$2"
-	mkdir -p "$r/tests/lib/test"
-	cp -R "${ROOT}/config" "$r/config"
-	cp "${ROOT}"/tests/lib/*.sh "$r/tests/lib/"
-	cp -R "${ROOT}/tests/lib/test/fixtures" "$r/tests/lib/test/fixtures"
-	(cd "${ROOT}/tests" && tar -cf - --exclude=results --exclude='*.local.env' "$s") | (cd "$r/tests" && tar -xf -)
-	cp "${ROOT}/.gitignore" "$r/.gitignore"
-	_commit "$r" init
 }
 
 # cp_sweep <args...>: the copy's 003 with the stubs, results under res/ (settle 0 unless
@@ -166,6 +160,36 @@ no_rows() {
 	[ "$status" -eq 0 ] || { echo "status ${status}: ${stderr}"; cat "$D/sweep-outcome.txt"; false; }
 	[ "$(grep -c "$n" "$D/sweep-outcome.txt")" = 1 ] || { cat "$D/sweep-outcome.txt"; false; }
 	[ "$(grep -c '^PROBLEM=\|the harness changed during the sweep' "$D/sweep-outcome.txt")" = 1 ]
+}
+
+@test "a harness change in a finished run, made a NOTE by a --resume that was interrupted in its reports: the next --resume carries it once (from sweep-outcome.prev.txt), a NOTE, and 004 names it once" {
+	local d1 n
+	# The first run: 001 adds a harness file and its cell fails (a PROBLEM, exit 4).
+	CN_EDIT1="$EDIT" CN_FAIL=1 cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5 --config-dump-samples 0
+	[ "$status" -eq 4 ] || { echo "status ${status}: ${stderr}"; false; }
+	D="$(find "$RES" -maxdepth 1 -name 'sweep-*' -type d)"
+	grep -q '^PROBLEM=the harness changed during the sweep: ' "$D/sweep-outcome.txt"
+	d1="$(sed -n 's/^# DATE=//p' "$D/sweep-outcome.txt")"
+	[ -n "$d1" ]
+	n="^NOTE=an earlier run of this sweep (outcome of ${d1}) recorded: the harness changed during the sweep: .* (its rows were all run again later)$"
+	# A --resume runs the cell again, makes the PROBLEM a NOTE at its end check, and is
+	# interrupted in its first report: its record holds the NOTE, sweep-outcome.prev.txt
+	# the PROBLEM.
+	CN_TERM004=1 cp_sweep --resume "$D" --contexts ci-a --config-dump-samples 0
+	[ "$status" -eq 143 ] || { echo "status ${status}: ${stderr}"; false; }
+	[ -e "${CN_DIR}/term004-sent" ]
+	grep -qx 'EXIT=unfinished' "$D/sweep-outcome.txt"
+	[ "$(grep -c "$n" "$D/sweep-outcome.txt")" = 1 ] || { cat "$D/sweep-outcome.txt"; false; }
+	grep -q '^PROBLEM=the harness changed during the sweep: ' "$D/sweep-outcome.prev.txt"
+	# The next --resume (every cell done): the change once, as that NOTE; no PROBLEM, exit 0.
+	cp_sweep --resume "$D" --contexts ci-a --config-dump-samples 0
+	[ "$status" -eq 0 ] || { echo "status ${status}: ${stderr}"; cat "$D/sweep-outcome.txt"; false; }
+	grep -qx 'EXIT=0' "$D/sweep-outcome.txt"
+	[ "$(grep -c "$n" "$D/sweep-outcome.txt")" = 1 ] || { cat "$D/sweep-outcome.txt"; false; }
+	[ "$(grep -c '^PROBLEM=\|the harness changed during the sweep' "$D/sweep-outcome.txt")" = 1 ]
+	run bash "$R/tests/controlplane/004-report-results.sh" --results-dir "$D" --format text
+	assert_success
+	[ "$(grep -c 'the harness changed during the sweep' <<<"$output")" = 1 ] || { echo "$output"; false; }
 }
 
 @test "the steps' log removed during a finished run (its NOTE), then --resume --extend-plan: the new outcome carries the NOTE once, and 004 names it" {

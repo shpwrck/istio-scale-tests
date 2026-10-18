@@ -86,7 +86,9 @@ Usage: $(basename "$0") [options]
                      was cut short gets a data warning (report each sweep alone to see
                      its record), and json pooled_sweep_outcomes lists each one that did
                      not end cleanly or holds a PROBLEM ([] when none, as in the other
-                     suites' reports). Legacy cells pool across runs, while each growth
+                     suites' reports), each record as it is: the PROBLEMs of the
+                     sweep-outcome.prev.txt behind one that has not finished count in
+                     the verdict only. Legacy cells pool across runs, while each growth
                      series (RUN_ID x mesh size x K x workload) keeps its own cells and
                      fits, labelled run=<RUN_ID>.
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
@@ -187,22 +189,30 @@ comparable with the other cells. An entry without /<spec> (an older harness, or 
 not read the Deployment) is compared with the member's ISTIOD_REPLICAS_BY_CONTEXT, read at
 the sweep's start (an HPA may have changed it since): a data warning only. So is a <spec>
 other than that start value (an HPA, or a changed replicaCount: the cell ran another
-replica count than the sweep's start), and an istiod pod that was Running but not Ready at
-a window's baseline (its "# ISTIOD_NOT_READY=<member>=<pod>,..." line: such a pod takes
-no new proxy connections, so the per-replica figures include a replica that carried fewer
-proxies than the others, or none). An INCOMPLETE cell is also marked where its
-figures are shown: its text block header ("INCOMPLETE: rows of 1 of 2 members"), its
-n_total in the markdown cells table (‡, with a footnote) and its chart series (‡, with a
-note); a legacy cell that ran on fewer istiod pods than wanted in its text block header
-("FEWER ISTIOD PODS: <member> ran 2 of its 3 istiod replicas") and its n_total in the
-markdown cells table (§, with a footnote). Each footnote names five cells, then "and N
-more". In a report of several TSVs a warning names each cell after its TSV's path
-(relative to the results dir). A NOT_RUN or INCOMPLETE cell, or one that ran on fewer
-istiod pods than wanted, also turns a PASS verdict into CAUTION ("N planned cell(s) never
-ran", "N cell(s) are INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's
-istiod Deployment wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes
-from the valid rows with a push count: fewer than n_valid shows as got/n_valid (csv
-pushes_n, json xds_pushes_n), with a data warning.
+replica count than the sweep's start), an istiod pod that was Running but not Ready at a
+window's baseline (its "# ISTIOD_NOT_READY=<member>=<pod>,..." line), and one not Ready at
+the window's end (its "# ISTIOD_NOT_READY_AT_END=" line): a pod that is not Ready takes no
+new proxy connection, and one shutting down also drops its own as it exits (their
+reconnects to the other replicas add to the cell's push, convergence and CPU figures), so
+the per-replica figures may include a replica that carried fewer proxies than the others,
+or none (its row's connected_proxies shows what it held at the window's end; a restarted
+replica's row is left out). An INCOMPLETE cell is also marked where its figures are shown:
+its text block header ("INCOMPLETE: rows of 1 of 2 members"), its n_total in the markdown
+cells table (‡, with a footnote) and its chart series (‡, with a note); a legacy cell that
+ran on fewer istiod pods than wanted in its text block header ("FEWER ISTIOD PODS:
+<member> ran 2 of its 3 istiod replicas") and its n_total in the markdown cells table (§,
+with a footnote); a legacy cell with a pod not Ready in its text block ("! NOT READY AT
+BASELINE: <pod> on <member>", "! NOT READY AT WINDOW END: ..."), its n_total in the
+markdown cells table (¶, one footnote for both) and the json results' istiod_not_ready and
+istiod_not_ready_at_end ("<member>=<pod>" entries; [] when none, or the TSV's harness wrote
+no such line; null for a growth cell, whose windows only the data warning names). Each
+footnote names up to five cells (then "and N more"). In a report of several TSVs a warning
+names each cell after its TSV's path (relative to the results dir). A NOT_RUN or INCOMPLETE
+cell, or one that ran on fewer istiod pods than wanted, also turns a PASS verdict into
+CAUTION ("N planned cell(s) never ran", "N cell(s) are INCOMPLETE", "N cell(s) ran on fewer
+istiod pods than their member's istiod Deployment wants"), and adds itself to a CAUTION or
+FAIL headline. pushes_avg comes from the valid rows with a push count: fewer than n_valid
+shows as got/n_valid (csv pushes_n, json xds_pushes_n), with a data warning.
 
 Provenance: HARNESS_SHA, HARNESS_CONTENT_KEY and KUBE_VERSIONS come from each TSV
 preamble (the first run), from each --resume (resumes.txt, or the TSV's "# RESUMED_AT="
@@ -1172,18 +1182,28 @@ ${AWK_HEADER_IX}"'
 #     warning only;
 #   - NOTREADY: a "# ISTIOD_NOT_READY=" line names an istiod pod of the window's members
 #     that was Running but not Ready at its baseline (cp_notready; a growth window's own
-#     line too): it took no new proxy connections, so the per-replica figures average in a
-#     replica that carried fewer. A data warning only.
+#     line too); NREND: a "# ISTIOD_NOT_READY_AT_END=" line names one not Ready at its end
+#     (cp_notready_end; the same). While not Ready it took no new proxy connection, and one
+#     shutting down drops its own as it exits (their reconnects add to the cell's push,
+#     convergence and CPU figures), so the per-replica figures may include a replica that
+#     carried fewer (a restarted one's row is left out). A data warning only.
 # The INCOMPLETE cells are also marked where their figures are shown (CS_INC_KEYS: one
 # "<mesh>|<svcs>|<reps>|<ns>|<scope>|<traffic>|<window kind>\t<why>" line each): the text
 # block's header, the markdown cells table (‡) and the charts; the SHORT legacy cells
 # (CS_SHORT_KEYS, the same form) in the text block's header and the markdown cells table
-# (§). A NOT_RUN warning names the full command that resumes the sweep with the axis flags
-# that planned those cells. In a report of several TSVs each cell is named behind its TSV
+# (§); the NOTREADY and NREND legacy cells (CS_NR_KEYS, CS_NRE_KEYS: "<key>\t<member>=
+# <pod>,..." lines) in a text block line, the markdown cells table (¶) and the json results;
+# a growth window in its data warning only. The lists go in files (CS_KEYS_DIR, below). A
+# NOT_RUN warning names the full command that resumes the sweep with the axis flags that
+# planned those cells. In a report of several TSVs each cell is named behind its TSV
 # (relative to the results dir), as the attempts are: one cell of two sweeps is two cells.
 NOT_RUN_CELLS=0
-_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=() _cs_specw=() _cs_notready=()
-CS_INC_KEYS="" CS_SHORT_KEYS=""
+_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=() _cs_specw=() _cs_notready=() _cs_nrend=()
+CS_INC_KEYS="" CS_SHORT_KEYS="" CS_NR_KEYS="" CS_NRE_KEYS=""
+# nr_on(s): a "<member>=<pod>,..." list (cp_notready) as "<pod> on <member>, ...".
+# shellcheck disable=SC2016  # awk source
+NR_ON_AWK='function nr_on(s,    n, i, o) { n = cp_nr_parse(s); o = ""; for (i = 1; i <= n; i++) o = o (i > 1 ? ", " : "") cp_nrq[i] " on " cp_nrm[i]; return o }
+'
 for _cs_i in "${!TSV_FILES[@]}"; do
 	_cs_tsv="${TSV_FILES[_cs_i]}"
 	_cs_pre=""
@@ -1206,11 +1226,14 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 		SHORTW) _cs_shortw+=("${_cs_pre}${_cs_cell}") ;;
 		SPECW) _cs_specw+=("${_cs_pre}${_cs_cell}") ;;
 		NOTREADY) _cs_notready+=("${_cs_pre}${_cs_cell}") ;;
+		NREND) _cs_nrend+=("${_cs_pre}${_cs_cell}") ;;
+		NRKEY) CS_NR_KEYS+="${_cs_cell}"$'\t'"${_cs_x}"$'\n' ;;
+		NREKEY) CS_NRE_KEYS+="${_cs_cell}"$'\t'"${_cs_x}"$'\n' ;;
 		NRPLAN) _cs_cmds+=("$(controlplane_resume_cmd "<sweep dir>" "${_cs_ctx:-<its contexts>}" "$_cs_cell" "$_cs_cfg") (<sweep dir>: the directory of ${_cs_tsv#"${RESULTS_DIR%/}"/})") ;;
 		PLANERR) echo "warning: could not read ${_cs_plan}; planned cells that never ran (NOT_RUN) are not counted" >&2 ;;
 		PLANOTHER) echo "note: ${_cs_plan#"${RESULTS_DIR%/}"/} is the plan of ${_cs_cell}, not of ${_cs_tsv##*/}: its planned cells are not counted for ${_cs_tsv##*/}" >&2 ;;
 		esac
-	done < <(awk -F'\t' -v st="$STATUS_RE" -v plan="$_cs_plan" -v tname="${_cs_tsv##*/}" "${CP_CELL_AWK}"'
+	done < <(awk -F'\t' -v st="$STATUS_RE" -v plan="$_cs_plan" -v tname="${_cs_tsv##*/}" "${CP_CELL_AWK}${NR_ON_AWK}"'
 		function label(k,    kp) { split(k, kp, SUBSEP); return "mesh=" kp[1] " svcs=" kp[2] " reps=" kp[3] " ns=" kp[4] " scope=" kp[5] " traffic=" kp[6] (kp[7] == "deploy" ? "" : " window=" kp[7]) }
 		BEGIN {
 			np = cp_plan_load(plan, tname)
@@ -1220,12 +1243,12 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 			while (np > 0 && (getline line < plan) > 0) if (line ~ /^# PLAN=[0-9]+ / && (q = index(line, ": --"))) { p = substr(line, 8); sub(/ .*/, "", p); pflags[p] = substr(line, q + 2) }
 			close(plan)
 		}
-		# gflush(): a growth window'"'"'s SHORT/SHORTW/SPECW/NOTREADY line, once its rows are
-		# read (gn: its WINDOW_ROWS entries; gnr: its ISTIOD_NOT_READY line; grd: its members
-		# with a row that has a reading). A member whose rows all have istiod_restarted
-		# unknown is left out, as cp_cell_state leaves it out.
-		function gflush(    j, m, w, gs, gw, gp, gq, nq) {
-			gs = ""; gw = ""; gp = ""; gq = ""
+		# gflush(): a growth window'"'"'s SHORT/SHORTW/SPECW/NOTREADY/NREND line, once its rows
+		# are read (gn: its WINDOW_ROWS entries; gnr, gne: its ISTIOD_NOT_READY and _AT_END
+		# lines; grd: its members with a row that has a reading). A member whose rows all have
+		# istiod_restarted unknown is left out, as cp_cell_state leaves it out.
+		function gflush(    j, m, w, gs, gw, gp, gq, ge, nq) {
+			gs = ""; gw = ""; gp = ""; gq = ""; ge = ""
 			for (j = 1; j <= gn; j++) {
 				m = gm[j]
 				if (!(m in grd)) continue
@@ -1238,11 +1261,14 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 			}
 			nq = cp_nr_parse(gnr)
 			for (j = 1; j <= nq; j++) if (cp_nrm[j] in grd) gq = gq (gq == "" ? "" : ", ") cp_nrq[j] " on " cp_nrm[j]
+			nq = cp_nr_parse(gne)
+			for (j = 1; j <= nq; j++) if (cp_nrm[j] in grd) ge = ge (ge == "" ? "" : ", ") cp_nrq[j] " on " cp_nrm[j]
 			if (gs != "") print "SHORT\t" glbl " (" gs ")"
 			if (gw != "") print "SHORTW\t" glbl " (" gw ")"
 			if (gp != "") print "SPECW\t" glbl " (" gp ")"
 			if (gq != "") print "NOTREADY\t" glbl " (" gq ")"
-			gn = 0; gnr = ""; split("", grd)
+			if (ge != "") print "NREND\t" glbl " (" ge ")"
+			gn = 0; gnr = ""; gne = ""; split("", grd)
 		}
 		/^timestamp\t/ { if (gn) gflush(); cp_header(); sc = 0; for (i = 1; i <= NF; i++) if ($i == "services_per_namespace") sc = i; next }
 		/^#/ { if (gn) gflush(); if (phase == "" && index($0, "# PHASE=") == 1) phase = substr($0, 9); cp_comment(); next }
@@ -1254,7 +1280,7 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 				if (gn) gflush()
 				gn = cp_wl_parse(cp_wl)
 				for (j = 1; j <= gn; j++) { gm[j] = cp_wlm[j]; gnn[j] = cp_wln[j]; gss[j] = cp_wls[j] }
-				gnr = cp_wnr
+				gnr = cp_wnr; gne = cp_wne
 				glbl = label(cp_key())
 			}
 			if (gn && $31 != "unknown") grd[$2] = 1
@@ -1269,17 +1295,19 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 				k = order[i]
 				cs = cp_cell_state(k)
 				split(k, kp, SUBSEP)
+				ck = kp[1] "|" kp[2] "|" kp[3] "|" kp[4] "|" kp[5] "|" kp[6] "|" kp[7]
 				if (cp_short[k] != "") {
 					print "SHORT\t" label(k) " (" cp_short[k] ")"
-					print "SHORTKEY\t" kp[1] "|" kp[2] "|" kp[3] "|" kp[4] "|" kp[5] "|" kp[6] "|" kp[7] "\t" cp_short[k]
+					print "SHORTKEY\t" ck "\t" cp_short[k]
 				}
 				if (cp_shortw[k] != "") print "SHORTW\t" label(k) " (" cp_shortw[k] ")"
 				if (cp_specw[k] != "") print "SPECW\t" label(k) " (" cp_specw[k] ")"
-				if (cp_notready[k] != "") print "NOTREADY\t" label(k) " (" cp_notready[k] ")"
+				if (cp_notready[k] != "") { print "NOTREADY\t" label(k) " (" nr_on(cp_notready[k]) ")"; print "NRKEY\t" ck "\t" cp_notready[k] }
+				if (cp_notready_end[k] != "") { print "NREND\t" label(k) " (" nr_on(cp_notready_end[k]) ")"; print "NREKEY\t" ck "\t" cp_notready_end[k] }
 				if ((phase == "" || phase == "sweep") && cs == "INCOMPLETE") {
 					why = (cp_why[k] != "" ? cp_why[k] : "rows of " (cp_nm[k] + 0) " of " cp_ms[k] " members")
 					print "INCOMPLETE\t" label(k) " (" why ")"
-					print "INCKEY\t" kp[1] "|" kp[2] "|" kp[3] "|" kp[4] "|" kp[5] "|" kp[6] "|" kp[7] "\t" why
+					print "INCKEY\t" ck "\t" why
 				}
 				if (k in cp_after) print "POOLED\t" label(k)
 			}
@@ -1323,21 +1351,42 @@ if ((${#_cs_specw[@]})); then
 	_cs_w+="${_cs_nl}${#_cs_specw[@]} cell(s) have a window whose member's istiod Deployment wanted another replica count than at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): $(cell_list "${_cs_specw[@]}"). An HPA, or a changed replicaCount: their per-replica figures are not comparable with the cells run at the start's count; it does not change the verdict."
 fi
 if ((${#_cs_notready[@]})); then
-	_cs_w+="${_cs_nl}${#_cs_notready[@]} cell(s) have an istiod pod that was Running but not Ready at the window's baseline: $(cell_list "${_cs_notready[@]}"). Such a pod takes no new proxy connections and keeps only the ones it had (its row's connected_proxies), so their per-replica figures include a replica that carried fewer proxies than the others, or none; it does not change the verdict."
+	_cs_w+="${_cs_nl}${#_cs_notready[@]} cell(s) have an istiod pod that was Running but not Ready at the window's baseline: $(cell_list "${_cs_notready[@]}"). A pod that is not Ready takes no new proxy connection, and one shutting down also drops its own as it exits (their reconnects to the other replicas add to the cell's push, convergence and CPU figures), so these cells' per-replica figures may include a replica that carried fewer proxies than the others, or none (its row's connected_proxies shows what it held at the window's end; a restarted replica's row is left out); it does not change the verdict."
+fi
+if ((${#_cs_nrend[@]})); then
+	_cs_w+="${_cs_nl}${#_cs_nrend[@]} cell(s) have an istiod pod that was not Ready at the window's end (a readiness probe failing under load, or a replica shutting down): $(cell_list "${_cs_nrend[@]}"). While not Ready it took no new proxy connection (one shutting down also drops its own as it exits, and their reconnects to the other replicas add to the cell's push, convergence and CPU figures), so these cells' per-replica figures may include a replica that carried fewer proxies than the others (a restarted replica's row is left out); it does not change the verdict."
 fi
 if [[ -n "$_cs_w" ]]; then
 	DATA_WARNINGS="${DATA_WARNINGS:+${DATA_WARNINGS}${_cs_nl}}${_cs_w#"$_cs_nl"}"
 fi
-# INC_AWK: inc_load() reads CS_INC_KEYS (passed as ENVIRON _INC) into inc[<key>] = <why>,
-# and CS_SHORT_KEYS (ENVIRON _SHORT) into sht[<key>]; inc_why() / short_why() are the
-# current aggregated row's INCOMPLETE / SHORT why ("" when it is not one): a legacy cell
-# ($48 services_per_namespace 0) keyed by $1-$5, $38 traffic and $53 window kind.
+# The marked cells' lists go in files that INC_AWK reads, as 003 keeps its plan's keys: one
+# environment string (or awk -v) holds at most 128 KiB on Linux, and past that awk cannot
+# start (a 64-cell sweep of 20 members with long context names, each a replica short).
+CS_KEYS_DIR="${DATA_DIR}/cells"
+if ! { mkdir "$CS_KEYS_DIR" && printf '%s' "$CS_INC_KEYS" > "${CS_KEYS_DIR}/inc" && printf '%s' "$CS_SHORT_KEYS" > "${CS_KEYS_DIR}/short" \
+	&& printf '%s' "$CS_NR_KEYS" > "${CS_KEYS_DIR}/nr" && printf '%s' "$CS_NRE_KEYS" > "${CS_KEYS_DIR}/nre"; }; then
+	die "could not write the marked cells' lists in ${CS_KEYS_DIR}"
+fi
+export CS_KEYS_DIR
+# INC_AWK: inc_load() reads those files ("<key>\t<value>" lines; a key of several TSVs joins
+# its values) into inc[<key>] = the INCOMPLETE why, sht[<key>] the SHORT why, and nrb[<key>]
+# / nre[<key>] the "<member>=<pod>,..." not Ready at the window's baseline / end; a file it
+# cannot read stops the report. inc_why(), short_why(), nrb_of() and nre_of() are the current
+# aggregated row's ("" when it is not one): a legacy cell ($48 services_per_namespace 0)
+# keyed by $1-$5, $38 traffic and $53 window kind. nr_on() comes from NR_ON_AWK.
 # shellcheck disable=SC2016  # awk source
-INC_AWK='function inc_add(s, a,    n, l, i, t, k, w) { n = split(s, l, "\n"); for (i = 1; i <= n; i++) if ((t = index(l[i], "\t"))) { k = substr(l[i], 1, t - 1); w = substr(l[i], t + 1); if (k in a) w = a[k] "; " w; a[k] = w } }
-function inc_load() { split("", inc); split("", sht); inc_add(ENVIRON["_INC"], inc); inc_add(ENVIRON["_SHORT"], sht) }
+INC_AWK="${CP_CELL_AWK}${NR_ON_AWK}"'function inc_file(n, a, sep,    f, r, l, t, k, w) {
+	f = ENVIRON["CS_KEYS_DIR"] "/" n
+	while ((r = (getline l < f)) > 0) if ((t = index(l, "\t"))) { k = substr(l, 1, t - 1); w = substr(l, t + 1); if (k in a) w = a[k] sep w; a[k] = w }
+	if (r < 0) { print "awk: cannot read " f > "/dev/stderr"; exit 2 }
+	close(f)
+}
+function inc_load() { split("", inc); split("", sht); split("", nrb); split("", nre); inc_file("inc", inc, "; "); inc_file("short", sht, "; "); inc_file("nr", nrb, ","); inc_file("nre", nre, ",") }
 function inc_key() { return ($48 + 0 != 0) ? "" : $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $38 "|" $53 }
 function inc_why(    k) { k = inc_key(); return (k != "" && (k in inc)) ? inc[k] : "" }
 function short_why(    k) { k = inc_key(); return (k != "" && (k in sht)) ? sht[k] : "" }
+function nrb_of(    k) { k = inc_key(); return (k != "" && (k in nrb)) ? nrb[k] : "" }
+function nre_of(    k) { k = inc_key(); return (k != "" && (k in nre)) ? nre[k] : "" }
 '
 LEFTOVER_AT_START_M="$(tag_values LEFTOVER_TEST_NAMESPACES "")"
 [[ -n "$LEFTOVER_AT_START_M" ]] || LEFTOVER_AT_START_M="n/a"
@@ -2423,7 +2472,7 @@ report_text() {
 	echo ""
 	echo "Files: $(files_label)"
 	echo ""
-	_INC="$CS_INC_KEYS" _SHORT="$CS_SHORT_KEYS" awk -F'\t' "${INC_AWK}"'
+	awk -F'\t' "${INC_AWK}"'
 	BEGIN { inc_load() }
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
@@ -2469,6 +2518,8 @@ report_text() {
 		}
 		if (iw != "") printf "  ! INCOMPLETE: %s: cut short while its member rows were written, so these figures cover only the rows written (a --resume runs it again)\n", iw
 		if (fw != "") printf "  ! FEWER ISTIOD PODS: %s (its istiod Deployment'"'"'s .spec.replicas: a replica evicted or Pending), so these per-replica figures are not comparable with the other cells; the rows are valid\n", fw
+		if ((nb = nrb_of()) != "") printf "  ! NOT READY AT BASELINE: %s (Running but not Ready: it took no new proxy connection while not Ready), so these per-replica figures may include a replica that carried fewer proxies than the others\n", nr_on(nb)
+		if ((ne = nre_of()) != "") printf "  ! NOT READY AT WINDOW END: %s (a readiness probe failing under load, or a replica shutting down), so these per-replica figures may include a replica that carried fewer proxies than the others\n", nr_on(ne)
 		printf "\n"
 	}' <<<"$aggregated"
 	if [[ -n "$short" ]]; then
@@ -2733,7 +2784,7 @@ report_markdown() {
 	fi
 	echo "| mesh_size | svc | reps | ns | scoping | traffic | n_total | n_valid | cpu_peak (m) | cpu_avg (m) | rss_peak (Mi) | heap_alloc (Mi) | heap_inuse (Mi) | conv_p99 (ms) | queue_p99 (ms) | proxies/replica | proxies/cluster | cfg_dump_avg (MiB) | restarts | unk_restarts |${gh}"
 	echo "|-----------|-----|------|----|---------|---------|---------|---------|--------------|-------------|---------------|-----------------|-----------------|---------------|----------------|-----------------|-----------------|--------------------|----------|--------------|${gs}"
-	_INC="$CS_INC_KEYS" _SHORT="$CS_SHORT_KEYS" awk -F'\t' -v growth="$growth" -v gruns="$gruns" "${INC_AWK}"'
+	awk -F'\t' -v growth="$growth" -v gruns="$gruns" "${INC_AWK}"'
 	BEGIN { inc_load() }
 	function bucket_range(upper_ms) {
 		if (upper_ms+0 <= 0)     return "N/A"
@@ -2760,20 +2811,27 @@ report_markdown() {
 		# Status rows count in unk_restarts; say so in the cell.
 		unk = $21
 		if ($62 + 0 > 0) { st = $63; gsub(/\+/, ", ", st); unk = unk " (" $62 " status: " st ")" }
-		# double-dagger-mark an INCOMPLETE cell (its n_total), and section-mark one that ran on
-		# fewer istiod pods than wanted, each named in a footnote below (the first five, then
-		# "and N more", as cell_list caps a data warning).
-		nt = $6; iw = inc_why(); fw = short_why()
+		# double-dagger-mark an INCOMPLETE cell (its n_total), section-mark one that ran on
+		# fewer istiod pods than wanted, and pilcrow-mark one with an istiod pod not Ready at
+		# the baseline or end of a window, each named in a footnote below (the first five,
+		# then "and N more", as cell_list caps a data warning).
+		nt = $6; iw = inc_why(); fw = short_why(); nb = nrb_of(); ne = nre_of()
 		lbl = "mesh=" $1 " svcs=" $2 " reps=" $3 " ns=" $4 " scope=" $5 " traffic=" $38 ($53 == "deploy" ? "" : " window=" $53)
 		if (iw != "") { nt = nt " ‡"; if (++ninc <= 5) incl = incl (incl == "" ? "" : "; ") lbl " (" iw ")" }
 		if (fw != "") { nt = nt " §"; if (++nshl <= 5) shl = shl (shl == "" ? "" : "; ") lbl " (" fw ")" }
+		if (nb != "" || ne != "") {
+			nt = nt " ¶"
+			if (++nnr <= 5) nrl = nrl (nrl == "" ? "" : "; ") lbl " (" (nb == "" ? "" : "at the baseline: " nr_on(nb)) (nb == "" || ne == "" ? "" : "; ") (ne == "" ? "" : "at the window'"'"'s end: " nr_on(ne)) ")"
+		}
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |%s\n", $1, $2, $3, $4, $5, $38, nt, $7, $24, ($68 == "" ? "N/A" : $68), $10, ha, hi, cp, qp, $19, $37, cfg_mb, $20, unk, gcols
 	}
 	END {
 		if (ninc > 5) incl = incl "; and " (ninc - 5) " more"
 		if (nshl > 5) shl = shl "; and " (nshl - 5) " more"
+		if (nnr > 5) nrl = nrl "; and " (nnr - 5) " more"
 		if (incl != "") { gsub(/\|/, "\\|", incl); print "\n> ‡ INCOMPLETE: the sweep was cut short while these cells'"'"' member rows were written, so their figures cover only the rows written (the sweep counts these cells as failed, and a --resume runs them again): " incl "." }
 		if (shl != "") { gsub(/\|/, "\\|", shl); print "\n> § Fewer istiod pods: these cells ran on fewer istiod pods than their member'"'"'s istiod Deployment wanted (a replica evicted or Pending), so their per-replica figures are not comparable with the other cells; the rows are valid: " shl "." }
+		if (nrl != "") { gsub(/\|/, "\\|", nrl); print "\n> ¶ istiod pod not Ready: an istiod pod of these cells was not Ready at a window'"'"'s baseline or end, and took no new proxy connection while not Ready, so their per-replica figures may include a replica that carried fewer proxies than the others (see the data warnings): " nrl "." }
 		if (any_pin) print "\n> † SINGLE-BUCKET-PINNED: all delta mass for that quantile sits in the coarsest (0-100ms) `pilot_proxy_convergence_time` bucket, so the reported value is a uniform-within-bucket assumption (Prometheus `histogram_quantile` semantics), NOT resolved below 100ms. Real sub-bucket signal only appears once convergence climbs into a higher bucket (e.g. at 10k-service scale)."
 	}' <<<"$aggregated"
 	local real_unknowns=$(( total_unknowns - total_status ))
@@ -2966,16 +3024,18 @@ TM_NOTES
 }
 
 report_json() {
-	local aggregated shortkeys
+	local aggregated
 	aggregated=$(aggregate)
-	# ";mesh|svc|reps|ns|scoping;..." of the vsdr cells with an ingest shortfall.
-	shortkeys="$(vsdr_ingest_short "$aggregated" | awk -F'\t' '{ printf ";%s", $1 } END { print ";" }')"
+	# The vsdr cells with an ingest shortfall ("mesh|svc|reps|ns|scoping[|traffic]\t<detail>"),
+	# in a file for INC_AWK's inc_file, as the marked cells' lists (awk -v holds 128 KiB).
+	vsdr_ingest_short "$aggregated" > "${CS_KEYS_DIR}/vsdr-short" \
+		|| die "could not write the vsdr ingest shortfalls in ${CS_KEYS_DIR}"
 	local ns_scaling_json
 	ns_scaling_json="$(scaling_section json "$aggregated")"
 	# Every string goes through the environment (the recorded outcome, the lists, the
 	# attempts and the warnings as JSON; each _J_<name> field as a value js() quotes): awk -v
 	# would unescape a backslash, and a " or \ printed as is would break the JSON. Only the
-	# counts (integers) and the cell keys (a lookup) stay -v.
+	# counts (integers) stay -v; the per-cell lists come from files (CS_KEYS_DIR).
 	SWEEP_OUTCOME_JSON="$(sweep_outcome_recorded --sweep-level-run-id "$RESULTS_DIR" json)" \
 	_RI_LIST="$(json_list "$RUN_IDS_M")" _IV_LIST="$(json_list "$ISTIO_VERSIONS_M")" _HS_LIST="$(json_list "$HARNESS_SHAS_M")" _HK_LIST="$(json_list "$HARNESS_KEYS_M")" \
 	_ATT_JSON="$ATTEMPTS_JSON" _PROV_WARN="$PROVENANCE_WARNING" _DATA_WARN="$DATA_WARNINGS" _PSO="$POOLED_SWEEP_OUTCOMES" \
@@ -3003,14 +3063,23 @@ report_json() {
 	_J_gr_wm="$SWEEP_WMODE" _J_gr_wk="$SWEEP_WKIND" _J_cov="$COVERAGE_LINE" \
 	_J_metrics_note="$(metrics_unavailable && metrics_note_text)" \
 	NS_SCALING_JSON="$ns_scaling_json" awk -F'\t' -v earlier_rows="$EARLIER_ROWS" -v earlier_cells="$EARLIER_CELLS" \
-		-v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" -v shortkeys="$shortkeys" \
+		-v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
 		-v pc_ok="$(pc_get pc_ok)" -v pc_low="$(pc_get pc_low)" -v pc_high="$(pc_get pc_high)" \
-		-v pc_na="$(pc_get pc_na)" -v pc_excl="$(pc_get pc_excluded)" "${JSON_STR_AWK}"'
+		-v pc_na="$(pc_get pc_na)" -v pc_excl="$(pc_get pc_excluded)" "${JSON_STR_AWK}${INC_AWK}"'
 	function cell(v) {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
+	# nr_json(s): a "<member>=<pod>,..." list as a JSON array; null for a growth cell, whose
+	# windows only the data warning names.
+	function nr_json(s,    n, i, o) {
+		if ($48 + 0 != 0) return "null"
+		n = cp_nr_parse(s); o = ""
+		for (i = 1; i <= n; i++) o = o (i > 1 ? "," : "") js(cp_nrm[i] "=" cp_nrq[i])
+		return "[" o "]"
+	}
 	BEGIN {
+		inc_load(); split("", vshort); inc_file("vsdr-short", vshort, "; ")
 		# Every string field as a JSON string (js), from the environment (_J_<name>).
 		nj = split("ri iv iv_src iv_pin iv_by iv_nr iv_wait iv_revs iv_gens iv_pv hs hk rhs rc_path rc_sha sw_mesh sw_svc sw_rep sw_ns sw_scope sw_traffic tm_every tm_subsets cap_ncpu cap_nmem cap_icpu cap_imem cap_tf cap_mode cap_metrics inf_rcpu inf_rmem inf_lcpu inf_lmem inf_rep inf_rep_by inf_net sla_v sla_h tb_levers tb_egress ach_prx ach_cprx ach_svc pc_tol pc_min pc_flagged ach_icpu ach_imem ach_icpu_peak leftover_start ach_irss ach_ncpu ach_nmem ach_psched ach_palloc gr_mode gr_stop gr_settle gr_spn gr_wm gr_wk cov metrics_note", jk, " ")
 		for (i = 1; i <= nj; i++) J[jk[i]] = js(ENVIRON["_J_" jk[i]])
@@ -3048,7 +3117,8 @@ report_json() {
 		if ($63 != "-" && $63 != "") { k = split($63, sta, "+"); for (i = 1; i <= k; i++) sts = sts (i > 1 ? "," : "") js(sta[i]) }
 		sts = sts "]"
 		printf "\"go_heap_inuse_cluster_mi_avg\":%s,\"istiod_pods_per_cluster_avg\":%s,\"status_rows\":%d,\"statuses\":%s,", cell($60), cell($61), $62 + 0, sts
-		printf "\"series_run_id\":%s,\"istiod_vs_ingest_short\":%s}", ($64 == "-" || $64 == "" ? "null" : js($64)), ($38 == "vsdr" && $48 + 0 == 0 && index(shortkeys, ";" $1 "|" $2 "|" $3 "|" $4 "|" $5 ($53 == "traffic" ? "|traffic" : "") ";")) ? "true" : "false"
+		printf "\"series_run_id\":%s,\"istiod_vs_ingest_short\":%s,", ($64 == "-" || $64 == "" ? "null" : js($64)), ($38 == "vsdr" && $48 + 0 == 0 && (($1 "|" $2 "|" $3 "|" $4 "|" $5 ($53 == "traffic" ? "|traffic" : "")) in vshort)) ? "true" : "false"
+		printf "\"istiod_not_ready\":%s,\"istiod_not_ready_at_end\":%s}", nr_json(nrb_of()), nr_json(nre_of())
 	}
 	END {
 		# The namespace-scaling section (growth cells only), from ENVIRON so awk -v
@@ -3152,7 +3222,7 @@ report_charts() {
 	fi
 	echo "> Workload charted: ${max_svc} services x ${max_rep} replicas in ${max_ns} namespace(s) per cluster (${pick_note})."
 	echo ""
-	_INC="$CS_INC_KEYS" awk -F'\t' -v max_svc="$max_svc" -v max_rep="$max_rep" -v max_ns="$max_ns" "${INC_AWK}"'
+	awk -F'\t' -v max_svc="$max_svc" -v max_rep="$max_rep" -v max_ns="$max_ns" "${INC_AWK}"'
 	BEGIN { inc_load() }
 	function is_num(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	NR == 1 { next }

@@ -39,8 +39,9 @@ To measure a baseline lever (Sidecar scoping, discoverySelectors, telemetry), to
 `--dry-run` prints every command and checks the probe arguments; remove it to run.
 `--suite` is one of `propagation`, `controlplane`, `dataplane`, `churn`,
 `churn-dataplane`. The first context is the source for suites that take one.
-Without `--profiles` the sweep runs every profile. Other options: `--no-baseline`,
-`--skip-setup`, `--keep-workloads`, `--churn-rate N` (see `--help`).
+Without `--profiles` the sweep runs every profile; list each profile once (each pass writes to
+a directory named after its profile, so the sweep refuses one listed twice). Other options:
+`--no-baseline`, `--skip-setup`, `--keep-workloads`, `--churn-rate N` (see `--help`).
 
 The suite's setup and probes take their sizes from `config/options.env`. Override
 them in the environment, for example `CHURN_ITERATIONS=2 ./tests/tuning/003-run-tuning-sweep.sh ...`.
@@ -83,7 +84,7 @@ these as problems (exit `4`, the revert still runs):
   between an apply that failed and its revert (Argo CD not paused, another operator, an OSSM
   operator upgrade; 002 warns and writes `istio-edited-during-pass` in `state/`). The revert
   restores only the profile's keys, so such an edit stays: the problem also names the pass
-  that runs next (and the passes after it). A re-run of 002 after a revert that stopped
+  that runs next (and any passes after it). A re-run of 002 after a revert that stopped
   partway (`revert-started` in `state/`: it may have patched the Istio CR already) skips this
   check, with a note, and keeps what the first run found;
 - it changed while the sweep changed nothing: during the suite setup, the baseline pass, a
@@ -94,7 +95,9 @@ these as problems (exit `4`, the revert still runs):
   step's merge patch raises it by exactly 1, so something else edited it (or deleted and
   created it) during the step (the IstioRevision's is left out: Sail moves it as it renders);
 - a member's Istio CR `spec` after the last revert differs from the sweep's start (an
-  incomplete revert; the differing paths are named, and both specs are in `istio-spec/`).
+  incomplete revert, or, when one of the checks above found one, an edit by something else
+  that no revert undid: they restore only the profiles' keys; the differing paths are named,
+  and both specs are in `istio-spec/`).
 
 A member whose generations could not be read for one of these comparisons (a read that
 failed twice, on a busy API server) is not compared: the sweep warns and its outcome notes

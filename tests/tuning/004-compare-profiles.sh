@@ -87,8 +87,9 @@ Istio version, the active revision or the generation of the Istio CR or its acti
 IstioRevision changed under the sweep; the Istio CR changed other than by the
 sweep's own apply and revert: during a pass, after its apply settled and not by its
 profile, or between two of the sweep's checkpoints while it changed nothing (the
-suite setup, between passes, after the last revert); an incomplete revert: a
-member's Istio CR spec after the last revert differs from the sweep's start; or the
+suite setup, between passes, after the last revert); an incomplete revert, or such
+an edit, which no revert undoes (they restore only the profiles' keys): a member's
+Istio CR spec after the last revert differs from the sweep's start; or the
 end-of-sweep check failed) and notes (members not ready at its start or end). The
 sweep writes it at its start as "not finished" (EXIT=unfinished) and replaces it at
 its end: a record still not finished is a sweep that died or still runs, or one

@@ -142,19 +142,31 @@ in a run that goes on, the cell's status row follows it, so the cell reads faile
 whose istiod replica was evicted or Pending wrote fewer rows on purpose and is complete: `002`
 warns on the console when fewer istiod pods run than the Deployment wants, and `004` gives a data
 warning for a cell measured on fewer replicas than `<spec>` (a `PASS` reads `CAUTION`; a legacy
-cell's `n_total` is marked `§` in the markdown cells table, with a footnote that names five
-cells, then "and N more", and its text block header says `FEWER ISTIOD PODS`); a line without
+cell's `n_total` is marked `§` in the markdown cells table, with a footnote that names up to five
+cells (then "and N more"), and its text block header says `FEWER ISTIOD PODS`); a line without
 `/<spec>` (an older harness, or `002` could not read the Deployment) gives the warning against
 the member's `ISTIOD_REPLICAS_BY_CONTEXT` entry (its replicas at the sweep's start), and a
 `<spec>` other than that entry (an HPA, or a changed `replicaCount`: the cell ran another replica
 count than the sweep's start, so its per-replica figures are not comparable with the others)
 gives a data warning of its own; neither changes the verdict. A Running istiod pod that is not
 Ready at the window's baseline (a replacement still syncing its remote clusters, an old replica
-shutting down, or one failing its readiness probe under load) writes a row, but takes no new
-proxy connections and keeps only the ones it has (its `connected_proxies` column): `002` names it
-on the console and in a `# ISTIOD_NOT_READY=<ctx>=<pod>,...` line right before the window's
-`WINDOW_ROWS` line (also in `--phase final`, from the baseline's state dir), and `004` gives a
-data warning naming the cell (its per-replica figures include that replica; no verdict change). A
+shutting down, or one failing its readiness probe under load) writes a row, but takes no new proxy
+connection while not Ready, and one shutting down also drops its own as it exits (their reconnects
+to the other replicas add to the cell's push, convergence and CPU figures); with `--vsdr-apply
+together` (the default) the cell's workloads deploy after that read, so a replacement that turns
+Ready later still takes its share (its row's `connected_proxies` shows what it held at the window's
+end). `002` names such a pod on the console and in a `# ISTIOD_NOT_READY=<ctx>=<pod>,...` line (also
+in `--phase final`, from the baseline's state dir; under `--watch`, the first window only: the pods
+are read once), and the pods its final phase reads as not Ready (a readiness probe failing under
+load, or a replica shutting down) in a `# ISTIOD_NOT_READY_AT_END=<ctx>=<pod>,...` line, every
+window, both right before the window's `WINDOW_ROWS` line. `004` gives a data warning for each kind
+naming the cells (their per-replica figures may include a replica that carried fewer proxies than
+the others; a restarted replica's row is left out, as rows carry no pod name; no verdict change)
+and marks a legacy cell where its figures are shown: its text block (a `! NOT READY AT BASELINE:`
+or `! NOT READY AT WINDOW END:` line), its `n_total` in the markdown cells table (`¶`, one footnote
+for both) and json `istiod_not_ready` and `istiod_not_ready_at_end` per result (`"<ctx>=<pod>"`
+entries; `[]` when none, or when a harness without these lines wrote the TSV; `null` for a growth
+cell, whose windows the data warnings name but no per-cell mark or list does, as for `§`). A
 member with no istiod pod Running writes one `N/A` row (`<ctx>=1/<spec>`): no figure has it, and
 the verdict reads `CAUTION` for it already (`partial coverage`), so these warnings leave
 it out. In a TSV without that line (an older harness wrote rows one by one), the cell written
@@ -164,12 +176,13 @@ cell, or the one known: an HPA or a rollout changes the replicas during a sweep)
 stops or is interrupted inside a cell appends an `INTERRUPTED` status row for it, unless
 every member's rows of the cell were already written (the sweep ended in its diagnostics or
 cleanup): that cell is done. An attempt is one run of the sweep (the first, or a resume): each
-resume writes a `# RESUMED_AT=<time>` comment line into the TSV where its rows start (then, as
-`KEY=value` on that line: `TSV_LINES`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
+resume that finds rows in the TSV writes a `# RESUMED_AT=<time>` comment line into it where its
+rows start (then, as `KEY=value` on that line: `TSV_LINES`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
 `ISTIO_NOTREADY_AT_RESUME`, `ISTIO_GENERATIONS`, `ISTIO_PROXY_VERSIONS`, and `KUBE_VERSIONS` last),
-and a line to `resumes.txt`, so a TSV copied without `resumes.txt` still separates its attempts and
-names each one's harness, Istio state and Kubernetes versions. When the harness files change during
-a run (`HARNESS_CONTENT_KEY` differs from the TSV's last record), `002` writes
+and every resume a line to `resumes.txt`, so a TSV copied without `resumes.txt` still separates its
+attempts and names each one's harness, Istio state and Kubernetes versions (a resume that finds no
+row writes the TSV's preamble itself: `TSV_LINES` 0 in `resumes.txt`). When the harness files
+change during a run (`HARNESS_CONTENT_KEY` differs from the TSV's last record), `002` writes
 `# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<sha> HARNESS_CONTENT_KEY=<key>` before that window's rows
 (it checks before each step), so the rows after it are credited to the harness that measured them;
 the reports list it as an attempt of its own, `harness changed at <time> (in <run>)`. The cell
@@ -288,7 +301,10 @@ not read as a finished sweep; the resume writes them again, whole, at its end.
 
 The TSV preamble keeps the first run's `ISTIO_NOTREADY_AT_START` and `HARNESS_SHA`; every resume's
 outcome repeats a first run that started not ready as a note, dated with the preamble's
-first line. The resume's own start condition, `none` included, goes into a note of its
+first line. A first run that died before it wrote its TSV (or its header line) leaves none: the
+resume that writes the TSV puts its own values there and records `TSV_LINES` `0` in `resumes.txt`,
+so the reports list the first run's values as `unknown`, and no outcome repeats them as the first
+run's. The resume's own start condition, `none` included, goes into a note of its
 sweep outcome (`ISTIO_NOTREADY_AT_RESUME=...`) with its start time (UTC with `Z`, as every
 time in the outcome's notes and in planned-cells.txt's `# PLAN=` lines; `resumes.txt`
 and the TSV's `# RESUMED_AT=` line keep the format of the rows' `timestamp` column, so
@@ -384,7 +400,9 @@ on more than one Istio version, and a cell that ran on fewer istiod pods than it
 below it (a pooled one, or the one sweep of a parent dir) that has not finished, was interrupted or
 stopped early gets a data warning instead (report that sweep alone to see its failed cells, problems
 and notes), and json `pooled_sweep_outcomes` lists each such record and each one that holds a
-`PROBLEM`, as in the other suites. The last line on stderr says how many, by reason, out of every
+`PROBLEM`, as in the other suites, each record as it is: the verdict also counts the `PROBLEM`s of
+the `sweep-outcome.prev.txt` behind one that has not finished (a `--resume` that died, or still
+runs), which the list does not show. The last line on stderr says how many, by reason, out of every
 planned cell, every cell of the TSV and of this run's matrix, and how many of them failed partway
 (the next `--resume` runs them again, as every failed cell). A cell counts once, by the last row
 of its latest attempt: a status row fails it, with that reason (also after some contexts' rows: a
@@ -676,6 +694,9 @@ Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID
   `DISCOVERY_LABEL`, `LEFTOVER_TEST_NAMESPACES`, `LEFTOVER_NS_WARN`, ...), then the
   66-column rows. The report also reads the 63-, 51- and 40-column files of earlier
   versions (their newer columns read N/A).
+- `controlplane-<RUN_ID>.md` (`002`, at its final or combined phase, a sweep's too): the run's
+  settings and every row of the TSV, then each window's istiod pods that were not Ready at its
+  baseline or end (its `ISTIOD_NOT_READY` and `ISTIOD_NOT_READY_AT_END` lines).
 - `ns-lifecycle-<RUN_ID>.tsv`, `mem-guard-<RUN_ID>.tsv` (growth sweeps): namespace
   lifecycle timings and the memory guard's decisions.
 - `run-config-<RUN_ID>.env` (sweep with `--config` only): a copy of the run config.
@@ -689,7 +710,8 @@ Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID
   on fewer istiod pods than wanted turns `PASS` into `CAUTION`). Its `partial coverage` `CAUTION`
   counts the rows of each cell's latest attempt, so a cell that failed and then ran valid on a
   `--resume` is covered. It also sums `ISTIO_PROXY_VERSIONS` over the members (`Proxy (Envoy)
-  versions at the start`, no context names).
+  versions at the start`, no context names). Its header repeats each of `004`'s data warnings
+  (`> **Data warning:**` lines); they can name members, so paste from a redacted copy.
 - `sweep-outcome.txt` (sweep): the outcome, also at the end of the markdown summary and of the
   envelope. After a `# DATE=` line (UTC, when it was written), its keys: `RUN_ID`, `HARNESS_SHA`,
   `HARNESS_CONTENT_KEY`, `EXIT`, `STOPPED`, `STOP_REASON`, `UNIT`, `TOTAL`, `FAILED` and `SKIPPED`
@@ -720,11 +742,11 @@ did not measure is recorded as a status row whose `context` is the status: `SETU
 `GROW_FAILED`, `SWITCH_FAILED` or `RETIRE_FAILED` (growth steps); a context with no running
 istiod pod gets an all-`N/A` row with `istiod_restarted=unknown`. An `INCOMPLETE` cell is marked
 where its figures are shown: its text block header (`INCOMPLETE: rows of 1 of 2 members`), its
-`n_total` in the markdown cells table (`‡`, with a footnote that names five cells, then "and N
-more") and its chart series (`‡`, with a note). The xDS pushes average reads the valid rows with a
-push count: when a valid row has none, every format shows it as from `got/n_valid` rows (csv
-`pushes_n`, json `xds_pushes_n`), with a data warning, and the `conv_p99_ms` fit notes a push gate
-that read only those rows.
+`n_total` in the markdown cells table (`‡`, with a footnote that names up to five cells (then
+"and N more")) and its chart series (`‡`, with a note). The xDS pushes average reads the valid
+rows with a push count: when a valid row has none, every format shows it as from `got/n_valid`
+rows (csv `pushes_n`, json `xds_pushes_n`), with a data warning, and the `conv_p99_ms` fit notes a
+push gate that read only those rows.
 
 Connected proxies appear twice. `connected_proxies per istiod replica (max)` is the busiest
 single replica, so with R replicas it is about 1/R of the cluster. R is read on every

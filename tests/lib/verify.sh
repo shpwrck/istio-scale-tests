@@ -289,6 +289,7 @@ EXTRACTED_PATTERNS=(
 	'_sweep_tree_freeze() {'
 	'_sweep_step_stop() {'
 	'sweep_step_kill() {'
+	'_sweep_step_reap() {'
 	'_sweep_pid_alive() {'
 	'_sweep_lock_refuse() {'
 	'_sweep_lock_release_mutex() {'

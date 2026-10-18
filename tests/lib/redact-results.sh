@@ -14,7 +14,7 @@
 #      (ISTIO_VERSION_BY_CONTEXT and every *_BY_CONTEXT key, ISTIO_ACTIVE_REVISIONS,
 #      ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS, ISTIO_NOTREADY_AT_*, KUBE_VERSIONS,
 #      ISTIOD_REPLICAS and controlplane's WINDOW_ROWS lines (<ctx>=<rows>[/<replicas>],
-#      the suffix kept) and ISTIOD_NOT_READY lines (<ctx>=<pod>) as ctx=value lists, as
+#      the suffix kept) and ISTIOD_NOT_READY[_AT_END] lines (<ctx>=<pod>) as ctx=value lists, as
 #      keys or as resumes.txt's columns), the member lists (CONTEXTS, REMOTE_CONTEXTS,
 #      REMOTES, any *_CONTEXTS key), SOURCE_CTX, WORKLOAD_CONTEXT and any other *_CTX /
 #      *_CONTEXT key, HUB_CONTEXT (the hub), and the "# Contexts:" / "# Source: ...
@@ -306,7 +306,7 @@ function lower(s) { return tolower(s) }
 function keyclass(k) {
 	if (k ~ /_by_context$/) return "kv"
 	if (k == "istio_active_revisions" || k == "istio_proxy_versions" || k == "istio_generations" \
-		|| k == "kube_versions" || k == "istiod_replicas" || k == "window_rows" || k == "istiod_not_ready" \
+		|| k == "kube_versions" || k == "istiod_replicas" || k == "window_rows" || k ~ /^istiod_not_ready(_at_end)?$/ \
 		|| k ~ /^istio_notready_at_(start|end|resume)$/) return "kv"
 	if (k == "contexts" || k == "remotes" || k ~ /_contexts$/) return "list"
 	if (k == "hub_context" || k == "hub_ctx") return "hub"

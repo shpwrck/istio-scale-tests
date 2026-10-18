@@ -805,7 +805,7 @@ _sweep_step_stop() {
 			fi
 		) &
 		_SWEEP_STEP_WD=$!
-		wait "$pid" 2>/dev/null || true
+		_sweep_step_reap "$pid"
 		kill "$_SWEEP_STEP_WD" 2>/dev/null || true
 		wait "$_SWEEP_STEP_WD" 2>/dev/null || true
 		_SWEEP_STEP_PID="" _SWEEP_STEP_TREE="" _SWEEP_STEP_WD=""
@@ -859,12 +859,22 @@ _sweep_step_stop() {
 			for k in ${sss_tree[@]+"${sss_tree[@]}"}; do
 				if kill -s KILL "${k%%@*}"; then n=$((n + 1)); fi
 			done
-			wait "$pid"
+			_sweep_step_reap "$pid"
 		} 2>/dev/null || true
 		((n == 0)) || echo "warning: ${n} process(es) of the step still ran ${grace}s after SIG${sig}: sent SIGKILL ($(_sweep_kill_hint))" >&2 || true
 	fi
-	wait "$pid" 2>/dev/null || true
+	_sweep_step_reap "$pid"
 	_SWEEP_STEP_PID="" _SWEEP_STEP_TREE=""
+}
+
+# _sweep_step_reap <pid>: wait for the step's process, only while it exists (running, or a
+# zombie not reaped yet). A step that ended at the moment the signal ended sweep_step's wait
+# can be gone while bash still lists it as running: `wait <pid>` then waits for any child,
+# and a sweep's background poller never ends, so the sweep would hang and never write its
+# outcome or remove its lock.
+# shellcheck disable=SC2329
+_sweep_step_reap() {
+	! kill -0 "$1" 2>/dev/null || wait "$1" 2>/dev/null || true
 }
 
 # sweep_step_kill: SIGKILL what still runs of the step sweep_step started in this shell
@@ -890,7 +900,7 @@ sweep_step_kill() {
 	if ((${#ssk_tree[@]} == 0)) && kill -0 "$pid" 2>/dev/null && ! _sweep_ps_works; then ssk_tree=("${pid}@"); fi
 	for k in ${ssk_tree[@]+"${ssk_tree[@]}"}; do kill -s KILL "${k%%@*}" 2>/dev/null || true; done
 	((${#ssk_tree[@]} == 0)) || echo "warning: the sweep ended while its step (${_SWEEP_STEP_NAME:-PID ${pid}}) still ran: sent SIGKILL to its ${#ssk_tree[@]} process(es)" >&2 || true
-	wait "$pid" 2>/dev/null || true
+	_sweep_step_reap "$pid"
 	_SWEEP_STEP_PID="" _SWEEP_STEP_TREE="" _SWEEP_STEP_WD=""
 }
 
@@ -2089,17 +2099,20 @@ report_harness_sha() {
 #                        row). <n>: the rows the window wrote, one per istiod pod; <spec>:
 #                        the member's istiod Deployment .spec.replicas at the window's
 #                        baseline (absent when not read, or an older harness wrote it).
-#                        And a "# ISTIOD_NOT_READY=<member>=<pod>,..." line right before
-#                        the WINDOW_ROWS line (002 writes one when an istiod pod was Running
-#                        but not Ready at the window's baseline): cp_cell_row ties it to the
-#                        same attempt.
+#                        And a "# ISTIOD_NOT_READY=<member>=<pod>,..." line (002 writes one
+#                        when an istiod pod was Running but not Ready at the window's
+#                        baseline) and a "# ISTIOD_NOT_READY_AT_END=" line of the same form
+#                        (the pods its final phase read as not Ready), in that order, right
+#                        before the WINDOW_ROWS line: cp_cell_row ties them to the same
+#                        attempt.
 #   cp_wl_parse(wl)      the entries of such a line's value wl into cp_wlm[i] (the member),
 #                        cp_wln[i] (<n>) and cp_wls[i] (<spec>, "" when absent); returns
 #                        their count (an entry of another form is skipped).
-#   cp_nr_parse(s)       the entries of an ISTIOD_NOT_READY line's value s into cp_nrm[i]
-#                        (the member) and cp_nrq[i] (the pod); returns their count.
-#   cp_wnr               the value of the ISTIOD_NOT_READY line right before the current
-#                        WINDOW_ROWS line ("" when none).
+#   cp_nr_parse(s)       the entries of an ISTIOD_NOT_READY or ISTIOD_NOT_READY_AT_END
+#                        line's value s (or of a cp_notready list) into cp_nrm[i] (the
+#                        member) and cp_nrq[i] (the pod); returns their count.
+#   cp_wnr, cp_wne       the values of the ISTIOD_NOT_READY and ISTIOD_NOT_READY_AT_END
+#                        lines right before the current WINDOW_ROWS line ("" when none).
 #   cp_end()             call it in END, before cp_cell_state: marks the cell written last.
 #   cp_cell_state(k)     "" when the cell is done: its last row is a measurement row, and
 #                        the measurement rows since its last status row name as many
@@ -2140,11 +2153,13 @@ report_harness_sha() {
 #                        (no istiod pod Running: 002 writes one degraded N/A row, so its entry
 #                        reads <member>=1/<spec>; or none could be read) is in neither: no
 #                        figure has its rows, and the verdict already reads CAUTION for them
-#                        (n_valid below n_total); nor in cp_specw or cp_notready.
-#                        cp_notready[k]: "<pod> on <member>", joined by ", ", for each pod
-#                        an ISTIOD_NOT_READY line of the attempt names (Running but not Ready
-#                        at its window's baseline: it took no new proxy connections, so the
-#                        per-replica figures average in a replica that carried fewer).
+#                        (n_valid below n_total); nor in cp_specw, cp_notready or cp_notready_end.
+#                        cp_notready[k]: "<member>=<pod>", joined by ",", for each pod an
+#                        ISTIOD_NOT_READY line of the attempt names (Running but not Ready at
+#                        its window's baseline: it took no new proxy connection while not
+#                        Ready, and one shutting down drops its own as it exits, so the
+#                        per-replica figures may include a replica that carried fewer);
+#                        cp_notready_end[k] the same for its ISTIOD_NOT_READY_AT_END lines.
 #   cp_valid[k]          set when the cell has a valid row (istiod_restarted 0).
 #   cp_after[k]          set when a measurement row follows a status row of the cell: two
 #                        attempts with no recorded boundary between them, so they pool.
@@ -2159,7 +2174,7 @@ CP_CELL_AWK='
 function cp_header(    i) { cp_tcol = 0; cp_wcol = 0; cp_hn = NF; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") cp_tcol = i; if ($i == "window_kind") cp_wcol = i } }
 function cp_isrow() { return NF >= (cp_hn > 40 ? cp_hn : 40) }
 function cp_key() { return $3 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP ((cp_tcol && NF >= cp_tcol) ? $cp_tcol : "none") SUBSEP ((cp_wcol && NF >= cp_wcol) ? $cp_wcol : "deploy") }
-function cp_comment(    n, p, i, e) {
+function cp_comment(    n, p, i, e, x) {
 	if (!cp_repread && index($0, "# ISTIOD_REPLICAS_BY_CONTEXT=") == 1) {
 		cp_repread = 1
 		n = split(substr($0, 30), p, ",")
@@ -2167,8 +2182,15 @@ function cp_comment(    n, p, i, e) {
 	}
 	if (index($0, "# RESUMED_AT=") == 1 && cp_lastk != "") cp_tail[cp_lastk] = 1
 	cp_wl = ""
-	if (index($0, "# WINDOW_ROWS=") == 1) { cp_wl = substr($0, 15); cp_wf = FNR; cp_wnr = (cp_nf == FNR - 1 && cp_nff == FILENAME) ? cp_nl : "" }
+	# The end line, when there is one, sits between the baseline line and WINDOW_ROWS.
+	if (index($0, "# WINDOW_ROWS=") == 1) {
+		cp_wl = substr($0, 15); cp_wf = FNR
+		x = (cp_ef == FNR - 1 && cp_eff == FILENAME)
+		cp_wne = x ? cp_el : ""
+		cp_wnr = (cp_nf == FNR - 1 - x && cp_nff == FILENAME) ? cp_nl : ""
+	}
 	if (index($0, "# ISTIOD_NOT_READY=") == 1) { cp_nl = substr($0, 20); cp_nf = FNR; cp_nff = FILENAME }
+	if (index($0, "# ISTIOD_NOT_READY_AT_END=") == 1) { cp_el = substr($0, 27); cp_ef = FNR; cp_eff = FILENAME }
 }
 function cp_end() { if (cp_lastk != "") cp_tail[cp_lastk] = 1 }
 function cp_wl_parse(wl,    n, p, i, e, c, v, j) {
@@ -2224,6 +2246,11 @@ function cp_cell_row(k, st,    mk, ep, n, i, m, wk) {
 			wk = k SUBSEP ep SUBSEP cp_nrm[i]
 			if (index(" " cp_nrp[wk] " ", " " cp_nrq[i] " ") == 0) cp_nrp[wk] = cp_nrp[wk] (cp_nrp[wk] == "" ? "" : " ") cp_nrq[i]
 		}
+		n = cp_nr_parse(cp_wne)
+		for (i = 1; i <= n; i++) {
+			wk = k SUBSEP ep SUBSEP cp_nrm[i]
+			if (index(" " cp_nep[wk] " ", " " cp_nrq[i] " ") == 0) cp_nep[wk] = cp_nep[wk] (cp_nep[wk] == "" ? "" : " ") cp_nrq[i]
+		}
 	}
 	cp_wl = ""
 	mk = k SUBSEP ep SUBSEP $2
@@ -2243,7 +2270,7 @@ function cp_mxo(m, k,    i, o, x) {
 	return x
 }
 function cp_cell_state(k,    n, ml, i, m, mk, ex, ep, np, pl, j) {
-	cp_why[k] = ""; cp_short[k] = ""; cp_shortw[k] = ""; cp_specw[k] = ""; cp_notready[k] = ""
+	cp_why[k] = ""; cp_short[k] = ""; cp_shortw[k] = ""; cp_specw[k] = ""; cp_notready[k] = ""; cp_notready_end[k] = ""
 	if (cp_last[k] != "") return cp_last[k]
 	ep = cp_ep[k] + 0
 	n = split(substr(cp_wm[k, ep], 2), ml, "\t")
@@ -2253,8 +2280,8 @@ function cp_cell_state(k,    n, ml, i, m, mk, ex, ep, np, pl, j) {
 		if (mk in cp_sd) cp_specw[k] = cp_specw[k] (cp_specw[k] == "" ? "" : ", ") ml[i] " wanted " cp_sd[mk] " istiod replicas, " cp_rep[ml[i]] " at the sweep'"'"'s start"
 		if (mk in cp_rn) cp_short[k] = cp_short[k] (cp_short[k] == "" ? "" : ", ") ml[i] " ran " cp_rn[mk] " of its " cp_rr[mk] " istiod replicas"
 		else if (mk in cp_qn) cp_shortw[k] = cp_shortw[k] (cp_shortw[k] == "" ? "" : ", ") ml[i] " ran " cp_qn[mk] " of its " cp_qr[mk] " istiod replicas"
-		np = split(cp_nrp[mk], pl, " ")
-		for (j = 1; j <= np; j++) cp_notready[k] = cp_notready[k] (cp_notready[k] == "" ? "" : ", ") pl[j] " on " ml[i]
+		if (mk in cp_nrp) { np = split(cp_nrp[mk], pl, " "); for (j = 1; j <= np; j++) cp_notready[k] = cp_notready[k] (cp_notready[k] == "" ? "" : ",") ml[i] "=" pl[j] }
+		if (mk in cp_nep) { np = split(cp_nep[mk], pl, " "); for (j = 1; j <= np; j++) cp_notready_end[k] = cp_notready_end[k] (cp_notready_end[k] == "" ? "" : ",") ml[i] "=" pl[j] }
 	}
 	if (cp_nm[k] + 0 < cp_ms[k] + 0) return "INCOMPLETE"
 	if ((k, ep) in cp_wa) {
@@ -2381,9 +2408,11 @@ controlplane_latest_attempts() {
 # run again reads 0 too, and a report leaves either out of the provenance of the rows (PL2,
 # PL15). <at>: the time as recorded (empty for the first run); <started_at>: the same in UTC
 # with Z, the first run's from the preamble's first line (unknown when it has none). Each <t>
-# in a <run> label is in that Z form too (the reports print the labels as prose). A run
-# that never wrote the TSV's preamble (it died first; a --resume wrote it) still reads
-# "first run", with the preamble's values and 0 rows. Returns non-zero when awk fails.
+# in a <run> label is in that Z form too (the reports print the labels as prose). A first
+# run that wrote no row reads "first run" with 0 rows; when it wrote no TSV either (it died
+# first, or before the header line: the --resume that wrote the TSV records TSV_LINES 0),
+# its values and <started_at> read unknown, as the preamble is that resume's. Returns
+# non-zero when awk fails.
 # shellcheck disable=SC2329
 controlplane_attempts() {
 	local tsv="$1" res="${2:-}"
@@ -2445,6 +2474,9 @@ controlplane_attempts() {
 				pos[i] = last
 				for (j = 1; j <= nd; j++) if (dts[j] >= substr(at[i], 1, 19)) { pos[i] = dpos[j] - 1; break }
 			}
+			# A resume that started at line 0 wrote the preamble (the TSV held no row): its
+			# values and first line are that resume'"'"'s, not the first run'"'"'s.
+			for (i = 1; i <= na; i++) if (pos[i] == 0) { split("", pre); t0 = "" }
 			# Run 0, the first: position 0. Then the resumes by position (a stable sort: a
 			# tie keeps their order, and the later one gets the rows).
 			o[0] = 0; pos[0] = 0

@@ -59,8 +59,8 @@ cell() { printf 'mesh=2 svcs=%s reps=2 ns=1 scope=none traffic=none' "$1"; }
 	assert_line "> ‡ INCOMPLETE: the sweep was cut short while these cells' member rows were written, so their figures cover only the rows written (the sweep counts these cells as failed, and a --resume runs them again): ${s}; and 1 more."
 }
 
-@test "--help says each footnote names five cells, then 'and N more'" {
+@test "--help says each footnote names up to five cells (then 'and N more')" {
 	run --separate-stderr "$REPORT" --help
 	assert_success
-	[[ "$(tr '\n' ' ' <<<"$output" | tr -s ' ')" == *"markdown cells table (§, with a footnote). Each footnote names five cells, then \"and N more\"."* ]]
+	[[ "$(tr '\n' ' ' <<<"$output" | tr -s ' ')" == *"markdown cells table (§, with a footnote);"*" Each footnote names up to five cells (then \"and N more\")."* ]]
 }

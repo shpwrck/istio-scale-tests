@@ -15,7 +15,7 @@ REPORT="${CP}/004-report-results.sh"
 FX="${ROOT}/tests/lib/test/fixtures/istiod-diag"
 FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
 GROWTH="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv"
-WARN_TAIL="Such a pod takes no new proxy connections and keeps only the ones it had (its row's connected_proxies), so their per-replica figures include a replica that carried fewer proxies than the others, or none; it does not change the verdict."
+WARN_TAIL="A pod that is not Ready takes no new proxy connection, and one shutting down also drops its own as it exits (their reconnects to the other replicas add to the cell's push, convergence and CPU figures), so these cells' per-replica figures may include a replica that carried fewer proxies than the others, or none (its row's connected_proxies shows what it held at the window's end; a restarted replica's row is left out); it does not change the verdict."
 
 setup() {
 	RES="${BATS_TEST_TMPDIR}/res"
@@ -103,13 +103,14 @@ cp_tsv() {
 	mkdir -p "$sd"
 	STUB_READY="True False" cp_window "$RES" --phase baseline --state-dir "$sd"
 	assert_success
-	[[ "$stderr" == *"warning: context ctx-a: istiod pod(s) Running but not Ready: istiod-b (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connections but keeps the ones it has (its connected_proxies column), and the window's ISTIOD_NOT_READY line tells the reports so"* ]]
+	[[ "$stderr" == *"warning: context ctx-a: istiod pod(s) Running but not Ready: istiod-b (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connection while not Ready (one shutting down also drops its own as it exits), and the window's ISTIOD_NOT_READY line tells the reports so"* ]]
 	[ "$(cut -f 1,4 "${sd}/istiod-spec.tsv")" = "ctx-a"$'\t'"istiod-b" ]
-	# The final phase reads no pod list: the baseline's state dir carries it.
+	# The baseline's state dir carries the baseline's not-Ready pods: the final phase reads
+	# the pods once, at the window's end (all Ready here: no ISTIOD_NOT_READY_AT_END line).
 	rm -f "$KLOG"
 	cp_window "$RES" --phase final --state-dir "$sd"
 	assert_success
-	run ! grep -qF '{.metadata.name}={.status.conditions' "$KLOG"
+	[ "$(grep -cF '{.metadata.name}={.status.conditions' "$KLOG")" -eq 1 ]
 	[ "$(grep -A 1 '^# ISTIOD_NOT_READY=' "$tsv")" = "# ISTIOD_NOT_READY=ctx-a=istiod-b"$'\n'"# WINDOW_ROWS=ctx-a=2/2" ]
 	# The rows follow the WINDOW_ROWS line, as cp_cell_row needs.
 	[ "$(grep -A 1 '^# WINDOW_ROWS=' "$tsv" | tail -n 1 | cut -f 2)" = ctx-a ]
@@ -204,5 +205,5 @@ cp_tsv() {
 	run --separate-stderr "$REPORT" --help
 	assert_success
 	[ -z "$(awk 'length($0) > 100' <<<"$output")" ] || { awk 'length($0) > 100' <<<"$output"; false; }
-	[[ "$(tr '\n' ' ' <<<"$output" | tr -s ' ')" == *"and an istiod pod that was Running but not Ready at a window's baseline (its \"# ISTIOD_NOT_READY=<member>=<pod>,...\" line: such a pod takes no new proxy connections"* ]]
+	[[ "$(tr '\n' ' ' <<<"$output" | tr -s ' ')" == *"an istiod pod that was Running but not Ready at a window's baseline (its \"# ISTIOD_NOT_READY=<member>=<pod>,...\" line), and one not Ready at the window's end (its \"# ISTIOD_NOT_READY_AT_END=\" line): a pod that is not Ready takes no new proxy connection"* ]]
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Per-pod istiod metric fanout helpers. Sourced, never executed.
 #
-# Consumers: propagation, churn, churn-dataplane, controlplane (fanout_list_istiod_pods,
-# fanout_gauge_sum_strict for the per-cluster connected-proxy total, fanout_counter_in_batch
-# and fanout_replica_counter for the per-replica push counters)
+# Consumers: propagation, churn, churn-dataplane, controlplane (fanout_gauge_sum_strict for
+# the per-cluster connected-proxy total, fanout_counter_in_batch and fanout_replica_counter
+# for the per-replica push counters)
 #
 # The mesh runs a FIXED, multi-replica istiod (HPA disabled, e.g. replicaCount=5).
 # Port-forwarding `svc/istiod` load-balances to ONE random replica per connection,

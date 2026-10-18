@@ -243,7 +243,7 @@ gen_sweep() {
 @test "a sweep interrupted after a generation check found a problem, or could not compare a member, keeps it in its not-finished record as a note, and the comparison repeats it (a stop record keeps a problem as one: sweep-stop.bats)" {
 	_need_yaml
 	_gen_stub
-	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read (baseline) may have measured another configuration, and pass 01-push-throttling (and the passes after it, while the edit stays) may measure another configuration than its profile's"
+	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read (baseline) may have measured another configuration, and pass 01-push-throttling may measure another configuration than its profile's"
 	# An edit during the baseline pass (found at the read before the apply of 01), then a
 	# SIGTERM to the sweep during that apply's merge patch.
 	TUN_FOREIGN_AT=2 TUN_TERM_ON="* patch istio.sailoperator.io default --type=merge *" gen_sweep

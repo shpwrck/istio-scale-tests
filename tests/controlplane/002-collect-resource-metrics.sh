@@ -52,7 +52,7 @@ source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_li
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"  # counter_delta, extract_gauge_sum
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_replica_counter, fanout_list_istiod_pods (needs metrics.sh first)
+source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_replica_counter, fanout_counter_in_batch (needs metrics.sh first)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 # shellcheck disable=SC1091
@@ -624,10 +624,21 @@ DROPPED_CTXS=()
 # keeps that read's whole line (its per-replica limits too) for the rows' %-of-limit
 # columns (collect_capacity_for_ctx), so a window reads each member's Deployment once.
 # ISTIOD_NOTREADY: its Running istiod pods that were not Ready then (space-separated), for
-# the window's "# ISTIOD_NOT_READY=" line.
+# the window's "# ISTIOD_NOT_READY=" line. ISTIOD_NOTREADY_END: the window's pods that were
+# not Ready at its end (compute_cluster_proxies), for its "# ISTIOD_NOT_READY_AT_END=" line.
 declare -A ISTIOD_SPEC=()
 declare -A ISTIOD_LIMITS=()
 declare -A ISTIOD_NOTREADY=()
+declare -A ISTIOD_NOTREADY_END=()
+
+# istiod_pods_ready <ctx>: "<name>=<its Ready condition> " per Running istiod pod of <ctx>
+# (a pod name has no "="; a bare name is one whose condition was not read). The one list
+# read of a window's two ends: resolve_pods at its baseline, compute_cluster_proxies at its end.
+istiod_pods_ready() {
+	"${KUBECTL[@]}" --context="$1" -n istio-system get pods -l app=istiod \
+		--field-selector=status.phase=Running \
+		-o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null
+}
 
 resolve_pods() {
 	POD_CTXS=()
@@ -638,11 +649,7 @@ resolve_pods() {
 	local spec kv n lim notready
 	for ctx in "${CONTEXTS[@]}"; do
 		local pods
-		# <name>=<its Ready condition> per Running pod (a pod name has no "="; a bare name is
-		# one whose condition was not read).
-		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
-			--field-selector=status.phase=Running \
-			-o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null)
+		pods=$(istiod_pods_ready "$ctx")
 		spec=unknown
 		lim="$(cap_istiod_limits "$ctx" "${KUBECTL[@]}")"
 		ISTIOD_LIMITS[$ctx]="$lim"
@@ -668,9 +675,10 @@ resolve_pods() {
 			echo "warning: context $ctx: ${n} istiod pod(s) Running, but its Deployment wants ${spec} (one evicted or Pending?): this window measures it on ${n} replica(s), and its WINDOW_ROWS entry (${ctx}=${n}/${spec}) tells the reports so" >&2
 		fi
 		# A Running replica that is not Ready is scraped and writes a row, but the Service
-		# sends it no new proxy; the window's ISTIOD_NOT_READY line records it.
+		# sends it no new proxy while it is not Ready (one shutting down also drops its own as
+		# it exits); the window's ISTIOD_NOT_READY line records it.
 		[[ -z "$notready" ]] \
-			|| echo "warning: context $ctx: istiod pod(s) Running but not Ready: ${notready// /, } (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connections but keeps the ones it has (its connected_proxies column), and the window's ISTIOD_NOT_READY line tells the reports so" >&2
+			|| echo "warning: context $ctx: istiod pod(s) Running but not Ready: ${notready// /, } (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connection while not Ready (one shutting down also drops its own as it exits), and the window's ISTIOD_NOT_READY line tells the reports so" >&2
 	done
 	((${#POD_CTXS[@]})) || die "no running istiod pods found in istio-system across ANY context (${CONTEXTS[*]}) — cannot proceed"
 }
@@ -1309,9 +1317,10 @@ declare -A SIDECAR_PODS     # ctx -> Running injected pods | N/A
 declare -A PROXY_CHECK      # ctx -> OK | LOW | HIGH | N/A
 
 compute_cluster_proxies() {
-	local ctx k live scraped n_pods n_live total sidecars check
+	local ctx k live scraped n_pods n_live total sidecars check rd p nre
 	local -a ctxs=() files=()
 	local -A seen=()
+	ISTIOD_NOTREADY_END=()
 	for k in "${!POD_CTXS[@]}"; do
 		ctx="${POD_CTXS[k]}"
 		[[ -n "${seen[$ctx]:-}" ]] && continue
@@ -1336,10 +1345,22 @@ compute_cluster_proxies() {
 		done
 		n_pods=${#files[@]}
 		scraped="$(printf '%s' "$scraped" | LC_ALL=C sort)"
-		# PL40: a failed read degrades to N/A; it never aborts the run.
-		live="$(fanout_list_istiod_pods "$ctx" "${KUBECTL[@]}")" || live=""
+		# PL40: a failed read degrades to N/A; it never aborts the run. The same read gives
+		# the scraped pods that are not Ready at the window's end (a pod gone is not listed).
+		rd="$(istiod_pods_ready "$ctx")" || rd=""
+		live="" nre=""
+		for p in $rd; do
+			live+="${p%%=*}"$'\n'
+			if [[ "$p" == *=* && "${p#*=}" != True && $'\n'"${scraped}"$'\n' == *$'\n'"${p%%=*}"$'\n'* ]]; then
+				nre+="${nre:+ }${p%%=*}"
+			fi
+		done
+		live="$(printf '%s' "$live" | LC_ALL=C sort)"
+		ISTIOD_NOTREADY_END[$ctx]="$nre"
+		[[ -z "$nre" ]] \
+			|| echo "warning: context ${ctx}: istiod pod(s) not Ready at the window's end: ${nre// /, } (a readiness probe failing under load, or a replica shutting down?): the window's ISTIOD_NOT_READY_AT_END line tells the reports so" >&2
 		if [[ -z "$live" ]]; then
-			echo "warning: ${ctx}: could not list Running istiod pods after the final scrape; cluster_connected_proxies=N/A" >&2
+			echo "warning: ${ctx}: could not list Running istiod pods after the final scrape; cluster_connected_proxies=N/A, and no ISTIOD_NOT_READY_AT_END entry (their readiness was not read)" >&2
 			total="N/A"
 		elif [[ "$live" != "$scraped" ]]; then
 			n_live="$(printf '%s\n' "$live" | grep -c .)" || n_live="?"
@@ -1799,22 +1820,25 @@ scrape_window() {
 	done
 	# One write: a HARNESS_CHANGED_AT line when these rows ran other harness files than the
 	# TSV records, then an ISTIOD_NOT_READY line when an istiod pod was Running but not Ready
-	# at the baseline (<member>=<pod>, one entry per pod, comma-separated: its rows average in
-	# a replica that took no new proxy connections), then a WINDOW_ROWS line (each member's
-	# row count, and after a / the replicas its istiod Deployment wanted at the baseline, when
-	# read: a report tells a write that was cut from a member with fewer istiod replicas,
-	# CP_CELL_AWK, and a member that ran the cell on fewer pods than it wants), then the
-	# rows, then the final phase's HARNESS_CHANGED_AT line when it ran other files than the
-	# rows are credited to (HCL_AFTER).
-	local win_file="${TMP_DIR}/window" sctx wr_spec="" nr_line="" nrp
-	for sctx in "${!ISTIOD_SPEC[@]}"; do wr_spec+="${sctx}"$'\t'"${ISTIOD_SPEC[$sctx]}"$'\n'; done
-	for sctx in "${CONTEXTS[@]}"; do
-		for nrp in ${ISTIOD_NOTREADY[$sctx]:-}; do nr_line+="${nr_line:+,}${sctx}=${nrp}"; done
+	# at the baseline (<member>=<pod>, one entry per pod, comma-separated: its rows may
+	# include a replica that took no new proxy connection), then an ISTIOD_NOT_READY_AT_END
+	# line in the same form for the scraped pods not Ready at the window's end, then a
+	# WINDOW_ROWS line (each member's row count, and after a / the replicas its istiod
+	# Deployment wanted at the baseline, when read: a report tells a write that was cut from a
+	# member with fewer istiod replicas, CP_CELL_AWK, and a member that ran the cell on fewer
+	# pods than it wants), then the rows, then the final phase's HARNESS_CHANGED_AT line when
+	# it ran other files than the rows are credited to (HCL_AFTER).
+	local win_file="${TMP_DIR}/window" wr_spec="" nr_line="" nre_line="" nrp
+	for ctx in "${!ISTIOD_SPEC[@]}"; do wr_spec+="${ctx}"$'\t'"${ISTIOD_SPEC[$ctx]}"$'\n'; done
+	for ctx in "${CONTEXTS[@]}"; do
+		for nrp in ${ISTIOD_NOTREADY[$ctx]:-}; do nr_line+="${nr_line:+,}${ctx}=${nrp}"; done
+		for nrp in ${ISTIOD_NOTREADY_END[$ctx]:-}; do nre_line+="${nre_line:+,}${ctx}=${nrp}"; done
 	done
 	if [[ -s "$rows_file" ]]; then
 		{
 			harness_change_line
 			[[ -z "$nr_line" ]] || printf '# ISTIOD_NOT_READY=%s\n' "$nr_line"
+			[[ -z "$nre_line" ]] || printf '# ISTIOD_NOT_READY_AT_END=%s\n' "$nre_line"
 			WR_SPEC="$wr_spec" awk -F'\t' '
 				BEGIN { ns = split(ENVIRON["WR_SPEC"], sl, "\n"); for (i = 1; i <= ns; i++) if (split(sl[i], f, "\t") == 2 && f[2] ~ /^[0-9]+$/) sp[f[1]] = f[2] }
 				{ if (!($2 in n)) o[++k] = $2; n[$2]++ }
@@ -1858,7 +1882,8 @@ if ((WATCH)); then
 		rm -f "${TMP_DIR}"/peak-mem-*.val "${TMP_DIR}"/peak-cpu-*.val "${TMP_DIR}"/prev-cpu-*.val
 		scrape_window "$INTERVAL"
 		# resolve_pods read the pods' readiness once, before the first window: later
-		# windows were not read, so their rows get no ISTIOD_NOT_READY line.
+		# windows were not read, so their rows get no ISTIOD_NOT_READY line (each window's
+		# end is read: its ISTIOD_NOT_READY_AT_END line).
 		ISTIOD_NOTREADY=()
 	done
 elif [[ "$PHASE" == baseline ]]; then
@@ -1945,6 +1970,23 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, tc, $32, $8, $33, $34, bucket($10), bucket($12), $22, c("cluster_connected_proxies"), c("sidecar_pods"), c("proxy_check"), $13, $16, $15, c("istiod_virt_services"), cfg_mb, c("sidecar_clusters_avg")
 		}' "$TSV_FILE"
 		echo ""
+		# The table has no pod column: each window's not-Ready istiod pods, from the lines 002
+		# writes right before its WINDOW_ROWS line (the baseline's, then the end's).
+		awk -F'\t' "${CP_CELL_AWK}"'
+		function pods(v,    n, i, s) { n = cp_nr_parse(v); for (i = 1; i <= n; i++) s = s (i > 1 ? ", " : "") cp_nrq[i] " on " cp_nrm[i]; return s }
+		BEGIN { wf = bf = ef = -9 }
+		/^timestamp\t/ { cp_header(); next }
+		index($0, "# ISTIOD_NOT_READY=") == 1 { b = substr($0, 20); bf = FNR; next }
+		index($0, "# ISTIOD_NOT_READY_AT_END=") == 1 { e = substr($0, 27); ef = FNR; next }
+		index($0, "# WINDOW_ROWS=") == 1 { we = (ef == FNR - 1) ? e : ""; wb = (bf == FNR - 1 - (we != "")) ? b : ""; wf = FNR; next }
+		/^#/ { next }
+		FNR == wf + 1 && (wb != "" || we != "") && cp_isrow() {
+			if (!n++) printf "## Istiod pods not Ready\n\nA pod that is not Ready takes no new proxy connection, and one shutting down also drops its own as it exits (their reconnects to the other replicas add to those replicas'"'"' pushes and convergence), so its row'"'"'s Proxies can read below the other replicas'"'"'.\n\n"
+			s = (wb != "") ? "Running but not Ready at its baseline: " pods(wb) : ""
+			if (we != "") s = s (s == "" ? "" : "; ") "not Ready at its end: " pods(we)
+			printf "- Window at %s (mesh %s, svc %s, reps %s, ns %s, scoping %s, traffic %s): %s\n", $1, $3, $4, $5, $6, $7, ((cp_tcol && NF >= cp_tcol) ? $cp_tcol : "none"), s
+		}
+		END { if (n) print "" }' "$TSV_FILE"
 		echo "## Raw Data"
 		echo ""
 		echo "TSV: [\`$(basename "$TSV_FILE")\`]($(basename "$TSV_FILE"))"

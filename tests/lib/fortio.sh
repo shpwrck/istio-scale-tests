@@ -136,7 +136,7 @@ fortio_client_stop() {
 	[[ -n "$pod" ]] || return 0
 	echo "note: ${ctx}: deleting the fortio client pod ${pod}, which still runs a load (its Deployment starts a new one)" >&2 || true
 	if ! "$@" --context="$ctx" --request-timeout=5s -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1; then
-		echo "warning: ${ctx}: could not delete the fortio client pod ${pod}: its load runs on for up to the load's duration; wait that long before the next run" >&2 || true
+		echo "warning: ${ctx}: could not delete the fortio client pod ${pod}: its load runs on for up to the probe's --duration (--warmup-duration in dataplane's warmup) from its start, and 5 s more; wait that long before the next run" >&2 || true
 	fi
 	return 0
 }
