@@ -147,7 +147,9 @@ _line() {
 	it2="$(grep -n -- '--- Iteration 2/2 ---' <<<"$output" | cut -d: -f1)"
 	settle="$(grep -n "The previous iteration's drain timed out: its removal may still be pushing. Settling for 0s before the baseline" <<<"$output" | cut -d: -f1)"
 	base2="$(grep -n 'Scraping baselines' <<<"$output" | sed -n 2p | cut -d: -f1)"
-	[ -n "$it2" ] && [ -n "$settle" ] && [ -n "$base2" ]
+	[ -n "$it2" ]
+	[ -n "$settle" ]
+	[ -n "$base2" ]
 	((it2 < settle && settle < base2))
 	# Without a timed-out drain before it, a clean check does not settle.
 	[ "$(grep -c "The previous iteration's drain timed out" <<<"$output")" -eq 1 ]

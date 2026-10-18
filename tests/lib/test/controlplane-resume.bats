@@ -204,7 +204,7 @@ FAKE
 	[[ "$stderr" == *"Resume axis flags: --mesh-sizes 2 --service-counts 5,6 --replica-counts "* ]]
 	[[ "$stderr" == *"Planned matrix:    2 = 1×2×1×1×1×1"* ]]
 	[ "$(grep -c '^# PLAN=' "${D}/planned-cells.txt")" -eq 1 ]
-	! grep -q 'svcs=10\|	10	3	1	none' "$(sweep_tsv "$D")"
+	! grep -q 'svcs=10\|	10	3	1	none' "$(sweep_tsv "$D")" || false
 	# A flag given wins over the plan: a narrower resume runs only its cell.
 	cp_sweep2 --resume "$D" --contexts ci-a,ci-b --service-counts 6
 	[ "$status" -eq 4 ]
@@ -262,7 +262,7 @@ FAKE
 	[[ "$stderr" == *"already has a valid row; skipping (resume)"* || "$output" == *"already has a valid row; skipping (resume)"* ]]
 	grep -q "^INFO=this --resume (at .*) added no rows: every cell of its axis flags was already done, so the reports leave it out of the rows' provenance" "${D}/sweep-outcome.txt"
 	# Its own harness and Kubernetes notes are left out of the record: it measured nothing.
-	! grep -q 'HARNESS_SHA abc1234\|abc1234.*harness\|v1.31.0' "${D}/sweep-outcome.txt"
+	! grep -q 'HARNESS_SHA abc1234\|abc1234.*harness\|v1.31.0' "${D}/sweep-outcome.txt" || false
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
 	assert_success
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = '["abc1234"]' ]
@@ -287,13 +287,13 @@ FAKE
 	assert_success
 	[ "$(jq -r '.metadata.harness_shas | length' <<<"$output")" -eq 1 ]
 	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
-	[ "$(jq -c '[.metadata.attempts[] | [.run, .rows]]' <<<"$output")" = '[["first run",1],["--resume at 2026-06-02T00:00:00+00:00",0]]' ]
+	[ "$(jq -c '[.metadata.attempts[] | [.run, .rows]]' <<<"$output")" = '[["first run",1],["--resume at 2026-06-02T00:00:00Z",0]]' ]
 	jq -e '[.metadata.data_warnings[]? | select(test("v1.99.0"))] | length == 0' <<<"$output"
 	local fmt
 	for fmt in text csv markdown; do
 		run --separate-stderr bash "$REPORT" --results-dir "$D" --format "$fmt"
 		assert_success
-		[[ "$output" == *"--resume at 2026-06-02T00:00:00+00:00 HARNESS_SHA=def5678 KUBE_VERSIONS=ci-a=v1.99.0 (added no rows)"* ]] || { echo "${fmt}: ${output}"; false; }
+		[[ "$output" == *"--resume at 2026-06-02T00:00:00Z HARNESS_SHA=def5678 KUBE_VERSIONS=ci-a=v1.99.0 (added no rows)"* ]] || { echo "${fmt}: ${output}"; false; }
 	done
 }
 
@@ -381,6 +381,23 @@ FAKE
 	[[ "$stderr" == *"controlplane-test namespaces are still on the members after 005-cleanup.sh (ci-b: 1"*"Run "*"005-cleanup.sh --contexts ci-b until it leaves none, then run this command again. Give it --timeout 3 (about 3 s per namespace, 1 on the fullest member; its default is 1 s)."* ]]
 }
 
+@test "a --resume that stops before its first cell says what the leftover check had changed: an earlier run's namespaces deleted, or nothing" {
+	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
+	[ "$status" -eq 4 ]
+	D="$(sweep_dir)"
+	# An append to resumes.txt fails: a directory in its place.
+	rm -f "${D}/resumes.txt"
+	mkdir "${D}/resumes.txt"
+	: > "${BATS_TEST_TMPDIR}/ns-left.ci-a"
+	cp_sweep2 --resume "$D" --contexts ci-a
+	[ "$status" -eq 1 ]
+	[ ! -e "${BATS_TEST_TMPDIR}/ns-left.ci-a" ]
+	[[ "$stderr" == *"--resume: could not append to ${D}/resumes.txt, which tells this run's rows from earlier ones; no cell ran (the leftover check had already deleted an earlier run's controlplane-test namespaces with 005-cleanup.sh; nothing else was changed on the cluster)."* ]] || { echo "$stderr"; false; }
+	cp_sweep2 --resume "$D" --contexts ci-a
+	[ "$status" -eq 1 ]
+	[[ "$stderr" == *"--resume: could not append to ${D}/resumes.txt, which tells this run's rows from earlier ones; no cell ran, and nothing was changed on the cluster."* ]]
+}
+
 # ---------------------------------------------------------------------------
 # C6: a cell whose rows were all written
 
@@ -392,7 +409,7 @@ FAKE
 	D="$(sweep_dir)"
 	TSV="$(sweep_tsv "$D")"
 	[ "$(awk -F'\t' '!/^#/ && $1 != "timestamp"' "$TSV" | wc -l | tr -d ' ')" -eq 2 ]
-	! grep -q 'INTERRUPTED' "$TSV"
+	! grep -q 'INTERRUPTED' "$TSV" || false
 	cp_sweep --resume "$D" --contexts ci-a,ci-b
 	assert_success
 	[[ "$output" == *"mesh=2 svcs=5 reps=3 ns=1 scope=none traffic=none — already has a valid row; skipping (resume)"* ]]

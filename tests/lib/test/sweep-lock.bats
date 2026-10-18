@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 # One run per sweep dir (sweep_lock, tests/lib/common.sh): a lock whose PID another user
-# runs (kill -0: EPERM) is alive; of several runs that find one stale lock at once,
-# exactly one takes it over; a takeover mutex left behind stops a run, named; a lock that
-# holds the run's own PID (left before a restart) is taken over. No cluster.
+# runs (kill -0: EPERM) is alive, also without a ps where /proc lists it; of several runs
+# that find one stale lock at once, exactly one takes it over; a takeover mutex left behind
+# stops a run, named; a lock that holds the run's own PID (left before a restart) is taken
+# over. No cluster.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -40,6 +41,45 @@ _dead_pid() {
 	assert_success
 	[ "${lines[0]}" = "took ${lines[1]}" ]
 	[ ! -e "$d/.sweep.lock.taking" ]
+}
+
+@test "without a ps, a lock whose PID kill -0 may not signal is alive while /proc lists it (Linux): the run is refused; a gone PID is taken over" {
+	[[ -d /proc/$$ ]] || skip "no /proc here (macOS always has ps)"
+	local d="${BATS_TEST_TMPDIR}/sweep"
+	mkdir -p "$d"
+	echo "$$" > "$d/.sweep.lock"
+	# kill -0 fails as on another user's process, and no ps answers: /proc decides.
+	run --separate-stderr bash -c '
+		source "$ROOT/tests/lib/common.sh"
+		kill() { if [[ "$1" == -0 ]]; then return 1; fi; builtin kill "$@"; }
+		ps() { return 127; }
+		sweep_lock "$1"
+		echo took' _ "$d"
+	assert_failure
+	refute_output took
+	[[ "$stderr" == *"another run of this sweep (PID $$) still runs in ${d}"* ]]
+	[ "$(<"$d/.sweep.lock")" = "$$" ]
+	# Without /proc as well (the proc root a missing dir), the same lock reads as stale: what
+	# the /proc read prevents.
+	run --separate-stderr bash -c '
+		source "$ROOT/tests/lib/common.sh"
+		kill() { if [[ "$1" == -0 ]]; then return 1; fi; builtin kill "$@"; }
+		ps() { return 127; }
+		_SWEEP_PROC="$2/no-proc"
+		sweep_lock "$1"
+		echo took' _ "$d" "$BATS_TEST_TMPDIR"
+	assert_success
+	assert_output took
+	# A gone PID with /proc in place: taken over.
+	_dead_pid > "$d/.sweep.lock"
+	run --separate-stderr bash -c '
+		source "$ROOT/tests/lib/common.sh"
+		kill() { if [[ "$1" == -0 ]]; then return 1; fi; builtin kill "$@"; }
+		ps() { return 127; }
+		sweep_lock "$1"
+		echo took' _ "$d"
+	assert_success
+	assert_output took
 }
 
 @test "of eight runs that find one stale lock at once, exactly one takes it over; the others are refused, naming it" {

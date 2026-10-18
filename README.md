@@ -39,7 +39,8 @@ flowchart TB
 - GNU coreutils `timeout` for live controlplane runs (macOS has none: `brew install coreutils`, which adds `gtimeout`)
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
 - `ps` from procps (Linux; macOS's own works) for the sweeps, which stop a step's whole process tree
-  with it (busybox, ubi-minimal and distroless have none that works: a sweep warns at its start)
+  with it (on Linux, `/proc` stands in for a missing or busybox `ps`; a sweep warns at its start
+  only when neither works)
 - `python3` with PyYAML (tuning suite only)
 - Mesh members must be able to provision `type: LoadBalancer` Services (cloud provider or MetalLB).
 
@@ -119,14 +120,16 @@ what your global `core.excludesFile`, or git's default `~/.config/git/ignore` wh
 unset, ignores; your other git settings, `.git/info/attributes` included, never change the value; a
 run's own results do not count). Next to it, `HARNESS_CONTENT_KEY` (12 hex characters) identifies
 the content of those files alone; the `<8hex>` is its start. A sweep reads them again before its
-steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default, `config/options.env`) and at its end.
-A file edited, added or removed there during the sweep (or a `git checkout`, `pull` or commit that
-changes one) is a problem in its outcome (exit 4) that names both values and when the change was
-first seen; the rows measured after it carry the new value in their TSV (controlplane: a
-`# HARNESS_CHANGED_AT=` line in its one TSV). A commit that changes none of those files, or a
-fetched tag, changes only the name `git describe` gives: a note, and every step keeps recording the
-start's `HARNESS_SHA`. Each report also records the harness it ran on as `REPORT_HARNESS_SHA`; the
-results dir it reads never counts as a change.
+steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default, `config/options.env`) and at its end,
+and each step's own read counts too. A file edited, added or removed there during the sweep (or a
+`git checkout`, `pull` or commit that changes one) is a problem in its outcome (exit 4) that names
+both values and when the change was first seen, also when it was undone before the sweep's next read
+and only a step read it; the rows measured after it carry the new value in their TSV (controlplane:
+a `# HARNESS_CHANGED_AT=` line in its one TSV; churn-dataplane: each row's `harness_sha`), while
+the sweep's own records (the TSV preamble, `sweep-outcome.txt`) keep the start's. A commit or tag
+that left those files as they were changes only the name `git describe` gives: a note, and every
+step keeps recording the start's `HARNESS_SHA`. Each report also records the harness it
+ran on as `REPORT_HARNESS_SHA`; the results dir it reads never counts as a change.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -215,12 +218,14 @@ no cleanup, so stop such a sweep from elsewhere with SIGTERM (`kill <pid>`). The
 commands between steps finish first, each bounded: a settle wait, the Istio version and proxy reads
 (tuning: the generation reads around each apply and revert), controlplane's leftover counts, and the
 end-of-sweep recheck. Stopping the step's tree needs a `ps` that lists every process with its start
-time (procps, or macOS's): without one, the sweep warns at its start, and a stop reaches only the
-step's own process. A results dir without `sweep-outcome.txt` is from a sweep that stopped before
-its start (nothing ran) or from an older harness. A kubectl error quoted in a record or a report
-names the API server as `<api-host>` or `<ip>`, never its address. `ISTIO_VERSION_CHECK`,
-`ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC` and
-`SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
+time (procps, or macOS's), or Linux's `/proc` in its place: without either, the sweep warns at its
+start, and a stop reaches only the step's own process (a `--dry-run` warns too; when the sweep's
+stdin is a terminal, a `kill -INT` or `kill -HUP` from elsewhere then reaches nothing: it is taken
+for a Ctrl-C, which reached the step itself). A results dir without `sweep-outcome.txt` is from a
+sweep that stopped before its start (nothing ran) or from an older harness. A kubectl error quoted
+in a record or a report names the API server as `<api-host>` or `<ip>`, never its address.
+`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`
+and `SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
 
 ### Run config (`--config FILE`)
 

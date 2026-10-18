@@ -3,8 +3,9 @@
 # sweep forwards, Ctrl-C) is stopped too (fortio_client_stop, tests/lib/fortio.sh): the
 # probe's EXIT trap deletes the client pod (the fortio image has no shell or kill), so the
 # load cannot run into the next window. Through dataplane 002 (a window and the warmup),
-# churn-dataplane 002 and 003 (PL33, PL41); a load that ended is left alone. No cluster:
-# kubectl and curl are stubs.
+# churn-dataplane 002 and 003 (PL33, PL41); a load that ended is left alone. A probe started
+# while that pod is still Terminating loads its replacement (fortio_client_pod). No
+# cluster: kubectl and curl are stubs.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -90,7 +91,7 @@ _stop_during_load() {
 	_stop_during_load '* -json - *' "${ROOT}/tests/dataplane/002-run-latency-probe.sh" --source-context ctx-a \
 		--qps-levels 10 --settle 0 --warmup-duration 0 --reach-requests 0 --output-dir "$RES"
 	[ "$rc" -eq 143 ] || { echo "status ${rc}: $(cat "${BATS_TEST_TMPDIR}/err")"; false; }
-	grep -qx -- "--context=ctx-a --request-timeout=10s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG" || { cat "$STUB_LOG"; false; }
+	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG" || { cat "$STUB_LOG"; false; }
 	grep -qF "note: ctx-a: deleting the fortio client pod dataplane-client-0, which still runs a load (its Deployment starts a new one)" "${BATS_TEST_TMPDIR}/err"
 	# The warmup's load (no -json).
 	rm -f "$LOAD_STARTED" "$POD_DELETED"
@@ -99,7 +100,7 @@ _stop_during_load() {
 		--qps-levels 10 --settle 0 --warmup-duration 1 --reach-requests 0 --output-dir "$RES"
 	[ "$rc" -eq 143 ]
 	grep -q -- " -t 1s -quiet " "$STUB_LOG"
-	grep -qx -- "--context=ctx-a --request-timeout=10s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG"
+	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test delete pod dataplane-client-0 --wait=false" "$STUB_LOG"
 	# A run that ends on its own deletes nothing.
 	rm -f "$LOAD_STARTED" "$POD_DELETED"
 	: > "$STUB_LOG"
@@ -119,8 +120,55 @@ _stop_during_load() {
 		_stop_during_load '* -json - *' "${ROOT}/tests/churn-dataplane/"${p} --source-context ctx-a --combo-id c1 \
 			--duration 5 --settle-sec 0 --output-dir "$RES"
 		[ "$rc" -eq 143 ] || { echo "${p}: status ${rc}: $(cat "${BATS_TEST_TMPDIR}/err")"; false; }
-		grep -qx -- "--context=ctx-a --request-timeout=10s -n churn-dataplane-test delete pod fortio-client-0 --wait=false" "$STUB_LOG" \
+		grep -qx -- "--context=ctx-a --request-timeout=5s -n churn-dataplane-test delete pod fortio-client-0 --wait=false" "$STUB_LOG" \
 			|| { echo "${p}:"; grep -E 'delete|exec' "$STUB_LOG"; false; }
 		grep -qF "note: ctx-a: deleting the fortio client pod fortio-client-0, which still runs a load" "${BATS_TEST_TMPDIR}/err"
 	done
+}
+
+@test "a probe started while a stopped run's client pod is still Terminating loads its replacement (a Running pod without a deletionTimestamp): dataplane 002, churn-dataplane 002 and 003; with none, it stops before its window, naming why" {
+	local p w="${BATS_TEST_TMPDIR}/wrap"
+	mkdir -p "$w"
+	# The client list as kubectl prints it for 002/003's jsonpath: the old pod, Terminating
+	# (deletionTimestamp set) and listed first, then its replacement; CLIENTS overrides it.
+	cat > "${w}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case " $* " in
+*" get pod -l app="*"-client --field-selector=status.phase=Running "*)
+	printf '%s\n' "$*" >> "$STUB_LOG"
+	printf '%b' "${CLIENTS-old-client\t2030-01-01T00:00:00Z\nnew-client\t\n}"
+	exit 0 ;;
+esac
+exec "$STUB_BIN/kubectl" "$@"
+STUB
+	chmod +x "${w}/kubectl"
+	export STUB_BIN="$BIN"
+	PATH="${w}:${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/dataplane/002-run-latency-probe.sh" --source-context ctx-a \
+		--qps-levels 10 --settle 0 --warmup-duration 0 --reach-requests 0 --output-dir "$RES"
+	assert_success
+	assert_output --partial "Source: ctx-a (pod: new-client)"
+	grep -q -- " exec new-client -c fortio -- fortio load " "$STUB_LOG"
+	[ "$(grep -c -- ' exec old-client ' "$STUB_LOG")" = 0 ]
+	for p in "002-run-baseline-probe.sh --reach-requests 0" "003-run-churn-probe.sh --churn-rate 1"; do
+		: > "$STUB_LOG"
+		# shellcheck disable=SC2086  # p: the probe and its own flags
+		PATH="${w}:${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/churn-dataplane/"${p} --source-context ctx-a \
+			--combo-id c1 --duration 1 --settle-sec 0 --output-dir "$RES"
+		assert_success
+		grep -q -- " exec new-client -c fortio -- fortio load " "$STUB_LOG" || { echo "${p}:"; cat "$STUB_LOG"; false; }
+		[ "$(grep -c -- ' exec old-client ' "$STUB_LOG")" = 0 ]
+	done
+	# Only the Terminating pod: no load runs, and the probe says why.
+	: > "$STUB_LOG"
+	CLIENTS='old-client\t2030-01-01T00:00:00Z\n' PATH="${w}:${BIN}:${PATH}" run --separate-stderr \
+		"${ROOT}/tests/dataplane/002-run-latency-probe.sh" --source-context ctx-a --qps-levels 10 --settle 0 \
+		--warmup-duration 0 --reach-requests 0 --output-dir "$RES"
+	assert_failure
+	[[ "$stderr" == *"no Running dataplane-client pod that is not being deleted on ctx-a (ns=dataplane-test): run 001, or wait until its Deployment's new pod is Ready"* ]]
+	[ "$(grep -c -- ' exec ' "$STUB_LOG")" = 0 ]
+	CLIENTS='old-client\t2030-01-01T00:00:00Z\n' PATH="${w}:${BIN}:${PATH}" run --separate-stderr \
+		"${ROOT}/tests/churn-dataplane/003-run-churn-probe.sh" --churn-rate 1 --source-context ctx-a --combo-id c1 \
+		--duration 1 --settle-sec 0 --output-dir "$RES"
+	assert_failure
+	[[ "$stderr" == *"no Running fortio-client pod that is not being deleted on ctx-a (ns=churn-dataplane-test)"* ]]
 }

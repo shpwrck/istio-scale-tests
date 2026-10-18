@@ -92,7 +92,12 @@ Usage: $(basename "$0") [options]
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
+                     (csv # POOLED_HARNESS_CONTENT_KEYS= and json harness_content_key
+                     also their HARNESS_CONTENT_KEY values); its note says when the
+                     HARNESS_SHA values differ only in git describe (every run records
+                     one key). It does not read the sweep-outcome.txt of a sweep-* dir
+                     below the results dir: report each sweep alone to see it.
   --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
@@ -164,8 +169,8 @@ made again later, or from another checkout, may count rows by other rules. The
 results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (next to
 HARNESS_SHA; unknown for a TSV written before it): the content key of the harness
 files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
-only in git describe (a docs commit or a new tag between them): stderr gives a note
-instead of the "disagree" warning.
+only in git describe (a commit or tag that left the harness files as they were):
+stderr gives a note instead of the "disagree" warning.
 
 text, markdown and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
@@ -291,14 +296,14 @@ for k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
 	[[ -n "${PREAMBLE[$k]:-}" ]] || PREAMBLE[$k]=unknown
 done
 # HARNESS_SHA values that differ only in their git describe part (every input records one
-# HARNESS_CONTENT_KEY: a docs commit or a new tag between the runs, the same harness files)
-# are a note, not a disagreement. A TSV without the key reads unknown: the warning stays.
+# HARNESS_CONTENT_KEY: a commit or tag that left the harness files as they were) are a
+# note, not a disagreement. A TSV without the key reads unknown: the warning stays.
 _hck="$(config_input_value HARNESS_CONTENT_KEY unknown "${ENDPOINT_FILES[@]}")"
 for k in "${SWEEP_LEVEL_KEYS[@]}"; do
 	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256) continue ;; esac
 	[[ "${PREAMBLE[$k]:-}" == mixed:* ]] || continue
 	if [[ "$k" == HARNESS_SHA && -n "$_hck" && "$_hck" != unknown && "$_hck" != mixed:* ]]; then
-		echo "note: the input TSVs' HARNESS_SHA values (${PREAMBLE[$k]#mixed:}) differ only in git describe: every input records HARNESS_CONTENT_KEY=${_hck}, the same harness files (a commit or a tag outside them moved the describe)" >&2
+		echo "note: the input TSVs' HARNESS_SHA values (${PREAMBLE[$k]#mixed:}) differ only in git describe (a commit or tag that left the harness files as they were): every input records HARNESS_CONTENT_KEY=${_hck}, the same harness files" >&2
 		continue
 	fi
 	echo "warning: input TSVs disagree on sweep-level ${k} (${PREAMBLE[$k]#mixed:}); the report shows it as mixed" >&2
@@ -314,6 +319,14 @@ PREAMBLE[REPORT_HARNESS_SHA]="$(report_harness_sha --exclude "$RESULTS_DIR")"
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${ENDPOINT_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
+# A pooled report repeats only its results dir's own sweep-outcome.txt
+# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
+# (text, md, charts and csv).
+POOLED_OUTCOME_NOTE=""
+if [[ -n "$POOLED_NOTE" ]]; then
+	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
+	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+fi
 
 # ---- what the probes set out to measure (PL17), and the TSV widths ------------------
 # One pass over the inputs, per file: its ITERATIONS, REMOTES, MESH_SIZE and SWEEP_RUN_ID,
@@ -777,6 +790,7 @@ report_endpoint_csv() {
 	echo "# TSV_COLUMNS=${TSV_COLUMNS:-none}"
 	data_warnings_lines "# WARNING: "
 	config_multi_run_csv
+	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
 	sweep_outcome_recorded "$RESULTS_DIR" csv
 	echo ""
 	# worst_bucket: the bucket range of max_ms, for the histogram phases only; n_attempted:

@@ -106,8 +106,9 @@ Exit codes:
      version, the active revision or the generation of the Istio CR or its active
      IstioRevision changed during the sweep (read again at its end), or that
      end-of-sweep check failed, or the harness (a file under tests/, config/, charts/
-     or terraform/) changed during the sweep (HARNESS_SHA read again before its steps
-     and at its end); the outcome is also in sweep-outcome.txt and sweep-summary.md
+     or terraform/) changed during the sweep (HARNESS_SHA read again before its steps,
+     by each step and at its end); the outcome is also in sweep-outcome.txt and
+     sweep-summary.md
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
      finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A signal
      sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches the step
@@ -118,8 +119,9 @@ Exit codes:
      stop such a sweep from elsewhere with SIGTERM. The sweep's own commands between
      steps (a settle wait, the Istio version and proxy reads, the end-of-sweep recheck)
      finish first, each bounded. Stopping the step's tree needs a ps that lists start
-     times (procps, or macOS's): without one, the sweep warns at its start, and a stop
-     reaches only the step's own process.
+     times (procps, or macOS's), or Linux's /proc in its place: without either, the
+     sweep warns at its start (a --dry-run too), and a stop reaches only the step's own
+     process.
 EOF
 }
 
@@ -381,6 +383,9 @@ config_snapshot "$SWEEP_DIR" "$SWEEP_RUN_ID"
 # sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
 # so the reports of a sweep that died say so.
 sweep_outcome_start "$SWEEP_DIR" "$SWEEP_RUN_ID" --next "if it died, run 007-cleanup.sh on its contexts, then the sweep again into a new dir (a propagation sweep has no --resume); the rows in this dir cover only the mesh sizes it finished"
+# The cleanup a step cut short by SIGKILL left undone (console only: _sweep_kill_hint), such
+# as 002's exit-time removal of the t0 label; the sweep's own exit runs it too (sweep_cleanup).
+SWEEP_CLEANUP_CMD="./tests/propagation/007-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}"); the sweep's own exit runs it too"
 
 
 echo "=========================================="

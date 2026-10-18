@@ -95,7 +95,7 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	grep -qE '^ENDED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' "$d/sweep-outcome.txt"
 	grep -qx 'ENDED_EXIT=143' "$d/sweep-outcome.txt"
 	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/sweep-outcome.txt"
-	! grep -q '^STOP' "$d/sweep-outcome.txt"
+	! grep -q '^STOP' "$d/sweep-outcome.txt" || false
 	run --separate-stderr "$REPORT" --results-dir "$d" --format text
 	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.txt by run ${rid}): NOT FINISHED"
 	assert_output --partial "#   warning: this sweep has not finished: the run that started at "
@@ -114,9 +114,9 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	assert_failure 4
 	refute_output --partial "records a problem"
 	grep -qx 'EXIT=4' "$d/sweep-outcome.txt"
-	! grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt"
-	! grep -qF "$PENDING_MARK" "$d/sweep-${rid}.md"
-	! grep -qF "$PENDING_MARK" "$d/scale-envelope-${rid}.md"
+	! grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt" || false
+	! grep -qF "$PENDING_MARK" "$d/sweep-${rid}.md" || false
+	! grep -qF "$PENDING_MARK" "$d/scale-envelope-${rid}.md" || false
 	grep -q '^## Sweep outcome' "$d/sweep-${rid}.md"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format json
 	[ "$(jq -c '.sweep_outcome | [.exit, .unfinished, .failed]' <<<"$output")" = '[4,false,1]' ]
@@ -173,7 +173,7 @@ STUB
 		grep -q '^NEXT=if it died, .*the sweep again into a new dir' "${BATS_TEST_TMPDIR}/snap-${suite}"
 		# At its end: the outcome, and no pending line left in its markdown.
 		grep -qx 'EXIT=4' "$d/sweep-outcome.txt"
-		! grep -rqF "$PENDING_MARK" "$d" --include='*.md'
+		! grep -rqF "$PENDING_MARK" "$d" --include='*.md' || false
 		grep -rlq '^ISTIO_PROXY_VERSIONS=\|^# ISTIO_PROXY_VERSIONS=' "$d" --include='*.tsv'
 	done
 	run --separate-stderr bash "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$(find "${BATS_TEST_TMPDIR}/res-dataplane" -maxdepth 1 -name 'sweep-*' -type d)" --format text
@@ -188,7 +188,7 @@ STUB
 	assert_failure 1
 	assert_output --partial "error: suite setup failed"
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	! grep -q '^EXIT=unfinished' "$d/sweep-outcome.txt"
+	! grep -q '^EXIT=unfinished' "$d/sweep-outcome.txt" || false
 	grep -qx 'EXIT=1' "$d/sweep-outcome.txt"
 	grep -qx 'STOPPED=1' "$d/sweep-outcome.txt"
 	grep -qx 'STOP_REASON=suite setup failed' "$d/sweep-outcome.txt"

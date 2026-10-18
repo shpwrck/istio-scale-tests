@@ -28,6 +28,7 @@
 #       `kubectl top` sum) to denominator scope (PL35). `unknown` if any arg bad.
 #   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total>
 #                   <n_valid> [caution_pct] [fail_pct] [not_run] [incomplete] [problems]
+#                   [problems_src] [cautions]
 #                                                  -> "VERDICT|headline" — one of
 #       PASS / CAUTION / FAIL plus a one-line human headline. The verdict is computed
 #       only over the validity-gated aggregates the caller passes (the report's
@@ -36,7 +37,8 @@
 #       config/options.env) but accept args 8/9 so the function stays pure/unit-testable.
 #       Arg 10: planned cells that never ran (NOT_RUN); arg 11: cells cut short while
 #       their member rows were written (INCOMPLETE); arg 12: the PROBLEM lines of the
-#       sweep outcome: each turns a PASS into CAUTION.
+#       sweep outcome (arg 13: the records that hold them); arg 14: other conditions, one
+#       clause per line: each turns a PASS into CAUTION.
 #       The controlplane report (004) is the SINGLE authoritative compute site;
 #       render_scale_envelope reads the verdict back from the report JSON.
 #   env_replicas_summary <n...>                    -> the ISTIOD_REPLICAS token for
@@ -147,7 +149,8 @@ env_pct_of_limit() {
 }
 
 # env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid>
-#                 [caution_pct] [fail_pct] [not_run] [incomplete] [problems]
+#                 [caution_pct] [fail_pct] [not_run] [incomplete] [problems] [problems_src]
+#                 [cautions]
 # Computes the headline customer SLA verdict from the report's validity-gated
 # aggregates (already n_valid-filtered by the caller — never configured axis
 # values, PL35). The CAUTION/FAIL utilization bands default from the env
@@ -167,16 +170,22 @@ env_pct_of_limit() {
 # the same, as "N cell(s) are INCOMPLETE". <problems> (arg 12, default 0): the PROBLEM
 # lines of the sweep's outcome (sweep-outcome.txt: the harness or Istio changed during the
 # sweep, ...), which the figures cannot show: the same, as "the sweep outcome records N
-# PROBLEM(s)". Pass "" for args 8/9 to keep their defaults.
+# PROBLEM(s) (<problems_src>)"; <problems_src> (arg 13, default sweep-outcome.txt) names
+# the records counted. <cautions> (arg 14, default none): other conditions the figures
+# cannot show (the rows ran on more than one harness, a cell ran on fewer istiod pods than
+# wanted), one clause per line, each the same: a PASS reads CAUTION "<clause>; the figures:
+# <reason>", and a CAUTION or FAIL headline adds "; also <clause>". Pass "" for args 8/9
+# to keep their defaults.
 # Emits "<VERDICT>|<one-line headline>". Pure.
 # shellcheck disable=SC2329
 env_sla_verdict() {
 	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}" not_run="${10:-0}" incomplete="${11:-0}"
-	local problems="${12:-0}"
+	local problems="${12:-0}" problems_src="${13:-sweep-outcome.txt}" cautions="${14:-}"
 	[[ "$not_run" =~ ^[0-9]+$ ]] || not_run=0
 	[[ "$incomplete" =~ ^[0-9]+$ ]] || incomplete=0
 	[[ "$problems" =~ ^[0-9]+$ ]] || problems=0
-	awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
+	# The texts through the environment: awk -v would unescape a backslash in them.
+	_ESV_SRC="$problems_src" _ESV_CAUTIONS="$cautions" awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
 	    -v restarts="${5:-0}" -v ntotal="${6:-0}" -v nvalid="${7:-0}" \
 	    -v caution="$caution" -v fail="$fail" -v notrun="$not_run" -v incomplete="$incomplete" \
 	    -v problems="$problems" '
@@ -222,8 +231,16 @@ env_sla_verdict() {
 		# The sweep outcome'"'"'s PROBLEMs (the harness or Istio changed during it, ...): no
 		# figure shows them.
 		if (problems + 0 > 0) {
-			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("the sweep outcome records %d PROBLEM(s) (sweep-outcome.txt), so the figures may not measure what they seem to; the figures: %s", problems, reason) }
-			else reason = sprintf("%s; also the sweep outcome records %d PROBLEM(s) (sweep-outcome.txt)", reason, problems)
+			src = ENVIRON["_ESV_SRC"]
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("the sweep outcome records %d PROBLEM(s) (%s), so the figures may not measure what they seem to; the figures: %s", problems, src, reason) }
+			else reason = sprintf("%s; also the sweep outcome records %d PROBLEM(s) (%s)", reason, problems, src)
+		}
+		# Other conditions no figure shows, one clause per line.
+		nc = split(ENVIRON["_ESV_CAUTIONS"], cl, "\n")
+		for (i = 1; i <= nc; i++) {
+			if (cl[i] == "") continue
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = cl[i] "; the figures: " reason }
+			else reason = reason "; also " cl[i]
 		}
 		printf "%s|%s\n", verdict, reason
 	}'
@@ -474,7 +491,7 @@ render_scale_envelope() {
 	# (the report already applied the validity gate to these maxes — PL35).
 	jq_get() { printf '%s' "$json" | jq -r "$1 // \"unknown\"" 2>/dev/null || printf 'unknown'; }
 
-	local node_cpu_m node_mem_mi istio_version istio_version_src harness_sha
+	local node_cpu_m node_mem_mi istio_version istio_version_src harness_sha harness_key
 	node_cpu_m="$(jq_get '.metadata.capacity.node_alloc_cpu_m')"
 	node_mem_mi="$(jq_get '.metadata.capacity.node_alloc_mem_mi')"
 	istio_version="$(jq_get '.metadata.istio_version')"
@@ -483,6 +500,7 @@ render_scale_envelope() {
 	# The sweep reads it again at the end and appends its outcome below this envelope.
 	istio_version_src="$(jq_get '.metadata.istio_version_source') (pin $(jq_get '.metadata.istio_version_pin'); by member $(jq_get '.metadata.istio_version_by_context'))"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
+	harness_key="$(jq_get '.metadata.harness_content_key')"
 	# The harness the report ran, and its provenance warning (the rows come from runs on
 	# other harnesses), as every report format shows them.
 	local report_harness prov_warn prov_line=""
@@ -490,9 +508,10 @@ render_scale_envelope() {
 	prov_warn="$(printf '%s' "$json" | jq -r '.metadata.provenance_warning // empty' 2>/dev/null || true)"
 	[[ -z "$prov_warn" ]] || prov_line="> **Provenance warning:** ${prov_warn//$'\n'/ }"
 	# The attempts behind it, when a --resume ran or the harness changed during a run: each
-	# run's or change's HARNESS_SHA and rows (no KUBE_VERSIONS: they name the members).
+	# run's or change's HARNESS_SHA and rows, as 004 prints them (no KUBE_VERSIONS: they
+	# name the members).
 	local att_line=""
-	att_line="$(printf '%s' "$json" | jq -r '(.metadata.attempts // []) | if length > 1 then "> **Attempts:** " + (map("\(.run) HARNESS_SHA=\(.harness_sha) (\(.rows) row(s), \(.rows_kept // .rows) of them in the figures)") | join("; ")) else empty end' 2>/dev/null || true)"
+	att_line="$(printf '%s' "$json" | jq -r '(.metadata.attempts // []) | if length > 1 then "> **Attempts:** " + (map("\(.run) HARNESS_SHA=\(.harness_sha) (\(.rows) row(s), \(.rows_kept // .rows) in the figures)") | join("; ")) else empty end' 2>/dev/null || true)"
 	# The proxy versions at the start, summed over the members (no context names).
 	local proxy_versions earlier_rows earlier_cells earlier_line=""
 	proxy_versions="$(env_proxy_versions_summary "$(jq_get '.metadata.istio_proxy_versions')")"
@@ -644,7 +663,7 @@ render_scale_envelope() {
 	cat <<MD
 ## Scale envelope
 
-> Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`; report harness \`${report_harness}\`: REPORT_HARNESS_SHA, the harness that rendered it).
+> Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`, HARNESS_CONTENT_KEY \`${harness_key}\`; report harness \`${report_harness}\`: REPORT_HARNESS_SHA, the harness that rendered it).
 > Measured columns are the report's n_valid-gated peaks (restarted/SETUP_FAILED rows excluded).
 ${prov_line:+${prov_line}
 }${att_line:+${att_line}

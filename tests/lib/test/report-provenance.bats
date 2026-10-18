@@ -46,7 +46,7 @@ _churn() {
 	done
 }
 
-NOTE="HARNESS_SHA values (v1.0-1-g1111111,v1.0-2-g2222222) differ only in git describe: every input records HARNESS_CONTENT_KEY=${KEY}"
+NOTE="HARNESS_SHA values (v1.0-1-g1111111,v1.0-2-g2222222) differ only in git describe (a commit or tag that left the harness files as they were): every input records HARNESS_CONTENT_KEY=${KEY}"
 
 @test "propagation 005: HARNESS_SHA values that differ only in git describe give a note; a different key, or a TSV without one, keeps the warning" {
 	local d="${BATS_TEST_TMPDIR}/p"
@@ -110,9 +110,9 @@ NOTE="HARNESS_SHA values (v1.0-1-g1111111,v1.0-2-g2222222) differ only in git de
 	assert_success
 	assert_line "| Harness (HARNESS_SHA) | v1.0-1-g1111111 | v1.0-2-g2222222 |"
 	assert_line "harness_content_key: \"${KEY}\""
-	assert_line "- Note: the passes' HARNESS_SHA values (baseline v1.0-1-g1111111; 01-x v1.0-2-g2222222) differ only in git describe: every pass records HARNESS_CONTENT_KEY=${KEY}, the same harness files (a commit or a tag outside them moved the describe)."
+	assert_line "- Note: the passes' HARNESS_SHA values (baseline v1.0-1-g1111111; 01-x v1.0-2-g2222222) differ only in git describe (a commit or tag that left the harness files as they were): every pass records HARNESS_CONTENT_KEY=${KEY}, the same harness files."
 	refute_output --partial "**Warning:** the passes ran on different harnesses"
-	[[ "$stderr" == *"note: the passes' HARNESS_SHA values (baseline v1.0-1-g1111111; 01-x v1.0-2-g2222222) differ only in git describe: every pass records HARNESS_CONTENT_KEY=${KEY}, the same harness files (a commit or a tag outside them moved the describe)."* ]]
+	[[ "$stderr" == *"note: the passes' HARNESS_SHA values (baseline v1.0-1-g1111111; 01-x v1.0-2-g2222222) differ only in git describe (a commit or tag that left the harness files as they were): every pass records HARNESS_CONTENT_KEY=${KEY}, the same harness files."* ]]
 	[[ "$stderr" != *"WARNING"* ]]
 	_passes "$OTHER_KEY"
 	run --separate-stderr "${ROOT}/tests/tuning/004-compare-profiles.sh" --results-dir "$S"
@@ -138,7 +138,7 @@ NOTE="HARNESS_SHA values (v1.0-1-g1111111,v1.0-2-g2222222) differ only in git de
 	local d="${BATS_TEST_TMPDIR}/cdp" f
 	_tsv "${d}/churn-dataplane-r1.tsv" 1 "$KEY" \
 		$'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms' \
-		$'r1\tsha\tc1\t2\t0\tbaseline\t60\t50\t50\t2\t3\t5\t6\t7\tN/A\t0\tOK\t10\t10\t100\tN/A\t5\tN/A\tN/A\tN/A\nr1\tsha\tc1\t2\t1\tchurn\t60\t50\t48\t4\t3\t9\t6\t7\tN/A\t0\tOK\t10\t10\t100\t30\t5\t99\tN/A\tN/A'
+		$'r1\tv1.0-1-g1111111\tc1\t2\t0\tbaseline\t60\t50\t50\t2\t3\t5\t6\t7\tN/A\t0\tOK\t10\t10\t100\tN/A\t5\tN/A\tN/A\tN/A\nr1\tv1.0-1-g1111111\tc1\t2\t1\tchurn\t60\t50\t48\t4\t3\t9\t6\t7\tN/A\t0\tOK\t10\t10\t100\t30\t5\t99\tN/A\tN/A'
 	run --separate-stderr "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$d" --format json
 	assert_success
 	[ "$(jq -r '.metadata.harness_content_key' <<<"$output")" = "$KEY" ]
@@ -166,7 +166,7 @@ NOTE="HARNESS_SHA values (v1.0-1-g1111111,v1.0-2-g2222222) differ only in git de
 
 @test "dataplane 004 and churn-dataplane 005 pooled (--allow-multi-run): HARNESS_SHA values that differ only in git describe give the same note as every report; another key keeps 'These differ'" {
 	local d f note k2
-	note="The HARNESS_SHA values differ only in git describe: every run records HARNESS_CONTENT_KEY=${KEY}, the same harness files (a commit or a tag outside them moved the describe)."
+	note="The HARNESS_SHA values differ only in git describe: every run records HARNESS_CONTENT_KEY=${KEY}, the same harness files (a commit or tag that left the harness files as they were)."
 	for k2 in "$KEY" "$OTHER_KEY"; do
 		d="${BATS_TEST_TMPDIR}/dp-${k2}"
 		for f in 1 2; do
@@ -188,7 +188,7 @@ NOTE="HARNESS_SHA values (v1.0-1-g1111111,v1.0-2-g2222222) differ only in git de
 	for f in 1 2; do
 		_tsv "${d}/sweep-r${f}/churn-dataplane-r${f}.tsv" "$f" "$KEY" \
 			$'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms' \
-			"r${f}"$'\tsha\tc1\t2\t0\tbaseline\t60\t50\t50\t2\t3\t5\t6\t7\tN/A\t0\tOK\t10\t10\t100\tN/A\t5\tN/A\tN/A\tN/A'
+			"r${f}"$'\tv1.0-'"${f}"'-g'"$(printf '%07d' 0 | tr 0 "$f")"$'\tc1\t2\t0\tbaseline\t60\t50\t50\t2\t3\t5\t6\t7\tN/A\t0\tOK\t10\t10\t100\tN/A\t5\tN/A\tN/A\tN/A'
 	done
 	run --separate-stderr "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$d" --allow-multi-run --format csv
 	assert_success

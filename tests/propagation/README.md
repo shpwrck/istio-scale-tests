@@ -104,27 +104,28 @@ error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `swee
 when and by which signal; a signal sent to the sweep's process alone stops the running step and
 every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before SIGKILL; a `kill -INT` or
 `kill -HUP` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from
-elsewhere with SIGTERM; without a `ps` that lists start times, only the step's own process is
-stopped; see the top-level README); `4` it finished and wrote its reports, but some mesh sizes
-failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder row), or the
-Istio version, active revision or generation of the Istio CR or its active IstioRevision changed
-during the sweep (read again before the reports), or that check failed, or its harness (a file under
-`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read again
-before its steps and at its end). The last line on stderr says how many, by reason;
-`sweep-outcome.txt` and the end of `sweep-summary.md` keep the outcome. From the sweep's start until
-it writes its outcome, `sweep-outcome.txt` holds a not-finished record (`EXIT=unfinished`,
-`STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do), so a report of a sweep that died, or still
-runs, or (with when and by which signal) was interrupted says "this sweep has not finished" in every
-format (json `sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads
-`"unfinished": false`; one that stopped on an error after its start records the stop and its reason
-instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more, run
-`007-cleanup.sh` on its contexts, then the sweep again into a new dir (a propagation sweep has no
-`--resume`). Proxies connected on another Istio version than their istiod at the start
-(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure. Rows a probe wrote with a
-non-OK status are measurements, not failures: the report counts them in `n_total`. Its `n_attempted`
-column is what the probes were configured to run (each TSV's `ITERATIONS`: iterations for P1, times
-its remotes for P2 and P3, and what a failed mesh size's placeholder would have run); a mesh size
-that measured fewer iterations or rows than that warns in every format and on stderr.
+elsewhere with SIGTERM; without a `ps` that lists start times or Linux's `/proc`, only the step's
+own process is stopped; see the top-level README); `4` it finished and wrote its reports, but some
+mesh sizes failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder
+row), or the Istio version, active revision or generation of the Istio CR or its active
+IstioRevision changed during the sweep (read again before the reports), or that check failed, or its
+harness (a file under `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during
+the sweep (read again before its steps, by each step and at its end). The last line on stderr says
+how many, by reason; `sweep-outcome.txt` and the end of `sweep-summary.md` keep the outcome. From
+the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a not-finished record
+(`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`, and what to do),
+so a report of a sweep that died, or still runs, or (with when and by which signal) was interrupted
+says "this sweep has not finished" in every format (json `sweep_outcome`: `"exit": null`,
+`"unfinished": true`; a finished one reads `"unfinished": false`; one that stopped on an error after
+its start records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level
+README): when no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again
+into a new dir (a propagation sweep has no `--resume`). Proxies connected on another Istio version
+than their istiod at the start (`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
+Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
+`n_total`. Its `n_attempted` column is what the probes were configured to run (each TSV's
+`ITERATIONS`: iterations for P1, times its remotes for P2 and P3, and what a failed mesh size's
+placeholder would have run); a mesh size that measured fewer iterations or rows than that warns in
+every format and on stderr.
 
 ## Run config (`--config FILE`)
 
@@ -184,10 +185,10 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   another checkout, may count rows by other rules. The results dir it reads never counts as a change
   to that harness. `HARNESS_CONTENT_KEY` (also from the preambles; `unknown` for a TSV written
   before it) is the content key of the harness files: inputs whose `HARNESS_SHA` differs but that
-  share one key differ only in git describe (a docs commit or a new tag between them), and stderr
-  gives a note instead of the "disagree" warning. In text and markdown `n_attempted` follows
-  `n_total` and `n_valid` (csv keeps it last), and a phase with no valid sample reads `n_valid` 0 in
-  every format.
+share one key differ only in git describe (a commit or tag that left the harness files as they
+were), and stderr gives a note instead of the "disagree" warning. In text and markdown `n_attempted`
+follows `n_total` and `n_valid` (csv keeps it last), and a phase with no valid sample reads
+`n_valid` 0 in every format.
 
 Row `status`: `OK`, `TIMEOUT_P1|P2|P3|ALL`, `RESTART` (istiod restarted mid-iteration),
 `DRAIN_TIMEOUT` (endpoint did not drain within `PROPAGATION_DRAIN_TIMEOUT_SEC` after the iteration:

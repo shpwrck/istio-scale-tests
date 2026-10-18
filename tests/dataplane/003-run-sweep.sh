@@ -128,8 +128,9 @@ Exit codes:
      version, the active revision or the generation of the Istio CR or its active
      IstioRevision changed during the sweep (read again at its end), or that
      end-of-sweep check failed, or the harness (a file under tests/, config/, charts/
-     or terraform/) changed during the sweep (HARNESS_SHA read again before its steps
-     and at its end); the outcome is also in sweep-outcome.txt and the markdown report
+     or terraform/) changed during the sweep (HARNESS_SHA read again before its steps,
+     by each step and at its end); the outcome is also in sweep-outcome.txt and the
+     markdown report
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
      finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A signal
      sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches the step
@@ -140,8 +141,9 @@ Exit codes:
      stop such a sweep from elsewhere with SIGTERM. The sweep's own commands between
      steps (a settle wait, the Istio version and proxy reads, the end-of-sweep recheck)
      finish first, each bounded. Stopping the step's tree needs a ps that lists start
-     times (procps, or macOS's): without one, the sweep warns at its start, and a stop
-     reaches only the step's own process.
+     times (procps, or macOS's), or Linux's /proc in its place: without either, the
+     sweep warns at its start (a --dry-run too), and a stop reaches only the step's own
+     process.
 EOF
 }
 

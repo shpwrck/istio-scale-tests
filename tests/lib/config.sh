@@ -751,7 +751,7 @@ config_multi_run_note() {
 	local differ="" what="" keys="${MULTI_RUN_HARNESS_CONTENT_KEYS:-unknown}"
 	if [[ "${MULTI_RUN_HARNESS_SHAS}" == *,* ]]; then
 		if [[ "$keys" != *,* && "$keys" =~ ^[0-9a-f]+$ ]]; then
-			differ=" The HARNESS_SHA values differ only in git describe: every run records HARNESS_CONTENT_KEY=${keys}, the same harness files (a commit or a tag outside them moved the describe)."
+			differ=" The HARNESS_SHA values differ only in git describe: every run records HARNESS_CONTENT_KEY=${keys}, the same harness files (a commit or tag that left the harness files as they were)."
 		else
 			what="harness"
 		fi

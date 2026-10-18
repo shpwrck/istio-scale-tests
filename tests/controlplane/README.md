@@ -134,13 +134,21 @@ valid row and did not end on a status row. A cell whose last row is a status row
 one that failed partway (a valid row, then a status row; its skip line says so), and so does a
 legacy cell whose latest attempt has rows for fewer members than its mesh size, or a member with
 fewer rows than its window wrote: `INCOMPLETE`, the run was cut short while it wrote them. `002`
-appends a window's rows in one write, after a `# WINDOW_ROWS=<ctx>=<n>,...` line that counts them
-per member, so this takes a kill at that moment; a member whose istiod replica was evicted or
-Pending wrote fewer rows on purpose and is complete. In a TSV without that line (an older harness
-wrote rows one by one), the cell written last before a run ended is `INCOMPLETE` when a member has
-fewer rows than its istiod replicas (the smaller of its `ISTIOD_REPLICAS_BY_CONTEXT` entry and its
-most valid rows in another cell, or the one known: an HPA or a rollout changes the replicas during a
-sweep). A run that stops or is interrupted inside a cell appends an `INTERRUPTED` status row for it,
+appends a window's rows in one write, after a `# WINDOW_ROWS=<ctx>=<n>[/<spec>],...` line that
+counts them per member (`/<spec>`: the replicas its istiod Deployment wanted, `.spec.replicas`, read
+at the window's baseline), so this takes a kill at that moment; a line with fewer columns than the
+TSV header is a row cut short, not a row. A member whose istiod replica was evicted or Pending
+wrote fewer rows on purpose and is complete: `002` warns on the console when fewer istiod pods run
+than the Deployment wants, and `004` gives a data warning for a cell measured on fewer replicas
+than `<spec>` (a `PASS` reads `CAUTION`); a line without `/<spec>` (an older harness) gives the
+warning against the member's `ISTIOD_REPLICAS_BY_CONTEXT` entry, and leaves the verdict as it is.
+A member with no istiod pod Running writes one `N/A` row (`<ctx>=1/<spec>`): no figure has it, and
+the verdict reads `CAUTION` for it already (`partial coverage`), so that warning leaves it out. In
+a TSV without that line (an older harness wrote rows one by one), the cell written last before a
+run ended is `INCOMPLETE` when a member has fewer rows than its istiod replicas (the smaller of its
+`ISTIOD_REPLICAS_BY_CONTEXT` entry and its most valid rows in another cell, or the one known: an
+HPA or a rollout changes the replicas during a sweep). A run that stops or is interrupted inside a
+cell appends an `INTERRUPTED` status row for it,
 unless every member's rows of the cell were already written (the sweep ended in its diagnostics or
 cleanup): that cell is done. An attempt is one run of the sweep (the first, or a resume): each
 resume writes a `# RESUMED_AT=<time>` comment line into the TSV where its rows start (then, as
@@ -169,8 +177,9 @@ flags>` line. On `--resume`, each axis flag not given (`--mesh-sizes`, `--servic
 `--replica-counts`, `--namespace-counts`, `--sidecar-scopings`, `--traffic-configs`) takes the first
 run's value from that line, not the environment, `--config` or the default (a sweep dir without that
 line, from an older harness, from the TSV's `# Contexts: ... Mesh sizes: ... Traffic: ...` line;
-with neither, a resume that gives no axis flag is refused); the resume prints the values it took and
-where from, and its banner the axis flags it runs with. So `003-run-sweep.sh --resume <sweep dir>
+with neither, a resume that does not give all six is refused, naming the ones not given); the resume
+prints the values it took and where from, and its banner the axis flags it runs with. So
+`003-run-sweep.sh --resume <sweep dir>
 --contexts <the sweep's>` finishes a sweep. A resume whose flags plan a cell no earlier run planned
 is refused before any change, unless `--extend-plan` (or `CONTROLPLANE_EXTEND_PLAN=1`, env only):
 then it adds those cells under its own `# PLAN=` line. The count covers every planned cell, the
@@ -219,45 +228,53 @@ counted is no such problem: every run counts them again.) A `PROBLEM` that the h
 during the sweep does not block a resume: the rows record which harness measured them
 (`HARNESS_CHANGED_AT`), and the resume carries it into its own outcome, once, as `an earlier run of
 this sweep (outcome of <DATE>) recorded: the harness changed ...` (`started at <time>, not finished`
-for a run that was interrupted or stopped), still a `PROBLEM`: the sweep exits `4`. A `NOTE` of an
+for a run that was interrupted or stopped), still a `PROBLEM`: the sweep exits `4`. Once the rows of
+the run that recorded it were all run again later (a later attempt of each of its cells, so none of
+them is in the figures) and the rows the figures keep ran one harness (one `HARNESS_CONTENT_KEY`,
+or, with none known, one `HARNESS_SHA`), the outcome writes it as a `NOTE` ending `(its rows were
+all run again later)` instead, and later resumes carry that note as it is. A `NOTE` of an
 earlier run about the end of the sweep (its version unconfirmed, istiod or IstioCNI not ready) is
 carried the same way, as `an earlier run of this sweep (outcome of <DATE>) noted: ...`, where
 `<DATE>` is that outcome's `# DATE=` line (UTC).
 
 From its start (after its preflights, before the first cell), every run writes `sweep-outcome.txt`
-as a "not finished" record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do
-if it died), which the outcome replaces at its end. While it is there, every report of the dir says
-"this sweep has not finished (it died, or still runs)" (json `sweep_outcome`: `"exit": null`,
-`"unfinished": true`, `"started_at"`, and `"resumed_at"` for a resume); if no sweep runs, resume it.
-A run interrupted by Ctrl-C, SIGTERM or SIGHUP keeps that record and adds when and by which signal
-(`ENDED_AT`, `ENDED_SIGNAL`; reports say "interrupted at ...", json `interrupted_at`,
-`interrupted_by`); a run that stops on an error after its start records the stop and its reason
-instead (`STOPPED=1`, `STOP_REASON`, `CUT_SHORT=1`), as the top-level README says. Either way the
-console then names the sweep dir and the next step. A first run that died, was interrupted or
-stopped that way can be resumed: none of these records is a recorded `PROBLEM` (a stop record's is
-that its cells could not be counted), a stop record is not moved to `sweep-outcome.prev.txt` (it is
-no outcome of the sweep), and the resume replaces it with its own. A resume first moves the earlier
-finished outcome to `sweep-outcome.prev.txt`, which stays until the next resume replaces it; until
-the resume writes its own, reports show the earlier one from there, after a warning that the last
-`--resume` has not finished (json: `"unfinished": true`, `"resume_unfinished": true`, `exit`,
-`failed`, `failed_by` and `stop_reason` null at the top level, and the earlier outcome's fields
-under `"earlier"`; csv: `# SWEEP_OUTCOME_EXIT=unfinished`, `RESUME_UNFINISHED=1`, its start, resume
-and interrupt keys, then the earlier record as `# SWEEP_OUTCOME_EARLIER_<KEY>=` lines). A resume
-that stops on an error shows its stop under a `STOPPED` header, then the outcome before it the same
-way (json `"earlier"`, csv `EARLIER_` keys). A finished outcome reads `"unfinished": false`. While
-the sweep writes its own reports, the markdown summary and the scale envelope get a "not written
-yet" line that the outcome replaces; one that still shows it is from a sweep that did not finish,
-and its `sweep-outcome.txt` says how it ended. A resume marks the pages an earlier run wrote
-(`sweep-`, `sweep-charts-` and `scale-envelope-<RUN_ID>.md`) the same way when it starts: their
-outcome section gives way to a "not written yet" line that names the resume's start, so a page left
-by a resume that died, was interrupted or stopped is not read as a finished sweep; the resume writes
-them again at its end.
+as a "not finished" record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`,
+`HARNESS_CONTENT_KEY`, and what to do if it died), which the outcome replaces at its end. While it
+is there, every report of the dir says "this sweep has not finished (it died, or still runs)" (json
+`sweep_outcome`: `"exit": null`, `"unfinished": true`, `"started_at"`, and `"resumed_at"` for a
+resume); if no sweep runs, resume it. A run interrupted by Ctrl-C, SIGTERM or SIGHUP keeps that
+record and adds when and by which signal (`ENDED_AT`, `ENDED_SIGNAL`; reports say "interrupted at
+...", json `interrupted_at`, `interrupted_by`); a run that stops on an error after its start records
+the stop and its reason instead (`STOPPED=1`, `STOP_REASON`, `CUT_SHORT=1`), as the top-level README
+says. Either way the console then names the sweep dir and the next step. A first run that died, was
+interrupted or stopped that way can be resumed: none of these records is a recorded `PROBLEM` (a
+stop record's is that its cells could not be counted), a stop record is not moved to
+`sweep-outcome.prev.txt` (it is no outcome of the sweep), and the resume replaces it with its own. A
+resume first moves the earlier finished outcome to `sweep-outcome.prev.txt`, which stays until the
+next resume replaces it; until the resume writes its own, reports show the earlier one from there,
+after a warning that the last `--resume` has not finished (json: `"unfinished": true`,
+`"resume_unfinished": true`, `exit`, `failed`, `failed_by` and `stop_reason` null at the top level,
+and the earlier outcome's fields under `"earlier"`; csv: `# SWEEP_OUTCOME_EXIT=unfinished`,
+`RESUME_UNFINISHED=1`, its start, resume and interrupt keys, then the earlier record as `#
+SWEEP_OUTCOME_EARLIER_<KEY>=` lines). A resume that stops on an error shows its stop under a
+`STOPPED` header, then the outcome before it the same way (json `"earlier"`, csv `EARLIER_` keys). A
+finished outcome reads `"unfinished": false`. While the sweep writes its own reports, the markdown
+summary and the scale envelope get a "not written yet" line that the outcome replaces; one that
+still shows it is from a sweep that did not finish, and its `sweep-outcome.txt` says how it ended. A
+resume marks the pages an earlier run wrote (`sweep-`, `sweep-charts-` and
+`scale-envelope-<RUN_ID>.md`) the same way when it starts: a "not written yet" line that names the
+resume's start goes under the title (where `004` puts its warnings) and in place of the outcome
+section, and a page with front matter gets `stale_since_resume: "<the resume's start, UTC with Z>"`
+(`004` never writes that key), so a page left by a resume that died, was interrupted or stopped is
+not read as a finished sweep; the resume writes them again, whole, at its end.
 
 The TSV preamble keeps the first run's `ISTIO_NOTREADY_AT_START` and `HARNESS_SHA`; every resume's
 outcome repeats a first run that started not ready as a note, dated with the preamble's first line.
 The resume's own start condition, `none` included, goes into a note of its sweep outcome
-(`ISTIO_NOTREADY_AT_RESUME=...`) with its start time, in the format of the rows' `timestamp` column,
-so its first rows can be found by it. Each resume that passes its preflights also appends a line to
+(`ISTIO_NOTREADY_AT_RESUME=...`) with its start time (UTC with `Z`, as every time in the outcome's
+notes and in planned-cells.txt's `# PLAN=` lines; `resumes.txt` and the TSV's `# RESUMED_AT=` line
+keep the format of the rows' `timestamp` column, so its first rows can be found by it). Each resume
+that passes its preflights also appends a line to
 `resumes.txt` in the sweep directory, nine columns (`RESUMED_AT`, `HARNESS_SHA`,
 `ISTIO_NOTREADY_AT_RESUME`, `KUBE_VERSIONS`, `TSV_LINES`: the TSV's line count then, where its
 attempt starts, `ISTIO_PROXY_VERSIONS` and `ISTIO_GENERATIONS` as the resume read them, `TSV`: the
@@ -279,26 +296,35 @@ the rows are that harness's), and every resume that read other Kubernetes server
 last known ones (the preamble's `KUBE_VERSIONS`, then each resume's, members `unreachable` or
 `unknown` left out; grouped by old and new version; a later resume that could not read one of those
 members ends the span); a resume that runs another `HARNESS_SHA` than the last known one before it,
-or `unknown`, or reads other Kubernetes server versions, also warns. `HARNESS_SHA` is `git describe
---always --abbrev=7`, and a harness with uncommitted changes (a file under `tests/`, `config/`,
-`charts/` or `terraform/`, tracked or untracked, not ignored) reads `<describe>-dirty.<8hex>`, a
-hash of that content (not a diff, so the operator's git config does not change it): two different
-uncommitted trees on one commit record two values, so the check tells them apart. Ignored files
+or `unknown`, or reads other Kubernetes server versions, also warns (another harness: another
+`HARNESS_CONTENT_KEY`; when only `git describe` differs, an `INFO` instead). `HARNESS_SHA` is `git
+describe --always --abbrev=7`, and a harness with uncommitted changes (a file under `tests/`,
+`config/`, `charts/` or `terraform/`, tracked or untracked, not ignored) reads
+`<describe>-dirty.<8hex>`, a hash of that content (not a diff, so the operator's git config does not
+change it): two different uncommitted trees on one commit record two values, so the check tells them
+apart. Ignored files
 never count: editor and Finder files (`.DS_Store`, `*.swp`, `*.swo`, `*~`), the `results/` dirs, the
 sweep's own output dir, and whatever the operator's global `core.excludesFile` ignores (or git's
 default `~/.config/git/ignore` when that key is unset); nor do files outside those four dirs (a
 campaign note under `docs/`) or the submodules (the bats checkouts, moved or not checked out). A
 tree git cannot hash reads `-dirty.unknown` when its tracked files differ from the commit. The sweep
 reads the harness again before its steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default)
-and at its end: a file edited, or a `git checkout` or `pull`, during the sweep is a `PROBLEM` in the
-outcome (exit 4) that names both values and the first read that saw the change (the cells after it
-may have run other code). `002` reads it at each of its steps, the sweep's results dir left out, and
+and at its end, and each step's own read counts too: a harness file edited, added or removed during
+the sweep (also by a `git checkout`, `pull` or commit) is a `PROBLEM` in the outcome (exit 4) that
+names both values and the first read that saw the change, also when it was undone before the
+sweep's next read and only a step read it (the cells after it may have run other code); a checkout,
+pull, commit or tag that left the harness files as they were changes only `git describe` and is a
+note (`INFO`). `002` reads it at each of its steps, the sweep's results dir left out, and
 writes a `# HARNESS_CHANGED_AT=` line before the rows of a window that ran other harness files than
-the TSV records, so the TSV credits those rows to it. The preamble and the outcome keep the value at
-the run's start. Before its first cell a run in legacy mode (a first run or a resume) counts the
-`controlplane-test` namespaces on the members and on the other mesh members their Istio remote
-secrets name (those with a kube context of that name; it warns about the rest), all at once. It
-deletes any an earlier run left on the `--contexts` members (`005-cleanup.sh`, its `--timeout` sized
+the TSV records, so the TSV credits those rows to it. A window whose baseline ran other files than
+its final scrape (split `--phase` steps across an edit) warns, and the TSV records both: its rows go
+to the baseline's harness when that differs from the TSV's record, with a second line after them for
+the final's (the next window's rows are compared with it), else to the final's. The preamble and the
+outcome keep the value at the run's start. Before its first cell a run in legacy mode (a first run
+or a resume) counts the `controlplane-test` namespaces on the members and on the other mesh members
+their Istio remote secrets name (those with a kube context of that name; it warns about the rest),
+all at once. It deletes any an earlier run left on the `--contexts` members (`005-cleanup.sh`, its
+`--timeout` sized
 about 1 s per namespace), waits `--settle` before the first cell (the deletion's pushes), and stops
 if any remain. Leftovers on another mesh member (one `--contexts` does not name) it never deletes:
 it stops before the first cell, deleting nothing, and prints the `005-cleanup.sh --contexts <those
@@ -317,28 +343,34 @@ flags plan a cell no earlier run planned, without `--extend-plan`; an unexpected
 SIGHUP; `sweep-outcome.txt` says when and by which signal; a signal sent to the sweep's process
 alone stops the running step and every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before
 SIGKILL; a `kill -INT` or `kill -HUP` skips the processes of a sweep in a terminal's foreground, so
-stop such a sweep from elsewhere with SIGTERM; without a `ps` that lists start times, only the
-step's own process is stopped; see the top-level README); `4` it finished and wrote its reports, but
-some cells failed (a status row instead of a measurement: `SETUP_FAILED`, `PROBE_FAILED`,
-`GROW_FAILED`, `SWITCH_FAILED`, `INTERRUPTED`; `INCOMPLETE`: rows for fewer members than the mesh
-size, or a member with fewer rows than its window wrote; or `NOT_RUN`: planned, but no row), or the
-Istio version, active revision or the generation of the Istio CR or its active IstioRevision changed
-during the sweep (read again before the reports), or that end-of-sweep version check failed, or its
-harness (a file under `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during
-the sweep (read again before its steps and at its end), or the cells could not be counted (the rows
-are intact: a `--resume` with the sweep's flags counts them). A `NOT_RUN` or `INCOMPLETE` cell, and
-each `PROBLEM` the sweep outcome records (with a not-finished record, also the one before it), also
-turns the report's SLA verdict from `PASS` to `CAUTION` (the sweep covers only part of its plan, or
-its figures may not measure what they seem to). The last line on stderr says how many, by reason,
-out of every planned cell, every cell of the TSV and of this run's matrix, and how many of them
-failed partway (the next `--resume` runs them again, as every failed cell). A cell counts once, by
-the last row of its latest attempt: a status row fails it, with that reason (also after some
-contexts' rows: a cell that failed partway); a measurement does not, as in a fresh run. `1` wins
-over `4`. Cells the memory guard skipped (`SKIPPED_MEM_GUARD`, and `SKIPPED_SERIES_STOPPED` after
-it) are counted apart, as skipped on purpose, and do not make it `4`. Proxies connected on another
-Istio version than their istiod at the start (`ISTIO_PROXY_VERSIONS`: a sidecar keeps the version it
-was injected with until its pod restarts) are a note, never a failure. `sweep-outcome.txt` in the
-sweep dir, the end of the markdown summary and the end of the scale envelope keep the outcome.
+stop such a sweep from elsewhere with SIGTERM; without a `ps` that lists start times or Linux's
+`/proc`, only the step's own process is stopped; see the top-level README); `4` it finished and
+wrote its reports, but some cells failed (a status row instead of a measurement: `SETUP_FAILED`,
+`PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `INTERRUPTED`; `INCOMPLETE`: rows for fewer members
+than the mesh size, or a member with fewer rows than its window wrote; or `NOT_RUN`: planned, but no
+row), or the Istio version, active revision or the generation of the Istio CR or its active
+IstioRevision changed during the sweep (read again before the reports), or that end-of-sweep version
+check failed, or its harness (a file under `tests/`, `config/`, `charts/` or `terraform/`,
+`HARNESS_SHA`) changed during the sweep (read again before its steps, by each step and at its end),
+or the cells could not be counted (the rows are intact: a `--resume` with the sweep's flags counts
+them). A `NOT_RUN` or `INCOMPLETE` cell, and each `PROBLEM` the sweep outcome records (with a
+not-finished record, also the one before it; a pooled report counts and names each pooled sweep's
+record; not the `PROBLEM` that the cells could not be counted, as the report counts them itself),
+also turns the report's SLA verdict from `PASS` to `CAUTION` (the sweep covers only part of its
+plan, or its figures may not measure what they seem to); so do rows in the figures from more than
+one harness (`HARNESS_SHA` values with no one `HARNESS_CONTENT_KEY`, whether or not the outcome
+records the change) or from a run that recorded neither, inputs measured on more than one Istio
+version, and a cell that ran on fewer istiod pods than its Deployment wanted (above). The last line
+on stderr says how many, by reason, out of every planned cell, every cell of the TSV and of this
+run's matrix, and how many of them failed partway (the next `--resume` runs them again, as every
+failed cell). A cell counts once, by the last row of its latest attempt: a status row fails it, with
+that reason (also after some contexts' rows: a cell that failed partway); a measurement does not, as
+in a fresh run. `1` wins over `4`. Cells the memory guard skipped (`SKIPPED_MEM_GUARD`, and
+`SKIPPED_SERIES_STOPPED` after it) are counted apart, as skipped on purpose, and do not make it `4`.
+Proxies connected on another Istio version than their istiod at the start (`ISTIO_PROXY_VERSIONS`: a
+sidecar keeps the version it was injected with until its pod restarts) are a note, never a failure.
+`sweep-outcome.txt` in the sweep dir, the end of the markdown summary and the end of the scale
+envelope keep the outcome.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
 scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces
@@ -407,10 +439,11 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   each alone; `--allow-multi-run` pools them on purpose (the calibration below), and every
   format then says it pools N runs. Every report also lists the distinct `RUN_ID`,
   `ISTIO_VERSION` and `HARNESS_SHA` of all its input files (`run_ids`, `istio_versions`,
-  `harness_shas` in all four formats); with more than one run `run_id` reads `multiple`. Inputs from
-  different Istio versions or harnesses print a `WARNING` (stderr and every format) and read
-  `mixed:<a>,<b>`; `HARNESS_SHA` values that differ only in git describe (one `HARNESS_CONTENT_KEY`)
-  are a note instead.
+  `harness_shas` in all four formats; `HARNESS_CONTENT_KEY` and `harness_content_keys` likewise);
+  with more than one run `run_id` reads `multiple`. Inputs from different Istio versions or
+  harnesses print a `WARNING` (stderr and every format), read `mixed:<a>,<b>` and turn a `PASS`
+  verdict into `CAUTION`; `HARNESS_SHA` values that differ only in git describe (one
+  `HARNESS_CONTENT_KEY`) are a note instead.
 
 ## Traffic management (VS/DR)
 
@@ -625,23 +658,27 @@ Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID
 - `run-config-<RUN_ID>.env` (sweep with `--config` only): a copy of the run config.
 - `sweep-<RUN_ID>.md`, `sweep-charts-<RUN_ID>.md`: report markdown and charts.
 - `scale-envelope-<RUN_ID>.md`: campaign scale envelope, led by the customer SLA verdict
-  (`PASS`, `CAUTION` at 75 % of a limit, `FAIL` at 90 % or on any istiod restart; a `NOT_RUN` or
-  `INCOMPLETE` cell, or a `PROBLEM` in the sweep outcome, turns `PASS` into `CAUTION`). Its
-  `partial coverage` `CAUTION` counts the rows of each cell's latest attempt, so a cell that failed
-  and then ran valid on a `--resume` is covered. It also sums `ISTIO_PROXY_VERSIONS` over the
-  members (`Proxy (Envoy) versions at the start`, no context names).
+  (`PASS`, `CAUTION` at 75 % of a limit, `FAIL` at 90 % or on any istiod restart; the `kubectl
+  top` columns `istiod_cpu_pct_of_limit` and `istiod_mem_pct_of_limit` sum the usage of the istiod
+  pods that run over the per-replica limit times their number, so a Pending or evicted replica
+  counts in neither; a `NOT_RUN` or `INCOMPLETE` cell, a `PROBLEM` in the sweep outcome, rows of
+  more than one harness or of an unrecorded one, inputs of more than one Istio version, or a cell
+  on fewer istiod pods than wanted turns `PASS` into `CAUTION`). Its `partial coverage` `CAUTION`
+  counts the rows of each cell's latest attempt, so a cell that failed and then ran valid on a
+  `--resume` is covered. It also sums `ISTIO_PROXY_VERSIONS` over the members (`Proxy (Envoy)
+  versions at the start`, no context names).
 - `sweep-outcome.txt` (sweep): the outcome, also at the end of the markdown summary and of the
   envelope. After a `# DATE=` line (UTC, when it was written), its keys: `RUN_ID`, `HARNESS_SHA`,
-  `EXIT`, `STOPPED`, `STOP_REASON`, `UNIT`, `TOTAL`, `FAILED` and `SKIPPED` (each `unknown` when the
-  cells could not be counted), `FAILED_BY`, `SKIPPED_BY`, then a `PROBLEM=`, `NOTE=` or `INFO=` line
-  each. Until the sweep writes it at its end, it holds the sweep's not-finished record
-  (`EXIT=unfinished`, `STARTED_AT`, `RESUMED_AT` for a resume: UTC with `Z`, as every time of the
-  record, while the TSV's `# RESUMED_AT=` line and `resumes.txt` keep the rows' `timestamp` format;
-  `NEXT`: what to do if it died), with `ENDED_AT`, `ENDED_EXIT` and `ENDED_SIGNAL` added when the
-  run was interrupted. A run that stopped on an error after its start replaces it with a stop
-  record: the outcome's keys (`EXIT=1`, `STOPPED=1`, `STOP_REASON`, `TOTAL=unknown`), then
-  `CUT_SHORT=1`, `STARTED_AT` and `ENDED_AT`. `sweep-outcome.prev.txt`: the outcome before it, moved
-  there by a `--resume`; it stays until the next resume replaces it.
+  `HARNESS_CONTENT_KEY`, `EXIT`, `STOPPED`, `STOP_REASON`, `UNIT`, `TOTAL`, `FAILED` and `SKIPPED`
+  (each `unknown` when the cells could not be counted), `FAILED_BY`, `SKIPPED_BY`, then a
+  `PROBLEM=`, `NOTE=` or `INFO=` line each. Until the sweep writes it at its end, it holds the
+  sweep's not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RESUMED_AT` for a resume: UTC with
+  `Z`, as every time of the record, while the TSV's `# RESUMED_AT=` line and `resumes.txt` keep the
+  rows' `timestamp` format; `NEXT`: what to do if it died), with `ENDED_AT`, `ENDED_EXIT` and
+  `ENDED_SIGNAL` added when the run was interrupted. A run that stopped on an error after its start
+  replaces it with a stop record: the outcome's keys (`EXIT=1`, `STOPPED=1`, `STOP_REASON`,
+  `TOTAL=unknown`), then `CUT_SHORT=1`, `STARTED_AT` and `ENDED_AT`. `sweep-outcome.prev.txt`: the
+  outcome before it, moved there by a `--resume`; it stays until the next resume replaces it.
 - `resumes.txt` (sweep, after a `--resume`): one line per resume, 9 columns (`RESUMED_AT`,
   `HARNESS_SHA`, `ISTIO_NOTREADY_AT_RESUME`, `KUBE_VERSIONS`, `TSV_LINES`, `ISTIO_PROXY_VERSIONS`,
   `ISTIO_GENERATIONS`, `TSV`: the TSV the line applies to, `HARNESS_CONTENT_KEY`), appended, never

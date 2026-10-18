@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 # The harness content key (tests/lib/common.sh harness_content_key, HARNESS_CONTENT_KEY): a
 # sweep decides "did the harness change" by the content of its files, never by the
-# `git describe` text, so a docs-only commit or a fetched tag during a sweep is a note
-# (INFO, exit 0), not a problem, and the steps keep recording the start's HARNESS_SHA; an
+# `git describe` text, so a commit or tag that left the harness files as they were (a
+# docs-only commit, a fetched tag) during a sweep is a note (INFO, exit 0), not a problem,
+# and the steps keep recording the start's HARNESS_SHA; an
 # edit under tests/ is still a problem (exit 4). The -dirty hash covers only the harness
 # paths, and the clone's own $GIT_DIR/info/attributes never changes it. istiod-diag's index
 # leaves out the probe's output dir. Through the real controlplane sweep too (PL33); no
@@ -63,7 +64,8 @@ _sweep() {
 	assert_success
 	local head
 	head="$(sed -n 's/^head=//p' <<<"$output")"
-	[ -n "$head" ] && [ "$head" != "$clean" ]
+	[ -n "$head" ]
+	[ "$head" != "$clean" ]
 	assert_line "key=${key}"
 	assert_line "step=${clean}"
 	assert_line "rc=0"
@@ -74,7 +76,7 @@ _sweep() {
 	[[ "$stderr" == *"HARNESS_SHA=${clean} at its start, ${head} now (read before 002-probe.sh), but the files under tests/, config/, charts/, terraform/ did not change"* ]] || { echo "$stderr"; false; }
 	# The record: exit 0, the INFO, no PROBLEM.
 	grep -qx 'EXIT=0' "$r/tests/out/rec/sweep-outcome.txt"
-	! grep -q '^PROBLEM=' "$r/tests/out/rec/sweep-outcome.txt"
+	! grep -q '^PROBLEM=' "$r/tests/out/rec/sweep-outcome.txt" || false
 	grep -qx "INFO=HEAD moved during the sweep, or a tag appeared: HARNESS_SHA=${clean} at its start, ${head} first read at [0-9T:-]*Z, before 002-probe.sh; the files under tests/, config/, charts/, terraform/ did not change (HARNESS_CONTENT_KEY=${key}), so every step ran the start's harness and recorded HARNESS_SHA=${clean}" "$r/tests/out/rec/sweep-outcome.txt"
 	# An edit under tests/ after the commit: still a problem, exit 4.
 	_sweep "$r" '
@@ -86,7 +88,7 @@ _sweep() {
 		sweep_outcome --run-id hs-run --record "$ROOT/tests/out/rec" 1'
 	[ "$status" -eq 4 ]
 	grep -qE '^PROBLEM=the harness changed during the sweep: HARNESS_SHA=[0-9a-f]{7} at its start, [0-9a-f]{7}-dirty\.[0-9a-f]{8} at its end' "$r/tests/out/rec/sweep-outcome.txt"
-	! grep -q '^INFO=' "$r/tests/out/rec/sweep-outcome.txt"
+	! grep -q '^INFO=' "$r/tests/out/rec/sweep-outcome.txt" || false
 	[ "$(grep -c '^WARNING: the harness changed during the sweep' <<<"$stderr")" -eq 1 ]
 }
 
@@ -236,7 +238,7 @@ STUB
 	[ "$(git -C "$r" describe --always --abbrev=7)" != "$clean" ]
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
 	[[ "$stderr" != *"WARNING: the harness changed"* ]] || { echo "$stderr"; false; }
-	! grep -q '^PROBLEM=the harness changed' "$d/sweep-outcome.txt"
+	! grep -q '^PROBLEM=the harness changed' "$d/sweep-outcome.txt" || false
 	grep -qE "^INFO=HEAD moved during the sweep, or a tag appeared: HARNESS_SHA=${clean} at its start" "$d/sweep-outcome.txt"
 	# Both cells' probes recorded the start's value, though HEAD moved in the first.
 	[ "$(grep -cE '^\[002\] RUN_ID=.*HARNESS_SHA=' <<<"$output")" -ge 2 ] || { echo "$output"; false; }

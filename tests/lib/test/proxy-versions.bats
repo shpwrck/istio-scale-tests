@@ -39,7 +39,7 @@ STUB
 	assert_success
 	assert_output "ci-a=1.30.5:6"
 	[ "$stderr" = "note: ci-a: 1 istiod pod(s) being deleted (Terminating) left out of its proxy-version read (ISTIO_PROXY_VERSIONS): their proxies are moving to the other pods" ]
-	! grep -q "read istiod-b" "$PV_LOG"
+	! grep -q "read istiod-b" "$PV_LOG" || false
 	# Every pod being deleted: unknown, and the note.
 	: > "$PV_LOG"
 	PV_PODS="istiod-a:2026-10-18T00:00:00Z" PATH="${BIN}:${PATH}" run --separate-stderr istio_proxy_versions ci-a kubectl

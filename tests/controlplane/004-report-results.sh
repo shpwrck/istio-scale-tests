@@ -69,16 +69,20 @@ Usage: $(basename "$0") [options]
                      --config > environment > default.
   --results-dir DIR  Results directory (default: ${CONTROLPLANE_RESULTS_DIR}). Every
                      controlplane-*.tsv under it is read; a sweep-*/ dir from 003 is
-                     one run. The report lists each distinct RUN_ID, ISTIO_VERSION and
-                     HARNESS_SHA (run_ids, istio_versions, harness_shas) and prints a
-                     WARNING when Istio versions or harnesses differ.
+                     one run. The report lists each distinct RUN_ID, ISTIO_VERSION,
+                     HARNESS_SHA and HARNESS_CONTENT_KEY (run_ids, istio_versions,
+                     harness_shas, harness_content_keys) and prints a WARNING when Istio
+                     versions or harnesses differ.
   --allow-multi-run  Pool more than one run, as the pods-vs-config-only calibration does
                      (a base dir with a pods sweep and a config-only sweep). Without it
                      a dir with several runs stops the report, which lists them and how
                      to report each alone. With it every format says it pools N runs
-                     and lists their HARNESS_SHA and ISTIO_VERSION values; legacy cells
-                     pool across runs, while each growth series (RUN_ID x mesh size x K
-                     x workload) keeps its own cells and fits, labelled run=<RUN_ID>.
+                     and lists their HARNESS_SHA and ISTIO_VERSION values (csv and json
+                     also HARNESS_CONTENT_KEY: # POOLED_HARNESS_CONTENT_KEYS=,
+                     pooled_runs.harness_content_key), and the verdict counts the
+                     PROBLEMs of each pooled sweep's outcome; legacy cells pool across
+                     runs, while each growth series (RUN_ID x mesh size x K x workload)
+                     keeps its own cells and fits, labelled run=<RUN_ID>.
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
@@ -148,8 +152,11 @@ format shows its own state, then the outcome before it (sweep-outcome.prev.txt):
 under "earlier"; csv # SWEEP_OUTCOME_RESUMED_AT= and the record as
 # SWEEP_OUTCOME_EARLIER_<KEY>= lines; text and markdown a second block. Each PROBLEM the
 outcome records (with a not-finished record, also the one before it) turns a PASS verdict
-into CAUTION ("the sweep outcome records N PROBLEM(s)"); the sweep's own reports, made
-before it writes the outcome, count the PROBLEMs it will record.
+into CAUTION ("the sweep outcome records N PROBLEM(s) (<the files>)"); a pooled report
+counts the record of each sweep it pools (the dir of each TSV) the same way, and names each
+record that holds one. A "could not count the sweep's cells" PROBLEM is left out of that
+count, as the report counts the cells itself; the sweep's own reports, made before it
+writes the outcome, count the PROBLEMs it will record, also without that one.
 
 Each cell is read from its latest attempt (a --resume runs a failed cell again): the
 rows of earlier attempts are left out of every figure, count and verdict, and every
@@ -164,28 +171,38 @@ replicas; and no status row; a sweep's TSV only, PHASE=sweep) and planned
 cells without a row (NOT_RUN, planned-cells.txt beside the TSV, applied to the TSV its
 "# TSV=" line names) each print a data warning (json data_warnings) in every format; the
 NOT_RUN one names the full command that resumes the sweep with the axis flags that
-planned them. An INCOMPLETE cell is also marked where its figures are shown: its text
-block header ("INCOMPLETE: rows of 1 of 2 members"), its n_total in the markdown cells
-table (‡, with a footnote) and its chart series (‡, with a note). A NOT_RUN or INCOMPLETE
-cell also turns a PASS verdict into CAUTION ("N planned cell(s) never ran", "N cell(s)
-are INCOMPLETE"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes from
+planned them. So does a window that ran on fewer istiod pods than its member's istiod
+Deployment wants (a "# WINDOW_ROWS=" entry <member>=<n>/<spec>, <n> below <spec>: a
+replica evicted or Pending): its rows are valid, but their per-replica figures are not
+comparable with the other cells. An entry without /<spec> (an older harness) is compared
+with the member's ISTIOD_REPLICAS_BY_CONTEXT, read at the sweep's start (an HPA may have
+changed it since): a data warning only. An INCOMPLETE cell is also marked where its
+figures are shown: its text block header ("INCOMPLETE: rows of 1 of 2 members"), its
+n_total in the markdown cells table (‡, with a footnote) and its chart series (‡, with a
+note). A NOT_RUN or INCOMPLETE cell, or one that ran on fewer istiod pods than wanted, also
+turns a PASS verdict into CAUTION ("N planned cell(s) never ran", "N cell(s) are
+INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's istiod Deployment
+wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes from
 the valid rows with a push count: fewer than n_valid shows as got/n_valid (csv pushes_n,
 json xds_pushes_n), with a data warning.
 
-Provenance: HARNESS_SHA and KUBE_VERSIONS come from each TSV preamble (the first run),
-from each --resume (resumes.txt, or the TSV's "# RESUMED_AT=" lines) and from each
-"# HARNESS_CHANGED_AT=" line (002 writes one before the rows of a window that ran other
-harness files than the TSV records): harness_shas lists those of the runs and changes
-whose rows the figures use (a cell's latest attempt), a mix prints a provenance warning
-(a note when they differ only in git describe: one HARNESS_CONTENT_KEY), and every format
-lists the attempts (text and csv # attempts:, markdown "Attempts", json and frontmatter
-attempts: each run's or change's HARNESS_SHA, KUBE_VERSIONS and row count; one that added
-none is marked "(added no rows)", one whose rows a later --resume all ran again "(its rows
-were all run again later)", and either is left out of harness_shas, the Kubernetes change
-check and the provenance warning), then each run's Istio state at its start (text and csv
-# attempts, Istio at each start:, markdown "Attempts, Istio at each start"; json attempts
-istio_notready, istio_generations, istio_proxy_versions, also started_at, rows_kept and
-harness_content_key). Every format also records
+Provenance: HARNESS_SHA, HARNESS_CONTENT_KEY and KUBE_VERSIONS come from each TSV
+preamble (the first run), from each --resume (resumes.txt, or the TSV's "# RESUMED_AT="
+lines) and from each "# HARNESS_CHANGED_AT=" line (002 writes one before the rows of a
+window that ran other harness files than the TSV records). harness_shas and
+harness_content_keys list those of the runs and changes whose rows the figures use (a
+cell's latest attempt); HARNESS_SHA and HARNESS_CONTENT_KEY read mixed:<list> when there
+are several. A mix of harnesses prints a provenance warning and turns a PASS verdict into
+CAUTION; HARNESS_SHA values that differ only in git describe (one HARNESS_CONTENT_KEY) are
+one harness, and print a note. Every format lists the attempts (text and csv # attempts:,
+markdown "Attempts", json and frontmatter attempts): each run's or change's HARNESS_SHA,
+KUBE_VERSIONS and rows ("(N row(s), K in the figures)" in text, csv and markdown; json
+rows and rows_kept). One that added none is marked "(added no rows)", one whose rows a
+later --resume all ran again "(its rows were all run again later)", and either is left
+out of harness_shas, the Kubernetes change check and the provenance warning. Then each
+run's Istio state at its start (text and csv # attempts, Istio at each start:, markdown
+"Attempts, Istio at each start"; json attempts istio_notready, istio_generations,
+istio_proxy_versions, also started_at and harness_content_key). Every format also records
 REPORT_HARNESS_SHA (json report_harness_sha): the harness this report ran on, which can
 differ from HARNESS_SHA, the harness that measured the rows: a report made again later,
 or from another checkout, may count rows by other rules. The results dir it reads does
@@ -410,17 +427,21 @@ ATTEMPTS="$(collect_attempts)" \
 #   HARNESS_SHAS_M  their HARNESS_SHAs, in file and run order; a file without such rows keeps
 #                   its preamble's (first run's)
 #   HARNESS_KEYS_M  their HARNESS_CONTENT_KEYs, the same way (unknown where not recorded)
-#   ATTEMPTS_NOTE   when a --resume ran or the harness changed: each of them, one without
-#                   rows marked "(added no rows)", one whose rows were all run again "(its
-#                   rows were all run again later)", after "the rows come from more than one
-#                   run" (" or harness" when a harness change keeps rows) when two or more
-#                   keep rows of a file, else "the rows come from one run"
+#   ATTEMPTS_NOTE   when a --resume ran or the harness changed: each of them with its rows,
+#                   "(N row(s), K in the figures)" (one without rows marked "(added no
+#                   rows)", one whose rows were all run again "(its rows were all run again
+#                   later)"), after "the rows come from more than one run" (" or harness"
+#                   when a harness change keeps rows) when two or more keep rows of a file,
+#                   else "the rows come from one run"
 #   ATTEMPTS_ISTIO  with it: the Istio state each run read at its start (the TSV preamble
 #                   keeps only the first run's; a harness change is no start)
 #   _att_kube       the resumes' KUBE_VERSIONS (collect_kube_versions_meta)
-HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" _att_kube=""
+#   HARNESS_UNKNOWN 1 when one of them recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY
+#                   (git could not name the harness, or an older harness): its rows cannot
+#                   be shown to be one harness, as 003 rules for a carried PROBLEM
+HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" _att_kube="" HARNESS_UNKNOWN=0
 _att_multi=0 _att_res_rows=0 _att_hc_rows=0
-_att_file="" _att_fh0="" _att_fk0="" _att_fn=0 _att_lead0=""
+_att_file="" _att_fh0="" _att_fk0="" _att_fn=0 _att_lead=""
 _att_addh() {
 	case ",${HARNESS_SHAS_M}," in *",${1},"*) ;; *) HARNESS_SHAS_M="${HARNESS_SHAS_M:+${HARNESS_SHAS_M},}${1}" ;; esac
 	case ",${HARNESS_KEYS_M}," in *",${2},"*) ;; *) HARNESS_KEYS_M="${HARNESS_KEYS_M:+${HARNESS_KEYS_M},}${2}" ;; esac
@@ -432,12 +453,15 @@ _att_flush() {
 	((_att_fn < 2)) || _att_multi=1
 	return 0
 }
-# _att_mark <rows> <kept>: the mark of a run or change whose rows the figures do not use.
+# _att_mark <rows> <kept>: the rows of a run or change, as every format but json prints them
+# (json: rows, rows_kept), or the mark of one whose rows the figures do not use.
 _att_mark() {
 	if (($1 == 0)); then
 		echo " (added no rows)"
 	elif (($2 == 0)); then
 		echo " (its rows were all run again later)"
+	else
+		echo " ($1 row(s), $2 in the figures)"
 	fi
 }
 # Fields split by \037: a tab is IFS whitespace, and read would merge the empty <at> of the
@@ -456,17 +480,14 @@ while IFS=$'\037' read -r _af _arun _ah _ak _an _anr _apv _agen _aat _akept _ahk
 	if ((_akept > 0)); then
 		_att_fn=$((_att_fn + 1))
 		_att_addh "$_ah" "$_ahk"
+		[[ "$_ah" != unknown || "$_ahk" != unknown ]] || HARNESS_UNKNOWN=1
 	fi
 	if [[ "$_arun" == "first run" ]]; then
 		ATTEMPTS_ISTIO+="${ATTEMPTS_ISTIO:+; }${_att_pre}the first run ISTIO_NOTREADY_AT_START=${_anr} ISTIO_GENERATIONS=${_agen} ISTIO_PROXY_VERSIONS=${_apv}"
-		if ((_akept == 0)); then
-			if ((${#TSV_FILES[@]} == 1)); then
-				_att_lead0="$(_att_mark "$_an" 0)"
-			elif ((_an == 0)); then
-				_att_lead0+="${_att_lead0:+; }${_att_pre}the first run added no rows"
-			else
-				_att_lead0+="${_att_lead0:+; }${_att_pre}the first run's rows were all run again later"
-			fi
+		if ((${#TSV_FILES[@]} == 1)); then
+			_att_lead="$(_att_mark "$_an" "$_akept")"
+		else
+			_att_lead+="${_att_lead:+; }${_att_pre}the first run$(_att_mark "$_an" "$_akept")"
 		fi
 		continue
 	fi
@@ -484,27 +505,25 @@ while IFS=$'\037' read -r _af _arun _ah _ak _an _anr _apv _agen _aat _akept _ahk
 done < <(tr '\t' '\037' <<<"$ATTEMPTS")
 _att_flush
 # _att_describe: the HARNESS_SHAs differ, but every one of them ran the same harness files
-# (one known HARNESS_CONTENT_KEY): a docs commit or a fetched tag between them, a note and
-# not a warning.
+# (one known HARNESS_CONTENT_KEY): a commit or tag that left the harness files as they
+# were, between them; a note and not a warning.
 _att_describe=0
 if [[ "$HARNESS_SHAS_M" == *,* && "$HARNESS_KEYS_M" != *,* && "$HARNESS_KEYS_M" =~ ^[0-9a-f]+$ ]]; then
 	_att_describe=1
 fi
 if [[ -n "$ATTEMPTS_NOTE" ]]; then
-	# A several-file report: a file whose first run added no rows is named first.
-	if ((${#TSV_FILES[@]} > 1)) && [[ -n "$_att_lead0" ]]; then
-		ATTEMPTS_NOTE="${_att_lead0}; ${ATTEMPTS_NOTE}"
-		_att_lead0=""
-	fi
+	# The first run, with its rows; a several-file report names each file's.
+	_att_first="the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead}"
+	((${#TSV_FILES[@]} == 1)) || _att_first="each file's first run (the HARNESS_SHA and KUBE_VERSIONS of its TSV preamble): ${_att_lead}"
 	_att_or=""
 	((_att_hc_rows == 0)) || _att_or=" or harness"
 	if ((_att_multi)); then
-		ATTEMPTS_NOTE="the rows come from more than one run${_att_or}: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead0}, then ${ATTEMPTS_NOTE}"
+		ATTEMPTS_NOTE="the rows come from more than one run${_att_or}: ${_att_first}, then ${ATTEMPTS_NOTE}"
 	else
-		ATTEMPTS_NOTE="the rows come from one run (no other run's rows are in the figures): the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead0}, then ${ATTEMPTS_NOTE}"
+		ATTEMPTS_NOTE="the rows come from one run (no other run's rows are in the figures): ${_att_first}, then ${ATTEMPTS_NOTE}"
 	fi
 	if ((_att_describe)); then
-		ATTEMPTS_NOTE+="; their HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or a tag outside them moved the describe)"
+		ATTEMPTS_NOTE+="; their HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or tag that left the harness files as they were)"
 	fi
 else
 	ATTEMPTS_ISTIO=""
@@ -536,15 +555,28 @@ ISTIO_VERSION_TAG="$ISTIO_VERSIONS_M"
 [[ "$ISTIO_VERSIONS_M" == *,* ]] && ISTIO_VERSION_TAG="$(config_input_value ISTIO_VERSION unknown "${TSV_FILES[@]}")"
 HARNESS_SHA_TAG="$HARNESS_SHAS_M"
 [[ "$HARNESS_SHAS_M" == *,* ]] && HARNESS_SHA_TAG="mixed:${HARNESS_SHAS_M}"
+HARNESS_KEY_TAG="$HARNESS_KEYS_M"
+[[ "$HARNESS_KEYS_M" == *,* ]] && HARNESS_KEY_TAG="mixed:${HARNESS_KEYS_M}"
+# HARNESS_MIX: the rows in the figures ran more than one harness (other HARNESS_SHA values,
+# and not one known HARNESS_CONTENT_KEY: the harness_same rule over their values), so the
+# provenance warning says so and a PASS verdict reads CAUTION (compute_sla_verdict), whether
+# or not a sweep outcome beside the TSV records the change.
+HARNESS_MIX=0
+if [[ "$HARNESS_SHAS_M" == *,* ]] && ((_att_describe == 0)); then
+	HARNESS_MIX=1
+fi
 # PROVENANCE_WARNING: what the mixed tags mean, repeated in every format (empty when
 # the inputs agree).
 PROVENANCE_WARNING=""
 # A one-file value mixed:a/b is a sweep whose members ran different versions;
 # v1.30.5 against 1.30.5 is one version (config_input_value).
+# ISTIO_MIX: the same mix turns a PASS verdict into CAUTION (compute_sla_verdict).
+ISTIO_MIX=0
 if [[ "$ISTIO_VERSION_TAG" == mixed:* ]]; then
+	ISTIO_MIX=1
 	PROVENANCE_WARNING="The inputs were measured on different Istio versions (ISTIO_VERSION ${ISTIO_VERSIONS_M}), so fits and pairings across runs mix versions."
 fi
-if [[ "$HARNESS_SHAS_M" == *,* ]] && ((_att_describe == 0)); then
+if ((HARNESS_MIX)); then
 	_hs_res=""
 	((_att_res_rows == 0)) || _hs_res="; a --resume's included"
 	((_att_hc_rows == 0)) || _hs_res+="; the harness changed during a run (HARNESS_CHANGED_AT)"
@@ -561,7 +593,7 @@ if [[ -n "$PROVENANCE_WARNING" && "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
 	echo "WARNING: ${PROVENANCE_WARNING} Report one Istio version and one clean harness commit per results dir." >&2
 fi
 if ((_att_describe)) && [[ "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
-	echo "note: the inputs' HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or a tag outside them moved the describe)" >&2
+	echo "note: the inputs' HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or tag that left the harness files as they were)" >&2
 fi
 # The harness this report runs (every format): it can differ from the inputs' HARNESS_SHA.
 # The results dir it reads does not count (a dir under the checkout would read dirty).
@@ -1094,13 +1126,21 @@ ${AWK_HEADER_IX}"'
 #   - NOT_RUN: a planned cell without a row. The plan applies to the TSV it names ("# TSV="
 #     in planned-cells.txt; one without the key, from an older harness, to every TSV beside
 #     it). NOT_RUN_CELLS, and the INCOMPLETE cells, also make a PASS verdict CAUTION
-#     (env_sla_verdict): the figures cover only the cells, or the members, that ran.
+#     (env_sla_verdict): the figures cover only the cells, or the members, that ran;
+#   - SHORT: a window of the cell ran on fewer istiod pods than its member's Deployment
+#     wants (a "# WINDOW_ROWS=" entry <n>/<spec> with <n> below <spec>, CP_CELL_AWK
+#     cp_short; a growth window's own line too): a replica evicted or Pending. The rows are
+#     valid (not INCOMPLETE), but their per-replica figures are not comparable with the
+#     other cells: a data warning, and SHORT_CELLS makes a PASS verdict CAUTION. An entry
+#     without <spec> (an older harness) below the member's ISTIOD_REPLICAS_BY_CONTEXT
+#     (cp_shortw: read at the sweep's start, an HPA may have changed it since) is a data
+#     warning only (SHORTW).
 # The INCOMPLETE cells are also marked where their figures are shown (CS_INC_KEYS: one
 # "<mesh>|<svcs>|<reps>|<ns>|<scope>|<traffic>|<window kind>\t<why>" line each): the text
 # block's header, the markdown cells table (‡) and the charts. A NOT_RUN warning names the
 # full command that resumes the sweep with the axis flags that planned those cells.
 NOT_RUN_CELLS=0
-_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=()
+_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=()
 CS_INC_KEYS=""
 for _cs_i in "${!TSV_FILES[@]}"; do
 	_cs_tsv="${TSV_FILES[_cs_i]}"
@@ -1117,6 +1157,8 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 		INCKEY) CS_INC_KEYS+="${_cs_cell}"$'\t'"${_cs_x}"$'\n' ;;
 		POOLED) _cs_pool+=("$_cs_cell") ;;
 		NOTRUN) _cs_nr+=("$_cs_cell") ;;
+		SHORT) _cs_short+=("$_cs_cell") ;;
+		SHORTW) _cs_shortw+=("$_cs_cell") ;;
 		NRPLAN) _cs_cmds+=("$(controlplane_resume_cmd "<sweep dir>" "${_cs_ctx:-<its contexts>}" "$_cs_cell" "$_cs_cfg") (<sweep dir>: the directory of ${_cs_tsv#"${RESULTS_DIR%/}"/})") ;;
 		PLANERR) echo "warning: could not read ${_cs_plan}; planned cells that never ran (NOT_RUN) are not counted" >&2 ;;
 		PLANOTHER) echo "note: ${_cs_plan#"${RESULTS_DIR%/}"/} is the plan of ${_cs_cell}, not of ${_cs_tsv##*/}: its planned cells are not counted for ${_cs_tsv##*/}" >&2 ;;
@@ -1131,17 +1173,48 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 			while (np > 0 && (getline line < plan) > 0) if (line ~ /^# PLAN=[0-9]+ / && (q = index(line, ": --"))) { p = substr(line, 8); sub(/ .*/, "", p); pflags[p] = substr(line, q + 2) }
 			close(plan)
 		}
-		/^timestamp\t/ { cp_header(); sc = 0; for (i = 1; i <= NF; i++) if ($i == "services_per_namespace") sc = i; next }
-		/^#/ { if (phase == "" && index($0, "# PHASE=") == 1) phase = substr($0, 9); cp_comment(); next }
-		NF < 40 { next }
+		# gflush(): a growth window'"'"'s SHORT/SHORTW line, once its rows are read (gn: its
+		# WINDOW_ROWS entries; grd: its members with a row that has a reading). A member whose
+		# rows all have istiod_restarted unknown is left out, as cp_cell_state leaves it out.
+		function gflush(    j, m, w, gs, gw) {
+			gs = ""; gw = ""
+			for (j = 1; j <= gn; j++) {
+				m = gm[j]
+				if (!(m in grd)) continue
+				w = m " ran " gnn[j] " of its "
+				if (gss[j] != "") { if (gnn[j] < gss[j]) gs = gs (gs == "" ? "" : ", ") w gss[j] " istiod replicas" }
+				else if ((m in cp_rep) && gnn[j] < cp_rep[m]) gw = gw (gw == "" ? "" : ", ") w cp_rep[m] " istiod replicas"
+			}
+			if (gs != "") print "SHORT\t" glbl " (" gs ")"
+			if (gw != "") print "SHORTW\t" glbl " (" gw ")"
+			gn = 0; split("", grd)
+		}
+		/^timestamp\t/ { if (gn) gflush(); cp_header(); sc = 0; for (i = 1; i <= NF; i++) if ($i == "services_per_namespace") sc = i; next }
+		/^#/ { if (gn) gflush(); if (phase == "" && index($0, "# PHASE=") == 1) phase = substr($0, 9); cp_comment(); next }
+		!cp_isrow() { next }
 		# Growth rows are not legacy cells: a series shares one key over several windows.
-		sc && NF >= sc && $sc + 0 > 0 { next }
-		{ k = cp_key(); if (!(k in seen)) { seen[k] = 1; order[++n] = k }; cp_cell_row(k, st) }
+		# Their own window'"'"'s WINDOW_ROWS line still says when it ran on fewer istiod pods.
+		sc && NF >= sc && $sc + 0 > 0 {
+			if (cp_wl != "" && FNR == cp_wf + 1) {
+				if (gn) gflush()
+				gn = cp_wl_parse(cp_wl)
+				for (j = 1; j <= gn; j++) { gm[j] = cp_wlm[j]; gnn[j] = cp_wln[j]; gss[j] = cp_wls[j] }
+				glbl = label(cp_key())
+			}
+			if (gn && $31 != "unknown") grd[$2] = 1
+			cp_wl = ""
+			next
+		}
+		{ if (gn) gflush(); k = cp_key(); if (!(k in seen)) { seen[k] = 1; order[++n] = k }; cp_cell_row(k, st) }
 		END {
+			if (gn) gflush()
 			cp_end()
 			for (i = 1; i <= n; i++) {
 				k = order[i]
-				if ((phase == "" || phase == "sweep") && cp_cell_state(k) == "INCOMPLETE") {
+				cs = cp_cell_state(k)
+				if (cp_short[k] != "") print "SHORT\t" label(k) " (" cp_short[k] ")"
+				if (cp_shortw[k] != "") print "SHORTW\t" label(k) " (" cp_shortw[k] ")"
+				if ((phase == "" || phase == "sweep") && cs == "INCOMPLETE") {
 					why = (cp_why[k] != "" ? cp_why[k] : "rows of " (cp_nm[k] + 0) " of " cp_ms[k] " members")
 					print "INCOMPLETE\t" label(k) " (" why ")"
 					split(k, kp, SUBSEP)
@@ -1177,6 +1250,13 @@ if ((NOT_RUN_CELLS)); then
 	else
 		_cs_w+=" (planned-cells.txt names them on its \"# PLAN=\" lines)."
 	fi
+fi
+SHORT_CELLS=${#_cs_short[@]}
+if ((SHORT_CELLS)); then
+	_cs_w+="${_cs_nl}${SHORT_CELLS} cell(s) ran on fewer istiod pods than their member's istiod Deployment wants (its .spec.replicas at the window's baseline: a replica evicted, or Pending), so their per-replica figures are not comparable with the other cells; the rows are valid measurements of the pods that ran: $(cell_list "${_cs_short[@]}")."
+fi
+if ((${#_cs_shortw[@]})); then
+	_cs_w+="${_cs_nl}${#_cs_shortw[@]} cell(s) have fewer rows for a member than its istiod replicas at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): $(cell_list "${_cs_shortw[@]}"). Their WINDOW_ROWS lines do not record the replicas the Deployment wanted then (an older harness), so this is a replica evicted or Pending, or an HPA or a rollout that changed the replicas during the sweep; it does not change the verdict."
 fi
 if [[ -n "$_cs_w" ]]; then
 	DATA_WARNINGS="${DATA_WARNINGS:+${DATA_WARNINGS}${_cs_nl}}${_cs_w#"$_cs_nl"}"
@@ -1214,24 +1294,54 @@ read -r STATUS_ROWS STATUS_SUMMARY < <(cat "${DATA_FILES[@]}" | awk -F'\t' -v re
 STATUS_KINDS="skipped or failed"
 [[ " ${STATUS_SUMMARY}" != *" INTERRUPTED "* ]] || STATUS_KINDS="skipped, failed or interrupted"
 # OUTCOME_PROBLEMS: the PROBLEM lines of the sweep's outcome (sweep-outcome.txt in the
-# results dir: the harness or Istio changed during the sweep, its cells could not be
-# counted, ...), which no figure shows: a PASS verdict reads CAUTION (env_sla_verdict). A
-# sweep's own reports come before its outcome is written: 003 passes the count it will
-# record (_SWEEP_OUTCOME_PROBLEMS). A record not finished (its run died or was interrupted)
-# adds the outcome before it (sweep-outcome.prev.txt: a --resume's), whose rows the figures
-# use too; a finished one already carries that outcome's PROBLEMs.
-OUTCOME_PROBLEMS=0
+# results dir: the harness or Istio changed during the sweep, ...), which no figure shows: a
+# PASS verdict reads CAUTION (env_sla_verdict), naming the records that hold them
+# (OUTCOME_SRC). A pooled report reads the record of each sweep it pools too (the dir of
+# each TSV, a sweep-*/ dir under the base dir). A sweep's own reports come before its
+# outcome is written: 003 passes the count it will record (_SWEEP_OUTCOME_PROBLEMS). A record
+# not finished (its run died or was interrupted) adds the outcome before it
+# (sweep-outcome.prev.txt: a --resume's), whose rows the figures use too; a finished one
+# already carries that outcome's PROBLEMs. "could not count the sweep's cells" is not
+# counted: this report counts the cells itself (NOT_RUN, INCOMPLETE, the status rows), and
+# 003 leaves it out of _SWEEP_OUTCOME_PROBLEMS for the same reason.
+OUTCOME_PROBLEMS=0 OUTCOME_SRC="sweep-outcome.txt"
 if [[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]]; then
 	OUTCOME_PROBLEMS="${_SWEEP_OUTCOME_PROBLEMS:-0}"
 else
-	_op_files=()
-	[[ ! -f "${RESULTS_DIR}/sweep-outcome.txt" ]] || _op_files+=("${RESULTS_DIR}/sweep-outcome.txt")
-	if [[ -f "${RESULTS_DIR}/sweep-outcome.prev.txt" ]] && { [[ ! -f "${RESULTS_DIR}/sweep-outcome.txt" ]] || sweep_outcome_unfinished "${RESULTS_DIR}/sweep-outcome.txt"; }; then
-		_op_files+=("${RESULTS_DIR}/sweep-outcome.prev.txt")
-	fi
-	if ((${#_op_files[@]})) && ! OUTCOME_PROBLEMS="$(awk '/^PROBLEM=/ { n++ } END { print n + 0 }' "${_op_files[@]}")"; then
-		echo "warning: could not read ${_op_files[*]}: the SLA verdict counts it as one PROBLEM" >&2
-		OUTCOME_PROBLEMS=1
+	_op_dirs=("${RESULTS_DIR%/}")
+	for f in "${TSV_FILES[@]}"; do
+		_op_d="$(dirname "$f")" _op_new=1
+		for _op_x in "${_op_dirs[@]}"; do [[ "$_op_x" != "${_op_d%/}" ]] || _op_new=0; done
+		((_op_new == 0)) || _op_dirs+=("${_op_d%/}")
+	done
+	_op_src=()
+	for _op_d in "${_op_dirs[@]}"; do
+		_op_files=()
+		[[ ! -f "${_op_d}/sweep-outcome.txt" ]] || _op_files+=("${_op_d}/sweep-outcome.txt")
+		if [[ -f "${_op_d}/sweep-outcome.prev.txt" ]] && { [[ ! -f "${_op_d}/sweep-outcome.txt" ]] || sweep_outcome_unfinished "${_op_d}/sweep-outcome.txt"; }; then
+			_op_files+=("${_op_d}/sweep-outcome.prev.txt")
+		fi
+		((${#_op_files[@]})) || continue
+		if ! _op_n="$(awk -v u="PROBLEM=could not count the sweep's " 'index($0, "PROBLEM=") == 1 && index($0, u) != 1 { n++ } END { print n + 0 }' "${_op_files[@]}")"; then
+			echo "warning: could not read ${_op_files[*]}: the SLA verdict counts it as one PROBLEM" >&2
+			_op_n=1
+		fi
+		is_nonneg_int "$_op_n" || _op_n=0
+		((_op_n > 0)) || continue
+		OUTCOME_PROBLEMS=$((OUTCOME_PROBLEMS + _op_n))
+		# Its name in the verdict: relative to the results dir, ", and .prev.txt before it"
+		# when that was counted too.
+		_op_l="${_op_files[0]#"${RESULTS_DIR%/}"/}"
+		((${#_op_files[@]} == 1)) || _op_l+=", and .prev.txt before it"
+		_op_src+=("${_op_l}" "$_op_n")
+	done
+	if ((${#_op_src[@]} == 2)); then
+		OUTCOME_SRC="${_op_src[0]}"
+	elif ((${#_op_src[@]} > 2)); then
+		OUTCOME_SRC=""
+		for ((_op_i = 0; _op_i < ${#_op_src[@]}; _op_i += 2)); do
+			OUTCOME_SRC+="${OUTCOME_SRC:+; }${_op_src[_op_i]}: ${_op_src[_op_i + 1]}"
+		done
 	fi
 fi
 is_nonneg_int "$OUTCOME_PROBLEMS" || OUTCOME_PROBLEMS=0
@@ -1265,17 +1375,30 @@ compute_sla_verdict() {
 	imem_eff="$(max_known "$(as_get istiod_mem_pct)" "$ISTIOD_RSS_MEM_PCT")"
 	# CPU likewise: the window peak against the limit, or the end-of-window top snapshot.
 	icpu_eff="$(max_known "$(as_get istiod_cpu_pct)" "$ISTIOD_CPU_PEAK_PCT")"
-	local raw
+	# What else no figure shows (each makes a PASS CAUTION): the rows ran on more than one
+	# harness (HARNESS_MIX), or on one git could not name (HARNESS_UNKNOWN), or on more than
+	# one Istio version (ISTIO_MIX), and cells that ran on fewer istiod pods than wanted
+	# (SHORT_CELLS).
+	local raw cautions=""
+	if ((HARNESS_MIX)); then
+		cautions="the rows in the figures ran on more than one harness (HARNESS_SHA ${HARNESS_SHAS_M}; see the provenance warning), so their cells may not be measured the same way"
+	elif ((HARNESS_UNKNOWN)); then
+		cautions="a run whose rows are in the figures recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY (git could not name its harness, or an older harness did not record it), so the rows cannot be shown to come from one harness"
+	fi
+	((ISTIO_MIX == 0)) || cautions+="${cautions:+$'\n'}the inputs were measured on different Istio versions (ISTIO_VERSION ${ISTIO_VERSIONS_M}; see the provenance warning), so their cells may not be comparable"
+	((SHORT_CELLS == 0)) || cautions+="${cautions:+$'\n'}${SHORT_CELLS} cell(s) ran on fewer istiod pods than their member's istiod Deployment wants (a replica evicted or Pending), so their per-replica figures are not comparable with the other cells"
 	raw="$(env_sla_verdict \
 		"$icpu_eff" "$imem_eff" \
 		"$(as_get node_cpu_pct)"   "$(as_get node_mem_pct)" \
-		"$restarts" "$n_total" "$n_valid" "" "" "$NOT_RUN_CELLS" "${#_cs_inc[@]}" "$OUTCOME_PROBLEMS")"
+		"$restarts" "$n_total" "$n_valid" "" "" "$NOT_RUN_CELLS" "${#_cs_inc[@]}" "$OUTCOME_PROBLEMS" \
+		"$OUTCOME_SRC" "$cautions")"
 	SLA_VERDICT="${raw%%|*}"
 	SLA_HEADLINE="${raw#*|}"
 	# Name the status rows behind a filtered-sample count: a memory-guard stop or a failed
-	# step reads differently from istiod instability.
+	# step reads differently from istiod instability. A sentence of its own: after the last
+	# "; also" clause it would read as part of that clause.
 	if ((STATUS_ROWS > 0)); then
-		SLA_HEADLINE+=" (${STATUS_ROWS} of the rows are status rows of cells ${STATUS_KINDS}, not restarts: ${STATUS_SUMMARY})"
+		SLA_HEADLINE+=". Of the rows, ${STATUS_ROWS} are status rows of cells ${STATUS_KINDS}, not restarts: ${STATUS_SUMMARY}"
 	fi
 }
 compute_sla_verdict
@@ -2110,10 +2233,12 @@ NSS_GLOSSARY
 		$1 == "FIDELITY" { printf "# scaling_fidelity: cell=%s metric=%s fresh=%s in_place=%s diff=%s fresh_run_id=%s in_place_run_id=%s\n", $2, $3, $4, $5, $6, $7, $8 }' <<<"$records"
 		;;
 	json)
-		awk -F'\t' -v reps="$(preamble_get ISTIOD_REPLICAS)" -v conv_min="$CONV_FIT_MIN_PUSHES" -v rules="${CONV_FIT_RULE} ${GROW_FIT_RULE} ${SERIES_FIT_RULE}" '
+		# str: a JSON string (JSON_STR_AWK js, common.sh: \ and " escaped, so a hand-edited
+		# run id or cell keeps the JSON valid).
+		awk -F'\t' -v reps="$(preamble_get ISTIOD_REPLICAS)" -v conv_min="$CONV_FIT_MIN_PUSHES" -v rules="${CONV_FIT_RULE} ${GROW_FIT_RULE} ${SERIES_FIT_RULE}" "${JSON_STR_AWK}"'
 		function isnum(s) { return s ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ }
 		function num(v) { return isnum(v) ? v + 0 : "null" }
-		function str(v) { gsub(/"/, "", v); return "\"" v "\"" }
+		function str(v) { return js(v) }
 		function strs(v,    a, n, i, out) {
 			n = split(v, a, "+"); out = ""
 			for (i = 1; i <= n; i++) if (a[i] != "" && a[i] != "-") out = out (out == "" ? "" : ",") str(a[i])
@@ -2168,8 +2293,8 @@ report_text() {
 	aggregated=$(aggregate)
 	short="$(vsdr_ingest_short "$aggregated")"
 	echo "=== Control-Plane Resource Scaling ==="
-	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}  ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}  ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}  ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}  ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}  ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}  ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}  ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}  ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
-	echo "# runs: run_ids=${RUN_IDS_M}  istio_versions=${ISTIO_VERSIONS_M}  harness_shas=${HARNESS_SHAS_M}  REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA}"
+	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  HARNESS_CONTENT_KEY=${HARNESS_KEY_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}  ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}  ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}  ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}  ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}  ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}  ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}  ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}  ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+	echo "# runs: run_ids=${RUN_IDS_M}  istio_versions=${ISTIO_VERSIONS_M}  harness_shas=${HARNESS_SHAS_M}  harness_content_keys=${HARNESS_KEYS_M}  REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA}"
 	[[ -z "$ATTEMPTS_NOTE" ]] || echo "# attempts: ${ATTEMPTS_NOTE}"
 	[[ -z "$ATTEMPTS_ISTIO" ]] || echo "# attempts, Istio at each start: ${ATTEMPTS_ISTIO}"
 	[[ -z "$POOLED_NOTE" ]] || echo "# POOLED RUNS: ${POOLED_NOTE}"
@@ -2284,12 +2409,12 @@ report_csv() {
 	# One `# KEY=value` line per key: a pooled value such as mixed:live,unknown holds a
 	# comma, so one comma-joined line would be ambiguous.
 	printf '# %s\n' "RUN_ID=${RUN_ID_TAG}" "ISTIO_VERSION=${ISTIO_VERSION_TAG}" "HARNESS_SHA=${HARNESS_SHA_TAG}" \
-		"files_consumed=${FILES_CONSUMED}" "skipped_legacy=${FILES_SKIPPED}" "ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}" \
+		"HARNESS_CONTENT_KEY=${HARNESS_KEY_TAG}" "files_consumed=${FILES_CONSUMED}" "skipped_legacy=${FILES_SKIPPED}" "ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}" \
 		"ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}" "ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}" \
 		"ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}" "ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}" \
 		"ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}" "ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}" \
 		"ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}" "REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA}"
-	echo "# runs: run_ids=${RUN_IDS_M} istio_versions=${ISTIO_VERSIONS_M} harness_shas=${HARNESS_SHAS_M}"
+	echo "# runs: run_ids=${RUN_IDS_M} istio_versions=${ISTIO_VERSIONS_M} harness_shas=${HARNESS_SHAS_M} harness_content_keys=${HARNESS_KEYS_M}"
 	[[ -z "$ATTEMPTS_NOTE" ]] || echo "# attempts: ${ATTEMPTS_NOTE}"
 	[[ -z "$ATTEMPTS_ISTIO" ]] || echo "# attempts, Istio at each start: ${ATTEMPTS_ISTIO}"
 	config_multi_run_csv
@@ -2411,9 +2536,11 @@ report_markdown() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_TAG}")"
+	echo "harness_content_key: $(yaml_str "${HARNESS_KEY_TAG}")"
 	echo "run_ids: $(json_list "$RUN_IDS_M")"
 	echo "istio_versions: $(json_list "$ISTIO_VERSIONS_M")"
 	echo "harness_shas: $(json_list "$HARNESS_SHAS_M")"
+	echo "harness_content_keys: $(json_list "$HARNESS_KEYS_M")"
 	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA}")"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
@@ -2765,12 +2892,12 @@ report_json() {
 	# would unescape a backslash, and a " or \ printed as is would break the JSON. Only the
 	# counts (integers) and the cell keys (a lookup) stay -v.
 	SWEEP_OUTCOME_JSON="$(sweep_outcome_recorded --sweep-level-run-id "$RESULTS_DIR" json)" \
-	_RI_LIST="$(json_list "$RUN_IDS_M")" _IV_LIST="$(json_list "$ISTIO_VERSIONS_M")" _HS_LIST="$(json_list "$HARNESS_SHAS_M")" \
+	_RI_LIST="$(json_list "$RUN_IDS_M")" _IV_LIST="$(json_list "$ISTIO_VERSIONS_M")" _HS_LIST="$(json_list "$HARNESS_SHAS_M")" _HK_LIST="$(json_list "$HARNESS_KEYS_M")" \
 	_ATT_JSON="$ATTEMPTS_JSON" _PROV_WARN="$PROVENANCE_WARNING" _DATA_WARN="$DATA_WARNINGS" \
 	_J_ri="$RUN_ID_TAG" _J_iv="$ISTIO_VERSION_TAG" _J_iv_src="$ISTIO_VERSION_SOURCE_M" _J_iv_pin="$ISTIO_VERSION_PIN_M" \
 	_J_iv_by="$ISTIO_VERSION_BY_CONTEXT_M" _J_iv_nr="$ISTIO_NOTREADY_AT_START_M" _J_iv_wait="$ISTIO_READY_WAITED_SEC_M" \
 	_J_iv_revs="$ISTIO_ACTIVE_REVISIONS_M" _J_iv_gens="$ISTIO_GENERATIONS_M" _J_iv_pv="$ISTIO_PROXY_VERSIONS_M" \
-	_J_hs="$HARNESS_SHA_TAG" _J_rhs="$REPORT_HARNESS_SHA" _J_pooled="$(config_multi_run_json)" _J_rc_path="$RUN_CONFIG_M" \
+	_J_hs="$HARNESS_SHA_TAG" _J_hk="$HARNESS_KEY_TAG" _J_rhs="$REPORT_HARNESS_SHA" _J_pooled="$(config_multi_run_json)" _J_rc_path="$RUN_CONFIG_M" \
 	_J_rc_sha="$RUN_CONFIG_SHA256_M" _J_sw_mesh="$SWEEP_MESH" _J_sw_svc="$SWEEP_SVC" _J_sw_rep="$SWEEP_REP" \
 	_J_sw_ns="$SWEEP_NS" _J_sw_scope="$SWEEP_SCOPE" _J_sw_traffic="$SWEEP_TRAFFIC" _J_tm_every="$VSDR_EVERY_M" \
 	_J_tm_subsets="$VSDR_SUBSETS_M" _J_cap_ncpu="$(preamble_get NODE_ALLOC_CPU_M)" \
@@ -2800,15 +2927,15 @@ report_json() {
 	}
 	BEGIN {
 		# Every string field as a JSON string (js), from the environment (_J_<name>).
-		nj = split("ri iv iv_src iv_pin iv_by iv_nr iv_wait iv_revs iv_gens iv_pv hs rhs rc_path rc_sha sw_mesh sw_svc sw_rep sw_ns sw_scope sw_traffic tm_every tm_subsets cap_ncpu cap_nmem cap_icpu cap_imem cap_tf cap_mode cap_metrics inf_rcpu inf_rmem inf_lcpu inf_lmem inf_rep inf_rep_by inf_net sla_v sla_h tb_levers tb_egress ach_prx ach_cprx ach_svc pc_tol pc_min pc_flagged ach_icpu ach_imem ach_icpu_peak leftover_start ach_irss ach_ncpu ach_nmem ach_psched ach_palloc gr_mode gr_stop gr_settle gr_spn gr_wm gr_wk cov metrics_note", jk, " ")
+		nj = split("ri iv iv_src iv_pin iv_by iv_nr iv_wait iv_revs iv_gens iv_pv hs hk rhs rc_path rc_sha sw_mesh sw_svc sw_rep sw_ns sw_scope sw_traffic tm_every tm_subsets cap_ncpu cap_nmem cap_icpu cap_imem cap_tf cap_mode cap_metrics inf_rcpu inf_rmem inf_lcpu inf_lmem inf_rep inf_rep_by inf_net sla_v sla_h tb_levers tb_egress ach_prx ach_cprx ach_svc pc_tol pc_min pc_flagged ach_icpu ach_imem ach_icpu_peak leftover_start ach_irss ach_ncpu ach_nmem ach_psched ach_palloc gr_mode gr_stop gr_settle gr_spn gr_wm gr_wk cov metrics_note", jk, " ")
 		for (i = 1; i <= nj; i++) J[jk[i]] = js(ENVIRON["_J_" jk[i]])
 		pooled = ENVIRON["_J_pooled"]
 		outcome = ENVIRON["SWEEP_OUTCOME_JSON"]
-		ri_list = ENVIRON["_RI_LIST"]; iv_list = ENVIRON["_IV_LIST"]; hs_list = ENVIRON["_HS_LIST"]; att_json = ENVIRON["_ATT_JSON"]
+		ri_list = ENVIRON["_RI_LIST"]; iv_list = ENVIRON["_IV_LIST"]; hs_list = ENVIRON["_HS_LIST"]; hk_list = ENVIRON["_HK_LIST"]; att_json = ENVIRON["_ATT_JSON"]
 		prov_warn = ENVIRON["_PROV_WARN"]
 		nw = split(ENVIRON["_DATA_WARN"], dws, "\n"); data_warn = ""
 		for (i = 1; i <= nw; i++) if (dws[i] != "") data_warn = data_warn (data_warn == "" ? "" : ",") js(dws[i])
-		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"report_harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"attempts\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,\"files_consumed\":%d,\"skipped_legacy\":%d,\"earlier_attempt_rows_left_out\":%d,\"earlier_attempt_cells\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"sweep_outcome\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], J["rhs"], ri_list, iv_list, hs_list, att_json, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], fc, fs, earlier_rows, earlier_cells, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, outcome }
+		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"harness_content_key\":%s,\"report_harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"harness_content_keys\":%s,\"attempts\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,\"files_consumed\":%d,\"skipped_legacy\":%d,\"earlier_attempt_rows_left_out\":%d,\"earlier_attempt_cells\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"sweep_outcome\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], J["hk"], J["rhs"], ri_list, iv_list, hs_list, hk_list, att_json, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], fc, fs, earlier_rows, earlier_cells, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, outcome }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -2860,9 +2987,11 @@ report_charts() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_TAG}")"
+	echo "harness_content_key: $(yaml_str "${HARNESS_KEY_TAG}")"
 	echo "run_ids: $(json_list "$RUN_IDS_M")"
 	echo "istio_versions: $(json_list "$ISTIO_VERSIONS_M")"
 	echo "harness_shas: $(json_list "$HARNESS_SHAS_M")"
+	echo "harness_content_keys: $(json_list "$HARNESS_KEYS_M")"
 	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA}")"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"

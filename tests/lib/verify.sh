@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pre-merge verification gate for tests/lib/ shared helpers.
 # Runs syntax checks, shellcheck, inline-definition audits, bats unit tests, the
-# bare-scrape and keyed-array lints, and the CI dry-run smoke (every tests/ script annotated
-# `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
+# bare-scrape, keyed-array and bats-negation lints, and the CI dry-run smoke (every tests/
+# script annotated `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
 # Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
 # A missing shellcheck or bats-core fails the run; --skip-shellcheck skips that step on purpose.
@@ -253,6 +253,9 @@ EXTRACTED_PATTERNS=(
 	# the keyed-array arithmetic lint (lint-keyed-arith.sh)
 	'lint_keyed_arith_file() {'
 	'lint_keyed_arith_paths() {'
+	# the bats negation lint (lint-bats-negation.sh)
+	'lint_bats_negation_file() {'
+	'lint_bats_negation_paths() {'
 	# placeholder rows and the legacy schema (propagation.sh); a
 	# sweep that ends before its outcome, escaped markdown cells, a fork-free size check
 	# (common.sh)
@@ -287,10 +290,12 @@ EXTRACTED_PATTERNS=(
 	'_sweep_lock_refuse() {'
 	'_sweep_lock_release_mutex() {'
 	'function cp_header('
+	'function cp_isrow('
 	'function cp_key('
 	'function cp_cell_row('
 	'function cp_cell_state('
 	'function cp_plan_load('
+	'function cp_wl_parse('
 	# a controlplane sweep's runs and its resume command (common.sh)
 	'function cp_comment('
 	'function cp_end('
@@ -308,16 +313,21 @@ EXTRACTED_PATTERNS=(
 	'harness_read() {'
 	'harness_content_key() {'
 	'_harness_same_files() {'
+	'harness_same() {'
 	'sweep_settings_check() {'
 	'_sweep_lock_pid() {'
 	'_sweep_ps_works() {'
 	'_sweep_ps_check() {'
+	'_sweep_ps_table() {'
 	'_sweep_kill_hint() {'
 	'JSON_STR_AWK='
 	'function js('
 	'_sweep_resume_rows_added() {'
-	# an in-pod load stopped with its probe (fortio.sh)
+	# an in-pod load stopped with its probe, or waited out after its exec failed (fortio.sh)
 	'fortio_client_stop() {'
+	'fortio_load_wait_out() {'
+	# the client pod a probe execs its loads in: Running, not being deleted (fortio.sh)
+	'fortio_client_pod() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
@@ -371,11 +381,23 @@ else
 	err "array element read by a variable key in shell arithmetic (read it into a scalar first)"
 fi
 
-# 7. dry-run smoke — same discovery and args as CI (portability.yml).
-if ((SKIP_DRY_RUN)); then
-	step 7 "dry-run smoke (SKIPPED)"
+# 7. bats negation lint: bash exempts a `!`-negated command from set -e and the ERR trap,
+# so a `! cmd` that is not a bats test's last command never fails the test.
+step 7 "bats negation lint"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/lint-bats-negation.sh"
+if lint_out="$(lint_bats_negation_paths "$ROOT/tests")"; then
+	ok
 else
-	step 7 "dry-run smoke for scripts annotated '# ci-dry-run:'"
+	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
+	err "a negated command in a bats test that is not its last never fails it (end it with || false, or use run !)"
+fi
+
+# 8. dry-run smoke — same discovery and args as CI (portability.yml).
+if ((SKIP_DRY_RUN)); then
+	step 8 "dry-run smoke (SKIPPED)"
+else
+	step 8 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
 	empty_kubeconfig="$(mktemp)"
 	dry_out="$(mktemp)"

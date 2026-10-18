@@ -172,7 +172,7 @@ ERR
 	for f in ns-scaling-lab.env ns-scaling-rosa.env; do
 		run load_config "${CP}/configs/$f" controlplane
 		assert_success
-		! grep -q '^SETUP_CONTEXTS=' "${CP}/configs/$f"
+		! grep -q '^SETUP_CONTEXTS=' "${CP}/configs/$f" || false
 	done
 }
 

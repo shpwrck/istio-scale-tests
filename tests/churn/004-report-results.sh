@@ -48,7 +48,12 @@ Usage: $(basename "$0") [options]
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
+                     (csv # POOLED_HARNESS_CONTENT_KEYS= also their HARNESS_CONTENT_KEY
+                     values); its note says when the HARNESS_SHA values differ only in
+                     git describe (every run records one key). It does not read the
+                     sweep-outcome.txt of a sweep-* dir below the results dir: report
+                     each sweep alone to see it.
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
@@ -91,8 +96,9 @@ report made again later, or from another checkout, may count rows by other rules
 results dir it reads does not count as a change to it. harness_content_key (every
 format; csv HARNESS_CONTENT_KEY) is the content key of the harness files the rows ran
 on, "unknown (not recorded)" for a TSV written before it. When harness_sha differs
-between inputs that share one key, they differ only in git describe (a docs commit or
-a new tag between them): stderr gives a note instead of the "disagree" warning.
+between inputs that share one key, they differ only in git describe (a commit or tag
+that left the harness files as they were): stderr gives a note instead of the
+"disagree" warning.
 When the results dir holds sweep-outcome.txt (003 writes it), text, csv and md
 repeat it, with the run that recorded it: the failed cells by reason, its problems
 (the Istio version, the active revision or the generation of the Istio CR or its
@@ -176,6 +182,14 @@ fi
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
+# A pooled report repeats only its results dir's own sweep-outcome.txt
+# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
+# (text, md, charts and csv).
+POOLED_OUTCOME_NOTE=""
+if [[ -n "$POOLED_NOTE" ]]; then
+	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
+	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+fi
 
 # Every format reads the rows through churn_rows, which re-derives the status of a row
 # an older 002 wrote as OK with no number in a measured column, so it
@@ -246,13 +260,14 @@ run_meta() {
 	echo "$v"
 }
 # The content key of the harness files the rows ran on. HARNESS_SHA values that differ
-# while every input records one key differ only in git describe (a docs commit or a new
-# tag between the runs): a note, not the warning. A TSV without the key keeps the warning.
+# while every input records one key differ only in git describe (a commit or tag that left
+# the harness files as they were): a note, not the warning. A TSV without the key keeps
+# the warning.
 HARNESS_CONTENT_KEY_M="$(run_meta HARNESS_CONTENT_KEY)"
 _hs_note=""
 case "$HARNESS_CONTENT_KEY_M" in
 mixed:* | unknown*) ;;
-*) _hs_note="differ only in git describe: every input records HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_M}, the same harness files (a commit or a tag outside them moved the describe)" ;;
+*) _hs_note="differ only in git describe (a commit or tag that left the harness files as they were): every input records HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_M}, the same harness files" ;;
 esac
 HARNESS_SHA_M="$(run_meta HARNESS_SHA "$_hs_note")"
 # This report's own harness, every format; the results dir it reads is no change to it.
@@ -439,6 +454,7 @@ report_csv() {
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
 	config_multi_run_csv
+	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
 	sweep_outcome_recorded "$RESULTS_DIR" csv
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
@@ -560,7 +576,7 @@ report ran on (`<describe>-dirty.<8hex>` with uncommitted changes; the results d
 does not count), which can differ from `harness_sha`: a report made again later, or from
 another checkout, may count rows by other rules. `harness_content_key` is the content key of
 the harness files the rows ran on: inputs whose `harness_sha` differs but that share one key
-differ only in git describe (a docs commit or a new tag between them).
+differ only in git describe (a commit or tag that left the harness files as they were).
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|

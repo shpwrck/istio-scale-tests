@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
-# propagation 002 around t0 and the drain, round 4, through the real probe and reports
-# (PL33) with a stub kubectl and curl, no cluster: the exit-time label removal is bounded
-# inside SWEEP_STOP_GRACE_SEC; an iteration whose drain timed out (DRAIN_TIMEOUT) counts
-# in 002's summary, every 005 format and tuning 004, each saying how many drained late;
-# 002's preamble and 006's placeholder record HARNESS_CONTENT_KEY next to HARNESS_SHA.
+# propagation 002 around t0 and the drain, through the real probe and reports (PL33) with a
+# stub kubectl and curl, no cluster: the exit-time label removal is bounded inside
+# SWEEP_STOP_GRACE_SEC; an iteration whose drain timed out (DRAIN_TIMEOUT) counts in 002's
+# summary, every 005 format and tuning 004, each saying how many drained late; 002's
+# preamble and 006's placeholder record HARNESS_CONTENT_KEY next to HARNESS_SHA, the two
+# from one read of the harness (an edit while the probe starts never splits them).
 # Event order and counts, never elapsed seconds (PL44). Names are placeholders (ctx-a,
 # ctx-b, ci-a), addresses come from 192.0.2.0/24.
 
@@ -208,4 +209,44 @@ _line() {
 	assert_failure 4
 	f="$(ls "$RES"/sweep-*/endpoint-*.tsv)"
 	grep -A1 '^# HARNESS_SHA=' "$f" | tail -1 | grep -Eq "$key"
+}
+
+@test "propagation 002 reads HARNESS_SHA and HARNESS_CONTENT_KEY once: an edit while it starts leaves its preamble one tree's pair (the -dirty.<8hex> is the key's start)" {
+	_stub
+	# A copy of the harness in a git checkout of its own, dirty at the start (an untracked
+	# tests/ file), so the probe's HARNESS_SHA carries -dirty.<8hex>.
+	local r="${BATS_TEST_TMPDIR}/repo" f sha key want_key
+	mkdir -p "$r/tests/lib/test"
+	cp -R "${ROOT}/config" "$r/config"
+	cp "${ROOT}"/tests/lib/*.sh "$r/tests/lib/"
+	cp -R "${ROOT}/tests/lib/test/fixtures" "$r/tests/lib/test/fixtures"
+	(cd "${ROOT}/tests" && tar -cf - --exclude=results --exclude='*.local.env' propagation) | (cd "$r/tests" && tar -xf -)
+	cp "${ROOT}/.gitignore" "$r/.gitignore"
+	git -C "$r" init -q
+	git -C "$r" add -A
+	git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
+	echo before > "$r/tests/zz-before.txt"
+	want_key="$(ROOT="$r" harness_content_key)"
+	[[ "$want_key" =~ ^[0-9a-f]{12}$ ]]
+	# The probe's first Istio CR read (istio_version_resolve, after its harness read) adds
+	# another untracked tests/ file: an operator's edit while the probe starts.
+	mv "${BIN}/kubectl" "${BIN}/kubectl.real"
+	cat > "${BIN}/kubectl" <<'W'
+#!/usr/bin/env bash
+case " $* " in *" get istios.sailoperator.io default "*) [[ -e "$ROOT/tests/zz-mid-edit.txt" ]] || echo edit > "$ROOT/tests/zz-mid-edit.txt" ;; esac
+exec "${0}.real" "$@"
+W
+	chmod +x "${BIN}/kubectl"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" PROPAGATION_DRAIN_TIMEOUT_SEC=1 run --separate-stderr \
+		"$r/tests/propagation/002-run-endpoint-probe.sh" --source-context ctx-a --remote-contexts ctx-b --timeout 3 \
+		--poll-interval-ms 100 --settle-sec 0 --tsv --output-dir "$RES" --iterations 1
+	assert_success
+	[ -e "$r/tests/zz-mid-edit.txt" ]
+	[ "$(ROOT="$r" harness_content_key)" != "$want_key" ]
+	f="$(ls "$RES"/endpoint-*.tsv)"
+	sha="$(sed -n 's/^# HARNESS_SHA=//p' "$f")"
+	key="$(sed -n 's/^# HARNESS_CONTENT_KEY=//p' "$f")"
+	# The read before the edit: its key, and the -dirty suffix is that key's first 8 hex.
+	[ "$key" = "$want_key" ] || { echo "key ${key}, want ${want_key}"; false; }
+	[[ "$sha" == *-dirty."${key:0:8}" ]] || { echo "HARNESS_SHA ${sha}, HARNESS_CONTENT_KEY ${key}"; false; }
 }

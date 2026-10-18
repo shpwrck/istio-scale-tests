@@ -13,7 +13,8 @@
 #      Names come from the files' own metadata: the per-member keys
 #      (ISTIO_VERSION_BY_CONTEXT and every *_BY_CONTEXT key, ISTIO_ACTIVE_REVISIONS,
 #      ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS, ISTIO_NOTREADY_AT_*, KUBE_VERSIONS,
-#      ISTIOD_REPLICAS as ctx=value lists, as keys or as resumes.txt's columns), the
+#      ISTIOD_REPLICAS and controlplane's WINDOW_ROWS lines (<ctx>=<rows>[/<replicas>],
+#      the suffix kept) as ctx=value lists, as keys or as resumes.txt's columns), the
 #      member lists (CONTEXTS, REMOTE_CONTEXTS, REMOTES, any *_CONTEXTS key), SOURCE_CTX,
 #      WORKLOAD_CONTEXT and any other *_CTX / *_CONTEXT key, HUB_CONTEXT (the hub), and
 #      the "# Contexts:" / "# Source: ... Remotes:" lines, and the "by member
@@ -54,8 +55,9 @@
 # Final scan, per file, on the redacted text and the renamed path: no mapped name is left;
 # every value of a TSV column named context, ctx, *_ctx or *_context (and of such a JSON
 # string field) is a placeholder, none/N/A/unknown/- or an UPPER_SNAKE status a placeholder
-# row writes there (PROBE_FAILED); a .json file still parses (jq). A file that fails is
-# never written (nor replaced or renamed with --in-place); the run names it and exits 1.
+# row writes there (PROBE_FAILED; controlplane's INTERRUPTED too); a .json file still
+# parses (jq). A file that fails is never written (nor replaced or renamed with
+# --in-place); the run names it and exits 1.
 # Columns are checked, not learned from: a member the metadata never names is a context
 # the script was not told about, so pass it with --context NAME.
 #
@@ -304,17 +306,22 @@ function lower(s) { return tolower(s) }
 function keyclass(k) {
 	if (k ~ /_by_context$/) return "kv"
 	if (k == "istio_active_revisions" || k == "istio_proxy_versions" || k == "istio_generations" \
-		|| k == "kube_versions" || k == "istiod_replicas" || k ~ /^istio_notready_at_(start|end|resume)$/) return "kv"
+		|| k == "kube_versions" || k == "istiod_replicas" || k == "window_rows" \
+		|| k ~ /^istio_notready_at_(start|end|resume)$/) return "kv"
 	if (k == "contexts" || k == "remotes" || k ~ /_contexts$/) return "list"
 	if (k == "hub_context" || k == "hub_ctx") return "hub"
 	if (k == "context" || k == "ctx" || k ~ /_ctx$/ || k ~ /_context$/) return "single"
 	return ""
 }
+# neutral <token>: no context name: a word a metadata value or a context column holds in
+# its place, a placeholder, or an UPPER_SNAKE status a placeholder row writes there
+# (PROBE_FAILED), and INTERRUPTED, the one status of controlplane 003 (CELL_STATUS_RE)
+# without an underscore (a cell a signal cut short; its --resume runs it again).
 function neutral(t,    l) {
 	l = lower(t)
 	return (t == "" || l == "none" || l == "unknown" || l == "unchecked" || l == "n/a" || l == "na" \
 		|| l == "-" || l == "mixed" || l == "mixed:" || l == "all" || l == "null" || l == "true" || l == "false" \
-		|| t ~ /^<[a-z][a-z0-9-]*>$/ || t ~ /^[A-Z][A-Z0-9]*_[A-Z0-9_]*$/)
+		|| t ~ /^<[a-z][a-z0-9-]*>$/ || t ~ /^[A-Z][A-Z0-9]*_[A-Z0-9_]*$/ || t == "INTERRUPTED")
 }
 function isname(t) {
 	if (neutral(t)) return 0

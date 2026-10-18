@@ -153,9 +153,9 @@ _trap_steps_guarded() {
 	grep -q '^STARTED_AT=[0-9T:-]*Z$' "$REC"
 	grep -q '^ENDED_AT=[0-9T:-]*Z$' "$REC"
 	grep -qx 'RUN_ID=skel-run' "$REC"
-	! grep -q '^ENDED_SIGNAL=' "$REC"
+	! grep -q '^ENDED_SIGNAL=' "$REC" || false
 	sweep_outcome_cut_short "$REC"
-	! sweep_outcome_unfinished "$REC"
+	! sweep_outcome_unfinished "$REC" || false
 	run sweep_outcome_recorded "$D" text
 	assert_output --partial "SWEEP OUTCOME (recorded in sweep-outcome.txt by run skel-run, exit 1):"
 	assert_output --partial "  stopped early: the members went away"
@@ -242,7 +242,7 @@ _trap_steps_guarded() {
 			grep -q '^ENDED_AT=[0-9T:-]*Z$' "$REC"
 			grep -qx "ENDED_EXIT=${st}" "$REC"
 			grep -qx "ENDED_SIGNAL=${sig}" "$REC"
-			! grep -q '^STOP' "$REC"
+			! grep -q '^STOP' "$REC" || false
 			sweep_outcome_unfinished "$REC"
 		done
 	done
@@ -272,7 +272,7 @@ _trap_steps_guarded() {
 	grep -qx 'EXIT=unfinished' "$REC"
 	grep -qx 'NOTE=the Istio CR changed while the sweep changed nothing' "$REC"
 	grep -qx 'NOTE=a member could not be compared' "$REC"
-	! grep -q '^PROBLEM=' "$REC"
+	! grep -q '^PROBLEM=' "$REC" || false
 	run sweep_outcome_recorded "$D" text
 	assert_output --partial "NOT FINISHED"
 	assert_output --partial "the Istio CR changed while the sweep changed nothing"
@@ -281,7 +281,7 @@ _trap_steps_guarded() {
 	assert_failure 143
 	grep -qx 'EXIT=unfinished' "$REC"
 	grep -qx 'ENDED_EXIT=143' "$REC"
-	! grep -q '^ENDED_SIGNAL=' "$REC"
+	! grep -q '^ENDED_SIGNAL=' "$REC" || false
 	run sweep_outcome_recorded "$D" text
 	assert_output --partial "(exit 143, no error recorded) before it wrote its outcome"
 }
@@ -292,12 +292,12 @@ _trap_steps_guarded() {
 	assert_failure 1
 	# The subshell's EXIT trap left the record alone; the sweep's own then recorded the die.
 	grep -qx 'EXIT=unfinished' "${D}/after-subshell.txt"
-	! grep -q '^ENDED_AT=' "${D}/after-subshell.txt"
+	! grep -q '^ENDED_AT=' "${D}/after-subshell.txt" || false
 	grep -qx 'STOP_REASON=after the subshell' "$REC"
 	_skeleton_run done
 	assert_success
 	grep -qx 'EXIT=0' "$REC"
-	! grep -q '^CUT_SHORT=\|^ENDED_AT=' "$REC"
+	! grep -q '^CUT_SHORT=\|^ENDED_AT=' "$REC" || false
 	# A finished sweep's csv names no stop.
 	run sweep_outcome_recorded "$D" csv
 	assert_line "# SWEEP_OUTCOME_EXIT=0"
@@ -307,11 +307,11 @@ _trap_steps_guarded() {
 	assert_failure 1
 	grep -qx 'RUN_ID=another-run' "$REC"
 	grep -qx 'EXIT=unfinished' "$REC"
-	! grep -q '^ENDED_AT=\|^STOP' "$REC"
+	! grep -q '^ENDED_AT=\|^STOP' "$REC" || false
 	_skeleton_run kill
 	[ "$status" -eq 137 ]
 	grep -qx 'EXIT=unfinished' "$REC"
-	! grep -q '^ENDED_AT=\|^STOP\|^CUT_SHORT' "$REC"
+	! grep -q '^ENDED_AT=\|^STOP\|^CUT_SHORT' "$REC" || false
 	run sweep_outcome_recorded "$D" text
 	assert_output --partial "this sweep has not finished (it died, or still runs): the run that started at "
 }
@@ -405,7 +405,7 @@ _trap_steps_guarded() {
 	assert_failure 4
 	[[ "$stderr" != *"records a problem"* ]]
 	grep -qx 'EXIT=4' "$d/sweep-outcome.txt"
-	! grep -q '^CUT_SHORT=\|^NOTE=next: ' "$d/sweep-outcome.txt"
+	! grep -q '^CUT_SHORT=\|^NOTE=next: ' "$d/sweep-outcome.txt" || false
 	[ ! -e "$d/sweep-outcome.prev.txt" ]
 }
 

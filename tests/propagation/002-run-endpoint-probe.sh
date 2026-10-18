@@ -290,8 +290,10 @@ if [[ -z "$MESH_SIZE" ]]; then
 fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
-HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
+# The harness (PL2), from one read (harness_read, tests/lib/common.sh): HARNESS_SHA
+# (<describe>, or <describe>-dirty.<8hex> for uncommitted changes) and HARNESS_CONTENT_KEY,
+# so the preamble's pair names one tree; this probe's own results do not count.
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
 TSV_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.tsv"
 
 if ((DRY_RUN)); then
@@ -363,8 +365,9 @@ if ((WRITE_TSV)); then
 		echo "# RUN_ID=${RUN_ID}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		# The harness files' content key: TSVs with one key ran the same harness files,
-		# whatever their HARNESS_SHA's describe part (a docs commit, a new tag).
-		echo "# HARNESS_CONTENT_KEY=$(harness_content_key --exclude "$OUTPUT_DIR")"
+		# whatever their HARNESS_SHA's describe part (a commit or tag that left the harness
+		# files as they were).
+		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 		istio_version_kv | sed 's/^/# /'
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}"

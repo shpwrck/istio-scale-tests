@@ -399,7 +399,7 @@ incomplete_dir() {
 # The attempts in controlplane 004
 
 @test "controlplane 004 names each attempt (its HARNESS_SHA and KUBE_VERSIONS) and REPORT_HARNESS_SHA in every format; a resume's harness joins harness_shas and the provenance warning, and one on other Kubernetes versions warns" {
-	local first ra rh
+	local first ra rh c0 c1
 	incomplete_dir
 	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6
 	[ "$status" -eq 4 ]
@@ -410,7 +410,8 @@ incomplete_dir() {
 	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "abc1234"; $4 = "ci-a=v1.31.0,ci-b=v1.30.0"; if (NF >= 9) $9 = "000000000000" } { print }' "$D/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt"
 	mv "${BATS_TEST_TMPDIR}/r.txt" "$D/resumes.txt"
 	first="$(sed -n 's/^# HARNESS_SHA=//p' "$TSV" | head -n 1)"
-	ra="$(awk -F'\t' 'NR == 2 { print $1 }' "$D/resumes.txt")"
+	# The attempt labels print its time with Z.
+	ra="$(awk -F'\t' 'NR == 2 { t = $1; sub(/\+00:00$/, "Z", t); print t }' "$D/resumes.txt")"
 	rh="$(harness_sha)"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
 	assert_success
@@ -422,7 +423,10 @@ incomplete_dir() {
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"ran on different harnesses (HARNESS_SHA ${first},abc1234; a --resume's included, see the attempts)"* ]]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"A --resume ran on other Kubernetes server versions than the first run (ci-a v1.30.0 in the first run, v1.31.0 at the --resume at ${ra})"* ]]
 	[[ "$stderr" == *"WARNING: "*"ran on different harnesses"* ]]
-	local att="the rows come from more than one run: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble), then --resume at ${ra} HARNESS_SHA=abc1234 KUBE_VERSIONS=ci-a=v1.31.0,ci-b=v1.30.0"
+	# Every format but json gives each attempt's rows as json does (rows, rows_kept).
+	c0="$(jq -r '.metadata.attempts[0] | "\(.rows) row(s), \(.rows_kept) in the figures"' <<<"$output")"
+	c1="$(jq -r '.metadata.attempts[1] | "\(.rows) row(s), \(.rows_kept) in the figures"' <<<"$output")"
+	local att="the rows come from more than one run: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (${c0}), then --resume at ${ra} HARNESS_SHA=abc1234 KUBE_VERSIONS=ci-a=v1.31.0,ci-b=v1.30.0 (${c1})"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_line "# attempts: ${att}"
 	assert_output --partial "REPORT_HARNESS_SHA=${rh}"
@@ -461,7 +465,9 @@ incomplete_dir() {
 		[[ "$output" == *"1 cell(s) have rows after a status row of their own with no recorded --resume start between them"*"mesh=2 svcs=6"* ]] || { echo "${fmt}: ${output}"; false; }
 	done
 	# A resumes.txt line of another TSV: still no boundary.
-	printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\n2026-06-01T00:04:00+00:00\tfixture\tnone\tci-a=unknown\t%s\tunknown\tunknown\tcontrolplane-other.tsv\n' "$n" > "$D/resumes.txt"
+	# The resume ran the first run's harness (a mix of harnesses would make the verdict CAUTION).
+	printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\n2026-06-01T00:04:00+00:00\t%s\tnone\tci-a=unknown\t%s\tunknown\tunknown\tcontrolplane-other.tsv\n' \
+		"$(sed -n 's/^# HARNESS_SHA=//p' "$TSV" | head -n 1)" "$n" > "$D/resumes.txt"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
 	[ "$(jq -r '.metadata.earlier_attempt_rows_left_out' <<<"$output")" = 0 ]
 	[ "$(jq -r '.metadata.attempts | length' <<<"$output")" = 1 ]
@@ -649,12 +655,14 @@ _hs() {
 	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 1 ]
 	# The console keeps the full path, and names the sweep dir after the stop, then the next
-	# step with that path (SWEEP_NEXT_CONSOLE; the record keeps "<sweep dir>").
+	# step with that path (SWEEP_NEXT_CONSOLE; the record keeps "<sweep dir>"), once.
 	[[ "$stderr" == *"error: could not write ${D}/planned-cells.txt, which records the cells this sweep plans; nothing was run."* ]]
-	[[ "$stderr" == *"warning: next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)."$'\n'"  sweep dir: ${D}"$'\n'"  next: ./tests/controlplane/003-run-sweep.sh --resume ${D} --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none" ]]
+	[[ "$stderr" == *"  sweep dir: ${D}"$'\n'"  next: ./tests/controlplane/003-run-sweep.sh --resume ${D} --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none" ]]
+	[[ "$stderr" != *"next: --resume this sweep dir"* ]]
 	# The record (shared) does not.
+	grep -qxF "NOTE=next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)" "$D/sweep-outcome.txt"
 	grep -qx 'STOP_REASON=could not write <sweep dir>/planned-cells.txt, which records the cells this sweep plans; nothing was run.' "$D/sweep-outcome.txt"
-	! grep -qF "$BATS_TEST_TMPDIR" "$D/sweep-outcome.txt"
+	! grep -qF "$BATS_TEST_TMPDIR" "$D/sweep-outcome.txt" || false
 	grep -qx 'CUT_SHORT=1' "$D/sweep-outcome.txt"
 	grep -q '^RESUMED_AT=' "$D/sweep-outcome.txt"
 	grep -qx 'EXIT=4' "$D/sweep-outcome.prev.txt"
@@ -787,7 +795,8 @@ _wait_file() {
 	wait "$p" || rc=$?
 	[ "$rc" -eq 143 ]
 	[ "$(<"$d/step-got")" = TERM ]
-	[ ! -e "$d/step-done" ] && [ ! -e "$d/sweep-continued" ]
+	[ ! -e "$d/step-done" ]
+	[ ! -e "$d/sweep-continued" ]
 	grep -qx 'EXIT=unfinished' "$d/rec/sweep-outcome.txt"
 	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/rec/sweep-outcome.txt"
 	grep -qx 'ENDED_EXIT=143' "$d/rec/sweep-outcome.txt"
@@ -925,7 +934,7 @@ tun_sweep() {
 	[ "$status" -eq 4 ]
 	[[ "$stderr" == *"error: 2 of 2 passes failed: PROBE_FAILED x2."* ]]
 	[[ "$stderr" != *"Istio CR changed"* && "$stderr" != *"was edited during the sweep"* && "$stderr" != *"incomplete revert"* ]]
-	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt"
+	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt" || false
 	# The baseline probe ran on generation 2, the profile's on 3 (after its apply).
 	grep -q '^ci-a=2/2 ' "${TD}/gens-seen"
 	grep -q '^ci-a=3/3 ' "${TD}/gens-seen"

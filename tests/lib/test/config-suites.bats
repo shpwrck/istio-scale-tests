@@ -101,8 +101,10 @@ formats_show() {
 	assert_success
 	[ -z "$stderr" ]
 	config_check_multi_run "$r" 0 "$r/sweep-1/a.tsv" "$r/sweep-1/b.tsv"
-	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-1 ]
-	[ -z "$(config_multi_run_note)" ] && [ -z "$(config_multi_run_csv)" ]
+	[ "$MULTI_RUN_N" = 1 ]
+	[ "$MULTI_RUN_IDS" = sweep-1 ]
+	[ -z "$(config_multi_run_note)" ]
+	[ -z "$(config_multi_run_csv)" ]
 	[ "$(config_multi_run_json)" = '{"runs":1,"run_ids":["sweep-1"],"harness_sha":["h1"],"istio_version":["v1"],"harness_content_key":["unknown"]}' ]
 	# Two sweeps: dies, naming each sweep dir (newest first) and the command that reports
 	# it alone, its path quoted.
@@ -244,7 +246,8 @@ formats_show() {
 	run --separate-stderr config_check_multi_run "$r/res/latest" 0 "$r/res/latest/a.tsv" "$r/res/latest/b.tsv" "$r/res/latest/c.tsv"
 	assert_success
 	config_check_multi_run "$r/res/latest" 0 "$r/res/latest/a.tsv" "$r/res/latest/b.tsv" "$r/res/latest/c.tsv"
-	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-7 ]
+	[ "$MULTI_RUN_N" = 1 ]
+	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-7 ]
 	cd "$r/res/latest"
 	config_check_multi_run . 0 ./a.tsv b.tsv c.tsv
 	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-7 ]
@@ -254,7 +257,8 @@ formats_show() {
 	printf '# RUN_ID=q2\nrun_id\nq2\n' > "$r/store/data/b.tsv"
 	ln -s "$r/store/data" "$r/res/sweep-20261016T100000Z-8"
 	config_check_multi_run "$r/res/sweep-20261016T100000Z-8" 0 "$r/res/sweep-20261016T100000Z-8/a.tsv" "$r/res/sweep-20261016T100000Z-8/b.tsv"
-	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-8 ]
+	[ "$MULTI_RUN_N" = 1 ]
+	[ "$MULTI_RUN_IDS" = sweep-20261016T100000Z-8 ]
 	# A plain directory (no sweep-* on either side) still counts its ids.
 	run --separate-stderr config_check_multi_run "$r/store/data" 0 "$r/store/data/a.tsv" "$r/store/data/b.tsv"
 	assert_failure 1
@@ -366,6 +370,30 @@ formats_show() {
 	run bash "$DP/001-setup-dataplane-test.sh" --config "$f" --source-context ci-x --dry-run
 	assert_failure 1
 	assert_output --partial "--wait-timeout (or DATAPLANE_WAIT_TIMEOUT_SEC) must be a positive integer"
+}
+
+@test "dataplane 002 checks its window knobs, from a flag, --config or the environment, before any cluster call: a bad --duration, --warmup-duration, --connections or --settle stops it, naming flag and key" {
+	local f a
+	for a in "--duration 0:--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '0'" \
+		"--duration 08:--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '08'" \
+		"--warmup-duration x:--warmup-duration (or DATAPLANE_WARMUP_DURATION_SEC) must be a non-negative integer; got 'x'" \
+		"--connections 0:--connections (or DATAPLANE_NUM_CONNECTIONS) must be a positive integer; got '0'" \
+		"--settle -1:--settle (or DATAPLANE_SETTLE_SEC) must be a non-negative integer; got '-1'"; do
+		# shellcheck disable=SC2086  # the flag and its value
+		PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run --separate-stderr bash "$DP/002-run-latency-probe.sh" \
+			--source-context ci-x ${a%%:*}
+		assert_failure 1
+		[[ "$stderr" == *"${a#*:}"* ]] || { echo "${a%%:*}: ${stderr}"; false; }
+	done
+	f="$(cfg bad.env 'DATAPLANE_DURATION_SEC=30s')"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run --separate-stderr bash "$DP/002-run-latency-probe.sh" --config "$f" --source-context ci-x
+	assert_failure 1
+	[[ "$stderr" == *"--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '30s'"* ]]
+	DATAPLANE_SETTLE_SEC=abc PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run --separate-stderr bash "$DP/002-run-latency-probe.sh" \
+		--source-context ci-x --dry-run
+	assert_failure 1
+	[[ "$stderr" == *"--settle (or DATAPLANE_SETTLE_SEC) must be a non-negative integer; got 'abc'"* ]]
+	[ ! -s "$STUB_LOG" ]
 }
 
 @test "dataplane 002 with --config: RUN_CONFIG in the preamble; 004 repeats it in every format" {

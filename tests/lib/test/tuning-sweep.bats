@@ -131,7 +131,7 @@ _proxy_settle_order() {
 	_tun_stub
 	tun_sweep 01-push-throttling 7
 	[ "$status" -eq 4 ]
-	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt"
+	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt" || false
 	[[ "$stderr" != *"changed while the sweep changed nothing"* ]]
 	[ "$(_proxy_settle_order)" = PSPSP ]
 }
@@ -143,7 +143,7 @@ _proxy_settle_order() {
 	tun_sweep "$p"
 	[ "$status" -eq 4 ] || { echo "$stderr"; false; }
 	[ "$(<"${TDIR}/${p}/state/patch.json")" = "{}" ]
-	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt"
+	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt" || false
 	[[ "$stderr" != *"Istio CR changed"* ]]
 	# During its apply: the read after the apply finds it (the profile raised nothing).
 	rm -rf "$TD" "$TUN_RES"
@@ -209,7 +209,8 @@ _proxy_settle_order() {
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run --separate-stderr "${ROOT}/tests/tuning/001-apply-profile.sh" \
 		--profile "${ROOT}/tests/tuning/profiles/01-push-throttling.yaml" --contexts ci-a --state-dir "$st"
 	assert_success
-	[ ! -e "$st/revert-started" ] && [ ! -e "$st/istio-edited-during-pass" ]
+	[ ! -e "$st/revert-started" ]
+	[ ! -e "$st/istio-edited-during-pass" ]
 }
 
 # _kc_stub: a kubectl for the Istio version reads: the Istio CR as fake-istio-cr.sh; two
@@ -291,7 +292,8 @@ STUB
 	assert_output "ci-a=1.30.5:6,ci-b=1.30.5:6,ci-c=1.30.5:6"
 	local max
 	max="$(sort -n "$KC_DIR/conc" | tail -n 1)"
-	[ "$max" -ge 2 ] && [ "$max" -le 3 ]
+	[ "$max" -ge 2 ]
+	[ "$max" -le 3 ]
 }
 
 @test "an Istio version check interrupted by Ctrl-C (or a closed terminal) leaves nothing in TMPDIR; so does tuning 003's dry run stopped during its probe check" {

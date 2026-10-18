@@ -412,7 +412,7 @@ _envelope() {
 	[ -f "${d}/istiod-diag-r9/001-restart-ci-b/istiod.log.txt" ]
 	[[ "$stderr" == *"still named after a context, neither redacted nor renamed"* ]]
 	grep -qxF "  ${d}/istiod-diag-r9/001-restart-ci-b" <<<"$stderr"
-	! grep -qxF "  ${d}/istiod-diag-r9/001-restart-ci-b/istiod.log.txt" <<<"$stderr"
+	! grep -qxF "  ${d}/istiod-diag-r9/001-restart-ci-b/istiod.log.txt" <<<"$stderr" || false
 	# A second run finds nothing more to rename.
 	run --separate-stderr "$REDACT" --in-place "$d"
 	assert_success

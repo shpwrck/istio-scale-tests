@@ -120,21 +120,21 @@ _gen_tsv() {
 	for loc in C C.UTF-8; do
 		LC_ALL="$loc" file_min_bytes "$d/512" 512
 		LC_ALL="$loc" file_min_bytes "$d/513" 512
-		! LC_ALL="$loc" file_min_bytes "$d/511" 512
+		! LC_ALL="$loc" file_min_bytes "$d/511" 512 || false
 		LC_ALL="$loc" file_min_bytes "$d/511" 511
-		! LC_ALL="$loc" file_min_bytes "$d/mb400" 512
+		! LC_ALL="$loc" file_min_bytes "$d/mb400" 512 || false
 		LC_ALL="$loc" file_min_bytes "$d/mb600" 512
 		LC_ALL="$loc" file_min_bytes "$d/nul520" 512
-		! LC_ALL="$loc" file_min_bytes "$d/nul410" 512
+		! LC_ALL="$loc" file_min_bytes "$d/nul410" 512 || false
 	done
-	! file_min_bytes "$d/empty" 512
-	! file_min_bytes "$d/missing" 512
-	! file_min_bytes "$d/dir" 512
-	! file_min_bytes "$d/512" abc
-	! file_min_bytes "$d/512" ""
+	! file_min_bytes "$d/empty" 512 || false
+	! file_min_bytes "$d/missing" 512 || false
+	! file_min_bytes "$d/dir" 512 || false
+	! file_min_bytes "$d/512" abc || false
+	! file_min_bytes "$d/512" "" || false
 	# n = 0: any readable regular file, empty included.
 	file_min_bytes "$d/empty" 0
-	! file_min_bytes "$d/dir" 0
+	! file_min_bytes "$d/dir" 0 || false
 	# A complete file is decided by the read builtin alone: no wc on PATH, still true; a
 	# short one needs wc, so without it reads as short.
 	(PATH="${BATS_TEST_TMPDIR}/no-such-dir"; file_min_bytes "$d/513" 512)

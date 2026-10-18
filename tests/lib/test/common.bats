@@ -447,13 +447,15 @@ _in_path() {
 @test "sweep_outcome record: RUN_ID, HARNESS_SHA and why it stopped; sweep_outcome_recorded repeats it for a re-generated report" {
 	local d="${BATS_TEST_TMPDIR}/rec"
 	mkdir -p "$d"
-	harness_sha() { echo abc1234; }
+	# One harness read gives both (no sweep exported them).
+	harness_read() { local -n _hrv="$1" _hrk="$2"; _hrv=abc1234 _hrk=0123456789ab; }
 	run --separate-stderr sweep_outcome --stopped 3 --stop-reason "the reachability gate found an unreachable remote" \
 		--run-id 20261016T100000Z-1 --record "$d" --md "${d}/none.md" \
 		--note "istiod/CNI not ready at the end of the sweep, same Istio version (a: its state is IstioCNINotHealthy)" 4
 	assert_failure 3
 	grep -qx 'RUN_ID=20261016T100000Z-1' "${d}/sweep-outcome.txt"
 	grep -qx 'HARNESS_SHA=abc1234' "${d}/sweep-outcome.txt"
+	grep -qx 'HARNESS_CONTENT_KEY=0123456789ab' "${d}/sweep-outcome.txt"
 	grep -qx 'STOP_REASON=the reachability gate found an unreachable remote' "${d}/sweep-outcome.txt"
 	echo 'PROBLEM=the Istio version changed during the sweep (a: v1 at the start, v2 at the end) "quoted"' >> "${d}/sweep-outcome.txt"
 	run sweep_outcome_recorded "$d" text

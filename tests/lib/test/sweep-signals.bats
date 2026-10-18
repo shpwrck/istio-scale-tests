@@ -108,7 +108,8 @@ teardown() {
 	[ "$status" -eq 143 ] || { echo "status ${status}: ${stderr}"; false; }
 	[ -e "$d/started" ]
 	[ "$(<"$d/step-exit")" = exit ]
-	[ ! -e "$d/step-done" ] && [ ! -e "$d/sweep-continued" ]
+	[ ! -e "$d/step-done" ]
+	[ ! -e "$d/sweep-continued" ]
 	_gone $(_tree_pids "$d")
 	[ "$(_tree_pids "$d" | wc -l)" -eq 6 ]
 	[[ "$stderr" =~ Stopping\ the\ running\ step\ \(step\.sh\):\ SIGTERM\ to\ its\ [0-9]+\ process\(es\)\;\ any\ still\ running\ 30s\ later\ get\ SIGKILL\ \(SWEEP_STOP_GRACE_SEC\)\. ]] || { echo "$stderr"; false; }
@@ -171,7 +172,7 @@ teardown() {
 	[ "$rc" -eq 143 ] || { echo "status ${rc}: $(cat "$d/err")"; false; }
 	_gone $(_tree_pids "$d")
 	grep -qE 'warning: the sweep ended while its step \(step\.sh\) still ran: sent SIGKILL to its [0-9]+ process\(es\)' "$d/err"
-	! grep -q 'still ran 300s after' "$d/err"
+	! grep -q 'still ran 300s after' "$d/err" || false
 	[ ! -e "$d/lock-gone-while-alive" ]
 	[ ! -e "$d/rec/.sweep.lock" ]
 	grep -qx 'EXIT=unfinished' "$d/rec/sweep-outcome.txt"

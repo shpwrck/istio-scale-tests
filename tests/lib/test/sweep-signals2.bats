@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # A sweep's stop without a working ps, in a terminal's foreground, and its console hints
-# (tests/lib/common.sh): without ps (or with busybox ps, no lstart) a sweep warns at its
-# start with the install hint, and a signal still stops its step's own process, SIGKILL
-# after SWEEP_STOP_GRACE_SEC; a kill -INT to a sweep in a terminal's foreground skips the
+# (tests/lib/common.sh): without ps (or with busybox ps, no lstart) and without /proc (a
+# missing _SWEEP_PROC dir) a sweep warns at its start, and a signal still stops its step's
+# own process, SIGKILL after SWEEP_STOP_GRACE_SEC; a kill -INT to a sweep in a terminal's foreground skips the
 # processes of that group, and its console line counts the ones it signalled and skipped;
 # a SIGKILL names the suite's cleanup (SWEEP_CLEANUP_CMD); a stop prints the sweep's console
 # next step (SWEEP_NEXT_CONSOLE). A lock another run has just created and not yet written
@@ -115,20 +115,21 @@ teardown() {
 	done
 }
 
-@test "without a working ps (none, or busybox ps without lstart) a sweep warns at its start with the install hint; a SIGTERM still stops its step's own process, which runs its EXIT trap, and the sweep ends (143) with its lock gone and its console next step" {
+@test "without a working ps (none, or busybox ps without lstart) or /proc a sweep warns at its start; a SIGTERM still stops its step's own process, which runs its EXIT trap, and the sweep ends (143) with its lock gone and its console next step" {
 	local d kind
 	for kind in none busybox; do
 		d="${BATS_TEST_TMPDIR}/sig-${kind}"
 		_one_fixture "$d"
 		_ps_stub "$d/bin" "$kind"
-		PATH="$d/bin:${PATH}" SWEEP_NEXT_CONSOLE="./tests/x/003-run-sweep.sh --resume <dir>" \
+		PATH="$d/bin:${PATH}" _SWEEP_PROC="$d/no-proc" SWEEP_NEXT_CONSOLE="./tests/x/003-run-sweep.sh --resume <dir>" \
 			run --separate-stderr bash "$d/sweep.sh" "$d"
 		[ "$status" -eq 143 ] || { echo "${kind}: status ${status}: ${stderr}"; false; }
-		[[ "$stderr" == *"warning: 'ps -A -o pid=,ppid=,pgid=,stat=,lstart=' does not work here (no ps, or busybox ps without lstart): a signal that stops this sweep reaches only its running step's own process"* ]]
-		[[ "$stderr" == *"Install procps: apt-get install procps (Debian, Ubuntu), dnf or microdnf install procps-ng (RHEL, UBI), apk add procps (Alpine)."* ]]
-		[[ "$stderr" == *"Stopping the running step (step.sh): ps does not work here (see the warning at the sweep's start), so only its own process gets SIGTERM, not the processes under it; it gets SIGKILL if it still runs 30s later (SWEEP_STOP_GRACE_SEC)."* ]]
+		[[ "$stderr" == *"warning: neither 'ps -A -o pid=,ppid=,pgid=,stat=,lstart=' (no ps, or busybox ps without lstart) nor /proc/<pid>/stat works here: a signal that stops this sweep reaches only its running step's own process"* ]]
+		[[ "$stderr" == *"Run the sweep where /proc is mounted (Linux), or install a ps that lists start times (procps)."* ]]
+		[[ "$stderr" == *"Stopping the running step (step.sh): neither ps nor /proc works here (see the warning at the sweep's start), so only its own process gets SIGTERM, not the processes under it; it gets SIGKILL if it still runs 30s later (SWEEP_STOP_GRACE_SEC)."* ]]
 		[ "$(<"$d/step-exit")" = exit ]
-		[ ! -e "$d/step-done" ] && [ ! -e "$d/sweep-continued" ]
+		[ ! -e "$d/step-done" ]
+		[ ! -e "$d/sweep-continued" ]
 		_gone "$(<"$d/step-pid")"
 		[[ "$stderr" != *"sent SIGKILL"* ]]
 		[ ! -e "$d/rec/.sweep.lock" ]
@@ -139,16 +140,17 @@ teardown() {
 	done
 }
 
-@test "without a working ps, a step that ignores the signal gets SIGKILL after SWEEP_STOP_GRACE_SEC, and the warning names the suite's cleanup command (SWEEP_CLEANUP_CMD)" {
+@test "without a working ps or /proc, a step that ignores the signal gets SIGKILL after SWEEP_STOP_GRACE_SEC, and the warning names the suite's cleanup command (SWEEP_CLEANUP_CMD)" {
 	local d="${BATS_TEST_TMPDIR}/sig-noign"
 	_one_fixture "$d"
 	_ps_stub "$d/bin" none
-	PATH="$d/bin:${PATH}" STEP_IGNORE=1 SWEEP_STOP_GRACE_SEC=1 SWEEP_CLEANUP_CMD="./tests/dataplane/005-cleanup.sh --contexts ci-a" \
+	PATH="$d/bin:${PATH}" _SWEEP_PROC="$d/no-proc" STEP_IGNORE=1 SWEEP_STOP_GRACE_SEC=1 SWEEP_CLEANUP_CMD="./tests/dataplane/005-cleanup.sh --contexts ci-a" \
 		run --separate-stderr bash "$d/sweep.sh" "$d"
 	[ "$status" -eq 143 ] || { echo "status ${status}: ${stderr}"; false; }
 	[[ "$stderr" == *"warning: the step still ran 1s after SIGTERM: sent SIGKILL (their own cleanup did not run; clean up with: ./tests/dataplane/005-cleanup.sh --contexts ci-a)"* ]] || { echo "$stderr"; false; }
 	# SIGKILL: no EXIT trap.
-	[ ! -e "$d/step-exit" ] && [ ! -e "$d/step-done" ]
+	[ ! -e "$d/step-exit" ]
+	[ ! -e "$d/step-done" ]
 	_gone "$(<"$d/step-pid")"
 	[ ! -e "$d/rec/.sweep.lock" ]
 }
@@ -194,7 +196,8 @@ teardown() {
 @test "the sweeps that run cleanup steps set SWEEP_CLEANUP_CMD to their suite's cleanup, after the sweep's start" {
 	local f
 	for f in dataplane/003-run-sweep.sh:dataplane/005-cleanup.sh churn/003-run-sweep.sh:churn/005-cleanup.sh \
-		churn-dataplane/004-run-sweep.sh:churn-dataplane/006-cleanup.sh; do
+		churn-dataplane/004-run-sweep.sh:churn-dataplane/006-cleanup.sh \
+		propagation/006-run-sweep.sh:propagation/007-cleanup.sh; do
 		grep -q "SWEEP_CLEANUP_CMD=\"./tests/${f#*:} --contexts " "${ROOT}/tests/${f%%:*}" || { echo "${f%%:*}"; false; }
 	done
 	grep -q 'SWEEP_CLEANUP_CMD="./$(show "${CLEANUP_CMD\[@\]}")"' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh"
@@ -283,8 +286,8 @@ teardown() {
 	assert_output --partial "follows; the rows that --resume added before it stopped are in the TSV, uncounted"
 }
 
-@test "every sweep's --help, the top-level README, the suite READMEs and PL45 say that a kill -INT or -HUP skips a terminal's foreground (stop such a sweep with SIGTERM), that without a ps that lists start times a stop reaches only the step's own process, the 30 s grace, and which of the sweep's own commands finish first" {
-	local f h p ps="Stopping the step's tree needs a ps that lists start times (procps, or macOS's): without one, the sweep warns at its start, and a stop reaches only the step's own process."
+@test "every sweep's --help, the top-level README, the suite READMEs and PL45 say that a kill -INT or -HUP skips a terminal's foreground (stop such a sweep with SIGTERM), that without a ps that lists start times or Linux's /proc a stop reaches only the step's own process, the 30 s grace, and which of the sweep's own commands finish first" {
+	local f h p ps="Stopping the step's tree needs a ps that lists start times (procps, or macOS's), or Linux's /proc in its place: without either, the sweep warns at its start (a --dry-run too), and a stop reaches only the step's own process."
 	for f in controlplane/003-run-sweep.sh churn/003-run-sweep.sh dataplane/003-run-sweep.sh \
 		churn-dataplane/004-run-sweep.sh propagation/006-run-sweep.sh tuning/003-run-tuning-sweep.sh; do
 		run --separate-stderr "${ROOT}/tests/${f}" --help
@@ -301,7 +304,8 @@ teardown() {
 		h="$(tr '\n' ' ' < "${ROOT}/${f}" | tr -s ' ')"
 		for p in "skips the processes in that foreground" "stop such a sweep from elsewhere with SIGTERM" \
 			"The sweep's own commands between steps finish first, each bounded" \
-			"needs a \`ps\` that lists" "without one, the sweep warns at its start, and a stop reaches only the step's own process"; do
+			"needs a \`ps\` that lists" "or Linux's \`/proc\` in its place: without either, the sweep warns at its start" \
+			"a stop reaches only the step's own process"; do
 			[[ "$h" == *"$p"* ]] || { echo "${f} does not say: ${p}"; false; }
 		done
 	done
@@ -312,7 +316,7 @@ teardown() {
 		h="$(tr '\n' ' ' < "${ROOT}/tests/${f}/README.md" | tr -s ' ')"
 		for p in "\`SWEEP_STOP_GRACE_SEC\` (30 s) before SIGKILL" \
 			"a \`kill -INT\` or \`kill -HUP\` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from elsewhere with SIGTERM" \
-			"without a \`ps\` that lists start times, only the step's own process is stopped"; do
+			"without a \`ps\` that lists start times or Linux's \`/proc\`, only the step's own process is stopped"; do
 			[[ "$h" == *"$p"* ]] || { echo "tests/${f}/README.md does not say: ${p}"; false; }
 		done
 	done

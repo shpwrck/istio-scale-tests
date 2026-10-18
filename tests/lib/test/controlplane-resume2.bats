@@ -211,7 +211,7 @@ FAKE
 	[[ "$stderr" == *"--resume: this sweep's sweep-outcome.txt records a problem (the Istio version changed during the sweep (bats)), so no later run can vouch for its rows"* ]]
 }
 
-@test "a --resume of a sweep without planned-cells.txt takes the first run's axis flags from the TSV's # Contexts: line and says so; without that line too, it is refused unless the axis flags are given" {
+@test "a --resume of a sweep without planned-cells.txt takes the first run's axis flags from the TSV's # Contexts: line and says so; without that line too, it is refused unless all six axis flags are given" {
 	cp_sweep --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6
 	[ "$status" -eq 4 ]
 	D="$(sweep_dir)"
@@ -228,14 +228,14 @@ FAKE
 	before="$(cksum < "$TSV")"
 	cp_sweep --resume "$D" --contexts ci-a,ci-b
 	[ "$status" -eq 1 ]
-	[[ "$stderr" == *"--resume: ${D} records none of its first run's axis values (no planned-cells.txt from its first run, no \"# Contexts:\" line in a controlplane-*.tsv), so a --resume without axis flags would run the environment's, --config's or default cells; nothing was run."* ]]
+	[[ "$stderr" == *"--resume: ${D} records none of its first run's axis values (no planned-cells.txt from its first run, no \"# Contexts:\" line in a controlplane-*.tsv), so a --resume would run the environment's, --config's or default value of each axis flag not given; nothing was run. Give all six axis flags the sweep ran with (not given: --mesh-sizes, --service-counts, --replica-counts, --namespace-counts, --sidecar-scopings, --traffic-configs)."* ]]
 	[ "$(cksum < "$TSV")" = "$before" ]
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6
+	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none
 	[ "$status" -eq 4 ]
 }
 
 @test "the sweep's pages from before a --resume say so until it ends: a resume that is interrupted leaves them marked; one that ends writes them again" {
-	local p
+	local p fm
 	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 4 ]
 	D="$(sweep_dir)"
@@ -246,12 +246,20 @@ FAKE
 	for p in "$D"/sweep-*.md "$D"/scale-envelope-*.md; do
 		[ "$(grep -c '^## Sweep outcome' "$p")" = 0 ] || { echo "${p}: still shows the outcome"; false; }
 		grep -q '^> \*\*Sweep outcome\*\*: not written yet: a --resume of this sweep started at [0-9T:-]*Z, and this page is from before it' "$p"
-		[ "$(grep -c 'not written yet' "$p")" = 1 ]
+		# Under the title (the line after the blank that follows it) and in place of the
+		# outcome; front matter, where the page has it, records the resume's start.
+		[ "$(grep -c 'not written yet' "$p")" = 2 ]
+		awk '/^#/ && !t { t = NR } t && NR == t + 2 { print; exit }' "$p" | grep -q '^> \*\*Sweep outcome\*\*: not written yet: a --resume'
+		fm=0
+		if [ "$(head -n 1 "$p")" = --- ]; then fm=1; fi
+		[ "$(awk 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { exit } /^stale_since_resume: "[0-9T:-]+Z"$/ { n++ } END { print n + 0 }' "$p")" = "$fm" ]
 	done
+	head -n 1 "$D"/sweep-[0-9]*.md | grep -qx -- ---
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
 	for p in "$D"/sweep-*.md "$D"/scale-envelope-*.md; do
 		[ "$(grep -c 'not written yet' "$p")" = 0 ] || { echo "${p}: still marked"; false; }
+		[ "$(grep -c '^stale_since_resume:' "$p")" = 0 ]
 	done
 	for p in "$D"/sweep-[0-9]*.md "$D"/scale-envelope-*.md; do grep -q '^## Sweep outcome' "$p"; done
 }
@@ -311,7 +319,7 @@ FAKE
 	FAKE_TERMS=1 SWEEP_STOP_GRACE_SEC=1 cp_sweep --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
 	[ "$status" -eq 143 ]
 	[ "$(awk -F'\t' '$8 == 999' "$(sweep_tsv "$(sweep_dir)")" | wc -l | tr -d ' ')" -eq 0 ]
-	[[ "$stderr" == *"still ran 1s after SIGTERM: sent SIGKILL (their own cleanup did not run; clean up with: $(printf '%q' "${TREE}/tests/controlplane/005-cleanup.sh") --contexts ci-a,ci-b; a --resume of this sweep also deletes the namespaces before its first cell)"* ]]
+	[[ "$stderr" == *"still ran 1s after SIGTERM: sent SIGKILL (their own cleanup did not run; clean up with: ./tests/controlplane/005-cleanup.sh --contexts ci-a,ci-b; a --resume of this sweep also deletes the namespaces before its first cell)"* ]]
 }
 
 @test "a --resume whose HARNESS_SHA differs from the run before it only in git describe (the same HARNESS_CONTENT_KEY) gets an INFO, not the harness warning or NOTE" {
@@ -328,8 +336,8 @@ FAKE
 	[ "$status" -eq 4 ]
 	[[ "$stderr" != *"warning: --resume: this resume runs harness"* ]]
 	sha="$(sed -n 's/^HARNESS_SHA=//p' "${D}/sweep-outcome.txt")"
-	t="$(awk -F'\t' 'NR == 2 { print $1 }' "${D}/resumes.txt")"
-	grep -qx "INFO=the --resume at ${t} ran HARNESS_SHA=${sha}, after HARNESS_SHA=v0.0.1-tagged: they differ only in git describe (a commit or tag that changed no harness file; the same HARNESS_CONTENT_KEY ${key}), so its rows ran the same harness" "${D}/sweep-outcome.txt"
+	t="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "${D}/resumes.txt")"
+	grep -qx "INFO=the --resume at ${t} ran HARNESS_SHA=${sha}, after HARNESS_SHA=v0.0.1-tagged: they differ only in git describe (a commit or tag that left the harness files as they were; the same HARNESS_CONTENT_KEY ${key}), so its rows ran the same harness" "${D}/sweep-outcome.txt"
 	[ "$(grep -c '^NOTE=the --resume at .* ran HARNESS_SHA=' "${D}/sweep-outcome.txt")" = 0 ]
 	# The report: one harness, no provenance warning.
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json

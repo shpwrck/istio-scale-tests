@@ -56,13 +56,16 @@ The "Istio CR / IstioRevision generations" row gives each pass's ISTIO_GENERATIO
 from its own TSVs: a profile's apply and revert raise them, so each pass ran on its
 own (one value for every member prints once, "(every member)"). The header's
 ISTIO_GENERATIONS merges the sweep's start and every pass: mixed when they differ.
-The "Harness (HARNESS_SHA)" row gives each pass's HARNESS_SHA from its own TSVs. When
-the passes' values differ, a WARNING says so (a profile's change may come from the
-harness); when every pass records one HARNESS_CONTENT_KEY (the harness files' content
-key; unknown in a TSV written before it), a note says they differ only in git
-describe (a docs commit, a new tag) instead. A propagation comparison adds "Drain
-timeouts (iterations, counted)" when a pass has an iteration whose drain after the
-window timed out (DRAIN_TIMEOUT): its values count, as in 005.
+The "Harness (HARNESS_SHA)" row gives each pass's HARNESS_SHA from its own TSVs (a
+churn-dataplane pass also from its rows' harness_sha column: mixed when they record
+more than one, or another than the preamble, and the WARNING then names that pass and
+the combos whose baseline and churn rows ran different harnesses). When the passes'
+values differ, a WARNING says so (a profile's change may come from the harness); when
+every pass records one HARNESS_CONTENT_KEY (the harness files' content key; unknown in
+a TSV written before it), a note says they differ only in git describe (a commit or
+tag that left the harness files as they were) instead. A propagation comparison adds
+"Drain timeouts (iterations, counted)" when a pass has an iteration whose drain after
+the window timed out (DRAIN_TIMEOUT): its values count, as in 005.
 HARNESS_SHA in the header is the sweep's harness (HARNESS_CONTENT_KEY, next to it, is
 its files' content key); REPORT_HARNESS_SHA (every format, next to it) is the harness
 this report ran on, which can differ: a report made again later, or from another
@@ -228,7 +231,11 @@ for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 # pass's distinct (run_id, iteration) per group, what P1 is attempted against when the
 # TSV does not record ITERATIONS. "d<TAB>iterations": a propagation pass's distinct
 # (run_id, iteration) with DRAIN_TIMEOUT in status, p1_status or remote_status (the
-# drain after the window timed out; counted, as 005 counts them).
+# drain after the window timed out; counted, as 005 counts them). "r<TAB>values<TAB>combos":
+# a churn-dataplane pass whose TSV rows record (harness_sha column) more than one harness,
+# or another than their file's preamble HARNESS_SHA (the harness changed during the pass):
+# every value (preamble's and rows', first seen first, comma-separated) and the combos
+# whose baseline and churn rows differ ("-" when none), as churn-dataplane 005 reads them.
 summarize() {
 	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" -v suite="$SUITE" -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
 	# prop_col_sample(c): whether a kept row carries a sample of propagation column c; the
@@ -251,10 +258,23 @@ summarize() {
 	}
 	# dt_col(c): the row has column c and it reads DRAIN_TIMEOUT.
 	function dt_col(c) { return ((c in idx) && $(idx[c]) == "DRAIN_TIMEOUT") }
+	# hadd(v): a harness value, in the order first seen.
+	function hadd(v) { if (!(v in hseen)) { hseen[v] = 1; hord[++hn] = v } }
 	BEGIN { nm = split(cols, mc, ","); ng = split(gcols, gc, ",") }
-	FNR == 1 { hdr = 0 }
+	FNR == 1 { hdr = 0; hpre = ""; hnv = 0; delete hfseen }
+	/^# HARNESS_SHA=/ { if (hpre == "") { hpre = substr($0, 15); hadd(hpre) } }
 	/^#/ || NF == 0 { next }
 	!hdr { delete idx; for (i = 1; i <= NF; i++) idx[$i] = i; hdr = 1; next }
+	("harness_sha" in idx) {
+		v = $(idx["harness_sha"]); hadd(v)
+		if (!(v in hfseen)) { hfseen[v] = 1; if (++hnv > 1) hbad = 1 }
+		if (hpre != "" && v != hpre) hbad = 1
+		if (("combo_id" in idx) && ("phase" in idx)) {
+			k = FILENAME SUBSEP $(idx["combo_id"])
+			if ($(idx["phase"]) == "baseline") hbl[k] = v
+			else if ($(idx["phase"]) == "churn" && !(k in hch)) { hch[k] = v; hco[++hnc] = k; hid[k] = $(idx["combo_id"]) }
+		}
+	}
 	{
 		total++
 		widths[NF]++
@@ -301,6 +321,13 @@ summarize() {
 		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "i\t%s\t%d\n", order[i], giters[order[i]]
 		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "o\t%s\t%d\n", order[i], p1ov[order[i]] + 0
 		if (suite == "propagation") printf "d\t%d\n", dt_iters
+		if (hbad) {
+			hv = ""; hc = ""
+			for (i = 1; i <= hn; i++) hv = hv (i > 1 ? "," : "") hord[i]
+			for (i = 1; i <= hnc; i++) if ((hco[i] in hbl) && hbl[hco[i]] != hch[hco[i]])
+				hc = hc (hc == "" ? "" : "; ") hid[hco[i]] " (baseline " hbl[hco[i]] ", churn " hch[hco[i]] ")"
+			printf "r\t%s\t%s\n", hv, (hc == "" ? "-" : hc)
+		}
 		for (k in has) {
 			split(k, a, SUBSEP)
 			if (k in cnt) printf "v\t%s\t%s\t%.6f\t%.6f\t%d\t%.6f\t%d\n", a[1], a[2], sum[k] / cnt[k], mx[k], ov[k] + 0, mn[k], cnt[k]
@@ -398,7 +425,7 @@ cfg_attempted() {
 	done
 }
 
-declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS PGENS PHS PHCK PDT
+declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS PGENS PHS PHCK PDT PROWHS
 GROUP_VALUES=()
 ALL_TSVS=()
 for p in "${PASSES[@]}"; do
@@ -424,6 +451,14 @@ for p in "${PASSES[@]}"; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
 		d) PDT[$p]="$a" ;;
+		r)
+			# Its rows ran on more than one harness: the pass reads mixed, its key adds
+			# unknown (a row records none), and HARNESS_WARNING names the pass.
+			PHS[$p]="mixed:${a}"
+			case ",${PHCK[$p]#mixed:}," in *,unknown,*) ;; *) PHCK[$p]="mixed:${PHCK[$p]#mixed:},unknown" ;; esac
+			PROWHS[$p]="pass ${p}'s rows record more than one harness (harness_sha column and preamble: ${a}), so the harness changed during that pass"
+			[[ "$b" == - ]] || PROWHS[$p]+="; combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ${b}"
+			;;
 		w) PWIDTHS[$p]="${PWIDTHS[$p]:+${PWIDTHS[$p]},}${a}" ;;
 		g) GROWS["$p|$a"]="$b"; [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
 		i) GITERS["$p|$a"]="$b" ;;
@@ -476,17 +511,18 @@ else
 fi
 
 # The harness each pass ran (PHS, from its TSVs). HARNESS_WARNING when the passes' values
-# differ (or one pass's TSVs do): a profile's change may then come from the harness.
-# HARNESS_NOTE instead when every pass records one HARNESS_CONTENT_KEY: the values differ
-# only in git describe (a docs commit, a new tag), not in the harness files. A TSV without
-# the key reads unknown, so older passes keep the warning.
+# differ (or one pass's TSVs do, or its rows: PROWHS): a profile's change may then come
+# from the harness. HARNESS_NOTE instead when every pass records one HARNESS_CONTENT_KEY:
+# the values differ only in git describe (a commit or tag that left the harness files as
+# they were). A TSV without the key reads unknown, so older passes keep the warning.
 HARNESS_WARNING="" HARNESS_NOTE=""
-_hs_by=() _hs_vals="" _hk_vals=""
+_hs_by=() _hs_vals="" _hk_vals="" _hs_rows=""
 for p in "${PASSES[@]}"; do
 	[[ -n "${PHS[$p]:-}" ]] || continue
 	_hs_by+=("${p} ${PHS[$p]}")
 	_hs_vals+="${PHS[$p]}"$'\n'
 	_hk_vals+="${PHCK[$p]}"$'\n'
+	[[ -z "${PROWHS[$p]:-}" ]] || _hs_rows+=" ${PROWHS[$p]^}."
 done
 _hs_n="$(printf '%s' "$_hs_vals" | LC_ALL=C sort -u | awk 'END { print NR }')"
 if [[ "$_hs_vals" == *mixed:* ]] || ((_hs_n > 1)); then
@@ -494,10 +530,10 @@ if [[ "$_hs_vals" == *mixed:* ]] || ((_hs_n > 1)); then
 	_hs_by_s="$(IFS=';'; echo "${_hs_by[*]}")"
 	_hs_by_s="${_hs_by_s//;/; }"
 	if [[ -n "$_hk" && "$_hk" != *$'\n'* && "$_hk" != unknown && "$_hk" != mixed:* ]]; then
-		HARNESS_NOTE="the passes' HARNESS_SHA values (${_hs_by_s}) differ only in git describe: every pass records HARNESS_CONTENT_KEY=${_hk}, the same harness files (a commit or a tag outside them moved the describe)."
+		HARNESS_NOTE="the passes' HARNESS_SHA values (${_hs_by_s}) differ only in git describe (a commit or tag that left the harness files as they were): every pass records HARNESS_CONTENT_KEY=${_hk}, the same harness files."
 		echo "note: ${HARNESS_NOTE}" >&2
 	else
-		HARNESS_WARNING="the passes ran on different harnesses (HARNESS_SHA ${_hs_by_s}): a profile's change against the baseline may come from the harness, not the profile. Compare those passes with care."
+		HARNESS_WARNING="the passes ran on different harnesses (HARNESS_SHA ${_hs_by_s}): a profile's change against the baseline may come from the harness, not the profile.${_hs_rows} Compare those passes with care."
 		echo "WARNING: ${HARNESS_WARNING}" >&2
 	fi
 fi

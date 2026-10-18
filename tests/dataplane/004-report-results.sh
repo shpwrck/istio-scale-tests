@@ -58,7 +58,12 @@ Usage: $(basename "$0") [options]
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values.
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
+                     (csv # POOLED_HARNESS_CONTENT_KEYS= and json harness_content_key
+                     also their HARNESS_CONTENT_KEY values); its note says when the
+                     HARNESS_SHA values differ only in git describe (every run records
+                     one key). It does not read the sweep-outcome.txt of a sweep-* dir
+                     below the results dir: report each sweep alone to see it.
   --format FMT       Output format: text, csv, markdown (or md), json, charts
                      (default: text).
   --fail-on-unreachable
@@ -124,7 +129,8 @@ a report made again later, or from another checkout, may count rows by other rul
 The results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (in the
 preamble list; unknown for a TSV written before it): the content key of the harness
 files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
-only in git describe (a docs commit or a new tag between them), not in the harness.
+only in git describe (a commit or tag that left the harness files as they were), not
+in the harness.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
@@ -190,6 +196,14 @@ fi
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
+# A pooled report repeats only its results dir's own sweep-outcome.txt
+# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
+# (text, md, charts and csv).
+POOLED_OUTCOME_NOTE=""
+if [[ -n "$POOLED_NOTE" ]]; then
+	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
+	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+fi
 
 # The preamble (# KEY=VALUE and # KEY[x]=VALUE lines) of every input, each key merged over
 # the files that carry it: one value, or mixed:a,b when it varies (per-probe keys such as
@@ -707,6 +721,7 @@ report_text() {
 report_csv() {
 	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
 	config_multi_run_csv
+	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
 	sweep_outcome_recorded "$RESULTS_DIR" csv
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"

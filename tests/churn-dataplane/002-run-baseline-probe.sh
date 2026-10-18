@@ -109,6 +109,15 @@ Row status: FAILED (fortio exec failed), PERCENTILE_MISSING or ERROR_RATE_HIGH
 POISONED_RESTART, POISONED_SCRAPE, else OK. The marker comment records pct_200 and
 top_code (the most frequent code other than 200).
 
+The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
+whose exec failed (a FAILED row) may run on there, so the probe waits until its -t and
+5 s more have passed before going on. When the probe ends during a load (a stop,
+Ctrl-C), it deletes the client pod, so the load ends with it; the pod's Deployment
+starts a new one, which a sweep started right after waits for (its setup 001 waits
+until the Deployments are Available). Run by hand, the probe loads only a Running client
+pod that is not being deleted, and stops when there is none: run 001, or wait until the
+new pod is Ready.
+
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
 
 Environment:
@@ -284,8 +293,8 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
-CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "$CLIENT_POD" ]] || die "no fortio-client pod found on $SOURCE_CTX (ns=$NS)"
+CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" fortio-client "${KUBECTL[@]}")" \
+	|| die "no Running fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 # Remote reachability check (tests/lib/reach.sh), before the istiod port-forwards
 # and the window, through each cluster's fortio-server-<ctx> Service.
@@ -379,8 +388,11 @@ if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
-LOAD_POD=""
 WINDOW_END_NS="$(now_ns)"
+# The load can outlive its failed exec in the pod: wait it out, so the churn window (003)
+# that a sweep runs next does not run beside it.
+if [[ "$STATUS" == FAILED ]]; then fortio_load_wait_out "$WINDOW_START_NS" "$DURATION"; fi
+LOAD_POD=""
 
 # Post-window scrape of every istiod pod (concurrent) + pod set.
 POST_PODSET="${ISTIOD_DIR}/post.podset"

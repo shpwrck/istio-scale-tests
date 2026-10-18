@@ -56,6 +56,16 @@ rolling updates, config changes (VirtualService, DestinationRule, Sidecar), side
 restarts and Envoy-side stats. Above about 100 ops/s the driver cannot keep up with
 the requested rate (per-operation process overhead).
 
+A window's load runs inside the source's fortio client pod, not in the `kubectl exec`
+that starts it, so it can outlive that exec. When `002` or `003` ends during a load (a
+stop, Ctrl-C, an error), it deletes the client pod, so the load cannot run on into the
+next window: its Deployment starts a new pod, which a sweep started right after waits
+for (its setup `001` waits until the Deployments are Available). Run by hand, a probe
+loads only a Running client pod that is not being deleted, and stops when there is none:
+run `001`, or wait until the new pod is Ready. When a load's `kubectl exec` fails
+part-way (a `FAILED` row), the probe waits until that load's `-t` and 5 s more have
+passed before the next window starts.
+
 ## Quick start
 
 Needs `kubectl` or `oc`, `helm`, `jq`, `curl`, the deployed mesh (see the root README)
@@ -112,24 +122,25 @@ error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `swee
 when and by which signal; a signal sent to the sweep's process alone stops the running step and
 every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before SIGKILL; a `kill -INT` or
 `kill -HUP` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from
-elsewhere with SIGTERM; without a `ps` that lists start times, only the step's own process is
-stopped; see the top-level README); `3` the reachability gate stopped it (`--on-unreachable fail`,
-below; the reports are written); `4` it finished and wrote its reports, but some combinations failed
-(`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the Istio version, active revision or
-generation of the Istio CR or its active IstioRevision changed during the sweep (read again before
-the reports), or that check failed, or its harness (a file under `tests/`, `config/`, `charts/` or
-`terraform/`, `HARNESS_SHA`) changed during the sweep (read again before its steps and at its end).
-The last line on stderr says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the
-sweep dir and the end of the markdown summary keep the outcome. From the sweep's start until it
-writes its outcome, `sweep-outcome.txt` holds a not-finished record (`EXIT=unfinished`,
-`STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to do), so a report of a sweep that died, or still
-runs, or (with when and by which signal) was interrupted says "this sweep has not finished" in every
-format (json `sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads
-`"unfinished": false`; one that stopped on an error after its start records the stop and its reason
-instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more, run
-the sweep again into a new dir (a churn-dataplane sweep has no `--resume`); the rows already in the
-dir cover only the cells it finished. Proxies connected on another Istio version than their istiod
-at the start (`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
+elsewhere with SIGTERM; without a `ps` that lists start times or Linux's `/proc`, only the step's
+own process is stopped; see the top-level README); `3` the reachability gate stopped it
+(`--on-unreachable fail`, below; the reports are written); `4` it finished and wrote its reports,
+but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the Istio
+version, active revision or generation of the Istio CR or its active IstioRevision changed during
+the sweep (read again before the reports), or that check failed, or its harness (a file under
+`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read again
+before its steps, by each step and at its end). The last line on stderr says how many, by reason;
+`3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the
+outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a
+not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`,
+`HARNESS_CONTENT_KEY`, and what to do), so a report of a sweep that died, or still runs, or (with
+when and by which signal) was interrupted says "this sweep has not finished" in every format (json
+`sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads `"unfinished": false`;
+one that stopped on an error after its start records the stop and its reason instead, `STOPPED=1`
+and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more, run the sweep again into
+a new dir (a churn-dataplane sweep has no `--resume`); the rows already in the dir cover only the
+cells it finished. Proxies connected on another Istio version than their istiod at the start
+(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
 
 ## Remote reachability
 
@@ -210,9 +221,14 @@ with `null` for `N/A`. Every format carries the inputs' preamble, each key merge
 another checkout, may count rows by other rules. The results dir it reads never counts as a change
 to that harness. `HARNESS_CONTENT_KEY` (json and frontmatter `harness_content_key`; `unknown` for a
 TSV written before it) is the content key of the harness files the rows ran on: inputs whose
-`HARNESS_SHA` differs but that share one key differ only in git describe (a docs commit or a new tag
-between them), not in the harness. md and charts start with a YAML frontmatter of those keys,
-lowercase as in the json `metadata`.
+`HARNESS_SHA` differs but that share one key differ only in git describe (a commit or tag that left
+the harness files as they were), not in the harness. Each row also records the harness its probe ran
+(`harness_sha`; a sweep's TSV preamble keeps the sweep's start): when a TSV's rows record more than
+one, or another than its preamble's `HARNESS_SHA` (the harness changed during the sweep),
+`HARNESS_SHA` reads `mixed:`, `HARNESS_CONTENT_KEY` adds `unknown` (a row records no key), and a
+warning in every format (json `data_warnings`) names the combos whose baseline and churn rows ran
+different harnesses (their `Δp99` pairs the two). md and charts start with a YAML frontmatter of
+those keys, lowercase as in the json `metadata`.
 
 ### Comparing with earlier sweeps
 

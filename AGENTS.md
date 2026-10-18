@@ -95,7 +95,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |
@@ -103,10 +103,11 @@ Prefer it over generic upstream Istio docs when they disagree.
 ## Testing and verification
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
-  audit, bats, the bare-scrape and keyed-array lints, and every `# ci-dry-run:` script against an
-  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`. The bats
-  that parse the reports' YAML frontmatter need `python3` + PyYAML and skip without it (CI
-  installs it), so a run without PyYAML proves less than it reports.
+  audit, bats, the bare-scrape, keyed-array and bats-negation lints (a `! cmd` that is not a bats
+  test's last command never fails it: write `! cmd || false` or `run ! cmd`), and every
+  `# ci-dry-run:` script against an empty kubeconfig (no cluster needed). Required before merging
+  changes to `tests/lib/`. The bats that parse the reports' YAML frontmatter need `python3` +
+  PyYAML and skip without it (CI installs it), so a run without PyYAML proves less than it reports.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
@@ -120,9 +121,9 @@ Prefer it over generic upstream Istio docs when they disagree.
 `bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
 `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in
 `tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
-busybox; macOS's own; a sweep stops its step's whole tree with it), `istioctl` matching
-`ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter bats, which skip without
-it), `aws` + `rosa` (ROSA only).
+busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for
+it), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter
+bats, which skip without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

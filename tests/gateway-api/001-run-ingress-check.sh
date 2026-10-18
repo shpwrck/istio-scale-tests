@@ -209,8 +209,8 @@ Environment:
   Environment only (the Istio version read; this read-only check warns and never stops on it):
   ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out, is read again, ${ISTIO_VERSION_READY_WAIT_SEC:-60} s; a rollout still running then reads as
-  unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC:-5} s),
-  ISTIO_PROXY_READ_PARALLEL (${ISTIO_PROXY_READ_PARALLEL:-20}): members whose proxy versions are read at once.
+  unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC:-5} s), ISTIO_PROXY_READ_PARALLEL
+  (members whose proxy versions are read at once, ${ISTIO_PROXY_READ_PARALLEL:-20}).
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),

@@ -28,8 +28,9 @@
 #   istio_generations_read <ctxs_csv> <kubectl_argv...>
 #                                                  -> ctx=<Istio CR gen>/<IstioRevision gen>,...
 #       read now, as ISTIO_GENERATIONS records them
-#   istio_generations_diff <before> <after>        -> the members whose generations moved
-#       (cr_moved<TAB>text), nothing when none did
+#   istio_generations_diff [--cr-over <n>] [--unchecked] <before> <after>
+#                                                  -> the members whose generations moved
+#       (cr_moved<TAB>text), nothing when none did; --unchecked: those it could not compare
 #   istio_generation_causes <cr_moved 0|1>         -> the likely causes of a generation change
 #   istio_version_refresh <from> <ctxs_csv> <kubectl_argv...>
 #                                                  -> read the generations and proxy versions
@@ -1222,7 +1223,7 @@ istio_generations_read() {
 	printf '%s\n' "$out"
 }
 
-# istio_generations_diff [--cr-over <n> | --unchecked] <before> <after>: the members whose
+# istio_generations_diff [--cr-over <n>] [--unchecked] <before> <after>: the members whose
 # generations moved between two istio_generations_read lines, as one line
 # "<cr_moved 0|1><TAB><ctx> (Istio CR generation 3 -> 5, IstioRevision 3 -> 4), ...",
 # cr_moved 1 when an Istio CR's own generation moved (istio_generation_causes); nothing
@@ -1232,18 +1233,21 @@ istio_generations_read() {
 # caller patched each Istio CR <n> times (a merge patch that changes the spec raises it by
 # exactly 1). --unchecked: the members that were not compared in full instead, as
 # "<ctx> (<before> -> <after>), ..." (unknown for a member a line lacks), nothing when
-# every one was, so a caller can say which comparison it could not make. The lines reach
-# awk through the environment (PL19). Never dies.
+# every one was, so a caller can say which comparison it could not make; with --cr-over, a
+# member is compared in full when its Istio CR generations are (the IstioRevision's are
+# left out). The lines reach awk through the environment (PL19). Never dies.
 # shellcheck disable=SC2329
 istio_generations_diff() {
 	local over=-1 unchecked=0
-	if [[ "${1:-}" == --cr-over ]]; then
-		over="${2:-0}"
-		shift 2
-	elif [[ "${1:-}" == --unchecked ]]; then
-		unchecked=1
-		shift
-	fi
+	while [[ "${1:-}" == --cr-over || "${1:-}" == --unchecked ]]; do
+		if [[ "$1" == --cr-over ]]; then
+			over="${2:-0}"
+			shift 2 || shift
+		else
+			unchecked=1
+			shift
+		fi
+	done
 	_IGD_A="${1:-}" _IGD_B="${2:-}" awk -v over="$over" -v un="$unchecked" 'BEGIN {
 		n = split(ENVIRON["_IGD_A"], x, ",")
 		for (i = 1; i <= n; i++) { if (x[i] !~ /=/) continue; k = x[i]; sub(/=[^=]*$/, "", k); v = x[i]; sub(/^.*=/, "", v); before[k] = v; ka[++na] = k }
@@ -1253,7 +1257,7 @@ istio_generations_diff() {
 			k = y[i]; sub(/=[^=]*$/, "", k); v = y[i]; sub(/^.*=/, "", v); seen[k] = 1
 			if (!(k in before)) { nc = nc (nc == "" ? "" : ", ") k " (unknown -> " v ")"; continue }
 			np = split(before[k], p, "/"); nq = split(v, q, "/"); t = ""
-			if (np != 2 || nq != 2 || p[1] !~ /^[0-9]+$/ || q[1] !~ /^[0-9]+$/ || p[2] !~ /^[0-9]+$/ || q[2] !~ /^[0-9]+$/)
+			if (np != 2 || nq != 2 || p[1] !~ /^[0-9]+$/ || q[1] !~ /^[0-9]+$/ || (over < 0 && (p[2] !~ /^[0-9]+$/ || q[2] !~ /^[0-9]+$/)))
 				nc = nc (nc == "" ? "" : ", ") k " (" before[k] " -> " v ")"
 			if (p[1] ~ /^[0-9]+$/ && q[1] ~ /^[0-9]+$/ && (p[1] != q[1] && (over < 0 || q[1] - p[1] > over || q[1] < p[1]))) { t = "Istio CR generation " p[1] " -> " q[1]; cr = 1 }
 			if (over < 0 && p[2] ~ /^[0-9]+$/ && q[2] ~ /^[0-9]+$/ && p[2] != q[2]) t = t (t == "" ? "" : ", ") "IstioRevision generation " p[2] " -> " q[2]

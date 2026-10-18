@@ -102,7 +102,7 @@ resume_rows() {
 	preamble_set HARNESS_CONTENT_KEY 000000000000
 	cp_window
 	assert_success
-	[[ "$stderr" == *"warning: [002] these rows ran other harness files than controlplane-R1.tsv records (HARNESS_SHA=old1234, HARNESS_CONTENT_KEY=000000000000; now HARNESS_SHA=${live}): a HARNESS_CHANGED_AT line before them records it"* ]]
+	[[ "$stderr" == *"warning: [002] these rows ran other harness files than controlplane-R1.tsv records (HARNESS_SHA=old1234, HARNESS_CONTENT_KEY=000000000000; now HARNESS_SHA=${live}, HARNESS_CONTENT_KEY=${key}): a HARNESS_CHANGED_AT line before them records it"* ]]
 	run grep -E '^# (HARNESS_CHANGED_AT|WINDOW_ROWS)=' "$TSV"
 	assert_line --index 0 "# WINDOW_ROWS=ctx-a=1"
 	assert_line --index 1 --regexp "^# HARNESS_CHANGED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z HARNESS_SHA=${live} HARNESS_CONTENT_KEY=${key}\$"
@@ -117,8 +117,8 @@ resume_rows() {
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = "[\"old1234\",\"${live}\"]" ]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"; the harness changed during a run (HARNESS_CHANGED_AT), see the attempts)"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_output --partial "# attempts: the rows come from more than one run or harness: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble), then harness changed at "
-	assert_output --partial "(in the first run) HARNESS_SHA=${live}"
+	assert_output --partial "# attempts: the rows come from more than one run or harness: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (1 row(s), 1 in the figures), then harness changed at "
+	assert_output --partial "(in the first run) HARNESS_SHA=${live} (2 row(s), 2 in the figures)"
 }
 
 @test "002 split phases: a baseline that ran other harness files than its final credits the window's rows to the baseline's" {
@@ -151,7 +151,7 @@ resume_rows() {
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = '["h2res"]' ]
 	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_output --partial "# attempts: the rows come from one run (no other run's rows are in the figures): the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (its rows were all run again later), then --resume at 2030-01-02T00:00:00+00:00 HARNESS_SHA=h2res KUBE_VERSIONS=ctx-a=v1.31.0"
+	assert_output --partial "# attempts: the rows come from one run (no other run's rows are in the figures): the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble) (its rows were all run again later), then --resume at 2030-01-02T00:00:00Z HARNESS_SHA=h2res KUBE_VERSIONS=ctx-a=v1.31.0 (1 row(s), 1 in the figures)"
 	refute_output --partial "ran on different harnesses"
 	[[ "$stderr" != *"ran on different harnesses"* ]]
 }
@@ -169,7 +169,7 @@ resume_rows() {
 	[ "$(jq -c '[.metadata.attempts[].rows_kept]' <<<"$output")" = '[1,1]' ]
 	# The wording every report gives a describe-only difference (propagation 005, churn
 	# 004, tuning 004, config_multi_run_note).
-	note="HARNESS_SHA values (${live},v9.9.9-tag) differ only in git describe: every run records HARNESS_CONTENT_KEY=${key}, the same harness files (a commit or a tag outside them moved the describe)"
+	note="HARNESS_SHA values (${live},v9.9.9-tag) differ only in git describe: every run records HARNESS_CONTENT_KEY=${key}, the same harness files (a commit or tag that left the harness files as they were)"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
 	assert_output --partial "; their ${note}"
 	[[ "$stderr" == *"note: the inputs' ${note}"* ]]
@@ -225,7 +225,7 @@ STUB
 	[[ "$(jq -r '.metadata.attempts[1].started_at' <<<"$output")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]]
 	run render_scale_envelope "$d" "$REPORT" ci-a false
 	assert_success
-	assert_output --regexp "> \*\*Attempts:\*\* first run HARNESS_SHA=${sha} \(1 row\(s\), 0 of them in the figures\); --resume at [^ ]+ HARNESS_SHA=[^ ]+ \(1 row\(s\), 1 of them in the figures\)"
+	assert_output --regexp "> \*\*Attempts:\*\* first run HARNESS_SHA=${sha} \(1 row\(s\), 0 in the figures\); --resume at [^ ]+ HARNESS_SHA=[^ ]+ \(1 row\(s\), 1 in the figures\)"
 }
 
 # outcome_dir: a sweep dir of the fixture's cell, run again valid by a --resume (TSV_LINES):

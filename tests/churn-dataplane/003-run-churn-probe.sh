@@ -107,6 +107,15 @@ COEXEC_MIN_PCT_200, default $MIN_PCT_200; 0 turns the rule off), POISONED_RESTAR
 POISONED_SCRAPE, CHURN_RATE_NOT_MET, else OK. The marker comment records pct_200
 and top_code.
 
+The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
+whose exec failed (a FAILED row) may run on there, so the probe waits until its -t and
+5 s more have passed before going on. When the probe ends during a load (a stop,
+Ctrl-C), it deletes the client pod, so the load ends with it; the pod's Deployment
+starts a new one, which a sweep started right after waits for (its setup 001 waits
+until the Deployments are Available). Run by hand, the probe loads only a Running client
+pod that is not being deleted, and stops when there is none: run 001, or wait until the
+new pod is Ready.
+
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
   record what the mesh runs, when a member's active IstioRevision version is not
@@ -301,8 +310,8 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
-CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "$CLIENT_POD" ]] || die "no fortio-client pod found on $SOURCE_CTX (ns=$NS)"
+CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" fortio-client "${KUBECTL[@]}")" \
+	|| die "no Running fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 # PL16: deterministic seeded shuffle of churn-target indices [0, N).
 # Implemented in awk with a linear congruential generator so we don't depend on
@@ -470,12 +479,13 @@ WINDOW_START_NS="$(now_ns)"
 JSON_OUT=""
 STATUS="OK"
 LOAD_POD="$CLIENT_POD"
-if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
+if JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 	fortio load -qps "$QPS" -c "$CONNECTIONS" -t "${DURATION}s" -json - -quiet "$TARGET_URL" 2>/dev/null)"; then
+	LOAD_POD=""
+else
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
-LOAD_POD=""
 WINDOW_END_NS="$(now_ns)"
 
 # Stop the churn driver. Only SIGTERM if fortio exited EARLY (before DURATION
@@ -490,6 +500,10 @@ if [[ "$STATUS" == "FAILED" ]] || (( ELAPSED_NS < DURATION_NS )); then
 fi
 wait "$DRIVER_PID" 2>/dev/null || true
 DRIVER_PID=""
+# The load can outlive its failed exec in the pod: wait it out (after the driver stopped),
+# so the next combo's baseline (002) does not run beside it.
+if [[ "$STATUS" == FAILED ]]; then fortio_load_wait_out "$WINDOW_START_NS" "$DURATION"; fi
+LOAD_POD=""
 
 POST_PODSET="${ISTIOD_DIR}/post.podset"
 POST_SKEW_MS=0

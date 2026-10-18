@@ -464,7 +464,7 @@ fit_of() {
 	assert_success
 	[ "$(jq -c '[.namespace_scaling.not_measured[] | [.n, .window, .scoping, .statuses]] | unique' <<<"$output")" = '[[800,"grow","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","none",["SKIPPED_MEM_GUARD"]],[800,"probe","wide",["SKIPPED_MEM_GUARD"]]]' ]
 	[ "$(jq -c '[.results[] | select(.namespace_count == 800)] | map([.status_rows, .statuses]) | unique' <<<"$output")" = '[[1,["SKIPPED_MEM_GUARD"]]]' ]
-	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"(4 of the rows are status rows of cells skipped or failed, not restarts: SKIPPED_MEM_GUARD 4)" ]]
+	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *". Of the rows, 4 are status rows of cells skipped or failed, not restarts: SKIPPED_MEM_GUARD 4" ]]
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
 	assert_output --partial "### Cells not measured"
 	assert_output --partial "| mesh=1 K=2 config-only | 800 | grow | namespace | 4 | - | SKIPPED_MEM_GUARD | 1 |"
@@ -698,7 +698,7 @@ fit_of() {
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
 	assert_success
 	assert_output --partial "# POOLED RUNS: This report pools 2 runs (--allow-multi-run)"
-	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  files_consumed=2"
+	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  HARNESS_CONTENT_KEY=unknown  files_consumed=2"
 	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222  istio_versions=1.30.5,1.31.0  harness_shas=fixture,abc1234-dirty"
 	assert_output --partial "# WARNING: The inputs were measured on different Istio versions"
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format csv

@@ -135,6 +135,15 @@ of each row also shows ret_codes (HTTP code=count; -1 is a socket error).
 Under --on-unreachable fail a stopped run also writes one STOPPED_UNREACHABLE row
 (target_class=na), so the report says why the local baseline is missing.
 
+The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
+whose exec failed (a FAILED row, or a failed warmup) may run on there, so the probe
+waits until its -t and 5 s more have passed before going on. When the probe ends during
+a load (a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the pod's
+Deployment starts a new one, which a sweep started right after waits for (its setup 001
+waits until the Deployments are Available). Run by hand, the probe loads only a Running
+client pod that is not being deleted, and stops when there is none: run 001, or wait
+until the new pod is Ready.
+
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the run.
 
 Environment:
@@ -186,27 +195,21 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--duration)
 		[[ -n "${2:-}" ]] || die "--duration requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--duration must be a positive integer"
-		(( $2 > 0 )) || die "--duration must be > 0"
 		DURATION="$2"
 		shift 2
 		;;
 	--connections)
 		[[ -n "${2:-}" ]] || die "--connections requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--connections must be a positive integer"
-		(( $2 > 0 )) || die "--connections must be > 0"
 		CONNECTIONS="$2"
 		shift 2
 		;;
 	--settle)
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--settle must be a non-negative integer"
 		SETTLE_SEC="$2"
 		shift 2
 		;;
 	--warmup-duration)
 		[[ -n "${2:-}" ]] || die "--warmup-duration requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--warmup-duration must be a non-negative integer"
 		WARMUP_DURATION="$2"
 		shift 2
 		;;
@@ -255,6 +258,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+# The flag or its default (the environment, --config): checked once, before any cluster read.
+is_pos_int "$DURATION" || die "--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '$DURATION'"
+is_nonneg_int "$WARMUP_DURATION" || die "--warmup-duration (or DATAPLANE_WARMUP_DURATION_SEC) must be a non-negative integer; got '$WARMUP_DURATION'"
+is_pos_int "$CONNECTIONS" || die "--connections (or DATAPLANE_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle (or DATAPLANE_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
 is_ratio "$MIN_QPS_RATIO" || die "--min-qps-ratio (or DATAPLANE_MIN_QPS_RATIO) must be a decimal in (0,1]; got '$MIN_QPS_RATIO'"
 is_ratio "$MIN_PCT_200" || die "DATAPLANE_MIN_PCT_200 must be a decimal in (0,1]; got '$MIN_PCT_200'"
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
@@ -409,8 +417,8 @@ trap cleanup_all EXIT
 #   pct_200, istiod_restarted, target_class
 printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n' >> "$TSV_FILE"
 
-CLIENT_POD=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=dataplane-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) \
-	|| die "no client pod found on $SOURCE_CTX"
+CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" dataplane-client "${KUBECTL[@]}")" \
+	|| die "no Running dataplane-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 echo "=== Data-plane latency probe ==="
 echo "Source: $SOURCE_CTX (pod: $CLIENT_POD)"
@@ -603,9 +611,12 @@ if ((WARMUP_DURATION > 0)); then
 	for wurl in ${WARMUP_URLS[@]+"${WARMUP_URLS[@]}"}; do
 		echo "  warmup -> $wurl"
 		LOAD_POD="$CLIENT_POD"
-		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
-			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" \
-			>/dev/null 2>&1 || echo "  warn: warmup failed for $wurl" >&2
+		load_start_ns="$(now_ns)"
+		if ! "${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
+			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" >/dev/null 2>&1; then
+			echo "  warn: warmup failed for $wurl" >&2
+			fortio_load_wait_out "$load_start_ns" "$WARMUP_DURATION"
+		fi
 		LOAD_POD=""
 	done
 	echo ""
@@ -617,17 +628,20 @@ run_fortio() {
 	local target_ctx="$1" target_url="$2" target_class="$3"
 	for qps in "${QPS_ARR[@]}"; do
 		echo "  QPS=$qps -> $target_url"
-		local json_output
+		local json_output load_start_ns
 		LOAD_POD="$CLIENT_POD"
+		load_start_ns="$(now_ns)"
 		json_output=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps "$qps" -c "$CONNECTIONS" -t "${DURATION}s" -p '50,90,99,99.9' \
 			-json - -quiet "$target_url" 2>/dev/null) || {
-			LOAD_POD=""
 			echo "    FAILED"
 			# Nothing was measured: qps_actual and every latency are N/A, never 0.
 			printf '%s\t%s\t%s\t%s\t%s\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tFAILED\tN/A\t%s\t%s\n' \
 				"$RUN_ID" "$MESH_SIZE" "$SOURCE_CTX" "$target_ctx" "$qps" \
 				"$CONNECTIONS" "$DURATION" "${ISTIOD_RESTARTED_TAG:-unknown}" "$target_class" >> "$TSV_FILE"
+			# The load can outlive its failed exec in the pod: wait it out before the next one.
+			fortio_load_wait_out "$load_start_ns" "$DURATION"
+			LOAD_POD=""
 			continue
 		}
 		LOAD_POD=""

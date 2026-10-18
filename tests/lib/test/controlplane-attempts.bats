@@ -164,7 +164,7 @@ attempts_dir() {
 	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5,6
 	assert_failure 4
 	assert_output --partial "error: 2 of 2 cells failed: PROBE_FAILED x2."
-	! grep -q 'NOT_RUN' "$d/sweep-outcome.txt"
+	! grep -q 'NOT_RUN' "$d/sweep-outcome.txt" || false
 	# A sweep dir an older harness started (no planned-cells.txt): the resume starts one,
 	# marked partial, and its outcome says the planned set is not known.
 	rm -f "$d/planned-cells.txt"
@@ -196,7 +196,7 @@ attempts_dir() {
 	refute_output --partial "does not record its members' active Istio revisions"
 	refute_output --partial "does not record its Istio CR and IstioRevision generations"
 	refute_output --partial "an older harness started it"
-	! grep -q "an older harness started it" "$d/sweep-outcome.txt"
+	! grep -q "an older harness started it" "$d/sweep-outcome.txt" || false
 	grep -qx '# ISTIO_ACTIVE_REVISIONS=ci-a=default' "$tsv"
 	grep -qx '# ISTIO_GENERATIONS=ci-a=2/2' "$tsv"
 }
@@ -211,11 +211,12 @@ attempts_dir() {
 	echo v1.31.2 > "${BATS_TEST_TMPDIR}/kver"
 	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
+	# resumes.txt keeps the time as recorded; the notes print it with Z.
+	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
 	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t1} on ran on them, up to a later change noted here" "$d/sweep-outcome.txt"
 	echo unreachable > "${BATS_TEST_TMPDIR}/kver"
 	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	t2="$(awk -F'\t' 'NR == 3 { print $1 }' "$d/resumes.txt")"
+	t2="$(awk -F'\t' 'NR == 3 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
 	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t1} until ${t2} ran on them (the --resume at ${t2} could not read every member's version, so from there on they are not known), up to a later change noted here" "$d/sweep-outcome.txt"
 }
