@@ -20,6 +20,8 @@ source "${ROOT}/tests/lib/config.sh"
 config_preload churn "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -46,7 +48,9 @@ Usage: $(basename "$0") [options]
 
 Environment:
   SETUP_CONTEXTS, CHURN_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
-  CHURN_WAIT_TIMEOUT_SEC (--wait-timeout default, 300).
+  CHURN_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
+  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
+  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
 EOF
 }
 
@@ -112,8 +116,11 @@ apply=("${KUBECTL[@]}" apply)
 
 CHART_DIR="${ROOT}/tests/churn/chart"
 
+# render <ctx>: the member's platform decides the chart overlay.
 render() {
-	helm template churn-test "$CHART_DIR" \
+	local pargs=()
+	platform_chart_args "$CHART_DIR" "$1" pargs || return 1
+	helm template churn-test "$CHART_DIR" ${pargs[@]+"${pargs[@]}"} \
 		--set namespace="$NS" \
 		--set deploymentCount="$DEPLOYMENT_COUNT" \
 		--set baseReplicas="$BASE_REPLICAS" \
@@ -128,12 +135,12 @@ for ctx in "${CONTEXTS[@]}"; do
 		echo "Setting up churn-test on context $ctx (${DEPLOYMENT_COUNT} deployments × ${BASE_REPLICAS} replicas)"
 		# Offline dry-run: a context not in the kubeconfig gets the render only.
 		if ((DRY_RUN)) && ! "${KUBECTL[@]}" config get-contexts "$ctx" >/dev/null 2>&1; then
-			objs=$(render | awk '/^kind:/ { print $2 }' | sort | uniq -c | awk '{ printf "%s%s=%s", sep, $2, $1; sep = " " }') \
+			objs=$(render "$ctx" | awk '/^kind:/ { print $2 }' | sort | uniq -c | awk '{ printf "%s%s=%s", sep, $2, $1; sep = " " }') \
 				|| { echo "error: render failed for $ctx" >&2; exit 1; }
 			echo "  [dry-run] $ctx is not in the kubeconfig; rendered only: $objs"
 			exit 0
 		fi
-		render | "${apply[@]}" --context="$ctx" -f - \
+		render "$ctx" | "${apply[@]}" --context="$ctx" -f - \
 			|| { echo "error: apply failed on $ctx" >&2; exit 1; }
 	) &
 	APPLY_PIDS+=($!)

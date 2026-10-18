@@ -46,8 +46,8 @@ Options:
                          churn-dataplane (required).
   --contexts CSV         Mesh member contexts; the first is the source for suites
                          that take one (default: \$SETUP_CONTEXTS).
-  --gitops-context CTX   ACM hub context running OpenShift GitOps, where Argo CD
-                         auto-sync is paused for the run (default: \$TUNING_GITOPS_CONTEXT).
+  --gitops-context CTX   Hub context running Argo CD, where its auto-sync is paused
+                         for the run (default: \$TUNING_GITOPS_CONTEXT).
   --no-gitops-pause      Do not pause Argo CD (mesh not managed by GitOps).
   --profiles CSV         Profile names (default: every profile in profiles/).
   --no-baseline          Skip the no-profile pass.
@@ -103,7 +103,7 @@ is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer"
 is_pos_int "$CHURN_RATE" || die "--churn-rate must be a positive integer"
 is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
 if ((GITOPS_PAUSE)) && [[ -z "$GITOPS_CTX" ]]; then
-	die "--gitops-context is required: the ACM hub context whose Argo CD manages the Istio CRs (or pass --no-gitops-pause)"
+	die "--gitops-context is required: the hub context whose Argo CD manages the Istio CRs (or pass --no-gitops-pause)"
 fi
 
 CONTEXTS=()

@@ -25,7 +25,7 @@
 #
 # Usage:
 #   ./tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
-#     --workload-context <mesh-b-ctx> [--hub-context <acm-hub-ctx>] [--dry-run]
+#     --workload-context <mesh-b-ctx> [--hub-context <hub-ctx>] [--dry-run]
 #   ./tests/gateway-api/001-run-ingress-check.sh --config tests/gateway-api/configs/smoke.env \
 #     --contexts <mesh-a-ctx>,<mesh-b-ctx> --workload-context <mesh-b-ctx>
 # ci-dry-run: --contexts ci-a,ci-b --workload-context ci-b
@@ -45,6 +45,9 @@ source "${ROOT}/tests/lib/preamble.sh"
 # reach_sanitize: masks IPs and hostnames in the response text this script records.
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"
+# platform_of: which operator build a member records (the OSSM CSV or the Sail Deployment).
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"
 
 CONTEXTS_CSV="${SETUP_CONTEXTS}"
 WORKLOAD_CTX="${GWAPI_WORKLOAD_CONTEXT}"
@@ -66,8 +69,9 @@ INGRESS_FROM_FLAG=0
 # Fixed by the charts (do not override them there): the ingress gateway and its pod selector
 # (charts/spoke-ingress-gateway), the echo label, the Service port (service.port) and the DNS
 # domain suffix (clusterDomain) of charts/mesh-verify-gateway-api, istiod's Gateway API
-# controller name and pod label, and the OSSM operator's namespace and package
-# (charts/spoke-ossm-operator).
+# controller name and pod label, the OSSM operator's namespace and package on OpenShift
+# (charts/spoke-ossm-operator), and the Sail operator's namespace and Deployment on Kubernetes
+# (charts/gitops-hub-ocm-placement-appset/values-sail-operator.yaml).
 INGRESS_DEPLOY=istio-ingressgateway
 INGRESS_SELECTOR=istio=ingressgateway
 ECHO_SELECTOR=app=gwapi-echo
@@ -77,6 +81,8 @@ CLUSTER_DOMAIN=cluster.local
 ISTIOD_SELECTOR=app=istiod
 OSSM_OPERATOR_NS=openshift-operators
 OSSM_PACKAGE=servicemeshoperator3
+SAIL_OPERATOR_NS=sail-operator
+SAIL_OPERATOR_DEPLOY=sail-operator
 # Fixed by this script (not knobs: the bounds they poll within are --wait-timeout and
 # GWAPI_GATE_PASSES). POLL_SEC: seconds between status polls in the wait (step 2).
 # GATE_POLL_SEC: seconds between the data-plane gate's rounds per ingress (step 2), so
@@ -160,11 +166,11 @@ Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml; tests/gatewa
   --config FILE           Run config of KEY=value lines (SETUP_CONTEXTS and the GWAPI_* keys of
                           config/options.env; tests/gateway-api/README.md, "Run config").
                           Precedence: flag > --config > environment > default.
-  --contexts CSV          Mesh members, never the ACM hub; at least two (default: \$SETUP_CONTEXTS).
-  --workload-context CTX  The member that runs the echo workload, i.e. whose ACM ManagedCluster
-                          name is the chart's workloadCluster; one of --contexts
-                          (default: \$GWAPI_WORKLOAD_CONTEXT).
-  --hub-context CTX       ACM hub context: also read the Argo CD health of the per-member
+  --contexts CSV          Mesh members, never the hub; at least two (default: \$SETUP_CONTEXTS).
+  --workload-context CTX  The member that runs the echo workload, i.e. whose Argo CD cluster
+                          name (on OpenShift: ACM ManagedCluster) is the chart's
+                          workloadCluster; one of --contexts (default: \$GWAPI_WORKLOAD_CONTEXT).
+  --hub-context CTX       Hub context: also read the Argo CD health of the per-member
                           Applications (best effort). Not one of --contexts.
                           (default: \$GWAPI_HUB_CONTEXT; empty = skip)
   --ingress CTX=ADDR      Ingress address of a member (host or IP, optional :PORT) when its
@@ -302,7 +308,7 @@ done
 [[ -n "$WORKLOAD_CTX" ]] || die "--workload-context (or GWAPI_WORKLOAD_CONTEXT) is required: the member whose ACM ManagedCluster name is the chart's workloadCluster"
 [[ -n "${IS_MEMBER[$WORKLOAD_CTX]:-}" ]] || die "--workload-context ${WORKLOAD_CTX} is not one of --contexts (${CONTEXTS[*]})"
 if [[ -n "$HUB_CTX" && -n "${IS_MEMBER[$HUB_CTX]:-}" ]]; then
-	die "--hub-context ${HUB_CTX} is also in --contexts: --contexts lists mesh members only, never the ACM hub"
+	die "--hub-context ${HUB_CTX} is also in --contexts: --contexts lists mesh members only, never the hub"
 fi
 is_pos_int "$REQUESTS" || die "--requests (or GWAPI_REQUESTS) must be a positive integer; got '${REQUESTS}'"
 is_pos_int "$TIMEOUT_SEC" || die "--timeout (or GWAPI_TIMEOUT_SEC) must be a positive integer; got '${TIMEOUT_SEC}'"
@@ -544,6 +550,12 @@ SIDECAR_FILTER='if (.items | length) == 0 then "no-pods" else ([.items[] | ((.sp
 NAME_LIST_FILTER='[.items[]?.metadata.name] | sort | if length == 0 then "none" else join(",") end'
 CSV_FILTER='[.items[]? | select(.metadata.name | startswith("'"${OSSM_PACKAGE}"'."))
 	| "\(.spec.version // "unknown")/\(.status.phase // "unknown")"] | unique | if length == 0 then "absent" else join("|") end'
+# The Sail operator Deployment: sail-operator:<image tag>/Available (or /Unavailable). The tag
+# is "digest" for an image pinned by digest only, "latest" for one with neither.
+# shellcheck disable=SC2016  # jq program: $img, $ref and $tag are jq variables
+SAIL_FILTER='([.spec.template.spec.containers[]? | select(.name == "'"${SAIL_OPERATOR_DEPLOY}"'") | .image][0] // "") as $img
+	| ($img | split("/") | last // "" | split("@")) as $ref | ($ref[0] // "" | split(":") | .[1]) as $tag
+	| "sail-operator:\(if $img == "" then "unknown" elif $tag then $tag elif ($ref | length) > 1 then "digest" else "latest" end)/\(if (.status.availableReplicas // 0) > 0 then "Available" else "Unavailable" end)"'
 
 # pod_filter <container>: jq program over a pod list, "<images>\t<fingerprint>\t<running>\t<pod>".
 # images: per pod, the container image's last path component (the registry host and path are
@@ -603,7 +615,12 @@ preflight_member() {
 		pf "istiod_image istiod_fp" "$ctx" "$(pod_filter discovery)" -n istio-system get pods -l "$ISTIOD_SELECTOR"
 		pf "ingress_image ingress_fp ingress_replicas ingress_pod" "$ctx" "$(pod_filter istio-proxy)" \
 			-n istio-system get pods -l "$INGRESS_SELECTOR"
-		pf ossm_operator "$ctx" "$CSV_FILTER" -n "$OSSM_OPERATOR_NS" get clusterserviceversions.operators.coreos.com
+		# The operator build: the Sail operator Deployment on Kubernetes, else the OSSM CSV (OLM).
+		if [[ "$(platform_of "$ctx" 2>/dev/null)" == kubernetes ]]; then
+			pf ossm_operator "$ctx" "$SAIL_FILTER" -n "$SAIL_OPERATOR_NS" get deploy "$SAIL_OPERATOR_DEPLOY"
+		else
+			pf ossm_operator "$ctx" "$CSV_FILTER" -n "$OSSM_OPERATOR_NS" get clusterserviceversions.operators.coreos.com
+		fi
 		pf istio_cr_version "$ctx" '.spec.version // "unset"' get istios.sailoperator.io default
 		pf "echo echo_text" "$ctx" "$ECHO_FILTER" -n "$NS" get deploy -l "$ECHO_SELECTOR"
 		pf echo_sidecar "$ctx" "$SIDECAR_FILTER" -n "$NS" get pods -l "$ECHO_SELECTOR"
@@ -706,7 +723,7 @@ fi
 # Stop when the check is not deployed (a whole-run precondition: nothing is written).
 problems=()
 for ctx in "${CONTEXTS[@]}"; do
-	[[ "${PRE[$ctx|crd]}" != absent ]] || problems+=("${ctx}: no Gateway API CRDs (httproutes.gateway.networking.k8s.io)")
+	[[ "${PRE[$ctx|crd]}" != absent ]] || problems+=("${ctx}: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (tests/gateway-api/README.md, Deploy)")
 	[[ "${PRE[$ctx|namespace]}" != absent ]] || problems+=("${ctx}: namespace ${NS} is missing")
 	[[ "${PRE[$ctx|gateway]}" != absent ]] || problems+=("${ctx}: Gateway istio-system/${GW_NAME} is missing")
 	case "${PRE[$ctx|gatewayclass]}" in
@@ -714,7 +731,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	*) warn "${ctx}: GatewayClass istio is ${PRE[$ctx|gatewayclass]}, but the status reads look for ${GW_CONTROLLER}: its routes will read no-status (see ISTIOD_ENV PILOT_GATEWAY_API_CONTROLLER_NAME)" ;;
 	esac
 	if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then
-		[[ "${PRE[$ctx|echo]}" != absent ]] || problems+=("${ctx} (--workload-context): no echo Deployment (${ECHO_SELECTOR}) in ${NS}; the chart's workloadCluster must be this member's ACM ManagedCluster name")
+		[[ "${PRE[$ctx|echo]}" != absent ]] || problems+=("${ctx} (--workload-context): no echo Deployment (${ECHO_SELECTOR}) in ${NS}; the chart's workloadCluster must be this member's cluster name (Argo CD cluster; on OpenShift ACM ManagedCluster)")
 		if [[ "${PRE[$ctx|remote_namespace]}" == absent ]]; then
 			problems+=("${ctx} (--workload-context): namespace ${NS_REMOTE} (the S7-S9 backends) is missing; sync a chart revision that renders it")
 		elif [[ "${PRE[$ctx|echo_remote]}" == absent ]]; then
@@ -727,7 +744,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 	else
 		if [[ "${PRE[$ctx|echo]}" != absent && "${PRE[$ctx|echo]}" != unknown ]]; then
-			problems+=("${ctx}: runs the echo Deployment, but --workload-context is ${WORKLOAD_CTX}; pass the member whose ManagedCluster name is the chart's workloadCluster")
+			problems+=("${ctx}: runs the echo Deployment, but --workload-context is ${WORKLOAD_CTX}; pass the member whose cluster name is the chart's workloadCluster")
 		fi
 		# Not stops: only the scenarios that depend on them, and their rows on this member say so.
 		case "${PRE[$ctx|remote_namespace]}" in

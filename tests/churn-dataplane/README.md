@@ -59,7 +59,7 @@ the requested rate (per-operation process overhead).
 ## Quick start
 
 Needs `kubectl` or `oc`, `helm`, `jq`, `curl`, the deployed mesh (see the root README)
-and kube contexts for the mesh members (not the ACM hub). Context names become Service
+and kube contexts for the mesh members (not the hub). Context names become Service
 names (`fortio-server-<ctx>`), so each must be a lowercase DNS label of at most 49
 characters; rename others with `kubectl config rename-context`.
 

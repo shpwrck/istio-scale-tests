@@ -29,6 +29,8 @@ source "${ROOT}/tests/lib/config.sh"
 config_preload dataplane "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -48,7 +50,7 @@ Usage: $(basename "$0") [options]
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the client (required).
   --remote-contexts CSV    Remote cluster contexts for servers (comma-separated).
-  --dry-run                Pass --dry-run=client to oc apply.
+  --dry-run                Pass --dry-run=client to kubectl apply.
   --wait-timeout N         Seconds to wait for pods (default: $WAIT_TIMEOUT).
   --server-replicas N      fortio server pods per cluster, local and remote alike
                            (default: $SERVER_REPLICAS).
@@ -60,7 +62,9 @@ be a lowercase DNS label of at most 46 characters; rename others with
 
 Environment:
   DATAPLANE_TEST_NAMESPACE, DATAPLANE_SERVER_REPLICAS, FORTIO_VERSION,
-  DATAPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300).
+  DATAPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
+  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
+  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
 EOF
 }
 
@@ -137,7 +141,7 @@ CHART_DIR="${ROOT}/tests/dataplane/chart"
 # Build --set flags for allClusterNames so every cluster gets per-cluster
 # Services for ALL clusters. Without this, DNS can't resolve
 # dataplane-server-${remote} on the source cluster (unless Istio DNS
-# proxying is enabled, which is not the default on OSSM 3.x).
+# proxying is enabled, which is not the Istio default).
 ALL_CN_SETS=()
 for i in "${!ALL_CTXS[@]}"; do
 	ALL_CN_SETS+=(--set "allClusterNames[$i]=${ALL_CTXS[$i]}")
@@ -156,7 +160,8 @@ APPLY_PIDS=()
 for ctx in "${ALL_CTXS[@]}"; do
 	(
 		echo "  Server on $ctx"
-		helm template dataplane-test "$CHART_DIR" \
+		platform_chart_args "$CHART_DIR" "$ctx" PLATFORM_ARGS || exit 1
+		helm template dataplane-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
 			--set clusterName="$ctx" \
 			--set namespace="$NS" \
 			--set role=server \
@@ -173,7 +178,9 @@ for pid in "${APPLY_PIDS[@]}"; do
 done
 
 echo "Deploying fortio client on source cluster $SOURCE_CTX..."
-helm template dataplane-test "$CHART_DIR" \
+SOURCE_PLATFORM_ARGS=()
+platform_chart_args "$CHART_DIR" "$SOURCE_CTX" SOURCE_PLATFORM_ARGS || die "cannot pick the chart overlay for $SOURCE_CTX"
+helm template dataplane-test "$CHART_DIR" ${SOURCE_PLATFORM_ARGS[@]+"${SOURCE_PLATFORM_ARGS[@]}"} \
 	--set clusterName="$SOURCE_CTX" \
 	--set namespace="$NS" \
 	--set role=both \

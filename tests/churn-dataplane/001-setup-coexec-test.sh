@@ -34,6 +34,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
 
 SOURCE_CTX=""
 REMOTE_CONTEXTS_CSV=""
@@ -79,7 +81,9 @@ Environment:
   COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
   defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 240),
   COEXEC_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014).
+  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
+  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
+  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
 EOF
 }
 
@@ -227,10 +231,12 @@ if ((DRY_RUN)); then
 	apply=("${KUBECTL[@]}" apply --dry-run=client)
 fi
 
-# render_for <ctx> <role>: helm template the chart for one cluster and fortio role.
+# render_for <ctx> <role>: helm template the chart for one cluster and fortio role
+# (the cluster's platform decides the chart overlay).
 render_for() {
-	local ctx="$1" role="$2"
-	helm template churn-dataplane-test "$CHART_DIR" \
+	local ctx="$1" role="$2" pargs=()
+	platform_chart_args "$CHART_DIR" "$ctx" pargs || return 1
+	helm template churn-dataplane-test "$CHART_DIR" ${pargs[@]+"${pargs[@]}"} \
 		--set namespace="$NS" \
 		--set clusterName="$ctx" \
 		"${ALL_CN_SETS[@]}" \

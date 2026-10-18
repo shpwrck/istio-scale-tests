@@ -10,7 +10,7 @@ and writes a comparison table.
 - The mesh deployed by GitOps (`charts/spoke-ossm`). Its baseline already has root
   Sidecar scoping, discoverySelectors, and client-metric and access-log filtering.
   Profiles change things on top of that.
-- Contexts for the mesh members and for the ACM hub (Argo CD runs there).
+- Contexts for the mesh members and for the hub (Argo CD runs there).
 
 ## Profiles
 
@@ -22,7 +22,9 @@ and writes a comparison table.
 | `04-connection-pools` | DestinationRule `tuning-connection-pool` in `istio-system` for `*.svc.cluster.local` | supported | dataplane, churn-dataplane |
 
 **supported**: a documented OSSM API. **configurable**: set through
-`spec.values.pilot.env` on the Istio CR; Red Hat does not document the variable.
+`spec.values.pilot.env` on the Istio CR; Red Hat does not document the variable. The OSSM column
+is Red Hat's support status, for the OpenShift profile; on Kubernetes the upstream Sail operator
+takes the same Istio CR, so every profile applies the same way.
 Each profile YAML lists the Istio 1.30 defaults it changes.
 
 To measure a baseline lever (Sidecar scoping, discoverySelectors, telemetry), toggle
@@ -32,7 +34,7 @@ To measure a baseline lever (Sidecar scoping, discoverySelectors, telemetry), to
 
 ```bash
 ./tests/tuning/003-run-tuning-sweep.sh --suite churn \
-  --contexts <mesh-a-ctx>,<mesh-b-ctx> --gitops-context <acm-hub-ctx> \
+  --contexts <mesh-a-ctx>,<mesh-b-ctx> --gitops-context <hub-ctx> \
   --profiles 02-xds-cache-off --settle 30 --dry-run
 ```
 
@@ -79,14 +81,14 @@ in KiB. Re-render:
 ## One profile by hand
 
 ```bash
-./tests/tuning/006-gitops-pause.sh --gitops-context <acm-hub-ctx> --pause
+./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --pause
 ./tests/tuning/001-apply-profile.sh --profile 01-push-throttling --contexts <mesh-a-ctx>,<mesh-b-ctx>
 # ... run a suite probe ...
 ./tests/tuning/002-revert-profile.sh --state-dir tests/tuning/results/state-01-push-throttling
 ./tests/tuning/006-gitops-pause.sh --resume
 ```
 
-`006-gitops-pause.sh --gitops-context <acm-hub-ctx> --status` lists the sync windows.
+`006-gitops-pause.sh --gitops-context <hub-ctx> --status` lists the sync windows.
 
 ## How apply, revert and the Argo CD pause work
 

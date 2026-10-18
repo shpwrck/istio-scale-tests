@@ -59,6 +59,8 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the apply timings
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # ns_lifecycle_init / _row / _api_counts
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -199,7 +201,9 @@ Environment:
   CONTROLPLANE_APPLY_ATTEMPTS / CONTROLPLANE_APPLY_BACKOFF_S (apply retry, default 3 / 5s),
   CONTROLPLANE_APPLY_CHUNK_OBJECTS (objects per apply batch, default 200; <=0 disables),
   CONTROLPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  BUSYBOX_VERSION (dummy workload image tag).
+  BUSYBOX_VERSION (dummy workload image tag),
+  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
+  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
 
   Scale coverage (off by default): SCALE_SIZING_MODE (fixed|auto; auto derives the
   service count from cluster capacity; legacy layout only), SCALE_TARGET_FRACTION,
@@ -995,7 +999,8 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 		echo "Setting up controlplane-test on context $ctx (part ${PARTS}, sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG})"
 		rendered="${ctx_dir}/rendered.yaml"
-		helm template controlplane-test "$CHART_DIR" --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
+		platform_chart_args "$CHART_DIR" "$ctx" PLATFORM_ARGS || exit 1
+		helm template controlplane-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
 			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
 		split_render "$rendered" "$ctx_dir"
 		read -r _ n_ns nsb _ ob < <(grep '^batches ' "${ctx_dir}/counts")

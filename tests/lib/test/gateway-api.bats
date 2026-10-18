@@ -47,7 +47,8 @@ setup() {
 
 	# kubectl: ctx-a has no workload, ctx-b runs it (echo text member-b) and alone has the S7-S9
 	# backend namespace; both have the S7b namespace and its ReferenceGrant; hub is the ACM hub; any
-	# other context does not exist. STUB_NO_NS=<ctx>: the test namespace is missing there.
+	# other context does not exist. STUB_NO_NS=<ctx>: the test namespace is missing there;
+	# STUB_NO_CRD=<ctx>: so are the Gateway API CRDs.
 	# STUB_NO_REMOTE_NS=1 / STUB_NO_SHARED_NS=1: that backend namespace is missing on ctx-b.
 	# STUB_REMOTE_NS_A=present|fail: ctx-a has the S7-S9 namespace too, or its read fails.
 	# STUB_SHARED_A=absent|nogrant: ctx-a lacks the S7b namespace, or its ReferenceGrant.
@@ -118,9 +119,9 @@ LABELS='"labels":{"istio-discovery":"enabled","istio.io/rev":"default"}'
 if [[ "$ctx" == hub ]]; then
 	[[ -z "${STUB_HUB_FAIL:-}" ]] || { echo "Unable to connect to the server: dial tcp 192.0.2.50:6443: i/o timeout" >&2; exit 1; }
 	case "$cmd" in
-	"-n openshift-gitops get applicationsets.argoproj.io mesh-verify-gwapi -o json")
+	"-n argocd get applicationsets.argoproj.io mesh-verify-gwapi -o json")
 		echo '{"spec":{"template":{"spec":{"source":{"helm":{"valuesObject":{"workloadCluster":"member-b"}}}}}}}' ;;
-	"-n openshift-gitops get applications.argoproj.io -o json")
+	"-n argocd get applications.argoproj.io -o json")
 		rev="${STUB_REVISION:-0123456789abcdef0123}"
 		echo '{"items":[
 			{"metadata":{"name":"member-a-mesh-verify-gwapi","ownerReferences":[{"kind":"ApplicationSet","name":"mesh-verify-gwapi"}]},"spec":{"destination":{"name":"member-a"}},
@@ -135,6 +136,7 @@ fi
 case "$cmd" in
 "version --output=json") echo '{"serverVersion":{"gitVersion":"v1.33.4"}}' ;;
 "get crd httproutes.gateway.networking.k8s.io -o json")
+	[[ "${STUB_NO_CRD:-}" != "$ctx" ]] || nf 'customresourcedefinitions.apiextensions.k8s.io "httproutes.gateway.networking.k8s.io"'
 	echo '{"metadata":{"annotations":{"gateway.networking.k8s.io/bundle-version":"v1.3.0","gateway.networking.k8s.io/channel":"standard"}}}' ;;
 "get gatewayclasses.gateway.networking.k8s.io istio -o json")
 	echo '{"spec":{"controllerName":"istio.io/gateway-controller"},"status":{"conditions":[{"type":"Accepted","status":"True"}]}}' ;;
@@ -188,6 +190,12 @@ case "$cmd" in
 	pods istio-ingressgateway-5d8f7 istio-proxy registry.example.invalid/openshift-service-mesh/istio-proxyv2-rhel9:1.30.5 2 2026-10-14T08:00:00Z ;;
 "-n openshift-operators get clusterserviceversions.operators.coreos.com -o json")
 	echo '{"items":[{"metadata":{"name":"servicemeshoperator3.v3.4.3"},"spec":{"version":"3.4.3"},"status":{"phase":"Succeeded"}},{"metadata":{"name":"other-operator.v1.0.0"},"spec":{"version":"1.0.0"},"status":{"phase":"Succeeded"}}]}' ;;
+# The members' platform (tests/lib/platform.sh): OpenShift, or STUB_PLATFORM=kubernetes.
+"api-versions")
+	printf '%s\n' apps/v1 gateway.networking.k8s.io/v1 v1
+	[[ "${STUB_PLATFORM:-}" == kubernetes ]] || printf '%s\n' security.openshift.io/v1 ;;
+"-n sail-operator get deploy sail-operator -o json")
+	echo '{"spec":{"template":{"spec":{"containers":[{"name":"sail-operator","image":"registry.example.invalid/sail-dev/sail-operator:1.31.1"}]}}},"status":{"availableReplicas":1}}' ;;
 "get istios.sailoperator.io default -o json") echo '{"spec":{"version":"v1.30.5"}}' ;;
 "-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json" | \
 	"-n mesh-verify-gwapi-shared get deploy -l app=gwapi-echo -o json")
@@ -445,7 +453,7 @@ preamble_keys() {
 		"--contexts ctx-a --workload-context ctx-a|needs at least two mesh members"
 		"--contexts ctx-a,ctx-b|--workload-context (or GWAPI_WORKLOAD_CONTEXT) is required"
 		"--contexts ctx-a,ctx-b --workload-context ctx-c|is not one of --contexts"
-		"--contexts ctx-a,ctx-b --workload-context ctx-b --hub-context ctx-a|never the ACM hub"
+		"--contexts ctx-a,ctx-b --workload-context ctx-b --hub-context ctx-a|never the hub"
 		"--contexts ctx-a,ctx-b --workload-context ctx-b --ingress ctx-c=192.0.2.1|ctx-c is not one of --contexts"
 		"--contexts ctx-a,ctx-b --workload-context ctx-b --ingress ctx-a|takes CTX=ADDR[:PORT]"
 		"--contexts ctx-a,ctx-b --workload-context ctx-b --wait-timeout 2m|--wait-timeout (or GWAPI_WAIT_TIMEOUT_SEC)"
@@ -643,7 +651,7 @@ render_sha() {
 	command -v helm >/dev/null 2>&1 || skip "helm not installed"
 	run helm template t "$CHART" --set clusterName=member-a
 	assert_failure
-	assert_output --partial "is not an ACM ManagedCluster name"
+	assert_output --partial "is not a member's cluster name"
 	run helm template t "$CHART" --set clusterName=member-a --set 'workloadCluster=<workload-cluster>'
 	assert_failure
 	run helm template t "$CHART" --set clusterName=member-b,workloadCluster=member-b,remoteNamespace=mesh-verify-gwapi
@@ -1115,6 +1123,11 @@ render_sha() {
 	assert_output --partial "ctx-a: namespace mesh-verify-gwapi is missing"
 	assert_output --partial "charts/mesh-verify-gateway-api-appset.yaml"
 	[ ! -e "$OUT" ]
+	# No Gateway API CRDs (Kubernetes does not ship them): the stop says where to get them.
+	STUB_NO_CRD=ctx-a gw_run
+	assert_failure
+	assert_output --partial "ctx-a: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (tests/gateway-api/README.md, Deploy)"
+	[ ! -e "$OUT" ]
 	# The echo Deployment on another member than --workload-context.
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --contexts ctx-a,ctx-b --workload-context ctx-a --results-dir "$OUT"
 	assert_failure
@@ -1354,7 +1367,7 @@ render_sha() {
 	STUB_ISTIOCTL=fail STUB_HUB_FAIL=1 gw_run --hub-context hub
 	assert_success
 	assert_output --partial "the Argo CD health read failed"
-	assert_output --partial "could not read ApplicationSet openshift-gitops/mesh-verify-gwapi on hub"
+	assert_output --partial "could not read ApplicationSet argocd/mesh-verify-gwapi on hub"
 	assert_output --partial "istioctl on ctx-a: exit 1: Error: failed to reach the proxy at <ip>:15000"
 	[ "$(cell ctx-a S2 observed_endpoints)" = unknown ]
 	[[ "$(cell ctx-a S2 row_status)" == *PROXY_CONFIG_FAILED* ]]
@@ -1400,4 +1413,19 @@ render_sha() {
 	ls "$OUT"/run-*/run-config-*.env
 	grep -q 'run-config-' "$(summary)"
 	no_addresses
+}
+
+@test "gateway-api run: on Kubernetes the operator build is the Sail operator's image; no OLM read" {
+	STUB_PLATFORM=kubernetes gw_run
+	assert_success
+	grep -qx '# OSSM_OPERATOR\[ctx-a\]=sail-operator:1.31.1/Available' "$(tsv)"
+	grep -qx '# OSSM_OPERATOR\[ctx-b\]=sail-operator:1.31.1/Available' "$(tsv)"
+	! grep -q clusterserviceversions "$STUB_LOG" || false
+	refute_output --partial "could not read ossm_operator"
+	# TEST_PLATFORM=openshift skips the question and reads the OSSM CSV.
+	rm -rf "$OUT"
+	STUB_PLATFORM=kubernetes TEST_PLATFORM=openshift gw_run
+	assert_success
+	grep -qx '# OSSM_OPERATOR\[ctx-b\]=3.4.3/Succeeded' "$(tsv)"
+	! grep -q api-versions "$STUB_LOG" || false
 }

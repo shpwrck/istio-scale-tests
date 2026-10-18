@@ -973,8 +973,8 @@ _istiod_diag_run() {
 			echo "## Memory history"
 			echo ""
 			echo "The pre-window values above come from the suite's own last scrape. For the"
-			echo "memory curve up to the restart, run this in the OpenShift console (Observe >"
-			echo "Metrics) at the pod's finished_at (cluster clock), per affected pod:"
+			echo "memory curve up to the restart, run this in Prometheus (on OpenShift: the console,"
+			echo "Observe > Metrics) at the pod's finished_at (cluster clock), per affected pod:"
 			echo ""
 			for k in "${!A_POD[@]}"; do
 				[[ "${A_EV[k]}" == "$folder" ]] || continue

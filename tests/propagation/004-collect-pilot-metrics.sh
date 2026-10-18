@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Snapshot istiod pilot_* metrics from every Running istiod pod via port-forward.
-# Useful when OpenShift User Workload Monitoring is not enabled, or for
+# Useful when no Prometheus scrapes istiod (on OpenShift: User Workload Monitoring off), or for
 # point-in-time snapshots during a load test. Writes one .prom file per pod.
 #
 # Usage:

@@ -153,7 +153,7 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 - The classic `Gateway` with S1's and S9's `VirtualService`s, the HTTPRoutes, the Services (one
   template, so the S3 stub is byte-identical), and, on the workload member only, the
   sidecar-injected `hashicorp/http-echo` Deployment `gwapi-echo`, whose body is the member's
-  ManagedCluster name.
+  cluster name.
 - On the workload member only: namespace `mesh-verify-gwapi-remote` (`remoteNamespace`, same
   labels; the label is what lets the other members' istiods discover its Services) with a second
   `gwapi-echo` Deployment, Services `echo-s7`, `echo-s8`, `echo-s9`, and ReferenceGrant `s7`
@@ -164,7 +164,7 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 - The scenario set id, annotation `mesh-verify-gwapi/scenario-set` on every namespace and on the
   Gateway API Gateway (`_helpers.tpl`, not a value). The script records it per member and marks a
   member that runs another set (`SCENARIO_SET_MISMATCH`).
-- `workloadCluster` (the workload member's ACM ManagedCluster name) decides where the
+- `workloadCluster` (the workload member's cluster name, below) decides where the
   Deployments, the workload-only Services, the backend namespace and C2 go. Empty, or the
   `<workload-cluster>` placeholder, fails every member's render with a message rather than
   deploying a check without a workload; a render with no `clusterName` (CI's `helm lint`) shows
@@ -172,22 +172,35 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 
 ## Deploy
 
-Needs the Gateway API CRDs on every member, ReferenceGrant included (recent OpenShift releases
-install the standard channel through the ingress operator; the script stops when HTTPRoute is
-missing), and the `istio` GatewayClass, which istiod creates.
+Needs the Gateway API CRDs on every member, ReferenceGrant included (the script stops when
+HTTPRoute is missing), and the `istio` GatewayClass, which istiod creates. Kubernetes does not
+ship the CRDs: install the standard channel on every member, at a version your Istio supports
+(Istio's Gateway API task has the command; on kind, cloud-provider-kind installs them). Recent
+OpenShift releases install the standard channel through the ingress operator.
 
-1. Pick the workload member: `oc --context <acm-hub-ctx> get managedclusters`.
-2. In [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
-   set both revisions (`spec.source.targetRevision`, `repo.revision`) and both repo URLs if you
-   use a fork. Leave the `<workload-cluster>` placeholder in the file: step 3 fills it in on the
-   way to the hub, so the cluster name never lands in git.
-3. Apply it on the hub with the workload member's ManagedCluster name, and wait for the per-member
-   Applications:
+1. Pick the workload member. A member's cluster name is its Argo CD cluster name: the kubeconfig
+   context it was registered with (`terraform -chdir=terraform/platform output
+   mesh_member_spoke_keys` lists them), which on OpenShift is also its ACM ManagedCluster name.
+2. Read what the hub syncs the mesh from. [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
+   keeps five placeholders: `<repo-url>`, `<revision>`, `<platform>`, `<gitops-namespace>` and
+   `<workload-cluster>`. `fill` fills them in on the way to the hub, so the check runs the same
+   charts as the mesh and the cluster name never lands in git.
 
    ```bash
-   sed 's/<workload-cluster>/<managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
-     | oc --context <acm-hub-ctx> apply -f -
-   oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops | grep mesh-verify-gwapi
+   NS=argocd PLATFORM=kubernetes   # OpenShift: NS=openshift-gitops PLATFORM=openshift
+   WORKLOAD=<member-cluster-name>
+   read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application hub-gitops-root \
+     -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+   fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+     -e "s|<platform>|${PLATFORM:?}|g" -e "s|<gitops-namespace>|${NS:?}|g" \
+     -e "s|<workload-cluster>|${WORKLOAD:?}|g" charts/mesh-verify-gateway-api-appset.yaml; }
+   ```
+
+3. Apply it on the hub, and wait for the per-member Applications:
+
+   ```bash
+   fill | kubectl --context <hub-ctx> apply -f -
+   kubectl --context <hub-ctx> get applications.argoproj.io -n "$NS" | grep mesh-verify-gwapi
    ```
 
    An Application may report `Degraded`: C1's missing backend is intentional, and Argo CD may
@@ -198,13 +211,13 @@ missing), and the `istio` GatewayClass, which istiod creates.
 
 ```bash
 tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
-  --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx> --dry-run
+  --workload-context <mesh-b-ctx> --hub-context <hub-ctx> --dry-run
 tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
-  --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx>
+  --workload-context <mesh-b-ctx> --hub-context <hub-ctx>
 ```
 
 `--contexts` lists mesh members only (at least two); `--workload-context` is the member whose
-ManagedCluster name is the chart's `workloadCluster`. The script deploys nothing, prints where its
+cluster name is the chart's `workloadCluster`. The script deploys nothing, prints where its
 results will go, and:
 
 1. **Preflight**, per member, recorded in the TSV preamble (`unset` = Istio's default; `unknown`
@@ -218,8 +231,10 @@ results will go, and:
      and `ENABLE_MCS_CLUSTER_LOCAL`;
    - the builds that ran: istiod's `discovery` image (`ISTIOD_IMAGE`), the ingress `istio-proxy`
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
-     ran (the registry host and path are dropped), and the OSSM operator CSV version and phase
-     (`OSSM_OPERATOR`); the Istio CR version and the tuning baseline;
+     ran (the registry host and path are dropped), and the operator build (`OSSM_OPERATOR`: on
+     OpenShift the OSSM CSV version and phase, such as `3.4.3/Succeeded`; on Kubernetes the Sail
+     operator's image tag and state, such as `sail-operator:1.31.1/Available`); the Istio CR
+     version and the tuning baseline;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),
@@ -518,7 +533,7 @@ unchanged.
 ## Cleanup
 
 ```bash
-oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+fill | kubectl --context <hub-ctx> delete -f -   # fill from Deploy, step 2
 ```
 
 The finalizers remove the ApplicationSet, the per-member Applications and everything they deployed,

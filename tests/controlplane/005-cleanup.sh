@@ -294,7 +294,7 @@ for ctx in "${CONTEXTS[@]}"; do
 			status=OK
 			# Explicit deletes first, so istiod processes them now rather than whenever the
 			# namespace controller gets to them (inside the next window). The probe has no
-			# pods; its OpenShift-created objects (service accounts, secrets, the
+			# pods; its auto-created objects (service accounts, secrets, the
 			# istio-ca-root-cert ConfigMap) go with the namespace after it leaves discovery.
 			"${KUBECTL[@]}" --context="$ctx" -n "$PROBE_NAME" delete services,sidecars.networking.istio.io \
 				-l "$BASE_SELECTOR" --ignore-not-found=true --wait=true --timeout="${TERMINATION_TIMEOUT}s" >/dev/null || status=FAILED

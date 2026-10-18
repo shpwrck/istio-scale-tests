@@ -127,7 +127,9 @@ rules: [Run config](../../README.md#run-config---config-file)).
 # One .prom file of pilot_* series per istiod pod (add --watch --interval 10 to repeat)
 ./tests/propagation/004-collect-pilot-metrics.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 
-# Or scrape continuously with OpenShift User Workload Monitoring (must already be enabled)
+# Or scrape continuously with a Prometheus Operator that watches istio-system: kube-prometheus-stack
+# (add --set extraLabels.release=<its release name>), or OpenShift User Workload Monitoring
+# (must already be enabled)
 helm install istiod-monitor charts/istiod-monitor -n istio-system --kube-context <mesh-a-ctx>
 ```
 

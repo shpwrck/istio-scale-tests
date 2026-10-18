@@ -26,6 +26,8 @@ source "${ROOT}/tests/lib/config.sh"
 config_preload propagation "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -42,7 +44,7 @@ Usage: $(basename "$0") [options]
                         --config > environment > default.
   --contexts CSV        Kube contexts to target (default: \$SETUP_CONTEXTS).
   --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
-  --dry-run             Pass --dry-run=client to oc apply.
+  --dry-run             Pass --dry-run=client to kubectl apply.
   --wait-timeout N      Seconds to wait for the watcher and backer pods to become
                         Ready (default: $WAIT_TIMEOUT).
   -h, --help            Show this help.
@@ -50,7 +52,9 @@ Usage: $(basename "$0") [options]
 Environment:
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_WATCHER_REPLICAS,
   BUSYBOX_VERSION, HTTP_ECHO_VERSION,
-  PROPAGATION_WAIT_TIMEOUT_SEC (--wait-timeout default, 300).
+  PROPAGATION_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
+  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
+  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
 EOF
 }
 
@@ -118,9 +122,10 @@ APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
 	(
 		echo "Setting up propagation-test on context $ctx"
+		platform_chart_args "$CHART_DIR" "$ctx" PLATFORM_ARGS || exit 1
 		# The backer is rendered on every context; only the source context's backer
 		# is flipped by the probe, so on remotes the canary Service stays empty.
-		helm template propagation-test "$CHART_DIR" \
+		helm template propagation-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
 			--set clusterName="$ctx" \
 			--set namespace="$NS" \
 			--set backer.enabled=true \

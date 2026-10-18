@@ -97,7 +97,7 @@ It grows with connected proxies, so compare it across mesh sizes, not against 1.
 ## Quick start
 
 Needs `kubectl` or `oc`, `helm`, `jq`, `curl`, the deployed mesh (see the root README)
-and kube contexts for the mesh members (not the ACM hub).
+and kube contexts for the mesh members (not the hub).
 
 ```bash
 # 1. Deploy churn targets and a watcher on each mesh member

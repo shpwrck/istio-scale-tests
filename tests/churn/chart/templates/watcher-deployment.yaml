@@ -27,3 +27,6 @@ spec:
               drop:
                 - ALL
             runAsNonRoot: true
+            {{- with $.Values.runAsUser }}
+            runAsUser: {{ . }}
+            {{- end }}

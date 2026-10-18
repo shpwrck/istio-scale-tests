@@ -180,6 +180,9 @@ EXTRACTED_PATTERNS=(
 	'cap_per_pod_requests() {'
 	'cap_parse_requested() {'
 	'cap_requested() {'
+	# member platform: platform.sh (the suite charts' OpenShift overlay)
+	'platform_of() {'
+	'platform_chart_args() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
