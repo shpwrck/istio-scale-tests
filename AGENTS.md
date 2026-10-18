@@ -12,8 +12,19 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
 4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
    tuning, and the read-only gateway-api check) plus a shared library in `tests/lib/`.
 
-Source of truth for mesh procedures: [Red Hat OpenShift Service Mesh 3.4 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.4/html/installing/ossm-multi-cluster-topologies).
-Prefer it over generic upstream Istio docs when they disagree.
+The default platform is vanilla Kubernetes (`platform = "kubernetes"`): upstream Argo CD (Helm),
+members registered as Argo CD cluster Secrets and selected by the label `istio-mesh-member=true`,
+and the upstream cert-manager, External Secrets and Sail operator charts. It is tested on kind
+([docs/runbooks/kind-lab](docs/runbooks/kind-lab/README.md)). OpenShift (`platform = "openshift"`)
+is an optional, untested profile: ROSA, ACM, OpenShift GitOps, ACM Placement and OSSM through OLM
+belong to it only. Keep both working: a chart that differs by platform gets a
+`values-openshift.yaml` overlay (member charts, suite charts) or a `platform-*.yaml` preset (the
+ApplicationSet chart), and Kubernetes stays the default.
+
+Source of truth for mesh procedures: on Kubernetes, the [Sail operator multicluster docs](https://github.com/istio-ecosystem/sail-operator/blob/main/docs/deployment-models/multicluster.adoc)
+and upstream Istio's [multi-primary on different networks](https://istio.io/latest/docs/setup/install/multicluster/multi-primary_multi-network/);
+on OpenShift, [Red Hat OpenShift Service Mesh 3.4 — Multi-cluster topologies](https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.4/html/installing/ossm-multi-cluster-topologies),
+which wins over the upstream docs there when they disagree.
 
 ## Rules
 
@@ -25,7 +36,8 @@ Prefer it over generic upstream Istio docs when they disagree.
   stay out (`.gitignore` covers them). Use placeholders in examples.
 - **Mesh via GitOps:** mesh, platform and operator resources are Helm charts under `charts/`, never
   install scripts. Per-environment differences go through `gitops_app_overrides` /
-  `argocd_config_values`, not forks; chart defaults stay sized for the 20-cluster campaign.
+  `argocd_helm_values` (`argocd_config_values` on OpenShift), not forks; chart defaults stay sized
+  for the 20-cluster campaign.
 - **Numbered scripts:** executable helpers in `tests/*/` and `terraform/*/scripts/` are named
   `NNN-kebab-case.sh` in execution order. When you add or renumber one, update every caller and
   README in the same change. Exception: `terraform/scripts/` holds helpers invoked by Terraform
@@ -33,8 +45,11 @@ Prefer it over generic upstream Istio docs when they disagree.
 - **`--dry-run`:** scripts that change a cluster accept `--dry-run` and run it without a reachable
   cluster. Annotate with `# ci-dry-run: <args>` (or `# ci-dry-run-skip: <reason>`) so CI runs it.
 - **Version pins:**
-  - deployed Istio: `istioVersion` in `charts/spoke-ossm/values.yaml`; OSSM channel:
-    `charts/spoke-ossm-operator/values.yaml`
+  - deployed Istio: `istioVersion` in `charts/spoke-ossm/values.yaml`; Sail operator chart:
+    `charts/gitops-hub-ocm-placement-appset/values-sail-operator.yaml` (it must list
+    `istioVersion`); External Secrets chart: `values-external-secrets.yaml` there; cert-manager
+    chart: `charts/gitops-hub-apps/values.yaml`; Argo CD chart: `argocd_chart_version` in
+    `terraform/platform/variables.tf`; OSSM channel (OpenShift): `charts/spoke-ossm-operator/values.yaml`
   - ACM/GitOps channels: `terraform/platform/variables.tf`
   - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
     keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`).
@@ -65,28 +80,28 @@ Prefer it over generic upstream Istio docs when they disagree.
 | --- | --- |
 | `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
-| `terraform/platform/` | ACM, GitOps, spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` |
+| `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy) |
 | `charts/gitops-hub-app-of-apps/` | Root Application `hub-gitops-root` (Helm source on `charts/gitops-hub-apps`) |
 | `charts/gitops-hub-apps/` | Child Applications (repo URL/branch templated; `apps.<name>.enabled/values`) |
-| `charts/gitops-hub-ocm-placement-appset/` | Reusable ApplicationSet + presets `values-*.yaml` |
-| `charts/argocd-config/` | ArgoCD CR: sharding, resources, exclusions, Sail Istio/IstioCNI health checks |
-| `charts/acm-*` | MultiClusterHub, KlusterletConfig, ManagedCluster, ClusterSet binding + Placement |
-| `charts/cert-manager-operator/`, `charts/external-secrets-operator/` | Hub operators (OLM) |
+| `charts/gitops-hub-ocm-placement-appset/` | Reusable ApplicationSet + presets `values-*.yaml` + platform overlays `platform-*.yaml` (cluster-Secret label or ACM Placement) |
+| `charts/argocd-config/` | Argo CD tuning (sharding, resources, exclusions, Sail Istio/IstioCNI health checks): the `argo-cd` chart's values on Kubernetes, the ArgoCD CR on OpenShift |
+| `charts/acm-*` | OpenShift only: MultiClusterHub, KlusterletConfig, ManagedCluster, ClusterSet binding + Placement |
+| `charts/cert-manager-operator/`, `charts/external-secrets-operator/` | Hub operators through OLM (OpenShift); Kubernetes uses the upstream charts |
 | `charts/hub-mesh-ca/`, `charts/hub-mesh-ca-intermediate/` | Shared root CA and per-member intermediates |
 | `charts/hub-kubeconfig-from-argosecret/`, `charts/hub-mesh-push-secrets/` | ESO: member kubeconfigs on the hub; push `cacerts` + Istio remote secrets |
-| `charts/spoke-istio-namespaces/`, `charts/spoke-ossm-operator/`, `charts/spoke-ossm/` | Member namespaces, Sail operator, Istio/IstioCNI (waits for `cacerts`) + tuning baseline |
+| `charts/spoke-istio-namespaces/`, `charts/spoke-ossm-operator/`, `charts/spoke-ossm/` | Member namespaces, Sail operator (OSSM through OLM on OpenShift; the upstream chart on Kubernetes), Istio/IstioCNI (waits for `cacerts`) + tuning baseline |
 | `charts/spoke-ingress-gateway/`, `charts/spoke-east-west-gateway/` | Member gateways |
 | `charts/mesh-wiring-verify/` | Always-on gate per member (remote secrets, istiod ingestion, shared root) |
 | `charts/mesh-verify/`, `charts/mesh-verify-appset.yaml` | On-demand cross-cluster echo check |
 | `charts/mesh-verify-gateway-api/`, `charts/mesh-verify-gateway-api-appset.yaml` | On-demand Gateway API check: HTTPRoutes on every member, echo workload on one (`tests/gateway-api`) |
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
-| `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
+| `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
 | `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`; bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
-| `docs/runbooks/` | Leave-behind runbooks for deployed environments |
+| `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
 
 ## Testing and verification
 
@@ -94,7 +109,7 @@ Prefer it over generic upstream Istio docs when they disagree.
   audit, bats, and every `# ci-dry-run:` script against an empty kubeconfig (no cluster needed).
   Required before merging changes to `tests/lib/`.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
-  (`charts/gitops-hub-apps` needs `--set repo.url=<url>`).
+  (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its `values-openshift.yaml`.
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
 - CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks on
   macOS. The job names are required checks; don't rename them.

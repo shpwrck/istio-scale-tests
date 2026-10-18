@@ -1,13 +1,20 @@
 # istio-scale-tests
 
-Deploy a multi-primary, multi-network Istio mesh on OpenShift (Red Hat OpenShift Service Mesh 3,
-Sail operator) across several clusters, then measure how it scales. One cluster is the ACM + Argo CD
-hub; every other cluster runs its own istiod and joins the mesh through east-west gateways, with a
-shared root CA.
+Deploy a multi-primary, multi-network Istio mesh (the Sail operator) across several Kubernetes
+clusters, then measure how it scales. One cluster is the hub (Argo CD, cert-manager, External
+Secrets); every other cluster runs its own istiod and joins the mesh through east-west gateways,
+with a shared root CA.
+
+Vanilla Kubernetes is the default (`platform = "kubernetes"`), with upstream Argo CD and the
+upstream Sail operator. It is tested on kind; other conformant clusters (kubeadm, EKS, ...) need
+only what [What you need](#what-you-need) lists. OpenShift is an optional profile
+(`platform = "openshift"`): Red Hat OpenShift Service Mesh 3, OpenShift GitOps and ACM, on existing
+clusters or new ROSA ones. It is kept for teams that run OpenShift but is untested: its last end to
+end run (ROSA, October 2026) predates the switch to Kubernetes by default.
 
 ```mermaid
 flowchart TB
-    hub["<b>hub</b><br/><i>never a mesh member</i><br/>ACM · Argo CD<br/>cert-manager · ESO"]
+    hub["<b>hub</b><br/><i>never a mesh member</i><br/>Argo CD · cert-manager · ESO<br/>(+ ACM on OpenShift)"]
 
     subgraph A["mesh member A"]
         direction TB
@@ -25,7 +32,7 @@ flowchart TB
 
     ew(["east-west :15443<br/>(cross-network mTLS)"])
 
-    hub -->|"charts: Argo CD ApplicationSets<br/>(ACM Placement)"| A
+    hub -->|"charts: Argo CD ApplicationSets"| A
     hub -.->|"ESO: cacerts +<br/>Istio remote secrets"| A
     hub --> B
     hub -.-> B
@@ -35,27 +42,37 @@ flowchart TB
 
 ## What you need
 
-- `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4+
+- `kubectl` (`oc` also works), `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4+
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
 - `python3` with PyYAML (tuning suite only)
-- Mesh members must be able to provision `type: LoadBalancer` Services (cloud provider or MetalLB).
+- Mesh members must be able to provision `type: LoadBalancer` Services (a cloud provider, MetalLB,
+  or cloud-provider-kind on kind), and the hub must reach every member's API server.
+- The Gateway API CRDs on every member for the gateway-api check (OpenShift installs them).
+- The metrics API (metrics-server) on every member for the controlplane suite's utilization-%
+  columns (OpenShift ships it); without it those columns read `N/A`.
 
 ## Deploy
 
-**Existing clusters:** use `terraform/platform` in kubeconfig mode. Name the hub context and the
-member contexts, and set the brownfield switches for anything already installed. See
-[terraform/platform/README.md](terraform/platform/README.md).
+**Kubernetes (default):** use `terraform/platform` in kubeconfig mode. Name the hub context and
+the member contexts (DNS labels: they become the cluster names). The apply installs Argo CD on the
+hub with its Helm chart and registers every member as an Argo CD cluster (a cluster-admin
+ServiceAccount token per member). See [terraform/platform/README.md](terraform/platform/README.md).
+To try it on one machine, [docs/runbooks/kind-lab](docs/runbooks/kind-lab/README.md) builds a hub
+and two members with kind.
 
-**New ROSA clusters:** create them with [terraform/rosa-hcp](terraform/rosa-hcp/README.md) (it covers
-the one-time AWS and Red Hat account setup and a preflight check), then apply `terraform/platform`
-with `cluster_provider = "rosa"`.
+**OpenShift (optional profile):** set `platform = "openshift"`. On existing clusters use kubeconfig
+mode, with the brownfield switches for anything already installed. For new ROSA clusters, create
+them with [terraform/rosa-hcp](terraform/rosa-hcp/README.md) (it covers the one-time AWS and Red Hat
+account setup and a preflight check), then apply `terraform/platform` with
+`cluster_provider = "rosa"`. The apply installs ACM and OpenShift GitOps unless already present.
 
-Either way the platform apply installs ACM and OpenShift GitOps (unless already present) and starts
-the app-of-apps. Argo CD then rolls out the mesh in sync waves ([charts/README.md](charts/README.md)).
-It's done when every Application on the hub is Synced/Healthy:
+Either way the apply starts the app-of-apps, and Argo CD rolls out the mesh in sync waves
+([charts/README.md](charts/README.md)). It's done when every Application on the hub is
+Synced/Healthy (`terraform output gitops_namespace` names the namespace: `argocd`, or
+`openshift-gitops` on OpenShift):
 
 ```bash
-oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops
+kubectl --context <hub-ctx> get applications.argoproj.io -n argocd
 ```
 
 ## Verify
@@ -65,20 +82,26 @@ secret for every member, istiod has ingested them all, and istiod signs with the
 Otherwise its Argo Application goes Degraded.
 
 ```bash
-oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh
+kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
 # Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared
 ```
 
 End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
-from every member. If you're not on `main`, set both `spec.source.targetRevision` and the
-`repo.revision` parameter in the manifest to your branch (and both repo URLs if you use a fork).
+from every member. The manifest keeps placeholders for the repo, the revision, the platform and the
+Argo CD namespace; fill them in on the way to the hub from what the hub already syncs, so the check
+runs the same charts as the mesh.
 
 ```bash
-oc --context <acm-hub-ctx> apply -f charts/mesh-verify-appset.yaml
-INGRESS=$(oc --context <mesh-a-ctx> get svc istio-ingressgateway -n istio-system \
+NS=argocd PLATFORM=kubernetes   # OpenShift: NS=openshift-gitops PLATFORM=openshift
+read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application hub-gitops-root \
+  -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+  -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" charts/mesh-verify-appset.yaml; }
+fill | kubectl --context <hub-ctx> apply -f -
+INGRESS=$(kubectl --context <mesh-a-ctx> get svc istio-ingressgateway -n istio-system \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')
 for i in $(seq 10); do curl -s -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
-oc --context <acm-hub-ctx> delete -f charts/mesh-verify-appset.yaml
+fill | kubectl --context <hub-ctx> delete -f -
 ```
 
 Gateway API: [`tests/gateway-api`](tests/gateway-api/README.md) checks whether an HTTPRoute reaches a
@@ -157,7 +180,7 @@ Raise it and re-apply; the wiring gate's expected size follows automatically.
 | Symptom | Fix |
 | --- | --- |
 | Gate says `istiod is not using the shared mesh root` | istiod started before `cacerts`. Delete the member's `<member>-ossm` Application on the hub (it's recreated and waits for `cacerts`), then restart that member's gateways. |
-| No `cacerts` or remote secrets on members | Check the ESO pods on the hub (`oc get pods -n external-secrets`); on a small hub lower the Argo CD requests with `argocd_config_values`. |
+| No `cacerts` or remote secrets on members | Check the ESO pods on the hub (`kubectl get pods -n external-secrets-operator`); on a small hub lower the Argo CD requests with `argocd_helm_values` (`argocd_config_values` on OpenShift). |
 | Gateway Service stays `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. |
 | `istioctl` errors on API versions | Use an `istioctl` that matches `ISTIO_VERSION`. |
 
@@ -165,4 +188,4 @@ Raise it and re-apply; the wiring gate's expected size follows automatically.
 
 - [AGENTS.md](AGENTS.md): repo conventions for contributors and coding agents
 - [docs/scale-test-campaign](docs/scale-test-campaign/README.md): end-to-end campaign runbook; [docs/campaigns](docs/campaigns/README.md): recorded results
-- [docs/runbooks](docs/runbooks): operating a deployed lab or ROSA validation run
+- [docs/runbooks](docs/runbooks): a kind lab on one machine, operating a deployed lab, or a ROSA validation run

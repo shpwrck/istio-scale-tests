@@ -481,7 +481,7 @@ The 4 clusters build in parallel in about 20-25 min; the platform takes about 15
 rosa list clusters                                                  # 4 ready
 oc --context <acm-hub-ctx> -n openshift-gitops get applications.argoproj.io   # all Synced/Healthy
 for c in <mesh-a-ctx> <mesh-b-ctx> <mesh-c-ctx>; do
-  oc --context "$c" exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh
+  oc --context "$c" exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
   oc --context "$c" -n istio-system get pod -l app=istiod -o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[0].resources.requests.memory}/{.spec.containers[0].resources.limits.memory}{"\n"}{end}'   # 1 pod, 8Gi/16Gi
   oc --context "$c" describe nodes | grep -A6 'Allocated resources'   # free CPU/memory baseline
 done

@@ -136,7 +136,7 @@ To pin the deployed chart to the commit you run the script from, also replace `m
     catalog pods start; it recovers on its own.
 - `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy
   (30 apps when no on-demand check is deployed).
-- `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh`:
+- `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
 - Data plane:
   1. Apply `charts/mesh-verify-appset.yaml` (set both `targetRevision` and the `repo.revision`
