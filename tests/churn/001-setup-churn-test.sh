@@ -138,7 +138,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	) &
 	APPLY_PIDS+=($!)
 done
-for pid in "${APPLY_PIDS[@]}"; do
+for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the churn-test apply"
 done
 
@@ -163,7 +163,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	) &
 	WAIT_PIDS+=($!)
 done
-for pid in "${WAIT_PIDS[@]}"; do
+for pid in ${WAIT_PIDS[@]+"${WAIT_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 

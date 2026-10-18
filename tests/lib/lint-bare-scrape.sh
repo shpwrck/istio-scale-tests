@@ -81,11 +81,11 @@ lint_bare_scrape_file() {
 # `"${TUNING_DIR}/00N-*.sh" …` (setup / probe / cleanup / apply / revert) — returns
 # non-zero on a per-iteration failure; bare in statement position it aborts the entire
 # multi-hour sweep under `set -e`, discarding every completed iteration (a
-# regression class seen before). Such a call must be captured, `|| …`'d, or used as an `if`/`while`
-# condition so the failure becomes a recorded marker/row + continue.
+# regression class seen before). Such a call must be captured, `|| …`'d, or used as an
+# `if`/`while` condition so the failure becomes a recorded marker/row + continue.
 #
 # Scope/exemptions (deterministic — no fragile loop-depth tracking):
-#   - Checked for every sweep orchestrator: files matching `*-sweep.sh` (R4-1 — the
+#   - Checked for every sweep orchestrator: files matching `*-sweep.sh` (the
 #     dispatch glob in lint_bare_scrape_paths; this includes the 5 `00N-run-sweep.sh`
 #     AND tuning's `003-run-tuning-sweep.sh`, which `*-run-sweep.sh` silently missed).
 #   - Anchor: the LOGICAL line STARTS with a `"${VAR}/…/0NN-name.sh"` token —

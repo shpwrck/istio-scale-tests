@@ -1277,22 +1277,28 @@ _iv_hostdep() {
 }
 
 @test "members failing alike on their own API hosts are one entry, at the start and the end; a settled CR whose istiod Deployment read fails is not waited for" {
-	(
+	if (
 		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
 		export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_b=v1.30.5 IV_c=v1.30.5 HOSTDEP=1
 		istio_version_resolve a,b,c 0 _iv_hostdep
-	) 2> "${BATS_TEST_TMPDIR}/start.err" && false || true
+	) 2> "${BATS_TEST_TMPDIR}/start.err"; then
+		echo "expected the version check to stop the run" >&2
+		false
+	fi
 	run cat "${BATS_TEST_TMPDIR}/start.err"
 	# The why is recorded masked, so members on their own API hosts read alike.
 	assert_output --partial "cannot read the running Istio version on 3 of 3 members:"$'\n'"  a, b, c (3 members): istiod Deployment istio-system/istiod: Unable to connect to the server: dial tcp: lookup <api-host>: no such host"$'\n'"    reproduce (shown for a): _iv_hostdep --context a -n istio-system get deployments.apps istiod -o yaml"
 	assert_output --partial $'\n'"Fix access to those members (kubeconfig, login, network) and to their istiod Deployment (their Istio CR is settled); the pin is not the problem."
 	refute_output --partial "wait until their Istio CR is settled"
 	# The same why on every member keeps the plain form.
-	(
+	if (
 		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
 		export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_b=v1.30.5 IVDEP_a=fail IVDEP_b=fail
 		istio_version_resolve a,b 0 _iv_kubectl
-	) 2> "${BATS_TEST_TMPDIR}/start2.err" && false || true
+	) 2> "${BATS_TEST_TMPDIR}/start2.err"; then
+		echo "expected the version check to stop the run" >&2
+		false
+	fi
 	run cat "${BATS_TEST_TMPDIR}/start2.err"
 	assert_output --partial $'\n'"  a, b (2 members): istiod Deployment istio-system/istiod: Error from server (Forbidden): deployments.apps \"istiod\" is forbidden"$'\n'
 	# End: read at the start, then each member's Deployment read fails on its own host.
@@ -1328,11 +1334,14 @@ _iv_hostdep() {
 @test "refused, IPv6, missing-context and long klog errors group across members whose names differ in length" {
 	local mode
 	for mode in refused ip6 ctx ctx2 long; do
-		(
+		if (
 			unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
 			export ISTIO_VERSION=v1.30.5 IV_a=v1.30.5 IV_bbbb=v1.30.5 IV_cccccccccccccccc=v1.30.5 HOSTDEP="$mode"
 			istio_version_resolve a,bbbb,cccccccccccccccc 0 _iv_hostdep
-		) 2> "${BATS_TEST_TMPDIR}/${mode}.err" && false || true
+		) 2> "${BATS_TEST_TMPDIR}/${mode}.err"; then
+			echo "expected the version check to stop the run" >&2
+			false
+		fi
 		run cat "${BATS_TEST_TMPDIR}/${mode}.err"
 		# Hosts are masked in the why itself; only a context name still differs.
 		case "$mode" in

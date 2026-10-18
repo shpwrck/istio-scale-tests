@@ -627,34 +627,34 @@ _in_path() {
 
 @test "harness_sha names a dirty tree's uncommitted content as -dirty.<8hex>: the same for the same changes, staged or not; another for other changes; untracked files count, ignored ones do not" {
 	local r="${BATS_TEST_TMPDIR}/repo" clean a b c
-	mkdir -p "$r"
+	mkdir -p "$r/tests"
 	git -C "$r" init -q
-	printf 'one\n' > "$r/f"
+	printf 'one\n' > "$r/tests/f"
 	printf '*.log\n' > "$r/.gitignore"
-	git -C "$r" add f .gitignore
+	git -C "$r" add tests/f .gitignore
 	git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
 	clean="$(ROOT="$r" harness_sha)"
 	[[ "$clean" =~ ^[0-9a-f]{7}$ ]]
-	: > "$r/x.log"
+	: > "$r/tests/x.log"
 	[ "$(ROOT="$r" harness_sha)" = "$clean" ]
-	printf 'two\n' > "$r/f"
+	printf 'two\n' > "$r/tests/f"
 	a="$(ROOT="$r" harness_sha)"
 	[[ "$a" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
 	[ "$(ROOT="$r" harness_sha)" = "$a" ]
-	git -C "$r" add f
+	git -C "$r" add tests/f
 	[ "$(ROOT="$r" harness_sha)" = "$a" ]
-	printf 'three\n' > "$r/f"
+	printf 'three\n' > "$r/tests/f"
 	b="$(ROOT="$r" harness_sha)"
 	[[ "$b" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
 	[ "$b" != "$a" ]
-	git -C "$r" checkout -q -- f 2>/dev/null || true
+	git -C "$r" checkout -q -- tests/f 2>/dev/null || true
 	git -C "$r" reset -q --hard
 	[ "$(ROOT="$r" harness_sha)" = "$clean" ]
 	# An untracked file (which git describe --dirty would not see) makes it dirty; its content counts.
-	printf 'u1\n' > "$r/new"
+	printf 'u1\n' > "$r/tests/new"
 	c="$(ROOT="$r" harness_sha)"
 	[[ "$c" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
-	printf 'u2\n' > "$r/new"
+	printf 'u2\n' > "$r/tests/new"
 	[ "$(ROOT="$r" harness_sha)" != "$c" ]
 	# Readers keep the -dirty substring (PL2): the gateway-api check strips it to compare commits.
 	grep -q 'hc="${HARNESS%%-dirty\*}"' "${ROOT}/tests/gateway-api/001-run-ingress-check.sh"

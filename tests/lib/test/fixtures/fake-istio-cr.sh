@@ -3,7 +3,7 @@
 # the bats tests: a settled InPlace Istio CR `default` (Healthy, generation reconciled, one
 # revision in use) whose IstioRevision `default` (settled, -o json) runs
 # STUB_ISTIO_VERSION, else the pin (ISTIO_VERSION_PIN once a run resolved it, else
-# ISTIO_VERSION), with its istiod Deployment rolled out (J3: read on the Healthy path too).
+# ISTIO_VERSION), with its istiod Deployment rolled out (read on the Healthy path too).
 # STUB_ISTIO_VERSION=fail fails every read the way an unreachable member does.
 # STUB_ISTIO_CR_GEN / STUB_ISTIO_REV_GEN set the Istio CR's / IstioRevision's generation
 # (default 2, always reconciled: observedGeneration follows it). A stub calls it for those reads:

@@ -235,8 +235,8 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 [[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
 
-HARNESS_SHA="$(harness_sha)"
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+HARNESS_SHA="$(harness_sha --exclude "$(dirname "$OUTPUT_FILE")")"
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 
 if ((DRY_RUN)); then
 	echo "=== Dry-run: churn probe ==="
@@ -263,7 +263,7 @@ fi
 # runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
 # mismatch.
 ALL_CTXS_CSV="$SOURCE_CTX"
-for r in "${REMOTES[@]}"; do ALL_CTXS_CSV+=",$r"; done
+for r in ${REMOTES[@]+"${REMOTES[@]}"}; do ALL_CTXS_CSV+=",$r"; done
 istio_version_resolve "$ALL_CTXS_CSV" 0 "${KUBECTL[@]}"
 mapfile -t IV_KV < <(istio_version_kv)
 
@@ -353,8 +353,8 @@ if ((PF_OK)); then
 	# Pre podset = the pods fanout_open reached, in scrape-file order, so
 	# fanout_restart_status pairs each pod with its own scrape. The post podset
 	# lists every Running pod, so a replaced or added istiod shows as a change.
-	printf '%s\n' "${ISTIOD_PODS[@]}" > "$PRE_PODSET"
-	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
+	printf '%s\n' ${ISTIOD_PODS[@]+"${ISTIOD_PODS[@]}"} > "$PRE_PODSET"
+	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" ${ISTIOD_PORTS[@]+"${ISTIOD_PORTS[@]}"})"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 pre_metrics_csv() {
@@ -435,7 +435,7 @@ run_churn_driver() {
 		# 429 / connection error / not-found / etc. Without this the TSV reports
 		# wc -l of the log and overstates actual churn at high rates.
 		exit_status=0
-		for pid in "${scale_pids[@]}"; do
+		for pid in ${scale_pids[@]+"${scale_pids[@]}"}; do
 			if wait "$pid"; then rc=0; else rc=$?; fi
 			(( rc != 0 )) && exit_status="$rc"
 		done
@@ -486,7 +486,7 @@ POST_PODSET="${ISTIOD_DIR}/post.podset"
 POST_SKEW_MS=0
 if ((PF_OK)); then
 	fanout_record_podset "$SOURCE_CTX" "$POST_PODSET" "${KUBECTL[@]}"
-	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" "${ISTIOD_PORTS[@]}")"
+	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" ${ISTIOD_PORTS[@]+"${ISTIOD_PORTS[@]}"})"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "post") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 # PL8: per-window scrape skew now spans pods (max of pre/post batches).
@@ -538,16 +538,16 @@ CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
 	# counter_delta (metrics.sh): N/A with a warning when a counter is in neither
 	# scrape (renamed, never 0) or went backwards; one registered in the window counts from 0.
-	XDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")" \
-		"$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")" "pilot_xds_pushes on ${SOURCE_CTX}")
-	EDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${PRE_FILES[@]}")" \
-		"$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${POST_FILES[@]}")" "pilot_xds_pushes{type=eds} on ${SOURCE_CTX}")
-	PUSH_TRIGGERS_DELTA=$(counter_delta "$(fanout_counter_sum pilot_push_triggers "${PRE_FILES[@]}")" \
-		"$(fanout_counter_sum pilot_push_triggers "${POST_FILES[@]}")" "pilot_push_triggers on ${SOURCE_CTX}")
+	XDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_sum pilot_xds_pushes ${PRE_FILES[@]+"${PRE_FILES[@]}"})" \
+		"$(fanout_counter_sum pilot_xds_pushes ${POST_FILES[@]+"${POST_FILES[@]}"})" "pilot_xds_pushes on ${SOURCE_CTX}")
+	EDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${PRE_FILES[@]+"${PRE_FILES[@]}"})" \
+		"$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${POST_FILES[@]+"${POST_FILES[@]}"})" "pilot_xds_pushes{type=eds} on ${SOURCE_CTX}")
+	PUSH_TRIGGERS_DELTA=$(counter_delta "$(fanout_counter_sum pilot_push_triggers ${PRE_FILES[@]+"${PRE_FILES[@]}"})" \
+		"$(fanout_counter_sum pilot_push_triggers ${POST_FILES[@]+"${POST_FILES[@]}"})" "pilot_push_triggers on ${SOURCE_CTX}")
 
 	for h in pilot_proxy_convergence_time pilot_proxy_queue_time pilot_xds_push_time; do
-		fanout_merge_histogram "$h" "${ISTIOD_DIR}/pre-${h}.merged" "${PRE_FILES[@]}"
-		fanout_merge_histogram "$h" "${ISTIOD_DIR}/post-${h}.merged" "${POST_FILES[@]}"
+		fanout_merge_histogram "$h" "${ISTIOD_DIR}/pre-${h}.merged" ${PRE_FILES[@]+"${PRE_FILES[@]}"}
+		fanout_merge_histogram "$h" "${ISTIOD_DIR}/post-${h}.merged" ${POST_FILES[@]+"${POST_FILES[@]}"}
 	done
 	CONVERGENCE_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_proxy_convergence_time.merged" "${ISTIOD_DIR}/post-pilot_proxy_convergence_time.merged" pilot_proxy_convergence_time)
 	QUEUE_TIME_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_proxy_queue_time.merged" "${ISTIOD_DIR}/post-pilot_proxy_queue_time.merged" pilot_proxy_queue_time)

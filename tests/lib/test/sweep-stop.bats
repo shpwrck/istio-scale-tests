@@ -161,8 +161,14 @@ _trap_steps_guarded() {
 	assert_output --partial "the members went away"
 	run sweep_outcome_recorded "$D" json
 	[ "$(jq -c '[.exit, .unfinished, .stop_reason, (.problems | length), .notes]' <<<"$output")" = '[1,false,"the members went away",1,["next: run it again into a new dir"]]' ]
+	# csv says it stopped, as json and text do, with the stop record's times.
 	run sweep_outcome_recorded "$D" csv
 	assert_line "# SWEEP_OUTCOME_EXIT=1"
+	assert_line "# SWEEP_OUTCOME_STOPPED=1"
+	assert_line "# SWEEP_OUTCOME_CUT_SHORT=1"
+	assert_line --regexp '^# SWEEP_OUTCOME_STARTED_AT=[0-9T:-]+Z$'
+	assert_line --regexp '^# SWEEP_OUTCOME_ENDED_AT=[0-9T:-]+Z$'
+	assert_line "# SWEEP_OUTCOME_STOP_REASON=the members went away"
 	# The ERR trap: the FATAL line names the script, the line and the command, and so does
 	# the record.
 	_skeleton_run err
@@ -205,8 +211,9 @@ _trap_steps_guarded() {
 }
 
 @test "Ctrl-C, SIGTERM and SIGHUP after a sweep's start leave it not finished, interrupted at a time by that signal (whatever \$? was), and it still dies of the signal; so does a command a signal killed" {
-	# The signal traps need a shell that does not ignore SIGINT.
+	# The signal traps need a shell that ignores neither SIGINT nor SIGHUP (nohup).
 	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGINT is ignored here"
+	[[ "$(bash -c 'trap "echo t" HUP; kill -HUP $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGHUP is ignored here (nohup)"
 	local c sig st compat
 	_skeleton_sweep
 	for compat in "" 51; do
@@ -258,6 +265,11 @@ _trap_steps_guarded() {
 	assert_success
 	grep -qx 'EXIT=0' "$REC"
 	! grep -q '^CUT_SHORT=\|^ENDED_AT=' "$REC"
+	# A finished sweep's csv names no stop.
+	run sweep_outcome_recorded "$D" csv
+	assert_line "# SWEEP_OUTCOME_EXIT=0"
+	refute_output --partial "STOPPED="
+	refute_output --partial "CUT_SHORT="
 	_skeleton_run other
 	assert_failure 1
 	grep -qx 'RUN_ID=another-run' "$REC"
@@ -306,6 +318,11 @@ _trap_steps_guarded() {
 		[[ "$output" =~ SWEEP\ OUTCOME\ \(recorded\ in\ sweep-outcome\.txt\ by\ run\ [^,]+,\ exit\ 1\) ]] || { echo "${suite}: ${output}"; false; }
 		[[ "$output" == *"stopped early: ${script##*/} aborted (exit 1) at line "* ]]
 		[[ "$output" != *"NOT FINISHED"* ]]
+		# Its csv says so too: stopped, cut short, when it started and ended.
+		run --separate-stderr bash "${ROOT}/tests/${rep}" --results-dir "$d" --format csv
+		[[ "$output" == *$'\n# SWEEP_OUTCOME_STOPPED=1\n'* && "$output" == *$'\n# SWEEP_OUTCOME_CUT_SHORT=1\n'* ]] \
+			|| { echo "${suite} csv: ${output}"; false; }
+		[[ "$output" =~ $'\n'\#\ SWEEP_OUTCOME_ENDED_AT=[0-9T:-]+Z$'\n' ]] || { echo "${suite} csv: ${output}"; false; }
 	done
 	# propagation: its EXIT trap ran 007-cleanup (kubectl calls) before it wrote the stop
 	# record: the last call still saw the not-finished one.
@@ -359,7 +376,7 @@ _trap_steps_guarded() {
 	[ ! -e "$d/sweep-outcome.prev.txt" ]
 }
 
-@test "every sweep sets its EXIT trap (which calls sweep_outcome_on_exit) before sweep_outcome_start, each of its steps guarded, and its ERR trap is sweep_err_trap" {
+@test "every sweep sets its EXIT trap (which calls sweep_outcome_on_exit) before sweep_outcome_start, takes its lock earlier only with --release-on-exit, each of its steps guarded, and its ERR trap is sweep_err_trap" {
 	local f t st
 	# The check fires on the EXIT trap propagation had before this pass.
 	printf '%s\n' "trap '_sweep_rc=\$?; sweep_cleanup; sweep_outcome_on_exit \"\$_sweep_rc\" || true' EXIT" > "${BATS_TEST_TMPDIR}/old.sh"
@@ -370,9 +387,13 @@ _trap_steps_guarded() {
 		controlplane/003-run-sweep.sh tuning/003-run-tuning-sweep.sh; do
 		f="${ROOT}/tests/${f}"
 		_trap_steps_guarded "$f"
-		t="$(grep -nE "^[[:space:]]*trap .* EXIT$" "$f" | head -n 1 | cut -d: -f1)"
+		# The EXIT trap that records the outcome (tuning's dry run sets another, which runs no sweep).
+		t="$(grep -nE "^[[:space:]]*trap '.*on_exit.*' EXIT$" "$f" | head -n 1 | cut -d: -f1)"
 		st="$(grep -nE '^[[:space:]]*sweep_outcome_start "' "$f" | head -n 1 | cut -d: -f1)"
 		[[ -n "$t" && -n "$st" && "$t" -lt "$st" ]] || { echo "${f}: EXIT trap at ${t:-none}, start at ${st:-none}"; false; }
+		# sweep_outcome_start takes the lock after that trap; a sweep that takes it before
+		# (controlplane --resume) releases it on a stop before that trap (--release-on-exit).
+		! grep -nE '^[[:space:]]*sweep_lock ' "$f" | grep -v -- 'sweep_lock --release-on-exit ' || { echo "${f}: sweep_lock without --release-on-exit"; false; }
 		# The EXIT trap calls the hook (tuning: in on_exit).
 		grep -qE 'sweep_outcome_on_exit "\$(\?|_sweep_rc|rc)"' "$f" || { echo "${f}: no sweep_outcome_on_exit"; false; }
 		grep -qxF "trap 'sweep_err_trap \"\$?\" \"\$LINENO\" \"\$BASH_COMMAND\"' ERR" "$f" || { echo "${f}: ERR trap"; false; }

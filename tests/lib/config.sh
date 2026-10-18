@@ -104,7 +104,7 @@ config_suite_prefixes() {
 # (tests/lib/istiod-diag.sh). An unknown-key error names them after the suite's own list.
 CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
-CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_"
+CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ ISTIO_PROXY_READ_PARALLEL HARNESS_SHA_CHECK_SEC SWEEP_STOP_GRACE_SEC"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
 # unknown for a file without them (written before the live-version keys: its
 # ISTIO_VERSION is the pin, unchecked; or before the start-of-run readiness keys,
@@ -130,8 +130,11 @@ _config_env_only_reason() {
 	case "$1" in
 	*_TEST_NAMESPACE) echo "cleanup deletes this namespace, so a typo in a file could delete a real one" ;;
 	*_MAX_MATRIX) echo "the large-matrix acknowledgment stays per invocation (PL10)" ;;
+	*_EXTEND_PLAN) echo "adding cells to a sweep's plan on --resume is acknowledged per invocation, as the large-matrix one" ;;
 	ISTIO_VERSION_CHECK) echo "running on a mesh whose Istio version is not the pin is acknowledged per invocation, like the pins themselves" ;;
 	ISTIO_VERSION_READY_*) echo "the version check's readiness wait is set per invocation, with ISTIO_VERSION_CHECK" ;;
+	ISTIO_PROXY_READ_PARALLEL) echo "the version check's read concurrency is set per invocation, with ISTIO_VERSION_CHECK" ;;
+	HARNESS_SHA_CHECK_SEC | SWEEP_STOP_GRACE_SEC) echo "a setting of every sweep (tests/lib/common.sh), not of one suite's run" ;;
 	esac
 }
 
@@ -757,15 +760,20 @@ config_multi_run_csv() {
 	echo "# NOTE: $(config_multi_run_note)"
 }
 
-# config_multi_run_json: the pooled runs as a JSON object, for one run too.
+# config_multi_run_json: the pooled runs as a JSON object, for one run too. The lists are
+# read from the environment (awk -v would unescape a backslash) and each value is a JSON
+# string: \ and " escaped, a tab, carriage return and newline as \t, \r and \n, any other
+# control character dropped, so a hand-edited HARNESS_SHA or RUN_ID keeps the JSON valid.
 # shellcheck disable=SC2329
 config_multi_run_json() {
-	awk -v n="${MULTI_RUN_N:-1}" -v ids="${MULTI_RUN_IDS:-}" -v shas="${MULTI_RUN_HARNESS_SHAS:-}" -v vers="${MULTI_RUN_ISTIO_VERSIONS:-}" '
+	_CMR_IDS="${MULTI_RUN_IDS:-}" _CMR_SHAS="${MULTI_RUN_HARNESS_SHAS:-}" _CMR_VERS="${MULTI_RUN_ISTIO_VERSIONS:-}" \
+		awk -v n="${MULTI_RUN_N:-1}" '
+		function js(x) { gsub(/\\/, "\\\\", x); gsub(/"/, "\\\"", x); gsub(/\t/, "\\t", x); gsub(/\r/, "\\r", x); gsub(/\n/, "\\n", x); gsub(/[[:cntrl:]]/, "", x); return "\"" x "\"" }
 		function arr(s,    a, k, i, o) {
 			k = split(s, a, ",")
 			o = "["
-			for (i = 1; i <= k; i++) { gsub(/["\\]/, "", a[i]); o = o (i > 1 ? "," : "") "\"" a[i] "\"" }
+			for (i = 1; i <= k; i++) o = o (i > 1 ? "," : "") js(a[i])
 			return o "]"
 		}
-		BEGIN { printf "{\"runs\":%d,\"run_ids\":%s,\"harness_sha\":%s,\"istio_version\":%s}\n", n, arr(ids), arr(shas), arr(vers) }'
+		BEGIN { printf "{\"runs\":%d,\"run_ids\":%s,\"harness_sha\":%s,\"istio_version\":%s}\n", n, arr(ENVIRON["_CMR_IDS"]), arr(ENVIRON["_CMR_SHAS"]), arr(ENVIRON["_CMR_VERS"]) }'
 }

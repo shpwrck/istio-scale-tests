@@ -127,7 +127,7 @@ case "$ACTION" in
 status)
 	discover_apps
 	echo "Applications: ${APPS[*]}"
-	for p in "${PROJECTS[@]}"; do
+	for p in ${PROJECTS[@]+"${PROJECTS[@]}"}; do
 		echo "AppProject ${p} syncWindows:"
 		"${K[@]}" get appprojects.argoproj.io "$p" -o jsonpath='{.spec.syncWindows}'
 		echo ""
@@ -139,7 +139,7 @@ pause)
 	discover_apps
 	apps_csv="$(IFS=,; echo "${APPS[*]}")"
 	mkdir -p "$(dirname "$STATE_FILE")"
-	for p in "${PROJECTS[@]}"; do
+	for p in ${PROJECTS[@]+"${PROJECTS[@]}"}; do
 		"${K[@]}" get appprojects.argoproj.io "$p" -o json >"$WORK/project.json" \
 			|| die "${GITOPS_CTX}: cannot read AppProject ${p}"
 		python3 -I "$HELPER" window-add "$WORK/project.json" "$apps_csv" "$WORK/window.json" >"$WORK/patch.json"

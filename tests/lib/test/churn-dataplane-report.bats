@@ -116,7 +116,7 @@ two_pairs() {
 			echo "# RUN_ID=r${d}"
 			echo "# HARNESS_SHA=h${d}"
 			echo "# ISTIO_VERSION=1.30.5"
-			echo "# QPS=$([[ $d == a ]] && echo 50 || echo 100)"
+			echo "# QPS=$(if [[ $d == a ]]; then echo 50; else echo 100; fi)"
 			echo "$HDR"
 			crow c1 0 baseline 50 2 5 OK N/A N/A
 			crow c1 1 churn 48 4 9 OK 30 99
@@ -215,6 +215,8 @@ two_pairs() {
 	assert_output --partial '> - warning: not ready at the start: IstioCNINotHealthy on 1 member (c2)'
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_output --partial "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
+	# charts: YAML frontmatter keys, lowercase as in the json metadata.
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
-	assert_output --partial "## ISTIO_READY_WAITED_SEC=60"
+	assert_line 'istio_notready_at_start: "c2=IstioCNINotHealthy"'
+	assert_line 'istio_ready_waited_sec: "60"'
 }

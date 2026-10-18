@@ -531,7 +531,7 @@ if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	a_cpu="unknown"; a_mem="unknown"; a_pods="unknown"
 	# shellcheck disable=SC2207
 	nt=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${nt[@]}"; do
+	for kv in ${nt[@]+"${nt[@]}"}; do
 		case "$kv" in
 			cpu_m=*) a_cpu="${kv#cpu_m=}" ;;
 			mem_mi=*) a_mem="${kv#mem_mi=}" ;;
@@ -541,7 +541,7 @@ if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	i_cpu="unknown"; i_mem="unknown"; i_rep="unknown"
 	# shellcheck disable=SC2207
 	il=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${il[@]}"; do
+	for kv in ${il[@]+"${il[@]}"}; do
 		case "$kv" in
 			cpu_m=*) i_cpu="${kv#cpu_m=}" ;;
 			mem_mi=*) i_mem="${kv#mem_mi=}" ;;
@@ -717,7 +717,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 		cpu_alloc=""; cpu_workers=""; cpu_req=""
 		# shellcheck disable=SC2207
 		nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
-		for kv in "${nt[@]}"; do
+		for kv in ${nt[@]+"${nt[@]}"}; do
 			case "$kv" in
 				cpu_m=*) cpu_alloc="${kv#cpu_m=}" ;;
 				names=*) cpu_workers="${kv#names=}" ;;
@@ -725,7 +725,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 		done
 		# shellcheck disable=SC2207
 		rq=($(cap_requested "$ctx" "$cpu_workers" "" "${KUBECTL[@]}"))
-		for kv in "${rq[@]}"; do case "$kv" in cpu_m=*) cpu_req="${kv#cpu_m=}" ;; esac; done
+		for kv in ${rq[@]+"${rq[@]}"}; do case "$kv" in cpu_m=*) cpu_req="${kv#cpu_m=}" ;; esac; done
 		if [[ "$cpu_alloc" =~ ^[0-9]+$ && "$cpu_req" =~ ^[0-9]+$ ]]; then
 			cpu_free=$(( cpu_alloc > cpu_req ? cpu_alloc - cpu_req : 0 ))
 			cpu_line="~$(cpu_cores "$cpu_free") cores of CPU requests free on the workers ($(cpu_cores "$cpu_alloc") allocatable − $(cpu_cores "$cpu_req") requested), ~$(cpu_cores "$CPU_NEEDED_M") needed ($NEEDED_PODS pods × ${CPU_PER_POD_M}m, ${CPU_PER_POD_SRC})"

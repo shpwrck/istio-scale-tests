@@ -106,17 +106,21 @@ first), runs the baseline and churn windows, and finally cleans up. It writes on
 `tests/churn-dataplane/results/sweep-<run-id>/`. More than 64 combinations needs
 `--force-large-matrix`.
 
-Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, or an
-unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP;
-`sweep-outcome.txt` says when and by which signal); `3` the reachability gate stopped it
-(`--on-unreachable fail`, below; the reports are written); `4` it finished and wrote its reports,
-but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the
-Istio version, active revision or generation of the Istio CR or its active IstioRevision changed
-during the sweep (read again before the reports), or that check failed. The last line on stderr
-says how many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown
+Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, such as
+another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
+error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
+when and by which signal; a signal sent to the sweep's process alone stops the running step and
+every process under it first, `SWEEP_STOP_GRACE_SEC` before SIGKILL, see the top-level README); `3`
+the reachability gate stopped it (`--on-unreachable fail`, below; the reports are written); `4` it
+finished and wrote its reports, but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or
+`PROBE_FAILED` rows), or the Istio version, active revision or generation of the Istio CR or its
+active IstioRevision changed during the sweep (read again before the reports), or that check failed,
+or its harness (a file under `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed
+during the sweep (read again before its steps and at its end). The last line on stderr says how
+many, by reason; `3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown
 summary keep the outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt`
-holds a not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what
-to do), so a report of a sweep that died, or still runs, or (with when and by which signal) was
+holds a not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, and what to
+do), so a report of a sweep that died, or still runs, or (with when and by which signal) was
 interrupted says "this sweep has not finished" in every format (json `sweep_outcome`: `"exit":
 null`, `"unfinished": true`; a finished one reads `"unfinished": false`; one that stopped on an
 error after its start records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see
@@ -191,15 +195,19 @@ restart evidence to `istiod-diag-<RUN_ID>/` next to the TSV, tag `<combo_id>-<ph
 the [dataplane README](../dataplane/README.md#restart-evidence-istiod-diag-run_id); the
 report's text, md and json carry an "istiod restart diagnostics" section.
 
-The report keeps rows with `status=OK` and `istiod_restarted=0`, pairs them by
-`combo_id` within each TSV file, and prints mean and stdev of `Δp99_ms` with
-`total_runs`/`valid_runs` for each `(mesh_size, churn_rate)`. Each other average (p50,
-p99, QPS, EDS pushes) counts only the valid pairs that have a number in that column, and
-is `N/A` when none has. `churn_convergence_p99` is not averaged: the report shows the
-worst bucket range a valid run's p99 hit (e.g. `500-1000`, in ms), or `overflow (N runs)`
-when N runs had their p99 in the `+Inf` bucket; csv and json carry it as
-`churn_convergence_p99_worst` and `churn_convergence_overflow_runs`. JSON row values are
-numbers, with `null` for `N/A`.
+The report keeps rows with `status=OK` and `istiod_restarted=0`, pairs them by `combo_id` within
+each TSV file, and prints mean and stdev of `Δp99_ms` with `total_runs`/`valid_runs` for each
+`(mesh_size, churn_rate)`. Each other average (p50, p99, QPS, EDS pushes) counts only the valid
+pairs that have a number in that column, and is `N/A` when none has. `churn_convergence_p99` is not
+averaged: the report shows the worst bucket range a valid run's p99 hit (e.g. `500-1000`, in ms), or
+`overflow (N runs)` when N runs had their p99 in the `+Inf` bucket; csv and json carry it as
+`churn_convergence_p99_worst` and `churn_convergence_overflow_runs`. JSON row values are numbers,
+with `null` for `N/A`. Every format carries the inputs' preamble, each key merged over the files
+(`HARNESS_SHA`: the harness that measured the rows), and `REPORT_HARNESS_SHA` (json and frontmatter
+`report_harness_sha`), the harness the report itself ran on: a report made again later, or from
+another checkout, may count rows by other rules. The results dir it reads never counts as a change
+to that harness. md and charts start with a YAML frontmatter of those keys, lowercase as in the json
+`metadata`.
 
 ### Comparing with earlier sweeps
 

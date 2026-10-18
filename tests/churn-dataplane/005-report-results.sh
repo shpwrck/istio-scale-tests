@@ -80,6 +80,13 @@ suffix), or "overflow (N runs)"; csv and json split it into
 churn_convergence_p99_worst and churn_convergence_overflow_runs. json numbers are
 numbers and N/A is null.
 
+REPORT_HARNESS_SHA (every format, next to HARNESS_SHA; json report_harness_sha): the
+harness this report ran on, which can differ from HARNESS_SHA, the harness that
+measured the rows: a report made again later, or from another checkout, may count
+rows by other rules. The results dir it reads does not count as a change to it.
+md and charts start with a YAML frontmatter of the metadata keys, lowercase as in
+the json metadata (run_id, harness_sha, report_harness_sha, run_config, ...).
+
 text, md and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
 changed, the cause, the evidence folder relative to the results dir) and a tally by
@@ -218,6 +225,8 @@ ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_STR="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_STR="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# This report's own harness, every format; the results dir it reads is no change to it.
+REPORT_HARNESS_SHA_STR="$(report_harness_sha --exclude "$RESULTS_DIR")"
 
 # Remote coverage over every reach-*.tsv under RESULTS_DIR (empty without any).
 REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
@@ -365,42 +374,63 @@ function conv_cell(w, ov) {
 	return w
 }'
 
+# metadata_kv: the run's metadata as KEY=value lines, in the order every format shows them.
+metadata_kv() {
+	printf '%s\n' \
+		"RUN_ID=${RUN_ID:-unknown}" \
+		"HARNESS_SHA=${HARNESS_SHA:-unknown}" \
+		"REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA_STR}" \
+		"ISTIO_VERSION=${ISTIO_VERSION_STR:-unknown}" \
+		"ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_STR:-unknown}" \
+		"ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_STR:-unknown}" \
+		"ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}" \
+		"ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_STR:-unknown}" \
+		"ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_STR:-unknown}" \
+		"ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_STR:-unknown}" \
+		"ISTIO_GENERATIONS=${ISTIO_GENERATIONS_STR:-unknown}" \
+		"ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_STR:-unknown}" \
+		"KUBE_VERSIONS=${KUBE_VERSIONS_STR:-unknown}" \
+		"TUNING_BASELINE=${TUNING_BASELINE_STR:-unknown}" \
+		"SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS_STR:-unknown}" \
+		"ISTIOD_REPLICAS=${ISTIOD_REPLICAS_STR:-unknown}" \
+		"SETTLE_SEC=${SETTLE_SEC_STR:-unknown}" \
+		"BASELINE_DURATION_SEC=${BASELINE_DURATION_STR:-unknown}" \
+		"CHURN_DURATION_SEC=${CHURN_DURATION_STR:-unknown}" \
+		"QPS=${QPS_STR:-unknown}" \
+		"CONNECTIONS=${CONNECTIONS_STR:-unknown}" \
+		"NAMESPACE=${NAMESPACE_STR:-unknown}" \
+		"FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS_STR:-unknown}" \
+		"FANOUT_METRICS_TIMEOUT=${FANOUT_METRICS_TIMEOUT_STR:-unknown}" \
+		"MIN_PCT_200=${MIN_PCT_200_STR:-unknown}" \
+		"REACH_REQUESTS=${REACH_REQUESTS_STR:-unknown}" \
+		"REACH_QPS=${REACH_QPS_STR:-unknown}" \
+		"REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}" \
+		"REACH_DETAIL_TIMEOUT_SEC=${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown}" \
+		"REACH_ATTEMPTS=${REACH_ATTEMPTS_STR:-unknown}" \
+		"REACH_RETRY_SEC=${REACH_RETRY_SEC_STR:-unknown}" \
+		"ON_UNREACHABLE=${ON_UNREACHABLE_STR:-unknown}" \
+		"RUN_CONFIG=${RUN_CONFIG_STR:-unknown}" \
+		"RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_STR:-unknown}"
+}
+
+# emit_metadata_lines <prefix>: text and csv: "<prefix> KEY=value" per metadata key.
 emit_metadata_lines() {
-	local prefix="${1:-#}"
-	printf '%s RUN_ID=%s\n'                "$prefix" "${RUN_ID:-unknown}"
-	printf '%s HARNESS_SHA=%s\n'           "$prefix" "${HARNESS_SHA:-unknown}"
-	printf '%s REPORT_HARNESS_SHA=%s\n'    "$prefix" "$(report_harness_sha)"
-	printf '%s ISTIO_VERSION=%s\n'         "$prefix" "${ISTIO_VERSION_STR:-unknown}"
-	printf '%s ISTIO_VERSION_SOURCE=%s\n'  "$prefix" "${ISTIO_VERSION_SOURCE_STR:-unknown}"
-	printf '%s ISTIO_VERSION_PIN=%s\n'     "$prefix" "${ISTIO_VERSION_PIN_STR:-unknown}"
-	printf '%s ISTIO_VERSION_BY_CONTEXT=%s\n' "$prefix" "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}"
-	printf '%s ISTIO_NOTREADY_AT_START=%s\n' "$prefix" "${ISTIO_NOTREADY_AT_START_STR:-unknown}"
-	printf '%s ISTIO_READY_WAITED_SEC=%s\n' "$prefix" "${ISTIO_READY_WAITED_SEC_STR:-unknown}"
-	printf '%s ISTIO_ACTIVE_REVISIONS=%s\n' "$prefix" "${ISTIO_ACTIVE_REVISIONS_STR:-unknown}"
-	printf '%s ISTIO_GENERATIONS=%s\n'    "$prefix" "${ISTIO_GENERATIONS_STR:-unknown}"
-	printf '%s ISTIO_PROXY_VERSIONS=%s\n' "$prefix" "${ISTIO_PROXY_VERSIONS_STR:-unknown}"
-	printf '%s KUBE_VERSIONS=%s\n'         "$prefix" "${KUBE_VERSIONS_STR:-unknown}"
-	printf '%s TUNING_BASELINE=%s\n'       "$prefix" "${TUNING_BASELINE_STR:-unknown}"
-	printf '%s SIDECAR_EGRESS_HOSTS=%s\n'  "$prefix" "${SIDECAR_EGRESS_HOSTS_STR:-unknown}"
-	printf '%s ISTIOD_REPLICAS=%s\n'       "$prefix" "${ISTIOD_REPLICAS_STR:-unknown}"
-	printf '%s SETTLE_SEC=%s\n'            "$prefix" "${SETTLE_SEC_STR:-unknown}"
-	printf '%s BASELINE_DURATION_SEC=%s\n' "$prefix" "${BASELINE_DURATION_STR:-unknown}"
-	printf '%s CHURN_DURATION_SEC=%s\n'    "$prefix" "${CHURN_DURATION_STR:-unknown}"
-	printf '%s QPS=%s\n'                   "$prefix" "${QPS_STR:-unknown}"
-	printf '%s CONNECTIONS=%s\n'           "$prefix" "${CONNECTIONS_STR:-unknown}"
-	printf '%s NAMESPACE=%s\n'             "$prefix" "${NAMESPACE_STR:-unknown}"
-	printf '%s FANOUT_MAX_SKEW_MS=%s\n'    "$prefix" "${FANOUT_MAX_SKEW_MS_STR:-unknown}"
-	printf '%s FANOUT_METRICS_TIMEOUT=%s\n' "$prefix" "${FANOUT_METRICS_TIMEOUT_STR:-unknown}"
-	printf '%s MIN_PCT_200=%s\n'           "$prefix" "${MIN_PCT_200_STR:-unknown}"
-	printf '%s REACH_REQUESTS=%s\n'        "$prefix" "${REACH_REQUESTS_STR:-unknown}"
-	printf '%s REACH_QPS=%s\n'             "$prefix" "${REACH_QPS_STR:-unknown}"
-	printf '%s REACH_HTTP_TIMEOUT_SEC=%s\n' "$prefix" "${REACH_HTTP_TIMEOUT_SEC_STR:-unknown}"
-	printf '%s REACH_DETAIL_TIMEOUT_SEC=%s\n' "$prefix" "${REACH_DETAIL_TIMEOUT_SEC_STR:-unknown}"
-	printf '%s REACH_ATTEMPTS=%s\n'        "$prefix" "${REACH_ATTEMPTS_STR:-unknown}"
-	printf '%s REACH_RETRY_SEC=%s\n'       "$prefix" "${REACH_RETRY_SEC_STR:-unknown}"
-	printf '%s ON_UNREACHABLE=%s\n'        "$prefix" "${ON_UNREACHABLE_STR:-unknown}"
-	printf '%s RUN_CONFIG=%s\n'            "$prefix" "${RUN_CONFIG_STR:-unknown}"
-	printf '%s RUN_CONFIG_SHA256=%s\n'     "$prefix" "${RUN_CONFIG_SHA256_STR:-unknown}"
+	local prefix="${1:-#}" kv
+	while IFS= read -r kv; do printf '%s %s\n' "$prefix" "$kv"; done < <(metadata_kv)
+}
+
+# emit_frontmatter [line]: the YAML frontmatter of md and charts (PL19): every metadata
+# key, lowercase as in the json metadata, its value through yaml_str; then [line].
+emit_frontmatter() {
+	local kv k o
+	echo "---"
+	while IFS= read -r kv; do
+		k="${kv%%=*}"
+		yaml_str -v o "${kv#*=}"
+		printf '%s: %s\n' "${k,,}" "$o"
+	done < <(metadata_kv)
+	[[ -z "${1:-}" ]] || echo "$1"
+	echo "---"
 }
 
 report_text() {
@@ -456,7 +486,7 @@ report_json() {
 	jq -n \
 		--arg run_id           "${RUN_ID:-unknown}" \
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
-		--arg report_harness_sha "$(report_harness_sha)" \
+		--arg report_harness_sha "${REPORT_HARNESS_SHA_STR}" \
 		--arg istio_version    "${ISTIO_VERSION_STR:-unknown}" \
 		--arg istio_version_source "${ISTIO_VERSION_SOURCE_STR:-unknown}" \
 		--arg istio_version_pin "${ISTIO_VERSION_PIN_STR:-unknown}" \
@@ -554,6 +584,8 @@ _md_kv() {
 }
 
 report_md() {
+	emit_frontmatter
+	echo ""
 	echo "# sweep-summary"
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
@@ -563,7 +595,7 @@ report_md() {
 	# Every value escaped (_md_kv): a mixed value joins per-member lists with " | ".
 	_md_kv RUN_ID "${RUN_ID:-unknown}"
 	_md_kv HARNESS_SHA "${HARNESS_SHA:-unknown}"
-	_md_kv REPORT_HARNESS_SHA "$(report_harness_sha)"
+	_md_kv REPORT_HARNESS_SHA "${REPORT_HARNESS_SHA_STR}"
 	_md_kv ISTIO_VERSION "${ISTIO_VERSION_STR:-unknown}"
 	_md_kv ISTIO_VERSION_SOURCE "${ISTIO_VERSION_SOURCE_STR:-unknown}"
 	_md_kv ISTIO_VERSION_PIN "${ISTIO_VERSION_PIN_STR:-unknown}"
@@ -615,10 +647,7 @@ report_md() {
 }
 
 report_charts() {
-	echo "---"
-	emit_metadata_lines "##"
-	echo "generated: $(date -u -Iseconds)"
-	echo "---"
+	emit_frontmatter "generated: $(date -u -Iseconds)"
 	echo ""
 	echo "# Churn x Data-Plane — Charts"
 	echo ""

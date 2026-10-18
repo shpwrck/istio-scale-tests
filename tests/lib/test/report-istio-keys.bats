@@ -123,7 +123,7 @@ _gen_tsv() {
 	{ echo "# RUN_ID=r2"; keys "$REV_B" "$PV_B"; echo "$CD_HDR"; drow r2 0 baseline; drow r2 1 churn; } > "${RES}/two/churn-dataplane-r2.tsv"
 	{ echo "# RUN_ID=r3"; echo "$CD_HDR"; drow r3 0 baseline; drow r3 1 churn; } > "${RES}/old/churn-dataplane-r3.tsv"
 	local R="${ROOT}/tests/churn-dataplane/005-report-results.sh" fmt
-	for fmt in text csv charts; do
+	for fmt in text csv; do
 		run "$R" --results-dir "${RES}/two" --allow-multi-run --format "$fmt"
 		assert_output --partial "ISTIO_ACTIVE_REVISIONS=mixed:${REV_A} | ${REV_B}"
 		assert_output --partial "ISTIO_PROXY_VERSIONS=mixed:${PV_A} | ${PV_B}"
@@ -131,6 +131,13 @@ _gen_tsv() {
 		assert_output --partial "ISTIO_ACTIVE_REVISIONS=unknown"
 		assert_output --partial "ISTIO_PROXY_VERSIONS=unknown"
 	done
+	# charts (and md): YAML frontmatter keys, lowercase as in the json metadata.
+	run "$R" --results-dir "${RES}/two" --allow-multi-run --format charts
+	assert_line "istio_active_revisions: \"mixed:${REV_A} | ${REV_B}\""
+	assert_line "istio_proxy_versions: \"mixed:${PV_A} | ${PV_B}\""
+	run "$R" --results-dir "${RES}/old" --format charts
+	assert_line 'istio_active_revisions: "unknown"'
+	assert_line 'istio_proxy_versions: "unknown"'
 	run "$R" --results-dir "${RES}/two" --allow-multi-run --format md
 	assert_line "| ISTIO_PROXY_VERSIONS | \`mixed:${PV_A} \\| ${PV_B}\` |"
 	run --separate-stderr "$R" --results-dir "${RES}/two" --allow-multi-run --format json

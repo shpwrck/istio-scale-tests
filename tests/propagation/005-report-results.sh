@@ -139,8 +139,9 @@ with status OK, restarted 0, p1_overflow 0 and scrape_skew_ms within the ceiling
 
 n_total / n_valid: rows considered vs rows used after the above filtering; for
 the P1 phases, iterations (P1 is one sample per iteration, as 002's summary counts it).
-n_attempted (the last column; json n_attempted): what the probes were configured to
-run, from each TSV's ITERATIONS and REMOTES: iterations for the P1 phases, ITERATIONS
+n_attempted (after n_valid in text and markdown, the last csv column; json
+n_attempted): what the probes were configured to run, from each TSV's ITERATIONS and
+REMOTES: iterations for the P1 phases, ITERATIONS
 x remotes rows (one per iteration with no remote) for P2/P3; a SETUP_FAILED or
 PROBE_FAILED placeholder counts its ITERATIONS x (mesh size - 1) unless a probe TSV of
 its sweep has its mesh size. "-" (csv empty, json null) when a TSV does not record it.
@@ -149,7 +150,13 @@ WARNING, csv # WARNING, markdown > Warning, json data_warnings) and stderr says 
 TSV_COLUMNS (csv # TSV_COLUMNS=, markdown tsv_columns, json tsv_columns) lists the
 column counts of the input rows; more than one also warns: the row rules above differ
 by width, so pooled figures mix rules.
-Averages are rounded to the nearest ms; json mesh_size is a number.
+Averages are rounded to the nearest ms; json mesh_size is a number. n_valid is 0
+(never "-") in every format when no row of a phase counts.
+
+REPORT_HARNESS_SHA (every format, next to HARNESS_SHA): the harness this report ran
+on, which can differ from HARNESS_SHA, the harness that measured the rows: a report
+made again later, or from another checkout, may count rows by other rules. The
+results dir it reads does not count as a change to it.
 
 text, markdown and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
@@ -285,7 +292,8 @@ done
 # mixed:a,b with a warning when they differ (PL26).
 PREAMBLE[RUN_CONFIG]="$(config_report_value RUN_CONFIG "${ENDPOINT_FILES[@]}")"
 PREAMBLE[RUN_CONFIG_SHA256]="$(config_report_value RUN_CONFIG_SHA256 "${ENDPOINT_FILES[@]}")"
-PREAMBLE[REPORT_HARNESS_SHA]="$(report_harness_sha)" # this report's own harness, every format
+# This report's own harness, every format; the results dir it reads is no harness change.
+PREAMBLE[REPORT_HARNESS_SHA]="$(report_harness_sha --exclude "$RESULTS_DIR")"
 # PL6: the report pools every TSV under the results dir; more than one run stops it
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${ENDPOINT_FILES[@]}"
@@ -356,7 +364,7 @@ while IFS=$'\t' read -r _k _a _b _c; do
 	W) TSV_WIDTHS+=("$_a"); TSV_WIDTH_FILES+=("${_a} in ${_b} file(s)") ;;
 	esac
 done <<<"$INPUT_SCAN"
-TSV_COLUMNS="$(IFS=,; echo "${TSV_WIDTHS[*]}")"
+TSV_COLUMNS="$(IFS=,; echo "${TSV_WIDTHS[*]-}")"
 # DATA_WARNINGS: one line each, in every format and on stderr. A mesh size whose probes
 # measured fewer iterations or rows than they were configured to (n_total counts only
 # what was written, and a failed cell's status row); inputs of different widths, which
@@ -382,9 +390,10 @@ data_warnings_lines() {
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
 data_warnings_lines "WARNING: " >&2
-# data_warnings_json: DATA_WARNINGS as a JSON array of strings.
+# data_warnings_json: DATA_WARNINGS as a JSON array of strings, one per line, each escaped
+# as json_escape does.
 data_warnings_json() {
-	printf '%s' "$DATA_WARNINGS" | awk 'BEGIN { ORS = ""; printf "[" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 } END { print "]" }'
+	printf '%s' "$DATA_WARNINGS" | awk 'BEGIN { ORS = ""; printf "[" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t"); gsub(/\r/, "\\r"); gsub(/[[:cntrl:]]/, ""); printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 } END { print "]" }'
 }
 
 # Helper: does any per-file row carry this key?
@@ -397,11 +406,17 @@ preamble_has() {
 	return 1
 }
 
-# JSON-escape a single value (backslash + quote only; values are ASCII run metadata).
+# JSON-escape a single value: each \ and " escaped, a tab, carriage return and newline as
+# \t, \r and \n, any other control character dropped (as controlplane 004's js()), so a
+# value from a hand-edited TSV or a run-config path keeps the JSON parseable.
 json_escape() {
 	local v="$1"
 	v="${v//\\/\\\\}"
 	v="${v//\"/\\\"}"
+	v="${v//$'\t'/\\t}"
+	v="${v//$'\r'/\\r}"
+	v="${v//$'\n'/\\n}"
+	v="${v//[[:cntrl:]]/}"
 	printf '%s' "$v"
 }
 
@@ -698,38 +713,38 @@ report_endpoint_text() {
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" -v ATT="$ATT_SPEC" "$AWK_AGG"'
 	function stats_line(label, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
-			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s | %5s\n",
-				ms, label, phase_total(label, ms), "-", "-", "-", "-", "-", "-", "-", phase_att(label, ms)
+			printf "  %-3s | %-26s | %5d | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
+				ms, label, phase_total(label, ms), 0, phase_att(label, ms), "-", "-", "-", "-", "-", "-"
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "  %-3s | %-26s | %5d | %5d | %11d | %11d | %11.0f | %11s | %11s | %11s | %5s\n",
-			ms, label, phase_total(label, ms), n, arr[1], arr[n], sum/n,
-			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99), phase_att(label, ms)
+		printf "  %-3s | %-26s | %5d | %5d | %5s | %11d | %11d | %11.0f | %11s | %11s | %11s\n",
+			ms, label, phase_total(label, ms), n, phase_att(label, ms), arr[1], arr[n], sum/n,
+			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
 	# Histogram rows: no average (see bucket_range); max is the worst bucket.
 	function stats_line_hist(label, src, ms, n,    arr) {
 		if (n == 0) {
-			printf "  %-3s | %-26s | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s | %5s\n",
-				ms, label, phase_total(label, ms), "-", "-", "-", "-", "-", "-", "-", phase_att(label, ms)
+			printf "  %-3s | %-26s | %5d | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
+				ms, label, phase_total(label, ms), 0, phase_att(label, ms), "-", "-", "-", "-", "-", "-"
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
-		printf "  %-3s | %-26s | %5d | %5d | %11s | %11s | %11s | %11s | %11s | %11s | %5s\n",
-			ms, label, phase_total(label, ms), n,
+		printf "  %-3s | %-26s | %5d | %5d | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
+			ms, label, phase_total(label, ms), n, phase_att(label, ms),
 			bucket_range(arr[1]), bucket_range(arr[n]), "-",
 			bucket_range(percentile(arr, n, 50)),
 			bucket_range(percentile(arr, n, 95)),
-			bucket_range(percentile(arr, n, 99)), phase_att(label, ms)
+			bucket_range(percentile(arr, n, 99))
 	}
 	END {
-		printf "  %-3s | %-26s | %5s | %5s | %11s | %11s | %11s | %11s | %11s | %11s | %5s\n",
-			"Sz", "Phase", "n_tot", "n_val", "min", "max", "avg", "p50", "p95", "p99", "n_att"
-		printf "  %-3s-+-%-26s-+-%5s-+-%5s-+-%11s-+-%11s-+-%11s-+-%11s-+-%11s-+-%11s-+-%5s\n",
-			"---", "--------------------------", "-----", "-----", "-----------", "-----------", "-----------", "-----------", "-----------", "-----------", "-----"
+		printf "  %-3s | %-26s | %5s | %5s | %5s | %11s | %11s | %11s | %11s | %11s | %11s\n",
+			"Sz", "Phase", "n_tot", "n_val", "n_att", "min", "max", "avg", "p50", "p95", "p99"
+		printf "  %-3s-+-%-26s-+-%5s-+-%5s-+-%5s-+-%11s-+-%11s-+-%11s-+-%11s-+-%11s-+-%11s\n",
+			"---", "--------------------------", "-----", "-----", "-----", "-----------", "-----------", "-----------", "-----------", "-----------", "-----------"
 		asorti_seen()
 		for (s = 1; s <= __n; s++) {
 			ms_cur = __sorted[s]
@@ -792,17 +807,18 @@ Definitions for every phase and statistic column in the tables above (see also
 `tests/propagation/README.md`). Each phase measures one stage of a single config change
 propagating across the mesh; all values are **milliseconds**. Remote phases (P2/P3) are
 undefined at mesh size 1 (no remote cluster). P2 and P3 are measured on a remote, so a row
-is dropped from them (not counted in `n_valid`) only for that remote's side: `remote_status
-!= OK` (its istiod restarted or unknown, a P2 or P3 timeout, its sidecar's drain timeout or a
-canary endpoint not drained before t0 (`NOT_DRAINED`), its scrape incomplete) or `remote_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`, never for the
-source's restart, P1 timeout or `p1_overflow`. A TSV without `remote_status` cannot split a row
-by side: `status != OK`, `restarted ∈ {1, unknown}` or a high `scrape_skew_ms` drop it. P2
+is dropped from them (not counted in `n_valid`) only for that remote's side:
+`remote_status != OK` (its istiod restarted or unknown, a P2 or P3 timeout, its sidecar's
+drain timeout or a canary endpoint not drained before t0 (`NOT_DRAINED`), its scrape
+incomplete) or `remote_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`, never for the source's
+restart, P1 timeout or `p1_overflow`. A TSV without `remote_status` cannot split a row by
+side: `status != OK`, `restarted ∈ {1, unknown}` or a high `scrape_skew_ms` drop it. P2
 additionally drops `p2_dirty=1` rows (an EDS bump not confirmed by the remote sidecar going
-healthy). The P1
-phases are measured on the source, so only the source side drops an iteration's P1:
-`p1_status != OK` (a P1 timeout, a source istiod restart or unknown restart state, a source
-sidecar drain timeout or `NOT_DRAINED`, a source scrape that failed), `p1_overflow=1`, or `p1_scrape_skew_ms`
-over `FANOUT_MAX_SKEW_MS`; a remote that timed out or restarted does not.
+healthy). The P1 phases are measured on the source, so only the source side drops an
+iteration's P1: `p1_status != OK` (a P1 timeout, a source istiod restart or unknown restart
+state, a source sidecar drain timeout or `NOT_DRAINED`, a source scrape that failed),
+`p1_overflow=1`, or `p1_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`; a remote that timed out
+or restarted does not.
 
 | Phase | Units | Source | Definition / caveats |
 |-------|-------|--------|----------------------|
@@ -816,9 +832,9 @@ over `FANOUT_MAX_SKEW_MS`; a remote that timed out or restarted does not.
 |-------------|------------|
 | `n_total` | All rows considered for the phase/mesh size, kept or dropped. For the P1 phases, iterations (distinct run_id and iteration, as the probe's summary counts them), so a clean run reads `n_total == n_valid` and an overflowed iteration shows as one less `n_valid`. |
 | `n_valid` | Samples used for the statistics: rows surviving the drop filters above. For the P1 phases, iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so it counts once per iteration whose source side is clean (from the iteration's first valid row in a TSV without `p1_status`). |
+| `n_attempted` | What the probes were configured to run, from each TSV's `ITERATIONS` and `REMOTES`: iterations for the P1 phases, `ITERATIONS` x remotes rows (one row per iteration with no remote) for P2/P3. `n_total` below it means iterations or rows that never ran (a warning above says so); `-` when a TSV does not record it. A `SETUP_FAILED` / `PROBE_FAILED` cell counts its status row in `n_total` and what it was configured to run here. |
 | `min_ms` / `max_ms` / `avg_ms` | Minimum / maximum / mean (rounded to ms) latency across the `n_valid` samples. A histogram row (`P1 conv_*`) has no average (`-`): the mean of bucket bounds can land in a bucket no row hit, so read `max` (the worst bucket). CSV and JSON keep the numbers and add `worst_bucket`, the range of `max_ms`, for those phases. |
 | `p50_ms` / `p95_ms` / `p99_ms` | Nearest-rank percentiles across the `n_valid` samples; `p95`/`p99` are `N/A` below `PROPAGATION_PERCENTILE_MIN_N` samples (a single worst sample would otherwise masquerade as a tail quantile). |
-| `n_attempted` | What the probes were configured to run (PL17), from each TSV's `ITERATIONS` and `REMOTES`: iterations for the P1 phases, `ITERATIONS` x remotes rows (one row per iteration with no remote) for P2/P3. `n_total` below it means iterations or rows that never ran (a warning above says so); `-` when a TSV does not record it. A `SETUP_FAILED` / `PROBE_FAILED` cell counts its status row in `n_total` and what it was configured to run here. |
 | `tsv_columns` | The column counts of the input rows (front matter). More than one means inputs from different harness versions, filtered by different rules (fewer than 23: no `remote_status`; fewer than 21: no `p1_status`; 18: no `p2_dirty` or skew); a warning above says so. |
 GLOSSARY
 }
@@ -844,30 +860,30 @@ report_endpoint_markdown() {
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" -v ATT="$ATT_SPEC" "$AWK_AGG"'
 	function md_row(phase, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
-			printf "| %s | %d | %d | - | - | - | - | - | - | %s |\n", phase, phase_total(phase, ms), 0, phase_att(phase, ms)
+			printf "| %s | %d | %d | %s | - | - | - | - | - | - |\n", phase, phase_total(phase, ms), 0, phase_att(phase, ms)
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
 		sum = 0; for (i = 1; i <= n; i++) sum += arr[i]
-		printf "| %s | %d | %d | %d | %d | %.0f | %s | %s | %s | %s |\n",
-			phase, phase_total(phase, ms), n, arr[1], arr[n], sum/n,
-			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99), phase_att(phase, ms)
+		printf "| %s | %d | %d | %s | %d | %d | %.0f | %s | %s | %s |\n",
+			phase, phase_total(phase, ms), n, phase_att(phase, ms), arr[1], arr[n], sum/n,
+			percentile(arr, n, 50), percentile(arr, n, 95), percentile(arr, n, 99)
 	}
 	# Histogram rows: no average (see bucket_range); max is the worst bucket.
 	function md_row_hist(phase, src, ms, n,    arr) {
 		if (n == 0) {
-			printf "| %s | %d | %d | - | - | - | - | - | - | %s |\n", phase, phase_total(phase, ms), 0, phase_att(phase, ms)
+			printf "| %s | %d | %d | %s | - | - | - | - | - | - |\n", phase, phase_total(phase, ms), 0, phase_att(phase, ms)
 			return
 		}
 		load(arr, src, ms, n)
 		sort_arr(arr, n)
-		printf "| %s | %d | %d | %s | %s | - | %s | %s | %s | %s |\n",
-			phase, phase_total(phase, ms), n,
+		printf "| %s | %d | %d | %s | %s | %s | - | %s | %s | %s |\n",
+			phase, phase_total(phase, ms), n, phase_att(phase, ms),
 			bucket_range(arr[1]), bucket_range(arr[n]),
 			bucket_range(percentile(arr, n, 50)),
 			bucket_range(percentile(arr, n, 95)),
-			bucket_range(percentile(arr, n, 99)), phase_att(phase, ms)
+			bucket_range(percentile(arr, n, 99))
 	}
 	function cmp_avg(src, ms, n,    arr, sum, i) {
 		if (n == 0) return "-- (0)"
@@ -887,8 +903,8 @@ report_endpoint_markdown() {
 		for (s = 1; s <= __n; s++) {
 			ms_cur = __sorted[s]
 			printf "## Mesh size: %s\n\n", ms_cur
-			printf "| Phase | n_total | n_valid | min (ms) | max (ms) | avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) | n_attempted |\n"
-			printf "|-------|---------|---------|----------|----------|----------|----------|----------|----------|-------------|\n"
+			printf "| Phase | n_total | n_valid | n_attempted | min (ms) | max (ms) | avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) |\n"
+			printf "|-------|---------|---------|-------------|----------|----------|----------|----------|----------|----------|\n"
 			md_row("P1 local xDS (wall)",  p1_vals,   ms_cur, p1_n[ms_cur])
 			md_row_hist("P1 conv_p50 (hist)",   cp50_vals, ms_cur, cp50_n[ms_cur])
 			md_row_hist("P1 conv_p99 (hist)",   cp99_vals, ms_cur, cp99_n[ms_cur])

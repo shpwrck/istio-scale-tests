@@ -138,7 +138,8 @@ _prop_tuning() {
 	# (22) the remote's: P3 measured a number, but the iteration started with the old
 	# endpoint healthy, so it is not a valid sample.
 	[ "$(_row 10,20,22)" = NOT_DRAINED/OK/NOT_DRAINED ]
-	[[ "$stderr" == *"Warning: ctx-b: a canary endpoint from an earlier iteration or run is still healthy on its watcher"*"NOT_DRAINED"* ]]
+	# The warning names the iteration, the state (still healthy, not unreadable) and the knob.
+	[[ "$stderr" == *"Warning: iteration 1/1: ctx-b: a canary endpoint from an earlier iteration or run is still healthy on its watcher after PROPAGATION_DRAIN_TIMEOUT_SEC=1s (raise it if its drains take longer): this iteration's P2/P3 for it are NOT_DRAINED"* ]]
 	assert_output --regexp 'P1 local xDS push: +n=1/1 min=[0-9]+ms'
 	assert_output --partial "P2 remote istiod EDS push:  n=0/1 (no valid sample)"
 	assert_output --partial "P3 remote sidecar:          n=0/1 (no valid sample)"
@@ -161,19 +162,24 @@ _prop_tuning() {
 	STUB_PRE_PORT=15101 _prop_run
 	assert_success
 	[ "$(_row 10,20,22)" = NOT_DRAINED/NOT_DRAINED/OK ]
-	[[ "$stderr" == *"Warning: ctx-a: a canary endpoint from an earlier iteration or run is still healthy on its watcher"*"P1 is NOT_DRAINED"* ]]
+	[[ "$stderr" == *"Warning: iteration 1/1: ctx-a: a canary endpoint from an earlier iteration or run is still healthy on its watcher after PROPAGATION_DRAIN_TIMEOUT_SEC=1s"*"P1 is NOT_DRAINED"* ]]
 	assert_output --partial "P1 local xDS push:          n=0/1 (no valid sample)"
 	assert_output --regexp 'P2 remote istiod EDS push: +n=1/1 min=[0-9]+ms'
 	assert_output --regexp 'P1 iterations left out .*'$'\n''    NOT_DRAINED +1'
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '[.rows[] | [.phase, .n_total, .n_valid]]' <<<"$output")" = \
 		'[["P1_local_wall",1,0],["P1_conv_p50",1,0],["P1_conv_p99",1,0],["P2_discovery",1,1],["P3_dataplane",1,1]]' ]
-	# The remote's /clusters cannot be read before t0: the drain cannot be confirmed.
+	# The remote's /clusters cannot be read before t0: the drain cannot be confirmed. The
+	# warning says so (not "still healthy"), and the check does not wait for it: its three
+	# tries are the only reads before t0 (a wait would read again until the drain timeout).
 	rm -rf "$RES" "$STUB_PRE_COUNT" "$STUB_MARK"
 	mkdir -p "$RES"
 	STUB_PRE_PORT=15100 STUB_PRE_MODE=unreadable _prop_run
 	assert_success
 	[ "$(_row 10,20,22)" = NOT_DRAINED/OK/NOT_DRAINED ]
+	[[ "$stderr" == *"Warning: iteration 1/1: ctx-b: its watcher's /clusters could not be read (the port-forward to deploy/propagation-watcher on localhost:15100), so its drain cannot be checked: this iteration's P2/P3 for it are NOT_DRAINED"* ]]
+	[[ "$stderr" != *"still healthy"* ]]
+	[ "$(cat "$STUB_PRE_COUNT")" = 3 ]
 }
 
 @test "propagation 002: a canary endpoint healthy again just before t0 (after a clean drain check) is NOT_DRAINED; one that drains within the wait settles and the iteration counts" {
@@ -182,7 +188,7 @@ _prop_tuning() {
 	STUB_PRE_PORT=15100 STUB_PRE_FROM=2 _prop_run
 	assert_success
 	[ "$(_row 10,20,22)" = NOT_DRAINED/OK/NOT_DRAINED ]
-	[[ "$stderr" == *"Warning: ctx-b: the canary endpoint is already healthy on its watcher before t0"* ]]
+	[[ "$stderr" == *"Warning: iteration 1/1: ctx-b: the canary endpoint is already healthy on its watcher before t0"* ]]
 	# Healthy on reads 1 and 2 (the drain check waits), gone on read 3: drained, settled,
 	# clean at t0: every status OK, nothing left out.
 	rm -rf "$RES" "$STUB_PRE_COUNT" "$STUB_MARK"

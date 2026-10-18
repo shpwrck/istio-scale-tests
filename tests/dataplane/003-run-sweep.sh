@@ -110,24 +110,32 @@ Environment:
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
   The sweep checks every numeric one of them, and the flags that set them, before the
   first setup, --dry-run included.
+  HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
+  step); SWEEP_STOP_GRACE_SEC (10): how long a signalled sweep waits for its step's
+  processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
+  are read at once. Environment only (config/options.env).
 
 Exit codes:
   0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
      counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition, or an unexpected error; after its
-     start, sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
+  1  the sweep stopped: a bad flag or precondition (or another live run holds the
+     sweep dir: .sweep.lock names its PID), or an unexpected error; after its start,
+     sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
      CUT_SHORT=1)
   3  --on-unreachable fail stopped the sweep (the reports are written)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
      version, the active revision or the generation of the Istio CR or its active
      IstioRevision changed during the sweep (read again at its end), or that
-     end-of-sweep check failed; the outcome is also in sweep-outcome.txt and the
-     markdown report
+     end-of-sweep check failed, or the harness (a file under tests/, config/, charts/
+     or terraform/) changed during the sweep (HARNESS_SHA read again before its steps
+     and at its end); the outcome is also in sweep-outcome.txt and the markdown report
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
-     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A SIGTERM
-     sent to the sweep's process alone reaches the step that runs (001, 002, 005) at
-     once; only a settle wait finishes first
+     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A signal
+     sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches the step
+     that runs (001, 002, 005) and every process under it at once; any still running
+     SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after them. Only a
+     settle wait finishes first.
 EOF
 }
 
@@ -288,8 +296,9 @@ fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
-# The harness, once for the whole sweep: its steps record this value (harness_sha_for_sweep
-# exports it), and its own results under the output dir do not count.
+# The harness at the sweep's start; its results under the output dir do not count
+# (harness_sha_for_sweep exports that dir, so each step records the harness it runs). A
+# harness that changes during the sweep is a problem in its outcome (exit 4).
 harness_sha_for_sweep "$OUTPUT_DIR_BASE"
 
 # Live tuning-baseline provenance, queried once on the source context and passed
@@ -405,7 +414,7 @@ for ms in "${MESH_SIZES[@]}"; do
 		remote_ctxs=("${active_ctxs[@]:1}")
 	fi
 	remote_csv=""
-	for rc in "${remote_ctxs[@]}"; do
+	for rc in ${remote_ctxs[@]+"${remote_ctxs[@]}"}; do
 		[[ -n "$remote_csv" ]] && remote_csv+=","
 		remote_csv+="$rc"
 	done

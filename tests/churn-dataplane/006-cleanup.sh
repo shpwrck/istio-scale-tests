@@ -160,7 +160,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 
 FAILED=0
-for pid in "${PIDS[@]}"; do
+for pid in ${PIDS[@]+"${PIDS[@]}"}; do
 	if ! wait "$pid"; then
 		RC+=("$pid")
 		FAILED=$((FAILED + 1))

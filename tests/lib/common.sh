@@ -13,10 +13,10 @@
 #                                     -> split_csv for a list of mesh members; die naming
 #                                        <what> (the flag or variable) when a member is
 #                                        listed twice, or equals <source_ctx> when given
-#   ctx_file_safe <name> [<max>]      -> the file-name form of a context name: each byte
-#                                        outside A-Za-z0-9._- as _ (in every locale), at
-#                                        most <max> chars (CTX_FILE_NAME_MAX: the cut used
-#                                        inside folder names)
+#   ctx_file_safe <name> [<max>]      -> the file-name form of a context name (or a run id,
+#                                        a tag): each byte outside A-Za-z0-9._- as _ (in
+#                                        every locale), at most <max> chars
+#                                        (CTX_FILE_NAME_MAX: the cut used inside folder names)
 #   is_pos_int <val>                  -> return 0 if val is a positive integer
 #   is_nonneg_int <val>               -> return 0 if val is a non-negative integer
 #   validate_scoping <val>            -> die if val is not none|namespace|explicit|wide
@@ -65,12 +65,23 @@
 #                                     -> the TSV without each cell's earlier attempts
 #   CP_CELL_AWK                       -> awk functions for a controlplane cell's state
 #                                        (done, its status, INCOMPLETE) and the planned cells
-#   sweep_lock <dir>                  -> one run per sweep dir (.sweep.lock with the PID)
-#   sweep_step <cmd...>               -> run a long step so a signal reaches it at once
+#   sweep_lock [--release-on-exit] <dir>
+#                                     -> one run per sweep dir (.sweep.lock with the PID; a
+#                                        stale lock taken over under .sweep.lock.taking);
+#                                        --release-on-exit: an EXIT trap releases it
+#   sweep_step <cmd...>               -> run a long step so a signal reaches it, and every
+#                                        process under it, at once (SWEEP_STOP_GRACE_SEC,
+#                                        then SIGKILL)
+#   sweep_step_kill                   -> SIGKILL what still runs of that step (EXIT traps)
 #   harness_sha [--exclude <dir>]...  -> the harness the run uses: git describe, with
-#                                        -dirty.<8hex> naming the uncommitted content
-#   harness_sha_for_sweep [<dir>]     -> a sweep's harness, once, exported to its steps
-#   report_harness_sha                -> the harness a report itself runs (REPORT_HARNESS_SHA)
+#                                        -dirty.<8hex> naming the uncommitted content of
+#                                        HARNESS_PATHS (tests config charts terraform)
+#   harness_sha_for_sweep [<dir>]     -> a sweep's harness at its start; exports <dir> as
+#                                        HARNESS_SHA_EXCLUDE (never the value)
+#   harness_sha_check <step>          -> read it again before a step (HARNESS_SHA_CHECK_SEC);
+#                                        a change is a problem in sweep_outcome
+#   report_harness_sha [--exclude <dir>]...
+#                                     -> the harness a report itself runs (REPORT_HARNESS_SHA)
 #   md_cell [-v <var>] <value>        -> the value for a markdown table cell (each | as
 #                                        \|, a newline as a space)
 #   MD_CELL_AWK                       -> the same as an awk function md_cell(s)
@@ -101,7 +112,7 @@ split_csv() {
 	_out=()
 	local x
 	IFS=',' read -ra _raw <<<"$csv"
-	for x in "${_raw[@]}"; do
+	for x in ${_raw[@]+"${_raw[@]}"}; do
 		x="${x#"${x%%[![:space:]]*}"}"
 		x="${x%"${x##*[![:space:]]}"}"
 		[[ -n "$x" ]] && _out+=("$x")
@@ -134,11 +145,15 @@ split_contexts() {
 
 # CTX_FILE_NAME_MAX: the longest a context's file-name form gets inside a folder name
 # (istiod-diag evidence folders); redact-results.sh maps that cut form too.
+# RUN_ID_FILE_NAME_MAX, TAG_FILE_NAME_MAX: the same for a run id (an istiod-diag-<run id>
+# folder) and a capture tag (an evidence folder's name).
 # shellcheck disable=SC2034
-CTX_FILE_NAME_MAX=40
+CTX_FILE_NAME_MAX=40 RUN_ID_FILE_NAME_MAX=64 TAG_FILE_NAME_MAX=48
 
 # ctx_file_safe <name> [<max>]: the one file-name form of a context name (state files,
-# evidence folders, redaction). Every byte outside A-Za-z0-9._- becomes _, byte by byte
+# evidence folders, redaction), and of any other text that becomes part of a file or folder
+# name (istiod-diag also cuts run ids and capture tags with it: RUN_ID_FILE_NAME_MAX,
+# TAG_FILE_NAME_MAX). Every byte outside A-Za-z0-9._- becomes _, byte by byte
 # in every locale (a 2-byte UTF-8 letter gives __), then at most <max> characters. The
 # list is spelled out: a [a-z] range follows the locale's collation before bash 5.0.
 # Forks nothing for a name that is already safe.
@@ -396,39 +411,114 @@ sweep_outcome_start() {
 	return 0
 }
 
-# sweep_lock <dir>: one run per sweep dir. Takes <dir>/.sweep.lock (it holds this shell's
-# PID); while the lock names a PID that is still alive, dies before anything in <dir>
-# changes, naming that PID and how to clear a stale lock, so a --resume cannot run beside
-# the run it resumes (two runs would append to one TSV and overwrite each other's outcome).
-# A lock whose PID is gone (that run died) is taken over. sweep_outcome_start takes it, so
-# every sweep does; controlplane 003 takes it earlier for a --resume, before it reads or
-# moves anything in the sweep dir. Taking it again from the same shell does nothing; the
-# sweep's EXIT trap removes it (sweep_outcome_on_exit, only the lock this shell took). Warns
-# and goes on when the lock cannot be written (a read-only dir fails later, loudly).
+# sweep_lock [--release-on-exit] <dir>: one run per sweep dir. Takes <dir>/.sweep.lock (it
+# holds this shell's PID); while the lock names a PID that is still alive, dies before
+# anything in <dir> changes, naming that PID and how to clear a stale lock, so a --resume
+# cannot run beside the run it resumes (two runs would append to one TSV and overwrite each
+# other's outcome). A PID that `kill -0` may not signal (another user's process) is alive
+# too (`ps -p`). A lock whose PID is gone (that run died) is taken over under
+# <dir>/.sweep.lock.taking (a mkdir mutex): the lock is read again under it and written
+# only while its PID is still gone, so of two runs that find one stale lock at once, one
+# takes it and the other is refused; a mutex left by a run that died while taking over is
+# never removed for you (the refusal names it). sweep_outcome_start takes the lock, so
+# every sweep does, after it has set its EXIT trap (sweep-stop.bats checks the order).
+# controlplane 003 takes it earlier for a --resume, before it reads or moves anything in
+# the sweep dir, with --release-on-exit: that sets an EXIT trap that releases it
+# (_sweep_unlock, only the lock this shell took), so a run that stops on a precondition
+# before its own EXIT trap leaves no lock; the sweep's own EXIT trap replaces it and
+# releases the lock too. Taking it again from the same shell does nothing; the sweep's EXIT
+# trap removes it (sweep_outcome_on_exit, only the lock this shell took), after the step
+# that was running has ended (_sweep_step_stop). Warns and goes on when the lock cannot be
+# written (a read-only dir fails later, loudly).
 # shellcheck disable=SC2329
 sweep_lock() {
-	local dir="$1" f me="${BASHPID:-$$}" pid i
-	f="${dir}/.sweep.lock"
+	if [[ "${1:-}" == --release-on-exit ]]; then
+		shift
+		trap '_sweep_unlock 2>/dev/null || true' EXIT
+	fi
+	local dir="$1" f m me="${BASHPID:-$$}" pid i
+	f="${dir}/.sweep.lock" m="${dir}/.sweep.lock.taking"
 	[[ "${_SWEEP_LOCK_FILE:-}" != "$f" || "${_SWEEP_LOCK_PID:-}" != "$me" ]] || return 0
 	mkdir -p "$dir" 2>/dev/null || true
-	for i in 1 2; do
-		if (set -o noclobber; printf '%s\n' "$me" > "$f") 2>/dev/null; then
-			_SWEEP_LOCK_FILE="$f" _SWEEP_LOCK_PID="$me"
-			return 0
+	if (set -o noclobber; printf '%s\n' "$me" > "$f") 2>/dev/null; then
+		_SWEEP_LOCK_FILE="$f" _SWEEP_LOCK_PID="$me"
+		return 0
+	fi
+	pid="$(head -n 1 "$f" 2>/dev/null)" || pid=""
+	# A lock with this shell's own PID is stale too (left before a restart).
+	if [[ "$pid" != "$me" ]] && _sweep_pid_alive "$pid"; then
+		_sweep_lock_refuse "$dir" "$pid"
+	fi
+	# The lock is stale (or was just removed): take it over under the mutex.
+	local got=0 nodir=0
+	for ((i = 0; i < 50; i++)); do
+		if mkdir "$m" 2>/dev/null; then
+			got=1
+			break
 		fi
-		pid="$(head -n 1 "$f" 2>/dev/null)" || pid=""
-		if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
-			die "another run of this sweep (PID ${pid}) still runs in ${dir}: wait for it to end, or stop it, before you start or --resume a run there (nothing was changed). If no such run exists (the host restarted and that PID is another process now), remove ${f} and run again."
+		if [[ -d "$m" ]]; then
+			nodir=0
+			sleep 0.1
+			continue
 		fi
-		[[ "$i" == 2 ]] || rm -f "$f" 2>/dev/null || true
+		nodir=$((nodir + 1))
+		((nodir < 3)) || break
 	done
+	if ((got == 0)) && [[ -d "$m" ]]; then
+		pid="$(head -n 1 "${m}/pid" 2>/dev/null)" || pid=""
+		die "another run (PID ${pid:-unknown}) is taking over the stale lock of ${dir}, or one died doing so: ${m} has stayed for 5s (nothing was changed). If no other run is starting there, remove ${m} and run again."
+	fi
+	if ((got == 0)); then
+		echo "warning: could not take ${f} (the sweep dir's lock), so another run in this dir would not be refused" >&2
+		return 0
+	fi
+	printf '%s\n' "$me" 2>/dev/null >| "${m}/pid" || true
+	_SWEEP_LOCK_TAKING="$m"
+	pid="$(head -n 1 "$f" 2>/dev/null)" || pid=""
+	if _sweep_pid_alive "$pid" && [[ "$pid" != "$me" ]]; then
+		_sweep_lock_release_mutex
+		_sweep_lock_refuse "$dir" "$pid"
+	fi
+	printf '%s\n' "$me" 2>/dev/null >| "$f" || true
+	pid="$(head -n 1 "$f" 2>/dev/null)" || pid=""
+	_sweep_lock_release_mutex
+	if [[ "$pid" == "$me" ]]; then
+		_SWEEP_LOCK_FILE="$f" _SWEEP_LOCK_PID="$me"
+		return 0
+	fi
 	echo "warning: could not take ${f} (the sweep dir's lock), so another run in this dir would not be refused" >&2
 	return 0
 }
 
-# _sweep_unlock: remove the lock sweep_lock took in this shell (sweep_outcome_on_exit).
+# _sweep_lock_refuse <dir> <pid>: sweep_lock's refusal (die) for a lock a live PID holds.
+# shellcheck disable=SC2329
+_sweep_lock_refuse() {
+	die "another run of this sweep (PID ${2}) still runs in ${1}: wait for it to end, or stop it, before you start or --resume a run there (nothing was changed). If no such run exists (the host restarted and that PID is another process now), remove ${1}/.sweep.lock and run again."
+}
+
+# _sweep_lock_release_mutex: remove the takeover mutex this shell made (sweep_lock).
+# shellcheck disable=SC2329
+_sweep_lock_release_mutex() {
+	[[ -n "${_SWEEP_LOCK_TAKING:-}" ]] || return 0
+	rm -f "${_SWEEP_LOCK_TAKING}/pid" 2>/dev/null || true
+	rmdir "$_SWEEP_LOCK_TAKING" 2>/dev/null || true
+	_SWEEP_LOCK_TAKING=""
+}
+
+# _sweep_pid_alive <pid>: true when <pid> is a positive integer and that process exists:
+# `kill -0`, or, when that fails (EPERM: another user's process), `ps -p`.
+# shellcheck disable=SC2329
+_sweep_pid_alive() {
+	[[ "${1:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+	kill -0 "$1" 2>/dev/null && return 0
+	[[ -n "$(ps -p "$1" -o pid= 2>/dev/null)" ]]
+}
+
+# _sweep_unlock: remove the lock sweep_lock took in this shell (sweep_outcome_on_exit),
+# and a takeover mutex it still holds.
 # shellcheck disable=SC2329
 _sweep_unlock() {
+	_sweep_lock_release_mutex
 	[[ -n "${_SWEEP_LOCK_FILE:-}" && "${_SWEEP_LOCK_PID:-}" == "${BASHPID:-$$}" ]] || return 0
 	local pid
 	pid="$(head -n 1 "$_SWEEP_LOCK_FILE" 2>/dev/null)" || pid=""
@@ -449,9 +539,9 @@ _sweep_unlock() {
 # and SIGHUP would end the sweep without it; Ctrl-C would still run it). Like any trap,
 # the handler runs once the foreground command returns. A long step that runs through
 # sweep_step is not a foreground command: the signal ends the sweep's wait for it at once,
-# and the handler sends SIGTERM on to the step (Ctrl-C and a closed terminal reach it from
-# the terminal already, so SIGINT and SIGHUP are not sent twice), waits for it to end
-# (its own cleanup), then ends the sweep.
+# and the handler stops the step and every process under it first (_sweep_step_stop: the
+# same signal, then SIGKILL for what still runs SWEEP_STOP_GRACE_SEC later), then ends the
+# sweep; its EXIT trap (and the lock's removal) runs after the step's processes are gone.
 # shellcheck disable=SC2329
 sweep_trap_signals() {
 	trap '_sweep_on_signal HUP' HUP
@@ -463,12 +553,146 @@ sweep_trap_signals() {
 _sweep_on_signal() {
 	_SWEEP_SIGNAL="$1"
 	trap - "$1"
-	if [[ -n "${_SWEEP_STEP_PID:-}" ]]; then
-		[[ "$1" != TERM ]] || kill -s TERM "$_SWEEP_STEP_PID" 2>/dev/null || true
-		wait "$_SWEEP_STEP_PID" 2>/dev/null || true
-		_SWEEP_STEP_PID=""
-	fi
+	[[ -z "${_SWEEP_STEP_PID:-}" ]] || _sweep_step_stop "$1"
 	kill -s "$1" "$$"
+}
+
+# _sweep_tree_read <root>...: one `ps -A` read: each live or zombie process that is a
+# <root> or under one, as "<pid> <pgid> <state> <key>" lines. A <root> is a PID, which
+# matches only a child of the shell that ran sweep_step (the step), or a key,
+# "<pid>@<start time>", which matches only the process that started then: a PID the
+# system gave to a new process after the old one ended is never taken for it. Reads every
+# process at once, the same way on Linux and macOS (no pgrep, no /proc).
+# shellcheck disable=SC2329
+_sweep_tree_read() {
+	(($#)) || return 0
+	LC_ALL=C ps -A -o pid=,ppid=,pgid=,stat=,lstart= 2>/dev/null | awk -v roots="$*" -v me="${_SWEEP_STEP_OWNER:-$$}" '
+		BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) want[r[i]] = 1 }
+		NF >= 9 {
+			k = $1 "@" $5 "-" $6 "-" $7 "-" $8 "-" $9
+			pid[NR] = $1; pg[NR] = $3; st[NR] = $4; key[NR] = k; kids[$2] = kids[$2] " " NR
+			if ((($1 in want) && $2 == me) || (k in want)) q[++t] = NR
+		}
+		END {
+			h = 1
+			while (h <= t) {
+				i = q[h++]
+				if (i in done) continue
+				done[i] = 1
+				print pid[i], pg[i], st[i], key[i]
+				m = split(kids[pid[i]], c, " ")
+				for (j = 1; j <= m; j++) q[++t] = c[j]
+			}
+		}' || true
+}
+
+# _sweep_tree_freeze <out_var> <root>...: SIGSTOP each live process of the trees under
+# <root>... (_sweep_tree_read), reading again until no new one shows up, so none of them
+# can start another process before the caller signals them; sets <out_var> (an array) to
+# their keys. The caller sends SIGCONT (or SIGKILL).
+# shellcheck disable=SC2329
+_sweep_tree_freeze() {
+	local -n _stf_out="$1"
+	shift
+	local -a stf_roots=("$@") stf_keys=()
+	local stf_frozen=" " stf_new i p g s k
+	_stf_out=()
+	for ((i = 0; i < 50; i++)); do
+		stf_new=0 stf_keys=()
+		while read -r p g s k; do
+			[[ -n "$k" && "$s" != Z* ]] || continue
+			stf_keys+=("$k")
+			[[ "$stf_frozen" != *" ${k} "* ]] || continue
+			kill -s STOP "$p" 2>/dev/null || true
+			stf_frozen+="${k} " stf_new=1
+		done < <(_sweep_tree_read ${stf_roots[@]+"${stf_roots[@]}"})
+		((${#stf_keys[@]})) || break
+		stf_roots=("${stf_keys[@]}")
+		((stf_new)) || break
+	done
+	_stf_out=(${stf_keys[@]+"${stf_keys[@]}"})
+}
+
+# _sweep_step_stop <signal>: stop the step sweep_step runs (_SWEEP_STEP_PID) and every
+# process under it, for _sweep_on_signal. The whole tree, not the step's PID alone: a
+# step's in-flight kubectl, its per-context `( ... ) &` workers and the commands they run
+# would otherwise run on after the sweep ends and removes its lock. It freezes the tree
+# (_sweep_tree_freeze: a process cannot start another one between the read and the
+# signal), sends <signal> to each process, resumes them, and waits until they are gone
+# (their EXIT traps clean up), at most SWEEP_STOP_GRACE_SEC seconds (config/options.env);
+# a process that still runs then (one that ignores the signal, or a cleanup that hangs)
+# gets SIGKILL, so the sweep never hangs on its step. The tree is read with `ps -A`, which
+# works on Linux and macOS: a process group (`set -m`) would miss the commands GNU
+# `timeout` runs (run_timeout: timeout moves itself to a group of its own) and would take
+# the step out of the terminal's foreground, so Ctrl-C would no longer reach it. SIGINT
+# and SIGHUP from the terminal (Ctrl-C, a closed terminal) already reached the processes
+# in the terminal's foreground group (the sweep's, so the step's too): those are not sent
+# the signal twice (that would cut their cleanup short), only the others (the timeout'd
+# commands). A SIGINT or SIGHUP sent to the sweep's PID alone (a supervisor's
+# `kill -INT <pid>`) reaches every process of the tree, as SIGTERM does. The tree's keys
+# stay in _SWEEP_STEP_TREE while it waits, so sweep_step_kill (the EXIT trap, after a
+# second signal ended this wait) finds the rest.
+# shellcheck disable=SC2329
+_sweep_step_stop() {
+	local sig="$1" pid="${_SWEEP_STEP_PID:-}" grace="${SWEEP_STOP_GRACE_SEC:-10}" tpg="" deadline p g s k n=0
+	local -a sss_tree=() sss_live=()
+	[[ -n "$pid" && "${_SWEEP_STEP_OWNER:-}" == "${BASHPID:-$$}" ]] || return 0
+	is_nonneg_int "$grace" || grace=10
+	if [[ "$sig" != TERM ]]; then
+		tpg="$(LC_ALL=C ps -o tpgid= -p "$$" 2>/dev/null)" || tpg=""
+		tpg="${tpg//[[:space:]]/}"
+		[[ "$tpg" =~ ^[1-9][0-9]*$ ]] || tpg=""
+	fi
+	_sweep_tree_freeze sss_tree "$pid"
+	_SWEEP_STEP_TREE="${sss_tree[*]-}"
+	if ((${#sss_tree[@]})); then
+		echo "Stopping the running step (${_SWEEP_STEP_NAME:-PID ${pid}}): SIG${sig} to its ${#sss_tree[@]} process(es); any still running ${grace}s later get SIGKILL (SWEEP_STOP_GRACE_SEC)." >&2 || true
+	fi
+	while read -r p g s k; do
+		[[ -n "$k" && "$s" != Z* ]] || continue
+		[[ -n "$tpg" && "$g" == "$tpg" ]] || kill -s "$sig" "$p" 2>/dev/null || true
+	done < <(_sweep_tree_read ${sss_tree[@]+"${sss_tree[@]}"})
+	for k in ${sss_tree[@]+"${sss_tree[@]}"}; do kill -s CONT "${k%%@*}" 2>/dev/null || true; done
+	deadline=$((SECONDS + grace))
+	while ((${#sss_tree[@]})); do
+		sss_live=()
+		while read -r p g s k; do
+			[[ -n "$k" && "$s" != Z* ]] || continue
+			sss_live+=("$k")
+		done < <(_sweep_tree_read "${sss_tree[@]}")
+		sss_tree=(${sss_live[@]+"${sss_live[@]}"})
+		_SWEEP_STEP_TREE="${sss_tree[*]-}"
+		((${#sss_tree[@]})) || break
+		((SECONDS < deadline)) || break
+		sleep 0.2
+	done
+	if ((${#sss_tree[@]})); then
+		_sweep_tree_freeze sss_tree "${sss_tree[@]}"
+		for k in ${sss_tree[@]+"${sss_tree[@]}"}; do
+			if kill -s KILL "${k%%@*}" 2>/dev/null; then n=$((n + 1)); fi
+		done
+		((n == 0)) || echo "warning: ${n} process(es) of the step still ran ${grace}s after SIG${sig}: sent SIGKILL (their own cleanup did not run)" >&2 || true
+	fi
+	wait "$pid" 2>/dev/null || true
+	_SWEEP_STEP_PID="" _SWEEP_STEP_TREE=""
+}
+
+# sweep_step_kill: SIGKILL what still runs of the step sweep_step started in this shell
+# (its tree: _SWEEP_STEP_TREE, else the step's PID), at once. sweep_outcome_on_exit calls
+# it first, and a sweep's EXIT trap that runs a step of its own (tuning's revert) calls it
+# before that: a second signal ends _sweep_step_stop's wait, and the sweep must not clean
+# up, or remove its lock, beside a step that still runs. Does nothing when no step runs.
+# shellcheck disable=SC2329
+sweep_step_kill() {
+	local pid="${_SWEEP_STEP_PID:-}" k
+	local -a ssk_tree=()
+	[[ -n "$pid" && "${_SWEEP_STEP_OWNER:-}" == "${BASHPID:-$$}" ]] || return 0
+	read -r -a ssk_tree <<< "${_SWEEP_STEP_TREE:-$pid}"
+	_sweep_tree_freeze ssk_tree ${ssk_tree[@]+"${ssk_tree[@]}"} "$pid"
+	for k in ${ssk_tree[@]+"${ssk_tree[@]}"}; do kill -s KILL "${k%%@*}" 2>/dev/null || true; done
+	((${#ssk_tree[@]} == 0)) || echo "warning: the sweep ended while its step (${_SWEEP_STEP_NAME:-PID ${pid}}) still ran: sent SIGKILL to its ${#ssk_tree[@]} process(es)" >&2 || true
+	wait "$pid" 2>/dev/null || true
+	_SWEEP_STEP_PID="" _SWEEP_STEP_TREE=""
 }
 
 # sweep_step <command> [<arg>...]: run one long step of a sweep (a setup, a probe, a
@@ -479,24 +703,26 @@ _sweep_on_signal() {
 # The step runs as a background job the sweep waits for: a trapped signal ends that wait
 # at once (a foreground command would delay the trap until it returned: a SIGTERM sent to
 # the sweep's process alone, by `kill <pid>` or a service manager, would wait 30-60 min
-# for a step at 10k services), and _sweep_on_signal forwards SIGTERM to the step and waits
-# for it. The step keeps the sweep's stdout and stderr and gets SIGINT and SIGQUIT back
-# (bash ignores them in a background job, so Ctrl-C still reaches it); its stdin is
-# /dev/null (no step reads the terminal). The command is exec'd in that job, so the
-# SIGTERM reaches the step itself (a script that then runs its EXIT trap, as bash does on
-# a signal it does not trap, and dies of it, writing no more rows), not a shell around
+# for a step at 10k services), and _sweep_on_signal stops the step and every process under
+# it (_sweep_step_stop). The step keeps the sweep's stdout and stderr and gets SIGINT and
+# SIGQUIT back (bash ignores them in a background job, so Ctrl-C still reaches it); its
+# stdin is /dev/null (no step reads the terminal). The command is exec'd in that job, so
+# the signal reaches the step itself (a script that then runs its EXIT trap, as bash does
+# on a signal it does not trap, and dies of it, writing no more rows), not a shell around
 # it: pass a script or a binary, never a function (exec fails on one, with exit 127) or a
 # pipeline (log a step's output with a redirection of the call, such as
 # `sweep_step "$probe" "${args[@]}" > >(tee -a "$log") 2>&1`). A settle `sleep` stays a
-# foreground command: it delays the signal by at most the settle.
+# foreground command: it delays the signal by at most the settle. Before the step, the
+# sweep's harness is read again (harness_sha_check, at most every HARNESS_SHA_CHECK_SEC).
 # shellcheck disable=SC2329
 sweep_step() {
 	local _ss_rc=0
+	harness_sha_check "${1##*/}"
 	(
 		trap - INT QUIT
 		exec "$@"
 	) &
-	_SWEEP_STEP_PID=$!
+	_SWEEP_STEP_PID=$! _SWEEP_STEP_OWNER="${BASHPID:-$$}" _SWEEP_STEP_NAME="${1##*/}"
 	wait "$_SWEEP_STEP_PID" || _ss_rc=$?
 	_SWEEP_STEP_PID=""
 	return "$_ss_rc"
@@ -533,8 +759,9 @@ sweep_outcome_cut_short() {
 #   sweep_outcome_on_exit "$rc" ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} || true
 # with <rc> the $? the trap started with, and the notes the sweep gathered so far (a
 # controlplane --resume's harness, Kubernetes and readiness notes), which its reports
-# would otherwise lose. It first removes the sweep dir's lock this shell took (sweep_lock).
-# Then it does nothing unless sweep_outcome_start armed it in this shell
+# would otherwise lose. It first kills what still runs of a step (sweep_step_kill: a
+# second signal ended the wait for it), then removes the sweep dir's lock this shell took
+# (sweep_lock). Then it does nothing unless sweep_outcome_start armed it in this shell
 # (never in a subshell) and <dir>/sweep-outcome.txt is still that start's not-finished
 # record: the sweep wrote its outcome at its end, or never started. Else the sweep ended
 # before its outcome, and the record says how:
@@ -542,7 +769,8 @@ sweep_outcome_cut_short() {
 #     _SWEEP_SIGNAL); the ERR trap for a command a signal killed (its exit 129, 130 or
 #     143); or exit 0 with no reason (no exit of this harness before its outcome is 0). The
 #     record stays not finished and gets ENDED_AT (UTC), ENDED_EXIT, when known
-#     ENDED_SIGNAL, and the notes as NOTE= and INFO= lines: the reports say the run was
+#     ENDED_SIGNAL, and the notes as NOTE= and INFO= lines (also one for a harness that
+#     changed during the sweep: _harness_sha_sweep_end): the reports say the run was
 #     interrupted then, before its outcome (it does not still run), with those notes.
 #   - stopped: die (its message), the ERR trap (sweep_err_trap: the script, line and
 #     command), or any other non-zero exit ("it exited <rc> before its end": set -e in a
@@ -577,6 +805,8 @@ sweep_outcome_on_exit() {
 	local rc="${1:-0}" dir="${_SWEEP_OUTCOME_ARMED_DIR:-}" f why="${_SWEEP_STOP_WHY:-}" by="${_SWEEP_STOP_BY:-}"
 	local sig="${_SWEEP_SIGNAL:-}" now started next srid resumed k marked="${_SWEEP_ENDED_AT:-}"
 	(($#)) && shift
+	# A step a second signal left running is killed before anything else (sweep_step_kill).
+	sweep_step_kill
 	((mark)) || _sweep_unlock
 	[[ -n "$dir" && "${_SWEEP_OUTCOME_ARMED_PID:-}" == "${BASHPID:-$$}" ]] || return 0
 	f="${dir}/sweep-outcome.txt"
@@ -629,6 +859,13 @@ sweep_outcome_on_exit() {
 				k=$((k + 1))
 			done
 		} 2>/dev/null >> "$f" || echo "warning: could not add ENDED_AT to ${f}" >&2
+		# A harness that changed during the sweep (harness_sha_check, the end check): a note.
+		local hs_changed=""
+		_harness_sha_sweep_end hs_changed
+		if [[ -n "$hs_changed" ]]; then
+			printf 'NOTE=%s\n' "$hs_changed" 2>/dev/null >> "$f" || true
+			echo "warning: ${hs_changed}." >&2
+		fi
 		echo "warning: the sweep was interrupted (${sig:+SIG${sig}, }exit ${rc}) before its outcome; sweep-outcome.txt says it has not finished" >&2
 		echo "  sweep dir: ${dir}${next:+; next: ${next}}" >&2
 		return 0
@@ -668,7 +905,9 @@ sweep_outcome_on_exit() {
 # "info":[...],"stop_reason":"...","unfinished":false}, or null without the file. A sweep
 # that stopped (STOPPED=1: the stop record sweep_outcome_on_exit wrote, or a stop the sweep
 # counted, such as REVERT_FAILED) leads with its reason, under a STOPPED header (text
-# "...): STOPPED", then "stopped early: <reason>"; md "**stopped**"; json "stopped":true).
+# "...): STOPPED", then "stopped early: <reason>"; md "**stopped**"; json "stopped":true;
+# csv `# SWEEP_OUTCOME_STOPPED=1`, then, for a stop record, CUT_SHORT=1, STARTED_AT and
+# ENDED_AT; the record before a --resume the same way, as EARLIER_ lines).
 # A sweep that has not finished (its sweep_outcome_start record: it died, or still
 # runs) says so in every format (text and md a warning with its start time and what to do,
 # csv `# SWEEP_OUTCOME_EXIT=unfinished`, json "exit":null and "unfinished":true with
@@ -790,6 +1029,11 @@ sweep_outcome_recorded() {
 		}
 		function csvrec(r, p,    i) {
 			printf "# SWEEP_OUTCOME_%sRUN_ID=%s\n# SWEEP_OUTCOME_%sEXIT=%s\n# SWEEP_OUTCOME_%sFAILED=%s\n", p, ridr(r), p, EX[r], p, (num(FAILED[r]) || FAILED[r] == "" ? nfail(r) : FAILED[r])
+			# A stopped record says so (json "stopped":true, text STOPPED), with its times.
+			if (stopped(r)) printf "# SWEEP_OUTCOME_%sSTOPPED=1\n", p
+			if (CUT[r]) printf "# SWEEP_OUTCOME_%sCUT_SHORT=1\n", p
+			if (stopped(r) && START[r] != "") printf "# SWEEP_OUTCOME_%sSTARTED_AT=%s\n", p, START[r]
+			if (stopped(r) && ENDED[r] != "") printf "# SWEEP_OUTCOME_%sENDED_AT=%s\n", p, ENDED[r]
 			if (FBY[r] != "") printf "# SWEEP_OUTCOME_%sFAILED_BY=%s\n", p, FBY[r]
 			for (i = 1; i <= NP[r]; i++) printf "# SWEEP_OUTCOME_%sPROBLEM=%s\n", p, PR[r, i]
 			for (i = 1; i <= NN[r]; i++) printf "# SWEEP_OUTCOME_%sNOTE=%s\n", p, NT[r, i]
@@ -937,6 +1181,9 @@ sweep_outcome_recorded() {
 # failed: <REASON> x<k>, .... <where>; exit 4." (stderr). Returns SWEEP_FAILED_EXIT when a
 # cell failed or a --problem was given, else 0, so a sweep ends with:
 # sweep_outcome ... || exit "$SWEEP_FAILED_EXIT".
+# In the shell that ran harness_sha_for_sweep it reads the harness again: one that changed
+# during the sweep (at its end, or at a harness_sha_check before a step) is a problem too,
+# naming both values and when the change was first read (_harness_sha_sweep_end).
 #   --stopped <rc>   the sweep stopped early and exits <rc> (1 or 3), which outranks 4: the
 #                    cells are still counted, "All cells ran" is never printed (they did
 #                    not), the lines name <rc>, and it returns <rc>
@@ -946,7 +1193,8 @@ sweep_outcome_recorded() {
 #   --where <text>   where a failed one shows in the results (default: the report's
 #                    placeholder rows, in n_total, not n_valid)
 #   --problem <msg>  the sweep failed although its cells ran (the Istio version changed
-#                    under it); printed, recorded and counted like a failed cell
+#                    under it, a foreign Istio CR edit); printed, recorded and counted like
+#                    a failed cell
 #   --uncounted <why>  the sweep could not count its cells: a problem ("could not count
 #                    the sweep's <unit>: <why>"), "All cells ran" is never printed, and the
 #                    record says TOTAL=unknown, FAILED=unknown and SKIPPED=unknown
@@ -991,6 +1239,10 @@ sweep_outcome() {
 	cells="$1"
 	shift
 	[[ -z "$uncounted" ]] || problems=("could not count the sweep's ${unit}: ${uncounted}" ${problems[@]+"${problems[@]}"})
+	# The sweep's harness at its end (harness_sha_for_sweep's shell only): a change is a problem.
+	local so_hs=""
+	_harness_sha_sweep_end so_hs
+	[[ -z "$so_hs" ]] || problems+=("$so_hs")
 	[[ -n "$where" ]] || where="The report includes them as placeholder rows (in n_total, not n_valid)"
 	for r in "$@"; do
 		if [[ "$r" == SKIPPED_* ]]; then skipped_r+=("$r"); else failed_r+=("$r"); fi
@@ -1075,19 +1327,25 @@ sweep_outcome() {
 
 # --- the harness a run uses (PL2) ---
 
+# HARNESS_PATHS: the dirs whose content is the harness (harness_sha's -dirty hash); a file
+# outside them (docs/, a campaign note, the READMEs at the top) never makes a run dirty.
+# shellcheck disable=SC2034
+HARNESS_PATHS=(tests config charts terraform)
+
 # harness_sha [--exclude <dir>]...: the harness the run uses (PL2): `git -C "${ROOT:-.}"
-# describe --always --abbrev=7`, or unknown when git cannot name it. A tree with uncommitted
-# changes (tracked files that differ from HEAD, or untracked files that are not ignored)
-# gets `-dirty.<8hex>`: `<describe>-dirty.<8hex>` (_harness_dirty_hash), so two different
-# uncommitted trees on one commit record two different values, and one tree records one
-# value whatever the operator's git config. Submodules (the bats checkouts) never count, as
-# `--ignore-submodules`: one moved, copied without its .git or with its gitdir gone reads
-# clean. When the content cannot be hashed, a tree whose tracked files differ from HEAD
-# reads `-dirty.unknown`. Each --exclude <dir> under the checkout (a sweep's --output-dir
-# there: its own results) does not count. A sweep computes it once (harness_sha_for_sweep), and every step it runs reads
-# that value: HARNESS_SHA_SWEEP, exported with HARNESS_SHA_SWEEP_ROOT, the checkout it
-# names, is returned as it is while ROOT is that checkout, so one sweep records one value
-# even when a file changes during it.
+# describe --always --abbrev=7`, or unknown when git cannot name it. A harness with
+# uncommitted changes under HARNESS_PATHS (tracked files that differ from HEAD, or untracked
+# files that are not ignored) gets `-dirty.<8hex>`: `<describe>-dirty.<8hex>`
+# (_harness_dirty_hash), so two different uncommitted trees on one commit record two
+# different values, and one tree records one value whatever the operator's git config.
+# Submodules (the bats checkouts) never count, as `--ignore-submodules`: one moved, copied
+# without its .git or with its gitdir gone reads clean. When the content cannot be hashed, a
+# harness whose tracked files differ from HEAD reads `-dirty.unknown`. The untracked files
+# under each --exclude <dir> (a run's output dir inside the checkout: its own results) do not
+# count, and neither do those under HARNESS_SHA_EXCLUDE, the results dir a sweep exports to
+# the steps it runs (harness_sha_for_sweep); a tracked file there still does. Every call
+# reads the live tree, so a step of a sweep records the harness it runs, also when a file
+# changed after the sweep started (harness_sha_check, sweep_outcome).
 # shellcheck disable=SC2329
 harness_sha() {
 	local sha h root="${ROOT:-.}"
@@ -1101,18 +1359,16 @@ harness_sha() {
 		*) shift ;;
 		esac
 	done
-	if [[ -n "${HARNESS_SHA_SWEEP:-}" && "${HARNESS_SHA_SWEEP_ROOT:-}" == "$root" ]]; then
-		printf '%s\n' "$HARNESS_SHA_SWEEP"
-		return 0
-	fi
+	[[ -z "${HARNESS_SHA_EXCLUDE:-}" ]] || hs_excl+=("$HARNESS_SHA_EXCLUDE")
 	# No --dirty: it fails (exit 128) when a submodule's gitdir is gone, and counts a moved
-	# submodule; the content hash below says whether the tree is dirty.
+	# submodule; the content hash below says whether the harness is dirty.
 	sha="$(git -C "$root" describe --always --abbrev=7 2>/dev/null || true)"
 	[[ -n "$sha" ]] || sha="unknown"
 	if [[ "$sha" != unknown ]]; then
 		if h="$(_harness_dirty_hash ${hs_excl[@]+"${hs_excl[@]}"})"; then
 			[[ -z "$h" ]] || sha+="-dirty.${h}"
-		elif ! git -C "$root" diff --quiet --no-ext-diff --no-textconv --ignore-submodules=all HEAD -- 2>/dev/null; then
+		elif ! git -C "$root" diff --quiet --no-ext-diff --no-textconv --ignore-submodules=all HEAD -- \
+			"${HARNESS_PATHS[@]/#/:(top,literal)}" 2>/dev/null; then
 			# The content could not be hashed, and the tracked files differ from HEAD (or git
 			# cannot tell): dirty, by what is unknown.
 			sha+="-dirty.unknown"
@@ -1121,50 +1377,122 @@ harness_sha() {
 	printf '%s\n' "$sha"
 }
 
-# harness_sha_for_sweep [<output_dir>]: a sweep's harness, once: sets HARNESS_SHA
-# (harness_sha --exclude <output_dir>) and exports it as HARNESS_SHA_SWEEP, with the
-# checkout as HARNESS_SHA_SWEEP_ROOT, so each step (a probe, a report) records that value,
-# never one of its own. Call it before the first step, as a plain command.
+# harness_sha_for_sweep [<output_dir>]: a sweep's harness at its start. Sets HARNESS_SHA
+# (harness_sha --exclude <output_dir>) and exports <output_dir> (absolute) as
+# HARNESS_SHA_EXCLUDE, never the value: each step (a probe, a report) reads the live tree
+# minus the sweep's results, so a step that ran on changed code records what it ran. Keeps
+# the start's value for harness_sha_check (before each step, through sweep_step) and for
+# the end check in sweep_outcome, which records a harness that changed during the sweep as
+# a problem. Call it before the first step, as a plain command (not in a subshell).
 # shellcheck disable=SC2329
 harness_sha_for_sweep() {
-	local hsfs_root="${ROOT:-.}"
-	unset HARNESS_SHA_SWEEP HARNESS_SHA_SWEEP_ROOT
-	if [[ -n "${1:-}" ]]; then
-		HARNESS_SHA="$(harness_sha --exclude "$1")"
+	local hsfs_d="${1:-}"
+	unset HARNESS_SHA_EXCLUDE
+	if [[ -n "$hsfs_d" ]]; then
+		[[ "$hsfs_d" == /* ]] || hsfs_d="${PWD%/}/${hsfs_d}"
+		HARNESS_SHA="$(harness_sha --exclude "$hsfs_d")"
+		export HARNESS_SHA_EXCLUDE="$hsfs_d"
 	else
 		HARNESS_SHA="$(harness_sha)"
 	fi
-	export HARNESS_SHA_SWEEP="$HARNESS_SHA" HARNESS_SHA_SWEEP_ROOT="$hsfs_root"
+	_HARNESS_SHA_START="$HARNESS_SHA" _HARNESS_SHA_PID="${BASHPID:-$$}" _HARNESS_SHA_CHECKED="$SECONDS"
+	_HARNESS_SHA_OK_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" _HARNESS_SHA_OK_BEFORE="" _HARNESS_SHA_SEEN=""
+	_HARNESS_SHA_SEEN_AT="" _HARNESS_SHA_SEEN_BEFORE="" _HARNESS_SHA_END=""
+}
+
+# harness_sha_check <step>: in the shell that ran harness_sha_for_sweep, read the harness
+# again before <step> (sweep_step names the step's script), at most once every
+# HARNESS_SHA_CHECK_SEC seconds (config/options.env; 0: before every step). The first value
+# other than the start's is kept, with when and before which step it was read, and printed
+# once as a WARNING; the sweep goes on, and sweep_outcome records the change as a problem
+# (exit 4). Never dies.
+# shellcheck disable=SC2329
+harness_sha_check() {
+	[[ -n "${_HARNESS_SHA_START:-}" && "${_HARNESS_SHA_PID:-}" == "${BASHPID:-$$}" && -z "${_HARNESS_SHA_SEEN:-}" ]] \
+		|| return 0
+	local every="${HARNESS_SHA_CHECK_SEC:-60}" v
+	is_nonneg_int "$every" || every=60
+	((SECONDS - ${_HARNESS_SHA_CHECKED:-0} >= every)) || return 0
+	_HARNESS_SHA_CHECKED="$SECONDS"
+	v="$(harness_sha)"
+	if [[ "$v" == "$_HARNESS_SHA_START" ]]; then
+		_HARNESS_SHA_OK_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" _HARNESS_SHA_OK_BEFORE="${1:-a step}"
+		return 0
+	fi
+	_HARNESS_SHA_SEEN="$v" _HARNESS_SHA_SEEN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" _HARNESS_SHA_SEEN_BEFORE="${1:-a step}"
+	local hp
+	hp="$(printf '%s/, ' "${HARNESS_PATHS[@]}")"
+	echo "WARNING: the harness changed during the sweep: HARNESS_SHA=${_HARNESS_SHA_START} at its start, ${v} now (read before ${_HARNESS_SHA_SEEN_BEFORE}): a file under ${hp%, } was edited, or a git checkout or pull ran. The sweep goes on; its outcome records this as a problem (exit 4)." >&2 || true
+	return 0
+}
+
+# _harness_sha_sweep_end <out_var>: once per sweep, in the shell that ran
+# harness_sha_for_sweep: read the harness again (the end check) and set <out_var> to the
+# problem sweep_outcome records when it changed during the sweep (a value other than the
+# start's at the end, or at a harness_sha_check before a step), naming each value and when
+# it was read; empty when it did not. A second call returns the first call's answer.
+# shellcheck disable=SC2329
+_harness_sha_sweep_end() {
+	local -n _hse_out="$1"
+	_hse_out=""
+	[[ -n "${_HARNESS_SHA_START:-}" && "${_HARNESS_SHA_PID:-}" == "${BASHPID:-$$}" ]] || return 0
+	local s="$_HARNESS_SHA_START" e last first
+	if [[ -z "${_HARNESS_SHA_END:-}" ]]; then
+		_HARNESS_SHA_END="$(harness_sha)"
+		_HARNESS_SHA_END_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	fi
+	e="$_HARNESS_SHA_END"
+	last="at the sweep's start (${_HARNESS_SHA_OK_AT:-})"
+	[[ -z "${_HARNESS_SHA_OK_BEFORE:-}" ]] || last="at ${_HARNESS_SHA_OK_AT}, before ${_HARNESS_SHA_OK_BEFORE}"
+	if [[ -n "${_HARNESS_SHA_SEEN:-}" ]]; then
+		first="${_HARNESS_SHA_SEEN} at ${_HARNESS_SHA_SEEN_AT}, before ${_HARNESS_SHA_SEEN_BEFORE} (the read before that, ${last}, still gave ${s})"
+		if [[ "$e" == "$s" ]]; then
+			_hse_out="the harness changed during the sweep, and back: HARNESS_SHA=${s} at its start and at its end, but ${first}"
+		else
+			_hse_out="the harness changed during the sweep: HARNESS_SHA=${s} at its start, ${e} at its end (${_HARNESS_SHA_END_AT}), first read ${first}"
+		fi
+	elif [[ "$e" != "$s" ]]; then
+		_hse_out="the harness changed during the sweep: HARNESS_SHA=${s} at its start, ${e} at its end (${_HARNESS_SHA_END_AT}); the last read that gave ${s} was ${last}"
+	else
+		return 0
+	fi
+	_hse_out+=", so the steps after that read may have run other code than ${s} (a probe's TSV records the harness it ran; the sweep's own files record the start's): run the sweep again if the change matters"
+	return 0
 }
 
 # _harness_dirty_hash [<exclude_dir>...]: 8 hex digits that name the uncommitted content of
-# the tree under ROOT, or nothing for a clean tree; returns 1 (prints nothing) when git
-# cannot hash it. The content,
-# never a diff (a diff's text follows the operator's git config: diff.context,
-# diff.orderFile, core.abbrev): the tree object id git would write for the working tree,
-# built in a temporary index (GIT_INDEX_FILE, never the operator's): `read-tree HEAD`, then
-# every tracked path and every untracked file that is not ignored (`ls-files --cached
-# --others --exclude-standard`) through `update-index --add --remove --info-only` (hashes
-# each file once, writes no object into the repository), then `write-tree --missing-ok`. A
-# clean tree is HEAD's own tree. core.autocrlf is pinned off, so line endings count as they
-# are. Ignored files never count: .gitignore (editor and Finder files: .DS_Store, *.swp,
-# *.swo, *~; the results/ dirs), .git/info/exclude, and the operator's global
-# core.excludesFile (a file that only it ignores reads clean for that operator). Each
-# <exclude_dir> under the checkout is left out (`:(exclude)` pathspec), and so is each
-# submodule of HEAD (its gitlink keeps HEAD's commit). The path list goes through a file,
-# never a pipe, so the result is the same with and without pipefail. git only: no
-# sha256sum or shasum.
+# the harness (HARNESS_PATHS) under ROOT, or nothing for a clean one; returns 1 (prints
+# nothing) when git cannot hash it. The content, never a diff (a diff's text follows the
+# operator's git config: diff.context, diff.orderFile, core.abbrev): the tree object id git
+# would write for the working tree, built in a temporary index (GIT_INDEX_FILE, never the
+# operator's): `read-tree HEAD`, then every tracked path and every untracked file that is
+# not ignored under HARNESS_PATHS (`ls-files --cached`, `ls-files --others
+# --exclude-standard`) through `update-index --add --remove --info-only` (hashes each file
+# once, writes no object into the repository), then `write-tree --missing-ok`. A clean
+# harness is HEAD's own tree. The operator's git config does not change it: core.autocrlf is
+# pinned off (line endings count as they are), core.fileMode on (an executable bit counts),
+# and core.attributesFile to /dev/null with GIT_ATTR_NOSYSTEM (the global and system
+# gitattributes, also the default ~/.config/git/attributes, never filter what is hashed;
+# the repository's own .gitattributes do). Ignored files never count: .gitignore (editor and
+# Finder files: .DS_Store, *.swp, *.swo, *~; the results/ dirs), .git/info/exclude, and the
+# operator's global excludes: core.excludesFile, or git's default ~/.config/git/ignore
+# ($XDG_CONFIG_HOME/git/ignore) when that key is unset (a file that only it ignores reads
+# clean for that operator). The untracked files under each <exclude_dir> are left out
+# (`:(exclude)` pathspec; its tracked files count), and so is each submodule of HEAD (its
+# gitlink keeps HEAD's commit). The path list goes through a file, never a pipe, so the
+# result is the same with and without pipefail. git only: no sha256sum or shasum.
 # shellcheck disable=SC2329
 _harness_dirty_hash() {
-	local root="${ROOT:-.}" top idx tree htree d rel ent
-	local -a hdh_spec=(.)
+	local root="${ROOT:-.}" top topp idx tree htree d rel ent
+	local -a hdh_spec=("${HARNESS_PATHS[@]/#/:(top,literal)}") hdh_excl=()
 	top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || return 1
 	htree="$(git -C "$top" rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null)" || return 1
+	topp="$(cd "$top" 2>/dev/null && pwd -P)" || return 1
 	for d in "$@"; do
 		d="$(cd "$d" 2>/dev/null && pwd -P)" || continue
-		rel="${d#"$(cd "$top" && pwd -P)"/}"
+		rel="${d#"$topp"/}"
 		[[ "$rel" != "$d" && -n "$rel" ]] || continue
-		hdh_spec+=(":(exclude,top,literal)${rel}")
+		hdh_excl+=(":(exclude,top,literal)${rel}")
 	done
 	idx="$(mktemp "${TMPDIR:-/tmp}/harness-index.XXXXXX" 2>/dev/null)" || return 1
 	# HEAD's submodules (mode 160000 gitlinks): left out, as --ignore-submodules.
@@ -1174,28 +1502,33 @@ _harness_dirty_hash() {
 	done < "$idx"
 	rm -f "$idx"
 	tree="$(
-		export GIT_INDEX_FILE="$idx"
+		export GIT_INDEX_FILE="$idx" GIT_ATTR_NOSYSTEM=1
 		git -C "$top" read-tree HEAD 2>/dev/null || exit 1
-		git -C "$top" -c core.quotePath=true ls-files -z --cached --others --exclude-standard -- "${hdh_spec[@]}" \
-			> "${idx}.paths" 2>/dev/null || exit 1
-		git -C "$top" -c core.autocrlf=false -c core.safecrlf=false update-index -z --add --remove --info-only --stdin \
-			< "${idx}.paths" 2>/dev/null || exit 1
+		{
+			git -C "$top" -c core.quotePath=true ls-files -z --cached -- "${hdh_spec[@]}" || exit 1
+			git -C "$top" -c core.quotePath=true ls-files -z --others --exclude-standard -- "${hdh_spec[@]}" \
+				${hdh_excl[@]+"${hdh_excl[@]}"} || exit 1
+		} > "${idx}.paths" 2>/dev/null
+		git -C "$top" -c core.autocrlf=false -c core.safecrlf=false -c core.fileMode=true -c core.attributesFile=/dev/null \
+			update-index -z --add --remove --info-only --stdin < "${idx}.paths" 2>/dev/null || exit 1
 		git -C "$top" write-tree --missing-ok 2>/dev/null
 	)" || tree=""
 	rm -f "$idx" "${idx}.paths"
 	[[ "$tree" =~ ^[0-9a-f]{40,64}$ ]] || return 1
-	# A clean tree: HEAD's own.
+	# A clean harness: HEAD's own tree.
 	[[ "$tree" != "$htree" ]] || return 0
 	printf '%s\n' "${tree:0:8}"
 }
 
-# report_harness_sha: the harness a report itself runs, which every report prints in every
-# format as REPORT_HARNESS_SHA next to the HARNESS_SHA its inputs recorded: a report
-# re-generated later, or from another checkout, can count rows by other rules than the
-# harness that measured them. Under a sweep it is the sweep's (harness_sha_for_sweep).
+# report_harness_sha [--exclude <dir>]...: the harness a report itself runs, which every
+# report prints in every format as REPORT_HARNESS_SHA next to the HARNESS_SHA its inputs
+# recorded: a report re-generated later, or from another checkout, can count rows by other
+# rules than the harness that measured them. A report passes the dirs it reads (its inputs,
+# or their results dir) as --exclude, so results inside the checkout do not read dirty;
+# under a sweep, the sweep's results dir is left out too (HARNESS_SHA_EXCLUDE).
 # shellcheck disable=SC2329
 report_harness_sha() {
-	harness_sha
+	harness_sha "$@"
 }
 
 # --- controlplane cell attempts and states ---
@@ -1209,47 +1542,104 @@ report_harness_sha() {
 #                        window_kind (none and deploy when absent), joined by SUBSEP.
 #   cp_cell_row(k, st)   feed it each data row of cell k in file order (st: the status-row
 #                        regex, 003's CELL_STATUS_RE); returns 1 for a status row.
+#   cp_comment()         call it at each comment (#) line: reads the preamble's first
+#                        ISTIOD_REPLICAS_BY_CONTEXT (cp_rep[member]) and marks the cell
+#                        written last before a "# RESUMED_AT=" line (where a run ended).
+#   cp_end()             call it in END, before cp_cell_state: marks the cell written last.
 #   cp_cell_state(k)     "" when the cell is done: its last row is a measurement row, and
 #                        the measurement rows since its last status row name as many
 #                        distinct members as its mesh_size; the status of its last row
 #                        when that is a status row; else INCOMPLETE: the run was cut short
 #                        while 002 wrote the cell's member rows (cp_nm[k] of its cp_ms[k]
-#                        members have one). Any key works (a caller may prefix the file).
+#                        members have one), or, for the cell written last before a run
+#                        ended (the end of the TSV, or a "# RESUMED_AT=" line), a member
+#                        has fewer rows than its istiod replicas (a row per replica: the
+#                        smaller of its ISTIOD_REPLICAS_BY_CONTEXT entry and its most
+#                        valid rows in another cell, or the one of them that is known: an
+#                        HPA or a rollout changes the replicas during a sweep, so the
+#                        two must agree; a member with a degraded row, istiod_restarted
+#                        unknown, is not checked) and cp_why[k] says which: a TSV an older
+#                        harness wrote row by row can be cut between replicas. Any key
+#                        works (a caller may prefix the file).
+#   cp_why[k]            set by cp_cell_state for that replica case: "<member> has rows of
+#                        <n> of its <r> istiod replicas"; empty otherwise.
 #   cp_valid[k]          set when the cell has a valid row (istiod_restarted 0).
 #   cp_after[k]          set when a measurement row follows a status row of the cell: two
 #                        attempts with no recorded boundary between them, so they pool.
-#   cp_plan_load(f)      the cells planned-cells.txt <f> lists into cp_plan[k] (its PLAN
+#   cp_plan_load(f, tsv) the cells planned-cells.txt <f> lists into cp_plan[k] (its PLAN
 #                        number), in order cp_plan_order[1..n]; returns n, or -1 when <f>
-#                        cannot be read.
+#                        cannot be read. A plan names its TSV ("# TSV=controlplane-<RUN_ID>.tsv",
+#                        cp_plan_tsv): when that is not <tsv> (a base name) it loads nothing
+#                        and returns 0 (a plan an older harness wrote, without the key,
+#                        applies to every TSV beside it).
 # shellcheck disable=SC2016,SC2034  # awk source, read by the scripts that source this file
 CP_CELL_AWK='
 function cp_header(    i) { cp_tcol = 0; cp_wcol = 0; for (i = 1; i <= NF; i++) { if ($i == "traffic_config") cp_tcol = i; if ($i == "window_kind") cp_wcol = i } }
 function cp_key() { return $3 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7 SUBSEP ((cp_tcol && NF >= cp_tcol) ? $cp_tcol : "none") SUBSEP ((cp_wcol && NF >= cp_wcol) ? $cp_wcol : "deploy") }
-function cp_cell_row(k, st,    mk) {
+function cp_comment(    n, p, i, e) {
+	if (!cp_repread && index($0, "# ISTIOD_REPLICAS_BY_CONTEXT=") == 1) {
+		cp_repread = 1
+		n = split(substr($0, 30), p, ",")
+		for (i = 1; i <= n; i++) { e = p[i]; gsub(/^ +| +$/, "", e); if (match(e, /=[0-9]+$/)) cp_rep[substr(e, 1, RSTART - 1)] = substr(e, RSTART + 1) + 0 }
+	}
+	if (index($0, "# RESUMED_AT=") == 1 && cp_lastk != "") cp_tail[cp_lastk] = 1
+}
+function cp_end() { if (cp_lastk != "") cp_tail[cp_lastk] = 1 }
+function cp_cell_row(k, st,    mk, ep) {
 	cp_ms[k] = $3 + 0
-	if ($2 ~ st) { cp_last[k] = $2; cp_ep[k]++; cp_nm[k] = 0; return 1 }
+	cp_lastk = k
+	if ($2 ~ st) { cp_last[k] = $2; cp_ep[k]++; cp_nm[k] = 0; cp_ml[k] = ""; return 1 }
 	if (cp_last[k] != "") cp_after[k] = 1
 	cp_last[k] = ""
 	if ($31 == "0") cp_valid[k] = 1
-	mk = k SUBSEP (cp_ep[k] + 0) SUBSEP $2
-	if (!(mk in cp_mem)) { cp_mem[mk] = 1; cp_nm[k]++ }
+	ep = cp_ep[k] + 0
+	mk = k SUBSEP ep SUBSEP $2
+	if (!(mk in cp_mem)) { cp_mem[mk] = 1; cp_nm[k]++; cp_ml[k] = cp_ml[k] "\t" $2 }
+	if ($31 == "unknown") cp_dg[mk] = 1
+	if (!(($2, k) in cp_mx)) { cp_mk[$2, ++cp_mn[$2]] = k; cp_mx[$2, k] = 0 }
+	cp_mr[mk]++
+	if ($31 == "0" && ++cp_mc[mk] > cp_mx[$2, k]) cp_mx[$2, k] = cp_mc[mk]
 	return 0
 }
-function cp_cell_state(k) {
-	if (cp_last[k] != "") return cp_last[k]
-	return (cp_nm[k] + 0 < cp_ms[k] + 0) ? "INCOMPLETE" : ""
+# cp_mxo(m, k): the most valid rows (istiod_restarted 0) member m has in an attempt of a cell
+# other than k (0: none).
+function cp_mxo(m, k,    i, o, x) {
+	x = 0
+	for (i = 1; i <= cp_mn[m] + 0; i++) { o = cp_mk[m, i]; if (o != k && cp_mx[m, o] > x) x = cp_mx[m, o] }
+	return x
 }
-function cp_plan_load(f,    r, line, p, n, fl, k) {
-	p = 0; n = 0
+function cp_cell_state(k,    n, ml, i, m, mk, ex) {
+	cp_why[k] = ""
+	if (cp_last[k] != "") return cp_last[k]
+	if (cp_nm[k] + 0 < cp_ms[k] + 0) return "INCOMPLETE"
+	if (!(k in cp_tail)) return ""
+	n = split(substr(cp_ml[k], 2), ml, "\t")
+	for (i = 1; i <= n; i++) {
+		m = ml[i]
+		mk = k SUBSEP (cp_ep[k] + 0) SUBSEP m
+		if (mk in cp_dg) continue
+		# When both are known, both must expect more rows: an HPA or a rollout changes the
+		# replicas during a sweep, so neither alone is proof.
+		ex = cp_mxo(m, k)
+		if ((m in cp_rep) && cp_rep[m] > 0 && (ex == 0 || cp_rep[m] < ex)) ex = cp_rep[m]
+		if (cp_mr[mk] + 0 < ex) { cp_why[k] = m " has rows of " (cp_mr[mk] + 0) " of its " ex " istiod replicas"; return "INCOMPLETE" }
+	}
+	return ""
+}
+function cp_plan_load(f, tsv,    r, line, p, n, fl, k) {
+	p = 0; n = 0; cp_plan_tsv = ""
 	while ((r = (getline line < f)) > 0) {
 		if (line ~ /^# PLAN=[0-9]+ /) { p = substr(line, 8); sub(/ .*/, "", p); continue }
+		if (index(line, "# TSV=") == 1) { cp_plan_tsv = substr(line, 7); continue }
 		if (line ~ /^#/ || line ~ /^mesh_size\t/ || line == "") continue
 		if (split(line, fl, "\t") < 7) continue
 		k = fl[1] SUBSEP fl[2] SUBSEP fl[3] SUBSEP fl[4] SUBSEP fl[5] SUBSEP fl[6] SUBSEP fl[7]
 		if (!(k in cp_plan)) { cp_plan[k] = p; cp_plan_order[++n] = k }
 	}
 	close(f)
-	return (r < 0 ? -1 : n)
+	if (r < 0) return -1
+	if (tsv != "" && cp_plan_tsv != "" && cp_plan_tsv != tsv) { split("", cp_plan); split("", cp_plan_order); return 0 }
+	return n
 }
 '
 
@@ -1311,6 +1701,100 @@ controlplane_latest_attempts() {
 		data { k = cp_key(); if (seg(FNR) < top[k]) { drop++; if (!(k in dk)) { dk[k] = 1; ndk++ }; next } }
 		{ print > out }
 		END { if (bad) exit 2; close(out); printf "%d\t%d\n", drop, ndk }' "$tsv" "$tsv"
+}
+
+# controlplane_attempts <tsv> <resumes_txt>: the runs that wrote a controlplane TSV, one line
+# each, in the order they started:
+#   <run>\t<HARNESS_SHA>\t<KUBE_VERSIONS>\t<rows>\t<ISTIO_NOTREADY>\t<ISTIO_PROXY_VERSIONS>\t<ISTIO_GENERATIONS>\t<at>
+# <run> is "first run" (its values from the TSV preamble; ISTIO_NOTREADY is its
+# ISTIO_NOTREADY_AT_START) or "--resume at <at>": from its resumes.txt line (a line whose
+# TSV column names another file is not this TSV's), else from the TSV's own "# RESUMED_AT="
+# line (which records HARNESS_SHA and, from this harness on, KUBE_VERSIONS); a value
+# neither records reads unknown. Both records of one start (the same time) are one run.
+# <rows> counts the data rows (measurements and status rows) from its start up to the
+# next run's, its starts read as controlplane_latest_attempts reads them (TSV_LINES, the
+# "# RESUMED_AT=" line, or in an older resumes.txt the first row of its time on): 0 for a
+# run that added none (a --resume of a finished sweep, or one that stopped before its
+# first cell), so a report can leave it out of the provenance of the rows (PL2, PL15).
+# A run that never wrote the TSV's preamble (it died first; a --resume wrote it) still
+# reads "first run", with the preamble's values and 0 rows. Returns non-zero when awk fails.
+# shellcheck disable=SC2329
+controlplane_attempts() {
+	local tsv="$1" res="${2:-}"
+	[[ -n "$res" && -f "$res" ]] || res=/dev/null
+	awk -F'\t' -v res="$res" -v tname="${tsv##*/}" '
+		function g(c) { return ((c in col) && n >= col[c] && f[col[c]] != "") ? f[col[c]] : "unknown" }
+		function pk(k,    p) { p = "# " k "="; if (!(k in pre) && index($0, p) == 1) pre[k] = substr($0, length(p) + 1) }
+		function pv(k) { return ((k in pre) && pre[k] != "") ? pre[k] : "unknown" }
+		BEGIN {
+			while ((r = (getline line < res)) > 0) {
+				n = split(line, f, "\t")
+				if (f[1] == "RESUMED_AT") { split("", col); for (i = 1; i <= n; i++) col[f[i]] = i; continue }
+				if (n < 2 || f[1] == "") continue
+				if (("TSV" in col) && n >= col["TSV"] && f[col["TSV"]] != "" && f[col["TSV"]] != tname) continue
+				na++
+				at[na] = f[1]; h[na] = g("HARNESS_SHA"); kv[na] = g("KUBE_VERSIONS"); nr[na] = g("ISTIO_NOTREADY_AT_RESUME")
+				pxv[na] = g("ISTIO_PROXY_VERSIONS"); gen[na] = g("ISTIO_GENERATIONS")
+				pos[na] = (g("TSV_LINES") ~ /^[0-9]+$/) ? g("TSV_LINES") + 0 : -1
+			}
+			if (r < 0) { print "cannot read " res > "/dev/stderr"; exit 2 }
+			close(res)
+		}
+		/^timestamp\t/ { hdr = 1; next }
+		/^#/ {
+			if (!hdr) { pk("HARNESS_SHA"); pk("KUBE_VERSIONS"); pk("ISTIO_NOTREADY_AT_START"); pk("ISTIO_PROXY_VERSIONS"); pk("ISTIO_GENERATIONS") }
+			if (index($0, "# RESUMED_AT=") != 1) next
+			m = split($0, w, " "); t = ""; th = "unknown"; tk = "unknown"
+			for (i = 1; i <= m; i++) { if (w[i] ~ /^RESUMED_AT=/) t = substr(w[i], 12); if (w[i] ~ /^HARNESS_SHA=./) th = substr(w[i], 13) }
+			if ((p = index($0, " KUBE_VERSIONS=")) && substr($0, p + 15) != "") tk = substr($0, p + 15)
+			if (t == "") next
+			for (i = 1; i <= na; i++) if (at[i] == t && !(i in byline)) break
+			if (i <= na) {
+				byline[i] = 1; pos[i] = FNR - 1
+				if (h[i] == "unknown") h[i] = th
+				if (kv[i] == "unknown") kv[i] = tk
+				next
+			}
+			na++; at[na] = t; h[na] = th; kv[na] = tk; nr[na] = "unknown"; pxv[na] = "unknown"; gen[na] = "unknown"; pos[na] = FNR - 1; byline[na] = 1
+			next
+		}
+		NF >= 40 { nd++; dpos[nd] = FNR; dts[nd] = substr($1, 1, 19) }
+		END {
+			if (r < 0) exit 2
+			last = NR
+			# A start that only an older resumes.txt records (its time): before the first row
+			# of that time on; none (it added no row): the end of the TSV.
+			for (i = 1; i <= na; i++) if (pos[i] < 0) {
+				pos[i] = last
+				for (j = 1; j <= nd; j++) if (dts[j] >= substr(at[i], 1, 19)) { pos[i] = dpos[j] - 1; break }
+			}
+			# Run 0, the first: position 0. Then the resumes by position (a stable sort: a
+			# tie keeps their order, and the later one gets the rows).
+			o[0] = 0; pos[0] = 0
+			for (i = 1; i <= na; i++) {
+				j = i
+				while (j > 1 && pos[o[j - 1]] > pos[i]) { o[j] = o[j - 1]; j-- }
+				o[j] = i
+			}
+			for (a = 0; a <= na; a++) {
+				lo = pos[o[a]]; hi = (a < na) ? pos[o[a + 1]] : last
+				c = 0
+				for (j = 1; j <= nd; j++) if (dpos[j] > lo && dpos[j] <= hi) c++
+				if (a == 0) printf "first run\t%s\t%s\t%d\t%s\t%s\t%s\t\n", pv("HARNESS_SHA"), pv("KUBE_VERSIONS"), c, pv("ISTIO_NOTREADY_AT_START"), pv("ISTIO_PROXY_VERSIONS"), pv("ISTIO_GENERATIONS")
+				else { i = o[a]; printf "--resume at %s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", at[i], h[i], kv[i], c, nr[i], pxv[i], gen[i], at[i] }
+			}
+		}' "$tsv"
+}
+
+# controlplane_resume_cmd <sweep_dir> <contexts_csv> <axis_flags> [<config>]: the command
+# that resumes a controlplane sweep, from the repo root:
+#   ./tests/controlplane/003-run-sweep.sh --resume <sweep_dir> --contexts <csv> <axis_flags>[ --config <config>]
+# <sweep_dir> and <config> are printed as given (a record shared with others passes
+# "<sweep dir>", the console a quoted path); <axis_flags> as planned-cells.txt's "# PLAN="
+# line (or planned_axis_flags in 003) names them.
+# shellcheck disable=SC2329
+controlplane_resume_cmd() {
+	printf './tests/controlplane/003-run-sweep.sh --resume %s --contexts %s %s%s\n' "$1" "$2" "$3" "${4:+ --config $4}"
 }
 
 # --- markdown table cells ---

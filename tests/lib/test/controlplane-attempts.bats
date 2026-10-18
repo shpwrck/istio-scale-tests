@@ -153,7 +153,10 @@ attempts_dir() {
 	assert_output --partial "error: 2 of 2 cells failed: NOT_RUN x1, PROBE_FAILED x1."
 	grep -qx 'TOTAL=2' "$d/sweep-outcome.txt"
 	grep -qx 'FAILED_BY=NOT_RUN x1, PROBE_FAILED x1' "$d/sweep-outcome.txt"
-	grep -qx "NOTE=1 planned cell(s) have no row (NOT_RUN: planned in planned-cells.txt, never reached: the run that planned them died or stopped first): mesh=1 svcs=6 reps=3 ns=1 scope=none traffic=none. To finish this sweep, --resume this sweep dir with the axis flags that planned them (and its --contexts); the first run: --mesh-sizes 1 --service-counts 5,6 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none" "$d/sweep-outcome.txt"
+	grep -qx "NOTE=1 planned cell(s) have no row (NOT_RUN: planned in planned-cells.txt, never reached: the run that planned them died or stopped first): mesh=1 svcs=6 reps=3 ns=1 scope=none traffic=none. To finish this sweep, --resume it with the axis flags that planned them: ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5,6 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)" "$d/sweep-outcome.txt"
+	# The text report prints it too, the command whole (no "." taken into its last flag).
+	run --separate-stderr "$REPORT" --results-dir "$d" --format text
+	assert_output --partial "--sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)"
 	[ "$(grep -c '^# PLAN=' "$d/planned-cells.txt")" = 1 ]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format text
 	assert_output --partial "#   error: 2 of 2 cells failed: NOT_RUN x1, PROBE_FAILED x1"

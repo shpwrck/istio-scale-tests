@@ -26,7 +26,8 @@
 #      When no member is learned and none is given, it refuses the whole run (exit 1,
 #      nothing written): a lone report can name members in prose only. Metadata that
 #      names members by placeholder only (<mesh-a-ctx>: a copy redacted already) passes;
-#      --no-contexts says the files name no kube context at all.
+#      --no-contexts runs anyway, for files that name no kube context (nothing checks
+#      that: the mapping says so, and a human reads the copy for member names).
 #   2. URLs -> <api-host> (in-cluster ones, *.svc[.cluster.local] and localhost, stay).
 #   3. 12-digit AWS account ids in ARNs -> <account>; emails -> <email>.
 #   4. API hosts (api.* / api-int.*) -> <api-host>; cluster host names (*.openshiftapps.com,
@@ -37,7 +38,8 @@
 #      lowercase hex digits, no letter, digit, _ or - before it and no letter, digit or _
 #      after it) -> <vpc-id>, <subnet-id>, <sg-id>, <instance-id>, <eni-id>, <volume-id>,
 #      <igw-id>, <nat-id>, <rtb-id>.
-#   6. IPv4 and IPv6 addresses -> <ip>; /home/<name> and /Users/<name> -> <user>.
+#   6. IPv4 and IPv6 addresses -> <ip>; home dirs /home/<name> and /Users/<name> -> <home>
+#      (the vocabulary tests/lib/preamble.sh masks error text with).
 # A TSV's header line is redacted like any other (its column names, read first, pick the
 # context columns the final scan checks). A tab-separated file's metadata columns (a
 # sweep's resumes.txt: KUBE_VERSIONS, ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS,
@@ -91,12 +93,12 @@ files) for pasting into docs/campaigns. Kube contexts become <mesh-a-ctx>, <mesh
 ... (the hub <hub-a-ctx>); URLs and API hosts <api-host>; IPs <ip>; emails <email>; AWS
 account ids in ARNs <account>; AWS resource ids (vpc-, subnet-, sg-, i-, eni-, vol-,
 igw-, nat-, rtb- with 8 or 17 hex digits) <vpc-id>, <subnet-id>, ...; cluster host names
-<host>; home dirs /home/<user>. A file or dir name that holds a context is renamed the
-same way, without the angle brackets (mesh-a-ctx). The context mapping and the renames go
-to stderr only. Handles .tsv .md .txt .csv .json (a sweep's resumes.txt and
-planned-cells.txt among them); skips other files, dot files (.sweep.lock), the raw
-istiod-diag evidence folders and a tuning sweep's raw copies of the Istio CR
-(istio-spec/, state/istio-before-*.json), each named on stderr, never copied.
+<host>; home dirs (/home/<name> and /Users/<name>) <home>. A file or dir name that
+holds a context is renamed the same way, without the angle brackets (mesh-a-ctx). The
+context mapping and the renames go to stderr only. Handles .tsv .md .txt .csv .json (a
+sweep's resumes.txt and planned-cells.txt among them); skips other files, dot files
+(.sweep.lock), the raw istiod-diag evidence folders and a tuning sweep's raw copies of
+the Istio CR (istio-spec/, state/istio-before-*.json), each named on stderr, never copied.
 
 Modes (--out or --in-place; --dry-run alone or with either):
   --out DIR         write the copy under DIR (new or empty, outside every PATH): a dir
@@ -115,8 +117,9 @@ Options:
                     first letters, in the order given; the rest follow in sorted order.
   --hub-context NAME
                     the ACM hub's context (repeatable, comma list): maps to <hub-a-ctx>, ...
-  --no-contexts     the files name no kube context at all: run even though no member was
-                    learned from their metadata or given with --context
+  --no-contexts     run even though no member was learned from the files' metadata or
+                    given with --context, for files that name no kube context; nothing
+                    checks that, so read the copy for member names
   -h, --help        this help
 
 Environment:
@@ -525,8 +528,7 @@ function redact(L,    s) {
 		s = rep(s, RE_IP6F, "<ip>", "ip", "alnum")
 	}
 	if (index(s, ".")) s = rep(s, RE_IP4, "<ip>", "ip", "ip4")
-	if (index(s, "/home/")) s = rep(s, RE_HOME, "/home/<user>", "user", "")
-	if (index(s, "/Users/")) s = rep(s, RE_USERS, "/Users/<user>", "user", "")
+	if (index(s, "/home/") || index(s, "/Users/")) s = rep(s, RE_HOME, "<home>", "home", "")
 	return s
 }
 # valok <value>: a context column or field value that names no unmapped context.
@@ -580,8 +582,7 @@ BEGIN {
 	RE_AWS = "(vpc|subnet|sg|i|eni|vol|igw|nat|rtb)-" h8
 	split("vpc vpc-id subnet subnet-id sg sg-id i instance-id eni eni-id vol volume-id igw igw-id nat nat-id rtb rtb-id", A, " ")
 	for (i = 1; i < 18; i += 2) AWSPH[A[i]] = A[i + 1]
-	RE_HOME = "/home/[A-Za-z0-9._-]+"
-	RE_USERS = "/Users/[A-Za-z0-9._-]+"
+	RE_HOME = "/(home|Users)/[A-Za-z0-9._-]+"
 	NN = 0
 	if (MODE == "redact" || MODE == "paths") {
 		while ((getline ln < MAPF) > 0) {
@@ -624,7 +625,7 @@ BEGIN {
 			if (ln == 0) printf "" > dst
 			close(dst)
 			ks = ""
-			nko = split("context url account email api-host host aws-id ip user", KO, " ")
+			nko = split("context url account email api-host host aws-id ip home", KO, " ")
 			for (i = 1; i <= nko; i++) if (K[KO[i]] > 0) ks = ks (ks == "" ? "" : ", ") KO[i] " " K[KO[i]]
 			printf "F\t%d\t%d\t%s\n", FI, changed, ks
 		}
@@ -688,7 +689,7 @@ MAP="${WORK}/map.tsv"
 	done
 	if ((${#MEMBERS[@]} + ${#HUBS[@]} == 0)); then
 		if ((REDACTED_SEEN)); then echo "  (none: the files' metadata names members by placeholder only, redacted already)"
-		else echo "  (none: --no-contexts, the files name no kube context)"; fi
+		else echo "  none: not checked (--no-contexts): read the copy for member names"; fi
 	fi
 } >&2
 # The file-name forms of each name (ctx_file_safe: whole, and cut to CTX_FILE_NAME_MAX

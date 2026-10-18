@@ -107,7 +107,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 
 FAILED=0
-for pid in "${PIDS[@]}"; do
+for pid in ${PIDS[@]+"${PIDS[@]}"}; do
 	wait "$pid" || FAILED=$((FAILED + 1))
 done
 

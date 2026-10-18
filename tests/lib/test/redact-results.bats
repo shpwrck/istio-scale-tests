@@ -76,7 +76,8 @@ cp_sweep() {
 	[ "$(head -n 1 "${c}/resumes.txt")" = "$(head -n 1 "$d/resumes.txt")" ]
 	[[ "$(awk -F'\t' 'NR == 2 { print $4 "|" $6 "|" $7 "|" $8 }' "${c}/resumes.txt")" == "<mesh-a-ctx>="*",<mesh-b-ctx>="*"|<mesh-a-ctx>="*",<mesh-b-ctx>="*"|<mesh-a-ctx>="*",<mesh-b-ctx>="*"|${tsv##*/}" ]]
 	# The TSV's resume line, its header and its preamble's resume keys.
-	[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}")" = "$(grep '^# RESUMED_AT=' "$tsv")" ]
+	[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}" | sed 's/ KUBE_VERSIONS=.*//')" = "$(grep '^# RESUMED_AT=' "$tsv" | sed 's/ KUBE_VERSIONS=.*//')" ]
+	[[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}")" == *" KUBE_VERSIONS=<mesh-a-ctx>="*",<mesh-b-ctx>="* ]]
 	[ "$(grep '^timestamp' "${c}/${tsv##*/}")" = "$(grep '^timestamp' "$tsv")" ]
 	run grep -rlE '(^|[^A-Za-z0-9_<])ci-[ab]([^A-Za-z0-9_]|$)' "$out"
 	assert_output ""
@@ -227,7 +228,7 @@ _envelope() {
 	assert_line "# SOURCE_CTX=<mesh-a-ctx>"
 	assert_line "# REMOTES=<mesh-b-ctx> <mesh-c-ctx>"
 	assert_line "# ISTIO_PROXY_VERSIONS=<mesh-a-ctx>=1.30.5:120+1.30.4:3,<mesh-b-ctx>=1.30.5:10,<mesh-c-ctx>=unknown"
-	assert_line "# RUN_CONFIG=/home/<user>/run.env"
+	assert_line "# RUN_CONFIG=<home>/run.env"
 	assert_line $'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tstatus\tdetail'
 	assert_line $'r1\t3\t1\t<mesh-a-ctx>\t<mesh-c-ctx>\tTIMEOUT_P3\tGet "<api-host>": dial tcp <ip>:6443: i/o timeout'
 	run cat "${c}/reach-r1.tsv"
@@ -262,7 +263,7 @@ _envelope() {
 	assert_success
 	[ ! -e "$out" ]
 	assert_output --partial "dry run, nothing written"
-	assert_line --regexp "^  would change  .*/sweep-r1/endpoint-r1\.tsv \([0-9]+ line\(s\): context [0-9]+, url 1, ip 1, user 1\)$"
+	assert_line --regexp "^  would change  .*/sweep-r1/endpoint-r1\.tsv \([0-9]+ line\(s\): context [0-9]+, url 1, ip 1, home 1\)$"
 	assert_line --regexp "^  would change  .*/sweep-r1/report\.md \([0-9]+ line\(s\): context [0-9]+, account 1, email 1, host 2\)$"
 	run --separate-stderr "$REDACT" "${RES}/sweep-r1"
 	assert_failure
@@ -509,7 +510,9 @@ _envelope() {
 	printf 'p99 12 ms on 192.0.2.10\n' > "${d}/summary.md"
 	run --separate-stderr "$REDACT" --no-contexts --out "$out" "$d"
 	assert_success
-	[[ "$stderr" == *"(none: --no-contexts"* ]]
+	# The mapping says the names were not checked, never that the files name none.
+	[[ "$stderr" == *"  none: not checked (--no-contexts): read the copy for member names"* ]]
+	[[ "$stderr" != *"name no kube context"* ]]
 	grep -qx 'p99 12 ms on <ip>' "${out}/lone/summary.md"
 }
 
@@ -565,4 +568,20 @@ _envelope() {
 	[ -f "${BATS_TEST_TMPDIR}/copy/s/istiod-diag-r1/mesh-a-ctx/b.txt" ]
 	[ -f "${BATS_TEST_TMPDIR}/copy/s/istiod-diag-r1/mesh-b-ctx/a.txt" ]
 	grep -qx $'r1\t<mesh-a-ctx> and <mesh-b-ctx>' "${BATS_TEST_TMPDIR}/copy/s/run.tsv"
+}
+
+@test "redact-results: home dirs under /home and /Users read <home>, emails <email>, the vocabulary preamble.sh masks with; --help says so" {
+	local d="${RES}/h" out="${BATS_TEST_TMPDIR}/copy"
+	mkdir -p "$d"
+	printf '# SOURCE_CTX=ci-a\n# RUN_CONFIG=/Users/some.one/campaign/run.env\nrun_id\tsource_ctx\tdetail\nr1\tci-a\topen /home/someone/.kube/config: owner ops.person@example.com\n' > "${d}/endpoint-r1.tsv"
+	run --separate-stderr "$REDACT" --out "$out" "$d"
+	assert_success
+	run cat "${out}/h/endpoint-r1.tsv"
+	assert_line "# RUN_CONFIG=<home>/campaign/run.env"
+	assert_line $'r1\t<mesh-a-ctx>\topen <home>/.kube/config: owner <email>'
+	run grep -rlE 'someone|some\.one|ops\.person|/Users/|/home/' "$out"
+	assert_output ""
+	run "$REDACT" --help
+	assert_output --partial "home dirs (/home/<name> and /Users/<name>) <home>"
+	assert_output --partial "emails <email>"
 }

@@ -40,10 +40,11 @@ fixture() {
 	# The last column, n_attempted, is empty: the fixture records no ITERATIONS or REMOTES.
 	assert_line "2,P1_local_wall,3,3,1000,1001,1001,1001,N/A,N/A,,"
 	run "$REPORT" --results-dir "$RES" --format markdown
-	assert_output --partial "| P1 local xDS (wall) | 3 | 3 | 1000 | 1001 | 1001 |"
+	# n_attempted follows n_valid ("-": the fixture records no ITERATIONS or REMOTES).
+	assert_output --partial "| P1 local xDS (wall) | 3 | 3 | - | 1000 | 1001 | 1001 |"
 	assert_output --partial "| 2 | 1001 (3) |"
 	run "$REPORT" --results-dir "$RES"
-	assert_output --regexp 'P1 local xDS \(wall\) +\| +3 \| +3 \| +1000 \| +1001 \| +1001 \|'
+	assert_output --regexp 'P1 local xDS \(wall\) +\| +3 \| +3 \| +- \| +1000 \| +1001 \| +1001 \|'
 	run "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq '.rows[0] | .avg_ms == 1001 and .phase == "P1_local_wall"' <<<"$output")" = true ]
 }
@@ -52,12 +53,12 @@ fixture() {
 	fixture
 	run "$REPORT" --results-dir "$RES" --format markdown
 	assert_success
-	assert_output --partial "| P1 conv_p99 (hist) | 3 | 3 | 0-100 | 500-1000 | - | 0-100 | N/A | N/A |"
+	assert_output --partial "| P1 conv_p99 (hist) | 3 | 3 | - | 0-100 | 500-1000 | - | 0-100 | N/A | N/A |"
 	assert_output --partial "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 worst (ms) |"
 	assert_output --partial "| 2 | 1001 (3) | 500-1000 (3) |"
 	refute_output --partial "| 100-500"
 	run "$REPORT" --results-dir "$RES"
-	assert_output --regexp 'P1 conv_p99 \(hist\) +\| +3 \| +3 \| +0-100 \| +500-1000 \| +- \|'
+	assert_output --regexp 'P1 conv_p99 \(hist\) +\| +3 \| +3 \| +- \| +0-100 \| +500-1000 \| +- \|'
 	refute_output --partial "100-500"
 }
 
@@ -93,7 +94,7 @@ fixture() {
 			echo "# RUN_ID=r${d}"
 			echo "# HARNESS_SHA=h${d}"
 			echo "# ISTIO_VERSION=1.30.5"
-			echo "# ITERATIONS=$([[ $d == a ]] && echo 3 || echo 5)"
+			echo "# ITERATIONS=$(if [[ $d == a ]]; then echo 3; else echo 5; fi)"
 			echo "$HDR"
 			prow 2 1 1000 100
 		} > "${RES}/sweep-${d}/endpoint-r${d}.tsv"

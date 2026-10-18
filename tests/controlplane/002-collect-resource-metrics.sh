@@ -96,7 +96,8 @@ Usage: $(basename "$0") [options]
                        tests/controlplane/README.md, "Run config").
                        Precedence: flag > --config > environment > default.
   --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --mesh-size N        Metadata tag for TSV output.
+  --mesh-size N        Metadata tag for TSV output (default: the number of contexts;
+                       at most that, as the reports expect a row per member).
   --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
   --replicas N         Metadata tag for TSV output (default: $REPLICAS).
   --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
@@ -388,6 +389,9 @@ fi
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE="${#CONTEXTS[@]}"
 is_pos_int "$MESH_SIZE" || die "--mesh-size must be a positive integer (got: $MESH_SIZE)"
+# Every member writes a row: rows naming fewer members than their mesh size read as a cell
+# cut short (INCOMPLETE) in the reports, so a larger mesh size is refused here.
+((MESH_SIZE <= ${#CONTEXTS[@]})) || die "--mesh-size ${MESH_SIZE} is larger than the ${#CONTEXTS[@]} context(s) given (${CONTEXTS[*]}): its rows would name fewer members than their mesh size, which the reports read as a cell cut short (INCOMPLETE). Give a context per member, or a smaller --mesh-size."
 
 if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 	RUN_ID="$RUN_ID_OVERRIDE"
@@ -395,7 +399,7 @@ else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
 # The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
-HARNESS_SHA="$(harness_sha)"
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
@@ -433,7 +437,7 @@ if [[ "$PHASE" != baseline ]]; then
 	src_ctx="${CONTEXTS[0]}"
 	# shellcheck disable=SC2207
 	nt_kv=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${nt_kv[@]}"; do
+	for kv in ${nt_kv[@]+"${nt_kv[@]}"}; do
 		case "$kv" in
 			cpu_m=*) PRE_NODE_ALLOC_CPU_M="${kv#cpu_m=}" ;;
 			mem_mi=*) PRE_NODE_ALLOC_MEM_MI="${kv#mem_mi=}" ;;
@@ -441,7 +445,7 @@ if [[ "$PHASE" != baseline ]]; then
 	done
 	# shellcheck disable=SC2207
 	il_kv=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${il_kv[@]}"; do
+	for kv in ${il_kv[@]+"${il_kv[@]}"}; do
 		case "$kv" in
 			cpu_m=*) PRE_ISTIOD_CPU_LIMIT_M="${kv#cpu_m=}" ;;
 			mem_mi=*) PRE_ISTIOD_MEM_LIMIT_MI="${kv#mem_mi=}" ;;
@@ -634,7 +638,7 @@ save_pod_manifest() {
 	# Persist dropped (zero-pod) contexts so the final phase can emit N/A rows.
 	: > "${dir}/dropped-ctxs.tsv"
 	local dctx
-	for dctx in "${DROPPED_CTXS[@]}"; do
+	for dctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		printf '%s\n' "$dctx" >> "${dir}/dropped-ctxs.tsv"
 	done
 }
@@ -1171,7 +1175,7 @@ collect_capacity_for_ctx() {
 	local used_cpu_m="unknown" used_mem_mi="unknown"
 	# shellcheck disable=SC2207
 	local -a nu=($(cap_node_used "$ctx" "$worker_csv" "${KUBECTL[@]}"))
-	for kv in "${nu[@]}"; do
+	for kv in ${nu[@]+"${nu[@]}"}; do
 		case "$kv" in
 			cpu_m=*) used_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) used_mem_mi="${kv#mem_mi=}" ;;
@@ -1186,7 +1190,7 @@ collect_capacity_for_ctx() {
 	local istd_cpu_m="unknown" istd_mem_mi="unknown" istd_rep="unknown"
 	# shellcheck disable=SC2207
 	local -a il=($(cap_istiod_limits "$ctx" "${KUBECTL[@]}"))
-	for kv in "${il[@]}"; do
+	for kv in ${il[@]+"${il[@]}"}; do
 		case "$kv" in
 			cpu_m=*) istd_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) istd_mem_mi="${kv#mem_mi=}" ;;
@@ -1201,7 +1205,7 @@ collect_capacity_for_ctx() {
 	local istd_used_cpu_m="unknown" istd_used_mem_mi="unknown"
 	# shellcheck disable=SC2207
 	local -a iu=($(cap_istiod_used "$ctx" "${KUBECTL[@]}"))
-	for kv in "${iu[@]}"; do
+	for kv in ${iu[@]+"${iu[@]}"}; do
 		case "$kv" in
 			cpu_m=*) istd_used_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) istd_used_mem_mi="${kv#mem_mi=}" ;;
@@ -1248,7 +1252,7 @@ compute_cluster_proxies() {
 	done
 	# Expected side first, for every context, so it lands as close to the batch as
 	# possible. Same node + pod lists the capacity columns use (no extra API call).
-	for ctx in "${ctxs[@]}" "${DROPPED_CTXS[@]}"; do
+	for ctx in "${ctxs[@]}" ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		read_pod_counts_for_ctx "$ctx"
 		sidecars="$(kv_get sidecars "${POD_KV_CACHE[$ctx]}")"
 		[[ "$sidecars" =~ ^[0-9]+$ ]] || sidecars="N/A"
@@ -1290,7 +1294,7 @@ compute_cluster_proxies() {
 		fi
 	done
 	# Dropped (zero-pod) contexts: no total, no check; the sidecar count was read above.
-	for ctx in "${DROPPED_CTXS[@]}"; do
+	for ctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		CLUSTER_PROXIES[$ctx]="N/A"
 		PROXY_CHECK[$ctx]="N/A"
 	done
@@ -1678,7 +1682,7 @@ scrape_window() {
 	# context name, restarted=unknown and every numeric column is N/A, so the row is
 	# counted in n_total but excluded from n_valid.
 	local dctx
-	for dctx in "${DROPPED_CTXS[@]}"; do
+	for dctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		echo "warning: context ${dctx}: dropped (zero istiod pods); emitting degraded N/A row" >&2
 		# Node capacity is still readable with zero istiod pods.
 		collect_capacity_for_ctx "$dctx"

@@ -28,10 +28,11 @@ setup() {
 	# their delete removes it unless ns-stuck exists (then the delete fails); the plain
 	# namespace's delete succeeds. 002's first read (its Running istiod pods) fails, and
 	# first: touches stale-seen when the file STALE names exists; under CP_TERM (once) lists
-	# TMPDIR into tmp-at-term, sends SIGTERM to the topmost *003-run-sweep.sh ancestor (the
-	# sweep process alone), closes its
-	# output, and waits 30 s before it touches stub-slept (a sweep that waited for its
-	# step would wait for it). Anything else fails, as against an empty kubeconfig.
+	# TMPDIR into tmp-at-term, records its PID (stub-pid), starts a 30 s sleep (sleep-pid),
+	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor (the sweep process alone),
+	# closes its output and waits for the sleep before it touches stub-slept (a sweep that
+	# waited for its step would wait for it). Anything else fails, as against an empty
+	# kubeconfig.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
 d="$RO_DIR"
@@ -52,6 +53,10 @@ case "$*" in
 	if [ -n "${CP_TERM:-}" ] && [ ! -e "$d/term-sent" ]; then
 		: > "$d/term-sent"
 		ls "${TMPDIR:-/tmp}" > "$d/tmp-at-term" 2>/dev/null || :
+		# Both PIDs are on file before the signal: the test checks that both are gone.
+		echo "$$" > "$d/stub-pid"
+		sleep 30 >/dev/null 2>&1 3>&- &
+		echo "$!" > "$d/sleep-pid"
 		p=$PPID s=""
 		while [ "${p:-1}" -gt 1 ]; do
 			case "$(ps -o args= -p "$p" 2>/dev/null)" in *003-run-sweep.sh*) s="$p" ;; esac
@@ -59,9 +64,6 @@ case "$*" in
 		done
 		[ -z "$s" ] || kill -TERM "$s"
 		exec >/dev/null 2>&1 3>&-
-		echo "$$" > "$d/stub-pid"
-		sleep 30 &
-		echo "$!" > "$d/sleep-pid"
 		wait
 		: > "$d/stub-slept"
 	fi
@@ -80,7 +82,7 @@ teardown() {
 	for f in "${BATS_TEST_TMPDIR}/sleep-pid" "${BATS_TEST_TMPDIR}/stub-pid"; do
 		[[ -s "$f" ]] || continue
 		p="$(<"$f")"
-		[[ "$p" =~ ^[0-9]+$ ]] && kill "$p" 2>/dev/null || true
+		if [[ "$p" =~ ^[0-9]+$ ]]; then kill "$p" 2>/dev/null || true; fi
 	done
 }
 
@@ -184,12 +186,20 @@ incomplete_dir() {
 # ---------------------------------------------------------------------------
 # SIGTERM to the sweep process inside a cell
 
-@test "a SIGTERM to the controlplane sweep's process alone reaches its step at once; the cell in progress gets an INTERRUPTED row, the record says SIGTERM, and a --resume runs that cell again" {
+@test "a SIGTERM to the controlplane sweep's process alone reaches its step's whole tree at once (the kubectl it runs and that command's own child are gone when the sweep returns); the cell in progress gets an INTERRUPTED row, the record says SIGTERM, and a --resume runs that cell again" {
+	local p f
 	CP_TERM=1 cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 143 ] || { echo "status ${status}: ${stderr}"; false; }
 	[ -e "${BATS_TEST_TMPDIR}/term-sent" ]
-	# The sweep did not wait for its step's stuck command (the stub's 30 s).
+	# The sweep did not wait for its step's stuck command (the stub's 30 s), and did not
+	# leave it running: the stub kubectl and its sleep are gone (or a zombie not reaped yet).
 	[ ! -e "${BATS_TEST_TMPDIR}/stub-slept" ]
+	for f in stub-pid sleep-pid; do
+		p="$(<"${BATS_TEST_TMPDIR}/${f}")"
+		[[ "$p" =~ ^[0-9]+$ ]]
+		[[ "$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ')" =~ ^(Z.*)?$ ]] || { echo "${f} ${p} still runs"; ps -o pid=,stat=,args= -p "$p"; false; }
+	done
+	[[ "$stderr" =~ Stopping\ the\ running\ step\ \(002-collect-resource-metrics\.sh\):\ SIGTERM\ to\ its\ [0-9]+\ process ]] || { echo "$stderr"; false; }
 	D="$(sweep_dir)"
 	TSV="$(find "$D" -maxdepth 1 -name 'controlplane-*.tsv')"
 	[ "$(grep -v '^#' "$TSV" | awk -F'\t' '$1 != "timestamp" { print $2 "/" $4 }' | tail -n 1)" = INTERRUPTED/5 ]
@@ -344,11 +354,11 @@ incomplete_dir() {
 	run env_sla_verdict 10 15 40 50 0 4 4 75 90 2 0
 	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan; the cells that ran: "* ]]
 	run env_sla_verdict 10 15 40 50 0 4 4 75 90 0 1
-	[[ "$output" == "CAUTION|1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size: cut short while they were written), so their figures cover part of the mesh; the rest: "* ]]
+	[[ "$output" == "CAUTION|1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas: cut short while they were written), so their figures cover part of the mesh; the rest: "* ]]
 	run env_sla_verdict 10 15 40 50 0 4 4 75 90 2 1
-	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), "*"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size)" ]]
+	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), "*"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas)" ]]
 	run env_sla_verdict 80 15 40 50 0 4 4 75 90 1 1
-	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 planned cell(s) never ran (NOT_RUN); also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size)" ]]
+	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 planned cell(s) never ran (NOT_RUN); also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas)" ]]
 	run env_sla_verdict 95 15 40 50 0 4 4 75 90 3 0
 	[[ "$output" == FAIL\|* && "$output" == *"; also 3 planned cell(s) never ran (NOT_RUN)" ]]
 	# Not a count: 0.
@@ -517,58 +527,58 @@ incomplete_dir() {
 # ---------------------------------------------------------------------------
 # HARNESS_SHA from the tree's content
 
-@test "HARNESS_SHA hashes the uncommitted content: git config does not change it, editor and Finder files and a global core.excludesFile's do not count, staged equals unstaged, a sweep's output dir is left out, and one sweep records one value" {
+@test "HARNESS_SHA hashes the uncommitted content: git config does not change it, editor and Finder files and a global core.excludesFile's do not count, staged equals unstaged, a sweep's output dir is left out (also for its steps), and a step after a change records the changed tree" {
 	local r="${BATS_TEST_TMPDIR}/repo" clean a
-	mkdir -p "$r/sub"
+	mkdir -p "$r/tests/sub"
 	git -C "$r" init -q
-	printf 'one\ntwo\nthree\n' > "$r/f"
+	printf 'one\ntwo\nthree\n' > "$r/tests/f"
 	cp "${ROOT}/.gitignore" "$r/.gitignore"
-	git -C "$r" add f .gitignore
+	git -C "$r" add tests/f .gitignore
 	git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
 	clean="$(ROOT="$r" harness_sha)"
 	[[ "$clean" =~ ^[0-9a-f]{7}$ ]]
 	# Editor swap and backup files and Finder metadata: ignored (.gitignore).
 	: > "$r/.DS_Store"
-	: > "$r/sub/.f.swp"
-	: > "$r/f.swo"
-	: > "$r/f~"
+	: > "$r/tests/sub/.f.swp"
+	: > "$r/tests/f.swo"
+	: > "$r/tests/f~"
 	[ "$(ROOT="$r" harness_sha)" = "$clean" ]
-	printf 'one\nTWO\nthree\n' > "$r/f"
+	printf 'one\nTWO\nthree\n' > "$r/tests/f"
 	a="$(ROOT="$r" harness_sha)"
 	[[ "$a" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
 	# The operator's git config (diff options, abbrev, line endings) does not change it.
 	[ "$(GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=diff.context GIT_CONFIG_VALUE_0=0 GIT_CONFIG_KEY_1=core.abbrev GIT_CONFIG_VALUE_1=12 \
 		GIT_CONFIG_KEY_2=diff.noprefix GIT_CONFIG_VALUE_2=true GIT_CONFIG_KEY_3=core.autocrlf GIT_CONFIG_VALUE_3=true ROOT="$r" harness_sha)" = "$a" ]
 	# An untracked file counts, unless the operator's global core.excludesFile ignores it.
-	: > "$r/x.local"
+	: > "$r/tests/x.local"
 	[ "$(ROOT="$r" harness_sha)" != "$a" ]
 	printf '*.local\n' > "${BATS_TEST_TMPDIR}/excludes"
 	[ "$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0="${BATS_TEST_TMPDIR}/excludes" ROOT="$r" harness_sha)" = "$a" ]
-	rm -f "$r/x.local"
+	rm -f "$r/tests/x.local"
 	# Staged or not: one value; the operator's index is not touched.
-	git -C "$r" add f
+	git -C "$r" add tests/f
 	[ "$(ROOT="$r" harness_sha)" = "$a" ]
-	[ "$(git -C "$r" diff --cached --name-only)" = f ]
+	[ "$(git -C "$r" diff --cached --name-only)" = tests/f ]
 	# A sweep's output dir under the checkout is left out.
-	mkdir -p "$r/out/sweep-x"
-	echo row > "$r/out/sweep-x/data.tsv"
+	mkdir -p "$r/tests/out/sweep-x"
+	echo row > "$r/tests/out/sweep-x/data.tsv"
 	[ "$(ROOT="$r" harness_sha)" != "$a" ]
-	[ "$(ROOT="$r" harness_sha --exclude "$r/out")" = "$a" ]
-	# harness_sha_for_sweep: the sweep's value, also for its steps, though a file changes
-	# during the sweep; outside that checkout, or unpinned, a value of its own.
+	[ "$(ROOT="$r" harness_sha --exclude "$r/tests/out")" = "$a" ]
+	# harness_sha_for_sweep: the sweep's start value; it exports its output dir, never the
+	# value, so a step leaves the sweep's results out and records the live tree: after a
+	# file changed during the sweep, the changed one.
 	run bash -c '
 		source "$2/tests/lib/common.sh"
 		ROOT="$1"
-		harness_sha_for_sweep "$1/out"
+		harness_sha_for_sweep "$1/tests/out"
 		echo "$HARNESS_SHA"
-		echo changed >> "$1/f"
-		harness_sha
+		echo "$HARNESS_SHA_EXCLUDE"
 		ROOT="$1" bash -c "source \"$2/tests/lib/common.sh\"; harness_sha"
-		unset HARNESS_SHA_SWEEP
-		harness_sha' _ "$r" "$ROOT"
+		echo changed >> "$1/tests/f"
+		ROOT="$1" bash -c "source \"$2/tests/lib/common.sh\"; harness_sha"' _ "$r" "$ROOT"
 	assert_success
 	assert_line --index 0 "$a"
-	assert_line --index 1 "$a"
+	assert_line --index 1 "$r/tests/out"
 	assert_line --index 2 "$a"
 	[[ "${lines[3]}" =~ ^${clean}-dirty\.[0-9a-f]{8}$ && "${lines[3]}" != "$a" ]]
 }
@@ -587,39 +597,40 @@ _hs() {
 	git -C "$BATS_TEST_TMPDIR" init -q sub
 	git -C "$s" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q --allow-empty -m one
 	git -C "$BATS_TEST_TMPDIR" init -q repo
-	echo a > "$r/f"
-	git -C "$r" add f
-	# A submodule at mods/sub: its gitlink, at the sub repo's commit.
-	git -C "$r" update-index --add --cacheinfo "160000,$(git -C "$s" rev-parse HEAD),mods/sub"
+	mkdir -p "$r/tests"
+	echo a > "$r/tests/f"
+	git -C "$r" add tests/f
+	# A submodule at tests/mods/sub (as the bats checkouts): its gitlink, at the sub repo's commit.
+	git -C "$r" update-index --add --cacheinfo "160000,$(git -C "$s" rev-parse HEAD),tests/mods/sub"
 	git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
 	clean="$(_hs "$r")"
 	[[ "$clean" =~ ^[0-9a-f]{7}$ ]]
 	# Not checked out (no dir), as a fresh clone without submodule init.
-	[ ! -e "$r/mods/sub" ]
+	[ ! -e "$r/tests/mods/sub" ]
 	[ "$(_hs "$r")" = "$clean" ]
 	# Checked out at another commit.
-	git clone -q "$s" "$r/mods/sub"
-	git -C "$r/mods/sub" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q --allow-empty -m two
+	git clone -q "$s" "$r/tests/mods/sub"
+	git -C "$r/tests/mods/sub" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q --allow-empty -m two
 	[ "$(_hs "$r")" = "$clean" ]
 	# Its gitdir gone (a worktree whose .git/modules is not there): git describe --dirty
 	# fails on such a tree; the harness still reads clean.
-	rm -rf "$r/mods/sub"
-	mkdir -p "$r/mods/sub"
-	echo 'gitdir: ../../.git/modules/mods/sub' > "$r/mods/sub/.git"
-	echo x > "$r/mods/sub/file"
+	rm -rf "$r/tests/mods/sub"
+	mkdir -p "$r/tests/mods/sub"
+	echo 'gitdir: ../../../.git/modules/tests/mods/sub' > "$r/tests/mods/sub/.git"
+	echo x > "$r/tests/mods/sub/file"
 	[ "$(_hs "$r")" = "$clean" ]
 	# A tracked edit: dirty, by the same hash whatever state the submodule is in.
-	echo b > "$r/f"
+	echo b > "$r/tests/f"
 	a="$(_hs "$r")"
 	[[ "$a" =~ ^${clean}-dirty\.[0-9a-f]{8}$ ]]
-	rm -rf "$r/mods/sub"
-	mkdir -p "$r/mods/sub"
-	echo x > "$r/mods/sub/file"
+	rm -rf "$r/tests/mods/sub"
+	mkdir -p "$r/tests/mods/sub"
+	echo x > "$r/tests/mods/sub/file"
 	[ "$(_hs "$r")" = "$a" ]
 	# Content that cannot be hashed (no temp dir): -dirty.unknown while a tracked file
 	# differs from HEAD, clean once it does not.
 	[ "$(TMPDIR="${BATS_TEST_TMPDIR}/none" _hs "$r")" = "${clean}-dirty.unknown" ]
-	echo a > "$r/f"
+	echo a > "$r/tests/f"
 	[ "$(TMPDIR="${BATS_TEST_TMPDIR}/none" _hs "$r")" = "$clean" ]
 }
 
@@ -639,7 +650,7 @@ _hs() {
 	[ "$status" -eq 1 ]
 	# The console keeps the full path, and names the sweep dir after the stop.
 	[[ "$stderr" == *"error: could not write ${D}/planned-cells.txt, which records the cells this sweep plans; nothing was run."* ]]
-	[[ "$stderr" == *"warning: next: --resume this sweep dir with the flags it ran with: the cells already measured are kept."$'\n'"  sweep dir: ${D}" ]]
+	[[ "$stderr" == *"warning: next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)."$'\n'"  sweep dir: ${D}" ]]
 	# The record (shared) does not.
 	grep -qx 'STOP_REASON=could not write <sweep dir>/planned-cells.txt, which records the cells this sweep plans; nothing was run.' "$D/sweep-outcome.txt"
 	! grep -qF "$BATS_TEST_TMPDIR" "$D/sweep-outcome.txt"
@@ -686,7 +697,7 @@ _hs() {
 	run _istio_version_mask 'Error from server (Forbidden): istios.sailoperator.io "default" is forbidden: User "jdoe" cannot get resource'
 	assert_output 'Error from server (Forbidden): istios.sailoperator.io "default" is forbidden: User "<user>" cannot get resource'
 	run _istio_version_mask 'error: you must be logged in as someone@example.com (/home/jdoe/.kube/config; /Users/jdoe/x)'
-	assert_output 'error: you must be logged in as <user> (<home>/.kube/config; <home>/x)'
+	assert_output 'error: you must be logged in as <email> (<home>/.kube/config; <home>/x)'
 	run _istio_version_mask 'error: unable to read client-key /tmp/k for kube-admin due to open /tmp/k: no such file'
 	assert_output 'error: unable to read client-key /tmp/k for <user> due to open /tmp/k: no such file'
 	run istio_generation_causes 1

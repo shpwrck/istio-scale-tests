@@ -70,11 +70,14 @@ prow23() {
 	jq -e --arg w3 "$w3" '(.data_warnings | length) == 2 and (.data_warnings[0] | startswith($w3))' <<<"$output"
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format md
 	assert_line --partial "> **Warning:** ${w3}"
-	assert_line "| P2 remote istiod EDS | 4 | 4 | 50 | 50 | 50 | 50 | N/A | N/A | 8 |"
+	# n_attempted follows n_total and n_valid in markdown and text (csv keeps it last).
+	assert_line "| P2 remote istiod EDS | 4 | 4 | 8 | 50 | 50 | 50 | 50 | N/A | N/A |"
 	_md_tables_even <<<"$output"
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES"
 	assert_line --partial "WARNING: ${w5}"
-	assert_output --regexp 'P2 remote istiod EDS +\| +4 \| +4 \|.*\| +8'
+	assert_output --regexp 'P2 remote istiod EDS +\| +4 \| +4 \| +8 \| +50 \|'
+	# n_valid 0 reads 0 in text too, as in markdown, csv and json (never "-").
+	assert_output --regexp 'P1 local xDS \(wall\) +\| +1 \| +0 \| +4 \| +- \|'
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format charts
 	assert_output --partial "${w3}"
 	# A probe that ran every iteration warns nothing; a TSV without ITERATIONS reads -.

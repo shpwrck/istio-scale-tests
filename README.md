@@ -99,14 +99,25 @@ Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-
 TSV data plus a markdown summary under its `results/` directory; a sweep writes its TSVs and
 reports into its own `results/sweep-<RUN_ID>/`. A sweep whose setup or probe failed for some
 cells still writes its report, then ends with `N of M cells failed` (by reason) and exit code
-4, as it does when the mesh changed under it: the Istio version or active revision changed
-during the sweep, or the generation of a member's Istio CR or active IstioRevision went up
-(an edit with the same version, an OSSM operator upgrade, a TLS profile change), or that
-end-of-sweep check failed.
-`sweep-outcome.txt` in the sweep dir keeps the outcome. While a sweep runs, its dir holds a
-lock (`.sweep.lock`, its PID): another run into that dir, or a `--resume` of it, is refused
-until it ends. Each suite README lists its exit codes.
-Every script has `--help`, and scripts that change a cluster also accept `--dry-run`.
+4, as it does when the mesh changed under it (the Istio version or active revision changed
+during the sweep, or the generation of a member's Istio CR or active IstioRevision went up: an
+edit with the same version, an OSSM operator upgrade, a TLS profile change; or that end-of-sweep
+check failed) and when its harness changed under it (below). `sweep-outcome.txt` in the sweep
+dir keeps the outcome. While a sweep runs, its dir holds a lock (`.sweep.lock`, its PID):
+another run into that dir, or a `--resume` of it, is refused until it ends (a PID another user
+runs counts as alive; the lock of a run that died is taken over, by one run at a time). Each
+suite README lists its exit codes. Every script has `--help`, and scripts that change a cluster
+also accept `--dry-run`.
+
+Every result records the harness that wrote it as `HARNESS_SHA`: `git describe`, plus
+`-dirty.<8hex>` when a file under `tests/`, `config/`, `charts/` or `terraform/` differs from
+that commit (an untracked file there counts; an ignored one never does, also what your global
+`core.excludesFile`, or git's default `~/.config/git/ignore` when that key is unset, ignores;
+your other git settings never change the value; a run's own results do not count). A sweep reads
+it again before its steps (at most every `HARNESS_SHA_CHECK_SEC`, `config/options.env`) and at
+its end: a file edited, or a `git checkout` or `pull`, during the sweep is a problem in its
+outcome (exit 4) that names both values and when the change was first seen, and each probe's
+TSV records the harness that probe ran.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -150,9 +161,10 @@ CR generation>/<active IstioRevision generation>`: a sweep compares them at its 
 controlplane `--resume` against the first run's, so a spec edited and changed back during the
 sweep is a problem too), `ISTIO_PROXY_VERSIONS` (`<ctx>=<version>:<count>+...`: the proxies
 connected to each member's istiod by Istio version, from istiod's `pilot_xds` gauge, read through
-the API server's pod proxy; `none` or `unknown` per member; proxies on another version than their
-istiod, such as sidecars not restarted after an upgrade, are a warning and a note of the sweep
-outcome, never a stop), and the members still not ready after the wait in
+the API server's pod proxy, `ISTIO_PROXY_READ_PARALLEL` (20) members at once and one pod of a
+member at a time; `none` or `unknown` per member; proxies on another version than their istiod,
+such as sidecars not restarted after an upgrade, are a warning and a note of the sweep outcome,
+never a stop), and the members still not ready after the wait in
 `ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a sweep's outcome repeats
 as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready), `<ctx>=<state>,...`
 (the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod rollout still in
@@ -182,12 +194,15 @@ how in that record: one that stops on an error (a check it makes, or an unexpect
 terminal closes) stays not finished and records when and by which signal (`ENDED_AT`,
 `ENDED_SIGNAL`; reports say "interrupted at ...", json `interrupted_at`, `interrupted_by`; exit
 130, 143 or 129); only one killed outright (SIGKILL, out of memory, a lost host) leaves the
-record as it was. A SIGTERM sent to the sweep's process alone (`kill <pid>`, a service manager)
-reaches the step that runs (a setup, a probe, a cleanup) at once, and the sweep ends once that
-step has; only a settle wait finishes first. A results dir without
-`sweep-outcome.txt` is from a sweep that stopped before its start (nothing ran) or from an older
-harness. A kubectl error quoted in a record or a report names the API server as `<api-host>` or
-`<ip>`, never its address. These keys are set in the environment, never in a `--config` file.
+record as it was. A signal sent to the sweep's process alone (`kill <pid>`, `kill -INT <pid>`, a
+service manager) reaches the step that runs (a setup, a probe, a cleanup) and every process under
+it (its kubectl calls, its per-member workers) at once; the sweep ends once they have, or sends
+SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` (10) seconds later, and only then releases its
+lock; only a settle wait finishes first. A results dir without `sweep-outcome.txt` is from a
+sweep that stopped before its start (nothing ran) or from an older harness. A kubectl error
+quoted in a record or a report names the API server as `<api-host>` or `<ip>`, never its address.
+`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`
+and `SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
 
 ### Run config (`--config FILE`)
 
@@ -207,8 +222,10 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   bad line or a key outside the suite's list rejects the whole file before anything runs, with
   `file:line` and the reason.
 - **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
-  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK` and
-  `ISTIO_VERSION_READY_*` (the version check above) and the version pins in `config/versions.env`.
+  `--force-large-matrix` acknowledgment stays per run), `*_EXTEND_PLAN` (so does a controlplane
+  `--resume`'s `--extend-plan`), `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*` and
+  `ISTIO_PROXY_READ_PARALLEL` (the version check above), `HARNESS_SHA_CHECK_SEC` and
+  `SWEEP_STOP_GRACE_SEC` (every sweep, above) and the version pins in `config/versions.env`.
 - **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
   what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
   A standalone step still takes those on the command line.

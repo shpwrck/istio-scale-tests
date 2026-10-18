@@ -85,6 +85,10 @@ them; inputs that differ read mixed:<value>,<value> with each distinct value onc
 (mixed:v1.30.5,v1.29.0, also when one run's own value was mixed:v1.30.5/v1.29.0).
 istio_version is each member's active IstioRevision .spec.version as 002 read it
 (istio_version_by_context: which member ran which).
+report_harness_sha (every format; csv REPORT_HARNESS_SHA) is the harness this report
+ran on, which can differ from harness_sha, the harness that measured the rows: a
+report made again later, or from another checkout, may count rows by other rules. The
+results dir it reads does not count as a change to it.
 When the results dir holds sweep-outcome.txt (003 writes it), text, csv and md
 repeat it, with the run that recorded it: the failed cells by reason, its problems
 (the Istio version, the active revision or the generation of the Istio CR or its
@@ -231,6 +235,8 @@ run_meta() {
 	echo "$v"
 }
 HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
+# This report's own harness, every format; the results dir it reads is no change to it.
+REPORT_HARNESS_SHA_M="$(report_harness_sha --exclude "$RESULTS_DIR")"
 ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
 # Where ISTIO_VERSION came from (live: each member's active IstioRevision; pin:
 # config only), the configured pin and which member ran which (PL19); files written
@@ -283,7 +289,7 @@ report_text() {
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
-	echo "# report_harness_sha (this report's own): $(report_harness_sha)"
+	echo "# report_harness_sha (this report's own): ${REPORT_HARNESS_SHA_M}"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# istio_notready_at_start: ${ISTIO_NOTREADY_AT_START_M}  istio_ready_waited_sec: ${ISTIO_READY_WAITED_SEC_M}"
@@ -396,7 +402,7 @@ report_text() {
 
 report_csv() {
 	echo "# HARNESS_SHA=${HARNESS_SHA_M}"
-	echo "# REPORT_HARNESS_SHA=$(report_harness_sha)"
+	echo "# REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA_M}"
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
 	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
@@ -527,7 +533,10 @@ in the `+Inf` bucket (above the histogram's highest finite bucket); `N/A` means 
 p99. `harness_sha` and `istio_version` in the front matter are what `002` recorded in the
 TSVs (`unknown (not recorded)` for a TSV written before it recorded them, `mixed:a,b` when
 the inputs differ, each distinct value once), not the commit or pin of the host that ran
-this report.
+this report. `report_harness_sha` in the front matter is that commit: the harness this
+report ran on (`<describe>-dirty.<8hex>` with uncommitted changes; the results dir it reads
+does not count), which can differ from `harness_sha`: a report made again later, or from
+another checkout, may count rows by other rules.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
@@ -583,7 +592,7 @@ report_markdown() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${harness_sha}")"
-	echo "report_harness_sha: $(yaml_str "$(report_harness_sha)")"
+	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
 	echo "sidecar_egress_hosts: $(yaml_str "$(preamble_get SIDECAR_EGRESS_HOSTS)")"
@@ -724,7 +733,7 @@ report_charts() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_M}")"
-	echo "report_harness_sha: $(yaml_str "$(report_harness_sha)")"
+	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"

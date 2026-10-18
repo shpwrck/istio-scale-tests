@@ -251,9 +251,10 @@ prop_row() {
 	grep -qx '# ISTIO_NOTREADY_AT_START=none' "${d}/sweep-metadata.txt"
 	grep -qx '# ISTIO_READY_WAITED_SEC=0' "${d}/sweep-metadata.txt"
 	grep -qx -- '- Start-of-run readiness: ISTIO_NOTREADY_AT_START=none, ISTIO_READY_WAITED_SEC=0' "${d}/sweep-comparison.md"
-	# The probe inherited the sweep's reading: the Istio CR is read at the start and again
-	# at the end, each a read and its one retry; never by the probe.
-	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 4 ]
+	# The probe inherited the sweep's reading: the Istio CR is read at the start, before the
+	# profile's apply (the sweep's checkpoint) and at the end, each a read and its one retry;
+	# never by the probe.
+	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 6 ]
 	# The outcome stays with the results, naming the harness the metadata names.
 	grep -qx 'EXIT=4' "${d}/sweep-outcome.txt"
 	[ "$(sed -n 's/^HARNESS_SHA=//p' "${d}/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "${d}/sweep-metadata.txt")" ]

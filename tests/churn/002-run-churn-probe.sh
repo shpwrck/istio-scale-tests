@@ -237,7 +237,7 @@ mkdir -p "$OUTPUT_DIR"
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
-for ctx in "${REMOTES[@]}"; do
+for ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	r="$(fanout_preflight_istiod "$ctx" "${KUBECTL[@]}")"
 	echo "  [$ctx] Running istiod replicas: $r"
 done
@@ -245,13 +245,13 @@ done
 # The Istio version the members run, before the first scale-up (inherited when 003
 # runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
 # mismatch.
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
 # HARNESS_SHA and the Istio version keys are recorded here so 004 reports the run's
 # commit and Istio version, not the report host's (the 003 placeholder writes the same
-# keys, PL36).
-HARNESS_SHA="$(harness_sha)"
+# keys, PL36); this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
@@ -314,7 +314,7 @@ scrape_ctx() {
 	local dir="$1" prefix="$2"
 	shift 2
 	local -a ports=("$@")
-	fanout_scrape_all "$dir" "$prefix" "${ports[@]}"
+	fanout_scrape_all "$dir" "$prefix" ${ports[@]+"${ports[@]}"}
 }
 
 # List the per-pod metrics files for a scrape (dir/prefix-*.metrics) in order.
@@ -411,7 +411,7 @@ poll_syncz_converged() {
 			(( $(count_grown_clusters "$baseline_file" "$cur_file") >= DEPLOYMENT_COUNT )) && seen=1
 		fi
 		if ((seen)); then
-			total="$(_syncz_stale_total "${ports[@]}")"
+			total="$(_syncz_stale_total ${ports[@]+"${ports[@]}"})"
 			if [[ "$total" == "0" ]]; then
 				now_ns > "$result_file"
 				return
@@ -429,7 +429,7 @@ wait_syncz_synced() {
 	local deadline=$(( $(date +%s) + timeout_sec ))
 	while (( $(date +%s) <= deadline )); do
 		local total
-		total="$(_syncz_stale_total "${ports[@]}")"
+		total="$(_syncz_stale_total ${ports[@]+"${ports[@]}"})"
 		[[ "$total" == "0" ]] && return 0
 		sleep "$POLL_INTERVAL_S"
 	done
@@ -545,7 +545,7 @@ scale_source() {
 		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" scale "deployment/churn-target-${d}" --replicas="$replicas" >/dev/null 2>&1 &
 		pids+=($!)
 	done
-	for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+	for pid in ${pids[@]+"${pids[@]}"}; do wait "$pid" 2>/dev/null || true; done
 }
 
 # convergence_remote_eds_ms: time to the first EDS push after t0 on a remote
@@ -585,7 +585,7 @@ poll_remote_eds_converged() {
 		# scrape (PL29); under set -e a bare call here would abort the probe before the
 		# .failed sidecar check below (the #31 incident class — caught by the new
 		# verify.sh bare-scrape lint). The .failed count is the authoritative gate.
-		fanout_scrape_all "$polldir" "tick" "${ports[@]}" >/dev/null || true
+		fanout_scrape_all "$polldir" "tick" ${ports[@]+"${ports[@]}"} >/dev/null || true
 		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
 			# Skip the detection test on an incomplete scrape (a missing pod
 			# undercounts the summed eds delta, PL29).
@@ -596,7 +596,7 @@ poll_remote_eds_converged() {
 		local -a tick_files=()
 		mapfile -t tick_files < <(ctx_metric_files "$polldir" "tick" "${#ports[@]}")
 		local cur_eds base_eds="$baseline_eds"
-		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${tick_files[@]}")
+		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${tick_files[@]+"${tick_files[@]}"})
 		# No EDS series in this tick (`unknown`, not 0): not converged yet. One that
 		# was absent at the baseline (`unknown`) was registered in the window, so it
 		# started at 0 (counter_delta's rule). Absent all along, the poll ends TIMEOUT,
@@ -697,13 +697,13 @@ load_rmt_ports() {
 reopen_istiod_fanouts_if_dead() {
 	local alive=1 port j
 	local -a _rp2=()
-	for port in "${SRC_ISTIOD_PORTS[@]}"; do
+	for port in ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"}; do
 		curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break; }
 	done
 	if ((alive)); then
 		for j in "${!REMOTES[@]}"; do
 			load_rmt_ports "$j" _rp2
-			for port in "${_rp2[@]}"; do
+			for port in ${_rp2[@]+"${_rp2[@]}"}; do
 				curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break 2; }
 			done
 		done
@@ -729,7 +729,7 @@ reopen_istiod_fanouts_if_dead() {
 	local -A old_rmt=()
 	old_src="$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")"
 	for j in "${!RMT_PODS_STR[@]}"; do old_rmt[$j]="${RMT_PODS_STR[$j]}"; done
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	open_istiod_fanouts
 	open_envoy_port_forwards
@@ -791,13 +791,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# proxies) SUMS across replicas; histograms/counters aggregate per pod below.
 	# `|| true`: scrape_ctx returns non-zero on an incomplete scrape (by design);
 	# incompleteness is captured on the next line, so it must not trip `set -e`.
-	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
+	scrape_ctx "$ITER_DIR" "src-pre" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"} >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_PRE_FILES < <(ctx_metric_files "$ITER_DIR" "src-pre" "$SRC_NPORTS")
 	# Pre podset = the scraped pods (lines up with SRC_PRE_FILES); post podset =
 	# every Running pod, so a replaced or added istiod shows up as a change.
-	printf '%s\n' "${SRC_ISTIOD_PODS[@]}" > "$ITER_DIR/src-pre.podset"
-	src_connected_proxies=$(fanout_gauge_sum pilot_xds "${SRC_PRE_FILES[@]}")
+	printf '%s\n' ${SRC_ISTIOD_PODS[@]+"${SRC_ISTIOD_PODS[@]}"} > "$ITER_DIR/src-pre.podset"
+	src_connected_proxies=$(fanout_gauge_sum pilot_xds ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"})
 
 	rmt_connected_proxies=0
 	declare -A RMT_PRE_FILES_STR=()
@@ -805,18 +805,18 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# (convergence_remote_eds_ms). Read from the SAME pre-scrape blob as the other
 	# baselines (PL21: no extra HTTP round-trip), summed across the remote's istiod
 	# pods. (No pilot_services baseline: churn has no clean registry-delta
-	# cross-check — see poll_remote_eds_converged, R2-1/PL31.)
+	# cross-check — see poll_remote_eds_converged and PL31.)
 	declare -A RMT_PRE_EDS=()
 	for i in "${!REMOTES[@]}"; do
 		_rports=()  # populated by load_rmt_ports via nameref
 		load_rmt_ports "$i" _rports
-		scrape_ctx "$ITER_DIR" "rmt${i}-pre" "${_rports[@]}" >/dev/null || true
+		scrape_ctx "$ITER_DIR" "rmt${i}-pre" ${_rports[@]+"${_rports[@]}"} >/dev/null || true
 		(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 		mapfile -t _rfiles < <(ctx_metric_files "$ITER_DIR" "rmt${i}-pre" "${#_rports[@]}")
 		RMT_PRE_FILES_STR["$i"]="$(IFS=$'\n'; echo "${_rfiles[*]}")"
 		printf '%s\n' "${RMT_PODS_STR[$i]}" > "$ITER_DIR/rmt${i}-pre.podset"
-		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds "${_rfiles[@]}") ))
-		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${_rfiles[@]}")
+		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds ${_rfiles[@]+"${_rfiles[@]}"}) ))
+		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${_rfiles[@]+"${_rfiles[@]}"})
 	done
 	((${#REMOTES[@]})) || rmt_connected_proxies="N/A"
 
@@ -838,8 +838,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	done
 
 	# Counter baselines summed across source pods.
-	src_pre_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_PRE_FILES[@]}")
-	src_pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_PRE_FILES[@]}")
+	src_pre_triggers=$(fanout_counter_sum pilot_push_triggers ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"})
+	src_pre_pushes=$(fanout_counter_sum pilot_xds_pushes ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"})
 
 	T0=$(now_ns)
 	# Run the scale-up + measurement + row-emit as a guarded subshell so a genuine
@@ -864,7 +864,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# own connected proxies, so convergence requires every pod to report 0 stale.
 	if ((SRC_WEIGHTS_OK)); then
 		poll_syncz_converged "$T0" "$LOCAL_FILE" "$SRC_ENVOY_PF_PORT" \
-			"$ITER_DIR/src-weights.base" "${SRC_ISTIOD_PORTS[@]}" &
+			"$ITER_DIR/src-weights.base" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"} &
 		POLL_PIDS+=($!)
 	else
 		echo "N/A" > "$LOCAL_FILE"
@@ -892,11 +892,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		load_rmt_ports "$i" _rports
 		poll_remote_eds_converged "$ITER_DIR/eds-poll-${i}" "$T0" \
 			"${RMT_PRE_EDS[$i]}" "$EDS_THRESHOLD_DELTA" \
-			"$edsf" "${_rports[@]}" &
+			"$edsf" ${_rports[@]+"${_rports[@]}"} &
 		POLL_PIDS+=($!)
 	done
 
-	for pid in "${POLL_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+	for pid in ${POLL_PIDS[@]+"${POLL_PIDS[@]}"}; do wait "$pid" 2>/dev/null || true; done
 	POLL_PIDS=()
 
 	conv_local=$(compute_delta_ms "$LOCAL_FILE" "$T0")
@@ -972,7 +972,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	fi
 
 	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
-	scrape_ctx "$ITER_DIR" "src-post" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
+	scrape_ctx "$ITER_DIR" "src-post" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"} >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_POST_FILES < <(ctx_metric_files "$ITER_DIR" "src-post" "$SRC_NPORTS")
 	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-post.podset" "${KUBECTL[@]}"
@@ -986,16 +986,16 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 
 	# counter_delta (metrics.sh): N/A with a warning when the counter is in neither
 	# scrape or went backwards, never 0 or negative.
-	src_post_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_POST_FILES[@]}")
-	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_POST_FILES[@]}")
+	src_post_triggers=$(fanout_counter_sum pilot_push_triggers ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"})
+	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"})
 	src_triggers_delta=$(counter_delta "$src_pre_triggers" "$src_post_triggers" "pilot_push_triggers on ${SOURCE_CTX}")
 	src_pushes_delta=$(counter_delta "$src_pre_pushes" "$src_post_pushes" "pilot_xds_pushes on ${SOURCE_CTX}")
 
 	# PL11: merge buckets across source pods, then delta -> quantile.
-	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-pre-q.merged" "${SRC_PRE_FILES[@]}"
-	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-post-q.merged" "${SRC_POST_FILES[@]}"
-	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-pre-pt.merged" "${SRC_PRE_FILES[@]}"
-	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-post-pt.merged" "${SRC_POST_FILES[@]}"
+	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-pre-q.merged" ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"}
+	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-post-q.merged" ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"}
+	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-pre-pt.merged" ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"}
+	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-post-pt.merged" ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"}
 	src_queue_p99=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/src-pre-q.merged" "$ITER_DIR/src-post-q.merged" pilot_proxy_queue_time)")
 	src_push_time_p99=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/src-pre-pt.merged" "$ITER_DIR/src-post-pt.merged" pilot_xds_push_time)")
 
@@ -1015,7 +1015,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		for i in "${!REMOTES[@]}"; do
 			_rports=()  # populated by load_rmt_ports via nameref
 			load_rmt_ports "$i" _rports
-			scrape_ctx "$ITER_DIR" "rmt${i}-post" "${_rports[@]}" >/dev/null || true
+			scrape_ctx "$ITER_DIR" "rmt${i}-post" ${_rports[@]+"${_rports[@]}"} >/dev/null || true
 			(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 			mapfile -t _rpost_files < <(ctx_metric_files "$ITER_DIR" "rmt${i}-post" "${#_rports[@]}")
 			fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-post.podset" "${KUBECTL[@]}"
@@ -1031,10 +1031,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			RMT_RESTART[i]="$r_restart"
 			RMT_PRE_CSV[i]="$rpre_csv"
 
-			rmt_post_t=$(fanout_counter_sum pilot_push_triggers "${_rpost_files[@]}")
-			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes "${_rpost_files[@]}")
-			rmt_pre_t=$(fanout_counter_sum pilot_push_triggers "${_rpre_files[@]}")
-			rmt_pre_p=$(fanout_counter_sum pilot_xds_pushes "${_rpre_files[@]}")
+			rmt_post_t=$(fanout_counter_sum pilot_push_triggers ${_rpost_files[@]+"${_rpost_files[@]}"})
+			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes ${_rpost_files[@]+"${_rpost_files[@]}"})
+			rmt_pre_t=$(fanout_counter_sum pilot_push_triggers ${_rpre_files[@]+"${_rpre_files[@]}"})
+			rmt_pre_p=$(fanout_counter_sum pilot_xds_pushes ${_rpre_files[@]+"${_rpre_files[@]}"})
 			# Summed over remotes; one remote's N/A makes the sum N/A (an undercount otherwise).
 			rmt_d=$(counter_delta "$rmt_pre_t" "$rmt_post_t" "pilot_push_triggers on ${REMOTES[i]}")
 			if [[ "$rmt_d" == "N/A" || "$rmt_triggers_delta" == "N/A" ]]; then
@@ -1049,8 +1049,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				rmt_pushes_delta=$(( rmt_pushes_delta + rmt_d ))
 			fi
 
-			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-pre-q.merged" "${_rpre_files[@]}"
-			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-post-q.merged" "${_rpost_files[@]}"
+			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-pre-q.merged" ${_rpre_files[@]+"${_rpre_files[@]}"}
+			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-post-q.merged" ${_rpost_files[@]+"${_rpost_files[@]}"}
 			rmt_q=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/rmt${i}-pre-q.merged" "$ITER_DIR/rmt${i}-post-q.merged" pilot_proxy_queue_time)")
 			if [[ "$rmt_q" != "N/A" && "$rmt_q" != "overflow" ]]; then
 				has_rmt_q=1
@@ -1059,8 +1059,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				rmt_queue_p99="overflow"
 			fi
 
-			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-pre-pt.merged" "${_rpre_files[@]}"
-			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-post-pt.merged" "${_rpost_files[@]}"
+			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-pre-pt.merged" ${_rpre_files[@]+"${_rpre_files[@]}"}
+			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-post-pt.merged" ${_rpost_files[@]+"${_rpost_files[@]}"}
 			rmt_pt=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/rmt${i}-pre-pt.merged" "$ITER_DIR/rmt${i}-post-pt.merged" pilot_xds_push_time)")
 			if [[ "$rmt_pt" != "N/A" && "$rmt_pt" != "overflow" ]]; then
 				has_rmt_pt=1
@@ -1200,7 +1200,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		if ! wait_source_pods_settled "$TIMEOUT_SEC"; then
 			echo "  Warning: $SOURCE_CTX still has terminating churn-target pods after ${TIMEOUT_SEC}s"
 		fi
-		if ! wait_syncz_synced "$TIMEOUT_SEC" "${SRC_ISTIOD_PORTS[@]}"; then
+		if ! wait_syncz_synced "$TIMEOUT_SEC" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"}; then
 			echo "  Warning: scale-down convergence timed out after ${TIMEOUT_SEC}s"
 		fi
 		if ((SRC_WEIGHTS_OK)) && ! wait_target_weights_settled "$SRC_ENVOY_PF_PORT" \

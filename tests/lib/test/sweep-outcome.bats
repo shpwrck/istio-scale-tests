@@ -86,7 +86,7 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	grep -qx "RUN_ID=${rid}" "$d/sweep-outcome.txt"
 	grep -q '^HARNESS_SHA=.' "$d/sweep-outcome.txt"
 	grep -qE '^STARTED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' "$d/sweep-outcome.txt"
-	grep -qx 'NEXT=if it died, --resume this sweep dir with the flags it ran with: the cells already measured are kept' "$d/sweep-outcome.txt"
+	grep -qx "NEXT=if it died, --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)" "$d/sweep-outcome.txt"
 	# Its own reports keep the "not written yet" line: the outcome never came.
 	grep -qF "$PENDING_MARK" "$d/sweep-${rid}.md"
 	grep -qF "$PENDING_MARK" "$d/scale-envelope-${rid}.md"

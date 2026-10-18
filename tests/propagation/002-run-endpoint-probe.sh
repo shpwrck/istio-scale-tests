@@ -136,14 +136,21 @@ DRAIN_TIMEOUT (endpoint did not drain within PROPAGATION_DRAIN_TIMEOUT_SEC after
 the iteration), NOT_DRAINED (before t0, a canary endpoint from an earlier
 iteration or run was still healthy on that side's watcher after a
 PROPAGATION_DRAIN_TIMEOUT_SEC wait, was healthy again at t0, or its /clusters
-could not be read: its timings are not this iteration's), or SCRAPE_INCOMPLETE
-(a pod's /metrics was unreachable, or baseline scrape skew exceeded
-FANOUT_MAX_SKEW_MS). status is the row's verdict over both sides; p1_status is
-the source side's alone and remote_status the remote's alone (N/A on a row with
-no remote), each also RESTART_UNKNOWN when that istiod's restart status could not
-be read. Before each iteration's baseline the probe checks every side's watcher:
-a canary endpoint still there is waited for, then SETTLE_SEC, so its removal push
-lands before the baseline.
+could not be read, which is not waited for: its timings are not this
+iteration's), or SCRAPE_INCOMPLETE (a pod's /metrics was unreachable, or baseline
+scrape skew exceeded FANOUT_MAX_SKEW_MS). status is the row's verdict over both
+sides; p1_status is the source side's alone and remote_status the remote's alone
+(N/A on a row with no remote), each also RESTART_UNKNOWN when that istiod's
+restart status could not be read. Before each iteration's baseline the probe
+checks every side's watcher: a canary endpoint still there is waited for, then
+SETTLE_SEC, so its removal push lands before the baseline; after an iteration
+whose drain timed out it settles SETTLE_SEC even when the check reads clean. Each
+NOT_DRAINED warning names the iteration and says whether the endpoint was still
+healthy or the watcher's /clusters could not be read. The backer resolve and its
+Ready wait run before the baseline scrape, so only the t0 check (one /clusters
+read per side) runs between that scrape and t0. A run that ends between t0 and
+its drain (an error, a kill, SIGTERM) removes the t0 label on exit, so the
+canary endpoint does not stay up for the next run.
 
 Summary (stdout and endpoint-<RUN_ID>.md): averages over the rows 005 counts, as valid
 samples/rows, with the other rows tallied by reason. P2 and P3 are left out only for the
@@ -281,7 +288,7 @@ fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 # The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
-HARNESS_SHA="$(harness_sha)"
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 TSV_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.tsv"
 
 if ((DRY_RUN)); then
@@ -317,13 +324,14 @@ if ((DRY_RUN)); then
 	echo "--- drain check (reads only; before each baseline, and again just before t0) ---"
 	echo "curl http://localhost:<watcher-port>/clusters on the source and every remote: no line may match"
 	echo "  ${CANARY_HEALTHY_RE}"
-	echo "  (waits up to ${DRAIN_TIMEOUT_SEC}s, then that side is NOT_DRAINED for the iteration)"
+	echo "  (a healthy one is waited for up to ${DRAIN_TIMEOUT_SEC}s, an unreadable /clusters not at all; then"
+	echo "  that side is NOT_DRAINED for the iteration)"
 	exit 0
 fi
 
 mkdir -p "$OUTPUT_DIR"
 
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
 # The Istio version the members run, before the first mutation (inherited when 006
 # runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
@@ -392,6 +400,11 @@ fi
 
 PF_PIDS=()
 POLL_PIDS=()
+# Backer pods labeled at t0 whose label removal has not succeeded yet. The EXIT trap
+# removes the label from each, so a run cut short between t0 and its drain (a kill, a
+# forwarded SIGTERM, a die) does not leave the canary endpoint up: the next run's first
+# iteration would read NOT_DRAINED.
+CANARY_LABELED_PODS=()
 TMPDIR_RUN=$(mktemp -d)
 # Every row, with or without --tsv: the summary below is computed from it.
 ROWS_FILE="${TMPDIR_RUN}/rows.tsv"
@@ -408,12 +421,35 @@ declare -A RMT_ISTIOD_PORTS_STR=()
 SRC_ISTIOD_PODS=()
 declare -A RMT_ISTIOD_PODS_STR=()
 
+# canary_unlabel <pod>: remove the t0 label from a backer pod (one bounded call) and, when
+# that worked, drop the pod from CANARY_LABELED_PODS. Returns 1 when kubectl failed.
+canary_unlabel() {
+	local pod="$1" p
+	local -a keep=()
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" --request-timeout=10s \
+		label "pod/${pod}" "${CANARY_ACTIVE_LABEL_KEY}-" --overwrite >/dev/null 2>&1 || return 1
+	for p in ${CANARY_LABELED_PODS[@]+"${CANARY_LABELED_PODS[@]}"}; do
+		[[ "$p" == "$pod" ]] || keep+=("$p")
+	done
+	CANARY_LABELED_PODS=(${keep[@]+"${keep[@]}"})
+	return 0
+}
+
 cleanup() {
+	local pod
 	for pid in ${POLL_PIDS[@]+"${POLL_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
 	POLL_PIDS=()
+	# A run that ended between t0 and its drain leaves the canary endpoint up.
+	for pod in ${CANARY_LABELED_PODS[@]+"${CANARY_LABELED_PODS[@]}"}; do
+		if canary_unlabel "$pod"; then
+			echo "The run ended before its drain: removed the ${CANARY_ACTIVE_LABEL_KEY} label from pod ${pod} on ${SOURCE_CTX}." >&2
+		else
+			echo "warning: could not remove the ${CANARY_ACTIVE_LABEL_KEY} label from pod ${pod} on ${SOURCE_CTX}: the canary endpoint stays up, and the next run's first iteration reads NOT_DRAINED. Remove it: kubectl --context=${SOURCE_CTX} -n ${NS} label pod/${pod} ${CANARY_ACTIVE_LABEL_KEY}-" >&2
+		fi
+	done
 	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
@@ -440,7 +476,7 @@ fanout_reopen_if_dead() {
 	local ctx="$1"
 	local -n _ports="$2"
 	local port alive=1
-	for port in "${_ports[@]}"; do
+	for port in ${_ports[@]+"${_ports[@]}"}; do
 		if ! curl -s -o /dev/null --max-time "$METRICS_TIMEOUT" "http://localhost:$port/metrics" 2>/dev/null; then
 			alive=0; break
 		fi
@@ -454,7 +490,7 @@ fanout_reopen_if_dead() {
 	local -A old_rmt=()
 	old_src="$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")"
 	for i in "${!RMT_ISTIOD_PODS_STR[@]}"; do old_rmt[$i]="${RMT_ISTIOD_PODS_STR[$i]}"; done
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	open_all_istiod_fanouts
 	# A replaced istiod pod kills its port-forward, so its iteration's row reads as a
@@ -923,9 +959,8 @@ normalize_proxy_count() {
 # increments pilot_xds_pushes{type=eds} when it ISSUES the push, and the sidecar
 # only reports health_flags::healthy after it APPLIES it (that lag IS the P3-P2 gap,
 # necessarily > 0). So a legitimately-clean iteration read "not healthy yet ->
-# dirty=1", re-collapsing the P2 column. R3-1 FIX: this poll loop no longer makes
-# the dirty decision at all — it only stamps the P2 LATENCY timestamp at the first
-# EDS bump. p2_dirty is reconciled by the CALLER against the SAME remote's P3
+# dirty=1", re-collapsing the P2 column. So this poll loop makes no dirty decision:
+# it only stamps the P2 LATENCY timestamp at the first EDS bump. p2_dirty is reconciled by the CALLER against the SAME remote's P3
 # OUTCOME (clean iff the canary became health_flags::healthy within the window, i.e.
 # P3 succeeded; dirty iff EDS bumped but P3 timed out / never went healthy). P3's
 # own retrying poll already waits for that signal, so there is no second /clusters
@@ -1116,18 +1151,29 @@ canary_healthy_on() {
 # that no canary endpoint from an earlier iteration or run is still healthy on its watcher
 # (a drain that timed out, or the last iteration of a run, which does not wait). Writes
 # "clean" (none seen), "drained" (one was there and went within DRAIN_TIMEOUT_SEC: settle
-# before the baseline, so its removal push lands outside the window) or "not_drained"
-# (still healthy, or /clusters unreadable, after DRAIN_TIMEOUT_SEC). Run in the background.
+# before the baseline, so its removal push lands outside the window), "healthy" (still
+# healthy after DRAIN_TIMEOUT_SEC) or "unreadable" (its /clusters could not be read: the
+# watcher's port-forward is down, so waiting would only spend DRAIN_TIMEOUT_SEC on every
+# iteration; no wait then). Run in the background.
 drain_gate() {
 	local out="$1" port="$2" rc=0
 	canary_healthy_on "$port" || rc=$?
-	if ((rc == 1)); then
-		echo clean > "$out"
-	elif wait_sidecar_endpoint_removed "$port" "$DRAIN_TIMEOUT_SEC"; then
+	case "$rc" in
+	1) echo clean > "$out"; return 0 ;;
+	2) echo unreadable > "$out"; return 0 ;;
+	esac
+	if wait_sidecar_endpoint_removed "$port" "$DRAIN_TIMEOUT_SEC"; then
 		echo drained > "$out"
-	else
-		echo not_drained > "$out"
+		return 0
 	fi
+	# The wait timed out: still healthy at the last read, or /clusters stopped answering.
+	rc=0
+	canary_healthy_on "$port" || rc=$?
+	case "$rc" in
+	1) echo drained > "$out" ;;
+	2) echo unreadable > "$out" ;;
+	*) echo healthy > "$out" ;;
+	esac
 	return 0
 }
 
@@ -1216,15 +1262,29 @@ gate_word() {
 	if [[ -r "$1" ]]; then w="$(<"$1")"; fi
 	printf '%s\n' "${w:-not_drained}"
 }
-# t0_check_text <word>: what a t0_check word other than "clean" means, for the console.
+# gate_text <word> <port>: what a drain_gate word other than "clean" or "drained" means,
+# for the console: the fix differs (a longer drain timeout, or the watcher's port-forward).
+gate_text() {
+	case "$1" in
+	healthy) echo "a canary endpoint from an earlier iteration or run is still healthy on its watcher after PROPAGATION_DRAIN_TIMEOUT_SEC=${DRAIN_TIMEOUT_SEC}s (raise it if its drains take longer)" ;;
+	unreadable) echo "its watcher's /clusters could not be read (the port-forward to deploy/propagation-watcher on localhost:${2}), so its drain cannot be checked" ;;
+	*) echo "its watcher's drain check wrote no result" ;;
+	esac
+}
+# t0_check_text <word> <port>: what a t0_check word other than "clean" means, for the console.
 t0_check_text() {
 	case "$1" in
 	healthy) echo "the canary endpoint is already healthy on its watcher" ;;
-	unreadable) echo "its watcher's /clusters could not be read" ;;
+	unreadable) echo "its watcher's /clusters could not be read (the port-forward to deploy/propagation-watcher on localhost:${2})" ;;
 	*) echo "its watcher could not be checked" ;;
 	esac
 }
 
+# PREV_DRAIN_TIMEOUT: the previous iteration's drain timed out on some side. Its removal
+# may have landed only at the end of that iteration's settle and still be pushing to the
+# other proxies, so the next drain check settles before the baseline even when it reads
+# clean.
+PREV_DRAIN_TIMEOUT=0
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo ""
 	echo "--- Iteration $iter/$ITERATIONS ---"
@@ -1263,26 +1323,55 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	done
 	wait "${gate_pids[@]}" || true
 	gate_settle=0
-	case "$(gate_word "$GATE_DIR/source")" in
+	_gw="$(gate_word "$GATE_DIR/source")"
+	case "$_gw" in
 	clean) ;;
 	drained) gate_settle=1 ;;
 	*)
 		SRC_NOTDRAINED=1
-		echo "  Warning: ${SOURCE_CTX}: a canary endpoint from an earlier iteration or run is still healthy on its watcher (or its /clusters cannot be read) after ${DRAIN_TIMEOUT_SEC}s: this iteration's P1 is NOT_DRAINED" >&2 ;;
+		echo "  Warning: iteration ${iter}/${ITERATIONS}: ${SOURCE_CTX}: $(gate_text "$_gw" "$SOURCE_ENVOY_PF_PORT"): this iteration's P1 is NOT_DRAINED" >&2 ;;
 	esac
 	for i in "${!REMOTES[@]}"; do
-		case "$(gate_word "$GATE_DIR/remote-${i}")" in
+		_gw="$(gate_word "$GATE_DIR/remote-${i}")"
+		case "$_gw" in
 		clean) ;;
 		drained) gate_settle=1 ;;
 		*)
 			RMT_NOTDRAINED[i]=1
-			echo "  Warning: ${REMOTES[i]}: a canary endpoint from an earlier iteration or run is still healthy on its watcher (or its /clusters cannot be read) after ${DRAIN_TIMEOUT_SEC}s: this iteration's P2/P3 for it are NOT_DRAINED" >&2 ;;
+			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${REMOTES[i]}: $(gate_text "$_gw" $(( BASE_ENVOY_PF_PORT + i ))): this iteration's P2/P3 for it are NOT_DRAINED" >&2 ;;
 		esac
 	done
 	if ((gate_settle)); then
 		echo "  A canary endpoint from an earlier iteration or run drained just now. Settling for ${SETTLE_SEC}s before the baseline..."
 		sleep "$SETTLE_SEC"
+	elif ((PREV_DRAIN_TIMEOUT)); then
+		echo "  The previous iteration's drain timed out: its removal may still be pushing. Settling for ${SETTLE_SEC}s before the baseline..."
+		sleep "$SETTLE_SEC"
 	fi
+
+	# O1: resolve the pre-warmed backer pod BEFORE t0 so its boot (scheduling,
+	# image pull, sidecar start) is entirely outside the measured window. The pod
+	# was made Ready by 001-setup and persists across iterations.
+	# During a rolling restart of the backer Deployment two Running pods can
+	# coexist (old Terminating-but-still-Running + new). items[0] could pick the
+	# terminating one (about to vanish, endpoint already removed), re-introducing the
+	# flip-onto-a-dying-pod race O1 removes. Sort by creationTimestamp and take the
+	# NEWEST Running pod so a just-rolled replacement wins over a lingering
+	# terminating one; the explicit Ready wait below then guarantees readiness before t0.
+	# Both calls run before the baseline scrape: between that scrape and T0 every second
+	# lets unrelated pushes raise the remote EDS counter (P2 reads short) and the source's
+	# convergence count (P1 reads short), so only the t0 check runs there.
+	BACKER_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pods \
+		-l app=propagation-canary --field-selector=status.phase=Running \
+		--sort-by=.metadata.creationTimestamp \
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+		| tail -n 1 || true)"
+	[[ -n "$BACKER_POD" ]] || die "no Running pre-warmed backer pod on $SOURCE_CTX (run 001-setup first)"
+	# Guard: the backer must be Ready before t0 (a label flip onto a not-yet-Ready
+	# pod would re-introduce boot latency into P3).
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" wait "pod/${BACKER_POD}" \
+		--for=condition=Ready --timeout="${TIMEOUT_SEC}s" >/dev/null 2>&1 \
+		|| die "backer pod $BACKER_POD on $SOURCE_CTX not Ready before t0"
 
 	# Concurrent baseline scrape across all istiods — now fanned out per-pod and
 	# aggregated (pilot_xds summed, pilot_services invariant, histograms
@@ -1291,7 +1380,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	BASELINE_DIR="$TMPDIR_RUN/baseline-${iter}"
 	mkdir -p "$BASELINE_DIR"
 	# Pre-window pod sets, lined up with the per-pod scrape files (istiod restart evidence).
-	printf '%s\n' "${SRC_ISTIOD_PODS[@]}" > "$BASELINE_DIR/source.podset"
+	printf '%s\n' ${SRC_ISTIOD_PODS[@]+"${SRC_ISTIOD_PODS[@]}"} > "$BASELINE_DIR/source.podset"
 	for i in "${!REMOTES[@]}"; do
 		printf '%s\n' "${RMT_ISTIOD_PODS_STR[$i]:-}" > "$BASELINE_DIR/remote-${i}.podset"
 	done
@@ -1337,29 +1426,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	SOURCE_PROXY_COUNT=$(normalize_proxy_count "$(kv_get "$BASELINE_DIR/source-kv" pilot_xds)")
 	echo "  Source connected proxies (summed across replicas): $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
 
-	# O1: resolve the pre-warmed backer pod BEFORE t0 so its boot (scheduling,
-	# image pull, sidecar start) is entirely outside the measured window. The pod
-	# was made Ready by 001-setup and persists across iterations.
-	# During a rolling restart of the backer Deployment two Running pods can
-	# coexist (old Terminating-but-still-Running + new). items[0] could pick the
-	# terminating one (about to vanish, endpoint already removed), re-introducing the
-	# flip-onto-a-dying-pod race O1 removes. Sort by creationTimestamp and take the
-	# NEWEST Running pod so a just-rolled replacement wins over a lingering
-	# terminating one; the explicit Ready wait below then guarantees readiness before t0.
-	BACKER_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pods \
-		-l app=propagation-canary --field-selector=status.phase=Running \
-		--sort-by=.metadata.creationTimestamp \
-		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-		| tail -n 1 || true)"
-	[[ -n "$BACKER_POD" ]] || die "no Running pre-warmed backer pod on $SOURCE_CTX (run 001-setup first)"
-	# Guard: the backer must be Ready before t0 (a label flip onto a not-yet-Ready
-	# pod would re-introduce boot latency into P3).
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" wait "pod/${BACKER_POD}" \
-		--for=condition=Ready --timeout="${TIMEOUT_SEC}s" >/dev/null 2>&1 \
-		|| die "backer pod $BACKER_POD on $SOURCE_CTX not Ready before t0"
-
 	# The last read before t0, on each side the drain check passed: a canary endpoint
 	# already healthy now (or a /clusters that cannot be read) makes that side NOT_DRAINED.
+	# It is all that runs between the baseline scrape and T0: one /clusters read per side,
+	# in parallel.
 	t0_pids=()
 	if ((SRC_NOTDRAINED == 0)); then t0_check "$GATE_DIR/source-t0" "$SOURCE_ENVOY_PF_PORT" & t0_pids+=($!); fi
 	for i in "${!REMOTES[@]}"; do
@@ -1371,7 +1441,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		_t0w="$(gate_word "$GATE_DIR/source-t0")"
 		if [[ "$_t0w" != clean ]]; then
 			SRC_NOTDRAINED=1
-			echo "  Warning: ${SOURCE_CTX}: $(t0_check_text "$_t0w") before t0: this iteration's P1 is NOT_DRAINED" >&2
+			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${SOURCE_CTX}: $(t0_check_text "$_t0w" "$SOURCE_ENVOY_PF_PORT") before t0: this iteration's P1 is NOT_DRAINED" >&2
 		fi
 	fi
 	for i in "${!REMOTES[@]}"; do
@@ -1379,7 +1449,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		_t0w="$(gate_word "$GATE_DIR/remote-${i}-t0")"
 		if [[ "$_t0w" != clean ]]; then
 			RMT_NOTDRAINED[i]=1
-			echo "  Warning: ${REMOTES[i]}: $(t0_check_text "$_t0w") before t0: this iteration's P2/P3 for it are NOT_DRAINED" >&2
+			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${REMOTES[i]}: $(t0_check_text "$_t0w" $(( BASE_ENVOY_PF_PORT + i ))) before t0: this iteration's P2/P3 for it are NOT_DRAINED" >&2
 		fi
 	done
 
@@ -1387,7 +1457,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	echo "  Flipping backer active label on $SOURCE_CTX (pod $BACKER_POD)..."
 	# Config-only mutation at t0: label the running backer pod. The canary Service
 	# selects on this label, so its endpoint appears with no pod boot; P1/P2/P3
-	# share this T0.
+	# share this T0. Recorded before the call, so a run cut short from here on removes
+	# the label on exit (cleanup).
+	[[ " ${CANARY_LABELED_PODS[*]-} " == *" ${BACKER_POD} "* ]] || CANARY_LABELED_PODS+=("$BACKER_POD")
 	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" \
 		label "pod/${BACKER_POD}" "${CANARY_ACTIVE_LABEL_KEY}=true" --overwrite >/dev/null
 
@@ -1482,8 +1554,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# warm for the next iteration; only the Service endpoint goes away. The
 	# Deployment + Service persist across iterations (created by 001-setup).
 	echo "  Removing backer active label on $SOURCE_CTX (pod $BACKER_POD)..."
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" \
-		label "pod/${BACKER_POD}" "${CANARY_ACTIVE_LABEL_KEY}-" --overwrite >/dev/null 2>&1 || true
+	# A failed removal leaves the pod in CANARY_LABELED_PODS (cleanup tries again on exit);
+	# the drain wait below then times out, and the next drain check sees the endpoint.
+	canary_unlabel "$BACKER_POD" \
+		|| echo "  Warning: could not remove the ${CANARY_ACTIVE_LABEL_KEY} label from pod ${BACKER_POD} on ${SOURCE_CTX}" >&2
 
 	# Track per-iteration drain timeout so we can flag the row with
 	# status=DRAIN_TIMEOUT. Without this, the next iteration's baseline
@@ -1513,12 +1587,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			fi
 		done
 		if [[ "$drain_timeout" == 1 ]]; then
-			echo "  Settling for ${SETTLE_SEC}s (the next iteration checks the drain again before its baseline)..."
+			echo "  Settling for ${SETTLE_SEC}s (the next iteration checks the drain again, and settles again, before its baseline)..."
 		else
 			echo "  Canary endpoints drained. Settling for ${SETTLE_SEC}s..."
 		fi
 		sleep "$SETTLE_SEC"
 	fi
+	PREV_DRAIN_TIMEOUT="$drain_timeout"
 
 	# Helper to compute final status. Honors restart, timeouts, drain timeout, a side not
 	# drained before t0.
@@ -1742,7 +1817,7 @@ done
 echo ""
 echo "Row-drop tally (rows left out of the averages above and by 005: a remote's row for its own side only, a row with no remote for the source's):"
 printf "  rows_dropped_total=%d/%d\n" "$DROPPED_TOTAL" "$ROWS_TOTAL"
-for r in "${DROP_REASONS[@]}"; do
+for r in ${DROP_REASONS[@]+"${DROP_REASONS[@]}"}; do
 	printf "    %-24s %s\n" "${r%%$'\t'*}" "${r#*$'\t'}"
 done
 printf "  rows_dropped_skew=%d/%d (that side's baseline scrape skew > FANOUT_MAX_SKEW_MS=%s)\n" \
@@ -1750,7 +1825,7 @@ printf "  rows_dropped_skew=%d/%d (that side's baseline scrape skew > FANOUT_MAX
 # P1 is left out only for its source side (p1_status, p1 overflow, source skew).
 if ((${#P1_DROP_REASONS[@]})); then
 	echo "P1 iterations left out (source side only; a remote's failure keeps P1):"
-	for r in "${P1_DROP_REASONS[@]}"; do
+	for r in ${P1_DROP_REASONS[@]+"${P1_DROP_REASONS[@]}"}; do
 		printf "    %-24s %s\n" "${r%%$'\t'*}" "${r#*$'\t'}"
 	done
 fi
@@ -1801,7 +1876,9 @@ md_cell -v _md_rmt "${REMOTES[*]:-none}"
 	echo "- **Drain check:** before each iteration's baseline, every side's watcher must show no"
 	echo "  healthy canary endpoint (waited for up to ${DRAIN_TIMEOUT_SEC}s, then ${SETTLE_SEC}s settle), and"
 	echo "  again just before t0. A side that fails it is \`NOT_DRAINED\` for that iteration: its P3"
-	echo "  would read about 0 and a late removal push would shorten P2 or P1."
+	echo "  would read about 0 and a late removal push would shorten P2 or P1. After an iteration"
+	echo "  whose drain timed out, the next one settles before its baseline even when the check reads"
+	echo "  clean."
 	echo ""
 	echo "## Summary"
 	echo ""
@@ -1826,7 +1903,7 @@ md_cell -v _md_rmt "${REMOTES[*]:-none}"
 		echo ""
 		echo "| Reason | Rows |"
 		echo "|--------|------|"
-		for r in "${DROP_REASONS[@]}"; do
+		for r in ${DROP_REASONS[@]+"${DROP_REASONS[@]}"}; do
 			echo "| \`${r%%$'\t'*}\` | ${r#*$'\t'} |"
 		done
 	else
@@ -1838,7 +1915,7 @@ md_cell -v _md_rmt "${REMOTES[*]:-none}"
 		echo ""
 		echo "| Reason | Iterations |"
 		echo "|--------|------------|"
-		for r in "${P1_DROP_REASONS[@]}"; do
+		for r in ${P1_DROP_REASONS[@]+"${P1_DROP_REASONS[@]}"}; do
 			echo "| \`${r%%$'\t'*}\` | ${r#*$'\t'} |"
 		done
 	fi

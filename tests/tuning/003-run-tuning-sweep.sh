@@ -73,13 +73,16 @@ Environment:
   long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
+  HARNESS_SHA_CHECK_SEC, SWEEP_STOP_GRACE_SEC, ISTIO_PROXY_READ_PARALLEL
+  (config/options.env).
 
 Exit codes:
   0  every pass (baseline and each profile) ran its probe
-  1  the sweep stopped: a bad flag or precondition, the suite setup failed, a profile
-     could not be reverted (REVERT_FAILED; later passes skipped), or an unexpected error;
-     after its start, sweep-outcome.txt records the stop and its reason (STOPPED=1,
-     STOP_REASON, CUT_SHORT=1), after the active profile is reverted
+  1  the sweep stopped: a bad flag or precondition (also another live run that holds
+     the sweep dir's .sweep.lock: nothing was changed), the suite setup failed, a
+     profile could not be reverted (REVERT_FAILED; later passes skipped), or an
+     unexpected error; after its start, sweep-outcome.txt records the stop and its
+     reason (STOPPED=1, STOP_REASON, CUT_SHORT=1), after the active profile is reverted
   4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
      passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
      non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason), or the
@@ -88,9 +91,13 @@ Exit codes:
          its end), or a member's Istio CR or active IstioRevision generation went up
          after the last revert (at the same version: an edit of the Istio CR, an OSSM
          operator upgrade, or a change of the cluster's TLS security profile);
-       - the Istio CR changed during a pass, after its profile's apply settled and not
-         by that profile (002-revert-profile.sh compares the generations before its
-         revert), or between the start and the end of the suite setup;
+       - the Istio CR changed while the sweep changed nothing: during a pass, after its
+         profile's apply settled and not by that profile (002-revert-profile.sh compares
+         the generations before its revert), during the suite setup, the baseline pass
+         or a profile that leaves the Istio CR alone (istio_cr_patch: {}), or between
+         one pass's revert and the next pass's apply (read before each apply);
+       - the harness (a file under tests/, config/, charts/ or terraform/) changed
+         during the sweep: HARNESS_SHA read again before the steps and at the end;
        - a member's Istio CR spec after the last revert differs from the sweep's start
          (an incomplete revert: the paths that differ are named).
      The sweep's own apply and revert raise the generations too: the sweep reads them
@@ -98,9 +105,10 @@ Exit codes:
      and sweep-comparison.md
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM); the active profile is reverted
      first, then sweep-outcome.txt stays "not finished" and says when and by which
-     signal (ENDED_AT, ENDED_SIGNAL). A SIGTERM sent to the sweep's process alone
-     reaches the step that runs (an apply, a revert, a probe) at once; only a settle
-     wait (--settle) finishes first
+     signal (ENDED_AT, ENDED_SIGNAL). A signal sent to the sweep's process alone
+     reaches the step that runs (an apply, a revert, a probe) and every process under
+     it at once (any still running SWEEP_STOP_GRACE_SEC later get SIGKILL); only a
+     settle wait (--settle) finishes first
 EOF
 }
 
@@ -169,9 +177,9 @@ PASSES+=("${PROFILES[@]}")
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_BASE}/sweep-${RUN_ID}"
-# The harness, once for the whole sweep: sweep-metadata.txt, sweep-outcome.txt and every
-# probe record this value (harness_sha_for_sweep exports it), and its own results under
-# the output dir do not count.
+# The harness at the sweep's start (sweep-metadata.txt, sweep-outcome.txt); its results
+# under the output dir do not count (harness_sha_for_sweep exports that dir, so each probe
+# records the harness it runs). A harness that changes during the sweep is a problem.
 harness_sha_for_sweep "$OUTPUT_BASE"
 PAUSE_STATE="${SWEEP_DIR}/gitops-pause.json"
 TUNING_BASELINE="unknown"
@@ -188,13 +196,13 @@ controlplane)
 	SETUP_CMD=("${SUITE_DIR}/001-setup-controlplane-test.sh" --contexts "$CONTEXTS_CSV")
 	CLEANUP_CMD=("${SUITE_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
 dataplane)
-	SETUP_CMD=("${SUITE_DIR}/001-setup-dataplane-test.sh" --source-context "$SOURCE_CTX" "${remote_args[@]}")
+	SETUP_CMD=("${SUITE_DIR}/001-setup-dataplane-test.sh" --source-context "$SOURCE_CTX" ${remote_args[@]+"${remote_args[@]}"})
 	CLEANUP_CMD=("${SUITE_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
 churn)
 	SETUP_CMD=("${SUITE_DIR}/001-setup-churn-test.sh" --contexts "$CONTEXTS_CSV")
 	CLEANUP_CMD=("${SUITE_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV") ;;
 churn-dataplane)
-	SETUP_CMD=("${SUITE_DIR}/001-setup-coexec-test.sh" --source-context "$SOURCE_CTX" "${remote_args[@]}")
+	SETUP_CMD=("${SUITE_DIR}/001-setup-coexec-test.sh" --source-context "$SOURCE_CTX" ${remote_args[@]+"${remote_args[@]}"})
 	CLEANUP_CMD=("${SUITE_DIR}/006-cleanup.sh" --contexts "$CONTEXTS_CSV" --wait-deletion) ;;
 esac
 
@@ -203,7 +211,7 @@ esac
 probe_argv() {
 	local n="$1" label="$2" dir="$3"
 	local tb=(--tuning-baseline "$TUNING_BASELINE" --sidecar-egress-hosts "$SIDECAR_EGRESS_HOSTS")
-	local src=(--source-context "$SOURCE_CTX" "${remote_args[@]}")
+	local src=(--source-context "$SOURCE_CTX" ${remote_args[@]+"${remote_args[@]}"})
 	local cd_file="${dir}/churn-dataplane-${label}.tsv"
 	case "${SUITE}:${n}" in
 	propagation:1) PROBE_ARGV=("${SUITE_DIR}/002-run-endpoint-probe.sh" "${src[@]}" --tsv --output-dir "$dir" "${tb[@]}") ;;
@@ -274,6 +282,7 @@ if ((DRY_RUN)); then
 	echo ""
 	echo "--- Checking probe arguments (each probe's --dry-run) ---"
 	check_dir="$(mktemp -d)"
+	trap 'rm -rf "$check_dir" || true' EXIT
 	n=1
 	while probe_argv "$n" baseline "$check_dir"; do
 		if ! "${PROBE_ARGV[@]}" --dry-run >"${check_dir}/check.log" 2>&1; then
@@ -314,6 +323,8 @@ GITOPS_PAUSED=0
 on_exit() {
 	local rc=$? sd="$ACTIVE_STATE_DIR" prof
 	local -a notes=()
+	# A step a second signal left running (an apply): killed before the revert.
+	sweep_step_kill
 	if [[ -n "$sd" && -f "${sd}/active-profile" ]]; then
 		prof="$(<"${sd}/active-profile")"
 		echo ">>> reverting ${prof} before exit" >&2
@@ -366,23 +377,33 @@ while IFS= read -r kv; do
 done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 
 # The sweep edits the Istio CR itself (each profile's apply and revert raise the Istio CR's
-# and the active IstioRevision's generations), so it reads them again after each of its
+# and the active IstioRevision's generations), so it reads them again around each of its
 # own edits (istio_version_refresh: the probes that follow record what they run on, and
 # the end recheck covers only the span after the last revert). ISTIO_EDITS: the
 # sweep_outcome --problem arguments for an edit that was not the sweep's.
 ISTIO_EDITS=()
-# istio_checkpoint <from> <ours 0|1>: read the generations and proxy versions again, named
-# <from> ("after the revert of pass 02-x") in the end recheck's messages. With <ours> 0
-# (the sweep changed nothing since the last read) a generation that moved is an edit by
-# something else: a problem.
+# istio_checkpoint <from> <ours 0|1>: read the generations again (not the proxies: right
+# after an apply or a revert, old istiod pods may still be terminating; run_pass reads
+# those after its settle), named <from> ("after the revert of pass 02-x") in the end
+# recheck's messages. With <ours> 0 (the sweep changed nothing since the last read) a
+# generation that moved is an edit by something else: a problem.
 istio_checkpoint() {
-	local from="$1" ours="$2" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-at the start}" moved tab=$'\t'
-	istio_version_refresh "$from" "$CONTEXTS_CSV" "${KUBECTL[@]}"
+	local from="$1" ours="$2" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-}" moved tab=$'\t'
+	[[ -n "$prev" ]] || prev="at the sweep's start"
+	istio_version_refresh --generations-only "$from" "$CONTEXTS_CSV" "${KUBECTL[@]}"
 	((ours == 0)) || return 0
 	moved="$(istio_generations_diff "$before" "${ISTIO_GENERATIONS:-}")"
 	[[ -n "$moved" ]] || return 0
-	ISTIO_EDITS+=(--problem "the Istio CR changed between ${prev} and ${from}, while the sweep changed nothing: ${moved#*"$tab"}; likely: $(istio_generation_causes "${moved%%"$tab"*}"); the passes after it may have measured another configuration")
+	ISTIO_EDITS+=(--problem "the Istio CR changed while the sweep changed nothing, between its read ${prev} and its read ${from}: ${moved#*"$tab"}; likely: $(istio_generation_causes "${moved%%"$tab"*}"); the passes run since that first read may have measured another configuration")
 	echo "WARNING: ${ISTIO_EDITS[${#ISTIO_EDITS[@]}-1]}" >&2
+}
+
+# profile_edits_cr <state_dir>: false when the pass's profile leaves the Istio CR alone
+# (001 saved its istio_cr_patch as {} in patch.json), so its apply and revert raise no
+# generation and a checkpoint after them compares as one with ours=0; true otherwise,
+# also when patch.json is missing (001 stopped before it saved it).
+profile_edits_cr() {
+	[[ "$(cat "${1}/patch.json" 2>/dev/null)" != "{}" ]]
 }
 
 # The members' Istio CR spec before the first profile, to check at the end that the last
@@ -404,7 +425,7 @@ fi
 if ((RUN_SETUP)); then
 	echo "--- Suite setup ---"
 	sweep_step "${SETUP_CMD[@]}" || die "suite setup failed"
-	# Its sidecars are what the probes measure: their proxy versions, read again.
+	# The setup changes no Istio CR (its sidecars' proxy versions: run_pass reads them).
 	istio_checkpoint "after the suite setup" 0
 fi
 
@@ -422,6 +443,9 @@ run_pass() {
 	fi
 	echo "--- Settle ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"
+	# The proxies connected now (the pass's sidecars, once old istiod pods are gone): what
+	# its probes record as ISTIO_PROXY_VERSIONS.
+	istio_version_refresh --proxies-only "after the settle of pass ${label}" "$CONTEXTS_CSV" "${KUBECTL[@]}"
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
@@ -448,6 +472,9 @@ for p in "${PASSES[@]}"; do
 		continue
 	fi
 	state_dir="${SWEEP_DIR}/${p}/state"
+	# Nothing the sweep did since its last read (a baseline pass, the last revert) moved the
+	# generations: one that moved now is an edit by something else.
+	istio_checkpoint "before the apply of pass ${p}" 0
 	ACTIVE_STATE_DIR="$state_dir"
 	if ! sweep_step "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
 		--state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
@@ -456,15 +483,22 @@ for p in "${PASSES[@]}"; do
 		mkdir -p "${SWEEP_DIR}/${p}"
 		echo "SETUP_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/SETUP_FAILED"
 	else
-		# The apply raised the generations: the pass's probes record the new ones.
-		istio_checkpoint "after the apply of pass ${p}" 1
+		# The apply raised the generations (unless its profile leaves the Istio CR alone):
+		# the pass's probes record the new ones.
+		ours=0
+		if profile_edits_cr "$state_dir"; then ours=1; fi
+		istio_checkpoint "after the apply of pass ${p}" "$ours"
 		run_pass "$p"
 	fi
 	if [[ -f "${state_dir}/active-profile" ]]; then
 		revert_ok=1
 		sweep_step "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT" || revert_ok=0
-		# The revert raised them again (a failed one too): the end recheck starts here.
-		istio_checkpoint "after the revert of pass ${p}" 1
+		# The revert raised them again (a failed one too): the end recheck starts here. A
+		# profile that leaves the Istio CR alone raised nothing: an edit since the apply's
+		# read is something else's, unless 002 named it already (istio-edited-during-pass).
+		ours=1
+		if ! profile_edits_cr "$state_dir" && [[ ! -s "${state_dir}/istio-edited-during-pass" ]]; then ours=0; fi
+		istio_checkpoint "after the revert of pass ${p}" "$ours"
 		if [[ -s "${state_dir}/istio-edited-during-pass" ]]; then
 			edit="$(<"${state_dir}/istio-edited-during-pass")" tab=$'\t'
 			ISTIO_EDITS+=(--problem "the Istio CR changed during pass ${p}, after its apply settled and not by its profile: ${edit#*"$tab"}; likely: $(istio_generation_causes "${edit%%"$tab"*}"); its probes may have measured another configuration (002-revert-profile.sh, istio-edited-during-pass in its state dir)")

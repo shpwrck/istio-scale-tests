@@ -161,6 +161,10 @@ reject() {
 	reject 1 'CONTROLPLANE_MAX_MATRIX is not settable from --config' 'CONTROLPLANE_MAX_MATRIX=9999'
 	# Every suite reads it; a file never turns the Istio version check off.
 	reject 1 'ISTIO_VERSION_CHECK is not settable from --config (env only: running on a mesh whose Istio version is not the pin' 'ISTIO_VERSION_CHECK=warn'
+	# The other shared keys every sweep or version check reads say why too.
+	reject 1 'ISTIO_PROXY_READ_PARALLEL is not settable from --config (env only: ' 'ISTIO_PROXY_READ_PARALLEL=5'
+	reject 1 'HARNESS_SHA_CHECK_SEC is not settable from --config (env only: a setting of every sweep' 'HARNESS_SHA_CHECK_SEC=0'
+	reject 1 'SWEEP_STOP_GRACE_SEC is not settable from --config (env only: a setting of every sweep' 'SWEEP_STOP_GRACE_SEC=1'
 }
 
 @test "load_config: one bad line rejects the whole file; nothing is exported" {
@@ -1042,7 +1046,7 @@ STUB
 	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/sweep-outcome.txt"
 	run bash "$CP/004-report-results.sh" --results-dir "$d"
 	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.prev.txt by run "
-	assert_output --regexp "#   warning: the last --resume of this sweep \(started at [0-9T:+-]+\) has not finished \(it was interrupted at [0-9T:-]+Z by SIGTERM; run the same --resume again\): this is the outcome before it, from sweep-outcome.prev.txt"
+	assert_output --regexp "#   warning: the last --resume of this sweep \(started at [0-9T:-]+Z\) has not finished \(it was interrupted at [0-9T:-]+Z by SIGTERM; run the same --resume again\): this is the outcome before it, from sweep-outcome.prev.txt"
 	assert_output --partial "#   error: could not count the sweep's cells: awk: cannot read the plan cell keys file"
 	# That problem does not stop a resume, which counts again: the valid retry ran last,
 	# so every cell ran.

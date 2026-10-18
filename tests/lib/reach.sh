@@ -318,7 +318,7 @@ reach_check_all() {
 	local -a targets=("$src") classes=(local) remotes=() att=() todo=() pids=()
 	local tmp i r attempt pid url line max retry
 	if [[ -n "$remotes_csv" ]]; then split_csv "$remotes_csv" remotes; fi
-	for r in "${remotes[@]}"; do targets+=("$r"); classes+=(remote); done
+	for r in ${remotes[@]+"${remotes[@]}"}; do targets+=("$r"); classes+=(remote); done
 	[[ -e "$tsv" ]] || return 1
 	tmp="$(mktemp -d 2>/dev/null)" || return 1
 	max="${REACH_ATTEMPTS:-3}"
@@ -335,13 +335,13 @@ reach_check_all() {
 		((${#todo[@]})) || break
 		if ((attempt > 1 && retry > 0)); then sleep "$retry"; fi
 		pids=()
-		for i in "${todo[@]}"; do
+		for i in ${todo[@]+"${todo[@]}"}; do
 			att[i]=$attempt
 			url="${tmpl//\{ctx\}/${targets[$i]}}"
 			reach_check_target "${tmp}/${i}" "$src" "$ns" "$pod" "$url" "$((attempt == max ? 1 : 0))" "$@" &
 			pids+=($!)
 		done
-		for pid in "${pids[@]}"; do wait "$pid" || true; done
+		for pid in ${pids[@]+"${pids[@]}"}; do wait "$pid" || true; done
 	done
 	for i in "${!targets[@]}"; do
 		line=""

@@ -94,7 +94,7 @@
 # restarted before the window, so the pod counts as no_change, not restarted_untimed.
 #
 # Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK, ctx_file_safe,
-# CTX_FILE_NAME_MAX), reach.sh (reach_sanitize), jq, awk, sed, tail, mktemp; gzip when
+# CTX_FILE_NAME_MAX, RUN_ID_FILE_NAME_MAX, TAG_FILE_NAME_MAX), reach.sh (reach_sanitize), jq, awk, sed, tail, mktemp; gzip when
 # present (evidence stays uncompressed without it); common.sh's harness_sha (else
 # HARNESS_SHA=unknown). Callers run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -206,8 +206,8 @@ _ISTIOD_DIAG_JQ_NODE='
 # File and folder names: ctx_file_safe (tests/lib/common.sh), the one file-name form of a
 # context that tuning's state files and redact-results.sh's renames use too: every byte
 # outside [A-Za-z0-9._-] becomes _ in any locale (no ':' or '+', for NTFS copies). A
-# context in a folder name is cut to CTX_FILE_NAME_MAX characters; a run id to 64, a tag
-# to 48. An empty token reads x.
+# context in a folder name is cut to CTX_FILE_NAME_MAX characters, a run id to
+# RUN_ID_FILE_NAME_MAX (64), a tag to TAG_FILE_NAME_MAX (48). An empty token reads x.
 
 # _istiod_diag_now: harness UTC time, ISO 8601 (portable: no GNU date flags).
 # shellcheck disable=SC2329
@@ -785,7 +785,7 @@ _istiod_diag_run() {
 			NODES+=("$node")
 		done
 		local ni=0 rd
-		for node in "${NODES[@]}"; do
+		for node in ${NODES[@]+"${NODES[@]}"}; do
 			ni=$((ni + 1))
 			_istiod_diag_time_ok || { partial=1; break; }
 			if "${kc[@]}" --context="$ctx" get node "$node" -o json --request-timeout="$_IDG_RT" \
@@ -944,7 +944,7 @@ _istiod_diag_run() {
 		rsc="${A_RSC[k]:-N/A}"
 		note="${A_NOTE[k]%; }"
 		[[ -n "$note" ]] || note=-
-		note="$(_istiod_diag_text "$note" "$ctx" "${all_nodes[@]}")"
+		note="$(_istiod_diag_text "$note" "$ctx" ${all_nodes[@]+"${all_nodes[@]}"})"
 		_istiod_diag_row "$dir" "$now" "$tag" "$ctx" "$trigger" "$p" "$ch" "${A_CAUSE[k]:-unknown}" \
 			"$rc_v" "$exit_v" "$sig_v" "$reason_v" "$start_v" "$fin_v" "$lim_v" "$rss" "$heap" "$gr" "$xds" \
 			"$at" "$rsc" "$nr" "${A_EV[k]}" "$note"
@@ -962,7 +962,7 @@ _istiod_diag_run() {
 			echo ""
 			echo "| pod | change | cause | restarts | exit | term_reason | started_at | finished_at | limit (Mi) | rss_pre (Mi) | heap_inuse_pre (Mi) | rs_changed | node_ready_at | note |"
 			echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
-			printf '%s\n' "${SUMMARY[@]}"
+			printf '%s\n' ${SUMMARY[@]+"${SUMMARY[@]}"}
 			echo ""
 			echo "## Memory history"
 			echo ""
@@ -994,7 +994,7 @@ _istiod_diag_run() {
 istiod_diag_dir() {
 	local d t
 	d="$(dirname "${1:-.}")"
-	t="$(ctx_file_safe "${2:-}" 64)"
+	t="$(ctx_file_safe "${2:-}" "$RUN_ID_FILE_NAME_MAX")"
 	printf '%s/istiod-diag-%s\n' "$d" "${t:-x}"
 }
 
@@ -1012,7 +1012,7 @@ istiod_diag_capture() {
 		return 0
 	fi
 	local dir="$1" tag ctx="$3" trigger="$4" podset="$5" pre_csv="$6"
-	tag="$(ctx_file_safe "$2" 48)"
+	tag="$(ctx_file_safe "$2" "$TAG_FILE_NAME_MAX")"
 	tag="${tag:-x}"
 	shift 6
 	if ! mkdir -p "$dir" 2>/dev/null; then

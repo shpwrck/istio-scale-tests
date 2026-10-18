@@ -92,7 +92,7 @@
 # at ~50 concurrent port-forwards, but above the ~2s P1/P2 signal so it does not
 # clip legitimate slow convergence.
 #
-# R2-2 (PROVISIONAL — pre-GO live-validation item, env-overridable knob): the
+# PROVISIONAL (a pre-GO live-validation item, an env-overridable knob): the
 # 1000ms ceiling is extrapolated from a SINGLE 4043ms outlier, NOT from a measured
 # .skew distribution at a high-context topology. For the 20-cluster/10k campaign a
 # scrape batch fans out across ~100 concurrent port-forwards (20 contexts x up to 5
@@ -207,7 +207,7 @@ fanout_open() {
 	done
 	# Join ONLY the readiness probes (the port-forwards run indefinitely, so a bare
 	# `wait` would block forever). O(slowest pod) instead of O(sum of waits).
-	for i in "${probe_pids[@]}"; do wait "$i" 2>/dev/null || true; done
+	for i in ${probe_pids[@]+"${probe_pids[@]}"}; do wait "$i" 2>/dev/null || true; done
 	# Collect ready pods in sorted-index order so port = base+i stays stable and a
 	# skipped pod leaves a gap rather than renumbering later pods' ports.
 	for i in "${!_fo_pods[@]}"; do
@@ -275,7 +275,7 @@ fanout_scrape_all() {
 		pids+=($!)
 	done
 	local p
-	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+	for p in ${pids[@]+"${pids[@]}"}; do wait "$p" 2>/dev/null || true; done
 
 	# Retry any empty/short scrape ONCE in-tick (transient timeout), then count
 	# pods still failing.

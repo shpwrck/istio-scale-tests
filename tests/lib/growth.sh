@@ -264,7 +264,7 @@ growth_retire_verified() {
 		if ! "$@"; then
 			bad="the cleanup command failed"
 		else
-			for ctx in "${ctxs[@]}"; do
+			for ctx in ${ctxs[@]+"${ctxs[@]}"}; do
 				if ! left="$(growth_discovered_ns "$ctx" "$sel" "${_grv_k[@]}")"; then
 					bad="${bad:+${bad}; }${ctx}: namespaces not listable"
 				elif [[ -n "$left" ]]; then

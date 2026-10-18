@@ -5,8 +5,8 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
 ## What this repo is
 
 1. `terraform/rosa-hcp/`: ROSA HCP cluster provisioning (optional).
-2. `terraform/platform/`: ACM + OpenShift GitOps on the hub and spoke registration. Clusters come from
-   ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
+2. `terraform/platform/`: ACM + OpenShift GitOps on the hub and spoke registration. Clusters come
+   from ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
    ApplicationSets through ACM Placement.
 4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
@@ -52,11 +52,12 @@ Prefer it over generic upstream Istio docs when they disagree.
 - `set -euo pipefail`. Repo root from a suite dir: `ROOT="$(cd "$(dirname "$0")/../.." && pwd)"`.
 - Source `"${ROOT}/config/versions.env"` first (it sources `options.env`), then the `tests/lib/*.sh`
   you need. Don't re-implement lib functions; `tests/lib/verify.sh` audits for inline copies.
-- Exception, scripts that take `--config FILE` (every suite but tuning): source `tests/lib/common.sh`
-  and `tests/lib/config.sh`, call `config_preload <suite> "$@"`, then source `versions.env` (or
-  `options.env`) and the other libs (`fanout.sh` reads its defaults when sourced). The
-  file's values must be in the environment before `options.env` fills in (and derives) defaults.
-  Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats` checks the order.
+- Exception, scripts that take `--config FILE` (every suite but tuning): source
+  `tests/lib/common.sh` and `tests/lib/config.sh`, call `config_preload <suite> "$@"`, then source
+  `versions.env` (or `options.env`) and the other libs (`fanout.sh` reads its defaults when
+  sourced). The file's values must be in the environment before `options.env` fills in (and
+  derives) defaults. Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats`
+  checks the order.
 - Contexts: env `SETUP_CONTEXTS` and flag `--contexts CSV` list **mesh members only**, never the
   ACM hub. Parse into `CONTEXTS_CSV`, split into `CONTEXTS[@]`, loop with `ctx`.
 - Arrays keyed by a variable (a context or file name): bash 4.3 to 5.1 expand the key twice inside
@@ -103,20 +104,23 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
   audit, bats, the bare-scrape and keyed-array lints, and every `# ci-dry-run:` script against an
-  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`.
+  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`. The bats
+  that parse the reports' YAML frontmatter need `python3` + PyYAML and skip without it (CI
+  installs it), so a run without PyYAML proves less than it reports.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
-- CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks on
-  macOS. The job names are required checks; don't rename them.
+- CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks
+  on macOS. The job names are required checks; don't rename them.
 - Live: deploy, then check that every hub Application is Synced/Healthy, the `mesh-wiring-verify`
   gate is Ready (`ca=shared`), and mesh-verify answers from every member (README "Verify").
 
 ## Tools
 
 `bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
-`timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in `tests/lib/common.sh`),
-`istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite), `aws` + `rosa` (ROSA only).
+`timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in
+`tests/lib/common.sh`), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and
+the frontmatter bats, which skip without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

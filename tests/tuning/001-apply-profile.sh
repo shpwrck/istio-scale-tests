@@ -142,7 +142,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		|| die "${ctx}: cannot read Istio CR 'default'"
 	python3 -I "$HELPER" revert-patch "$WORK/patch.json" "${STATE_DIR}/istio-before-${key}.json" \
 		"${STATE_DIR}/istio-revert-${key}.json"
-	for line in "${RES_LINES[@]}"; do
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
 			die "${ctx}: ${kind}/${name} already exists in ${ns}; refusing to overwrite it (part of the GitOps baseline or a leftover? see 005-cleanup.sh)"
@@ -150,7 +150,9 @@ for ctx in "${CONTEXTS[@]}"; do
 	done
 done
 
-# Record state before mutating so an interrupted apply can still be reverted.
+# Record state before mutating so an interrupted apply can still be reverted. A revert's
+# markers from an earlier apply in this state dir do not belong to this one.
+rm -f "${STATE_DIR}/revert-started" "${STATE_DIR}/istio-edited-during-pass"
 cp "$WORK/patch.json" "${STATE_DIR}/patch.json"
 cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
 (IFS=,; echo "${CONTEXTS[*]}") >"${STATE_DIR}/contexts"
@@ -201,7 +203,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		"${KUBECTL[@]}" --context="$ctx" -n istio-system get deployment "$deploy" -o json >"$WORK/deploy.json"
 		python3 -I "$HELPER" check "$WORK/patch.json" "$WORK/live.json" "$WORK/deploy.json" || fail=1
 	fi
-	for line in "${RES_LINES[@]}"; do
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
 			echo "  PASS  ${kind}/${name} exists in ${ns}"

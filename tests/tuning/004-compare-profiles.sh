@@ -50,7 +50,18 @@ peaks), config sizes in KiB, and a count's mean prints bare when it is whole (43
 not 438.00).
 "TSV columns" gives the data rows' column count, per pass when the passes differ:
 then a WARNING says their rows were written by different harness versions (for
-propagation, filtered by different row rules).
+propagation, filtered by different row rules); "none" when no pass wrote a TSV (or
+no TSV has a data row).
+The "Istio CR / IstioRevision generations" row gives each pass's ISTIO_GENERATIONS
+from its own TSVs: a profile's apply and revert raise them, so each pass ran on its
+own (one value for every member prints once, "(every member)"). The header's
+ISTIO_GENERATIONS merges the sweep's start and every pass: mixed when they differ.
+HARNESS_SHA is the sweep's harness; REPORT_HARNESS_SHA (every format, next to it) is
+the harness this report ran on, which can differ: a report made again later, or from
+another checkout, may count rows by other rules. The sweep dir it reads does not count
+as a change to it.
+The markdown starts with a YAML frontmatter of the same keys (lowercase:
+istio_generations, harness_sha, report_harness_sha, tsv_columns, ...).
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -61,11 +72,16 @@ Options:
 When the sweep dir holds sweep-outcome.txt (003 writes it), the comparison repeats
 it, with the run that recorded it: the failed passes by reason, its problems (the
 Istio version, the active revision or the generation of the Istio CR or its active
-IstioRevision changed under the sweep, or the end-of-sweep check failed) and notes
-(members not ready at its start or end). The sweep writes it at its start as "not
-finished" (EXIT=unfinished) and replaces it at its end: a record still not finished
-is a sweep that died or still runs, or one interrupted, with when and by which
-signal; one that stopped on an error after its start shows the stop and its reason.
+IstioRevision changed under the sweep; the Istio CR changed other than by the
+sweep's own apply and revert: during a pass, after its apply settled and not by its
+profile, or between two of the sweep's checkpoints while it changed nothing (the
+suite setup, between passes, after the last revert); an incomplete revert: a
+member's Istio CR spec after the last revert differs from the sweep's start; or the
+end-of-sweep check failed) and notes (members not ready at its start or end). The
+sweep writes it at its start as "not finished" (EXIT=unfinished) and replaces it at
+its end: a record still not finished is a sweep that died or still runs, or one
+interrupted, with when and by which signal; one that stopped on an error after its
+start shows the stop and its reason.
 A sweep dir without the file is from a sweep that stopped before its start (nothing
 ran), or from an older harness.
 
@@ -365,7 +381,7 @@ cfg_attempted() {
 	done
 }
 
-declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS
+declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS PGENS
 GROUP_VALUES=()
 ALL_TSVS=()
 for p in "${PASSES[@]}"; do
@@ -380,6 +396,9 @@ for p in "${PASSES[@]}"; do
 	fi
 	cfg_attempted "$p" "${files[@]}"
 	ALL_TSVS+=("${files[@]}")
+	# The generations this pass ran on, from its own TSVs (each apply and revert raises
+	# them); mixed when its TSVs disagree, unknown for a TSV without the key.
+	PGENS[$p]="$(config_input_value ISTIO_GENERATIONS unknown "${files[@]}")"
 	while IFS=$'\t' read -r kind a b c d e f h; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
@@ -415,8 +434,14 @@ for p in "${PASSES[@]}"; do
 		[[ -n "${_wseen[$_w]+x}" ]] || { _wseen[$_w]=1; _wlist+=("$_w"); }
 	done
 done
-if ((${#_wlist[@]} <= 1)); then
-	TSV_COLUMNS="${_wlist[0]:-none}"
+if ((${#_wlist[@]} == 0)); then
+	if ((${#ALL_TSVS[@]})); then
+		TSV_COLUMNS="none (no pass's TSV has a data row)"
+	else
+		TSV_COLUMNS="none (no pass wrote a TSV)"
+	fi
+elif ((${#_wlist[@]} == 1)); then
+	TSV_COLUMNS="${_wlist[0]}"
 else
 	TSV_COLUMNS="$(IFS=';'; echo "${_wper[*]}")"
 	TSV_COLUMNS="${TSV_COLUMNS//;/; }"
@@ -458,6 +483,25 @@ for p in "${PASSES[@]}"; do cells+=("${STATUS[$p]}"); done
 row "${cells[@]}"
 cells=("Valid / total rows")
 for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
+row "${cells[@]}"
+# gens_cell <ISTIO_GENERATIONS>: "<gen> (every member)" when every ctx=<gen> pair has
+# one value, else the value as recorded (mixed, unknown, members that differ).
+gens_cell() {
+	awk -v v="$1" 'BEGIN {
+		n = split(v, p, ",")
+		if (n == 0 || v ~ /^mixed:/) { print v; exit }
+		for (i = 1; i <= n; i++) {
+			if (p[i] !~ /^[^=]+=[^=]+$/) { print v; exit }
+			sub(/^[^=]+=/, "", p[i])
+			if (p[i] != p[1]) { print v; exit }
+		}
+		print p[1] " (every member)"
+	}'
+}
+cells=("Istio CR / IstioRevision generations")
+for p in "${PASSES[@]}"; do
+	if [[ -n "${PGENS[$p]:-}" ]]; then cells+=("$(gens_cell "${PGENS[$p]}")"); else cells+=("-"); fi
+done
 row "${cells[@]}"
 # metric_n <pass> <group> <column>: got/attempted (PL17): valid samples with a value
 # (overflow counts) / what the pass was configured to take (cfg_attempted), else every
@@ -509,8 +553,37 @@ for g in "${GROUP_VALUES[@]}"; do
 	done
 done
 
+# This report's own harness; the sweep dir it reads is no change to it.
+REPORT_HARNESS_SHA="$(report_harness_sha --exclude "$RESULTS_DIR")"
+
+# frontmatter: the markdown's YAML frontmatter (PL19), every value through yaml_str.
+frontmatter() {
+	local k v o
+	echo "---"
+	for k in suite run_id contexts passes istio_version istio_version_source istio_version_pin \
+		istio_version_by_context istio_notready_at_start istio_ready_waited_sec; do
+		case "$k" in
+		suite) v="$SUITE" ;;
+		passes) v="$(IFS=,; echo "${PASSES[*]}")" ;;
+		istio_notready_at_start | istio_ready_waited_sec) v="$(istio_start_kv "${k^^}")" ;;
+		*) v="$(meta_get "${k^^}")"; v="${v:-unknown}" ;;
+		esac
+		yaml_str -v o "$v"
+		echo "${k}: ${o}"
+	done
+	echo "istio_active_revisions: $(yaml_str "$ISTIO_ACTIVE_REVISIONS_M")"
+	echo "istio_generations: $(yaml_str "$ISTIO_GENERATIONS_M")"
+	echo "istio_proxy_versions: $(yaml_str "$ISTIO_PROXY_VERSIONS_M")"
+	echo "harness_sha: $(yaml_str "$(istio_start_kv HARNESS_SHA)")"
+	echo "report_harness_sha: $(yaml_str "$REPORT_HARNESS_SHA")"
+	echo "tsv_columns: $(yaml_str "$TSV_COLUMNS")"
+	echo "---"
+	echo ""
+}
+
 render() {
 	if [[ "$FORMAT" == markdown ]]; then
+		frontmatter
 		echo "# Tuning sweep comparison"
 		echo ""
 		echo "- Suite: ${SUITE}"
@@ -520,7 +593,7 @@ render() {
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		# Each on its own line, as every other report prints the two.
 		echo "- HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
-		echo "- REPORT_HARNESS_SHA=$(report_harness_sha) (this report's own)"
+		echo "- REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA} (this report's own)"
 		echo "- Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 		echo "- TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "- **Warning:** ${WIDTH_WARNING}"
@@ -529,6 +602,7 @@ render() {
 		else
 			echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
 		fi
+		echo "- The \"Istio CR / IstioRevision generations\" row gives each pass's ISTIO_GENERATIONS from its own TSVs: a profile's apply and revert raise them, so each pass ran on its own (\"(every member)\" when every member has one value)."
 		echo "- Under each metric: n is got/attempted (valid samples with a value / what the probe was configured to take where its TSV records it, else every row the pass wrote, failed and timed-out rows included) and range is its min to max."
 		((N_DIFFERS)) && echo "- **A profile's n differs from the baseline's** (shown as \"(baseline n ...)\"): its mean is over other iterations, so a better mean can come from fewer, easier samples."
 		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket (propagation's P1 convergence: \"overflow (N iterations)\" when N iterations put a sample in the +Inf bucket, whatever their p99; counted although 005 leaves those iterations out of its means)."
@@ -545,11 +619,12 @@ render() {
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		echo "HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
-		echo "REPORT_HARNESS_SHA=$(report_harness_sha) (this report's own)"
+		echo "REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA} (this report's own)"
 		echo "Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 		echo "TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "WARNING: ${WIDTH_WARNING}"
 		echo "Means over valid rows; profiles show the change against the baseline."
+		echo "Istio CR / IstioRevision generations: each pass's own, from its TSVs (its apply and revert raise them)."
 		echo "n = got/attempted (valid samples with a value / configured samples, else rows written); range = min to max."
 		((N_DIFFERS)) && echo "WARNING: a profile's n differs from the baseline's (\"(baseline n ...)\"): its mean is over other iterations."
 		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."

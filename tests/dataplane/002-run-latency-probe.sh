@@ -278,7 +278,7 @@ done
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 # {ctx} is the per-cluster Service's context; reach.sh and the loops below fill it in.
 URL_TEMPLATE="http://dataplane-server-{ctx}.${NS}.svc.cluster.local:8080/echo"
 LOCAL_URL="${URL_TEMPLATE//\{ctx\}/${SOURCE_CTX}}"
@@ -288,9 +288,9 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-# harness_sha (tests/lib/common.sh), as every sweep records it: a tree with
-# uncommitted changes reads <describe>-dirty.<8hex>.
-HARNESS_SHA="$(harness_sha)"
+# harness_sha (tests/lib/common.sh): a harness with uncommitted changes reads
+# <describe>-dirty.<8hex>; this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then
@@ -300,7 +300,7 @@ if ((DRY_RUN)); then
 	echo "Min QPS ratio: ${MIN_QPS_RATIO} | Min pct_200: ${MIN_PCT_200}"
 	echo "Server replicas: queried live on: ${ALL_CTXS[*]}"
 	echo "Local target:        ${LOCAL_URL}"
-	for rc in "${REMOTES[@]}"; do
+	for rc in ${REMOTES[@]+"${REMOTES[@]}"}; do
 		echo "Cross-cluster target ($rc): http://dataplane-server-${rc}.${NS}.svc.cluster.local:8080/echo"
 	done
 	echo "istiod restart check: port-forward every Running istiod pod on: ${ALL_CTXS[*]}"
@@ -331,7 +331,7 @@ server_replicas_csv() {
 		) &
 		pids+=($!)
 	done
-	for i in "${pids[@]}"; do wait "$i" || true; done
+	for i in ${pids[@]+"${pids[@]}"}; do wait "$i" || true; done
 	for i in "${!ALL_CTXS[@]}"; do
 		v="unknown"
 		[[ -s "${tmp}/${i}" ]] && v="$(<"${tmp}/${i}")"
@@ -342,7 +342,7 @@ server_replicas_csv() {
 }
 SERVER_REPLICAS_CSV="$(server_replicas_csv)"
 IFS=',' read -ra _sr_pairs <<<"$SERVER_REPLICAS_CSV"
-for _sr in "${_sr_pairs[@]}"; do
+for _sr in ${_sr_pairs[@]+"${_sr_pairs[@]}"}; do
 	_v="${_sr##*=}"
 	if [[ "$_v" == unknown ]]; then
 		echo "warning: could not read dataplane-server replicas on ${_sr%=*} (SERVER_REPLICAS records unknown)" >&2
@@ -441,11 +441,11 @@ snapshot_istiod() {
 		read -ra snap_ports <<<"${CTX_PORTS[$i]}"
 		read -ra snap_pods <<<"${CTX_PODS[$i]}"
 		if [[ "$phase" == pre ]]; then
-			printf '%s\n' "${snap_pods[@]}" > "${ISTIOD_DIR}/${phase}-c${i}.podset"
+			printf '%s\n' ${snap_pods[@]+"${snap_pods[@]}"} > "${ISTIOD_DIR}/${phase}-c${i}.podset"
 		else
 			fanout_record_podset "${ALL_CTXS[$i]}" "${ISTIOD_DIR}/${phase}-c${i}.podset" "${KUBECTL[@]}"
 		fi
-		fanout_scrape_all "$ISTIOD_DIR" "${phase}-c${i}" "${snap_ports[@]}" >/dev/null || true
+		fanout_scrape_all "$ISTIOD_DIR" "${phase}-c${i}" ${snap_ports[@]+"${snap_ports[@]}"} >/dev/null || true
 	done
 }
 
@@ -574,7 +574,7 @@ if ((REACH_REQUESTS > 0)) && reach_should_stop "$ON_UNREACHABLE" "$REACH_TSV" "$
 	mapfile -t STOP_REMOTES < <(reach_not_reachable "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$REMOTE_CONTEXTS_CSV")
 	ISTIOD_RESTARTED="unknown"
 	ISTIOD_RESTARTED_TAG="unknown"
-	for rctx in "${STOP_REMOTES[@]}"; do
+	for rctx in ${STOP_REMOTES[@]+"${STOP_REMOTES[@]}"}; do
 		if [[ "${REACH_STATUS[$rctx]:-UNKNOWN}" == UNREACHABLE ]]; then emit_unreachable_rows "$rctx"; fi
 	done
 	printf '%s\t%s\t%s\tN/A\t0\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tSTOPPED_UNREACHABLE\tN/A\tunknown\tna\n' \
@@ -588,11 +588,11 @@ fi
 if ((WARMUP_DURATION > 0)); then
 	echo "Warming Envoy upstream connection pools (${WARMUP_DURATION}s at QPS=10)..."
 	WARMUP_URLS=("$LOCAL_URL")
-	for rc in "${REMOTES[@]}"; do
+	for rc in ${REMOTES[@]+"${REMOTES[@]}"}; do
 		[[ "${REACH_STATUS[$rc]}" == UNREACHABLE ]] && continue
 		WARMUP_URLS+=("${URL_TEMPLATE//\{ctx\}/${rc}}")
 	done
-	for wurl in "${WARMUP_URLS[@]}"; do
+	for wurl in ${WARMUP_URLS[@]+"${WARMUP_URLS[@]}"}; do
 		echo "  warmup -> $wurl"
 		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" \
@@ -648,7 +648,7 @@ ISTIOD_RESTARTED_TAG="pending"
 echo "--- Local baseline (intra-cluster, sidecar-to-sidecar) ---"
 run_fortio "$SOURCE_CTX" "$LOCAL_URL" "local"
 
-for remote_ctx in "${REMOTES[@]}"; do
+for remote_ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	echo ""
 	echo "--- Cross-cluster: $SOURCE_CTX -> $remote_ctx ---"
 	# An UNREACHABLE remote (no HTTP 200 on any reach check) skips its load; DEGRADED

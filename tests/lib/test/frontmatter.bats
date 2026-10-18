@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
 # The YAML frontmatter of the reports (PL19): yaml_str (tests/lib/common.sh), and through
 # each report's real entrypoint (PL33) the markdown and charts frontmatter of churn 004,
-# churn-dataplane 005, controlplane 004, dataplane 004 and propagation 005, with a value
-# that holds a double quote and a backslash, parsed by python3 + PyYAML. gateway-api 001's
-# summary is checked in gateway-api.bats (it runs on that file's stubs).
+# churn-dataplane 005, controlplane 004, dataplane 004 and propagation 005, and tuning
+# 004's markdown, with a value that holds a double quote and a backslash, parsed by
+# python3 + PyYAML. gateway-api 001's summary is checked in gateway-api.bats (it runs on
+# that file's stubs).
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -111,24 +112,54 @@ if d["n"] != 12:
 	} > "$d/pr/endpoint-r1.tsv"
 	W="$WEIRD" awk 'NR == 2 { print "# RUN_CONFIG=" ENVIRON["W"] } { print }' \
 		"${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv" > "$d/cp/controlplane-fixture-t2.tsv"
-	# <script> <dir> <key that holds RUN_CONFIG, or - when the frontmatter keeps it in a
-	# comment> <formats>: churn-dataplane's markdown has no frontmatter, its charts keep the
-	# preamble as ## comments.
+	# <script> <dir> <key that holds RUN_CONFIG> <formats>.
 	for r in "dataplane/004-report-results.sh dp RUN_CONFIG md,charts" \
 		"churn/004-report-results.sh ch run_config md,charts" \
 		"propagation/005-report-results.sh pr RUN_CONFIG md,charts" \
 		"controlplane/004-report-results.sh cp run_config md,charts" \
-		"churn-dataplane/005-report-results.sh cd - charts"; do
+		"churn-dataplane/005-report-results.sh cd run_config md,charts"; do
 		read -r script sub key fmts <<<"$r"
 		for f in ${fmts//,/ }; do
 			run --separate-stderr bash "${ROOT}/tests/${script}" --results-dir "$d/$sub" --format "$f"
 			assert_success
 			printf '%s\n' "$output" > "$d/out.md"
 			got="$(fm "$d/out.md")" || { echo "${script} --format ${f}: the frontmatter does not parse"; false; }
-			[[ "$key" == - ]] || [ "$(jq -r --arg k "$key" '.[$k]' <<<"$got")" = "$WEIRD" ] || {
+			[ "$(jq -r --arg k "$key" '.[$k]' <<<"$got")" = "$WEIRD" ] || {
 				echo "${script} --format ${f}: ${key} reads $(jq -c --arg k "$key" '.[$k]' <<<"$got")"
 				false
 			}
 		done
 	done
+}
+
+@test "tuning 004's markdown frontmatter parses as YAML, reads a quoted value back as written, and carries the pass and harness keys" {
+	need_yaml
+	local P="${BATS_TEST_TMPDIR}/tsweep" got k
+	mkdir -p "$P/baseline" "$P/01-x"
+	{
+		printf '# SUITE=propagation\n# PASSES=baseline,01-x\n# HARNESS_SHA=abc1234\n'
+		printf '# CONTEXTS=%s\n' "$WEIRD"
+	} > "$P/sweep-metadata.txt"
+	{
+		echo "# RUN_ID=r1"
+		echo "# ISTIO_GENERATIONS=ci-a=2/2,ci-b=2/2"
+		printf 'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms\n'
+		printf 'r1\t2\t1\tsrc\trmt\t0\t1000\t500\t3000\tOK\t100\t100\t40/40\t40\t0\t0\t0\t5000\t10\n'
+	} > "$P/baseline/endpoint-r1.tsv"
+	run --separate-stderr "${ROOT}/tests/tuning/004-compare-profiles.sh" --results-dir "$P" --format md
+	assert_success
+	printf '%s\n' "$output" > "${BATS_TEST_TMPDIR}/out.md"
+	got="$(fm "${BATS_TEST_TMPDIR}/out.md")" || { echo "tuning 004: the frontmatter does not parse"; false; }
+	[ "$(jq -r .contexts <<<"$got")" = "$WEIRD" ]
+	[ "$(jq -r .suite <<<"$got")" = propagation ]
+	[ "$(jq -r .passes <<<"$got")" = "baseline,01-x" ]
+	[ "$(jq -r .harness_sha <<<"$got")" = abc1234 ]
+	# The merged generations (the sweep start has none: unknown) and the TSV width.
+	[ "$(jq -r .istio_generations <<<"$got")" = "mixed:unknown | ci-a=2/2,ci-b=2/2" ]
+	[ "$(jq -r .tsv_columns <<<"$got")" = 19 ]
+	for k in report_harness_sha istio_version istio_proxy_versions istio_active_revisions; do
+		[ "$(jq -r --arg k "$k" 'has($k)' <<<"$got")" = true ] || { echo "no ${k}"; false; }
+	done
+	# The markdown body follows the frontmatter.
+	[ "$(sed -n '/^---$/,/^---$/!p' "${BATS_TEST_TMPDIR}/out.md" | grep -m1 .)" = "# Tuning sweep comparison" ]
 }

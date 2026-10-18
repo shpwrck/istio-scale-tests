@@ -275,17 +275,35 @@ EXTRACTED_PATTERNS=(
 	'_sweep_unlock() {'
 	'harness_sha_for_sweep() {'
 	'report_harness_sha() {'
+	# a sweep's harness read again before its steps and at its end; its step's whole
+	# process tree stopped on a signal; a stale lock taken over by one run (common.sh)
+	'harness_sha_check() {'
+	'_harness_sha_sweep_end() {'
+	'_sweep_tree_read() {'
+	'_sweep_tree_freeze() {'
+	'_sweep_step_stop() {'
+	'sweep_step_kill() {'
+	'_sweep_pid_alive() {'
+	'_sweep_lock_refuse() {'
+	'_sweep_lock_release_mutex() {'
 	'function cp_header('
 	'function cp_key('
 	'function cp_cell_row('
 	'function cp_cell_state('
 	'function cp_plan_load('
+	# a controlplane sweep's runs and its resume command (common.sh)
+	'function cp_comment('
+	'function cp_end('
+	'function cp_mxo('
+	'controlplane_attempts() {'
+	'controlplane_resume_cmd() {'
 	'istio_generation_causes() {'
 	'istio_generations_read() {'
 	'istio_generations_diff() {'
 	'istio_version_refresh() {'
 	'_istio_proxy_versions_run() {'
 	'_istio_proxy_versions_cleanup() {'
+	'_istio_version_isolated() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

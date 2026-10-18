@@ -121,7 +121,7 @@ if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 
 # "dataplane-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
 for ctx in "${ALL_CTXS[@]}"; do
@@ -168,7 +168,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 	) &
 	APPLY_PIDS+=($!)
 done
-for pid in "${APPLY_PIDS[@]}"; do
+for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the fortio-server apply"
 done
 
@@ -205,7 +205,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 	) &
 	WAIT_PIDS+=($!)
 done
-for pid in "${WAIT_PIDS[@]}"; do
+for pid in ${WAIT_PIDS[@]+"${WAIT_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 

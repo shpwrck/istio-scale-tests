@@ -330,7 +330,7 @@ declare -A INGRESS_ADDR=() INGRESS_SOURCE=()
 INGRESS_ITEMS=()
 split_csv "$INGRESS_CSV" INGRESS_ITEMS
 ADDR_RE='^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?$'
-for item in "${INGRESS_ITEMS[@]}"; do
+for item in ${INGRESS_ITEMS[@]+"${INGRESS_ITEMS[@]}"}; do
 	[[ "$item" == *=* ]] || die "--ingress (or GWAPI_INGRESS) takes CTX=ADDR[:PORT]; got '${item}'"
 	ctx="${item%=*}"
 	addr="${item##*=}"
@@ -373,7 +373,7 @@ for line in "${SCENARIOS[@]}"; do
 	FQDNS+=("$fqdn")
 done
 # The same list as a JSON array, for the one jq pass over each dump (DNS names: nothing to escape).
-printf -v FQDNS_JSON '"%s",' "${FQDNS[@]}"
+printf -v FQDNS_JSON '"%s",' ${FQDNS[@]+"${FQDNS[@]}"}
 FQDNS_JSON="[${FQDNS_JSON%,}]"
 
 # backend_label <kind> <service> <main|remote>: the backendRef as the chart writes it; a backend
@@ -390,7 +390,7 @@ backend_label() {
 # the Gateway API listener and routes reached that ingress).
 GATE_IDS=(S1 S3)
 GATE_HOSTS=()
-for gid in "${GATE_IDS[@]}"; do
+for gid in ${GATE_IDS[@]+"${GATE_IDS[@]}"}; do
 	for line in "${SCENARIOS[@]}"; do
 		IFS='|' read -r id _ host _ <<<"$line"
 		[[ "$id" != "$gid" ]] || GATE_HOSTS+=("$host")
@@ -514,7 +514,7 @@ pf() {
 	fi
 	rm -f "$tmp" "${tmp}.err"
 	IFS=$'\t' read -r -a pf_fields <<<"$v"
-	for k in "${pf_keys[@]}"; do
+	for k in ${pf_keys[@]+"${pf_keys[@]}"}; do
 		printf '%s\t%s\n' "$k" "${pf_fields[i]:-${pf_fields[0]}}"
 		i=$((i + 1))
 	done
@@ -628,7 +628,7 @@ for i in "${!CONTEXTS[@]}"; do
 	(preflight_member "$i" "${CONTEXTS[i]}") 2>"${WORK}/pre-${i}.stderr" &
 	pids+=("$!")
 done
-for p in "${pids[@]}"; do wait "$p" || true; done
+for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
 KUBE_VERSIONS="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 PREFLIGHT_KEYS=(namespace scenario_set_ns crd gatewayclass gateway scenario_set_gw remote_namespace shared_namespace
 	shared_grants svc_main svc_shared istiod_env istiod_image istiod_fp ingress_image ingress_fp ingress_replicas ingress_pod
@@ -663,7 +663,7 @@ for i in "${!CONTEXTS[@]}"; do
 	dead+=("${ctx} answered none of the preflight reads; first kubectl error: ${first:-none recorded}")
 done
 if ((${#dead[@]})); then
-	for p in "${dead[@]}"; do echo "error: ${p}" >&2; done
+	for p in ${dead[@]+"${dead[@]}"}; do echo "error: ${p}" >&2; done
 	die "check the context names (kubectl config get-contexts), each member's API server and GWAPI_KUBECTL_TIMEOUT_SEC (${GWAPI_KUBECTL_TIMEOUT_SEC} s). Nothing was written."
 fi
 for i in "${!CONTEXTS[@]}"; do
@@ -752,7 +752,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	fi
 done
 if ((${#problems[@]})); then
-	for p in "${problems[@]}"; do echo "error: ${p}" >&2; done
+	for p in ${problems[@]+"${problems[@]}"}; do echo "error: ${p}" >&2; done
 	die "the check is not deployed as expected (above). Deploy it from the ACM hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
 fi
 
@@ -792,7 +792,7 @@ snapshot_all() {
 		) 2>/dev/null &
 		spids+=("$!")
 	done
-	for p in "${spids[@]}"; do wait "$p" || true; done
+	for p in ${spids[@]+"${spids[@]}"}; do wait "$p" || true; done
 }
 
 # snap_rc <file>: kget's return code for a snapshot file (1 when it is missing).
@@ -966,7 +966,7 @@ gate_member() {
 	local i="$1" ctx="$2" start="$3" code h ok passes=0 answered=0 last b="${WORK}/gate-${1}.body"
 	while :; do
 		ok=1 last=""
-		for h in "${GATE_HOSTS[@]}"; do
+		for h in ${GATE_HOSTS[@]+"${GATE_HOSTS[@]}"}; do
 			: >"$b"
 			code="$(curl -sS -o "$b" -w '%{http_code}' --max-time "$TIMEOUT_SEC" -H "Host: ${h}" "http://${ADDR[$ctx]}/" 2>/dev/null)" || true
 			[[ "$code" =~ ^[0-9]{3}$ ]] || code=000
@@ -998,7 +998,7 @@ for i in "${!CONTEXTS[@]}"; do
 	gate_member "$i" "${CONTEXTS[i]}" "$GATE_START" &
 	pids+=("$!")
 done
-for p in "${pids[@]}"; do wait "$p" || true; done
+for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
 GATE_SEC=$((SECONDS - GATE_START))
 declare -A DP_READY=()
 for i in "${!CONTEXTS[@]}"; do
@@ -1043,7 +1043,7 @@ for i in "${!CONTEXTS[@]}"; do
 		pids+=("$!")
 	done
 done
-for p in "${pids[@]}"; do wait "$p" || true; done
+for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
 
 # A cell with a timed-out request gets one detail request with the long timeout (PL42), so
 # Envoy's own verdict (503 and its reason) is recorded instead of a client timeout. Off the
@@ -1064,7 +1064,7 @@ for i in "${!CONTEXTS[@]}"; do
 		pids+=("$!")
 	done
 done
-for p in "${pids[@]}"; do wait "$p" || true; done
+for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
 TRAFFIC_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # An ingress where every request of every host timed out is unreachable from here, which says
@@ -1140,13 +1140,13 @@ if ((REPROBE_CELLS)); then
 	echo "Re-probe: ${REPROBE_CELLS} cell(s) did not answer 200 with the echo text (predicted 200, or S7 through the other members); once more after ${REPROBE_DELAY} s..." >&2
 	((REPROBE_DELAY == 0)) || sleep "$REPROBE_DELAY"
 	pids=()
-	for c in "${REPROBE[@]}"; do
+	for c in ${REPROBE[@]+"${REPROBE[@]}"}; do
 		i="${c%|*}" s="${c#*|}"
 		IFS='|' read -r _ _ host _ <<<"${SCENARIOS[s]}"
 		probe_cell "${ADDR[${CONTEXTS[i]}]}" "$host" "${WORK}/reprobe-${i}-${s}.txt" &
 		pids+=("$!")
 	done
-	for p in "${pids[@]}"; do wait "$p" || true; done
+	for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
 fi
 
 # --- Step 4: endpoint evidence (best effort; subshell-isolated, PL40) ---
@@ -1212,7 +1212,7 @@ pc_slot() {
 # pc_unread <i> <class>: every backend of ingress <i> with that class (timeout or unknown).
 pc_unread() {
 	local fqdn
-	for fqdn in "${FQDNS[@]}"; do printf '%s\t%s\t-\t-\n' "$fqdn" "$2"; done >"${WORK}/pc-${1}.tsv"
+	for fqdn in ${FQDNS[@]+"${FQDNS[@]}"}; do printf '%s\t%s\t-\t-\n' "$fqdn" "$2"; done >"${WORK}/pc-${1}.tsv"
 }
 
 # proxy_endpoints_member <i> <ctx>: ONE bounded istioctl dump of the ingress's endpoints (not one
@@ -1321,7 +1321,7 @@ fi
 
 # Argo CD syncs the chart from its own revision, which can move independently of this script
 # (PL39): say when it is not the commit the script runs from.
-HARNESS="$(harness_sha)"
+HARNESS="$(harness_sha --exclude "$RESULTS_DIR")"
 CHART_REVISION_VS_HARNESS=unknown
 # A dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
 hc="${HARNESS%%-dirty*}"
@@ -1332,7 +1332,7 @@ elif [[ ! "$hc" =~ ^[0-9a-f]{7,}$ ]]; then
 fi
 if [[ -n "$hc" && "$CHART_REVISION" != unknown ]]; then
 	IFS=, read -r -a revs <<<"$CHART_REVISION"
-	for rev in "${revs[@]}"; do
+	for rev in ${revs[@]+"${revs[@]}"}; do
 		[[ "$rev" =~ ^[0-9a-f]{7,}$ ]] || continue
 		if [[ "$rev" == "$hc"* || "$hc" == "$rev"* ]]; then
 			[[ "$CHART_REVISION_VS_HARNESS" == differs ]] || CHART_REVISION_VS_HARNESS=same
@@ -1694,7 +1694,7 @@ for i in "${!CONTEXTS[@]}"; do
 		row_status=OK
 		((${#flags[@]} == 0)) || row_status="$(IFS=,; echo "${flags[*]}")"
 		detail="-"
-		((${#notes[@]} == 0)) || detail="$(printf '%s; ' "${notes[@]}" | sed 's/; $//' | tr '\t\n' '  ')"
+		((${#notes[@]} == 0)) || detail="$(printf '%s; ' ${notes[@]+"${notes[@]}"} | sed 's/; $//' | tr '\t\n' '  ')"
 		exp_body="-"
 		[[ "$exp_code" != 200 ]] || exp_body="$EXPECTED_BODY"
 		backend_l="$(backend_label "$bkind" "$backend" "$bns")"
@@ -2079,7 +2079,7 @@ member_answer() {
 answer_lists() {
 	local o a
 	ANS_OK=() ANS_LATE=() ANS_FAIL=() ANS_BROKEN=() ANS_UNCLEAR=() ANS_WHY=()
-	for o in "${OTHERS[@]}"; do
+	for o in ${OTHERS[@]+"${OTHERS[@]}"}; do
 		a="$(member_answer "$o" "$@")"
 		case "$a" in
 		ok) ANS_OK+=("$o") ;;
@@ -2104,7 +2104,7 @@ answer_lists() {
 contradicted_by() {
 	local id="$1" ref="$2" what="$3" o st
 	local -a keep=()
-	for o in "${ANS_FAIL[@]}"; do
+	for o in ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}; do
 		st="$(cell_state "$o" "$ref")"
 		if [[ -z "$(blocking_reason "$o" "$ref")" ]] && [[ "$st" == ok || "$st" == late* ]]; then
 			ANS_UNCLEAR+=("$o")
@@ -2113,7 +2113,7 @@ contradicted_by() {
 			keep+=("$o")
 		fi
 	done
-	ANS_FAIL=("${keep[@]}")
+	ANS_FAIL=(${keep[@]+"${keep[@]}"})
 }
 
 # codes_through <id> <ctx...>: "`<codes>` through `a`, `b`'s ingress", one group per distinct code
@@ -2128,7 +2128,7 @@ codes_through() {
 		[[ -n "${grp[$c]+x}" ]] || order+=("$c")
 		grp[$c]="${grp[$c]:+${grp[$c]}, }\`${o}\`"
 	done
-	for c in "${order[@]}"; do out="${out:+${out}; }\`${c}\` through ${grp[$c]}'s ingress"; done
+	for c in ${order[@]+"${order[@]}"}; do out="${out:+${out}; }\`${c}\` through ${grp[$c]}'s ingress"; done
 	printf '%s' "$out"
 }
 
@@ -2159,7 +2159,7 @@ ans_counts() {
 late_note() {
 	((${#ANS_LATE[@]})) || return 0
 	printf ' %s of the %s other members (%s) answered %s only on the re-probe %s s after the traffic (a late endpoint push), not during it.' \
-		"${#ANS_LATE[@]}" "$n_others" "$(join_ticks "${ANS_LATE[@]}")" "$1" "$REPROBE_DELAY"
+		"${#ANS_LATE[@]}" "$n_others" "$(join_ticks ${ANS_LATE[@]+"${ANS_LATE[@]}"})" "$1" "$REPROBE_DELAY"
 }
 
 # broken_note <service|namespace> <ctx>: what a member where a scenario and its references all
@@ -2182,9 +2182,9 @@ broken_note() {
 # inconclusive_why <id> <references label> <service|namespace>: the reasons, from the ANS_* lists.
 inconclusive_why() {
 	local id="$1" refs="$2" o k why=""
-	((${#ANS_OK[@]} == 0)) || why="${why}${id} answered 200 through $(join_ticks "${ANS_OK[@]}"); "
-	((${#ANS_FAIL[@]} == 0)) || why="${why}${id} failed while ${refs} answered through $(join_ticks "${ANS_FAIL[@]}"); "
-	for o in "${ANS_BROKEN[@]}"; do
+	((${#ANS_OK[@]} == 0)) || why="${why}${id} answered 200 through $(join_ticks ${ANS_OK[@]+"${ANS_OK[@]}"}); "
+	((${#ANS_FAIL[@]} == 0)) || why="${why}${id} failed while ${refs} answered through $(join_ticks ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}); "
+	for o in ${ANS_BROKEN[@]+"${ANS_BROKEN[@]}"}; do
 		why="${why}${id} and ${refs} all failed through \`${o}\`: $(broken_note "$3" "$o"); "
 	done
 	for k in "${!ANS_UNCLEAR[@]}"; do why="${why}${ANS_WHY[k]}; "; done
@@ -2206,10 +2206,10 @@ answer_lists S2 S3
 contradicted_by S2 S7b "the same code path: its grant passes, the local Service lookup misses, a soft error"
 if ((${#ANS_OK[@]} == n_others)); then
 	ANSWER1=no
-	HEADLINE="**${L1}: NO** — S2 answered 200 (${REQUESTS}/${REQUESTS}, body \`${EXPECTED_BODY}\`) from the workload member \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, with no \`echo-s2\` Service there (read in the preflight).$(late_note S2)${BODY_NOTE}"
+	HEADLINE="**${L1}: NO** — S2 answered 200 (${REQUESTS}/${REQUESTS}, body \`${EXPECTED_BODY}\`) from the workload member \`${WORKLOAD_CTX}\` through $(join_ticks ${ANS_OK[@]+"${ANS_OK[@]}"})'s ingress, with no \`echo-s2\` Service there (read in the preflight).$(late_note S2)${BODY_NOTE}"
 elif ((${#ANS_FAIL[@]} == n_others)); then
 	ANSWER1=yes
-	HEADLINE="**${L1}: YES** — S2 (its route in place for the whole traffic window, no \`echo-s2\` Service on the ingress member) returned $(codes_through S2 "${ANS_FAIL[@]}") ($(fail_meaning S2))$(again_note S2 "${ANS_FAIL[@]}"), while S3 (the same route plus a stub Service there) answered 200 from the workload member \`${WORKLOAD_CTX}\` and S2 answered 200 through \`${WORKLOAD_CTX}\` itself.${BODY_NOTE}"
+	HEADLINE="**${L1}: YES** — S2 (its route in place for the whole traffic window, no \`echo-s2\` Service on the ingress member) returned $(codes_through S2 ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}) ($(fail_meaning S2))$(again_note S2 ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}), while S3 (the same route plus a stub Service there) answered 200 from the workload member \`${WORKLOAD_CTX}\` and S2 answered 200 through \`${WORKLOAD_CTX}\` itself.${BODY_NOTE}"
 else
 	ANSWER1=inconclusive
 	why="$(inconclusive_why S2 S3 service)"
@@ -2231,9 +2231,9 @@ ns_line() {
 	refs="$(IFS=/; echo "$*")"
 	answer_lists "$id" "$@"
 	if ((${#ANS_OK[@]} == n_others)); then
-		echo "- ${label} — **NO**: ${id} answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` there.$(late_note "$id")"
+		echo "- ${label} — **NO**: ${id} answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks ${ANS_OK[@]+"${ANS_OK[@]}"})'s ingress, without \`${NS_REMOTE}\` there.$(late_note "$id")"
 	elif ((${#ANS_FAIL[@]} == n_others)); then
-		echo "- ${label} — **YES**: ${id} returned $(codes_through "$id" "${ANS_FAIL[@]}") ($(fail_meaning "$id"))$(again_note "$id" "${ANS_FAIL[@]}"), while ${refs}, with the backend in the same namespace, answered 200 there and ${id} answered 200 through \`${WORKLOAD_CTX}\` itself."
+		echo "- ${label} — **YES**: ${id} returned $(codes_through "$id" ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}) ($(fail_meaning "$id"))$(again_note "$id" ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}), while ${refs}, with the backend in the same namespace, answered 200 there and ${id} answered 200 through \`${WORKLOAD_CTX}\` itself."
 	else
 		echo "- ${label} — **INCONCLUSIVE** ($(ans_counts)): $(inconclusive_why "$id" "$refs" namespace)."
 	fi
@@ -2245,19 +2245,19 @@ ns_line_service() {
 	local label="kind: Service" s7_codes
 	answer_lists S7 S9 S8
 	if ((${#ANS_OK[@]} == n_others)); then
-		echo "- ${label} — **NO**: S7 answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks "${ANS_OK[@]}")'s ingress, without \`${NS_REMOTE}\` (or a ReferenceGrant) there.$(late_note S7)"
+		echo "- ${label} — **NO**: S7 answered 200 from \`${WORKLOAD_CTX}\` through $(join_ticks ${ANS_OK[@]+"${ANS_OK[@]}"})'s ingress, without \`${NS_REMOTE}\` (or a ReferenceGrant) there.$(late_note S7)"
 		return 0
 	fi
 	if ((${#ANS_FAIL[@]} != n_others)); then
 		echo "- ${label} — **INCONCLUSIVE** ($(ans_counts)): $(inconclusive_why S7 S9/S8 namespace)."
 		return 0
 	fi
-	s7_codes="S7 (no \`${NS_REMOTE}\` there) returned $(codes_through S7 "${ANS_FAIL[@]}") ($(fail_meaning S7))$(again_note S7 "${ANS_FAIL[@]}"), while S9/S8, with the backend in the same namespace, answered 200 there and S7 answered 200 through \`${WORKLOAD_CTX}\` itself"
+	s7_codes="S7 (no \`${NS_REMOTE}\` there) returned $(codes_through S7 ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}) ($(fail_meaning S7))$(again_note S7 ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}), while S9/S8, with the backend in the same namespace, answered 200 there and S7 answered 200 through \`${WORKLOAD_CTX}\` itself"
 	answer_lists S7b S1
 	if ((${#ANS_OK[@]} == n_others)); then
 		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant) but not the Service: ${s7_codes}; S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant there, no Service) answered 200 from \`${WORKLOAD_CTX}\`.$(late_note S7b)"
 	elif [[ "$ANSWER1" == yes ]] && ((${#ANS_FAIL[@]} == n_others)); then
-		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant): ${s7_codes}. S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant there, no Service) failed like S2, $(codes_through S7b "${ANS_FAIL[@]}")$(again_note S7b "${ANS_FAIL[@]}"), while S1 answered there: consistent with the first answer, so it needs the Service too."
+		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant): ${s7_codes}. S7b (namespace \`${NS_SHARED}\` and its ReferenceGrant there, no Service) failed like S2, $(codes_through S7b ${ANS_FAIL[@]+"${ANS_FAIL[@]}"})$(again_note S7b ${ANS_FAIL[@]+"${ANS_FAIL[@]}"}), while S1 answered there: consistent with the first answer, so it needs the Service too."
 	else
 		echo "- ${label} — **YES**, it needs the namespace (for the ReferenceGrant): ${s7_codes}. Whether it needs the Service too is **INCONCLUSIVE** ($(ans_counts)): $(inconclusive_why S7b S1 namespace)."
 	fi
@@ -2288,9 +2288,9 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo ""
 	echo "$NS_HEADLINE"
 	echo ""
-	printf '%s\n' "${NS_LINES[@]}"
+	printf '%s\n' ${NS_LINES[@]+"${NS_LINES[@]}"}
 	echo ""
-	for o in "${OTHERS[@]}"; do
+	for o in ${OTHERS[@]+"${OTHERS[@]}"}; do
 		echo "- HTTPRoute status on \`${o}\` for S2, whose Service exists only on the workload member: \`${R[$o|S2|obs_status]}\` (predicted \`${R[$o|S2|exp_status]}\`)."
 		rn_state="state there: \`${PRE[$o|remote_namespace]}\`"
 		if [[ "${PRE[$o|remote_namespace]}" == absent ]]; then rn_state="absent there"; fi
@@ -2389,7 +2389,7 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 echo ""
 echo "${HEADLINE//\*\*/}"
 echo "${NS_HEADLINE//\*\*/}"
-for line in "${NS_LINES[@]}"; do echo "  ${line//\*\*/}"; done
+for line in ${NS_LINES[@]+"${NS_LINES[@]}"}; do echo "  ${line//\*\*/}"; done
 echo "Predictions: ${PRED_COUNTS}."
 echo "TSV:     ${TSV}"
 echo "Summary: ${SUMMARY}"

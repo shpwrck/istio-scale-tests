@@ -118,6 +118,11 @@ ran), or from an older harness.
 The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to each
 member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
 
+REPORT_HARNESS_SHA (every format, after the preamble's HARNESS_SHA): the harness this
+report ran on, which can differ from HARNESS_SHA, the harness that measured the rows:
+a report made again later, or from another checkout, may count rows by other rules.
+The results dir it reads does not count as a change to it.
+
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
   DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
@@ -204,14 +209,15 @@ unset _k _have
 # file: `none` without one, `unknown` for files written before the key existed,
 # mixed:a,b with a warning when they differ (PL26).
 _pre=()
-for kv in "${PREAMBLE[@]}"; do
+for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
 	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) _pre+=("$kv") ;; esac
 done
-PREAMBLE=("${_pre[@]}"
+PREAMBLE=(${_pre[@]+"${_pre[@]}"}
 	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
 unset _pre
-PREAMBLE+=("REPORT_HARNESS_SHA=$(report_harness_sha)") # this report's own harness, every format
+# This report's own harness, every format; the results dir it reads is no change to it.
+PREAMBLE+=("REPORT_HARNESS_SHA=$(report_harness_sha --exclude "$RESULTS_DIR")")
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).
 # Counts:
@@ -497,7 +503,7 @@ LB_VERDICT="ok"
 lb_rank() { case "$1" in ok) echo 0 ;; degraded) echo 1 ;; unchecked) echo 2 ;; missing) echo 3 ;; dropped) echo 4 ;; esac; }
 lb_worse() { (( $(lb_rank "$1") > $(lb_rank "$LB_VERDICT") )) && LB_VERDICT="$1"; return 0; }
 LB_TOP_QPS=0
-for c in "${LB_CELLS[@]}"; do
+for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 	IFS=$'\t' read -r _m q _t _v verdict _rest <<<"$c"
 	lb_worse "$verdict"
 	[[ "$q" =~ ^[0-9]+$ ]] && (( q > LB_TOP_QPS )) && LB_TOP_QPS="$q"
@@ -521,7 +527,7 @@ local_baseline_lines() {
 		echo "Local baseline: OK at every QPS level (${cells}, top qps_target=${LB_TOP_QPS}, min_qps_ratio=${LB_RATIO}${legacy})"
 		return 0
 	fi
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		IFS=$'\t' read -r m q t v verdict reason qa qr srep remote sts nbr unr <<<"$c"
 		[[ "$verdict" == ok ]] && continue
 		pct="N/A"
@@ -532,7 +538,7 @@ local_baseline_lines() {
 		((nbr > 0)) && line+=" ok_below_ratio=${nbr}"
 		echo "$line"
 	done
-	for c in "${LB_MISSING[@]}"; do
+	for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "Local baseline: MISSING mesh_size=${m} reason=${reason} (no local rows)"
 	done
@@ -543,7 +549,7 @@ local_baseline_lines() {
 # (saturated_unflagged).
 local_baseline_hint() {
 	local c sat=0 unflagged=0 unr=0 legacy="" unr_note=""
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		[[ "$c" == *$'\tsaturated\t'* ]] && sat=1
 		[[ "$c" == *$'\tsaturated_unflagged\t'* ]] && unflagged=1
 		[[ "${c##*$'\t'}" =~ ^[1-9] ]] && unr=1
@@ -660,7 +666,7 @@ fmt_pct() {
 }
 
 report_text() {
-	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
 	[[ ${#PREAMBLE[@]} -gt 0 ]] && echo ""
 	echo "=== Data-Plane Latency Results ==="
 	echo ""
@@ -696,17 +702,17 @@ report_text() {
 }
 
 report_csv() {
-	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
 	config_multi_run_csv
 	sweep_outcome_recorded "$RESULTS_DIR" csv
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
 	local c m q _t _v verdict reason _rest
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		IFS=$'\t' read -r m q _t _v verdict reason _rest <<<"$c"
 		[[ "$verdict" == ok ]] || echo "# LOCAL_BASELINE_CELL=${m}:${q}:${verdict}:${reason}"
 	done
-	for c in "${LB_MISSING[@]}"; do
+	for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "# LOCAL_BASELINE_CELL=${m}:-:missing:${reason}"
 	done
@@ -799,7 +805,7 @@ FM_PLAIN_KEY_RE='^[A-Za-z_][A-Za-z0-9_]*(\[[A-Za-z0-9._/-]*\])?$'
 report_markdown() {
 	local k v_esc=""
 	echo "---"
-	for kv in "${PREAMBLE[@]}"; do
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
 		# Split at the first '=' only; the value as a YAML string (yaml_str escapes it), and
 		# the key too when it is more than a name (a KEY[x] key of a hand-edited TSV).
 		k="${kv%%=*}"
@@ -855,7 +861,7 @@ report_markdown() {
 report_json() {
 	# Build metadata object from PREAMBLE.
 	local meta_json
-	meta_json=$(printf '%s\n' "${PREAMBLE[@]}" | jq -R -s '
+	meta_json=$(printf '%s\n' ${PREAMBLE[@]+"${PREAMBLE[@]}"} | jq -R -s '
 		split("\n")
 		| map(select(length > 0))
 		| map(capture("^(?<k>[^=]+)=(?<v>.*)$"; "g"))
@@ -892,8 +898,8 @@ report_json() {
 	local lb_json
 	local c
 	lb_json=$( {
-		for c in "${LB_CELLS[@]}"; do printf 'cell\t%s\n' "$c"; done
-		for c in "${LB_MISSING[@]}"; do printf 'missing\t%s\n' "$c"; done
+		for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do printf 'cell\t%s\n' "$c"; done
+		for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do printf 'missing\t%s\n' "$c"; done
 	} | jq -R -s \
 		--arg verdict "$LB_VERDICT" --arg ratio "$LB_RATIO" --arg legacy "$LB_LEGACY_FILES" '
 		def num: if . == "N/A" or . == "" then null else (tonumber? // .) end;
@@ -968,7 +974,7 @@ report_json() {
 
 report_charts() {
 	echo "---"
-	for kv in "${PREAMBLE[@]}"; do
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
 		k="${kv%%=*}"
 		[[ "$k" =~ $FM_PLAIN_KEY_RE ]] || yaml_str -v k "$k"
 		yaml_str -v v_esc "${kv#*=}"
@@ -983,7 +989,7 @@ report_charts() {
 	# Name every local point that is drawn as 0 because it has no valid sample, and
 	# every one that averages OK rows below the QPS ratio (legacy TSVs).
 	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr lb_notes=0
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		IFS=$'\t' read -r m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr <<<"$c"
 		if [[ "$verdict" == dropped ]]; then
 			echo "> Local baseline missing at mesh ${m} / QPS ${q} (${reason}); its point is drawn as 0."
@@ -993,7 +999,7 @@ report_charts() {
 			lb_notes=1
 		fi
 	done
-	for c in "${LB_MISSING[@]}"; do
+	for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "> Local baseline missing at mesh ${m} (${reason}); its points are drawn as 0."
 		lb_notes=1
