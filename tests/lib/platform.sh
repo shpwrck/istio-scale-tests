@@ -225,7 +225,7 @@ _platform_warn() {
 # shellcheck disable=SC2329
 _platform_probe_member() {
 	local ctx="$1" w="$2" platform op=unknown istiod=unknown proxy=unknown nodes=unknown rc=0 f
-	local -a val=()
+	local -a _pl_val=()
 	# shellcheck disable=SC2016  # jq programs: $d, $sel, $img, ... are jq variables
 	local sail_jq='([.items[]? | select(.kind == "Deployment" and .metadata.name == $name)][0]) as $d
 		| if $d == null then "absent" else
@@ -308,9 +308,9 @@ _platform_probe_member() {
 	if ((rc == 1)); then
 		echo "warning: ${ctx}: did not answer; its platform record stops here (the values not read are unknown)" >&2
 	fi
-	val=("$(_platform_sanitize "$platform")" "$(_platform_sanitize "$op")" "$(_platform_sanitize "$istiod")"
+	_pl_val=("$(_platform_sanitize "$platform")" "$(_platform_sanitize "$op")" "$(_platform_sanitize "$istiod")"
 		"$(_platform_sanitize "$proxy")" "$(_platform_sanitize "$nodes")")
-	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ctx" "${val[@]}"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ctx" "${_pl_val[@]}"
 }
 
 # _platform_row <ctx>: the member's line of PLATFORM_PROBE_ROWS; return 1 when it has none.
@@ -377,7 +377,7 @@ platform_probe() {
 # shellcheck disable=SC2329
 platform_member_value() {
 	local row i
-	local -a f=()
+	local -a _pl_f=()
 	case "$2" in
 	platform) i=1 ;;
 	operator) i=2 ;;
@@ -387,8 +387,8 @@ platform_member_value() {
 	*) die "platform_member_value: unknown field '$2' (platform, operator, istiod, proxy or nodes)" ;;
 	esac
 	row="$(_platform_row "$1")" || row=""
-	IFS=$'\t' read -r -a f <<<"$row"
-	printf '%s\n' "${f[i]:-unknown}"
+	IFS=$'\t' read -r -a _pl_f <<<"$row"
+	printf '%s\n' "${_pl_f[i]:-unknown}"
 }
 
 # platform_probed_contexts: the members of this shell's last platform_probe call, comma-separated
@@ -432,22 +432,22 @@ platform_probe_load() {
 # shellcheck disable=SC2329
 _platform_values() {
 	local ctx row agg sk=0 so=0 su=0 c j
-	local -a ctxs=() f=() by=("" "" "" "" "")
+	local -a ctxs=() _pl_f=() _pl_by=("" "" "" "" "")
 	split_csv "$1" ctxs
 	for ctx in "${ctxs[@]}"; do
 		if ! row="$(_platform_row "$ctx")"; then
 			echo "warning: ${ctx}: no platform record was read (platform_probe was not called for it); its values read unknown" >&2
 			row="${ctx}"$'\tunknown\tunknown\tunknown\tunknown\tunknown'
 		fi
-		IFS=$'\t' read -r -a f <<<"$row"
-		case "${f[1]}" in
+		IFS=$'\t' read -r -a _pl_f <<<"$row"
+		case "${_pl_f[1]}" in
 		kubernetes) sk=1 ;;
 		openshift) so=1 ;;
 		*) su=1 ;;
 		esac
 		c="$(_platform_sanitize "$ctx")"
 		for j in 0 1 2 3 4; do
-			by[j]+="${by[j]:+,}${c}=${f[j + 1]:-unknown}"
+			_pl_by[j]+="${_pl_by[j]:+,}${c}=${_pl_f[j + 1]:-unknown}"
 		done
 	done
 	if ((sk && so)); then
@@ -461,11 +461,11 @@ _platform_values() {
 	fi
 	echo "PLATFORM=${agg}"
 	echo "TEST_PLATFORM=$(_platform_sanitize "${TEST_PLATFORM:-auto}")"
-	echo "PLATFORM_BY_CONTEXT=${by[0]:-unknown}"
-	echo "MESH_OPERATOR_BY_CONTEXT=${by[1]:-unknown}"
-	echo "ISTIOD_IMAGE_BY_CONTEXT=${by[2]:-unknown}"
-	echo "PROXY_IMAGE_BY_CONTEXT=${by[3]:-unknown}"
-	echo "NODE_PROVIDER_BY_CONTEXT=${by[4]:-unknown}"
+	echo "PLATFORM_BY_CONTEXT=${_pl_by[0]:-unknown}"
+	echo "MESH_OPERATOR_BY_CONTEXT=${_pl_by[1]:-unknown}"
+	echo "ISTIOD_IMAGE_BY_CONTEXT=${_pl_by[2]:-unknown}"
+	echo "PROXY_IMAGE_BY_CONTEXT=${_pl_by[3]:-unknown}"
+	echo "NODE_PROVIDER_BY_CONTEXT=${_pl_by[4]:-unknown}"
 }
 
 # platform_preamble_lines <ctxs_csv>: the record's `# KEY=value` preamble lines for these
@@ -496,14 +496,14 @@ platform_collapse() {
 # shellcheck disable=SC2329
 platform_md_row() {
 	local line
-	local -A v=()
+	local -A _pl_rec=()
 	while IFS= read -r line; do
-		v["${line%%=*}"]="${line#*=}"
+		_pl_rec["${line%%=*}"]="${line#*=}"
 	done < <(_platform_values "$1" 2>/dev/null)
-	printf '| Platform | %s (TEST_PLATFORM %s); nodes %s; operator %s; istiod %s; proxy %s |\n' "${v[PLATFORM]}" \
-		"${v[TEST_PLATFORM]}" "$(platform_collapse "${v[NODE_PROVIDER_BY_CONTEXT]}")" \
-		"$(platform_collapse "${v[MESH_OPERATOR_BY_CONTEXT]}")" "$(platform_collapse "${v[ISTIOD_IMAGE_BY_CONTEXT]}")" \
-		"$(platform_collapse "${v[PROXY_IMAGE_BY_CONTEXT]}")"
+	printf '| Platform | %s (TEST_PLATFORM %s); nodes %s; operator %s; istiod %s; proxy %s |\n' "${_pl_rec[PLATFORM]}" \
+		"${_pl_rec[TEST_PLATFORM]}" "$(platform_collapse "${_pl_rec[NODE_PROVIDER_BY_CONTEXT]}")" \
+		"$(platform_collapse "${_pl_rec[MESH_OPERATOR_BY_CONTEXT]}")" "$(platform_collapse "${_pl_rec[ISTIOD_IMAGE_BY_CONTEXT]}")" \
+		"$(platform_collapse "${_pl_rec[PROXY_IMAGE_BY_CONTEXT]}")"
 }
 
 # platform_merge_by_context <key> <tsv>...: one *_BY_CONTEXT key over a report's inputs: each
@@ -513,7 +513,7 @@ platform_md_row() {
 platform_merge_by_context() {
 	local key="$1" f line pair c x out="" n=0 missing=0
 	local -a order=() pairs=()
-	local -A vals=()
+	local -A _pl_vals=()
 	shift
 	for f in "$@"; do
 		n=$((n + 1))
@@ -527,11 +527,11 @@ platform_merge_by_context() {
 		for pair in "${pairs[@]}"; do
 			c="${pair%%=*}"
 			x="${pair#*=}"
-			if [[ -z "${vals[$c]+set}" ]]; then
+			if [[ -z "${_pl_vals[$c]+set}" ]]; then
 				order+=("$c")
-				vals[$c]="$x"
+				_pl_vals[$c]="$x"
 			else
-				case ";${vals[$c]};" in *";${x};"*) ;; *) vals[$c]+=";${x}" ;; esac
+				case ";${_pl_vals[$c]};" in *";${x};"*) ;; *) _pl_vals[$c]+=";${x}" ;; esac
 			fi
 		done
 	done
@@ -540,11 +540,11 @@ platform_merge_by_context() {
 		return 0
 	fi
 	for c in "${order[@]}"; do
-		if [[ "${vals[$c]}" == *";"* ]]; then
-			echo "warning: input TSVs disagree on ${key} for ${c} (${vals[$c]}): the report mixes runs on different platforms or mesh builds; compare like with like" >&2
-			out+="${out:+,}${c}=mixed:${vals[$c]}"
+		if [[ "${_pl_vals[$c]}" == *";"* ]]; then
+			echo "warning: input TSVs disagree on ${key} for ${c} (${_pl_vals[$c]}): the report mixes runs on different platforms or mesh builds; compare like with like" >&2
+			out+="${out:+,}${c}=mixed:${_pl_vals[$c]}"
 		else
-			out+="${out:+,}${c}=${vals[$c]}"
+			out+="${out:+,}${c}=${_pl_vals[$c]}"
 		fi
 	done
 	((missing == 0)) || out="mixed:unknown,${out}"
