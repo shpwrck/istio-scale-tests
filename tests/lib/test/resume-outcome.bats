@@ -961,7 +961,7 @@ tun_sweep() {
 	_tun_stub
 	TUN_FOREIGN=1 tun_sweep
 	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"WARNING: the Istio CR changed during the pass of 01-push-throttling, after its apply settled and not by this profile: ci-a (Istio CR generation 3 -> 4, IstioRevision generation 3 -> 4). Likely: a version changed and changed back, or a values change (an edit of the Istio CR). The pass's probes may have measured another configuration. Reverting anyway."* ]]
+	[[ "$stderr" == *"WARNING: the Istio CR changed during the pass of 01-push-throttling, after its apply settled and not by this profile: ci-a (Istio CR generation 3 -> 4, IstioRevision generation 3 -> 4). Likely: a version changed and changed back, or a values change (an edit of the Istio CR). The pass's probes may have measured another configuration, and the passes after it (while the edit stays: this revert restores only the profile's keys) may measure another configuration. Reverting anyway."* ]]
 	[[ "$stderr" == *"error: the Istio CR changed during pass 01-push-throttling, after its apply settled and not by its profile: ci-a (Istio CR generation 3 -> 4, IstioRevision generation 3 -> 4); likely: "*"; exit 4."* ]]
 	grep -q '^PROBLEM=the Istio CR changed during pass 01-push-throttling' "${TDIR}/sweep-outcome.txt"
 	[ -s "${TDIR}/01-push-throttling/state/istio-edited-during-pass" ]

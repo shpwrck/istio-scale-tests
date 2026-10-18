@@ -34,7 +34,8 @@
 #   fortio_load_wait_out <start_ns> <duration_s> <ctx> <ns> <pod> <kubectl_argv...>
 #       -> after a load whose `kubectl exec` failed: sleep until the load it started may
 #          have ended (start + duration + 5 s), so the next load does not run beside it;
-#          not when the client pod is gone (a note on stderr; never dies)
+#          not when the client pod is gone (deleted, or evicted: phase Failed); a note on
+#          stderr; never dies
 #
 # Requires: jq, awk (fortio_client_pod, fortio_client_stop: kubectl or oc;
 # fortio_load_wait_out: now_ns, tests/lib/timestamp.sh).
@@ -135,7 +136,7 @@ fortio_client_stop() {
 	[[ -n "$pod" ]] || return 0
 	echo "note: ${ctx}: deleting the fortio client pod ${pod}, which still runs a load (its Deployment starts a new one)" >&2 || true
 	if ! "$@" --context="$ctx" --request-timeout=5s -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1; then
-		echo "warning: ${ctx}: could not delete the fortio client pod ${pod}: its load runs on for up to its -t seconds; wait that long before the next run" >&2 || true
+		echo "warning: ${ctx}: could not delete the fortio client pod ${pod}: its load runs on for up to the load's duration; wait that long before the next run" >&2 || true
 	fi
 	return 0
 }
@@ -164,28 +165,36 @@ fortio_client_pod() {
 # (fortio_client_stop): an exec stream that broke part-way (an API server or kubelet
 # hiccup) leaves it loading the servers for the rest of its -t, so the probe's next load
 # would run beside it. Sleep until <start_ns> + <duration_s> + 5 s (the exec's start-up and
-# fortio's last requests), with a note; not at all once that has passed, nor when <pod> is
-# gone (evicted, deleted: a `get pod --ignore-not-found` that answers nothing), as no load
-# runs then; an API error, or the pod still there (also Terminating), keeps the wait. The
+# fortio's last requests), with a note; not at all once that has passed (then no read),
+# nor when <pod> is gone, as no load runs then: deleted (a `get pod --ignore-not-found`
+# that answers nothing), or its containers ended (phase Failed: evicted by the kubelet,
+# which leaves the pod listed; or Succeeded). An API error, or any other phase (Running,
+# also while Terminating; Pending; Unknown), keeps the wait, counted after that read. The
 # caller keeps its EXIT trap's pod (LOAD_POD) set meanwhile, so a stop during the wait
 # still deletes the pod. Never dies.
 fortio_load_wait_out() {
-	local start_ns="$1" dur="$2" ctx="$3" ns="$4" pod="$5" now left out
+	local start_ns="$1" dur="$2" ctx="$3" ns="$4" pod="$5" end now left out gone=deleted
 	shift 5
 	if ! [[ "$start_ns" =~ ^[0-9]+$ && "$dur" =~ ^[0-9]+$ ]]; then
 		echo "warning: fortio_load_wait_out: bad start (${start_ns}) or duration (${dur}): not waiting for the failed load to end" >&2 || true
 		return 0
 	fi
+	end=$((start_ns + (dur + 5) * 1000000000))
 	now="$(now_ns)" || now=""
 	[[ "$now" =~ ^[0-9]+$ ]] || now="$start_ns"
-	left=$(((start_ns + (dur + 5) * 1000000000 - now + 999999999) / 1000000000))
-	((left > 0)) || return 0
-	if out="$("$@" --context="$ctx" --request-timeout=5s -n "$ns" get pod "$pod" --ignore-not-found -o name 2>/dev/null)" \
-		&& [[ -z "$out" ]]; then
-		echo "note: ${ctx}: the load's kubectl exec failed and the client pod ${pod} is gone (evicted or deleted), so no load of it runs: not waiting" >&2 || true
+	((now < end)) || return 0
+	if out="$("$@" --context="$ctx" --request-timeout=5s -n "$ns" get pod "$pod" --ignore-not-found -o 'jsonpath={.status.phase}' 2>/dev/null)" \
+		&& [[ -z "$out" || "$out" == Failed || "$out" == Succeeded ]]; then
+		[[ -z "$out" ]] || gone="phase ${out}: its containers ended"
+		echo "note: ${ctx}: the load's kubectl exec failed and the client pod ${pod} is gone (${gone}), so no load of it runs: not waiting" >&2 || true
 		return 0
 	fi
-	echo "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting ${left}s (its -t ${dur}s and 5 s, from its start) before going on, so the next load does not run beside it" >&2 || true
+	# After the read (up to 15 s with a cold discovery cache), so the wait ends at <end>.
+	now="$(now_ns)" || now=""
+	[[ "$now" =~ ^[0-9]+$ ]] || now="$start_ns"
+	left=$(((end - now + 999999999) / 1000000000))
+	((left > 0)) || return 0
+	echo "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting ${left}s (its load's duration, ${dur}s, and 5 s, from its start) before going on, so the next load does not run beside it" >&2 || true
 	sleep "$left" || true
 	return 0
 }

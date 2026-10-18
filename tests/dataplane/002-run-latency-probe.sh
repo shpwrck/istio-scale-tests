@@ -138,12 +138,12 @@ Under --on-unreachable fail a stopped run also writes one STOPPED_UNREACHABLE ro
 The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
 whose exec failed (a FAILED row, or a failed warmup) may run on there, so the probe
 waits until its --duration (--warmup-duration for the warmup) and 5 s more have passed
-before going on, unless the client pod is gone (then no load runs). When the probe ends
-during a load (a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the
-pod's Deployment starts a new one, which a sweep started right after waits for (its
-setup 001 waits until the Deployments are Available). Run by hand, the probe loads only
-a Ready client pod that is not being deleted, and stops when there is none: run 001, or
-wait until the new pod is Ready.
+before going on, unless the client pod is gone (deleted, or evicted and Failed: then no
+load runs). When the probe ends during a load (a stop, Ctrl-C), it deletes the client
+pod, so the load ends with it; the pod's Deployment starts a new one, which a sweep
+started right after waits for (its setup 001 waits until the Deployments are Available).
+Run by hand, the probe loads only a Ready client pod that is not being deleted, and
+stops when there is none: run 001, or wait until the new pod is Ready.
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the run.
 

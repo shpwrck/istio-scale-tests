@@ -56,7 +56,7 @@ client pod that is not being deleted, and stops when there is none: run `001`, o
 until the new pod is Ready. When a load's `kubectl exec` fails part-way (a `FAILED` row,
 or a failed warmup), `002` waits until that load's `--duration` (`--warmup-duration` for
 the warmup) and 5 s more have passed before it starts the next load, unless the client
-pod is gone (then no load runs).
+pod is gone (deleted, or evicted and Failed: then no load runs).
 
 Every cluster runs `--server-replicas` fortio server pods (default 2,
 `DATAPLANE_SERVER_REPLICAS`) labelled `cluster=<ctx>`, and every cluster gets a Service

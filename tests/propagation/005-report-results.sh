@@ -102,7 +102,8 @@ Usage: $(basename "$0") [options]
                      one key). It repeats no sweep-outcome.txt of a sweep-* dir below the
                      results dir (report each sweep alone to see it), but its note names
                      each one that has not finished, was interrupted, stopped early or
-                     records a PROBLEM (json pooled_sweep_outcomes).
+                     records a PROBLEM (json pooled_sweep_outcomes), and so does a
+                     warning on stderr.
   --format FMT       Output format: text, csv, json, markdown, charts (default: text).
   -h, --help         Show this help.
 
@@ -341,6 +342,9 @@ elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/swee
 	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${ENDPOINT_FILES[@]}")"
 	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
 fi
+# The same list on stderr (as controlplane's data warning), in sight when the report goes
+# to a file.
+[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || echo "warning: sweep records below ${RESULTS_DIR} that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }; report each sweep dir alone to see its outcome" >&2
 
 # ---- what the probes set out to measure (PL17), and the TSV widths ------------------
 # One pass over the inputs, per file: its ITERATIONS, REMOTES, MESH_SIZE and SWEEP_RUN_ID,

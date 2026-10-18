@@ -84,9 +84,11 @@ Usage: $(basename "$0") [options]
                      PROBLEMs of each pooled sweep's outcome. It repeats only the results
                      dir's own sweep-outcome.txt: a pooled one that has not finished or
                      was cut short gets a data warning (report each sweep alone to see
-                     its record). Legacy cells pool across runs, while each growth series
-                     (RUN_ID x mesh size x K x workload) keeps its own cells and fits,
-                     labelled run=<RUN_ID>.
+                     its record), and json pooled_sweep_outcomes lists each one that did
+                     not end cleanly or holds a PROBLEM ([] when none, as in the other
+                     suites' reports). Legacy cells pool across runs, while each growth
+                     series (RUN_ID x mesh size x K x workload) keeps its own cells and
+                     fits, labelled run=<RUN_ID>.
   --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
   -h, --help         Show this help.
 
@@ -185,18 +187,22 @@ comparable with the other cells. An entry without /<spec> (an older harness, or 
 not read the Deployment) is compared with the member's ISTIOD_REPLICAS_BY_CONTEXT, read at
 the sweep's start (an HPA may have changed it since): a data warning only. So is a <spec>
 other than that start value (an HPA, or a changed replicaCount: the cell ran another
-replica count than the sweep's start). An INCOMPLETE cell is also marked where its
+replica count than the sweep's start), and an istiod pod that was Running but not Ready at
+a window's baseline (its "# ISTIOD_NOT_READY=<member>=<pod>,..." line: such a pod takes
+no new proxy connections, so the per-replica figures include a replica that carried fewer
+proxies than the others, or none). An INCOMPLETE cell is also marked where its
 figures are shown: its text block header ("INCOMPLETE: rows of 1 of 2 members"), its
 n_total in the markdown cells table (‡, with a footnote) and its chart series (‡, with a
 note); a legacy cell that ran on fewer istiod pods than wanted in its text block header
 ("FEWER ISTIOD PODS: <member> ran 2 of its 3 istiod replicas") and its n_total in the
-markdown cells table (§, with a footnote). A report of several TSVs names each cell in a
-warning behind its TSV. A NOT_RUN or INCOMPLETE cell, or one that ran on fewer istiod pods
-than wanted, also turns a PASS verdict into CAUTION ("N planned cell(s) never ran", "N
-cell(s) are INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's istiod
-Deployment wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes from
-the valid rows with a push count: fewer than n_valid shows as got/n_valid (csv pushes_n,
-json xds_pushes_n), with a data warning.
+markdown cells table (§, with a footnote). Each footnote names five cells, then "and N
+more". In a report of several TSVs a warning names each cell after its TSV's path
+(relative to the results dir). A NOT_RUN or INCOMPLETE cell, or one that ran on fewer
+istiod pods than wanted, also turns a PASS verdict into CAUTION ("N planned cell(s) never
+ran", "N cell(s) are INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's
+istiod Deployment wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes
+from the valid rows with a push count: fewer than n_valid shows as got/n_valid (csv
+pushes_n, json xds_pushes_n), with a data warning.
 
 Provenance: HARNESS_SHA, HARNESS_CONTENT_KEY and KUBE_VERSIONS come from each TSV
 preamble (the first run), from each --resume (resumes.txt, or the TSV's "# RESUMED_AT="
@@ -526,15 +532,14 @@ if [[ "$HARNESS_SHAS_M" == *,* && "$HARNESS_KEYS_M" != *,* && "$HARNESS_KEYS_M" 
 	_att_describe=1
 fi
 if [[ -n "$ATTEMPTS_NOTE" ]]; then
-	# The first run, with its values and rows; a several-file report names each file's.
-	_att_first="${_att_lead}"
-	((${#TSV_FILES[@]} == 1)) || _att_first="each file's first run: ${_att_lead}"
+	# The first run, with its values and rows (in a several-file report each entry names its
+	# file), then the rest.
 	_att_or=""
 	((_att_hc_rows == 0)) || _att_or=" or harness"
 	if ((_att_multi)); then
-		ATTEMPTS_NOTE="the rows come from more than one run${_att_or}: ${_att_first}, then ${ATTEMPTS_NOTE}"
+		ATTEMPTS_NOTE="the rows come from more than one run${_att_or}: ${_att_lead}, then ${ATTEMPTS_NOTE}"
 	else
-		ATTEMPTS_NOTE="the rows come from one run (no other run's rows are in the figures): ${_att_first}, then ${ATTEMPTS_NOTE}"
+		ATTEMPTS_NOTE="the rows come from one run (no other run's rows are in the figures): ${_att_lead}, then ${ATTEMPTS_NOTE}"
 	fi
 	if ((_att_describe)); then
 		ATTEMPTS_NOTE+="; their HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or tag that left the harness files as they were)"
@@ -644,12 +649,15 @@ POOLED_NOTE="$(config_multi_run_note)"
 # A pooled report repeats only its results dir's own sweep-outcome.txt
 # (sweep_outcome_recorded), as the other suites' reports do; it counts each pooled record's
 # PROBLEMs, and names one cut short in a data warning (OUTCOME_PROBLEMS below). The pooled
-# note says so (text, md, charts and csv).
+# note says so (text, md, charts and csv). json pooled_sweep_outcomes lists each record
+# below the results dir that did not end cleanly or holds a PROBLEM (sweep_outcome_pooled),
+# as the other suites' reports do.
 POOLED_OUTCOME_NOTE=""
 if [[ -n "$POOLED_NOTE" ]]; then
 	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: it counts their PROBLEMs in the verdict and names each one that has not finished or was cut short in a data warning; report each sweep alone to see its failed cells, problems and notes."
 	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
 fi
+POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
 FILES_CONSUMED=${#TSV_FILES[@]}
 FILES_SKIPPED=${#LEGACY_FILES[@]}
 
@@ -1161,7 +1169,11 @@ ${AWK_HEADER_IX}"'
 #   - SPECW: an entry whose <spec> is not the member's ISTIOD_REPLICAS_BY_CONTEXT (its
 #     Deployment's .spec.replicas at the sweep's start; cp_specw): an HPA or a changed
 #     replicaCount, so the cell ran another replica count than the sweep's start. A data
-#     warning only.
+#     warning only;
+#   - NOTREADY: a "# ISTIOD_NOT_READY=" line names an istiod pod of the window's members
+#     that was Running but not Ready at its baseline (cp_notready; a growth window's own
+#     line too): it took no new proxy connections, so the per-replica figures average in a
+#     replica that carried fewer. A data warning only.
 # The INCOMPLETE cells are also marked where their figures are shown (CS_INC_KEYS: one
 # "<mesh>|<svcs>|<reps>|<ns>|<scope>|<traffic>|<window kind>\t<why>" line each): the text
 # block's header, the markdown cells table (‡) and the charts; the SHORT legacy cells
@@ -1170,7 +1182,7 @@ ${AWK_HEADER_IX}"'
 # that planned those cells. In a report of several TSVs each cell is named behind its TSV
 # (relative to the results dir), as the attempts are: one cell of two sweeps is two cells.
 NOT_RUN_CELLS=0
-_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=() _cs_specw=()
+_cs_inc=() _cs_pool=() _cs_nr=() _cs_cmds=() _cs_short=() _cs_shortw=() _cs_specw=() _cs_notready=()
 CS_INC_KEYS="" CS_SHORT_KEYS=""
 for _cs_i in "${!TSV_FILES[@]}"; do
 	_cs_tsv="${TSV_FILES[_cs_i]}"
@@ -1193,6 +1205,7 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 		SHORTKEY) CS_SHORT_KEYS+="${_cs_cell}"$'\t'"${_cs_x}"$'\n' ;;
 		SHORTW) _cs_shortw+=("${_cs_pre}${_cs_cell}") ;;
 		SPECW) _cs_specw+=("${_cs_pre}${_cs_cell}") ;;
+		NOTREADY) _cs_notready+=("${_cs_pre}${_cs_cell}") ;;
 		NRPLAN) _cs_cmds+=("$(controlplane_resume_cmd "<sweep dir>" "${_cs_ctx:-<its contexts>}" "$_cs_cell" "$_cs_cfg") (<sweep dir>: the directory of ${_cs_tsv#"${RESULTS_DIR%/}"/})") ;;
 		PLANERR) echo "warning: could not read ${_cs_plan}; planned cells that never ran (NOT_RUN) are not counted" >&2 ;;
 		PLANOTHER) echo "note: ${_cs_plan#"${RESULTS_DIR%/}"/} is the plan of ${_cs_cell}, not of ${_cs_tsv##*/}: its planned cells are not counted for ${_cs_tsv##*/}" >&2 ;;
@@ -1207,12 +1220,12 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 			while (np > 0 && (getline line < plan) > 0) if (line ~ /^# PLAN=[0-9]+ / && (q = index(line, ": --"))) { p = substr(line, 8); sub(/ .*/, "", p); pflags[p] = substr(line, q + 2) }
 			close(plan)
 		}
-		# gflush(): a growth window'"'"'s SHORT/SHORTW/SPECW line, once its rows are read (gn:
-		# its WINDOW_ROWS entries; grd: its members with a row that has a reading). A member
-		# whose rows all have istiod_restarted unknown is left out, as cp_cell_state leaves it
-		# out.
-		function gflush(    j, m, w, gs, gw, gp) {
-			gs = ""; gw = ""; gp = ""
+		# gflush(): a growth window'"'"'s SHORT/SHORTW/SPECW/NOTREADY line, once its rows are
+		# read (gn: its WINDOW_ROWS entries; gnr: its ISTIOD_NOT_READY line; grd: its members
+		# with a row that has a reading). A member whose rows all have istiod_restarted
+		# unknown is left out, as cp_cell_state leaves it out.
+		function gflush(    j, m, w, gs, gw, gp, gq, nq) {
+			gs = ""; gw = ""; gp = ""; gq = ""
 			for (j = 1; j <= gn; j++) {
 				m = gm[j]
 				if (!(m in grd)) continue
@@ -1223,10 +1236,13 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 				}
 				else if ((m in cp_rep) && gnn[j] < cp_rep[m]) gw = gw (gw == "" ? "" : ", ") w cp_rep[m] " istiod replicas"
 			}
+			nq = cp_nr_parse(gnr)
+			for (j = 1; j <= nq; j++) if (cp_nrm[j] in grd) gq = gq (gq == "" ? "" : ", ") cp_nrq[j] " on " cp_nrm[j]
 			if (gs != "") print "SHORT\t" glbl " (" gs ")"
 			if (gw != "") print "SHORTW\t" glbl " (" gw ")"
 			if (gp != "") print "SPECW\t" glbl " (" gp ")"
-			gn = 0; split("", grd)
+			if (gq != "") print "NOTREADY\t" glbl " (" gq ")"
+			gn = 0; gnr = ""; split("", grd)
 		}
 		/^timestamp\t/ { if (gn) gflush(); cp_header(); sc = 0; for (i = 1; i <= NF; i++) if ($i == "services_per_namespace") sc = i; next }
 		/^#/ { if (gn) gflush(); if (phase == "" && index($0, "# PHASE=") == 1) phase = substr($0, 9); cp_comment(); next }
@@ -1238,6 +1254,7 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 				if (gn) gflush()
 				gn = cp_wl_parse(cp_wl)
 				for (j = 1; j <= gn; j++) { gm[j] = cp_wlm[j]; gnn[j] = cp_wln[j]; gss[j] = cp_wls[j] }
+				gnr = cp_wnr
 				glbl = label(cp_key())
 			}
 			if (gn && $31 != "unknown") grd[$2] = 1
@@ -1258,6 +1275,7 @@ for _cs_i in "${!TSV_FILES[@]}"; do
 				}
 				if (cp_shortw[k] != "") print "SHORTW\t" label(k) " (" cp_shortw[k] ")"
 				if (cp_specw[k] != "") print "SPECW\t" label(k) " (" cp_specw[k] ")"
+				if (cp_notready[k] != "") print "NOTREADY\t" label(k) " (" cp_notready[k] ")"
 				if ((phase == "" || phase == "sweep") && cs == "INCOMPLETE") {
 					why = (cp_why[k] != "" ? cp_why[k] : "rows of " (cp_nm[k] + 0) " of " cp_ms[k] " members")
 					print "INCOMPLETE\t" label(k) " (" why ")"
@@ -1303,6 +1321,9 @@ if ((${#_cs_shortw[@]})); then
 fi
 if ((${#_cs_specw[@]})); then
 	_cs_w+="${_cs_nl}${#_cs_specw[@]} cell(s) have a window whose member's istiod Deployment wanted another replica count than at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): $(cell_list "${_cs_specw[@]}"). An HPA, or a changed replicaCount: their per-replica figures are not comparable with the cells run at the start's count; it does not change the verdict."
+fi
+if ((${#_cs_notready[@]})); then
+	_cs_w+="${_cs_nl}${#_cs_notready[@]} cell(s) have an istiod pod that was Running but not Ready at the window's baseline: $(cell_list "${_cs_notready[@]}"). Such a pod takes no new proxy connections and keeps only the ones it had (its row's connected_proxies), so their per-replica figures include a replica that carried fewer proxies than the others, or none; it does not change the verdict."
 fi
 if [[ -n "$_cs_w" ]]; then
 	DATA_WARNINGS="${DATA_WARNINGS:+${DATA_WARNINGS}${_cs_nl}}${_cs_w#"$_cs_nl"}"
@@ -2740,14 +2761,17 @@ report_markdown() {
 		unk = $21
 		if ($62 + 0 > 0) { st = $63; gsub(/\+/, ", ", st); unk = unk " (" $62 " status: " st ")" }
 		# double-dagger-mark an INCOMPLETE cell (its n_total), and section-mark one that ran on
-		# fewer istiod pods than wanted, each named in a footnote below.
+		# fewer istiod pods than wanted, each named in a footnote below (the first five, then
+		# "and N more", as cell_list caps a data warning).
 		nt = $6; iw = inc_why(); fw = short_why()
 		lbl = "mesh=" $1 " svcs=" $2 " reps=" $3 " ns=" $4 " scope=" $5 " traffic=" $38 ($53 == "deploy" ? "" : " window=" $53)
-		if (iw != "") { nt = nt " ‡"; incl = incl (incl == "" ? "" : "; ") lbl " (" iw ")" }
-		if (fw != "") { nt = nt " §"; shl = shl (shl == "" ? "" : "; ") lbl " (" fw ")" }
+		if (iw != "") { nt = nt " ‡"; if (++ninc <= 5) incl = incl (incl == "" ? "" : "; ") lbl " (" iw ")" }
+		if (fw != "") { nt = nt " §"; if (++nshl <= 5) shl = shl (shl == "" ? "" : "; ") lbl " (" fw ")" }
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |%s\n", $1, $2, $3, $4, $5, $38, nt, $7, $24, ($68 == "" ? "N/A" : $68), $10, ha, hi, cp, qp, $19, $37, cfg_mb, $20, unk, gcols
 	}
 	END {
+		if (ninc > 5) incl = incl "; and " (ninc - 5) " more"
+		if (nshl > 5) shl = shl "; and " (nshl - 5) " more"
 		if (incl != "") { gsub(/\|/, "\\|", incl); print "\n> ‡ INCOMPLETE: the sweep was cut short while these cells'"'"' member rows were written, so their figures cover only the rows written (the sweep counts these cells as failed, and a --resume runs them again): " incl "." }
 		if (shl != "") { gsub(/\|/, "\\|", shl); print "\n> § Fewer istiod pods: these cells ran on fewer istiod pods than their member'"'"'s istiod Deployment wanted (a replica evicted or Pending), so their per-replica figures are not comparable with the other cells; the rows are valid: " shl "." }
 		if (any_pin) print "\n> † SINGLE-BUCKET-PINNED: all delta mass for that quantile sits in the coarsest (0-100ms) `pilot_proxy_convergence_time` bucket, so the reported value is a uniform-within-bucket assumption (Prometheus `histogram_quantile` semantics), NOT resolved below 100ms. Real sub-bucket signal only appears once convergence climbs into a higher bucket (e.g. at 10k-service scale)."
@@ -2954,7 +2978,7 @@ report_json() {
 	# counts (integers) and the cell keys (a lookup) stay -v.
 	SWEEP_OUTCOME_JSON="$(sweep_outcome_recorded --sweep-level-run-id "$RESULTS_DIR" json)" \
 	_RI_LIST="$(json_list "$RUN_IDS_M")" _IV_LIST="$(json_list "$ISTIO_VERSIONS_M")" _HS_LIST="$(json_list "$HARNESS_SHAS_M")" _HK_LIST="$(json_list "$HARNESS_KEYS_M")" \
-	_ATT_JSON="$ATTEMPTS_JSON" _PROV_WARN="$PROVENANCE_WARNING" _DATA_WARN="$DATA_WARNINGS" \
+	_ATT_JSON="$ATTEMPTS_JSON" _PROV_WARN="$PROVENANCE_WARNING" _DATA_WARN="$DATA_WARNINGS" _PSO="$POOLED_SWEEP_OUTCOMES" \
 	_J_ri="$RUN_ID_TAG" _J_iv="$ISTIO_VERSION_TAG" _J_iv_src="$ISTIO_VERSION_SOURCE_M" _J_iv_pin="$ISTIO_VERSION_PIN_M" \
 	_J_iv_by="$ISTIO_VERSION_BY_CONTEXT_M" _J_iv_nr="$ISTIO_NOTREADY_AT_START_M" _J_iv_wait="$ISTIO_READY_WAITED_SEC_M" \
 	_J_iv_revs="$ISTIO_ACTIVE_REVISIONS_M" _J_iv_gens="$ISTIO_GENERATIONS_M" _J_iv_pv="$ISTIO_PROXY_VERSIONS_M" \
@@ -2996,7 +3020,9 @@ report_json() {
 		prov_warn = ENVIRON["_PROV_WARN"]
 		nw = split(ENVIRON["_DATA_WARN"], dws, "\n"); data_warn = ""
 		for (i = 1; i <= nw; i++) if (dws[i] != "") data_warn = data_warn (data_warn == "" ? "" : ",") js(dws[i])
-		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"harness_content_key\":%s,\"report_harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"harness_content_keys\":%s,\"attempts\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,\"files_consumed\":%d,\"skipped_legacy\":%d,\"earlier_attempt_rows_left_out\":%d,\"earlier_attempt_cells\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"sweep_outcome\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], J["hk"], J["rhs"], ri_list, iv_list, hs_list, hk_list, att_json, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], fc, fs, earlier_rows, earlier_cells, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, outcome }
+		npso = split(ENVIRON["_PSO"], psos, "\n"); pso_json = ""
+		for (i = 1; i <= npso; i++) if (psos[i] != "") pso_json = pso_json (pso_json == "" ? "" : ",") js(psos[i])
+		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"harness_content_key\":%s,\"report_harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"harness_content_keys\":%s,\"attempts\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,\"files_consumed\":%d,\"skipped_legacy\":%d,\"earlier_attempt_rows_left_out\":%d,\"earlier_attempt_cells\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"pooled_sweep_outcomes\": [%s],\n  \"sweep_outcome\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], J["hk"], J["rhs"], ri_list, iv_list, hs_list, hk_list, att_json, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], fc, fs, earlier_rows, earlier_cells, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, pso_json, outcome }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "

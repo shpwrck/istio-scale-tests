@@ -14,16 +14,16 @@
 #      (ISTIO_VERSION_BY_CONTEXT and every *_BY_CONTEXT key, ISTIO_ACTIVE_REVISIONS,
 #      ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS, ISTIO_NOTREADY_AT_*, KUBE_VERSIONS,
 #      ISTIOD_REPLICAS and controlplane's WINDOW_ROWS lines (<ctx>=<rows>[/<replicas>],
-#      the suffix kept) as ctx=value lists, as keys or as resumes.txt's columns), the
-#      member lists (CONTEXTS, REMOTE_CONTEXTS, REMOTES, any *_CONTEXTS key), SOURCE_CTX,
-#      WORKLOAD_CONTEXT and any other *_CTX / *_CONTEXT key, HUB_CONTEXT (the hub), and
-#      the "# Contexts:" / "# Source: ... Remotes:" lines, and the "by member
-#      <ctx>=<value>,..." lists of the scale envelope and the tuning report; plus every
-#      --context / --hub-context the operator names. A name matches only where no
-#      letter, digit or _ touches it on either side. The file-name form of a name
-#      (ctx_file_safe in tests/lib/common.sh: other bytes as _, as the tuning state files
-#      and tests/lib/istiod-diag.sh write it; istiod-diag folders cut it to
-#      CTX_FILE_NAME_MAX chars) maps to the same placeholder.
+#      the suffix kept) and ISTIOD_NOT_READY lines (<ctx>=<pod>) as ctx=value lists, as
+#      keys or as resumes.txt's columns), the member lists (CONTEXTS, REMOTE_CONTEXTS,
+#      REMOTES, any *_CONTEXTS key), SOURCE_CTX, WORKLOAD_CONTEXT and any other *_CTX /
+#      *_CONTEXT key, HUB_CONTEXT (the hub), and the "# Contexts:" / "# Source: ...
+#      Remotes:" lines, and the "by member <ctx>=<value>,..." lists of the scale envelope
+#      and the tuning report; plus every --context / --hub-context the operator names. A
+#      name matches only where no letter, digit or _ touches it on either side. The
+#      file-name form of a name (ctx_file_safe in tests/lib/common.sh: other bytes as _,
+#      as the tuning state files and tests/lib/istiod-diag.sh write it; istiod-diag
+#      folders cut it to CTX_FILE_NAME_MAX chars) maps to the same placeholder.
 #      When no member is learned and none is given, it refuses the whole run (exit 1,
 #      nothing written): a lone report can name members in prose only. Metadata that
 #      names members by placeholder only (<mesh-a-ctx>: a copy redacted already) passes;
@@ -306,7 +306,7 @@ function lower(s) { return tolower(s) }
 function keyclass(k) {
 	if (k ~ /_by_context$/) return "kv"
 	if (k == "istio_active_revisions" || k == "istio_proxy_versions" || k == "istio_generations" \
-		|| k == "kube_versions" || k == "istiod_replicas" || k == "window_rows" \
+		|| k == "kube_versions" || k == "istiod_replicas" || k == "window_rows" || k == "istiod_not_ready" \
 		|| k ~ /^istio_notready_at_(start|end|resume)$/) return "kv"
 	if (k == "contexts" || k == "remotes" || k ~ /_contexts$/) return "list"
 	if (k == "hub_context" || k == "hub_ctx") return "hub"

@@ -351,5 +351,5 @@ gen_sweep() {
 	[ "$(grep -c '^PROBLEM=' "${TDIR}/sweep-outcome.txt")" -eq 1 ] || { cat "${TDIR}/sweep-outcome.txt"; false; }
 	grep -qF "PROBLEM=the Istio CR changed between the failed apply of pass ${p} and its revert, not by its profile: ci-a (IstioRevision generation 3 -> 4); likely: only the IstioRevision moved" "${TDIR}/sweep-outcome.txt" \
 		|| { cat "${TDIR}/sweep-outcome.txt"; false; }
-	grep -qF "; the passes after it may have measured another configuration (002-revert-profile.sh, istio-edited-during-pass in its state dir)" "${TDIR}/sweep-outcome.txt"
+	grep -qF "; its probes did not run, and no pass runs after it (002-revert-profile.sh, istio-edited-during-pass in its state dir)" "${TDIR}/sweep-outcome.txt"
 }

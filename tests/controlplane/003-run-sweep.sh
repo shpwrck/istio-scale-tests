@@ -285,22 +285,30 @@ Other:
                               end-of-sweep version check failed; not that the
                               cells could not be counted, which every run
                               redoes, nor that the harness changed during the
-                              sweep: the resume carries that PROBLEM into its
-                              own outcome, which keeps it, exit 4, or, when the
-                              rows of the run that recorded it were all run again
-                              later and the rows the figures keep ran one
-                              harness, writes it as a NOTE). Before its first
-                              cell, a resume (as a first run) counts the
-                              controlplane-test namespaces a run cut short left
-                              on the --contexts members and on the other mesh
-                              members their remote secrets name, deletes those on
-                              the --contexts members (005-cleanup.sh), then waits
-                              --settle, so no cell runs on another's leftovers or
-                              inside their deletion's pushes; it deletes nothing
-                              on the other members: when they hold some,
-                              it stops first and prints the 005 command for
-                              them. An earlier run's notes about the end of
-                              the sweep are carried into the new outcome,
+                              sweep). The resume carries that harness PROBLEM
+                              into its own outcome, still a PROBLEM (exit 4)
+                              ending "(kept: <why>)": <n> row(s) of that run
+                              are in the figures; the rows in the figures ran
+                              more than one harness, or one not recorded; that
+                              run's rows could not be counted; or its record
+                              names no date, so the run it is about is not
+                              known. When that run wrote no rows, or its rows
+                              were all run again later, and the rows the
+                              figures keep ran one harness, the outcome writes
+                              it as a NOTE instead, ending "(that run wrote no
+                              rows)" or "(its rows were all run again later)",
+                              without the advice to run the sweep again. Before
+                              its first cell, a resume (as a first run) counts
+                              the controlplane-test namespaces a run cut short
+                              left on the --contexts members and on the other
+                              mesh members their remote secrets name, deletes
+                              those on the --contexts members (005-cleanup.sh),
+                              then waits --settle, so no cell runs on another's
+                              leftovers or inside their deletion's pushes;
+                              it deletes nothing on the other members: when
+                              they hold some, it stops first and prints the 005
+                              command for them. An earlier run's notes about the
+                              end of the sweep are carried into the new outcome,
                               once. A resume that passes its checks marks the
                               sweep's markdown pages (sweep-, sweep-charts- and
                               scale-envelope-<RUN_ID>.md) as made before it (a
@@ -2018,11 +2026,12 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	_istio_notready_notes RESUME_NOTES first "$_resume_nr0" "$_resume_w0" "$_resume_d0"
 fi
 # An earlier run's end notes (its Istio version unconfirmed at the end, istiod or
-# IstioCNI not ready at the end) are about rows that stay in the TSV: this run's outcome
-# carries them, from the newest record (sweep-outcome.txt, or sweep-outcome.prev.txt when
-# the resume after it died), as "an earlier run of this sweep (outcome of <DATE>) noted:
-# ...". A note that already starts "an earlier run of this sweep (" (one of these, or a
-# harness PROBLEM made a NOTE, below) is carried as it is, so each is kept once.
+# IstioCNI not ready at the end, its steps' own harness reads not checked) are about rows
+# that stay in the TSV: this run's outcome carries them, from the newest record
+# (sweep-outcome.txt, or sweep-outcome.prev.txt when the resume after it died), as "an
+# earlier run of this sweep (outcome of <DATE>) noted: ...". A note that already starts
+# "an earlier run of this sweep (" (one of these, or a harness PROBLEM made a NOTE, below)
+# is carried as it is, so each is kept once.
 if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	_resume_rec="${OUTPUT_DIR}/sweep-outcome.txt"
 	# A run that died left its not-finished record, with no notes (or the stop
@@ -2032,14 +2041,15 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 		_resume_rec="${OUTPUT_DIR}/sweep-outcome.prev.txt"
 	fi
 	_resume_carry=()
-	[[ ! -f "$_resume_rec" ]] || mapfile -t _resume_carry < <(awk -v p="an earlier run of this sweep (outcome of " '
+	[[ ! -f "$_resume_rec" ]] || mapfile -t _resume_carry < <(awk -v p="an earlier run of this sweep (outcome of " \
+		-v l="the steps' own harness reads could not be checked: " '
 		/^# DATE=/ { d = substr($0, 8) }
 		/^NOTE=/ {
 			n = substr($0, 6)
 			if (index(n, "an earlier run of this sweep (") == 1) { print "N" n; next }
 			if (index(n, "the Istio version at the end of the sweep is unconfirmed: ") == 1 \
 				|| index(n, "istiod or IstioCNI was not ready at the end of the sweep") == 1 \
-				|| index(n, "not ready at the end: ") == 1)
+				|| index(n, "not ready at the end: ") == 1 || index(n, l) == 1)
 				print "N" p (d == "" ? "an unknown date" : d) ") noted: " n
 		}
 		# A harness change during the sweep stays a PROBLEM in later outcomes (exit 4) while
@@ -2050,13 +2060,25 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 			if (index(n, "an earlier run of this sweep (") == 1 && index(n, ") recorded: the harness changed during the sweep")) print "P" n
 			else if (index(n, "the harness changed during the sweep") == 1) print "P" p (d == "" ? "an unknown date" : d) ") recorded: " n
 		}' "$_resume_rec")
-	# A run that died, was interrupted or stopped after a harness change recorded it in its
-	# not-finished or stop record (a NOTE or PROBLEM), which this run replaces: carried too.
+	# A run that was interrupted or stopped wrote its harness change and its steps' reads
+	# not checked in its not-finished or stop record (a NOTE or PROBLEM line), which this
+	# run replaces: carried too, the first as a PROBLEM, the second as a NOTE. So is what
+	# that run had carried, as it is: a harness change stays a PROBLEM unless it ends as
+	# the NOTE an end of the sweep made of it (below).
 	if [[ "$_resume_rec" != "${OUTPUT_DIR}/sweep-outcome.txt" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]]; then
-		mapfile -t -O "${#_resume_carry[@]}" _resume_carry < <(awk -v p="an earlier run of this sweep (" '
+		mapfile -t -O "${#_resume_carry[@]}" _resume_carry < <(awk -v p="an earlier run of this sweep (" \
+			-v h="the harness changed during the sweep" -v l="the steps' own harness reads could not be checked: " '
 			/^STARTED_AT=/ { d = substr($0, 12) }
-			/^(NOTE|PROBLEM)=the harness changed during the sweep/ { n[++k] = substr($0, index($0, "=") + 1) }
-			END { for (i = 1; i <= k; i++) print "P" p "started at " (d == "" ? "an unknown time" : d) ", not finished) recorded: " n[i] }' "${OUTPUT_DIR}/sweep-outcome.txt")
+			/^(NOTE|PROBLEM)=/ {
+				x = substr($0, index($0, "=") + 1)
+				if (index(x, p) == 1) {
+					t[++k] = "N"
+					if (index(x, ") recorded: " h) && x !~ / \((its rows were all run again later|that run wrote no rows)\)$/) t[k] = "P"
+					n[k] = x
+				} else if (index(x, h) == 1) { t[++k] = "P"; v[k] = "recorded"; n[k] = x }
+				else if (index(x, l) == 1) { t[++k] = "N"; v[k] = "noted"; n[k] = x }
+			}
+			END { for (i = 1; i <= k; i++) print t[i] (v[i] == "" ? "" : p "started at " (d == "" ? "an unknown time" : d) ", not finished) " v[i] ": ") n[i] }' "${OUTPUT_DIR}/sweep-outcome.txt")
 	fi
 	_resume_seen=()
 	for _resume_n in ${_resume_carry[@]+"${_resume_carry[@]}"}; do
@@ -3440,17 +3462,19 @@ echo ""
 # The Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# A harness change an earlier run recorded is carried as a PROBLEM (above). It becomes a
-# NOTE ending "(its rows were all run again later)" when no row of that run is in the
-# figures (controlplane_attempts: its rows, and those of the harness changes in it, all
-# left out, a later attempt of each cell kept) and the rows the figures keep ran one
-# harness (harness_same on every pair, one known HARNESS_SHA or HARNESS_CONTENT_KEY: the
-# rule 004's verdict uses), so no figure comes from the changed harness. That run is the
-# one before this resume that started last before its outcome's date (a resume can start
-# in the second an outcome was written, this one or an earlier one), or at or before its
-# start for a record it did not finish, the first run when none did; a record with no date
-# keeps the PROBLEM. A PROBLEM it keeps ends with why, "(kept: ...)"; the NOTE drops the
-# PROBLEM's advice to run the sweep again (its rows were).
+# A harness change an earlier run recorded is carried as a PROBLEM (above). It becomes
+# a NOTE when no row of that run is in the figures (controlplane_attempts: it wrote
+# none, the NOTE then ending "(that run wrote no rows)", or its rows, and those of
+# the harness changes in it, were all left out, a later attempt of each cell kept:
+# "(its rows were all run again later)") and the rows the figures keep ran one harness
+# (harness_same on every pair, one known HARNESS_SHA or HARNESS_CONTENT_KEY: the rule
+# 004's verdict uses), so no figure comes from the changed harness. That run is the one
+# before this resume that started last before its outcome's date (a resume can start in
+# the second an outcome was written, this one or an earlier one), or at or before its
+# start for a record it did not finish, the first run when none did; a record with no
+# date, or rows that could not be counted, keep the PROBLEM. A PROBLEM it keeps ends
+# with why, "(kept: ...)"; the NOTE drops the PROBLEM's advice to run the sweep again
+# (no row of that run is left to run).
 if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	_cr_att="$(controlplane_attempts "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "${OUTPUT_DIR}/resumes.txt" 2>/dev/null)" || _cr_att=""
 	# The harness of each attempt with kept rows; each run's start, rows and kept rows.
@@ -3491,13 +3515,15 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 			IFS=$'\t' read -r _ _cr_rows _cr_kept <<<"$_cr_run" || true
 			if [[ "$_cr_kept" =~ ^[1-9][0-9]*$ ]]; then
 				_cr_why="${_cr_kept} row(s) of that run are in the figures"
-			elif [[ ! "$_cr_rows" =~ ^[1-9][0-9]*$ ]]; then
-				_cr_why="no row of that run is known to have run again"
+			elif [[ ! "$_cr_rows" =~ ^[0-9]+$ ]]; then
+				_cr_why="that run's rows could not be counted"
 			elif ! ((_cr_one)); then
 				_cr_why="the rows in the figures ran more than one harness, or one not recorded"
 			else
+				_cr_why="its rows were all run again later"
+				[[ "$_cr_rows" != 0 ]] || _cr_why="that run wrote no rows"
 				RESUME_NOTES[_cr_i]=--note
-				RESUME_NOTES[_cr_i + 1]="${_cr_t%; run the sweep again if the change matters} (its rows were all run again later)"
+				RESUME_NOTES[_cr_i + 1]="${_cr_t%; run the sweep again if the change matters} (${_cr_why})"
 				continue
 			fi
 		fi

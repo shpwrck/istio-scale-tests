@@ -81,9 +81,11 @@ these as problems (exit `4`, the revert still runs):
 
 - the Istio CR changed during a pass, after its apply settled and not by its profile, or
   between an apply that failed and its revert (Argo CD not paused, another operator, an OSSM
-  operator upgrade; 002 warns and writes `istio-edited-during-pass` in `state/`). A re-run of
-  002 after a revert that stopped partway (`revert-started` in `state/`: it may have patched
-  the Istio CR already) skips this check, with a note, and keeps what the first run found;
+  operator upgrade; 002 warns and writes `istio-edited-during-pass` in `state/`). The revert
+  restores only the profile's keys, so such an edit stays: the problem also names the pass
+  that runs next (and the passes after it). A re-run of 002 after a revert that stopped
+  partway (`revert-started` in `state/`: it may have patched the Istio CR already) skips this
+  check, with a note, and keeps what the first run found;
 - it changed while the sweep changed nothing: during the suite setup, the baseline pass, a
   profile that leaves the Istio CR alone (`istio_cr_patch: {}`), between 001's record and the
   sweep's read after an apply, between one pass's revert and the next pass's apply, or after

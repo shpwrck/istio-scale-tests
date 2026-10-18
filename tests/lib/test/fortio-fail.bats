@@ -74,7 +74,7 @@ STUB
 }
 
 _waited_note() {
-	grep -qE "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting [0-9]+s \(its -t $1s and 5 s, from its start\) before going on, so the next load does not run beside it" "$2"
+	grep -qE "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting [0-9]+s \(its load's duration, $1s, and 5 s, from its start\) before going on, so the next load does not run beside it" "$2"
 }
 
 @test "dataplane 002: a window whose exec failed is a FAILED row, and its load is waited out before the next window starts; a failed warmup too" {
@@ -144,7 +144,7 @@ _waited_note() {
 		d="--duration"
 		[[ "$f" != dataplane/* ]] || d="--duration (--warmup-duration for the warmup)"
 		for p in "The load runs in the fortio client pod, not in the kubectl exec that starts it." \
-			"so the probe waits until its ${d} and 5 s more have passed before going on, unless the client pod is gone (then no load runs)." \
+			"so the probe waits until its ${d} and 5 s more have passed before going on, unless the client pod is gone (deleted, or evicted and Failed: then no load runs)." \
 			"When the probe ends during a load (a stop, Ctrl-C), it deletes the client pod, so the load ends with it;" \
 			"which a sweep started right after waits for (its setup 001 waits until the Deployments are Available)." \
 			"Run by hand, the probe loads only a Ready client pod that is not being deleted, and stops when there is none: run 001, or wait until the new pod is Ready."; do

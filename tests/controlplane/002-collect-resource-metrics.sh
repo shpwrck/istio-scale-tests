@@ -623,14 +623,18 @@ DROPPED_CTXS=()
 # than it wants (one evicted or Pending) from one that runs fewer replicas. ISTIOD_LIMITS
 # keeps that read's whole line (its per-replica limits too) for the rows' %-of-limit
 # columns (collect_capacity_for_ctx), so a window reads each member's Deployment once.
+# ISTIOD_NOTREADY: its Running istiod pods that were not Ready then (space-separated), for
+# the window's "# ISTIOD_NOT_READY=" line.
 declare -A ISTIOD_SPEC=()
 declare -A ISTIOD_LIMITS=()
+declare -A ISTIOD_NOTREADY=()
 
 resolve_pods() {
 	POD_CTXS=()
 	POD_NAMES=()
 	ISTIOD_SPEC=()
 	ISTIOD_LIMITS=()
+	ISTIOD_NOTREADY=()
 	local spec kv n lim notready
 	for ctx in "${CONTEXTS[@]}"; do
 		local pods
@@ -654,18 +658,19 @@ resolve_pods() {
 		fi
 		n=0 notready=""
 		for pod in $pods; do
-			[[ "$pod" != *=* || "${pod#*=}" == True ]] || notready+="${notready:+, }${pod%%=*}"
+			[[ "$pod" != *=* || "${pod#*=}" == True ]] || notready+="${notready:+ }${pod%%=*}"
 			POD_CTXS+=("$ctx")
 			POD_NAMES+=("${pod%%=*}")
 			n=$((n + 1))
 		done
+		ISTIOD_NOTREADY[$ctx]="$notready"
 		if [[ "$spec" != unknown ]] && ((n < spec)); then
 			echo "warning: context $ctx: ${n} istiod pod(s) Running, but its Deployment wants ${spec} (one evicted or Pending?): this window measures it on ${n} replica(s), and its WINDOW_ROWS entry (${ctx}=${n}/${spec}) tells the reports so" >&2
 		fi
-		# A Running replica that is not Ready (a replacement still syncing its remote
-		# clusters) is scraped and writes a row, but serves no proxy yet.
+		# A Running replica that is not Ready is scraped and writes a row, but the Service
+		# sends it no new proxy; the window's ISTIOD_NOT_READY line records it.
 		[[ -z "$notready" ]] \
-			|| echo "warning: context $ctx: istiod pod(s) Running but not Ready: ${notready} (a replacement still syncing?): this window scrapes them, but they serve no proxies yet, so the other replicas carry the load" >&2
+			|| echo "warning: context $ctx: istiod pod(s) Running but not Ready: ${notready// /, } (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connections but keeps the ones it has (its connected_proxies column), and the window's ISTIOD_NOT_READY line tells the reports so" >&2
 	done
 	((${#POD_CTXS[@]})) || die "no running istiod pods found in istio-system across ANY context (${CONTEXTS[*]}) — cannot proceed"
 }
@@ -681,8 +686,10 @@ save_pod_manifest() {
 	for dctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		printf '%s\n' "$dctx" >> "${dir}/dropped-ctxs.tsv"
 	done
+	# The limits line is never empty (- when unread): a tab is IFS whitespace, so read would
+	# shift the not-Ready pods into it.
 	for dctx in "${!ISTIOD_SPEC[@]}"; do
-		printf '%s\t%s\t%s\n' "$dctx" "${ISTIOD_SPEC[$dctx]}" "${ISTIOD_LIMITS[$dctx]:-}"
+		printf '%s\t%s\t%s\t%s\n' "$dctx" "${ISTIOD_SPEC[$dctx]}" "${ISTIOD_LIMITS[$dctx]:--}" "${ISTIOD_NOTREADY[$dctx]:-}"
 	done > "${dir}/istiod-spec.tsv"
 }
 
@@ -705,14 +712,16 @@ load_pod_manifest() {
 			[[ -n "$dctx" ]] && DROPPED_CTXS+=("$dctx")
 		done < "${dir}/dropped-ctxs.tsv"
 	fi
-	# The baseline's istiod Deployment replicas and its read's line (none from an older
-	# baseline: unknown, and collect_capacity_for_ctx reads the Deployment itself).
+	# The baseline's istiod Deployment replicas, its read's line and the pods not Ready then
+	# (none from an older baseline: unknown, and collect_capacity_for_ctx reads the
+	# Deployment itself).
 	ISTIOD_SPEC=()
 	ISTIOD_LIMITS=()
+	ISTIOD_NOTREADY=()
 	if [[ -f "${dir}/istiod-spec.tsv" ]]; then
-		local sctx sval slim
-		while IFS=$'\t' read -r sctx sval slim; do
-			[[ -z "$sctx" ]] || { ISTIOD_SPEC[$sctx]="$sval"; ISTIOD_LIMITS[$sctx]="$slim"; }
+		local sctx sval slim snr
+		while IFS=$'\t' read -r sctx sval slim snr; do
+			[[ -z "$sctx" ]] || { ISTIOD_SPEC[$sctx]="$sval"; ISTIOD_LIMITS[$sctx]="$slim"; ISTIOD_NOTREADY[$sctx]="$snr"; }
 		done < "${dir}/istiod-spec.tsv"
 	fi
 	for k in "${!POD_CTXS[@]}"; do
@@ -1789,16 +1798,23 @@ scrape_window() {
 		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 	done
 	# One write: a HARNESS_CHANGED_AT line when these rows ran other harness files than the
-	# TSV records, then a WINDOW_ROWS line (each member's row count, and after a / the
-	# replicas its istiod Deployment wanted at the baseline, when read: a report tells a write
-	# that was cut from a member with fewer istiod replicas, CP_CELL_AWK, and a member that ran
-	# the cell on fewer pods than it wants), then the rows, then the final phase's
-	# HARNESS_CHANGED_AT line when it ran other files than the rows are credited to (HCL_AFTER).
-	local win_file="${TMP_DIR}/window" sctx wr_spec=""
+	# TSV records, then an ISTIOD_NOT_READY line when an istiod pod was Running but not Ready
+	# at the baseline (<member>=<pod>, one entry per pod, comma-separated: its rows average in
+	# a replica that took no new proxy connections), then a WINDOW_ROWS line (each member's
+	# row count, and after a / the replicas its istiod Deployment wanted at the baseline, when
+	# read: a report tells a write that was cut from a member with fewer istiod replicas,
+	# CP_CELL_AWK, and a member that ran the cell on fewer pods than it wants), then the
+	# rows, then the final phase's HARNESS_CHANGED_AT line when it ran other files than the
+	# rows are credited to (HCL_AFTER).
+	local win_file="${TMP_DIR}/window" sctx wr_spec="" nr_line="" nrp
 	for sctx in "${!ISTIOD_SPEC[@]}"; do wr_spec+="${sctx}"$'\t'"${ISTIOD_SPEC[$sctx]}"$'\n'; done
+	for sctx in "${CONTEXTS[@]}"; do
+		for nrp in ${ISTIOD_NOTREADY[$sctx]:-}; do nr_line+="${nr_line:+,}${sctx}=${nrp}"; done
+	done
 	if [[ -s "$rows_file" ]]; then
 		{
 			harness_change_line
+			[[ -z "$nr_line" ]] || printf '# ISTIOD_NOT_READY=%s\n' "$nr_line"
 			WR_SPEC="$wr_spec" awk -F'\t' '
 				BEGIN { ns = split(ENVIRON["WR_SPEC"], sl, "\n"); for (i = 1; i <= ns; i++) if (split(sl[i], f, "\t") == 2 && f[2] ~ /^[0-9]+$/) sp[f[1]] = f[2] }
 				{ if (!($2 in n)) o[++k] = $2; n[$2]++ }
@@ -1841,6 +1857,9 @@ if ((WATCH)); then
 		# peak CPU keep the highest value of every earlier window.
 		rm -f "${TMP_DIR}"/peak-mem-*.val "${TMP_DIR}"/peak-cpu-*.val "${TMP_DIR}"/prev-cpu-*.val
 		scrape_window "$INTERVAL"
+		# resolve_pods read the pods' readiness once, before the first window: later
+		# windows were not read, so their rows get no ISTIOD_NOT_READY line.
+		ISTIOD_NOTREADY=()
 	done
 elif [[ "$PHASE" == baseline ]]; then
 	echo ""

@@ -64,8 +64,8 @@ for (its setup `001` waits until the Deployments are Available). Run by hand, a 
 loads only a Ready client pod that is not being deleted, and stops when there is none:
 run `001`, or wait until the new pod is Ready. When a load's `kubectl exec` fails
 part-way (a `FAILED` row), the probe waits until that load's `--duration` and 5 s more
-have passed before the next window starts, unless the client pod is gone (then no load
-runs).
+have passed before the next window starts, unless the client pod is gone (deleted, or
+evicted and Failed: then no load runs).
 
 ## Quick start
 

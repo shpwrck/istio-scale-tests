@@ -202,11 +202,13 @@ FAKE
 	[ "$(grep -c '^PROBLEM=.*the harness changed during the sweep: HARNESS_SHA=aaa1111' "${D}/sweep-outcome.txt")" = 1 ]
 	grep -q "^PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed" "${D}/sweep-outcome.txt"
 	# A run that did not finish (its not-finished record) noted a harness change: carried too.
+	# The run it names (the last to start by 2030: the second --resume, which added no rows)
+	# wrote no rows, and the figures ran one harness: a NOTE.
 	mv -f "${D}/sweep-outcome.txt" "${D}/sweep-outcome.prev.txt"
 	printf 'RUN_ID=x\nEXIT=unfinished\nSTARTED_AT=2030-01-01T00:00:00Z\nNOTE=the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats)\n' > "${D}/sweep-outcome.txt"
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
-	grep -qx 'PROBLEM=an earlier run of this sweep (started at 2030-01-01T00:00:00Z, not finished) recorded: the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats) (kept: no row of that run is known to have run again)' "${D}/sweep-outcome.txt"
+	grep -qx 'NOTE=an earlier run of this sweep (started at 2030-01-01T00:00:00Z, not finished) recorded: the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats) (that run wrote no rows)' "${D}/sweep-outcome.txt"
 	[ "$(grep -c '^PROBLEM=.*HARNESS_SHA=aaa1111' "${D}/sweep-outcome.txt")" = 1 ]
 	# A change of the mesh under the sweep still refuses the --resume.
 	echo 'PROBLEM=the Istio version changed during the sweep (bats)' >> "${D}/sweep-outcome.txt"

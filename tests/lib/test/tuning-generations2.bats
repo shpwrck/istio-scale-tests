@@ -138,7 +138,7 @@ member_sweep() {
 	_failed_apply edited
 	echo $(( $(<"${TD}/gen.ci-a") + 2 )) > "${TD}/gen.ci-a"
 	_revert
-	[[ "$stderr" == *"WARNING: the Istio CR changed ${span}, not by this profile: ci-a (Istio CR generation 3 -> 5, IstioRevision generation 3 -> 5). Likely: "*". The passes after it may have measured another configuration. Reverting anyway."* ]] \
+	[[ "$stderr" == *"WARNING: the Istio CR changed ${span}, not by this profile: ci-a (Istio CR generation 3 -> 5, IstioRevision generation 3 -> 5). Likely: "*". Its probes did not run, but the passes after it (while the edit stays: this revert restores only the profile's keys) may measure another configuration. Reverting anyway."* ]] \
 		|| { echo "$stderr"; false; }
 	[ -s "${st}/istio-edited-during-pass" ]
 	# Run again after that revert finished (no active-profile left): the pass is named from

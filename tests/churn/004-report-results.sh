@@ -57,7 +57,8 @@ Usage: $(basename "$0") [options]
                      git describe (every run records one key). It repeats no
                      sweep-outcome.txt of a sweep-* dir below the results dir (report each
                      sweep alone to see it), but its note names each one that has not
-                     finished, was interrupted, stopped early or records a PROBLEM.
+                     finished, was interrupted, stopped early or records a PROBLEM, and
+                     so does a warning on stderr.
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
@@ -203,6 +204,9 @@ elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/swee
 	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
 	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
 fi
+# The same list on stderr (as controlplane's data warning), in sight when the report goes
+# to a file.
+[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || echo "warning: sweep records below ${RESULTS_DIR} that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }; report each sweep dir alone to see its outcome" >&2
 
 # Every format reads the rows through churn_rows, which re-derives the status of a row
 # an older 002 wrote as OK with no number in a measured column, so it

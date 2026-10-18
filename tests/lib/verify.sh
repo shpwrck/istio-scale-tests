@@ -299,6 +299,7 @@ EXTRACTED_PATTERNS=(
 	'function cp_cell_state('
 	'function cp_plan_load('
 	'function cp_wl_parse('
+	'function cp_nr_parse('
 	# a controlplane sweep's runs and its resume command (common.sh)
 	'function cp_comment('
 	'function cp_end('

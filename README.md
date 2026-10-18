@@ -278,8 +278,10 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   instead of a warning, which an input without the key keeps. A report repeats only its results
   dir's own `sweep-outcome.txt`: the record of a `sweep-*` dir below it (a pooled run, or one
   sweep reported from its parent dir) that has not finished, was interrupted, stopped early or
-  records a `PROBLEM` is named in a note (controlplane: a data warning, and its verdict counts the
-  `PROBLEM`s); report that sweep dir alone to see its outcome.
+  records a `PROBLEM` is named in a note and a warning on stderr (json `pooled_sweep_outcomes`;
+  controlplane: one that has not finished, was interrupted or stopped early is a data warning,
+  and the verdict counts and names each record's `PROBLEM`s); report that sweep dir alone to see
+  its outcome.
 
 ## Grow the mesh
 

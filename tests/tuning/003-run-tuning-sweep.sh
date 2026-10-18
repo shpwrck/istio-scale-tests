@@ -620,13 +620,23 @@ for p in "${PASSES[@]}"; do
 		elif ! profile_edits_cr "$state_dir"; then
 			edits=0
 		fi
-		istio_checkpoint "after the revert of pass ${p}" "$edits" "${PASSES[step]:-}"
+		# The pass that runs next: none after a failed revert (the sweep stops below).
+		next="${PASSES[step]:-}"
+		((revert_ok)) || next=""
+		istio_checkpoint "after the revert of pass ${p}" "$edits" "$next"
 		# 002's span: the pass, or for an apply that failed (no probe ran), up to its revert.
+		# 002 reverts only the profile's keys, so such an edit stays for the passes after it,
+		# and no later check reports it again: name them here.
 		span="during pass ${p}" settled=", after its apply settled and" in_span="during the pass"
 		effect="its probes may have measured another configuration"
 		if ((applied == 0)); then
 			span="between the failed apply of pass ${p} and its revert" settled="," in_span="in that span"
-			effect="the passes after it may have measured another configuration"
+			effect="its probes did not run"
+		fi
+		if [[ -n "$next" ]]; then
+			effect+=", and pass ${next} (and the passes after it, while the edit stays) may measure another configuration than its profile's"
+		elif ((applied == 0)); then
+			effect+=", and no pass runs after it"
 		fi
 		if [[ -s "${state_dir}/istio-edited-during-pass" ]]; then
 			edit="$(<"${state_dir}/istio-edited-during-pass")" tab=$'\t'

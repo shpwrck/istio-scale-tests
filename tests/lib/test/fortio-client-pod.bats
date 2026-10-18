@@ -4,8 +4,9 @@
 # - fortio_client_pod takes only a Ready pod (Running alone is not enough: its istio-proxy
 #   may still wait for its config), and the probe stops when there is none;
 # - fortio_load_wait_out skips its wait when the client pod is gone (a `get pod
-#   --ignore-not-found` that answers nothing: no load runs), and keeps it when the pod is
-#   still there or the API answers an error (fortio-fail.bats: its stub fails that read);
+#   --ignore-not-found` of its phase that answers nothing, Failed as after an eviction, or
+#   Succeeded: no load runs), and keeps it when the pod still runs or the API answers an
+#   error (fortio-fail.bats: its stub fails that read), counted from after that read;
 # - fortio_client_stop deletes with --ignore-not-found, so a pod already gone gives no
 #   "its load runs on" warning.
 # No cluster: kubectl and curl are stubs. The checks are markers and orderings, never
@@ -26,8 +27,9 @@ setup() {
 	# CLIENTS (name, deletionTimestamp, Ready status per line; default one Ready pod). An
 	# exec answers fortio_ok.json; with EXEC=notfound it fails as for a pod that is gone,
 	# with EXEC=block it runs until the pod is deleted (LOAD_STARTED once it runs). `get
-	# pod <name> --ignore-not-found -o name` answers nothing with GONE=1, else the pod. A
-	# delete fails NotFound without --ignore-not-found, as kubectl does for a pod gone.
+	# pod <name> --ignore-not-found` of its phase answers nothing with GONE=1, else PHASE
+	# (default Running). A delete fails NotFound without --ignore-not-found, as kubectl does
+	# for a pod gone.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
@@ -38,8 +40,8 @@ case " $* " in
 	[[ "${GONE:-0}" == 1 && " $* " != *" --ignore-not-found "* ]] && { echo 'Error from server (NotFound): pods not found' >&2; exit 1; }
 	exit 0 ;;
 *" get pod -l app="*"-client --field-selector=status.phase=Running "*) printf '%b' "${CLIENTS-client-0\t\tTrue\n}" ;;
-*" get pod "*" --ignore-not-found -o name "*)
-	[[ "${GONE:-0}" == 1 ]] || printf 'pod/client-0\n' ;;
+*" get pod "*" --ignore-not-found -o jsonpath={.status.phase} "*)
+	[[ "${GONE:-0}" == 1 ]] || printf '%s' "${PHASE:-Running}" ;;
 *" exec "*" fortio load "*)
 	case "${EXEC:-ok}" in
 	notfound) echo 'Error from server (NotFound): pods "client-0" not found' >&2; exit 1 ;;
@@ -117,20 +119,27 @@ CDP3=(churn-dataplane/003-run-churn-probe.sh --churn-rate 1 --source-context ctx
 	done
 }
 
-@test "dataplane 002: when the client pod is gone, a failed window's (and the warmup's) load is not waited out: every window runs, FAILED, each after a read that found no pod" {
-	export EXEC=notfound GONE=1
-	PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/${DP[0]}" "${DP[@]:1}" --qps-levels 10,20,50 \
-		--duration 30 --warmup-duration 30 --output-dir "$RES"
-	assert_success
-	[[ "$stderr" != *"waiting "* ]] || { echo "$stderr"; false; }
-	# The warmup and three windows: one note each.
-	[ "$(grep -c "note: ctx-a: the load's kubectl exec failed and the client pod client-0 is gone (evicted or deleted), so no load of it runs: not waiting" <<<"$stderr")" -eq 4 ] \
-		|| { echo "$stderr"; false; }
-	[ "$(awk -F'\t' '$14 == "FAILED"' "$RES"/latency-*.tsv | wc -l)" -eq 3 ]
-	# Ordering: each exec is followed by its pod read before the next exec.
-	[ "$(grep -E ' exec client-0 | get pod client-0 --ignore-not-found -o name' "$STUB_LOG" | sed -E 's/.* (exec|get pod) .*/\1/' | paste -sd,)" = \
-		"exec,get pod,exec,get pod,exec,get pod,exec,get pod" ] || { cat "$STUB_LOG"; false; }
-	grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test get pod client-0 --ignore-not-found -o name" "$STUB_LOG"
+@test "dataplane 002: when the client pod is gone (deleted, or evicted: phase Failed), a failed window's (and the warmup's) load is not waited out: every window runs, FAILED, each after a read that found no pod running" {
+	local gone
+	export EXEC=notfound
+	for gone in deleted Failed; do
+		: > "$STUB_LOG"
+		rm -f "$RES"/latency-*
+		if [[ "$gone" == deleted ]]; then export GONE=1; else export GONE=0 PHASE=Failed; fi
+		PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/${DP[0]}" "${DP[@]:1}" --qps-levels 10,20,50 \
+			--duration 30 --warmup-duration 30 --output-dir "$RES"
+		assert_success
+		[[ "$stderr" != *"waiting "* ]] || { echo "$stderr"; false; }
+		# The warmup and three windows: one note each.
+		[[ "$gone" == deleted ]] || gone="phase Failed: its containers ended"
+		[ "$(grep -c "note: ctx-a: the load's kubectl exec failed and the client pod client-0 is gone (${gone}), so no load of it runs: not waiting" <<<"$stderr")" -eq 4 ] \
+			|| { echo "$stderr"; false; }
+		[ "$(awk -F'\t' '$14 == "FAILED"' "$RES"/latency-*.tsv | wc -l)" -eq 3 ]
+		# Ordering: each exec is followed by its pod read before the next exec.
+		[ "$(grep -E ' exec client-0 | get pod client-0 --ignore-not-found ' "$STUB_LOG" | sed -E 's/.* (exec|get pod) .*/\1/' | paste -sd,)" = \
+			"exec,get pod,exec,get pod,exec,get pod,exec,get pod" ] || { cat "$STUB_LOG"; false; }
+		grep -qx -- "--context=ctx-a --request-timeout=5s -n dataplane-test get pod client-0 --ignore-not-found -o jsonpath={.status.phase}" "$STUB_LOG"
+	done
 }
 
 @test "churn-dataplane 002 and 003: when the client pod is gone, the FAILED window's load is not waited out" {
@@ -141,52 +150,80 @@ CDP3=(churn-dataplane/003-run-churn-probe.sh --churn-rate 1 --source-context ctx
 		local -n a="$p"
 		PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/${a[0]}" "${a[@]:1}" --duration 30 --output-dir "$RES"
 		[ "$status" -eq 0 ] || { echo "${a[0]}: status ${status}: ${stderr}"; false; }
-		[[ "$stderr" == *"note: ctx-a: the load's kubectl exec failed and the client pod client-0 is gone (evicted or deleted), so no load of it runs: not waiting"* ]] \
+		[[ "$stderr" == *"note: ctx-a: the load's kubectl exec failed and the client pod client-0 is gone (deleted), so no load of it runs: not waiting"* ]] \
 			|| { echo "${a[0]}: ${stderr}"; false; }
 		[[ "$stderr" != *"waiting "* ]]
 		grep -q $'\tFAILED\t' "$RES"/churn-dataplane-*.tsv
-		grep -qx -- "--context=ctx-a --request-timeout=5s -n churn-dataplane-test get pod client-0 --ignore-not-found -o name" "$STUB_LOG"
+		grep -qx -- "--context=ctx-a --request-timeout=5s -n churn-dataplane-test get pod client-0 --ignore-not-found -o jsonpath={.status.phase}" "$STUB_LOG"
 		rm -f "$RES"/churn-dataplane-*
 		unset -n a
 	done
 }
 
-@test "fortio_load_wait_out: a pod still there, or an API error, keeps the wait; a gone pod skips it; once the load's time has passed, no read at all" {
+@test "fortio_load_wait_out: a pod in a phase other than Failed or Succeeded (Running, Pending), or an API error, keeps the wait, counted from after the read; a gone pod (no answer; Failed, as after an eviction; Succeeded) skips it; once the load's time has passed, no read at all" {
 	source "${ROOT}/tests/lib/timestamp.sh"
 	source "${ROOT}/tests/lib/fortio.sh"
-	local calls="${BATS_TEST_TMPDIR}/calls" start
+	local calls="${BATS_TEST_TMPDIR}/calls" clock="${BATS_TEST_TMPDIR}/clock" start ans t0
 	# k <answer>: a kubectl stand-in that logs its call and answers: gone (nothing, 0),
-	# there (the pod, 0) or error (1).
+	# there (Running, 0), Failed, Succeeded, Pending (that phase, 0) or error (1).
 	k() {
 		local a="$1"
 		shift
 		printf '%s\n' "$*" >> "$calls"
 		case "$a" in
 		gone) return 0 ;;
-		there) echo pod/p ;;
+		there) echo Running ;;
+		Failed | Succeeded | Pending) echo "$a" ;;
 		*) return 1 ;;
 		esac
 	}
 	# A start 4 s ago with a 0 s load: under a second left to wait.
-	for ans in there error; do
+	for ans in there Pending error; do
 		: > "$calls"
 		start="$(($(now_ns) - 4000000000))"
 		run --separate-stderr fortio_load_wait_out "$start" 0 ctx-a ns-a p k "$ans"
 		assert_success
-		[[ "$stderr" == "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting "*"s (its -t 0s and 5 s, from its start)"* ]] \
+		[[ "$stderr" == "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting "*"s (its load's duration, 0s, and 5 s, from its start)"* ]] \
 			|| { echo "${ans}: ${stderr}"; false; }
-		[ "$(cat "$calls")" = "--context=ctx-a --request-timeout=5s -n ns-a get pod p --ignore-not-found -o name" ]
+		[ "$(cat "$calls")" = "--context=ctx-a --request-timeout=5s -n ns-a get pod p --ignore-not-found -o jsonpath={.status.phase}" ]
 	done
-	: > "$calls"
-	run --separate-stderr fortio_load_wait_out "$(now_ns)" 30 ctx-a ns-a p k gone
-	assert_success
-	[ "$stderr" = "note: ctx-a: the load's kubectl exec failed and the client pod p is gone (evicted or deleted), so no load of it runs: not waiting" ]
+	for ans in gone Failed Succeeded; do
+		: > "$calls"
+		run --separate-stderr fortio_load_wait_out "$(now_ns)" 30 ctx-a ns-a p k "$ans"
+		assert_success
+		if [[ "$ans" == gone ]]; then ans=deleted; else ans="phase ${ans}: its containers ended"; fi
+		[ "$stderr" = "note: ctx-a: the load's kubectl exec failed and the client pod p is gone (${ans}), so no load of it runs: not waiting" ] \
+			|| { echo "$stderr"; false; }
+	done
 	# Its time has passed: no wait, no read.
 	: > "$calls"
 	run --separate-stderr fortio_load_wait_out "$(($(now_ns) - 60000000000))" 30 ctx-a ns-a p k gone
 	assert_success
 	[ -z "$stderr" ]
 	[ ! -s "$calls" ]
+	# The wait is counted after the read: a clock (now_ns) that a slow read moves 20 s on,
+	# and a sleep that only logs. A 30 s load just started: 35 s, less the read's 20.
+	t0="$(now_ns)"
+	now_ns() { cat "$clock"; }
+	sleep() { printf 'slept %s\n' "$*" >> "$calls"; }
+	slow() {
+		printf '%s\n' "$((t0 + $1 * 1000000000))" > "$clock"
+		echo Running
+	}
+	echo "$t0" > "$clock"
+	: > "$calls"
+	run --separate-stderr fortio_load_wait_out "$t0" 30 ctx-a ns-a p slow 20
+	assert_success
+	[[ "$stderr" == "note: the load's kubectl exec failed, but its fortio load may still run in the client pod: waiting 15s "* ]] \
+		|| { echo "$stderr"; false; }
+	[ "$(grep -c '^slept 15$' "$calls")" -eq 1 ]
+	# A read that ends past the load's end: no wait, no note.
+	echo "$t0" > "$clock"
+	: > "$calls"
+	run --separate-stderr fortio_load_wait_out "$t0" 30 ctx-a ns-a p slow 40
+	assert_success
+	[ -z "$stderr" ]
+	! grep -q '^slept' "$calls" || false
 }
 
 @test "dataplane 002: a SIGTERM during a load whose pod is already gone gives no 'could not delete' warning (the delete uses --ignore-not-found)" {

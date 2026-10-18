@@ -61,7 +61,8 @@ something else edited the Istio CR (Argo CD not paused, another operator, an OSS
 operator upgrade) during the pass, or, after an apply that failed (SETUP_FAILED beside
 the state dir, under 003), between that apply and this revert: it warns and writes
 istio-edited-during-pass in the state dir (003-run-tuning-sweep.sh then fails the sweep,
-exit 4), and the revert still runs. A member whose generations could not be read (now or
+exit 4), and the revert still runs. It restores only the profile's keys, so such an edit
+stays for the passes after it. A member whose generations could not be read (now or
 then) is not compared: it warns and writes istio-generations-unchecked (003 adds a note
 to its outcome). Its exit status does not change. A re-run after a revert that stopped
 partway (revert-started in the state dir: it may have patched the Istio CR already)
@@ -146,9 +147,11 @@ ns_probe() {
 # The span: the pass, or under 003-run-tuning-sweep.sh after an apply that failed (its
 # SETUP_FAILED next to the state dir: no probe ran), from that apply to this revert, named
 # as 003 names it. A re-run after a revert that finished has no active-profile left: the
-# pass is then the state dir's parent (003's <pass>/state), else "its pass".
+# pass is then the state dir's parent (003's <pass>/state), else "its pass". This revert
+# restores only the profile's keys, so such an edit stays for the passes after it.
 in_span="during the pass" changed="during the pass of ${PROFILE_NAME}, after its apply settled and"
-effect="The pass's probes may have measured another configuration."
+after="the passes after it (while the edit stays: this revert restores only the profile's keys) may measure another configuration"
+effect="The pass's probes may have measured another configuration, and ${after}."
 if [[ -e "${STATE_DIR}/../SETUP_FAILED" ]]; then
 	pass_l="$PROFILE_NAME"
 	if [[ "$pass_l" == unknown ]]; then
@@ -157,7 +160,7 @@ if [[ -e "${STATE_DIR}/../SETUP_FAILED" ]]; then
 	fi
 	if [[ -n "$pass_l" ]]; then pass_l="pass ${pass_l}"; else pass_l="its pass"; fi
 	in_span="between the failed apply of ${pass_l} and its revert"
-	changed="${in_span}," effect="The passes after it may have measured another configuration."
+	changed="${in_span}," effect="Its probes did not run, but ${after}."
 fi
 if [[ -e "${STATE_DIR}/revert-started" ]]; then
 	echo "    note: a revert of this apply started before ($(head -n 1 "${STATE_DIR}/revert-started" 2>/dev/null || echo "time unknown")) and may have patched the Istio CR already: no check that it was left alone ${in_span} (that run's finding, if any, stays in istio-edited-during-pass)"

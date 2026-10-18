@@ -102,52 +102,62 @@ STUB
 	[ -z "$(ls -A "$TMPDIR")" ]
 }
 
-@test "every real setup step (controlplane, dataplane, churn, churn-dataplane, propagation, tuning) reads the harness after its render: a chart file (a profile) present only while it rendered (read) is a PROBLEM naming it" {
+# _setup_step <suite> <step> <edit> [<args>...]: the real setup step tests/<suite>/<step>
+# (--dry-run <args>) in a sweep's shell, in a copy of the checkout where a file in
+# tests/<suite>/<edit>/ is present only while the step renders its chart (reads a profile):
+# the record's PROBLEM names <step>. kubectl: a client-side dry-run apply takes the render;
+# any other call fails (no context in the kubeconfig). helm and python3: the edit appears
+# when a chart is rendered (a profile is read), then the real tool runs.
+_setup_step() {
+	local suite="$1" step="$2" edit="$3" bin="${BATS_TEST_TMPDIR}/bin" ek="${BATS_TEST_TMPDIR}/kubeconfig" r clean
+	shift 3
+	if [[ ! -e "${bin}/kubectl" ]]; then
+		: > "$ek"
+		mkdir -p "$bin"
+		printf '#!/bin/sh\ncase " $* " in *" apply --dry-run=client "*) cat >/dev/null; exit 0 ;; esac\nexit 1\n' > "${bin}/kubectl"
+		printf '#!/bin/sh\n[ "$1" != template ] || printf "x\\n" > "$HS_EDIT"\nexec %q "$@"\n' "$(command -v helm)" > "${bin}/helm"
+		printf '#!/bin/sh\ncase " $* " in *" load "*) printf "x\\n" > "$HS_EDIT" ;; esac\nexec %q "$@"\n' "$(command -v python3)" > "${bin}/python3"
+		chmod +x "${bin}/kubectl" "${bin}/helm" "${bin}/python3"
+	fi
+	r="${BATS_TEST_TMPDIR}/${suite}"
+	_suite_copy "$r" "$suite"
+	clean="$(ROOT="$r" harness_sha)"
+	# A sweep's shell: its start read, the step (dry run), the edit undone, its end.
+	HS_EDIT="$r/tests/${suite}/${edit}/zz-edit.yaml" HARNESS_SHA_CHECK_SEC=3600 PATH="${bin}:${PATH}" KUBECONFIG="$ek" \
+		run --separate-stderr bash -c '
+		source "$1/tests/lib/common.sh"
+		ROOT="$1"
+		harness_sha_for_sweep "$1/tests/out"
+		sweep_outcome_start "$1/tests/out/rec" st-run
+		"$1/tests/$2" --dry-run "${@:3}" || { echo "step failed: $?" >&2; exit 9; }
+		rm -f "$HS_EDIT"
+		sweep_outcome --run-id st-run --record "$1/tests/out/rec" 1' _ "$r" "${suite}/${step}" "$@"
+	[ "$status" -eq 4 ] || { echo "${suite}: status ${status}: ${stderr}"; false; }
+	# The edit is undone: only the sweep's own output is new.
+	[ "$(git -C "$r" status --porcelain)" = "?? tests/out/" ] || { git -C "$r" status --porcelain; false; }
+	_problem "$r/tests/out/rec/sweep-outcome.txt" "$clean" "$step"
+}
+
+@test "every real setup step that renders a chart (controlplane, dataplane, churn, churn-dataplane, propagation) reads the harness after its render: a chart file present only while it rendered is a PROBLEM naming it" {
 	command -v helm >/dev/null 2>&1 || skip "helm is needed (the setup steps render their charts)"
-	_need() { python3 -I -c 'import yaml' 2>/dev/null; }
-	local bin="${BATS_TEST_TMPDIR}/bin" ek="${BATS_TEST_TMPDIR}/kubeconfig" r clean s suite step edit args
+	local s suite step edit args
 	local -a steps=(
 		"controlplane 001-setup-controlplane-test.sh chart --contexts ci-a"
 		"dataplane 001-setup-dataplane-test.sh chart --source-context ci-a --remote-contexts ci-b"
 		"churn 001-setup-churn-test.sh chart --contexts ci-a"
 		"churn-dataplane 001-setup-coexec-test.sh chart --source-context ci-a"
 		"propagation 001-setup-propagation-test.sh chart --contexts ci-a"
-		"tuning 001-apply-profile.sh profiles --profile 01-push-throttling --contexts ci-a"
 	)
-	: > "$ek"
-	mkdir -p "$bin"
-	# kubectl: a client-side dry-run apply takes the render; any other call fails (no
-	# context in the kubeconfig). helm and python3: the edit appears when a chart is rendered
-	# (a profile is read), then the real tool runs.
-	printf '#!/bin/sh\ncase " $* " in *" apply --dry-run=client "*) cat >/dev/null; exit 0 ;; esac\nexit 1\n' > "${bin}/kubectl"
-	printf '#!/bin/sh\n[ "$1" != template ] || printf "x\\n" > "$HS_EDIT"\nexec %q "$@"\n' "$(command -v helm)" > "${bin}/helm"
-	printf '#!/bin/sh\ncase " $* " in *" load "*) printf "x\\n" > "$HS_EDIT" ;; esac\nexec %q "$@"\n' "$(command -v python3)" > "${bin}/python3"
-	chmod +x "${bin}/kubectl" "${bin}/helm" "${bin}/python3"
 	for s in "${steps[@]}"; do
 		read -r suite step edit args <<<"$s"
-		if [[ "$suite" == tuning ]] && ! _need; then
-			echo "# skipped tuning: python3 with PyYAML is needed" >&3
-			continue
-		fi
-		r="${BATS_TEST_TMPDIR}/${suite}"
-		_suite_copy "$r" "$suite"
-		clean="$(ROOT="$r" harness_sha)"
-		# A sweep's shell: its start read, the step (dry run), the edit undone, its end.
 		# shellcheck disable=SC2086  # args: the step's flags
-		HS_EDIT="$r/tests/${suite}/${edit}/zz-edit.yaml" HARNESS_SHA_CHECK_SEC=3600 PATH="${bin}:${PATH}" KUBECONFIG="$ek" \
-			run --separate-stderr bash -c '
-			source "$1/tests/lib/common.sh"
-			ROOT="$1"
-			harness_sha_for_sweep "$1/tests/out"
-			sweep_outcome_start "$1/tests/out/rec" st-run
-			"$1/tests/$2" --dry-run "${@:3}" || { echo "step failed: $?" >&2; exit 9; }
-			rm -f "$HS_EDIT"
-			sweep_outcome --run-id st-run --record "$1/tests/out/rec" 1' _ "$r" "${suite}/${step}" $args
-		[ "$status" -eq 4 ] || { echo "${suite}: status ${status}: ${stderr}"; false; }
-		# The edit is undone: only the sweep's own output is new.
-		[ "$(git -C "$r" status --porcelain)" = "?? tests/out/" ] || { git -C "$r" status --porcelain; false; }
-		_problem "$r/tests/out/rec/sweep-outcome.txt" "$clean" "$step"
+		_setup_step "$suite" "$step" "$edit" $args
 	done
+}
+
+@test "the tuning setup step (001-apply-profile.sh) reads the harness after it reads its profile: a profile file present only while it was read is a PROBLEM naming it" {
+	python3 -I -c 'import yaml' 2>/dev/null || skip "python3 with PyYAML is needed (the tuning lib reads the profile)"
+	_setup_step tuning 001-apply-profile.sh profiles --profile 01-push-throttling --contexts ci-a
 }
 
 @test "a step log a temp-file cleaner removed during the sweep, or that its start could not create, is a NOTE (and a warning) in the finished and in the interrupted record" {
@@ -157,7 +167,7 @@ STUB
 	cp "${ROOT}/.gitignore" "$r/.gitignore"
 	_commit "$r" init
 	rec="$r/tests/out/rec/sweep-outcome.txt"
-	note="the steps' own harness reads could not be checked: the temp file they are added to (HARNESS_SWEEP_LOG) was gone at the end check (removed during the sweep, as a temp-file cleaner does), so a harness change that only a step read (undone before the sweep's next read) is not in this outcome"
+	note="the steps' own harness reads could not be checked: the temp file they are added to (HARNESS_SWEEP_LOG) was gone at the end check (removed during the sweep, as a temp-file cleaner does), so a harness change that only a step read (undone before the sweep's next read) is not in its outcome"
 	# Finished: a note, not a problem (exit 0).
 	run --separate-stderr bash -c '
 		source "$2/tests/lib/common.sh"
@@ -195,7 +205,7 @@ STUB
 		sweep_outcome --run-id st-run --record "$1/tests/out/rec" 1' _ "$r" "$ROOT"
 	assert_success
 	[[ "$stderr" == *"warning: could not create a temp file for the steps' harness reads"* ]] || { echo "$stderr"; false; }
-	grep -qxF "NOTE=the steps' own harness reads could not be checked: the sweep could not create the temp file they are added to (HARNESS_SWEEP_LOG) at its start, so a harness change that only a step read (undone before the sweep's next read) is not in this outcome" "$rec" \
+	grep -qxF "NOTE=the steps' own harness reads could not be checked: the sweep could not create the temp file they are added to (HARNESS_SWEEP_LOG) at its start, so a harness change that only a step read (undone before the sweep's next read) is not in its outcome" "$rec" \
 		|| { cat "$rec"; false; }
 	# A sweep whose log was there to the end: no such note.
 	rm -rf "$r/tests/out"

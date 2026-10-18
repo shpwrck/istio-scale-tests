@@ -192,7 +192,11 @@ is_nonneg_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 # tsv_end_line <file>: ends <file>'s last line with a newline when it has none (a write cut
 # short: a full disk, a run killed while it appended), so the next append starts a line of
 # its own instead of merging onto the cut one. Does nothing for a missing or empty file;
-# returns non-zero when it cannot write (the caller dies with what to fix).
+# returns non-zero when it cannot write (the caller dies with what to fix). The cut line
+# then has fewer columns than the header, unless the cut fell inside its last field: it then
+# keeps the header's column count, and only the status row a run that goes on writes after
+# it marks the cell failed (after a hard kill, a --resume reads it as a whole row, its last
+# field cut).
 # shellcheck disable=SC2329
 tsv_end_line() {
 	[[ ! -s "$1" || -z "$(tail -c 1 "$1" 2>/dev/null)" ]] || printf '\n' >> "$1"
@@ -1891,7 +1895,7 @@ _harness_sha_sweep_end() {
 		fi
 	fi
 	if (($# > 2)) && [[ -n "${_HARNESS_STEP_LOST:-}" ]]; then
-		_hse_note="the steps' own harness reads could not be checked: ${_HARNESS_STEP_LOST}, so a harness change that only a step read (undone before the sweep's next read) is not in this outcome"
+		_hse_note="the steps' own harness reads could not be checked: ${_HARNESS_STEP_LOST}, so a harness change that only a step read (undone before the sweep's next read) is not in its outcome"
 	fi
 	# The first step read of other files: "<UTC Z> <script> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>".
 	if [[ -n "${_HARNESS_STEP_FIRST:-}" ]]; then
@@ -2085,9 +2089,17 @@ report_harness_sha() {
 #                        row). <n>: the rows the window wrote, one per istiod pod; <spec>:
 #                        the member's istiod Deployment .spec.replicas at the window's
 #                        baseline (absent when not read, or an older harness wrote it).
+#                        And a "# ISTIOD_NOT_READY=<member>=<pod>,..." line right before
+#                        the WINDOW_ROWS line (002 writes one when an istiod pod was Running
+#                        but not Ready at the window's baseline): cp_cell_row ties it to the
+#                        same attempt.
 #   cp_wl_parse(wl)      the entries of such a line's value wl into cp_wlm[i] (the member),
 #                        cp_wln[i] (<n>) and cp_wls[i] (<spec>, "" when absent); returns
 #                        their count (an entry of another form is skipped).
+#   cp_nr_parse(s)       the entries of an ISTIOD_NOT_READY line's value s into cp_nrm[i]
+#                        (the member) and cp_nrq[i] (the pod); returns their count.
+#   cp_wnr               the value of the ISTIOD_NOT_READY line right before the current
+#                        WINDOW_ROWS line ("" when none).
 #   cp_end()             call it in END, before cp_cell_state: marks the cell written last.
 #   cp_cell_state(k)     "" when the cell is done: its last row is a measurement row, and
 #                        the measurement rows since its last status row name as many
@@ -2128,7 +2140,11 @@ report_harness_sha() {
 #                        (no istiod pod Running: 002 writes one degraded N/A row, so its entry
 #                        reads <member>=1/<spec>; or none could be read) is in neither: no
 #                        figure has its rows, and the verdict already reads CAUTION for them
-#                        (n_valid below n_total); nor in cp_specw.
+#                        (n_valid below n_total); nor in cp_specw or cp_notready.
+#                        cp_notready[k]: "<pod> on <member>", joined by ", ", for each pod
+#                        an ISTIOD_NOT_READY line of the attempt names (Running but not Ready
+#                        at its window's baseline: it took no new proxy connections, so the
+#                        per-replica figures average in a replica that carried fewer).
 #   cp_valid[k]          set when the cell has a valid row (istiod_restarted 0).
 #   cp_after[k]          set when a measurement row follows a status row of the cell: two
 #                        attempts with no recorded boundary between them, so they pool.
@@ -2151,7 +2167,8 @@ function cp_comment(    n, p, i, e) {
 	}
 	if (index($0, "# RESUMED_AT=") == 1 && cp_lastk != "") cp_tail[cp_lastk] = 1
 	cp_wl = ""
-	if (index($0, "# WINDOW_ROWS=") == 1) { cp_wl = substr($0, 15); cp_wf = FNR }
+	if (index($0, "# WINDOW_ROWS=") == 1) { cp_wl = substr($0, 15); cp_wf = FNR; cp_wnr = (cp_nf == FNR - 1 && cp_nff == FILENAME) ? cp_nl : "" }
+	if (index($0, "# ISTIOD_NOT_READY=") == 1) { cp_nl = substr($0, 20); cp_nf = FNR; cp_nff = FILENAME }
 }
 function cp_end() { if (cp_lastk != "") cp_tail[cp_lastk] = 1 }
 function cp_wl_parse(wl,    n, p, i, e, c, v, j) {
@@ -2164,6 +2181,16 @@ function cp_wl_parse(wl,    n, p, i, e, c, v, j) {
 		cp_wlm[c] = substr(e, 1, RSTART - 1); cp_wls[c] = ""
 		if ((j = index(v, "/"))) { cp_wls[c] = substr(v, j + 1) + 0; v = substr(v, 1, j - 1) }
 		cp_wln[c] = v + 0
+	}
+	return c
+}
+function cp_nr_parse(s,    n, p, i, e, c) {
+	split("", cp_nrm); split("", cp_nrq)
+	n = split(s, p, ","); c = 0
+	for (i = 1; i <= n; i++) {
+		e = p[i]; gsub(/^ +| +$/, "", e)
+		if (!match(e, /=[^=]+$/)) continue
+		c++; cp_nrm[c] = substr(e, 1, RSTART - 1); cp_nrq[c] = substr(e, RSTART + 1)
 	}
 	return c
 }
@@ -2192,6 +2219,11 @@ function cp_cell_row(k, st,    mk, ep, n, i, m, wk) {
 			}
 			else if ((m in cp_rep) && cp_wln[i] < cp_rep[m] && (!(wk in cp_qn) || cp_wln[i] < cp_qn[wk])) { cp_qn[wk] = cp_wln[i]; cp_qr[wk] = cp_rep[m] }
 		}
+		n = cp_nr_parse(cp_wnr)
+		for (i = 1; i <= n; i++) {
+			wk = k SUBSEP ep SUBSEP cp_nrm[i]
+			if (index(" " cp_nrp[wk] " ", " " cp_nrq[i] " ") == 0) cp_nrp[wk] = cp_nrp[wk] (cp_nrp[wk] == "" ? "" : " ") cp_nrq[i]
+		}
 	}
 	cp_wl = ""
 	mk = k SUBSEP ep SUBSEP $2
@@ -2210,8 +2242,8 @@ function cp_mxo(m, k,    i, o, x) {
 	for (i = 1; i <= cp_mn[m] + 0; i++) { o = cp_mk[m, i]; if (o != k && cp_mx[m, o] > x) x = cp_mx[m, o] }
 	return x
 }
-function cp_cell_state(k,    n, ml, i, m, mk, ex, ep) {
-	cp_why[k] = ""; cp_short[k] = ""; cp_shortw[k] = ""; cp_specw[k] = ""
+function cp_cell_state(k,    n, ml, i, m, mk, ex, ep, np, pl, j) {
+	cp_why[k] = ""; cp_short[k] = ""; cp_shortw[k] = ""; cp_specw[k] = ""; cp_notready[k] = ""
 	if (cp_last[k] != "") return cp_last[k]
 	ep = cp_ep[k] + 0
 	n = split(substr(cp_wm[k, ep], 2), ml, "\t")
@@ -2221,6 +2253,8 @@ function cp_cell_state(k,    n, ml, i, m, mk, ex, ep) {
 		if (mk in cp_sd) cp_specw[k] = cp_specw[k] (cp_specw[k] == "" ? "" : ", ") ml[i] " wanted " cp_sd[mk] " istiod replicas, " cp_rep[ml[i]] " at the sweep'"'"'s start"
 		if (mk in cp_rn) cp_short[k] = cp_short[k] (cp_short[k] == "" ? "" : ", ") ml[i] " ran " cp_rn[mk] " of its " cp_rr[mk] " istiod replicas"
 		else if (mk in cp_qn) cp_shortw[k] = cp_shortw[k] (cp_shortw[k] == "" ? "" : ", ") ml[i] " ran " cp_qn[mk] " of its " cp_qr[mk] " istiod replicas"
+		np = split(cp_nrp[mk], pl, " ")
+		for (j = 1; j <= np; j++) cp_notready[k] = cp_notready[k] (cp_notready[k] == "" ? "" : ", ") pl[j] " on " ml[i]
 	}
 	if (cp_nm[k] + 0 < cp_ms[k] + 0) return "INCOMPLETE"
 	if ((k, ep) in cp_wa) {
