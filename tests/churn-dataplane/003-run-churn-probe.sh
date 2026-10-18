@@ -113,9 +113,11 @@ Environment:
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
   long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_SETTLE_SEC,
-  COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS (expected pin;
-  warns on mismatch), COEXEC_RESULTS_DIR (--output-dir; relative to the repo root),
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
+  COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
+  COEXEC_SETTLE_SEC, COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS
+  (expected pin; warns on mismatch), COEXEC_RESULTS_DIR (--output-dir; relative to the
+  repo root),
   CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS,
   FANOUT_PF_BASE (per-pod istiod PF block base; default 21014),
   FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
@@ -235,7 +237,7 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 [[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="${OUTPUT_DIR}/churn-dataplane-${RUN_ID}.tsv"
 
-HARNESS_SHA="$(harness_sha --exclude "$(dirname "$OUTPUT_FILE")")"
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$(dirname "$OUTPUT_FILE")"
 ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 
 if ((DRY_RUN)); then
@@ -273,6 +275,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
+		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
 		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
@@ -332,7 +335,11 @@ ISTIOD_PORTS=()
 ISTIOD_PODS=()
 ISTIOD_DIR="$(mktemp -d)"
 PF_OK=0
+# LOAD_POD: the client pod while the window's `fortio load` runs in it; the EXIT trap stops
+# a load still running there (fortio_client_stop).
+LOAD_POD=""
 cleanup_all() {
+	[[ -z "${LOAD_POD:-}" ]] || fortio_client_stop "$SOURCE_CTX" "$NS" "$LOAD_POD" "${KUBECTL[@]}"
 	if [[ -n "$DRIVER_PID" ]]; then kill "$DRIVER_PID" 2>/dev/null || true; wait "$DRIVER_PID" 2>/dev/null || true; fi
 	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
@@ -462,11 +469,13 @@ TARGET_URL="http://fortio-server.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-
 WINDOW_START_NS="$(now_ns)"
 JSON_OUT=""
 STATUS="OK"
+LOAD_POD="$CLIENT_POD"
 if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 	fortio load -qps "$QPS" -c "$CONNECTIONS" -t "${DURATION}s" -json - -quiet "$TARGET_URL" 2>/dev/null)"; then
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
+LOAD_POD=""
 WINDOW_END_NS="$(now_ns)"
 
 # Stop the churn driver. Only SIGTERM if fortio exited EARLY (before DURATION

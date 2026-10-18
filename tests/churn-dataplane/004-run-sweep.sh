@@ -135,7 +135,7 @@ Environment:
   001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
   them, and the flags that set them, before the first setup, --dry-run included.
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
-  step); SWEEP_STOP_GRACE_SEC (10): how long a signalled sweep waits for its step's
+  step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
   are read at once. Environment only (config/options.env).
 
@@ -159,8 +159,14 @@ Exit codes:
      finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A signal
      sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches the step
      that runs (001, 002, 003, 006) and every process under it at once; any still running
-     SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after them. Only a
-     settle wait finishes first.
+     SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after them. For a
+     sweep in a terminal's foreground, a kill -INT or -HUP skips the processes in that
+     foreground (a Ctrl-C reaches them itself): they get SIGKILL with no cleanup, so
+     stop such a sweep from elsewhere with SIGTERM. The sweep's own commands between
+     steps (a settle wait, the Istio version and proxy reads, the end-of-sweep recheck)
+     finish first, each bounded. Stopping the step's tree needs a ps that lists start
+     times (procps, or macOS's): without one, the sweep warns at its start, and a stop
+     reaches only the step's own process.
 EOF
 }
 
@@ -373,12 +379,15 @@ if ! ((DRY_RUN)); then
 	# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
 	# so the reports of a sweep that died say so.
 	sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a churn-dataplane sweep has no --resume); the rows in this dir cover only the cells it finished"
+	# The cleanup a step cut short by SIGKILL left undone (console only: _sweep_kill_hint).
+	SWEEP_CLEANUP_CMD="./tests/churn-dataplane/006-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}") --wait-deletion"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 	ISTIOD_REPLICAS="$(fanout_preflight_istiod "${CONTEXTS[0]}" "${KUBECTL[@]}")"
 	write_preamble "churn-dataplane co-exec test" "$TSV_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
+		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
 		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \

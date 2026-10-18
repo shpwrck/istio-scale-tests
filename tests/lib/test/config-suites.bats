@@ -103,7 +103,7 @@ formats_show() {
 	config_check_multi_run "$r" 0 "$r/sweep-1/a.tsv" "$r/sweep-1/b.tsv"
 	[ "$MULTI_RUN_N" = 1 ] && [ "$MULTI_RUN_IDS" = sweep-1 ]
 	[ -z "$(config_multi_run_note)" ] && [ -z "$(config_multi_run_csv)" ]
-	[ "$(config_multi_run_json)" = '{"runs":1,"run_ids":["sweep-1"],"harness_sha":["h1"],"istio_version":["v1"]}' ]
+	[ "$(config_multi_run_json)" = '{"runs":1,"run_ids":["sweep-1"],"harness_sha":["h1"],"istio_version":["v1"],"harness_content_key":["unknown"]}' ]
 	# Two sweeps: dies, naming each sweep dir (newest first) and the command that reports
 	# it alone, its path quoted.
 	run --separate-stderr config_check_multi_run "$r" 0 "$r/sweep-1/a.tsv" "$r/sweep-2/c.tsv"
@@ -119,7 +119,7 @@ formats_show() {
 	config_check_multi_run "$r" 1 "$r/sweep-1/a.tsv" "$r/sweep-2/c.tsv" 2>/dev/null
 	[ "$(config_multi_run_note)" = "This report pools 2 runs (--allow-multi-run): sweep-1, sweep-2. HARNESS_SHA: h1, unknown. ISTIO_VERSION: v1, unknown. These differ, so the pooled rows were not all measured with the same harness or Istio version." ]
 	[[ "$(config_multi_run_csv)" == "# POOLED_RUNS=2"$'\n'"# POOLED_RUN_IDS=sweep-1,sweep-2"$'\n'* ]]
-	[ "$(config_multi_run_json)" = '{"runs":2,"run_ids":["sweep-1","sweep-2"],"harness_sha":["h1","unknown"],"istio_version":["v1","unknown"]}' ]
+	[ "$(config_multi_run_json)" = '{"runs":2,"run_ids":["sweep-1","sweep-2"],"harness_sha":["h1","unknown"],"istio_version":["v1","unknown"],"harness_content_key":["unknown"]}' ]
 	# Two standalone probes into one dir: two RUN_IDs (preamble, else the first data row),
 	# and no --results-dir isolates them.
 	printf '# RUN_ID=p1\nrun_id\tx\np1\t1\n' > "$r/latency-p1.tsv"

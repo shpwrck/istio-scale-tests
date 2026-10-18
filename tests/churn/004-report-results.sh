@@ -88,7 +88,11 @@ istio_version is each member's active IstioRevision .spec.version as 002 read it
 report_harness_sha (every format; csv REPORT_HARNESS_SHA) is the harness this report
 ran on, which can differ from harness_sha, the harness that measured the rows: a
 report made again later, or from another checkout, may count rows by other rules. The
-results dir it reads does not count as a change to it.
+results dir it reads does not count as a change to it. harness_content_key (every
+format; csv HARNESS_CONTENT_KEY) is the content key of the harness files the rows ran
+on, "unknown (not recorded)" for a TSV written before it. When harness_sha differs
+between inputs that share one key, they differ only in git describe (a docs commit or
+a new tag between them): stderr gives a note instead of the "disagree" warning.
 When the results dir holds sweep-outcome.txt (003 writes it), text, csv and md
 repeat it, with the run that recorded it: the failed cells by reason, its problems
 (the Istio version, the active revision or the generation of the Istio CR or its
@@ -211,9 +215,10 @@ preamble_get() {
 # every input TSV, never read from this checkout or environment: the report may run on
 # another commit than the probe. A file without the line (written before 002 recorded
 # the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b
-# (config_input_value: each distinct value once) plus a stderr warning (PL26).
+# (config_input_value: each distinct value once) plus a stderr warning (PL26), or with
+# <note>, a note that ends with it instead.
 run_meta() {
-	local key="$1" v n
+	local key="$1" note="${2:-}" v n
 	v="$(config_input_value "$key" "unknown (not recorded)" "${TSV_FILES[@]}")"
 	[[ -n "$v" ]] || v="unknown (not recorded)"
 	# How many inputs differ: one file's own mixed:a/b is not a disagreement, nor v1.30.5
@@ -231,10 +236,25 @@ run_meta() {
 		print n + 0
 		exit
 	}' "${TSV_FILES[@]}")"
-	[[ "$v" != mixed:* ]] || ((n < 2)) || echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
+	if [[ "$v" == mixed:* ]] && ((n >= 2)); then
+		if [[ -n "$note" ]]; then
+			echo "note: the input TSVs' ${key} values (${v#mixed:}) ${note}" >&2
+		else
+			echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
+		fi
+	fi
 	echo "$v"
 }
-HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
+# The content key of the harness files the rows ran on. HARNESS_SHA values that differ
+# while every input records one key differ only in git describe (a docs commit or a new
+# tag between the runs): a note, not the warning. A TSV without the key keeps the warning.
+HARNESS_CONTENT_KEY_M="$(run_meta HARNESS_CONTENT_KEY)"
+_hs_note=""
+case "$HARNESS_CONTENT_KEY_M" in
+mixed:* | unknown*) ;;
+*) _hs_note="differ only in git describe: every input records HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_M}, the same harness files (a commit or a tag outside them moved the describe)" ;;
+esac
+HARNESS_SHA_M="$(run_meta HARNESS_SHA "$_hs_note")"
 # This report's own harness, every format; the results dir it reads is no change to it.
 REPORT_HARNESS_SHA_M="$(report_harness_sha --exclude "$RESULTS_DIR")"
 ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
@@ -289,6 +309,7 @@ report_text() {
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
+	echo "# harness_content_key (recorded by 002): ${HARNESS_CONTENT_KEY_M}"
 	echo "# report_harness_sha (this report's own): ${REPORT_HARNESS_SHA_M}"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
@@ -402,6 +423,7 @@ report_text() {
 
 report_csv() {
 	echo "# HARNESS_SHA=${HARNESS_SHA_M}"
+	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_M}"
 	echo "# REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA_M}"
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
@@ -536,7 +558,9 @@ the inputs differ, each distinct value once), not the commit or pin of the host 
 this report. `report_harness_sha` in the front matter is that commit: the harness this
 report ran on (`<describe>-dirty.<8hex>` with uncommitted changes; the results dir it reads
 does not count), which can differ from `harness_sha`: a report made again later, or from
-another checkout, may count rows by other rules.
+another checkout, may count rows by other rules. `harness_content_key` is the content key of
+the harness files the rows ran on: inputs whose `harness_sha` differs but that share one key
+differ only in git describe (a docs commit or a new tag between them).
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
@@ -592,6 +616,7 @@ report_markdown() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${harness_sha}")"
+	echo "harness_content_key: $(yaml_str "${HARNESS_CONTENT_KEY_M}")"
 	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
@@ -733,6 +758,7 @@ report_charts() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_M}")"
+	echo "harness_content_key: $(yaml_str "${HARNESS_CONTENT_KEY_M}")"
 	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"

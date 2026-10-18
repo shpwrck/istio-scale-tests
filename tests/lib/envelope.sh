@@ -26,7 +26,8 @@
 #                                                  -> integer percent of the CROSS-REPLICA
 #       limit (per-replica limit * replicas), matching numerator (a cross-replica
 #       `kubectl top` sum) to denominator scope (PL35). `unknown` if any arg bad.
-#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct] [not_run] [incomplete]
+#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total>
+#                   <n_valid> [caution_pct] [fail_pct] [not_run] [incomplete] [problems]
 #                                                  -> "VERDICT|headline" — one of
 #       PASS / CAUTION / FAIL plus a one-line human headline. The verdict is computed
 #       only over the validity-gated aggregates the caller passes (the report's
@@ -34,7 +35,8 @@
 #       bands default from the env (SCALE_SLA_CAUTION_PCT=75 / SCALE_SLA_FAIL_PCT=90 in
 #       config/options.env) but accept args 8/9 so the function stays pure/unit-testable.
 #       Arg 10: planned cells that never ran (NOT_RUN); arg 11: cells cut short while
-#       their member rows were written (INCOMPLETE): either turns a PASS into CAUTION.
+#       their member rows were written (INCOMPLETE); arg 12: the PROBLEM lines of the
+#       sweep outcome: each turns a PASS into CAUTION.
 #       The controlplane report (004) is the SINGLE authoritative compute site;
 #       render_scale_envelope reads the verdict back from the report JSON.
 #   env_replicas_summary <n...>                    -> the ISTIOD_REPLICAS token for
@@ -144,7 +146,8 @@ env_pct_of_limit() {
 	}'
 }
 
-# env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct] [not_run] [incomplete]
+# env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid>
+#                 [caution_pct] [fail_pct] [not_run] [incomplete] [problems]
 # Computes the headline customer SLA verdict from the report's validity-gated
 # aggregates (already n_valid-filtered by the caller — never configured axis
 # values, PL35). The CAUTION/FAIL utilization bands default from the env
@@ -159,18 +162,24 @@ env_pct_of_limit() {
 # row, so no sample of theirs is in n_total). The figures cover only the cells that ran, so
 # a PASS reads CAUTION "N planned cell(s) never ran (NOT_RUN)", and a CAUTION or FAIL
 # headline adds it. <incomplete> (arg 11, default 0): cells whose latest attempt has rows of
-# fewer members than its mesh size (INCOMPLETE: cut short while they were written), whose
-# figures cover only those members: the same, as "N cell(s) are INCOMPLETE". Pass "" for
-# args 8/9 to keep their defaults.
+# fewer members than its mesh size, or a member fewer rows than its window wrote
+# (INCOMPLETE: cut short while they were written), whose figures cover only those members:
+# the same, as "N cell(s) are INCOMPLETE". <problems> (arg 12, default 0): the PROBLEM
+# lines of the sweep's outcome (sweep-outcome.txt: the harness or Istio changed during the
+# sweep, ...), which the figures cannot show: the same, as "the sweep outcome records N
+# PROBLEM(s)". Pass "" for args 8/9 to keep their defaults.
 # Emits "<VERDICT>|<one-line headline>". Pure.
 # shellcheck disable=SC2329
 env_sla_verdict() {
 	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}" not_run="${10:-0}" incomplete="${11:-0}"
+	local problems="${12:-0}"
 	[[ "$not_run" =~ ^[0-9]+$ ]] || not_run=0
 	[[ "$incomplete" =~ ^[0-9]+$ ]] || incomplete=0
+	[[ "$problems" =~ ^[0-9]+$ ]] || problems=0
 	awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
 	    -v restarts="${5:-0}" -v ntotal="${6:-0}" -v nvalid="${7:-0}" \
-	    -v caution="$caution" -v fail="$fail" -v notrun="$not_run" -v incomplete="$incomplete" '
+	    -v caution="$caution" -v fail="$fail" -v notrun="$not_run" -v incomplete="$incomplete" \
+	    -v problems="$problems" '
 	function isnum(x) { return x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	BEGIN {
 		n_metrics = split(icpu "|" imem "|" ncpu "|" nmem, m, "|")
@@ -204,10 +213,17 @@ env_sla_verdict() {
 			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%d planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan; the cells that ran: %s", notrun, reason) }
 			else reason = sprintf("%s; also %d planned cell(s) never ran (NOT_RUN)", reason, notrun)
 		}
-		# Cells cut short while their member rows were written: their figures cover part of the mesh.
+		# Cells cut short while their member rows were written: their figures cover part of
+		# the mesh.
 		if (incomplete + 0 > 0) {
-			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%d cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas: cut short while they were written), so their figures cover part of the mesh; the rest: %s", incomplete, reason) }
-			else reason = sprintf("%s; also %d cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas)", reason, incomplete)
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%d cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote: cut short while they were written), so their figures cover part of the mesh; the figures, these cells included: %s", incomplete, reason) }
+			else reason = sprintf("%s; also %d cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)", reason, incomplete)
+		}
+		# The sweep outcome'"'"'s PROBLEMs (the harness or Istio changed during it, ...): no
+		# figure shows them.
+		if (problems + 0 > 0) {
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("the sweep outcome records %d PROBLEM(s) (sweep-outcome.txt), so the figures may not measure what they seem to; the figures: %s", problems, reason) }
+			else reason = sprintf("%s; also the sweep outcome records %d PROBLEM(s) (sweep-outcome.txt)", reason, problems)
 		}
 		printf "%s|%s\n", verdict, reason
 	}'
@@ -323,7 +339,8 @@ env_istiod_resources() {
 # `get deploy istiod` each, 5 s timeout) so a 20-cluster mesh costs one read, not 20.
 # Members can run different replica counts, and the per-replica proxy figure is about
 # 1/R of the cluster figure, so R must not come from the first context alone. Emits:
-#   req_cpu_m=.. req_mem_mi=.. lim_cpu_m=.. lim_mem_mi=.. replicas=<summary> replicas_by_context=<ctx=n,...>
+#   req_cpu_m=.. req_mem_mi=.. lim_cpu_m=.. lim_mem_mi=.. replicas=<summary>
+#   replicas_by_context=<ctx=n,...>
 # replicas is env_replicas_summary over the contexts; a failed read is `unknown` in
 # replicas_by_context (`unknown` as a whole with no contexts). Never dies (PL40).
 # shellcheck disable=SC2329
@@ -467,11 +484,15 @@ render_scale_envelope() {
 	istio_version_src="$(jq_get '.metadata.istio_version_source') (pin $(jq_get '.metadata.istio_version_pin'); by member $(jq_get '.metadata.istio_version_by_context'))"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
 	# The harness the report ran, and its provenance warning (the rows come from runs on
-	# other harness commits), as every report format shows them.
+	# other harnesses), as every report format shows them.
 	local report_harness prov_warn prov_line=""
 	report_harness="$(jq_get '.metadata.report_harness_sha')"
 	prov_warn="$(printf '%s' "$json" | jq -r '.metadata.provenance_warning // empty' 2>/dev/null || true)"
 	[[ -z "$prov_warn" ]] || prov_line="> **Provenance warning:** ${prov_warn//$'\n'/ }"
+	# The attempts behind it, when a --resume ran or the harness changed during a run: each
+	# run's or change's HARNESS_SHA and rows (no KUBE_VERSIONS: they name the members).
+	local att_line=""
+	att_line="$(printf '%s' "$json" | jq -r '(.metadata.attempts // []) | if length > 1 then "> **Attempts:** " + (map("\(.run) HARNESS_SHA=\(.harness_sha) (\(.rows) row(s), \(.rows_kept // .rows) of them in the figures)") | join("; ")) else empty end' 2>/dev/null || true)"
 	# The proxy versions at the start, summed over the members (no context names).
 	local proxy_versions earlier_rows earlier_cells earlier_line=""
 	proxy_versions="$(env_proxy_versions_summary "$(jq_get '.metadata.istio_proxy_versions')")"
@@ -626,6 +647,7 @@ render_scale_envelope() {
 > Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`; report harness \`${report_harness}\`: REPORT_HARNESS_SHA, the harness that rendered it).
 > Measured columns are the report's n_valid-gated peaks (restarted/SETUP_FAILED rows excluded).
 ${prov_line:+${prov_line}
+}${att_line:+${att_line}
 }${earlier_line:+${earlier_line}
 }${pending_line:+
 ${pending_line}

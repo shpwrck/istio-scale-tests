@@ -10,10 +10,12 @@
 # says so.
 #
 # Usage:
-#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT]
+#   ./tests/controlplane/004-report-results.sh [--results-dir DIR] [--allow-multi-run] \
+#     [--format FMT]
 #
 # Examples:
-#   ./tests/controlplane/004-report-results.sh --results-dir tests/controlplane/results/sweep-<RUN_ID>
+#   ./tests/controlplane/004-report-results.sh \
+#     --results-dir tests/controlplane/results/sweep-<RUN_ID>
 #   ./tests/controlplane/004-report-results.sh --format csv
 #   ./tests/controlplane/004-report-results.sh --format json
 #   ./tests/controlplane/004-report-results.sh --format markdown
@@ -69,7 +71,7 @@ Usage: $(basename "$0") [options]
                      controlplane-*.tsv under it is read; a sweep-*/ dir from 003 is
                      one run. The report lists each distinct RUN_ID, ISTIO_VERSION and
                      HARNESS_SHA (run_ids, istio_versions, harness_shas) and prints a
-                     WARNING when Istio versions or harness commits differ.
+                     WARNING when Istio versions or harnesses differ.
   --allow-multi-run  Pool more than one run, as the pods-vs-config-only calibration does
                      (a base dir with a pods sweep and a config-only sweep). Without it
                      a dir with several runs stops the report, which lists them and how
@@ -144,7 +146,10 @@ from an older harness. While a --resume has not finished, or after it stopped, e
 format shows its own state, then the outcome before it (sweep-outcome.prev.txt): json
 "resume_unfinished": true (while it runs or after it died), "resumed_at" and that record
 under "earlier"; csv # SWEEP_OUTCOME_RESUMED_AT= and the record as
-# SWEEP_OUTCOME_EARLIER_<KEY>= lines; text and markdown a second block.
+# SWEEP_OUTCOME_EARLIER_<KEY>= lines; text and markdown a second block. Each PROBLEM the
+outcome records (with a not-finished record, also the one before it) turns a PASS verdict
+into CAUTION ("the sweep outcome records N PROBLEM(s)"); the sweep's own reports, made
+before it writes the outcome, count the PROBLEMs it will record.
 
 Each cell is read from its latest attempt (a --resume runs a failed cell again): the
 rows of earlier attempts are left out of every figure, count and verdict, and every
@@ -154,7 +159,8 @@ from resumes.txt beside the TSV (its lines for that TSV) and from the TSV's own
 "# RESUMED_AT=" lines. Rows of a cell after a status row of its own with no recorded
 start between them (two attempts pooled), a cell cut short while its member rows were
 written (INCOMPLETE: rows of fewer members than its mesh size, or a member with fewer rows
-than its istiod replicas, and no status row; a sweep's TSV only, PHASE=sweep) and planned
+than its window wrote: its "# WINDOW_ROWS=" line, or in a TSV without one its istiod
+replicas; and no status row; a sweep's TSV only, PHASE=sweep) and planned
 cells without a row (NOT_RUN, planned-cells.txt beside the TSV, applied to the TSV its
 "# TSV=" line names) each print a data warning (json data_warnings) in every format; the
 NOT_RUN one names the full command that resumes the sweep with the axis flags that
@@ -166,15 +172,20 @@ are INCOMPLETE"), and adds itself to a CAUTION or FAIL headline. pushes_avg come
 the valid rows with a push count: fewer than n_valid shows as got/n_valid (csv pushes_n,
 json xds_pushes_n), with a data warning.
 
-Provenance: HARNESS_SHA and KUBE_VERSIONS come from each TSV preamble (the first run) and
-from each --resume (resumes.txt, or the TSV's "# RESUMED_AT=" lines): harness_shas lists
-those of the runs that added rows, a mix prints a provenance warning, and every format
+Provenance: HARNESS_SHA and KUBE_VERSIONS come from each TSV preamble (the first run),
+from each --resume (resumes.txt, or the TSV's "# RESUMED_AT=" lines) and from each
+"# HARNESS_CHANGED_AT=" line (002 writes one before the rows of a window that ran other
+harness files than the TSV records): harness_shas lists those of the runs and changes
+whose rows the figures use (a cell's latest attempt), a mix prints a provenance warning
+(a note when they differ only in git describe: one HARNESS_CONTENT_KEY), and every format
 lists the attempts (text and csv # attempts:, markdown "Attempts", json and frontmatter
-attempts: each run's HARNESS_SHA, KUBE_VERSIONS and row count, a run that added none
-marked "(added no rows)" and left out of harness_shas, the Kubernetes change check and
-the provenance warning), then each run's Istio state at its start (text and csv
+attempts: each run's or change's HARNESS_SHA, KUBE_VERSIONS and row count; one that added
+none is marked "(added no rows)", one whose rows a later --resume all ran again "(its rows
+were all run again later)", and either is left out of harness_shas, the Kubernetes change
+check and the provenance warning), then each run's Istio state at its start (text and csv
 # attempts, Istio at each start:, markdown "Attempts, Istio at each start"; json attempts
-istio_notready, istio_generations, istio_proxy_versions). Every format also records
+istio_notready, istio_generations, istio_proxy_versions, also started_at, rows_kept and
+harness_content_key). Every format also records
 REPORT_HARNESS_SHA (json report_harness_sha): the harness this report ran on, which can
 differ from HARNESS_SHA, the harness that measured the rows: a report made again later,
 or from another checkout, may count rows by other rules. The results dir it reads does
@@ -248,11 +259,12 @@ fi
 
 # Partition by header width: 66 columns (current, CONTROLPLANE_SCHEMA=66: gateway
 # physical memory and working set, leftover test namespaces), 63 columns (before
-# those), 51 columns (before the namespace-scaling columns 52-63) and 40 columns (before the per-cluster
-# proxy check, cols 41-43, and the traffic-management columns, cols 44-51). Older
-# files feed every aggregate they always fed: their rows count as traffic_config none
-# (40 columns) and as the legacy layout (services_per_namespace 0, workload pods,
-# window deploy), and add nothing to figures that read later columns by header name.
+# those), 51 columns (before the namespace-scaling columns 52-63) and 40 columns
+# (before the per-cluster proxy check, cols 41-43, and the traffic-management columns,
+# cols 44-51). Older files feed every aggregate they always fed: their rows count as
+# traffic_config none (40 columns) and as the legacy layout (services_per_namespace 0,
+# workload pods, window deploy), and add nothing to figures that read later columns by
+# header name.
 # Any other width is legacy and skipped (43 and 48 columns were intermediate layouts
 # that never shipped).
 TSV_FILES=()
@@ -373,16 +385,16 @@ tag_values() {
 }
 RUN_IDS_M="$(tag_values RUN_ID)"
 ISTIO_VERSIONS_M="$(tag_values ISTIO_VERSION)"
-# HARNESS_SHAS_M (below, from the runs): the harnesses that wrote the inputs' rows.
-# collect_attempts: each run that wrote into the inputs, one line per run, behind its file:
-# "<file>\t<run>\t<HARNESS_SHA>\t<KUBE_VERSIONS>\t<rows>\t<ISTIO_NOTREADY>\t
-# <ISTIO_PROXY_VERSIONS>\t<ISTIO_GENERATIONS>\t<at>" (controlplane_attempts): the first run
-# ("first run", from the TSV preamble), then each --resume ("--resume at <time>"), from
-# resumes.txt beside the TSV (its lines for this TSV: a line whose TSV column names another
-# file is skipped) and from the TSV's own "# RESUMED_AT=" lines (a TSV copied without its
-# resumes.txt: what such a line does not record reads unknown), with the rows each one
-# added. The preamble keeps the first run's HARNESS_SHA and KUBE_VERSIONS, so a resume's
-# are only here.
+# HARNESS_SHAS_M (below, from the runs): the harnesses that wrote the rows the figures use.
+# collect_attempts: each run that wrote into the inputs, and each harness change within
+# one, a line each behind its file: "<file>\t" and controlplane_attempts' line (<run>,
+# <HARNESS_SHA>, <KUBE_VERSIONS>, <rows>, <ISTIO_NOTREADY>, <ISTIO_PROXY_VERSIONS>,
+# <ISTIO_GENERATIONS>, <at>, <kept>, <HARNESS_CONTENT_KEY>, <started_at>): the first run
+# ("first run", from the TSV preamble), each --resume ("--resume at <time>", from
+# resumes.txt beside the TSV and the TSV's own "# RESUMED_AT=" lines) and each
+# "# HARNESS_CHANGED_AT=" line 002 wrote ("harness changed at <time> (in <its run>)"), with
+# the rows each added and how many of them are in their cell's latest attempt (<kept>, the
+# rows the figures use). The preamble keeps the first run's values, so the rest are only here.
 collect_attempts() {
 	local f out
 	for f in "${TSV_FILES[@]}"; do
@@ -392,86 +404,128 @@ collect_attempts() {
 }
 ATTEMPTS="$(collect_attempts)" \
 	|| die "could not read the runs that wrote the inputs (a resumes.txt beside a TSV could not be read); no report was written, as it could not say which harness wrote the rows"
-# From the runs that added rows only (a --resume of a finished sweep, or one that stopped
-# before its first cell, added none: it changed no row's provenance):
-#   HARNESS_SHAS_M  their harnesses, in file and run order; a file without rows keeps its
-#                   preamble's (first run's)
-#   ATTEMPTS_NOTE   when a --resume ran: each one, a run without rows marked "(added no
-#                   rows)", after "the rows come from more than one run" when two or more
-#                   wrote rows of a file, else "the rows come from one run"
+# From the runs and harness changes whose rows the figures use (<kept> > 0: a --resume of a
+# finished sweep or one that stopped before its first cell added none, and a run whose
+# rows a later --resume all ran again keeps none; neither is the provenance of a figure):
+#   HARNESS_SHAS_M  their HARNESS_SHAs, in file and run order; a file without such rows keeps
+#                   its preamble's (first run's)
+#   HARNESS_KEYS_M  their HARNESS_CONTENT_KEYs, the same way (unknown where not recorded)
+#   ATTEMPTS_NOTE   when a --resume ran or the harness changed: each of them, one without
+#                   rows marked "(added no rows)", one whose rows were all run again "(its
+#                   rows were all run again later)", after "the rows come from more than one
+#                   run" (" or harness" when a harness change keeps rows) when two or more
+#                   keep rows of a file, else "the rows come from one run"
 #   ATTEMPTS_ISTIO  with it: the Istio state each run read at its start (the TSV preamble
-#                   keeps only the first run's)
+#                   keeps only the first run's; a harness change is no start)
 #   _att_kube       the resumes' KUBE_VERSIONS (collect_kube_versions_meta)
-HARNESS_SHAS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" _att_kube="" _att_multi=0 _att_res_rows=0
-_att_file="" _att_fh0="" _att_fn=0 _att_lead0=""
+HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" _att_kube=""
+_att_multi=0 _att_res_rows=0 _att_hc_rows=0
+_att_file="" _att_fh0="" _att_fk0="" _att_fn=0 _att_lead0=""
 _att_addh() {
 	case ",${HARNESS_SHAS_M}," in *",${1},"*) ;; *) HARNESS_SHAS_M="${HARNESS_SHAS_M:+${HARNESS_SHAS_M},}${1}" ;; esac
+	case ",${HARNESS_KEYS_M}," in *",${2},"*) ;; *) HARNESS_KEYS_M="${HARNESS_KEYS_M:+${HARNESS_KEYS_M},}${2}" ;; esac
 }
 # _att_flush: the end of one file's runs.
 _att_flush() {
 	[[ -n "$_att_file" ]] || return 0
-	((_att_fn > 0)) || _att_addh "$_att_fh0"
+	((_att_fn > 0)) || _att_addh "$_att_fh0" "$_att_fk0"
 	((_att_fn < 2)) || _att_multi=1
 	return 0
 }
-while IFS=$'\t' read -r _af _arun _ah _ak _an _anr _apv _agen _aat; do
+# _att_mark <rows> <kept>: the mark of a run or change whose rows the figures do not use.
+_att_mark() {
+	if (($1 == 0)); then
+		echo " (added no rows)"
+	elif (($2 == 0)); then
+		echo " (its rows were all run again later)"
+	fi
+}
+# Fields split by \037: a tab is IFS whitespace, and read would merge the empty <at> of the
+# first run with its neighbours.
+while IFS=$'\037' read -r _af _arun _ah _ak _an _anr _apv _agen _aat _akept _ahk _astart; do
 	[[ -n "$_arun" ]] || continue
 	is_nonneg_int "$_an" || _an=0
+	is_nonneg_int "${_akept:-}" || _akept=0
+	[[ -n "${_ahk:-}" ]] || _ahk=unknown
 	if [[ "$_af" != "$_att_file" ]]; then
 		_att_flush
-		_att_file="$_af" _att_fh0="$_ah" _att_fn=0
+		_att_file="$_af" _att_fh0="$_ah" _att_fk0="$_ahk" _att_fn=0
 	fi
 	_att_pre=""
 	((${#TSV_FILES[@]} == 1)) || _att_pre="${_af}: "
-	if ((_an > 0)); then
+	if ((_akept > 0)); then
 		_att_fn=$((_att_fn + 1))
-		_att_addh "$_ah"
+		_att_addh "$_ah" "$_ahk"
 	fi
 	if [[ "$_arun" == "first run" ]]; then
 		ATTEMPTS_ISTIO+="${ATTEMPTS_ISTIO:+; }${_att_pre}the first run ISTIO_NOTREADY_AT_START=${_anr} ISTIO_GENERATIONS=${_agen} ISTIO_PROXY_VERSIONS=${_apv}"
-		if ((_an == 0)); then
-			if ((${#TSV_FILES[@]} == 1)); then _att_lead0=" (added no rows)"; else _att_lead0+="${_att_lead0:+; }${_att_pre}the first run added no rows"; fi
+		if ((_akept == 0)); then
+			if ((${#TSV_FILES[@]} == 1)); then
+				_att_lead0="$(_att_mark "$_an" 0)"
+			elif ((_an == 0)); then
+				_att_lead0+="${_att_lead0:+; }${_att_pre}the first run added no rows"
+			else
+				_att_lead0+="${_att_lead0:+; }${_att_pre}the first run's rows were all run again later"
+			fi
 		fi
 		continue
 	fi
+	if [[ "$_arun" == "harness changed at "* ]]; then
+		((_akept == 0)) || _att_hc_rows=1
+		ATTEMPTS_NOTE+="${ATTEMPTS_NOTE:+; }${_att_pre}${_arun} HARNESS_SHA=${_ah}$(_att_mark "$_an" "$_akept")"
+		continue
+	fi
 	ATTEMPTS_ISTIO+="${ATTEMPTS_ISTIO:+; }${_att_pre}${_arun} ISTIO_NOTREADY_AT_RESUME=${_anr} ISTIO_GENERATIONS=${_agen} ISTIO_PROXY_VERSIONS=${_apv}"
-	_att_none=""
-	if ((_an == 0)); then
-		_att_none=" (added no rows)"
-	else
+	if ((_akept > 0)); then
 		_att_res_rows=1
 		[[ "$_ak" == unknown ]] || _att_kube+="${_att_kube:+, }${_ak}"
 	fi
-	ATTEMPTS_NOTE+="${ATTEMPTS_NOTE:+; }${_att_pre}${_arun} HARNESS_SHA=${_ah} KUBE_VERSIONS=${_ak}${_att_none}"
-done <<<"$ATTEMPTS"
+	ATTEMPTS_NOTE+="${ATTEMPTS_NOTE:+; }${_att_pre}${_arun} HARNESS_SHA=${_ah} KUBE_VERSIONS=${_ak}$(_att_mark "$_an" "$_akept")"
+done < <(tr '\t' '\037' <<<"$ATTEMPTS")
 _att_flush
+# _att_describe: the HARNESS_SHAs differ, but every one of them ran the same harness files
+# (one known HARNESS_CONTENT_KEY): a docs commit or a fetched tag between them, a note and
+# not a warning.
+_att_describe=0
+if [[ "$HARNESS_SHAS_M" == *,* && "$HARNESS_KEYS_M" != *,* && "$HARNESS_KEYS_M" =~ ^[0-9a-f]+$ ]]; then
+	_att_describe=1
+fi
 if [[ -n "$ATTEMPTS_NOTE" ]]; then
 	# A several-file report: a file whose first run added no rows is named first.
 	if ((${#TSV_FILES[@]} > 1)) && [[ -n "$_att_lead0" ]]; then
 		ATTEMPTS_NOTE="${_att_lead0}; ${ATTEMPTS_NOTE}"
 		_att_lead0=""
 	fi
+	_att_or=""
+	((_att_hc_rows == 0)) || _att_or=" or harness"
 	if ((_att_multi)); then
-		ATTEMPTS_NOTE="the rows come from more than one run: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead0}, then ${ATTEMPTS_NOTE}"
+		ATTEMPTS_NOTE="the rows come from more than one run${_att_or}: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead0}, then ${ATTEMPTS_NOTE}"
 	else
-		ATTEMPTS_NOTE="the rows come from one run (the others added no rows): the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead0}, then ${ATTEMPTS_NOTE}"
+		ATTEMPTS_NOTE="the rows come from one run (no other run's rows are in the figures): the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble)${_att_lead0}, then ${ATTEMPTS_NOTE}"
+	fi
+	if ((_att_describe)); then
+		ATTEMPTS_NOTE+="; their HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or a tag outside them moved the describe)"
 	fi
 else
 	ATTEMPTS_ISTIO=""
 fi
-# KUBE_CHANGE: the members a run that added rows read on another Kubernetes server version
-# than the first run of its TSV that added rows (members it could not read left out), for
-# the provenance warning; a run that added none changed no row's versions.
+# KUBE_CHANGE: the members a run whose rows the figures use read on another Kubernetes
+# server version than the first such run of its TSV (members it could not read left out),
+# for the provenance warning; a harness change counts as its run, and a run that kept no
+# rows changed no figure's versions.
 KUBE_CHANGE="$(awk -F'\t' '
 	function kv(s, out,    n, p, i, e) {
 		n = split(s, p, ",")
 		for (i = 1; i <= n; i++) { e = p[i]; gsub(/^ +| +$/, "", e); if (match(e, /=[^=]*$/) && substr(e, RSTART + 1) !~ /^(unreachable|unknown)$/) out[substr(e, 1, RSTART - 1)] = substr(e, RSTART + 1) }
 	}
-	$5 + 0 == 0 { next }
-	!($1 in based) { based[$1] = 1; delete k0; kv($4, k0); for (c in k0) base[$1, c] = k0[c]; bl[$1] = ($2 == "first run" ? "in the first run" : "at the " $2 " (the first run added no rows)"); next }
+	$10 + 0 == 0 { next }
+	{ r = $2; if (r ~ /^harness changed at /) { sub(/^.*\(in (the )?/, "", r); sub(/\)$/, "", r) } }
+	(($1, r) in seen) { next }
+	{ seen[$1, r] = 1 }
+	!($1 in based) { based[$1] = 1; delete k0; kv($4, k0); for (c in k0) base[$1, c] = k0[c]; bl[$1] = (r == "first run" ? "in the first run" : "at the " r " (the first run kept no rows)"); next }
 	{
 		delete k1; kv($4, k1)
-		for (c in k1) if ((($1, c) in base) && base[$1, c] != k1[c]) out = out (out == "" ? "" : "; ") c " " base[$1, c] " " bl[$1] ", " k1[c] " at the " $2
+		for (c in k1) if ((($1, c) in base) && base[$1, c] != k1[c]) out = out (out == "" ? "" : "; ") c " " base[$1, c] " " bl[$1] ", " k1[c] " at the " r
 	}
 	END { print out }' <<<"$ATTEMPTS")"
 RUN_ID_TAG="$RUN_IDS_M"
@@ -490,33 +544,35 @@ PROVENANCE_WARNING=""
 if [[ "$ISTIO_VERSION_TAG" == mixed:* ]]; then
 	PROVENANCE_WARNING="The inputs were measured on different Istio versions (ISTIO_VERSION ${ISTIO_VERSIONS_M}), so fits and pairings across runs mix versions."
 fi
-if [[ "$HARNESS_SHAS_M" == *,* ]]; then
+if [[ "$HARNESS_SHAS_M" == *,* ]] && ((_att_describe == 0)); then
 	_hs_res=""
-	((_att_res_rows == 0)) || _hs_res="; a --resume's included, see the attempts"
-	PROVENANCE_WARNING="${PROVENANCE_WARNING:+${PROVENANCE_WARNING} }The inputs come from different harness commits (HARNESS_SHA ${HARNESS_SHAS_M}${_hs_res}), so their cells may not be measured the same way."
+	((_att_res_rows == 0)) || _hs_res="; a --resume's included"
+	((_att_hc_rows == 0)) || _hs_res+="; the harness changed during a run (HARNESS_CHANGED_AT)"
+	[[ -z "$_hs_res" ]] || _hs_res+=", see the attempts"
+	PROVENANCE_WARNING="${PROVENANCE_WARNING:+${PROVENANCE_WARNING} }The inputs ran on different harnesses (HARNESS_SHA ${HARNESS_SHAS_M}${_hs_res}), so their cells may not be measured the same way."
 fi
 if [[ -n "$KUBE_CHANGE" ]]; then
 	PROVENANCE_WARNING="${PROVENANCE_WARNING:+${PROVENANCE_WARNING} }A --resume ran on other Kubernetes server versions than the first run (${KUBE_CHANGE}), so the cells of each run were measured on their own versions."
 fi
 # On stderr once per report; a sweep's own reports (_SWEEP_OUTCOME_PENDING) leave it to the
 # text report, which prints it on stdout (the console shows it once, not once per format).
+# A describe-only difference is a note there, as in the other suites' reports.
 if [[ -n "$PROVENANCE_WARNING" && "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
 	echo "WARNING: ${PROVENANCE_WARNING} Report one Istio version and one clean harness commit per results dir." >&2
+fi
+if ((_att_describe)) && [[ "${_SWEEP_OUTCOME_PENDING:-0}" != 1 ]]; then
+	echo "note: the inputs' HARNESS_SHA values (${HARNESS_SHAS_M}) differ only in git describe: every run records HARNESS_CONTENT_KEY=${HARNESS_KEYS_M}, the same harness files (a commit or a tag outside them moved the describe)" >&2
 fi
 # The harness this report runs (every format): it can differ from the inputs' HARNESS_SHA.
 # The results dir it reads does not count (a dir under the checkout would read dirty).
 REPORT_HARNESS_SHA="$(report_harness_sha --exclude "$RESULTS_DIR")"
-# JSON_STR_AWK: js(x), x as a JSON string (also a YAML double-quoted one, for the markdown
-# and charts frontmatter): each \ and " escaped, a tab, carriage return and newline as \t,
-# \r and \n, any other control character dropped. The values reach awk through the
-# environment or stdin, never awk -v, which would read their backslashes as escapes.
-# shellcheck disable=SC2016
-JSON_STR_AWK='function js(x) { gsub(/\\/, "\\\\", x); gsub(/"/, "\\\"", x); gsub(/\t/, "\\t", x); gsub(/\r/, "\\r", x); gsub(/\n/, "\\n", x); gsub(/[[:cntrl:]]/, "", x); return "\"" x "\"" }'
-# ATTEMPTS_JSON: collect_attempts as a JSON array of {file, run, harness_sha, kube_versions,
-# rows, istio_notready (at its start: ISTIO_NOTREADY_AT_START of the first run,
-# ISTIO_NOTREADY_AT_RESUME of a resume), istio_proxy_versions, istio_generations}.
+# ATTEMPTS_JSON: collect_attempts as a JSON array of {file, run, harness_sha,
+# harness_content_key, kube_versions, rows, rows_kept (the rows the figures use),
+# started_at (UTC, Z; unknown when not recorded), istio_notready (at its start:
+# ISTIO_NOTREADY_AT_START of the first run, ISTIO_NOTREADY_AT_RESUME of a resume, n/a for a
+# harness change), istio_proxy_versions, istio_generations}. JSON_STR_AWK: common.sh.
 ATTEMPTS_JSON="$(awk -F'\t' "${JSON_STR_AWK}"'
-	NF >= 5 { printf "%s{\"file\":%s,\"run\":%s,\"harness_sha\":%s,\"kube_versions\":%s,\"rows\":%d,\"istio_notready\":%s,\"istio_proxy_versions\":%s,\"istio_generations\":%s}", (n++ ? "," : "["), js($1), js($2), js($3), js($4), $5 + 0, js($6), js($7), js($8) }
+	NF >= 5 { printf "%s{\"file\":%s,\"run\":%s,\"harness_sha\":%s,\"harness_content_key\":%s,\"kube_versions\":%s,\"rows\":%d,\"rows_kept\":%d,\"started_at\":%s,\"istio_notready\":%s,\"istio_proxy_versions\":%s,\"istio_generations\":%s}", (n++ ? "," : "["), js($1), js($2), js($3), js($11 == "" ? "unknown" : $11), js($4), $5 + 0, $10 + 0, js($12 == "" ? "unknown" : $12), js($6), js($7), js($8) }
 	END { print (n ? "]" : "[]") }' <<<"$ATTEMPTS")"
 
 # files_label: the consumed TSVs relative to the results dir. An absolute path would put
@@ -751,10 +807,12 @@ ISTIO_VERSION_SOURCE_M="$(preamble_get ISTIO_VERSION_SOURCE)"
 # which member was unknown or on another version (PL19).
 ISTIO_VERSION_BY_CONTEXT_M="$(preamble_get ISTIO_VERSION_BY_CONTEXT)"
 # The members still not ready (ctx=state, rolling for an istiod rollout) after the
-# start's readiness wait, none, and how long that wait took; unknown in a file written before these keys.
+# start's readiness wait, none, and how long that wait took; unknown in a file written
+# before these keys.
 ISTIO_NOTREADY_AT_START_M="$(preamble_get ISTIO_NOTREADY_AT_START)"
 ISTIO_READY_WAITED_SEC_M="$(preamble_get ISTIO_READY_WAITED_SEC)"
-# Each member's active Istio revision at the start (ctx=rev,...); unknown in a file written before the key.
+# Each member's active Istio revision at the start (ctx=rev,...); unknown in a file
+# written before the key.
 ISTIO_ACTIVE_REVISIONS_M="$(preamble_get ISTIO_ACTIVE_REVISIONS)"
 # Each member's Istio CR and active IstioRevision generation at the start
 # (ctx=<cr>/<rev>,...); the proxy versions connected to each member's istiod at the
@@ -1026,7 +1084,8 @@ ${AWK_HEADER_IX}"'
 # The legacy cells' states (the rule 003 uses for its count and a --resume: CP_CELL_AWK),
 # from each input's latest attempts, with planned-cells.txt beside the TSV:
 #   - INCOMPLETE: cut short while 002 wrote its member rows (fewer members have a row than
-#     its mesh size, or a member fewer rows than its istiod replicas, and no status row):
+#     its mesh size, or a member fewer rows than its window wrote: the "# WINDOW_ROWS="
+#     line before them, or in a TSV without one its istiod replicas; and no status row):
 #     its figures cover only those members or replicas. A sweep's TSV only (PHASE=sweep, or
 #     no PHASE: an older harness): a standalone 002's rows are not a sweep's cells;
 #   - rows after a status row of their own cell with no recorded start of a --resume
@@ -1108,7 +1167,7 @@ cell_list() {
 }
 _cs_nl=$'\n'
 _cs_w=""
-((${#_cs_inc[@]} == 0)) || _cs_w+="${_cs_nl}${#_cs_inc[@]} cell(s) are INCOMPLETE: the sweep was cut short while their member rows were written (fewer members have a row than the mesh size, or a member fewer rows than its istiod replicas, and no status row), so their figures cover only those members: $(cell_list "${_cs_inc[@]}"). They count as failed (marked INCOMPLETE where their figures are shown); --resume the sweep to run them again."
+((${#_cs_inc[@]} == 0)) || _cs_w+="${_cs_nl}${#_cs_inc[@]} cell(s) are INCOMPLETE: the sweep was cut short while their member rows were written (fewer members have a row than the mesh size, or a member fewer rows than its window wrote: its WINDOW_ROWS line, or in a TSV without one its istiod replicas; and no status row), so their figures cover only those members: $(cell_list "${_cs_inc[@]}"). Their rows stay in the figures, marked INCOMPLETE where shown; the sweep counts these cells as failed, and a --resume of it runs them again."
 ((${#_cs_pool[@]} == 0)) || _cs_w+="${_cs_nl}${#_cs_pool[@]} cell(s) have rows after a status row of their own with no recorded --resume start between them (no resumes.txt line for this TSV, no # RESUMED_AT= line in it), so two attempts are pooled in their figures: $(cell_list "${_cs_pool[@]}"). Report the sweep dir with its resumes.txt beside the TSV."
 if ((NOT_RUN_CELLS)); then
 	_cs_w+="${_cs_nl}${NOT_RUN_CELLS} planned cell(s) never ran (NOT_RUN: in planned-cells.txt, no row), so this report covers only part of the sweep's plan: $(cell_list "${_cs_nr[@]}"). To finish the sweep, resume it with the axis flags that planned them"
@@ -1151,6 +1210,31 @@ read -r STATUS_ROWS STATUS_SUMMARY < <(cat "${DATA_FILES[@]}" | awk -F'\t' -v re
 		for (i = 1; i <= k; i++) s = s (i > 1 ? ", " : "") order[i] " " n[order[i]]
 		printf "%d %s\n", t + 0, (s == "" ? "-" : s)
 	}')
+# STATUS_KINDS: what the status rows stand for, in the headline and the md footnote.
+STATUS_KINDS="skipped or failed"
+[[ " ${STATUS_SUMMARY}" != *" INTERRUPTED "* ]] || STATUS_KINDS="skipped, failed or interrupted"
+# OUTCOME_PROBLEMS: the PROBLEM lines of the sweep's outcome (sweep-outcome.txt in the
+# results dir: the harness or Istio changed during the sweep, its cells could not be
+# counted, ...), which no figure shows: a PASS verdict reads CAUTION (env_sla_verdict). A
+# sweep's own reports come before its outcome is written: 003 passes the count it will
+# record (_SWEEP_OUTCOME_PROBLEMS). A record not finished (its run died or was interrupted)
+# adds the outcome before it (sweep-outcome.prev.txt: a --resume's), whose rows the figures
+# use too; a finished one already carries that outcome's PROBLEMs.
+OUTCOME_PROBLEMS=0
+if [[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]]; then
+	OUTCOME_PROBLEMS="${_SWEEP_OUTCOME_PROBLEMS:-0}"
+else
+	_op_files=()
+	[[ ! -f "${RESULTS_DIR}/sweep-outcome.txt" ]] || _op_files+=("${RESULTS_DIR}/sweep-outcome.txt")
+	if [[ -f "${RESULTS_DIR}/sweep-outcome.prev.txt" ]] && { [[ ! -f "${RESULTS_DIR}/sweep-outcome.txt" ]] || sweep_outcome_unfinished "${RESULTS_DIR}/sweep-outcome.txt"; }; then
+		_op_files+=("${RESULTS_DIR}/sweep-outcome.prev.txt")
+	fi
+	if ((${#_op_files[@]})) && ! OUTCOME_PROBLEMS="$(awk '/^PROBLEM=/ { n++ } END { print n + 0 }' "${_op_files[@]}")"; then
+		echo "warning: could not read ${_op_files[*]}: the SLA verdict counts it as one PROBLEM" >&2
+		OUTCOME_PROBLEMS=1
+	fi
+fi
+is_nonneg_int "$OUTCOME_PROBLEMS" || OUTCOME_PROBLEMS=0
 compute_sla_verdict() {
 	local restarts n_total n_valid
 	# Sum restart rows (istiod_restarted==1) and n_total/n_valid across all valid rows.
@@ -1185,13 +1269,13 @@ compute_sla_verdict() {
 	raw="$(env_sla_verdict \
 		"$icpu_eff" "$imem_eff" \
 		"$(as_get node_cpu_pct)"   "$(as_get node_mem_pct)" \
-		"$restarts" "$n_total" "$n_valid" "" "" "$NOT_RUN_CELLS" "${#_cs_inc[@]}")"
+		"$restarts" "$n_total" "$n_valid" "" "" "$NOT_RUN_CELLS" "${#_cs_inc[@]}" "$OUTCOME_PROBLEMS")"
 	SLA_VERDICT="${raw%%|*}"
 	SLA_HEADLINE="${raw#*|}"
 	# Name the status rows behind a filtered-sample count: a memory-guard stop or a failed
 	# step reads differently from istiod instability.
 	if ((STATUS_ROWS > 0)); then
-		SLA_HEADLINE+=" (${STATUS_ROWS} of the rows are status rows of cells skipped or failed, not restarts: ${STATUS_SUMMARY})"
+		SLA_HEADLINE+=" (${STATUS_ROWS} of the rows are status rows of cells ${STATUS_KINDS}, not restarts: ${STATUS_SUMMARY})"
 	fi
 }
 compute_sla_verdict
@@ -1552,7 +1636,8 @@ growth_run_count() {
 #        | PODSNOTE message | PODSMISSING message
 #   MSWEEP label m heap heap_cluster istiod_pods cpu_s pushes cfg_kib envoy_mi heap_per_pod run
 #          | MSWEEPMISSING message
-#   DISC label discovery x istiod_services delta expected heap cfg_kib root_cms gw_clusters check run
+#   DISC label discovery x istiod_services delta expected heap cfg_kib root_cms gw_clusters
+#        check run
 #   FIDELITY label metric fresh in_place diff_pct fresh_run in_place_run
 # Series (SERIES_FIT_RULE): a growth cell belongs to one series run (aggregated col 64,
 # the RUN_ID; a series is RUN_ID x mesh size x K x workload), and every grow ladder,
@@ -2275,7 +2360,7 @@ Units: Mi / MiB = 1024² bytes, KiB = 1024 bytes, GiB = Mi / 1024; m = millicore
 | `proxy check` (proxy_check) | OK / LOW / HIGH / N/A | `proxies/cluster` vs the cluster's Running, non-terminating pods with the `sidecar.istio.io/status` annotation (gateways included) | `LOW`/`HIGH` when they differ by more than max(`PROXY_CHECK_TOLERANCE_PCT` % of the sidecar pods, `PROXY_CHECK_MIN_DIFF`). A warning, never a filter: flagged scrapes stay in every aggregate. The pod count is read seconds after the scrape, so pods starting or stopping in between can flag a scrape. |
 | `cfg_dump_avg (MiB)` | MiB (1024 x 1024 bytes) | `pilot-agent request /config_dump?include_eds` → `wc -c` | Real per-proxy config-dump size (EDS included by design — the cost `Sidecar` scoping reduces); proxy-side, so ingested regardless of istiod restart state. |
 | `restarts` | rows | `istiod_restarted==1` | Rows where `process_start_time_seconds` moved forward between baseline and final scrape; counters/histograms for those samples may under-report. |
-| `unk_restarts` | rows | `istiod_restarted==unknown` | Rows where restart state was undetectable (a pinned pod disappeared / missing `process_start_time_seconds`), plus 003 status rows of a cell that was skipped or failed (`SETUP_FAILED`, `SKIPPED_MEM_GUARD`, ...); the cell names those as `(N status: ...)`. |
+| `unk_restarts` | rows | `istiod_restarted==unknown` | Rows where restart state was undetectable (a pinned pod disappeared / missing `process_start_time_seconds`), plus 003 status rows of a cell that was skipped, failed or interrupted (`SETUP_FAILED`, `SKIPPED_MEM_GUARD`, `INTERRUPTED`, ...); the cell names those as `(N status: ...)`. |
 | `traffic` (traffic_config) | enum | sweep axis | `none` (no VirtualService/DestinationRule) or `vsdr` (one VirtualService and one DestinationRule per configured service; that service's replicas are split over one Deployment per subset, so the pod count is the same). Rows from 40-column TSVs count as `none`. |
 | `VS+DR svcs` (vsdr_services) | services | configured | Services given a VirtualService + DestinationRule (`--vsdr-every`); 0 for `none`. Configured intent, not a measurement. |
 | `istiod VS` (istiod_virt_services) | VirtualServices | `pilot_virt_services` gauge (final scrape) | Every VirtualService istiod knows, the test's and any already in the mesh. Same on every replica (never summed). Gated on `istiod_restarted==0`. |
@@ -2476,7 +2561,7 @@ report_markdown() {
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |%s\n", $1, $2, $3, $4, $5, $38, nt, $7, $24, ($68 == "" ? "N/A" : $68), $10, ha, hi, cp, qp, $19, $37, cfg_mb, $20, unk, gcols
 	}
 	END {
-		if (incl != "") { gsub(/\|/, "\\|", incl); print "\n> ‡ INCOMPLETE: the sweep was cut short while these cells'"'"' member rows were written, so their figures cover only the rows written (they count as failed; a --resume runs them again): " incl "." }
+		if (incl != "") { gsub(/\|/, "\\|", incl); print "\n> ‡ INCOMPLETE: the sweep was cut short while these cells'"'"' member rows were written, so their figures cover only the rows written (the sweep counts these cells as failed, and a --resume runs them again): " incl "." }
 		if (any_pin) print "\n> † SINGLE-BUCKET-PINNED: all delta mass for that quantile sits in the coarsest (0-100ms) `pilot_proxy_convergence_time` bucket, so the reported value is a uniform-within-bucket assumption (Prometheus `histogram_quantile` semantics), NOT resolved below 100ms. Real sub-bucket signal only appears once convergence climbs into a higher bucket (e.g. at 10k-service scale)."
 	}' <<<"$aggregated"
 	local real_unknowns=$(( total_unknowns - total_status ))
@@ -2492,7 +2577,7 @@ report_markdown() {
 	fi
 	if (( total_status > 0 )); then
 		echo ""
-		echo "> ${total_status} row(s) are status rows of cells that were skipped or failed (${STATUS_SUMMARY}), not restarts: they carry no metrics and count in \`n_total\` and \`unk_restarts\` only.$( ((growth)) && echo ' The growth cells among them are listed under "Cells not measured" in the Namespace scaling section.')"
+		echo "> ${total_status} row(s) are status rows of cells that were ${STATUS_KINDS} (${STATUS_SUMMARY}), not restarts: they carry no metrics and count in \`n_total\` and \`unk_restarts\` only.$( ((growth)) && echo ' The growth cells among them are listed under "Cells not measured" in the Namespace scaling section.')"
 	fi
 
 	# Sidecar scoping effect table: compare config sizes across scoping modes

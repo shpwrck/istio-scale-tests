@@ -33,12 +33,15 @@
 #     --namespace-count 50 --workload-mode config-only --series demo --sidecar-scoping namespace
 #   # ...grow it to 100 namespaces, then switch all 100 to wide scoping in place:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --services-per-namespace 2 \
-#     --namespace-start 50 --namespace-count 100 --workload-mode config-only --series demo --sidecar-scoping namespace
+#     --namespace-start 50 --namespace-count 100 --workload-mode config-only --series demo \
+#     --sidecar-scoping namespace
 #   ./tests/controlplane/001-setup-controlplane-test.sh --services-per-namespace 2 \
-#     --namespace-count 100 --workload-mode config-only --series demo --sidecar-scoping wide --parts sidecars
+#     --namespace-count 100 --workload-mode config-only --series demo --sidecar-scoping wide \
+#     --parts sidecars
 #
 #   # Everything from a run config (see tests/controlplane/README.md, "Run config"):
-#   ./tests/controlplane/001-setup-controlplane-test.sh --config tests/controlplane/configs/smoke.env
+#   ./tests/controlplane/001-setup-controlplane-test.sh \
+#     --config tests/controlplane/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 

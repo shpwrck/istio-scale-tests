@@ -3,7 +3,9 @@
 # istio_cr_patch and server-side apply its resources. Saves what 002-revert-profile.sh
 # needs to undo exactly those changes, and the members' Istio CR and IstioRevision
 # generations once the apply settled (istio-generations-applied), which 002 compares
-# before its revert.
+# before its revert. A new apply clears what an earlier apply and its revert left in the
+# state dir (revert-started, istio-edited-during-pass, istio-generations-unchecked,
+# istio-generations-applied).
 #
 # Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
 #
@@ -35,7 +37,12 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --profile NAME|PATH [options]
 
-Apply a tuning profile: patch the Istio CR and apply the profile's resources.
+Apply a tuning profile: patch the Istio CR and apply the profile's resources. Saves what
+002-revert-profile.sh needs, and the members' Istio CR and IstioRevision generations once
+the apply settled (istio-generations-applied; a member it could not read is a warning).
+A new apply clears what an earlier apply and its revert left in the state dir
+(revert-started, istio-edited-during-pass, istio-generations-unchecked,
+istio-generations-applied).
 
 Options:
   --profile NAME|PATH    Profile name (e.g. 01-push-throttling) or YAML path (required).
@@ -151,8 +158,10 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 
 # Record state before mutating so an interrupted apply can still be reverted. A revert's
-# markers from an earlier apply in this state dir do not belong to this one.
-rm -f "${STATE_DIR}/revert-started" "${STATE_DIR}/istio-edited-during-pass"
+# markers, and the generations recorded after an earlier apply in this state dir, do not
+# belong to this one.
+rm -f "${STATE_DIR}/revert-started" "${STATE_DIR}/istio-edited-during-pass" \
+	"${STATE_DIR}/istio-generations-unchecked" "${STATE_DIR}/istio-generations-applied"
 cp "$WORK/patch.json" "${STATE_DIR}/patch.json"
 cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
 (IFS=,; echo "${CONTEXTS[*]}") >"${STATE_DIR}/contexts"
@@ -180,9 +189,14 @@ fi
 
 # The generations this apply left (the patch raises the Istio CR's, and Sail the active
 # IstioRevision's): 002 reads them again before its revert, and a member whose generation
-# moved in between had its Istio CR edited by something else during the pass.
-istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" >"${STATE_DIR}/istio-generations-applied" \
-	|| echo "warn: could not write ${STATE_DIR}/istio-generations-applied; 002 cannot check that nothing else edited the Istio CR during the pass" >&2
+# moved in between had its Istio CR edited by something else during the pass. A member
+# whose read failed is recorded as unknown, which 002 cannot compare: say so now.
+GENS_APPLIED="$(istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
+if ! printf '%s\n' "$GENS_APPLIED" >"${STATE_DIR}/istio-generations-applied"; then
+	echo "warn: could not write ${STATE_DIR}/istio-generations-applied; 002 cannot check that nothing else edited the Istio CR during the pass" >&2
+elif [[ "$GENS_APPLIED" == *unknown* ]]; then
+	echo "warn: the Istio CR generations of a member could not be read after the apply settled (${GENS_APPLIED}): 002 cannot check that member for an edit during the pass, and says so (istio-generations-unchecked)" >&2
+fi
 
 REVERT_HINT="Revert: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"
 if ((SKIP_VERIFY)); then

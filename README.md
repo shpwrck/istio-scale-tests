@@ -38,6 +38,8 @@ flowchart TB
 - `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4.3+ (macOS ships 3.2: `brew install bash`)
 - GNU coreutils `timeout` for live controlplane runs (macOS has none: `brew install coreutils`, which adds `gtimeout`)
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
+- `ps` from procps (Linux; macOS's own works) for the sweeps, which stop a step's whole process tree
+  with it (busybox, ubi-minimal and distroless have none that works: a sweep warns at its start)
 - `python3` with PyYAML (tuning suite only)
 - Mesh members must be able to provision `type: LoadBalancer` Services (cloud provider or MetalLB).
 
@@ -110,14 +112,21 @@ suite README lists its exit codes. Every script has `--help`, and scripts that c
 also accept `--dry-run`.
 
 Every result records the harness that wrote it as `HARNESS_SHA`: `git describe`, plus
-`-dirty.<8hex>` when a file under `tests/`, `config/`, `charts/` or `terraform/` differs from
-that commit (an untracked file there counts; an ignored one never does, also what your global
-`core.excludesFile`, or git's default `~/.config/git/ignore` when that key is unset, ignores;
-your other git settings never change the value; a run's own results do not count). A sweep reads
-it again before its steps (at most every `HARNESS_SHA_CHECK_SEC`, `config/options.env`) and at
-its end: a file edited, or a `git checkout` or `pull`, during the sweep is a problem in its
-outcome (exit 4) that names both values and when the change was first seen, and each probe's
-TSV records the harness that probe ran.
+`-dirty.<8hex>` when a file under `tests/`, `config/`, `charts/` or `terraform/` differs from that
+commit (an added untracked file there counts too, unless git ignores it: a run config in
+`tests/<suite>/configs/` counts unless it is named `*.local.env`; an ignored file never counts, also
+what your global `core.excludesFile`, or git's default `~/.config/git/ignore` when that key is
+unset, ignores; your other git settings, `.git/info/attributes` included, never change the value; a
+run's own results do not count). Next to it, `HARNESS_CONTENT_KEY` (12 hex characters) identifies
+the content of those files alone; the `<8hex>` is its start. A sweep reads them again before its
+steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default, `config/options.env`) and at its end.
+A file edited, added or removed there during the sweep (or a `git checkout`, `pull` or commit that
+changes one) is a problem in its outcome (exit 4) that names both values and when the change was
+first seen; the rows measured after it carry the new value in their TSV (controlplane: a
+`# HARNESS_CHANGED_AT=` line in its one TSV). A commit that changes none of those files, or a
+fetched tag, changes only the name `git describe` gives: a note, and every step keeps recording the
+start's `HARNESS_SHA`. Each report also records the harness it ran on as `REPORT_HARNESS_SHA`; the
+results dir it reads never counts as a change.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -162,47 +171,56 @@ controlplane `--resume` against the first run's, so a spec edited and changed ba
 sweep is a problem too), `ISTIO_PROXY_VERSIONS` (`<ctx>=<version>:<count>+...`: the proxies
 connected to each member's istiod by Istio version, from istiod's `pilot_xds` gauge, read through
 the API server's pod proxy, `ISTIO_PROXY_READ_PARALLEL` (20) members at once and one pod of a
-member at a time; `none` or `unknown` per member; proxies on another version than their istiod,
-such as sidecars not restarted after an upgrade, are a warning and a note of the sweep outcome,
-never a stop), and the members still not ready after the wait in
-`ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a sweep's outcome repeats
-as a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready), `<ctx>=<state>,...`
-(the Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod rollout still in
-progress), `<ctx>=unreadable` (a rollout at the first read, then every re-read failed),
-`unchecked` (a `--dry-run`, or a version check that stopped unexpectedly) or, in a report,
-`unknown` (a TSV written before the key existed). A controlplane `--resume` keeps the first run's
-value in the TSV, and records its own, with its UTC start time, in a note of the sweep outcome
+member at a time, a pod being deleted left out with a note (the counts are approximate: a proxy can
+move to another pod during the read); `none` or `unknown` per member; proxies on another version
+than their istiod, such as sidecars not restarted after an upgrade, are a warning and a note of the
+sweep outcome, never a stop), and the members still not ready after the wait in
+`ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a sweep's outcome repeats as
+a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready), `<ctx>=<state>,...` (the
+Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod rollout still in progress),
+`<ctx>=unreadable` (a rollout at the first read, then every re-read failed), `unchecked` (a
+`--dry-run`, or a version check that stopped unexpectedly) or, in a report, `unknown` (a TSV written
+before the key existed). A controlplane `--resume` keeps the first run's value in the TSV, and
+records its own, with its UTC start time, in a note of the sweep outcome
 (`ISTIO_NOTREADY_AT_RESUME=...`) and in the sweep dir's append-only `resumes.txt`, one line per
 resume. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the pin,
 members on different versions, or a member that cannot be read stop every suite but gateway-api (a
-read-only check that only records it) before it changes anything; `ISTIO_VERSION_CHECK=warn` goes
-on and records what the mesh runs (`mixed:<a>/<b>` or `unknown` when they differ or cannot be
-read). A version check that stops unexpectedly counts as unknown: `fail` stops the run, `warn`
-records `unknown`, and at the end of a sweep it is a problem (exit 4). A sweep reads it again at
-the end and exits 4 when the version, the active revision or the generation of the Istio CR or its
-active IstioRevision changed (also when the Istio CR is not settled at the end, or its istiod
-Deployment cannot be read, but its active revision reads another version); istiod or IstioCNI not
-ready at the end, on the same version, is a warning. From its start the sweep keeps a not-finished
-record in `sweep-outcome.txt` in its results dir (`EXIT=unfinished`), and every report of that dir
-says the sweep has not finished (it died, or still runs; json `sweep_outcome.unfinished`); at its
-end the sweep writes its outcome there, and every report re-generated from that dir repeats its
-errors, warnings and notes (json `"unfinished": false`). A sweep that ends between the two says
-how in that record: one that stops on an error (a check it makes, or an unexpected abort whose
-`FATAL:` line names the script, line and command) records a stop (`STOPPED=1`, the reason in
-`STOP_REASON`, `TOTAL=unknown`, `CUT_SHORT=1`; every report shows the stop and its reason; exit
-1, whatever code the failed command had); one interrupted (Ctrl-C, SIGTERM, or SIGHUP when its
-terminal closes) stays not finished and records when and by which signal (`ENDED_AT`,
-`ENDED_SIGNAL`; reports say "interrupted at ...", json `interrupted_at`, `interrupted_by`; exit
-130, 143 or 129); only one killed outright (SIGKILL, out of memory, a lost host) leaves the
-record as it was. A signal sent to the sweep's process alone (`kill <pid>`, `kill -INT <pid>`, a
-service manager) reaches the step that runs (a setup, a probe, a cleanup) and every process under
-it (its kubectl calls, its per-member workers) at once; the sweep ends once they have, or sends
-SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` (10) seconds later, and only then releases its
-lock; only a settle wait finishes first. A results dir without `sweep-outcome.txt` is from a
-sweep that stopped before its start (nothing ran) or from an older harness. A kubectl error
-quoted in a record or a report names the API server as `<api-host>` or `<ip>`, never its address.
-`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`
-and `SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
+read-only check that only records it) before it changes anything; `ISTIO_VERSION_CHECK=warn` goes on
+and records what the mesh runs (`mixed:<a>/<b>` or `unknown` when they differ or cannot be read). A
+version check that stops unexpectedly counts as unknown: `fail` stops the run, `warn` records
+`unknown`, and at the end of a sweep it is a problem (exit 4). A sweep reads it again at the end and
+exits 4 when the version, the active revision or the generation of the Istio CR or its active
+IstioRevision changed (also when the Istio CR is not settled at the end, or its istiod Deployment
+cannot be read, but its active revision reads another version); istiod or IstioCNI not ready at the
+end, on the same version, is a warning. From its start the sweep keeps a not-finished record in
+`sweep-outcome.txt` in its results dir (`EXIT=unfinished`), and every report of that dir says the
+sweep has not finished (it died, or still runs; json `sweep_outcome.unfinished`); at its end the
+sweep writes its outcome there, and every report re-generated from that dir repeats its errors,
+warnings and notes (json `"unfinished": false`). A sweep that ends between the two says how in that
+record: one that stops on an error (a check it makes, or an unexpected abort whose `FATAL:` line
+names the script, line and command) records a stop (`STOPPED=1`, the reason in `STOP_REASON`,
+`TOTAL=unknown`, `CUT_SHORT=1`; every report shows the stop and its reason; exit 1, whatever code
+the failed command had); one interrupted (Ctrl-C, SIGTERM, or SIGHUP when its terminal closes) stays
+not finished and records when and by which signal (`ENDED_AT`, `ENDED_SIGNAL`; reports say
+"interrupted at ...", json `interrupted_at`, `interrupted_by`; exit 130, 143 or 129); only one
+killed outright (SIGKILL, out of memory, a lost host) leaves the record as it was. A signal sent to
+the sweep's process alone (`kill <pid>`, `kill -INT <pid>`, a service manager) reaches the step that
+runs (a setup, a probe, a cleanup) and every process under it (its kubectl calls, its per-member
+workers) at once; the sweep ends once they have, or sends SIGKILL to what still runs
+`SWEEP_STOP_GRACE_SEC` (30) seconds later (their own cleanup does not run; the warning names the
+suite's cleanup command), and only then releases its lock. For a sweep in a terminal's foreground (a
+terminal, a tmux or screen pane), a `kill -INT` or `kill -HUP` sent from elsewhere skips the
+processes in that foreground, which a Ctrl-C reaches itself: they get SIGKILL after the grace, with
+no cleanup, so stop such a sweep from elsewhere with SIGTERM (`kill <pid>`). The sweep's own
+commands between steps finish first, each bounded: a settle wait, the Istio version and proxy reads
+(tuning: the generation reads around each apply and revert), controlplane's leftover counts, and the
+end-of-sweep recheck. Stopping the step's tree needs a `ps` that lists every process with its start
+time (procps, or macOS's): without one, the sweep warns at its start, and a stop reaches only the
+step's own process. A results dir without `sweep-outcome.txt` is from a sweep that stopped before
+its start (nothing ran) or from an older harness. A kubectl error quoted in a record or a report
+names the API server as `<api-host>` or `<ip>`, never its address. `ISTIO_VERSION_CHECK`,
+`ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC` and
+`SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
 
 ### Run config (`--config FILE`)
 
@@ -246,8 +264,11 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   more than one run (each `sweep-*` directory is one run; outside one, each `RUN_ID`), it stops,
   lists the runs and prints the `--results-dir <dir>/sweep-<RUN_ID>` that reports each alone.
   `--allow-multi-run` pools them on purpose, and every format then says it pools N runs and
-  lists their `HARNESS_SHA` and `ISTIO_VERSION` values. A key that differs across the inputs
-  reads `mixed:<a>,<b>`, never one file's value.
+  lists their `HARNESS_SHA` and `ISTIO_VERSION` values. A key that differs across the inputs reads
+  `mixed:<a>,<b>`, never one file's value. `HARNESS_SHA` values that differ while every input
+  records one `HARNESS_CONTENT_KEY` differ only in git describe: every report then gives a note
+  ("differ only in git describe: every ... records HARNESS_CONTENT_KEY=..., the same harness files")
+  instead of a warning, which an input without the key keeps.
 
 ## Grow the mesh
 

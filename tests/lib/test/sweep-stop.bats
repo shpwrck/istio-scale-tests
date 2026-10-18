@@ -35,6 +35,9 @@ on_exit_t() {
 }
 if [[ "$2" == notes ]]; then
 	trap 'sweep_outcome_on_exit "$?" --note "REVERT_FAILED: profile p is still applied" || true' EXIT
+elif [[ "$2" == problem-* ]]; then
+	# tuning's shape: what its Istio CR generation checks found so far, then its own notes.
+	trap 'sweep_outcome_on_exit "$?" --problem "the Istio CR changed while the sweep changed nothing" --note "a member could not be compared" || true' EXIT
 elif [[ "$2" == tun ]]; then
 	trap 'on_exit_t || true' EXIT
 elif [[ "$2" == tun-bare ]]; then
@@ -47,13 +50,13 @@ sweep_outcome_start "$D" skel-run --next "if it died, run it again into a new di
 # only the signal traps can say a signal came.
 [[ -n "" ]] && echo never
 case "$2" in
-die | notes | tun | tun-bare) die "the members went away" ;;
+die | notes | tun | tun-bare | problem-die) die "the members went away" ;;
 err) false ;;
 err4) sh -c 'exit 4' ;;
 fn) f() { false; echo never; }; f ;;
 fn4) f() { sh -c 'exit 4'; echo never; }; f ;;
 int) sh -c 'kill -INT "$PPID"'; sleep 2; echo after ;;
-term) sh -c 'kill -TERM "$PPID"'; echo after ;;
+term | problem-term) sh -c 'kill -TERM "$PPID"'; echo after ;;
 hup) sh -c 'kill -HUP "$PPID"'; echo after ;;
 child) x="$(sh -c 'kill -TERM $$')" ;;
 sub)
@@ -187,6 +190,16 @@ _trap_steps_guarded() {
 	assert_failure 1
 	grep -qx 'NOTE=REVERT_FAILED: profile p is still applied' "$REC"
 	grep -qx 'NOTE=next: run it again into a new dir' "$REC"
+	# A problem the EXIT trap passes (tuning: an Istio CR generation check) stays a problem
+	# in the stop record, which counts it; the interrupted record keeps it as a note (a
+	# not-finished record counts nothing; the Ctrl-C test below).
+	_skeleton_run problem-die
+	assert_failure 1
+	grep -qx 'STOPPED=1' "$REC"
+	grep -qx 'PROBLEM=the Istio CR changed while the sweep changed nothing' "$REC"
+	grep -qx 'NOTE=a member could not be compared' "$REC"
+	run sweep_outcome_recorded "$D" json
+	[ "$(jq -c '[.exit, (.problems | length), (.problems | index("the Istio CR changed while the sweep changed nothing") != null), (.notes | index("a member could not be compared") != null)]' <<<"$output")" = '[1,2,true,true]' ]
 	# A stop exits 1 whatever code the failed command had (4 would read as failed cells,
 	# 3 as a reachability stop); the record keeps that code in its reason.
 	_skeleton_run err4
@@ -211,14 +224,16 @@ _trap_steps_guarded() {
 }
 
 @test "Ctrl-C, SIGTERM and SIGHUP after a sweep's start leave it not finished, interrupted at a time by that signal (whatever \$? was), and it still dies of the signal; so does a command a signal killed" {
-	# The signal traps need a shell that ignores neither SIGINT nor SIGHUP (nohup).
-	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGINT is ignored here"
-	[[ "$(bash -c 'trap "echo t" HUP; kill -HUP $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGHUP is ignored here (nohup)"
-	local c sig st compat
+	# A shell that ignores SIGINT or SIGHUP (nohup: SIGHUP; some CI runners: SIGINT) passes
+	# that on to the sweep: those cases are left out there (SIGTERM is always checked).
+	local c sig st compat ign=""
+	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || ign+=" int"
+	[[ "$(bash -c 'trap "echo t" HUP; kill -HUP $$; echo n' 2>/dev/null)" == t* ]] || ign+=" hup"
 	_skeleton_sweep
 	for compat in "" 51; do
-		for c in int:SIGINT:130 term:SIGTERM:143 hup:SIGHUP:129; do
+		for c in int:SIGINT:130 hup:SIGHUP:129 term:SIGTERM:143; do
 			IFS=: read -r c sig st <<<"$c"
+			[[ "$ign " != *" ${c} "* ]] || continue
 			BASH_COMPAT="$compat" _skeleton_run "$c"
 			[ "$status" -eq "$st" ] || { echo "${c} (compat ${compat}): ${status} ${stderr}"; false; }
 			[[ "$output" != *after* ]]
@@ -231,18 +246,36 @@ _trap_steps_guarded() {
 			sweep_outcome_unfinished "$REC"
 		done
 	done
+	# The last run was SIGTERM; the reports name each signal.
 	run sweep_outcome_recorded "$D" text
 	assert_output --partial "NOT FINISHED"
-	assert_output --regexp "this sweep has not finished: the run that started at [0-9T:-]+Z was interrupted at [0-9T:-]+Z \(SIGHUP: its terminal closed\) before it wrote its outcome, so no cell count vouches for these results, which may be partial; next: run it again into a new dir"
+	assert_output --regexp "this sweep has not finished: the run that started at [0-9T:-]+Z was interrupted at [0-9T:-]+Z \(SIGTERM\) before it wrote its outcome, so no cell count vouches for these results, which may be partial; next: run it again into a new dir"
 	run sweep_outcome_recorded "$D" json
-	[ "$(jq -c '[.exit, .unfinished, (.interrupted_at | test("Z$")), .interrupted_by]' <<<"$output")" = '[null,true,true,"SIGHUP"]' ]
+	[ "$(jq -c '[.exit, .unfinished, (.interrupted_at | test("Z$")), .interrupted_by]' <<<"$output")" = '[null,true,true,"SIGTERM"]' ]
 	run sweep_outcome_recorded "$D" csv
 	assert_line "# SWEEP_OUTCOME_EXIT=unfinished"
-	assert_line "# SWEEP_OUTCOME_INTERRUPTED_BY=SIGHUP"
+	assert_line "# SWEEP_OUTCOME_INTERRUPTED_BY=SIGTERM"
 	assert_line --regexp '^# SWEEP_OUTCOME_INTERRUPTED_AT=[0-9T:-]+Z$'
-	_skeleton_run int
+	if [[ "$ign " != *" hup "* ]]; then
+		_skeleton_run hup
+		run sweep_outcome_recorded "$D" text
+		assert_output --partial "(SIGHUP: its terminal closed) before it wrote its outcome"
+	fi
+	if [[ "$ign " != *" int "* ]]; then
+		_skeleton_run int
+		run sweep_outcome_recorded "$D" text
+		assert_output --partial "(SIGINT: Ctrl-C) before it wrote its outcome"
+	fi
+	# The problems and notes the EXIT trap passes: one NOTE= line each, no PROBLEM= line.
+	_skeleton_run problem-term
+	assert_failure 143
+	grep -qx 'EXIT=unfinished' "$REC"
+	grep -qx 'NOTE=the Istio CR changed while the sweep changed nothing' "$REC"
+	grep -qx 'NOTE=a member could not be compared' "$REC"
+	! grep -q '^PROBLEM=' "$REC"
 	run sweep_outcome_recorded "$D" text
-	assert_output --partial "(SIGINT: Ctrl-C) before it wrote its outcome"
+	assert_output --partial "NOT FINISHED"
+	assert_output --partial "the Istio CR changed while the sweep changed nothing"
 	# A command a signal killed (its exit 143 through the ERR trap): interrupted, no signal named.
 	_skeleton_run child
 	assert_failure 143

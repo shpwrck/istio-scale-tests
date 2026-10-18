@@ -88,9 +88,9 @@ Usage: $(basename "$0") [options]
 
 Behavior:
   Default: deletes the workload pods with a short grace period, then every namespace
-  labelled '${BASE_SELECTOR}' plus '\$CONTROLPLANE_TEST_NAMESPACE' (default
-  'controlplane-test'), and waits up to the timeout for them to disappear. A context
-  that times out or cannot be reached fails.
+  labelled '${BASE_SELECTOR}'
+  plus '\$CONTROLPLANE_TEST_NAMESPACE' (default 'controlplane-test'), and waits up to the
+  timeout for them to disappear. A context that times out or cannot be reached fails.
 
 Environment:
   SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_NS_DELETE_TIMEOUT_SEC

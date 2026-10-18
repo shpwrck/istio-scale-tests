@@ -324,7 +324,7 @@ _in_path() {
 	assert_output gtimeout
 	run _in_path "$d" run_timeout 5s echo hi
 	assert_success
-	assert_output "gtimeout 5s echo hi"
+	assert_output "gtimeout --foreground 5s echo hi"
 	printf '#!/bin/sh\necho "timeout $*"\n' > "${d}/timeout"
 	chmod +x "${d}/timeout"
 	run _in_path "$d" timeout_cmd

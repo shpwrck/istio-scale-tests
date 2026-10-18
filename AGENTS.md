@@ -75,7 +75,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults, `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*` |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | ACM, GitOps, spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy) |
@@ -119,8 +119,10 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 `bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
 `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in
-`tests/lib/common.sh`), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and
-the frontmatter bats, which skip without it), `aws` + `rosa` (ROSA only).
+`tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
+busybox; macOS's own; a sweep stops its step's whole tree with it), `istioctl` matching
+`ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter bats, which skip without
+it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

@@ -211,7 +211,7 @@ pv_pod() {
 	assert_success
 	assert_output "a=1.30.5:120+1.30.4:3,b=none,c=unknown,d=unknown,e=unknown,f=unknown"
 	run cat "${BATS_TEST_TMPDIR}/pv/log"
-	assert_line "--context=a --request-timeout=5s -n istio-system get pods -l app=istiod --field-selector=status.phase=Running -o name"
+	assert_line "--context=a --request-timeout=5s -n istio-system get pods -l app=istiod --field-selector=status.phase=Running --no-headers -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp"
 	assert_line "--context=a --request-timeout=7s get --raw /api/v1/namespaces/istio-system/pods/istiod-a1:15014/proxy/metrics"
 	refute_output --partial "port-forward"
 	# Off the istiod version: a warning at the start (never a stop), a note at the end.

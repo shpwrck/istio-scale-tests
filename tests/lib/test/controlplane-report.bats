@@ -677,7 +677,7 @@ fit_of() {
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
 	[ "$(jq -c '.pooled_runs' <<<"$output")" = \
-		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"]}' ]
+		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"],"harness_content_key":["unknown"]}' ]
 	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .istio_versions, .harness_sha, .harness_shas, .files_consumed]' <<<"$output")" = \
 		'["multiple",["20261013T100000Z-111","20261013T110000Z-222"],"mixed:1.30.5,1.31.0",["1.30.5","1.31.0"],"mixed:fixture,abc1234-dirty",["fixture","abc1234-dirty"],2]' ]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
@@ -686,7 +686,7 @@ fit_of() {
 	# The opt-in still warns; mixed versions and commits are loud.
 	[[ "$stderr" == *"warning: --allow-multi-run: this report pools 2 runs from ${base} (sweep-20261013T100000Z-111,sweep-20261013T110000Z-222)"* ]]
 	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
-	[[ "$stderr" == *"different harness commits (HARNESS_SHA fixture,abc1234-dirty)"* ]]
+	[[ "$stderr" == *"ran on different harnesses (HARNESS_SHA fixture,abc1234-dirty)"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format markdown
 	assert_success
 	assert_output --partial "> **Pooled runs.** This report pools 2 runs (--allow-multi-run): sweep-20261013T100000Z-111, sweep-20261013T110000Z-222. HARNESS_SHA: fixture, abc1234-dirty. ISTIO_VERSION: 1.30.5, 1.31.0. These differ"

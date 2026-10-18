@@ -224,7 +224,7 @@ FAKE
 	[ "$status" -eq 1 ]
 	[[ "$stderr" == *"--resume: this run's axis flags plan 1 cell(s) no earlier run of this sweep planned (mesh=2 svcs=10 reps=3 ns=1 scope=none traffic=none). A --resume finishes the sweep it resumes; nothing was run."* ]]
 	[[ "$stderr" == *"add --extend-plan to add these cells"* ]]
-	[[ "$stderr" == *"The plans so far: PLAN 1, the first run: --mesh-sizes 2 --service-counts 5,6 "* ]]
+	[[ "$stderr" == *"The plans so far, each with the command that resumes with its axis flags:"$'\n'"  PLAN 1 the first run: --mesh-sizes 2 --service-counts 5,6 "*$'\n'"    ./tests/controlplane/003-run-sweep.sh --resume $(printf '%q' "$D") --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6 "* ]]
 	[ "$(cat "$TSV" "${D}/planned-cells.txt" | cksum)" = "$before" ]
 	[ ! -e "${D}/resumes.txt" ]
 	# The refusal released the sweep's lock.
@@ -272,7 +272,7 @@ FAKE
 	jq -e '[.metadata.data_warnings[]? | select(test("Kubernetes|KUBE"))] | length == 0' <<<"$output"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_success
-	[[ "$output" == *"# attempts: the rows come from one run (the others added no rows): the first run "*"(added no rows)"* ]]
+	[[ "$output" == *"# attempts: the rows come from one run (no other run's rows are in the figures): the first run "*"(added no rows)"* ]]
 	[[ "$output" != *"more than one run"* ]]
 }
 
@@ -323,7 +323,8 @@ FAKE
 	CP_TERM=1 cp_sweep2 --resume "$D" --contexts ci-a
 	[ "$status" -eq 143 ]
 	grep -q "^NEXT=if it died, --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5,6 .* (<sweep dir> is this sweep's directory)$" "${D}/sweep-outcome.txt"
-	[[ "$stderr" == *"  sweep dir: ${D}; next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5,6 "*" (<sweep dir> is this sweep's directory)"* ]]
+	# The console's next: the command with this sweep dir's path (SWEEP_NEXT_CONSOLE).
+	[[ "$stderr" == *"  sweep dir: ${D}; next: ./tests/controlplane/003-run-sweep.sh --resume ${qd} --contexts ci-a --mesh-sizes 1 --service-counts 5,6 "* ]]
 	# The stop record's times are UTC with Z, as its DATE.
 	grep -Eq '^RESUMED_AT=[0-9T:-]+Z$' "${D}/sweep-outcome.txt"
 }
@@ -334,20 +335,22 @@ FAKE
 @test "the legacy leftover check: --dry-run says what a live run does; a live run counts on the measured members and the mesh members their remote secrets name (warning about one without a kube context), deletes with a sized --timeout, records it, and settles before the first cell" {
 	cp_sweep2 --dry-run --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_success
-	[[ "$stderr" == *"Leftover check: a live run counts the controlplane-test namespaces on the members (and on the mesh members their Istio remote secrets name), deletes any an earlier run left through 005-cleanup.sh before the first cell, then waits --settle (0s) before it; a dry run reads no cluster."* ]]
-	# ci-a's remote secrets name ci-c (a kube context) and ci-d (none); ci-c holds a leftover.
+	[[ "$stderr" == *"Leftover check: a live run counts the controlplane-test namespaces on the members (and on the mesh members their Istio remote secrets name), deletes those an earlier run left on the --contexts members through 005-cleanup.sh before the first cell, then waits --settle (0s) before it; it deletes nothing on the other mesh members, and stops first when they hold some; a dry run reads no cluster."* ]]
+	# ci-a's remote secrets name ci-c (a kube context) and ci-d (none); ci-a holds a leftover
+	# (one on ci-c, outside --contexts, stops the sweep: controlplane-resume2.bats).
 	printf 'ci-a\nci-c\n' > "${BATS_TEST_TMPDIR}/kube-contexts"
 	printf '%s\n' '{"items":[{"metadata":{"name":"istio-remote-secret-ci-c","labels":{"istio/multiCluster":"true"},"annotations":{"networking.istio.io/cluster":"ci-c"}}},{"metadata":{"name":"istio-remote-secret-ci-d","labels":{"istio/multiCluster":"true"}}}]}' > "${BATS_TEST_TMPDIR}/remote.ci-a"
-	: > "${BATS_TEST_TMPDIR}/ns-left.ci-c"
+	: > "${BATS_TEST_TMPDIR}/ns-left.ci-a"
 	export KLOG="${BATS_TEST_TMPDIR}/klog"
 	CONTROLPLANE_SETTLE_SEC=1 CONTROLPLANE_NS_DELETE_TIMEOUT_SEC=1 CONTROLPLANE_NS_DELETE_SEC_PER_NS=7 \
 		cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 4 ]
 	[[ "$output" == *"Leftover check: also counts on mesh member(s) ci-c (named by the Istio remote secrets, not measured)"* ]]
 	[[ "$output" == *"warn: mesh member(s) ci-d (named by the Istio remote secrets) have no kube context of that name"*"check each with: kubectl --context <its context> get namespaces -l app.kubernetes.io/instance=controlplane-test"* ]]
-	[[ "$output" == *"note: controlplane-test namespaces are left on the members (ci-c: 1) by a run cut short or a growth series."*"so 005-cleanup.sh deletes them now, before the first cell. Its --timeout is 7 s (about 7 s per namespace, 1 on the fullest member)"* ]]
-	grep -q -- '--context=ci-c .*delete namespace -l app.kubernetes.io/instance=controlplane-test' "$KLOG"
-	[ ! -e "${BATS_TEST_TMPDIR}/ns-left.ci-c" ]
+	[[ "$output" == *"note: controlplane-test namespaces are left on the members (ci-a: 1) by a run cut short or a growth series."*"so 005-cleanup.sh deletes them now, before the first cell. Its --timeout is 7 s (about 7 s per namespace, 1 on the fullest member)"* ]]
+	grep -q -- '--context=ci-a .*delete namespace -l app.kubernetes.io/instance=controlplane-test' "$KLOG"
+	[ "$(grep -c -- '--context=ci-c .*delete namespace' "$KLOG")" = 0 ]
+	[ ! -e "${BATS_TEST_TMPDIR}/ns-left.ci-a" ]
 	# The settle comes after the deletion and before the first cell's baseline (the order;
 	# its length is the configured --settle, PL44).
 	local o="$output" a b c
@@ -357,8 +360,8 @@ FAKE
 	[ "${#a}" -lt "${#b}" ]
 	[ "${#b}" -lt "${#c}" ]
 	D="$(sweep_dir)"
-	grep -qx '# LEFTOVER_TEST_NAMESPACES=ci-c=1 (deleted by 005-cleanup.sh before the first cell)' "$(sweep_tsv "$D")"
-	grep -q '^INFO=the leftover check found controlplane-test namespaces an earlier run left (ci-c: 1) and 005-cleanup.sh deleted them before the first cell' "${D}/sweep-outcome.txt"
+	grep -qx '# LEFTOVER_TEST_NAMESPACES=ci-a=1 (deleted by 005-cleanup.sh before the first cell)' "$(sweep_tsv "$D")"
+	grep -q '^INFO=the leftover check found controlplane-test namespaces an earlier run left (ci-a: 1) and 005-cleanup.sh deleted them before the first cell' "${D}/sweep-outcome.txt"
 }
 
 @test "the legacy leftover check: no leftover, no settle before the first cell and LEFTOVER_TEST_NAMESPACES=none; one that stays stops the sweep with the sized --timeout to give 005" {
@@ -375,7 +378,7 @@ FAKE
 	CONTROLPLANE_NS_DELETE_TIMEOUT_SEC=1 CONTROLPLANE_NS_DELETE_SEC_PER_NS=3 \
 		cp_sweep2 --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
 	[ "$status" -eq 1 ]
-	[[ "$stderr" == *"controlplane-test namespaces are still on the members after 005-cleanup.sh (ci-b: 1"*"Run "*"005-cleanup.sh --contexts ci-a,ci-b until it leaves none, then run this command again. Give it --timeout 3 (about 3 s per namespace, 1 on the fullest member; its default is 1 s)."* ]]
+	[[ "$stderr" == *"controlplane-test namespaces are still on the members after 005-cleanup.sh (ci-b: 1"*"Run "*"005-cleanup.sh --contexts ci-b until it leaves none, then run this command again. Give it --timeout 3 (about 3 s per namespace, 1 on the fullest member; its default is 1 s)."* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -438,10 +441,10 @@ FAKE
 	sed -i.bak 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=ci-a=1,ci-b=2/' "$TSV"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
 	assert_success
-	jq -e '[.metadata.data_warnings[] | select(test("1 cell\\(s\\) are INCOMPLETE: .*or a member fewer rows than its istiod replicas.*mesh=2 svcs=5 reps=3 ns=1 scope=none traffic=none \\(ci-b has rows of 1 of its 2 istiod replicas\\)"))] | length == 1' <<<"$output"
+	jq -e '[.metadata.data_warnings[] | select(test("1 cell\\(s\\) are INCOMPLETE: .*or a member fewer rows than its window wrote: its WINDOW_ROWS line, or in a TSV without one its istiod replicas.*mesh=2 svcs=5 reps=3 ns=1 scope=none traffic=none \\(ci-b has rows of 1 of its 2 istiod replicas\\)"))] | length == 1' <<<"$output"
 	[ "$(jq -r '.metadata.sla.verdict' <<<"$output")" != PASS ]
 	# The SLA headline names the replica case too, not only fewer members than the mesh size.
-	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas"* ]]
+	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote"* ]]
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_success
 	[[ "$output" == *"--- mesh_size=2 service_count=5 "*"(n_total=2 n_valid=2; INCOMPLETE: ci-b has rows of 1 of its 2 istiod replicas) ---"* ]]
@@ -486,10 +489,10 @@ FAKE
 	D="$(sweep_dir)"
 	TSV="$(sweep_tsv "$D")"
 	measured "$TSV" "$(cp_row 2026-06-01T00:01:00+00:00 ci-a 1 5 1000)"$'\n'
-	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=abc1234/' "$TSV"
+	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=abc1234/; s/^# HARNESS_CONTENT_KEY=.*/# HARNESS_CONTENT_KEY=000000000000/' "$TSV"
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
-	grep -Eq '^# RESUMED_AT=[0-9T:+-]+ TSV_LINES=[0-9]+ HARNESS_SHA=[^ ]+ KUBE_VERSIONS=ci-a=v1.30.0$' "$TSV"
+	grep -Eq '^# RESUMED_AT=[0-9T:+-]+ TSV_LINES=[0-9]+ HARNESS_SHA=[^ ]+ HARNESS_CONTENT_KEY=[^ ]+ ISTIO_NOTREADY_AT_RESUME=none ISTIO_GENERATIONS=ci-a=[^ ]+ ISTIO_PROXY_VERSIONS=ci-a=[^ ]+ KUBE_VERSIONS=ci-a=v1.30.0$' "$TSV"
 	# A value with " and \ (resumes.txt is plain text).
 	awk -F'\t' -v OFS='\t' 'NR == 2 { $7 = "ci-a=2/2\"x\\y" } { print }' "${D}/resumes.txt" > "${D}/resumes.new"
 	mv "${D}/resumes.new" "${D}/resumes.txt"

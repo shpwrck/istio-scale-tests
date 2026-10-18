@@ -121,7 +121,10 @@ member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
 REPORT_HARNESS_SHA (every format, after the preamble's HARNESS_SHA): the harness this
 report ran on, which can differ from HARNESS_SHA, the harness that measured the rows:
 a report made again later, or from another checkout, may count rows by other rules.
-The results dir it reads does not count as a change to it.
+The results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (in the
+preamble list; unknown for a TSV written before it): the content key of the harness
+files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
+only in git describe (a docs commit or a new tag between them), not in the harness.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.

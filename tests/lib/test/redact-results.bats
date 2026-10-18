@@ -76,7 +76,7 @@ cp_sweep() {
 	[ "$(head -n 1 "${c}/resumes.txt")" = "$(head -n 1 "$d/resumes.txt")" ]
 	[[ "$(awk -F'\t' 'NR == 2 { print $4 "|" $6 "|" $7 "|" $8 }' "${c}/resumes.txt")" == "<mesh-a-ctx>="*",<mesh-b-ctx>="*"|<mesh-a-ctx>="*",<mesh-b-ctx>="*"|<mesh-a-ctx>="*",<mesh-b-ctx>="*"|${tsv##*/}" ]]
 	# The TSV's resume line, its header and its preamble's resume keys.
-	[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}" | sed 's/ KUBE_VERSIONS=.*//')" = "$(grep '^# RESUMED_AT=' "$tsv" | sed 's/ KUBE_VERSIONS=.*//')" ]
+	[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}" | sed 's/ ISTIO_NOTREADY_AT_RESUME=.*//')" = "$(grep '^# RESUMED_AT=' "$tsv" | sed 's/ ISTIO_NOTREADY_AT_RESUME=.*//')" ]
 	[[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}")" == *" KUBE_VERSIONS=<mesh-a-ctx>="*",<mesh-b-ctx>="* ]]
 	[ "$(grep '^timestamp' "${c}/${tsv##*/}")" = "$(grep '^timestamp' "$tsv")" ]
 	run grep -rlE '(^|[^A-Za-z0-9_<])ci-[ab]([^A-Za-z0-9_]|$)' "$out"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # propagation 002's drain check: a canary endpoint still healthy on a watcher after the
-# drain wait, or healthy again just before t0, makes that side NOT_DRAINED, and 005 and
+# drain wait, or healthy again at the t0 check, makes that side NOT_DRAINED, and 005 and
 # tuning 004 leave it out; one that drains within the wait settles. Stub kubectl and curl,
 # no cluster (PL33); no exact elapsed seconds (PL44). Names are placeholders (ci-a),
 # addresses come from 192.0.2.0/24.
@@ -182,9 +182,9 @@ _prop_tuning() {
 	[ "$(cat "$STUB_PRE_COUNT")" = 3 ]
 }
 
-@test "propagation 002: a canary endpoint healthy again just before t0 (after a clean drain check) is NOT_DRAINED; one that drains within the wait settles and the iteration counts" {
+@test "propagation 002: a canary endpoint healthy again at the t0 check (after a clean drain check) is NOT_DRAINED; one that drains within the wait settles and the iteration counts" {
 	_prop_stub
-	# Read 1 (the drain check) is clean, read 2 (just before t0) shows it healthy.
+	# Read 1 (the drain check) is clean, read 2 (the t0 check) shows it healthy.
 	STUB_PRE_PORT=15100 STUB_PRE_FROM=2 _prop_run
 	assert_success
 	[ "$(_row 10,20,22)" = NOT_DRAINED/OK/NOT_DRAINED ]
@@ -202,7 +202,7 @@ _prop_tuning() {
 	# The dry run describes the check.
 	run "${PR}/002-run-endpoint-probe.sh" --source-context ci-a --remote-contexts ci-b --dry-run
 	assert_success
-	assert_output --partial "--- drain check (reads only; before each baseline, and again just before t0) ---"
+	assert_output --partial "--- drain check (reads only; before each baseline, and again after the backer's Ready wait: the t0 check) ---"
 	run "${PR}/002-run-endpoint-probe.sh" --help
 	assert_output --partial "NOT_DRAINED"
 }

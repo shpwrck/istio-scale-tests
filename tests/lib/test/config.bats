@@ -643,7 +643,7 @@ with_run_config() {
 	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
 	assert_success
 	# At the top level, as in every suite's JSON.
-	[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"]}' ]
+	[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"],"harness_content_key":["unknown"]}' ]
 }
 
 @test "003 with --config, no cluster: snapshot, preamble and report provenance; --resume checks the config" {
@@ -791,8 +791,10 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	# resumes.txt has one line per resume past its preflights: its start time (the
 	# INFO's), HARNESS_SHA, ISTIO_NOTREADY_AT_RESUME, KUBE_VERSIONS and TSV_LINES,
 	# the TSV's line count when it started (where its attempt starts), then the resume's
-	# ISTIO_PROXY_VERSIONS and ISTIO_GENERATIONS and the TSV it applies to.
-	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV')" ]
+	# ISTIO_PROXY_VERSIONS and ISTIO_GENERATIONS, the TSV it applies to and its
+	# HARNESS_CONTENT_KEY.
+	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\tHARNESS_CONTENT_KEY')" ]
+	[[ "$(awk -F'\t' 'NR == 2 { print $9 }' "$d/resumes.txt")" =~ ^([0-9a-f]{12}|unknown)$ ]]
 	[[ "$(awk -F'\t' 'NR == 2 { print $5 }' "$d/resumes.txt")" =~ ^[1-9][0-9]*$ ]]
 	[ "$(awk -F'\t' 'NR == 2 { print $8 }' "$d/resumes.txt")" = "${tsv##*/}" ]
 	[ "$(wc -l < "$d/resumes.txt")" -eq 2 ]
@@ -801,13 +803,14 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	# Through a symlink (latest -> sweep-X, no trailing slash) the resume is that sweep:
 	# its RUN_ID and its TSV, never a second TSV the report would pool. A resume on
 	# another harness than the runs before it (here the preamble's and resumes.txt's are
-	# made 0000000) gets a warning, and a note from the resume's start on.
+	# made 0000000, with another HARNESS_CONTENT_KEY) gets a warning, and a note from the
+	# resume's start on.
 	local res_d="${d%/*}" rid sha
 	rid="$(basename "$tsv" .tsv)"
 	rid="${rid#controlplane-}"
 	ln -s "${d##*/}" "${res_d}/latest"
-	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=0000000/' "$tsv" && rm -f "${tsv}.bak"
-	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "0000000" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
+	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=0000000/; s/^# HARNESS_CONTENT_KEY=.*/# HARNESS_CONTENT_KEY=000000000000/' "$tsv" && rm -f "${tsv}.bak"
+	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "0000000"; if (NF >= 9) $9 = "000000000000" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
 	ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
 		run bash "$CP/003-run-sweep.sh" --resume "${res_d}/latest" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_output --partial "Resuming sweep RUN_ID=${rid} in "
@@ -872,7 +875,7 @@ case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailope
 	# The first resume ran another harness (B) than the first run (A, the preamble's); it
 	# died, or its outcome was overwritten: only resumes.txt keeps it. The second runs A again.
 	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
-	awk -F'\t' -v OFS='\t' 'NR == 2 { $2 = "1111111" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
+	awk -F'\t' -v OFS='\t' 'NR == 2 { $2 = "1111111"; if (NF >= 9) $9 = "000000000000" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	[ "$(wc -l < "$d/resumes.txt")" -eq 3 ]

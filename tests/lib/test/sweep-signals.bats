@@ -111,19 +111,20 @@ teardown() {
 	[ ! -e "$d/step-done" ] && [ ! -e "$d/sweep-continued" ]
 	_gone $(_tree_pids "$d")
 	[ "$(_tree_pids "$d" | wc -l)" -eq 6 ]
-	[[ "$stderr" =~ Stopping\ the\ running\ step\ \(step\.sh\):\ SIGTERM\ to\ its\ [0-9]+\ process\(es\)\;\ any\ still\ running\ 10s\ later\ get\ SIGKILL\ \(SWEEP_STOP_GRACE_SEC\)\. ]] || { echo "$stderr"; false; }
+	[[ "$stderr" =~ Stopping\ the\ running\ step\ \(step\.sh\):\ SIGTERM\ to\ its\ [0-9]+\ process\(es\)\;\ any\ still\ running\ 30s\ later\ get\ SIGKILL\ \(SWEEP_STOP_GRACE_SEC\)\. ]] || { echo "$stderr"; false; }
 	[[ "$stderr" != *SIGKILL\ \(their* && "$stderr" != *"sent SIGKILL to its"* ]]
 	[ ! -e "$d/rec/.sweep.lock" ]
 	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/rec/sweep-outcome.txt"
 }
 
 @test "a SIGINT or SIGHUP sent to the sweep's process alone (a supervisor's kill -INT <pid>) reaches every process of its step's tree as well, which runs its own trap" {
-	# A shell that ignores SIGINT or SIGHUP (nohup, a CI runner) passes that on: nothing to test.
-	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGINT is ignored here"
-	[[ "$(bash -c 'trap "echo t" HUP; kill -HUP $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGHUP is ignored here (nohup)"
-	local d sig st
+	local d sig st tested=0
 	for sig in INT:130 HUP:129; do
 		IFS=: read -r sig st <<<"$sig"
+		# A shell that ignores the signal (nohup: SIGHUP; some CI runners: SIGINT) passes that
+		# on: nothing to test for that one.
+		[[ "$(bash -c "trap 'echo t' ${sig}; kill -${sig} \$\$; echo n" 2>/dev/null)" == t* ]] || continue
+		tested=$((tested + 1))
 		d="${BATS_TEST_TMPDIR}/sig-${sig}"
 		_sig_fixture "$d"
 		# The sweep as a job of its own (set -m): a background job of a shell without job
@@ -138,6 +139,7 @@ teardown() {
 		grep -qx "ENDED_SIGNAL=SIG${sig}" "$d/rec/sweep-outcome.txt"
 		[ ! -e "$d/rec/.sweep.lock" ]
 	done
+	((tested)) || skip "SIGINT and SIGHUP are both ignored here"
 }
 
 @test "a process of the step that ignores the signal gets SIGKILL after SWEEP_STOP_GRACE_SEC, and the sweep keeps its lock until then" {
@@ -148,7 +150,7 @@ teardown() {
 	[ -s "$d/ign" ]
 	_gone $(_tree_pids "$d")
 	[[ "$stderr" == *"any still running 1s later get SIGKILL (SWEEP_STOP_GRACE_SEC)."* ]]
-	[[ "$stderr" =~ warning:\ [0-9]+\ process\(es\)\ of\ the\ step\ still\ ran\ 1s\ after\ SIGTERM:\ sent\ SIGKILL\ \(their\ own\ cleanup\ did\ not\ run\) ]] || { echo "$stderr"; false; }
+	[[ "$stderr" =~ warning:\ [0-9]+\ process\(es\)\ of\ the\ step\ still\ ran\ 1s\ after\ SIGTERM:\ sent\ SIGKILL\ \(their\ own\ cleanup\ did\ not\ run ]] || { echo "$stderr"; false; }
 	# It polled the lock until it was killed: the lock was there all along.
 	[ ! -e "$d/lock-gone-while-alive" ]
 	[ ! -e "$d/rec/.sweep.lock" ]

@@ -295,9 +295,11 @@ STUB
 }
 
 @test "an Istio version check interrupted by Ctrl-C (or a closed terminal) leaves nothing in TMPDIR; so does tuning 003's dry run stopped during its probe check" {
-	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGINT is ignored here"
-	[[ "$(bash -c 'trap "echo t" HUP; kill -HUP $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGHUP is ignored here (nohup)"
-	local sig st t
+	# A shell that ignores SIGINT or SIGHUP (nohup: SIGHUP) passes that on: that case is
+	# left out there; the SIGTERM case below always runs.
+	local sig st t ign=""
+	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || ign+=" INT"
+	[[ "$(bash -c 'trap "echo t" HUP; kill -HUP $$; echo n' 2>/dev/null)" == t* ]] || ign+=" HUP"
 	# The stub's first Istio CR read sends <sig> to its process group (the version check's
 	# job, as a terminal does), once.
 	cat > "${BIN}/kubectl" <<'STUB'
@@ -311,6 +313,7 @@ STUB
 	chmod +x "${BIN}/kubectl"
 	for sig in INT:130 HUP:129; do
 		IFS=: read -r sig st <<<"$sig"
+		[[ "$ign " != *" ${sig} "* ]] || continue
 		t="${BATS_TEST_TMPDIR}/tmp-${sig}"
 		mkdir -p "$t"
 		KC_SIG="$sig" KC_SIG_SENT="${BATS_TEST_TMPDIR}/sent-${sig}" TMPDIR="$t" PATH="${BIN}:${PATH}" \

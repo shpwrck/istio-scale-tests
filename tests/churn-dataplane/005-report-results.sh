@@ -84,8 +84,13 @@ REPORT_HARNESS_SHA (every format, next to HARNESS_SHA; json report_harness_sha):
 harness this report ran on, which can differ from HARNESS_SHA, the harness that
 measured the rows: a report made again later, or from another checkout, may count
 rows by other rules. The results dir it reads does not count as a change to it.
+HARNESS_CONTENT_KEY (every format, after HARNESS_SHA; json harness_content_key): the
+content key of the harness files the rows ran on, unknown for a TSV written before
+it. Inputs whose HARNESS_SHA differs but that share one key differ only in git
+describe (a docs commit or a new tag between them), not in the harness.
 md and charts start with a YAML frontmatter of the metadata keys, lowercase as in
-the json metadata (run_id, harness_sha, report_harness_sha, run_config, ...).
+the json metadata (run_id, harness_sha, harness_content_key, report_harness_sha,
+run_config, ...).
 
 text, md and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
@@ -182,6 +187,9 @@ fi
 
 RUN_ID="$(extract_preamble_kv RUN_ID)"
 HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
+# The content key of the harness files the rows ran on, over every input: unknown for a
+# TSV written before it (so a pooled report never credits older rows with a key).
+HARNESS_CONTENT_KEY_STR="$(config_input_value HARNESS_CONTENT_KEY unknown "${TSV_FILES[@]}")"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
 # Live (each member's active IstioRevision) or pin (config only), the configured pin,
 # and which member ran which (PL19).
@@ -379,6 +387,7 @@ metadata_kv() {
 	printf '%s\n' \
 		"RUN_ID=${RUN_ID:-unknown}" \
 		"HARNESS_SHA=${HARNESS_SHA:-unknown}" \
+		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_STR:-unknown}" \
 		"REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA_STR}" \
 		"ISTIO_VERSION=${ISTIO_VERSION_STR:-unknown}" \
 		"ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_STR:-unknown}" \
@@ -486,6 +495,7 @@ report_json() {
 	jq -n \
 		--arg run_id           "${RUN_ID:-unknown}" \
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
+		--arg harness_content_key "${HARNESS_CONTENT_KEY_STR:-unknown}" \
 		--arg report_harness_sha "${REPORT_HARNESS_SHA_STR}" \
 		--arg istio_version    "${ISTIO_VERSION_STR:-unknown}" \
 		--arg istio_version_source "${ISTIO_VERSION_SOURCE_STR:-unknown}" \
@@ -524,7 +534,7 @@ report_json() {
 		--argjson rows         "$rows" \
 		--argjson pooled_runs  "$(config_multi_run_json)" \
 		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
-		'{pooled_runs: $pooled_runs, sweep_outcome: $sweep_outcome, metadata: {run_id: $run_id, harness_sha: $harness_sha, report_harness_sha: $report_harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		'{pooled_runs: $pooled_runs, sweep_outcome: $sweep_outcome, metadata: {run_id: $run_id, harness_sha: $harness_sha, harness_content_key: $harness_content_key, report_harness_sha: $report_harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -595,6 +605,7 @@ report_md() {
 	# Every value escaped (_md_kv): a mixed value joins per-member lists with " | ".
 	_md_kv RUN_ID "${RUN_ID:-unknown}"
 	_md_kv HARNESS_SHA "${HARNESS_SHA:-unknown}"
+	_md_kv HARNESS_CONTENT_KEY "${HARNESS_CONTENT_KEY_STR:-unknown}"
 	_md_kv REPORT_HARNESS_SHA "${REPORT_HARNESS_SHA_STR}"
 	_md_kv ISTIO_VERSION "${ISTIO_VERSION_STR:-unknown}"
 	_md_kv ISTIO_VERSION_SOURCE "${ISTIO_VERSION_SOURCE_STR:-unknown}"

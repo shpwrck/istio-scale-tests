@@ -25,8 +25,11 @@
 #          OK
 #       min_qps_ratio 0 disables the shortfall check (for callers that run at a
 #       fixed low QPS); a non-numeric or zero qps_target also skips it.
+#   fortio_client_stop <ctx> <ns> <pod> <kubectl_argv...>
+#       -> for a probe's EXIT trap during an in-pod `fortio load`: delete the client pod,
+#          so the load stops (a note on stderr; never dies)
 #
-# Requires: jq, awk.
+# Requires: jq, awk (fortio_client_stop: kubectl or oc).
 # shellcheck shell=bash
 
 # shellcheck disable=SC2329
@@ -107,4 +110,23 @@ fortio_row_status() {
 		return 0
 	fi
 	echo OK
+}
+
+# fortio_client_stop <ctx> <ns> <pod> <kubectl_argv...>: for a probe's EXIT trap when it
+# ends (a stop, Ctrl-C, an error) while a `fortio load` runs in the client pod. That load
+# runs inside the pod, not in the `kubectl exec` that started it: ending kubectl leaves it
+# loading the servers for the rest of its -t, into the next run's first window. The client
+# image has no shell or kill, so delete the pod: its container, and the load, end at once,
+# and its Deployment starts a new pod, which a setup's rollout wait (and the next probe's
+# warmup) waits for. Bounded (--request-timeout=10s, --wait=false: well inside
+# SWEEP_STOP_GRACE_SEC); a warning when the delete fails. Never dies.
+fortio_client_stop() {
+	local ctx="$1" ns="$2" pod="$3"
+	shift 3
+	[[ -n "$pod" ]] || return 0
+	echo "note: ${ctx}: deleting the fortio client pod ${pod}, which still runs a load (its Deployment starts a new one)" >&2 || true
+	if ! "$@" --context="$ctx" --request-timeout=10s -n "$ns" delete pod "$pod" --wait=false >/dev/null 2>&1; then
+		echo "warning: ${ctx}: could not delete the fortio client pod ${pod}: its load runs on for up to its -t seconds; wait that long before the next run" >&2 || true
+	fi
+	return 0
 }

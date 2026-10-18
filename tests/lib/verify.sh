@@ -232,7 +232,7 @@ EXTRACTED_PATTERNS=(
 	'sweep_outcome_unfinished() {'
 	'sweep_outcome_start() {'
 	'controlplane_latest_attempts() {'
-	'_harness_dirty_hash() {'
+	'_harness_keys() {'
 	'_istio_version_mask() {'
 	'_istio_live_version_read() {'
 	'istio_proxy_versions() {'
@@ -303,7 +303,21 @@ EXTRACTED_PATTERNS=(
 	'istio_version_refresh() {'
 	'_istio_proxy_versions_run() {'
 	'_istio_proxy_versions_cleanup() {'
-	'_istio_version_isolated() {'
+	# the harness content key (common.sh); the sweep settings checked at its start; a lock
+	# written in two steps; a stop without a working ps; the one JSON string escaper
+	'harness_read() {'
+	'harness_content_key() {'
+	'_harness_same_files() {'
+	'sweep_settings_check() {'
+	'_sweep_lock_pid() {'
+	'_sweep_ps_works() {'
+	'_sweep_ps_check() {'
+	'_sweep_kill_hint() {'
+	'JSON_STR_AWK='
+	'function js('
+	'_sweep_resume_rows_added() {'
+	# an in-pod load stopped with its probe (fortio.sh)
+	'fortio_client_stop() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

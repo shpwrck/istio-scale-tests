@@ -2,9 +2,9 @@
 # propagation 002 around t0 and the drain, through the real probe (PL33) with a stub
 # kubectl and curl, no cluster: a run cut short after its t0 label flip removes the label
 # on exit; after an iteration whose drain timed out, the next one settles before its
-# baseline even when its drain check reads clean; between the baseline scrape and t0 only
-# the t0 check runs. Event order, never elapsed seconds (PL44). Names are placeholders
-# (ctx-a, ctx-b), addresses come from 192.0.2.0/24.
+# baseline even when its drain check reads clean; the t0 check runs before the baseline
+# scrape, so nothing runs between that scrape and t0. Event order, never elapsed seconds
+# (PL44). Names are placeholders (ctx-a, ctx-b), addresses come from 192.0.2.0/24.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -153,7 +153,7 @@ _line() {
 	[ "$(grep -c "The previous iteration's drain timed out" <<<"$output")" -eq 1 ]
 }
 
-@test "propagation 002: the backer resolve and its Ready wait run before the baseline scrape; between that scrape and the t0 flip only the t0 check reads /clusters" {
+@test "propagation 002: the backer resolve, its Ready wait and then the t0 check run before the baseline scrape; nothing runs between that scrape and the t0 flip" {
 	_stub
 	_run 1
 	assert_success
@@ -164,7 +164,11 @@ _line() {
 	base_last="$(_line '/baseline-1/' last)"
 	flip="$(_line ' label pod/canary-backer-0 propagation-active=true ')"
 	((resolve > 0 && ready > resolve && base_first > ready && flip > base_last))
-	# Every call between the last baseline scrape and the flip is a watcher /clusters read.
-	[ "$(sed -n "$((base_last + 1)),$((flip - 1))p" "$STUB_LOG" | grep -vc '^curl http://localhost:151[0-9][0-9]/clusters > -$')" -eq 0 ]
-	[ "$(sed -n "$((base_last + 1)),$((flip - 1))p" "$STUB_LOG" | grep -c '/clusters')" -eq 2 ]
+	# The t0 check, between the Ready wait and the baseline scrape: one watcher /clusters
+	# read per side and nothing else. The flip comes right after the last baseline scrape.
+	local between
+	between="$(awk -v a="$ready" -v b="$base_first" 'NR > a && NR < b' "$STUB_LOG")"
+	[ "$(grep -vc '^curl http://localhost:151[0-9][0-9]/clusters > -$' <<<"$between")" -eq 0 ]
+	[ "$(grep -c '/clusters' <<<"$between")" -eq 2 ]
+	((flip == base_last + 1))
 }

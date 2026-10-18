@@ -641,6 +641,8 @@ istio_version_resolve() {
 	esac
 	is_nonneg_int "$wait_max" || die "ISTIO_VERSION_READY_WAIT_SEC must be a non-negative integer (got: ${wait_max})"
 	{ is_nonneg_int "$poll" && ((poll > 0)); } || die "ISTIO_VERSION_READY_POLL_SEC must be a positive integer (got: ${poll})"
+	is_pos_int "${ISTIO_PROXY_READ_PARALLEL:-20}" \
+		|| die "ISTIO_PROXY_READ_PARALLEL must be a positive integer of members (got: ${ISTIO_PROXY_READ_PARALLEL:-}); see config/options.env"
 	((nostop)) && policy=warn
 	export ISTIO_VERSION_PIN="${ISTIO_VERSION:-unknown}"
 	if ((dry)); then
@@ -1220,25 +1222,46 @@ istio_generations_read() {
 	printf '%s\n' "$out"
 }
 
-# istio_generations_diff <before> <after>: the members whose generations moved between two
-# istio_generations_read lines (a part unknown on either side is not compared), as one
-# line "<cr_moved 0|1><TAB><ctx> (Istio CR generation 3 -> 5, IstioRevision 3 -> 4), ...",
+# istio_generations_diff [--cr-over <n> | --unchecked] <before> <after>: the members whose
+# generations moved between two istio_generations_read lines, as one line
+# "<cr_moved 0|1><TAB><ctx> (Istio CR generation 3 -> 5, IstioRevision 3 -> 4), ...",
 # cr_moved 1 when an Istio CR's own generation moved (istio_generation_causes); nothing
-# when none moved. Never dies.
+# when none moved. A part unknown on either side, or a member one line lacks, is not
+# compared. --cr-over <n>: only an Istio CR generation that rose by more than <n>, or fell
+# (a CR deleted and created again), the IstioRevision's left out, for a span in which the
+# caller patched each Istio CR <n> times (a merge patch that changes the spec raises it by
+# exactly 1). --unchecked: the members that were not compared in full instead, as
+# "<ctx> (<before> -> <after>), ..." (unknown for a member a line lacks), nothing when
+# every one was, so a caller can say which comparison it could not make. The lines reach
+# awk through the environment (PL19). Never dies.
 # shellcheck disable=SC2329
 istio_generations_diff() {
-	awk -v a="$1" -v b="$2" 'BEGIN {
-		n = split(a, x, ","); for (i = 1; i <= n; i++) { k = x[i]; sub(/=[^=]*$/, "", k); v = x[i]; sub(/^.*=/, "", v); before[k] = v }
-		m = split(b, y, ","); out = ""; cr = 0
+	local over=-1 unchecked=0
+	if [[ "${1:-}" == --cr-over ]]; then
+		over="${2:-0}"
+		shift 2
+	elif [[ "${1:-}" == --unchecked ]]; then
+		unchecked=1
+		shift
+	fi
+	_IGD_A="${1:-}" _IGD_B="${2:-}" awk -v over="$over" -v un="$unchecked" 'BEGIN {
+		n = split(ENVIRON["_IGD_A"], x, ",")
+		for (i = 1; i <= n; i++) { if (x[i] !~ /=/) continue; k = x[i]; sub(/=[^=]*$/, "", k); v = x[i]; sub(/^.*=/, "", v); before[k] = v; ka[++na] = k }
+		m = split(ENVIRON["_IGD_B"], y, ","); out = ""; cr = 0; nc = ""
 		for (i = 1; i <= m; i++) {
-			k = y[i]; sub(/=[^=]*$/, "", k); v = y[i]; sub(/^.*=/, "", v)
-			if (!(k in before)) continue
-			split(before[k], p, "/"); split(v, q, "/"); t = ""
-			if (p[1] != "unknown" && q[1] != "unknown" && p[1] != q[1]) { t = "Istio CR generation " p[1] " -> " q[1]; cr = 1 }
-			if (p[2] != "unknown" && q[2] != "unknown" && p[2] != q[2]) t = t (t == "" ? "" : ", ") "IstioRevision generation " p[2] " -> " q[2]
+			if (y[i] !~ /=/) continue
+			k = y[i]; sub(/=[^=]*$/, "", k); v = y[i]; sub(/^.*=/, "", v); seen[k] = 1
+			if (!(k in before)) { nc = nc (nc == "" ? "" : ", ") k " (unknown -> " v ")"; continue }
+			np = split(before[k], p, "/"); nq = split(v, q, "/"); t = ""
+			if (np != 2 || nq != 2 || p[1] !~ /^[0-9]+$/ || q[1] !~ /^[0-9]+$/ || p[2] !~ /^[0-9]+$/ || q[2] !~ /^[0-9]+$/)
+				nc = nc (nc == "" ? "" : ", ") k " (" before[k] " -> " v ")"
+			if (p[1] ~ /^[0-9]+$/ && q[1] ~ /^[0-9]+$/ && (p[1] != q[1] && (over < 0 || q[1] - p[1] > over || q[1] < p[1]))) { t = "Istio CR generation " p[1] " -> " q[1]; cr = 1 }
+			if (over < 0 && p[2] ~ /^[0-9]+$/ && q[2] ~ /^[0-9]+$/ && p[2] != q[2]) t = t (t == "" ? "" : ", ") "IstioRevision generation " p[2] " -> " q[2]
 			if (t != "") out = out (out == "" ? "" : ", ") k " (" t ")"
 		}
-		if (out != "") printf "%d\t%s\n", cr, out
+		for (i = 1; i <= na; i++) if (!(ka[i] in seen)) nc = nc (nc == "" ? "" : ", ") ka[i] " (" before[ka[i]] " -> unknown)"
+		if (un) { if (nc != "") print nc }
+		else if (out != "") printf "%d\t%s\n", cr, out
 	}'
 }
 
@@ -1522,17 +1545,22 @@ _istio_version_recheck_live() {
 # every revision's istiod), each read through the API server's pod proxy (`kubectl get
 # --raw /api/v1/namespaces/istio-system/pods/<pod>:15014/proxy/metrics`, no port-forward)
 # bounded by --request-timeout (METRICS_SCRAPE_TIMEOUT, the pod list 5s). Series at 0 (their
-# proxies left) are left out; a proxy that reported no version counts as unset. A member
-# reads none when no proxy is connected, unknown when its istiod pods could not be listed,
-# it has none Running, or one pod's metrics could not be read (a partial sum could hide a
-# version). Members are read concurrently, ISTIO_PROXY_READ_PARALLEL at a time
-# (config/options.env, default 20: every member of the 20-member campaign at once), and
-# each member's pods one after another (one pod list, then one read per pod), so at most
-# that many multi-MB /metrics bodies are read at once (a tuning sweep reads them before
-# every pass). Never dies. The reads run in a subshell
+# proxies left) are left out; a proxy that reported no version counts as unset. A pod being
+# deleted (a deletionTimestamp: Terminating, though still phase Running, after a rollout
+# when the settle was short) is left out, with a note on stderr: its proxies are moving to
+# the other pods. A member reads none when no proxy is connected, unknown when its istiod
+# pods could not be listed, it has none Running (and not being deleted), or one pod's
+# metrics could not be read (a partial sum could hide a version). Members are read
+# concurrently, ISTIO_PROXY_READ_PARALLEL at a time (config/options.env, default 20: every
+# member of the 20-member campaign at once), and each member's pods one after another (one
+# pod list, then one read per pod, each body folded into the member's sums and deleted as
+# it arrives), so at most that many multi-MB /metrics bodies are read, or on disk, at once
+# (a tuning sweep reads them before every pass). Because the pods are read in turn, the
+# per-version counts are approximate: a proxy that moves to another istiod pod between two
+# reads (PILOT_MAX_CONNECTION_AGE rebalancing, a restart) is counted twice or not at all;
+# the versions present are what the check is for. Never dies. The reads run in a subshell
 # whose traps remove its temp dir and stop its readers however it ends, so a Ctrl-C (or
-# another signal) during the read at a sweep's start leaves nothing behind (at scale each
-# pod's file holds a full /metrics body).
+# another signal) during the read at a sweep's start leaves nothing behind.
 # shellcheck disable=SC2329
 istio_proxy_versions() {
 	( _istio_proxy_versions_run "$@" )
@@ -1574,6 +1602,8 @@ _istio_proxy_versions_run() {
 		v="$(head -n 1 "${_IPV_DIR}/${i}" 2>/dev/null || true)"
 		[[ "$v" =~ ^(none|unknown|[A-Za-z0-9._-]+:[0-9]+(\+[A-Za-z0-9._-]+:[0-9]+)*)$ ]] || v=unknown
 		out="${out:+${out},}${ipv_ctxs[i]}=${v}"
+		p="$(sed -n 's/^terminating=\([0-9][0-9]*\)$/\1/p' "${_IPV_DIR}/${i}" 2>/dev/null || true)"
+		[[ -z "$p" ]] || echo "note: ${ipv_ctxs[i]}: ${p} istiod pod(s) being deleted (Terminating) left out of its proxy-version read (ISTIO_PROXY_VERSIONS): their proxies are moving to the other pods" >&2
 	done
 	printf '%s\n' "$out"
 }
@@ -1590,10 +1620,11 @@ _istio_proxy_versions_cleanup() {
 }
 
 # _istio_proxy_versions_one <ctx> <timeout_sec> <workdir> <kubectl_argv...>: one member's
-# value for istio_proxy_versions.
+# value for istio_proxy_versions, then, when it left pods being deleted out, a second line
+# "terminating=<n>" (_istio_proxy_versions_run notes it).
 # shellcheck disable=SC2329
 _istio_proxy_versions_one() {
-	local ctx="$1" to="$2" d="$3" pods p n=0 bad=0
+	local ctx="$1" to="$2" d="$3" pods p del n=0 bad=0 term=0
 	shift 3
 	local -a pids=()
 	# Stopped by istio_proxy_versions, or by Ctrl-C (it gets SIGINT, its read does not): stop
@@ -1601,36 +1632,51 @@ _istio_proxy_versions_one() {
 	# trap runs without waiting for it.
 	trap 'kill -s TERM ${pids[@]+"${pids[@]}"} 2>/dev/null; exit 143' HUP INT TERM
 	pods="$("$@" --context="$ctx" --request-timeout=5s -n istio-system get pods -l app=istiod \
-		--field-selector=status.phase=Running -o name 2>/dev/null)" || { echo unknown; return 0; }
+		--field-selector=status.phase=Running --no-headers \
+		-o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp 2>/dev/null)" \
+		|| { echo unknown; return 0; }
 	mkdir -p "$d" 2>/dev/null || { echo unknown; return 0; }
-	while IFS= read -r p; do
+	while read -r p del _; do
 		p="${p#pod/}"
 		[[ -n "$p" ]] || continue
 		[[ "$p" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || { bad=1; continue; }
+		if [[ -n "$del" && "$del" != "<none>" ]]; then
+			term=$((term + 1))
+			continue
+		fi
 		n=$((n + 1))
-		"$@" --context="$ctx" --request-timeout="${to}s" get --raw "/api/v1/namespaces/istio-system/pods/${p}:15014/proxy/metrics" > "${d}/${n}" 2>/dev/null &
+		"$@" --context="$ctx" --request-timeout="${to}s" get --raw "/api/v1/namespaces/istio-system/pods/${p}:15014/proxy/metrics" > "${d}/body" 2>/dev/null &
 		pids=($!)
 		# One failed read makes the member unknown: the rest are not read.
 		wait "${pids[0]}" 2>/dev/null || { bad=1; pids=(); break; }
 		pids=()
+		# Every body must be Prometheus text (an istiod with no proxy may export no
+		# pilot_xds). Its pilot_xds series go into the member's sums, and the body is deleted,
+		# before the next pod is read.
+		grep -q '^# TYPE ' "${d}/body" 2>/dev/null || { bad=1; break; }
+		awk '
+			/^pilot_xds[{ ]/ {
+				v = "unset"
+				if (match($0, /version="[^"]*"/)) v = substr($0, RSTART + 9, RLENGTH - 10)
+				if (v == "" || v !~ /^[A-Za-z0-9._-]+$/) v = (v == "" ? "unset" : "invalid")
+				line = $0
+				sub(/^[^ ]*\} */, "", line)
+				sub(/^pilot_xds +/, "", line)
+				split(line, f, " ")
+				print v, f[1] + 0
+			}' "${d}/body" >> "${d}/sums" 2>/dev/null || { bad=1; break; }
+		rm -f "${d}/body"
 	done <<<"$pods"
 	if ((n == 0 || bad)); then
 		echo unknown
+		((term == 0)) || echo "terminating=${term}"
 		return 0
 	fi
-	# Every body must be Prometheus text (an istiod with no proxy may export no pilot_xds).
-	for ((p = 1; p <= n; p++)); do grep -q '^# TYPE ' "${d}/${p}" 2>/dev/null || { echo unknown; return 0; }; done
-	cat "${d}"/* | awk '
-		/^pilot_xds[{ ]/ {
-			v = "unset"
-			if (match($0, /version="[^"]*"/)) v = substr($0, RSTART + 9, RLENGTH - 10)
-			if (v == "" || v !~ /^[A-Za-z0-9._-]+$/) v = (v == "" ? "unset" : "invalid")
-			line = $0
-			sub(/^[^ ]*\} */, "", line)
-			sub(/^pilot_xds +/, "", line)
-			split(line, f, " ")
+	awk '
+		{
+			v = $1
 			if (!(v in sum)) order[++nv] = v
-			sum[v] += f[1] + 0
+			sum[v] += $2 + 0
 		}
 		END {
 			for (i = 1; i <= nv; i++) if (sum[order[i]] >= 0.5) { k[++m] = order[i] }
@@ -1638,7 +1684,8 @@ _istio_proxy_versions_one() {
 			if (m == 0) { print "none"; exit }
 			for (i = 1; i <= m; i++) printf "%s%s:%d", (i > 1 ? "+" : ""), k[i], sum[k[i]] + 0.5
 			printf "\n"
-		}'
+		}' "${d}/sums" 2>/dev/null || echo unknown
+	((term == 0)) || echo "terminating=${term}"
 }
 
 # _istio_proxy_versions_off: The members whose connected proxies are not all on the
@@ -1775,18 +1822,19 @@ NS_LIFECYCLE_HEADER=$'timestamp\tcontext\tseries\tnamespace_count\taction\tnames
 # no-op when the file exists (the first writer wins; every writer uses this function).
 # shellcheck disable=SC2329
 ns_lifecycle_init() {
-	local file="$1" run_id="${2:-unknown}" dir hs
+	local file="$1" run_id="${2:-unknown}" dir hs hk
 	[[ -n "$file" ]] || return 0
 	[[ -f "$file" ]] && return 0
 	dir="$(dirname "$file")"
 	mkdir -p "$dir"
 	# The harness without the results dir this file lives in (they would read dirty).
-	hs="$(harness_sha --exclude "$dir")"
+	harness_read hs hk --exclude "$dir"
 	{
 		echo "# Namespace lifecycle (controlplane growth mode) — $(date -u -Iseconds)"
 		echo "# NS_LIFECYCLE_SCHEMA=2"
 		echo "# RUN_ID=${run_id}"
 		echo "# HARNESS_SHA=${hs}"
+		echo "# HARNESS_CONTENT_KEY=${hk}"
 		istio_version_kv | sed 's/^/# /'
 		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
 		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"

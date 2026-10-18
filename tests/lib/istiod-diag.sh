@@ -93,10 +93,11 @@
 # started more than _ISTIOD_DIAG_CLOCK_MARGIN_SEC before that scrape (harness clock)
 # restarted before the window, so the pod counts as no_change, not restarted_untimed.
 #
-# Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK, ctx_file_safe,
-# CTX_FILE_NAME_MAX, RUN_ID_FILE_NAME_MAX, TAG_FILE_NAME_MAX), reach.sh (reach_sanitize), jq, awk, sed, tail, mktemp; gzip when
-# present (evidence stays uncompressed without it); common.sh's harness_sha (else
-# HARNESS_SHA=unknown). Callers run `set -euo pipefail`.
+# Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK,
+# ctx_file_safe, CTX_FILE_NAME_MAX, RUN_ID_FILE_NAME_MAX, TAG_FILE_NAME_MAX), reach.sh
+# (reach_sanitize), jq, awk, sed, tail, mktemp; gzip when present (evidence stays
+# uncompressed without it); common.sh's harness_read (else HARNESS_SHA and
+# HARNESS_CONTENT_KEY are unknown). Callers run `set -euo pipefail`.
 # shellcheck shell=bash
 
 ISTIOD_DIAG_SCHEMA=1
@@ -387,7 +388,7 @@ README
 # and the index.tsv preamble and header; a no-op for the parts that exist.
 # shellcheck disable=SC2329
 _istiod_diag_init() {
-	local dir="$1" idx="${1}/index.tsv" run_id sha=unknown
+	local dir="$1" idx="${1}/index.tsv" run_id sha=unknown key=unknown
 	mkdir -p "$dir" || return 1
 	if [[ ! -f "${dir}/README.md" ]]; then
 		_istiod_diag_readme > "${dir}/README.md" || return 1
@@ -398,12 +399,17 @@ _istiod_diag_init() {
 	[[ -f "$idx" ]] && return 0
 	run_id="${dir##*/}"
 	run_id="${run_id#istiod-diag-}"
-	declare -F harness_sha >/dev/null 2>&1 && sha="$(harness_sha 2>/dev/null)"
+	# The harness without the probe's output dir this folder is in (its results would read
+	# dirty), as the probe's own TSV records it.
+	if declare -F harness_read >/dev/null 2>&1; then
+		harness_read sha key --exclude "$(dirname "$dir")" 2>/dev/null || true
+	fi
 	{
 		echo "# ISTIOD_DIAG_SCHEMA=${ISTIOD_DIAG_SCHEMA}"
 		echo "# RUN_ID=${run_id}"
 		echo "# CREATED_BY=${0##*/}"
 		echo "# HARNESS_SHA=${sha:-unknown}"
+		echo "# HARNESS_CONTENT_KEY=${key:-unknown}"
 		echo "# DATE=$(_istiod_diag_now)"
 		echo "# ISTIOD_DIAG_REQUEST_TIMEOUT=${_IDG_RT}"
 		echo "# ISTIOD_DIAG_MAX_SEC=${_IDG_MAX_SEC}"

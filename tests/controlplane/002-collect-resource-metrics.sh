@@ -23,7 +23,8 @@
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 #
 #   # Settle, results dir and metadata tags from a run config:
-#   ./tests/controlplane/002-collect-resource-metrics.sh --config tests/controlplane/configs/smoke.env
+#   ./tests/controlplane/002-collect-resource-metrics.sh \
+#     --config tests/controlplane/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 # Loud ERR trap for unexpected aborts (per-pod faults become N/A rows).
@@ -172,6 +173,7 @@ Environment:
   (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
   over its istiod pods) and its Running sidecar pods differ by more than
   max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
 
 Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
 on macOS: brew install coreutils, which installs gtimeout). Without it a live run
@@ -398,8 +400,12 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes.
-HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
+# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes, and the
+# content key of its files (HARNESS_CONTENT_KEY), from one read; when (UTC) for the
+# HARNESS_CHANGED_AT line a window may write (harness_change_line).
+HARNESS_SHA="" HARNESS_CONTENT_KEY=""
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+HARNESS_READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
@@ -478,6 +484,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
@@ -524,7 +531,8 @@ fi
 #   xds_pushes_cds xds_pushes_eds xds_pushes_lds xds_pushes_rds xds_pushes_nds
 #   k8s_events_delta k8s_events_rate
 #   connected_proxies config_size_avg_bytes
-#   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max sidecar_config_bytes_samples
+#   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max
+#   sidecar_config_bytes_samples
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #   istiod_cpu_m_delta
 #   go_heap_alloc_mi go_heap_inuse_mi
@@ -1356,6 +1364,44 @@ collect_growth_for_ctx() {
 	echo "  Cluster ${ctx}: gateways $(kv_get pods "$kv") (clusters max ${cl}; Envoy allocated max ${mem} Mi, physical max ${phy} Mi; container working set max ${ws} Mi), istio-ca-root-cert ConfigMaps ${rc}, leftover test namespaces ${left}"
 }
 
+# harness_change_line: the "# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>"
+# line a window writes before its rows when they ran other harness files than the TSV's
+# last record of them: its preamble's HARNESS_SHA and HARNESS_CONTENT_KEY, then each
+# "# RESUMED_AT=" and "# HARNESS_CHANGED_AT=" line. A sweep's TSV keeps the preamble of its
+# start, so without it the rows of a file edited (or a checkout) during the sweep would be
+# credited to the start's harness; controlplane_attempts reads the line as a boundary of the
+# rows' provenance. Compared by content key (a commit that changes no harness file, or a
+# tag, is no change), by HARNESS_SHA when either key is unknown. A final phase whose
+# baseline (its read in --state-dir) ran other files than it did spans both: its rows go
+# to the baseline's when that differs from the record, else to the final's. Prints
+# nothing when they match; warns when it prints the line.
+# _hcl_same <sha> <key> <sha2> <key2>: one harness: the same key, or when either is unknown
+# the same HARNESS_SHA.
+_hcl_same() {
+	if [[ "$2" != unknown && "$4" != unknown ]]; then [[ "$2" == "$4" ]]; else [[ "$1" == "$3" ]]; fi
+}
+harness_change_line() {
+	local rec_s rec_k s="$HARNESS_SHA" k="$HARNESS_CONTENT_KEY" t="$HARNESS_READ_AT" bs="" bk="" bt=""
+	IFS=$'\t' read -r rec_s rec_k < <(awk '
+		function lv(k,    p, v) { if (!(p = index($0, " " k "="))) return "unknown"; v = substr($0, p + length(k) + 2); sub(/ .*/, "", v); return (v == "" ? "unknown" : v) }
+		/^timestamp\t/ { hdr = 1; next }
+		!/^#/ { next }
+		!hdr && index($0, "# HARNESS_SHA=") == 1 { s = substr($0, 15) }
+		!hdr && index($0, "# HARNESS_CONTENT_KEY=") == 1 { k = substr($0, 23) }
+		index($0, "# RESUMED_AT=") == 1 || index($0, "# HARNESS_CHANGED_AT=") == 1 { s = lv("HARNESS_SHA"); k = lv("HARNESS_CONTENT_KEY") }
+		END { printf "%s\t%s\n", (s == "" ? "unknown" : s), (k == "" ? "unknown" : k) }' "$TSV_FILE" 2>/dev/null) || true
+	if [[ "$PHASE" == final && -f "${STATE_DIR}/harness" ]]; then
+		IFS=$'\t' read -r bs bk bt < "${STATE_DIR}/harness" || true
+		if [[ -n "$bs" && -n "$bk" ]] && ! _hcl_same "$bs" "$bk" "$s" "$k"; then
+			echo "warning: [002] this window's baseline ran other harness files (HARNESS_SHA=${bs}) than its final scrape (HARNESS_SHA=${s}): a harness file was edited, or a checkout ran, during the window" >&2
+			if ! _hcl_same "$bs" "$bk" "${rec_s:-unknown}" "${rec_k:-unknown}"; then s="$bs" k="$bk" t="${bt:-$t}"; fi
+		fi
+	fi
+	_hcl_same "$s" "$k" "${rec_s:-unknown}" "${rec_k:-unknown}" && return 0
+	echo "warning: [002] these rows ran other harness files than ${TSV_FILE##*/} records (HARNESS_SHA=${rec_s:-unknown}, HARNESS_CONTENT_KEY=${rec_k:-unknown}; now HARNESS_SHA=${s}): a HARNESS_CHANGED_AT line before them records it" >&2
+	printf '# HARNESS_CHANGED_AT=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s\n' "$t" "$s" "$k"
+}
+
 # ---------------------------------------------------------------------------
 # Main scrape_window: baseline + final + deltas + emit TSV rows.
 # ---------------------------------------------------------------------------
@@ -1689,7 +1735,18 @@ scrape_window() {
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
 		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 	done
-	cat "$rows_file" >> "$TSV_FILE" || die "could not append the window's rows to ${TSV_FILE}"
+	# One write: a HARNESS_CHANGED_AT line when these rows ran other harness files than the
+	# TSV records, then a WINDOW_ROWS line (each member's row count: a report tells a write
+	# that was cut from a member with fewer istiod replicas, CP_CELL_AWK), then the rows.
+	local win_file="${TMP_DIR}/window"
+	if [[ -s "$rows_file" ]]; then
+		{
+			harness_change_line
+			awk -F'\t' '{ if (!($2 in n)) o[++k] = $2; n[$2]++ } END { printf "# WINDOW_ROWS="; for (i = 1; i <= k; i++) printf "%s%s=%d", (i > 1 ? "," : ""), o[i], n[o[i]]; print "" }' "$rows_file"
+			cat "$rows_file"
+		} > "$win_file" || die "could not write the window's rows to ${win_file}"
+		cat "$win_file" >> "$TSV_FILE" || die "could not append the window's rows to ${TSV_FILE}"
+	fi
 
 	# istiod restart evidence for the contexts whose rows above say istiod_restarted 1 or
 	# unknown (tests/lib/istiod-diag.sh, istiod-diag-<RUN_ID>/ next to the TSV). Reads the
@@ -1725,6 +1782,10 @@ elif [[ "$PHASE" == baseline ]]; then
 	echo ""
 	echo "=== Baseline scrape only (phase=baseline) ==="
 	echo "  Writing baseline metrics to $STATE_DIR"
+	# The baseline's harness, for the final's rows (harness_change_line).
+	rm -f "${STATE_DIR}/harness"
+	printf '%s\t%s\t%s\n' "$HARNESS_SHA" "$HARNESS_CONTENT_KEY" "$HARNESS_READ_AT" > "${STATE_DIR}/harness" \
+		|| echo "warning: could not write ${STATE_DIR}/harness: the final phase credits its rows to its own harness only" >&2
 	scrape_all_parallel "${STATE_DIR}/baseline" >/dev/null
 	echo "  Baseline complete. Caller should now deploy workloads, settle, and"
 	echo "  invoke this script again with --phase final --state-dir $STATE_DIR"

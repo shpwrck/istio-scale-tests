@@ -209,7 +209,8 @@ Environment:
   Environment only (the Istio version read; this read-only check warns and never stops on it):
   ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out, is read again, ${ISTIO_VERSION_READY_WAIT_SEC:-60} s; a rollout still running then reads as
-  unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC:-5} s).
+  unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC:-5} s),
+  ISTIO_PROXY_READ_PARALLEL (${ISTIO_PROXY_READ_PARALLEL:-20}): members whose proxy versions are read at once.
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
@@ -1321,7 +1322,7 @@ fi
 
 # Argo CD syncs the chart from its own revision, which can move independently of this script
 # (PL39): say when it is not the commit the script runs from.
-HARNESS="$(harness_sha --exclude "$RESULTS_DIR")"
+harness_read HARNESS HARNESS_CONTENT_KEY --exclude "$RESULTS_DIR"
 CHART_REVISION_VS_HARNESS=unknown
 # A dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
 hc="${HARNESS%%-dirty*}"
@@ -1717,6 +1718,7 @@ emit_preamble() {
 	echo "# GWAPI_SCHEMA=${GWAPI_SCHEMA}"
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# HARNESS_SHA=${HARNESS}"
+	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 	istio_version_kv | sed 's/^/# /'
 	config_preamble_lines
 	echo "# SCENARIO_SET=${SCENARIO_SET}"

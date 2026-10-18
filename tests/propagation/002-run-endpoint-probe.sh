@@ -133,10 +133,11 @@ Phases (all timed from the same t0 label flip):
 
 Row status: OK, TIMEOUT_P1/P2/P3/ALL, RESTART (istiod restarted mid-iteration),
 DRAIN_TIMEOUT (endpoint did not drain within PROPAGATION_DRAIN_TIMEOUT_SEC after
-the iteration), NOT_DRAINED (before t0, a canary endpoint from an earlier
-iteration or run was still healthy on that side's watcher after a
-PROPAGATION_DRAIN_TIMEOUT_SEC wait, was healthy again at t0, or its /clusters
-could not be read, which is not waited for: its timings are not this
+the iteration: a flag, not a drop, since the values were measured before that
+drain; the summary counts those iterations), NOT_DRAINED (before t0, a canary
+endpoint from an earlier iteration or run was still healthy on that side's watcher
+after a PROPAGATION_DRAIN_TIMEOUT_SEC wait, was healthy again at the t0 check, or
+its /clusters could not be read, which is not waited for: its timings are not this
 iteration's), or SCRAPE_INCOMPLETE (a pod's /metrics was unreachable, or baseline
 scrape skew exceeded FANOUT_MAX_SKEW_MS). status is the row's verdict over both
 sides; p1_status is the source side's alone and remote_status the remote's alone
@@ -146,23 +147,24 @@ checks every side's watcher: a canary endpoint still there is waited for, then
 SETTLE_SEC, so its removal push lands before the baseline; after an iteration
 whose drain timed out it settles SETTLE_SEC even when the check reads clean. Each
 NOT_DRAINED warning names the iteration and says whether the endpoint was still
-healthy or the watcher's /clusters could not be read. The backer resolve and its
-Ready wait run before the baseline scrape, so only the t0 check (one /clusters
-read per side) runs between that scrape and t0. A run that ends between t0 and
-its drain (an error, a kill, SIGTERM) removes the t0 label on exit, so the
-canary endpoint does not stay up for the next run.
+healthy or the watcher's /clusters could not be read. The backer resolve, its
+Ready wait and the t0 check (one /clusters read per side) run before the baseline
+scrape, so nothing the probe runs sits between that scrape and t0. A run that ends
+between t0 and its drain (an error, a kill, SIGTERM) removes the t0 label on exit,
+so the canary endpoint does not stay up for the next run.
 
 Summary (stdout and endpoint-<RUN_ID>.md): averages over the rows 005 counts, as valid
 samples/rows, with the other rows tallied by reason. P2 and P3 are left out only for the
 remote's side: its remote_status column (RESTART or RESTART_UNKNOWN for its istiod, a P2
-or P3 timeout, DRAIN_TIMEOUT or NOT_DRAINED for its sidecar, SCRAPE_INCOMPLETE for its
-scrape) or its remote_scrape_skew_ms over FANOUT_MAX_SKEW_MS; the source's restart, P1
-timeout or +Inf overflow never drops them. P1 is one sample per iteration (/iterations),
-left out only for a source-side reason: its p1_status column (TIMEOUT_P1, RESTART or
-RESTART_UNKNOWN for the source istiod, DRAIN_TIMEOUT or NOT_DRAINED for the source
-sidecar, SCRAPE_INCOMPLETE for a source scrape that failed or skewed past
-FANOUT_MAX_SKEW_MS), or a P1 +Inf overflow; a remote that timed out or restarted never
-drops it. One definition decides for both: tests/lib/propagation.sh.
+or P3 timeout, NOT_DRAINED for its sidecar, SCRAPE_INCOMPLETE for its scrape) or its
+remote_scrape_skew_ms over FANOUT_MAX_SKEW_MS; the source's restart, P1 timeout or +Inf
+overflow never drops them. P1 is one sample per iteration (/iterations), left out only
+for a source-side reason: its p1_status column (TIMEOUT_P1, RESTART or RESTART_UNKNOWN
+for the source istiod, NOT_DRAINED for the source sidecar, SCRAPE_INCOMPLETE for a
+source scrape that failed or skewed past FANOUT_MAX_SKEW_MS), or a P1 +Inf overflow; a
+remote that timed out or restarted never drops it. A DRAIN_TIMEOUT side counts, and the
+summary says how many iterations drained late. One definition decides for both:
+tests/lib/propagation.sh.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -178,6 +180,7 @@ Environment:
   FANOUT_CTX_STRIDE (ports per context, default 20),
   FANOUT_MAX_SKEW_MS (baseline scrape-skew ceiling, default 1000),
   PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root).
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
 EOF
 }
 
@@ -321,7 +324,7 @@ if ((DRY_RUN)); then
 	echo "--- drain (removes the label) ---"
 	echo "${KUBECTL[*]} --context=${SOURCE_CTX} -n ${NS} label pod <backer-pod> ${CANARY_ACTIVE_LABEL_KEY}- --overwrite"
 	echo ""
-	echo "--- drain check (reads only; before each baseline, and again just before t0) ---"
+	echo "--- drain check (reads only; before each baseline, and again after the backer's Ready wait: the t0 check) ---"
 	echo "curl http://localhost:<watcher-port>/clusters on the source and every remote: no line may match"
 	echo "  ${CANARY_HEALTHY_RE}"
 	echo "  (a healthy one is waited for up to ${DRAIN_TIMEOUT_SEC}s, an unreadable /clusters not at all; then"
@@ -359,6 +362,9 @@ if ((WRITE_TSV)); then
 		[[ -n "$SWEEP_RUN_ID" ]] && echo "# SWEEP_RUN_ID=${SWEEP_RUN_ID}"
 		echo "# RUN_ID=${RUN_ID}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		# The harness files' content key: TSVs with one key ran the same harness files,
+		# whatever their HARNESS_SHA's describe part (a docs commit, a new tag).
+		echo "# HARNESS_CONTENT_KEY=$(harness_content_key --exclude "$OUTPUT_DIR")"
 		istio_version_kv | sed 's/^/# /'
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}"
@@ -421,12 +427,13 @@ declare -A RMT_ISTIOD_PORTS_STR=()
 SRC_ISTIOD_PODS=()
 declare -A RMT_ISTIOD_PODS_STR=()
 
-# canary_unlabel <pod>: remove the t0 label from a backer pod (one bounded call) and, when
-# that worked, drop the pod from CANARY_LABELED_PODS. Returns 1 when kubectl failed.
+# canary_unlabel <pod> [<request timeout, s>]: remove the t0 label from a backer pod (one
+# kubectl call, each of its requests bounded: 10 s by default) and, when that worked, drop
+# the pod from CANARY_LABELED_PODS. Returns 1 when kubectl failed.
 canary_unlabel() {
-	local pod="$1" p
+	local pod="$1" rto="${2:-10}" p
 	local -a keep=()
-	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" --request-timeout=10s \
+	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" --request-timeout="${rto}s" \
 		label "pod/${pod}" "${CANARY_ACTIVE_LABEL_KEY}-" --overwrite >/dev/null 2>&1 || return 1
 	for p in ${CANARY_LABELED_PODS[@]+"${CANARY_LABELED_PODS[@]}"}; do
 		[[ "$p" == "$pod" ]] || keep+=("$p")
@@ -442,9 +449,12 @@ cleanup() {
 		wait "$pid" 2>/dev/null || true
 	done
 	POLL_PIDS=()
-	# A run that ended between t0 and its drain leaves the canary endpoint up.
+	# A run that ended between t0 and its drain leaves the canary endpoint up. A sweep that
+	# stops this probe sends SIGKILL SWEEP_STOP_GRACE_SEC (30 s by default) later: 5 s per
+	# request (the label call reads the pod, then patches it) keeps the removal well inside
+	# that, also at a lowered grace of 10 s.
 	for pod in ${CANARY_LABELED_PODS[@]+"${CANARY_LABELED_PODS[@]}"}; do
-		if canary_unlabel "$pod"; then
+		if canary_unlabel "$pod" 5; then
 			echo "The run ended before its drain: removed the ${CANARY_ACTIVE_LABEL_KEY} label from pod ${pod} on ${SOURCE_CTX}." >&2
 		else
 			echo "warning: could not remove the ${CANARY_ACTIVE_LABEL_KEY} label from pod ${pod} on ${SOURCE_CTX}: the canary endpoint stays up, and the next run's first iteration reads NOT_DRAINED. Remove it: kubectl --context=${SOURCE_CTX} -n ${NS} label pod/${pod} ${CANARY_ACTIVE_LABEL_KEY}-" >&2
@@ -956,15 +966,15 @@ normalize_proxy_count() {
 #
 # Round-2 reconciled cleanliness against an instantaneous health_flags::healthy
 # /clusters read AT THE EDS-BUMP INSTANT — but that is causally too early: istiod
-# increments pilot_xds_pushes{type=eds} when it ISSUES the push, and the sidecar
-# only reports health_flags::healthy after it APPLIES it (that lag IS the P3-P2 gap,
+# increments pilot_xds_pushes{type=eds} when it ISSUES the push, and the sidecar only
+# reports health_flags::healthy after it APPLIES it (that lag IS the P3-P2 gap,
 # necessarily > 0). So a legitimately-clean iteration read "not healthy yet ->
-# dirty=1", re-collapsing the P2 column. So this poll loop makes no dirty decision:
-# it only stamps the P2 LATENCY timestamp at the first EDS bump. p2_dirty is reconciled by the CALLER against the SAME remote's P3
-# OUTCOME (clean iff the canary became health_flags::healthy within the window, i.e.
-# P3 succeeded; dirty iff EDS bumped but P3 timed out / never went healthy). P3's
-# own retrying poll already waits for that signal, so there is no second /clusters
-# consumer racing the P3 poller here.
+# dirty=1", re-collapsing the P2 column. So this poll loop makes no dirty decision: it
+# only stamps the P2 LATENCY timestamp at the first EDS bump. p2_dirty is reconciled
+# by the CALLER against the SAME remote's P3 OUTCOME (clean iff the canary became
+# health_flags::healthy within the window, i.e. P3 succeeded; dirty iff EDS bumped but
+# P3 timed out / never went healthy). P3's own retrying poll already waits for that
+# signal, so there is no second /clusters consumer racing the P3 poller here.
 # Fanned out across the remote's istiod pods: eds_count + pushes_total SUM across
 # pods, restart via proc_start_sig.
 poll_p2_remote_eds_push() {
@@ -1177,9 +1187,9 @@ drain_gate() {
 	return 0
 }
 
-# t0_check <out_file> <port>: right before t0, one side's last read: "clean", else
-# "healthy" (the canary endpoint is already healthy: P3 would read about 0) or
-# "unreadable". Run in the background.
+# t0_check <out_file> <port>: one side's last read before t0, after the backer's Ready
+# wait and just before the baseline scrape: "clean", else "healthy" (the canary endpoint
+# is already healthy: P3 would read about 0) or "unreadable". Run in the background.
 t0_check() {
 	local out="$1" port="$2" rc=0
 	canary_healthy_on "$port" || rc=$?
@@ -1358,9 +1368,10 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# flip-onto-a-dying-pod race O1 removes. Sort by creationTimestamp and take the
 	# NEWEST Running pod so a just-rolled replacement wins over a lingering
 	# terminating one; the explicit Ready wait below then guarantees readiness before t0.
-	# Both calls run before the baseline scrape: between that scrape and T0 every second
-	# lets unrelated pushes raise the remote EDS counter (P2 reads short) and the source's
-	# convergence count (P1 reads short), so only the t0 check runs there.
+	# Both calls, and the t0 check after them, run before the baseline scrape: between that
+	# scrape and T0 every second lets unrelated pushes raise the remote EDS counter (P2
+	# reads short) and the source's convergence count (P1 reads short), so nothing runs
+	# there.
 	BACKER_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pods \
 		-l app=propagation-canary --field-selector=status.phase=Running \
 		--sort-by=.metadata.creationTimestamp \
@@ -1372,6 +1383,34 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" wait "pod/${BACKER_POD}" \
 		--for=condition=Ready --timeout="${TIMEOUT_SEC}s" >/dev/null 2>&1 \
 		|| die "backer pod $BACKER_POD on $SOURCE_CTX not Ready before t0"
+
+	# The t0 check: the last /clusters read before t0, on each side the drain check
+	# passed: a canary endpoint already healthy now (or a /clusters that cannot be read)
+	# makes that side NOT_DRAINED. It runs before the baseline scrape, so nothing the
+	# probe runs sits between that scrape and T0. Only this probe's t0 label makes the
+	# canary healthy again, so the check loses nothing by coming before the scrape.
+	t0_pids=()
+	if ((SRC_NOTDRAINED == 0)); then t0_check "$GATE_DIR/source-t0" "$SOURCE_ENVOY_PF_PORT" & t0_pids+=($!); fi
+	for i in "${!REMOTES[@]}"; do
+		[[ "${RMT_NOTDRAINED[i]:-0}" == 1 ]] && continue
+		t0_check "$GATE_DIR/remote-${i}-t0" $(( BASE_ENVOY_PF_PORT + i )) & t0_pids+=($!)
+	done
+	((${#t0_pids[@]} == 0)) || wait "${t0_pids[@]}" || true
+	if ((SRC_NOTDRAINED == 0)); then
+		_t0w="$(gate_word "$GATE_DIR/source-t0")"
+		if [[ "$_t0w" != clean ]]; then
+			SRC_NOTDRAINED=1
+			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${SOURCE_CTX}: $(t0_check_text "$_t0w" "$SOURCE_ENVOY_PF_PORT") before t0: this iteration's P1 is NOT_DRAINED" >&2
+		fi
+	fi
+	for i in "${!REMOTES[@]}"; do
+		[[ "${RMT_NOTDRAINED[i]:-0}" == 1 ]] && continue
+		_t0w="$(gate_word "$GATE_DIR/remote-${i}-t0")"
+		if [[ "$_t0w" != clean ]]; then
+			RMT_NOTDRAINED[i]=1
+			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${REMOTES[i]}: $(t0_check_text "$_t0w" $(( BASE_ENVOY_PF_PORT + i ))) before t0: this iteration's P2/P3 for it are NOT_DRAINED" >&2
+		fi
+	done
 
 	# Concurrent baseline scrape across all istiods — now fanned out per-pod and
 	# aggregated (pilot_xds summed, pilot_services invariant, histograms
@@ -1425,33 +1464,6 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	SOURCE_START=$(kv_get "$BASELINE_DIR/source-kv" proc_start_sig)
 	SOURCE_PROXY_COUNT=$(normalize_proxy_count "$(kv_get "$BASELINE_DIR/source-kv" pilot_xds)")
 	echo "  Source connected proxies (summed across replicas): $SOURCE_PROXY_COUNT (scrape_skew=${SCRAPE_SKEW_MS}ms)"
-
-	# The last read before t0, on each side the drain check passed: a canary endpoint
-	# already healthy now (or a /clusters that cannot be read) makes that side NOT_DRAINED.
-	# It is all that runs between the baseline scrape and T0: one /clusters read per side,
-	# in parallel.
-	t0_pids=()
-	if ((SRC_NOTDRAINED == 0)); then t0_check "$GATE_DIR/source-t0" "$SOURCE_ENVOY_PF_PORT" & t0_pids+=($!); fi
-	for i in "${!REMOTES[@]}"; do
-		[[ "${RMT_NOTDRAINED[i]:-0}" == 1 ]] && continue
-		t0_check "$GATE_DIR/remote-${i}-t0" $(( BASE_ENVOY_PF_PORT + i )) & t0_pids+=($!)
-	done
-	((${#t0_pids[@]} == 0)) || wait "${t0_pids[@]}" || true
-	if ((SRC_NOTDRAINED == 0)); then
-		_t0w="$(gate_word "$GATE_DIR/source-t0")"
-		if [[ "$_t0w" != clean ]]; then
-			SRC_NOTDRAINED=1
-			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${SOURCE_CTX}: $(t0_check_text "$_t0w" "$SOURCE_ENVOY_PF_PORT") before t0: this iteration's P1 is NOT_DRAINED" >&2
-		fi
-	fi
-	for i in "${!REMOTES[@]}"; do
-		[[ "${RMT_NOTDRAINED[i]:-0}" == 1 ]] && continue
-		_t0w="$(gate_word "$GATE_DIR/remote-${i}-t0")"
-		if [[ "$_t0w" != clean ]]; then
-			RMT_NOTDRAINED[i]=1
-			echo "  Warning: iteration ${iter}/${ITERATIONS}: ${REMOTES[i]}: $(t0_check_text "$_t0w" $(( BASE_ENVOY_PF_PORT + i ))) before t0: this iteration's P2/P3 for it are NOT_DRAINED" >&2
-		fi
-	done
 
 	T0=$(now_ns)
 	echo "  Flipping backer active label on $SOURCE_CTX (pod $BACKER_POD)..."
@@ -1560,8 +1572,9 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		|| echo "  Warning: could not remove the ${CANARY_ACTIVE_LABEL_KEY} label from pod ${BACKER_POD} on ${SOURCE_CTX}" >&2
 
 	# Track per-iteration drain timeout so we can flag the row with
-	# status=DRAIN_TIMEOUT. Without this, the next iteration's baseline
-	# includes an un-drained canary endpoint, contaminating the data silently.
+	# status=DRAIN_TIMEOUT (its values still count). The next iteration then settles
+	# before its baseline, and its drain check makes a side NOT_DRAINED if the canary
+	# endpoint is still there, so a late removal never reaches its window unseen.
 	drain_timeout="0" src_drain_timeout="0"
 	for i in "${!REMOTES[@]}"; do RMT_DRAIN[i]=0; done
 	if ((iter < ITERATIONS)); then
@@ -1605,7 +1618,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		[[ "$p3" == "TIMEOUT" ]] && s="TIMEOUT_P3"
 		[[ "$p1" == "TIMEOUT" && "$p2" == "TIMEOUT" && "$p3" == "TIMEOUT" ]] && s="TIMEOUT_ALL"
 		[[ "$rst" == "1" ]] && s="RESTART"
-		# DRAIN_TIMEOUT supersedes only OK (data is suspect for downstream filtering).
+		# DRAIN_TIMEOUT supersedes only OK. A flag, not a drop: the values were measured
+		# before the drain, so the reports count them (tests/lib/propagation.sh).
 		if [[ "$drain" == "1" && "$s" == "OK" ]]; then
 			s="DRAIN_TIMEOUT"
 		fi
@@ -1750,7 +1764,8 @@ echo ""
 # iteration and decided before the row filter from its source-side columns
 # (prop_p1_sample), with the iterations it leaves out tallied by reason. Output lines:
 # "T total valid dropped", "S phase n min max avg" (min/max/avg "-" without a sample),
-# "D reason count" and "Q reason iterations".
+# "D reason count", "Q reason iterations" and "W iterations" (whose drain timed out on a
+# side: DRAIN_TIMEOUT, counted).
 SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
 	function acc(ph, v) {
 		n[ph]++; sum[ph] += v
@@ -1764,6 +1779,9 @@ SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AW
 			q = prop_p1_drop_reason(MAXSKEW)
 			if (q != "") p1_drop[q]++
 		}
+		if (($10 == "DRAIN_TIMEOUT" || $20 == "DRAIN_TIMEOUT" || $22 == "DRAIN_TIMEOUT") && !(($1 SUBSEP $3) in dt_seen)) {
+			dt_seen[$1 SUBSEP $3] = 1; dt_iters++
+		}
 		if (prop_p1_sample(MAXSKEW)) acc("P1", $7 + 0)
 		r = prop_drop_reason(MAXSKEW)
 		if (r != "") { dropped++; drop[r]++; next }
@@ -1774,6 +1792,7 @@ SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AW
 	END {
 		printf "T\t%d\t%d\t%d\n", total, valid, dropped
 		printf "I\t%d\n", iters
+		printf "W\t%d\n", dt_iters
 		split("P1 P2 P3", ph, " ")
 		for (i = 1; i <= 3; i++) {
 			p = ph[i]
@@ -1783,13 +1802,14 @@ SUMMARY_KV="$(awk -F'\t' -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AW
 		for (r in drop) printf "D\t%s\t%d\n", r, drop[r]
 		for (q in p1_drop) printf "Q\t%s\t%d\n", q, p1_drop[q]
 	}' "$ROWS_FILE" | sort)"
-ROWS_TOTAL=0 ROWS_VALID=0 DROPPED_TOTAL=0 ITERS_TOTAL=0
+ROWS_TOTAL=0 ROWS_VALID=0 DROPPED_TOTAL=0 ITERS_TOTAL=0 DRAIN_TIMEOUT_ITERS=0
 declare -A PH_N=() PH_MIN=() PH_MAX=() PH_AVG=()
 DROP_REASONS=() P1_DROP_REASONS=()
 while IFS=$'\t' read -r kind a b c d e; do
 	case "$kind" in
 	T) ROWS_TOTAL="$a" ROWS_VALID="$b" DROPPED_TOTAL="$c" ;;
 	I) ITERS_TOTAL="$a" ;;
+	W) DRAIN_TIMEOUT_ITERS="$a" ;;
 	S) PH_N[$a]="$b" PH_MIN[$a]="$c" PH_MAX[$a]="$d" PH_AVG[$a]="$e" ;;
 	D) DROP_REASONS+=("${a}"$'\t'"${b}") ;;
 	Q) P1_DROP_REASONS+=("${a}"$'\t'"${b}") ;;
@@ -1822,6 +1842,12 @@ for r in ${DROP_REASONS[@]+"${DROP_REASONS[@]}"}; do
 done
 printf "  rows_dropped_skew=%d/%d (that side's baseline scrape skew > FANOUT_MAX_SKEW_MS=%s)\n" \
 	"$ROWS_DROPPED_SKEW" "$ROWS_TOTAL" "$FANOUT_MAX_SKEW_MS"
+# DRAIN_TIMEOUT_NOTE: the iterations whose drain timed out, counted (tests/lib/propagation.sh).
+DRAIN_TIMEOUT_NOTE=""
+if ((DRAIN_TIMEOUT_ITERS > 0)); then
+	DRAIN_TIMEOUT_NOTE="The drain after ${DRAIN_TIMEOUT_ITERS} of ${ITERS_TOTAL} iteration(s) timed out (DRAIN_TIMEOUT: a canary endpoint still healthy on a watcher PROPAGATION_DRAIN_TIMEOUT_SEC=${DRAIN_TIMEOUT_SEC}s after the label removal). Their values count: they were measured before that drain, and the next iteration settled before its baseline. A removal that slow points at a slow push path."
+	echo "  ${DRAIN_TIMEOUT_NOTE}"
+fi
 # P1 is left out only for its source side (p1_status, p1 overflow, source skew).
 if ((${#P1_DROP_REASONS[@]})); then
 	echo "P1 iterations left out (source side only; a remote's failure keeps P1):"
@@ -1875,22 +1901,24 @@ md_cell -v _md_rmt "${REMOTES[*]:-none}"
 	echo "  pre-warmed backer pod, so P3 excludes pod boot / image pull / sidecar startup."
 	echo "- **Drain check:** before each iteration's baseline, every side's watcher must show no"
 	echo "  healthy canary endpoint (waited for up to ${DRAIN_TIMEOUT_SEC}s, then ${SETTLE_SEC}s settle), and"
-	echo "  again just before t0. A side that fails it is \`NOT_DRAINED\` for that iteration: its P3"
-	echo "  would read about 0 and a late removal push would shorten P2 or P1. After an iteration"
-	echo "  whose drain timed out, the next one settles before its baseline even when the check reads"
-	echo "  clean."
+	echo "  again after the backer's Ready wait (the t0 check, still before the baseline scrape). A side"
+	echo "  that fails it is \`NOT_DRAINED\` for that iteration: its P3 would read about 0 and a late"
+	echo "  removal push would shorten P2 or P1. After an iteration whose drain timed out"
+	echo "  (\`DRAIN_TIMEOUT\`, counted: it was measured before that drain), the next one settles before"
+	echo "  its baseline even when the check reads clean."
 	echo ""
 	echo "## Summary"
 	echo ""
 	echo "Averages over the rows the report (005) counts. P2 and P3 are measured on a remote, so only"
 	echo "that remote's side leaves them out: \`remote_status\` not OK (its istiod restarted or unknown, a"
-	echo "P2 or P3 timeout, its sidecar's drain, a canary not drained before t0, its scrape incomplete)"
-	echo "or its baseline scrape skew over FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}, never the source's"
-	echo "restart, P1 timeout or \`+Inf\` overflow."
-	echo "P2 also leaves out a dirty sample (\`p2_dirty=1\`). n is valid samples / rows; for P1, valid samples /"
-	echo "iterations: P1 is measured on the source once per iteration and repeated on every remote's row, so"
-	echo "only the source side leaves it out (\`p1_status\` not OK, a P1 \`+Inf\` overflow, or a source scrape skew"
-	echo "over FANOUT_MAX_SKEW_MS), never a remote that timed out or restarted."
+	echo "P2 or P3 timeout, a canary not drained before t0, its scrape incomplete) or its baseline scrape"
+	echo "skew over FANOUT_MAX_SKEW_MS=${FANOUT_MAX_SKEW_MS}, never the source's restart, P1 timeout or"
+	echo "\`+Inf\` overflow. A \`DRAIN_TIMEOUT\` side (its drain after the window timed out) counts: it was"
+	echo "measured before that drain. P2 also leaves out a dirty sample (\`p2_dirty=1\`). n is valid"
+	echo "samples / rows; for P1, valid samples / iterations: P1 is measured on the source once per"
+	echo "iteration and repeated on every remote's row, so only the source side leaves it out"
+	echo "(\`p1_status\` not OK, a P1 \`+Inf\` overflow, or a source scrape skew over FANOUT_MAX_SKEW_MS),"
+	echo "never a remote that timed out or restarted."
 	echo ""
 	echo "| Phase | n (valid / attempted) | min (ms) | max (ms) | avg (ms) |"
 	echo "|-------|-----------------------|----------|----------|----------|"
@@ -1908,6 +1936,10 @@ md_cell -v _md_rmt "${REMOTES[*]:-none}"
 		done
 	else
 		echo "No rows left out (0 of ${ROWS_TOTAL})."
+	fi
+	if [[ -n "$DRAIN_TIMEOUT_NOTE" ]]; then
+		echo ""
+		echo "$DRAIN_TIMEOUT_NOTE"
 	fi
 	if ((${#P1_DROP_REASONS[@]})); then
 		echo ""

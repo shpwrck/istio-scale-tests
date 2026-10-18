@@ -245,15 +245,20 @@ Other:
                               --namespace-counts, --sidecar-scopings,
                               --traffic-configs) takes the first run's value
                               from planned-cells.txt ("# PLAN=1"), not the
-                              environment, --config or default; the run prints
-                              the values it took, and its banner the axis flags
-                              it runs with. A cell no earlier run of the sweep
-                              planned is refused (nothing runs) unless
-                              --extend-plan. Scalars recorded once in the TSV
-                              preamble (VSDR_EVERY and VSDR_SUBSETS when the run
-                              includes vsdr, PROXY_CHECK_*) are taken from it; a
-                              conflicting --vsdr-every/--vsdr-subsets flag is
-                              refused. Not valid with --output-dir or --dry-run.
+                              environment, --config or default (a sweep dir an
+                              older harness started, without the file or with
+                              PLANNED_SET=partial: from the TSV's "# Contexts:
+                              ... Mesh sizes: ..." line; with neither, a resume
+                              that gives no axis flag is refused); the run
+                              prints the values it took, and its banner the
+                              axis flags it runs with. A cell no earlier run
+                              of the sweep planned is refused (nothing runs)
+                              unless --extend-plan. Scalars recorded once in
+                              the TSV preamble (VSDR_EVERY and VSDR_SUBSETS when
+                              the run includes vsdr, PROXY_CHECK_*) are taken
+                              from it; a conflicting --vsdr-every/--vsdr-subsets
+                              flag is refused. Not valid with --output-dir or
+                              --dry-run.
                               Refused while another run of the sweep still runs
                               in the dir (.sweep.lock holds its PID). A sweep
                               started with --config resumes only with the same
@@ -278,15 +283,25 @@ Other:
                               IstioRevision changed under it, or the
                               end-of-sweep version check failed; not that the
                               cells could not be counted, which every run
-                              redoes). Before its first cell, a resume (as a
-                              first run) deletes the controlplane-test
-                              namespaces a run cut short left on the members
-                              and on the mesh members their remote secrets
-                              name (005-cleanup.sh), then waits --settle, so no
-                              cell runs on another's leftovers or inside their
-                              deletion's pushes. An earlier run's notes about
+                              redoes, nor that the harness changed during the
+                              sweep: the resume carries that PROBLEM into its
+                              own outcome, which keeps it, exit 4). Before its
+                              first cell, a resume (as a first run) counts the
+                              controlplane-test namespaces a run cut short left
+                              on the --contexts members and on the other mesh
+                              members their remote secrets name, deletes those
+                              on the --contexts members (005-cleanup.sh), then
+                              waits --settle, so no cell runs on another's
+                              leftovers or inside their deletion's pushes; it
+                              deletes nothing on the other members: when they
+                              hold some, it stops first and prints the 005
+                              command for them. An earlier run's notes about
                               the end of the sweep are carried into the new
-                              outcome, once. The TSV keeps the first run's
+                              outcome, once. A resume that passes its checks
+                              marks the sweep's markdown pages (sweep-,
+                              sweep-charts- and scale-envelope-<RUN_ID>.md) as
+                              made before it, until it writes them again at
+                              its end. The TSV keeps the first run's
                               ISTIO_NOTREADY_AT_START (the outcome repeats it as
                               a note) and HARNESS_SHA; the resume records its
                               own readiness, with its start time, in a note of
@@ -333,15 +348,18 @@ Exit codes:
      instead of a measurement: SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED,
      or INTERRUPTED, the cell a run that stopped or was interrupted was in, unless every
      member's rows were written; or a legacy cell whose rows cover fewer members than
-     its mesh size, or a member with fewer rows than its istiod replicas, INCOMPLETE: cut
-     short while its rows were written; stderr ends with "N of M cells failed" by
+     its mesh size, or a member with fewer rows than its window's WINDOW_ROWS line names
+     (in rows an older harness wrote one by one: than its istiod replicas), INCOMPLETE:
+     cut short while its rows were written; stderr ends with "N of M cells failed" by
      reason), or the Istio version or active revision changed during the sweep (read
      again at its end), or the generation of a member's Istio CR or active
      IstioRevision went up at the same version (an edit of the Istio CR; or, the
      IstioRevision alone, an OSSM operator upgrade or a TLS security profile change),
      or that end-of-sweep version check failed, or the harness (a file under tests/,
      config/, charts/ or terraform/) changed during the sweep (HARNESS_SHA read again
-     before its steps and at its end), or the cells could not be counted. A cell
+     before its steps and at its end; 002 writes a "# HARNESS_CHANGED_AT=" line in the
+     TSV before rows that ran other harness files than the TSV records), or the cells
+     could not be counted. A cell
      counts once, by the last row of its latest attempt (a --resume runs a failed or
      INCOMPLETE cell again; the rows of its earlier attempts are left out): a status row
      fails it, with that reason; a measurement does not.
@@ -359,8 +377,15 @@ Exit codes:
      A signal sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches
      the step that runs (001, 002, 005) and every process under it at once; any still
      running SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after
-     them. Only a settle wait finishes first. While a run goes on, the sweep dir holds
-     its lock (.sweep.lock, its PID): another --resume of it is refused.
+     them. For a sweep in a terminal's foreground, a kill -INT or -HUP skips the
+     processes in that foreground (a Ctrl-C reaches them itself): they get SIGKILL with
+     no cleanup, so stop such a sweep from elsewhere with SIGTERM. The sweep's own
+     commands between steps (a settle wait, the leftover counts, the Istio version and
+     proxy reads, the end-of-sweep recheck) finish first, each bounded. Stopping the
+     step's tree needs a ps that lists start times (procps, or macOS's): without one, the
+     sweep warns at its start, and a stop reaches only the step's own process. While a
+     run goes on, the sweep dir holds its lock (.sweep.lock, its PID): another --resume
+     of it is refused.
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -409,7 +434,7 @@ Environment:
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
-  step); SWEEP_STOP_GRACE_SEC (10): how long a signalled sweep waits for its step's
+  step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
   are read at once. Environment only (config/options.env), as
   CONTROLPLANE_EXTEND_PLAN (--extend-plan).
@@ -626,12 +651,41 @@ fi
 # A --resume finishes the sweep it resumes: each axis flag not given takes the first run's
 # value from planned-cells.txt's "# PLAN=1" line (the environment, --config or the default
 # may plan other cells), and the run prints the ones it took. A sweep without the file, or
-# whose file an older harness's sweep started (PLANNED_SET=partial: its PLAN=1 is a resume's,
-# not the first run's), keeps the environment, --config and default values.
+# whose file an older harness's sweep started (PLANNED_SET=partial: its PLAN=1 is a
+# resume's, not the first run's), takes them from its TSV's "# Contexts: ... Mesh sizes:
+# ... Services: ..." line, which every harness's first run writes; with neither, a resume
+# that gives no axis flag is refused (it would run the environment's cells).
 RESUME_PLAN1_TOOK=""
-if [[ -n "$RESUME_DIR" && -f "${RESUME_DIR%/}/planned-cells.txt" ]]; then
-	_rp1="$(awk 'index($0, "# PLANNED_SET=partial") == 1 { exit } index($0, "# PLAN=1 ") == 1 { p = index($0, ": --"); if (p) print substr($0, p + 2); exit }' "${RESUME_DIR%/}/planned-cells.txt" 2>/dev/null)" \
-		|| die "--resume: could not read ${RESUME_DIR%/}/planned-cells.txt, which names the cells this sweep planned; nothing was run."
+if [[ -n "$RESUME_DIR" ]]; then
+	_rp1="" _rp1_src='planned-cells.txt "# PLAN=1"'
+	if [[ -f "${RESUME_DIR%/}/planned-cells.txt" ]]; then
+		_rp1="$(awk 'index($0, "# PLANNED_SET=partial") == 1 { exit } index($0, "# PLAN=1 ") == 1 { p = index($0, ": --"); if (p) print substr($0, p + 2); exit }' "${RESUME_DIR%/}/planned-cells.txt" 2>/dev/null)" \
+			|| die "--resume: could not read ${RESUME_DIR%/}/planned-cells.txt, which names the cells this sweep planned; nothing was run."
+	fi
+	if [[ -z "$_rp1" ]]; then
+		_rp1_src='the TSV'"'"'s "# Contexts:" line: an older harness started this sweep without planned-cells.txt'
+		_rp1_tsv="$(find -H "${RESUME_DIR%/}" -maxdepth 1 -name 'controlplane-*.tsv' -type f 2>/dev/null | sort | head -1)" || _rp1_tsv=""
+		[[ -z "$_rp1_tsv" ]] || _rp1="$(awk '
+			/^timestamp\t/ { exit }
+			index($0, "# Contexts: ") == 1 {
+				n = split(substr($0, 13), part, /  +/)
+				fl["Mesh sizes"] = "--mesh-sizes"; fl["Services"] = "--service-counts"; fl["Replicas"] = "--replica-counts"
+				fl["Namespaces"] = "--namespace-counts"; fl["Scopings"] = "--sidecar-scopings"; fl["Traffic"] = "--traffic-configs"
+				for (i = 2; i <= n; i++) {
+					if (!(q = index(part[i], ": "))) continue
+					l = substr(part[i], 1, q - 1); v = substr(part[i], q + 2)
+					gsub(/ +/, ",", v)
+					if ((l in fl) && v != "") out = out (out == "" ? "" : " ") fl[l] " " v
+				}
+				print out
+				exit
+			}' "$_rp1_tsv" 2>/dev/null)" || _rp1=""
+	fi
+	# Refused below, once the dir is known to be a sweep dir (the checks of --resume first).
+	_rp1_none=0
+	if [[ -z "$_rp1" ]] && ! ((MESH_SIZES_FLAG || SERVICE_COUNTS_FLAG || REPLICA_COUNTS_FLAG || NAMESPACE_COUNTS_FLAG || SIDECAR_SCOPINGS_FLAG || TRAFFIC_CONFIGS_FLAG)); then
+		_rp1_none=1
+	fi
 	_rp1w=()
 	read -r -a _rp1w <<<"$_rp1" || true
 	for ((_rp_i = 0; _rp_i + 1 < ${#_rp1w[@]}; _rp_i += 2)); do
@@ -649,7 +703,7 @@ if [[ -n "$RESUME_DIR" && -f "${RESUME_DIR%/}/planned-cells.txt" ]]; then
 		RESUME_PLAN1_TOOK+="${RESUME_PLAN1_TOOK:+ }${_rp1w[_rp_i]} ${_rp1w[_rp_i + 1]}"
 	done
 	[[ -z "$RESUME_PLAN1_TOOK" ]] \
-		|| echo "note: --resume: the axis flags not given take the first run's values (planned-cells.txt \"# PLAN=1\"): ${RESUME_PLAN1_TOOK}" >&2
+		|| echo "note: --resume: the axis flags not given take the first run's values (${_rp1_src}): ${RESUME_PLAN1_TOOK}" >&2
 fi
 
 CONTEXTS=()
@@ -875,6 +929,8 @@ if [[ -n "$RESUME_DIR" ]]; then
 		RUN_ID="$(basename "$OUTPUT_DIR")"; RUN_ID="${RUN_ID#sweep-}"
 	fi
 	[[ -n "$RUN_ID" ]] || die "--resume: could not recover RUN_ID from $RESUME_DIR (no controlplane-*.tsv and dir is not sweep-<RUN_ID>)"
+	((${_rp1_none:-0} == 0)) \
+		|| die "--resume: ${RESUME_DIR} records none of its first run's axis values (no planned-cells.txt from its first run, no \"# Contexts:\" line in a controlplane-*.tsv), so a --resume without axis flags would run the environment's, --config's or default cells; nothing was run. Give the axis flags the sweep ran with (--mesh-sizes, --service-counts, --replica-counts, --namespace-counts, --sidecar-scopings, --traffic-configs)."
 	# One run per sweep dir: a --resume while the run it resumes (or another resume) still
 	# runs there is refused here, before it reads or moves anything in the dir (sweep_lock;
 	# a first run takes the lock in sweep_outcome_start). --release-on-exit: until the
@@ -914,9 +970,9 @@ combo_already_done() {
 # keyed as combo_already_done keys a cell, each run's below a "# PLAN=<n> <who>: <axis
 # flags>" line, and the TSV it applies to ("# TSV=controlplane-<RUN_ID>.tsv"). The first run
 # writes it before its first cell; each --resume adds the cells of its matrix not listed yet
-# (a cell no earlier run planned only with --extend-plan). A sweep an older harness started has none: a resume
-# then starts it with "# PLANNED_SET=partial" (the first run's plan is not known), and every
-# outcome after says so.
+# (a cell no earlier run planned only with --extend-plan). A sweep an older harness started
+# has none: a resume then starts it with "# PLANNED_SET=partial" (the first run's plan is
+# not known), and every outcome after says so.
 PLANNED_FILE="${OUTPUT_DIR}/planned-cells.txt"
 PLANNED_PARTIAL=0
 # planned_axis_flags: this run's axis flags, as a --resume repeats them.
@@ -964,7 +1020,8 @@ planned_cells_record() {
 			# planned-cells line, not a TSV preamble key.
 			printf '# TSV=controlplane-%s.tsv\n' "$RUN_ID"
 			if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" ]]; then
-				# printf: a planned-cells line, not a TSV preamble key (the PL36 key-set lint greps echo).
+				# printf: a planned-cells line, not a TSV preamble key (the PL36 key-set lint
+				# greps echo).
 				printf '%s\n' "# PLANNED_SET=partial: an older harness started this sweep without this file, so the cells its first run planned are not known"
 			fi
 			printf 'mesh_size\tservice_count\treplicas\tnamespace_count\tsidecar_scoping\ttraffic_config\twindow_kind\n'
@@ -1116,6 +1173,7 @@ precreate_tsv_preamble() {
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY:-unknown}"
 		echo "# KUBE_VERSIONS=${kver}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
@@ -1413,7 +1471,7 @@ guard_add_mesh_members() {
 LEFTOVER_AT_START="n/a"
 leftover_preflight() {
 	if ((DRY_RUN)); then
-		((GROWTH)) || echo "Leftover check: a live run counts the controlplane-test namespaces on the members (and on the mesh members their Istio remote secrets name), deletes any an earlier run left through 005-cleanup.sh before the first cell, then waits --settle (${SETTLE_SEC}s) before it; a dry run reads no cluster." >&2
+		((GROWTH)) || echo "Leftover check: a live run counts the controlplane-test namespaces on the members (and on the mesh members their Istio remote secrets name), deletes those an earlier run left on the --contexts members through 005-cleanup.sh before the first cell, then waits --settle (${SETTLE_SEC}s) before it; it deletes nothing on the other mesh members, and stops first when they hold some; a dry run reads no cluster." >&2
 		return 0
 	fi
 	((${#KUBECTL[@]})) || return 0
@@ -1473,16 +1531,20 @@ leftover_counts() {
 # size) and the other mesh members their Istio remote secrets name that have a kube context
 # of that name (their Services reach every member's istiod through remote discovery,
 # multi-primary); a member without one is named in a warning. Every count runs on all of
-# them at once. LEFTOVER_AT_START records the counts (and that 005 deleted them), for a
-# first run's preamble; the outcome says so too (INFO). When it deleted anything, the first
-# cell waits SETTLE_SEC first, as after every cell's cleanup (LEFTOVER_DELETED): its
-# baseline must not land inside the deletion's push storm.
+# them at once. It deletes only on members the operator named (--contexts): leftovers on
+# another mesh member stop the sweep before any change, with the 005 command for them.
+# LEFTOVER_AT_START records the counts (and that 005 deleted them), for a first run's
+# preamble; the outcome says so too (INFO). When it deleted anything, the first cell waits
+# SETTLE_SEC first, as after every cell's cleanup (LEFTOVER_DELETED): its baseline must not
+# land inside the deletion's push storm.
 LEFTOVER_DELETED=0
 legacy_leftover_preflight() {
 	local ctx total m members found="" found_kv="" unread="" csv max=0 sized
-	local -a lp_members=("${CONTEXTS[@]:0:${MAX_MESH_SIZE}}") lp_nokube=()
-	local -A lp_have=() lp_known=()
+	local -a lp_members=("${CONTEXTS[@]:0:${MAX_MESH_SIZE}}") lp_nokube=() lp_del=() lp_other=()
+	local -A lp_have=() lp_known=() lp_given=()
+	local other="" omax=0
 	for ctx in "${lp_members[@]}"; do lp_have[$ctx]=1; done
+	for ctx in "${CONTEXTS[@]}"; do lp_given[$ctx]=1; done
 	while IFS= read -r ctx; do [[ -z "$ctx" ]] || lp_known[$ctx]=1; done < <("${KUBECTL[@]}" config get-contexts -o name 2>/dev/null || true)
 	# The mesh members the measured ones' remote secrets name, read on all of them at once.
 	local i=0 pid
@@ -1507,19 +1569,29 @@ legacy_leftover_preflight() {
 	while IFS=$'\t' read -r ctx total; do
 		if ! [[ "$total" =~ ^[0-9]+$ ]]; then
 			unread="${unread:+${unread}, }${ctx}"
+		elif ((total > 0)) && [[ -z "${lp_given[$ctx]:-}" ]]; then
+			other="${other:+${other}, }${ctx}: ${total}"
+			lp_other+=("$ctx")
+			if ((total > omax)); then omax="$total"; fi
 		elif ((total > 0)); then
 			found="${found:+${found}, }${ctx}: ${total}"
 			found_kv="${found_kv:+${found_kv},}${ctx}=${total}"
+			lp_del+=("$ctx")
 			if ((total > max)); then max="$total"; fi
 		fi
 	done < <(leftover_counts "${SWEEP_TMP}/leftover-1" "${lp_members[@]}")
+	# Not on a cluster the operator did not name: those stop the sweep, before any change.
+	if [[ -n "$other" ]]; then
+		sized="$(awk -v n="$omax" -v r="$NS_DELETE_SEC_PER_NS" -v d="${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}" 'BEGIN { t = int(n * r + 0.999); if (t < d + 0) t = d + 0; print t }')"
+		die "controlplane-test namespaces an earlier run left are on mesh members outside --contexts (${other}; named by the Istio remote secrets of the measured members): their Services reach every member's istiod, so a cell would measure on top of them. The sweep deletes leftovers only on the --contexts members, so nothing was deleted or measured. Delete these with: ${SCRIPT_DIR}/005-cleanup.sh --contexts $(IFS=,; echo "${lp_other[*]}") --timeout ${sized} (about ${NS_DELETE_SEC_PER_NS} s per namespace), then run this command again${found:+ (it then deletes those on the --contexts members: ${found})}."
+	fi
 	[[ -z "$unread" ]] || echo "warn: could not count the controlplane-test namespaces on ${unread}, so a cell there may run on top of an earlier run's leftovers; check with: kubectl --context <ctx> get namespaces -l app.kubernetes.io/instance=controlplane-test" >&2
 	if [[ -z "$found" ]]; then
 		LEFTOVER_AT_START="none"
 		[[ -z "$unread" ]] || LEFTOVER_AT_START="none counted (unread: ${unread// /})"
 		return 0
 	fi
-	csv="$(IFS=,; echo "${lp_members[*]}")"
+	csv="$(IFS=,; echo "${lp_del[*]}")"
 	# About 1 s per namespace (CONTROLPLANE_NS_DELETE_SEC_PER_NS), and never less than
 	# 005's own default: the members are cleaned at once, so the largest count sizes it.
 	sized="$(awk -v n="$max" -v r="$NS_DELETE_SEC_PER_NS" -v d="${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-300}" 'BEGIN { t = int(n * r + 0.999); if (t < d + 0) t = d + 0; print t }')"
@@ -1608,7 +1680,14 @@ if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/planned-cells.txt" ]] && ! ((GROWTH)
 		elif ((EXTEND_PLAN)); then
 			echo "note: --resume --extend-plan: this run adds ${_xp_n} cell(s) no earlier run of this sweep planned (${_xp_list}); planned-cells.txt records them as a new PLAN" >&2
 		else
-			die "--resume: this run's axis flags plan ${_xp_n} cell(s) no earlier run of this sweep planned (${_xp_list}). A --resume finishes the sweep it resumes; nothing was run. Resume with the planned axis flags (an axis flag not given takes the first run's), add --extend-plan to add these cells to this sweep (planned-cells.txt records them as a new PLAN), or start a new sweep for them. The plans so far: $(awk 'index($0, "# PLAN=") == 1 { l = substr($0, 8); sub(/ /, ", ", l); printf "%sPLAN %s", (n++ ? "; " : ""), l }' "${OUTPUT_DIR}/planned-cells.txt")"
+			# Each plan with the command that resumes with its axis flags (local paths: the
+			# console only).
+			_xp_cmds=""
+			while IFS= read -r _xp_l; do
+				[[ "$_xp_l" == *": --"* ]] || continue
+				_xp_cmds+=$'\n'"  PLAN ${_xp_l#"# PLAN="}"$'\n'"    $(resume_cmd_console "--${_xp_l#*: --}")"
+			done < <(grep '^# PLAN=' "${OUTPUT_DIR}/planned-cells.txt" 2>/dev/null)
+			die "--resume: this run's axis flags plan ${_xp_n} cell(s) no earlier run of this sweep planned (${_xp_list}). A --resume finishes the sweep it resumes; nothing was run. Resume with the planned axis flags (an axis flag not given takes the first run's), add --extend-plan to add these cells to this sweep (planned-cells.txt records them as a new PLAN), or start a new sweep for them. The plans so far, each with the command that resumes with its axis flags:${_xp_cmds}"
 		fi
 	fi
 fi
@@ -1649,14 +1728,23 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	case "/${_resume_iv#mixed:}/" in
 	*/unknown/*) die "--resume: this sweep recorded ISTIO_VERSION=${_resume_iv}: a member's version could not be read or confirmed when it started (unreadable, its Istio CR not settled, or an istiod rollout in progress), so the version its rows ran on is not known and it cannot be resumed. Start a new sweep once every member's Istio CR is settled and Healthy." ;;
 	esac
-	# Nor a sweep whose outcome recorded a problem (every PROBLEM is the Istio version
-	# or active revision changing under it, or the end-of-sweep check failing): its rows
-	# are not all from one version, or that is not known, so no later read can vouch for
-	# them, and a resume would write an outcome without it (.prev too: a resume that died).
-	# A cell count that failed is not one: every run counts again from the TSV.
+	# Nor a sweep whose outcome recorded a problem with the mesh (the Istio version, the
+	# active revision or the generation of the Istio CR or its IstioRevision changing under
+	# it, or the end-of-sweep check failing): its rows are not all from one configuration,
+	# or that is not known, so no later read can vouch for them (.prev too: a resume that
+	# died). Two PROBLEMs do not stop it: a cell count that failed (every run counts again
+	# from the TSV), and the harness changing during the sweep (_harness_sha_sweep_end's
+	# "the harness changed during the sweep", or an earlier resume's carried copy of it):
+	# the TSV marks the rows of the changed harness (HARNESS_CHANGED_AT, every report reads
+	# it), and the resume carries the PROBLEM into its own outcome (below).
 	for _resume_rec in sweep-outcome.txt sweep-outcome.prev.txt; do
 		[[ -f "${OUTPUT_DIR}/${_resume_rec}" ]] || continue
-		_resume_problem="$(awk -v c="PROBLEM=could not count the sweep's " '/^PROBLEM=/ && index($0, c) != 1 { print substr($0, 9); exit }' "${OUTPUT_DIR}/${_resume_rec}")"
+		_resume_problem="$(awk -v c="PROBLEM=could not count the sweep's " -v h="the harness changed during the sweep" -v e="an earlier run of this sweep (" '
+			/^PROBLEM=/ {
+				p = substr($0, 9)
+				if (index($0, c) == 1 || index(p, h) == 1 || (index(p, e) == 1 && index(p, ") recorded: " h))) next
+				print p; exit
+			}' "${OUTPUT_DIR}/${_resume_rec}")"
 		[[ -z "$_resume_problem" ]] || die "--resume: this sweep's ${_resume_rec} records a problem (${_resume_problem}), so no later run can vouch for its rows, and a resume would write an outcome without it. Start a new sweep."
 	done
 	# Nor on other members than it started on: a renamed or other context would be
@@ -1883,6 +1971,11 @@ if [[ -n "$RESUME_DIR" && -f "$PLANNED_FILE" ]] && ! ((GROWTH || DRY_RUN)); then
 	fi
 	unset _np_matrix
 fi
+# The cleanup to run when SIGKILL cut a step's own cleanup short (sweep_step's warning;
+# console only, a local path).
+# shellcheck disable=SC2034  # read by sweep_step (tests/lib/common.sh)
+SWEEP_CLEANUP_CMD="$(printf '%q' "${SCRIPT_DIR}/005-cleanup.sh") --contexts $(IFS=,; echo "${CONTEXTS[*]}")"
+((GROWTH)) || SWEEP_CLEANUP_CMD+="; a --resume of this sweep also deletes the namespaces before its first cell"
 capacity_plan_warn
 guard_add_mesh_members
 leftover_preflight
@@ -1919,13 +2012,36 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 		/^# DATE=/ { d = substr($0, 8) }
 		/^NOTE=/ {
 			n = substr($0, 6)
-			if (index(n, p) == 1) { print n; next }
+			if (index(n, p) == 1) { print "N" n; next }
 			if (index(n, "the Istio version at the end of the sweep is unconfirmed: ") == 1 \
 				|| index(n, "istiod or IstioCNI was not ready at the end of the sweep") == 1 \
 				|| index(n, "not ready at the end: ") == 1)
-				print p (d == "" ? "an unknown date" : d) ") noted: " n
+				print "N" p (d == "" ? "an unknown date" : d) ") noted: " n
+		}
+		# A harness change during the sweep stays a PROBLEM in every later outcome (exit 4):
+		# rows of the changed harness may still be among the figures.
+		/^PROBLEM=/ {
+			n = substr($0, 9)
+			if (index(n, "an earlier run of this sweep (") == 1 && index(n, ") recorded: the harness changed during the sweep")) print "P" n
+			else if (index(n, "the harness changed during the sweep") == 1) print "P" p (d == "" ? "an unknown date" : d) ") recorded: " n
 		}' "$_resume_rec")
-	for _resume_n in ${_resume_carry[@]+"${_resume_carry[@]}"}; do RESUME_NOTES+=(--note "$_resume_n"); done
+	# A run that died, was interrupted or stopped after a harness change recorded it in its
+	# not-finished or stop record (a NOTE or PROBLEM), which this run replaces: carried too.
+	if [[ "$_resume_rec" != "${OUTPUT_DIR}/sweep-outcome.txt" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]]; then
+		mapfile -t -O "${#_resume_carry[@]}" _resume_carry < <(awk -v p="an earlier run of this sweep (" '
+			/^STARTED_AT=/ { d = substr($0, 12) }
+			/^(NOTE|PROBLEM)=the harness changed during the sweep/ { n[++k] = substr($0, index($0, "=") + 1) }
+			END { for (i = 1; i <= k; i++) print "P" p "started at " (d == "" ? "an unknown time" : d) ", not finished) recorded: " n[i] }' "${OUTPUT_DIR}/sweep-outcome.txt")
+	fi
+	_resume_seen=()
+	for _resume_n in ${_resume_carry[@]+"${_resume_carry[@]}"}; do
+		for _resume_s in ${_resume_seen[@]+"${_resume_seen[@]}"}; do [[ "$_resume_s" != "$_resume_n" ]] || continue 2; done
+		_resume_seen+=("$_resume_n")
+		case "$_resume_n" in
+		P*) RESUME_NOTES+=(--problem "${_resume_n#P}") ;;
+		*) RESUME_NOTES+=(--note "${_resume_n#N}") ;;
+		esac
+	done
 fi
 # A resumed sweep writes a new outcome at its end; the interrupted run's record (when it got
 # that far) no longer describes the sweep, and its reports must not show it meanwhile. It is
@@ -1939,6 +2055,29 @@ if [[ -n "$RESUME_DIR" && -f "${OUTPUT_DIR}/sweep-outcome.txt" ]] && ! ((DRY_RUN
 	&& ! sweep_outcome_cut_short "${OUTPUT_DIR}/sweep-outcome.txt"; then
 	mv -f "${OUTPUT_DIR}/sweep-outcome.txt" "${OUTPUT_DIR}/sweep-outcome.prev.txt"
 fi
+# The sweep's markdown pages (sweep-, sweep-charts- and scale-envelope-<RUN_ID>.md) show the
+# sweep before this resume: until the resume writes them again at its end, each says so in
+# place of its outcome section (a "not written yet" line with SWEEP_OUTCOME_PENDING_MARK,
+# which sweep_outcome --md replaces), so a page left by a resume that died, was
+# interrupted or stopped is not read as a finished sweep on one harness.
+if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
+	for _resume_page in sweep sweep-charts scale-envelope; do
+		_resume_page="${OUTPUT_DIR}/${_resume_page}-${RUN_ID}.md"
+		[[ -f "$_resume_page" ]] || continue
+		if ! {
+			awk -v m="$SWEEP_OUTCOME_PENDING_MARK" '
+				index($0, m) { skip = 1; next }
+				skip && $0 == "" { skip = 0; next }
+				$0 == "## Sweep outcome" || $0 == "## Sweep outcome: stopped" { exit }
+				{ skip = 0; l[++n] = $0 }
+				END { while (n > 0 && l[n] == "") n--; for (i = 1; i <= n; i++) print l[i] }' "$_resume_page"
+			printf '\n%s\n' "> **Sweep outcome**: not written yet: a --resume of this sweep started at ${RESUME_AT%+00:00}Z, and this page is from before it (its figures, provenance and outcome). The resume writes it again at its end; a page that still shows this line is from a resume that did not finish (it died, was interrupted or stopped): its sweep-outcome.txt says how it ended, and the next --resume writes the page again. ${SWEEP_OUTCOME_PENDING_MARK}"
+		} > "${_resume_page}.new" || ! mv -f "${_resume_page}.new" "$_resume_page"; then
+			rm -f "${_resume_page}.new"
+			echo "warning: could not mark ${_resume_page} as made before this --resume" >&2
+		fi
+	done
+fi
 # The TSV preamble names the harness the sweep started on, and each resume appends
 # rows from its own. resumes.txt in the sweep dir is append-only: one line per resume that
 # passed its preflights (this one, and one that dies later, included), with its start time
@@ -1948,23 +2087,25 @@ fi
 # the rows of its attempts begin (controlplane_latest_attempts; a file an older harness
 # started keeps its columns, and its rows are told apart by RESUMED_AT). Then the proxy
 # versions and generations this resume read at its start (ISTIO_PROXY_VERSIONS,
-# ISTIO_GENERATIONS: the TSV preamble keeps the first run's) and the TSV the line is about
-# (TSV: a resumes.txt applies only to its TSV). Columns are only ever added at the end; a
-# file keeps the columns its first line names. The resume also writes a "# RESUMED_AT=<time>
-# TSV_LINES=<n> HARNESS_SHA=<sha> KUBE_VERSIONS=<ctx=ver,...>" line into the TSV itself, where
-# its rows begin, so a TSV copied without resumes.txt still keeps its attempts apart and
-# names each attempt's harness and Kubernetes versions (KUBE_VERSIONS last: the rest of the
-# line). From that file the outcome
-# notes every earlier resume that
-# started with a member not ready (this one's is the version recheck's note), and the
-# harness segments: a note per resume whose harness differs from the run before it (the
-# first run's is the preamble's), with the time from which the rows are that harness's,
-# and until when when a later resume changed it again. unknown cannot be compared: each
-# resume that ran it gets a note of its own. This resume also warns when it runs unknown,
-# or a harness other than the last known one before it.
+# ISTIO_GENERATIONS: the TSV preamble keeps the first run's), the TSV the line is about
+# (TSV: a resumes.txt applies only to its TSV) and its HARNESS_CONTENT_KEY. Columns are only
+# ever added at the end; a file keeps the columns its first line names. The resume also
+# writes a "# RESUMED_AT=<time> TSV_LINES=<n> HARNESS_SHA=<sha> HARNESS_CONTENT_KEY=<key>
+# ISTIO_NOTREADY_AT_RESUME=<...> ISTIO_GENERATIONS=<...> ISTIO_PROXY_VERSIONS=<...>
+# KUBE_VERSIONS=<ctx=ver,...>" line into the TSV itself, where its rows begin, so a TSV
+# copied without resumes.txt still keeps its attempts apart and names each attempt's
+# harness, Istio reads and Kubernetes versions (KUBE_VERSIONS last: the rest of the line;
+# 002 compares its harness with this line's). From that file the outcome notes every
+# earlier resume that started with a member not ready (this one's is the version recheck's
+# note), and the harness segments: a note per resume whose harness files differ from the
+# run before it (another HARNESS_CONTENT_KEY; another HARNESS_SHA when a key is not
+# recorded), with the time from which the rows are that harness's, and until when when a
+# later resume changed it again. unknown cannot be compared: each resume that ran it gets
+# a note of its own. This resume also warns when it runs unknown, or a harness other than
+# the last known one before it.
 if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	_resumes_log="${OUTPUT_DIR}/resumes.txt"
-	[[ -s "$_resumes_log" ]] || printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\n' >> "$_resumes_log"
+	[[ -s "$_resumes_log" ]] || printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\tHARNESS_CONTENT_KEY\n' >> "$_resumes_log"
 	# A TSV without its header line holds no row yet, and precreate_tsv_preamble writes it
 	# again: every row of it is this run's (0).
 	_resume_lines=0
@@ -1975,7 +2116,7 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	_resume_hdr="$(head -n 1 "$_resumes_log")"
 	# Each column the file's first line names, in its order (a file an older harness
 	# started keeps its columns: only the ones it has are filled).
-	for _resume_col in KUBE_VERSIONS TSV_LINES ISTIO_PROXY_VERSIONS ISTIO_GENERATIONS TSV; do
+	for _resume_col in KUBE_VERSIONS TSV_LINES ISTIO_PROXY_VERSIONS ISTIO_GENERATIONS TSV HARNESS_CONTENT_KEY; do
 		[[ $'\t'"${_resume_hdr}"$'\t' == *$'\t'"${_resume_col}"$'\t'* ]] || break
 		case "$_resume_col" in
 		KUBE_VERSIONS) _resume_line+=$'\t'"${_resume_kv}" ;;
@@ -1983,6 +2124,7 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 		ISTIO_PROXY_VERSIONS) _resume_line+=$'\t'"${ISTIO_PROXY_VERSIONS:-unchecked}" ;;
 		ISTIO_GENERATIONS) _resume_line+=$'\t'"${ISTIO_GENERATIONS:-unchecked}" ;;
 		TSV) _resume_line+=$'\t'"${_resume_tsv##*/}" ;;
+		HARNESS_CONTENT_KEY) _resume_line+=$'\t'"${HARNESS_CONTENT_KEY:-unknown}" ;;
 		esac
 	done
 	# The reports tell this run's rows from earlier attempts by these two lines: without
@@ -1991,14 +2133,18 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	# boundary line, not a preamble key.
 	printf '%s\n' "$_resume_line" >> "$_resumes_log" \
 		|| die "--resume: could not append to ${_resumes_log}, which tells this run's rows from earlier ones; nothing was changed. Fix the sweep dir (permissions, disk space), then run the same --resume again."
-	((_resume_lines == 0)) || printf '# RESUMED_AT=%s TSV_LINES=%s HARNESS_SHA=%s KUBE_VERSIONS=%s\n' "$RESUME_AT" "$_resume_lines" "$HARNESS_SHA" "$_resume_kv" >> "$_resume_tsv" \
+	((_resume_lines == 0)) || printf '# RESUMED_AT=%s TSV_LINES=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s ISTIO_NOTREADY_AT_RESUME=%s ISTIO_GENERATIONS=%s ISTIO_PROXY_VERSIONS=%s KUBE_VERSIONS=%s\n' \
+		"$RESUME_AT" "$_resume_lines" "$HARNESS_SHA" "${HARNESS_CONTENT_KEY:-unknown}" "${ISTIO_NOTREADY_AT_START:-unchecked}" \
+		"${ISTIO_GENERATIONS:-unchecked}" "${ISTIO_PROXY_VERSIONS:-unchecked}" "$_resume_kv" >> "$_resume_tsv" \
 		|| die "--resume: could not append the resume's start line to ${_resume_tsv}, which tells this run's rows from earlier ones; nothing was changed on the cluster. Fix the sweep dir (permissions, disk space), then run the same --resume again."
 	_resume_harness="$(awk -v k="# HARNESS_SHA=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
+	_resume_hkey0="$(awk -v k="# HARNESS_CONTENT_KEY=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 	_resume_kv0="$(awk -v k="# KUBE_VERSIONS=" '/^timestamp\t/ { exit } index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$_resume_tsv")"
 	# One line each, fields split by \037 (a tab is IFS whitespace: read would merge the
 	# empty ones): R at notready until (an earlier resume not ready), U at until (a resume
 	# on an unknown harness), C at new old old_at until (a change; old_at: the last run on
-	# old, empty: the first run), K at diffs (a resume that read other Kubernetes
+	# old, empty: the first run), D at new old key (another HARNESS_SHA on the same harness
+	# files: git describe only), K at diffs (a resume that read other Kubernetes
 	# server versions than the last known ones, from the preamble then each resume before
 	# it, members unreachable or unknown left out; grouped by old and new), W old
 	# old_at gap (this resume differs from the last known harness; gap 1: an unknown one ran
@@ -2007,15 +2153,23 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 	# rows' versions are not known from there); a member read again after such a resume, on
 	# another version than the first run's, is a K of its own.
 	# An earlier resume that added no rows (controlplane_attempts: every cell of its flags
-	# was done, or it stopped first) measured nothing: it is left out of these notes, as the
-	# reports leave it out of the rows' provenance. This one's rows are not known yet.
+	# was done, or it stopped first; its rows after a harness change included) measured
+	# nothing: it is left out of these notes, as the reports leave it out of the rows'
+	# provenance. This one's rows are not known yet.
 	_resume_zero="$(controlplane_attempts "$_resume_tsv" "$_resumes_log" 2>/dev/null \
-		| awk -F'\t' -v me="$RESUME_AT" '$1 ~ /^--resume at / && $4 == "0" && $8 != me { printf "%s%s", (n++ ? "," : ""), $8 }')" || _resume_zero=""
+		| awk -F'\t' -v me="$RESUME_AT" -v ip=" (in the --resume at " '
+			$1 ~ /^--resume at / { if (!($8 in rows)) o[++k] = $8; rows[$8] += $4; next }
+			(p = index($1, ip)) { t = substr($1, p + length(ip)); sub(/\)$/, "", t); rows[t] += $4 }
+			END { for (i = 1; i <= k; i++) if (rows[o[i]] == 0 && o[i] != me) printf "%s%s", (n++ ? "," : ""), o[i] }')" || _resume_zero=""
 	_resume_changes=()
-	mapfile -t _resume_changes < <(awk -F'\t' -v OFS='\037' -v h0="$_resume_harness" -v kv0="$_resume_kv0" -v zero="$_resume_zero" '
+	mapfile -t _resume_changes < <(awk -F'\t' -v OFS='\037' -v h0="$_resume_harness" -v hk0="$_resume_hkey0" -v kv0="$_resume_kv0" -v zero="$_resume_zero" '
 		BEGIN { nz = split(zero, zl, ","); for (i = 1; i <= nz; i++) z[zl[i]] = 1 }
-		$1 == "RESUMED_AT" || NF < 2 || ($1 in z) { next }
-		{ n++; at[n] = $1; h[n] = ($2 == "" ? "unknown" : $2); nr[n] = $3; kv[n] = (NF >= 4 ? $4 : "") }
+		# differ(a, ak, b, bk): other harness files: another content key, or another
+		# HARNESS_SHA when either key is not recorded or either HARNESS_SHA is unknown.
+		function differ(a, ak, b, bk) { return (a != "unknown" && b != "unknown" && ak != "" && ak != "unknown" && bk != "" && bk != "unknown") ? (ak != bk) : (a != b) }
+		$1 == "RESUMED_AT" { for (i = 1; i <= NF; i++) if ($i == "HARNESS_CONTENT_KEY") kc = i; next }
+		NF < 2 || ($1 in z) { next }
+		{ n++; at[n] = $1; h[n] = ($2 == "" ? "unknown" : $2); nr[n] = $3; kv[n] = (NF >= 4 ? $4 : ""); hk[n] = (kc && NF >= kc) ? $kc : "" }
 		END {
 			for (i = 1; i < n; i++)
 				if (nr[i] != "" && nr[i] != "none" && nr[i] != "unchecked") print "R", at[i], nr[i], at[i + 1]
@@ -2056,9 +2210,11 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 					for (e in unr) { split(e, kk, SUBSEP); if (kk[1] == i && ((q, kk[2]) in km)) { u = at[i]; break } }
 				print "K", kat[q], kd[q], u
 			}
-			seg = 0; sh[0] = (h0 == "" ? "unknown" : h0); sat[0] = ""; slast[0] = ""
+			seg = 0; sh[0] = (h0 == "" ? "unknown" : h0); shk[0] = hk0; sat[0] = ""; slast[0] = ""; ld = sh[0]
 			for (i = 1; i <= n; i++) {
-				if (h[i] != sh[seg] || h[i] == "unknown") { seg++; sh[seg] = h[i]; sat[seg] = at[i] }
+				if (differ(h[i], hk[i], sh[seg], shk[seg]) || h[i] == "unknown") { seg++; sh[seg] = h[i]; shk[seg] = hk[i]; sat[seg] = at[i] }
+				else if (h[i] != ld) print "D", at[i], h[i], ld, hk[i]
+				ld = h[i]
 				slast[seg] = at[i]
 			}
 			for (s = 1; s <= seg; s++) {
@@ -2068,10 +2224,10 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 			}
 			if (n < 1) exit
 			if (h[n] == "unknown") { print "WU"; exit }
-			lk = ""; lat = ""; gap = 0
-			if (h0 != "" && h0 != "unknown") lk = h0
-			for (i = 1; i < n; i++) if (h[i] != "unknown") { lk = h[i]; lat = at[i]; gap = 0 } else gap = 1
-			if (lk != "" && lk != h[n]) print "W", lk, lat, gap
+			lk = ""; lkk = ""; lat = ""; gap = 0
+			if (h0 != "" && h0 != "unknown") { lk = h0; lkk = hk0 }
+			for (i = 1; i < n; i++) if (h[i] != "unknown") { lk = h[i]; lkk = hk[i]; lat = at[i]; gap = 0 } else gap = 1
+			if (lk != "" && differ(lk, lkk, h[n], hk[n])) print "W", lk, lat, gap
 		}' "$_resumes_log")
 	for _resume_chg in ${_resume_changes[@]+"${_resume_changes[@]}"}; do
 		_chg_kind="" _chg_a="" _chg_b="" _chg_c="" _chg_d="" _chg_e=""
@@ -2101,6 +2257,10 @@ if [[ -n "$RESUME_DIR" && -f "${_resume_tsv:-}" ]] && ! ((DRY_RUN)); then
 			_chg_span="from ${_chg_a} on"
 			[[ -z "$_chg_e" ]] || _chg_span="from ${_chg_a} until ${_chg_e}"
 			RESUME_NOTES+=(--note "the --resume at ${_chg_a} ran HARNESS_SHA=${_chg_b}, after HARNESS_SHA=${_chg_c} (${_chg_by}): rows ${_chg_span} are ${_chg_b}'s")
+			[[ "$_chg_a" != "$RESUME_AT" ]] || RESUME_OWN_NOTES+=("${RESUME_NOTES[${#RESUME_NOTES[@]} - 1]}")
+			;;
+		D)
+			RESUME_NOTES+=(--info "the --resume at ${_chg_a} ran HARNESS_SHA=${_chg_b}, after HARNESS_SHA=${_chg_c}: they differ only in git describe (a commit or tag that changed no harness file; the same HARNESS_CONTENT_KEY ${_chg_d}), so its rows ran the same harness")
 			[[ "$_chg_a" != "$RESUME_AT" ]] || RESUME_OWN_NOTES+=("${RESUME_NOTES[${#RESUME_NOTES[@]} - 1]}")
 			;;
 		W)
@@ -2271,11 +2431,13 @@ cell_interrupted_row() {
 		|| echo "warning: could not write the INTERRUPTED row of the cell in progress; a --resume finds it by its rows" >&2
 }
 
-# The poller and scratch dir (SWEEP_TMP) first, then the cell in progress, then a run that ends before
-# its outcome (die, an unexpected abort, Ctrl-C) says how in that record, stopped with its
-# reason or interrupted, with the notes this run gathered so far (a --resume's).
+# A step that still runs first (sweep_step_kill: after a second signal, 002 may still be
+# writing rows), then the poller and scratch dir (SWEEP_TMP), then the cell in progress,
+# then a run that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
+# that record, stopped with its reason or interrupted, with the notes this run gathered so
+# far (a --resume's).
 _sweep_rc=0 # the trap's own $?, kept before its first step changes it
-trap '_sweep_rc=$?; stop_peak_metrics_poller 2>/dev/null || true; rm -rf "$SWEEP_TMP" 2>/dev/null || true; cell_interrupted_row || true; sweep_outcome_on_exit "$_sweep_rc" ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} || true' EXIT
+trap '_sweep_rc=$?; sweep_step_kill || true; stop_peak_metrics_poller 2>/dev/null || true; rm -rf "$SWEEP_TMP" 2>/dev/null || true; cell_interrupted_row || true; sweep_outcome_on_exit "$_sweep_rc" ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"} || true' EXIT
 
 # Pre-create the TSV preamble before any combo (skipped in dry-run). A fresh sweep with
 # --config also gets the run-config-<RUN_ID>.env replay copy; a resumed one keeps the
@@ -2295,6 +2457,10 @@ if ((! DRY_RUN)); then
 	# The record's times are UTC with Z, as its STARTED_AT and ENDED_AT (RESUME_AT keeps
 	# the rows' +00:00 format for the TSV and resumes.txt).
 	[[ -z "$RESUME_DIR" ]] || _so_start+=(--resumed-at "${RESUME_AT%+00:00}Z")
+	# The console's next step after an interrupt or a stop: the same command with this
+	# sweep dir's path (the record keeps "<sweep dir>").
+	# shellcheck disable=SC2034  # read by sweep_outcome_on_exit (tests/lib/common.sh)
+	((GROWTH)) || SWEEP_NEXT_CONSOLE="$(resume_cmd_console "$(planned_axis_flags)")"
 	sweep_outcome_start "$OUTPUT_DIR" "$RUN_ID" "${_so_start[@]}"
 	# The cells this run plans, before the first one.
 	if ! ((GROWTH)); then
@@ -3074,14 +3240,16 @@ for ms in "${MESH_SIZES[@]}"; do
 						# The rows after this line are this attempt's (cell_interrupted_row).
 						CELL_START_LINE="$(wc -l < "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" 2>/dev/null | tr -d ' ')" || CELL_START_LINE=0
 						[[ "$CELL_START_LINE" =~ ^[0-9]+$ ]] || CELL_START_LINE=0
-						# The cell's axes for 001 and 002; a split VS/DR apply measures window kind traffic.
+						# The cell's axes for 001 and 002; a split VS/DR apply measures window kind
+						# traffic.
 						cell_args=(--contexts "$active_csv" --service-count "$sc" --replicas "$rc" --namespace-count "$nc"
 							--sidecar-scoping "$scp" --traffic-config "$tc" --vsdr-every "$VSDR_EVERY" --vsdr-subsets "$VSDR_SUBSETS")
 						m002_args=("${cell_args[@]}" --mesh-size "$ms" --window-kind "$LEGACY_WINDOW_KIND" --settle "$SETTLE_SEC" --run-id "$RUN_ID")
 
 						if [[ "$VSDR_APPLY" == split ]]; then
-							# Phase 0 (outside the window): the namespaces, Services, Sidecars and the
-							# per-subset Deployments, Ready before the baseline (BACKLOG 9.11).
+							# Phase 0 (outside the window): the namespaces, Services, Sidecars
+							# and the per-subset Deployments, Ready before the baseline (BACKLOG
+							# 9.11).
 							echo "--- Deploying workloads before the window (split apply, scoping=$scp, traffic=$tc) ---"
 							if ! sweep_step "$SCRIPT_DIR/001-setup-controlplane-test.sh" "${cell_args[@]}" --parts workloads; then
 								echo "warn: [$combo_idx/$MATRIX_SIZE] workloads setup failed for '$label'; recording SETUP_FAILED row and continuing" >&2
@@ -3202,6 +3370,18 @@ istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
 # These reports come before this run's outcome is written; a resume's earlier one (in
 # sweep-outcome.prev.txt) is not theirs to show.
 export _SWEEP_OUTCOME_PENDING=1
+# The PROBLEMs that outcome will record, for the reports' verdict (env_sla_verdict: a PASS
+# reads CAUTION): the end-of-sweep Istio recheck's, those carried from an earlier run, and
+# a harness that changed during the sweep (the end check, read now: sweep_outcome records
+# this same answer). Not that the cells could not be counted: the reports count them.
+_so_hs=""
+_harness_sha_sweep_end _so_hs
+_so_np=0
+for _so_a in ${IV_END[@]+"${IV_END[@]}"} ${RESUME_NOTES[@]+"${RESUME_NOTES[@]}"}; do
+	[[ "$_so_a" != --problem ]] || _so_np=$((_so_np + 1))
+done
+[[ -z "$_so_hs" ]] || _so_np=$((_so_np + 1))
+export _SWEEP_OUTCOME_PROBLEMS="$_so_np"
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
 
@@ -3240,9 +3420,10 @@ rm -f "$ENVELOPE_ERR"
 # last row that is a status row fails it, with that row's reason (also after a context's
 # rows: a partial failure; INTERRUPTED: the run ended inside it); a last row that is a
 # measurement (valid or not) does not, unless the cell's rows name fewer members than its
-# mesh size (INCOMPLETE: cut short while they were written). The total is every cell of the TSV, of this run's matrix
-# and of planned-cells.txt (each earlier run's), so a narrower --resume never reads "2 of
-# 1", and a planned cell with no row counts failed as NOT_RUN. A growth series is never
+# mesh size, or fewer than its WINDOW_ROWS lines name (INCOMPLETE: cut short while they
+# were written). The total is every cell of the TSV, of this run's matrix and of
+# planned-cells.txt (each earlier run's), so a narrower --resume never reads "2 of 1", and
+# a planned cell with no row counts failed as NOT_RUN. A growth series is never
 # resumed, and its cells share that key (M-sweep, outside phases), so each of its status
 # rows is a cell of its own, of the plan.
 CELL_KEYS=""
@@ -3335,7 +3516,7 @@ if ((_cells_rc == 0)) && is_nonneg_int "$_cells_seen"; then
 		_cells_where+="; ${_cells_pw} of them failed partway (a valid row, then a status row): the next --resume runs them again (as every failed cell), and the reports then use only that new attempt"
 	fi
 	if is_nonneg_int "$_cells_inc" && ((_cells_inc > 0)); then
-		_cells_where+="; ${_cells_inc} of them (INCOMPLETE) were cut short while their member rows were written (fewer members have a row than the mesh size, or a member fewer rows than its istiod replicas, and no status row): the report keeps their rows with a data warning, and the next --resume runs them again"
+		_cells_where+="; ${_cells_inc} of them (INCOMPLETE) were cut short while their member rows were written (fewer members have a row than the mesh size, or a member fewer rows than its window wrote, or in rows an older harness wrote one by one than its istiod replicas, and no status row): the report keeps their rows with a data warning, and the next --resume runs them again"
 	fi
 	((RERUN_RAN == 0)) || _cells_where+=". ${RERUN_RAN} cell(s) that had failed partway in an earlier run ran again in this one; the reports use only that new attempt"
 	if ((${#NOTRUN_CELLS[@]})); then

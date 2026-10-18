@@ -5,12 +5,13 @@
 # Filtering policy (one definition, prop_drop_reason in tests/lib/propagation.sh). P2 and
 # P3 are measured on a remote, so a row's P2/P3 are excluded only for that remote's side:
 #   - remote_status != OK       (field 22: its istiod RESTART or RESTART_UNKNOWN, a P2/P3
-#                                timeout, its sidecar's DRAIN_TIMEOUT or NOT_DRAINED,
-#                                SCRAPE_INCOMPLETE)
+#                                timeout, its sidecar's NOT_DRAINED, SCRAPE_INCOMPLETE)
 #   - remote_scrape_skew_ms > FANOUT_MAX_SKEW_MS (field 23; default 1000)
 # never for the source's restart, P1 timeout or p1_overflow. A TSV from before fields
 # 22-23 cannot split the row by side: status != OK, restarted == 1|unknown, or
-# scrape_skew_ms (field 19) over the ceiling drop it, p1_overflow does not.
+# scrape_skew_ms (field 19) over the ceiling drop it, p1_overflow does not. A
+# DRAIN_TIMEOUT status (the drain after the iteration timed out) counts as OK: the values
+# were measured before that drain; a warning in every format counts those iterations.
 # p2_ms values are also excluded when p2_dirty == 1 (EDS pushed but the canary
 # never went healthy on that remote's watcher; could be unrelated churn).
 # Reports n_total (rows considered), n_valid (rows used) and n_attempted (what the probes
@@ -25,14 +26,15 @@
 # because its remote rows failed; a TSV from before field 20 takes it from the first row
 # with status OK, restarted=0, no p1_overflow and skew within the ceiling.
 #
-# Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION and its
-# ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE / ISTIO_VERSION_BY_CONTEXT, the start-of-run
-# readiness ISTIO_NOTREADY_AT_START / ISTIO_READY_WAITED_SEC, each member's active
-# revision ISTIO_ACTIVE_REVISIONS, its Istio CR / IstioRevision generations
-# ISTIO_GENERATIONS and connected proxy versions ISTIO_PROXY_VERSIONS (unknown for a TSV
-# written before them; mixed when pooled inputs differ), KUBE_VERSIONS, SETTLE_SEC,
-# POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all report formats, plus RUN_CONFIG /
-# RUN_CONFIG_SHA256 (the --config behind the inputs) over all input TSVs.
+# Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, HARNESS_CONTENT_KEY,
+# ISTIO_VERSION and its ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE /
+# ISTIO_VERSION_BY_CONTEXT, the start-of-run readiness ISTIO_NOTREADY_AT_START /
+# ISTIO_READY_WAITED_SEC, each member's active revision ISTIO_ACTIVE_REVISIONS, its
+# Istio CR / IstioRevision generations ISTIO_GENERATIONS and connected proxy versions
+# ISTIO_PROXY_VERSIONS (unknown for a TSV written before them; mixed when pooled inputs
+# differ), KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
+# report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
+# over all input TSVs.
 #
 # Every endpoint-*.tsv under the results dir is read. More than one run there (several
 # sweep-* dirs, or standalone probes with different run ids) stops the report unless
@@ -121,8 +123,8 @@ Phases emitted in the report:
 Filtering policy (rows excluded from numeric aggregation): P2 and P3 are measured
 on a remote, so a row's P2/P3 are left out only for that remote's side:
   remote_status (field 22) != OK   (its istiod RESTART or RESTART_UNKNOWN, a P2 or
-                                    P3 timeout, its sidecar's DRAIN_TIMEOUT or
-                                    NOT_DRAINED, SCRAPE_INCOMPLETE of its scrape)
+                                    P3 timeout, its sidecar's NOT_DRAINED,
+                                    SCRAPE_INCOMPLETE of its scrape)
   remote_scrape_skew_ms (field 23) > FANOUT_MAX_SKEW_MS
 never for the source's restart, P1 timeout or p1_overflow. A row with no remote
 (remote_status N/A) measures P1 only. A TSV without field 22 (21 or fewer
@@ -131,11 +133,14 @@ or scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS drops it; p1_overflow does not
 P2 values are additionally suppressed when p2_dirty == 1.
 P1 phases (one sample per iteration, measured on the source) use the source side
 only: an iteration's P1 is left out when p1_status (field 20) is not OK
-(TIMEOUT_P1, RESTART, RESTART_UNKNOWN, DRAIN_TIMEOUT or NOT_DRAINED of the source
-sidecar, SCRAPE_INCOMPLETE of a source scrape), p1_overflow == 1, or p1_scrape_skew_ms
+(TIMEOUT_P1, RESTART, RESTART_UNKNOWN, NOT_DRAINED of the source sidecar,
+SCRAPE_INCOMPLETE of a source scrape), p1_overflow == 1, or p1_scrape_skew_ms
 (field 21) > FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it. A
 TSV without field 20 (written before it) takes P1 from the iteration's first row
 with status OK, restarted 0, p1_overflow 0 and scrape_skew_ms within the ceiling.
+DRAIN_TIMEOUT (in any of these status fields: the drain after the iteration timed
+out) counts as OK, since the values were measured before that drain; every format
+warns with the number of such iterations per mesh size.
 
 n_total / n_valid: rows considered vs rows used after the above filtering; for
 the P1 phases, iterations (P1 is one sample per iteration, as 002's summary counts it).
@@ -156,7 +161,11 @@ Averages are rounded to the nearest ms; json mesh_size is a number. n_valid is 0
 REPORT_HARNESS_SHA (every format, next to HARNESS_SHA): the harness this report ran
 on, which can differ from HARNESS_SHA, the harness that measured the rows: a report
 made again later, or from another checkout, may count rows by other rules. The
-results dir it reads does not count as a change to it.
+results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (next to
+HARNESS_SHA; unknown for a TSV written before it): the content key of the harness
+files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
+only in git describe (a docs commit or a new tag between them): stderr gives a note
+instead of the "disagree" warning.
 
 text, markdown and json also carry an "istiod restart diagnostics" section: every
 istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
@@ -243,7 +252,7 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
 # over every input (config_merged_preamble): one value, or mixed:a,b with a warning.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA REPORT_HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA HARNESS_CONTENT_KEY REPORT_HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -281,11 +290,18 @@ done < <(config_merged_preamble "${ENDPOINT_FILES[@]}")
 for k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
 	[[ -n "${PREAMBLE[$k]:-}" ]] || PREAMBLE[$k]=unknown
 done
+# HARNESS_SHA values that differ only in their git describe part (every input records one
+# HARNESS_CONTENT_KEY: a docs commit or a new tag between the runs, the same harness files)
+# are a note, not a disagreement. A TSV without the key reads unknown: the warning stays.
+_hck="$(config_input_value HARNESS_CONTENT_KEY unknown "${ENDPOINT_FILES[@]}")"
 for k in "${SWEEP_LEVEL_KEYS[@]}"; do
 	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256) continue ;; esac
-	if [[ "${PREAMBLE[$k]:-}" == mixed:* ]]; then
-		echo "warning: input TSVs disagree on sweep-level ${k} (${PREAMBLE[$k]#mixed:}); the report shows it as mixed" >&2
+	[[ "${PREAMBLE[$k]:-}" == mixed:* ]] || continue
+	if [[ "$k" == HARNESS_SHA && -n "$_hck" && "$_hck" != unknown && "$_hck" != mixed:* ]]; then
+		echo "note: the input TSVs' HARNESS_SHA values (${PREAMBLE[$k]#mixed:}) differ only in git describe: every input records HARNESS_CONTENT_KEY=${_hck}, the same harness files (a commit or a tag outside them moved the describe)" >&2
+		continue
 	fi
+	echo "warning: input TSVs disagree on sweep-level ${k} (${PREAMBLE[$k]#mixed:}); the report shows it as mixed" >&2
 done
 # Which --config produced the inputs (PL2/PL19), over every input rather than the last
 # file: `none` without one, `unknown` for files written before the key existed,
@@ -312,6 +328,8 @@ POOLED_NOTE="$(config_multi_run_note)"
 #   A <ms> <iterations attempted|-> <rows attempted|->
 #   G <ms> <iterations measured> <rows measured>   (placeholder rows left out)
 #   W <columns> <files with data rows of that width>
+#   D <ms> <iterations whose drain timed out> (DRAIN_TIMEOUT in status, p1_status or
+#     remote_status; counted, tests/lib/propagation.sh)
 INPUT_SCAN="$(awk -F'\t' '
 	function val(    v) { v = $0; sub(/^# [A-Z_]+=/, "", v); return v }
 	FNR == 1 { f++ }
@@ -326,6 +344,9 @@ INPUT_SCAN="$(awk -F'\t' '
 		if (rowms[f] == "") rowms[f] = $2
 		rows[f]++
 		if (!((f, $1, $3) in its)) { its[f, $1, $3] = 1; iters[f]++ }
+		if (($10 == "DRAIN_TIMEOUT" || $20 == "DRAIN_TIMEOUT" || $22 == "DRAIN_TIMEOUT") && !(($2, $1, $3) in dts)) {
+			dts[$2, $1, $3] = 1; dt[$2]++
+		}
 	}
 	END {
 		for (i = 1; i <= f; i++) {
@@ -352,8 +373,9 @@ INPUT_SCAN="$(awk -F'\t' '
 			printf "G\t%s\t%d\t%d\n", ms, gi[ms], gr[ms]
 		}
 		for (w in wfiles) printf "W\t%s\t%d\n", w, wfiles[w]
+		for (ms in dt) printf "D\t%s\t%d\n", ms, dt[ms]
 	}' "${ENDPOINT_FILES[@]}" | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n)"
-declare -A ATT_IT=() ATT_ROWS=() GOT_IT=() GOT_ROWS=()
+declare -A ATT_IT=() ATT_ROWS=() GOT_IT=() GOT_ROWS=() DRAIN_TIMEOUT_IT=()
 ATT_SPEC=""        # ms=iterations,rows;... for the aggregation awk (n_attempted)
 TSV_WIDTHS=()      # data-row column counts seen, ascending
 TSV_WIDTH_FILES=() # "<columns> in <n> file(s)", same order
@@ -362,13 +384,15 @@ while IFS=$'\t' read -r _k _a _b _c; do
 	A) ATT_IT[$_a]="$_b" ATT_ROWS[$_a]="$_c"; ATT_SPEC+="${_a}=${_b},${_c};" ;;
 	G) GOT_IT[$_a]="$_b" GOT_ROWS[$_a]="$_c" ;;
 	W) TSV_WIDTHS+=("$_a"); TSV_WIDTH_FILES+=("${_a} in ${_b} file(s)") ;;
+	D) DRAIN_TIMEOUT_IT[$_a]="$_b" ;;
 	esac
 done <<<"$INPUT_SCAN"
 TSV_COLUMNS="$(IFS=,; echo "${TSV_WIDTHS[*]-}")"
 # DATA_WARNINGS: one line each, in every format and on stderr. A mesh size whose probes
 # measured fewer iterations or rows than they were configured to (n_total counts only
-# what was written, and a failed cell's status row); inputs of different widths, which
-# the row rules of tests/lib/propagation.sh filter differently.
+# what was written, and a failed cell's status row); a mesh size with iterations whose
+# drain timed out (counted, but a slow removal is worth knowing about); inputs of
+# different widths, which the row rules of tests/lib/propagation.sh filter differently.
 DATA_WARNINGS=""
 data_warning() { DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}$1"; }
 while IFS= read -r _ms; do
@@ -379,6 +403,10 @@ while IFS= read -r _ms; do
 		data_warning "mesh size ${_ms}: ${_gi} of ${_ai} iteration(s) and ${_gr} of ${_ar} row(s) were measured; the rest never ran (a probe that failed or stopped early: see the sweep outcome). n_attempted shows what was configured."
 	fi
 done < <(printf '%s\n' "${!ATT_IT[@]}" | LC_ALL=C sort -n)
+while IFS= read -r _ms; do
+	[[ -n "$_ms" ]] || continue
+	data_warning "mesh size ${_ms}: the drain after ${DRAIN_TIMEOUT_IT[$_ms]} iteration(s) timed out (DRAIN_TIMEOUT: a canary endpoint was still healthy on a watcher PROPAGATION_DRAIN_TIMEOUT_SEC after its label was removed). Their values count: they were measured before that drain. A removal that slow points at a slow push path, so read the tails with that in mind."
+done < <(printf '%s\n' ${DRAIN_TIMEOUT_IT[@]+"${!DRAIN_TIMEOUT_IT[@]}"} | LC_ALL=C sort -n)
 if ((${#TSV_WIDTHS[@]} > 1)); then
 	_wf="$(IFS=,; echo "${TSV_WIDTH_FILES[*]}")"
 	data_warning "the input TSVs have different column counts (${_wf//,/, }), so their rows are filtered by different rules (tests/lib/propagation.sh): one without remote_status (under 23 columns) drops a row's P2/P3 for either side's failure, one without p1_status (under 21) takes P1 from its iteration's first OK row, and an 18-column one has no p2_dirty or scrape-skew check. Compare its figures with care."
@@ -390,10 +418,10 @@ data_warnings_lines() {
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
 data_warnings_lines "WARNING: " >&2
-# data_warnings_json: DATA_WARNINGS as a JSON array of strings, one per line, each escaped
-# as json_escape does.
+# data_warnings_json: DATA_WARNINGS as a JSON array of strings, one per line (through stdin
+# and JSON_STR_AWK, tests/lib/common.sh).
 data_warnings_json() {
-	printf '%s' "$DATA_WARNINGS" | awk 'BEGIN { ORS = ""; printf "[" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t"); gsub(/\r/, "\\r"); gsub(/[[:cntrl:]]/, ""); printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 } END { print "]" }'
+	printf '%s' "$DATA_WARNINGS" | awk "${JSON_STR_AWK}"'BEGIN { ORS = ""; printf "[" } { printf "%s%s", (NR > 1 ? "," : ""), js($0) } END { print "]" }'
 }
 
 # Helper: does any per-file row carry this key?
@@ -404,20 +432,6 @@ preamble_has() {
 	done
 	[[ -n "${PREAMBLE[$k]:-}" ]] && return 0
 	return 1
-}
-
-# JSON-escape a single value: each \ and " escaped, a tab, carriage return and newline as
-# \t, \r and \n, any other control character dropped (as controlplane 004's js()), so a
-# value from a hand-edited TSV or a run-config path keeps the JSON parseable.
-json_escape() {
-	local v="$1"
-	v="${v//\\/\\\\}"
-	v="${v//\"/\\\"}"
-	v="${v//$'\t'/\\t}"
-	v="${v//$'\r'/\\r}"
-	v="${v//$'\n'/\\n}"
-	v="${v//[[:cntrl:]]/}"
-	printf '%s' "$v"
 }
 
 # CSV-escape (RFC4180 — quote if comma/quote/newline; double internal quotes).
@@ -527,39 +541,38 @@ format_preamble_json() {
 	# Sweep-level scalars become top-level metadata fields; per-iteration values
 	# go into an "iterations" array of objects so downstream JSON consumers can
 	# recover every iteration's RUN_ID/DATE/MESH_SIZE without re-reading TSVs.
-	local k i v first=1
-	printf '{'
-	for k in "${SWEEP_LEVEL_KEYS[@]}"; do
-		preamble_has "$k" || continue
-		((first)) || printf ","
-		printf '"%s":"%s"' "$k" "$(json_escape "${PREAMBLE[$k]:-}")"
-		first=0
-	done
-	local any_iter=0
+	# One awk writes the object from "S|V<TAB>key<TAB>value" lines (a scalar, a key of the
+	# current iteration) and "I" lines (the next iteration), every string through
+	# JSON_STR_AWK's js() (tests/lib/common.sh). The values are those of preamble lines, so
+	# none holds a newline.
+	local k i v any_iter=0
 	for k in "${PER_ITER_KEYS[@]}"; do
 		preamble_has "$k" && { any_iter=1; break; }
 	done
-	if ((any_iter)); then
-		((first)) || printf ","
-		printf '"iterations":['
-		local row_first=1 kv_first
-		for i in "${PER_FILE_INDICES[@]}"; do
-			((row_first)) || printf ","
-			printf '{'
-			kv_first=1
-			for k in "${PER_ITER_KEYS[@]}"; do
-				v="${PER_FILE_VALS[${k}|${i}]:-}"
-				[[ -z "$v" ]] && continue
-				((kv_first)) || printf ","
-				printf '"%s":"%s"' "$k" "$(json_escape "$v")"
-				kv_first=0
-			done
-			printf '}'
-			row_first=0
+	{
+		for k in "${SWEEP_LEVEL_KEYS[@]}"; do
+			preamble_has "$k" || continue
+			printf 'S\t%s\t%s\n' "$k" "${PREAMBLE[$k]:-}"
 		done
-		printf ']'
-	fi
-	printf '}'
+		if ((any_iter)); then
+			for i in "${PER_FILE_INDICES[@]}"; do
+				printf 'I\n'
+				for k in "${PER_ITER_KEYS[@]}"; do
+					v="${PER_FILE_VALS[${k}|${i}]:-}"
+					[[ -z "$v" ]] || printf 'V\t%s\t%s\n' "$k" "$v"
+				done
+			done
+		fi
+	} | awk "${JSON_STR_AWK}"'
+		BEGIN { ORS = ""; printf "{" }
+		{
+			t = $0; sub(/\t.*/, "", t)
+			if (t == "I") { printf "%s{", (nobj++ ? "}," : (n++ ? "," : "") "\"iterations\":["); kv = 0; next }
+			r = substr($0, length(t) + 2); k = r; sub(/\t.*/, "", k); v = substr(r, length(k) + 2)
+			if (t == "S") printf "%s%s:%s", (n++ ? "," : ""), js(k), js(v)
+			else printf "%s%s:%s", (kv++ ? "," : ""), js(k), js(v)
+		}
+		END { if (nobj) printf "}]"; print "}" }'
 }
 
 # Schema reminder: tab columns are
@@ -808,17 +821,19 @@ Definitions for every phase and statistic column in the tables above (see also
 propagating across the mesh; all values are **milliseconds**. Remote phases (P2/P3) are
 undefined at mesh size 1 (no remote cluster). P2 and P3 are measured on a remote, so a row
 is dropped from them (not counted in `n_valid`) only for that remote's side:
-`remote_status != OK` (its istiod restarted or unknown, a P2 or P3 timeout, its sidecar's
-drain timeout or a canary endpoint not drained before t0 (`NOT_DRAINED`), its scrape
-incomplete) or `remote_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`, never for the source's
-restart, P1 timeout or `p1_overflow`. A TSV without `remote_status` cannot split a row by
-side: `status != OK`, `restarted ∈ {1, unknown}` or a high `scrape_skew_ms` drop it. P2
+`remote_status != OK` (its istiod restarted or unknown, a P2 or P3 timeout, a canary
+endpoint not drained before t0 (`NOT_DRAINED`), its scrape incomplete) or
+`remote_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`, never for the source's restart, P1
+timeout or `p1_overflow`. A TSV without `remote_status` cannot split a row by side:
+`status != OK`, `restarted ∈ {1, unknown}` or a high `scrape_skew_ms` drop it. P2
 additionally drops `p2_dirty=1` rows (an EDS bump not confirmed by the remote sidecar going
 healthy). The P1 phases are measured on the source, so only the source side drops an
 iteration's P1: `p1_status != OK` (a P1 timeout, a source istiod restart or unknown restart
-state, a source sidecar drain timeout or `NOT_DRAINED`, a source scrape that failed),
-`p1_overflow=1`, or `p1_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`; a remote that timed out
-or restarted does not.
+state, a source sidecar `NOT_DRAINED`, a source scrape that failed), `p1_overflow=1`, or
+`p1_scrape_skew_ms` over `FANOUT_MAX_SKEW_MS`; a remote that timed out or restarted does
+not. `DRAIN_TIMEOUT` in any status column (the drain after the iteration timed out) counts
+as `OK`: the values were measured before that drain; a warning above gives the number of
+such iterations per mesh size.
 
 | Phase | Units | Source | Definition / caveats |
 |-------|-------|--------|----------------------|
@@ -917,7 +932,7 @@ report_endpoint_markdown() {
 			printf "## Comparison across mesh sizes\n\n"
 			printf "Averages over rows surviving the report filter (P1: its source side, p1_status != OK, "
 			printf "p1_overflow=1 or a high source skew drop it; P2/P3: the remote side, remote_status != OK "
-			printf "or a high remote skew; P2 also drops p2_dirty=1 rows). "
+			printf "or a high remote skew; P2 also drops p2_dirty=1 rows; DRAIN_TIMEOUT counts as OK). "
 			printf "Cells show `avg (n_valid)`, except P1 conv_p99: the worst bucket any valid row hit "
 			printf "`(n_valid)`, never averaged. Per-mesh-size tables above carry the full breakdown.\n\n"
 			printf "| Mesh Size | P1 wall avg (ms) | P1 conv_p99 worst (ms) | P2 EDS avg (ms) | P3 sidecar avg (ms) |\n"

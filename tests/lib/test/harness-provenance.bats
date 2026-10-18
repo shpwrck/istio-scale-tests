@@ -130,9 +130,9 @@ _hs_sweep() {
 		printf "%s\n" "$p"'
 	assert_success
 	[ "$(grep -c '^WARNING: the harness changed during the sweep' <<<"$stderr")" -eq 1 ]
-	[[ "$stderr" =~ WARNING:\ the\ harness\ changed\ during\ the\ sweep:\ HARNESS_SHA=${clean}\ at\ its\ start,\ ${clean}-dirty\.[0-9a-f]{8}\ now\ \(read\ before\ 002-probe\.sh\):\ a\ file\ under\ tests/,\ config/,\ charts/,\ terraform/\ was\ edited,\ or\ a\ git\ checkout\ or\ pull\ ran\.\ The\ sweep\ goes\ on\;\ its\ outcome\ records\ this\ as\ a\ problem\ \(exit\ 4\)\. ]] || { echo "$stderr"; false; }
+	[[ "$stderr" =~ WARNING:\ the\ harness\ changed\ during\ the\ sweep:\ HARNESS_SHA=${clean}\ at\ its\ start,\ ${clean}-dirty\.[0-9a-f]{8}\ now\ \(read\ before\ 002-probe\.sh\):\ a\ file\ under\ tests/,\ config/,\ charts/,\ terraform/\ was\ edited,\ added\ or\ removed\ \(an\ untracked\ file\ counts\ unless\ git\ ignores\ it,\ such\ as\ a\ run\ config\ not\ named\ \*\.local\.env\),\ or\ a\ git\ checkout,\ pull\ or\ commit\ changed\ one\.\ The\ sweep\ goes\ on\;\ its\ outcome\ records\ this\ as\ a\ problem\ \(exit\ 4\)\. ]] || { echo "$stderr"; false; }
 	refute_output --partial "second call differs"
-	assert_output --regexp "^the harness changed during the sweep: HARNESS_SHA=${clean} at its start, ${clean}-dirty\.[0-9a-f]{8} at its end \([0-9T:-]+Z\), first read ${clean}-dirty\.[0-9a-f]{8} at [0-9T:-]+Z, before 002-probe\.sh \(the read before that, at [0-9T:-]+Z, before 001-setup\.sh, still gave ${clean}\), so the steps after that read may have run other code than ${clean} \(a probe's TSV records the harness it ran; the sweep's own files record the start's\): run the sweep again if the change matters$"
+	assert_output --regexp "^the harness changed during the sweep: HARNESS_SHA=${clean} at its start, ${clean}-dirty\.[0-9a-f]{8} at its end \([0-9T:-]+Z\), first read ${clean}-dirty\.[0-9a-f]{8} at [0-9T:-]+Z, before 002-probe\.sh; the read before that \(at [0-9T:-]+Z, before 001-setup\.sh\) still gave ${clean}, so the steps after that read may have run other code than ${clean}: the rows after the change carry the new value in their TSV \(controlplane: a HARNESS_CHANGED_AT line\), the sweep's own files the start's; run the sweep again if the change matters$"
 	git -C "$r" checkout -q -- tests/f
 	# Changed and back before the end.
 	_hs_sweep "$r" '
@@ -142,7 +142,7 @@ _hs_sweep() {
 		_harness_sha_sweep_end p
 		printf "%s\n" "$p"'
 	assert_success
-	assert_output --regexp "^the harness changed during the sweep, and back: HARNESS_SHA=${clean} at its start and at its end, but ${clean}-dirty\.[0-9a-f]{8} at [0-9T:-]+Z, before 002-probe\.sh \(the read before that, at the sweep's start \([0-9T:-]+Z\), still gave ${clean}\)"
+	assert_output --regexp "^the harness changed during the sweep, and back: HARNESS_SHA=${clean} at its start and at its end, but ${clean}-dirty\.[0-9a-f]{8} at [0-9T:-]+Z, before 002-probe\.sh; the read before that \(at [0-9T:-]+Z, the sweep's start\) still gave ${clean}, so"
 	# Changed after the last step: only the end check sees it.
 	_hs_sweep "$r" '
 		harness_sha_check 002-probe.sh

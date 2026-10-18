@@ -237,7 +237,8 @@ results will go, and:
      read-only check warns on a difference and never stops on it. A member whose istiod or
      IstioCNI is not ready (or whose istiod is rolling out) is read again every
      `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds,
-     both set in the environment only; the members still not ready then are in
+     both set in the environment only, as is `ISTIO_PROXY_READ_PARALLEL` (20), the members whose
+     proxy versions are read at once; the members still not ready then are in
      `ISTIO_NOTREADY_AT_START` (`none` when every member was ready), with the wait in
      `ISTIO_READY_WAITED_SEC`; and the tuning baseline;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
@@ -311,9 +312,10 @@ results will go, and:
    within ⌈members / 4⌉ × 2 × that limit reads `timeout`.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
-   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` only describes the script); when it
-   is not the script's commit the run warns and records `CHART_REVISION_VS_HARNESS=differs`
-   (`same` when it is, `same-dirty` when it is but the script's tree has uncommitted changes).
+   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` and `HARNESS_CONTENT_KEY`, both in the
+   preamble, only describe the script); when it is not the script's commit the run warns and records
+   `CHART_REVISION_VS_HARNESS=differs` (`same` when it is, `same-dirty` when it is but the script's
+   tree has uncommitted changes).
 6. Rereads the route status (S4's status depends on istiod's push timing; a route that was not
    in place when the wait ended, or whose status was unread then, but is in place now says
    `STATUS_CHANGED`; `detail` keeps the status the wait ended on) and the istiod and ingress pods

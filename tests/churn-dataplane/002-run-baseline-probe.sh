@@ -88,7 +88,8 @@ Usage: $(basename "$0") [options]
   --qps N                  Target QPS (default: $QPS).
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle-sec N           Settle delay before measurement starts (default: $SETTLE_SEC).
-  --output-file FILE       TSV file to write/append to (default: ${COEXEC_RESULTS_DIR}/churn-dataplane-\$RUN_ID.tsv).
+  --output-file FILE       TSV file to write/append to
+                           (default: ${COEXEC_RESULTS_DIR}/churn-dataplane-\$RUN_ID.tsv).
   --output-dir DIR         Default results dir if --output-file not given.
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
@@ -116,6 +117,7 @@ Environment:
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
   long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
   COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
   REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
   COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
@@ -219,7 +221,7 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 REACH_TSV="$(dirname "$OUTPUT_FILE")/reach-${RUN_ID}.tsv"
 REACH_URL_TEMPLATE="http://fortio-server-{ctx}.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
 
-HARNESS_SHA="$(harness_sha --exclude "$(dirname "$OUTPUT_FILE")")"
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$(dirname "$OUTPUT_FILE")"
 ALL_CTXS_CSV="$SOURCE_CTX"
 for r in ${REMOTES[@]+"${REMOTES[@]}"}; do ALL_CTXS_CSV+=",$r"; done
 
@@ -256,6 +258,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
+		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
 		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
@@ -288,7 +291,8 @@ CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fo
 # and the window, through each cluster's fortio-server-<ctx> Service.
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every cluster's fortio-server-<ctx> (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" \
+	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
+		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=churn-dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
@@ -316,7 +320,11 @@ ISTIOD_PORTS=()
 ISTIOD_PODS=()
 ISTIOD_DIR="$(mktemp -d)"
 PF_OK=0
+# LOAD_POD: the client pod while the window's `fortio load` runs in it; the EXIT trap stops
+# a load still running there (fortio_client_stop).
+LOAD_POD=""
 cleanup_pf() {
+	[[ -z "${LOAD_POD:-}" ]] || fortio_client_stop "$SOURCE_CTX" "$NS" "$LOAD_POD" "${KUBECTL[@]}"
 	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	rm -rf "${ISTIOD_DIR:-}"
@@ -365,11 +373,13 @@ WINDOW_START_NS="$(now_ns)"
 
 JSON_OUT=""
 STATUS="OK"
+LOAD_POD="$CLIENT_POD"
 if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 	fortio load -qps "$QPS" -c "$CONNECTIONS" -t "${DURATION}s" -json - -quiet "$TARGET_URL" 2>/dev/null)"; then
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
+LOAD_POD=""
 WINDOW_END_NS="$(now_ns)"
 
 # Post-window scrape of every istiod pod (concurrent) + pod set.

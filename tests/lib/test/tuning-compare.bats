@@ -235,7 +235,9 @@ prop_row() {
 	[[ "$stderr" == *"warn: applying 01-push-throttling failed; marking SETUP_FAILED"* ]]
 	[[ "$stderr" == *"warn: probe for baseline exited "*"; marking PROBE_FAILED"* ]]
 	# In the tuning's own words: passes, marker files, Pass status.
-	[[ "$stderr" == *"error: 2 of 2 passes failed: PROBE_FAILED x1, SETUP_FAILED x1. Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it; exit 4." ]]
+	[[ "$stderr" == *"error: 2 of 2 passes failed: PROBE_FAILED x1, SETUP_FAILED x1. Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it; exit 4."* ]]
+	# No Istio CR answered: the generation checks it could not make are notes, after the error.
+	[[ "$stderr" == *"exit 4."$'\n'"warning: the Istio CR generations of a member could not be compared between the sweep's read at the sweep's start and its read before the apply of pass 01-push-throttling (a read failed): ci-a (unknown/unknown -> unknown/unknown)"* ]]
 	assert_output --partial "=== Sweep "
 	d="$(find "$out" -maxdepth 1 -name 'sweep-*' -type d)"
 	[ -f "${d}/baseline/PROBE_FAILED" ]
@@ -252,9 +254,9 @@ prop_row() {
 	grep -qx '# ISTIO_READY_WAITED_SEC=0' "${d}/sweep-metadata.txt"
 	grep -qx -- '- Start-of-run readiness: ISTIO_NOTREADY_AT_START=none, ISTIO_READY_WAITED_SEC=0' "${d}/sweep-comparison.md"
 	# The probe inherited the sweep's reading: the Istio CR is read at the start, before the
-	# profile's apply (the sweep's checkpoint) and at the end, each a read and its one retry;
-	# never by the probe.
-	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 6 ]
+	# profile's apply and after its failed apply (the sweep's checkpoints) and at the end, each
+	# a read and its one retry; never by the probe.
+	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 8 ]
 	# The outcome stays with the results, naming the harness the metadata names.
 	grep -qx 'EXIT=4' "${d}/sweep-outcome.txt"
 	[ "$(sed -n 's/^HARNESS_SHA=//p' "${d}/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "${d}/sweep-metadata.txt")" ]

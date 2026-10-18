@@ -158,7 +158,7 @@ incomplete_dir() {
 	[[ "$stderr" == *"[2/2] mesh=2 svcs=6 reps=3 ns=1 scope=none traffic=none — cut short while its rows were written (INCOMPLETE: rows of 1 of its 2 members): running it again; the reports use only this new attempt (resume)"* ]]
 	[[ "$stderr" == *"error: 1 of 2 cells failed: PROBE_FAILED x1."* ]]
 	[ "$(grep -c '^# RESUMED_AT=[^ ]* TSV_LINES=[0-9]* HARNESS_SHA=' "$TSV")" -eq 2 ]
-	head -n 1 "$D/resumes.txt" | grep -qx $'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV'
+	head -n 1 "$D/resumes.txt" | grep -qx $'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\tHARNESS_CONTENT_KEY'
 	[ "$(awk -F'\t' 'NR > 1 { print $8 }' "$D/resumes.txt" | sort -u)" = "${TSV##*/}" ]
 	[ "$(awk -F'\t' 'NR > 1 { print $7 }' "$D/resumes.txt" | sort -u)" = "ci-a=2/2,ci-b=2/2" ]
 	# The reports use the latest attempt: a PROBE_FAILED cell, no INCOMPLETE warning.
@@ -354,11 +354,11 @@ incomplete_dir() {
 	run env_sla_verdict 10 15 40 50 0 4 4 75 90 2 0
 	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan; the cells that ran: "* ]]
 	run env_sla_verdict 10 15 40 50 0 4 4 75 90 0 1
-	[[ "$output" == "CAUTION|1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas: cut short while they were written), so their figures cover part of the mesh; the rest: "* ]]
+	[[ "$output" == "CAUTION|1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote: cut short while they were written), so their figures cover part of the mesh; the figures, these cells included: "* ]]
 	run env_sla_verdict 10 15 40 50 0 4 4 75 90 2 1
-	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), "*"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas)" ]]
+	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), "*"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
 	run env_sla_verdict 80 15 40 50 0 4 4 75 90 1 1
-	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 planned cell(s) never ran (NOT_RUN); also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its istiod replicas)" ]]
+	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 planned cell(s) never ran (NOT_RUN); also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
 	run env_sla_verdict 95 15 40 50 0 4 4 75 90 3 0
 	[[ "$output" == FAIL\|* && "$output" == *"; also 3 planned cell(s) never ran (NOT_RUN)" ]]
 	# Not a count: 0.
@@ -407,7 +407,7 @@ incomplete_dir() {
 	# v1.31.0 on ci-a.
 	sed -i 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=v1.30.0,ci-b=v1.30.0/' "$TSV"
 	sed -i 's/^\(# RESUMED_AT=[^ ]* TSV_LINES=[0-9]*\) HARNESS_SHA=.*/\1 HARNESS_SHA=abc1234/' "$TSV"
-	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "abc1234"; $4 = "ci-a=v1.31.0,ci-b=v1.30.0" } { print }' "$D/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt"
+	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "abc1234"; $4 = "ci-a=v1.31.0,ci-b=v1.30.0"; if (NF >= 9) $9 = "000000000000" } { print }' "$D/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt"
 	mv "${BATS_TEST_TMPDIR}/r.txt" "$D/resumes.txt"
 	first="$(sed -n 's/^# HARNESS_SHA=//p' "$TSV" | head -n 1)"
 	ra="$(awk -F'\t' 'NR == 2 { print $1 }' "$D/resumes.txt")"
@@ -419,9 +419,9 @@ incomplete_dir() {
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = "[\"${first}\",\"abc1234\"]" ]
 	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = "mixed:${first},abc1234" ]
 	[ "$(jq -r '.metadata.report_harness_sha' <<<"$output")" = "$rh" ]
-	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"different harness commits (HARNESS_SHA ${first},abc1234; a --resume's included, see the attempts)"* ]]
+	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"ran on different harnesses (HARNESS_SHA ${first},abc1234; a --resume's included, see the attempts)"* ]]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"A --resume ran on other Kubernetes server versions than the first run (ci-a v1.30.0 in the first run, v1.31.0 at the --resume at ${ra})"* ]]
-	[[ "$stderr" == *"WARNING: "*"different harness commits"* ]]
+	[[ "$stderr" == *"WARNING: "*"ran on different harnesses"* ]]
 	local att="the rows come from more than one run: the first run (the HARNESS_SHA and KUBE_VERSIONS of the TSV preamble), then --resume at ${ra} HARNESS_SHA=abc1234 KUBE_VERSIONS=ci-a=v1.31.0,ci-b=v1.30.0"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_line "# attempts: ${att}"
@@ -648,9 +648,10 @@ _hs() {
 	mkdir "$D/planned-cells.txt"
 	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 1 ]
-	# The console keeps the full path, and names the sweep dir after the stop.
+	# The console keeps the full path, and names the sweep dir after the stop, then the next
+	# step with that path (SWEEP_NEXT_CONSOLE; the record keeps "<sweep dir>").
 	[[ "$stderr" == *"error: could not write ${D}/planned-cells.txt, which records the cells this sweep plans; nothing was run."* ]]
-	[[ "$stderr" == *"warning: next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)."$'\n'"  sweep dir: ${D}" ]]
+	[[ "$stderr" == *"warning: next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)."$'\n'"  sweep dir: ${D}"$'\n'"  next: ./tests/controlplane/003-run-sweep.sh --resume ${D} --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none" ]]
 	# The record (shared) does not.
 	grep -qx 'STOP_REASON=could not write <sweep dir>/planned-cells.txt, which records the cells this sweep plans; nothing was run.' "$D/sweep-outcome.txt"
 	! grep -qF "$BATS_TEST_TMPDIR" "$D/sweep-outcome.txt"
@@ -980,8 +981,9 @@ tun_sweep() {
 	rm -f "$st/istio-generations-applied"
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run --separate-stderr "${ROOT}/tests/tuning/002-revert-profile.sh" --state-dir "$st"
 	assert_success
-	assert_output --partial "note: no istio-generations-applied in the state dir (001 stopped before its apply settled, or an older 001 wrote it): no check that the Istio CR was left alone during the pass"
+	assert_output --partial "note: no istio-generations-applied in the state dir (001 stopped before its apply settled, could not write it, or an older 001 ran): no check that the Istio CR was left alone during the pass"
 	[ ! -e "$st/istio-edited-during-pass" ]
+	[ "$(<"$st/istio-generations-unchecked")" = "every member (no istio-generations-applied in the state dir)" ]
 }
 
 # ---------------------------------------------------------------------------

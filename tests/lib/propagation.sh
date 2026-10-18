@@ -18,19 +18,22 @@
 #                                       prop_drop_reason(maxskew) -> "" when the row counts
 #                                         for P2 and P3, else why it is dropped, from the
 #                                         remote side only: remote_status (22) when not
-#                                         OK, else remote_scrape_skew>MAX (23). A row with no
+#                                         OK or DRAIN_TIMEOUT (which counts), else
+#                                         remote_scrape_skew>MAX (23). A row with no
 #                                         remote (remote_status N/A) measures only P1, so
 #                                         prop_p1_drop_reason decides it. A TSV from before
 #                                         columns 22-23 has no remote-only verdict: its row
-#                                         status when not OK, else restarted=1|unknown, else
-#                                         scrape_skew>MAX (field 19); never p1_overflow, a
-#                                         source histogram (on a row with no remote too)
+#                                         status when not OK or DRAIN_TIMEOUT, else
+#                                         restarted=1|unknown, else scrape_skew>MAX (field
+#                                         19); never p1_overflow, a source histogram (on a
+#                                         row with no remote too)
 #                                       prop_p1_drop_reason(maxskew) -> "" when the row's
 #                                         iteration has a P1 sample, else why not, from the
 #                                         source-side columns only: p1_status (20) when
-#                                         not OK, else p1_overflow, else p1_scrape_skew>MAX
-#                                         (21); a TSV from before them (19 columns): the
-#                                         status, restarted, p1_overflow and skew of the row
+#                                         not OK or DRAIN_TIMEOUT, else p1_overflow, else
+#                                         p1_scrape_skew>MAX (21); a TSV from before them
+#                                         (19 columns): the status (DRAIN_TIMEOUT counts),
+#                                         restarted, p1_overflow and skew of the row
 #                                       prop_p1_first(maxskew) -> 1 on the row that carries
 #                                         its iteration's P1, 0 on the others: P1 (p1_ms and
 #                                         the P1 convergence histogram) is measured once per
@@ -65,11 +68,15 @@
 # with no remote. Older TSVs: 18 columns (no p2_dirty or skew: p2_dirty reads 0, no skew
 # gate), 19 (no p1_status or p1_scrape_skew_ms), 21 (no remote_status or
 # remote_scrape_skew_ms).
-# A status is OK or the reason the side is left out: TIMEOUT_P1/P2/P3/ALL, RESTART,
-# RESTART_UNKNOWN, DRAIN_TIMEOUT (the drain after the iteration timed out), NOT_DRAINED (a
-# canary endpoint was already healthy on that side's watcher before t0), SCRAPE_INCOMPLETE,
-# or a placeholder's SETUP_FAILED / PROBE_FAILED. Every rule below drops any status other
-# than OK, so a new status needs no change here.
+# A status is OK, DRAIN_TIMEOUT (the drain after the iteration timed out; the side was
+# otherwise OK: 002 sets it only over OK) or the reason the side is left out:
+# TIMEOUT_P1/P2/P3/ALL, RESTART, RESTART_UNKNOWN, NOT_DRAINED (a canary endpoint was
+# already healthy on that side's watcher before t0), SCRAPE_INCOMPLETE, or a placeholder's
+# SETUP_FAILED / PROBE_FAILED. A DRAIN_TIMEOUT side counts: its values were measured
+# before that drain, and the next iteration settles before its baseline (and is
+# NOT_DRAINED if the endpoint is still there), so dropping them would only cut the slow
+# tail (a slow removal and a slow add share istiod's push path). Every rule below drops
+# any status other than these two, so a new status needs no change here.
 # shellcheck shell=bash
 
 # shellcheck disable=SC2034  # read by the scripts that source this file
@@ -88,15 +95,16 @@ prop_placeholder_row() {
 # shellcheck disable=SC2016,SC2034  # awk source, read by the scripts that source this file
 PROP_ROW_AWK='
 # prop_legacy_reason_(maxskew, p1): the row rule of a TSV from before the remote-side
-# verdict (columns 22-23): its status, restarted, then p1_overflow only when p1 is set
-# (the P1 rule, or a row with no remote), then its scrape skew (field 19).
+# verdict (columns 22-23): its status (DRAIN_TIMEOUT counts), restarted, then p1_overflow
+# only when p1 is set (the P1 rule, or a row with no remote), then its scrape skew (field
+# 19).
 function prop_legacy_reason_(maxskew, p1,    st, ov, rs, sk) {
 	st = $10
 	ov = ($15 == "") ? "0" : $15
 	rs = ($16 == "") ? "0" : $16
 	sk = (NF >= 19 && $19 ~ /^[0-9]+$/) ? ($19 + 0) : -1
 	if (maxskew == "") maxskew = 1000
-	if (st != "" && st != "OK") return st
+	if (st != "" && st != "OK" && st != "DRAIN_TIMEOUT") return st
 	if (rs == "1" || rs == "unknown") return "restarted=" rs
 	if (p1 && ov == "1") return "p1_overflow"
 	# A pre-gate TSV row (status OK) whose skew exceeds the current ceiling.
@@ -110,7 +118,7 @@ function prop_drop_reason(maxskew,    st, sk) {
 	if (st == "N/A") return prop_p1_drop_reason(maxskew)
 	if (maxskew == "") maxskew = 1000
 	sk = ($23 ~ /^[0-9]+$/) ? ($23 + 0) : -1
-	if (st != "OK") return (st == "" ? "remote_status=missing" : st)
+	if (st != "OK" && st != "DRAIN_TIMEOUT") return (st == "" ? "remote_status=missing" : st)
 	if (sk >= 0 && sk > maxskew + 0) return "remote_scrape_skew>" maxskew
 	return ""
 }
@@ -120,7 +128,7 @@ function prop_p1_drop_reason(maxskew,    st, ov, sk) {
 	st = $20
 	ov = ($15 == "") ? "0" : $15
 	sk = ($21 ~ /^[0-9]+$/) ? ($21 + 0) : -1
-	if (st != "OK") return (st == "" ? "p1_status=missing" : st)
+	if (st != "OK" && st != "DRAIN_TIMEOUT") return (st == "" ? "p1_status=missing" : st)
 	if (ov == "1") return "p1_overflow"
 	if (sk >= 0 && sk > maxskew + 0) return "p1_scrape_skew>" maxskew
 	return ""

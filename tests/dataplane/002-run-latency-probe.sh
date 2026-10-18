@@ -143,6 +143,7 @@ Environment:
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
   long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
   DATAPLANE_TEST_NAMESPACE, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
   DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200,
@@ -288,9 +289,10 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-# harness_sha (tests/lib/common.sh): a harness with uncommitted changes reads
-# <describe>-dirty.<8hex>; this probe's own results do not count.
-HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
+# harness_read (tests/lib/common.sh): HARNESS_SHA (a harness with uncommitted changes reads
+# <describe>-dirty.<8hex>) and HARNESS_CONTENT_KEY from one read; this probe's own results
+# do not count.
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then
@@ -354,10 +356,14 @@ done
 PF_PIDS=()
 ISTIOD_DIR="$(mktemp -d)"
 tmp_tsv=""
+# LOAD_POD: the client pod while a `fortio load` runs in it (the warmup, a window).
+LOAD_POD=""
 # Also on a SIGTERM the sweep forwards (sweep_step): bash runs the EXIT trap on a fatal
-# signal it does not trap and still dies of it (143). tmp_tsv sits next to the TSV.
+# signal it does not trap and still dies of it (143). tmp_tsv sits next to the TSV. A load
+# still running in the client pod is stopped (fortio_client_stop).
 cleanup_all() {
 	local pid
+	[[ -z "${LOAD_POD:-}" ]] || fortio_client_stop "$SOURCE_CTX" "$NS" "$LOAD_POD" "${KUBECTL[@]}"
 	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
@@ -372,6 +378,7 @@ trap cleanup_all EXIT
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# DATE=$(date -u -Iseconds)"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
+	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 	istio_version_kv | sed 's/^/# /'
 	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 	echo "# FORTIO_IMAGE=${FORTIO_IMAGE}"
@@ -481,7 +488,8 @@ declare -A REACH_STATUS=() REACH_PCT=()
 for rctx in "${ALL_CTXS[@]}"; do REACH_STATUS["$rctx"]=UNCHECKED; REACH_PCT["$rctx"]=N/A; done
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every target (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "SUITE=dataplane" \
+	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
+		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
@@ -594,9 +602,11 @@ if ((WARMUP_DURATION > 0)); then
 	done
 	for wurl in ${WARMUP_URLS[@]+"${WARMUP_URLS[@]}"}; do
 		echo "  warmup -> $wurl"
+		LOAD_POD="$CLIENT_POD"
 		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" \
 			>/dev/null 2>&1 || echo "  warn: warmup failed for $wurl" >&2
+		LOAD_POD=""
 	done
 	echo ""
 fi
@@ -608,9 +618,11 @@ run_fortio() {
 	for qps in "${QPS_ARR[@]}"; do
 		echo "  QPS=$qps -> $target_url"
 		local json_output
+		LOAD_POD="$CLIENT_POD"
 		json_output=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps "$qps" -c "$CONNECTIONS" -t "${DURATION}s" -p '50,90,99,99.9' \
 			-json - -quiet "$target_url" 2>/dev/null) || {
+			LOAD_POD=""
 			echo "    FAILED"
 			# Nothing was measured: qps_actual and every latency are N/A, never 0.
 			printf '%s\t%s\t%s\t%s\t%s\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tFAILED\tN/A\t%s\t%s\n' \
@@ -618,6 +630,7 @@ run_fortio() {
 				"$CONNECTIONS" "$DURATION" "${ISTIOD_RESTARTED_TAG:-unknown}" "$target_class" >> "$TSV_FILE"
 			continue
 		}
+		LOAD_POD=""
 
 		# Parsing and the row status live in tests/lib/fortio.sh.
 		local qps_actual p50 p90 p99 p999 max_lat pct_200 ret_codes status

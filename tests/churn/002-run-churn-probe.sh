@@ -105,6 +105,7 @@ Environment:
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
   long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
   CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
   CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
   CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).
@@ -248,15 +249,16 @@ done
 ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
-# HARNESS_SHA and the Istio version keys are recorded here so 004 reports the run's
-# commit and Istio version, not the report host's (the 003 placeholder writes the same
-# keys, PL36); this probe's own results do not count.
-HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
+# HARNESS_SHA, HARNESS_CONTENT_KEY and the Istio version keys are recorded here so 004
+# reports the run's harness and Istio version, not the report host's (the 003 placeholder
+# writes the same keys, PL36); this probe's own results do not count.
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # HARNESS_SHA=${HARNESS_SHA}
+# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}
 $(istio_version_kv | sed 's/^/# /')
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
 # CHURN_SCALE_SCOPE=source

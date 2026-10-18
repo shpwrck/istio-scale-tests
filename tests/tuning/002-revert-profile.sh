@@ -5,10 +5,12 @@
 # anything, it compares the members' Istio CR and IstioRevision generations with the ones
 # 001 recorded once its apply settled: one that moved means something else edited the
 # Istio CR during the pass (warned, and written to istio-edited-during-pass in the state
-# dir, which 003-run-tuning-sweep.sh reports as a problem); the revert still runs. It
-# writes revert-started in the state dir before its first change: a re-run (after a
-# revert that stopped partway) skips that comparison, since its own first run may have
-# patched the Istio CR already, and keeps what that run found.
+# dir, which 003-run-tuning-sweep.sh reports as a problem); the revert still runs. A member
+# whose generations could not be read, now or then, is not compared: warned, and written to
+# istio-generations-unchecked, which 003 notes. It writes revert-started in the state dir
+# before its first change: a re-run (after a revert that stopped partway) skips that
+# comparison, since its own first run may have patched the Istio CR already, and keeps
+# what that run found.
 #
 # Usage:
 #   ./tests/tuning/002-revert-profile.sh --state-dir DIR [--contexts CSV] [options]
@@ -53,13 +55,16 @@ Environment:
                                         istio-ca-root-cert to appear in it.
 
 Before the revert it compares the members' Istio CR and IstioRevision generations with
-the ones 001 recorded after its apply (istio-generations-applied in the state dir). A
-generation that moved means something else edited the Istio CR during the pass (Argo CD
-not paused, another operator, an OSSM operator upgrade): it warns and writes
-istio-edited-during-pass in the state dir (003-run-tuning-sweep.sh then fails the sweep,
-exit 4), and the revert still runs. Its exit status does not change. A re-run after a
-revert that stopped partway (revert-started in the state dir: it may have patched the
-Istio CR already) skips this comparison, with a note, and keeps what the first run found.
+the ones recorded after the apply (istio-generations-applied in the state dir: 001's,
+or 003-run-tuning-sweep.sh's read once the apply settled). A generation that moved means
+something else edited the Istio CR during the pass (Argo CD not paused, another
+operator, an OSSM operator upgrade): it warns and writes istio-edited-during-pass in the
+state dir (003-run-tuning-sweep.sh then fails the sweep, exit 4), and the revert still
+runs. A member whose generations could not be read (now or then) is not compared: it
+warns and writes istio-generations-unchecked (003 adds a note to its outcome). Its exit
+status does not change. A re-run after a revert that stopped partway (revert-started in
+the state dir: it may have patched the Istio CR already) skips this comparison, with a
+note, and keeps what the first run found.
 
 Exit status: 0 reverted and checked, 1 error, 3 the post-revert check failed.
 EOF
@@ -140,9 +145,18 @@ ns_probe() {
 if [[ -e "${STATE_DIR}/revert-started" ]]; then
 	echo "    note: a revert of this apply started before ($(head -n 1 "${STATE_DIR}/revert-started" 2>/dev/null || echo "time unknown")) and may have patched the Istio CR already: no check that it was left alone during the pass (that run's finding, if any, stays in istio-edited-during-pass)"
 elif [[ -s "${STATE_DIR}/istio-generations-applied" ]]; then
-	rm -f "${STATE_DIR}/istio-edited-during-pass"
-	gen_moved="$(istio_generations_diff "$(<"${STATE_DIR}/istio-generations-applied")" \
-		"$(istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")")"
+	rm -f "${STATE_DIR}/istio-edited-during-pass" "${STATE_DIR}/istio-generations-unchecked"
+	gen_applied="$(<"${STATE_DIR}/istio-generations-applied")"
+	gen_now="$(istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
+	gen_moved="$(istio_generations_diff "$gen_applied" "$gen_now")"
+	# A member whose generations could not be read (now, or when the apply settled) is not
+	# compared: say so, and leave it in istio-generations-unchecked for 003's outcome.
+	gen_unchecked="$(istio_generations_diff --unchecked "$gen_applied" "$gen_now")"
+	if [[ -n "$gen_unchecked" ]]; then
+		printf '%s\n' "$gen_unchecked" >"${STATE_DIR}/istio-generations-unchecked" \
+			|| echo "warn: could not write ${STATE_DIR}/istio-generations-unchecked" >&2
+		echo "warning: the Istio CR generations of a member could not be compared with the ones recorded once the apply of ${PROFILE_NAME} settled (a read failed): ${gen_unchecked}. An edit of its Istio CR during the pass is not ruled out (istio-generations-unchecked in the state dir). Reverting anyway." >&2
+	fi
 	if [[ -n "$gen_moved" ]]; then
 		printf '%s\n' "$gen_moved" >"${STATE_DIR}/istio-edited-during-pass" \
 			|| echo "warn: could not write ${STATE_DIR}/istio-edited-during-pass" >&2
@@ -151,7 +165,9 @@ elif [[ -s "${STATE_DIR}/istio-generations-applied" ]]; then
 	fi
 else
 	rm -f "${STATE_DIR}/istio-edited-during-pass"
-	echo "    note: no istio-generations-applied in the state dir (001 stopped before its apply settled, or an older 001 wrote it): no check that the Istio CR was left alone during the pass"
+	echo "    note: no istio-generations-applied in the state dir (001 stopped before its apply settled, could not write it, or an older 001 ran): no check that the Istio CR was left alone during the pass"
+	printf '%s\n' "every member (no istio-generations-applied in the state dir)" >"${STATE_DIR}/istio-generations-unchecked" \
+		|| echo "warn: could not write ${STATE_DIR}/istio-generations-unchecked" >&2
 fi
 # Before the first change: a re-run of this revert knows one started.
 date -u +%Y-%m-%dT%H:%M:%SZ >"${STATE_DIR}/revert-started" \
