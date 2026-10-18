@@ -27,6 +27,12 @@ data "external" "cluster_api_url" {
 locals {
   use_kubeconfig = var.cluster_provider == "kubeconfig"
 
+  # kubernetes: upstream Argo CD, cluster Secrets, upstream operator charts. openshift:
+  # OpenShift GitOps, ACM and OLM operators (the only choice on ROSA).
+  platform         = coalesce(var.platform, var.cluster_provider == "rosa" ? "openshift" : "kubernetes")
+  is_openshift     = local.platform == "openshift"
+  gitops_namespace = coalesce(var.gitops_namespace, local.is_openshift ? "openshift-gitops" : "argocd")
+
   # Content hash of each local chart, passed as a release value: the helm
   # provider only upgrades on value or chart-version changes, so without this
   # an edited chart file would never roll out on apply.
@@ -53,7 +59,7 @@ locals {
   by_cluster = (
     local.use_kubeconfig
     ? { for ctx in local.cluster_keys : ctx => {
-      cluster_api_url = data.external.cluster_api_url[ctx].result.url
+      cluster_api_url = lookup(var.cluster_api_url_overrides, ctx, data.external.cluster_api_url[ctx].result.url)
       }
     }
     : data.terraform_remote_state.rosa[0].outputs.by_cluster

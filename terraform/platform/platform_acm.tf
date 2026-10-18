@@ -1,11 +1,11 @@
 # --------------------------------------------------------------------------
-# ACM hub — operator, MultiClusterHub, KlusterletConfig
+# ACM hub — operator, MultiClusterHub, KlusterletConfig (platform openshift only)
 # --------------------------------------------------------------------------
 
 # --- ACM namespace ---
 
 resource "kubernetes_manifest" "acm_namespace" {
-  count    = var.acm_install_operator ? 1 : 0
+  count    = local.is_openshift && var.acm_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -27,7 +27,7 @@ resource "kubernetes_manifest" "acm_namespace" {
 # --- ACM operator (OLM OperatorGroup + Subscription) ---
 
 resource "kubernetes_manifest" "acm_operator_group" {
-  count    = var.acm_install_operator ? 1 : 0
+  count    = local.is_openshift && var.acm_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -46,7 +46,7 @@ resource "kubernetes_manifest" "acm_operator_group" {
 }
 
 resource "kubernetes_manifest" "acm_subscription" {
-  count    = var.acm_install_operator ? 1 : 0
+  count    = local.is_openshift && var.acm_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -80,7 +80,7 @@ resource "kubernetes_manifest" "acm_subscription" {
 }
 
 resource "terraform_data" "acm_csv_cleanup" {
-  count = var.acm_install_operator ? 1 : 0
+  count = local.is_openshift && var.acm_install_operator ? 1 : 0
 
   input = {
     token_script    = local.token_script
@@ -112,6 +112,8 @@ resource "terraform_data" "acm_csv_cleanup" {
 }
 
 resource "time_sleep" "wait_acm_operator" {
+  count = local.is_openshift ? 1 : 0
+
   # Through the cleanup hook, so on destroy the CSV cleanup runs only after
   # everything that needs the operator (MultiClusterHub, spokes) is gone.
   depends_on      = [terraform_data.acm_csv_cleanup]
@@ -121,6 +123,7 @@ resource "time_sleep" "wait_acm_operator" {
 # --- MultiClusterHub ---
 
 resource "helm_release" "acm_multicluster_hub" {
+  count    = local.is_openshift ? 1 : 0
   provider = helm.hub
 
   name             = "acm-multicluster-hub"
@@ -149,6 +152,8 @@ resource "helm_release" "acm_multicluster_hub" {
 }
 
 resource "time_sleep" "wait_acm_multicluster_hub" {
+  count = local.is_openshift ? 1 : 0
+
   depends_on      = [helm_release.acm_multicluster_hub]
   create_duration = "120s"
 }
@@ -156,7 +161,7 @@ resource "time_sleep" "wait_acm_multicluster_hub" {
 # --- KlusterletConfig ---
 
 resource "helm_release" "acm_klusterlet_config" {
-  count    = var.acm_install_klusterletconfig ? 1 : 0
+  count    = local.is_openshift && var.acm_install_klusterletconfig ? 1 : 0
   provider = helm.hub
 
   name             = "acm-klusterlet-config"
@@ -188,6 +193,8 @@ resource "helm_release" "acm_klusterlet_config" {
 }
 
 resource "time_sleep" "wait_acm_ocm_webhook" {
+  count = local.is_openshift ? 1 : 0
+
   depends_on      = [time_sleep.wait_acm_multicluster_hub]
   create_duration = "120s"
 }

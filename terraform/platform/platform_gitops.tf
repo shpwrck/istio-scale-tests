@@ -1,11 +1,85 @@
 # --------------------------------------------------------------------------
-# OpenShift GitOps — operator, ArgoCD config, ACM GitOps wiring
+# Argo CD — upstream chart (kubernetes) or OpenShift GitOps operator, ArgoCD config
+# and ACM GitOps wiring (openshift); cluster Secrets and the app-of-apps (both)
 # --------------------------------------------------------------------------
 
-# --- GitOps operator (OLM Subscription) ---
+# --- kubernetes: upstream Argo CD (argo-cd Helm chart) ---
+# charts/argocd-config/values.yaml is the one place the hub's Argo CD tuning is set: on
+# openshift it becomes the ArgoCD CR, on kubernetes Terraform maps it onto the argo-cd
+# chart's values here. The release is named argocd, so the controllers' ServiceAccounts
+# are argocd-application-controller and argocd-applicationset-controller, the names the
+# charts' RBAC defaults expect.
+
+locals {
+  argocd_tuning = yamldecode(file("${local.charts_dir}/argocd-config/values.yaml")).argocd
+
+  argocd_upstream_values = {
+    dex           = { enabled = false }
+    notifications = { enabled = false }
+    configs = {
+      cm = merge(
+        {
+          "timeout.reconciliation" = local.argocd_tuning.controller.appSync
+          # Replaces the chart's default list, as resourceExclusions does on openshift.
+          "resource.exclusions" = yamlencode(local.argocd_tuning.resourceExclusions)
+        },
+        { for h in local.argocd_tuning.resourceHealthChecks :
+          "resource.customizations.health.${h.group}_${h.kind}" => h.check
+        },
+      )
+      params = {
+        "controller.status.processors"    = local.argocd_tuning.controller.processors.status
+        "controller.operation.processors" = local.argocd_tuning.controller.processors.operation
+        "controller.sharding.algorithm"   = local.argocd_tuning.controller.shardingAlgorithm
+        # No chart needs the repo's git submodules (the bats test frameworks on github.com).
+        # Cloning them for every render fails wherever github.com is unreachable (a git mirror).
+        "reposerver.enable.git.submodule"               = "false"
+        "applicationsetcontroller.enable.git.submodule" = "false"
+      }
+    }
+    # A fixed replica count: each controller shards the clusters by
+    # ARGOCD_CONTROLLER_REPLICAS, with no operator rescaling it mid-apply.
+    controller = {
+      replicas  = local.argocd_computed_min_shards
+      resources = local.argocd_tuning.controller.resources
+    }
+    repoServer = {
+      replicas  = local.argocd_tuning.repo.replicas
+      resources = local.argocd_tuning.repo.resources
+    }
+    server         = { resources = local.argocd_tuning.server.resources }
+    applicationSet = { resources = local.argocd_tuning.applicationSetResources }
+  }
+}
+
+resource "helm_release" "argocd" {
+  count    = local.gitops_enabled && !local.is_openshift && var.gitops_install_operator ? 1 : 0
+  provider = helm.hub
+
+  name             = "argocd"
+  repository       = var.argocd_chart_repository
+  chart            = "argo-cd"
+  version          = var.argocd_chart_version
+  namespace        = local.gitops_namespace
+  create_namespace = true
+  wait             = true
+  timeout          = 900
+
+  # Helm deep-merges the documents in order, so argocd_helm_values overrides any key.
+  values = [yamlencode(local.argocd_upstream_values), yamlencode(var.argocd_helm_values)]
+
+  lifecycle {
+    precondition {
+      condition     = length(keys(var.argocd_config_values)) == 0
+      error_message = "argocd_config_values sets the OpenShift GitOps ArgoCD CR (platform openshift). On platform kubernetes put the same settings in argocd_helm_values, in the argo-cd chart's schema (e.g. controller.resources)."
+    }
+  }
+}
+
+# --- openshift: GitOps operator (OLM Subscription) ---
 
 resource "kubernetes_manifest" "gitops_subscription" {
-  count    = local.gitops_enabled && var.gitops_install_operator ? 1 : 0
+  count    = local.gitops_enabled && local.is_openshift && var.gitops_install_operator ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -39,7 +113,7 @@ resource "kubernetes_manifest" "gitops_subscription" {
 }
 
 resource "terraform_data" "gitops_csv_cleanup" {
-  count = local.gitops_enabled && var.gitops_install_operator ? 1 : 0
+  count = local.gitops_enabled && local.is_openshift && var.gitops_install_operator ? 1 : 0
 
   input = {
     token_script    = local.token_script
@@ -71,7 +145,7 @@ resource "terraform_data" "gitops_csv_cleanup" {
 }
 
 resource "time_sleep" "wait_gitops_operator" {
-  count = local.gitops_enabled ? 1 : 0
+  count = local.gitops_enabled && local.is_openshift ? 1 : 0
 
   # Through the cleanup hook, so on destroy the CSV cleanup runs only after the
   # ArgoCD CR (whose finalizer the operator handles) and all apps are gone.
@@ -80,21 +154,21 @@ resource "time_sleep" "wait_gitops_operator" {
 }
 
 resource "time_sleep" "wait_argocd_stabilized" {
-  count = local.gitops_enabled ? 1 : 0
+  count = local.gitops_enabled && local.is_openshift ? 1 : 0
 
   depends_on      = [time_sleep.wait_gitops_operator]
   create_duration = var.gitops_install_operator ? "300s" : "0s"
 }
 
-# --- ArgoCD configuration (resource limits + ApplicationSet) ---
+# --- openshift: ArgoCD configuration (resource limits + ApplicationSet) ---
 
 resource "helm_release" "argocd_config" {
-  count    = local.gitops_enabled ? 1 : 0
+  count    = local.gitops_enabled && local.is_openshift ? 1 : 0
   provider = helm.hub
 
   name             = "argocd-config"
   chart            = "${path.module}/../../charts/argocd-config"
-  namespace        = var.gitops_namespace
+  namespace        = local.gitops_namespace
   create_namespace = false
   take_ownership   = true
   wait             = true
@@ -152,10 +226,10 @@ resource "helm_release" "argocd_config" {
   depends_on = [time_sleep.wait_argocd_stabilized]
 }
 
-# --- RHACM ApplicationSet-in-any-namespace RBAC ---
+# --- openshift: RHACM ApplicationSet-in-any-namespace RBAC ---
 
 resource "kubernetes_manifest" "appset_cluster_role" {
-  count    = local.gitops_enabled && var.gitops_rhacm_appset_any_namespace ? 1 : 0
+  count    = local.gitops_enabled && local.is_openshift && var.gitops_rhacm_appset_any_namespace ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -222,7 +296,7 @@ resource "kubernetes_manifest" "appset_cluster_role" {
 }
 
 resource "kubernetes_manifest" "appset_cluster_role_binding" {
-  count    = local.gitops_enabled && var.gitops_rhacm_appset_any_namespace ? 1 : 0
+  count    = local.gitops_enabled && local.is_openshift && var.gitops_rhacm_appset_any_namespace ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -245,7 +319,7 @@ resource "kubernetes_manifest" "appset_cluster_role_binding" {
       {
         kind      = "ServiceAccount"
         name      = "openshift-gitops-applicationset-controller"
-        namespace = var.gitops_namespace
+        namespace = local.gitops_namespace
       },
     ]
   }
@@ -253,15 +327,15 @@ resource "kubernetes_manifest" "appset_cluster_role_binding" {
   depends_on = [kubernetes_manifest.appset_cluster_role]
 }
 
-# --- ACM GitOps resources (ManagedClusterSetBinding, Placement, etc.) ---
+# --- openshift: ACM GitOps resources (ManagedClusterSetBinding, Placement, etc.) ---
 
 resource "helm_release" "acm_gitops_resources" {
-  count    = local.gitops_enabled ? 1 : 0
+  count    = local.gitops_enabled && local.is_openshift ? 1 : 0
   provider = helm.hub
 
   name             = "acm-openshift-gitops-resources"
   chart            = "${path.module}/../../charts/acm-openshift-gitops-resources"
-  namespace        = var.gitops_namespace
+  namespace        = local.gitops_namespace
   create_namespace = true
   take_ownership   = true
   wait             = true
@@ -272,7 +346,7 @@ resource "helm_release" "acm_gitops_resources" {
   set = [
     {
       name  = "gitopsNamespace"
-      value = var.gitops_namespace
+      value = local.gitops_namespace
     },
     {
       name  = "clusterSet"
@@ -304,7 +378,7 @@ resource "kubernetes_manifest" "gitops_repo_credentials" {
     kind       = "Secret"
     metadata = {
       name      = var.gitops_app_repo_credentials_secret_name
-      namespace = var.gitops_namespace
+      namespace = local.gitops_namespace
       labels = {
         "argocd.argoproj.io/secret-type" = "repository"
       }
@@ -332,7 +406,7 @@ resource "kubernetes_manifest" "gitops_repo_credentials" {
     force_conflicts = true
   }
 
-  depends_on = [time_sleep.wait_argocd_stabilized]
+  depends_on = [time_sleep.wait_argocd_stabilized, helm_release.argocd]
 }
 
 # --- Hub app-of-apps (Argo CD root Application) ---
@@ -343,7 +417,7 @@ resource "helm_release" "gitops_hub_app_of_apps" {
 
   name             = "gitops-hub-app-of-apps"
   chart            = "${path.module}/../../charts/gitops-hub-app-of-apps"
-  namespace        = var.gitops_namespace
+  namespace        = local.gitops_namespace
   create_namespace = false
   take_ownership   = true
   wait             = true
@@ -353,7 +427,8 @@ resource "helm_release" "gitops_hub_app_of_apps" {
   # Helm deep-merges an override of the same app into them (Terraform's merge() is
   # shallow, and a later -var-file replaces the whole gitops_app_overrides map).
   values = [yamlencode({
-    gitopsNamespace = var.gitops_namespace
+    platform        = local.platform
+    gitopsNamespace = local.gitops_namespace
     repo = {
       url      = var.gitops_app_repo_url
       revision = var.gitops_app_repo_revision
@@ -362,12 +437,12 @@ resource "helm_release" "gitops_hub_app_of_apps" {
     yamlencode({ apps = var.gitops_app_overrides }),
   yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-app-of-apps"] })]
 
-  depends_on = [helm_release.acm_gitops_resources, kubernetes_manifest.gitops_repo_credentials]
+  depends_on = [helm_release.acm_gitops_resources, helm_release.argocd, kubernetes_manifest.gitops_repo_credentials]
 }
 
 # --- Mesh-wiring health gate ApplicationSet ---
-# Deploys charts/mesh-wiring-verify on every istio-mesh-member (reuses
-# acm-openshift-gitops-placement, requireMeshMemberLabel=true). Each member runs
+# Deploys charts/mesh-wiring-verify on every istio-mesh-member (the cluster Secret label;
+# on openshift acm-openshift-gitops-placement, requireMeshMemberLabel=true). Each member runs
 # a readiness-gated pod that goes NotReady — flipping its Argo Application
 # Degraded — when it is missing remote secrets or istiod has not synced every
 # cluster. This surfaces partial ESO PushSecret fan-out, which both Argo
@@ -382,13 +457,17 @@ resource "helm_release" "mesh_wiring_verify_appset" {
 
   name             = "mesh-wiring-verify-appset"
   chart            = "${path.module}/../../charts/gitops-hub-ocm-placement-appset"
-  namespace        = var.gitops_namespace
+  namespace        = local.gitops_namespace
   create_namespace = false
   take_ownership   = true
   wait             = true
   timeout          = 300
 
-  values = [file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml"), yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-ocm-placement-appset"] })]
+  values = [
+    file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml"),
+    file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/platform-${local.platform}.yaml"),
+    yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-ocm-placement-appset"] }),
+  ]
 
   set = [
     {
@@ -414,11 +493,17 @@ resource "helm_release" "mesh_wiring_verify_appset" {
     },
   ]
 
-  depends_on = [helm_release.acm_gitops_resources, helm_release.acm_managed_cluster]
+  depends_on = [helm_release.acm_gitops_resources, helm_release.acm_managed_cluster, helm_release.argocd]
 }
 
 # --- ArgoCD cluster secrets (direct external URL, Terraform-owned) ---
-# We create these secrets ourselves instead of letting ACM's GitOpsCluster
+# kubernetes: the cluster Secrets are how the spokes join at all. The script creates a
+# ServiceAccount bound to cluster-admin on each spoke (spoke_service_account_namespace)
+# and puts its token in the Secret; mesh members carry the istio-mesh-member label the
+# ApplicationSets select. A changed input re-applies the Secret in place;
+# spoke_access_cleanup removes the Secret and the ServiceAccount on destroy.
+#
+# openshift: we create these secrets ourselves instead of letting ACM's GitOpsCluster
 # controller generate them. That controller only ever writes an unreachable
 # server URL — https://<name>-control-plane in gitops-addon/pull mode, or a
 # flaky cluster-proxy tunnel URL in push mode — and reconciles it back on every
@@ -434,42 +519,88 @@ resource "terraform_data" "create_argocd_cluster_secret" {
   for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
 
   triggers_replace = [
+    local.platform,
     local.by_cluster[each.key].cluster_api_url,
-    helm_release.acm_managed_cluster[each.key].metadata.revision,
+    contains(local.mesh_member_spoke_set, each.key),
+    try(helm_release.acm_managed_cluster[each.key].metadata.revision, ""),
   ]
 
   input = {
-    spoke_name       = each.key
-    api_url          = local.by_cluster[each.key].cluster_api_url
-    token_script     = local.token_script
-    hub_api_url      = local.hub_api_url
-    hub_admin_pass   = local.hub_admin_pass
-    kubeconfig_path  = local.kubeconfig
-    hub_context      = local.hub_cluster_key
-    spoke_context    = each.key
-    gitops_namespace = var.gitops_namespace
-    managed_sa_name  = var.gitops_managed_service_account_name
+    platform           = local.platform
+    spoke_name         = each.key
+    api_url            = local.by_cluster[each.key].cluster_api_url
+    mesh_member        = tostring(contains(local.mesh_member_spoke_set, each.key))
+    token_script       = local.token_script
+    hub_api_url        = local.hub_api_url
+    hub_admin_pass     = local.hub_admin_pass
+    kubeconfig_path    = local.kubeconfig
+    hub_context        = local.hub_cluster_key
+    spoke_context      = each.key
+    gitops_namespace   = local.gitops_namespace
+    managed_sa_name    = var.gitops_managed_service_account_name
+    spoke_sa_namespace = var.spoke_service_account_namespace
   }
 
   provisioner "local-exec" {
     command = "bash ${path.module}/../scripts/create-argocd-cluster-secret.sh"
     environment = {
-      SPOKE_NAME       = self.input.spoke_name
-      API_URL          = self.input.api_url
-      HUB_TOKEN_SCRIPT = self.input.token_script
-      HUB_API_URL      = self.input.hub_api_url
-      HUB_ADMIN_PASS   = self.input.hub_admin_pass
-      KUBECONFIG_PATH  = self.input.kubeconfig_path
-      HUB_CONTEXT      = self.input.hub_context
-      SPOKE_CONTEXT    = self.input.spoke_context
-      GITOPS_NAMESPACE = self.input.gitops_namespace
-      MANAGED_SA_NAME  = self.input.managed_sa_name
+      PLATFORM           = self.input.platform
+      SPOKE_NAME         = self.input.spoke_name
+      API_URL            = self.input.api_url
+      MESH_MEMBER        = self.input.mesh_member
+      HUB_TOKEN_SCRIPT   = self.input.token_script
+      HUB_API_URL        = self.input.hub_api_url
+      HUB_ADMIN_PASS     = self.input.hub_admin_pass
+      KUBECONFIG_PATH    = self.input.kubeconfig_path
+      HUB_CONTEXT        = self.input.hub_context
+      SPOKE_CONTEXT      = self.input.spoke_context
+      GITOPS_NAMESPACE   = self.input.gitops_namespace
+      MANAGED_SA_NAME    = self.input.managed_sa_name
+      SPOKE_SA_NAMESPACE = self.input.spoke_sa_namespace
     }
   }
 
   # wait_spoke_registration: spoke ManagedCluster registered + MSA token minted on the hub.
-  # acm_gitops_resources: openshift-gitops namespace + Argo CD instance exist to hold the secret.
-  depends_on = [time_sleep.wait_spoke_registration, helm_release.acm_gitops_resources]
+  # acm_gitops_resources / argocd: the Argo CD namespace and instance exist to hold the secret.
+  depends_on = [time_sleep.wait_spoke_registration, helm_release.acm_gitops_resources, helm_release.argocd]
+}
+
+# --- kubernetes, destroy-time cleanup: each spoke's cluster Secret and ServiceAccount ---
+# The Secret holds a cluster-admin token for the spoke. A separate resource, so a re-run of
+# create_argocd_cluster_secret (any changed input) never deletes the Secret: that would
+# drop every Application of the spoke. argocd_app_cleanup depends on it, so on destroy the
+# member Applications are deleted first, while Argo CD can still reach the spoke.
+
+resource "terraform_data" "spoke_access_cleanup" {
+  for_each = local.gitops_enabled && !local.is_openshift ? local.spoke_cluster_keys : {}
+
+  input = {
+    spoke_name         = each.key
+    kubeconfig_path    = local.kubeconfig
+    hub_context        = local.hub_cluster_key
+    spoke_context      = each.key
+    gitops_namespace   = local.gitops_namespace
+    managed_sa_name    = var.gitops_managed_service_account_name
+    spoke_sa_namespace = var.spoke_service_account_namespace
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "bash ${path.module}/../scripts/create-argocd-cluster-secret.sh"
+    environment = {
+      ACTION             = "delete"
+      PLATFORM           = "kubernetes"
+      SPOKE_NAME         = self.input.spoke_name
+      KUBECONFIG_PATH    = self.input.kubeconfig_path
+      HUB_CONTEXT        = self.input.hub_context
+      SPOKE_CONTEXT      = self.input.spoke_context
+      GITOPS_NAMESPACE   = self.input.gitops_namespace
+      MANAGED_SA_NAME    = self.input.managed_sa_name
+      SPOKE_SA_NAMESPACE = self.input.spoke_sa_namespace
+    }
+  }
+
+  depends_on = [terraform_data.create_argocd_cluster_secret]
 }
 
 # --- Argo CD controller restart after the cluster secrets (BACKLOG 9.1) ---
@@ -482,7 +613,7 @@ resource "terraform_data" "create_argocd_cluster_secret" {
 # the member Applications. Re-runs whenever a cluster secret is re-created.
 
 resource "terraform_data" "argocd_controller_reshard" {
-  count = local.gitops_enabled && var.argocd_restart_controller_after_cluster_secrets && length(local.spoke_cluster_keys) > 0 ? 1 : 0
+  count = local.gitops_enabled && local.is_openshift && var.argocd_restart_controller_after_cluster_secrets && length(local.spoke_cluster_keys) > 0 ? 1 : 0
 
   triggers_replace = [for k in sort(keys(local.spoke_cluster_keys)) : terraform_data.create_argocd_cluster_secret[k].id]
 
@@ -492,7 +623,7 @@ resource "terraform_data" "argocd_controller_reshard" {
     hub_admin_pass   = local.hub_admin_pass
     kubeconfig_path  = local.kubeconfig
     hub_context      = local.hub_cluster_key
-    gitops_namespace = var.gitops_namespace
+    gitops_namespace = local.gitops_namespace
     argocd_name      = var.gitops_argocd_cr_name
   }
 
@@ -533,8 +664,8 @@ resource "terraform_data" "argocd_app_status_check" {
     hub_admin_pass   = local.hub_admin_pass
     kubeconfig_path  = local.kubeconfig
     hub_context      = local.hub_cluster_key
-    gitops_namespace = var.gitops_namespace
-    argocd_name      = var.gitops_argocd_cr_name
+    gitops_namespace = local.gitops_namespace
+    argocd_name      = local.is_openshift ? var.gitops_argocd_cr_name : "argocd"
     timeout_sec      = tostring(var.argocd_app_status_timeout_sec)
     expected_dests   = join(" ", sort(keys(local.spoke_cluster_keys)))
   }
@@ -563,13 +694,13 @@ resource "terraform_data" "argocd_app_status_check" {
   ]
 }
 
-# --- Placement-generator ConfigMap (deferred until cluster secrets exist) ---
+# --- openshift: Placement-generator ConfigMap (deferred until cluster secrets exist) ---
 # ApplicationSets use this ConfigMap to discover spoke clusters via ACM PlacementDecisions.
 # Created AFTER create_argocd_cluster_secret so that ApplicationSets only generate spoke
 # apps once the cluster secrets exist with correct external API URLs.
 
 resource "kubernetes_manifest" "placement_generator_configmap" {
-  count    = local.gitops_enabled && length(local.spoke_cluster_keys) > 0 ? 1 : 0
+  count    = local.gitops_enabled && local.is_openshift && length(local.spoke_cluster_keys) > 0 ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -577,7 +708,7 @@ resource "kubernetes_manifest" "placement_generator_configmap" {
     kind       = "ConfigMap"
     metadata = {
       name      = "acm-gitops-placement-generator"
-      namespace = var.gitops_namespace
+      namespace = local.gitops_namespace
     }
     data = {
       apiVersion    = "cluster.open-cluster-management.io/v1beta1"
@@ -595,12 +726,12 @@ resource "kubernetes_manifest" "placement_generator_configmap" {
   depends_on = [terraform_data.create_argocd_cluster_secret, terraform_data.argocd_controller_reshard]
 }
 
-# --- Destroy-time cleanup: OSSM operator CSV on spoke clusters ---
+# --- openshift, destroy-time cleanup: OSSM operator CSV on spoke clusters ---
 # Argo CD's PreDelete hook may not run if apps are force-deleted, so we
 # clean up the OSSM CSV directly on each spoke after Argo CD apps are gone.
 
 resource "terraform_data" "spoke_ossm_csv_cleanup" {
-  for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
+  for_each = local.gitops_enabled && local.is_openshift ? local.spoke_cluster_keys : {}
 
   input = {
     token_script    = local.token_script
@@ -640,12 +771,15 @@ resource "terraform_data" "argocd_app_cleanup" {
     hub_admin_pass   = local.hub_admin_pass
     kubeconfig_path  = local.kubeconfig
     hub_context      = local.hub_cluster_key
-    gitops_namespace = var.gitops_namespace
+    gitops_namespace = local.gitops_namespace
   }
 
+  # Destroyed before these: the member apps are deleted while Argo CD can still reach the
+  # spokes through their cluster Secrets.
   depends_on = [
     helm_release.gitops_hub_app_of_apps,
     terraform_data.spoke_ossm_csv_cleanup,
+    terraform_data.spoke_access_cleanup,
   ]
 
   provisioner "local-exec" {

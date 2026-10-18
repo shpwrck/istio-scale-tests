@@ -188,7 +188,7 @@ app_status() {
         echo "  Fix: delete the ${STS} pods in ${GITOPS_NS} once the StatefulSet is settled, then re-run the apply." >&2
       fi
       if [[ -n "$absent" ]]; then
-        echo "error: no Application targets these destination clusters after ${APP_STATUS_TIMEOUT_SEC}s; their ApplicationSets have not generated them (check the ACM PlacementDecisions and the Argo CD cluster Secrets):" >&2
+        echo "error: no Application targets these destination clusters after ${APP_STATUS_TIMEOUT_SEC}s; their ApplicationSets have not generated them (check the Argo CD cluster Secrets and their istio-mesh-member label; on openshift the ACM PlacementDecisions):" >&2
         printf '%s\n' "$absent" | sed 's/^/  /' >&2
       fi
       exit 1

@@ -1,11 +1,27 @@
 # --------------------------------------------------------------------------
-# Cluster provider — controls how the platform module discovers clusters
+# Platform and cluster provider — what runs on the hub and how clusters are found
 # --------------------------------------------------------------------------
+
+variable "platform" {
+  type        = string
+  default     = null
+  description = "'kubernetes': upstream Argo CD (argo-cd Helm chart) on the hub, the mesh members registered as Argo CD cluster Secrets, and the upstream cert-manager, External Secrets and Sail operator charts. 'openshift': OpenShift GitOps, ACM and the Red Hat operators (OLM). Null (the default) means openshift for cluster_provider = 'rosa', else kubernetes."
+
+  validation {
+    condition     = contains(["kubernetes", "openshift"], coalesce(var.platform, "kubernetes"))
+    error_message = "platform must be kubernetes or openshift."
+  }
+
+  validation {
+    condition     = !(var.cluster_provider == "rosa" && var.platform == "kubernetes")
+    error_message = "cluster_provider = \"rosa\" needs platform = \"openshift\" (ROSA clusters run OpenShift)."
+  }
+}
 
 variable "cluster_provider" {
   type        = string
-  default     = "rosa"
-  description = "Cluster provisioning backend. 'rosa' reads from terraform_remote_state (rosa-hcp module). 'kubeconfig' reads from a kubeconfig file with explicit context names."
+  default     = "kubeconfig"
+  description = "Cluster provisioning backend. 'kubeconfig' reads from a kubeconfig file with explicit context names (any Kubernetes or OpenShift clusters). 'rosa' reads from terraform_remote_state (rosa-hcp module)."
 
   validation {
     condition     = contains(["rosa", "kubeconfig"], var.cluster_provider)
@@ -33,7 +49,7 @@ variable "kubeconfig_path" {
 variable "hub_cluster_context" {
   type        = string
   default     = ""
-  description = "Kubeconfig context of the ACM + Argo CD management cluster (never a mesh member). Required when cluster_provider = 'kubeconfig'."
+  description = "Kubeconfig context of the management cluster: Argo CD, the mesh CA and External Secrets (ACM too on openshift). Never a mesh member. Required when cluster_provider = 'kubeconfig'."
 
   validation {
     condition     = var.cluster_provider != "kubeconfig" || var.hub_cluster_context != ""
@@ -44,11 +60,39 @@ variable "hub_cluster_context" {
 variable "spoke_cluster_contexts" {
   type        = list(string)
   default     = []
-  description = "Kubeconfig contexts of the spoke (mesh member) clusters. Context names become ManagedCluster names, so they must be DNS-1123 labels. Required when cluster_provider = 'kubeconfig'."
+  description = "Kubeconfig contexts of the spoke (mesh member) clusters. Context names become the Argo CD cluster names (and ACM ManagedCluster names on openshift), so they must be DNS-1123 labels; the test suites' per-cluster Services allow at most 46 characters. Required when cluster_provider = 'kubeconfig'."
+
+  validation {
+    condition     = alltrue([for c in var.spoke_cluster_contexts : can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", c)) && length(c) <= 63])
+    error_message = "spoke_cluster_contexts must be DNS-1123 labels (lowercase letters, digits and '-', at most 63 characters): they name the Argo CD clusters and the Istio networks. Rename a context with kubectl config rename-context (aws eks update-kubeconfig --alias for an EKS ARN)."
+  }
+}
+
+variable "cluster_api_url_overrides" {
+  type        = map(string)
+  default     = {}
+  description = "kubeconfig mode: the API URL the hub reaches a cluster at, keyed by context, when the kubeconfig's server URL works only from this machine. kind writes https://127.0.0.1:<port>; from the hub use https://<cluster>-control-plane:6443 on the kind Docker network. The URL goes into the Argo CD cluster Secret, and from there into the ESO SecretStores and the Istio remote secrets."
+
+  validation {
+    condition     = alltrue([for k, v in var.cluster_api_url_overrides : startswith(v, "https://")])
+    error_message = "cluster_api_url_overrides values must be https:// URLs."
+  }
+
+  validation {
+    condition = alltrue([for k in keys(var.cluster_api_url_overrides) :
+    var.cluster_provider == "kubeconfig" && contains(concat([var.hub_cluster_context], var.spoke_cluster_contexts), k)])
+    error_message = "cluster_api_url_overrides keys must be hub_cluster_context or one of spoke_cluster_contexts (cluster_provider = \"kubeconfig\")."
+  }
+}
+
+variable "spoke_service_account_namespace" {
+  type        = string
+  default     = "kube-system"
+  description = "platform kubernetes: namespace of the ServiceAccount (gitops_managed_service_account_name) that Terraform creates on every spoke, bound to cluster-admin. Its token authenticates Argo CD, the ESO pushes and the Istio remote secrets to the spoke. Removed again on destroy."
 }
 
 # --------------------------------------------------------------------------
-# ACM (Red Hat Advanced Cluster Management)
+# ACM (Red Hat Advanced Cluster Management), platform openshift only
 # --------------------------------------------------------------------------
 
 variable "acm_channel" {
@@ -99,43 +143,61 @@ variable "acm_keep_managed_clusters_on_destroy" {
 }
 
 # --------------------------------------------------------------------------
-# OpenShift GitOps / Argo CD
+# Argo CD (upstream on kubernetes, OpenShift GitOps on openshift)
 # --------------------------------------------------------------------------
 
 variable "enable_gitops" {
   type        = bool
   default     = true
-  description = "Install OpenShift GitOps and configure ACM GitOps wiring."
+  description = "Install Argo CD on the hub and register the spokes with it (on openshift: OpenShift GitOps and the ACM GitOps wiring)."
 }
 
 variable "gitops_namespace" {
   type        = string
-  default     = "openshift-gitops"
-  description = "Operand namespace for Argo CD, the ACM Placement, and the ManagedClusterSetBinding."
+  default     = null
+  description = "Argo CD namespace: Applications, the cluster Secrets and (openshift) the ACM Placement and ManagedClusterSetBinding. Null (the default) means argocd on kubernetes, openshift-gitops on openshift."
 }
 
 variable "gitops_install_operator" {
   type        = bool
   default     = true
-  description = "Install the OpenShift GitOps operator Subscription. Set false when the operator is already installed on the hub."
+  description = "Install Argo CD: the argo-cd Helm chart as release argocd (kubernetes) or the OpenShift GitOps operator Subscription (openshift). Set false when it is already installed on the hub; on kubernetes it must then use the upstream resource names (argocd-application-controller, argocd-applicationset-controller) in gitops_namespace."
+}
+
+variable "argocd_chart_repository" {
+  type        = string
+  default     = "https://argoproj.github.io/argo-helm"
+  description = "platform kubernetes: Helm repository of the argo-cd chart (a mirror works)."
+}
+
+variable "argocd_chart_version" {
+  type        = string
+  default     = "10.9.6"
+  description = "platform kubernetes: argo-cd chart version (10.9.6 is Argo CD v3.5.3)."
+}
+
+variable "argocd_helm_values" {
+  type        = any
+  default     = {}
+  description = "platform kubernetes: extra values for the argo-cd chart, in its own schema (e.g. smaller controller/repoServer/server resources on a small hub). Helm deep-merges them over the values Terraform derives from charts/argocd-config/values.yaml."
 }
 
 variable "gitops_operator_namespace" {
   type        = string
   default     = "openshift-operators"
-  description = "Namespace for the OpenShift GitOps operator OLM Subscription."
+  description = "platform openshift: namespace for the OpenShift GitOps operator OLM Subscription."
 }
 
 variable "gitops_operator_channel" {
   type        = string
   default     = "gitops-1.22"
-  description = "OLM subscription channel for the OpenShift GitOps operator."
+  description = "platform openshift: OLM subscription channel for the OpenShift GitOps operator."
 }
 
 variable "gitops_argocd_cr_name" {
   type        = string
   default     = "openshift-gitops"
-  description = "Name of the ArgoCD custom resource created by the GitOps operator on the hub."
+  description = "platform openshift: name of the ArgoCD custom resource created by the GitOps operator on the hub."
 }
 
 variable "gitops_app_repo_url" {
@@ -185,19 +247,19 @@ variable "gitops_app_repo_credentials_secret_name" {
 variable "argocd_config_values" {
   type        = any
   default     = {}
-  description = "Extra values for charts/argocd-config (e.g. smaller argocd.controller/repo/server resources on a small hub). The chart defaults are sized for the 20-cluster campaign."
+  description = "platform openshift: extra values for charts/argocd-config, the ArgoCD CR (e.g. smaller argocd.controller/repo/server resources on a small hub). The chart defaults are sized for the 20-cluster campaign. On kubernetes use argocd_helm_values."
 }
 
 variable "gitops_rhacm_appset_any_namespace" {
   type        = bool
   default     = true
-  description = "Enable RHACM ApplicationSet-in-any-namespace: ArgoCD applicationSet env + ClusterRole/Binding for the applicationset-controller."
+  description = "platform openshift: enable RHACM ApplicationSet-in-any-namespace: ArgoCD applicationSet env + ClusterRole/Binding for the applicationset-controller."
 }
 
 variable "argocd_clusters_per_shard" {
   type        = number
   default     = 3
-  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace. For large 3-node hubs, raise this value to keep controller shard count within hub capacity."
+  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace. On kubernetes minShards is the controller's replica count. For large 3-node hubs, raise this value to keep controller shard count within hub capacity."
 
   validation {
     condition     = var.argocd_clusters_per_shard > 0 && var.argocd_clusters_per_shard == floor(var.argocd_clusters_per_shard)
@@ -208,7 +270,7 @@ variable "argocd_clusters_per_shard" {
 variable "argocd_restart_controller_after_cluster_secrets" {
   type        = bool
   default     = true
-  description = "After the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh)."
+  description = "platform openshift: after the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh). Upstream Argo CD runs a fixed replica count, so kubernetes skips it."
 }
 
 variable "argocd_app_status_timeout_sec" {
@@ -225,7 +287,7 @@ variable "argocd_app_status_timeout_sec" {
 variable "argocd_max_shards" {
   type        = number
   default     = 20
-  description = "ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards."
+  description = "platform openshift: ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards."
 
   validation {
     condition     = var.argocd_max_shards > 0 && var.argocd_max_shards == floor(var.argocd_max_shards)
@@ -236,13 +298,13 @@ variable "argocd_max_shards" {
 variable "gitops_applicationset_source_namespaces" {
   type        = list(string)
   default     = ["open-cluster-management-global-set"]
-  description = "Namespaces merged into ArgoCD spec.applicationSet.sourceNamespaces."
+  description = "platform openshift: namespaces merged into ArgoCD spec.applicationSet.sourceNamespaces."
 }
 
 variable "gitops_managed_service_account_name" {
   type        = string
   default     = "argocd-gitops"
-  description = "ManagedServiceAccount name created per spoke (acm-managed-cluster chart). Its rotated token authenticates the Terraform-owned Argo CD cluster Secret to the spoke. The secret name follows <spoke>-<this>-cluster-secret, which the hub-kubeconfig-from-argosecret ESO chart also reads."
+  description = "The ServiceAccount whose token authenticates the Terraform-owned Argo CD cluster Secret to each spoke: on kubernetes created by Terraform in spoke_service_account_namespace, on openshift the ACM ManagedServiceAccount (acm-managed-cluster chart, rotated token). The secret name follows <spoke>-<this>-cluster-secret, which the hub-kubeconfig-from-argosecret ESO chart also reads."
 }
 
 # --------------------------------------------------------------------------
@@ -252,7 +314,7 @@ variable "gitops_managed_service_account_name" {
 variable "mesh_member_count" {
   type        = number
   default     = 0
-  description = "Number of spoke clusters to label as Istio mesh members (0 = all spokes). Spokes are labeled in sorted key order (e.g. istio-002 first when hub is istio-001)."
+  description = "Number of spoke clusters to label as Istio mesh members (0 = all spokes): the istio-mesh-member label on the Argo CD cluster Secret (on openshift, on the ManagedCluster). Spokes are labeled in sorted key order (e.g. istio-002 first when hub is istio-001)."
 
   validation {
     condition     = var.mesh_member_count >= 0
