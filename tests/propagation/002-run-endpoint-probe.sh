@@ -49,6 +49,8 @@ source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines; the dry-run's overlay
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
@@ -255,8 +257,10 @@ if ((DRY_RUN)); then
 	echo "001 creates the backer and canary Service; at t0 this probe only labels the"
 	echo "backer pod. No cluster is contacted in --dry-run."
 	echo ""
+	# The overlay 001 would add: TEST_PLATFORM's, else none (the Kubernetes render, no cluster call).
+	platform_chart_args "$CHART_DIR" "$SOURCE_CTX" PLATFORM_ARGS || exit 1
 	echo "--- Backer Deployment (created by 001, shown for reference) ---"
-	helm template propagation-test "$CHART_DIR" \
+	helm template propagation-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
 		--set clusterName="$SOURCE_CTX" \
 		--set namespace="$NS" \
 		--set backer.enabled=true \
@@ -265,7 +269,7 @@ if ((DRY_RUN)); then
 		--show-only templates/canary-deployment.yaml
 	echo ""
 	echo "--- Canary Service (selects on active label; here rendered ACTIVE) ---"
-	helm template propagation-test "$CHART_DIR" \
+	helm template propagation-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
 		--set clusterName="$SOURCE_CTX" \
 		--set namespace="$NS" \
 		--set backer.enabled=true \
@@ -284,6 +288,8 @@ mkdir -p "$OUTPUT_DIR"
 
 ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
+# The platform record (tests/lib/platform.sh): inherited from 006, else read here.
+platform_probe "$(IFS=,; echo "${ALL_CTXS[*]}")"
 
 # Preflight every context (tests/lib/fanout.sh): require >= 1 Running istiod pod.
 # Multi-replica istiod is supported via the per-pod fanout below. Record the
@@ -329,6 +335,7 @@ if ((WRITE_TSV)); then
 		echo "# FANOUT_METRICS_TIMEOUT=${METRICS_TIMEOUT}"
 		echo "# BACKER_IMAGE=${BACKER_IMAGE}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${ALL_CTXS[*]}")"
 		echo "# DATE=$(date -u -Iseconds)"
 	} > "$TSV_FILE"
 	# Columns (tab-separated). Old p1/p2/p3 cols preserved for back-compat with
@@ -1516,6 +1523,7 @@ MD_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.md"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+	platform_md_row "$(IFS=,; echo "${ALL_CTXS[*]}")"
 	echo "| Istio version | ${ISTIO_VERSION} |"
 	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
 	echo "| istiod replicas | \`${ISTIOD_REPLICAS_CSV}\` |"

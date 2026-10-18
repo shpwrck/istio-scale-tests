@@ -2,8 +2,9 @@
 # Generate summary statistics from churn convergence TSV files.
 #
 # Every format carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs),
-# and HARNESS_SHA / ISTIO_VERSION as 002 recorded them, over all input TSVs: mixed:a,b
-# with a warning when they differ (PL26).
+# and HARNESS_SHA / ISTIO_VERSION as 002 recorded them, plus KUBE_VERSIONS and the platform
+# record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh), over all input TSVs:
+# mixed:a,b with a warning when they differ (PL26).
 # Histogram p99 columns show the worst bucket a valid row hit, and "overflow (N rows)"
 # when a row's p99 was in the +Inf bucket; they are never averaged.
 #
@@ -25,6 +26,8 @@ config_preload churn "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_lines, platform_merge_by_context
 
 RESULTS_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -152,6 +155,10 @@ ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_M="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_M="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# Where the inputs ran: the platform record and each member's Kubernetes version (002 records
+# both; a file without them reads unknown).
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "${TSV_FILES[@]}")"
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
@@ -189,6 +196,7 @@ report_text() {
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
+	platform_report_lines text "$PLATFORM_VALUES"
 	echo ""
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
@@ -297,6 +305,7 @@ report_csv() {
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
+	platform_report_lines comment "$PLATFORM_VALUES"
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
@@ -460,6 +469,7 @@ report_markdown() {
 	echo "sidecar_egress_hosts: \"$(preamble_get SIDECAR_EGRESS_HOSTS)\""
 	echo "run_config: \"${RUN_CONFIG_M}\""
 	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "---"
 	echo ""
 	echo "# Churn Convergence"
@@ -587,6 +597,7 @@ report_charts() {
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: \"${RUN_CONFIG_M}\""
 	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"
 	echo ""

@@ -10,6 +10,7 @@ load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
 source "${ROOT}/tests/lib/fortio.sh"
 source "${ROOT}/tests/lib/config.sh"  # config_preamble_lines (reach_write_header)
+source "${ROOT}/tests/lib/platform.sh"  # platform_preamble_lines (reach_write_header)
 source "${ROOT}/tests/lib/reach.sh"
 
 DP_PROBE="${ROOT}/tests/dataplane/002-run-latency-probe.sh"
@@ -274,7 +275,7 @@ rrow() {
 	[ "$output" -gt $(((1 + 2) * 10)) ]
 }
 
-@test "reach_write_header: records RUN_CONFIG and RUN_CONFIG_SHA256 (PL36); refuses without config.sh" {
+@test "reach_write_header: records RUN_CONFIG, RUN_CONFIG_SHA256 and the platform record (PL36); refuses without config.sh or platform.sh" {
 	RUN_CONFIG=c.env RUN_CONFIG_SHA256=abc reach_write_header "${RES}/reach-c.tsv" RUN_ID=c
 	grep -qx '# RUN_CONFIG=c.env' "${RES}/reach-c.tsv"
 	grep -qx '# RUN_CONFIG_SHA256=abc' "${RES}/reach-c.tsv"
@@ -287,6 +288,18 @@ rrow() {
 	assert_failure
 	[[ "$stderr" == *"config_preamble_lines missing"* ]]
 	[ ! -e "${RES}/reach-z.tsv" ]
+	# The platform record of the members the last platform_probe read (tests/lib/platform.sh).
+	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\tsail-operator:1.31.1/Available\tpilot:1.30.5\tproxyv2:1.30.5\tkind'
+		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-p.tsv" RUN_ID=p)
+	grep -qx '# PLATFORM=kubernetes' "${RES}/reach-p.tsv"
+	grep -qx '# PLATFORM_BY_CONTEXT=c1=kubernetes' "${RES}/reach-p.tsv"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind' "${RES}/reach-p.tsv"
+	# Without platform.sh it is not written either.
+	run --separate-stderr bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/fortio.sh"
+		source "$1/tests/lib/config.sh"; source "$1/tests/lib/reach.sh"; reach_write_header "$2" RUN_ID=y' _ "$ROOT" "${RES}/reach-y.tsv"
+	assert_failure
+	[[ "$stderr" == *"platform_preamble_lines missing (source tests/lib/platform.sh)"* ]]
+	[ ! -e "${RES}/reach-y.tsv" ]
 }
 
 @test "reach_result_for / reach_not_reachable: listed remotes without a row count as UNKNOWN" {
@@ -400,6 +413,7 @@ lrow() {
 _dp_fixture() {
 	{
 		echo "# RUN_ID=r1"
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 3 s 10 OK local
 		lrow 3 r1 10 OK remote
@@ -443,6 +457,7 @@ _dp_fixture() {
 	ok="${BATS_TEST_TMPDIR}/ok"
 	mkdir -p "$ok"
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		lrow 2 r1 10 OK remote
@@ -465,6 +480,8 @@ _dp_fixture() {
 	assert_output --partial "Remotes with no valid latency rows: mesh_size=2 from s: r2 (0/2; ERROR_RATE_HIGH=2)"
 	[[ "$stderr" == *"rule=no_valid_rows"* ]]
 	[[ "$stderr" != *"rule=reach_coverage"* ]]
+	# A file from before the platform record: one warning; its platform reads unknown.
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 }
 
 # --- dataplane 002 / 003 (entrypoints, stub kubectl) ---
@@ -537,6 +554,7 @@ _dp_probe() {
 
 @test "004: poisoned rows and unreachable skips are counted apart in every format" {
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		lrow 2 r1 10 ERROR_RATE_HIGH remote
@@ -557,6 +575,7 @@ _dp_probe() {
 	ok="${BATS_TEST_TMPDIR}/ok"
 	mkdir -p "$ok"
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 	} > "${ok}/latency-x.tsv"
@@ -605,6 +624,7 @@ crow() {
 		echo "# REACH_HTTP_TIMEOUT_SEC=1"
 		echo "# REACH_DETAIL_TIMEOUT_SEC=11"
 		echo "# REACH_RETRY_SEC=5"
+		platform_fixture_lines a,b
 		printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n'
 		crow ms2-cr1 baseline 0 5 ERROR_RATE_HIGH
 		crow ms2-cr1 churn 1 9 OK
@@ -683,6 +703,7 @@ crow() {
 	d="${BATS_TEST_TMPDIR}/tune/baseline"
 	mkdir -p "$d"
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		lrow 2 r1 10 OK remote

@@ -64,6 +64,10 @@ Options:
 
 Environment:
   SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
+  006-gitops-pause.sh, which pauses Argo CD, reads TUNING_GITOPS_NAMESPACE (the Argo CD
+  namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
+  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET:-spoke-ossm}).
+  TEST_PLATFORM (auto: ask each cluster): the platform the results record.
 EOF
 }
 

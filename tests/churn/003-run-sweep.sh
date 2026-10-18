@@ -28,6 +28,10 @@ config_preload churn "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV="${CHURN_MESH_SIZES:-}"
@@ -199,6 +203,9 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
+# The platform record of every member, read once here; each 002 inherits it (exported) and
+# the placeholders write it (tests/lib/platform.sh). --dry-run reads nothing (unknown).
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Write a one-row placeholder TSV for a combo whose setup or probe failed before
 # any row was written, so the report still counts it (n_total, not n_valid).
@@ -211,11 +218,13 @@ emit_churn_placeholder() {
 		echo "# Churn convergence test (placeholder — combo failed before any row)"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# ISTIO_VERSION=${ISTIO_VERSION:-unknown}"
-		# Same preamble keys as 002 (004 may read this file first).
+		# Same preamble keys as 002 (004 may read this file first); read now, after the failure.
+		echo "# KUBE_VERSIONS=$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")" "${KUBECTL[@]}")"
 		echo "# CHURN_SCALE_SCOPE=source"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 21-col header (matches 002-run-churn-probe.sh).
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

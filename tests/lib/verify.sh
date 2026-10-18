@@ -180,9 +180,25 @@ EXTRACTED_PATTERNS=(
 	'cap_per_pod_requests() {'
 	'cap_parse_requested() {'
 	'cap_requested() {'
-	# member platform: platform.sh (the suite charts' OpenShift overlay)
+	# member platform: platform.sh (the suite charts' OpenShift overlay, the platform record)
 	'platform_of() {'
 	'platform_chart_args() {'
+	'platform_validate() {'
+	'platform_gitops_namespace() {'
+	'platform_pod_filter() {'
+	'platform_probe() {'
+	'platform_probed_contexts() {'
+	'platform_member_value() {'
+	'platform_probe_save() {'
+	'platform_probe_load() {'
+	'platform_preamble_lines() {'
+	'platform_md_row() {'
+	'platform_collapse() {'
+	'platform_merge_by_context() {'
+	'platform_report_values() {'
+	'platform_report_lines() {'
+	'platform_report_is_key() {'
+	'platform_value_has() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

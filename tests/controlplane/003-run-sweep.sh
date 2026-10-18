@@ -50,6 +50,10 @@ source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the peak poller
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha / probe_kube_versions for the pre-created preamble
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/capacity.sh"  # cap_node_totals / cap_istiod_limits for the capacity lines
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble + campaign-end scale envelope
@@ -836,6 +840,7 @@ precreate_tsv_preamble() {
 		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
 		echo "# VSDR_APPLY=${VSDR_APPLY}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]}")"
 		# Namespace-scaling keys through the emitter 002 uses too (PL36). A legacy sweep
 		# records GROWTH_MODE=off.
 		local growth_mode_key="off"
@@ -932,7 +937,7 @@ capacity_plan_warn() {
 			esac
 		done
 		if ! [[ "$alloc_cpu_m" =~ ^[0-9]+$ ]]; then
-			echo "  $ctx: WARN: node allocatable CPU unreadable; left out of the fit estimate." >&2
+			echo "  $ctx: WARN: node allocatable CPU unreadable (the node list failed, or no node counts as a worker: infra and tainted control-plane/master nodes are left out); left out of the fit estimate." >&2
 			continue
 		fi
 		# shellcheck disable=SC2207
@@ -965,7 +970,7 @@ capacity_plan_warn() {
 		fi
 	done
 	if [[ -z "$min_free" ]]; then
-		echo "  WARN: node allocatable CPU unreadable on every context; cannot estimate services-that-fit." >&2
+		echo "  WARN: node allocatable CPU unreadable on every context (the node list failed, or no node counts as a worker); cannot estimate services-that-fit." >&2
 		echo "" >&2
 		return 0
 	fi
@@ -1314,6 +1319,9 @@ trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 # config it started with.
 if ((! DRY_RUN)); then
 	metrics_preflight
+	# The platform record of every member, read once before the first combo; each 002
+	# inherits it (exported), the pre-created preamble writes it (tests/lib/platform.sh).
+	platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 	precreate_tsv_preamble
 	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"
 	if ((GROWTH)); then
@@ -1480,7 +1488,7 @@ guard_baseline() {
 		[[ "$amodel" =~ ^[0-9]+$ ]] || continue
 		if ((alloc > amodel + 100)); then
 			stale=1
-			echo "WARNING: memory guard: ${key}: Envoy allocated ${alloc} Mi at the series start, above the ${amodel} Mi the model allows for ${svc} Services (memory kept from an earlier series). Restart the gateways between series (oc -n istio-system rollout restart deploy -l 'istio in (ingressgateway,eastwestgateway)' on each member, nothing measuring) for clean numbers; the absolute projection still guards every step." >&2
+			echo "WARNING: memory guard: ${key}: Envoy allocated ${alloc} Mi at the series start, above the ${amodel} Mi the model allows for ${svc} Services (memory kept from an earlier series). Restart the gateways between series (kubectl -n istio-system rollout restart deploy -l 'istio in (ingressgateway,eastwestgateway)' on each member, nothing measuring) for clean numbers; the absolute projection still guards every step." >&2
 			guard_log "series start" "${key%%|*}" "${key#*|}" allocated "$alloc" "$alloc" 1 1 "$alloc" "$svc" "$amodel" "$alloc" "$lim" stale_base
 		fi
 	done

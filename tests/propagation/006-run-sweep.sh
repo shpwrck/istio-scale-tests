@@ -33,6 +33,10 @@ config_preload propagation "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV="${PROPAGATION_MESH_SIZES:-}"
@@ -215,6 +219,9 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
+# The platform record of every member, read once here; each 002 inherits it (exported) and
+# the placeholders write it (tests/lib/platform.sh). --dry-run reads nothing (unknown).
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (counted in n_total, excluded from n_valid).
@@ -239,6 +246,7 @@ emit_propagation_placeholder() {
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		echo -e "run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms"
 		# One degraded row: status sentinel, restarted=unknown, numerics N/A.

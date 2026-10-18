@@ -126,11 +126,14 @@ function mem_to_mi(q,    v, s) {
 # ---------------------------------------------------------------------------
 # cap_parse_node_totals: `kubectl get nodes -o json` on stdin.
 # Sums allocatable cpu/memory/pods across WORKER nodes only. A worker is a node
-# labelled node-role.kubernetes.io/worker that is not infra (so single-node and
-# compact clusters, whose nodes carry control-plane + master + worker, count), or a
-# node with no control-plane / master / infra label at all. Emits:
+# labelled node-role.kubernetes.io/worker that is not infra (so OpenShift single-node and
+# compact clusters, whose nodes carry control-plane + master + worker, count), a
+# control-plane / master node that is not infra and has no NoSchedule or NoExecute taint
+# (it runs ordinary pods: single-node kind, kubeadm and k3s clusters), or a node with no
+# control-plane / master / infra label at all. Emits:
 #   cpu_m=<int> mem_mi=<int> pods=<int> nodes=<int> names=<csv>
-# Zero workers or unparseable -> cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=
+# Zero workers (every node infra or a tainted control-plane / master) or unparseable ->
+#   cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=
 # shellcheck disable=SC2329
 cap_parse_node_totals() {
 	jq -r "${CAP_JQ_QTY}"'
@@ -140,7 +143,8 @@ cap_parse_node_totals() {
 			| ($l | has("node-role.kubernetes.io/master")) as $mas
 			| ($l | has("node-role.kubernetes.io/infra")) as $inf
 			| ($l | has("node-role.kubernetes.io/worker")) as $wrk
-			| ($wrk and ($inf | not)) or (($cp or $mas or $inf) | not);
+			| ([.spec.taints[]? | select(.effect == "NoSchedule" or .effect == "NoExecute")] | length == 0) as $sched
+			| ($wrk and ($inf | not)) or (($cp or $mas) and ($inf | not) and $sched) or (($cp or $mas or $inf) | not);
 		[ .items[]? | select(is_worker) ] as $w
 		| ($w | length) as $n
 		| if $n == 0 then

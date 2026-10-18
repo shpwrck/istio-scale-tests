@@ -121,7 +121,8 @@ QPS 10 and 100, 10 s per level):
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `DATAPLANE_*`, `REACH_*`,
-  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below) and `METRICS_SCRAPE_TIMEOUT`.
+  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below), `TEST_PLATFORM` (the members'
+  platform) and `METRICS_SCRAPE_TIMEOUT`.
   `DATAPLANE_TEST_NAMESPACE` and `DATAPLANE_MAX_MATRIX` stay environment only.
 - **Run keys:** `DATAPLANE_MESH_SIZES` (`003 --mesh-sizes`; empty: 1 to the number of
   contexts), `DATAPLANE_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts
@@ -319,8 +320,10 @@ bearer tokens and JWTs. It lives under the gitignored `results/` and must never 
 committed; the folder's own `.gitignore` ignores everything in it, even under a tracked
 `--output-dir`.
 
-For the memory curve before an OOM, `summary.md` lists a PromQL query per pod to run in
-the OpenShift console (Observe > Metrics) at the pod's `finished_at`:
+For the memory curve before an OOM, `summary.md` lists a PromQL query per pod to run at the
+pod's `finished_at` in a Prometheus that scrapes the kubelet's cAdvisor metrics (on OpenShift
+the console, Observe > Metrics; on Kubernetes a monitoring stack such as kube-prometheus-stack.
+`charts/istiod-monitor` scrapes only istiod, so it cannot answer it):
 `max_over_time(container_memory_working_set_bytes{namespace="istio-system",pod="<pod>",container="discovery"}[15m])`.
 The report (`004`) ends text and markdown with an "istiod restart diagnostics" section: a
 tally by cause, then one line per restart with its `run_id` and its evidence folder
@@ -335,7 +338,13 @@ the row with a folder; the other rows count as repeats. json has the section as
 ## Outputs
 
 `latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `ISTIO_VERSION`,
-`KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
+`KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. The preamble's platform record
+([`tests/lib/platform.sh`](../lib/platform.sh): `PLATFORM`, `TEST_PLATFORM`, and per member
+`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+`PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`) names the platform and the mesh builds the
+run measured, read before the first window; `004` prints it in every format and warns when its
+inputs differ. A file without it predates the record (the suite supported only OpenShift with OSSM
+then); its values read `unknown`. `SERVER_REPLICAS` records the
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
 thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,

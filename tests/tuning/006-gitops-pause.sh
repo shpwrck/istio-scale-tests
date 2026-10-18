@@ -16,12 +16,14 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_gitops_namespace: the hub's Argo CD namespace
 
 HELPER="${ROOT}/tests/tuning/lib/tuning.py"
 # Explicit flags; --resume otherwise takes context and namespace from the state file.
 CTX_FLAG=""
 NS_FLAG=""
-NS_DEFAULT="${TUNING_GITOPS_NAMESPACE:-argocd}"
+NS_DEFAULT="${TUNING_GITOPS_NAMESPACE:-}"
 APPSET="${TUNING_GITOPS_APPSET:-spoke-ossm}"
 APP_SUFFIX="ossm"
 STATE_FILE="${ROOT}/tests/tuning/results/gitops-pause.json"
@@ -41,8 +43,9 @@ Options:
   --status               List the Applications and their AppProject sync windows.
   --gitops-context CTX   Hub context running Argo CD (default: \$TUNING_GITOPS_CONTEXT).
   --state-file FILE      Pause record (default: tests/tuning/results/gitops-pause.json).
-  --namespace NS         Argo CD namespace (default: ${NS_DEFAULT}; openshift-gitops on
-                         OpenShift: terraform/platform output gitops_namespace).
+  --namespace NS         Argo CD namespace (default: \$TUNING_GITOPS_NAMESPACE, ${NS_DEFAULT:-empty};
+                         empty: from the hub's platform, openshift-gitops on OpenShift,
+                         else argocd: terraform/platform output gitops_namespace).
   --appset NAME          ApplicationSet that owns the Applications (default: ${APPSET}).
   --dry-run              Print what would change; do not touch clusters.
   -h, --help             Show this help.
@@ -95,8 +98,8 @@ fi
 
 if ((DRY_RUN)); then
 	case "$ACTION" in
-	pause) echo "[dry-run] ${GITOPS_CTX}: add a deny sync window for the Applications owned by ApplicationSet ${APPSET} in ${NS}; record it in ${STATE_FILE}" ;;
-	resume) echo "[dry-run] ${GITOPS_CTX}: remove the sync window recorded in ${STATE_FILE} from ${NS}" ;;
+	pause) echo "[dry-run] ${GITOPS_CTX}: add a deny sync window for the Applications owned by ApplicationSet ${APPSET} in ${NS:-the Argo CD namespace of its platform}; record it in ${STATE_FILE}" ;;
+	resume) echo "[dry-run] ${GITOPS_CTX}: remove the sync window recorded in ${STATE_FILE} from ${NS:-the namespace recorded there}" ;;
 	status) echo "[dry-run] ${GITOPS_CTX}: list Applications owned by ${APPSET} and their AppProject sync windows" ;;
 	esac
 	exit 0
@@ -104,6 +107,11 @@ fi
 
 KUBECTL=()
 resolve_kubectl KUBECTL
+if [[ -z "$NS" ]]; then
+	NS="$(platform_gitops_namespace "$GITOPS_CTX")" \
+		|| die "${GITOPS_CTX}: could not tell the hub's platform to pick its Argo CD namespace; set TUNING_GITOPS_NAMESPACE (argocd, or openshift-gitops on OpenShift)"
+	echo "Argo CD namespace on ${GITOPS_CTX}: ${NS} (from its platform; TUNING_GITOPS_NAMESPACE sets it)" >&2
+fi
 K=("${KUBECTL[@]}" --context="$GITOPS_CTX" -n "$NS")
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -114,7 +122,7 @@ discover_apps() {
 	"${K[@]}" get applications.argoproj.io -o json >"$WORK/apps.json" \
 		|| die "${GITOPS_CTX}: cannot list Argo CD Applications in ${NS} (wrong --gitops-context?)"
 	out="$(python3 -I "$HELPER" apps "$WORK/apps.json" "$APPSET" "$APP_SUFFIX")"
-	[[ -n "$out" ]] || die "${GITOPS_CTX}: no Applications owned by ApplicationSet ${APPSET} (or named *-${APP_SUFFIX}) in ${NS}; Argo CD runs in argocd, OpenShift GitOps in openshift-gitops (--namespace or TUNING_GITOPS_NAMESPACE)"
+	[[ -n "$out" ]] || die "${GITOPS_CTX}: no Applications owned by ApplicationSet ${APPSET} (or named *-${APP_SUFFIX}) in ${NS}; set TUNING_GITOPS_NAMESPACE to the hub's Argo CD namespace (argocd, or openshift-gitops on OpenShift; --namespace when you run this script yourself)"
 	APPS=()
 	PROJECTS=()
 	while read -r name project; do

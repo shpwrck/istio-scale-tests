@@ -108,8 +108,8 @@ rules: [Run config](../../README.md#run-config---config-file)).
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `PROPAGATION_*`, `FANOUT_*`,
-  `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`.
-  `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
+  `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform) and
+  `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
   keeps its own port block (`PROPAGATION_SNAPSHOT_PF_BASE`), so a `FANOUT_PF_BASE` in the
   file does not move it.
 - **Run keys:** `PROPAGATION_MESH_SIZES` (`006 --mesh-sizes`; empty: 1 to the number of
@@ -140,6 +140,13 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
 
 - `endpoint-<RUN_ID>.tsv` (with `--tsv`): preamble of `# KEY=value` provenance lines, then
   one row per iteration and remote. Columns are listed in `005-report-results.sh --help`.
+- The preamble's platform record ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`,
+  `TEST_PLATFORM` and, per member, the platform, the mesh operator, istiod and proxy builds and
+  the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+  `PROXY_IMAGE_BY_CONTEXT` and `NODE_PROVIDER_BY_CONTEXT`), read before the first
+  iteration (a sweep reads it once for all its steps). `005` prints it in every format, as
+  `mixed` with a warning when its inputs differ. A file without it predates the record (the
+  suite supported only OpenShift with OSSM then); its values read `unknown`.
 - `endpoint-<RUN_ID>.md`: per-run summary.
 - `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends
   with a glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters.

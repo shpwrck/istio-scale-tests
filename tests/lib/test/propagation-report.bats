@@ -4,6 +4,7 @@
 # csv/json carry worst_bucket, and json mesh_size is a number.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/propagation/005-report-results.sh"
 HDR=$'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1_ms\tp2_ms\tp3_ms\tstatus\tp1_conv_p50_ms\tp1_conv_p99_ms\tp1_sample_count\tp1_proxy_count\tp1_overflow\trestarted\tp2_dirty\twindow_ms\tscrape_skew_ms'
@@ -23,6 +24,7 @@ prow() {
 fixture() {
 	{
 		echo "# RUN_ID=r1"
+		[[ -n "${NO_PLATFORM:-}" ]] || platform_fixture_lines src,rmt
 		echo "$HDR"
 		for m in 2 3; do
 			prow "$m" 1 1000 100
@@ -74,10 +76,32 @@ fixture() {
 
 @test "005: a phase with no valid sample is null in json, with the same keys" {
 	{
+		platform_fixture_lines src,rmt
 		echo "$HDR"
 		printf 'r1\t2\t1\tsrc\trmt\t0\tTIMEOUT\tN/A\tN/A\tTIMEOUT_ALL\tN/A\tN/A\t0/40\t40\t0\t0\t0\t5000\t10\n'
 	} > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
+}
+
+@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
+	fixture
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_line "  PLATFORM: kubernetes"
+	assert_line "  NODE_PROVIDER_BY_CONTEXT: src=kind,rmt=kind"
+	[[ "$stderr" != *"no PLATFORM line"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_line 'MESH_OPERATOR_BY_CONTEXT: "src=sail-operator:1.31.1/Available,rmt=sail-operator:1.31.1/Available"'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.5,rmt=pilot:1.30.5"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.TEST_PLATFORM) \(.PROXY_IMAGE_BY_CONTEXT)"' <<<"$output")" = "kubernetes auto src=proxyv2:1.30.5,rmt=proxyv2:1.30.5" ]
+	rm "${RES}"/*.tsv
+	NO_PLATFORM=1 fixture
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.MESH_OPERATOR_BY_CONTEXT)"' <<<"$output")" = "unknown unknown" ]
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 }

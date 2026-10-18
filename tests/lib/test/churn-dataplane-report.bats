@@ -5,6 +5,7 @@
 # an overflow count instead of the bucket of a mean.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/churn-dataplane/005-report-results.sh"
 HDR=$'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms'
@@ -20,10 +21,12 @@ crow() {
 	printf 'r1\tsha\t%s\t2\t%s\t%s\t60\t50\t%s\t%s\t3\t%s\t6\t7\tN/A\t0\t%s\t10\t10\t100\t%s\t5\t%s\tN/A\tN/A\n' "$@"
 }
 
-# write_tsv <file>; rows come on stdin.
+# write_tsv <file>; rows come on stdin. NO_PLATFORM=1: a legacy file, without the platform
+# record every writer adds now.
 write_tsv() {
 	{
 		echo "# RUN_ID=r1"
+		[[ -n "${NO_PLATFORM:-}" ]] || platform_fixture_lines
 		echo "$HDR"
 		cat
 	} > "$1"
@@ -105,4 +108,25 @@ two_pairs() {
 	[ "$(jq -c '.rows[1] | [.churn_rate, .valid_runs, .delta_p99_ms, .baseline_p50_ms, .churn_qps, .churn_convergence_p99_worst, .churn_convergence_overflow_runs]' <<<"$output")" = '[5,0,null,null,null,null,0]' ]
 	# No average is a string any more.
 	[ "$(jq '[.rows[] | to_entries[] | select(.key != "churn_convergence_p99_worst") | .value | strings] | length' <<<"$output")" = 0 ]
+}
+
+@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
+	two_pairs
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_line "# PLATFORM=kubernetes"
+	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=kind"
+	[ -z "$stderr" ]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# MESH_OPERATOR_BY_CONTEXT=ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_line '| ISTIOD_IMAGE_BY_CONTEXT | `ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5` |'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.metadata | "\(.platform) \(.test_platform) \(.proxy_image_by_context)"' <<<"$output")" = "kubernetes auto ctx-a=proxyv2:1.30.5,ctx-b=proxyv2:1.30.5" ]
+	rm "${RES}"/*.tsv
+	NO_PLATFORM=1 two_pairs
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -r '.metadata | "\(.platform) \(.mesh_operator_by_context)"' <<<"$output")" = "unknown unknown" ]
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 }

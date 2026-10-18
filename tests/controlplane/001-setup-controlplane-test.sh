@@ -743,7 +743,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 				echo "  $ctx: ${cpu_line} — OK"
 			fi
 		else
-			echo "  $ctx: could not read node CPU or pod requests (alloc=${cpu_alloc:-unknown}, requested=${cpu_req:-unknown}) — skipping the CPU check" >&2
+			echo "  $ctx: could not read node CPU or pod requests (alloc=${cpu_alloc:-unknown}, requested=${cpu_req:-unknown}) — skipping the CPU check. alloc is unknown when the node list fails or no node counts as a worker (infra nodes and control-plane/master nodes with a NoSchedule or NoExecute taint are left out; tests/lib/capacity.sh)" >&2
 		fi
 	done
 	echo ""
@@ -967,6 +967,16 @@ fi
 EXPECTED_DEPLOYS_FILE="${WORKDIR_ROOT}/expected-deploys"
 echo 0 > "$EXPECTED_DEPLOYS_FILE"
 
+# Each member's chart overlay (tests/lib/platform.sh), resolved before the applies start: a
+# member it cannot tell fails the run before any cluster changes, and no platform read lands
+# inside an apply's ns-lifecycle duration (t0 below). The args, one per line (none on Kubernetes).
+declare -A OVERLAY_BY_CTX=()
+for ctx in "${CONTEXTS[@]}"; do
+	((SKIP_APPLY || DELETE_SIDECARS)) && break
+	platform_chart_args "$CHART_DIR" "$ctx" PLATFORM_ARGS || exit 1
+	OVERLAY_BY_CTX[$ctx]="$(printf '%s\n' ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"})"
+done
+
 # Apply each context concurrently; any failure fails the join below.
 APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
@@ -999,7 +1009,8 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 		echo "Setting up controlplane-test on context $ctx (part ${PARTS}, sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG})"
 		rendered="${ctx_dir}/rendered.yaml"
-		platform_chart_args "$CHART_DIR" "$ctx" PLATFORM_ARGS || exit 1
+		PLATFORM_ARGS=()
+		[[ -z "${OVERLAY_BY_CTX[$ctx]:-}" ]] || mapfile -t PLATFORM_ARGS <<<"${OVERLAY_BY_CTX[$ctx]}"
 		helm template controlplane-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
 			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
 		split_render "$rendered" "$ctx_dir"

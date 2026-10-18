@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Compare the passes of a tuning sweep (baseline + one directory per profile).
 # Reads each pass's suite TSV, finds columns by header name, averages the valid rows
-# and shows each profile's change against the baseline.
+# and shows each profile's change against the baseline. Each pass's platform record
+# (PLATFORM, the mesh operator, istiod and proxy builds, the node provider: tests/lib/platform.sh)
+# gets a row, and a pass whose record differs from the baseline's warns: its change is then not
+# the profile's alone.
 #
 # Usage:
 #   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
@@ -10,6 +13,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/config.sh"  # config_report_value (platform_report_values)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_collapse
 
 RESULTS_DIR=""
 FORMAT="text"
@@ -216,6 +223,7 @@ fmt_metric() {
 }
 
 declare -A VAL VMAX VOV NROWS STATUS GSEEN
+declare -A PLAT  # pass -> its platform record (KEY=value lines, platform_report_values)
 GROUP_VALUES=()
 for p in "${PASSES[@]}"; do
 	STATUS[$p]="ok"
@@ -234,6 +242,7 @@ for p in "${PASSES[@]}"; do
 		v) VAL["$p|$a|$b"]="$c"; VMAX["$p|$a|$b"]="$d"; VOV["$p|$a|$b"]="$e" ;;
 		esac
 	done < <(summarize "${files[@]}")
+	PLAT[$p]="$(platform_report_values "${files[@]}")"
 done
 ((${#GROUP_VALUES[@]})) || GROUP_VALUES=("-")
 
@@ -249,6 +258,25 @@ row "${cells[@]}"
 cells=("Valid / total rows")
 for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
 row "${cells[@]}"
+# The platform record, one row per key (a value every member shares shown once). A pass that
+# differs from the baseline on one warns, in the output and on stderr (PL39).
+plat_get() { sed -n "s/^$2=//p" <<<"${PLAT[$1]:-}"; }
+PLAT_WARNINGS=()
+for kl in "PLATFORM|Platform" "TEST_PLATFORM|TEST_PLATFORM" "MESH_OPERATOR_BY_CONTEXT|Mesh operator" \
+	"ISTIOD_IMAGE_BY_CONTEXT|istiod image" "PROXY_IMAGE_BY_CONTEXT|Proxy image" "NODE_PROVIDER_BY_CONTEXT|Node provider"; do
+	k="${kl%%|*}"
+	cells=("${kl#*|}")
+	for p in "${PASSES[@]}"; do
+		if [[ -z "${PLAT[$p]:-}" ]]; then cells+=("-"); continue; fi
+		v="$(plat_get "$p" "$k")"
+		cells+=("$(platform_collapse "${v:-unknown}")")
+		if [[ -n "$BASE" && "$p" != "$BASE" && -n "${PLAT[$BASE]:-}" && "$v" != "$(plat_get "$BASE" "$k")" ]]; then
+			PLAT_WARNINGS+=("pass ${p} and the baseline differ on ${k} (baseline: $(plat_get "$BASE" "$k"); ${p}: ${v}), so its change against the baseline is not the profile's alone (unknown: not recorded)")
+		fi
+	done
+	row "${cells[@]}"
+done
+for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "warning: ${w}" >&2; done
 for g in "${GROUP_VALUES[@]}"; do
 	for m in "${METRICS[@]}"; do
 		col="${m%%|*}" rest="${m#*|}"
@@ -277,6 +305,7 @@ render() {
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
 		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket."
+		for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "- **Warning:** ${w}"; done
 		echo ""
 		local hdr="| Metric |" sep="|---|" r
 		for p in "${PASSES[@]}"; do hdr+=" ${p} |"; sep+="---|"; done
@@ -287,6 +316,7 @@ render() {
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		echo "Means over valid rows; profiles show the change against the baseline."
 		echo "Histogram p99 rows show the worst bucket a valid row hit (or overflow), not a mean."
+		for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "WARNING: ${w}"; done
 		echo ""
 		{
 			printf 'Metric'

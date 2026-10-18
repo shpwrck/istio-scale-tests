@@ -188,6 +188,56 @@ vsdr_dir() {
 	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
 }
 
+# with_platform <sed program>: the fixture with the platform record a current 003 writes
+# (members mesh-a and mesh-b on kind nodes), edited by <sed program>.
+with_platform() {
+	{
+		head -1 "$FIXTURE"
+		platform_fixture_lines mesh-a,mesh-b | sed "$1"
+		tail -n +2 "$FIXTURE"
+	} > "${RES}/controlplane-fixture-t2.tsv"
+}
+
+@test "report: the platform record reaches every format (PL19); cloud nodes raise no kind warning" {
+	with_platform 's/=kind/=aws/g'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -r '.metadata | "\(.platform) \(.test_platform) \(.node_provider_by_context)"' <<<"$output")" = "kubernetes auto mesh-a=aws,mesh-b=aws" ]
+	[ "$(jq '[(.metadata.data_warnings // [])[] | select(test("kind"))] | length' <<<"$output")" = 0 ]
+	[[ "$stderr" != *"no PLATFORM line"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
+	assert_output --partial "# platform: PLATFORM=kubernetes  TEST_PLATFORM=auto  PLATFORM_BY_CONTEXT=mesh-a=kubernetes,mesh-b=kubernetes"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_output --partial "# platform: PLATFORM=kubernetes TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=mesh-a=kubernetes,mesh-b=kubernetes"
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_line 'mesh_operator_by_context: "mesh-a=sail-operator:1.31.1/Available,mesh-b=sail-operator:1.31.1/Available"'
+		assert_line 'node_provider_by_context: "mesh-a=aws,mesh-b=aws"'
+		refute_output --partial "Nodes on kind"
+	done
+}
+
+@test "report: a member on kind nodes warns that capacity is the shared host's, in every format" {
+	with_platform 's/mesh-a=kind/mesh-a=aws/'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"))] | length' <<<"$output")" = 1 ]
+	[[ "$stderr" == *"WARNING: Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"* ]]
+	for fmt in text csv; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_output --partial "# WARNING: Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"
+	done
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_output --partial "> **Warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"
+	done
+	# A file from before the record does not know its nodes: no kind warning, no guess.
+	cp "$FIXTURE" "${RES}/controlplane-fixture-t2.tsv"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
+	refute_output --partial "Nodes on kind"
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+}
+
 # --- VirtualService/DestinationRule traffic axis -------------------------------
 
 @test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields" {

@@ -185,12 +185,27 @@ kinds() {
 	helm template controlplane-test "$CHART" "$@" | awk '/^kind:/ { n[$2]++ } END { for (k in n) print n[k], k }' | sort -k2
 }
 
-@test "chart: the legacy layout renders byte-identical to the pre-growth golden" {
+# no_blank: drop empty lines. The golden is a helm 4 render, which keeps the blank line a
+# template ends with; helm 3 drops it. Both are supported, and YAML ignores those lines.
+no_blank() { grep -v '^$' || true; }
+
+@test "chart: the legacy layout renders the pre-growth golden line for line" {
 	command -v helm >/dev/null || skip "helm not installed"
 	run --separate-stderr helm template controlplane-test "$CHART" --set namespaceCount=2 --set serviceCount=4 \
 		--set replicasPerService=1 --set sidecarScoping=namespace --set clusterName=ci --set image.tag=1.37.0
 	assert_success
-	diff <(printf '%s\n' "$output") "${ROOT}/tests/lib/test/fixtures/controlplane_chart_legacy.yaml"
+	diff <(printf '%s\n' "$output" | no_blank) <(no_blank <"${ROOT}/tests/lib/test/fixtures/controlplane_chart_legacy.yaml")
+}
+
+@test "chart: the OpenShift overlay renders the legacy golden minus its runAsUser lines" {
+	# The golden is the Kubernetes render; without its runAsUser: 65534 lines it is the render
+	# from before the Kubernetes default, so OpenShift members keep that render line for line.
+	command -v helm >/dev/null || skip "helm not installed"
+	run --separate-stderr helm template controlplane-test "$CHART" -f "${CHART}/values-openshift.yaml" --set namespaceCount=2 \
+		--set serviceCount=4 --set replicasPerService=1 --set sidecarScoping=namespace --set clusterName=ci --set image.tag=1.37.0
+	assert_success
+	grep -q '^ *runAsUser: 65534$' "${ROOT}/tests/lib/test/fixtures/controlplane_chart_legacy.yaml"
+	diff <(printf '%s\n' "$output" | no_blank) <(grep -v '^ *runAsUser: 65534$' "${ROOT}/tests/lib/test/fixtures/controlplane_chart_legacy.yaml" | no_blank)
 }
 
 @test "chart: N=50 K=2 config-only M=4 per-kind counts for none, namespace and wide" {

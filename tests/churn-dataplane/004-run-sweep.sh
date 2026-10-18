@@ -35,6 +35,8 @@ source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh" # FANOUT_* defaults + istiod preflight for the preamble
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fortio.sh"
@@ -316,6 +318,9 @@ if ! ((DRY_RUN)); then
 		esac
 	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 fi
+# The platform record of every member, read once here; each 002/003 inherits it (exported)
+# and the sweep TSV's preamble writes it (tests/lib/platform.sh). --dry-run reads nothing.
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then
@@ -353,7 +358,7 @@ if ! ((DRY_RUN)); then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
-	config_preamble_lines >> "$TSV_FILE"
+	{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$TSV_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 

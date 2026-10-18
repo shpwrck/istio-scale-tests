@@ -33,6 +33,8 @@ source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha, tuning_baseline_state
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fortio.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # REACH_EXIT_CODE, reach_validate
@@ -287,6 +289,9 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
+# The platform record of every member, read once here; each 002 inherits it (exported) and
+# the placeholders write it (tests/lib/platform.sh). --dry-run reads nothing (unknown).
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (one qps=0, class=na row; counted in
@@ -314,6 +319,7 @@ emit_dataplane_placeholder() {
 		echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 		echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'

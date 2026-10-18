@@ -4,6 +4,7 @@
 # serves fortio JSON fixtures, and the 001/002/003 flags, help and dry-runs.
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 REPORT="${ROOT}/tests/dataplane/004-report-results.sh"
 PROBE="${ROOT}/tests/dataplane/002-run-latency-probe.sh"
@@ -45,12 +46,14 @@ row() {
 	printf 'r1\t%s\t%s\t%s\t%s\t%s\t8\t30\t2.0\t2.5\t5.0\t11.0\t12.5\t%s\t%s\t%s\t%s\n' "$@"
 }
 
-# tsv <file> <preamble lines...>; rows come on stdin.
+# tsv <file> <preamble lines...>; rows come on stdin. NO_PLATFORM=1: a legacy file, without
+# the platform record every writer adds now.
 tsv() {
 	local f="$1" l
 	shift
 	{
 		for l in "$@"; do echo "# $l"; done
+		[[ -n "${NO_PLATFORM:-}" ]] || platform_fixture_lines
 		echo "$HDR"
 		cat
 	} > "$f"
@@ -357,6 +360,50 @@ tsv() {
 	[ "$(jq '.results[1].avg_http_200_ratio' <<<"$output")" = 0.995 ]
 }
 
+@test "004: the platform record reaches every format; a member the inputs disagree on is mixed, with a warning (PL19, PL26)" {
+	tsv "${RES}/latency-a.tsv" "RUN_ID=r1" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-b=kind/ctx-b=aws/')
+	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_line "# PLATFORM=kubernetes"
+	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=mixed:kind;aws"
+	[[ "$stderr" == *"input TSVs disagree on NODE_PROVIDER_BY_CONTEXT for ctx-b (kind;aws)"* ]]
+	for fmt in md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_line 'MESH_OPERATOR_BY_CONTEXT: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
+		assert_line 'NODE_PROVIDER_BY_CONTEXT: "ctx-a=kind,ctx-b=mixed:kind;aws"'
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.TEST_PLATFORM) \(.NODE_PROVIDER_BY_CONTEXT)"' <<<"$output")" = "kubernetes auto ctx-a=kind,ctx-b=mixed:kind;aws" ]
+}
+
+@test "004: inputs from before the platform record read unknown with one warning; beside a current one, mixed" {
+	NO_PLATFORM=1 tsv "${RES}/latency-old.tsv" "RUN_ID=r0" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_success
+	assert_line "# PLATFORM=unknown"
+	assert_line "# PROXY_IMAGE_BY_CONTEXT=unknown"
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	tsv "${RES}/latency-new.tsv" "RUN_ID=r1" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# PLATFORM=mixed:kubernetes,unknown"
+	assert_line "# PLATFORM_BY_CONTEXT=mixed:unknown,ctx-a=kubernetes,ctx-b=kubernetes"
+	[[ "$stderr" == *"1 of 2 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" == *"input TSVs disagree on PLATFORM (kubernetes,unknown)"* ]]
+}
+
 # --- 002: row status through the real probe, against a stub kubectl ---
 
 @test "002: per-run md rounds latency and QPS and shows the 200 share as %; a FAILED run is N/A, never 0" {
@@ -373,6 +420,12 @@ tsv() {
 	grep -qxF '| ctx-b | remote | 10 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | FAILED |' "$md"
 	grep -qxF '| Min HTTP 200 share | 99.00% (DATAPLANE_MIN_PCT_200=0.99) |' "$md"
 	grep -qF '| Max (ms) | HTTP 200 (%) | Status |' "$md"
+	# The stub answers no platform read: the record says unknown, never a guess (PL39).
+	grep -qx '# PLATFORM=unknown' "$f"
+	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=unknown,ctx-b=unknown' "$f"
+	grep -qx '# MESH_OPERATOR_BY_CONTEXT=ctx-a=unknown,ctx-b=unknown' "$f"
+	grep -q '^| Platform | unknown (TEST_PLATFORM auto); nodes unknown; operator unknown; ' "$md"
+	assert_output --partial "warning: ctx-a: could not read the platform (so the mesh operator build is not read either); recorded as unknown"
 	# The report leaves the FAILED row out of every average.
 	run "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '[.results[] | select(.target_class == "remote") | .n_valid, .avg_max_ms, .avg_actual_qps]' <<<"$output")" = '[0,null,null]' ]

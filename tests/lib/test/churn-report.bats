@@ -25,12 +25,14 @@ crow() {
 	printf 'r1\t2\t5\t1\t5\t%s\t0\t1000\t2000\t300\t10\t20\t100\t200\t%s\t%s\t50\t60\t%s\t%s\t%s\n' "$@"
 }
 
-# tsv <file> <preamble lines...>; rows come on stdin.
+# tsv <file> <preamble lines...>; rows come on stdin. NO_PLATFORM=1: a legacy file, without
+# the platform record every writer adds now.
 tsv() {
 	local f="$1" l
 	shift
 	{
 		for l in "$@"; do echo "# $l"; done
+		[[ -n "${NO_PLATFORM:-}" ]] || platform_fixture_lines
 		echo "$HDR"
 		cat
 	} > "$f"
@@ -38,28 +40,36 @@ tsv() {
 
 # --- 004: run provenance -------------------------------------------------------
 
-@test "004: harness_sha and istio_version come from the TSV preamble, in every format" {
-	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" <<-EOF
+@test "004: harness_sha, istio_version and the platform record come from the TSV preamble, in every format" {
+	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
 	EOF
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
 	assert_success
 	assert_output --partial 'harness_sha: "feed123-test"'
 	assert_output --partial 'istio_version: "1.99.0"'
+	assert_line 'platform: "kubernetes"'
+	assert_line 'node_provider_by_context: "ctx-a=kind,ctx-b=kind"'
+	assert_line 'kube_versions: "ctx-a=v1.34.1,ctx-b=v1.34.1"'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
 	assert_output --partial 'harness_sha: "feed123-test"'
 	assert_output --partial 'istio_version: "1.99.0"'
+	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# HARNESS_SHA=feed123-test"
 	assert_line "# ISTIO_VERSION=1.99.0"
+	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5"
+	assert_line "# KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1"
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_output --partial "# harness_sha (recorded by 002): feed123-test"
 	assert_output --partial "# istio_version (recorded by 002): 1.99.0"
+	assert_line "# platform: kubernetes"
+	assert_line "# proxy_image_by_context: ctx-a=proxyv2:1.30.5,ctx-b=proxyv2:1.30.5"
 	[ -z "$stderr" ]
 }
 
 @test "004: a TSV without the keys reads 'unknown (not recorded)', never this checkout's HEAD" {
-	tsv "${RES}/churn-old.tsv" "TUNING_BASELINE=unknown" <<-EOF
+	NO_PLATFORM=1 tsv "${RES}/churn-old.tsv" "TUNING_BASELINE=unknown" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
 	EOF
 	head="$(git -C "$ROOT" rev-parse --short HEAD)"
@@ -69,6 +79,11 @@ tsv() {
 	assert_output --partial 'istio_version: "unknown (not recorded)"'
 	refute_output --partial "$head"
 	refute_output --partial "istio_version: \"${ISTIO_VERSION}\""
+	# From before the platform record: unknown, with one warning, never this host's platform.
+	assert_line 'platform: "unknown"'
+	assert_line 'mesh_operator_by_context: "unknown"'
+	assert_line 'kube_versions: "unknown"'
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 	# Beside a TSV that recorded them: mixed, with a warning naming the key.
 	tsv "${RES}/churn-new.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -76,6 +91,7 @@ tsv() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
 	assert_success
 	assert_output --partial 'harness_sha: "mixed:feed123-test,unknown (not recorded)"'
+	assert_line 'platform: "mixed:kubernetes,unknown"'
 	[[ "$stderr" == *"input TSVs disagree on HARNESS_SHA (feed123-test,unknown (not recorded))"* ]]
 	[[ "$stderr" == *"input TSVs disagree on ISTIO_VERSION"* ]]
 }
@@ -187,16 +203,24 @@ STUB
 	head -1 "$f" | grep -Eq '(\+00:00|Z)$'
 	grep -Eq '^\| Date \(UTC\) \| .*(\+00:00|Z) \|$' "$RES"/churn-*.md
 	grep -q '^| Harness SHA | ' "$RES"/churn-*.md
+	# The stub answers neither the version nor the platform reads: unknown, never a guess.
+	grep -qx '# KUBE_VERSIONS=ctx-a=unreachable' "$f"
+	grep -qx '# PLATFORM=unknown' "$f"
+	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=unknown' "$f"
+	grep -q '^| Platform | unknown (TEST_PLATFORM auto); ' "$RES"/churn-*.md
 	# 004 reports what the probe recorded.
 	run "$REPORT" --results-dir "$RES" --format md
 	assert_output --partial "istio_version: \"${ISTIO_VERSION}\""
 }
 
 @test "PL36: 002 and the 003 placeholder both write HARNESS_SHA and ISTIO_VERSION" {
-	for k in HARNESS_SHA ISTIO_VERSION; do
+	for k in HARNESS_SHA ISTIO_VERSION KUBE_VERSIONS; do
 		grep -q "^# ${k}=" "$PROBE"
 		grep -q "echo \"# ${k}=" "$SWEEP"
 	done
+	# The platform record has one emitter (tests/lib/platform.sh), called by both.
+	grep -q 'platform_preamble_lines "\$ALL_CTXS_CSV"' "$PROBE"
+	grep -q 'platform_preamble_lines "\$(IFS=,; echo "\${CONTEXTS\[\*\]:0:\$ms}")"' "$SWEEP"
 	# Every timestamp the probe writes is UTC.
 	run grep -nE 'date -I' "$PROBE"
 	refute_output --regexp 'date -I[a-z]'

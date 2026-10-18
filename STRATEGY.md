@@ -42,7 +42,7 @@ _Why it serves the approach:_ The suites encode subject matter expertise about w
 
 Tuning profile evaluation for Istio (upstream through the Sail operator, or Red Hat OpenShift Service Mesh), turning test results into actionable configuration recommendations.
 
-_Why it serves the approach:_ Profiles change only Istio CR settings and record Red Hat's support status for each, so a result is actionable on upstream Istio and on OSSM alike.
+_Why it serves the approach:_ Profiles change only Istio CR settings and record Red Hat's support status for each, so a profile applies to upstream Istio and to OSSM alike. A result is measured on one platform and mesh build (the platform record in every TSV names it): it carries over to the other only once rerun there.
 
 ### Reporting
 

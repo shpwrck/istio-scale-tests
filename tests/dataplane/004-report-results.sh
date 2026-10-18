@@ -35,6 +35,8 @@ source "${ROOT}/config/versions.env"  # DATAPLANE_MIN_QPS_RATIO (fallback for TS
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_is_key
 
 RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -170,12 +172,15 @@ done < <(awk '
 # mixed:a,b with a warning when they differ (PL26).
 _pre=()
 for kv in "${PREAMBLE[@]}"; do
-	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) _pre+=("$kv") ;; esac
+	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) platform_report_is_key "${kv%%=*}" || _pre+=("$kv") ;; esac
 done
 PREAMBLE=("${_pre[@]}"
 	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
 unset _pre
+# The platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...) over every input too.
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+while IFS= read -r kv; do PREAMBLE+=("$kv"); done <<<"$PLATFORM_VALUES"
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then

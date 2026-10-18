@@ -154,7 +154,8 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
-  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`. A step ignores the keys it
+  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`, plus `ISTIOD_DIAG_*` and
+  `TEST_PLATFORM` (the members' platform), which every suite takes. A step ignores the keys it
   does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
   `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run) and
   the version pins. Any other key, or any bad line, rejects the whole file before anything
@@ -193,6 +194,14 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   all four formats) and warns on stderr whenever it reads more than one run; `run_id` then
   reads `multiple`. Inputs from different Istio versions or harness commits print a
   `WARNING` (stderr and every format) and read `mixed:<a>,<b>`.
+- **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member,
+  the platform, the mesh operator, istiod and proxy builds and the nodes' provider
+  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+  `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)),
+  read before the first window (a sweep reads it once; `002 --phase final` reuses the baseline
+  phase's). `004` prints it in every format and warns when its inputs differ; on kind nodes it
+  also warns that the capacity figures overstate the headroom. A file without it predates the
+  record (the suite supported only OpenShift with OSSM then); its values read `unknown`.
 
 ## Traffic management (VS/DR)
 
@@ -456,7 +465,11 @@ Each row is a per-window delta over `--interval` seconds.
 - Services are spread evenly across namespaces; real meshes are skewed.
 - Utilization-% columns need the metrics API (`kubectl top`); without it they are `N/A`.
   Node columns count worker nodes, including control-plane nodes that also carry the
-  worker role (single-node and compact clusters).
+  worker role (OpenShift single-node and compact clusters) or have no NoSchedule or
+  NoExecute taint (single-node kind, kubeadm and k3s). On kind every node reports the
+  whole host, which all the clusters on it share, so node allocatable, `node_*_pct` and
+  the coverage fraction overstate the headroom; the report warns when the platform record
+  says the nodes are kind.
 - Raise `METRICS_SCRAPE_TIMEOUT` (default 30 s) if `/metrics` scrapes time out at scale.
 - `sidecar_pods` is read a few seconds after the `pilot_xds` scrape, from the same 5 s pod
   list as `pods_scheduled`. Pods starting or stopping in between, or proxies not yet

@@ -14,14 +14,14 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
 
 ## Prerequisites
 
-1. **A healthy multi-primary mesh** across your spoke clusters. The ACM hub is not a mesh member.
+1. **A healthy multi-primary mesh** across your spoke clusters. The hub is not a mesh member.
    Verify per [README → Verify](../../README.md#verify).
 2. **istiod pinned to a fixed replica count** (HPA off) on every spoke: `charts/spoke-ossm`
    `pilot.autoscaleEnabled: false`, `pilot.replicaCount: <K>` (default 3). An autoscaling istiod
    changes topology mid-sweep and corrupts the xDS deltas.
 3. **Enough CPU for the workload** — see [Capacity planning](#capacity-planning).
 4. **A kubeconfig with every mesh-member context.** Set `SETUP_CONTEXTS` in `config/versions.env`
-   or pass `--contexts`: mesh members only, never the ACM hub. Token/OAuth credentials must stay
+   or pass `--contexts`: mesh members only, never the hub. Token/OAuth credentials must stay
    valid for the whole multi-hour run.
 5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`.
 
@@ -56,7 +56,9 @@ its limit as `(10 + 145 × Services / 1000) Mi × 2.5` and the ingress as `(10 +
 1000) Mi × 1.5`. For the 10k campaign that is about 3.6 GiB and 1.4 GiB: the chart defaults are
 5Gi and 2Gi. The east-west default sits above the rule because a one-step burst to 10k Services
 peaked at 3.4 GiB (ROSA, 2026-10-16) and a second burst keeps more. The controlplane sweep's
-memory guard uses the same model.
+memory guard uses the same model. Both figures and the 2.5× / 1.5× guard factors come from OSSM
+3.x proxies on ROSA and are not validated on upstream Istio builds or on kind (where every node
+reports the whole host): measure them before sizing a campaign there.
 
 > **Let metrics-server settle after heavy churn.** The utilization columns
 > (`istiod_*_pct_of_limit`, `node_*_pct`) come from `kubectl top`. Right after scaling istiod or
@@ -67,7 +69,7 @@ memory guard uses the same model.
 ## Procedure
 
 ```bash
-# Set once. Mesh members only — never the ACM hub.
+# Set once. Mesh members only — never the hub.
 CONTEXTS="<mesh-a-ctx>,<mesh-b-ctx>"
 MESH="1,2"                            # mesh sizes to sweep; up to the number of contexts
 export KUBECONFIG=<path-to-kubeconfig>

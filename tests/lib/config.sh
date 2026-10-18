@@ -35,8 +35,9 @@
 #
 # Exposes:
 #   config_suite_prefixes <suite>  -> the suite's key list: prefixes (ending in _) and whole
-#                                     key names, then CONFIG_SHARED_PREFIXES (ISTIOD_DIAG_,
-#                                     taken by every suite); die for a suite without a map
+#                                     key names, then CONFIG_SHARED_PREFIXES (ISTIOD_DIAG_ and
+#                                     TEST_PLATFORM, taken by every suite); die for a suite
+#                                     without a map
 #   config_allowed_keys <suite>    -> the keys a config may set, one per line, sorted
 #   load_config <file> <suite>     -> validate the whole file, then export its keys and
 #                                     RUN_CONFIG, RUN_CONFIG_SHA256, RUN_CONFIG_PATH
@@ -47,10 +48,11 @@
 #   config_repo_path <path>        -> <path> if absolute, else ${ROOT}/<path>
 #   config_snapshot <dir> <run_id> -> a sweep's replay copy <dir>/run-config-<run_id>.env;
 #                                     no-op without a config, warns if the copy fails
-#   config_report_value <key> <tsv>...
-#                                  -> a report's RUN_CONFIG or RUN_CONFIG_SHA256 over all its
-#                                     inputs: one value, mixed:a,b with a warning (PL26), and
-#                                     unknown for a file written before the key existed
+#   config_report_value [--consequence TEXT] <key> <tsv>...
+#                                  -> a report's RUN_CONFIG or RUN_CONFIG_SHA256 (or PLATFORM)
+#                                     over all its inputs: one value, mixed:a,b with a warning
+#                                     (PL26) naming TEXT, and unknown for a file written before
+#                                     the key existed
 #   config_warn_multi_run <dir> <tsv>...
 #                                  -> warn when a report's inputs come from more than one
 #                                     run: a sweep-* dir, or a RUN_ID outside one (PL6)
@@ -86,8 +88,9 @@ config_suite_prefixes() {
 }
 
 # Keys every suite takes: ISTIOD_DIAG_* tune the istiod restart evidence capture
-# (tests/lib/istiod-diag.sh). An unknown-key error names them after the suite's own list.
-CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
+# (tests/lib/istiod-diag.sh); TEST_PLATFORM picks the members' platform (tests/lib/platform.sh).
+# An unknown-key error names them after the suite's own list.
+CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_ TEST_PLATFORM"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -166,11 +169,11 @@ load_config() {
 	local prefixes allowed_desc="" shared_desc="" p
 	prefixes="$(config_suite_prefixes "$suite")"
 	for p in $prefixes; do
-		if [[ " ${CONFIG_SHARED_PREFIXES} " == *" ${p} "* ]]; then
-			shared_desc="${shared_desc:+${shared_desc}, }${p}*"
+		case "$p" in *_) p="${p}*" ;; esac
+		if [[ " ${CONFIG_SHARED_PREFIXES} " == *" ${p%\*} "* ]]; then
+			shared_desc="${shared_desc:+${shared_desc}, }${p}"
 			continue
 		fi
-		case "$p" in *_) p="${p}*" ;; esac
 		allowed_desc="${allowed_desc:+${allowed_desc}, }${p}"
 	done
 	local -A cfg_allowed=()
@@ -326,12 +329,18 @@ config_snapshot() {
 	return 0
 }
 
-# config_report_value <key> <tsv>...: the `# <key>=` preamble value (RUN_CONFIG or
-# RUN_CONFIG_SHA256) over every input of a report. A file without the line counts as
-# unknown (written before the key existed), so it is never credited to a config. One
-# value -> that value; several -> mixed:a,b plus a stderr warning (PL26).
+# config_report_value [--consequence TEXT] <key> <tsv>...: the `# <key>=` preamble value
+# (RUN_CONFIG or RUN_CONFIG_SHA256, or another sweep-level key: PLATFORM) over every input of a
+# report. A file without the line counts as unknown (written before the key existed), so it is
+# never credited to a config. One value -> that value; several -> mixed:a,b plus a stderr
+# warning (PL26) that ends with TEXT (default: the --config one).
 # shellcheck disable=SC2329
 config_report_value() {
+	local consequence="the report mixes runs made with different --config files"
+	if [[ "${1:-}" == --consequence ]]; then
+		consequence="$2"
+		shift 2
+	fi
 	local key="$1" f v vals=""
 	shift
 	for f in "$@"; do
@@ -342,7 +351,7 @@ config_report_value() {
 	if [[ -z "$vals" ]]; then
 		echo unknown
 	elif [[ "$vals" == *,* ]]; then
-		echo "warning: input TSVs disagree on ${key} (${vals}); the report mixes runs made with different --config files" >&2
+		echo "warning: input TSVs disagree on ${key} (${vals}); ${consequence}" >&2
 		echo "mixed:${vals}"
 	else
 		echo "$vals"

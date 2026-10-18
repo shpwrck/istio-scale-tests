@@ -32,6 +32,8 @@ source "${ROOT}/tests/lib/capacity.sh"  # quantity parsers envelope.sh uses
 source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fit.sh"  # FIT_AWK (namespace-scaling fits)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_lines, platform_value_has
 
 RESULTS_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
 # 1 when --results-dir is passed (picks the wording of the multi-run warning below).
@@ -544,6 +546,9 @@ VSDR_SUBSETS_M="$(preamble_scalar VSDR_SUBSETS "vsdr cells mix DestinationRule s
 # mixed:<file>,unknown instead of crediting its rows to that config.
 RUN_CONFIG_M="$(preamble_scalar RUN_CONFIG "the report mixes runs made with different --config files" unknown)"
 RUN_CONFIG_SHA256_M="$(preamble_scalar RUN_CONFIG_SHA256 "the report mixes runs made with different --config contents" unknown)"
+# The platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh) over
+# every input, in every format; a file without it reads unknown.
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
 # Namespace-scaling preamble keys (sweep-level scalars; `mixed:` with a warning when
 # the inputs disagree, PL26). 40/51-column files have none of them. A report that
 # pairs a pods run with a config-only run legitimately mixes WORKLOAD_MODE, so that
@@ -622,7 +627,7 @@ PROXY_CHECK_TALLY="ok=$(pc_get pc_ok) low=$(pc_get pc_low) high=$(pc_get pc_high
 # (allocatable, istiod limit, pod counts) still populate. Detect exactly that case —
 # every utilization-% max non-numeric — so an empty utilization headline reads as a
 # known environment limitation rather than a harness bug. Returns 0 when unavailable.
-METRICS_NOTE="utilization-% columns are N/A — the metrics API (kubectl top / metrics-server) returned no usable data during this sweep; verify metrics-server availability on the target clusters to populate istiod_*_pct_of_limit and node_*_pct. Capacity denominators below come from kubectl get and are unaffected."
+METRICS_NOTE="utilization-% columns are N/A — the metrics API (kubectl top / metrics-server) returned no usable data during this sweep; verify metrics-server availability on the target clusters to populate istiod_*_pct_of_limit and node_*_pct. Capacity denominators below come from kubectl get, not the metrics API (unknown only when no node counted as a worker; on kind they are the shared host's, see the warnings)."
 metrics_unavailable() {
 	local key v
 	for key in istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct; do
@@ -742,7 +747,9 @@ STATUS_RE='^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUA
 #   - a RETIRE_FAILED row (BACKLOG 9.3): a series' namespaces stayed discovered, so 003
 #     stopped; a later sweep on those members starts on a contaminated baseline;
 #   - leftover test namespaces above LEFTOVER_NS_WARN on a growth row (BACKLOG 9.10):
-#     they stay in istiod's informers, so its absolute heap and RSS are inflated.
+#     they stay in istiod's informers, so its absolute heap and RSS are inflated;
+#   - nodes on kind (the platform record's NODE_PROVIDER_BY_CONTEXT): every node reports
+#     the whole host, so the capacity and headroom figures overstate it.
 LEFTOVER_NS_WARN_M="$(preamble_get LEFTOVER_NS_WARN)"
 [[ "$LEFTOVER_NS_WARN_M" =~ ^[0-9]+$ ]] || LEFTOVER_NS_WARN_M="${CONTROLPLANE_LEFTOVER_NS_WARN:-100}"
 DATA_WARNINGS="$(awk -F'\t' -v thr="$LEFTOVER_NS_WARN_M" "${AWK_SERIES_RUN}
@@ -756,6 +763,9 @@ ${AWK_HEADER_IX}"'
 		if (rf) printf "RETIRE_FAILED (%s): a growth series was not retired (the cleanup failed, or its namespaces stayed discovered), so the sweep stopped there; retire it (005 --series <id> --undiscover --no-delete) before any other sweep on those members, or that sweep starts on a contaminated baseline.\n", rfn
 		if (lo) printf "%d growth row(s) were measured with up to %d leftover controlplane-test namespaces from earlier series or runs on their member (warning threshold %d). They stay in istiod'"'"'s informers, so those rows'"'"' absolute istiod heap and RSS are inflated; deltas within a series stay valid. Delete the leftovers between sweeps for absolute numbers.\n", lo, lomax, thr
 	}' "${TSV_FILES[@]}")"
+if platform_value_has "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" kind; then
+	DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory, which all kind clusters on that host share, so node allocatable, node_*_pct, the coverage fraction and the services-that-fit estimate overstate the real headroom; quote capacity and headroom from cloud nodes only."
+fi
 LEFTOVER_AT_START_M="$(tag_values LEFTOVER_TEST_NAMESPACES "")"
 [[ -n "$LEFTOVER_AT_START_M" ]] || LEFTOVER_AT_START_M="n/a"
 # data_warnings_lines <prefix>: each DATA_WARNINGS line behind a prefix (nothing when none).
@@ -1700,6 +1710,7 @@ report_text() {
 	echo "=== Control-Plane Resource Scaling ==="
 	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}"
 	echo "# runs: run_ids=${RUN_IDS_M}  istio_versions=${ISTIO_VERSIONS_M}  harness_shas=${HARNESS_SHAS_M}"
+	echo "# platform: ${PLATFORM_VALUES//$'\n'/  }"
 	[[ -n "$PROVENANCE_WARNING" ]] && echo "# WARNING: ${PROVENANCE_WARNING}"
 	data_warnings_lines "# WARNING: "
 	if has_growth_cells "$aggregated"; then
@@ -1802,6 +1813,7 @@ report_csv() {
 	[[ -n "$PROVENANCE_WARNING" ]] && echo "# WARNING: ${PROVENANCE_WARNING}"
 	data_warnings_lines "# WARNING: "
 	echo "# run_config: run_config=${RUN_CONFIG_M} run_config_sha256=${RUN_CONFIG_SHA256_M}"
+	echo "# platform: ${PLATFORM_VALUES//$'\n'/ }"
 	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE} traffic_configs=${SWEEP_TRAFFIC}"
 	echo "# traffic_management: vsdr_every=${VSDR_EVERY_M} vsdr_subsets=${VSDR_SUBSETS_M}"
 	if has_growth_cells "$aggregated"; then
@@ -1911,6 +1923,7 @@ report_markdown() {
 	echo "harness_shas: $(json_list "$HARNESS_SHAS_M")"
 	echo "run_config: \"${RUN_CONFIG_M}\""
 	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "sidecar_scoping: ${SIDECAR_SCOPING_M:-N/A}"
 	echo "traffic_configs: \"${SWEEP_TRAFFIC}\""
 	echo "vsdr_every: \"${VSDR_EVERY_M}\""
@@ -2231,7 +2244,10 @@ report_json() {
 	shortkeys="$(vsdr_ingest_short "$aggregated" | awk -F'\t' '{ printf ";%s", $1 } END { print ";" }')"
 	local ns_scaling_json
 	ns_scaling_json="$(scaling_section json "$aggregated")"
-	NS_SCALING_JSON="$ns_scaling_json" awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
+	# The platform record's keys go into metadata (from ENVIRON, so awk -v escapes cannot touch them).
+	local plat_json
+	plat_json="$(platform_report_lines json "$PLATFORM_VALUES")"
+	NS_SCALING_JSON="$ns_scaling_json" PLATFORM_JSON="$plat_json" awk -F'\t' -v ri="$RUN_ID_TAG" -v iv="$ISTIO_VERSION_TAG" -v hs="$HARNESS_SHA_TAG" -v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
 		-v ri_list="$(json_list "$RUN_IDS_M")" -v iv_list="$(json_list "$ISTIO_VERSIONS_M")" -v hs_list="$(json_list "$HARNESS_SHAS_M")" -v prov_warn="${PROVENANCE_WARNING//[\"\\]/}" \
 		-v rc_path="$RUN_CONFIG_M" -v rc_sha="$RUN_CONFIG_SHA256_M" \
 		-v sw_mesh="$SWEEP_MESH" -v sw_svc="$SWEEP_SVC" -v sw_rep="$SWEEP_REP" -v sw_ns="$SWEEP_NS" -v sw_scope="$SWEEP_SCOPE" \
@@ -2260,7 +2276,8 @@ report_json() {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
 	}
-	BEGIN { printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"provenance_warning\":%s,\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"istiod_replicas_by_context\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_peak_pct_of_limit_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\",\"growth\":{\"growth_mode\":\"%s\",\"mem_stop_pct\":\"%s\",\"probe_settle_sec\":\"%s\",\"services_per_namespace\":\"%s\",\"workload_modes\":\"%s\",\"window_kinds\":\"%s\",\"leftover_test_namespaces_at_start\":\"%s\"},\"data_warnings\":[%s]},\n  \"results\": [", ri, iv, hs, ri_list, iv_list, hs_list, (prov_warn == "" ? "null" : "\"" prov_warn "\""), rc_path, rc_sha, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_rep_by, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu_peak, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note, gr_mode, gr_stop, gr_settle, gr_spn, gr_wm, gr_wk, leftover_start, data_warn }
+	BEGIN { plat = ENVIRON["PLATFORM_JSON"]; plat = substr(plat, 2, length(plat) - 2); if (plat != "") plat = plat ","
+		printf "{\n  \"metadata\": {\"run_id\":\"%s\",\"istio_version\":\"%s\",\"harness_sha\":\"%s\",\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"provenance_warning\":%s,\"run_config\":\"%s\",\"run_config_sha256\":\"%s\",%s\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":\"%s\",\"service_counts\":\"%s\",\"replica_counts\":\"%s\",\"namespace_counts\":\"%s\",\"sidecar_scopings\":\"%s\",\"traffic_configs\":\"%s\"},\"traffic_management\":{\"vsdr_every\":\"%s\",\"vsdr_subsets\":\"%s\"},\"capacity\":{\"node_alloc_cpu_m\":\"%s\",\"node_alloc_mem_mi\":\"%s\",\"istiod_cpu_limit_m\":\"%s\",\"istiod_mem_limit_mi\":\"%s\",\"scale_target_fraction\":\"%s\",\"scale_sizing_mode\":\"%s\",\"metrics_api\":\"%s\",\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":\"%s\",\"istiod_req_mem_mi\":\"%s\",\"istiod_lim_cpu_m\":\"%s\",\"istiod_lim_mem_mi\":\"%s\",\"istiod_replicas\":\"%s\",\"istiod_replicas_by_context\":\"%s\",\"network_topology\":\"%s\"},\"tuning_baseline\":{\"levers\":\"%s\",\"sidecar_egress_hosts\":\"%s\"},\"achieved_scale\":{\"connected_proxies_max\":\"%s\",\"connected_proxies_cluster_max\":\"%s\",\"services_configured_max\":\"%s\",\"istiod_cpu_peak_pct_of_limit_max\":\"%s\",\"istiod_cpu_pct_of_limit_max\":\"%s\",\"istiod_mem_pct_of_limit_max\":\"%s\",\"istiod_rss_pct_of_limit_max\":\"%s\",\"node_cpu_pct_max\":\"%s\",\"node_mem_pct_max\":\"%s\",\"pods_scheduled_max\":\"%s\",\"pods_allocatable_max\":\"%s\"},\"proxy_check\":{\"tolerance_pct\":\"%s\",\"min_diff\":\"%s\",\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":\"%s\"},\"coverage\":\"%s\",\"sla\":{\"verdict\":\"%s\",\"headline\":\"%s\"},\"metrics_note\":\"%s\",\"growth\":{\"growth_mode\":\"%s\",\"mem_stop_pct\":\"%s\",\"probe_settle_sec\":\"%s\",\"services_per_namespace\":\"%s\",\"workload_modes\":\"%s\",\"window_kinds\":\"%s\",\"leftover_test_namespaces_at_start\":\"%s\"},\"data_warnings\":[%s]},\n  \"results\": [", ri, iv, hs, ri_list, iv_list, hs_list, (prov_warn == "" ? "null" : "\"" prov_warn "\""), rc_path, rc_sha, plat, fc, fs, sw_mesh, sw_svc, sw_rep, sw_ns, sw_scope, sw_traffic, tm_every, tm_subsets, cap_ncpu, cap_nmem, cap_icpu, cap_imem, cap_tf, cap_mode, cap_metrics, inf_rcpu, inf_rmem, inf_lcpu, inf_lmem, inf_rep, inf_rep_by, inf_net, tb_levers, tb_egress, ach_prx, ach_cprx, ach_svc, ach_icpu_peak, ach_icpu, ach_imem, ach_irss, ach_ncpu, ach_nmem, ach_psched, ach_palloc, pc_tol, pc_min, pc_ok, pc_low, pc_high, pc_na, pc_excl, pc_flagged, cov, sla_v, sla_h, metrics_note, gr_mode, gr_stop, gr_settle, gr_spn, gr_wm, gr_wk, leftover_start, data_warn }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -2309,6 +2326,7 @@ report_charts() {
 	echo "harness_shas: $(json_list "$HARNESS_SHAS_M")"
 	echo "run_config: \"${RUN_CONFIG_M}\""
 	echo "run_config_sha256: \"${RUN_CONFIG_SHA256_M}\""
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"

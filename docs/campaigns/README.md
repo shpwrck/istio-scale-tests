@@ -23,6 +23,12 @@ cluster count alone is not a scale. The controlplane sweep generates the envelop
 The 10-spoke pass ran far below the infra's limits: trust its scaling shapes and
 cross-cluster overheads, not its absolute magnitudes.
 
+Every record above ran on OpenShift (ROSA or single-node OpenShift) with OSSM 3.x builds,
+before the suites recorded the platform: their TSVs have no `PLATFORM` line, and a report reads
+those values as `unknown`. A run on upstream Istio (the Sail operator) or on kind measures other
+builds and infrastructure; record its platform and mesh builds (`TEMPLATE.md`, "Platform / mesh
+build") and compare it with these only as such.
+
 The data-plane numbers above ran one fortio server pod per cluster, and a run that missed
 its target QPS with only HTTP 200s still counted as valid. Later dataplane runs default to
 2 server pods (`SERVER_REPLICAS` in the TSV preamble) and tag such rows `QPS_SHORTFALL`;

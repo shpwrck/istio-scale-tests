@@ -39,6 +39,8 @@ source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # harness_sha (TSV preamble, istiod-diag index preamble)
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
@@ -240,18 +242,24 @@ done
 # HARNESS_SHA and ISTIO_VERSION are recorded here so 004 reports the run's commit and
 # Istio pin, not the report host's (the 003 placeholder writes the same two keys, PL36).
 HARNESS_SHA="$(harness_sha)"
+# Every member's Kubernetes version and the platform record (inherited from 003, else read here),
+# before the first churn event.
+ALL_CTXS_CSV="$(IFS=,; echo "${SOURCE_CTX},${REMOTES[*]}")"
+KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+platform_probe "$ALL_CTXS_CSV"
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # HARNESS_SHA=${HARNESS_SHA}
 # ISTIO_VERSION=${ISTIO_VERSION:-unknown}
+# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
 # CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
 # SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS
 EOF
-config_preamble_lines >> "$TSV_FILE"
+{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$TSV_FILE"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
 	convergence_local_ms remote_endpoint_reachable_ms convergence_remote_eds_ms \
@@ -1147,6 +1155,8 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Istio version | ${ISTIO_VERSION:-unknown} |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+	platform_md_row "$ALL_CTXS_CSV"
+	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
 	echo "| Date (UTC) | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"
 	echo "| Remotes | ${REMOTES[*]:-none} |"

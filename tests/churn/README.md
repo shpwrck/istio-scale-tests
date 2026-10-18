@@ -83,6 +83,15 @@ The TSV preamble records `HARNESS_SHA` (`git describe --always --dirty`) and
 before they were recorded reads `unknown (not recorded)`, and inputs that differ read
 `mixed:a,b` with a warning. Timestamps are UTC.
 
+It also records `KUBE_VERSIONS` and the platform record
+([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
+platform, the mesh operator, istiod and proxy builds and the nodes' provider
+(`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+`PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`), read before the first churn event (a
+sweep reads it once for all its combos). `004` prints them in every format, per member as
+`<ctx>=mixed:a;b` with a warning when the inputs differ. A file without them predates the
+record (the suite supported only OpenShift with OSSM then); its values read `unknown`.
+
 Every source or remote istiod status other than `0` also saves the restart evidence to
 `istiod-diag-<RUN_ID>/` next to the TSV, tag `iter<N>`, after the row is written; a failed
 capture never adds a `SETUP_FAILED` row. A pod replaced between iterations (scale-down,
@@ -144,8 +153,8 @@ rules: [Run config](../../README.md#run-config---config-file)).
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `CHURN_*`, `FANOUT_*`,
-  `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE`
-  stays environment only.
+  `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform) and
+  `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE` stays environment only.
 - **One value or a list:** `001` and `002` read `CHURN_DEPLOYMENT_COUNT`; the sweep reads the
   CSV `CHURN_INTENSITIES` (`--churn-intensities`; empty: `CHURN_DEPLOYMENT_COUNT`) and
   `CHURN_MESH_SIZES` (`--mesh-sizes`; empty: 1 to the number of contexts). A list key exported

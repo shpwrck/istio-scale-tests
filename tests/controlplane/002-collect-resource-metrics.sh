@@ -49,6 +49,8 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_lines, tuning_baseline_state
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
@@ -407,6 +409,12 @@ ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
 # Kube server version per context (concurrent, 5s timeout each).
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 
+# The platform record (tests/lib/platform.sh), before any scrape: inherited from 003, else read
+# here. --phase baseline keeps it in the state dir, so --phase final reads nothing in its window.
+[[ "$PHASE" != final ]] || platform_probe_load "${STATE_DIR}/platform-record.tsv"
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+[[ "$PHASE" != baseline ]] || platform_probe_save "${STATE_DIR}/platform-record.tsv"
+
 # Source context's node allocatable + istiod limits for the preamble (read-only;
 # `unknown` on failure). Skipped for --phase baseline (no preamble written then).
 PRE_NODE_ALLOC_CPU_M="unknown"
@@ -478,6 +486,7 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		# The sweep's VS/DR apply mode (003 --vsdr-apply); a standalone window has none.
 		echo "# VSDR_APPLY=n/a"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]}")"
 		# Namespace-scaling keys, same shared emitter as 003 (PL36). A standalone run is
 		# no growth sweep, so the sweep-only keys read n/a.
 		growth_preamble_lines SERVICES_PER_NAMESPACE="$SERVICES_PER_NAMESPACE" GROWTH_MODE=n/a \
@@ -1694,6 +1703,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+		platform_md_row "$(IFS=,; echo "${CONTEXTS[*]}")"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
 		echo "| Contexts | ${CONTEXTS[*]} |"
 		echo "| Last window written | mesh ${MESH_SIZE}, ${SERVICE_COUNT} services x ${REPLICAS} replicas in ${NAMESPACE_COUNT} namespace(s), scoping ${SIDECAR_SCOPING}, traffic ${TRAFFIC_CONFIG} (VS+DR services ${VSDR_SERVICES}; every ${VSDR_EVERY}, ${VSDR_SUBSETS} subsets) |"

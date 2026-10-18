@@ -51,6 +51,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"  # extract_gauge (used by fanout_restart_status)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
@@ -304,6 +306,8 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
+# The platform record (tests/lib/platform.sh), before any load: inherited from 003, else read here.
+platform_probe "$(IFS=,; echo "${ALL_CTXS[*]}")"
 
 # server_replicas_csv: "<ctx>=<ready>/<spec>,..." for the dataplane-server
 # Deployment on every context, read live and concurrently (PL39) before any load.
@@ -384,6 +388,7 @@ trap cleanup_all EXIT
 	echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 	echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
 	config_preamble_lines
+	platform_preamble_lines "$(IFS=,; echo "${ALL_CTXS[*]}")"
 } > "$TSV_FILE"
 # New TSV columns appended at the end of the old schema:
 #   pct_200, istiod_restarted, target_class
@@ -511,6 +516,7 @@ write_run_md() {
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+		platform_md_row "$(IFS=,; echo "${ALL_CTXS[*]}")"
 		echo "| Istio version | ${ISTIO_VER} |"
 		echo "| Fortio image | \`${FORTIO_IMAGE}\` |"
 		echo "| Source | ${SOURCE_CTX} |"

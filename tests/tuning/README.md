@@ -78,6 +78,12 @@ hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the control
 in KiB. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
+Each pass's probe reads the platform record live ([`tests/lib/platform.sh`](../lib/platform.sh):
+the platform, the mesh operator, istiod and proxy builds, the nodes' provider), and the table
+shows it per pass. A pass whose record differs from the baseline's (an operator upgrade or a
+proxy roll between passes, or a value not recorded) gets a warning in the table's notes and on
+stderr: its change against the baseline is then not the profile's alone.
+
 ## One profile by hand
 
 ```bash

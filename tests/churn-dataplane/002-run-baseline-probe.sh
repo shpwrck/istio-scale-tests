@@ -39,6 +39,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
@@ -233,6 +235,8 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # PL2: probe kube versions concurrently with 5s --request-timeout.
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+# The platform record (tests/lib/platform.sh), before any window: inherited from 004, else read here.
+platform_probe "$ALL_CTXS_CSV"
 
 # Preflight + record the source istiod replica count for the TSV preamble (PL2).
 # The fanout (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-
@@ -268,7 +272,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
-	config_preamble_lines >> "$OUTPUT_FILE"
+	{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$OUTPUT_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 

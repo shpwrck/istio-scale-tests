@@ -6,7 +6,8 @@
 # - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
 #   within one TSV file.
 # - Every output format carries the TSV preamble metadata, and RUN_CONFIG /
-#   RUN_CONFIG_SHA256 (the --config behind the inputs) over all input TSVs.
+#   RUN_CONFIG_SHA256 (the --config behind the inputs) and the platform record (PLATFORM,
+#   MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh) over all input TSVs.
 # - Every output format has a "Remote coverage" section from the reach-*.tsv files
 #   that 002's reachability check writes (tests/lib/reach.sh).
 #
@@ -30,6 +31,8 @@ source "${ROOT}/config/options.env"  # COEXEC_RESULTS_DIR
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_lines
 
 RESULTS_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -181,6 +184,8 @@ ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_STR="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_STR="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# The platform record over every input (a file without it reads unknown).
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
@@ -360,6 +365,7 @@ emit_metadata_lines() {
 	printf '%s ON_UNREACHABLE=%s\n'        "$prefix" "${ON_UNREACHABLE_STR:-unknown}"
 	printf '%s RUN_CONFIG=%s\n'            "$prefix" "${RUN_CONFIG_STR:-unknown}"
 	printf '%s RUN_CONFIG_SHA256=%s\n'     "$prefix" "${RUN_CONFIG_SHA256_STR:-unknown}"
+	while IFS= read -r kv; do printf '%s %s\n' "$prefix" "$kv"; done <<<"$PLATFORM_VALUES"
 }
 
 report_text() {
@@ -434,11 +440,12 @@ report_json() {
 		--arg on_unreachable   "${ON_UNREACHABLE_STR:-unknown}" \
 		--arg run_config       "${RUN_CONFIG_STR:-unknown}" \
 		--arg run_config_sha256 "${RUN_CONFIG_SHA256_STR:-unknown}" \
+		--argjson platform     "$(platform_report_lines json "$PLATFORM_VALUES")" \
 		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
 		--argjson rows         "$rows" \
-		'{metadata: {run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		'{metadata: ({run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256} + $platform), summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -514,6 +521,7 @@ report_md() {
 	echo "| ON_UNREACHABLE | ${ON_UNREACHABLE_STR:-unknown} |"
 	echo "| RUN_CONFIG | \`${RUN_CONFIG_STR:-unknown}\` |"
 	echo "| RUN_CONFIG_SHA256 | \`${RUN_CONFIG_SHA256_STR:-unknown}\` |"
+	platform_report_lines md "$PLATFORM_VALUES"
 	echo ""
 	reach_coverage_render md <(printf '%s' "$REACH_ROWS")
 	echo ""

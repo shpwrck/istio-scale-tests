@@ -15,11 +15,14 @@ member, the echo workload on one. [`001-run-ingress-check.sh`](001-run-ingress-c
 what each member resolved, sends traffic through every member's ingress, and writes a report
 that leads with both answers.
 
-**Status:** confirmed in the lab on 2026-10-14: 22 of 22 rows matched the predictions below,
-and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded
-([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)).
+**Status:** confirmed in the lab on 2026-10-14 on OpenShift (OSSM 3.4.3): 22 of 22 rows matched
+the predictions below, and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded
+([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)). Confirmed
+again on 2026-10-18 on kind ([kind lab](../../docs/runbooks/kind-lab/README.md): upstream Istio
+1.30.5 through the Sail operator 1.31.1, Gateway API v1.6.1 standard channel): 22 of 22 rows
+matched.
 
-## Answer (Istio 1.30.5 / OSSM 3.4.3; predicted from the source, confirmed in the lab 2026-10-14)
+## Answer (Istio 1.30.5, OSSM 3.4.3 and upstream; predicted from the source, confirmed in the lab 2026-10-14 and on kind 2026-10-18)
 
 **For traffic, no. For the HTTPRoute status, yes.** An HTTPRoute attached to a Gateway routes to a
 Service that exists only in another member; the only side effect is that the route's status on
@@ -174,9 +177,16 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 
 Needs the Gateway API CRDs on every member, ReferenceGrant included (the script stops when
 HTTPRoute is missing), and the `istio` GatewayClass, which istiod creates. Kubernetes does not
-ship the CRDs: install the standard channel on every member, at a version your Istio supports
-(Istio's Gateway API task has the command; on kind, cloud-provider-kind installs them). Recent
-OpenShift releases install the standard channel through the ingress operator.
+ship the CRDs: install the standard channel on every member, at a version your Istio supports.
+The check was confirmed with v1.6.1 (the release cloud-provider-kind v0.12.0 installs on kind):
+
+```bash
+kubectl --context <member-ctx> apply --server-side \
+  -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
+```
+
+The preflight records the bundle version each member has. Recent OpenShift releases install the
+standard channel through the ingress operator.
 
 1. Pick the workload member. A member's cluster name is its Argo CD cluster name: the kubeconfig
    context it was registered with (`terraform -chdir=terraform/platform output
@@ -231,10 +241,21 @@ results will go, and:
      and `ENABLE_MCS_CLUSTER_LOCAL`;
    - the builds that ran: istiod's `discovery` image (`ISTIOD_IMAGE`), the ingress `istio-proxy`
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
-     ran (the registry host and path are dropped), and the operator build (`OSSM_OPERATOR`: on
-     OpenShift the OSSM CSV version and phase, such as `3.4.3/Succeeded`; on Kubernetes the Sail
-     operator's image tag and state, such as `sail-operator:1.31.1/Available`); the Istio CR
-     version and the tuning baseline;
+     ran (the registry host and path are dropped; several are `+`-joined), and the operator build
+     (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV, such as
+     `servicemeshoperator3:3.4.3/Succeeded`; on Kubernetes the Sail operator's image tag, the
+     digest its pod runs and its state, such as `sail-operator:1.31.1@sha256:<digest>/Available`;
+     `absent` only when the platform's own operator read answers with none on a platform asked
+     of the member; `unknown`, with a warning, when the platform or that read is unknown, or
+     when `TEST_PLATFORM` set the platform and that read found none); the Istio CR version and
+     the tuning baseline;
+   - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
+     `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
+     `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` and `NODE_PROVIDER_BY_CONTEXT` (the nodes'
+     providerID scheme: `kind`, `aws`, ...). `TEST_PLATFORM` (`config/options.env`, default
+     `auto`) picks each member's platform: `auto` asks the member (it serves
+     `security.openshift.io/v1` on OpenShift), `kubernetes` or `openshift` is taken as given, and
+     any other value stops the run;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),
@@ -413,7 +434,7 @@ repeats every TSV preamble line.
 
 **Comparing re-runs:** each run writes a fresh `run-<RUN_ID>/`. Runs whose preambles match on
 `GWAPI_SCHEMA` (the rules that turn codes into answers), `SCENARIO_SET` (and `SCENARIO_SET[ctx]`),
-`ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `TIMEOUT_SEC`: a
+`PLATFORM`, `ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `TIMEOUT_SEC`: a
 reply slower than it is `000`, `GATE_PASSES`, `SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable
 verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
 
@@ -588,8 +609,9 @@ on the wait and the gate, no istioctl evidence):
   `GWAPI_GATE_PASSES`, `GWAPI_SETTLE_SEC`, `GWAPI_REPROBE_DELAY_SEC`, `GWAPI_DETAIL_TIMEOUT_SEC`,
   `GWAPI_KUBECTL_TIMEOUT_SEC`, `GWAPI_ISTIOCTL_TIMEOUT_SEC`, `GWAPI_NAMESPACE`,
   `GWAPI_REMOTE_NAMESPACE` (the chart's `remoteNamespace`), `GWAPI_SHARED_NAMESPACE`
-  (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` and `GWAPI_ARGOCD_APPSET` have
-  no flag.
+  (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` (empty by default: the Argo CD
+  namespace of the hub's platform, `openshift-gitops` on OpenShift, else `argocd`; the run logs
+  which) and `GWAPI_ARGOCD_APPSET` have no flag. `TEST_PLATFORM` (above) is a key of every suite.
 - The shared `ISTIOD_DIAG_*` keys are accepted and unused. The script copies the config into the
   run directory as `run-config-<RUN_ID>.env`.
 - **Flags only:** `--dry-run`. Keep context names in `configs/<name>.local.env` (gitignored).

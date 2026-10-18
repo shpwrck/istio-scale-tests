@@ -15,6 +15,7 @@
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, ISTIO_VERSION,
 # KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
 # report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
+# and the platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh)
 # over all input TSVs.
 #
 # Usage:
@@ -46,6 +47,8 @@ config_preload propagation "$@"
 source "${ROOT}/config/options.env"  # PROPAGATION_RESULTS_DIR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values (the platform record)
 
 RESULTS_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
 # 1 when --results-dir is passed (gates the multi-run warning below).
@@ -163,7 +166,8 @@ fi
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_<KEY>[i]. Scalars are looked up via the first row (homogeneous by
 # definition); sequences iterate the rows in input order.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256
+	"${PLATFORM_KEYS[@]}")
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -197,6 +201,10 @@ done
 # mixed:a,b with a warning when they differ (PL26).
 PREAMBLE[RUN_CONFIG]="$(config_report_value RUN_CONFIG "${ENDPOINT_FILES[@]}")"
 PREAMBLE[RUN_CONFIG_SHA256]="$(config_report_value RUN_CONFIG_SHA256 "${ENDPOINT_FILES[@]}")"
+# The platform record over every input too (tests/lib/platform.sh): unknown for files written
+# before it, mixed (with a warning) when the inputs disagree.
+PLATFORM_VALUES="$(platform_report_values "${ENDPOINT_FILES[@]}")"
+while IFS= read -r kv; do PREAMBLE["${kv%%=*}"]="${kv#*=}"; done <<<"$PLATFORM_VALUES"
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then

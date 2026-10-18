@@ -188,6 +188,15 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
+Every TSV preamble also carries the platform record
+([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
+platform, the mesh operator, istiod and proxy builds and the nodes' provider
+(`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+`PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`), read before the baseline window (a sweep
+reads it once for all its combos). `005` prints it in every format and warns when its inputs
+differ. Sweeps recorded before it have none of these lines (the suite supported only OpenShift
+with OSSM then), and the report reads their values as `unknown`.
+
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
@@ -204,8 +213,9 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 ```
 
 - **Keys:** `SETUP_CONTEXTS`, the `config/options.env` keys `COEXEC_*`, `REACH_*`,
-  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`, and the churn
-  suite's `CHURN_DEPLOYMENT_COUNT`, `CHURN_BASE_REPLICAS` and `CHURN_SCALE_TO_REPLICAS`.
+  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform) and
+  `METRICS_SCRAPE_TIMEOUT`, and the churn suite's `CHURN_DEPLOYMENT_COUNT`, `CHURN_BASE_REPLICAS`
+  and `CHURN_SCALE_TO_REPLICAS`.
   `COEXEC_TEST_NAMESPACE` stays environment only.
 - **Run keys:** `COEXEC_MESH_SIZES` (`004 --mesh-sizes`; empty: 1 to the number of
   contexts), `COEXEC_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts at
