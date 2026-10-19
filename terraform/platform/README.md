@@ -50,7 +50,8 @@ What the apply needs to reach:
   which the other members' istiod use. When the kubeconfig's URL works only from this machine
   (kind writes `https://127.0.0.1:<port>`), set a URL that works from all of them in
   `cluster_api_url_overrides`. The apply fails at its end when Argo CD cannot reach a member (see
-  below), and the wiring gate on each member names a member its istiod cannot sync.
+  below), and the wiring gate on each member names a member whose remote secret it lacks or whose
+  cluster its istiod cannot sync.
 - The Argo CD chart repo (`argocd_chart_repository`) from this machine, and the git repo
   (`gitops_app_repo_url`) plus the operator chart repos from the hub (Argo CD pulls them): a
   mirror goes in through `gitops_app_overrides` (`terraform.tfvars.example`).
@@ -122,7 +123,14 @@ changes owner only when the apply updates its Secret, and the replica that owned
 cache. Adding or removing a spoke re-pins the spokes after it in name order, and a new replica count
 re-pins most of them (the apply changes the replica count first: until it re-pins, a spoke whose pin
 is at or above the new count sits on shard 0, and the controller logs
-`is greater than the number of available shard`). With `gitops_install_operator = false` the apply
+`is greater than the number of available shard`). The pins follow from the names alone, so anyone
+can work out a spoke's owner: adding a spoke to `spoke_cluster_contexts` moves every spoke that
+sorts after it one shard on (removing one, one back), a name that sorts last (zero-padded `mesh-021`
+after `mesh-020`) moves none unless the replica count changes with it, and `mesh_member_count`
+moves none (it labels spokes, it adds none). Each moved spoke costs one cache rebuild: its new owner
+lists and watches everything Argo CD tracks on that member from scratch while the old one drops its
+copy, and its Applications are not compared until the new cache has synced. So change membership
+between test runs, not during one. With `gitops_install_operator = false` the apply
 pins nothing (it does not know the existing Argo CD's replica count; restart its controller pods
 after adding spokes, or pin the shards yourself) and drops a pin it wrote before; a `shard` key
 someone else set stays, and the apply warns about it. The controller logs say
@@ -161,7 +169,11 @@ for 2 members, 17 CPU / 34 GiB for 20. Override them per environment without for
   tuning (`charts/argocd-config/values.yaml`); for example smaller requests on a small hub.
   `argocd_config_values` is the same for the OpenShift GitOps ArgoCD CR. Keep the controller
   limit near 6Gi on a busy hub.
-- `mesh_member_count`: how many spokes join the mesh, in sorted order (0 = all).
+- `mesh_member_count`: how many spokes join the mesh, in sorted order (0 = all). The wiring gate
+  on each member gets their names (`expectedClusters`, the spoke keys: each member's Argo CD cluster
+  name, Istio cluster ID and remote-secret suffix), checks every other member by name and names a
+  removed member's leftover remote secret ([README](../../README.md#grow-the-mesh)). Change it
+  between test runs, not during one.
 - Large fleets: `argocd_clusters_per_shard` (`argocd_max_shards` only on OpenShift; on
   `kubernetes` the replica count is the computed one unless `argocd_helm_values` sets
   `controller.replicas`, and the shard pins follow it).

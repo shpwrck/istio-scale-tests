@@ -179,7 +179,7 @@ Sizing (prices checked 2026-10-13, sources in [window-plan.md](window-plan.md#2-
 ### Verify and recover
 
 - `rosa list clusters`: all `ready`. `oc --kubeconfig terraform/rosa-hcp/kubeconfig --context cluster-001 get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy.
-- On each member, `oc exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`: `Ready ... ca=shared`.
+- On each member, `oc exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`: `Ready ... members=<the three members> ca=shared`.
 - On each member, istiod runs 1 pod with an 8Gi memory request and a 16Gi limit (8Gi on the
   fallback tiers):
   `oc -n istio-system get pod -l app=istiod -o jsonpath='{..resources.requests.memory}/{..resources.limits.memory}'`.

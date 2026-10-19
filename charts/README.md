@@ -56,7 +56,7 @@ Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/
 | `spoke-ossm/` | app-of-apps | Istio + IstioCNI CRs (multi-primary, multi-network) |
 | `spoke-ingress-gateway/` | app-of-apps | North-south ingress gateway |
 | `spoke-east-west-gateway/` | app-of-apps | East-west gateway + cross-network Gateway |
-| `mesh-wiring-verify/` | Terraform (`values-mesh-wiring-verify.yaml`) | Per-member health gate for remote secrets and istiod sync |
+| `mesh-wiring-verify/` | Terraform (`values-mesh-wiring-verify.yaml`) | Per-member health gate for remote secrets and istiod sync, each member by name |
 | `mesh-verify/` | `mesh-verify-appset.yaml` | Cross-cluster echo workload |
 | `mesh-verify-gateway-api/` | `mesh-verify-gateway-api-appset.yaml` | Gateway API ingress check: HTTPRoutes on every member, echo on one ([tests/gateway-api](../tests/gateway-api/README.md)) |
 | `istiod-monitor/` | manual `helm install` | ServiceMonitor + PrometheusRule for istiod |

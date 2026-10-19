@@ -460,8 +460,11 @@ resource "helm_release" "gitops_hub_app_of_apps" {
 # (no PushSecret health check) and ESO (reports Synced=True on partial push)
 # otherwise hide.
 #
-# expectedMembers is derived here from the same source of truth that labels mesh
-# members, so a change to mesh_member_count automatically updates the gate.
+# expectedMembers and expectedClusters (the members' names) are derived here from the same
+# source of truth that labels mesh members, so a change to mesh_member_count automatically
+# updates the gate. With the names each gate checks every other member by name and names a
+# remote secret or cluster of any other (a removed member's stays behind), which a count
+# cannot tell from a member's.
 resource "helm_release" "mesh_wiring_verify_appset" {
   count    = local.gitops_enabled && var.gitops_app_repo_url != "" ? 1 : 0
   provider = helm.hub
@@ -477,6 +480,12 @@ resource "helm_release" "mesh_wiring_verify_appset" {
   values = [
     file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/values-mesh-wiring-verify.yaml"),
     file("${path.module}/../../charts/gitops-hub-ocm-placement-appset/platform-${local.platform}.yaml"),
+    # The members' names, which are their Istio cluster IDs and remote-secret suffixes: the
+    # ApplicationSets pass each member its Argo CD cluster name (the spoke key) as clusterName.
+    # A list in a values document: a set value would split on the commas.
+    yamlencode({ template = { source = { helm = { valuesObject = {
+      expectedClusters = local.mesh_member_spoke_keys
+    } } } } }),
     yamlencode({ chartChecksum = local.chart_checksum["gitops-hub-ocm-placement-appset"] }),
   ]
 

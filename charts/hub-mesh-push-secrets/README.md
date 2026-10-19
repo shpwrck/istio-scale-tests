@@ -7,8 +7,9 @@ ApplicationSet):
 - `push-remote-secret-<member>` pushes `istio-remote-secret-<member>` to every member's
   `istio-system`.
 
-Removing a member does not delete what was pushed (ESO `deletionPolicy` stays `None`).
-Delete its remote secret from each remaining member:
+Removing a member does not delete what was pushed (ESO `deletionPolicy` stays `None`), and
+istiod keeps that cluster until its remote secret is deleted: the wiring gate on each remaining
+member reads NotReady, naming the secret, until then. Delete it from each remaining member:
 
 ```bash
 kubectl --context <mesh-ctx> -n istio-system delete secret istio-remote-secret-<removed-member>

@@ -147,7 +147,7 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
 - `kubectl --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops`: all Synced/Healthy
   (30 apps when no on-demand check is deployed).
 - `kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`:
-  `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
+  `Ready: secrets=2 istiod_managed=2 ... members=<mesh-a-ctx>,<mesh-b-ctx> ca=shared` on each member.
 - Data plane:
   1. Apply `charts/mesh-verify-appset.yaml` with the `fill` recipe in the repo README's "Verify"
      (`NS=openshift-gitops PLATFORM=openshift`); it deploys the revision the hub syncs.

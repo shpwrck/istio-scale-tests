@@ -728,6 +728,22 @@ gateway resets are now listed at the top of
 - After a move or a rotation, External Secrets takes up to about 10 minutes to give the other
   members the new token. Forcing a refresh (the ExternalSecret's and the PushSecret's
   `force-sync` annotation) could cut that; untested.
+- The wiring gate counts istiod's `closed` sync state as synced only when the `istio_build` tag
+  reads 1.30 or a later 1.x. Whether OSSM 3.4's istiod reports `1.30.x` there is unverified: read
+  `istio_build{component="pilot"}` from an OpenShift member's istiod (`:15014/metrics`). With any
+  other tag the gate fails closed (NotReady after each remote secret change, until istiod
+  restarts); then give the gate the Istio minor another way, such as the Istio CR's `spec.version`.
+- The gate's checks by name (a removed member's leftover remote secret, a member whose remote
+  secret never arrived) are tested in bats only: watch them on the next member removal or swap (the
+  kind lab cannot remove one read-only). Deleting a removed member's remote secrets from the other
+  members when it leaves (External Secrets does not, `charts/hub-mesh-push-secrets/README.md`)
+  would spare the manual delete the gate asks for.
+- A tuning profile that adds objects (04's root DestinationRule) and is left applied after a
+  killed tuning run is not in other suites' records: `ISTIOD_ENV_BY_CONTEXT` catches the env
+  profiles (01-03) only. Tuning itself refuses to start over a leftover `active-profile` marker,
+  and `tests/tuning/005-cleanup.sh` removes the labelled objects. Recording the objects labelled
+  `istio-scale-tests/tuning-profile` in istio-system would show such a leftover in every suite's
+  results.
 
 ## Validation environment
 

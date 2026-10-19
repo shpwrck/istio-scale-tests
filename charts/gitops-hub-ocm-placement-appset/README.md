@@ -23,15 +23,16 @@ sets only what differs.
 | `values-ossm.yaml` | `charts/spoke-ossm` | each mesh member |
 | `values-ingress-gateway.yaml` | `charts/spoke-ingress-gateway` | each mesh member |
 | `values-east-west-gateway.yaml` | `charts/spoke-east-west-gateway` | each mesh member |
-| `values-mesh-wiring-verify.yaml` | `charts/mesh-wiring-verify` (installed by Terraform) | each mesh member |
+| `values-mesh-wiring-verify.yaml` | `charts/mesh-wiring-verify` (installed by Terraform, which adds `expectedMembers` and `expectedClusters`) | each mesh member |
 | `values-mesh-verify.yaml` | `charts/mesh-verify` (via `charts/mesh-verify-appset.yaml`) | each mesh member |
 | `values-mesh-verify-gateway-api.yaml` | `charts/mesh-verify-gateway-api` (via `charts/mesh-verify-gateway-api-appset.yaml`; `valuesObject.workloadCluster`) | each mesh member |
 
 `destination.mode: clusterName` targets each member cluster by name;
 `inClusterServer` targets the hub API and passes `clusterName`/`clusterServer` to the
-child chart. Put generator placeholders such as `{{clusterName}}` in
-`template.source.helm.parameters` (the template rewrites it to `{{name}}` for the `clusters`
-generator); put static values in `template.source.helm.valuesObject`.
+child chart. Write a member's name as `{{clusterName}}`, in `template.source.helm.parameters`
+or in a string of `template.source.helm.valuesObject` (the gate's preset passes its `clusterName`
+so): the template rewrites it to `{{name}}` for the `clusters` generator, and Argo CD fills it in
+for each member. Static values go in `template.source.helm.valuesObject`.
 
 ```bash
 helm template x charts/gitops-hub-ocm-placement-appset \

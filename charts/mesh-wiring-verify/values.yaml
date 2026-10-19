@@ -5,9 +5,22 @@
 # Not istio-injected: the gate must not depend on the mesh it checks.
 namespace: mesh-wiring-verify
 
-# Mesh size, set by Terraform. With N > 0: at least N remote secrets, istiod
-# manages at least N clusters, and at least N-1 of them are remote.
-# With 0: istiod must manage at least as many clusters as there are remote secrets.
+# The mesh, set by Terraform (platform_gitops.tf) from the mesh members.
+# expectedClusters: every member's name (a list, or one comma-separated string): its Istio
+# cluster ID and the suffix of its remote secret istio-remote-secret-<name>. With names, the gate
+# needs each other member's remote secret and, on every istiod replica, that member synced, and
+# it is NotReady on a remote secret or remote cluster of any other name, naming each: a removed
+# member's secret stays on every member (charts/hub-mesh-push-secrets/README.md), and istiod
+# keeps its cluster and last sync state until the secret is deleted.
+# clusterName: this member's own name among them (the ApplicationSet sets it per member);
+# required with expectedClusters.
+# expectedMembers: their number, 0 or the same count with names. Without names (a manual
+# install) the gate counts: at least N remote secrets, istiod manages at least N clusters, at
+# least N-1 of them remote and synced; with 0, istiod must manage at least as many clusters as
+# there are remote secrets and sync every remote one. A count cannot tell a removed member's
+# secret from a member's.
+expectedClusters: []
+clusterName: ""
 expectedMembers: 0
 
 # Namespace with the Istio remote secrets and istiod.
@@ -25,9 +38,13 @@ istiodCheck:
   # istiod's metrics port on each pod (the Service's http-monitoring port has the same number).
   port: 15014
   curlTimeoutSeconds: 5
-  # At least N-1 remote clusters (every managed one with expectedMembers 0) must be synced
-  # on every replica. closed counts as synced only when the replica's istio_build tag is
-  # 1.30 or later: before 1.30 it can be a stopped connection that nothing replaced.
+  # Every other member (by name with expectedClusters, else N-1, or every managed one with
+  # expectedMembers 0) must be synced on every replica. closed counts as synced only when the
+  # replica's istio_build tag reads 1.30 or a later 1.x: before 1.30 it can be a stopped
+  # connection that nothing replaced. On OpenShift that needs OSSM's istiod to report its Istio
+  # version as the tag (1.30.x on OSSM 3.4), which is unverified: any other tag (a build name, or
+  # OSSM's own 3.x version) fails closed (closed reads NotReady, advising an istiod restart),
+  # never open.
   # false only for an istiod without istiod_remote_cluster_sync_status (before 1.29).
   requireRemoteSync: true
 

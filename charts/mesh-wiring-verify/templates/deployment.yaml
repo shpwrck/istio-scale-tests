@@ -10,6 +10,15 @@ metadata:
     {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # The old pod goes first (maxSurge 0): a gate with the old member list beside the new one
+  # would name a member being added as a stale secret, or stay Ready on a list that no longer
+  # holds. (Still RollingUpdate: an apply that switched the type to Recreate would keep the
+  # live rollingUpdate defaults, which Recreate rejects.)
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       {{- include "mesh-wiring-verify.selectorLabels" . | nindent 6 }}
@@ -35,6 +44,11 @@ spec:
               value: {{ .Values.istioNamespace | quote }}
             - name: EXPECTED_MEMBERS
               value: {{ .Values.expectedMembers | quote }}
+            # The mesh members by name (comma-separated) and this member's own; empty: by count.
+            - name: EXPECTED_CLUSTERS
+              value: {{ include "mesh-wiring-verify.expectedClusters" . | quote }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.clusterName | default "" | toString | quote }}
             - name: ISTIOD_CHECK_ENABLED
               value: {{ .Values.istiodCheck.enabled | quote }}
             - name: ISTIOD_SERVICE

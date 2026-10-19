@@ -87,12 +87,15 @@ which wins over the upstream docs there when they disagree.
   makes it config-settable. A sweep axis gets a plural CSV key that falls back to the singular one.
 - Platform record: every TSV writer and placeholder calls `platform_probe` before any window and
   writes `platform_preamble_lines` next to `config_preamble_lines`; a run's markdown summary adds
-  `platform_md_row` after its `| Run config |` row; a report merges the record over its inputs with
-  `platform_report_values` and prints `platform_report_warnings` in every format's body; a sweep
-  calls `platform_drift_check` after its last step, before its reports; every script that sources
+  `platform_md_row` after its `| Run config |` row; every suite report merges the record over its
+  inputs with `platform_report_values` and prints `platform_report_warnings` in every format's body
+  (tuning 004 compares each pass's record with the reference pass's, the baseline's or else the
+  first pass with data's, over `PLATFORM_PASS_KEYS`, every record key but `ISTIOD_ENV_BY_CONTEXT`,
+  in its `Platform record` row and notes instead); a sweep calls `platform_drift_check` after its
+  last step, before its reports; every script that sources
   `platform.sh` calls `platform_validate` with its argument checks (`tests/lib/platform.sh`;
-  `tests/lib/test/config-suites.bats` and `platform.bats` check the pairing). `TEST_PLATFORM` is a
-  key of every suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
+  `tests/lib/test/config-suites.bats` and `platform.bats` check the pairing). `TEST_PLATFORM` and
+  `PLATFORM_READ_TIMEOUT` are keys of every suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
 
 ## Repository map
 
@@ -101,7 +104,7 @@ which wins over the upstream docs there when they disagree.
 | `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
-| `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy) |
+| `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |
 | `charts/gitops-hub-app-of-apps/` | Root Application `hub-gitops-root` (Helm source on `charts/gitops-hub-apps`) |
 | `charts/gitops-hub-apps/` | Child Applications (repo URL/branch templated; `apps.<name>.enabled/values`) |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable ApplicationSet + presets `values-*.yaml` + platform overlays `platform-*.yaml` (cluster-Secret label or ACM Placement) |
@@ -112,7 +115,7 @@ which wins over the upstream docs there when they disagree.
 | `charts/hub-kubeconfig-from-argosecret/`, `charts/hub-mesh-push-secrets/` | ESO: member kubeconfigs on the hub; push `cacerts` + Istio remote secrets |
 | `charts/spoke-istio-namespaces/`, `charts/spoke-ossm-operator/`, `charts/spoke-ossm/` | Member namespaces, Sail operator (OSSM through OLM on OpenShift; the upstream chart on Kubernetes), Istio/IstioCNI (waits for `cacerts`) + tuning baseline |
 | `charts/spoke-ingress-gateway/`, `charts/spoke-east-west-gateway/` | Member gateways |
-| `charts/mesh-wiring-verify/` | Always-on gate per member (remote secrets, istiod ingestion and sync, shared root, east-west address) |
+| `charts/mesh-wiring-verify/` | Always-on gate per member (each other member's remote secret and istiod sync, by name; shared root, east-west address) |
 | `charts/mesh-verify/`, `charts/mesh-verify-appset.yaml` | On-demand cross-cluster echo check |
 | `charts/mesh-verify-gateway-api/`, `charts/mesh-verify-gateway-api-appset.yaml` | On-demand Gateway API check: HTTPRoutes on every member, echo workload on one (`tests/gateway-api`) |
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |

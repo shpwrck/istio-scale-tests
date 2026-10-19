@@ -83,6 +83,10 @@ mode, with the brownfield switches for anything already installed. For new ROSA 
 them with [terraform/rosa-hcp](terraform/rosa-hcp/README.md) (it covers the one-time AWS and Red Hat
 account setup and a preflight check), then apply `terraform/platform` with
 `cluster_provider = "rosa"`. The apply installs ACM and OpenShift GitOps unless already present.
+Unverified there: the wiring gate counts istiod's `closed` sync state (a remote secret changed and
+the new connection synced) only when istiod's `istio_build` tag reads 1.30 or a later 1.x. If OSSM's
+istiod reports another tag, the gate fails closed, never open: after a remote secret changes it reads
+NotReady, advising an istiod restart.
 
 Either way the apply starts the app-of-apps, and Argo CD rolls out the mesh in sync waves
 ([charts/README.md](charts/README.md)). It's done when every Application on the hub is
@@ -95,14 +99,15 @@ kubectl --context <hub-ctx> get applications.argoproj.io -n argocd
 
 ## Verify
 
-Every member runs `mesh-wiring-verify`, a gate that is Ready only when the member holds a remote
-secret for every member, every Ready istiod replica has ingested them all and synced every other
-member, istiod signs with the shared root, and the east-west gateway has an address. Otherwise its
-Argo Application goes Degraded, and the gate's output says why.
+Every member runs `mesh-wiring-verify`, a gate that is Ready only when the member holds the remote
+secret of every other member, every Ready istiod replica has synced each of them, no remote secret
+or cluster of anything else is left (a removed member's stays behind), istiod signs with the shared
+root, and the east-west gateway has an address. Otherwise its Argo Application goes Degraded, and
+the gate's output says why, naming each member, secret and replica.
 
 ```bash
 kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
-# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 replicas=3 root=<fingerprint> eastwest=<address>
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 members=<mesh-a-ctx>,<mesh-b-ctx> ca=shared synced=1 replicas=3 root=<fingerprint> eastwest=<address>
 ```
 
 `root=` is the first 16 hex digits of the SHA-256 of the root certificate in `cacerts`: compare it
@@ -110,7 +115,10 @@ across members, it must read the same on every one. `replicas=` counts the Ready
 the gate read; each connects to every member on its own, so the istiod figures and `synced=` are
 the lowest any of them reports. `synced=` comes from istiod's metric, which changes only when
 istiod (re)connects: a member token revoked later still reads synced, and shows as errors in
-istiod's log.
+istiod's log. `members=` lists the members it checked by name: Terraform sets them, each member's
+Argo CD cluster name, which is also its Istio cluster ID and the suffix of its remote secret
+`istio-remote-secret-<member>`. A gate installed without them counts instead (`members=unchecked`),
+and a count cannot tell a removed member's leftover secret from a member's.
 
 End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
 from every member. The manifest keeps placeholders for the repo, the revision, the platform and the
@@ -165,34 +173,50 @@ Settings and image pins live in `config/versions.env` and `config/options.env`. 
 version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
 
 Every TSV, run summary and report also records what each member ran on: Kubernetes or OpenShift,
-the mesh operator build, the istiod and proxy images and the nodes' provider
+the mesh operator build, the istiod and proxy images, istiod's env and the nodes' provider
 ([tests/lib/platform.sh](tests/lib/platform.sh)). `TEST_PLATFORM` (`auto`, the default, asks each
 member; `kubernetes` or `openshift` is used as given) picks each suite chart's OpenShift overlay;
 the record still asks each member what it serves, outside every measurement window, and warns when
 that differs from the override. A report warns when its inputs differ on any of these, so compare
 results within one platform and mesh build. On kind every node reports the whole host, so the
 controlplane report flags its capacity figures and its SLA verdict leaves the node figures out
-(`CAUTION`). The cross-cluster path there runs through cloud-provider-kind's userspace Envoy on the
-shared host, so the dataplane and churn-dataplane reports flag their remote latency.
+(`CAUTION`); so does a member whose node provider could not be read. k3d (`k3s://`) and minikube
+clusters that share one host are not detected: their node figures are the host's too, so read them
+the same way. The cross-cluster path on kind runs through cloud-provider-kind's userspace Envoy on
+the shared host, so the dataplane and churn-dataplane reports flag their remote latency.
 
 | Record key | Values |
 | --- | --- |
 | `PLATFORM` | `kubernetes` or `openshift` over the members; `mixed` when they run both, else `unknown` when any member is |
 | `TEST_PLATFORM` | The override as set: `auto`, `kubernetes` or `openshift` |
 | `PLATFORM_BY_CONTEXT` | What each member serves, asked even with an override |
-| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>[@<digest>]/<state>` (Kubernetes) or `servicemeshoperator3:<version>/<phase>` (OpenShift). The state (`Available`, `Unavailable`: no available replica, or a CSV phase) is never compared, only the build before it. `absent`: the member answered and runs none where the charts install it |
-| `ISTIOD_IMAGE_BY_CONTEXT` | The istiod pods' `discovery` image and the digest that ran |
-| `PROXY_IMAGE_BY_CONTEXT` | The `istio-proxy` image of the ingress and east-west gateway pods. The test pods' sidecars get the injector's current build (normally istiod's), which can be newer than a gateway not restarted since an upgrade |
+| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>/<state>` (Kubernetes) or `servicemeshoperator3:<version>/<phase>` (OpenShift). The state (`Available`, `Unavailable`: no available replica, or a CSV phase) is never compared, only the build before it (`@unknown` as below). `absent`: the member answered and runs none where the charts install it |
+| `ISTIOD_IMAGE_BY_CONTEXT` | The istiod pods' `discovery` image and the digest that ran; `<image>@unknown`: none of them has started (below); `none`: no istiod pod on that member |
+| `PROXY_IMAGE_BY_CONTEXT` | The `istio-proxy` image of the ingress and east-west gateway pods; `@unknown` and `none` as for istiod. The test pods' sidecars get the injector's current build (normally istiod's), which can be newer than a gateway not restarted since an upgrade |
+| `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` container env (each `name=value`, or `name=` and its `valueFrom`, sorted) without `CLUSTER_ID`, the one variable that differs by member. It changes when a tuning profile's `spec.values.pilot.env` or a hand edit changes istiod's settings (tuning 004 leaves it out of its pass comparison: a profile changes it on purpose). `none` and `unknown` as for the images |
 | `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...); `none`: nodes without one; `no-nodes`: no nodes listed; `unrecognized`: a providerID without `<scheme>://` |
 
 In every key `unknown` means not read (a failed read, with a warning; a `--dry-run`; a file from
-before the record), never none, and several values on one member are `+`-joined. A report whose
+before the record), never none, and several values on one member are `+`-joined. An image whose
+pods have not started (Pending, still pulling, evicted; an operator scaled to 0) is not another
+build: the record takes the pods that report a digest, and when none does it records the spec image
+as `<name>:<tag>@unknown` (its pinned digest when the spec image has one), which every comparison
+takes as not read (a warning), never as a different build. A report whose
 inputs disagree for a member shows `mixed:<a>;<b>` there and says so in its body
-(`mixed:unknown,...` when only some inputs carry the key); a sweep whose record changed between
-its start and end marks its reports `mixed:` (it writes `platform-drift.txt` in the sweep dir). A
-controlplane `--resume` stops when a member's platform, mesh build or node provider, or the source
-member's tuning baseline or Sidecar egress hosts, differ from what the sweep's TSV records; a value
-it cannot read only warns.
+(`mixed:unknown,...` when only some inputs carry the key, with a warning that counts the inputs
+from before the key). A sweep reads the record again at its end, with each member's Kubernetes
+version and its first member's tuning levers and Sidecar egress hosts when its TSVs record them: a
+value that changed goes to `platform-drift.txt` in the sweep dir, and every report of the sweep says
+so in its body, naming the sweep dir (the record's keys and `KUBE_VERSIONS` read `mixed:`). A
+controlplane `--resume` stops on a definite difference from what the sweep's TSV records: a
+member's platform, mesh operator build (not its state), istiod or gateway proxy build, istiod env
+digest, node provider or Kubernetes version, or the source member's (the TSV's first) tuning
+baseline, Sidecar egress hosts or istiod CPU and memory limits; whatever it cannot read only warns.
+It also only warns when node allocatable, istiod's requests, a member's istiod replica count or the
+network topology differ (an autoscaler or an HPA moves some of them);
+[tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is
+bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
+nodes).
 
 ### Run config (`--config FILE`)
 
@@ -235,7 +259,20 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
 ## Grow the mesh
 
 `mesh_member_count` in `terraform/platform` sets how many spokes join, in sorted order (0 = all).
-Raise it and re-apply; the wiring gate's expected size follows automatically.
+Raise it, or add a spoke, and re-apply; the wiring gate's member list follows automatically. Change
+membership between test runs, not during one: every istiod connects to a new member, and on
+`kubernetes` adding or removing a spoke moves the spokes that sort after it to another Argo CD
+controller shard, which rebuilds their cache there (the shard pins in [terraform/platform/README.md](terraform/platform/README.md#run)).
+Until the new member is wired, every gate reads NotReady and names it (no remote secret yet, then
+not synced); wait until all of them read Ready again.
+
+When a member leaves, External Secrets leaves its remote secret on every other member, and istiod
+keeps that cluster until the secret is deleted. Each remaining member's gate reads NotReady and
+prints the delete command; run it on each of them:
+
+```bash
+kubectl --context <mesh-ctx> -n istio-system delete secret istio-remote-secret-<removed-member>
+```
 
 ## Troubleshooting
 
@@ -246,7 +283,12 @@ Raise it and re-apply; the wiring gate's expected size follows automatically.
 | Pods stay `Pending` with `Insufficient cpu` or `Insufficient memory` (`kubectl describe pod`) | The chart defaults need the capacity in [What you need](#what-you-need). Lower istiod with `gitops_app_overrides` (`spoke-ossm-appset`) and Argo CD with `argocd_helm_values`, as in `terraform/platform/terraform.tfvars.example`. |
 | The apply fails on `helm_release.argocd` after 900 s (`context deadline exceeded`) | Usually the same: the Argo CD pods cannot schedule on the hub (`kubectl -n argocd get pods`, then `describe` a Pending one). Lower the requests with `argocd_helm_values` and apply again. |
 | The apply fails: `Argo CD on the hub cannot load state from these clusters` | The member's registered URL is not reachable from the hub's pods (a kubeconfig that points at `127.0.0.1`, a private endpoint). Set `cluster_api_url_overrides` to an address that the hub and every member reach, and apply again. `Unauthorized` or `Forbidden` in the quoted message is the member's token instead ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
-| Gate says `istiod pod <pod> (<address>) has synced <n> remote cluster(s) < <need>` | That istiod replica cannot use the named member's remote secret: that member's API server URL is unreachable from its node, or its token is wrong. `istioctl remote-clusters` lists each one's state, and `kubectl -n istio-system logs -l app=istiod --prefix --tail=-1 \| grep <member>` says why, per replica: `remote cluster <member> failed to sync after 30s` (fix the URL with `cluster_api_url_overrides`) or `watch error in cluster <member>: Unauthorized` ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
+| Gate says `no remote secret here for mesh member(s) <member>` | The hub has not pushed that member's remote secret to this one. On the hub, `kubectl -n external-secrets-operator describe pushsecret push-remote-secret-<member>` shows the stores it reached and its last error (`Unauthorized` for this member's store: [rotate this member's token](terraform/platform/README.md#rotating-a-members-token)). Right after a member joins, wait: the push takes up to about 10 minutes. |
+| Gate says `remote secret(s) of no mesh member` | A member left, and External Secrets leaves what it pushed: run the `kubectl ... delete secret` the gate prints, on this member ([Grow the mesh](#grow-the-mesh)). Check first that the name is not a member being added: its secret can arrive a moment before this gate restarts with the new list. |
+| Gate says `has not synced mesh member(s) <member> (not managed)` | The remote secret is here but istiod built no cluster from it: `kubectl -n istio-system logs <pod> \| grep <member>` says why (a kubeconfig it cannot use, a data key other than the member's name, or a cluster ID another secret already holds). |
+| Gate says `manages remote cluster(s) of no mesh member` or `manages this member's own name as a remote cluster` | A remote secret holds a cluster that is no member: the gate prints a command that lists each remote secret's clusters; delete the secret (or the key) of a cluster that left. Its own name: this member's Istio cluster ID is not its Argo CD name (`spec.values.global.multiCluster.clusterName` in its Istio CR). |
+| Gate says `expectedMembers is <n> but expectedClusters names <m>`, or `this member (<name>) is not in expectedClusters` | The gate's values disagree with the mesh: Terraform sets both from the mesh members, so apply `terraform/platform` again. A member that just joined reads the second until that apply has updated the gate's ApplicationSet. |
+| Gate says `istiod pod <pod> (<address>) has not synced mesh member(s) <member> (<state>)` (counting: `has synced <n> remote cluster(s) < <need>`) | That istiod replica cannot use the named member's remote secret: that member's API server URL is unreachable from its node, or its token is wrong. `istioctl remote-clusters` lists each one's state, and `kubectl -n istio-system logs -l app=istiod --prefix --tail=-1 \| grep <member>` says why, per replica: `remote cluster <member> failed to sync after 30s` (fix the URL with `cluster_api_url_overrides`) or `watch error in cluster <member>: Unauthorized` ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
 | Gate says `cannot list the EndpointSlices of the istiod Service` (HTTP 403) | The gate's Role lacks the chart's EndpointSlice rule (it reads every istiod replica through them): sync the member's `mesh-wiring-verify` Application on the hub. |
 | Gateway Applications stay `Progressing`, the gateway Service `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. The gate says `has no external address yet` for the east-west gateway. |
 | `istioctl` errors on API versions | Use an `istioctl` that matches `ISTIO_VERSION`. |

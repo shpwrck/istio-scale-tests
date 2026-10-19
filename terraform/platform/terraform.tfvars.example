@@ -16,7 +16,9 @@ platform = "kubernetes"
 # --- Existing clusters (kubeconfig mode) ---
 # The hub runs Argo CD (and ACM on openshift) and is never a mesh member. Spoke context names
 # become the Argo CD cluster names (ManagedCluster names on openshift), so they must be
-# DNS-1123 labels (rename an EKS ARN: kubectl config rename-context <arn> mesh-a).
+# DNS-1123 labels (rename an EKS ARN: kubectl config rename-context <arn> mesh-a). Add or remove
+# spokes between test runs: those that sort after the change move to another Argo CD controller
+# shard (README.md, "Grow the mesh").
 cluster_provider       = "kubeconfig"
 kubeconfig_path        = "~/.kube/config"
 hub_cluster_context    = "<hub-ctx>"

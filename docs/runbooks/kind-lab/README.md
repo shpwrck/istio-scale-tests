@@ -151,10 +151,11 @@ kubectl --context kind-hub -n argocd get applications.argoproj.io
 for m in kind-mesh-1 kind-mesh-2; do
   kubectl --context "$m" exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
 done
-# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 replicas=1 root=<fingerprint> eastwest=<address>
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 members=kind-mesh-1,kind-mesh-2 ca=shared synced=1 replicas=1 root=<fingerprint> eastwest=<address>
 ```
 
-`root=` must read the same on both members; `replicas=1` is the lab's one istiod replica.
+`root=` must read the same on both members; `replicas=1` is the lab's one istiod replica; `members=`
+lists both members, which each gate checks by name.
 
 Then run the end to end echo check in [Verify](../../../README.md#verify) with `kind-hub` as
 `<hub-ctx>` and `kind-mesh-1` as `<mesh-a-ctx>`: answers come from both members. The ingress
@@ -175,6 +176,13 @@ tests/propagation/007-cleanup.sh --contexts kind-mesh-1,kind-mesh-2
 The other suites run the same way: the "Quick start" in each suite's README lists its steps
 (tuning: "Run a sweep"; gateway-api: "Deploy" and "Run"). Keep runs small: a sweep sized for the
 20-cluster campaign does not fit on one host.
+
+Expect kind warnings in the reports; they describe the lab, not a failed run. The controlplane
+report flags its capacity figures (each kind node reports the whole host) and its SLA verdict
+leaves the node figures out, so that verdict, in the report and in the scale envelope a
+controlplane sweep writes, reads `CAUTION` at best, never `PASS`. The dataplane and
+churn-dataplane reports flag their remote latency: the cross-cluster path runs through
+cloud-provider-kind's userspace Envoy on the shared host.
 
 kind has no metrics API, so the controlplane report's four utilization-% columns
 (`istiod_*_pct_of_limit`, `node_*_pct`) read `N/A` and its memory guard reads the gateways' memory

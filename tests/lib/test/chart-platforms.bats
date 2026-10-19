@@ -4,8 +4,9 @@
 # OpenShift; the ApplicationSet presets select the members by the cluster-Secret label in
 # argocd on kubernetes, and by the ACM Placement in openshift-gitops, with each member
 # chart's values-openshift.yaml (which must exist), on openshift; the app-of-apps hands its
-# children the platform's presets and operator sources; any other platform fails the render.
-# Needs helm; skips without it.
+# children the platform's presets and operator sources; any other platform fails the render;
+# the gate's ApplicationSet, with Terraform's values, gives each member's gate the members' names
+# and its own on both platforms. Needs helm; skips without it.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -93,6 +94,55 @@ appset_render() {
 		fi
 		! grep -q 'values-openshift.yaml' <<<"$k8s" || { echo "$name: kubernetes Applications add values-openshift.yaml"; false; }
 	done
+}
+
+# gate_values <render> <member>: the gate ApplicationSet's valuesObject in <render>, as the values
+# Argo CD hands <member>'s Application (the generator's placeholder filled in with its name).
+gate_values() {
+	awk -v m="$2" '
+		/^          valuesObject:$/ { on = 1; next }
+		on && substr($0, 1, 12) == "            " {
+			l = substr($0, 13)
+			while ((i = index(l, "{{name}}")) > 0) l = substr(l, 1, i - 1) m substr(l, i + 8)
+			while ((i = index(l, "{{clusterName}}")) > 0) l = substr(l, 1, i - 1) m substr(l, i + 15)
+			print l
+			next
+		}
+		on { exit }' <<<"$1"
+}
+
+@test "mesh-wiring gate: Terraform's values and the preset give each member's gate the members' names and its own, on both platforms" {
+	local p out m dep extra
+	# Terraform's values document for the gate ApplicationSet (platform_gitops.tf) and its set value
+	# (a string, type = "string").
+	grep -q '^      expectedClusters = local.mesh_member_spoke_keys$' "${ROOT}/terraform/platform/platform_gitops.tf" ||
+		{ echo "platform_gitops.tf no longer sets expectedClusters from local.mesh_member_spoke_keys: update this test"; false; }
+	printf '%s\n' '{"template":{"source":{"helm":{"valuesObject":{"expectedClusters":["member-a","member-b"]}}}}}' >"${BATS_TEST_TMPDIR}/tf.json"
+	for p in kubernetes openshift; do
+		out="$(helm template preset "$APPSET" -f "${APPSET}/values-mesh-wiring-verify.yaml" -f "${APPSET}/platform-${p}.yaml" \
+			-f "${BATS_TEST_TMPDIR}/tf.json" --set-string template.source.helm.valuesObject.expectedMembers=2 "${REPO[@]}")"
+		# The generator's own placeholder: the cluster Secret's name, or the PlacementDecision's.
+		if [[ "$p" == kubernetes ]]; then
+			grep -qx "            clusterName: '{{name}}'" <<<"$out" || { echo "$p: clusterName is not {{name}}"; false; }
+			extra=()
+		else
+			grep -qx "            clusterName: '{{clusterName}}'" <<<"$out" || { echo "$p: clusterName is not {{clusterName}}"; false; }
+			extra=(-f "${ROOT}/charts/mesh-wiring-verify/values-openshift.yaml")
+		fi
+		for m in member-a member-b; do
+			gate_values "$out" "$m" >"${BATS_TEST_TMPDIR}/${p}-${m}.yaml"
+			dep="$(helm template mesh-wiring-verify "${ROOT}/charts/mesh-wiring-verify" -f "${BATS_TEST_TMPDIR}/${p}-${m}.yaml" "${extra[@]}" \
+				--show-only templates/deployment.yaml)" || { echo "$p/$m: the gate does not render with the Application's values"; false; }
+			grep -A1 'name: EXPECTED_CLUSTERS$' <<<"$dep" | grep -q 'value: "member-a,member-b"' || { echo "$p/$m: EXPECTED_CLUSTERS is not member-a,member-b"; false; }
+			grep -A1 'name: CLUSTER_NAME$' <<<"$dep" | grep -q "value: \"${m}\"" || { echo "$p/$m: CLUSTER_NAME is not ${m}"; false; }
+			grep -A1 'name: EXPECTED_MEMBERS$' <<<"$dep" | grep -q 'value: "2"' || { echo "$p/$m: EXPECTED_MEMBERS is not 2"; false; }
+		done
+	done
+	# Without Terraform's names (a manual install of the preset): by count, and clusterName unused.
+	out="$(appset_render values-mesh-wiring-verify.yaml kubernetes)"
+	gate_values "$out" member-a >"${BATS_TEST_TMPDIR}/count.yaml"
+	dep="$(helm template mesh-wiring-verify "${ROOT}/charts/mesh-wiring-verify" -f "${BATS_TEST_TMPDIR}/count.yaml" --show-only templates/deployment.yaml)"
+	grep -A1 'name: EXPECTED_CLUSTERS$' <<<"$dep" | grep -q 'value: ""'
 }
 
 @test "app-of-apps: each platform's children get its presets and operator sources; other platforms fail" {

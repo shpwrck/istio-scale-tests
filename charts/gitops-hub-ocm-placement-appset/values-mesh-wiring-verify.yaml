@@ -1,6 +1,6 @@
 # Preset: mesh-wiring health gate on every mesh member. Installed by Terraform
-# (platform_gitops.tf), which sets
-# template.source.helm.valuesObject.expectedMembers to the mesh size.
+# (platform_gitops.tf), which sets template.source.helm.valuesObject.expectedMembers to the
+# mesh size and expectedClusters to the members' names.
 identity:
   component: mesh-wiring-verify
 
@@ -25,6 +25,9 @@ template:
     path: charts/mesh-wiring-verify
     helm:
       releaseName: mesh-wiring-verify
-      # 0 = consistency-only checks (no Terraform override).
+      # 0 and no expectedClusters = consistency-only checks (no Terraform override).
       valuesObject:
         expectedMembers: 0
+        # The member's own name, which the gate finds in expectedClusters (the template
+        # rewrites {{clusterName}} for the generator, as in the other presets' parameters).
+        clusterName: "{{clusterName}}"
