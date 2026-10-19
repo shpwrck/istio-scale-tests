@@ -591,7 +591,7 @@ _probe() {
 	# The sweep's drift check (platform_drift_check) found ctx-b's gateways on another build.
 	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# PROXY_IMAGE_BY_CONTEXT=ctx-b=proxyv2:1.30.6' > "${RES}/platform-drift.txt"
 	local dis="input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for ctx-a (pilot:1.30.5;pilot:1.30.6), ctx-b (pilot:1.30.5;pilot:1.30.6): the report mixes runs on different istiod builds; compare like with like"
-	local drift="PROXY_IMAGE_BY_CONTEXT changed during the sweep for ctx-b (platform-drift.txt next to its TSVs): the TSVs record the value at the sweep's start"
+	local drift="PROXY_IMAGE_BY_CONTEXT changed during the sweep for ctx-b (platform-drift.txt in sweep-h10): the TSVs record the value at the sweep's start"
 	local kind="Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so remote latency and the remote-minus-local delta are not a cloud load balancer's"
 	local fmt top first
 	for fmt in markdown charts; do
@@ -654,4 +654,21 @@ _probe() {
 	refute_output --partial "WARNING:"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	refute_output --partial "# WARNING:"
+}
+
+@test "004 (H5): a member whose node provider was not read gets the cross-cluster path warning too" {
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-a=kind/ctx-a=aws/; s/ctx-b=kind/ctx-b=unknown/')
+	NO_PLATFORM=1 tsv "${RES}/latency-a.tsv" "RUN_ID=r1" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
+	EOF
+	local w="Node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so remote latency and the remote-minus-local delta are not a cloud load balancer's"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[[ "$(jq -r '.warnings[0]' <<<"$output")" == "${w}"* ]]
+	[[ "$stderr" == *"WARNING: ${w}"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_output --partial "> **Warning:** ${w}"
+	refute_output --partial "Nodes on kind"
 }

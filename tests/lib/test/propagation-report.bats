@@ -127,7 +127,7 @@ second_sweep() {
 	# The sweep's drift check (platform_drift_check) found istiod on src on another build.
 	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.6' > "${RES}/platform-drift.txt"
 	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for rmt (sail-operator:1.31.1/Available;sail-operator:1.31.2/Available): the report mixes runs on different mesh operator builds; compare like with like"
-	local drift="ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for src (platform-drift.txt next to its TSVs): the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; compare like with like"
+	local drift="ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for src (platform-drift.txt in sweep-h10): the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade during the sweep; for publishable figures, run the sweep again on one build"
 	local fmt w top first
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_success

@@ -79,16 +79,20 @@ in KiB. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 Each pass's probe reads the platform record live ([`tests/lib/platform.sh`](../lib/platform.sh):
-the platform, the mesh operator, istiod and gateway proxy builds, the nodes' provider). The
-table's `Platform record` row compares each pass's with the baseline's (without a baseline, the
-first pass with data's, which reads `reference`; the baseline reads `baseline`): `same`,
-`differs (see notes)`, `unknown (see notes)` (a value not read or not recorded in one of them)
-or `-` (no data). A mesh operator that differs only in its state (`Available`, `Unavailable`) is
-the same build. The record follows the table once, digests shortened to 12 hex digits, then each
+the platform, the mesh operator, istiod and gateway proxy builds, the nodes' provider, istiod's
+settings). The table's `Platform record` row compares each pass's with the baseline's (without a
+baseline, the first pass with data's, which reads `reference`; the baseline reads `baseline`):
+`same`, `differs (see notes)`, `unknown (see notes)` (a value not read or not recorded in one of
+them, or an image whose digest is `@unknown`: no pod had started) or `-` (no data). A mesh
+operator that differs only in its state (`Available`, `Unavailable`) is the same build. The row
+leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`), which a profile changes on purpose
+(`spec.values.pilot.env`); the TSVs keep them. The record follows the table once, digests
+shortened to 12 hex digits, then each
 pass that differs or cannot be compared, with those keys' values (one line for a pass whose every
 value is unknown, such as one from before the record). A pass that differs (an operator upgrade
 or a gateway roll between passes) or cannot be compared gets a warning in the notes and on
-stderr: its change against the baseline is then not the profile's alone.
+stderr: its change against the baseline is then not the profile's alone (without a baseline, its
+difference from the reference pass is not the profiles' alone).
 
 `TEST_PLATFORM` (`config/options.env`; `auto`, `kubernetes` or `openshift`) sets the platform
 instead of asking each cluster, for the probe suite's chart overlay and, with

@@ -122,7 +122,8 @@ QPS 10 and 100, 10 s per level):
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `DATAPLANE_*`, `REACH_*`,
   `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below), `TEST_PLATFORM` (the members'
-  platform) and `METRICS_SCRAPE_TIMEOUT`.
+  platform), `PLATFORM_READ_TIMEOUT` (each read of the platform record) and
+  `METRICS_SCRAPE_TIMEOUT`.
   `DATAPLANE_TEST_NAMESPACE` and `DATAPLANE_MAX_MATRIX` stay environment only.
 - **Run keys:** `DATAPLANE_MESH_SIZES` (`003 --mesh-sizes`; empty: 1 to the number of
   contexts), `DATAPLANE_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts
@@ -342,17 +343,22 @@ the row with a folder; the other rows count as repeats. json has the section as
 ([`tests/lib/platform.sh`](../lib/platform.sh): `PLATFORM`, `TEST_PLATFORM`, and per member
 `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
 `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways' build; the test pods' sidecars get
-the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`) names the platform and the
-mesh builds the run measured, read before the first window (a sweep reads it once, and again
-after its last combo: a build that changed in between is written to `platform-drift.txt` in the
-sweep dir). `004` prints it in every format, with a warning in the report itself when its inputs
-differ, a value could not be read in some of them, or the sweep's build changed (an operator
-that differs only in its state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`)
-every format also warns that the cross-cluster path runs through cloud-provider-kind's userspace
-Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so remote
-latency and the remote-minus-local delta are not a cloud load balancer's. A file without the
-record predates it (the suite supported only OpenShift with OSSM then); its values read
-`unknown`. `SERVER_REPLICAS` records the
+the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`
+(a digest of istiod's discovery container env without `CLUSTER_ID`: its settings)) names the
+platform and the mesh builds the run measured, read before the first window (a sweep reads it
+once, and again after its last combo: a build, istiod setting, tuning lever or Kubernetes version
+that changed in between is written to `platform-drift.txt` in the sweep dir). An image carries
+the digest its pods run (`@unknown` when none has started: not read, never another build);
+`none` means no such pod. `004` prints it in every format, with a warning in the report itself
+(the top-level `warnings` array in json, empty without one) when its inputs differ, a value
+could not be read in some of them, or the sweep's record changed (an operator that differs only
+in its state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a
+member's node provider could not be read, every format also warns that the cross-cluster path
+runs (or may run) through cloud-provider-kind's userspace Envoy (the east-west gateway's
+LoadBalancer) on the host the kind clusters share, so remote latency and the remote-minus-local
+delta are not a cloud load balancer's; k3d (`k3s://`) and minikube clusters that share one host
+are not detected. A file without the record predates it (the suite supported only OpenShift with
+OSSM then); its values read `unknown`. `SERVER_REPLICAS` records the
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
 thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,

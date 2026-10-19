@@ -211,7 +211,8 @@ explicit scoping, no --resume.
   _BURST_FACTOR). It compares the container working set (kubectl top; else Envoy
   server.memory_physical_size, else server.memory_allocated) and istiod RSS with the
   limit. A live sweep also adds every mesh member its remote secrets name to the
-  guard set (or warns when a member has no kube context), and refuses to start
+  guard set (and stops when one has no kube context of its name; with
+  --mem-guard-contexts it warns), and refuses to start
   while a controlplane-test namespace of an earlier run is still discovered.
 
 Other:
@@ -232,7 +233,13 @@ Other:
                               A sweep started with --config resumes only with the
                               same file (same sha256; add --config
                               <DIR>/run-config-<RUN_ID>.env); one started without
-                              it warns when --config is given.
+                              it warns when --config is given. It stops when a
+                              member now has another platform, mesh build
+                              (operator, istiod, gateway proxy), istiod env,
+                              node provider or Kubernetes version than the TSV
+                              records, or its source member other tuning
+                              levers or istiod limits (README, --resume); a
+                              value it cannot read only warns.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -1105,10 +1112,10 @@ guard_add_mesh_members() {
 	((${#new_members[@]} == 0)) || echo "Memory guard: added mesh member(s) ${new_members[*]} (named by the remote secrets); samples ${GUARD_CONTEXTS[*]}"
 	((${#missing[@]})) || return 0
 	if [[ -n "$MEM_GUARD_CONTEXTS_CSV" ]]; then
-		echo "WARNING: memory guard: mesh member(s) ${missing[*]} ingest the series' Services but are not in --mem-guard-contexts (${MEM_GUARD_CONTEXTS_CSV}); their istiod and gateways are not guarded unless a context of another name covers them." >&2
+		echo "WARNING: memory guard: mesh member(s) ${missing[*]} (named by the Istio remote secrets) are not in --mem-guard-contexts (${MEM_GUARD_CONTEXTS_CSV}); their istiod and gateways are not guarded unless a context of another name covers them. A member that left the mesh stays named until its remote secret is deleted (README.md, \"Grow the mesh\")." >&2
 		return 0
 	fi
-	die "memory guard: mesh member(s) ${missing[*]} (named by the Istio remote secrets) have no kube context of that name, so their istiod and gateways could not be guarded. Pass --mem-guard-contexts with a context for every member (or the subset you accept), or set MEM_STOP_PCT 0 to run unguarded."
+	die "memory guard: mesh member(s) ${missing[*]} (named by the Istio remote secrets) have no kube context of that name, so their istiod and gateways could not be guarded. A member that left the mesh stays named until its remote secret is deleted from every other member: their wiring gate reads NotReady and prints the delete command (README.md, \"Grow the mesh\"). Otherwise pass --mem-guard-contexts with a context for every member (or the subset you accept), or set MEM_STOP_PCT 0 to run unguarded."
 }
 
 # leftover_preflight: before a live growth sweep, count the controlplane-test namespaces
@@ -1319,13 +1326,13 @@ trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 # --config also gets the run-config-<RUN_ID>.env replay copy; a resumed one keeps the
 # config it started with.
 if ((! DRY_RUN)); then
-	metrics_preflight
 	# The platform record of every member, read once before the first combo; each 002
 	# inherits it (exported), the pre-created preamble writes it (tests/lib/platform.sh).
 	platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 	# --resume appends to a TSV whose preamble keeps the record it started with: other builds or
-	# tuning levers stop the run here.
+	# tuning levers stop the run here, before the metrics preflight can wait.
 	[[ -z "$RESUME_DIR" ]] || platform_resume_check "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "$(IFS=,; echo "${CONTEXTS[*]}")" "${CONTEXTS[0]}"
+	metrics_preflight
 	precreate_tsv_preamble
 	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"
 	if ((GROWTH)); then

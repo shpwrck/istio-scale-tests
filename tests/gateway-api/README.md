@@ -253,8 +253,11 @@ results will go, and:
    - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
      `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
      `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'
-     `istio-proxy` build) and `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
-     `aws`, ...). `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
+     `istio-proxy` build), `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
+     `aws`, ...) and `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
+     without `CLUSTER_ID`: its settings). An image carries the digest its pods run (`@unknown`
+     when none has started: not read, never another build); `none` means no such pod.
+     `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
      OpenShift), asked of the member whatever `TEST_PLATFORM` says (`unknown` when it cannot be
      asked). `TEST_PLATFORM` (`config/options.env`, default `auto`) picks the hub's platform for its
      Argo CD namespace: `auto` asks the hub, `kubernetes` or `openshift` is taken as given (a member
@@ -619,7 +622,8 @@ on the wait and the gate, no istioctl evidence):
   `GWAPI_REMOTE_NAMESPACE` (the chart's `remoteNamespace`), `GWAPI_SHARED_NAMESPACE`
   (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` (empty by default: the Argo CD
   namespace of the hub's platform, `openshift-gitops` on OpenShift, else `argocd`; the run logs
-  which) and `GWAPI_ARGOCD_APPSET` have no flag. `TEST_PLATFORM` (above) is a key of every suite.
+  which) and `GWAPI_ARGOCD_APPSET` have no flag. `TEST_PLATFORM` (above) and
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record) are keys of every suite.
 - The shared `ISTIOD_DIAG_*` keys are accepted and unused. The script copies the config into the
   run directory as `run-config-<RUN_ID>.env`.
 - **Flags only:** `--dry-run`. Keep context names in `configs/<name>.local.env` (gitignored).

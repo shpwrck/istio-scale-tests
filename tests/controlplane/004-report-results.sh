@@ -769,6 +769,11 @@ if platform_value_has "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_
 	KIND_NODES=1
 	DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory, which all kind clusters on that host share, so node allocatable, node_*_pct, the coverage fraction and the services-that-fit estimate overstate the real headroom; quote capacity and headroom from cloud nodes only."
 fi
+# A member whose node provider was not read may be on kind too: its node figures stay out as well.
+NODES_UNREAD="$(platform_unread_members "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")")"
+if ((NODES_UNREAD && ! KIND_NODES)); then
+	DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}Node provider not read on ${NODES_UNREAD} member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, every node reports the whole host's CPU and memory, so node allocatable, node_*_pct, the coverage fraction and the services-that-fit estimate may overstate the real headroom; the verdict leaves the node figures out."
+fi
 LEFTOVER_AT_START_M="$(tag_values LEFTOVER_TEST_NAMESPACES "")"
 [[ -n "$LEFTOVER_AT_START_M" ]] || LEFTOVER_AT_START_M="n/a"
 # data_warnings_lines <prefix>: each DATA_WARNINGS line behind a prefix (nothing when none).
@@ -829,6 +834,8 @@ compute_sla_verdict() {
 	local -a verdict_opts=()
 	if ((KIND_NODES)); then
 		verdict_opts=(--nodes-excluded "the nodes are kind's (NODE_PROVIDER_BY_CONTEXT), so node_cpu_pct and node_mem_pct measure the host every kind cluster shares, not this cluster's headroom")
+	elif ((NODES_UNREAD)); then
+		verdict_opts=(--nodes-excluded "node provider not read on ${NODES_UNREAD} member(s) (NODE_PROVIDER_BY_CONTEXT unknown), so node_cpu_pct and node_mem_pct may measure a host several clusters share, as on kind")
 	fi
 	raw="$(env_sla_verdict ${verdict_opts[@]+"${verdict_opts[@]}"} \
 		"$icpu_eff" "$imem_eff" \

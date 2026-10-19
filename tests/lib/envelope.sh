@@ -22,11 +22,15 @@
 #   env_parse_network                              -> reads istiod deploy json on stdin;
 #       emits the spoke's Istio network id from the discovery container's
 #       PILOT-injected MESH/NETWORK env (ISTIO_META_NETWORK / NETWORK_ID), else `unknown`.
+#   env_limit_drift_warning <rec_cpu_m> <rec_mem_mi> <live_cpu_m> <live_mem_mi>
+#                                                  -> a warning when istiod's limit read now
+#       differs from the one the sweep recorded (which the % of limit figures use), else
+#       nothing.
 #   env_pct_of_limit <used> <per_replica_limit> <replicas>
 #                                                  -> integer percent of the CROSS-REPLICA
 #       limit (per-replica limit * replicas), matching numerator (a cross-replica
 #       `kubectl top` sum) to denominator scope (PL35). `unknown` if any arg bad.
-#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct]
+#   env_sla_verdict [--nodes-excluded REASON] <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct]
 #                                                  -> "VERDICT|headline" — one of
 #       PASS / CAUTION / FAIL plus a one-line human headline. The verdict is computed
 #       only over the validity-gated aggregates the caller passes (the report's
@@ -59,7 +63,8 @@
 #          read-only `kubectl top nodes` / `top pod -l app=istiod` snapshot across
 #          --contexts. Per-sweep dir only (PL6); never a flat glob.
 #
-# Requires: tests/lib/common.sh (die, split_csv), tests/lib/capacity.sh, jq, awk.
+# Requires: tests/lib/common.sh (die, split_csv), tests/lib/capacity.sh, jq, awk;
+# render_scale_envelope also tests/lib/platform.sh (platform_summary: the platform record's row).
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
 
@@ -254,6 +259,21 @@ env_replicas_label() {
 	echo "$label"
 }
 
+# env_limit_drift_warning <rec_cpu_m> <rec_mem_mi> <live_cpu_m> <live_mem_mi>: the envelope's
+# "% of limit" figures divide by the istiod limit the sweep recorded at its start
+# (ISTIOD_CPU_LIMIT_M, ISTIOD_MEM_LIMIT_MI); its "Provisioned" column is read live. One
+# warning when a limit is numeric on both sides and differs, else nothing. Pure.
+# shellcheck disable=SC2329
+env_limit_drift_warning() {
+	local _env_o="" _env_rc="$1" _env_rm="$2" _env_lc="$3" _env_lm="$4"
+	[[ ! "$_env_rc" =~ ^[0-9]+$ || ! "$_env_lc" =~ ^[0-9]+$ || "$_env_rc" == "$_env_lc" ]] ||
+		_env_o+="CPU ${_env_rc}m recorded, ${_env_lc}m now"
+	[[ ! "$_env_rm" =~ ^[0-9]+$ || ! "$_env_lm" =~ ^[0-9]+$ || "$_env_rm" == "$_env_lm" ]] ||
+		_env_o+="${_env_o:+; }memory ${_env_rm}Mi recorded, ${_env_lm}Mi now"
+	[[ -n "$_env_o" ]] || return 0
+	printf '%s\n' "istiod's limit per replica differs from the one the sweep recorded at its start (${_env_o}): the % of limit figures below use the recorded one, the Provisioned column the one read now; the limit changed during or after the sweep (an Argo CD sync, a tuning profile or a hand edit)"
+}
+
 # ---------------------------------------------------------------------------
 # Thin kubectl wrappers (read-only).
 # ---------------------------------------------------------------------------
@@ -412,6 +432,10 @@ render_scale_envelope() {
 	local node_cpu_m node_mem_mi istio_version harness_sha
 	node_cpu_m="$(jq_get '.metadata.capacity.node_alloc_cpu_m')"
 	node_mem_mi="$(jq_get '.metadata.capacity.node_alloc_mem_mi')"
+	# The per-replica istiod limit the % of limit figures divide by (recorded at the sweep's start).
+	local _env_rec_cpu _env_rec_mem
+	_env_rec_cpu="$(jq_get '.metadata.capacity.istiod_cpu_limit_m')"
+	_env_rec_mem="$(jq_get '.metadata.capacity.istiod_mem_limit_mi')"
 	istio_version="$(jq_get '.metadata.istio_version')"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
 
@@ -544,7 +568,9 @@ render_scale_envelope() {
 	while IFS= read -r _env_w; do
 		[[ -z "$_env_w" ]] || _env_warnings_md+="> **Warning:** ${_env_w}"$'\n\n'
 	done < <(printf '%s' "$json" | jq -r '.metadata.data_warnings[]? // empty' 2>/dev/null || true)
-	_env_platform_row="$(jq_get '.metadata.platform') (TEST_PLATFORM $(jq_get '.metadata.test_platform')); nodes $(platform_summary "$(jq_get '.metadata.node_provider_by_context')"); operator $(platform_summary "$(jq_get '.metadata.mesh_operator_by_context')"); istiod $(platform_summary "$(jq_get '.metadata.istiod_image_by_context')"); gateway proxy $(platform_summary "$(jq_get '.metadata.proxy_image_by_context')")"
+	_env_w="$(env_limit_drift_warning "$_env_rec_cpu" "$_env_rec_mem" "$lim_cpu" "$lim_mem")"
+	[[ -z "$_env_w" ]] || _env_warnings_md+="> **Warning:** ${_env_w}"$'\n\n'
+	_env_platform_row="$(jq_get '.metadata.platform') (TEST_PLATFORM $(jq_get '.metadata.test_platform')); nodes $(platform_summary "$(jq_get '.metadata.node_provider_by_context')"); operator $(platform_summary "$(jq_get '.metadata.mesh_operator_by_context')"); istiod $(platform_summary "$(jq_get '.metadata.istiod_image_by_context')"); gateway proxy $(platform_summary "$(jq_get '.metadata.proxy_image_by_context')"); istiod env $(platform_summary "$(jq_get '.metadata.istiod_env_by_context')")"
 
 	# ---- render ----
 	cat <<MD
@@ -579,15 +605,16 @@ ${_env_warnings_md}### 1. Mesh topology — what the peak mesh-size point actual
 | Resource | Provisioned (req / lim, per replica) | Measured (% of limit) | Source |
 |---|---|---|---|
 | istiod replicas | ${replicas_label} | — | live \`deploy/istiod\` on every context |
-| **istiod CPU (window peak)** | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_pct}% | report \`istiod_cpu_peak_pct_of_limit_max\`: one replica's peak (the larger of a window's average and its busiest 5 s poll) / the per-replica limit |
-| istiod CPU (kubectl top at window end) | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_top_pct}% | report \`istiod_cpu_pct_of_limit_max\`: one snapshot per window, summed over the replicas / their summed limit; misses bursts |
-| istiod memory (kubectl top) | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_mem_pct}% | report \`istiod_mem_pct_of_limit_max\` |
-| **istiod memory (RSS — OOM headroom)** | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_rss_pct}% | report \`istiod_rss_pct_of_limit_max\` (\`process_resident_memory_bytes\`) |
+| **istiod CPU (window peak)** | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_pct}% of ${_env_rec_cpu}m | report \`istiod_cpu_peak_pct_of_limit_max\`: one replica's peak (the larger of a window's average and its busiest 5 s poll) / the per-replica limit |
+| istiod CPU (kubectl top at window end) | ${req_cpu}m / ${lim_cpu}m | ${istiod_cpu_top_pct}% of ${_env_rec_cpu}m | report \`istiod_cpu_pct_of_limit_max\`: one snapshot per window, summed over the replicas / their summed limit; misses bursts |
+| istiod memory (kubectl top) | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_mem_pct}% of ${_env_rec_mem}Mi | report \`istiod_mem_pct_of_limit_max\` |
+| **istiod memory (RSS — OOM headroom)** | ${req_mem}Mi / ${lim_mem}Mi | ${istiod_rss_pct}% of ${_env_rec_mem}Mi | report \`istiod_rss_pct_of_limit_max\` (\`process_resident_memory_bytes\`) |
 | Worker-node CPU | — | ${node_cpu_pct}% | report \`node_cpu_pct_max\` (\`kubectl top nodes\`) |
 | Worker-node memory | — | ${node_mem_pct}% | report \`node_mem_pct_max\` (\`kubectl top nodes\`) |
 
 > Node allocatable (source ctx): ${node_cpu_m}m CPU / ${node_mem_mi}Mi memory.
 > istiod CPU/mem(top) % is of the **cross-replica** limit (per-replica limit x that cluster's istiod replicas), so an idle R-replica plane does not read ~Rx100% (PL35).
+> The "of" value is the per-replica limit the sweep recorded at its start (ISTIOD_CPU_LIMIT_M, ISTIOD_MEM_LIMIT_MI), which every % divides by (times the replicas for the kubectl top rows); "Provisioned" is read live now (a warning above when the two differ).
 > **istiod RSS %** is per-replica (peak \`process_resident_memory_bytes\` of one istiod / its per-replica mem limit) and is the OOM-risk signal: in multi-primary each istiod caches the WHOLE mesh (~N x services x replicas endpoints), so RSS grows with total mesh size. It is sourced from the /metrics scrape, so it stays populated even when \`kubectl top\` (the row above) is N/A during a metrics-API gap. An RSS % approaching 100 is OOM-mid-sweep risk.
 > **istiod mem REQUEST sizing (GO gate):** the chart's istiod mem *request* (${req_mem}Mi above) must be sized to the **measured steady-state RSS** at the target mesh scale before GO — it needs a measured number from a full-scale run, NOT a guessed default. The RSS % here is the input for that sizing. This change only SURFACES the headroom; it deliberately does not change the request value.
 

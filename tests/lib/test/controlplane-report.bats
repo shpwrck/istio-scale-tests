@@ -239,6 +239,31 @@ with_platform() {
 	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 }
 
+@test "report (H5): a member whose node provider was not read warns and leaves the node figures out of the verdict" {
+	with_platform 's/mesh-a=kind/mesh-a=aws/; s/mesh-b=kind/mesh-b=unknown/'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	local w="Node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, every node reports the whole host's CPU and memory"
+	[ "$(jq --arg w "$w" '[.metadata.data_warnings[] | select(startswith($w))] | length' <<<"$output")" = 1 ]
+	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Nodes on kind"))] | length' <<<"$output")" = 0 ]
+	[ "$(jq -r '.metadata.sla.verdict' <<<"$output")" != PASS ]
+	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"node figures left out: node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown), so node_cpu_pct and node_mem_pct may measure a host several clusters share, as on kind"* ]]
+	[[ "$stderr" == *"WARNING: ${w}"* ]]
+	for fmt in text csv; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_output --partial "# WARNING: ${w}"
+	done
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_output --partial "> **Warning:** ${w}"
+	done
+	# With a member on kind as well, the kind warning (and its reason) covers it.
+	with_platform 's/mesh-b=kind/mesh-b=unknown/'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Node provider not read"))] | length' <<<"$output")" = 0 ]
+	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"node figures left out: the nodes are kind's"* ]]
+}
+
 # second_input <sed program>: controlplane-fixture-t3.tsv, the fixture again with the record
 # edited by <sed program>: a second input of the same report.
 second_input() {

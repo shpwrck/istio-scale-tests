@@ -128,17 +128,25 @@ once, in the TSV preamble, so they must match on resume: `--vsdr-every` and `--v
 the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep reads them from the
 preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
 `--vsdr-subsets` that differs. Pass the other options as in the original run. The preamble also
-keeps the platform record and the tuning baseline the sweep started with, so `--resume` reads
-them again and compares, member by member: `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`
-(without its state: `Available` and `Unavailable` are the same build), `ISTIOD_IMAGE_BY_CONTEXT`,
-`PROXY_IMAGE_BY_CONTEXT` and `NODE_PROVIDER_BY_CONTEXT`, then `TUNING_BASELINE` and
-`SIDECAR_EGRESS_HOSTS` on the member the TSV read them on. A value that differs stops the run,
-naming the member, the key and both values: an upgrade, a gateway restarted onto a new build or
-clusters rebuilt under the same context names would otherwise be credited to the old record.
-Start a new sweep then (the sweep's own command without `--resume`; the message names its
-`run-config-<RUN_ID>.env` snapshot when it ran with `--config`), or put the members back. A value
-not read on either side, a member on one side only, a TSV from before the record or another
-`TEST_PLATFORM` only warns.
+keeps what the sweep started on, so `--resume` reads it again first (before the metrics
+preflight, so a refused resume stops in seconds), prints one `Platform record: comparing ...`
+line and compares: on every member `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT` (without its
+state: `Available` and `Unavailable` are the same build), `ISTIOD_IMAGE_BY_CONTEXT`,
+`PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT` and
+`KUBE_VERSIONS`; on the member the TSV read them on, `TUNING_BASELINE`, `SIDECAR_EGRESS_HOSTS`,
+`ISTIOD_CPU_LIMIT_M` and `ISTIOD_MEM_LIMIT_MI` (what `004` divides istiod's CPU and RSS peaks
+by). A value that differs stops the run, naming the member, the key and both values: an upgrade,
+a gateway restarted onto a new build, a tuning profile left applied, new istiod limits or
+clusters rebuilt under the same context names on another Kubernetes version would otherwise be
+credited to the old record. Start a new sweep then (the sweep's own command without `--resume`;
+the message names its `run-config-<RUN_ID>.env` snapshot when it ran with `--config`), or put
+the members back. Only warnings: a value not read on either side (the warning says which: the
+TSV records `unknown` or predates the key, or the member cannot be read now), an image whose
+digest reads `@unknown` (no pod had started), a member on one side only, a TSV from before the
+record, another `TEST_PLATFORM`, and what the report only shows: `NODE_ALLOC_CPU_M` and
+`NODE_ALLOC_MEM_MI` (a cluster autoscaler moves them), `ISTIOD_REQ_*`, `ISTIOD_LIM_*`,
+`ISTIOD_REPLICAS_BY_CONTEXT` (an HPA moves it) and `NETWORK_TOPOLOGY`. `METRICS_API` is not
+compared: the resumed run's preflight checks the metrics API.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
@@ -165,8 +173,9 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
-  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`, plus `ISTIOD_DIAG_*` and
-  `TEST_PLATFORM` (the members' platform), which every suite takes. A step ignores the keys it
+  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`, plus `ISTIOD_DIAG_*`,
+  `TEST_PLATFORM` (the members' platform) and `PLATFORM_READ_TIMEOUT` (each read of the platform
+  record), which every suite takes. A step ignores the keys it
   does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
   `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run) and
   the version pins. Any other key, or any bad line, rejects the whole file before anything
@@ -207,21 +216,36 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   `WARNING` (stderr and every format) and read `mixed:<a>,<b>`.
 - **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member,
   the platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west)
-  builds and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-  `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`;
-  [`tests/lib/platform.sh`](../lib/platform.sh)), read before the first window (a sweep reads it
-  once, and again after its last combo: a build that changed in between is written to
-  `platform-drift.txt` in the sweep dir; `002 --phase final` reuses the baseline phase's). The
-  growth mode's `ns-lifecycle-<RUN_ID>.tsv` and `mem-guard-<RUN_ID>.tsv` carry it too (a
-  standalone `001` or `005` reads none, so its lifecycle file records `unknown`). `004` prints it
-  in every format, with a warning in the report itself (members counted, not named) when its
-  inputs differ, a value could not be read in some of them, or the sweep's build changed (an
-  operator that differs only in its state is not a difference). On kind nodes it also warns that
-  the capacity figures overstate the headroom, and the SLA verdict leaves the node figures out:
-  it is `CAUTION` with that reason even when istiod's figures pass. The scale envelope prints
-  every data warning above its tables and a `Platform / mesh build` row. A file without the
-  record predates it (the suite supported only OpenShift with OSSM then); its values read
-  `unknown`.
+  builds, istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`,
+  `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`,
+  `ISTIOD_ENV_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`;
+  [`tests/lib/platform.sh`](../lib/platform.sh)),
+  read before the first window (a sweep reads it once, and again after its last combo: a build,
+  istiod setting, tuning lever or Kubernetes version that changed in between is written to
+  `platform-drift.txt` in the sweep dir; `002 --phase final` reuses the baseline phase's). An
+  image carries the digest its pods run; `@unknown` when none has started (an operator scaled to
+  0, a Pending replica), which every comparison takes as not read (a warning), never as another
+  build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT` is a 12-hex digest of
+  istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
+  `spec.values.pilot.env` or a hand edit changes it. The growth mode's `ns-lifecycle-<RUN_ID>.tsv`
+  and `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates
+  the lifecycle file). `004` prints it in every format, with a warning in the report itself
+  (members counted, not named; `metadata.data_warnings` in JSON) when its inputs differ, a value
+  could not be read in some of them, or the sweep's record changed (an operator that differs only
+  in its state is not a difference). On kind nodes it also warns that the capacity figures
+  overstate the headroom, and the SLA verdict leaves the node figures out: it is `CAUTION` with
+  that reason even when istiod's figures pass. A member whose node provider was not read does the
+  same (`node provider not read on N member(s)`): it may be on kind. k3d (`k3s://`) and minikube
+  clusters that share one host are not detected, so their node figures are the host's too. The
+  scale envelope prints every data warning above its tables and a `Platform / mesh build` row. A
+  file without the record predates it (the suite supported only OpenShift with OSSM then); its
+  values read `unknown`.
+- **Tuning levers:** `TUNING_BASELINE` reads the four levers live on the first member:
+  `sidecar` (the root Sidecar `default` in `istio-system`), `discoverySelectors` (on the Istio CR
+  `default`), `telemetryFiltering` and `accessLogFiltering` (the Telemetry resources
+  `tuning-metrics` and `tuning-access-log`). Each is `on`, `off` (the resource is absent) or
+  `unknown` (not read, a kind the member does not serve, or no Istio CR named `default`).
+  `SIDECAR_EGRESS_HOSTS` holds the root Sidecar's egress hosts (`none` without one).
 
 ## Traffic management (VS/DR)
 

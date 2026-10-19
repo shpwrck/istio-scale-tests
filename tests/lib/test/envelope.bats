@@ -226,6 +226,7 @@ cat <<'JSON'
 "mesh_operator_by_context":"mesh-a=sail-operator:1.31.1@${da}/Available,mesh-b=sail-operator:1.31.1@${da}/Available",
 "istiod_image_by_context":"mesh-a=pilot:1.30.5@${db},mesh-b=mixed:pilot:1.30.5@${db};pilot:1.30.6@${dc}",
 "proxy_image_by_context":"mesh-a=proxyv2:1.30.5@${dc},mesh-b=proxyv2:1.30.5@${dc}",
+"istiod_env_by_context":"mesh-a=0123456789ab,mesh-b=0123456789ab",
 "capacity":{"node_alloc_cpu_m":"4000","node_alloc_mem_mi":"16093"},
 "achieved_scale":{"connected_proxies_max":"10","connected_proxies_cluster_max":"10","istiod_cpu_peak_pct_of_limit_max":"20","istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30","istiod_rss_pct_of_limit_max":"30","node_cpu_pct_max":"28","node_mem_pct_max":"35"},
 "sla":{"verdict":"CAUTION","headline":"node figures left out: the nodes are kind's"},
@@ -250,7 +251,8 @@ SH
 	t1="$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)"
 	v="$(grep -n '^> \*\*CAUTION\*\*' <<<"$output" | cut -d: -f1)"
 	((w1 < w2 && w2 < t1 && t1 < v)) || { echo "warnings at ${w1} and ${w2}, topology at ${t1}, verdict at ${v}"; false; }
-	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member); mixed:pilot:1.30.5@sha256:bbbbbbbbbbbb;pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc |"
+	# H17: ", " between the groups, " and " between a mixed member's builds, "; " between fields.
+	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member), mixed: pilot:1.30.5@sha256:bbbbbbbbbbbb and pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc; istiod env 0123456789ab |"
 	# The envelope is pasted into campaign docs: no member names, no full digests.
 	refute_output --partial "mesh-a="
 	refute_output --partial "mesh-b="
@@ -260,6 +262,47 @@ SH
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
 	assert_success
 	refute_output --partial "**Warning:**"
+}
+
+@test "env_limit_drift_warning (H6): a warning only when a limit read now differs from the recorded one" {
+	run env_limit_drift_warning 2000 4096 2000 4096
+	assert_success
+	assert_output ""
+	run env_limit_drift_warning 1000 4096 2000 4096
+	assert_output "istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now): the % of limit figures below use the recorded one, the Provisioned column the one read now; the limit changed during or after the sweep (an Argo CD sync, a tuning profile or a hand edit)"
+	run env_limit_drift_warning 1000 4096 2000 8192
+	assert_output --partial "(CPU 1000m recorded, 2000m now; memory 4096Mi recorded, 8192Mi now)"
+	# Not read on a side: nothing to compare.
+	run env_limit_drift_warning unknown 4096 2000 unknown
+	assert_output ""
+}
+
+# _lim_kubectl: istiod's Deployment with limits of 2 CPUs and 4Gi; every other read fails.
+_lim_kubectl() {
+	case " $* " in
+	*" get deploy istiod "*) echo '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"discovery","resources":{"requests":{"cpu":"500m","memory":"2Gi"},"limits":{"cpu":"2","memory":"4Gi"}}}]}}}}' ;;
+	*) return 1 ;;
+	esac
+}
+
+@test "render_scale_envelope (H6): the % of limit names the recorded limit; a live limit that differs warns above the tables" {
+	source "${ROOT}/tests/lib/platform.sh"
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh"
+	mkdir -p "$d"
+	fake_cp_report "$rep" '[]'
+	# The sweep recorded 1 CPU per replica (its % figures divide by it); istiod has 2 now.
+	sed -i 's/"node_alloc_mem_mi":"16093"/"node_alloc_mem_mi":"16093","istiod_cpu_limit_m":"1000","istiod_mem_limit_mi":"4096"/' "$rep"
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
+	assert_success
+	assert_output --partial "> **Warning:** istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now)"
+	assert_output --partial "| **istiod CPU (window peak)** | 500m / 2000m | 20% of 1000m |"
+	assert_output --partial "| **istiod memory (RSS — OOM headroom)** | 2048Mi / 4096Mi | 30% of 4096Mi |"
+	[ "$(grep -n '^> \*\*Warning:\*\* istiod' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)" ]
+	# The same limit: no warning.
+	sed -i 's/"istiod_cpu_limit_m":"1000"/"istiod_cpu_limit_m":"2000"/' "$rep"
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
+	refute_output --partial "**Warning:**"
+	assert_output --partial "| 20% of 2000m |"
 }
 
 @test "render_scale_envelope: it needs platform.sh (platform_summary)" {

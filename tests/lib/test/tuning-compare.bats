@@ -113,7 +113,7 @@ five_passes() {
 	# the table, not a list of unknowns.
 	assert_output --partial "Pass 04-legacy: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
 	refute_output --partial "Pass 04-legacy, cannot be compared on"
-	assert_output --partial "- **Warning:** pass 04-legacy: no key of its platform record can be compared with the baseline's (its TSVs predate the record, or nothing could be read)"
+	assert_output --partial "- **Warning:** pass 04-legacy: no key of its platform record can be compared with the baseline (its TSVs predate the record, or nothing could be read)"
 	refute_output --partial "04-legacy differs"
 	# Available vs Unavailable is the same operator build: no warning, no block entry.
 	refute_output --partial "02-state"$'\n'
@@ -124,7 +124,7 @@ five_passes() {
 	assert_success
 	assert_output --regexp 'Platform record +baseline +same +same +differs \(see notes\) +unknown \(see notes\)'
 	assert_output --partial "WARNING: pass 03-proxy differs from the baseline on PROXY_IMAGE_BY_CONTEXT"
-	assert_output --partial "Platform record of the baseline (digests shortened to 12 hex digits; the TSVs keep them in full):"
+	assert_output --partial "Platform record of the baseline, digests shortened to 12 hex digits (the TSVs keep them in full):"
 	assert_output --regexp '  PROXY_IMAGE_BY_CONTEXT +proxyv2:1.30.5@sha256:efefefefefef'
 	assert_output --partial "Pass 04-legacy: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
 	refute_output --partial "Pass 04-legacy, cannot be compared on"
@@ -144,8 +144,28 @@ five_passes() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | reference | same | differs (see notes) | unknown (see notes) |"
-	assert_output --partial "The pass 01-same (the first pass with data)'s (digests shortened"
-	assert_output --partial "- **Warning:** pass 03-proxy differs from the pass 01-same (the first pass with data) on PROXY_IMAGE_BY_CONTEXT"
+	assert_output --partial "The record of the reference pass (01-same, the first with data), digests shortened"
+	assert_output --partial "- **Warning:** pass 03-proxy differs from the reference pass (01-same, the first with data) on PROXY_IMAGE_BY_CONTEXT (its values follow the table), so its difference from the reference pass (01-same, the first with data) is not the profiles' alone"
+	refute_output --partial "so its change against the baseline"
+}
+
+@test "tuning 004 (H25, H2): istiod's settings are not compared (a profile changes them); a digest @unknown is not read, never another build" {
+	five_passes
+	# 01-same ran with its profile's istiod env; 02-state's istiod had not started when it was read.
+	sed -i 's/^\(# ISTIOD_ENV_BY_CONTEXT=.*\)0123456789ab/\1fedcba987654/' "${S}/01-same/controlplane-01-same.tsv"
+	grep -q '^# ISTIOD_ENV_BY_CONTEXT=.*fedcba987654' "${S}/01-same/controlplane-01-same.tsv"
+	sed -i "s/pilot:1.30.5@$(digest cd)/pilot:1.30.5@unknown/g" "${S}/02-state/controlplane-02-state.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) | differs (see notes) | unknown (see notes) |"
+	refute_output --partial "pass 01-same"
+	refute_output --partial "Pass 01-same"
+	[[ "$stderr" != *ISTIOD_ENV_BY_CONTEXT* ]]
+	# The baseline's record still shows it (the TSVs keep it).
+	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT: \`0123456789ab\`"
+	assert_output --partial "Pass 02-state, cannot be compared on ISTIOD_IMAGE_BY_CONTEXT:"
+	assert_output --partial "- **Warning:** pass 02-state: ISTIOD_IMAGE_BY_CONTEXT could not be compared with the baseline (not read, or not recorded, in one of them)"
+	refute_output --partial "02-state differs"
 }
 
 @test "tuning 004: a pass with one value not read names that key and its value after the table" {
@@ -157,7 +177,7 @@ five_passes() {
 	assert_output --partial "| Platform record | baseline | unknown (see notes) | same | differs (see notes) | unknown (see notes) |"
 	assert_output --partial "Pass 01-same, cannot be compared on ISTIOD_IMAGE_BY_CONTEXT:"
 	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`unknown\`"
-	assert_output --partial "- **Warning:** pass 01-same: ISTIOD_IMAGE_BY_CONTEXT could not be compared with the baseline's (not read, or not recorded, in one of them)"
+	assert_output --partial "- **Warning:** pass 01-same: ISTIOD_IMAGE_BY_CONTEXT could not be compared with the baseline (not read, or not recorded, in one of them)"
 	refute_output --partial "Pass 01-same: every value"
 }
 

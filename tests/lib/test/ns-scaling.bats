@@ -123,7 +123,8 @@ CHART="${CP}/chart"
 	assert_success
 }
 
-@test "ns_lifecycle_init: a standalone step records unknown; without config.sh or platform.sh it refuses" {
+@test "ns_lifecycle_init: without a platform_probe in the shell the record reads unknown; without config.sh or platform.sh it refuses" {
+	# (A standalone 001 or 005 probes before it creates the file: platform.bats, H3.)
 	source "${ROOT}/tests/lib/config.sh"
 	source "${ROOT}/tests/lib/platform.sh"
 	f="${BATS_TEST_TMPDIR}/lc/standalone.tsv"

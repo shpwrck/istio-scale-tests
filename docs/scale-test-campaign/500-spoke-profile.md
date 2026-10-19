@@ -95,6 +95,11 @@ After each step, check mesh-wiring health, remote-secret fan-out, sampled istiod
 sync and `mesh-verify` cross-cluster traffic. If a step breaks the mesh, hold at the last good
 count and fix the cause first.
 
+Each step changes every gate's member list: until the new members are wired, every gate reads
+NotReady and names them. The probe's event can cut a long list;
+`oc --context=<spoke-ctx> -n mesh-wiring-verify exec deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`
+prints it whole.
+
 ## Contexts and live checks
 
 `CONTEXTS` holds **only the 500 spoke contexts**, in the order you want `mesh_size=1..500` to

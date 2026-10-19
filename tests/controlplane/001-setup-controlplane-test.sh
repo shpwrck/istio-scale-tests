@@ -61,6 +61,8 @@ source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the apply timings
 source "${ROOT}/tests/lib/preamble.sh"  # ns_lifecycle_init / _row / _api_counts
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -805,6 +807,8 @@ if ! ((DRY_RUN)) && [[ -s "$TARGETS_FILE" ]]; then
 fi
 
 if [[ -n "$LIFECYCLE_FILE" ]] && ! ((DRY_RUN)); then
+	# A new file (a standalone run; a sweep creates it first): its preamble needs the record.
+	[[ -f "$LIFECYCLE_FILE" ]] || platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-001"
 fi
 

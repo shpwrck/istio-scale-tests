@@ -3,7 +3,8 @@
 # platform_of over a fake kubectl (an OpenShift and a Kubernetes API version list,
 # lookalike groups, an unreachable member), the TEST_PLATFORM override and its check,
 # platform_chart_args (the overlay on OpenShift only, the offline dry-run, a chart without
-# an overlay), the suite charts' two renders, and the 001 setup scripts that call it (PL33).
+# an overlay), the suite charts' two renders, and the 001 setup scripts that call it (PL33);
+# the platform record: platform_probe, the reports' merge, the --resume and drift checks.
 # No cluster: the fake kubectl answers from the test, and the entrypoint runs use an empty
 # kubeconfig.
 
@@ -11,6 +12,11 @@ bats_require_minimum_version 1.5.0
 load test_helper
 source "${ROOT}/tests/lib/platform.sh"
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
+source "${ROOT}/tests/lib/config.sh"  # _config_sha256 (platform_probe's istiod env digest)
+# What platform_resume_check reads with a source context, and platform_drift_check again.
+source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state, probe_kube_versions, infra_preamble_lines
+source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits, cap_node_totals
+source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra
 
 SUITES=(propagation churn churn-dataplane controlplane dataplane)
 
@@ -249,16 +255,40 @@ DIG_A="sha256:$(printf 'a%.0s' {1..64})"
 DIG_B="sha256:$(printf 'b%.0s' {1..64})"
 DIG_C="sha256:$(printf 'c%.0s' {1..64})"
 
+# _probe_istiod_pod <ctx> <name> <phase> <imageID|-> [image] [PILOT_PUSH_THROTTLE]: one istiod pod
+# (CLUSTER_ID is its member, as on a real one); "-": no containerStatuses yet (just scheduled).
+_probe_istiod_pod() {
+	local st=""
+	[[ "$4" == - ]] || st=",\"containerStatuses\":[{\"name\":\"discovery\",\"imageID\":\"$4\",\"restartCount\":0}]"
+	printf '{"metadata":{"name":"%s","labels":{"app":"istiod"}},"spec":{"containers":[{"name":"discovery","image":"%s","env":[{"name":"CLUSTER_ID","value":"%s"},{"name":"PILOT_PUSH_THROTTLE","value":"%s"},{"name":"POD_NAME","valueFrom":{"fieldRef":{"fieldPath":"metadata.name","apiVersion":"v1"}}}]}]},"status":{"phase":"%s"%s}},' \
+		"$2" "${5:-registry.example.invalid/istio/pilot:${PROBE_ISTIOD:-1.30.5}}" "$1" "${6:-${PROBE_ISTIOD_THROTTLE:-100}}" "$3" "$st"
+}
+
 # _probe_kubectl: one member for platform_probe; PROBE_PLATFORM picks it: kubernetes (default),
 # openshift, down (no answer) or forbidden (api-versions refused, the rest answers). PROBE_SAIL
-# empty: nothing in the Sail namespace; PROBE_CSV other: no servicemeshoperator3 CSV. PROBE_EWGW:
-# the east-west gateway pod runs the ingress gateway's build (same, default), another one
-# (other) or is not there (none); an egress gateway pod never counts. PROBE_ISTIOD and
-# PROBE_OPERATOR replace istiod's and the Sail operator's tag. tuning_baseline_state's reads:
-# PROBE_TB_SIDECAR on (default) or off, PROBE_TB_DS off (default) or on, PROBE_TB_HOSTS (the
-# root Sidecar's egress hosts, default "istio-system/* ./*").
+# empty: nothing in the Sail namespace; PROBE_SAIL_PODS: the operator's pod runs (running, the
+# default), is Pending without an imageID (pending), is not there (none: scaled to 0), or there
+# is none and the Deployment pins a digest (pinned); PROBE_SAIL_AVAILABLE its available replicas.
+# PROBE_CSV other: no servicemeshoperator3 CSV. PROBE_EWGW: the east-west gateway pod runs the
+# ingress gateway's build (same, default), another one (other) or is not there (none); an egress
+# gateway pod never counts. PROBE_ISTIOD and PROBE_OPERATOR replace istiod's and the Sail
+# operator's tag, PROBE_ISTIOD_THROTTLE istiod's PILOT_PUSH_THROTTLE. PROBE_ISTIOD_PODS: one
+# running replica (running, the default) and another that is Pending (pending), ContainerCreating
+# (creating: an empty imageID), evicted (evicted: Failed, an empty imageID; evicted-old: Failed,
+# the old digest), runs another digest (two-digests) or other settings (env-rollout); or only a
+# Pending one (only-pending), one whose spec pins PROBE_ISTIOD_PIN (pinned-pending), none (none).
+# tuning_baseline_state's reads, NotFound unless --ignore-not-found as with kubectl:
+# PROBE_TB_SIDECAR on (default) or off, PROBE_TB_TELEMETRY and PROBE_TB_ACCESS_LOG off (default)
+# or on, PROBE_TB_UNSERVED=1 (the member serves none of these kinds), PROBE_TB_DS off (default),
+# on or missing (no Istio CR named default), PROBE_TB_HOSTS (the root Sidecar's egress hosts,
+# default "istio-system/* ./*"). The once-recorded values 003 reads: PROBE_KUBE_VERSION (default
+# v1.33.1; PROBE_KUBE=down: no answer), istiod's Deployment (PROBE_ISTIOD_CPU_LIMIT 2,
+# PROBE_ISTIOD_MEM_LIMIT 4Gi, PROBE_ISTIOD_REQ_CPU 500m, PROBE_ISTIOD_REPLICAS 1, PROBE_NETWORK
+# net-<ctx>; PROBE_ISTIOD_DEPLOY=missing: none), the nodes' allocatable (PROBE_NODE_CPU 8).
 _probe_kubectl() {
+	local a ctx="" on img pod pods
 	printf '%s\n' "$*" >> "$CALLS"
+	for a in "$@"; do [[ "$a" != --context=* ]] || ctx="${a#--context=}"; done
 	if [[ "${PROBE_PLATFORM:-kubernetes}" == down ]]; then
 		echo "error: Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout" >&2
 		return 1
@@ -274,14 +304,20 @@ _probe_kubectl() {
 		;;
 	*" -n sail-operator get deployments.apps,pods "*)
 		if [[ "${PROBE_SAIL:-}" == empty ]]; then echo '{"kind":"List","items":[]}'; return 0; fi
+		img="registry.example.invalid/sail/sail-operator:${PROBE_OPERATOR:-1.31.1}"
+		pod='{"kind":"Pod","metadata":{"name":"sail-operator-1","labels":{"app.kubernetes.io/name":"sail-operator"}},"status":{"phase":"Running","containerStatuses":[{"name":"sail-operator","imageID":"registry.example.invalid/sail/sail-operator@'"${DIG_A}"'"}]}},'
+		case "${PROBE_SAIL_PODS:-running}" in
+		pending) pod='{"kind":"Pod","metadata":{"name":"sail-operator-1","labels":{"app.kubernetes.io/name":"sail-operator"}},"status":{"phase":"Pending","containerStatuses":[{"name":"sail-operator","imageID":""}]}},' ;;
+		none) pod="" ;;
+		pinned) pod="" img+="@${DIG_B}" ;;
+		esac
 		cat <<JSON
 {"kind":"List","items":[
  {"kind":"Deployment","metadata":{"name":"sail-operator"},
   "spec":{"selector":{"matchLabels":{"app.kubernetes.io/name":"sail-operator"}},
-   "template":{"spec":{"containers":[{"name":"sail-operator","image":"registry.example.invalid/sail/sail-operator:${PROBE_OPERATOR:-1.31.1}"}]}}},
+   "template":{"spec":{"containers":[{"name":"sail-operator","image":"${img}"}]}}},
   "status":{"availableReplicas":${PROBE_SAIL_AVAILABLE:-1}}},
- {"kind":"Pod","metadata":{"name":"sail-operator-1","labels":{"app.kubernetes.io/name":"sail-operator"}},
-  "status":{"containerStatuses":[{"name":"sail-operator","imageID":"registry.example.invalid/sail/sail-operator@${DIG_A}"}]}},
+ ${pod}
  {"kind":"Pod","metadata":{"name":"unrelated","labels":{"app":"x"}},
   "status":{"containerStatuses":[{"name":"sail-operator","imageID":"${DIG_C}"}]}}
 ]}
@@ -300,11 +336,21 @@ JSON
 			{"metadata":{"name":"other-operator.v1.0.0"},"spec":{"version":"1.0.0"},"status":{"phase":"Succeeded"}}]}'
 		;;
 	*" -n istio-system get pods "*)
+		img="registry.example.invalid/istio/pilot@${DIG_B}"
+		case "${PROBE_ISTIOD_PODS:-running}" in
+		running) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")" ;;
+		pending) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Pending -)" ;;
+		creating) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Pending "")" ;;
+		evicted) pods="$(_probe_istiod_pod "$ctx" istiod-0 Failed "")$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")" ;;
+		evicted-old) pods="$(_probe_istiod_pod "$ctx" istiod-0 Failed "registry.example.invalid/istio/pilot@${DIG_A}")$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")" ;;
+		two-digests) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Running "registry.example.invalid/istio/pilot@${DIG_A}")" ;;
+		env-rollout) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Running "$img" "" 50)" ;;
+		only-pending) pods="$(_probe_istiod_pod "$ctx" istiod-1 Pending -)" ;;
+		pinned-pending) pods="$(_probe_istiod_pod "$ctx" istiod-1 Pending - "registry.example.invalid/istio/pilot:1.30.5@${PROBE_ISTIOD_PIN:-$DIG_B}")" ;;
+		none) pods="" ;;
+		esac
 		cat <<JSON
-{"kind":"List","items":[
- {"metadata":{"name":"istiod-1","labels":{"app":"istiod"}},
-  "spec":{"containers":[{"name":"discovery","image":"registry.example.invalid/istio/pilot:${PROBE_ISTIOD:-1.30.5}"}]},
-  "status":{"phase":"Running","containerStatuses":[{"name":"discovery","imageID":"registry.example.invalid/istio/pilot@${DIG_B}","restartCount":0}]}},
+{"kind":"List","items":[ ${pods}
  {"metadata":{"name":"ingress-1","labels":{"istio":"ingressgateway"}},
   "spec":{"containers":[{"name":"istio-proxy","image":"registry.example.invalid/istio/proxyv2:1.30.5"}]},
   "status":{"phase":"Running","containerStatuses":[{"name":"istio-proxy","imageID":"${DIG_C}","restartCount":0}]}},
@@ -318,19 +364,56 @@ JSON
 		esac
 		echo ']}'
 		;;
-	*" -n istio-system get sidecar.networking.istio.io default -o name "*)
-		[[ "${PROBE_TB_SIDECAR:-on}" != on ]] || echo sidecar.networking.istio.io/default
+	*" -n istio-system get sidecar.networking.istio.io default -o name "* | *" -n istio-system get telemetry.telemetry.istio.io "*" -o name "*)
+		# The kind and the name after "get".
+		a="$*"
+		a="${a#*" get "}"
+		a="${a%%" -o name"*}"
+		if ((${PROBE_TB_UNSERVED:-0})); then
+			printf '%s\n' "error: the server doesn't have a resource type \"${a%%.*}\"" >&2
+			return 1
+		fi
+		case " $* " in
+		*" sidecar.networking.istio.io "*) on="${PROBE_TB_SIDECAR:-on}" ;;
+		*" tuning-metrics "*) on="${PROBE_TB_TELEMETRY:-off}" ;;
+		*) on="${PROBE_TB_ACCESS_LOG:-off}" ;;
+		esac
+		if [[ "$on" == on ]]; then
+			echo "${a/ //}"
+		elif [[ " $* " != *" --ignore-not-found "* ]]; then
+			echo "Error from server (NotFound): ${a%% *} \"${a#* }\" not found" >&2
+			return 1
+		fi
 		;;
 	*" -n istio-system get sidecar.networking.istio.io default -o jsonpath="*) echo "${PROBE_TB_HOSTS:-istio-system/* ./*}" ;;
-	*" -n istio-system get telemetry.telemetry.istio.io "*) ;;
 	*" get istio.sailoperator.io default "*)
-		if [[ "${PROBE_TB_DS:-off}" == on ]]; then echo '[{"matchLabels":{"istio-discovery":"enabled"}}]'; else echo '[]'; fi
+		case "${PROBE_TB_DS:-off}" in
+		on) echo '[{"matchLabels":{"istio-discovery":"enabled"}}]' ;;
+		missing)
+			echo 'Error from server (NotFound): istios.sailoperator.io "default" not found' >&2
+			return 1
+			;;
+		*) echo '[]' ;;
+		esac
+		;;
+	*" version --output=json "*)
+		[[ "${PROBE_KUBE:-up}" != down ]] || return 1
+		printf '{"serverVersion":{"gitVersion":"%s"}}\n' "${PROBE_KUBE_VERSION:-v1.33.1}"
+		;;
+	*" -n istio-system get deploy istiod "*)
+		if [[ "${PROBE_ISTIOD_DEPLOY:-}" == missing ]]; then
+			echo 'Error from server (NotFound): deployments.apps "istiod" not found' >&2
+			return 1
+		fi
+		printf '{"spec":{"replicas":%s,"template":{"spec":{"containers":[{"name":"discovery","env":[{"name":"ISTIO_META_NETWORK","value":"%s"}],"resources":{"requests":{"cpu":"%s","memory":"2Gi"},"limits":{"cpu":"%s","memory":"%s"}}}]}}}}\n' \
+			"${PROBE_ISTIOD_REPLICAS:-1}" "${PROBE_NETWORK:-net-${ctx}}" "${PROBE_ISTIOD_REQ_CPU:-500m}" "${PROBE_ISTIOD_CPU_LIMIT:-2}" \
+			"${PROBE_ISTIOD_MEM_LIMIT:-4Gi}"
 		;;
 	*" get nodes "*)
 		if [[ "${PROBE_PLATFORM:-}" == openshift ]]; then
-			echo '{"items":[{"spec":{"providerID":"aws:///zone-a/i-0"}},{"spec":{"providerID":"aws:///zone-b/i-1"}}]}'
+			echo '{"items":[{"metadata":{"name":"node-0"},"spec":{"providerID":"aws:///zone-a/i-0"},"status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"110"}}},{"metadata":{"name":"node-1"},"spec":{"providerID":"aws:///zone-b/i-1"},"status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"110"}}}]}'
 		else
-			echo '{"items":[{"spec":{"providerID":"kind://docker/lab/node-0"}}]}'
+			printf '{"items":[{"metadata":{"name":"node-0"},"spec":{"providerID":"kind://docker/lab/node-0"},"status":{"allocatable":{"cpu":"%s","memory":"16Gi","pods":"110"}}}]}\n' "${PROBE_NODE_CPU:-8}"
 		fi
 		;;
 	*) return 1 ;;
@@ -343,6 +426,18 @@ probe_setup() {
 	unset PLATFORM_PROBE_ROWS PROBE_PLATFORM PROBE_SAIL PROBE_CSV
 	WARN="${BATS_TEST_TMPDIR}/warn"
 	: > "$WARN"
+}
+
+# env_digest <json array>: ISTIOD_ENV_BY_CONTEXT's form of one env list (sorted name=value
+# lines without CLUSTER_ID, as one JSON array line): the first 12 hex digits of its sha256.
+env_digest() {
+	printf '%s\n' "$1" > "${BATS_TEST_TMPDIR}/env-list.txt"
+	_config_sha256 "${BATS_TEST_TMPDIR}/env-list.txt" | cut -c1-12
+}
+# The stub istiod's env: PILOT_PUSH_THROTTLE (100 unless PROBE_ISTIOD_THROTTLE) and POD_NAME from
+# a fieldRef (its keys sorted), CLUSTER_ID left out.
+env_list() {
+	printf '["PILOT_PUSH_THROTTLE=%s","POD_NAME={\\"fieldRef\\":{\\"apiVersion\\":\\"v1\\",\\"fieldPath\\":\\"metadata.name\\"}}"]' "${1:-100}"
 }
 
 @test "platform_probe: a Kubernetes member records the Sail operator, the builds that ran and the node provider" {
@@ -360,8 +455,11 @@ probe_setup() {
 	# A bare sha256 imageID (an image loaded with kind load) is kept.
 	assert_line "# PROXY_IMAGE_BY_CONTEXT=member-a=proxyv2:1.30.5@${DIG_C}"
 	assert_line "# NODE_PROVIDER_BY_CONTEXT=member-a=kind"
+	# istiod's settings: a digest of its discovery env, from the pod list already read.
+	assert_line "# ISTIOD_ENV_BY_CONTEXT=member-a=$(env_digest "$(env_list)")"
 	refute_output --partial "example.invalid"
 	! grep -q 'clusterserviceversions' "$CALLS" || false
+	[ "$(wc -l < "$CALLS")" -eq 4 ]
 }
 
 @test "platform_probe: an OpenShift member records its OSSM CSV and the cloud provider" {
@@ -462,6 +560,99 @@ probe_setup() {
 	[[ "$(platform_preamble_lines member-a)" != *"9.9.9"* ]]
 }
 
+@test "platform_probe (H2): only containers that started count; with none, the spec image @unknown or the digest it pins" {
+	local v
+	# A Pending, ContainerCreating or evicted replica next to a running one: the running one's build.
+	for v in pending creating evicted evicted-old; do
+		probe_setup
+		PROBE_ISTIOD_PODS="$v" platform_probe member-a 2>"$WARN"
+		[ "$(platform_member_value member-a istiod)" = "pilot:1.30.5@${DIG_B}" ] || { echo "${v}: $(platform_member_value member-a istiod)"; false; }
+		[ "$(platform_member_value member-a istiod_env)" = "$(env_digest "$(env_list)")" ]
+		[ ! -s "$WARN" ] || { cat "$WARN"; false; }
+	done
+	# Two replicas that run two digests (a rollout): both, sorted.
+	probe_setup
+	PROBE_ISTIOD_PODS=two-digests platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.5@${DIG_A}+pilot:1.30.5@${DIG_B}" ]
+	# Only a Pending replica: its spec image, @unknown (not read), unless the spec pins a digest.
+	probe_setup
+	PROBE_ISTIOD_PODS=only-pending platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.5@unknown" ]
+	probe_setup
+	PROBE_ISTIOD_PODS=pinned-pending platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.5@${DIG_B}" ]
+	# No istiod pod at all: none, for its build and its settings.
+	probe_setup
+	PROBE_ISTIOD_PODS=none platform_probe member-a 2>"$WARN"
+	[ "$(platform_member_value member-a istiod)" = none ]
+	[ "$(platform_member_value member-a istiod_env)" = none ]
+	[ ! -s "$WARN" ] || { cat "$WARN"; false; }
+	# The Sail operator scaled to 0, or its pod Pending: @unknown; a digest its Deployment pins counts.
+	probe_setup
+	PROBE_SAIL_PODS=none PROBE_SAIL_AVAILABLE=0 platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a operator)" = "sail-operator:1.31.1@unknown/Unavailable" ]
+	probe_setup
+	PROBE_SAIL_PODS=pending PROBE_SAIL_AVAILABLE=0 platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a operator)" = "sail-operator:1.31.1@unknown/Unavailable" ]
+	probe_setup
+	PROBE_SAIL_PODS=pinned PROBE_SAIL_AVAILABLE=0 platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a operator)" = "sail-operator:1.31.1@${DIG_B}/Unavailable" ]
+}
+
+@test "platform_probe (H25): ISTIOD_ENV_BY_CONTEXT is one digest for the same settings on every member; another setting or a rollout shows" {
+	local d100 d50
+	d100="$(env_digest "$(env_list)")"
+	d50="$(env_digest "$(env_list 50)")"
+	[[ "$d100" =~ ^[0-9a-f]{12}$ && "$d100" != "$d50" ]]
+	# CLUSTER_ID differs by member and is left out; a valueFrom counts by its content.
+	probe_setup
+	platform_probe member-a,member-b 2>"$WARN"
+	[ ! -s "$WARN" ] || { cat "$WARN"; false; }
+	[ "$(platform_member_value member-a istiod_env)" = "$d100" ]
+	[ "$(platform_member_value member-b istiod_env)" = "$d100" ]
+	# A tuning profile's spec.values.pilot.env (another PILOT_PUSH_THROTTLE): another digest.
+	probe_setup
+	PROBE_ISTIOD_THROTTLE=50 platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a istiod_env)" = "$d50" ]
+	# During a rollout, both, sorted and "+"-joined.
+	probe_setup
+	PROBE_ISTIOD_PODS=env-rollout platform_probe member-a 2>/dev/null
+	[ "$(platform_member_value member-a istiod_env)" = "$(printf '%s\n' "$d100" "$d50" | LC_ALL=C sort | paste -sd + -)" ]
+	# platform_probe needs the sha256 helper (tests/lib/config.sh) before it reads anything.
+	run bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/platform.sh"; source "$1/tests/lib/reach.sh"
+		KUBECTL=(false); DRY_RUN=0; platform_probe member-a' _ "$ROOT"
+	assert_failure
+	assert_output --partial "platform_probe needs _config_sha256 (source tests/lib/config.sh)"
+	# Without a working sha256 tool: unknown, with a warning.
+	probe_setup
+	_config_sha256() { echo unknown; }
+	platform_probe member-a 2>"$WARN"
+	[ "$(platform_member_value member-a istiod_env)" = unknown ]
+	grep -q "member-a: could not read istiod's settings (its discovery container env); recorded as unknown: the reply did not parse, or no sha256 tool" "$WARN"
+}
+
+@test "PLATFORM_READ_TIMEOUT (H27): every record read uses it; it is an options.env default every suite's --config can set" {
+	local t s
+	probe_setup
+	PLATFORM_READ_TIMEOUT=45s platform_probe member-a 2>/dev/null
+	[ "$(grep -c -- '--request-timeout=45s' "$CALLS")" -eq 4 ]
+	! grep -q -- '--request-timeout=20s' "$CALLS" || false
+	for t in 20s 1m 30 500ms 1m30s 1.5m; do
+		PLATFORM_READ_TIMEOUT="$t" run platform_validate
+		assert_success
+	done
+	for t in 0 0s 0.0m abc -5s 20x "20 s"; do
+		PLATFORM_READ_TIMEOUT="$t" run platform_validate
+		assert_failure
+		assert_output --partial "PLATFORM_READ_TIMEOUT must be a kubectl --request-timeout above zero, such as 20s or 1m (got: ${t}); set it in the environment, the --config file or config/options.env"
+	done
+	run bash -c 'unset PLATFORM_READ_TIMEOUT; source "$1/config/options.env"; echo "$PLATFORM_READ_TIMEOUT"' _ "$ROOT"
+	assert_output 20s
+	for s in propagation churn churn-dataplane controlplane dataplane gateway-api; do
+		config_allowed_keys "$s" | grep -qx PLATFORM_READ_TIMEOUT || { echo "${s}: --config cannot set PLATFORM_READ_TIMEOUT"; false; }
+	done
+}
+
 @test "platform_probe: --dry-run reads nothing and records unknown; a bad TEST_PLATFORM stops first" {
 	probe_setup
 	DRY_RUN=1 platform_probe member-a,member-b
@@ -478,7 +669,7 @@ probe_setup() {
 
 @test "platform_probe: an inherited record is reused and only new members are read; save and load keep it" {
 	probe_setup
-	PLATFORM_PROBE_ROWS=$'member-a\tkubernetes\tsail-operator:1.31.0/Available\tpilot:1.30.4\tproxyv2:1.30.4\tkind\n'
+	PLATFORM_PROBE_ROWS=$'member-a\tkubernetes\tsail-operator:1.31.0/Available\tpilot:1.30.4\tproxyv2:1.30.4\tkind\t0123456789ab\n'
 	export PLATFORM_PROBE_ROWS
 	platform_probe member-a,member-b 2>"$WARN"
 	! grep -q -- '--context=member-a' "$CALLS" || false
@@ -488,7 +679,7 @@ probe_setup() {
 	[ "$(platform_probed_contexts)" = member-a,member-b ]
 	platform_probe_save "${BATS_TEST_TMPDIR}/record.tsv"
 	# A later phase: the saved record fills in; a row it already has wins.
-	PLATFORM_PROBE_ROWS=$'member-b\topenshift\tx\ty\tz\taws\n'
+	PLATFORM_PROBE_ROWS=$'member-b\topenshift\tx\ty\tz\taws\te\n'
 	platform_probe_load "${BATS_TEST_TMPDIR}/record.tsv"
 	[ "$(platform_member_value member-b platform)" = openshift ]
 	[ "$(platform_member_value member-a operator)" = sail-operator:1.31.0/Available ]
@@ -516,9 +707,9 @@ probe_setup() {
 
 @test "platform_md_row: a value every member shares shows once, else per member" {
 	probe_setup
-	PLATFORM_PROBE_ROWS=$'m1\tkubernetes\top1\tistiod1\tproxy1\tkind\nm2\tkubernetes\top2\tistiod1\tproxy1\tkind\n'
+	PLATFORM_PROBE_ROWS=$'m1\tkubernetes\top1\tistiod1\tproxy1\tkind\te1\nm2\tkubernetes\top2\tistiod1\tproxy1\tkind\te1\n'
 	run platform_md_row m1,m2
-	assert_output "| Platform | kubernetes (TEST_PLATFORM auto); nodes kind; operator m1=op1,m2=op2; istiod istiod1; gateway proxy proxy1 |"
+	assert_output "| Platform | kubernetes (TEST_PLATFORM auto); nodes kind; operator m1=op1,m2=op2; istiod istiod1; gateway proxy proxy1; istiod env e1 |"
 }
 
 @test "platform_gitops_namespace: argocd on a Kubernetes hub, openshift-gitops on OpenShift, an error when unknown" {
@@ -564,6 +755,25 @@ probe_setup() {
 	[ "${#lines[@]}" -eq "${#PLATFORM_KEYS[@]}" ]
 }
 
+@test "platform_report_values: inputs with the record but from before a key (ISTIOD_ENV_BY_CONTEXT) warn, on stderr and in the body" {
+	source "${ROOT}/tests/lib/config.sh"
+	local d="$BATS_TEST_TMPDIR"
+	printf '%s\n' '# PLATFORM=kubernetes' '# TEST_PLATFORM=auto' '# PLATFORM_BY_CONTEXT=m1=kubernetes' > "${d}/old.tsv"
+	printf '%s\n' '# PLATFORM=kubernetes' '# TEST_PLATFORM=auto' '# PLATFORM_BY_CONTEXT=m1=kubernetes' \
+		'# ISTIOD_ENV_BY_CONTEXT=m1=0123456789ab' > "${d}/new.tsv"
+	run --separate-stderr platform_report_values "${d}/old.tsv" "${d}/new.tsv"
+	assert_success
+	assert_line "ISTIOD_ENV_BY_CONTEXT=mixed:unknown,m1=0123456789ab"
+	[[ "$stderr" == *"warning: ISTIOD_ENV_BY_CONTEXT is not recorded in 1 of 2 input TSV(s) (written before the platform record had the key), while other inputs have it"* ]]
+	[[ "$stderr" != *"PLATFORM line"* ]]
+	run platform_report_warnings "${d}/old.tsv" "${d}/new.tsv"
+	assert_output "ISTIOD_ENV_BY_CONTEXT is not recorded in 1 of 2 input TSV(s) (written before the platform record had the key), while other inputs have it: the report cannot tell whether those runs had the same istiod settings (its discovery container env) as the others"
+	# Every input from before the key: unknown, nothing mixed, no warning.
+	run --separate-stderr platform_report_values "${d}/old.tsv"
+	assert_line "ISTIOD_ENV_BY_CONTEXT=unknown"
+	[[ "$stderr" != *"not recorded in"* ]]
+}
+
 @test "platform_report_lines: every style, and platform_value_has finds kind in a mixed value" {
 	local v=$'PLATFORM=kubernetes\nNODE_PROVIDER_BY_CONTEXT=m1=kind,m2=mixed:aws;kind'
 	run platform_report_lines comment "$v"
@@ -591,7 +801,7 @@ probe_setup() {
 @test "platform_probe (H7): an inherited member with an unknown value is read again; a value only the inherited row has is kept" {
 	probe_setup
 	# The sweep's start: member-a did not answer, member-b did.
-	PLATFORM_PROBE_ROWS=$'member-a\tunknown\tunknown\tunknown\tunknown\tunknown\nmember-b\tkubernetes\tsail-operator:1.31.0/Available\tpilot:1.30.4\tproxyv2:1.30.4\tkind\n'
+	PLATFORM_PROBE_ROWS=$'member-a\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\nmember-b\tkubernetes\tsail-operator:1.31.0/Available\tpilot:1.30.4\tproxyv2:1.30.4\tkind\t0123456789ab\n'
 	export PLATFORM_PROBE_ROWS
 	platform_probe member-a,member-b 2>"$WARN"
 	grep -q -- '--context=member-a' "$CALLS"
@@ -602,7 +812,7 @@ probe_setup() {
 	[ "$(platform_member_value member-b istiod)" = pilot:1.30.4 ]
 	[ "$(platform_recorded_contexts)" = member-a,member-b ]
 	# A read that gets less than the inherited row: the inherited values stay, each with a note.
-	PLATFORM_PROBE_ROWS=$'member-c\tkubernetes\tunknown\tpilot:1.30.4\tproxyv2:1.30.4\tkind\n'
+	PLATFORM_PROBE_ROWS=$'member-c\tkubernetes\tunknown\tpilot:1.30.4\tproxyv2:1.30.4\tkind\t0123456789ab\n'
 	: > "$CALLS"
 	PROBE_PLATFORM=down platform_probe member-c 2>"$WARN"
 	grep -q -- '--context=member-c' "$CALLS"
@@ -611,11 +821,12 @@ probe_setup() {
 	[ "$(platform_member_value member-c istiod)" = pilot:1.30.4 ]
 	grep -q "member-c: keeps the platform of the record it inherited (kubernetes), read before this step; this read could not get it" "$WARN"
 	grep -q "member-c: keeps the gateway proxy build of the record it inherited (proxyv2:1.30.4)" "$WARN"
+	grep -q "member-c: keeps the istiod settings (its discovery container env) of the record it inherited (0123456789ab)" "$WARN"
 }
 
 @test "platform_probe (H7): nothing is read again after platform_probe_load (inside a window) or in a dry-run" {
 	probe_setup
-	PLATFORM_PROBE_ROWS=$'member-a\tunknown\tunknown\tunknown\tunknown\tunknown\n'
+	PLATFORM_PROBE_ROWS=$'member-a\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\n'
 	export PLATFORM_PROBE_ROWS
 	DRY_RUN=1 platform_probe member-a
 	[ ! -s "$CALLS" ]
@@ -624,14 +835,14 @@ probe_setup() {
 	[ ! -s "$CALLS" ]
 	[ "$(platform_member_value member-a platform)" = unknown ]
 	# A saved record that knows more replaces an inherited row of unknowns.
-	printf 'member-a\tkubernetes\top\tistiod\tproxy\tkind\n' > "${BATS_TEST_TMPDIR}/saved.tsv"
+	printf 'member-a\tkubernetes\top\tistiod\tproxy\tkind\te\n' > "${BATS_TEST_TMPDIR}/saved.tsv"
 	platform_probe_load "${BATS_TEST_TMPDIR}/saved.tsv"
 	[ "$(platform_member_value member-a istiod)" = istiod ]
 }
 
 @test "platform_chart_args (H15): with auto, a member the record holds is not asked again; one it lacks or holds unknown is" {
 	local a=(stale)
-	PLATFORM_PROBE_ROWS=$'member-a\topenshift\tx\ty\tz\taws\nmember-u\tunknown\tunknown\tunknown\tunknown\tunknown\n'
+	PLATFORM_PROBE_ROWS=$'member-a\topenshift\tx\ty\tz\taws\te\nmember-u\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\n'
 	FAKE_PLATFORM=kubernetes platform_chart_args "$CHART" member-a a
 	[ "${a[*]}" = "-f ${CHART}/values-openshift.yaml" ]
 	[ ! -s "$CALLS" ]
@@ -693,13 +904,40 @@ probe_setup() {
 		churn-dataplane/005-report-results.sh controlplane/004-report-results.sh; do
 		grep -q 'platform_report_warnings ' "${ROOT}/tests/${f}" || { echo "${f}: no platform_report_warnings"; false; }
 	done
+	# tuning 004 merges each pass's record and compares it with the reference pass's, on every
+	# key but istiod's settings (a profile changes them on purpose); its notes say what differs.
+	f="${ROOT}/tests/tuning/004-compare-profiles.sh"
+	grep -q 'platform_report_values ' "$f" || { echo "${f}: no platform_report_values"; false; }
+	grep -q 'platform_compare_values .*"${PLATFORM_PASS_KEYS\[@\]}"' "$f" || { echo "${f}: no platform_compare_values over PLATFORM_PASS_KEYS"; false; }
 }
 
-@test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh (their warnings mask addresses)" {
-	local f
+@test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh and config.sh (address masking, the istiod env digest)" {
+	local f seen=""
 	for f in "$ROOT"/tests/*/0*.sh; do
-		grep -qE '^[[:space:]]*(platform_probe|platform_drift_check) ' "$f" || continue
+		grep -qE '(^[[:space:]]*|(\|\||&&)[[:space:]]*)(platform_probe|platform_drift_check) ' "$f" || continue
+		seen+=" ${f#"${ROOT}/tests/"}"
 		grep -q 'source "${ROOT}/tests/lib/reach.sh"' "$f" || { echo "${f}: calls platform_probe or platform_drift_check without reach.sh"; false; }
+		grep -q 'source "${ROOT}/tests/lib/config.sh"' "$f" || { echo "${f}: calls platform_probe or platform_drift_check without config.sh"; false; }
+	done
+	# A call after || counts: controlplane 001 and 005 read the record for a new ns-lifecycle TSV (H3).
+	[[ "$seen " == *" controlplane/001-setup-controlplane-test.sh "* && "$seen " == *" controlplane/005-cleanup.sh "* ]] || { echo "callers:${seen}"; false; }
+}
+
+@test "H3: every writer of the ns-lifecycle TSV reads the platform record before it creates the file" {
+	local f p i n=0
+	for f in "$ROOT"/tests/*/0*.sh; do
+		i="$(grep -n '^[[:space:]]*ns_lifecycle_init "' "$f" | head -n 1 | cut -d: -f1)"
+		[[ -n "$i" ]] || continue
+		n=$((n + 1))
+		p="$(grep -nE '(^[[:space:]]*|\|\|[[:space:]]*)platform_probe ' "$f" | head -n 1 | cut -d: -f1)"
+		[[ -n "$p" ]] && ((p < i)) || { echo "${f}: ns_lifecycle_init at line ${i}, platform_probe at '${p}'"; false; }
+	done
+	[ "$n" -eq 3 ]
+	# A standalone 001 or 005 reads it only for a new file: in a sweep, 003 created the file after
+	# its own read, and a second read would be another call per member for nothing.
+	for f in controlplane/001-setup-controlplane-test.sh controlplane/005-cleanup.sh; do
+		grep -qxF '	[[ -f "$LIFECYCLE_FILE" ]] || platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"' "${ROOT}/tests/${f}" ||
+			{ echo "${f}: no new-file platform_probe before ns_lifecycle_init"; false; }
 	done
 }
 
@@ -707,18 +945,30 @@ probe_setup() {
 # --resume (H1): platform_resume_check against the TSV a sweep started
 # ---------------------------------------------------------------------------
 
-# resume_tsv <file> [sed program]: the controlplane TSV a sweep started on member-a,member-b: the
-# record platform_probe reads from _probe_kubectl now and the tuning baseline
-# tuning_baseline_state reads on member-a now (both edited by the sed program), a header and a
-# row. Leaves PLATFORM_PROBE_ROWS reset.
+# resume_tsv <file> [sed program]: the controlplane TSV a sweep started on member-a,member-b, with
+# what 003's preamble records from _probe_kubectl now (edited by the sed program): the record
+# (platform_probe), KUBE_VERSIONS, the capacity lines of member-a (cap_node_totals,
+# cap_istiod_limits), its tuning baseline (tuning_baseline_state) and the infra block
+# (env_collect_infra); then a header and a row. Leaves PLATFORM_PROBE_ROWS reset.
 resume_tsv() {
-	source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state
+	local nt lim
 	probe_setup
 	platform_probe member-a,member-b 2>/dev/null
+	nt="$(cap_node_totals member-a "${KUBECTL[@]}")"
+	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
 	{
 		echo "# Control-plane resource metrics"
-		{ platform_preamble_lines member-a,member-b; tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'; } |
-			sed "${2:-}"
+		{
+			echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
+			echo "# NODE_ALLOC_CPU_M=$(_platform_kv "$nt" cpu_m)"
+			echo "# NODE_ALLOC_MEM_MI=$(_platform_kv "$nt" mem_mi)"
+			echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
+			echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+			platform_preamble_lines member-a,member-b
+			tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
+			# shellcheck disable=SC2046  # the infra block's KEY=value words
+			infra_preamble_lines $(env_collect_infra member-a,member-b "${KUBECTL[@]}")
+		} | sed "${2:-}"
 		printf 'timestamp\tcontext\n'
 		printf 't\tmember-a\n'
 	} > "$1"
@@ -726,74 +976,190 @@ resume_tsv() {
 	: > "$CALLS"
 }
 
-@test "platform_resume_check (H1): the same record and levers proceed silently" {
+# resume_run <tsv> [ctxs_csv] [source ctx]: what 003 --resume runs: a fresh record of the members
+# (platform_probe), then platform_resume_check (run, stderr apart) with the source member
+# (member-a unless given; "" for none). The PROBE_* settings of the call apply to both.
+resume_run() {
+	probe_setup
+	platform_probe "${2:-member-a,member-b}" 2>/dev/null
+	run --separate-stderr platform_resume_check "$1" "${2:-member-a,member-b}" "${3-member-a}"
+}
+
+@test "platform_resume_check (H1, H18): the same record, levers, limits and versions proceed, with one line on stdout" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv"
-	platform_probe member-a,member-b 2>/dev/null
-	run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	# What 003's preamble records, every value read.
+	grep -qx '# KUBE_VERSIONS=member-a=v1.33.1,member-b=v1.33.1' "$tsv"
+	grep -qx '# ISTIOD_CPU_LIMIT_M=2000' "$tsv"
+	grep -qx '# ISTIOD_MEM_LIMIT_MI=4096' "$tsv"
+	grep -qx '# NODE_ALLOC_CPU_M=8000' "$tsv"
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=1' "$tsv"
+	grep -qx '# NETWORK_TOPOLOGY=multi-primary,multi-network:2' "$tsv"
+	grep -qx '# TUNING_BASELINE=sidecar=on,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off' "$tsv"
+	resume_run "$tsv"
 	assert_success
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
-	grep -q -- '--context=member-a .*get sidecar.networking.istio.io default -o name' "$CALLS"
+	assert_output "Platform record: comparing what member-a member-b run now with what ${tsv} recorded at the sweep's start (--resume)"
+	grep -q -- '--context=member-a .*get sidecar.networking.istio.io default -o name --ignore-not-found' "$CALLS"
+	grep -q -- '--context=member-a .*-n istio-system get deploy istiod -o json' "$CALLS"
+	grep -q -- '--context=member-b .*version --output=json' "$CALLS"
 }
 
 @test "platform_resume_check (H1): another build dies naming the member, the key, both values and how to start a new sweep" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv"
-	PROBE_ISTIOD=1.30.6 platform_probe member-a,member-b 2>/dev/null
-	run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	PROBE_ISTIOD=1.30.6 resume_run "$tsv"
 	assert_failure
-	[[ "$stderr" == *"error: --resume: ${tsv} was started on other builds or tuning levers than the members have now:"* ]]
+	[[ "$stderr" == *"error: --resume: ${tsv} was started on other builds, settings or cluster values than the members have now:"* ]]
 	[[ "$stderr" == *"  member-a: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.6@${DIG_B}"* ]]
 	[[ "$stderr" == *"  member-b: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.6@${DIG_B}"* ]]
-	[[ "$stderr" == *"Start a new sweep instead: run "*" again with this sweep's flags (and --config) but without --resume; it writes a new sweep-<RUN_ID>/ in its results dir and leaves this one as it is. Or put the members back"* ]]
+	[[ "$stderr" == *"The rows this run appends would be credited to what its preamble records. Start a new sweep instead: run "*" again with this sweep's flags (and --config) but without --resume; it writes a new sweep-<RUN_ID>/ in its results dir and leaves this one as it is. Or put the members back"* ]]
 	[[ "$stderr" != *"config snapshot"* ]] || { echo "$stderr"; false; }
 	# Another operator build too, and a cluster rebuilt onto other nodes; a sweep run with
 	# --config names its snapshot, which replays the config.
 	resume_tsv "$tsv" 's/member-b=kind/member-b=aws/'
 	echo "CONTROLPLANE_MESH_SIZES=1,2" > "${BATS_TEST_TMPDIR}/run-config-r.env"
-	PROBE_OPERATOR=1.31.2 platform_probe member-a,member-b 2>/dev/null
-	run --separate-stderr platform_resume_check "$tsv" member-a,member-b
+	PROBE_OPERATOR=1.31.2 resume_run "$tsv" member-a,member-b ""
 	assert_failure
 	[[ "$stderr" == *"member-a: MESH_OPERATOR_BY_CONTEXT recorded sail-operator:1.31.1@${DIG_A}/Available, now sail-operator:1.31.2@${DIG_A}/Available"* ]]
 	[[ "$stderr" == *"member-b: NODE_PROVIDER_BY_CONTEXT recorded aws, now kind"* ]]
 	[[ "$stderr" == *"This sweep's config snapshot replays its --config values: "*" --config $(printf '%q' "${BATS_TEST_TMPDIR}/run-config-r.env") (plus the flags it ran with besides --config). Or put the members back"* ]]
 }
 
+@test "platform_resume_check (H1): another Kubernetes version, istiod limit or istiod settings die; what is not read warns, saying which side" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
+	resume_tsv "$tsv"
+	# A cluster rebuilt under the same name (on kind it differs only in its version).
+	PROBE_KUBE_VERSION=v1.34.0 resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a: KUBE_VERSIONS recorded v1.33.1, now v1.34.0"* ]]
+	[[ "$stderr" == *"  member-b: KUBE_VERSIONS recorded v1.33.1, now v1.34.0"* ]]
+	# istiod's limits: the denominators of the report's istiod limit figures and its verdict.
+	PROBE_ISTIOD_CPU_LIMIT=4 PROBE_ISTIOD_MEM_LIMIT=8Gi resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a: ISTIOD_CPU_LIMIT_M recorded 2000, now 4000"* ]]
+	[[ "$stderr" == *"  member-a: ISTIOD_MEM_LIMIT_MI recorded 4096, now 8192"* ]]
+	[[ "$stderr" == *"warning: --resume: member-a: ISTIOD_LIM_CPU_M recorded 2000, now 4000; the report shows the recorded value; its istiod limit figures use ISTIOD_CPU_LIMIT_M and ISTIOD_MEM_LIMIT_MI"* ]]
+	# istiod's settings (H25): a tuning profile's pilot env left applied.
+	PROBE_ISTIOD_THROTTLE=50 resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a: ISTIOD_ENV_BY_CONTEXT recorded $(env_digest "$(env_list)"), now $(env_digest "$(env_list 50)")"* ]]
+	[[ "$stderr" == *"  member-b: ISTIOD_ENV_BY_CONTEXT recorded "* ]]
+	# Not read now: a warning that says so (and why), and the run goes on.
+	PROBE_KUBE=down resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a: KUBE_VERSIONS: could not be read now (unreachable), so this run cannot tell whether it changed since its rows were measured"* ]]
+	PROBE_ISTIOD_DEPLOY=missing resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a: ISTIOD_CPU_LIMIT_M, ISTIOD_MEM_LIMIT_MI, ISTIOD_REQ_CPU_M, "*": could not be read now, so this run cannot tell whether they changed since its rows were measured"* ]]
+	# A TSV from before a key: not in its record.
+	resume_tsv "$tsv" '/KUBE_VERSIONS=\|ISTIOD_CPU_LIMIT_M=\|ISTIOD_ENV_BY_CONTEXT=/d'
+	resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a: ISTIOD_ENV_BY_CONTEXT, KUBE_VERSIONS, ISTIOD_CPU_LIMIT_M: not in the record of ${tsv} (it predates the key), so this run cannot tell whether they changed since its rows were measured"* ]]
+	[[ "$stderr" == *"warning: --resume: member-b: ISTIOD_ENV_BY_CONTEXT, KUBE_VERSIONS: not in the record of ${tsv} (it predates the key)"* ]]
+	[[ "$stderr" != *"error:"* ]]
+}
+
+@test "platform_resume_check (H1): what the report only shows warns and proceeds: node allocatable, istiod requests and replicas, the network topology" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
+	resume_tsv "$tsv"
+	PROBE_NODE_CPU=16 PROBE_ISTIOD_REQ_CPU=1 PROBE_ISTIOD_REPLICAS=2 PROBE_NETWORK=net-1 resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a: NODE_ALLOC_CPU_M recorded 8000, now 16000; a cluster autoscaler moves it; each row's node figures are its own reads"* ]]
+	[[ "$stderr" == *"warning: --resume: member-a: ISTIOD_REQ_CPU_M recorded 500, now 1000; the report shows the recorded value; its istiod limit figures use ISTIOD_CPU_LIMIT_M and ISTIOD_MEM_LIMIT_MI"* ]]
+	[[ "$stderr" == *"warning: --resume: member-a: ISTIOD_REPLICAS_BY_CONTEXT recorded 1, now 2; an HPA moves it, the report shows the recorded count while each row records its own istiod pods"* ]]
+	[[ "$stderr" == *"warning: --resume: member-b: ISTIOD_REPLICAS_BY_CONTEXT recorded 1, now 2"* ]]
+	[[ "$stderr" == *"warning: --resume: member-a member-b: NETWORK_TOPOLOGY recorded multi-primary,multi-network:2, now single-network; the report labels every row with the recorded one"* ]]
+	[[ "$stderr" != *"error:"* ]]
+}
+
+@test "platform_resume_check (H2): a replica or the operator with no started pod warns (@unknown) and proceeds; a pinned digest is compared" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
+	resume_tsv "$tsv"
+	# A Pending or evicted istiod replica next to the running one: the same build, silently.
+	PROBE_ISTIOD_PODS=pending resume_run "$tsv"
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	PROBE_ISTIOD_PODS=evicted resume_run "$tsv"
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	# Only a Pending replica, and the operator scaled to 0: not read, a warning, never another build.
+	PROBE_ISTIOD_PODS=only-pending PROBE_SAIL_PODS=none PROBE_SAIL_AVAILABLE=0 resume_run "$tsv"
+	assert_success
+	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.5@unknown" ]
+	[ "$(platform_member_value member-a operator)" = "sail-operator:1.31.1@unknown/Unavailable" ]
+	[[ "$stderr" == *"warning: --resume: member-a: MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT: read with a digest @unknown now (no pod has started), so this run cannot tell whether they changed since its rows were measured"* ]]
+	[[ "$stderr" != *"error:"* ]]
+	# A digest the spec pins is definite: the same one proceeds, another one stops.
+	PROBE_ISTIOD_PODS=pinned-pending resume_run "$tsv"
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	PROBE_ISTIOD_PODS=pinned-pending PROBE_ISTIOD_PIN="$DIG_A" resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.5@${DIG_A}"* ]]
+	# A TSV that recorded @unknown: a warning that says the record lacks the digest.
+	resume_tsv "$tsv" "s/member-b=pilot:1.30.5@${DIG_B}/member-b=pilot:1.30.5@unknown/"
+	resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-b: ISTIOD_IMAGE_BY_CONTEXT: recorded with a digest @unknown in ${tsv} (no pod had started), so this run cannot tell whether it changed since its rows were measured"* ]]
+}
+
 @test "platform_resume_check (H1): an operator that only changed its state proceeds" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv"
-	PROBE_SAIL_AVAILABLE=0 platform_probe member-a,member-b 2>/dev/null
+	PROBE_SAIL_AVAILABLE=0 resume_run "$tsv"
 	[ "$(platform_member_value member-a operator)" = "sail-operator:1.31.1@${DIG_A}/Unavailable" ]
-	run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
 	assert_success
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
 }
 
-@test "platform_resume_check (H1): unknown on either side, a member on one side only, another TEST_PLATFORM: warnings only" {
+@test "platform_resume_check (H1, H11, H28): unknown on either side says which, a member on one side only, another TEST_PLATFORM: warnings only" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv" 's/member-b=pilot:[^,]*/member-b=unknown/'
-	platform_probe member-a,member-b 2>/dev/null
-	TEST_PLATFORM=kubernetes run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	TEST_PLATFORM=kubernetes resume_run "$tsv"
 	assert_success
-	[[ "$stderr" == *"warning: --resume: member-b: ISTIOD_IMAGE_BY_CONTEXT not read in the record of ${tsv} or now, so this run cannot tell whether they changed since its rows were measured"* ]]
+	[[ "$stderr" == *"warning: --resume: member-b: ISTIOD_IMAGE_BY_CONTEXT: unknown in the record of ${tsv} (not read at the sweep's start), so this run cannot tell whether it changed since its rows were measured"* ]]
 	[[ "$stderr" == *"warning: --resume: ${tsv} was started with TEST_PLATFORM=auto, this run has TEST_PLATFORM=kubernetes"* ]]
+	# H26: no value printed twice.
+	[[ "$stderr" != *unknownunknown* ]]
 	# Now: member-a does not answer; member-c is new; member-b is no longer a member.
 	resume_tsv "$tsv"
+	probe_setup
 	PROBE_PLATFORM=down platform_probe member-a 2>/dev/null
 	platform_probe member-c 2>/dev/null
 	run --separate-stderr platform_resume_check "$tsv" member-a,member-c
 	assert_success
-	[[ "$stderr" == *"member-a: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT not read"* ]]
-	[[ "$stderr" == *"warning: --resume: member-c is a member of this run but not of the record in ${tsv}"* ]]
+	[[ "$stderr" == *"warning: --resume: member-a: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT, ISTIOD_ENV_BY_CONTEXT: could not be read now (the warnings above say why), so this run cannot tell whether they changed since its rows were measured"* ]]
+	[[ "$stderr" == *"warning: --resume: member-c is a member of this run but not of the record in ${tsv}: the preamble is not rewritten on --resume, so its builds are never recorded and the report does not list it; start a new sweep to record it"* ]]
 	[[ "$stderr" == *"warning: --resume: member-b is in the record of ${tsv} but not a member of this run"* ]]
+	# A source member that is not in this run: the levers and limits are read on this run's first.
+	resume_tsv "$tsv"
+	resume_run "$tsv" member-b member-b
+	assert_success
+	[[ "$stderr" == *"warning: --resume: ${tsv} read TUNING_BASELINE and istiod's limits on member-a, which is not a member of this run; comparing them with member-b's"* ]]
+}
+
+@test "platform_resume_check (H12): a context name the record sanitizes is compared under that name" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
+	probe_setup
+	platform_probe "member a,member-b" 2>/dev/null
+	{ echo "# Control-plane resource metrics"; platform_preamble_lines "member a,member-b"; printf 'timestamp\tcontext\nt\tmember_a\n'; } > "$tsv"
+	grep -qx '# PLATFORM_BY_CONTEXT=member_a=kubernetes,member-b=kubernetes' "$tsv"
+	PROBE_ISTIOD=1.30.6 resume_run "$tsv" "member a,member-b" ""
+	assert_failure
+	[[ "$stderr" == *"  member_a: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.6@${DIG_B}"* ]]
+	[[ "$stderr" != *"not a member"* && "$stderr" != *"not of the record"* ]] || { echo "$stderr"; false; }
+	resume_run "$tsv" "member a,member-b" ""
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
 }
 
 @test "platform_resume_check (H1): a TSV from before the record warns and proceeds" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv" '/_BY_CONTEXT=\|PLATFORM=/d'
 	! grep -q 'PLATFORM' "$tsv" || false
-	platform_probe member-a,member-b 2>/dev/null
-	run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	resume_run "$tsv"
 	assert_success
 	[[ "$stderr" == *"warning: --resume: ${tsv} predates the platform record (no PLATFORM_BY_CONTEXT line)"* ]]
 }
@@ -801,50 +1167,76 @@ resume_tsv() {
 @test "platform_resume_check (H1): TUNING_BASELINE or SIDECAR_EGRESS_HOSTS that differ die; unknown warns; read on the TSV's member" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv"
-	platform_probe member-a,member-b 2>/dev/null
-	PROBE_TB_DS=on run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	PROBE_TB_DS=on resume_run "$tsv"
 	assert_failure
 	[[ "$stderr" == *"  member-a: TUNING_BASELINE discoverySelectors recorded off, now on"* ]]
-	PROBE_TB_HOSTS="istio-system/*" run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	PROBE_TB_HOSTS="istio-system/*" resume_run "$tsv"
 	assert_failure
 	[[ "$stderr" == *"  member-a: SIDECAR_EGRESS_HOSTS recorded istio-system/* ./*, now istio-system/*"* ]]
-	# A lever recorded unknown cannot be compared: a warning.
+	# A lever recorded unknown cannot be compared: a warning that says the record lacks it.
 	resume_tsv "$tsv" 's/discoverySelectors=off/discoverySelectors=unknown/'
-	platform_probe member-a,member-b 2>/dev/null
-	run --separate-stderr platform_resume_check "$tsv" member-a,member-b member-a
+	resume_run "$tsv"
 	assert_success
-	[[ "$stderr" == *"warning: --resume: TUNING_BASELINE discoverySelectors recorded unknown, now off on member-a"* ]]
-	# --contexts in another order: the levers are read on the member the TSV read them on.
+	[[ "$stderr" == *"warning: --resume: member-a: TUNING_BASELINE discoverySelectors: unknown in the record of ${tsv} (not read at the sweep's start), so this run cannot tell whether it changed since its rows were measured"* ]]
+	# --contexts in another order: the levers and limits are read on the member the TSV read them on.
 	resume_tsv "$tsv"
+	probe_setup
 	platform_probe member-b,member-a 2>/dev/null
 	: > "$CALLS"
 	run --separate-stderr platform_resume_check "$tsv" member-b,member-a member-b
 	assert_success
-	[[ "$stderr" == *"--resume: reading TUNING_BASELINE on member-a, the member ${tsv} read it on (this run lists member-b first)"* ]]
+	[[ "$stderr" == *"--resume: reading TUNING_BASELINE and istiod's limits on member-a, the member ${tsv} read them on (this run lists member-b first)"* ]]
+	[[ "$stderr" != *warning* ]] || { echo "$stderr"; false; }
 	grep -q -- '--context=member-a .*get sidecar.networking.istio.io' "$CALLS"
 	! grep -q -- '--context=member-b .*get sidecar.networking.istio.io' "$CALLS" || false
 }
 
-@test "platform_resume_check (H1): nothing in a dry-run or for a TSV without a header yet; it needs tuning_baseline_state for levers" {
+@test "platform_resume_check (H24): a root Sidecar removed since the sweep started dies (on, now off); a kind the member does not serve warns" {
 	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
 	resume_tsv "$tsv"
-	PROBE_ISTIOD=1.30.6 platform_probe member-a,member-b 2>/dev/null
-	DRY_RUN=1 run platform_resume_check "$tsv" member-a,member-b member-a
-	assert_success
-	printf '# PLATFORM=kubernetes\n' > "${BATS_TEST_TMPDIR}/new.tsv"
-	run platform_resume_check "${BATS_TEST_TMPDIR}/new.tsv" member-a,member-b member-a
-	assert_success
-	unset -f tuning_baseline_state
-	run platform_resume_check "$tsv" member-a,member-b member-a
+	PROBE_TB_SIDECAR=off resume_run "$tsv"
 	assert_failure
-	assert_output --partial "platform_resume_check needs tuning_baseline_state (source tests/lib/preamble.sh)"
+	[[ "$stderr" == *"  member-a: TUNING_BASELINE sidecar recorded on, now off"* ]]
+	[[ "$stderr" == *"  member-a: SIDECAR_EGRESS_HOSTS recorded istio-system/* ./*, now none"* ]]
+	# An absent lever reads off in the record too: a tuning Telemetry applied since stops the run.
+	PROBE_TB_TELEMETRY=on resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a: TUNING_BASELINE telemetryFiltering recorded off, now on"* ]]
+	# Kinds the member does not serve are not read: unknown, a warning, never off.
+	PROBE_TB_UNSERVED=1 resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a: TUNING_BASELINE sidecar, TUNING_BASELINE telemetryFiltering, TUNING_BASELINE accessLogFiltering, SIDECAR_EGRESS_HOSTS: could not be read now, so this run cannot tell whether they changed since its rows were measured"* ]]
+	# No Istio CR named default: discoverySelectors unknown, never off.
+	PROBE_TB_DS=missing resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a: TUNING_BASELINE discoverySelectors: could not be read now, so this run cannot tell whether it changed since its rows were measured"* ]]
+}
+
+@test "platform_resume_check (H1): nothing in a dry-run or for a TSV without a header yet; with a source member it needs its readers" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv" f
+	resume_tsv "$tsv"
+	DRY_RUN=1 PROBE_ISTIOD=1.30.6 resume_run "$tsv"
+	assert_success
+	[ -z "$output" ]
+	printf '# PLATFORM=kubernetes\n' > "${BATS_TEST_TMPDIR}/new.tsv"
+	resume_run "${BATS_TEST_TMPDIR}/new.tsv"
+	assert_success
+	[ -z "$output" ]
+	for f in "tuning_baseline_state preamble" "probe_kube_versions preamble" "cap_istiod_limits capacity" \
+		"cap_node_totals capacity" "env_collect_infra envelope"; do
+		run bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/platform.sh"; source "$1/tests/lib/preamble.sh"
+			source "$1/tests/lib/capacity.sh"; source "$1/tests/lib/envelope.sh"; unset -f "$2"; DRY_RUN=1
+			platform_resume_check "$3" member-a member-a' _ "$ROOT" "${f% *}" "$tsv"
+		assert_failure
+		assert_output --partial "platform_resume_check needs ${f% *} (source tests/lib/${f#* }.sh)"
+	done
 }
 
 # ---------------------------------------------------------------------------
 # Drift during a sweep (H2): platform_drift_check and the reports' side
 # ---------------------------------------------------------------------------
 
-@test "platform_drift_check (H2): a build that changed during the sweep warns and goes to the marker; a state-only change does not" {
+@test "platform_drift_check (H2, H8): a build that changed during the sweep warns with its cause and goes to the marker; a state-only change does not" {
 	probe_setup
 	platform_probe member-a,member-b 2>/dev/null
 	local dir="${BATS_TEST_TMPDIR}/sweep"
@@ -852,7 +1244,7 @@ resume_tsv() {
 	: > "$CALLS"
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	assert_output "Platform record: reading member-a member-b again, to check that no build changed during the sweep"
+	assert_output "Platform record: reading member-a member-b again, to check that no build, istiod setting, tuning lever or Kubernetes version changed during the sweep"
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
 	[ ! -e "${dir}/platform-drift.txt" ]
 	# Fresh reads, not the record the sweep holds.
@@ -861,16 +1253,20 @@ resume_tsv() {
 	# istiod upgraded; the operator only became Unavailable.
 	PROBE_ISTIOD=1.30.6 PROBE_SAIL_AVAILABLE=0 run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	[[ "$stderr" == *"warning: member-a: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep: pilot:1.30.5@${DIG_B} at its start, pilot:1.30.6@${DIG_B} at its end"* ]]
-	[[ "$stderr" == *"(written to ${dir}/platform-drift.txt, so its reports read ISTIOD_IMAGE_BY_CONTEXT mixed)"* ]]
+	[[ "$stderr" == *"warning: member-a: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep: pilot:1.30.5@${DIG_B} at its start, pilot:1.30.6@${DIG_B} at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, so its reports read ISTIOD_IMAGE_BY_CONTEXT mixed); the usual cause is an Argo CD sync of a new revision or an operator upgrade during the sweep; for publishable figures, run the sweep again on one build"* ]]
 	[[ "$stderr" != *MESH_OPERATOR* ]]
 	grep -qx "# ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:1.30.6@${DIG_B},member-b=pilot:1.30.6@${DIG_B}" "${dir}/platform-drift.txt"
 	grep -q '^# DRIFT_READ_AT=' "${dir}/platform-drift.txt"
 	! grep -q MESH_OPERATOR "${dir}/platform-drift.txt" || false
+	# istiod's settings (H25): a tuning profile left applied.
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_THROTTLE=50 run --separate-stderr platform_drift_check "$dir" member-a
+	[[ "$stderr" == *"warning: member-a: ISTIOD_ENV_BY_CONTEXT changed during the sweep: $(env_digest "$(env_list)") at its start, $(env_digest "$(env_list 50)") at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, so its reports read ISTIOD_ENV_BY_CONTEXT mixed); the usual cause is a tuning profile left applied, or a sync or hand edit of the Istio CR's spec.values.pilot.env, during the sweep; for publishable figures, run the sweep again with istiod's settings fixed"* ]]
+	grep -qx "# ISTIOD_ENV_BY_CONTEXT=member-a=$(env_digest "$(env_list 50)")" "${dir}/platform-drift.txt"
 	# A member that does not answer at the end: a warning, no marker line for it.
 	PROBE_PLATFORM=down run --separate-stderr platform_drift_check "${BATS_TEST_TMPDIR}" member-a
 	assert_success
-	[[ "$stderr" == *"member-a: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT not read at the sweep's start or end"* ]]
+	[[ "$stderr" == *"warning: member-a: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT, ISTIOD_ENV_BY_CONTEXT not read at the sweep's start or end, so whether they changed during the sweep is not known"* ]]
 	[ ! -e "${BATS_TEST_TMPDIR}/platform-drift.txt" ]
 	# A dry-run reads nothing.
 	: > "$CALLS"
@@ -882,30 +1278,143 @@ resume_tsv() {
 	KUBECTL=()
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	[[ "$stderr" == *"warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh) and KUBECTL; not checked"* ]]
+	[[ "$stderr" == *"warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh), _config_sha256 (tests/lib/config.sh) and KUBECTL; not checked"* ]]
 	[ ! -s "$CALLS" ]
 }
 
-@test "platform_report_values (H2): a sweep's drift marker makes its keys mixed, and the report's body says the build changed" {
-	local d="${BATS_TEST_TMPDIR}/sweep"
+@test "platform_drift_check (H2): a replica or the operator that has not started at the end is no change; another digest is" {
+	local dir="${BATS_TEST_TMPDIR}/sweep"
+	mkdir -p "$dir"
+	probe_setup
+	platform_probe member-a 2>/dev/null
+	# A rescheduled istiod replica (Pending) or an evicted pod next to the running one: nothing.
+	PROBE_ISTIOD_PODS=pending run --separate-stderr platform_drift_check "$dir" member-a
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	PROBE_ISTIOD_PODS=evicted run --separate-stderr platform_drift_check "$dir" member-a
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ ! -e "${dir}/platform-drift.txt" ]
+	# Only a Pending replica, and the operator scaled to 0: not read, a warning, no marker.
+	PROBE_ISTIOD_PODS=only-pending PROBE_SAIL_PODS=none PROBE_SAIL_AVAILABLE=0 run --separate-stderr platform_drift_check "$dir" member-a
+	assert_success
+	[[ "$stderr" == *"warning: member-a: MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT read with a digest @unknown at the sweep's start or end (no pod had started), so whether they changed during the sweep is not known"* ]]
+	[[ "$stderr" != *"changed during the sweep:"* ]]
+	[ ! -e "${dir}/platform-drift.txt" ]
+	# So the sweep's reports read the values of its start, not mixed:.
+	platform_preamble_lines member-a > "${dir}/s.tsv"
+	run --separate-stderr platform_report_values "${dir}/s.tsv"
+	assert_line "ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:1.30.5@${DIG_B}"
+	assert_line "MESH_OPERATOR_BY_CONTEXT=member-a=sail-operator:1.31.1@${DIG_A}/Available"
+	refute_output --partial "mixed"
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	rm -f "${dir}/s.tsv"
+	# A replica that runs another digest at the end: a change.
+	PROBE_ISTIOD_PODS=two-digests run --separate-stderr platform_drift_check "$dir" member-a
+	[[ "$stderr" == *"warning: member-a: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep: pilot:1.30.5@${DIG_B} at its start, pilot:1.30.5@${DIG_A}+pilot:1.30.5@${DIG_B} at its end"* ]]
+	grep -qx "# ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:1.30.5@${DIG_A}+pilot:1.30.5@${DIG_B}" "${dir}/platform-drift.txt"
+}
+
+@test "platform_drift_check (H7, H8): the levers and Kubernetes versions the sweep's TSVs record are read again; a change goes to the marker" {
+	local dir="${BATS_TEST_TMPDIR}/sweep"
+	mkdir -p "$dir"
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	# A sweep TSV records the levers of its first member and each member's Kubernetes version; a
+	# reach TSV next to it records neither.
+	{
+		tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
+		echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
+		printf 'timestamp\tcontext\n'
+	} > "${dir}/controlplane-r.tsv"
+	printf '# RUN_ID=r\ntimestamp\tcontext\n' > "${dir}/reach-r.tsv"
+	: > "$CALLS"
+	run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ ! -e "${dir}/platform-drift.txt" ]
+	grep -q -- '--context=member-a .*get sidecar.networking.istio.io default -o name --ignore-not-found' "$CALLS"
+	! grep -q -- '--context=member-b .*get sidecar.networking.istio.io' "$CALLS" || false
+	grep -q -- '--context=member-b .*version --output=json' "$CALLS"
+	# The root Sidecar removed (a GitOps self-heal, a hand edit) and a control-plane upgrade.
+	PROBE_TB_SIDECAR=off PROBE_KUBE_VERSION=v1.33.2 run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a: TUNING_BASELINE changed during the sweep: sidecar=on,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off at its start, sidecar=off,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off at its end; rows measured after the change ran with other tuning levers (written to ${dir}/platform-drift.txt, which its reports say in their body); the usual cause is a GitOps sync or self-heal that put a lever back, a tuning profile left applied, or a hand edit, during the sweep; for publishable figures, run the sweep again with the levers fixed"* ]]
+	[[ "$stderr" == *"warning: member-a: SIDECAR_EGRESS_HOSTS changed during the sweep: istio-system/* ./* at its start, none at its end; rows measured after the change ran with other root Sidecar egress hosts"* ]]
+	[[ "$stderr" == *"warning: member-b: KUBE_VERSIONS changed during the sweep: v1.33.1 at its start, v1.33.2 at its end; rows measured after the change ran on another Kubernetes version (written to ${dir}/platform-drift.txt, which its reports say in their body); the usual cause is a managed control-plane upgrade during the sweep; for publishable figures, run the sweep again on one Kubernetes version"* ]]
+	grep -qx '# TUNING_BASELINE=sidecar=off,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off' "${dir}/platform-drift.txt"
+	grep -qx '# SIDECAR_EGRESS_HOSTS=none' "${dir}/platform-drift.txt"
+	grep -qx '# KUBE_VERSIONS=member-a=v1.33.2,member-b=v1.33.2' "${dir}/platform-drift.txt"
+	! grep -q '_BY_CONTEXT=' "${dir}/platform-drift.txt" || false
+	# Not read at the end (kinds the member does not serve, no answer): a warning, no marker.
+	rm "${dir}/platform-drift.txt"
+	PROBE_TB_UNSERVED=1 PROBE_KUBE=down run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a: TUNING_BASELINE sidecar, TUNING_BASELINE telemetryFiltering, TUNING_BASELINE accessLogFiltering, SIDECAR_EGRESS_HOSTS, KUBE_VERSIONS not read at the sweep's start or end, so whether they changed during the sweep is not known"* ]]
+	[[ "$stderr" == *"warning: member-b: KUBE_VERSIONS not read at the sweep's start or end, so whether it changed during the sweep is not known"* ]]
+	[ ! -e "${dir}/platform-drift.txt" ]
+	# A sweep whose TSVs record neither reads neither again.
+	rm "${dir}/controlplane-r.tsv"
+	: > "$CALLS"
+	run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	! grep -q -- 'sidecar.networking.istio.io\|version --output=json' "$CALLS" || false
+}
+
+@test "platform_report_values (H2, H13): a sweep's drift marker makes its keys mixed; the body names the sweep's dir, never a path" {
+	local d="${BATS_TEST_TMPDIR}/sweep" b="${BATS_TEST_TMPDIR}/base"
 	mkdir -p "$d"
 	platform_fixture_lines > "${d}/a.tsv"
 	platform_fixture_lines > "${d}/b.tsv"
-	printf '%s\n' '# Platform builds that changed during this sweep' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' \
+	printf '%s\n' '# Values that changed during this sweep' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' \
 		'# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.6' > "${d}/platform-drift.txt"
 	run --separate-stderr platform_report_values "${d}/a.tsv" "${d}/b.tsv"
 	assert_success
 	assert_line "ISTIOD_IMAGE_BY_CONTEXT=ctx-a=mixed:pilot:1.30.5;pilot:1.30.6,ctx-b=pilot:1.30.5"
 	assert_line "PROXY_IMAGE_BY_CONTEXT=ctx-a=proxyv2:1.30.5,ctx-b=proxyv2:1.30.5"
-	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt next to its TSVs)"* ]]
+	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt in sweep): the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade during the sweep; for publishable figures, run the sweep again on one build"* ]]
 	[ "$(grep -c 'changed during the sweep' <<<"$stderr")" -eq 1 ]
 	run platform_report_warnings "${d}/a.tsv" "${d}/b.tsv"
-	assert_output --partial "ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt next to its TSVs): the TSVs record the value at the sweep's start"
+	assert_output --partial "ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt in sweep): the TSVs record the value at the sweep's start"
 	refute_output --partial "warning:"
 	# Another sweep's inputs are not touched by it.
 	mkdir -p "${BATS_TEST_TMPDIR}/other"
 	platform_fixture_lines > "${BATS_TEST_TMPDIR}/other/c.tsv"
 	run platform_report_warnings "${BATS_TEST_TMPDIR}/other/c.tsv"
+	[ -z "$output" ]
+	# A report over a base dir with two sweeps (PL6) names the one that drifted, by its dir's name.
+	mkdir -p "${b}/sweep-r1" "${b}/sweep-r2"
+	cp "${d}/a.tsv" "${d}/platform-drift.txt" "${b}/sweep-r1/"
+	cp "${d}/b.tsv" "${b}/sweep-r2/"
+	run platform_report_warnings "${b}/sweep-r1/a.tsv" "${b}/sweep-r2/b.tsv"
+	assert_output --partial "ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt in sweep-r1): "
+	refute_output --partial "$BATS_TEST_TMPDIR"
+	refute_output --partial "sweep-r2"
+}
+
+@test "platform_report_warnings (H7): the marker's KUBE_VERSIONS and tuning lines go to the body of the sweep's reports" {
+	local d="${BATS_TEST_TMPDIR}/sweep"
+	mkdir -p "$d"
+	{
+		platform_fixture_lines
+		echo '# KUBE_VERSIONS=ctx-a=v1.33.1,ctx-b=v1.33.1'
+		echo '# TUNING_BASELINE=sidecar=on,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off'
+		echo '# SIDECAR_EGRESS_HOSTS=istio-system/* ./*'
+	} > "${d}/a.tsv"
+	printf '%s\n' '# Values that changed during this sweep' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# KUBE_VERSIONS=ctx-b=v1.33.2' \
+		'# TUNING_BASELINE=sidecar=off,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off' \
+		'# SIDECAR_EGRESS_HOSTS=none' > "${d}/platform-drift.txt"
+	run platform_report_warnings "${d}/a.tsv"
+	assert_line "KUBE_VERSIONS changed during the sweep for ctx-b (platform-drift.txt in sweep): the TSVs record the value at the sweep's start, but rows measured after the change ran on other Kubernetes versions, and the report cannot tell which rows those are; the usual cause is a managed control-plane upgrade during the sweep; for publishable figures, run the sweep again on one Kubernetes version"
+	assert_line "TUNING_BASELINE changed during the sweep in sweep (platform-drift.txt): sidecar=on,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off at its start, sidecar=off,discoverySelectors=off,telemetryFiltering=off,accessLogFiltering=off at its end; rows measured after the change ran with other tuning levers, and the report cannot tell which rows those are; the usual cause is a GitOps sync or self-heal that put a lever back, a tuning profile left applied, or a hand edit, during the sweep; for publishable figures, run the sweep again with the levers fixed"
+	assert_line --partial "SIDECAR_EGRESS_HOSTS changed during the sweep in sweep (platform-drift.txt): istio-system/* ./* at its start, none at its end; rows measured after the change ran with other root Sidecar egress hosts"
+	# Merged (churn's --with KUBE_VERSIONS), it reads mixed, and the body says it once.
+	run --separate-stderr platform_merge_by_context KUBE_VERSIONS "${d}/a.tsv"
+	assert_output "ctx-a=v1.33.1,ctx-b=mixed:v1.33.1;v1.33.2"
+	run platform_report_warnings --with KUBE_VERSIONS "${d}/a.tsv"
+	[ "$(grep -c '^KUBE_VERSIONS changed during the sweep' <<<"$output")" -eq 1 ]
+	# Only for keys the inputs record: a reach TSV next to them has neither.
+	printf '# RUN_ID=r\ntimestamp\n' > "${d}/reach-r.tsv"
+	run platform_report_warnings "${d}/reach-r.tsv"
 	[ -z "$output" ]
 }
 
@@ -913,7 +1422,7 @@ resume_tsv() {
 # The reports' body (H10): platform_report_warnings, platform_warning_lines and the helpers
 # ---------------------------------------------------------------------------
 
-@test "platform_report_warnings (H10): per-key wording; unknown against known could not be read; a state-only difference is not mixed" {
+@test "platform_report_warnings (H10, H2): per-key wording; unknown or a digest @unknown against known could not be read; a state-only difference is not mixed" {
 	local d="$BATS_TEST_TMPDIR"
 	platform_fixture_lines > "${d}/a.tsv"
 	# ctx-a's operator only Unavailable: one build, both states kept, no warning.
@@ -930,6 +1439,14 @@ resume_tsv() {
 	assert_output "ISTIOD_IMAGE_BY_CONTEXT could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same istiod builds as the others"
 	run platform_report_values "${d}/a.tsv" "${d}/unread.tsv"
 	assert_line "ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=mixed:pilot:1.30.5;unknown"
+	# A digest @unknown (no istiod pod had started) against the digest elsewhere: not read too,
+	# never another build.
+	platform_fixture_lines | sed "s/ctx-b=pilot:1.30.5/ctx-b=pilot:1.30.5@${DIG_A}/" > "${d}/dig.tsv"
+	platform_fixture_lines | sed 's/ctx-b=pilot:1.30.5/ctx-b=pilot:1.30.5@unknown/' > "${d}/atu.tsv"
+	run platform_report_warnings "${d}/dig.tsv" "${d}/atu.tsv"
+	assert_output "ISTIOD_IMAGE_BY_CONTEXT could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown, or with a digest @unknown: no pod had started), while other inputs have a value: the report cannot tell whether those runs had the same istiod builds as the others"
+	run platform_report_values "${d}/dig.tsv" "${d}/atu.tsv"
+	assert_line "ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=mixed:pilot:1.30.5@${DIG_A};pilot:1.30.5@unknown"
 	# Two builds: the members and the values (digests shortened), per key's noun.
 	platform_fixture_lines | sed "s/proxyv2:1.30.5/proxyv2:1.30.6@${DIG_A}/g" > "${d}/proxy.tsv"
 	run platform_report_warnings "${d}/a.tsv" "${d}/proxy.tsv"
@@ -974,7 +1491,7 @@ resume_tsv() {
 	ref="$(printf '%s\n' PLATFORM=kubernetes TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes \
 		"MESH_OPERATOR_BY_CONTEXT=a=sail-operator:1.31.1/Available,b=sail-operator:1.31.1/Available" \
 		ISTIOD_IMAGE_BY_CONTEXT=a=pilot:1.30.5,b=pilot:1.30.5 PROXY_IMAGE_BY_CONTEXT=a=proxyv2:1.30.5,b=proxyv2:1.30.5 \
-		NODE_PROVIDER_BY_CONTEXT=a=kind,b=kind)"
+		NODE_PROVIDER_BY_CONTEXT=a=kind,b=kind ISTIOD_ENV_BY_CONTEXT=a=0123456789ab,b=0123456789ab)"
 	v="${ref/a=sail-operator:1.31.1\/Available/a=sail-operator:1.31.1/Unavailable}"
 	v="${v/b=pilot:1.30.5/b=pilot:1.30.6}"
 	v="${v/a=proxyv2:1.30.5/a=unknown}"
@@ -993,15 +1510,56 @@ resume_tsv() {
 	run platform_compare_values "$ref" "$ref"
 	refute_output --partial differs
 	refute_output --partial unknown
+	# A digest @unknown (no pod had started) is not read, never another build; its tag still is.
+	ref="${ref//pilot:1.30.5/pilot:1.30.5@${DIG_B}}"
+	run platform_compare_values "$ref" "${ref/a=pilot:1.30.5@${DIG_B}/a=pilot:1.30.5@unknown}"
+	assert_line $'ISTIOD_IMAGE_BY_CONTEXT\tunknown'
+	run platform_compare_values "$ref" "${ref/a=pilot:1.30.5@${DIG_B}/a=pilot:1.30.6@unknown}"
+	assert_line $'ISTIOD_IMAGE_BY_CONTEXT\tdiffers'
+	# Other istiod settings: a difference, except over the keys a tuning pass is compared on.
+	v="${ref/a=0123456789ab/a=fedcba987654}"
+	run platform_compare_values "$ref" "$v"
+	assert_line $'ISTIOD_ENV_BY_CONTEXT\tdiffers'
+	run platform_compare_values "$ref" "$v" "${PLATFORM_PASS_KEYS[@]}"
+	refute_output --partial ISTIOD_ENV_BY_CONTEXT
+	refute_output --partial differs
+	[ "${#lines[@]}" -eq "${#PLATFORM_PASS_KEYS[@]}" ]
+}
+
+@test "_platform_build_cmp (H2): one build, another, or not known; @unknown and a state never make another build" {
+	local k=ISTIOD_IMAGE_BY_CONTEXT
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5@${DIG_B}" "pilot:1.30.5@${DIG_B}")" = same ]
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5@${DIG_A}" "pilot:1.30.5@${DIG_B}")" = differs ]
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5@unknown" "pilot:1.30.5@${DIG_B}")" = unknown ]
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5@unknown" "pilot:1.30.5@unknown")" = unknown ]
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5@unknown" "pilot:1.30.6@${DIG_B}")" = differs ]
+	# A value recorded without a digest (before round 4): comparable only in part.
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5" "pilot:1.30.5@${DIG_B}")" = unknown ]
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5" "pilot:1.30.5")" = same ]
+	# A rollout: every build of each side needs one on the other.
+	[ "$(_platform_build_cmp "$k" "pilot:1.30.5@${DIG_A}+pilot:1.30.5@${DIG_B}" "pilot:1.30.5@${DIG_B}")" = differs ]
+	[ "$(_platform_build_cmp "$k" "mixed:pilot:1.30.5@${DIG_B};pilot:1.30.5@unknown" "pilot:1.30.5@${DIG_B}")" = unknown ]
+	# none (no such pod) is a definite value; unknown is not read.
+	[ "$(_platform_build_cmp "$k" none "pilot:1.30.5@${DIG_B}")" = differs ]
+	[ "$(_platform_build_cmp "$k" unknown "pilot:1.30.5@${DIG_B}")" = unknown ]
+	[ "$(_platform_build_cmp MESH_OPERATOR_BY_CONTEXT "sail-operator:1.31.1@${DIG_A}/Available" "sail-operator:1.31.1@${DIG_A}/Unavailable")" = same ]
+	# Kubernetes versions keep their "+" (k3s); unreachable is not read.
+	[ "$(_platform_build_cmp KUBE_VERSIONS v1.30.4+k3s1 v1.30.4+k3s1)" = same ]
+	[ "$(_platform_build_cmp KUBE_VERSIONS v1.30.4+k3s1 v1.30.4+k3s2)" = differs ]
+	[ "$(_platform_build_cmp KUBE_VERSIONS unreachable v1.33.1)" = unknown ]
+	[ "$(_platform_build_cmp ISTIOD_ENV_BY_CONTEXT 0123456789ab 0123456789ab+fedcba987654)" = differs ]
 }
 
 @test "platform_summary and platform_short_digests: no member names, counts when members differ, 12 hex digits" {
 	run platform_summary "a=pilot:1.30.5@${DIG_B},b=pilot:1.30.5@${DIG_B}"
 	assert_output "pilot:1.30.5@sha256:bbbbbbbbbbbb"
 	run platform_summary "a=x,b=y,c=x"
-	assert_output "x (2 members); y (1 member)"
+	assert_output "x (2 members), y (1 member)"
 	run platform_summary "mixed:unknown,a=x"
-	assert_output "mixed:unknown; x (1 member)"
+	assert_output "mixed:unknown, x (1 member)"
+	# H17: a member whose inputs disagree; ";" stays inside nothing the reader has to split.
+	run platform_summary "a=mixed:proxyv2:1.30.5;proxyv2:1.30.6@${DIG_A},b=proxyv2:1.30.5"
+	assert_output "mixed: proxyv2:1.30.5 and proxyv2:1.30.6@sha256:aaaaaaaaaaaa (1 member), proxyv2:1.30.5 (1 member)"
 	run platform_summary unknown
 	assert_output unknown
 	run platform_summary ""
@@ -1018,4 +1576,19 @@ resume_tsv() {
 	assert_output ""
 	run platform_kind_path_warning unknown "x"
 	assert_output ""
+	# H5: a member whose node provider was not read may be on kind.
+	run platform_kind_path_warning "a=aws,b=unknown" "remote latency is not a cloud load balancer's"
+	assert_output "Node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so remote latency is not a cloud load balancer's"
+	run platform_kind_path_warning "a=aws,b=mixed:aws;unknown" "x"
+	assert_output --partial "Node provider not read on 1 member(s)"
+	# Inputs from before the record name no member: nothing to say about one.
+	run platform_kind_path_warning "mixed:unknown,a=aws" "x"
+	assert_output ""
+}
+
+@test "platform_unread_members (H5): members whose value was not read in every input or in some; none for a memberless token" {
+	[ "$(platform_unread_members "a=unknown,b=mixed:kind;unknown,c=aws,mixed:unknown")" -eq 2 ]
+	[ "$(platform_unread_members "a=kind,b=aws")" -eq 0 ]
+	[ "$(platform_unread_members unknown)" -eq 0 ]
+	[ "$(platform_unread_members "")" -eq 0 ]
 }

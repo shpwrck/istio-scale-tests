@@ -42,8 +42,9 @@
 #                                          the istio-remote-secret-<cluster> name), sorted
 #   growth_mesh_members <ctx> <kubectl_argv...>
 #                                       -> <ctx> plus every cluster its remote secrets name
-#                                          (one per line, sorted, unique); exit 1 when the
-#                                          secrets cannot be listed
+#                                          (one per line, sorted, unique; still a member that
+#                                          left the mesh, until its remote secret is
+#                                          deleted); exit 1 when the secrets cannot be listed
 #   growth_test_ns_counts <ctx> <kubectl_argv...>
 #                                       -> "total=<n|N/A> discovered=<n|N/A>": every
 #                                          controlplane-test namespace on <ctx> (any series,

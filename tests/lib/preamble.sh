@@ -175,7 +175,7 @@ tuning_baseline_state() {
 	_tb_exists() {
 		local kind="$1" name="$2" out rc
 		out="$("${k[@]}" --context="$ctx" --request-timeout=5s -n istio-system \
-			get "$kind" "$name" -o name 2>/dev/null)" && rc=0 || rc=$?
+			get "$kind" "$name" -o name --ignore-not-found 2>/dev/null)" && rc=0 || rc=$?
 		if ((rc != 0)); then printf 'unknown\n'; return 0; fi
 		[[ -n "$out" ]] && printf 'on\n' || printf 'off\n'
 	}
@@ -274,8 +274,8 @@ NS_LIFECYCLE_HEADER=$'timestamp\tcontext\tseries\tnamespace_count\taction\tnames
 # ns_lifecycle_init <file> <run_id>: write the PL2 preamble and the header once. A
 # no-op when the file exists (the first writer wins; every writer uses this function).
 # The preamble carries the run config and the platform record of the shell's last
-# platform_probe (a standalone 001 or 005 reads none, so its values are unknown); the
-# caller sources tests/lib/config.sh and tests/lib/platform.sh.
+# platform_probe (a sweep's, or the one a standalone 001 or 005 reads when it creates the
+# file); the caller sources tests/lib/config.sh and tests/lib/platform.sh.
 # shellcheck disable=SC2329
 ns_lifecycle_init() {
 	local file="$1" run_id="${2:-unknown}"

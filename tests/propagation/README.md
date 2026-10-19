@@ -108,8 +108,8 @@ rules: [Run config](../../README.md#run-config---config-file)).
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `PROPAGATION_*`, `FANOUT_*`,
-  `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform) and
-  `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
+  `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform),
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record) and `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
   keeps its own port block (`PROPAGATION_SNAPSHOT_PF_BASE`), so a `FANOUT_PF_BASE` in the
   file does not move it.
 - **Run keys:** `PROPAGATION_MESH_SIZES` (`006 --mesh-sizes`; empty: 1 to the number of
@@ -142,14 +142,18 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   one row per iteration and remote. Columns are listed in `005-report-results.sh --help`.
 - The preamble's platform record ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`,
   `TEST_PLATFORM` and, per member, the platform it serves, the mesh operator, istiod and gateway
-  proxy (ingress and east-west) builds and the nodes' provider (`PLATFORM_BY_CONTEXT`,
-  `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` and
-  `NODE_PROVIDER_BY_CONTEXT`), read before the first iteration (a sweep reads it once for all its
-  steps, and again after the last one: a build that changed in between is written to
-  `platform-drift.txt` in the sweep dir). `005` prints it in every format, as `mixed` with a
-  warning in the report itself when its inputs differ, a value could not be read in some of
-  them, or the sweep's build changed; an operator that differs only in its state (`Available`,
-  `Unavailable`) is not mixed. A file without it predates the record (the suite supported only
+  proxy (ingress and east-west) builds, istiod's settings and the nodes' provider
+  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+  `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT` and `ISTIOD_ENV_BY_CONTEXT`: a digest of
+  istiod's discovery container env without `CLUSTER_ID`), read before the first iteration (a
+  sweep reads it once for all its steps, and again after the last one: a build, istiod setting,
+  tuning lever or Kubernetes version that changed in between is written to `platform-drift.txt`
+  in the sweep dir). An image carries the digest its pods run (`@unknown` when none has started:
+  not read, never another build); `none` means no such pod. `005` prints it in every format, as
+  `mixed` with a warning in the report itself (the top-level `warnings` array in json, empty
+  without one) when its inputs differ, a value could not be read in some of them, or the sweep's
+  record changed; an operator that differs only in its state (`Available`, `Unavailable`) is not
+  mixed. A file without it predates the record (the suite supported only
   OpenShift with OSSM then); its values read `unknown`.
 - `endpoint-<RUN_ID>.md`: per-run summary.
 - `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends

@@ -35,9 +35,9 @@
 #
 # Exposes:
 #   config_suite_prefixes <suite>  -> the suite's key list: prefixes (ending in _) and whole
-#                                     key names, then CONFIG_SHARED_PREFIXES (ISTIOD_DIAG_ and
-#                                     TEST_PLATFORM, taken by every suite); die for a suite
-#                                     without a map
+#                                     key names, then CONFIG_SHARED_PREFIXES (ISTIOD_DIAG_,
+#                                     TEST_PLATFORM and PLATFORM_READ_TIMEOUT, taken by every
+#                                     suite); die for a suite without a map
 #   config_allowed_keys <suite>    -> the keys a config may set, one per line, sorted
 #   load_config <file> <suite>     -> validate the whole file, then export its keys and
 #                                     RUN_CONFIG, RUN_CONFIG_SHA256, RUN_CONFIG_PATH
@@ -88,9 +88,10 @@ config_suite_prefixes() {
 }
 
 # Keys every suite takes: ISTIOD_DIAG_* tune the istiod restart evidence capture
-# (tests/lib/istiod-diag.sh); TEST_PLATFORM picks the members' platform (tests/lib/platform.sh).
+# (tests/lib/istiod-diag.sh); TEST_PLATFORM picks the members' platform and
+# PLATFORM_READ_TIMEOUT bounds each read of the platform record (tests/lib/platform.sh).
 # An unknown-key error names them after the suite's own list.
-CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_ TEST_PLATFORM"
+CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_ TEST_PLATFORM PLATFORM_READ_TIMEOUT"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).

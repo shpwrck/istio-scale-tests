@@ -12,11 +12,11 @@ load "${_TEST_DIR}/bats-assert/load.bash"
 source "${ROOT}/tests/lib/common.sh"
 
 # platform_fixture_lines [ctxs_csv]: the platform record (tests/lib/platform.sh) a writer puts in
-# a TSV preamble, as "# KEY=value" lines: Kubernetes members on kind running the Sail operator
-# (members ctx-a,ctx-b unless named). Report fixtures add it so a report reads a current file; a
-# legacy file (from before the record) leaves it out.
+# a TSV preamble, as "# KEY=value" lines: Kubernetes members on kind running the Sail operator,
+# with one istiod env digest (members ctx-a,ctx-b unless named). Report fixtures add it so a
+# report reads a current file; a legacy file (from before the record) leaves it out.
 platform_fixture_lines() {
-	local ctx p="" o="" i="" x="" n=""
+	local ctx p="" o="" i="" x="" n="" e=""
 	local -a ctxs=()
 	split_csv "${1:-ctx-a,ctx-b}" ctxs
 	for ctx in "${ctxs[@]}"; do
@@ -25,8 +25,9 @@ platform_fixture_lines() {
 		i+="${i:+,}${ctx}=pilot:1.30.5"
 		x+="${x:+,}${ctx}=proxyv2:1.30.5"
 		n+="${n:+,}${ctx}=kind"
+		e+="${e:+,}${ctx}=0123456789ab"
 	done
 	printf '# %s\n' PLATFORM=kubernetes TEST_PLATFORM=auto "PLATFORM_BY_CONTEXT=${p}" \
 		"MESH_OPERATOR_BY_CONTEXT=${o}" "ISTIOD_IMAGE_BY_CONTEXT=${i}" "PROXY_IMAGE_BY_CONTEXT=${x}" \
-		"NODE_PROVIDER_BY_CONTEXT=${n}"
+		"NODE_PROVIDER_BY_CONTEXT=${n}" "ISTIOD_ENV_BY_CONTEXT=${e}"
 }

@@ -779,6 +779,10 @@ render_sha() {
 	grep -qx "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=istio-pilot-rhel9:1.30.5@${digest},ctx-b=istio-pilot-rhel9:1.30.5@${digest}" "$t"
 	grep -qx "# PROXY_IMAGE_BY_CONTEXT=ctx-a=istio-proxyv2-rhel9:1.30.5@${digest},ctx-b=istio-proxyv2-rhel9:1.30.5@${digest}" "$t"
 	grep -qx '# NODE_PROVIDER_BY_CONTEXT=ctx-a=aws,ctx-b=aws' "$t"
+	# istiod's settings: the stub's discovery container has no env, so the digest of an empty list.
+	local envd
+	envd="$(printf '[]\n' | sha256sum | cut -c1-12)"
+	grep -qx "# ISTIOD_ENV_BY_CONTEXT=ctx-a=${envd},ctx-b=${envd}" "$t"
 	grep -qx '# INGRESS_REPLICAS\[ctx-a\]=2' "$t"
 	grep -qx '# PROXY_CONFIG_POD\[ctx-a\]=istio-ingressgateway-5d8f7-p1' "$t"
 	grep -qx '# ISTIOD_RESTARTED\[ctx-a\]=0' "$t"
@@ -833,7 +837,7 @@ render_sha() {
 	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | sed -n 3p)" = "$(grep -m1 '^- kind: Service' "$s")" ]
 	grep -q '^- Hostname — \*\*NO\*\*' "$s"
 	grep -q '| Run config | `none` (sha256 `none`) |' "$s"
-	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest} |" "$s"
+	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest}; istiod env ${envd} |" "$s"
 	grep -q '| Member | istiod image | Ingress istio-proxy image | Operator build |' "$s"
 	grep -q '| Traffic | ' "$s"
 	grep -q "istio-pilot-rhel9:1.30.5@${digest}" "$s"
