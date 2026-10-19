@@ -266,7 +266,7 @@ variable "gitops_rhacm_appset_any_namespace" {
 variable "argocd_clusters_per_shard" {
   type        = number
   default     = 3
-  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace. On kubernetes minShards is the controller's replica count. For large 3-node hubs, raise this value to keep controller shard count within hub capacity."
+  description = "ArgoCD controller sharding: max clusters per shard (clustersPerShard). Terraform uses this to compute minShards = ceil((spoke_count + 1) / argocd_clusters_per_shard) so the statefulset always has enough replicas from the start and no Application gets an empty controllerNamespace. On kubernetes minShards is the controller's replica count (unless argocd_helm_values sets controller.replicas), and each spoke's cluster Secret pins its shard: the spoke's index in name order + 1, mod that count. For large 3-node hubs, raise this value to keep controller shard count within hub capacity."
 
   validation {
     condition     = var.argocd_clusters_per_shard > 0 && var.argocd_clusters_per_shard == floor(var.argocd_clusters_per_shard)
@@ -277,13 +277,13 @@ variable "argocd_clusters_per_shard" {
 variable "argocd_restart_controller_after_cluster_secrets" {
   type        = bool
   default     = true
-  description = "platform openshift: after the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh). On kubernetes the controllers run a fixed replica count with round-robin sharding, on which every replica agrees, so it is skipped."
+  description = "platform openshift: after the Argo CD cluster secrets exist, wait for the GitOps operator's dynamic-scaling reconcile of the application controller to settle, then restart the controller pods once so every cluster is assigned a shard (terraform/scripts/argocd-controller-reshard.sh). On kubernetes it is skipped: the controllers run a fixed replica count, and each spoke's cluster Secret pins its shard when Terraform installs Argo CD (gitops_install_operator)."
 }
 
 variable "argocd_app_status_timeout_sec" {
   type        = number
   default     = 900
-  description = "Post-apply check: fail when, after this many seconds, an Argo CD Application still has an empty sync or health status (no controller shard owns its destination cluster), a mesh member still has no Application (its ApplicationSets generated none), or Argo CD still cannot reach a cluster at its cluster-Secret URL (sync Unknown with a live-state ComparisonError), or has not compared an Application again since the check started (it requests one refresh of every Application, so a status from before the apply never counts). 0 disables the check."
+  description = "Post-apply check: fail when, after this many seconds, Argo CD has still not rendered or compared everything the apply deploys: an Application or ApplicationSet that an Application lists in its resources does not exist, one of the repo's member ApplicationSets owns fewer Applications than there are mesh members, a mesh member has no Application, an Application has an empty sync or health status (no controller shard owns its destination cluster) or has not been compared again since the check started (it requests one refresh of every Application, so a status from before the apply never counts), or an Application is sync Unknown with a ComparisonError (Argo CD cannot reach its cluster at the cluster-Secret URL, or cannot render it). Each Argo CD error is printed when first seen. 0 disables the check."
 
   validation {
     condition     = var.argocd_app_status_timeout_sec == 0 || var.argocd_app_status_timeout_sec >= 600
@@ -294,7 +294,7 @@ variable "argocd_app_status_timeout_sec" {
 variable "argocd_max_shards" {
   type        = number
   default     = 20
-  description = "platform openshift: ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards. No effect on kubernetes, where the controller replica count is the computed minShards."
+  description = "platform openshift: ArgoCD controller sharding maxShards. Terraform renders max(var.argocd_max_shards, computed minShards) so large fleets do not produce minShards > maxShards. No effect on kubernetes, where the controller replica count is the computed minShards (or argocd_helm_values' controller.replicas)."
 
   validation {
     condition     = var.argocd_max_shards > 0 && var.argocd_max_shards == floor(var.argocd_max_shards)

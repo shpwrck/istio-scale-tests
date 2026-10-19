@@ -40,7 +40,8 @@ imagePullPolicy: IfNotPresent
 
 # PreSync Job that waits for istiod before the gateway syncs.
 waitForIstiod:
-  # Same curl image as charts/spoke-ossm waitForCacerts and charts/mesh-wiring-verify.
+  # Same curl image as charts/spoke-east-west-gateway waitForIstiod.image, charts/spoke-ossm
+  # waitForCacerts and charts/mesh-wiring-verify.
   image: docker.io/curlimages/curl:8.22.0
   # The image's user (curl_user) is not numeric, so runAsNonRoot needs the UID.
   # values-openshift.yaml clears it: OpenShift assigns one from the namespace range.

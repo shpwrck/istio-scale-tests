@@ -96,18 +96,21 @@ kubectl --context <hub-ctx> get applications.argoproj.io -n argocd
 ## Verify
 
 Every member runs `mesh-wiring-verify`, a gate that is Ready only when the member holds a remote
-secret for every member, istiod has ingested them all and synced every other member, istiod
-signs with the shared root, and the east-west gateway has an address. Otherwise its Argo
-Application goes Degraded, and the gate's output says why.
+secret for every member, every Ready istiod replica has ingested them all and synced every other
+member, istiod signs with the shared root, and the east-west gateway has an address. Otherwise its
+Argo Application goes Degraded, and the gate's output says why.
 
 ```bash
 kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
-# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 root=<fingerprint> eastwest=<address>
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 replicas=3 root=<fingerprint> eastwest=<address>
 ```
 
-`root=` is the first 16 hex digits of the shared root certificate's SHA-256, so it is the same on
-every member. `synced=` comes from istiod's metric, which changes only when istiod (re)connects:
-a member token revoked later still reads synced, and shows as errors in istiod's log.
+`root=` is the first 16 hex digits of the SHA-256 of the root certificate in `cacerts`: compare it
+across members, it must read the same on every one. `replicas=` counts the Ready istiod replicas
+the gate read; each connects to every member on its own, so the istiod figures and `synced=` are
+the lowest any of them reports. `synced=` comes from istiod's metric, which changes only when
+istiod (re)connects: a member token revoked later still reads synced, and shows as errors in
+istiod's log.
 
 End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
 from every member. The manifest keeps placeholders for the repo, the revision, the platform and the
@@ -164,10 +167,27 @@ version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSIO
 Every TSV, run summary and report also records what each member ran on: Kubernetes or OpenShift,
 the mesh operator build, the istiod and proxy images and the nodes' provider
 ([tests/lib/platform.sh](tests/lib/platform.sh)). `TEST_PLATFORM` (`auto`, the default, asks each
-member; `kubernetes` or `openshift` records that value without asking) also picks each suite
-chart's OpenShift overlay. A report warns when its inputs differ on any of these, so compare results
-within one platform and mesh build. On kind every node reports the whole host, so the
+member; `kubernetes` or `openshift` is used as given) picks each suite chart's OpenShift overlay;
+the record still asks each member what it serves, outside every measurement window, and warns when
+that differs from the override. A report warns when its inputs differ on any of these, so compare
+results within one platform and mesh build. On kind every node reports the whole host, so the
 controlplane report flags its capacity figures.
+
+| Record key | Values |
+| --- | --- |
+| `PLATFORM` | `kubernetes` or `openshift` over the members; `mixed` when they run both, else `unknown` when any member is |
+| `TEST_PLATFORM` | The override as set: `auto`, `kubernetes` or `openshift` |
+| `PLATFORM_BY_CONTEXT` | What each member serves, asked even with an override |
+| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>[@<digest>]/<state>` (Kubernetes) or `servicemeshoperator3:<version>/<phase>` (OpenShift). The state (`Available`, `Unavailable`: no available replica, or a CSV phase) is never compared, only the build before it. `absent`: the member answered and runs none where the charts install it |
+| `ISTIOD_IMAGE_BY_CONTEXT` | The istiod pods' `discovery` image and the digest that ran |
+| `PROXY_IMAGE_BY_CONTEXT` | The `istio-proxy` image of the ingress and east-west gateway pods. The test pods' sidecars get the injector's current build (normally istiod's), which can be newer than a gateway not restarted since an upgrade |
+| `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...); `none`: nodes without one; `no-nodes`: no nodes listed; `unrecognized`: a providerID without `<scheme>://` |
+
+In every key `unknown` means not read (a failed read, with a warning; a `--dry-run`; a file from
+before the record), never none, and several values on one member are `+`-joined. A report whose
+inputs disagree for a member shows `mixed:<a>;<b>` there and says so in its body
+(`mixed:unknown,...` when only some inputs carry the key); a sweep whose record changed between
+its start and end marks its reports `mixed:`.
 
 ### Run config (`--config FILE`)
 
@@ -221,7 +241,8 @@ Raise it and re-apply; the wiring gate's expected size follows automatically.
 | Pods stay `Pending` with `Insufficient cpu` or `Insufficient memory` (`kubectl describe pod`) | The chart defaults need the capacity in [What you need](#what-you-need). Lower istiod with `gitops_app_overrides` (`spoke-ossm-appset`) and Argo CD with `argocd_helm_values`, as in `terraform/platform/terraform.tfvars.example`. |
 | The apply fails on `helm_release.argocd` after 900 s (`context deadline exceeded`) | Usually the same: the Argo CD pods cannot schedule on the hub (`kubectl -n argocd get pods`, then `describe` a Pending one). Lower the requests with `argocd_helm_values` and apply again. |
 | The apply fails: `Argo CD on the hub cannot load state from these clusters` | The member's registered URL is not reachable from the hub's pods (a kubeconfig that points at `127.0.0.1`, a private endpoint). Set `cluster_api_url_overrides` to an address that the hub and every member reach, and apply again. `Unauthorized` or `Forbidden` in the quoted message is the member's token instead ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
-| Gate says `istiod has synced <n> remote cluster(s) < <need>` | This member's istiod cannot use the named member's remote secret: that member's API server URL is unreachable from here, or its token is wrong. `istioctl remote-clusters` lists each one's state, and `kubectl -n istio-system logs deploy/istiod \| grep <member>` says why: `remote cluster <member> failed to sync after 30s` (fix the URL with `cluster_api_url_overrides`) or `watch error in cluster <member>: Unauthorized` ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
+| Gate says `istiod pod <pod> (<address>) has synced <n> remote cluster(s) < <need>` | That istiod replica cannot use the named member's remote secret: that member's API server URL is unreachable from its node, or its token is wrong. `istioctl remote-clusters` lists each one's state, and `kubectl -n istio-system logs -l app=istiod --prefix --tail=-1 \| grep <member>` says why, per replica: `remote cluster <member> failed to sync after 30s` (fix the URL with `cluster_api_url_overrides`) or `watch error in cluster <member>: Unauthorized` ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
+| Gate says `cannot list the EndpointSlices of the istiod Service` (HTTP 403) | The gate's Role lacks the chart's EndpointSlice rule (it reads every istiod replica through them): sync the member's `mesh-wiring-verify` Application on the hub. |
 | Gateway Applications stay `Progressing`, the gateway Service `<pending>` | No LoadBalancer provider, or a MetalLB pool with auto-assign off: add `metallb.io/address-pool` via `gitops_app_overrides`. The gate says `has no external address yet` for the east-west gateway. |
 | `istioctl` errors on API versions | Use an `istioctl` that matches `ISTIO_VERSION`. |
 

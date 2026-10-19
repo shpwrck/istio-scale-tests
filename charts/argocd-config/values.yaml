@@ -4,7 +4,8 @@
 # .resources, repo.replicas and .resources, server.resources, applicationSetResources,
 # resourceExclusions and resourceHealthChecks. The rest (name, applicationSet,
 # controller.sharding, controller.shardingAlgorithm) is the CR's only; on kubernetes the
-# controller replica count comes from argocd_clusters_per_shard.
+# controller replica count comes from argocd_clusters_per_shard, and each spoke's cluster Secret
+# pins its shard (terraform/platform/README.md).
 argocd:
   name: openshift-gitops
   applicationSet:
@@ -25,7 +26,9 @@ argocd:
     # kubernetes: round-robin. The replicas start before any Application exists, and
     # consistent-hashing's bounded loads count Applications per destination server, so the
     # replicas disagree on who owns a spoke and some spokes get no controller. Round-robin
-    # sorts the clusters and assigns index mod replicas, the same on every replica.
+    # sorts the clusters and assigns index mod replicas, the same on every replica, and honours
+    # the shard that terraform/platform pins in each spoke's cluster Secret; the hub's
+    # in-cluster sorts first and stays on shard 0.
     kubernetesShardingAlgorithm: round-robin
     processors:
       status: 50

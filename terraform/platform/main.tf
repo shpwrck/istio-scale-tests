@@ -137,4 +137,15 @@ locals {
   argocd_cluster_count        = length(local.spoke_cluster_keys) + 1
   argocd_computed_min_shards  = max(1, ceil(local.argocd_cluster_count / var.argocd_clusters_per_shard))
   argocd_effective_max_shards = max(var.argocd_max_shards, local.argocd_computed_min_shards)
+
+  # kubernetes, with Argo CD installed here: each spoke's cluster Secret pins its controller
+  # shard (terraform/platform/README.md): its index in name order + 1, mod the controller
+  # replicas (argocd_helm_values' controller.replicas when set). The hub's in-cluster has no
+  # Secret and stays on shard 0, where round-robin puts it (its cluster ID is empty, so it
+  # sorts first).
+  argocd_controller_replicas = max(1, try(tonumber(var.argocd_helm_values.controller.replicas), local.argocd_computed_min_shards))
+  argocd_pin_shards          = !local.is_openshift && var.gitops_install_operator
+  argocd_cluster_shard = {
+    for i, k in keys(local.spoke_cluster_keys) : k => tostring((i + 1) % local.argocd_controller_replicas)
+  }
 }

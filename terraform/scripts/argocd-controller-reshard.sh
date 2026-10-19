@@ -10,20 +10,31 @@ set -euo pipefail
 #   an empty sync/health status). Wait until the operator's own reconcile has settled
 #   (StatefulSet at its replica count, rollout complete, STABLE_POLLS polls in a row),
 #   then delete the controller pods once and wait until every replacement is Ready.
-# MODE=app-status: fail when an Application still has an empty sync or health status
-#   after APP_STATUS_TIMEOUT_SEC, naming its destination cluster. With
-#   EXPECTED_DESTINATIONS (destination cluster names or servers, space or comma
-#   separated) it also waits until at least one Application targets each of them: the
-#   ApplicationSets generate the member Applications minutes after the apply, so
-#   without it the check can pass on the hub's own Applications alone (ROSA 2026-10-16:
-#   13 of 40 existed when it ran). It also fails on Applications whose sync status is
-#   Unknown because Argo CD cannot load state from their destination cluster (a
-#   ComparisonError about the cluster, such as a URL the hub cannot reach), quoting one
-#   per cluster. Each poll reads the Applications once, so the tests see one list. A status
-#   read when the check starts can predate the change that triggered it (a cluster Secret's
-#   new URL or token takes effect at Argo CD's next comparison), so the first read notes
-#   every Application's reconciledAt and requests a refresh, and an Application counts only
-#   once Argo CD has compared it again.
+# MODE=app-status: wait until Argo CD has rendered and compared everything the apply
+#   deployed, else fail after APP_STATUS_TIMEOUT_SEC naming what is missing and the fix:
+#   - every Application has a sync and health status (no controller shard owns the
+#     destination cluster of one without), and Argo CD has compared it since the check
+#     started: a status read at the start can predate the change that triggered the check
+#     (a cluster Secret's new URL or token takes effect at Argo CD's next comparison), so the
+#     first read notes every reconciledAt and requests one refresh;
+#   - every Application or ApplicationSet that an Application lists in .status.resources
+#     exists (the app-of-apps lists its children, each child the ApplicationSet it deploys);
+#   - with EXPECTED_DESTINATIONS (the N mesh members, destination cluster names or servers,
+#     space or comma separated): at least one Application targets each of them, and every
+#     ApplicationSet of this repo (label app.kubernetes.io/name=gitops-hub-ocm-placement-appset)
+#     whose generators select clusters (clusters, or clusterDecisionResource on openshift)
+#     owns at least N Applications. Hub-side presets generate member Applications whose
+#     destination is the hub, so they are counted (ownerReferences), not matched. The
+#     ApplicationSets generate the member Applications minutes after the apply: without these
+#     the check passed on the hub's own Applications and the gate's (kind 2026-10-18: after
+#     11 s with 3 of 33; ROSA 2026-10-16: 13 of 40);
+#   - no Application is sync Unknown with a ComparisonError: about its cluster (Argo CD
+#     cannot load state from it, such as a URL the hub cannot reach; one message per
+#     cluster) or any other (a manifest or repo error: it never deploys). Each is printed
+#     once when first seen, so the operator can stop early; the check still fails only at
+#     the deadline, as an error can clear.
+#   Each poll reads the Applications and the ApplicationSets once (the tests see one list of
+#   each), and prints what it still waits for whenever that changes.
 #
 # Auth modes (via environment variables):
 #   Kubeconfig: KUBECONFIG_PATH + KUBE_CONTEXT
@@ -148,7 +159,12 @@ reshard() {
   done
 }
 
-# The tests below read `kubectl get applications -o json` on stdin.
+# The tests below read `kubectl get applications -o json` on stdin; the ones about
+# ApplicationSets also take appsets_summary's output as their first argument.
+
+# Argo CD's ComparisonError messages about the destination cluster itself (connection
+# refused, timeouts, 401/403), not about the manifests.
+CLUSTER_ERROR_RE='Failed to load live state|failed to get cluster (version|info)'
 
 # app_status_missing: "<app>\t<destination>" for every Application whose sync or health
 # status is empty (no controller shard has processed it).
@@ -172,18 +188,30 @@ dests_without_apps() {
 }
 
 # apps_unreachable: "<destination>\t<app>\t<message>" for every Application whose sync
-# status is Unknown with a ComparisonError about its cluster: "Failed to load live state"
-# or "failed to get cluster version/info" (connection refused, timeouts, 401/403). A repo
-# or manifest error ("failed to generate manifest") is not counted: the cluster answered.
+# status is Unknown with a ComparisonError about its cluster (CLUSTER_ERROR_RE).
 apps_unreachable() {
-  jq -r '
+  jq -r --arg re "$CLUSTER_ERROR_RE" '
     .items[]
     | select((.status.sync.status // "") == "Unknown")
     | . as $a
-    | [.status.conditions[]? | select(.type == "ComparisonError") | (.message // "")
-        | select(test("Failed to load live state|failed to get cluster (version|info)"))] as $m
+    | [.status.conditions[]? | select(.type == "ComparisonError") | (.message // "") | select(test($re))] as $m
     | select($m | length > 0)
     | "\($a.spec.destination.name // $a.spec.destination.server // "?")\t\($a.metadata.name)\t\($m[0] | gsub("[\t\n\r]+"; " "))"
+  '
+}
+
+# apps_compare_errors: "<app>\t<destination>\t<message>" for every Application whose sync
+# status is Unknown with a ComparisonError, none of them about its cluster: a manifest or
+# repo error ("failed to generate manifest", a chart's fail message). Argo CD cannot compare
+# it, so it never deploys.
+apps_compare_errors() {
+  jq -r --arg re "$CLUSTER_ERROR_RE" '
+    .items[]
+    | select((.status.sync.status // "") == "Unknown")
+    | . as $a
+    | [.status.conditions[]? | select(.type == "ComparisonError") | (.message // "")] as $m
+    | select(($m | length > 0) and ([$m[] | select(test($re))] | length == 0))
+    | "\($a.metadata.name)\t\($a.spec.destination.name // $a.spec.destination.server // "?")\t\($m[0] | gsub("[\t\n\r]+"; " "))"
   '
 }
 
@@ -203,6 +231,53 @@ apps_stale() {
   '
 }
 
+# appsets_summary (stdin: `kubectl get applicationsets -o json`): one compact JSON array,
+# [{name, uid, members, error}]. members: one of this repo's ApplicationSets whose
+# generators select clusters (a clusters or clusterDecisionResource generator, also inside a
+# matrix or merge), so it generates one Application per mesh member. error: the message of
+# its ErrorOccurred condition when that is True.
+appsets_summary() {
+  jq -c '[.items[] | {
+    name: .metadata.name,
+    uid: (.metadata.uid // ""),
+    members: (((.metadata.labels // {})["app.kubernetes.io/name"] // "") == "gitops-hub-ocm-placement-appset"
+      and ([.spec.generators[]? | .. | objects | select(has("clusters") or has("clusterDecisionResource"))] | length > 0)),
+    error: ([.status.conditions[]? | select(.type == "ErrorOccurred" and .status == "True") | (.message // "")]
+      | join("; ") | gsub("[\t\n\r]+"; " "))
+  }]'
+}
+
+# listed_missing <appsets summary>: "<kind>\t<name>\t<parent>" for every Application or
+# ApplicationSet (argoproj.io, in GITOPS_NS) that an Application lists in .status.resources
+# to create (not to prune), but that does not exist yet.
+listed_missing() {
+  jq -r --argjson sets "$1" --arg ns "$GITOPS_NS" '
+    (reduce .items[] as $a ({}; .["Application/" + $a.metadata.name] = true)) as $have_apps
+    | (reduce $sets[] as $s ($have_apps; .["ApplicationSet/" + $s.name] = true)) as $have
+    | .items[]
+    | .metadata.name as $parent
+    | .status.resources[]?
+    | select(.group == "argoproj.io" and (.kind == "Application" or .kind == "ApplicationSet")
+        and ((.requiresPruning // false) | not) and ((.namespace // $ns) == $ns))
+    | select($have[.kind + "/" + .name] | not)
+    | "\(.kind)\t\(.name)\t\($parent)"
+  ' | awk -F'\t' '!seen[$1 FS $2]++'
+}
+
+# appsets_short <appsets summary> <n>: "<appset>\t<k>\t<error>" for every ApplicationSet that
+# generates one Application per mesh member (members) but owns fewer than n of them.
+appsets_short() {
+  jq -r --argjson sets "$1" --argjson n "$2" '
+    [.items[] | .metadata.ownerReferences[]? | select(.kind == "ApplicationSet") | {name, uid: (.uid // "")}] as $owners
+    | $sets[]
+    | select(.members)
+    | . as $s
+    | ([$owners[] | select(.name == $s.name and (.uid == $s.uid or .uid == "" or $s.uid == ""))] | length) as $k
+    | select($k < $n)
+    | "\($s.name)\t\($k)\t\($s.error)"
+  '
+}
+
 # request_refresh: ask Argo CD to compare every Application now (the refresh annotation that
 # `argocd app get --refresh` sets) instead of at its periodic reconciliation. Best effort:
 # that reconciliation (timeout.reconciliation, minutes) still comes without it.
@@ -213,38 +288,88 @@ request_refresh() {
   fi
 }
 
+# count_lines <text>: the number of non-empty lines.
+count_lines() { if [[ -z "$1" ]]; then echo 0; else grep -c . <<<"$1"; fi; }
+
 app_status() {
-  echo "=== Checking that every Application has a sync and health status (timeout ${APP_STATUS_TIMEOUT_SEC}s) ==="
-  [[ -z "$EXPECTED_DESTINATIONS" ]] || echo "  and that each of these destinations has Applications: ${EXPECTED_DESTINATIONS}"
-  local deadline=$((SECONDS + APP_STATUS_TIMEOUT_SEC)) apps total missing absent unreachable stale since="" read_err=""
+  echo "=== Checking that Argo CD has rendered and compared every Application (timeout ${APP_STATUS_TIMEOUT_SEC}s) ==="
+  local -a want=()
+  read -r -a want <<<"${EXPECTED_DESTINATIONS//,/ }"
+  local n_members=${#want[@]}
+  ((n_members == 0)) || echo "  and that each of these ${n_members} mesh members has Applications from every member ApplicationSet: ${want[*]}"
+  local deadline=$((SECONDS + APP_STATUS_TIMEOUT_SEC)) apps appsets sets total since="" read_err="" what
+  local missing absent unreachable stale listed short cerr waiting last_waiting="" dest app msg
+  local -A told=()
   APP_ERR_FILE=$(mktemp)
   trap 'rm -f "$APP_ERR_FILE"' EXIT
   while :; do
-    missing="" absent="" unreachable="" stale=""
-    if apps="$("${KC[@]}" -n "$GITOPS_NS" get applications.argoproj.io -o json 2>"$APP_ERR_FILE")" \
+    missing="" absent="" unreachable="" stale="" listed="" short="" cerr=""
+    if what=Applications && apps="$("${KC[@]}" -n "$GITOPS_NS" get applications.argoproj.io -o json 2>"$APP_ERR_FILE")" \
       && total="$(jq '.items | length' <<<"$apps")" \
       && { [[ -n "$since" ]] || { since="$(apps_reconciled <<<"$apps")" && request_refresh; }; } \
+      && what=ApplicationSets && appsets="$("${KC[@]}" -n "$GITOPS_NS" get applicationsets.argoproj.io -o json 2>"$APP_ERR_FILE")" \
+      && sets="$(appsets_summary <<<"$appsets")" \
       && missing="$(app_status_missing <<<"$apps")" \
       && absent="$(dests_without_apps <<<"$apps")" \
       && unreachable="$(apps_unreachable <<<"$apps")" \
-      && stale="$(apps_stale "$since" <<<"$apps")"; then
+      && cerr="$(apps_compare_errors <<<"$apps")" \
+      && stale="$(apps_stale "$since" <<<"$apps")" \
+      && listed="$(listed_missing "$sets" <<<"$apps")" \
+      && { ((n_members == 0)) || short="$(appsets_short "$sets" "$n_members" <<<"$apps")"; }; then
       read_err=""
-      if [[ -z "$missing" && -z "$absent" && -z "$unreachable" && -z "$stale" ]] && ((total > 0)); then
-        echo "  all ${total} Application(s) have a sync and health status$([[ -z "$EXPECTED_DESTINATIONS" ]] || echo ", and every expected destination has Applications")"
+      if [[ -z "$missing$absent$unreachable$cerr$stale$listed$short" ]] && ((total > 0)); then
+        msg=""
+        ((n_members == 0)) || msg=", and every member ApplicationSet owns an Application for each of the ${n_members} members"
+        echo "  all ${total} Application(s) have a sync and health status, compared since this check started; every Application and ApplicationSet they list exists${msg}"
         return 0
       fi
+      # Errors once each, when first seen: the operator can stop the apply and fix them now.
+      while IFS=$'\t' read -r dest app msg; do
+        [[ -n "$dest" && -z "${told["cluster/$dest"]:-}" ]] || continue
+        told["cluster/$dest"]=1
+        echo "WARNING: Argo CD cannot load state from cluster ${dest} (Application ${app}): ${msg}. The check fails in $((deadline - SECONDS))s unless this clears; you can stop the apply and fix it now (a URL the hub cannot reach: cluster_api_url_overrides; Unauthorized or Forbidden: the member's token, see \"Rotating a member's token\" in terraform/platform/README.md)." >&2
+      done <<<"$unreachable"
+      while IFS=$'\t' read -r app dest msg; do
+        [[ -n "$app" && -z "${told["error/$msg"]:-}" ]] || continue
+        told["error/$msg"]=1
+        echo "WARNING: Argo CD cannot compare Application ${app} (destination ${dest}), so it does not deploy: ${msg}. The check fails in $((deadline - SECONDS))s unless this clears; fix the chart, values or repository access the message names." >&2
+      done <<<"$cerr"
+      waiting=""
+      [[ -z "$listed" ]] || waiting+="; $(count_lines "$listed") listed but not created yet"
+      [[ -z "$short" ]] || waiting+="; $(awk -F'\t' -v n="$n_members" 'NF { printf "%s%s %d of %d", (k++ ? ", " : "ApplicationSet "), $1, $2, n }' <<<"$short")"
+      [[ -z "$absent" ]] || waiting+="; no Application for $(tr '\n' ' ' <<<"$absent" | sed 's/ $//')"
+      [[ -z "$missing" ]] || waiting+="; $(count_lines "$missing") without a sync or health status"
+      [[ -z "$stale" ]] || waiting+="; $(count_lines "$stale") not compared again yet"
+      [[ -z "$unreachable" ]] || waiting+="; $(count_lines "$unreachable") on unreachable clusters"
+      [[ -z "$cerr" ]] || waiting+="; $(count_lines "$cerr") that cannot be compared"
+      [[ -n "$waiting" ]] || waiting="; no Applications yet"
     else
       read_err="$(tr '\n' ' ' <"$APP_ERR_FILE")"
-      read_err="${read_err:-the reply was not a list of Applications}"
+      read_err="${read_err:-the reply was not a list of ${what}}"
+      waiting="; the ${what} cannot be read: ${read_err}"
+    fi
+    if [[ "$waiting" != "$last_waiting" ]]; then
+      echo "  waiting ($((deadline - SECONDS))s left): ${waiting#; }"
+      last_waiting="$waiting"
     fi
     if ((SECONDS >= deadline)); then
       if [[ -n "$read_err" ]]; then
-        echo "error: could not read the Applications in ${GITOPS_NS} after ${APP_STATUS_TIMEOUT_SEC}s: ${read_err}" >&2
+        echo "error: could not read the ${what} in ${GITOPS_NS} after ${APP_STATUS_TIMEOUT_SEC}s: ${read_err}" >&2
         exit 1
       fi
-      if [[ -z "$missing" && -z "$absent" && -z "$unreachable" && -z "$stale" ]]; then
+      if [[ -z "$missing$absent$unreachable$cerr$stale$listed$short" ]]; then
         echo "error: no Applications found in ${GITOPS_NS} after ${APP_STATUS_TIMEOUT_SEC}s" >&2
         exit 1
+      fi
+      if [[ -n "$listed" ]]; then
+        echo "error: Applications list these in their resources, but they still do not exist after ${APP_STATUS_TIMEOUT_SEC}s:" >&2
+        printf '%s\n' "$listed" | awk -F'\t' 'NF { printf "  %s %s (listed by Application %s)\n", $1, $2, $3 }' >&2
+        echo "  Fix: Argo CD creates them when it syncs the listing Application; its sync result says why it did not (kubectl -n ${GITOPS_NS} get applications.argoproj.io <listing Application> -o jsonpath='{.status.operationState.message}'). Fix that and re-run the apply." >&2
+      fi
+      if [[ -n "$short" ]]; then
+        echo "error: these ApplicationSets generate one Application per mesh member, but after ${APP_STATUS_TIMEOUT_SEC}s own fewer than the ${n_members} members (${want[*]}):" >&2
+        printf '%s\n' "$short" | awk -F'\t' -v n="$n_members" 'NF { printf "  %s: %d of %d Applications%s\n", $1, $2, n, ($3 != "" ? "; ErrorOccurred: " $3 : "; no ErrorOccurred condition") }' >&2
+        echo "  Fix: on kubernetes they select the Argo CD cluster Secrets labelled istio-mesh-member=true (kubectl -n ${GITOPS_NS} get secrets -l argocd.argoproj.io/secret-type=cluster --show-labels); on openshift, the ACM PlacementDecisions. ErrorOccurred above, or the applicationset-controller's log, says why one generated fewer. Fix that and re-run the apply." >&2
       fi
       if [[ -n "$missing" ]]; then
         echo "error: Applications without a sync or health status after ${APP_STATUS_TIMEOUT_SEC}s; no controller shard owns their destination cluster:" >&2
@@ -257,6 +382,11 @@ app_status() {
           NF >= 3 { if (!($1 in msg)) { order[++k] = $1; app[$1] = $2; msg[$1] = $3 } n[$1]++ }
           END { for (i = 1; i <= k; i++) { d = order[i]; printf "  %s: %s%s: %s\n", d, app[d], (n[d] > 1 ? " and " (n[d] - 1) " more" : ""), msg[d] } }' >&2
         echo "  Fix: a connection error (dial tcp, i/o timeout, no such host) means the URL the cluster was registered at is not reachable from the hub's Argo CD pods. That URL is the kubeconfig context's server unless cluster_api_url_overrides sets one; the hub and every other member (istiod reads the same URL) must reach it. Set cluster_api_url_overrides and re-run the apply. Unauthorized (401) or Forbidden (403) means the registration's token no longer works: see \"Rotating a member's token\" in terraform/platform/README.md." >&2
+      fi
+      if [[ -n "$cerr" ]]; then
+        echo "error: Argo CD cannot compare these Applications after ${APP_STATUS_TIMEOUT_SEC}s (sync Unknown with a ComparisonError), so they never deploy:" >&2
+        printf '%s\n' "$cerr" | awk -F'\t' 'NF >= 3 { printf "  %s (destination %s): %s\n", $1, $2, $3 }' >&2
+        echo "  Fix: the message is Argo CD's: a chart that fails to render (its values, such as gitops_app_overrides), or a repository Argo CD cannot read. Fix it and re-run the apply." >&2
       fi
       if [[ -n "$stale" ]]; then
         echo "error: Argo CD has not compared these Applications again in the ${APP_STATUS_TIMEOUT_SEC}s since this check started, so their status can predate the apply:" >&2

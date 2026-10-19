@@ -1,3 +1,6 @@
+{{- if hasKey .Values.istiodCheck "host" }}
+{{- fail "istiodCheck.host was replaced by istiodCheck.service: the gate now reads every Ready istiod replica through the EndpointSlices of that Service in istioNamespace. Set istiodCheck.service to the Service's name (istiod for istiod.istio-system.svc) and remove istiodCheck.host." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,8 +37,8 @@ spec:
               value: {{ .Values.expectedMembers | quote }}
             - name: ISTIOD_CHECK_ENABLED
               value: {{ .Values.istiodCheck.enabled | quote }}
-            - name: ISTIOD_HOST
-              value: {{ .Values.istiodCheck.host | quote }}
+            - name: ISTIOD_SERVICE
+              value: {{ .Values.istiodCheck.service | quote }}
             - name: ISTIOD_PORT
               value: {{ .Values.istiodCheck.port | quote }}
             - name: CURL_TIMEOUT
@@ -49,6 +52,9 @@ spec:
             # Inside the probe's timeout, so a slow API answers NotReady with a reason.
             - name: CHECK_TIMEOUT
               value: {{ max 1 (sub (int .Values.probe.timeoutSeconds) 2) | quote }}
+            # The check's files (each istiod replica's metric lines); the root filesystem is read-only.
+            - name: WORK_DIR
+              value: /work
           readinessProbe:
             exec:
               command:
@@ -65,8 +71,11 @@ spec:
             - name: check
               mountPath: /opt/check
               readOnly: true
+            - name: work
+              mountPath: /work
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             runAsNonRoot: true
             {{- with .Values.runAsUser }}
             runAsUser: {{ . }}
@@ -81,3 +90,6 @@ spec:
           configMap:
             name: mesh-wiring-verify-check
             defaultMode: 0555
+        - name: work
+          emptyDir:
+            sizeLimit: 16Mi

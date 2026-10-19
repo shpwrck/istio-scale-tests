@@ -6,8 +6,8 @@ smoke-run the suites and develop the charts. Don't publish its numbers: the thre
 one host's CPUs and network, so latencies and convergence times describe the host more than Istio.
 Capacity and headroom figures are void too (every node reports the whole host, which the three
 clusters share), and so are remote-path latencies and the remote-minus-local delta: both gateways
-sit behind cloud-provider-kind's Envoy (`ipMode: Proxy` on the Services), a hop that a cloud load
-balancer path does not have.
+sit behind cloud-provider-kind's load balancer (`ipMode: Proxy` on the Services), a userspace Envoy
+on the same shared host, where a cloud load balancer is a hop on infrastructure of its own.
 
 Last run end to end on 2026-10-18 with kind v0.33.0 (node image `kindest/node:v1.34.11`),
 cloud-provider-kind v0.12.0, Argo CD v3.5.3 and Istio v1.30.5 through the Sail operator 1.31.1:
@@ -151,10 +151,10 @@ kubectl --context kind-hub -n argocd get applications.argoproj.io
 for m in kind-mesh-1 kind-mesh-2; do
   kubectl --context "$m" exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
 done
-# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 root=<fingerprint> eastwest=<address>
+# Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 ca=shared synced=1 replicas=1 root=<fingerprint> eastwest=<address>
 ```
 
-`root=` must read the same on both members.
+`root=` must read the same on both members; `replicas=1` is the lab's one istiod replica.
 
 Then run the end to end echo check in [Verify](../../../README.md#verify) with `kind-hub` as
 `<hub-ctx>` and `kind-mesh-1` as `<mesh-a-ctx>`: answers come from both members. The ingress

@@ -26,7 +26,10 @@ set -euo pipefail
 #
 # Required: SPOKE_NAME, GITOPS_NAMESPACE, MANAGED_SA_NAME, API_URL (except ACTION=delete)
 # Optional: PLATFORM (kubernetes), ACTION (apply|delete), MESH_MEMBER (true|false),
-#   SPOKE_SA_NAMESPACE (istio-scale-tests-access)
+#   SPOKE_SA_NAMESPACE (istio-scale-tests-access), SHARD (the Argo CD controller shard to pin
+#   in the hub Secret's shard key; Terraform sets it on kubernetes when it installs Argo CD.
+#   Empty: no pin. kubectl apply then removes a pin an earlier run wrote, and one set by
+#   anyone else stays, with a warning.)
 
 : "${SPOKE_NAME:?SPOKE_NAME is required}"
 : "${GITOPS_NAMESPACE:?GITOPS_NAMESPACE is required}"
@@ -40,6 +43,8 @@ case "$PLATFORM" in kubernetes | openshift) ;; *) echo "error: PLATFORM must be 
 case "$ACTION" in apply | delete) ;; *) echo "error: ACTION must be apply or delete (got: $ACTION)" >&2; exit 1 ;; esac
 case "$MESH_MEMBER" in true | false) ;; *) echo "error: MESH_MEMBER must be true or false (got: $MESH_MEMBER)" >&2; exit 1 ;; esac
 [[ "$SPOKE_SA_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo "error: SPOKE_SA_NAMESPACE must be a namespace name (got: $SPOKE_SA_NAMESPACE)" >&2; exit 1; }
+SHARD="${SHARD:-}"
+[[ -z "$SHARD" || "$SHARD" =~ ^[0-9]+$ ]] || { echo "error: SHARD must be empty or a shard number (got: $SHARD)" >&2; exit 1; }
 [[ "$ACTION" == delete ]] || : "${API_URL:?API_URL is required}"
 
 # Every hub call gets the same request timeout as the spoke calls (SKC below).
@@ -266,10 +271,16 @@ SERVER_B64=$(echo -n "$API_URL" | base64 | tr -d '\n')
 CONFIG_B64=$(echo -n "$CONFIG_JSON" | base64 | tr -d '\n')
 MEMBER_LABEL=""
 [[ "$MESH_MEMBER" == true ]] && MEMBER_LABEL='    istio-mesh-member: "true"'
+# The controller shard: Argo CD reads the shard key as a number and keeps the cluster on that
+# replica (round-robin and every other algorithm honour it while it is below the replica count).
+SHARD_LINE=""
+[[ -z "$SHARD" ]] || SHARD_LINE="  shard: $(echo -n "$SHARD" | base64 | tr -d '\n')"
 
 # Apply the full Argo CD cluster Secret. `apply` is idempotent: it creates the
 # secret on a fresh deploy and updates it (server/config/token refresh, the mesh-member
-# label) on subsequent applies, adopting any pre-existing same-named secret.
+# label, the shard) on subsequent applies, adopting any pre-existing same-named secret.
+# Without SHARD the shard key is absent here, so apply drops one that its last apply (this
+# script's) wrote.
 $KC apply -f - <<EOF
 apiVersion: v1
 kind: Secret
@@ -284,9 +295,21 @@ data:
   name: ${NAME_B64}
   server: ${SERVER_B64}
   config: ${CONFIG_B64}
+${SHARD_LINE}
 EOF
 
-echo "Applied $SECRET_NAME with server=$API_URL (mesh member: $MESH_MEMBER)"
+echo "Applied $SECRET_NAME with server=$API_URL (mesh member: $MESH_MEMBER; controller shard: ${SHARD:-not pinned})"
+
+# Without a pin from Terraform, a shard key that is still there was set by someone else
+# (apply keeps keys its last apply did not write): say so, since it decides the owner.
+if [[ -z "$SHARD" ]]; then
+  # shellcheck disable=SC2086 # $KC is a word-split command, as everywhere in this script
+  if ! LEFT_SHARD=$($KC get secret "$SECRET_NAME" -n "$GITOPS_NAMESPACE" -o jsonpath='{.data.shard}'); then
+    echo "WARNING: could not read ${GITOPS_NAMESPACE}/${SECRET_NAME} back to check for a shard key; check it by hand (kubectl -n ${GITOPS_NAMESPACE} get secret ${SECRET_NAME} -o jsonpath='{.data.shard}')" >&2
+  elif [[ -n "$LEFT_SHARD" ]]; then
+    echo "WARNING: ${GITOPS_NAMESPACE}/${SECRET_NAME} keeps shard=$(echo "$LEFT_SHARD" | base64 --decode), which this script did not set: Argo CD keeps ${SPOKE_NAME} on that controller replica. Remove it unless someone pinned it on purpose: kubectl -n ${GITOPS_NAMESPACE} patch secret ${SECRET_NAME} --type=json -p '[{\"op\":\"remove\",\"path\":\"/data/shard\"}]'" >&2
+  fi
+fi
 
 # remove_old_access <ns>: the ServiceAccount moved out of <ns> (spoke_service_account_namespace
 # changed), and the binding and the hub Secret now use the new one. Delete the old token

@@ -335,6 +335,17 @@ came back empty. Results (gitignored) are in the operator host's window archive.
   stranded member. **Fixed:** the check now also waits until every spoke has an Application
   (`EXPECTED_DESTINATIONS`, set by Terraform to the spoke keys) and names any that has none
   (bats; live against the window's hub: pass for the 3 members, a named failure for a fourth).
+  **Found (kind, 2026-10-18):** that still passed early: the gate ApplicationSet, which the apply
+  creates with the cluster Secrets, gives every member an Application from the start, so the
+  check passed after 11 s with 3 of 33 Applications (the other 30 came 7 minutes later; about 200
+  would at 20 members). **Fixed:** the check also waits until every Application or ApplicationSet
+  that an Application lists in its resources exists, and until each of the repo's ApplicationSets
+  that selects clusters owns an Application per mesh member (counted by ownerReferences: the
+  hub-side presets' Applications target the hub), naming each missing one and each ApplicationSet
+  with `<k> of <N>` and its `ErrorOccurred` message at the deadline. An Application sync
+  `Unknown` with any ComparisonError (a manifest error too) fails it at the deadline, and every
+  such error is printed when first seen (bats in `tests/lib/test/argocd-app-status.bats`; live on
+  the kind lab it passed in about 12 s on its 34 existing Applications, three applies).
   **Left:** —
 
 ### 9.2 Kubeconfig exec plugin logs in on every `oc` call (finding 2)

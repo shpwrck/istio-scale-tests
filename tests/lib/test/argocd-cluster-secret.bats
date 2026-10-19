@@ -2,10 +2,11 @@
 # terraform/scripts/create-argocd-cluster-secret.sh on platform kubernetes, against a stub
 # kubectl: the spoke's namespace (created and labelled only when it does not exist), its
 # ServiceAccount, token Secret and cluster-admin binding, the hub's Argo CD cluster Secret
-# (token, the kubeconfig's CA or its insecure flag, the mesh-member label), a token that never
-# appears, the move from an earlier run's namespace (reporting only what it removed), the
-# destroy-time delete (best effort, never silent, never a namespace the script did not
-# create) and the input checks that stop before any call.
+# (token, the kubeconfig's CA or its insecure flag, the mesh-member label, the controller shard
+# pin: written, changed, absent, and a pin someone else set), a token that never appears, the
+# move from an earlier run's namespace (reporting only what it removed), the destroy-time
+# delete (best effort, never silent, never a namespace the script did not create) and the
+# input checks that stop before any call.
 
 load test_helper
 
@@ -24,7 +25,8 @@ setup() {
 	# create.<context>.yaml) and `delete namespace` removes it unless stuck.txt exists. An apply
 	# saves its stdin as apply.<context>.<n>.yaml; the binding's subjects come from
 	# subjects.txt; the token Secret answers from token.b64 (absent: empty, as before the token
-	# controller fills it); config view prints kubeconfig.json. An earlier run's ServiceAccount
+	# controller fills it), the hub Secret's shard key from shard.b64 (absent: empty); config
+	# view prints kubeconfig.json. An earlier run's ServiceAccount
 	# and token Secret are files obj.<ns>.<kind>.<name> holding labelled or unlabelled: a
 	# `delete -l ... -o name` removes a labelled one and prints <kind>/<name> (else "No resources
 	# found", on stdout as kubectl prints it); `get <kind>/<name> -o name` finds either.
@@ -81,6 +83,7 @@ case "$args" in
 	fi ;;
 *" get clusterrolebinding "*) cat "$STUB_DIR/subjects.txt" 2>/dev/null || true ;;
 *" get secret "*"jsonpath={.data.token}"*) cat "$STUB_DIR/token.b64" 2>/dev/null || true ;;
+*" get secret "*"jsonpath={.data.shard}"*) cat "$STUB_DIR/shard.b64" 2>/dev/null || true ;;
 *" get secret/"* | *" get serviceaccount/"*)
 	if [[ -e "$STUB_DIR/obj.${nsarg}.${obj%%/*}.${obj#*/}" ]]; then echo "$obj"; fi ;;
 *" delete "*" -o name "*)
@@ -103,7 +106,7 @@ EOF
 	export PLATFORM=kubernetes KUBECONFIG_PATH=/dev/null HUB_CONTEXT=hub SPOKE_CONTEXT=mesh-a
 	export SPOKE_NAME=mesh-a API_URL=https://mesh-a-control-plane:6443 GITOPS_NAMESPACE=argocd
 	export MANAGED_SA_NAME=argocd-gitops MESH_MEMBER=true
-	unset ACTION SPOKE_SA_NAMESPACE
+	unset ACTION SPOKE_SA_NAMESPACE SHARD
 }
 
 teardown() {
@@ -150,7 +153,7 @@ line_of() {
 	run bash "$SCRIPT"
 	assert_success
 	assert_output --partial "Created the namespace istio-scale-tests-access on mesh-a (label istio-scale-tests/created-by=create-argocd-cluster-secret)"
-	assert_output --partial "Applied mesh-a-argocd-gitops-cluster-secret with server=https://mesh-a-control-plane:6443 (mesh member: true)"
+	assert_output --partial "Applied mesh-a-argocd-gitops-cluster-secret with server=https://mesh-a-control-plane:6443 (mesh member: true; controller shard: not pinned)"
 	local ns="${STUB_DIR}/create.mesh-a.yaml" sa="${STUB_DIR}/apply.mesh-a.1.yaml" crb="${STUB_DIR}/apply.mesh-a.2.yaml"
 	local hub="${STUB_DIR}/apply.hub.1.yaml" cfg
 	grep -q '^kind: Namespace' "$ns"
@@ -280,6 +283,44 @@ line_of() {
 	grep -q 'argocd.argoproj.io/secret-type: cluster' "${STUB_DIR}/apply.hub.1.yaml"
 }
 
+@test "cluster secret (kubernetes): SHARD pins the controller shard in the hub Secret, and a new SHARD changes it" {
+	SHARD=2 run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "(mesh member: true; controller shard: 2)"
+	[ "$(secret_field "${STUB_DIR}/apply.hub.1.yaml" shard)" = 2 ]
+	# With a pin there is nothing to read back.
+	! grep -q 'jsonpath={.data.shard}' "$STUB_LOG" || false
+	SHARD=0 run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "(mesh member: true; controller shard: 0)"
+	[ "$(secret_field "${STUB_DIR}/apply.hub.2.yaml" shard)" = 0 ]
+	refute_output --partial WARNING
+}
+
+@test "cluster secret (kubernetes): without SHARD the hub Secret has no shard key, and the read-back finds none" {
+	run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "(mesh member: true; controller shard: not pinned)"
+	# apply then removes a pin that this script's last apply wrote.
+	! grep -q '^  shard:' "${STUB_DIR}/apply.hub.1.yaml" || false
+	grep -q -- '--context=hub --request-timeout=60s get secret mesh-a-argocd-gitops-cluster-secret -n argocd -o jsonpath={.data.shard}' "$STUB_LOG"
+	[ "$(line_of '--context=hub --request-timeout=60s apply -f -')" -lt "$(line_of 'jsonpath={.data.shard}')" ]
+	refute_output --partial WARNING
+}
+
+@test "cluster secret (kubernetes): without SHARD a shard key someone else set is named with the command that removes it" {
+	printf '%s' 1 | base64 >"${STUB_DIR}/shard.b64"
+	run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "WARNING: argocd/mesh-a-argocd-gitops-cluster-secret keeps shard=1, which this script did not set: Argo CD keeps mesh-a on that controller replica."
+	assert_output --partial "kubectl -n argocd patch secret mesh-a-argocd-gitops-cluster-secret --type=json -p '[{\"op\":\"remove\",\"path\":\"/data/shard\"}]'"
+	! grep -q ' patch ' "$STUB_LOG" || false
+	printf 'jsonpath={.data.shard}\n' >"${STUB_DIR}/fail.txt"
+	run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "WARNING: could not read argocd/mesh-a-argocd-gitops-cluster-secret back to check for a shard key"
+}
+
 @test "cluster secret (kubernetes): a kubeconfig that skips TLS verification gives insecure: true and no CA" {
 	kubeconfig_json true
 	run bash "$SCRIPT"
@@ -359,7 +400,7 @@ line_of() {
 	refute_output --partial "Removed the Argo CD access"
 }
 
-@test "cluster secret: a bad PLATFORM, ACTION, MESH_MEMBER or SPOKE_SA_NAMESPACE, or kubernetes without a kubeconfig, stops before any call" {
+@test "cluster secret: a bad PLATFORM, ACTION, MESH_MEMBER, SPOKE_SA_NAMESPACE or SHARD, or kubernetes without a kubeconfig, stops before any call" {
 	PLATFORM=okd run bash "$SCRIPT"
 	assert_failure 1
 	assert_output --partial "PLATFORM must be kubernetes or openshift (got: okd)"
@@ -372,6 +413,9 @@ line_of() {
 	SPOKE_SA_NAMESPACE=Kube_System run bash "$SCRIPT"
 	assert_failure 1
 	assert_output --partial "SPOKE_SA_NAMESPACE must be a namespace name (got: Kube_System)"
+	SHARD=-1 run bash "$SCRIPT"
+	assert_failure 1
+	assert_output --partial "SHARD must be empty or a shard number (got: -1)"
 	SPOKE_CONTEXT='' run bash "$SCRIPT"
 	assert_failure 1
 	assert_output --partial "platform kubernetes needs KUBECONFIG_PATH and SPOKE_CONTEXT"

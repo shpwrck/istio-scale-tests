@@ -13,16 +13,22 @@ expectedMembers: 0
 # Namespace with the Istio remote secrets and istiod.
 istioNamespace: istio-system
 
-# Stage 2: read istiod_managed_clusters and istiod_remote_cluster_sync_status from
-# istiod's /metrics. curlTimeoutSeconds bounds each request of the check (API server
-# and istiod); the whole check stops at probe.timeoutSeconds - 2.
+# Stage 2: read istiod_managed_clusters, istiod_remote_cluster_sync_status and istio_build
+# from the /metrics of every Ready istiod replica (the Service's EndpointSlices), all at
+# once; each replica must pass. curlTimeoutSeconds bounds each request of the check (API
+# server and istiod); the whole check stops at probe.timeoutSeconds - 2.
 istiodCheck:
   enabled: true
-  host: istiod.istio-system.svc
+  # The istiod Service in istioNamespace (istiod-<revision> for a named revision). It
+  # replaced host, which reached one replica per request; setting host fails the render.
+  service: istiod
+  # istiod's metrics port on each pod (the Service's http-monitoring port has the same number).
   port: 15014
   curlTimeoutSeconds: 5
-  # At least N-1 remote clusters (every managed one with expectedMembers 0) must be
-  # synced. false only for an istiod without istiod_remote_cluster_sync_status (before 1.29).
+  # At least N-1 remote clusters (every managed one with expectedMembers 0) must be synced
+  # on every replica. closed counts as synced only when the replica's istio_build tag is
+  # 1.30 or later: before 1.30 it can be a stopped connection that nothing replaced.
+  # false only for an istiod without istiod_remote_cluster_sync_status (before 1.29).
   requireRemoteSync: true
 
 # Stage 4: the east-west gateway Service (in istioNamespace) must have an address when it
@@ -53,7 +59,7 @@ probe:
   failureThreshold: 2
   successThreshold: 1
 
-# Each probe holds istiod's /metrics body in memory.
+# Each probe keeps only the istiod metric lines it reads, per replica, in the work emptyDir.
 resources:
   requests:
     cpu: 10m

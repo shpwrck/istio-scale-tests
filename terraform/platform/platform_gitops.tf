@@ -37,9 +37,10 @@ locals {
         "applicationsetcontroller.enable.git.submodule" = "false"
       }
     }
-    # A fixed replica count, ceil((spokes + 1) / argocd_clusters_per_shard), and round-robin
-    # sharding: every replica sorts the same cluster Secrets and takes every Nth cluster, so
-    # the replicas agree on each cluster's owner without the openshift reshard restart.
+    # A fixed replica count, ceil((spokes + 1) / argocd_clusters_per_shard), and a shard pinned
+    # in each spoke's cluster Secret (create_argocd_cluster_secret, local.argocd_cluster_shard):
+    # the replicas agree on every owner without the openshift reshard restart, and a spoke
+    # changes owner only through its own Secret, which makes the old owner drop its cache.
     controller = {
       replicas  = local.argocd_computed_min_shards
       resources = local.argocd_tuning.controller.resources
@@ -530,16 +531,22 @@ resource "helm_release" "mesh_wiring_verify_appset" {
 resource "terraform_data" "create_argocd_cluster_secret" {
   for_each = local.gitops_enabled ? local.spoke_cluster_keys : {}
 
-  # The namespace only on kubernetes (it is unused on openshift), appended so that openshift
-  # state keeps its trigger list unchanged.
-  triggers_replace = concat([
-    local.platform,
-    local.by_cluster[each.key].cluster_api_url,
-    contains(local.mesh_member_spoke_set, each.key),
-    try(helm_release.acm_managed_cluster[each.key].metadata.revision, ""),
-  ], local.is_openshift ? [] : [var.spoke_service_account_namespace])
+  # The namespace only on kubernetes (it is unused on openshift), and the shard pin only where
+  # Terraform installs Argo CD on kubernetes, appended so that openshift state keeps its
+  # trigger list (and its input) unchanged. A new pin re-runs the script: that update of the
+  # spoke's own Secret is what makes the controller that owned the spoke drop its cache.
+  triggers_replace = concat(
+    [
+      local.platform,
+      local.by_cluster[each.key].cluster_api_url,
+      contains(local.mesh_member_spoke_set, each.key),
+      try(helm_release.acm_managed_cluster[each.key].metadata.revision, ""),
+    ],
+    local.is_openshift ? [] : [var.spoke_service_account_namespace],
+    local.argocd_pin_shards ? [local.argocd_cluster_shard[each.key]] : [],
+  )
 
-  input = {
+  input = merge({
     platform           = local.platform
     spoke_name         = each.key
     api_url            = local.by_cluster[each.key].cluster_api_url
@@ -553,7 +560,7 @@ resource "terraform_data" "create_argocd_cluster_secret" {
     gitops_namespace   = local.gitops_namespace
     managed_sa_name    = var.gitops_managed_service_account_name
     spoke_sa_namespace = var.spoke_service_account_namespace
-  }
+  }, local.argocd_pin_shards ? { shard = local.argocd_cluster_shard[each.key] } : {})
 
   provisioner "local-exec" {
     command = "bash ${path.module}/../scripts/create-argocd-cluster-secret.sh"
@@ -571,6 +578,7 @@ resource "terraform_data" "create_argocd_cluster_secret" {
       GITOPS_NAMESPACE   = self.input.gitops_namespace
       MANAGED_SA_NAME    = self.input.managed_sa_name
       SPOKE_SA_NAMESPACE = self.input.spoke_sa_namespace
+      SHARD              = try(self.input.shard, "")
     }
   }
 
@@ -659,13 +667,15 @@ resource "terraform_data" "argocd_controller_reshard" {
   depends_on = [terraform_data.create_argocd_cluster_secret, helm_release.argocd_config]
 }
 
-# --- Post-apply check: every Application has a sync and health status (BACKLOG 9.1) ---
+# --- Post-apply check: Argo CD has rendered and compared everything (BACKLOG 9.1) ---
 # An empty status means no controller shard processes the Application's destination
-# cluster. Fails the apply after argocd_app_status_timeout_sec, naming the cluster. It
-# also waits for every mesh member to have Applications: the ApplicationSets generate them
-# minutes after this resource starts (ROSA 2026-10-16: 13 of 40 existed when it ran). And it
-# fails when Argo CD cannot reach a cluster at its cluster-Secret URL (sync Unknown with a
-# live-state ComparisonError), quoting the error and naming cluster_api_url_overrides.
+# cluster. Fails the apply after argocd_app_status_timeout_sec, naming what is missing. It
+# also waits for what the ApplicationSets generate minutes after this resource starts (ROSA
+# 2026-10-16: 13 of 40 existed when it ran; kind: 3 of 33): every Application and
+# ApplicationSet that an Application lists in its resources, an Application for every mesh
+# member, and one per mesh member from each of the repo's member ApplicationSets. And it
+# fails when Argo CD cannot reach a cluster at its cluster-Secret URL or cannot render an
+# Application (sync Unknown with a ComparisonError), quoting each error when first seen.
 # A status from before the check never counts: a registration change does not make Argo CD
 # compare again (kind, Argo CD 3.5: statuses stayed stale for minutes), so the check requests
 # one refresh of every Application and waits until each has been compared again.

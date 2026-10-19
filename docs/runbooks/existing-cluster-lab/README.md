@@ -160,9 +160,9 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
     `docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`.
   - While deployed, both member Applications read Degraded by design: C1's backend does not exist,
     and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded.
-  - After `oc delete -f`, the finalizers remove everything within about 20 s. That includes the
-    `istio-system` Gateway, so `get ns mesh-verify-gwapi mesh-verify-gwapi-shared
-    mesh-verify-gwapi-remote` should find nothing on either member.
+  - After `fill | kubectl --context <acm-hub-ctx> delete -f -`, the finalizers remove everything
+    within about 20 s. That includes the `istio-system` Gateway, so `get ns mesh-verify-gwapi
+    mesh-verify-gwapi-shared mesh-verify-gwapi-remote` should find nothing on either member.
   - If the Gateway survives, delete `gateways.gateway.networking.k8s.io/mesh-verify-gwapi` in
     `istio-system`. Spell out the resource name: `gateway` alone is ambiguous with Istio's.
 - Gate reports a `ca=` mismatch (istiod started before cacerts):

@@ -74,22 +74,32 @@ which it removed, found missing or left. Argo CD switches at once. The other mem
 new remote secret, up to about 10 minutes (the ExternalSecret and the PushSecret each refresh every
 5): until then they log `watch error in cluster <member>: Unauthorized` and keep that member's last
 endpoints, then reconnect without a restart (66 s and 4.5 minutes on the kind lab). Run no suite
-until every other member's istiod has logged `Update cluster cluster=<member>` for each moved member
-(`kubectl -n istio-system logs deploy/istiod | grep 'Update cluster'`): the wiring gate cannot see
-this, because istiod's sync metric changes only when it reconnects.
+until every istiod replica of every other member has logged
+`stopping previous cluster <member> after new cluster synced` for each moved member
+(`kubectl -n istio-system logs -l app=istiod --prefix --tail=-1 | grep 'stopping previous cluster'`;
+`Update cluster` marks only the start of the switch): the wiring gate cannot see this, because
+istiod's sync metric changes only when it reconnects.
 
-At the end, the apply waits until every spoke has Applications (the ApplicationSets generate them a
-few minutes after the apply's own Applications) and fails if one has none, or an Application still
-has an empty sync or health status, after `argocd_app_status_timeout_sec` (default 900; 0
-disables), naming the destination cluster. For a spoke with no Applications, check its Argo CD
+At the end, the apply waits until Argo CD has rendered and compared everything it deploys, and
+fails after `argocd_app_status_timeout_sec` (default 900; 0 disables), naming what is missing and
+the fix. Every Application or ApplicationSet that an Application lists in its resources must exist
+(the app-of-apps lists its child Applications, each child the ApplicationSet it deploys); each of
+the repo's ApplicationSets that selects clusters must own an Application per mesh member (the
+hub-side presets' Applications target the hub, so they are counted, not matched; the failure
+gives `<k> of <N>` and the ApplicationSet's `ErrorOccurred` message); every mesh member must be the
+destination of an Application; and every Application must have a sync and health status. The
+ApplicationSets generate the member Applications minutes after the apply's own (on the kind lab
+3 of 33 existed after 11 s). For a spoke with no Applications, check its Argo CD
 cluster Secret (`kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=cluster
 --show-labels`: mesh members carry `istio-mesh-member=true`; on OpenShift also its ACM
-PlacementDecision). It also fails, quoting Argo CD's error once per cluster, when Argo CD cannot
+PlacementDecision). Argo CD's errors are printed once each when first seen, so you can stop the
+apply and fix them; they fail the check if they last until the deadline. When Argo CD cannot
 load state from a member (its Applications are sync `Unknown` with `Failed to load live state` or
 `failed to get cluster info`): the registered URL is unreachable from the hub
 (`cluster_api_url_overrides`), or `Unauthorized` or `Forbidden` says the token is not accepted (see
-[Rotating a member's token](#rotating-a-members-token)). A status from before the apply never
-counts: the check asks Argo CD to refresh every Application once
+[Rotating a member's token](#rotating-a-members-token)). Any other `ComparisonError` (a chart that
+fails to render, a repository Argo CD cannot read) means that Application never deploys. A status
+from before the apply never counts: the check asks Argo CD to refresh every Application once
 (`argocd.argoproj.io/refresh=normal`) and waits until each has been compared again, naming any
 that never is. It runs again on every apply that changes a member's registration or, on
 `kubernetes`, the Argo CD release.
@@ -100,11 +110,24 @@ to settle, then restarts the controller pods once. A controller that starts whil
 change can leave a cluster without a shard, and that cluster's Applications never get a status;
 the fix by hand is the same restart:
 `oc -n openshift-gitops delete pod -l app.kubernetes.io/name=openshift-gitops-application-controller`.
-On `kubernetes` the controller runs a fixed number of replicas, so nothing rescales it mid-apply,
-and shards clusters round-robin (`kubernetesShardingAlgorithm` in `charts/argocd-config`): every
-replica sorts the clusters and takes index mod replicas, so they agree on each cluster's owner
-from the start. The controller logs say which replica owns which cluster:
-`kubectl -n argocd logs argocd-application-controller-0 | grep 'has been assigned to shard'`.
+On `kubernetes` the controller runs a fixed number of replicas (the computed count, or
+`argocd_helm_values`' `controller.replicas`), so nothing rescales it mid-apply, and the apply pins
+each spoke to one: the `shard` key of the spoke's cluster Secret is its index in name order plus 1,
+mod the replica count. The spokes spread round-robin, and the hub's own `in-cluster`, which has no
+Secret, stays on shard 0, where round-robin (`kubernetesShardingAlgorithm` in
+`charts/argocd-config`) puts it. Unpinned, Argo CD re-indexes its clusters whenever one is added or
+removed, but a replica drops a cluster's cache only when that cluster's own Secret changes, so while
+the Secrets arrive one at a time replicas keep caching clusters they no longer own. A pinned spoke
+changes owner only when the apply updates its Secret, and the replica that owned it then drops its
+cache. Adding or removing a spoke re-pins the spokes after it in name order, and a new replica count
+re-pins most of them (the apply changes the replica count first: until it re-pins, a spoke whose pin
+is at or above the new count sits on shard 0, and the controller logs
+`is greater than the number of available shard`). With `gitops_install_operator = false` the apply
+pins nothing (it does not know the existing Argo CD's replica count; restart its controller pods
+after adding spokes, or pin the shards yourself) and drops a pin it wrote before; a `shard` key
+someone else set stays, and the apply warns about it. The controller logs say
+which replica owns which cluster (every replica logs the whole map):
+`kubectl -n argocd logs argocd-application-controller-0 | grep -e 'assigned to shard' -e 'changed shard'`.
 
 ## Existing clusters
 
@@ -140,7 +163,8 @@ for 2 members, 17 CPU / 34 GiB for 20. Override them per environment without for
   limit near 6Gi on a busy hub.
 - `mesh_member_count`: how many spokes join the mesh, in sorted order (0 = all).
 - Large fleets: `argocd_clusters_per_shard` (`argocd_max_shards` only on OpenShift; on
-  `kubernetes` the replica count is the computed one).
+  `kubernetes` the replica count is the computed one unless `argocd_helm_values` sets
+  `controller.replicas`, and the shard pins follow it).
 - ROSA: the ingress gateway Service gets an AWS NLB (`rosa_ingress_nlb`, default true). Behind a
   Classic LB it aborted HTTP requests (each arrived followed by a FIN); the east-west gateway
   (mTLS passthrough) stays on a Classic LB. This default is merged under `gitops_app_overrides`,
@@ -187,9 +211,12 @@ After the apply a recovered token, being the same, works everywhere at once (one
 under another signing key type, goes the way of a rotated one). A rotated one works
 for Argo CD at once and reaches the other members through External Secrets: the
 `kubeconfig-<ctx>` ExternalSecret and the `push-remote-secret-<ctx>` PushSecret each refresh every
-5 minutes, so within about 10 (17 seconds to 4.5 minutes on the kind lab). Each istiod then logs
-`Update cluster cluster=<ctx>` and reconnects without a restart. Run no suite before every other
-member's istiod has. On the kind lab (Istio 1.30.5) one istiod went on logging `watch error in
+5 minutes, so within about 10 (17 seconds to 4.5 minutes on the kind lab). Each istiod replica
+then reconnects without a restart: it logs `Update cluster` when it starts the new connection and
+`stopping previous cluster <ctx> after new cluster synced` once that one has synced
+(`kubectl -n istio-system logs -l app=istiod --prefix --tail=-1 | grep 'stopping previous cluster'`).
+Run no suite before every replica of every other member has logged the second. On the kind lab
+(Istio 1.30.5) one istiod went on logging `watch error in
 cluster <ctx>: failed to list *v1.ConfigMap: Unauthorized` about once a minute for over 30 minutes
 after that, from a watch the previous connection left behind, while `istioctl remote-clusters` read
 `synced` and the member's endpoints stayed current. Restarting that member's istiod pods leaves

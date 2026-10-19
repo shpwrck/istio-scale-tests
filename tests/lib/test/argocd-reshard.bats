@@ -2,7 +2,8 @@
 # terraform/scripts/argocd-controller-reshard.sh (BACKLOG 9.1) against a stub kubectl: the
 # restart waits for the operator's reconcile to settle, deletes the controller pods once and
 # waits for Ready replacements; the app-status check names Applications without a status
-# and expected destinations that no Application targets yet.
+# and expected destinations that no Application targets yet (argocd-app-status.bats has the
+# rest of that check).
 
 load test_helper
 
@@ -31,7 +32,8 @@ setup() {
 	mkdir -p "${STUB_DIR}/bin"
 	: >"$STUB_LOG"
 	# kubectl: the StatefulSet answers from sts.<n>.json in call order (the last one repeats);
-	# pods from pods.json until a delete, then from pods.after.json; Applications from apps.json.
+	# pods from pods.json until a delete, then from pods.after.json; Applications from apps.json,
+	# ApplicationSets from appsets.json (none: an empty list); the refresh annotation succeeds.
 	cat >"${STUB_DIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 echo "kubectl $*" >>"$STUB_LOG"
@@ -49,6 +51,8 @@ case "$args" in
 *" delete pod "*) touch "$STUB_DIR/deleted" ;;
 *" get applications.argoproj.io -o name "*) jq -r '.items[] | "application.argoproj.io/" + .metadata.name' "$STUB_DIR/apps.json" ;;
 *" get applications.argoproj.io -o json "*) cat "$STUB_DIR/apps.json" ;;
+*" get applicationsets.argoproj.io -o json "*) cat "$STUB_DIR/appsets.json" 2>/dev/null || echo '{"items":[]}' ;;
+*" annotate applications.argoproj.io "*) ;;
 *) exit 1 ;;
 esac
 EOF
@@ -155,7 +159,7 @@ EOF
 EOF
 	MODE=app-status EXPECTED_DESTINATIONS="mesh-a,https://api.mesh-b.example:6443" run bash "$SCRIPT"
 	assert_success
-	assert_output --partial "all 3 Application(s) have a sync and health status, and every expected destination has Applications"
+	assert_output --partial "all 3 Application(s) have a sync and health status, compared since this check started; every Application and ApplicationSet they list exists, and every member ApplicationSet owns an Application for each of the 2 members"
 }
 
 @test "app-status: an expected destination with no Application fails, named, even when every status is set" {

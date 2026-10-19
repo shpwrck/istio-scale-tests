@@ -58,7 +58,7 @@ which wins over the upstream docs there when they disagree.
     `istioVersion`); External Secrets chart: `values-external-secrets.yaml` there; cert-manager
     chart: `charts/gitops-hub-apps/values.yaml`; Argo CD chart: `argocd_chart_version` in
     `terraform/platform/variables.tf`; OSSM channel (OpenShift): `charts/spoke-ossm-operator/values.yaml`
-  - the curl image of the wiring gate and the wait Jobs (`docker.io/curlimages/curl:8.22.0`):
+  - the curl image of the wiring gate and the wait Jobs (`docker.io/curlimages/curl`):
     `charts/mesh-wiring-verify/values.yaml`, `waitForCacerts.image` in `charts/spoke-ossm/values.yaml`
     and both gateways' `waitForIstiod.image`, each with a keep-in-sync comment naming the others
     (`charts/spoke-east-west-gateway/README.md` repeats it)
