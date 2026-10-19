@@ -29,6 +29,8 @@ source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe: masked ad
 source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits (platform_drift_check: istiod's limits)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse, each pass's record
+# shellcheck disable=SC1091
+source "${ROOT}/tests/tuning/lib/tuning.sh"  # ctx_keys_distinct
 
 TUNING_DIR="${ROOT}/tests/tuning"
 SUITE=""
@@ -134,6 +136,9 @@ fi
 CONTEXTS=()
 split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
+# What 001-apply-profile.sh refuses for every profile pass, refused before the setup and the
+# baseline pass run.
+ctx_keys_distinct "${CONTEXTS[@]}"
 CONTEXTS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 SOURCE_CTX="${CONTEXTS[0]}"
 REMOTE_CSV="$(IFS=,; echo "${CONTEXTS[*]:1}")"
@@ -250,10 +255,10 @@ if ((DRY_RUN)); then
 			echo "kubectl scale deployment -l churn-target=true --replicas=${CHURN_BASE_REPLICAS:-1}  # each context"
 		fi
 		echo "sleep ${SETTLE_SEC}"
-		echo "read the platform record of every member into ${SWEEP_DIR}/${p}/platform-record.txt, and the tuning levers on ${SOURCE_CTX}"
+		show "# read the platform record of every member into ${SWEEP_DIR}/${p}/platform-record.txt, and the tuning levers on ${SOURCE_CTX}"
 		n=1
 		while probe_argv "$n" "$p" "${SWEEP_DIR}/${p}"; do show "${PROBE_ARGV[@]}"; n=$((n + 1)); done
-		echo "read it again; what changed during the pass goes to ${SWEEP_DIR}/${p}/platform-drift.txt"
+		show "# read it again; what changed during the pass, and what it could not compare, goes to ${SWEEP_DIR}/${p}/platform-drift.txt"
 		if [[ "$p" != baseline ]]; then
 			show "${TUNING_DIR}/002-revert-profile.sh" --state-dir "${SWEEP_DIR}/${p}/state" \
 				--rollout-timeout "$ROLLOUT_TIMEOUT"

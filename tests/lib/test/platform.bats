@@ -1329,12 +1329,17 @@ env_list() {
 		grep -q 'platform_report_warnings ' "${ROOT}/tests/${f}" || { echo "${f}: no platform_report_warnings"; false; }
 	done
 	# tuning 004 merges each pass's record and compares it with the reference pass's, on every
-	# key but istiod's settings (a profile changes them on purpose), and says what changed during
-	# each pass (platform_drift_changes, from the pass's drift file); its notes say what differs.
+	# key but istiod's settings (a profile changes them on purpose) and on the tuning levers, the
+	# root Sidecar's egress hosts and istiod's limits (platform_lever_values), and says what
+	# changed or was not compared during each pass (platform_drift_changes and
+	# platform_drift_unread, from the pass's drift file); its notes say what differs.
 	f="${ROOT}/tests/tuning/004-compare-profiles.sh"
 	grep -q 'platform_report_values ' "$f" || { echo "${f}: no platform_report_values"; false; }
-	grep -q 'platform_compare_values .*"${PLATFORM_PASS_KEYS\[@\]}"' "$f" || { echo "${f}: no platform_compare_values over PLATFORM_PASS_KEYS"; false; }
+	grep -q '^COMPARE_KEYS=("${PLATFORM_PASS_KEYS\[@\]}" ' "$f" || { echo "${f}: COMPARE_KEYS does not start with PLATFORM_PASS_KEYS"; false; }
+	grep -q 'platform_compare_values .*"${COMPARE_KEYS\[@\]}"' "$f" || { echo "${f}: no platform_compare_values over COMPARE_KEYS"; false; }
+	grep -q 'platform_lever_values ' "$f" || { echo "${f}: no platform_lever_values"; false; }
 	grep -q 'platform_drift_changes ' "$f" || { echo "${f}: no platform_drift_changes"; false; }
+	grep -q 'platform_drift_unread ' "$f" || { echo "${f}: no platform_drift_unread"; false; }
 }
 
 @test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh and config.sh (address masking, the istiod env digest)" {
@@ -1752,6 +1757,11 @@ resume_run() {
 # Drift during a sweep (H2): platform_drift_check and the reports' side
 # ---------------------------------------------------------------------------
 
+# drift_value_lines <file>: what a drift file (platform_drift_check) holds besides its header and
+# its DRIFT_READ_AT lines: nothing when every read at the end found nothing changed and compared
+# everything.
+drift_value_lines() { grep -v '^# The platform record read again at the end of this \|^# DRIFT_READ_AT=' "$1" || true; }
+
 @test "platform_drift_check (H2, H8): a build that changed during the sweep warns with its cause and goes to the marker; a state-only change does not" {
 	probe_setup
 	platform_probe member-a,member-b 2>/dev/null
@@ -1762,7 +1772,11 @@ resume_run() {
 	assert_success
 	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting or limit, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
-	[ ! -e "${dir}/platform-drift.txt" ]
+	# The file says the read ran (M8-S1), and that it found nothing.
+	head -n 1 "${dir}/platform-drift.txt" | grep -q '^# The platform record read again at the end of this sweep (tests/lib/platform.sh platform_drift_check), one block per read: '
+	grep -q '^# DRIFT_READ_AT=' "${dir}/platform-drift.txt"
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	rm "${dir}/platform-drift.txt"
 	# Fresh reads, not the record the sweep holds.
 	grep -q -- '--context=member-a' "$CALLS"
 	grep -q -- '--context=member-b' "$CALLS"
@@ -1785,23 +1799,29 @@ resume_run() {
 	[[ "$stderr" == *"warning: member-a: ISTIOD_ENV_BY_CONTEXT changed during the pass: $(env_digest "$(env_list)") at its start, $(env_digest "$(env_list 50)") at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass); the usual cause is"* ]]
 	# (The fix still says to run the sweep again: the tuning sweep.)
 	[[ "$stderr" != *"its reports"* && "$stderr" != *"during the sweep"* ]] || { echo "$stderr"; false; }
-	# A member that does not answer at the end: a warning, no marker line for it.
+	# A member that does not answer at the end: a warning, and the file says what it could not
+	# compare (M8-S1), no value of it.
 	PROBE_PLATFORM=down run --separate-stderr platform_drift_check "${BATS_TEST_TMPDIR}" member-a
 	assert_success
 	[[ "$stderr" == *"warning: member-a: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT, ISTIOD_ENV_BY_CONTEXT, TUNING_OBJECTS_BY_CONTEXT not read at the sweep's start or end, so whether they changed during the sweep is not known"* ]]
-	[ ! -e "${BATS_TEST_TMPDIR}/platform-drift.txt" ]
-	# A dry-run reads nothing.
+	[ "$(drift_value_lines "${BATS_TEST_TMPDIR}/platform-drift.txt")" = "# NOT_COMPARED_AT_END=member-a=PLATFORM_BY_CONTEXT;MESH_OPERATOR_BY_CONTEXT;ISTIOD_IMAGE_BY_CONTEXT;PROXY_IMAGE_BY_CONTEXT;NODE_PROVIDER_BY_CONTEXT;ISTIOD_ENV_BY_CONTEXT;TUNING_OBJECTS_BY_CONTEXT" ]
+	rm "${BATS_TEST_TMPDIR}/platform-drift.txt"
+	# A dry-run reads nothing, and writes no file.
 	: > "$CALLS"
+	rm -f "${dir}/platform-drift.txt"
 	DRY_RUN=1 run platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[ -z "$output" ]
 	[ ! -s "$CALLS" ]
-	# It never fails the sweep whose reports run next (PL40): without KUBECTL it warns.
+	[ ! -e "${dir}/platform-drift.txt" ]
+	# It never fails the sweep whose reports run next (PL40): without KUBECTL it warns, and writes
+	# no file (nothing was read again: tuning 004 says so for a pass).
 	KUBECTL=()
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[[ "$stderr" == *"warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh), _config_sha256 (tests/lib/config.sh) and KUBECTL; not checked"* ]]
 	[ ! -s "$CALLS" ]
+	[ ! -e "${dir}/platform-drift.txt" ]
 }
 
 @test "platform_drift_check (H2): a replica or the operator that has not started at the end is no change; another digest is" {
@@ -1815,13 +1835,14 @@ resume_run() {
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
 	PROBE_ISTIOD_PODS=evicted run --separate-stderr platform_drift_check "$dir" member-a
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
-	[ ! -e "${dir}/platform-drift.txt" ]
-	# Only a Pending replica, and the operator scaled to 0: not read, a warning, no marker.
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	# Only a Pending replica, and the operator scaled to 0: not read, a warning, and the file says
+	# what it could not compare.
 	PROBE_ISTIOD_PODS=only-pending PROBE_SAIL_PODS=none PROBE_SAIL_AVAILABLE=0 run --separate-stderr platform_drift_check "$dir" member-a
 	assert_success
 	[[ "$stderr" == *"warning: member-a: MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT read with a digest @unknown at the sweep's start or end (no pod had started), so whether they changed during the sweep is not known"* ]]
 	[[ "$stderr" != *"changed during the sweep:"* ]]
-	[ ! -e "${dir}/platform-drift.txt" ]
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# NOT_COMPARED_AT_END=member-a=MESH_OPERATOR_BY_CONTEXT;ISTIOD_IMAGE_BY_CONTEXT" ]
 	# So the sweep's reports read the values of its start, not mixed:.
 	platform_preamble_lines member-a > "${dir}/s.tsv"
 	run --separate-stderr platform_report_values "${dir}/s.tsv"
@@ -1853,7 +1874,8 @@ resume_run() {
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
-	[ ! -e "${dir}/platform-drift.txt" ]
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	rm "${dir}/platform-drift.txt"
 	grep -q -- '--context=member-a .*get sidecar.networking.istio.io default -o name --ignore-not-found' "$CALLS"
 	! grep -q -- '--context=member-b .*get sidecar.networking.istio.io' "$CALLS" || false
 	grep -q -- '--context=member-b .*version --output=json' "$CALLS"
@@ -1867,13 +1889,22 @@ resume_run() {
 	grep -qx '# SIDECAR_EGRESS_HOSTS=none' "${dir}/platform-drift.txt"
 	grep -qx '# KUBE_VERSIONS=member-a=v1.33.2,member-b=v1.33.2' "${dir}/platform-drift.txt"
 	! grep -q '_BY_CONTEXT=' "${dir}/platform-drift.txt" || false
-	# Not read at the end (kinds the member does not serve, no answer): a warning, no marker.
+	# Not read at the end (kinds the member does not serve, no answer): a warning, and the file
+	# says what it could not compare, each lever by name.
 	rm "${dir}/platform-drift.txt"
 	PROBE_TB_UNSERVED=1 PROBE_KUBE=down run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[[ "$stderr" == *"warning: member-a: TUNING_BASELINE sidecar, TUNING_BASELINE telemetryFiltering, TUNING_BASELINE accessLogFiltering, SIDECAR_EGRESS_HOSTS, KUBE_VERSIONS not read at the sweep's start or end, so whether they changed during the sweep is not known"* ]]
 	[[ "$stderr" == *"warning: member-b: KUBE_VERSIONS not read at the sweep's start or end, so whether it changed during the sweep is not known"* ]]
-	[ ! -e "${dir}/platform-drift.txt" ]
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# NOT_COMPARED_AT_END=member-a=TUNING_BASELINE sidecar;TUNING_BASELINE telemetryFiltering;TUNING_BASELINE accessLogFiltering;SIDECAR_EGRESS_HOSTS;KUBE_VERSIONS,member-b=KUBE_VERSIONS" ]
+	# What a report of the sweep says of it (the body; the TSVs' values of its start).
+	run platform_drift_unread "${dir}/controlplane-r.tsv"
+	assert_output $'TUNING_BASELINE sidecar\tmember-a\nTUNING_BASELINE telemetryFiltering\tmember-a\nTUNING_BASELINE accessLogFiltering\tmember-a\nSIDECAR_EGRESS_HOSTS\tmember-a\nKUBE_VERSIONS\tmember-a, member-b'
+	_pl_no_members=1 run platform_drift_unread "${dir}/controlplane-r.tsv"
+	assert_line $'KUBE_VERSIONS\t2 members'
+	assert_line $'SIDECAR_EGRESS_HOSTS\t1 member'
+	run --separate-stderr platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "the read again at the end of the sweep in sweep (platform-drift.txt) could not compare TUNING_BASELINE sidecar on member-a; TUNING_BASELINE telemetryFiltering on member-a; TUNING_BASELINE accessLogFiltering on member-a; SIDECAR_EGRESS_HOSTS on member-a; KUBE_VERSIONS on member-a, member-b (not read at its start or end, or read with a digest @unknown: no pod had started), so whether those changed during the sweep is not known; the report shows the values the TSVs recorded at its start"
 	# A sweep whose TSVs record neither reads neither again.
 	rm "${dir}/controlplane-r.tsv"
 	: > "$CALLS"
@@ -1897,7 +1928,8 @@ resume_run() {
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
-	[ ! -e "${dir}/platform-drift.txt" ]
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	rm "${dir}/platform-drift.txt"
 	# The limits raised during the sweep (a sync of new resources, a tuning profile).
 	PROBE_ISTIOD_CPU_LIMIT=4 run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
@@ -1912,23 +1944,33 @@ resume_run() {
 	assert_output --partial "ISTIOD_CPU_LIMIT_M changed during the sweep in sweep (platform-drift.txt): 2000 at its start, 4000 at its end; rows measured after the change ran under another limit, but the report's window-peak CPU % (the highest istiod CPU of every member's rows) divides by the one recorded at the start, as does the SLA verdict on it, and the report cannot tell which rows those are; the kubectl top % use each row's own limit; the usual cause is"
 	assert_output --partial "istiod's limits per replica on member-b (CPU 4000m, memory 4096Mi) differ from those the TSVs recorded on their source member (CPU 2000m, memory 4096Mi) at the end of the sweep in sweep (platform-drift.txt)"
 	# A tuning pass's check (tuning 003: pass) names the pass and leaves out the controlplane
-	# report's percentages, which its comparison does not show.
+	# report's percentages, which its comparison does not show; a member whose limits differ from
+	# the source member's does not warn (S5: tuning 004 compares each member's with the reference
+	# pass's), and still goes to the file.
 	rm "${dir}/platform-drift.txt"
 	PROBE_ISTIOD_CPU_LIMIT=4 run --separate-stderr platform_drift_check "$dir" member-a,member-b pass
 	assert_success
 	[[ "$stderr" == *"warning: member-a: ISTIOD_CPU_LIMIT_M changed during the pass: 2000 at its start, 4000 at its end; rows measured after the change ran under another limit (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass); the usual cause is"* ]]
-	[[ "$stderr" == *"differ from those the TSVs recorded on member-a, their source member (CPU 2000m, memory 4096Mi) at the pass's end, so those members ran the pass under other limits than its TSVs record (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass)"* ]]
+	[[ "$stderr" != *"differ from those"* ]] || { echo "$stderr"; false; }
 	[[ "$stderr" != *"which its reports say in their body"* ]] || { echo "$stderr"; false; }
 	[[ "$stderr" != *window-peak* && "$stderr" != *"during the sweep"* ]] || { echo "$stderr"; false; }
-	head -n 1 "${dir}/platform-drift.txt" | grep -q '^# Values that changed during this pass: '
+	head -n 1 "${dir}/platform-drift.txt" | grep -q '^# The platform record read again at the end of this pass (tests/lib/platform.sh platform_drift_check), one block per read: '
 	grep -qx '# ISTIOD_CPU_LIMIT_M=4000' "${dir}/platform-drift.txt"
-	# Not read at the end: a warning, no marker.
+	grep -qx '# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=member-b=4000/4096' "${dir}/platform-drift.txt"
+	# What tuning 004 compares for the pass: each member's limits, the source member's with its
+	# value at the end.
+	run platform_lever_values "${dir}/controlplane-r.tsv"
+	assert_line "ISTIOD_CPU_LIMIT_M_BY_CONTEXT=member-a=mixed:2000;4000,member-b=4000"
+	assert_line "ISTIOD_MEM_LIMIT_MI_BY_CONTEXT=member-a=4096,member-b=4096"
+	# Not read at the end: a warning, and the file says what it could not compare.
 	rm "${dir}/platform-drift.txt"
 	PROBE_ISTIOD_DEPLOY=missing run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[[ "$stderr" == *"warning: member-a: ISTIOD_CPU_LIMIT_M, ISTIOD_MEM_LIMIT_MI not read at the sweep's start or end"* ]]
 	[[ "$stderr" == *"warning: istiod's limits could not be read on member-b at the sweep's end, so whether they are the ones the report divides those members' window-peak CPU and RSS % by is not known"* ]]
-	[ ! -e "${dir}/platform-drift.txt" ]
+	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_CPU_LIMIT_M;ISTIOD_MEM_LIMIT_MI,member-b=ISTIOD_LIMITS_DIFFER_BY_CONTEXT' "${dir}/platform-drift.txt"
+	run platform_lever_values "${dir}/controlplane-r.tsv"
+	assert_line "ISTIOD_CPU_LIMIT_M_BY_CONTEXT=member-a=2000,member-b=unknown"
 }
 
 @test "platform_drift_check (R6, M5-S2): a member whose istiod limits differ from the recorded ones warns, goes to the marker and the report; --no-members counts" {
@@ -2281,6 +2323,63 @@ resume_run() {
 	done
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "$v" "$ref"
 	assert_output "m70=p:2, m140=p:2, m210=p:2, m280=p:2, m350=p:2 and 2 more (7 of 500 members; the other 493 match)"
+}
+
+@test "platform_compare_members (U8-B1): a member with two values matches when one of them is the other side's build, else differs when a pair differs, else is not known" {
+	# The reference pass's member changed during its pass (mixed:<a>;<b>): a pass on either matches.
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=p:1" "a=p:2,b=p:1"
+	assert_success
+	assert_output ""
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=p:1" "a=p:3,b=p:1"
+	assert_output "$(printf '%s\t%s\t%s\t%s' a 'mixed:p:1;p:2' p:3 differs)"
+	# On either side, or both: one build in common is enough.
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=p:2" "a=mixed:p:2;p:3"
+	assert_output ""
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2" "a=mixed:p:2;p:3"
+	assert_output ""
+	# One of them not read: another that differs still differs; else not known.
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=mixed:unknown;p:1" "a=p:2"
+	assert_output "$(printf '%s\t%s\t%s\t%s' a 'mixed:unknown;p:1' p:2 differs)"
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=mixed:unknown;p:1" "a=p:1"
+	assert_output ""
+	run platform_compare_members PROXY_IMAGE_BY_CONTEXT "a=mixed:unknown;p:1@unknown" "a=p:1@${DIG_B}"
+	assert_output "$(printf '%s\t%s\t%s\t%s' a 'mixed:unknown;p:1@unknown' "p:1@${DIG_B}" unknown)"
+	# The same for a scalar, whose values a mixed: joins with ",".
+	run platform_compare_values "TEST_PLATFORM=mixed:auto,kubernetes" "TEST_PLATFORM=kubernetes" TEST_PLATFORM
+	assert_output $'TEST_PLATFORM\tsame'
+	run platform_compare_values "TEST_PLATFORM=mixed:auto,kubernetes" "TEST_PLATFORM=openshift" TEST_PLATFORM
+	assert_output $'TEST_PLATFORM\tdiffers'
+}
+
+@test "platform_lever_values (M8-B1): nothing for inputs that record none; a key one input lacks is mixed with unknown; without a drift file the other members' limits are not known" {
+	local dir="${BATS_TEST_TMPDIR}/pass"
+	mkdir -p "$dir"
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" c1 1 >"${dir}/legacy.tsv"
+	run platform_lever_values "${dir}/legacy.tsv"
+	assert_success
+	assert_output ""
+	printf '%s\n' "# TUNING_BASELINE=sidecar=on,discoverySelectors=off" "# SIDECAR_EGRESS_HOSTS=./* istio-system/*" \
+		"# ISTIOD_CPU_LIMIT_M=2000" "# ISTIOD_MEM_LIMIT_MI=4096" "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" c1 1 \
+		>"${dir}/r1.tsv"
+	# The limits are read on the record's first member (the source); nothing read b's.
+	run platform_lever_values "${dir}/r1.tsv"
+	assert_output "TUNING_BASELINE=sidecar=on,discoverySelectors=off
+SIDECAR_EGRESS_HOSTS=./* istio-system/*
+ISTIOD_CPU_LIMIT_M_BY_CONTEXT=a=2000,b=unknown
+ISTIOD_MEM_LIMIT_MI_BY_CONTEXT=a=4096,b=unknown"
+	# An input from before the keys: each value is also not known there.
+	run platform_lever_values "${dir}/r1.tsv" "${dir}/legacy.tsv"
+	assert_output "TUNING_BASELINE=sidecar=mixed:on;unknown,discoverySelectors=mixed:off;unknown
+SIDECAR_EGRESS_HOSTS=mixed:./* istio-system/*,unknown
+ISTIOD_CPU_LIMIT_M_BY_CONTEXT=a=mixed:2000;unknown,b=unknown
+ISTIOD_MEM_LIMIT_MI_BY_CONTEXT=a=mixed:4096;unknown,b=unknown"
+	# Inputs that disagree on a lever and on the hosts hold both.
+	sed 's/^# TUNING_BASELINE=sidecar=on/# TUNING_BASELINE=sidecar=off/; s|^# SIDECAR_EGRESS_HOSTS=.*|# SIDECAR_EGRESS_HOSTS=none|' \
+		"${dir}/r1.tsv" >"${dir}/r2.tsv"
+	run platform_lever_values "${dir}/r1.tsv" "${dir}/r2.tsv"
+	assert_line "TUNING_BASELINE=sidecar=mixed:on;off,discoverySelectors=off"
+	assert_line "SIDECAR_EGRESS_HOSTS=mixed:./* istio-system/*,none"
+	assert_line "ISTIOD_CPU_LIMIT_M_BY_CONTEXT=a=2000,b=unknown"
 }
 
 @test "platform_summary and platform_short_digests: no member names, counts when members differ, 12 hex digits" {

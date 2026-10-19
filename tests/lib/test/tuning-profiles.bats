@@ -21,8 +21,9 @@ setup() {
 	mkdir -p "${STUB_DIR}/bin"
 	: >"$STUB_LOG"
 	# kubectl: one member per --context. Its Istio CR is live.<ctx>.json, which a merge patch
-	# changes (null deletes) unless STUB_PATCH_NOOP names the context; the Sail operator and
-	# istiod always read as reconciled and rolled out. Its markers are markers.<ctx>.json (an
+	# changes (null deletes) unless STUB_PATCH_NOOP names the context; the Sail operator reads as
+	# reconciled (never on a context STUB_NO_RECONCILE names) and istiod as rolled out. Its
+	# markers are markers.<ctx>.json (an
 	# empty list when absent; STUB_LIST_FAIL names a context whose list fails). A delete -f of
 	# a marker file removes it, unless STUB_MARKER_STAYS names the context. The hub's Argo CD
 	# Applications are apps.json and its AppProject default project.json, which a merge patch
@@ -47,7 +48,8 @@ case "$args" in
 		((if type == "object" then . else {} end); if $p[$k] == null then del(.[$k]) else .[$k] = (.[$k] | mp($p[$k])) end)
 		else $p end; mp($patch)' "${STUB_DIR}/live.${ctx}.json" >"${STUB_DIR}/live.tmp" &&
 		mv "${STUB_DIR}/live.tmp" "${STUB_DIR}/live.${ctx}.json" ;;
-*" get istio.sailoperator.io default -o jsonpath="*) echo "2 2 True default" ;;
+*" get istio.sailoperator.io default -o jsonpath="*)
+	if on "${STUB_NO_RECONCILE:-}"; then echo "3 2 False default"; else echo "2 2 True default"; fi ;;
 *" get istiorevision.sailoperator.io default -o jsonpath="*) echo "1 1 True" ;;
 *" rollout status deployment/istiod "*) echo 'deployment "istiod" successfully rolled out' ;;
 *" get istio.sailoperator.io default -o json "*) cat "${STUB_DIR}/live.${ctx}.json" ;;
@@ -92,18 +94,20 @@ markers_on() {
 	jq -s '{kind: "List", items: .}' "$@" >"${STUB_DIR}/markers.${ctx}.json"
 }
 
-# state_dir: a state dir of 02-xds-cache-off applied to ctx-a and ctx-b, as 001-apply-profile.sh
-# leaves it (SD), with each member's Istio CR as the profile left it and a fresh stub log.
+# state_dir [<ctx>...]: a state dir of 02-xds-cache-off applied to those members (ctx-a and ctx-b
+# unless named), as 001-apply-profile.sh leaves it (SD), with each member's Istio CR as the
+# profile left it and a fresh stub log.
 state_dir() {
-	local ctx
+	local ctx ctxs=("$@")
+	((${#ctxs[@]})) || ctxs=(ctx-a ctx-b)
 	SD="${T}/state"
 	rm -rf "$SD" "${STUB_DIR}"/gone.*
 	mkdir -p "$SD"
 	: >"$STUB_LOG"
-	echo "ctx-a,ctx-b" >"${SD}/contexts"
+	(IFS=,; echo "${ctxs[*]}") >"${SD}/contexts"
 	echo "02-xds-cache-off" >"${SD}/active-profile"
 	: >"${SD}/applied-resources.yaml"
-	for ctx in ctx-a ctx-b; do
+	for ctx in "${ctxs[@]}"; do
 		echo '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}' >"${SD}/istio-revert-${ctx}.json"
 		echo '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":"false","PILOT_PUSH_THROTTLE":"100"}}}}}' \
 			>"${STUB_DIR}/live.${ctx}.json"
@@ -297,8 +301,96 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.ctx-b.json")" = '{"PILOT_PUSH_THROTTLE":"10"}' ]
 }
 
-@test "005-cleanup (U6-B1, U7-S3): with a hub context it removes the deny window a pause adds, recorded or not, keeps every other window, and fails on one of its shape for other Applications" {
-	local win
+@test "002-revert-profile and 005-cleanup (SC7-S1, SC8-N1): members that never reconcile share the round's deadline, so each after the first is checked once" {
+	local c
+	# 002 patches all three, then waits with one deadline: the first member's wait runs it out,
+	# and each later one is checked once and fails (a deadline each would poll it again 5 s on).
+	state_dir ctx-a ctx-b ctx-c
+	STUB_NO_RECONCILE=ctx-a,ctx-b,ctx-c run --separate-stderr "$REVERT" --state-dir "$SD" --rollout-timeout 2
+	[ "$status" -eq 3 ]
+	for c in ctx-a ctx-b ctx-c; do
+		[[ "$stderr" == *"${c}: Sail operator did not reconcile within 2s"* ]] || { echo "${c}: ${stderr}"; false; }
+	done
+	[ "$(grep -c -- "--context=ctx-a get istio.sailoperator.io default -o jsonpath=" "$STUB_LOG")" -ge 1 ]
+	[ "$(grep -c -- "--context=ctx-b get istio.sailoperator.io default -o jsonpath=" "$STUB_LOG")" -eq 1 ]
+	[ "$(grep -c -- "--context=ctx-c get istio.sailoperator.io default -o jsonpath=" "$STUB_LOG")" -eq 1 ]
+	! grep -q "/marker-" "$STUB_LOG" || false
+	# 005's round, the same; every marker stays.
+	: >"$STUB_LOG"
+	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}' "${T}/m2.json"
+	for c in ctx-a ctx-b ctx-c; do markers_on "$c" "${T}/m2.json"; done
+	STUB_NO_RECONCILE=ctx-a,ctx-b,ctx-c run --separate-stderr "$CLEANUP" --contexts ctx-a,ctx-b,ctx-c \
+		--results-dir "${T}/results" --rollout-timeout 2
+	assert_failure
+	for c in ctx-a ctx-b ctx-c; do
+		[[ "$stderr" == *"${c}: Sail operator did not reconcile within 2s"* ]] || { echo "${c}: ${stderr}"; false; }
+		[[ "$stderr" == *"FAIL  ${c}: the Istio CR is not back to its state before 02-xds-cache-off; the marker istio-system/tuning-profile-02-xds-cache-off stays"* ]]
+	done
+	[ "$(grep -c -- "--context=ctx-a get istio.sailoperator.io default -o jsonpath=" "$STUB_LOG")" -ge 1 ]
+	[ "$(grep -c -- "--context=ctx-b get istio.sailoperator.io default -o jsonpath=" "$STUB_LOG")" -eq 1 ]
+	[ "$(grep -c -- "--context=ctx-c get istio.sailoperator.io default -o jsonpath=" "$STUB_LOG")" -eq 1 ]
+	! grep -q " delete configmaps tuning-profile-" "$STUB_LOG" || false
+}
+
+@test "005-cleanup (C8-B1, SC8-S1): a member listed twice is cleaned once, every marker restored newest first, with a note" {
+	mk_marker 01-push-throttling 2026-10-19T09:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}' "${T}/m1.json"
+	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}' "${T}/m2.json"
+	mk_marker 03-gateway-cluster-filter 2026-10-19T11:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":null}}}}}' "${T}/m3.json"
+	markers_on ctx-a "${T}/m1.json" "${T}/m2.json" "${T}/m3.json"
+	echo '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"10","PILOT_ENABLE_CDS_CACHE":"false","PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":"true"}}}}}' \
+		>"${STUB_DIR}/live.ctx-a.json"
+	run --separate-stderr "$CLEANUP" --contexts ctx-a,ctx-a --results-dir "${T}/results"
+	assert_success
+	[[ "$stderr" == *"note: ctx-a listed more than once in the contexts; each member is cleaned once"* ]]
+	# Twice in a round, the middle marker was skipped and the cleanup still read complete.
+	run grep '^patch ' "$STUB_LOG"
+	assert_output 'patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":null}}}}}
+patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}
+patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
+	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.ctx-a.json")" = '{"PILOT_PUSH_THROTTLE":"100"}' ]
+	for p in 03-gateway-cluster-filter 02-xds-cache-off 01-push-throttling; do
+		[ "$(grep -c -- "--context=ctx-a -n istio-system delete configmaps tuning-profile-${p} --ignore-not-found" "$STUB_LOG")" -eq 1 ]
+	done
+	# m01,m02,m01 with two markers on m01 (round 2 read past the end of m01's list and died):
+	# both are restored, m02 has none, and the steps after the markers run.
+	: >"$STUB_LOG"
+	markers_on m01 "${T}/m1.json" "${T}/m2.json"
+	echo '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"10","PILOT_ENABLE_CDS_CACHE":"false"}}}}}' >"${STUB_DIR}/live.m01.json"
+	run --separate-stderr "$CLEANUP" --contexts m01,m02,m01 --results-dir "${T}/results"
+	assert_success
+	[[ "$stderr" == *"note: m01 listed more than once in the contexts; each member is cleaned once"* ]]
+	assert_output --partial "PASS  m01: marker istio-system/tuning-profile-02-xds-cache-off removed"
+	assert_output --partial "PASS  m01: marker istio-system/tuning-profile-01-push-throttling removed"
+	assert_output --partial "  m02: none"
+	assert_output --partial "--- Leftover profile resources (label istio-scale-tests/tuning-profile) ---"
+	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.m01.json")" = '{"PILOT_PUSH_THROTTLE":"100"}' ]
+	[ "$(grep -c -- "--context=m01 delete destinationrules" "$STUB_LOG")" -eq 1 ]
+}
+
+@test "ctx_keys_distinct (C8-S1, SC8-S2): a context listed twice, or two with one state file name, dies; 003 refuses either before its sweep, in --dry-run too" {
+	source "${ROOT}/tests/tuning/lib/tuning.sh"
+	run ctx_keys_distinct ctx-a ctx-b team/a team.a
+	assert_success
+	run ctx_keys_distinct ctx-a ctx-b ctx-a
+	assert_failure
+	assert_output --partial "context ctx-a is listed twice; list each member once"
+	run ctx_keys_distinct team/a team_a
+	assert_failure
+	assert_output --partial "contexts team/a and team_a have one state file name (team_a: a context name keeps only letters, digits, '.', '_' and '-' there); list each member once, under names that differ there"
+	# 001 refuses either for every profile pass; 003 refuses it before the setup and the baseline
+	# pass run, and before --dry-run prints its plan.
+	run "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" --dry-run --suite churn --no-gitops-pause --contexts ci-a,ci-a
+	assert_failure
+	assert_output --partial "context ci-a is listed twice; list each member once"
+	refute_output --partial "--- Plan ---"
+	run "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" --dry-run --suite churn --no-gitops-pause --contexts ci-a/x,ci-a_x
+	assert_failure
+	assert_output --partial "contexts ci-a/x and ci-a_x have one state file name"
+	! grep -q . "$STUB_LOG" || false
+}
+
+@test "005-cleanup (U6-B1, U7-S3, U8-S4): with a hub context it removes the deny window a pause adds, recorded or not, keeps every other window, and fails on one of its shape for other *-ossm Applications, naming its index" {
+	local win team
 	export TUNING_GITOPS_NAMESPACE=argocd
 	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{}' "${T}/m2.json"
 	markers_on ctx-a "${T}/m2.json"
@@ -325,21 +417,43 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	assert_output --partial "AppProject default: no deny sync window of this tool left"
 	assert_line "=== Cleanup complete ==="
 	! grep -q '^project-patch ' "$STUB_LOG" || false
-	# A window of this tool's shape for other Applications (a pause from before ctx-b was added)
-	# is not this tool's to remove by value (U7-S3): its own window goes, that one stays, named
-	# on stderr, and the cleanup fails until it is removed by hand.
+	# Another team's window of the same recipe, for Applications not named as the ApplicationSet
+	# names them (*-ossm), is not this tool's (U8-S4): it stays, unnamed, and the cleanup passes.
 	: >"$STUB_LOG"
-	jq -n --argjson w "$win" '{metadata: {name: "default", resourceVersion: "8"}, spec: {syncWindows: [
-		{kind: "deny", schedule: "* * * * *", duration: "1h", applications: ["ctx-a-ossm"], manualSync: true}, $w]}}' >"${STUB_DIR}/project.json"
+	team='{"kind":"deny","schedule":"* * * * *","duration":"1h","applications":["other-app"],"manualSync":true}'
+	jq -n --argjson w "$win" --argjson t "$team" '{metadata: {name: "default", resourceVersion: "8"}, spec: {syncWindows: [$w, $t]}}' \
+		>"${STUB_DIR}/project.json"
+	run --separate-stderr "$CLEANUP" --contexts ctx-a --results-dir "${T}/results" --gitops-context hub
+	assert_success
+	assert_output --partial "Resumed auto-sync (removed this tool's deny sync window from AppProject default)"
+	[[ "$stderr" != *"other-app"* && "$stderr" != *"warning: AppProject default holds"* ]]
+	run grep '^project-patch ' "$STUB_LOG"
+	assert_output "project-patch hub {\"metadata\":{\"resourceVersion\":\"8\"},\"spec\":{\"syncWindows\":[${team}]}}"
+	# A window of this tool's shape for other *-ossm Applications (a pause from before ctx-b was
+	# added) is not this tool's to remove by value (U7-S3): its own window goes, that one stays,
+	# named on stderr with its index in the list the patch leaves (U8-S4: --status shows that
+	# list), and the cleanup fails until it is removed by hand.
+	: >"$STUB_LOG"
+	jq -n --argjson w "$win" --argjson t "$team" '{metadata: {name: "default", resourceVersion: "9"}, spec: {syncWindows: [
+		$w, $t, {kind: "deny", schedule: "* * * * *", duration: "1h", applications: ["ctx-a-ossm"], manualSync: true}]}}' >"${STUB_DIR}/project.json"
 	run --separate-stderr "$CLEANUP" --contexts ctx-a --results-dir "${T}/results" --gitops-context hub
 	assert_failure
 	assert_output --partial "Resumed auto-sync (removed this tool's deny sync window from AppProject default)"
 	refute_output --partial "no deny sync window of this tool left"
-	[[ "$stderr" == *"warning: AppProject default holds a deny sync window of this tool's shape for other Applications (ctx-a-ossm): a pause from before a member was added or removed, which --clear does not remove; those Applications do not sync until it is removed by hand (--status lists the windows; tests/tuning/README.md, \"After a killed run\")"* ]]
+	[[ "$stderr" == *"warning: AppProject default holds a deny sync window of this tool's shape for other Applications (ctx-a-ossm; index 1 in its sync windows): a pause from before a member was added or removed, which --clear does not remove; those Applications do not sync until it is removed by hand (--status lists the windows; tests/tuning/README.md, \"After a killed run\")"* ]]
+	[[ "$stderr" != *"other-app"* ]]
 	[[ "$stderr" == *"error: a deny sync window of this tool's shape is still on hub (see the warnings above)"* ]]
 	[[ "$stderr" == *"=== Cleanup finished with errors (see above) ==="* ]]
 	run grep '^project-patch ' "$STUB_LOG"
-	assert_output 'project-patch hub {"metadata":{"resourceVersion":"8"},"spec":{"syncWindows":[{"kind":"deny","schedule":"* * * * *","duration":"1h","applications":["ctx-a-ossm"],"manualSync":true}]}}'
+	assert_output "project-patch hub {\"metadata\":{\"resourceVersion\":\"9\"},\"spec\":{\"syncWindows\":[${team},{\"kind\":\"deny\",\"schedule\":\"* * * * *\",\"duration\":\"1h\",\"applications\":[\"ctx-a-ossm\"],\"manualSync\":true}]}}"
+	# --status lists the windows the patch left with their index, and marks the stale one only:
+	# the other team's has the same shape but not *-ossm Applications.
+	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --status
+	assert_success
+	assert_line "Applications: ctx-a-ossm ctx-b-ossm"
+	assert_line "AppProject default sync windows (index: window, the index a JSON patch's /spec/syncWindows/<index> takes):"
+	assert_line '  0: {"applications": ["other-app"], "duration": "1h", "kind": "deny", "manualSync": true, "schedule": "* * * * *"}'
+	assert_line '  1: {"applications": ["ctx-a-ossm"], "duration": "1h", "kind": "deny", "manualSync": true, "schedule": "* * * * *"} (this tool'"'"'s shape, for *-ossm Applications)'
 	# The README section that warning names exists.
 	grep -qx '## After a killed run' "${ROOT}/tests/tuning/README.md"
 	# --dry-run names the call and touches nothing.

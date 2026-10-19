@@ -149,7 +149,8 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   outside a tuning run), read before the first iteration (a sweep reads it once for all its steps
   and hands it to them in `platform-record.txt` in the sweep dir, and reads it again after the
   last one: a build, istiod setting, tuning lever, tuning profile object or Kubernetes version
-  that changed in between is written to `platform-drift.txt` there). An image carries the digest
+  that changed in between is written to `platform-drift.txt` there, as is what that read could
+  not compare). An image carries the digest
   its pods run (`@unknown` when none has started: not read, never another build); `none` means
   no such pod. `005` prints it in every format, as `mixed` with a warning in the report itself
   (the top-level `warnings` array in json, empty without one) when its inputs differ, a value

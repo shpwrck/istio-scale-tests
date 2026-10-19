@@ -70,13 +70,14 @@ tests/tuning/results/sweep-<RUN_ID>/
 └── 01-push-throttling/      # same, plus state/ (patch.json, objects and the revert data)
 ```
 
-004 reads each pass's TSVs, its `platform-drift.txt` (only there when the read after its probe
-found something changed) and, for a profile pass, `state/patch.json` and `state/objects` (what
-001 patched and applied): keep them when you archive a sweep, or a re-render cannot see what
-changed during a pass, and checks a profile against its marker alone, with a warning that its
-istiod settings were not checked. `platform-record.txt` hands the record read before a pass's
-probe to the probe; `gitops-pause.json` is what 005 resumes a pause from (see "After a killed
-run").
+004 reads each pass's TSVs, its `platform-drift.txt` (what the read after its probe found
+changed during the pass and could not compare) and, for a profile pass, `state/patch.json` and
+`state/objects` (what 001 patched and applied): keep them when you archive a sweep. Without the
+drift file 004 warns that the pass was not read again at its end; without the state it cannot
+see what the profile sets, and checks the profile against its marker alone, with a warning that
+its istiod settings were not checked. `platform-record.txt` hands the record read before a
+pass's probe to the probe; `gitops-pause.json` is what 005 resumes a pause from (see "After a
+killed run").
 
 `SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
 table. Data-plane rows are split by target class (local or remote) and QPS; a row that
@@ -91,25 +92,48 @@ in KiB. Re-render:
 Each pass reads the platform record live before its probe
 ([`tests/lib/platform.sh`](../lib/platform.sh): the platform, the mesh operator, istiod and
 gateway proxy builds, the nodes' provider, istiod's settings, the tuning profile objects), and
-its tuning levers on the source member; the probe's TSVs carry them, with each member's
-Kubernetes version (`platform-record.txt` in the pass directory hands the record over). The pass
-reads them again after the probe, and what changed in between (a profile reverted by hand, an
-Argo CD sync that put istiod's settings back, a lever, an istiod limit, a control-plane upgrade)
-goes to the pass's `platform-drift.txt`, which 004 reads for that pass.
+its tuning levers and root Sidecar egress hosts on the source member; the probe's TSVs carry
+them, with each member's Kubernetes version and, for the controlplane suite, istiod's limits
+(`platform-record.txt` in the pass directory hands the record over). The pass reads them again
+after the probe, always, and writes what that read found to the pass's `platform-drift.txt`:
+what changed in between (a profile reverted by hand, an Argo CD sync that put istiod's settings
+back, a lever, an istiod limit, a control-plane upgrade), the other members whose istiod limits
+differ from the source member's, and what it could not compare (a value not read at either
+end, or an image whose digest is `@unknown`: no pod had started).
 
-The table's `Platform record` row compares each pass's with the baseline's (without a baseline,
-the first pass with data's, which reads `reference`; the baseline reads `baseline`), member by
-member for the builds and each member's Kubernetes version: `same`, `differs (see notes)`,
-`changed (see notes)` (the read after its probe found a build, a Kubernetes version, a tuning
-lever or an istiod limit changed during the pass), `mixed (see notes)` (its TSVs disagree),
-`unknown (see notes)` (a value not read or not recorded in one of them, an image whose digest is
-`@unknown`: no pod had started, or a member's version `unreachable`) or `-` (no data). The
-baseline (or reference) pass reads `baseline (see notes)` when its own record changed during it
-or its TSVs disagree: no pass is compared with it on that key, and its warning says that no
-profile's change against it is the profile's alone. A mesh operator that differs only in its
-state (`Available`, `Unavailable`) is the same build. The tuning levers and istiod's limits are
-checked within each pass, not between passes, since a profile may set them (a root Sidecar of
-its own, `spec.values.pilot.resources`). The row leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`) and the profile's objects
+The table's `Platform record` row compares each pass's record, tuning levers, root Sidecar egress
+hosts and istiod limits with the baseline's (without a baseline, the first pass with data's,
+which reads `reference`; the baseline reads `baseline`): member by member for the builds, the
+Kubernetes versions and the limits, lever by lever for the levers. A pass reads:
+
+- `same`;
+- `same (see notes)`: only what its profile sets differs, a lever or the egress hosts whose
+  object its `state/objects` lists (a root Sidecar of its own, a `tuning-metrics` or
+  `tuning-access-log` Telemetry), or `discoverySelectors` or a limit its `state/patch.json` sets
+  (also what the reference pass's profile sets, without a baseline); the notes say which;
+- `differs (see notes)`;
+- `changed (see notes)`: the read after its probe found a build, a Kubernetes version, a tuning
+  lever or an istiod limit changed during the pass;
+- `mixed (see notes)`: its TSVs disagree;
+- `unknown (see notes)`: a value not read or not recorded in one of them (a digest `@unknown`, a
+  member's version `unreachable`, a lever `unknown`), or not compared at the pass's end (a value
+  the read after its probe could not compare, or no `platform-drift.txt`: that read did not run);
+- `-`: no data.
+
+The baseline (or reference) pass reads `baseline (see notes)` when its own values changed during
+it, its TSVs disagree or it was not compared at its end, and its warning says that no profile's
+change against it is the profile's alone. A member that changed during a pass, or whose TSVs
+disagree, matches the other side when one of its values is that side's (the pass's own warning
+covers the change), so a pass on a version the baseline ended with reads `same`, and one on a
+version the baseline never ran there still `differs`: an upgrade rolling through the members
+shows in each pass it reaches. A mesh operator that differs only in its state (`Available`,
+`Unavailable`) is the same build. Only the controlplane suite's TSVs record istiod's limits, so
+another suite's sweep compares none, and nothing else shows a CPU limit that changes: istiod's
+Deployment sets `GOMAXPROCS` from `limits.cpu` by reference (`valueFrom`, so the env digest does
+not change with it), and `GOMAXPROCS` sets `PILOT_PUSH_THROTTLE`'s default, min(15 + 5 ×
+`GOMAXPROCS`, 100), which profile 01 tunes; keep istiod's resources fixed during such a sweep.
+
+The row leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`) and the profile's objects
 (`TUNING_OBJECTS_BY_CONTEXT`), which a profile changes on purpose (`spec.values.pilot.env`, the
 objects labelled `istio-scale-tests/tuning-profile`); two rows of their own show them, and both
 read `-` for a pass without data. `istiod env` is each pass's digest of istiod's settings, so you
@@ -122,22 +146,26 @@ ran different settings at once (their digests `+`-joined: a rollout caught midwa
 Terminating or a second istiod Deployment), or when it contradicts the profile: the baseline's
 digest, on a member or one of its pods, though the profile sets `spec.values.pilot.env` (the
 pass's `state/patch.json`), or another though it does not patch the Istio CR (a profile that
-changes other Istio CR values only is not checked, since some of them reach istiod's env too). A pass whose `state/patch.json` is gone warns that this was
-not checked. `Tuning objects` reads `none` (no profile's objects or marker, as in the baseline),
-`own` (every object of the pass's own profile on every member, its marker and its resources as
-`state/objects` lists them, and no other), `other (see notes)` (another profile's, or any in the
-baseline: a profile left applied), `missing (see notes)` (one of its own is not on a member: the
-profile was undone during the pass or never applied there, or the TSVs predate the markers) or
-`unknown (see notes)` (not read); all but `none` and `own` warn that the pass did not measure
-what its name says. The record follows the table once, digests shortened to 12 hex digits, then
-each pass that differs, changed, is mixed or cannot be compared, with those keys' values: one
-value when every member shares it, else only the members that do not match the reference pass,
-five at most, with a count (`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`), and
-what changed during it (`v1.33.1 to v1.33.2 on m7`); one line for a pass whose every value is
-unknown, such as one from before the record. A pass that differs (an operator upgrade or a
-gateway roll between passes), changed, is mixed or cannot be compared gets a warning in the notes
-and on stderr: its change against the baseline is then not the profile's alone (without a baseline,
-its difference from the reference pass is not the profiles' alone).
+changes other Istio CR values only is not checked, since some of them reach istiod's env too).
+A pass whose `state/patch.json` is gone warns that this was not checked. `Tuning objects` reads
+`none` (no profile's objects or marker, as in the baseline), `own` (every object of the pass's
+own profile on every member, its marker and its resources as `state/objects` lists them, and no
+other), `other (see notes)` (another profile's, or any in the baseline: a profile left applied),
+`missing (see notes)` (one of its own is not on a member: the profile was undone during the pass
+or never applied there, or the TSVs predate the markers) or `unknown (see notes)` (not read);
+all but `none` and `own` warn that the pass did not measure what its name says.
+
+The record follows the table once, digests shortened to 12 hex digits (a value its members do
+not share by value, five named), then each pass that differs, changed, is mixed, cannot be
+compared or has what its profile sets, with those keys' values: one value when every member
+shares it, else only the members that do not match the reference pass, five at most, with a
+count (`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`), what changed during it
+(`v1.33.1 to v1.33.2 on m7`), what it could not compare at its end, and what its profile sets;
+one line for a pass whose every value is unknown, such as one from before the record. A pass that
+differs (an operator upgrade, a gateway roll or a lever put back between passes), changed, is
+mixed or cannot be compared gets a warning in the notes and on stderr: its change against the
+baseline is then not the profile's alone, or not known to be (without a baseline, its difference
+from the reference pass is not the profiles' alone).
 
 `TEST_PLATFORM` (`config/options.env`; `auto`, `kubernetes` or `openshift`) sets the platform
 instead of asking each cluster, for the probe suite's chart overlay and, with
@@ -211,19 +239,23 @@ and every other suite's sweep warns as it starts (and every report in its body) 
 does: run 005 then, unless a tuning run is in progress on those members.
 
 `--clear`, and so the cleanup, fails when an AppProject holds a deny window of this tool's
-shape for other Applications than the ApplicationSet owns now (a pause from before a member was
-added or removed), naming that window's Applications; nothing removes it by value. Remove it by
-hand: `./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --status` prints the
-Applications and each AppProject's sync windows in order; with that window's place in its list,
-from 0, as `<i>`:
+shape for other Applications than the ApplicationSet owns now, all named as it names them
+(`*-ossm`: a pause from before a member was added or removed), naming that window's Applications
+and its index; nothing removes it by value. A window of that shape for any other Application is
+another team's, and is left alone. Remove the stale one by hand:
+`./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --status` prints the Applications
+and each AppProject's sync windows with their index (`<i>` below) and marks those of this
+tool's shape for `*-ossm` Applications:
 
 ```bash
 kubectl --context <hub-ctx> -n <argocd-namespace> patch appprojects.argoproj.io <project> --type json \
-  -p '[{"op":"test","path":"/spec/syncWindows/<i>/kind","value":"deny"},{"op":"remove","path":"/spec/syncWindows/<i>"}]'
+  -p '[{"op":"test","path":"/spec/syncWindows/<i>/kind","value":"deny"},
+       {"op":"test","path":"/spec/syncWindows/<i>/schedule","value":"* * * * *"},
+       {"op":"remove","path":"/spec/syncWindows/<i>"}]'
 ```
 
-The `test` step makes the patch change nothing when that place holds no deny window. Then run
-the cleanup again.
+The `test` steps make the patch change nothing when that index holds another window (one added
+or removed since `--status`). Then run the cleanup again.
 
 ## Adding a profile
 

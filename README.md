@@ -216,7 +216,9 @@ every other member's istiod limits against the recorded ones (the controlplane r
 every member's window-peak CPU and RSS % by those): a value that changed goes to
 `platform-drift.txt` in the sweep dir, and every report of the sweep says so in its body, naming
 the sweep dir and the value at the start and at the end (the record's keys read `mixed:`, as does
-`KUBE_VERSIONS` in churn's report, which merges it). Members that changed the same way share one
+`KUBE_VERSIONS` in churn's report, which merges it); so does a value the read could not compare
+(not read at either end, or a digest `@unknown`), which the reports call not known. Members that
+changed the same way share one
 warning, which names five of them and counts the rest. A controlplane `--resume` stops on a
 definite difference from what the sweep's TSV records: a member's platform, mesh operator build
 (not its state), istiod or gateway proxy build, istiod env digest, tuning profile objects, node

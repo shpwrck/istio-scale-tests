@@ -349,7 +349,8 @@ the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_
 platform and the mesh builds the run measured, read before the first window (a sweep reads it
 once and hands it to its combos in `platform-record.txt` in the sweep dir, and reads it again
 after its last combo: a build, istiod setting, tuning lever, tuning profile object or Kubernetes
-version that changed in between is written to `platform-drift.txt` there). An image carries
+version that changed in between is written to `platform-drift.txt` there, as is what that read
+could not compare). An image carries
 the digest its pods run (`@unknown` when none has started: not read, never another build);
 `none` means no such pod. `004` prints it in every format, with a warning in the report itself
 (the top-level `warnings` array in json, empty without one) when its inputs differ, a value

@@ -224,7 +224,8 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   first window (a sweep reads it once and hands it to its combos in `platform-record.txt` in the
   sweep dir, and reads it again after its last combo: a build, istiod setting or limit, tuning
   lever, tuning profile object or Kubernetes version that changed in between is written to
-  `platform-drift.txt` there; `002 --phase final` reuses the baseline phase's). An
+  `platform-drift.txt` there, as is what that read could not compare; `002 --phase final` reuses
+  the baseline phase's). An
   image carries the digest its pods run; `@unknown` when none has started (an operator scaled to
   0, a Pending replica), which every comparison takes as not read (a warning), never as another
   build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT` is a 12-hex digest of

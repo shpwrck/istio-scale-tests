@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Helpers shared by tests/tuning/001-apply-profile.sh, 002-revert-profile.sh and
-# 005-cleanup.sh. Sourced, never executed. Expects a KUBECTL array (see resolve_kubectl).
+# Helpers shared by tests/tuning/001-apply-profile.sh, 002-revert-profile.sh,
+# 003-run-tuning-sweep.sh and 005-cleanup.sh. Sourced, never executed. Expects a KUBECTL
+# array (see resolve_kubectl).
 #
 #   ctx_key <ctx>                     -> file-name-safe form of a context name
-#   ctx_keys_distinct <ctx>...        -> die when two contexts have one ctx_key (their
-#                                        state files would be one file)
+#   ctx_keys_distinct <ctx>...        -> die when a context is listed twice, or two
+#                                        contexts have one ctx_key (their state files
+#                                        would be one file)
 #   wait_for_istiod <ctx> <timeout> [<deadline>]
 #                                     -> wait for the Sail operator to reconcile the
 #                                        Istio CR and its active IstioRevision, then
@@ -24,8 +26,10 @@ ctx_keys_distinct() {
 	local -A seen=()
 	for ctx in "$@"; do
 		k="$(ctx_key "$ctx")"
-		[[ -z "${seen[$k]+x}" ]] ||
+		if [[ -n "${seen[$k]+x}" ]]; then
+			[[ "${seen[$k]}" != "$ctx" ]] || die "context ${ctx} is listed twice; list each member once"
 			die "contexts ${seen[$k]} and ${ctx} have one state file name (${k}: a context name keeps only letters, digits, '.', '_' and '-' there); list each member once, under names that differ there"
+		fi
 		seen[$k]="$ctx"
 	done
 }

@@ -222,6 +222,8 @@ EXTRACTED_PATTERNS=(
 	'platform_probe_reset() {'
 	'platform_members_by_value() {'
 	'platform_drift_changes() {'
+	'platform_drift_unread() {'
+	'platform_lever_values() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

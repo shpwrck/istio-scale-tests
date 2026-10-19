@@ -31,9 +31,12 @@ Profile commands need PyYAML; the others use the standard library only.
   window-remove PROJECT_JSON WINDOW_JSON
                                   print a merge patch that removes the window; exit 3 if
                                   it is not there
-  windows-like PROJECT_JSON WINDOW_JSON
-                                  print the Applications (names) of each other window of
-                                  this tool's shape: a pause for another set of Applications
+  windows-like PROJECT_JSON WINDOW_JSON SUFFIX
+                                  print "index names" for each other window of this tool's
+                                  shape whose Applications are all named *-SUFFIX (the
+                                  ApplicationSet's): a pause for another set of them
+  windows PROJECT_JSON SUFFIX     print each sync window, "index: window", marking those of
+                                  this tool's shape for Applications all named *-SUFFIX
   state-add STATE CTX NS PROJECT WINDOW_JSON
                                   record a paused AppProject window in the STATE file
   state-get STATE context|namespace|projects|window:PROJECT [OUT]
@@ -379,14 +382,27 @@ def cmd_window_remove(project_file, window_file):
     }))
 
 
-def cmd_windows_like(project_file, window_file):
-    """Each window of the AppProject with WINDOW's shape (window_for) but other Applications: a
-    pause from before a member was added or removed, which --clear does not remove."""
+def shaped(w, suffix):
+    """A window of this tool's shape (window_for) for Applications all named *-SUFFIX, as the
+    ApplicationSet names them. One of that shape for any other Application is another team's."""
+    apps = w.get("applications") or []
+    shape = {k: v for k, v in window_for([]).items() if k != "applications"}
+    return matches(w, shape) and bool(apps) and all(a.endswith("-" + suffix) for a in apps)
+
+
+def cmd_windows_like(project_file, window_file, suffix):
+    """Each such window (shaped) for other Applications than WINDOW's, with its index: a pause
+    from before a member was added or removed, which --clear does not remove."""
     proj, window = read_json(project_file), read_json(window_file)
-    shape = {k: v for k, v in window.items() if k != "applications"}
-    for w in proj.get("spec", {}).get("syncWindows") or []:
-        if matches(w, shape) and not matches(w, window):
-            print(names(sorted(w.get("applications") or [])))
+    for i, w in enumerate(proj.get("spec", {}).get("syncWindows") or []):
+        if shaped(w, suffix) and not matches(w, window):
+            print(i, names(sorted(w["applications"])))
+
+
+def cmd_windows(project_file, suffix):
+    for i, w in enumerate(read_json(project_file).get("spec", {}).get("syncWindows") or []):
+        mark = f" (this tool's shape, for *-{suffix} Applications)" if shaped(w, suffix) else ""
+        print(f"  {i}: {json.dumps(w, sort_keys=True)}{mark}")
 
 
 def cmd_state_add(state_file, ctx, ns, project, window_file):
@@ -429,7 +445,8 @@ COMMANDS = {
     "window-remove": (cmd_window_remove, 2, 2),
     "state-add": (cmd_state_add, 5, 5),
     "state-get": (cmd_state_get, 2, 3),
-    "windows-like": (cmd_windows_like, 2, 2),
+    "windows-like": (cmd_windows_like, 3, 3),
+    "windows": (cmd_windows, 2, 2),
 }
 
 if __name__ == "__main__":

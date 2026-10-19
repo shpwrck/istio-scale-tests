@@ -93,7 +93,8 @@ without `CLUSTER_ID`; `TUNING_OBJECTS_BY_CONTEXT`: `none` outside a tuning run),
 first churn event (a sweep reads it once for all its combos and hands it to them in
 `platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
 setting, tuning lever, tuning profile object or Kubernetes version that changed in between is
-written to `platform-drift.txt` there). An image carries the digest its pods run (`@unknown`
+written to `platform-drift.txt` there, as is what that read could not compare). An image carries
+the digest its pods run (`@unknown`
 when none has started: not read, never another build); `none` means no such pod.
 `004` prints them in every format (text, csv, md, charts; it has no json), per member as
 `<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ (`KUBE_VERSIONS`:

@@ -40,13 +40,16 @@ ${APPSET} ApplicationSet, using a deny sync window on their AppProject.
 Options:
   --pause                Add the deny window; record it in --state-file.
   --resume               Remove the window recorded in --state-file.
-  --status               List the Applications and their AppProject sync windows.
+  --status               List the Applications and each AppProject's sync windows, with
+                         each window's index in its list, marking those of this tool's
+                         shape for Applications named *-${APP_SUFFIX}.
   --clear                Remove the deny window this tool adds for the Applications the
                          ApplicationSet owns now, whether or not a pause record names it
                          (a run whose results, and so its record, are elsewhere or gone).
-                         Fails when one of this tool's shape for other Applications is
-                         left (a pause from before a member was added or removed), which
-                         is removed by hand (tests/tuning/README.md).
+                         Fails when a deny window of this tool's shape for other
+                         Applications named *-${APP_SUFFIX} is left (a pause from before a
+                         member was added or removed), naming its index; you remove it by
+                         hand (tests/tuning/README.md, "After a killed run").
   --gitops-context CTX   Hub context running Argo CD (default: \$TUNING_GITOPS_CONTEXT).
   --state-file FILE      Pause record (default: tests/tuning/results/gitops-pause.json).
   --namespace NS         Argo CD namespace (default: \$TUNING_GITOPS_NAMESPACE, ${NS_DEFAULT:-empty};
@@ -54,7 +57,8 @@ Options:
                          else argocd: terraform/platform output gitops_namespace). The
                          hub's platform is TEST_PLATFORM (config/options.env) when it is
                          kubernetes or openshift, else asked of the hub.
-  --appset NAME          ApplicationSet that owns the Applications (default: ${APPSET}).
+  --appset NAME          ApplicationSet that owns the Applications (default:
+                         \$TUNING_GITOPS_APPSET, ${APPSET}).
   --dry-run              Print what would change; do not touch clusters.
   -h, --help             Show this help.
 
@@ -146,9 +150,10 @@ status)
 	discover_apps
 	echo "Applications: ${APPS[*]}"
 	for p in "${PROJECTS[@]}"; do
-		echo "AppProject ${p} syncWindows:"
-		"${K[@]}" get appprojects.argoproj.io "$p" -o jsonpath='{.spec.syncWindows}'
-		echo ""
+		"${K[@]}" get appprojects.argoproj.io "$p" -o json >"$WORK/project.json" \
+			|| die "${GITOPS_CTX}: cannot read AppProject ${p}"
+		echo "AppProject ${p} sync windows (index: window, the index a JSON patch's /spec/syncWindows/<index> takes):"
+		python3 -I "$HELPER" windows "$WORK/project.json" "$APP_SUFFIX"
 	done
 	if [[ -f "$STATE_FILE" ]]; then echo "Paused by this tool (state: ${STATE_FILE})"; fi
 	;;
@@ -209,20 +214,25 @@ clear)
 			|| die "${GITOPS_CTX}: cannot read AppProject ${p}"
 		rc=0
 		python3 -I "$HELPER" window-remove "$WORK/project.json" "$WORK/window.json" >"$WORK/patch.json" || rc=$?
+		# The windows left: the patch's list once it applies (it replaces the list, at the
+		# resourceVersion read), so the indices below are the ones --status shows next.
+		left="$WORK/project.json"
 		if ((rc == 0)); then
 			"${K[@]}" patch appprojects.argoproj.io "$p" --type=merge --patch-file="$WORK/patch.json" >/dev/null \
 				|| die "${GITOPS_CTX}: patching AppProject ${p} failed; still paused"
 			echo "Resumed auto-sync (removed this tool's deny sync window from AppProject ${p})"
+			left="$WORK/patch.json"
 		elif ((rc != 3)); then
 			die "building the patch for AppProject ${p} failed"
 		fi
-		# A window of the same shape for other Applications: a pause from before a member was
-		# added or removed. Not this tool's to remove by value (its Applications are not the
-		# ApplicationSet's now), so it is named for removal by hand.
-		others="$(python3 -I "$HELPER" windows-like "$WORK/project.json" "$WORK/window.json")"
+		# A window of the same shape for other Applications named as the ApplicationSet names
+		# them: a pause from before a member was added or removed. Not this tool's to remove by
+		# value (its Applications are not the ApplicationSet's now), so it is named for removal
+		# by hand; one for any other Application is another team's, and stays unnamed.
+		others="$(python3 -I "$HELPER" windows-like "$left" "$WORK/window.json" "$APP_SUFFIX")"
 		if [[ -n "$others" ]]; then
-			while IFS= read -r w; do
-				echo "warning: AppProject ${p} holds a deny sync window of this tool's shape for other Applications (${w}): a pause from before a member was added or removed, which --clear does not remove; those Applications do not sync until it is removed by hand (--status lists the windows; tests/tuning/README.md, \"After a killed run\")" >&2
+			while read -r i w; do
+				echo "warning: AppProject ${p} holds a deny sync window of this tool's shape for other Applications (${w}; index ${i} in its sync windows): a pause from before a member was added or removed, which --clear does not remove; those Applications do not sync until it is removed by hand (--status lists the windows; tests/tuning/README.md, \"After a killed run\")" >&2
 			done <<<"$others"
 			stale=1
 		elif ((rc == 3)); then

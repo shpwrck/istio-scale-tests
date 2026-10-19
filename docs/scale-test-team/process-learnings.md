@@ -477,6 +477,14 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 
 **Why:** Tuning 004 compared each member's istiod settings with the baseline's, so a member whose istiod could not be read (`unknown`) read as other settings, and a pass whose TSVs disagree on a build read as another build than the baseline's: a profile could be credited with, or blamed for, a difference nobody had seen.
 
-**How to preempt:** Before comparing, split each side into its definite values and the rest. An unread or unrecorded value (`unknown`, `unreachable`, a digest `@unknown`) makes the comparison not known, with a warning that names the members; a member with two values (a `mixed:` merge, `+`-joined pods) reads `mixed` and is compared with nothing. Test each with one member of several and with all of them.
+**How to preempt:** Before comparing, split each side into its definite values and the rest. An unread or unrecorded value (`unknown`, `unreachable`, a digest `@unknown`) makes the comparison not known, with a warning that names the members. A member with two values (a `mixed:` merge, `+`-joined pods) reads `mixed` with its own warning and is still compared value by value: it matches the other side when one of its values is that side's, and differs when none is, so one istiod pod on the baseline's settings still shows a profile that was not in effect there. Test each with one member of several and with all of them.
 
 (PL60 and PL61 were added after the same cycle's round 7.)
+
+## PL62 — A read moved into each part makes each part its own reference; compare the parts with each other
+
+**Why:** Tuning 003 came to read each pass's tuning levers and istiod limits before its probe, and the read after the probe compared the pass with its own start, while 004 checked those values only within each pass. A root Sidecar removed between the baseline and a profile pass, or an istiod CPU limit doubled, was then compared with nothing: the table read `same` and credited the profile with the change, which the earlier read once per sweep had caught.
+
+**How to preempt:** When a value read once per run comes to be read once per part, compare each part's value with the reference part's, member by member, unless the part's own record shows that it set the value on purpose (a tuning profile's `state/objects` and `state/patch.json`), and then say so in a note. Test a change between two parts that no part's record explains, and one that a part's record does.
+
+(PL62 was added after the same cycle's round 8.)
