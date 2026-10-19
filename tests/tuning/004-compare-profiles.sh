@@ -2,9 +2,10 @@
 # Compare the passes of a tuning sweep (baseline + one directory per profile).
 # Reads each pass's suite TSV, finds columns by header name, averages the valid rows
 # and shows each profile's change against the baseline. Each pass's platform record
-# (PLATFORM, the mesh operator, istiod and proxy builds, the node provider: tests/lib/platform.sh)
-# gets a row, and a pass whose record differs from the baseline's warns: its change is then not
-# the profile's alone.
+# (PLATFORM, the mesh operator, istiod and gateway proxy builds, the node provider:
+# tests/lib/platform.sh) is compared with the baseline's (else the first pass with data's) in
+# one "Platform record" row, its values follow the table once, and a pass whose record differs
+# (or cannot be compared) warns: its change is then not the profile's alone.
 #
 # Usage:
 #   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
@@ -14,9 +15,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/config.sh"  # config_report_value (platform_report_values)
-# shellcheck disable=SC1091
-source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_collapse
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_compare_values, platform_collapse
 
 RESULTS_DIR=""
 FORMAT="text"
@@ -31,7 +30,10 @@ istiod restart); each profile also shows its change against the baseline.
 Histogram p99 rows (convergence, push time) show the worst bucket a valid row hit,
 or "overflow (N rows)", never a mean. Memory is in Mi, CPU in millicores (the
 controlplane's istiod CPU and memory are window peaks), config sizes in KiB, and a
-count's mean prints bare when it is whole (438, not 438.00).
+count's mean prints bare when it is whole (438, not 438.00). The "Platform record" row
+compares each pass's platform and mesh builds with the baseline's (same, differs or
+unknown; an operator that differs only in its state is the same build); the values
+follow the table, digests shortened to 12 hex digits.
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$RESULTS_DIR" ]] || die "--results-dir is required"
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 case "$FORMAT" in
@@ -258,25 +261,77 @@ row "${cells[@]}"
 cells=("Valid / total rows")
 for p in "${PASSES[@]}"; do cells+=("${NROWS[$p]:-0/0}"); done
 row "${cells[@]}"
-# The platform record, one row per key (a value every member shares shown once). A pass that
-# differs from the baseline on one warns, in the output and on stderr (PL39).
-plat_get() { sed -n "s/^$2=//p" <<<"${PLAT[$1]:-}"; }
-PLAT_WARNINGS=()
-for kl in "PLATFORM|Platform" "TEST_PLATFORM|TEST_PLATFORM" "MESH_OPERATOR_BY_CONTEXT|Mesh operator" \
-	"ISTIOD_IMAGE_BY_CONTEXT|istiod image" "PROXY_IMAGE_BY_CONTEXT|Proxy image" "NODE_PROVIDER_BY_CONTEXT|Node provider"; do
-	k="${kl%%|*}"
-	cells=("${kl#*|}")
+# The platform record: one row, each pass against the reference pass (the baseline, else the
+# first pass with data; platform_compare_values: an operator that differs only in its state is
+# the same build), and the values once after the table (render). A pass that differs, or cannot
+# be compared, warns in the output and on stderr (PL39).
+REF=""
+[[ -z "$BASE" || -z "${PLAT[$BASE]:-}" ]] || REF="$BASE"
+if [[ -z "$REF" ]]; then
 	for p in "${PASSES[@]}"; do
-		if [[ -z "${PLAT[$p]:-}" ]]; then cells+=("-"); continue; fi
-		v="$(plat_get "$p" "$k")"
-		cells+=("$(platform_collapse "${v:-unknown}")")
-		if [[ -n "$BASE" && "$p" != "$BASE" && -n "${PLAT[$BASE]:-}" && "$v" != "$(plat_get "$BASE" "$k")" ]]; then
-			PLAT_WARNINGS+=("pass ${p} and the baseline differ on ${k} (baseline: $(plat_get "$BASE" "$k"); ${p}: ${v}), so its change against the baseline is not the profile's alone (unknown: not recorded)")
-		fi
+		[[ -z "${PLAT[$p]:-}" ]] || { REF="$p"; break; }
 	done
-	row "${cells[@]}"
+fi
+REF_NAME="baseline"
+[[ "$REF" == "$BASE" ]] || REF_NAME="pass ${REF} (the first pass with data)"
+declare -A PLAT_DIFF PLAT_UNK  # pass -> the record keys that differ from / cannot be compared with REF's
+PLAT_WARNINGS=()
+PLAT_KEYS_ALL="$(IFS=,; echo "${PLATFORM_KEYS[*]}")"
+PLAT_KEYS_ALL="${PLAT_KEYS_ALL//,/, }"
+cells=("Platform record")
+for p in "${PASSES[@]}"; do
+	if [[ -z "${PLAT[$p]:-}" ]]; then cells+=("-"); continue; fi
+	if [[ "$p" == "$REF" ]]; then
+		if [[ "$REF" == "$BASE" ]]; then cells+=("baseline"); else cells+=("reference"); fi
+		continue
+	fi
+	dk="" uk=""
+	while IFS=$'\t' read -r k res; do
+		case "$res" in
+		differs) dk+="${dk:+, }${k}" ;;
+		unknown) uk+="${uk:+, }${k}" ;;
+		esac
+	done < <(platform_compare_values "${PLAT[$REF]}" "${PLAT[$p]}")
+	PLAT_DIFF[$p]="$dk" PLAT_UNK[$p]="$uk"
+	if [[ -n "$dk" ]]; then
+		cells+=("differs (see notes)")
+		PLAT_WARNINGS+=("pass ${p} differs from the ${REF_NAME} on ${dk} (its values follow the table), so its change against the baseline is not the profile's alone")
+	elif [[ -n "$uk" ]]; then
+		cells+=("unknown (see notes)")
+	else
+		cells+=("same")
+	fi
+	if [[ "$uk" == "$PLAT_KEYS_ALL" ]]; then
+		PLAT_WARNINGS+=("pass ${p}: no key of its platform record can be compared with the ${REF_NAME}'s (its TSVs predate the record, or nothing could be read), so whether it ran on the same platform and builds is not known")
+	elif [[ -n "$uk" ]]; then
+		PLAT_WARNINGS+=("pass ${p}: ${uk} could not be compared with the ${REF_NAME}'s (not read, or not recorded, in one of them), so whether it ran on the same platform and builds is not known")
+	fi
 done
+row "${cells[@]}"
 for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "warning: ${w}" >&2; done
+# plat_lines <pass> [keys CSV]: "KEY<TAB>value" of a pass's record (those keys, else every one),
+# a value every member shares once, digests shortened (the TSVs keep them in full).
+plat_lines() {
+	local kv
+	while IFS= read -r kv; do
+		[[ -n "$kv" ]] || continue
+		[[ -z "${2:-}" || ", ${2}, " == *", ${kv%%=*}, "* ]] || continue
+		printf '%s\t%s\n' "${kv%%=*}" "$(platform_short_digests "$(platform_collapse "${kv#*=}")")"
+	done <<<"${PLAT[$1]:-}"
+}
+# plat_head <pass>: the heading of a pass's note after the table (the keys it differs on or
+# cannot be compared on); return 1, with one line instead, when every value it has is unknown.
+plat_head() {
+	local kv known=0
+	while IFS= read -r kv; do
+		[[ -z "$kv" || "$(platform_collapse "${kv#*=}")" == unknown ]] || known=1
+	done <<<"${PLAT[$1]:-}"
+	if ((known == 0)) && [[ -z "${PLAT_DIFF[$1]:-}" ]]; then
+		echo "Pass ${1}: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
+		return 1
+	fi
+	echo "Pass ${1}$([[ -z "${PLAT_DIFF[$1]:-}" ]] || echo ", differs on ${PLAT_DIFF[$1]}")$([[ -z "${PLAT_UNK[$1]:-}" ]] || echo ", cannot be compared on ${PLAT_UNK[$1]}"):"
+}
 for g in "${GROUP_VALUES[@]}"; do
 	for m in "${METRICS[@]}"; do
 		col="${m%%|*}" rest="${m#*|}"
@@ -312,6 +367,21 @@ render() {
 		echo "$hdr"
 		echo "$sep"
 		for r in "${ROWS[@]}"; do echo "| ${r//$'\t'/ | } |"; done
+		if [[ -n "$REF" ]]; then
+			echo ""
+			echo "### Platform record"
+			echo ""
+			echo "The ${REF_NAME}'s (digests shortened to 12 hex digits; the TSVs keep them in full):"
+			echo ""
+			plat_lines "$REF" | awk -F'\t' '{ printf "- %s: `%s`\n", $1, $2 }'
+			for p in "${PASSES[@]}"; do
+				[[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}" ]] || continue
+				echo ""
+				plat_head "$p" || continue
+				echo ""
+				plat_lines "$p" "${PLAT_DIFF[$p]:-}${PLAT_DIFF[$p]:+${PLAT_UNK[$p]:+, }}${PLAT_UNK[$p]:-}" | awk -F'\t' '{ printf "- %s: `%s`\n", $1, $2 }'
+			done
+		fi
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		echo "Means over valid rows; profiles show the change against the baseline."
@@ -326,6 +396,16 @@ render() {
 		} | awk -F'\t' '
 			{ for (i = 1; i <= NF; i++) { cell[NR, i] = $i; if (length($i) > w[i]) w[i] = length($i) } if (NF > nf) nf = NF }
 			END { for (r = 1; r <= NR; r++) { line = ""; for (i = 1; i <= nf; i++) line = line sprintf("%-" w[i] "s  ", cell[r, i]); sub(/ +$/, "", line); print line } }'
+		if [[ -n "$REF" ]]; then
+			echo ""
+			echo "Platform record of the ${REF_NAME} (digests shortened to 12 hex digits; the TSVs keep them in full):"
+			plat_lines "$REF" | awk -F'\t' '{ printf "  %-25s %s\n", $1, $2 }'
+			for p in "${PASSES[@]}"; do
+				[[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}" ]] || continue
+				plat_head "$p" || continue
+				plat_lines "$p" "${PLAT_DIFF[$p]:-}${PLAT_DIFF[$p]:+${PLAT_UNK[$p]:+, }}${PLAT_UNK[$p]:-}" | awk -F'\t' '{ printf "  %-25s %s\n", $1, $2 }'
+			done
+		fi
 	fi
 }
 

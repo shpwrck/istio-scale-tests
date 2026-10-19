@@ -155,6 +155,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
+
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
 	split_csv "$CONTEXTS_CSV" CONTEXTS
@@ -391,6 +393,8 @@ for ms in "${MESH_SIZES[@]}"; do
 
 	echo ""
 done
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep complete"

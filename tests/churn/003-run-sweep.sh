@@ -131,6 +131,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
+
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
 	split_csv "$CONTEXTS_CSV" CONTEXTS
@@ -341,6 +343,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete."
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep complete"

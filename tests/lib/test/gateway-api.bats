@@ -833,7 +833,7 @@ render_sha() {
 	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | sed -n 3p)" = "$(grep -m1 '^- kind: Service' "$s")" ]
 	grep -q '^- Hostname — \*\*NO\*\*' "$s"
 	grep -q '| Run config | `none` (sha256 `none`) |' "$s"
-	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; proxy istio-proxyv2-rhel9:1.30.5@${digest} |" "$s"
+	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest} |" "$s"
 	grep -q '| Member | istiod image | Ingress istio-proxy image | Operator build |' "$s"
 	grep -q '| Traffic | ' "$s"
 	grep -q "istio-pilot-rhel9:1.30.5@${digest}" "$s"
@@ -1467,16 +1467,21 @@ render_sha() {
 	grep -qx '# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=kind' "$(tsv)"
 	! grep -q clusterserviceversions "$STUB_LOG" || false
 	refute_output --partial "could not read"
-	# TEST_PLATFORM=openshift skips the question; on a member without OLM the CSV read cannot
-	# answer, so the operator build is unknown with a warning, never absent (PL39).
+	# TEST_PLATFORM=openshift still asks each member what it serves: Kubernetes members keep
+	# kubernetes and their Sail operator build, with a warning that the override disagrees (the
+	# override is recorded as TEST_PLATFORM).
 	rm -rf "$OUT"
+	: > "$STUB_LOG"
 	STUB_PLATFORM=kubernetes TEST_PLATFORM=openshift gw_run
 	assert_success
-	grep -qx '# OSSM_OPERATOR\[ctx-b\]=unknown' "$(tsv)"
 	grep -qx '# TEST_PLATFORM=openshift' "$(tsv)"
-	grep -qx '# PLATFORM=openshift' "$(tsv)"
-	assert_output --partial "ctx-b: could not read the mesh operator build; recorded as unknown: error: the server doesn't have a resource type"
-	! grep -q api-versions "$STUB_LOG" || false
+	grep -qx '# PLATFORM=kubernetes' "$(tsv)"
+	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=kubernetes,ctx-b=kubernetes' "$(tsv)"
+	grep -qx "# OSSM_OPERATOR\[ctx-b\]=sail-operator:1.31.1@${digest}/Available" "$(tsv)"
+	assert_output --partial "ctx-b: TEST_PLATFORM=openshift, but the member serves kubernetes: the record keeps kubernetes (PLATFORM_BY_CONTEXT)"
+	grep -q -- '--context=ctx-b .*api-versions' "$STUB_LOG"
+	! grep -q clusterserviceversions "$STUB_LOG" || false
+	refute_output --partial "could not read"
 }
 
 @test "gateway-api run: a member whose platform cannot be read records the operator build unknown, never absent (PL39)" {

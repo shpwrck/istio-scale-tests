@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 TUNING_DIR="${ROOT}/tests/tuning"
 RESULTS="${TUNING_DIR}/results"
@@ -55,6 +57,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 CONTEXTS=()
 split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"

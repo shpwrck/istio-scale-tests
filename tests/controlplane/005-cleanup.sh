@@ -35,6 +35,8 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the delete timings
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state, ns_lifecycle_*
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate; the platform record ns_lifecycle_init writes
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -161,6 +163,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 KUBECTL=()
 resolve_kubectl KUBECTL
 

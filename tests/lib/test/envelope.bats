@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 load test_helper
 source "${ROOT}/tests/lib/capacity.sh"
 source "${ROOT}/tests/lib/envelope.sh"
@@ -182,6 +183,92 @@ _net_kubectl() {
 	run env_sla_verdict 80 20 30 40 0 12 12
 	[[ "$output" == CAUTION\|* ]]
 	[[ "$output" == *"[75,90)"* ]]
+}
+
+# H4: kind nodes report the shared host, so the verdict leaves their figures out.
+@test "env_sla_verdict --nodes-excluded: CAUTION with the reason even when every figure is low" {
+	run env_sla_verdict --nodes-excluded "the nodes are kind's" 10 20 30 40 0 12 12
+	assert_success
+	assert_output "CAUTION|node figures left out: the nodes are kind's; the figures: peak utilization 20% < 75% across istiod, no restarts, all 12 samples valid"
+	# Node figures that would fail, or are unknown, do not count; istiod's still do.
+	run env_sla_verdict --nodes-excluded kind 10 20 95 99 0 12 12
+	assert_output "CAUTION|node figures left out: kind; the figures: peak utilization 20% < 75% across istiod, no restarts, all 12 samples valid"
+	run env_sla_verdict --nodes-excluded kind 10 20 unknown unknown 0 12 12
+	[[ "$output" == "CAUTION|node figures left out: kind; the figures: peak utilization 20%"* ]]
+	run env_sla_verdict --nodes-excluded kind 95 20 30 40 0 12 12
+	assert_output "FAIL|peak utilization 95% >= 90% — at/over a resource limit; also node figures left out: kind"
+	run env_sla_verdict --nodes-excluded kind 10 20 30 40 2 12 10
+	[[ "$output" == FAIL\|*"restart"*"; also node figures left out: kind" ]]
+	# The bands still come from args 8/9 after the option.
+	run env_sla_verdict --nodes-excluded kind 60 20 30 40 0 12 12 40 55
+	[[ "$output" == FAIL\|* ]]
+}
+
+@test "env_sla_verdict without --nodes-excluded: node figures count as before" {
+	run env_sla_verdict 10 20 30 40 0 12 12
+	assert_output "PASS|peak utilization 40% < 75% across istiod + nodes, no restarts, all 12 samples valid"
+	run env_sla_verdict 10 20 95 40 0 12 12
+	[[ "$output" == FAIL\|* ]]
+	run env_sla_verdict 10 20 30 unknown 0 12 12
+	[[ "$output" == CAUTION\|*"metrics API gap"* ]]
+}
+
+# fake_cp_report <file> <warnings JSON array>: a controlplane report stand-in whose JSON carries
+# the platform record of two kind members (one on another istiod build) and those warnings.
+fake_cp_report() {
+	local da db dc
+	da="sha256:$(printf 'a%.0s' {1..64})" db="sha256:$(printf 'b%.0s' {1..64})" dc="sha256:$(printf 'c%.0s' {1..64})"
+	cat > "$1" <<SH
+#!/usr/bin/env bash
+cat <<'JSON'
+{"metadata":{"run_id":"r","istio_version":"v1.30.5","harness_sha":"abc","platform":"kubernetes","test_platform":"auto",
+"node_provider_by_context":"mesh-a=kind,mesh-b=kind",
+"mesh_operator_by_context":"mesh-a=sail-operator:1.31.1@${da}/Available,mesh-b=sail-operator:1.31.1@${da}/Available",
+"istiod_image_by_context":"mesh-a=pilot:1.30.5@${db},mesh-b=mixed:pilot:1.30.5@${db};pilot:1.30.6@${dc}",
+"proxy_image_by_context":"mesh-a=proxyv2:1.30.5@${dc},mesh-b=proxyv2:1.30.5@${dc}",
+"capacity":{"node_alloc_cpu_m":"4000","node_alloc_mem_mi":"16093"},
+"achieved_scale":{"connected_proxies_max":"10","connected_proxies_cluster_max":"10","istiod_cpu_peak_pct_of_limit_max":"20","istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30","istiod_rss_pct_of_limit_max":"30","node_cpu_pct_max":"28","node_mem_pct_max":"35"},
+"sla":{"verdict":"CAUTION","headline":"node figures left out: the nodes are kind's"},
+"data_warnings":${2}},
+"results":[{"mesh_size":2,"service_count":10,"replicas":1,"namespace_count":1,"sidecar_scoping":"none","n_valid":1}]}
+JSON
+SH
+	chmod +x "$1"
+}
+
+@test "render_scale_envelope (H4): every data warning above the tables and the verdict; a Platform / mesh build row without member names" {
+	source "${ROOT}/tests/lib/platform.sh"
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh" w1 w2 t1 v
+	mkdir -p "$d"
+	fake_cp_report "$rep" '["Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host'"'"'s CPU and memory","input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members: the report mixes runs on different istiod builds; compare like with like"]'
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
+	assert_success
+	assert_output --partial "> **Warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"
+	assert_output --partial "> **Warning:** input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members"
+	w1="$(grep -n '^> \*\*Warning:\*\* Nodes on kind' <<<"$output" | cut -d: -f1)"
+	w2="$(grep -n '^> \*\*Warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
+	t1="$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)"
+	v="$(grep -n '^> \*\*CAUTION\*\*' <<<"$output" | cut -d: -f1)"
+	((w1 < w2 && w2 < t1 && t1 < v)) || { echo "warnings at ${w1} and ${w2}, topology at ${t1}, verdict at ${v}"; false; }
+	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member); mixed:pilot:1.30.5@sha256:bbbbbbbbbbbb;pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc |"
+	# The envelope is pasted into campaign docs: no member names, no full digests.
+	refute_output --partial "mesh-a="
+	refute_output --partial "mesh-b="
+	refute_output --partial "$(printf 'b%.0s' {1..64})"
+	# No warnings: none printed.
+	fake_cp_report "$rep" '[]'
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
+	assert_success
+	refute_output --partial "**Warning:**"
+}
+
+@test "render_scale_envelope: it needs platform.sh (platform_summary)" {
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh"
+	mkdir -p "$d"
+	fake_cp_report "$rep" '[]'
+	run render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
+	assert_failure
+	assert_output --partial "render_scale_envelope needs platform_summary (source tests/lib/platform.sh)"
 }
 
 # ---------------------------------------------------------------------------

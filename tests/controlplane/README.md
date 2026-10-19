@@ -127,7 +127,18 @@ already have a valid row. Each row records its own axis values, but some scalars
 once, in the TSV preamble, so they must match on resume: `--vsdr-every` and `--vsdr-subsets` (when
 the resumed run has `vsdr` cells) and `CONTROLPLANE_PROXY_CHECK_*`. The sweep reads them from the
 preamble and prints a note when that changes a value. It refuses an explicit `--vsdr-every` or
-`--vsdr-subsets` that differs. Pass the other options as in the original run.
+`--vsdr-subsets` that differs. Pass the other options as in the original run. The preamble also
+keeps the platform record and the tuning baseline the sweep started with, so `--resume` reads
+them again and compares, member by member: `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`
+(without its state: `Available` and `Unavailable` are the same build), `ISTIOD_IMAGE_BY_CONTEXT`,
+`PROXY_IMAGE_BY_CONTEXT` and `NODE_PROVIDER_BY_CONTEXT`, then `TUNING_BASELINE` and
+`SIDECAR_EGRESS_HOSTS` on the member the TSV read them on. A value that differs stops the run,
+naming the member, the key and both values: an upgrade, a gateway restarted onto a new build or
+clusters rebuilt under the same context names would otherwise be credited to the old record.
+Start a new sweep then (the sweep's own command without `--resume`; the message names its
+`run-config-<RUN_ID>.env` snapshot when it ran with `--config`), or put the members back. A value
+not read on either side, a member on one side only, a TSV from before the record or another
+`TEST_PLATFORM` only warns.
 `--config-dump-samples 0` skips the per-sidecar exec.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
@@ -195,13 +206,22 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   reads `multiple`. Inputs from different Istio versions or harness commits print a
   `WARNING` (stderr and every format) and read `mixed:<a>,<b>`.
 - **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member,
-  the platform, the mesh operator, istiod and proxy builds and the nodes' provider
-  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-  `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)),
-  read before the first window (a sweep reads it once; `002 --phase final` reuses the baseline
-  phase's). `004` prints it in every format and warns when its inputs differ; on kind nodes it
-  also warns that the capacity figures overstate the headroom. A file without it predates the
-  record (the suite supported only OpenShift with OSSM then); its values read `unknown`.
+  the platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west)
+  builds and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
+  `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`;
+  [`tests/lib/platform.sh`](../lib/platform.sh)), read before the first window (a sweep reads it
+  once, and again after its last combo: a build that changed in between is written to
+  `platform-drift.txt` in the sweep dir; `002 --phase final` reuses the baseline phase's). The
+  growth mode's `ns-lifecycle-<RUN_ID>.tsv` and `mem-guard-<RUN_ID>.tsv` carry it too (a
+  standalone `001` or `005` reads none, so its lifecycle file records `unknown`). `004` prints it
+  in every format, with a warning in the report itself (members counted, not named) when its
+  inputs differ, a value could not be read in some of them, or the sweep's build changed (an
+  operator that differs only in its state is not a difference). On kind nodes it also warns that
+  the capacity figures overstate the headroom, and the SLA verdict leaves the node figures out:
+  it is `CAUTION` with that reason even when istiod's figures pass. The scale envelope prints
+  every data warning above its tables and a `Platform / mesh build` row. A file without the
+  record predates it (the suite supported only OpenShift with OSSM then); its values read
+  `unknown`.
 
 ## Traffic management (VS/DR)
 

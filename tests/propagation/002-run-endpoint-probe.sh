@@ -222,6 +222,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 is_pos_int "$POLL_INTERVAL_MS" || die "--poll-interval-ms must be a positive integer (got: $POLL_INTERVAL_MS)"
 is_pos_int "$ITERATIONS" || die "--iterations must be a positive integer (got: $ITERATIONS)"

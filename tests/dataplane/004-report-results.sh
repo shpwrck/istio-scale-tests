@@ -133,6 +133,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 md) FORMAT=markdown ;;
 text|csv|markdown|json|charts) ;;
@@ -181,6 +182,12 @@ unset _pre
 # The platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...) over every input too.
 PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
 while IFS= read -r kv; do PREAMBLE+=("$kv"); done <<<"$PLATFORM_VALUES"
+# Every format's body repeats the record's warnings (inputs that disagree, a build that changed
+# during the sweep, a value not read) and, on kind, the cross-cluster path's (PL19).
+REPORT_WARNINGS="$(platform_report_warnings "${TSV_FILES[@]}")"
+KIND_PATH_WARNING="$(platform_kind_path_warning "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" \
+	"remote latency and the remote-minus-local delta are not a cloud load balancer's; quote them from cloud clusters only.")"
+[[ -z "$KIND_PATH_WARNING" ]] || { echo "WARNING: ${KIND_PATH_WARNING}" >&2; REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}${KIND_PATH_WARNING}"; }
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
@@ -638,6 +645,7 @@ report_text() {
 	[[ ${#PREAMBLE[@]} -gt 0 ]] && echo ""
 	echo "=== Data-Plane Latency Results ==="
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	echo "Files: ${TSV_FILES[*]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Numeric averages exclude rows with"
 	echo "status != OK or istiod_restarted != 0. n_total and n_valid are reported per cell."
@@ -669,6 +677,7 @@ report_text() {
 
 report_csv() {
 	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
 	local c m q _t _v verdict reason _rest
@@ -778,6 +787,7 @@ report_markdown() {
 	echo ""
 	echo "# Data-Plane Latency Results"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Rows with status != OK or"
 	echo "istiod_restarted != 0 are excluded from numeric averages."
 	echo ""
@@ -903,6 +913,7 @@ report_json() {
 
 	jq -n \
 		--argjson metadata "$meta_json" \
+		--argjson warnings "$(platform_warning_lines json "$REPORT_WARNINGS")" \
 		--argjson results "$results_json" \
 		--argjson local_baseline "$lb_json" \
 		--argjson remote_coverage "$rc_json" \
@@ -916,7 +927,7 @@ report_json() {
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
 		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
-		'{metadata: $metadata,
+		'{metadata: $metadata, warnings: $warnings,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
 		            n_placeholder: $n_placeholder, placeholders: $placeholders,
@@ -939,6 +950,7 @@ report_charts() {
 	echo ""
 	echo "# Data-Plane Latency — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	# Name every local point that is drawn as 0 because it has no valid sample, and
 	# every one that averages OK rows below the QPS ratio (legacy TSVs).
 	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr lb_notes=0

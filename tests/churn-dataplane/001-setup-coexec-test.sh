@@ -138,6 +138,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or COEXEC_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
 is_nonneg_int "$SETUP_NS_WAIT_SEC" || die "--ns-wait-timeout (or COEXEC_SETUP_NS_WAIT_SEC) must be a non-negative integer; got '$SETUP_NS_WAIT_SEC'"

@@ -188,6 +188,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 # fortio gets -t "${DURATION}s": `5m` would be a 5 ms window, not an error.
 is_pos_int "$DURATION" || die "--duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '$DURATION'"
@@ -283,8 +284,10 @@ CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fo
 # and the window, through each cluster's fortio-server-<ctx> Service.
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every cluster's fortio-server-<ctx> (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" \
-		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
+	# A sweep's 002s share one reach file (its RUN_ID): its header records every member the
+	# sweep covers (the inherited record), not the first mesh size's.
+	if reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)" "RUN_ID=${RUN_ID}" \
+		"HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" "NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
 		reach_print_summary "$REACH_TSV" "$RUN_ID" "$COMBO_ID"

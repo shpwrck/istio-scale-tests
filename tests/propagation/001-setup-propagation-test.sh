@@ -95,6 +95,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$WATCHER_REPLICAS" || die "--watcher-replicas must be a positive integer (got: $WATCHER_REPLICAS)"
 is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or PROPAGATION_WAIT_TIMEOUT_SEC) must be a positive integer (got: $WAIT_TIMEOUT)"
 

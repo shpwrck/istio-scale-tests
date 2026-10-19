@@ -18,6 +18,8 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 TUNING_DIR="${ROOT}/tests/tuning"
 SUITE=""
@@ -66,8 +68,12 @@ Environment:
   SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
   006-gitops-pause.sh, which pauses Argo CD, reads TUNING_GITOPS_NAMESPACE (the Argo CD
   namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
-  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET:-spoke-ossm}).
-  TEST_PLATFORM (auto: ask each cluster): the platform the results record.
+  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
+  TEST_PLATFORM (config/options.env; auto, kubernetes or openshift; now ${TEST_PLATFORM:-auto}):
+  kubernetes or openshift is taken as the platform instead of asking each cluster, for the probe
+  suite's chart overlay and, with TUNING_GITOPS_NAMESPACE empty, for the hub whose Argo CD
+  namespace 006 pauses in (TUNING_GITOPS_NAMESPACE overrides that). The platform record of each
+  pass still asks every member what it serves.
 EOF
 }
 
@@ -97,6 +103,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$SUITE" in
 propagation | controlplane | dataplane | churn | churn-dataplane) ;;
 "") die "--suite is required (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;

@@ -341,10 +341,18 @@ the row with a folder; the other rows count as repeats. json has the section as
 `KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. The preamble's platform record
 ([`tests/lib/platform.sh`](../lib/platform.sh): `PLATFORM`, `TEST_PLATFORM`, and per member
 `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-`PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`) names the platform and the mesh builds the
-run measured, read before the first window; `004` prints it in every format and warns when its
-inputs differ. A file without it predates the record (the suite supported only OpenShift with OSSM
-then); its values read `unknown`. `SERVER_REPLICAS` records the
+`PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways' build; the test pods' sidecars get
+the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`) names the platform and the
+mesh builds the run measured, read before the first window (a sweep reads it once, and again
+after its last combo: a build that changed in between is written to `platform-drift.txt` in the
+sweep dir). `004` prints it in every format, with a warning in the report itself when its inputs
+differ, a value could not be read in some of them, or the sweep's build changed (an operator
+that differs only in its state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`)
+every format also warns that the cross-cluster path runs through cloud-provider-kind's userspace
+Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so remote
+latency and the remote-minus-local delta are not a cloud load balancer's. A file without the
+record predates it (the suite supported only OpenShift with OSSM then); its values read
+`unknown`. `SERVER_REPLICAS` records the
 fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
 thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,

@@ -96,6 +96,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 text | csv | md | markdown | charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, md, or charts)" ;;
@@ -159,6 +160,9 @@ RUN_CONFIG_SHA256_M="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
 # both; a file without them reads unknown).
 PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
 PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "${TSV_FILES[@]}")"
+# Every format's body repeats their warnings (inputs that disagree, a build that changed during
+# the sweep, a value not read; PL19).
+REPORT_WARNINGS="$(platform_report_warnings --with KUBE_VERSIONS "${TSV_FILES[@]}")"
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
@@ -198,6 +202,7 @@ report_text() {
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
 	platform_report_lines text "$PLATFORM_VALUES"
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
@@ -306,6 +311,7 @@ report_csv() {
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
 	platform_report_lines comment "$PLATFORM_VALUES"
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
@@ -474,6 +480,7 @@ report_markdown() {
 	echo ""
 	echo "# Churn Convergence"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	echo "| Axis | Values |"
 	echo "|------|--------|"
 	echo "| mesh_sizes | ${sweep_mesh} |"
@@ -603,6 +610,7 @@ report_charts() {
 	echo ""
 	echo "# Churn Convergence — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	cat "${TSV_FILES[@]}" | awk -F'\t' '
 	# Charts average each series per mesh size over valid rows only ($21=="OK").
 	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,

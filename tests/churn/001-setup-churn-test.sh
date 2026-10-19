@@ -96,6 +96,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$WAIT_TIMEOUT" || die "--wait-timeout (or CHURN_WAIT_TIMEOUT_SEC) must be a positive integer; got '$WAIT_TIMEOUT'"
 
 KUBECTL=()

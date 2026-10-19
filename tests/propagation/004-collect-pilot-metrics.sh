@@ -38,6 +38,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 FANOUT_PF_BASE="${PROPAGATION_SNAPSHOT_PF_BASE:-22014}"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
@@ -111,6 +113,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
 CONTEXTS=()

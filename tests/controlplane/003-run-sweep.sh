@@ -437,6 +437,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
 # 002 reads the same two knobs per combo; validate once here so a typo fails the
@@ -1322,6 +1323,9 @@ if ((! DRY_RUN)); then
 	# The platform record of every member, read once before the first combo; each 002
 	# inherits it (exported), the pre-created preamble writes it (tests/lib/platform.sh).
 	platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+	# --resume appends to a TSV whose preamble keeps the record it started with: other builds or
+	# tuning levers stop the run here.
+	[[ -z "$RESUME_DIR" ]] || platform_resume_check "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "$(IFS=,; echo "${CONTEXTS[*]}")" "${CONTEXTS[0]}"
 	precreate_tsv_preamble
 	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"
 	if ((GROWTH)); then
@@ -1332,6 +1336,7 @@ if ((! DRY_RUN)); then
 			"MEM_STOP_PCT=${MEM_STOP_PCT}" "MEM_GUARD_CONTEXTS=$(IFS=,; echo "${GUARD_CONTEXTS[*]}")" \
 			"GUARD_SCHEMA=2" "GW_MODEL=intercept ${GW_MI_INTERCEPT} Mi; eastwestgateway ${EWGW_MI_PER_1000} Mi per 1000 Services x ${EWGW_BURST}; ingressgateway ${INGW_MI_PER_1000} Mi per 1000 Services x ${INGW_BURST}" \
 			"NOTE=rel_projected = base + (current - base) x ratio^power from the series start (ratio 1: the first step and changes that add no Services); abs_projected (gateways) = (intercept + Mi per 1000 Services x services_after / 1000) x burst factor, plus the non-heap part of a working-set reading (ws - Envoy physical heap); services_after = the context's istiod pilot_services + the Services the step adds; projected = the larger, compared with stop_pct % of limit_mi. metric: rss = istiod process_resident_memory_bytes (max over replicas, per-replica limit); ws = the gateway container's working set (kubectl top), else physical = Envoy server.memory_physical_size, else allocated = server.memory_allocated (istio-proxy limit). verdict stale_base: a gateway's Envoy allocated memory exceeded 1.5 x the model + 100 Mi at the series start (memory kept from an earlier series)."
+		{ config_preamble_lines; platform_preamble_lines "$(platform_probed_contexts)"; } >> "$GUARD_FILE"
 		printf 'timestamp\tseries\tcell\tcontext\tcomponent\tmetric\tcurrent_mi\tbase_mi\tratio\tpower\trel_projected_mi\tservices_after\tabs_projected_mi\tprojected_mi\tlimit_mi\tstop_pct\tverdict\n' >> "$GUARD_FILE"
 	fi
 fi
@@ -2173,6 +2178,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete. $combo_idx combinations enumerated; no clusters touched." >&2
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$OUTPUT_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 if [[ -n "$SWEEP_STOPPED" ]]; then

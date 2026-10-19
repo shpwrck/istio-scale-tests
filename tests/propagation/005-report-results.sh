@@ -139,6 +139,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
 ENDPOINT_FILES=()
@@ -205,6 +206,9 @@ PREAMBLE[RUN_CONFIG_SHA256]="$(config_report_value RUN_CONFIG_SHA256 "${ENDPOINT
 # before it, mixed (with a warning) when the inputs disagree.
 PLATFORM_VALUES="$(platform_report_values "${ENDPOINT_FILES[@]}")"
 while IFS= read -r kv; do PREAMBLE["${kv%%=*}"]="${kv#*=}"; done <<<"$PLATFORM_VALUES"
+# Every format's body repeats the record's warnings (inputs that disagree, a build that changed
+# during the sweep, a value not read; PL19).
+REPORT_WARNINGS="$(platform_report_warnings "${ENDPOINT_FILES[@]}")"
 # PL6: a results dir from --config (or the default) is a base dir that can hold many
 # sweeps, and the report aggregates all of them.
 if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
@@ -503,6 +507,7 @@ report_endpoint_text() {
 	echo "Run metadata:"
 	format_preamble_text
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function stats_line(label, src, ms, n,    arr, sum, i) {
 		if (n == 0) {
@@ -554,6 +559,7 @@ report_endpoint_text() {
 
 report_endpoint_csv() {
 	format_preamble_csv_header
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	echo ""
 	# worst_bucket: the bucket range of max_ms, for the histogram phases only.
 	echo "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket"
@@ -622,6 +628,7 @@ report_endpoint_markdown() {
 	echo ""
 	echo "# Endpoint Propagation Latency"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
 	echo ""
 	for f in "${ENDPOINT_FILES[@]}"; do
@@ -716,6 +723,7 @@ report_endpoint_json() {
 	# Emit a single object: { metadata: {...}, rows: [...] }.
 	printf '{"metadata":'
 	format_preamble_json
+	printf ',"warnings":%s' "$(platform_warning_lines json "$REPORT_WARNINGS")"
 	printf ',"rows":'
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function jnum(v) { return (v == "N/A" ? "null" : v) }
@@ -761,6 +769,7 @@ report_endpoint_charts() {
 	echo ""
 	echo "# Endpoint Propagation Latency — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" "$AWK_AGG"'
 	function chart_avg(src, ms, n,    arr, sum, i) {
 		if (n == 0) return -1

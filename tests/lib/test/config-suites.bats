@@ -571,6 +571,9 @@ MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA2
 	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'run_id.tmesh_size'
 	# reach-<RUN_ID>.tsv (dataplane and churn-dataplane 002) through its one writer.
 	in_block "${ROOT}/tests/lib/reach.sh" 'echo "# Remote reachability check' 'printf .run_id'
+	# The controlplane growth mode's side TSVs: ns-lifecycle (its one writer) and the memory guard.
+	in_block "${ROOT}/tests/lib/preamble.sh" '^ns_lifecycle_init\(\)' '^\}$'
+	in_block "${ROOT}/tests/controlplane/003-run-sweep.sh" 'write_preamble "Memory stop guard' 'printf .timestamp.tseries'
 	# The check fires on a writer without it.
 	sed '/config_preamble_lines/d' "$DP/003-run-sweep.sh" > "${BATS_TEST_TMPDIR}/003.sh"
 	run in_block "${BATS_TEST_TMPDIR}/003.sh" '^emit_dataplane_placeholder\(\)' 'printf .run_id'
@@ -606,12 +609,13 @@ platform_pairs_ok() {
 
 @test "PL36: every writer of RUN_CONFIG writes the platform record too, and every Run config row has a Platform row" {
 	local f n=0
-	for f in "$ROOT"/tests/*/0*.sh "${ROOT}/tests/lib/reach.sh"; do
+	for f in "$ROOT"/tests/*/0*.sh "${ROOT}/tests/lib/reach.sh" "${ROOT}/tests/lib/preamble.sh"; do
 		run platform_pairs_ok "$f"
 		if ((status == 0)); then n=$((n + 1)); elif [[ -n "$output" ]]; then echo "$output"; false; fi
 	done
-	# Every TSV writer and placeholder of the suites (12 scripts) and the reach TSV's.
-	[ "$n" -ge 13 ]
+	# Every TSV writer and placeholder of the suites (12 scripts), the reach TSV's and the
+	# ns-lifecycle TSV's.
+	[ "$n" -ge 14 ]
 	for f in "$CD/004-run-sweep.sh" "$CH/003-run-sweep.sh" "$PR/006-run-sweep.sh" "$DP/003-run-sweep.sh" \
 		"${ROOT}/tests/controlplane/003-run-sweep.sh" "${ROOT}/tests/gateway-api/001-run-ingress-check.sh"; do
 		platform_pairs_ok "$f"
@@ -628,6 +632,14 @@ platform_pairs_ok() {
 	in_block "$CH/003-run-sweep.sh" '^emit_churn_placeholder\(\)' 'run_id mesh_size churn_intensity' platform_preamble_lines
 	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'run_id.tmesh_size' platform_preamble_lines
 	in_block "${ROOT}/tests/lib/reach.sh" 'echo "# Remote reachability check' 'printf .run_id' platform_preamble_lines
+	in_block "${ROOT}/tests/lib/preamble.sh" '^ns_lifecycle_init\(\)' '^\}$' platform_preamble_lines
+	in_block "${ROOT}/tests/controlplane/003-run-sweep.sh" 'write_preamble "Memory stop guard' 'printf .timestamp.tseries' \
+		platform_preamble_lines
+	# Every caller of ns_lifecycle_init sources what it writes with (it refuses otherwise).
+	for f in $(grep -l 'ns_lifecycle_init "' "$ROOT"/tests/*/0*.sh); do
+		grep -q 'source "${ROOT}/tests/lib/config.sh"' "$f" || { echo "${f}: ns_lifecycle_init without config.sh"; false; }
+		grep -q 'source "${ROOT}/tests/lib/platform.sh"' "$f" || { echo "${f}: ns_lifecycle_init without platform.sh"; false; }
+	done
 	# Every report merges it over all its inputs (PL26).
 	local r
 	for r in "$DP/004-report-results.sh" "$CH/004-report-results.sh" "$CD/005-report-results.sh" "$PR/005-report-results.sh" \

@@ -94,12 +94,23 @@ CHART="${CP}/chart"
 }
 
 @test "ns_lifecycle_init/row: one preamble and header, rates from the duration" {
+	source "${ROOT}/tests/lib/config.sh"    # config_preamble_lines
+	source "${ROOT}/tests/lib/platform.sh"  # platform_preamble_lines
 	f="${BATS_TEST_TMPDIR}/lc/ns-lifecycle.tsv"
+	PLATFORM_PROBE_ROWS=$'mesh-a\tkubernetes\tsail-operator:1.31.1/Available\tpilot:1.30.5\tproxyv2:1.30.5\tkind\n'
+	PLATFORM_PROBE_LAST=mesh-a
 	ns_lifecycle_init "$f" run-1
 	ns_lifecycle_init "$f" run-2
 	[ "$(grep -c '^# RUN_ID=' "$f")" -eq 1 ]
 	grep -q '^# RUN_ID=run-1$' "$f"
 	grep -q '^# NS_LIFECYCLE_SCHEMA=2$' "$f"
+	# The run config and the platform record (H12): its objects/s figures are quoted in campaigns.
+	grep -qx '# RUN_CONFIG=none' "$f"
+	grep -qx '# PLATFORM=kubernetes' "$f"
+	grep -qx '# ISTIOD_IMAGE_BY_CONTEXT=mesh-a=pilot:1.30.5' "$f"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=mesh-a=kind' "$f"
+	# Before the header.
+	[ "$(grep -n '^# PLATFORM=' "$f" | cut -d: -f1)" -lt "$(grep -n '^timestamp' "$f" | cut -d: -f1)" ]
 	ns_lifecycle_row "$f" mesh-a s1 100 grow 100 500 10.0 2 1 7 OK
 	ns_lifecycle_row "$f" mesh-a s1 100 ready N/A 4 0 N/A N/A N/A OK
 	run awk -F'\t' '!/^#/ { print NF }' "$f"
@@ -110,6 +121,23 @@ CHART="${CP}/chart"
 	# No file: a no-op (a step run standalone).
 	run ns_lifecycle_row "" mesh-a s1 1 grow 1 1 1 0 0 0 OK
 	assert_success
+}
+
+@test "ns_lifecycle_init: a standalone step records unknown; without config.sh or platform.sh it refuses" {
+	source "${ROOT}/tests/lib/config.sh"
+	source "${ROOT}/tests/lib/platform.sh"
+	f="${BATS_TEST_TMPDIR}/lc/standalone.tsv"
+	(unset PLATFORM_PROBE_ROWS PLATFORM_PROBE_LAST; ns_lifecycle_init "$f" standalone-001)
+	grep -qx '# PLATFORM=unknown' "$f"
+	grep -qx '# PLATFORM_BY_CONTEXT=unknown' "$f"
+	run bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/preamble.sh"; ns_lifecycle_init "$2" r' _ "$ROOT" "${BATS_TEST_TMPDIR}/lc/x.tsv"
+	assert_failure
+	assert_output --partial "ns_lifecycle_init needs config_preamble_lines (source tests/lib/config.sh)"
+	run bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/config.sh"; source "$1/tests/lib/preamble.sh"; ns_lifecycle_init "$2" r' _ "$ROOT" "${BATS_TEST_TMPDIR}/lc/y.tsv"
+	assert_failure
+	assert_output --partial "ns_lifecycle_init needs platform_preamble_lines (source tests/lib/platform.sh)"
+	[ ! -e "${BATS_TEST_TMPDIR}/lc/x.tsv" ]
+	[ ! -e "${BATS_TEST_TMPDIR}/lc/y.tsv" ]
 }
 
 @test "ns_lifecycle_api_counts: retried and exhausted 429s from kubectl -v=4, never a 429 in a name, URL or timestamp" {

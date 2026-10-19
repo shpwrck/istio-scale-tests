@@ -245,17 +245,20 @@ results will go, and:
      (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV, such as
      `servicemeshoperator3:3.4.3/Succeeded`; on Kubernetes the Sail operator's image tag, the
      digest its pod runs and its state, such as `sail-operator:1.31.1@sha256:<digest>/Available`;
-     `absent` only when the platform's own operator read answers with none on a platform asked
-     of the member; `unknown`, with a warning, when the platform or that read is unknown, or
-     when `TEST_PLATFORM` set the platform and that read found none); the Istio CR version and
-     the tuning baseline;
+     read on the platform the member serves, on `TEST_PLATFORM`'s only when the member could not
+     be asked; `absent` only when that read of the served platform's operator answers with none;
+     `unknown`, with a warning, when the read fails, or when the member could not be asked and
+     the read where `TEST_PLATFORM` looks found none); the Istio CR version and the tuning
+     baseline;
    - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
      `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-     `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` and `NODE_PROVIDER_BY_CONTEXT` (the nodes'
-     providerID scheme: `kind`, `aws`, ...). `TEST_PLATFORM` (`config/options.env`, default
-     `auto`) picks each member's platform: `auto` asks the member (it serves
-     `security.openshift.io/v1` on OpenShift), `kubernetes` or `openshift` is taken as given, and
-     any other value stops the run;
+     `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'
+     `istio-proxy` build) and `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
+     `aws`, ...). `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
+     OpenShift), asked of the member whatever `TEST_PLATFORM` says (`unknown` when it cannot be
+     asked). `TEST_PLATFORM` (`config/options.env`, default `auto`) picks the hub's platform for its
+     Argo CD namespace: `auto` asks the hub, `kubernetes` or `openshift` is taken as given (a member
+     that serves the other platform gets a warning), and any other value stops the run;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),
@@ -437,6 +440,11 @@ repeats every TSV preamble line.
 `PLATFORM`, `ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `TIMEOUT_SEC`: a
 reply slower than it is `000`, `GATE_PASSES`, `SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable
 verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
+`OSSM_OPERATOR` changed format after the 2026-10-14 runs: it was `<version>/<phase>`, several
+`|`-joined; it is now `servicemeshoperator3:<version>/<phase>` on OpenShift or
+`sail-operator:<tag>@<digest>/<state>` on Kubernetes, several `+`-joined. To compare with a
+2026-10-14 TSV, compare its version with the part after `servicemeshoperator3:`. The state after
+the last `/` (`Available`, `Unavailable`, a CSV phase) is not part of the build.
 
 TSV (`GWAPI_SCHEMA=5`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code

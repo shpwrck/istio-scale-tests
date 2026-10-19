@@ -193,6 +193,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 is_pos_int "$DEPLOYMENT_COUNT" || die "--deployment-count must be a positive integer"
 is_nonneg_int "$BASE_REPLICAS" || die "CHURN_BASE_REPLICAS must be a non-negative integer"

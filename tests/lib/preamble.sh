@@ -273,10 +273,15 @@ NS_LIFECYCLE_HEADER=$'timestamp\tcontext\tseries\tnamespace_count\taction\tnames
 
 # ns_lifecycle_init <file> <run_id>: write the PL2 preamble and the header once. A
 # no-op when the file exists (the first writer wins; every writer uses this function).
+# The preamble carries the run config and the platform record of the shell's last
+# platform_probe (a standalone 001 or 005 reads none, so its values are unknown); the
+# caller sources tests/lib/config.sh and tests/lib/platform.sh.
 # shellcheck disable=SC2329
 ns_lifecycle_init() {
 	local file="$1" run_id="${2:-unknown}"
 	[[ -n "$file" ]] || return 0
+	declare -F config_preamble_lines >/dev/null || die "ns_lifecycle_init needs config_preamble_lines (source tests/lib/config.sh)"
+	declare -F platform_preamble_lines >/dev/null || die "ns_lifecycle_init needs platform_preamble_lines (source tests/lib/platform.sh)"
 	[[ -f "$file" ]] && return 0
 	mkdir -p "$(dirname "$file")"
 	{
@@ -288,6 +293,8 @@ ns_lifecycle_init() {
 		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
 		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"
 		echo "# NS_DELETE_TIMEOUT_SEC=${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-unknown}"
+		config_preamble_lines
+		platform_preamble_lines "$(platform_probed_contexts)"
 		echo "# NOTE=001 runs its applies and Sidecar deletes at kubectl -v=4. api_429_retried counts client-go's 'Got a Retry-After response' lines (a 429 with Retry-After that client-go retried; at the default verbosity it prints nothing); api_429_exhausted counts TooManyRequests errors that reached kubectl after its retries; client_throttle_waits counts client-side rate-limiter waits over 50 ms (kubectl 1.34 showed none on server-side apply). N/A = not measured (readiness waits and 005's deletes). leftover-check rows (003, one per context at each series start): namespaces = the controlplane-test namespaces present, objects = how many of them are still discovered, status LEFTOVER above CONTROLPLANE_LEFTOVER_NS_WARN."
 		printf '%s\n' "$NS_LIFECYCLE_HEADER"
 	} > "$file"

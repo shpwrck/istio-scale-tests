@@ -121,6 +121,7 @@ vsdr_dir() {
 @test "envelope: per-cluster peak, per-replica peak and proxy check from the report JSON" {
 	source "${ROOT}/tests/lib/capacity.sh"
 	source "${ROOT}/tests/lib/envelope.sh"
+	source "${ROOT}/tests/lib/platform.sh"  # platform_summary (the Platform / mesh build row)
 	# `false` as the kubectl argv: the live reads degrade to unknown; only the
 	# report-sourced rows are asserted.
 	run --separate-stderr render_scale_envelope "$RES" "$REPORT" "mesh-a,mesh-b" false
@@ -238,6 +239,64 @@ with_platform() {
 	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 }
 
+# second_input <sed program>: controlplane-fixture-t3.tsv, the fixture again with the record
+# edited by <sed program>: a second input of the same report.
+second_input() {
+	{
+		head -1 "$FIXTURE"
+		platform_fixture_lines mesh-a,mesh-b | sed "$1"
+		tail -n +2 "$FIXTURE"
+	} > "${RES}/controlplane-fixture-t3.tsv"
+}
+
+@test "report (H10): inputs that disagree or could not be read warn in every format's body, counting members" {
+	with_platform 's/=kind/=aws/g; s/mesh-b=pilot:1.30.5/mesh-b=unknown/'
+	second_input 's/=kind/=aws/g; s/proxyv2:1.30.5/proxyv2:1.30.6/g'
+	# The body counts members (its warnings reach the scale envelope, pasted into campaign
+	# docs); stderr names them.
+	local unread="ISTIOD_IMAGE_BY_CONTEXT could not be read for 1 of 2 members in some of the 2 input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same istiod builds as the others"
+	local dis="input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for 2 of 2 members: the report mixes runs on different gateway proxy builds; compare like with like"
+	local fmt top first
+	for fmt in text csv; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		assert_line "# WARNING: ${unread}"
+		assert_line "# WARNING: ${dis}"
+	done
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		assert_line "> **Warning:** ${unread}"
+		assert_line "> **Warning:** ${dis}"
+		# Under the title, before the first section, table, chart or note.
+		top="$(grep -nF "> **Warning:** ${dis}" <<<"$output" | cut -d: -f1)"
+		first="$(awk 'seen && /^(\| |## |```mermaid|> [^*])/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
+		((top < first)) || { echo "${fmt}: warning at ${top}, first section, table, chart or note at ${first}"; false; }
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq --arg u "$unread" --arg d "$dis" '[.metadata.data_warnings[] | select(. == $u or . == $d)] | length' <<<"$output")" = 2 ]
+	[[ "$(jq -r '.metadata.proxy_image_by_context' <<<"$output")" == "mesh-a=mixed:proxyv2:1.30.5;proxyv2:1.30.6,mesh-b=mixed:proxyv2:1.30.5;proxyv2:1.30.6" ]]
+	[[ "$stderr" == *"warning: input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for mesh-a (proxyv2:1.30.5;proxyv2:1.30.6), mesh-b (proxyv2:1.30.5;proxyv2:1.30.6)"* ]]
+	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT could not be read for mesh-b in 1 of 2 input TSV(s)"* ]]
+}
+
+@test "report (H10): inputs that agree, an operator state aside, add no platform warning" {
+	with_platform 's/=kind/=aws/g'
+	second_input 's/=kind/=aws/g; s#/Available#/Unavailable#g'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq '[.metadata.data_warnings[] | select(test("input TSVs|could not be read|changed during the sweep|Nodes on kind"))] | length' <<<"$output")" = 0 ]
+	[[ "$(jq -r '.metadata.mesh_operator_by_context' <<<"$output")" != *mixed* ]]
+	[[ "$stderr" != *"warning: input TSVs"* && "$stderr" != *"could not be read"* ]] || { echo "$stderr"; false; }
+	local fmt
+	for fmt in text csv markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		refute_output --partial "input TSVs disagree"
+		refute_output --partial "could not be read"
+	done
+}
+
 # --- VirtualService/DestinationRule traffic axis -------------------------------
 
 @test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields" {
@@ -320,6 +379,7 @@ with_platform() {
 @test "envelope: traffic row prefers the none cell at the peak mesh size, else shows vsdr" {
 	source "${ROOT}/tests/lib/capacity.sh"
 	source "${ROOT}/tests/lib/envelope.sh"
+	source "${ROOT}/tests/lib/platform.sh"  # platform_summary (the Platform / mesh build row)
 	vsdr_dir
 	run --separate-stderr render_scale_envelope "$VRES" "$REPORT" "mesh-a,mesh-b" false
 	assert_success
@@ -367,6 +427,7 @@ fleet_replicas() {
 @test "envelope: istiod replicas probed on every context, no context names in the table" {
 	source "${ROOT}/tests/lib/capacity.sh"
 	source "${ROOT}/tests/lib/envelope.sh"
+	source "${ROOT}/tests/lib/platform.sh"  # platform_summary (the Platform / mesh build row)
 	_rep_kubectl() {
 		local ctx="" a
 		for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
@@ -866,6 +927,7 @@ growth66() {
 	growth66
 	source "${ROOT}/tests/lib/capacity.sh"
 	source "${ROOT}/tests/lib/envelope.sh"
+	source "${ROOT}/tests/lib/platform.sh"  # platform_summary (the Platform / mesh build row)
 	run --separate-stderr render_scale_envelope "$GRES" "$REPORT" "mesh-a" false
 	assert_success
 	assert_output --partial "| **Total endpoints in mesh** | N/A (config-only: Services without pods;"

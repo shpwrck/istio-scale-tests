@@ -88,8 +88,11 @@ which wins over the upstream docs there when they disagree.
 - Platform record: every TSV writer and placeholder calls `platform_probe` before any window and
   writes `platform_preamble_lines` next to `config_preamble_lines`; a run's markdown summary adds
   `platform_md_row` after its `| Run config |` row; a report merges the record over its inputs with
-  `platform_report_values` (`tests/lib/platform.sh`; `tests/lib/test/config-suites.bats` checks the
-  pairing). `TEST_PLATFORM` is a key of every suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
+  `platform_report_values` and prints `platform_report_warnings` in every format's body; a sweep
+  calls `platform_drift_check` after its last step, before its reports; every script that sources
+  `platform.sh` calls `platform_validate` with its argument checks (`tests/lib/platform.sh`;
+  `tests/lib/test/config-suites.bats` and `platform.bats` check the pairing). `TEST_PLATFORM` is a
+  key of every suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
 
 ## Repository map
 

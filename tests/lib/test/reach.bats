@@ -302,6 +302,23 @@ rrow() {
 	[ ! -e "${RES}/reach-y.tsv" ]
 }
 
+@test "reach_write_header --contexts (H13): the record of every member listed, not only the last platform_probe's" {
+	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\top\tpilot\tproxy\tkind\nc2\tkubernetes\top\tpilot\tproxy\taws\n'
+		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-s.tsv" --contexts c1,c2 RUN_ID=s SUITE=churn-dataplane)
+	grep -qx '# PLATFORM_BY_CONTEXT=c1=kubernetes,c2=kubernetes' "${RES}/reach-s.tsv"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind,c2=aws' "${RES}/reach-s.tsv"
+	grep -qx '# RUN_ID=s' "${RES}/reach-s.tsv"
+	grep -qx '# SUITE=churn-dataplane' "${RES}/reach-s.tsv"
+	! grep -q -- '--contexts' "${RES}/reach-s.tsv" || false
+	# Without --contexts: the last platform_probe's members, as before.
+	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\top\tpilot\tproxy\tkind\nc2\tkubernetes\top\tpilot\tproxy\taws\n'
+		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-1.tsv" RUN_ID=s)
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind' "${RES}/reach-1.tsv"
+	# churn-dataplane 002 writes the sweep's per-sweep file with every member the record holds
+	# (a sweep's 002 inherits all of them), so later mesh sizes' members are in its header.
+	grep -q 'reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)"' "${ROOT}/tests/churn-dataplane/002-run-baseline-probe.sh"
+}
+
 @test "reach_result_for / reach_not_reachable: listed remotes without a row count as UNKNOWN" {
 	f="${RES}/reach-x.tsv"
 	reach_tsv "$f" "$(rrow x c1 3 s s local 10 REACHABLE)" "$(rrow x c1 3 s b remote 0 UNREACHABLE)" \
@@ -435,7 +452,7 @@ _dp_fixture() {
 	[ "$(printf '%s\n' "$output" | grep -n '## Remote coverage' | cut -d: -f1)" -lt "$(printf '%s\n' "$output" | grep -n '^| mesh_size | qps_target' | cut -d: -f1)" ]
 	run "$DP_REPORT" --results-dir "$RES"
 	assert_output --partial "REMOTE COVERAGE mesh_size=3 source=s: 1/2 remotes reachable"
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.summary.remotes_not_reachable' <<<"$output")" = 1 ]
 	[ "$(jq -r '.summary.remotes_without_valid_rows' <<<"$output")" = 1 ]
 	[ "$(jq -r '.remote_validity[] | select(.target_ctx == "r2") | .statuses.UNREACHABLE' <<<"$output")" = 2 ]
@@ -510,7 +527,7 @@ _dp_probe() {
 	grep -qx '# REACH_DETAIL_TIMEOUT_SEC=35' "$f"
 	grep -qx '# REACH_DETAIL_TIMEOUT_SEC=35' "$RES"/reach-*.tsv
 	grep -qx '# REACH_RETRY_SEC=0' "$f"
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.metadata | "\(.REACH_QPS) \(.REACH_HTTP_TIMEOUT_SEC) \(.REACH_RETRY_SEC)"' <<<"$output")" = "10 3 0" ]
 	# No load was sent to ctx-b: only the reach check and its curl.
 	run grep -q 'fortio load -qps 10 -c 8 .*dataplane-server-ctx-b' "$STUB_LOG"
@@ -541,7 +558,7 @@ _dp_probe() {
 	refute_output --partial "dropped (poisoned)"
 	refute_output --regexp '\| na +\|'
 	[[ "$(printf '%s\n' "$output" | grep '[|] remote [|]' | wc -l)" -eq 2 ]]
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[3,0,0,3]' ]
 	[ "$(jq '[.results[] | select(.target_class == "na")] | length' <<<"$output")" = 0 ]
 	run "$DP_REPORT" --results-dir "$RES" --format csv
@@ -567,7 +584,7 @@ _dp_probe() {
 	assert_output --partial "4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
 	run "$DP_REPORT" --results-dir "$RES" --format csv
 	assert_output --partial "# ROWS n_total=4 n_valid=1 n_dropped=1 n_skipped_unreachable=2"
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[4,1,1,2]' ]
 	# Per-cell n_total/n_valid are unchanged: the UNREACHABLE rows stay in their cells.
 	[ "$(jq -c '[.results[] | select(.target_class == "remote") | [.qps_target, .n_total, .n_valid]]' <<<"$output")" = '[[10,2,0],[100,1,0]]' ]
@@ -632,7 +649,7 @@ crow() {
 		crow ms2-cr5 churn 5 9 OK
 	} > "${RES}/churn-dataplane-r1.tsv"
 	reach_tsv "${RES}/reach-r1.tsv" "$(rrow r1 ms2-cr1 2 a a local 10 REACHABLE)" "$(rrow r1 ms2-cr1 2 a b remote 0 UNREACHABLE 503 'no healthy upstream')"
-	run "$CD_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$CD_REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.rows[] | select(.churn_rate == 1) | "\(.valid_runs)/\(.total_runs)"' <<<"$output")" = 0/1 ]
 	[ "$(jq -r '.rows[] | select(.churn_rate == 5) | .valid_runs' <<<"$output")" = 1 ]

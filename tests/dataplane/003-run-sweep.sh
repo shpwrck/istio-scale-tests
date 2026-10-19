@@ -207,6 +207,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
+
 # The probe window 002 gets as flags; from the environment or --config these reach 002
 # unchecked, and a bad one fails every probe.
 is_pos_int "$DURATION" || die "--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '$DURATION'"
@@ -467,6 +469,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete."
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$OUTPUT_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep complete"

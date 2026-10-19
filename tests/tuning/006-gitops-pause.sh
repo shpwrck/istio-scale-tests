@@ -24,7 +24,7 @@ HELPER="${ROOT}/tests/tuning/lib/tuning.py"
 CTX_FLAG=""
 NS_FLAG=""
 NS_DEFAULT="${TUNING_GITOPS_NAMESPACE:-}"
-APPSET="${TUNING_GITOPS_APPSET:-spoke-ossm}"
+APPSET="${TUNING_GITOPS_APPSET}"
 APP_SUFFIX="ossm"
 STATE_FILE="${ROOT}/tests/tuning/results/gitops-pause.json"
 ACTION=""
@@ -45,7 +45,9 @@ Options:
   --state-file FILE      Pause record (default: tests/tuning/results/gitops-pause.json).
   --namespace NS         Argo CD namespace (default: \$TUNING_GITOPS_NAMESPACE, ${NS_DEFAULT:-empty};
                          empty: from the hub's platform, openshift-gitops on OpenShift,
-                         else argocd: terraform/platform output gitops_namespace).
+                         else argocd: terraform/platform output gitops_namespace). The
+                         hub's platform is TEST_PLATFORM (config/options.env) when it is
+                         kubernetes or openshift, else asked of the hub.
   --appset NAME          ApplicationSet that owns the Applications (default: ${APPSET}).
   --dry-run              Print what would change; do not touch clusters.
   -h, --help             Show this help.
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$ACTION" ]] || die "one of --pause, --resume, --status is required"
 GITOPS_CTX="${CTX_FLAG:-${TUNING_GITOPS_CONTEXT:-}}"
 NS="${NS_FLAG:-$NS_DEFAULT}"

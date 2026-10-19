@@ -190,12 +190,19 @@ report shows `unknown` and "no reachability data".
 
 Every TSV preamble also carries the platform record
 ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
-platform, the mesh operator, istiod and proxy builds and the nodes' provider
-(`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-`PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`), read before the baseline window (a sweep
-reads it once for all its combos). `005` prints it in every format and warns when its inputs
-differ. Sweeps recorded before it have none of these lines (the suite supported only OpenShift
-with OSSM then), and the report reads their values as `unknown`.
+platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds
+and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
+`ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`), read before the
+baseline window (a sweep reads it once for all its combos, and again after the last one: a build
+that changed in between is written to `platform-drift.txt` in the sweep dir). The sweep's reach
+file records every member the sweep covers. `005` prints the record in every format, with a
+warning in the report itself when its inputs differ, a value could not be read in some of them,
+or the sweep's build changed (an operator that differs only in its state is not a difference).
+On kind nodes (`NODE_PROVIDER_BY_CONTEXT`) every format also warns that the cross-cluster path
+runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the
+host the kind clusters share, so at mesh sizes above 1 latency under churn is not a cloud load
+balancer's. Sweeps recorded before the record have none of these lines (the suite supported
+only OpenShift with OSSM then), and the report reads their values as `unknown`.
 
 ## Run config (`--config FILE`)
 

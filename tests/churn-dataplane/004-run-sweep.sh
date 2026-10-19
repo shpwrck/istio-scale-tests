@@ -204,6 +204,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
 	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
@@ -623,6 +624,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete. Planned ${MATRIX_SIZE} combinations." >&2
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "Sweep complete: $TSV_FILE"

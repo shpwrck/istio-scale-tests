@@ -151,6 +151,77 @@ tsv() {
 	assert_output --partial "| 2 | 5 | 1->5 | 3 | 1 |"
 }
 
+# --- 004: the platform record's warnings in the report's body (H10, H2) --------
+
+# warned_in_body: the warnings of $1.. (one per line) in text, csv, md and charts; md and
+# charts carry them under the title, before the first table, section or note.
+warned_in_body() {
+	local w fmt top first
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	for w in "$@"; do assert_line "WARNING: ${w}"; done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	for w in "$@"; do assert_line "# WARNING: ${w}"; done
+	for fmt in md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		for w in "$@"; do assert_line "> **Warning:** ${w}"; done
+		top="$(grep -n '^> \*\*Warning:\*\*' <<<"$output" | tail -1 | cut -d: -f1)"
+		first="$(awk 'seen && /^(\| |## |```mermaid|> [^*])/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
+		((top < first)) || { echo "${fmt}: last warning at ${top}, first table, section or note at ${first}"; false; }
+	done
+	# stderr: each once.
+	for w in "$@"; do
+		[ "$(grep -cF "warning: ${w}" <<<"$stderr")" -eq 1 ] || { echo "$stderr"; false; }
+	done
+}
+
+@test "004 (H10, H2): a build that changed during the sweep, a value not read and other Kubernetes versions warn in every format's body" {
+	tsv "${RES}/churn-a.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
+	$(crow 1 99 N/A 10 N/A OK)
+	EOF
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-b=proxyv2:1.30.5/ctx-b=unknown/')
+	NO_PLATFORM=1 tsv "${RES}/churn-b.tsv" "KUBE_VERSIONS=ctx-a=v1.34.2,ctx-b=unreachable" "${plat[@]}" <<-EOF
+	$(crow 2 99 N/A 10 N/A OK)
+	EOF
+	# The sweep's drift check (platform_drift_check) found istiod on ctx-a on another build.
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.6' > "${RES}/platform-drift.txt"
+	warned_in_body \
+		"ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt next to its TSVs): the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; compare like with like" \
+		"PROXY_IMAGE_BY_CONTEXT could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same gateway proxy builds as the others" \
+		"input TSVs disagree on KUBE_VERSIONS for ctx-a (v1.34.1;v1.34.2): the report mixes runs on different Kubernetes versions; compare like with like" \
+		"KUBE_VERSIONS could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown or unreachable), while other inputs have a value: the report cannot tell whether those runs had the same Kubernetes versions as the others"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_line 'istiod_image_by_context: "ctx-a=mixed:pilot:1.30.5;pilot:1.30.6,ctx-b=pilot:1.30.5"'
+	assert_line 'proxy_image_by_context: "ctx-a=proxyv2:1.30.5,ctx-b=mixed:proxyv2:1.30.5;unknown"'
+	# kind nodes: churn measures the control plane, so no kind data-path warning (H11 is
+	# dataplane's and churn-dataplane's).
+	refute_output --partial "cloud-provider-kind"
+}
+
+@test "004 (H10): inputs that agree, an operator state aside, warn in no format" {
+	tsv "${RES}/churn-a.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
+	$(crow 1 99 N/A 10 N/A OK)
+	EOF
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s#/Available#/Unavailable#g')
+	NO_PLATFORM=1 tsv "${RES}/churn-b.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" "${plat[@]}" <<-EOF
+	$(crow 2 99 N/A 10 N/A OK)
+	EOF
+	local fmt
+	for fmt in text csv md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		refute_output --partial "WARNING"
+		refute_output --partial "**Warning:**"
+		refute_output --regexp '(=|"|: )mixed:'
+		[ -z "$stderr" ] || { echo "$stderr"; false; }
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable,ctx-b=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable"'
+}
+
 # --- 002 / 003: the writers ----------------------------------------------------
 
 # Stub kubectl and curl for the churn probe: one istiod pod whose /metrics never

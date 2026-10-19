@@ -231,17 +231,23 @@ reach_body_line() {
 	printf '%s\n' "$line"
 }
 
-# reach_write_header <tsv> <K=V...>: the only writer of a reach TSV's preamble and
-# header, and only when the file does not exist yet (PL36). REACH_SCHEMA, the
-# REACH_* knobs, the run config (RUN_CONFIG, RUN_CONFIG_SHA256: config.sh) and the
-# platform record of the members the run read (platform.sh) are always written;
-# callers add RUN_ID, HARNESS_SHA, SUITE, NAMESPACE and ON_UNREACHABLE.
+# reach_write_header <tsv> [--contexts CSV] <K=V...>: the only writer of a reach TSV's
+# preamble and header, and only when the file does not exist yet (PL36). REACH_SCHEMA,
+# the REACH_* knobs, the run config (RUN_CONFIG, RUN_CONFIG_SHA256: config.sh) and the
+# platform record (platform.sh) are always written: of the members in --contexts (a
+# file the whole sweep appends to: every member it covers), else of the members the
+# run read (platform_probed_contexts). Callers add RUN_ID, HARNESS_SHA, SUITE,
+# NAMESPACE and ON_UNREACHABLE.
 # Returns 1 (the caller reports the check as not run) when config.sh or platform.sh
 # is not sourced.
 # shellcheck disable=SC2329
 reach_write_header() {
-	local tsv="$1" kv
+	local tsv="$1" kv _rw_ctxs=""
 	shift
+	if [[ "${1:-}" == --contexts ]]; then
+		_rw_ctxs="${2:-}"
+		shift 2
+	fi
 	[[ -e "$tsv" ]] && return 0
 	if ! declare -F config_preamble_lines >/dev/null; then
 		echo "reach_write_header: config_preamble_lines missing (source tests/lib/config.sh)" >&2
@@ -256,7 +262,7 @@ reach_write_header() {
 		echo "# REACH_SCHEMA=${REACH_SCHEMA}"
 		for kv in "$@"; do echo "# ${kv}"; done
 		config_preamble_lines
-		platform_preamble_lines "$(platform_probed_contexts)"
+		platform_preamble_lines "${_rw_ctxs:-$(platform_probed_contexts)}"
 		echo "# REACH_REQUESTS=${REACH_REQUESTS:-10}"
 		echo "# REACH_QPS=${REACH_QPS:-10}"
 		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"

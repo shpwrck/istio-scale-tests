@@ -208,9 +208,9 @@ Environment:
   GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
   GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE:-empty}; empty: the namespace of the hub's
   platform, openshift-gitops on OpenShift, else argocd), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
-  TEST_PLATFORM (${TEST_PLATFORM:-auto}): the members' platform, recorded with the operator build;
-  auto asks each member (and the hub, for its Argo CD namespace), kubernetes or openshift is
-  taken as given.
+  TEST_PLATFORM (${TEST_PLATFORM:-auto}): the hub's platform, for its Argo CD namespace (auto asks
+  the hub; kubernetes or openshift is taken as given). The platform record asks each member what
+  it serves either way, and warns when that is not TEST_PLATFORM.
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
@@ -426,7 +426,7 @@ if ((DRY_RUN)); then
 			echo "Ingress ${ctx}: LoadBalancer status of istio-system/${INGRESS_DEPLOY}"
 		fi
 	done
-	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels and scenario set, ${NS_REMOTE} on the workload member only, ${NS_SHARED} and its ReferenceGrant everywhere, the backend Services on the other members, istiod env overrides, istiod/ingress builds and pods, the echo Deployments, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s); the platform record (TEST_PLATFORM ${TEST_PLATFORM:-auto}: platform, operator, istiod and proxy builds, node provider; tests/lib/platform.sh)"
+	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels and scenario set, ${NS_REMOTE} on the workload member only, ${NS_SHARED} and its ReferenceGrant everywhere, the backend Services on the other members, istiod env overrides, istiod/ingress builds and pods, the echo Deployments, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s); the platform record (platform, operator, istiod and gateway proxy builds, node provider; tests/lib/platform.sh; TEST_PLATFORM ${TEST_PLATFORM:-auto})"
 	echo "Wait:           up to ${WAIT_TIMEOUT_SEC} s for Gateway Programmed, the echo Deployments Ready and every route's status (poll ${POLL_SEC} s), then ${GATE_DESC} answering 200 with the echo text through every ingress ${GWAPI_GATE_PASSES} time(s) in a row (same deadline; a streak under way may finish), then ${GWAPI_SETTLE_SEC} s settle"
 	echo "Traffic:        ${REQUESTS} requests x ${#SCENARIOS[@]} hosts x ${#CONTEXTS[@]} ingresses, curl --max-time ${TIMEOUT_SEC}; one ${GWAPI_DETAIL_TIMEOUT_SEC} s detail request per cell with a timeout; then each cell that did not answer 200 with the echo text, predicted 200 or making a YES when it fails (S7 through the other members), is re-probed once (${REQUESTS} requests) after ${REPROBE_DELAY} s (not through an ingress whose gate never passed); a failure counts toward an answer only if its re-probe repeats it"
 	echo "Proxy evidence: ${proxy_plan}"

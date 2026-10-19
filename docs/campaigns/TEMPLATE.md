@@ -34,7 +34,7 @@ the **peak** mesh-size point of the run (usually mesh-10), not mesh-1.
 | Traffic management | none / vsdr | controlplane envelope `Traffic management` (sweep peak `traffic_config`; none when both were swept) |
 | Istio version | _…_ | sweep header `Istio version` |
 | Kube version(s) | _…_ | sweep header `Kube versions` |
-| Platform / mesh build | _kubernetes or openshift; operator, istiod and proxy builds; node provider_ | run summary row `Platform`, report keys `PLATFORM`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`. Upstream (Sail) and OSSM builds, and kind and cloud nodes, are different measurements: compare like with like. On kind, capacity and headroom figures overstate the host |
+| Platform / mesh build | _kubernetes or openshift; operator, istiod and gateway proxy builds; node provider_ | controlplane envelope `Platform / mesh build`; run summary row `Platform`, report keys `PLATFORM`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways' build), `NODE_PROVIDER_BY_CONTEXT`. Upstream (Sail) and OSSM builds, and kind and cloud nodes, are different measurements: compare like with like. On kind, capacity and headroom figures overstate the host (the envelope's verdict leaves the node figures out), and remote latency runs through cloud-provider-kind's userspace Envoy on the shared host. Copy the envelope's `> **Warning:**` lines with it |
 
 ### 2. Control-plane provisioning & headroom — *was anything actually stressed?*
 

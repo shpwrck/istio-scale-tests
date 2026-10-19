@@ -199,6 +199,15 @@ EXTRACTED_PATTERNS=(
 	'platform_report_lines() {'
 	'platform_report_is_key() {'
 	'platform_value_has() {'
+	'platform_recorded_contexts() {'
+	'platform_report_warnings() {'
+	'platform_warning_lines() {'
+	'platform_kind_path_warning() {'
+	'platform_resume_check() {'
+	'platform_drift_check() {'
+	'platform_compare_values() {'
+	'platform_summary() {'
+	'platform_short_digests() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

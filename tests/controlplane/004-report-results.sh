@@ -157,6 +157,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 md) FORMAT=markdown ;;
 text|csv|json|markdown|charts) ;;
@@ -763,7 +764,9 @@ ${AWK_HEADER_IX}"'
 		if (rf) printf "RETIRE_FAILED (%s): a growth series was not retired (the cleanup failed, or its namespaces stayed discovered), so the sweep stopped there; retire it (005 --series <id> --undiscover --no-delete) before any other sweep on those members, or that sweep starts on a contaminated baseline.\n", rfn
 		if (lo) printf "%d growth row(s) were measured with up to %d leftover controlplane-test namespaces from earlier series or runs on their member (warning threshold %d). They stay in istiod'"'"'s informers, so those rows'"'"' absolute istiod heap and RSS are inflated; deltas within a series stay valid. Delete the leftovers between sweeps for absolute numbers.\n", lo, lomax, thr
 	}' "${TSV_FILES[@]}")"
+KIND_NODES=0  # the verdict leaves the node figures out (compute_sla_verdict)
 if platform_value_has "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" kind; then
+	KIND_NODES=1
 	DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory, which all kind clusters on that host share, so node allocatable, node_*_pct, the coverage fraction and the services-that-fit estimate overstate the real headroom; quote capacity and headroom from cloud nodes only."
 fi
 LEFTOVER_AT_START_M="$(tag_values LEFTOVER_TEST_NAMESPACES "")"
@@ -775,6 +778,11 @@ data_warnings_lines() {
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
 data_warnings_lines "WARNING: " >&2
+# The record's merge warnings (inputs that disagree, a build that changed during the sweep, a
+# value not read): platform_report_values printed them on stderr with the members' names; every
+# format's body gets them with member counts, since the scale envelope prints data_warnings.
+PLATFORM_WARNINGS="$(platform_report_warnings --no-members "${TSV_FILES[@]}")"
+[[ -z "$PLATFORM_WARNINGS" ]] || DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}${PLATFORM_WARNINGS}"
 # STATUS_ROWS / STATUS_SUMMARY: their count and "SKIPPED_MEM_GUARD 4, GROW_FAILED 1"
 # (first-seen order) over every consumed TSV.
 read -r STATUS_ROWS STATUS_SUMMARY < <(cat "${TSV_FILES[@]}" | awk -F'\t' -v re="$STATUS_RE" '
@@ -818,7 +826,11 @@ compute_sla_verdict() {
 	# CPU likewise: the window peak against the limit, or the end-of-window top snapshot.
 	icpu_eff="$(max_known "$(as_get istiod_cpu_pct)" "$ISTIOD_CPU_PEAK_PCT")"
 	local raw
-	raw="$(env_sla_verdict \
+	local -a verdict_opts=()
+	if ((KIND_NODES)); then
+		verdict_opts=(--nodes-excluded "the nodes are kind's (NODE_PROVIDER_BY_CONTEXT), so node_cpu_pct and node_mem_pct measure the host every kind cluster shares, not this cluster's headroom")
+	fi
+	raw="$(env_sla_verdict ${verdict_opts[@]+"${verdict_opts[@]}"} \
 		"$icpu_eff" "$imem_eff" \
 		"$(as_get node_cpu_pct)"   "$(as_get node_mem_pct)" \
 		"$restarts" "$n_total" "$n_valid")"

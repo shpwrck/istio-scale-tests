@@ -171,7 +171,9 @@ member; `kubernetes` or `openshift` is used as given) picks each suite chart's O
 the record still asks each member what it serves, outside every measurement window, and warns when
 that differs from the override. A report warns when its inputs differ on any of these, so compare
 results within one platform and mesh build. On kind every node reports the whole host, so the
-controlplane report flags its capacity figures.
+controlplane report flags its capacity figures and its SLA verdict leaves the node figures out
+(`CAUTION`). The cross-cluster path there runs through cloud-provider-kind's userspace Envoy on the
+shared host, so the dataplane and churn-dataplane reports flag their remote latency.
 
 | Record key | Values |
 | --- | --- |
@@ -187,7 +189,10 @@ In every key `unknown` means not read (a failed read, with a warning; a `--dry-r
 before the record), never none, and several values on one member are `+`-joined. A report whose
 inputs disagree for a member shows `mixed:<a>;<b>` there and says so in its body
 (`mixed:unknown,...` when only some inputs carry the key); a sweep whose record changed between
-its start and end marks its reports `mixed:`.
+its start and end marks its reports `mixed:` (it writes `platform-drift.txt` in the sweep dir). A
+controlplane `--resume` stops when a member's platform, mesh build or node provider, or the source
+member's tuning baseline or Sidecar egress hosts, differ from what the sweep's TSV records; a value
+it cannot read only warns.
 
 ### Run config (`--config FILE`)
 
