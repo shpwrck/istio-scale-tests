@@ -77,7 +77,7 @@
 #   platform_short_digests <text>           -> sha256 digests shortened to 12 hex digits
 #   platform_report_is_key <key>            -> return 0 for a record key
 #   platform_value_has <value> <word>       -> return 0 when a member's value holds <word>
-#   platform_help_lines [timeout]           -> a --help's Environment lines for TEST_PLATFORM and
+#   platform_help_lines <all|timeout>       -> a --help's Environment lines for TEST_PLATFORM and
 #                                              PLATFORM_READ_TIMEOUT (or the latter only)
 #
 # Requires KUBECTL (resolve_kubectl) and TEST_PLATFORM (config/options.env: auto,
@@ -1599,10 +1599,11 @@ platform_value_has() {
 	return 1
 }
 
-# platform_help_lines [timeout]: the lines a sweep's --help adds to its Environment section for
-# the platform record's knobs, with their current values (config/options.env): TEST_PLATFORM and
-# PLATFORM_READ_TIMEOUT, or with "timeout" the latter only (a script that describes TEST_PLATFORM
-# its own way).
+# platform_help_lines <all|timeout>: the lines a sweep's --help adds to its Environment section
+# for the platform record's knobs, with their current values (config/options.env): with "all",
+# TEST_PLATFORM and PLATFORM_READ_TIMEOUT; with "timeout", the latter only (a script that
+# describes TEST_PLATFORM its own way). Every caller names one (shellcheck's SC2119 flags a call
+# without an argument).
 # shellcheck disable=SC2329
 platform_help_lines() {
 	[[ "${1:-}" == timeout ]] || cat <<EOF

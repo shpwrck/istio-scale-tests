@@ -126,7 +126,7 @@ Environment:
   relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
   001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
   them, and the flags that set them, before the first setup, --dry-run included.
-$(platform_help_lines)
+$(platform_help_lines all)
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF

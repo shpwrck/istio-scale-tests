@@ -103,7 +103,7 @@ Environment:
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
   The sweep checks every numeric one of them, and the flags that set them, before the
   first setup, --dry-run included.
-$(platform_help_lines)
+$(platform_help_lines all)
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF

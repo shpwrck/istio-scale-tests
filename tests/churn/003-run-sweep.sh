@@ -71,7 +71,7 @@ Environment:
   CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
   CHURN_BASE_REPLICAS, CHURN_SETTLE_SEC, CHURN_POLL_INTERVAL_MS, CHURN_WAIT_TIMEOUT_SEC
   (read by 001/002; the sweep checks them before the first setup, --dry-run included).
-$(platform_help_lines)
+$(platform_help_lines all)
 EOF
 }
 

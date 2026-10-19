@@ -284,7 +284,7 @@ Environment:
   CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
-$(platform_help_lines)
+$(platform_help_lines all)
 EOF
 }
 

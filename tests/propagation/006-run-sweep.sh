@@ -83,7 +83,7 @@ Environment:
   PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
   PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
   setup, --dry-run included.
-$(platform_help_lines)
+$(platform_help_lines all)
 EOF
 }
 

@@ -982,6 +982,13 @@ env_list() {
 	done
 	run platform_help_lines timeout
 	refute_output --partial TEST_PLATFORM
+	assert_output --partial "PLATFORM_READ_TIMEOUT ("
+	run platform_help_lines all
+	assert_output --partial "TEST_PLATFORM ("
+	assert_output --partial "PLATFORM_READ_TIMEOUT ("
+	# Every caller names its variant: a call without one is shellcheck's SC2119 (CI's version
+	# flags it).
+	! grep -n 'platform_help_lines)' "$ROOT"/tests/*/0*.sh || false
 }
 
 @test "platform_probe_share (S-B1): every suite sweep shares its record right after its probe, before its first step; nothing exports the record" {
