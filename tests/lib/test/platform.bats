@@ -722,6 +722,9 @@ env_list() {
 		destinationrules.networking.istio.io,envoyfilters.networking.istio.io,sidecars.networking.istio.io,telemetries.telemetry.istio.io ]
 	grep -qx 'MARKER_KIND = "ConfigMap"' "$py"
 	[ "$PLATFORM_TUNING_MARKER_KIND" = configmaps ]
+	# Where the marker is and how it is named: tuning 004 expects it on every member of a pass.
+	grep -qx "MARKER_NAMESPACE = \"${PLATFORM_TUNING_MARKER_NS}\"" "$py"
+	grep -qx "MARKER_PREFIX = \"${PLATFORM_TUNING_MARKER_PREFIX}\"" "$py"
 	# The record lists both.
 	[ "$PLATFORM_TUNING_KINDS" = "${PLATFORM_TUNING_RESOURCE_KINDS},configmaps" ]
 }
@@ -762,13 +765,44 @@ env_list() {
 	assert_output $'unknown\tcould not be read on 2 of 3 members\t'
 }
 
+@test "platform_tuning_objects_check (I6-B1): a pass's profile not on a member, in any value it was read with, reads missing, with the members and objects" {
+	local m02="02-x:ConfigMap/istio-system/tuning-profile-02-x" s02="02-x:Sidecar/istio-system/tuning-02"
+	local dr04="04-y:DestinationRule/istio-system/tuning-pool"
+	# By default the profile's marker is expected on every member.
+	run platform_tuning_objects_check "ctx-a=${m02},ctx-b=none" 02-x
+	assert_output $'missing\tctx-b\t'"${m02}"
+	run platform_tuning_objects_check "ctx-a=none,ctx-b=none" 02-x
+	assert_output $'missing\tctx-a, ctx-b\t'"${m02}"
+	# One input of a member's, or the read at the pass's end (a mixed: value), without it.
+	run platform_tuning_objects_check "ctx-a=mixed:${m02};none,ctx-b=${m02}" 02-x
+	assert_output $'missing\tctx-a\t'"${m02}"
+	# The objects given: the marker and the profile's resources; a member without one lacks it.
+	run platform_tuning_objects_check "ctx-a=${m02},ctx-b=${m02}+${s02}" 02-x "ConfigMap/istio-system/tuning-profile-02-x+Sidecar/istio-system/tuning-02"
+	assert_output $'missing\tctx-a\t'"${s02}"
+	run platform_tuning_objects_check "ctx-a=${m02}+${s02},ctx-b=${s02}+${m02}" 02-x "ConfigMap/istio-system/tuning-profile-02-x+Sidecar/istio-system/tuning-02"
+	assert_output $'own\t\t'
+	# Another profile's objects come first; missing before not read.
+	run platform_tuning_objects_check "ctx-a=${dr04},ctx-b=none" 02-x
+	assert_output $'other\tctx-a\t'"${dr04}"
+	run platform_tuning_objects_check "ctx-a=unknown,ctx-b=none" 02-x
+	assert_output $'missing\tctx-b\t'"${m02}"
+	# Without a profile (the baseline, a run that is no tuning pass) nothing is expected.
+	run platform_tuning_objects_check "ctx-a=none,ctx-b=none"
+	assert_output $'none\t\t'
+	# A fleet: five names, then how many more; with _pl_no_members, a count.
+	run platform_tuning_objects_check "m1=none,m2=none,m3=none,m4=none,m5=none,m6=none,m7=none,m8=${m02}" 02-x
+	assert_output $'missing\tm1, m2, m3, m4, m5 and 2 more\t'"${m02}"
+	_pl_no_members=1 run platform_tuning_objects_check "m1=none,m2=${m02},m3=unknown" 02-x
+	assert_output $'missing\t1 of 3 members\t'"${m02}"
+}
+
 @test "platform_start_warnings (R6, U5-Ba): a sweep warns as it starts when a member holds a tuning profile's objects or marker; silent otherwise and in a dry-run" {
 	probe_setup
 	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=marker platform_probe member-a,member-b 2>/dev/null
 	run --separate-stderr platform_start_warnings member-a,member-b
 	assert_success
 	assert_output ""
-	[ "$stderr" = "warning: a tuning profile's objects are in place on member-b (TUNING_OBJECTS_BY_CONTEXT: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off), so this sweep would measure that profile's configuration, not the charts'. Unless that is the point, stop it now (Ctrl-C) and undo them with ./tests/tuning/005-cleanup.sh --contexts member-a,member-b; every report of this run warns too" ] || { echo "$stderr"; false; }
+	[ "$stderr" = "warning: a tuning profile's objects are in place on member-b (TUNING_OBJECTS_BY_CONTEXT: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off), so this sweep would measure that profile's configuration, not the charts'. Unless that is the point, stop it now (Ctrl-C); then, unless a tuning run is still in progress on these members (wait for it to end), undo them with ./tests/tuning/005-cleanup.sh --contexts member-a,member-b (add --results-dir <that run's --output-dir> if it had one, and --gitops-context <hub> to resume Argo CD if it paused it); every report of this run warns too" ] || { echo "$stderr"; false; }
 	# Only the members asked about.
 	run --separate-stderr platform_start_warnings member-a
 	[ -z "$stderr" ]
@@ -819,7 +853,7 @@ env_list() {
 	# An env-only profile left applied: only its marker, on member-b.
 	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=marker run platform_tuning_objects_refuse member-a,member-b "every pass of this sweep (the baseline included)"
 	assert_failure
-	assert_output --partial "a tuning profile's objects (label istio-scale-tests/tuning-profile) are on member-b already: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off. Every pass of this sweep (the baseline included) would be measured with them. They are a profile left applied (a run stopped before its revert, in any checkout) or objects applied by hand; undo them with ./tests/tuning/005-cleanup.sh --contexts member-a,member-b (it also restores the Istio CR from each profile's marker), then start again"
+	assert_output --partial "a tuning profile's objects (label istio-scale-tests/tuning-profile) are on member-b already: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off. Every pass of this sweep (the baseline included) would be measured with them. They are a tuning run still in progress on these members (wait for it to end), a profile left applied (a run stopped before its revert, in any checkout) or objects applied by hand; undo those with ./tests/tuning/005-cleanup.sh --contexts member-a,member-b (add --results-dir <that run's --output-dir> if it had one, and --gitops-context <hub> to resume Argo CD if it paused it), which also restores each member's Istio CR from the profile's marker, then start again"
 	# A member that cannot be asked stops it too, whatever the others hold.
 	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=timeout run platform_tuning_objects_refuse member-a,member-b "this profile"
 	assert_failure
@@ -830,7 +864,7 @@ env_list() {
 	PROBE_TUNING_OBJECTS=two run platform_tuning_objects_refuse "${csv%,}" "this profile"
 	assert_failure
 	assert_output --partial "are on member-01, member-02, member-03, member-04, member-05 and 35 more already: 04-connection-pools:DestinationRule/istio-system/tuning-connection-pool, 09-x:Sidecar/ns-b/tuning-x. This profile would be measured with them."
-	assert_output --partial "./tests/tuning/005-cleanup.sh the same --contexts (it also"
+	assert_output --partial "./tests/tuning/005-cleanup.sh the same --contexts (add --results-dir"
 	# A dry-run asks nothing.
 	probe_setup
 	: >"$CALLS"
@@ -1095,6 +1129,15 @@ env_list() {
 	! grep -q -- '--context=member-b' "$CALLS" || false
 	grep -q 'Platform record: reading again member-a (an unknown value in the record this step inherited)' "$WARN"
 	[ "$(platform_member_value member-a platform)" = kubernetes ]
+	# SC6-N1: a fleet's members read again are named five at most.
+	(
+		local m
+		PLATFORM_PROBE_ROWS=""
+		for m in m1 m2 m3 m4 m5 m6 m7; do PLATFORM_PROBE_ROWS+="${m}"$'\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\n'; done
+		export PLATFORM_PROBE_ROWS
+		platform_probe m1,m2,m3,m4,m5,m6,m7 2>"${WARN}.fleet"
+	)
+	grep -qx 'Platform record: reading again m1, m2, m3, m4, m5 and 2 more (an unknown value in the record this step inherited)' "${WARN}.fleet"
 	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.5@${DIG_B}" ]
 	[ "$(platform_member_value member-b istiod)" = pilot:1.30.4 ]
 	[ "$(platform_recorded_contexts)" = member-a,member-b ]
@@ -1270,7 +1313,7 @@ env_list() {
 
 @test "H2, H10: every suite sweep checks its record for drift before its first report; every report warns in its body" {
 	local f d r n=0
-	# tuning 003 compares its passes with the baseline instead (004).
+	# tuning 003 checks each pass instead (its own test) and compares the passes in 004.
 	for f in "$ROOT"/tests/*/0*-run-sweep.sh; do
 		[[ "$f" != */tuning/* ]] || continue
 		n=$((n + 1))
@@ -1301,6 +1344,63 @@ env_list() {
 	done
 	# A call after || counts: controlplane 001 and 005 read the record for a new ns-lifecycle TSV (H3).
 	[[ "$seen " == *" controlplane/001-setup-controlplane-test.sh "* && "$seen " == *" controlplane/005-cleanup.sh "* ]] || { echo "callers:${seen}"; false; }
+	# tuning 003 reads each pass's record, and its drift check reads istiod's limits (capacity.sh).
+	[[ "$seen " == *" tuning/003-run-tuning-sweep.sh "* ]] || { echo "callers:${seen}"; false; }
+	grep -q 'source "${ROOT}/tests/lib/capacity.sh"' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh"
+}
+
+@test "tuning 003 (I6-B1): each pass forgets the last pass's record, reads its own and shares it before its probes, and reads it again after them" {
+	local f="${ROOT}/tests/tuning/003-run-tuning-sweep.sh" body r p s w d
+	body="$(sed -n '/^run_pass() {$/,/^}$/p' "$f")"
+	[ -n "$body" ]
+	r="$(grep -n '^[[:space:]]*platform_probe_reset$' <<<"$body" | cut -d: -f1)"
+	p="$(grep -n '^[[:space:]]*platform_probe "$CONTEXTS_CSV"$' <<<"$body" | cut -d: -f1)"
+	s="$(grep -n '^[[:space:]]*platform_probe_share "$dir"$' <<<"$body" | cut -d: -f1)"
+	w="$(grep -n '^[[:space:]]*while probe_argv ' <<<"$body" | cut -d: -f1)"
+	d="$(grep -n '^[[:space:]]*platform_drift_check "$dir" "$CONTEXTS_CSV"$' <<<"$body" | cut -d: -f1)"
+	[[ -n "$r" && -n "$p" && -n "$s" && -n "$w" && -n "$d" ]] || { echo "reset '${r}', probe '${p}', share '${s}', probes '${w}', drift '${d}'"; false; }
+	((r < p && p < s && s < w && w < d)) || { echo "reset ${r}, probe ${p}, share ${s}, probes ${w}, drift ${d}: out of order"; false; }
+	# A failed probe ends the probes, not the pass: its record is still read again.
+	sed -n "${w},${d}p" <<<"$body" | grep -q '^[[:space:]]*break$'
+	! sed -n "${w},${d}p" <<<"$body" | grep -q '^[[:space:]]*return' || false
+}
+
+@test "platform_probe_reset (I6-B1): the next platform_probe reads every member again and stops handing the old record to the steps" {
+	local dir="${BATS_TEST_TMPDIR}/pass"
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	platform_probe_share "$dir"
+	[ "$PLATFORM_PROBE_FILE" = "${dir}/platform-record.txt" ]
+	: > "$CALLS"
+	# Without the reset, the record read is reused.
+	platform_probe member-a,member-b 2>/dev/null
+	[ ! -s "$CALLS" ]
+	platform_probe_reset
+	[ -z "$PLATFORM_PROBE_ROWS" ]
+	[ -z "${PLATFORM_PROBE_FILE+x}" ]
+	[ -z "${PLATFORM_PROBE_LOADED+x}" ]
+	PROBE_ISTIOD_THROTTLE=50 platform_probe member-a,member-b 2>/dev/null
+	grep -q -- '--context=member-a' "$CALLS"
+	grep -q -- '--context=member-b' "$CALLS"
+	[ "$(platform_member_value member-a istiod_env)" = "$(env_digest "$(env_list 50)")" ]
+	# After a platform_probe_load too (a step inside a window reads nothing until reset).
+	printf 'member-a\tkubernetes\top\tistiod\tproxy\tkind\te\n' > "${BATS_TEST_TMPDIR}/saved.tsv"
+	platform_probe_load "${BATS_TEST_TMPDIR}/saved.tsv"
+	platform_probe_reset
+	: > "$CALLS"
+	platform_probe member-a 2>/dev/null
+	grep -q -- '--context=member-a' "$CALLS"
+	[ "$(platform_member_value member-a istiod)" != istiod ]
+}
+
+@test "platform_members_by_value (U6-S2): each value with its members, five named, mixed values spelled out, digests shortened" {
+	local d="sha256:$(printf 'ab%.0s' {1..32})"
+	run platform_members_by_value "a=x,b=y,c=x"
+	assert_output "x on a, c; y on b"
+	run platform_members_by_value "m1=x,m2=x,m3=x,m4=x,m5=x,m6=x,m7=x,n=pilot:1.30.5@${d}"
+	assert_output "x on m1, m2, m3, m4, m5 and 2 more; pilot:1.30.5@sha256:abababababab on n"
+	run platform_members_by_value "mixed:unknown,a=mixed:x;y,b=x"
+	assert_output "mixed:unknown; mixed: x and y on a; x on b"
 }
 
 @test "H3: every writer of the ns-lifecycle TSV reads the platform record before it creates the file" {
@@ -1426,13 +1526,13 @@ resume_run() {
 	assert_failure
 	[[ "$stderr" == *"  member-a, member-b: ISTIOD_ENV_BY_CONTEXT recorded $(env_digest "$(env_list)"), now $(env_digest "$(env_list 50)")"* ]]
 	# U-S-b: the refusal names each key's usual cause once, so the operator can revert and resume.
-	[[ "$stderr" == *"Usual causes: ISTIOD_ENV_BY_CONTEXT: a tuning profile left applied (tests/tuning/005-cleanup.sh reverts it), or a sync or hand edit of the Istio CR's spec.values.pilot.env."* ]]
+	[[ "$stderr" == *"Usual causes: ISTIOD_ENV_BY_CONTEXT: a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes), or a sync or hand edit of the Istio CR's spec.values.pilot.env."* ]]
 	[ "$(grep -c 'Usual causes' <<<"$stderr")" -eq 1 ]
 	# A tuning profile's objects left in place since the rows were measured (R5).
 	PROBE_TUNING_OBJECTS=04 resume_run "$tsv"
 	assert_failure
 	[[ "$stderr" == *"  member-a, member-b: TUNING_OBJECTS_BY_CONTEXT recorded none, now 04-connection-pools:DestinationRule/istio-system/tuning-connection-pool"* ]] || { echo "$stderr"; false; }
-	[[ "$stderr" == *"Usual causes: TUNING_OBJECTS_BY_CONTEXT: a tuning run stopped before its revert (tests/tuning/005-cleanup.sh restores the Istio CR from its marker and deletes the objects), or a profile's objects applied by hand."* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"Usual causes: TUNING_OBJECTS_BY_CONTEXT: a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes from its marker), or a profile's objects applied or deleted by hand."* ]] || { echo "$stderr"; false; }
 	# Not read now: a warning that says so (and why), and the run goes on.
 	PROBE_KUBE=down resume_run "$tsv"
 	assert_success
@@ -1673,7 +1773,7 @@ resume_run() {
 	# istiod's settings (H25): a tuning profile left applied.
 	rm "${dir}/platform-drift.txt"
 	PROBE_ISTIOD_THROTTLE=50 run --separate-stderr platform_drift_check "$dir" member-a
-	[[ "$stderr" == *"warning: member-a: ISTIOD_ENV_BY_CONTEXT changed during the sweep: $(env_digest "$(env_list)") at its start, $(env_digest "$(env_list 50)") at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, so its reports read ISTIOD_ENV_BY_CONTEXT mixed); the usual cause is a tuning profile left applied (tests/tuning/005-cleanup.sh reverts it), or a sync or hand edit of the Istio CR's spec.values.pilot.env; for publishable figures, run the sweep again with istiod's settings fixed"* ]]
+	[[ "$stderr" == *"warning: member-a: ISTIOD_ENV_BY_CONTEXT changed during the sweep: $(env_digest "$(env_list)") at its start, $(env_digest "$(env_list 50)") at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, so its reports read ISTIOD_ENV_BY_CONTEXT mixed); the usual cause is a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes), or a sync or hand edit of the Istio CR's spec.values.pilot.env; for publishable figures, run the sweep again with istiod's settings fixed"* ]]
 	grep -qx "# ISTIOD_ENV_BY_CONTEXT=member-a=$(env_digest "$(env_list 50)")" "${dir}/platform-drift.txt"
 	# A member that does not answer at the end: a warning, no marker line for it.
 	PROBE_PLATFORM=down run --separate-stderr platform_drift_check "${BATS_TEST_TMPDIR}" member-a
@@ -1791,7 +1891,7 @@ resume_run() {
 	# The limits raised during the sweep (a sync of new resources, a tuning profile).
 	PROBE_ISTIOD_CPU_LIMIT=4 run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	[[ "$stderr" == *"warning: member-a: ISTIOD_CPU_LIMIT_M changed during the sweep: 2000 at its start, 4000 at its end; rows measured after the change ran under another limit, but the report divides every row's window-peak CPU % (and the SLA verdict on it) by the recorded one, while the kubectl top % use each row's own limit (written to ${dir}/platform-drift.txt, which its reports say in their body); the usual cause is an Argo CD sync, a tuning profile or a hand edit of istiod's resources (the Istio CR's spec.values.pilot.resources); for publishable figures, run the sweep again with istiod's limits fixed"* ]]
+	[[ "$stderr" == *"warning: member-a: ISTIOD_CPU_LIMIT_M changed during the sweep: 2000 at its start, 4000 at its end; rows measured after the change ran under another limit, but the report's window-peak CPU % (the highest istiod CPU of every member's rows) divides by the recorded one, as does the SLA verdict on it, while the kubectl top % use each row's own limit (written to ${dir}/platform-drift.txt, which its reports say in their body); the usual cause is an Argo CD sync, a tuning profile or a hand edit of istiod's resources (the Istio CR's spec.values.pilot.resources); for publishable figures, run the sweep again with istiod's limits fixed"* ]]
 	[[ "$stderr" != *ISTIOD_MEM_LIMIT_MI* ]]
 	grep -qx '# ISTIOD_CPU_LIMIT_M=4000' "${dir}/platform-drift.txt"
 	! grep -q ISTIOD_MEM_LIMIT_MI "${dir}/platform-drift.txt" || false
@@ -1799,7 +1899,7 @@ resume_run() {
 	grep -qx '# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=member-b=4000/4096' "${dir}/platform-drift.txt"
 	# The sweep's reports say it in their body.
 	run platform_report_warnings "${dir}/controlplane-r.tsv"
-	assert_output --partial "ISTIOD_CPU_LIMIT_M changed during the sweep in sweep (platform-drift.txt): 2000 at its start, 4000 at its end; rows measured after the change ran under another limit, but the report divides every row's window-peak CPU % (and the SLA verdict on it) by the one recorded at the start, and cannot tell which rows those are; the kubectl top % use each row's own limit; the usual cause is"
+	assert_output --partial "ISTIOD_CPU_LIMIT_M changed during the sweep in sweep (platform-drift.txt): 2000 at its start, 4000 at its end; rows measured after the change ran under another limit, but the report's window-peak CPU % (the highest istiod CPU of every member's rows) divides by the one recorded at the start, as does the SLA verdict on it, and the report cannot tell which rows those are; the kubectl top % use each row's own limit; the usual cause is"
 	assert_output --partial "istiod's limits per replica on member-b (CPU 4000m, memory 4096Mi) differ from those the TSVs recorded on their source member (CPU 2000m, memory 4096Mi) at the end of the sweep in sweep (platform-drift.txt)"
 	# Not read at the end: a warning, no marker.
 	rm "${dir}/platform-drift.txt"
@@ -1835,6 +1935,11 @@ resume_run() {
 	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
 	assert_output --partial "istiod's limits per replica on 1 member(s) (CPU 2000m, memory 2048Mi) differ from those"
 	refute_output --partial member-b
+	# M6-N1: a second drift check (a resumed sweep's) adds member-c; both checks' members are named, each once.
+	echo '# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=member-c=4000/4096,member-b=2000/2048' >>"${dir}/platform-drift.txt"
+	run platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "istiod's limits per replica on member-b (CPU 2000m, memory 2048Mi); member-c (CPU 4000m, memory 4096Mi) differ from those the TSVs recorded on their source member"
+	[ "$(grep -o 'member-b (CPU' <<<"$output" | wc -l)" -eq 1 ]
 	# A report of a suite that records no istiod limits says nothing of them.
 	sed '/ISTIOD_CPU_LIMIT_M=\|ISTIOD_MEM_LIMIT_MI=/d' "${dir}/controlplane-r.tsv" > "${dir}/other.tsv"
 	rm "${dir}/controlplane-r.tsv"
@@ -1984,7 +2089,7 @@ resume_run() {
 	platform_fixture_lines > "${d}/sweep-x/a.tsv"
 	printf '# TUNING_OBJECTS_BY_CONTEXT=ctx-a=%s\n' "$o" > "${d}/sweep-x/platform-drift.txt"
 	run platform_report_warnings "${d}/sweep-x/a.tsv"
-	assert_output "TUNING_OBJECTS_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-x): ctx-a from none to ${o}; the TSVs record the value at the sweep's start, but rows measured after the change ran on other tuning profile objects, and the report cannot tell which rows those are; the usual cause is a tuning run stopped before its revert (tests/tuning/005-cleanup.sh restores the Istio CR from its marker and deletes the objects), or a profile's objects applied by hand; for publishable figures, run the sweep again without a profile's objects (or with the same ones throughout)"
+	assert_output "TUNING_OBJECTS_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-x): ctx-a from none to ${o}; the TSVs record the value at the sweep's start, but rows measured after the change ran on other tuning profile objects, and the report cannot tell which rows those are; the usual cause is a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes from its marker), or a profile's objects applied or deleted by hand; for publishable figures, run the sweep again without a profile's objects (or with the same ones throughout)"
 	refute_output --partial "when the run started"
 }
 

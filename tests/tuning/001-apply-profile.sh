@@ -28,7 +28,7 @@ HELPER="${TUNING_DIR}/lib/tuning.py"
 PROFILE=""
 CONTEXTS_CSV=""
 STATE_DIR=""
-ROLLOUT_TIMEOUT=300
+ROLLOUT_TIMEOUT="${TUNING_ROLLOUT_TIMEOUT:-300}"
 SKIP_VERIFY=0
 DRY_RUN=0
 
@@ -48,7 +48,7 @@ Options:
   --state-dir DIR        Where to save revert state
                          (default: tests/tuning/results/state-<profile>).
   --rollout-timeout N    Seconds to wait for the operator and istiod rollout
-                         (default: ${ROLLOUT_TIMEOUT}).
+                         (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --skip-verify          Skip the post-apply checks.
   --dry-run              Print the patch and resources; do not touch clusters.
   -h, --help             Show this help.
@@ -118,6 +118,8 @@ echo "    State dir:    ${STATE_DIR}"
 
 if ((DRY_RUN)); then
 	echo ""
+	echo "--- Before any change ---"
+	echo "check that no member holds a tuning profile's objects or marker (label ${PLATFORM_TUNING_LABEL}); stop if one does"
 	echo "--- Istio CR merge patch ---"
 	if ((HAS_PATCH)); then cat "$WORK/patch.json"; else echo "(none)"; fi
 	echo "--- Resources (server-side apply) ---"
@@ -177,9 +179,18 @@ cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
 echo "$PROFILE_NAME" >"${STATE_DIR}/active-profile"
 
 # The marker on every member before any change (002-revert-profile.sh deletes it last).
-read -r _ MARKER_NAME MARKER_NS < <(python3 -I "$HELPER" resources "${STATE_DIR}/marker-$(ctx_key "${CONTEXTS[0]}").json")
+read -r MARKER_KIND MARKER_NAME MARKER_NS < <(python3 -I "$HELPER" resources "${STATE_DIR}/marker-$(ctx_key "${CONTEXTS[0]}").json")
+# The objects the profile puts on every member, as the platform record names them: tuning 004
+# checks that each pass's record holds them all.
+{
+	echo "${MARKER_KIND}/${MARKER_NS}/${MARKER_NAME}"
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
+		read -r kind name ns <<<"$line"
+		echo "${kind}/${ns}/${name}"
+	done
+} >"${STATE_DIR}/objects"
 for ctx in "${CONTEXTS[@]}"; do
-	echo "--- ${ctx}: marking ${PROFILE_NAME} applied (ConfigMap ${MARKER_NS}/${MARKER_NAME}) ---"
+	echo "--- ${ctx}: marking ${PROFILE_NAME} applied (${MARKER_KIND} ${MARKER_NS}/${MARKER_NAME}) ---"
 	"${KUBECTL[@]}" --context="$ctx" apply --server-side --field-manager=tuning-profile \
 		-f "${STATE_DIR}/marker-$(ctx_key "$ctx").json" \
 		|| die "${ctx}: could not create the profile's marker; nothing is patched yet. Remove the markers already created with ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"
@@ -224,7 +235,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		"${KUBECTL[@]}" --context="$ctx" -n istio-system get deployment "$deploy" -o json >"$WORK/deploy.json"
 		python3 -I "$HELPER" check "$WORK/patch.json" "$WORK/live.json" "$WORK/deploy.json" || fail=1
 	fi
-	for line in ${RES_LINES[@]+"${RES_LINES[@]}"} "ConfigMap ${MARKER_NAME} ${MARKER_NS}"; do
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"} "${MARKER_KIND} ${MARKER_NAME} ${MARKER_NS}"; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
 			echo "  PASS  ${kind}/${name} exists in ${ns}"

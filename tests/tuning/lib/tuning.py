@@ -20,6 +20,8 @@ Profile commands need PyYAML; the others use the standard library only.
                                   revert patch to OUTDIR (patch-file "-": none to restore from)
   apps APPS_JSON APPSET SUFFIX    print "name project" for Argo CD Applications owned by
                                   APPSET (falls back to names ending in -SUFFIX)
+  window APPS_CSV OUT_WINDOW       write the deny sync window this tool adds for APPS (the
+                                  same for the same APPS: found without a pause record)
   window-add PROJECT_JSON APPS_CSV OUT_WINDOW
                                   print a merge patch that adds a deny sync window for
                                   APPS; write the window JSON to OUT_WINDOW
@@ -51,10 +53,12 @@ ALLOWED_KINDS = {"DestinationRule", "Sidecar", "Telemetry", "EnvoyFilter"}
 MARKER_KIND = "ConfigMap"
 MARKER_NAMESPACE = "istio-system"
 MARKER_PREFIX = "tuning-profile-"
-# A profile's name labels its objects and names its marker: a DNS label, and none of the words a
-# platform record's TUNING_OBJECTS_BY_CONTEXT value uses for itself (tests/lib/platform.sh).
+# A profile's name labels its objects and names its marker: a DNS label, none of the words a
+# platform record's TUNING_OBJECTS_BY_CONTEXT value uses for itself (tests/lib/platform.sh), and
+# not the name of tuning 003's pass without a profile.
 NAME_RE = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 RECORD_WORDS = ("none", "unknown", "mixed", "unlabelled")
+RESERVED_NAMES = RECORD_WORDS + ("baseline",)
 MISSING = object()
 
 
@@ -111,9 +115,10 @@ def cmd_load(profile, outdir):
     if not re.match(NAME_RE, name) or len(MARKER_PREFIX + name) > 63:
         die(f"{profile}: a profile's name ('{name}') must be lowercase letters, digits and '-', at most "
             f"{63 - len(MARKER_PREFIX)} characters: it labels the profile's objects and names its marker ConfigMap")
-    if name in RECORD_WORDS:
-        die(f"{profile}: a profile's name ('{name}') must not be one of {', '.join(RECORD_WORDS)}: the platform "
-            "record uses these words for itself")
+    if name in RESERVED_NAMES:
+        die(f"{profile}: a profile's name ('{name}') must not be one of {', '.join(RESERVED_NAMES)}: the platform "
+            f"record uses {', '.join(RECORD_WORDS)} for itself, and baseline names a tuning sweep's pass without a "
+            "profile")
     desc = " ".join(str(doc.get("description") or "").split())
     support = str(doc.get("ossm_support") or "")
     if support not in ("supported", "configurable"):
@@ -320,6 +325,10 @@ def matches(entry, window):
     return all(entry.get(k) == v for k, v in window.items())
 
 
+def cmd_window(apps_csv, out_window):
+    write_json(out_window, window_for([a for a in apps_csv.split(",") if a]))
+
+
 def cmd_window_add(project_file, apps_csv, out_window):
     proj = read_json(project_file)
     window = window_for([a for a in apps_csv.split(",") if a])
@@ -378,6 +387,7 @@ COMMANDS = {
     "marker": (cmd_marker, 5, 5),
     "markers": (cmd_markers, 2, 2),
     "apps": (cmd_apps, 3, 3),
+    "window": (cmd_window, 2, 2),
     "window-add": (cmd_window_add, 3, 3),
     "window-remove": (cmd_window_remove, 2, 2),
     "state-add": (cmd_state_add, 5, 5),

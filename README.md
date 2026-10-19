@@ -226,8 +226,10 @@ It also only warns when node allocatable, istiod's requests, a member's istiod r
 network topology differ (an autoscaler or an HPA moves some of them);
 [tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is
 bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
-nodes), and `PLATFORM_READ_PARALLEL` members are read at once (20; lower it when the machine
-running the suite runs short of memory or processes on a large mesh).
+nodes), and `PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile
+objects and istiod's limits (20; lower it when the machine running the suite runs short of memory
+or processes on a large mesh). The Kubernetes versions and istiod's replicas are read on every
+member at once.
 
 ### Run config (`--config FILE`)
 

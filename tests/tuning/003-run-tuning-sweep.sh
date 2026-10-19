@@ -3,7 +3,9 @@
 # Istio CR Applications, runs the suite's setup once, then measures the baseline and
 # each profile (apply -> settle -> probe -> revert), writes sweep-comparison.md,
 # runs the suite's cleanup and resumes Argo CD. It refuses to start while a member
-# holds a tuning profile's objects or marker (a profile left applied).
+# holds a tuning profile's objects or marker (a profile left applied). Each pass reads
+# its own platform record before its probes and again after them, so a profile undone
+# or istiod's settings put back during the pass show in its comparison.
 #
 # Usage:
 #   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
@@ -20,7 +22,13 @@ source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse
+source "${ROOT}/tests/lib/config.sh"  # _config_sha256 (platform_probe: the istiod env digest)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe: masked addresses)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits (platform_drift_check: istiod's limits)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse, each pass's record
 
 TUNING_DIR="${ROOT}/tests/tuning"
 SUITE=""
@@ -34,7 +42,7 @@ RUN_CLEANUP=1
 SETTLE_SEC="${TUNING_SETTLE_SEC:-60}"
 CHURN_RATE="${TUNING_COEXEC_CHURN_RATE:-5}"
 OUTPUT_BASE="${TUNING_DIR}/results"
-ROLLOUT_TIMEOUT=300
+ROLLOUT_TIMEOUT="${TUNING_ROLLOUT_TIMEOUT:-300}"
 DRY_RUN=0
 
 usage() {
@@ -62,13 +70,15 @@ Options:
   --churn-rate N         churn-dataplane only: churn operations/s (default: ${CHURN_RATE}).
   --output-dir DIR       Results base; the run writes sweep-<RUN_ID>/ there
                          (default: tests/tuning/results).
-  --rollout-timeout N    Seconds to wait for istiod after apply/revert (default: ${ROLLOUT_TIMEOUT}).
+  --rollout-timeout N    Seconds to wait for istiod after apply/revert
+                         (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --dry-run              Print the plan, check the probe arguments with each probe's
                          own --dry-run, and exit. Touches no cluster.
   -h, --help             Show this help.
 
 Environment:
-  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
+  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE,
+  TUNING_ROLLOUT_TIMEOUT.
   006-gitops-pause.sh, which pauses Argo CD, reads TUNING_GITOPS_NAMESPACE (the Argo CD
   namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
   TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
@@ -335,6 +345,13 @@ run_pass() {
 	fi
 	echo "--- Settle ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"
+	# This pass's own platform record (a profile changes istiod's env and its objects), read once
+	# for its probes, which reuse it (platform-record.txt in the pass dir), and read again after
+	# them: a profile undone or istiod's settings put back during the pass go to its
+	# platform-drift.txt, which 004 merges into the pass's record.
+	platform_probe_reset
+	platform_probe "$CONTEXTS_CSV"
+	platform_probe_share "$dir"
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
@@ -342,10 +359,11 @@ run_pass() {
 		if ((rc != 0)); then
 			echo "warn: probe for ${label} exited ${rc}; marking PROBE_FAILED" >&2
 			echo "PROBE_FAILED rc=${rc} $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${dir}/PROBE_FAILED"
-			return 0
+			break
 		fi
 		n=$((n + 1))
 	done
+	platform_drift_check "$dir" "$CONTEXTS_CSV"
 }
 
 ABORTED=0

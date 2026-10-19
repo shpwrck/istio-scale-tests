@@ -930,15 +930,27 @@ empty: "
 }
 
 @test "mesh-wiring gate by name: bad names, a count that disagrees, no clusterName or a member not listed is NotReady" {
+	local rule="expectedClusters and clusterName take only cluster names (lowercase letters, digits, '-' and '.'), the list comma-separated"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,Mesh_B' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: expectedClusters (mesh-a,Mesh_B) and clusterName (mesh-a) take only cluster names: lowercase letters, digits, '-' and '.', the list comma-separated"
+	assert_output "NotReady: expectedClusters holds \"Mesh_B\": ${rule}"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME='mesh-*' EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output --partial "take only cluster names"
+	assert_output "NotReady: clusterName is \"mesh-*\": ${rule}"
+	# A space after a comma shows in the quotes; a comma in clusterName is not a name.
+	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a,mesh-b EXPECTED_CLUSTERS='mesh-a, mesh-b' run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: expectedClusters holds \" mesh-b\"; clusterName is \"mesh-a,mesh-b\": ${rule}"
+	# SC6-N2: five bad names at most, then how many more; the good ones not copied.
+	EXPECTED_MEMBERS=0 CLUSTER_NAME=ok EXPECTED_CLUSTERS='ok,A1,A2,A3,A4,A5,A6,A7,good' run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: expectedClusters holds \"A1\", \"A2\", \"A3\", \"A4\", \"A5\" and 2 more: ${rule}"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: expectedClusters (mesh-a,,mesh-b) holds an empty name"
+	assert_output "NotReady: expectedClusters holds an empty name: a comma at either end of the list, or two in a row"
+	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b,' run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: expectedClusters holds an empty name: a comma at either end of the list, or two in a row"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b,mesh-a' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedClusters repeats mesh-a (3 names in all): list each member once"
@@ -948,13 +960,19 @@ empty: "
 	assert_output "NotReady: expectedClusters repeats m1, m2, m3, m4, m5 and 2 more (14 names in all): list each member once"
 	EXPECTED_MEMBERS=3 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a,mesh-b): set both from the same members, or expectedMembers to 0"
+	assert_output "NotReady: expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a, mesh-b): set both from the same members, or expectedMembers to 0"
+	EXPECTED_MEMBERS=3 CLUSTER_NAME=m1 EXPECTED_CLUSTERS='m1,m2,m3,m4,m5,m6,m7' run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: expectedMembers is 3 but expectedClusters names 7 member(s) (m1, m2, m3, m4, m5 and 2 more): set both from the same members, or expectedMembers to 0"
 	EXPECTED_MEMBERS=2 CLUSTER_NAME= EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedClusters is set but clusterName is empty, so the gate cannot tell which member it runs on (the ApplicationSet sets it per member)"
 	EXPECTED_MEMBERS=2 CLUSTER_NAME=mesh-z EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: this member (mesh-z) is not in expectedClusters (mesh-a,mesh-b); a member the apply just added waits for the gate ApplicationSet's new list"
+	assert_output "NotReady: this member (mesh-z) is not in expectedClusters (mesh-a, mesh-b); a member the apply just added waits for the gate ApplicationSet's new list"
+	EXPECTED_MEMBERS=0 CLUSTER_NAME=m8 EXPECTED_CLUSTERS='m1,m2,m3,m4,m5,m6,m7' run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: this member (m8) is not in expectedClusters (m1, m2, m3, m4, m5 and 2 more); a member the apply just added waits for the gate ApplicationSet's new list"
 	# None of these asked the API anything.
 	[ ! -s "${STUB_DIR}/requests.log" ]
 }
@@ -1015,7 +1033,10 @@ empty: "
 	grep -A1 'name: EXPECTED_CLUSTERS' <<<"$output" | grep -q 'value: ""'
 	run helm template x "$CHART" --set clusterName=mesh-a --set 'expectedClusters={mesh-a,mesh-b}' --set expectedMembers=3
 	assert_failure
-	assert_output --partial "expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a,mesh-b)"
+	assert_output --partial "expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a, mesh-b): set both"
+	run helm template x "$CHART" --set clusterName=m1 --set 'expectedClusters={m1,m2,m3,m4,m5,m6,m7}' --set expectedMembers=3
+	assert_failure
+	assert_output --partial "expectedMembers is 3 but expectedClusters names 7 member(s) (m1, m2, m3, m4, m5 and 2 more): set both"
 	run helm template x "$CHART" --set 'expectedClusters={mesh-a,mesh-b}'
 	assert_failure
 	assert_output --partial 'clusterName "" is not a cluster name: with expectedClusters set it to this member'

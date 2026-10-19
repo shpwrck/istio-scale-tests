@@ -7,8 +7,10 @@
 # compared with the baseline's (else the first pass with data's) in one "Platform record" row,
 # its values follow the table once, and a pass whose record differs (or cannot be compared)
 # warns: its change is then not the profile's alone. Two more rows: each pass's istiod
-# settings (one digest; a pass whose members differ warns) and its tuning profile objects
-# (the baseline must hold none, a profile pass only its own: anything else warns).
+# settings (one digest; a pass whose members differ, whose value changed during it, or whose
+# settings contradict its profile against the baseline's warns) and its tuning profile objects
+# (the baseline must hold none, a profile pass all of its own on every member and no other:
+# anything else warns).
 #
 # Usage:
 #   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
@@ -40,18 +42,25 @@ or not recorded in one of them), baseline or reference (the pass compared with) 
 (no data). An operator that differs only in its state is the same build. istiod's
 settings (ISTIOD_ENV_BY_CONTEXT) and a profile's objects (TUNING_OBJECTS_BY_CONTEXT) are
 not compared, since a profile changes them: the "istiod env" row shows each pass's
-digest (by member (see notes) when its members differ), and the "Tuning objects" row
-whether a pass held none, only its own profile's (own), another profile's (other, or
-any in the baseline: a profile left applied, with a warning) or could not be told
-(unknown). The values follow the table, digests shortened to 12 hex digits: the
-reference pass's, then for each pass that differs or cannot be compared only the
-members that do not match (five at most, with a count).
+digest (by member (see notes) when its members differ, mixed (see notes) when its TSVs or
+the read at its end disagree, "(see notes)" after it when it is the baseline's though the
+profile sets istiod's env, or another though the profile patches nothing in the Istio CR:
+state/patch.json), and the "Tuning objects" row whether a pass held none, all of its own
+profile's on every member and no other (own: its marker and its resources,
+state/objects), another profile's (other, or any in the baseline: a profile left
+applied), not all of its own (missing: the profile undone during the pass or never
+applied there) or could not be told (unknown); anything but none, own and the digests
+warns. A pass without data reads - in both. The values follow the table, digests
+shortened to 12 hex digits: the reference pass's, then for each pass that differs or
+cannot be compared only the members that do not match (five at most, with a count).
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
   --format FMT       text or md (or markdown) (default: text).
   --output FILE      Write to FILE instead of stdout.
   -h, --help         Show this help.
+
+Requires jq (it reads each profile pass's state/patch.json).
 EOF
 }
 
@@ -79,6 +88,7 @@ text | markdown) ;;
 md) FORMAT=markdown ;;
 *) die "--format must be text or md" ;;
 esac
+command -v jq >/dev/null 2>&1 || die "jq not found on PATH: it reads each profile pass's state/patch.json"
 
 META="${RESULTS_DIR}/sweep-metadata.txt"
 meta_get() { [[ -f "$META" ]] && sed -n "s/^# $1=//p" "$META" | head -1; return 0; }
@@ -336,12 +346,64 @@ plat_all_unknown() {
 }
 # Each pass's istiod settings (ISTIOD_ENV_BY_CONTEXT, which a profile changes on purpose): one
 # digest, so the table shows that a profile reached istiod and a re-run's pass can be matched to
-# this one's. A pass whose members ran different settings warns: the profile may have reached
-# some of them only. And its tuning profile objects (platform_tuning_objects_check): a profile
-# pass measures with its own (labelled with its name, the pass's); another profile's, or any in
-# the baseline, are a profile left applied (a run stopped before its revert, or objects applied
-# by hand), so the pass did not measure what its name says.
-declare -A ENV_NOTE OBJ_NOTE  # pass -> its note after the table
+# this one's. A pass whose members ran different settings, or whose TSVs (or the read again at its
+# end: tuning 003's platform_drift_check) disagree, warns: the profile may have reached some of them,
+# or part of the pass, only; so does a profile pass whose settings contradict its profile against
+# the baseline's (env_against_base). And its tuning profile objects (platform_tuning_objects_check):
+# a profile pass measures with its own, every one on every member (its marker, which 001 puts there
+# before any change, and its resources: the pass's state/objects); another profile's, or any in the
+# baseline, are a profile left applied (a run stopped before its revert, or objects applied by
+# hand), and one of its own missing is a profile undone during the pass or never applied there, so
+# the pass did not measure what its name says.
+declare -A ENV_NOTE ENVB_NOTE OBJ_NOTE  # pass -> its notes after the table
+BASE_ENV=""
+[[ -z "$BASE" || -z "${PLAT[$BASE]:-}" ]] || BASE_ENV="$(plat_value "$BASE" ISTIOD_ENV_BY_CONTEXT)"
+# env_against_base <pass>: the members whose istiod settings contradict the pass's profile, as
+# "<same|other>\t<their ISTIOD_ENV_BY_CONTEXT pairs>": its state/patch.json (001-apply-profile.sh
+# writes it) sets spec.values.pilot.env, yet a value they were read with is their baseline's (same:
+# the profile's env was not in effect there), or it patches nothing in the Istio CR, yet one is
+# not (other: something else changed them). Nothing when none does, for a profile that patches
+# other Istio CR values only (some of them reach istiod's env too), for the baseline, without
+# one, or when no member was read on both sides. Return 2 when there is something to compare but
+# the patch is not there or does not parse.
+env_against_base() {
+	local patch="${RESULTS_DIR}/${1}/state/patch.json" sets="" pair c x b hit=""
+	local -a pairs=() parts=()
+	local -A base=()
+	[[ -n "$BASE_ENV" && "$1" != "$BASE" ]] || return 0
+	IFS=',' read -r -a pairs <<<"$BASE_ENV"
+	for pair in ${pairs[@]+"${pairs[@]}"}; do
+		[[ "$pair" != *=* ]] || { x="${pair#*=}"; base[${pair%%=*}]=";${x#mixed:};"; }
+	done
+	IFS=',' read -r -a pairs <<<"$(plat_value "$1" ISTIOD_ENV_BY_CONTEXT)"
+	for pair in ${pairs[@]+"${pairs[@]}"}; do
+		[[ "$pair" == *=* ]] || continue
+		c="${pair%%=*}" x="${pair#*=}"
+		b="${base[$c]:-}"
+		[[ -n "$b" && "$b" != ";unknown;" ]] || continue
+		IFS=';' read -r -a parts <<<"${x#mixed:}"
+		for x in ${parts[@]+"${parts[@]}"}; do
+			[[ "$x" != unknown ]] || continue
+			if [[ -z "$sets" ]]; then
+				# A member has values on both sides: what the profile patches decides.
+				[[ -f "$patch" ]] || return 2
+				sets="$(jq -r 'if ((.spec.values.pilot.env // {}) | length) > 0 then "env" elif . == {} then "none" else "values" end' "$patch" 2>/dev/null)" || return 2
+				case "$sets" in
+				env | none) ;;
+				values) return 0 ;;
+				*) return 2 ;;
+				esac
+			fi
+			if [[ "$sets" == env && "$b" == *";${x};"* ]] || [[ "$sets" == none && "$b" != *";${x};"* ]]; then
+				hit+="${hit:+,}${pair}"
+				break
+			fi
+		done
+	done
+	[[ -n "$hit" ]] || return 0
+	printf '%s\t%s\n' "$([[ "$sets" == env ]] && echo same || echo other)" "$hit"
+}
+UNREC=()  # passes whose TSVs predate TUNING_OBJECTS_BY_CONTEXT: one warning names them all
 cells=("istiod env")
 cells_o=("Tuning objects")
 for p in "${PASSES[@]}"; do
@@ -352,16 +414,42 @@ for p in "${PASSES[@]}"; do
 	fi
 	v="$(plat_value "$p" ISTIOD_ENV_BY_CONTEXT)"
 	c="$(platform_collapse "${v:-unknown}")"
-	if [[ "$c" != *=* ]]; then
-		cells+=("$(platform_short_digests "$c")")
-	else
-		cells+=("by member (see notes)")
-		ENV_NOTE[$p]="$(platform_summary "$v")"
+	if [[ ",${v}" == *"=mixed:"* ]]; then
+		cell="mixed (see notes)"
+		ENV_NOTE[$p]="$(platform_members_by_value "$v")"
+		PLAT_WARNINGS+=("pass ${p}: istiod's settings were not one value all through the pass (ISTIOD_ENV_BY_CONTEXT: ${ENV_NOTE[$p]}): its TSVs disagree or one could not read them, or the read at its end found them changed (an Argo CD sync, a hand edit, a profile applied or reverted during it), so part of it may have run other settings")
+	elif [[ "$c" == *=* ]]; then
+		cell="by member (see notes)"
+		ENV_NOTE[$p]="$(platform_members_by_value "$v")"
 		PLAT_WARNINGS+=("pass ${p}: istiod's settings differ between its members (ISTIOD_ENV_BY_CONTEXT: ${ENV_NOTE[$p]}), so they did not all run the same configuration$([[ "$p" == "$BASE" ]] || echo "; the profile may have reached some of them only")")
+	else
+		cell="$(platform_short_digests "$c")"
 	fi
-	prof="$p"
+	rc=0
+	eb="$(env_against_base "$p")" || rc=$?
+	if ((rc == 2)); then
+		ENVB_NOTE[$p]="state/patch.json missing or unreadable: not checked against the baseline"
+		PLAT_WARNINGS+=("pass ${p}: its state/patch.json (001-apply-profile.sh writes it in the pass's state dir) is not in the sweep directory or does not parse (jq reads it), so whether its profile's istiod settings were in effect is not checked against the baseline")
+	elif [[ -n "$eb" ]]; then
+		[[ "$cell" == *"(see notes)" ]] || cell+=" (see notes)"
+		w="$(platform_members_by_value "${eb#*$'\t'}")"
+		if [[ "${eb%%$'\t'*}" == same ]]; then
+			ENVB_NOTE[$p]="the baseline's (${w}), though the profile sets spec.values.pilot.env"
+			PLAT_WARNINGS+=("pass ${p}: istiod's settings are the baseline's (ISTIOD_ENV_BY_CONTEXT: ${w}), though its profile sets spec.values.pilot.env, so the profile's env was not in effect there all through the pass (an Argo CD sync or a hand edit put it back, or it never rolled out; or the profile sets the values istiod already had), and its change against the baseline is not the profile's")
+		else
+			ENVB_NOTE[$p]="not the baseline's (${w}), though the profile does not patch the Istio CR"
+			PLAT_WARNINGS+=("pass ${p}: istiod's settings are not the baseline's (ISTIOD_ENV_BY_CONTEXT: ${w}), though its profile does not patch the Istio CR, so something else changed them (an Argo CD sync, a hand edit, another profile), and its change against the baseline is not the profile's alone")
+		fi
+	fi
+	cells+=("$cell")
+	prof="$p" exp=""
 	[[ "$p" != "$BASE" ]] || prof=""
-	IFS=$'\t' read -r st who what < <(platform_tuning_objects_check "$(plat_value "$p" TUNING_OBJECTS_BY_CONTEXT)" "$prof")
+	# The objects the profile put on every member (its marker, then its resources), when 001 wrote
+	# them down; else its marker alone.
+	if [[ -n "$prof" && -s "${RESULTS_DIR}/${p}/state/objects" ]]; then
+		while IFS= read -r o; do [[ -z "$o" ]] || exp+="${exp:++}${o}"; done <"${RESULTS_DIR}/${p}/state/objects"
+	fi
+	IFS=$'\t' read -r st who what < <(platform_tuning_objects_check "$(plat_value "$p" TUNING_OBJECTS_BY_CONTEXT)" "$prof" ${exp:+"$exp"})
 	case "$st" in
 	none | own) cells_o+=("$st") ;;
 	other)
@@ -375,15 +463,31 @@ for p in "${PASSES[@]}"; do
 			PLAT_WARNINGS+=("pass ${p} ran with another tuning profile's objects in place on ${who} (TUNING_OBJECTS_BY_CONTEXT: ${what}), so it did not measure ${p} alone and ${w}; tests/tuning/005-cleanup.sh undoes them")
 		fi
 		;;
+	missing)
+		cells_o+=("missing (see notes)")
+		OBJ_NOTE[$p]="its profile's ${what} not on ${who}"
+		PLAT_WARNINGS+=("pass ${p}: its profile's objects (${what}) are not on ${who} in its record (TUNING_OBJECTS_BY_CONTEXT), so the profile was not in place there all through the pass: undone during it (002-revert-profile.sh, 005-cleanup.sh or a hand delete), never applied there, or its TSVs predate the profile markers; its figures are not the profile's")
+		;;
 	*)
 		cells_o+=("unknown (see notes)")
 		# A pass whose whole record is unknown has one note and one warning already.
 		plat_all_unknown "$p" && continue
 		OBJ_NOTE[$p]="${who}"
-		PLAT_WARNINGS+=("pass ${p}: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) ${who}, so whether another profile's objects were in place is not known")
+		if [[ "$who" == "are not recorded (the inputs predate the key)" ]]; then
+			UNREC+=("$p")
+			continue
+		fi
+		if [[ "$p" == "$BASE" ]]; then w="whether a profile's objects were in place"; else w="whether its profile's objects, and only those, were in place"; fi
+		PLAT_WARNINGS+=("pass ${p}: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) ${who}, so ${w} is not known")
 		;;
 	esac
 done
+if ((${#UNREC[@]} == 1)); then
+	PLAT_WARNINGS+=("pass ${UNREC[0]}: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded (its TSVs predate the key), so whether it held only the objects its name says (none for the baseline) is not known")
+elif ((${#UNREC[@]})); then
+	w="${UNREC[*]}"
+	PLAT_WARNINGS+=("passes ${w// /, }: their tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded (their TSVs predate the key), so whether each held only the objects its name says (none for the baseline) is not known")
+fi
 row "${cells[@]}"
 row "${cells_o[@]}"
 for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "warning: ${w}" >&2; done
@@ -460,7 +564,7 @@ render() {
 			echo ""
 			plat_lines "$REF" | awk -F'\t' '{ printf "- %s: `%s`\n", $1, $2 }'
 			for p in "${PASSES[@]}"; do
-				[[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}${ENV_NOTE[$p]:-}${OBJ_NOTE[$p]:-}" ]] || continue
+				[[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}${ENV_NOTE[$p]:-}${ENVB_NOTE[$p]:-}${OBJ_NOTE[$p]:-}" ]] || continue
 				echo ""
 				if [[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}" ]]; then
 					plat_head "$p" || continue
@@ -471,6 +575,7 @@ render() {
 					echo ""
 				fi
 				[[ -z "${ENV_NOTE[$p]:-}" ]] || echo "- ISTIOD_ENV_BY_CONTEXT, by member: \`${ENV_NOTE[$p]}\`"
+				[[ -z "${ENVB_NOTE[$p]:-}" ]] || echo "- ISTIOD_ENV_BY_CONTEXT: ${ENVB_NOTE[$p]}"
 				[[ -z "${OBJ_NOTE[$p]:-}" ]] || echo "- TUNING_OBJECTS_BY_CONTEXT: ${OBJ_NOTE[$p]}"
 			done
 		fi
@@ -493,7 +598,7 @@ render() {
 			echo "Platform record of the ${REF_NAME}, digests shortened to 12 hex digits (the TSVs keep them in full):"
 			plat_lines "$REF" | awk -F'\t' '{ printf "  %-25s %s\n", $1, $2 }'
 			for p in "${PASSES[@]}"; do
-				[[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}${ENV_NOTE[$p]:-}${OBJ_NOTE[$p]:-}" ]] || continue
+				[[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}${ENV_NOTE[$p]:-}${ENVB_NOTE[$p]:-}${OBJ_NOTE[$p]:-}" ]] || continue
 				if [[ -n "${PLAT_DIFF[$p]:-}${PLAT_UNK[$p]:-}" ]]; then
 					plat_head "$p" || continue
 					plat_lines "$p" "${PLAT_DIFF[$p]:-}${PLAT_DIFF[$p]:+${PLAT_UNK[$p]:+, }}${PLAT_UNK[$p]:-}" | awk -F'\t' '{ printf "  %-25s %s\n", $1, $2 }'
@@ -501,6 +606,7 @@ render() {
 					echo "Pass ${p}:"
 				fi
 				[[ -z "${ENV_NOTE[$p]:-}" ]] || printf '  %-25s %s\n' ISTIOD_ENV_BY_CONTEXT "by member: ${ENV_NOTE[$p]}"
+				[[ -z "${ENVB_NOTE[$p]:-}" ]] || printf '  %-25s %s\n' ISTIOD_ENV_BY_CONTEXT "${ENVB_NOTE[$p]}"
 				[[ -z "${OBJ_NOTE[$p]:-}" ]] || printf '  %-25s %s\n' TUNING_OBJECTS_BY_CONTEXT "${OBJ_NOTE[$p]}"
 			done
 		fi

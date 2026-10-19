@@ -51,8 +51,9 @@ The sweep:
 
 1. Pauses Argo CD auto-sync of the `<cluster>-ossm` Applications (006).
 2. Runs the suite's setup once.
-3. For the baseline and each profile: apply (001), wait `--settle`, run the probe,
-   revert (002). A failed revert stops the sweep.
+3. For the baseline and each profile: apply (001), wait `--settle`, read the platform
+   record, run the probe, read the record again, revert (002). A failed revert stops the
+   sweep.
 4. Writes `sweep-comparison.md` (004), runs the suite's cleanup, resumes Argo CD.
 
 On Ctrl-C or an error the sweep still reverts the active profile and resumes Argo CD.
@@ -78,22 +79,37 @@ hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the control
 in KiB. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
-Each pass's probe reads the platform record live ([`tests/lib/platform.sh`](../lib/platform.sh):
-the platform, the mesh operator, istiod and gateway proxy builds, the nodes' provider, istiod's
-settings, the tuning profile objects). The table's `Platform record` row compares each pass's with the baseline's (without a
+Each pass reads the platform record live before its probe
+([`tests/lib/platform.sh`](../lib/platform.sh): the platform, the mesh operator, istiod and
+gateway proxy builds, the nodes' provider, istiod's settings, the tuning profile objects); the
+probe's TSVs carry it (`platform-record.txt` in the pass directory hands it over). The pass reads
+it again after the probe, and what changed in between (a profile reverted by hand, an Argo CD
+sync that put istiod's settings back) goes to the pass's `platform-drift.txt`, which 004 merges
+into that pass's values.
+The table's `Platform record` row compares each pass's with the baseline's (without a
 baseline, the first pass with data's, which reads `reference`; the baseline reads `baseline`):
 `same`, `differs (see notes)`, `unknown (see notes)` (a value not read or not recorded in one of
 them, or an image whose digest is `@unknown`: no pod had started) or `-` (no data). A mesh
 operator that differs only in its state (`Available`, `Unavailable`) is the same build. The row
 leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`) and the profile's objects
 (`TUNING_OBJECTS_BY_CONTEXT`), which a profile changes on purpose (`spec.values.pilot.env`, the
-objects labelled `istio-scale-tests/tuning-profile`); two rows of their own show them. `istiod env`
-is each pass's digest of istiod's settings, so you can see that a profile reached istiod and match
-a re-run's pass to this one's (`by member (see notes)`, with a warning, when its members ran
-different settings). `Tuning objects` reads `none` (no profile's objects or marker, as in the
-baseline), `own` (only the pass's own profile's), `other (see notes)` (another profile's, or any
-in the baseline: a profile left applied, with a warning that the pass did not measure what its
-name says) or `unknown (see notes)` (not read). The record follows the
+objects labelled `istio-scale-tests/tuning-profile`); two rows of their own show them, and both
+read `-` for a pass without data. `istiod env` is each pass's digest of istiod's settings, so you
+can see that a profile reached istiod and match a re-run's pass to this one's. With a warning, it
+reads `by member (see notes)` when the pass's members ran different settings, `mixed (see notes)`
+when its TSVs or the read after its probe disagree (the settings changed during the pass), and the
+digest with `(see notes)` when it contradicts the profile: the baseline's digest though the
+profile sets `spec.values.pilot.env` (the pass's `state/patch.json`), or another though it does
+not patch the Istio CR (a profile that changes other Istio CR values only is not checked, since
+some of them reach istiod's env too). A pass whose `state/patch.json` is gone warns that this was
+not checked. `Tuning objects`
+reads `none` (no profile's objects or marker, as in the baseline), `own` (every object of the
+pass's own profile on every member, its marker and its resources as `state/objects` lists them,
+and no other), `other (see notes)` (another profile's, or any in the baseline: a profile left
+applied), `missing (see notes)` (one of its own is not on a member: the profile was undone during
+the pass or never applied there, or the TSVs predate the markers) or `unknown (see notes)` (not
+read); all but `none` and `own` warn that the pass did not measure what its name says. The record
+follows the
 table once, digests shortened to 12 hex digits, then each pass that differs or cannot be compared,
 with those keys' values: one value when every member shares it, else only the members that do not
 match the reference pass, five at most, with a count (`m7=proxyv2:1.30.6 (1 of 500 members; the
@@ -107,7 +123,10 @@ difference from the reference pass is not the profiles' alone).
 instead of asking each cluster, for the probe suite's chart overlay and, with
 `TUNING_GITOPS_NAMESPACE` empty, for the hub whose Argo CD namespace 006 pauses in;
 `TUNING_GITOPS_NAMESPACE` overrides that namespace. The platform record still asks each member
-what it serves, and warns when that is not `TEST_PLATFORM`.
+what it serves, and warns when that is not `TEST_PLATFORM`. 001 and 003 also read every member
+before they change anything (a profile's objects or marker): each read is bounded by
+`PLATFORM_READ_TIMEOUT` (20 s by default) and `PLATFORM_READ_PARALLEL` members (20) are read at
+once, so raise the first for slow API servers and lower the second on a small runner.
 
 ## One profile by hand
 
@@ -139,30 +158,41 @@ what it serves, and warns when that is not `TEST_PLATFORM`.
   `TUNING_REVERT_HEALTHCHECK_NS_PROBE=1` it also checks that istiod still delivers
   `istio-ca-root-cert` to a new namespace.
 - **006** adds a deny sync window for the Applications to their AppProject. Resume
-  removes it from the context and namespace recorded at pause. Patching an
-  Application's `syncPolicy` would be undone by the ApplicationSet controller.
+  removes it from the context and namespace recorded at pause. `--clear` removes it without
+  the record: the window is the same for the same Applications, so it is found by its value.
+  Patching an Application's `syncPolicy` would be undone by the ApplicationSet controller.
 
 ## After a killed run
 
 If the sweep could not clean up (for example `kill -9` or a lost shell), run:
 
 ```bash
-./tests/tuning/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
+./tests/tuning/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --gitops-context <hub-ctx>
 ```
 
 It reverts profiles still marked active, then restores each member's Istio CR from the
 markers left on it (newest first: the revert patch, istiod's rollout within
-`--rollout-timeout`, 300 s by default, a check that the patch took, then the marker's
-delete; on a member it stops at the first that fails, leaving it in place, and the cleanup
-exits non-zero),
-deletes leftover profile resources (label `istio-scale-tests/tuning-profile`) and resumes
-recorded Argo CD pauses. The markers make the cleanup work from any checkout, even without
-the sweep's state directory. Add `--results-dir DIR` if the sweep used `--output-dir`. Then
-run the suite's cleanup. 001 and 003 refuse to start while a profile is still marked active
-or any member holds a profile's objects or marker, and every other suite's sweep warns as it
-starts (and every report in its body) when a member does.
+`--rollout-timeout` (`TUNING_ROLLOUT_TIMEOUT`, 300 s by default), a check that the patch took,
+then the marker's delete; every member's patch goes out before it waits for any, so their
+rollouts overlap; on a member it stops at the first that fails, leaving it in place, and the
+cleanup exits non-zero), deletes leftover profile resources (label
+`istio-scale-tests/tuning-profile`) and resumes the Argo CD pauses recorded under
+`--results-dir` (add it, `DIR`, if the sweep used `--output-dir`). The markers live on the
+members, so their restore works from any checkout, even without the sweep's state directory;
+the pause record does not. With `--gitops-context` (or `TUNING_GITOPS_CONTEXT`) the cleanup
+also removes the deny window a pause adds on that hub, recorded or not
+(`006-gitops-pause.sh --clear`); without it, a cleanup that restored markers but found no pause
+record warns that Argo CD was not checked. Then run the suite's cleanup. 001 and 003 refuse to
+start while a profile is still marked active or any member holds a profile's objects or marker,
+and every other suite's sweep warns as it starts (and every report in its body) when a member
+does: run 005 then, unless a tuning run is in progress on those members.
 
 ## Adding a profile
+
+A profile's file name, without `.yaml`, is its name: a DNS label (lowercase letters, digits
+and `-`) of at most 48 characters, since it labels the profile's objects and names its marker
+(`tuning-profile-<name>`), and not `none`, `unknown`, `mixed` or `unlabelled`, the words the
+platform record uses for itself, or `baseline`, the name of the sweep's pass without a profile.
 
 A profile YAML has `description`, `ossm_support` (`supported` or `configurable`),
 optional `ossm_support_detail`, `istio_cr_patch` (under `spec` only; `pilot.env`

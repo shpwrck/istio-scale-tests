@@ -31,6 +31,9 @@
 #                                              (see "The platform record" below)
 #   platform_probe_share <dir>              -> hand a sweep's record to the steps it runs
 #                                              (<dir>/platform-record.txt)
+#   platform_probe_reset                    -> forget the record read so far, so the next
+#                                              platform_probe reads every member (tuning 003:
+#                                              each pass reads its own)
 #   platform_probe_save <file>, platform_probe_load <file>
 #                                           -> keep the record between two phases of one run
 #   platform_probed_contexts                -> the members of this shell's last platform_probe
@@ -74,12 +77,16 @@
 #                                           -> a value shown against a reference one: only the
 #                                              members that do not match, five at most
 #   platform_summary <by_context value>     -> the value without member names, digests shortened
+#   platform_members_by_value <by_context value>
+#                                           -> each value with the members that have it (five
+#                                              named), digests shortened
 #   platform_short_digests <text>           -> sha256 digests shortened to 12 hex digits
 #   platform_report_is_key <key>            -> return 0 for a record key
 #   platform_value_has <value> <word>       -> return 0 when a member's value holds <word>
-#   platform_tuning_objects_check <value> [<profile>]
-#                                           -> other|unknown|own|none, with the members and
-#                                              objects: a value against a tuning pass's profile
+#   platform_tuning_objects_check <value> [<profile> [<objects>]]
+#                                           -> other|missing|unknown|own|none, with the members
+#                                              and objects: a value against a tuning pass's
+#                                              profile and the objects it puts on every member
 #   platform_tuning_objects <ctx>           -> a member's tuning profile objects, or none
 #   platform_start_warnings <ctxs_csv>      -> a sweep's warnings at its start (tuning objects)
 #   platform_tuning_objects_refuse <ctxs_csv> <what>
@@ -188,11 +195,15 @@ PLATFORM_OSSM_PACKAGE=servicemeshoperator3
 # The label of a tuning profile's objects, the kinds a profile may create, and its marker's (a
 # ConfigMap on each member it is applied to: tests/tuning/001-apply-profile.sh). The record lists
 # them all (TUNING_OBJECTS_BY_CONTEXT); tests/tuning/005-cleanup.sh restores each member's Istio CR
-# from its markers and deletes the rest by kind. Keep in sync with tests/tuning/lib/tuning.py
-# (LABEL, ALLOWED_KINDS, MARKER_KIND), which platform.bats checks.
+# from its markers and deletes the rest by kind; tuning 004 checks that each pass's record holds
+# its profile's marker (tuning-profile-<profile> in istio-system) on every member. Keep in sync
+# with tests/tuning/lib/tuning.py (LABEL, ALLOWED_KINDS, MARKER_KIND, MARKER_NAMESPACE,
+# MARKER_PREFIX), which platform.bats checks.
 PLATFORM_TUNING_LABEL=istio-scale-tests/tuning-profile
 PLATFORM_TUNING_RESOURCE_KINDS=destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io
 PLATFORM_TUNING_MARKER_KIND=configmaps
+PLATFORM_TUNING_MARKER_NS=istio-system
+PLATFORM_TUNING_MARKER_PREFIX=tuning-profile-
 PLATFORM_TUNING_KINDS="${PLATFORM_TUNING_RESOURCE_KINDS},${PLATFORM_TUNING_MARKER_KIND}"
 # The jq program over a list of them: "<profile>:<Kind>/<ns>/<name>" per object, sorted and
 # "+"-joined, or none (a TUNING_OBJECTS_BY_CONTEXT value).
@@ -803,7 +814,7 @@ platform_probe() {
 	fi
 	[[ -n "${KUBECTL[*]:-}" ]] || die "neither kubectl nor oc found on PATH (platform_probe needs KUBECTL)"
 	if ((${#_pl_again[@]})); then
-		echo "Platform record: reading again ${_pl_again[*]} (an unknown value in the record this step inherited)" >&2
+		echo "Platform record: reading again $(_platform_names "${_pl_again[@]}") (an unknown value in the record this step inherited)" >&2
 	fi
 	rows="$(_platform_read_members ${todo[@]+"${todo[@]}"} ${_pl_again[@]+"${_pl_again[@]}"})" ||
 		die "platform_probe: cannot read the platform record (no temp dir)"
@@ -917,6 +928,19 @@ platform_probe_share() {
 	export PLATFORM_PROBE_FILE="$f"
 }
 
+# platform_probe_reset: forget the record this shell holds (PLATFORM_PROBE_ROWS, inherited or
+# read, and a platform_probe_load), and stop handing it to the steps it runs (PLATFORM_PROBE_FILE),
+# so the next platform_probe reads every member again. tuning 003 calls it before each pass's
+# platform_probe: a profile changes the record (istiod's env, its objects), so each pass has its own.
+# shellcheck disable=SC2329
+platform_probe_reset() {
+	PLATFORM_PROBE_ROWS=""
+	unset PLATFORM_PROBE_LOADED PLATFORM_PROBE_LAST PLATFORM_PROBE_FILE
+	_PL_IDX=()
+	_PL_IDX_SRC=""
+	_PL_IDX_SET=""
+}
+
 # _platform_values <ctxs_csv>: the record as KEY=value lines (PLATFORM_KEYS order) for these
 # members; a member platform_probe did not read warns and reads unknown.
 # shellcheck disable=SC2329
@@ -971,9 +995,18 @@ platform_start_warnings() {
 	v="$(_platform_values "$1" 2>/dev/null | sed -n 's/^TUNING_OBJECTS_BY_CONTEXT=//p')"
 	IFS=$'\t' read -r state who objs < <(platform_tuning_objects_check "$v")
 	[[ "$state" == other ]] || return 0
-	hint="--contexts ${1}"
-	((${#hint} <= 200)) || hint="the same --contexts"
-	echo "warning: a tuning profile's objects are in place on ${who} (TUNING_OBJECTS_BY_CONTEXT: ${objs}), so this sweep would measure that profile's configuration, not the charts'. Unless that is the point, stop it now (Ctrl-C) and undo them with ./tests/tuning/005-cleanup.sh ${hint}; every report of this run warns too" >&2
+	echo "warning: a tuning profile's objects are in place on ${who} (TUNING_OBJECTS_BY_CONTEXT: ${objs}), so this sweep would measure that profile's configuration, not the charts'. Unless that is the point, stop it now (Ctrl-C); then, unless a tuning run is still in progress on these members (wait for it to end), undo them with $(_platform_cleanup_hint "$1"); every report of this run warns too" >&2
+}
+
+# _platform_cleanup_hint <ctxs_csv>: the tests/tuning/005-cleanup.sh command that undoes a profile
+# left applied on these members (its marker restores each member's Istio CR from any checkout),
+# and the flags that find the state and the Argo CD pause of the run that left it, which only
+# that run's results directory records.
+# shellcheck disable=SC2329
+_platform_cleanup_hint() {
+	local v="--contexts ${1}"
+	((${#v} <= 200)) || v="the same --contexts"
+	echo "./tests/tuning/005-cleanup.sh ${v} (add --results-dir <that run's --output-dir> if it had one, and --gitops-context <hub> to resume Argo CD if it paused it)"
 }
 
 # platform_preamble_lines <ctxs_csv>: the record's `# KEY=value` preamble lines for these
@@ -1169,8 +1202,8 @@ _platform_cause() {
 	case "$1" in
 	MESH_OPERATOR_BY_CONTEXT) echo "an operator upgrade (an Argo CD sync of a new chart revision, or a new OLM CSV)" ;;
 	ISTIOD_IMAGE_BY_CONTEXT | PROXY_IMAGE_BY_CONTEXT) echo "an Argo CD sync of a new revision or an operator upgrade" ;;
-	ISTIOD_ENV_BY_CONTEXT) echo "a tuning profile left applied (tests/tuning/005-cleanup.sh reverts it), or a sync or hand edit of the Istio CR's spec.values.pilot.env" ;;
-	TUNING_OBJECTS_BY_CONTEXT) echo "a tuning run stopped before its revert (tests/tuning/005-cleanup.sh restores the Istio CR from its marker and deletes the objects), or a profile's objects applied by hand" ;;
+	ISTIOD_ENV_BY_CONTEXT) echo "a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes), or a sync or hand edit of the Istio CR's spec.values.pilot.env" ;;
+	TUNING_OBJECTS_BY_CONTEXT) echo "a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes from its marker), or a profile's objects applied or deleted by hand" ;;
 	KUBE_VERSIONS) echo "a managed control-plane upgrade" ;;
 	TUNING_BASELINE | SIDECAR_EGRESS_HOSTS) echo "a GitOps sync or self-heal that put a lever back, a tuning profile left applied, or a hand edit" ;;
 	ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) echo "an Argo CD sync, a tuning profile or a hand edit of istiod's resources (the Istio CR's spec.values.pilot.resources)" ;;
@@ -1537,19 +1570,27 @@ _platform_tuning_objects_warning() {
 	echo "warning: a tuning profile's objects were in place on ${who} when the run started (TUNING_OBJECTS_BY_CONTEXT: ${objs}), so unless this is a tuning pass its figures are not those of the charts' configuration; tests/tuning/005-cleanup.sh undoes them" >&2
 }
 
-# platform_tuning_objects_check <TUNING_OBJECTS_BY_CONTEXT value> [<profile>]: what a value holds
-# against the tuning profile a run applied (none: the baseline, or a run that is no tuning pass),
-# as "<state>\t<detail>\t<objects>". other: a member holds an object labelled with another
-# profile (without <profile>: any object); <detail> names those members and <objects> those
-# objects, five of each at most (with _pl_no_members=1, dynamic scope: how many members instead
-# of their names). Else unknown: a member's objects were not read, or an input does not record
-# the key; <detail> says which ("could not be read on <members>", "are not recorded ..."). Else
-# own (only <profile>'s objects, labelled with its name) or none.
+# platform_tuning_objects_check <TUNING_OBJECTS_BY_CONTEXT value> [<profile> [<objects>]]: what a
+# value holds against the tuning profile a run applied (none: the baseline, or a run that is no
+# tuning pass), as "<state>\t<detail>\t<objects>". other: a member holds an object labelled with
+# another profile (without <profile>: any object); <detail> names those members and <objects>
+# those objects, five of each at most (with _pl_no_members=1, dynamic scope: how many members
+# instead of their names). Else, with <profile>, missing: a value a member was read with (an
+# input's, or the drift check's at the pass's end: each part of a mixed: value) lacks one of the
+# profile's <objects> ("<Kind>/<ns>/<name>", "+"-joined; by default its marker, which
+# tests/tuning/001-apply-profile.sh puts on every member before any change and 002 or 005 delete
+# only after undoing the profile), so the profile was not in place there all along; <detail>
+# names those members and <objects> the objects they lack. Else unknown: a member's objects were
+# not read, or an input does not record the key; <detail> says which ("could not be read on
+# <members>", "are not recorded ..."). Else own (<profile>'s objects only, every one of them) or
+# none.
 # shellcheck disable=SC2329
 platform_tuning_objects_check() {
-	local pair c part foreign bare=0 own=0 n=0 who detail=""
-	local -a _pl_p=() _pl_parts=() _pl_m=() _pl_objs=() _pl_un=()
-	local -A _pl_o=()
+	local pair c input part o foreign lacks bare=0 own=0 n=0 who detail=""
+	local -a _pl_p=() _pl_in=() _pl_parts=() _pl_m=() _pl_objs=() _pl_un=() _pl_want=() _pl_miss=() _pl_mo=()
+	local -A _pl_o=() _pl_mos=()
+	[[ -z "${2:-}" ]] ||
+		IFS='+' read -r -a _pl_want <<<"${3:-ConfigMap/${PLATFORM_TUNING_MARKER_NS}/${PLATFORM_TUNING_MARKER_PREFIX}${2}}"
 	IFS=',' read -r -a _pl_p <<<"$1"
 	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
 		# unknown (no input has the key) or mixed:unknown (one has not): no member.
@@ -1557,28 +1598,43 @@ platform_tuning_objects_check() {
 			bare=1
 			continue
 		fi
-		c="${pair%%=*}" foreign=0 n=$((n + 1))
-		IFS=';+' read -r -a _pl_parts <<<"${pair#*=}"
-		for part in ${_pl_parts[@]+"${_pl_parts[@]}"}; do
-			part="${part#mixed:}"
-			case "$part" in
-			none | "") ;;
-			unknown) [[ " ${_pl_un[*]:-} " == *" ${c} "* ]] || _pl_un+=("$c") ;;
-			*)
-				if [[ -n "${2:-}" && "${part%%:*}" == "$2" ]]; then
-					own=1
-					continue
-				fi
-				foreign=1
-				[[ -n "${_pl_o[$part]+x}" ]] || { _pl_o[$part]=1; _pl_objs+=("$part"); }
-				;;
-			esac
+		c="${pair%%=*}" foreign=0 lacks=0 n=$((n + 1))
+		IFS=';' read -r -a _pl_in <<<"${pair#*=}"
+		for input in ${_pl_in[@]+"${_pl_in[@]}"}; do
+			input="${input#mixed:}"
+			if [[ "$input" == unknown ]]; then
+				[[ " ${_pl_un[*]:-} " == *" ${c} "* ]] || _pl_un+=("$c")
+				continue
+			fi
+			IFS='+' read -r -a _pl_parts <<<"$input"
+			for part in ${_pl_parts[@]+"${_pl_parts[@]}"}; do
+				case "$part" in
+				none | "") ;;
+				*)
+					if [[ -n "${2:-}" && "${part%%:*}" == "$2" ]]; then
+						own=1
+						continue
+					fi
+					foreign=1
+					[[ -n "${_pl_o[$part]+x}" ]] || { _pl_o[$part]=1; _pl_objs+=("$part"); }
+					;;
+				esac
+			done
+			for o in ${_pl_want[@]+"${_pl_want[@]}"}; do
+				[[ "+${input}+" != *"+${2}:${o}+"* ]] || continue
+				lacks=1
+				[[ -n "${_pl_mos[$o]+x}" ]] || { _pl_mos[$o]=1; _pl_mo+=("${2}:${o}"); }
+			done
 		done
 		((foreign == 0)) || _pl_m+=("$c")
+		((lacks == 0)) || _pl_miss+=("$c")
 	done
 	if ((${#_pl_m[@]})); then
 		if ((${_pl_no_members:-0})); then who="${#_pl_m[@]} of ${n} members"; else who="$(_platform_names "${_pl_m[@]}")"; fi
 		printf 'other\t%s\t%s\n' "$who" "$(_platform_names "${_pl_objs[@]}")"
+	elif ((${#_pl_miss[@]})); then
+		if ((${_pl_no_members:-0})); then who="${#_pl_miss[@]} of ${n} members"; else who="$(_platform_names "${_pl_miss[@]}")"; fi
+		printf 'missing\t%s\t%s\n' "$who" "$(_platform_names "${_pl_mo[@]}")"
 	elif ((${#_pl_un[@]} || bare)); then
 		if ((${#_pl_un[@]})); then
 			if ((${_pl_no_members:-0})); then who="${#_pl_un[@]} of ${n} members"; else who="$(_platform_names "${_pl_un[@]}")"; fi
@@ -1657,9 +1713,7 @@ platform_tuning_objects_refuse() {
 	((${#_pl_bad[@]} == 0)) ||
 		die "the tuning profile objects (label ${PLATFORM_TUNING_LABEL}) could not be listed on $(_platform_names "${_pl_bad[@]}"): a member that cannot be asked may hold a profile's objects, and ${2} would be measured with them; fix the access (or raise PLATFORM_READ_TIMEOUT) and start again"
 	if ((${#_pl_m[@]})); then
-		v="--contexts ${1}"
-		((${#v} <= 200)) || v="the same --contexts"
-		die "a tuning profile's objects (label ${PLATFORM_TUNING_LABEL}) are on $(_platform_names "${_pl_m[@]}") already: $(_platform_names "${_pl_objs[@]}"). ${2^} would be measured with them. They are a profile left applied (a run stopped before its revert, in any checkout) or objects applied by hand; undo them with ./tests/tuning/005-cleanup.sh ${v} (it also restores the Istio CR from each profile's marker), then start again"
+		die "a tuning profile's objects (label ${PLATFORM_TUNING_LABEL}) are on $(_platform_names "${_pl_m[@]}") already: $(_platform_names "${_pl_objs[@]}"). ${2^} would be measured with them. They are a tuning run still in progress on these members (wait for it to end), a profile left applied (a run stopped before its revert, in any checkout) or objects applied by hand; undo those with $(_platform_cleanup_hint "$1"), which also restores each member's Istio CR from the profile's marker, then start again"
 	fi
 }
 
@@ -1694,23 +1748,24 @@ _platform_drift_scalar_warnings() {
 			[[ "$key" != TUNING_BASELINE ]] || what="$(_platform_lever_changes "$start" "${_pl_ends[@]}")"
 			[[ -n "$what" ]] || what="${start} at its start, $(_platform_then "${_pl_ends[@]}") at its end"
 			case "$key" in
-			ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) what+="; rows measured after the change ran under another limit, but the report divides $(_platform_limit_figure "$key") (and the SLA verdict on it) by the one recorded at the start, and cannot tell which rows those are; the kubectl top % use each row's own limit" ;;
+			ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) what+="; rows measured after the change ran under another limit, but $(_platform_limit_figure "$key") divides by the one recorded at the start, as does the SLA verdict on it, and the report cannot tell which rows those are; the kubectl top % use each row's own limit" ;;
 			*) what+="; rows measured after the change ran with other $(_platform_noun "$key"), and the report cannot tell which rows those are" ;;
 			esac
 			echo "warning: ${key} changed during the sweep in ${name} (${PLATFORM_DRIFT_FILE}): ${what}; $(_platform_drift_cause "$key")" >&2
 		done
 		[[ -n "${_pl_start["ISTIOD_CPU_LIMIT_M|${d}"]+x}${_pl_start["ISTIOD_MEM_LIMIT_MI|${d}"]+x}" ]] || continue
-		what="$(sed -n 's/^# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=//p' "${d}/${PLATFORM_DRIFT_FILE}" | tail -n 1)"
+		# Every drift check's members (a --resume runs one more), each pair once.
+		what="$(sed -n 's/^# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=//p' "${d}/${PLATFORM_DRIFT_FILE}" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)"
 		[[ -n "$what" ]] || continue
 		echo "warning: $(_platform_limits_differ "$what" "${_pl_start["ISTIOD_CPU_LIMIT_M|${d}"]:-unknown}" "${_pl_start["ISTIOD_MEM_LIMIT_MI|${d}"]:-unknown}" "the TSVs recorded on their source member") at the end of the sweep in ${name} (${PLATFORM_DRIFT_FILE}), but the report divides the window-peak CPU and RSS % of every member's rows (and the SLA verdict on them) by the recorded ones, so those members' rows read against another limit; the kubectl top % use each row's own; $(_platform_limits_cause)" >&2
 	done
 }
 
-# _platform_limit_figure <ISTIOD_CPU_LIMIT_M|ISTIOD_MEM_LIMIT_MI>: the controlplane report's
-# figure that divides by that recorded limit.
+# _platform_limit_figure <ISTIOD_CPU_LIMIT_M|ISTIOD_MEM_LIMIT_MI>: the controlplane report's one
+# figure that divides by that recorded limit (the peak over every member's rows).
 # shellcheck disable=SC2329
 _platform_limit_figure() {
-	if [[ "$1" == ISTIOD_CPU_LIMIT_M ]]; then echo "every row's window-peak CPU %"; else echo "every row's RSS %"; fi
+	if [[ "$1" == ISTIOD_CPU_LIMIT_M ]]; then echo "the report's window-peak CPU % (the highest istiod CPU of every member's rows)"; else echo "the report's RSS % (the highest istiod RSS of every member's rows)"; fi
 }
 
 # _platform_limits_member <ctx> <dir>: istiod's limits on the member (cap_istiod_limits), for
@@ -1894,8 +1949,9 @@ EOF
   platform record (kubectl --request-timeout); raise it for members with many nodes or a
   slow link.
   PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL:-20}): how many members' platform records
-  are read at once (a few kubectl calls each); lower it when the machine running the suite
-  runs short of memory or processes on a large mesh.
+  are read at once (a few kubectl calls each; also their tuning objects and istiod's limits);
+  lower it when the machine running the suite runs short of memory or processes on a large
+  mesh. The Kubernetes versions and istiod's replicas are read on every member at once.
 EOF
 }
 
@@ -1943,6 +1999,31 @@ platform_unread_members() {
 # shellcheck disable=SC2329
 platform_short_digests() {
 	printf '%s\n' "$1" | sed -E 's/(sha256:[0-9a-f]{12})[0-9a-f]{52}/\1/g'
+}
+
+# platform_members_by_value <by_context value>: each value with the members that have it, five
+# named (then how many more), "; "-joined in the order they first appear, digests shortened: a
+# member whose inputs disagree reads "mixed: <a> and <b>". A token without a member (mixed:unknown:
+# some inputs predate the key) comes first, as is.
+# shellcheck disable=SC2329
+platform_members_by_value() {
+	local pair x out=""
+	local -a _pl_p=() _pl_mo=()
+	local -A _pl_mv=()
+	IFS=',' read -r -a _pl_p <<<"$1"
+	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+		if [[ "$pair" != *=* ]]; then
+			out+="${out:+; }${pair}"
+			continue
+		fi
+		x="${pair#*=}"
+		[[ "$x" != mixed:* ]] || { x="${x#mixed:}"; x="mixed: ${x//;/ and }"; }
+		_platform_group _pl_mv _pl_mo "$x" "${pair%%=*}"
+	done
+	for x in ${_pl_mo[@]+"${_pl_mo[@]}"}; do
+		out+="${out:+; }${x} on $(_platform_group_names "${_pl_mv[$x]}")"
+	done
+	platform_short_digests "$out"
 }
 
 # platform_summary <by_context value>: the value without member names (the scale envelope is
@@ -2674,7 +2755,7 @@ platform_drift_check() {
 							[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")
 							_pl_unk[$c]+="${_pl_unk[$c]:+, }${k}"
 						elif [[ "${_pl_tb[$k]}" != "$n" ]]; then
-							echo "warning: ${c}: ${k} changed during the sweep: ${_pl_lim_start[$k]} at its start, ${n} at its end; rows measured after the change ran under another limit, but the report divides $(_platform_limit_figure "$k") (and the SLA verdict on it) by the recorded one, while the kubectl top % use each row's own limit (written to ${dir}/${PLATFORM_DRIFT_FILE}, which its reports say in their body); $(_platform_drift_cause "$k")" >&2
+							echo "warning: ${c}: ${k} changed during the sweep: ${_pl_lim_start[$k]} at its start, ${n} at its end; rows measured after the change ran under another limit, but $(_platform_limit_figure "$k") divides by the recorded one, as does the SLA verdict on it, while the kubectl top % use each row's own limit (written to ${dir}/${PLATFORM_DRIFT_FILE}, which its reports say in their body); $(_platform_drift_cause "$k")" >&2
 							_pl_end[$k]="$n"
 							found=1
 						fi

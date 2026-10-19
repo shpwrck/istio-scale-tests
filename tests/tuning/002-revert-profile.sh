@@ -21,7 +21,7 @@ source "${ROOT}/tests/tuning/lib/tuning.sh"
 HELPER="${ROOT}/tests/tuning/lib/tuning.py"
 STATE_DIR=""
 CONTEXTS_CSV=""
-ROLLOUT_TIMEOUT=300
+ROLLOUT_TIMEOUT="${TUNING_ROLLOUT_TIMEOUT:-300}"
 DRY_RUN=0
 NS_PROBE="${TUNING_REVERT_HEALTHCHECK_NS_PROBE:-0}"
 NS_PROBE_TIMEOUT="${TUNING_REVERT_HEALTHCHECK_TIMEOUT:-60}"
@@ -38,7 +38,7 @@ Options:
   --state-dir DIR        State directory written by 001-apply-profile.sh (required).
   --contexts CSV         Contexts to revert (default: the contexts recorded at apply).
   --rollout-timeout N    Seconds to wait for the operator and istiod rollout
-                         (default: ${ROLLOUT_TIMEOUT}).
+                         (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --dry-run              Print the revert patches, resources and markers; do not touch
                          clusters.
   -h, --help             Show this help.

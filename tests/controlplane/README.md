@@ -135,12 +135,14 @@ state: `Available` and `Unavailable` are the same build), `ISTIOD_IMAGE_BY_CONTE
 `PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`, `TUNING_OBJECTS_BY_CONTEXT`,
 `NODE_PROVIDER_BY_CONTEXT` and `KUBE_VERSIONS`; on the member the TSV read them on,
 `TUNING_BASELINE`, `SIDECAR_EGRESS_HOSTS`, `ISTIOD_CPU_LIMIT_M` and `ISTIOD_MEM_LIMIT_MI` (what
-`004` divides istiod's CPU and RSS peaks by). A value that differs stops the run, naming the member, the key and both values: an upgrade,
-a gateway restarted onto a new build, a tuning profile left applied, new istiod limits or
-clusters rebuilt under the same context names on another Kubernetes version would otherwise be
-credited to the old record. Start a new sweep then (the sweep's own command without `--resume`;
-the message names its `run-config-<RUN_ID>.env` snapshot when it ran with `--config`), or put
-the members back. Only warnings: a value not read on either side (the warning says which: the
+`004` divides istiod's CPU and RSS peaks by). A value that differs stops the run, naming the
+key, both values and the members (members that changed the same way share one line, five named,
+then how many more): an upgrade, a gateway restarted onto a new build, a tuning profile left
+applied, new istiod limits or clusters rebuilt under the same context names on another
+Kubernetes version would otherwise be credited to the old record. Start a new sweep then (the
+sweep's own command without `--resume`; the message names its `run-config-<RUN_ID>.env` snapshot
+when it ran with `--config`), or put the members back. Only warnings: a value not read on either
+side (the warning says which: the
 TSV records `unknown` or predates the key, or the member cannot be read now), an image whose
 digest reads `@unknown` (no pod had started), a member on one side only, a TSV from before the
 record, another `TEST_PLATFORM`, and what the report only shows: `NODE_ALLOC_CPU_M` and

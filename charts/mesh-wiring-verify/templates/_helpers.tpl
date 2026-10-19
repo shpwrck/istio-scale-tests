@@ -50,7 +50,9 @@ Empty without names: the gate then counts (expectedMembers).
 {{- end -}}
 {{- $n := int (.Values.expectedMembers | default 0) -}}
 {{- if and (gt $n 0) (ne $n (len $names)) -}}
-{{- fail (printf "expectedMembers is %d but expectedClusters names %d member(s) (%s): set both from the same members, or expectedMembers to 0" $n (len $names) (join "," $names)) -}}
+{{- $listed := join ", " (slice $names 0 (min 5 (len $names))) -}}
+{{- if gt (len $names) 5 }}{{ $listed = printf "%s and %d more" $listed (sub (len $names) 5) }}{{ end -}}
+{{- fail (printf "expectedMembers is %d but expectedClusters names %d member(s) (%s): set both from the same members, or expectedMembers to 0" $n (len $names) $listed) -}}
 {{- end -}}
 {{- join "," $names -}}
 {{- end -}}

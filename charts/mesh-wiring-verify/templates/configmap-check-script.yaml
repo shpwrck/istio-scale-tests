@@ -67,6 +67,8 @@ data:
     commas() { printf '%s' "$1" | sed 's/ /, /g'; }
     # The same with five names at most, then how many more.
     commas_capped() { printf '%s' "$1" | awk '{ s = $1; for (i = 2; i <= NF && i <= 5; i++) s = s ", " $i; if (NF > 5) s = s " and " (NF - 5) " more"; printf "%s", s }'; }
+    # quoted_capped: the lines on stdin, each quoted (a stray space shows), five at most, then how many more.
+    quoted_capped() { awk '{ n++; if (n <= 5) s = s (n > 1 ? ", " : "") "\"" $0 "\"" } END { if (n > 5) s = s " and " (n - 5) " more"; printf "%s", s }'; }
 
     # The mesh members by name: each one's Istio cluster ID, which is also the suffix of its
     # remote secret istio-remote-secret-<name>. members holds them all, others all but this
@@ -74,13 +76,21 @@ data:
     # the later stages still run, so one probe names everything, and the check ends NotReady.
     members="" others="" missing="" stale_ids="" bad=0
     if [ -n "$NAMES" ]; then
-      case "${NAMES},${SELF}" in
+      odd=""
+      case "$NAMES" in
         *[!a-z0-9.,-]*)
-          echo "NotReady: expectedClusters (${NAMES}) and clusterName (${SELF}) take only cluster names: lowercase letters, digits, '-' and '.', the list comma-separated" >&2
-          exit 1 ;;
+          odd=$(printf '%s\n' "$NAMES" | tr ',' '\n' | grep -v '^[a-z0-9.-]*$' | quoted_capped)
+          odd="expectedClusters holds ${odd:-a line break}" ;;
       esac
+      case "$SELF" in
+        *[!a-z0-9.-]*) odd="${odd:+${odd}; }clusterName is \"${SELF}\"" ;;
+      esac
+      if [ -n "$odd" ]; then
+        echo "NotReady: ${odd}: expectedClusters and clusterName take only cluster names (lowercase letters, digits, '-' and '.'), the list comma-separated" >&2
+        exit 1
+      fi
       case ",${NAMES}," in
-        *,,*) echo "NotReady: expectedClusters (${NAMES}) holds an empty name" >&2; exit 1 ;;
+        *,,*) echo "NotReady: expectedClusters holds an empty name: a comma at either end of the list, or two in a row" >&2; exit 1 ;;
       esac
       members=$(printf '%s' "$NAMES" | tr ',' ' ')
       dup=$(printf '%s' "$NAMES" | tr ',' '\n' | sort | uniq -d | tr '\n' ' ')
@@ -90,7 +100,7 @@ data:
         exit 1
       fi
       if [ "$EXPECTED" -gt 0 ] && [ "$EXPECTED" -ne "$n_names" ]; then
-        echo "NotReady: expectedMembers is ${EXPECTED} but expectedClusters names ${n_names} member(s) (${NAMES}): set both from the same members, or expectedMembers to 0" >&2
+        echo "NotReady: expectedMembers is ${EXPECTED} but expectedClusters names ${n_names} member(s) ($(commas_capped "$members")): set both from the same members, or expectedMembers to 0" >&2
         exit 1
       fi
       EXPECTED=$n_names
@@ -100,7 +110,7 @@ data:
       fi
       case ",${NAMES}," in
         *",${SELF},"*) ;;
-        *) echo "NotReady: this member (${SELF}) is not in expectedClusters (${NAMES}); a member the apply just added waits for the gate ApplicationSet's new list" >&2
+        *) echo "NotReady: this member (${SELF}) is not in expectedClusters ($(commas_capped "$members")); a member the apply just added waits for the gate ApplicationSet's new list" >&2
            exit 1 ;;
       esac
       others=$(printf '%s' "$NAMES" | tr ',' '\n' | grep -vxF "$SELF" | tr '\n' ' ')
