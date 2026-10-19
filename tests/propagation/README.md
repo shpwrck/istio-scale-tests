@@ -109,7 +109,7 @@ rules: [Run config](../../README.md#run-config---config-file)).
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `PROPAGATION_*`, `FANOUT_*`,
   `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform),
-  `PLATFORM_READ_TIMEOUT` (each read of the platform record) and `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record), `PLATFORM_READ_PARALLEL` (members read at once) and `METRICS_SCRAPE_TIMEOUT`. `PROPAGATION_TEST_NAMESPACE` and `PROPAGATION_MAX_MATRIX` stay environment only. `004`
   keeps its own port block (`PROPAGATION_SNAPSHOT_PF_BASE`), so a `FANOUT_PF_BASE` in the
   file does not move it.
 - **Run keys:** `PROPAGATION_MESH_SIZES` (`006 --mesh-sizes`; empty: 1 to the number of

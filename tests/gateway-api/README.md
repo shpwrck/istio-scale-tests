@@ -623,8 +623,9 @@ on the wait and the gate, no istioctl evidence):
   `GWAPI_REMOTE_NAMESPACE` (the chart's `remoteNamespace`), `GWAPI_SHARED_NAMESPACE`
   (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` (empty by default: the Argo CD
   namespace of the hub's platform, `openshift-gitops` on OpenShift, else `argocd`; the run logs
-  which) and `GWAPI_ARGOCD_APPSET` have no flag. `TEST_PLATFORM` (above) and
-  `PLATFORM_READ_TIMEOUT` (each read of the platform record) are keys of every suite.
+  which) and `GWAPI_ARGOCD_APPSET` have no flag. `TEST_PLATFORM` (above),
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record) and `PLATFORM_READ_PARALLEL` (members
+  read at once) are keys of every suite.
 - The shared `ISTIOD_DIAG_*` keys are accepted and unused. The script copies the config into the
   run directory as `run-config-<RUN_ID>.env`.
 - **Flags only:** `--dry-run`. Keep context names in `configs/<name>.local.env` (gitignored).

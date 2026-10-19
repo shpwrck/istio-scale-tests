@@ -236,10 +236,11 @@ Other:
                               it warns when --config is given. It stops when a
                               member now has another platform, mesh build
                               (operator, istiod, gateway proxy), istiod env,
-                              node provider or Kubernetes version than the TSV
-                              records, or its source member other tuning
-                              levers or istiod limits (README, --resume); a
-                              value it cannot read only warns.
+                              tuning profile objects, node provider or
+                              Kubernetes version than the TSV records, or its
+                              source member other tuning levers or istiod
+                              limits (README, --resume); a value it cannot read
+                              only warns.
   --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
   --dry-run                   Print plan and matrix, then exit.
   -h, --help                  Show this help.
@@ -1335,6 +1336,7 @@ if ((! DRY_RUN)); then
 	# tuning levers stop the run here, before the metrics preflight can wait.
 	[[ -z "$RESUME_DIR" ]] || platform_resume_check "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "$(IFS=,; echo "${CONTEXTS[*]}")" "${CONTEXTS[0]}"
 	platform_probe_share "$OUTPUT_DIR"
+	platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 	metrics_preflight
 	precreate_tsv_preamble
 	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"

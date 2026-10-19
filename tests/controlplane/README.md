@@ -174,8 +174,8 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
   `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`, plus `ISTIOD_DIAG_*`,
-  `TEST_PLATFORM` (the members' platform) and `PLATFORM_READ_TIMEOUT` (each read of the platform
-  record), which every suite takes. A step ignores the keys it
+  `TEST_PLATFORM` (the members' platform), `PLATFORM_READ_TIMEOUT` (each read of the platform
+  record) and `PLATFORM_READ_PARALLEL` (members read at once), which every suite takes. A step ignores the keys it
   does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
   `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run) and
   the version pins. Any other key, or any bad line, rejects the whole file before anything
@@ -229,8 +229,8 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT` is a 12-hex digest of
   istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
   `spec.values.pilot.env` or a hand edit changes it. `TUNING_OBJECTS_BY_CONTEXT` names the objects
-  a tuning profile created (labelled `istio-scale-tests/tuning-profile`), `none` outside a tuning
-  run. The growth mode's `ns-lifecycle-<RUN_ID>.tsv`
+  a tuning profile created and its marker ConfigMap (labelled `istio-scale-tests/tuning-profile`),
+  `none` outside a tuning run. The growth mode's `ns-lifecycle-<RUN_ID>.tsv`
   and `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates
   the lifecycle file). `004` prints it in every format, with a warning in the report itself
   (members counted, not named; `metadata.data_warnings` in JSON) when its inputs differ, a value

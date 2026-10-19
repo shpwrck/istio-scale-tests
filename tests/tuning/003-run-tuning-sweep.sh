@@ -2,7 +2,8 @@
 # Sweep tuning profiles against one test suite. Pauses Argo CD auto-sync of the
 # Istio CR Applications, runs the suite's setup once, then measures the baseline and
 # each profile (apply -> settle -> probe -> revert), writes sweep-comparison.md,
-# runs the suite's cleanup and resumes Argo CD.
+# runs the suite's cleanup and resumes Argo CD. It refuses to start while a member
+# holds a tuning profile's objects or marker (a profile left applied).
 #
 # Usage:
 #   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
@@ -19,7 +20,7 @@ source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse
 
 TUNING_DIR="${ROOT}/tests/tuning"
 SUITE=""
@@ -41,7 +42,9 @@ usage() {
 Usage: $(basename "$0") --suite SUITE --gitops-context CTX [options]
 
 For the baseline and each profile: apply, wait --settle seconds, run the suite's
-probe, revert. Writes sweep-comparison.md into the sweep directory.
+probe, revert. Writes sweep-comparison.md into the sweep directory. Refuses to start
+while a profile is left applied: its state under the results directory, or its objects
+or marker on a member (./tests/tuning/005-cleanup.sh undoes both).
 
 Options:
   --suite SUITE          propagation | controlplane | dataplane | churn |
@@ -74,7 +77,7 @@ Environment:
   suite's chart overlay and, with TUNING_GITOPS_NAMESPACE empty, for the hub whose Argo CD
   namespace 006 pauses in (TUNING_GITOPS_NAMESPACE overrides that). The platform record of each
   pass still asks every member what it serves.
-$(platform_help_lines timeout)
+$(platform_help_lines reads)
 EOF
 }
 
@@ -214,6 +217,7 @@ done
 if ((DRY_RUN)); then
 	echo ""
 	echo "--- Plan ---"
+	echo "# check that no member holds a tuning profile's objects or marker (label ${PLATFORM_TUNING_LABEL}); stop if one does"
 	if ((GITOPS_PAUSE)); then
 		show "${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE"
 	fi
@@ -263,6 +267,9 @@ python3 -I -c 'import yaml' 2>/dev/null \
 	|| die "python3 with PyYAML is required (dnf install python3-pyyaml, apt install python3-yaml, or pip install pyyaml)"
 KUBECTL=()
 resolve_kubectl KUBECTL
+# A profile left applied by a run whose state is not under the results dirs above (another
+# checkout, a deleted dir), or objects applied by hand, would contaminate every pass too.
+platform_tuning_objects_refuse "$CONTEXTS_CSV" "every pass of this sweep (the baseline included)"
 
 ACTIVE_STATE_DIR=""
 GITOPS_PAUSED=0

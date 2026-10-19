@@ -205,12 +205,9 @@ HARNESS_SHA="$(harness_sha)"
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 if ((! DRY_RUN)); then
-	if command -v oc >/dev/null 2>&1; then
-		KUBECTL=(oc)
-	elif command -v kubectl >/dev/null 2>&1; then
-		KUBECTL=(kubectl)
-	else
-		KUBECTL=()
+	KUBECTL=()
+	if command -v kubectl >/dev/null 2>&1 || command -v oc >/dev/null 2>&1; then
+		resolve_kubectl KUBECTL
 	fi
 	if ((${#KUBECTL[@]})); then
 		tb_kv=""
@@ -227,6 +224,7 @@ fi
 # (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 platform_probe_share "$SWEEP_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (counted in n_total, excluded from n_valid).

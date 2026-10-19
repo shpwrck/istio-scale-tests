@@ -86,7 +86,7 @@ probe_read=""
 case "$cmd" in
 "api-versions" | "-n sail-operator get deployments.apps,pods -o json" | "-n istio-system get pods -o json" | "get nodes -o json" | \
 	"-n openshift-operators get clusterserviceversions.operators.coreos.com -o json" | \
-	"get destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io -A -l istio-scale-tests/tuning-profile -o json") probe_read=1 ;;
+	"get destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io,configmaps -A -l istio-scale-tests/tuning-profile -o json") probe_read=1 ;;
 esac
 if [[ "$ctx" == ctx-a && -n "${STUB_FLAKY_A:-}" && -z "$probe_read" ]]; then
 	n="$(cat "${STUB_LOG}.flaky" 2>/dev/null || echo 0)"
@@ -225,7 +225,7 @@ case "$cmd" in
 		echo '{"items":[{"spec":{"providerID":"aws:///zone-a/i-0"}}]}'
 	fi ;;
 "get istios.sailoperator.io default -o json") echo '{"spec":{"version":"v1.30.5"}}' ;;
-"get destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io -A -l istio-scale-tests/tuning-profile -o json")
+"get destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io,configmaps -A -l istio-scale-tests/tuning-profile -o json")
 	echo '{"kind":"List","items":[]}' ;;
 "-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json" | \
 	"-n mesh-verify-gwapi-shared get deploy -l app=gwapi-echo -o json")

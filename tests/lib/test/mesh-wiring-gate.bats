@@ -941,7 +941,11 @@ empty: "
 	assert_output "NotReady: expectedClusters (mesh-a,,mesh-b) holds an empty name"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b,mesh-a' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: expectedClusters names mesh-a more than once (mesh-a,mesh-b,mesh-a)"
+	assert_output "NotReady: expectedClusters repeats mesh-a (3 names in all): list each member once"
+	# Sc5-N1: five duplicates named at most, the list counted, not copied.
+	EXPECTED_MEMBERS=0 CLUSTER_NAME=m1 EXPECTED_CLUSTERS='m1,m2,m3,m4,m5,m6,m7,m1,m2,m3,m4,m5,m6,m7' run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: expectedClusters repeats m1, m2, m3, m4, m5 and 2 more (14 names in all): list each member once"
 	EXPECTED_MEMBERS=3 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a,mesh-b): set both from the same members, or expectedMembers to 0"
@@ -1020,5 +1024,8 @@ empty: "
 	assert_output --partial 'expectedClusters: "Mesh_B" is not a cluster name'
 	run helm template x "$CHART" --set clusterName=mesh-a --set 'expectedClusters={mesh-a,mesh-b,mesh-a}'
 	assert_failure
-	assert_output --partial "expectedClusters names mesh-a more than once (mesh-a,mesh-b,mesh-a)"
+	assert_output --partial "expectedClusters repeats mesh-a (3 names in all): list each member once"
+	run helm template x "$CHART" --set clusterName=m1 --set 'expectedClusters={m1,m2,m3,m4,m5,m6,m7,m1,m2,m3,m4,m5,m6,m7}'
+	assert_failure
+	assert_output --partial "expectedClusters repeats m1, m2, m3, m4, m5 and 2 more (14 names in all): list each member once"
 }

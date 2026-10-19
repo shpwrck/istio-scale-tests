@@ -87,6 +87,7 @@ EXTRACTED_PATTERNS=(
 	'env_pct_of_limit() {'
 	'env_sla_verdict() {'
 	'env_limit_drift_warning() {'
+	'env_pct_cell() {'
 	'env_collect_infra() {'
 	'env_istiod_resources() {'
 	'env_network() {'
@@ -201,6 +202,7 @@ EXTRACTED_PATTERNS=(
 	'platform_report_lines() {'
 	'platform_report_is_key() {'
 	'platform_value_has() {'
+	'platform_help_lines() {'
 	'platform_recorded_contexts() {'
 	'platform_report_warnings() {'
 	'platform_warning_lines() {'
@@ -213,6 +215,10 @@ EXTRACTED_PATTERNS=(
 	'platform_value_against() {'
 	'platform_summary() {'
 	'platform_short_digests() {'
+	'platform_tuning_objects() {'
+	'platform_tuning_objects_check() {'
+	'platform_tuning_objects_refuse() {'
+	'platform_start_warnings() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

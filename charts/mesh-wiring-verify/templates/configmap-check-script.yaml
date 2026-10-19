@@ -65,6 +65,8 @@ data:
     pem_body() { tr -d '\r\n' | sed -e 's/\\n//g' -e 's/-----[A-Z ]*-----//g'; }
     # The space-separated list $1 as "a, b, c".
     commas() { printf '%s' "$1" | sed 's/ /, /g'; }
+    # The same with five names at most, then how many more.
+    commas_capped() { printf '%s' "$1" | awk '{ s = $1; for (i = 2; i <= NF && i <= 5; i++) s = s ", " $i; if (NF > 5) s = s " and " (NF - 5) " more"; printf "%s", s }'; }
 
     # The mesh members by name: each one's Istio cluster ID, which is also the suffix of its
     # remote secret istio-remote-secret-<name>. members holds them all, others all but this
@@ -82,11 +84,11 @@ data:
       esac
       members=$(printf '%s' "$NAMES" | tr ',' ' ')
       dup=$(printf '%s' "$NAMES" | tr ',' '\n' | sort | uniq -d | tr '\n' ' ')
+      n_names=$(printf '%s' "$NAMES" | tr ',' '\n' | grep -c .)
       if [ -n "$dup" ]; then
-        echo "NotReady: expectedClusters names $(commas "${dup% }") more than once (${NAMES})" >&2
+        echo "NotReady: expectedClusters repeats $(commas_capped "${dup% }") (${n_names} names in all): list each member once" >&2
         exit 1
       fi
-      n_names=$(printf '%s' "$NAMES" | tr ',' '\n' | grep -c .)
       if [ "$EXPECTED" -gt 0 ] && [ "$EXPECTED" -ne "$n_names" ]; then
         echo "NotReady: expectedMembers is ${EXPECTED} but expectedClusters names ${n_names} member(s) (${NAMES}): set both from the same members, or expectedMembers to 0" >&2
         exit 1

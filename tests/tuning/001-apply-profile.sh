@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Apply one tuning profile to the mesh: merge-patch the Istio CR with the profile's
 # istio_cr_patch and server-side apply its resources. Saves what 002-revert-profile.sh
-# needs to undo exactly those changes.
+# needs to undo exactly those changes, and first puts a marker ConfigMap on each member
+# (tuning.py marker) that names the profile and holds that member's Istio CR revert patch:
+# every platform record shows it, and 005-cleanup.sh can undo the profile from it alone.
+# Refuses while any member holds a profile's objects already (a profile left applied).
 #
 # Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
 #
@@ -17,6 +20,8 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/tuning/lib/tuning.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate, platform_tuning_objects_refuse
 
 TUNING_DIR="${ROOT}/tests/tuning"
 HELPER="${TUNING_DIR}/lib/tuning.py"
@@ -31,7 +36,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --profile NAME|PATH [options]
 
-Apply a tuning profile: patch the Istio CR and apply the profile's resources.
+Apply a tuning profile: patch the Istio CR and apply the profile's resources. First it
+puts a marker ConfigMap on each member that names the profile and holds the patch that
+restores that member's Istio CR (002-revert-profile.sh deletes it last). It refuses to
+start while a member holds a profile's objects or marker already: a profile left applied,
+which ./tests/tuning/005-cleanup.sh undoes.
 
 Options:
   --profile NAME|PATH    Profile name (e.g. 01-push-throttling) or YAML path (required).
@@ -43,6 +52,9 @@ Options:
   --skip-verify          Skip the post-apply checks.
   --dry-run              Print the patch and resources; do not touch clusters.
   -h, --help             Show this help.
+
+Environment:
+$(platform_help_lines reads)
 
 Exit status: 0 applied and verified, 1 error, 2 applied but verification failed.
 Requires python3 with PyYAML.
@@ -70,6 +82,7 @@ done
 
 [[ -n "$PROFILE" ]] || die "--profile is required"
 is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+platform_validate
 if [[ ! -f "$PROFILE" ]]; then
 	for cand in "${TUNING_DIR}/profiles/${PROFILE}" "${TUNING_DIR}/profiles/${PROFILE}.yaml"; do
 		[[ -f "$cand" ]] && { PROFILE="$cand"; break; }
@@ -109,6 +122,12 @@ if ((DRY_RUN)); then
 	if ((HAS_PATCH)); then cat "$WORK/patch.json"; else echo "(none)"; fi
 	echo "--- Resources (server-side apply) ---"
 	if ((HAS_RESOURCES)); then cat "$WORK/resources.yaml"; else echo "(none)"; fi
+	echo "--- Marker (server-side apply on each member, before any change) ---"
+	echo '{}' >"$WORK/revert-none.json"
+	python3 -I "$HELPER" marker "$PROFILE_NAME" "$WORK/description" "$WORK/revert-none.json" dry-run "$WORK/marker.json"
+	read -r m_kind m_name m_ns < <(python3 -I "$HELPER" resources "$WORK/marker.json")
+	echo "${m_kind} ${m_ns}/${m_name}, labelled ${PLATFORM_TUNING_LABEL}=${PROFILE_NAME}:"
+	echo "  it holds the merge patch that restores that member's Istio CR"
 	echo "--- Dry run: no cluster changes; would save revert state to ${STATE_DIR}/ ---"
 	exit 0
 fi
@@ -131,14 +150,19 @@ if [[ -d "${TUNING_DIR}/results" ]]; then
 	[[ -z "$leftover" ]] \
 		|| die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ./tests/tuning/005-cleanup.sh first"
 fi
+# And on the members: a profile's objects or marker from a run this checkout has no state of.
+platform_tuning_objects_refuse "$CONTEXTS_CSV" "this profile"
 mkdir -p "$STATE_DIR"
+APPLIED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 for ctx in "${CONTEXTS[@]}"; do
 	key="$(ctx_key "$ctx")"
 	"${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json >"${STATE_DIR}/istio-before-${key}.json" \
 		|| die "${ctx}: cannot read Istio CR 'default'"
 	python3 -I "$HELPER" revert-patch "$WORK/patch.json" "${STATE_DIR}/istio-before-${key}.json" \
 		"${STATE_DIR}/istio-revert-${key}.json"
-	for line in "${RES_LINES[@]}"; do
+	python3 -I "$HELPER" marker "$PROFILE_NAME" "$WORK/description" "${STATE_DIR}/istio-revert-${key}.json" \
+		"$APPLIED_AT" "${STATE_DIR}/marker-${key}.json"
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
 			die "${ctx}: ${kind}/${name} already exists in ${ns}; refusing to overwrite it (part of the GitOps baseline or a leftover? see 005-cleanup.sh)"
@@ -151,6 +175,15 @@ cp "$WORK/patch.json" "${STATE_DIR}/patch.json"
 cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
 (IFS=,; echo "${CONTEXTS[*]}") >"${STATE_DIR}/contexts"
 echo "$PROFILE_NAME" >"${STATE_DIR}/active-profile"
+
+# The marker on every member before any change (002-revert-profile.sh deletes it last).
+read -r _ MARKER_NAME MARKER_NS < <(python3 -I "$HELPER" resources "${STATE_DIR}/marker-$(ctx_key "${CONTEXTS[0]}").json")
+for ctx in "${CONTEXTS[@]}"; do
+	echo "--- ${ctx}: marking ${PROFILE_NAME} applied (ConfigMap ${MARKER_NS}/${MARKER_NAME}) ---"
+	"${KUBECTL[@]}" --context="$ctx" apply --server-side --field-manager=tuning-profile \
+		-f "${STATE_DIR}/marker-$(ctx_key "$ctx").json" \
+		|| die "${ctx}: could not create the profile's marker; nothing is patched yet. Remove the markers already created with ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"
+done
 
 for ctx in "${CONTEXTS[@]}"; do
 	if ((HAS_PATCH)); then
@@ -191,7 +224,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		"${KUBECTL[@]}" --context="$ctx" -n istio-system get deployment "$deploy" -o json >"$WORK/deploy.json"
 		python3 -I "$HELPER" check "$WORK/patch.json" "$WORK/live.json" "$WORK/deploy.json" || fail=1
 	fi
-	for line in "${RES_LINES[@]}"; do
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"} "ConfigMap ${MARKER_NAME} ${MARKER_NS}"; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
 			echo "  PASS  ${kind}/${name} exists in ${ns}"

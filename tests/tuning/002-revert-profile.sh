@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Revert a profile applied by 001-apply-profile.sh: delete its resources and
 # merge-patch the Istio CR back to the saved values at every path the profile set.
-# Then check that those paths and resources match the pre-apply state.
+# Then check that those paths and resources match the pre-apply state, and only then
+# delete the profile's marker ConfigMap on each member (a failed revert keeps it, so
+# every platform record and the next tuning run see the profile still applied).
 #
 # Usage:
 #   ./tests/tuning/002-revert-profile.sh --state-dir DIR [--contexts CSV] [options]
@@ -28,14 +30,17 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --state-dir DIR [options]
 
-Undo a profile applied by 001-apply-profile.sh and check the result.
+Undo a profile applied by 001-apply-profile.sh and check the result. Only when the
+check passes does it delete the profile's marker ConfigMap on each member, so a failed
+revert stays visible to every platform record and blocks the next tuning run.
 
 Options:
   --state-dir DIR        State directory written by 001-apply-profile.sh (required).
   --contexts CSV         Contexts to revert (default: the contexts recorded at apply).
   --rollout-timeout N    Seconds to wait for the operator and istiod rollout
                          (default: ${ROLLOUT_TIMEOUT}).
-  --dry-run              Print the revert patches and resources; do not touch clusters.
+  --dry-run              Print the revert patches, resources and markers; do not touch
+                         clusters.
   -h, --help             Show this help.
 
 Environment:
@@ -94,6 +99,16 @@ if ((DRY_RUN)); then
 	done
 	echo "--- Resources to delete ---"
 	if ((HAS_RESOURCES)); then cat "$RESOURCES"; else echo "(none)"; fi
+	echo "--- Markers to delete once the check passes ---"
+	for ctx in "${CONTEXTS[@]}"; do
+		f="${STATE_DIR}/marker-$(ctx_key "$ctx").json"
+		if [[ -f "$f" ]]; then
+			read -r m_kind m_name m_ns < <(python3 -I "$HELPER" resources "$f")
+			echo "${ctx}: ${m_kind} ${m_ns}/${m_name}"
+		else
+			echo "${ctx}: (none recorded: applied before profiles had markers)"
+		fi
+	done
 	echo "--- Dry run: no cluster changes ---"
 	exit 0
 fi
@@ -174,6 +189,22 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 	fi
 done
+
+# The markers last, once everything else is back (a state dir from before the markers has none).
+if ((fail == 0)); then
+	for ctx in "${CONTEXTS[@]}"; do
+		marker="${STATE_DIR}/marker-$(ctx_key "$ctx").json"
+		[[ -f "$marker" ]] || continue
+		left=""
+		if "${KUBECTL[@]}" --context="$ctx" delete --ignore-not-found -f "$marker" >/dev/null &&
+			left="$("${KUBECTL[@]}" --context="$ctx" get --ignore-not-found -f "$marker" -o name 2>&1)" && [[ -z "$left" ]]; then
+			echo "  PASS  ${ctx}: profile marker removed"
+		else
+			echo "  FAIL  ${ctx}: profile marker still present: ${left:-the delete failed}"
+			fail=1
+		fi
+	done
+fi
 
 if ((fail)); then
 	echo "=== Revert of ${PROFILE_NAME} FAILED the check; the mesh may still carry profile changes ===" >&2

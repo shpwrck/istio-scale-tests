@@ -10,7 +10,14 @@ Profile commands need PyYAML; the others use the standard library only.
   check PATCH LIVE [DEPLOY]       every PATCH leaf matches LIVE; pilot.env entries are
                                   also on the istiod Deployment's discovery container
   check-revert REVERT LIVE        LIVE matches REVERT at every leaf (null = absent)
-  resources RESOURCES_YAML        print "kind name namespace" per document
+  resources RESOURCES_YAML        print "kind name namespace" per document (a JSON file: no
+                                  PyYAML needed)
+  marker NAME DESC REVERT AT OUT  write the marker ConfigMap (JSON) of profile NAME applied at
+                                  AT, holding its description (file DESC) and the merge patch
+                                  that restores one member's Istio CR (file REVERT)
+  markers LIST_JSON OUTDIR        print "namespace name profile patch-file" per labelled
+                                  ConfigMap of a list, newest first; write each marker's
+                                  revert patch to OUTDIR (patch-file "-": none to restore from)
   apps APPS_JSON APPSET SUFFIX    print "name project" for Argo CD Applications owned by
                                   APPSET (falls back to names ending in -SUFFIX)
   window-add PROJECT_JSON APPS_CSV OUT_WINDOW
@@ -27,11 +34,27 @@ Profile commands need PyYAML; the others use the standard library only.
 
 import copy
 import json
+import re
 import sys
 
+# The label, and the kinds 005-cleanup.sh can find by it: profiles may only create these, and each
+# applied profile gets a marker of MARKER_KIND (cmd_marker). Keep them in sync with
+# tests/lib/platform.sh (PLATFORM_TUNING_LABEL, PLATFORM_TUNING_RESOURCE_KINDS and
+# PLATFORM_TUNING_MARKER_KIND), which every suite's platform
+# record reads and 005-cleanup.sh deletes by; platform.bats checks.
 LABEL = "istio-scale-tests/tuning-profile"
-# Kinds 005-cleanup.sh can find by label; profiles may only create these.
 ALLOWED_KINDS = {"DestinationRule", "Sidecar", "Telemetry", "EnvoyFilter"}
+# The marker 001-apply-profile.sh puts on each member before it changes anything there, and
+# 002-revert-profile.sh deletes last: while it is there, every platform record names the profile
+# (even one that only sets istiod's env), and 005-cleanup.sh can restore that member's Istio CR
+# from it without the state dir of the run that applied it.
+MARKER_KIND = "ConfigMap"
+MARKER_NAMESPACE = "istio-system"
+MARKER_PREFIX = "tuning-profile-"
+# A profile's name labels its objects and names its marker: a DNS label, and none of the words a
+# platform record's TUNING_OBJECTS_BY_CONTEXT value uses for itself (tests/lib/platform.sh).
+NAME_RE = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+RECORD_WORDS = ("none", "unknown", "mixed", "unlabelled")
 MISSING = object()
 
 
@@ -85,6 +108,12 @@ def cmd_load(profile, outdir):
     name = profile.rsplit("/", 1)[-1]
     if name.endswith(".yaml"):
         name = name[: -len(".yaml")]
+    if not re.match(NAME_RE, name) or len(MARKER_PREFIX + name) > 63:
+        die(f"{profile}: a profile's name ('{name}') must be lowercase letters, digits and '-', at most "
+            f"{63 - len(MARKER_PREFIX)} characters: it labels the profile's objects and names its marker ConfigMap")
+    if name in RECORD_WORDS:
+        die(f"{profile}: a profile's name ('{name}') must not be one of {', '.join(RECORD_WORDS)}: the platform "
+            "record uses these words for itself")
     desc = " ".join(str(doc.get("description") or "").split())
     support = str(doc.get("ossm_support") or "")
     if support not in ("supported", "configurable"):
@@ -126,6 +155,51 @@ def cmd_load(profile, outdir):
     for key, val in (("description", desc), ("ossm_support", support), ("ossm_support_detail", detail)):
         with open(f"{outdir}/{key}", "w", encoding="utf-8") as f:
             f.write(val + "\n")
+
+
+def cmd_marker(name, desc_file, revert_file, applied_at, out_file):
+    with open(desc_file, encoding="utf-8") as f:
+        desc = " ".join(f.read().split())
+    with open(revert_file, encoding="utf-8") as f:
+        revert = json.load(f)
+    write_json(out_file, {
+        "apiVersion": "v1",
+        "kind": MARKER_KIND,
+        "metadata": {"name": MARKER_PREFIX + name, "namespace": MARKER_NAMESPACE, "labels": {LABEL: name}},
+        "data": {
+            "profile": name,
+            "description": desc,
+            "applied-at": applied_at,
+            "istio-revert.json": json.dumps(revert, sort_keys=True),
+        },
+    })
+
+
+def cmd_markers(list_file, outdir):
+    """The labelled ConfigMaps of a list (kubectl get configmaps -A -l LABEL -o json), newest
+    first (applied-at: a later profile's revert patch restores what an earlier one had set, so it
+    goes first), one line each: "namespace name profile file", the file holding the marker's
+    revert patch. A ConfigMap that is no marker, or a marker whose patch does not parse, gets
+    the file "-": the caller cannot restore that member's Istio CR from it."""
+    items = read_json(list_file).get("items") or []
+    rows = []
+    for i, cm in enumerate(items):
+        md = cm.get("metadata") or {}
+        data = cm.get("data") or {}
+        name = md.get("name") or "-"
+        prof = (md.get("labels") or {}).get(LABEL) or data.get("profile") or "unknown"
+        path = "-"
+        if name.startswith(MARKER_PREFIX):
+            try:
+                patch = json.loads(data.get("istio-revert.json") or "")
+            except ValueError:
+                patch = None
+            if isinstance(patch, dict):
+                path = f"{outdir}/{i}.json"
+                write_json(path, patch)
+        rows.append((data.get("applied-at") or "", md.get("namespace") or "-", name, prof, path))
+    for _, ns, name, prof, path in sorted(rows, reverse=True):
+        print(f"{ns} {name} {prof} {path}")
 
 
 def cmd_revert_patch(patch_file, before_file, out_file):
@@ -202,13 +276,19 @@ def cmd_check_revert(revert_file, live_file):
 
 
 def cmd_resources(res_file):
-    import yaml
-
     with open(res_file, encoding="utf-8") as f:
-        for r in yaml.safe_load_all(f):
-            if r:
-                md = r["metadata"]
-                print(r["kind"], md["name"], md["namespace"])
+        text = f.read()
+    try:
+        # A marker (one JSON document) needs no PyYAML.
+        docs = [json.loads(text)]
+    except ValueError:
+        import yaml
+
+        docs = yaml.safe_load_all(text)
+    for r in docs:
+        if r:
+            md = r["metadata"]
+            print(r["kind"], md["name"], md["namespace"])
 
 
 def cmd_apps(apps_file, appset, suffix):
@@ -295,6 +375,8 @@ COMMANDS = {
     "check": (cmd_check, 2, 3),
     "check-revert": (cmd_check_revert, 2, 2),
     "resources": (cmd_resources, 1, 1),
+    "marker": (cmd_marker, 5, 5),
+    "markers": (cmd_markers, 2, 2),
     "apps": (cmd_apps, 3, 3),
     "window-add": (cmd_window_add, 3, 3),
     "window-remove": (cmd_window_remove, 2, 2),

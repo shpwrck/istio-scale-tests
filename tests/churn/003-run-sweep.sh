@@ -211,6 +211,7 @@ fi
 # (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 platform_probe_share "$SWEEP_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Write a one-row placeholder TSV for a combo whose setup or probe failed before
 # any row was written, so the report still counts it (n_total, not n_valid).

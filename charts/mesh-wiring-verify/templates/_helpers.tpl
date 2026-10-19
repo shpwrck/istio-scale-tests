@@ -39,7 +39,10 @@ Empty without names: the gate then counts (expectedMembers).
 {{- $_ := set $seen . true -}}
 {{- end -}}
 {{- if $dups -}}
-{{- fail (printf "expectedClusters names %s more than once (%s)" (join "," (uniq $dups)) (join "," $names)) -}}
+{{- $u := uniq $dups -}}
+{{- $shown := join ", " (slice $u 0 (min 5 (len $u))) -}}
+{{- if gt (len $u) 5 }}{{ $shown = printf "%s and %d more" $shown (sub (len $u) 5) }}{{ end -}}
+{{- fail (printf "expectedClusters repeats %s (%d names in all): list each member once" $shown (len $names)) -}}
 {{- end -}}
 {{- $self := .Values.clusterName | default "" | toString -}}
 {{- if not (regexMatch $dns $self) -}}

@@ -165,9 +165,10 @@ five_passes() {
 
 @test "tuning 004 (H25, H2): istiod's settings are not compared (a profile changes them); a digest @unknown is not read, never another build" {
 	five_passes
-	# 01-same ran with its profile's istiod env; 02-state's istiod had not started when it was read.
-	sed -i 's/^\(# ISTIOD_ENV_BY_CONTEXT=.*\)0123456789ab/\1fedcba987654/' "${S}/01-same/controlplane-01-same.tsv"
-	grep -q '^# ISTIOD_ENV_BY_CONTEXT=.*fedcba987654' "${S}/01-same/controlplane-01-same.tsv"
+	# 01-same ran with its profile's istiod env (on both members); 02-state's istiod had not
+	# started when it was read.
+	sed -i '/^# ISTIOD_ENV_BY_CONTEXT=/s/0123456789ab/fedcba987654/g' "${S}/01-same/controlplane-01-same.tsv"
+	grep -qx '# ISTIOD_ENV_BY_CONTEXT=ctx-a=fedcba987654,ctx-b=fedcba987654' "${S}/01-same/controlplane-01-same.tsv"
 	sed -i "s/pilot:1.30.5@$(digest cd)/pilot:1.30.5@unknown/g" "${S}/02-state/controlplane-02-state.tsv"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
@@ -175,8 +176,9 @@ five_passes() {
 	refute_output --partial "pass 01-same"
 	refute_output --partial "Pass 01-same"
 	[[ "$stderr" != *ISTIOD_ENV_BY_CONTEXT* ]]
-	# The baseline's record still shows it (the TSVs keep it).
+	# The baseline's record still shows it (the TSVs keep it), and every pass's digest has a row (R6).
 	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT: \`0123456789ab\`"
+	assert_output --partial "| istiod env | 0123456789ab | fedcba987654 | 0123456789ab | 0123456789ab | unknown |"
 	assert_output --partial "Pass 02-state, cannot be compared on ISTIOD_IMAGE_BY_CONTEXT:"
 	assert_output --partial "- **Warning:** pass 02-state: ISTIOD_IMAGE_BY_CONTEXT could not be compared with the baseline (not read, or not recorded, in one of them)"
 	refute_output --partial "02-state differs"
@@ -208,4 +210,100 @@ five_passes() {
 	assert_output --partial "Pass 01-same, differs on ISTIOD_IMAGE_BY_CONTEXT:"
 	# Both members hold both builds: the value they share, once.
 	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`mixed:pilot:1.30.5@sha256:cdcdcdcdcdcd;pilot:1.30.6@sha256:232323232323\`"
+}
+
+# objects_passes: a baseline and the passes 02-x and 04-connection-pools (each pass dir is the
+# profile's name, as tuning 003 makes it), with no tuning profile objects in their records.
+objects_passes() {
+	local p
+	rm -rf "$S"
+	mkdir -p "$S"
+	printf '# SUITE=controlplane\n# PASSES=baseline,02-x,04-connection-pools\n' > "${S}/sweep-metadata.txt"
+	for p in baseline 02-x 04-connection-pools; do
+		mkdir -p "${S}/${p}"
+		printf '%s\n' "$CP_HDR" $'t\t0\t512\t300\t250\t99\t438\t20480\t10' > "${S}/${p}/controlplane-${p}.tsv"
+	done
+}
+
+@test "tuning 004 (R6): a pass holding its own profile's objects reads own; none else reads none; no warning" {
+	local own="04-connection-pools:DestinationRule/istio-system/tuning-connection-pool"
+	objects_passes
+	with_record baseline
+	with_record 02-x
+	with_record 04-connection-pools "s#=none#=${own}#g"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | same |"
+	assert_output --partial "| istiod env | 0123456789ab | 0123456789ab | 0123456789ab |"
+	assert_output --partial "| Tuning objects | none | none | own |"
+	refute_output --partial "Warning"
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+}
+
+@test "tuning 004 (R6, M5-B1): a baseline with a profile's objects, and a pass with another profile's, warn in both formats and on stderr" {
+	local dr="04-connection-pools:DestinationRule/istio-system/tuning-connection-pool"
+	objects_passes
+	# A run stopped before its revert left profile 04's root DestinationRule on ctx-a; the sweep
+	# ran --profiles without 04, so its own objects never replaced it.
+	with_record baseline "s#ctx-a=none#ctx-a=${dr}#"
+	with_record 02-x "s#ctx-a=none#ctx-a=02-x:Sidecar/istio-system/tuning-02+${dr}#"
+	with_record 04-connection-pools "s#=none#=${dr}#g"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Tuning objects | other (see notes) | other (see notes) | own |"
+	assert_output --partial "- **Warning:** pass baseline ran with a tuning profile's objects in place on ctx-a (TUNING_OBJECTS_BY_CONTEXT: ${dr}), so its figures are not those of the charts' configuration and no profile's change against it is the profile's alone; tests/tuning/005-cleanup.sh undoes them"
+	assert_output --partial "- **Warning:** pass 02-x ran with another tuning profile's objects in place on ctx-a (TUNING_OBJECTS_BY_CONTEXT: ${dr}), so it did not measure 02-x alone and its change against the baseline is not the profile's alone; tests/tuning/005-cleanup.sh undoes them"
+	refute_output --partial "pass 04-connection-pools"
+	# The notes after the table name them too.
+	assert_output --partial "Pass baseline:"
+	assert_output --partial "- TUNING_OBJECTS_BY_CONTEXT: a profile's objects on ctx-a: ${dr}"
+	assert_output --partial "- TUNING_OBJECTS_BY_CONTEXT: another profile's objects on ctx-a: ${dr}"
+	[[ "$stderr" == *"warning: pass baseline ran with a tuning profile's objects in place on ctx-a"* ]]
+	[[ "$stderr" == *"warning: pass 02-x ran with another tuning profile's objects in place on ctx-a"* ]]
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp 'Tuning objects +other \(see notes\) +other \(see notes\) +own'
+	assert_output --partial "WARNING: pass baseline ran with a tuning profile's objects in place on ctx-a"
+	assert_output --regexp "  TUNING_OBJECTS_BY_CONTEXT +another profile's objects on ctx-a: ${dr}"
+}
+
+@test "tuning 004 (R6): objects not read on a member read unknown with a warning; a pass from before the record has its one note" {
+	objects_passes
+	with_record baseline
+	with_record 02-x "s#ctx-b=none#ctx-b=unknown#"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Tuning objects | none | unknown (see notes) | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass 02-x: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) could not be read on ctx-b, so whether another profile's objects were in place is not known"
+	assert_output --partial "- TUNING_OBJECTS_BY_CONTEXT: could not be read on ctx-b"
+	# 04-connection-pools has no record: its one note, no tuning objects warning of its own.
+	assert_output --partial "Pass 04-connection-pools: every value of its platform record is unknown"
+	refute_output --partial "pass 04-connection-pools: its tuning profile objects"
+	# A record from before the key: not recorded, so not known either.
+	with_record 04-connection-pools '/^# TUNING_OBJECTS_BY_CONTEXT=/d'
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Tuning objects | none | unknown (see notes) | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded (the inputs predate the key), so whether another profile's objects were in place is not known"
+	# In one of its two TSVs only.
+	{
+		platform_fixture_lines
+		printf '%s\n' "$CP_HDR" $'t\t0\t512\t300\t250\t99\t438\t20480\t10'
+	} > "${S}/04-connection-pools/controlplane-second.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded in every input (one predates the key), so whether another profile's objects were in place is not known"
+}
+
+@test "tuning 004 (R6): a pass whose members ran different istiod settings shows them by member and warns" {
+	objects_passes
+	with_record baseline
+	with_record 02-x "s/ctx-b=0123456789ab/ctx-b=fedcba987654/"
+	with_record 04-connection-pools
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| istiod env | 0123456789ab | by member (see notes) | 0123456789ab |"
+	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT, by member: \`0123456789ab (1 member), fedcba987654 (1 member)\`"
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings differ between its members (ISTIOD_ENV_BY_CONTEXT: 0123456789ab (1 member), fedcba987654 (1 member)), so they did not all run the same configuration; the profile may have reached some of them only"
+	[[ "$stderr" == *"warning: pass 02-x: istiod's settings differ between its members"* ]]
 }

@@ -325,6 +325,7 @@ fi
 # writes it (tests/lib/platform.sh). --dry-run reads nothing and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 platform_probe_share "$SWEEP_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then
