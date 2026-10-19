@@ -93,25 +93,40 @@ Each pass reads the platform record live before its probe
 ([`tests/lib/platform.sh`](../lib/platform.sh): the platform, the mesh operator, istiod and
 gateway proxy builds, the nodes' provider, istiod's settings, the tuning profile objects), and
 its tuning levers and root Sidecar egress hosts on the source member; the probe's TSVs carry
-them, with each member's Kubernetes version and, for the controlplane suite, istiod's limits
-(`platform-record.txt` in the pass directory hands the record over). The pass reads them again
-after the probe, always, and writes what that read found to the pass's `platform-drift.txt`:
-what changed in between (a profile reverted by hand, an Argo CD sync that put istiod's settings
-back, a lever, an istiod limit, a control-plane upgrade), the other members whose istiod limits
-differ from the source member's, and what it could not compare (a value not read at either
-end, or an image whose digest is `@unknown`: no pod had started).
+them, with each member's Kubernetes version, for the controlplane suite istiod's limits, and
+istiod's replica counts at the probe's start as the suite records them (controlplane: each
+member's Deployment replicas; propagation: each member's Running istiod pods; churn and
+churn-dataplane: the source member's; dataplane: none). `platform-record.txt` in the pass
+directory hands the record over. The pass reads them again after the probe, always, and writes
+what that read found to the pass's `platform-drift.txt`: what changed in between (a profile
+reverted by hand, an Argo CD sync that put istiod's settings back, a lever, an istiod limit, a
+control-plane upgrade), the other members' istiod limits where they differ from the source
+member's, and what it could not compare (a value not read at either end, or an image whose
+digest is `@unknown`: no pod had started). Nothing records the other members' limits at a
+pass's start, so theirs are their limits at its end: a change there during a pass reads as a
+difference from that pass on, not as a change during it, and one undone before the pass ends is
+not seen. That read does not count istiod's replicas again; in a controlplane pass, a window
+whose Running istiod pods changed writes its `cluster_connected_proxies` as `N/A`.
 
-The table's `Platform record` row compares each pass's record, tuning levers, root Sidecar egress
-hosts and istiod limits with the baseline's (without a baseline, the first pass with data's,
-which reads `reference`; the baseline reads `baseline`): member by member for the builds, the
-Kubernetes versions and the limits, lever by lever for the levers. A pass reads:
+The table's `Platform record` row compares each pass's record and the values its TSVs record
+outside it with the baseline's (without a baseline, the first pass with data's, which reads
+`reference`; the baseline reads `baseline`): member by member for the builds, the Kubernetes
+versions, istiod's limits and replica counts, lever by lever for the levers. Those values are
+`TUNING_BASELINE` (each lever `on` or `off`), `SIDECAR_EGRESS_HOSTS` (the root Sidecar's),
+`ISTIOD_CPU_LIMIT_M_BY_CONTEXT` (millicores), `ISTIOD_MEM_LIMIT_MI_BY_CONTEXT` (Mi) and
+`ISTIOD_REPLICAS_BY_CONTEXT`. A pass reads:
 
 - `same`;
-- `same (see notes)`: only what its profile sets differs, a lever or the egress hosts whose
-  object its `state/objects` lists (a root Sidecar of its own, a `tuning-metrics` or
-  `tuning-access-log` Telemetry), or `discoverySelectors` or a limit its `state/patch.json` sets
-  (also what the reference pass's profile sets, without a baseline); the notes say which;
+- `same (see notes)`: only what its profile sets differs (a lever or the egress hosts whose
+  object its `state/objects` lists: a root Sidecar of its own, a `tuning-metrics` or
+  `tuning-access-log` Telemetry; or `discoverySelectors`, a limit or the replica count its
+  `state/patch.json` sets; without a baseline, also what the reference pass's profile sets), or
+  it ran one of the values the reference pass ran more than one of (one that changed during that
+  pass, or that its TSVs disagree on); the notes say which;
 - `differs (see notes)`;
+- `not in effect (see notes)`: a member did not run a limit or the replica count that its
+  `state/patch.json` sets to one value (not rolled out there, changed during the pass, or for the
+  count an HPA; a patch that turns autoscaling on is not checked against its `replicaCount`);
 - `changed (see notes)`: the read after its probe found a build, a Kubernetes version, a tuning
   lever or an istiod limit changed during the pass;
 - `mixed (see notes)`: its TSVs disagree;
@@ -121,17 +136,25 @@ Kubernetes versions and the limits, lever by lever for the levers. A pass reads:
 - `-`: no data.
 
 The baseline (or reference) pass reads `baseline (see notes)` when its own values changed during
-it, its TSVs disagree or it was not compared at its end, and its warning says that no profile's
-change against it is the profile's alone. A member that changed during a pass, or whose TSVs
-disagree, matches the other side when one of its values is that side's (the pass's own warning
-covers the change), so a pass on a version the baseline ended with reads `same`, and one on a
-version the baseline never ran there still `differs`: an upgrade rolling through the members
-shows in each pass it reaches. A mesh operator that differs only in its state (`Available`,
-`Unavailable`) is the same build. Only the controlplane suite's TSVs record istiod's limits, so
-another suite's sweep compares none, and nothing else shows a CPU limit that changes: istiod's
+it, its TSVs disagree, it was not compared at its end or (a reference pass) its profile's value
+was not in effect, and its warning says that no profile's change against it is the profile's
+alone, or, when it was not compared at its end, that none is known to be. A member that changed
+during a pass, or whose TSVs disagree, matches the other side when one of its values is that
+side's (the pass's own warning covers the change), so a pass on a version the baseline ended
+with reads `same (see notes)`, its notes naming that version, and one on a version the baseline
+never ran there still `differs`: an upgrade rolling through the members shows in each pass it
+reaches. A mesh operator that differs only in its state (`Available`, `Unavailable`) is the same
+build.
+
+Only the controlplane suite's TSVs record istiod's limits, and the dataplane suite's record no
+replica count, so those sweeps compare none of them, and a profile that sets one warns that
+whether it was in effect is not known. Nothing else shows a CPU limit that changes: istiod's
 Deployment sets `GOMAXPROCS` from `limits.cpu` by reference (`valueFrom`, so the env digest does
-not change with it), and `GOMAXPROCS` sets `PILOT_PUSH_THROTTLE`'s default, min(15 + 5 ×
-`GOMAXPROCS`, 100), which profile 01 tunes; keep istiod's resources fixed during such a sweep.
+not change with it), and `GOMAXPROCS` sets the defaults of `PILOT_PUSH_THROTTLE` (which profile
+01 tunes) and `PILOT_MAX_REQUESTS_PER_SECOND`, each min(15 + 5 × `GOMAXPROCS`, 100); keep
+istiod's resources fixed during such a sweep. No pass records the rest of the Istio CR either
+(`meshConfig` but `discoverySelectors`, `global.proxy`), which istiod reloads without a restart:
+keep it fixed during a sweep, but for what the profiles change.
 
 The row leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`) and the profile's objects
 (`TUNING_OBJECTS_BY_CONTEXT`), which a profile changes on purpose (`spec.values.pilot.env`, the
@@ -156,16 +179,19 @@ or never applied there, or the TSVs predate the markers) or `unknown (see notes)
 all but `none` and `own` warn that the pass did not measure what its name says.
 
 The record follows the table once, digests shortened to 12 hex digits (a value its members do
-not share by value, five named), then each pass that differs, changed, is mixed, cannot be
-compared or has what its profile sets, with those keys' values: one value when every member
-shares it, else only the members that do not match the reference pass, five at most, with a
-count (`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`), what changed during it
-(`v1.33.1 to v1.33.2 on m7`), what it could not compare at its end, and what its profile sets;
-one line for a pass whose every value is unknown, such as one from before the record. A pass that
-differs (an operator upgrade, a gateway roll or a lever put back between passes), changed, is
-mixed or cannot be compared gets a warning in the notes and on stderr: its change against the
-baseline is then not the profile's alone, or not known to be (without a baseline, its difference
-from the reference pass is not the profiles' alone).
+not share by value, five named, as is one that names fewer members than the record: the churn
+suites' replica counts), then each pass with notes, with those keys' values: where it differs,
+is mixed or cannot be compared, the one value every member shares when all of them differ, else
+only the members that do not match the reference pass, five at most, with a count
+(`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`); what changed during it (`v1.33.1
+to v1.33.2 on m7`); what it could not compare at its end; what its profile sets; the members
+that did not run the profile's value; and which value it ran where the reference pass ran more
+than one. One line stands for a pass whose every value is unknown, such as one from before the
+record. A pass that differs (an operator upgrade, a gateway roll or a lever put back between
+passes), whose profile's value was not in effect, that changed, is mixed or cannot be compared
+gets a warning in the notes and on stderr: its change against the baseline is then not the
+profile's alone, or not known to be (without a baseline, its difference from the reference pass
+is not the profiles' alone). The passes not read again at their end share one warning.
 
 `TEST_PLATFORM` (`config/options.env`; `auto`, `kubernetes` or `openshift`) sets the platform
 instead of asking each cluster, for the probe suite's chart overlay and, with
@@ -173,9 +199,12 @@ instead of asking each cluster, for the probe suite's chart overlay and, with
 `TUNING_GITOPS_NAMESPACE` overrides that namespace. The platform record still asks each member
 what it serves, and warns when that is not `TEST_PLATFORM`. 001 and 003 also read every member
 before they change anything (a profile's objects or marker), and 003 reads every member's record
-twice per pass (before and after its probe): each read is bounded by
-`PLATFORM_READ_TIMEOUT` (20 s by default) and `PLATFORM_READ_PARALLEL` members (20) are read at
-once, so raise the first for slow API servers and lower the second on a small runner.
+twice per pass (before and after its probe): each read is bounded by `PLATFORM_READ_TIMEOUT`
+(20 s by default) and `PLATFORM_READ_PARALLEL` members (20) are read at once, so raise the first
+for slow API servers and lower the second on a small runner. The read after the probe also reads
+the levers, each member's istiod limits and Kubernetes version, each bounded by 5 s as the
+probes' own reads are and asked once more when it comes back unknown; what still does not answer
+is not compared at the pass's end.
 
 ## One profile by hand
 
@@ -187,7 +216,8 @@ once, so raise the first for slow API servers and lower the second on a small ru
 ./tests/tuning/006-gitops-pause.sh --resume
 ```
 
-`006-gitops-pause.sh --gitops-context <hub-ctx> --status` lists the sync windows.
+`006-gitops-pause.sh --gitops-context <hub-ctx> --status` lists the sync windows (`none` when
+there are none).
 
 ## How apply, revert and the Argo CD pause work
 
@@ -243,19 +273,20 @@ shape for other Applications than the ApplicationSet owns now, all named as it n
 (`*-ossm`: a pause from before a member was added or removed), naming that window's Applications
 and its index; nothing removes it by value. A window of that shape for any other Application is
 another team's, and is left alone. Remove the stale one by hand:
-`./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --status` prints the Applications
-and each AppProject's sync windows with their index (`<i>` below) and marks those of this
-tool's shape for `*-ossm` Applications:
+`./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --status` prints the Applications,
+then each AppProject's sync windows with their index (`<i>` below): the pause of those
+Applications (which `--resume` or `--clear` removes) on one line, a stale pause with the window
+whole on the line under it (`<window>` below), and any other window as it is:
 
 ```bash
 kubectl --context <hub-ctx> -n <argocd-namespace> patch appprojects.argoproj.io <project> --type json \
-  -p '[{"op":"test","path":"/spec/syncWindows/<i>/kind","value":"deny"},
-       {"op":"test","path":"/spec/syncWindows/<i>/schedule","value":"* * * * *"},
+  -p '[{"op":"test","path":"/spec/syncWindows/<i>","value":<window>},
        {"op":"remove","path":"/spec/syncWindows/<i>"}]'
 ```
 
-The `test` steps make the patch change nothing when that index holds another window (one added
-or removed since `--status`). Then run the cleanup again.
+The `test` step makes the patch change nothing unless that index still holds that very window
+(not one added or removed since `--status`, nor another team's of the same shape). Then run the
+cleanup again.
 
 ## Adding a profile
 

@@ -292,6 +292,9 @@ _probe_istiod_pod() {
 # DestinationRule), two (two profiles' objects, in reverse order), marker (profile 02's marker
 # ConfigMap, all an env-only profile leaves), unserved (a kind the member does not serve) or
 # timeout (no answer within the request timeout); with PROBE_TUNING_ON, on that member only.
+# PROBE_FLAKY: the reads that get no answer the first time on each member, then answer (a read
+# that timed out once): kube (the version), sidecar (the root Sidecar's) and istiod (istiod's
+# Deployment), comma-separated.
 _probe_kubectl() {
 	local a ctx="" on img pod pods tobj
 	printf '%s\n' "$*" >> "$CALLS"
@@ -375,6 +378,10 @@ JSON
 		echo ']}'
 		;;
 	*" -n istio-system get sidecar.networking.istio.io default -o name "* | *" -n istio-system get telemetry.telemetry.istio.io "*" -o name "*)
+		if [[ " $* " == *" sidecar.networking.istio.io "* ]] && _probe_flaky sidecar "$ctx"; then
+			echo 'Unable to connect to the server: net/http: request canceled (Client.Timeout exceeded while awaiting headers)' >&2
+			return 1
+		fi
 		# The kind and the name after "get".
 		a="$*"
 		a="${a#*" get "}"
@@ -408,9 +415,11 @@ JSON
 		;;
 	*" version --output=json "*)
 		[[ "${PROBE_KUBE:-up}" != down ]] || return 1
+		! _probe_flaky kube "$ctx" || return 1
 		printf '{"serverVersion":{"gitVersion":"%s"}}\n' "${PROBE_KUBE_VERSION:-v1.33.1}"
 		;;
 	*" -n istio-system get deploy istiod "*)
+		! _probe_flaky istiod "$ctx" || return 1
 		local dep="${PROBE_ISTIOD_DEPLOY:-}" lcpu="${PROBE_ISTIOD_CPU_LIMIT:-2}" lmem="${PROBE_ISTIOD_MEM_LIMIT:-4Gi}"
 		if [[ -n "${PROBE_ISTIOD_ON:-}" && "$ctx" == "$PROBE_ISTIOD_ON" ]]; then
 			dep="${PROBE_ISTIOD_ON_DEPLOY:-$dep}" lcpu="${PROBE_ISTIOD_ON_CPU_LIMIT:-$lcpu}" lmem="${PROBE_ISTIOD_ON_MEM_LIMIT:-$lmem}"
@@ -449,6 +458,13 @@ JSON
 		;;
 	*) return 1 ;;
 	esac
+}
+
+# _probe_flaky <read> <ctx>: whether this read gets no answer: PROBE_FLAKY lists it, and it is the
+# first such read on the member.
+_probe_flaky() {
+	[[ ",${PROBE_FLAKY:-}," == *",${1},"* ]] || return 1
+	mkdir "${BATS_TEST_TMPDIR}/flaky-${1}-${2//\//_}" 2>/dev/null
 }
 
 # probe_setup: a fresh record over _probe_kubectl; warnings go to $WARN.
@@ -987,6 +1003,26 @@ env_list() {
 	assert_failure
 	assert_output --partial "TEST_PLATFORM must be auto, kubernetes or openshift (got: okd)"
 	[ ! -s "$CALLS" ]
+}
+
+@test "platform_probe (M9-S2): a member listed twice, or two members the record writes under one name, dies before any read, in a dry-run too" {
+	probe_setup
+	run platform_probe member-a,member-b,member-a
+	assert_failure
+	assert_output --partial "member-a is listed twice among the mesh members (member-a,member-b,member-a): list each member once (--contexts or SETUP_CONTEXTS; a probe's --source is not one of its --remote-contexts)"
+	[ ! -s "$CALLS" ]
+	DRY_RUN=1 run platform_probe member-a,member-a
+	assert_failure
+	assert_output --partial "member-a is listed twice among the mesh members"
+	# lab~a is lab_a in the record (its safe characters only): two members' values under one name.
+	run platform_probe "lab~a,lab_a"
+	assert_failure
+	assert_output --partial "lab~a and lab_a would be recorded under one name, lab_a (the record writes a member's name with A-Z, a-z, 0-9 and _.:/@+- only): rename one of the two contexts"
+	[ ! -s "$CALLS" ]
+	# Each member once: read as before.
+	run platform_probe member-a,member-b
+	assert_success
+	grep -q -- '--context=member-b' "$CALLS"
 }
 
 @test "platform_probe: an inherited record is reused and only new members are read; save and load keep it" {
@@ -1762,6 +1798,17 @@ resume_run() {
 # everything.
 drift_value_lines() { grep -v '^# The platform record read again at the end of this \|^# DRIFT_READ_AT=' "$1" || true; }
 
+# drift_unsourced <helper,...> <arg>...: platform_drift_check <arg>... in a subshell where those
+# helpers are not defined (a script that did not source their library).
+drift_unsourced() (
+	local f
+	local -a fs=()
+	IFS=',' read -r -a fs <<<"$1"
+	shift
+	for f in "${fs[@]}"; do unset -f "$f"; done
+	platform_drift_check "$@"
+)
+
 @test "platform_drift_check (H2, H8): a build that changed during the sweep warns with its cause and goes to the marker; a state-only change does not" {
 	probe_setup
 	platform_probe member-a,member-b 2>/dev/null
@@ -1996,7 +2043,7 @@ drift_value_lines() { grep -v '^# The platform record read again at the end of t
 	assert_output --partial "istiod's limits per replica on member-b (CPU 2000m, memory 2048Mi) differ from those the TSVs recorded on their source member (CPU 2000m, memory 4096Mi) at the end of the sweep in sweep (platform-drift.txt), but the report divides the window-peak CPU and RSS % of every member's rows (and the SLA verdict on them) by the recorded ones, so those members' rows read against another limit; the kubectl top % use each row's own; the usual cause is a per-member change"
 	# Where member names may not go (the scale envelope): how many.
 	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
-	assert_output --partial "istiod's limits per replica on 1 member(s) (CPU 2000m, memory 2048Mi) differ from those"
+	assert_output --partial "istiod's limits per replica on 1 member (CPU 2000m, memory 2048Mi) differ from those"
 	refute_output --partial member-b
 	# M6-N1: a second drift check (a resumed sweep's) adds member-c; both checks' members are named, each once.
 	echo '# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=member-c=4000/4096,member-b=2000/2048' >>"${dir}/platform-drift.txt"
@@ -2010,15 +2057,88 @@ drift_value_lines() { grep -v '^# The platform record read again at the end of t
 	refute_output --partial "istiod's limits"
 }
 
+@test "platform_drift_check (SC9-S3, C9-S2): a read it cannot make (its helper not sourced) warns, and what it would have compared goes to the file as not compared at the end" {
+	local dir="${BATS_TEST_TMPDIR}/sweep" lim
+	mkdir -p "$dir"
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
+	{
+		platform_preamble_lines member-a,member-b
+		tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
+		echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
+		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		printf 'timestamp\tcontext\n'
+	} > "${dir}/controlplane-r.tsv"
+	run --separate-stderr drift_unsourced tuning_baseline_state,cap_istiod_limits,probe_kube_versions "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: platform_drift_check needs tuning_baseline_state (source tests/lib/preamble.sh) to read the tuning levers again; not checked, so the reports cannot tell whether they changed during the sweep"* ]]
+	[[ "$stderr" == *"warning: platform_drift_check needs cap_istiod_limits (source tests/lib/capacity.sh) and a temp dir to read istiod's limits again; not checked"* ]]
+	[[ "$stderr" == *"warning: platform_drift_check needs probe_kube_versions (source tests/lib/preamble.sh) to read the Kubernetes versions again; not checked"* ]]
+	# The source member's levers, hosts, limits and version; the other member's limits and version.
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# NOT_COMPARED_AT_END=member-a=TUNING_BASELINE;SIDECAR_EGRESS_HOSTS;ISTIOD_CPU_LIMIT_M;ISTIOD_MEM_LIMIT_MI;KUBE_VERSIONS,member-b=ISTIOD_LIMITS_DIFFER_BY_CONTEXT;KUBE_VERSIONS" ]
+	# What tuning 004 and the sweep's reports make of it: the other member's limits are not known,
+	# and the body says what was not compared, counted out of the members the TSVs record (U9-N3)
+	# where member names may not go.
+	run platform_lever_values "${dir}/controlplane-r.tsv"
+	assert_line "ISTIOD_CPU_LIMIT_M_BY_CONTEXT=member-a=2000,member-b=unknown"
+	_pl_no_members=1 run platform_drift_unread "${dir}/controlplane-r.tsv"
+	assert_line $'KUBE_VERSIONS\t2 of 2 members'
+	assert_line $'ISTIOD_LIMITS_DIFFER_BY_CONTEXT\t1 of 2 members'
+	run --separate-stderr platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "the read again at the end of the sweep in sweep (platform-drift.txt) could not compare TUNING_BASELINE on member-a; SIDECAR_EGRESS_HOSTS on member-a; ISTIOD_CPU_LIMIT_M on member-a; ISTIOD_MEM_LIMIT_MI on member-a; KUBE_VERSIONS on member-a, member-b (not read at its start or end, or read with a digest @unknown: no pod had started); istiod's limits on member-b (not read at its end), so whether those changed during the sweep is not known"
+}
+
+@test "platform_drift_check (SC9-S2): an end read that gets no answer (a timeout) is made once more: the levers, each member's istiod limits and Kubernetes version" {
+	local dir="${BATS_TEST_TMPDIR}/sweep" lim
+	mkdir -p "$dir"
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
+	{
+		platform_preamble_lines member-a,member-b
+		tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
+		echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
+		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		printf 'timestamp\tcontext\n'
+	} > "${dir}/controlplane-r.tsv"
+	: > "$CALLS"
+	PROBE_FLAKY=kube,sidecar,istiod run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	# Each of those reads twice: the first got no answer.
+	[ "$(grep -c -- '--context=member-a .*get sidecar.networking.istio.io default -o name' "$CALLS")" -eq 2 ]
+	[ "$(grep -c -- '--context=member-a .*get deploy istiod' "$CALLS")" -eq 2 ]
+	[ "$(grep -c -- '--context=member-b .*get deploy istiod' "$CALLS")" -eq 2 ]
+	[ "$(grep -c -- '--context=member-a .*version --output=json' "$CALLS")" -eq 2 ]
+	[ "$(grep -c -- '--context=member-b .*version --output=json' "$CALLS")" -eq 2 ]
+	# No answer the second time either: not compared, as before; once more only, then on.
+	rm "${dir}/platform-drift.txt"
+	: > "$CALLS"
+	PROBE_KUBE=down run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a, member-b: KUBE_VERSIONS not read at the sweep's start or end, so whether it changed during the sweep is not known"* ]]
+	[ "$(grep -c -- '--context=member-b .*version --output=json' "$CALLS")" -eq 2 ]
+	[ "$(grep -c -- '--context=member-a .*get deploy istiod' "$CALLS")" -eq 1 ]
+}
+
 @test "_platform_limits_differ (R6): members grouped by their limits, five names a group and five groups at most" {
 	local v="" i
 	for i in $(seq 1 7); do v+="${v:+,}m${i}=4000/2048"; done
 	v+=",x1=1000/512"
 	for i in $(seq 2 6); do v+=",y${i}=${i}000/${i}"; done
 	run _platform_limits_differ "$v" 2000 4096 "recorded on src"
-	assert_output "istiod's limits per replica on m1, m2, m3, m4, m5 and 2 more (CPU 4000m, memory 2048Mi); x1 (CPU 1000m, memory 512Mi); y2 (CPU 2000m, memory 2Mi); y3 (CPU 3000m, memory 3Mi); y4 (CPU 4000m, memory 4Mi); and 2 more member(s) under other limits differ from those recorded on src (CPU 2000m, memory 4096Mi)"
+	assert_output "istiod's limits per replica on m1, m2, m3, m4, m5 and 2 more (CPU 4000m, memory 2048Mi); x1 (CPU 1000m, memory 512Mi); y2 (CPU 2000m, memory 2Mi); y3 (CPU 3000m, memory 3Mi); y4 (CPU 4000m, memory 4Mi); and 2 more members under other limits differ from those recorded on src (CPU 2000m, memory 4096Mi)"
 	run _platform_limits_differ "a=unknown/2048" unknown 4096 "recorded on src"
 	assert_output "istiod's limits per replica on a (CPU unknown, memory 2048Mi) differ from those recorded on src (CPU unknown, memory 4096Mi)"
+	# U9-N3: one member more; without names (the scale envelope), how many a group has.
+	run _platform_limits_differ "a1=1000/1,a2=2000/2,a3=3000/3,a4=4000/4,a5=5000/5,a6=6000/6" 2000 4096 "recorded on src"
+	assert_output "istiod's limits per replica on a1 (CPU 1000m, memory 1Mi); a2 (CPU 2000m, memory 2Mi); a3 (CPU 3000m, memory 3Mi); a4 (CPU 4000m, memory 4Mi); a5 (CPU 5000m, memory 5Mi); and 1 more member under other limits differ from those recorded on src (CPU 2000m, memory 4096Mi)"
+	_pl_no_members=1 run _platform_limits_differ "a=4000/2048,b=4000/2048,c=1000/512" 2000 4096 "recorded on src"
+	assert_output "istiod's limits per replica on 2 members (CPU 4000m, memory 2048Mi); 1 member (CPU 1000m, memory 512Mi) differ from those recorded on src (CPU 2000m, memory 4096Mi)"
 }
 
 @test "platform_report_values (H2, H13): a sweep's drift marker makes its keys mixed; the body names the sweep's dir, never a path" {
@@ -2109,6 +2229,18 @@ drift_value_lines() { grep -v '^# The platform record read again at the end of t
 	assert_line --index 1 $'KUBE_VERSIONS\tKubernetes versions\tv1.33.1 to v1.33.2 on ctx-b'
 	assert_line --index 2 $'TUNING_BASELINE\ttuning levers\tsidecar from on to off'
 	assert_line --index 3 $'ISTIOD_CPU_LIMIT_M\tistiod CPU limits\t2000 at its start, 4000 at its end'
+	# SC9-S1: a file with only the read's time and what it could not compare holds no change, and
+	# nothing is merged for it (every key, over hundreds of members).
+	printf '%s\n' '# Values that changed during this pass' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' \
+		'# NOT_COMPARED_AT_END=ctx-b=KUBE_VERSIONS' > "${d}/platform-drift.txt"
+	platform_merge_by_context() { : > "${BATS_TEST_TMPDIR}/merged"; }
+	run --separate-stderr platform_drift_changes "${d}/a.tsv"
+	assert_success
+	[ -z "$output" ]
+	[ ! -e "${BATS_TEST_TMPDIR}/merged" ]
+	echo '# KUBE_VERSIONS=ctx-b=v1.33.2' >> "${d}/platform-drift.txt"
+	run --separate-stderr platform_drift_changes "${d}/a.tsv"
+	[ -e "${BATS_TEST_TMPDIR}/merged" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -2315,6 +2447,17 @@ drift_value_lines() { grep -v '^# The platform record read again at the end of t
 	assert_output "mixed:unknown, b=p:2, c not recorded (2 of 3 members; the other 1 match)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "mixed:unknown,a=p:1,b=p:2" "a=p:1,b=p:2"
 	assert_output "mixed:unknown, every member recorded matches"
+	# U9-S3: the one value only when no member or every member differs, each recorded on both
+	# sides; else the members that differ, so one that matches (by one of two values a reference
+	# member ran: R9-B1) or that a side does not record is not hidden behind it.
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:1,b=p:1" "a=p:1,b=p:1"
+	assert_output "p:1"
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=p:1,b=p:2"
+	assert_output "a=p:2 (1 of 2 members; the other 1 match)"
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=mixed:p:1;p:2,b=p:1"
+	assert_output "b=p:2 (1 of 2 members; the other 1 match)"
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=p:1,b=p:1,c=p:1"
+	assert_output "a=p:2, b=p:2, c not recorded (all 3 members)"
 	# A fleet: 500 members, 7 of them on another build, named five at most.
 	local ref="" v="" i
 	for ((i = 1; i <= 500; i++)); do
@@ -2380,6 +2523,46 @@ ISTIOD_MEM_LIMIT_MI_BY_CONTEXT=a=mixed:4096;unknown,b=unknown"
 	assert_line "TUNING_BASELINE=sidecar=mixed:on;off,discoverySelectors=off"
 	assert_line "SIDECAR_EGRESS_HOSTS=mixed:./* istio-system/*,none"
 	assert_line "ISTIOD_CPU_LIMIT_M_BY_CONTEXT=a=2000,b=unknown"
+}
+
+@test "platform_lever_values (I9-B1): istiod's replicas as each suite records them, per member under its record name; inputs that disagree or lack a member hold each, unknown for the one without" {
+	local dir="${BATS_TEST_TMPDIR}/pass"
+	mkdir -p "$dir"
+	# controlplane: every member's Deployment replicas (ISTIOD_REPLICAS_BY_CONTEXT), not their
+	# summary (ISTIOD_REPLICAS, min-max).
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=1-3" \
+		"# ISTIOD_REPLICAS_BY_CONTEXT=a=1,b=3" c1 1 >"${dir}/cp.tsv"
+	run platform_lever_values "${dir}/cp.tsv"
+	assert_success
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=a=1,b=3"
+	# A controlplane TSV from before it read every member: the number, on the first.
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=3" \
+		"# ISTIOD_REPLICAS_BY_CONTEXT=unknown" c1 1 >"${dir}/cp-first.tsv"
+	run platform_lever_values "${dir}/cp-first.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=a=3"
+	# propagation: every member's Running pods by its context's name, which the record writes with
+	# safe characters only (lab~a is lab_a there).
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=lab_a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=lab~a=2,b=1" c1 1 >"${dir}/prop.tsv"
+	run platform_lever_values "${dir}/prop.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=lab_a=2,b=1"
+	# churn and churn-dataplane: the source member's (the record's first).
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=2" c1 1 >"${dir}/churn.tsv"
+	run platform_lever_values "${dir}/churn.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=a=2"
+	# Inputs that disagree hold both; a member one of them does not record holds unknown too.
+	run platform_lever_values "${dir}/cp.tsv" "${dir}/churn.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=a=mixed:1;2,b=mixed:3;unknown"
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" c1 1 >"${dir}/none.tsv"
+	run platform_lever_values "${dir}/cp.tsv" "${dir}/none.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=a=mixed:1;unknown,b=mixed:3;unknown"
+	run platform_lever_values "${dir}/none.tsv"
+	assert_output ""
+	# An input from before the record (no member to name it by): its value without one.
+	printf '%s\n' "# ISTIOD_REPLICAS=3" c1 1 >"${dir}/old.tsv"
+	run platform_lever_values "${dir}/old.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=3"
+	run platform_lever_values "${dir}/old.tsv" "${dir}/cp.tsv"
+	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=mixed:3;unknown,a=mixed:1;unknown,b=mixed:3;unknown"
 }
 
 @test "platform_summary and platform_short_digests: no member names, counts when members differ, 12 hex digits" {

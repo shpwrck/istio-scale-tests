@@ -218,20 +218,19 @@ every member's window-peak CPU and RSS % by those): a value that changed goes to
 the sweep dir and the value at the start and at the end (the record's keys read `mixed:`, as does
 `KUBE_VERSIONS` in churn's report, which merges it); so does a value the read could not compare
 (not read at either end, or a digest `@unknown`), which the reports call not known. Members that
-changed the same way share one
-warning, which names five of them and counts the rest. A controlplane `--resume` stops on a
-definite difference from what the sweep's TSV records: a member's platform, mesh operator build
-(not its state), istiod or gateway proxy build, istiod env digest, tuning profile objects, node
-provider or Kubernetes version, or the source member's (the TSV's first) tuning baseline, Sidecar
-egress hosts or istiod CPU and memory limits; whatever it cannot read only warns.
-It also only warns when node allocatable, istiod's requests, a member's istiod replica count or the
-network topology differ (an autoscaler or an HPA moves some of them);
+changed the same way share one warning, which names five of them and counts the rest. A controlplane
+`--resume` stops on a definite difference from what the sweep's TSV records: a member's platform,
+mesh operator build (not its state), istiod or gateway proxy build, istiod env digest, tuning
+profile objects, node provider or Kubernetes version, or the source member's (the TSV's first)
+tuning baseline, Sidecar egress hosts or istiod CPU and memory limits; whatever it cannot read only
+warns. It also only warns when node allocatable, istiod's requests, a member's istiod replica count
+or the network topology differ (an autoscaler or an HPA moves some of them);
 [tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is
 bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
 nodes), and `PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile
-objects and istiod's limits (20; lower it when the machine running the suite runs short of memory
-or processes on a large mesh). The Kubernetes versions and istiod's replicas are read on every
-member at once.
+objects and istiod's limits (20; lower it when the machine running the suite runs short of memory or
+processes on a large mesh). The Kubernetes versions and istiod's replicas are read on every member
+at once.
 
 ### Run config (`--config FILE`)
 

@@ -40,9 +40,11 @@ ${APPSET} ApplicationSet, using a deny sync window on their AppProject.
 Options:
   --pause                Add the deny window; record it in --state-file.
   --resume               Remove the window recorded in --state-file.
-  --status               List the Applications and each AppProject's sync windows, with
-                         each window's index in its list, marking those of this tool's
-                         shape for Applications named *-${APP_SUFFIX}.
+  --status               List the Applications and each AppProject's sync windows with
+                         each one's index in its list: this tool's pause of those
+                         Applications, a stale one of its shape for other Applications
+                         named *-${APP_SUFFIX} (printed whole, for its removal by hand),
+                         any other; "none" without windows.
   --clear                Remove the deny window this tool adds for the Applications the
                          ApplicationSet owns now, whether or not a pause record names it
                          (a run whose results, and so its record, are elsewhere or gone).
@@ -148,12 +150,15 @@ discover_apps() {
 case "$ACTION" in
 status)
 	discover_apps
+	apps_csv="$(IFS=,; echo "${APPS[*]}")"
+	# This tool's pause of these Applications (the same for the same Applications: tuning.py window_for).
+	python3 -I "$HELPER" window "$apps_csv" "$WORK/window.json"
 	echo "Applications: ${APPS[*]}"
 	for p in "${PROJECTS[@]}"; do
 		"${K[@]}" get appprojects.argoproj.io "$p" -o json >"$WORK/project.json" \
 			|| die "${GITOPS_CTX}: cannot read AppProject ${p}"
 		echo "AppProject ${p} sync windows (index: window, the index a JSON patch's /spec/syncWindows/<index> takes):"
-		python3 -I "$HELPER" windows "$WORK/project.json" "$APP_SUFFIX"
+		python3 -I "$HELPER" windows "$WORK/project.json" "$WORK/window.json" "$APP_SUFFIX"
 	done
 	if [[ -f "$STATE_FILE" ]]; then echo "Paused by this tool (state: ${STATE_FILE})"; fi
 	;;

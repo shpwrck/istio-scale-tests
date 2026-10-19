@@ -332,7 +332,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	! grep -q " delete configmaps tuning-profile-" "$STUB_LOG" || false
 }
 
-@test "005-cleanup (C8-B1, SC8-S1): a member listed twice is cleaned once, every marker restored newest first, with a note" {
+@test "005-cleanup (C8-B1, SC8-S1, C9-S1): a member listed twice is cleaned once, every marker restored newest first, with a note naming five at most" {
 	mk_marker 01-push-throttling 2026-10-19T09:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}' "${T}/m1.json"
 	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}' "${T}/m2.json"
 	mk_marker 03-gateway-cluster-filter 2026-10-19T11:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":null}}}}}' "${T}/m3.json"
@@ -365,6 +365,13 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	assert_output --partial "--- Leftover profile resources (label istio-scale-tests/tuning-profile) ---"
 	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.m01.json")" = '{"PILOT_PUSH_THROTTLE":"100"}' ]
 	[ "$(grep -c -- "--context=m01 delete destinationrules" "$STUB_LOG")" -eq 1 ]
+	# 500 members each listed twice: five named, then how many more (C9-S1, SC9-N1).
+	local ctxs
+	ctxs="$(seq -f 'member-%03g' 1 500 | paste -sd, -)"
+	run --separate-stderr "$CLEANUP" --contexts "${ctxs},${ctxs}" --results-dir "${T}/results" --dry-run
+	assert_success
+	[[ "$stderr" == *"note: member-001, member-002, member-003, member-004, member-005 and 495 more listed more than once in the contexts; each member is cleaned once"* ]]
+	awk 'length > 300 { bad = 1 } END { exit bad }' <<<"$stderr"
 }
 
 @test "ctx_keys_distinct (C8-S1, SC8-S2): a context listed twice, or two with one state file name, dies; 003 refuses either before its sweep, in --dry-run too" {
@@ -389,7 +396,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	! grep -q . "$STUB_LOG" || false
 }
 
-@test "005-cleanup (U6-B1, U7-S3, U8-S4): with a hub context it removes the deny window a pause adds, recorded or not, keeps every other window, and fails on one of its shape for other *-ossm Applications, naming its index" {
+@test "005-cleanup (U6-B1, U7-S3, U8-S4): with a hub context it removes the deny window a pause adds, recorded or not, keeps every other window, and fails on one of its shape for other *-ossm Applications, naming its index; --status prints that one whole and its own pause on one line" {
 	local win team
 	export TUNING_GITOPS_NAMESPACE=argocd
 	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{}' "${T}/m2.json"
@@ -447,13 +454,27 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	run grep '^project-patch ' "$STUB_LOG"
 	assert_output "project-patch hub {\"metadata\":{\"resourceVersion\":\"9\"},\"spec\":{\"syncWindows\":[${team},{\"kind\":\"deny\",\"schedule\":\"* * * * *\",\"duration\":\"1h\",\"applications\":[\"ctx-a-ossm\"],\"manualSync\":true}]}}"
 	# --status lists the windows the patch left with their index, and marks the stale one only:
-	# the other team's has the same shape but not *-ossm Applications.
+	# the other team's has the same shape but not *-ossm Applications. The stale one's window is
+	# whole on the line under it, as the hand removal's JSON patch tests it (U9-S5).
 	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --status
 	assert_success
 	assert_line "Applications: ctx-a-ossm ctx-b-ossm"
 	assert_line "AppProject default sync windows (index: window, the index a JSON patch's /spec/syncWindows/<index> takes):"
 	assert_line '  0: {"applications": ["other-app"], "duration": "1h", "kind": "deny", "manualSync": true, "schedule": "* * * * *"}'
-	assert_line '  1: {"applications": ["ctx-a-ossm"], "duration": "1h", "kind": "deny", "manualSync": true, "schedule": "* * * * *"} (this tool'"'"'s shape, for *-ossm Applications)'
+	assert_line "  1: a stale pause of this tool's, for other *-ossm Applications (ctx-a-ossm: from before a member was added or removed), which --clear does not remove; remove it by hand (tests/tuning/README.md, \"After a killed run\"), its JSON patch testing this window:"
+	assert_line '     {"applications": ["ctx-a-ossm"], "duration": "1h", "kind": "deny", "manualSync": true, "schedule": "* * * * *"}'
+	[ "$(sed -n 's/^     //p' <<<"$output" | jq -cS .)" = "$(jq -cS '.spec.syncWindows[1]' "${STUB_DIR}/project.json")" ]
+	# This tool's own pause of the Applications listed: one line, without them (SC9-N2).
+	jq -n --argjson w "$win" '{metadata: {name: "default", resourceVersion: "10"}, spec: {syncWindows: [$w]}}' >"${STUB_DIR}/project.json"
+	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --status
+	assert_success
+	assert_line "  0: this tool's pause of the Applications above (--resume or --clear removes it)"
+	refute_output --partial '"applications"'
+	# No window at all: none (U9-N2).
+	jq -n '{metadata: {name: "default", resourceVersion: "11"}, spec: {}}' >"${STUB_DIR}/project.json"
+	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --status
+	assert_success
+	assert_line "  none"
 	# The README section that warning names exists.
 	grep -qx '## After a killed run' "${ROOT}/tests/tuning/README.md"
 	# --dry-run names the call and touches nothing.

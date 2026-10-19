@@ -1,8 +1,10 @@
 {{- if .Values.tuningBaseline.sidecar.enabled }}
 {{- /*
-  The root-namespace Sidecar (no workloadSelector) limits every proxy's
-  egress to egressHosts. The gateways are also injected proxies, so each gets a
-  workloadSelector Sidecar with all-namespace egress, which takes precedence.
+  The root-namespace Sidecar (no workloadSelector) limits every sidecar proxy's
+  egress to egressHosts. Istio applies no Sidecar to a gateway (a router proxy:
+  both gateway charts run `proxy router`), so the gateways keep all-namespace
+  egress anyway; the two workloadSelector Sidecars below change nothing for them
+  and only record that they need it.
 */}}
 apiVersion: networking.istio.io/v1
 kind: Sidecar
@@ -22,7 +24,7 @@ spec:
         - {{ $h | quote }}
         {{- end }}
 ---
-{{- /* Ingress gateway: full egress (it routes mesh-verify traffic across clusters). */}}
+{{- /* Ingress gateway: full egress (it routes mesh-verify traffic across clusters; a router proxy has it anyway). */}}
 apiVersion: networking.istio.io/v1
 kind: Sidecar
 metadata:
@@ -42,7 +44,7 @@ spec:
     - hosts:
         - "*/*"
 ---
-{{- /* East-west gateway: full egress (AUTO_PASSTHROUGH does not need it; kept so a future route is not narrowed). */}}
+{{- /* East-west gateway: full egress (AUTO_PASSTHROUGH does not need it; a router proxy has it anyway). */}}
 apiVersion: networking.istio.io/v1
 kind: Sidecar
 metadata:

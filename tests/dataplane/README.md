@@ -350,27 +350,24 @@ platform and the mesh builds the run measured, read before the first window (a s
 once and hands it to its combos in `platform-record.txt` in the sweep dir, and reads it again
 after its last combo: a build, istiod setting, tuning lever, tuning profile object or Kubernetes
 version that changed in between is written to `platform-drift.txt` there, as is what that read
-could not compare). An image carries
-the digest its pods run (`@unknown` when none has started: not read, never another build);
-`none` means no such pod. `004` prints it in every format, with a warning in the report itself
-(the top-level `warnings` array in json, empty without one) when its inputs differ, a value
-could not be read in some of them, the sweep's record changed or a tuning profile's objects were
-in place (an operator that differs only
-in its state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a
-member's node provider could not be read, every format also warns that the cross-cluster path
-runs (or may run) through cloud-provider-kind's userspace Envoy (the east-west gateway's
-LoadBalancer) on the host the kind clusters share, so remote latency and the remote-minus-local
-delta are not a cloud load balancer's; k3d (`k3s://`) and minikube clusters that share one host
-are not detected. A file without the record predates it (the suite supported only OpenShift with
-OSSM then); its values read `unknown`. `SERVER_REPLICAS` records the
-fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
-(`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
-thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,
-`REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the
-reach check that decides which
-remotes are `UNREACHABLE`. Next to it, `reach-<RUN_ID>.tsv` holds the reach
-check ([Remote reachability](#remote-reachability)) and `latency-<RUN_ID>.md` a per-run
-summary with its Remote coverage section.
+could not compare). An image carries the digest its pods run (`@unknown` when none has started: not
+read, never another build); `none` means no such pod. `004` prints it in every format, with a
+warning in the report itself (the top-level `warnings` array in json, empty without one) when its
+inputs differ, a value could not be read in some of them, the sweep's record changed or a tuning
+profile's objects were in place (an operator that differs only in its state is not a difference). On
+kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every
+format also warns that the cross-cluster path runs (or may run) through cloud-provider-kind's
+userspace Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so
+remote latency and the remote-minus-local delta are not a cloud load balancer's; k3d (`k3s://`) and
+minikube clusters that share one host are not detected. A file without the record predates it (the
+suite supported only OpenShift with OSSM then); its values read `unknown`. `SERVER_REPLICAS` records
+the fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
+(`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the thresholds
+behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,
+`REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the reach check
+that decides which remotes are `UNREACHABLE`. Next to it, `reach-<RUN_ID>.tsv` holds the reach check
+([Remote reachability](#remote-reachability)) and `latency-<RUN_ID>.md` a per-run summary with its
+Remote coverage section.
 
 ```
 run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections

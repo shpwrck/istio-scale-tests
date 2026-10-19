@@ -61,8 +61,8 @@ tuningBaseline:
       - matchLabels:
           kubernetes.io/metadata.name: istio-system
 
-  # A mesh-wide Sidecar in istio-system limits each proxy's egress.
-  # The gateways get their own full-egress Sidecars (templates/tuning-sidecar.yaml).
+  # A mesh-wide Sidecar in istio-system limits each sidecar proxy's egress. The gateways
+  # (router proxies) take no Sidecar and keep full egress (templates/tuning-sidecar.yaml).
   sidecar:
     enabled: true
     # Namespace parts are exact matches, not globs. Every mesh namespace needs its own

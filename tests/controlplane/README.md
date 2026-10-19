@@ -225,27 +225,25 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   sweep dir, and reads it again after its last combo: a build, istiod setting or limit, tuning
   lever, tuning profile object or Kubernetes version that changed in between is written to
   `platform-drift.txt` there, as is what that read could not compare; `002 --phase final` reuses
-  the baseline phase's). An
-  image carries the digest its pods run; `@unknown` when none has started (an operator scaled to
-  0, a Pending replica), which every comparison takes as not read (a warning), never as another
-  build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT` is a 12-hex digest of
-  istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
-  `spec.values.pilot.env` or a hand edit changes it. `TUNING_OBJECTS_BY_CONTEXT` names the objects
-  a tuning profile created and its marker ConfigMap (labelled `istio-scale-tests/tuning-profile`),
-  `none` outside a tuning run. The growth mode's `ns-lifecycle-<RUN_ID>.tsv`
-  and `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates
-  the lifecycle file). `004` prints it in every format, with a warning in the report itself
-  (members counted, not named; `metadata.data_warnings` in JSON) when its inputs differ, a value
-  could not be read in some of them, the sweep's record changed or a tuning profile's objects were
-  in place (an operator that differs only
-  in its state is not a difference). On kind nodes it also warns that the capacity figures
-  overstate the headroom, and the SLA verdict leaves the node figures out: it is `CAUTION` with
-  that reason even when istiod's figures pass. A member whose node provider was not read does the
-  same (`node provider not read on N member(s)`): it may be on kind. k3d (`k3s://`) and minikube
-  clusters that share one host are not detected, so their node figures are the host's too. The
-  scale envelope prints every data warning above its tables and a `Platform / mesh build` row. A
-  file without the record predates it (the suite supported only OpenShift with OSSM then); its
-  values read `unknown`.
+  the baseline phase's). An image carries the digest its pods run; `@unknown` when none has started
+  (an operator scaled to 0, a Pending replica), which every comparison takes as not read (a
+  warning), never as another build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT`
+  is a 12-hex digest of istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
+  `spec.values.pilot.env` or a hand edit changes it. `TUNING_OBJECTS_BY_CONTEXT` names the objects a
+  tuning profile created and its marker ConfigMap (labelled `istio-scale-tests/tuning-profile`),
+  `none` outside a tuning run. The growth mode's `ns-lifecycle-<RUN_ID>.tsv` and
+  `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates the
+  lifecycle file). `004` prints it in every format, with a warning in the report itself (members
+  counted, not named; `metadata.data_warnings` in JSON) when its inputs differ, a value could not be
+  read in some of them, the sweep's record changed or a tuning profile's objects were in place (an
+  operator that differs only in its state is not a difference). On kind nodes it also warns that the
+  capacity figures overstate the headroom, and the SLA verdict leaves the node figures out: it is
+  `CAUTION` with that reason even when istiod's figures pass. A member whose node provider was not
+  read does the same (`node provider not read on N member(s)`): it may be on kind. k3d (`k3s://`)
+  and minikube clusters that share one host are not detected, so their node figures are the host's
+  too. The scale envelope prints every data warning above its tables and a `Platform / mesh build`
+  row. A file without the record predates it (the suite supported only OpenShift with OSSM then);
+  its values read `unknown`.
 - **Tuning levers:** `TUNING_BASELINE` reads the four levers live on the first member:
   `sidecar` (the root Sidecar `default` in `istio-system`), `discoverySelectors` (on the Istio CR
   `default`), `telemetryFiltering` and `accessLogFiltering` (the Telemetry resources

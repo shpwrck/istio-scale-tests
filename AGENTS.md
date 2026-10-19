@@ -93,20 +93,20 @@ which wins over the upstream docs there when they disagree.
   first pass with data's, member by member in its `Platform record` row and notes, over
   `PLATFORM_PASS_KEYS` (every record key but `ISTIOD_ENV_BY_CONTEXT` and
   `TUNING_OBJECTS_BY_CONTEXT`, which a profile changes and its `istiod env` and `Tuning objects`
-  rows show per pass), each member's `KUBE_VERSIONS` and what `platform_lever_values` gives (the
-  tuning levers, the root Sidecar's egress hosts and istiod's limits; one the pass's profile sets
-  is a note), with what `platform_drift_changes` and `platform_drift_unread` find changed or not
-  compared during each pass); a suite's sweep calls
-  `platform_probe_share` right after its `platform_probe` (controlplane: after its `--resume`
-  check), then `platform_start_warnings`, and `platform_drift_check` after its last step, before its
-  reports (tuning 003 refuses to start on a profile's objects with `platform_tuning_objects_refuse`
-  instead of warning, and since a profile changes the record, each pass calls
-  `platform_probe_reset`, `platform_probe` and `platform_probe_share` before its probes and
-  `platform_drift_check` after them; 004 compares the passes); every script that sources
-  `platform.sh` calls `platform_validate` with its argument checks (`tests/lib/platform.sh`;
-  `tests/lib/test/config-suites.bats` and `platform.bats` check the pairing). `TEST_PLATFORM`,
-  `PLATFORM_READ_TIMEOUT` and `PLATFORM_READ_PARALLEL` are keys of every suite
-  (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
+  rows show per pass, plus each member's `KUBE_VERSIONS`) and what `platform_lever_values` gives
+  (the tuning levers, the root Sidecar's egress hosts, istiod's limits and replica counts; one the
+  pass's profile sets is a note, and one it sets that a member did not run warns), with what
+  `platform_drift_changes` and `platform_drift_unread` find changed or not compared during each
+  pass); a suite's sweep calls `platform_probe_share` right after its `platform_probe`
+  (controlplane: after its `--resume` check), then `platform_start_warnings`, and
+  `platform_drift_check` after its last step, before its reports (tuning 003 refuses to start on a
+  profile's objects with `platform_tuning_objects_refuse` instead of warning, and since a profile
+  changes the record, each pass calls `platform_probe_reset`, `platform_probe` and
+  `platform_probe_share` before its probes and `platform_drift_check` after them; 004 compares the
+  passes); every script that sources `platform.sh` calls `platform_validate` with its argument
+  checks (`tests/lib/platform.sh`; `tests/lib/test/config-suites.bats` and `platform.bats` check the
+  pairing). `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and `PLATFORM_READ_PARALLEL` are keys of every
+  suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
 
 ## Repository map
 

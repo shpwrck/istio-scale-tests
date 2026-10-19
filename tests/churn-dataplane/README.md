@@ -199,20 +199,18 @@ baseline window (a sweep reads it once for all its combos and hands it to them i
 `platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
 setting, tuning lever, tuning profile object or Kubernetes version that changed in between is
 written to `platform-drift.txt` there, as is what that read could not compare). An image carries
-the digest its pods run (`@unknown`
-when none has started: not read, never another build); `none` means no such pod. The
-sweep's reach file records every member the sweep covers. `005` prints the record in every
-format, with a warning in the report itself (the top-level `warnings` array in json, empty
-without one) when its inputs differ, a value could not be read in some of them, the sweep's
+the digest its pods run (`@unknown` when none has started: not read, never another build); `none`
+means no such pod. The sweep's reach file records every member the sweep covers. `005` prints the
+record in every format, with a warning in the report itself (the top-level `warnings` array in json,
+empty without one) when its inputs differ, a value could not be read in some of them, the sweep's
 record changed or a tuning profile's objects were in place (an operator that differs only in its
-state is not a difference). On kind nodes
-(`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every format
-also warns that the cross-cluster path runs (or may run) through cloud-provider-kind's userspace
-Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so at mesh
-sizes above 1 latency under churn is not a cloud load balancer's; k3d (`k3s://`) and minikube
-clusters that share one host are not detected. Sweeps recorded before the record have none of
-these lines (the suite supported
-only OpenShift with OSSM then), and the report reads their values as `unknown`.
+state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node
+provider could not be read, every format also warns that the cross-cluster path runs (or may run)
+through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the host the
+kind clusters share, so at mesh sizes above 1 latency under churn is not a cloud load balancer's;
+k3d (`k3s://`) and minikube clusters that share one host are not detected. Sweeps recorded before
+the record have none of these lines (the suite supported only OpenShift with OSSM then), and the
+report reads their values as `unknown`.
 
 ## Run config (`--config FILE`)
 

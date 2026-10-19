@@ -94,14 +94,13 @@ first churn event (a sweep reads it once for all its combos and hands it to them
 `platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
 setting, tuning lever, tuning profile object or Kubernetes version that changed in between is
 written to `platform-drift.txt` there, as is what that read could not compare). An image carries
-the digest its pods run (`@unknown`
-when none has started: not read, never another build); `none` means no such pod.
-`004` prints them in every format (text, csv, md, charts; it has no json), per member as
-`<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ (`KUBE_VERSIONS`:
-different Kubernetes versions), a value could not be read in some of them, the sweep's record
-changed or a tuning profile's objects were in place; an operator that differs only in its state
-(`Available`, `Unavailable`) is not mixed. A file without them predates the record (the suite
-supported only OpenShift with OSSM then); its values read `unknown`.
+the digest its pods run (`@unknown` when none has started: not read, never another build); `none`
+means no such pod. `004` prints them in every format (text, csv, md, charts; it has no json), per
+member as `<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ
+(`KUBE_VERSIONS`: different Kubernetes versions), a value could not be read in some of them, the
+sweep's record changed or a tuning profile's objects were in place; an operator that differs only in
+its state (`Available`, `Unavailable`) is not mixed. A file without them predates the record (the
+suite supported only OpenShift with OSSM then); its values read `unknown`.
 
 Every source or remote istiod status other than `0` also saves the restart evidence to
 `istiod-diag-<RUN_ID>/` next to the TSV, tag `iter<N>`, after the row is written; a failed

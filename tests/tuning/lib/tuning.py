@@ -23,7 +23,7 @@ Profile commands need PyYAML; the others use the standard library only.
                                   revert patch to OUTDIR (patch-file "-": none to restore from)
   apps APPS_JSON APPSET SUFFIX    print "name project" for Argo CD Applications owned by
                                   APPSET (falls back to names ending in -SUFFIX)
-  window APPS_CSV OUT_WINDOW       write the deny sync window this tool adds for APPS (the
+  window APPS_CSV OUT_WINDOW      write the deny sync window this tool adds for APPS (the
                                   same for the same APPS: found without a pause record)
   window-add PROJECT_JSON APPS_CSV OUT_WINDOW
                                   print a merge patch that adds a deny sync window for
@@ -35,8 +35,13 @@ Profile commands need PyYAML; the others use the standard library only.
                                   print "index names" for each other window of this tool's
                                   shape whose Applications are all named *-SUFFIX (the
                                   ApplicationSet's): a pause for another set of them
-  windows PROJECT_JSON SUFFIX     print each sync window, "index: window", marking those of
-                                  this tool's shape for Applications all named *-SUFFIX
+  windows PROJECT_JSON WINDOW_JSON SUFFIX
+                                  print each sync window with its index: WINDOW (this tool's
+                                  pause of the Applications listed above it) without them, a
+                                  stale pause (this tool's shape for other Applications all
+                                  named *-SUFFIX) with the window whole on the line under it
+                                  (a hand removal's JSON patch tests it), any other as it is;
+                                  "none" without windows
   state-add STATE CTX NS PROJECT WINDOW_JSON
                                   record a paused AppProject window in the STATE file
   state-get STATE context|namespace|projects|window:PROJECT [OUT]
@@ -399,10 +404,22 @@ def cmd_windows_like(project_file, window_file, suffix):
             print(i, names(sorted(w["applications"])))
 
 
-def cmd_windows(project_file, suffix):
-    for i, w in enumerate(read_json(project_file).get("spec", {}).get("syncWindows") or []):
-        mark = f" (this tool's shape, for *-{suffix} Applications)" if shaped(w, suffix) else ""
-        print(f"  {i}: {json.dumps(w, sort_keys=True)}{mark}")
+def cmd_windows(project_file, window_file, suffix):
+    window = read_json(window_file)
+    windows = read_json(project_file).get("spec", {}).get("syncWindows") or []
+    if not windows:
+        print("  none")
+    for i, w in enumerate(windows):
+        if matches(w, window):
+            print(f"  {i}: this tool's pause of the Applications above (--resume or --clear removes it)")
+        elif shaped(w, suffix):
+            print(f"  {i}: a stale pause of this tool's, for other *-{suffix} Applications"
+                  f" ({names(sorted(w['applications']))}: from before a member was added or removed),"
+                  " which --clear does not remove; remove it by hand (tests/tuning/README.md,"
+                  ' "After a killed run"), its JSON patch testing this window:')
+            print(f"     {json.dumps(w, sort_keys=True)}")
+        else:
+            print(f"  {i}: {json.dumps(w, sort_keys=True)}")
 
 
 def cmd_state_add(state_file, ctx, ns, project, window_file):
@@ -446,7 +463,7 @@ COMMANDS = {
     "state-add": (cmd_state_add, 5, 5),
     "state-get": (cmd_state_get, 2, 3),
     "windows-like": (cmd_windows_like, 3, 3),
-    "windows": (cmd_windows, 2, 2),
+    "windows": (cmd_windows, 3, 3),
 }
 
 if __name__ == "__main__":

@@ -117,8 +117,11 @@ JSON
 	[[ "$output" == "cpu_m=3000 mem_mi=6144 pods=220 nodes=2 names=cp-pref,m-0" ]]
 }
 
-@test "cap_parse_node_totals: unparseable input -> unknown" {
+@test "cap_parse_node_totals: unparseable or empty input -> unknown" {
 	run cap_parse_node_totals <<<'not json'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=" ]]
+	run cap_parse_node_totals < /dev/null
 	[ "$status" -eq 0 ]
 	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=" ]]
 }
@@ -189,6 +192,9 @@ JSON
 
 @test "cap_parse_istiod_limits: empty/unparseable -> unknown" {
 	run cap_parse_istiod_limits <<<'not json'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown replicas=unknown" ]]
+	run cap_parse_istiod_limits < /dev/null
 	[ "$status" -eq 0 ]
 	[[ "$output" == "cpu_m=unknown mem_mi=unknown replicas=unknown" ]]
 }
@@ -306,10 +312,11 @@ JSON
 	grep -q -- '--field-selector=status.phase!=Succeeded,status.phase!=Failed' "${BATS_TEST_TMPDIR}/args"
 	grep -q -- '--chunk-size=' "${BATS_TEST_TMPDIR}/args"
 	# A failed read is unknown and exit 0: `arr=($(cap_requested ...))` must not end a
-	# `set -e -o pipefail` caller (nor may the other wrappers).
-	run bash -c 'set -euo pipefail; source "$1"; a=($(cap_requested c w-0 "" false)); b=($(cap_node_totals c false)); c=($(cap_istiod_limits c false)); echo "${a[*]} | survived"' _ "${ROOT}/tests/lib/capacity.sh"
+	# `set -e -o pipefail` caller (nor may the other wrappers), and each prints its parser's
+	# all-unknown line.
+	run bash -c 'set -euo pipefail; source "$1"; a=($(cap_requested c w-0 "" false)); b=($(cap_node_totals c false)); c=($(cap_istiod_limits c false)); echo "${a[*]} | ${b[*]} | ${c[*]} | survived"' _ "${ROOT}/tests/lib/capacity.sh"
 	[ "$status" -eq 0 ]
-	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown | survived" ]]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown | cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names= | cpu_m=unknown mem_mi=unknown replicas=unknown | survived" ]]
 }
 
 # ---------------------------------------------------------------------------

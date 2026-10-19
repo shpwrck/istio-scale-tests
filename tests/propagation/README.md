@@ -150,13 +150,12 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   and hands it to them in `platform-record.txt` in the sweep dir, and reads it again after the
   last one: a build, istiod setting, tuning lever, tuning profile object or Kubernetes version
   that changed in between is written to `platform-drift.txt` there, as is what that read could
-  not compare). An image carries the digest
-  its pods run (`@unknown` when none has started: not read, never another build); `none` means
-  no such pod. `005` prints it in every format, as `mixed` with a warning in the report itself
-  (the top-level `warnings` array in json, empty without one) when its inputs differ, a value
-  could not be read in some of them, the sweep's record changed or a tuning profile's objects
-  were in place; an operator that differs only in its state (`Available`, `Unavailable`) is not
-  mixed. A file without it predates the record (the suite supported only
+  not compare). An image carries the digest its pods run (`@unknown` when none has started: not
+  read, never another build); `none` means no such pod. `005` prints it in every format, as `mixed`
+  with a warning in the report itself (the top-level `warnings` array in json, empty without one)
+  when its inputs differ, a value could not be read in some of them, the sweep's record changed or a
+  tuning profile's objects were in place; an operator that differs only in its state (`Available`,
+  `Unavailable`) is not mixed. A file without it predates the record (the suite supported only
   OpenShift with OSSM then); its values read `unknown`.
 - `endpoint-<RUN_ID>.md`: per-run summary.
 - `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends
