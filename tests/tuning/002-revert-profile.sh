@@ -71,7 +71,7 @@ done
 
 [[ -n "$STATE_DIR" ]] || die "--state-dir is required"
 [[ -d "$STATE_DIR" ]] || die "state directory not found: $STATE_DIR"
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 if [[ -z "$CONTEXTS_CSV" && -f "${STATE_DIR}/contexts" ]]; then
 	CONTEXTS_CSV="$(<"${STATE_DIR}/contexts")"
 fi
@@ -154,8 +154,9 @@ for ctx in "${CONTEXTS[@]}"; do
 	fi
 done
 
-for ctx in "${PATCHED[@]}"; do
-	wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" || fail=1
+deadline=$(($(date +%s) + ROLLOUT_TIMEOUT))
+for ctx in ${PATCHED[@]+"${PATCHED[@]}"}; do
+	wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" "$deadline" || fail=1
 done
 
 echo "--- Post-revert check ---"

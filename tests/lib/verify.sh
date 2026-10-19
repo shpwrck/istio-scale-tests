@@ -219,6 +219,9 @@ EXTRACTED_PATTERNS=(
 	'platform_tuning_objects_check() {'
 	'platform_tuning_objects_refuse() {'
 	'platform_start_warnings() {'
+	'platform_probe_reset() {'
+	'platform_members_by_value() {'
+	'platform_drift_changes() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do

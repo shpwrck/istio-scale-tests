@@ -257,13 +257,16 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	run grep -- " -A -l istio-scale-tests/tuning-profile --ignore-not-found" "$STUB_LOG"
 	assert_output --partial "--context=ctx-a delete destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io -A"
 	refute_output --partial configmaps
-	# Nothing restored: nothing to warn about.
+	# Nothing restored: no warning, but without a hub its last line still says what it did not
+	# check (U7-S2: a run stopped before its first profile leaves a pause and no marker).
 	echo '{"kind":"List","items":[]}' >"${STUB_DIR}/markers.ctx-a.json"
 	echo '{"kind":"List","items":[]}' >"${STUB_DIR}/markers.ctx-b.json"
 	run --separate-stderr "$CLEANUP" --contexts ctx-a,ctx-b,ctx-c --results-dir "${T}/results"
 	assert_success
 	[[ "$stderr" != *"Argo CD"* ]]
-	assert_output --partial "=== Cleanup complete ==="
+	assert_output --partial "  The hub was not checked for a pause that no record here names (a run stopped before its first profile leaves one and no marker): pass --gitops-context <hub> (or set TUNING_GITOPS_CONTEXT) to check it"
+	assert_line "=== Cleanup complete; Argo CD checked only for the pauses recorded under ${T}/results (no --gitops-context) ==="
+	refute_line "=== Cleanup complete ==="
 }
 
 @test "005-cleanup (SC6-S1): each round patches every member's next marker before it waits for any rollout" {
@@ -294,7 +297,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.ctx-b.json")" = '{"PILOT_PUSH_THROTTLE":"10"}' ]
 }
 
-@test "005-cleanup (U6-B1): with a hub context it removes the deny window a pause adds, recorded or not, and keeps every other window" {
+@test "005-cleanup (U6-B1, U7-S3): with a hub context it removes the deny window a pause adds, recorded or not, keeps every other window, and fails on one of its shape for other Applications" {
 	local win
 	export TUNING_GITOPS_NAMESPACE=argocd
 	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{}' "${T}/m2.json"
@@ -319,8 +322,26 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	: >"$STUB_LOG"
 	TUNING_GITOPS_CONTEXT=hub run "$CLEANUP" --contexts ctx-a --results-dir "${T}/results"
 	assert_success
-	assert_output --partial "AppProject default: no deny sync window of this tool for ctx-a-ossm,ctx-b-ossm"
+	assert_output --partial "AppProject default: no deny sync window of this tool left"
+	assert_line "=== Cleanup complete ==="
 	! grep -q '^project-patch ' "$STUB_LOG" || false
+	# A window of this tool's shape for other Applications (a pause from before ctx-b was added)
+	# is not this tool's to remove by value (U7-S3): its own window goes, that one stays, named
+	# on stderr, and the cleanup fails until it is removed by hand.
+	: >"$STUB_LOG"
+	jq -n --argjson w "$win" '{metadata: {name: "default", resourceVersion: "8"}, spec: {syncWindows: [
+		{kind: "deny", schedule: "* * * * *", duration: "1h", applications: ["ctx-a-ossm"], manualSync: true}, $w]}}' >"${STUB_DIR}/project.json"
+	run --separate-stderr "$CLEANUP" --contexts ctx-a --results-dir "${T}/results" --gitops-context hub
+	assert_failure
+	assert_output --partial "Resumed auto-sync (removed this tool's deny sync window from AppProject default)"
+	refute_output --partial "no deny sync window of this tool left"
+	[[ "$stderr" == *"warning: AppProject default holds a deny sync window of this tool's shape for other Applications (ctx-a-ossm): a pause from before a member was added or removed, which --clear does not remove; those Applications do not sync until it is removed by hand (--status lists the windows; tests/tuning/README.md, \"After a killed run\")"* ]]
+	[[ "$stderr" == *"error: a deny sync window of this tool's shape is still on hub (see the warnings above)"* ]]
+	[[ "$stderr" == *"=== Cleanup finished with errors (see above) ==="* ]]
+	run grep '^project-patch ' "$STUB_LOG"
+	assert_output 'project-patch hub {"metadata":{"resourceVersion":"8"},"spec":{"syncWindows":[{"kind":"deny","schedule":"* * * * *","duration":"1h","applications":["ctx-a-ossm"],"manualSync":true}]}}'
+	# The README section that warning names exists.
+	grep -qx '## After a killed run' "${ROOT}/tests/tuning/README.md"
 	# --dry-run names the call and touches nothing.
 	: >"$STUB_LOG"
 	run "$CLEANUP" --contexts ctx-a --results-dir "${T}/results" --gitops-context hub --dry-run

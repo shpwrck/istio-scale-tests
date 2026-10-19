@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROFILE" ]] || die "--profile is required"
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 platform_validate
 if [[ ! -f "$PROFILE" ]]; then
 	for cand in "${TUNING_DIR}/profiles/${PROFILE}" "${TUNING_DIR}/profiles/${PROFILE}.yaml"; do
@@ -95,6 +95,7 @@ CONTEXTS_CSV="${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}"
 CONTEXTS=()
 split_csv "$CONTEXTS_CSV" CONTEXTS
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
+ctx_keys_distinct "${CONTEXTS[@]}"
 STATE_DIR="${STATE_DIR:-${TUNING_DIR}/results/state-${PROFILE_NAME}}"
 
 python3 -I -c 'import yaml' 2>/dev/null \
@@ -211,8 +212,9 @@ done
 
 if ((HAS_PATCH)); then
 	echo "--- Waiting for the operator and istiod rollout ---"
+	deadline=$(($(date +%s) + ROLLOUT_TIMEOUT))
 	for ctx in "${CONTEXTS[@]}"; do
-		wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" || die "${ctx}: istiod did not roll out; revert with 002-revert-profile.sh --state-dir ${STATE_DIR}"
+		wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" "$deadline" || die "${ctx}: istiod did not roll out; revert with 002-revert-profile.sh --state-dir ${STATE_DIR}"
 	done
 fi
 

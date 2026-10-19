@@ -446,3 +446,37 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 **How to preempt:** Print only the members or levers that differ from the reference, the first five by name and then "and N more", with both values; keep the full values in the TSV. Test each such message at 500 members.
 
 (PL55 and PL56 were added after the same cycle's round 5.)
+
+## PL57 — A change made only through a patch leaves nothing to find; put a labelled marker on first and take it off last
+
+**Why:** The platform record found a tuning profile's objects by their label, but three of the four profiles only patch the Istio CR (istiod's env), which carries no label. A tuning run killed before its revert left those settings in place with nothing a record, a sweep or the cleanup could see: every later sweep measured the profile's configuration as the charts', and `005-cleanup.sh` could undo it only from the killed run's own state directory.
+
+**How to preempt:** When a tool changes shared state in place (a patch, an annotation, a setting), first put a labelled object on every target that names the change and holds what undoes it, and remove it last, only once the undo checks out. Records and cleanups then find it with the change's other objects in one label query, from any checkout, and the tool's own entry points can refuse to start over it.
+
+## PL58 — A check that a run held nothing foreign also checks that it held all of its own
+
+**Why:** Tuning 004 read a pass as `own` when no member held another profile's objects and some member held one of its own. A profile reverted during a pass (by hand, by a cleanup from another shell, or an Argo CD sync that put istiod's env back) still read `own`, and the comparison credited the profile with figures measured without it.
+
+**How to preempt:** Check both directions from the run's own record of what it applied (`state/objects`, `state/patch.json`): nothing it should not have, and every object it should have on every member, with the settings it sets differing from the baseline's. Read the record again after the window, so a change during it shows as `mixed` or `missing`, never as the run's.
+
+## PL59 — A cleanup that cannot see a record says what it did not check
+
+**Why:** `005-cleanup.sh` restored the members from their profile markers, found no Argo CD pause record under its results directory (the killed run wrote it in another checkout), and printed "Cleanup complete": the deny window stayed on the hub and the Istio CR Applications stopped syncing, with nothing saying so.
+
+**How to preempt:** When a cleanup finds state whose record is missing, find the rest by value where it can (`006-gitops-pause.sh --clear` matches the window `--pause` builds) and otherwise say which part it did not check and the command that does; never end on an unqualified "complete".
+
+(PL57 to PL59 were added after the same cycle's round 6.)
+
+## PL60 — A check moved from the run to each of its parts needs a reader in each part's report
+
+**Why:** Tuning 003 came to read each pass's record again after its probes and write what changed to the pass's `platform-drift.txt`, but 004 took only the record's keys from it: a Kubernetes version, a tuning lever or an istiod limit that changed during a pass was written down and shown nowhere in the comparison, and the drift check's own warning spoke of "the sweep" and of the controlplane report's window-peak percentages, which a pass's comparison does not show.
+
+**How to preempt:** When a check that ran once per run starts running once per part (a pass, a combo), give every kind of finding it writes a reader in that part's report, worded for the part (`platform_drift_changes`, read per pass; the drift check's `pass` wording), and test that a change of each kind reaches the report.
+
+## PL61 — A value that was not read is not known, never another value; one that holds two values is mixed
+
+**Why:** Tuning 004 compared each member's istiod settings with the baseline's, so a member whose istiod could not be read (`unknown`) read as other settings, and a pass whose TSVs disagree on a build read as another build than the baseline's: a profile could be credited with, or blamed for, a difference nobody had seen.
+
+**How to preempt:** Before comparing, split each side into its definite values and the rest. An unread or unrecorded value (`unknown`, `unreachable`, a digest `@unknown`) makes the comparison not known, with a warning that names the members; a member with two values (a `mixed:` merge, `+`-joined pods) reads `mixed` and is compared with nothing. Test each with one member of several and with all of them.
+
+(PL60 and PL61 were added after the same cycle's round 7.)

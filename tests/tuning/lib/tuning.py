@@ -4,6 +4,9 @@ Profile commands need PyYAML; the others use the standard library only.
 
   load PROFILE OUTDIR             validate a profile; write patch.json, resources.yaml,
                                   description, ossm_support, ossm_support_detail
+  check-name NAME                 exit 1 unless NAME may name a profile (the rule load
+                                  applies; no PyYAML needed)
+  names CSV                       print the first five names, then how many more
   revert-patch PATCH BEFORE OUT   write the merge patch that restores BEFORE (Istio CR
                                   JSON) at every path PATCH sets; warn on paths that
                                   already hold the profile value
@@ -28,6 +31,9 @@ Profile commands need PyYAML; the others use the standard library only.
   window-remove PROJECT_JSON WINDOW_JSON
                                   print a merge patch that removes the window; exit 3 if
                                   it is not there
+  windows-like PROJECT_JSON WINDOW_JSON
+                                  print the Applications (names) of each other window of
+                                  this tool's shape: a pause for another set of Applications
   state-add STATE CTX NS PROJECT WINDOW_JSON
                                   record a paused AppProject window in the STATE file
   state-get STATE context|namespace|projects|window:PROJECT [OUT]
@@ -40,9 +46,10 @@ import re
 import sys
 
 # The label, and the kinds 005-cleanup.sh can find by it: profiles may only create these, and each
-# applied profile gets a marker of MARKER_KIND (cmd_marker). Keep them in sync with
-# tests/lib/platform.sh (PLATFORM_TUNING_LABEL, PLATFORM_TUNING_RESOURCE_KINDS and
-# PLATFORM_TUNING_MARKER_KIND), which every suite's platform
+# applied profile gets a marker of MARKER_KIND (cmd_marker) named MARKER_PREFIX<profile> in
+# MARKER_NAMESPACE. Keep them in sync with tests/lib/platform.sh (PLATFORM_TUNING_LABEL,
+# PLATFORM_TUNING_RESOURCE_KINDS, PLATFORM_TUNING_MARKER_KIND and _OBJECT_KIND,
+# PLATFORM_TUNING_MARKER_NS and PLATFORM_TUNING_MARKER_PREFIX), which every suite's platform
 # record reads and 005-cleanup.sh deletes by; platform.bats checks.
 LABEL = "istio-scale-tests/tuning-profile"
 ALLOWED_KINDS = {"DestinationRule", "Sidecar", "Telemetry", "EnvoyFilter"}
@@ -100,6 +107,30 @@ def fmt(path):
     return "." + ".".join(path)
 
 
+def check_name(name, where):
+    if not re.match(NAME_RE, name) or len(MARKER_PREFIX + name) > 63:
+        die(f"{where}: a profile's name ('{name}') must be lowercase letters, digits and '-', at most "
+            f"{63 - len(MARKER_PREFIX)} characters: it labels the profile's objects and names its marker ConfigMap")
+    if name in RESERVED_NAMES:
+        die(f"{where}: a profile's name ('{name}') must not be one of {', '.join(RESERVED_NAMES)}: the platform "
+            f"record uses {', '.join(RECORD_WORDS)} for itself, and baseline names a tuning sweep's pass without a "
+            "profile")
+
+
+def cmd_check_name(name):
+    check_name(name, f"profiles/{name}.yaml")
+
+
+def names(items):
+    """The first five, comma-separated, then how many more (one line at any fleet size)."""
+    out = ", ".join(items[:5])
+    return out + (f" and {len(items) - 5} more" if len(items) > 5 else "")
+
+
+def cmd_names(csv):
+    print(names([a for a in csv.split(",") if a]))
+
+
 def cmd_load(profile, outdir):
     try:
         import yaml
@@ -112,13 +143,7 @@ def cmd_load(profile, outdir):
     name = profile.rsplit("/", 1)[-1]
     if name.endswith(".yaml"):
         name = name[: -len(".yaml")]
-    if not re.match(NAME_RE, name) or len(MARKER_PREFIX + name) > 63:
-        die(f"{profile}: a profile's name ('{name}') must be lowercase letters, digits and '-', at most "
-            f"{63 - len(MARKER_PREFIX)} characters: it labels the profile's objects and names its marker ConfigMap")
-    if name in RESERVED_NAMES:
-        die(f"{profile}: a profile's name ('{name}') must not be one of {', '.join(RESERVED_NAMES)}: the platform "
-            f"record uses {', '.join(RECORD_WORDS)} for itself, and baseline names a tuning sweep's pass without a "
-            "profile")
+    check_name(name, profile)
     desc = " ".join(str(doc.get("description") or "").split())
     support = str(doc.get("ossm_support") or "")
     if support not in ("supported", "configurable"):
@@ -354,6 +379,16 @@ def cmd_window_remove(project_file, window_file):
     }))
 
 
+def cmd_windows_like(project_file, window_file):
+    """Each window of the AppProject with WINDOW's shape (window_for) but other Applications: a
+    pause from before a member was added or removed, which --clear does not remove."""
+    proj, window = read_json(project_file), read_json(window_file)
+    shape = {k: v for k, v in window.items() if k != "applications"}
+    for w in proj.get("spec", {}).get("syncWindows") or []:
+        if matches(w, shape) and not matches(w, window):
+            print(names(sorted(w.get("applications") or [])))
+
+
 def cmd_state_add(state_file, ctx, ns, project, window_file):
     try:
         state = read_json(state_file)
@@ -380,6 +415,8 @@ def cmd_state_get(state_file, key, out=None):
 
 COMMANDS = {
     "load": (cmd_load, 2, 2),
+    "check-name": (cmd_check_name, 1, 1),
+    "names": (cmd_names, 1, 1),
     "revert-patch": (cmd_revert_patch, 3, 3),
     "check": (cmd_check, 2, 3),
     "check-revert": (cmd_check_revert, 2, 2),
@@ -392,6 +429,7 @@ COMMANDS = {
     "window-remove": (cmd_window_remove, 2, 2),
     "state-add": (cmd_state_add, 5, 5),
     "state-get": (cmd_state_get, 2, 3),
+    "windows-like": (cmd_windows_like, 2, 2),
 }
 
 if __name__ == "__main__":

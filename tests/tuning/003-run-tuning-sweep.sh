@@ -124,9 +124,9 @@ propagation | controlplane | dataplane | churn | churn-dataplane) ;;
 *) die "unknown suite: $SUITE (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;
 esac
 SUITE_DIR="${ROOT}/tests/${SUITE}"
-is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer"
-is_pos_int "$CHURN_RATE" || die "--churn-rate must be a positive integer"
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_nonneg_int "$SETTLE_SEC" || die "--settle (or TUNING_SETTLE_SEC) must be a non-negative integer; got '${SETTLE_SEC}'"
+is_pos_int "$CHURN_RATE" || die "--churn-rate (or TUNING_COEXEC_CHURN_RATE) must be a positive integer; got '${CHURN_RATE}'"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 if ((GITOPS_PAUSE)) && [[ -z "$GITOPS_CTX" ]]; then
 	die "--gitops-context is required: the hub context whose Argo CD manages the Istio CRs (or pass --no-gitops-pause)"
 fi
@@ -147,9 +147,17 @@ else
 	done
 fi
 ((${#PROFILES[@]})) || die "no profiles to sweep"
+command -v python3 >/dev/null ||
+	die "python3 is required (and PyYAML for a run): tests/tuning/lib/tuning.py checks each profile's name and applies it"
+declare -A LISTED=()
 for i in "${!PROFILES[@]}"; do
 	PROFILES[i]="${PROFILES[i]%.yaml}"
 	[[ -f "${TUNING_DIR}/profiles/${PROFILES[i]}.yaml" ]] || die "profile not found: ${PROFILES[i]} (see tests/tuning/profiles/)"
+	# Each pass has its own directory: a name listed twice, or baseline (the pass without a
+	# profile), would share one. tuning.py's rule, which 001 applies too.
+	[[ -z "${LISTED[${PROFILES[i]}]+x}" ]] || die "profile ${PROFILES[i]} is listed twice in --profiles"
+	LISTED[${PROFILES[i]}]=1
+	python3 -I "${TUNING_DIR}/lib/tuning.py" check-name "${PROFILES[i]}" || exit 1
 done
 PASSES=()
 ((INCLUDE_BASELINE)) && PASSES+=(baseline)
@@ -242,8 +250,10 @@ if ((DRY_RUN)); then
 			echo "kubectl scale deployment -l churn-target=true --replicas=${CHURN_BASE_REPLICAS:-1}  # each context"
 		fi
 		echo "sleep ${SETTLE_SEC}"
+		echo "read the platform record of every member into ${SWEEP_DIR}/${p}/platform-record.txt, and the tuning levers on ${SOURCE_CTX}"
 		n=1
 		while probe_argv "$n" "$p" "${SWEEP_DIR}/${p}"; do show "${PROBE_ARGV[@]}"; n=$((n + 1)); done
+		echo "read it again; what changed during the pass goes to ${SWEEP_DIR}/${p}/platform-drift.txt"
 		if [[ "$p" != baseline ]]; then
 			show "${TUNING_DIR}/002-revert-profile.sh" --state-dir "${SWEEP_DIR}/${p}/state" \
 				--rollout-timeout "$ROLLOUT_TIMEOUT"
@@ -319,13 +329,6 @@ if ((GITOPS_PAUSE)); then
 		|| die "could not pause Argo CD auto-sync"
 fi
 
-while IFS= read -r kv; do
-	case "$kv" in
-	TUNING_BASELINE=*) TUNING_BASELINE="${kv#*=}" ;;
-	SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
-	esac
-done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
-
 if ((RUN_SETUP)); then
 	echo "--- Suite setup ---"
 	"${SETUP_CMD[@]}" || die "suite setup failed"
@@ -346,12 +349,19 @@ run_pass() {
 	echo "--- Settle ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"
 	# This pass's own platform record (a profile changes istiod's env and its objects), read once
-	# for its probes, which reuse it (platform-record.txt in the pass dir), and read again after
-	# them: a profile undone or istiod's settings put back during the pass go to its
-	# platform-drift.txt, which 004 merges into the pass's record.
+	# for its probes, which reuse it (platform-record.txt in the pass dir), and its tuning levers,
+	# which its TSVs record; both read again after the probes: a profile undone, istiod's
+	# settings put back, a lever, an istiod limit or a Kubernetes version changed during the pass
+	# go to its platform-drift.txt, which 004 reads for the pass.
 	platform_probe_reset
 	platform_probe "$CONTEXTS_CSV"
 	platform_probe_share "$dir"
+	while IFS= read -r kv; do
+		case "$kv" in
+		TUNING_BASELINE=*) TUNING_BASELINE="${kv#*=}" ;;
+		SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
+		esac
+	done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
@@ -363,7 +373,7 @@ run_pass() {
 		fi
 		n=$((n + 1))
 	done
-	platform_drift_check "$dir" "$CONTEXTS_CSV"
+	platform_drift_check "$dir" "$CONTEXTS_CSV" pass
 }
 
 ABORTED=0

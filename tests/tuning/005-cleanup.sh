@@ -58,17 +58,29 @@ Options:
   --gitops-context CTX
                      Hub context running Argo CD (default: \$TUNING_GITOPS_CONTEXT): after
                      the recorded pauses, remove the deny window a pause adds there even
-                     when no record names it (006-gitops-pause.sh --clear). Without it, and
-                     with markers restored but no pause recorded, a warning says to check.
+                     when no record names it (006-gitops-pause.sh --clear). Without it, the
+                     hub is checked only for the pauses recorded under --results-dir (a
+                     warning when markers were restored but none is recorded there).
   --rollout-timeout N
                      Seconds to wait for the operator and istiod rollout after a restore
                      from a marker (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --dry-run          Show what would be done; do not touch clusters.
   -h, --help         Show this help.
 
-Exit status: 0 nothing left behind, 1 something could not be undone (see the output; a
-marker whose restore failed stays on its member, so the next tuning run refuses to start).
-Requires python3 (the standard library only).
+Environment:
+  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_ROLLOUT_TIMEOUT.
+  006-gitops-pause.sh, which resumes Argo CD, takes a recorded pause's context and namespace
+  from its record; with --gitops-context its --clear reads TUNING_GITOPS_NAMESPACE (the Argo CD
+  namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
+  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
+  TEST_PLATFORM (config/options.env; auto, kubernetes or openshift; now ${TEST_PLATFORM:-auto}):
+  with TUNING_GITOPS_NAMESPACE empty, kubernetes or openshift is taken as the hub's platform
+  instead of asking it.
+
+Exit status: 0 nothing left behind of what it checked (its last line says what it did not
+check: without --gitops-context, a pause that no record under --results-dir names), 1 something
+could not be undone (see the output; a marker whose restore failed stays on its member, so the
+next tuning run refuses to start). Requires python3 (the standard library only).
 EOF
 }
 
@@ -91,7 +103,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 platform_validate
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 CONTEXTS=()
 split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
@@ -124,11 +136,18 @@ KUBECTL=(kubectl)
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Each member's work files: ${WORK}/<its index in CONTEXTS> (a context name may hold '/', and
+# two names can have one file-name-safe form).
+declare -A DIR=()
+for i in "${!CONTEXTS[@]}"; do
+	[[ -n "${DIR[${CONTEXTS[i]}]+x}" ]] || DIR[${CONTEXTS[i]}]="${WORK}/${i}"
+done
+
 # list_markers <ctx>: the member's profile markers, newest first, as tuning.py markers prints them
-# (<ns> <name> <profile> <patch-file>), into ${WORK}/<ctx>/rows; return 1 with a FAIL line when
+# (<ns> <name> <profile> <patch-file>), into ${DIR[<ctx>]}/rows; return 1 with a FAIL line when
 # they cannot be listed.
 list_markers() {
-	local ctx="$1" d="${WORK}/$(ctx_key "$1")"
+	local ctx="$1" d="${DIR[$1]}"
 	mkdir -p "$d"
 	if ! "${KUBECTL[@]}" --context="$ctx" get "$MARKER_KIND" -A -l "$LABEL" -o json >"${d}/list.json"; then
 		echo "  FAIL  ${ctx}: the profile markers could not be listed; the next tuning run refuses to start until they can" >&2
@@ -157,7 +176,7 @@ else
 	LIVE=()
 	for ctx in "${CONTEXTS[@]}"; do
 		list_markers "$ctx" || { fail=1; continue; }
-		mapfile -t rows <"${WORK}/$(ctx_key "$ctx")/rows"
+		mapfile -t rows <"${DIR[$ctx]}/rows"
 		if ((${#rows[@]})); then
 			NEXT[$ctx]=0
 			COUNT[$ctx]="${#rows[@]}"
@@ -169,7 +188,7 @@ else
 	while ((${#LIVE[@]})); do
 		WAIT=()
 		for ctx in "${LIVE[@]}"; do
-			mapfile -t rows <"${WORK}/$(ctx_key "$ctx")/rows"
+			mapfile -t rows <"${DIR[$ctx]}/rows"
 			n="${NEXT[$ctx]}"
 			CUR[$ctx]="${rows[n]}"
 			read -r ns name prof patch <<<"${CUR[$ctx]}"
@@ -188,11 +207,13 @@ else
 			WAIT+=("$ctx")
 		done
 		LIVE=()
+		# One deadline for the round: its members' rollouts run at once.
+		deadline=$(($(date +%s) + ROLLOUT_TIMEOUT))
 		for ctx in ${WAIT[@]+"${WAIT[@]}"}; do
 			read -r ns name prof patch <<<"${CUR[$ctx]}"
-			d="${WORK}/$(ctx_key "$ctx")"
+			d="${DIR[$ctx]}"
 			if [[ "$(<"$patch")" != "{}" ]]; then
-				if ! wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" ||
+				if ! wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" "$deadline" ||
 					! "${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json >"${d}/live.json" ||
 					! python3 -I "$HELPER" check-revert "$patch" "${d}/live.json"; then
 					echo "  FAIL  ${ctx}: the Istio CR is not back to its state before ${prof}; the marker ${ns}/${name} stays (fix it, then run this again)" >&2
@@ -234,14 +255,21 @@ elif ((RESTORED && found == 0)); then
 	# The markers outlived their run's results, and the pause record lives there.
 	unchecked=1
 	echo "warning: the markers restored above were left by a run whose results are not under ${RESULTS#"${ROOT}"/}; if it paused Argo CD, its deny sync window is still on the hub and the Istio CR Applications do not sync: run this again with --gitops-context <hub> (or --results-dir <that run's --output-dir>), or list the windows with ./tests/tuning/006-gitops-pause.sh --gitops-context <hub> --status" >&2
+else
+	# A run stopped before its first profile (its setup, or its baseline pass) leaves a pause and
+	# no marker: with its results elsewhere, nothing here points at it.
+	unchecked=2
+	echo "  The hub was not checked for a pause that no record here names (a run stopped before its first profile leaves one and no marker): pass --gitops-context <hub> (or set TUNING_GITOPS_CONTEXT) to check it"
 fi
 
 if ((fail)); then
 	echo "=== Cleanup finished with errors (see above) ===" >&2
 	exit 1
 fi
-if ((unchecked)); then
+if ((unchecked == 1)); then
 	echo "=== Cleanup complete on the members; Argo CD not checked (see the warning above) ==="
+elif ((unchecked == 2)); then
+	echo "=== Cleanup complete; Argo CD checked only for the pauses recorded under ${RESULTS#"${ROOT}"/} (no --gitops-context) ==="
 else
 	echo "=== Cleanup complete ==="
 fi

@@ -720,7 +720,8 @@ env_list() {
 	[ "$kinds" = DestinationRule,EnvoyFilter,Sidecar,Telemetry ]
 	[ "$(tr , '\n' <<<"$PLATFORM_TUNING_RESOURCE_KINDS" | LC_ALL=C sort | paste -sd , -)" = \
 		destinationrules.networking.istio.io,envoyfilters.networking.istio.io,sidecars.networking.istio.io,telemetries.telemetry.istio.io ]
-	grep -qx 'MARKER_KIND = "ConfigMap"' "$py"
+	grep -qx "MARKER_KIND = \"${PLATFORM_TUNING_MARKER_OBJECT_KIND}\"" "$py"
+	[ "$PLATFORM_TUNING_MARKER_OBJECT_KIND" = ConfigMap ]
 	[ "$PLATFORM_TUNING_MARKER_KIND" = configmaps ]
 	# Where the marker is and how it is named: tuning 004 expects it on every member of a pass.
 	grep -qx "MARKER_NAMESPACE = \"${PLATFORM_TUNING_MARKER_NS}\"" "$py"
@@ -1328,10 +1329,12 @@ env_list() {
 		grep -q 'platform_report_warnings ' "${ROOT}/tests/${f}" || { echo "${f}: no platform_report_warnings"; false; }
 	done
 	# tuning 004 merges each pass's record and compares it with the reference pass's, on every
-	# key but istiod's settings (a profile changes them on purpose); its notes say what differs.
+	# key but istiod's settings (a profile changes them on purpose), and says what changed during
+	# each pass (platform_drift_changes, from the pass's drift file); its notes say what differs.
 	f="${ROOT}/tests/tuning/004-compare-profiles.sh"
 	grep -q 'platform_report_values ' "$f" || { echo "${f}: no platform_report_values"; false; }
 	grep -q 'platform_compare_values .*"${PLATFORM_PASS_KEYS\[@\]}"' "$f" || { echo "${f}: no platform_compare_values over PLATFORM_PASS_KEYS"; false; }
+	grep -q 'platform_drift_changes ' "$f" || { echo "${f}: no platform_drift_changes"; false; }
 }
 
 @test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh and config.sh (address masking, the istiod env digest)" {
@@ -1357,7 +1360,8 @@ env_list() {
 	p="$(grep -n '^[[:space:]]*platform_probe "$CONTEXTS_CSV"$' <<<"$body" | cut -d: -f1)"
 	s="$(grep -n '^[[:space:]]*platform_probe_share "$dir"$' <<<"$body" | cut -d: -f1)"
 	w="$(grep -n '^[[:space:]]*while probe_argv ' <<<"$body" | cut -d: -f1)"
-	d="$(grep -n '^[[:space:]]*platform_drift_check "$dir" "$CONTEXTS_CSV"$' <<<"$body" | cut -d: -f1)"
+	# Its messages name the pass, not the sweep (run=pass).
+	d="$(grep -n '^[[:space:]]*platform_drift_check "$dir" "$CONTEXTS_CSV" pass$' <<<"$body" | cut -d: -f1)"
 	[[ -n "$r" && -n "$p" && -n "$s" && -n "$w" && -n "$d" ]] || { echo "reset '${r}', probe '${p}', share '${s}', probes '${w}', drift '${d}'"; false; }
 	((r < p && p < s && s < w && w < d)) || { echo "reset ${r}, probe ${p}, share ${s}, probes ${w}, drift ${d}: out of order"; false; }
 	# A failed probe ends the probes, not the pass: its record is still read again.
@@ -1775,6 +1779,12 @@ resume_run() {
 	PROBE_ISTIOD_THROTTLE=50 run --separate-stderr platform_drift_check "$dir" member-a
 	[[ "$stderr" == *"warning: member-a: ISTIOD_ENV_BY_CONTEXT changed during the sweep: $(env_digest "$(env_list)") at its start, $(env_digest "$(env_list 50)") at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, so its reports read ISTIOD_ENV_BY_CONTEXT mixed); the usual cause is a tuning profile applied or reverted on these members (by a tuning run, or one stopped before its revert, which tests/tuning/005-cleanup.sh undoes), or a sync or hand edit of the Istio CR's spec.values.pilot.env; for publishable figures, run the sweep again with istiod's settings fixed"* ]]
 	grep -qx "# ISTIOD_ENV_BY_CONTEXT=member-a=$(env_digest "$(env_list 50)")" "${dir}/platform-drift.txt"
+	# A tuning pass's check (pass): tuning 004 reads the file for the pass, not "its reports".
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_THROTTLE=50 run --separate-stderr platform_drift_check "$dir" member-a pass
+	[[ "$stderr" == *"warning: member-a: ISTIOD_ENV_BY_CONTEXT changed during the pass: $(env_digest "$(env_list)") at its start, $(env_digest "$(env_list 50)") at its end; rows measured after the change ran with the new value (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass); the usual cause is"* ]]
+	# (The fix still says to run the sweep again: the tuning sweep.)
+	[[ "$stderr" != *"its reports"* && "$stderr" != *"during the sweep"* ]] || { echo "$stderr"; false; }
 	# A member that does not answer at the end: a warning, no marker line for it.
 	PROBE_PLATFORM=down run --separate-stderr platform_drift_check "${BATS_TEST_TMPDIR}" member-a
 	assert_success
@@ -1901,6 +1911,17 @@ resume_run() {
 	run platform_report_warnings "${dir}/controlplane-r.tsv"
 	assert_output --partial "ISTIOD_CPU_LIMIT_M changed during the sweep in sweep (platform-drift.txt): 2000 at its start, 4000 at its end; rows measured after the change ran under another limit, but the report's window-peak CPU % (the highest istiod CPU of every member's rows) divides by the one recorded at the start, as does the SLA verdict on it, and the report cannot tell which rows those are; the kubectl top % use each row's own limit; the usual cause is"
 	assert_output --partial "istiod's limits per replica on member-b (CPU 4000m, memory 4096Mi) differ from those the TSVs recorded on their source member (CPU 2000m, memory 4096Mi) at the end of the sweep in sweep (platform-drift.txt)"
+	# A tuning pass's check (tuning 003: pass) names the pass and leaves out the controlplane
+	# report's percentages, which its comparison does not show.
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_CPU_LIMIT=4 run --separate-stderr platform_drift_check "$dir" member-a,member-b pass
+	assert_success
+	[[ "$stderr" == *"warning: member-a: ISTIOD_CPU_LIMIT_M changed during the pass: 2000 at its start, 4000 at its end; rows measured after the change ran under another limit (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass); the usual cause is"* ]]
+	[[ "$stderr" == *"differ from those the TSVs recorded on member-a, their source member (CPU 2000m, memory 4096Mi) at the pass's end, so those members ran the pass under other limits than its TSVs record (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass)"* ]]
+	[[ "$stderr" != *"which its reports say in their body"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" != *window-peak* && "$stderr" != *"during the sweep"* ]] || { echo "$stderr"; false; }
+	head -n 1 "${dir}/platform-drift.txt" | grep -q '^# Values that changed during this pass: '
+	grep -qx '# ISTIOD_CPU_LIMIT_M=4000' "${dir}/platform-drift.txt"
 	# Not read at the end: a warning, no marker.
 	rm "${dir}/platform-drift.txt"
 	PROBE_ISTIOD_DEPLOY=missing run --separate-stderr platform_drift_check "$dir" member-a,member-b
@@ -2014,6 +2035,38 @@ resume_run() {
 	printf '# RUN_ID=r\ntimestamp\n' > "${d}/reach-r.tsv"
 	run platform_report_warnings "${d}/reach-r.tsv"
 	[ -z "$output" ]
+}
+
+@test "platform_drift_changes (M7-B1): what changed during one pass, a line per key from the drift file next to its TSVs; nothing without one" {
+	local d="${BATS_TEST_TMPDIR}/pass"
+	mkdir -p "$d"
+	{
+		platform_fixture_lines | sed "s#proxyv2:1.30.5#proxyv2:1.30.5@${DIG_A}#g"
+		echo '# KUBE_VERSIONS=ctx-a=v1.33.1,ctx-b=v1.33.1'
+		echo '# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on'
+		echo '# SIDECAR_EGRESS_HOSTS=./* istio-system/*'
+		echo '# ISTIOD_CPU_LIMIT_M=2000'
+		echo '# ISTIOD_MEM_LIMIT_MI=4096'
+	} > "${d}/a.tsv"
+	run --separate-stderr platform_drift_changes "${d}/a.tsv"
+	assert_success
+	[ -z "$output" ]
+	[ -z "$stderr" ]
+	printf '%s\n' '# Values that changed during this pass' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' \
+		"# PROXY_IMAGE_BY_CONTEXT=ctx-a=proxyv2:1.30.5@${DIG_B},ctx-b=proxyv2:1.30.5@${DIG_B}" \
+		'# KUBE_VERSIONS=ctx-b=v1.33.2' \
+		'# TUNING_BASELINE=sidecar=off,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on' \
+		'# ISTIOD_CPU_LIMIT_M=4000' '# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=ctx-b=2000/4096' > "${d}/platform-drift.txt"
+	run --separate-stderr platform_drift_changes "${d}/a.tsv"
+	assert_success
+	[ -z "$stderr" ]
+	# The record's keys, then KUBE_VERSIONS, the levers and the limits; digests shortened; the
+	# members whose limits differ from the recorded ones are not a change (every read finds them).
+	[ "${#lines[@]}" -eq 4 ]
+	assert_line --index 0 $'PROXY_IMAGE_BY_CONTEXT\tgateway proxy builds\tproxyv2:1.30.5@sha256:aaaaaaaaaaaa to proxyv2:1.30.5@sha256:bbbbbbbbbbbb on ctx-a, ctx-b'
+	assert_line --index 1 $'KUBE_VERSIONS\tKubernetes versions\tv1.33.1 to v1.33.2 on ctx-b'
+	assert_line --index 2 $'TUNING_BASELINE\ttuning levers\tsidecar from on to off'
+	assert_line --index 3 $'ISTIOD_CPU_LIMIT_M\tistiod CPU limits\t2000 at its start, 4000 at its end'
 }
 
 # ---------------------------------------------------------------------------
@@ -2150,6 +2203,24 @@ resume_run() {
 	refute_output --partial ISTIOD_ENV_BY_CONTEXT
 	refute_output --partial differs
 	[ "${#lines[@]}" -eq "${#PLATFORM_PASS_KEYS[@]}" ]
+	# The passes compare each member's Kubernetes version too (M7-S2): another version differs, a
+	# member that could not be read (unreachable) or a record without the key is not known, and a
+	# k3s version keeps its "+" part (never two pods' values), in any member order.
+	[[ " ${PLATFORM_PASS_KEYS[*]} " == *" KUBE_VERSIONS "* ]]
+	run platform_compare_values "KUBE_VERSIONS=a=v1.33.1,b=v1.33.1" "KUBE_VERSIONS=a=v1.33.1,b=v1.34.0" KUBE_VERSIONS
+	assert_output $'KUBE_VERSIONS\tdiffers'
+	run platform_compare_values "KUBE_VERSIONS=a=v1.33.1,b=v1.33.1" "KUBE_VERSIONS=a=v1.33.1,b=unreachable" KUBE_VERSIONS
+	assert_output $'KUBE_VERSIONS\tunknown'
+	run platform_compare_values "KUBE_VERSIONS=a=v1.33.1" "PLATFORM=kubernetes" KUBE_VERSIONS
+	assert_output $'KUBE_VERSIONS\tunknown'
+	run platform_compare_values "KUBE_VERSIONS=a=v1.30.4+k3s1,b=v1.30.4+k3s1" "KUBE_VERSIONS=b=v1.30.4+k3s1,a=v1.30.4+k3s1" KUBE_VERSIONS
+	assert_output $'KUBE_VERSIONS\tsame'
+	run platform_compare_values "KUBE_VERSIONS=a=v1.30.4+k3s1" "KUBE_VERSIONS=a=v1.30.4+k3s2" KUBE_VERSIONS
+	assert_output $'KUBE_VERSIONS\tdiffers'
+	run platform_value_against KUBE_VERSIONS "a=v1.33.1,b=v1.34.0" "a=v1.33.1,b=v1.33.1"
+	assert_output "b=v1.34.0 (1 of 2 members; the other 1 match)"
+	run platform_value_against KUBE_VERSIONS "a=v1.30.4+k3s1,b=v1.30.4+k3s1" "a=v1.30.4+k3s1,b=v1.30.4+k3s1"
+	assert_output "v1.30.4+k3s1"
 }
 
 @test "_platform_build_cmp (H2): one build, another, or not known; @unknown and a state never make another build" {

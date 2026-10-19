@@ -55,12 +55,23 @@ setup() {
 	refute_output --partial "438.00"
 }
 
-# with_record <pass> [sed program]: put the platform record a current writer adds (edited by
-# the sed program) at the top of that pass's TSV.
+# tsv_record [sed program]: the preamble lines a suite TSV of a tuning pass carries, edited by
+# the sed program: each member's Kubernetes version (tests/lib/preamble.sh), then the platform
+# record (members ctx-a,ctx-b unless PLATFORM_FIXTURE_CTXS names others).
+tsv_record() {
+	local ctx kv=""
+	local -a ctxs=()
+	split_csv "${PLATFORM_FIXTURE_CTXS:-ctx-a,ctx-b}" ctxs
+	for ctx in "${ctxs[@]}"; do kv+="${kv:+,}${ctx}=v1.33.1"; done
+	{ echo "# KUBE_VERSIONS=${kv}"; platform_fixture_lines; } | sed "${1:-}"
+}
+
+# with_record <pass> [sed program]: put the lines tsv_record makes (edited by the sed program) at
+# the top of that pass's TSV.
 with_record() {
 	local f
 	f="$(ls "${S}/$1"/controlplane-*.tsv)"
-	{ platform_fixture_lines | sed "${2:-}"; cat "$f"; } > "${f}.new"
+	{ tsv_record "${2:-}"; cat "$f"; } > "${f}.new"
 	mv "${f}.new" "$f"
 }
 
@@ -162,8 +173,10 @@ five_passes() {
 	# the table, not a list of unknowns.
 	assert_output --partial "Pass 04-legacy: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
 	refute_output --partial "Pass 04-legacy, cannot be compared on"
-	assert_output --partial "- **Warning:** pass 04-legacy: no key of its platform record can be compared with the baseline (its TSVs predate the record, or nothing could be read)"
+	assert_output --partial "- **Warning:** pass 04-legacy: no key of its platform record can be compared with the baseline (its TSVs predate the record, or nothing could be read), nor its Kubernetes versions, so whether it ran on the same platform and builds is not known"
 	refute_output --partial "04-legacy differs"
+	# The baseline's record shows its Kubernetes version too.
+	assert_output --partial "- KUBE_VERSIONS: \`v1.33.1\`"
 	# Available vs Unavailable is the same operator build: no warning, no block entry.
 	refute_output --partial "02-state"$'\n'
 	[[ "$output" != *"pass 02-state"* && "$output" != *"Pass 02-state"* ]]
@@ -234,19 +247,32 @@ five_passes() {
 	refute_output --partial "Pass 01-same: every value"
 }
 
-@test "tuning 004: a pass whose TSVs disagree within it differs from the baseline" {
+@test "tuning 004 (M7-N2): a pass whose TSVs disagree within it reads mixed, not another build than the baseline's" {
 	five_passes
 	# A second TSV in 01-same, on another istiod build: the pass's own record is mixed.
 	{
-		platform_fixture_lines | sed "${digests}; s/pilot:1.30.5@$(digest cd)/pilot:1.30.6@$(digest 23)/g; s#=none#=$(own_objects 01-same)#g"
+		tsv_record "${digests}; s/pilot:1.30.5@$(digest cd)/pilot:1.30.6@$(digest 23)/g; s#=none#=$(own_objects 01-same)#g"
 		printf '%s\n' "$CP_HDR" $'t\t0\t512\t300\t250\t99\t438\t20480\t10'
 	} > "${S}/01-same/controlplane-second.tsv"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
-	assert_output --partial "| Platform record | baseline | differs (see notes) | same | differs (see notes) | unknown (see notes) |"
-	assert_output --partial "Pass 01-same, differs on ISTIOD_IMAGE_BY_CONTEXT:"
+	assert_output --partial "| Platform record | baseline | mixed (see notes) | same | differs (see notes) | unknown (see notes) |"
+	assert_output --partial "Pass 01-same, its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT:"
 	# Both members hold both builds: the value they share, once.
 	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`mixed:pilot:1.30.5@sha256:cdcdcdcdcdcd;pilot:1.30.6@sha256:232323232323\`"
+	assert_output --partial "- **Warning:** pass 01-same: its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT (or one of them did not read or record a value; the values follow the table), so part of it may have run on another platform, build or Kubernetes version, and then its change against the baseline is not the profile's alone"
+	refute_output --partial "pass 01-same differs"
+	# Only 004's own warnings on stderr: none of the library's for a sweep's report (U7-S4).
+	[[ "$stderr" == *"warning: pass 01-same: its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT"* ]]
+	! grep -v '^warning: pass' <<<"$stderr" || false
+	# In the baseline: its cell says so, and no pass is compared with it on that key.
+	mv "${S}/01-same/controlplane-second.tsv" "${S}/baseline/controlplane-second.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | same | same | differs (see notes) | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass baseline: its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT (or one of them did not read or record a value; the values follow the table), so part of it may have run on another platform, build or Kubernetes version, and then no profile's change against it is the profile's alone"
+	assert_output --partial "Pass baseline, its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT:"
+	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`mixed: pilot:1.30.5@sha256:cdcdcdcdcdcd and pilot:1.30.6@sha256:232323232323 on ctx-a, ctx-b\`"
 }
 
 # objects_passes: a baseline and the passes 02-x and 04-connection-pools (each pass dir is the
@@ -334,7 +360,7 @@ objects_passes() {
 	assert_output --partial "- **Warning:** pass 04-connection-pools: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded (its TSVs predate the key), so whether it held only the objects its name says (none for the baseline) is not known"
 	# In one of its two TSVs only (the other holds the profile's objects).
 	{
-		platform_fixture_lines | sed "s#=none#=$(own_objects 04-connection-pools)#g"
+		tsv_record "s#=none#=$(own_objects 04-connection-pools)#g"
 		printf '%s\n' "$CP_HDR" $'t\t0\t512\t300\t250\t99\t438\t20480\t10'
 	} > "${S}/04-connection-pools/controlplane-second.tsv"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
@@ -409,10 +435,13 @@ objects_passes() {
 	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT: the baseline's (mixed: fedcba987654 and 0123456789ab on ctx-b), though the profile sets spec.values.pilot.env"
 	assert_output --partial "- **Warning:** pass 02-x: its profile's objects (${m02}) are not on ctx-b in its record"
 	refute_output --partial "pass 04-connection-pools"
+	# On stderr, 004's own warnings only, not the library's for a sweep's report (U7-S4).
+	[[ "$stderr" != *"during the sweep"* ]]
+	! grep -v '^warning: pass' <<<"$stderr" || false
 	# A pass's own two TSVs that disagree (churn-dataplane writes two): one without the marker.
 	mv "${S}/02-x/platform-drift.txt" "${S}/02-x-drift.old"
 	{
-		platform_fixture_lines | sed "s/=0123456789ab/=fedcba987654/g"
+		tsv_record "s/=0123456789ab/=fedcba987654/g"
 		printf '%s\n' "$CP_HDR" $'t\t0\t512\t300\t250\t99\t438\t20480\t10'
 	} > "${S}/02-x/controlplane-second.tsv"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
@@ -488,4 +517,150 @@ objects_passes() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT, by member: \`fedcba987654 on ctx-a, ctx-b, ctx-c, ctx-d, ctx-e and 1 more; 0123456789ab on ctx-g\`"
+}
+
+# with_levers <pass>: the tuning levers, root Sidecar egress hosts and istiod limits a suite TSV
+# records (tests/lib/preamble.sh; the controlplane's limits), at the top of that pass's TSV.
+with_levers() {
+	local f
+	f="$(ls "${S}/$1"/controlplane-*.tsv)"
+	{
+		printf '%s\n' '# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on' \
+			'# SIDECAR_EGRESS_HOSTS=./* istio-system/*' '# ISTIOD_CPU_LIMIT_M=2000' '# ISTIOD_MEM_LIMIT_MI=4096'
+		cat "$f"
+	} > "${f}.new"
+	mv "${f}.new" "$f"
+}
+
+@test "tuning 004 (M7-B1, R7-B1): what the read at a pass's end found changed warns for that pass in the body and on stderr: a Kubernetes version, a lever, the root Sidecar's hosts, an istiod limit" {
+	local p w="- **Warning:** pass 02-x:"
+	objects_passes
+	with_record baseline
+	with_record 02-x "s/=0123456789ab/=fedcba987654/g"
+	with_record 04-connection-pools
+	for p in baseline 02-x 04-connection-pools; do with_levers "$p"; done
+	profile_pass 02-x PILOT_DEBOUNCE_AFTER
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	# What tuning 003's platform_drift_check writes after 02-x's probes: a control-plane upgrade on
+	# ctx-a, the root Sidecar gone, istiod's CPU limit raised; and a member whose limits differ from
+	# the source member's, which every pass's read finds again (no change during the pass).
+	printf '%s\n' '# Values that changed during this pass' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' \
+		'# KUBE_VERSIONS=ctx-a=v1.33.2' \
+		'# TUNING_BASELINE=sidecar=off,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on' \
+		'# SIDECAR_EGRESS_HOSTS=none' '# ISTIOD_CPU_LIMIT_M=4000' '# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=ctx-b=1000/2048' \
+		> "${S}/02-x/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | changed (see notes) | same |"
+	assert_output --partial "${w} KUBE_VERSIONS changed during the pass (its platform-drift.txt): v1.33.1 to v1.33.2 on ctx-a, so part of it ran with other Kubernetes versions, and its change against the baseline is not the profile's alone"
+	assert_output --partial "${w} TUNING_BASELINE changed during the pass (its platform-drift.txt): sidecar from on to off, so part of it ran with other tuning levers, and its change against the baseline is not the profile's alone"
+	assert_output --partial "${w} SIDECAR_EGRESS_HOSTS changed during the pass (its platform-drift.txt): ./* istio-system/* at its start, none at its end, so part of it ran with other root Sidecar egress hosts"
+	assert_output --partial "${w} ISTIOD_CPU_LIMIT_M changed during the pass (its platform-drift.txt): 2000 at its start, 4000 at its end, so part of it ran with other istiod CPU limits, and its change against the baseline is not the profile's alone"
+	# 004 shows istiod's CPU and memory, not a % of its limit; members whose limits differ are no change.
+	refute_output --partial "window-peak"
+	refute_output --partial ISTIOD_LIMITS_DIFFER_BY_CONTEXT
+	refute_output --partial "pass 02-x differs"
+	assert_output --partial "Pass 02-x, changed during the pass on KUBE_VERSIONS, TUNING_BASELINE, SIDECAR_EGRESS_HOSTS, ISTIOD_CPU_LIMIT_M:"
+	assert_output --partial "- KUBE_VERSIONS, changed during the pass: \`v1.33.1 to v1.33.2 on ctx-a\`"
+	assert_output --partial "- TUNING_BASELINE, changed during the pass: \`sidecar from on to off\`"
+	# On stderr, 004's own lines only (U7-S4).
+	[[ "$stderr" == *"warning: pass 02-x: KUBE_VERSIONS changed during the pass"* ]]
+	[[ "$stderr" != *"during the sweep"* ]]
+	! grep -v '^warning: pass' <<<"$stderr" || false
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp 'Platform record +baseline +changed \(see notes\) +same'
+	assert_output --regexp '  KUBE_VERSIONS +changed during the pass: v1\.33\.1 to v1\.33\.2 on ctx-a'
+	assert_output --partial "WARNING: pass 02-x: TUNING_BASELINE changed during the pass"
+	# The baseline's own change: its cell and warning say so, and no pass is compared with it on it.
+	mv "${S}/02-x/platform-drift.txt" "${S}/baseline/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | same | same |"
+	assert_output --partial "- **Warning:** pass baseline: KUBE_VERSIONS changed during the pass (its platform-drift.txt): v1.33.1 to v1.33.2 on ctx-a, so part of it ran with other Kubernetes versions, and no profile's change against it is the profile's alone"
+	assert_output --partial "Pass baseline, changed during the pass on KUBE_VERSIONS, TUNING_BASELINE, SIDECAR_EGRESS_HOSTS, ISTIOD_CPU_LIMIT_M:"
+}
+
+@test "tuning 004 (M7-S2, R7-B1): each member's Kubernetes version is compared with the reference pass's; unreachable is not read, never another version" {
+	objects_passes
+	with_record baseline
+	with_record 02-x "s/=0123456789ab/=fedcba987654/g; /^# KUBE_VERSIONS=/s/ctx-b=v1.33.1/ctx-b=v1.34.0/"
+	with_record 04-connection-pools "/^# KUBE_VERSIONS=/s/ctx-b=v1.33.1/ctx-b=unreachable/"
+	profile_pass 02-x PILOT_DEBOUNCE_AFTER
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | differs (see notes) | unknown (see notes) |"
+	assert_output --partial "- KUBE_VERSIONS: \`v1.33.1\`"
+	assert_output --partial "Pass 02-x, differs on KUBE_VERSIONS:"
+	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=v1.34.0 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- **Warning:** pass 02-x differs from the baseline on KUBE_VERSIONS (its values follow the table), so its change against the baseline is not the profile's alone"
+	assert_output --partial "Pass 04-connection-pools, cannot be compared on KUBE_VERSIONS:"
+	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=unreachable (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: KUBE_VERSIONS could not be compared with the baseline (not read, or not recorded, in one of them), so whether it ran on the same platform, builds and Kubernetes versions is not known"
+	refute_output --partial "04-connection-pools differs"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp 'Platform record +baseline +differs \(see notes\) +unknown \(see notes\)'
+	assert_output --regexp '  KUBE_VERSIONS +ctx-b=v1\.34\.0 \(1 of 2 members; the other 1 match\)'
+}
+
+@test "tuning 004 (U7-B1): istiod settings not read on a member are not other settings: their own warning, the read members' digest; none read reads unknown" {
+	local c3=ctx-a,ctx-b,ctx-c
+	objects_passes
+	# The baseline's and 02-x's ctx-b not read (a PLATFORM_READ_TIMEOUT on its pod list), no member
+	# of 04-connection-pools read.
+	with_record baseline "s/ctx-b=0123456789ab/ctx-b=unknown/"
+	with_record 02-x "s/ctx-a=0123456789ab/ctx-a=fedcba987654/; s/ctx-b=0123456789ab/ctx-b=unknown/"
+	with_record 04-connection-pools "s/=0123456789ab/=unknown/g"
+	profile_pass 02-x PILOT_DEBOUNCE_AFTER
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| istiod env | 0123456789ab (see notes) | fedcba987654 (see notes) | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass baseline: istiod's settings could not be read on ctx-b (ISTIOD_ENV_BY_CONTEXT: 0123456789ab on ctx-a; unknown on ctx-b), so whether those members ran the same settings as the others is not known"
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings could not be read on ctx-b (ISTIOD_ENV_BY_CONTEXT: fedcba987654 on ctx-a; unknown on ctx-b), so whether its profile reached those members is not known"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: istiod's settings could not be read on ctx-a, ctx-b (ISTIOD_ENV_BY_CONTEXT: unknown on ctx-a, ctx-b), so whether its profile was in effect is not known"
+	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT, by member: \`fedcba987654 on ctx-a; unknown on ctx-b\`"
+	# Not read is never "differ", and the read members are still checked against the baseline's.
+	refute_output --partial "differ between its members"
+	refute_output --partial "by member (see notes)"
+	refute_output --partial "though its profile sets"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp 'istiod env +0123456789ab \(see notes\) +fedcba987654 \(see notes\) +unknown \(see notes\)'
+	# Two members read that differ and one not read: "differ" names the two read ones only.
+	PLATFORM_FIXTURE_CTXS="$c3" objects_passes
+	PLATFORM_FIXTURE_CTXS="$c3" with_record baseline
+	PLATFORM_FIXTURE_CTXS="$c3" with_record 02-x "s/ctx-b=0123456789ab/ctx-b=fedcba987654/; s/ctx-c=0123456789ab/ctx-c=unknown/"
+	PLATFORM_FIXTURE_CTXS="$c3" with_record 04-connection-pools
+	profile_pass 02-x PILOT_DEBOUNCE_AFTER
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| istiod env | 0123456789ab | by member (see notes) | 0123456789ab |"
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings differ between its members (ISTIOD_ENV_BY_CONTEXT: 0123456789ab on ctx-a; fedcba987654 on ctx-b), so they did not all run the same configuration; the profile may have reached some of them only"
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings could not be read on ctx-c (ISTIOD_ENV_BY_CONTEXT: 0123456789ab on ctx-a; fedcba987654 on ctx-b; unknown on ctx-c)"
+}
+
+@test "tuning 004 (M7-S1, I7-S1): istiod pods on different settings at once warn; each pod's digest is compared with the baseline's" {
+	objects_passes
+	with_record baseline
+	# 02-x sets istiod's env, but one istiod pod per member still ran the baseline's settings (a
+	# rollout caught midway, a pod stuck Terminating); 04 sets none, but a pod on ctx-b ran others.
+	with_record 02-x "s/=0123456789ab/=fedcba987654+0123456789ab/g"
+	with_record 04-connection-pools "s/ctx-b=0123456789ab/ctx-b=0123456789ab+fedcba987654/"
+	profile_pass 02-x PILOT_DEBOUNCE_AFTER
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| istiod env | 0123456789ab | fedcba987654+0123456789ab (see notes) | by member (see notes) |"
+	assert_output --partial "- **Warning:** pass 02-x: istiod's pods ran different settings at once (ISTIOD_ENV_BY_CONTEXT: fedcba987654+0123456789ab on ctx-a, ctx-b, each pod's digest \"+\"-joined): a rollout caught midway (a short --settle), a pod stuck Terminating or a second istiod Deployment, so part of the pass may have run other settings"
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings are the baseline's (ISTIOD_ENV_BY_CONTEXT: fedcba987654+0123456789ab on ctx-a, ctx-b), though its profile sets spec.values.pilot.env"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: istiod's pods ran different settings at once (ISTIOD_ENV_BY_CONTEXT: 0123456789ab+fedcba987654 on ctx-b,"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: istiod's settings are not the baseline's (ISTIOD_ENV_BY_CONTEXT: 0123456789ab+fedcba987654 on ctx-b), though its profile does not patch the Istio CR"
+	[[ "$stderr" == *"warning: pass 02-x: istiod's pods ran different settings at once"* ]]
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp 'istiod env +0123456789ab +fedcba987654\+0123456789ab \(see notes\) +by member \(see notes\)'
 }
