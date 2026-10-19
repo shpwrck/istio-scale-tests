@@ -911,31 +911,39 @@ report_json() {
 			   statuses: (.[5] | split(",") | map(capture("^(?<k>.*)=(?<v>[0-9]+)$") | {(.k): (.v | tonumber)}) | add // {})})
 	')
 
+	local warn_json diag_json
+	warn_json="$(platform_warning_lines json "$REPORT_WARNINGS")"
+	diag_json="$(istiod_diag_report json "$RESULTS_DIR")"
+	# The objects that grow with the members (the platform record in metadata, the warnings, the
+	# remote coverage and validity, the istiod diagnostics) go in as files (--slurpfile; $x[0]),
+	# never as arguments: Linux refuses to run a command with one argument string over 128 KiB,
+	# the record of about 360 members.
 	jq -n \
-		--argjson metadata "$meta_json" \
-		--argjson warnings "$(platform_warning_lines json "$REPORT_WARNINGS")" \
-		--argjson results "$results_json" \
-		--argjson local_baseline "$lb_json" \
-		--argjson remote_coverage "$rc_json" \
-		--argjson remote_validity "$rv_json" \
+		--slurpfile metadata <(printf '%s\n' "$meta_json") \
+		--slurpfile warnings <(printf '%s\n' "$warn_json") \
+		--slurpfile results <(printf '%s\n' "$results_json") \
+		--slurpfile local_baseline <(printf '%s\n' "$lb_json") \
+		--slurpfile remote_coverage <(printf '%s\n' "$rc_json") \
+		--slurpfile remote_validity <(printf '%s\n' "$rv_json") \
 		--argjson n_total "$TOTAL_ALL" \
 		--argjson n_valid "$VALID_ALL" \
 		--argjson n_dropped "$DROPPED_ALL" \
 		--argjson n_skipped "$SKIPPED_ALL" \
 		--argjson n_placeholder "$N_PLACEHOLDER" \
-		--argjson placeholders "$ph_json" \
+		--slurpfile placeholders <(printf '%s\n' "$ph_json") \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
-		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
-		'{metadata: $metadata, warnings: $warnings,
+		--slurpfile istiod_diag <(printf '%s\n' "$diag_json") \
+		'def one($x; $name): if ($x | length) == 1 then $x[0] else error("dataplane report: \($name) is not one JSON value") end;
+		{metadata: one($metadata; "metadata"), warnings: one($warnings; "warnings"),
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
-		            n_placeholder: $n_placeholder, placeholders: $placeholders,
+		            n_placeholder: $n_placeholder, placeholders: one($placeholders; "placeholders"),
 		            remotes_not_reachable: $not_reachable, remotes_without_valid_rows: $no_valid},
-		  remote_coverage: $remote_coverage.remote_coverage,
-		  remote_validity: $remote_validity,
-		  istiod_diag: $istiod_diag,
-		  local_baseline: $local_baseline, results: $results}'
+		  remote_coverage: one($remote_coverage; "remote_coverage").remote_coverage,
+		  remote_validity: one($remote_validity; "remote_validity"),
+		  istiod_diag: one($istiod_diag; "istiod_diag"),
+		  local_baseline: one($local_baseline; "local_baseline"), results: one($results; "results")}'
 }
 
 report_charts() {

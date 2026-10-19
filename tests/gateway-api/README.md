@@ -254,8 +254,9 @@ results will go, and:
      `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
      `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'
      `istio-proxy` build), `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
-     `aws`, ...) and `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
-     without `CLUSTER_ID`: its settings). An image carries the digest its pods run (`@unknown`
+     `aws`, ...), `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
+     without `CLUSTER_ID`: its settings) and `TUNING_OBJECTS_BY_CONTEXT` (a tuning profile's
+     objects, `none` outside a tuning run). An image carries the digest its pods run (`@unknown`
      when none has started: not read, never another build); `none` means no such pod.
      `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
      OpenShift), asked of the member whatever `TEST_PLATFORM` says (`unknown` when it cannot be

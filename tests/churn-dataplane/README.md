@@ -191,17 +191,20 @@ report shows `unknown` and "no reachability data".
 Every TSV preamble also carries the platform record
 ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
 platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
-istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-`ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`,
-`ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env without `CLUSTER_ID`),
-read before the baseline window (a sweep reads it once for all its combos, and again after the
-last one: a build, istiod setting, tuning lever or Kubernetes version that changed in between is
-written to `platform-drift.txt` in the sweep dir). An image carries the digest its pods run
-(`@unknown` when none has started: not read, never another build); `none` means no such pod. The
+istiod's settings, the nodes' provider and any tuning profile objects (`PLATFORM_BY_CONTEXT`,
+`MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`,
+`NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env
+without `CLUSTER_ID`; `TUNING_OBJECTS_BY_CONTEXT`: `none` outside a tuning run), read before the
+baseline window (a sweep reads it once for all its combos and hands it to them in
+`platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
+setting, tuning lever, tuning profile object or Kubernetes version that changed in between is
+written to `platform-drift.txt` there). An image carries the digest its pods run (`@unknown`
+when none has started: not read, never another build); `none` means no such pod. The
 sweep's reach file records every member the sweep covers. `005` prints the record in every
 format, with a warning in the report itself (the top-level `warnings` array in json, empty
-without one) when its inputs differ, a value could not be read in some of them, or the sweep's
-record changed (an operator that differs only in its state is not a difference). On kind nodes
+without one) when its inputs differ, a value could not be read in some of them, the sweep's
+record changed or a tuning profile's objects were in place (an operator that differs only in its
+state is not a difference). On kind nodes
 (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every format
 also warns that the cross-cluster path runs (or may run) through cloud-provider-kind's userspace
 Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so at mesh

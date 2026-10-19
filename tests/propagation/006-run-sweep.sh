@@ -83,6 +83,7 @@ Environment:
   PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
   PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
   setup, --dry-run included.
+$(platform_help_lines)
 EOF
 }
 
@@ -221,9 +222,11 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
-# The platform record of every member, read once here; each 002 inherits it (exported) and
-# the placeholders write it (tests/lib/platform.sh). --dry-run reads nothing (unknown).
+# The platform record of every member, read once here; each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the placeholders write it
+# (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$SWEEP_DIR"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (counted in n_total, excluded from n_valid).

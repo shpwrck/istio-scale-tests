@@ -103,6 +103,7 @@ Environment:
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
   The sweep checks every numeric one of them, and the flags that set them, before the
   first setup, --dry-run included.
+$(platform_help_lines)
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
@@ -291,9 +292,11 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
-# The platform record of every member, read once here; each 002 inherits it (exported) and
-# the placeholders write it (tests/lib/platform.sh). --dry-run reads nothing (unknown).
+# The platform record of every member, read once here; each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the placeholders write it
+# (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$OUTPUT_DIR"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (one qps=0, class=na row; counted in

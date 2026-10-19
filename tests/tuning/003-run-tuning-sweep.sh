@@ -74,6 +74,7 @@ Environment:
   suite's chart overlay and, with TUNING_GITOPS_NAMESPACE empty, for the hub whose Argo CD
   namespace 006 pauses in (TUNING_GITOPS_NAMESPACE overrides that). The platform record of each
   pass still asks every member what it serves.
+$(platform_help_lines timeout)
 EOF
 }
 

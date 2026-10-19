@@ -126,6 +126,7 @@ Environment:
   relative to the repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
   001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
   them, and the flags that set them, before the first setup, --dry-run included.
+$(platform_help_lines)
 
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the sweep.
 EOF
@@ -319,9 +320,11 @@ if ! ((DRY_RUN)); then
 		esac
 	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 fi
-# The platform record of every member, read once here; each 002/003 inherits it (exported)
-# and the sweep TSV's preamble writes it (tests/lib/platform.sh). --dry-run reads nothing.
+# The platform record of every member, read once here; each 002/003 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the sweep TSV's preamble
+# writes it (tests/lib/platform.sh). --dry-run reads nothing and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$SWEEP_DIR"
 
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then

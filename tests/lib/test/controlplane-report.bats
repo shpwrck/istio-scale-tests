@@ -322,6 +322,15 @@ second_input() {
 	done
 }
 
+@test "report (S-B2): a record of 500 members goes through every format; json lists them all" {
+	{
+		head -1 "$FIXTURE"
+		platform_fixture_lines "$(wide_ctxs 500 mesh-a mesh-b)"
+		tail -n +2 "$FIXTURE"
+	} > "${RES}/controlplane-fixture-t2.tsv"
+	wide_record_report "$REPORT" "$RES" text csv json markdown charts
+}
+
 # --- VirtualService/DestinationRule traffic axis -------------------------------
 
 @test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields" {

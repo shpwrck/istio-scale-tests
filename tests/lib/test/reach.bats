@@ -136,6 +136,11 @@ rrow() {
 	[ "$output" = "-" ]
 }
 
+@test "reach_sanitize (R5): kubectl's Client.Timeout survives, the host before it is masked" {
+	run reach_sanitize 'Unable to connect to the server: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers) from api.mesh-a.example.invalid'
+	assert_output "Unable to connect to the server: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers) from <host>"
+}
+
 @test "reach_sanitize: IPv6 literals masked (bracketed, compressed, full, zone, mapped)" {
 	run reach_sanitize "Unable to connect: dial tcp [fd00:10:96::1f]:8080: connect: connection refused"
 	assert_output "Unable to connect: dial tcp <ip>:8080: connect: connection refused"

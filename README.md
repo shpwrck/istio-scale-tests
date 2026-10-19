@@ -194,7 +194,8 @@ the shared host, so the dataplane and churn-dataplane reports flag their remote 
 | `ISTIOD_IMAGE_BY_CONTEXT` | The istiod pods' `discovery` image and the digest that ran; `<image>@unknown`: none of them has started (below); `none`: no istiod pod on that member |
 | `PROXY_IMAGE_BY_CONTEXT` | The `istio-proxy` image of the ingress and east-west gateway pods; `@unknown` and `none` as for istiod. The test pods' sidecars get the injector's current build (normally istiod's), which can be newer than a gateway not restarted since an upgrade |
 | `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` container env (each `name=value`, or `name=` and its `valueFrom`, sorted) without `CLUSTER_ID`, the one variable that differs by member. It changes when a tuning profile's `spec.values.pilot.env` or a hand edit changes istiod's settings (tuning 004 leaves it out of its pass comparison: a profile changes it on purpose). `none` and `unknown` as for the images |
-| `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...); `none`: nodes without one; `no-nodes`: no nodes listed; `unrecognized`: a providerID without `<scheme>://` |
+| `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...); `none`: nodes without one; `no-nodes`: no nodes listed; `unrecognized`: a providerID without `<scheme>://`. Nodes without one beside a provider's (`aws+none`: a control-plane node, a virtual node) compare as that provider's |
+| `TUNING_OBJECTS_BY_CONTEXT` | The objects a tuning profile created, labelled `istio-scale-tests/tuning-profile` (DestinationRules, Sidecars, EnvoyFilters and Telemetries in any namespace), as `<profile>:<Kind>/<namespace>/<name>`; `none` outside a tuning run. Every report warns when a member had some (a tuning run killed before its revert: `tests/tuning/005-cleanup.sh` deletes them), since profile 04's root DestinationRule changes every proxy's clusters; tuning 004 leaves it out of its pass comparison |
 
 In every key `unknown` means not read (a failed read, with a warning; a `--dry-run`; a file from
 before the record), never none, and several values on one member are `+`-joined. An image whose
@@ -204,14 +205,19 @@ as `<name>:<tag>@unknown` (its pinned digest when the spec image has one), which
 takes as not read (a warning), never as a different build. A report whose
 inputs disagree for a member shows `mixed:<a>;<b>` there and says so in its body
 (`mixed:unknown,...` when only some inputs carry the key, with a warning that counts the inputs
-from before the key). A sweep reads the record again at its end, with each member's Kubernetes
-version and its first member's tuning levers and Sidecar egress hosts when its TSVs record them: a
-value that changed goes to `platform-drift.txt` in the sweep dir, and every report of the sweep says
-so in its body, naming the sweep dir (the record's keys and `KUBE_VERSIONS` read `mixed:`). A
-controlplane `--resume` stops on a definite difference from what the sweep's TSV records: a
-member's platform, mesh operator build (not its state), istiod or gateway proxy build, istiod env
-digest, node provider or Kubernetes version, or the source member's (the TSV's first) tuning
-baseline, Sidecar egress hosts or istiod CPU and memory limits; whatever it cannot read only warns.
+from before the key). A sweep reads the record once at its start and hands it to its steps in
+`platform-record.txt` in the sweep dir (each step still reads a member it recorded `unknown`).
+It reads the record again at its end, with each member's Kubernetes version and its first
+member's tuning levers, Sidecar egress hosts and istiod limits when its TSVs record them
+(`TUNING_BASELINE`: four levers, each `on`, `off` or `unknown`, as "Tuning levers" in
+[tests/controlplane/README.md](tests/controlplane/README.md) describes): a value that changed goes
+to `platform-drift.txt` in the sweep dir, and every report of the sweep says so in its body,
+naming the sweep dir and the value at the start and at the end (the record's keys read `mixed:`,
+as does `KUBE_VERSIONS` in churn's report, which merges it). A controlplane `--resume` stops on a
+definite difference from what the sweep's TSV records: a member's platform, mesh operator build
+(not its state), istiod or gateway proxy build, istiod env digest, tuning profile objects, node
+provider or Kubernetes version, or the source member's (the TSV's first) tuning baseline, Sidecar
+egress hosts or istiod CPU and memory limits; whatever it cannot read only warns.
 It also only warns when node allocatable, istiod's requests, a member's istiod replica count or the
 network topology differ (an autoscaler or an HPA moves some of them);
 [tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is

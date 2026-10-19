@@ -423,6 +423,15 @@ report_json() {
 			churn_convergence_p99_worst: (if .[13] == "N/A" then null else .[13] end),
 			churn_convergence_overflow_runs: (.[14] | num)
 		})')"
+	# The objects that grow with the members (the platform record, the warnings, the remote
+	# coverage, the istiod diagnostics) go in as files (--slurpfile), never as arguments: Linux
+	# refuses to run a command with one argument string over 128 KiB, the record of about 360
+	# members.
+	local plat_json warn_json rc_json diag_json
+	plat_json="$(platform_report_lines json "$PLATFORM_VALUES")"
+	warn_json="$(platform_warning_lines json "$REPORT_WARNINGS")"
+	rc_json="$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))"
+	diag_json="$(istiod_diag_report json "$RESULTS_DIR")"
 	jq -n \
 		--arg run_id           "${RUN_ID:-unknown}" \
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
@@ -449,13 +458,17 @@ report_json() {
 		--arg on_unreachable   "${ON_UNREACHABLE_STR:-unknown}" \
 		--arg run_config       "${RUN_CONFIG_STR:-unknown}" \
 		--arg run_config_sha256 "${RUN_CONFIG_SHA256_STR:-unknown}" \
-		--argjson platform     "$(platform_report_lines json "$PLATFORM_VALUES")" \
-		--argjson warnings     "$(platform_warning_lines json "$REPORT_WARNINGS")" \
-		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
+		--slurpfile platform   <(printf '%s\n' "$plat_json") \
+		--slurpfile warnings   <(printf '%s\n' "$warn_json") \
+		--slurpfile remote_coverage <(printf '%s\n' "$rc_json") \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
-		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
-		--argjson rows         "$rows" \
-		'{metadata: ({run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256} + $platform), warnings: $warnings, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		--slurpfile istiod_diag <(printf '%s\n' "$diag_json") \
+		--slurpfile rows       <(printf '%s\n' "$rows") \
+		'def one($x; $name): if ($x | length) == 1 then $x[0] else error("churn-dataplane report: \($name) is not one JSON value") end;
+		one($platform; "platform") as $platform | one($warnings; "warnings") as $warnings
+		| one($remote_coverage; "remote_coverage") as $remote_coverage | one($istiod_diag; "istiod_diag") as $istiod_diag
+		| one($rows; "rows") as $rows
+		| {metadata: ({run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256} + $platform), warnings: $warnings, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are

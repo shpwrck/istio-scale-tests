@@ -68,6 +68,13 @@ tsv() {
 	[ -z "$stderr" ]
 }
 
+@test "004 (S-B2): a record of 500 members goes through every format" {
+	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" tsv "${RES}/churn-a.tsv" <<-EOF
+	$(crow 1 99 N/A 10 N/A OK)
+	EOF
+	wide_record_report "$REPORT" "$RES" text csv md charts
+}
+
 @test "004: a TSV without the keys reads 'unknown (not recorded)', never this checkout's HEAD" {
 	NO_PLATFORM=1 tsv "${RES}/churn-old.tsv" "TUNING_BASELINE=unknown" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -188,7 +195,7 @@ warned_in_body() {
 	# The sweep's drift check (platform_drift_check) found istiod on ctx-a on another build.
 	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.6' > "${RES}/platform-drift.txt"
 	warned_in_body \
-		"ISTIOD_IMAGE_BY_CONTEXT changed during the sweep for ctx-a (platform-drift.txt in res): the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade during the sweep; for publishable figures, run the sweep again on one build" \
+		"ISTIOD_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in res): ctx-a from pilot:1.30.5 to pilot:1.30.6; the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade; for publishable figures, run the sweep again on one build" \
 		"PROXY_IMAGE_BY_CONTEXT could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same gateway proxy builds as the others" \
 		"input TSVs disagree on KUBE_VERSIONS for ctx-a (v1.34.1;v1.34.2): the report mixes runs on different Kubernetes versions; compare like with like" \
 		"KUBE_VERSIONS could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown or unreachable), while other inputs have a value: the report cannot tell whether those runs had the same Kubernetes versions as the others"

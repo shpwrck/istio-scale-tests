@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_compare_values, platform_collapse
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_compare_values, platform_collapse, platform_value_against
 
 RESULTS_DIR=""
 FORMAT="text"
@@ -36,8 +36,10 @@ compares each pass's platform and mesh builds with the reference pass's (the bas
 else the first pass with data): same, differs (see notes), unknown (see notes: not read
 or not recorded in one of them), baseline or reference (the pass compared with) or -
 (no data). An operator that differs only in its state is the same build; istiod's
-settings (ISTIOD_ENV_BY_CONTEXT) are not compared, since a profile changes them. The
-values follow the table, digests shortened to 12 hex digits.
+settings (ISTIOD_ENV_BY_CONTEXT) and a profile's objects (TUNING_OBJECTS_BY_CONTEXT) are
+not compared, since a profile changes them. The values follow the table, digests
+shortened to 12 hex digits: the reference pass's, then for each pass that differs or
+cannot be compared only the members that do not match (five at most, with a count).
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -316,14 +318,21 @@ for p in "${PASSES[@]}"; do
 done
 row "${cells[@]}"
 for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "warning: ${w}" >&2; done
-# plat_lines <pass> [keys CSV]: "KEY<TAB>value" of a pass's record (those keys, else every one),
-# a value every member shares once, digests shortened (the TSVs keep them in full).
+# plat_lines <pass> [keys CSV]: "KEY<TAB>value" of a pass's record, digests shortened (the TSVs
+# keep them in full): every key, a value every member shares once (the reference pass); or
+# those keys against REF's, only the members that do not match it (platform_value_against), so
+# a record of hundreds of members stays one short line.
 plat_lines() {
-	local kv
+	local kv ref
 	while IFS= read -r kv; do
 		[[ -n "$kv" ]] || continue
-		[[ -z "${2:-}" || ", ${2}, " == *", ${kv%%=*}, "* ]] || continue
-		printf '%s\t%s\n' "${kv%%=*}" "$(platform_short_digests "$(platform_collapse "${kv#*=}")")"
+		if [[ -z "${2:-}" ]]; then
+			printf '%s\t%s\n' "${kv%%=*}" "$(platform_short_digests "$(platform_collapse "${kv#*=}")")"
+			continue
+		fi
+		[[ ", ${2}, " == *", ${kv%%=*}, "* ]] || continue
+		ref="$(sed -n "s/^${kv%%=*}=//p" <<<"${PLAT[$REF]:-}" | head -n 1)"
+		printf '%s\t%s\n' "${kv%%=*}" "$(platform_short_digests "$(platform_value_against "${kv%%=*}" "${kv#*=}" "${ref:-unknown}")")"
 	done <<<"${PLAT[$1]:-}"
 }
 # plat_head <pass>: the heading of a pass's note after the table (the keys it differs on or

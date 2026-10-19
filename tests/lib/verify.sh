@@ -192,6 +192,7 @@ EXTRACTED_PATTERNS=(
 	'platform_member_value() {'
 	'platform_probe_save() {'
 	'platform_probe_load() {'
+	'platform_probe_share() {'
 	'platform_preamble_lines() {'
 	'platform_md_row() {'
 	'platform_collapse() {'
@@ -208,6 +209,8 @@ EXTRACTED_PATTERNS=(
 	'platform_resume_check() {'
 	'platform_drift_check() {'
 	'platform_compare_values() {'
+	'platform_compare_members() {'
+	'platform_value_against() {'
 	'platform_summary() {'
 	'platform_short_digests() {'
 )

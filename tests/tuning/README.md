@@ -85,11 +85,14 @@ baseline, the first pass with data's, which reads `reference`; the baseline read
 `same`, `differs (see notes)`, `unknown (see notes)` (a value not read or not recorded in one of
 them, or an image whose digest is `@unknown`: no pod had started) or `-` (no data). A mesh
 operator that differs only in its state (`Available`, `Unavailable`) is the same build. The row
-leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`), which a profile changes on purpose
-(`spec.values.pilot.env`); the TSVs keep them. The record follows the table once, digests
-shortened to 12 hex digits, then each
-pass that differs or cannot be compared, with those keys' values (one line for a pass whose every
-value is unknown, such as one from before the record). A pass that differs (an operator upgrade
+leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`) and the profile's objects
+(`TUNING_OBJECTS_BY_CONTEXT`), which a profile changes on purpose (`spec.values.pilot.env`, the
+objects labelled `istio-scale-tests/tuning-profile`); the TSVs keep them. The record follows the
+table once, digests shortened to 12 hex digits, then each pass that differs or cannot be compared,
+with those keys' values: one value when every member shares it, else only the members that do not
+match the reference pass, five at most, with a count (`m7=proxyv2:1.30.6 (1 of 500 members; the
+other 499 match)`); one line for a pass whose every value is unknown, such as one from before the
+record. A pass that differs (an operator upgrade
 or a gateway roll between passes) or cannot be compared gets a warning in the notes and on
 stderr: its change against the baseline is then not the profile's alone (without a baseline, its
 difference from the reference pass is not the profiles' alone).

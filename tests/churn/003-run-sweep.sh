@@ -71,6 +71,7 @@ Environment:
   CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
   CHURN_BASE_REPLICAS, CHURN_SETTLE_SEC, CHURN_POLL_INTERVAL_MS, CHURN_WAIT_TIMEOUT_SEC
   (read by 001/002; the sweep checks them before the first setup, --dry-run included).
+$(platform_help_lines)
 EOF
 }
 
@@ -205,9 +206,11 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
-# The platform record of every member, read once here; each 002 inherits it (exported) and
-# the placeholders write it (tests/lib/platform.sh). --dry-run reads nothing (unknown).
+# The platform record of every member, read once here; each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the placeholders write it
+# (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$SWEEP_DIR"
 
 # Write a one-row placeholder TSV for a combo whose setup or probe failed before
 # any row was written, so the report still counts it (n_total, not n_valid).

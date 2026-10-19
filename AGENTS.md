@@ -90,9 +90,11 @@ which wins over the upstream docs there when they disagree.
   `platform_md_row` after its `| Run config |` row; every suite report merges the record over its
   inputs with `platform_report_values` and prints `platform_report_warnings` in every format's body
   (tuning 004 compares each pass's record with the reference pass's, the baseline's or else the
-  first pass with data's, over `PLATFORM_PASS_KEYS`, every record key but `ISTIOD_ENV_BY_CONTEXT`,
-  in its `Platform record` row and notes instead); a sweep calls `platform_drift_check` after its
-  last step, before its reports; every script that sources
+  first pass with data's, over `PLATFORM_PASS_KEYS`, every record key but `ISTIOD_ENV_BY_CONTEXT`
+  and `TUNING_OBJECTS_BY_CONTEXT`, in its `Platform record` row and notes instead); a suite's sweep
+  calls `platform_probe_share` right after its `platform_probe` and `platform_drift_check` after
+  its last step, before its reports (tuning 003 calls neither: each pass's own probe reads the
+  record, and 004 compares the passes); every script that sources
   `platform.sh` calls `platform_validate` with its argument checks (`tests/lib/platform.sh`;
   `tests/lib/test/config-suites.bats` and `platform.bats` check the pairing). `TEST_PLATFORM` and
   `PLATFORM_READ_TIMEOUT` are keys of every suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).

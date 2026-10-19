@@ -195,3 +195,8 @@ two_pairs() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	refute_output --partial "WARNING:"
 }
+
+@test "005 (S-B2): a record of 500 members goes through every format; json lists them all" {
+	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" two_pairs
+	wide_record_report "$REPORT" "$RES" text csv json md charts
+}

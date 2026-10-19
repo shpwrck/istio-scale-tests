@@ -738,12 +738,6 @@ gateway resets are now listed at the top of
   kind lab cannot remove one read-only). Deleting a removed member's remote secrets from the other
   members when it leaves (External Secrets does not, `charts/hub-mesh-push-secrets/README.md`)
   would spare the manual delete the gate asks for.
-- A tuning profile that adds objects (04's root DestinationRule) and is left applied after a
-  killed tuning run is not in other suites' records: `ISTIOD_ENV_BY_CONTEXT` catches the env
-  profiles (01-03) only. Tuning itself refuses to start over a leftover `active-profile` marker,
-  and `tests/tuning/005-cleanup.sh` removes the labelled objects. Recording the objects labelled
-  `istio-scale-tests/tuning-profile` in istio-system would show such a leftover in every suite's
-  results.
 
 ## Validation environment
 

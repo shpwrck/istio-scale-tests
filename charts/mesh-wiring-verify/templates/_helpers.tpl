@@ -32,8 +32,14 @@ Empty without names: the gate then counts (expectedMembers).
 {{- fail (printf "expectedClusters: %q is not a cluster name (lowercase letters, digits, '-' and '.'): list each mesh member's Istio cluster ID" .) -}}
 {{- end -}}
 {{- end -}}
-{{- if ne (len $names) (len (uniq $names)) -}}
-{{- fail (printf "expectedClusters names a member more than once: %s" (join "," $names)) -}}
+{{- $seen := dict -}}
+{{- $dups := list -}}
+{{- range $names -}}
+{{- if hasKey $seen . }}{{ $dups = append $dups . }}{{ end -}}
+{{- $_ := set $seen . true -}}
+{{- end -}}
+{{- if $dups -}}
+{{- fail (printf "expectedClusters names %s more than once (%s)" (join "," (uniq $dups)) (join "," $names)) -}}
 {{- end -}}
 {{- $self := .Values.clusterName | default "" | toString -}}
 {{- if not (regexMatch $dns $self) -}}

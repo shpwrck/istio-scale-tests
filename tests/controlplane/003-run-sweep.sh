@@ -284,6 +284,7 @@ Environment:
   CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
+$(platform_help_lines)
 EOF
 }
 
@@ -1326,12 +1327,14 @@ trap 'stop_peak_metrics_poller 2>/dev/null || true' EXIT
 # --config also gets the run-config-<RUN_ID>.env replay copy; a resumed one keeps the
 # config it started with.
 if ((! DRY_RUN)); then
-	# The platform record of every member, read once before the first combo; each 002
-	# inherits it (exported), the pre-created preamble writes it (tests/lib/platform.sh).
+	# The platform record of every member, read once before the first combo; each 002 reads
+	# it from platform-record.txt in the sweep dir (platform_probe_share), the pre-created
+	# preamble writes it (tests/lib/platform.sh).
 	platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 	# --resume appends to a TSV whose preamble keeps the record it started with: other builds or
 	# tuning levers stop the run here, before the metrics preflight can wait.
 	[[ -z "$RESUME_DIR" ]] || platform_resume_check "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "$(IFS=,; echo "${CONTEXTS[*]}")" "${CONTEXTS[0]}"
+	platform_probe_share "$OUTPUT_DIR"
 	metrics_preflight
 	precreate_tsv_preamble
 	[[ -n "$RESUME_DIR" ]] || config_snapshot "$OUTPUT_DIR" "$RUN_ID"

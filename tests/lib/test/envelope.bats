@@ -227,6 +227,7 @@ cat <<'JSON'
 "istiod_image_by_context":"mesh-a=pilot:1.30.5@${db},mesh-b=mixed:pilot:1.30.5@${db};pilot:1.30.6@${dc}",
 "proxy_image_by_context":"mesh-a=proxyv2:1.30.5@${dc},mesh-b=proxyv2:1.30.5@${dc}",
 "istiod_env_by_context":"mesh-a=0123456789ab,mesh-b=0123456789ab",
+"tuning_objects_by_context":"mesh-a=none,mesh-b=none",
 "capacity":{"node_alloc_cpu_m":"4000","node_alloc_mem_mi":"16093"},
 "achieved_scale":{"connected_proxies_max":"10","connected_proxies_cluster_max":"10","istiod_cpu_peak_pct_of_limit_max":"20","istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30","istiod_rss_pct_of_limit_max":"30","node_cpu_pct_max":"28","node_mem_pct_max":"35"},
 "sla":{"verdict":"CAUTION","headline":"node figures left out: the nodes are kind's"},
@@ -252,7 +253,7 @@ SH
 	v="$(grep -n '^> \*\*CAUTION\*\*' <<<"$output" | cut -d: -f1)"
 	((w1 < w2 && w2 < t1 && t1 < v)) || { echo "warnings at ${w1} and ${w2}, topology at ${t1}, verdict at ${v}"; false; }
 	# H17: ", " between the groups, " and " between a mixed member's builds, "; " between fields.
-	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member), mixed: pilot:1.30.5@sha256:bbbbbbbbbbbb and pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc; istiod env 0123456789ab |"
+	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member), mixed: pilot:1.30.5@sha256:bbbbbbbbbbbb and pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc; istiod env 0123456789ab; tuning objects none |"
 	# The envelope is pasted into campaign docs: no member names, no full digests.
 	refute_output --partial "mesh-a="
 	refute_output --partial "mesh-b="
@@ -269,7 +270,7 @@ SH
 	assert_success
 	assert_output ""
 	run env_limit_drift_warning 1000 4096 2000 4096
-	assert_output "istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now): the % of limit figures below use the recorded one, the Provisioned column the one read now; the limit changed during or after the sweep (an Argo CD sync, a tuning profile or a hand edit)"
+	assert_output "istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now): the window-peak CPU and RSS % below use the recorded one, the kubectl top % each row's own (read with it), the Provisioned column the one read now; the limit changed during or after the sweep (an Argo CD sync, a tuning profile or a hand edit)"
 	run env_limit_drift_warning 1000 4096 2000 8192
 	assert_output --partial "(CPU 1000m recorded, 2000m now; memory 4096Mi recorded, 8192Mi now)"
 	# Not read on a side: nothing to compare.
@@ -297,12 +298,53 @@ _lim_kubectl() {
 	assert_output --partial "> **Warning:** istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now)"
 	assert_output --partial "| **istiod CPU (window peak)** | 500m / 2000m | 20% of 1000m |"
 	assert_output --partial "| **istiod memory (RSS — OOM headroom)** | 2048Mi / 4096Mi | 30% of 4096Mi |"
+	# The kubectl top figures divide by each row's own limit (002, read with the row), not by the
+	# recorded one: no "of 1000m" there.
+	assert_output --partial "| istiod CPU (kubectl top at window end) | 500m / 2000m | 10% of each row's limit |"
+	assert_output --partial "| istiod memory (kubectl top) | 2048Mi / 4096Mi | 30% of each row's limit |"
 	[ "$(grep -n '^> \*\*Warning:\*\* istiod' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)" ]
 	# The same limit: no warning.
 	sed -i 's/"istiod_cpu_limit_m":"1000"/"istiod_cpu_limit_m":"2000"/' "$rep"
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
 	refute_output --partial "**Warning:**"
 	assert_output --partial "| 20% of 2000m |"
+}
+
+@test "env_pct_cell: a % of limit cell names its limit only when both are numbers; a value not read stays bare" {
+	run env_pct_cell 20 1000 m
+	assert_output "20% of 1000m"
+	run env_pct_cell 12.5 4096 Mi
+	assert_output "12.5% of 4096Mi"
+	run env_pct_cell 10 row
+	assert_output "10% of each row's limit"
+	# No numeric limit: the % alone; no numeric %: the value as it is, never "unknown%".
+	run env_pct_cell 20 unknown m
+	assert_output "20%"
+	run env_pct_cell 28
+	assert_output "28%"
+	run env_pct_cell unknown 2000 m
+	assert_output "unknown"
+	run env_pct_cell N/A row
+	assert_output "N/A"
+	run env_pct_cell ""
+	assert_output "unknown"
+}
+
+@test "render_scale_envelope: with kubectl top down, its cells read unknown, not unknown% of a limit" {
+	source "${ROOT}/tests/lib/platform.sh"
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh"
+	mkdir -p "$d"
+	fake_cp_report "$rep" '[]'
+	sed -i 's/"node_alloc_mem_mi":"16093"/"node_alloc_mem_mi":"16093","istiod_cpu_limit_m":"2000","istiod_mem_limit_mi":"4096"/; s/"istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30"/"istiod_cpu_pct_of_limit_max":"unknown","istiod_mem_pct_of_limit_max":"unknown"/; s/"node_cpu_pct_max":"28","node_mem_pct_max":"35"/"node_cpu_pct_max":"unknown","node_mem_pct_max":"unknown"/' "$rep"
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
+	assert_success
+	assert_output --partial "| istiod CPU (kubectl top at window end) | 500m / 2000m | unknown |"
+	assert_output --partial "| istiod memory (kubectl top) | 2048Mi / 4096Mi | unknown |"
+	assert_output --partial "| Worker-node CPU | — | unknown |"
+	assert_output --partial "| Worker-node memory | — | unknown |"
+	# The figures from the /metrics scrape still name the recorded limit.
+	assert_output --partial "| **istiod CPU (window peak)** | 500m / 2000m | 20% of 2000m |"
+	refute_output --partial "unknown%"
 }
 
 @test "render_scale_envelope: it needs platform.sh (platform_summary)" {

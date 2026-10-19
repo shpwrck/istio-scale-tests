@@ -179,16 +179,19 @@ reach_classify() {
 # colon-separated hex groups (an uncompressed address has 8). Each unbracketed form
 # starts at the text start or after a non-alphanumeric character, so `code:-1`,
 # HH:MM:SS (3 groups), Envoy::Http and 268435581:SSL survive. Reason tokens such as
-# CERTIFICATE_VERIFY_FAILED have no dots and survive.
+# CERTIFICATE_VERIFY_FAILED have no dots and survive, and so does Go's Client.Timeout (kubectl's
+# "request canceled (Client.Timeout exceeded ...)"), which names no host.
 # shellcheck disable=SC2329
 reach_sanitize() {
 	local out
 	out="$(printf '%s' "$1" | tr '\t\r\n' '   ' | sed -E \
+		-e 's/Client\.Timeout/Client@Timeout/g' \
 		-e 's/\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(%[0-9A-Za-z_.-]+)?]/<ip>/g' \
 		-e 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g' \
 		-e 's/(^|[^0-9A-Za-z_])[0-9A-Fa-f:]*([0-9A-Fa-f]::|::[0-9A-Fa-f])([0-9A-Fa-f:]*[0-9A-Fa-f])?(%[0-9A-Za-z_.-]+)?/\1<ip>/g' \
 		-e 's/(^|[^0-9A-Za-z_])([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}(%[0-9A-Za-z_.-]+)?/\1<ip>/g' \
 		-e 's/([A-Za-z0-9_-]+\.)+[A-Za-z][A-Za-z0-9-]*/<host>/g' \
+		-e 's/Client@Timeout/Client.Timeout/g' \
 		-e 's/ +/ /g' -e 's/^ //' -e 's/ $//' 2>/dev/null)" || out=""
 	[[ -n "$out" ]] || out="-"
 	printf '%s\n' "${out:0:256}"

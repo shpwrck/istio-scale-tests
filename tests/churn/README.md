@@ -86,18 +86,20 @@ before they were recorded reads `unknown (not recorded)`, and inputs that differ
 It also records `KUBE_VERSIONS` and the platform record
 ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
 platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
-istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-`ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`,
-`ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env without `CLUSTER_ID`),
-read before the first churn event (a sweep reads it once for all its combos, and again after the
-last one: a build, istiod setting, tuning lever or Kubernetes version that changed in between is
-written to `platform-drift.txt` in the sweep dir). An image carries the digest its pods run
-(`@unknown` when none has started: not read, never another build); `none` means no such pod.
+istiod's settings, the nodes' provider and any tuning profile objects (`PLATFORM_BY_CONTEXT`,
+`MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`,
+`NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env
+without `CLUSTER_ID`; `TUNING_OBJECTS_BY_CONTEXT`: `none` outside a tuning run), read before the
+first churn event (a sweep reads it once for all its combos and hands it to them in
+`platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
+setting, tuning lever, tuning profile object or Kubernetes version that changed in between is
+written to `platform-drift.txt` there). An image carries the digest its pods run (`@unknown`
+when none has started: not read, never another build); `none` means no such pod.
 `004` prints them in every format (text, csv, md, charts; it has no json), per member as
 `<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ (`KUBE_VERSIONS`:
-different Kubernetes versions), a value could not be read in some of them, or the sweep's record
-changed; an operator that differs only in its state (`Available`, `Unavailable`) is not mixed. A
-file without them predates the record (the suite
+different Kubernetes versions), a value could not be read in some of them, the sweep's record
+changed or a tuning profile's objects were in place; an operator that differs only in its state
+(`Available`, `Unavailable`) is not mixed. A file without them predates the record (the suite
 supported only OpenShift with OSSM then); its values read `unknown`.
 
 Every source or remote istiod status other than `0` also saves the restart evidence to

@@ -29,6 +29,8 @@
 #                                              count, first Running pod
 #   platform_probe <ctxs_csv>               -> read each member's platform and mesh builds once
 #                                              (see "The platform record" below)
+#   platform_probe_share <dir>              -> hand a sweep's record to the steps it runs
+#                                              (<dir>/platform-record.txt)
 #   platform_probe_save <file>, platform_probe_load <file>
 #                                           -> keep the record between two phases of one run
 #   platform_probed_contexts                -> the members of this shell's last platform_probe
@@ -65,10 +67,18 @@
 #   platform_compare_values <ref> <values> [<key>...]
 #                                           -> KEY<TAB>same|differs|unknown per record key (or per
 #                                              <key>) of two platform_report_values outputs
+#   platform_compare_members <key> <ref> <value>
+#                                           -> the members of two *_BY_CONTEXT values that do
+#                                              not match, one line each
+#   platform_value_against <key> <value> <ref>
+#                                           -> a value shown against a reference one: only the
+#                                              members that do not match, five at most
 #   platform_summary <by_context value>     -> the value without member names, digests shortened
 #   platform_short_digests <text>           -> sha256 digests shortened to 12 hex digits
 #   platform_report_is_key <key>            -> return 0 for a record key
 #   platform_value_has <value> <word>       -> return 0 when a member's value holds <word>
+#   platform_help_lines [timeout]           -> a --help's Environment lines for TEST_PLATFORM and
+#                                              PLATFORM_READ_TIMEOUT (or the latter only)
 #
 # Requires KUBECTL (resolve_kubectl) and TEST_PLATFORM (config/options.env: auto,
 # kubernetes or openshift; read at call time). With DRY_RUN=1 and TEST_PLATFORM=auto no
@@ -119,27 +129,39 @@
 #                             valueFrom's JSON, sorted), without CLUSTER_ID (the one variable that
 #                             differs by member); a tuning profile's spec.values.pilot.env or a
 #                             hand edit changes it. none without an istiod pod (_platform_env_digest)
+#   TUNING_OBJECTS_BY_CONTEXT the objects a tuning profile created (tests/tuning: labelled
+#                             istio-scale-tests/tuning-profile, of the kinds a profile may create:
+#                             PLATFORM_TUNING_KINDS, in any namespace) as <profile>:<Kind>/<ns>/
+#                             <name>, sorted; none when there are none (the usual state: a tuning
+#                             run deletes them when it reverts its profile). A killed tuning run
+#                             leaves them, and a root-namespace DestinationRule (profile 04) changes
+#                             every proxy's clusters, which no other key shows
 # Images drop the registry host and path (a mirror can name an internal host) and carry the
-# sha256 the pods run (the imageID after "@", or a bare sha256:... imageID, as kind gives a
-# loaded image). Only the pods whose container started (it reports a digest) count, those not
+# sha256 the pods run (the sha256:<64 hex> in the imageID: after "@", bare as kind gives a loaded
+# image, or after docker:// as cri-dockerd gives a local one). Only the pods whose container started (it reports a digest) count, those not
 # terminated (an evicted pod) first; when none has, each pod's spec image with @unknown, or with
 # the digest the spec pins. Every comparison takes @unknown as not read (a warning), never as
 # another build. Several values on one member are "+"-joined (a rollout). Every value keeps only
 # [A-Za-z0-9_.:/@+-] (anything else becomes _), so it holds no tab, newline, comma, = or |.
 # A file written before the record has none of these keys (the suites supported only OpenShift
 # with OSSM then), and its values read unknown in a report; one written before
-# ISTIOD_ENV_BY_CONTEXT has the others.
+# ISTIOD_ENV_BY_CONTEXT or TUNING_OBJECTS_BY_CONTEXT has the others.
 #
-# A sweep calls platform_probe once with all its members, before its first step; the record
-# is exported (PLATFORM_PROBE_ROWS: one line per member, <ctx> and the six values
-# (PLATFORM_ROW_KEYS) tab-separated), so the steps it runs reuse it for the members it covers
-# and read only the others, like RUN_CONFIG, and those whose platform it recorded unknown (a
-# transient failure at the sweep's start; a phase that reuses a saved record reads nothing:
-# platform_probe_load). A standalone step reads its own members. With DRY_RUN=1 nothing is read
-# and every value is unknown. After its last step a sweep reads its members again
-# (platform_drift_check): a build, istiod setting, tuning lever or Kubernetes version that
-# changed while it ran goes to platform-drift.txt in the sweep dir, which every report of the
-# sweep says in its body (the record's keys and KUBE_VERSIONS merged as a second value, mixed:).
+# A sweep calls platform_probe once with all its members, before its first step, then
+# platform_probe_share: the record (PLATFORM_PROBE_ROWS, never exported: one line per member,
+# <ctx> and the seven values (PLATFORM_ROW_KEYS) tab-separated) goes to platform-record.txt in
+# the sweep dir, whose path is exported (PLATFORM_PROBE_FILE), and each step it runs reads that
+# file when it sources this one. No environment string holds it: Linux refuses to run any
+# command whose environment holds a string over 128 KiB, the record of about 400 members. The
+# steps reuse it for the members it covers and read only the others, like RUN_CONFIG, and those
+# whose platform it recorded unknown (a transient failure at the sweep's start; a phase that
+# reuses a saved record reads nothing: platform_probe_load). A standalone step reads its own
+# members. With DRY_RUN=1 nothing is read, every value is unknown and no file is written. After
+# its last step a sweep reads its members again (platform_drift_check): a build, istiod setting
+# or limit, tuning lever, tuning profile object or Kubernetes version that changed while it ran
+# goes to platform-drift.txt in the sweep dir, which every report of the sweep says in its body,
+# naming each member's value at the start and at the end (the record's keys merge it as a second
+# value, mixed:; so does KUBE_VERSIONS in a report that merges it, churn's).
 # controlplane 003 --resume compares the record, and the once-recorded values its report applies
 # to every row, with what its TSV holds (platform_resume_check).
 # shellcheck shell=bash
@@ -153,24 +175,46 @@ PLATFORM_SAIL_NS=sail-operator
 PLATFORM_SAIL_DEPLOY=sail-operator
 PLATFORM_OSSM_NS=openshift-operators
 PLATFORM_OSSM_PACKAGE=servicemeshoperator3
+# The label and the kinds of the objects a tuning profile creates (TUNING_OBJECTS_BY_CONTEXT); keep
+# in sync with tests/tuning/lib/tuning.py (LABEL, ALLOWED_KINDS) and tests/tuning/005-cleanup.sh
+# (LABEL, KINDS), which platform.bats checks.
+PLATFORM_TUNING_LABEL=istio-scale-tests/tuning-profile
+PLATFORM_TUNING_KINDS=destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io
 # kubectl --request-timeout of each platform-record read (config/options.env; the same default
 # for a caller that did not source it). platform_validate checks it.
 PLATFORM_READ_TIMEOUT="${PLATFORM_READ_TIMEOUT:-20s}"
 # The record's preamble keys, in order; the reports print the same list.
 # shellcheck disable=SC2034  # read by the reports
 PLATFORM_KEYS=(PLATFORM TEST_PLATFORM PLATFORM_BY_CONTEXT MESH_OPERATOR_BY_CONTEXT ISTIOD_IMAGE_BY_CONTEXT
-	PROXY_IMAGE_BY_CONTEXT NODE_PROVIDER_BY_CONTEXT ISTIOD_ENV_BY_CONTEXT)
+	PROXY_IMAGE_BY_CONTEXT NODE_PROVIDER_BY_CONTEXT ISTIOD_ENV_BY_CONTEXT TUNING_OBJECTS_BY_CONTEXT)
 # The per-member keys, in the order of a PLATFORM_PROBE_ROWS line's values (after <ctx>).
 PLATFORM_ROW_KEYS=(PLATFORM_BY_CONTEXT MESH_OPERATOR_BY_CONTEXT ISTIOD_IMAGE_BY_CONTEXT PROXY_IMAGE_BY_CONTEXT
-	NODE_PROVIDER_BY_CONTEXT ISTIOD_ENV_BY_CONTEXT)
-# The keys a tuning pass is compared on (tuning 004): every record key but istiod's settings,
-# which a profile changes on purpose (spec.values.pilot.env).
+	NODE_PROVIDER_BY_CONTEXT ISTIOD_ENV_BY_CONTEXT TUNING_OBJECTS_BY_CONTEXT)
+# The keys a tuning pass is compared on (tuning 004): every record key but istiod's settings and
+# the tuning objects, which a profile changes on purpose (spec.values.pilot.env, its resources).
 # shellcheck disable=SC2034  # read by tuning 004
 PLATFORM_PASS_KEYS=(PLATFORM TEST_PLATFORM PLATFORM_BY_CONTEXT MESH_OPERATOR_BY_CONTEXT ISTIOD_IMAGE_BY_CONTEXT
 	PROXY_IMAGE_BY_CONTEXT NODE_PROVIDER_BY_CONTEXT)
 # The file platform_drift_check writes into a sweep dir and platform_merge_by_context reads
 # next to each input (not *.tsv, so no report or tuning glob takes it for data).
 PLATFORM_DRIFT_FILE="platform-drift.txt"
+# The file platform_probe_share writes into a sweep dir: the record the sweep read at its start,
+# which its steps read (PLATFORM_PROBE_FILE).
+PLATFORM_RECORD_FILE="platform-record.txt"
+
+# A step a sweep runs starts from the sweep's record, read here as this file is sourced
+# (platform_probe_share); its platform_probe still reads again a member the record holds
+# unknown. PLATFORM_PROBE_ROWS is never exported, even when it came in so (a test): no command
+# this shell runs gets it in its environment.
+export -n PLATFORM_PROBE_ROWS
+if [[ -z "${PLATFORM_PROBE_ROWS:-}" && -n "${PLATFORM_PROBE_FILE:-}" ]]; then
+	if [[ -r "$PLATFORM_PROBE_FILE" ]]; then
+		PLATFORM_PROBE_ROWS="$(<"$PLATFORM_PROBE_FILE")"
+		[[ -z "$PLATFORM_PROBE_ROWS" ]] || PLATFORM_PROBE_ROWS+=$'\n'
+	else
+		echo "warning: cannot read the sweep's platform record (PLATFORM_PROBE_FILE: ${PLATFORM_PROBE_FILE}); this step reads its own members' record" >&2
+	fi
+fi
 
 # platform_of <ctx>: TEST_PLATFORM kubernetes or openshift is used as is. auto asks the
 # cluster whether it serves security.openshift.io/v1 (SecurityContextConstraints). It never
@@ -261,7 +305,7 @@ platform_gitops_namespace() {
 
 # platform_pod_filter <container>: jq program over a pod list, "<images>\t<fingerprint>\t
 # <running>\t<pod>". images: the container's image without its registry host and path plus the
-# sha256 that ran (the imageID's, after "@" or a bare sha256:...), of the pods whose container
+# sha256 that ran (the sha256:<64 hex> in the imageID, wherever it stands), of the pods whose container
 # started (it reports one) or whose spec pins a digest, those not terminated (Failed or
 # Succeeded: an evicted pod) when there are any; when none started, every pod's spec image with
 # @unknown (or the digest it pins); unique, "+"-joined; "none" without such a pod. A Pending or
@@ -278,7 +322,7 @@ platform_pod_filter() {
 	    | select($img != "")
 	    | {ref: ($img | sub("^.*/"; "")), pin: ($img | test("@")),
 	       end: (($p.status.phase // "") | test("^(Failed|Succeeded)$")),
-	       dig: ($id | if test("@sha256:") then sub("^.*@"; "") elif test("^sha256:") then . else "" end)}]
+	       dig: ([$id | capture("(?<d>sha256:[0-9a-f]{64})")][0].d // "")}]
 	   | (map(select(.pin or .dig != "")) as $ran | [$ran[] | select(.end | not)] as $live
 	      | if ($live | length) > 0 then $live elif ($ran | length) > 0 then $ran else . end)
 	   | map(.ref + (if .pin then "" elif .dig != "" then "@" + .dig else "@unknown" end))
@@ -290,10 +334,18 @@ platform_pod_filter() {
 }
 
 # _platform_sanitize <value>: one record value: [A-Za-z0-9_.:/@+-] only, unknown when empty.
+# _platform_sanitize_to <name> <value>: the same into variable <name>, in this shell (no fork: a
+# loop over 500 members calls it per member).
 # shellcheck disable=SC2329
 _platform_sanitize() {
-	local v="${1//[^A-Za-z0-9_.:\/@+-]/_}"
-	printf '%s\n' "${v:-unknown}"
+	local _pl_sv
+	_platform_sanitize_to _pl_sv "$1"
+	printf '%s\n' "$_pl_sv"
+}
+# shellcheck disable=SC2329
+_platform_sanitize_to() {
+	local _pl_st="${2//[^A-Za-z0-9_.:\/@+-]/_}"
+	printf -v "$1" '%s' "${_pl_st:-unknown}"
 }
 
 # _platform_read <ctx> <out> <kubectl args...>: one bounded read (-o json) into <out>, stderr in
@@ -311,13 +363,28 @@ _platform_read() {
 }
 
 # _platform_warn <ctx> <what> <err file>: one warning for values recorded as unknown, with the
-# first 300 bytes of the read's stderr, addresses and host names masked (reach_sanitize).
+# first 300 bytes of the read's stderr, addresses and host names masked (reach_sanitize), and the
+# knob to raise when the read ran out of time (_platform_timed_out).
 # shellcheck disable=SC2329
 _platform_warn() {
-	local why
+	local why hint=""
 	why="$(head -c 300 "$3" 2>/dev/null)" || why=""
+	! _platform_timed_out "$3" || hint="; $(_platform_timeout_hint)"
 	why="$(reach_sanitize "${why:-no answer}")"
-	echo "warning: ${1}: could not read ${2}; recorded as unknown: ${why}" >&2
+	echo "warning: ${1}: could not read ${2}; recorded as unknown: ${why}${hint}" >&2
+}
+
+# _platform_timed_out <err file>: return 0 when a read's stderr says it ran out of time (kubectl's
+# client timeout, a deadline, or the server's Timeout answer to the request's timeout).
+# shellcheck disable=SC2329
+_platform_timed_out() {
+	grep -qiE 'Client\.Timeout|deadline exceeded|i/o timeout|timeout exceeded|\(Timeout\)|timed out' "$1" 2>/dev/null
+}
+
+# _platform_timeout_hint: what to do about a read that ran out of time.
+# shellcheck disable=SC2329
+_platform_timeout_hint() {
+	echo "no answer within PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}); raise it in config/options.env or --config for a large or slow member"
 }
 
 # _platform_env_digest <pods.json> <workdir>: a member's ISTIOD_ENV_BY_CONTEXT from the istio-system
@@ -337,7 +404,7 @@ _platform_env_digest() {
 		[.items[]? | select(.metadata.labels.app? == "istiod") | . as $p
 		 | ([$p.spec.containers[]? | select(.name == "discovery")][0]) as $c
 		 | select($c != null)
-		 | {run: ([$p.status.containerStatuses[]? | select(.name == "discovery")][0].imageID // "" | test("sha256:")),
+		 | {run: ([$p.status.containerStatuses[]? | select(.name == "discovery")][0].imageID // "" | test("sha256:[0-9a-f]{64}")),
 		    end: (($p.status.phase // "") | test("^(Failed|Succeeded)$")),
 		    env: ([$c.env[]? | select(.name != "CLUSTER_ID")
 		      | .name + "=" + (if .valueFrom != null then (.valueFrom | canon) else (.value // "") end)] | sort)}]
@@ -366,14 +433,16 @@ _platform_env_digest() {
 }
 
 # _platform_probe_member <ctx> <workdir>: "<ctx>\t<platform>\t<operator>\t<istiod>\t<proxy>\t
-# <nodes>\t<istiod env>" on stdout, a warning per value it could not read on stderr. After a read
-# the member did not answer, the rest are not tried (each would wait out the timeout) and read
-# unknown. The platform is what the member serves, whatever TEST_PLATFORM says (a disagreement
-# warns); the operator is looked for on it, or on TEST_PLATFORM's when the member could not be
-# asked. istiod's env comes from the same pod list as the images (no other read).
+# <nodes>\t<istiod env>\t<tuning objects>" on stdout, a warning per value it could not read on
+# stderr. After a read the member did not answer, the rest are not tried (each would wait out the
+# timeout) and read unknown. The platform is what the member serves, whatever TEST_PLATFORM says
+# (a disagreement warns); the operator is looked for on it, or on TEST_PLATFORM's when the member
+# could not be asked. istiod's env comes from the same pod list as the images (no other read). The
+# tuning objects: one list of PLATFORM_TUNING_KINDS by PLATFORM_TUNING_LABEL in every namespace (a
+# kind the member does not serve makes it unknown, never none).
 # shellcheck disable=SC2329
 _platform_probe_member() {
-	local ctx="$1" w="$2" platform look op=unknown istiod=unknown proxy=unknown nodes=unknown ienv=unknown rc=0 f
+	local ctx="$1" w="$2" platform look op=unknown istiod=unknown proxy=unknown nodes=unknown ienv=unknown tobj=unknown rc=0 f last=""
 	local tp="${TEST_PLATFORM:-auto}"
 	local -a _pl_val=()
 	# The digests of the operator's pods that started (those not terminated first); @unknown when
@@ -386,7 +455,7 @@ _platform_probe_member() {
 		  | ([.items[]? | select(.kind == "Pod") | select((.metadata.labels // {}) as $l | $sel | to_entries | all(.value == $l[.key]))
 		      | {end: ((.status.phase // "") | test("^(Failed|Succeeded)$")),
 		         dig: ([.status.containerStatuses[]? | select(.name == $name) | .imageID][0] // ""
-		           | if test("@sha256:") then sub("^.*@"; "") elif test("^sha256:") then . else "" end)}
+		           | [capture("(?<d>sha256:[0-9a-f]{64})")][0].d // "")}
 		      | select(.dig != "")]) as $ran
 		  | ((if any($ran[]; .end | not) then [$ran[] | select(.end | not)] else $ran end) | map(.dig) | unique) as $digs
 		  | ($img | split("/") | last // "" | split("@")) as $ref
@@ -405,8 +474,12 @@ _platform_probe_member() {
 	local nodes_jq='[.items[]? | (.spec.providerID // "")
 		| if . == "" then "none" elif test("^[A-Za-z][A-Za-z0-9.-]*://") then sub("://.*$"; "") else "unrecognized" end]
 		| unique | if length == 0 then "no-nodes" else join("+") end'
+	# shellcheck disable=SC2016  # jq program: $label is a jq variable
+	local tobj_jq='[.items[]? | "\(.metadata.labels[$label] // "unlabelled"):\(.kind // "unknown")/\(.metadata.namespace // "-")/\(.metadata.name // "-")"]
+		| unique | if length == 0 then "none" else join("+") end'
 	if ! platform="$(_platform_served "$ctx" 2>"${w}/platform.err")"; then
 		platform=unknown
+		last="${w}/platform.err"
 		if [[ "$tp" == auto ]]; then
 			_platform_warn "$ctx" "the platform (so the mesh operator build is not read either)" "${w}/platform.err"
 		else
@@ -422,10 +495,12 @@ _platform_probe_member() {
 		case "$look" in
 		kubernetes)
 			_platform_read "$ctx" "${w}/op.json" -n "$PLATFORM_SAIL_NS" get deployments.apps,pods || rc=$?
+			last="${w}/op.json.err"
 			((rc != 0)) || op="$(jq -r --arg name "$PLATFORM_SAIL_DEPLOY" "$sail_jq" "${w}/op.json" 2>/dev/null)" || op=""
 			;;
 		openshift)
 			_platform_read "$ctx" "${w}/op.json" -n "$PLATFORM_OSSM_NS" get clusterserviceversions.operators.coreos.com || rc=$?
+			last="${w}/op.json.err"
 			((rc != 0)) || op="$(jq -r --arg pkg "$PLATFORM_OSSM_PACKAGE" "$csv_jq" "${w}/op.json" 2>/dev/null)" || op=""
 			;;
 		esac
@@ -445,6 +520,7 @@ _platform_probe_member() {
 	if ((rc != 1)); then
 		rc=0
 		_platform_read "$ctx" "${w}/pods.json" -n istio-system get pods || rc=$?
+		last="${w}/pods.json.err"
 		if ((rc != 0)); then
 			_platform_warn "$ctx" "the istiod and proxy builds" "${w}/pods.json.err"
 		else
@@ -468,6 +544,7 @@ _platform_probe_member() {
 	if ((rc != 1)); then
 		rc=0
 		_platform_read "$ctx" "${w}/nodes.json" get nodes || rc=$?
+		last="${w}/nodes.json.err"
 		((rc != 0)) || nodes="$(jq -r "$nodes_jq" "${w}/nodes.json" 2>/dev/null)" || nodes=""
 		if [[ "$rc" != 0 || -z "$nodes" ]]; then
 			[[ -s "${w}/nodes.json.err" ]] || echo "the reply did not parse" >"${w}/nodes.json.err"
@@ -475,12 +552,28 @@ _platform_probe_member() {
 			nodes=unknown
 		fi
 	fi
+	if ((rc != 1)); then
+		rc=0
+		_platform_read "$ctx" "${w}/tuning.json" get "$PLATFORM_TUNING_KINDS" -A -l "$PLATFORM_TUNING_LABEL" || rc=$?
+		last="${w}/tuning.json.err"
+		((rc != 0)) || tobj="$(jq -r --arg label "$PLATFORM_TUNING_LABEL" "$tobj_jq" "${w}/tuning.json" 2>/dev/null)" || tobj=""
+		if [[ "$rc" != 0 || -z "$tobj" ]]; then
+			[[ -s "${w}/tuning.json.err" ]] || echo "the reply did not parse" >"${w}/tuning.json.err"
+			_platform_warn "$ctx" "the tuning profile objects (label ${PLATFORM_TUNING_LABEL})" "${w}/tuning.json.err"
+			tobj=unknown
+		fi
+	fi
 	if ((rc == 1)); then
-		echo "warning: ${ctx}: did not answer; its platform record stops here (the values not read are unknown)" >&2
+		if [[ -n "$last" ]] && _platform_timed_out "$last"; then
+			echo "warning: ${ctx}: did not answer within PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}); its platform record stops here (the values not read are unknown)" >&2
+		else
+			echo "warning: ${ctx}: did not answer; its platform record stops here (the values not read are unknown)" >&2
+		fi
 	fi
 	_pl_val=("$(_platform_sanitize "$platform")" "$(_platform_sanitize "$op")" "$(_platform_sanitize "$istiod")"
-		"$(_platform_sanitize "$proxy")" "$(_platform_sanitize "$nodes")" "$(_platform_sanitize "$ienv")")
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ctx" "${_pl_val[@]}"
+		"$(_platform_sanitize "$proxy")" "$(_platform_sanitize "$nodes")" "$(_platform_sanitize "$ienv")"
+		"$(_platform_sanitize "$tobj")")
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ctx" "${_pl_val[@]}"
 }
 
 # _platform_unknown_row <ctx>: a record line with every value unknown.
@@ -491,34 +584,58 @@ _platform_unknown_row() {
 	printf '%s\n' "$out"
 }
 
-# _platform_rows_find <rows> <ctx>: the member's line of a record (PLATFORM_PROBE_ROWS lines);
-# return 1 when it has none.
+# _platform_index: _PL_IDX, each member's line of PLATFORM_PROBE_ROWS (its first), built again
+# only when the record changed since (_PL_IDX_SRC; the helpers below keep it current). A loop
+# over many members calls it once in its own shell first and then reads _PL_IDX, so a lookup is
+# one array read instead of a scan of every line (500 members: 500 scans of 500 lines); even the
+# check costs a millisecond at 500 members, so the loops do not repeat it.
+declare -gA _PL_IDX=()
 # shellcheck disable=SC2329
-_platform_rows_find() {
-	local line
+_platform_index() {
+	local line c
+	[[ -z "${_PL_IDX_SET:-}" || "${_PL_IDX_SRC:-}" != "${PLATFORM_PROBE_ROWS:-}" ]] || return 0
+	_PL_IDX=()
 	while IFS= read -r line; do
-		if [[ -n "$line" && "${line%%$'\t'*}" == "$2" ]]; then
-			printf '%s\n' "$line"
-			return 0
-		fi
-	done <<<"$1"
-	return 1
+		[[ -n "$line" ]] || continue
+		c="${line%%$'\t'*}"
+		[[ -z "$c" || -n "${_PL_IDX[$c]+x}" ]] || _PL_IDX[$c]="$line"
+	done <<<"${PLATFORM_PROBE_ROWS:-}"
+	_PL_IDX_SRC="${PLATFORM_PROBE_ROWS:-}"
+	_PL_IDX_SET=1
 }
 
 # _platform_row <ctx>: the member's line of PLATFORM_PROBE_ROWS; return 1 when it has none.
 # shellcheck disable=SC2329
 _platform_row() {
-	_platform_rows_find "${PLATFORM_PROBE_ROWS:-}" "$1"
+	_platform_index
+	[[ -n "$1" && -n "${_PL_IDX[$1]+x}" ]] || return 1
+	printf '%s\n' "${_PL_IDX[$1]}"
+}
+
+# _platform_rows_add <lines>: append these lines (members PLATFORM_PROBE_ROWS does not have, each
+# line newline-terminated) and keep the index current.
+# shellcheck disable=SC2329
+_platform_rows_add() {
+	local line c
+	[[ -n "$1" ]] || return 0
+	_platform_index
+	PLATFORM_PROBE_ROWS+="$1"
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		c="${line%%$'\t'*}"
+		[[ -z "$c" || -n "${_PL_IDX[$c]+x}" ]] || _PL_IDX[$c]="$line"
+	done <<<"$1"
+	_PL_IDX_SRC="$PLATFORM_PROBE_ROWS"
 }
 
 # _platform_row_set <row>: put <row> in PLATFORM_PROBE_ROWS in place of its member's line (at the
-# end when it has none).
+# end when it has none), and keep the index current.
 # shellcheck disable=SC2329
 _platform_row_set() {
-	local line out="" done=0
+	local line out="" done=0 c="${1%%$'\t'*}"
 	while IFS= read -r line; do
 		[[ -n "$line" ]] || continue
-		if [[ "${line%%$'\t'*}" == "${1%%$'\t'*}" ]]; then
+		if [[ "${line%%$'\t'*}" == "$c" ]]; then
 			((done)) || out+="${1}"$'\n'
 			done=1
 		else
@@ -526,7 +643,10 @@ _platform_row_set() {
 		fi
 	done <<<"${PLATFORM_PROBE_ROWS:-}"
 	((done)) || out+="${1}"$'\n'
+	_platform_index
 	PLATFORM_PROBE_ROWS="$out"
+	[[ -z "$c" ]] || _PL_IDX[$c]="$1"
+	_PL_IDX_SRC="$PLATFORM_PROBE_ROWS"
 }
 
 # _platform_row_has_unknown <row>: return 0 when one of the row's values is unknown.
@@ -571,7 +691,7 @@ _platform_row_merge() {
 	local j out
 	local -a _pl_o=() _pl_n=()
 	local -a _pl_names=(platform "mesh operator build" "istiod build" "gateway proxy build" "node provider"
-		"istiod settings (its discovery container env)")
+		"istiod settings (its discovery container env)" "tuning profile objects")
 	IFS=$'\t' read -r -a _pl_o <<<"$1"
 	IFS=$'\t' read -r -a _pl_n <<<"$2"
 	out="${_pl_o[0]}"
@@ -589,13 +709,14 @@ _platform_row_merge() {
 # platform_probe <ctxs_csv>: read the platform record of the members not in PLATFORM_PROBE_ROWS
 # yet, and again of those whose inherited line holds an unknown value (a member that did not
 # answer at the sweep's start; not after platform_probe_load, not in a dry-run), in parallel, and
-# put them in it (exported). Call it in the script's own shell (not in $(...)), before any
-# measurement window. Never fails for a member it cannot read: those values are unknown and
-# each one gets a warning.
+# put them in it (not exported: a sweep hands it on with platform_probe_share). Call it in the
+# script's own shell (not in $(...)), before any measurement window. Never fails for a member it
+# cannot read: those values are unknown and each one gets a warning.
 # shellcheck disable=SC2329
 platform_probe() {
-	local ctx row rows old
+	local ctx row rows old add=""
 	local -a ctxs=() todo=() _pl_again=()
+	local -A _pl_seen=()
 	platform_validate
 	# Checked before the dry-run returns, though the probes (dataplane 002, controlplane 002) exit
 	# their dry-run before they call this: platform.bats's static test is what checks every caller.
@@ -603,19 +724,22 @@ platform_probe() {
 	declare -F _config_sha256 >/dev/null || die "platform_probe needs _config_sha256 (source tests/lib/config.sh)"
 	split_csv "$1" ctxs
 	PLATFORM_PROBE_LAST="$(IFS=,; echo "${ctxs[*]}")"
+	_platform_index
 	for ctx in "${ctxs[@]}"; do
-		if ! row="$(_platform_row "$ctx")"; then
+		[[ -n "$ctx" && -z "${_pl_seen[$ctx]+x}" ]] || continue
+		_pl_seen[$ctx]=1
+		if [[ -z "${_PL_IDX[$ctx]+x}" ]]; then
 			todo+=("$ctx")
-		elif ! ((${DRY_RUN:-0} || ${PLATFORM_PROBE_LOADED:-0})) && _platform_row_has_unknown "$row"; then
+		elif ! ((${DRY_RUN:-0} || ${PLATFORM_PROBE_LOADED:-0})) && _platform_row_has_unknown "${_PL_IDX[$ctx]}"; then
 			_pl_again+=("$ctx")
 		fi
 	done
 	((${#todo[@]} + ${#_pl_again[@]})) || return 0
 	if ((${DRY_RUN:-0})); then
 		for ctx in "${todo[@]}"; do
-			PLATFORM_PROBE_ROWS+="$(_platform_unknown_row "$ctx")"$'\n'
+			add+="$(_platform_unknown_row "$ctx")"$'\n'
 		done
-		export PLATFORM_PROBE_ROWS
+		_platform_rows_add "$add"
 		return 0
 	fi
 	[[ -n "${KUBECTL[*]:-}" ]] || die "neither kubectl nor oc found on PATH (platform_probe needs KUBECTL)"
@@ -624,19 +748,22 @@ platform_probe() {
 	fi
 	rows="$(_platform_read_members ${todo[@]+"${todo[@]}"} ${_pl_again[@]+"${_pl_again[@]}"})" ||
 		die "platform_probe: cannot read the platform record (no temp dir)"
+	# The members read again are merged in place; the new ones appended at once, in read order.
 	while IFS= read -r row; do
 		[[ -n "$row" ]] || continue
-		if old="$(_platform_row "${row%%$'\t'*}")"; then
-			_platform_row_set "$(_platform_row_merge "$old" "$row")"
+		old="${row%%$'\t'*}"
+		if [[ -n "${_PL_IDX[$old]+x}" ]]; then
+			_platform_row_set "$(_platform_row_merge "${_PL_IDX[$old]}" "$row")"
 		else
-			PLATFORM_PROBE_ROWS+="${row}"$'\n'
+			add+="${row}"$'\n'
 		fi
 	done <<<"$rows"
-	export PLATFORM_PROBE_ROWS
+	_platform_rows_add "$add"
 }
 
-# platform_member_value <ctx> <platform|operator|istiod|proxy|nodes|istiod_env>: one value of a
-# member's record (PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ...); unknown when it was not read.
+# platform_member_value <ctx> <platform|operator|istiod|proxy|nodes|istiod_env|tuning_objects>: one
+# value of a member's record (PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ...); unknown when it
+# was not read.
 # shellcheck disable=SC2329
 platform_member_value() {
 	local row i
@@ -648,9 +775,12 @@ platform_member_value() {
 	proxy) i=4 ;;
 	nodes) i=5 ;;
 	istiod_env) i=6 ;;
-	*) die "platform_member_value: unknown field '$2' (platform, operator, istiod, proxy, nodes or istiod_env)" ;;
+	tuning_objects) i=7 ;;
+	*) die "platform_member_value: unknown field '$2' (platform, operator, istiod, proxy, nodes, istiod_env or tuning_objects)" ;;
 	esac
-	row="$(_platform_row "$1")" || row=""
+	_platform_index
+	row=""
+	[[ -z "$1" || -z "${_PL_IDX[$1]+x}" ]] || row="${_PL_IDX[$1]}"
 	IFS=$'\t' read -r -a _pl_f <<<"$row"
 	printf '%s\n' "${_pl_f[i]:-unknown}"
 }
@@ -691,18 +821,39 @@ platform_probe_save() {
 # again in this shell (PLATFORM_PROBE_LOADED): the later phase runs inside a window.
 # shellcheck disable=SC2329
 platform_probe_load() {
-	local line old
+	local line old add=""
+	local -A _pl_seen=()
 	PLATFORM_PROBE_LOADED=1
 	[[ -f "$1" ]] || return 0
+	_platform_index
 	while IFS= read -r line; do
 		[[ -n "$line" ]] || continue
-		if ! old="$(_platform_row "${line%%$'\t'*}")"; then
-			PLATFORM_PROBE_ROWS+="${line}"$'\n'
-		elif _platform_row_has_unknown "$old" && ! _platform_row_has_unknown "$line"; then
+		old="${line%%$'\t'*}"
+		[[ -n "$old" && -z "${_pl_seen[$old]+x}" ]] || continue
+		_pl_seen[$old]=1
+		if [[ -z "${_PL_IDX[$old]+x}" ]]; then
+			add+="${line}"$'\n'
+		elif _platform_row_has_unknown "${_PL_IDX[$old]}" && ! _platform_row_has_unknown "$line"; then
 			_platform_row_set "$line"
 		fi
 	done <"$1"
-	export PLATFORM_PROBE_ROWS
+	_platform_rows_add "$add"
+}
+
+# platform_probe_share <dir>: hand this sweep's record to the steps it runs: write it to
+# <dir>/platform-record.txt (created with <dir>) and export its path (PLATFORM_PROBE_FILE),
+# which a step reads when it sources this file. Never the environment: Linux refuses to run any
+# command whose environment holds a string over 128 KiB, the record of about 400 members. Call it
+# right after the sweep's platform_probe (and --resume check). With DRY_RUN=1 it writes nothing
+# and each step records its own members (unknown, as the sweep's are).
+# shellcheck disable=SC2329
+platform_probe_share() {
+	local f="${1}/${PLATFORM_RECORD_FILE}"
+	((${DRY_RUN:-0} == 0)) || return 0
+	if ! mkdir -p "$1" || ! printf '%s' "${PLATFORM_PROBE_ROWS:-}" >"$f"; then
+		die "platform_probe_share: cannot write ${f}: the steps of this sweep need the record it read"
+	fi
+	export PLATFORM_PROBE_FILE="$f"
 }
 
 # _platform_values <ctxs_csv>: the record as KEY=value lines (PLATFORM_KEYS order) for these
@@ -712,8 +863,11 @@ _platform_values() {
 	local ctx row agg sk=0 so=0 su=0 c j
 	local -a ctxs=() _pl_f=() _pl_by=()
 	split_csv "$1" ctxs
+	_platform_index
 	for ctx in ${ctxs[@]+"${ctxs[@]}"}; do
-		if ! row="$(_platform_row "$ctx")"; then
+		if [[ -n "$ctx" && -n "${_PL_IDX[$ctx]+x}" ]]; then
+			row="${_PL_IDX[$ctx]}"
+		else
 			echo "warning: ${ctx}: no platform record was read (platform_probe was not called for it); its values read unknown" >&2
 			row="$(_platform_unknown_row "$ctx")"
 		fi
@@ -723,7 +877,7 @@ _platform_values() {
 		openshift) so=1 ;;
 		*) su=1 ;;
 		esac
-		c="$(_platform_sanitize "$ctx")"
+		_platform_sanitize_to c "$ctx"
 		for j in "${!PLATFORM_ROW_KEYS[@]}"; do
 			_pl_by[j]="${_pl_by[j]:-}${_pl_by[j]:+,}${c}=${_pl_f[j + 1]:-unknown}"
 		done
@@ -776,29 +930,55 @@ platform_md_row() {
 	while IFS= read -r line; do
 		_pl_rec["${line%%=*}"]="${line#*=}"
 	done < <(_platform_values "$1" 2>/dev/null)
-	printf '| Platform | %s (TEST_PLATFORM %s); nodes %s; operator %s; istiod %s; gateway proxy %s; istiod env %s |\n' \
+	printf '| Platform | %s (TEST_PLATFORM %s); nodes %s; operator %s; istiod %s; gateway proxy %s; istiod env %s; tuning objects %s |\n' \
 		"${_pl_rec[PLATFORM]}" "${_pl_rec[TEST_PLATFORM]}" "$(platform_collapse "${_pl_rec[NODE_PROVIDER_BY_CONTEXT]}")" \
 		"$(platform_collapse "${_pl_rec[MESH_OPERATOR_BY_CONTEXT]}")" "$(platform_collapse "${_pl_rec[ISTIOD_IMAGE_BY_CONTEXT]}")" \
-		"$(platform_collapse "${_pl_rec[PROXY_IMAGE_BY_CONTEXT]}")" "$(platform_collapse "${_pl_rec[ISTIOD_ENV_BY_CONTEXT]}")"
+		"$(platform_collapse "${_pl_rec[PROXY_IMAGE_BY_CONTEXT]}")" "$(platform_collapse "${_pl_rec[ISTIOD_ENV_BY_CONTEXT]}")" \
+		"$(platform_collapse "${_pl_rec[TUNING_OBJECTS_BY_CONTEXT]}")"
 }
 
-# _platform_parts <key> <value>: the builds a value holds, one per line: without "mixed:", split
-# at ";" (a merged value) and "+" (not for KUBE_VERSIONS, whose versions can hold one:
-# v1.30.4+k3s1), each without the state after its last "/" ("/Available", "/Succeeded", ...: a
-# value that differs only in it is the same build); "?" for a value not read (_platform_unread).
+# _platform_parts_to <key> <value> <array name>: the builds a value holds, into the array: without
+# "mixed:", split at ";" (a merged value) and "+" (not for KUBE_VERSIONS, whose versions can hold
+# one: v1.30.4+k3s1), a MESH_OPERATOR_BY_CONTEXT one without the state after its last "/"
+# ("/Available", "/Succeeded", ...: a value that differs only in it is the same build; no other
+# key has a state, and TUNING_OBJECTS_BY_CONTEXT's <Kind>/<ns>/<name> keeps its slashes); "?" for a
+# value not read (_platform_unread). A NODE_PROVIDER_BY_CONTEXT "none" beside a provider is
+# dropped: a node its cloud controller has not initialized yet (a scale-up) has no providerID,
+# and its provider is the others' ("aws+none" is aws), not another platform.
 # shellcheck disable=SC2329
-_platform_parts() {
-	local x seps=';+'
-	local -a _pl_xs=()
-	[[ "$1" != KUBE_VERSIONS ]] || seps=';'
-	IFS="$seps" read -r -a _pl_xs <<<"${2#mixed:}"
-	for x in ${_pl_xs[@]+"${_pl_xs[@]}"}; do
-		[[ -n "$x" ]] || continue
-		if _platform_unread "$1" "$x"; then echo '?'; else printf '%s\n' "${x%/*}"; fi
+_platform_parts_to() {
+	local _pl_px _pl_py _pl_ps=';+'
+	local -a _pl_pxs=()
+	local -n _pl_pt_out="$3"
+	_pl_pt_out=()
+	[[ "$1" != KUBE_VERSIONS ]] || _pl_ps=';'
+	IFS="$_pl_ps" read -r -a _pl_pxs <<<"${2#mixed:}"
+	for _pl_px in ${_pl_pxs[@]+"${_pl_pxs[@]}"}; do
+		[[ -n "$_pl_px" ]] || continue
+		if _platform_unread "$1" "$_pl_px"; then
+			_pl_pt_out+=('?')
+		elif [[ "$1" == MESH_OPERATOR_BY_CONTEXT ]]; then
+			_pl_pt_out+=("${_pl_px%/*}")
+		else
+			_pl_pt_out+=("$_pl_px")
+		fi
+	done
+	[[ "$1" == NODE_PROVIDER_BY_CONTEXT ]] || return 0
+	for _pl_px in ${_pl_pt_out[@]+"${_pl_pt_out[@]}"}; do
+		case "$_pl_px" in
+		none | '?' | no-nodes | unrecognized) ;;
+		*)
+			# A provider: the nodes without one are its nodes not initialized yet.
+			_pl_pxs=()
+			for _pl_py in "${_pl_pt_out[@]}"; do [[ "$_pl_py" == none ]] || _pl_pxs+=("$_pl_py"); done
+			_pl_pt_out=("${_pl_pxs[@]}")
+			return 0
+			;;
+		esac
 	done
 }
 
-# _platform_part_match <part> <part>: two builds (_platform_parts): return 0 when they are the
+# _platform_part_match <part> <part>: two builds (_platform_parts_to): return 0 when they are the
 # same, 1 when it cannot tell (a digest @unknown, or one without a digest: its pod had not
 # started), 2 when they differ. An image (a value with "@") compares by name, then by tag when
 # both have one, then by digest when both have one; any other value as it is.
@@ -826,41 +1006,56 @@ _platform_part_match() {
 # (a member's, or merged ones). Every build of each side needs the same build on the other
 # (_platform_part_match): one without any differs; else one that only may match, or a value
 # not read on a side, makes it unknown. A side with nothing read is unknown.
+# _platform_build_cmp_to <name> <key> <value> <value>: the same into variable <name>, in this
+# shell (no fork: a resume or a report compares every member's value of every key). Two equal
+# values with nothing unread in them are the same without being split.
 # shellcheck disable=SC2329
 _platform_build_cmp() {
-	local key="$1" x y m best res=same
-	local -a _pl_xa=() _pl_xb=() _pl_ka=() _pl_kb=()
-	mapfile -t _pl_xa < <(_platform_parts "$key" "$2")
-	mapfile -t _pl_xb < <(_platform_parts "$key" "$3")
-	for x in ${_pl_xa[@]+"${_pl_xa[@]}"}; do
-		if [[ "$x" == '?' ]]; then res=unknown; else _pl_ka+=("$x"); fi
-	done
-	for x in ${_pl_xb[@]+"${_pl_xb[@]}"}; do
-		if [[ "$x" == '?' ]]; then res=unknown; else _pl_kb+=("$x"); fi
-	done
-	if ((${#_pl_ka[@]} == 0 || ${#_pl_kb[@]} == 0)); then
-		echo unknown
+	local _pl_bc
+	_platform_build_cmp_to _pl_bc "$@"
+	printf '%s\n' "$_pl_bc"
+}
+# shellcheck disable=SC2329
+_platform_build_cmp_to() {
+	# Every local is _pl_b*: <name> is the caller's variable (res, cmp, ...), which a local of the
+	# same name here would hide from printf -v.
+	local _pl_bo="$1" _pl_bk="$2" _pl_bx _pl_by _pl_bm _pl_bb _pl_br=same
+	local -a _pl_bxa=() _pl_bxb=() _pl_bka=() _pl_bkb=()
+	if [[ "$3" == "$4" && "${3#mixed:}" == *[A-Za-z0-9]* && "$3" != *unknown* && ( "$_pl_bk" != KUBE_VERSIONS || "$3" != *unreachable* ) ]]; then
+		printf -v "$_pl_bo" same
 		return 0
 	fi
-	for x in "${_pl_ka[@]}"; do
-		best=2
-		for y in "${_pl_kb[@]}"; do
-			_platform_part_match "$x" "$y" && m=0 || m=$?
-			((m >= best)) || best=$m
-		done
-		if ((best == 2)); then echo differs; return 0; fi
-		((best == 0)) || res=unknown
+	_platform_parts_to "$_pl_bk" "$3" _pl_bxa
+	_platform_parts_to "$_pl_bk" "$4" _pl_bxb
+	for _pl_bx in ${_pl_bxa[@]+"${_pl_bxa[@]}"}; do
+		if [[ "$_pl_bx" == '?' ]]; then _pl_br=unknown; else _pl_bka+=("$_pl_bx"); fi
 	done
-	for y in "${_pl_kb[@]}"; do
-		best=2
-		for x in "${_pl_ka[@]}"; do
-			_platform_part_match "$y" "$x" && m=0 || m=$?
-			((m >= best)) || best=$m
-		done
-		if ((best == 2)); then echo differs; return 0; fi
-		((best == 0)) || res=unknown
+	for _pl_bx in ${_pl_bxb[@]+"${_pl_bxb[@]}"}; do
+		if [[ "$_pl_bx" == '?' ]]; then _pl_br=unknown; else _pl_bkb+=("$_pl_bx"); fi
 	done
-	echo "$res"
+	if ((${#_pl_bka[@]} == 0 || ${#_pl_bkb[@]} == 0)); then
+		printf -v "$_pl_bo" unknown
+		return 0
+	fi
+	for _pl_bx in "${_pl_bka[@]}"; do
+		_pl_bb=2
+		for _pl_by in "${_pl_bkb[@]}"; do
+			_platform_part_match "$_pl_bx" "$_pl_by" && _pl_bm=0 || _pl_bm=$?
+			((_pl_bm >= _pl_bb)) || _pl_bb=$_pl_bm
+		done
+		if ((_pl_bb == 2)); then printf -v "$_pl_bo" differs; return 0; fi
+		((_pl_bb == 0)) || _pl_br=unknown
+	done
+	for _pl_by in "${_pl_bkb[@]}"; do
+		_pl_bb=2
+		for _pl_bx in "${_pl_bka[@]}"; do
+			_platform_part_match "$_pl_by" "$_pl_bx" && _pl_bm=0 || _pl_bm=$?
+			((_pl_bm >= _pl_bb)) || _pl_bb=$_pl_bm
+		done
+		if ((_pl_bb == 2)); then printf -v "$_pl_bo" differs; return 0; fi
+		((_pl_bb == 0)) || _pl_br=unknown
+	done
+	printf -v "$_pl_bo" '%s' "$_pl_br"
 }
 
 # _platform_unread <key> <value>: return 0 for a value that says it was not read: unknown (and
@@ -880,6 +1075,7 @@ _platform_noun() {
 	PROXY_IMAGE_BY_CONTEXT) echo "gateway proxy builds" ;;
 	NODE_PROVIDER_BY_CONTEXT) echo "node providers" ;;
 	ISTIOD_ENV_BY_CONTEXT) echo "istiod settings (its discovery container env)" ;;
+	TUNING_OBJECTS_BY_CONTEXT) echo "tuning profile objects" ;;
 	KUBE_VERSIONS) echo "Kubernetes versions" ;;
 	TUNING_BASELINE) echo "tuning levers" ;;
 	SIDECAR_EGRESS_HOSTS) echo "root Sidecar egress hosts" ;;
@@ -888,18 +1084,52 @@ _platform_noun() {
 	esac
 }
 
-# _platform_drift_cause <key>: the usual cause of a value that changed during a sweep, and what
-# to do for figures that can be published.
+# _platform_cause <key>: what usually changes a key's value, for a drift warning and a refused
+# --resume.
+# shellcheck disable=SC2329
+_platform_cause() {
+	case "$1" in
+	MESH_OPERATOR_BY_CONTEXT) echo "an operator upgrade (an Argo CD sync of a new chart revision, or a new OLM CSV)" ;;
+	ISTIOD_IMAGE_BY_CONTEXT | PROXY_IMAGE_BY_CONTEXT) echo "an Argo CD sync of a new revision or an operator upgrade" ;;
+	ISTIOD_ENV_BY_CONTEXT) echo "a tuning profile left applied (tests/tuning/005-cleanup.sh reverts it), or a sync or hand edit of the Istio CR's spec.values.pilot.env" ;;
+	TUNING_OBJECTS_BY_CONTEXT) echo "a tuning run stopped before its revert (tests/tuning/005-cleanup.sh deletes the objects), or a profile's objects applied by hand" ;;
+	KUBE_VERSIONS) echo "a managed control-plane upgrade" ;;
+	TUNING_BASELINE | SIDECAR_EGRESS_HOSTS) echo "a GitOps sync or self-heal that put a lever back, a tuning profile left applied, or a hand edit" ;;
+	ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) echo "an Argo CD sync, a tuning profile or a hand edit of istiod's resources (the Istio CR's spec.values.pilot.resources)" ;;
+	*) echo "a context that now points at a rebuilt or another cluster" ;;
+	esac
+}
+
+# _platform_drift_cause <key>: the usual cause of a value that changed during a sweep
+# (_platform_cause), and what to do for figures that can be published.
 # shellcheck disable=SC2329
 _platform_drift_cause() {
+	local fix
 	case "$1" in
-	MESH_OPERATOR_BY_CONTEXT) echo "the usual cause is an operator upgrade during the sweep (an Argo CD sync of a new chart revision, or a new OLM CSV); for publishable figures, run the sweep again on one build" ;;
-	ISTIOD_IMAGE_BY_CONTEXT | PROXY_IMAGE_BY_CONTEXT) echo "the usual cause is an Argo CD sync of a new revision or an operator upgrade during the sweep; for publishable figures, run the sweep again on one build" ;;
-	ISTIOD_ENV_BY_CONTEXT) echo "the usual cause is a tuning profile left applied, or a sync or hand edit of the Istio CR's spec.values.pilot.env, during the sweep; for publishable figures, run the sweep again with istiod's settings fixed" ;;
-	KUBE_VERSIONS) echo "the usual cause is a managed control-plane upgrade during the sweep; for publishable figures, run the sweep again on one Kubernetes version" ;;
-	TUNING_BASELINE | SIDECAR_EGRESS_HOSTS) echo "the usual cause is a GitOps sync or self-heal that put a lever back, a tuning profile left applied, or a hand edit, during the sweep; for publishable figures, run the sweep again with the levers fixed" ;;
-	*) echo "the usual cause is a context that now points at a rebuilt or another cluster; for publishable figures, run the sweep again on fixed members" ;;
+	MESH_OPERATOR_BY_CONTEXT | ISTIOD_IMAGE_BY_CONTEXT | PROXY_IMAGE_BY_CONTEXT) fix="on one build" ;;
+	ISTIOD_ENV_BY_CONTEXT) fix="with istiod's settings fixed" ;;
+	TUNING_OBJECTS_BY_CONTEXT) fix="without a profile's objects (or with the same ones throughout)" ;;
+	KUBE_VERSIONS) fix="on one Kubernetes version" ;;
+	TUNING_BASELINE | SIDECAR_EGRESS_HOSTS) fix="with the levers fixed" ;;
+	ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) fix="with istiod's limits fixed" ;;
+	*) fix="on fixed members" ;;
 	esac
+	echo "the usual cause is $(_platform_cause "$1"); for publishable figures, run the sweep again ${fix}"
+}
+
+# _platform_resume_causes <lines>: for a refused --resume, one line with the usual cause
+# (_platform_cause) of each key its "  <member>: <KEY>[ <lever>] recorded <a>, now <b>" lines
+# name, each key once; nothing without such a line.
+# shellcheck disable=SC2329
+_platform_resume_causes() {
+	local k out=""
+	local -A _pl_seen=()
+	while IFS= read -r k; do
+		[[ -n "$k" && -z "${_pl_seen[$k]+x}" ]] || continue
+		_pl_seen[$k]=1
+		out+="${out:+; }${k}: $(_platform_cause "$k")"
+	done < <(sed -n 's/^  [^ ]*: \([A-Z_]*\) .*/\1/p' <<<"$1")
+	[[ -z "$out" ]] || printf 'Usual causes: %s.\n' "$out"
 }
 
 # _platform_names <name>...: the first five, comma-separated, then "and N more".
@@ -951,9 +1181,9 @@ _platform_drift_values() {
 # merge) only the drift warning.
 # shellcheck disable=SC2329
 platform_merge_by_context() {
-	local key="$1" f line pair c x v out="" n=0 missing=0 noun dis="" drf="" unr="" d i j unread partial differ atu=0 nokey=0
-	local -a order=() pairs=() _pl_dis=() _pl_drf=() _pl_unr=() _pl_kn=() _pl_dd=()
-	local -A _pl_vals=() _pl_drift=() _pl_unread_in=() _pl_ddir=()
+	local key="$1" f line pair c x v cmp out="" n=0 missing=0 noun dis="" drf="" unr="" d i j unread partial differ atu=0 nokey=0
+	local -a order=() pairs=() _pl_dis=() _pl_drf=() _pl_unr=() _pl_kn=() _pl_dd=() _pl_drv=()
+	local -A _pl_vals=() _pl_drift=() _pl_unread_in=() _pl_ddir=() _pl_tsvv=() _pl_dend=() _pl_drvs=()
 	shift
 	for f in "$@"; do
 		n=$((n + 1))
@@ -985,12 +1215,14 @@ platform_merge_by_context() {
 		echo unknown
 		return 0
 	fi
+	for c in "${order[@]}"; do _pl_tsvv[$c]="${_pl_vals[$c]}"; done
 	while IFS=$'\t' read -r d pair; do
 		[[ -n "$pair" ]] || continue
 		c="${pair%%=*}"
 		x="${pair#*=}"
 		[[ -n "${_pl_vals[$c]+set}" ]] || continue
 		_pl_drift[$c]=1
+		case ";${_pl_dend[$c]:-};" in *";${x};"*) ;; *) _pl_dend[$c]="${_pl_dend[$c]:-}${_pl_dend[$c]:+;}${x}" ;; esac
 		[[ -n "${_pl_ddir[$d]+x}" ]] || { _pl_ddir[$d]=1; _pl_dd+=("$d"); }
 		case ";${_pl_vals[$c]};" in *";${x};"*) ;; *) _pl_vals[$c]+=";${x}" ;; esac
 	done < <(_platform_drift_values "$key" "$@")
@@ -1004,7 +1236,8 @@ platform_merge_by_context() {
 		done
 		for ((i = 0; i < ${#_pl_kn[@]}; i++)); do
 			for ((j = i + 1; j < ${#_pl_kn[@]}; j++)); do
-				case "$(_platform_build_cmp "$key" "${_pl_kn[i]}" "${_pl_kn[j]}")" in
+				_platform_build_cmp_to cmp "$key" "${_pl_kn[i]}" "${_pl_kn[j]}"
+				case "$cmp" in
 				differs) differ=1 ;;
 				unknown) partial=1 ;;
 				esac
@@ -1016,9 +1249,13 @@ platform_merge_by_context() {
 		fi
 		out+="${out:+,}${c}=mixed:${_pl_vals[$c]}"
 		if [[ -n "${_pl_drift[$c]+x}" ]]; then
-			_pl_drf+=("$c")
+			# What it recorded at the start, and what the drift checks read at the end (the
+			# digests are shortened once, in the warning).
+			v="from ${_pl_tsvv[$c]//;/ or } to ${_pl_dend[$c]//;/ then }"
+			_pl_drf+=("${c} ${v}")
+			[[ -n "${_pl_drvs[$v]+x}" ]] || { _pl_drvs[$v]=1; _pl_drv+=("$v"); }
 		elif ((differ)); then
-			_pl_dis+=("${c} ($(platform_short_digests "${_pl_vals[$c]}"))")
+			_pl_dis+=("${c} (${_pl_vals[$c]})")
 		fi
 		if ((unread || partial)); then
 			v="${_pl_unread_in[$c]:-0}"
@@ -1029,7 +1266,11 @@ platform_merge_by_context() {
 	# Without member names (platform_report_warnings --no-members): "2 of 3 members".
 	if ((${_pl_no_members:-0})); then
 		((${#_pl_dis[@]} == 0)) || dis="${#_pl_dis[@]} of ${#order[@]} members"
-		((${#_pl_drf[@]} == 0)) || drf="${#_pl_drf[@]} of ${#order[@]} members"
+		if ((${#_pl_drf[@]})); then
+			drf="${#_pl_drf[@]} of ${#order[@]} members, "
+			for v in "${_pl_drv[@]}"; do drf+="${v}${v:+; }"; done
+			drf="${drf%; }"
+		fi
 		((${#_pl_unr[@]} == 0)) || unr="${#_pl_unr[@]} of ${#order[@]} members in some of the ${n}"
 	else
 		((${#_pl_dis[@]} == 0)) || dis="$(_platform_names "${_pl_dis[@]}")"
@@ -1037,7 +1278,7 @@ platform_merge_by_context() {
 		((${#_pl_unr[@]} == 0)) || unr="$(_platform_names "${_pl_unr[@]}")"
 	fi
 	if [[ -n "$drf" ]]; then
-		echo "warning: ${key} changed during the sweep for ${drf} (${PLATFORM_DRIFT_FILE} in $(_platform_names "${_pl_dd[@]}")): the TSVs record the value at the sweep's start, but rows measured after the change ran on other ${noun}, and the report cannot tell which rows those are; $(_platform_drift_cause "$key")" >&2
+		platform_short_digests "warning: ${key} changed during the sweep (${PLATFORM_DRIFT_FILE} in $(_platform_names "${_pl_dd[@]}")): ${drf}; the TSVs record the value at the sweep's start, but rows measured after the change ran on other ${noun}, and the report cannot tell which rows those are; $(_platform_drift_cause "$key")" >&2
 	fi
 	((missing == 0)) || out="mixed:unknown,${out}"
 	if ((${_pl_drift_only:-0})); then
@@ -1045,7 +1286,7 @@ platform_merge_by_context() {
 		return 0
 	fi
 	if [[ -n "$dis" ]]; then
-		echo "warning: input TSVs disagree on ${key} for ${dis}: the report mixes runs on different ${noun}; compare like with like" >&2
+		platform_short_digests "warning: input TSVs disagree on ${key} for ${dis}: the report mixes runs on different ${noun}; compare like with like" >&2
 	fi
 	if [[ -n "$unr" ]]; then
 		echo "warning: ${key} could not be read for ${unr} input TSV(s) (recorded unknown$([[ "$key" != KUBE_VERSIONS ]] || echo " or unreachable")$( ((atu == 0)) || echo ", or with a digest @unknown: no pod had started")), while other inputs have a value: the report cannot tell whether those runs had the same ${noun} as the others" >&2
@@ -1141,9 +1382,10 @@ platform_report_values() {
 # read, not only on stderr (PL26). The one for inputs from before the record only when others
 # have it (all of them before it: every value reads unknown, nothing is mixed). Also the drift
 # marker's other values (platform_drift_check): KUBE_VERSIONS when it is not a --with key, and
-# TUNING_BASELINE and SIDECAR_EGRESS_HOSTS, each only when the inputs record it. --no-members
-# counts the members instead of naming them, for text that goes where context names may not
-# (the scale envelope, pasted into campaign docs).
+# TUNING_BASELINE and SIDECAR_EGRESS_HOSTS, each only when the inputs record it; and a tuning
+# profile's objects in place (_platform_tuning_objects_warning). --no-members counts the members
+# instead of naming them, for text that goes where context names may not (the scale envelope,
+# pasted into campaign docs).
 # shellcheck disable=SC2329
 platform_report_warnings() {
 	local k
@@ -1165,6 +1407,7 @@ platform_report_warnings() {
 		for k in "${PLATFORM_KEYS[@]}" ${_pl_with[@]+"${_pl_with[@]}"}; do
 			case "$k" in
 			PLATFORM | TEST_PLATFORM) _platform_merge_scalar "$k" "$@" >/dev/null ;;
+			TUNING_OBJECTS_BY_CONTEXT) _platform_tuning_objects_warning "$(platform_merge_by_context "$k" "$@")" ;;
 			*) platform_merge_by_context "$k" "$@" >/dev/null ;;
 			esac
 		done
@@ -1177,19 +1420,48 @@ platform_report_warnings() {
 	} 2>&1 | sed 's/^warning: //'
 }
 
-# _platform_drift_scalar_warnings <tsv>...: a warning per TUNING_BASELINE or SIDECAR_EGRESS_HOSTS
-# line of the PLATFORM_DRIFT_FILE next to the inputs, for a key one of them records: its value
-# at the sweep's end (each drift check's, " then "-joined), against what that input recorded at
-# its start.
+# _platform_tuning_objects_warning <TUNING_OBJECTS_BY_CONTEXT value>: one warning naming the members
+# whose record holds a tuning profile's objects (platform_merge_by_context's value: none is the
+# chart baseline; unknown, not read, warns elsewhere) and the objects, five at most, or nothing. A
+# tuning pass runs with them on purpose; any other run measured something else than the charts
+# deploy (profile 04's root DestinationRule changes every proxy's clusters).
+# shellcheck disable=SC2329
+_platform_tuning_objects_warning() {
+	local pair c part found who n=0
+	local -a _pl_p=() _pl_parts=() _pl_m=() _pl_objs=()
+	local -A _pl_o=()
+	IFS=',' read -r -a _pl_p <<<"$1"
+	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+		[[ "$pair" == *=* ]] || continue
+		c="${pair%%=*}" found=0 n=$((n + 1))
+		IFS=';+' read -r -a _pl_parts <<<"${pair#*=}"
+		for part in ${_pl_parts[@]+"${_pl_parts[@]}"}; do
+			part="${part#mixed:}"
+			case "$part" in none | unknown | "") continue ;; esac
+			found=1
+			[[ -n "${_pl_o[$part]+x}" ]] || { _pl_o[$part]=1; _pl_objs+=("$part"); }
+		done
+		((found == 0)) || _pl_m+=("$c")
+	done
+	((${#_pl_m[@]})) || return 0
+	if ((${_pl_no_members:-0})); then who="${#_pl_m[@]} of ${n} members"; else who="$(_platform_names "${_pl_m[@]}")"; fi
+	echo "warning: a tuning profile's objects were in place on ${who} when the run started (TUNING_OBJECTS_BY_CONTEXT: $(_platform_names "${_pl_objs[@]}")), so unless this is a tuning pass its figures are not those of the charts' configuration; tests/tuning/005-cleanup.sh deletes them" >&2
+}
+
+# _platform_drift_scalar_warnings <tsv>...: a warning per TUNING_BASELINE, SIDECAR_EGRESS_HOSTS,
+# ISTIOD_CPU_LIMIT_M or ISTIOD_MEM_LIMIT_MI line of the PLATFORM_DRIFT_FILE next to the inputs, for
+# a key one of them records: its value at the sweep's end (each drift check's, " then "-joined),
+# against what that input recorded at its start; for TUNING_BASELINE, only the levers that changed
+# (_platform_lever_changes).
 # shellcheck disable=SC2329
 _platform_drift_scalar_warnings() {
-	local f d key start end name
-	local -a _pl_sd=()
+	local f d key start name what
+	local -a _pl_sd=() _pl_ends=()
 	local -A _pl_sf=() _pl_start=()
 	for f in "$@"; do
 		d="$(dirname "$f")"
 		[[ -n "${_pl_sf[$d]+x}" ]] || { _pl_sf[$d]=1; _pl_sd+=("$d"); }
-		for key in TUNING_BASELINE SIDECAR_EGRESS_HOSTS; do
+		for key in TUNING_BASELINE SIDECAR_EGRESS_HOSTS ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
 			[[ -z "${_pl_start["${key}|${d}"]+x}" ]] || continue
 			start="$(_platform_preamble_value "$f" "$key")" || continue
 			_pl_start["${key}|${d}"]="$start"
@@ -1198,13 +1470,68 @@ _platform_drift_scalar_warnings() {
 	for d in ${_pl_sd[@]+"${_pl_sd[@]}"}; do
 		[[ -f "${d}/${PLATFORM_DRIFT_FILE}" ]] || continue
 		name="$(cd "$d" 2>/dev/null && basename "$PWD")" || name="$(basename "$d")"
-		for key in TUNING_BASELINE SIDECAR_EGRESS_HOSTS; do
+		for key in TUNING_BASELINE SIDECAR_EGRESS_HOSTS ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
 			[[ -n "${_pl_start["${key}|${d}"]+x}" ]] || continue
-			end="$(sed -n "s/^# ${key}=//p" "${d}/${PLATFORM_DRIFT_FILE}" | awk 'NR > 1 { printf " then " } { printf "%s", $0 }')"
-			[[ -n "$end" ]] || continue
-			echo "warning: ${key} changed during the sweep in ${name} (${PLATFORM_DRIFT_FILE}): ${_pl_start["${key}|${d}"]} at its start, ${end} at its end; rows measured after the change ran with other $(_platform_noun "$key"), and the report cannot tell which rows those are; $(_platform_drift_cause "$key")" >&2
+			mapfile -t _pl_ends < <(sed -n "s/^# ${key}=//p" "${d}/${PLATFORM_DRIFT_FILE}")
+			((${#_pl_ends[@]})) || continue
+			start="${_pl_start["${key}|${d}"]}"
+			what=""
+			[[ "$key" != TUNING_BASELINE ]] || what="$(_platform_lever_changes "$start" "${_pl_ends[@]}")"
+			[[ -n "$what" ]] || what="${start} at its start, $(_platform_then "${_pl_ends[@]}") at its end"
+			case "$key" in
+			ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) what+="; rows measured after the change ran under another limit, but the report divides every row's istiod limit figures by the one recorded at the start, and cannot tell which rows those are" ;;
+			*) what+="; rows measured after the change ran with other $(_platform_noun "$key"), and the report cannot tell which rows those are" ;;
+			esac
+			echo "warning: ${key} changed during the sweep in ${name} (${PLATFORM_DRIFT_FILE}): ${what}; $(_platform_drift_cause "$key")" >&2
 		done
 	done
+}
+
+# _platform_then <value>...: the values " then "-joined (the drift checks of one sweep dir, in
+# the order they ran).
+# shellcheck disable=SC2329
+_platform_then() {
+	local out="" v
+	for v in "$@"; do out+="${out:+ then }${v}"; done
+	printf '%s\n' "$out"
+}
+
+# _platform_lever_changes <start> <end>...: the TUNING_BASELINE levers (lever=value,...) whose
+# value at an end differs from <start>'s, as "sidecar from on to off" (the ends " then "-joined:
+# "sidecar from on to off then on"), ", "-separated; a lever not read (unknown) on a side is left
+# out. Nothing when none differs.
+# shellcheck disable=SC2329
+_platform_lever_changes() {
+	local start="$1" e lv k out="" seq diff
+	local -a _pl_lo=() _pl_p=()
+	local -A _pl_sv=() _pl_seq=()
+	shift
+	IFS=',' read -r -a _pl_p <<<"$start"
+	for lv in ${_pl_p[@]+"${_pl_p[@]}"}; do
+		[[ "$lv" == *=* ]] || continue
+		_pl_lo+=("${lv%%=*}")
+		_pl_sv[${lv%%=*}]="${lv#*=}"
+	done
+	for e in "$@"; do
+		IFS=',' read -r -a _pl_p <<<"$e"
+		for lv in ${_pl_p[@]+"${_pl_p[@]}"}; do
+			[[ "$lv" == *=* ]] || continue
+			k="${lv%%=*}"
+			_pl_seq[$k]+="${_pl_seq[$k]:+ then }${lv#*=}"
+		done
+	done
+	for k in ${_pl_lo[@]+"${_pl_lo[@]}"}; do
+		[[ "${_pl_sv[$k]}" != unknown && -n "${_pl_seq[$k]:-}" ]] || continue
+		seq="${_pl_seq[$k]}"
+		diff=0
+		IFS=' ' read -r -a _pl_p <<<"${seq// then / }"
+		for e in ${_pl_p[@]+"${_pl_p[@]}"}; do
+			[[ "$e" == unknown || "$e" == "${_pl_sv[$k]}" ]] || diff=1
+		done
+		((diff)) || continue
+		out+="${out:+, }${k} from ${_pl_sv[$k]} to ${seq}"
+	done
+	printf '%s\n' "$out"
 }
 
 # platform_warning_lines <md|text|comment|json> <lines>: warnings (one per line) in a report's
@@ -1270,6 +1597,24 @@ platform_value_has() {
 	IFS=',;+' read -r -a items <<<"$flat"
 	for item in "${items[@]}"; do [[ "${item#*=}" != "$2" ]] || return 0; done
 	return 1
+}
+
+# platform_help_lines [timeout]: the lines a sweep's --help adds to its Environment section for
+# the platform record's knobs, with their current values (config/options.env): TEST_PLATFORM and
+# PLATFORM_READ_TIMEOUT, or with "timeout" the latter only (a script that describes TEST_PLATFORM
+# its own way).
+# shellcheck disable=SC2329
+platform_help_lines() {
+	[[ "${1:-}" == timeout ]] || cat <<EOF
+  TEST_PLATFORM (auto, kubernetes or openshift; ${TEST_PLATFORM:-auto}): whether a member gets
+  the suite chart's values-openshift.yaml; auto asks each member, and a --dry-run renders
+  kubernetes. The platform record asks each member what it serves either way.
+EOF
+	cat <<EOF
+  PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT:-20s}): the bound on each read of the
+  platform record (kubectl --request-timeout); raise it for members with many nodes or a
+  slow link.
+EOF
 }
 
 # platform_kind_path_warning <node_provider_by_context value> <consequence>: the data warning of
@@ -1359,43 +1704,103 @@ platform_summary() {
 
 # _platform_compare_key <key> <ref value> <value>: same, differs or unknown for one record key
 # of two platform_report_values outputs (_platform_build_cmp). Member by member for
-# *_BY_CONTEXT: a member whose builds differ makes it differs; else a member not read on a side
-# (unknown, or a digest @unknown), or on one side only, makes it unknown. A state-only
+# *_BY_CONTEXT (platform_compare_members): a member whose builds differ makes it differs; else a
+# member not read on a side (unknown, or a digest @unknown), or on one side only, makes it
+# unknown, as does a token without a member (mixed:unknown) or no member at all. A state-only
 # difference is the same build.
 # shellcheck disable=SC2329
 _platform_compare_key() {
-	local key="$1" pair c res=same r
-	local -a _pl_p=() _pl_all=()
-	local -A _pl_r=() _pl_v=() _pl_in=()
+	local key="$1" pair res=same any=0 m
+	local -a _pl_p=()
 	if [[ "$key" != *_BY_CONTEXT ]]; then
 		_platform_build_cmp "$key" "${2//,/;}" "${3//,/;}"
 		return 0
 	fi
+	IFS=',' read -r -a _pl_p <<<"${2},${3}"
+	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+		if [[ "$pair" == *=* ]]; then any=1; else res=unknown; fi
+	done
+	((any)) || res=unknown
+	m="$(platform_compare_members "$key" "$2" "$3")"
+	if [[ $'\n'"${m}"$'\n' == *$'\tdiffers\n'* ]]; then
+		echo differs
+		return 0
+	fi
+	[[ -z "$m" ]] || res=unknown
+	echo "$res"
+}
+
+# platform_compare_members <key> <ref value> <value>: "<member>\t<ref>\t<value>\t<result>" for
+# each member of two *_BY_CONTEXT values of platform_report_values that does not match
+# (_platform_build_cmp): differs, another build; unknown, a value not read on a side (or a
+# digest @unknown), or a member on one side only (the other side "-"). In the order the members
+# first appear; nothing for a member that matches, or a token without a member (mixed:unknown).
+# shellcheck disable=SC2329
+platform_compare_members() {
+	local key="$1" pair c r
+	local -a _pl_p=() _pl_all=()
+	local -A _pl_r=() _pl_v=() _pl_in=()
 	IFS=',' read -r -a _pl_p <<<"$2"
 	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
-		if [[ "$pair" != *=* ]]; then res=unknown; continue; fi
+		[[ "$pair" == *=* ]] || continue
 		c="${pair%%=*}"
 		_pl_r[$c]="${pair#*=}"
 		[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_all+=("$c"); }
 	done
 	IFS=',' read -r -a _pl_p <<<"$3"
 	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
-		if [[ "$pair" != *=* ]]; then res=unknown; continue; fi
+		[[ "$pair" == *=* ]] || continue
 		c="${pair%%=*}"
 		_pl_v[$c]="${pair#*=}"
 		[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_all+=("$c"); }
 	done
-	((${#_pl_all[@]})) || res=unknown
 	for c in ${_pl_all[@]+"${_pl_all[@]}"}; do
-		if [[ -z "${_pl_r[$c]+x}" || -z "${_pl_v[$c]+x}" ]]; then res=unknown; continue; fi
-		r="$(_platform_build_cmp "$key" "${_pl_r[$c]}" "${_pl_v[$c]}")"
-		if [[ "$r" == differs ]]; then
-			echo differs
-			return 0
+		if [[ -z "${_pl_r[$c]+x}" || -z "${_pl_v[$c]+x}" ]]; then
+			printf '%s\t%s\t%s\tunknown\n' "$c" "${_pl_r[$c]:--}" "${_pl_v[$c]:--}"
+			continue
 		fi
-		[[ "$r" == same ]] || res=unknown
+		_platform_build_cmp_to r "$key" "${_pl_r[$c]}" "${_pl_v[$c]}"
+		[[ "$r" == same ]] || printf '%s\t%s\t%s\t%s\n' "$c" "${_pl_r[$c]}" "${_pl_v[$c]}" "$r"
 	done
-	echo "$res"
+}
+
+# platform_value_against <key> <value> <ref value>: a value of platform_report_values shown
+# against a reference one (a tuning pass against the baseline), so a record of hundreds of
+# members stays one short line: the one value every member shares (platform_collapse), else the
+# members that do not match the reference (platform_compare_members) as <member>=<value>, five
+# at most (_platform_names), then "(<n> of <m> members; the other <k> match)", or "(all <m>
+# members)". A member only the reference has reads "<member> not recorded"; a token without a
+# member (mixed:unknown: an input without the key) comes first.
+# shellcheck disable=SC2329
+platform_value_against() {
+	local key="$1" v pair c a b r n=0 bare=""
+	local -a _pl_items=() _pl_p=()
+	local -A _pl_in=()
+	v="$(platform_collapse "$2")"
+	if [[ "$key" != *_BY_CONTEXT || "$v" != *=* ]]; then
+		printf '%s\n' "$v"
+		return 0
+	fi
+	IFS=',' read -r -a _pl_p <<<"$2"
+	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+		if [[ "$pair" == *=* ]]; then _pl_in[${pair%%=*}]=1; else bare="${bare:-${pair}}"; fi
+	done
+	IFS=',' read -r -a _pl_p <<<"$3"
+	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+		[[ "$pair" != *=* ]] || _pl_in[${pair%%=*}]=1
+	done
+	while IFS=$'\t' read -r c a b r; do
+		[[ -n "$c" ]] || continue
+		n=$((n + 1))
+		if [[ "$b" == - ]]; then _pl_items+=("${c} not recorded"); else _pl_items+=("${c}=${b}"); fi
+	done < <(platform_compare_members "$key" "$3" "$2")
+	if ((n == 0)); then
+		printf '%s\n' "${bare:+${bare}, }every member recorded matches"
+	elif ((n == ${#_pl_in[@]})); then
+		printf '%s%s (all %d members)\n' "${bare:+${bare}, }" "$(_platform_names "${_pl_items[@]}")" "$n"
+	else
+		printf '%s%s (%d of %d members; the other %d match)\n' "${bare:+${bare}, }" "$(_platform_names "${_pl_items[@]}")" "$n" "${#_pl_in[@]}" "$((${#_pl_in[@]} - n))"
+	fi
 }
 
 # platform_compare_values <ref values> <values> [<key>...]: "KEY\tsame|differs|unknown" per record
@@ -1419,12 +1824,14 @@ platform_compare_values() {
 # unknowns.
 # shellcheck disable=SC2329
 _platform_rows_of() {
-	local ctx row
+	local ctx row c
 	local -a _pl_c=()
 	split_csv "$1" _pl_c
+	_platform_index
 	for ctx in ${_pl_c[@]+"${_pl_c[@]}"}; do
-		row="$(_platform_row "$ctx")" || row="$(_platform_unknown_row "$ctx")"
-		printf '%s\t%s\n' "$(_platform_sanitize "$ctx")" "${row#*$'\t'}"
+		if [[ -n "$ctx" && -n "${_PL_IDX[$ctx]+x}" ]]; then row="${_PL_IDX[$ctx]}"; else row="$(_platform_unknown_row "$ctx")"; fi
+		_platform_sanitize_to c "$ctx"
+		printf '%s\t%s\n' "$c" "${row#*$'\t'}"
 	done
 }
 
@@ -1475,18 +1882,18 @@ _platform_diff() {
 	local -A _pl_in=() _pl_or=() _pl_nr=()
 	split_csv "$3" _pl_c
 	for c in ${_pl_c[@]+"${_pl_c[@]}"}; do
-		c="$(_platform_sanitize "$c")"
+		_platform_sanitize_to c "$c"
 		[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_all+=("$c"); }
 	done
 	while IFS= read -r line; do
 		[[ -n "$line" ]] || continue
-		c="$(_platform_sanitize "${line%%$'\t'*}")"
+		_platform_sanitize_to c "${line%%$'\t'*}"
 		[[ -n "${_pl_or[$c]+x}" ]] || _pl_or[$c]="$line"
 		[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_all+=("$c"); }
 	done <<<"$1"
 	while IFS= read -r line; do
 		[[ -n "$line" ]] || continue
-		c="$(_platform_sanitize "${line%%$'\t'*}")"
+		_platform_sanitize_to c "${line%%$'\t'*}"
 		[[ -n "${_pl_nr[$c]+x}" ]] || _pl_nr[$c]="$line"
 	done <<<"$2"
 	for c in ${_pl_all[@]+"${_pl_all[@]}"}; do
@@ -1504,7 +1911,7 @@ _platform_diff() {
 		for j in "${!PLATFORM_ROW_KEYS[@]}"; do
 			ov="${_pl_o[j + 1]:-unknown}"
 			nv="${_pl_n[j + 1]:-unknown}"
-			res="$(_platform_build_cmp "${PLATFORM_ROW_KEYS[j]}" "$ov" "$nv")"
+			_platform_build_cmp_to res "${PLATFORM_ROW_KEYS[j]}" "$ov" "$nv"
 			[[ "$res" == same ]] || printf '%s\t%s\t%s\t%s\t%s\n' "$res" "$c" "${PLATFORM_ROW_KEYS[j]}" "$ov" "$nv"
 		done
 	done
@@ -1574,7 +1981,7 @@ _platform_kv() {
 # shellcheck disable=SC2329
 platform_resume_check() {
 	local tsv="$1" _pl_ctxs="$2" tctx="${3:-}" old new kind c key o n dies="" line tb_old eh_old tb_new="" eh_new="" lv
-	local again tp_old snap src unr="" g keys kv_old kv_new lim nt infra note csv _pl_tn _pl_gall=""
+	local again tp_old snap src unr="" g cmp keys kv_old kv_new lim nt infra note csv _pl_tn _pl_gall=""
 	local -a _pl_lv=() _pl_lo=() _pl_rc=() _pl_gk=() _pl_p=()
 	local -A _pl_ov=() _pl_nv=() _pl_raw=() _pl_gkeys=() _pl_rko=() _pl_rkn=()
 	if [[ -n "$tctx" ]]; then
@@ -1604,7 +2011,7 @@ platform_resume_check() {
 	# The run's members by the names the TSV records (_platform_sanitize).
 	split_csv "$_pl_ctxs" _pl_rc
 	for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
-		g="$(_platform_sanitize "$c")"
+		_platform_sanitize_to g "$c"
 		[[ -n "${_pl_raw[$g]+x}" ]] || _pl_raw[$g]="$c"
 	done
 	# The TSV read its once-recorded values on its first member (the sweep's first context then):
@@ -1647,7 +2054,10 @@ platform_resume_check() {
 	if [[ -n "$tctx" ]]; then
 		# Its warnings name members as the TSV records them (_platform_sanitize).
 		_pl_tn="$(_platform_sanitize "$tctx")"
-		for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do _pl_gall+="${_pl_gall:+ }$(_platform_sanitize "$c")"; done
+		for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
+			_platform_sanitize_to g "$c"
+			_pl_gall+="${_pl_gall:+ }${g}"
+		done
 		# Kubernetes versions, member by member (probe_kube_versions names them as given).
 		kv_old="$(_platform_preamble_value "$tsv" KUBE_VERSIONS)" || kv_old=""
 		kv_new="$(probe_kube_versions "$_pl_ctxs" "${KUBECTL[@]}")"
@@ -1664,7 +2074,8 @@ platform_resume_check() {
 			[[ -n "${_pl_rko[$c]+x}" ]] || continue
 			o="${_pl_rko[$c]}"
 			n="${_pl_rkn[$c]:-unknown}"
-			case "$(_platform_build_cmp KUBE_VERSIONS "$o" "$n")" in
+			_platform_build_cmp_to cmp KUBE_VERSIONS "$o" "$n"
+			case "$cmp" in
 			differs) dies+=$'\n'"  $(_platform_sanitize "$c"): KUBE_VERSIONS recorded ${o}, now ${n}" ;;
 			unknown) unr+="$(_platform_sanitize "$c")"$'\t'"$(_platform_unread_why "$tsv" KUBE_VERSIONS "$o" "$n" " (${n})")"$'\t'KUBE_VERSIONS$'\n' ;;
 			esac
@@ -1766,27 +2177,34 @@ platform_resume_check() {
 		echo "warning: --resume: ${g%%$'\t'*}: ${keys}: ${g#*$'\t'}, so this run cannot tell whether $([[ "$keys" == *", "* ]] && echo they || echo it) changed since its rows were measured" >&2
 	done
 	[[ -z "$dies" ]] || die "--resume: ${tsv} was started on other builds, settings or cluster values than the members have now:${dies}
+$(_platform_resume_causes "$dies")
 The rows this run appends would be credited to what its preamble records. ${again}"
 }
 
 # platform_drift_check <sweep_dir> <ctxs_csv>: after a sweep's last step (outside every window;
 # nothing in a dry-run), read these members' record again and compare it with the one the sweep
 # started with (PLATFORM_PROBE_ROWS); when the sweep's TSVs (<sweep_dir>/*.tsv) record them, also
-# each member's KUBE_VERSIONS (probe_kube_versions) and, on the first member (where the sweeps
-# read them), TUNING_BASELINE and SIDECAR_EGRESS_HOSTS (tuning_baseline_state), against every
-# definite value those TSVs recorded. A value that changed warns, naming the member, key, both
-# values, the usual cause and what to do, and goes into <sweep_dir>/platform-drift.txt
-# (PLATFORM_DRIFT_FILE: "# <KEY>=<ctx>=<value at the end>,..." lines, the levers as
-# "# TUNING_BASELINE=<value at the end>"), which every report of the sweep says in its body
-# (platform_report_warnings; the record's keys and KUBE_VERSIONS merge as a second value:
-# mixed:). A value not read at either end warns only. It never fails the sweep (PL40: its
-# reports run next): a check it cannot make is a warning.
+# each member's KUBE_VERSIONS (probe_kube_versions) and, on the member the TSVs read them on (the
+# first of their record, when it is one of <ctxs_csv>; else the first of <ctxs_csv>),
+# TUNING_BASELINE and SIDECAR_EGRESS_HOSTS (tuning_baseline_state) and ISTIOD_CPU_LIMIT_M and
+# ISTIOD_MEM_LIMIT_MI (cap_istiod_limits: the denominators of the controlplane report's istiod
+# limit figures), against every definite value those TSVs recorded. A value that changed warns,
+# naming the member, key, both values (the levers that changed, for TUNING_BASELINE), the usual
+# cause and what to do, and goes into <sweep_dir>/platform-drift.txt (PLATFORM_DRIFT_FILE:
+# "# <KEY>=<ctx>=<value at the end>,..." lines, the once-recorded values as "# <KEY>=<value at
+# the end>"), which every report of the sweep says in its body (platform_report_warnings, with
+# both values; the record's keys merge it as a second value, mixed:, and so does KUBE_VERSIONS in
+# a report that merges it with --with). A value not read at either end
+# warns only. It never fails the sweep (PL40: its reports run next): a check it cannot make is a
+# warning.
 # shellcheck disable=SC2329
 platform_drift_check() {
 	local dir="$1" _pl_ctxs="$2" start now kind c key o n marker found="" k fresh=0 f v lv
-	local tb_start="" eh_start="" tb_end="" eh_end="" kv_end="" tb_rec=0 eh_rec=0 kv_rec=0 line
+	local eh_start="" tb_end="" eh_end="" kv_end="" tb_rec=0 eh_rec=0 kv_rec=0 lim_rec=0 line
+	local src="" src_rec="" lim chg
 	local -a _pl_c=() _pl_uo=() _pl_do=() _pl_p=()
 	local -A _pl_end=() _pl_unk=() _pl_dig=() _pl_tb=() _pl_kv=() _pl_kv_start=() _pl_kv_now=()
+	local -A _pl_lim_start=()
 	! ((${DRY_RUN:-0})) || return 0
 	split_csv "$_pl_ctxs" _pl_c
 	((${#_pl_c[@]})) || return 0
@@ -1795,7 +2213,7 @@ platform_drift_check() {
 		return 0
 	fi
 	start="$(_platform_rows_of "$_pl_ctxs")"
-	echo "Platform record: reading ${_pl_c[*]} again, to check that no build, istiod setting, tuning lever or Kubernetes version changed during the sweep"
+	echo "Platform record: reading ${_pl_c[*]} again, to check that no build, istiod setting or limit, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
 	if ! now="$(_platform_read_members "${_pl_c[@]}")"; then
 		echo "warning: the platform record could not be read again (no temp dir), so the reports cannot tell whether a build changed during the sweep" >&2
 		return 0
@@ -1819,12 +2237,16 @@ platform_drift_check() {
 			;;
 		esac
 	done < <(_platform_diff "$start" "$now" "$_pl_ctxs")
-	# What the sweep's TSVs recorded once, at their start: each lever's and each member's
-	# definite values.
+	# What the sweep's TSVs recorded once, at their start: each lever's, each istiod limit's and
+	# each member's definite values, and the member they read the levers and limits on.
 	for f in "$dir"/*.tsv; do
 		[[ -f "$f" ]] || continue
+		if [[ -z "$src_rec" ]] && { _platform_preamble_value "$f" TUNING_BASELINE >/dev/null ||
+			_platform_preamble_value "$f" ISTIOD_CPU_LIMIT_M >/dev/null; }; then
+			line="$(_platform_file_rows "$f")"
+			src_rec="${line%%$'\t'*}"
+		fi
 		if v="$(_platform_preamble_value "$f" TUNING_BASELINE)"; then
-			((tb_rec)) || tb_start="$v"
 			tb_rec=1
 			IFS=',' read -r -a _pl_p <<<"$v"
 			for lv in ${_pl_p[@]+"${_pl_p[@]}"}; do
@@ -1833,6 +2255,13 @@ platform_drift_check() {
 				case ";${_pl_tb[$k]:-};" in *";${lv#*=};"*) ;; *) _pl_tb[$k]="${_pl_tb[$k]:-}${_pl_tb[$k]:+;}${lv#*=}" ;; esac
 			done
 		fi
+		for k in ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
+			v="$(_platform_preamble_value "$f" "$k")" || continue
+			lim_rec=1
+			[[ -n "${_pl_lim_start[$k]+x}" ]] || _pl_lim_start[$k]="$v"
+			[[ "$v" != unknown ]] || continue
+			case ";${_pl_tb[$k]:-};" in *";${v};"*) ;; *) _pl_tb[$k]="${_pl_tb[$k]:-}${_pl_tb[$k]:+;}${v}" ;; esac
+		done
 		if v="$(_platform_preamble_value "$f" SIDECAR_EGRESS_HOSTS)"; then
 			((eh_rec)) || eh_start="$v"
 			eh_rec=1
@@ -1852,6 +2281,16 @@ platform_drift_check() {
 			done
 		fi
 	done
+	# The member the TSVs read their once-recorded values on, by its name in this run.
+	src="${_pl_c[0]}"
+	if [[ -n "$src_rec" ]]; then
+		for c in "${_pl_c[@]}"; do
+			if [[ "$(_platform_sanitize "$c")" == "$src_rec" ]]; then
+				src="$c"
+				break
+			fi
+		done
+	fi
 	if ((tb_rec || eh_rec)); then
 		if declare -F tuning_baseline_state >/dev/null; then
 			while IFS= read -r line; do
@@ -1859,36 +2298,37 @@ platform_drift_check() {
 				TUNING_BASELINE=*) tb_end="${line#*=}" ;;
 				SIDECAR_EGRESS_HOSTS=*) eh_end="${line#*=}" ;;
 				esac
-			done < <(tuning_baseline_state "${_pl_c[0]}" "${KUBECTL[@]}")
+			done < <(tuning_baseline_state "$src" "${KUBECTL[@]}")
 		else
 			echo "warning: platform_drift_check needs tuning_baseline_state (source tests/lib/preamble.sh) to read the tuning levers again; not checked, so the reports cannot tell whether they changed during the sweep" >&2
 			tb_rec=0 eh_rec=0
 		fi
 	fi
 	if ((tb_rec)); then
-		c="$(_platform_sanitize "${_pl_c[0]}")"
-		v=0
+		c="$(_platform_sanitize "$src")"
+		chg=""
 		IFS=',' read -r -a _pl_p <<<"$tb_end"
 		for lv in ${_pl_p[@]+"${_pl_p[@]}"}; do
 			[[ "$lv" == *=* ]] || continue
-			if [[ "${lv#*=}" == unknown || -z "${_pl_tb[${lv%%=*}]:-}" ]]; then
+			k="${lv%%=*}"
+			if [[ "${lv#*=}" == unknown || -z "${_pl_tb[$k]:-}" ]]; then
 				[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")
-				_pl_unk[$c]+="${_pl_unk[$c]:+, }TUNING_BASELINE ${lv%%=*}"
-			elif [[ "${_pl_tb[${lv%%=*}]}" != "${lv#*=}" ]]; then
-				v=1
+				_pl_unk[$c]+="${_pl_unk[$c]:+, }TUNING_BASELINE ${k}"
+			elif [[ "${_pl_tb[$k]}" != "${lv#*=}" ]]; then
+				chg+="${chg:+, }${k} from ${_pl_tb[$k]//;/ or } to ${lv#*=}"
 			fi
 		done
 		if [[ "$tb_end" != *=* ]]; then
 			[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")
 			_pl_unk[$c]+="${_pl_unk[$c]:+, }TUNING_BASELINE"
-		elif ((v)); then
-			echo "warning: ${c}: TUNING_BASELINE changed during the sweep: ${tb_start} at its start, ${tb_end} at its end; rows measured after the change ran with other tuning levers (written to ${dir}/${PLATFORM_DRIFT_FILE}, which its reports say in their body); $(_platform_drift_cause TUNING_BASELINE)" >&2
+		elif [[ -n "$chg" ]]; then
+			echo "warning: ${c}: TUNING_BASELINE changed during the sweep: ${chg}; rows measured after the change ran with other tuning levers (written to ${dir}/${PLATFORM_DRIFT_FILE}, which its reports say in their body); $(_platform_drift_cause TUNING_BASELINE)" >&2
 			_pl_end[TUNING_BASELINE]="$tb_end"
 			found=1
 		fi
 	fi
 	if ((eh_rec)); then
-		c="$(_platform_sanitize "${_pl_c[0]}")"
+		c="$(_platform_sanitize "$src")"
 		if [[ -z "$eh_end" || "$eh_end" == unknown || -z "${_pl_tb[SIDECAR_EGRESS_HOSTS]:-}" ]]; then
 			[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")
 			_pl_unk[$c]+="${_pl_unk[$c]:+, }SIDECAR_EGRESS_HOSTS"
@@ -1896,6 +2336,28 @@ platform_drift_check() {
 			echo "warning: ${c}: SIDECAR_EGRESS_HOSTS changed during the sweep: ${eh_start} at its start, ${eh_end} at its end; rows measured after the change ran with other root Sidecar egress hosts (written to ${dir}/${PLATFORM_DRIFT_FILE}, which its reports say in their body); $(_platform_drift_cause SIDECAR_EGRESS_HOSTS)" >&2
 			_pl_end[SIDECAR_EGRESS_HOSTS]="$eh_end"
 			found=1
+		fi
+	fi
+	# istiod's limits (per replica): the controlplane report divides every row's window-peak CPU
+	# and RSS by the recorded ones, and its SLA verdict uses both.
+	if ((lim_rec)); then
+		if declare -F cap_istiod_limits >/dev/null; then
+			c="$(_platform_sanitize "$src")"
+			lim="$(cap_istiod_limits "$src" "${KUBECTL[@]}")"
+			for k in ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
+				[[ -n "${_pl_lim_start[$k]+x}" ]] || continue
+				if [[ "$k" == ISTIOD_CPU_LIMIT_M ]]; then n="$(_platform_kv "$lim" cpu_m)"; else n="$(_platform_kv "$lim" mem_mi)"; fi
+				if [[ "$n" == unknown || -z "$n" || -z "${_pl_tb[$k]:-}" ]]; then
+					[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")
+					_pl_unk[$c]+="${_pl_unk[$c]:+, }${k}"
+				elif [[ "${_pl_tb[$k]}" != "$n" ]]; then
+					echo "warning: ${c}: ${k} changed during the sweep: ${_pl_lim_start[$k]} at its start, ${n} at its end; rows measured after the change ran under another limit, but the report divides every row's istiod limit figures (the window-peak CPU and RSS %, and the SLA verdict on them) by the recorded one (written to ${dir}/${PLATFORM_DRIFT_FILE}, which its reports say in their body); $(_platform_drift_cause "$k")" >&2
+					_pl_end[$k]="$n"
+					found=1
+				fi
+			done
+		else
+			echo "warning: platform_drift_check needs cap_istiod_limits (source tests/lib/capacity.sh) to read istiod's limits again; not checked, so the reports cannot tell whether they changed during the sweep" >&2
 		fi
 	fi
 	if ((kv_rec)); then
@@ -1930,9 +2392,9 @@ platform_drift_check() {
 	marker="${dir}/${PLATFORM_DRIFT_FILE}"
 	[[ -f "$marker" ]] || fresh=1
 	if ! {
-		((fresh == 0)) || echo "# Values that changed during this sweep: the value at its end, per member (tests/lib/platform.sh platform_drift_check; TUNING_BASELINE and SIDECAR_EGRESS_HOSTS on its first member; the TSVs record the value at its start)"
+		((fresh == 0)) || echo "# Values that changed during this sweep: the value at its end, per member (tests/lib/platform.sh platform_drift_check; TUNING_BASELINE, SIDECAR_EGRESS_HOSTS and istiod's limits on the member the TSVs read them on; the TSVs record the value at its start)"
 		echo "# DRIFT_READ_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-		for k in "${PLATFORM_KEYS[@]}" KUBE_VERSIONS TUNING_BASELINE SIDECAR_EGRESS_HOSTS; do
+		for k in "${PLATFORM_KEYS[@]}" KUBE_VERSIONS TUNING_BASELINE SIDECAR_EGRESS_HOSTS ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
 			[[ -z "${_pl_end[$k]+x}" ]] || echo "# ${k}=${_pl_end[$k]}"
 		done
 	} >>"$marker"; then

@@ -85,7 +85,8 @@ esac
 probe_read=""
 case "$cmd" in
 "api-versions" | "-n sail-operator get deployments.apps,pods -o json" | "-n istio-system get pods -o json" | "get nodes -o json" | \
-	"-n openshift-operators get clusterserviceversions.operators.coreos.com -o json") probe_read=1 ;;
+	"-n openshift-operators get clusterserviceversions.operators.coreos.com -o json" | \
+	"get destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io -A -l istio-scale-tests/tuning-profile -o json") probe_read=1 ;;
 esac
 if [[ "$ctx" == ctx-a && -n "${STUB_FLAKY_A:-}" && -z "$probe_read" ]]; then
 	n="$(cat "${STUB_LOG}.flaky" 2>/dev/null || echo 0)"
@@ -224,6 +225,8 @@ case "$cmd" in
 		echo '{"items":[{"spec":{"providerID":"aws:///zone-a/i-0"}}]}'
 	fi ;;
 "get istios.sailoperator.io default -o json") echo '{"spec":{"version":"v1.30.5"}}' ;;
+"get destinationrules.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io,telemetries.telemetry.istio.io -A -l istio-scale-tests/tuning-profile -o json")
+	echo '{"kind":"List","items":[]}' ;;
 "-n mesh-verify-gwapi get deploy -l app=gwapi-echo -o json" | "-n mesh-verify-gwapi-remote get deploy -l app=gwapi-echo -o json" | \
 	"-n mesh-verify-gwapi-shared get deploy -l app=gwapi-echo -o json")
 	if [[ "$ctx" == ctx-b && ( "$cmd" != *-remote* || -z "${STUB_NO_REMOTE_NS:-}" ) && ( "$cmd" != *-shared* || -z "${STUB_NO_SHARED_NS:-}" ) ]]; then
@@ -837,7 +840,7 @@ render_sha() {
 	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | sed -n 3p)" = "$(grep -m1 '^- kind: Service' "$s")" ]
 	grep -q '^- Hostname — \*\*NO\*\*' "$s"
 	grep -q '| Run config | `none` (sha256 `none`) |' "$s"
-	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest}; istiod env ${envd} |" "$s"
+	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest}; istiod env ${envd}; tuning objects none |" "$s"
 	grep -q '| Member | istiod image | Ingress istio-proxy image | Operator build |' "$s"
 	grep -q '| Traffic | ' "$s"
 	grep -q "istio-pilot-rhel9:1.30.5@${digest}" "$s"
@@ -1500,7 +1503,7 @@ render_sha() {
 	! grep -q 'OSSM_OPERATOR.*absent' "$(tsv)" || false
 	! grep -q -- '--context=ctx-a .*clusterserviceversions' "$STUB_LOG" || false
 	assert_output --partial "ctx-a: could not read the platform (so the mesh operator build is not read either); recorded as unknown"
-	assert_output --partial "ctx-a: did not answer; its platform record stops here"
+	assert_output --partial "ctx-a: did not answer within PLATFORM_READ_TIMEOUT (20s); its platform record stops here"
 	# The run itself goes on: the preflight's own reads answered.
 	assert_output --partial "traffic: NO"
 }

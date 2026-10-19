@@ -1020,5 +1020,5 @@ empty: "
 	assert_output --partial 'expectedClusters: "Mesh_B" is not a cluster name'
 	run helm template x "$CHART" --set clusterName=mesh-a --set 'expectedClusters={mesh-a,mesh-b,mesh-a}'
 	assert_failure
-	assert_output --partial "expectedClusters names a member more than once: mesh-a,mesh-b,mesh-a"
+	assert_output --partial "expectedClusters names mesh-a more than once (mesh-a,mesh-b,mesh-a)"
 }

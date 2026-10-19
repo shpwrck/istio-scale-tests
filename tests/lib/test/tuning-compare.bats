@@ -86,6 +86,20 @@ five_passes() {
 	with_record 03-proxy "${digests}; s/proxyv2:1.30.5@$(digest ef)/proxyv2:1.30.6@$(digest 01)/g"
 }
 
+@test "tuning 004 (S-B2): a record of 500 members compares in both formats; the one member that differs is named, not all 500" {
+	local last=scale-campaign-region-a-member-500.example.invalid
+	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500)" with_record baseline
+	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500)" with_record 01-x "s/${last}=proxyv2:1.30.5/${last}=proxyv2:1.30.6/"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | differs (see notes) |"
+	assert_output --partial "- PROXY_IMAGE_BY_CONTEXT: \`${last}=proxyv2:1.30.6 (1 of 500 members; the other 499 match)\`"
+	refute_output --partial "member-499.example.invalid"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp "  PROXY_IMAGE_BY_CONTEXT +${last}=proxyv2:1.30.6 \(1 of 500 members; the other 499 match\)"
+}
+
 @test "tuning 004 (H3): one Platform record row keeps the table narrow; a differing pass is flagged, a state-only operator difference is not" {
 	five_passes
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md

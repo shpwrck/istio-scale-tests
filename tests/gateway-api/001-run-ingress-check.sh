@@ -211,6 +211,7 @@ Environment:
   TEST_PLATFORM (${TEST_PLATFORM:-auto}): the hub's platform, for its Argo CD namespace (auto asks
   the hub; kubernetes or openshift is taken as given). The platform record asks each member what
   it serves either way, and warns when that is not TEST_PLATFORM.
+$(platform_help_lines timeout)
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),

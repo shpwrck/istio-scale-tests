@@ -142,17 +142,19 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   one row per iteration and remote. Columns are listed in `005-report-results.sh --help`.
 - The preamble's platform record ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`,
   `TEST_PLATFORM` and, per member, the platform it serves, the mesh operator, istiod and gateway
-  proxy (ingress and east-west) builds, istiod's settings and the nodes' provider
-  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-  `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT` and `ISTIOD_ENV_BY_CONTEXT`: a digest of
-  istiod's discovery container env without `CLUSTER_ID`), read before the first iteration (a
-  sweep reads it once for all its steps, and again after the last one: a build, istiod setting,
-  tuning lever or Kubernetes version that changed in between is written to `platform-drift.txt`
-  in the sweep dir). An image carries the digest its pods run (`@unknown` when none has started:
-  not read, never another build); `none` means no such pod. `005` prints it in every format, as
-  `mixed` with a warning in the report itself (the top-level `warnings` array in json, empty
-  without one) when its inputs differ, a value could not be read in some of them, or the sweep's
-  record changed; an operator that differs only in its state (`Available`, `Unavailable`) is not
+  proxy (ingress and east-west) builds, istiod's settings, the nodes' provider and any tuning
+  profile objects (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+  `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of
+  istiod's discovery container env without `CLUSTER_ID`, and `TUNING_OBJECTS_BY_CONTEXT`: `none`
+  outside a tuning run), read before the first iteration (a sweep reads it once for all its steps
+  and hands it to them in `platform-record.txt` in the sweep dir, and reads it again after the
+  last one: a build, istiod setting, tuning lever, tuning profile object or Kubernetes version
+  that changed in between is written to `platform-drift.txt` there). An image carries the digest
+  its pods run (`@unknown` when none has started: not read, never another build); `none` means
+  no such pod. `005` prints it in every format, as `mixed` with a warning in the report itself
+  (the top-level `warnings` array in json, empty without one) when its inputs differ, a value
+  could not be read in some of them, the sweep's record changed or a tuning profile's objects
+  were in place; an operator that differs only in its state (`Available`, `Unavailable`) is not
   mixed. A file without it predates the record (the suite supported only
   OpenShift with OSSM then); its values read `unknown`.
 - `endpoint-<RUN_ID>.md`: per-run summary.
