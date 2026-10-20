@@ -287,8 +287,7 @@ _probe_istiod_pod() {
 # PROBE_ISTIOD_MEM_LIMIT 4Gi, PROBE_ISTIOD_REQ_CPU 500m, PROBE_ISTIOD_REPLICAS 1, PROBE_NETWORK
 # net-<ctx>; PROBE_ISTIOD_DEPLOY=missing: none; on the member PROBE_ISTIOD_ON names,
 # PROBE_ISTIOD_ON_CPU_LIMIT, PROBE_ISTIOD_ON_MEM_LIMIT, PROBE_ISTIOD_ON_REPLICAS and
-# PROBE_ISTIOD_ON_DEPLOY instead), the
-# nodes' allocatable (PROBE_NODE_CPU 8).
+# PROBE_ISTIOD_ON_DEPLOY instead), the nodes' allocatable (PROBE_NODE_CPU 8).
 # PROBE_TUNING_OBJECTS: the objects labelled by a tuning profile: none (default), 04 (profile 04's
 # DestinationRule), two (two profiles' objects, in reverse order), marker (profile 02's marker
 # ConfigMap, all an env-only profile leaves), unserved (a kind the member does not serve) or
@@ -1454,8 +1453,9 @@ env_list() {
 	assert_output "x on a, c; y on b"
 	run platform_members_by_value "m1=x,m2=x,m3=x,m4=x,m5=x,m6=x,m7=x,n=pilot:1.30.5@${d}"
 	assert_output "x on m1, m2, m3, m4, m5 and 2 more; pilot:1.30.5@sha256:abababababab on n"
+	# A token without a member: some inputs predate the key (M13-N3).
 	run platform_members_by_value "mixed:unknown,a=mixed:x;y,b=x"
-	assert_output "mixed:unknown; mixed: x and y on a; x on b"
+	assert_output "not recorded in some of its TSVs; mixed: x and y on a; x on b"
 }
 
 @test "H3: every writer of the ns-lifecycle TSV reads the platform record before it creates the file" {
@@ -2671,9 +2671,9 @@ drift_unsourced() (
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:3" "a=p:1,b=p:1"
 	assert_output "a=p:2, b=p:3 (all 2 members)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "mixed:unknown,a=p:1,b=p:2" "a=p:1,b=p:1,c=p:1"
-	assert_output "mixed:unknown, b=p:2, c not recorded (2 of 3 members; the other 1 match)"
+	assert_output "not recorded in some of its TSVs, b=p:2, c not recorded (2 of 3 members; the other 1 match)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "mixed:unknown,a=p:1,b=p:2" "a=p:1,b=p:2"
-	assert_output "mixed:unknown, every member recorded matches"
+	assert_output "not recorded in some of its TSVs, every member recorded matches"
 	# U9-S3: the one value only when no member or every member differs, each recorded on both
 	# sides; else the members that differ, so one that matches (by one of two values a reference
 	# member ran: R9-B1) or that a side does not record is not hidden behind it.
@@ -2701,6 +2701,14 @@ drift_unsourced() (
 	assert_output "m7=3, m1=mixed: 1 and 2, m2=mixed: 1 and 2, m3=mixed: 1 and 2, m4=mixed: 1 and 2, and 2 more members (all 7 members)"
 	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "$six" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1,m8=1"
 	assert_output "m7 not recorded, m8 not recorded, m1=mixed: 1 and 2, m2=mixed: 1 and 2, m3=mixed: 1 and 2, and 3 more members (all 8 members)"
+	# Those that differ before those not read on a side, so six failed reads do not push the one
+	# that differs out either (I13-B1); then those that ran two values; one more, one member.
+	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "m1=unknown,m2=unknown,m3=unknown,m4=unknown,m5=unknown,m6=unknown,m7=3" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1"
+	assert_output "m7=3, m1=unknown, m2=unknown, m3=unknown, m4=unknown, and 2 more members (all 7 members)"
+	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "m1=mixed:1;2,m2=unknown,m3=2,m4=1,m5=1,m6=1,m7=1,m8=1" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1,m8=1"
+	assert_output "m3=2, m2=unknown, m1=mixed: 1 and 2 (3 of 8 members; the other 5 match)"
+	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "m1=2,m2=2,m3=2,m4=2,m5=2,m6=2,m7=1" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1"
+	assert_output "m1=2, m2=2, m3=2, m4=2, m5=2, and 1 more member (6 of 7 members; the other 1 match)"
 	# Counts from before the record (no member) that disagree (R11-N1).
 	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "mixed:2;1" 1
 	assert_output "mixed: 2 and 1"

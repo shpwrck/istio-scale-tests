@@ -23,11 +23,10 @@ setup() {
 	# kubectl: one member per --context. Its Istio CR is live.<ctx>.json, which a merge patch
 	# changes (null deletes) unless STUB_PATCH_NOOP names the context; the Sail operator reads as
 	# reconciled (never on a context STUB_NO_RECONCILE names) and istiod as rolled out. Its
-	# markers are markers.<ctx>.json (an
-	# empty list when absent; STUB_LIST_FAIL names a context whose list fails). A delete -f of
-	# a marker file removes it, unless STUB_MARKER_STAYS names the context. The hub's Argo CD
-	# Applications are apps.json and its AppProject default project.json, which a merge patch
-	# replaces (logged as "project-patch"). Anything else fails.
+	# markers are markers.<ctx>.json (an empty list when absent; STUB_LIST_FAIL names a context
+	# whose list fails). A delete -f of a marker file removes it, unless STUB_MARKER_STAYS names
+	# the context. The hub's Argo CD Applications are apps.json and its AppProject default
+	# project.json, which a merge patch replaces (logged as "project-patch"). Anything else fails.
 	cat >"${STUB_DIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 echo "kubectl $*" >>"$STUB_LOG"

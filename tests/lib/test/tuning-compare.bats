@@ -1245,6 +1245,32 @@ with_replicas() {
 	assert_output --regexp '  ISTIOD_REPLICAS_BY_CONTEXT +m7=3, m1=mixed: 1 and 2, '
 }
 
+@test "tuning 004 (I13-B1): a pass's note names the member that differs from the baseline ahead of those not read at its probe" {
+	local i im="" bi=""
+	PLATFORM_FIXTURE_CTXS=m1,m2,m3,m4,m5,m6,m7 lever_passes
+	# 02-x: m1 to m6 unreachable at its probe, m7 on another Kubernetes version.
+	sed -i 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=m1=unreachable,m2=unreachable,m3=unreachable,m4=unreachable,m5=unreachable,m6=unreachable,m7=v1.33.2/' \
+		"${S}/02-x"/controlplane-*.tsv
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | differs (see notes) | same |"
+	assert_output --partial "- KUBE_VERSIONS: \`m7=v1.33.2, m1=unreachable, m2=unreachable, m3=unreachable, m4=unreachable, and 2 more members (all 7 members)\`"
+	# Its istiod build instead: m1 to m6 with no pod started at its probe (a digest @unknown),
+	# m7 on another build.
+	sed -i 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=m1=v1.33.1,m2=v1.33.1,m3=v1.33.1,m4=v1.33.1,m5=v1.33.1,m6=v1.33.1,m7=v1.33.1/' \
+		"${S}/02-x"/controlplane-*.tsv
+	for i in 1 2 3 4 5 6 7; do
+		bi+="${bi:+,}m${i}=pilot:1.30.5@$(digest aa)"
+		if ((i < 7)); then im+="${im:+,}m${i}=pilot:1.30.5@unknown"; else im+=",m${i}=pilot:1.30.6@$(digest bb)"; fi
+	done
+	sed -i "s#^\# ISTIOD_IMAGE_BY_CONTEXT=.*#\# ISTIOD_IMAGE_BY_CONTEXT=${bi}#" "${S}/baseline"/controlplane-*.tsv "${S}/04-connection-pools"/controlplane-*.tsv
+	sed -i "s#^\# ISTIOD_IMAGE_BY_CONTEXT=.*#\# ISTIOD_IMAGE_BY_CONTEXT=${im}#" "${S}/02-x"/controlplane-*.tsv
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | differs (see notes) | same |"
+	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`m7=pilot:1.30.6@sha256:bbbbbbbbbbbb, m1=pilot:1.30.5@unknown, m2=pilot:1.30.5@unknown, m3=pilot:1.30.5@unknown, m4=pilot:1.30.5@unknown, and 2 more members (all 7 members)\`"
+}
+
 @test "tuning 004 (M11-S2): a pass of a suite that reads istiod's replica count at its start only, whose profile turns autoscaling on, is not known all through the pass: noted and warned" {
 	local p
 	lever_passes
@@ -1284,9 +1310,29 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | same (see notes) |"
-	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; each cell's own count of istiod pods is in the pass's controlplane report (the csv's istiod_pods_avg, the json's istiod_pods_per_cluster_avg, the growth table's istiod pods / cluster)"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; each cell's own count of istiod pods is in its istiod_pods_avg (tests/controlplane/004-report-results.sh --results-dir <the pass's directory> --format csv)"
 	refute_output --partial "Warning:** pass 04-connection-pools"
 	[[ "$stderr" != *"pass 04-connection-pools"* ]] || { echo "$stderr"; false; }
+	# Without a baseline that pass is the reference: its cell points at the note, and it does
+	# not warn either (C13-S1).
+	mv "${S}/baseline" "${BATS_TEST_TMPDIR}/gone/"
+	printf '# SUITE=controlplane\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | reference (see notes) | same |"
+	assert_output --partial "the read at the pass's end found each member's count it started with"
+	refute_output --partial "Warning:**"
+	[[ "$stderr" != *"warning: pass"* ]] || { echo "$stderr"; false; }
+	mv "${BATS_TEST_TMPDIR}/gone/baseline" "${S}/"
+	printf '# SUITE=controlplane\n# PASSES=baseline,02-x,04-connection-pools\n' > "${S}/sweep-metadata.txt"
+	# A TSV that records the count without its members (ISTIOD_REPLICAS), which the read at its
+	# end does not compare: no such note (R13-N1).
+	with_replicas 04-connection-pools 1 ISTIOD_REPLICAS
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	refute_output --partial "found each member's count it started with"
+	with_replicas 04-connection-pools ctx-a=1,ctx-b=1
 	# Not read again at its end (no drift file), or not compared there: no such note.
 	mv "${S}/04-connection-pools/platform-drift.txt" "${BATS_TEST_TMPDIR}/gone/"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
@@ -1352,7 +1398,7 @@ with_replicas() {
 	assert_success
 	assert_output --partial "| Platform record | baseline | unknown (see notes) | same | differs (see notes) | unknown (see notes) |"
 	assert_output --partial "Pass 01-same, cannot be compared on NODE_PROVIDER_BY_CONTEXT:"
-	assert_output --partial "- NODE_PROVIDER_BY_CONTEXT: \`mixed:unknown, every member recorded matches\`"
+	assert_output --partial "- NODE_PROVIDER_BY_CONTEXT: \`not recorded in some of its TSVs, every member recorded matches\`"
 	[[ "$stderr" == *"warning: pass 01-same: NODE_PROVIDER_BY_CONTEXT could not be compared with the baseline (not read, or not recorded, in one of them)"* ]] || { echo "$stderr"; false; }
 	refute_output --partial "disagree"
 	# In the baseline instead: the pass compared with, and every pass's NODE_PROVIDER_BY_CONTEXT
@@ -1363,7 +1409,7 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | unknown (see notes) | unknown (see notes) | differs (see notes) | unknown (see notes) |"
-	assert_output --partial "- NODE_PROVIDER_BY_CONTEXT: \`mixed:unknown; kind on ctx-a, ctx-b\`"
+	assert_output --partial "- NODE_PROVIDER_BY_CONTEXT: \`not recorded in some of its TSVs; kind on ctx-a, ctx-b\`"
 	refute_output --partial "disagree"
 	refute_output --partial "no profile's change against it"
 }

@@ -2472,11 +2472,27 @@ platform_short_digests() {
 	printf '%s\n' "$1" | sed -E 's/(sha256:[0-9a-f]{12})[0-9a-f]{52}/\1/g'
 }
 
+# _platform_bare_text <token>: a token without a member, as tuning 004's notes show it:
+# mixed:unknown (some of a pass's inputs predate the key; platform_report_values) reads "not
+# recorded in some of its TSVs", which the cell's unknown stands for; mixed:<a>;<b> (counts from
+# before the record that disagree) "mixed: <a> and <b>"; any other as it is.
+_platform_bare_text() {
+	local x
+	case "$1" in
+	mixed:unknown) printf '%s\n' "not recorded in some of its TSVs" ;;
+	mixed:*";"*)
+		x="${1#mixed:}"
+		printf 'mixed: %s\n' "${x//;/ and }"
+		;;
+	*) printf '%s\n' "$1" ;;
+	esac
+}
+
 # platform_members_by_value <by_context value>: each value with the members that have it, five
 # named (then how many more), "; "-joined in the order they first appear, digests shortened: a
 # member whose inputs disagree reads "mixed: <a> and <b>". A token without a member comes first
-# (mixed:unknown: some inputs predate the key; counts from before the record that disagree read
-# "mixed: <a> and <b>").
+# (_platform_bare_text: mixed:unknown, some inputs predate the key, reads "not recorded in some of
+# its TSVs"; counts from before the record that disagree read "mixed: <a> and <b>").
 # shellcheck disable=SC2329
 platform_members_by_value() {
 	local pair x out=""
@@ -2485,8 +2501,7 @@ platform_members_by_value() {
 	IFS=',' read -r -a _pl_p <<<"$1"
 	for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
 		if [[ "$pair" != *=* ]]; then
-			[[ "$pair" != mixed:*";"* ]] || { x="${pair#mixed:}"; pair="mixed: ${x//;/ and }"; }
-			out+="${out:+; }${pair}"
+			out+="${out:+; }$(_platform_bare_text "$pair")"
 			continue
 		fi
 		x="${pair#*=}"
@@ -2676,20 +2691,21 @@ platform_compare_members() {
 # against a reference one (a tuning pass against the baseline), so a record of hundreds of
 # members stays one short line: the one value every member shares (platform_collapse) when no
 # member or every member differs from the reference (each recorded on both sides), else the
-# members that do not match it (platform_compare_members), then those that only ran more than
-# one value (which match by one of them: a note on what the inputs disagree on shows them), so
-# the five named include those that differ first; each group in the order its members first
-# appear, as <member>=<value> (a value it ran more than one of as "mixed: <a> and <b>", and so
-# the shared one), five at most, then ", and <j> more members", then "(<n> of <m> members; the
-# other <k> match)", or "(all <m> members)": a member that matches by one of the reference's
-# values (it ran two) is not hidden behind the shared value. A member only the reference has
-# reads "<member> not recorded"; a token without a member (mixed:unknown: an input without the
-# key) comes first.
+# members that do not match it (platform_compare_members): those that differ, then those not read
+# or not recorded on a side, then those that only ran more than one value (which match by one of
+# them: a note on what the inputs disagree on shows them), so the five named include those that
+# differ first; each group in the order its members first appear, as <member>=<value> (a value it
+# ran more than one of as "mixed: <a> and <b>", and so the shared one), five at most, then ", and
+# <j> more members", then "(<n> of <m> members; the other <k> match)", or "(all <m> members)": a
+# member that matches by one of the reference's values (it ran two) is not hidden behind the
+# shared value. A member only the reference has reads "<member> not recorded"; a token without a
+# member comes first (_platform_bare_text: "not recorded in some of its TSVs" for mixed:unknown,
+# an input without the key).
 # shellcheck disable=SC2329
 platform_value_against() {
-	local key="$1" v pair c a b r n=0 bare="" one=0 names
+	local key="$1" v pair c a b r t n=0 bare="" one=0 names
 	local -a _pl_items=() _pl_p=() _pl_vord=()
-	local -A _pl_in=() _pl_it=() _pl_dm=()
+	local -A _pl_in=() _pl_it=() _pl_rk=()
 	v="$(platform_collapse "$2")"
 	[[ "$v" == *=* || "$v" != mixed:*";"* ]] || { b="${v#mixed:}"; v="mixed: ${b//;/ and }"; }
 	if ! _platform_per_member "$key" || [[ "$2" != *=* ]]; then
@@ -2714,19 +2730,23 @@ platform_value_against() {
 		[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_vord+=("$c"); }
 		[[ "$pair" != *=mixed:*";"* ]] || { b="${pair#*=mixed:}"; _pl_it[$c]="${c}=mixed: ${b//;/ and }"; }
 	done
-	[[ "$bare" != mixed:*";"* ]] || { b="${bare#mixed:}"; bare="mixed: ${b//;/ and }"; }
+	[[ -z "$bare" ]] || bare="$(_platform_bare_text "$bare")"
 	while IFS=$'\t' read -r c a b r; do
 		[[ -n "$c" ]] || continue
-		_pl_dm[$c]=1
+		# 0: another value; 1: not read, or not recorded, on a side (the members that only ran
+		# more than one value come last: 2).
+		_pl_rk[$c]=1
+		[[ "$r" != differs ]] || _pl_rk[$c]=0
 		[[ "$a" != - && "$b" != - ]] || one=1
 		[[ "$b" != mixed:*";"* ]] || { b="${b#mixed:}"; b="mixed: ${b//;/ and }"; }
 		if [[ "$b" == - ]]; then _pl_it[$c]="${c} not recorded"; else _pl_it[$c]="${c}=${b}"; fi
 	done < <(platform_compare_members "$key" "$3" "$2")
-	# The members that do not match first, so six that only ran two values do not push one that
-	# differs out of the five named; then those.
-	for c in ${_pl_vord[@]+"${_pl_vord[@]}"}; do [[ -z "${_pl_dm[$c]+x}" ]] || _pl_items+=("${_pl_it[$c]}"); done
-	for c in ${_pl_vord[@]+"${_pl_vord[@]}"}; do
-		[[ -z "${_pl_it[$c]+x}" || -n "${_pl_dm[$c]+x}" ]] || _pl_items+=("${_pl_it[$c]}")
+	# The members that differ first, so five not read or six that only ran two values do not push
+	# one that differs out of the five named; then those not read, then those that ran two.
+	for t in 0 1 2; do
+		for c in ${_pl_vord[@]+"${_pl_vord[@]}"}; do
+			[[ -z "${_pl_it[$c]+x}" || "${_pl_rk[$c]:-2}" != "$t" ]] || _pl_items+=("${_pl_it[$c]}")
+		done
 	done
 	n=${#_pl_items[@]}
 	if [[ "$v" != *=* ]] && ((one == 0 && (n == 0 || n == ${#_pl_in[@]}))); then
@@ -2735,7 +2755,7 @@ platform_value_against() {
 	fi
 	# Past five, how many more members: "m5=mixed: 1 and 2 and 2 more" would read as a third value.
 	names="$(_platform_names ${_pl_items[@]+"${_pl_items[@]:0:5}"})"
-	((n <= 5)) || names+=", and $((n - 5)) more members"
+	((n <= 5)) || names+=", and $((n - 5)) more member$( ((n - 5 == 1)) || echo s)"
 	if ((n == 0)); then
 		printf '%s\n' "${bare:+${bare}, }every member recorded matches"
 	elif ((n == ${#_pl_in[@]})); then

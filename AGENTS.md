@@ -145,8 +145,9 @@ which wins over the upstream docs there when they disagree.
   audit, bats, and every `# ci-dry-run:` script against an empty kubeconfig (no cluster needed).
   Required before merging changes to `tests/lib/`.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
-  (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its `values-openshift.yaml`;
-  each ApplicationSet preset with both platform overlays (`platform-kubernetes.yaml`, `platform-openshift.yaml`).
+  (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its
+  `values-openshift.yaml`; each ApplicationSet preset with both platform overlays
+  (`platform-kubernetes.yaml`, `platform-openshift.yaml`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
 - CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks on
   macOS. The job names are required checks; don't rename them.

@@ -121,12 +121,15 @@ objects" row (TUNING_OBJECTS_BY_CONTEXT) reads none, own (all of its own profile
 every member, its marker and its resources: state/objects, and no other), other (another
 profile's, or any in the baseline: a profile left applied), missing (not all of its own:
 undone during the pass or never applied there) or unknown. Each value followed by "(see
-notes)" warns, but "same (see notes)"; a pass without data reads - in all three rows.
+notes)" warns, but "same (see notes)", and "reference (see notes)" whose one note is its
+profile's HPA (controlplane: the counts it started with held to its end); a pass without
+data reads - in all three rows.
 
 After the table: the reference pass's values, digests shortened to 12 hex digits; then for
-each pass with notes, the members that do not match, then those that ran more than one value
-(five at most, with a count), what changed during it, what it could not compare at its end,
-what its profile sets and what it ran where the reference pass ran more than one value.
+each pass with notes, the members that differ, then those not read or not recorded on a side,
+then those that ran more than one value (five at most, with a count), what changed during it,
+what it could not compare at its end, what its profile sets and what it ran where the reference
+pass ran more than one value.
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -200,6 +203,18 @@ fi
 # status column and is not probe data, so it is left out.
 # A pass the metadata lists without its directory has none (no data).
 pass_tsvs() { find "${RESULTS_DIR}/$1" -maxdepth 1 -name '*.tsv' ! -name 'reach-*.tsv' -type f 2>/dev/null | sort || true; }
+# pass_counts_per_member <pass>: return 0 when every TSV of the pass records each member's istiod
+# replica count (ISTIOD_REPLICAS_BY_CONTEXT, as the controlplane suite writes it): the counts the
+# read at its end compares (platform_drift_check), which never compares a bare ISTIOD_REPLICAS.
+pass_counts_per_member() {
+	local f n=0
+	while IFS= read -r f; do
+		[[ -n "$f" ]] || continue
+		grep -q '^# ISTIOD_REPLICAS_BY_CONTEXT=[^,]*=' "$f" || return 1
+		n=$((n + 1))
+	done < <(pass_tsvs "$1")
+	((n > 0))
+}
 
 # Suite from metadata, else from a header column only that suite's TSV has.
 SUITE="$(meta_get SUITE)"
@@ -971,7 +986,7 @@ for p in "${PASSES[@]}"; do
 		esac
 		PLAT_AS[$p]="$w"
 		PLAT_WARNINGS+=("pass ${p}: its profile turns istiod's autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA sets each member's istiod replica count, and ${w}, so whether that count held all through the pass is not known, nor $(pass_unknown_effect "$p")")
-	elif profile_autoscales "$p" && [[ -n "$(plat_value "$p" ISTIOD_REPLICAS_BY_CONTEXT)" && -z "${NODRIFT[$p]:-}" ]] &&
+	elif profile_autoscales "$p" && pass_counts_per_member "$p" && [[ -z "${NODRIFT[$p]:-}" ]] &&
 		[[ ", ${PLAT_CHG[$p]:-}, ${PLAT_NC[$p]:-}, " != *", ISTIOD_REPLICAS_BY_CONTEXT, "* ]]; then
 		PLAT_ASN[$p]=1
 	fi
@@ -1384,7 +1399,7 @@ pass_notes() {
 	[[ -z "${PLAT_AS[$1]:-}" ]] ||
 		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\t%s, so whether that count held all through the pass is not known\t\n" "${PLAT_AS[$1]}"
 	[[ -z "${PLAT_ASN[$1]:-}" ]] ||
-		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\tthe read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; each cell's own count of istiod pods is in the pass's controlplane report (the csv's istiod_pods_avg, the json's istiod_pods_per_cluster_avg, the growth table's istiod pods / cluster)\t\n"
+		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\tthe read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; each cell's own count of istiod pods is in its istiod_pods_avg (tests/controlplane/004-report-results.sh --results-dir <the pass's directory> --format csv)\t\n"
 	while IFS=$'\t' read -r k what; do
 		[[ -z "$k" ]] || printf '%s\twhere the %s ran more than one value, one of those\t%s\t1\n' "$k" "$REF_NAME" "$what"
 	done <<<"${PLAT_OM[$1]:-}"
