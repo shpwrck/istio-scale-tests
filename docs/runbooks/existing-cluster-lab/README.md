@@ -96,7 +96,8 @@ istioctl at the mesh's version.
 
 ```bash
 NS=openshift-gitops PLATFORM=openshift WORKLOAD=<member-managed-cluster-name>
-read -r REPO REV < <(kubectl --context <acm-hub-ctx> -n "$NS" get application hub-gitops-root \
+read -r REPO REV < <(kubectl --context <acm-hub-ctx> -n "$NS" \
+  get applications.argoproj.io hub-gitops-root \
   -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
 fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
   -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" \
@@ -178,7 +179,7 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
   `argocd_config_values` requests and re-apply.
   - If an ESO Application is stuck at "Retrying operation. Attempt #1" after an Argo controller
     restart, terminate the operation
-    (`oc patch app <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
+    (`oc patch applications.argoproj.io <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
     and auto-sync starts a fresh one.
 - Argo controller OOMKilled in a loop: raise its limit in `argocd_config_values`. It uses about 3Gi
   here even with the default exclusions.

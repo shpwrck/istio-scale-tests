@@ -13,8 +13,9 @@
 #     ManagedCluster name). Applied as the placeholder, every member's Application fails to
 #     render with a message.
 # Apply:  NS=argocd PLATFORM=kubernetes   # openshift: NS=openshift-gitops PLATFORM=openshift
-#         read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application \
-#           hub-gitops-root -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+#         read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" \
+#           get applications.argoproj.io hub-gitops-root \
+#           -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
 #         sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
 #           -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" \
 #           -e 's|<workload-cluster>|<member-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \

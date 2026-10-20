@@ -199,7 +199,8 @@ standard channel through the ingress operator.
    ```bash
    NS=argocd PLATFORM=kubernetes   # OpenShift: NS=openshift-gitops PLATFORM=openshift
    WORKLOAD=<member-cluster-name>
-   read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" get application hub-gitops-root \
+   read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" \
+     get applications.argoproj.io hub-gitops-root \
      -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
    fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
      -e "s|<platform>|${PLATFORM:?}|g" -e "s|<gitops-namespace>|${NS:?}|g" \

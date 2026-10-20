@@ -159,7 +159,7 @@ reshard() {
   done
 }
 
-# The tests below read `kubectl get applications -o json` on stdin; the ones about
+# The tests below read `kubectl get applications.argoproj.io -o json` on stdin; the ones about
 # ApplicationSets also take appsets_summary's output as their first argument.
 
 # Argo CD's ComparisonError messages about the destination cluster itself (connection
