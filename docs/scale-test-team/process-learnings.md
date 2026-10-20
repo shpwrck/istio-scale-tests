@@ -488,3 +488,11 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 **How to preempt:** When a value read once per run comes to be read once per part, compare each part's value with the reference part's, member by member, unless the part's own record shows that it set the value on purpose (a tuning profile's `state/objects` and `state/patch.json`), and then say so in a note. Test a change between two parts that no part's record explains, and one that a part's record does.
 
 (PL62 was added after the same cycle's round 8.)
+
+## PL63 — A capped list of a fleet names the members that matter most first
+
+**Why:** Tuning 004's notes named five members in the order they first appeared, so six members whose istiod replica count changed during a pass, and then six that a side did not read, hid the one that differed from the baseline: no line of the report named it. Ranking the members that differ ahead of those whose count changed still left them in one group with those not read, and it took two rounds to find both.
+
+**How to preempt:** Rank what a capped message lists by what it tells the reader (differs, then not known, then only mixed), cap after ranking, and say how many are left out ("and 1 more member" in the singular). Test six members of each lower rank ahead of one that differs, in the unit and end to end.
+
+(PL63 was added after the same cycle's round 14.)

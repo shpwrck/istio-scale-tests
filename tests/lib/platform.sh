@@ -1712,7 +1712,7 @@ platform_tuning_objects_check() {
 		if ((bare && n == 0)); then
 			detail="are not recorded (the inputs predate the key)"
 		elif ((bare)); then
-			detail+="${detail:+, and }are not recorded in every input (one predates the key)"
+			detail+="${detail:+, and }are not recorded in every input (some predate the key)"
 		fi
 		printf 'unknown\t%s\t\n' "$detail"
 	elif ((own)); then
@@ -2696,14 +2696,14 @@ platform_compare_members() {
 # them: a note on what the inputs disagree on shows them), so the five named include those that
 # differ first; each group in the order its members first appear, as <member>=<value> (a value it
 # ran more than one of as "mixed: <a> and <b>", and so the shared one), five at most, then ", and
-# <j> more members", then "(<n> of <m> members; the other <k> match)", or "(all <m> members)": a
-# member that matches by one of the reference's values (it ran two) is not hidden behind the
-# shared value. A member only the reference has reads "<member> not recorded"; a token without a
-# member comes first (_platform_bare_text: "not recorded in some of its TSVs" for mixed:unknown,
-# an input without the key).
+# <j> more members" ("member" for one), then "(<n> of <m> members; the other <k> match)" ("matches"
+# for one), or "(all <m> members)": a member that matches by one of the reference's values (it ran
+# two) is not hidden behind the shared value. A member only the reference has reads "<member> not
+# recorded"; a token without a member comes first (_platform_bare_text: "not recorded in some of
+# its TSVs" for mixed:unknown, an input without the key).
 # shellcheck disable=SC2329
 platform_value_against() {
-	local key="$1" v pair c a b r t n=0 bare="" one=0 names
+	local key="$1" v pair c a b r t k n=0 bare="" one=0 names
 	local -a _pl_items=() _pl_p=() _pl_vord=()
 	local -A _pl_in=() _pl_it=() _pl_rk=()
 	v="$(platform_collapse "$2")"
@@ -2761,7 +2761,8 @@ platform_value_against() {
 	elif ((n == ${#_pl_in[@]})); then
 		printf '%s%s (all %d members)\n' "${bare:+${bare}, }" "$names" "$n"
 	else
-		printf '%s%s (%d of %d members; the other %d match)\n' "${bare:+${bare}, }" "$names" "$n" "${#_pl_in[@]}" "$((${#_pl_in[@]} - n))"
+		k=$((${#_pl_in[@]} - n))
+		printf '%s%s (%d of %d members; the other %d match%s)\n' "${bare:+${bare}, }" "$names" "$n" "${#_pl_in[@]}" "$k" "$( ((k != 1)) || echo es)"
 	fi
 }
 

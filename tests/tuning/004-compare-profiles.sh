@@ -203,14 +203,23 @@ fi
 # status column and is not probe data, so it is left out.
 # A pass the metadata lists without its directory has none (no data).
 pass_tsvs() { find "${RESULTS_DIR}/$1" -maxdepth 1 -name '*.tsv' ! -name 'reach-*.tsv' -type f 2>/dev/null | sort || true; }
-# pass_counts_per_member <pass>: return 0 when every TSV of the pass records each member's istiod
-# replica count (ISTIOD_REPLICAS_BY_CONTEXT, as the controlplane suite writes it): the counts the
-# read at its end compares (platform_drift_check), which never compares a bare ISTIOD_REPLICAS.
+# pass_counts_per_member <pass>: return 0 when every TSV of the pass records the istiod replica
+# count of each member of its record (ISTIOD_REPLICAS_BY_CONTEXT, as the controlplane suite writes
+# it, listing every member its PLATFORM_BY_CONTEXT does): the counts the read at its end compares
+# (platform_drift_check), which never compares a bare ISTIOD_REPLICAS or a member the key leaves
+# out.
 pass_counts_per_member() {
-	local f n=0
+	local f n=0 cnt pair
+	local -a pairs=()
 	while IFS= read -r f; do
 		[[ -n "$f" ]] || continue
-		grep -q '^# ISTIOD_REPLICAS_BY_CONTEXT=[^,]*=' "$f" || return 1
+		cnt="$(grep -m1 '^# ISTIOD_REPLICAS_BY_CONTEXT=' "$f" || true)"
+		cnt="${cnt#*=}"
+		[[ "${cnt%%,*}" == *=* ]] || return 1
+		IFS=',' read -r -a pairs <<<"$(grep -m1 '^# PLATFORM_BY_CONTEXT=' "$f" | cut -d= -f2- || true)"
+		for pair in ${pairs[@]+"${pairs[@]}"}; do
+			[[ "$pair" != *=* || ",${cnt}," == *",${pair%%=*}="* ]] || return 1
+		done
 		n=$((n + 1))
 	done < <(pass_tsvs "$1")
 	((n > 0))
@@ -1206,7 +1215,7 @@ for p in "${PASSES[@]}"; do
 			w="$(platform_members_by_value "$unread")"
 			w="could not be read on ${w#unknown on }"
 		fi
-		[[ -z "$bare" ]] || w+="${w:+, and }are not recorded in $([[ -n "${known}${unread}" ]] && echo "one of its TSVs (it predates the key)" || echo "its TSVs (they predate the key)")"
+		[[ -z "$bare" ]] || w+="${w:+, and }are not recorded in $([[ -n "${known}${unread}" ]] && echo "some of its TSVs" || echo "its TSVs") (they predate the key)"
 		if [[ -n "$unread" && -n "$known" ]]; then
 			w2="those members"
 			[[ "$unread" == *,* ]] || w2="that member"
@@ -1216,7 +1225,11 @@ for p in "${PASSES[@]}"; do
 		else
 			x="whether its profile was in effect"
 		fi
-		PLAT_WARNINGS+=("pass ${p}: istiod's settings ${w} (ISTIOD_ENV_BY_CONTEXT: ${ENV_NOTE[$p]}), so ${x} is not known")
+		# The members' values only: the TSVs without the key are said once, above.
+		mv=""
+		IFS=',' read -r -a mvp <<<"$v"
+		for mvx in ${mvp[@]+"${mvp[@]}"}; do [[ "$mvx" != *=* ]] || mv+="${mv:+,}${mvx}"; done
+		PLAT_WARNINGS+=("pass ${p}: istiod's settings ${w} (ISTIOD_ENV_BY_CONTEXT$([[ -z "$mv" ]] || echo ": $(platform_members_by_value "$mv")")), so ${x} is not known")
 	fi
 	if [[ -n "$plus" ]]; then
 		[[ "$cell" == *"(see notes)" ]] || cell+=" (see notes)"

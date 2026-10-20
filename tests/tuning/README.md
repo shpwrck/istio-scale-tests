@@ -110,13 +110,12 @@ and one undone before the pass ends is not seen. In a controlplane pass that rea
 each member's istiod Deployment replicas with the ones its TSVs record: a pass whose profile
 turns autoscaling on is said to have its HPA move them, and when they read the same at its end,
 it has a note that the HPA may have raised and lowered them in between (`same (see notes)` when
-nothing else differs), which says where each cell's own count of istiod pods is:
-`istiod_pods_avg` in the csv of
-`tests/controlplane/004-report-results.sh --results-dir <pass dir>`. The other suites' replica
-counts are read at the probe's start only (dataplane's not at all), so a pass whose profile
-turns autoscaling on there reads `unknown (see notes)` and warns that whether its HPA held the
-count all through the pass is not known. A controlplane window whose Running istiod pods changed
-also writes its `cluster_connected_proxies` as `N/A`.
+nothing else differs), which says where each cell's own count of istiod pods is: `istiod_pods_avg`
+in `tests/controlplane/004-report-results.sh --results-dir <pass dir> --format csv`. The other
+suites' replica counts are read at the probe's start only (dataplane's not at all), so a pass whose
+profile turns autoscaling on there reads `unknown (see notes)` and warns that whether its HPA held
+the count all through the pass is not known. A controlplane window whose Running istiod pods
+changed also writes its `cluster_connected_proxies` as `N/A`.
 
 The table's `Platform record` row compares each pass's record and the values its TSVs record
 outside it with the baseline's (without a baseline, the first pass with data's, which reads
@@ -152,18 +151,18 @@ versions, istiod's limits and replica counts, lever by lever for the levers. Tho
   compare, or no `platform-drift.txt`: that read did not run);
 - `-`: no data.
 
-The baseline (or reference) pass reads `baseline (see notes)` when its own values changed during
-it, its TSVs disagree, it was not compared at its end or (a reference pass) its profile's value
-was not in effect or is not known to be, and its warning says that no profile's change against
-it is the profile's alone, or, when it was not compared at its end, that none is known to be.
-A reference pass whose one note is its profile's HPA (controlplane: the counts it started with
-held to its end) reads `reference (see notes)` and does not warn, as `same (see notes)` does not. A
-member that changed during a pass, or whose TSVs disagree, matches the other side when one of
-its values is that side's (the pass's own warning covers the change), so a pass on a version the
-baseline ended with reads `same (see notes)`, its notes naming that version, and one on a version
-the baseline never ran there still `differs`: an upgrade rolling through the members shows in
-each pass it reaches. A mesh operator that differs only in its state (`Available`,
-`Unavailable`) is the same build.
+The baseline pass reads `baseline (see notes)` (a reference pass `reference (see notes)`) when its
+own values changed during it, its TSVs disagree, it was not compared at its end or (a reference
+pass) its profile's value was not in effect or is not known to be, and its warning says that no
+profile's change against it is the profile's alone, or, when it was not compared at its end, that
+none is known to be. A reference pass whose one note is its profile's HPA (controlplane: the counts
+it started with held to its end) reads `reference (see notes)` and does not warn, as
+`same (see notes)` does not. A member that changed during a pass, or whose TSVs disagree, matches
+the other side when one of its values is that side's (the pass's own warning covers the change), so
+a pass on a version the baseline ended with reads `same (see notes)`, its notes naming that
+version, and one on a version the baseline never ran there still `differs`: an upgrade rolling
+through the members shows in each pass it reaches. A mesh operator that differs only in its state
+(`Available`, `Unavailable`) is the same build.
 
 Only the controlplane suite's TSVs record istiod's limits, and the dataplane suite's record no
 replica count, so those sweeps compare none of them, and a pass whose profile sets one reads

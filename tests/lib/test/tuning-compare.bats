@@ -286,7 +286,7 @@ five_passes() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | mixed (see notes) | same | differs (see notes) | unknown (see notes) |"
-	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`ctx-a=mixed: pilot:1.30.5@sha256:cdcdcdcdcdcd and pilot:1.30.6@sha256:232323232323 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`ctx-a=mixed: pilot:1.30.5@sha256:cdcdcdcdcdcd and pilot:1.30.6@sha256:232323232323 (1 of 2 members; the other 1 matches)\`"
 	refute_output --partial "every member recorded matches"
 }
 
@@ -380,7 +380,7 @@ objects_passes() {
 	} > "${S}/04-connection-pools/controlplane-second.tsv"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded in every input (one predates the key), so whether its profile's objects, and only those, were in place is not known"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its tuning profile objects (TUNING_OBJECTS_BY_CONTEXT) are not recorded in every input (some predate the key), so whether its profile's objects, and only those, were in place is not known"
 }
 
 @test "tuning 004 (U6-S3): passes from before the tuning objects key share one warning that names them" {
@@ -625,16 +625,16 @@ SIDECAR_OFF=sidecar=off,discoverySelectors=on,telemetryFiltering=on,accessLogFil
 	assert_output --partial "| Platform record | baseline | differs (see notes) | unknown (see notes) |"
 	assert_output --partial "- KUBE_VERSIONS: \`v1.33.1\`"
 	assert_output --partial "Pass 02-x, differs on KUBE_VERSIONS:"
-	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=v1.34.0 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=v1.34.0 (1 of 2 members; the other 1 matches)\`"
 	assert_output --partial "- **Warning:** pass 02-x differs from the baseline on KUBE_VERSIONS (its values follow the table), so its change against the baseline is not the profile's alone"
 	assert_output --partial "Pass 04-connection-pools, cannot be compared on KUBE_VERSIONS:"
-	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=unreachable (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=unreachable (1 of 2 members; the other 1 matches)\`"
 	assert_output --partial "- **Warning:** pass 04-connection-pools: KUBE_VERSIONS could not be compared with the baseline (not read, or not recorded, in one of them), so whether it ran on the same platform, builds and Kubernetes versions is not known"
 	refute_output --partial "04-connection-pools differs"
 	run --separate-stderr "$COMPARE" --results-dir "$S"
 	assert_success
 	assert_output --regexp 'Platform record +baseline +differs \(see notes\) +unknown \(see notes\)'
-	assert_output --regexp '  KUBE_VERSIONS +ctx-b=v1\.34\.0 \(1 of 2 members; the other 1 match\)'
+	assert_output --regexp '  KUBE_VERSIONS +ctx-b=v1\.34\.0 \(1 of 2 members; the other 1 matches\)'
 }
 
 @test "tuning 004 (U7-B1): istiod settings not read on a member are not other settings: their own warning, the read members' digest; none read reads unknown" {
@@ -673,6 +673,30 @@ SIDECAR_OFF=sidecar=off,discoverySelectors=on,telemetryFiltering=on,accessLogFil
 	assert_output --partial "| istiod env | 0123456789ab | by member (see notes) | 0123456789ab |"
 	assert_output --partial "- **Warning:** pass 02-x: istiod's settings differ between its members (ISTIOD_ENV_BY_CONTEXT: 0123456789ab on ctx-a; fedcba987654 on ctx-b), so they did not all run the same configuration; the profile may have reached some of them only"
 	assert_output --partial "- **Warning:** pass 02-x: istiod's settings could not be read on ctx-c (ISTIOD_ENV_BY_CONTEXT: 0123456789ab on ctx-a; fedcba987654 on ctx-b; unknown on ctx-c)"
+}
+
+@test "tuning 004 (U14-N3): istiod settings some of a pass's TSVs do not record are said once, with the members' digest" {
+	local f
+	objects_passes
+	with_record baseline
+	with_record 02-x "s/ctx-a=0123456789ab/ctx-a=fedcba987654/; s/ctx-b=0123456789ab/ctx-b=fedcba987654/"
+	with_record 04-connection-pools
+	profile_pass 02-x PILOT_DEBOUNCE_AFTER
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	# A second TSV in 02-x from before the key.
+	f="$(ls "${S}/02-x"/controlplane-*.tsv)"
+	sed '/^# ISTIOD_ENV_BY_CONTEXT=/d' "$f" > "${S}/02-x/controlplane-second.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings are not recorded in some of its TSVs (they predate the key) (ISTIOD_ENV_BY_CONTEXT: fedcba987654 on ctx-a, ctx-b), so whether its profile was in effect is not known"
+	assert_output --partial "- ISTIOD_ENV_BY_CONTEXT, by member: \`not recorded in some of its TSVs; fedcba987654 on ctx-a, ctx-b\`"
+	refute_output --partial "one of its TSVs"
+	# None of them records it: said once, with no members' digest.
+	sed -i '/^# ISTIOD_ENV_BY_CONTEXT=/d' "$f"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- **Warning:** pass 02-x: istiod's settings are not recorded in its TSVs (they predate the key) (ISTIOD_ENV_BY_CONTEXT), so whether its profile was in effect is not known"
+	refute_output --partial "ISTIOD_ENV_BY_CONTEXT: unknown"
 }
 
 @test "tuning 004 (M7-S1, I7-S1): istiod pods on different settings at once warn; each pod's digest is compared with the baseline's" {
@@ -840,7 +864,7 @@ lever_passes() {
 	assert_output --partial "- KUBE_VERSIONS: \`mixed: v1.33.1 and v1.33.2 on ctx-a; v1.33.1 on ctx-b\`"
 	assert_output --partial "- **Warning:** pass 04-connection-pools differs from the baseline on KUBE_VERSIONS (its values follow the table), so its change against the baseline is not the profile's alone"
 	# Only the member that differs (U9-S3), and on ctx-a which of the baseline's values (R9-B1).
-	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=v1.33.2 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- KUBE_VERSIONS: \`ctx-b=v1.33.2 (1 of 2 members; the other 1 matches)\`"
 	assert_output --partial "- KUBE_VERSIONS, where the baseline ran more than one value, one of those: \`v1.33.2 on ctx-a\`"
 	refute_output --partial "pass 02-x differs"
 	# A build the baseline ended with on every member, and a third one.
@@ -930,7 +954,7 @@ with_replicas() {
 	assert_output --partial "| Platform record | baseline | same | differs (see notes) |"
 	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`1\`"
 	assert_output --partial "- **Warning:** pass 04-connection-pools differs from the baseline on ISTIOD_REPLICAS_BY_CONTEXT (its values follow the table), so its change against the baseline is not the profile's alone"
-	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`ctx-a=2 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`ctx-a=2 (1 of 2 members; the other 1 matches)\`"
 	refute_output --partial "pass 02-x differs"
 	# Its profile sets the count and every member ran it: shown, not warned.
 	echo '{"spec":{"values":{"pilot":{"replicaCount":2}}}}' > "${S}/04-connection-pools/state/patch.json"
@@ -954,7 +978,7 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | same (see notes) |"
-	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile (its state/patch.json sets spec.values.pilot.replicaCount, spec.values.pilot.autoscaleEnabled): \`ctx-a=2 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile (its state/patch.json sets spec.values.pilot.replicaCount, spec.values.pilot.autoscaleEnabled): \`ctx-a=2 (1 of 2 members; the other 1 matches)\`"
 	refute_output --partial "not in effect"
 	# The text format: the key column as wide as the longest key (U9-N1).
 	run --separate-stderr "$COMPARE" --results-dir "$S"
@@ -974,7 +998,7 @@ with_replicas() {
 	assert_success
 	assert_output --partial "| Platform record | baseline | differs (see notes) | same |"
 	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`1\`"
-	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`ctx-b=2 (1 of 2 members; the other 1 match)\`"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`ctx-b=2 (1 of 2 members; the other 1 matches)\`"
 	# churn and churn-dataplane: the source member's (the first of the record), named as such.
 	for p in baseline 04-connection-pools; do with_replicas "$p" 1 ISTIOD_REPLICAS; done
 	with_replicas 02-x 3 ISTIOD_REPLICAS
@@ -1331,6 +1355,13 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	refute_output --partial "found each member's count it started with"
+	# One that lists only some of the members of its record, the others not compared at its end
+	# either: no such note (R14-N1).
+	with_replicas 04-connection-pools ctx-a=1
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "ctx-b not recorded"
 	refute_output --partial "found each member's count it started with"
 	with_replicas 04-connection-pools ctx-a=1,ctx-b=1
 	# Not read again at its end (no drift file), or not compared there: no such note.

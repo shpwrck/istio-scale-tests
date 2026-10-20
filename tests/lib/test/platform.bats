@@ -771,9 +771,9 @@ env_list() {
 	run platform_tuning_objects_check unknown
 	assert_output $'unknown\tare not recorded (the inputs predate the key)\t'
 	run platform_tuning_objects_check "mixed:unknown,ctx-a=none"
-	assert_output $'unknown\tare not recorded in every input (one predates the key)\t'
+	assert_output $'unknown\tare not recorded in every input (some predate the key)\t'
 	run platform_tuning_objects_check "mixed:unknown,ctx-a=unknown,ctx-b=none"
-	assert_output $'unknown\tcould not be read on ctx-a, and are not recorded in every input (one predates the key)\t'
+	assert_output $'unknown\tcould not be read on ctx-a, and are not recorded in every input (some predate the key)\t'
 	# A fleet: five names, then how many more; with _pl_no_members, a count.
 	run platform_tuning_objects_check "m1=${dr04},m2=${dr04},m3=${dr04},m4=${dr04},m5=${dr04},m6=${dr04},m7=none"
 	assert_output $'other\tm1, m2, m3, m4, m5 and 1 more\t'"${dr04}"
@@ -2619,7 +2619,7 @@ drift_unsourced() (
 	run platform_compare_values "KUBE_VERSIONS=a=v1.30.4+k3s1" "KUBE_VERSIONS=a=v1.30.4+k3s2" KUBE_VERSIONS
 	assert_output $'KUBE_VERSIONS\tdiffers'
 	run platform_value_against KUBE_VERSIONS "a=v1.33.1,b=v1.34.0" "a=v1.33.1,b=v1.33.1"
-	assert_output "b=v1.34.0 (1 of 2 members; the other 1 match)"
+	assert_output "b=v1.34.0 (1 of 2 members; the other 1 matches)"
 	run platform_value_against KUBE_VERSIONS "a=v1.30.4+k3s1,b=v1.30.4+k3s1" "a=v1.30.4+k3s1,b=v1.30.4+k3s1"
 	assert_output "v1.30.4+k3s1"
 }
@@ -2671,7 +2671,7 @@ drift_unsourced() (
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:3" "a=p:1,b=p:1"
 	assert_output "a=p:2, b=p:3 (all 2 members)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "mixed:unknown,a=p:1,b=p:2" "a=p:1,b=p:1,c=p:1"
-	assert_output "not recorded in some of its TSVs, b=p:2, c not recorded (2 of 3 members; the other 1 match)"
+	assert_output "not recorded in some of its TSVs, b=p:2, c not recorded (2 of 3 members; the other 1 matches)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "mixed:unknown,a=p:1,b=p:2" "a=p:1,b=p:2"
 	assert_output "not recorded in some of its TSVs, every member recorded matches"
 	# U9-S3: the one value only when no member or every member differs, each recorded on both
@@ -2680,15 +2680,15 @@ drift_unsourced() (
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:1,b=p:1" "a=p:1,b=p:1"
 	assert_output "p:1"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=p:1,b=p:2"
-	assert_output "a=p:2 (1 of 2 members; the other 1 match)"
+	assert_output "a=p:2 (1 of 2 members; the other 1 matches)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=mixed:p:1;p:2,b=p:1"
-	assert_output "b=p:2 (1 of 2 members; the other 1 match)"
+	assert_output "b=p:2 (1 of 2 members; the other 1 matches)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=p:1,b=p:1,c=p:1"
 	assert_output "a=p:2, b=p:2, c not recorded (all 3 members)"
 	# A member that ran more than one value (its inputs disagree) is shown though it matches by
 	# one of them, its values joined (I11-N2); every member on the same two: those, once.
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=p:1" "a=p:1,b=p:1"
-	assert_output "a=mixed: p:1 and p:2 (1 of 2 members; the other 1 match)"
+	assert_output "a=mixed: p:1 and p:2 (1 of 2 members; the other 1 matches)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:2;p:3,b=p:2" "a=p:1,b=p:1"
 	assert_output "a=mixed: p:2 and p:3, b=p:2 (all 2 members)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=mixed:p:1;p:2" "a=p:1,b=p:1"
@@ -2708,7 +2708,7 @@ drift_unsourced() (
 	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "m1=mixed:1;2,m2=unknown,m3=2,m4=1,m5=1,m6=1,m7=1,m8=1" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1,m8=1"
 	assert_output "m3=2, m2=unknown, m1=mixed: 1 and 2 (3 of 8 members; the other 5 match)"
 	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "m1=2,m2=2,m3=2,m4=2,m5=2,m6=2,m7=1" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1"
-	assert_output "m1=2, m2=2, m3=2, m4=2, m5=2, and 1 more member (6 of 7 members; the other 1 match)"
+	assert_output "m1=2, m2=2, m3=2, m4=2, m5=2, and 1 more member (6 of 7 members; the other 1 matches)"
 	# Counts from before the record (no member) that disagree (R11-N1).
 	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "mixed:2;1" 1
 	assert_output "mixed: 2 and 1"
