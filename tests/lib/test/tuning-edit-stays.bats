@@ -25,7 +25,9 @@ setup() {
 	# TUN_CRBUMP_NTH-th call (default 1) containing it, someone else edits the Istio CR (its
 	# generation + 1; with TUN_CRBUMP_SPEC, it also sets values.global.logging.level, a key
 	# no profile sets). TUN_VERIFY_FAIL: 001's istiod Deployment read fails (its apply
-	# fails). Any other call fails (the probes then fail: PROBE_FAILED).
+	# fails). A marker's apply, read and delete succeed, and the member holds no tuning
+	# profile objects (label istio-scale-tests/tuning-profile: an empty list). Any other call
+	# fails (the probes then fail: PROBE_FAILED).
 	export TD="${BATS_TEST_TMPDIR}/tun"
 	mkdir -p "$TD"
 	cat > "${BIN}/kubectl" <<'STUB'
@@ -59,6 +61,8 @@ case "$*" in
 *" -n istio-system get deployment istiod -o json"*)
 	[ -z "${TUN_VERIFY_FAIL:-}" ] || exit 1
 	jq -c '{spec: {template: {spec: {containers: [{name: "discovery", env: ((.spec.values.pilot.env // {}) | to_entries | map({name: .key, value: (.value | tostring)}))}]}}}}' "$d/cr.json" ;;
+*" apply --server-side "*|*" delete --ignore-not-found -f "*|*" get --ignore-not-found -f "*|*" -n istio-system get ConfigMap tuning-profile-"*) exit 0 ;;
+*" -l istio-scale-tests/tuning-profile"*) echo '{"kind":"List","items":[]}' ;;
 *) exit 1 ;;
 esac
 STUB

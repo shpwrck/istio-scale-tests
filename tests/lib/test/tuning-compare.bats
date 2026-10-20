@@ -193,13 +193,15 @@ five_passes() {
 	assert_output --regexp '  PROXY_IMAGE_BY_CONTEXT +proxyv2:1.30.5@sha256:efefefefefef'
 	assert_output --partial "Pass 04-legacy: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
 	refute_output --partial "Pass 04-legacy, cannot be compared on"
+	# The text table pads every column to its widest cell (a range row's "0-100 to 0-100"), so
+	# its lines run wider than the markdown rows; full digests would take them past 200.
 	widest=0
 	while IFS= read -r line; do
 		[[ "$line" != "Platform record of"* ]] || break
 		((${#line} <= widest)) || widest="${#line}"
 	done < <(sed -n '/^Metric/,$p' <<<"$output")
 	[ "$widest" -gt 0 ]
-	[ "$widest" -lt 120 ]
+	[ "$widest" -lt 140 ]
 }
 
 @test "tuning 004: without a baseline, the first pass with data is the reference" {
@@ -1690,8 +1692,9 @@ prop_row() {
 	# wrote (7), not per row (17).
 	[[ "$output" == *"| P1 local push (ms) | 350.00 |"$'\n'"|   n (got/attempted) | 6/7 |"* ]]
 	[[ "$output" == *"| P2 remote EDS (ms) | 50.00 |"$'\n'"|   n (got/attempted) | 15/17 |"* ]]
-	# 005 on the same rows: the same n and mean.
-	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "${P}/baseline" --format json
+	# 005 on the same rows: the same n and mean (its stderr warns that the TSV predates the
+	# platform record).
+	run --separate-stderr "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "${P}/baseline" --format json
 	assert_success
 	[ "$(jq -c '[.rows[] | select(.phase == "P1_local_wall" or .phase == "P2_discovery") | [.phase, .n_valid, .avg_ms]]' <<<"$output")" = \
 		'[["P1_local_wall",6,350],["P2_discovery",15,50]]' ]
@@ -1774,14 +1777,20 @@ prop_row() {
 }
 
 @test "tuning 003 live: a profile that does not apply and a probe that fails are counted, the sweep finishes and exits 4" {
-	# python3 passes the PyYAML check and fails everything else (001-apply-profile cannot
-	# load the profile: SETUP_FAILED); every kubectl call fails (the churn probe: PROBE_FAILED);
+	# python3 passes the PyYAML check and the profile name check and fails everything else
+	# (001-apply-profile cannot load the profile: SETUP_FAILED); every kubectl call but the list of
+	# tuning profile objects (none) fails (the churn probe: PROBE_FAILED);
 	# no Istio CR answers, so ISTIO_VERSION_CHECK=warn records unknown.
 	local bin="${BATS_TEST_TMPDIR}/bin" out="${BATS_TEST_TMPDIR}/res" d
 	mkdir -p "$bin"
 	export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
-	printf '#!/bin/sh\n[ "$*" = "-I -c import yaml" ] && exit 0\nexit 1\n' > "${bin}/python3"
-	printf '#!/bin/sh\necho "$*" >> "$STUB_LOG"\nexit 1\n' > "${bin}/kubectl"
+	printf '#!/bin/sh\n[ "$*" = "-I -c import yaml" ] && exit 0\ncase "$*" in *"/tuning.py check-name "*) exit 0 ;; esac\nexit 1\n' > "${bin}/python3"
+	cat > "${bin}/kubectl" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$STUB_LOG"
+case "$*" in *" -l istio-scale-tests/tuning-profile "*) echo '{"kind":"List","items":[]}'; exit 0 ;; esac
+exit 1
+EOF
 	chmod +x "${bin}/python3" "${bin}/kubectl"
 	ISTIO_VERSION_CHECK=warn PATH="${bin}:${PATH}" run --separate-stderr "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" \
 		--suite churn --contexts ci-a --no-gitops-pause --skip-setup --keep-workloads \
@@ -1821,7 +1830,7 @@ prop_row() {
 
 @test "tuning 003 --suite controlplane without timeout or gtimeout: stops at startup, before any profile or kubectl call" {
 	# A PATH with every tool but timeout and gtimeout, a python3 that passes the PyYAML
-	# check, and a kubectl that logs its calls.
+	# check and the profile name check, and a kubectl that logs its calls.
 	local d="${BATS_TEST_TMPDIR}/path" out="${BATS_TEST_TMPDIR}/res" p f n
 	mkdir -p "$d"
 	local IFS=:
@@ -1837,6 +1846,7 @@ prop_row() {
 	export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
 	printf '#!/bin/sh
 [ "$*" = "-I -c import yaml" ] && exit 0
+case "$*" in *"/tuning.py check-name "*) exit 0 ;; esac
 exit 1
 ' > "${d}/python3"
 	printf '#!/bin/sh
@@ -1851,14 +1861,15 @@ exit 1
 	[[ "$stderr" == *"error: neither 'timeout' nor 'gtimeout' (GNU coreutils) is on PATH"*"On macOS: brew install coreutils"* ]]
 	[ ! -s "$STUB_LOG" ]
 	[ -z "$(find "$out" -name 'sweep-metadata.txt' 2>/dev/null)" ]
-	# Another suite does not need it: the sweep goes on to its first kubectl call (the Istio
-	# version read, which fails here and stops it under ISTIO_VERSION_CHECK=fail).
+	# Another suite does not need it: the sweep goes on to its first kubectl call (the list of
+	# tuning profile objects, which fails here and stops it: a member that cannot be asked may
+	# hold a profile's objects).
 	PATH="$d" run --separate-stderr "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" \
 		--suite churn --contexts ci-a --no-gitops-pause --skip-setup --keep-workloads \
 		--profiles 01-push-throttling --settle 0 --output-dir "$out"
 	assert_failure 1
 	[[ "$stderr" != *"timeout"*"gtimeout"* ]]
-	[[ "$stderr" == *"cannot read the running Istio version on 1 of 1 members"* ]]
+	[[ "$stderr" == *"the tuning profile objects (label istio-scale-tests/tuning-profile) could not be listed on ci-a"* ]]
 	[ -s "$STUB_LOG" ]
 }
 

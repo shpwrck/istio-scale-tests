@@ -255,10 +255,12 @@ FAKE
 # C1: a --resume that adds no rows
 
 @test "a --resume that adds no rows (every cell done) says so, and 004 lists it as (added no rows), out of harness_shas, the provenance warning and the Kubernetes change check" {
-	echo v1.30.0 > "${BATS_TEST_TMPDIR}/kver"
+	# The first run cannot read ci-a's Kubernetes version (no kver: unreachable in its preamble), so
+	# the resume that reads one goes on (one that differs from a recorded version is refused).
 	done_dir
-	# The first run on another harness commit; the resume reads another Kubernetes version.
+	# The first run on another harness commit; the resume reads a Kubernetes version.
 	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=abc1234/' "$TSV"
+	grep -qx '# KUBE_VERSIONS=ci-a=unreachable' "$TSV"
 	echo v1.31.0 > "${BATS_TEST_TMPDIR}/kver"
 	cp_sweep2 --resume "$D" --contexts ci-a
 	assert_success
@@ -272,7 +274,9 @@ FAKE
 	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = abc1234 ]
 	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
 	[ "$(jq -c '[.metadata.attempts[].rows]' <<<"$output")" = '[1,0]' ]
-	jq -e '[.metadata.data_warnings[]? | select(test("Kubernetes|KUBE"))] | length == 0' <<<"$output"
+	# No data warning names its version or a Kubernetes change (the read at its end could not
+	# compare KUBE_VERSIONS with the start's, which was not read: that warning stays).
+	jq -e '[.metadata.data_warnings[]? | select(test("v1[.]31[.]0|Kubernetes server version"))] | length == 0' <<<"$output"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_success
 	[[ "$output" == *"# attempts: the rows come from one run (no other run's rows are in the figures): the first run "*"(added no rows)"* ]]
@@ -523,6 +527,7 @@ FAKE
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_success
 	[[ "$output" == *"# attempts, Istio at each start: the first run ISTIO_NOTREADY_AT_START=none ISTIO_GENERATIONS="*"; --resume at "*" ISTIO_NOTREADY_AT_RESUME=none ISTIO_GENERATIONS=ci-a=2/2\"x\\y ISTIO_PROXY_VERSIONS="* ]]
+	source "${ROOT}/tests/lib/platform.sh"
 	run --separate-stderr render_scale_envelope "$D" "$REPORT" "ci-a" false
 	assert_success
 	[[ "$output" == *"> **Provenance warning:** "* ]]

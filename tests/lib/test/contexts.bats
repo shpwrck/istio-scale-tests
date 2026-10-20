@@ -180,6 +180,12 @@ _refuses() {
 	# A key holding a quote or a bracket is still one key (no arithmetic on it).
 	run split_contexts "x\"y],x\"y]" OUT --contexts
 	assert_output --partial 'lists x"y] twice'
+	# A list over 200 characters is counted, not repeated: 500 members listed twice.
+	local ctxs
+	ctxs="$(seq -f 'member-%03g' 1 500 | paste -sd, -)"
+	run split_contexts "${ctxs},${ctxs}" OUT --contexts
+	assert_failure
+	assert_output "error: --contexts lists member-001 twice (1000 items): list each mesh member once"
 }
 
 @test "003 --resume refuses a sweep an older harness started with a member twice, whatever --contexts says: start a new sweep" {

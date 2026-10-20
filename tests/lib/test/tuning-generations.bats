@@ -43,8 +43,9 @@ _need_yaml() {
 # read is the first, 001's read before its first patch the second) fails, and someone else
 # edits the Istio CR then. TUN_TERM_ON=<glob>: at the first call matching it, SIGTERM to
 # the sweep (the topmost ancestor running 003-run-tuning-sweep.sh below the test's process,
-# TEST_PID), and that call fails.
-# Any other call fails (the probes then fail: PROBE_FAILED).
+# TEST_PID), and that call fails. The members hold no tuning profile objects (label
+# istio-scale-tests/tuning-profile: an empty list). Any other call fails (the probes then
+# fail: PROBE_FAILED).
 _gen_stub() {
 	export TD="${BATS_TEST_TMPDIR}/tun"
 	mkdir -p "$TD"
@@ -117,10 +118,11 @@ case "$*" in
 *" apply --server-side "*) : > "$d/applied"; exit 0 ;;
 *" delete --ignore-not-found -f "*) rm -f "$d/applied"; exit 0 ;;
 *" get --ignore-not-found -f "*) exit 0 ;;
-*" -n istio-system get DestinationRule "*|*" -n istio-system get destinationrule"*) [ -f "$d/applied" ] && { echo x; exit 0; }; exit 1 ;;
+*" -n istio-system get DestinationRule "*|*" -n istio-system get destinationrule"*|*" -n istio-system get ConfigMap tuning-profile-"*) [ -f "$d/applied" ] && { echo x; exit 0; }; exit 1 ;;
 *" -n istio-system get deployment istiod -o json"*)
 	[ -z "${TUN_VERIFY_FAIL:-}" ] || exit 1
 	jq -c '{spec: {template: {spec: {containers: [{name: "discovery", env: ((.spec.values.pilot.env // {}) | to_entries | map({name: .key, value: (.value | tostring)}))}]}}}}' "$d/cr.json" ;;
+*" -l istio-scale-tests/tuning-profile"*) echo '{"kind":"List","items":[]}' ;;
 *) exit 1 ;;
 esac
 STUB

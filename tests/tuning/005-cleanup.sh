@@ -107,26 +107,6 @@ is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEO
 CONTEXTS=()
 split_contexts "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
-# Each member once: one listed twice would take two of its markers a round and skip one.
-declare -A SEEN=()
-UNIQ=() REPEATED=()
-for ctx in "${CONTEXTS[@]}"; do
-	if [[ -n "${SEEN[$ctx]+x}" ]]; then
-		[[ "${SEEN[$ctx]}" == 2 ]] || REPEATED+=("$ctx")
-		SEEN[$ctx]=2
-		continue
-	fi
-	SEEN[$ctx]=1
-	UNIQ+=("$ctx")
-done
-if ((${#REPEATED[@]})); then
-	rep="$(IFS=,; echo "${REPEATED[*]}")"
-	# Five named, then how many more (tuning.py names; without python3, as a dry-run may run, all).
-	rep_names="$(python3 -I "$HELPER" names "$rep" 2>/dev/null)" || rep_names=""
-	[[ -n "$rep_names" ]] || rep_names="${rep//,/, }"
-	echo "note: ${rep_names} listed more than once in the contexts; each member is cleaned once" >&2
-fi
-CONTEXTS=("${UNIQ[@]}")
 ((DRY_RUN)) || command -v python3 >/dev/null ||
 	die "python3 is required (the standard library only): the revert and the restore from the profile markers read their patches with it"
 

@@ -331,17 +331,21 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	! grep -q " delete configmaps tuning-profile-" "$STUB_LOG" || false
 }
 
-@test "005-cleanup (C8-B1, SC8-S1, C9-S1): a member listed twice is cleaned once, every marker restored newest first, with a note naming five at most" {
+@test "005-cleanup (C8-B1, SC8-S1): a member listed twice is refused before any cluster call; every marker restored newest first" {
 	mk_marker 01-push-throttling 2026-10-19T09:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}' "${T}/m1.json"
 	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}' "${T}/m2.json"
 	mk_marker 03-gateway-cluster-filter 2026-10-19T11:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":null}}}}}' "${T}/m3.json"
 	markers_on ctx-a "${T}/m1.json" "${T}/m2.json" "${T}/m3.json"
 	echo '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"10","PILOT_ENABLE_CDS_CACHE":"false","PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":"true"}}}}}' \
 		>"${STUB_DIR}/live.ctx-a.json"
+	# Listed twice, a member would take two of its markers a round and skip one: refused when
+	# parsed (split_contexts), as every tuning script does.
 	run --separate-stderr "$CLEANUP" --contexts ctx-a,ctx-a --results-dir "${T}/results"
+	assert_failure
+	[[ "$stderr" == *"--contexts (or SETUP_CONTEXTS) lists ctx-a twice (ctx-a,ctx-a): list each mesh member once"* ]]
+	[ ! -s "$STUB_LOG" ]
+	run --separate-stderr "$CLEANUP" --contexts ctx-a --results-dir "${T}/results"
 	assert_success
-	[[ "$stderr" == *"note: ctx-a listed more than once in the contexts; each member is cleaned once"* ]]
-	# Twice in a round, the middle marker was skipped and the cleanup still read complete.
 	run grep '^patch ' "$STUB_LOG"
 	assert_output 'patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_FILTER_GATEWAY_CLUSTER_CONFIG":null}}}}}
 patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}
@@ -350,34 +354,25 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	for p in 03-gateway-cluster-filter 02-xds-cache-off 01-push-throttling; do
 		[ "$(grep -c -- "--context=ctx-a -n istio-system delete configmaps tuning-profile-${p} --ignore-not-found" "$STUB_LOG")" -eq 1 ]
 	done
-	# m01,m02,m01 with two markers on m01 (round 2 read past the end of m01's list and died):
-	# both are restored, m02 has none, and the steps after the markers run.
+	# A member with two markers beside one with none: both restored, m02 has none, and the steps
+	# after the markers run.
 	: >"$STUB_LOG"
 	markers_on m01 "${T}/m1.json" "${T}/m2.json"
 	echo '{"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"10","PILOT_ENABLE_CDS_CACHE":"false"}}}}}' >"${STUB_DIR}/live.m01.json"
-	run --separate-stderr "$CLEANUP" --contexts m01,m02,m01 --results-dir "${T}/results"
+	run --separate-stderr "$CLEANUP" --contexts m01,m02 --results-dir "${T}/results"
 	assert_success
-	[[ "$stderr" == *"note: m01 listed more than once in the contexts; each member is cleaned once"* ]]
 	assert_output --partial "PASS  m01: marker istio-system/tuning-profile-02-xds-cache-off removed"
 	assert_output --partial "PASS  m01: marker istio-system/tuning-profile-01-push-throttling removed"
 	assert_output --partial "  m02: none"
 	assert_output --partial "--- Leftover profile resources (label istio-scale-tests/tuning-profile) ---"
 	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.m01.json")" = '{"PILOT_PUSH_THROTTLE":"100"}' ]
 	[ "$(grep -c -- "--context=m01 delete destinationrules" "$STUB_LOG")" -eq 1 ]
-	# 500 members each listed twice: five named, then how many more (C9-S1, SC9-N1).
-	local ctxs
-	ctxs="$(seq -f 'member-%03g' 1 500 | paste -sd, -)"
-	run --separate-stderr "$CLEANUP" --contexts "${ctxs},${ctxs}" --results-dir "${T}/results" --dry-run
-	assert_success
-	[[ "$stderr" == *"note: member-001, member-002, member-003, member-004, member-005 and 495 more listed more than once in the contexts; each member is cleaned once"* ]]
-	awk 'length > 300 { bad = 1 } END { exit bad }' <<<"$stderr"
-	# Without a working python3 (a dry-run needs none): every member, by name (C10-B1).
+	# A dry-run needs no working python3 (C10-B1).
 	mkdir -p "${T}/nopy"
 	printf '#!/bin/sh\nexit 127\n' > "${T}/nopy/python3"
 	chmod +x "${T}/nopy/python3"
-	PATH="${T}/nopy:${PATH}" run --separate-stderr "$CLEANUP" --contexts ci-a,ci-a,ci-b,ci-b --results-dir "${T}/results" --dry-run
+	PATH="${T}/nopy:${PATH}" run --separate-stderr "$CLEANUP" --contexts ci-a,ci-b --results-dir "${T}/results" --dry-run
 	assert_success
-	[[ "$stderr" == *"note: ci-a, ci-b listed more than once in the contexts; each member is cleaned once"* ]]
 }
 
 @test "ctx_keys_distinct (C8-S1, SC8-S2): a context listed twice, or two with one state file name, dies; 003 refuses either before its sweep, in --dry-run too" {
@@ -394,7 +389,8 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	# pass run, and before --dry-run prints its plan.
 	run "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" --dry-run --suite churn --no-gitops-pause --contexts ci-a,ci-a
 	assert_failure
-	assert_output --partial "context ci-a is listed twice; list each member once"
+	# split_contexts refuses a member listed twice when the flags are parsed.
+	assert_output --partial "--contexts (or SETUP_CONTEXTS) lists ci-a twice (ci-a,ci-a): list each mesh member once"
 	refute_output --partial "--- Plan ---"
 	run "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" --dry-run --suite churn --no-gitops-pause --contexts ci-a/x,ci-a_x
 	assert_failure

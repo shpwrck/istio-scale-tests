@@ -245,10 +245,10 @@ SH
 	fake_cp_report "$rep" '["Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host'"'"'s CPU and memory","input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members: the report mixes runs on different istiod builds; compare like with like"]'
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
 	assert_success
-	assert_output --partial "> **Warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"
-	assert_output --partial "> **Warning:** input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members"
-	w1="$(grep -n '^> \*\*Warning:\*\* Nodes on kind' <<<"$output" | cut -d: -f1)"
-	w2="$(grep -n '^> \*\*Warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
+	assert_output --partial "> **Data warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"
+	assert_output --partial "> **Data warning:** input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members"
+	w1="$(grep -n '^> \*\*Data warning:\*\* Nodes on kind' <<<"$output" | cut -d: -f1)"
+	w2="$(grep -n '^> \*\*Data warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
 	t1="$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)"
 	v="$(grep -n '^> \*\*CAUTION\*\*' <<<"$output" | cut -d: -f1)"
 	((w1 < w2 && w2 < t1 && t1 < v)) || { echo "warnings at ${w1} and ${w2}, topology at ${t1}, verdict at ${v}"; false; }
@@ -262,7 +262,7 @@ SH
 	fake_cp_report "$rep" '[]'
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
 	assert_success
-	refute_output --partial "**Warning:**"
+	refute_output --partial "**Data warning:**"
 }
 
 @test "env_limit_drift_warning (H6): a warning only when a limit read now differs from the recorded one" {
@@ -295,18 +295,18 @@ _lim_kubectl() {
 	sed -i 's/"node_alloc_mem_mi":"16093"/"node_alloc_mem_mi":"16093","istiod_cpu_limit_m":"1000","istiod_mem_limit_mi":"4096"/' "$rep"
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
 	assert_success
-	assert_output --partial "> **Warning:** istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now)"
+	assert_output --partial "> **Data warning:** istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now)"
 	assert_output --partial "| **istiod CPU (window peak)** | 500m / 2000m | 20% of 1000m |"
 	assert_output --partial "| **istiod memory (RSS — OOM headroom)** | 2048Mi / 4096Mi | 30% of 4096Mi |"
 	# The kubectl top figures divide by each row's own limit (002, read with the row), not by the
 	# recorded one: no "of 1000m" there.
 	assert_output --partial "| istiod CPU (kubectl top at window end) | 500m / 2000m | 10% of each row's limit |"
 	assert_output --partial "| istiod memory (kubectl top) | 2048Mi / 4096Mi | 30% of each row's limit |"
-	[ "$(grep -n '^> \*\*Warning:\*\* istiod' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)" ]
+	[ "$(grep -n '^> \*\*Data warning:\*\* istiod' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)" ]
 	# The same limit: no warning.
 	sed -i 's/"istiod_cpu_limit_m":"1000"/"istiod_cpu_limit_m":"2000"/' "$rep"
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
-	refute_output --partial "**Warning:**"
+	refute_output --partial "**Data warning:**"
 	assert_output --partial "| 20% of 2000m |"
 }
 

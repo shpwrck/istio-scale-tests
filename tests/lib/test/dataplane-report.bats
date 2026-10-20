@@ -400,19 +400,20 @@ tsv() {
 	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	EOF
-	run --separate-stderr "$REPORT" --results-dir "$RES"
+	# Two runs in one dir: pooled on purpose.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run
 	assert_success
 	assert_line "# PLATFORM=kubernetes"
 	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=mixed:kind;aws"
 	[[ "$stderr" == *"input TSVs disagree on NODE_PROVIDER_BY_CONTEXT for ctx-b (kind;aws)"* ]]
 	for fmt in md charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
 		assert_line 'MESH_OPERATOR_BY_CONTEXT: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
 		assert_line 'NODE_PROVIDER_BY_CONTEXT: "ctx-a=kind,ctx-b=mixed:kind;aws"'
 	done
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format csv
 	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format json
 	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.TEST_PLATFORM) \(.NODE_PROVIDER_BY_CONTEXT)"' <<<"$output")" = "kubernetes auto ctx-a=kind,ctx-b=mixed:kind;aws" ]
 }
 
@@ -428,7 +429,8 @@ tsv() {
 	tsv "${RES}/latency-new.tsv" "RUN_ID=r1" <<-EOF
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	EOF
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	# Two runs in one dir: pooled on purpose.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format csv
 	assert_line "# PLATFORM=mixed:kubernetes,unknown"
 	assert_line "# PLATFORM_BY_CONTEXT=mixed:unknown,ctx-a=kubernetes,ctx-b=kubernetes"
 	[[ "$stderr" == *"1 of 2 input TSV(s) have no PLATFORM line"* ]]

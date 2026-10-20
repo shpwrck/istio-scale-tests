@@ -1126,7 +1126,7 @@ ref_two() {
 		for ((j = i + 1; j < n; j++)); do
 			a="" b=""
 			for c in ${order[@]+"${order[@]}"}; do
-				((cnt[$c] > j)) || continue
+				[[ "${cnt[$c]}" -gt "$j" ]] || continue
 				a+="${a:+,}${c}=${alt["${c}|${i}"]}"
 				b+="${b:+,}${c}=${alt["${c}|${j}"]}"
 			done

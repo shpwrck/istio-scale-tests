@@ -118,7 +118,10 @@ incomplete_dir() {
 	TSV="$(find "$D" -maxdepth 1 -name 'controlplane-*.tsv')"
 	# The first run's status rows (svcs=5, svcs=6), for tests that need one.
 	awk -F'\t' '$2 == "PROBE_FAILED"' "$TSV" > "${BATS_TEST_TMPDIR}/status.rows"
-	grep -E '^#|^timestamp' "$TSV" > "${TSV}.new"
+	# Members on nodes of their own (the stub reads no node provider, and a verdict over an
+	# unknown one leaves the node figures out: CAUTION).
+	grep -E '^#|^timestamp' "$TSV" \
+		| sed 's/^# NODE_PROVIDER_BY_CONTEXT=.*/# NODE_PROVIDER_BY_CONTEXT=ci-a=aws,ci-b=aws/' > "${TSV}.new"
 	{
 		cp_row 2026-06-01T00:01:00+00:00 ci-a 2 5 1000
 		cp_row 2026-06-01T00:01:00+00:00 ci-b 2 5 1000
@@ -384,6 +387,7 @@ incomplete_dir() {
 		assert_success
 		[[ "$output" == *CAUTION* && "$output" == *"1 planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan"* ]] || { echo "${fmt}: ${output}"; false; }
 	done
+	source "${ROOT}/tests/lib/platform.sh"
 	run --separate-stderr render_scale_envelope "$D" "$REPORT" "ci-a,ci-b" false
 	assert_success
 	assert_output --partial CAUTION
@@ -507,6 +511,7 @@ incomplete_dir() {
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format markdown
 	assert_success
 	assert_line --regexp '^\| proxy versions at start \(connected to istiod, summed over the members\) \| mixed:ci-a=1\.3[01]\.[05]:[0-9],ci-b=1\.3[01]\.[05]:[0-9] \\\| ci-a=1\.3[01]\.[05]:[0-9],ci-b=1\.3[01]\.[05]:[0-9] \|$'
+	source "${ROOT}/tests/lib/platform.sh"
 	run --separate-stderr render_scale_envelope "$D" "$REPORT" "ci-a,ci-b" false
 	assert_success
 	assert_line --regexp '^\| Proxy \(Envoy\) versions at the start \| mixed:ci-a=[^|]* \\\| ci-a=[^|]* \| '
@@ -884,8 +889,10 @@ STUB
 # applied marker, and under TUN_REVERT_LEAVES leaves a value behind (an incomplete revert).
 # TUN_FOREIGN: the first other call while a profile is applied raises gen once (someone
 # else edits the Istio CR during the pass). Each istiod pod list logs the
-# ISTIO_GENERATIONS and ISTIO_PROXY_VERSIONS its caller was handed (gens-seen). Any other
-# call fails (the probe then fails: PROBE_FAILED).
+# ISTIO_GENERATIONS and ISTIO_PROXY_VERSIONS its caller was handed (gens-seen). A marker's
+# apply, read and delete succeed, and the members hold no tuning profile objects (label
+# istio-scale-tests/tuning-profile: an empty list). Any other call fails (the probe then
+# fails: PROBE_FAILED).
 _tun_stub() {
 	export TD="${BATS_TEST_TMPDIR}/tun"
 	mkdir -p "$TD"
@@ -916,6 +923,8 @@ case "$*" in
 *" rollout status "*) exit 0 ;;
 *" -n istio-system get deployment istiod -o json"*)
 	jq -c '{spec: {template: {spec: {containers: [{name: "discovery", env: ((.spec.values.pilot.env // {}) | to_entries | map({name: .key, value: (.value | tostring)}))}]}}}}' "$d/cr.json" ;;
+*" apply --server-side "*|*" delete --ignore-not-found -f "*|*" get --ignore-not-found -f "*|*" -n istio-system get ConfigMap tuning-profile-"*) exit 0 ;;
+*" -l istio-scale-tests/tuning-profile"*) echo '{"kind":"List","items":[]}' ;;
 *) [ -z "${TUN_FOREIGN:-}" ] || [ ! -f "$d/applied" ] || [ -f "$d/foreign-done" ] || { echo $((g + 1)) > "$d/gen"; : > "$d/foreign-done"; }
 	exit 1 ;;
 esac

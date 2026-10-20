@@ -174,7 +174,9 @@ resume_rows() {
 	assert_output --partial "; their ${note}"
 	[[ "$stderr" == *"note: the inputs' ${note}"* ]]
 	refute_output --partial "ran on different harnesses"
-	[[ "$stderr" != *"WARNING"* ]]
+	# No harness warning (the stub's member has no node provider on record: the platform
+	# record's warning says so).
+	[[ "$stderr" != *"ran on different harnesses"* ]]
 	# The same --resume with other harness files: the warning.
 	sed -i.bak 's/^\(# RESUMED_AT=.* HARNESS_CONTENT_KEY=\)[0-9a-f]*/\1333333333333/' "$TSV" && rm -f "${TSV}.bak"
 	report_json
@@ -223,6 +225,7 @@ STUB
 	[ "$(jq -r '.metadata.attempts | length' <<<"$output")" = 2 ]
 	[ "$(jq -c '.metadata.attempts[1] | [.istio_generations, .rows, .rows_kept]' <<<"$output")" = '["ci-a=2/2",1,1]' ]
 	[[ "$(jq -r '.metadata.attempts[1].started_at' <<<"$output")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]]
+	source "${ROOT}/tests/lib/platform.sh"
 	run render_scale_envelope "$d" "$REPORT" ci-a false
 	assert_success
 	assert_output --regexp "> \*\*Attempts:\*\* first run HARNESS_SHA=${sha} \(1 row\(s\), 0 in the figures\); --resume at [^ ]+ HARNESS_SHA=[^ ]+ \(1 row\(s\), 1 in the figures\)"

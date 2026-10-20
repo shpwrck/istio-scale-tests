@@ -140,16 +140,20 @@ split_csv() {
 # split_contexts <csv> <out_arrayname> <what> [<source_ctx>]: split a context list like
 # split_csv, then refuse a member listed twice (a duplicate would deploy, scrape and count
 # that member twice) and, with <source_ctx>, a remote equal to the source. Call it before
-# any cluster change; <what> names the flag or variable the operator fixes.
+# any cluster change; <what> names the flag or variable the operator fixes. The refusal
+# repeats the list, or says how many items it has when it is over 200 characters (a
+# fleet's runs to thousands).
 # shellcheck disable=SC2329
 split_contexts() {
-	local _sc_csv="$1" _sc_what="$3" _sc_src="${4:-}" _sc_x
+	local _sc_csv="$1" _sc_what="$3" _sc_src="${4:-}" _sc_x _sc_shown
 	split_csv "$_sc_csv" "$2"
 	local -n _sc_out="$2"
 	local -A _sc_seen=()
+	_sc_shown="$_sc_csv"
+	((${#_sc_shown} <= 200)) || _sc_shown="${#_sc_out[@]} items"
 	for _sc_x in ${_sc_out[@]+"${_sc_out[@]}"}; do
 		[[ -z "${_sc_seen[$_sc_x]+x}" ]] \
-			|| die "${_sc_what} lists ${_sc_x} twice (${_sc_csv}): list each mesh member once"
+			|| die "${_sc_what} lists ${_sc_x} twice (${_sc_shown}): list each mesh member once"
 		[[ -z "$_sc_src" || "$_sc_x" != "$_sc_src" ]] \
 			|| die "${_sc_what} lists the source context ${_sc_x}: the remotes are the other mesh members"
 		_sc_seen[$_sc_x]=1

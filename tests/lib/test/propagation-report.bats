@@ -196,6 +196,7 @@ second_sweep() {
 			echo "# HARNESS_SHA=h${d}"
 			echo "# ISTIO_VERSION=1.30.5"
 			echo "# ITERATIONS=$(if [[ $d == a ]]; then echo 3; else echo 5; fi)"
+			platform_fixture_lines src,rmt
 			echo "$HDR"
 			prow 2 1 1000 100
 		} > "${RES}/sweep-${d}/endpoint-r${d}.tsv"
@@ -306,7 +307,7 @@ p1rows() {
 }
 
 @test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor" {
-	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
+	{ echo "# RUN_ID=r1"; platform_fixture_lines src,b,c,d; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	# P1 is one sample per iteration, so its n_total counts iterations too.
@@ -332,7 +333,7 @@ p1rows() {
 @test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	# Every remote row of iterations 2, 5 and 9 carries p1_overflow=1 (P1 is source-side).
-	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d \
+	{ echo "# RUN_ID=r1"; platform_fixture_lines src,b,c,d; echo "$HDR"; p1rows r1 4 10 b c d \
 		| awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 2 || $3 == 5 || $3 == 9 { $15 = 1 } 1'; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success

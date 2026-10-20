@@ -189,6 +189,7 @@ prow21() {
 @test "005 and tuning 004 on 21-column rows: remote failures keep P1; a source restart, overflow or skew drops it" {
 	{
 		echo "# RUN_ID=r1"
+		platform_fixture_lines src,b,c
 		printf '%s\tp1_status\tp1_scrape_skew_ms\n' "$PROP_HDR"
 		# 1: both remotes timed out, the source was clean: P1 counts.
 		prow21 1 b 100 TIMEOUT_P3 0 0 OK 5
@@ -228,7 +229,8 @@ prow21() {
 	} > "${BATS_TEST_TMPDIR}/legacy.tsv"
 	mkdir -p "${BATS_TEST_TMPDIR}/legacy"
 	mv "${BATS_TEST_TMPDIR}/legacy.tsv" "${BATS_TEST_TMPDIR}/legacy/endpoint-r2.tsv"
-	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "${BATS_TEST_TMPDIR}/legacy" --format json
+	# (It predates the platform record too: a warning on stderr.)
+	run --separate-stderr "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "${BATS_TEST_TMPDIR}/legacy" --format json
 	[ "$(jq -c '[.rows[] | select(.phase == "P1_local_wall") | [.n_total, .n_valid]]' <<<"$output")" = '[[2,1]]' ]
 }
 

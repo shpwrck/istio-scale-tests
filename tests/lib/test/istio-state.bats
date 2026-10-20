@@ -275,6 +275,7 @@ pv_pod() {
 	run --separate-stderr "$REPORT" --results-dir "$r" --format json
 	[ "$(jq -r '.metadata.istio_proxy_versions' <<<"$output")" = "mesh-a=1.30.5:30,mesh-b=1.30.5:34+1.30.4:2" ]
 	[ "$(jq -r '.metadata.istio_generations' <<<"$output")" = "mesh-a=2/2,mesh-b=3/2" ]
+	source "${ROOT}/tests/lib/platform.sh"
 	run --separate-stderr render_scale_envelope "$r" "$REPORT" "mesh-a,mesh-b" false
 	assert_output --partial "| Proxy (Envoy) versions at the start | 1.30.5: 64, 1.30.4: 2 (2 members) |"
 	# A TSV from before ISTIO_PROXY_VERSIONS: unknown, never a guess.

@@ -28,14 +28,15 @@ _need_yaml() {
 # _tun_stub: a kubectl with a stateful Istio CR (files in TD): cr.json (its spec) and gen
 # (its generation, and its IstioRevision's, which Sail raises with it). A merge patch
 # applies (RFC 7386) and raises gen; a revert patch (istio-revert-*) also removes the
-# applied marker. A profile's resources: a server-side apply creates them (res), a delete
-# removes them. One istiod pod (istiod-a) whose /metrics names TUN_PROXY_VERSION (default
-# 1.30.5) for 3 proxies. Every call is logged to KLOG; a `sleep` on PATH logs `SLEEP <sec>`
-# there and returns at once (the settle). TUN_FOREIGN_WHEN: someone else edits the Istio CR
-# once (gen + 1): `baseline` at an istiod pod list during the baseline pass (its dir exists,
-# no profile's state dir yet), `applied` at one while a profile is applied, else at the
-# first call that matches that glob. Any other call fails (the probes then fail:
-# PROBE_FAILED).
+# applied marker. A profile's resources and its marker: a server-side apply creates them
+# (res), a delete removes them; the members hold no other tuning profile objects (label
+# istio-scale-tests/tuning-profile: an empty list). One istiod pod (istiod-a) whose
+# /metrics names TUN_PROXY_VERSION (default 1.30.5) for 3 proxies. Every call is logged to
+# KLOG; a `sleep` on PATH logs `SLEEP <sec>` there and returns at once (the settle).
+# TUN_FOREIGN_WHEN: someone else edits the Istio CR once (gen + 1): `baseline` at an istiod
+# pod list during the baseline pass (its dir exists, no profile's state dir yet), `applied`
+# at one while a profile is applied, else at the first call that matches that glob. Any
+# other call fails (the probes then fail: PROBE_FAILED).
 _tun_stub() {
 	export TD="${BATS_TEST_TMPDIR}/tun" KLOG="${BATS_TEST_TMPDIR}/kubectl.log" TUN_RES="${BATS_TEST_TMPDIR}/tres"
 	mkdir -p "$TD"
@@ -85,7 +86,8 @@ case "$*" in
 *" apply --server-side "*) : > "$d/res" ;;
 *" delete --ignore-not-found -f "*) rm -f "$d/res" ;;
 *" get --ignore-not-found -f "*) : ;;
-*" tuning-connection-pool -o name"*) [ -f "$d/res" ] ;;
+*" tuning-connection-pool -o name"*|*" -n istio-system get ConfigMap tuning-profile-"*) [ -f "$d/res" ] ;;
+*" -l istio-scale-tests/tuning-profile"*) echo '{"kind":"List","items":[]}' ;;
 *" --request-timeout=5s -n istio-system get pods -l app=istiod "*) echo pod/istiod-a ;;
 *" get --raw /api/v1/namespaces/istio-system/pods/istiod-a:15014/proxy/metrics"*)
 	printf '# TYPE pilot_xds gauge\npilot_xds{version="%s"} 3\n' "${TUN_PROXY_VERSION:-1.30.5}" ;;
