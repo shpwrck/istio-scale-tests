@@ -68,6 +68,7 @@ step 3 "grep audit for inline function definitions"
 audit_fail=0
 EXTRACTED_PATTERNS=(
 	'die() {'
+	'awk_untyped_ok() {'
 	'split_csv() {'
 	'split_contexts() {'
 	'ctx_file_safe() {'

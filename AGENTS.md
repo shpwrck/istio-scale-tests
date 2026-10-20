@@ -95,7 +95,7 @@ Prefer it over generic upstream Istio docs when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.3 host); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments |
@@ -118,7 +118,8 @@ Prefer it over generic upstream Istio docs when they disagree.
 
 ## Tools
 
-`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
+`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk` (gawk 5.3
+corrupts unset array elements passed to a function: `common.sh` then runs mawk, or stops), GNU
 `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in
 `tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
 busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for

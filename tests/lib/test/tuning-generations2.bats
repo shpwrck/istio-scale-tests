@@ -36,7 +36,7 @@ _member_stub() {
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
 d="$TD" c=none
-case "$*" in *--context=*) c="${*#*--context=}"; c="${c%% *}" ;; esac
+case "$*" in *--context=*) args="$*"; c="${args#*--context=}"; c="${c%% *}" ;; esac
 [ -f "$d/gen.$c" ] || echo 2 > "$d/gen.$c"
 [ -f "$d/cr.$c.json" ] || echo '{"spec":{"version":"v1.30-latest","values":{}}}' > "$d/cr.$c.json"
 if [ -n "${TUN_CRBUMP_ON:-}" ] && [ ! -f "$d/bump-done" ]; then
@@ -58,7 +58,7 @@ case "$*" in
 *"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*)
 	STUB_ISTIO_CR_GEN="$g" STUB_ISTIO_REV_GEN="$g" exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" patch istio.sailoperator.io default --type=merge --patch-file="*)
-	f="${*##*--patch-file=}"; f="${f%% *}"
+	args="$*"; f="${args##*--patch-file=}"; f="${f%% *}"
 	jq --slurpfile p "$f" 'def mp($q): if ($q | type) == "object" then reduce ($q | keys_unsorted[]) as $k ((if type == "object" then . else {} end); if $q[$k] == null then del(.[$k]) else .[$k] = (.[$k] | mp($q[$k])) end) else $q end; mp($p[0])' "$d/cr.$c.json" > "$d/cr.$c.new" && mv "$d/cr.$c.new" "$d/cr.$c.json"
 	echo $((g + 1)) > "$d/gen.$c" ;;
 *" get istio.sailoperator.io default -o jsonpath={.metadata.generation}"*) echo "$g $g True default" ;;
