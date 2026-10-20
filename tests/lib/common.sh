@@ -876,7 +876,8 @@ _sweep_step_stop() {
 		_sweep_tree_freeze sss_tree "${sss_tree[@]}"
 		# The step's own process is reaped here, quietly: bash would print a "Killed" notice
 		# for it at the next command it waits for (the hint's substitution below). The wait
-		# is short: the step was just sent SIGKILL when it still ran (it is in the tree).
+		# is short: the step was just sent SIGKILL when it still ran (it is in the tree); one
+		# bash reaped already is marked as told (_sweep_step_reap).
 		{
 			for k in ${sss_tree[@]+"${sss_tree[@]}"}; do
 				if kill -s KILL "${k%%@*}"; then n=$((n + 1)); fi
@@ -893,10 +894,14 @@ _sweep_step_stop() {
 # zombie not reaped yet). A step that ended at the moment the signal ended sweep_step's wait
 # can be gone while bash still lists it as running: `wait <pid>` then waits for any child,
 # and a sweep's background poller never ends, so the sweep would hang and never write its
-# outcome or remove its lock.
+# outcome or remove its lock. A step bash reaped already (its SIGCHLD handler runs at any
+# time, also between the SIGKILL and the check) keeps its job notice ("line N: <pid> Killed
+# ..."), which bash prints at the next command it waits for: `jobs` marks every ended job as
+# told, quietly (a later `wait <pid>` still gets its status).
 # shellcheck disable=SC2329
 _sweep_step_reap() {
 	! kill -0 "$1" 2>/dev/null || wait "$1" 2>/dev/null || true
+	jobs >/dev/null 2>&1 || true
 }
 
 # sweep_step_kill: SIGKILL what still runs of the step sweep_step started in this shell

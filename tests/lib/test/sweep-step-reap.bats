@@ -6,7 +6,7 @@ load test_helper
 # _sweep_step_reap: the stop's and sweep_step_kill's wait for the step's process. A step
 # that ended as the signal arrived must never leave the sweep waiting on a background
 # poller that never ends (bash can still list a gone step as running, and `wait <pid>`
-# then waits for any child).
+# then waits for any child), and one bash reaped already leaves no job notice.
 
 @test "_sweep_step_reap waits for a step that still runs, and reaps it" {
 	run run_timeout 20s bash -c '
@@ -19,6 +19,27 @@ load test_helper
 	assert_success
 	assert_output "rc=0
 reaped"
+}
+
+@test "_sweep_step_reap: a step bash reaped already (its SIGCHLD handler, before the check) leaves no job notice for a later command" {
+	# In a function, as in a sweep's stop: bash prints a pending notice at the next command it
+	# waits for (the substitution), or at the script's next top-level command.
+	run --separate-stderr run_timeout 20s bash -c '
+		source "$ROOT/tests/lib/common.sh"
+		t() {
+			local p i
+			( trap "" TERM; exec sleep 30 ) &
+			p=$!
+			kill -s KILL "$p"
+			# Builtins only: bash waits for no command, so its SIGCHLD handler reaps the step.
+			for ((i = 0; i < 1000000; i++)); do kill -0 "$p" 2>/dev/null || break; done
+			_sweep_step_reap "$p"
+			echo "after: $(echo x)"
+		}
+		t'
+	assert_success
+	assert_output "after: x"
+	[[ "$stderr" != *Killed* ]] || { echo "$stderr"; false; }
 }
 
 @test "a step gone before the stop: _sweep_step_stop and sweep_step_kill return beside a poller that never ends" {

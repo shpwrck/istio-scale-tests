@@ -24,6 +24,12 @@ for arg in "$@"; do
 	esac
 done
 
+# Every step runs awk. Sourcing common.sh checks it (awk_untyped_ok): with gawk 5.3 it runs awk
+# as mawk, or stops here once with the install hint instead of failing every bats file and
+# dry-run with it.
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/common.sh"
+
 pass=0
 fail=0
 step() { echo "--- [$1] $2"; }
@@ -408,13 +414,13 @@ else
 	empty_kubeconfig="$(mktemp)"
 	dry_out="$(mktemp)"
 	while IFS= read -r f; do
-		args=$(grep -m1 '^# ci-dry-run:' "$f" | sed 's/^# ci-dry-run://')
+		dry_args=$(grep -m1 '^# ci-dry-run:' "$f" | sed 's/^# ci-dry-run://')
 		rel="${f#"$ROOT"/}"
 		# shellcheck disable=SC2086
-		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $args) >"$dry_out" 2>&1; then
-			echo "    ok: $rel --dry-run${args}"
+		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $dry_args) >"$dry_out" 2>&1; then
+			echo "    ok: $rel --dry-run${dry_args}"
 		else
-			echo "    FAIL: $rel --dry-run${args} (last 20 lines of its output):"
+			echo "    FAIL: $rel --dry-run${dry_args} (last 20 lines of its output):"
 			tail -n 20 "$dry_out" | sed 's/^/      | /'
 			dry_fail=1
 		fi
