@@ -37,7 +37,7 @@ source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/preamble.sh"  # harness_sha (TSV preamble, istiod-diag index preamble)
+source "${ROOT}/tests/lib/preamble.sh"  # istio_version_resolve and the rest of the TSV preamble
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
@@ -100,6 +100,12 @@ columns measure cross-cluster propagation. Per iteration:
   convergence_remote_eds_ms     first remote EDS push after t0 (control plane only).
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
   CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
   CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
   CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).
@@ -210,7 +216,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
@@ -232,20 +238,28 @@ mkdir -p "$OUTPUT_DIR"
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
-for ctx in "${REMOTES[@]}"; do
+for ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	r="$(fanout_preflight_istiod "$ctx" "${KUBECTL[@]}")"
 	echo "  [$ctx] Running istiod replicas: $r"
 done
 
-# HARNESS_SHA and ISTIO_VERSION are recorded here so 004 reports the run's commit and
-# Istio pin, not the report host's (the 003 placeholder writes the same two keys, PL36).
-HARNESS_SHA="$(harness_sha)"
+# The Istio version the members run, before the first scale-up (inherited when 003
+# runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
+# mismatch.
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
+istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
+
+# HARNESS_SHA, HARNESS_CONTENT_KEY and the Istio version keys are recorded here so 004
+# reports the run's harness and Istio version, not the report host's (the 003 placeholder
+# writes the same keys, PL36); this probe's own results do not count.
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # HARNESS_SHA=${HARNESS_SHA}
-# ISTIO_VERSION=${ISTIO_VERSION:-unknown}
+# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}
+$(istio_version_kv | sed 's/^/# /')
 # ISTIOD_REPLICAS=$SOURCE_REPLICAS
 # CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
@@ -266,9 +280,9 @@ PF_PIDS=()
 POLL_PIDS=()
 
 cleanup() {
-	for pid in "${POLL_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${POLL_PIDS[@]+"${POLL_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	POLL_PIDS=()
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 }
 trap cleanup EXIT
@@ -278,7 +292,7 @@ start_envoy_port_forward() {
 	"${KUBECTL[@]}" --context="$ctx" -n "$NS" port-forward deploy/churn-watcher "$local_port":15000 >/dev/null 2>&1 &
 	PF_PIDS+=($!)
 	local attempts=0
-	# P4: --max-time bounds the readiness probe so a stuck/half-open watcher PF can't
+	# --max-time bounds the readiness probe so a stuck/half-open watcher PF can't
 	# block ~30s/attempt at scale (same shape as the istiod /metrics readiness curls).
 	while ! curl -s -o /dev/null --max-time 2 "http://localhost:$local_port/clusters" 2>/dev/null; do
 		attempts=$((attempts + 1))
@@ -302,7 +316,7 @@ scrape_ctx() {
 	local dir="$1" prefix="$2"
 	shift 2
 	local -a ports=("$@")
-	fanout_scrape_all "$dir" "$prefix" "${ports[@]}"
+	fanout_scrape_all "$dir" "$prefix" ${ports[@]+"${ports[@]}"}
 }
 
 # List the per-pod metrics files for a scrape (dir/prefix-*.metrics) in order.
@@ -361,7 +375,7 @@ bucket_range() {
 # knows its OWN connected proxies, so we must query every source pod).
 _syncz_stale_count() {
 	local port="$1" syncz stale
-	syncz=$(curl -s --max-time 5 "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }  # P4: bound a stuck PF
+	syncz=$(curl -s --max-time 5 "http://localhost:$port/debug/syncz" 2>/dev/null) || { echo "ERR"; return; }  # Bound a stuck PF
 	stale=$(echo "$syncz" | jq -r '[.[] | select(.proxy_status != null) | select(.proxy_status | to_entries | map(select(.value != "SYNCED")) | length > 0)] | length' 2>/dev/null) || { echo "ERR"; return; }
 	echo "$stale"
 }
@@ -399,7 +413,7 @@ poll_syncz_converged() {
 			(( $(count_grown_clusters "$baseline_file" "$cur_file") >= DEPLOYMENT_COUNT )) && seen=1
 		fi
 		if ((seen)); then
-			total="$(_syncz_stale_total "${ports[@]}")"
+			total="$(_syncz_stale_total ${ports[@]+"${ports[@]}"})"
 			if [[ "$total" == "0" ]]; then
 				now_ns > "$result_file"
 				return
@@ -417,7 +431,7 @@ wait_syncz_synced() {
 	local deadline=$(( $(date +%s) + timeout_sec ))
 	while (( $(date +%s) <= deadline )); do
 		local total
-		total="$(_syncz_stale_total "${ports[@]}")"
+		total="$(_syncz_stale_total ${ports[@]+"${ports[@]}"})"
 		[[ "$total" == "0" ]] && return 0
 		sleep "$POLL_INTERVAL_S"
 	done
@@ -533,7 +547,7 @@ scale_source() {
 		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" scale "deployment/churn-target-${d}" --replicas="$replicas" >/dev/null 2>&1 &
 		pids+=($!)
 	done
-	for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+	for pid in ${pids[@]+"${pids[@]}"}; do wait "$pid" 2>/dev/null || true; done
 }
 
 # convergence_remote_eds_ms: time to the first EDS push after t0 on a remote
@@ -550,6 +564,12 @@ poll_remote_eds_converged() {
 	local -a ports=("$@")
 	local deadline=$(( t0 / 1000000 + TIMEOUT_SEC * 1000 ))
 	local ever_complete=0
+	# A failed baseline scrape (PL29) leaves nothing to measure the delta from; reading
+	# it as 0 would count every earlier EDS push as this window's.
+	if [[ "$baseline_eds" == unscraped ]]; then
+		echo "INCOMPLETE" > "$result_file"
+		return
+	fi
 	mkdir -p "$polldir"
 	while true; do
 		local now_ms
@@ -560,14 +580,14 @@ poll_remote_eds_converged() {
 		fi
 		# One fanned-out scrape per tick. A FIXED prefix ("tick") means each tick
 		# OVERWRITES the prior tick's per-pod /metrics bodies, so disk stays bounded
-		# at one tick's worth of files regardless of how many ticks elapse (R2-3) —
+		# at one tick's worth of files regardless of how many ticks elapse —
 		# the EDS/gauge values are consumed immediately below, no tick body needs to
 		# survive. The .failed/.skew sidecars are likewise overwritten in place.
 		# `|| true`: fanout_scrape_all returns non-zero BY DESIGN on an incomplete
 		# scrape (PL29); under set -e a bare call here would abort the probe before the
 		# .failed sidecar check below (the #31 incident class — caught by the new
 		# verify.sh bare-scrape lint). The .failed count is the authoritative gate.
-		fanout_scrape_all "$polldir" "tick" "${ports[@]}" >/dev/null || true
+		fanout_scrape_all "$polldir" "tick" ${ports[@]+"${ports[@]}"} >/dev/null || true
 		if (( $(fanout_scrape_failed_count "$polldir" "tick") > 0 )); then
 			# Skip the detection test on an incomplete scrape (a missing pod
 			# undercounts the summed eds delta, PL29).
@@ -577,11 +597,19 @@ poll_remote_eds_converged() {
 		ever_complete=1
 		local -a tick_files=()
 		mapfile -t tick_files < <(ctx_metric_files "$polldir" "tick" "${#ports[@]}")
-		local cur_eds
-		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${tick_files[@]}")
-		[[ -z "$cur_eds" || ! "$cur_eds" =~ ^[0-9]+$ ]] && cur_eds=0
+		local cur_eds base_eds="$baseline_eds"
+		cur_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${tick_files[@]+"${tick_files[@]}"})
+		# No EDS series in this tick (`unknown`, not 0): not converged yet. One that
+		# was absent at the baseline (`unknown`) was registered in the window, so it
+		# started at 0 (counter_delta's rule). Absent all along, the poll ends TIMEOUT,
+		# never a 0.
+		if [[ ! "$cur_eds" =~ ^[0-9]+$ ]]; then
+			sleep "$POLL_INTERVAL_S"
+			continue
+		fi
+		[[ "$base_eds" =~ ^[0-9]+$ ]] || base_eds=0
 		# Counter can appear to "decrease" mid restart/deploy; treat as not-yet.
-		if (( cur_eds - baseline_eds >= eds_delta_target )); then
+		if (( cur_eds - base_eds >= eds_delta_target )); then
 			now_ns > "$result_file"
 			return
 		fi
@@ -671,13 +699,13 @@ load_rmt_ports() {
 reopen_istiod_fanouts_if_dead() {
 	local alive=1 port j
 	local -a _rp2=()
-	for port in "${SRC_ISTIOD_PORTS[@]}"; do
+	for port in ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"}; do
 		curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break; }
 	done
 	if ((alive)); then
 		for j in "${!REMOTES[@]}"; do
 			load_rmt_ports "$j" _rp2
-			for port in "${_rp2[@]}"; do
+			for port in ${_rp2[@]+"${_rp2[@]}"}; do
 				curl -s -o /dev/null --max-time 2 "http://localhost:$port/metrics" 2>/dev/null || { alive=0; break 2; }
 			done
 		done
@@ -703,7 +731,7 @@ reopen_istiod_fanouts_if_dead() {
 	local -A old_rmt=()
 	old_src="$(IFS=$'\n'; echo "${SRC_ISTIOD_PODS[*]}")"
 	for j in "${!RMT_PODS_STR[@]}"; do old_rmt[$j]="${RMT_PODS_STR[$j]}"; done
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	open_istiod_fanouts
 	open_envoy_port_forwards
@@ -765,13 +793,13 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# proxies) SUMS across replicas; histograms/counters aggregate per pod below.
 	# `|| true`: scrape_ctx returns non-zero on an incomplete scrape (by design);
 	# incompleteness is captured on the next line, so it must not trip `set -e`.
-	scrape_ctx "$ITER_DIR" "src-pre" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
+	scrape_ctx "$ITER_DIR" "src-pre" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"} >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_PRE_FILES < <(ctx_metric_files "$ITER_DIR" "src-pre" "$SRC_NPORTS")
 	# Pre podset = the scraped pods (lines up with SRC_PRE_FILES); post podset =
 	# every Running pod, so a replaced or added istiod shows up as a change.
-	printf '%s\n' "${SRC_ISTIOD_PODS[@]}" > "$ITER_DIR/src-pre.podset"
-	src_connected_proxies=$(fanout_gauge_sum pilot_xds "${SRC_PRE_FILES[@]}")
+	printf '%s\n' ${SRC_ISTIOD_PODS[@]+"${SRC_ISTIOD_PODS[@]}"} > "$ITER_DIR/src-pre.podset"
+	src_connected_proxies=$(fanout_gauge_sum pilot_xds ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"})
 
 	rmt_connected_proxies=0
 	declare -A RMT_PRE_FILES_STR=()
@@ -779,18 +807,18 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# (convergence_remote_eds_ms). Read from the SAME pre-scrape blob as the other
 	# baselines (PL21: no extra HTTP round-trip), summed across the remote's istiod
 	# pods. (No pilot_services baseline: churn has no clean registry-delta
-	# cross-check — see poll_remote_eds_converged, R2-1/PL31.)
+	# cross-check — see poll_remote_eds_converged and PL31.)
 	declare -A RMT_PRE_EDS=()
 	for i in "${!REMOTES[@]}"; do
 		_rports=()  # populated by load_rmt_ports via nameref
 		load_rmt_ports "$i" _rports
-		scrape_ctx "$ITER_DIR" "rmt${i}-pre" "${_rports[@]}" >/dev/null || true
+		scrape_ctx "$ITER_DIR" "rmt${i}-pre" ${_rports[@]+"${_rports[@]}"} >/dev/null || true
 		(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-pre") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 		mapfile -t _rfiles < <(ctx_metric_files "$ITER_DIR" "rmt${i}-pre" "${#_rports[@]}")
 		RMT_PRE_FILES_STR["$i"]="$(IFS=$'\n'; echo "${_rfiles[*]}")"
 		printf '%s\n' "${RMT_PODS_STR[$i]}" > "$ITER_DIR/rmt${i}-pre.podset"
-		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds "${_rfiles[@]}") ))
-		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${_rfiles[@]}")
+		rmt_connected_proxies=$(( rmt_connected_proxies + $(fanout_gauge_sum pilot_xds ${_rfiles[@]+"${_rfiles[@]}"}) ))
+		RMT_PRE_EDS["$i"]=$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${_rfiles[@]+"${_rfiles[@]}"})
 	done
 	((${#REMOTES[@]})) || rmt_connected_proxies="N/A"
 
@@ -812,8 +840,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	done
 
 	# Counter baselines summed across source pods.
-	src_pre_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_PRE_FILES[@]}")
-	src_pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_PRE_FILES[@]}")
+	src_pre_triggers=$(fanout_counter_sum pilot_push_triggers ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"})
+	src_pre_pushes=$(fanout_counter_sum pilot_xds_pushes ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"})
 
 	T0=$(now_ns)
 	# Run the scale-up + measurement + row-emit as a guarded subshell so a genuine
@@ -838,7 +866,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	# own connected proxies, so convergence requires every pod to report 0 stale.
 	if ((SRC_WEIGHTS_OK)); then
 		poll_syncz_converged "$T0" "$LOCAL_FILE" "$SRC_ENVOY_PF_PORT" \
-			"$ITER_DIR/src-weights.base" "${SRC_ISTIOD_PORTS[@]}" &
+			"$ITER_DIR/src-weights.base" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"} &
 		POLL_PIDS+=($!)
 	else
 		echo "N/A" > "$LOCAL_FILE"
@@ -866,11 +894,11 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		load_rmt_ports "$i" _rports
 		poll_remote_eds_converged "$ITER_DIR/eds-poll-${i}" "$T0" \
 			"${RMT_PRE_EDS[$i]}" "$EDS_THRESHOLD_DELTA" \
-			"$edsf" "${_rports[@]}" &
+			"$edsf" ${_rports[@]+"${_rports[@]}"} &
 		POLL_PIDS+=($!)
 	done
 
-	for pid in "${POLL_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+	for pid in ${POLL_PIDS[@]+"${POLL_PIDS[@]}"}; do wait "$pid" 2>/dev/null || true; done
 	POLL_PIDS=()
 
 	conv_local=$(compute_delta_ms "$LOCAL_FILE" "$T0")
@@ -903,35 +931,50 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	fi
 
 	# Control-plane-only EDS-push convergence (max across remotes; mirrors the
-	# conv_remote aggregation). A poller that never completed a clean scrape emits
-	# INCOMPLETE (treated as TIMEOUT). No dirty cross-check: churn has no clean
-	# registry-delta denominator (R2-1/PL31).
+	# conv_remote aggregation). No dirty cross-check: churn has no clean registry-delta
+	# denominator (PL31). A poller that never completed a clean scrape (INCOMPLETE)
+	# measured nothing, so it is not a timeout: with no remote timed out, the column
+	# is N/A and the row SCRAPE_INCOMPLETE_REMOTE_EDS. A remote that did time out (clean
+	# scrapes, no push) still makes the row TIMEOUT_REMOTE_EDS.
 	conv_remote_eds="N/A"
+	eds_incomplete=0
 	if [[ ${#REMOTES[@]} -gt 0 ]]; then
 		max_eds=0
 		eds_ok=1
 		for i in "${!REMOTES[@]}"; do
 			ev=$(<"${REMOTE_EDS_FILES[i]}")
-			# Treat TIMEOUT/INCOMPLETE/empty AND any non-integer crossing-ns (a
-			# truncated/garbled result file) as TIMEOUT, so the arithmetic below can
-			# never raise a syntax error that aborts the probe under `set -e`.
-			if [[ "$ev" == "TIMEOUT" || "$ev" == "INCOMPLETE" || ! "$ev" =~ ^[0-9]+$ ]]; then
+			# Treat TIMEOUT/empty AND any non-integer crossing-ns (a truncated/garbled
+			# result file) as TIMEOUT, so the arithmetic below can never raise a syntax
+			# error that aborts the probe under `set -e`.
+			if [[ "$ev" == "INCOMPLETE" ]]; then
+				e="INCOMPLETE"
+			elif [[ "$ev" == "TIMEOUT" || ! "$ev" =~ ^[0-9]+$ ]]; then
 				e="TIMEOUT"
 			else
 				e=$(( (ev - T0) / 1000000 ))
 			fi
-			echo "  Convergence (remote ${REMOTES[i]}, EDS push): ${e}ms"
+			if [[ "$e" == "INCOMPLETE" ]]; then
+				echo "  Convergence (remote ${REMOTES[i]}, EDS push): not measured (no complete scrape of its istiod)"
+			else
+				echo "  Convergence (remote ${REMOTES[i]}, EDS push): ${e}ms"
+			fi
 			if [[ "$e" == "TIMEOUT" ]]; then
 				eds_ok=0
+			elif [[ "$e" == "INCOMPLETE" ]]; then
+				eds_incomplete=1
 			elif ((e > max_eds)); then
 				max_eds="$e"
 			fi
 		done
-		if ((eds_ok)); then conv_remote_eds="$max_eds"; else conv_remote_eds="TIMEOUT"; fi
+		if ((!eds_ok)); then
+			conv_remote_eds="TIMEOUT"
+		elif ((!eds_incomplete)); then
+			conv_remote_eds="$max_eds"
+		fi
 	fi
 
 	# Post-churn: full per-pod scrape of every istiod (concurrent), summed/merged.
-	scrape_ctx "$ITER_DIR" "src-post" "${SRC_ISTIOD_PORTS[@]}" >/dev/null || true
+	scrape_ctx "$ITER_DIR" "src-post" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"} >/dev/null || true
 	(( $(fanout_scrape_failed_count "$ITER_DIR" "src-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 	mapfile -t SRC_POST_FILES < <(ctx_metric_files "$ITER_DIR" "src-post" "$SRC_NPORTS")
 	fanout_record_podset "$SOURCE_CTX" "$ITER_DIR/src-post.podset" "${KUBECTL[@]}"
@@ -943,16 +986,18 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		"$ITER_DIR/src-pre.podset" "$ITER_DIR/src-post.podset" \
 		"$src_pre_csv" "$src_post_csv")"
 
-	src_post_triggers=$(fanout_counter_sum pilot_push_triggers "${SRC_POST_FILES[@]}")
-	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes "${SRC_POST_FILES[@]}")
-	src_triggers_delta=$((src_post_triggers - src_pre_triggers))
-	src_pushes_delta=$((src_post_pushes - src_pre_pushes))
+	# counter_delta (metrics.sh): N/A with a warning when the counter is in neither
+	# scrape or went backwards, never 0 or negative.
+	src_post_triggers=$(fanout_counter_sum pilot_push_triggers ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"})
+	src_post_pushes=$(fanout_counter_sum pilot_xds_pushes ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"})
+	src_triggers_delta=$(counter_delta "$src_pre_triggers" "$src_post_triggers" "pilot_push_triggers on ${SOURCE_CTX}")
+	src_pushes_delta=$(counter_delta "$src_pre_pushes" "$src_post_pushes" "pilot_xds_pushes on ${SOURCE_CTX}")
 
 	# PL11: merge buckets across source pods, then delta -> quantile.
-	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-pre-q.merged" "${SRC_PRE_FILES[@]}"
-	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-post-q.merged" "${SRC_POST_FILES[@]}"
-	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-pre-pt.merged" "${SRC_PRE_FILES[@]}"
-	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-post-pt.merged" "${SRC_POST_FILES[@]}"
+	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-pre-q.merged" ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"}
+	fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/src-post-q.merged" ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"}
+	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-pre-pt.merged" ${SRC_PRE_FILES[@]+"${SRC_PRE_FILES[@]}"}
+	fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/src-post-pt.merged" ${SRC_POST_FILES[@]+"${SRC_POST_FILES[@]}"}
 	src_queue_p99=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/src-pre-q.merged" "$ITER_DIR/src-post-q.merged" pilot_proxy_queue_time)")
 	src_push_time_p99=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/src-pre-pt.merged" "$ITER_DIR/src-post-pt.merged" pilot_xds_push_time)")
 
@@ -972,7 +1017,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		for i in "${!REMOTES[@]}"; do
 			_rports=()  # populated by load_rmt_ports via nameref
 			load_rmt_ports "$i" _rports
-			scrape_ctx "$ITER_DIR" "rmt${i}-post" "${_rports[@]}" >/dev/null || true
+			scrape_ctx "$ITER_DIR" "rmt${i}-post" ${_rports[@]+"${_rports[@]}"} >/dev/null || true
 			(( $(fanout_scrape_failed_count "$ITER_DIR" "rmt${i}-post") > 0 )) && ITER_SCRAPE_INCOMPLETE=1
 			mapfile -t _rpost_files < <(ctx_metric_files "$ITER_DIR" "rmt${i}-post" "${#_rports[@]}")
 			fanout_record_podset "${REMOTES[i]}" "$ITER_DIR/rmt${i}-post.podset" "${KUBECTL[@]}"
@@ -988,15 +1033,26 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 			RMT_RESTART[i]="$r_restart"
 			RMT_PRE_CSV[i]="$rpre_csv"
 
-			rmt_post_t=$(fanout_counter_sum pilot_push_triggers "${_rpost_files[@]}")
-			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes "${_rpost_files[@]}")
-			rmt_pre_t=$(fanout_counter_sum pilot_push_triggers "${_rpre_files[@]}")
-			rmt_pre_p=$(fanout_counter_sum pilot_xds_pushes "${_rpre_files[@]}")
-			rmt_triggers_delta=$(( rmt_triggers_delta + rmt_post_t - rmt_pre_t ))
-			rmt_pushes_delta=$(( rmt_pushes_delta + rmt_post_p - rmt_pre_p ))
+			rmt_post_t=$(fanout_counter_sum pilot_push_triggers ${_rpost_files[@]+"${_rpost_files[@]}"})
+			rmt_post_p=$(fanout_counter_sum pilot_xds_pushes ${_rpost_files[@]+"${_rpost_files[@]}"})
+			rmt_pre_t=$(fanout_counter_sum pilot_push_triggers ${_rpre_files[@]+"${_rpre_files[@]}"})
+			rmt_pre_p=$(fanout_counter_sum pilot_xds_pushes ${_rpre_files[@]+"${_rpre_files[@]}"})
+			# Summed over remotes; one remote's N/A makes the sum N/A (an undercount otherwise).
+			rmt_d=$(counter_delta "$rmt_pre_t" "$rmt_post_t" "pilot_push_triggers on ${REMOTES[i]}")
+			if [[ "$rmt_d" == "N/A" || "$rmt_triggers_delta" == "N/A" ]]; then
+				rmt_triggers_delta="N/A"
+			else
+				rmt_triggers_delta=$(( rmt_triggers_delta + rmt_d ))
+			fi
+			rmt_d=$(counter_delta "$rmt_pre_p" "$rmt_post_p" "pilot_xds_pushes on ${REMOTES[i]}")
+			if [[ "$rmt_d" == "N/A" || "$rmt_pushes_delta" == "N/A" ]]; then
+				rmt_pushes_delta="N/A"
+			else
+				rmt_pushes_delta=$(( rmt_pushes_delta + rmt_d ))
+			fi
 
-			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-pre-q.merged" "${_rpre_files[@]}"
-			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-post-q.merged" "${_rpost_files[@]}"
+			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-pre-q.merged" ${_rpre_files[@]+"${_rpre_files[@]}"}
+			fanout_merge_histogram pilot_proxy_queue_time "$ITER_DIR/rmt${i}-post-q.merged" ${_rpost_files[@]+"${_rpost_files[@]}"}
 			rmt_q=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/rmt${i}-pre-q.merged" "$ITER_DIR/rmt${i}-post-q.merged" pilot_proxy_queue_time)")
 			if [[ "$rmt_q" != "N/A" && "$rmt_q" != "overflow" ]]; then
 				has_rmt_q=1
@@ -1005,8 +1061,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 				rmt_queue_p99="overflow"
 			fi
 
-			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-pre-pt.merged" "${_rpre_files[@]}"
-			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-post-pt.merged" "${_rpost_files[@]}"
+			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-pre-pt.merged" ${_rpre_files[@]+"${_rpre_files[@]}"}
+			fanout_merge_histogram pilot_xds_push_time "$ITER_DIR/rmt${i}-post-pt.merged" ${_rpost_files[@]+"${_rpost_files[@]}"}
 			rmt_pt=$(_round_p99 "$(delta_histogram_p99 "$ITER_DIR/rmt${i}-pre-pt.merged" "$ITER_DIR/rmt${i}-post-pt.merged" pilot_xds_push_time)")
 			if [[ "$rmt_pt" != "N/A" && "$rmt_pt" != "overflow" ]]; then
 				has_rmt_pt=1
@@ -1076,6 +1132,37 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 	if [[ "$status" == "OK" && "$ITER_SCRAPE_INCOMPLETE" == "1" ]]; then
 		status="SCRAPE_INCOMPLETE"
 	fi
+	# A remote EDS poller that never completed a scrape measured nothing: its own
+	# status, counted in n_total and not in n_valid, never a TIMEOUT_REMOTE_EDS.
+	if [[ "$status" == "OK" && "$eds_incomplete" == 1 && "$conv_remote_eds" == "N/A" ]]; then
+		status="SCRAPE_INCOMPLETE_REMOTE_EDS"
+	fi
+	# An OK row has a number in every measured column, so the report's n_valid
+	# counts the same rows for every average (PL15). The remote EDS push that never
+	# came is TIMEOUT_REMOTE_EDS; any other non-numeric measured value (a watcher that
+	# did not list every churn target, a counter missing from both scrapes) is
+	# MISSING_VALUE. Measured: the three convergence columns and the four push
+	# counter deltas (the remote ones only with remotes). Not gated: the queue and
+	# push-time p99s (N/A means no observation in the window, `overflow` is a value
+	# the report counts) and the connected-proxy gauges.
+	if [[ "$status" == "OK" && ${#REMOTES[@]} -gt 0 && ! "$conv_remote_eds" =~ ^[0-9]+$ ]]; then
+		status="TIMEOUT_REMOTE_EDS"
+	fi
+	if [[ "$status" == "OK" ]]; then
+		missing_cols=()
+		[[ "$conv_local" =~ ^[0-9]+$ ]] || missing_cols+=("convergence_local_ms=${conv_local}")
+		[[ "$src_triggers_delta" =~ ^[0-9]+$ ]] || missing_cols+=("source_push_triggers_delta=${src_triggers_delta}")
+		[[ "$src_pushes_delta" =~ ^[0-9]+$ ]] || missing_cols+=("source_xds_pushes_delta=${src_pushes_delta}")
+		if [[ ${#REMOTES[@]} -gt 0 ]]; then
+			[[ "$conv_remote" =~ ^[0-9]+$ ]] || missing_cols+=("remote_endpoint_reachable_ms=${conv_remote}")
+			[[ "$rmt_triggers_delta" =~ ^[0-9]+$ ]] || missing_cols+=("remote_push_triggers_delta=${rmt_triggers_delta}")
+			[[ "$rmt_pushes_delta" =~ ^[0-9]+$ ]] || missing_cols+=("remote_xds_pushes_delta=${rmt_pushes_delta}")
+		fi
+		if ((${#missing_cols[@]})); then
+			status="MISSING_VALUE"
+			echo "  Warning: iteration ${iter} has no number for ${missing_cols[*]}; status MISSING_VALUE (counted in n_total, not in n_valid)" >&2
+		fi
+	fi
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$RUN_ID" "$MESH_SIZE" "$DEPLOYMENT_COUNT" "$BASE_REPLICAS" "$SCALE_TO" \
@@ -1115,7 +1202,7 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
 		if ! wait_source_pods_settled "$TIMEOUT_SEC"; then
 			echo "  Warning: $SOURCE_CTX still has terminating churn-target pods after ${TIMEOUT_SEC}s"
 		fi
-		if ! wait_syncz_synced "$TIMEOUT_SEC" "${SRC_ISTIOD_PORTS[@]}"; then
+		if ! wait_syncz_synced "$TIMEOUT_SEC" ${SRC_ISTIOD_PORTS[@]+"${SRC_ISTIOD_PORTS[@]}"}; then
 			echo "  Warning: scale-down convergence timed out after ${TIMEOUT_SEC}s"
 		fi
 		if ((SRC_WEIGHTS_OK)) && ! wait_target_weights_settled "$SRC_ENVOY_PF_PORT" \
@@ -1145,7 +1232,7 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "|-------|-------|"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
-	echo "| Istio version | ${ISTIO_VERSION:-unknown} |"
+	echo "| Istio version | $(istio_version_label) |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 	echo "| Date (UTC) | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"

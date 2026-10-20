@@ -23,7 +23,8 @@
 #   ./tests/controlplane/002-collect-resource-metrics.sh --watch --interval 15
 #
 #   # Settle, results dir and metadata tags from a run config:
-#   ./tests/controlplane/002-collect-resource-metrics.sh --config tests/controlplane/configs/smoke.env
+#   ./tests/controlplane/002-collect-resource-metrics.sh \
+#     --config tests/controlplane/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 # Loud ERR trap for unexpected aborts (per-pod faults become N/A rows).
@@ -49,9 +50,9 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions, infra_preamble_lines, tuning_baseline_state
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/metrics.sh"  # extract_counter_sum, extract_counter_by_label, extract_gauge_sum
+source "${ROOT}/tests/lib/metrics.sh"  # counter_delta, extract_gauge_sum
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_list_istiod_pods (needs metrics.sh first)
+source "${ROOT}/tests/lib/fanout.sh"  # fanout_gauge_sum_strict, fanout_replica_counter, fanout_counter_in_batch (needs metrics.sh first)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # env_collect_infra (istiod req/lim, network topology)
 # shellcheck disable=SC1091
@@ -96,7 +97,8 @@ Usage: $(basename "$0") [options]
                        tests/controlplane/README.md, "Run config").
                        Precedence: flag > --config > environment > default.
   --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --mesh-size N        Metadata tag for TSV output.
+  --mesh-size N        Metadata tag for TSV output (default: the number of contexts;
+                       at most that, as the reports expect a row per member).
   --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
   --replicas N         Metadata tag for TSV output (default: $REPLICAS).
   --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
@@ -155,6 +157,11 @@ Usage: $(basename "$0") [options]
   -h, --help           Show this help.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -166,6 +173,11 @@ Environment:
   (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
   over its istiod pods) and its Running sidecar pods differ by more than
   max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
+
+Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
+on macOS: brew install coreutils, which installs gtimeout). Without it a live run
+stops at startup; --dry-run does not need it.
 EOF
 }
 
@@ -365,24 +377,35 @@ resolve_kubectl KUBECTL
 
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
+# The config-dump and Envoy-stats samples run under timeout/gtimeout; without either,
+# every sample would read N/A with no message. --dry-run does not need it.
+((DRY_RUN)) || require_timeout
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE="${#CONTEXTS[@]}"
 is_pos_int "$MESH_SIZE" || die "--mesh-size must be a positive integer (got: $MESH_SIZE)"
+# Every member writes a row: rows naming fewer members than their mesh size read as a cell
+# cut short (INCOMPLETE) in the reports, so a larger mesh size is refused here.
+((MESH_SIZE <= ${#CONTEXTS[@]})) || die "--mesh-size ${MESH_SIZE} is larger than the ${#CONTEXTS[@]} context(s) given (${CONTEXTS[*]}): its rows would name fewer members than their mesh size, which the reports read as a cell cut short (INCOMPLETE). Give a context per member, or a smaller --mesh-size."
 
 if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 	RUN_ID="$RUN_ID_OVERRIDE"
 else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"
+# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes, and the
+# content key of its files (HARNESS_CONTENT_KEY), from one read; when (UTC) for the
+# HARNESS_CHANGED_AT line a window may write (harness_change_line).
+HARNESS_SHA="" HARNESS_CONTENT_KEY=""
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+HARNESS_READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
@@ -402,22 +425,27 @@ if [[ "$PHASE" != combined ]]; then
 	mkdir -p "$STATE_DIR"
 fi
 
-ISTIO_VERSION_TAG="${ISTIO_VERSION:-unknown}"
+# The Istio version the members run, before the first scrape (inherited when 003
+# runs this step; read here when it runs alone, a read-only API GET like the version
+# and capacity reads below). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 
 # Kube server version per context (concurrent, 5s timeout each).
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 
 # Source context's node allocatable + istiod limits for the preamble (read-only;
-# `unknown` on failure). Skipped for --phase baseline (no preamble written then).
+# `unknown` on failure). Skipped when no preamble is written: --phase baseline, or a TSV
+# that exists (003 writes it before a sweep's first window).
+TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 PRE_NODE_ALLOC_CPU_M="unknown"
 PRE_NODE_ALLOC_MEM_MI="unknown"
 PRE_ISTIOD_CPU_LIMIT_M="unknown"
 PRE_ISTIOD_MEM_LIMIT_MI="unknown"
-if [[ "$PHASE" != baseline ]]; then
+if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	src_ctx="${CONTEXTS[0]}"
 	# shellcheck disable=SC2207
 	nt_kv=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${nt_kv[@]}"; do
+	for kv in ${nt_kv[@]+"${nt_kv[@]}"}; do
 		case "$kv" in
 			cpu_m=*) PRE_NODE_ALLOC_CPU_M="${kv#cpu_m=}" ;;
 			mem_mi=*) PRE_NODE_ALLOC_MEM_MI="${kv#mem_mi=}" ;;
@@ -425,7 +453,7 @@ if [[ "$PHASE" != baseline ]]; then
 	done
 	# shellcheck disable=SC2207
 	il_kv=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${il_kv[@]}"; do
+	for kv in ${il_kv[@]+"${il_kv[@]}"}; do
 		case "$kv" in
 			cpu_m=*) PRE_ISTIOD_CPU_LIMIT_M="${kv#cpu_m=}" ;;
 			mem_mi=*) PRE_ISTIOD_MEM_LIMIT_MI="${kv#mem_mi=}" ;;
@@ -437,7 +465,7 @@ fi
 # to 003's precreate_tsv_preamble (002 writes the preamble only when standalone).
 PRE_TUNING_BASELINE="TUNING_BASELINE=unknown"
 PRE_SIDECAR_EGRESS_HOSTS="SIDECAR_EGRESS_HOSTS=unknown"
-if [[ "$PHASE" != baseline ]]; then
+if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	tb_kv=""
 	while IFS= read -r tb_kv; do
 		case "$tb_kv" in
@@ -447,7 +475,6 @@ if [[ "$PHASE" != baseline ]]; then
 	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 fi
 
-TSV_FILE="${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv"
 if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 	# Cluster-infra block, collected only when 002 writes the preamble itself
 	# (003 pre-creates it in a sweep). Same shared emitter as 003.
@@ -456,8 +483,9 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# Control-plane resource metrics — $(date -u -Iseconds)"
 		echo "# CONTROLPLANE_SCHEMA=66"
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
-		echo "# ISTIO_VERSION=${ISTIO_VERSION_TAG}"
+		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
+		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
@@ -504,12 +532,15 @@ fi
 #   xds_pushes_cds xds_pushes_eds xds_pushes_lds xds_pushes_rds xds_pushes_nds
 #   k8s_events_delta k8s_events_rate
 #   connected_proxies config_size_avg_bytes
-#   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max sidecar_config_bytes_samples
+#   sidecar_config_bytes_avg sidecar_config_bytes_p50 sidecar_config_bytes_max
+#   sidecar_config_bytes_samples
 #   scrape_window_sec scrape_skew_ms settle_sec istiod_restarted
 #   istiod_cpu_m_delta
 #   go_heap_alloc_mi go_heap_inuse_mi
 #   (cols 35-40) istiod_cpu_pct_of_limit istiod_mem_pct_of_limit
 #                   node_cpu_pct node_mem_pct pods_scheduled pods_allocatable
+#     istiod_*_pct_of_limit = `kubectl top` usage summed over the istiod pods it lists,
+#     over the per-replica limit times that pod count (a Pending replica counts in neither).
 #   (cols 41-43) cluster_connected_proxies sidecar_pods proxy_check
 #     Per CONTEXT (same value on every row of that context in one window):
 #     cluster_connected_proxies = pilot_xds summed over the context's istiod pods from
@@ -560,7 +591,7 @@ PF_PIDS=()
 TMP_DIR="$(mktemp -d -t controlplane-002.XXXXXX)"
 
 cleanup() {
-	for pid in "${PF_PIDS[@]}"; do
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
@@ -568,6 +599,9 @@ cleanup() {
 	rm -rf "$TMP_DIR"
 }
 
+# Also on a SIGTERM the sweep forwards (sweep_step): bash runs the EXIT trap on a fatal
+# signal it does not trap and still dies of it (143), at once. A TERM trap would wait for
+# the command in progress to end first.
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -583,15 +617,45 @@ POD_NAMES=()
 # phase emits one degraded N/A row per dropped context (counted in n_total,
 # excluded from n_valid).
 DROPPED_CTXS=()
+# Each member's istiod Deployment .spec.replicas at the window's baseline (cap_istiod_limits;
+# unknown when unread), persisted with the pods: the WINDOW_ROWS line records it next to the
+# rows the member wrote, so a report tells a member that ran the cell on fewer istiod pods
+# than it wants (one evicted or Pending) from one that runs fewer replicas. ISTIOD_LIMITS
+# keeps that read's whole line (its per-replica limits too) for the rows' %-of-limit
+# columns (collect_capacity_for_ctx), so a window reads each member's Deployment once.
+# ISTIOD_NOTREADY: its Running istiod pods that were not Ready then (space-separated), for
+# the window's "# ISTIOD_NOT_READY=" line. ISTIOD_NOTREADY_END: the window's pods that were
+# not Ready at its end (compute_cluster_proxies), for its "# ISTIOD_NOT_READY_AT_END=" line.
+declare -A ISTIOD_SPEC=()
+declare -A ISTIOD_LIMITS=()
+declare -A ISTIOD_NOTREADY=()
+declare -A ISTIOD_NOTREADY_END=()
+
+# istiod_pods_ready <ctx>: "<name>=<its Ready condition> " per Running istiod pod of <ctx>
+# (a pod name has no "="; a bare name is one whose condition was not read). The one list
+# read of a window's two ends: resolve_pods at its baseline, compute_cluster_proxies at its end.
+istiod_pods_ready() {
+	"${KUBECTL[@]}" --context="$1" -n istio-system get pods -l app=istiod \
+		--field-selector=status.phase=Running \
+		-o jsonpath='{range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null
+}
 
 resolve_pods() {
 	POD_CTXS=()
 	POD_NAMES=()
+	ISTIOD_SPEC=()
+	ISTIOD_LIMITS=()
+	ISTIOD_NOTREADY=()
+	local spec kv n lim notready
 	for ctx in "${CONTEXTS[@]}"; do
 		local pods
-		pods=$("${KUBECTL[@]}" --context="$ctx" -n istio-system get pods -l app=istiod \
-			--field-selector=status.phase=Running \
-			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+		pods=$(istiod_pods_ready "$ctx")
+		spec=unknown
+		lim="$(cap_istiod_limits "$ctx" "${KUBECTL[@]}")"
+		ISTIOD_LIMITS[$ctx]="$lim"
+		for kv in $lim; do [[ "$kv" != replicas=* ]] || spec="${kv#replicas=}"; done
+		[[ "$spec" =~ ^[0-9]+$ ]] || spec=unknown
+		ISTIOD_SPEC[$ctx]="$spec"
 		# One context with zero istiod pods is dropped (degraded row later); only
 		# zero pods across ALL contexts is fatal.
 		if [[ -z "$pods" ]]; then
@@ -599,10 +663,22 @@ resolve_pods() {
 			DROPPED_CTXS+=("$ctx")
 			continue
 		fi
+		n=0 notready=""
 		for pod in $pods; do
+			[[ "$pod" != *=* || "${pod#*=}" == True ]] || notready+="${notready:+ }${pod%%=*}"
 			POD_CTXS+=("$ctx")
-			POD_NAMES+=("$pod")
+			POD_NAMES+=("${pod%%=*}")
+			n=$((n + 1))
 		done
+		ISTIOD_NOTREADY[$ctx]="$notready"
+		if [[ "$spec" != unknown ]] && ((n < spec)); then
+			echo "warning: context $ctx: ${n} istiod pod(s) Running, but its Deployment wants ${spec} (one evicted or Pending?): this window measures it on ${n} replica(s), and its WINDOW_ROWS entry (${ctx}=${n}/${spec}) tells the reports so" >&2
+		fi
+		# A Running replica that is not Ready is scraped and writes a row, but the Service
+		# sends it no new proxy while it is not Ready (one shutting down also drops its own as
+		# it exits); the window's ISTIOD_NOT_READY line records it.
+		[[ -z "$notready" ]] \
+			|| echo "warning: context $ctx: istiod pod(s) Running but not Ready: ${notready// /, } (a replacement still syncing its remote clusters, an old replica shutting down, or one failing its readiness probe under load?): such a pod takes no new proxy connection while not Ready (one shutting down also drops its own as it exits), and the window's ISTIOD_NOT_READY line tells the reports so" >&2
 	done
 	((${#POD_CTXS[@]})) || die "no running istiod pods found in istio-system across ANY context (${CONTEXTS[*]}) — cannot proceed"
 }
@@ -615,9 +691,14 @@ save_pod_manifest() {
 	# Persist dropped (zero-pod) contexts so the final phase can emit N/A rows.
 	: > "${dir}/dropped-ctxs.tsv"
 	local dctx
-	for dctx in "${DROPPED_CTXS[@]}"; do
+	for dctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		printf '%s\n' "$dctx" >> "${dir}/dropped-ctxs.tsv"
 	done
+	# The limits line is never empty (- when unread): a tab is IFS whitespace, so read would
+	# shift the not-Ready pods into it.
+	for dctx in "${!ISTIOD_SPEC[@]}"; do
+		printf '%s\t%s\t%s\t%s\n' "$dctx" "${ISTIOD_SPEC[$dctx]}" "${ISTIOD_LIMITS[$dctx]:--}" "${ISTIOD_NOTREADY[$dctx]:-}"
+	done > "${dir}/istiod-spec.tsv"
 }
 
 load_pod_manifest() {
@@ -638,6 +719,18 @@ load_pod_manifest() {
 		while IFS= read -r dctx; do
 			[[ -n "$dctx" ]] && DROPPED_CTXS+=("$dctx")
 		done < "${dir}/dropped-ctxs.tsv"
+	fi
+	# The baseline's istiod Deployment replicas, its read's line and the pods not Ready then
+	# (none from an older baseline: unknown, and collect_capacity_for_ctx reads the
+	# Deployment itself).
+	ISTIOD_SPEC=()
+	ISTIOD_LIMITS=()
+	ISTIOD_NOTREADY=()
+	if [[ -f "${dir}/istiod-spec.tsv" ]]; then
+		local sctx sval slim snr
+		while IFS=$'\t' read -r sctx sval slim snr; do
+			[[ -z "$sctx" ]] || { ISTIOD_SPEC[$sctx]="$sval"; ISTIOD_LIMITS[$sctx]="$slim"; ISTIOD_NOTREADY[$sctx]="$snr"; }
+		done < "${dir}/istiod-spec.tsv"
 	fi
 	for k in "${!POD_CTXS[@]}"; do
 		if ! "${KUBECTL[@]}" --context="${POD_CTXS[k]}" -n istio-system get pod "${POD_NAMES[k]}" &>/dev/null; then
@@ -778,9 +871,12 @@ extract_hist_count() {
 # label series (PL11). N/A when nothing was observed (Δcount <= 0) or Δsum < 0.
 hist_delta_avg_ms() {
 	local baseline="$1" final="$2" name="$3" b_sum f_sum b_cnt f_cnt
-	b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" "$name" || echo 0)
+	b_sum=0 b_cnt=0
+	if [[ -n "$baseline" ]]; then
+		b_sum=$(extract_hist_sum "$baseline" "$name")
+		b_cnt=$(extract_hist_count "$baseline" "$name")
+	fi
 	f_sum=$(extract_hist_sum "$final" "$name")
-	b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" "$name" || echo 0)
 	f_cnt=$(extract_hist_count "$final" "$name")
 	awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
 		BEGIN {
@@ -890,12 +986,12 @@ collect_config_dump_samples() {
 	while IFS='|' read -r ns pod; do
 		[[ -z "$pod" ]] && continue
 		attempted=$((attempted + 1))
-		# P2: bound the config_dump exec — at 10k services the dump is multi-MB and a
+		# Bound the config_dump exec — at 10k services the dump is multi-MB and a
 		# wedged sidecar/exec must not stall the sweep. On timeout the dump is empty ->
 		# bytes=0 -> counted as a FAILED sample (got not incremented), never a partial/
 		# misleading byte count (capturing first lets us drop a timed-out exec cleanly).
 		local dump bytes bd v
-		dump="$(timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
+		dump="$(run_timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "${KUBECTL[@]}" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
 			pilot-agent request GET "/config_dump?include_eds" 2>/dev/null)" || dump=""
 		bytes="$(printf '%s' "$dump" | wc -c)"
 		bytes="$(echo "$bytes" | tr -d '[:space:]')"
@@ -1010,7 +1106,7 @@ scrape_one_context() {
 	local ctx="$1" port="$2" out="$3" ts_start="$4" ts_end="$5"
 	local body t_start t_end
 	t_start=$(now_ms)
-	# P4: --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
+	# --max-time bounds the scrape so a stuck/half-open PF among 35-50 returns 1
 	# (-> empty metrics file -> N/A row via scrape_window) instead of hanging the
 	# whole sweep. This is the PRIMARY body scrape feeding every TSV row, so it must
 	# honor the shared METRICS_SCRAPE_TIMEOUT knob (default 30s): a multi-MB /metrics
@@ -1035,11 +1131,18 @@ scrape_all_parallel() {
 		local m_out="${out_prefix}-${k}.metrics"
 		local t_out="${out_prefix}-${k}.ts"
 		local te_out="${out_prefix}-${k}.tsend"
+		# Empty this scrape's files first: a failed curl writes nothing, so in watch mode
+		# the previous window's body and timestamps would otherwise stand in for it (stale
+		# gauges, a backwards counter read as a reset). An empty file reads as no scrape.
+		: > "$m_out"
+		: > "$t_out"
+		: > "$te_out"
 		(
 			scrape_one_context "${POD_CTXS[k]}" "$port" "$m_out" "$t_out" "$te_out" || exit 1
 		) &
 		pids+=($!)
-		ts_files+=("$t_out")
+		# PL8: the skew is the spread of the completion stamps (.tsend), not the starts.
+		ts_files+=("$te_out")
 	done
 	local rc=0
 	for pid in "${pids[@]}"; do
@@ -1061,11 +1164,14 @@ scrape_all_parallel() {
 	fi
 }
 
+# compute_skew_ms <prefix>: scrape_all_parallel's skew for a batch scraped earlier (the
+# baseline a --phase final reads from the state dir): the spread of its completion stamps
+# (.tsend, PL8), as scrape_all_parallel computes it.
 compute_skew_ms() {
 	local prefix="$1"
 	local min="" max="" t k
 	for k in "${!POD_CTXS[@]}"; do
-		local t_file="${prefix}-${k}.ts"
+		local t_file="${prefix}-${k}.tsend"
 		[[ -s "$t_file" ]] || continue
 		t=$(<"$t_file")
 		[[ -z "$min" || "$t" -lt "$min" ]] && min="$t"
@@ -1086,6 +1192,11 @@ compute_skew_ms() {
 # report's is_num/NF logic treats it like any other N/A column. Results cached
 # per ctx so multi-replica rows on the same ctx don't re-read.
 declare -A CAP_CACHE  # ctx -> "icpu_pct imem_pct ncpu_pct nmem_pct pods_sched pods_alloc"
+# The config_dump samples of a context, once per window (collect_config_dump_samples
+# output): every istiod replica's row of that context reads the same sampled proxies, so
+# a context with R replicas execs into the proxies once, not R times (300 execs per
+# mesh-20 cell with 3 replicas and 5 samples became 100).
+declare -A CD_CACHE
 # The node list and the pod list are read first, together, by read_pod_counts_for_ctx:
 # compute_cluster_proxies needs the sidecar count right after the final scrape (PL21),
 # before any slow `kubectl top` read. Raw key=value strings, parsed by their consumers.
@@ -1134,7 +1245,7 @@ collect_capacity_for_ctx() {
 	local used_cpu_m="unknown" used_mem_mi="unknown"
 	# shellcheck disable=SC2207
 	local -a nu=($(cap_node_used "$ctx" "$worker_csv" "${KUBECTL[@]}"))
-	for kv in "${nu[@]}"; do
+	for kv in ${nu[@]+"${nu[@]}"}; do
 		case "$kv" in
 			cpu_m=*) used_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) used_mem_mi="${kv#mem_mi=}" ;;
@@ -1142,34 +1253,40 @@ collect_capacity_for_ctx() {
 	done
 
 	# cap_istiod_limits returns the PER-REPLICA container limit + the replica count.
-	# cap_istiod_used (below) SUMS usage across ALL istiod replicas, so the %-of-limit
-	# denominator must be the AGGREGATE limit (per-replica × replicas) for the ratio to
-	# share scope with its numerator — otherwise a healthy R-replica control plane reads
-	# up to ~R×100%. (cf PL28 sum-vs-invariant scope.)
-	local istd_cpu_m="unknown" istd_mem_mi="unknown" istd_rep="unknown"
-	# shellcheck disable=SC2207
-	local -a il=($(cap_istiod_limits "$ctx" "${KUBECTL[@]}"))
-	for kv in "${il[@]}"; do
+	# cap_istiod_used (below) SUMS usage across the istiod pods `kubectl top` lists, so the
+	# %-of-limit denominator must be the AGGREGATE limit over those same pods (per-replica ×
+	# the pods it summed) for the ratio to share scope with its numerator — otherwise a
+	# healthy R-replica control plane reads up to ~R×100%, and one with a Pending or evicted
+	# replica (counted in .spec.replicas, absent from top) reads low. The Deployment's
+	# replicas only when that count is unknown. (cf PL28 sum-vs-invariant scope, PL35.)
+	# The Deployment as resolve_pods read it at the window's baseline (ISTIOD_LIMITS), read
+	# again only when that read lacks a limit. A limit changed during the window rolls istiod
+	# out: its pods restart, and the restart guard marks the rows.
+	local istd_cpu_m="unknown" istd_mem_mi="unknown" istd_rep="unknown" lim_re='cpu_m=[0-9]+ mem_mi=[0-9]+'
+	local il="${ISTIOD_LIMITS[$ctx]:-}"
+	[[ "$il" =~ $lim_re ]] || il="$(cap_istiod_limits "$ctx" "${KUBECTL[@]}")"
+	for kv in $il; do
 		case "$kv" in
 			cpu_m=*) istd_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) istd_mem_mi="${kv#mem_mi=}" ;;
 			replicas=*) istd_rep="${kv#replicas=}" ;;
 		esac
 	done
-	# Aggregate limit across replicas (unknown if any input is non-numeric).
-	local istd_cpu_total="unknown" istd_mem_total="unknown"
-	if [[ "$istd_cpu_m" =~ ^[0-9]+$ && "$istd_rep" =~ ^[0-9]+$ ]]; then istd_cpu_total=$(( istd_cpu_m * istd_rep )); fi
-	if [[ "$istd_mem_mi" =~ ^[0-9]+$ && "$istd_rep" =~ ^[0-9]+$ ]]; then istd_mem_total=$(( istd_mem_mi * istd_rep )); fi
-
-	local istd_used_cpu_m="unknown" istd_used_mem_mi="unknown"
+	local istd_used_cpu_m="unknown" istd_used_mem_mi="unknown" istd_used_pods="unknown"
 	# shellcheck disable=SC2207
 	local -a iu=($(cap_istiod_used "$ctx" "${KUBECTL[@]}"))
-	for kv in "${iu[@]}"; do
+	for kv in ${iu[@]+"${iu[@]}"}; do
 		case "$kv" in
 			cpu_m=*) istd_used_cpu_m="${kv#cpu_m=}" ;;
 			mem_mi=*) istd_used_mem_mi="${kv#mem_mi=}" ;;
+			pods=*) istd_used_pods="${kv#pods=}" ;;
 		esac
 	done
+	# Aggregate limit over the pods summed (unknown if any input is non-numeric).
+	[[ ! "$istd_used_pods" =~ ^[1-9][0-9]*$ ]] || istd_rep="$istd_used_pods"
+	local istd_cpu_total="unknown" istd_mem_total="unknown"
+	if [[ "$istd_cpu_m" =~ ^[0-9]+$ && "$istd_rep" =~ ^[0-9]+$ ]]; then istd_cpu_total=$(( istd_cpu_m * istd_rep )); fi
+	if [[ "$istd_mem_mi" =~ ^[0-9]+$ && "$istd_rep" =~ ^[0-9]+$ ]]; then istd_mem_total=$(( istd_mem_mi * istd_rep )); fi
 
 	# Percent columns (N/A when any input unknown).
 	local icpu_pct imem_pct ncpu_pct nmem_pct
@@ -1200,9 +1317,10 @@ declare -A SIDECAR_PODS     # ctx -> Running injected pods | N/A
 declare -A PROXY_CHECK      # ctx -> OK | LOW | HIGH | N/A
 
 compute_cluster_proxies() {
-	local ctx k live scraped n_pods n_live total sidecars check
+	local ctx k live scraped n_pods n_live total sidecars check rd p nre
 	local -a ctxs=() files=()
 	local -A seen=()
+	ISTIOD_NOTREADY_END=()
 	for k in "${!POD_CTXS[@]}"; do
 		ctx="${POD_CTXS[k]}"
 		[[ -n "${seen[$ctx]:-}" ]] && continue
@@ -1211,7 +1329,7 @@ compute_cluster_proxies() {
 	done
 	# Expected side first, for every context, so it lands as close to the batch as
 	# possible. Same node + pod lists the capacity columns use (no extra API call).
-	for ctx in "${ctxs[@]}" "${DROPPED_CTXS[@]}"; do
+	for ctx in "${ctxs[@]}" ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		read_pod_counts_for_ctx "$ctx"
 		sidecars="$(kv_get sidecars "${POD_KV_CACHE[$ctx]}")"
 		[[ "$sidecars" =~ ^[0-9]+$ ]] || sidecars="N/A"
@@ -1227,10 +1345,22 @@ compute_cluster_proxies() {
 		done
 		n_pods=${#files[@]}
 		scraped="$(printf '%s' "$scraped" | LC_ALL=C sort)"
-		# PL40: a failed read degrades to N/A; it never aborts the run.
-		live="$(fanout_list_istiod_pods "$ctx" "${KUBECTL[@]}")" || live=""
+		# PL40: a failed read degrades to N/A; it never aborts the run. The same read gives
+		# the scraped pods that are not Ready at the window's end (a pod gone is not listed).
+		rd="$(istiod_pods_ready "$ctx")" || rd=""
+		live="" nre=""
+		for p in $rd; do
+			live+="${p%%=*}"$'\n'
+			if [[ "$p" == *=* && "${p#*=}" != True && $'\n'"${scraped}"$'\n' == *$'\n'"${p%%=*}"$'\n'* ]]; then
+				nre+="${nre:+ }${p%%=*}"
+			fi
+		done
+		live="$(printf '%s' "$live" | LC_ALL=C sort)"
+		ISTIOD_NOTREADY_END[$ctx]="$nre"
+		[[ -z "$nre" ]] \
+			|| echo "warning: context ${ctx}: istiod pod(s) not Ready at the window's end: ${nre// /, } (a readiness probe failing under load, or a replica shutting down?): the window's ISTIOD_NOT_READY_AT_END line tells the reports so" >&2
 		if [[ -z "$live" ]]; then
-			echo "warning: ${ctx}: could not list Running istiod pods after the final scrape; cluster_connected_proxies=N/A" >&2
+			echo "warning: ${ctx}: could not list Running istiod pods after the final scrape; cluster_connected_proxies=N/A, and no ISTIOD_NOT_READY_AT_END entry (their readiness was not read)" >&2
 			total="N/A"
 		elif [[ "$live" != "$scraped" ]]; then
 			n_live="$(printf '%s\n' "$live" | grep -c .)" || n_live="?"
@@ -1253,7 +1383,7 @@ compute_cluster_proxies() {
 		fi
 	done
 	# Dropped (zero-pod) contexts: no total, no check; the sidecar count was read above.
-	for ctx in "${DROPPED_CTXS[@]}"; do
+	for ctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		CLUSTER_PROXIES[$ctx]="N/A"
 		PROXY_CHECK[$ctx]="N/A"
 	done
@@ -1315,6 +1445,46 @@ collect_growth_for_ctx() {
 	echo "  Cluster ${ctx}: gateways $(kv_get pods "$kv") (clusters max ${cl}; Envoy allocated max ${mem} Mi, physical max ${phy} Mi; container working set max ${ws} Mi), istio-ca-root-cert ConfigMaps ${rc}, leftover test namespaces ${left}"
 }
 
+# harness_change_line: the "# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>"
+# line a window writes before its rows when they ran other harness files than the TSV's
+# last record of them: its preamble's HARNESS_SHA and HARNESS_CONTENT_KEY, then each
+# "# RESUMED_AT=" and "# HARNESS_CHANGED_AT=" line. A sweep's TSV keeps the preamble of its
+# start, so without it the rows of a file edited (or a checkout) during the sweep would be
+# credited to the start's harness; controlplane_attempts reads the line as a boundary of the
+# rows' provenance. Compared by content key (harness_same: a commit or tag that left the
+# harness files as they were is no change), by HARNESS_SHA when either key is unknown. A
+# final phase whose baseline (its read in --state-dir) ran other files than it did spans
+# both: its rows go to the baseline's when that differs from the record (and HCL_AFTER, a
+# second line the window writes after its rows, records the final's, which the next
+# window's rows are compared with), else to the final's. Prints nothing when they match;
+# warns when it prints a line.
+HCL_AFTER=""
+harness_change_line() {
+	local rec_s rec_k s="$HARNESS_SHA" k="$HARNESS_CONTENT_KEY" t="$HARNESS_READ_AT" bs="" bk="" bt=""
+	HCL_AFTER=""
+	IFS=$'\t' read -r rec_s rec_k < <(awk '
+		function lv(k,    p, v) { if (!(p = index($0, " " k "="))) return "unknown"; v = substr($0, p + length(k) + 2); sub(/ .*/, "", v); return (v == "" ? "unknown" : v) }
+		/^timestamp\t/ { hdr = 1; next }
+		!/^#/ { next }
+		!hdr && index($0, "# HARNESS_SHA=") == 1 { s = substr($0, 15) }
+		!hdr && index($0, "# HARNESS_CONTENT_KEY=") == 1 { k = substr($0, 23) }
+		index($0, "# RESUMED_AT=") == 1 || index($0, "# HARNESS_CHANGED_AT=") == 1 { s = lv("HARNESS_SHA"); k = lv("HARNESS_CONTENT_KEY") }
+		END { printf "%s\t%s\n", (s == "" ? "unknown" : s), (k == "" ? "unknown" : k) }' "$TSV_FILE" 2>/dev/null) || true
+	if [[ "$PHASE" == final && -f "${STATE_DIR}/harness" ]]; then
+		IFS=$'\t' read -r bs bk bt < "${STATE_DIR}/harness" || true
+		if [[ -n "$bs" && -n "$bk" ]] && ! harness_same "$bs" "$bk" "$s" "$k"; then
+			echo "warning: [002] this window's baseline ran other harness files (HARNESS_SHA=${bs}) than its final scrape (HARNESS_SHA=${s}): a harness file was edited, or a checkout ran, during the window; the TSV records both" >&2
+			if ! harness_same "$bs" "$bk" "${rec_s:-unknown}" "${rec_k:-unknown}"; then
+				HCL_AFTER="$(printf '# HARNESS_CHANGED_AT=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s' "$t" "$s" "$k")"
+				s="$bs" k="$bk" t="${bt:-$t}"
+			fi
+		fi
+	fi
+	harness_same "$s" "$k" "${rec_s:-unknown}" "${rec_k:-unknown}" && return 0
+	echo "warning: [002] these rows ran other harness files than ${TSV_FILE##*/} records (HARNESS_SHA=${rec_s:-unknown}, HARNESS_CONTENT_KEY=${rec_k:-unknown}; now HARNESS_SHA=${s}, HARNESS_CONTENT_KEY=${k}): a HARNESS_CHANGED_AT line before them records it" >&2
+	printf '# HARNESS_CHANGED_AT=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s\n' "$t" "$s" "$k"
+}
+
 # ---------------------------------------------------------------------------
 # Main scrape_window: baseline + final + deltas + emit TSV rows.
 # ---------------------------------------------------------------------------
@@ -1363,6 +1533,26 @@ scrape_window() {
 
 	local ts
 	ts=$(date -u -Iseconds)
+	# The window's rows go to one file first and into the TSV in one append at the end
+	# (degraded rows too), so a sweep cut short while this window writes leaves all of its
+	# member rows or none: a cell never reads as measured from some members' rows (003
+	# counts a cell whose rows name fewer members than its mesh size as INCOMPLETE).
+	local rows_file="${TMP_DIR}/rows"
+	: > "$rows_file"
+
+	# Per-replica pilot_xds_pushes: a replica that never pushed has no series
+	# and no `# TYPE` line, so "renamed or idle" is decided once over the whole batch
+	# (every baseline and final body, all members: one Istio version, checked at the
+	# start). Any complete body with the counter makes a complete body without it a
+	# real 0; none with it leaves it unknown, and counter_delta warns "renamed?".
+	# pilot_k8s_cfg_events is not read this way: every replica's informers see every
+	# config event, so a replica without it has the counter missing, not idle.
+	local -a batch_files=()
+	for k in "${!POD_CTXS[@]}"; do
+		batch_files+=("${TMP_DIR}/baseline-${k}.metrics" "${TMP_DIR}/final-${k}.metrics")
+	done
+	local xds_pushes_in_batch
+	xds_pushes_in_batch=$(fanout_counter_in_batch pilot_xds_pushes "${batch_files[@]}")
 
 	for k in "${!POD_CTXS[@]}"; do
 		ctx="${POD_CTXS[k]}"
@@ -1377,18 +1567,19 @@ scrape_window() {
 			# Cols 41-43 come from the cluster: its total is already N/A (strict sum).
 			collect_capacity_for_ctx "$ctx"
 			cap_fields="${CAP_CACHE[$ctx]}"; cap_fields="${cap_fields// /$'\t'}"
-			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$ctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$TSV_FILE"
+			echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$ctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 			continue
 		fi
 		local baseline final
-		baseline=$([[ -s "$b_file" ]] && cat "$b_file" || echo "")
+		baseline=""
+		if [[ -s "$b_file" ]]; then baseline="$(cat "$b_file" 2>/dev/null || true)"; fi
 		final=$(cat "$f_file")
 
 		# Memory: peak of (baseline, polled peaks, final) in MiB.
 		local final_mem_bytes baseline_mem_bytes peak_mem_bytes mem_mi
 		final_mem_bytes=$(extract_gauge_exact "$final" process_resident_memory_bytes)
-		baseline_mem_bytes=$([[ -n "$baseline" ]] \
-			&& extract_gauge_exact "$baseline" process_resident_memory_bytes || echo 0)
+		baseline_mem_bytes=0
+		if [[ -n "$baseline" ]]; then baseline_mem_bytes=$(extract_gauge_exact "$baseline" process_resident_memory_bytes); fi
 		peak_mem_bytes=0
 		[[ -s "${TMP_DIR}/peak-mem-${k}.val" ]] && peak_mem_bytes=$(<"${TMP_DIR}/peak-mem-${k}.val")
 		if [[ "$final_mem_bytes" != "N/A" ]]; then
@@ -1414,7 +1605,8 @@ scrape_window() {
 		# Restart detection (must run before delta computations so the
 		# restart guard can protect counter/histogram columns — PL9/PL13).
 		local b_pst f_pst istiod_restarted
-		b_pst=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_start_time_seconds || echo N/A)
+		b_pst=N/A
+		if [[ -n "$baseline" ]]; then b_pst=$(extract_gauge_exact "$baseline" process_start_time_seconds); fi
 		f_pst=$(extract_gauge_exact "$final" process_start_time_seconds)
 		istiod_restarted=$(awk -v b="$b_pst" -v f="$f_pst" '
 			BEGIN {
@@ -1447,48 +1639,43 @@ scrape_window() {
 			queue_p99=$(extract_histogram_quantile "$queue_delta_text" "pilot_proxy_queue_time" "0.99")
 		fi
 
-		# Counter deltas (xds pushes + k8s events).
+		# Counter deltas (xds pushes + k8s events). counter_delta (metrics.sh): a
+		# counter missing from both scrapes, or one that went backwards, is N/A with a
+		# warning, never 0; one first registered in the window counts from 0; an
+		# incomplete scrape (`unscraped`, PL29) is N/A. Pushes: see xds_pushes_in_batch.
 		local pushes_delta pushes_rate evts_delta evts_rate
 		if (( restarted_or_unknown )); then
 			pushes_delta="N/A"; pushes_rate="N/A"
 			evts_delta="N/A"; evts_rate="N/A"
 		else
-			local b_pushes f_pushes
-			b_pushes=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_xds_pushes || echo 0)
-			f_pushes=$(extract_counter_sum "$f_file" pilot_xds_pushes)
-			pushes_delta=$(( f_pushes - b_pushes ))
-			(( pushes_delta < 0 )) && pushes_delta=0
-			if (( window_positive )); then
+			pushes_delta=$(counter_delta "$(fanout_replica_counter "$xds_pushes_in_batch" "$b_file" pilot_xds_pushes)" \
+				"$(fanout_replica_counter "$xds_pushes_in_batch" "$f_file" pilot_xds_pushes)" "pilot_xds_pushes on ${ctx}/${POD_NAMES[k]}")
+			if (( window_positive )) && [[ "$pushes_delta" != "N/A" ]]; then
 				pushes_rate=$(awk -v d="$pushes_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				pushes_rate="N/A"
 			fi
 
-			local b_evts f_evts
-			b_evts=$([[ -s "$b_file" ]] && extract_counter_sum "$b_file" pilot_k8s_cfg_events || echo 0)
-			f_evts=$(extract_counter_sum "$f_file" pilot_k8s_cfg_events)
-			evts_delta=$(( f_evts - b_evts ))
-			(( evts_delta < 0 )) && evts_delta=0
-			if (( window_positive )); then
+			evts_delta=$(counter_delta "$(fanout_replica_counter 0 "$b_file" pilot_k8s_cfg_events)" \
+				"$(fanout_replica_counter 0 "$f_file" pilot_k8s_cfg_events)" "pilot_k8s_cfg_events on ${ctx}/${POD_NAMES[k]}")
+			if (( window_positive )) && [[ "$evts_delta" != "N/A" ]]; then
 				evts_rate=$(awk -v d="$evts_delta" -v w="$window_sec" 'BEGIN{ printf "%.2f", d/w }')
 			else
 				evts_rate="N/A"
 			fi
 		fi
 
-		# Per-type xds_pushes deltas.
+		# Per-type xds_pushes deltas. A type with no series while pilot_xds_pushes itself
+		# is in the scrape is a real 0 (extract_counter_by_label), as is an idle replica's
+		# (xds_pushes_in_batch); N/A as above.
 		local types=(cds eds lds rds nds)
 		local push_by_type=()
 		if (( restarted_or_unknown )); then
 			push_by_type=("N/A" "N/A" "N/A" "N/A" "N/A")
 		else
 			for t in "${types[@]}"; do
-				local b_t f_t d_t
-				b_t=$([[ -s "$b_file" ]] && extract_counter_by_label "$b_file" pilot_xds_pushes type "$t" || echo 0)
-				f_t=$(extract_counter_by_label "$f_file" pilot_xds_pushes type "$t")
-				d_t=$(( f_t - b_t ))
-				(( d_t < 0 )) && d_t=0
-				push_by_type+=("$d_t")
+				push_by_type+=("$(counter_delta "$(fanout_replica_counter "$xds_pushes_in_batch" "$b_file" pilot_xds_pushes type "$t")" \
+					"$(fanout_replica_counter "$xds_pushes_in_batch" "$f_file" pilot_xds_pushes type "$t")" "pilot_xds_pushes{type=${t}} on ${ctx}/${POD_NAMES[k]}")")
 			done
 		fi
 
@@ -1499,7 +1686,8 @@ scrape_window() {
 			cpu_m_delta="N/A"
 		else
 			local b_cpu_s f_cpu_s window_avg_m=0
-			b_cpu_s=$([[ -n "$baseline" ]] && extract_gauge_exact "$baseline" process_cpu_seconds_total || echo N/A)
+			b_cpu_s=N/A
+			if [[ -n "$baseline" ]]; then b_cpu_s=$(extract_gauge_exact "$baseline" process_cpu_seconds_total); fi
 			f_cpu_s=$(extract_gauge_exact "$final" process_cpu_seconds_total)
 			cpu_s_delta=$(awk -v b="$b_cpu_s" -v f="$f_cpu_s" '
 				BEGIN { if (b == "N/A" || f == "N/A" || f - b < 0) print "N/A"; else printf "%.2f", f - b }')
@@ -1545,15 +1733,18 @@ scrape_window() {
 			cs_avg="N/A"
 		else
 			local b_sum f_sum b_cnt f_cnt
-			b_sum=$([[ -n "$baseline" ]] && extract_hist_sum "$baseline" pilot_xds_config_size_bytes || echo 0)
+			b_sum=0 b_cnt=0
+			if [[ -n "$baseline" ]]; then
+				b_sum=$(extract_hist_sum "$baseline" pilot_xds_config_size_bytes)
+				b_cnt=$(extract_hist_count "$baseline" pilot_xds_config_size_bytes)
+			fi
 			f_sum=$(extract_hist_sum "$final" pilot_xds_config_size_bytes)
-			b_cnt=$([[ -n "$baseline" ]] && extract_hist_count "$baseline" pilot_xds_config_size_bytes || echo 0)
 			f_cnt=$(extract_hist_count "$final" pilot_xds_config_size_bytes)
 			cs_avg=$(awk -v bs="$b_sum" -v fs="$f_sum" -v bc="$b_cnt" -v fc="$f_cnt" '
 				BEGIN {
 					ds = fs - bs; dc = fc - bc
-					if (ds < 0) ds = 0
-					if (dc <= 0) { print "N/A"; exit }
+					# Nothing observed, or the sum went backwards (a reset): N/A, not 0.
+					if (dc <= 0 || ds < 0) { print "N/A"; exit }
 					printf "%.0f", ds/dc
 				}')
 		fi
@@ -1579,7 +1770,10 @@ scrape_window() {
 		local sc_clusters="N/A" sc_cds="N/A" sc_rds="N/A" sc_mem="N/A"
 		if (( CONFIG_DUMP_SAMPLES > 0 )); then
 			local cd_out cd_csv cd_meta
-			cd_out="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
+			if [[ -z "${CD_CACHE[$ctx]+x}" ]]; then
+				CD_CACHE[$ctx]="$(collect_config_dump_samples "$ctx" "$CONFIG_DUMP_SAMPLES" || true)"
+			fi
+			cd_out="${CD_CACHE[$ctx]}"
 			cd_csv="${cd_out%%|*}"
 			cd_meta="${cd_out#*|}"
 			local attempted=0 got=0
@@ -1607,7 +1801,7 @@ scrape_window() {
 		local tm_fields="${TRAFFIC_CONFIG}\t${VSDR_SERVICES}\t${virt_services}\t${push_time_avg}\t${pushctx_avg}\t${sc_clusters}\t${sc_cds}\t${sc_rds}"
 		local gr_fields
 		gr_fields="$(growth_meta_fields)\t${istiod_services}\t${cpu_s_delta}\t${sc_mem}\t${GROWTH_CTX_CACHE[$ctx]}\t${GROWTH_CTX_CACHE2[$ctx]}"
-		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")\t${tm_fields}\t${gr_fields}" >> "$TSV_FILE"
+		echo -e "${ts}\t${ctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\t${mem_mi}\t${conv_p50}\t${conv_p99}\t${queue_p50}\t${queue_p99}\t${pushes_delta}\t${pushes_rate}\t${push_by_type[0]}\t${push_by_type[1]}\t${push_by_type[2]}\t${push_by_type[3]}\t${push_by_type[4]}\t${evts_delta}\t${evts_rate}\t${connected_proxies}\t${cs_avg}\t${cd_avg}\t${cd_p50}\t${cd_max}\t${cd_samples}\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\t${istiod_restarted}\t${cpu_m_delta}\t${go_heap_alloc_mi}\t${go_heap_inuse_mi}\t${cap_fields}\t$(cluster_fields "$ctx")\t${tm_fields}\t${gr_fields}" >> "$rows_file"
 		echo "  Scraped $ctx/${POD_NAMES[k]}: cpu_delta=${cpu_m_delta}m mem=${mem_mi}Mi heap_alloc=${go_heap_alloc_mi}Mi heap_inuse=${go_heap_inuse_mi}Mi proxies=${connected_proxies} cluster=${CLUSTER_PROXIES[$ctx]:-N/A} sidecars=${SIDECAR_PODS[$ctx]:-N/A} check=${PROXY_CHECK[$ctx]:-N/A} pushes_delta=${pushes_delta} (eds=${push_by_type[1]} cds=${push_by_type[0]}) cfg_dump_avg=${cd_avg}"
 		echo "    traffic=${TRAFFIC_CONFIG} vsdr_services=${VSDR_SERVICES} istiod_virt_services=${virt_services} push_time_avg=${push_time_avg}ms pushctx_init_avg=${pushctx_avg}ms sidecar_clusters_avg=${sc_clusters} cds_bytes_avg=${sc_cds} rds_bytes_avg=${sc_rds}"
 		echo "    window=${WINDOW_KIND} services_per_namespace=${SERVICES_PER_NAMESPACE} workload=${WORKLOAD_MODE} istiod_services=${istiod_services} cpu_s=${cpu_s_delta} sidecar_envoy_mem=${sc_mem}Mi"
@@ -1617,13 +1811,46 @@ scrape_window() {
 	# context name, restarted=unknown and every numeric column is N/A, so the row is
 	# counted in n_total but excluded from n_valid.
 	local dctx
-	for dctx in "${DROPPED_CTXS[@]}"; do
+	for dctx in ${DROPPED_CTXS[@]+"${DROPPED_CTXS[@]}"}; do
 		echo "warning: context ${dctx}: dropped (zero istiod pods); emitting degraded N/A row" >&2
 		# Node capacity is still readable with zero istiod pods.
 		collect_capacity_for_ctx "$dctx"
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
-		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$TSV_FILE"
+		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 	done
+	# One write: a HARNESS_CHANGED_AT line when these rows ran other harness files than the
+	# TSV records, then an ISTIOD_NOT_READY line when an istiod pod was Running but not Ready
+	# at the baseline (<member>=<pod>, one entry per pod, comma-separated: its rows may
+	# include a replica that took no new proxy connection), then an ISTIOD_NOT_READY_AT_END
+	# line in the same form for the scraped pods not Ready at the window's end, then a
+	# WINDOW_ROWS line (each member's row count, and after a / the replicas its istiod
+	# Deployment wanted at the baseline, when read: a report tells a write that was cut from a
+	# member with fewer istiod replicas, CP_CELL_AWK, and a member that ran the cell on fewer
+	# pods than it wants), then the rows, then the final phase's HARNESS_CHANGED_AT line when
+	# it ran other files than the rows are credited to (HCL_AFTER).
+	local win_file="${TMP_DIR}/window" wr_spec="" nr_line="" nre_line="" nrp
+	for ctx in "${!ISTIOD_SPEC[@]}"; do wr_spec+="${ctx}"$'\t'"${ISTIOD_SPEC[$ctx]}"$'\n'; done
+	for ctx in "${CONTEXTS[@]}"; do
+		for nrp in ${ISTIOD_NOTREADY[$ctx]:-}; do nr_line+="${nr_line:+,}${ctx}=${nrp}"; done
+		for nrp in ${ISTIOD_NOTREADY_END[$ctx]:-}; do nre_line+="${nre_line:+,}${ctx}=${nrp}"; done
+	done
+	if [[ -s "$rows_file" ]]; then
+		{
+			harness_change_line
+			[[ -z "$nr_line" ]] || printf '# ISTIOD_NOT_READY=%s\n' "$nr_line"
+			[[ -z "$nre_line" ]] || printf '# ISTIOD_NOT_READY_AT_END=%s\n' "$nre_line"
+			WR_SPEC="$wr_spec" awk -F'\t' '
+				BEGIN { ns = split(ENVIRON["WR_SPEC"], sl, "\n"); for (i = 1; i <= ns; i++) if (split(sl[i], f, "\t") == 2 && f[2] ~ /^[0-9]+$/) sp[f[1]] = f[2] }
+				{ if (!($2 in n)) o[++k] = $2; n[$2]++ }
+				END { printf "# WINDOW_ROWS="; for (i = 1; i <= k; i++) printf "%s%s=%d%s", (i > 1 ? "," : ""), o[i], n[o[i]], ((o[i] in sp) ? "/" sp[o[i]] : ""); print "" }' "$rows_file"
+			cat "$rows_file"
+			[[ -z "$HCL_AFTER" ]] || printf '%s\n' "$HCL_AFTER"
+		} > "$win_file" || die "could not write the window's rows to ${win_file}"
+		# A write cut short (a full disk, a step killed while it appended) leaves the TSV's
+		# last line without its newline: end it, so these lines do not merge onto it.
+		tsv_end_line "$TSV_FILE" || die "could not end the last line of ${TSV_FILE} (a write cut short left it without a newline), so the window's rows would merge with it"
+		cat "$win_file" >> "$TSV_FILE" || die "could not append the window's rows to ${TSV_FILE}"
+	fi
 
 	# istiod restart evidence for the contexts whose rows above say istiod_restarted 1 or
 	# unknown (tests/lib/istiod-diag.sh, istiod-diag-<RUN_ID>/ next to the TSV). Reads the
@@ -1643,18 +1870,30 @@ if ((WATCH)); then
 		# are cheap, read-only, and outside the scrape window, so re-reading is safe.
 		# The per-cluster proxy total, sidecar count and check are per window too.
 		CAP_CACHE=()
+		CD_CACHE=()
 		NODE_KV_CACHE=()
 		POD_KV_CACHE=()
 		CLUSTER_PROXIES=()
 		SIDECAR_PODS=()
 		PROXY_CHECK=()
 		GROWTH_CTX_CACHE=()
+		# The polled peaks are this window's too: without this, istiod_mem_mi and the
+		# peak CPU keep the highest value of every earlier window.
+		rm -f "${TMP_DIR}"/peak-mem-*.val "${TMP_DIR}"/peak-cpu-*.val "${TMP_DIR}"/prev-cpu-*.val
 		scrape_window "$INTERVAL"
+		# resolve_pods read the pods' readiness once, before the first window: later
+		# windows were not read, so their rows get no ISTIOD_NOT_READY line (each window's
+		# end is read: its ISTIOD_NOT_READY_AT_END line).
+		ISTIOD_NOTREADY=()
 	done
 elif [[ "$PHASE" == baseline ]]; then
 	echo ""
 	echo "=== Baseline scrape only (phase=baseline) ==="
 	echo "  Writing baseline metrics to $STATE_DIR"
+	# The baseline's harness, for the final's rows (harness_change_line).
+	rm -f "${STATE_DIR}/harness"
+	printf '%s\t%s\t%s\n' "$HARNESS_SHA" "$HARNESS_CONTENT_KEY" "$HARNESS_READ_AT" > "${STATE_DIR}/harness" \
+		|| echo "warning: could not write ${STATE_DIR}/harness: the final phase credits its rows to its own harness only" >&2
 	scrape_all_parallel "${STATE_DIR}/baseline" >/dev/null
 	echo "  Baseline complete. Caller should now deploy workloads, settle, and"
 	echo "  invoke this script again with --phase final --state-dir $STATE_DIR"
@@ -1691,7 +1930,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "| Run ID | \`${RUN_ID}\` |"
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Phase | ${PHASE} |"
-		echo "| Istio version | ${ISTIO_VERSION_TAG} |"
+		echo "| Istio version | $(istio_version_label) |"
 		echo "| Harness SHA | ${HARNESS_SHA} |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
 		echo "| Kube versions | ${KUBE_VERSIONS_CSV} |"
@@ -1709,7 +1948,7 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 		echo "|---------|------|-----|------|----|---------|---------|--------------|---------------|-----------------|-----------------|---------------|----------------|---------|-----------------|--------------|-------------|----------|-------|-------|-----------|--------------------|------------------|"
 		# Cols 41+ are read by header name: a reused older file (40 columns) has none.
 		awk -F'\t' '
-		/^timestamp\t/ { delete ix; for (i = 1; i <= NF; i++) ix[$i] = i; next }
+		/^timestamp\t/ { delete ix; for (i = 1; i <= NF; i++) ix[$i] = i; hn = NF; next }
 		function c(name) { return ((name in ix) && NF >= ix[name]) ? $(ix[name]) : "N/A" }
 		function bucket(v) {
 			if (v == "overflow") return "overflow"
@@ -1724,12 +1963,30 @@ if [[ "$PHASE" == combined || "$PHASE" == final ]]; then
 			if (v + 0 <= 30000) return "20000-30000"
 			return ">30000"
 		}
-		!/^#/ && NF>=40 {
+		# A row has its header'"'"'s columns (CP_CELL_AWK cp_isrow): a shorter one was cut.
+		!/^#/ && NF >= (hn > 40 ? hn : 40) {
 			cfg_mb = ($24+0 > 0) ? sprintf("%.2f", $24/1048576) : "N/A"
 			tc = c("traffic_config"); if (tc == "N/A") tc = "none"
 			printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $2, $3, $4, $5, $6, $7, tc, $32, $8, $33, $34, bucket($10), bucket($12), $22, c("cluster_connected_proxies"), c("sidecar_pods"), c("proxy_check"), $13, $16, $15, c("istiod_virt_services"), cfg_mb, c("sidecar_clusters_avg")
 		}' "$TSV_FILE"
 		echo ""
+		# The table has no pod column: each window's not-Ready istiod pods, from the lines 002
+		# writes right before its WINDOW_ROWS line (the baseline's, then the end's).
+		awk -F'\t' "${CP_CELL_AWK}"'
+		function pods(v,    n, i, s) { n = cp_nr_parse(v); for (i = 1; i <= n; i++) s = s (i > 1 ? ", " : "") cp_nrq[i] " on " cp_nrm[i]; return s }
+		BEGIN { wf = bf = ef = -9 }
+		/^timestamp\t/ { cp_header(); next }
+		index($0, "# ISTIOD_NOT_READY=") == 1 { b = substr($0, 20); bf = FNR; next }
+		index($0, "# ISTIOD_NOT_READY_AT_END=") == 1 { e = substr($0, 27); ef = FNR; next }
+		index($0, "# WINDOW_ROWS=") == 1 { we = (ef == FNR - 1) ? e : ""; wb = (bf == FNR - 1 - (we != "")) ? b : ""; wf = FNR; next }
+		/^#/ { next }
+		FNR == wf + 1 && (wb != "" || we != "") && cp_isrow() {
+			if (!n++) printf "## Istiod pods not Ready\n\nA pod that is not Ready takes no new proxy connection, and one shutting down also drops its own as it exits (their reconnects to the other replicas add to those replicas'"'"' pushes and convergence), so its row'"'"'s Proxies can read below the other replicas'"'"'.\n\n"
+			s = (wb != "") ? "Running but not Ready at its baseline: " pods(wb) : ""
+			if (we != "") s = s (s == "" ? "" : "; ") "not Ready at its end: " pods(we)
+			printf "- Window at %s (mesh %s, svc %s, reps %s, ns %s, scoping %s, traffic %s): %s\n", $1, $3, $4, $5, $6, $7, ((cp_tcol && NF >= cp_tcol) ? $cp_tcol : "none"), s
+		}
+		END { if (n) print "" }' "$TSV_FILE"
 		echo "## Raw Data"
 		echo ""
 		echo "TSV: [\`$(basename "$TSV_FILE")\`]($(basename "$TSV_FILE"))"

@@ -142,6 +142,11 @@ variable "gitops_app_repo_url" {
   type        = string
   default     = ""
   description = "Git repo URL for Argo CD hub Application sources. When empty, the hub app-of-apps chart is skipped."
+
+  validation {
+    condition     = !strcontains(var.gitops_app_repo_url, "<")
+    error_message = "gitops_app_repo_url still holds a placeholder (<org>); set it to the repo Argo CD should sync from."
+  }
 }
 
 variable "gitops_app_repo_revision" {

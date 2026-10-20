@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Helpers shared by tests/tuning/001-apply-profile.sh and 002-revert-profile.sh.
-# Sourced, never executed. Expects a KUBECTL array (see resolve_kubectl).
+# Sourced, never executed, after tests/lib/common.sh. Expects a KUBECTL array (see
+# resolve_kubectl).
 #
 #   ctx_key <ctx>                     -> file-name-safe form of a context name
+#                                        (ctx_file_safe in tests/lib/common.sh)
 #   wait_for_istiod <ctx> <timeout>   -> wait for the Sail operator to reconcile the
 #                                        Istio CR and its active IstioRevision, then
 #                                        for the istiod Deployment rollout
 # shellcheck shell=bash
 
+# ctx_key <ctx>: the state-file key of a member; the same form redact-results.sh maps.
 # shellcheck disable=SC2329
-ctx_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+ctx_key() { ctx_file_safe "$1"; }
 
 # shellcheck disable=SC2329
 wait_for_istiod() {

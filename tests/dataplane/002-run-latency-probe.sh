@@ -135,9 +135,25 @@ of each row also shows ret_codes (HTTP code=count; -1 is a socket error).
 Under --on-unreachable fail a stopped run also writes one STOPPED_UNREACHABLE row
 (target_class=na), so the report says why the local baseline is missing.
 
+The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
+whose exec failed (a FAILED row, or a failed warmup) may run on there, so the probe
+waits until its --duration (--warmup-duration for the warmup) and 5 s more have passed
+before going on, unless the client pod is gone (deleted, or evicted and Failed: then no
+load runs). When the probe ends during a load (a stop, Ctrl-C), it deletes the client
+pod, so the load ends with it; the pod's Deployment starts a new one, which a sweep
+started right after waits for (its setup 001 waits until the Deployments are Available).
+Run by hand, the probe loads only a Ready client pod that is not being deleted, and
+stops when there is none: run 001, or wait until the new pod is Ready.
+
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the run.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
   DATAPLANE_TEST_NAMESPACE, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
   DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
   DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200,
@@ -180,27 +196,21 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--duration)
 		[[ -n "${2:-}" ]] || die "--duration requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--duration must be a positive integer"
-		(( $2 > 0 )) || die "--duration must be > 0"
 		DURATION="$2"
 		shift 2
 		;;
 	--connections)
 		[[ -n "${2:-}" ]] || die "--connections requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--connections must be a positive integer"
-		(( $2 > 0 )) || die "--connections must be > 0"
 		CONNECTIONS="$2"
 		shift 2
 		;;
 	--settle)
 		[[ -n "${2:-}" ]] || die "--settle requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--settle must be a non-negative integer"
 		SETTLE_SEC="$2"
 		shift 2
 		;;
 	--warmup-duration)
 		[[ -n "${2:-}" ]] || die "--warmup-duration requires a value"
-		[[ "$2" =~ ^[0-9]+$ ]] || die "--warmup-duration must be a non-negative integer"
 		WARMUP_DURATION="$2"
 		shift 2
 		;;
@@ -249,6 +259,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
+# The flag or its default (the environment, --config): checked once, before any cluster read.
+is_pos_int "$DURATION" || die "--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '$DURATION'"
+is_nonneg_int "$WARMUP_DURATION" || die "--warmup-duration (or DATAPLANE_WARMUP_DURATION_SEC) must be a non-negative integer; got '$WARMUP_DURATION'"
+is_pos_int "$CONNECTIONS" || die "--connections (or DATAPLANE_NUM_CONNECTIONS) must be a positive integer; got '$CONNECTIONS'"
+is_nonneg_int "$SETTLE_SEC" || die "--settle (or DATAPLANE_SETTLE_SEC) must be a non-negative integer; got '$SETTLE_SEC'"
 is_ratio "$MIN_QPS_RATIO" || die "--min-qps-ratio (or DATAPLANE_MIN_QPS_RATIO) must be a decimal in (0,1]; got '$MIN_QPS_RATIO'"
 is_ratio "$MIN_PCT_200" || die "DATAPLANE_MIN_PCT_200 must be a decimal in (0,1]; got '$MIN_PCT_200'"
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
@@ -260,7 +275,7 @@ command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
 QPS_ARR=()
@@ -273,7 +288,7 @@ done
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 # {ctx} is the per-cluster Service's context; reach.sh and the loops below fill it in.
 URL_TEMPLATE="http://dataplane-server-{ctx}.${NS}.svc.cluster.local:8080/echo"
 LOCAL_URL="${URL_TEMPLATE//\{ctx\}/${SOURCE_CTX}}"
@@ -283,8 +298,10 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-HARNESS_SHA=$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo "unknown")
-ISTIO_VER="${ISTIO_VERSION:-unknown}"
+# harness_read (tests/lib/common.sh): HARNESS_SHA (a harness with uncommitted changes reads
+# <describe>-dirty.<8hex>) and HARNESS_CONTENT_KEY from one read; this probe's own results
+# do not count.
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then
@@ -294,7 +311,7 @@ if ((DRY_RUN)); then
 	echo "Min QPS ratio: ${MIN_QPS_RATIO} | Min pct_200: ${MIN_PCT_200}"
 	echo "Server replicas: queried live on: ${ALL_CTXS[*]}"
 	echo "Local target:        ${LOCAL_URL}"
-	for rc in "${REMOTES[@]}"; do
+	for rc in ${REMOTES[@]+"${REMOTES[@]}"}; do
 		echo "Cross-cluster target ($rc): http://dataplane-server-${rc}.${NS}.svc.cluster.local:8080/echo"
 	done
 	echo "istiod restart check: port-forward every Running istiod pod on: ${ALL_CTXS[*]}"
@@ -304,6 +321,9 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KUBECTL[@]}")"
+# The Istio version the members run, before any load (inherited when 003 runs this
+# probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
 # server_replicas_csv: "<ctx>=<ready>/<spec>,..." for the dataplane-server
 # Deployment on every context, read live and concurrently (PL39) before any load.
@@ -322,7 +342,7 @@ server_replicas_csv() {
 		) &
 		pids+=($!)
 	done
-	for i in "${pids[@]}"; do wait "$i" || true; done
+	for i in ${pids[@]+"${pids[@]}"}; do wait "$i" || true; done
 	for i in "${!ALL_CTXS[@]}"; do
 		v="unknown"
 		[[ -s "${tmp}/${i}" ]] && v="$(<"${tmp}/${i}")"
@@ -333,7 +353,7 @@ server_replicas_csv() {
 }
 SERVER_REPLICAS_CSV="$(server_replicas_csv)"
 IFS=',' read -ra _sr_pairs <<<"$SERVER_REPLICAS_CSV"
-for _sr in "${_sr_pairs[@]}"; do
+for _sr in ${_sr_pairs[@]+"${_sr_pairs[@]}"}; do
 	_v="${_sr##*=}"
 	if [[ "$_v" == unknown ]]; then
 		echo "warning: could not read dataplane-server replicas on ${_sr%=*} (SERVER_REPLICAS records unknown)" >&2
@@ -344,13 +364,21 @@ done
 
 PF_PIDS=()
 ISTIOD_DIR="$(mktemp -d)"
+tmp_tsv=""
+# LOAD_POD: the client pod while a `fortio load` runs in it (the warmup, a window).
+LOAD_POD=""
+# Also on a SIGTERM the sweep forwards (sweep_step): bash runs the EXIT trap on a fatal
+# signal it does not trap and still dies of it (143). tmp_tsv sits next to the TSV. A load
+# still running in the client pod is stopped (fortio_client_stop).
 cleanup_all() {
 	local pid
-	for pid in "${PF_PIDS[@]}"; do
+	[[ -z "${LOAD_POD:-}" ]] || fortio_client_stop "$SOURCE_CTX" "$NS" "$LOAD_POD" "${KUBECTL[@]}"
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
 	rm -rf "$ISTIOD_DIR"
+	rm -f "${tmp_tsv:-}"
 }
 trap cleanup_all EXIT
 
@@ -359,7 +387,8 @@ trap cleanup_all EXIT
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# DATE=$(date -u -Iseconds)"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# ISTIO_VERSION=${ISTIO_VER}"
+	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
+	istio_version_kv | sed 's/^/# /'
 	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 	echo "# FORTIO_IMAGE=${FORTIO_IMAGE}"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
@@ -389,8 +418,8 @@ trap cleanup_all EXIT
 #   pct_200, istiod_restarted, target_class
 printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n' >> "$TSV_FILE"
 
-CLIENT_POD=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=dataplane-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) \
-	|| die "no client pod found on $SOURCE_CTX"
+CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" dataplane-client "${KUBECTL[@]}")" \
+	|| die "no Ready dataplane-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 echo "=== Data-plane latency probe ==="
 echo "Source: $SOURCE_CTX (pod: $CLIENT_POD)"
@@ -428,11 +457,11 @@ snapshot_istiod() {
 		read -ra snap_ports <<<"${CTX_PORTS[$i]}"
 		read -ra snap_pods <<<"${CTX_PODS[$i]}"
 		if [[ "$phase" == pre ]]; then
-			printf '%s\n' "${snap_pods[@]}" > "${ISTIOD_DIR}/${phase}-c${i}.podset"
+			printf '%s\n' ${snap_pods[@]+"${snap_pods[@]}"} > "${ISTIOD_DIR}/${phase}-c${i}.podset"
 		else
 			fanout_record_podset "${ALL_CTXS[$i]}" "${ISTIOD_DIR}/${phase}-c${i}.podset" "${KUBECTL[@]}"
 		fi
-		fanout_scrape_all "$ISTIOD_DIR" "${phase}-c${i}" "${snap_ports[@]}" >/dev/null || true
+		fanout_scrape_all "$ISTIOD_DIR" "${phase}-c${i}" ${snap_ports[@]+"${snap_ports[@]}"} >/dev/null || true
 	done
 }
 
@@ -468,7 +497,8 @@ declare -A REACH_STATUS=() REACH_PCT=()
 for rctx in "${ALL_CTXS[@]}"; do REACH_STATUS["$rctx"]=UNCHECKED; REACH_PCT["$rctx"]=N/A; done
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every target (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "SUITE=dataplane" \
+	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
+		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
@@ -511,7 +541,7 @@ write_run_md() {
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
-		echo "| Istio version | ${ISTIO_VER} |"
+		echo "| Istio version | $(istio_version_label) |"
 		echo "| Fortio image | \`${FORTIO_IMAGE}\` |"
 		echo "| Source | ${SOURCE_CTX} |"
 		echo "| Remotes | ${REMOTES[*]:-none} |"
@@ -561,7 +591,7 @@ if ((REACH_REQUESTS > 0)) && reach_should_stop "$ON_UNREACHABLE" "$REACH_TSV" "$
 	mapfile -t STOP_REMOTES < <(reach_not_reachable "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$REMOTE_CONTEXTS_CSV")
 	ISTIOD_RESTARTED="unknown"
 	ISTIOD_RESTARTED_TAG="unknown"
-	for rctx in "${STOP_REMOTES[@]}"; do
+	for rctx in ${STOP_REMOTES[@]+"${STOP_REMOTES[@]}"}; do
 		if [[ "${REACH_STATUS[$rctx]:-UNKNOWN}" == UNREACHABLE ]]; then emit_unreachable_rows "$rctx"; fi
 	done
 	printf '%s\t%s\t%s\tN/A\t0\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tSTOPPED_UNREACHABLE\tN/A\tunknown\tna\n' \
@@ -575,15 +605,20 @@ fi
 if ((WARMUP_DURATION > 0)); then
 	echo "Warming Envoy upstream connection pools (${WARMUP_DURATION}s at QPS=10)..."
 	WARMUP_URLS=("$LOCAL_URL")
-	for rc in "${REMOTES[@]}"; do
+	for rc in ${REMOTES[@]+"${REMOTES[@]}"}; do
 		[[ "${REACH_STATUS[$rc]}" == UNREACHABLE ]] && continue
 		WARMUP_URLS+=("${URL_TEMPLATE//\{ctx\}/${rc}}")
 	done
-	for wurl in "${WARMUP_URLS[@]}"; do
+	for wurl in ${WARMUP_URLS[@]+"${WARMUP_URLS[@]}"}; do
 		echo "  warmup -> $wurl"
-		"${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
-			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" \
-			>/dev/null 2>&1 || echo "  warn: warmup failed for $wurl" >&2
+		LOAD_POD="$CLIENT_POD"
+		load_start_ns="$(now_ns)"
+		if ! "${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
+			fortio load -qps 10 -c "$CONNECTIONS" -t "${WARMUP_DURATION}s" -quiet "$wurl" >/dev/null 2>&1; then
+			echo "  warn: warmup failed for $wurl" >&2
+			fortio_load_wait_out "$load_start_ns" "$WARMUP_DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
+		fi
+		LOAD_POD=""
 	done
 	echo ""
 fi
@@ -594,7 +629,9 @@ run_fortio() {
 	local target_ctx="$1" target_url="$2" target_class="$3"
 	for qps in "${QPS_ARR[@]}"; do
 		echo "  QPS=$qps -> $target_url"
-		local json_output
+		local json_output load_start_ns
+		LOAD_POD="$CLIENT_POD"
+		load_start_ns="$(now_ns)"
 		json_output=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps "$qps" -c "$CONNECTIONS" -t "${DURATION}s" -p '50,90,99,99.9' \
 			-json - -quiet "$target_url" 2>/dev/null) || {
@@ -603,8 +640,12 @@ run_fortio() {
 			printf '%s\t%s\t%s\t%s\t%s\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tFAILED\tN/A\t%s\t%s\n' \
 				"$RUN_ID" "$MESH_SIZE" "$SOURCE_CTX" "$target_ctx" "$qps" \
 				"$CONNECTIONS" "$DURATION" "${ISTIOD_RESTARTED_TAG:-unknown}" "$target_class" >> "$TSV_FILE"
+			# The load can outlive its failed exec in the pod: wait it out before the next one.
+			fortio_load_wait_out "$load_start_ns" "$DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
+			LOAD_POD=""
 			continue
 		}
+		LOAD_POD=""
 
 		# Parsing and the row status live in tests/lib/fortio.sh.
 		local qps_actual p50 p90 p99 p999 max_lat pct_200 ret_codes status
@@ -635,7 +676,7 @@ ISTIOD_RESTARTED_TAG="pending"
 echo "--- Local baseline (intra-cluster, sidecar-to-sidecar) ---"
 run_fortio "$SOURCE_CTX" "$LOCAL_URL" "local"
 
-for remote_ctx in "${REMOTES[@]}"; do
+for remote_ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	echo ""
 	echo "--- Cross-cluster: $SOURCE_CTX -> $remote_ctx ---"
 	# An UNREACHABLE remote (no HTTP 200 on any reach check) skips its load; DEGRADED
@@ -686,6 +727,7 @@ awk -F'\t' -v OFS='\t' -v r="$ISTIOD_RESTARTED" '
 	{ print }
 ' "$TSV_FILE" > "$tmp_tsv"
 mv "$tmp_tsv" "$TSV_FILE"
+tmp_tsv=""
 
 echo ""
 for i in "${!ALL_CTXS[@]}"; do

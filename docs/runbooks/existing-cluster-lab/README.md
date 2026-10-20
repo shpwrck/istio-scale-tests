@@ -66,7 +66,7 @@ charts/argocd-config -> ArgoCD CR `openshift-gitops` (sharding, resources, exclu
 terraform/scripts/create-argocd-cluster-secret.sh -> Secret `<member>-argocd-gitops-cluster-secret` in `openshift-gitops`
 charts/acm-managed-cluster -> ManagedCluster `<member>` + `auto-import-secret` in namespace `<member>` on `<acm-hub-ctx>`
 charts/mesh-verify-appset.yaml -> on demand: Application `mesh-verify-appset` + per-member `mesh-verify` echo apps
-charts/mesh-verify-gateway-api-appset.yaml (workload member filled in by `sed` on the way to the hub) -> on demand: Application `mesh-verify-gateway-api-appset`, ApplicationSet `mesh-verify-gwapi`, per-member Applications `<member>-mesh-verify-gwapi`
+charts/mesh-verify-gateway-api-appset.yaml (repo, revision and workload member filled in by `sed` on the way to the hub) -> on demand: Application `mesh-verify-gateway-api-appset`, ApplicationSet `mesh-verify-gwapi`, per-member Applications `<member>-mesh-verify-gwapi`
 charts/mesh-verify-gateway-api -> on each member: namespaces `mesh-verify-gwapi` + `mesh-verify-gwapi-shared` and the Gateway API Gateway `istio-system/mesh-verify-gwapi`; on the workload member also `mesh-verify-gwapi-remote` and the echo Deployments
 
 ### Re-run
@@ -93,15 +93,19 @@ Gateway API multicluster check, on demand. It is read-only apart from the Applic
 istioctl at the mesh's version.
 
 ```bash
-sed -e 's/<workload-cluster>/<member-managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
+read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+  get applications.argoproj.io hub-gitops-root \
+  -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+  -e 's|<workload-cluster>|<member-managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
   | oc --context <acm-hub-ctx> apply -f -
 tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
   --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx>
 oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
 ```
 
-To pin the deployed chart to the commit you run the script from, also replace `main` in
-`targetRevision` and in the `repo.revision` value with that commit; the 2026-10-14 run did this.
+This deploys the check from the revision the mesh syncs. To pin it to the commit you run the
+script from, set `REV=$(git rev-parse HEAD)` before the `sed`; the 2026-10-14 run did this.
 
 ### Verify and recover
 
@@ -139,8 +143,8 @@ To pin the deployed chart to the commit you run the script from, also replace `m
 - `oc --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- bash /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... ca=shared` on each member.
 - Data plane:
-  1. Apply `charts/mesh-verify-appset.yaml` (set both `targetRevision` and the `repo.revision`
-     parameter to your branch).
+  1. Apply `charts/mesh-verify-appset.yaml` with its `<repo-url>` and `<revision>` placeholders
+     filled in from `hub-gitops-root` (root README, "Verify").
   2. Curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
      `Host: mesh-verify.local`. Answers alternate between both clusters.
   3. Remove it with `oc delete -f`, which cascades.
@@ -167,7 +171,7 @@ To pin the deployed chart to the commit you run the script from, also replace `m
   `argocd_config_values` requests and re-apply.
   - If an ESO Application is stuck at "Retrying operation. Attempt #1" after an Argo controller
     restart, terminate the operation
-    (`oc patch app <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
+    (`oc patch applications.argoproj.io <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
     and auto-sync starts a fresh one.
 - Argo controller OOMKilled in a loop: raise its limit in `argocd_config_values`. It uses about 3Gi
   here even with the default exclusions.

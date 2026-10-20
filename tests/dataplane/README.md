@@ -47,6 +47,17 @@ For each QPS level, `002` runs `fortio load` from the client pod on the source c
 against each target and records p50/p90/p99/p99.9/max latency, achieved QPS and the share
 of HTTP 200 responses.
 
+A load runs inside the client pod, not in the `kubectl exec` that starts it, so it can
+outlive that exec. When `002` ends during a load (a stop, Ctrl-C, an error), it deletes
+the client pod, so the load cannot run on into the next run's first window: its
+Deployment starts a new pod, which a sweep started right after waits for (its setup `001`
+waits until the Deployments are Available). Run by hand, `002` loads only a Ready
+client pod that is not being deleted, and stops when there is none: run `001`, or wait
+until the new pod is Ready. When a load's `kubectl exec` fails part-way (a `FAILED` row,
+or a failed warmup), `002` waits until that load's `--duration` (`--warmup-duration` for
+the warmup) and 5 s more have passed before it starts the next load, unless the client
+pod is gone (deleted, or evicted and Failed: then no load runs).
+
 Every cluster runs `--server-replicas` fortio server pods (default 2,
 `DATAPLANE_SERVER_REPLICAS`) labelled `cluster=<ctx>`, and every cluster gets a Service
 `dataplane-server-<ctx>` for each context that selects only those pods:
@@ -83,6 +94,8 @@ server queues requests and can still answer with HTTP 200. `002` tags such a row
 ./tests/dataplane/002-run-latency-probe.sh --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 
 # 3. Report, then clean up
+# (it reads every run under the results dir; with more than one there it stops and
+#  lists the --results-dir that reports each, or pools them with --allow-multi-run)
 ./tests/dataplane/004-report-results.sh
 ./tests/dataplane/005-cleanup.sh --contexts <mesh-a-ctx>,<mesh-b-ctx>
 ```
@@ -104,6 +117,32 @@ For each mesh size the sweep runs `001`, then `002` `--repetitions` times, then 
 and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
 `sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
 size with a remote cluster; the p50-vs-mesh-size chart needs two.
+
+Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, such as
+another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
+error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
+when and by which signal; a signal sent to the sweep's process alone stops the running step and
+every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before SIGKILL; a `kill -INT` or
+`kill -HUP` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from
+elsewhere with SIGTERM; without a `ps` that lists start times or Linux's `/proc`, only the step's
+own process is stopped; see the top-level README); `3` the reachability gate stopped it
+(`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
+reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
+version, active revision or generation of the Istio CR or its active IstioRevision changed during
+the sweep (read again before the reports), or that check failed, or its harness (a file under
+`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read again
+before its steps, by each step and at its end). The last line on stderr says how many, by reason;
+`3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the
+outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a
+not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`,
+`HARNESS_CONTENT_KEY`, and what to do), so a report of a sweep that died, or still runs, or (with
+when and by which signal) was interrupted says "this sweep has not finished" in every format (json
+`sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads `"unfinished": false`;
+one that stopped on an error after its start records the stop and its reason instead, `STOPPED=1`
+and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more, run the sweep again into
+a new dir (a dataplane sweep has no `--resume`); the rows already in the dir cover only the mesh
+sizes it finished. Proxies connected on another Istio version than their istiod at the start
+(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
 
 ## Run config (`--config FILE`)
 
@@ -130,8 +169,8 @@ QPS 10 and 100, 10 s per level):
   list for `002` and `003` alike.
 - **Flags only:** `--source-context`, `--remote-contexts`, `--mesh-size`,
   `--tuning-baseline` and `--sidecar-egress-hosts` (`001`/`002`; the sweep sets them),
-  `--fail-on-unreachable` (`004`), `--no-wait-deletion` (`005`), `--force-large-matrix`,
-  `--format` and `--dry-run`.
+  `--fail-on-unreachable` and `--allow-multi-run` (`004`), `--no-wait-deletion` (`005`),
+  `--force-large-matrix`, `--format` and `--dry-run`.
 
 ## Remote reachability
 
@@ -168,7 +207,7 @@ A shorter `REACH_DETAIL_TIMEOUT_SEC` ends on the client side and reads as fortio
 `i/o timeout`; on a mesh that sets `meshConfig.connectTimeout` or
 `defaultHttpRetryPolicy`, keep it above (1 + retries) x `connectTimeout`. The file has
 its own preamble (`REACH_SCHEMA`,
-`RUN_ID`, `HARNESS_SHA`, the `REACH_*` knobs, `ON_UNREACHABLE`, `RUN_CONFIG`,
+`RUN_ID`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`, the `REACH_*` knobs, `ON_UNREACHABLE`, `RUN_CONFIG`,
 `RUN_CONFIG_SHA256`), and stderr gets a per-target block ending in
 `WARNING: N of M remotes NOT reachable from <source>: ...`.
 
@@ -235,8 +274,8 @@ tuning through them). The rows and their status do not change; the capture only 
 evidence, and a failed capture never fails the run.
 
 - `index.tsv`: a `# KEY=value` preamble (`ISTIOD_DIAG_SCHEMA`, `RUN_ID`, `CREATED_BY`,
-  `HARNESS_SHA`, `DATE` and the six settings below), a header line, then one row per
-  affected pod (columns below).
+  `HARNESS_SHA`, `HARNESS_CONTENT_KEY`, `DATE` and the six settings below), a header line, then one
+  row per affected pod (columns below).
 - `NNN-<tag>-<context>/`: the raw evidence of one capture: `summary.md`, the istiod pod
   status, the Deployment and ReplicaSet revisions, the newest istio-system events of
   istiod objects, the previous container's log (or the old pod's log; a new pod's startup
@@ -334,16 +373,15 @@ the row with a folder; the other rows count as repeats. json has the section as
 
 ## Outputs
 
-`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `ISTIO_VERSION`,
-`KUBE_VERSIONS`, `FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the
-fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
-(`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the
-thresholds behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,
-`REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the
-reach check that decides which
-remotes are `UNREACHABLE`. Next to it, `reach-<RUN_ID>.tsv` holds the reach
-check ([Remote reachability](#remote-reachability)) and `latency-<RUN_ID>.md` a per-run
-summary with its Remote coverage section.
+`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
+`ISTIO_VERSION` with `ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`, `KUBE_VERSIONS`,
+`FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the fortio server pods as
+`<ctx>=<ready>/<spec>` per context, read live before the load (`<ctx>=unknown` when the read fails);
+`MIN_QPS_RATIO` and `MIN_PCT_200` record the thresholds behind `status`, and `REACH_REQUESTS`,
+`REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`, `REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`,
+`REACH_RETRY_SEC` and `ON_UNREACHABLE` the reach check that decides which remotes are `UNREACHABLE`.
+Next to it, `reach-<RUN_ID>.tsv` holds the reach check ([Remote reachability](#remote-reachability))
+and `latency-<RUN_ID>.md` a per-run summary with its Remote coverage section.
 
 ```
 run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections
@@ -354,32 +392,36 @@ duration_s  p50_ms  p90_ms  p99_ms  p999_ms  max_ms  status  pct_200  istiod_res
 response was HTTP 200). A row that measured nothing (`FAILED`, `UNREACHABLE`, a missing
 fortio `Max` or `ActualQPS`) has `N/A` there, never `0`.
 
-`status` is `UNREACHABLE` for a remote the reach check could not reach (no load ran),
-else the first that applies of `FAILED` (fortio exec failed), `PERCENTILE_MISSING`,
-`ERROR_RATE_HIGH` (`pct_200 < DATAPLANE_MIN_PCT_200`, default 0.99, or no responses),
-`QPS_SHORTFALL` (actual QPS < `--min-qps-ratio` × target, or no `ActualQPS` in the
-fortio JSON) and `OK`, or one of the
+`status` is `UNREACHABLE` for a remote the reach check could not reach (no load ran), else the first
+that applies of `FAILED` (fortio exec failed), `PERCENTILE_MISSING`, `ERROR_RATE_HIGH` (`pct_200 <
+DATAPLANE_MIN_PCT_200`, default 0.99, or no responses), `QPS_SHORTFALL` (actual QPS <
+`--min-qps-ratio` × target, or no `ActualQPS` in the fortio JSON) and `OK`, or one of the
 placeholders `SETUP_FAILED` / `PROBE_FAILED` (sweep, one row per failed mesh size) and
-`STOPPED_UNREACHABLE` (`002 --on-unreachable fail`), all with `target_class=na`. The console line of each row also prints `ret_codes` (HTTP
-`code=count`, `-1` is a socket error) so an `ERROR_RATE_HIGH` row can be diagnosed.
-`004-report-results.sh --format text|csv|json|markdown|md|charts` averages valid rows per
-(mesh size, QPS, target class) and reports `n_total` / `n_valid`; the markdown ends with a
-glossary. Text and markdown print the HTTP 200 share as a percentage (`avg_http_200 (%)`,
-e.g. `100.00%`); csv and json keep the 0–1 ratio as `avg_http_200_ratio` and, for
-existing readers, under the old name `avg_pct_200`. The per-run `latency-<RUN_ID>.md`
-rounds latencies to 0.01 ms and QPS to 0.1, and shows the HTTP 200 share as a percentage. Placeholder rows (`target_class=na`) form no cell: a `Placeholder rows (no
-table cell): mesh_size=<n> <STATUS>=<count>` line under the table names them per mesh
-size, also when that mesh size has measured rows (a failed repetition, or a probe that
-died after some QPS levels); csv has `# PLACEHOLDER=<mesh>:<STATUS>:<count>`, json
-`summary.placeholders` and `summary.n_placeholder`, so `n_total` is the cells' `n_total`
-plus `n_placeholder`. A mesh size with no local row is also a Local baseline `MISSING`.
-Under the table, text and markdown count every row that is not valid as `dropped
-(poisoned)` (it ran and failed a check, or is a `SETUP_FAILED`/`PROBE_FAILED`
-placeholder) or `skipped (remote unreachable)` (`UNREACHABLE` rows and the
-`STOPPED_UNREACHABLE` placeholder: no load ran); csv (`# ROWS ...`) and json (`summary`:
-`n_dropped`, `n_skipped_unreachable`, `n_placeholder`) carry the same counts. It reads every
-`latency-*.tsv` under `--results-dir`, subdirectories included, so pass one
-`sweep-<RUN_ID>/` to report a single sweep.
+`STOPPED_UNREACHABLE` (`002 --on-unreachable fail`), all with `target_class=na`. The console line of
+each row also prints `ret_codes` (HTTP `code=count`, `-1` is a socket error) so an `ERROR_RATE_HIGH`
+row can be diagnosed. `004-report-results.sh --format text|csv|json|markdown|md|charts` averages
+valid rows per (mesh size, QPS, target class) and reports `n_total` / `n_valid`; the markdown ends
+with a glossary. Text and markdown print the HTTP 200 share as a percentage (`avg_http_200 (%)`,
+e.g. `100.00%`); csv and json keep the 0-1 ratio as `avg_http_200_ratio` and, for existing readers,
+under the old name `avg_pct_200`. The per-run `latency-<RUN_ID>.md` rounds latencies to 0.01 ms and
+QPS to 0.1, and shows the HTTP 200 share as a percentage. Placeholder rows (`target_class=na`) form
+no cell: a `Placeholder rows (no table cell): mesh_size=<n> <STATUS>=<count>` line under the table
+names them per mesh size, also when that mesh size has measured rows (a failed repetition, or a
+probe that died after some QPS levels); csv has `# PLACEHOLDER=<mesh>:<STATUS>:<count>`, json
+`summary.placeholders` and `summary.n_placeholder`, so `n_total` is the cells' `n_total` plus
+`n_placeholder`. A mesh size with no local row is also a Local baseline `MISSING`. Under the table,
+text and markdown count every row that is not valid as `dropped (poisoned)` (it ran and failed a
+check, or is a `SETUP_FAILED`/`PROBE_FAILED` placeholder) or `skipped (remote unreachable)`
+(`UNREACHABLE` rows and the `STOPPED_UNREACHABLE` placeholder: no load ran); csv (`# ROWS ...`) and
+json (`summary`: `n_dropped`, `n_skipped_unreachable`, `n_placeholder`) carry the same counts. It
+reads every `latency-*.tsv` under `--results-dir`, subdirectories included, so pass one
+`sweep-<RUN_ID>/` to report a single sweep. Every format carries the inputs' preamble, each key
+merged over the files (`HARNESS_SHA`: the harness that measured the rows), and `REPORT_HARNESS_SHA`,
+the harness the report itself ran on: a report made again later, or from another checkout, may count
+rows by other rules. The results dir it reads never counts as a change to that harness.
+`HARNESS_CONTENT_KEY` (in the preamble; `unknown` for a TSV written before it) is the content key of
+the harness files the rows ran on: inputs whose `HARNESS_SHA` differs but that share one key differ
+only in git describe (a commit or tag that left the harness files as they were), not in the harness.
 
 ## Local baseline verdict
 

@@ -26,15 +26,21 @@
 #                                                  -> integer percent of the CROSS-REPLICA
 #       limit (per-replica limit * replicas), matching numerator (a cross-replica
 #       `kubectl top` sum) to denominator scope (PL35). `unknown` if any arg bad.
-#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct]
+#   env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total>
+#                   <n_valid> [caution_pct] [fail_pct] [not_run] [incomplete] [problems]
+#                   [problems_src] [cautions]
 #                                                  -> "VERDICT|headline" — one of
 #       PASS / CAUTION / FAIL plus a one-line human headline. The verdict is computed
 #       only over the validity-gated aggregates the caller passes (the report's
 #       n_valid maxes), never configured axis values (PL35). The CAUTION/FAIL utilization
 #       bands default from the env (SCALE_SLA_CAUTION_PCT=75 / SCALE_SLA_FAIL_PCT=90 in
 #       config/options.env) but accept args 8/9 so the function stays pure/unit-testable.
+#       Arg 10: planned cells that never ran (NOT_RUN); arg 11: cells cut short while
+#       their member rows were written (INCOMPLETE); arg 12: the PROBLEM lines of the
+#       sweep outcome (arg 13: the records that hold them); arg 14: other conditions, one
+#       clause per line: each turns a PASS into CAUTION.
 #       The controlplane report (004) is the SINGLE authoritative compute site;
-#       render_scale_envelope reads the verdict back from the report JSON (C1).
+#       render_scale_envelope reads the verdict back from the report JSON.
 #   env_replicas_summary <n...>                    -> the ISTIOD_REPLICAS token for
 #       per-context istiod replica counts: `3` when they agree, `1-3` when they vary,
 #       `unknown` when none was read.
@@ -42,6 +48,9 @@
 #                                                  -> display form: `3 per cluster`,
 #       `1-3 per cluster (varies by cluster)`, `3 (first context only)` for a TSV
 #       written before every context was read.
+#   env_proxy_versions_summary <ISTIO_PROXY_VERSIONS>
+#                                                  -> the proxy versions summed over the
+#       members, no context names: `1.30.5: 2400, 1.30.4: 3 (20 members; 1 unknown)`.
 #
 # Exposes (thin kubectl wrappers — each takes <ctx> <kubectl_argv...>):
 #   env_istiod_resources <ctx> <argv...>
@@ -55,9 +64,10 @@
 #   render_scale_envelope <results_dir> <report_script> <contexts_csv> <kubectl_argv...>
 #       -> renders the docs/campaigns/TEMPLATE.md scale-envelope tables (mesh topology,
 #          control-plane provisioning & headroom, scale verdict) as markdown to stdout.
-#          Reads the report's JSON (peak-mesh row + capacity metadata) and takes a
-#          read-only `kubectl top nodes` / `top pod -l app=istiod` snapshot across
-#          --contexts. Per-sweep dir only (PL6); never a flat glob.
+#          Reads the report's JSON (peak-mesh row + capacity metadata; its provenance
+#          warning, attempts and data warnings lead the block) and takes a read-only
+#          `kubectl top nodes` / `top pod -l app=istiod` snapshot across --contexts.
+#          Per-sweep dir only (PL6); never a flat glob.
 #
 # Requires: tests/lib/common.sh (die, split_csv), tests/lib/capacity.sh, jq, awk.
 # All callers are expected to have run `set -euo pipefail`.
@@ -139,7 +149,9 @@ env_pct_of_limit() {
 	}'
 }
 
-# env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid> [caution_pct] [fail_pct]
+# env_sla_verdict <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct> <restarts> <n_total> <n_valid>
+#                 [caution_pct] [fail_pct] [not_run] [incomplete] [problems] [problems_src]
+#                 [cautions]
 # Computes the headline customer SLA verdict from the report's validity-gated
 # aggregates (already n_valid-filtered by the caller — never configured axis
 # values, PL35). The CAUTION/FAIL utilization bands default from the env
@@ -150,13 +162,35 @@ env_pct_of_limit() {
 #   CAUTION — any utilization in [caution_pct, fail_pct), or any utilization unknown
 #             (metrics API gap), or n_valid < n_total (some samples poisoned).
 #   PASS    — all utilizations < caution_pct, no restarts, every sample valid.
+# <not_run> (arg 10, default 0): planned cells of the sweep that never ran (NOT_RUN: no
+# row, so no sample of theirs is in n_total). The figures cover only the cells that ran, so
+# a PASS reads CAUTION "N planned cell(s) never ran (NOT_RUN)", and a CAUTION or FAIL
+# headline adds it. <incomplete> (arg 11, default 0): cells whose latest attempt has rows of
+# fewer members than its mesh size, or a member fewer rows than its window wrote
+# (INCOMPLETE: cut short while they were written), whose figures cover only those members:
+# the same, as "N cell(s) are INCOMPLETE". <problems> (arg 12, default 0): the PROBLEM
+# lines of the sweep's outcome (sweep-outcome.txt: the harness or Istio changed during the
+# sweep, ...), which the figures cannot show: the same, as "the sweep outcome records N
+# PROBLEM(s) (<problems_src>)"; <problems_src> (arg 13, default sweep-outcome.txt) names
+# the records counted (several, "<file>: <n>; <file>: <n>", read "the sweep outcomes
+# record"). <cautions> (arg 14, default none): other conditions the figures cannot show
+# (the rows ran on more than one harness, a cell ran on fewer istiod pods than wanted), one
+# clause per line, each the same: a PASS reads CAUTION "<clause>; the figures: <reason>",
+# and a CAUTION or FAIL headline adds "; also <clause>". Pass "" for args 8/9 to keep
+# their defaults.
 # Emits "<VERDICT>|<one-line headline>". Pure.
 # shellcheck disable=SC2329
 env_sla_verdict() {
-	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}"
-	awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
+	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}" not_run="${10:-0}" incomplete="${11:-0}"
+	local problems="${12:-0}" problems_src="${13:-sweep-outcome.txt}" cautions="${14:-}"
+	[[ "$not_run" =~ ^[0-9]+$ ]] || not_run=0
+	[[ "$incomplete" =~ ^[0-9]+$ ]] || incomplete=0
+	[[ "$problems" =~ ^[0-9]+$ ]] || problems=0
+	# The texts through the environment: awk -v would unescape a backslash in them.
+	_ESV_SRC="$problems_src" _ESV_CAUTIONS="$cautions" awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
 	    -v restarts="${5:-0}" -v ntotal="${6:-0}" -v nvalid="${7:-0}" \
-	    -v caution="$caution" -v fail="$fail" '
+	    -v caution="$caution" -v fail="$fail" -v notrun="$not_run" -v incomplete="$incomplete" \
+	    -v problems="$problems" '
 	function isnum(x) { return x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	BEGIN {
 		n_metrics = split(icpu "|" imem "|" ncpu "|" nmem, m, "|")
@@ -185,7 +219,74 @@ env_sla_verdict() {
 		} else {
 			verdict = "PASS"; reason = sprintf("peak utilization %d%% < %d%% across istiod + nodes, no restarts, all %d samples valid", peak, caution+0, nvalid+0)
 		}
+		# Planned cells that never ran: the figures cover only the cells that did.
+		if (notrun + 0 > 0) {
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%d planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan; the cells that ran: %s", notrun, reason) }
+			else reason = sprintf("%s; also %d planned cell(s) never ran (NOT_RUN)", reason, notrun)
+		}
+		# Cells cut short while their member rows were written: their figures cover part of
+		# the mesh.
+		if (incomplete + 0 > 0) {
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%d cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote: cut short while they were written), so their figures cover part of the mesh; the figures, these cells included: %s", incomplete, reason) }
+			else reason = sprintf("%s; also %d cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)", reason, incomplete)
+		}
+		# The sweep outcome'"'"'s PROBLEMs (the harness or Istio changed during it, ...): no
+		# figure shows them.
+		if (problems + 0 > 0) {
+			src = ENVIRON["_ESV_SRC"]
+			# Several records ("<file>: <n>; <file>: <n>", a pooled report): plural.
+			rec = index(src, "; ") ? "the sweep outcomes record" : "the sweep outcome records"
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%s %d PROBLEM(s) (%s), so the figures may not measure what they seem to; the figures: %s", rec, problems, src, reason) }
+			else reason = sprintf("%s; also %s %d PROBLEM(s) (%s)", reason, rec, problems, src)
+		}
+		# Other conditions no figure shows, one clause per line.
+		nc = split(ENVIRON["_ESV_CAUTIONS"], cl, "\n")
+		for (i = 1; i <= nc; i++) {
+			if (cl[i] == "") continue
+			if (verdict == "PASS") { verdict = "CAUTION"; reason = cl[i] "; the figures: " reason }
+			else reason = reason "; also " cl[i]
+		}
 		printf "%s|%s\n", verdict, reason
+	}'
+}
+
+# env_proxy_versions_summary <ISTIO_PROXY_VERSIONS>: The proxies connected to istiod
+# at the start, by Istio version, summed over the members and without their names (the
+# envelope is pasted into campaign docs; one line for 20 members), most first:
+# "1.30.5: 2400, 1.30.4: 3 (20 members; 1 unknown)". A member with no proxy counts as
+# "with none", one whose read failed as unknown; a value that is not per member (unknown,
+# unchecked, a pooled mixed:a,b) is printed as it is. A pooled value whose runs
+# connected the same versions with different counts carries no counts
+# (config_merged_preamble): its versions are listed without them, "1.30.5, 1.30.4 (20
+# members; proxy counts differ between the pooled runs)". Pure.
+# shellcheck disable=SC2329
+env_proxy_versions_summary() {
+	awk -v v="${1:-}" 'BEGIN {
+		if (v == "" || v == "unknown" || v == "unchecked" || v ~ /^mixed:/) { print (v == "" ? "unknown" : v); exit }
+		n = split(v, p, ",")
+		for (i = 1; i <= n; i++) {
+			if (!match(p[i], /=[^=]*$/)) { unk++; nm++; continue }
+			nm++
+			l = substr(p[i], RSTART + 1)
+			if (l == "none") { none++; continue }
+			if (l == "unknown" || l !~ /^[^:+]+(:[0-9]+)?(\+[^:+]+(:[0-9]+)?)*$/) { unk++; continue }
+			m = split(l, e, "+")
+			for (j = 1; j <= m; j++) {
+				k = e[j]
+				if (k ~ /:[0-9]+$/) { c = substr(k, match(k, /:[0-9]+$/) + 1); sub(/:[0-9]+$/, "", k) } else { c = 0; nocount = 1 }
+				if (!(k in s)) o[++no] = k
+				s[k] += c
+			}
+		}
+		if (!nocount) for (i = 2; i <= no; i++) { x = o[i]; for (j = i - 1; j >= 1 && (s[o[j]] < s[x] || (s[o[j]] == s[x] && o[j] > x)); j--) o[j + 1] = o[j]; o[j + 1] = x }
+		out = ""
+		for (i = 1; i <= no; i++) out = out (i > 1 ? ", " : "") o[i] (nocount ? "" : ": " s[o[i]])
+		if (out == "") out = (unk ? "unknown" : "no proxy connected")
+		t = nm " member" (nm == 1 ? "" : "s")
+		if (none) t = t "; " none " with none"
+		if (unk) t = t "; " unk " unknown"
+		if (nocount) t = t "; proxy counts differ between the pooled runs"
+		print out " (" t ")"
 	}'
 }
 
@@ -259,7 +360,8 @@ env_istiod_resources() {
 # `get deploy istiod` each, 5 s timeout) so a 20-cluster mesh costs one read, not 20.
 # Members can run different replica counts, and the per-replica proxy figure is about
 # 1/R of the cluster figure, so R must not come from the first context alone. Emits:
-#   req_cpu_m=.. req_mem_mi=.. lim_cpu_m=.. lim_mem_mi=.. replicas=<summary> replicas_by_context=<ctx=n,...>
+#   req_cpu_m=.. req_mem_mi=.. lim_cpu_m=.. lim_mem_mi=.. replicas=<summary>
+#   replicas_by_context=<ctx=n,...>
 # replicas is env_replicas_summary over the contexts; a failed read is `unknown` in
 # replicas_by_context (`unknown` as a whole with no contexts). Never dies (PL40).
 # shellcheck disable=SC2329
@@ -331,7 +433,7 @@ env_network() {
 #   - the network topology (single/multi-network) across ALL contexts (env_network).
 # These are sweep-level scalars (the pin and mesh wiring are homogeneous across a
 # coherent run — PL26). Node allocatable is NOT read here — the O9 capacity block in
-# 002/003 already emits NODE_ALLOC_* (single-source per key, F4). Emits space-separated
+# 002/003 already emits NODE_ALLOC_* (single-source per key). Emits space-separated
 # `KEY=value` tokens on one line; every read degrades to `unknown` independently so a
 # missing metrics path never aborts the caller (mirrors capacity.sh).
 # shellcheck disable=SC2329
@@ -343,7 +445,7 @@ env_collect_infra() {
 	local kv
 	# shellcheck disable=SC2207
 	local -a rk=($(env_istiod_scan "$contexts_csv" "$@"))
-	for kv in "${rk[@]}"; do
+	for kv in ${rk[@]+"${rk[@]}"}; do
 		case "$kv" in
 			req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
 			req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
@@ -357,9 +459,9 @@ env_collect_infra() {
 	local ctx networks_csv="" net
 	for ctx in "${ctxs[@]}"; do
 		net="$(env_network "$ctx" "$@")"; net="${net#network=}"
-		[[ -z "$networks_csv" ]] && networks_csv="$net" || networks_csv="${networks_csv},${net}"
+		networks_csv="${networks_csv:+${networks_csv},}${net}"
 	done
-	# F6: each distinct network is a separate context's own local istiod (multi-primary),
+	# Each distinct network is a separate context's own local istiod (multi-primary),
 	# so label >1 networks "multi-primary,multi-network:N" (comma, no spaces — this is a
 	# single preamble token; the report renders it verbatim).
 	local n_networks topology
@@ -393,11 +495,49 @@ render_scale_envelope() {
 	# (the report already applied the validity gate to these maxes — PL35).
 	jq_get() { printf '%s' "$json" | jq -r "$1 // \"unknown\"" 2>/dev/null || printf 'unknown'; }
 
-	local node_cpu_m node_mem_mi istio_version harness_sha
+	local node_cpu_m node_mem_mi istio_version istio_version_src harness_sha harness_key
 	node_cpu_m="$(jq_get '.metadata.capacity.node_alloc_cpu_m')"
 	node_mem_mi="$(jq_get '.metadata.capacity.node_alloc_mem_mi')"
 	istio_version="$(jq_get '.metadata.istio_version')"
+	# Live = each member's active IstioRevision .spec.version, read before the first
+	# step; pin = config only (a dry run, or a TSV written before the live read: unknown).
+	# The sweep reads it again at the end and appends its outcome below this envelope.
+	istio_version_src="$(jq_get '.metadata.istio_version_source') (pin $(jq_get '.metadata.istio_version_pin'); by member $(jq_get '.metadata.istio_version_by_context'))"
 	harness_sha="$(jq_get '.metadata.harness_sha')"
+	harness_key="$(jq_get '.metadata.harness_content_key')"
+	# The harness the report ran, and its provenance warning (the rows come from runs on
+	# other harnesses), as every report format shows them.
+	local report_harness prov_warn prov_line=""
+	report_harness="$(jq_get '.metadata.report_harness_sha')"
+	prov_warn="$(printf '%s' "$json" | jq -r '.metadata.provenance_warning // empty' 2>/dev/null || true)"
+	[[ -z "$prov_warn" ]] || prov_line="> **Provenance warning:** ${prov_warn//$'\n'/ }"
+	# The report's data warnings (an istiod pod not Ready in a window, a member that ran
+	# fewer istiod replicas than wanted, ...): they qualify the figures below, so one line
+	# each, as every report format prints them. They can name members, as the "by member"
+	# list below does: paste a redacted copy (redact-results.sh maps them).
+	local dw_lines=""
+	dw_lines="$(printf '%s' "$json" | jq -r '(.metadata.data_warnings // [])[] | "> **Data warning:** " + (split("\n") | join(" "))' 2>/dev/null || true)"
+	# The attempts behind it, when a --resume ran or the harness changed during a run: each
+	# run's or change's HARNESS_SHA and rows, as 004 prints them (no KUBE_VERSIONS: they
+	# name the members).
+	local att_line=""
+	att_line="$(printf '%s' "$json" | jq -r '(.metadata.attempts // []) | if length > 1 then "> **Attempts:** " + (map("\(.run) HARNESS_SHA=\(.harness_sha) (\(.rows) row(s), \(.rows_kept // .rows) in the figures)") | join("; ")) else empty end' 2>/dev/null || true)"
+	# The proxy versions at the start, summed over the members (no context names).
+	local proxy_versions earlier_rows earlier_cells earlier_line=""
+	proxy_versions="$(env_proxy_versions_summary "$(jq_get '.metadata.istio_proxy_versions')")"
+	# The report reads each cell's latest attempt; say how many rows that left out.
+	earlier_rows="$(jq_get '.metadata.earlier_attempt_rows_left_out')"
+	earlier_cells="$(jq_get '.metadata.earlier_attempt_cells')"
+	if [[ "$earlier_rows" =~ ^[1-9][0-9]*$ ]]; then
+		earlier_line="> Each cell's latest attempt only: ${earlier_rows} row(s) of earlier attempts of ${earlier_cells} cell(s) (failed, then run again by a --resume) are left out of every figure here."
+	fi
+	# While the sweep renders this, its outcome is not written yet: the same line the
+	# markdown report gets, which sweep_outcome --md replaces with the outcome (a sweep
+	# that dies before it leaves the line, so the envelope says it is not finished).
+	local pending_line=""
+	if [[ "${_SWEEP_OUTCOME_PENDING:-0}" == 1 ]] && sweep_outcome_unfinished "${results_dir}/sweep-outcome.txt"; then
+		pending_line="$(sweep_outcome_recorded "$results_dir" md)"
+	fi
 
 	local proxies_peak proxies_cluster_peak proxy_check istiod_cpu_pct istiod_mem_pct istiod_rss_pct node_cpu_pct node_mem_pct
 	proxies_peak="$(jq_get '.metadata.achieved_scale.connected_proxies_max')"
@@ -417,7 +557,7 @@ render_scale_envelope() {
 	istiod_cpu_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_peak_pct_of_limit_max')"
 	istiod_cpu_top_pct="$(jq_get '.metadata.achieved_scale.istiod_cpu_pct_of_limit_max')"
 	istiod_mem_pct="$(jq_get '.metadata.achieved_scale.istiod_mem_pct_of_limit_max')"
-	# P1-4: RSS-derived istiod mem headroom (% of per-replica mem limit). Always
+	# RSS-derived istiod mem headroom (% of per-replica mem limit). Always
 	# available from the /metrics scrape, so it surfaces OOM risk even when the
 	# kubectl-top mem pct above is N/A during a metrics-API gap.
 	istiod_rss_pct="$(jq_get '.metadata.achieved_scale.istiod_rss_pct_of_limit_max')"
@@ -468,7 +608,7 @@ render_scale_envelope() {
 	local networks_csv=""
 	# shellcheck disable=SC2207
 	local -a rk=($(env_istiod_scan "$contexts_csv" "${kubectl_argv[@]}"))
-	for kv in "${rk[@]}"; do
+	for kv in ${rk[@]+"${rk[@]}"}; do
 		case "$kv" in
 			req_cpu_m=*) req_cpu="${kv#req_cpu_m=}" ;;
 			req_mem_mi=*) req_mem="${kv#req_mem_mi=}" ;;
@@ -486,9 +626,9 @@ render_scale_envelope() {
 		local net
 		net="$(env_network "$ctx" "${kubectl_argv[@]}")"
 		net="${net#network=}"
-		[[ -z "$networks_csv" ]] && networks_csv="$net" || networks_csv="${networks_csv},${net}"
+		networks_csv="${networks_csv:+${networks_csv},}${net}"
 	done
-	# Distinct non-unknown networks across the per-context istiod reads. F6: each
+	# Distinct non-unknown networks across the per-context istiod reads. Each
 	# distinct network came from a SEPARATE context's own local istiod (env_collect_infra
 	# iterates one istiod per context) — that per-cluster control plane IS the
 	# multi-primary signal — so label >1 networks "multi-primary, multi-network".
@@ -521,13 +661,27 @@ render_scale_envelope() {
 	verdict="$(jq_get '.metadata.sla.verdict')"
 	headline="$(jq_get '.metadata.sla.headline')"
 
+	# Table cells: a pooled or per-member value can hold " | " (a merged preamble value,
+	# config_merged_preamble), which would split the cell (md_cell, PL19).
+	local _cell
+	for _cell in proxy_versions istio_version istio_version_src replicas_label proxy_check \
+		topology peak_scope peak_traffic peak_mesh peak_svc peak_ns reps_label total_svc total_eps; do
+		md_cell -v "$_cell" "${!_cell}"
+	done
+
 	# ---- render ----
 	cat <<MD
 ## Scale envelope
 
-> Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`).
+> Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`, HARNESS_CONTENT_KEY \`${harness_key}\`; report harness \`${report_harness}\`: REPORT_HARNESS_SHA, the harness that rendered it).
 > Measured columns are the report's n_valid-gated peaks (restarted/SETUP_FAILED rows excluded).
-
+${prov_line:+${prov_line}
+}${att_line:+${att_line}
+}${earlier_line:+${earlier_line}
+}${dw_lines:+${dw_lines}
+}${pending_line:+
+${pending_line}
+}
 ### 1. Mesh topology — what the peak mesh-size point actually contains
 
 | Dimension | Value | Source |
@@ -544,7 +698,8 @@ render_scale_envelope() {
 | Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Traffic management | ${peak_traffic} | sweep peak \`traffic_config\` (none preferred when a vsdr cell ties at the peak mesh size) |
-| Istio version | ${istio_version} | sweep header \`ISTIO_VERSION\` |
+| Proxy (Envoy) versions at the start | ${proxy_versions} | sweep header \`ISTIO_PROXY_VERSIONS\` (istiod \`pilot_xds\` by \`version\`, summed over the members; a sidecar keeps its version until its pod restarts) |
+| Istio version | ${istio_version}, source ${istio_version_src} | sweep header \`ISTIO_VERSION\` (\`ISTIO_VERSION_SOURCE\` live: each member's active IstioRevision \`.spec.version\` at the start; the end-of-sweep read is under "Sweep outcome" below when it found a change) |
 
 > **Connected proxies per cluster** is \`pilot_xds\` summed over one cluster's istiod replicas at one scrape. It should be about equal to that cluster's Running injected pods (gateways included), which the proxy check compares. It is still not a mesh-wide sum and not endpoints; do not expect it to equal total endpoints. **Per istiod replica** is the busiest single replica (max over the per-pod rows), about 1/R of the cluster figure with R replicas.
 

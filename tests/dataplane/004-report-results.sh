@@ -5,7 +5,9 @@
 # rows are reported separately rather than averaged together.
 # Filters poisoned rows (status != OK, istiod_restarted != 0) from numeric
 # aggregation but still counts them in count_total and reports the gap.
-# Propagates the first TSV's preamble metadata into every output format.
+# Propagates the TSV preamble metadata into every output format, each key merged over
+# every input (mixed:a,b when it varies, PL26). More than one run under the results dir
+# stops the report unless --allow-multi-run, and then every format says so.
 # Every format also carries a "Local baseline" verdict per (mesh_size, qps_target),
 # so a same-cluster number that was dropped or never measured is always visible.
 # Every format also has a "Remote coverage" section, before the results table: the
@@ -17,7 +19,7 @@
 # text, markdown and json add the istiod restart diagnostics (tests/lib/istiod-diag.sh).
 #
 # Usage:
-#   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--format FMT] [--fail-on-unreachable]
+#   ./tests/dataplane/004-report-results.sh [--results-dir DIR] [--allow-multi-run] [--format FMT] [--fail-on-unreachable]
 #   ./tests/dataplane/004-report-results.sh --config tests/dataplane/configs/smoke.env \
 #     --results-dir tests/dataplane/results/smoke/sweep-<RUN_ID> --format markdown
 set -euo pipefail
@@ -37,9 +39,10 @@ source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_rende
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 
 RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
-# 1 when --results-dir is passed (gates the multi-run warning below).
-RESULTS_DIR_FROM_FLAG=0
 FORMAT="text"
+# --allow-multi-run: pool more than one run (else the report refuses). Per invocation
+# like --force-large-matrix, so no options.env key.
+ALLOW_MULTI_RUN=0
 FAIL_ON_UNREACHABLE=0
 
 
@@ -49,17 +52,35 @@ Usage: $(basename "$0") [options]
 
   --config FILE      Run config of KEY=value lines (config/options.env keys; see
                      tests/dataplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default. Without --results-dir, warns
-                     when the results dir holds more than one run.
-  --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}).
-                     A directory containing latency-*.tsv files; a sweep-*/
-                     subdir from 003 also works.
-  --format FMT       Output format: text, csv, markdown (or md), json, charts (default: text).
+                     --config > environment > default.
+  --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}). Every
+                     latency-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
+                     Run on the parent of one sweep dir (no sweep-outcome.txt of its
+                     own), the report repeats no outcome, but a note names that sweep's
+                     record when it did not end cleanly, as --allow-multi-run's does.
+  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
+                     with different run ids). Without it the report stops, lists the
+                     runs and how to report each alone; with it every format says it
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
+                     (csv # POOLED_HARNESS_CONTENT_KEYS= and json harness_content_key
+                     also their HARNESS_CONTENT_KEY values); its note says when the
+                     HARNESS_SHA values differ only in git describe (every run records
+                     one key). It repeats no sweep-outcome.txt of a sweep-* dir below the
+                     results dir (report each sweep alone to see it), but its note names
+                     each one that has not finished, was interrupted, stopped early or
+                     records a PROBLEM (json pooled_sweep_outcomes), and so does a
+                     warning on stderr.
+  --format FMT       Output format: text, csv, markdown (or md), json, charts
+                     (default: text).
   --fail-on-unreachable
                      After the output, exit 3 when a remote's reach coverage is not
                      REACHABLE (rule=reach_coverage) or a remote has no valid latency
                      row (rule=no_valid_rows); stderr names the rule and the remotes.
   -h, --help         Show this help.
+
+Example (one sweep, as 003 runs it; from the repo root):
+  tests/dataplane/$(basename "$0") \\
+    --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
 Every format includes a "Remote coverage" section before the results table: per
 mesh size and source, how many remotes passed every reach check (reach-*.tsv from
@@ -91,6 +112,32 @@ The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv an
 json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
 A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
 
+When the results dir holds sweep-outcome.txt (003 writes it), every format repeats
+it, with the run that recorded it: the failed cells by reason, its problems (the Istio
+version, the active revision or the generation of the Istio CR or its active
+IstioRevision changed under the sweep, or the end-of-sweep check failed) and notes
+(members not ready at its start or end, proxies on another version). The sweep writes
+it at its start as "not finished" (EXIT=unfinished) and replaces it at its end: while
+it says not finished (the sweep died, or still runs), every format says "this sweep
+has not finished" (json sweep_outcome: "exit": null, "unfinished": true, "started_at";
+a finished one reads "unfinished": false). One interrupted (Ctrl-C, SIGTERM, SIGHUP)
+says when and by which signal (json "interrupted_at", "interrupted_by"), and one that
+stopped on an error after its start shows the stop and its reason, as any stop. A
+sweep dir without the file is from a sweep that stopped before its start (nothing
+ran), or from an older harness.
+
+The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to each
+member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
+
+REPORT_HARNESS_SHA (every format, after the preamble's HARNESS_SHA): the harness this
+report ran on, which can differ from HARNESS_SHA, the harness that measured the rows:
+a report made again later, or from another checkout, may count rows by other rules.
+The results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (in the
+preamble list; unknown for a TSV written before it): the content key of the harness
+files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
+only in git describe (a commit or tag that left the harness files as they were), not
+in the harness.
+
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
   DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
@@ -109,8 +156,11 @@ while [[ $# -gt 0 ]]; do
 	--results-dir)
 		[[ -n "${2:-}" ]] || die "--results-dir requires a value"
 		RESULTS_DIR="$2"
-		RESULTS_DIR_FROM_FLAG=1
 		shift 2
+		;;
+	--allow-multi-run)
+		ALLOW_MULTI_RUN=1
+		shift
 		;;
 	--format)
 		[[ -n "${2:-}" ]] || die "--format requires a value"
@@ -142,45 +192,67 @@ esac
 TSV_FILES=()
 while IFS= read -r f; do
 	TSV_FILES+=("$f")
-done < <(find "$RESULTS_DIR" -name 'latency-*.tsv' -type f 2>/dev/null | sort)
+done < <(find -H "$RESULTS_DIR" -name 'latency-*.tsv' -type f 2>/dev/null | sort)
 
 if [[ ${#TSV_FILES[@]} -eq 0 ]]; then
 	die "no TSV result files found in $RESULTS_DIR"
 fi
 
-# Collect preamble (# KEY=VALUE lines) from the first TSV. KUBE_VERSION[ctx]
-# keys are preserved as-is. Output is captured as an array of "KEY=VALUE"
-# strings to make formatting consistent across output formats.
+# PL6: the report pools every TSV under the results dir; more than one run stops it
+# unless --allow-multi-run, and then every format says so (config_multi_run_note).
+config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
+POOLED_NOTE="$(config_multi_run_note)"
+# A pooled report repeats only its results dir's own sweep-outcome.txt
+# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
+# and names each pooled sweep whose record has not finished, was interrupted, stopped early
+# or holds a PROBLEM (sweep_outcome_pooled): text, md, charts, csv; json pooled_sweep_outcomes.
+# One run on the parent dir of its sweep (no record of its own) repeats none either: the
+# same note, alone, names that sweep's record when it did not end cleanly.
+POOLED_OUTCOME_NOTE=""
+POOLED_SWEEP_OUTCOMES=""
+if [[ -n "$POOLED_NOTE" ]]; then
+	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
+	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
+	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE+=" Pooled sweep records that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
+	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
+elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/sweep-outcome.prev.txt" ]]; then
+	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
+	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
+fi
+# The same list on stderr (as controlplane's data warning), in sight when the report goes
+# to a file.
+[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || echo "warning: sweep records below ${RESULTS_DIR} that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }; report each sweep dir alone to see its outcome" >&2
+
+# The preamble (# KEY=VALUE and # KEY[x]=VALUE lines) of every input, each key merged over
+# the files that carry it: one value, or mixed:a,b when it varies (per-probe keys such as
+# RUN_ID, DATE and MESH_SIZE do within a sweep), never the first file's (PL26). An array
+# of "KEY=VALUE" strings, so every output format renders the same list.
 PREAMBLE=()
 while IFS= read -r line; do
 	PREAMBLE+=("$line")
-done < <(awk '
-	/^# / && /=/ {
-		line = $0
-		sub(/^# /, "", line)
-		# Accept KEY=VALUE and KEY[ANY]=VALUE; reject pure comments like "# foo bar".
-		if (line ~ /^[A-Z][A-Z0-9_]*(\[[^]]+\])?=/) print line
-		next
-	}
-	/^[^#]/ { exit }
-' "${TSV_FILES[0]}")
+done < <(config_merged_preamble "${TSV_FILES[@]}")
+# A sweep-level Istio key no input carries (every TSV predates it) reads unknown,
+# as in the other reports: not recorded, rather than absent.
+for _k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
+	_have=0
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do [[ "$kv" != "${_k}="* ]] || { _have=1; break; }; done
+	((_have)) || PREAMBLE+=("${_k}=unknown")
+done
+unset _k _have
 
 # Which --config produced the inputs (PL2/PL19), over every input rather than the first
 # file: `none` without one, `unknown` for files written before the key existed,
 # mixed:a,b with a warning when they differ (PL26).
 _pre=()
-for kv in "${PREAMBLE[@]}"; do
+for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
 	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) _pre+=("$kv") ;; esac
 done
-PREAMBLE=("${_pre[@]}"
+PREAMBLE=(${_pre[@]+"${_pre[@]}"}
 	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
 unset _pre
-# PL6: a results dir from --config (or the default) is a base dir that can hold many
-# sweeps, and the report aggregates all of them.
-if ((RUN_CONFIG_LOADED)) && ! ((RESULTS_DIR_FROM_FLAG)); then
-	config_warn_multi_run "$RESULTS_DIR" "${TSV_FILES[@]}"
-fi
+# This report's own harness, every format; the results dir it reads is no change to it.
+PREAMBLE+=("REPORT_HARNESS_SHA=$(report_harness_sha --exclude "$RESULTS_DIR")")
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).
 # Counts:
@@ -466,7 +538,7 @@ LB_VERDICT="ok"
 lb_rank() { case "$1" in ok) echo 0 ;; degraded) echo 1 ;; unchecked) echo 2 ;; missing) echo 3 ;; dropped) echo 4 ;; esac; }
 lb_worse() { (( $(lb_rank "$1") > $(lb_rank "$LB_VERDICT") )) && LB_VERDICT="$1"; return 0; }
 LB_TOP_QPS=0
-for c in "${LB_CELLS[@]}"; do
+for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 	IFS=$'\t' read -r _m q _t _v verdict _rest <<<"$c"
 	lb_worse "$verdict"
 	[[ "$q" =~ ^[0-9]+$ ]] && (( q > LB_TOP_QPS )) && LB_TOP_QPS="$q"
@@ -490,7 +562,7 @@ local_baseline_lines() {
 		echo "Local baseline: OK at every QPS level (${cells}, top qps_target=${LB_TOP_QPS}, min_qps_ratio=${LB_RATIO}${legacy})"
 		return 0
 	fi
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		IFS=$'\t' read -r m q t v verdict reason qa qr srep remote sts nbr unr <<<"$c"
 		[[ "$verdict" == ok ]] && continue
 		pct="N/A"
@@ -501,7 +573,7 @@ local_baseline_lines() {
 		((nbr > 0)) && line+=" ok_below_ratio=${nbr}"
 		echo "$line"
 	done
-	for c in "${LB_MISSING[@]}"; do
+	for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "Local baseline: MISSING mesh_size=${m} reason=${reason} (no local rows)"
 	done
@@ -512,7 +584,7 @@ local_baseline_lines() {
 # (saturated_unflagged).
 local_baseline_hint() {
 	local c sat=0 unflagged=0 unr=0 legacy="" unr_note=""
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		[[ "$c" == *$'\tsaturated\t'* ]] && sat=1
 		[[ "$c" == *$'\tsaturated_unflagged\t'* ]] && unflagged=1
 		[[ "${c##*$'\t'}" =~ ^[1-9] ]] && unr=1
@@ -629,10 +701,13 @@ fmt_pct() {
 }
 
 report_text() {
-	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
 	[[ ${#PREAMBLE[@]} -gt 0 ]] && echo ""
 	echo "=== Data-Plane Latency Results ==="
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
+	sweep_outcome_recorded "$RESULTS_DIR" text
 	echo "Files: ${TSV_FILES[*]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Numeric averages exclude rows with"
 	echo "status != OK or istiod_restarted != 0. n_total and n_valid are reported per cell."
@@ -663,15 +738,18 @@ report_text() {
 }
 
 report_csv() {
-	for kv in "${PREAMBLE[@]}"; do echo "# $kv"; done
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
+	config_multi_run_csv
+	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
+	sweep_outcome_recorded "$RESULTS_DIR" csv
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
 	local c m q _t _v verdict reason _rest
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		IFS=$'\t' read -r m q _t _v verdict reason _rest <<<"$c"
 		[[ "$verdict" == ok ]] || echo "# LOCAL_BASELINE_CELL=${m}:${q}:${verdict}:${reason}"
 	done
-	for c in "${LB_MISSING[@]}"; do
+	for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "# LOCAL_BASELINE_CELL=${m}:-:missing:${reason}"
 	done
@@ -758,21 +836,27 @@ whose latency rows are all (`no valid latency rows`) or partly invalid, as
 GLOSSARY
 }
 
+# A frontmatter key printed bare: a preamble key name, or KEY[x] with a plain x.
+FM_PLAIN_KEY_RE='^[A-Za-z_][A-Za-z0-9_]*(\[[A-Za-z0-9._/-]*\])?$'
+
 report_markdown() {
+	local k v_esc=""
 	echo "---"
-	for kv in "${PREAMBLE[@]}"; do
-		# Split at first '=' only; quote value to keep YAML literal.
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
+		# Split at the first '=' only; the value as a YAML string (yaml_str escapes it), and
+		# the key too when it is more than a name (a KEY[x] key of a hand-edited TSV).
 		k="${kv%%=*}"
-		v="${kv#*=}"
-		# Escape backslashes and double quotes in value.
-		v_esc=${v//\\/\\\\}
-		v_esc=${v_esc//\"/\\\"}
-		echo "${k}: \"${v_esc}\""
+		[[ "$k" =~ $FM_PLAIN_KEY_RE ]] || yaml_str -v k "$k"
+		yaml_str -v v_esc "${kv#*=}"
+		echo "${k}: ${v_esc}"
 	done
 	echo "---"
 	echo ""
 	echo "# Data-Plane Latency Results"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
+	sweep_outcome_recorded "$RESULTS_DIR" md
 	echo "Aggregated by (mesh_size, qps_target, target_class). Rows with status != OK or"
 	echo "istiod_restarted != 0 are excluded from numeric averages."
 	echo ""
@@ -784,6 +868,8 @@ report_markdown() {
 	echo "|-----------|------------|--------------|---------|---------|------------|------------|------------|-------------|------------|----------------|------------------|"
 	while IFS=$'\t' read -r mesh qps cls n_tot n_val p50 p90 p99 p999 mx qa pct; do
 		[[ -n "$mesh" ]] || continue
+		# The key cells (TSV values) through md_cell: a | in one would break the row.
+		md_cell -v mesh "$mesh"; md_cell -v qps "$qps"; md_cell -v cls "$cls"
 		printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
 			"$mesh" "$qps" "$cls" "$n_tot" "$n_val" \
 			"$(fmt_val "$p50")" "$(fmt_val "$p90")" "$(fmt_val "$p99")" \
@@ -813,7 +899,7 @@ report_markdown() {
 report_json() {
 	# Build metadata object from PREAMBLE.
 	local meta_json
-	meta_json=$(printf '%s\n' "${PREAMBLE[@]}" | jq -R -s '
+	meta_json=$(printf '%s\n' ${PREAMBLE[@]+"${PREAMBLE[@]}"} | jq -R -s '
 		split("\n")
 		| map(select(length > 0))
 		| map(capture("^(?<k>[^=]+)=(?<v>.*)$"; "g"))
@@ -850,8 +936,8 @@ report_json() {
 	local lb_json
 	local c
 	lb_json=$( {
-		for c in "${LB_CELLS[@]}"; do printf 'cell\t%s\n' "$c"; done
-		for c in "${LB_MISSING[@]}"; do printf 'missing\t%s\n' "$c"; done
+		for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do printf 'cell\t%s\n' "$c"; done
+		for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do printf 'missing\t%s\n' "$c"; done
 	} | jq -R -s \
 		--arg verdict "$LB_VERDICT" --arg ratio "$LB_RATIO" --arg legacy "$LB_LEGACY_FILES" '
 		def num: if . == "N/A" or . == "" then null else (tonumber? // .) end;
@@ -911,7 +997,11 @@ report_json() {
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
 		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
-		'{metadata: $metadata,
+		--argjson pooled_runs "$(config_multi_run_json)" \
+		--argjson pooled_sweep_outcomes "$(printf '%s' "$POOLED_SWEEP_OUTCOMES" | jq -Rn '[inputs]')" \
+		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
+		'{metadata: $metadata, pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes,
+		  sweep_outcome: $sweep_outcome,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
 		            n_placeholder: $n_placeholder, placeholders: $placeholders,
@@ -924,20 +1014,23 @@ report_json() {
 
 report_charts() {
 	echo "---"
-	for kv in "${PREAMBLE[@]}"; do
-		k="${kv%%=*}"; v="${kv#*=}"
-		v_esc=${v//\\/\\\\}; v_esc=${v_esc//\"/\\\"}
-		echo "${k}: \"${v_esc}\""
+	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
+		k="${kv%%=*}"
+		[[ "$k" =~ $FM_PLAIN_KEY_RE ]] || yaml_str -v k "$k"
+		yaml_str -v v_esc "${kv#*=}"
+		echo "${k}: ${v_esc}"
 	done
 	echo "generated: \"$(date -u -Iseconds)\""
 	echo "---"
 	echo ""
 	echo "# Data-Plane Latency — Charts"
 	echo ""
+	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
+	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	# Name every local point that is drawn as 0 because it has no valid sample, and
 	# every one that averages OK rows below the QPS ratio (legacy TSVs).
 	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr lb_notes=0
-	for c in "${LB_CELLS[@]}"; do
+	for c in ${LB_CELLS[@]+"${LB_CELLS[@]}"}; do
 		IFS=$'\t' read -r m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr <<<"$c"
 		if [[ "$verdict" == dropped ]]; then
 			echo "> Local baseline missing at mesh ${m} / QPS ${q} (${reason}); its point is drawn as 0."
@@ -947,7 +1040,7 @@ report_charts() {
 			lb_notes=1
 		fi
 	done
-	for c in "${LB_MISSING[@]}"; do
+	for c in ${LB_MISSING[@]+"${LB_MISSING[@]}"}; do
 		IFS=$'\t' read -r m reason <<<"$c"
 		echo "> Local baseline missing at mesh ${m} (${reason}); its points are drawn as 0."
 		lb_notes=1

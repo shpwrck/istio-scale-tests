@@ -1,0 +1,5 @@
+#!/bin/sh
+# awk, run as mawk. tests/lib/common.sh puts this folder first on PATH when the awk on PATH
+# fails awk_untyped_ok (gawk 5.2 and 5.3 corrupt an array element passed to a function before
+# it holds a value) and mawk passes it.
+exec mawk "$@"

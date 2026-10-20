@@ -1,0 +1,8 @@
+# Code owners: GitHub asks these owners to review every PR that touches a matching path.
+# Empty on purpose: fill it in when the repo moves to its long-term home, then turn on
+# "Require review from Code Owners" in the branch protection rule for main.
+# See README.md "Moving or forking the repo".
+#
+# Example (one team owns everything, a second team co-owns the Terraform):
+# *            @<org>/<team>
+# /terraform/  @<org>/<team> @<org>/<infra-team>

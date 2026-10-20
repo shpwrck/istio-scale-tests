@@ -76,9 +76,9 @@ resolve_kubectl KUBECTL
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -114,7 +114,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 
 FAILED=0
-for pid in "${PIDS[@]}"; do
+for pid in ${PIDS[@]+"${PIDS[@]}"}; do
 	wait "$pid" || FAILED=$((FAILED + 1))
 done
 

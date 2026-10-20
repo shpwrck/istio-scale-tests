@@ -177,15 +177,23 @@ install the standard channel through the ingress operator; the script stops when
 missing), and the `istio` GatewayClass, which istiod creates.
 
 1. Pick the workload member: `oc --context <acm-hub-ctx> get managedclusters`.
-2. In [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
-   set both revisions (`spec.source.targetRevision`, `repo.revision`) and both repo URLs if you
-   use a fork. Leave the `<workload-cluster>` placeholder in the file: step 3 fills it in on the
-   way to the hub, so the cluster name never lands in git.
+2. Read the repo and revision the hub syncs the mesh from. [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
+   keeps `<repo-url>`, `<revision>` and `<workload-cluster>` placeholders: step 3 fills them in on
+   the way to the hub, so the check runs the same charts as the mesh and the cluster name never
+   lands in git.
+
+   ```bash
+   read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+     get applications.argoproj.io hub-gitops-root \
+     -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+   ```
+
 3. Apply it on the hub with the workload member's ManagedCluster name, and wait for the per-member
    Applications:
 
    ```bash
-   sed 's/<workload-cluster>/<managed-cluster-name>/' charts/mesh-verify-gateway-api-appset.yaml \
+   sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+     -e 's|<workload-cluster>|<managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
      | oc --context <acm-hub-ctx> apply -f -
    oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops | grep mesh-verify-gwapi
    ```
@@ -219,7 +227,21 @@ results will go, and:
    - the builds that ran: istiod's `discovery` image (`ISTIOD_IMAGE`), the ingress `istio-proxy`
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
      ran (the registry host and path are dropped), and the OSSM operator CSV version and phase
-     (`OSSM_OPERATOR`); the Istio CR version and the tuning baseline;
+     (`OSSM_OPERATOR`); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`, which can be
+     an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each active
+     IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
+     `unknown` for a member that cannot be read or whose Istio CR is not settled), with
+     `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`, the
+     generations of its Istio CR and active IstioRevision in `ISTIO_GENERATIONS`
+     (`<ctx>=<cr>/<revision>`), the proxy versions connected to its istiod in
+     `ISTIO_PROXY_VERSIONS`, and the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this
+     read-only check warns on a difference and never stops on it. A member whose istiod or
+     IstioCNI is not ready (or whose istiod is rolling out) is read again every
+     `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds,
+     both set in the environment only, as is `ISTIO_PROXY_READ_PARALLEL` (20), the members whose
+     proxy versions are read at once; the members still not ready then are in
+     `ISTIO_NOTREADY_AT_START` (`none` when every member was ready), with the wait in
+     `ISTIO_READY_WAITED_SEC`; and the tuning baseline;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),
@@ -291,9 +313,10 @@ results will go, and:
    within ⌈members / 4⌉ × 2 × that limit reads `timeout`.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
-   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` only describes the script); when it
-   is not the script's commit the run warns and records `CHART_REVISION_VS_HARNESS=differs`
-   (`same` when it is, `same-dirty` when it is but the script's tree has uncommitted changes).
+   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` and `HARNESS_CONTENT_KEY`, both in the
+   preamble, only describe the script); when it is not the script's commit the run warns and records
+   `CHART_REVISION_VS_HARNESS=differs` (`same` when it is, `same-dirty` when it is but the script's
+   tree has uncommitted changes).
 6. Rereads the route status (S4's status depends on istiod's push timing; a route that was not
    in place when the wait ended, or whose status was unread then, but is in place now says
    `STATUS_CHANGED`; `detail` keeps the status the wait ended on) and the istiod and ingress pods

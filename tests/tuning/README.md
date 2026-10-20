@@ -39,8 +39,9 @@ To measure a baseline lever (Sidecar scoping, discoverySelectors, telemetry), to
 `--dry-run` prints every command and checks the probe arguments; remove it to run.
 `--suite` is one of `propagation`, `controlplane`, `dataplane`, `churn`,
 `churn-dataplane`. The first context is the source for suites that take one.
-Without `--profiles` the sweep runs every profile. Other options: `--no-baseline`,
-`--skip-setup`, `--keep-workloads`, `--churn-rate N` (see `--help`).
+Without `--profiles` the sweep runs every profile; list each profile once (each pass writes to
+a directory named after its profile, so the sweep refuses one listed twice). Other options:
+`--no-baseline`, `--skip-setup`, `--keep-workloads`, `--churn-rate N` (see `--help`).
 
 The suite's setup and probes take their sizes from `config/options.env`. Override
 them in the environment, for example `CHURN_ITERATIONS=2 ./tests/tuning/003-run-tuning-sweep.sh ...`.
@@ -54,16 +55,92 @@ The sweep:
 4. Writes `sweep-comparison.md` (004), runs the suite's cleanup, resumes Argo CD.
 
 On Ctrl-C or an error the sweep still reverts the active profile and resumes Argo CD.
-It leaves the suite's workloads; remove them with the suite's cleanup script.
+It leaves the suite's workloads; remove them with the suite's cleanup script. A signal
+sent to the sweep's process alone (`kill <pid>`, `kill -INT <pid>`) reaches the step that runs
+and every process under it at once (any still running `SWEEP_STOP_GRACE_SEC`, 30 s by default,
+later get SIGKILL), before the revert. For a sweep in a terminal's foreground, a `kill -INT` or
+`kill -HUP` sent from elsewhere skips the processes in that foreground (a Ctrl-C reaches them
+itself): they get SIGKILL after the grace, with no cleanup, so stop such a sweep from elsewhere
+with SIGTERM. The sweep's own commands between steps finish first, each bounded: the `--settle`
+wait and the proxy reads after it, the generation reads around each apply and revert, and the
+end-of-sweep recheck. Stopping the step's tree needs a `ps` that lists start times (procps, or
+macOS's), or Linux's `/proc` in its place: without either, the sweep warns at its start (a
+`--dry-run` too), and a stop reaches only the step's own process.
+
+A profile's apply and revert patch the Istio CR, which raises its generation and its active
+IstioRevision's. The sweep reads the generations again after the suite setup, before and after
+each apply, and after each revert, so each pass's TSVs record the ones it ran on, and the check
+at the end covers only the time after the last revert; it reads the proxy versions
+(`ISTIO_PROXY_VERSIONS`) once each pass has settled, before its probes (right after a rollout,
+old istiod pods may still be terminating; a pod being deleted is left out of that read, with a
+note). 001 records the generations once its apply settled (`istio-generations-applied` in the
+pass's `state/`); the sweep compares its own read after the apply with that record (the
+IstioRevision too), then writes its read there member by member (a member its read missed keeps
+001's record, which 002 then compares it from; nothing after an apply that failed before its
+record: Sail may still be rendering); 002 compares them before its revert. The sweep reports
+these as problems (exit `4`, the revert still runs):
+
+- the Istio CR changed during a pass, after its apply settled and not by its profile, or
+  between an apply that failed and its revert (Argo CD not paused, another operator, an OSSM
+  operator upgrade; 002 warns and writes `istio-edited-during-pass` in `state/`). The revert
+  restores only the profile's keys, so such an edit stays: the problem also names the pass
+  that runs next (and any passes after it). A re-run of 002 after a revert that stopped
+  partway (`revert-started` in `state/`: it may have patched the Istio CR already) skips this
+  check, with a note, and keeps what the first run found;
+- it changed while the sweep changed nothing: during the suite setup, the baseline pass, a
+  profile that leaves the Istio CR alone (`istio_cr_patch: {}`), between 001's record and the
+  sweep's read after an apply, between one pass's revert and the next pass's apply, or after
+  the last revert (the end check);
+- its generation rose by more than 1, or fell, across a profile's apply or revert: that
+  step's merge patch raises it by exactly 1, so something else edited it (or deleted and
+  created it) during the step (the IstioRevision's is left out: Sail moves it as it renders);
+- a member's Istio CR `spec` after the last revert differs from the sweep's start (an
+  incomplete revert, or, when one of the checks above found one, an edit by something else
+  that no revert undid: they restore only the profiles' keys; the differing paths are named,
+  and both specs are in `istio-spec/`).
+
+A member whose generations could not be read for one of these comparisons (a read that
+failed twice, on a busy API server) is not compared: the sweep warns and its outcome notes
+the span it could not check (`NOTE=`; for 002's comparison, `istio-generations-unchecked` in
+`state/`), so an edit in that span is not ruled out. 001 warns when it records a member as
+`unknown`. A new apply clears what an earlier apply and its revert left in `state/`.
+
+Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or precondition, also
+another live run that holds the sweep dir's `.sweep.lock`; a failed suite setup, a failed
+revert, or an unexpected error); `4` it finished, reverted every profile and wrote
+`sweep-comparison.md`, but some passes failed (`SETUP_FAILED`: the profile did not apply;
+`PROBE_FAILED`: the probe exited non-zero, including a reachability stop), or the mesh changed
+under it: the Istio version or active revision changed during the sweep, the generation of the
+Istio CR or its active IstioRevision went up other than by the sweep's own apply and revert (an
+edit with the same version, an OSSM operator upgrade or a TLS profile change; see above), or
+the last revert left the Istio CR's spec unlike the start; or its harness (`HARNESS_SHA`)
+changed during the sweep (read before its steps, by each step and at its end). Each is an `error:`
+line on stderr; the failed passes' line says how many, by reason; `sweep-outcome.txt` and the end of
+`sweep-comparison.md` keep the outcome. From the sweep's start until it writes its outcome,
+`sweep-outcome.txt` holds a not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`,
+`HARNESS_SHA`, `HARNESS_CONTENT_KEY`, and what to do), so a report of a sweep that died, or still
+runs, or (with when and by which signal) was interrupted says "this sweep has not finished" in every
+format (json `sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads
+`"unfinished": false`; one that stopped on an error after its start records the stop and its reason
+instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more,
+check that no profile is still applied (`005-cleanup.sh`) and that Argo CD auto-sync is resumed
+(`006-gitops-pause.sh --resume`), then run the sweep again into a new dir. Proxies connected on
+another Istio version than their istiod (`ISTIO_PROXY_VERSIONS`, as last read: after the last pass's
+settle) are a note of the outcome, never a failure. `130` / `143` / `129`: interrupted (Ctrl-C,
+SIGTERM, SIGHUP), after reverting the active profile; `sweep-outcome.txt` then says when and by
+which signal, with what the generation checks found until then (each problem as a note: a
+not-finished record counts nothing; a stop record keeps it as a problem).
 
 ## Results
 
 ```
 tests/tuning/results/sweep-<RUN_ID>/
-├── sweep-metadata.txt
-├── sweep-comparison.md      # means of valid rows (histogram p99s: worst bucket); % change vs baseline
+├── sweep-metadata.txt       # suite, passes, HARNESS_SHA, HARNESS_CONTENT_KEY, ISTIO_VERSION (read
+│                            # live once; every probe records it), the pin, ISTIO_NOTREADY_AT_START
+├── sweep-comparison.md      # means of valid rows with n and range (histogram p99s: worst bucket); % change vs baseline
+├── istio-spec/              # each member's Istio CR spec at the start and after the last revert (start-<ctx>.json, end-<ctx>.json)
 ├── baseline/                # suite TSV + .md, probe-output.log
-└── 01-push-throttling/      # same, plus state/ (revert data)
+└── 01-push-throttling/      # same, plus state/ (revert data, istio-generations-applied)
 ```
 
 `SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
@@ -71,9 +148,40 @@ table. Data-plane rows are split by target class (local or remote) and QPS; a ro
 missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers run
 `DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Histogram p99 rows
 (convergence, push time) are never averaged: they show the worst bucket range a valid row
-hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the controlplane's
-`istiod CPU peak (m)` and `istiod memory peak (Mi)` are window peaks), the sidecar config
-in KiB. Re-render:
+hit, or `overflow (N rows)` when N rows had their p99 in the +Inf bucket; propagation's P1
+convergence counts iterations instead, `overflow (N iterations)`: N iterations put a sample
+in the +Inf bucket (counted, although propagation 005 leaves them out of its means). The
+`P1 local push` cell adds `(N overflowed)` for the iterations its mean leaves out for that
+overflow (`- (N overflowed)` when every one did); P1 is left out of an iteration only for a
+source-side reason, as in 005 (a remote that timed out or restarted keeps it). Units: memory
+in Mi, CPU in millicores (the controlplane's `istiod CPU peak (m)` and `istiod memory peak
+(Mi)` are window peaks), the sidecar config in KiB. Under each metric, `n (got/attempted)`
+counts the valid samples with a value over what the pass's probe was configured to take, where
+its TSV records it (propagation: iterations for P1 and its convergence, iterations x remotes
+for P2 and P3; churn: iterations), else over every row the pass wrote (failed and timed-out
+rows included); `range` gives its min to max. "TSV columns" gives the data rows' column count,
+per pass when the passes differ, with a warning: their rows were written by different harness
+versions. It reads `none (no pass wrote a TSV)` when no pass wrote one, and `none (no pass's
+TSV has a data row)` when none has a row. The `Istio CR / IstioRevision generations` row gives
+each pass's `ISTIO_GENERATIONS` from its own TSVs: a profile's apply and revert raise them, so
+each pass ran on its own (`2/2 (every member)` when every member has one value; `mixed:...`
+when the pass's TSVs disagree, `unknown` for a TSV without the key, `-` for a pass without a
+TSV). The "Harness (HARNESS_SHA)" row gives each pass's `HARNESS_SHA` from its own TSVs (a
+churn-dataplane pass also from its rows' `harness_sha` column: `mixed:` when they record more than
+one value, or another than the preamble, and the WARNING then names that pass and the combos whose
+baseline and churn rows ran different harnesses, so their `delta_p99` pairs the two): passes
+on different harnesses get a WARNING (a profile's change may come from the harness), or a note
+when every pass records one `HARNESS_CONTENT_KEY` (they differ only in `git describe`). A
+propagation comparison counts a `DRAIN_TIMEOUT` side, as 005 does (measured before that drain),
+and adds a "Drain timeouts (iterations, counted)" row when a pass has one. The page also
+records `REPORT_HARNESS_SHA` (text: `REPORT_HARNESS_SHA=... (this report's own)`), the harness
+the comparison itself ran on, next to the sweep's `HARNESS_SHA`: a comparison made again later,
+or from another checkout, may count rows by other rules. The sweep dir it reads never counts as
+a change to that harness. The markdown starts with a YAML frontmatter of these keys (`suite`,
+`run_id`, `contexts`, `passes`, the `istio_*` keys, `harness_sha`, `report_harness_sha`,
+`tsv_columns`). A profile whose n differs from the baseline's shows `(baseline n ...)` and the
+page warns: its mean comes from other iterations, so a profile that timed out on the slow ones
+can look faster than it is. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 ## One profile by hand

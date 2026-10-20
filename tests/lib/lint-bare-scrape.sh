@@ -75,20 +75,20 @@ lint_bare_scrape_file() {
 	' "$file"
 }
 
-# B7 / R3-2: flag bare per-combo / per-profile orchestrator-step calls.
+# Flag bare per-combo / per-profile orchestrator-step calls.
 #
 # Why: a sweep orchestrator's per-iteration step — e.g. `"$SCRIPT_DIR/00N-*.sh" …` or
 # `"${TUNING_DIR}/00N-*.sh" …` (setup / probe / cleanup / apply / revert) — returns
 # non-zero on a per-iteration failure; bare in statement position it aborts the entire
-# multi-hour sweep under `set -e`, discarding every completed iteration (the B1
-# regression class). Such a call must be captured, `|| …`'d, or used as an `if`/`while`
-# condition so the failure becomes a recorded marker/row + continue.
+# multi-hour sweep under `set -e`, discarding every completed iteration (a
+# regression class seen before). Such a call must be captured, `|| …`'d, or used as an
+# `if`/`while` condition so the failure becomes a recorded marker/row + continue.
 #
 # Scope/exemptions (deterministic — no fragile loop-depth tracking):
-#   - Checked for every sweep orchestrator: files matching `*-sweep.sh` (R4-1 — the
+#   - Checked for every sweep orchestrator: files matching `*-sweep.sh` (the
 #     dispatch glob in lint_bare_scrape_paths; this includes the 5 `00N-run-sweep.sh`
 #     AND tuning's `003-run-tuning-sweep.sh`, which `*-run-sweep.sh` silently missed).
-#   - Anchor (R3-2): the LOGICAL line STARTS with a `"${VAR}/…/0NN-name.sh"` token —
+#   - Anchor: the LOGICAL line STARTS with a `"${VAR}/…/0NN-name.sh"` token —
 #     ANY `$VAR`/`${VAR}`-prefixed path to an `0NN-`-numbered script, not just the
 #     literal `$SCRIPT_DIR` (the original anchor silently missed tuning's
 #     `${TUNING_DIR}/001-apply-profile.sh`). Statement-position only, so captures
@@ -99,8 +99,10 @@ lint_bare_scrape_file() {
 #     conventionally the last call. Exempted suffixes: -report-results.sh,
 #     -collect-pilot-metrics.sh, -compare-profiles.sh.
 #   - Guarded (`|| …` / `&& …`) or function-tail calls pass.
+#   - A call through `sweep_step` (tests/lib/common.sh: the step a signal reaches) is
+#     checked as the call it runs: `sweep_step "$SCRIPT_DIR/002-….sh" …` is anchored too.
 #
-# Multi-line robustness (R4-2): a step call is commonly written across several
+# Multi-line robustness: a step call is commonly written across several
 # physical lines via trailing `\` continuations, with the `|| …`/`&& …` guard on a
 # LATER continuation line. We therefore JOIN `\`-continued physical lines into one
 # LOGICAL line BEFORE testing the guard/anchor exemptions; inspecting only the first
@@ -139,8 +141,10 @@ lint_bare_orchestrator_step_file() {
 				t = logical[n]
 				sub(/^[ \t]+/, "", t)
 				if (t ~ /^#/ || t == "") continue
+				# A step run through sweep_step (tests/lib/common.sh) is the same call.
+				sub(/^sweep_step[ \t]+/, "", t)
 				# Statement-position "${VAR}/.../0NN-name.sh" call (any ${VAR}/ or $VAR/
-				# prefix; R3-2)? Tested on the JOINED logical line (R4-2).
+				# prefix)? Tested on the JOINED logical line.
 				if (t !~ /^"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\/[^"]*0[0-9][0-9]-[^"]*\.sh"/) continue
 				# Exempt report/aggregation steps (post-loop; failure acceptable).
 				if (t ~ /-report-results\.sh"/ || t ~ /-collect-pilot-metrics\.sh"/ || t ~ /-compare-profiles\.sh"/) continue
@@ -167,7 +171,7 @@ lint_bare_orchestrator_step_file() {
 # lint_bare_scrape_paths <path>...
 #   Recurses into directories for *.sh files; lints individual files directly.
 #   Runs the scrape-call lint on every *.sh, and the orchestrator-step lint on every
-#   sweep orchestrator. R4-1: dispatch glob is `*-sweep.sh` (NOT `*-run-sweep.sh`),
+#   sweep orchestrator. Dispatch glob is `*-sweep.sh` (NOT `*-run-sweep.sh`),
 #   so tuning's `003-run-tuning-sweep.sh` is also routed through verify — it ends
 #   `-run-tuning-sweep.sh` and would otherwise escape the orchestrator-step lint
 #   entirely. `*-sweep.sh` matches exactly the 6 orchestrators and no other file.

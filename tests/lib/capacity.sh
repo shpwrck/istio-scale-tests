@@ -25,7 +25,8 @@
 #                                                  -> cpu_m mem_mi pods (requests already scheduled on
 #                                                     worker nodes; pods with the label skipped)
 #   cap_parse_istiod_limits                        -> cpu_m mem_mi replicas (live istiod deploy limits/requests)
-#   cap_parse_istiod_used                          -> cpu_m mem_mi (sum of istiod pod top)
+#   cap_parse_istiod_used                          -> cpu_m mem_mi pods (sum of istiod pod top,
+#                                                     over pods rows)
 #   cap_pct <used> <total>                          -> integer percent or `unknown`
 #   cap_proxy_check <connected> <expected> <tol_pct> [min_diff]
 #                                                  -> OK | LOW | HIGH | N/A (connected proxies vs
@@ -297,7 +298,10 @@ cap_parse_istiod_limits() {
 
 # cap_parse_istiod_used: `kubectl top pod -n istio-system -l app=istiod
 # --no-headers` on stdin (cols: NAME CPU(cores) MEM(bytes)). Sums CPU+MEM across
-# istiod pods. CPU `1234m`/`1`->m; MEM `1234Mi`/`5Gi`->Mi. Empty -> unknown.
+# istiod pods. CPU `1234m`/`1`->m; MEM `1234Mi`/`5Gi`->Mi. Empty -> unknown. pods= is
+# the number of pods summed (the ones `kubectl top` lists, which run): a %-of-limit
+# denominator multiplies the per-replica limit by it, not by the Deployment's replicas,
+# which count a Pending or evicted replica too (PL35 scope).
 # shellcheck disable=SC2329
 cap_parse_istiod_used() {
 	awk "${CAP_AWK_QTY}"'
@@ -306,8 +310,8 @@ cap_parse_istiod_used() {
 	/^[ \t]*$/ { next }
 	NF >= 3 { c = cpu_to_m($2); m = top_mi($3); if (c >= 0 && m >= 0) { cpu_m += c; mem_mi += m; rows++ } }
 	END {
-		if (rows == 0) { print "cpu_m=unknown mem_mi=unknown"; exit }
-		printf "cpu_m=%d mem_mi=%d\n", cpu_m, mem_mi
+		if (rows == 0) { print "cpu_m=unknown mem_mi=unknown pods=unknown"; exit }
+		printf "cpu_m=%d mem_mi=%d pods=%d\n", cpu_m, mem_mi, rows
 	}'
 }
 
@@ -554,5 +558,5 @@ cap_metrics_ready() {
 	local ctx="$1"; shift
 	local out
 	out="$("$@" --context="$ctx" --request-timeout="${CAP_TOP_TIMEOUT:-15}s" top nodes --no-headers 2>/dev/null)" || out=""
-	[[ -n "$out" ]] && echo "ready" || echo "unavailable"
+	if [[ -n "$out" ]]; then echo "ready"; else echo "unavailable"; fi
 }

@@ -118,10 +118,10 @@ command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
 
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 
 # "dataplane-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
 for ctx in "${ALL_CTXS[@]}"; do
@@ -168,7 +168,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 	) &
 	APPLY_PIDS+=($!)
 done
-for pid in "${APPLY_PIDS[@]}"; do
+for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the fortio-server apply"
 done
 
@@ -181,6 +181,8 @@ helm template dataplane-test "$CHART_DIR" \
 	--set image.tag="$FORTIO_TAG" \
 	"${ALL_CN_SETS[@]}" \
 	| "${apply[@]}" --context="$SOURCE_CTX" -f -
+# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
+harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."
@@ -205,7 +207,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 	) &
 	WAIT_PIDS+=($!)
 done
-for pid in "${WAIT_PIDS[@]}"; do
+for pid in ${WAIT_PIDS[@]+"${WAIT_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 
