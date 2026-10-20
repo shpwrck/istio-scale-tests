@@ -1215,7 +1215,7 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | changed (see notes) | same |"
-	assert_output --partial "- **Warning:** pass 02-x: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass (its platform-drift.txt): 1 to 2 on ctx-b; its profile turns autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA moved the count, and its figures are over more than one istiod replica count"
+	assert_output --partial "- **Warning:** pass 02-x: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass (its platform-drift.txt): 1 to 2 on ctx-b; its profile turns autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA moved the count, and its figures may be over more than one istiod replica count"
 	refute_output --partial "so part of it ran with other istiod replica counts"
 	# A pass of another suite says its record was not read again for builds, versions, levers and limits only.
 	mkdir -p "${BATS_TEST_TMPDIR}/gone"
@@ -1224,6 +1224,25 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "so whether its builds, Kubernetes versions, tuning levers or istiod limits changed during it is not known"
+}
+
+@test "tuning 004 (I12-B1): a pass's note names the member that differs from the baseline ahead of those whose count only changed during the pass" {
+	local ctxs=m1,m2,m3,m4,m5,m6,m7 six="" two="" i
+	PLATFORM_FIXTURE_CTXS="$ctxs" lever_passes
+	for i in 1 2 3 4 5 6; do six+="${six:+,}m${i}=1"; two+="${two:+,}m${i}=2"; done
+	with_replicas baseline "${six},m7=1"
+	with_replicas 04-connection-pools "${six},m7=1"
+	# 02-x: m7 starts on 3 replicas, and m1 to m6 scale from 1 to 2 during the pass.
+	with_replicas 02-x "${six},m7=3"
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' "# ISTIOD_REPLICAS_BY_CONTEXT=${two}" > "${S}/02-x/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | differs (see notes) | same |"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`m7=3, m1=mixed: 1 and 2, m2=mixed: 1 and 2, m3=mixed: 1 and 2, m4=mixed: 1 and 2, and 2 more members (all 7 members)\`"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, changed during the pass: \`1 to 2 on m1, m2, m3, m4, m5 and 1 more\`"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp '  ISTIOD_REPLICAS_BY_CONTEXT +m7=3, m1=mixed: 1 and 2, '
 }
 
 @test "tuning 004 (M11-S2): a pass of a suite that reads istiod's replica count at its start only, whose profile turns autoscaling on, is not known all through the pass: noted and warned" {
@@ -1257,14 +1276,29 @@ with_replicas() {
 	assert_success
 	assert_output --partial "| Platform record | reference (see notes) | same |"
 	assert_output --partial "so whether that count held all through the pass is not known, nor whether any pass's difference from it is the profiles' alone"
-	# The controlplane suite reads the count again at a pass's end: one that held says nothing.
+	# The controlplane suite reads the count again at a pass's end: one that held is a note, not
+	# a warning, since its HPA may have raised and lowered it in between (M12-S2).
 	mv "${BATS_TEST_TMPDIR}/gone/baseline" "${S}/"
 	printf '# SUITE=controlplane\n# PASSES=baseline,02-x,04-connection-pools\n' > "${S}/sweep-metadata.txt"
 	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" ctx-a=1,ctx-b=1; done
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
-	assert_output --partial "| Platform record | baseline | same | same |"
-	refute_output --partial "HPA"
+	assert_output --partial "| Platform record | baseline | same | same (see notes) |"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; each cell's own count of istiod pods is in the pass's controlplane report (the csv's istiod_pods_avg, the json's istiod_pods_per_cluster_avg, the growth table's istiod pods / cluster)"
+	refute_output --partial "Warning:** pass 04-connection-pools"
+	[[ "$stderr" != *"pass 04-connection-pools"* ]] || { echo "$stderr"; false; }
+	# Not read again at its end (no drift file), or not compared there: no such note.
+	mv "${S}/04-connection-pools/platform-drift.txt" "${BATS_TEST_TMPDIR}/gone/"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	refute_output --partial "found each member's count it started with"
+	mv "${BATS_TEST_TMPDIR}/gone/platform-drift.txt" "${S}/04-connection-pools/"
+	printf '%s\n' '# NOT_COMPARED_AT_END=ctx-a=ISTIOD_REPLICAS_BY_CONTEXT' >> "${S}/04-connection-pools/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	refute_output --partial "found each member's count it started with"
 }
 
 @test "tuning 004 (R11-N1): bare replica counts from before the record that a pass's TSVs disagree on warn and show both; where the baseline's do, a pass that ran one of them says so" {
@@ -1285,6 +1319,14 @@ with_replicas() {
 	assert_output --partial "- **Warning:** pass 02-x: its TSVs disagree on ISTIOD_REPLICAS_BY_CONTEXT (or one of them did not read or record a value; the values follow the table)"
 	assert_output --partial "Pass 02-x, every value of its platform record unknown (its TSVs predate the record, or nothing could be read), its TSVs disagree on ISTIOD_REPLICAS_BY_CONTEXT:"
 	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`mixed: 1 and 2\`"
+	# A third TSV from before the count: the two counts still disagree, mixed (SC12-S2).
+	printf '%s\n' "$CHURN_HDR" $'t\tOK\t100\t200\t300\t40\t50' > "${S}/02-x/churn-third.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | mixed (see notes) |"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`mixed: 1 and 2 and unknown\`"
+	mkdir -p "${BATS_TEST_TMPDIR}/gone"
+	mv "${S}/02-x/churn-third.tsv" "${BATS_TEST_TMPDIR}/gone/"
 	# In the baseline: its record shows both, and the pass that ran one of them says which.
 	mv "${S}/02-x/churn-second.tsv" "${S}/baseline/churn-second.tsv"
 	sed -i 's/^# ISTIOD_REPLICAS=1$/# ISTIOD_REPLICAS=2/' "${S}/02-x/churn-02-x.tsv"
@@ -1301,6 +1343,29 @@ with_replicas() {
 	assert_success
 	assert_output --partial "| Platform record | baseline (see notes) | differs (see notes) |"
 	refute_output --partial "one of those"
+}
+
+@test "tuning 004 (SC12-S2): a pass with a TSV from before a key reads unknown, not mixed; a baseline with one leaves every pass unknown" {
+	five_passes
+	grep -v '^# NODE_PROVIDER_BY_CONTEXT=' "${S}/01-same/controlplane-01-same.tsv" > "${S}/01-same/controlplane-old.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | unknown (see notes) | same | differs (see notes) | unknown (see notes) |"
+	assert_output --partial "Pass 01-same, cannot be compared on NODE_PROVIDER_BY_CONTEXT:"
+	assert_output --partial "- NODE_PROVIDER_BY_CONTEXT: \`mixed:unknown, every member recorded matches\`"
+	[[ "$stderr" == *"warning: pass 01-same: NODE_PROVIDER_BY_CONTEXT could not be compared with the baseline (not read, or not recorded, in one of them)"* ]] || { echo "$stderr"; false; }
+	refute_output --partial "disagree"
+	# In the baseline instead: the pass compared with, and every pass's NODE_PROVIDER_BY_CONTEXT
+	# unknown.
+	mkdir -p "${BATS_TEST_TMPDIR}/gone"
+	mv "${S}/01-same/controlplane-old.tsv" "${BATS_TEST_TMPDIR}/gone/"
+	grep -v '^# NODE_PROVIDER_BY_CONTEXT=' "${S}/baseline/controlplane-baseline.tsv" > "${S}/baseline/controlplane-old.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | unknown (see notes) | unknown (see notes) | differs (see notes) | unknown (see notes) |"
+	assert_output --partial "- NODE_PROVIDER_BY_CONTEXT: \`mixed:unknown; kind on ctx-a, ctx-b\`"
+	refute_output --partial "disagree"
+	refute_output --partial "no profile's change against it"
 }
 
 @test "tuning 004 (U9-N5): an unknown --format names the value it was given" {

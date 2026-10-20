@@ -8,8 +8,7 @@
 # check), gateway-api (001: the platform record and the operator build), tuning (001: the refusal
 # of a profile's objects left on a member; 003: each pass's record, its drift check and that
 # refusal; 004: each pass's record, tuning levers, istiod limits and replica counts, compared
-# between passes;
-# 005: the profile label and kinds; 006: the hub's Argo CD namespace)
+# between passes; 005: the profile label and kinds; 006: the hub's Argo CD namespace)
 #
 # The suite charts default to Kubernetes: their pods run as a numeric non-root UID
 # (runAsUser), because the busybox and fortio images run as root and runAsNonRoot cannot
@@ -178,8 +177,8 @@
 # started (it reports a digest) count, those not terminated (an evicted pod) first; when none
 # has, each pod's spec image with @unknown, or with the digest the spec pins. Every comparison
 # takes @unknown as not read (a warning), never as another build. Several values on one member
-# are "+"-joined (a rollout). Every value keeps only
-# [A-Za-z0-9_.:/@+-] (anything else becomes _), so it holds no tab, newline, comma, = or |.
+# are "+"-joined (a rollout). Every value keeps only [A-Za-z0-9_.:/@+-] (anything else becomes
+# _), so it holds no tab, newline, comma, = or |.
 # A file written before the record has none of these keys (the suites supported only OpenShift
 # with OSSM then), and its values read unknown in a report; one written before
 # ISTIOD_ENV_BY_CONTEXT or TUNING_OBJECTS_BY_CONTEXT has the others.
@@ -1797,7 +1796,7 @@ platform_tuning_objects_refuse() {
 # to <b> on <members>; ..." (each member's values at the start, what those inputs recorded,
 # " or "-joined, and each drift check's, " then "-joined; the members grouped by them,
 # _platform_groups_text: with _pl_no_members=1, dynamic scope, how many of the members those
-# inputs record a count for); then, when its inputs record istiod's limits and the file names
+# inputs list, unknown included); then, when its inputs record istiod's limits and the file names
 # members whose limits differ from them, "<dir name>\tISTIOD_LIMITS_DIFFER_BY_CONTEXT\t<ctx>=
 # <cpu_m>/<mem_mi>,...\t<cpu_m>\t<mem_mi>" (every drift check's members, each pair once, and the
 # limits recorded at the start).
@@ -1805,7 +1804,7 @@ platform_tuning_objects_refuse() {
 _platform_drift_scalar_findings() {
 	local f d key start name what v pair c
 	local -a _pl_sd=() _pl_ends=() _pl_p=() _pl_rmo=() _pl_rgo=()
-	local -A _pl_sf=() _pl_start=() _pl_rs=() _pl_re=() _pl_rg=()
+	local -A _pl_sf=() _pl_start=() _pl_rs=() _pl_re=() _pl_rg=() _pl_rall=()
 	for f in "$@"; do
 		d="$(dirname "$f")"
 		[[ -n "${_pl_sf[$d]+x}" ]] || { _pl_sf[$d]=1; _pl_sd+=("$d"); }
@@ -1832,14 +1831,16 @@ _platform_drift_scalar_findings() {
 		# its name in the record, and each drift check's at the end.
 		mapfile -t _pl_ends < <(sed -n 's/^# ISTIOD_REPLICAS_BY_CONTEXT=//p' "${d}/${PLATFORM_DRIFT_FILE}")
 		if ((${#_pl_ends[@]})); then
-			_pl_rs=() _pl_re=() _pl_rg=() _pl_rmo=() _pl_rgo=()
+			_pl_rs=() _pl_re=() _pl_rg=() _pl_rmo=() _pl_rgo=() _pl_rall=()
 			for f in "$@"; do
 				[[ "$(dirname "$f")" == "$d" ]] || continue
 				v="$(_platform_preamble_value "$f" ISTIOD_REPLICAS_BY_CONTEXT)" || continue
 				IFS=',' read -r -a _pl_p <<<"$v"
 				for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
-					[[ "$pair" == *=* && "${pair#*=}" != unknown ]] || continue
+					[[ "$pair" == *=* ]] || continue
 					_platform_sanitize_to c "${pair%%=*}"
+					_pl_rall[$c]=1
+					[[ "${pair#*=}" != unknown ]] || continue
 					_platform_alt_add _pl_rs "$c" "${pair#*=}"
 				done
 			done
@@ -1856,8 +1857,10 @@ _platform_drift_scalar_findings() {
 			for c in ${_pl_rmo[@]+"${_pl_rmo[@]}"}; do
 				_platform_group _pl_rg _pl_rgo "${_pl_rs[$c]//;/ or } to ${_pl_re[$c]//;/ then }" "$c"
 			done
-			# Without member names (platform_report_warnings --no-members): how many of those inputs'.
-			what="$(_platform_groups_text _pl_rg _pl_rgo "${#_pl_rs[@]}")"
+			# Without member names (platform_report_warnings --no-members): how many of the members
+			# those inputs list, one whose count at the start is unknown too (as the unread warning
+			# beside it counts them).
+			what="$(_platform_groups_text _pl_rg _pl_rgo "${#_pl_rall[@]}")"
 			[[ -z "$what" ]] || printf '%s\t%s\t%s\n' "$name" ISTIOD_REPLICAS_BY_CONTEXT "$what"
 		fi
 		[[ -n "${_pl_start["ISTIOD_CPU_LIMIT_M|${d}"]+x}${_pl_start["ISTIOD_MEM_LIMIT_MI|${d}"]+x}" ]] || continue
@@ -2673,19 +2676,20 @@ platform_compare_members() {
 # against a reference one (a tuning pass against the baseline), so a record of hundreds of
 # members stays one short line: the one value every member shares (platform_collapse) when no
 # member or every member differs from the reference (each recorded on both sides), else the
-# members that do not match it (platform_compare_members) and those that ran more than one value
-# (which match by one of them: a note on what the inputs disagree on shows them), in the order
-# they first appear, as <member>=<value> (a value it ran more than one of as "mixed: <a> and
-# <b>", and so the shared one), five at most (_platform_names), then "(<n> of <m> members; the
+# members that do not match it (platform_compare_members), then those that only ran more than
+# one value (which match by one of them: a note on what the inputs disagree on shows them), so
+# the five named include those that differ first; each group in the order its members first
+# appear, as <member>=<value> (a value it ran more than one of as "mixed: <a> and <b>", and so
+# the shared one), five at most, then ", and <j> more members", then "(<n> of <m> members; the
 # other <k> match)", or "(all <m> members)": a member that matches by one of the reference's
 # values (it ran two) is not hidden behind the shared value. A member only the reference has
 # reads "<member> not recorded"; a token without a member (mixed:unknown: an input without the
 # key) comes first.
 # shellcheck disable=SC2329
 platform_value_against() {
-	local key="$1" v pair c a b r n=0 bare="" one=0
+	local key="$1" v pair c a b r n=0 bare="" one=0 names
 	local -a _pl_items=() _pl_p=() _pl_vord=()
-	local -A _pl_in=() _pl_it=()
+	local -A _pl_in=() _pl_it=() _pl_dm=()
 	v="$(platform_collapse "$2")"
 	[[ "$v" == *=* || "$v" != mixed:*";"* ]] || { b="${v#mixed:}"; v="mixed: ${b//;/ and }"; }
 	if ! _platform_per_member "$key" || [[ "$2" != *=* ]]; then
@@ -2713,22 +2717,31 @@ platform_value_against() {
 	[[ "$bare" != mixed:*";"* ]] || { b="${bare#mixed:}"; bare="mixed: ${b//;/ and }"; }
 	while IFS=$'\t' read -r c a b r; do
 		[[ -n "$c" ]] || continue
+		_pl_dm[$c]=1
 		[[ "$a" != - && "$b" != - ]] || one=1
 		[[ "$b" != mixed:*";"* ]] || { b="${b#mixed:}"; b="mixed: ${b//;/ and }"; }
 		if [[ "$b" == - ]]; then _pl_it[$c]="${c} not recorded"; else _pl_it[$c]="${c}=${b}"; fi
 	done < <(platform_compare_members "$key" "$3" "$2")
-	for c in ${_pl_vord[@]+"${_pl_vord[@]}"}; do [[ -z "${_pl_it[$c]+x}" ]] || _pl_items+=("${_pl_it[$c]}"); done
+	# The members that do not match first, so six that only ran two values do not push one that
+	# differs out of the five named; then those.
+	for c in ${_pl_vord[@]+"${_pl_vord[@]}"}; do [[ -z "${_pl_dm[$c]+x}" ]] || _pl_items+=("${_pl_it[$c]}"); done
+	for c in ${_pl_vord[@]+"${_pl_vord[@]}"}; do
+		[[ -z "${_pl_it[$c]+x}" || -n "${_pl_dm[$c]+x}" ]] || _pl_items+=("${_pl_it[$c]}")
+	done
 	n=${#_pl_items[@]}
 	if [[ "$v" != *=* ]] && ((one == 0 && (n == 0 || n == ${#_pl_in[@]}))); then
 		printf '%s\n' "$v"
 		return 0
 	fi
+	# Past five, how many more members: "m5=mixed: 1 and 2 and 2 more" would read as a third value.
+	names="$(_platform_names ${_pl_items[@]+"${_pl_items[@]:0:5}"})"
+	((n <= 5)) || names+=", and $((n - 5)) more members"
 	if ((n == 0)); then
 		printf '%s\n' "${bare:+${bare}, }every member recorded matches"
 	elif ((n == ${#_pl_in[@]})); then
-		printf '%s%s (all %d members)\n' "${bare:+${bare}, }" "$(_platform_names "${_pl_items[@]}")" "$n"
+		printf '%s%s (all %d members)\n' "${bare:+${bare}, }" "$names" "$n"
 	else
-		printf '%s%s (%d of %d members; the other %d match)\n' "${bare:+${bare}, }" "$(_platform_names "${_pl_items[@]}")" "$n" "${#_pl_in[@]}" "$((${#_pl_in[@]} - n))"
+		printf '%s%s (%d of %d members; the other %d match)\n' "${bare:+${bare}, }" "$names" "$n" "${#_pl_in[@]}" "$((${#_pl_in[@]} - n))"
 	fi
 }
 
@@ -2903,14 +2916,14 @@ _platform_kv() {
 # says which side), a member on one side only, a TSV from before the record or a key, another
 # TEST_PLATFORM, and the values the report only shows: NODE_ALLOC_CPU_M and NODE_ALLOC_MEM_MI
 # (cap_node_totals; a cluster autoscaler moves them), ISTIOD_REQ_*, ISTIOD_LIM_*,
-# ISTIOD_REPLICAS_BY_CONTEXT (an HPA moves it; ISTIOD_REPLICAS is its summary) and
-# NETWORK_TOPOLOGY (env_collect_infra). METRICS_API is not compared: the resumed run's own
-# preflight checks the metrics API. One line on stdout says the comparison ran. Nothing in a
-# dry-run, or when <tsv> has no header yet (it is written anew).
+# ISTIOD_REPLICAS_BY_CONTEXT (an HPA moves it; ISTIOD_REPLICAS is its summary; five warnings,
+# then how many more members) and NETWORK_TOPOLOGY (env_collect_infra). METRICS_API is not
+# compared: the resumed run's own preflight checks the metrics API. One line on stdout says the
+# comparison ran. Nothing in a dry-run, or when <tsv> has no header yet (it is written anew).
 # shellcheck disable=SC2329
 platform_resume_check() {
 	local tsv="$1" _pl_ctxs="$2" tctx="${3:-}" old new kind c key o n dies="" line tb_old eh_old tb_new="" eh_new="" lv
-	local again tp_old snap src unr="" g cmp keys kv_old kv_new lim nt infra note csv _pl_tn
+	local again tp_old snap src unr="" g cmp keys kv_old kv_new lim nt infra note csv _pl_tn i more=0
 	local -a _pl_lv=() _pl_lo=() _pl_rc=() _pl_gk=() _pl_p=() _pl_ga=() _pl_dzo=() _pl_ck=() _pl_ugo=()
 	local -a _pl_rgo=() _pl_mr=() _pl_mt=()
 	local -A _pl_ov=() _pl_nv=() _pl_raw=() _pl_gkeys=() _pl_rko=() _pl_rkn=() _pl_dz=() _pl_ug=() _pl_rg=()
@@ -3104,9 +3117,20 @@ platform_resume_check() {
 					_platform_group _pl_rg _pl_rgo "${o}"$'\x1f'"${n}" "$(_platform_sanitize "$c")"
 				fi
 			done
+			# Five warnings, then how many more members (an HPA spreads the counts), as the drift
+			# check's.
+			i=0
 			for g in ${_pl_rgo[@]+"${_pl_rgo[@]}"}; do
+				i=$((i + 1))
+				if ((i > 5)); then
+					IFS=$'\x1f' read -r -a _pl_p <<<"${_pl_rg[$g]}"
+					more=$((more + ${#_pl_p[@]}))
+					continue
+				fi
 				echo "warning: --resume: $(_platform_group_names "${_pl_rg[$g]}"): ISTIOD_REPLICAS_BY_CONTEXT recorded ${g%%$'\x1f'*}, now ${g#*$'\x1f'}; an HPA moves it, the report shows the recorded count while each row records its own istiod pods" >&2
 			done
+			((more == 0)) ||
+				echo "warning: --resume: and ${more} more member$( ((more == 1)) || echo s) whose ISTIOD_REPLICAS_BY_CONTEXT is not the recorded one; an HPA moves it, the report shows the recorded count while each row records its own istiod pods" >&2
 		fi
 	fi
 	# The values not read: each member's keys by reason, then one warning per keys and reason.

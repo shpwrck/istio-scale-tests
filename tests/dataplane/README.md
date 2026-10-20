@@ -122,8 +122,8 @@ QPS 10 and 100, 10 s per level):
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `DATAPLANE_*`, `REACH_*`,
   `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below), `TEST_PLATFORM` (the members'
-  platform), `PLATFORM_READ_TIMEOUT` (each read of the platform record), `PLATFORM_READ_PARALLEL` (members
-  read at once) and `METRICS_SCRAPE_TIMEOUT`.
+  platform), `PLATFORM_READ_TIMEOUT` (each read of the platform record),
+  `PLATFORM_READ_PARALLEL` (members read at once) and `METRICS_SCRAPE_TIMEOUT`.
   `DATAPLANE_TEST_NAMESPACE` and `DATAPLANE_MAX_MATRIX` stay environment only.
 - **Run keys:** `DATAPLANE_MESH_SIZES` (`003 --mesh-sizes`; empty: 1 to the number of
   contexts), `DATAPLANE_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts

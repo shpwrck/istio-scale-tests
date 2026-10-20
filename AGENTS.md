@@ -62,8 +62,7 @@ which wins over the upstream docs there when they disagree.
   - the curl image of the wiring gate and the wait Jobs (`docker.io/curlimages/curl`):
     `charts/mesh-wiring-verify/values.yaml`, `waitForCacerts.image` in
     `charts/spoke-ossm/values.yaml` and both gateways' `waitForIstiod.image`, each with a
-    keep-in-sync comment naming the others
-    (`charts/spoke-east-west-gateway/README.md` repeats it)
+    keep-in-sync comment naming the others (`charts/spoke-east-west-gateway/README.md` repeats it)
   - ACM/GitOps channels: `terraform/platform/variables.tf`
   - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
     keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`).
@@ -98,18 +97,18 @@ which wins over the upstream docs there when they disagree.
   rows show per pass, plus each member's `KUBE_VERSIONS`) and what `platform_lever_values` gives
   (the tuning levers, the root Sidecar's egress hosts, istiod's limits and replica counts; one the
   pass's profile sets is a note, and one it sets that a member did not run, or that a member's
-  TSVs do not record, warns), with what
-  `platform_drift_changes` and `platform_drift_unread` find changed or not compared during each
-  pass); a suite's sweep calls `platform_probe_share` right after its `platform_probe`
-  (controlplane: after its `--resume` check), then `platform_start_warnings`, and
-  `platform_drift_check` after its last step, before its reports (tuning 003 refuses to start on a
-  profile's objects with `platform_tuning_objects_refuse` instead of warning, and since a profile
-  changes the record, each pass calls `platform_probe_reset`, `platform_probe` and
-  `platform_probe_share` before its probes and `platform_drift_check` after them; 004 compares the
-  passes); every script that sources `platform.sh` calls `platform_validate` with its argument
-  checks (`tests/lib/platform.sh`; `tests/lib/test/config-suites.bats` and `platform.bats` check the
-  pairing). `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and `PLATFORM_READ_PARALLEL` are keys of every
-  suite (`CONFIG_SHARED_PREFIXES`, `tests/lib/config.sh`).
+  TSVs do not record, warns), with what `platform_drift_changes` and `platform_drift_unread` find
+  changed or not compared during each pass); a suite's sweep calls `platform_probe_share` right
+  after its `platform_probe` (controlplane: after its `--resume` check), then
+  `platform_start_warnings`, and `platform_drift_check` after its last step, before its reports
+  (tuning 003 refuses to start on a profile's objects with `platform_tuning_objects_refuse` instead
+  of warning, and since a profile changes the record, each pass calls `platform_probe_reset`,
+  `platform_probe` and `platform_probe_share` before its probes and `platform_drift_check` after
+  them; 004 compares the passes); every script that sources `platform.sh` calls `platform_validate`
+  with its argument checks (`tests/lib/platform.sh`; `tests/lib/test/config-suites.bats` and
+  `platform.bats` check the pairing). `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and
+  `PLATFORM_READ_PARALLEL` are keys of every suite (`CONFIG_SHARED_PREFIXES`,
+  `tests/lib/config.sh`).
 
 ## Repository map
 

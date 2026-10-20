@@ -107,11 +107,13 @@ read at either end, or an image whose digest is `@unknown`: no pod had started).
 records the other members' limits at a pass's start, so theirs are their limits at its end: a
 change there during a pass reads as a difference from that pass on, not as a change during it,
 and one undone before the pass ends is not seen. In a controlplane pass that read also compares
-each member's istiod Deployment replicas with the ones its TSVs record (a profile that turns
-autoscaling on is said to have its HPA move them); the other suites' replica counts are read at
-the probe's start only, so a pass whose profile turns autoscaling on there reads `unknown (see
-notes)` and warns that whether its HPA held the count all through the pass is not known. A
-controlplane window whose Running istiod pods changed also writes its
+each member's istiod Deployment replicas with the ones its TSVs record: a pass whose profile
+turns autoscaling on is said to have its HPA move them, and when they read the same at its end,
+it has a note that the HPA may have raised and lowered them in between (`same (see notes)` when
+nothing else differs). The other suites' replica counts are read at the probe's start only
+(dataplane's not at all), so a pass whose profile turns autoscaling on there reads
+`unknown (see notes)` and warns that whether its HPA held the count all through the pass is not
+known. A controlplane window whose Running istiod pods changed also writes its
 `cluster_connected_proxies` as `N/A`.
 
 The table's `Platform record` row compares each pass's record and the values its TSVs record
@@ -128,7 +130,8 @@ versions, istiod's limits and replica counts, lever by lever for the levers. Tho
   `tuning-access-log` Telemetry; or `discoverySelectors`, a limit or the replica count its
   `state/patch.json` sets; without a baseline, also what the reference pass's profile sets), or
   it ran one of the values the reference pass ran more than one of (one that changed during that
-  pass, or that its TSVs disagree on); the notes say which;
+  pass, or that its TSVs disagree on), or (controlplane) its profile turns autoscaling on and the
+  read at its end found the replica counts it started with; the notes say which;
 - `differs (see notes)`;
 - `not in effect (see notes)`: a member did not run a limit or the replica count that its
   `state/patch.json` sets to one value (not rolled out there; a limit, or a controlplane pass's
@@ -142,9 +145,9 @@ versions, istiod's limits and replica counts, lever by lever for the levers. Tho
 - `unknown (see notes)`: a value not read or not recorded in one of them (a digest `@unknown`, a
   member's version `unreachable`, a lever `unknown`), a limit or replica count its profile sets
   that its TSVs do not record on a member, a replica count its profile's HPA sets (autoscaling
-  on) in a suite that reads the count at the probe's start only (all but controlplane), or not
-  compared at the pass's end (a value the read after its probe could not compare, or no
-  `platform-drift.txt`: that read did not run);
+  on) in a suite that reads the count at the probe's start only or not at all (all but
+  controlplane), or not compared at the pass's end (a value the read after its probe could not
+  compare, or no `platform-drift.txt`: that read did not run);
 - `-`: no data.
 
 The baseline (or reference) pass reads `baseline (see notes)` when its own values changed during
@@ -192,20 +195,20 @@ other), `other (see notes)` (another profile's, or any in the baseline: a profil
 or never applied there, or the TSVs predate the markers) or `unknown (see notes)` (not read);
 all but `none` and `own` warn that the pass did not measure what its name says.
 
-The record follows the table once, digests shortened to 12 hex digits (a value its members do
-not share by value, five named, as is one that names fewer members than the record: the churn
-suites' replica counts), then each pass with notes, with those keys' values: where it differs,
-is mixed or cannot be compared, the one value every member shares when all of them differ, else
-only the members that do not match the reference pass, five at most, with a count
-(`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`); what changed during it (`v1.33.1
-to v1.33.2 on m7`); what it could not compare at its end; what its profile sets; the members
-that did not run the profile's value; and which value it ran where the reference pass ran more
-than one. One line stands for a pass whose every value is unknown, such as one from before the
-record. A pass that differs (an operator upgrade, a gateway roll or a lever put back between
-passes), whose profile's value was not in effect, that changed, is mixed or cannot be compared
-gets a warning in the notes and on stderr: its change against the baseline is then not the
-profile's alone, or not known to be (without a baseline, its difference from the reference pass
-is not the profiles' alone). The passes not read again at their end share one warning.
+The record follows the table once, digests shortened to 12 hex digits (a value its members do not
+share by value, five named, as is one that names fewer members than the record: the churn suites'
+replica counts), then each pass with notes, with those keys' values: where it differs, is mixed or
+cannot be compared, the one value every member shares when all of them differ, else the members
+that do not match the reference pass, then those that ran more than one value (`m3=mixed: 1 and
+2`), five at most, with a count (`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`); what
+changed during it (`v1.33.1 to v1.33.2 on m7`); what it could not compare at its end; what its
+profile sets; the members that did not run the profile's value; and which value it ran where the
+reference pass ran more than one. One line stands for a pass whose every value is unknown, such as
+one from before the record. A pass that differs (an operator upgrade, a gateway roll or a lever put
+back between passes), whose profile's value was not in effect, that changed, is mixed or cannot be
+compared gets a warning in the notes and on stderr: its change against the baseline is then not the
+profile's alone, or not known to be (without a baseline, its difference from the reference pass is
+not the profiles' alone). The passes not read again at their end share one warning.
 
 `TEST_PLATFORM` (`config/options.env`; `auto`, `kubernetes` or `openshift`) sets the platform
 instead of asking each cluster, for the probe suite's chart overlay and, with

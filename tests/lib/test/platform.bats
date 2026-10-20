@@ -1722,18 +1722,15 @@ resume_run() {
 	assert_output "Platform record: comparing what m001, m002, m003, m004, m005 and 495 more run now with what ${tsv} recorded at the sweep's start (--resume)"
 	[[ "$stderr" == *"  m001, m002, m003, m004, m005 and 495 more: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.6@${DIG_B}"$'\n'"Usual causes: ISTIOD_IMAGE_BY_CONTEXT: "* ]] || { echo "$stderr" | head -c 2000; false; }
 	[ "$(wc -l <<<"$stderr")" -lt 10 ]
-	# C11-S2: every member's istiod scaled from 1 to 2 during the sweep: one warning naming five,
-	# one finding in the reports (counts without member names), and every member in the marker
-	# and in tuning 004's values.
-	rm "${dir}/platform-drift.txt"
+	# C11-S2: every member's istiod scaled from 1 to 2 during the sweep, as the drift file of the
+	# read at its end records it (the SC11-S1 and I10-S1 tests run that read; a second one of 500
+	# members here took minutes, SC12-N1): one finding in the reports (counts without member
+	# names), and every member in tuning 004's values.
 	cp "$tsv" "${dir}/controlplane-r.tsv"
-	PROBE_ISTIOD_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" "$csv"
-	assert_success
-	assert_output "Platform record: reading m001, m002, m003, m004, m005 and 495 more again, to check that no build, istiod setting, istiod replica count or tuning profile object changed during the sweep"
-	[ "$(grep -c 'ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep' <<<"$stderr")" -eq 1 ] || { echo "$stderr" | head -c 2000; false; }
-	[[ "$stderr" == *"warning: m001, m002, m003, m004, m005 and 495 more: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 at its start, 2 at its end;"* ]] || { echo "$stderr" | head -c 2000; false; }
-	[ "$(wc -l <<<"$stderr")" -lt 5 ]
-	[ "$(grep '^# ISTIOD_REPLICAS_BY_CONTEXT=' "${dir}/platform-drift.txt" | tr , '\n' | grep -c '=2$')" -eq 500 ]
+	{
+		echo '# DRIFT_READ_AT=2026-01-01T00:00:00Z'
+		printf '# ISTIOD_REPLICAS_BY_CONTEXT=%s\n' "$(sed 's/,/=2,/g; s/$/=2/' <<<"$csv")"
+	} > "${dir}/platform-drift.txt"
 	run platform_report_warnings "${dir}/controlplane-r.tsv"
 	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep-x (platform-drift.txt): 1 to 2 on m001, m002, m003, m004, m005 and 495 more;"
 	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
@@ -1781,6 +1778,19 @@ resume_run() {
 	[[ "$stderr" == *"warning: and 1 more member whose ISTIOD_REPLICAS_BY_CONTEXT changed otherwise during the sweep"* ]] || { echo "$stderr"; false; }
 	run platform_report_warnings "${dir}/controlplane-r.tsv"
 	assert_output --partial "5 to 9 on m5; and 1 more member with other changes;"
+	# A --resume that finds seven recorded counts at 9 warns five times too, then how many more
+	# members (SC12-S1).
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=m1=1,m2=2,m3=3,m4=4,m5=5,m6=6,m7=7/' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=9 resume_run "${dir}/controlplane-r.tsv" "$csv" m1
+	assert_success
+	[ "$(grep -c '^warning: --resume: m[0-9]: ISTIOD_REPLICAS_BY_CONTEXT recorded' <<<"$stderr")" -eq 5 ] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: --resume: m5: ISTIOD_REPLICAS_BY_CONTEXT recorded 5, now 9; an HPA moves it,"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" != *"warning: --resume: m6:"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: --resume: and 2 more members whose ISTIOD_REPLICAS_BY_CONTEXT is not the recorded one; an HPA moves it, the report shows the recorded count while each row records its own istiod pods"* ]] || { echo "$stderr"; false; }
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=m1=1,m2=2,m3=3,m4=4,m5=5,m6=6,m7=9/' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=9 resume_run "${dir}/controlplane-r.tsv" "$csv" m1
+	assert_success
+	[[ "$stderr" == *"warning: --resume: and 1 more member whose ISTIOD_REPLICAS_BY_CONTEXT is not the recorded one;"* ]] || { echo "$stderr"; false; }
 }
 
 @test "platform_resume_check (H1): a TSV from before the record warns and proceeds" {
@@ -1993,6 +2003,8 @@ drift_unsourced() (
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	# The banner names what these TSVs record (C12-S1).
+	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
 	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
 	rm "${dir}/platform-drift.txt"
 	grep -q -- '--context=member-a .*get sidecar.networking.istio.io default -o name --ignore-not-found' "$CALLS"
@@ -2030,6 +2042,14 @@ drift_unsourced() (
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	! grep -q -- 'sidecar.networking.istio.io\|version --output=json' "$CALLS" || false
+	# A pass's TSV that records the root Sidecar's egress hosts alone: a tuning lever, no
+	# Kubernetes version.
+	rm "${dir}/platform-drift.txt"
+	tuning_baseline_state member-a "${KUBECTL[@]}" | sed -n 's/^SIDECAR_EGRESS_HOSTS=/# &/p' > "${dir}/controlplane-r.tsv"
+	printf 'timestamp\tcontext\n' >> "${dir}/controlplane-r.tsv"
+	run --separate-stderr platform_drift_check "$dir" member-a,member-b pass
+	assert_success
+	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting, tuning lever or tuning profile object changed during the pass"
 }
 
 @test "platform_drift_check (M-B1): istiod's limits the sweep's TSVs record are read again on their member; a change goes to the marker and the report" {
@@ -2124,6 +2144,12 @@ drift_unsourced() (
 	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
 	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on 1 of 2 members;"
 	refute_output --partial member-b
+	# A member whose count was not read at the start (a failed read records unknown) is one of
+	# them too, as the unread warning beside it counts it (M12-S1).
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,/# ISTIOD_REPLICAS_BY_CONTEXT=member-a=unknown,/' "${dir}/controlplane-r.tsv"
+	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on 1 of 2 members;"
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=member-a=unknown,/# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,/' "${dir}/controlplane-r.tsv"
 	# The TSVs' banner names the replica counts and limits they record (C11-S1).
 	rm "${dir}/platform-drift.txt"
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
@@ -2667,6 +2693,14 @@ drift_unsourced() (
 	assert_output "a=mixed: p:2 and p:3, b=p:2 (all 2 members)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=mixed:p:1;p:2" "a=p:1,b=p:1"
 	assert_output "mixed: p:1 and p:2"
+	# The members that do not match come first: six that only ran two values do not push the one
+	# that differs, or one not recorded, out of the five named (I12-B1); past five, how many more
+	# members, so a mixed value's "and" does not run into it (I12-N1).
+	local six="m1=mixed:1;2,m2=mixed:1;2,m3=mixed:1;2,m4=mixed:1;2,m5=mixed:1;2,m6=mixed:1;2"
+	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "${six},m7=3" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1"
+	assert_output "m7=3, m1=mixed: 1 and 2, m2=mixed: 1 and 2, m3=mixed: 1 and 2, m4=mixed: 1 and 2, and 2 more members (all 7 members)"
+	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "$six" "m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1,m8=1"
+	assert_output "m7 not recorded, m8 not recorded, m1=mixed: 1 and 2, m2=mixed: 1 and 2, m3=mixed: 1 and 2, and 3 more members (all 8 members)"
 	# Counts from before the record (no member) that disagree (R11-N1).
 	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "mixed:2;1" 1
 	assert_output "mixed: 2 and 1"
@@ -2681,7 +2715,7 @@ drift_unsourced() (
 		if ((i % 70 == 0)); then v+="${v:+,}m${i}=p:2"; else v+="${v:+,}m${i}=p:1"; fi
 	done
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "$v" "$ref"
-	assert_output "m70=p:2, m140=p:2, m210=p:2, m280=p:2, m350=p:2 and 2 more (7 of 500 members; the other 493 match)"
+	assert_output "m70=p:2, m140=p:2, m210=p:2, m280=p:2, m350=p:2, and 2 more members (7 of 500 members; the other 493 match)"
 }
 
 @test "platform_compare_members (U8-B1): a member with two values matches when one of them is the other side's build, else differs when a pair differs, else is not known" {
