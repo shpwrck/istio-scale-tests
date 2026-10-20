@@ -334,8 +334,10 @@ Other:
                               and warns when it runs another harness
                               (HARNESS_CONTENT_KEY; when only git describe
                               differs, an INFO) than the last known one before
-                              it, or unknown, or reads other Kubernetes server
-                              versions. resumes.txt in the sweep dir keeps one
+                              it, or unknown, or reads another Kubernetes server
+                              version than an earlier resume on a member the TSV
+                              records none for (one the TSV records stops it,
+                              above). resumes.txt in the sweep dir keeps one
                               line per resume (start time, HARNESS_SHA,
                               readiness, kube versions, the TSV's line count,
                               which starts its attempt, the proxy versions and

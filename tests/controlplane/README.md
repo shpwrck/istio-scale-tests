@@ -351,17 +351,18 @@ every resume whose `HARNESS_SHA` is `unknown`, every harness change (with the ti
 the rows are that harness's), and every resume that read other Kubernetes server versions than the
 last known ones (the preamble's `KUBE_VERSIONS`, then each resume's, members `unreachable` or
 `unknown` left out; grouped by old and new version; a later resume that could not read one of those
-members ends the span); a resume that runs another `HARNESS_SHA` than the last known one before it,
-or `unknown`, or reads other Kubernetes server versions, also warns (another harness: another
-`HARNESS_CONTENT_KEY`; when only `git describe` differs, an `INFO` instead). `HARNESS_SHA` is `git
-describe --always --abbrev=7`, and a harness with uncommitted changes (a file under `tests/`,
-`config/`, `charts/` or `terraform/`, tracked or untracked, not ignored) reads
-`<describe>-dirty.<8hex>`, a hash of that content (not a diff, so the operator's git
-config does not change it): two different uncommitted trees on one commit record two
-values, so the check tells them apart. Ignored files never count: editor and Finder
-files (`.DS_Store`, `*.swp`, `*.swo`, `*~`), the `results/` dirs, the sweep's own output
-dir, and whatever the operator's global `core.excludesFile` ignores (or git's default
-`~/.config/git/ignore` when that key is unset); nor do files outside those four dirs (a
+members ends the span; a version that differs from the preamble's stops the resume first, as above,
+so these are members whose version the sweep's start could not read); a resume that runs another
+`HARNESS_SHA` than the last known one before it, or `unknown`, or reads other Kubernetes server
+versions, also warns (another harness: another `HARNESS_CONTENT_KEY`; when only `git describe`
+differs, an `INFO` instead). `HARNESS_SHA` is `git describe --always --abbrev=7`, and a harness
+with uncommitted changes (a file under `tests/`, `config/`, `charts/` or `terraform/`, tracked or
+untracked, not ignored) reads `<describe>-dirty.<8hex>`, a hash of that content (not a diff, so the
+operator's git config does not change it): two different uncommitted trees on one commit record two
+values, so the check tells them apart. Ignored files never count: editor and Finder files
+(`.DS_Store`, `*.swp`, `*.swo`, `*~`), the `results/` dirs, the sweep's own output dir, and whatever
+the operator's global `core.excludesFile` ignores (or git's default `~/.config/git/ignore` when that
+key is unset); nor do files outside those four dirs (a
 campaign note under `docs/`) or the submodules (the bats checkouts, moved or not checked out). A
 tree git cannot hash reads `-dirty.unknown` when its tracked files differ from the commit. The sweep
 reads the harness again before its steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default)

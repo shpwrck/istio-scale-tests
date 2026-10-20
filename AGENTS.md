@@ -5,8 +5,9 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
 ## What this repo is
 
 1. `terraform/rosa-hcp/`: ROSA HCP cluster provisioning (optional).
-2. `terraform/platform/`: ACM + OpenShift GitOps on the hub and spoke registration. Clusters come
-   from ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
+2. `terraform/platform/`: Argo CD on the hub (ACM and OpenShift GitOps on OpenShift) and spoke
+   registration. Clusters come from an existing kubeconfig or ROSA state; brownfield switches
+   reuse installed operators.
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
    ApplicationSets (members by cluster-Secret label on Kubernetes, by ACM Placement on OpenShift).
 4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
@@ -65,7 +66,7 @@ which wins over the upstream docs there when they disagree.
     `charts/mesh-wiring-verify/values.yaml`, `waitForCacerts.image` in
     `charts/spoke-ossm/values.yaml` and both gateways' `waitForIstiod.image`, each with a
     keep-in-sync comment naming the others (`charts/spoke-east-west-gateway/README.md` repeats it)
-  - ACM/GitOps channels: `terraform/platform/variables.tf`
+  - ACM/GitOps channels (OpenShift): `terraform/platform/variables.tf`
   - test images and the `ISTIO_VERSION` pin: `config/versions.env`, with a
     keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`);
     `tests/lib/test/version-pins.bats` fails when they drift. Results record the version the
@@ -87,7 +88,7 @@ which wins over the upstream docs there when they disagree.
   derives) defaults. Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats`
   checks the order.
 - Contexts: env `SETUP_CONTEXTS` and flag `--contexts CSV` list **mesh members only**, never the
-  ACM hub. Parse into `CONTEXTS_CSV`, split into `CONTEXTS[@]`, loop with `ctx`.
+  hub. Parse into `CONTEXTS_CSV`, split into `CONTEXTS[@]`, loop with `ctx`.
 - Arrays keyed by a variable (a context or file name): bash 4.3 to 5.1 expand the key twice inside
   arithmetic and `-v`, so a key with a quote, `$` or `]` breaks. Never write `(( a[$k] ))`,
   `$(( a[$k] + 1 ))`, `let`, `[[ a[$k] -gt N ]]` or `[[ -v a[$k] ]]`: read the element into a
@@ -146,7 +147,7 @@ which wins over the upstream docs there when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
@@ -171,7 +172,7 @@ which wins over the upstream docs there when they disagree.
 
 ## Tools
 
-`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
+`bash` 4.3+, `kubectl` (or `oc`), `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
 `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in
 `tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
 busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for
