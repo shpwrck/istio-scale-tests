@@ -75,6 +75,7 @@ EXTRACTED_PATTERNS=(
 	'is_nonneg_int() {'
 	'file_sha256() {'
 	'kv_value() {'
+	'each_bounded() {'
 	'validate_scoping() {'
 	'_detect_now_ns() {'
 	'now_ns() {'

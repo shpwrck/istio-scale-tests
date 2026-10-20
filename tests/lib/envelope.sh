@@ -409,10 +409,18 @@ env_istiod_resources() {
 		| env_parse_istiod_resources
 }
 
+# _env_istiod_one <ctx> <dir>: env_istiod_resources on <ctx> with the kubectl argv of the
+# env_istiod_scan call it runs under (_eis_argv, dynamic scope), for each_bounded.
+# shellcheck disable=SC2329
+_env_istiod_one() {
+	env_istiod_resources "$1" "${_eis_argv[@]}"
+}
+
 # env_istiod_scan <contexts_csv> <kubectl_argv...>
 # istiod req/lim from the SOURCE (first) context, which is the pin the preamble
 # records, plus the replica count of EVERY context, read concurrently (one
-# `get deploy istiod` each, 5 s timeout) so a 20-cluster mesh costs one read, not 20.
+# `get deploy istiod` each, 5 s timeout, PLATFORM_READ_PARALLEL at a time: each_bounded)
+# so a 20-cluster mesh costs one read, not 20.
 # Members can run different replica counts, and the per-replica proxy figure is about
 # 1/R of the cluster figure, so R must not come from the first context alone. Emits:
 #   req_cpu_m=.. req_mem_mi=.. lim_cpu_m=.. lim_mem_mi=.. replicas=<summary>
@@ -422,21 +430,16 @@ env_istiod_resources() {
 # shellcheck disable=SC2329
 env_istiod_scan() {
 	local contexts_csv="$1"; shift
-	local -a ctxs=() rep_list=() pids=() rk=()
+	local -a ctxs=() rep_list=() rk=() _eis_argv=("$@")
 	split_csv "$contexts_csv" ctxs
 	local req_cpu="unknown" req_mem="unknown" lim_cpu="unknown" lim_mem="unknown"
-	local by="" kv i rep tmp="" p
+	local by="" kv i rep tmp=""
 	if ((${#ctxs[@]})) && tmp="$(mktemp -d 2>/dev/null)"; then
-		# Temp files by index: context names can contain '/' (oc login style).
-		for i in "${!ctxs[@]}"; do
-			env_istiod_resources "${ctxs[i]}" "$@" > "${tmp}/${i}" 2>/dev/null &
-			pids+=($!)
-		done
-		for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+		each_bounded "${PLATFORM_READ_PARALLEL:-20}" _env_istiod_one "$tmp" "${ctxs[@]}"
 		for i in "${!ctxs[@]}"; do
 			rep="unknown"
 			# shellcheck disable=SC2207
-			rk=($(cat "${tmp}/${i}" 2>/dev/null))
+			rk=($(cat "${tmp}/${i}.row" 2>/dev/null))
 			for kv in ${rk[@]+"${rk[@]}"}; do
 				case "$kv" in
 					replicas=*) rep="${kv#replicas=}" ;;

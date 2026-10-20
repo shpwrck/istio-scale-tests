@@ -232,6 +232,33 @@ _fake_kubectl() {
 	assert_output "plain=v1.34.0-plain,default/api-x:6443/admin=v1.34.0-default_api-x:6443_admin"
 }
 
+# _conc_kubectl <kubectl args...>: counts the reads alive (their dirs under running/) as each
+# starts, in counts, then answers both the version read and istiod's Deployment read.
+_conc_kubectl() {
+	local ctx="" a
+	for a in "$@"; do [[ "$a" != --context=* ]] || ctx="${a#--context=}"; done
+	mkdir -p "${BATS_TEST_TMPDIR}/running/${ctx}"
+	find "${BATS_TEST_TMPDIR}/running" -mindepth 1 -maxdepth 1 -type d | wc -l >>"${BATS_TEST_TMPDIR}/counts"
+	sleep 0.2
+	rmdir "${BATS_TEST_TMPDIR}/running/${ctx}"
+	case " $* " in
+	*" version "*) printf '{"serverVersion":{"gitVersion":"v1.34.0"}}\n' ;;
+	*) echo '{"spec":{"replicas":2,"template":{"spec":{"containers":[{"name":"discovery","resources":{"limits":{"cpu":"2","memory":"4Gi"}}}]}}}}' ;;
+	esac
+}
+
+@test "probe_kube_versions: PLATFORM_READ_PARALLEL members at a time (each_bounded), in the given order" {
+	PLATFORM_READ_PARALLEL=2 run probe_kube_versions "m0,m1,m2,m3,m4,m5" _conc_kubectl
+	assert_success
+	assert_output "m0=v1.34.0,m1=v1.34.0,m2=v1.34.0,m3=v1.34.0,m4=v1.34.0,m5=v1.34.0"
+	[ "$(wc -l <"${BATS_TEST_TMPDIR}/counts")" -eq 6 ]
+	[ "$(sort -n "${BATS_TEST_TMPDIR}/counts" | tail -1 | tr -d ' ')" -le 2 ]
+	: >"${BATS_TEST_TMPDIR}/counts"
+	PLATFORM_READ_PARALLEL=1 run probe_kube_versions "m0,m1,m2" _conc_kubectl
+	assert_output "m0=v1.34.0,m1=v1.34.0,m2=v1.34.0"
+	[ "$(sort -nu "${BATS_TEST_TMPDIR}/counts" | tr -d ' ')" = 1 ]
+}
+
 @test "probe_kube_versions: unreachable context reports 'unreachable'" {
 	_fail_kubectl() { return 1; }
 	run probe_kube_versions "a,b" _fail_kubectl

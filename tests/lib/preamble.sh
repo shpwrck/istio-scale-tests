@@ -10,7 +10,8 @@
 #       terraform/ (submodules never count), or "unknown"
 #   kube_versions <ctx> <kubectl_argv...>          -> kubectl server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
-#                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
+#                                                  -> CSV of ctx=ver pairs, PLATFORM_READ_PARALLEL
+#                                                     at a time, each with a 5s timeout (PL2)
 #   tuning_baseline_state <ctx> <kubectl_argv...>  -> two lines (TUNING_BASELINE=, SIDECAR_EGRESS_HOSTS=)
 #                                                     queried from the LIVE mesh, on|off|unknown (PL2)
 #   istio_live_version <ctx> <kubectl_argv...>     -> the version the member RUNS (its active
@@ -103,35 +104,32 @@ kube_versions() {
 	printf '%s\n' "$gitv"
 }
 
-# Concurrent probe of multiple contexts. Returns ctx1=ver1,ctx2=ver2,...
+# _kube_versions_one <ctx> <dir>: <ctx>'s kube_versions with the kubectl argv of the
+# probe_kube_versions call it runs under (_pkv_argv, dynamic scope), for each_bounded.
+# shellcheck disable=SC2329
+_kube_versions_one() {
+	kube_versions "$1" "${_pkv_argv[@]}"
+}
+
+# Probe of multiple contexts, PLATFORM_READ_PARALLEL at a time (each_bounded,
+# tests/lib/common.sh). Returns ctx1=ver1,ctx2=ver2,... in the given order; a member whose read
+# left no answer at all (no temp dir, say) reads unknown.
 # Usage: probe_kube_versions "$ctxs_csv" <kubectl_argv...>
 # shellcheck disable=SC2329
 probe_kube_versions() {
 	local ctxs_csv="$1"
 	shift
-	local -a ctxs=()
+	local -a ctxs=() _pkv_argv=("$@")
 	split_csv "$ctxs_csv" ctxs
-	local tmp
-	tmp="$(mktemp -d)"
-	# Temp files are named by index: context names can contain '/' (oc login style).
-	local i pids=()
+	local tmp="" i v out=""
+	tmp="$(mktemp -d 2>/dev/null)" || tmp=""
+	[[ -z "$tmp" ]] || each_bounded "${PLATFORM_READ_PARALLEL:-20}" _kube_versions_one "$tmp" ${ctxs[@]+"${ctxs[@]}"}
 	for i in "${!ctxs[@]}"; do
-		(
-			v="$(kube_versions "${ctxs[i]}" "$@")"
-			printf '%s=%s\n' "${ctxs[i]}" "$v" > "${tmp}/${i}.kv"
-		) &
-		pids+=($!)
+		v=""
+		[[ -z "$tmp" ]] || v="$(head -n 1 "${tmp}/${i}.row" 2>/dev/null || true)"
+		out+="${out:+,}${ctxs[i]}=${v:-unknown}"
 	done
-	local p
-	for p in ${pids[@]+"${pids[@]}"}; do wait "$p" 2>/dev/null || true; done
-	local first=1 line out=""
-	for i in "${!ctxs[@]}"; do
-		if [[ -r "${tmp}/${i}.kv" ]]; then
-			line="$(<"${tmp}/${i}.kv")"
-			if ((first)); then out="$line"; first=0; else out+=",${line}"; fi
-		fi
-	done
-	rm -rf "$tmp"
+	[[ -z "$tmp" ]] || rm -rf "$tmp"
 	printf '%s\n' "$out"
 }
 

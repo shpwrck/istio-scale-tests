@@ -406,6 +406,29 @@ _rep_kubectl() {
 	esac
 }
 
+# _conc_kubectl <kubectl args...>: counts the reads alive (their dirs under running/) as each
+# starts, in counts, then answers both the version read and istiod's Deployment read.
+_conc_kubectl() {
+	local ctx="" a
+	for a in "$@"; do [[ "$a" != --context=* ]] || ctx="${a#--context=}"; done
+	mkdir -p "${BATS_TEST_TMPDIR}/running/${ctx}"
+	find "${BATS_TEST_TMPDIR}/running" -mindepth 1 -maxdepth 1 -type d | wc -l >>"${BATS_TEST_TMPDIR}/counts"
+	sleep 0.2
+	rmdir "${BATS_TEST_TMPDIR}/running/${ctx}"
+	case " $* " in
+	*" version "*) printf '{"serverVersion":{"gitVersion":"v1.34.0"}}\n' ;;
+	*) echo '{"spec":{"replicas":2,"template":{"spec":{"containers":[{"name":"discovery","resources":{"limits":{"cpu":"2","memory":"4Gi"}}}]}}}}' ;;
+	esac
+}
+
+@test "env_istiod_scan: PLATFORM_READ_PARALLEL members at a time (each_bounded), each member's count in order" {
+	PLATFORM_READ_PARALLEL=2 run env_istiod_scan "m0,m1,m2,m3,m4" _conc_kubectl
+	assert_success
+	assert_output --partial "lim_cpu_m=2000 lim_mem_mi=4096 replicas=2 replicas_by_context=m0=2,m1=2,m2=2,m3=2,m4=2"
+	[ "$(wc -l <"${BATS_TEST_TMPDIR}/counts")" -eq 5 ]
+	[ "$(sort -n "${BATS_TEST_TMPDIR}/counts" | tail -1 | tr -d ' ')" -le 2 ]
+}
+
 @test "env_istiod_scan: req/lim from the first context, replicas from every context" {
 	run env_istiod_scan "mesh-a,mesh-b,mesh-c" _rep_kubectl
 	assert_success

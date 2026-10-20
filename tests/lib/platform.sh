@@ -730,28 +730,12 @@ _platform_row_has_unknown() {
 }
 
 # _platform_each <fn> <tmp> <ctx>...: run "<fn> <ctx> <tmp>/<i>" for each member in the
-# background, PLATFORM_READ_PARALLEL at a time (500 members would otherwise start 500 reads, and
-# their kubectl processes, at once), with its stdout in <tmp>/<i>.row and its stderr in
-# <tmp>/<i>.warn (<i>: the member's index), and wait for all of them. The pool runs in a subshell
-# of its own, so its waits see only its reads, never a job of the caller's.
+# background, PLATFORM_READ_PARALLEL at a time (each_bounded, tests/lib/common.sh), with its
+# stdout in <tmp>/<i>.row and its stderr in <tmp>/<i>.warn (<i>: the member's index), and wait for
+# all of them.
 # shellcheck disable=SC2329
 _platform_each() {
-	local fn="$1" tmp="$2"
-	shift 2
-	(
-		local i n=0
-		local -a _pl_m=("$@")
-		for i in "${!_pl_m[@]}"; do
-			if ((n >= PLATFORM_READ_PARALLEL)); then
-				wait -n || true
-				n=$((n - 1))
-			fi
-			mkdir -p "${tmp}/${i}"
-			("$fn" "${_pl_m[i]}" "${tmp}/${i}" >"${tmp}/${i}.row" 2>"${tmp}/${i}.warn") &
-			n=$((n + 1))
-		done
-		wait
-	)
+	each_bounded "$PLATFORM_READ_PARALLEL" "$@"
 }
 
 # _platform_read_members <ctx>...: read each member's record (_platform_probe_member; a member's
@@ -2498,10 +2482,9 @@ EOF
   platform record (kubectl --request-timeout); raise it for members with many nodes or a
   slow link.
   PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL:-20}): how many members' platform records
-  are read at once (a few kubectl calls each; also their tuning objects, and istiod's limits
-  and replica counts read again at a run's end); lower it when the machine running the suite
-  runs short of memory or processes on a large mesh. The Kubernetes versions, and istiod's
-  replicas at a run's start, are read on every member at once.
+  are read at once (a few kubectl calls each; also their tuning objects, Kubernetes versions
+  and istiod's replica counts, and istiod's limits read again at a run's end); lower it when
+  the machine running the suite runs short of memory or processes on a large mesh.
 EOF
 }
 

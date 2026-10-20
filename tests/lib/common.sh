@@ -107,6 +107,9 @@
 #                                        (sha256sum, shasum) works
 #   kv_value <key> <tokens>           -> the value of <key>=... among "k=v k=v" tokens, or
 #                                        unknown
+#   each_bounded <max> <fn> <tmp> <item>...
+#                                     -> run <fn> on each item in the background, <max> at a
+#                                        time (the platform record's PLATFORM_READ_PARALLEL)
 #
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -2679,6 +2682,33 @@ file_sha256() {
 	fi
 	out="${out%% *}"
 	if [[ "$out" =~ ^[0-9a-f]{64}$ ]]; then echo "$out"; else echo unknown; fi
+}
+
+# each_bounded <max> <fn> <tmp> <item>...: run "<fn> <item> <tmp>/<i>" for each item in the
+# background, <max> at a time (a whole number above zero, else 20: 500 members would otherwise
+# start 500 reads, and their kubectl processes, at once), with its stdout in <tmp>/<i>.row and its
+# stderr in <tmp>/<i>.warn (<i>: the item's index; files by index, since a context name can hold
+# a /), and wait for all of them. The pool runs in a subshell of its own, so its waits see only
+# its jobs, never one of the caller's. <fn> sees the caller's variables (a local array included).
+# shellcheck disable=SC2329
+each_bounded() {
+	local _eb_max="$1" _eb_fn="$2" _eb_tmp="$3"
+	shift 3
+	[[ "$_eb_max" =~ ^[1-9][0-9]*$ ]] || _eb_max=20
+	(
+		local _eb_i _eb_n=0
+		local -a _eb_m=("$@")
+		for _eb_i in "${!_eb_m[@]}"; do
+			if ((_eb_n >= _eb_max)); then
+				wait -n || true
+				_eb_n=$((_eb_n - 1))
+			fi
+			mkdir -p "${_eb_tmp}/${_eb_i}"
+			("$_eb_fn" "${_eb_m[_eb_i]}" "${_eb_tmp}/${_eb_i}" >"${_eb_tmp}/${_eb_i}.row" 2>"${_eb_tmp}/${_eb_i}.warn") &
+			_eb_n=$((_eb_n + 1))
+		done
+		wait
+	)
 }
 
 # kv_value <key> <tokens>: the value of <key>=... among whitespace-separated "k=v" tokens (what

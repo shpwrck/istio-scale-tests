@@ -345,9 +345,9 @@ or the network topology differ (an autoscaler or an HPA moves some of them);
 [tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is
 bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
 nodes), and `PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile
-objects, and istiod's limits and replica counts read again at a run's end (20; lower it when the
-machine running the suite runs short of memory or processes on a large mesh). The Kubernetes
-versions, and istiod's replicas at a run's start, are read on every member at once.
+objects, the Kubernetes versions, istiod's replica counts, and istiod's limits read again at a
+run's end (20; lower it when the machine running the suite runs short of memory or processes on a
+large mesh).
 
 ### Run config (`--config FILE`)
 
