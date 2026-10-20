@@ -329,8 +329,9 @@ Kubernetes version and its first member's tuning levers, Sidecar egress hosts an
 when its TSVs record them (`TUNING_BASELINE`: four levers, each `on`, `off` or `unknown`, as
 "Tuning levers" in [tests/controlplane/README.md](tests/controlplane/README.md) describes), and
 every other member's istiod limits against the recorded ones (the controlplane report divides
-every member's window-peak CPU and RSS % by those), and for the controlplane suite each member's
-istiod replica count (its Deployment's) against the recorded one: a value that changed goes to
+every member's window-peak CPU and RSS % by those), and each member's istiod replica count against
+the recorded one (controlplane: its Deployment's replicas; propagation, churn and churn-dataplane:
+its Running istiod pods, churn-dataplane's on its source member only): a value that changed goes to
 `platform-drift.txt` in the sweep dir, and every report of the sweep says so in its body, naming
 the sweep dir and the value at the start and at the end (the record's keys read `mixed:`, as does
 `KUBE_VERSIONS` in churn's report, which merges it); so does a value the read could not compare
@@ -345,9 +346,9 @@ or the network topology differ (an autoscaler or an HPA moves some of them);
 [tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is
 bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
 nodes), and `PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile
-objects, the Kubernetes versions, istiod's replica counts, and istiod's limits read again at a
-run's end (20; lower it when the machine running the suite runs short of memory or processes on a
-large mesh).
+objects, the Kubernetes versions, istiod's replica counts, and istiod's limits and replica counts
+read again at a run's end (20; lower it when the machine running the suite runs short of memory or
+processes on a large mesh).
 
 ### Run config (`--config FILE`)
 

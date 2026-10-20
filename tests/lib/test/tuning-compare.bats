@@ -1122,46 +1122,54 @@ with_replicas() {
 	assert_output --partial "which its TSVs do not record (its TSVs predate the key), so whether it was in effect on any member is not known"
 }
 
-@test "tuning 004 (M10-B1): a replica count its profile sets that its TSVs do not record on a member (the churn suites' source member only) is not known there, never in effect; with or without a baseline" {
-	local p
+@test "tuning 004 (M10-B1): a replica count its profile sets that its TSVs do not record on a member (churn-dataplane's source member only, or an older churn sweep's) is not known there, never in effect; with or without a baseline" {
+	local p suite
 	lever_passes
-	sed -i 's/^# SUITE=controlplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	sed -i 's/^# SUITE=controlplane$/# SUITE=churn-dataplane/' "${S}/sweep-metadata.txt"
 	for p in baseline 02-x; do with_replicas "$p" 1 ISTIOD_REPLICAS; done
 	with_replicas 04-connection-pools 2 ISTIOD_REPLICAS
 	echo '{"spec":{"values":{"pilot":{"replicaCount":2}}}}' > "${S}/04-connection-pools/state/patch.json"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), which its TSVs do not record on ctx-b (the churn suite's TSVs record the source member's only), so whether it was in effect there is not known, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), which its TSVs do not record on ctx-b (the churn-dataplane suite's TSVs record the source member's only), so whether it was in effect there is not known, nor whether its change against the baseline is the profile's alone"
 	assert_output --partial "Pass 04-connection-pools, its profile's value not known to be in effect on ISTIOD_REPLICAS_BY_CONTEXT:"
 	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile (its state/patch.json sets spec.values.pilot.replicaCount): \`2 on ctx-a\`"
-	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, the profile's 2 not known to be in effect: not recorded on ctx-b (the churn suite's TSVs record the source member's only)"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, the profile's 2 not known to be in effect: not recorded on ctx-b (the churn-dataplane suite's TSVs record the source member's only)"
 	[[ "$(grep -c '^warning: ' <<<"$stderr")" == 1 ]]
+	# An older churn sweep's TSVs record the source member's count only too, and say so.
+	sed -i 's/^# SUITE=churn-dataplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "which its TSVs do not record on ctx-b (its TSVs record the source member's only, as the churn suite's did before they recorded every member's), so whether it was in effect there is not known"
+	sed -i 's/^# SUITE=churn$/# SUITE=churn-dataplane/' "${S}/sweep-metadata.txt"
 	# The source member did not run it either: not in effect there, and still not known on ctx-b.
 	with_replicas 04-connection-pools 1 ISTIOD_REPLICAS
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | not in effect (see notes) |"
-	assert_output --partial "yet ISTIOD_REPLICAS_BY_CONTEXT reads 1 on ctx-a, so the profile's value was not in effect there all through the pass (not rolled out there, changed between its TSVs, set by an HPA, or a Terminating pod still counted as Running after a short --settle)"
-	assert_output --partial "which its TSVs do not record on ctx-b (the churn suite's TSVs record the source member's only)"
+	assert_output --partial "yet ISTIOD_REPLICAS_BY_CONTEXT reads 1 on ctx-a, so the profile's value was not in effect there all through the pass (not rolled out there, changed during it, set by an HPA, or a Terminating pod still counted as Running after a short --settle)"
+	assert_output --partial "which its TSVs do not record on ctx-b (the churn-dataplane suite's TSVs record the source member's only)"
 	assert_output --partial "Pass 04-connection-pools, its profile's value not in effect on ISTIOD_REPLICAS_BY_CONTEXT, its profile's value not known to be in effect on ISTIOD_REPLICAS_BY_CONTEXT:"
 	# Without a baseline, the reference pass is a profile pass: its own cell says so.
 	mkdir -p "${BATS_TEST_TMPDIR}/gone"
 	mv "${S}/baseline" "${BATS_TEST_TMPDIR}/gone/"
-	printf '# SUITE=churn\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
+	printf '# SUITE=churn-dataplane\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
 	with_replicas 04-connection-pools 2 ISTIOD_REPLICAS
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | reference (see notes) |"
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), which its TSVs do not record on ctx-b (the churn suite's TSVs record the source member's only), so whether it was in effect there is not known, nor whether any pass's difference from it is the profiles' alone"
-	# Every member recorded (propagation's form) and running it: nothing to say.
-	printf '# SUITE=propagation\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
-	with_replicas 04-connection-pools ctx-a=2,ctx-b=2 ISTIOD_REPLICAS
-	with_replicas 02-x ctx-a=2,ctx-b=2 ISTIOD_REPLICAS
-	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
-	assert_success
-	assert_output --partial "| Platform record | reference | same |"
-	refute_output --partial "not known to be in effect"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), which its TSVs do not record on ctx-b (the churn-dataplane suite's TSVs record the source member's only), so whether it was in effect there is not known, nor whether any pass's difference from it is the profiles' alone"
+	# Every member recorded (propagation's and churn's form) and running it: nothing to say.
+	for suite in propagation churn; do
+		printf '# SUITE=%s\n# PASSES=04-connection-pools,02-x\n' "$suite" > "${S}/sweep-metadata.txt"
+		with_replicas 04-connection-pools ctx-a=2,ctx-b=2 ISTIOD_REPLICAS
+		with_replicas 02-x ctx-a=2,ctx-b=2 ISTIOD_REPLICAS
+		run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+		assert_success
+		assert_output --partial "| Platform record | reference | same |"
+		refute_output --partial "not known to be in effect"
+	done
 }
 
 @test "tuning 004 (C10-S2): at 500 members, what a profile's value was not in effect on, not recorded on, and which of the baseline's values a pass ran each name five members, then how many more" {
@@ -1196,13 +1204,13 @@ with_replicas() {
 	assert_output --partial "- KUBE_VERSIONS, where the baseline ran more than one value, one of those: \`v1.33.2 on ${arr[0]}, ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]} and 495 more\`"
 	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$output"
 	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$stderr"
-	# The churn suites' form: the 499 other members are not recorded.
-	sed -i 's/^# SUITE=controlplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	# churn-dataplane's form: the 499 other members are not recorded.
+	sed -i 's/^# SUITE=controlplane$/# SUITE=churn-dataplane/' "${S}/sweep-metadata.txt"
 	for m in baseline 02-x; do with_replicas "$m" 1 ISTIOD_REPLICAS; done
 	with_replicas 04-connection-pools 2 ISTIOD_REPLICAS
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
-	assert_output --partial "which its TSVs do not record on ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]}, ${arr[5]} and 494 more (the churn suite's TSVs record the source member's only)"
+	assert_output --partial "which its TSVs do not record on ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]}, ${arr[5]} and 494 more (the churn-dataplane suite's TSVs record the source member's only)"
 	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$output"
 	run --separate-stderr "$COMPARE" --results-dir "$S"
 	assert_success
@@ -1286,10 +1294,15 @@ with_replicas() {
 	assert_output --partial "| Platform record | baseline | changed (see notes) | same |"
 	assert_output --partial "- **Warning:** pass 02-x: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass (its platform-drift.txt): 1 to 2 on ctx-b; its profile turns autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA moved the count, and its figures may be over more than one istiod replica count"
 	refute_output --partial "so part of it ran with other istiod replica counts"
-	# A pass of another suite says its record was not read again for builds, versions, levers and limits only.
+	# A pass of another suite whose TSVs record the count says the read it did not get covers that
+	# too; a dataplane pass's, whose TSVs record none, does not.
 	mkdir -p "${BATS_TEST_TMPDIR}/gone"
 	mv "${S}/02-x/platform-drift.txt" "${BATS_TEST_TMPDIR}/gone/"
 	sed -i 's/^# SUITE=controlplane/# SUITE=propagation/' "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "so whether its builds, Kubernetes versions, tuning levers, istiod limits or replica counts changed during it is not known"
+	sed -i 's/^# SUITE=propagation/# SUITE=dataplane/' "${S}/sweep-metadata.txt"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "so whether its builds, Kubernetes versions, tuning levers or istiod limits changed during it is not known"
@@ -1340,33 +1353,60 @@ with_replicas() {
 	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`m7=pilot:1.30.6@sha256:bbbbbbbbbbbb, m1=pilot:1.30.5@unknown, m2=pilot:1.30.5@unknown, m3=pilot:1.30.5@unknown, m4=pilot:1.30.5@unknown, and 2 more members (all 7 members)\`"
 }
 
-@test "tuning 004 (M11-S2): a pass of a suite that reads istiod's replica count at its start only, whose profile turns autoscaling on, is not known all through the pass: noted and warned" {
-	local p
+@test "tuning 004 (M11-S2): a pass whose TSVs do not record each member's istiod replica count, whose profile turns autoscaling on, is not known all through the pass: noted and warned; one whose TSVs record each member's has a note" {
+	local p suite
 	lever_passes
-	sed -i 's/^# SUITE=controlplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	sed -i 's/^# SUITE=controlplane$/# SUITE=churn-dataplane/' "${S}/sweep-metadata.txt"
 	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" 1 ISTIOD_REPLICAS; done
 	echo '{"spec":{"values":{"pilot":{"autoscaleEnabled":true,"autoscaleMin":1,"autoscaleMax":3}}}}' > "${S}/04-connection-pools/state/patch.json"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile turns istiod's autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA sets each member's istiod replica count, and the churn suite's TSVs record the source member's count at the probe's start only, so whether that count held all through the pass is not known, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile turns istiod's autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA sets each member's istiod replica count, and the churn-dataplane suite's TSVs record the source member's count only, so whether that count held all through the pass is not known, nor whether its change against the baseline is the profile's alone"
 	assert_output --partial "Pass 04-connection-pools, not known all through the pass on ISTIOD_REPLICAS_BY_CONTEXT (set by its profile's HPA):"
-	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the churn suite's TSVs record the source member's count at the probe's start only, so whether that count held all through the pass is not known"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the churn-dataplane suite's TSVs record the source member's count only, so whether that count held all through the pass is not known"
 	[[ "$stderr" == *"warning: pass 04-connection-pools: its profile turns istiod's autoscaling on"* ]]
 	run --separate-stderr "$COMPARE" --results-dir "$S"
 	assert_success
-	assert_output --regexp '  ISTIOD_REPLICAS_BY_CONTEXT +set by its profile.s HPA \(spec.values.pilot.autoscaleEnabled in its state/patch.json\): the churn suite'
-	# propagation reads each member's count, at the probe's start only too.
-	sed -i 's/^# SUITE=churn$/# SUITE=propagation/' "${S}/sweep-metadata.txt"
-	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" ctx-a=1,ctx-b=1 ISTIOD_REPLICAS; done
+	assert_output --regexp '  ISTIOD_REPLICAS_BY_CONTEXT +set by its profile.s HPA \(spec.values.pilot.autoscaleEnabled in its state/patch.json\): the churn-dataplane suite'
+	# An older churn sweep's TSVs (the source member's count only) and a dataplane sweep's (none).
+	sed -i 's/^# SUITE=churn-dataplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
-	assert_output --partial "so its HPA sets each member's istiod replica count, and the propagation suite's TSVs record each member's count at the probe's start only, so"
+	assert_output --partial "so its HPA sets each member's istiod replica count, and its TSVs do not record each member's count, so whether that count held all through the pass is not known"
+	sed -i 's/^# SUITE=churn$/# SUITE=dataplane/' "${S}/sweep-metadata.txt"
+	for p in baseline 02-x 04-connection-pools; do sed -i '/^# ISTIOD_REPLICAS/d' "${S}/${p}"/controlplane-*.tsv; done
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	assert_output --partial "so its HPA sets each member's istiod replica count, and the dataplane suite's TSVs record no count, so whether that count held all through the pass is not known"
+	# propagation's and churn's TSVs record each member's Running istiod pods, which the read at a
+	# pass's end compares: one that held is a note, not a warning, since its HPA may have raised
+	# and lowered it in between.
+	for suite in propagation churn; do
+		sed -i "s/^# SUITE=.*/# SUITE=${suite}/" "${S}/sweep-metadata.txt"
+		for p in baseline 02-x 04-connection-pools; do with_replicas "$p" ctx-a=1,ctx-b=1 ISTIOD_REPLICAS; done
+		run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+		assert_success
+		assert_output --partial "| Platform record | baseline | same | same (see notes) |"
+		assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; a row whose window saw istiod's pods change counts it as an istiod restart"
+		refute_output --partial "Warning:** pass 04-connection-pools"
+		[[ "$stderr" != *"pass 04-connection-pools"* ]] || { echo "$stderr"; false; }
+	done
+	# One a context name the record sanitizes names (lab~b is lab_b there) is still each member's.
+	sed -i 's/ctx-b/lab_b/g' "${S}"/*/controlplane-*.tsv
+	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" ctx-a=1,lab~b=1 ISTIOD_REPLICAS; done
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | same (see notes) |"
+	refute_output --partial "Warning:** pass 04-connection-pools"
+	sed -i 's/lab_b/ctx-b/g' "${S}"/*/controlplane-*.tsv
+	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" 1 ISTIOD_REPLICAS; done
 	# Without a baseline, the reference pass is that profile pass: its own cell says so.
 	mkdir -p "${BATS_TEST_TMPDIR}/gone"
 	mv "${S}/baseline" "${BATS_TEST_TMPDIR}/gone/"
-	printf '# SUITE=propagation\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
+	printf '# SUITE=churn-dataplane\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | reference (see notes) | same |"
@@ -1394,8 +1434,8 @@ with_replicas() {
 	[[ "$stderr" != *"warning: pass"* ]] || { echo "$stderr"; false; }
 	mv "${BATS_TEST_TMPDIR}/gone/baseline" "${S}/"
 	printf '# SUITE=controlplane\n# PASSES=baseline,02-x,04-connection-pools\n' > "${S}/sweep-metadata.txt"
-	# A TSV that records the count without its members (ISTIOD_REPLICAS), which the read at its
-	# end does not compare: no such note (R13-N1).
+	# A TSV that records the count without its members (a bare ISTIOD_REPLICAS, the record's
+	# first member's only): no such note (R13-N1).
 	with_replicas 04-connection-pools 1 ISTIOD_REPLICAS
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success

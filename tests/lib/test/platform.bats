@@ -272,12 +272,16 @@ _probe_istiod_pod() {
 # PROBE_CSV other: no servicemeshoperator3 CSV. PROBE_EWGW: the east-west gateway pod runs the
 # ingress gateway's build (same, default), another one (other, or docker: with a cri-dockerd
 # docker://sha256: imageID) or is not there (none); an egress gateway pod never counts.
-# PROBE_SAIL_PODS=docker and PROBE_ISTIOD_PODS=docker: those pods report docker:// imageIDs. PROBE_ISTIOD and PROBE_OPERATOR replace istiod's and the Sail
-# operator's tag, PROBE_ISTIOD_THROTTLE istiod's PILOT_PUSH_THROTTLE. PROBE_ISTIOD_PODS: one
-# running replica (running, the default) and another that is Pending (pending), ContainerCreating
-# (creating: an empty imageID), evicted (evicted: Failed, an empty imageID; evicted-old: Failed,
-# the old digest), runs another digest (two-digests) or other settings (env-rollout); or only a
-# Pending one (only-pending), one whose spec pins PROBE_ISTIOD_PIN (pinned-pending), none (none).
+# PROBE_SAIL_PODS=docker and PROBE_ISTIOD_PODS=docker: those pods report docker:// imageIDs.
+# PROBE_ISTIOD and PROBE_OPERATOR replace istiod's and the Sail operator's tag,
+# PROBE_ISTIOD_THROTTLE istiod's PILOT_PUSH_THROTTLE. PROBE_ISTIOD_PODS: one running replica
+# (running, the default) and another that is Pending (pending), ContainerCreating (creating: an
+# empty imageID), evicted (evicted: Failed, an empty imageID; evicted-old: Failed, the old
+# digest), runs another digest (two-digests), other settings (env-rollout) or the same build and
+# settings (two); or only a Pending one (only-pending), one whose spec pins PROBE_ISTIOD_PIN
+# (pinned-pending), none (none); with PROBE_ISTIOD_PODS_ON, on that member only (the others:
+# running). The count of Running istiod pods a run's end reads (a field selector on the phase)
+# gets no answer with PROBE_ISTIOD_COUNT=down.
 # tuning_baseline_state's reads, NotFound unless --ignore-not-found as with kubectl:
 # PROBE_TB_SIDECAR on (default) or off, PROBE_TB_TELEMETRY and PROBE_TB_ACCESS_LOG off (default)
 # or on, PROBE_TB_UNSERVED=1 (the member serves none of these kinds), PROBE_TB_DS off (default),
@@ -293,10 +297,10 @@ _probe_istiod_pod() {
 # ConfigMap, all an env-only profile leaves), unserved (a kind the member does not serve) or
 # timeout (no answer within the request timeout); with PROBE_TUNING_ON, on that member only.
 # PROBE_FLAKY: the reads that get no answer the first time on each member, then answer (a read
-# that timed out once): kube (the version), sidecar (the root Sidecar's) and istiod (istiod's
-# Deployment), comma-separated.
+# that timed out once): kube (the version), sidecar (the root Sidecar's), istiod (istiod's
+# Deployment) and pods (the count of Running istiod pods), comma-separated.
 _probe_kubectl() {
-	local a ctx="" on img pod pods tobj
+	local a ctx="" on img pod pods tobj ipods
 	printf '%s\n' "$*" >> "$CALLS"
 	for a in "$@"; do [[ "$a" != --context=* ]] || ctx="${a#--context=}"; done
 	if [[ "${PROBE_PLATFORM:-kubernetes}" == down ]]; then
@@ -347,9 +351,18 @@ JSON
 			{"metadata":{"name":"other-operator.v1.0.0"},"spec":{"version":"1.0.0"},"status":{"phase":"Succeeded"}}]}'
 		;;
 	*" -n istio-system get pods "*)
+		# The count of Running istiod pods a run's end reads (platform_drift_check).
+		if [[ " $* " == *" --field-selector=status.phase=Running "* ]] &&
+			{ [[ "${PROBE_ISTIOD_COUNT:-up}" == down ]] || _probe_flaky pods "$ctx"; }; then
+			echo 'Unable to connect to the server: net/http: request canceled (Client.Timeout exceeded while awaiting headers)' >&2
+			return 1
+		fi
 		img="registry.example.invalid/istio/pilot@${DIG_B}"
-		case "${PROBE_ISTIOD_PODS:-running}" in
+		ipods="${PROBE_ISTIOD_PODS:-running}"
+		[[ -z "${PROBE_ISTIOD_PODS_ON:-}" || "$ctx" == "$PROBE_ISTIOD_PODS_ON" ]] || ipods=running
+		case "$ipods" in
 		running) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")" ;;
+		two) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Running "$img")" ;;
 		pending) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Pending -)" ;;
 		creating) pods="$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")$(_probe_istiod_pod "$ctx" istiod-2 Pending "")" ;;
 		evicted) pods="$(_probe_istiod_pod "$ctx" istiod-0 Failed "")$(_probe_istiod_pod "$ctx" istiod-1 Running "$img")" ;;
@@ -2054,6 +2067,17 @@ resume_line() {
 # everything.
 drift_value_lines() { grep -v '^# The platform record read again at the end of this \|^# DRIFT_READ_AT=' "$1" || true; }
 
+# drift_one_mktemp <arg>...: platform_drift_check <arg>... in a subshell where mktemp makes one
+# temp dir (the record's read again), then fails.
+drift_one_mktemp() (
+	mktemp() {
+		[[ ! -e "${BATS_TEST_TMPDIR}/mktemp-once" ]] || return 1
+		: >"${BATS_TEST_TMPDIR}/mktemp-once"
+		command mktemp "$@"
+	}
+	platform_drift_check "$@"
+)
+
 # drift_unsourced <helper,...> <arg>...: platform_drift_check <arg>... in a subshell where those
 # helpers are not defined (a script that did not source their library).
 drift_unsourced() (
@@ -2379,13 +2403,16 @@ drift_unsourced() (
 	assert_success
 	[[ "$stderr" == *"warning: platform_drift_check needs cap_istiod_limits (source tests/lib/capacity.sh) and a temp dir to read istiod's limits and replica counts again; not checked"* ]] || { echo "$stderr"; false; }
 	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_CPU_LIMIT_M;ISTIOD_MEM_LIMIT_MI;ISTIOD_REPLICAS_BY_CONTEXT,member-b=ISTIOD_LIMITS_DIFFER_BY_CONTEXT;ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
-	# Another suite's count (propagation's ISTIOD_REPLICAS: Running istiod pods) is not read again.
+	# Another suite's count (propagation's ISTIOD_REPLICAS) is read again as that suite counts it:
+	# its Running istiod pods (1 here), not its Deployment's replicas (2).
 	rm "${dir}/platform-drift.txt"
 	sed -i -e '/^# ISTIOD_REPLICAS_BY_CONTEXT=/d' -e 's/^# ISTIOD_REPLICAS=.*/# ISTIOD_REPLICAS=member-a=1,member-b=1/' "${dir}/controlplane-r.tsv"
+	: >"$CALLS"
 	PROBE_ISTIOD_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
 	[[ "$stderr" != *ISTIOD_REPLICAS* ]] || { echo "$stderr"; false; }
 	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	[ "$(grep -c -- '-n istio-system get pods -l app=istiod --field-selector=status.phase=Running' "$CALLS")" -eq 2 ]
 	# A context the record names with its safe characters only (lab~b is lab_b there): the count
 	# the TSVs record under its own name is read again under the record's.
 	rm "${dir}/platform-drift.txt"
@@ -2420,6 +2447,161 @@ drift_unsourced() (
 	assert_success
 	[[ "$stderr" == *"warning: platform_drift_check needs cap_istiod_limits (source tests/lib/capacity.sh) and a temp dir to read istiod's replica counts again; not checked"* ]] || { echo "$stderr"; false; }
 	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_REPLICAS_BY_CONTEXT,lab_b=ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
+}
+
+@test "platform_drift_check (F4-c): the other suites' count of Running istiod pods is read again on each member they record it for; a change warns and goes to the marker, the reports and tuning 004's values" {
+	local i csv="" reps="" dir="${BATS_TEST_TMPDIR}/sweep"
+	mkdir -p "$dir"
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	# propagation and churn: each member's Running istiod pods at a probe's start.
+	{
+		platform_preamble_lines member-a,member-b
+		echo "# ISTIOD_REPLICAS=member-a=1,member-b=1"
+		printf 'timestamp\tcontext\n'
+	} >"${dir}/propagation-r.tsv"
+	run platform_replica_counts "${dir}/propagation-r.tsv"
+	assert_output $'pods\tmember-a=1,member-b=1'
+	: >"$CALLS"
+	run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting, istiod replica count or tuning profile object changed during the sweep"
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	grep -q -- '--context=member-b .*-n istio-system get pods -l app=istiod --field-selector=status.phase=Running' "$CALLS"
+	# A second istiod pod Running on member-b at the end (an HPA, or a restart read while the old
+	# pod was still Terminating).
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_PODS=two PROBE_ISTIOD_PODS_ON=member-b run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-b: ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the sweep: 1 at its start, 2 at its end; rows measured after the change ran with another count of Running istiod pods (written to ${dir}/platform-drift.txt, which its reports say in their body); the usual cause is an HPA (the Istio CR's spec.values.pilot.autoscaleEnabled turned on), an Argo CD sync or a tuning profile that sets spec.values.pilot.replicaCount, a hand scale of istiod's Deployment, or a rollout or restart read while istiod's old pod was still Terminating (it counts as Running); for publishable figures, run the sweep again with istiod's replica count fixed (autoscaling off, as charts/spoke-ossm sets it)"* ]] || { echo "$stderr"; false; }
+	[ "$(grep -c '^warning:' <<<"$stderr")" -eq 1 ] || { echo "$stderr"; false; }
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# ISTIOD_REPLICAS_BY_CONTEXT=member-b=2" ]
+	run platform_report_warnings "${dir}/propagation-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the sweep in sweep (platform-drift.txt): 1 to 2 on member-b; rows measured after the change ran with another count of Running istiod pods, and the report cannot tell which rows those are (a row whose window saw istiod's pods change counts it as an istiod restart); the usual cause is an HPA"
+	refute_output --partial istiod_pods_avg
+	run platform_report_warnings --no-members "${dir}/propagation-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the sweep in sweep (platform-drift.txt): 1 to 2 on 1 of 2 members;"
+	refute_output --partial member-b
+	run platform_lever_values "${dir}/propagation-r.tsv"
+	assert_line "ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=mixed:1;2"
+	run platform_drift_changes "${dir}/propagation-r.tsv"
+	assert_output $'ISTIOD_REPLICAS_BY_CONTEXT\tistiod replica counts\t1 to 2 on member-b'
+	# A tuning pass's check names the pass.
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_PODS=two run --separate-stderr platform_drift_check "$dir" member-a,member-b pass
+	assert_success
+	[[ "$stderr" == *"warning: member-a, member-b: ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the pass: 1 at its start, 2 at its end; rows measured after the change ran with another count of Running istiod pods (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass);"* ]] || { echo "$stderr"; false; }
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=member-a=2,member-b=2' "${dir}/platform-drift.txt"
+	# A count read that times out once is made once more.
+	rm "${dir}/platform-drift.txt"
+	: >"$CALLS"
+	PROBE_FLAKY=pods run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	[ "$(grep -c -- '--context=member-a .*--field-selector=status.phase=Running' "$CALLS")" -eq 2 ]
+	# One that gets no answer twice: not compared, and the file says so.
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_COUNT=down run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a, member-b: ISTIOD_REPLICAS_BY_CONTEXT not read at the sweep's start or end, so whether it changed during the sweep is not known"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_REPLICAS_BY_CONTEXT,member-b=ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
+	run platform_drift_unread "${dir}/propagation-r.tsv"
+	assert_line $'ISTIOD_REPLICAS_BY_CONTEXT\tmember-a, member-b'
+	# Not read at the start (unknown in the TSVs): not compared on that member only.
+	rm "${dir}/platform-drift.txt"
+	sed -i 's/^# ISTIOD_REPLICAS=.*/# ISTIOD_REPLICAS=member-a=1,member-b=unknown/' "${dir}/propagation-r.tsv"
+	PROBE_ISTIOD_PODS=two run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a: ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the sweep: 1 at its start, 2 at its end"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: member-b: ISTIOD_REPLICAS_BY_CONTEXT not read at the sweep's start or end"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-b=ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=member-a=2' "${dir}/platform-drift.txt"
+	# Without a temp dir for that read (mktemp fails after the record's read): not compared.
+	rm "${dir}/platform-drift.txt"
+	sed -i 's/^# ISTIOD_REPLICAS=.*/# ISTIOD_REPLICAS=member-a=1,member-b=1/' "${dir}/propagation-r.tsv"
+	run --separate-stderr drift_one_mktemp "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: platform_drift_check needs a temp dir to read istiod's Running pods again; not checked, so the reports cannot tell whether they changed during the sweep"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_REPLICAS_BY_CONTEXT,member-b=ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
+	# churn-dataplane: the source member's count only (a bare <n>, credited to the record's first
+	# member); no other member's count is read.
+	rm "${dir}/platform-drift.txt"
+	sed -i 's/^# ISTIOD_REPLICAS=.*/# ISTIOD_REPLICAS=1/' "${dir}/propagation-r.tsv"
+	run platform_replica_counts "${dir}/propagation-r.tsv"
+	assert_output $'pods\tmember-a=1'
+	: >"$CALLS"
+	PROBE_ISTIOD_PODS=two PROBE_ISTIOD_PODS_ON=member-b run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	! grep -q -- '--context=member-b .*--field-selector=status.phase=Running' "$CALLS" || false
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_PODS=two run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a: ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the sweep: 1 at its start, 2 at its end"* ]] || { echo "$stderr"; false; }
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# ISTIOD_REPLICAS_BY_CONTEXT=member-a=2" ]
+	run platform_lever_values "${dir}/propagation-r.tsv"
+	assert_line "ISTIOD_REPLICAS_BY_CONTEXT=member-a=mixed:1;2"
+	# More than five ways: five warnings, then how many more members.
+	rm "${dir}/platform-drift.txt"
+	for ((i = 1; i <= 7; i++)); do
+		csv+="${csv:+,}m${i}"
+		reps+="${reps:+,}m${i}=$((i + 2))"
+	done
+	platform_probe_reset
+	platform_probe "$csv" 2>/dev/null
+	{ platform_preamble_lines "$csv"; echo "# ISTIOD_REPLICAS=${reps}"; printf 'timestamp\tcontext\n'; } >"${dir}/propagation-r.tsv"
+	run --separate-stderr platform_drift_check "$dir" "$csv"
+	assert_success
+	[ "$(grep -c '^warning: m[0-9]: ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed during the sweep' <<<"$stderr")" -eq 5 ] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: and 2 more members whose ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods) changed otherwise during the sweep (written to ${dir}/platform-drift.txt, which its reports say in their body)"* ]] || { echo "$stderr"; false; }
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=m1=1,m2=1,m3=1,m4=1,m5=1,m6=1,m7=1' "${dir}/platform-drift.txt"
+}
+
+@test "platform_replica_counts (F4-c): how each suite's TSV counts istiod's replicas; a bare count goes to the record's first member; platform_counts_every_member" {
+	local f dir="${BATS_TEST_TMPDIR}/rc"
+	mkdir -p "$dir"
+	# controlplane: each member's Deployment replicas.
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=1-3" \
+		"# ISTIOD_REPLICAS_BY_CONTEXT=a=1,b=3" c1 1 >"${dir}/cp.tsv"
+	run platform_replica_counts "${dir}/cp.tsv"
+	assert_success
+	assert_output $'deployment\ta=1,b=3'
+	# A controlplane TSV from before it read every member: its count, on the first, still the
+	# Deployment's.
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=3" \
+		"# ISTIOD_REPLICAS_BY_CONTEXT=unknown" c1 1 >"${dir}/cp-first.tsv"
+	run platform_replica_counts "${dir}/cp-first.tsv"
+	assert_output $'deployment\ta=3'
+	# propagation and churn: each member's Running pods; churn-dataplane: the source member's.
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=a=2,b=1" c1 1 >"${dir}/prop.tsv"
+	run platform_replica_counts "${dir}/prop.tsv"
+	assert_output $'pods\ta=2,b=1'
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=2" c1 1 >"${dir}/cdp.tsv"
+	run platform_replica_counts "${dir}/cdp.tsv"
+	assert_output $'pods\ta=2'
+	# Without a record to name its member: bare.
+	printf '%s\n' "# ISTIOD_REPLICAS=3" c1 1 >"${dir}/old.tsv"
+	run platform_replica_counts "${dir}/old.tsv"
+	assert_output $'pods\t3'
+	# dataplane: none.
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes" c1 1 >"${dir}/dp.tsv"
+	run platform_replica_counts "${dir}/dp.tsv"
+	assert_failure
+	assert_output ""
+	# Whether they cover every member of the record, by its name there (lab~a is lab_a).
+	platform_counts_every_member "${dir}/cp.tsv"
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=lab_a=kubernetes,b=kubernetes" "# ISTIOD_REPLICAS=lab~a=2,b=1" c1 1 >"${dir}/safe.tsv"
+	platform_counts_every_member "${dir}/safe.tsv"
+	printf '%s\n' "# ISTIOD_REPLICAS=a=2,b=1" c1 1 >"${dir}/norec.tsv"
+	platform_counts_every_member "${dir}/norec.tsv"
+	for f in cp-first cdp old dp; do
+		! platform_counts_every_member "${dir}/${f}.tsv" || false
+	done
+	printf '%s\n' "# PLATFORM_BY_CONTEXT=a=kubernetes,b=kubernetes,c=kubernetes" "# ISTIOD_REPLICAS=a=2,b=1" c1 1 >"${dir}/some.tsv"
+	! platform_counts_every_member "${dir}/some.tsv" || false
 }
 
 @test "platform_drift_check (R6, M5-S2): a member whose istiod limits differ from the recorded ones warns, goes to the marker and the report; --no-members counts" {

@@ -240,13 +240,16 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 # Preflight every context: require >= 1 Running istiod pod (all pods are scraped
-# via tests/lib/fanout.sh). The source replica count goes into the preamble.
+# via tests/lib/fanout.sh). Each member's count goes into the preamble, as
+# ISTIOD_REPLICAS=<ctx>=<n>,... (as propagation records it; a sweep reads it again at its end).
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
+ISTIOD_REPLICAS_CSV="${SOURCE_CTX}=${SOURCE_REPLICAS}"
 for ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	r="$(fanout_preflight_istiod "$ctx" "${KUBECTL[@]}")"
 	echo "  [$ctx] Running istiod replicas: $r"
+	ISTIOD_REPLICAS_CSV+=",${ctx}=${r}"
 done
 
 # The Istio version the members run, before the first scale-up (inherited when 003
@@ -272,7 +275,7 @@ cat > "$TSV_FILE" <<EOF
 # HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}
 $(istio_version_kv | sed 's/^/# /')
 # KUBE_VERSIONS=${KUBE_VERSIONS_CSV}
-# ISTIOD_REPLICAS=$SOURCE_REPLICAS
+# ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}
 # CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
 # SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS

@@ -16,13 +16,13 @@
 # be. A lever, the egress hosts, a limit or the replica count that the pass's profile sets (its
 # state/objects or state/patch.json) is shown, not warned, unless a member did not run the limit or
 # count it sets (not in effect) or its TSVs do not record it on a member (unknown), or the profile
-# turns istiod's autoscaling on in a suite that reads the count at the start only or not at all
-# (unknown: its HPA sets the count): each of those warns (in the controlplane suite, a note when
-# its counts read the same at the pass's end). Two more rows: each pass's istiod settings (one
-# digest; a pass whose members differ, whose value changed during it or could not be read on a
-# member, whose istiod pods ran different settings at once, or whose settings contradict its
-# profile against the baseline's warns) and its tuning profile objects (the baseline must hold
-# none, a profile pass all of its own on every member and no other: anything else warns).
+# turns istiod's autoscaling on where its TSVs do not record each member's count (unknown: its
+# HPA sets the count): each of those warns (a note when each member's count reads the same at the
+# pass's end). Two more rows: each pass's istiod settings (one digest; a pass whose members
+# differ, whose value changed during it or could not be read on a member, whose istiod pods ran
+# different settings at once, or whose settings contradict its profile against the baseline's
+# warns) and its tuning profile objects (the baseline must hold none, a profile pass all of its
+# own on every member and no other: anything else warns).
 #
 # Usage:
 #   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
@@ -118,34 +118,35 @@ else the first pass with data), member by member:
     ISTIOD_MEM_LIMIT_MI_BY_CONTEXT in Mi), which only the controlplane suite's TSVs
     record: the source member's at the pass's start and end, the others' at its end only;
   - each member's istiod replica count at the pass's start (ISTIOD_REPLICAS_BY_CONTEXT):
-    the controlplane and propagation suites record every member's, churn and
-    churn-dataplane the source member's, dataplane none; the controlplane suite's are
-    read again at its end.
+    the controlplane, propagation and churn suites record every member's, churn-dataplane
+    the source member's, dataplane none; each is read again at its end (controlplane:
+    istiod's Deployment replicas; the others: its Running pods).
 A pass reads:
   same
   same (see notes)           only what its profile sets differs (a lever or the egress
                              hosts whose object its state/objects lists; discoverySelectors,
                              a limit or the replica count its state/patch.json sets), or the
                              reference pass ran more than one value and this pass one of
-                             them, or (controlplane) its profile turns autoscaling on and
-                             its replica counts read the same at its end
+                             them, or its profile turns autoscaling on and each member's
+                             replica count reads the same at its end
   differs (see notes)
   not in effect (see notes)  a member did not run the limit or replica count its
                              state/patch.json sets (not rolled out there, a limit or a
-                             controlplane count that changed during the pass, a count its
-                             TSVs disagree on or an HPA set, or a Terminating pod still
-                             counted as Running after a short --settle: the other suites
-                             count Running istiod pods)
+                             count that changed during the pass, a count its TSVs disagree
+                             on or an HPA set, or a Terminating pod still counted as
+                             Running after a short --settle: the other suites count
+                             Running istiod pods)
   changed (see notes)        the read at its end found a build, a Kubernetes version, a
-                             lever, a limit or (controlplane) a replica count changed during
-                             it (its platform-drift.txt)
+                             lever, a limit or a replica count changed during it (its
+                             platform-drift.txt)
   mixed (see notes)          its TSVs disagree
   unknown (see notes)        a value not read or not recorded in one of them, a limit or
                              replica count its profile sets that its TSVs do not record on
                              a member, a replica count its profile's HPA sets (autoscaling
-                             on) that its suite reads at the start only or not at all (all
-                             but controlplane), or not compared at its end (not read again
-                             then, or no platform-drift.txt: that read did not run)
+                             on) that its TSVs do not record on every member
+                             (churn-dataplane's remotes, dataplane), or not compared at its
+                             end (not read again then, or no platform-drift.txt: that read
+                             did not run)
   baseline, reference        the pass compared with; "(see notes)" after it when it changed,
                              its TSVs disagree, it was not compared at its end, or a member
                              did not run, or is not recorded with, what its profile sets (or
@@ -279,22 +280,15 @@ fi
 # A pass the metadata lists without its directory has none (no data).
 pass_tsvs() { find -H "${RESULTS_DIR}/$1" -maxdepth 1 -name '*.tsv' ! -name 'reach-*.tsv' -type f 2>/dev/null | sort || true; }
 # pass_counts_per_member <pass>: return 0 when every TSV of the pass records the istiod replica
-# count of each member of its record (ISTIOD_REPLICAS_BY_CONTEXT, as the controlplane suite writes
-# it, listing every member its PLATFORM_BY_CONTEXT does): the counts the read at its end compares
-# (platform_drift_check), which never compares a bare ISTIOD_REPLICAS or a member the key leaves
-# out.
+# count of each member of its record (platform_counts_every_member: the controlplane suite's
+# ISTIOD_REPLICAS_BY_CONTEXT, propagation's and churn's ISTIOD_REPLICAS; churn-dataplane's only on
+# a mesh of one): the counts the read at its end compares (platform_drift_check), which never
+# compares a member they leave out.
 pass_counts_per_member() {
-	local f n=0 cnt pair
-	local -a pairs=()
+	local f n=0
 	while IFS= read -r f; do
 		[[ -n "$f" ]] || continue
-		cnt="$(grep -m1 '^# ISTIOD_REPLICAS_BY_CONTEXT=' "$f" || true)"
-		cnt="${cnt#*=}"
-		[[ "${cnt%%,*}" == *=* ]] || return 1
-		IFS=',' read -r -a pairs <<<"$(grep -m1 '^# PLATFORM_BY_CONTEXT=' "$f" | cut -d= -f2- || true)"
-		for pair in ${pairs[@]+"${pairs[@]}"}; do
-			[[ "$pair" != *=* || ",${cnt}," == *",${pair%%=*}="* ]] || return 1
-		done
+		platform_counts_every_member "$f" || return 1
 		n=$((n + 1))
 	done < <(pass_tsvs "$1")
 	((n > 0))
@@ -786,7 +780,7 @@ ref_kv_unread() {
 # keep them in full): a lever list and the scalar values as they are (mixed:<a>;<b> as "mixed:
 # <a> and <b>"); any other value, one that every member shares once, else each value with its
 # members, five named (platform_members_by_value), as is one that lists fewer than [members]
-# (its record's: the churn suites record istiod's replicas on their source member only).
+# (its record's: churn-dataplane records istiod's replicas on its source member only).
 plat_text() {
 	local pair x out=""
 	local -a pairs=()
@@ -994,8 +988,8 @@ with_unit() {
 	printf '%s\n' "$out"
 }
 # unrecorded <pass> <key>: the members of the pass's record (PLATFORM_BY_CONTEXT) that its <key>
-# does not list, ","-joined (the churn suites record istiod's replica count on the source member
-# only).
+# does not list, ","-joined (churn-dataplane records istiod's replica count on the source member
+# only, as churn did before it recorded every member's).
 unrecorded() {
 	local pair out=""
 	local -a pairs=()
@@ -1013,7 +1007,8 @@ unrecorded() {
 unrecorded_why() {
 	if [[ -n "${2:-}" ]]; then
 		case "${1}:${SUITE}" in
-		ISTIOD_REPLICAS_BY_CONTEXT:churn | ISTIOD_REPLICAS_BY_CONTEXT:churn-dataplane) echo "the ${SUITE} suite's TSVs record the source member's only" ;;
+		ISTIOD_REPLICAS_BY_CONTEXT:churn-dataplane) echo "the churn-dataplane suite's TSVs record the source member's only" ;;
+		ISTIOD_REPLICAS_BY_CONTEXT:churn) echo "its TSVs record the source member's only, as the churn suite's did before they recorded every member's" ;;
 		*) echo "its TSVs do not list them" ;;
 		esac
 	elif [[ "$1" == ISTIOD_REPLICAS_BY_CONTEXT && "$SUITE" == dataplane ]]; then
@@ -1202,8 +1197,8 @@ limits_end_only() {
 # member (PLAT_NR: "KEY<TAB>the profile's value<TAB>where and why"), the keys that changed during it
 # (PLAT_CHG: its DRIFT keys), that its TSVs disagree on (PLAT_MIX) and that the read at its end
 # could not compare (PLAT_NC: its UNREAD keys), why its replica count is not known all through
-# it when its profile's HPA sets the count (PLAT_AS), and a controlplane pass whose profile's HPA
-# sets the count that its read at the end found unchanged (PLAT_ASN: 1)
+# it when its profile's HPA sets the count (PLAT_AS), and a pass whose profile's HPA sets the
+# count that its read at the end found unchanged on every member (PLAT_ASN: 1)
 declare -A PLAT_DIFF PLAT_UNK PLAT_DTXT PLAT_UTXT PLAT_SET PLAT_OM PLAT_NE PLAT_NR PLAT_CHG PLAT_MIX PLAT_NC PLAT_AS PLAT_ASN
 PLAT_WARNINGS=()
 # The record's own keys (TSVs from before it still record each member's Kubernetes version).
@@ -1245,9 +1240,9 @@ for p in "${PASSES[@]}"; do
 	PLAT_CHG[$p]="$ck" PLAT_MIX[$p]="$mk" PLAT_NC[$p]="$nk"
 done
 NODRIFT_PASSES=()  # the passes without a platform-drift.txt: one warning names them all
-# What that read compares (the controlplane suite's TSVs record each member's replica count).
+# What that read compares (every suite's TSVs but dataplane's record istiod's replica counts).
 NODRIFT_WHAT="builds, Kubernetes versions, tuning levers or istiod limits"
-[[ "$SUITE" != controlplane ]] || NODRIFT_WHAT="builds, Kubernetes versions, tuning levers, istiod limits or replica counts"
+[[ "$SUITE" == dataplane ]] || NODRIFT_WHAT="builds, Kubernetes versions, tuning levers, istiod limits or replica counts"
 NODRIFT_LIM=0 NODRIFT_AT=-1
 cells=("Platform record")
 for p in "${PASSES[@]}"; do
@@ -1298,9 +1293,9 @@ for p in "${PASSES[@]}"; do
 		ISTIOD_MEM_LIMIT_MI_BY_CONTEXT) noun="istiod's memory limit" unit=Mi why="not rolled out there, or changed during it" ;;
 		*)
 			noun="istiod's replica count" unit="" why="not rolled out there, changed during it, or set by an HPA"
-			# The other suites count Running istiod pods at the start only.
+			# The other suites count Running istiod pods.
 			[[ "$SUITE" == controlplane ]] ||
-				why="not rolled out there, changed between its TSVs, set by an HPA, or a Terminating pod still counted as Running after a short --settle"
+				why="not rolled out there, changed during it, set by an HPA, or a Terminating pod still counted as Running after a short --settle"
 			;;
 		esac
 		if [[ -z "$(plat_value "$p" "$k")" ]]; then
@@ -1323,19 +1318,19 @@ for p in "${PASSES[@]}"; do
 		PLAT_WARNINGS+=("pass ${p}: its profile sets ${noun} to ${x}${unit} (${what} in its state/patch.json), yet ${k} reads ${w}, so the profile's value was not in effect there all through the pass (${why}), and $(pass_effect "$p")")
 	done < <(profile_fixed "$p")
 	PLAT_NE[$p]="$ne" PLAT_NR[$p]="$nr"
-	# A profile that turns istiod's autoscaling on: its HPA sets each member's count, which the
-	# other suites read at the probe's start only, or not at all (the controlplane suite's read at
-	# a pass's end compares it: a count the HPA moved by then reads changed, and one it found
-	# unchanged has a note, since the HPA may have raised and lowered it in between).
-	if [[ "$SUITE" != controlplane ]] && profile_autoscales "$p"; then
+	# A profile that turns istiod's autoscaling on: its HPA sets each member's count. The read at a
+	# pass's end compares the count its TSVs record on each member (a count the HPA moved by then
+	# reads changed, and one it found unchanged on every member has a note, since the HPA may have
+	# raised and lowered it in between); a member they do not record is not known.
+	if profile_autoscales "$p" && ! pass_counts_per_member "$p"; then
 		case "$SUITE" in
 		dataplane) w="the dataplane suite's TSVs record no count" ;;
-		churn | churn-dataplane) w="the ${SUITE} suite's TSVs record the source member's count at the probe's start only" ;;
-		*) w="the ${SUITE} suite's TSVs record each member's count at the probe's start only" ;;
+		churn-dataplane) w="the churn-dataplane suite's TSVs record the source member's count only" ;;
+		*) w="its TSVs do not record each member's count" ;;
 		esac
 		PLAT_AS[$p]="$w"
 		PLAT_WARNINGS+=("pass ${p}: its profile turns istiod's autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA sets each member's istiod replica count, and ${w}, so whether that count held all through the pass is not known, nor $(pass_unknown_effect "$p")")
-	elif profile_autoscales "$p" && pass_counts_per_member "$p" && [[ -z "${NODRIFT[$p]:-}" ]] &&
+	elif profile_autoscales "$p" && [[ -z "${NODRIFT[$p]:-}" ]] &&
 		[[ ", ${PLAT_CHG[$p]:-}, ${PLAT_NC[$p]:-}, " != *", ISTIOD_REPLICAS_BY_CONTEXT, "* ]]; then
 		PLAT_ASN[$p]=1
 	fi
@@ -1723,7 +1718,7 @@ pass_heading() {
 # tuning objects; for a pass whose every value of its platform record is unknown, none of the
 # record's keys, nor its Kubernetes versions when they cannot be compared either.
 pass_notes() {
-	local keys="${PLAT_DIFF[$1]:-}" unk="${PLAT_UNK[$1]:-}" k what who rec=""
+	local keys="${PLAT_DIFF[$1]:-}" unk="${PLAT_UNK[$1]:-}" k what who rec="" own
 	# Every value of its record unknown: its heading says so, so its notes leave those keys out,
 	# and its Kubernetes versions when they are not known either (its warning says so).
 	if rec_unknown "$1"; then
@@ -1751,8 +1746,13 @@ pass_notes() {
 	done <<<"${PLAT_NR[$1]:-}"
 	[[ -z "${PLAT_AS[$1]:-}" ]] ||
 		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\t%s, so whether that count held all through the pass is not known\t\n" "${PLAT_AS[$1]}"
-	[[ -z "${PLAT_ASN[$1]:-}" ]] ||
-		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\tthe read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; each cell's own count of istiod pods is in its istiod_pods_avg (tests/controlplane/004-report-results.sh --results-dir <the pass's directory> --format csv)\t\n"
+	if [[ -n "${PLAT_ASN[$1]:-}" ]]; then
+		# Where a row says what it ran with: the controlplane report's per-cell count, or the
+		# other suites' restart check (a row whose window saw istiod's pods change).
+		own="each cell's own count of istiod pods is in its istiod_pods_avg (tests/controlplane/004-report-results.sh --results-dir <the pass's directory> --format csv)"
+		[[ "$SUITE" == controlplane ]] || own="a row whose window saw istiod's pods change counts it as an istiod restart"
+		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\tthe read at the pass's end found each member's count it started with, but the HPA may have raised and lowered it in between; %s\t\n" "$own"
+	fi
 	while IFS=$'\t' read -r k what; do
 		[[ -z "$k" ]] || printf '%s\twhere the %s ran more than one value, one of those\t%s\t1\n' "$k" "$REF_NAME" "$what"
 	done <<<"${PLAT_OM[$1]:-}"

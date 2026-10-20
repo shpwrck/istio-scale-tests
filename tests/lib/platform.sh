@@ -70,11 +70,15 @@
 #   platform_drift_check <sweep_dir> <ctxs_csv> [<run>]
 #                                           -> after a sweep's last step (tuning 003: each pass's,
 #                                              <run> pass): read the record, the tuning levers,
-#                                              istiod's limits and replica counts (the
-#                                              controlplane suite's) and the Kubernetes versions
-#                                              again and write <sweep_dir>/platform-drift.txt for
-#                                              its reports: each value that changed (it warns),
-#                                              and the values it could not compare
+#                                              istiod's limits (the controlplane suite's) and
+#                                              replica counts and the Kubernetes versions again
+#                                              and write <sweep_dir>/platform-drift.txt for its
+#                                              reports: each value that changed (it warns), and
+#                                              the values it could not compare
+#   platform_replica_counts <tsv>           -> istiod's replica counts a TSV records, per member,
+#                                              and how its suite counts them (the Deployment's
+#                                              replicas, or Running istiod pods)
+#   platform_counts_every_member <tsv>      -> whether they cover every member of its record
 #   platform_drift_changes <tsv>...         -> what those reads found changed, one line per key
 #                                              (tuning 004 words its own warnings)
 #   platform_drift_unread <tsv>...          -> what they could not compare, one line per key
@@ -122,9 +126,9 @@
 # context tuning_baseline_state and probe_kube_versions (tests/lib/preamble.sh),
 # cap_istiod_limits and cap_node_totals (tests/lib/capacity.sh) and env_collect_infra
 # (tests/lib/envelope.sh); platform_drift_check reads the levers and Kubernetes versions again
-# with preamble.sh's, and istiod's limits and replica counts with capacity.sh's
-# cap_istiod_limits (without one, a warning, and the values it reads are listed as not compared
-# at the end).
+# with preamble.sh's, istiod's limits and the controlplane suite's replica counts with
+# capacity.sh's cap_istiod_limits (without one, a warning, and the values it reads are listed as
+# not compared at the end), and the other suites' Running istiod pods with a read of its own.
 #
 # The platform record (PL2, PL36, PL39, PL41): what each member ran, read live and once per
 # run, before any measurement window, into every TSV preamble and every report format (PL19).
@@ -1272,6 +1276,8 @@ _platform_cause() {
 	TUNING_BASELINE | SIDECAR_EGRESS_HOSTS) echo "a GitOps sync or self-heal that put a lever back, a tuning profile left applied, or a hand edit" ;;
 	ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) echo "an Argo CD sync, a tuning profile or a hand edit of istiod's resources (the Istio CR's spec.values.pilot.resources)" ;;
 	ISTIOD_REPLICAS_BY_CONTEXT) echo "an HPA (the Istio CR's spec.values.pilot.autoscaleEnabled turned on), an Argo CD sync or a tuning profile that sets spec.values.pilot.replicaCount, or a hand scale of istiod's Deployment" ;;
+	# The other suites' count, of Running istiod pods (platform_replica_counts: pods).
+	ISTIOD_REPLICAS_BY_CONTEXT:pods) echo "an HPA (the Istio CR's spec.values.pilot.autoscaleEnabled turned on), an Argo CD sync or a tuning profile that sets spec.values.pilot.replicaCount, a hand scale of istiod's Deployment, or a rollout or restart read while istiod's old pod was still Terminating (it counts as Running)" ;;
 	*) echo "a context that now points at a rebuilt or another cluster" ;;
 	esac
 }
@@ -1288,7 +1294,7 @@ _platform_drift_cause() {
 	KUBE_VERSIONS) fix="on one Kubernetes version" ;;
 	TUNING_BASELINE | SIDECAR_EGRESS_HOSTS) fix="with the levers fixed" ;;
 	ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) fix="with istiod's limits fixed" ;;
-	ISTIOD_REPLICAS_BY_CONTEXT) fix="with istiod's replica count fixed (autoscaling off, as charts/spoke-ossm sets it)" ;;
+	ISTIOD_REPLICAS_BY_CONTEXT | ISTIOD_REPLICAS_BY_CONTEXT:pods) fix="with istiod's replica count fixed (autoscaling off, as charts/spoke-ossm sets it)" ;;
 	*) fix="on fixed members" ;;
 	esac
 	echo "the usual cause is $(_platform_cause "$1"); for publishable figures, run the sweep again ${fix}"
@@ -1865,18 +1871,18 @@ platform_tuning_objects_refuse() {
 # PLATFORM_DRIFT_FILE there says changed: "<dir name>\t<key>\t<what>", <what> the value that
 # input recorded at its start and each drift check's at the end (" then "-joined), or for
 # TUNING_BASELINE only the levers that changed (_platform_lever_changes); then, when its inputs
-# record each member's istiod replica count (the controlplane suite's ISTIOD_REPLICAS_BY_CONTEXT)
-# and the file names members whose count changed, "<dir name>\tISTIOD_REPLICAS_BY_CONTEXT\t<a>
-# to <b> on <members>; ..." (each member's values at the start, what those inputs recorded,
-# " or "-joined, and each drift check's, " then "-joined; the members grouped by them,
-# _platform_groups_text: with _pl_no_members=1, dynamic scope, how many of the members those
-# inputs list, unknown included); then, when its inputs record istiod's limits and the file names
-# members whose limits differ from them, "<dir name>\tISTIOD_LIMITS_DIFFER_BY_CONTEXT\t<ctx>=
-# <cpu_m>/<mem_mi>,...\t<cpu_m>\t<mem_mi>" (every drift check's members, each pair once, and the
-# limits recorded at the start).
+# record istiod's replica counts by member (platform_replica_counts) and the file names members
+# whose count changed, "<dir name>\tISTIOD_REPLICAS_BY_CONTEXT\t<a> to <b> on <members>; ...\t
+# <form>" (each member's values at the start, what those inputs recorded, " or "-joined, and each
+# drift check's, " then "-joined; the members grouped by them, _platform_groups_text: with
+# _pl_no_members=1, dynamic scope, how many of the members those inputs list, unknown included;
+# <form> how they count them: deployment or pods); then, when its inputs record istiod's limits
+# and the file names members whose limits differ from them, "<dir name>\t
+# ISTIOD_LIMITS_DIFFER_BY_CONTEXT\t<ctx>=<cpu_m>/<mem_mi>,...\t<cpu_m>\t<mem_mi>" (every drift
+# check's members, each pair once, and the limits recorded at the start).
 # shellcheck disable=SC2329
 _platform_drift_scalar_findings() {
-	local f d key start name what v pair c
+	local f d key start name what v pair c form
 	local -a _pl_sd=() _pl_ends=() _pl_p=() _pl_rmo=() _pl_rgo=()
 	local -A _pl_sf=() _pl_start=() _pl_rs=() _pl_re=() _pl_rg=() _pl_rall=()
 	for f in "$@"; do
@@ -1902,14 +1908,15 @@ _platform_drift_scalar_findings() {
 			printf '%s\t%s\t%s\n' "$name" "$key" "$what"
 		done
 		# Each member's istiod replica count: its definite values in these inputs at their start, by
-		# its name in the record, and each drift check's at the end.
+		# its name in the record, as their suite counts them, and each drift check's at the end.
 		mapfile -t _pl_ends < <(sed -n 's/^# ISTIOD_REPLICAS_BY_CONTEXT=//p' "${d}/${PLATFORM_DRIFT_FILE}")
 		if ((${#_pl_ends[@]})); then
-			_pl_rs=() _pl_re=() _pl_rg=() _pl_rmo=() _pl_rgo=() _pl_rall=()
+			_pl_rs=() _pl_re=() _pl_rg=() _pl_rmo=() _pl_rgo=() _pl_rall=() form=""
 			for f in "$@"; do
 				[[ "$(dirname "$f")" == "$d" ]] || continue
-				v="$(_platform_preamble_value "$f" ISTIOD_REPLICAS_BY_CONTEXT)" || continue
-				IFS=',' read -r -a _pl_p <<<"$v"
+				v="$(platform_replica_counts "$f")" || continue
+				[[ -n "$form" ]] || form="${v%%$'\t'*}"
+				IFS=',' read -r -a _pl_p <<<"${v#*$'\t'}"
 				for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
 					[[ "$pair" == *=* ]] || continue
 					_platform_sanitize_to c "${pair%%=*}"
@@ -1935,7 +1942,7 @@ _platform_drift_scalar_findings() {
 			# those inputs list, one whose count at the start is unknown too (as the unread warning
 			# beside it counts them).
 			what="$(_platform_groups_text _pl_rg _pl_rgo "${#_pl_rall[@]}")"
-			[[ -z "$what" ]] || printf '%s\t%s\t%s\n' "$name" ISTIOD_REPLICAS_BY_CONTEXT "$what"
+			[[ -z "$what" ]] || printf '%s\t%s\t%s\t%s\n' "$name" ISTIOD_REPLICAS_BY_CONTEXT "$what" "$form"
 		fi
 		[[ -n "${_pl_start["ISTIOD_CPU_LIMIT_M|${d}"]+x}${_pl_start["ISTIOD_MEM_LIMIT_MI|${d}"]+x}" ]] || continue
 		# Every drift check's members (a --resume runs one more), each pair once.
@@ -1948,23 +1955,31 @@ _platform_drift_scalar_findings() {
 
 # _platform_drift_scalar_warnings <tsv>...: a warning per finding of
 # _platform_drift_scalar_findings, for a sweep's reports: a changed lever, root Sidecar egress
-# host, istiod limit or member's istiod replica count with what it does to the rows; members
-# whose istiod limits differ from the recorded ones with what the controlplane report divides
-# by them.
+# host, istiod limit or member's istiod replica count with what it does to the rows (a count of
+# Running istiod pods, the other suites', with what their rows say of it); members whose istiod
+# limits differ from the recorded ones with what the controlplane report divides by them.
 # shellcheck disable=SC2329
 _platform_drift_scalar_warnings() {
-	local name key what a b
+	local name key what a b ck
 	while IFS=$'\t' read -r name key what a b; do
+		ck="$key"
 		case "$key" in
 		ISTIOD_LIMITS_DIFFER_BY_CONTEXT)
 			echo "warning: $(_platform_limits_differ "$what" "$a" "$b" "the TSVs recorded on their source member") at the end of the sweep in ${name} (${PLATFORM_DRIFT_FILE}), but the report divides the window-peak CPU and RSS % of every member's rows (and the SLA verdict on them) by the recorded ones, so those members' rows read against another limit; the kubectl top % use each row's own; $(_platform_limits_cause)" >&2
 			continue
 			;;
 		ISTIOD_CPU_LIMIT_M | ISTIOD_MEM_LIMIT_MI) what+="; rows measured after the change ran under another limit, but $(_platform_limit_figure "$key") divides by the one recorded at the start, as does the SLA verdict on it, and the report cannot tell which rows those are; the kubectl top % use each row's own limit" ;;
-		ISTIOD_REPLICAS_BY_CONTEXT) what+="; rows measured after the change ran with another istiod replica count; the report's istiod replicas show the count recorded at the start, while each cell's own count of istiod pods is in the csv's istiod_pods_avg, the json's istiod_pods_per_cluster_avg and the growth table's istiod pods / cluster" ;;
+		ISTIOD_REPLICAS_BY_CONTEXT)
+			if [[ "$a" == pods ]]; then
+				key+=" (Running istiod pods)" ck="ISTIOD_REPLICAS_BY_CONTEXT:pods"
+				what+="; rows measured after the change ran with another count of Running istiod pods, and the report cannot tell which rows those are (a row whose window saw istiod's pods change counts it as an istiod restart)"
+			else
+				what+="; rows measured after the change ran with another istiod replica count; the report's istiod replicas show the count recorded at the start, while each cell's own count of istiod pods is in the csv's istiod_pods_avg, the json's istiod_pods_per_cluster_avg and the growth table's istiod pods / cluster"
+			fi
+			;;
 		*) what+="; rows measured after the change ran with other $(_platform_noun "$key"), and the report cannot tell which rows those are" ;;
 		esac
-		echo "warning: ${key} changed during the sweep in ${name} (${PLATFORM_DRIFT_FILE}): ${what}; $(_platform_drift_cause "$key")" >&2
+		echo "warning: ${key} changed during the sweep in ${name} (${PLATFORM_DRIFT_FILE}): ${what}; $(_platform_drift_cause "$ck")" >&2
 	done < <(_platform_drift_scalar_findings "$@")
 }
 
@@ -2038,18 +2053,18 @@ platform_drift_changes() {
 # (ISTIOD_LIMITS_DIFFER_BY_CONTEXT): an other member's are its limits at the end, since nothing
 # records them at the start; unknown where that read could not read them (NOT_COMPARED_AT_END), or
 # without the file (nothing read them); and ISTIOD_REPLICAS_BY_CONTEXT, istiod's replicas at the
-# start on each member the inputs record them for: the controlplane suite's
-# ISTIOD_REPLICAS_BY_CONTEXT (the Deployment's replicas, every member), else ISTIOD_REPLICAS as
-# propagation records it (<ctx>=<n>,...: the Running istiod pods, every member) or as churn and
-# churn-dataplane do (<n>: the source member's, the first of their record), each member by its
-# name in the record, with the count the read at the end found there where it changed (the
-# controlplane suite's: platform_drift_check reads the Deployments again). A value the inputs
+# start on each member the inputs record them for (platform_replica_counts): the controlplane
+# suite's ISTIOD_REPLICAS_BY_CONTEXT (the Deployment's replicas, every member), else
+# ISTIOD_REPLICAS as propagation and churn record it (<ctx>=<n>,...: the Running istiod pods,
+# every member) or as churn-dataplane does (<n>: the source member's, the first of its record),
+# each member by its name in the record, with the count the read at the end found there where it
+# changed (platform_drift_check: the Deployments again, or the Running pods). A value the inputs
 # disagree on, that one of them does not record, or that the read at the end found changed holds
 # each (unknown for an input without the key): mixed:<a>;<b> for a lever or a member,
 # mixed:<a>,<b> for the egress hosts.
 # shellcheck disable=SC2329
 platform_lever_values() {
-	local f d v lv k c x line out src="" fsrc rbare="" nbare=0 n=0 drift=0
+	local f d v lv k c x line out src="" rbare="" nbare=0 n=0 drift=0
 	local -a _pl_p=() _pl_lo=() _pl_mo=() _pl_dd=() _pl_ro=()
 	local -A _pl_lv=() _pl_has=() _pl_ddir=() _pl_rec=() _pl_src=() _pl_dl=() _pl_nc=() _pl_in=()
 	local -A _pl_rep=() _pl_rn=() _pl_rf=()
@@ -2072,25 +2087,18 @@ platform_lever_values() {
 			_platform_alt_add _pl_rec "$k" "$v"
 		done
 		# The members of its record; the first is the one it read the levers and limits on.
-		fsrc=""
 		if v="$(_platform_preamble_value "$f" PLATFORM_BY_CONTEXT)"; then
 			IFS=',' read -r -a _pl_p <<<"$v"
 			for lv in ${_pl_p[@]+"${_pl_p[@]}"}; do
 				[[ "$lv" == *=* ]] || continue
 				c="${lv%%=*}"
-				[[ -n "$fsrc" ]] || fsrc="$c"
 				[[ -n "$src" ]] || src="$c"
 				[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_mo+=("$c"); }
 			done
 		fi
 		# istiod's replicas, in the form its suite records them: per member, or the source member's.
-		if v="$(_platform_preamble_value "$f" ISTIOD_REPLICAS_BY_CONTEXT)" && [[ "$v" == *=* ]]; then
-			:
-		elif v="$(_platform_preamble_value "$f" ISTIOD_REPLICAS)"; then
-			[[ "$v" == *=* || -z "$fsrc" ]] || v="${fsrc}=${v}"
-		else
-			continue
-		fi
+		v="$(platform_replica_counts "$f")" || continue
+		v="${v#*$'\t'}"
 		_pl_has[ISTIOD_REPLICAS]=1
 		_pl_rf=()
 		IFS=',' read -r -a _pl_p <<<"$v"
@@ -2319,6 +2327,121 @@ _platform_limits_member() {
 	printf '%s\n' "$lim"
 }
 
+# _platform_pods_member <ctx> <dir>: how many istiod pods run on the member (namespace
+# istio-system, label app=istiod, phase Running: the count fanout_preflight_istiod records at a
+# probe's start, a Terminating pod included), for _platform_each; one read bounded by
+# PLATFORM_READ_TIMEOUT, made once more when it fails; unknown when both do.
+# shellcheck disable=SC2329
+_platform_pods_member() {
+	local i n
+	for i in 1 2; do
+		_platform_read "$1" "${2}/pods.json" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running || continue
+		n="$(jq -r '[.items[]? | select(.metadata.labels.app == "istiod" and .status.phase == "Running")] | length' "${2}/pods.json" 2>/dev/null)" || n=""
+		if [[ "$n" =~ ^[0-9]+$ ]]; then
+			printf '%s\n' "$n"
+			return 0
+		fi
+	done
+	echo unknown
+}
+
+# platform_replica_counts <tsv>: istiod's replica counts the TSV records at its start, and how its
+# suite counts them, "<form>\t<ctx>=<n>,...": deployment for the controlplane suite's (a TSV with
+# ISTIOD_REPLICAS_BY_CONTEXT: istiod's Deployment replicas on each member), else pods for
+# ISTIOD_REPLICAS as the other suites record it (Running istiod pods): each member's (propagation
+# and churn), or the source member's (a bare <n>: churn-dataplane, and churn before it recorded
+# each member's). A bare <n> (also a controlplane TSV's from before it read every member, whose
+# ISTIOD_REPLICAS_BY_CONTEXT is unknown) is credited to the first member of the TSV's record
+# (PLATFORM_BY_CONTEXT; left bare without one: a TSV from before the record). Return 1 when the
+# TSV records neither (dataplane).
+# shellcheck disable=SC2329
+platform_replica_counts() {
+	local v r form=pods
+	if v="$(_platform_preamble_value "$1" ISTIOD_REPLICAS_BY_CONTEXT)"; then
+		form=deployment
+		if [[ "$v" == *=* ]]; then
+			printf 'deployment\t%s\n' "$v"
+			return 0
+		fi
+	fi
+	v="$(_platform_preamble_value "$1" ISTIOD_REPLICAS)" || return 1
+	if [[ "$v" != *=* ]] && r="$(_platform_preamble_value "$1" PLATFORM_BY_CONTEXT)" && [[ "${r%%,*}" == *=* ]]; then
+		r="${r%%,*}"
+		v="${r%%=*}=${v}"
+	fi
+	printf '%s\t%s\n' "$form" "$v"
+}
+
+# platform_counts_every_member <tsv>: return 0 when the TSV records istiod's replica count
+# (platform_replica_counts) of every member of its record (PLATFORM_BY_CONTEXT, which names each
+# with its safe characters only), and so the read at a run's end compares each member's
+# (platform_drift_check never compares a member they leave out); 1 for a count without its
+# member (churn-dataplane's, credited to the record's first member on a mesh of more than one)
+# or none (dataplane). A TSV without a record lists every member its counts name.
+# shellcheck disable=SC2329
+platform_counts_every_member() {
+	local cnt pair c rec=""
+	local -a _pce_p=()
+	local -A _pce_have=()
+	cnt="$(platform_replica_counts "$1")" || return 1
+	cnt="${cnt#*$'\t'}"
+	[[ "${cnt%%,*}" == *=* ]] || return 1
+	IFS=',' read -r -a _pce_p <<<"$cnt"
+	for pair in ${_pce_p[@]+"${_pce_p[@]}"}; do
+		[[ "$pair" == *=* ]] || continue
+		_platform_sanitize_to c "${pair%%=*}"
+		_pce_have["$c"]=1
+	done
+	rec="$(_platform_preamble_value "$1" PLATFORM_BY_CONTEXT)" || rec=""
+	IFS=',' read -r -a _pce_p <<<"$rec"
+	for pair in ${_pce_p[@]+"${_pce_p[@]}"}; do
+		[[ "$pair" != *=* || -n "${_pce_have["${pair%%=*}"]+x}" ]] || return 1
+	done
+}
+
+# _platform_counts_add <map> <ctx>=<n>,...: each member's count into the associative array <map>
+# by its name in the record, its values ";"-joined, each once; a member whose value is not a count
+# (unknown: not read) with none.
+# shellcheck disable=SC2329
+_platform_counts_add() {
+	local -n _pcn_map="$1"
+	local lv c
+	local -a _pcn_p=()
+	IFS=',' read -r -a _pcn_p <<<"$2"
+	for lv in ${_pcn_p[@]+"${_pcn_p[@]}"}; do
+		[[ "$lv" == *=* ]] || continue
+		_platform_sanitize_to c "${lv%%=*}"
+		[[ -n "${_pcn_map["$c"]+x}" ]] || _pcn_map["$c"]=""
+		[[ "${lv#*=}" =~ ^[0-9]+$ ]] || continue
+		case ";${_pcn_map["$c"]};" in *";${lv#*=};"*) ;; *) _pcn_map["$c"]+="${_pcn_map["$c"]:+;}${lv#*=}" ;; esac
+	done
+}
+
+# _platform_replica_warnings <groups> <order> <deployment|pods> <run> <dir> <said>: the
+# platform_drift_check warnings for the members whose istiod replica count changed during <run>
+# (_platform_group's groups, "<at its start>\x1f<at its end>": <groups>, in <order>), five, then
+# how many more members (an HPA spreads the counts; the drift file keeps every member); pods:
+# the other suites' count of Running istiod pods.
+# shellcheck disable=SC2329
+_platform_replica_warnings() {
+	local -n _prw_g="$1" _prw_o="$2"
+	local g i=0 more=0 key=ISTIOD_REPLICAS_BY_CONTEXT ck=ISTIOD_REPLICAS_BY_CONTEXT ran="another istiod replica count"
+	local -a _prw_p=()
+	[[ "$3" != pods ]] ||
+		key="ISTIOD_REPLICAS_BY_CONTEXT (Running istiod pods)" ck="ISTIOD_REPLICAS_BY_CONTEXT:pods" ran="another count of Running istiod pods"
+	for g in ${_prw_o[@]+"${_prw_o[@]}"}; do
+		i=$((i + 1))
+		if ((i > 5)); then
+			IFS=$'\x1f' read -r -a _prw_p <<<"${_prw_g[$g]}"
+			more=$((more + ${#_prw_p[@]}))
+			continue
+		fi
+		echo "warning: $(_platform_group_names "${_prw_g[$g]}"): ${key} changed during the ${4}: ${g%%$'\x1f'*} at its start, ${g#*$'\x1f'} at its end; rows measured after the change ran with ${ran} (written to ${5}/${PLATFORM_DRIFT_FILE}, ${6}); $(_platform_drift_cause "$ck")" >&2
+	done
+	((more == 0)) ||
+		echo "warning: and ${more} more member$( ((more == 1)) || echo s) whose ${key} changed otherwise during the ${4} (written to ${5}/${PLATFORM_DRIFT_FILE}, ${6})" >&2
+}
+
 # _platform_limits_differ <ctx>=<cpu_m>/<mem_mi>,... <recorded cpu_m> <recorded mem_mi> <where>:
 # "istiod's limits per replica on <members> (CPU <c>m, memory <m>Mi; ...) differ from those
 # <where> (CPU <c>m, memory <m>Mi)": the members grouped by their limits, five names a group and
@@ -2501,8 +2624,9 @@ EOF
   slow link.
   PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL:-20}): how many members' platform records
   are read at once (a few kubectl calls each; also their tuning objects, Kubernetes versions
-  and istiod's replica counts, and istiod's limits read again at a run's end); lower it when
-  the machine running the suite runs short of memory or processes on a large mesh.
+  and istiod's replica counts, and istiod's limits and replica counts read again at a run's
+  end); lower it when the machine running the suite runs short of memory or processes on a
+  large mesh.
 EOF
 }
 
@@ -3313,9 +3437,11 @@ The rows this run appends would be credited to what its preamble records. ${agai
 # recorded; and istiod's limits on every other member against the recorded ones (a member that
 # differs: ISTIOD_LIMITS_DIFFER_BY_CONTEXT, "<ctx>=<cpu_m>/<mem_mi>"; the report divides every
 # member's rows by the recorded ones; a sweep's warns, a pass's does not: tuning 004 compares
-# each member's limits between passes); and each member's istiod replica count (its Deployment's,
-# from the same read) against the ones the TSVs recorded, when they record each member's
-# (ISTIOD_REPLICAS_BY_CONTEXT, the controlplane suite's). Its first line names what it reads
+# each member's limits between passes); and each member's istiod replica count against the ones
+# the TSVs recorded, as they count it (platform_replica_counts): istiod's Deployment replicas from
+# the same read, for the controlplane suite's ISTIOD_REPLICAS_BY_CONTEXT; istiod's Running pods
+# (_platform_pods_member, PLATFORM_READ_PARALLEL at a time), for the other suites' ISTIOD_REPLICAS
+# (each member's, or churn-dataplane's source member's). Its first line names what it reads
 # again: the record, and what the TSVs record of those. A value that changed warns, naming the
 # member, key, both values (the levers that changed, for TUNING_BASELINE), the usual cause and
 # what to do (five warnings for istiod's replica counts, then how many more members). Every
@@ -3326,9 +3452,9 @@ The rows this run appends would be credited to what its preamble records. ${agai
 # (not read at either end, or a digest @unknown; a lever as "TUNING_BASELINE <lever>";
 # ISTIOD_LIMITS_DIFFER_BY_CONTEXT for a member whose limits it could not read; and every value of a
 # read it could not make: a helper not sourced, no temp dir), which warns only. The end reads of
-# the levers, of each member's limits (and replica count) and of each member's Kubernetes version
-# are each made once more when they come back unknown (a read timed out): one read decides a
-# tuning pass's cell.
+# the levers, of each member's limits (and replica count), of its Running istiod pods and of its
+# Kubernetes version are each made once more when they come back unknown (a read timed out): one
+# read decides a tuning pass's cell.
 # Every report of the sweep says both in its body (platform_report_warnings, with both values; the
 # record's keys merge a changed value as a second one, mixed:, and so does KUBE_VERSIONS in a
 # report that merges it with --with); tuning 004 reads them for each pass. It never fails the
@@ -3337,12 +3463,12 @@ The rows this run appends would be credited to what its preamble records. ${agai
 platform_drift_check() {
 	local dir="$1" _pl_ctxs="$2" run="${3:-sweep}" start now kind c key o n marker k fresh=0 f v lv
 	local eh_start="" tb_end="" eh_end="" kv_end="" tb_rec=0 eh_rec=0 kv_rec=0 lim_rec=0 rep_rec=0 line
-	local src="" src_rec="" lim chg m dif i tmp g said w again more=0
+	local src="" src_rec="" lim chg m dif i tmp g said w again pod_rec=0 cnt
 	local -a _pl_c=() _pl_uo=() _pl_do=() _pl_p=() _pl_lu=() _pl_chgo=() _pl_kgo=() _pl_ugo=() _pl_igo=() _pl_nco=()
-	local -a _pl_so=() _pl_kv_again=() _pl_rpgo=() _pl_wl=()
+	local -a _pl_so=() _pl_kv_again=() _pl_rpgo=() _pl_wl=() _pl_ppgo=() _pl_pm=()
 	local -A _pl_end=() _pl_unk=() _pl_dig=() _pl_tb=() _pl_kv=() _pl_kv_start=() _pl_kv_now=()
 	local -A _pl_lim_start=() _pl_chg=() _pl_kg=() _pl_ug=() _pl_ig=() _pl_nc=() _pl_skip=()
-	local -A _pl_rep_tb=() _pl_rpg=()
+	local -A _pl_rep_tb=() _pl_rpg=() _pl_pod_tb=() _pl_ppg=()
 	! ((${DRY_RUN:-0})) || return 0
 	# Where the drift file's findings show: the sweep's reports, or tuning 004 for a pass.
 	said="which its reports say in their body"
@@ -3355,8 +3481,8 @@ platform_drift_check() {
 	fi
 	start="$(_platform_rows_of "$_pl_ctxs")"
 	# What the TSVs recorded once, at their start: each lever's, each istiod limit's, each
-	# member's Kubernetes version's and istiod replica count's definite values, and the member they
-	# read the levers and limits on.
+	# member's Kubernetes version's and istiod replica count's definite values (the count as the
+	# TSVs count it), and the member they read the levers and limits on.
 	for f in "$dir"/*.tsv; do
 		[[ -f "$f" ]] || continue
 		if [[ -z "$src_rec" ]] && { _platform_preamble_value "$f" TUNING_BASELINE >/dev/null ||
@@ -3387,17 +3513,14 @@ platform_drift_check() {
 			[[ "$v" == unknown ]] ||
 				case ";${_pl_tb[$k]:-};" in *";${v};"*) ;; *) _pl_tb[$k]="${_pl_tb[$k]:-}${_pl_tb[$k]:+;}${v}" ;; esac
 		fi
-		# Each member's replicas, by its name in the record (the controlplane suite's form).
-		if v="$(_platform_preamble_value "$f" ISTIOD_REPLICAS_BY_CONTEXT)" && [[ "$v" == *=* ]]; then
-			rep_rec=1
-			IFS=',' read -r -a _pl_p <<<"$v"
-			for lv in ${_pl_p[@]+"${_pl_p[@]}"}; do
-				[[ "$lv" == *=* ]] || continue
-				_platform_sanitize_to c "${lv%%=*}"
-				[[ -n "${_pl_rep_tb[$c]+x}" ]] || _pl_rep_tb[$c]=""
-				[[ "${lv#*=}" == unknown ]] ||
-					case ";${_pl_rep_tb[$c]};" in *";${lv#*=};"*) ;; *) _pl_rep_tb[$c]+="${_pl_rep_tb[$c]:+;}${lv#*=}" ;; esac
-			done
+		# Each member's replicas, by its name in the record: istiod's Deployment replicas (the
+		# controlplane suite's), else its Running pods (the other suites').
+		if cnt="$(platform_replica_counts "$f")"; then
+			if [[ "${cnt%%$'\t'*}" == deployment ]]; then
+				_platform_counts_add _pl_rep_tb "${cnt#*$'\t'}"
+			else
+				_platform_counts_add _pl_pod_tb "${cnt#*$'\t'}"
+			fi
 		fi
 		if v="$(_platform_preamble_value "$f" KUBE_VERSIONS)"; then
 			kv_rec=1
@@ -3411,10 +3534,12 @@ platform_drift_check() {
 			done
 		fi
 	done
+	((${#_pl_rep_tb[@]} == 0)) || rep_rec=1
+	((${#_pl_pod_tb[@]} == 0)) || pod_rec=1
 	# What this read compares: the record, and what the TSVs record of the rest.
 	_pl_wl=(build "istiod setting")
 	((lim_rec == 0)) || _pl_wl+=("istiod limit")
-	((rep_rec == 0)) || _pl_wl+=("istiod replica count")
+	((rep_rec == 0 && pod_rec == 0)) || _pl_wl+=("istiod replica count")
 	((tb_rec == 0 && eh_rec == 0)) || _pl_wl+=("tuning lever")
 	_pl_wl+=("tuning profile object")
 	((kv_rec == 0)) || _pl_wl+=("Kubernetes version")
@@ -3565,20 +3690,7 @@ platform_drift_check() {
 				_pl_end[ISTIOD_LIMITS_DIFFER_BY_CONTEXT]+="${_pl_end[ISTIOD_LIMITS_DIFFER_BY_CONTEXT]:+,}${c}=${lv}"
 			done
 			rm -rf "$tmp"
-			# Five warnings, then how many more members (an HPA spreads the counts); the drift file
-			# keeps every member.
-			i=0
-			for g in ${_pl_rpgo[@]+"${_pl_rpgo[@]}"}; do
-				i=$((i + 1))
-				if ((i > 5)); then
-					IFS=$'\x1f' read -r -a _pl_p <<<"${_pl_rpg[$g]}"
-					more=$((more + ${#_pl_p[@]}))
-					continue
-				fi
-				echo "warning: $(_platform_group_names "${_pl_rpg[$g]}"): ISTIOD_REPLICAS_BY_CONTEXT changed during the ${run}: ${g%%$'\x1f'*} at its start, ${g#*$'\x1f'} at its end; rows measured after the change ran with another istiod replica count (written to ${dir}/${PLATFORM_DRIFT_FILE}, ${said}); $(_platform_drift_cause ISTIOD_REPLICAS_BY_CONTEXT)" >&2
-			done
-			((more == 0)) ||
-				echo "warning: and ${more} more member$( ((more == 1)) || echo s) whose ISTIOD_REPLICAS_BY_CONTEXT changed otherwise during the ${run} (written to ${dir}/${PLATFORM_DRIFT_FILE}, ${said})" >&2
+			_platform_replica_warnings _pl_rpg _pl_rpgo deployment "$run" "$dir" "$said"
 			# Not for a pass: tuning 004 compares each member's limits with the reference pass's (a
 			# difference every pass has is not the profile's).
 			if [[ -n "${_pl_end[ISTIOD_LIMITS_DIFFER_BY_CONTEXT]+x}" && "$run" != pass ]]; then
@@ -3609,6 +3721,39 @@ platform_drift_check() {
 				[[ -n "$lv" ]] || continue
 				[[ -n "${_pl_skip[$c]+x}" ]] || _pl_so+=("$c")
 				_pl_skip[$c]+="${_pl_skip[$c]:+;}${lv}"
+			done
+		fi
+	fi
+	# istiod's Running pods, where the TSVs count those (the other suites' ISTIOD_REPLICAS), on each
+	# member they record a count for, PLATFORM_READ_PARALLEL at a time, against the recorded ones.
+	if ((pod_rec)); then
+		for m in "${_pl_c[@]}"; do
+			_platform_sanitize_to c "$m"
+			[[ -z "${_pl_pod_tb[$c]+x}" ]] || _pl_pm+=("$m")
+		done
+		if ((${#_pl_pm[@]} == 0)); then
+			:
+		elif tmp="$(mktemp -d)"; then
+			_platform_each _platform_pods_member "$tmp" "${_pl_pm[@]}"
+			for i in "${!_pl_pm[@]}"; do
+				_platform_sanitize_to c "${_pl_pm[i]}"
+				n="$(head -n 1 "${tmp}/${i}.row" 2>/dev/null || true)"
+				if [[ ! "$n" =~ ^[0-9]+$ || -z "${_pl_pod_tb[$c]}" ]]; then
+					[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")
+					_pl_unk[$c]+="${_pl_unk[$c]:+, }ISTIOD_REPLICAS_BY_CONTEXT"
+				elif [[ "${_pl_pod_tb[$c]}" != "$n" ]]; then
+					_platform_group _pl_ppg _pl_ppgo "${_pl_pod_tb[$c]//;/ or }"$'\x1f'"${n}" "$c"
+					_pl_end[ISTIOD_REPLICAS_BY_CONTEXT]+="${_pl_end[ISTIOD_REPLICAS_BY_CONTEXT]:+,}${c}=${n}"
+				fi
+			done
+			rm -rf "$tmp"
+			_platform_replica_warnings _pl_ppg _pl_ppgo pods "$run" "$dir" "$said"
+		else
+			echo "warning: platform_drift_check needs a temp dir to read istiod's Running pods again; not checked, so the reports cannot tell whether they changed during the ${run}" >&2
+			for m in "${_pl_pm[@]}"; do
+				_platform_sanitize_to c "$m"
+				[[ -n "${_pl_skip[$c]+x}" ]] || _pl_so+=("$c")
+				_pl_skip[$c]+="${_pl_skip[$c]:+;}ISTIOD_REPLICAS_BY_CONTEXT"
 			done
 		fi
 	fi
@@ -3684,7 +3829,7 @@ platform_drift_check() {
 	marker="${dir}/${PLATFORM_DRIFT_FILE}"
 	[[ -f "$marker" ]] || fresh=1
 	if ! {
-		((fresh == 0)) || echo "# The platform record read again at the end of this ${run} (tests/lib/platform.sh platform_drift_check), one block per read: when; each value that changed, as its value at the end, per member (TUNING_BASELINE, SIDECAR_EGRESS_HOSTS and istiod's limits on the member the TSVs read them on; ISTIOD_REPLICAS_BY_CONTEXT, istiod's Deployment replicas on each member, when the TSVs record each member's: the controlplane suite's; the TSVs record the value at the start); ISTIOD_LIMITS_DIFFER_BY_CONTEXT, the other members whose istiod limits per replica (CPU m/memory Mi) differ at the end from the recorded ones; NOT_COMPARED_AT_END, per member what it could not compare (not read at the start or the end, a digest @unknown, or a read it could not make)"
+		((fresh == 0)) || echo "# The platform record read again at the end of this ${run} (tests/lib/platform.sh platform_drift_check), one block per read: when; each value that changed, as its value at the end, per member (TUNING_BASELINE, SIDECAR_EGRESS_HOSTS and istiod's limits on the member the TSVs read them on; ISTIOD_REPLICAS_BY_CONTEXT, istiod's replica count on each member the TSVs record it for, counted as they count it: its Deployment's replicas for the controlplane suite's ISTIOD_REPLICAS_BY_CONTEXT, its Running pods for the other suites' ISTIOD_REPLICAS; the TSVs record the value at the start); ISTIOD_LIMITS_DIFFER_BY_CONTEXT, the other members whose istiod limits per replica (CPU m/memory Mi) differ at the end from the recorded ones; NOT_COMPARED_AT_END, per member what it could not compare (not read at the start or the end, a digest @unknown, or a read it could not make)"
 		echo "# DRIFT_READ_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		for k in "${PLATFORM_KEYS[@]}" KUBE_VERSIONS TUNING_BASELINE SIDECAR_EGRESS_HOSTS ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI ISTIOD_REPLICAS_BY_CONTEXT ISTIOD_LIMITS_DIFFER_BY_CONTEXT; do
 			[[ -z "${_pl_end[$k]+x}" ]] || echo "# ${k}=${_pl_end[$k]}"
