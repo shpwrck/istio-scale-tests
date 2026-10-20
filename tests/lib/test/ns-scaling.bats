@@ -58,7 +58,7 @@ CHART="${CP}/chart"
 	[ "$(mem_guard_verdict 1800 3072 70)" = ok ]
 	[ "$(mem_guard_verdict 3400 3072 70)" = stop ]
 	[ "$(mem_guard_verdict 300 3072 70)" = ok ]
-	# The L2b proof setting (5%) stops even the first step at current usage.
+	# A 5% setting stops even the first step at current usage.
 	[ "$(mem_guard_verdict 300 3072 5)" = stop ]
 	[ "$(mem_guard_verdict 300 unknown 70)" = unknown ]
 	[ "$(mem_guard_verdict 300 0 70)" = unknown ]
@@ -201,7 +201,7 @@ ERR
 	for f in ns-scaling-lab.env ns-scaling-rosa.env; do
 		run load_config "${CP}/configs/$f" controlplane
 		assert_success
-		! grep -q '^SETUP_CONTEXTS=' "${CP}/configs/$f"
+		! grep -q '^SETUP_CONTEXTS=' "${CP}/configs/$f" || false
 	done
 }
 
@@ -498,7 +498,7 @@ no_blank() { grep -v '^$' || true; }
 
 @test "mem_guard_project_abs: (intercept + per-1000 x Services) x burst factor" {
 	# 4000 Services on an east-west gateway: (10 + 145 x 4) x 2.0 = 1180 Mi, above 70% of 1Gi
-	# (the X1 first step that the relative projection, ratio 1, let through).
+	# (the first step, which a projection relative to current usage, ratio 1, let through).
 	[ "$(mem_guard_project_abs 4000 145 10 2.0)" = 1180 ]
 	[ "$(mem_guard_verdict 1180 1024 70)" = stop ]
 	[ "$(mem_guard_project_abs 6000 91 10 1.2)" = 667 ]
@@ -570,12 +570,16 @@ no_blank() { grep -v '^$' || true; }
 @test "003 live growth run against an empty kubeconfig: RETIRE_FAILED row, exit 1 (BACKLOG 9.3)" {
 	command -v helm >/dev/null || skip "helm not installed"
 	out="${BATS_TEST_TMPDIR}/res"
-	CONTROLPLANE_RETIRE_ATTEMPTS=1 CONTROLPLANE_RETIRE_BACKOFF_S=0 METRICS_READY_TIMEOUT=0 KUBECONFIG=/dev/null \
+	# ISTIO_VERSION_CHECK=warn: no Istio CR answers either; the run records unknown.
+	ISTIO_VERSION_CHECK=warn CONTROLPLANE_RETIRE_ATTEMPTS=1 CONTROLPLANE_RETIRE_BACKOFF_S=0 METRICS_READY_TIMEOUT=0 KUBECONFIG=/dev/null \
 		run timeout 300 "${CP}/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --services-per-namespaces 1 \
 		--namespace-counts 2 --sidecar-scopings namespace --workload-mode config-only --settle 0 --probe-settle 0 \
 		--output-dir "$out"
 	assert_failure 1
 	assert_output --partial "ERROR: the sweep stopped early: series"
+	# A stop is exit 1 even with failed cells, and the count line says so: 1 outranks 4.
+	assert_output --partial "the sweep also stopped early, so it exits 1, not 4."
+	refute_output --partial "exit 4"
 	tsv="$(find "$out" -name 'controlplane-*.tsv')"
 	[ "$(awk -F'\t' '$2 == "RETIRE_FAILED" { print $57 }' "$tsv")" = retire ]
 	# Every row has the schema's width.
@@ -649,4 +653,61 @@ EOF
 	KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --dry-run --contexts ci-dummy --services-per-namespace 2 --namespace-count 5 --parts workloads
 	assert_failure
 	assert_output --partial "--parts workloads is for the legacy layout"
+}
+@test "003 refuses SCALE_SIZING_MODE=auto in every mode, before any step and under --dry-run; 001 alone keeps it" {
+	local extra f
+	for extra in "" "--services-per-namespaces 1"; do
+		# shellcheck disable=SC2086  # extra is empty or two words
+		SCALE_SIZING_MODE=auto KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --dry-run \
+			--contexts a --mesh-sizes 1 $extra
+		assert_failure 1
+		[[ "$stderr" == *"error: SCALE_SIZING_MODE=auto is for a standalone 001 setup: in a sweep, 001 would deploy a capacity-derived service count while every row records the --service-counts value. Set SCALE_SIZING_MODE=fixed"* ]]
+		[ -z "$output" ]
+	done
+	# From --config too (SCALE_* is in the controlplane vocabulary).
+	f="${BATS_TEST_TMPDIR}/auto.env"
+	echo 'SCALE_SIZING_MODE=auto' > "$f"
+	KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --dry-run --config "$f" --contexts a --mesh-sizes 1
+	assert_failure 1
+	[[ "$stderr" == *"SCALE_SIZING_MODE=auto is for a standalone 001 setup"* ]]
+	SCALE_SIZING_MODE=sometimes KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --dry-run --contexts a --mesh-sizes 1
+	assert_failure 1
+	[[ "$stderr" == *"SCALE_SIZING_MODE must be fixed or auto (got: sometimes)"* ]]
+	# A standalone 001 still sizes from capacity (live only; its dry run says so).
+	SCALE_SIZING_MODE=auto KUBECONFIG=/dev/null run "${CP}/001-setup-controlplane-test.sh" --dry-run --contexts ci-dummy
+	assert_success
+	assert_output --partial "Sizing mode:     auto (capacity-derived SERVICE_COUNT)"
+}
+
+@test "003 without timeout or gtimeout: a live run stops at startup with the install hint, before any kubectl call; --dry-run runs" {
+	# A PATH with every tool but timeout and gtimeout, and a kubectl that logs its calls.
+	local d="${BATS_TEST_TMPDIR}/path" p f n
+	mkdir -p "$d"
+	local IFS=:
+	for p in $PATH; do
+		[[ -d "$p" ]] || continue
+		for f in "$p"/*; do
+			n="${f##*/}"
+			[[ -x "$f" && ! -e "${d}/${n}" && "$n" != timeout && "$n" != gtimeout ]] && ln -s "$f" "${d}/${n}"
+		done
+	done
+	unset IFS
+	rm -f "${d}/kubectl" "${d}/oc"
+	export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+	printf '#!/bin/sh\necho "$*" >> "$STUB_LOG"\nexit 1\n' > "${d}/kubectl"
+	chmod +x "${d}/kubectl"
+	PATH="$d" KUBECONFIG=/dev/null run --separate-stderr "${CP}/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 \
+		--output-dir "${BATS_TEST_TMPDIR}/res"
+	assert_failure 1
+	[[ "$stderr" == *"error: neither 'timeout' nor 'gtimeout' (GNU coreutils) is on PATH; the bounded config-dump and Envoy-stats reads need it. On macOS: brew install coreutils"* ]]
+	[ ! -s "$STUB_LOG" ]
+	[ -z "$(find "${BATS_TEST_TMPDIR}/res" -name '*.tsv' 2>/dev/null)" ]
+	PATH="$d" KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --dry-run --contexts ci-a --mesh-sizes 1
+	assert_success
+	[ ! -s "$STUB_LOG" ]
+	# 002 alone stops the same way.
+	PATH="$d" KUBECONFIG=/dev/null run --separate-stderr "${CP}/002-collect-resource-metrics.sh" --contexts ci-a \
+		--output-dir "${BATS_TEST_TMPDIR}/res"
+	assert_failure 1
+	[[ "$stderr" == *"brew install coreutils"* ]]
 }

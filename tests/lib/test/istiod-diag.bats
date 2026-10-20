@@ -395,6 +395,40 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	assert_output "/x/y/istiod-diag-R1__"
 }
 
+@test "folder names: a context's part is ctx_file_safe's form in any locale (tuning's ctx_key too), so redact-results maps it in the index and names the folder" {
+	local loc ctx want got
+	source "${ROOT}/tests/tuning/lib/tuning.sh"
+	export -f _fake_kubectl
+	export D PODSET PRE FAKE_PODS FX
+	# A UTF-8 letter is two bytes (ctx-é1 -> ctx-__1, as in a C locale), a long name is cut
+	# to CTX_FILE_NAME_MAX, and the cut and whole forms are what ctx_key and redact use.
+	for ctx in 'ctx-é1' 'ns/api-long-cluster-name.example:6443/ci-user-with-long-name'; do
+		for loc in C C.UTF-8; do
+			rm -rf "$D"
+			run --separate-stderr env LC_ALL="$loc" bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/config.sh"
+				source "$1/tests/lib/reach.sh"; source "$1/tests/lib/istiod-diag.sh"
+				istiod_diag_capture "$D" iter1 "$2" 1 "$PODSET" "$PRE" _fake_kubectl' _ "$ROOT" "$ctx"
+			assert_success
+			got="$(_col evidence)"
+			want="001-iter1-$(ctx_file_safe "$ctx" "$CTX_FILE_NAME_MAX")"
+			[ "$got" = "$want" ] || { echo "${loc}: ${got} (want ${want})"; false; }
+			[ -d "${D}/${got}" ]
+			# tuning's state-file key is the whole form; the folder's is its first 40 characters.
+			[[ "$(ctx_file_safe "$ctx")" == "$(ctx_key "$ctx")" && "001-iter1-$(ctx_key "$ctx")" == "$want"* ]]
+		done
+	done
+	[ "$(ctx_key 'ctx-é1')" = ctx-__1 ]
+	# The last capture (the long name, C.UTF-8): redact-results maps the context and the
+	# folder's cut form in the index to one placeholder, and names the raw folder it skips.
+	LC_ALL=C.UTF-8 run --separate-stderr "${ROOT}/tests/lib/redact-results.sh" --context "$ctx" \
+		--out "${BATS_TEST_TMPDIR}/copy" "$RES"
+	assert_success
+	[ "$(awk -F'\t' '!/^#/ && $1 != "captured_at" { print $3 "|" $(NF - 1) }' "${BATS_TEST_TMPDIR}/copy/res/istiod-diag-RUN1/index.tsv")" = '<mesh-a-ctx>|001-iter1-<mesh-a-ctx>' ]
+	[[ "$stderr" == *"istiod-diag-RUN1/${got}/"*"raw istiod-diag evidence"* ]]
+	run grep -rF -e 'ns_api-long' -e 'long-cluster' "${BATS_TEST_TMPDIR}/copy"
+	assert_failure
+}
+
 # --- report ---
 
 @test "istiod_diag_report: tally by cause over two index files in md, text and json; csv prints nothing" {
@@ -631,8 +665,9 @@ _stub_bin() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin
 *" fortio load "*" -json - "*) : > "$STUB_MARK"; cat "$FX/../fortio_ok.json" ;;
-*" get pod -l app=fortio-client "*) printf 'fortio-client-0' ;;
+*" get pod -l app=fortio-client "*) printf 'fortio-client-0\t\tTrue' ;;
 *" exec "*) cat "$FX/../fortio_ok.json" ;;
 *" scale "*" --replicas=1 "*)
 	if [[ -n "${STUB_REPLACE_ON_SCALE_DOWN:-}" ]]; then : > "$STUB_REPLACED"; fi ;;
@@ -643,7 +678,7 @@ case " $* " in
 *" wait pod/"*) : ;;
 *" get pods -l app=propagation-canary "*) printf 'canary-backer-0\n' ;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*)
 	if [[ -f "$STUB_REPLACED" ]]; then printf 'istiod-abc-y2\n'; else printf 'istiod-abc-x1\n'; fi ;;
 *" -n istio-system get pods -l app=istiod -o json "*)
@@ -823,8 +858,10 @@ _churn_run() {
 		--deployment-count 1 --output-dir "$RES"
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	# Both rows are OK: the replacement happened between the windows.
-	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $21 }' "$f" | sort -u)" = OK ]
+	# Neither row is POISONED_RESTART: the replacement happened between the windows.
+	# (They are MISSING_VALUE: this stub's watcher lists no churn target, so
+	# convergence_local_ms is N/A.)
+	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $21 }' "$f" | sort -u)" = MISSING_VALUE ]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
 	[ "$(_col trigger istiod-abc-x1)" = podset_changed ]
 	[ "$(_col tag istiod-abc-x1)" = before-iter2 ]
@@ -837,6 +874,41 @@ _prop_run() {
 	PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/propagation/002-run-endpoint-probe.sh" \
 		--source-context ctx-a --timeout 2 --poll-interval-ms 100 --settle-sec 0 --tsv \
 		--output-dir "$RES" "$@"
+}
+
+@test "propagation 002 entrypoint: the summary averages only the rows 005 counts and tallies the rest" {
+	_stub_bin
+	# P1 converges: the flip adds 10 convergence samples for 5 proxies.
+	hist() { printf 'pilot_proxy_convergence_time_bucket{le="0.1"} %s\npilot_proxy_convergence_time_bucket{le="+Inf"} %s\npilot_proxy_convergence_time_sum %s\npilot_proxy_convergence_time_count %s\n' "$1" "$1" "$2" "$1"; }
+	{ cat "${FX}/pre_metrics.txt"; hist 0 0; } > "${BATS_TEST_TMPDIR}/pre.txt"
+	{ cat "${FX}/pre_metrics.txt"; hist 10 0.5; } > "${BATS_TEST_TMPDIR}/post.txt"
+	STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre.txt" STUB_POST_BODY="${BATS_TEST_TMPDIR}/post.txt" _prop_run --iterations 1
+	assert_success
+	assert_output --regexp 'P1 local xDS push: +n=1/1 min=[0-9]+ms'
+	assert_output --partial "rows_dropped_total=0/1"
+	grep -qE '^\| P1 local xDS push \| 1/1 \| [0-9]+ \|' "$RES"/endpoint-*.md
+	# The same P1 with no process_start_time_seconds: the row is written OK with
+	# restarted=unknown, which 005 drops. The summary used to average it anyway.
+	rm -rf "$RES"; rm -f "$STUB_MARK"
+	grep -v '^process_start_time_seconds' "${BATS_TEST_TMPDIR}/pre.txt" > "${BATS_TEST_TMPDIR}/pre-u.txt"
+	grep -v '^process_start_time_seconds' "${BATS_TEST_TMPDIR}/post.txt" > "${BATS_TEST_TMPDIR}/post-u.txt"
+	STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre-u.txt" STUB_POST_BODY="${BATS_TEST_TMPDIR}/post-u.txt" _prop_run --iterations 1
+	assert_success
+	f="$(ls "$RES"/endpoint-*.tsv)"
+	[[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $10 "/" $16 }' "$f")" == OK/unknown ]]
+	[[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $7 }' "$f")" =~ ^[0-9]+$ ]]
+	assert_output --partial "P1 local xDS push:          n=0/1 (no valid sample)"
+	assert_output --partial "rows_dropped_total=1/1"
+	# A row with no remote measures P1 only, so its source side decides (p1_status).
+	[[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $20 "/" $22 }' "$f")" == RESTART_UNKNOWN/N/A ]]
+	assert_output --regexp 'RESTART_UNKNOWN +1'
+	grep -qxF '| P1 local xDS push | 0/1 | - | - | - |' "$RES"/endpoint-*.md
+	grep -qxF '| `RESTART_UNKNOWN` | 1 |' "$RES"/endpoint-*.md
+	grep -qF "that remote's side leaves them out" "$RES"/endpoint-*.md
+	# 005 counts the same rows.
+	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "$RES" --format csv
+	# n_attempted (the last column): the probe's one iteration.
+	assert_line "1,P1_local_wall,1,0,,,,,,,,1"
 }
 
 @test "propagation 002 entrypoint: a restart in the window (RESTART row) gets an oom_killed index row" {

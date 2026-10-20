@@ -93,10 +93,11 @@
 # started more than _ISTIOD_DIAG_CLOCK_MARGIN_SEC before that scrape (harness clock)
 # restarted before the window, so the pod counts as no_change, not restarted_untimed.
 #
-# Requires: common.sh (is_nonneg_int, is_pos_int), reach.sh (reach_sanitize), jq, awk,
-# sed, tail, mktemp; gzip when present (evidence stays uncompressed without it);
-# preamble.sh's harness_sha when sourced (else HARNESS_SHA=unknown). Callers run
-# `set -euo pipefail`.
+# Requires: common.sh (is_nonneg_int, is_pos_int, file_min_bytes, MD_CELL_AWK,
+# ctx_file_safe, CTX_FILE_NAME_MAX, RUN_ID_FILE_NAME_MAX, TAG_FILE_NAME_MAX), reach.sh
+# (reach_sanitize), jq, awk, sed, tail, mktemp; gzip when present (evidence stays
+# uncompressed without it); common.sh's harness_read (else HARNESS_SHA and
+# HARNESS_CONTENT_KEY are unknown). Callers run `set -euo pipefail`.
 # shellcheck shell=bash
 
 ISTIOD_DIAG_SCHEMA=1
@@ -203,16 +204,11 @@ _ISTIOD_DIAG_JQ_NODE='
 
 # --- small helpers ------------------------------------------------------------
 
-# _istiod_diag_safe <text> [max]: a file-name-safe token ([A-Za-z0-9._-], others -> _),
-# at most max (default 48) characters; never empty. No ':' or '+' (NTFS copies).
-# shellcheck disable=SC2329
-_istiod_diag_safe() {
-	local s="${1:-}" max="${2:-48}"
-	s="${s//[^A-Za-z0-9._-]/_}"
-	s="${s:0:max}"
-	[[ -n "$s" ]] || s=x
-	printf '%s\n' "$s"
-}
+# File and folder names: ctx_file_safe (tests/lib/common.sh), the one file-name form of a
+# context that tuning's state files and redact-results.sh's renames use too: every byte
+# outside [A-Za-z0-9._-] becomes _ in any locale (no ':' or '+', for NTFS copies). A
+# context in a folder name is cut to CTX_FILE_NAME_MAX characters, a run id to
+# RUN_ID_FILE_NAME_MAX (64), a tag to TAG_FILE_NAME_MAX (48). An empty token reads x.
 
 # _istiod_diag_now: harness UTC time, ISO 8601 (portable: no GNU date flags).
 # shellcheck disable=SC2329
@@ -313,12 +309,9 @@ _istiod_diag_ts_iso() {
 # proxies sums pilot_xds over its label series (PL12).
 # shellcheck disable=SC2329
 _istiod_diag_pre_values() {
-	local f="${1:-}" sz=0 out=""
-	if [[ -n "$f" && -s "$f" ]]; then
-		sz="$(wc -c < "$f" 2>/dev/null)" || sz=0
-		sz="${sz//[^0-9]/}"
-	fi
-	if (( ${sz:-0} >= ${FANOUT_MIN_SCRAPE_BYTES:-512} )); then
+	local f="${1:-}" out=""
+	# No wc fork per file (file_min_bytes, common.sh); the same rule as before.
+	if [[ -n "$f" && -s "$f" ]] && file_min_bytes "$f" "${FANOUT_MIN_SCRAPE_BYTES:-512}"; then
 		out="$(awk '
 			function v(x, d) { return (x == "") ? "N/A" : sprintf("%.0f", x / d) }
 			/^#/ { next }
@@ -395,7 +388,7 @@ README
 # and the index.tsv preamble and header; a no-op for the parts that exist.
 # shellcheck disable=SC2329
 _istiod_diag_init() {
-	local dir="$1" idx="${1}/index.tsv" run_id sha=unknown
+	local dir="$1" idx="${1}/index.tsv" run_id sha=unknown key=unknown
 	mkdir -p "$dir" || return 1
 	if [[ ! -f "${dir}/README.md" ]]; then
 		_istiod_diag_readme > "${dir}/README.md" || return 1
@@ -406,12 +399,17 @@ _istiod_diag_init() {
 	[[ -f "$idx" ]] && return 0
 	run_id="${dir##*/}"
 	run_id="${run_id#istiod-diag-}"
-	declare -F harness_sha >/dev/null 2>&1 && sha="$(harness_sha 2>/dev/null)"
+	# The harness without the probe's output dir this folder is in (its results would read
+	# dirty), as the probe's own TSV records it.
+	if declare -F harness_read >/dev/null 2>&1; then
+		harness_read sha key --exclude "$(dirname "$dir")" 2>/dev/null || true
+	fi
 	{
 		echo "# ISTIOD_DIAG_SCHEMA=${ISTIOD_DIAG_SCHEMA}"
 		echo "# RUN_ID=${run_id}"
 		echo "# CREATED_BY=${0##*/}"
 		echo "# HARNESS_SHA=${sha:-unknown}"
+		echo "# HARNESS_CONTENT_KEY=${key:-unknown}"
 		echo "# DATE=$(_istiod_diag_now)"
 		echo "# ISTIOD_DIAG_REQUEST_TIMEOUT=${_IDG_RT}"
 		echo "# ISTIOD_DIAG_MAX_SEC=${_IDG_MAX_SEC}"
@@ -704,8 +702,10 @@ _istiod_diag_run() {
 	fi
 	if ((pending > 0)) && [[ -z "$skip" ]]; then
 		local num=$((nfold + 1))
-		while [[ -e "${dir}/$(printf '%03d' "$num")-${tag}-$(_istiod_diag_safe "$ctx" 40)" ]]; do num=$((num + 1)); done
-		folder="$(printf '%03d' "$num")-${tag}-$(_istiod_diag_safe "$ctx" 40)"
+		local cfs
+		cfs="$(ctx_file_safe "$ctx" "$CTX_FILE_NAME_MAX")"
+		while [[ -e "${dir}/$(printf '%03d' "$num")-${tag}-${cfs:-x}" ]]; do num=$((num + 1)); done
+		folder="$(printf '%03d' "$num")-${tag}-${cfs:-x}"
 		mkdir -p "${dir}/${folder}" || { echo "cannot create ${dir}/${folder}" >&2; _IDG_EXPLAINED=1; return 1; }
 	fi
 	for k in "${!A_POD[@]}"; do
@@ -791,7 +791,7 @@ _istiod_diag_run() {
 			NODES+=("$node")
 		done
 		local ni=0 rd
-		for node in "${NODES[@]}"; do
+		for node in ${NODES[@]+"${NODES[@]}"}; do
 			ni=$((ni + 1))
 			_istiod_diag_time_ok || { partial=1; break; }
 			if "${kc[@]}" --context="$ctx" get node "$node" -o json --request-timeout="$_IDG_RT" \
@@ -950,7 +950,7 @@ _istiod_diag_run() {
 		rsc="${A_RSC[k]:-N/A}"
 		note="${A_NOTE[k]%; }"
 		[[ -n "$note" ]] || note=-
-		note="$(_istiod_diag_text "$note" "$ctx" "${all_nodes[@]}")"
+		note="$(_istiod_diag_text "$note" "$ctx" ${all_nodes[@]+"${all_nodes[@]}"})"
 		_istiod_diag_row "$dir" "$now" "$tag" "$ctx" "$trigger" "$p" "$ch" "${A_CAUSE[k]:-unknown}" \
 			"$rc_v" "$exit_v" "$sig_v" "$reason_v" "$start_v" "$fin_v" "$lim_v" "$rss" "$heap" "$gr" "$xds" \
 			"$at" "$rsc" "$nr" "${A_EV[k]}" "$note"
@@ -968,7 +968,7 @@ _istiod_diag_run() {
 			echo ""
 			echo "| pod | change | cause | restarts | exit | term_reason | started_at | finished_at | limit (Mi) | rss_pre (Mi) | heap_inuse_pre (Mi) | rs_changed | node_ready_at | note |"
 			echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
-			printf '%s\n' "${SUMMARY[@]}"
+			printf '%s\n' ${SUMMARY[@]+"${SUMMARY[@]}"}
 			echo ""
 			echo "## Memory history"
 			echo ""
@@ -999,9 +999,10 @@ _istiod_diag_run() {
 # istiod_diag_dir <tsv_file> <run_id>: the run's evidence folder, next to its TSV.
 # shellcheck disable=SC2329
 istiod_diag_dir() {
-	local d
+	local d t
 	d="$(dirname "${1:-.}")"
-	printf '%s/istiod-diag-%s\n' "$d" "$(_istiod_diag_safe "${2:-}" 64)"
+	t="$(ctx_file_safe "${2:-}" "$RUN_ID_FILE_NAME_MAX")"
+	printf '%s/istiod-diag-%s\n' "$d" "${t:-x}"
 }
 
 # istiod_diag_capture <diag_dir> <tag> <ctx> <trigger> <pre_podset|''> <pre_metrics_csv|''>
@@ -1018,7 +1019,8 @@ istiod_diag_capture() {
 		return 0
 	fi
 	local dir="$1" tag ctx="$3" trigger="$4" podset="$5" pre_csv="$6"
-	tag="$(_istiod_diag_safe "$2")"
+	tag="$(ctx_file_safe "$2" "$TAG_FILE_NAME_MAX")"
+	tag="${tag:-x}"
 	shift 6
 	if ! mkdir -p "$dir" 2>/dev/null; then
 		echo "warning: istiod-diag: cannot create ${dir}; no restart evidence saved" >&2
@@ -1112,7 +1114,7 @@ _istiod_diag_report_rows() {
 	local rdir="${1:-.}" f
 	local -a files=()
 	[[ "$rdir" == / ]] || rdir="${rdir%/}"
-	while IFS= read -r f; do files+=("$f"); done < <(find "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | LC_ALL=C sort)
+	while IFS= read -r f; do files+=("$f"); done < <(find -H "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | LC_ALL=C sort)
 	((${#files[@]})) || return 0
 	awk -F'\t' -v want="${#_ISTIOD_DIAG_HEADER[@]}" -v pfx="${rdir%/}/" '
 		FNR == 1 {
@@ -1154,7 +1156,7 @@ istiod_diag_report() {
 	local fmt="${1:-text}" rdir="${2:-.}" rows nfiles
 	[[ "$fmt" == csv ]] && return 0
 	rows="$(_istiod_diag_report_rows "$rdir")" || rows=""
-	nfiles="$(find "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | awk 'END { print NR }')" || nfiles=0
+	nfiles="$(find -H "$rdir" -path '*/istiod-diag-*/index.tsv' -type f 2>/dev/null | awk 'END { print NR }')" || nfiles=0
 	case "$fmt" in
 	json)
 		# Fields after the three prefixes: index column j is .[j + 2].
@@ -1174,7 +1176,8 @@ istiod_diag_report() {
 			|| printf '{"index_files":0,"rows":0,"repeat_rows":0,"untimed_rows":0,"by_cause":{},"untimed_by_cause":{},"captures":[]}\n'
 		;;
 	text | md | markdown)
-		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" -v files="${nfiles:-0}" '
+		# Every markdown cell through md_cell (MD_CELL_AWK, common.sh).
+		printf '%s\n' "$rows" | awk -F'\t' -v fmt="$fmt" -v files="${nfiles:-0}" "$MD_CELL_AWK"'
 			function tl(o, a, c,    i, s) {
 				s = ""
 				for (i = 1; i <= c; i++) s = s (i > 1 ? ", " : "") o[i] "=" a[o[i]]
@@ -1214,7 +1217,7 @@ istiod_diag_report() {
 				for (i = 1; i <= n; i++) {
 					if (role[i] == "repeat") continue
 					c = cause[i] (role[i] == "untimed" ? " (untimed)" : "")
-					if (md) printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", rid[i], ctx[i], tag[i], pod[i], ch[i], c, ex[i], mem[i], ev[i]
+					if (md) printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", md_cell(rid[i]), md_cell(ctx[i]), md_cell(tag[i]), md_cell(pod[i]), md_cell(ch[i]), md_cell(c), md_cell(ex[i]), md_cell(mem[i]), md_cell(ev[i])
 					else printf "  %s | %s | %s | %s | %s | %s | exit=%s | rss_pre/limit=%s Mi | %s\n", rid[i], ctx[i], tag[i], pod[i], ch[i], c, ex[i], mem[i], ev[i]
 				}
 			}' || true

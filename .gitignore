@@ -2,6 +2,12 @@
 /.vscode/settings.json
 /.claude/settings.local.json
 /.claude/worktrees/
+# Editor swap and backup files, macOS Finder metadata (anywhere: a run's HARNESS_SHA
+# counts every untracked file that is not ignored: harness_sha in tests/lib/common.sh)
+.DS_Store
+*.swp
+*.swo
+*~
 
 # Local campaign progress log (unredacted; never commit)
 /CAMPAIGN_STATUS.md
@@ -48,5 +54,9 @@
 /terraform/**/tfplan
 /terraform/**/crash.log
 /terraform/**/crash.*.log
-/terraform/**/*.tfvars
+# tfvars and their JSON form anywhere (a copied rosa.tfvars at the repo root, *.auto.tfvars.json)
+*.tfvars
+*.tfvars.json
 !/terraform/**/*.tfvars.example
+# `terraform output -json by_cluster` (cluster API URLs, console URLs, account data)
+by_cluster*.json

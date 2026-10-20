@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 load test_helper
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 source "${ROOT}/tests/lib/metrics.sh"
 
 FIXTURES="${ROOT}/tests/lib/test/fixtures"
@@ -12,14 +13,31 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 	[[ "$result" == "770" ]]
 }
 
-@test "extract_counter_sum: missing counter returns 0" {
+@test "extract_counter_sum: missing counter returns unknown, not 0" {
 	result=$(extract_counter_sum "$FIXTURES/prometheus_counters.txt" "nonexistent_counter")
-	[[ "$result" == "0" ]]
+	[[ "$result" == "unknown" ]]
 }
 
 @test "extract_counter_sum: ignores comment lines" {
 	result=$(extract_counter_sum "$FIXTURES/prometheus_counters.txt" "HELP")
+	[[ "$result" == "unknown" ]]
+}
+
+@test "extract_counter_sum: a declared counter with no sample yet is a real 0" {
+	f=$(mktemp)
+	printf '# HELP pilot_k8s_cfg_events Events\n# TYPE pilot_k8s_cfg_events counter\nother_metric 5\n' > "$f"
+	result=$(extract_counter_sum "$f" pilot_k8s_cfg_events)
+	rm -f "$f"
 	[[ "$result" == "0" ]]
+}
+
+@test "extract_counter_sum: empty or missing scrape file is unscraped, never 0 or unknown (PL29)" {
+	f=$(mktemp)
+	result=$(extract_counter_sum "$f" pilot_xds_pushes)
+	rm -f "$f"
+	[[ "$result" == "unscraped" ]]
+	result=$(extract_counter_sum "${BATS_TEST_TMPDIR}/no-such-file" pilot_xds_pushes)
+	[[ "$result" == "unscraped" ]]
 }
 
 @test "extract_counter_sum: handles counters with and without labels" {
@@ -40,8 +58,74 @@ FIXTURES="${ROOT}/tests/lib/test/fixtures"
 }
 
 @test "extract_counter_by_label: no matching label returns 0" {
+	# pilot_xds_pushes is in the scrape; istiod registers type=nds at its first push.
 	result=$(extract_counter_by_label "$FIXTURES/prometheus_counters.txt" "pilot_xds_pushes" "type" "nds")
 	[[ "$result" == "0" ]]
+}
+
+@test "extract_counter_by_label: counter absent from the scrape returns unknown" {
+	result=$(extract_counter_by_label "$FIXTURES/prometheus_counters.txt" "pilot_xds_pushes_renamed" "type" "eds")
+	[[ "$result" == "unknown" ]]
+	f=$(mktemp)
+	result=$(extract_counter_by_label "$f" "pilot_xds_pushes" "type" "eds")
+	rm -f "$f"
+	[[ "$result" == "unscraped" ]]
+}
+
+# --- counter_delta ---
+
+@test "counter_delta: after - before when both are numbers" {
+	run counter_delta 100 250 x
+	assert_success
+	assert_output "150"
+}
+
+@test "counter_delta: absent at the baseline, present at the end = lazily registered, from 0" {
+	run counter_delta unknown 7 x
+	assert_success
+	assert_output "7"
+}
+
+@test "counter_delta: absent in both scrapes is N/A with a warning, not 0" {
+	run --separate-stderr counter_delta unknown unknown pilot_xds_pushes
+	assert_success
+	assert_output "N/A"
+	[[ "$stderr" == *"pilot_xds_pushes"*"neither scrape"* ]]
+}
+
+@test "counter_delta: a negative delta (reset) is N/A with a warning, never clamped to 0" {
+	run --separate-stderr counter_delta 500 20 pilot_xds_pushes
+	assert_success
+	assert_output "N/A"
+	[[ "$stderr" == *"went from 500 to 20"* ]]
+}
+
+@test "counter_delta: present at the baseline, gone at the end is N/A" {
+	run --separate-stderr counter_delta 500 unknown x
+	assert_success
+	assert_output "N/A"
+	[[ "$stderr" == *"missing from the final scrape"* ]]
+}
+
+@test "counter_delta: a failed (unscraped) baseline or final is N/A, never a lifetime total (PL29)" {
+	empty="${BATS_TEST_TMPDIR}/empty.metrics"; : > "$empty"
+	run --separate-stderr counter_delta "$(extract_counter_sum "$empty" pilot_xds_pushes)" \
+		"$(extract_counter_sum "$FIXTURES/prometheus_counters.txt" pilot_xds_pushes)" pilot_xds_pushes
+	assert_success
+	assert_output "N/A"
+	[[ "$stderr" == *"pilot_xds_pushes: the baseline scrape is empty, short or unreadable"* ]]
+	run --separate-stderr counter_delta 500 unscraped x
+	assert_output "N/A"
+	[[ "$stderr" == *"the final scrape is empty"* ]]
+	run --separate-stderr counter_delta unscraped unscraped x
+	assert_output "N/A"
+	[[ "$stderr" == *"the baseline and final scrape is empty"* ]]
+}
+
+@test "counter_delta: N/A is safe under set -e and never reaches \$(( ))" {
+	run bash -c 'set -euo pipefail; source "$1/tests/lib/common.sh"; source "$1/tests/lib/metrics.sh"; d=$(counter_delta unknown unknown x 2>/dev/null); echo "d=$d"' _ "$ROOT"
+	assert_success
+	assert_output "d=N/A"
 }
 
 # --- extract_gauge ---

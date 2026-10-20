@@ -105,9 +105,9 @@ command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -139,9 +139,11 @@ for ctx in "${CONTEXTS[@]}"; do
 	) &
 	APPLY_PIDS+=($!)
 done
-for pid in "${APPLY_PIDS[@]}"; do
+for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the propagation-test apply"
 done
+# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
+harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."
@@ -165,7 +167,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	) &
 	WAIT_PIDS+=($!)
 done
-for pid in "${WAIT_PIDS[@]}"; do
+for pid in ${WAIT_PIDS[@]+"${WAIT_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed readiness check"
 done
 

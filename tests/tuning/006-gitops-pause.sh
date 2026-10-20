@@ -154,7 +154,7 @@ status)
 	# This tool's pause of these Applications (the same for the same Applications: tuning.py window_for).
 	python3 -I "$HELPER" window "$apps_csv" "$WORK/window.json"
 	echo "Applications: ${APPS[*]}"
-	for p in "${PROJECTS[@]}"; do
+	for p in ${PROJECTS[@]+"${PROJECTS[@]}"}; do
 		"${K[@]}" get appprojects.argoproj.io "$p" -o json >"$WORK/project.json" \
 			|| die "${GITOPS_CTX}: cannot read AppProject ${p}"
 		echo "AppProject ${p} sync windows (index: window, the index a JSON patch's /spec/syncWindows/<index> takes):"
@@ -167,7 +167,7 @@ pause)
 	discover_apps
 	apps_csv="$(IFS=,; echo "${APPS[*]}")"
 	mkdir -p "$(dirname "$STATE_FILE")"
-	for p in "${PROJECTS[@]}"; do
+	for p in ${PROJECTS[@]+"${PROJECTS[@]}"}; do
 		"${K[@]}" get appprojects.argoproj.io "$p" -o json >"$WORK/project.json" \
 			|| die "${GITOPS_CTX}: cannot read AppProject ${p}"
 		python3 -I "$HELPER" window-add "$WORK/project.json" "$apps_csv" "$WORK/window.json" >"$WORK/patch.json"

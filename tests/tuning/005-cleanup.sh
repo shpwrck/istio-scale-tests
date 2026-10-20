@@ -105,7 +105,7 @@ done
 platform_validate
 is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 CONTEXTS=()
-split_csv "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS
+split_contexts "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
 # Each member once: one listed twice would take two of its markers a round and skip one.
 declare -A SEEN=()

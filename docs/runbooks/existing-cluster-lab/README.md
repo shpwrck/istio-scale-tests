@@ -68,7 +68,7 @@ charts/argocd-config -> ArgoCD CR `openshift-gitops` (sharding, resources, exclu
 terraform/scripts/create-argocd-cluster-secret.sh -> Secret `<member>-argocd-gitops-cluster-secret` in `openshift-gitops`
 charts/acm-managed-cluster -> ManagedCluster `<member>` + `auto-import-secret` in namespace `<member>` on `<acm-hub-ctx>`
 charts/mesh-verify-appset.yaml -> on demand: Application `mesh-verify-appset` + per-member `mesh-verify` echo apps
-charts/mesh-verify-gateway-api-appset.yaml (workload member filled in by `sed` on the way to the hub) -> on demand: Application `mesh-verify-gateway-api-appset`, ApplicationSet `mesh-verify-gwapi`, per-member Applications `<member>-mesh-verify-gwapi`
+charts/mesh-verify-gateway-api-appset.yaml (repo, revision and workload member filled in by `sed` on the way to the hub) -> on demand: Application `mesh-verify-gateway-api-appset`, ApplicationSet `mesh-verify-gwapi`, per-member Applications `<member>-mesh-verify-gwapi`
 charts/mesh-verify-gateway-api -> on each member: namespaces `mesh-verify-gwapi` + `mesh-verify-gwapi-shared` and the Gateway API Gateway `istio-system/mesh-verify-gwapi`; on the workload member also `mesh-verify-gwapi-remote` and the echo Deployments
 
 ### Re-run

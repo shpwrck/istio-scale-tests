@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Pre-merge verification gate for tests/lib/ shared helpers.
 # Runs syntax checks, shellcheck, inline-definition audits, bats unit tests, the
-# bare-scrape lint, and the CI dry-run smoke (every tests/ script annotated
-# `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
+# bare-scrape, keyed-array and bats-negation lints, and the CI dry-run smoke (every tests/
+# script annotated `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
 # Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
+# A missing shellcheck or bats-core fails the run; --skip-shellcheck skips that step on purpose.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -32,7 +33,7 @@ err()  { fail=$((fail + 1)); echo "    FAIL: $1"; }
 # 1. bash -n syntax check
 step 1 "bash -n on all test scripts"
 syntax_fail=0
-for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh; do
+for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh "$ROOT"/tests/tuning/lib/*.sh; do
 	if ! bash -n "$f" 2>/dev/null; then
 		echo "    syntax error: $f"
 		bash -n "$f" 2>&1 || true
@@ -47,16 +48,18 @@ if ((SKIP_SHELLCHECK)); then
 else
 	step 2 "shellcheck on lib/ and suite scripts"
 	if command -v shellcheck >/dev/null 2>&1; then
-		sc_fail=0
-		for f in "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh; do
-			if ! shellcheck "$f" 2>/dev/null; then
-				sc_fail=1
-			fi
-		done
-		if ((sc_fail)); then err "shellcheck violations found"; else ok; fi
+		# One call over every file, as CI runs it: shellcheck then follows a `source` of a file
+		# on the same command line, so a name used as an array in a lib and as a scalar in a
+		# suite is caught here too, not only in CI (whose find takes these files too, the bats
+		# fixtures and tests/tuning/lib included).
+		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh \
+			"$ROOT"/tests/tuning/lib/*.sh; then
+			ok
+		else
+			err "shellcheck violations found"
+		fi
 	else
-		echo "    WARNING: shellcheck not found, skipping"
-		pass=$((pass + 1))
+		err "shellcheck not found on PATH (install it, or pass --skip-shellcheck to skip this step)"
 	fi
 fi
 
@@ -66,6 +69,8 @@ audit_fail=0
 EXTRACTED_PATTERNS=(
 	'die() {'
 	'split_csv() {'
+	'split_contexts() {'
+	'ctx_file_safe() {'
 	'is_pos_int() {'
 	'is_nonneg_int() {'
 	'validate_scoping() {'
@@ -144,7 +149,13 @@ EXTRACTED_PATTERNS=(
 	'config_repo_path() {'
 	'config_snapshot() {'
 	'config_report_value() {'
-	'config_warn_multi_run() {'
+	# one run per report, merged preambles (config.sh)
+	'config_input_value() {'
+	'config_merged_preamble() {'
+	'config_check_multi_run() {'
+	'config_multi_run_note() {'
+	'config_multi_run_csv() {'
+	'config_multi_run_json() {'
 	# validation fixes: istiod replicas over every context, reach-check cost bound
 	'env_replicas_summary() {'
 	'env_replicas_label() {'
@@ -182,6 +193,148 @@ EXTRACTED_PATTERNS=(
 	'cap_per_pod_requests() {'
 	'cap_parse_requested() {'
 	'cap_requested() {'
+	# bounded exec calls (common.sh)
+	'timeout_cmd() {'
+	'require_timeout() {'
+	'run_timeout() {'
+	# counter window deltas (metrics.sh)
+	'counter_delta() {'
+	# sweep outcome (common.sh)
+	'sweep_outcome() {'
+	# which propagation rows count (propagation.sh, awk)
+	'function prop_drop_reason('
+	'function prop_p1_drop_reason('
+	'function prop_p1_first('
+	'function prop_p1_sample('
+	'function prop_p2_sample('
+	'function prop_p3_sample('
+	# the Istio version the mesh runs, read at the start and the end (preamble.sh)
+	'istio_live_version() {'
+	'_istio_version_read_all() {'
+	'_istio_version_repro() {'
+	'_istio_version_marker() {'
+	'istio_version_resolve() {'
+	'_istio_notready_notes() {'
+	'istio_version_recheck() {'
+	'istio_version_kv() {'
+	'istio_version_label() {'
+	# the version check runs apart and fails closed; kubectl's why without klog
+	'_istio_version_isolated() {'
+	'_istio_version_resolve_live() {'
+	'_istio_version_recheck_emit() {'
+	'_istio_version_recheck_live() {'
+	'_istio_version_errline() {'
+	'_istio_version_hostkey() {'
+	# sweep outcome record (common.sh), multi-run refusal (config.sh)
+	'_sweep_outcome_by() {'
+	'_sweep_outcome_sweep_ids() {'
+	'sweep_outcome_recorded() {'
+	# not-finished record, latest attempts (common.sh); dirty hash, masked
+	# errors, generations, proxy versions (preamble.sh); proxy summary (envelope.sh)
+	'sweep_outcome_unfinished() {'
+	'sweep_outcome_start() {'
+	'controlplane_latest_attempts() {'
+	'_harness_keys() {'
+	'_istio_version_mask() {'
+	'_istio_live_version_read() {'
+	'istio_proxy_versions() {'
+	'_istio_proxy_versions_one() {'
+	'_istio_proxy_versions_off() {'
+	'_istio_proxy_versions_warn() {'
+	'env_proxy_versions_summary() {'
+	'_config_run_key() {'
+	'_config_run_ids() {'
+	'_config_sq() {'
+	'_config_canon_dir() {'
+	'_config_distinct() {'
+	'_config_join_mixed() {'
+	# scrape completeness and per-replica counters (fanout.sh)
+	'fanout_body_complete() {'
+	'fanout_counter_in_batch() {'
+	'fanout_replica_counter() {'
+	# the keyed-array arithmetic lint (lint-keyed-arith.sh)
+	'lint_keyed_arith_file() {'
+	'lint_keyed_arith_paths() {'
+	# the bats negation lint (lint-bats-negation.sh)
+	'lint_bats_negation_file() {'
+	'lint_bats_negation_paths() {'
+	# placeholder rows and the legacy schema (propagation.sh); a
+	# sweep that ends before its outcome, escaped markdown cells, a fork-free size check
+	# (common.sh)
+	'prop_placeholder_row() {'
+	'function prop_legacy_reason_('
+	'sweep_trap_signals() {'
+	'_sweep_on_signal() {'
+	'sweep_err_trap() {'
+	'sweep_outcome_cut_short() {'
+	'sweep_outcome_brief() {'
+	'sweep_outcome_pooled() {'
+	'tsv_end_line() {'
+	'sweep_outcome_on_exit() {'
+	'md_cell() {'
+	'function md_cell('
+	'yaml_str() {'
+	'file_min_bytes() {'
+	# one run per sweep dir, signals reach a sweep's step, one harness
+	# per sweep and per report (common.sh); a controlplane cell's attempts and states
+	# (common.sh CP_CELL_AWK); the Istio CR generations a sweep reads again (preamble.sh)
+	'sweep_step() {'
+	'sweep_lock() {'
+	'_sweep_unlock() {'
+	'harness_sha_for_sweep() {'
+	'report_harness_sha() {'
+	# a sweep's harness read again before its steps and at its end; its step's whole
+	# process tree stopped on a signal; a stale lock taken over by one run (common.sh)
+	'harness_sha_check() {'
+	'_harness_sha_sweep_end() {'
+	'_sweep_tree_read() {'
+	'_sweep_tree_freeze() {'
+	'_sweep_step_stop() {'
+	'sweep_step_kill() {'
+	'_sweep_step_reap() {'
+	'_sweep_pid_alive() {'
+	'_sweep_lock_refuse() {'
+	'_sweep_lock_release_mutex() {'
+	'function cp_header('
+	'function cp_isrow('
+	'function cp_key('
+	'function cp_cell_row('
+	'function cp_cell_state('
+	'function cp_plan_load('
+	'function cp_wl_parse('
+	'function cp_nr_parse('
+	# a controlplane sweep's runs and its resume command (common.sh)
+	'function cp_comment('
+	'function cp_end('
+	'function cp_mxo('
+	'controlplane_attempts() {'
+	'controlplane_resume_cmd() {'
+	'istio_generation_causes() {'
+	'istio_generations_read() {'
+	'istio_generations_diff() {'
+	'istio_version_refresh() {'
+	'_istio_proxy_versions_run() {'
+	'_istio_proxy_versions_cleanup() {'
+	# the harness content key (common.sh); the sweep settings checked at its start; a lock
+	# written in two steps; a stop without a working ps; the one JSON string escaper
+	'harness_read() {'
+	'harness_content_key() {'
+	'_harness_same_files() {'
+	'harness_same() {'
+	'sweep_settings_check() {'
+	'_sweep_lock_pid() {'
+	'_sweep_ps_works() {'
+	'_sweep_ps_check() {'
+	'_sweep_ps_table() {'
+	'_sweep_kill_hint() {'
+	'JSON_STR_AWK='
+	'function js('
+	'_sweep_resume_rows_added() {'
+	# an in-pod load stopped with its probe, or waited out after its exec failed (fortio.sh)
+	'fortio_client_stop() {'
+	'fortio_load_wait_out() {'
+	# the client pod a probe execs its loads in: Ready, not being deleted (fortio.sh)
+	'fortio_client_pod() {'
 	# member platform: platform.sh (the suite charts' OpenShift overlay, the platform record)
 	'platform_of() {'
 	'platform_chart_args() {'
@@ -265,25 +418,51 @@ else
 	err "bare by-design-non-zero scrape call(s) found (capture, guard with || true, or use as if/while condition)"
 fi
 
-# 6. dry-run smoke — same discovery and args as CI (portability.yml).
-if ((SKIP_DRY_RUN)); then
-	step 6 "dry-run smoke (SKIPPED)"
+# 6. keyed-array arithmetic lint: bash 4.3-5.1 expand an array key twice in (( )), let,
+# [[ -gt ]] and -v, so a key with a quote stops the script or reads false.
+step 6 "keyed-array arithmetic lint"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/lint-keyed-arith.sh"
+if lint_out="$(lint_keyed_arith_paths "$ROOT/tests" "$ROOT/terraform")"; then
+	ok
 else
-	step 6 "dry-run smoke for scripts annotated '# ci-dry-run:'"
+	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
+	err "array element read by a variable key in shell arithmetic (read it into a scalar first)"
+fi
+
+# 7. bats negation lint: bash exempts a `!`-negated command from set -e and the ERR trap,
+# so a `! cmd` that is not a bats test's last command never fails the test.
+step 7 "bats negation lint"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/lint-bats-negation.sh"
+if lint_out="$(lint_bats_negation_paths "$ROOT/tests")"; then
+	ok
+else
+	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
+	err "a negated command in a bats test that is not its last never fails it (end it with || false, or use run !)"
+fi
+
+# 8. dry-run smoke — same discovery and args as CI (portability.yml).
+if ((SKIP_DRY_RUN)); then
+	step 8 "dry-run smoke (SKIPPED)"
+else
+	step 8 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
 	empty_kubeconfig="$(mktemp)"
+	dry_out="$(mktemp)"
 	while IFS= read -r f; do
 		args=$(grep -m1 '^# ci-dry-run:' "$f" | sed 's/^# ci-dry-run://')
 		rel="${f#"$ROOT"/}"
 		# shellcheck disable=SC2086
-		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $args) >/dev/null 2>&1; then
+		if (cd "$ROOT" && KUBECONFIG="$empty_kubeconfig" bash "$rel" --dry-run $args) >"$dry_out" 2>&1; then
 			echo "    ok: $rel --dry-run${args}"
 		else
-			echo "    FAIL: $rel --dry-run${args}"
+			echo "    FAIL: $rel --dry-run${args} (last 20 lines of its output):"
+			tail -n 20 "$dry_out" | sed 's/^/      | /'
 			dry_fail=1
 		fi
 	done < <(grep -rl --exclude-dir='bats-*' '^# ci-dry-run:' "$ROOT/tests" --include='*.sh' | sort)
-	rm -f "$empty_kubeconfig"
+	rm -f "$empty_kubeconfig" "$dry_out"
 	if ((dry_fail)); then err "dry-run failures"; else ok; fi
 fi
 

@@ -33,12 +33,15 @@
 #     --namespace-count 50 --workload-mode config-only --series demo --sidecar-scoping namespace
 #   # ...grow it to 100 namespaces, then switch all 100 to wide scoping in place:
 #   ./tests/controlplane/001-setup-controlplane-test.sh --services-per-namespace 2 \
-#     --namespace-start 50 --namespace-count 100 --workload-mode config-only --series demo --sidecar-scoping namespace
+#     --namespace-start 50 --namespace-count 100 --workload-mode config-only --series demo \
+#     --sidecar-scoping namespace
 #   ./tests/controlplane/001-setup-controlplane-test.sh --services-per-namespace 2 \
-#     --namespace-count 100 --workload-mode config-only --series demo --sidecar-scoping wide --parts sidecars
+#     --namespace-count 100 --workload-mode config-only --series demo --sidecar-scoping wide \
+#     --parts sidecars
 #
 #   # Everything from a run config (see tests/controlplane/README.md, "Run config"):
-#   ./tests/controlplane/001-setup-controlplane-test.sh --config tests/controlplane/configs/smoke.env
+#   ./tests/controlplane/001-setup-controlplane-test.sh \
+#     --config tests/controlplane/configs/smoke.env
 # ci-dry-run: --contexts ci-dummy
 set -euo pipefail
 
@@ -424,9 +427,9 @@ command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -538,7 +541,7 @@ if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	a_cpu="unknown"; a_mem="unknown"; a_pods="unknown"
 	# shellcheck disable=SC2207
 	nt=($(cap_node_totals "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${nt[@]}"; do
+	for kv in ${nt[@]+"${nt[@]}"}; do
 		case "$kv" in
 			cpu_m=*) a_cpu="${kv#cpu_m=}" ;;
 			mem_mi=*) a_mem="${kv#mem_mi=}" ;;
@@ -548,7 +551,7 @@ if [[ "$SCALE_SIZING_MODE" == auto ]] && ! ((DRY_RUN)); then
 	i_cpu="unknown"; i_mem="unknown"; i_rep="unknown"
 	# shellcheck disable=SC2207
 	il=($(cap_istiod_limits "$src_ctx" "${KUBECTL[@]}"))
-	for kv in "${il[@]}"; do
+	for kv in ${il[@]+"${il[@]}"}; do
 		case "$kv" in
 			cpu_m=*) i_cpu="${kv#cpu_m=}" ;;
 			mem_mi=*) i_mem="${kv#mem_mi=}" ;;
@@ -724,7 +727,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 		cpu_alloc=""; cpu_workers=""; cpu_req=""
 		# shellcheck disable=SC2207
 		nt=($(cap_node_totals "$ctx" "${KUBECTL[@]}"))
-		for kv in "${nt[@]}"; do
+		for kv in ${nt[@]+"${nt[@]}"}; do
 			case "$kv" in
 				cpu_m=*) cpu_alloc="${kv#cpu_m=}" ;;
 				names=*) cpu_workers="${kv#names=}" ;;
@@ -732,7 +735,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 		done
 		# shellcheck disable=SC2207
 		rq=($(cap_requested "$ctx" "$cpu_workers" "" "${KUBECTL[@]}"))
-		for kv in "${rq[@]}"; do case "$kv" in cpu_m=*) cpu_req="${kv#cpu_m=}" ;; esac; done
+		for kv in ${rq[@]+"${rq[@]}"}; do case "$kv" in cpu_m=*) cpu_req="${kv#cpu_m=}" ;; esac; done
 		if [[ "$cpu_alloc" =~ ^[0-9]+$ && "$cpu_req" =~ ^[0-9]+$ ]]; then
 			cpu_free=$(( cpu_alloc > cpu_req ? cpu_alloc - cpu_req : 0 ))
 			cpu_line="~$(cpu_cores "$cpu_free") cores of CPU requests free on the workers ($(cpu_cores "$cpu_alloc") allocatable − $(cpu_cores "$cpu_req") requested), ~$(cpu_cores "$CPU_NEEDED_M") needed ($NEEDED_PODS pods × ${CPU_PER_POD_M}m, ${CPU_PER_POD_SRC})"
@@ -1018,6 +1021,8 @@ for ctx in "${CONTEXTS[@]}"; do
 		[[ -z "${OVERLAY_BY_CTX[$ctx]:-}" ]] || mapfile -t PLATFORM_ARGS <<<"${OVERLAY_BY_CTX[$ctx]}"
 		helm template controlplane-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
 			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
+		# Under a sweep, a chart file changed for this render reaches its outcome (harness_read).
+		harness_read _hs _hk
 		split_render "$rendered" "$ctx_dir"
 		read -r _ n_ns nsb _ ob < <(grep '^batches ' "${ctx_dir}/counts")
 		kind_count "$ctx_dir" Deployment > "$EXPECTED_DEPLOYS_FILE"

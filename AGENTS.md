@@ -5,8 +5,8 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
 ## What this repo is
 
 1. `terraform/rosa-hcp/`: ROSA HCP cluster provisioning (optional).
-2. `terraform/platform/`: ACM + OpenShift GitOps on the hub and spoke registration. Clusters come from
-   ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
+2. `terraform/platform/`: ACM + OpenShift GitOps on the hub and spoke registration. Clusters come
+   from ROSA state or an existing kubeconfig; brownfield switches reuse installed operators.
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
    ApplicationSets (members by cluster-Secret label on Kubernetes, by ACM Placement on OpenShift).
 4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
@@ -45,7 +45,9 @@ which wins over the upstream docs there when they disagree.
 - **Numbered scripts:** executable helpers in `tests/*/` and `terraform/*/scripts/` are named
   `NNN-kebab-case.sh` in execution order. When you add or renumber one, update every caller and
   README in the same change. Exception: `terraform/scripts/` holds helpers invoked by Terraform
-  `local-exec`; keep their names (generated kubeconfigs reference them).
+  `local-exec`; keep their names (generated kubeconfigs reference them). `tests/lib/` is not a
+  suite: its libraries and standalone tools (`verify.sh`, `redact-results.sh`) run in no order
+  and keep plain names.
 - **`--dry-run`:** scripts that change a cluster accept `--dry-run` and run it without a reachable
   cluster. Annotate with `# ci-dry-run: <args>` (or `# ci-dry-run-skip: <reason>`) so CI runs it.
   Exempt: the `terraform/scripts/` `local-exec` helpers. Terraform runs them, so `terraform plan`
@@ -64,8 +66,12 @@ which wins over the upstream docs there when they disagree.
     `charts/spoke-ossm/values.yaml` and both gateways' `waitForIstiod.image`, each with a
     keep-in-sync comment naming the others (`charts/spoke-east-west-gateway/README.md` repeats it)
   - ACM/GitOps channels: `terraform/platform/variables.tf`
-  - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
-    keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`).
+  - test images and the `ISTIO_VERSION` pin: `config/versions.env`, with a
+    keep-in-sync comment next to each duplicated value (chart image tags, `istioVersion`);
+    `tests/lib/test/version-pins.bats` fails when they drift. Results record the version the
+    members run (their active IstioRevision, `ISTIO_VERSION`) next to the pin
+    (`ISTIO_VERSION_PIN`), through `istio_version_resolve` / `istio_version_kv` in
+    `tests/lib/preamble.sh`.
 - **Reports:** every suite writes a markdown summary next to its TSV data. Sweeps call their report
   script with `--format markdown`.
 
@@ -74,13 +80,19 @@ which wins over the upstream docs there when they disagree.
 - `set -euo pipefail`. Repo root from a suite dir: `ROOT="$(cd "$(dirname "$0")/../.." && pwd)"`.
 - Source `"${ROOT}/config/versions.env"` first (it sources `options.env`), then the `tests/lib/*.sh`
   you need. Don't re-implement lib functions; `tests/lib/verify.sh` audits for inline copies.
-- Exception, scripts that take `--config FILE` (every suite but tuning): source `tests/lib/common.sh`
-  and `tests/lib/config.sh`, call `config_preload <suite> "$@"`, then source `versions.env` (or
-  `options.env`) and the other libs (`fanout.sh` reads its defaults when sourced). The
-  file's values must be in the environment before `options.env` fills in (and derives) defaults.
-  Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats` checks the order.
+- Exception, scripts that take `--config FILE` (every suite but tuning): source
+  `tests/lib/common.sh` and `tests/lib/config.sh`, call `config_preload <suite> "$@"`, then source
+  `versions.env` (or `options.env`) and the other libs (`fanout.sh` reads its defaults when
+  sourced). The file's values must be in the environment before `options.env` fills in (and
+  derives) defaults. Precedence is flag > `--config` > env > default; `tests/lib/test/config.bats`
+  checks the order.
 - Contexts: env `SETUP_CONTEXTS` and flag `--contexts CSV` list **mesh members only**, never the
   ACM hub. Parse into `CONTEXTS_CSV`, split into `CONTEXTS[@]`, loop with `ctx`.
+- Arrays keyed by a variable (a context or file name): bash 4.3 to 5.1 expand the key twice inside
+  arithmetic and `-v`, so a key with a quote, `$` or `]` breaks. Never write `(( a[$k] ))`,
+  `$(( a[$k] + 1 ))`, `let`, `[[ a[$k] -gt N ]]` or `[[ -v a[$k] ]]`: read the element into a
+  scalar first (`n="${a[$k]:-0}"; a[$k]=$((n + 1))`) and test it with `[[ -n "${a[$k]+x}" ]]`.
+  `tests/lib/verify.sh` step 6 (`tests/lib/lint-keyed-arith.sh`) fails on these forms.
 - `DRY_RUN` (0/1) pairs with `--dry-run`; `--help` exits 0 and lists every flag the parser accepts.
 - Tunables get defaults in `config/options.env` (one short comment each), not only inline. A flag
   that shapes a run needs such a key, read before the flag parser: the `--config` vocabulary is the
@@ -114,7 +126,7 @@ which wins over the upstream docs there when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |
@@ -134,7 +146,7 @@ which wins over the upstream docs there when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `verify.sh`, `fortio.sh`, `reach.sh`, `config.sh`; bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
@@ -142,22 +154,30 @@ which wins over the upstream docs there when they disagree.
 ## Testing and verification
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
-  audit, bats, and every `# ci-dry-run:` script against an empty kubeconfig (no cluster needed).
-  Required before merging changes to `tests/lib/`.
+  audit, bats, the bare-scrape, keyed-array and bats-negation lints (a `! cmd` that is not a bats
+  test's last command never fails it: write `! cmd || false` or `run ! cmd`), and every
+  `# ci-dry-run:` script against an empty kubeconfig (no cluster needed). Required before merging
+  changes to `tests/lib/`. The bats that parse the reports' YAML frontmatter need `python3` +
+  PyYAML and skip without it (CI installs it), so a run without PyYAML proves less than it reports.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its
   `values-openshift.yaml`; each ApplicationSet preset with both platform overlays
   (`platform-kubernetes.yaml`, `platform-openshift.yaml`).
 - Terraform: `terraform fmt -check -recursive` and `terraform validate` in both roots.
-- CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks on
-  macOS. The job names are required checks; don't rename them.
+- CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks
+  on macOS. The job names are required checks; don't rename them.
 - Live: deploy, then check that every hub Application is Synced/Healthy, the `mesh-wiring-verify`
   gate is Ready (`ca=shared`), and mesh-verify answers from every member (README "Verify").
 
 ## Tools
 
-`bash` 4+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`,
-`istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite), `aws` + `rosa` (ROSA only).
+`bash` 4.3+, `oc` and `kubectl`, `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk`, GNU
+`timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout` in
+`tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
+busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for
+it), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter
+bats, which skip without it; `python3` alone for the signal bats' pseudo-terminal test, which
+skips without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

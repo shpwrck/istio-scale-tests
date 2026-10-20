@@ -4,8 +4,10 @@
 # Consumers: churn, churn-dataplane, controlplane
 #
 # Exposes:
-#   extract_counter_sum <metrics_file> <counter_name>
+#   extract_counter_sum <metrics_file> <counter_name>       -> sum, unknown or unscraped (below)
 #   extract_counter_by_label <metrics_file> <counter_name> <label> <value>
+#                                                           -> sum, unknown or unscraped (below)
+#   counter_delta <before> <after> [<what>]                 -> after - before, or N/A
 #   extract_gauge <metrics_file> <gauge_name>
 #   extract_gauge_sum <metrics_file> <gauge_name>
 #   delta_histogram_p99 <baseline_file> <final_file> <histogram_name>
@@ -19,25 +21,46 @@
 # tests/lib/common.sh (for die()).
 # shellcheck shell=bash
 
-# Sum all instances of a Prometheus counter.
+# Counters: a counter that is not in the scrape is `unknown`, never 0, so a metric
+# renamed on another Istio version cannot read as zero pushes. The family counts as
+# present when the scrape has a sample of it (or a `# TYPE <name>` line, which other
+# exporters write; istiod's writes none for a counter that has no data point yet). A
+# present family with no sample for the label value asked for is a real 0 (istiod
+# creates a label series at its first increment). So one istiod replica that never
+# incremented a counter has no trace of it at all: a caller reading replicas one by one
+# decides "renamed or idle" across the whole scrape batch (fanout_replica_counter).
+# An empty, missing or unreadable file is `unscraped` (PL29): a failed scrape, which
+# counter_delta never reads as a 0 baseline. Window deltas go through counter_delta,
+# which also knows that a series absent at the baseline but present at the end
+# started from 0.
+
+# Sum all instances of a Prometheus counter: unknown when the scrape has none,
+# unscraped when the file is missing, empty or unreadable.
 # Usage: extract_counter_sum <metrics_file> <counter_name>
 # shellcheck disable=SC2329
 extract_counter_sum() {
 	local file="$1" name="$2"
+	[[ -s "$file" && -r "$file" ]] || { echo unscraped; return 0; }
 	awk -v name="$name" '
-	BEGIN { pat = "^" name "(\\{| )" }
-	!/^#/ && $0 ~ pat { sum += $NF }
-	END { printf "%.0f\n", sum+0 }
+	BEGIN { pat = "^" name "(\\{| )"; tpat = "^# TYPE " name " " }
+	$0 ~ tpat { found = 1; next }
+	!/^#/ && $0 ~ pat { sum += $NF; found = 1 }
+	END { if (found) printf "%.0f\n", sum+0; else print "unknown" }
 	' "$file"
 }
 
-# Sum a Prometheus counter filtered by a specific label value.
+# Sum a Prometheus counter filtered by a specific label value: 0 when the counter is
+# in the scrape but has no series with that value, unknown when it is not there at all,
+# unscraped as extract_counter_sum.
 # Usage: extract_counter_by_label <metrics_file> <counter_name> <label> <value>
 # shellcheck disable=SC2329
 extract_counter_by_label() {
 	local file="$1" name="$2" label="$3" value="$4"
+	[[ -s "$file" && -r "$file" ]] || { echo unscraped; return 0; }
 	awk -v name="$name" -v lbl="$label" -v val="$value" '
-	BEGIN { pat = "^" name "\\{" }
+	BEGIN { pat = "^" name "\\{"; any = "^" name "(\\{| )"; tpat = "^# TYPE " name " " }
+	$0 ~ tpat { found = 1; next }
+	!/^#/ && $0 ~ any { found = 1 }
 	!/^#/ && $0 ~ pat {
 		labels = $0
 		sub(/^[^{]*\{/, "", labels); sub(/\}.*$/, "", labels)
@@ -55,8 +78,47 @@ extract_counter_by_label() {
 		}
 		if (hit) sum += $NF
 	}
-	END { printf "%.0f\n", sum+0 }
+	END { if (found) printf "%.0f\n", sum+0; else print "unknown" }
 	' "$file"
+}
+
+# counter_delta <before> <after> [<what>]: the window delta of a cumulative counter read
+# by the extractors above (or fanout_counter_sum): a number, or N/A when it is not a
+# measurement. Before unknown with a number after is a 0 baseline (the series was
+# registered in the window). N/A, with a warning on stderr naming <what>, when:
+#   - either is unscraped: that scrape failed (PL29), so a failed baseline never gives
+#     the counter's lifetime total;
+#   - both are unknown: the counter is in neither scrape (renamed, or not exported);
+#   - after is unknown but before is not: the series vanished (an istiod restart);
+#   - after < before: the counter went backwards (a restart the caller did not detect,
+#     PL13/PL14).
+# Always returns 0, so it is safe in $(...) under set -e.
+# shellcheck disable=SC2329
+counter_delta() {
+	local b="$1" a="$2" what="${3:-counter}" num='^[0-9]+$'
+	if [[ "$b" == unscraped || "$a" == unscraped ]]; then
+		local which="final"
+		[[ "$b" == unscraped ]] && which="baseline"
+		[[ "$b" == unscraped && "$a" == unscraped ]] && which="baseline and final"
+		echo "warning: ${what}: the ${which} scrape is empty, short or unreadable (a failed scrape); delta N/A" >&2
+		echo "N/A"
+	elif [[ "$a" =~ $num && "$b" =~ $num ]]; then
+		if (( a >= b )); then
+			echo $(( a - b ))
+		else
+			echo "warning: ${what}: counter went from ${b} to ${a} in the window (a reset, usually an istiod restart); delta N/A" >&2
+			echo "N/A"
+		fi
+	elif [[ "$a" =~ $num ]]; then
+		echo "$a"
+	elif [[ "$b" =~ $num ]]; then
+		echo "warning: ${what}: counter was ${b} at the baseline and is missing from the final scrape (a reset?); delta N/A" >&2
+		echo "N/A"
+	else
+		echo "warning: ${what}: counter is in neither scrape (renamed on this Istio version, or not exported); delta N/A, not 0" >&2
+		echo "N/A"
+	fi
+	return 0
 }
 
 # Extract a single Prometheus gauge value (LAST matching line).

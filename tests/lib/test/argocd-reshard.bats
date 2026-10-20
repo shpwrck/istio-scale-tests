@@ -20,7 +20,7 @@ pods_json() {
 	local items="" p uid ready term
 	for p in "$@"; do
 		IFS=: read -r uid ready term <<<"$p"
-		items+="${items:+,}{\"metadata\":{\"uid\":\"${uid}\"$([[ "${term:-0}" == 1 ]] && echo ',"deletionTimestamp":"x"')},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"$([[ "$ready" == 1 ]] && echo True || echo False)\"}]}}"
+		items+="${items:+,}{\"metadata\":{\"uid\":\"${uid}\"$([[ "${term:-0}" == 1 ]] && echo ',"deletionTimestamp":"x"')},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"$(if [[ "$ready" == 1 ]]; then echo True; else echo False; fi)\"}]}}"
 	done
 	printf '{"items":[%s]}\n' "$items"
 }

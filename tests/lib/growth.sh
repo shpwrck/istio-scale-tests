@@ -17,7 +17,8 @@
 #   growth_envoy_stats <ctx> <ns> <pod> <kubectl_argv...>
 #                                       -> the same for one pod's istio-proxy, read with
 #                                          `pilot-agent request GET stats` (bounded by
-#                                          CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S)
+#                                          CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S via
+#                                          run_timeout; the caller runs require_timeout)
 #   growth_parse_gateway_pods           -> stdin: `get pods -o json`; prints one
 #                                          "<pod>\t<istio-proxy memory limit Mi|unknown>\t<kind>"
 #                                          line per Running pod (kind = the istio label:
@@ -97,7 +98,7 @@ growth_envoy_stats() {
 	local ctx="$1" ns="$2" pod="$3"
 	shift 3
 	local out
-	out="$(timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "$@" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
+	out="$(run_timeout "${CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S:-30}s" "$@" --context="$ctx" -n "$ns" exec "$pod" -c istio-proxy -- \
 		pilot-agent request GET 'stats?filter=memory_allocated|memory_physical_size|active_clusters' 2>/dev/null)" || out=""
 	printf '%s\n' "$out" | growth_parse_envoy_stats
 }
@@ -264,7 +265,7 @@ growth_retire_verified() {
 		if ! "$@"; then
 			bad="the cleanup command failed"
 		else
-			for ctx in "${ctxs[@]}"; do
+			for ctx in ${ctxs[@]+"${ctxs[@]}"}; do
 				if ! left="$(growth_discovered_ns "$ctx" "$sel" "${_grv_k[@]}")"; then
 					bad="${bad:+${bad}; }${ctx}: namespaces not listable"
 				elif [[ -n "$left" ]]; then

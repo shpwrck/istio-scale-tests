@@ -153,9 +153,9 @@ command -v helm >/dev/null 2>&1 || die "helm not found on PATH"
 
 REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
-	split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
-ALL_CTXS=("$SOURCE_CTX" "${REMOTES[@]}")
+ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 
 # "fortio-server-" + ctx must be a valid Service name (DNS-1035 label, <= 63).
 for ctx in "${ALL_CTXS[@]}"; do
@@ -219,7 +219,7 @@ if ! ((DRY_RUN)); then
 		wait_ns_gone "$ctx" &
 		NS_WAIT_PIDS+=($!)
 	done
-	for pid in "${NS_WAIT_PIDS[@]}"; do
+	for pid in ${NS_WAIT_PIDS[@]+"${NS_WAIT_PIDS[@]}"}; do
 		wait "$pid" || die "pre-existing namespace $NS did not clear within ${SETUP_NS_WAIT_SEC}s on one or more contexts; refusing to apply into a Terminating namespace"
 	done
 fi
@@ -269,14 +269,16 @@ APPLY_PIDS=()
 echo "Setup [source=$SOURCE_CTX]: fortio (server+client) + ${CHURN_DEPLOYMENT_COUNT_OPT} churn-targets in ns=${NS}"
 apply_to "$SOURCE_CTX" both &
 APPLY_PIDS+=($!)
-for ctx in "${REMOTES[@]}"; do
+for ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	echo "Setup [remote=$ctx]: fortio-server + ${CHURN_DEPLOYMENT_COUNT_OPT} churn-targets in ns=${NS}"
 	apply_to "$ctx" server &
 	APPLY_PIDS+=($!)
 done
-for pid in "${APPLY_PIDS[@]}"; do
+for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the workload apply"
 done
+# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
+harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."
@@ -296,7 +298,7 @@ for ctx in "${ALL_CTXS[@]}"; do
 	) &
 	WAIT_PIDS+=($!)
 done
-for pid in "${WAIT_PIDS[@]}"; do
+for pid in ${WAIT_PIDS[@]+"${WAIT_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed deployment readiness check"
 done
 

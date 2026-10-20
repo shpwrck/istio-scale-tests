@@ -1,5 +1,13 @@
 # Scale-test campaign results — 2026-06-04 clean pass
 
+> **Erratum (2026-10-16).** istiod `cpu_avg` in this record (for example "~310–402 m avg under
+> load") is the peak of each window, not its average: the report labelled a per-window peak as
+> an average until commit `ed32c30` (PR 106), which renamed it `cpu_peak` and added a true average.
+> Config sizes reported as "MB" are MiB (3.9 MiB is about 4.1 MB); ratios such as the 87%
+> reduction are unaffected. The churn-dataplane rows may overstate the churn they saw (the driver
+> ran ops one after another and only slept when ahead). See [BACKLOG](../../BACKLOG.md) section 9,
+> "Status 2026-10-16".
+
 The **clean full-workload re-run** that an earlier reduced-workload pass (2026-06-02: istiod pinned to
 5 replicas, controlplane 10×2, churn-dataplane stopped at 11/30 combos) deferred. All five suites ran end-to-end against the live 10-spoke multi-primary mesh, at
 **full workload** (controlplane 10×3, churn-dataplane 5×5) — enabled by fixing the O5 istiod

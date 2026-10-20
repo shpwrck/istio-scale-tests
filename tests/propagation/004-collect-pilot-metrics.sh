@@ -118,9 +118,9 @@ is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTE
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
-	split_csv "$CONTEXTS_CSV" CONTEXTS
+	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
 else
-	split_csv "$SETUP_CONTEXTS" CONTEXTS
+	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
 
@@ -146,7 +146,7 @@ declare -A CTX_PORTS=() CTX_PODS=()
 
 cleanup() {
 	local pid
-	for pid in "${PF_PIDS[@]}"; do
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
@@ -158,7 +158,7 @@ trap cleanup EXIT
 # (Re)open one port-forward per Running istiod pod on every context.
 open_all() {
 	local pid i ctx
-	for pid in "${PF_PIDS[@]}"; do
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	done
@@ -180,7 +180,7 @@ scrape_all() {
 	ts=$(date -u +%Y%m%dT%H%M%SZ)
 	for i in "${!CONTEXTS[@]}"; do
 		ctx="${CONTEXTS[i]}"
-		safe_ctx="${ctx//[^A-Za-z0-9._-]/_}"
+		safe_ctx="$(ctx_file_safe "$ctx")"
 		read -ra ports <<<"${CTX_PORTS[$i]}"
 		read -ra pods <<<"${CTX_PODS[$i]}"
 		fanout_scrape_all "$SCRAPE_DIR" "ctx${i}" "${ports[@]}" >/dev/null || failed=1

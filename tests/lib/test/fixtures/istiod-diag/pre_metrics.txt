@@ -20,3 +20,6 @@ pilot_xds{type="grpc"} 2
 # HELP pilot_xds_pushes Pilot build and send errors for lds, rds, cds and eds.
 # TYPE pilot_xds_pushes counter
 pilot_xds_pushes{type="eds"} 200
+# HELP pilot_push_triggers Total number of times a push was triggered, labeled by reason for the push.
+# TYPE pilot_push_triggers counter
+pilot_push_triggers{type="endpoint"} 40

@@ -61,6 +61,7 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case " $* " in
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;  # the pin
 *" fortio curl "*) printf 'HTTP/1.1 503 Service Unavailable\r\n\r\nno healthy upstream\n'; exit 1 ;;
 *" exec "*)
 	url="${*: -1}"
@@ -70,7 +71,7 @@ case " $* " in
 	esac
 	;;
 *" get deploy dataplane-server "*) printf '1/1' ;;
-*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0' ;;
+*" get pod -l app=dataplane-client "*) printf 'dataplane-client-0\t\tTrue' ;;
 *" get pods "*) : ;;
 *) exit 1 ;;
 esac

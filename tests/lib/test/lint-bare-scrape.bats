@@ -122,7 +122,7 @@ EOF
 	assert_success
 }
 
-# --- B7: bare orchestrator-step calls in *-run-sweep.sh ---
+# --- bare orchestrator-step calls in *-run-sweep.sh ---
 
 @test "orchestrator-step lint flags a bare setup call" {
 	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
@@ -191,7 +191,7 @@ EOF
 	assert_success
 }
 
-# --- R3-2: generalized anchor catches non-$SCRIPT_DIR vars (e.g. ${TUNING_DIR}) ---
+# --- generalized anchor catches non-$SCRIPT_DIR vars (e.g. ${TUNING_DIR}) ---
 
 @test "orchestrator-step lint flags a bare \${TUNING_DIR} apply call" {
 	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
@@ -242,10 +242,10 @@ EOF
 	assert_success
 }
 
-# --- R4-1: lint_bare_scrape_paths dispatches the orchestrator-step lint to a
+# --- lint_bare_scrape_paths dispatches the orchestrator-step lint to a
 #           *-run-tuning-sweep.sh file (not just *-run-sweep.sh) ---
 
-@test "R4-1: paths dispatches orchestrator-step lint to a *-run-tuning-sweep.sh file" {
+@test "paths dispatches orchestrator-step lint to a *-run-tuning-sweep.sh file" {
 	# A bare step call in a tuning-style sweep name must be CAUGHT via paths.
 	cat > "$FIX/003-run-tuning-sweep.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -259,7 +259,7 @@ EOF
 	assert_output --partial "001-apply-profile.sh"
 }
 
-@test "R4-1: a clean *-run-tuning-sweep.sh passes via paths" {
+@test "a clean *-run-tuning-sweep.sh passes via paths" {
 	cat > "$FIX/003-run-tuning-sweep.sh" <<'EOF'
 #!/usr/bin/env bash
 for p in a b; do
@@ -272,9 +272,9 @@ EOF
 	assert_success
 }
 
-# --- R4-2: \-continued multi-line calls — guard on a LATER line must be honored ---
+# --- \-continued multi-line calls — guard on a LATER line must be honored ---
 
-@test "R4-2: a \\-continued call with the || guard on a later line PASSES" {
+@test "a \\-continued call with the || guard on a later line PASSES" {
 	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
 #!/usr/bin/env bash
 for p in a b; do
@@ -290,7 +290,7 @@ EOF
 	[[ -z "$output" ]]
 }
 
-@test "R4-2: a \\-continued call with NO guard anywhere is FLAGGED" {
+@test "a \\-continued call with NO guard anywhere is FLAGGED" {
 	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
 #!/usr/bin/env bash
 for p in a b; do
@@ -305,7 +305,7 @@ EOF
 	assert_output --partial "002-revert-profile.sh"
 }
 
-@test "R4-2: a \\-continued call guarded by a wrapping if ! PASSES" {
+@test "a \\-continued call guarded by a wrapping if ! PASSES" {
 	cat > "$FIX/foo-run-sweep.sh" <<'EOF'
 #!/usr/bin/env bash
 for p in a b; do

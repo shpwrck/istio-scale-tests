@@ -20,7 +20,7 @@
 #       --source-context <mesh-a-ctx> --remote-contexts <mesh-b-ctx>
 # ci-dry-run: --source-context ci-dummy
 set -euo pipefail
-# P3: loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
+# A loud ERR trap (separate signal from the EXIT cleanup trap installed later, so
 # both run). Self-reports an UNEXPECTED abort.
 # shellcheck disable=SC2154  # rc is assigned at the head of the trap body
 trap 'rc=$?; echo "FATAL: ${0##*/} aborted (exit ${rc}) at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
@@ -90,7 +90,8 @@ Usage: $(basename "$0") [options]
   --qps N                  Target QPS (default: $QPS).
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle-sec N           Settle delay before measurement starts (default: $SETTLE_SEC).
-  --output-file FILE       TSV file to write/append to (default: ${COEXEC_RESULTS_DIR}/churn-dataplane-\$RUN_ID.tsv).
+  --output-file FILE       TSV file to write/append to
+                           (default: ${COEXEC_RESULTS_DIR}/churn-dataplane-\$RUN_ID.tsv).
   --output-dir DIR         Default results dir if --output-file not given.
   --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
                            (default: unknown; the sweep queries + threads this).
@@ -110,9 +111,25 @@ Row status: FAILED (fortio exec failed), PERCENTILE_MISSING or ERROR_RATE_HIGH
 POISONED_RESTART, POISONED_SCRAPE, else OK. The marker comment records pct_200 and
 top_code (the most frequent code other than 200).
 
+The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
+whose exec failed (a FAILED row) may run on there, so the probe waits until its
+--duration and 5 s more have passed before going on, unless the client pod is gone
+(deleted, or evicted and Failed: then no load runs). When the probe ends during a load
+(a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the pod's
+Deployment starts a new one, which a sweep started right after waits for (its setup 001
+waits until the Deployments are Available). Run by hand, the probe loads only a Ready
+client pod that is not being deleted, and stops when there is none: run 001, or wait
+until the new pod is Ready.
+
 Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
 
 Environment:
+  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
+  record what the mesh runs, when a member's active IstioRevision version is not
+  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
+  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
+  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
   COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
   REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
   COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
@@ -205,7 +222,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
-[[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_csv "$REMOTE_CONTEXTS_CSV" REMOTES
+[[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -217,9 +234,9 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 REACH_TSV="$(dirname "$OUTPUT_FILE")/reach-${RUN_ID}.tsv"
 REACH_URL_TEMPLATE="http://fortio-server-{ctx}.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
 
-HARNESS_SHA="$(harness_sha)"
+harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$(dirname "$OUTPUT_FILE")"
 ALL_CTXS_CSV="$SOURCE_CTX"
-for r in "${REMOTES[@]}"; do ALL_CTXS_CSV+=",$r"; done
+for r in ${REMOTES[@]+"${REMOTES[@]}"}; do ALL_CTXS_CSV+=",$r"; done
 
 if ((DRY_RUN)); then
 	echo "=== Dry-run: baseline probe ==="
@@ -236,6 +253,10 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # PL2: probe kube versions concurrently with 5s --request-timeout.
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+# The Istio version the members run, before any load (inherited when 004 runs this
+# probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
+istio_version_resolve "$ALL_CTXS_CSV" 0 "${KUBECTL[@]}"
+mapfile -t IV_KV < <(istio_version_kv)
 # The platform record (tests/lib/platform.sh), before any window: inherited from 004, else read here.
 platform_probe "$ALL_CTXS_CSV"
 
@@ -252,7 +273,8 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
-		"ISTIO_VERSION=${ISTIO_VERSION:-unknown}" \
+		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
+		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
 		"SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS" \
@@ -277,8 +299,8 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
-CLIENT_POD="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" get pod -l app=fortio-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "$CLIENT_POD" ]] || die "no fortio-client pod found on $SOURCE_CTX (ns=$NS)"
+CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" fortio-client "${KUBECTL[@]}")" \
+	|| die "no Ready fortio-client pod that is not being deleted on $SOURCE_CTX (ns=$NS): run 001, or wait until its Deployment's new pod is Ready"
 
 # Remote reachability check (tests/lib/reach.sh), before the istiod port-forwards
 # and the window, through each cluster's fortio-server-<ctx> Service.
@@ -287,7 +309,8 @@ if ((REACH_REQUESTS > 0)); then
 	# A sweep's 002s share one reach file (its RUN_ID): its header records every member the
 	# sweep covers (the inherited record), not the first mesh size's.
 	if reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)" "RUN_ID=${RUN_ID}" \
-		"HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" "NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
+		"HARNESS_SHA=${HARNESS_SHA}" "HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=churn-dataplane" \
+		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then
 		reach_print_summary "$REACH_TSV" "$RUN_ID" "$COMBO_ID"
@@ -314,8 +337,12 @@ ISTIOD_PORTS=()
 ISTIOD_PODS=()
 ISTIOD_DIR="$(mktemp -d)"
 PF_OK=0
+# LOAD_POD: the client pod while the window's `fortio load` runs in it; the EXIT trap stops
+# a load still running there (fortio_client_stop).
+LOAD_POD=""
 cleanup_pf() {
-	for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+	[[ -z "${LOAD_POD:-}" ]] || fortio_client_stop "$SOURCE_CTX" "$NS" "$LOAD_POD" "${KUBECTL[@]}"
+	for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
 	PF_PIDS=()
 	rm -rf "${ISTIOD_DIR:-}"
 }
@@ -336,8 +363,8 @@ if ((PF_OK)); then
 	# Pre podset = the pods fanout_open reached, in scrape-file order, so
 	# fanout_restart_status pairs each pod with its own scrape. The post podset
 	# lists every Running pod, so a replaced or added istiod shows as a change.
-	printf '%s\n' "${ISTIOD_PODS[@]}" > "$PRE_PODSET"
-	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" "${ISTIOD_PORTS[@]}")"
+	printf '%s\n' ${ISTIOD_PODS[@]+"${ISTIOD_PODS[@]}"} > "$PRE_PODSET"
+	PRE_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "pre" ${ISTIOD_PORTS[@]+"${ISTIOD_PORTS[@]}"})"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "pre") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 # CSV of the per-pod pre-scrape files in podset order for fanout_restart_status.
@@ -363,19 +390,26 @@ WINDOW_START_NS="$(now_ns)"
 
 JSON_OUT=""
 STATUS="OK"
+LOAD_POD="$CLIENT_POD"
 if ! JSON_OUT="$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 	fortio load -qps "$QPS" -c "$CONNECTIONS" -t "${DURATION}s" -json - -quiet "$TARGET_URL" 2>/dev/null)"; then
 	STATUS="FAILED"
 	JSON_OUT=""
 fi
 WINDOW_END_NS="$(now_ns)"
+# The load can outlive its failed exec in the pod: wait it out, so the churn window (003)
+# that a sweep runs next does not run beside it.
+if [[ "$STATUS" == FAILED ]]; then
+	fortio_load_wait_out "$WINDOW_START_NS" "$DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
+fi
+LOAD_POD=""
 
 # Post-window scrape of every istiod pod (concurrent) + pod set.
 POST_PODSET="${ISTIOD_DIR}/post.podset"
 POST_SKEW_MS=0
 if ((PF_OK)); then
 	fanout_record_podset "$SOURCE_CTX" "$POST_PODSET" "${KUBECTL[@]}"
-	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" "${ISTIOD_PORTS[@]}")"
+	POST_SKEW_MS="$(fanout_scrape_all "$ISTIOD_DIR" "post" ${ISTIOD_PORTS[@]+"${ISTIOD_PORTS[@]}"})"
 	(( $(fanout_scrape_failed_count "$ISTIOD_DIR" "post") > 0 )) && SCRAPE_INCOMPLETE=1
 fi
 # PL8: per-window scrape skew now spans pods (the max of the pre/post batches).
@@ -419,24 +453,18 @@ fi
 XDS_PUSHES_DELTA="N/A"; EDS_PUSHES_DELTA="N/A"; PUSH_TRIGGERS_DELTA="N/A"
 CONVERGENCE_P99="N/A"; QUEUE_TIME_P99="N/A"; PUSH_TIME_P99="N/A"
 if [[ "$RESTARTED" == "0" && ${#PRE_FILES[@]} -gt 0 && "$SCRAPE_INCOMPLETE" == "0" ]]; then
-	pre_pushes=$(fanout_counter_sum pilot_xds_pushes "${PRE_FILES[@]}")
-	post_pushes=$(fanout_counter_sum pilot_xds_pushes "${POST_FILES[@]}")
-	XDS_PUSHES_DELTA=$(( post_pushes - pre_pushes ))
-	(( XDS_PUSHES_DELTA < 0 )) && XDS_PUSHES_DELTA="N/A"
-
-	pre_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${PRE_FILES[@]}")
-	post_eds=$(fanout_counter_by_label_sum pilot_xds_pushes type eds "${POST_FILES[@]}")
-	EDS_PUSHES_DELTA=$(( post_eds - pre_eds ))
-	(( EDS_PUSHES_DELTA < 0 )) && EDS_PUSHES_DELTA="N/A"
-
-	pre_triggers=$(fanout_counter_sum pilot_push_triggers "${PRE_FILES[@]}")
-	post_triggers=$(fanout_counter_sum pilot_push_triggers "${POST_FILES[@]}")
-	PUSH_TRIGGERS_DELTA=$(( post_triggers - pre_triggers ))
-	(( PUSH_TRIGGERS_DELTA < 0 )) && PUSH_TRIGGERS_DELTA="N/A"
+	# counter_delta (metrics.sh): N/A with a warning when a counter is in neither
+	# scrape (renamed, never 0) or went backwards; one registered in the window counts from 0.
+	XDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_sum pilot_xds_pushes ${PRE_FILES[@]+"${PRE_FILES[@]}"})" \
+		"$(fanout_counter_sum pilot_xds_pushes ${POST_FILES[@]+"${POST_FILES[@]}"})" "pilot_xds_pushes on ${SOURCE_CTX}")
+	EDS_PUSHES_DELTA=$(counter_delta "$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${PRE_FILES[@]+"${PRE_FILES[@]}"})" \
+		"$(fanout_counter_by_label_sum pilot_xds_pushes type eds ${POST_FILES[@]+"${POST_FILES[@]}"})" "pilot_xds_pushes{type=eds} on ${SOURCE_CTX}")
+	PUSH_TRIGGERS_DELTA=$(counter_delta "$(fanout_counter_sum pilot_push_triggers ${PRE_FILES[@]+"${PRE_FILES[@]}"})" \
+		"$(fanout_counter_sum pilot_push_triggers ${POST_FILES[@]+"${POST_FILES[@]}"})" "pilot_push_triggers on ${SOURCE_CTX}")
 
 	for h in pilot_proxy_convergence_time pilot_proxy_queue_time pilot_xds_push_time; do
-		fanout_merge_histogram "$h" "${ISTIOD_DIR}/pre-${h}.merged" "${PRE_FILES[@]}"
-		fanout_merge_histogram "$h" "${ISTIOD_DIR}/post-${h}.merged" "${POST_FILES[@]}"
+		fanout_merge_histogram "$h" "${ISTIOD_DIR}/pre-${h}.merged" ${PRE_FILES[@]+"${PRE_FILES[@]}"}
+		fanout_merge_histogram "$h" "${ISTIOD_DIR}/post-${h}.merged" ${POST_FILES[@]+"${POST_FILES[@]}"}
 	done
 	CONVERGENCE_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_proxy_convergence_time.merged" "${ISTIOD_DIR}/post-pilot_proxy_convergence_time.merged" pilot_proxy_convergence_time)
 	QUEUE_TIME_P99=$(delta_histogram_p99 "${ISTIOD_DIR}/pre-pilot_proxy_queue_time.merged" "${ISTIOD_DIR}/post-pilot_proxy_queue_time.merged" pilot_proxy_queue_time)

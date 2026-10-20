@@ -243,12 +243,25 @@ results will go, and:
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
      ran (the registry host and path are dropped; several are `+`-joined), and the operator build
      (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV, such as
-     `servicemeshoperator3:3.4.3/Succeeded`; on Kubernetes the Sail operator's image tag, the
-     digest its pod runs and its state, such as `sail-operator:1.31.1@sha256:<digest>/Available`;
-     read on the platform the member serves, on `TEST_PLATFORM`'s only when the member could not
-     be asked; `absent` only when that read of the served platform's operator answers with none;
-     `unknown`, with a warning, when the read fails, or when the member could not be asked and
-     the read where `TEST_PLATFORM` looks found none); the Istio CR version and the tuning
+     `servicemeshoperator3:3.4.3/Succeeded`; on Kubernetes the Sail operator's image tag, the digest
+     its pod runs and its state, such as `sail-operator:1.31.1@sha256:<digest>/Available`; read on
+     the platform the member serves, on `TEST_PLATFORM`'s only when the member could not be asked;
+     `absent` only when that read of the served platform's operator answers with none; `unknown`,
+     with a warning, when the read fails, or when the member could not be asked and the read where
+     `TEST_PLATFORM` looks found none); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`,
+     which can be an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each
+     active IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
+     `unknown` for a member that cannot be read or whose Istio CR is not settled), with
+     `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`, the
+     generations of its Istio CR and active IstioRevision in `ISTIO_GENERATIONS`
+     (`<ctx>=<cr>/<revision>`), the proxy versions connected to its istiod in
+     `ISTIO_PROXY_VERSIONS`, and the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this
+     read-only check warns on a difference and never stops on it. A member whose istiod or IstioCNI
+     is not ready (or whose istiod is rolling out) is read again every
+     `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, both
+     set in the environment only, as is `ISTIO_PROXY_READ_PARALLEL` (20), the members whose proxy
+     versions are read at once; the members still not ready then are in `ISTIO_NOTREADY_AT_START`
+     (`none` when every member was ready), with the wait in `ISTIO_READY_WAITED_SEC`; and the tuning
      baseline;
    - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
      `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
@@ -334,9 +347,10 @@ results will go, and:
    within ⌈members / 4⌉ × 2 × that limit reads `timeout`.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
-   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` only describes the script); when it
-   is not the script's commit the run warns and records `CHART_REVISION_VS_HARNESS=differs`
-   (`same` when it is, `same-dirty` when it is but the script's tree has uncommitted changes).
+   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` and `HARNESS_CONTENT_KEY`, both in the
+   preamble, only describe the script); when it is not the script's commit the run warns and records
+   `CHART_REVISION_VS_HARNESS=differs` (`same` when it is, `same-dirty` when it is but the script's
+   tree has uncommitted changes).
 6. Rereads the route status (S4's status depends on istiod's push timing; a route that was not
    in place when the wait ended, or whose status was unread then, but is in place now says
    `STATUS_CHANGED`; `detail` keeps the status the wait ended on) and the istiod and ingress pods

@@ -1293,6 +1293,49 @@ env_list() {
 	! grep -n 'platform_help_lines)' "$ROOT"/tests/*/0*.sh || false
 }
 
+# first_step_line <sweep>: the first line of its main flow (outside function bodies, comments
+# skipped) that runs a step: a "$SCRIPT_DIR/0NN-..." command, through sweep_step or not, or a call
+# of a function whose body runs one, itself or through another such function (controlplane's
+# leftover check runs 005-cleanup.sh before the first cell).
+first_step_line() {
+	awk '
+		function isstep(l) { return l ~ /(^|[[:space:];!(])(sweep_step[[:space:]]+)?"\$SCRIPT_DIR\/0[0-9][0-9]-/ }
+		function mentions(l, g) { return match(l, "(^|[^A-Za-z0-9_])" g "([^A-Za-z0-9_]|$)") > 0 }
+		{ line[NR] = $0 }
+		END {
+			infn = ""
+			for (i = 1; i <= NR; i++) {
+				l = line[i]
+				if (infn == "" && l ~ /^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{/) {
+					f = substr(l, 1, index(l, "(") - 1)
+					body[f] = body[f] "\n" l
+					# A one-line definition ends where it starts.
+					if (!(l ~ /\}[[:space:]]*$/ && l !~ /\{[[:space:]]*$/)) infn = f
+					continue
+				}
+				if (infn != "") {
+					if (l ~ /^\}/) infn = ""
+					else if (l !~ /^[[:space:]]*#/) body[infn] = body[infn] "\n" l
+					continue
+				}
+				main[i] = 1
+			}
+			for (f in body) if (isstep(body[f])) runs[f] = 1
+			do {
+				more = 0
+				for (f in body) {
+					if (f in runs) continue
+					for (g in runs) if (mentions(body[f], g)) { runs[f] = 1; more = 1; break }
+				}
+			} while (more)
+			for (i = 1; i <= NR; i++) {
+				if (!(i in main) || line[i] ~ /^[[:space:]]*#/) continue
+				if (isstep(line[i])) { print i; exit }
+				for (g in runs) if (mentions(line[i], g)) { print i; exit }
+			}
+		}' "$1"
+}
+
 @test "platform_probe_share (S-B1, U5-Ba): every suite sweep shares its record right after its probe and warns from it, before its first step; nothing exports the record" {
 	local f p sh sw st n=0
 	for f in "$ROOT"/tests/*/0*-run-sweep.sh; do
@@ -1301,7 +1344,7 @@ env_list() {
 		p="$(grep -n '^[[:space:]]*platform_probe "' "$f" | head -n 1 | cut -d: -f1)"
 		sh="$(grep -n '^[[:space:]]*platform_probe_share "' "$f" | head -n 1 | cut -d: -f1)"
 		sw="$(grep -n '^[[:space:]]*platform_start_warnings "' "$f" | head -n 1 | cut -d: -f1)"
-		st="$(grep -nE '^[[:space:]]*(if ! )?"\$SCRIPT_DIR/0[0-9]{2}-' "$f" | head -n 1 | cut -d: -f1)"
+		st="$(first_step_line "$f")"
 		[[ -n "$p" && -n "$sh" && -n "$sw" && -n "$st" ]] || { echo "${f}: probe '${p}', share '${sh}', warnings '${sw}', first step '${st}'"; false; }
 		((p < sh && sh < sw && sw < st)) || { echo "${f}: probe (line ${p}), share (line ${sh}), warnings (line ${sw}), first step (line ${st}) out of order"; false; }
 	done

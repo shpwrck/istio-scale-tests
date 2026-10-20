@@ -239,7 +239,10 @@ EOF
 	cleanup=$(grep -n 'describe-vpc-endpoints' "${STUB_LOG}" | head -1 | cut -d: -f1)
 	full=$(grep -n 'terraform .* destroy ' "${STUB_LOG}" | grep -v -- '-target=' | head -1 | cut -d: -f1)
 	token=$(grep -n 'rosa token --refresh' "${STUB_LOG}" | head -1 | cut -d: -f1)
-	[ -n "$target" ] && [ -n "$cleanup" ] && [ -n "$full" ] && [ -n "$token" ]
+	[ -n "$target" ]
+	[ -n "$cleanup" ]
+	[ -n "$full" ]
+	[ -n "$token" ]
 	((token < target && target < cleanup && cleanup < full))
 	run bash -c "grep 'terraform .* destroy ' '${STUB_LOG}' | grep -vc -- '-target='"
 	assert_output "2"
