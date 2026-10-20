@@ -1141,7 +1141,7 @@ env_list() {
 	[[ "$stderr" != *"not recorded in"* ]]
 }
 
-@test "platform_report_lines: every style, and platform_value_has finds kind in a mixed value" {
+@test "platform_report_lines: every style, a value escaped for yaml and md, and platform_value_has finds kind in a mixed value" {
 	local v=$'PLATFORM=kubernetes\nNODE_PROVIDER_BY_CONTEXT=m1=kind,m2=mixed:aws;kind'
 	run platform_report_lines comment "$v"
 	assert_output $'# PLATFORM=kubernetes\n# NODE_PROVIDER_BY_CONTEXT=m1=kind,m2=mixed:aws;kind'
@@ -1155,6 +1155,12 @@ env_list() {
 	assert_output '{"platform":"kubernetes","node_provider_by_context":"m1=kind,m2=mixed:aws;kind"}'
 	run platform_report_lines xml "$v"
 	assert_failure
+	# A hand-edited value: the front matter stays parseable, the table row one row.
+	v=$'PLATFORM=kube"r\\net|es'
+	run platform_report_lines yaml "$v"
+	assert_output 'platform: "kube\"r\\net|es"'
+	run platform_report_lines md "$v"
+	assert_output '| PLATFORM | `kube"r\net\|es` |'
 	platform_value_has "m1=aws,m2=mixed:aws;kind" kind
 	platform_value_has "m1=aws+kind" kind
 	! platform_value_has "m1=aws,m2=kindest" kind || false

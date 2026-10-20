@@ -9,6 +9,7 @@ bats_require_minimum_version 1.5.0  # run --separate-stderr
 
 COMPARE="${ROOT}/tests/tuning/004-compare-profiles.sh"
 CP_HDR=$'timestamp\tistiod_restarted\tistiod_mem_mi\tgo_heap_inuse_mi\tistiod_cpu_m_delta\tconvergence_p99_ms\txds_pushes_delta\tsidecar_config_bytes_avg\tconnected_proxies'
+CD_HDR=$'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms'
 
 setup() {
 	S="${BATS_TEST_TMPDIR}/sweep"
@@ -54,6 +55,47 @@ setup() {
 	refute_output --partial "millicores"
 	refute_output --partial "(bytes)"
 	refute_output --partial "438.00"
+}
+
+@test "tuning 004: the settle time the sweep recorded, and a churn-dataplane sweep's churn rate, are in both formats' header and the markdown frontmatter; a sweep from before them prints neither" {
+	local f pfx p cd="${BATS_TEST_TMPDIR}/cdsweep"
+	for f in md text; do
+		run --separate-stderr "$COMPARE" --results-dir "$S" --format "$f"
+		assert_success
+		refute_output --partial "SETTLE_SEC"
+		refute_output --partial "settle_sec"
+		refute_output --partial "CHURN_RATE"
+		refute_output --partial "churn_rate"
+	done
+	# 003 records the settle time for every suite, the churn rate for churn-dataplane only.
+	printf '# SETTLE_SEC=90\n' >> "${S}/sweep-metadata.txt"
+	mkdir -p "${cd}/baseline" "${cd}/01-x"
+	printf '# SUITE=churn-dataplane\n# PASSES=baseline,01-x\n# SETTLE_SEC=60\n# CHURN_RATE=5\n' > "${cd}/sweep-metadata.txt"
+	for p in baseline 01-x; do
+		{
+			echo "$CD_HDR"
+			printf 'r1\tsha\tc1\t2\t0\tbaseline\t60\t50\t50\t2\t3\t5\t6\t7\tN/A\t0\tOK\t10\t10\t100\tN/A\t5\tN/A\tN/A\tN/A\n'
+			printf 'r1\tsha\tc1\t2\t5\tchurn\t60\t50\t48\t4\t3\t9\t6\t7\tN/A\t0\tOK\t10\t10\t100\t30\t5\t99\tN/A\tN/A\n'
+		} > "${cd}/${p}/churn-dataplane-${p}.tsv"
+	done
+	for f in md text; do
+		pfx=""
+		[[ "$f" != md ]] || pfx="- "
+		run --separate-stderr "$COMPARE" --results-dir "$S" --format "$f"
+		assert_success
+		assert_line "${pfx}SETTLE_SEC=90 (each pass's wait after its apply, before its probe)"
+		refute_output --partial "CHURN_RATE"
+		run --separate-stderr "$COMPARE" --results-dir "$cd" --format "$f"
+		assert_success
+		assert_line "${pfx}SETTLE_SEC=60 (each pass's wait after its apply, before its probe)"
+		assert_line "${pfx}CHURN_RATE=5 (churn operations/s during each pass's probe)"
+	done
+	# In the frontmatter as bare numbers.
+	run --separate-stderr "$COMPARE" --results-dir "$cd" --format md
+	[ "$(sed -n '2,/^---$/p' <<<"$output" | grep -cx 'settle_sec: 60\|churn_rate: 5')" = 2 ]
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_line "settle_sec: 90"
+	refute_output --partial "churn_rate"
 }
 
 # tsv_record [sed program]: the preamble lines a suite TSV of a tuning pass carries, edited by

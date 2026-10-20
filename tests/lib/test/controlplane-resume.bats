@@ -277,6 +277,8 @@ FAKE
 	# No data warning names its version or a Kubernetes change (the read at its end could not
 	# compare KUBE_VERSIONS with the start's, which was not read: that warning stays).
 	jq -e '[.metadata.data_warnings[]? | select(test("v1[.]31[.]0|Kubernetes server version"))] | length == 0' <<<"$output"
+	# Nor is its version the rows': the record keeps the first run's.
+	[ "$(jq -r '.metadata.kube_versions' <<<"$output")" = ci-a=unreachable ]
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	assert_success
 	[[ "$output" == *"# attempts: the rows come from one run (no other run's rows are in the figures): the first run "*"(added no rows)"* ]]

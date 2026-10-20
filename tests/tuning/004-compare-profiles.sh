@@ -98,10 +98,12 @@ HARNESS_SHA in the header is the sweep's harness (HARNESS_CONTENT_KEY, next to i
 its files' content key); REPORT_HARNESS_SHA (every format, next to it) is the harness
 this report ran on, which can differ: a report made again later, or from another
 checkout, may count rows by other rules. The sweep dir it reads does not count as a
-change to it.
+change to it. SETTLE_SEC (each pass's wait after its apply, before its probe) and, for
+churn-dataplane, CHURN_RATE follow, as 003 recorded them (a sweep from before them prints
+neither).
 The markdown starts with a YAML frontmatter of the same keys (lowercase:
-istio_generations, harness_sha, harness_content_key, report_harness_sha, tsv_columns
-and the others).
+istio_generations, harness_sha, harness_content_key, report_harness_sha, settle_sec,
+churn_rate, tsv_columns and the others).
 
 The "Pass status" row reads ok, the marker the pass directory holds (SETUP_FAILED,
 PROBE_FAILED or REVERT_FAILED), or "no data": a pass without TSVs (the metadata lists
@@ -1879,6 +1881,8 @@ frontmatter() {
 	echo "harness_sha: $(yaml_str "$(istio_start_kv HARNESS_SHA)")"
 	echo "harness_content_key: $(yaml_str "$(istio_start_kv HARNESS_CONTENT_KEY)")"
 	echo "report_harness_sha: $(yaml_str "$REPORT_HARNESS_SHA")"
+	[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "settle_sec: $(yaml_str -n "$(meta_get SETTLE_SEC)")"
+	[[ -z "$(meta_get CHURN_RATE)" ]] || echo "churn_rate: $(yaml_str -n "$(meta_get CHURN_RATE)")"
 	echo "tsv_columns: $(yaml_str "$TSV_COLUMNS")"
 	echo "---"
 	echo ""
@@ -1901,6 +1905,8 @@ render() {
 		echo "- HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
 		echo "- HARNESS_CONTENT_KEY=$(istio_start_kv HARNESS_CONTENT_KEY) (the sweep's harness files)"
 		echo "- REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA} (this report's own)"
+		[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "- SETTLE_SEC=$(meta_get SETTLE_SEC) (each pass's wait after its apply, before its probe)"
+		[[ -z "$(meta_get CHURN_RATE)" ]] || echo "- CHURN_RATE=$(meta_get CHURN_RATE) (churn operations/s during each pass's probe)"
 		echo "- Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 		echo "- TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "- **Warning:** ${WIDTH_WARNING}"
@@ -1950,6 +1956,8 @@ render() {
 		echo "HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
 		echo "HARNESS_CONTENT_KEY=$(istio_start_kv HARNESS_CONTENT_KEY) (the sweep's harness files)"
 		echo "REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA} (this report's own)"
+		[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "SETTLE_SEC=$(meta_get SETTLE_SEC) (each pass's wait after its apply, before its probe)"
+		[[ -z "$(meta_get CHURN_RATE)" ]] || echo "CHURN_RATE=$(meta_get CHURN_RATE) (churn operations/s during each pass's probe)"
 		echo "Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 		echo "TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "WARNING: ${WIDTH_WARNING}"

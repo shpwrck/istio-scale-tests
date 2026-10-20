@@ -39,7 +39,7 @@ source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fit.sh"  # FIT_AWK (namespace-scaling fits)
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_lines, platform_value_has
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_merge_by_context, platform_report_lines, platform_value_has
 
 RESULTS_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
 FORMAT="text"
@@ -470,11 +470,10 @@ ATTEMPTS="$(collect_attempts)" \
 #                   else "the rows come from one run"
 #   ATTEMPTS_ISTIO  with it: the Istio state each run read at its start (the TSV preamble
 #                   keeps only the first run's; a harness change is no start)
-#   _att_kube       the resumes' KUBE_VERSIONS (collect_kube_versions_meta)
 #   HARNESS_UNKNOWN 1 when one of them recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY
 #                   (git could not name the harness, or an older harness): its rows cannot
 #                   be shown to be one harness, as 003 rules for a carried PROBLEM
-HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" _att_kube="" HARNESS_UNKNOWN=0
+HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" HARNESS_UNKNOWN=0
 _att_multi=0 _att_res_rows=0 _att_hc_rows=0
 _att_file="" _att_fh0="" _att_fk0="" _att_fn=0 _att_lead=""
 _att_addh() {
@@ -530,10 +529,7 @@ while IFS=$'\037' read -r _af _arun _ah _ak _an _anr _apv _agen _aat _akept _ahk
 		continue
 	fi
 	ATTEMPTS_ISTIO+="${ATTEMPTS_ISTIO:+; }${_att_pre}${_arun} ISTIO_NOTREADY_AT_RESUME=${_anr} ISTIO_GENERATIONS=${_agen} ISTIO_PROXY_VERSIONS=${_apv}"
-	if ((_akept > 0)); then
-		_att_res_rows=1
-		[[ "$_ak" == unknown ]] || _att_kube+="${_att_kube:+, }${_ak}"
-	fi
+	((_akept == 0)) || _att_res_rows=1
 	ATTEMPTS_NOTE+="${ATTEMPTS_NOTE:+; }${_att_pre}${_arun} HARNESS_SHA=${_ah} KUBE_VERSIONS=${_ak}$(_att_mark "$_an" "$_akept")"
 done < <(tr '\t' '\037' <<<"$ATTEMPTS")
 _att_flush
@@ -723,36 +719,6 @@ SIDECAR_SCOPING_M="$(collect_scopings_meta)"
 # Over every input, mixed:a,b when they differ (PL26); empty when no input has it.
 CONFIG_DUMP_SAMPLES_M="$(config_input_value CONFIG_DUMP_SAMPLES "" "${TSV_FILES[@]}")"
 
-# Concatenate KUBE_VERSIONS lines into one readable string: each input's preamble (its
-# first run), then each --resume's (resumes.txt: collect_attempts).
-# 002 writes: # KUBE_VERSIONS=ctx1=v1.29.4, ctx2=v1.29.4  (flat CSV)
-collect_kube_versions_meta() {
-	local f line all=""
-	local -a kv_lines=()
-	for f in "${TSV_FILES[@]}"; do
-		line=$(grep -m1 '^# KUBE_VERSIONS=' "$f" 2>/dev/null || true)
-		[[ -z "$line" ]] || kv_lines+=("${line#\# KUBE_VERSIONS=}")
-	done
-	[[ -z "$_att_kube" ]] || kv_lines+=("$_att_kube")
-	for line in ${kv_lines[@]+"${kv_lines[@]}"}; do
-		local val="$line"
-		if [[ -z "$all" ]]; then
-			all="$val"
-		else
-			# Merge entries not already present.
-			IFS=',' read -ra entries <<<"$val"
-			for entry in "${entries[@]}"; do
-				entry="${entry#"${entry%%[![:space:]]*}"}"
-				entry="${entry%"${entry##*[![:space:]]}"}"
-				[[ -z "$entry" ]] && continue
-				[[ "$all" == *"$entry"* ]] || all="${all}, ${entry}"
-			done
-		fi
-	done
-	echo "$all"
-}
-KUBE_VERSIONS_M="$(collect_kube_versions_meta)"
-
 # Extract unique sweep axis values from the TSV data rows.
 collect_sweep_axes() {
 	cat "${DATA_FILES[@]}" | awk -F'\t' "${AWK_HEADER_IX}"'
@@ -937,8 +903,12 @@ VSDR_SUBSETS_M="$(preamble_scalar VSDR_SUBSETS "vsdr cells mix DestinationRule s
 RUN_CONFIG_M="$(preamble_scalar RUN_CONFIG "the report mixes runs made with different --config files" unknown)"
 RUN_CONFIG_SHA256_M="$(preamble_scalar RUN_CONFIG_SHA256 "the report mixes runs made with different --config contents" unknown)"
 # The platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh) over
-# every input, in every format; a file without it reads unknown.
+# every input, in every format; a file without it reads unknown. Then each member's Kubernetes
+# version, merged member by member over the inputs' preambles (their first runs) like the
+# record's keys: mixed, with a warning, when the inputs differ on a member. The attempts (the
+# text and markdown lines, the frontmatter's and the json's list) add each --resume's.
 PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "${TSV_FILES[@]}")"
 # Namespace-scaling preamble keys (sweep-level scalars; `mixed:` with a warning when
 # the inputs disagree, PL26). 40/51-column files have none of them. A report that
 # pairs a pods run with a config-only run legitimately mixes WORKLOAD_MODE, so that
@@ -1420,7 +1390,7 @@ data_warnings_lines() {
 # data_warnings. platform_report_values printed the merge warnings on stderr with the members'
 # names; the drift file's findings name them only there (platform-drift.txt) and in the sweep's
 # log, so no output of this report does.
-PLATFORM_WARNINGS="$(platform_report_warnings --no-members "${TSV_FILES[@]}")"
+PLATFORM_WARNINGS="$(platform_report_warnings --no-members --with KUBE_VERSIONS "${TSV_FILES[@]}")"
 [[ -z "$PLATFORM_WARNINGS" ]] || DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}${PLATFORM_WARNINGS}"
 # STATUS_ROWS / STATUS_SUMMARY: their count and "SKIPPED_MEM_GUARD 4, GROW_FAILED 1"
 # (first-seen order) over every consumed TSV.
@@ -2718,7 +2688,6 @@ report_markdown() {
 	echo "vsdr_every: $(yaml_str "${VSDR_EVERY_M}")"
 	echo "vsdr_subsets: $(yaml_str "${VSDR_SUBSETS_M}")"
 	echo "config_dump_samples: $(yaml_str -n "${CONFIG_DUMP_SAMPLES_M:-N/A}")"
-	echo "kube_versions: $(yaml_str "${KUBE_VERSIONS_M:-N/A}")"
 	echo "scale_sizing_mode: $(yaml_str "$(preamble_get SCALE_SIZING_MODE)")"
 	echo "metrics_api: $(yaml_str "$(preamble_get METRICS_API)")"
 	echo "istiod_req_cpu_m: $(yaml_str -n "$(preamble_get ISTIOD_REQ_CPU_M)")"

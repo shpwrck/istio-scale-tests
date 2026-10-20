@@ -2361,11 +2361,12 @@ platform_warning_lines() {
 
 # platform_report_lines <comment|text|yaml|md|json> <values>: print KEY=value lines (from
 # platform_report_values) in a report's format: "# KEY=value" (csv and TSV-style headers),
-# "# key: value" (text), key: "value" (markdown front matter), "| KEY | `value` |" (a markdown
-# table row), or one compact JSON object with lowercase keys.
+# "# key: value" (text), key: "value" (markdown front matter, through yaml_str), "| KEY |
+# `value` |" (a markdown table row, through md_cell), or one compact JSON object with lowercase
+# keys. A value from a hand-edited TSV keeps the front matter parseable and the row one row.
 # shellcheck disable=SC2329
 platform_report_lines() {
-	local style="$1" kv k
+	local style="$1" kv k v
 	if [[ "$style" == json ]]; then
 		jq -R -s -c 'split("\n") | map(select(length > 0) | capture("^(?<k>[^=]+)=(?<v>.*)$") | {(.k | ascii_downcase): .v}) | add // {}' <<<"$2"
 		return
@@ -2376,8 +2377,14 @@ platform_report_lines() {
 		case "$style" in
 		comment) printf '# %s\n' "$kv" ;;
 		text) printf '# %s: %s\n' "${k,,}" "${kv#*=}" ;;
-		yaml) printf '%s: "%s"\n' "${k,,}" "${kv#*=}" ;;
-		md) printf '| %s | %s |\n' "$k" "\`${kv#*=}\`" ;;
+		yaml)
+			yaml_str -v v "${kv#*=}"
+			printf '%s: %s\n' "${k,,}" "$v"
+			;;
+		md)
+			md_cell -v v "${kv#*=}"
+			printf '| %s | %s |\n' "$k" "\`${v}\`"
+			;;
 		*) die "platform_report_lines: unknown style '${style}' (comment, text, yaml, md or json)" ;;
 		esac
 	done <<<"$2"

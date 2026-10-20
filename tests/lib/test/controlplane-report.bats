@@ -323,6 +323,36 @@ second_input() {
 	done
 }
 
+@test "report: each member's Kubernetes version, merged over the inputs, is in every format once; inputs that differ on a member read mixed and warn" {
+	with_platform 's/=kind/=aws/g'
+	second_input 's/=kind/=aws/g'
+	sed -i.bak 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.35.0/' "${RES}/controlplane-fixture-t3.tsv"
+	rm -f "${RES}/controlplane-fixture-t3.tsv.bak"
+	local kv="mesh-a=v1.34.8,mesh-b=mixed:v1.34.8;v1.35.0" fmt
+	local w="input TSVs disagree on KUBE_VERSIONS for 1 of 2 members: the report mixes runs on different Kubernetes versions; compare like with like"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -r '.metadata.kube_versions' <<<"$output")" = "$kv" ]
+	[ "$(jq --arg w "$w" '[.metadata.data_warnings[] | select(. == $w)] | length' <<<"$output")" = 1 ]
+	# Each input's first run keeps its own versions in the attempts.
+	[ "$(jq -c '[.metadata.attempts[].kube_versions]' <<<"$output")" = '["mesh-a=v1.34.8,mesh-b=v1.34.8","mesh-a=v1.34.8,mesh-b=v1.35.0"]' ]
+	[[ "$stderr" == *"warning: input TSVs disagree on KUBE_VERSIONS for mesh-b (v1.34.8;v1.35.0)"* ]]
+	for fmt in text csv; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		[[ "$(grep '^# platform: ' <<<"$output")" == *" KUBE_VERSIONS=${kv}" ]]
+		assert_line "# WARNING: ${w}"
+	done
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		# Once in the frontmatter (frontmatter.bats checks that no key repeats).
+		[ "$(sed -n '2,/^---$/p' <<<"$output" | grep -c '^kube_versions: ')" = 1 ]
+		assert_line "kube_versions: \"${kv}\""
+		assert_line "> **Warning:** ${w}"
+	done
+}
+
 @test "report (S-B2): a record of 500 members goes through every format; json lists them all" {
 	{
 		head -1 "$FIXTURE"
