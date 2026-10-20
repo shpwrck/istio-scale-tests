@@ -695,7 +695,8 @@ gateway resets are now listed at the top of
 - Dataplane local-baseline verdict still reads "OK at every QPS level" when a mesh size has OK
   local cells plus a failed repetition's placeholder (the placeholder is named next to it).
 - churn-dataplane records `ISTIOD_REPLICAS` for the source context only (what its probe measures);
-  the controlplane suite now probes every context.
+  controlplane, propagation and churn record every member's. tuning 004 therefore reads a
+  churn-dataplane pass whose profile autoscales istiod as unknown for the other members.
 - `reach_sanitize` masks an unbracketed IPv6 address without `::` only from 4 groups on (a
   3-group form is indistinguishable from HH:MM:SS).
 - `PROPAGATION_METRICS_TIMEOUT` is not checked up front by the propagation sweep.
