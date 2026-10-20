@@ -518,7 +518,8 @@ FAKE
 	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=abc1234/; s/^# HARNESS_CONTENT_KEY=.*/# HARNESS_CONTENT_KEY=000000000000/' "$TSV"
 	cp_sweep --resume "$D" --contexts ci-a
 	[ "$status" -eq 4 ]
-	grep -Eq '^# RESUMED_AT=[0-9T:+-]+ TSV_LINES=[0-9]+ HARNESS_SHA=[^ ]+ HARNESS_CONTENT_KEY=[^ ]+ ISTIO_NOTREADY_AT_RESUME=none ISTIO_GENERATIONS=ci-a=[^ ]+ ISTIO_PROXY_VERSIONS=ci-a=[^ ]+ KUBE_VERSIONS=ci-a=v1.30.0$' "$TSV"
+	# The resume's platform record (platform_resume_words) before KUBE_VERSIONS, the rest of the line.
+	grep -Eq '^# RESUMED_AT=[0-9T:+-]+ TSV_LINES=[0-9]+ HARNESS_SHA=[^ ]+ HARNESS_CONTENT_KEY=[^ ]+ ISTIO_NOTREADY_AT_RESUME=none ISTIO_GENERATIONS=ci-a=[^ ]+ ISTIO_PROXY_VERSIONS=ci-a=[^ ]+ PLATFORM=[^ ]+ TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=ci-a=[^ ]+ MESH_OPERATOR_BY_CONTEXT=ci-a=[^ ]+ ISTIOD_IMAGE_BY_CONTEXT=ci-a=[^ ]+ PROXY_IMAGE_BY_CONTEXT=ci-a=[^ ]+ NODE_PROVIDER_BY_CONTEXT=ci-a=[^ ]+ ISTIOD_ENV_BY_CONTEXT=ci-a=[^ ]+ TUNING_OBJECTS_BY_CONTEXT=ci-a=[^ ]+ KUBE_VERSIONS=ci-a=v1.30.0$' "$TSV"
 	# A value with " and \ (resumes.txt is plain text).
 	awk -F'\t' -v OFS='\t' 'NR == 2 { $7 = "ci-a=2/2\"x\\y" } { print }' "${D}/resumes.txt" > "${D}/resumes.new"
 	mv "${D}/resumes.new" "${D}/resumes.txt"

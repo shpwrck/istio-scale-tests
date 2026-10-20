@@ -217,7 +217,7 @@ STUB
 	assert_failure 4
 	sha="$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")"
 	run grep '^# RESUMED_AT=' "$tsv"
-	assert_output --regexp "^# RESUMED_AT=[0-9T:+-]+ TSV_LINES=[0-9]+ HARNESS_SHA=[^ ]+ HARNESS_CONTENT_KEY=[0-9a-f]{12} ISTIO_NOTREADY_AT_RESUME=[^ ]+ ISTIO_GENERATIONS=ci-a=2/2 ISTIO_PROXY_VERSIONS=[^ ]+ KUBE_VERSIONS=[^ ]+\$"
+	assert_output --regexp "^# RESUMED_AT=[0-9T:+-]+ TSV_LINES=[0-9]+ HARNESS_SHA=[^ ]+ HARNESS_CONTENT_KEY=[0-9a-f]{12} ISTIO_NOTREADY_AT_RESUME=[^ ]+ ISTIO_GENERATIONS=ci-a=2/2 ISTIO_PROXY_VERSIONS=[^ ]+ PLATFORM=[^ ]+ TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=ci-a=[^ ]+ MESH_OPERATOR_BY_CONTEXT=ci-a=[^ ]+ ISTIOD_IMAGE_BY_CONTEXT=ci-a=[^ ]+ PROXY_IMAGE_BY_CONTEXT=ci-a=[^ ]+ NODE_PROVIDER_BY_CONTEXT=ci-a=[^ ]+ ISTIOD_ENV_BY_CONTEXT=ci-a=[^ ]+ TUNING_OBJECTS_BY_CONTEXT=ci-a=[^ ]+ KUBE_VERSIONS=[^ ]+\$"
 	# The TSV alone (no resumes.txt): the line gives the resume's start and Istio state.
 	mkdir -p "${BATS_TEST_TMPDIR}/alone"
 	cp "$tsv" "${BATS_TEST_TMPDIR}/alone/"

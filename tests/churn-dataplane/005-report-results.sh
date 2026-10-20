@@ -85,7 +85,8 @@ Example (one sweep, as 004 runs it; from the repo root):
 Every format has a "Remote coverage" section from the reach-*.tsv files next to the
 TSVs: per mesh size and source, how many remotes passed every reach check
 (REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN per remote). Without reach
-files (the check was off, or the TSV predates it) it says "no reachability data".
+files (the check was off, or the TSV predates it) it says "no reachability data"; with
+reach files that check the source itself only (a mesh of one), "no remote to check".
 Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 200
 share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
 Each average counts only the valid pairs with a number in that column (N/A when none).

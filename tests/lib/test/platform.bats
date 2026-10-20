@@ -1716,7 +1716,7 @@ resume_run() {
 	run --separate-stderr platform_resume_check "$tsv" member-a,member-c
 	assert_success
 	[[ "$stderr" == *"warning: --resume: member-a: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT, ISTIOD_ENV_BY_CONTEXT, TUNING_OBJECTS_BY_CONTEXT: could not be read now (the warnings above say why), so this run cannot tell whether they changed since its rows were measured"* ]]
-	[[ "$stderr" == *"warning: --resume: member-c is a member of this run but not of the record in ${tsv}: the preamble is not rewritten on --resume, so its builds are never recorded and the report does not list it; start a new sweep to record it"* ]]
+	[[ "$stderr" == *"warning: --resume: member-c is a member of this run but not of the record in ${tsv}: its builds are recorded from this resume on (the TSV's \"# RESUMED_AT=\" line), and the report lists them from there"* ]]
 	[[ "$stderr" == *"warning: --resume: member-b is in the record of ${tsv} but not a member of this run"* ]]
 	# A source member that is not in this run: the levers and limits are read on this run's first.
 	resume_tsv "$tsv"
@@ -1738,6 +1738,110 @@ resume_run() {
 	resume_run "$tsv" "member a,member-b" ""
 	assert_success
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
+}
+
+# resume_line <tsv> [sed expression]: what controlplane 003 --resume appends to <tsv> where its
+# rows begin: its "# RESUMED_AT=" line with the record of member-a and member-b
+# (platform_resume_words, as probed with the PROBE_* settings of the call; the expression edits
+# the words), then a row.
+resume_line() {
+	local words
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	words="$(platform_resume_words member-a,member-b | sed "${2:-}")"
+	printf '# RESUMED_AT=2026-06-01T00:10:00+00:00 TSV_LINES=3 HARNESS_SHA=x HARNESS_CONTENT_KEY=y ISTIO_NOTREADY_AT_RESUME=none ISTIO_GENERATIONS=member-a=1/1 ISTIO_PROXY_VERSIONS=member-a=1.30.5 %s KUBE_VERSIONS=member-a=v1.33.1,member-b=v1.33.1\nt\tmember-a\n' "$words" >> "$1"
+	probe_setup
+}
+
+@test "platform_resume_check: each earlier --resume's record (its # RESUMED_AT= line) is compared too, so a value the start did not read is compared with a resume's" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
+	# The sweep's start could not read istiod's build on either member.
+	resume_tsv "$tsv" 's/^# ISTIOD_IMAGE_BY_CONTEXT=.*/# ISTIOD_IMAGE_BY_CONTEXT=member-a=unknown,member-b=unknown/'
+	# With no resume's record, even another build only warns.
+	PROBE_ISTIOD=1.30.6 resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a, member-b: ISTIOD_IMAGE_BY_CONTEXT: unknown in the record of ${tsv} (not read at the sweep's start), so this run cannot tell whether it changed since its rows were measured"* ]] || { echo "$stderr"; false; }
+	# A resume read it, and wrote the record on its line, KEY=value words in PLATFORM_KEYS order.
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	[[ "$(platform_resume_words member-a,member-b)" == "PLATFORM=kubernetes TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=member-a=kubernetes,member-b=kubernetes MESH_OPERATOR_BY_CONTEXT="*" TUNING_OBJECTS_BY_CONTEXT=member-a=none,member-b=none" ]] || { platform_resume_words member-a,member-b; false; }
+	resume_line "$tsv"
+	[ "$(_platform_resume_values "$tsv" ISTIOD_IMAGE_BY_CONTEXT)" = "member-a=pilot:1.30.5@${DIG_B},member-b=pilot:1.30.5@${DIG_B}" ]
+	[ "$(_platform_resume_values "$tsv" TEST_PLATFORM)" = auto ]
+	# KUBE_VERSIONS, the line's last key, names contexts raw: a word in it is never the record's.
+	cp "$tsv" "${tsv}.raw"
+	printf '# RESUMED_AT=2026-06-01T00:30:00+00:00 TSV_LINES=4 KUBE_VERSIONS=x ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:9.9.9=v1.33.1\n' >> "${tsv}.raw"
+	[ "$(_platform_resume_values "${tsv}.raw" ISTIOD_IMAGE_BY_CONTEXT)" = "member-a=pilot:1.30.5@${DIG_B},member-b=pilot:1.30.5@${DIG_B}" ]
+	[[ "$(_platform_file_rows "${tsv}.raw")" != *9.9.9* ]] || { _platform_file_rows "${tsv}.raw"; false; }
+	# The same build goes on without a warning; another one stops, naming the resume's build.
+	resume_run "$tsv"
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	assert_output "Platform record: comparing what member-a, member-b run now with what ${tsv} recorded at the sweep's start and at the 1 --resume run(s) before this one (--resume)"
+	PROBE_ISTIOD=1.30.6 resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a, member-b: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.6@${DIG_B}"* ]] || { echo "$stderr"; false; }
+	# A later resume that read the digest @unknown (no pod had started) hides neither the digest
+	# read before it nor another one now.
+	resume_line "$tsv" "s/member-b=pilot:1.30.5@${DIG_B}/member-b=pilot:1.30.5@unknown/"
+	resume_run "$tsv"
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	PROBE_ISTIOD_PODS=pinned-pending PROBE_ISTIOD_PIN="$DIG_A" resume_run "$tsv"
+	assert_failure
+	[[ "$stderr" == *"  member-a, member-b: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.5@${DIG_A}"* ]] || { echo "$stderr"; false; }
+	# No run read it: the warning names the resumes too.
+	resume_tsv "$tsv" 's/^# ISTIOD_IMAGE_BY_CONTEXT=.*/# ISTIOD_IMAGE_BY_CONTEXT=member-a=unknown,member-b=unknown/'
+	resume_line "$tsv" 's/^\(.* ISTIOD_IMAGE_BY_CONTEXT=\)[^ ]*/\1member-a=unknown,member-b=unknown/'
+	resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"warning: --resume: member-a, member-b: ISTIOD_IMAGE_BY_CONTEXT: unknown in the record of ${tsv} (not read at the sweep's start, nor at the --resume runs before this one), so this run cannot tell"* ]] || { echo "$stderr"; false; }
+	# A key the preamble does not have (it predates the key): the resumes' values are not used.
+	resume_tsv "$tsv" '/^# ISTIOD_ENV_BY_CONTEXT=/d'
+	resume_line "$tsv"
+	resume_run "$tsv"
+	assert_success
+	[[ "$stderr" == *"ISTIOD_ENV_BY_CONTEXT"*": not in the record of ${tsv} (it predates the key)"* ]] || { echo "$stderr"; false; }
+}
+
+@test "platform_merge_by_context and platform_report_values: each --resume's record is the same input's; the start's unknown next to a resume's value is mixed, with warnings that name the runs" {
+	local tsv="${BATS_TEST_TMPDIR}/controlplane-r.tsv"
+	resume_tsv "$tsv" "s/^# ISTIOD_IMAGE_BY_CONTEXT=.*/# ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:1.30.5@${DIG_B},member-b=unknown/"
+	resume_line "$tsv"
+	run --separate-stderr platform_merge_by_context ISTIOD_IMAGE_BY_CONTEXT "$tsv"
+	assert_success
+	assert_output "member-a=pilot:1.30.5@${DIG_B},member-b=mixed:unknown;pilot:1.30.5@${DIG_B}"
+	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT could not be read for member-b in 1 of 1 input TSV(s) (recorded unknown), while other inputs, or other runs of one (a --resume), have a value: the report cannot tell whether those runs had the same istiod builds as the others"* ]] || { echo "$stderr"; false; }
+	# The same value at the start and at the resume is one value, with no warning.
+	run --separate-stderr platform_merge_by_context PLATFORM_BY_CONTEXT "$tsv"
+	assert_output "member-a=kubernetes,member-b=kubernetes"
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	# KUBE_VERSIONS on the line is the attempts' (controlplane_attempts): not merged here.
+	run --separate-stderr platform_merge_by_context KUBE_VERSIONS "$tsv"
+	assert_output "member-a=v1.33.1,member-b=v1.33.1"
+	# Another build, or another TEST_PLATFORM, at a resume: the runs of one input disagree.
+	resume_line "$tsv" "s/member-a=pilot:1.30.5@/member-a=pilot:1.30.6@/; s/TEST_PLATFORM=auto/TEST_PLATFORM=kubernetes/"
+	run --separate-stderr platform_merge_by_context ISTIOD_IMAGE_BY_CONTEXT "$tsv"
+	assert_output "member-a=mixed:pilot:1.30.5@${DIG_B};pilot:1.30.6@${DIG_B},member-b=mixed:unknown;pilot:1.30.5@${DIG_B}"
+	[[ "$stderr" == *"warning: input TSVs, or the runs of one (its start and a --resume), disagree on ISTIOD_IMAGE_BY_CONTEXT for member-a ("* ]] || { echo "$stderr"; false; }
+	run --separate-stderr platform_report_values "$tsv"
+	assert_line "TEST_PLATFORM=mixed:auto,kubernetes"
+	[[ "$stderr" == *"warning: input TSVs, or the runs of one (its start and a --resume), disagree on TEST_PLATFORM (auto,kubernetes); the report mixes runs with different TEST_PLATFORM overrides, which pick the suite charts' overlay"* ]] || { echo "$stderr"; false; }
+	# A preamble without the key (written before it was added): the resumes' values are not read.
+	sed -i.bak '/^# ISTIOD_ENV_BY_CONTEXT=/d' "$tsv" && rm -f "${tsv}.bak"
+	run --separate-stderr platform_merge_by_context ISTIOD_ENV_BY_CONTEXT "$tsv"
+	assert_output unknown
+}
+
+@test "the resume line's reader (controlplane_attempts, tests/lib/common.sh) knows every key of the record platform_resume_words writes, before KUBE_VERSIONS" {
+	local list k
+	list="$(grep -o 'nlk = split("[^"]*"' "${ROOT}/tests/lib/common.sh")"
+	[ -n "$list" ]
+	list="${list#*\"}"
+	for k in "${PLATFORM_KEYS[@]}"; do
+		[[ " ${list%\"} " == *" ${k} "* ]] || { echo "missing ${k}: ${list}"; false; }
+	done
+	[[ " ${list%\"} " == *" ${PLATFORM_KEYS[${#PLATFORM_KEYS[@]} - 1]} KUBE_VERSIONS "* ]] || { echo "$list"; false; }
 }
 
 @test "platform_drift_check and platform_resume_check (R6, U5-S1, Sc5-S1): 500 members that moved the same way read as one line each, five named" {

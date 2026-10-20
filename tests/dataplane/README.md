@@ -253,7 +253,10 @@ callout, CSV `# REMOTE_COVERAGE ...`, `# REMOTE_COVERAGE_TARGET ...` and
 `> ⚠` line. `004 --fail-on-unreachable` exits 3 after the output when a remote's
 coverage is not `REACHABLE` (`rule=reach_coverage`) or a remote has no valid latency row
 (`rule=no_valid_rows`); stderr names the rule and the remote, so a reachable remote
-whose rows are all `QPS_SHORTFALL` is not mistaken for an unreachable one.
+whose rows are all `QPS_SHORTFALL` is not mistaken for an unreachable one. Without a reach
+file (the check was off, or the TSV predates it) the section reads "no reachability data"
+(JSON `remote_coverage.data` false); when every run had a mesh of one member, whose reach
+file checks the source itself only, it reads "no remote to check" (`data` true, no groups).
 
 ## istiod restart detection
 

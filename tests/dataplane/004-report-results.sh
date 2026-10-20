@@ -88,7 +88,8 @@ Every format includes a "Remote coverage" section before the results table: per
 mesh size and source, how many remotes passed every reach check (reach-*.tsv from
 002, statuses REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN), and the remotes
 with no or only some valid latency rows (n_valid/n_total with their statuses). A
-TSV recorded before the reach check has no reach file: "no reachability data".
+TSV recorded before the reach check has no reach file: "no reachability data". Reach
+files from meshes of one member only check the source itself: "no remote to check".
 
 Every format includes a "Local baseline" verdict: OK when every local cell has all
 rows valid and none below the QPS ratio, else one line per
@@ -616,7 +617,8 @@ local_baseline_hint() {
 
 # --- Remote coverage ----------------------------------------------------------
 # REACH_ROWS: reach_coverage_rows over every reach-*.tsv under RESULTS_DIR (empty
-# when there is none, e.g. a TSV recorded before the reach check).
+# when there is none, e.g. a TSV recorded before the reach check; REACH_NO_REMOTE_LINE
+# when their rows are all local: a mesh of one member).
 REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
 REACH_NOT_REACHABLE="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { n++ } END { print n + 0 }' <<<"$REACH_ROWS")"
 # RV_ROWS: per remote (mesh_size, source_ctx, target_ctx) the latency rows' n_total,

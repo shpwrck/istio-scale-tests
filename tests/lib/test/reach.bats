@@ -417,6 +417,24 @@ _coverage_fixture() {
 	done
 	run reach_coverage_render json "${RES}/empty"
 	[ "$(jq -r '.remote_coverage.data' <<<"$output")" = false ]
+	# A mesh of one member: its reach file holds the source's own row only, no remote to check.
+	printf 'run_id\tcombo_id\tmesh_size\tsource_ctx\ttarget_ctx\ttarget_class\tattempts\trequests\tok\tpct_200\ttop_code\treach_status\tdetail\n' > "${RES}/reach-one.tsv"
+	printf 'r1\tc1\t1\ts\ts\tlocal\t1\t4\t4\t100.0\t200\tREACHABLE\t-\n' >> "${RES}/reach-one.tsv"
+	reach_coverage_rows "${RES}/reach-one.tsv" > "${RES}/one"
+	[ "$(cat "${RES}/one")" = "$REACH_NO_REMOTE_LINE" ]
+	run reach_coverage_render text "${RES}/one"
+	assert_output "REMOTE COVERAGE: no remote to check (every run had a mesh of one member: its reach-*.tsv checks the source only)"
+	run reach_coverage_render md "${RES}/one"
+	assert_output --partial "No remote to check: every run had a mesh of one member"
+	run reach_coverage_render csv "${RES}/one"
+	assert_output "# REMOTE_COVERAGE=no remote to check (a mesh of one member)"
+	run reach_coverage_render json "${RES}/one"
+	[ "$(jq -c '.remote_coverage' <<<"$output")" = '{"data":true,"not_reachable":0,"groups":[]}' ]
+	run reach_coverage_render charts "${RES}/one"
+	assert_output ""
+	# A header without a row is no data at all.
+	head -n 1 "${RES}/reach-one.tsv" > "${RES}/reach-none.tsv"
+	[ -z "$(reach_coverage_rows "${RES}/reach-none.tsv")" ]
 }
 
 @test "reach_coverage_render md: a '|' in the detail is escaped" {

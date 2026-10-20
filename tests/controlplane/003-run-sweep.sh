@@ -2194,10 +2194,13 @@ fi
 # ever added at the end; a file keeps the columns its first line names. The resume also
 # writes a "# RESUMED_AT=<time> TSV_LINES=<n> HARNESS_SHA=<sha> HARNESS_CONTENT_KEY=<key>
 # ISTIO_NOTREADY_AT_RESUME=<...> ISTIO_GENERATIONS=<...> ISTIO_PROXY_VERSIONS=<...>
-# KUBE_VERSIONS=<ctx=ver,...>" line into the TSV itself, where its rows begin, so a TSV
-# copied without resumes.txt still keeps its attempts apart and names each attempt's
-# harness, Istio reads and Kubernetes versions (KUBE_VERSIONS last: the rest of the line;
-# 002 compares its harness with this line's). From that file the outcome notes every
+# PLATFORM=<...> ... TUNING_OBJECTS_BY_CONTEXT=<...> KUBE_VERSIONS=<ctx=ver,...>" line into
+# the TSV itself, where its rows begin, so a TSV copied without resumes.txt still keeps its
+# attempts apart and names each attempt's harness, Istio reads, platform record (the record
+# platform_probe read for this run: platform_resume_words; the reports merge it with the
+# preamble's, and the next --resume compares it too) and Kubernetes versions (KUBE_VERSIONS
+# last: the rest of the line; 002 compares its harness with this line's). The record is no
+# resumes.txt column: its readers read the TSV's line. From that file the outcome notes every
 # earlier resume that started with a member not ready (this one's is the version recheck's
 # note), and the harness segments: a note per resume whose harness files differ from the
 # run before it (another HARNESS_CONTENT_KEY; another HARNESS_SHA when a key is not
@@ -2243,9 +2246,10 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	# key.
 	printf '%s\n' "$_resume_line" >> "$_resumes_log" \
 		|| die "--resume: could not append to ${_resumes_log}, which tells this run's rows from earlier ones; ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
-	((_resume_lines == 0)) || printf '# RESUMED_AT=%s TSV_LINES=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s ISTIO_NOTREADY_AT_RESUME=%s ISTIO_GENERATIONS=%s ISTIO_PROXY_VERSIONS=%s KUBE_VERSIONS=%s\n' \
+	_resume_words="$(platform_resume_words "$(IFS=,; echo "${CONTEXTS[*]}")")"
+	((_resume_lines == 0)) || printf '# RESUMED_AT=%s TSV_LINES=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s ISTIO_NOTREADY_AT_RESUME=%s ISTIO_GENERATIONS=%s ISTIO_PROXY_VERSIONS=%s%s KUBE_VERSIONS=%s\n' \
 		"$RESUME_AT" "$_resume_lines" "$HARNESS_SHA" "${HARNESS_CONTENT_KEY:-unknown}" "${ISTIO_NOTREADY_AT_START:-unchecked}" \
-		"${ISTIO_GENERATIONS:-unchecked}" "${ISTIO_PROXY_VERSIONS:-unchecked}" "$_resume_kv" >> "$_resume_tsv" \
+		"${ISTIO_GENERATIONS:-unchecked}" "${ISTIO_PROXY_VERSIONS:-unchecked}" "${_resume_words:+ ${_resume_words}}" "$_resume_kv" >> "$_resume_tsv" \
 		|| die "--resume: could not append the resume's start line to ${_resume_tsv}, which tells this run's rows from earlier ones; ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
 fi
 # The notes compare this resume with the runs before it, from the TSV it found: one that held

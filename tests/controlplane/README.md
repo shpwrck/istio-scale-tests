@@ -178,10 +178,12 @@ every member's rows of the cell were already written (the sweep ended in its dia
 cleanup): that cell is done. An attempt is one run of the sweep (the first, or a resume): each
 resume that finds rows in the TSV writes a `# RESUMED_AT=<time>` comment line into it where its
 rows start (then, as `KEY=value` on that line: `TSV_LINES`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
-`ISTIO_NOTREADY_AT_RESUME`, `ISTIO_GENERATIONS`, `ISTIO_PROXY_VERSIONS`, and `KUBE_VERSIONS` last),
-and every resume a line to `resumes.txt`, so a TSV copied without `resumes.txt` still separates its
-attempts and names each one's harness, Istio state and Kubernetes versions (a resume that finds no
-row writes the TSV's preamble itself: `TSV_LINES` 0 in `resumes.txt`). When the harness files
+`ISTIO_NOTREADY_AT_RESUME`, `ISTIO_GENERATIONS`, `ISTIO_PROXY_VERSIONS`, the platform record the
+resume read, from `PLATFORM` to `TUNING_OBJECTS_BY_CONTEXT` as the preamble has them, and
+`KUBE_VERSIONS` last), and every resume a line to `resumes.txt`, so a TSV copied without
+`resumes.txt` still separates its attempts and names each one's harness, Istio state, builds and
+Kubernetes versions (a resume that finds no row writes the TSV's preamble itself: `TSV_LINES` 0
+in `resumes.txt`). When the harness files
 change during a run (`HARNESS_CONTENT_KEY` differs from the TSV's last record), `002` writes
 `# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<sha> HARNESS_CONTENT_KEY=<key>` before that window's rows
 (it checks before each step), so the rows after it are credited to the harness that measured them;
@@ -266,7 +268,12 @@ cannot be read now), an image whose digest reads `@unknown` (no pod had started)
 side only, a TSV from before the record, another `TEST_PLATFORM`, and what the report only shows:
 `NODE_ALLOC_CPU_M` and `NODE_ALLOC_MEM_MI` (a cluster autoscaler moves them), `ISTIOD_REQ_*`,
 `ISTIOD_LIM_*`, `ISTIOD_REPLICAS_BY_CONTEXT` (an HPA moves it) and `NETWORK_TOPOLOGY`.
-`METRICS_API` is not compared: the resumed run's preflight checks the metrics API.
+`METRICS_API` is not compared: the resumed run's preflight checks the metrics API. Each resume's
+`# RESUMED_AT=` line keeps the record it read, and a later `--resume` compares with it too, so a
+value the sweep could not read at its start but an earlier resume did is compared with that one;
+the reports merge it with the preamble's record, member by member (the start's `unknown` next to a
+resume's value reads `mixed:unknown;<value>`, with a warning: the first run's rows cannot be tied
+to a build).
 
 Nor can a sweep whose `sweep-outcome.txt` (or `sweep-outcome.prev.txt`) records a `PROBLEM` about
 Istio: the Istio version, active revision or Istio CR generation changed under the sweep, or the

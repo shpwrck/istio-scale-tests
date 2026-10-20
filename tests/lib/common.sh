@@ -2431,6 +2431,8 @@ controlplane_attempts() {
 		function pv(k) { return ((k in pre) && pre[k] != "") ? pre[k] : "unknown" }
 		# lv(k): key k of this "# RESUMED_AT=" or "# HARNESS_CHANGED_AT=" line, up to the next
 		# key it records (KUBE_VERSIONS, its last, to the end of the line); unknown when absent.
+		# Its keys: those of the line itself, then the platform record before KUBE_VERSIONS
+		# (PLATFORM_KEYS in tests/lib/platform.sh, which platform.bats checks against this list).
 		function lv(k,    p, s, i, q, e) {
 			if (!(p = index($0, " " k "="))) return "unknown"
 			s = substr($0, p + length(k) + 2); e = length(s) + 1
@@ -2440,7 +2442,7 @@ controlplane_attempts() {
 		}
 		function z(t) { sub(/\+00:00$/, "Z", t); return t }
 		BEGIN {
-			nlk = split("RESUMED_AT TSV_LINES HARNESS_SHA HARNESS_CONTENT_KEY ISTIO_NOTREADY_AT_RESUME ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS KUBE_VERSIONS HARNESS_CHANGED_AT", lk, " ")
+			nlk = split("RESUMED_AT TSV_LINES HARNESS_SHA HARNESS_CONTENT_KEY ISTIO_NOTREADY_AT_RESUME ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS PLATFORM TEST_PLATFORM PLATFORM_BY_CONTEXT MESH_OPERATOR_BY_CONTEXT ISTIOD_IMAGE_BY_CONTEXT PROXY_IMAGE_BY_CONTEXT NODE_PROVIDER_BY_CONTEXT ISTIOD_ENV_BY_CONTEXT TUNING_OBJECTS_BY_CONTEXT KUBE_VERSIONS HARNESS_CHANGED_AT", lk, " ")
 			while ((r = (getline line < res)) > 0) {
 				n = split(line, f, "\t")
 				if (f[1] == "RESUMED_AT") { split("", col); for (i = 1; i <= n; i++) col[f[i]] = i; continue }

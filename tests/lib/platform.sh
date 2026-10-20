@@ -199,7 +199,9 @@
 # naming each member's value at the start and at the end (the record's keys merge it as a second
 # value, mixed:; so does KUBE_VERSIONS in a report that merges it, churn's).
 # controlplane 003 --resume compares the record, and the once-recorded values its report applies
-# to every row, with what its TSV holds (platform_resume_check).
+# to every row, with what its TSV holds (platform_resume_check), and writes the record it read into
+# the "# RESUMED_AT=" line its rows start after (platform_resume_words): the reports merge each
+# resume's record with the start's, and the next --resume compares it too.
 # shellcheck shell=bash
 
 # Fixed by the charts (do not override them there): the Sail operator's namespace and
@@ -1050,6 +1052,32 @@ platform_preamble_lines() {
 	done < <(_platform_values "$1")
 }
 
+# platform_resume_words <ctxs_csv>: the same record (PLATFORM_KEYS order) as one line of
+# space-separated KEY=value words (a value holds no space), for the "# RESUMED_AT=" line
+# controlplane 003 --resume writes where its rows begin: the TSV's preamble keeps the record of
+# the sweep's start, each resume's line its own (_platform_resume_values reads them back).
+# shellcheck disable=SC2329
+platform_resume_words() {
+	local line out=""
+	while IFS= read -r line; do
+		out+="${out:+ }${line}"
+	done < <(_platform_values "$1")
+	printf '%s\n' "$out"
+}
+
+# _platform_resume_values <tsv> <key>: the <key> value of each "# RESUMED_AT=" line of a TSV that
+# records one (platform_resume_words), one per line, in the TSV's order; nothing when no --resume
+# wrote its record there. Only the words before KUBE_VERSIONS, the line's last key, are read: its
+# context names are raw and may hold a space.
+# shellcheck disable=SC2329
+_platform_resume_values() {
+	awk -v k=" ${2}=" 'index($0, "# RESUMED_AT=") == 1 {
+		s = $0
+		if ((q = index(s, " KUBE_VERSIONS="))) s = substr(s, 1, q)
+		if ((p = index(s, k))) { v = substr(s, p + length(k)); sub(/ .*/, "", v); print v }
+	}' "$1" 2>/dev/null || true
+}
+
 # platform_collapse <by_context value>: the one value every member shares, else the value as is.
 # shellcheck disable=SC2329
 platform_collapse() {
@@ -1362,9 +1390,11 @@ _platform_drift_values() {
 }
 
 # platform_merge_by_context <key> <tsv>...: one *_BY_CONTEXT key (or KUBE_VERSIONS) over a
-# report's inputs, member by member (PL26). The values a member has in the inputs (and in the
-# drift marker next to them) -> that value when they are one build (values that differ only in
-# their state ";"-joined); else <ctx>=mixed:<a>;<b> with a warning that says which: two builds
+# report's inputs, member by member (PL26). The values a member has in the inputs (a record key's
+# from each --resume's own record too: _platform_resume_values; for an input whose preamble has
+# the key), and in the drift marker next to them -> that value when they are one build (values
+# that differ only in their state ";"-joined); else <ctx>=mixed:<a>;<b> with a warning that says
+# which (and, for values of one input, that its runs differ: a --resume read another): two builds
 # (_platform_build_cmp), a value not read (unknown, or a digest @unknown: no pod had started)
 # next to a known one, or a value platform_drift_check found changed during the sweep. unknown
 # when no input has the key; mixed:unknown,<members> when only some have it (the legacy warning
@@ -1376,8 +1406,9 @@ _platform_drift_values() {
 # shellcheck disable=SC2329
 platform_merge_by_context() {
 	local key="$1" f line pair c x v cmp out="" n=0 missing=0 noun dis="" drf="" unr="" d i j unread partial differ atu=0 nokey=0
-	local -a order=() pairs=() _pl_dis=() _pl_drf=() _pl_unr=() _pl_kn=() _pl_dd=() _pl_drv=()
-	local -A _pl_vals=() _pl_drift=() _pl_unread_in=() _pl_ddir=() _pl_tsvv=() _pl_dend=() _pl_drvs=()
+	local runs=0 ins="input TSVs" oth="other inputs"
+	local -a order=() pairs=() _pl_dis=() _pl_drf=() _pl_unr=() _pl_kn=() _pl_dd=() _pl_drv=() _pl_fl=()
+	local -A _pl_vals=() _pl_drift=() _pl_unread_in=() _pl_ddir=() _pl_tsvv=() _pl_dend=() _pl_drvs=() _pl_fv=() _pl_fu=()
 	shift
 	for f in "$@"; do
 		n=$((n + 1))
@@ -1389,22 +1420,46 @@ platform_merge_by_context() {
 			! grep -q '^# PLATFORM_BY_CONTEXT=' "$f" 2>/dev/null || nokey=$((nokey + 1))
 			continue
 		fi
-		IFS=',' read -r -a pairs <<<"$line"
-		for pair in "${pairs[@]}"; do
-			c="${pair%%=*}"
-			x="${pair#*=}"
-			if [[ -z "${_pl_vals[$c]+set}" ]]; then
-				order+=("$c")
-				_pl_vals[$c]="$x"
-			else
-				case ";${_pl_vals[$c]};" in *";${x};"*) ;; *) _pl_vals[$c]+=";${x}" ;; esac
-			fi
-			if _platform_unread "$key" "$x" || [[ "$x" == *@unknown* ]]; then
-				v="${_pl_unread_in[$c]:-0}"
-				_pl_unread_in[$c]=$((v + 1))
-			fi
+		# The record each --resume of the input read (controlplane 003 writes it into its
+		# "# RESUMED_AT=" line): the rows after that line ran on it. KUBE_VERSIONS on that line
+		# is the attempts' (controlplane_attempts), which the report lists attempt by attempt.
+		_pl_fl=("$line")
+		if [[ " ${PLATFORM_ROW_KEYS[*]} " == *" ${key} "* ]]; then
+			while IFS= read -r x; do
+				[[ "$x" != *=* ]] || _pl_fl+=("$x")
+			done < <(_platform_resume_values "$f" "$key")
+		fi
+		_pl_fv=() _pl_fu=()
+		for line in "${_pl_fl[@]}"; do
+			IFS=',' read -r -a pairs <<<"$line"
+			for pair in "${pairs[@]}"; do
+				c="${pair%%=*}"
+				x="${pair#*=}"
+				if [[ -z "${_pl_vals[$c]+set}" ]]; then
+					order+=("$c")
+					_pl_vals[$c]="$x"
+				else
+					case ";${_pl_vals[$c]};" in *";${x};"*) ;; *) _pl_vals[$c]+=";${x}" ;; esac
+				fi
+				# A --resume that read another value than the input's start: its warnings say so.
+				if [[ -z "${_pl_fv[$c]+set}" ]]; then
+					_pl_fv[$c]="$x"
+				elif [[ "${_pl_fv[$c]}" != "$x" ]]; then
+					runs=1
+				fi
+				if _platform_unread "$key" "$x" || [[ "$x" == *@unknown* ]]; then _pl_fu[$c]=1; fi
+			done
+		done
+		# An input counts once per member, whichever of its runs did not read the member.
+		for c in "${!_pl_fu[@]}"; do
+			v="${_pl_unread_in[$c]:-0}"
+			_pl_unread_in[$c]=$((v + 1))
 		done
 	done
+	if ((runs)); then
+		ins="input TSVs, or the runs of one (its start and a --resume),"
+		oth="other inputs, or other runs of one (a --resume),"
+	fi
 	if ((n == 0 || missing == n)); then
 		echo unknown
 		return 0
@@ -1480,10 +1535,10 @@ platform_merge_by_context() {
 		return 0
 	fi
 	if [[ -n "$dis" ]]; then
-		platform_short_digests "warning: input TSVs disagree on ${key} for ${dis}: the report mixes runs on different ${noun}; compare like with like" >&2
+		platform_short_digests "warning: ${ins} disagree on ${key} for ${dis}: the report mixes runs on different ${noun}; compare like with like" >&2
 	fi
 	if [[ -n "$unr" ]]; then
-		echo "warning: ${key} could not be read for ${unr} input TSV(s) (recorded unknown$([[ "$key" != KUBE_VERSIONS ]] || echo " or unreachable")$( ((atu == 0)) || echo ", or with a digest @unknown: no pod had started")), while other inputs have a value: the report cannot tell whether those runs had the same ${noun} as the others" >&2
+		echo "warning: ${key} could not be read for ${unr} input TSV(s) (recorded unknown$([[ "$key" != KUBE_VERSIONS ]] || echo " or unreachable")$( ((atu == 0)) || echo ", or with a digest @unknown: no pod had started")), while ${oth} have a value: the report cannot tell whether those runs had the same ${noun} as the others" >&2
 	fi
 	if ((nokey)); then
 		echo "warning: ${key} is not recorded in ${nokey} of ${n} input TSV(s) (written before the platform record had the key), while other inputs have it: the report cannot tell whether those runs had the same ${noun} as the others" >&2
@@ -1491,24 +1546,42 @@ platform_merge_by_context() {
 	printf '%s\n' "$out"
 }
 
-# _platform_merge_scalar <key> <tsv>...: PLATFORM or TEST_PLATFORM over a report's inputs: one
-# value; mixed:<a>,<b> with a warning when two inputs disagree, or when one recorded unknown and
-# another a value. A file without the line counts as unknown (the legacy warning names those).
+# _platform_merge_scalar <key> <tsv>...: PLATFORM or TEST_PLATFORM over a report's inputs (and
+# each --resume's own record of an input that has the line: _platform_resume_values): one value;
+# mixed:<a>,<b> with a warning when two inputs (or two runs of one) disagree, or when one recorded
+# unknown and another a value. A file without the line counts as unknown (the legacy warning
+# names those).
 # shellcheck disable=SC2329
 _platform_merge_scalar() {
-	local key="$1" f v vals="" known=0 unread=0 n=0 consequence
+	local key="$1" f v vals="" known=0 unread=0 n=0 runs=0 fu has consequence ins="input TSVs" oth="other inputs"
+	local -a _pl_msv=()
 	shift
 	for f in "$@"; do
 		n=$((n + 1))
 		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
+		has=0
 		if [[ -n "$v" ]]; then
-			v="${v#*=}"
-			[[ "$v" != unknown ]] || unread=$((unread + 1))
+			has=1
+			_pl_msv=("${v#*=}")
+			while IFS= read -r v; do
+				[[ -z "$v" ]] || _pl_msv+=("$v")
+			done < <(_platform_resume_values "$f" "$key")
 		else
-			v=unknown
+			_pl_msv=(unknown)
 		fi
-		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
+		fu=0
+		for v in "${_pl_msv[@]}"; do
+			[[ "$v" != unknown ]] || fu=1
+			[[ "$v" == "${_pl_msv[0]}" ]] || runs=1
+			case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
+		done
+		# A file without the line is the legacy warning's, not one that could not be read.
+		((has == 0 || fu == 0)) || unread=$((unread + 1))
 	done
+	if ((runs)); then
+		ins="input TSVs, or the runs of one (its start and a --resume),"
+		oth="other inputs, or other runs of one (a --resume),"
+	fi
 	[[ -n "$vals" ]] || { echo unknown; return 0; }
 	v=",${vals},"
 	v="${v//,unknown,/,}"
@@ -1524,10 +1597,10 @@ _platform_merge_scalar() {
 	*) consequence="the report mixes runs on different platforms; compare like with like" ;;
 	esac
 	if [[ "$v" == *,* ]]; then
-		echo "warning: input TSVs disagree on ${key} (${v}); ${consequence}" >&2
+		echo "warning: ${ins} disagree on ${key} (${v}); ${consequence}" >&2
 	fi
 	if ((known && unread)); then
-		echo "warning: ${key} could not be read in ${unread} of ${n} input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same $(_platform_noun "$key") as the others" >&2
+		echo "warning: ${key} could not be read in ${unread} of ${n} input TSV(s) (recorded unknown), while ${oth} have a value: the report cannot tell whether those runs had the same $(_platform_noun "$key") as the others" >&2
 	fi
 	echo "mixed:${vals}"
 }
@@ -2804,14 +2877,17 @@ _platform_rows_of() {
 	done
 }
 
-# _platform_file_rows <tsv>: the record a TSV's preamble holds (the `# ` lines before its
-# header), as PLATFORM_PROBE_ROWS lines; a member a key does not list reads unknown there (so
-# does a key the TSV predates). Nothing for a file without PLATFORM_BY_CONTEXT (it predates the
-# record).
+# _platform_file_rows <tsv>: the record a TSV holds, as PLATFORM_PROBE_ROWS lines: its preamble's
+# (the `# ` lines before its header) and, for each key the preamble has, the record each --resume
+# wrote into its "# RESUMED_AT=" line (platform_resume_words), member by member. A value more than
+# one run read: those read with every digest, else those with a digest @unknown, else unknown,
+# ";"-joined when they are more than one (the next --resume is compared with each of them:
+# _platform_build_cmp). A member a key does not list reads unknown there (so does a key the TSV
+# predates). Nothing for a file without PLATFORM_BY_CONTEXT (it predates the record).
 # shellcheck disable=SC2329
 _platform_file_rows() {
-	local line k pair c j row
-	local -a _pl_order=() _pl_p=()
+	local line k pair c j row v w best part
+	local -a _pl_order=() _pl_p=() _pl_fkv=() _pl_vs=()
 	local -A _pl_fv=() _pl_seen=() _pl_in=()
 	while IFS= read -r line; do
 		[[ "$line" == '#'* ]] || break
@@ -2821,19 +2897,58 @@ _platform_file_rows() {
 		for j in "${!PLATFORM_ROW_KEYS[@]}"; do
 			[[ "$k" == "${PLATFORM_ROW_KEYS[j]}" && -z "${_pl_seen[$k]+x}" ]] || continue
 			_pl_seen[$k]=1
-			IFS=',' read -r -a _pl_p <<<"${line#*=}"
-			for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
-				[[ "$pair" == *=* ]] || continue
-				c="${pair%%=*}"
-				[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_order+=("$c"); }
-				_pl_fv["${j}|${c}"]="${pair#*=}"
-			done
+			_pl_fkv+=("${j}"$'\t'"${line#*=}")
 		done
 	done <"$1"
 	[[ -n "${_pl_seen[PLATFORM_BY_CONTEXT]+x}" ]] || return 0
+	# Each --resume's record, for the keys the preamble has (the words before KUBE_VERSIONS, the
+	# line's last key: its context names are raw and may hold a space).
+	while IFS= read -r line; do
+		read -r -a _pl_p <<<"$line"
+		for w in ${_pl_p[@]+"${_pl_p[@]}"}; do
+			[[ "$w" != KUBE_VERSIONS=* ]] || break
+			k="${w%%=*}"
+			for j in "${!PLATFORM_ROW_KEYS[@]}"; do
+				[[ "$k" == "${PLATFORM_ROW_KEYS[j]}" && -n "${_pl_seen[$k]+x}" ]] || continue
+				_pl_fkv+=("${j}"$'\t'"${w#*=}")
+			done
+		done
+	done < <(grep '^# RESUMED_AT=' "$1" 2>/dev/null || true)
+	for line in ${_pl_fkv[@]+"${_pl_fkv[@]}"}; do
+		j="${line%%$'\t'*}"
+		IFS=',' read -r -a _pl_p <<<"${line#*$'\t'}"
+		for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+			[[ "$pair" == *=* ]] || continue
+			c="${pair%%=*}"
+			v="${pair#*=}"
+			[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_order+=("$c"); }
+			if [[ -z "${_pl_fv["${j}|${c}"]+x}" ]]; then
+				_pl_fv["${j}|${c}"]="$v"
+			else
+				case ";${_pl_fv["${j}|${c}"]};" in *";${v};"*) ;; *) _pl_fv["${j}|${c}"]+=";${v}" ;; esac
+			fi
+		done
+	done
 	for c in ${_pl_order[@]+"${_pl_order[@]}"}; do
 		row="$c"
-		for j in "${!PLATFORM_ROW_KEYS[@]}"; do row+=$'\t'"${_pl_fv["${j}|${c}"]:-unknown}"; done
+		for j in "${!PLATFORM_ROW_KEYS[@]}"; do
+			v="${_pl_fv["${j}|${c}"]:-unknown}"
+			if [[ "$v" == *';'* ]]; then
+				best="" part=""
+				IFS=';' read -r -a _pl_vs <<<"$v"
+				for w in "${_pl_vs[@]}"; do
+					if _platform_unread "${PLATFORM_ROW_KEYS[j]}" "$w"; then
+						continue
+					elif [[ "$w" == *@unknown* ]]; then
+						part+="${part:+;}${w}"
+					else
+						best+="${best:+;}${w}"
+					fi
+				done
+				v="${best:-${part:-unknown}}"
+			fi
+			row+=$'\t'"$v"
+		done
 		printf '%s\n' "$row"
 	done
 }
@@ -2896,16 +3011,22 @@ _platform_preamble_value() {
 # _platform_unread_why <tsv> <key> <recorded> <now> [<hint>]: for a resume's warning, which side
 # of one comparison was not read: not in the record (the TSV predates the key: <recorded> empty),
 # unknown in it, recorded with a digest @unknown, not read now (<hint> says why), read now with a
-# digest @unknown; else comparable only in part (a value recorded without its digest).
+# digest @unknown; else comparable only in part (a value recorded without its digest). A record
+# key of a TSV whose earlier resumes recorded theirs (_pl_nres, dynamic scope: from
+# platform_resume_check) was not read by those either.
 # shellcheck disable=SC2329
 _platform_unread_why() {
-	local tsv="$1" key="$2" o="$3" n="$4" hint="${5:-}" why=""
+	local tsv="$1" key="$2" o="$3" n="$4" hint="${5:-}" why="" res="" pod=""
+	if ((${_pl_nres:-0})) && [[ " ${PLATFORM_ROW_KEYS[*]} " == *" ${key} "* ]]; then
+		res=", nor at the --resume runs before this one"
+		pod=" at the sweep's start${res}"
+	fi
 	if [[ -z "$o" ]]; then
 		why="not in the record of ${tsv} (it predates the key)"
 	elif _platform_unread "$key" "$o"; then
-		why="${o} in the record of ${tsv} (not read at the sweep's start)"
+		why="${o} in the record of ${tsv} (not read at the sweep's start${res})"
 	elif [[ "$o" == *@unknown* ]]; then
-		why="recorded with a digest @unknown in ${tsv} (no pod had started)"
+		why="recorded with a digest @unknown in ${tsv} (no pod had started${pod})"
 	fi
 	if [[ -z "$n" ]] || _platform_unread "$key" "$n"; then
 		why+="${why:+, and }could not be read now${hint}"
@@ -2918,7 +3039,9 @@ _platform_unread_why() {
 
 # platform_resume_check <tsv> <ctxs_csv> [<source_ctx>]: before --resume appends rows to <tsv>,
 # whose preamble keeps what the sweep recorded at its start, compare that with what these members
-# have now: each member's record (PLATFORM_ROW_KEYS; platform_probe just read it). With
+# have now: each member's record (PLATFORM_ROW_KEYS; platform_probe just read it), against the
+# start's and the one each earlier --resume wrote into its "# RESUMED_AT=" line
+# (_platform_file_rows: a value the start could not read is compared with what a resume read). With
 # <source_ctx> (the run's first context; controlplane 003) also the values the report applies to
 # every row: each member's KUBE_VERSIONS (probe_kube_versions) and, on the member the TSV read
 # them on (its record's first member when it is in this run, else <source_ctx>, with a warning),
@@ -2936,7 +3059,9 @@ _platform_unread_why() {
 # shellcheck disable=SC2329
 platform_resume_check() {
 	local tsv="$1" _pl_ctxs="$2" tctx="${3:-}" old new kind c key o n dies="" line tb_old eh_old tb_new="" eh_new="" lv
-	local again tp_old snap src unr="" g cmp keys kv_old kv_new lim nt infra note csv _pl_tn i more=0
+	local again tp_old snap src unr="" g cmp keys kv_old kv_new lim nt infra note csv _pl_tn i more=0 at
+	# Read by _platform_unread_why (dynamic scope): the earlier resumes that recorded theirs.
+	local _pl_nres=0
 	local -a _pl_lv=() _pl_lo=() _pl_rc=() _pl_gk=() _pl_p=() _pl_ga=() _pl_dzo=() _pl_ck=() _pl_ugo=()
 	local -a _pl_rgo=() _pl_mr=() _pl_mt=()
 	local -A _pl_ov=() _pl_nv=() _pl_raw=() _pl_gkeys=() _pl_rko=() _pl_rkn=() _pl_dz=() _pl_ug=() _pl_rg=()
@@ -2982,7 +3107,10 @@ platform_resume_check() {
 			echo "warning: --resume: ${tsv} read TUNING_BASELINE and istiod's limits on ${src}, which is not a member of this run; comparing them with ${tctx}'s" >&2
 		fi
 	fi
-	echo "Platform record: comparing what $(_platform_names ${_pl_rc[@]+"${_pl_rc[@]}"}) run now with what ${tsv} recorded at the sweep's start (--resume)"
+	_pl_nres="$(grep -c '^# RESUMED_AT=.* PLATFORM_BY_CONTEXT=' "$tsv" 2>/dev/null)" || _pl_nres=0
+	at="at the sweep's start"
+	((_pl_nres == 0)) || at+=" and at the ${_pl_nres} --resume run(s) before this one"
+	echo "Platform record: comparing what $(_platform_names ${_pl_rc[@]+"${_pl_rc[@]}"}) run now with what ${tsv} recorded ${at} (--resume)"
 	if [[ -z "$old" ]]; then
 		echo "warning: --resume: ${tsv} predates the platform record (no PLATFORM_BY_CONTEXT line), so this run cannot tell whether the members still run the builds its rows were measured on; its report reads them unknown" >&2
 	else
@@ -2999,9 +3127,9 @@ platform_resume_check() {
 			esac
 		done < <(_platform_diff "$old" "$new" "$_pl_ctxs")
 		if ((${#_pl_mr[@]} == 1)); then
-			echo "warning: --resume: ${_pl_mr[0]} is a member of this run but not of the record in ${tsv}: the preamble is not rewritten on --resume, so its builds are never recorded and the report does not list it; start a new sweep to record it" >&2
+			echo "warning: --resume: ${_pl_mr[0]} is a member of this run but not of the record in ${tsv}: its builds are recorded from this resume on (the TSV's \"# RESUMED_AT=\" line), and the report lists them from there" >&2
 		elif ((${#_pl_mr[@]})); then
-			echo "warning: --resume: $(_platform_names "${_pl_mr[@]}") are members of this run but not of the record in ${tsv}: the preamble is not rewritten on --resume, so their builds are never recorded and the report does not list them; start a new sweep to record them" >&2
+			echo "warning: --resume: $(_platform_names "${_pl_mr[@]}") are members of this run but not of the record in ${tsv}: their builds are recorded from this resume on (the TSV's \"# RESUMED_AT=\" line), and the report lists them from there" >&2
 		fi
 		if ((${#_pl_mt[@]} == 1)); then
 			echo "warning: --resume: ${_pl_mt[0]} is in the record of ${tsv} but not a member of this run" >&2

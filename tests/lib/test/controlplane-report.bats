@@ -353,6 +353,25 @@ second_input() {
 	done
 }
 
+@test "report: a --resume's platform record (its # RESUMED_AT= line) merges with the start's, member by member; the attempts still read the line's own keys around it" {
+	local tsv="${RES}/controlplane-fixture-t2.tsv" words
+	with_platform 's/=kind/=aws/g; s/mesh-b=pilot:1.30.5/mesh-b=unknown/'
+	# The resume read mesh-b's istiod: its line holds the record (platform_resume_words), then
+	# its rows (the fixture's again).
+	words="$(platform_fixture_lines mesh-a,mesh-b | sed 's/=kind/=aws/g; s/^# //' | paste -sd ' ' -)"
+	printf '# RESUMED_AT=2026-06-01T00:20:00+00:00 TSV_LINES=%s HARNESS_SHA=fixture ISTIO_PROXY_VERSIONS=mesh-a=1.30.5,mesh-b=1.30.5 %s KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8\n' \
+		"$(wc -l < "$tsv" | tr -d ' ')" "$words" >> "$tsv"
+	grep -v '^#' "$FIXTURE" | tail -n +2 >> "$tsv"
+	run controlplane_attempts "$tsv" ""
+	assert_success
+	[ "$(awk -F'\t' 'NR == 2 { print $1 "|" $3 "|" $6 }' <<<"$output")" = "--resume at 2026-06-01T00:20:00Z|mesh-a=v1.34.8,mesh-b=v1.34.8|mesh-a=1.30.5,mesh-b=1.30.5" ]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -r '.metadata.istiod_image_by_context' <<<"$output")" = "mesh-a=pilot:1.30.5,mesh-b=mixed:unknown;pilot:1.30.5" ]
+	[ "$(jq -r '.metadata.node_provider_by_context' <<<"$output")" = "mesh-a=aws,mesh-b=aws" ]
+	[ "$(jq '[.metadata.data_warnings[] | select(startswith("ISTIOD_IMAGE_BY_CONTEXT could not be read for 1 of 2 members") and contains("while other inputs, or other runs of one (a --resume), have a value"))] | length' <<<"$output")" = 1 ]
+}
+
 @test "report (S-B2): a record of 500 members goes through every format; json lists them all" {
 	{
 		head -1 "$FIXTURE"

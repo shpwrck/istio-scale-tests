@@ -70,6 +70,8 @@
 #
 # Coverage rows (reach_coverage_rows, tab-separated):
 #   mesh_size source_ctx target_ctx checks reachable_checks coverage_status top_code detail
+# or, for reach files whose rows are all local (a mesh of one member: no remote to check),
+# the one line REACH_NO_REMOTE_LINE.
 # coverage_status: REACHABLE (every check), FLAPPING (some), DEGRADED (none, some
 # 200s), UNREACHABLE (none, no 200s), UNKNOWN (no check could run). top_code and
 # detail come from the latest check that was not REACHABLE.
@@ -429,10 +431,15 @@ reach_print_summary() {
 		}' "$tsv" >&2 2>/dev/null || true
 }
 
+# The line reach_coverage_rows prints for reach files that hold local rows only (every run had a
+# mesh of one member, so there was no remote to check); reach_coverage_render says so.
+REACH_NO_REMOTE_LINE="# no remote target"
+
 # reach_coverage_rows <dir|file>...: every reach-*.tsv under the given directories
 # (and every given file), remote rows only, aggregated by (mesh_size, source_ctx,
 # target_ctx) in mesh-size order. Files are read in name order (reach-<RUN_ID>
-# sorts by time), so "latest" is the last row read.
+# sorts by time), so "latest" is the last row read. Files with local rows only:
+# REACH_NO_REMOTE_LINE; none, or no row at all: nothing.
 # shellcheck disable=SC2329
 reach_coverage_rows() {
 	local p f
@@ -445,9 +452,10 @@ reach_coverage_rows() {
 		fi
 	done
 	((${#files[@]})) || return 0
-	awk -F'\t' '
+	awk -F'\t' -v none="$REACH_NO_REMOTE_LINE" '
 		BEGIN { OFS = "\t" }
-		/^#/ || $1 == "run_id" || NF < 13 || $6 != "remote" { next }
+		/^#/ || $1 == "run_id" || NF < 13 { next }
+		$6 != "remote" { if ($6 == "local") loc++; next }
 		{
 			k = $3 SUBSEP $4 SUBSEP $5
 			if (!(k in checks)) { keys[++n] = k; ms[n] = $3 }
@@ -459,6 +467,7 @@ reach_coverage_rows() {
 			}
 		}
 		END {
+			if (n == 0 && loc > 0) { print none; exit }
 			for (i = 2; i <= n; i++) {
 				t = keys[i]; tm = ms[i]; j = i - 1
 				while (j >= 1 && ms[j] + 0 > tm + 0) { keys[j + 1] = keys[j]; ms[j + 1] = ms[j]; j-- }
@@ -500,6 +509,19 @@ reach_coverage_render() {
 			;;
 		csv) echo "# REMOTE_COVERAGE=no reachability data" ;;
 		json) echo '{"remote_coverage":{"data":false,"not_reachable":0,"groups":[]}}' ;;
+		esac
+		return 0
+	fi
+	# The check ran, but every run had a mesh of one member: nothing to cover.
+	if [[ "$rows" == "$REACH_NO_REMOTE_LINE" ]]; then
+		case "$fmt" in
+		text) echo "REMOTE COVERAGE: no remote to check (every run had a mesh of one member: its reach-*.tsv checks the source only)" ;;
+		md)
+			# shellcheck disable=SC2016  # literal backticks for markdown code
+			printf '## Remote coverage\n\nNo remote to check: every run had a mesh of one member, so its `reach-*.tsv` checks the source only.\n'
+			;;
+		csv) echo "# REMOTE_COVERAGE=no remote to check (a mesh of one member)" ;;
+		json) echo '{"remote_coverage":{"data":true,"not_reachable":0,"groups":[]}}' ;;
 		esac
 		return 0
 	fi
