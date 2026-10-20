@@ -8,7 +8,7 @@
 #   die <msg>                         -> exit 1 with stderr message (and keep <msg> as the
 #                                        stop reason sweep_outcome_on_exit records)
 #   awk_untyped_ok <awk>              -> true when <awk> keeps an unset array element intact
-#                                        after passing it to a function (gawk 5.3 does not);
+#                                        after passing it to a function (gawk 5.2, 5.3 do not);
 #                                        sourcing runs awk as mawk, or stops, when awk fails it
 #   split_csv <csv> <out_arrayname>   -> trim+split CSV into named array; empty items
 #                                        (",", "a,,b", "a, ") are dropped; always returns 0
@@ -130,11 +130,12 @@ fi
 die() { _SWEEP_STOP_WHY="$*" _SWEEP_STOP_BY=die; echo "error: $*" >&2; exit 1; }
 
 # awk_untyped_ok <awk>: true when <awk> keeps an array element that holds no value yet intact
-# after passing it to a function. gawk 5.3 (5.3.2 checked) does not: a later comparison of
-# the element stops awk with "fixtype: expected Node_val: got Node_var", and a later number
-# read of it returns garbage. The reports pass such elements (a count no row filled), so a
-# run never uses that awk: when awk on PATH fails this check, tests/lib/awk-mawk (awk run as
-# mawk) goes first on PATH if mawk passes it, else the run stops here.
+# after passing it to a function. gawk 5.2 and 5.3 (5.2.1 and 5.3.2 checked; 5.1 keeps it) do
+# not: a later number read of the element returns garbage, and on 5.3 a later comparison of it
+# stops awk with "fixtype: expected Node_val: got Node_var". The reports pass such elements (a
+# count no row filled), so a run never uses that awk: when awk on PATH fails this check,
+# tests/lib/awk-mawk (awk run as mawk) goes first on PATH if mawk passes it, else the run stops
+# here.
 awk_untyped_ok() {
 	"$1" 'function f(v) { return v ~ /x/ } BEGIN { f(a[1]); if (a[1] == "" && a[1] + 0 == 0) exit 0; exit 1 }' \
 		</dev/null >/dev/null 2>&1
@@ -144,7 +145,7 @@ if ! awk_untyped_ok awk; then
 		PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/awk-mawk:${PATH}"
 		export PATH
 	else
-		die "awk on PATH ($(awk --version 2>/dev/null | head -n 1 || true)) corrupts an array element passed to a function before it holds a value (a gawk 5.3 bug), and the reports do that, so its figures could be wrong. Install mawk (dnf, apt or brew install mawk); the harness then runs awk as mawk on its own."
+		die "awk on PATH ($(awk --version 2>/dev/null | head -n 1 || true)) corrupts an array element passed to a function before it holds a value (a gawk 5.2 and 5.3 bug), and the reports do that, so its figures could be wrong. Install mawk (dnf, apt or brew install mawk); the harness then runs awk as mawk on its own."
 	fi
 fi
 

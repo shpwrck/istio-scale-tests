@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
-# common.sh's awk check: gawk 5.3 corrupts an array element passed to a function before it holds
-# a value (a later comparison stops awk, a later number read returns garbage), and the reports
-# pass such elements. Sourcing common.sh with such an awk first on PATH runs awk as mawk when mawk
-# passes the check, and stops otherwise. Stubs stand in for both awks, so the tests run the same
-# on every host.
+# common.sh's awk check: gawk 5.2 and 5.3 corrupt an array element passed to a function before it
+# holds a value (a later number read of it returns garbage; on 5.3 a later comparison stops awk),
+# and the reports pass such elements. Sourcing common.sh with such an awk first on PATH runs awk as
+# mawk when mawk passes the check, and stops otherwise. Stubs stand in for both awks, so the tests
+# run the same on every host.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -11,7 +11,12 @@ load test_helper
 setup() {
 	STUBS="${BATS_TEST_TMPDIR}/stubs"
 	mkdir -p "$STUBS"
+	# The awk a stub runs for anything but the check. Never the awk-mawk shim, which this file's
+	# own sourcing of common.sh (test_helper) puts first on PATH when the host's awk fails the
+	# check (gawk 5.2 on the Ubuntu CI runner): the shim runs mawk, a stub in two tests, and the
+	# stub and the shim would run each other forever.
 	REAL_AWK="$(command -v awk)"
+	if [[ "$REAL_AWK" == */tests/lib/awk-mawk/awk ]]; then REAL_AWK="$(command -v mawk)"; fi
 	export STUBS REAL_AWK
 }
 
@@ -47,7 +52,7 @@ EOF
 	stub mawk 1
 	run env PATH="${STUBS}:${PATH}" bash -c 'source "$ROOT/tests/lib/common.sh"; echo "not reached"'
 	assert_failure 1
-	assert_output --partial "error: awk on PATH (GNU Awk 5.3.2, API 4.0) corrupts an array element passed to a function before it holds a value (a gawk 5.3 bug)"
+	assert_output --partial "error: awk on PATH (GNU Awk 5.3.2, API 4.0) corrupts an array element passed to a function before it holds a value (a gawk 5.2 and 5.3 bug)"
 	assert_output --partial "Install mawk (dnf, apt or brew install mawk)"
 	refute_output --partial "not reached"
 }
