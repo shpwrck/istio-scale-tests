@@ -57,10 +57,12 @@ which wins over the upstream docs there when they disagree.
     `charts/gitops-hub-ocm-placement-appset/values-sail-operator.yaml` (it must list
     `istioVersion`); External Secrets chart: `values-external-secrets.yaml` there; cert-manager
     chart: `charts/gitops-hub-apps/values.yaml`; Argo CD chart: `argocd_chart_version` in
-    `terraform/platform/variables.tf`; OSSM channel (OpenShift): `charts/spoke-ossm-operator/values.yaml`
+    `terraform/platform/variables.tf`; OSSM channel (OpenShift):
+    `charts/spoke-ossm-operator/values.yaml`
   - the curl image of the wiring gate and the wait Jobs (`docker.io/curlimages/curl`):
-    `charts/mesh-wiring-verify/values.yaml`, `waitForCacerts.image` in `charts/spoke-ossm/values.yaml`
-    and both gateways' `waitForIstiod.image`, each with a keep-in-sync comment naming the others
+    `charts/mesh-wiring-verify/values.yaml`, `waitForCacerts.image` in
+    `charts/spoke-ossm/values.yaml` and both gateways' `waitForIstiod.image`, each with a
+    keep-in-sync comment naming the others
     (`charts/spoke-east-west-gateway/README.md` repeats it)
   - ACM/GitOps channels: `terraform/platform/variables.tf`
   - test images and the `ISTIO_VERSION` recorded in results: `config/versions.env`, with a
@@ -95,7 +97,8 @@ which wins over the upstream docs there when they disagree.
   `TUNING_OBJECTS_BY_CONTEXT`, which a profile changes and its `istiod env` and `Tuning objects`
   rows show per pass, plus each member's `KUBE_VERSIONS`) and what `platform_lever_values` gives
   (the tuning levers, the root Sidecar's egress hosts, istiod's limits and replica counts; one the
-  pass's profile sets is a note, and one it sets that a member did not run warns), with what
+  pass's profile sets is a note, and one it sets that a member did not run, or that a member's
+  TSVs do not record, warns), with what
   `platform_drift_changes` and `platform_drift_unread` find changed or not compared during each
   pass); a suite's sweep calls `platform_probe_share` right after its `platform_probe`
   (controlplane: after its `--resume` check), then `platform_start_warnings`, and

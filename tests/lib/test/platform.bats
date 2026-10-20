@@ -1698,19 +1698,21 @@ resume_run() {
 }
 
 @test "platform_drift_check and platform_resume_check (R6, U5-S1, Sc5-S1): 500 members that moved the same way read as one line each, five named" {
-	local i ctx csv="" dir="${BATS_TEST_TMPDIR}/sweep-x" tsv="${BATS_TEST_TMPDIR}/resume-x/controlplane-r.tsv"
+	local i ctx csv="" reps="" dir="${BATS_TEST_TMPDIR}/sweep-x" tsv="${BATS_TEST_TMPDIR}/resume-x/controlplane-r.tsv"
 	mkdir -p "$dir" "${BATS_TEST_TMPDIR}/resume-x"
 	for ((i = 1; i <= 500; i++)); do
 		printf -v ctx 'm%03d' "$i"
 		csv+="${csv:+,}${ctx}"
+		reps+="${reps:+,}${ctx}=1"
 	done
 	probe_setup
 	platform_probe "$csv" 2>/dev/null
-	{ echo "# Control-plane resource metrics"; platform_preamble_lines "$csv"; printf 'timestamp\tcontext\nt\tm001\n'; } > "$tsv"
-	# Every member upgraded during the sweep: one warning, and every member in the marker.
+	{ echo "# Control-plane resource metrics"; platform_preamble_lines "$csv"; echo "# ISTIOD_REPLICAS_BY_CONTEXT=${reps}"; printf 'timestamp\tcontext\nt\tm001\n'; } > "$tsv"
+	# Every member upgraded during the sweep: one warning, and every member in the marker. The
+	# sweep holds no TSV yet: the read names the record's values only.
 	PROBE_ISTIOD=1.30.6 run --separate-stderr platform_drift_check "$dir" "$csv"
 	assert_success
-	assert_output "Platform record: reading m001, m002, m003, m004, m005 and 495 more again, to check that no build, istiod setting, limit or replica count, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
+	assert_output "Platform record: reading m001, m002, m003, m004, m005 and 495 more again, to check that no build, istiod setting or tuning profile object changed during the sweep"
 	[ "$(grep -c 'ISTIOD_IMAGE_BY_CONTEXT changed during the sweep' <<<"$stderr")" -eq 1 ]
 	[[ "$stderr" == *"warning: m001, m002, m003, m004, m005 and 495 more: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep: pilot:1.30.5@${DIG_B} at its start, pilot:1.30.6@${DIG_B} at its end;"* ]] || { echo "$stderr" | head -c 2000; false; }
 	[ "$(grep '^# ISTIOD_IMAGE_BY_CONTEXT=' "${dir}/platform-drift.txt" | tr , '\n' | grep -c '=pilot:1.30.6@')" -eq 500 ]
@@ -1720,6 +1722,65 @@ resume_run() {
 	assert_output "Platform record: comparing what m001, m002, m003, m004, m005 and 495 more run now with what ${tsv} recorded at the sweep's start (--resume)"
 	[[ "$stderr" == *"  m001, m002, m003, m004, m005 and 495 more: ISTIOD_IMAGE_BY_CONTEXT recorded pilot:1.30.5@${DIG_B}, now pilot:1.30.6@${DIG_B}"$'\n'"Usual causes: ISTIOD_IMAGE_BY_CONTEXT: "* ]] || { echo "$stderr" | head -c 2000; false; }
 	[ "$(wc -l <<<"$stderr")" -lt 10 ]
+	# C11-S2: every member's istiod scaled from 1 to 2 during the sweep: one warning naming five,
+	# one finding in the reports (counts without member names), and every member in the marker
+	# and in tuning 004's values.
+	rm "${dir}/platform-drift.txt"
+	cp "$tsv" "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" "$csv"
+	assert_success
+	assert_output "Platform record: reading m001, m002, m003, m004, m005 and 495 more again, to check that no build, istiod setting, istiod replica count or tuning profile object changed during the sweep"
+	[ "$(grep -c 'ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep' <<<"$stderr")" -eq 1 ] || { echo "$stderr" | head -c 2000; false; }
+	[[ "$stderr" == *"warning: m001, m002, m003, m004, m005 and 495 more: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 at its start, 2 at its end;"* ]] || { echo "$stderr" | head -c 2000; false; }
+	[ "$(wc -l <<<"$stderr")" -lt 5 ]
+	[ "$(grep '^# ISTIOD_REPLICAS_BY_CONTEXT=' "${dir}/platform-drift.txt" | tr , '\n' | grep -c '=2$')" -eq 500 ]
+	run platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep-x (platform-drift.txt): 1 to 2 on m001, m002, m003, m004, m005 and 495 more;"
+	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep-x (platform-drift.txt): 1 to 2 on 500 of 500 members;"
+	refute_output --partial m001
+	run platform_lever_values "${dir}/controlplane-r.tsv"
+	[ "$(grep '^ISTIOD_REPLICAS_BY_CONTEXT=' <<<"$output" | tr , '\n' | grep -c '=mixed:1;2$')" -eq 500 ]
+}
+
+@test "platform_drift_check (SC11-S1): istiod replica counts that changed in more than five ways warn five times, then how many more members; the report's finding names five groups" {
+	local i ctx csv="" reps="" dir="${BATS_TEST_TMPDIR}/sweep"
+	mkdir -p "$dir"
+	# Seven members, each started at another count (1 to 7), all at 9 at the end: seven groups.
+	for ((i = 1; i <= 7; i++)); do
+		csv+="${csv:+,}m${i}"
+		reps+="${reps:+,}m${i}=${i}"
+	done
+	probe_setup
+	platform_probe "$csv" 2>/dev/null
+	{ platform_preamble_lines "$csv"; echo "# ISTIOD_REPLICAS_BY_CONTEXT=${reps}"; printf 'timestamp\tcontext\n'; } > "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=9 run --separate-stderr platform_drift_check "$dir" "$csv"
+	assert_success
+	[ "$(grep -c '^warning: m[0-9]: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep' <<<"$stderr")" -eq 5 ] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: m5: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 5 at its start, 9 at its end;"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" != *"warning: m6:"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: and 2 more members whose ISTIOD_REPLICAS_BY_CONTEXT changed otherwise during the sweep (written to ${dir}/platform-drift.txt, which its reports say in their body)"* ]] || { echo "$stderr"; false; }
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=m1=9,m2=9,m3=9,m4=9,m5=9,m6=9,m7=9' "${dir}/platform-drift.txt"
+	run platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 9 on m1; 2 to 9 on m2; 3 to 9 on m3; 4 to 9 on m4; 5 to 9 on m5; and 2 more members with other changes;"
+	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
+	assert_output --partial "1 to 9 on 1 of 7 members; 2 to 9 on 1 of 7 members; 3 to 9 on 1 of 7 members; 4 to 9 on 1 of 7 members; 5 to 9 on 1 of 7 members; and 2 more members with other changes;"
+	refute_output --regexp 'on m[0-9]'
+	run platform_drift_changes "${dir}/controlplane-r.tsv"
+	assert_output $'ISTIOD_REPLICAS_BY_CONTEXT\tistiod replica counts\t1 to 9 on m1; 2 to 9 on m2; 3 to 9 on m3; 4 to 9 on m4; 5 to 9 on m5; and 2 more members with other changes'
+	# One more way, by one member: "1 more member".
+	rm "${dir}/platform-drift.txt"
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=m1=1,m2=2,m3=3,m4=4,m5=5,m6=6,m7=6/' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=9 run --separate-stderr platform_drift_check "$dir" "$csv"
+	assert_success
+	[[ "$stderr" == *"warning: and 2 more members whose ISTIOD_REPLICAS_BY_CONTEXT changed otherwise during the sweep"* ]] || { echo "$stderr"; false; }
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=m1=1,m2=2,m3=3,m4=4,m5=5,m6=6,m7=9/' "${dir}/controlplane-r.tsv"
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_REPLICAS=9 run --separate-stderr platform_drift_check "$dir" "$csv"
+	assert_success
+	[[ "$stderr" == *"warning: and 1 more member whose ISTIOD_REPLICAS_BY_CONTEXT changed otherwise during the sweep"* ]] || { echo "$stderr"; false; }
+	run platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "5 to 9 on m5; and 1 more member with other changes;"
 }
 
 @test "platform_resume_check (H1): a TSV from before the record warns and proceeds" {
@@ -1827,7 +1888,8 @@ drift_unsourced() (
 	: > "$CALLS"
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting, limit or replica count, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
+	# No TSV in the sweep yet: the record's values only (C11-S1).
+	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting or tuning profile object changed during the sweep"
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
 	# The file says the read ran (M8-S1), and that it found nothing.
 	head -n 1 "${dir}/platform-drift.txt" | grep -q '^# The platform record read again at the end of this sweep (tests/lib/platform.sh platform_drift_check), one block per read: '
@@ -2056,7 +2118,20 @@ drift_unsourced() (
 	[[ "$stderr" != *"member-a: ISTIOD_REPLICAS"* && "$stderr" != *"ISTIOD_CPU_LIMIT_M changed"* ]] || { echo "$stderr"; false; }
 	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# ISTIOD_REPLICAS_BY_CONTEXT=member-b=2" ]
 	run platform_report_warnings "${dir}/controlplane-r.tsv"
-	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on member-b; rows measured after the change ran with another istiod replica count; the report's istiod replicas show the count recorded at the start, while each cell's istiod pods per cluster count its own; the usual cause is an HPA"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on member-b; rows measured after the change ran with another istiod replica count; the report's istiod replicas show the count recorded at the start, while each cell's own count of istiod pods is in the csv's istiod_pods_avg, the json's istiod_pods_per_cluster_avg and the growth table's istiod pods / cluster; the usual cause is an HPA"
+	# Where member names may not go (the scale envelope, pasted into campaign docs): how many of
+	# the members the inputs record a count for (M11-B1).
+	run platform_report_warnings --no-members "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on 1 of 2 members;"
+	refute_output --partial member-b
+	# The TSVs' banner names the replica counts and limits they record (C11-S1).
+	rm "${dir}/platform-drift.txt"
+	run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting, istiod limit, istiod replica count or tuning profile object changed during the sweep"
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_ON=member-b PROBE_ISTIOD_ON_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
 	run platform_lever_values "${dir}/controlplane-r.tsv"
 	assert_line "ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=mixed:1;2"
 	run platform_drift_changes "${dir}/controlplane-r.tsv"
@@ -2584,6 +2659,21 @@ drift_unsourced() (
 	assert_output "b=p:2 (1 of 2 members; the other 1 match)"
 	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=p:2,b=p:2" "a=p:1,b=p:1,c=p:1"
 	assert_output "a=p:2, b=p:2, c not recorded (all 3 members)"
+	# A member that ran more than one value (its inputs disagree) is shown though it matches by
+	# one of them, its values joined (I11-N2); every member on the same two: those, once.
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=p:1" "a=p:1,b=p:1"
+	assert_output "a=mixed: p:1 and p:2 (1 of 2 members; the other 1 match)"
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:2;p:3,b=p:2" "a=p:1,b=p:1"
+	assert_output "a=mixed: p:2 and p:3, b=p:2 (all 2 members)"
+	run platform_value_against PROXY_IMAGE_BY_CONTEXT "a=mixed:p:1;p:2,b=mixed:p:1;p:2" "a=p:1,b=p:1"
+	assert_output "mixed: p:1 and p:2"
+	# Counts from before the record (no member) that disagree (R11-N1).
+	run platform_value_against ISTIOD_REPLICAS_BY_CONTEXT "mixed:2;1" 1
+	assert_output "mixed: 2 and 1"
+	run platform_members_by_value "mixed:1;2"
+	assert_output "mixed: 1 and 2"
+	run platform_summary "mixed:1;2,a=2"
+	assert_output "mixed: 1 and 2, 2 (1 member)"
 	# A fleet: 500 members, 7 of them on another build, named five at most.
 	local ref="" v="" i
 	for ((i = 1; i <= 500; i++)); do

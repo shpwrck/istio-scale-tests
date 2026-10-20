@@ -261,7 +261,7 @@ five_passes() {
 	assert_output --partial "| Platform record | baseline | mixed (see notes) | same | differs (see notes) | unknown (see notes) |"
 	assert_output --partial "Pass 01-same, its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT:"
 	# Both members hold both builds: the value they share, once.
-	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`mixed:pilot:1.30.5@sha256:cdcdcdcdcdcd;pilot:1.30.6@sha256:232323232323\`"
+	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`mixed: pilot:1.30.5@sha256:cdcdcdcdcdcd and pilot:1.30.6@sha256:232323232323\`"
 	assert_output --partial "- **Warning:** pass 01-same: its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT (or one of them did not read or record a value; the values follow the table), so part of it may have run on another platform, build, Kubernetes version, tuning lever, istiod limit or istiod replica count, and then its change against the baseline is not the profile's alone"
 	refute_output --partial "pass 01-same differs"
 	# Only 004's own warnings on stderr: none of the library's for a sweep's report (U7-S4).
@@ -276,6 +276,18 @@ five_passes() {
 	assert_output --partial "- **Warning:** pass baseline: its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT (or one of them did not read or record a value; the values follow the table), so part of it may have run on another platform, build, Kubernetes version, tuning lever, istiod limit or istiod replica count, and then no profile's change against it is the profile's alone"
 	assert_output --partial "Pass baseline, its TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT:"
 	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`mixed: pilot:1.30.5@sha256:cdcdcdcdcdcd and pilot:1.30.6@sha256:232323232323 on ctx-a, ctx-b\`"
+	# One member's TSVs disagree, by a build the baseline also ran: that member is shown, not
+	# hidden behind "every member recorded matches".
+	rm "${S}/baseline/controlplane-second.tsv"
+	{
+		tsv_record "${digests}; /^# ISTIOD_IMAGE_BY_CONTEXT=/s/ctx-a=pilot:1.30.5@$(digest cd)/ctx-a=pilot:1.30.6@$(digest 23)/; s#=none#=$(own_objects 01-same)#g"
+		printf '%s\n' "$CP_HDR" $'t\t0\t512\t300\t250\t99\t438\t20480\t10'
+	} > "${S}/01-same/controlplane-second.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | mixed (see notes) | same | differs (see notes) | unknown (see notes) |"
+	assert_output --partial "- ISTIOD_IMAGE_BY_CONTEXT: \`ctx-a=mixed: pilot:1.30.5@sha256:cdcdcdcdcdcd and pilot:1.30.6@sha256:232323232323 (1 of 2 members; the other 1 match)\`"
+	refute_output --partial "every member recorded matches"
 }
 
 # objects_passes: a baseline and the passes 02-x and 04-connection-pools (each pass dir is the
@@ -1214,6 +1226,83 @@ with_replicas() {
 	assert_output --partial "so whether its builds, Kubernetes versions, tuning levers or istiod limits changed during it is not known"
 }
 
+@test "tuning 004 (M11-S2): a pass of a suite that reads istiod's replica count at its start only, whose profile turns autoscaling on, is not known all through the pass: noted and warned" {
+	local p
+	lever_passes
+	sed -i 's/^# SUITE=controlplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" 1 ISTIOD_REPLICAS; done
+	echo '{"spec":{"values":{"pilot":{"autoscaleEnabled":true,"autoscaleMin":1,"autoscaleMax":3}}}}' > "${S}/04-connection-pools/state/patch.json"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile turns istiod's autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA sets each member's istiod replica count, and the churn suite's TSVs record the source member's count at the probe's start only, so whether that count held all through the pass is not known, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "Pass 04-connection-pools, not known all through the pass on ISTIOD_REPLICAS_BY_CONTEXT (set by its profile's HPA):"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json): the churn suite's TSVs record the source member's count at the probe's start only, so whether that count held all through the pass is not known"
+	[[ "$stderr" == *"warning: pass 04-connection-pools: its profile turns istiod's autoscaling on"* ]]
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp '  ISTIOD_REPLICAS_BY_CONTEXT +set by its profile.s HPA \(spec.values.pilot.autoscaleEnabled in its state/patch.json\): the churn suite'
+	# propagation reads each member's count, at the probe's start only too.
+	sed -i 's/^# SUITE=churn$/# SUITE=propagation/' "${S}/sweep-metadata.txt"
+	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" ctx-a=1,ctx-b=1 ISTIOD_REPLICAS; done
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	assert_output --partial "so its HPA sets each member's istiod replica count, and the propagation suite's TSVs record each member's count at the probe's start only, so"
+	# Without a baseline, the reference pass is that profile pass: its own cell says so.
+	mkdir -p "${BATS_TEST_TMPDIR}/gone"
+	mv "${S}/baseline" "${BATS_TEST_TMPDIR}/gone/"
+	printf '# SUITE=propagation\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | reference (see notes) | same |"
+	assert_output --partial "so whether that count held all through the pass is not known, nor whether any pass's difference from it is the profiles' alone"
+	# The controlplane suite reads the count again at a pass's end: one that held says nothing.
+	mv "${BATS_TEST_TMPDIR}/gone/baseline" "${S}/"
+	printf '# SUITE=controlplane\n# PASSES=baseline,02-x,04-connection-pools\n' > "${S}/sweep-metadata.txt"
+	for p in baseline 02-x 04-connection-pools; do with_replicas "$p" ctx-a=1,ctx-b=1; done
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | same |"
+	refute_output --partial "HPA"
+}
+
+@test "tuning 004 (R11-N1): bare replica counts from before the record that a pass's TSVs disagree on warn and show both; where the baseline's do, a pass that ran one of them says so" {
+	local p
+	rm -rf "$S"
+	mkdir -p "$S"
+	printf '# SUITE=churn\n# PASSES=baseline,02-x\n' > "${S}/sweep-metadata.txt"
+	for p in baseline 02-x; do
+		mkdir -p "${S}/${p}"
+		printf '%s\n' '# ISTIOD_REPLICAS=1' "$CHURN_HDR" $'t\tOK\t100\t200\t300\t40\t50' > "${S}/${p}/churn-${p}.tsv"
+	done
+	profile_state 02-x
+	# A second TSV in 02-x counted 2.
+	printf '%s\n' '# ISTIOD_REPLICAS=2' "$CHURN_HDR" $'t\tOK\t100\t200\t300\t40\t50' > "${S}/02-x/churn-second.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | mixed (see notes) |"
+	assert_output --partial "- **Warning:** pass 02-x: its TSVs disagree on ISTIOD_REPLICAS_BY_CONTEXT (or one of them did not read or record a value; the values follow the table)"
+	assert_output --partial "Pass 02-x, every value of its platform record unknown (its TSVs predate the record, or nothing could be read), its TSVs disagree on ISTIOD_REPLICAS_BY_CONTEXT:"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`mixed: 1 and 2\`"
+	# In the baseline: its record shows both, and the pass that ran one of them says which.
+	mv "${S}/02-x/churn-second.tsv" "${S}/baseline/churn-second.tsv"
+	sed -i 's/^# ISTIOD_REPLICAS=1$/# ISTIOD_REPLICAS=2/' "${S}/02-x/churn-02-x.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- **Warning:** pass baseline: its TSVs disagree on ISTIOD_REPLICAS_BY_CONTEXT"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`mixed: 1 and 2\`"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, where the baseline ran more than one value, one of those: \`2\`"
+	refute_output --partial "mixed:1;2"
+	refute_output --partial "02-x differs"
+	# A pass on a count the baseline never ran still differs.
+	sed -i 's/^# ISTIOD_REPLICAS=2$/# ISTIOD_REPLICAS=3/' "${S}/02-x/churn-02-x.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | differs (see notes) |"
+	refute_output --partial "one of those"
+}
+
 @test "tuning 004 (U9-N5): an unknown --format names the value it was given" {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format html
 	assert_failure
@@ -1369,4 +1458,11 @@ CHURN_HDR=$'timestamp\tstatus\tconvergence_local_ms\tconvergence_remote_eds_ms\t
 	assert_output --partial "| Valid / total rows | 0/0 | 2/3 | 2/2 |"
 	assert_output --partial "| Platform record | - | baseline (see notes) | unknown (see notes) |"
 	assert_output --partial "| istiod memory peak (Mi) | - | 512 | 256 (-50.0%) |"
+	# The directory that holds the sweeps (tests/tuning/results): it names the last of them (U11-S1).
+	mkdir -p "${BATS_TEST_TMPDIR}/results"
+	cp -r "$S" "${BATS_TEST_TMPDIR}/results/sweep-20260101T000000Z-1"
+	cp -r "$S" "${BATS_TEST_TMPDIR}/results/sweep-20260102T000000Z-1"
+	run --separate-stderr "$COMPARE" --results-dir "${BATS_TEST_TMPDIR}/results"
+	assert_failure
+	[[ "$stderr" == *"${BATS_TEST_TMPDIR}/results holds tuning sweeps, not passes: give one of them (the last by name: ${BATS_TEST_TMPDIR}/results/sweep-20260102T000000Z-1)"* ]] || { echo "$stderr"; false; }
 }

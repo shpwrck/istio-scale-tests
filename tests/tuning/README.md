@@ -80,13 +80,14 @@ pass's probe to the probe; `gitops-pause.json` is what 005 resumes a pause from 
 killed run").
 
 `SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
-table. Data-plane rows are split by target class (local or remote) and QPS; a row that
-missed its target QPS (`QPS_SHORTFALL`) is not valid, and the data-plane servers run
-`DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Histogram p99 rows
-(convergence, push time) are never averaged: they show the worst bucket range a valid row
-hit, or `overflow (N rows)`. Units: memory in Mi, CPU in millicores (the controlplane's
-`istiod CPU peak (m)` and `istiod memory peak (Mi)` are window peaks), the sidecar config
-in KiB. Re-render:
+table's `Pass status` row (`ok` otherwise), and so does `no data`: a pass without TSVs (one
+the metadata lists without its directory, or whose probe wrote none). Data-plane rows are
+split by target class (local or remote) and QPS; a row that missed its target QPS
+(`QPS_SHORTFALL`) is not valid, and the data-plane servers run `DATAPLANE_SERVER_REPLICAS`
+pods per cluster (2 by default). Histogram p99 rows (convergence, push time) are never
+averaged: they show the worst bucket range a valid row hit, or `overflow (N rows)`. Units:
+memory in Mi, CPU in millicores (the controlplane's `istiod CPU peak (m)` and `istiod memory
+peak (Mi)` are window peaks), the sidecar config in KiB. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 Each pass reads the platform record live before its probe
@@ -100,16 +101,18 @@ churn-dataplane: the source member's; dataplane: none). `platform-record.txt` in
 directory hands the record over. The pass reads them again after the probe, always, and writes
 what that read found to the pass's `platform-drift.txt`: what changed in between (a profile
 reverted by hand, an Argo CD sync that put istiod's settings back, a lever, an istiod limit, a
-controlplane pass's istiod replica count, a control-plane upgrade), the other members' istiod limits where they differ from the source
-member's, and what it could not compare (a value not read at either end, or an image whose
-digest is `@unknown`: no pod had started). Nothing records the other members' limits at a
-pass's start, so theirs are their limits at its end: a change there during a pass reads as a
-difference from that pass on, not as a change during it, and one undone before the pass ends is
-not seen. In a controlplane pass that read also compares each member's istiod Deployment
-replicas with the ones its TSVs record (a profile that turns autoscaling on is said to have its
-HPA move them); the other suites' replica counts are read at the probe's start only. A
-controlplane window whose Running istiod pods changed also writes its `cluster_connected_proxies`
-as `N/A`.
+controlplane pass's istiod replica count, a control-plane upgrade), the other members' istiod
+limits where they differ from the source member's, and what it could not compare (a value not
+read at either end, or an image whose digest is `@unknown`: no pod had started). Nothing
+records the other members' limits at a pass's start, so theirs are their limits at its end: a
+change there during a pass reads as a difference from that pass on, not as a change during it,
+and one undone before the pass ends is not seen. In a controlplane pass that read also compares
+each member's istiod Deployment replicas with the ones its TSVs record (a profile that turns
+autoscaling on is said to have its HPA move them); the other suites' replica counts are read at
+the probe's start only, so a pass whose profile turns autoscaling on there reads `unknown (see
+notes)` and warns that whether its HPA held the count all through the pass is not known. A
+controlplane window whose Running istiod pods changed also writes its
+`cluster_connected_proxies` as `N/A`.
 
 The table's `Platform record` row compares each pass's record and the values its TSVs record
 outside it with the baseline's (without a baseline, the first pass with data's, which reads
@@ -129,28 +132,31 @@ versions, istiod's limits and replica counts, lever by lever for the levers. Tho
 - `differs (see notes)`;
 - `not in effect (see notes)`: a member did not run a limit or the replica count that its
   `state/patch.json` sets to one value (not rolled out there; a limit, or a controlplane pass's
-  count, that changed during the pass, a count its TSVs disagree on or an HPA set; a patch that
-  turns autoscaling on is not checked
-  against its `replicaCount`);
+  count, that changed during the pass, a count its TSVs disagree on or an HPA set, or a
+  Terminating pod still counted as Running after a short `--settle`: the other suites count
+  Running istiod pods; a patch that turns autoscaling on is not checked against its
+  `replicaCount`);
 - `changed (see notes)`: the read after its probe found a build, a Kubernetes version, a tuning
   lever, an istiod limit or (controlplane) a member's istiod replica count changed during the pass;
 - `mixed (see notes)`: its TSVs disagree;
 - `unknown (see notes)`: a value not read or not recorded in one of them (a digest `@unknown`, a
   member's version `unreachable`, a lever `unknown`), a limit or replica count its profile sets
-  that its TSVs do not record on a member, or not compared at the pass's end (a value the read
-  after its probe could not compare, or no `platform-drift.txt`: that read did not run);
+  that its TSVs do not record on a member, a replica count its profile's HPA sets (autoscaling
+  on) in a suite that reads the count at the probe's start only (all but controlplane), or not
+  compared at the pass's end (a value the read after its probe could not compare, or no
+  `platform-drift.txt`: that read did not run);
 - `-`: no data.
 
 The baseline (or reference) pass reads `baseline (see notes)` when its own values changed during
 it, its TSVs disagree, it was not compared at its end or (a reference pass) its profile's value
-was not in effect or is not known to be, and its warning says that no profile's change against it is the profile's
-alone, or, when it was not compared at its end, that none is known to be. A member that changed
-during a pass, or whose TSVs disagree, matches the other side when one of its values is that
-side's (the pass's own warning covers the change), so a pass on a version the baseline ended
-with reads `same (see notes)`, its notes naming that version, and one on a version the baseline
-never ran there still `differs`: an upgrade rolling through the members shows in each pass it
-reaches. A mesh operator that differs only in its state (`Available`, `Unavailable`) is the same
-build.
+was not in effect or is not known to be, and its warning says that no profile's change against
+it is the profile's alone, or, when it was not compared at its end, that none is known to be. A
+member that changed during a pass, or whose TSVs disagree, matches the other side when one of
+its values is that side's (the pass's own warning covers the change), so a pass on a version the
+baseline ended with reads `same (see notes)`, its notes naming that version, and one on a version
+the baseline never ran there still `differs`: an upgrade rolling through the members shows in
+each pass it reaches. A mesh operator that differs only in its state (`Available`,
+`Unavailable`) is the same build.
 
 Only the controlplane suite's TSVs record istiod's limits, and the dataplane suite's record no
 replica count, so those sweeps compare none of them, and a pass whose profile sets one reads
@@ -283,8 +289,9 @@ and its index; nothing removes it by value. A window of that shape for any other
 another team's, and is left alone. Remove the stale one by hand:
 `./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --status` prints the Applications,
 then each AppProject's sync windows with their index (`<i>` below): the pause of those
-Applications (which `--resume` removes with its pause record, and `--clear` without one) on one line, a stale pause with the window
-whole on the line under it (`<window>` below), and any other window as it is:
+Applications (which `--resume` removes with its pause record, and `--clear` without one) on one
+line, a stale pause with the window whole on the line under it (`<window>` below), and any
+other window as it is:
 
 ```bash
 kubectl --context <hub-ctx> -n <argocd-namespace> patch appprojects.argoproj.io <project> --type json \

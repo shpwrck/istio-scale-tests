@@ -694,7 +694,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
 			remaining=$((alloc - current))
 			if ((NEEDED_PODS > remaining)); then
-				die "context $ctx: need $NEEDED_PODS pods but only $remaining slots available ($alloc allocatable − $current non-terminal pods). Reduce --service-count, --replicas, --namespace-count or --measurement-pods, or add nodes."
+				die "context $ctx: need $NEEDED_PODS pods but only $remaining slots available ($alloc allocatable − $current non-terminal pods). Reduce --service-count, --replicas, --namespace-count or --measurement-pods (or their keys CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT or CONTROLPLANE_MEASUREMENT_PODS: in the environment of a tuning sweep, which runs this setup with --contexts only), or add nodes."
 			fi
 			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
 			# Under-provision coverage floor (auto mode only).
@@ -739,7 +739,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 			if (( CPU_NEEDED_M > cpu_free )); then
 				cpu_fit=$(( cpu_free / CPU_PER_POD_M ))
 				if [[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" == "1" ]]; then
-					die "context $ctx: ${cpu_line}; about ${cpu_fit} pods fit. Reduce --service-count, --replicas, --namespace-count or --measurement-pods, or add nodes (SCALE_CPU_PREFLIGHT_ENFORCE=0 only warns, for a node autoscaler)."
+					die "context $ctx: ${cpu_line}; about ${cpu_fit} pods fit. Reduce --service-count, --replicas, --namespace-count or --measurement-pods (or their keys CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT or CONTROLPLANE_MEASUREMENT_PODS: in the environment of a tuning sweep, which runs this setup with --contexts only), or add nodes (SCALE_CPU_PREFLIGHT_ENFORCE=0 only warns, for a node autoscaler)."
 				fi
 				echo "  WARN: $ctx: ${cpu_line}; about ${cpu_fit} pods fit; the rest stay Pending unless a node autoscaler adds capacity (SCALE_CPU_PREFLIGHT_ENFORCE=0)." >&2
 			else

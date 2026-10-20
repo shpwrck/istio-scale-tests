@@ -13,11 +13,14 @@
 # none: that read did not run) warns: its change is then not the profile's alone, or not known
 # to be. A lever, the egress hosts, a limit or the replica count that the pass's profile sets
 # (its state/objects or state/patch.json) is shown, not warned, unless a member did not run the
-# limit or count it sets (not in effect, which warns). Two more rows: each pass's istiod settings (one
-# digest; a pass whose members differ, whose value changed during it or could not be read on a
-# member, whose istiod pods ran different settings at once, or whose settings contradict its
-# profile against the baseline's warns) and its tuning profile objects (the baseline must hold
-# none, a profile pass all of its own on every member and no other: anything else warns).
+# limit or count it sets (not in effect) or its TSVs do not record it on a member (unknown), or
+# the profile turns istiod's autoscaling on in a suite that reads the count at the start only
+# (unknown: its HPA sets the count): each of those warns. Two more rows: each pass's istiod
+# settings (one digest; a pass whose members differ, whose value changed during it or could not
+# be read on a member, whose istiod pods ran different settings at once, or whose settings
+# contradict its profile against the baseline's warns) and its tuning profile objects (the
+# baseline must hold none, a profile pass all of its own on every member and no other: anything
+# else warns).
 #
 # Usage:
 #   ./tests/tuning/004-compare-profiles.sh --results-dir DIR [--format text|md] [--output FILE]
@@ -73,19 +76,25 @@ A pass reads:
                              reference pass ran more than one value and this pass one of them
   differs (see notes)
   not in effect (see notes)  a member did not run the limit or replica count its
-                             state/patch.json sets (not rolled out there, a limit changed
-                             during the pass, a count its TSVs disagree on or an HPA set)
+                             state/patch.json sets (not rolled out there, a limit or a
+                             controlplane count that changed during the pass, a count its
+                             TSVs disagree on or an HPA set, or a Terminating pod still
+                             counted as Running after a short --settle: the other suites
+                             count Running istiod pods)
   changed (see notes)        the read at its end found a build, a Kubernetes version, a
                              lever, a limit or (controlplane) a replica count changed during
                              it (its platform-drift.txt)
   mixed (see notes)          its TSVs disagree
   unknown (see notes)        a value not read or not recorded in one of them, a limit or
                              replica count its profile sets that its TSVs do not record on
-                             a member, or not compared at its end (not read again then, or
-                             no platform-drift.txt: that read did not run)
+                             a member, a replica count its profile's HPA sets (autoscaling
+                             on) that its suite reads at the start only (all but
+                             controlplane), or not compared at its end (not read again
+                             then, or no platform-drift.txt: that read did not run)
   baseline, reference        the pass compared with; "(see notes)" after it when it changed,
                              its TSVs disagree, it was not compared at its end, or a member
-                             did not run, or is not recorded with, what its profile sets
+                             did not run, or is not recorded with, what its profile sets (or
+                             its profile's HPA, as above)
   -                          no data
 A member that ran the value the reference pass started or ended with there matches it (that
 change is the reference pass's warning), and an operator that differs only in its state is
@@ -121,6 +130,8 @@ Options:
 Environment:
   TEST_PLATFORM      Checked only (auto, kubernetes or openshift; config/options.env): the
                      comparison reads the platform each pass recorded.
+  PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL
+                     Checked only (config/options.env): the comparison reads no cluster.
 
 Requires jq (it reads each profile pass's state/patch.json).
 EOF
@@ -171,6 +182,10 @@ else
 	# A pass directory, or another suite's sweep, holds its TSVs itself.
 	! compgen -G "${RESULTS_DIR}/*.tsv" >/dev/null ||
 		die "${RESULTS_DIR} holds TSVs itself (a pass directory, or another suite's sweep): give a tuning sweep directory (tests/tuning/results/sweep-<RUN_ID>), which holds one directory per pass"
+	# The directory that holds the sweeps (tests/tuning/results): each of them has its metadata.
+	if last="$(compgen -G "${RESULTS_DIR}/*/sweep-metadata.txt" | sort | tail -1)" && [[ -n "$last" ]]; then
+		die "${RESULTS_DIR} holds tuning sweeps, not passes: give one of them (the last by name: $(dirname "$last"))"
+	fi
 fi
 ((${#PASSES[@]})) || die "no pass directories in ${RESULTS_DIR}: give a tuning sweep directory (tests/tuning/results/sweep-<RUN_ID>), which holds one directory per pass"
 
@@ -691,8 +706,8 @@ key_result() {
 # ref_two <key>: where the reference pass ran more than one value of <key> (mixed: it changed
 # during that pass, or its TSVs disagree), two of them that differ (not one that was not read, nor
 # the same build in another state): its members (levers, for TUNING_BASELINE) ","-joined, or "-"
-# for a key without members (PLATFORM, TEST_PLATFORM, SIDECAR_EGRESS_HOSTS); nothing when it ran
-# one value only.
+# for a key without members (PLATFORM, TEST_PLATFORM, SIDECAR_EGRESS_HOSTS) or for a value
+# without a member (counts from before the record), first; nothing when it ran one value only.
 ref_two() {
 	local k="$1" rv pair c x i j n=0 a b r
 	local -a pairs=() alts=() order=()
@@ -714,7 +729,21 @@ ref_two() {
 		;;
 	esac
 	IFS=',' read -r -a pairs <<<"$rv"
+	x=""
 	for pair in ${pairs[@]+"${pairs[@]}"}; do
+		if [[ "$pair" != *=* && "$pair" == mixed:* && -z "$x" ]]; then
+			# A value without a member (counts from before the record): two of its values differ.
+			IFS=';' read -r -a alts <<<"${pair#mixed:}"
+			for ((i = 0; i < ${#alts[@]}; i++)); do
+				[[ -z "$x" ]] || break
+				for ((j = i + 1; j < ${#alts[@]}; j++)); do
+					if [[ "$(platform_compare_values "${k}=${alts[i]}" "${k}=${alts[j]}" "$k")" == "${k}"$'\t'differs ]]; then
+						x=-
+						break
+					fi
+				done
+			done
+		fi
 		[[ "$pair" == *=mixed:* ]] || continue
 		c="${pair%%=*}"
 		IFS=';' read -r -a alts <<<"${pair#*=mixed:}"
@@ -736,16 +765,16 @@ ref_two() {
 			while IFS=$'\t' read -r c _ _ r; do [[ "$r" != differs ]] || two[$c]=1; done < <(platform_compare_members "$k" "$a" "$b")
 		done
 	done
-	x=""
 	for c in ${order[@]+"${order[@]}"}; do [[ -z "${two[$c]+x}" ]] || x+="${x:+,}${c}"; done
 	printf '%s\n' "$x"
 }
 # ref_alts <pass> <key>: where the reference pass ran more than one value (REF_MIX: ref_two) and
 # this pass ran one of them, that value, as its notes show it: the whole value for a scalar key,
-# the levers or members concerned for another (platform_members_by_value). Nothing elsewhere, nor
-# where this pass ran more than one value itself (its own note: its TSVs disagree, or it changed).
+# the levers or members concerned for another (platform_members_by_value; a value without a
+# member, counts from before the record, first). Nothing elsewhere, nor where this pass ran more
+# than one value itself (its own note: its TSVs disagree, or it changed).
 ref_alts() {
-	local k="$2" rv pv pair out=""
+	local k="$2" rv pv pair rb="" out=""
 	local -a pairs=()
 	local -A mx=() miss=()
 	rv="$(plat_value "$REF" "$k")"
@@ -760,9 +789,18 @@ ref_alts() {
 	IFS=',' read -r -a pairs <<<"${REF_MIX[$k]}"
 	for pair in ${pairs[@]+"${pairs[@]}"}; do mx[$pair]=1; done
 	while IFS=$'\t' read -r pair _; do [[ -z "$pair" ]] || miss[$pair]=1; done < <(platform_compare_members "$k" "$rv" "$pv")
+	# The reference pass's value without a member (counts from before the record).
+	IFS=',' read -r -a pairs <<<"$rv"
+	for pair in ${pairs[@]+"${pairs[@]}"}; do [[ "$pair" == *=* || -n "$rb" ]] || rb="$pair"; done
 	IFS=',' read -r -a pairs <<<"$pv"
 	for pair in ${pairs[@]+"${pairs[@]}"}; do
-		[[ "$pair" == *=* && "$pair" != *=mixed:* && -n "${mx[${pair%%=*}]+x}" && -z "${miss[${pair%%=*}]+x}" ]] || continue
+		if [[ "$pair" != *=* ]]; then
+			[[ -n "${mx[-]+x}" && -n "$rb" && "$pair" != mixed:* && "$pair" != unknown ]] || continue
+			[[ "$(platform_compare_values "${k}=${rb}" "${k}=${pair}" "$k")" == "${k}"$'\t'same ]] || continue
+			out="${pair}${out:+,}${out}"
+			continue
+		fi
+		[[ "$pair" != *=mixed:* && -n "${mx[${pair%%=*}]+x}" && -z "${miss[${pair%%=*}]+x}" ]] || continue
 		out+="${out:+,}${pair}"
 	done
 	[[ -n "$out" ]] || return 0
@@ -792,8 +830,9 @@ limits_end_only() {
 # "KEY<TAB>the profile's value<TAB>the members that did not") or that its TSVs do not record on a
 # member (PLAT_NR: "KEY<TAB>the profile's value<TAB>where and why"), the keys that changed during it
 # (PLAT_CHG: its DRIFT keys), that its TSVs disagree on (PLAT_MIX) and that the read at its end
-# could not compare (PLAT_NC: its UNREAD keys)
-declare -A PLAT_DIFF PLAT_UNK PLAT_DTXT PLAT_UTXT PLAT_SET PLAT_OM PLAT_NE PLAT_NR PLAT_CHG PLAT_MIX PLAT_NC
+# could not compare (PLAT_NC: its UNREAD keys), and why its replica count is not known all
+# through it when its profile's HPA sets the count (PLAT_AS)
+declare -A PLAT_DIFF PLAT_UNK PLAT_DTXT PLAT_UTXT PLAT_SET PLAT_OM PLAT_NE PLAT_NR PLAT_CHG PLAT_MIX PLAT_NC PLAT_AS
 PLAT_WARNINGS=()
 # The record's own keys (TSVs from before it still record each member's Kubernetes version).
 PLAT_KEYS_ALL=""
@@ -818,9 +857,11 @@ for p in "${PASSES[@]}"; do
 		[[ "$k" != ISTIOD_*_LIMIT_*_BY_CONTEXT ]] || x="${k%_BY_CONTEXT}"
 		[[ ", ${ck}, " != *", ${x}, "* ]] || continue
 		v="$(plat_value "$p" "$k")"
+		# Not one value: a member's (a lever's), or one without a member (counts from before the
+		# record).
 		case "$k" in
 		PLATFORM | TEST_PLATFORM | SIDECAR_EGRESS_HOSTS) [[ "$v" != mixed:* ]] || mk+="${mk:+, }${k}" ;;
-		*) [[ ",${v}" != *"=mixed:"* ]] || mk+="${mk:+, }${k}" ;;
+		*) [[ ",${v}" != *"=mixed:"* && ",${v}" != *",mixed:"* ]] || mk+="${mk:+, }${k}" ;;
 		esac
 	done
 	# The other members' istiod limits by what they are (the internal key names their read).
@@ -909,6 +950,18 @@ for p in "${PASSES[@]}"; do
 		PLAT_WARNINGS+=("pass ${p}: its profile sets ${noun} to ${x}${unit} (${what} in its state/patch.json), yet ${k} reads ${w}, so the profile's value was not in effect there all through the pass (${why}), and $(pass_effect "$p")")
 	done < <(profile_fixed "$p")
 	PLAT_NE[$p]="$ne" PLAT_NR[$p]="$nr"
+	# A profile that turns istiod's autoscaling on: its HPA sets each member's count, which the
+	# other suites read at the probe's start only, or not at all (the controlplane suite's read at
+	# a pass's end compares it: a count the HPA moved reads changed).
+	if [[ "$SUITE" != controlplane ]] && profile_autoscales "$p"; then
+		case "$SUITE" in
+		dataplane) w="the dataplane suite's TSVs record no count" ;;
+		churn | churn-dataplane) w="the ${SUITE} suite's TSVs record the source member's count at the probe's start only" ;;
+		*) w="the ${SUITE} suite's TSVs record each member's count at the probe's start only" ;;
+		esac
+		PLAT_AS[$p]="$w"
+		PLAT_WARNINGS+=("pass ${p}: its profile turns istiod's autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA sets each member's istiod replica count, and ${w}, so whether that count held all through the pass is not known, nor $(pass_unknown_effect "$p")")
+	fi
 	if [[ "$p" == "$REF" ]]; then
 		if [[ "$REF" == "$BASE" ]]; then cell="baseline"; else cell="reference"; fi
 		nd="${NODRIFT[$p]:-}" ru=""
@@ -922,7 +975,7 @@ for p in "${PASSES[@]}"; do
 				break
 			done
 		fi
-		[[ -z "${PLAT_CHG[$p]:-}${PLAT_MIX[$p]:-}${PLAT_NC[$p]:-}${nd}${ne}${nr}${ru}" ]] || cell+=" (see notes)"
+		[[ -z "${PLAT_CHG[$p]:-}${PLAT_MIX[$p]:-}${PLAT_NC[$p]:-}${PLAT_AS[$p]:-}${nd}${ne}${nr}${ru}" ]] || cell+=" (see notes)"
 		cells+=("$cell")
 		continue
 	fi
@@ -974,7 +1027,7 @@ for p in "${PASSES[@]}"; do
 		cells+=("changed (see notes)")
 	elif [[ -n "${PLAT_MIX[$p]:-}" ]]; then
 		cells+=("mixed (see notes)")
-	elif [[ -n "${uk}${PLAT_NC[$p]:-}${NODRIFT[$p]:-}${nr}" ]]; then
+	elif [[ -n "${uk}${PLAT_NC[$p]:-}${NODRIFT[$p]:-}${nr}${PLAT_AS[$p]:-}" ]]; then
 		cells+=("unknown (see notes)")
 	elif [[ -n "${st}${om}" ]]; then
 		cells+=("same (see notes)")
@@ -1016,11 +1069,11 @@ fi
 # Each pass's istiod settings (ISTIOD_ENV_BY_CONTEXT, which a profile changes on purpose): one
 # digest, so the table shows that a profile reached istiod and a re-run's pass can be matched to
 # this one's. A pass whose members ran different settings, or whose TSVs (or the read again at its
-# end: tuning 003's platform_drift_check) disagree, warns: the profile may have reached some of them,
-# or part of the pass, only; so do one whose settings could not be read on a member (not known,
-# never other settings), one whose istiod pods ran different settings at once (a rollout caught
-# midway), and a profile pass whose settings contradict its profile against the baseline's
-# (env_against_base). And its tuning profile objects (platform_tuning_objects_check):
+# end: tuning 003's platform_drift_check) disagree, warns: the profile may have reached some of
+# them, or part of the pass, only; so do one whose settings could not be read on a member (not
+# known, never other settings), one whose istiod pods ran different settings at once (a rollout
+# caught midway), and a profile pass whose settings contradict its profile against the
+# baseline's (env_against_base). And its tuning profile objects (platform_tuning_objects_check):
 # a profile pass measures with its own, every one on every member (its marker, which 001 puts there
 # before any change, and its resources: the pass's state/objects); another profile's, or any in the
 # baseline, are a profile left applied (a run stopped before its revert, or objects applied by
@@ -1246,8 +1299,9 @@ drop_keys() {
 # unknown (plat_all_unknown): its notes say so in their heading and leave the record's keys out.
 rec_unknown() { [[ -n "${PLAT[$1]:-}" ]] && plat_all_unknown "$1"; }
 # plat_head <pass> [notes]: the heading of a pass's notes after the table (the keys it differs on,
-# whose profile's value was not in effect or is not known to be, that changed during it, that its
-# TSVs disagree on, that cannot be compared, that the read at its end could not compare); for a
+# whose profile's value was not in effect or is not known to be, whose count its profile's HPA
+# sets, that changed during it, that its TSVs disagree on, that cannot be compared, that the read
+# at its end could not compare); for a
 # pass whose every value of its platform record is unknown, that first, then only what is not its
 # record (nor its Kubernetes versions, when they are not known either), or one sentence without
 # [notes].
@@ -1265,7 +1319,7 @@ plat_head() {
 	fi
 	while IFS=$'\t' read -r k _; do [[ -z "$k" ]] || nek+="${nek:+, }${k}"; done <<<"${PLAT_NE[$1]:-}"
 	while IFS=$'\t' read -r k _; do [[ -z "$k" ]] || nrk+="${nrk:+, }${k}"; done <<<"${PLAT_NR[$1]:-}"
-	echo "${hd}$([[ -z "${PLAT_DTXT[$1]:-}" ]] || echo ", differs on ${PLAT_DTXT[$1]}")$([[ -z "$nek" ]] || echo ", its profile's value not in effect on ${nek}")$([[ -z "$nrk" ]] || echo ", its profile's value not known to be in effect on ${nrk}")$([[ -z "${PLAT_CHG[$1]:-}" ]] || echo ", changed during the pass on ${PLAT_CHG[$1]}")$([[ -z "${PLAT_MIX[$1]:-}" ]] || echo ", its TSVs disagree on ${PLAT_MIX[$1]}")$([[ -z "$ut" ]] || echo ", cannot be compared on ${ut}")$([[ -z "$nc" ]] || echo ", not compared at its end on ${nc}")$([[ -z "$nd" ]] || echo ", not read again at its end"):"
+	echo "${hd}$([[ -z "${PLAT_DTXT[$1]:-}" ]] || echo ", differs on ${PLAT_DTXT[$1]}")$([[ -z "$nek" ]] || echo ", its profile's value not in effect on ${nek}")$([[ -z "$nrk" ]] || echo ", its profile's value not known to be in effect on ${nrk}")$([[ -z "${PLAT_AS[$1]:-}" ]] || echo ", not known all through the pass on ISTIOD_REPLICAS_BY_CONTEXT (set by its profile's HPA)")$([[ -z "${PLAT_CHG[$1]:-}" ]] || echo ", changed during the pass on ${PLAT_CHG[$1]}")$([[ -z "${PLAT_MIX[$1]:-}" ]] || echo ", its TSVs disagree on ${PLAT_MIX[$1]}")$([[ -z "$ut" ]] || echo ", cannot be compared on ${ut}")$([[ -z "$nc" ]] || echo ", not compared at its end on ${nc}")$([[ -z "$nd" ]] || echo ", not read again at its end"):"
 }
 # pass_heading <pass> <notes>: the line over a pass's notes after the table; return 1 for a pass
 # without notes, unless every value of its platform record is unknown (one line says so).
@@ -1274,7 +1328,7 @@ pass_heading() {
 		plat_head "$1" "$2"
 	elif [[ -z "$2" ]]; then
 		return 1
-	elif [[ -n "${PLAT_DIFF[$1]:-}${PLAT_NE[$1]:-}${PLAT_NR[$1]:-}${PLAT_UNK[$1]:-}${PLAT_CHG[$1]:-}${PLAT_MIX[$1]:-}${PLAT_NC[$1]:-}${NODRIFT[$1]:-}" ]]; then
+	elif [[ -n "${PLAT_DIFF[$1]:-}${PLAT_NE[$1]:-}${PLAT_NR[$1]:-}${PLAT_AS[$1]:-}${PLAT_UNK[$1]:-}${PLAT_CHG[$1]:-}${PLAT_MIX[$1]:-}${PLAT_NC[$1]:-}${NODRIFT[$1]:-}" ]]; then
 		plat_head "$1"
 	else
 		echo "Pass ${1}:"
@@ -1283,7 +1337,8 @@ pass_heading() {
 # pass_notes <pass>: its notes after the table, "KEY<TAB>label<TAB>text<TAB>1 when the text is a
 # value (markdown quotes it)": the keys it differs on, its TSVs disagree on and it cannot be
 # compared on (plat_lines), what its profile sets that differs, what its profile sets that a
-# member did not run or that its TSVs do not record on a member, what it ran where the reference
+# member did not run or that its TSVs do not record on a member, the replica count its profile's
+# HPA sets (PLAT_AS), what it ran where the reference
 # pass ran more than one value, what changed during it, what the read at its end could not
 # compare, then its istiod settings and tuning objects; for a pass whose every value of its
 # platform record is unknown, none of the record's keys, nor its Kubernetes versions when they
@@ -1315,6 +1370,8 @@ pass_notes() {
 	while IFS=$'\t' read -r k what who; do
 		[[ -z "$k" ]] || printf "%s\tthe profile's %s not known to be in effect\t%s\t\n" "$k" "$what" "$who"
 	done <<<"${PLAT_NR[$1]:-}"
+	[[ -z "${PLAT_AS[$1]:-}" ]] ||
+		printf "ISTIOD_REPLICAS_BY_CONTEXT\tset by its profile's HPA (spec.values.pilot.autoscaleEnabled in its state/patch.json)\t%s, so whether that count held all through the pass is not known\t\n" "${PLAT_AS[$1]}"
 	while IFS=$'\t' read -r k what; do
 		[[ -z "$k" ]] || printf '%s\twhere the %s ran more than one value, one of those\t%s\t1\n' "$k" "$REF_NAME" "$what"
 	done <<<"${PLAT_OM[$1]:-}"

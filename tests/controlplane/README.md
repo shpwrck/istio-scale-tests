@@ -176,10 +176,10 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
   `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`, plus `ISTIOD_DIAG_*`,
   `TEST_PLATFORM` (the members' platform), `PLATFORM_READ_TIMEOUT` (each read of the platform
-  record) and `PLATFORM_READ_PARALLEL` (members read at once), which every suite takes. A step ignores the keys it
-  does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
-  `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run) and
-  the version pins. Any other key, or any bad line, rejects the whole file before anything
+  record) and `PLATFORM_READ_PARALLEL` (members read at once), which every suite takes. A step
+  ignores the keys it does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005`
+  deletes it), `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per
+  run) and the version pins. Any other key, or any bad line, rejects the whole file before anything
   runs, with `file:line` and the reason.
 - **Precedence:** flag > `--config` > environment > default. The file loads before
   `options.env`, so the defaults derived there follow it: a config
@@ -223,7 +223,7 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   `TUNING_OBJECTS_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)), read before the
   first window (a sweep reads it once and hands it to its combos in `platform-record.txt` in the
   sweep dir, and reads it again after its last combo: a build, istiod setting, limit or replica
-  count, tuning lever, tuning profile object or Kubernetes version that changed in between is written to
+  count, tuning lever, tuning profile object or Kubernetes version that changed in between is in
   `platform-drift.txt` there, as is what that read could not compare; `002 --phase final` reuses
   the baseline phase's). An image carries the digest its pods run; `@unknown` when none has started
   (an operator scaled to 0, a Pending replica), which every comparison takes as not read (a
