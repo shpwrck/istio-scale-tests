@@ -1138,7 +1138,7 @@ if [[ -n "$RESUME_DIR" ]]; then
 	elif [[ -z "$_resume_cfg" && -f "$_resume_snapshot" ]]; then
 		_resume_with_cfg=1
 		_resume_cfg="$(basename "$_resume_snapshot")"
-		_resume_sha="$(_config_sha256 "$_resume_snapshot")"
+		_resume_sha="$(file_sha256 "$_resume_snapshot")"
 	fi
 	_resume_hint=""
 	if [[ -f "$_resume_snapshot" ]]; then
@@ -1526,8 +1526,8 @@ leftover_preflight() {
 	local c kv total disc out="" bad=""
 	for c in "${CONTEXTS[@]:0:${MAX_MESH_SIZE}}"; do
 		kv="$(growth_test_ns_counts "$c" "${KUBECTL[@]}")"
-		total="$(_growth_kv total "$kv")"
-		disc="$(_growth_kv discovered "$kv")"
+		total="$(kv_value total "$kv")"
+		disc="$(kv_value discovered "$kv")"
 		out="${out:+${out},}${c}=${total}/${disc}"
 		if [[ "$disc" =~ ^[0-9]+$ ]] && ((disc > 0)); then
 			bad="${bad:+${bad}; }${c}: ${disc} discovered"
@@ -1550,7 +1550,7 @@ leftover_counts() {
 	local -a lc_pids=()
 	mkdir -p "$dir" 2>/dev/null || true
 	for ctx in "$@"; do
-		(_growth_kv total "$(growth_test_ns_counts "$ctx" "${KUBECTL[@]}")" > "${dir}/${i}" 2>/dev/null) &
+		(kv_value total "$(growth_test_ns_counts "$ctx" "${KUBECTL[@]}")" > "${dir}/${i}" 2>/dev/null) &
 		lc_pids+=("$!")
 		i=$((i + 1))
 	done
@@ -2708,8 +2708,8 @@ guard_sample_ctx() {
 	while IFS=$'\t' read -r pod plim kind; do
 		[[ -n "$pod" ]] || continue
 		kv="$(growth_envoy_stats "$ctx" istio-system "$pod" "${KUBECTL[@]}")"
-		mem="$(_growth_kv mem_mi "$kv")"
-		phy="$(_growth_kv physical_mi "$kv")"
+		mem="$(kv_value mem_mi "$kv")"
+		phy="$(kv_value physical_mi "$kv")"
 		ws="${wsm[$pod]:-}"
 		if [[ "$ws" =~ ^[0-9]+$ ]]; then metric=ws; val="$ws"
 		elif [[ "$phy" =~ ^[0-9]+$ ]]; then metric=physical; val="$phy"
@@ -3071,8 +3071,8 @@ g_series_start_count() {
 	local c kv total disc st
 	for c in "${CONTEXTS[@]:0:$G_MS}"; do
 		kv="$(growth_test_ns_counts "$c" "${KUBECTL[@]}")"
-		total="$(_growth_kv total "$kv")"
-		disc="$(_growth_kv discovered "$kv")"
+		total="$(kv_value total "$kv")"
+		disc="$(kv_value discovered "$kv")"
 		st=OK
 		[[ "$total" =~ ^[0-9]+$ ]] && ((total > LEFTOVER_NS_WARN)) && st=LEFTOVER
 		echo "Series ${G_SID} start: ${c} holds ${total} controlplane-test namespace(s) from earlier series or runs (${disc} discovered)"

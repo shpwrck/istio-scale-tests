@@ -12,7 +12,7 @@ bats_require_minimum_version 1.5.0
 load test_helper
 source "${ROOT}/tests/lib/platform.sh"
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
-source "${ROOT}/tests/lib/config.sh"  # _config_sha256 (platform_probe's istiod env digest)
+source "${ROOT}/tests/lib/config.sh"  # config_allowed_keys (the keys --config can set)
 # What platform_resume_check reads with a source context, and platform_drift_check again.
 source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state, probe_kube_versions, infra_preamble_lines
 source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits, cap_node_totals
@@ -480,7 +480,7 @@ probe_setup() {
 # lines without CLUSTER_ID, as one JSON array line): the first 12 hex digits of its sha256.
 env_digest() {
 	printf '%s\n' "$1" > "${BATS_TEST_TMPDIR}/env-list.txt"
-	_config_sha256 "${BATS_TEST_TMPDIR}/env-list.txt" | cut -c1-12
+	file_sha256 "${BATS_TEST_TMPDIR}/env-list.txt" | cut -c1-12
 }
 # The stub istiod's env: PILOT_PUSH_THROTTLE (100 unless PROBE_ISTIOD_THROTTLE) and POD_NAME from
 # a fieldRef (its keys sorted), CLUSTER_ID left out.
@@ -681,14 +681,9 @@ env_list() {
 	probe_setup
 	PROBE_ISTIOD_PODS=env-rollout platform_probe member-a 2>/dev/null
 	[ "$(platform_member_value member-a istiod_env)" = "$(printf '%s\n' "$d100" "$d50" | LC_ALL=C sort | paste -sd + -)" ]
-	# platform_probe needs the sha256 helper (tests/lib/config.sh) before it reads anything.
-	run bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/platform.sh"; source "$1/tests/lib/reach.sh"
-		KUBECTL=(false); DRY_RUN=0; platform_probe member-a' _ "$ROOT"
-	assert_failure
-	assert_output --partial "platform_probe needs _config_sha256 (source tests/lib/config.sh)"
 	# Without a working sha256 tool: unknown, with a warning.
 	probe_setup
-	_config_sha256() { echo unknown; }
+	file_sha256() { echo unknown; }
 	platform_probe member-a 2>"$WARN"
 	[ "$(platform_member_value member-a istiod_env)" = unknown ]
 	grep -q "member-a: could not read istiod's settings (its discovery container env); recorded as unknown: the reply did not parse, or no sha256 tool" "$WARN"
@@ -1436,13 +1431,12 @@ first_step_line() {
 	grep -q 'platform_drift_unread ' "$f" || { echo "${f}: no platform_drift_unread"; false; }
 }
 
-@test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh and config.sh (address masking, the istiod env digest)" {
+@test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh (address masking)" {
 	local f seen=""
 	for f in "$ROOT"/tests/*/0*.sh; do
 		grep -qE '(^[[:space:]]*|(\|\||&&)[[:space:]]*)(platform_probe|platform_drift_check) ' "$f" || continue
 		seen+=" ${f#"${ROOT}/tests/"}"
 		grep -q 'source "${ROOT}/tests/lib/reach.sh"' "$f" || { echo "${f}: calls platform_probe or platform_drift_check without reach.sh"; false; }
-		grep -q 'source "${ROOT}/tests/lib/config.sh"' "$f" || { echo "${f}: calls platform_probe or platform_drift_check without config.sh"; false; }
 	done
 	# A call after || counts: controlplane 001 and 005 read the record for a new ns-lifecycle TSV (H3).
 	[[ "$seen " == *" controlplane/001-setup-controlplane-test.sh "* && "$seen " == *" controlplane/005-cleanup.sh "* ]] || { echo "callers:${seen}"; false; }
@@ -1544,10 +1538,10 @@ resume_tsv() {
 		echo "# Control-plane resource metrics"
 		{
 			echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
-			echo "# NODE_ALLOC_CPU_M=$(_platform_kv "$nt" cpu_m)"
-			echo "# NODE_ALLOC_MEM_MI=$(_platform_kv "$nt" mem_mi)"
-			echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-			echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+			echo "# NODE_ALLOC_CPU_M=$(kv_value cpu_m "$nt")"
+			echo "# NODE_ALLOC_MEM_MI=$(kv_value mem_mi "$nt")"
+			echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+			echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 			platform_preamble_lines member-a,member-b
 			tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
 			# shellcheck disable=SC2046  # the infra block's KEY=value words
@@ -1997,7 +1991,7 @@ drift_unsourced() (
 	KUBECTL=()
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	[[ "$stderr" == *"warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh), _config_sha256 (tests/lib/config.sh) and KUBECTL; not checked"* ]]
+	[[ "$stderr" == *"warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh) and KUBECTL; not checked"* ]]
 	[ ! -s "$CALLS" ]
 	[ ! -e "${dir}/platform-drift.txt" ]
 }
@@ -2109,8 +2103,8 @@ drift_unsourced() (
 	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
 	{
 		platform_preamble_lines member-a,member-b
-		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 		printf 'timestamp\tcontext\n'
 	} > "${dir}/controlplane-r.tsv"
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
@@ -2169,8 +2163,8 @@ drift_unsourced() (
 	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
 	{
 		platform_preamble_lines member-a,member-b
-		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 		echo "# ISTIOD_REPLICAS=1"
 		echo "# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=1"
 		printf 'timestamp\tcontext\n'
@@ -2267,8 +2261,8 @@ drift_unsourced() (
 	platform_probe member-a,lab~b 2>/dev/null
 	{
 		platform_preamble_lines member-a,lab~b
-		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 		echo "# ISTIOD_REPLICAS=1"
 		echo "# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,lab~b=1"
 		printf 'timestamp\tcontext\n'
@@ -2304,8 +2298,8 @@ drift_unsourced() (
 	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
 	{
 		platform_preamble_lines member-a,member-b,member-c
-		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 		printf 'timestamp\tcontext\n'
 	} > "${dir}/controlplane-r.tsv"
 	# member-b's memory limit is half the source member's (a hand edit on that member only).
@@ -2343,8 +2337,8 @@ drift_unsourced() (
 		platform_preamble_lines member-a,member-b
 		tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
 		echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
-		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 		printf 'timestamp\tcontext\n'
 	} > "${dir}/controlplane-r.tsv"
 	run --separate-stderr drift_unsourced tuning_baseline_state,cap_istiod_limits,probe_kube_versions "$dir" member-a,member-b
@@ -2376,8 +2370,8 @@ drift_unsourced() (
 		platform_preamble_lines member-a,member-b
 		tuning_baseline_state member-a "${KUBECTL[@]}" | sed 's/^/# /'
 		echo "# KUBE_VERSIONS=$(probe_kube_versions member-a,member-b "${KUBECTL[@]}")"
-		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
-		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_CPU_LIMIT_M=$(kv_value cpu_m "$lim")"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(kv_value mem_mi "$lim")"
 		printf 'timestamp\tcontext\n'
 	} > "${dir}/controlplane-r.tsv"
 	: > "$CALLS"

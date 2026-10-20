@@ -162,19 +162,6 @@ config_allowed_keys() {
 	} | LC_ALL=C sort -u
 }
 
-# _config_sha256 <file>: hex sha256, or unknown when no hashing tool works.
-# shellcheck disable=SC2329
-_config_sha256() {
-	local out=""
-	if command -v sha256sum >/dev/null 2>&1; then
-		out="$(sha256sum < "$1" 2>/dev/null)" || out=""
-	elif command -v shasum >/dev/null 2>&1; then
-		out="$(shasum -a 256 < "$1" 2>/dev/null)" || out=""
-	fi
-	out="${out%% *}"
-	if [[ "$out" =~ ^[0-9a-f]{64}$ ]]; then echo "$out"; else echo unknown; fi
-}
-
 # _config_display_path <file>: repo-relative path inside ROOT, else the basename. Characters
 # outside [A-Za-z0-9_.,:/@%+=-] become _ so the value is safe in every report format.
 # shellcheck disable=SC2329
@@ -288,7 +275,7 @@ load_config() {
 	# Valid: apply every key, then the provenance.
 	local display sha abs i v note
 	display="$(_config_display_path "$file")"
-	sha="$(_config_sha256 "$file")"
+	sha="$(file_sha256 "$file")"
 	abs="$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")"
 	for i in "${!cfg_keys[@]}"; do
 		k="${cfg_keys[i]}"

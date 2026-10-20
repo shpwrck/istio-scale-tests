@@ -24,8 +24,6 @@ trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/lib/config.sh"  # _config_sha256 (platform_probe: the istiod env digest)
-# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe: masked addresses)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits (platform_drift_check: istiod's limits)

@@ -113,15 +113,15 @@
 # Requires KUBECTL (resolve_kubectl) and TEST_PLATFORM (config/options.env: auto,
 # kubernetes or openshift; read at call time). With DRY_RUN=1 and TEST_PLATFORM=auto no
 # cluster is asked and the Kubernetes defaults render, so a dry-run stays offline; set
-# TEST_PLATFORM=openshift to preview the OpenShift render. Needs split_csv and die
-# (tests/lib/common.sh); platform_probe and platform_drift_check need reach_sanitize
-# (tests/lib/reach.sh: their warnings mask addresses) and _config_sha256 (tests/lib/config.sh:
-# the istiod env digest); platform_resume_check with a source context tuning_baseline_state and
-# probe_kube_versions (tests/lib/preamble.sh), cap_istiod_limits and cap_node_totals
-# (tests/lib/capacity.sh) and env_collect_infra (tests/lib/envelope.sh); platform_drift_check
-# reads the levers and Kubernetes versions again with preamble.sh's, and istiod's limits and
-# replica counts with capacity.sh's cap_istiod_limits (without one, a warning, and the values it
-# reads are listed as not compared at the end).
+# TEST_PLATFORM=openshift to preview the OpenShift render. Needs split_csv, die, kv_value and
+# file_sha256 (tests/lib/common.sh); platform_probe and platform_drift_check need reach_sanitize
+# (tests/lib/reach.sh: their warnings mask addresses); platform_resume_check with a source
+# context tuning_baseline_state and probe_kube_versions (tests/lib/preamble.sh),
+# cap_istiod_limits and cap_node_totals (tests/lib/capacity.sh) and env_collect_infra
+# (tests/lib/envelope.sh); platform_drift_check reads the levers and Kubernetes versions again
+# with preamble.sh's, and istiod's limits and replica counts with capacity.sh's
+# cap_istiod_limits (without one, a warning, and the values it reads are listed as not compared
+# at the end).
 #
 # The platform record (PL2, PL36, PL39, PL41): what each member ran, read live and once per
 # run, before any measurement window, into every TSV preamble and every report format (PL19).
@@ -450,7 +450,7 @@ _platform_timeout_hint() {
 # pod list the probe read: per istiod pod (app=istiod; the pods whose discovery container started,
 # those not terminated first, as for its image), the discovery container's env as sorted
 # name=value lines (a valueFrom as name= plus its JSON, keys sorted; neither: name=), without
-# CLUSTER_ID; the first 12 hex digits of each distinct list's sha256 (_config_sha256), sorted and
+# CLUSTER_ID; the first 12 hex digits of each distinct list's sha256 (file_sha256), sorted and
 # "+"-joined (two during a rollout). none without an istiod pod; unknown when the list does not
 # parse or no sha256 tool works.
 # shellcheck disable=SC2329
@@ -481,7 +481,7 @@ _platform_env_digest() {
 	while IFS= read -r line; do
 		i=$((i + 1))
 		printf '%s\n' "$line" >"${w}/env.${i}"
-		d="$(_config_sha256 "${w}/env.${i}")"
+		d="$(file_sha256 "${w}/env.${i}")"
 		if [[ "$d" == unknown ]]; then
 			echo unknown
 			return 0
@@ -816,7 +816,6 @@ platform_probe() {
 	# Checked before the dry-run returns, though the probes (dataplane 002, controlplane 002) exit
 	# their dry-run before they call this: platform.bats's static test is what checks every caller.
 	declare -F reach_sanitize >/dev/null || die "platform_probe needs reach_sanitize (source tests/lib/reach.sh)"
-	declare -F _config_sha256 >/dev/null || die "platform_probe needs _config_sha256 (source tests/lib/config.sh)"
 	split_csv "$1" ctxs
 	PLATFORM_PROBE_LAST="$(IFS=,; echo "${ctxs[*]}")"
 	_platform_index
@@ -2240,7 +2239,7 @@ _platform_limit_figure() {
 _platform_limits_member() {
 	local lim
 	lim="$(cap_istiod_limits "$1" "${KUBECTL[@]}")"
-	[[ "$(_platform_kv "$lim" cpu_m)" != unknown && "$(_platform_kv "$lim" mem_mi)" != unknown ]] ||
+	[[ "$(kv_value cpu_m "$lim")" != unknown && "$(kv_value mem_mi "$lim")" != unknown ]] ||
 		lim="$(cap_istiod_limits "$1" "${KUBECTL[@]}")"
 	printf '%s\n' "$lim"
 }
@@ -2917,20 +2916,6 @@ _platform_unread_why() {
 	printf '%s\n' "$why"
 }
 
-# _platform_kv <tokens> <key>: the value of <key>=... among space-separated tokens (cap_* and
-# env_collect_infra output); unknown without one.
-# shellcheck disable=SC2329
-_platform_kv() {
-	local t
-	for t in $1; do
-		if [[ "$t" == "${2}="* ]]; then
-			printf '%s\n' "${t#*=}"
-			return 0
-		fi
-	done
-	echo unknown
-}
-
 # platform_resume_check <tsv> <ctxs_csv> [<source_ctx>]: before --resume appends rows to <tsv>,
 # whose preamble keeps what the sweep recorded at its start, compare that with what these members
 # have now: each member's record (PLATFORM_ROW_KEYS; platform_probe just read it). With
@@ -3095,7 +3080,7 @@ platform_resume_check() {
 		lim="$(cap_istiod_limits "$tctx" "${KUBECTL[@]}")"
 		for key in ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
 			o="$(_platform_preamble_value "$tsv" "$key")" || o=""
-			if [[ "$key" == ISTIOD_CPU_LIMIT_M ]]; then n="$(_platform_kv "$lim" cpu_m)"; else n="$(_platform_kv "$lim" mem_mi)"; fi
+			if [[ "$key" == ISTIOD_CPU_LIMIT_M ]]; then n="$(kv_value cpu_m "$lim")"; else n="$(kv_value mem_mi "$lim")"; fi
 			if [[ -z "$o" || "$o" == unknown || "$n" == unknown ]]; then
 				unr+="${_pl_tn}"$'\t'"$(_platform_unread_why "$tsv" "$key" "$o" "$n")"$'\t'"${key}"$'\n'
 			elif [[ "$o" != "$n" ]]; then
@@ -3110,10 +3095,10 @@ platform_resume_check() {
 		for key in NODE_ALLOC_CPU_M NODE_ALLOC_MEM_MI ISTIOD_REQ_CPU_M ISTIOD_REQ_MEM_MI ISTIOD_LIM_CPU_M ISTIOD_LIM_MEM_MI NETWORK_TOPOLOGY; do
 			o="$(_platform_preamble_value "$tsv" "$key")" || continue
 			case "$key" in
-			NODE_ALLOC_CPU_M) n="$(_platform_kv "$nt" cpu_m)" note="a cluster autoscaler moves it; each row's node figures are its own reads" ;;
-			NODE_ALLOC_MEM_MI) n="$(_platform_kv "$nt" mem_mi)" note="a cluster autoscaler moves it; each row's node figures are its own reads" ;;
-			NETWORK_TOPOLOGY) n="$(_platform_kv "$infra" "$key")" note="the report labels every row with the recorded one" ;;
-			*) n="$(_platform_kv "$infra" "$key")" note="the report shows the recorded value; its istiod limit figures use ISTIOD_CPU_LIMIT_M and ISTIOD_MEM_LIMIT_MI" ;;
+			NODE_ALLOC_CPU_M) n="$(kv_value cpu_m "$nt")" note="a cluster autoscaler moves it; each row's node figures are its own reads" ;;
+			NODE_ALLOC_MEM_MI) n="$(kv_value mem_mi "$nt")" note="a cluster autoscaler moves it; each row's node figures are its own reads" ;;
+			NETWORK_TOPOLOGY) n="$(kv_value "$key" "$infra")" note="the report labels every row with the recorded one" ;;
+			*) n="$(kv_value "$key" "$infra")" note="the report shows the recorded value; its istiod limit figures use ISTIOD_CPU_LIMIT_M and ISTIOD_MEM_LIMIT_MI" ;;
 			esac
 			if [[ "$o" == unknown || "$n" == unknown ]]; then
 				line="$(_platform_unread_why "$tsv" "$key" "$o" "$n")"
@@ -3133,7 +3118,7 @@ platform_resume_check() {
 			_pl_rko=() _pl_rkn=()
 			IFS=',' read -r -a _pl_p <<<"$o"
 			for line in ${_pl_p[@]+"${_pl_p[@]}"}; do [[ "$line" != *=* ]] || _pl_rko[${line%%=*}]="${line#*=}"; done
-			IFS=',' read -r -a _pl_p <<<"$(_platform_kv "$infra" ISTIOD_REPLICAS_BY_CONTEXT)"
+			IFS=',' read -r -a _pl_p <<<"$(kv_value ISTIOD_REPLICAS_BY_CONTEXT "$infra")"
 			for line in ${_pl_p[@]+"${_pl_p[@]}"}; do [[ "$line" != *=* ]] || _pl_rkn[${line%%=*}]="${line#*=}"; done
 			for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
 				[[ -n "${_pl_rko[$c]+x}" ]] || continue
@@ -3235,8 +3220,8 @@ platform_drift_check() {
 	[[ "$run" != pass ]] || said="which tuning 004 reads for this pass"
 	split_csv "$_pl_ctxs" _pl_c
 	((${#_pl_c[@]})) || return 0
-	if ! declare -F reach_sanitize >/dev/null || ! declare -F _config_sha256 >/dev/null || [[ -z "${KUBECTL[*]:-}" ]]; then
-		echo "warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh), _config_sha256 (tests/lib/config.sh) and KUBECTL; not checked, so the reports cannot tell whether a build changed during the ${run}" >&2
+	if ! declare -F reach_sanitize >/dev/null || [[ -z "${KUBECTL[*]:-}" ]]; then
+		echo "warning: platform_drift_check needs reach_sanitize (source tests/lib/reach.sh) and KUBECTL; not checked, so the reports cannot tell whether a build changed during the ${run}" >&2
 		return 0
 	fi
 	start="$(_platform_rows_of "$_pl_ctxs")"
@@ -3416,7 +3401,7 @@ platform_drift_check() {
 				c="$(_platform_sanitize "$m")"
 				dif=0 lv=""
 				for k in ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
-					if [[ "$k" == ISTIOD_CPU_LIMIT_M ]]; then n="$(_platform_kv "$lim" cpu_m)"; else n="$(_platform_kv "$lim" mem_mi)"; fi
+					if [[ "$k" == ISTIOD_CPU_LIMIT_M ]]; then n="$(kv_value cpu_m "$lim")"; else n="$(kv_value mem_mi "$lim")"; fi
 					[[ -n "$n" ]] || n=unknown
 					lv+="${lv:+/}${n}"
 					[[ -n "${_pl_lim_start[$k]+x}" ]] || continue
@@ -3437,7 +3422,7 @@ platform_drift_check() {
 					fi
 				done
 				if [[ -n "${_pl_rep_tb[$c]+x}" ]]; then
-					n="$(_platform_kv "$lim" replicas)"
+					n="$(kv_value replicas "$lim")"
 					[[ -n "$n" ]] || n=unknown
 					if [[ "$n" == unknown || -z "${_pl_rep_tb[$c]}" ]]; then
 						[[ -n "${_pl_unk[$c]+x}" ]] || _pl_uo+=("$c")

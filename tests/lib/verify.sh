@@ -73,6 +73,8 @@ EXTRACTED_PATTERNS=(
 	'ctx_file_safe() {'
 	'is_pos_int() {'
 	'is_nonneg_int() {'
+	'file_sha256() {'
+	'kv_value() {'
 	'validate_scoping() {'
 	'_detect_now_ns() {'
 	'now_ns() {'

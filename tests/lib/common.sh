@@ -103,6 +103,10 @@
 #                                        (\ " and control characters), for frontmatter
 #   file_min_bytes <file> <n>         -> true when <file> holds at least <n> bytes; forks
 #                                        nothing when it does
+#   file_sha256 <file>                -> the file's hex sha256, or unknown when no tool
+#                                        (sha256sum, shasum) works
+#   kv_value <key> <tokens>           -> the value of <key>=... among "k=v k=v" tokens, or
+#                                        unknown
 #
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -2656,4 +2660,38 @@ file_min_bytes() {
 	sz=$(wc -c < "$f" 2>/dev/null || echo 0)
 	sz="${sz//[^0-9]/}"
 	((${sz:-0} >= n))
+}
+
+# --- sha256 and key=value tokens ---
+
+# file_sha256 <file>: the file's hex sha256 (a --config file's RUN_CONFIG_SHA256, the platform
+# record's istiod env digest, a resume's run config), or unknown when no hashing tool
+# (sha256sum, shasum) works.
+# shellcheck disable=SC2329
+file_sha256() {
+	local out=""
+	if command -v sha256sum >/dev/null 2>&1; then
+		out="$(sha256sum < "$1" 2>/dev/null)" || out=""
+	elif command -v shasum >/dev/null 2>&1; then
+		out="$(shasum -a 256 < "$1" 2>/dev/null)" || out=""
+	fi
+	out="${out%% *}"
+	if [[ "$out" =~ ^[0-9a-f]{64}$ ]]; then echo "$out"; else echo unknown; fi
+}
+
+# kv_value <key> <tokens>: the value of <key>=... among whitespace-separated "k=v" tokens (what
+# cap_istiod_limits, cap_node_totals, env_collect_infra and the growth probes print), or
+# unknown without one. The tokens are split without pathname expansion.
+# shellcheck disable=SC2329
+kv_value() {
+	local _kv_t
+	local -a _kv_toks=()
+	read -r -d '' -a _kv_toks <<<"$2" || true
+	for _kv_t in ${_kv_toks[@]+"${_kv_toks[@]}"}; do
+		if [[ "$_kv_t" == "${1}="* ]]; then
+			printf '%s\n' "${_kv_t#"${1}="}"
+			return 0
+		fi
+	done
+	echo unknown
 }
