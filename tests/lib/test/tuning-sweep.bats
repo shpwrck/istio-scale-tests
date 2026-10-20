@@ -68,7 +68,7 @@ case "$*" in
 *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*)
 	STUB_ISTIO_CR_GEN="$g" STUB_ISTIO_REV_GEN="$g" exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
 *" patch istio.sailoperator.io default --type=merge --patch-file="*)
-	f="${*##*--patch-file=}"; f="${f%% *}"
+	args="$*"; f="${args##*--patch-file=}"; f="${f%% *}"
 	jq --slurpfile p "$f" 'def mp($q): if ($q | type) == "object" then reduce ($q | keys_unsorted[]) as $k ((if type == "object" then . else {} end); if $q[$k] == null then del(.[$k]) else .[$k] = (.[$k] | mp($q[$k])) end) else $q end; mp($p[0])' "$d/cr.json" > "$d/cr.new" && mv "$d/cr.new" "$d/cr.json"
 	case "$f" in
 	*istio-revert-*) rm -f "$d/applied" ;;

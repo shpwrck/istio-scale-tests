@@ -49,6 +49,8 @@ flowchart TB
   with it (on Linux, `/proc` stands in for a missing or busybox `ps`; a sweep warns at its start
   only when neither works)
 - `python3` with PyYAML (tuning suite only)
+- `awk`: mawk, macOS's own or gawk up to 5.2. gawk 5.3 (Fedora's awk) has a bug the reports would
+  hit, so with it the harness runs mawk and stops when mawk is missing (`dnf install mawk`)
 - Mesh members must be able to provision `type: LoadBalancer` Services (a cloud provider, MetalLB,
   or cloud-provider-kind on kind). Each member is registered at one API server URL (its
   kubeconfig context's server, or `cluster_api_url_overrides`): the hub's pods and every other
