@@ -326,9 +326,10 @@ GROUP=""
 case "$SUITE" in
 controlplane)
 	# Rows are per istiod pod: connected_proxies is per replica; cluster_connected_proxies
-	# repeats on each pod row of a cluster, so its mean weights clusters by replica
-	# count (same replicas everywhere -> the plain per-cluster mean). Absent in older
-	# 40-column TSVs, where it is skipped. istiod_mem_mi is the window's peak RSS and
+	# repeats on each pod row of a cluster scrape, so summarize takes it once per scrape
+	# (file, timestamp, context), and not from a scrape with a row that is not valid, as
+	# the controlplane report does; its n counts scrapes. Absent in older 40-column TSVs,
+	# where it is skipped. istiod_mem_mi is the window's peak RSS and
 	# istiod_cpu_m_delta the larger of the window average and the polled 5 s peak.
 	METRICS=("istiod_mem_mi|istiod memory peak (Mi)|mi" "go_heap_inuse_mi|Go heap in use (Mi)|mi"
 		"istiod_cpu_m_delta|istiod CPU peak (m)|m" "convergence_p99_ms|Convergence p99 worst bucket (ms)|hist"
@@ -358,7 +359,8 @@ for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 
 # One pass -> lines "n<TAB>valid<TAB>total", "w<TAB>columns<TAB>rows" (the data rows'
 # column counts), "g<TAB>group<TAB>rows" (first-seen order; rows counts every row of the
-# group, valid or not) and
+# group, valid or not), "a<TAB>group<TAB>column<TAB>attempted" for a column taken once per
+# cluster scrape (cluster_connected_proxies: its scrapes, valid or not) and
 # "v<TAB>group<TAB>column<TAB>mean<TAB>max<TAB>n_overflow<TAB>min<TAB>n_numeric" for
 # every metric column the TSV has (mean, max and min "-" without a numeric value: a tab
 # IFS would merge empty fields). A group is "col=value, col=value", or "-". "overflow"
@@ -389,8 +391,10 @@ summarize() {
 		return 1
 	}
 	# take(g, c): add the value of column c on this row to group g.
-	function take(g, c,    v, k) {
-		v = $(idx[c]); k = g SUBSEP c
+	function take(g, c) { takev(g, c, $(idx[c])) }
+	# takev(g, c, v): add value v of column c to group g.
+	function takev(g, c, v,    k) {
+		k = g SUBSEP c
 		if (v == "overflow") { ov[k]++; return }
 		if (v ~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) {
 			if (!(k in cnt) || v + 0 > mx[k]) mx[k] = v + 0
@@ -426,6 +430,14 @@ summarize() {
 		if (!(g in seen)) { seen[g] = 1; order[++norder] = g }
 		grows[g]++
 		for (j = 1; j <= nm; j++) if (mc[j] != "" && (mc[j] in idx)) has[g SUBSEP mc[j]] = 1
+		# cluster_connected_proxies repeats on each istiod pod row of a cluster scrape: one
+		# value per scrape (file, timestamp, context), attempted once, and none from a scrape
+		# with a row that is not valid, as the controlplane report takes it.
+		sk = ""
+		if (("cluster_connected_proxies" in idx) && ("timestamp" in idx) && ("context" in idx)) {
+			sk = FILENAME SUBSEP $(idx["timestamp"]) SUBSEP $(idx["context"])
+			if (!(sk in sgrp)) { sgrp[sk] = g; sord[++ns] = sk; satt[g]++ }
+		}
 		if (suite == "propagation") {
 			if (!((g, $1, $3) in iter_seen)) { iter_seen[g, $1, $3] = 1; giters[g]++ }
 			if (!(($1, $3) in dt_seen) && (dt_col("status") || dt_col("p1_status") || dt_col("remote_status"))) {
@@ -444,19 +456,27 @@ summarize() {
 			r = prop_drop_reason(MAXSKEW)
 			if (r != "") next
 		} else {
-			if (("status" in idx) && $(idx["status"]) != "OK") next
-			if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") next
-			if (("restarted" in idx) && $(idx["restarted"]) != "0") next
+			bad = 0
+			if (("status" in idx) && $(idx["status"]) != "OK") bad = 1
+			if (("istiod_restarted" in idx) && $(idx["istiod_restarted"]) != "0") bad = 1
+			if (("restarted" in idx) && $(idx["restarted"]) != "0") bad = 1
+			if (bad) { if (sk != "") sbad[sk] = 1; next }
 		}
 		valid++
 		for (j = 1; j <= nm; j++) {
 			c = mc[j]
 			if (c == "" || !(c in idx)) continue
 			if (suite == "propagation" && !prop_col_sample(c)) continue
+			if (c == "cluster_connected_proxies" && sk != "") { if (!(sk in sval)) sval[sk] = $(idx[c]); continue }
 			take(g, c)
 		}
 	}
 	END {
+		for (i = 1; i <= ns; i++) {
+			sk = sord[i]
+			if (!(sk in sbad) && (sk in sval)) takev(sgrp[sk], "cluster_connected_proxies", sval[sk])
+		}
+		for (gg in satt) printf "a\t%s\tcluster_connected_proxies\t%d\n", gg, satt[gg]
 		printf "n\t%d\t%d\n", valid, total
 		for (w in widths) printf "w\t%s\t%d\n", w, widths[w]
 		for (i = 1; i <= norder; i++) printf "g\t%s\t%d\n", order[i], grows[order[i]]
@@ -611,6 +631,8 @@ for p in "${PASSES[@]}"; do
 		g) GROWS["$p|$a"]="$b"; [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
 		i) GITERS["$p|$a"]="$b" ;;
 		o) P1OV["$p|$a"]="$b" ;;
+		# A column taken once per cluster scrape is attempted once per scrape (metric_n).
+		a) ATT["$p|$a|$b"]="$c" ;;
 		v)
 			VHAS["$p|$a|$b"]=1; VMAX["$p|$a|$b"]="$d"; VOV["$p|$a|$b"]="$e"
 			VMIN["$p|$a|$b"]="$f"; VCNT["$p|$a|$b"]="$h"
@@ -1888,6 +1910,7 @@ render() {
 			echo "- Values are means over the samples the propagation report (005) counts: P1 once per iteration, left out only for a source-side reason (p1_status other than OK or DRAIN_TIMEOUT, a +Inf overflow, a source scrape skew over FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it), P2 and P3 per remote row, left out only for that remote's side (remote_status other than OK or DRAIN_TIMEOUT, its scrape skew over FANOUT_MAX_SKEW_MS; the source's restart, P1 timeout or overflow keeps them); \"(N overflowed)\" in the P1 local push cell counts the iterations its mean leaves out for a +Inf overflow. Profiles show the change against the baseline in brackets."
 		else
 			echo "- Values are means over valid rows (status OK, no istiod restart). Profiles show the change against the baseline in brackets."
+			[[ "$SUITE" != controlplane ]] || echo "- \"Connected proxies / cluster\" is one value per cluster scrape (its n counts scrapes), none from a scrape with an istiod pod row that is not valid, as the controlplane report takes it."
 		fi
 		echo "- The \"Istio CR / IstioRevision generations\" row gives each pass's ISTIO_GENERATIONS from its own TSVs: a profile's apply and revert raise them, so each pass ran on its own (\"(every member)\" when every member has one value). The \"Harness (HARNESS_SHA)\" row gives the harness each pass's TSVs record."
 		[[ "$SUITE" != propagation ]] || echo "- \"Drain timeouts (iterations, counted)\" (shown when a pass has one): iterations whose drain after the window timed out (DRAIN_TIMEOUT). Their values count, as in 005: they were measured before that drain."
@@ -1933,6 +1956,7 @@ render() {
 		[[ -z "$HARNESS_WARNING" ]] || echo "WARNING: ${HARNESS_WARNING}"
 		[[ -z "$HARNESS_NOTE" ]] || echo "Note: ${HARNESS_NOTE}"
 		echo "Means over valid rows; profiles show the change against the baseline."
+		[[ "$SUITE" != controlplane ]] || echo "Connected proxies / cluster: one value per cluster scrape (n counts scrapes), none from a scrape with an istiod pod row that is not valid."
 		echo "Istio CR / IstioRevision generations: each pass's own, from its TSVs (its apply and revert raise them)."
 		echo "Harness (HARNESS_SHA): each pass's own, from its TSVs."
 		[[ "$SUITE" != propagation ]] || echo "Drain timeouts (iterations, counted; shown when a pass has one): their drain after the window timed out (DRAIN_TIMEOUT); measured before it, so they count."

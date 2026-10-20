@@ -1861,3 +1861,46 @@ exit 1
 	[[ "$stderr" == *"cannot read the running Istio version on 1 of 1 members"* ]]
 	[ -s "$STUB_LOG" ]
 }
+
+# cp_cluster_tsv <file> <row>...: a controlplane TSV with timestamp, context, istiod_restarted,
+# istiod_mem_mi, connected_proxies and cluster_connected_proxies (M13-S1).
+cp_cluster_tsv() {
+	local f="$1"
+	shift
+	{
+		printf 'timestamp\tcontext\tistiod_restarted\tistiod_mem_mi\tconnected_proxies\tcluster_connected_proxies\n'
+		printf '%b\n' "$@"
+	} > "$f"
+}
+
+@test "tuning 004 (M13-S1): Connected proxies / cluster takes one value per cluster scrape, not one per istiod pod row" {
+	cp_cluster_tsv "${S}/baseline/controlplane-r1.tsv" 't1\tctx-a\t0\t500\t1000\t1000' 't1\tctx-b\t0\t500\t100\t100' \
+		't2\tctx-a\t0\t500\t1000\t1000' 't2\tctx-b\t0\t500\t100\t100'
+	# 01-x: ctx-a on two istiod replicas (an HPA); no cluster's proxies changed.
+	cp_cluster_tsv "${S}/01-x/controlplane-r2.tsv" 't1\tctx-a\t0\t500\t500\t1000' 't1\tctx-a\t0\t500\t500\t1000' 't1\tctx-b\t0\t500\t100\t100' \
+		't2\tctx-a\t0\t500\t500\t1000' 't2\tctx-a\t0\t500\t500\t1000' 't2\tctx-b\t0\t500\t100\t100'
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Valid / total rows | 4/4 | 6/6 |"
+	assert_output --partial "| Connected proxies / istiod replica | 550 | 366.7 (-33.3%) |"
+	assert_output --partial "| Connected proxies / cluster | 550 | 550 (+0.0%) |"
+	# Its n counts cluster scrapes: four in each pass.
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_output --regexp '\| Connected proxies / cluster \| 550 \| 550 \(\+0\.0%\) \|
+\|   n \(got/attempted\) \| 4/4 \| 4/4 \|
+\|   range \(min to max\) \| 100 to 1000 \| 100 to 1000 \|'
+}
+
+@test "tuning 004 (M13-S1): a cluster scrape with a restarted istiod pod gives Connected proxies / cluster no value, as the controlplane report has it" {
+	cp_cluster_tsv "${S}/baseline/controlplane-r1.tsv" 't1\tctx-a\t0\t500\t500\t1000' 't1\tctx-a\t0\t500\t500\t1000' 't1\tctx-b\t0\t500\t1000\t1000'
+	# 01-x: one of ctx-a's two istiod pods restarted; its sibling's row carries the cluster's sum.
+	cp_cluster_tsv "${S}/01-x/controlplane-r2.tsv" 't1\tctx-a\t1\t500\t20\t520' 't1\tctx-a\t0\t500\t500\t520' 't1\tctx-b\t0\t500\t1000\t1000'
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Valid / total rows | 3/3 | 2/3 |"
+	assert_output --regexp '\| Connected proxies / cluster \| 1000 \| 1000 \(\+0\.0%\) \|
+\|   n \(got/attempted\) \| 2/2 \| 1/2 \(baseline n 2/2\) \|'
+	refute_output --partial "760"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_output --partial "Connected proxies / cluster: one value per cluster scrape"
+}
