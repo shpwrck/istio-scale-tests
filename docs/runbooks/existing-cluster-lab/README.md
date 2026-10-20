@@ -93,7 +93,8 @@ Gateway API multicluster check, on demand. It is read-only apart from the Applic
 istioctl at the mesh's version.
 
 ```bash
-read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application hub-gitops-root \
+read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+  get applications.argoproj.io hub-gitops-root \
   -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
 sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
   -e 's|<workload-cluster>|<member-managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
@@ -170,7 +171,7 @@ script from, set `REV=$(git rev-parse HEAD)` before the `sed`; the 2026-10-14 ru
   `argocd_config_values` requests and re-apply.
   - If an ESO Application is stuck at "Retrying operation. Attempt #1" after an Argo controller
     restart, terminate the operation
-    (`oc patch app <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
+    (`oc patch applications.argoproj.io <name> --type merge -p '{"status":{"operationState":{"phase":"Terminating"}}}'`)
     and auto-sync starts a fresh one.
 - Argo controller OOMKilled in a loop: raise its limit in `argocd_config_values`. It uses about 3Gi
   here even with the default exclusions.

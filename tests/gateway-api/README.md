@@ -183,7 +183,8 @@ missing), and the `istio` GatewayClass, which istiod creates.
    lands in git.
 
    ```bash
-   read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application hub-gitops-root \
+   read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+     get applications.argoproj.io hub-gitops-root \
      -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
    ```
 

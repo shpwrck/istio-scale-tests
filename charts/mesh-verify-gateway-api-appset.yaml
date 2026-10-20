@@ -8,8 +8,9 @@
 #   - <workload-cluster>: the ACM ManagedCluster name of the member that runs the workload
 #     (oc --context <acm-hub-ctx> get managedclusters). Applied as the placeholder, every
 #     member's Application fails to render with a message.
-# Apply:  read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application \
-#           hub-gitops-root -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+# Apply:  read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+#           get applications.argoproj.io hub-gitops-root \
+#           -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
 #         sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
 #           -e 's|<workload-cluster>|<managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
 #           | oc --context <acm-hub-ctx> apply -f -

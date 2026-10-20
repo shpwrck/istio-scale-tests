@@ -79,7 +79,8 @@ way to the hub from the repo and revision the hub already syncs, so the check ru
 as the mesh.
 
 ```bash
-read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops get application hub-gitops-root \
+read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+  get applications.argoproj.io hub-gitops-root \
   -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
 sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" charts/mesh-verify-appset.yaml \
   | oc --context <acm-hub-ctx> apply -f -
