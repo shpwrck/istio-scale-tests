@@ -372,6 +372,13 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	assert_success
 	[[ "$stderr" == *"note: member-001, member-002, member-003, member-004, member-005 and 495 more listed more than once in the contexts; each member is cleaned once"* ]]
 	awk 'length > 300 { bad = 1 } END { exit bad }' <<<"$stderr"
+	# Without a working python3 (a dry-run needs none): every member, by name (C10-B1).
+	mkdir -p "${T}/nopy"
+	printf '#!/bin/sh\nexit 127\n' > "${T}/nopy/python3"
+	chmod +x "${T}/nopy/python3"
+	PATH="${T}/nopy:${PATH}" run --separate-stderr "$CLEANUP" --contexts ci-a,ci-a,ci-b,ci-b --results-dir "${T}/results" --dry-run
+	assert_success
+	[[ "$stderr" == *"note: ci-a, ci-b listed more than once in the contexts; each member is cleaned once"* ]]
 }
 
 @test "ctx_keys_distinct (C8-S1, SC8-S2): a context listed twice, or two with one state file name, dies; 003 refuses either before its sweep, in --dry-run too" {
@@ -468,7 +475,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	jq -n --argjson w "$win" '{metadata: {name: "default", resourceVersion: "10"}, spec: {syncWindows: [$w]}}' >"${STUB_DIR}/project.json"
 	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --status
 	assert_success
-	assert_line "  0: this tool's pause of the Applications above (--resume or --clear removes it)"
+	assert_line "  0: this tool's pause of the Applications above (--resume removes it with its pause record, --clear without one)"
 	refute_output --partial '"applications"'
 	# No window at all: none (U9-N2).
 	jq -n '{metadata: {name: "default", resourceVersion: "11"}, spec: {}}' >"${STUB_DIR}/project.json"
@@ -489,6 +496,11 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --clear --status
 	assert_failure
 	assert_output --partial "use only one of --pause, --resume, --status, --clear"
+	# --resume without its pause record points at --clear, which removes a pause it did not
+	# record (U10-N3).
+	run "${ROOT}/tests/tuning/006-gitops-pause.sh" --gitops-context hub --resume --state-file "${T}/no-pause-record.json"
+	assert_failure
+	assert_output --partial "no pause record at ${T}/no-pause-record.json, so nothing for --resume to remove; a pause of this tool's without its record (--status marks it) is removed with --clear"
 }
 
 @test "005-cleanup (R6): a restore that does not check out, a ConfigMap with no patch, or a list that fails keeps the markers and exits 1" {

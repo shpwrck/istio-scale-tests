@@ -411,7 +411,8 @@ def cmd_windows(project_file, window_file, suffix):
         print("  none")
     for i, w in enumerate(windows):
         if matches(w, window):
-            print(f"  {i}: this tool's pause of the Applications above (--resume or --clear removes it)")
+            print(f"  {i}: this tool's pause of the Applications above (--resume removes it with its pause"
+                  " record, --clear without one)")
         elif shaped(w, suffix):
             print(f"  {i}: a stale pause of this tool's, for other *-{suffix} Applications"
                   f" ({names(sorted(w['applications']))}: from before a member was added or removed),"

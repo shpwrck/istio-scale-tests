@@ -864,7 +864,7 @@ lever_passes() {
 	assert_success
 	assert_output --partial "| Platform record | baseline | unknown (see notes) | unknown (see notes) |"
 	assert_output --partial "- **Warning:** pass 02-x: the read again at its end (its platform-drift.txt) could not compare KUBE_VERSIONS on ctx-b; ISTIOD_IMAGE_BY_CONTEXT on ctx-b (not read at its start or end, or read with a digest @unknown: no pod had started), so whether those values changed during the pass is not known, nor whether its change against the baseline is the profile's alone"
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its record was not read again at its end (no platform-drift.txt in its directory: the run stopped during the pass, or it predates that read), so whether its builds, Kubernetes versions, tuning levers or istiod limits changed during it is not known, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its record was not read again at its end (no platform-drift.txt in its directory: the run stopped during the pass, or it predates that read), so whether its builds, Kubernetes versions, tuning levers, istiod limits or replica counts changed during it is not known, nor whether its change against the baseline is the profile's alone"
 	assert_output --partial "Pass 02-x, not compared at its end on KUBE_VERSIONS, ISTIOD_IMAGE_BY_CONTEXT:"
 	assert_output --partial "- KUBE_VERSIONS, not compared at its end: ctx-b"
 	assert_output --partial "Pass 04-connection-pools, not read again at its end:"
@@ -880,7 +880,7 @@ lever_passes() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline (see notes) | unknown (see notes) | unknown (see notes) |"
-	assert_output --partial "- **Warning:** passes baseline, 04-connection-pools: their records were not read again at their end (no platform-drift.txt in their directories: the runs stopped during them, or they predate that read), so whether their builds, Kubernetes versions, tuning levers or istiod limits changed during them is not known, nor whether any profile's change against the baseline is the profile's alone"
+	assert_output --partial "- **Warning:** passes baseline, 04-connection-pools: their records were not read again at their end (no platform-drift.txt in their directories: the runs stopped during them, or they predate that read), so whether their builds, Kubernetes versions, tuning levers, istiod limits or replica counts changed during them is not known, nor whether any profile's change against the baseline is the profile's alone"
 	[[ "$(grep -c 'not read again at' <<<"$stderr")" == 1 ]]
 	refute_output --partial "pass baseline: its record was not read again"
 }
@@ -933,7 +933,7 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | not in effect (see notes) |"
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), yet ISTIOD_REPLICAS_BY_CONTEXT reads 1 on ctx-b, so the profile's value was not in effect there all through the pass (not rolled out there, or changed during it; or an HPA set the count), and its change against the baseline is not the profile's alone"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), yet ISTIOD_REPLICAS_BY_CONTEXT reads 1 on ctx-b, so the profile's value was not in effect there all through the pass (not rolled out there, changed during it, or set by an HPA), and its change against the baseline is not the profile's alone"
 	assert_output --partial "Pass 04-connection-pools, its profile's value not in effect on ISTIOD_REPLICAS_BY_CONTEXT:"
 	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, the profile's 2 not in effect: \`1 on ctx-b\`"
 	[[ "$stderr" == *"warning: pass 04-connection-pools: its profile sets istiod's replica count to 2"* ]]
@@ -993,8 +993,8 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | not in effect (see notes) |"
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's CPU limit to 4000m (spec.values.pilot.resources.limits.cpu in its state/patch.json), yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 2000 on ctx-b, so the profile's value was not in effect there all through the pass (not rolled out there, or changed during it), and its change against the baseline is not the profile's alone"
-	assert_output --partial "- ISTIOD_CPU_LIMIT_M_BY_CONTEXT, the profile's 4000m not in effect: \`2000 on ctx-b\`"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's CPU limit to 4000m (spec.values.pilot.resources.limits.cpu in its state/patch.json), yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 2000m on ctx-b, so the profile's value was not in effect there all through the pass (not rolled out there, or changed during it), and its change against the baseline is not the profile's alone"
+	assert_output --partial "- ISTIOD_CPU_LIMIT_M_BY_CONTEXT, the profile's 4000m not in effect: \`2000m on ctx-b\`"
 	refute_output --partial "04-connection-pools differs"
 	# On no member: the pass reads the baseline's limit, which the profile's value would change.
 	lever_passes
@@ -1002,14 +1002,14 @@ with_replicas() {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | not in effect (see notes) |"
-	assert_output --partial "yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 2000 on ctx-a, ctx-b, so the profile's value was not in effect there all through the pass"
+	assert_output --partial "yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 2000m on ctx-a, ctx-b, so the profile's value was not in effect there all through the pass"
 	# A third value: not in effect, not another difference from the baseline.
 	lever_passes "" "" "" "" "" "" 3000
 	echo '{"spec":{"values":{"pilot":{"resources":{"limits":{"cpu":"4000m"}}}}}}' > "${S}/04-connection-pools/state/patch.json"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | not in effect (see notes) |"
-	assert_output --partial "yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 3000 on ctx-a, ctx-b"
+	assert_output --partial "yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 3000m on ctx-a, ctx-b"
 	# What was already in place (2000m, the baseline's too): nothing to say.
 	lever_passes
 	echo '{"spec":{"values":{"pilot":{"resources":{"limits":{"cpu":"2","memory":"4Gi"}}}}}}' > "${S}/04-connection-pools/state/patch.json"
@@ -1017,8 +1017,10 @@ with_replicas() {
 	assert_success
 	assert_output --partial "| Platform record | baseline | same | same |"
 	[ -z "$stderr" ]
-	# TSVs that do not record istiod's limits (every suite but controlplane): not known.
+	# TSVs that do not record istiod's limits (every suite but controlplane): not known, in its
+	# cell and notes too (M10-B1).
 	objects_passes
+	sed -i 's/^# SUITE=controlplane$/# SUITE=propagation/' "${S}/sweep-metadata.txt"
 	with_record baseline
 	with_record 02-x "s/=0123456789ab/=fedcba987654/g"
 	with_record 04-connection-pools
@@ -1027,7 +1029,103 @@ with_replicas() {
 	echo '{"spec":{"values":{"pilot":{"resources":{"limits":{"memory":"8Gi"}}}}}}' > "${S}/04-connection-pools/state/patch.json"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
-	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's memory limit to 8192Mi (spec.values.pilot.resources.limits.memory in its state/patch.json), which its TSVs do not record (this suite's do not), so whether that was in effect on every member is not known"
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's memory limit to 8192Mi (spec.values.pilot.resources.limits.memory in its state/patch.json), which its TSVs do not record (only the controlplane suite's TSVs record istiod's limits), so whether it was in effect on any member is not known, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "Pass 04-connection-pools, its profile's value not known to be in effect on ISTIOD_MEM_LIMIT_MI_BY_CONTEXT:"
+	assert_output --partial "- ISTIOD_MEM_LIMIT_MI_BY_CONTEXT, the profile's 8192Mi not known to be in effect: not recorded (only the controlplane suite's TSVs record istiod's limits)"
+	# A controlplane TSV without them: from before the key.
+	sed -i 's/^# SUITE=propagation$/# SUITE=controlplane/' "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	assert_output --partial "which its TSVs do not record (its TSVs predate the key), so whether it was in effect on any member is not known"
+}
+
+@test "tuning 004 (M10-B1): a replica count its profile sets that its TSVs do not record on a member (the churn suites' source member only) is not known there, never in effect; with or without a baseline" {
+	local p
+	lever_passes
+	sed -i 's/^# SUITE=controlplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	for p in baseline 02-x; do with_replicas "$p" 1 ISTIOD_REPLICAS; done
+	with_replicas 04-connection-pools 2 ISTIOD_REPLICAS
+	echo '{"spec":{"values":{"pilot":{"replicaCount":2}}}}' > "${S}/04-connection-pools/state/patch.json"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | unknown (see notes) |"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), which its TSVs do not record on ctx-b (the churn suite's TSVs record the source member's only), so whether it was in effect there is not known, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "Pass 04-connection-pools, its profile's value not known to be in effect on ISTIOD_REPLICAS_BY_CONTEXT:"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, set by its profile (its state/patch.json sets spec.values.pilot.replicaCount): \`2 on ctx-a\`"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, the profile's 2 not known to be in effect: not recorded on ctx-b (the churn suite's TSVs record the source member's only)"
+	[[ "$(grep -c '^warning: ' <<<"$stderr")" == 1 ]]
+	# The source member did not run it either: not in effect there, and still not known on ctx-b.
+	with_replicas 04-connection-pools 1 ISTIOD_REPLICAS
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | same | not in effect (see notes) |"
+	assert_output --partial "yet ISTIOD_REPLICAS_BY_CONTEXT reads 1 on ctx-a, so the profile's value was not in effect there all through the pass (not rolled out there, changed between its TSVs, set by an HPA, or a Terminating pod still counted as Running after a short --settle)"
+	assert_output --partial "which its TSVs do not record on ctx-b (the churn suite's TSVs record the source member's only)"
+	assert_output --partial "Pass 04-connection-pools, its profile's value not in effect on ISTIOD_REPLICAS_BY_CONTEXT, its profile's value not known to be in effect on ISTIOD_REPLICAS_BY_CONTEXT:"
+	# Without a baseline, the reference pass is a profile pass: its own cell says so.
+	mkdir -p "${BATS_TEST_TMPDIR}/gone"
+	mv "${S}/baseline" "${BATS_TEST_TMPDIR}/gone/"
+	printf '# SUITE=churn\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
+	with_replicas 04-connection-pools 2 ISTIOD_REPLICAS
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | reference (see notes) |"
+	assert_output --partial "- **Warning:** pass 04-connection-pools: its profile sets istiod's replica count to 2 (spec.values.pilot.replicaCount in its state/patch.json), which its TSVs do not record on ctx-b (the churn suite's TSVs record the source member's only), so whether it was in effect there is not known, nor whether any pass's difference from it is the profiles' alone"
+	# Every member recorded (propagation's form) and running it: nothing to say.
+	printf '# SUITE=propagation\n# PASSES=04-connection-pools,02-x\n' > "${S}/sweep-metadata.txt"
+	with_replicas 04-connection-pools ctx-a=2,ctx-b=2 ISTIOD_REPLICAS
+	with_replicas 02-x ctx-a=2,ctx-b=2 ISTIOD_REPLICAS
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | reference | same |"
+	refute_output --partial "not known to be in effect"
+}
+
+@test "tuning 004 (C10-S2): at 500 members, what a profile's value was not in effect on, not recorded on, and which of the baseline's values a pass ran each name five members, then how many more" {
+	local ctxs base="" pass="" diff="" kv="" kv2="" i m
+	local -a arr=()
+	ctxs="$(wide_ctxs 500)"
+	PLATFORM_FIXTURE_CTXS="$ctxs" lever_passes "" "" "" "" "" "" 4000
+	IFS=',' read -r -a arr <<<"$ctxs"
+	for i in "${!arr[@]}"; do
+		m="${arr[i]}"
+		base+="${base:+,}${m}=1"
+		# 497 members on the baseline's count, three on the profile's.
+		if ((i < 497)); then pass+="${pass:+,}${m}=1"; else pass+="${pass:+,}${m}=2"; fi
+		((i == 0)) || diff+="${diff:+,}${m}=2000/4096"
+		kv+="${kv:+,}${m}=v1.33.2"
+	done
+	with_replicas baseline "$base"
+	with_replicas 02-x "$base"
+	with_replicas 04-connection-pools "$pass"
+	# 04's profile sets the count to 2 and the CPU limit to 4000m: ran on three members and on one.
+	echo '{"spec":{"values":{"pilot":{"replicaCount":2,"resources":{"limits":{"cpu":"4"}}}}}}' > "${S}/04-connection-pools/state/patch.json"
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' "# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=${diff}" > "${S}/04-connection-pools/platform-drift.txt"
+	# Every member's Kubernetes version changed during the baseline; 02-x ran the new one.
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' "# KUBE_VERSIONS=${kv}" > "${S}/baseline/platform-drift.txt"
+	sed -i "/^# KUBE_VERSIONS=/s/v1\.33\.1/v1.33.2/g" "${S}/02-x/controlplane-02-x.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | same (see notes) | not in effect (see notes) |"
+	assert_output --partial "yet ISTIOD_CPU_LIMIT_M_BY_CONTEXT reads 2000m on ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]}, ${arr[5]} and 494 more, so the profile's value was not in effect there"
+	assert_output --partial "yet ISTIOD_REPLICAS_BY_CONTEXT reads 1 on ${arr[0]}, ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]} and 492 more, so the profile's value was not in effect there"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, the profile's 2 not in effect: \`1 on ${arr[0]}, ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]} and 492 more\`"
+	assert_output --partial "- KUBE_VERSIONS, where the baseline ran more than one value, one of those: \`v1.33.2 on ${arr[0]}, ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]} and 495 more\`"
+	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$output"
+	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$stderr"
+	# The churn suites' form: the 499 other members are not recorded.
+	sed -i 's/^# SUITE=controlplane$/# SUITE=churn/' "${S}/sweep-metadata.txt"
+	for m in baseline 02-x; do with_replicas "$m" 1 ISTIOD_REPLICAS; done
+	with_replicas 04-connection-pools 2 ISTIOD_REPLICAS
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "which its TSVs do not record on ${arr[1]}, ${arr[2]}, ${arr[3]}, ${arr[4]}, ${arr[5]} and 494 more (the churn suite's TSVs record the source member's only)"
+	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$output"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	awk 'length > 1000 { bad = 1 } END { exit bad }' <<<"$output"
 }
 
 @test "tuning 004 (R9-B1): where the baseline ran two values (a lever that changed during it), each pass's notes say which of them it ran" {
@@ -1077,12 +1175,198 @@ with_replicas() {
 	mv "${S}/02-x/platform-drift.txt" "${BATS_TEST_TMPDIR}/gone/"
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
 	assert_success
-	assert_output --partial "- **Warning:** pass 02-x: its record was not read again at its end (no platform-drift.txt in its directory: the run stopped during the pass, or it predates that read), so whether its builds, Kubernetes versions, tuning levers or istiod limits changed during it is not known, nor its other members' istiod limits, which only that read gives, nor whether its change against the baseline is the profile's alone"
+	assert_output --partial "- **Warning:** pass 02-x: its record was not read again at its end (no platform-drift.txt in its directory: the run stopped during the pass, or it predates that read), so whether its builds, Kubernetes versions, tuning levers, istiod limits or replica counts changed during it is not known, nor its other members' istiod limits, which only that read gives, nor whether its change against the baseline is the profile's alone"
 	refute_output --partial "ISTIOD_CPU_LIMIT_M_BY_CONTEXT could not be compared"
+}
+
+@test "tuning 004 (I10-S1): a controlplane pass whose istiod replica count changed during it reads changed and warns; a profile that turns autoscaling on has its HPA named" {
+	lever_passes
+	with_replicas baseline ctx-a=1,ctx-b=1
+	with_replicas 02-x ctx-a=1,ctx-b=1
+	with_replicas 04-connection-pools ctx-a=1,ctx-b=1
+	# What tuning 003's read at 02-x's end found: ctx-b's istiod scaled to 2 during the pass.
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_REPLICAS_BY_CONTEXT=ctx-b=2' > "${S}/02-x/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | changed (see notes) | same |"
+	assert_output --partial "- **Warning:** pass 02-x: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass (its platform-drift.txt): 1 to 2 on ctx-b, so part of it ran with other istiod replica counts, and its change against the baseline is not the profile's alone"
+	assert_output --partial "Pass 02-x, changed during the pass on ISTIOD_REPLICAS_BY_CONTEXT:"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT, changed during the pass: \`1 to 2 on ctx-b\`"
+	refute_output --partial "pass 02-x differs"
+	[[ "$stderr" == *"warning: pass 02-x: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass"* ]]
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --regexp 'Platform record +baseline +changed \(see notes\) +same'
+	assert_output --regexp '  ISTIOD_REPLICAS_BY_CONTEXT +changed during the pass: 1 to 2 on ctx-b'
+	# Its profile turns autoscaling on: its HPA moved the count, and the warning says so.
+	echo '{"spec":{"values":{"pilot":{"autoscaleEnabled":true,"env":{"PILOT_DEBOUNCE_AFTER":"x"}}}}}' > "${S}/02-x/state/patch.json"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline | changed (see notes) | same |"
+	assert_output --partial "- **Warning:** pass 02-x: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass (its platform-drift.txt): 1 to 2 on ctx-b; its profile turns autoscaling on (spec.values.pilot.autoscaleEnabled in its state/patch.json), so its HPA moved the count, and its figures are over more than one istiod replica count"
+	refute_output --partial "so part of it ran with other istiod replica counts"
+	# A pass of another suite says its record was not read again for builds, versions, levers and limits only.
+	mkdir -p "${BATS_TEST_TMPDIR}/gone"
+	mv "${S}/02-x/platform-drift.txt" "${BATS_TEST_TMPDIR}/gone/"
+	sed -i 's/^# SUITE=controlplane/# SUITE=propagation/' "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "so whether its builds, Kubernetes versions, tuning levers or istiod limits changed during it is not known"
 }
 
 @test "tuning 004 (U9-N5): an unknown --format names the value it was given" {
 	run --separate-stderr "$COMPARE" --results-dir "$S" --format html
 	assert_failure
 	[[ "$stderr" == *"--format must be text or md (or markdown), not html"* ]]
+}
+
+# The churn suite's columns that 004 reads (tests/churn/002-run-churn-probe.sh writes more).
+CHURN_HDR=$'timestamp\tstatus\tconvergence_local_ms\tconvergence_remote_eds_ms\tremote_endpoint_reachable_ms\tsource_xds_pushes_delta\tsource_push_time_p99_ms'
+
+@test "tuning 004 (R10-S2): passes from before the record compare the churn suite's bare replica count as it is: the same says nothing, another differs" {
+	local p
+	rm -rf "$S"
+	mkdir -p "$S"
+	printf '# SUITE=churn\n# PASSES=baseline,02-x\n' > "${S}/sweep-metadata.txt"
+	for p in baseline 02-x; do
+		mkdir -p "${S}/${p}"
+		printf '%s\n' '# ISTIOD_REPLICAS=1' "$CHURN_HDR" $'t\tOK\t100\t200\t300\t40\t50' > "${S}/${p}/churn-${p}.tsv"
+	done
+	profile_state 02-x
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | unknown (see notes) |"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`1\`"
+	assert_output --partial "- **Warning:** pass baseline: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read), and so are its Kubernetes versions, so whether the other passes ran on its platform and builds is not known, nor whether any profile's change against it is the profile's alone"
+	assert_output --partial "- **Warning:** pass 02-x: no key of its platform record can be compared with the baseline (its TSVs predate the record, or nothing could be read), nor its Kubernetes versions"
+	assert_output --partial "Pass 02-x: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
+	refute_output --partial "ISTIOD_REPLICAS_BY_CONTEXT could not be compared"
+	refute_output --partial "differs"
+	# Another count: it differs, with the cause a suite that counts Running pods adds.
+	sed -i 's/^# ISTIOD_REPLICAS=1$/# ISTIOD_REPLICAS=2/' "${S}/02-x/churn-02-x.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | differs (see notes) |"
+	assert_output --partial "- **Warning:** pass 02-x differs from the baseline on ISTIOD_REPLICAS_BY_CONTEXT (its values follow the table; the churn suite counts Running istiod pods, which include a Terminating pod after a short --settle), so its change against the baseline is not the profile's alone"
+	assert_output --partial "Pass 02-x, every value of its platform record unknown (its TSVs predate the record, or nothing could be read), differs on ISTIOD_REPLICAS_BY_CONTEXT:"
+	assert_output --partial "- ISTIOD_REPLICAS_BY_CONTEXT: \`2\`"
+	[[ "$stderr" == *"warning: pass 02-x differs from the baseline on ISTIOD_REPLICAS_BY_CONTEXT"* ]]
+}
+
+@test "tuning 004 (R10-N1): a value of the baseline's not read on one of its inputs is not a second value it ran; a pass that ran two values itself is not said to run one of the baseline's" {
+	lever_passes "" "" "" "" "$SIDECAR_OFF" none
+	# The baseline's second TSV (churn-dataplane writes two) could not read ctx-b's Kubernetes version.
+	sed 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ctx-a=v1.33.1,ctx-b=unreachable/' "${S}/baseline/controlplane-baseline.tsv" > "${S}/baseline/controlplane-second.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- KUBE_VERSIONS: \`v1.33.1 on ctx-a; mixed: v1.33.1 and unreachable on ctx-b\`"
+	refute_output --partial "KUBE_VERSIONS, where the baseline ran more than one value"
+	# The baseline's sidecar lever and egress hosts changed during it, and so did 02-x's: 04 ran
+	# one of the baseline's values, 02-x both.
+	rm "${S}/baseline/controlplane-second.tsv"
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' "# TUNING_BASELINE=${SIDECAR_OFF}" '# SIDECAR_EGRESS_HOSTS=none' > "${S}/baseline/platform-drift.txt"
+	cp "${S}/baseline/platform-drift.txt" "${S}/02-x/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | changed (see notes) | same (see notes) |"
+	assert_output --partial "Pass 02-x, changed during the pass on TUNING_BASELINE, SIDECAR_EGRESS_HOSTS:"
+	assert_output --partial "- TUNING_BASELINE, where the baseline ran more than one value, one of those: \`sidecar=off\`"
+	assert_output --partial "- SIDECAR_EGRESS_HOSTS, where the baseline ran more than one value, one of those: \`none\`"
+	[[ "$(sed -n '/^Pass 02-x/,/^Pass 04/p' <<<"$output")" != *"one of those"* ]]
+	[ "$(grep -c 'one of those' <<<"$output")" -eq 2 ]
+}
+
+@test "tuning 004 (R10-S1): a pass whose platform record is all unknown still shows what its profile sets, and which of the baseline's values it ran" {
+	objects_passes
+	with_record baseline
+	# 02-x and 04: their records not read (their TSVs keep their Kubernetes versions).
+	with_record 02-x '/^# KUBE_VERSIONS=/!d'
+	with_record 04-connection-pools '/^# KUBE_VERSIONS=/!d'
+	with_levers baseline
+	# 02-x's profile brings its own root Sidecar.
+	with_levers 02-x "$SIDECAR_OFF" none
+	with_levers 04-connection-pools
+	# Without a record a limit names no member: no pass records one here.
+	sed -i '/^# ISTIOD_.*_LIMIT_/d' "${S}"/*/controlplane-*.tsv
+	profile_state 02-x "" Sidecar/istio-system/default
+	profile_state 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "Pass 02-x, every value of its platform record unknown (its TSVs predate the record, or nothing could be read):"
+	assert_output --partial "- TUNING_BASELINE, set by its profile (sidecar: its state/objects lists Sidecar/istio-system/default): \`sidecar=off,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on\`"
+	assert_output --partial "- SIDECAR_EGRESS_HOSTS, set by its profile (its state/objects lists Sidecar/istio-system/default): \`none\`"
+	assert_output --partial "Pass 04-connection-pools: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
+	refute_output --partial "- PLATFORM: \`unknown\`"
+	# 04 ran the second value of the baseline's sidecar lever and egress hosts (changed during it).
+	sed -i "s/^# TUNING_BASELINE=.*/# TUNING_BASELINE=${SIDECAR_OFF}/; s|^# SIDECAR_EGRESS_HOSTS=.*|# SIDECAR_EGRESS_HOSTS=none|" "${S}/04-connection-pools/controlplane-04-connection-pools.tsv"
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' "# TUNING_BASELINE=${SIDECAR_OFF}" '# SIDECAR_EGRESS_HOSTS=none' > "${S}/baseline/platform-drift.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "Pass 04-connection-pools, every value of its platform record unknown (its TSVs predate the record, or nothing could be read):"
+	[[ "$(sed -n '/^Pass 04-connection-pools/,$p' <<<"$output")" == *"- TUNING_BASELINE, where the baseline ran more than one value, one of those: \`sidecar=off\`"* ]]
+	refute_output --partial "Pass 04-connection-pools: every value"
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --partial "Pass 04-connection-pools, every value of its platform record unknown (its TSVs predate the record, or nothing could be read):"
+	assert_output --regexp "  TUNING_BASELINE +where the baseline ran more than one value, one of those: sidecar=off"
+}
+
+@test "tuning 004 (R10-N2): a baseline whose platform record is all unknown has the one note and one warning that say so; a pass compared with it warns for its own Kubernetes versions only" {
+	objects_passes
+	with_record baseline '/^# KUBE_VERSIONS=/!d'
+	with_record 02-x
+	with_record 04-connection-pools
+	profile_pass 02-x
+	profile_pass 04-connection-pools "" DestinationRule/istio-system/tuning-connection-pool
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "| Platform record | baseline (see notes) | unknown (see notes) | unknown (see notes) |"
+	assert_output --partial "Pass baseline: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
+	assert_output --partial "- **Warning:** pass baseline: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read), so whether the other passes ran on its platform and builds is not known, nor whether any profile's change against it is the profile's alone"
+	# The passes compared with it have records: the baseline's warning covers them.
+	refute_output --partial "no key of its platform record"
+	[ "$(grep -c '^warning: ' <<<"$stderr")" -eq 1 ]
+	run --separate-stderr "$COMPARE" --results-dir "$S"
+	assert_success
+	assert_output --partial "Pass baseline: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read)."
+	assert_output --partial "WARNING: pass baseline: every value of its platform record is unknown"
+	# A pass whose own Kubernetes versions were not read on a member warns for those.
+	sed -i 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ctx-a=v1.33.1,ctx-b=unreachable/' "${S}/02-x/controlplane-02-x.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- **Warning:** pass 02-x: KUBE_VERSIONS could not be compared with the baseline (not read, or not recorded, in one of them), so whether it ran on the same Kubernetes versions is not known"
+	[ "$(grep -c '^warning: ' <<<"$stderr")" -eq 2 ]
+	# The baseline's not read either: its warning says so, and none of the passes'.
+	sed -i '/^# KUBE_VERSIONS=/d' "${S}/baseline/controlplane-baseline.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- **Warning:** pass baseline: every value of its platform record is unknown (its TSVs predate the record, or nothing could be read), and so are its Kubernetes versions, so whether the other passes ran on its platform and builds is not known"
+	[ "$(grep -c '^warning: ' <<<"$stderr")" -eq 1 ]
+}
+
+@test "tuning 004 (U10-S1): a directory that is not a tuning sweep's says what to give instead; a pass the metadata lists without its directory has no data" {
+	mkdir -p "${BATS_TEST_TMPDIR}/empty"
+	run --separate-stderr "$COMPARE" --results-dir "${BATS_TEST_TMPDIR}/empty"
+	assert_failure
+	[[ "$stderr" == *"no pass directories in ${BATS_TEST_TMPDIR}/empty: give a tuning sweep directory (tests/tuning/results/sweep-<RUN_ID>), which holds one directory per pass"* ]]
+	# A pass directory (its state/ is no pass), or another suite's sweep: the TSVs are its own.
+	profile_state 01-x
+	run --separate-stderr "$COMPARE" --results-dir "${S}/01-x"
+	assert_failure
+	[[ "$stderr" == *"${S}/01-x holds TSVs itself (a pass directory, or another suite's sweep): give a tuning sweep directory (tests/tuning/results/sweep-<RUN_ID>), which holds one directory per pass"* ]]
+	mkdir -p "${BATS_TEST_TMPDIR}/sweep-prop/logs"
+	printf '%s\n' $'p1_ms\tp2_ms\tp3_ms' $'1\t2\t3' > "${BATS_TEST_TMPDIR}/sweep-prop/propagation-r1.tsv"
+	run --separate-stderr "$COMPARE" --results-dir "${BATS_TEST_TMPDIR}/sweep-prop"
+	assert_failure
+	[[ "$stderr" == *"${BATS_TEST_TMPDIR}/sweep-prop holds TSVs itself"* ]]
+	# A pass the metadata lists without its directory, before any with data (no SUITE line: the
+	# first pass with a TSV names it): no data.
+	printf '# PASSES=03-gone,baseline,01-x\n' > "${S}/sweep-metadata.txt"
+	run --separate-stderr "$COMPARE" --results-dir "$S" --format md
+	assert_success
+	assert_output --partial "- Suite: controlplane"
+	assert_output --partial "| Pass status | no data | ok | ok |"
+	assert_output --partial "| Valid / total rows | 0/0 | 2/3 | 2/2 |"
+	assert_output --partial "| Platform record | - | baseline (see notes) | unknown (see notes) |"
+	assert_output --partial "| istiod memory peak (Mi) | - | 512 | 256 (-50.0%) |"
 }

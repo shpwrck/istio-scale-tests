@@ -179,7 +179,8 @@ pause)
 	done
 	;;
 resume)
-	[[ -f "$STATE_FILE" ]] || die "no pause record at ${STATE_FILE}; nothing to resume"
+	[[ -f "$STATE_FILE" ]] ||
+		die "no pause record at ${STATE_FILE}, so nothing for --resume to remove; a pause of this tool's without its record (--status marks it) is removed with --clear"
 	projects="$(python3 -I "$HELPER" state-get "$STATE_FILE" projects)"
 	keep=0
 	for p in $projects; do

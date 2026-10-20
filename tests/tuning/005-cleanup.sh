@@ -122,8 +122,9 @@ done
 if ((${#REPEATED[@]})); then
 	rep="$(IFS=,; echo "${REPEATED[*]}")"
 	# Five named, then how many more (tuning.py names; without python3, as a dry-run may run, all).
-	rep="$(python3 -I "$HELPER" names "$rep" 2>/dev/null)" || rep="${rep//,/, }"
-	echo "note: ${rep} listed more than once in the contexts; each member is cleaned once" >&2
+	rep_names="$(python3 -I "$HELPER" names "$rep" 2>/dev/null)" || rep_names=""
+	[[ -n "$rep_names" ]] || rep_names="${rep//,/, }"
+	echo "note: ${rep_names} listed more than once in the contexts; each member is cleaned once" >&2
 fi
 CONTEXTS=("${UNIQ[@]}")
 ((DRY_RUN)) || command -v python3 >/dev/null ||

@@ -286,7 +286,8 @@ _probe_istiod_pod() {
 # v1.33.1; PROBE_KUBE=down: no answer), istiod's Deployment (PROBE_ISTIOD_CPU_LIMIT 2,
 # PROBE_ISTIOD_MEM_LIMIT 4Gi, PROBE_ISTIOD_REQ_CPU 500m, PROBE_ISTIOD_REPLICAS 1, PROBE_NETWORK
 # net-<ctx>; PROBE_ISTIOD_DEPLOY=missing: none; on the member PROBE_ISTIOD_ON names,
-# PROBE_ISTIOD_ON_CPU_LIMIT, PROBE_ISTIOD_ON_MEM_LIMIT and PROBE_ISTIOD_ON_DEPLOY instead), the
+# PROBE_ISTIOD_ON_CPU_LIMIT, PROBE_ISTIOD_ON_MEM_LIMIT, PROBE_ISTIOD_ON_REPLICAS and
+# PROBE_ISTIOD_ON_DEPLOY instead), the
 # nodes' allocatable (PROBE_NODE_CPU 8).
 # PROBE_TUNING_OBJECTS: the objects labelled by a tuning profile: none (default), 04 (profile 04's
 # DestinationRule), two (two profiles' objects, in reverse order), marker (profile 02's marker
@@ -420,16 +421,17 @@ JSON
 		;;
 	*" -n istio-system get deploy istiod "*)
 		! _probe_flaky istiod "$ctx" || return 1
-		local dep="${PROBE_ISTIOD_DEPLOY:-}" lcpu="${PROBE_ISTIOD_CPU_LIMIT:-2}" lmem="${PROBE_ISTIOD_MEM_LIMIT:-4Gi}"
+		local dep="${PROBE_ISTIOD_DEPLOY:-}" lcpu="${PROBE_ISTIOD_CPU_LIMIT:-2}" lmem="${PROBE_ISTIOD_MEM_LIMIT:-4Gi}" rep="${PROBE_ISTIOD_REPLICAS:-1}"
 		if [[ -n "${PROBE_ISTIOD_ON:-}" && "$ctx" == "$PROBE_ISTIOD_ON" ]]; then
 			dep="${PROBE_ISTIOD_ON_DEPLOY:-$dep}" lcpu="${PROBE_ISTIOD_ON_CPU_LIMIT:-$lcpu}" lmem="${PROBE_ISTIOD_ON_MEM_LIMIT:-$lmem}"
+			rep="${PROBE_ISTIOD_ON_REPLICAS:-$rep}"
 		fi
 		if [[ "$dep" == missing ]]; then
 			echo 'Error from server (NotFound): deployments.apps "istiod" not found' >&2
 			return 1
 		fi
 		printf '{"spec":{"replicas":%s,"template":{"spec":{"containers":[{"name":"discovery","env":[{"name":"ISTIO_META_NETWORK","value":"%s"}],"resources":{"requests":{"cpu":"%s","memory":"2Gi"},"limits":{"cpu":"%s","memory":"%s"}}}]}}}}\n' \
-			"${PROBE_ISTIOD_REPLICAS:-1}" "${PROBE_NETWORK:-net-${ctx}}" "${PROBE_ISTIOD_REQ_CPU:-500m}" "$lcpu" "$lmem"
+			"$rep" "${PROBE_NETWORK:-net-${ctx}}" "${PROBE_ISTIOD_REQ_CPU:-500m}" "$lcpu" "$lmem"
 		;;
 	*" get ${PLATFORM_TUNING_KINDS} -A -l ${PLATFORM_TUNING_LABEL} "*)
 		tobj="${PROBE_TUNING_OBJECTS:-none}"
@@ -1009,7 +1011,15 @@ env_list() {
 	probe_setup
 	run platform_probe member-a,member-b,member-a
 	assert_failure
-	assert_output --partial "member-a is listed twice among the mesh members (member-a,member-b,member-a): list each member once (--contexts or SETUP_CONTEXTS; a probe's --source is not one of its --remote-contexts)"
+	assert_output --partial "member-a is listed twice among the mesh members: list each member once (--contexts or SETUP_CONTEXTS; a probe's --source-context is not one of its --remote-contexts)"
+	[ ! -s "$CALLS" ]
+	# At 500 members, the one member only (SC10-N1).
+	local ctxs
+	ctxs="$(wide_ctxs 500)"
+	run platform_probe "${ctxs},${ctxs%%,*}"
+	assert_failure
+	assert_output --partial "${ctxs%%,*} is listed twice among the mesh members: list each member once"
+	awk 'length > 300 { bad = 1 } END { exit bad }' <<<"$output"
 	[ ! -s "$CALLS" ]
 	DRY_RUN=1 run platform_probe member-a,member-a
 	assert_failure
@@ -1700,7 +1710,7 @@ resume_run() {
 	# Every member upgraded during the sweep: one warning, and every member in the marker.
 	PROBE_ISTIOD=1.30.6 run --separate-stderr platform_drift_check "$dir" "$csv"
 	assert_success
-	assert_output "Platform record: reading m001, m002, m003, m004, m005 and 495 more again, to check that no build, istiod setting or limit, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
+	assert_output "Platform record: reading m001, m002, m003, m004, m005 and 495 more again, to check that no build, istiod setting, limit or replica count, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
 	[ "$(grep -c 'ISTIOD_IMAGE_BY_CONTEXT changed during the sweep' <<<"$stderr")" -eq 1 ]
 	[[ "$stderr" == *"warning: m001, m002, m003, m004, m005 and 495 more: ISTIOD_IMAGE_BY_CONTEXT changed during the sweep: pilot:1.30.5@${DIG_B} at its start, pilot:1.30.6@${DIG_B} at its end;"* ]] || { echo "$stderr" | head -c 2000; false; }
 	[ "$(grep '^# ISTIOD_IMAGE_BY_CONTEXT=' "${dir}/platform-drift.txt" | tr , '\n' | grep -c '=pilot:1.30.6@')" -eq 500 ]
@@ -1817,7 +1827,7 @@ drift_unsourced() (
 	: > "$CALLS"
 	run --separate-stderr platform_drift_check "$dir" member-a,member-b
 	assert_success
-	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting or limit, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
+	assert_output "Platform record: reading member-a, member-b again, to check that no build, istiod setting, limit or replica count, tuning lever, tuning profile object or Kubernetes version changed during the sweep"
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
 	# The file says the read ran (M8-S1), and that it found nothing.
 	head -n 1 "${dir}/platform-drift.txt" | grep -q '^# The platform record read again at the end of this sweep (tests/lib/platform.sh platform_drift_check), one block per read: '
@@ -2018,6 +2028,122 @@ drift_unsourced() (
 	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_CPU_LIMIT_M;ISTIOD_MEM_LIMIT_MI,member-b=ISTIOD_LIMITS_DIFFER_BY_CONTEXT' "${dir}/platform-drift.txt"
 	run platform_lever_values "${dir}/controlplane-r.tsv"
 	assert_line "ISTIOD_CPU_LIMIT_M_BY_CONTEXT=member-a=2000,member-b=unknown"
+}
+
+@test "platform_drift_check (I10-S1): each member's istiod replica count the controlplane TSVs record is read again; a change warns and goes to the marker, the reports and tuning 004's values" {
+	local dir="${BATS_TEST_TMPDIR}/sweep" lim
+	mkdir -p "$dir"
+	probe_setup
+	platform_probe member-a,member-b 2>/dev/null
+	lim="$(cap_istiod_limits member-a "${KUBECTL[@]}")"
+	{
+		platform_preamble_lines member-a,member-b
+		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_REPLICAS=1"
+		echo "# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=1"
+		printf 'timestamp\tcontext\n'
+	} > "${dir}/controlplane-r.tsv"
+	run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	rm "${dir}/platform-drift.txt"
+	# member-b's istiod scaled to 2 during the sweep (an HPA, a hand scale).
+	PROBE_ISTIOD_ON=member-b PROBE_ISTIOD_ON_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-b: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 at its start, 2 at its end; rows measured after the change ran with another istiod replica count (written to ${dir}/platform-drift.txt, which its reports say in their body); the usual cause is an HPA (the Istio CR's spec.values.pilot.autoscaleEnabled turned on), an Argo CD sync or a tuning profile that sets spec.values.pilot.replicaCount, or a hand scale of istiod's Deployment; for publishable figures, run the sweep again with istiod's replica count fixed (autoscaling off, as charts/spoke-ossm sets it)"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" != *"member-a: ISTIOD_REPLICAS"* && "$stderr" != *"ISTIOD_CPU_LIMIT_M changed"* ]] || { echo "$stderr"; false; }
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# ISTIOD_REPLICAS_BY_CONTEXT=member-b=2" ]
+	run platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on member-b; rows measured after the change ran with another istiod replica count; the report's istiod replicas show the count recorded at the start, while each cell's istiod pods per cluster count its own; the usual cause is an HPA"
+	run platform_lever_values "${dir}/controlplane-r.tsv"
+	assert_line "ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=mixed:1;2"
+	run platform_drift_changes "${dir}/controlplane-r.tsv"
+	assert_output $'ISTIOD_REPLICAS_BY_CONTEXT\tistiod replica counts\t1 to 2 on member-b'
+	# A tuning pass's check names the pass; members that changed the same way share one warning.
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,member-b pass
+	assert_success
+	[[ "$stderr" == *"warning: member-a, member-b: ISTIOD_REPLICAS_BY_CONTEXT changed during the pass: 1 at its start, 2 at its end; rows measured after the change ran with another istiod replica count (written to ${dir}/platform-drift.txt, which tuning 004 reads for this pass); the usual cause is"* ]] || { echo "$stderr"; false; }
+	[ "$(grep -c 'ISTIOD_REPLICAS_BY_CONTEXT changed' <<<"$stderr")" -eq 1 ]
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=member-a=2,member-b=2' "${dir}/platform-drift.txt"
+	run platform_drift_changes "${dir}/controlplane-r.tsv"
+	assert_output $'ISTIOD_REPLICAS_BY_CONTEXT\tistiod replica counts\t1 to 2 on member-a, member-b'
+	# Not read at the end (no Deployment): not compared, and the file says so.
+	rm "${dir}/platform-drift.txt"
+	PROBE_ISTIOD_DEPLOY=missing run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a: ISTIOD_CPU_LIMIT_M, ISTIOD_MEM_LIMIT_MI, ISTIOD_REPLICAS_BY_CONTEXT not read at the sweep's start or end"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: member-b: ISTIOD_REPLICAS_BY_CONTEXT not read at the sweep's start or end"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_CPU_LIMIT_M;ISTIOD_MEM_LIMIT_MI;ISTIOD_REPLICAS_BY_CONTEXT,member-b=ISTIOD_REPLICAS_BY_CONTEXT;ISTIOD_LIMITS_DIFFER_BY_CONTEXT' "${dir}/platform-drift.txt"
+	run platform_drift_unread "${dir}/controlplane-r.tsv"
+	assert_line $'ISTIOD_REPLICAS_BY_CONTEXT\tmember-a, member-b'
+	# Not read at the start (unknown in the TSVs): not compared on that member only.
+	rm "${dir}/platform-drift.txt"
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=unknown/' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-a: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 at its start, 2 at its end"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"warning: member-b: ISTIOD_REPLICAS_BY_CONTEXT not read at the sweep's start or end"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-b=ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
+	grep -qx '# ISTIOD_REPLICAS_BY_CONTEXT=member-a=2' "${dir}/platform-drift.txt"
+	# Inputs that disagree on a member's count: either of them at its start.
+	rm "${dir}/platform-drift.txt"
+	sed 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=2/' "${dir}/controlplane-r.tsv" > "${dir}/controlplane-s.tsv"
+	sed -i 's/^# ISTIOD_REPLICAS_BY_CONTEXT=.*/# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,member-b=1/' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_ON=member-b PROBE_ISTIOD_ON_REPLICAS=3 run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: member-b: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 or 2 at its start, 3 at its end"* ]] || { echo "$stderr"; false; }
+	run platform_report_warnings "${dir}/controlplane-r.tsv" "${dir}/controlplane-s.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 or 2 to 3 on member-b;"
+	# Without cap_istiod_limits: not checked, and each member's recorded count goes to the file.
+	rm "${dir}/platform-drift.txt" "${dir}/controlplane-s.tsv"
+	run --separate-stderr drift_unsourced cap_istiod_limits "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" == *"warning: platform_drift_check needs cap_istiod_limits (source tests/lib/capacity.sh) and a temp dir to read istiod's limits and replica counts again; not checked"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_CPU_LIMIT_M;ISTIOD_MEM_LIMIT_MI;ISTIOD_REPLICAS_BY_CONTEXT,member-b=ISTIOD_LIMITS_DIFFER_BY_CONTEXT;ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
+	# Another suite's count (propagation's ISTIOD_REPLICAS: Running istiod pods) is not read again.
+	rm "${dir}/platform-drift.txt"
+	sed -i -e '/^# ISTIOD_REPLICAS_BY_CONTEXT=/d' -e 's/^# ISTIOD_REPLICAS=.*/# ISTIOD_REPLICAS=member-a=1,member-b=1/' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,member-b
+	assert_success
+	[[ "$stderr" != *ISTIOD_REPLICAS* ]] || { echo "$stderr"; false; }
+	[ -z "$(drift_value_lines "${dir}/platform-drift.txt")" ]
+	# A context the record names with its safe characters only (lab~b is lab_b there): the count
+	# the TSVs record under its own name is read again under the record's.
+	rm "${dir}/platform-drift.txt"
+	platform_probe_reset
+	platform_probe member-a,lab~b 2>/dev/null
+	{
+		platform_preamble_lines member-a,lab~b
+		echo "# ISTIOD_CPU_LIMIT_M=$(_platform_kv "$lim" cpu_m)"
+		echo "# ISTIOD_MEM_LIMIT_MI=$(_platform_kv "$lim" mem_mi)"
+		echo "# ISTIOD_REPLICAS=1"
+		echo "# ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,lab~b=1"
+		printf 'timestamp\tcontext\n'
+	} > "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_ON='lab~b' PROBE_ISTIOD_ON_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,lab~b
+	assert_success
+	[[ "$stderr" == *"warning: lab_b: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 at its start, 2 at its end"* ]] || { echo "$stderr"; false; }
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# ISTIOD_REPLICAS_BY_CONTEXT=lab_b=2" ]
+	run platform_report_warnings "${dir}/controlplane-r.tsv"
+	assert_output --partial "ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep in sweep (platform-drift.txt): 1 to 2 on lab_b;"
+	run platform_lever_values "${dir}/controlplane-r.tsv"
+	assert_line "ISTIOD_REPLICAS_BY_CONTEXT=member-a=1,lab_b=mixed:1;2"
+	# TSVs from before istiod's limits were recorded: their replica counts are still read again,
+	# and without cap_istiod_limits, those alone go to the file as not compared.
+	rm "${dir}/platform-drift.txt"
+	sed -i '/^# ISTIOD_CPU_LIMIT_M=\|^# ISTIOD_MEM_LIMIT_MI=/d' "${dir}/controlplane-r.tsv"
+	PROBE_ISTIOD_ON='lab~b' PROBE_ISTIOD_ON_REPLICAS=2 run --separate-stderr platform_drift_check "$dir" member-a,lab~b
+	assert_success
+	[[ "$stderr" == *"warning: lab_b: ISTIOD_REPLICAS_BY_CONTEXT changed during the sweep: 1 at its start, 2 at its end"* ]] || { echo "$stderr"; false; }
+	[ "$(drift_value_lines "${dir}/platform-drift.txt")" = "# ISTIOD_REPLICAS_BY_CONTEXT=lab_b=2" ]
+	rm "${dir}/platform-drift.txt"
+	run --separate-stderr drift_unsourced cap_istiod_limits "$dir" member-a,lab~b
+	assert_success
+	[[ "$stderr" == *"warning: platform_drift_check needs cap_istiod_limits (source tests/lib/capacity.sh) and a temp dir to read istiod's replica counts again; not checked"* ]] || { echo "$stderr"; false; }
+	grep -qx '# NOT_COMPARED_AT_END=member-a=ISTIOD_REPLICAS_BY_CONTEXT,lab_b=ISTIOD_REPLICAS_BY_CONTEXT' "${dir}/platform-drift.txt"
 }
 
 @test "platform_drift_check (R6, M5-S2): a member whose istiod limits differ from the recorded ones warns, goes to the marker and the report; --no-members counts" {
@@ -2563,6 +2689,34 @@ ISTIOD_MEM_LIMIT_MI_BY_CONTEXT=a=mixed:4096;unknown,b=unknown"
 	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=3"
 	run platform_lever_values "${dir}/old.tsv" "${dir}/cp.tsv"
 	assert_output "ISTIOD_REPLICAS_BY_CONTEXT=mixed:3;unknown,a=mixed:1;unknown,b=mixed:3;unknown"
+}
+
+@test "_platform_compare_key (R10-S2): replica counts that name no member (inputs from before the record) compare as they are; a side without one, or one beside members, is not known" {
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT 1 1
+	assert_success
+	assert_output same
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT 1 2
+	assert_output differs
+	# Inputs that disagree (mixed:) match when one of their values does; unknown is no value.
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT "mixed:1;2" 2
+	assert_output same
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT "mixed:1;unknown" 1
+	assert_output same
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT "mixed:1;unknown" 3
+	assert_output differs
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT unknown 1
+	assert_output unknown
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT 1 ""
+	assert_output unknown
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT "" 1
+	assert_output unknown
+	# A count without a member beside members' (an input from before the record and one after).
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT 1 a=1
+	assert_output unknown
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT "mixed:3;unknown,a=1" "mixed:3;unknown,a=1"
+	assert_output unknown
+	run _platform_compare_key ISTIOD_REPLICAS_BY_CONTEXT "mixed:3;unknown,a=1" "mixed:3;unknown,a=2"
+	assert_output differs
 }
 
 @test "platform_summary and platform_short_digests: no member names, counts when members differ, 12 hex digits" {

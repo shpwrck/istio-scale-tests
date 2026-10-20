@@ -100,13 +100,16 @@ churn-dataplane: the source member's; dataplane: none). `platform-record.txt` in
 directory hands the record over. The pass reads them again after the probe, always, and writes
 what that read found to the pass's `platform-drift.txt`: what changed in between (a profile
 reverted by hand, an Argo CD sync that put istiod's settings back, a lever, an istiod limit, a
-control-plane upgrade), the other members' istiod limits where they differ from the source
+controlplane pass's istiod replica count, a control-plane upgrade), the other members' istiod limits where they differ from the source
 member's, and what it could not compare (a value not read at either end, or an image whose
 digest is `@unknown`: no pod had started). Nothing records the other members' limits at a
 pass's start, so theirs are their limits at its end: a change there during a pass reads as a
 difference from that pass on, not as a change during it, and one undone before the pass ends is
-not seen. That read does not count istiod's replicas again; in a controlplane pass, a window
-whose Running istiod pods changed writes its `cluster_connected_proxies` as `N/A`.
+not seen. In a controlplane pass that read also compares each member's istiod Deployment
+replicas with the ones its TSVs record (a profile that turns autoscaling on is said to have its
+HPA move them); the other suites' replica counts are read at the probe's start only. A
+controlplane window whose Running istiod pods changed also writes its `cluster_connected_proxies`
+as `N/A`.
 
 The table's `Platform record` row compares each pass's record and the values its TSVs record
 outside it with the baseline's (without a baseline, the first pass with data's, which reads
@@ -125,19 +128,22 @@ versions, istiod's limits and replica counts, lever by lever for the levers. Tho
   pass, or that its TSVs disagree on); the notes say which;
 - `differs (see notes)`;
 - `not in effect (see notes)`: a member did not run a limit or the replica count that its
-  `state/patch.json` sets to one value (not rolled out there, changed during the pass, or for the
-  count an HPA; a patch that turns autoscaling on is not checked against its `replicaCount`);
+  `state/patch.json` sets to one value (not rolled out there; a limit, or a controlplane pass's
+  count, that changed during the pass, a count its TSVs disagree on or an HPA set; a patch that
+  turns autoscaling on is not checked
+  against its `replicaCount`);
 - `changed (see notes)`: the read after its probe found a build, a Kubernetes version, a tuning
-  lever or an istiod limit changed during the pass;
+  lever, an istiod limit or (controlplane) a member's istiod replica count changed during the pass;
 - `mixed (see notes)`: its TSVs disagree;
 - `unknown (see notes)`: a value not read or not recorded in one of them (a digest `@unknown`, a
-  member's version `unreachable`, a lever `unknown`), or not compared at the pass's end (a value
-  the read after its probe could not compare, or no `platform-drift.txt`: that read did not run);
+  member's version `unreachable`, a lever `unknown`), a limit or replica count its profile sets
+  that its TSVs do not record on a member, or not compared at the pass's end (a value the read
+  after its probe could not compare, or no `platform-drift.txt`: that read did not run);
 - `-`: no data.
 
 The baseline (or reference) pass reads `baseline (see notes)` when its own values changed during
 it, its TSVs disagree, it was not compared at its end or (a reference pass) its profile's value
-was not in effect, and its warning says that no profile's change against it is the profile's
+was not in effect or is not known to be, and its warning says that no profile's change against it is the profile's
 alone, or, when it was not compared at its end, that none is known to be. A member that changed
 during a pass, or whose TSVs disagree, matches the other side when one of its values is that
 side's (the pass's own warning covers the change), so a pass on a version the baseline ended
@@ -147,8 +153,10 @@ reaches. A mesh operator that differs only in its state (`Available`, `Unavailab
 build.
 
 Only the controlplane suite's TSVs record istiod's limits, and the dataplane suite's record no
-replica count, so those sweeps compare none of them, and a profile that sets one warns that
-whether it was in effect is not known. Nothing else shows a CPU limit that changes: istiod's
+replica count, so those sweeps compare none of them, and a pass whose profile sets one reads
+`unknown (see notes)` and warns that whether it was in effect is not known; so does one whose
+profile sets the replica count in a churn or churn-dataplane sweep, which records the source
+member's only, for every other member. Nothing else shows a CPU limit that changes: istiod's
 Deployment sets `GOMAXPROCS` from `limits.cpu` by reference (`valueFrom`, so the env digest does
 not change with it), and `GOMAXPROCS` sets the defaults of `PILOT_PUSH_THROTTLE` (which profile
 01 tunes) and `PILOT_MAX_REQUESTS_PER_SECOND`, each min(15 + 5 × `GOMAXPROCS`, 100); keep
@@ -275,7 +283,7 @@ and its index; nothing removes it by value. A window of that shape for any other
 another team's, and is left alone. Remove the stale one by hand:
 `./tests/tuning/006-gitops-pause.sh --gitops-context <hub-ctx> --status` prints the Applications,
 then each AppProject's sync windows with their index (`<i>` below): the pause of those
-Applications (which `--resume` or `--clear` removes) on one line, a stale pause with the window
+Applications (which `--resume` removes with its pause record, and `--clear` without one) on one line, a stale pause with the window
 whole on the line under it (`<window>` below), and any other window as it is:
 
 ```bash
