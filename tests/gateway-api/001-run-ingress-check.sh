@@ -304,6 +304,9 @@ warn() { echo "warning: $*" >&2; }
 
 CONTEXTS=()
 split_contexts "$CONTEXTS_CSV" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 ((${#CONTEXTS[@]} >= 2)) || die "--contexts (or SETUP_CONTEXTS) needs at least two mesh members (one runs the workload, the others show the cross-cluster path); got '${CONTEXTS_CSV}'"
 declare -A IS_MEMBER=()
 for ctx in "${CONTEXTS[@]}"; do IS_MEMBER[$ctx]=1; done

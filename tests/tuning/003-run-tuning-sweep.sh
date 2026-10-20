@@ -200,6 +200,9 @@ split_contexts "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS "--contexts (or S
 # What 001-apply-profile.sh refuses for every profile pass, refused before the setup and the
 # baseline pass run.
 ctx_keys_distinct "${CONTEXTS[@]}"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 CONTEXTS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 SOURCE_CTX="${CONTEXTS[0]}"
 REMOTE_CSV="$(IFS=,; echo "${CONTEXTS[*]:1}")"

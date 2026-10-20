@@ -29,6 +29,9 @@
 #   platform_pod_filter <container>         -> jq program over a pod list: images (of the pods
 #                                              that started), restart fingerprint, Running
 #                                              count, first Running pod
+#   platform_members_check <ctx>...         -> die on a member listed twice, or two members
+#                                              the record would write under one name (no
+#                                              cluster call: with a script's argument checks)
 #   platform_probe <ctxs_csv>               -> read each member's platform and mesh builds once
 #                                              (see "The platform record" below)
 #   platform_probe_share <dir>              -> hand a sweep's record to the steps it runs
@@ -785,27 +788,17 @@ _platform_row_merge() {
 	printf '%s\n' "$out"
 }
 
-# platform_probe <ctxs_csv>: read the platform record of the members not in PLATFORM_PROBE_ROWS
-# yet, and again of those whose inherited line holds an unknown value (a member that did not
-# answer at the sweep's start; not after platform_probe_load, not in a dry-run), in parallel, and
-# put them in it (not exported: a sweep hands it on with platform_probe_share). Call it in the
-# script's own shell (not in $(...)), before any measurement window. Never fails for a member it
-# cannot read: those values are unknown and each one gets a warning. Dies when <ctxs_csv> lists a
-# member twice, or two members the record would write under one name (_platform_sanitize): their
-# values would be read, counted and recorded as two members' (mesh size, every value per member).
+# platform_members_check <ctx>...: die when a member is listed twice, or when two members would
+# be recorded under one name (_platform_sanitize: the record writes a member's name with A-Z,
+# a-z, 0-9 and _.:/@+- only): their values would be read, counted and recorded as one member's.
+# No cluster call. platform_probe checks this first; every script that calls it checks it with
+# its argument checks too, so its --dry-run refuses what its run would, and its run refuses
+# before its first cluster call (platform.bats checks the callers).
 # shellcheck disable=SC2329
-platform_probe() {
-	local ctx c row rows old add="" set=""
-	local -a ctxs=() todo=() _pl_again=()
+platform_members_check() {
+	local ctx c
 	local -A _pl_seen=() _pl_name=()
-	platform_validate
-	# Checked before the dry-run returns, though the probes (dataplane 002, controlplane 002) exit
-	# their dry-run before they call this: platform.bats's static test is what checks every caller.
-	declare -F reach_sanitize >/dev/null || die "platform_probe needs reach_sanitize (source tests/lib/reach.sh)"
-	split_csv "$1" ctxs
-	PLATFORM_PROBE_LAST="$(IFS=,; echo "${ctxs[*]}")"
-	_platform_index
-	for ctx in "${ctxs[@]}"; do
+	for ctx in "$@"; do
 		[[ -n "$ctx" ]] || continue
 		[[ -z "${_pl_seen[$ctx]+x}" ]] ||
 			die "${ctx} is listed twice among the mesh members: list each member once (--contexts or SETUP_CONTEXTS; a probe's --source-context is not one of its --remote-contexts)"
@@ -814,6 +807,31 @@ platform_probe() {
 		[[ -z "${_pl_name[$c]+x}" ]] ||
 			die "${_pl_name[$c]} and ${ctx} would be recorded under one name, ${c} (the record writes a member's name with A-Z, a-z, 0-9 and _.:/@+- only): rename one of the two contexts"
 		_pl_name[$c]="$ctx"
+	done
+}
+
+# platform_probe <ctxs_csv>: read the platform record of the members not in PLATFORM_PROBE_ROWS
+# yet, and again of those whose inherited line holds an unknown value (a member that did not
+# answer at the sweep's start; not after platform_probe_load, not in a dry-run), in parallel, and
+# put them in it (not exported: a sweep hands it on with platform_probe_share). Call it in the
+# script's own shell (not in $(...)), before any measurement window. Never fails for a member it
+# cannot read: those values are unknown and each one gets a warning. Dies, before any read, when
+# <ctxs_csv> lists a member twice or two members the record would write under one name
+# (platform_members_check).
+# shellcheck disable=SC2329
+platform_probe() {
+	local ctx row rows old add="" set=""
+	local -a ctxs=() todo=() _pl_again=()
+	platform_validate
+	# Checked before the dry-run returns, though the probes (dataplane 002, controlplane 002) exit
+	# their dry-run before they call this: platform.bats's static test is what checks every caller.
+	declare -F reach_sanitize >/dev/null || die "platform_probe needs reach_sanitize (source tests/lib/reach.sh)"
+	split_csv "$1" ctxs
+	platform_members_check ${ctxs[@]+"${ctxs[@]}"}
+	PLATFORM_PROBE_LAST="$(IFS=,; echo "${ctxs[*]}")"
+	_platform_index
+	for ctx in "${ctxs[@]}"; do
+		[[ -n "$ctx" ]] || continue
 		if [[ -z "${_PL_IDX[$ctx]+x}" ]]; then
 			todo+=("$ctx")
 		elif ! ((${DRY_RUN:-0} || ${PLATFORM_PROBE_LOADED:-0})) && _platform_row_has_unknown "${_PL_IDX[$ctx]}"; then

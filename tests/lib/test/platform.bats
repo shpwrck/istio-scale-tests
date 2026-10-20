@@ -1431,6 +1431,34 @@ first_step_line() {
 	grep -q 'platform_drift_unread ' "$f" || { echo "${f}: no platform_drift_unread"; false; }
 }
 
+@test "C10-S1, U10-S3: every script that calls platform_probe checks its members first, with its argument checks (platform_members_check), so its dry-run refuses what its run would" {
+	local f n seen=0 probe check
+	for f in "$ROOT"/tests/*/0*.sh; do
+		probe="$(grep -nE '^[[:space:]]*platform_probe ' "$f" | head -1 | cut -d: -f1)"
+		[[ -n "$probe" ]] || continue
+		seen=$((seen + 1))
+		check="$(grep -nE '^platform_members_check ' "$f" | head -1 | cut -d: -f1)"
+		[[ -n "$check" ]] || { echo "${f}: calls platform_probe without a top-level platform_members_check"; false; }
+		((check < probe)) || { echo "${f}: platform_members_check at ${check}, after its first platform_probe at ${probe}"; false; }
+		# Before the --dry-run returns: no "exit 0" of a DRY_RUN block above it.
+		n="$(awk -v c="$check" 'NR < c && /^if \(\(DRY_RUN\)\); then$/ { print NR; exit }' "$f")"
+		[[ -z "$n" ]] || { echo "${f}: a --dry-run block at ${n} before platform_members_check at ${check}"; false; }
+	done
+	# The probes, the sweeps, gateway-api 001 and tuning 003.
+	((seen >= 13)) || { echo "only ${seen} scripts call platform_probe"; false; }
+	# The check itself: no cluster call, a dry-run too.
+	probe_setup
+	run platform_members_check member-a member-b member-a
+	assert_failure
+	assert_output --partial "member-a is listed twice among the mesh members"
+	DRY_RUN=1 run platform_members_check "lab~a" lab_a
+	assert_failure
+	assert_output --partial "lab~a and lab_a would be recorded under one name, lab_a"
+	run platform_members_check member-a "" member-b
+	assert_success
+	[ ! -s "$CALLS" ]
+}
+
 @test "H6: every script that calls platform_probe or platform_drift_check sources reach.sh (address masking)" {
 	local f seen=""
 	for f in "$ROOT"/tests/*/0*.sh; do
