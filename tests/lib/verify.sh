@@ -24,8 +24,8 @@ for arg in "$@"; do
 	esac
 done
 
-# Every step runs awk. Sourcing common.sh checks it (awk_untyped_ok): with gawk 5.3 it runs awk
-# as mawk, or stops here once with the install hint instead of failing every bats file and
+# Every step runs awk. Sourcing common.sh checks it (awk_untyped_ok): with gawk 5.2 or 5.3 it runs
+# awk as mawk, or stops here once with the install hint instead of failing every bats file and
 # dry-run with it.
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/common.sh"
