@@ -4,8 +4,8 @@
 # controlplane-window2.bats, or fixture TSVs): 002 keeps the pods with the pod manifest
 # (istiod-spec.tsv, so --phase final has them) and writes a "# ISTIOD_NOT_READY=" line
 # right before the window's WINDOW_ROWS line; 004 gives a data warning naming the cell (a
-# growth window too), from the cell's latest attempt only, and the verdict does not change;
-# the cell stays done; redaction maps the member names in the line. Names are placeholders.
+# growth window too), and the verdict does not change; the cell stays done; redaction maps
+# the member names in the line. Names are placeholders.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -156,20 +156,9 @@ cp_tsv() {
 	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" != *INCOMPLETE* ]]
 }
 
-@test "004 reads the line only right before a WINDOW_ROWS line of the cell's latest attempt: a --resume that ran the cell again drops it; a growth window's own line counts" {
-	local d="${BATS_TEST_TMPDIR}/r" g="${BATS_TEST_TMPDIR}/g" n rows
+@test "004 reads the line only right before a WINDOW_ROWS line; a growth window's own line counts" {
+	local d="${BATS_TEST_TMPDIR}/r" g="${BATS_TEST_TMPDIR}/g"
 	mkdir -p "$d" "$g"
-	# The 30-service cell's first attempt had a not-Ready pod; a --resume ran it again.
-	cp_tsv "${d}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY=mesh-b=istiod-x"
-	n="$(wc -l < "${d}/controlplane-fixture-t2.tsv" | tr -d ' ')"
-	rows="$(tail -n 6 "${d}/controlplane-fixture-t2.tsv" | sed 's/^2026-06-01T00:10:00/2026-06-01T00:20:00/')"
-	{
-		printf '# RESUMED_AT=2026-06-01T00:20:00+00:00 TSV_LINES=%s HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8\n' "$n"
-		printf '# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3\n%s\n' "$rows"
-	} >> "${d}/controlplane-fixture-t2.tsv"
-	report json "$d"
-	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
-	[ "$(jq -c '[.metadata.attempts[].rows_kept]' <<<"$output")" = '[6,6]' ]
 	# A line that is not right before a WINDOW_ROWS line names nothing.
 	cp_tsv "${d}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY=mesh-b=istiod-x"$'\n'"# NOTE=bats"
 	report json "$d"

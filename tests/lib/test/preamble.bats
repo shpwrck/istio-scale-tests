@@ -133,56 +133,6 @@ source "${ROOT}/tests/lib/preamble.sh"
 }
 
 # ---------------------------------------------------------------------------
-# 003 --resume: the sweep-level scalars recorded only in the preamble (VSDR_EVERY,
-# VSDR_SUBSETS, PROXY_CHECK_*) must be the same for every row of the resumed TSV.
-# Each case stops before any cluster contact (a die, or the matrix-size guard).
-# ---------------------------------------------------------------------------
-
-# _resume_dir <subsets>: the VS/DR fixture widened to this harness's 66 columns (the
-# legacy-layout growth columns), so --resume accepts its width.
-_resume_dir() {
-	local subsets="$1" d="${BATS_TEST_TMPDIR}/sweep-fixture-t6"
-	mkdir -p "$d"
-	sed "s/^# VSDR_SUBSETS=.*/# VSDR_SUBSETS=${subsets}/" \
-		"${ROOT}/tests/lib/test/fixtures/controlplane_vsdr.tsv" \
-		| awk 'BEGIN { FS = OFS = "\t" }
-			/^#/ { print; next }
-			$1 == "timestamp" { print $0, "services_per_namespace", "workload_mode", "measurement_pods", "outside_namespaces", "outside_discovery", "window_kind", "istiod_services", "istiod_cpu_s_delta", "sidecar_mem_mi_avg", "gateway_clusters_max", "gateway_mem_mi_max", "root_cert_configmaps", "gateway_physical_mi_max", "gateway_ws_mi_max", "leftover_test_namespaces"; next }
-			{ print $0, 0, "pods", $4 * $5, 0, "none", "deploy", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A" }' \
-		> "${d}/controlplane-fixture-t6.tsv"
-	printf '%s' "$d"
-}
-
-@test "003 --resume: refuses an explicit --vsdr-subsets that differs from the preamble" {
-	d="$(_resume_dir 2)"
-	KUBECONFIG=/dev/null run "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" \
-		--contexts a,b --mesh-sizes 1 --replica-counts 3 --traffic-configs none,vsdr --vsdr-subsets 3
-	assert_failure 1
-	assert_output --partial "--vsdr-subsets 3 differs from VSDR_SUBSETS=2"
-}
-
-@test "003 --resume: adopts the recorded --vsdr-subsets, then validates it against replicas" {
-	d="$(_resume_dir 3)"
-	KUBECONFIG=/dev/null run "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" \
-		--contexts a,b --mesh-sizes 1 --replica-counts 2 --traffic-configs none,vsdr
-	assert_failure 1
-	assert_output --partial "using VSDR_SUBSETS=3 from the resumed sweep's preamble (this run had 2)"
-	assert_output --partial "--vsdr-subsets 3 > replica-count 2"
-}
-
-@test "003 --resume: adopts PROXY_CHECK_*; leaves the VS/DR pair alone without vsdr cells" {
-	d="$(_resume_dir 3)"
-	CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT=25 CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG=/dev/null \
-		run "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" \
-		--contexts a,b --mesh-sizes 1,2 --replica-counts 2 --traffic-configs none
-	assert_failure 1
-	assert_output --partial "using PROXY_CHECK_TOLERANCE_PCT=10 from the resumed sweep's preamble (this run had 25)"
-	refute_output --partial "VSDR_SUBSETS"
-	# Stopped by the matrix guard, i.e. after the resume checks and before any cluster call.
-	assert_output --partial "exceeds safety limit 1"
-}
-
-# ---------------------------------------------------------------------------
 # PL36 for churn-dataplane: three writers build the same TSV preamble (004's
 # pre-create, then 002 and 003 when they bootstrap the file). Each key one writer
 # adds and another omits is lost whenever the other writer created the file.
@@ -409,8 +359,6 @@ _iv_run() {
 		export ISTIO_VERSION="${PIN-v1.30.5}"
 		if [[ "${3:-}" == --no-stop ]]; then
 			istio_version_resolve --no-stop "$1" "$2" _iv_kubectl
-		elif [[ "${3:-}" == --resumed-at ]]; then
-			istio_version_resolve --resumed-at "$4" "$1" "$2" _iv_kubectl
 		else
 			istio_version_resolve "$1" "$2" _iv_kubectl
 		fi
@@ -980,51 +928,6 @@ _iv_recheck() {
 	assert_output 0
 }
 
-# _iv_resume <ctxs_csv> [<dry 0|1>]: resolve as a --resume started at a fixed time (no
-# readiness wait), then recheck; print the sweep_outcome arguments it returned.
-_iv_resume() {
-	(
-		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
-		unset ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC
-		export ISTIO_VERSION=v1.30.5
-		ISTIO_VERSION_READY_WAIT_SEC=0 istio_version_resolve --resumed-at 2026-10-17T10:00:00+00:00 "$1" "${2:-0}" _iv_kubectl
-		local -a out=()
-		istio_version_recheck out _iv_kubectl
-		printf '%s\n' ${out[@]+"${out[@]}"}
-	)
-}
-
-@test "a --resume records its own start condition and its start time in the sweep outcome, none included" {
-	IV_a=v1.30.5 IV_b=v1.30.5 run --separate-stderr _iv_resume a,b
-	assert_success
-	# An all-clear is an info line (note: on stdout, INFO= in the record), not a warning.
-	assert_output "$(printf '%s\n' --info "this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's (a resume's, when the first run wrote no TSV)")"
-	local -a args=()
-	mapfile -t args < <(IV_a=v1.30.5 IV_b=v1.30.5 _iv_resume a,b 2>/dev/null)
-	run --separate-stderr sweep_outcome "${args[@]}" --record "$BATS_TEST_TMPDIR" 3
-	assert_success
-	assert_line --index 1 "note: this --resume started at 2026-10-17T10:00:00+00:00 with every member ready (ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's (a resume's, when the first run wrote no TSV)."
-	[ -z "$stderr" ]
-	grep -q '^INFO=this --resume started at 2026-10-17T10:00:00+00:00 with every member ready' "${BATS_TEST_TMPDIR}/sweep-outcome.txt"
-	[ "$(grep -c '^NOTE=' "${BATS_TEST_TMPDIR}/sweep-outcome.txt" || true)" = 0 ]
-	# b not ready when the resume starts, ready at its end: the resume's own rows, by time.
-	rm -f "${BATS_TEST_TMPDIR}"/n-* "${BATS_TEST_TMPDIR}"/dn-*
-	IV_a=v1.30.5 IV_b=v1.30.5 IVSTATESEQ_b="IstioCNINotHealthy Healthy" run --separate-stderr _iv_resume a,b
-	assert_success
-	assert_line --index 0 -- "--note"
-	assert_line --index 1 "istiod or IstioCNI was still not ready when this --resume started at 2026-10-17T10:00:00+00:00, after waiting 0s (ISTIO_NOTREADY_AT_RESUME=b=IstioCNINotHealthy; the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's (a resume's, when the first run wrote no TSV)): the first cells the resume ran (rows from 2026-10-17T10:00:00+00:00 on) may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted"
-	assert_line --index 3 "not ready at the resume: IstioCNINotHealthy on 1 member (b)"
-	refute_output --partial "at the start of the sweep"
-	# Its warning says where the condition is recorded on a resume.
-	[[ "$stderr" == *"This --resume records them in sweep-outcome.txt as ISTIO_NOTREADY_AT_RESUME, with its start time (2026-10-17T10:00:00+00:00); the TSV preamble keeps the first run's ISTIO_NOTREADY_AT_START."* ]]
-	[[ "$stderr" != *"the preambles record"* ]]
-	# --dry-run reads nothing and notes nothing.
-	: > "$IV_LOG"
-	IV_a=v1.30.5 run --separate-stderr _iv_resume a 1
-	assert_output ""
-	[ ! -s "$IV_LOG" ]
-}
-
 @test "an Istio CR not settled whose IstioRevision read fails is a failed read naming the revision: retried, then an honest note" {
 	IV_a=v1.30.5 IVSTATE_a=ReconcileError IVRFAIL_a=1 run istio_live_version a _iv_kubectl
 	assert_output "$(printf 'unknown\nread\nthe Istio CR default is not settled: its state is ReconcileError, not Healthy, and its Reconciled condition is False; IstioRevision default: Unable to connect to the server: net/http: TLS handshake timeout\ndefault\n\nReconcileError')"
@@ -1382,43 +1285,4 @@ _iv_hostdep() {
 	# The long line is recorded masked, then cut.
 	run cat "${BATS_TEST_TMPDIR}/long.err"
 	assert_output --partial '"Unhandled Error" err="Get \"https://<api-host>:6443/api?timeout=32s\": dial tcp: lookup <api-host> on <ip>: no such host" logger="UnhandledError" tailtail'
-}
-
-@test "a --resume is never told to set warn, nor that it goes on, for an unknown version; a check that stops partway leaves no temp files" {
-	local tmpd="${BATS_TEST_TMPDIR}/tmpd"
-	mkdir -p "$tmpd"
-	# A member that cannot be read, under fail, at a --resume: warn would not help.
-	IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
-	assert_failure 1
-	[[ "$stderr" == *$'\n'"Nothing was changed. A --resume never goes on with an unknown version (ISTIO_VERSION_CHECK=warn would not help): once every member can be read, run the same --resume again."* ]]
-	[[ "$stderr" != *"set ISTIO_VERSION_CHECK=warn"* ]]
-	# A version off the pin at a --resume keeps the advice: a sweep that recorded that
-	# version resumes under warn.
-	IV_a=v1.30.6 run --separate-stderr _iv_run a 0 --resumed-at 2026-01-01T00:00:00+00:00
-	assert_failure 1
-	[[ "$stderr" == *"To go on anyway and record ISTIO_VERSION=v1.30.6, set ISTIO_VERSION_CHECK=warn."* ]]
-	# Under warn, a --resume with an unknown version is not told "Going on" just before
-	# 003 refuses it; a new run still is.
-	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
-	assert_success
-	[[ "$stderr" == *"warning: cannot read the running Istio version on 1 of 2 members:"* ]]
-	[[ "$stderr" != *"Going on"* ]]
-	ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0
-	assert_success
-	[[ "$stderr" == *"Going on (ISTIO_VERSION_CHECK=warn): the results record ISTIO_VERSION=mixed:"* ]]
-	# The check stops unexpectedly, at the start and at the end: under fail at a --resume,
-	# no warn advice; and nothing is left in TMPDIR either way.
-	_istio_version_read_all() { exit 3; }
-	TMPDIR="$tmpd" IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
-	assert_failure 1
-	[[ "$stderr" == *"stopped unexpectedly (exit 3; the error is above), so the version the members run is not known."$'\n'"Nothing was changed. A --resume never goes on with an unknown version (ISTIO_VERSION_CHECK=warn would not help): fix what the error above shows, then run the same --resume again."* ]]
-	[ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]
-	TMPDIR="$tmpd" ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_run a,b 0 --resumed-at 2026-01-01T00:00:00+00:00
-	assert_success
-	[[ "$stderr" == *"warning: the Istio version check stopped unexpectedly (exit 3; the error is above), so the version the members run is not known."* ]]
-	[[ "$stderr" != *"Going on"* ]]
-	TMPDIR="$tmpd" ISTIO_VERSION_CHECK=warn IV_a=v1.30.5 run --separate-stderr _iv_recheck a,b
-	assert_success
-	assert_line --index 0 -- "--problem"
-	[ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]
 }

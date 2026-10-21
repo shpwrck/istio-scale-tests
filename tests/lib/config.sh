@@ -137,7 +137,6 @@ _config_env_only_reason() {
 	case "$1" in
 	*_TEST_NAMESPACE) echo "cleanup deletes this namespace, so a typo in a file could delete a real one" ;;
 	*_MAX_MATRIX) echo "the large-matrix acknowledgment stays per invocation (PL10)" ;;
-	*_EXTEND_PLAN) echo "adding cells to a sweep's plan on --resume is acknowledged per invocation, as the large-matrix one" ;;
 	ISTIO_VERSION_CHECK) echo "running on a mesh whose Istio version is not the pin is acknowledged per invocation, like the pins themselves" ;;
 	ISTIO_VERSION_READY_*) echo "the version check's readiness wait is set per invocation, with ISTIO_VERSION_CHECK" ;;
 	ISTIO_PROXY_READ_PARALLEL) echo "the version check's read concurrency is set per invocation, with ISTIO_VERSION_CHECK" ;;

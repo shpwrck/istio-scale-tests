@@ -408,7 +408,7 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 
 **Why:** Making the harness run on two platforms (Kubernetes with the Sail operator, OpenShift with OSSM, on kind or cloud nodes) turned "which platform and mesh build produced this row" into a hidden variable. Round 1 of the de-Red-Hat cycle found that only the gateway-api check recorded the operator build: every other TSV and report would have averaged kind and cloud, Sail and OSSM runs without a trace, and a resumed sweep would have credited new rows to the build it started on.
 
-**How to preempt:** When a change adds an axis results depend on (platform, operator, node provider, mesh build), add it to the shared provenance emitter in that change (`tests/lib/platform.sh`), read it live before any measurement window, and write it from every TSV writer and placeholder (`config-suites.bats` checks the pairing). Every report merges it over its inputs and warns in its body when they differ; a `--resume` compares it with the record the sweep started with and refuses a definite change; a long sweep re-reads it at the end. Values that cannot be read are `unknown`, never a guess.
+**How to preempt:** When a change adds an axis results depend on (platform, operator, node provider, mesh build), add it to the shared provenance emitter in that change (`tests/lib/platform.sh`), read it live before any measurement window, and write it from every TSV writer and placeholder (`config-suites.bats` checks the pairing). Every report merges it over its inputs and warns in its body when they differ; a long sweep re-reads it at the end. Values that cannot be read are `unknown`, never a guess.
 
 (PL47 to PL54 were added after the de-Red-Hat cycle: rounds 1 to 4.)
 

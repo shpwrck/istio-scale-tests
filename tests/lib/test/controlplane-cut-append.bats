@@ -90,8 +90,7 @@ FAKE
 }
 
 # cp_row <ts> <ctx> <mesh> <svcs> <mem_mi>: a valid measurement row (66 columns, window
-# kind deploy, 3 replicas, 1 namespace, scoping none, traffic none), as
-# controlplane-resume2.bats writes it.
+# kind deploy, 3 replicas, 1 namespace, scoping none, traffic none).
 cp_row() {
 	printf '%s\t%s\t%s\t%s\t3\t1\tnone\t%s\t50\t90\t5\t9\t100\t3.33\t10\t60\t10\t10\t10\t50\t1.67\t20\t2048\t1048576\t1048576\t1048576\t3/3\t30.0\t100\t30\t0\t100\t200\t250\t10\t15\t40\t50\t120\t250\t22\t22\tOK\tnone\t0\t0\t1.00\t0.50\t30\t51200\t20480\t0\tpods\t4\t0\tnone\tdeploy\t%s\t12.5\t45\t120\t200\t3\t210\t180\t0\n' \
 		"$1" "$2" "$3" "$4" "$5" "$(($4 * 2))"
@@ -134,7 +133,7 @@ cut_sweep() {
 	rm -rf "${BATS_TEST_TMPDIR}/res"
 	FAKE_TERM=1 cut_sweep
 	[ "$status" -eq 143 ]
-	[[ "$stderr" == *"warning: could not write the INTERRUPTED row of the cell in progress; a --resume finds it by its rows"* ]]
+	[[ "$stderr" == *"warning: could not write the INTERRUPTED row of the cell in progress; the reports judge it by its rows"* ]]
 	grep -qx 'ENDED_SIGNAL=SIGTERM' "${D}/sweep-outcome.txt"
 	[ "$(awk -F'\t' '$2 == "INTERRUPTED"' "$TSV" | wc -l | tr -d ' ')" -eq 0 ]
 }

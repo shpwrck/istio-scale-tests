@@ -170,7 +170,7 @@ during the sweep, or the generation of a member's Istio CR or active IstioRevisi
 edit with the same version, an OSSM operator upgrade, a TLS profile change; or that end-of-sweep
 check failed) and when its harness changed under it (below). `sweep-outcome.txt` in the sweep
 dir keeps the outcome. While a sweep runs, its dir holds a lock (`.sweep.lock`, its PID):
-another run into that dir, or a `--resume` of it, is refused until it ends (a PID another user
+another run into that dir is refused until it ends (a PID another user
 runs counts as alive; the lock of a run that died is taken over, by one run at a time). Each
 suite README lists its exit codes. Every script has `--help`, and scripts that change a cluster
 also accept `--dry-run`.
@@ -232,11 +232,10 @@ not stop the run early; its answer at the deadline counts. The suite records the
 `--dry-run`, which reads nothing), `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in
 `ISTIO_ACTIVE_REVISIONS` (`<ctx>=<revision>,...`, `<ctx>=` for a member whose Istio CR could not
 be read; `unchecked` in a `--dry-run`, `unknown` after a version check that stopped unexpectedly
-and, in a report, for a TSV written before the key existed; a controlplane `--resume` refuses a
-member whose active revision changed since the sweep started), `ISTIO_GENERATIONS` (`<ctx>=<Istio
-CR generation>/<active IstioRevision generation>`: a sweep compares them at its end, and a
-controlplane `--resume` against the first run's, so a spec edited and changed back during the
-sweep is a problem too), `ISTIO_PROXY_VERSIONS` (`<ctx>=<version>:<count>+...`: the proxies
+and, in a report, for a TSV written before the key existed), `ISTIO_GENERATIONS` (`<ctx>=<Istio
+CR generation>/<active IstioRevision generation>`: a sweep compares them at its end, so a spec
+edited and changed back during the sweep is a problem too), `ISTIO_PROXY_VERSIONS`
+(`<ctx>=<version>:<count>+...`: the proxies
 connected to each member's istiod by Istio version, from istiod's `pilot_xds` gauge, read through
 the API server's pod proxy, `ISTIO_PROXY_READ_PARALLEL` (20) members at once and one pod of a
 member at a time, a pod being deleted left out with a note (the counts are approximate: a proxy can
@@ -248,10 +247,8 @@ a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready), `<ctx>=
 Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod rollout still in progress),
 `<ctx>=unreadable` (a rollout at the first read, then every re-read failed), `unchecked` (a
 `--dry-run`, or a version check that stopped unexpectedly) or, in a report, `unknown` (a TSV written
-before the key existed). A controlplane `--resume` keeps the first run's value in the TSV, and
-records its own, with its UTC start time, in a note of the sweep outcome
-(`ISTIO_NOTREADY_AT_RESUME=...`) and in the sweep dir's append-only `resumes.txt`, one line per
-resume. With `ISTIO_VERSION_CHECK=fail` (the default) a member on another version than the pin,
+before the key existed). With `ISTIO_VERSION_CHECK=fail` (the default) a member on another
+version than the pin,
 members on different versions, or a member that cannot be read stop every suite but gateway-api (a
 read-only check that only records it) before it changes anything; `ISTIO_VERSION_CHECK=warn` goes on
 and records what the mesh runs (`mixed:<a>/<b>` or `unknown` when they differ or cannot be read). A
@@ -326,9 +323,8 @@ takes as not read (a warning), never as a different build. A report whose
 inputs disagree for a member shows `mixed:<a>;<b>` there and says so in its body
 (`mixed:unknown,...` when only some inputs carry the key, with a warning that counts the inputs
 from before the key). A sweep reads the record once at its start and hands it to its steps in
-`platform-record.txt` in the sweep dir (each step still reads a member it recorded `unknown`; a
-controlplane `--resume` writes the file anew from its own read, while the TSV's preamble keeps
-the record of the sweep's start). It reads the record again at its end, with each member's
+`platform-record.txt` in the sweep dir (each step still reads a member it recorded `unknown`).
+It reads the record again at its end, with each member's
 Kubernetes version and its first member's tuning levers, Sidecar egress hosts and istiod limits
 when its TSVs record them (`TUNING_BASELINE`: four levers, each `on`, `off` or `unknown`, as
 "Tuning levers" in [tests/controlplane/README.md](tests/controlplane/README.md) describes), and
@@ -340,15 +336,8 @@ its Running istiod pods, churn-dataplane's on its source member only): a value t
 the sweep dir and the value at the start and at the end (the record's keys read `mixed:`, as does
 `KUBE_VERSIONS` in churn's report, which merges it); so does a value the read could not compare
 (not read at either end, or a digest `@unknown`), which the reports call not known. Members that
-changed the same way share one warning, which names five of them and counts the rest. A controlplane
-`--resume` stops on a definite difference from what the sweep's TSV records: a member's platform,
-mesh operator build (not its state), istiod or gateway proxy build, istiod env digest, tuning
-profile objects, node provider or Kubernetes version, or the source member's (the TSV's first)
-tuning baseline, Sidecar egress hosts or istiod CPU and memory limits; whatever it cannot read only
-warns. It also only warns when node allocatable, istiod's requests, a member's istiod replica count
-or the network topology differ (an autoscaler or an HPA moves some of them);
-[tests/controlplane/README.md](tests/controlplane/README.md) lists every check. Each record read is
-bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
+changed the same way share one warning, which names five of them and counts the rest. A record read
+is bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
 nodes), and `PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile
 objects, the Kubernetes versions, istiod's replica counts, and istiod's limits and replica counts
 read again at a run's end (20; lower it when the machine running the suite runs short of memory or
@@ -372,8 +361,8 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   bad line or a key outside the suite's list rejects the whole file before anything runs, with
   `file:line` and the reason.
 - **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
-  `--force-large-matrix` acknowledgment stays per run), `*_EXTEND_PLAN` (so does a controlplane
-  `--resume`'s `--extend-plan`), `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*` and
+  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK`,
+  `ISTIO_VERSION_READY_*` and
   `ISTIO_PROXY_READ_PARALLEL` (the version check above), `HARNESS_SHA_CHECK_SEC` and
   `SWEEP_STOP_GRACE_SEC` (every sweep, above) and the version pins in `config/versions.env`.
 - **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and

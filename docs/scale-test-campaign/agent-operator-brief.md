@@ -29,8 +29,8 @@ provisioning, import, networking or credential work.
    and the sweep continues. If a whole suite fails after one recovery attempt, run its cleanup,
    mark it FAILED in `CAMPAIGN_STATUS.md` with a redacted error, and move to the next suite.
 4. **Investigate a breaking error before retrying.** Find the cause with evidence (log tail, pod
-   events, the failing construct in isolation). Then re-run only the remaining `--mesh-sizes`
-   (controlplane: `--resume <sweep-dir>`).
+   events, the failing construct in isolation). Then run the suite's cleanup and re-run only the
+   remaining `--mesh-sizes` (each run writes a new sweep dir).
 5. **Check the numbers, not just the exit code.** `status=OK` only means the probe finished.
    Spot-check that values make sense (local latency < remote latency; expected trends; gauges
    aggregate correctly across the pinned istiod replicas).

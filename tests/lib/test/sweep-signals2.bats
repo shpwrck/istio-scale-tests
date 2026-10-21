@@ -8,7 +8,7 @@
 # next step (SWEEP_NEXT_CONSOLE). A lock another run has just created and not yet written
 # is held (sweep_lock). A bad SWEEP_STOP_GRACE_SEC, HARNESS_SHA_CHECK_SEC or
 # ISTIO_PROXY_READ_PARALLEL stops every sweep before any change, named; a probe run alone
-# stops on a bad ISTIO_PROXY_READ_PARALLEL. A stopped --resume says how many rows it added.
+# stops on a bad ISTIO_PROXY_READ_PARALLEL.
 # No cluster.
 
 bats_require_minimum_version 1.5.0
@@ -121,7 +121,7 @@ teardown() {
 		d="${BATS_TEST_TMPDIR}/sig-${kind}"
 		_one_fixture "$d"
 		_ps_stub "$d/bin" "$kind"
-		PATH="$d/bin:${PATH}" _SWEEP_PROC="$d/no-proc" SWEEP_NEXT_CONSOLE="./tests/x/003-run-sweep.sh --resume <dir>" \
+		PATH="$d/bin:${PATH}" _SWEEP_PROC="$d/no-proc" SWEEP_NEXT_CONSOLE="./tests/x/005-cleanup.sh --contexts ci-a" \
 			run --separate-stderr bash "$d/sweep.sh" "$d"
 		[ "$status" -eq 143 ] || { echo "${kind}: status ${status}: ${stderr}"; false; }
 		[[ "$stderr" == *"warning: neither 'ps -A -o pid=,ppid=,pgid=,stat=,lstart=' (no ps, or busybox ps without lstart) nor /proc/<pid>/stat works here: a signal that stops this sweep reaches only its running step's own process"* ]]
@@ -135,7 +135,7 @@ teardown() {
 		[ ! -e "$d/rec/.sweep.lock" ]
 		grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/rec/sweep-outcome.txt"
 		# The console's next step, in place of the record's.
-		[[ "$stderr" == *"  sweep dir: ${d}/rec; next: ./tests/x/003-run-sweep.sh --resume <dir>"* ]]
+		[[ "$stderr" == *"  sweep dir: ${d}/rec; next: ./tests/x/005-cleanup.sh --contexts ci-a"* ]]
 		grep -qx 'NEXT=run it again' "$d/rec/sweep-outcome.txt"
 	done
 }
@@ -187,9 +187,9 @@ teardown() {
 @test "a sweep that stops (not a signal) prints its console next step after the sweep dir" {
 	local d="${BATS_TEST_TMPDIR}/sig-die"
 	_one_fixture "$d"
-	SWEEP_DIE=1 SWEEP_NEXT_CONSOLE="./tests/x/003-run-sweep.sh --resume <dir>" run --separate-stderr bash "$d/sweep.sh" "$d"
+	SWEEP_DIE=1 SWEEP_NEXT_CONSOLE="./tests/x/005-cleanup.sh --contexts ci-a" run --separate-stderr bash "$d/sweep.sh" "$d"
 	assert_failure 1
-	[[ "$stderr" == *"  sweep dir: ${d}/rec"$'\n'"  next: ./tests/x/003-run-sweep.sh --resume <dir>"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == *"  sweep dir: ${d}/rec"$'\n'"  next: ./tests/x/005-cleanup.sh --contexts ci-a"* ]] || { echo "$stderr"; false; }
 	[ ! -e "$d/step-pid" ]
 }
 
@@ -257,33 +257,6 @@ teardown() {
 	[[ "$stderr" == *"error: ISTIO_PROXY_READ_PARALLEL must be a positive integer of members (got: 0); see config/options.env"* ]] || { echo "$stderr"; false; }
 	# Only reads ran (the Kubernetes versions), nothing that changes a member.
 	! grep -qE ' (apply|create|delete|patch|scale|label|annotate|exec|rollout) ' "$log"
-}
-
-@test "a --resume that stopped says how many rows it added before it stopped: none, or the count, in every format; not known without the TSV's RESUMED_AT line" {
-	local d="${BATS_TEST_TMPDIR}/stopres" t=2026-01-02T03:04:05Z
-	mkdir -p "$d"
-	printf 'RUN_ID=sweep-r1\nEXIT=4\nFAILED=1\nTOTAL=4\nFAILED_BY=PROBE_FAILED x1\n' > "$d/sweep-outcome.prev.txt"
-	printf 'RUN_ID=sweep-r1\nEXIT=1\nSTOPPED=1\nSTOP_REASON=could not write the plan\nCUT_SHORT=1\nSTARTED_AT=2026-01-01T00:00:00Z\nRESUMED_AT=%s\nENDED_AT=2026-01-02T03:05:00Z\n' "$t" > "$d/sweep-outcome.txt"
-	# The TSV: the first run's rows, then the resume's line (written in the +00:00 form an
-	# older resume used) and no row after it.
-	printf '# RUN_ID=sweep-r1\nrun_id\tx\nsweep-r1\t1\nsweep-r1\t2\n# RESUMED_AT=2026-01-02T03:04:05+00:00 HARNESS_SHA=v1\n' > "$d/controlplane-sweep-r1.tsv"
-	run sweep_outcome_recorded "$d" text
-	assert_output --partial "this stop ended a --resume of the sweep (started at ${t}): the outcome before it, from sweep-outcome.prev.txt, follows; that --resume added no rows before it stopped"
-	refute_output --partial "uncounted"
-	run sweep_outcome_recorded "$d" csv
-	assert_line "# WARNING: this stop ended a --resume of the sweep (started at ${t}): the outcome before it, from sweep-outcome.prev.txt, follows; that --resume added no rows before it stopped"
-	# Two rows after it (a comment line and a blank line do not count).
-	printf 'sweep-r1\t3\n# a note\n\nsweep-r1\t4\n' >> "$d/controlplane-sweep-r1.tsv"
-	run sweep_outcome_recorded "$d" md
-	assert_output --partial "the 2 row(s) that --resume added before it stopped are in the TSV, uncounted"
-	# Without the line (an older resume, or another suite): not known.
-	sed -i.bak '/^# RESUMED_AT=/d' "$d/controlplane-sweep-r1.tsv"
-	run sweep_outcome_recorded "$d" text
-	assert_output --partial "follows; the rows that --resume added before it stopped are in the TSV, uncounted"
-	# A RESUMED_AT line of another resume does not count for this one.
-	printf '# RESUMED_AT=2025-12-31T00:00:00Z\nsweep-r1\t5\n' >> "$d/controlplane-sweep-r1.tsv"
-	run sweep_outcome_recorded "$d" text
-	assert_output --partial "follows; the rows that --resume added before it stopped are in the TSV, uncounted"
 }
 
 @test "every sweep's --help, the top-level README, the suite READMEs and PL45 say that a kill -INT or -HUP skips a terminal's foreground (stop such a sweep with SIGTERM), that without a ps that lists start times or Linux's /proc a stop reaches only the step's own process, the 30 s grace, and which of the sweep's own commands finish first" {

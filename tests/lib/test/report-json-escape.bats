@@ -15,8 +15,8 @@ PROP_HDR=$'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1
 @test "controlplane 004 json: a run-config path, a mixed harness and a leftover count with \" and \\ read back as themselves" {
 	local d="${BATS_TEST_TMPDIR}/r" n
 	mkdir -p "$d"
-	# Two attempts of one run, each with its own harness (h1"q\x, h2"q\x): the json names
-	# both, and the mixed value. \t and \x stay two characters each (awk -v would read \t as
+	# Two TSVs of one run, each with its own harness (h1"q\x, h2"q\x): the json names both,
+	# and the mixed value. \t and \x stay two characters each (awk -v would read \t as
 	# a tab).
 	for n in 1 2; do
 		awk -v n="$n" '
@@ -31,7 +31,6 @@ PROP_HDR=$'run_id\tmesh_size\titeration\tsource_ctx\tremote_ctx\tt0_epoch_ns\tp1
 	[ "$(jq -r '.metadata.run_config' <<<"$output")" = 'configs/r"c\td.env' ]
 	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = 'mixed:h1"q\x,h2"q\x' ]
 	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = '["h1\"q\\x","h2\"q\\x"]' ]
-	[ "$(jq -c '[.metadata.attempts[].harness_sha]' <<<"$output")" = '["h1\"q\\x","h2\"q\\x"]' ]
 	[ "$(jq -c '.pooled_runs.harness_sha' <<<"$output")" = '["h1\"q\\x","h2\"q\\x"]' ]
 	[ "$(jq -r '.metadata.growth.leftover_test_namespaces_at_start' <<<"$output")" = '2 ("a\b")' ]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *'(HARNESS_SHA h1"q\x,h2"q\x)'* ]]

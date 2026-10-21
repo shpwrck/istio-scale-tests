@@ -3,9 +3,9 @@
 # during the baseline pass, or during a pass whose profile leaves the Istio CR alone
 # (istio_cr_patch: {}), is a problem (exit 4), named by the reads it fell between; the
 # sweep's own apply and revert are none. A re-run of 002 after a revert that died after its
-# patch is no foreign edit. The proxies are read after each pass's settle. A --resume's
-# reads are named by when it started. The Istio version check leaves nothing in TMPDIR when
-# it is interrupted; its proxy reads run at most ISTIO_PROXY_READ_PARALLEL members at once.
+# patch is no foreign edit. The proxies are read after each pass's settle. The Istio
+# version check leaves nothing in TMPDIR when it is interrupted; its proxy reads run at most
+# ISTIO_PROXY_READ_PARALLEL members at once.
 # Through the real scripts (PL33); no cluster: kubectl is a stub.
 
 bats_require_minimum_version 1.5.0
@@ -245,21 +245,8 @@ STUB
 	chmod +x "${BIN}/kubectl"
 }
 
-@test "the end recheck names a --resume's reads by when it started, and the proxies by the read they came from (after a pass's settle), in the problem and the note" {
+@test "the end recheck names the proxies by the read they came from (after a pass's settle), in its note" {
 	_kc_stub
-	PATH="${BIN}:${PATH}" run --separate-stderr bash -c '
-		source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/preamble.sh"
-		export ISTIO_VERSION=v1.30.5
-		istio_version_resolve --resumed-at 2026-06-01T00:04:00Z ci-a 0 kubectl 2>/dev/null
-		# Proxies on another version than istiod, read when this --resume started.
-		export ISTIO_PROXY_VERSIONS="ci-a=1.29.0:3+1.30.5:7"
-		export STUB_ISTIO_CR_GEN=4 STUB_ISTIO_REV_GEN=4
-		IV_END=(); istio_version_recheck IV_END kubectl 2>/dev/null
-		printf "%s\n" "${IV_END[@]}"'
-	assert_success
-	assert_output --partial "its Istio CR default (generation 2 when this --resume started at 2026-06-01T00:04:00Z, 4 at the end)"
-	assert_output --partial "proxies on another Istio version than their istiod were connected when this --resume started at 2026-06-01T00:04:00Z (ci-a (istiod 1.30.5): 3 on 1.29.0; ISTIO_PROXY_VERSIONS)"
-	refute_output --partial "at the start of this run (the --resume"
 	# The proxies read again after a pass's settle (as tuning 003 does): the note names that read.
 	KC_PROXY="1.29.0:3+1.30.5:7" PATH="${BIN}:${PATH}" run --separate-stderr bash -c '
 		source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/preamble.sh"

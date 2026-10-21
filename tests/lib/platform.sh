@@ -4,11 +4,11 @@
 # Consumers: every suite script that takes TEST_PLATFORM (platform_validate, with its argument
 # checks; the setups through platform_chart_args); propagation, churn, churn-dataplane,
 # controlplane, dataplane (the 001 setup scripts: the chart overlay; the TSV writers and reports:
-# the platform record; the sweeps: its drift check, and controlplane 003 --resume its resume
-# check), gateway-api (001: the platform record and the operator build), tuning (001: the refusal
-# of a profile's objects left on a member; 003: each pass's record, its drift check and that
-# refusal; 004: each pass's record, tuning levers, istiod limits and replica counts, compared
-# between passes; 005: the profile label and kinds; 006: the hub's Argo CD namespace)
+# the platform record; the sweeps: its drift check), gateway-api (001: the platform record and
+# the operator build), tuning (001: the refusal of a profile's objects left on a member; 003: each
+# pass's record, its drift check and that refusal; 004: each pass's record, tuning levers, istiod
+# limits and replica counts, compared between passes; 005: the profile label and kinds; 006: the
+# hub's Argo CD namespace)
 #
 # The suite charts default to Kubernetes: their pods run as a numeric non-root UID
 # (runAsUser), because the busybox and fortio images run as root and runAsNonRoot cannot
@@ -62,11 +62,6 @@
 #   platform_unread_members <by_context value>
 #                                           -> how many members' value was not read (unknown),
 #                                              in every input or in some
-#   platform_resume_check <tsv> <ctxs_csv> [<source_ctx>]
-#                                           -> die when a --resume would append rows measured on
-#                                              other builds, istiod settings, Kubernetes versions,
-#                                              tuning levers or istiod limits than the TSV's
-#                                              preamble records
 #   platform_drift_check <sweep_dir> <ctxs_csv> [<run>]
 #                                           -> after a sweep's last step (tuning 003: each pass's,
 #                                              <run> pass): read the record, the tuning levers,
@@ -122,13 +117,11 @@
 # cluster is asked and the Kubernetes defaults render, so a dry-run stays offline; set
 # TEST_PLATFORM=openshift to preview the OpenShift render. Needs split_csv, die, kv_value and
 # file_sha256 (tests/lib/common.sh); platform_probe and platform_drift_check need reach_sanitize
-# (tests/lib/reach.sh: their warnings mask addresses); platform_resume_check with a source
-# context tuning_baseline_state and probe_kube_versions (tests/lib/preamble.sh),
-# cap_istiod_limits and cap_node_totals (tests/lib/capacity.sh) and env_collect_infra
-# (tests/lib/envelope.sh); platform_drift_check reads the levers and Kubernetes versions again
-# with preamble.sh's, istiod's limits and the controlplane suite's replica counts with
-# capacity.sh's cap_istiod_limits (without one, a warning, and the values it reads are listed as
-# not compared at the end), and the other suites' Running istiod pods with a read of its own.
+# (tests/lib/reach.sh: their warnings mask addresses); platform_drift_check reads the levers and
+# Kubernetes versions again with preamble.sh's, istiod's limits and the controlplane suite's
+# replica counts with capacity.sh's cap_istiod_limits (without one, a warning, and the values it
+# reads are listed as not compared at the end), and the other suites' Running istiod pods with a
+# read of its own.
 #
 # The platform record (PL2, PL36, PL39, PL41): what each member ran, read live and once per
 # run, before any measurement window, into every TSV preamble and every report format (PL19).
@@ -205,10 +198,6 @@
 # goes to platform-drift.txt in the sweep dir, which every report of the sweep says in its body,
 # naming each member's value at the start and at the end (the record's keys merge it as a second
 # value, mixed:; so does KUBE_VERSIONS in a report that merges it, churn's).
-# controlplane 003 --resume compares the record, and the once-recorded values its report applies
-# to every row, with what its TSV holds (platform_resume_check), and writes the record it read into
-# the "# RESUMED_AT=" line its rows start after (platform_resume_words): the reports merge each
-# resume's record with the start's, and the next --resume compares it too.
 # shellcheck shell=bash
 
 # Fixed by the charts (do not override them there): the Sail operator's namespace and
@@ -263,8 +252,7 @@ PLATFORM_PASS_KEYS=(PLATFORM TEST_PLATFORM PLATFORM_BY_CONTEXT MESH_OPERATOR_BY_
 # next to each input (not *.tsv, so no report or tuning glob takes it for data).
 PLATFORM_DRIFT_FILE="platform-drift.txt"
 # The file platform_probe_share writes into a sweep dir: the record the sweep read at its start,
-# which its steps read (PLATFORM_PROBE_FILE). A controlplane --resume writes it anew from its own
-# read; the TSV's preamble keeps the record of the sweep's start.
+# which its steps read (PLATFORM_PROBE_FILE).
 PLATFORM_RECORD_FILE="platform-record.txt"
 
 # A step a sweep runs starts from the sweep's record, read here as this file is sourced
@@ -954,7 +942,7 @@ platform_probe_load() {
 # <dir>/platform-record.txt (created with <dir>) and export its path (PLATFORM_PROBE_FILE),
 # which a step reads when it sources this file. Never the environment: Linux refuses to run any
 # command whose environment holds a string over 128 KiB, the record of about 400 members. Call it
-# right after the sweep's platform_probe (and --resume check). With DRY_RUN=1 it writes nothing
+# right after the sweep's platform_probe. With DRY_RUN=1 it writes nothing
 # and each step records its own members (unknown, as the sweep's are).
 # shellcheck disable=SC2329
 platform_probe_share() {
@@ -1058,32 +1046,6 @@ platform_preamble_lines() {
 	done < <(_platform_values "$1")
 }
 
-# platform_resume_words <ctxs_csv>: the same record (PLATFORM_KEYS order) as one line of
-# space-separated KEY=value words (a value holds no space), for the "# RESUMED_AT=" line
-# controlplane 003 --resume writes where its rows begin: the TSV's preamble keeps the record of
-# the sweep's start, each resume's line its own (_platform_resume_values reads them back).
-# shellcheck disable=SC2329
-platform_resume_words() {
-	local line out=""
-	while IFS= read -r line; do
-		out+="${out:+ }${line}"
-	done < <(_platform_values "$1")
-	printf '%s\n' "$out"
-}
-
-# _platform_resume_values <tsv> <key>: the <key> value of each "# RESUMED_AT=" line of a TSV that
-# records one (platform_resume_words), one per line, in the TSV's order; nothing when no --resume
-# wrote its record there. Only the words before KUBE_VERSIONS, the line's last key, are read: its
-# context names are raw and may hold a space.
-# shellcheck disable=SC2329
-_platform_resume_values() {
-	awk -v k=" ${2}=" 'index($0, "# RESUMED_AT=") == 1 {
-		s = $0
-		if ((q = index(s, " KUBE_VERSIONS="))) s = substr(s, 1, q)
-		if ((p = index(s, k))) { v = substr(s, p + length(k)); sub(/ .*/, "", v); print v }
-	}' "$1" 2>/dev/null || true
-}
-
 # platform_collapse <by_context value>: the one value every member shares, else the value as is.
 # shellcheck disable=SC2329
 platform_collapse() {
@@ -1183,7 +1145,7 @@ _platform_part_match() {
 # (_platform_part_match): one without any differs; else one that only may match, or a value
 # not read on a side, makes it unknown. A side with nothing read is unknown.
 # _platform_build_cmp_to <name> <key> <value> <value>: the same into variable <name>, in this
-# shell (no fork: a resume or a report compares every member's value of every key). Two equal
+# shell (no fork: a report compares every member's value of every key). Two equal
 # values with nothing unread in them are the same without being split.
 # shellcheck disable=SC2329
 _platform_build_cmp() {
@@ -1263,8 +1225,7 @@ _platform_noun() {
 	esac
 }
 
-# _platform_cause <key>: what usually changes a key's value, for a drift warning and a refused
-# --resume.
+# _platform_cause <key>: what usually changes a key's value, for a drift warning.
 # shellcheck disable=SC2329
 _platform_cause() {
 	case "$1" in
@@ -1298,20 +1259,6 @@ _platform_drift_cause() {
 	*) fix="on fixed members" ;;
 	esac
 	echo "the usual cause is $(_platform_cause "$1"); for publishable figures, run the sweep again ${fix}"
-}
-
-# _platform_resume_causes <key>...: for a refused --resume, one line with the usual cause
-# (_platform_cause) of each key that differs, each once; nothing without a key.
-# shellcheck disable=SC2329
-_platform_resume_causes() {
-	local k out=""
-	local -A _pl_seen=()
-	for k in "$@"; do
-		[[ -n "$k" && -z "${_pl_seen[$k]+x}" ]] || continue
-		_pl_seen[$k]=1
-		out+="${out:+; }${k}: $(_platform_cause "$k")"
-	done
-	[[ -z "$out" ]] || printf 'Usual causes: %s.\n' "$out"
 }
 
 # _platform_names <name>...: the first five, comma-separated, then "and N more".
@@ -1398,11 +1345,9 @@ _platform_drift_values() {
 }
 
 # platform_merge_by_context <key> <tsv>...: one *_BY_CONTEXT key (or KUBE_VERSIONS) over a
-# report's inputs, member by member (PL26). The values a member has in the inputs (a record key's
-# from each --resume's own record too: _platform_resume_values; for an input whose preamble has
-# the key), and in the drift marker next to them -> that value when they are one build (values
-# that differ only in their state ";"-joined); else <ctx>=mixed:<a>;<b> with a warning that says
-# which (and, for values of one input, that its runs differ: a --resume read another): two builds
+# report's inputs, member by member (PL26). The values a member has in the inputs (and in the
+# drift marker next to them) -> that value when they are one build (values that differ only in
+# their state ";"-joined); else <ctx>=mixed:<a>;<b> with a warning that says which: two builds
 # (_platform_build_cmp), a value not read (unknown, or a digest @unknown: no pod had started)
 # next to a known one, or a value platform_drift_check found changed during the sweep. unknown
 # when no input has the key; mixed:unknown,<members> when only some have it (the legacy warning
@@ -1414,9 +1359,8 @@ _platform_drift_values() {
 # shellcheck disable=SC2329
 platform_merge_by_context() {
 	local key="$1" f line pair c x v cmp out="" n=0 missing=0 noun dis="" drf="" unr="" d i j unread partial differ atu=0 nokey=0
-	local runs=0 ins="input TSVs" oth="other inputs"
-	local -a order=() pairs=() _pl_dis=() _pl_drf=() _pl_unr=() _pl_kn=() _pl_dd=() _pl_drv=() _pl_fl=()
-	local -A _pl_vals=() _pl_drift=() _pl_unread_in=() _pl_ddir=() _pl_tsvv=() _pl_dend=() _pl_drvs=() _pl_fv=() _pl_fu=()
+	local -a order=() pairs=() _pl_dis=() _pl_drf=() _pl_unr=() _pl_kn=() _pl_dd=() _pl_drv=()
+	local -A _pl_vals=() _pl_drift=() _pl_unread_in=() _pl_ddir=() _pl_tsvv=() _pl_dend=() _pl_drvs=()
 	shift
 	for f in "$@"; do
 		n=$((n + 1))
@@ -1428,46 +1372,22 @@ platform_merge_by_context() {
 			! grep -q '^# PLATFORM_BY_CONTEXT=' "$f" 2>/dev/null || nokey=$((nokey + 1))
 			continue
 		fi
-		# The record each --resume of the input read (controlplane 003 writes it into its
-		# "# RESUMED_AT=" line): the rows after that line ran on it. KUBE_VERSIONS on that line
-		# is the attempts' (controlplane_attempts), which the report lists attempt by attempt.
-		_pl_fl=("$line")
-		if [[ " ${PLATFORM_ROW_KEYS[*]} " == *" ${key} "* ]]; then
-			while IFS= read -r x; do
-				[[ "$x" != *=* ]] || _pl_fl+=("$x")
-			done < <(_platform_resume_values "$f" "$key")
-		fi
-		_pl_fv=() _pl_fu=()
-		for line in "${_pl_fl[@]}"; do
-			IFS=',' read -r -a pairs <<<"$line"
-			for pair in "${pairs[@]}"; do
-				c="${pair%%=*}"
-				x="${pair#*=}"
-				if [[ -z "${_pl_vals[$c]+set}" ]]; then
-					order+=("$c")
-					_pl_vals[$c]="$x"
-				else
-					case ";${_pl_vals[$c]};" in *";${x};"*) ;; *) _pl_vals[$c]+=";${x}" ;; esac
-				fi
-				# A --resume that read another value than the input's start: its warnings say so.
-				if [[ -z "${_pl_fv[$c]+set}" ]]; then
-					_pl_fv[$c]="$x"
-				elif [[ "${_pl_fv[$c]}" != "$x" ]]; then
-					runs=1
-				fi
-				if _platform_unread "$key" "$x" || [[ "$x" == *@unknown* ]]; then _pl_fu[$c]=1; fi
-			done
-		done
-		# An input counts once per member, whichever of its runs did not read the member.
-		for c in "${!_pl_fu[@]}"; do
-			v="${_pl_unread_in[$c]:-0}"
-			_pl_unread_in[$c]=$((v + 1))
+		IFS=',' read -r -a pairs <<<"$line"
+		for pair in "${pairs[@]}"; do
+			c="${pair%%=*}"
+			x="${pair#*=}"
+			if [[ -z "${_pl_vals[$c]+set}" ]]; then
+				order+=("$c")
+				_pl_vals[$c]="$x"
+			else
+				case ";${_pl_vals[$c]};" in *";${x};"*) ;; *) _pl_vals[$c]+=";${x}" ;; esac
+			fi
+			if _platform_unread "$key" "$x" || [[ "$x" == *@unknown* ]]; then
+				v="${_pl_unread_in[$c]:-0}"
+				_pl_unread_in[$c]=$((v + 1))
+			fi
 		done
 	done
-	if ((runs)); then
-		ins="input TSVs, or the runs of one (its start and a --resume),"
-		oth="other inputs, or other runs of one (a --resume),"
-	fi
 	if ((n == 0 || missing == n)); then
 		echo unknown
 		return 0
@@ -1543,10 +1463,10 @@ platform_merge_by_context() {
 		return 0
 	fi
 	if [[ -n "$dis" ]]; then
-		platform_short_digests "warning: ${ins} disagree on ${key} for ${dis}: the report mixes runs on different ${noun}; compare like with like" >&2
+		platform_short_digests "warning: input TSVs disagree on ${key} for ${dis}: the report mixes runs on different ${noun}; compare like with like" >&2
 	fi
 	if [[ -n "$unr" ]]; then
-		echo "warning: ${key} could not be read for ${unr} input TSV(s) (recorded unknown$([[ "$key" != KUBE_VERSIONS ]] || echo " or unreachable")$( ((atu == 0)) || echo ", or with a digest @unknown: no pod had started")), while ${oth} have a value: the report cannot tell whether those runs had the same ${noun} as the others" >&2
+		echo "warning: ${key} could not be read for ${unr} input TSV(s) (recorded unknown$([[ "$key" != KUBE_VERSIONS ]] || echo " or unreachable")$( ((atu == 0)) || echo ", or with a digest @unknown: no pod had started")), while other inputs have a value: the report cannot tell whether those runs had the same ${noun} as the others" >&2
 	fi
 	if ((nokey)); then
 		echo "warning: ${key} is not recorded in ${nokey} of ${n} input TSV(s) (written before the platform record had the key), while other inputs have it: the report cannot tell whether those runs had the same ${noun} as the others" >&2
@@ -1554,42 +1474,24 @@ platform_merge_by_context() {
 	printf '%s\n' "$out"
 }
 
-# _platform_merge_scalar <key> <tsv>...: PLATFORM or TEST_PLATFORM over a report's inputs (and
-# each --resume's own record of an input that has the line: _platform_resume_values): one value;
-# mixed:<a>,<b> with a warning when two inputs (or two runs of one) disagree, or when one recorded
-# unknown and another a value. A file without the line counts as unknown (the legacy warning
-# names those).
+# _platform_merge_scalar <key> <tsv>...: PLATFORM or TEST_PLATFORM over a report's inputs: one
+# value; mixed:<a>,<b> with a warning when two inputs disagree, or when one recorded unknown and
+# another a value. A file without the line counts as unknown (the legacy warning names those).
 # shellcheck disable=SC2329
 _platform_merge_scalar() {
-	local key="$1" f v vals="" known=0 unread=0 n=0 runs=0 fu has consequence ins="input TSVs" oth="other inputs"
-	local -a _pl_msv=()
+	local key="$1" f v vals="" known=0 unread=0 n=0 consequence
 	shift
 	for f in "$@"; do
 		n=$((n + 1))
 		v="$(grep -m1 "^# ${key}=" "$f" 2>/dev/null || true)"
-		has=0
 		if [[ -n "$v" ]]; then
-			has=1
-			_pl_msv=("${v#*=}")
-			while IFS= read -r v; do
-				[[ -z "$v" ]] || _pl_msv+=("$v")
-			done < <(_platform_resume_values "$f" "$key")
+			v="${v#*=}"
+			[[ "$v" != unknown ]] || unread=$((unread + 1))
 		else
-			_pl_msv=(unknown)
+			v=unknown
 		fi
-		fu=0
-		for v in "${_pl_msv[@]}"; do
-			[[ "$v" != unknown ]] || fu=1
-			[[ "$v" == "${_pl_msv[0]}" ]] || runs=1
-			case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
-		done
-		# A file without the line is the legacy warning's, not one that could not be read.
-		((has == 0 || fu == 0)) || unread=$((unread + 1))
+		case ",${vals}," in *",${v},"*) ;; *) vals="${vals:+${vals},}${v}" ;; esac
 	done
-	if ((runs)); then
-		ins="input TSVs, or the runs of one (its start and a --resume),"
-		oth="other inputs, or other runs of one (a --resume),"
-	fi
 	[[ -n "$vals" ]] || { echo unknown; return 0; }
 	v=",${vals},"
 	v="${v//,unknown,/,}"
@@ -1605,10 +1507,10 @@ _platform_merge_scalar() {
 	*) consequence="the report mixes runs on different platforms; compare like with like" ;;
 	esac
 	if [[ "$v" == *,* ]]; then
-		echo "warning: ${ins} disagree on ${key} (${v}); ${consequence}" >&2
+		echo "warning: input TSVs disagree on ${key} (${v}); ${consequence}" >&2
 	fi
 	if ((known && unread)); then
-		echo "warning: ${key} could not be read in ${unread} of ${n} input TSV(s) (recorded unknown), while ${oth} have a value: the report cannot tell whether those runs had the same $(_platform_noun "$key") as the others" >&2
+		echo "warning: ${key} could not be read in ${unread} of ${n} input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same $(_platform_noun "$key") as the others" >&2
 	fi
 	echo "mixed:${vals}"
 }
@@ -1945,7 +1847,7 @@ _platform_drift_scalar_findings() {
 			[[ -z "$what" ]] || printf '%s\t%s\t%s\t%s\n' "$name" ISTIOD_REPLICAS_BY_CONTEXT "$what" "$form"
 		fi
 		[[ -n "${_pl_start["ISTIOD_CPU_LIMIT_M|${d}"]+x}${_pl_start["ISTIOD_MEM_LIMIT_MI|${d}"]+x}" ]] || continue
-		# Every drift check's members (a --resume runs one more), each pair once.
+		# Every drift check's members, each pair once.
 		what="$(sed -n 's/^# ISTIOD_LIMITS_DIFFER_BY_CONTEXT=//p' "${d}/${PLATFORM_DRIFT_FILE}" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)"
 		[[ -n "$what" ]] || continue
 		printf '%s\t%s\t%s\t%s\t%s\n' "$name" ISTIOD_LIMITS_DIFFER_BY_CONTEXT "$what" \
@@ -3002,17 +2904,14 @@ _platform_rows_of() {
 	done
 }
 
-# _platform_file_rows <tsv>: the record a TSV holds, as PLATFORM_PROBE_ROWS lines: its preamble's
-# (the `# ` lines before its header) and, for each key the preamble has, the record each --resume
-# wrote into its "# RESUMED_AT=" line (platform_resume_words), member by member. A value more than
-# one run read: those read with every digest, else those with a digest @unknown, else unknown,
-# ";"-joined when they are more than one (the next --resume is compared with each of them:
-# _platform_build_cmp). A member a key does not list reads unknown there (so does a key the TSV
-# predates). Nothing for a file without PLATFORM_BY_CONTEXT (it predates the record).
+# _platform_file_rows <tsv>: the record a TSV's preamble holds (the `# ` lines before its
+# header), as PLATFORM_PROBE_ROWS lines; a member a key does not list reads unknown there (so
+# does a key the TSV predates). Nothing for a file without PLATFORM_BY_CONTEXT (it predates the
+# record).
 # shellcheck disable=SC2329
 _platform_file_rows() {
-	local line k pair c j row v w best part
-	local -a _pl_order=() _pl_p=() _pl_fkv=() _pl_vs=()
+	local line k pair c j row
+	local -a _pl_order=() _pl_p=()
 	local -A _pl_fv=() _pl_seen=() _pl_in=()
 	while IFS= read -r line; do
 		[[ "$line" == '#'* ]] || break
@@ -3022,58 +2921,19 @@ _platform_file_rows() {
 		for j in "${!PLATFORM_ROW_KEYS[@]}"; do
 			[[ "$k" == "${PLATFORM_ROW_KEYS[j]}" && -z "${_pl_seen[$k]+x}" ]] || continue
 			_pl_seen[$k]=1
-			_pl_fkv+=("${j}"$'\t'"${line#*=}")
+			IFS=',' read -r -a _pl_p <<<"${line#*=}"
+			for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
+				[[ "$pair" == *=* ]] || continue
+				c="${pair%%=*}"
+				[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_order+=("$c"); }
+				_pl_fv["${j}|${c}"]="${pair#*=}"
+			done
 		done
 	done <"$1"
 	[[ -n "${_pl_seen[PLATFORM_BY_CONTEXT]+x}" ]] || return 0
-	# Each --resume's record, for the keys the preamble has (the words before KUBE_VERSIONS, the
-	# line's last key: its context names are raw and may hold a space).
-	while IFS= read -r line; do
-		read -r -a _pl_p <<<"$line"
-		for w in ${_pl_p[@]+"${_pl_p[@]}"}; do
-			[[ "$w" != KUBE_VERSIONS=* ]] || break
-			k="${w%%=*}"
-			for j in "${!PLATFORM_ROW_KEYS[@]}"; do
-				[[ "$k" == "${PLATFORM_ROW_KEYS[j]}" && -n "${_pl_seen[$k]+x}" ]] || continue
-				_pl_fkv+=("${j}"$'\t'"${w#*=}")
-			done
-		done
-	done < <(grep '^# RESUMED_AT=' "$1" 2>/dev/null || true)
-	for line in ${_pl_fkv[@]+"${_pl_fkv[@]}"}; do
-		j="${line%%$'\t'*}"
-		IFS=',' read -r -a _pl_p <<<"${line#*$'\t'}"
-		for pair in ${_pl_p[@]+"${_pl_p[@]}"}; do
-			[[ "$pair" == *=* ]] || continue
-			c="${pair%%=*}"
-			v="${pair#*=}"
-			[[ -n "${_pl_in[$c]+x}" ]] || { _pl_in[$c]=1; _pl_order+=("$c"); }
-			if [[ -z "${_pl_fv["${j}|${c}"]+x}" ]]; then
-				_pl_fv["${j}|${c}"]="$v"
-			else
-				case ";${_pl_fv["${j}|${c}"]};" in *";${v};"*) ;; *) _pl_fv["${j}|${c}"]+=";${v}" ;; esac
-			fi
-		done
-	done
 	for c in ${_pl_order[@]+"${_pl_order[@]}"}; do
 		row="$c"
-		for j in "${!PLATFORM_ROW_KEYS[@]}"; do
-			v="${_pl_fv["${j}|${c}"]:-unknown}"
-			if [[ "$v" == *';'* ]]; then
-				best="" part=""
-				IFS=';' read -r -a _pl_vs <<<"$v"
-				for w in "${_pl_vs[@]}"; do
-					if _platform_unread "${PLATFORM_ROW_KEYS[j]}" "$w"; then
-						continue
-					elif [[ "$w" == *@unknown* ]]; then
-						part+="${part:+;}${w}"
-					else
-						best+="${best:+;}${w}"
-					fi
-				done
-				v="${best:-${part:-unknown}}"
-			fi
-			row+=$'\t'"$v"
-		done
+		for j in "${!PLATFORM_ROW_KEYS[@]}"; do row+=$'\t'"${_pl_fv["${j}|${c}"]:-unknown}"; done
 		printf '%s\n' "$row"
 	done
 }
@@ -3131,297 +2991,6 @@ _platform_diff() {
 # shellcheck disable=SC2329
 _platform_preamble_value() {
 	awk -v k="# ${2}=" '!/^#/ { exit 1 } index($0, k) == 1 { print substr($0, length(k) + 1); found = 1; exit } END { exit !found }' "$1"
-}
-
-# _platform_unread_why <tsv> <key> <recorded> <now> [<hint>]: for a resume's warning, which side
-# of one comparison was not read: not in the record (the TSV predates the key: <recorded> empty),
-# unknown in it, recorded with a digest @unknown, not read now (<hint> says why), read now with a
-# digest @unknown; else comparable only in part (a value recorded without its digest). A record
-# key of a TSV whose earlier resumes recorded theirs (_pl_nres, dynamic scope: from
-# platform_resume_check) was not read by those either.
-# shellcheck disable=SC2329
-_platform_unread_why() {
-	local tsv="$1" key="$2" o="$3" n="$4" hint="${5:-}" why="" res="" pod=""
-	if ((${_pl_nres:-0})) && [[ " ${PLATFORM_ROW_KEYS[*]} " == *" ${key} "* ]]; then
-		res=", nor at the --resume runs before this one"
-		pod=" at the sweep's start${res}"
-	fi
-	if [[ -z "$o" ]]; then
-		why="not in the record of ${tsv} (it predates the key)"
-	elif _platform_unread "$key" "$o"; then
-		why="${o} in the record of ${tsv} (not read at the sweep's start${res})"
-	elif [[ "$o" == *@unknown* ]]; then
-		why="recorded with a digest @unknown in ${tsv} (no pod had started${pod})"
-	fi
-	if [[ -z "$n" ]] || _platform_unread "$key" "$n"; then
-		why+="${why:+, and }could not be read now${hint}"
-	elif [[ "$n" == *@unknown* ]]; then
-		why+="${why:+, and }read with a digest @unknown now (no pod has started)"
-	fi
-	[[ -n "$why" ]] || why="comparable only in part (recorded $(platform_short_digests "$o"), now $(platform_short_digests "$n"))"
-	printf '%s\n' "$why"
-}
-
-# platform_resume_check <tsv> <ctxs_csv> [<source_ctx>]: before --resume appends rows to <tsv>,
-# whose preamble keeps what the sweep recorded at its start, compare that with what these members
-# have now: each member's record (PLATFORM_ROW_KEYS; platform_probe just read it), against the
-# start's and the one each earlier --resume wrote into its "# RESUMED_AT=" line
-# (_platform_file_rows: a value the start could not read is compared with what a resume read). With
-# <source_ctx> (the run's first context; controlplane 003) also the values the report applies to
-# every row: each member's KUBE_VERSIONS (probe_kube_versions) and, on the member the TSV read
-# them on (its record's first member when it is in this run, else <source_ctx>, with a warning),
-# TUNING_BASELINE and SIDECAR_EGRESS_HOSTS (tuning_baseline_state) and ISTIOD_CPU_LIMIT_M and
-# ISTIOD_MEM_LIMIT_MI (cap_istiod_limits: the denominators of the report's istiod limit figures).
-# A definite difference in any of them dies: the new rows would be credited to builds, settings
-# or limits that did not produce them. Only warns: a value not read on either side (the warning
-# says which side), a member on one side only, a TSV from before the record or a key, another
-# TEST_PLATFORM, and the values the report only shows: NODE_ALLOC_CPU_M and NODE_ALLOC_MEM_MI
-# (cap_node_totals; a cluster autoscaler moves them), ISTIOD_REQ_*, ISTIOD_LIM_*,
-# ISTIOD_REPLICAS_BY_CONTEXT (an HPA moves it; ISTIOD_REPLICAS is its summary; five warnings,
-# then how many more members) and NETWORK_TOPOLOGY (env_collect_infra). METRICS_API is not
-# compared: the resumed run's own preflight checks the metrics API. One line on stdout says the
-# comparison ran. Nothing in a dry-run, or when <tsv> has no header yet (it is written anew).
-# shellcheck disable=SC2329
-platform_resume_check() {
-	local tsv="$1" _pl_ctxs="$2" tctx="${3:-}" old new kind c key o n dies="" line tb_old eh_old tb_new="" eh_new="" lv
-	local again tp_old snap src unr="" g cmp keys kv_old kv_new lim nt infra note csv _pl_tn i more=0 at
-	# Read by _platform_unread_why (dynamic scope): the earlier resumes that recorded theirs.
-	local _pl_nres=0
-	local -a _pl_lv=() _pl_lo=() _pl_rc=() _pl_gk=() _pl_p=() _pl_ga=() _pl_dzo=() _pl_ck=() _pl_ugo=()
-	local -a _pl_rgo=() _pl_mr=() _pl_mt=()
-	local -A _pl_ov=() _pl_nv=() _pl_raw=() _pl_gkeys=() _pl_rko=() _pl_rkn=() _pl_dz=() _pl_ug=() _pl_rg=()
-	if [[ -n "$tctx" ]]; then
-		declare -F tuning_baseline_state >/dev/null ||
-			die "platform_resume_check needs tuning_baseline_state (source tests/lib/preamble.sh)"
-		declare -F probe_kube_versions >/dev/null ||
-			die "platform_resume_check needs probe_kube_versions (source tests/lib/preamble.sh)"
-		declare -F cap_istiod_limits >/dev/null ||
-			die "platform_resume_check needs cap_istiod_limits (source tests/lib/capacity.sh)"
-		declare -F cap_node_totals >/dev/null ||
-			die "platform_resume_check needs cap_node_totals (source tests/lib/capacity.sh)"
-		declare -F env_collect_infra >/dev/null ||
-			die "platform_resume_check needs env_collect_infra (source tests/lib/envelope.sh)"
-	fi
-	! ((${DRY_RUN:-0})) || return 0
-	[[ -f "$tsv" ]] && grep -q '^timestamp' "$tsv" 2>/dev/null || return 0
-	again="Start a new sweep instead: run $(printf '%q' "$0") again with this sweep's flags (and --config) but without --resume; it writes a new sweep-<RUN_ID>/ in its results dir and leaves this one as it is."
-	# The run-config snapshot config_snapshot keeps in the sweep dir (a sweep run with --config).
-	for snap in "$(dirname "$tsv")"/run-config-*.env; do
-		[[ -f "$snap" ]] || continue
-		again+=" This sweep's config snapshot replays its --config values: $(printf '%q' "$0") --config $(printf '%q' "$snap") (plus the flags it ran with besides --config)."
-		break
-	done
-	again+=" Or put the members back on what the TSV records and resume."
-	old="$(_platform_file_rows "$tsv")"
-	new="$(_platform_rows_of "$_pl_ctxs")"
-	# The run's members by the names the TSV records (_platform_sanitize).
-	split_csv "$_pl_ctxs" _pl_rc
-	for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
-		_platform_sanitize_to g "$c"
-		[[ -n "${_pl_raw[$g]+x}" ]] || _pl_raw[$g]="$c"
-	done
-	# The TSV read its once-recorded values on its first member (the sweep's first context then):
-	# read them there again when that member is in this run, whatever order --contexts lists now.
-	if [[ -n "$tctx" && -n "$old" ]]; then
-		src="${old%%$'\t'*}"
-		if [[ -n "${_pl_raw[$src]+x}" ]]; then
-			[[ "${_pl_raw[$src]}" == "$tctx" ]] ||
-				echo "--resume: reading TUNING_BASELINE and istiod's limits on ${_pl_raw[$src]}, the member ${tsv} read them on (this run lists ${tctx} first)" >&2
-			tctx="${_pl_raw[$src]}"
-		else
-			echo "warning: --resume: ${tsv} read TUNING_BASELINE and istiod's limits on ${src}, which is not a member of this run; comparing them with ${tctx}'s" >&2
-		fi
-	fi
-	_pl_nres="$(grep -c '^# RESUMED_AT=.* PLATFORM_BY_CONTEXT=' "$tsv" 2>/dev/null)" || _pl_nres=0
-	at="at the sweep's start"
-	((_pl_nres == 0)) || at+=" and at the ${_pl_nres} --resume run(s) before this one"
-	echo "Platform record: comparing what $(_platform_names ${_pl_rc[@]+"${_pl_rc[@]}"}) run now with what ${tsv} recorded ${at} (--resume)"
-	if [[ -z "$old" ]]; then
-		echo "warning: --resume: ${tsv} predates the platform record (no PLATFORM_BY_CONTEXT line), so this run cannot tell whether the members still run the builds its rows were measured on; its report reads them unknown" >&2
-	else
-		while IFS=$'\t' read -r kind c key o n; do
-			case "$kind" in
-			differs) _platform_group _pl_dz _pl_dzo "${key}"$'\x1f'"${o}"$'\x1f'"${n}" "$c" ;;
-			unknown)
-				[[ "$o" != unknown ]] || _platform_preamble_value "$tsv" "$key" >/dev/null || o=""
-				unr+="${c}"$'\t'"$(_platform_unread_why "$tsv" "$key" "$o" "$n" " (the warnings above say why)")"$'\t'"${key}"$'\n'
-				;;
-			missing)
-				if [[ "$o" == - ]]; then _pl_mr+=("$c"); else _pl_mt+=("$c"); fi
-				;;
-			esac
-		done < <(_platform_diff "$old" "$new" "$_pl_ctxs")
-		if ((${#_pl_mr[@]} == 1)); then
-			echo "warning: --resume: ${_pl_mr[0]} is a member of this run but not of the record in ${tsv}: its builds are recorded from this resume on (the TSV's \"# RESUMED_AT=\" line), and the report lists them from there" >&2
-		elif ((${#_pl_mr[@]})); then
-			echo "warning: --resume: $(_platform_names "${_pl_mr[@]}") are members of this run but not of the record in ${tsv}: their builds are recorded from this resume on (the TSV's \"# RESUMED_AT=\" line), and the report lists them from there" >&2
-		fi
-		if ((${#_pl_mt[@]} == 1)); then
-			echo "warning: --resume: ${_pl_mt[0]} is in the record of ${tsv} but not a member of this run" >&2
-		elif ((${#_pl_mt[@]})); then
-			echo "warning: --resume: $(_platform_names "${_pl_mt[@]}") are in the record of ${tsv} but not members of this run" >&2
-		fi
-	fi
-	tp_old="$(_platform_preamble_value "$tsv" TEST_PLATFORM)" || tp_old=""
-	if [[ -n "$tp_old" && "$tp_old" != "${TEST_PLATFORM:-auto}" ]]; then
-		echo "warning: --resume: ${tsv} was started with TEST_PLATFORM=${tp_old}, this run has TEST_PLATFORM=${TEST_PLATFORM:-auto}: its suite charts may get another overlay than the recorded rows had" >&2
-	fi
-	if [[ -n "$tctx" ]]; then
-		# Its warnings name members as the TSV records them (_platform_sanitize).
-		_pl_tn="$(_platform_sanitize "$tctx")"
-		for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
-			_platform_sanitize_to g "$c"
-			_pl_ga+=("$g")
-		done
-		# Kubernetes versions, member by member (probe_kube_versions names them as given).
-		kv_old="$(_platform_preamble_value "$tsv" KUBE_VERSIONS)" || kv_old=""
-		kv_new="$(probe_kube_versions "$_pl_ctxs" "${KUBECTL[@]}")"
-		IFS=',' read -r -a _pl_p <<<"$kv_old"
-		for line in ${_pl_p[@]+"${_pl_p[@]}"}; do [[ "$line" != *=* ]] || _pl_rko[${line%%=*}]="${line#*=}"; done
-		IFS=',' read -r -a _pl_p <<<"$kv_new"
-		for line in ${_pl_p[@]+"${_pl_p[@]}"}; do [[ "$line" != *=* ]] || _pl_rkn[${line%%=*}]="${line#*=}"; done
-		for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
-			if [[ -z "$kv_old" ]]; then
-				unr+="$(_platform_sanitize "$c")"$'\t'"$(_platform_unread_why "$tsv" KUBE_VERSIONS "" "${_pl_rkn[$c]:-unknown}")"$'\t'KUBE_VERSIONS$'\n'
-				continue
-			fi
-			# A member the sweep did not have at its start: the record's warning names it.
-			[[ -n "${_pl_rko[$c]+x}" ]] || continue
-			o="${_pl_rko[$c]}"
-			n="${_pl_rkn[$c]:-unknown}"
-			_platform_build_cmp_to cmp KUBE_VERSIONS "$o" "$n"
-			case "$cmp" in
-			differs) _platform_group _pl_dz _pl_dzo "KUBE_VERSIONS"$'\x1f'"${o}"$'\x1f'"${n}" "$(_platform_sanitize "$c")" ;;
-			unknown) unr+="$(_platform_sanitize "$c")"$'\t'"$(_platform_unread_why "$tsv" KUBE_VERSIONS "$o" "$n" " (${n})")"$'\t'KUBE_VERSIONS$'\n' ;;
-			esac
-		done
-		# The tuning levers and the root Sidecar's egress hosts.
-		tb_old="$(_platform_preamble_value "$tsv" TUNING_BASELINE)" || tb_old=""
-		eh_old="$(_platform_preamble_value "$tsv" SIDECAR_EGRESS_HOSTS)" || eh_old=""
-		while IFS= read -r line; do
-			case "$line" in
-			TUNING_BASELINE=*) tb_new="${line#*=}" ;;
-			SIDECAR_EGRESS_HOSTS=*) eh_new="${line#*=}" ;;
-			esac
-		done < <(tuning_baseline_state "$tctx" "${KUBECTL[@]}")
-		if [[ "$tb_old" != *=* || "$tb_new" != *=* ]]; then
-			unr+="${_pl_tn}"$'\t'"$(_platform_unread_why "$tsv" TUNING_BASELINE "$tb_old" "${tb_new:-unknown}")"$'\t'TUNING_BASELINE$'\n'
-		else
-			IFS=',' read -r -a _pl_lv <<<"$tb_old"
-			for lv in ${_pl_lv[@]+"${_pl_lv[@]}"}; do
-				_pl_lo+=("${lv%%=*}")
-				_pl_ov[${lv%%=*}]="${lv#*=}"
-			done
-			IFS=',' read -r -a _pl_lv <<<"$tb_new"
-			for lv in ${_pl_lv[@]+"${_pl_lv[@]}"}; do _pl_nv[${lv%%=*}]="${lv#*=}"; done
-			for lv in ${_pl_lo[@]+"${_pl_lo[@]}"}; do
-				o="${_pl_ov[$lv]}"
-				n="${_pl_nv[$lv]:-unknown}"
-				if [[ "$o" == unknown || "$n" == unknown ]]; then
-					unr+="${_pl_tn}"$'\t'"$(_platform_unread_why "$tsv" "TUNING_BASELINE ${lv}" "$o" "$n")"$'\t'"TUNING_BASELINE ${lv}"$'\n'
-				elif [[ "$o" != "$n" ]]; then
-					_platform_group _pl_dz _pl_dzo "TUNING_BASELINE ${lv}"$'\x1f'"${o}"$'\x1f'"${n}" "$_pl_tn"
-				fi
-			done
-		fi
-		if [[ -n "$eh_old" && "$eh_old" != unknown && -n "$eh_new" && "$eh_new" != unknown ]]; then
-			[[ "$eh_old" == "$eh_new" ]] || _platform_group _pl_dz _pl_dzo "SIDECAR_EGRESS_HOSTS"$'\x1f'"${eh_old}"$'\x1f'"${eh_new}" "$_pl_tn"
-		else
-			unr+="${_pl_tn}"$'\t'"$(_platform_unread_why "$tsv" SIDECAR_EGRESS_HOSTS "$eh_old" "${eh_new:-unknown}")"$'\t'SIDECAR_EGRESS_HOSTS$'\n'
-		fi
-		# istiod's limits (per replica): the denominators of the report's istiod limit figures.
-		lim="$(cap_istiod_limits "$tctx" "${KUBECTL[@]}")"
-		for key in ISTIOD_CPU_LIMIT_M ISTIOD_MEM_LIMIT_MI; do
-			o="$(_platform_preamble_value "$tsv" "$key")" || o=""
-			if [[ "$key" == ISTIOD_CPU_LIMIT_M ]]; then n="$(kv_value cpu_m "$lim")"; else n="$(kv_value mem_mi "$lim")"; fi
-			if [[ -z "$o" || "$o" == unknown || "$n" == unknown ]]; then
-				unr+="${_pl_tn}"$'\t'"$(_platform_unread_why "$tsv" "$key" "$o" "$n")"$'\t'"${key}"$'\n'
-			elif [[ "$o" != "$n" ]]; then
-				_platform_group _pl_dz _pl_dzo "${key}"$'\x1f'"${o}"$'\x1f'"${n}" "$_pl_tn"
-			fi
-		done
-		# What the report only shows for every row: warnings, never a stop.
-		nt="$(cap_node_totals "$tctx" "${KUBECTL[@]}")"
-		csv="$tctx"
-		for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do [[ "$c" == "$tctx" ]] || csv+=",${c}"; done
-		infra="$(env_collect_infra "$csv" "${KUBECTL[@]}")"
-		for key in NODE_ALLOC_CPU_M NODE_ALLOC_MEM_MI ISTIOD_REQ_CPU_M ISTIOD_REQ_MEM_MI ISTIOD_LIM_CPU_M ISTIOD_LIM_MEM_MI NETWORK_TOPOLOGY; do
-			o="$(_platform_preamble_value "$tsv" "$key")" || continue
-			case "$key" in
-			NODE_ALLOC_CPU_M) n="$(kv_value cpu_m "$nt")" note="a cluster autoscaler moves it; each row's node figures are its own reads" ;;
-			NODE_ALLOC_MEM_MI) n="$(kv_value mem_mi "$nt")" note="a cluster autoscaler moves it; each row's node figures are its own reads" ;;
-			NETWORK_TOPOLOGY) n="$(kv_value "$key" "$infra")" note="the report labels every row with the recorded one" ;;
-			*) n="$(kv_value "$key" "$infra")" note="the report shows the recorded value; its istiod limit figures use ISTIOD_CPU_LIMIT_M and ISTIOD_MEM_LIMIT_MI" ;;
-			esac
-			if [[ "$o" == unknown || "$n" == unknown ]]; then
-				line="$(_platform_unread_why "$tsv" "$key" "$o" "$n")"
-				if [[ "$key" == NETWORK_TOPOLOGY ]]; then
-					for g in ${_pl_ga[@]+"${_pl_ga[@]}"}; do unr+="${g}"$'\t'"${line}"$'\t'"${key}"$'\n'; done
-				else
-					unr+="${_pl_tn}"$'\t'"${line}"$'\t'"${key}"$'\n'
-				fi
-			elif [[ "$o" != "$n" ]]; then
-				g="$_pl_tn"
-				[[ "$key" != NETWORK_TOPOLOGY ]] || g="$(_platform_names ${_pl_ga[@]+"${_pl_ga[@]}"})"
-				echo "warning: --resume: ${g}: ${key} recorded ${o}, now ${n}; ${note}" >&2
-			fi
-		done
-		o="$(_platform_preamble_value "$tsv" ISTIOD_REPLICAS_BY_CONTEXT)" || o=""
-		if [[ -n "$o" ]]; then
-			_pl_rko=() _pl_rkn=()
-			IFS=',' read -r -a _pl_p <<<"$o"
-			for line in ${_pl_p[@]+"${_pl_p[@]}"}; do [[ "$line" != *=* ]] || _pl_rko[${line%%=*}]="${line#*=}"; done
-			IFS=',' read -r -a _pl_p <<<"$(kv_value ISTIOD_REPLICAS_BY_CONTEXT "$infra")"
-			for line in ${_pl_p[@]+"${_pl_p[@]}"}; do [[ "$line" != *=* ]] || _pl_rkn[${line%%=*}]="${line#*=}"; done
-			for c in ${_pl_rc[@]+"${_pl_rc[@]}"}; do
-				[[ -n "${_pl_rko[$c]+x}" ]] || continue
-				o="${_pl_rko[$c]}"
-				n="${_pl_rkn[$c]:-unknown}"
-				if [[ "$o" == unknown || "$n" == unknown ]]; then
-					unr+="$(_platform_sanitize "$c")"$'\t'"$(_platform_unread_why "$tsv" ISTIOD_REPLICAS_BY_CONTEXT "$o" "$n")"$'\t'ISTIOD_REPLICAS_BY_CONTEXT$'\n'
-				elif [[ "$o" != "$n" ]]; then
-					_platform_group _pl_rg _pl_rgo "${o}"$'\x1f'"${n}" "$(_platform_sanitize "$c")"
-				fi
-			done
-			# Five warnings, then how many more members (an HPA spreads the counts), as the drift
-			# check's.
-			i=0
-			for g in ${_pl_rgo[@]+"${_pl_rgo[@]}"}; do
-				i=$((i + 1))
-				if ((i > 5)); then
-					IFS=$'\x1f' read -r -a _pl_p <<<"${_pl_rg[$g]}"
-					more=$((more + ${#_pl_p[@]}))
-					continue
-				fi
-				echo "warning: --resume: $(_platform_group_names "${_pl_rg[$g]}"): ISTIOD_REPLICAS_BY_CONTEXT recorded ${g%%$'\x1f'*}, now ${g#*$'\x1f'}; an HPA moves it, the report shows the recorded count while each row records its own istiod pods" >&2
-			done
-			((more == 0)) ||
-				echo "warning: --resume: and ${more} more member$( ((more == 1)) || echo s) whose ISTIOD_REPLICAS_BY_CONTEXT is not the recorded one; an HPA moves it, the report shows the recorded count while each row records its own istiod pods" >&2
-		fi
-	fi
-	# The values not read: each member's keys by reason, then one warning per keys and reason.
-	while IFS=$'\t' read -r c line key; do
-		[[ -n "$c" ]] || continue
-		g="${c}"$'\t'"${line}"
-		[[ -n "${_pl_gkeys[$g]+x}" ]] || _pl_gk+=("$g")
-		_pl_gkeys[$g]+="${_pl_gkeys[$g]:+, }${key}"
-	done <<<"$unr"
-	for g in ${_pl_gk[@]+"${_pl_gk[@]}"}; do
-		_platform_group _pl_ug _pl_ugo "${_pl_gkeys[$g]}"$'\x1f'"${g#*$'\t'}" "${g%%$'\t'*}"
-	done
-	for g in ${_pl_ugo[@]+"${_pl_ugo[@]}"}; do
-		keys="${g%%$'\x1f'*}"
-		echo "warning: --resume: $(_platform_group_names "${_pl_ug[$g]}"): ${keys}: ${g#*$'\x1f'}, so this run cannot tell whether $([[ "$keys" == *", "* ]] && echo they || echo it) changed since its rows were measured" >&2
-	done
-	# What differs: one line per key and values, naming its members.
-	for g in ${_pl_dzo[@]+"${_pl_dzo[@]}"}; do
-		IFS=$'\x1f' read -r key o n <<<"$g"
-		dies+=$'\n'"  $(_platform_group_names "${_pl_dz[$g]}"): ${key} recorded ${o}, now ${n}"
-		_pl_ck+=("${key%% *}")
-	done
-	[[ -z "$dies" ]] || die "--resume: ${tsv} was started on other builds, settings or cluster values than the members have now:${dies}
-$(_platform_resume_causes "${_pl_ck[@]}")
-The rows this run appends would be credited to what its preamble records. ${again}"
 }
 
 # platform_drift_check <sweep_dir> <ctxs_csv> [<run>]: after a sweep's last step (outside every

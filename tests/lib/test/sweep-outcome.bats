@@ -74,7 +74,7 @@ fake_awk() {
 # The count's awk program (003's cell count) prints this.
 COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 
-@test "a controlplane sweep that dies keeps its not-finished record and every 004 format says so; a --resume of it runs, and a finished sweep leaves no pending line; an unfinished --resume's json keeps the earlier record under earlier" {
+@test "a controlplane sweep that dies keeps its not-finished record and every 004 format says so; a finished sweep leaves no pending line" {
 	local d rid fa
 	# The first run dies while it counts its cells (TERM, as an interrupt), after its reports.
 	fa="$(fake_awk "$COUNT_PAT" 'kill -TERM "$PPID"; exit 0')"
@@ -86,7 +86,7 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	grep -qx "RUN_ID=${rid}" "$d/sweep-outcome.txt"
 	grep -q '^HARNESS_SHA=.' "$d/sweep-outcome.txt"
 	grep -qE '^STARTED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' "$d/sweep-outcome.txt"
-	grep -qx "NEXT=if it died, --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)" "$d/sweep-outcome.txt"
+	grep -qx "NEXT=if it died, run 005-cleanup.sh on its contexts, then the sweep again into a new dir with the mesh sizes it did not finish; the rows in this dir cover only the cells it finished" "$d/sweep-outcome.txt"
 	# Its own reports keep the "not written yet" line: the outcome never came.
 	grep -qF "$PENDING_MARK" "$d/sweep-${rid}.md"
 	grep -qF "$PENDING_MARK" "$d/scale-envelope-${rid}.md"
@@ -99,7 +99,7 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	run --separate-stderr "$REPORT" --results-dir "$d" --format text
 	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.txt by run ${rid}): NOT FINISHED"
 	assert_output --partial "#   warning: this sweep has not finished: the run that started at "
-	assert_output --partial " (SIGTERM) before it wrote its outcome, so no cell count vouches for these results, which may be partial; next: --resume this sweep dir"
+	assert_output --partial " (SIGTERM) before it wrote its outcome, so no cell count vouches for these results, which may be partial; next: run 005-cleanup.sh on its contexts, then the sweep again into a new dir"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format md
 	assert_output --partial "> **Sweep outcome** (recorded in \`sweep-outcome.txt\` by run \`${rid}\`): **not finished**"
 	refute_output --partial "$PENDING_MARK"
@@ -109,12 +109,13 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	[ "$(jq -c '.sweep_outcome | [.exit, .unfinished, (.started_at | test("Z$")), .run_id, (.interrupted_at | test("Z$")), .interrupted_by]' <<<"$output")" = "[null,true,true,\"${rid}\",true,\"SIGTERM\"]" ]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
 	assert_output --partial "> **Warning:** this sweep has not finished: it was interrupted before it wrote its outcome (sweep-outcome.txt), so these charts may show partial results."
-	# A --resume of it: the record is no recorded problem (it runs), and it writes the outcome.
-	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	# A sweep that finishes writes its outcome, and its reports keep no pending line.
+	rm -rf "${BATS_TEST_TMPDIR}/res"
+	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	refute_output --partial "records a problem"
+	d="$(sweep_dir)"
+	rid="${d##*/sweep-}"
 	grep -qx 'EXIT=4' "$d/sweep-outcome.txt"
-	! grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt" || false
 	! grep -qF "$PENDING_MARK" "$d/sweep-${rid}.md" || false
 	! grep -qF "$PENDING_MARK" "$d/scale-envelope-${rid}.md" || false
 	grep -q '^## Sweep outcome' "$d/sweep-${rid}.md"
@@ -122,17 +123,6 @@ COUNT_PAT='*"print \"TOTAL\\t\" ncell"*'
 	[ "$(jq -c '.sweep_outcome | [.exit, .unfinished, .failed]' <<<"$output")" = '[4,false,1]' ]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
 	refute_output --partial "has not finished"
-	# A --resume that dies keeps the finished record as sweep-outcome.prev.txt; json says
-	# the resume has not finished and keeps that record under "earlier", with nothing at the
-	# top level that reads as this resume's count.
-	PATH_PRE="$fa" cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 143
-	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	[ "$(jq -c '.sweep_outcome | [.exit, .failed, .failed_by, .unfinished, .resume_unfinished, .run_id, .earlier.exit, .earlier.failed, .earlier.unfinished, .interrupted_by]' <<<"$output")" = "[null,null,null,true,true,\"${rid}\",4,1,false,\"SIGTERM\"]" ]
-	run --separate-stderr "$REPORT" --results-dir "$d" --format text
-	assert_output --partial "the last --resume of this sweep (started at "
-	assert_output --partial "has not finished (it was interrupted at "
-	assert_output --partial " by SIGTERM; run the same --resume again): this is the outcome before it, from sweep-outcome.prev.txt"
 }
 
 @test "dataplane, churn, propagation and churn-dataplane sweeps write the not-finished record at their start and their outcome at their end; their own markdown keeps no pending line; ISTIO_PROXY_VERSIONS is in the placeholder preambles and the dataplane report (PL36)" {

@@ -1,14 +1,10 @@
 #!/usr/bin/env bats
-# Controlplane windows and resumes, through 002 and 003 (PL33; no cluster: kubectl and curl
-# are stubs): 002's istiod %-of-limit divides by the limit of the pods it summed, and its
+# Controlplane windows, through 002, 003 and 004 (PL33; no cluster: kubectl and curl are
+# stubs): 002's istiod %-of-limit divides by the limit of the pods it summed, and its
 # WINDOW_ROWS line records the replicas each istiod Deployment wants (fewer Running warns);
-# a split window across a harness change records both harnesses in the TSV; a carried
-# harness PROBLEM becomes a NOTE once no row of the run that recorded it is in the figures
-# and the rows that are ran one harness; a --resume with no axis record names the axis
-# flags it lacks; a TSV cut short without its last newline still gets its RESUMED_AT line
-# on a line of its own; a --resume reads WINDOW_ROWS <n>/<spec> lines (a window on fewer
-# pods than wanted is done, one short of its rows runs again); and a member with no istiod
-# pod Running (one N/A row, <ctx>=1/<spec>) gives no replica shortfall.
+# a split window across a harness change records both harnesses in the TSV; 004 over a
+# sweep's TSV warns of a window on fewer pods than wanted; and a member with no istiod pod
+# Running (one N/A row, <ctx>=1/<spec>) gives no replica shortfall.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -141,141 +137,20 @@ cp_row() {
 	assert_line --index 7 --regexp "^# HARNESS_CHANGED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z HARNESS_SHA=${live} HARNESS_CONTENT_KEY=${key}\$"
 	assert_line --index 8 "# WINDOW_ROWS=ctx-a=2/3"
 	[ "${#lines[@]}" -eq 11 ]
-	# The attempts: the first window's harness, the split window's (base999), then the live one.
-	run controlplane_attempts "$TSV" ""
-	assert_success
-	[ "$(cut -f 2,4 <<<"$output" | tr '\t\n' ':,')" = "${live}:2,base999:2,${live}:2," ]
 }
 
-@test "a carried harness PROBLEM becomes a NOTE once every row of the run that recorded it was run again; carried as it is after that; also from a record its run did not finish" {
-	local date s0
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	# The first run's start (the TSV preamble's first line, in UTC with Z).
-	s0="$(controlplane_attempts "$(sweep_tsv "$D")" "" | awk -F'\t' 'NR == 1 { print $11 }')"
-	[[ "$s0" =~ ^[0-9T:-]+Z$ ]]
-	echo 'PROBLEM=the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats)' >> "${D}/sweep-outcome.txt"
-	date="$(sed -n 's/^# DATE=//p' "${D}/sweep-outcome.txt")"
-	# The resume runs the failed cell again: no row of the first run is in the figures.
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	grep -qx "NOTE=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats) (its rows were all run again later)" "${D}/sweep-outcome.txt"
-	[ "$(grep -c '^PROBLEM=' "${D}/sweep-outcome.txt")" = 0 ]
-	# Resumed again: carried as it is, once.
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	[ "$(grep -c 'HARNESS_SHA=aaa1111' "${D}/sweep-outcome.txt")" = 1 ]
-	grep -q '^NOTE=an earlier run of this sweep (outcome of .*(bats) (its rows were all run again later)$' "${D}/sweep-outcome.txt"
-	# A record of a run that did not finish (it started with the first run, whose rows were
-	# all run again): the same.
-	mv -f "${D}/sweep-outcome.txt" "${D}/sweep-outcome.prev.txt"
-	printf 'RUN_ID=x\nEXIT=unfinished\nSTARTED_AT=%s\nNOTE=the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats)\n' "$s0" > "${D}/sweep-outcome.txt"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	grep -qx "NOTE=an earlier run of this sweep (started at ${s0}, not finished) recorded: the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats) (its rows were all run again later)" "${D}/sweep-outcome.txt"
-	[ "$(grep -c '^PROBLEM=' "${D}/sweep-outcome.txt")" = 0 ]
-}
-
-@test "a carried harness PROBLEM stays one while a row of the run that recorded it is in the figures, or while those rows ran more than one harness" {
-	local date mixed
-	# A row of the first run stays in the figures (its cell of 5 Services measured).
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5,6
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	cp_row 2026-06-01T00:01:00+00:00 ci-a 1 5 1000 >> "$(sweep_tsv "$D")"
-	echo 'PROBLEM=the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats)' >> "${D}/sweep-outcome.txt"
-	date="$(sed -n 's/^# DATE=//p' "${D}/sweep-outcome.txt")"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	grep -qx "PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats) (kept: 2 row(s) of that run are in the figures)" "${D}/sweep-outcome.txt"
-	[ "$(grep -c 'its rows were all run again later' "${D}/sweep-outcome.txt")" = 0 ]
-	# A resume recorded the change, and a later one ran all its rows again: a NOTE when the
-	# rows in the figures ran one harness; a PROBLEM when the first run's kept row ran other
-	# harness files.
-	for mixed in 0 1; do
-		rm -rf "$RES"
-		cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5,6
-		[ "$status" -eq 4 ]
-		D="$(sweep_dir)"
-		cp_row 2026-06-01T00:01:00+00:00 ci-a 1 5 1000 >> "$(sweep_tsv "$D")"
-		if ((mixed)); then
-			sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=old1234/; s/^# HARNESS_CONTENT_KEY=.*/# HARNESS_CONTENT_KEY=000000000000/' "$(sweep_tsv "$D")"
-			rm -f "$(sweep_tsv "$D").bak"
-		fi
-		cp_sweep --resume "$D" --contexts ci-a
-		[ "$status" -eq 4 ]
-		echo 'PROBLEM=the harness changed during the sweep: HARNESS_SHA=ddd4444 at its start (bats)' >> "${D}/sweep-outcome.txt"
-		date="$(sed -n 's/^# DATE=//p' "${D}/sweep-outcome.txt")"
-		cp_sweep --resume "$D" --contexts ci-a
-		[ "$status" -eq 4 ]
-		if ((mixed)); then
-			grep -qx "PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=ddd4444 at its start (bats) (kept: the rows in the figures ran more than one harness, or one not recorded)" "${D}/sweep-outcome.txt"
-		else
-			grep -qx "NOTE=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=ddd4444 at its start (bats) (its rows were all run again later)" "${D}/sweep-outcome.txt"
-		fi
-	done
-}
-
-@test "a --resume of a sweep with no axis record that gives only some axis flags is refused, naming the others; with all six it runs, and its PLAN line names its start in UTC with Z" {
-	local before tsv
-	cp_sweep --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	tsv="$(sweep_tsv "$D")"
-	rm -f "${D}/planned-cells.txt"
-	sed -i.bak '/^# Contexts: /d' "$tsv" && rm -f "${tsv}.bak"
-	before="$(cksum < "$tsv")"
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
-	[ "$status" -eq 1 ]
-	[[ "$stderr" == *"so a --resume would run the environment's, --config's or default value of each axis flag not given; nothing was run. Give all six axis flags the sweep ran with (not given: --replica-counts, --namespace-counts, --sidecar-scopings, --traffic-configs)."* ]]
-	[ "$(cksum < "$tsv")" = "$before" ]
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none
-	[ "$status" -eq 4 ]
-	grep -Eq '^# PLAN=1 the --resume at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: --mesh-sizes 2 --service-counts 5 ' "${D}/planned-cells.txt"
-}
-
-@test "a --resume of a TSV whose last line lost its newline (a run cut short while it wrote) puts its RESUMED_AT line on a line of its own" {
-	local tsv last n
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	tsv="$(sweep_tsv "$D")"
-	last="$(tail -n 1 "$tsv")"
-	printf '%s' "$(cat "$tsv")" > "${tsv}.cut" && mv -f "${tsv}.cut" "$tsv"
-	[ -n "$(tail -c 1 "$tsv")" ]
-	n="$(($(wc -l < "$tsv") + 1))"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	# The last row is whole, the resume's line starts a line, and both records start its
-	# attempt after that row.
-	grep -qxF -- "$last" "$tsv"
-	[ "$(grep -c 'RESUMED_AT=' "$tsv")" = 1 ]
-	grep -q "^# RESUMED_AT=.* TSV_LINES=${n} " "$tsv"
-	[ "$(awk -F'\t' 'NR == 2 { print $5 }' "${D}/resumes.txt")" = "$n" ]
-}
-
-@test "a --resume reads WINDOW_ROWS <n>/<spec> lines: a window that wrote all its rows on fewer pods than its Deployment wants is done; one with fewer rows than <n> runs again (INCOMPLETE); a member whose one row is N/A (no istiod pod Running) gives no shortfall" {
+@test "004 over a sweep's TSV: a window that wrote all its rows on fewer pods than its Deployment wants is a data warning; a member whose one row is N/A (no istiod pod Running) gives no shortfall" {
 	local tsv dg
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5,6
+	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 4 ]
 	D="$(sweep_dir)"
 	tsv="$(sweep_tsv "$D")"
-	# Cell 5: its window wrote 2 rows on 2 of the 3 pods the Deployment wants, both in the
-	# TSV. Cell 6: its window wrote 3 rows and the TSV holds 2 (a kill during the write).
+	# Its window wrote 2 rows on 2 of the 3 pods the Deployment wants, both in the TSV.
 	{
 		echo "# WINDOW_ROWS=ci-a=2/3"
 		cp_row 2026-06-01T00:01:00+00:00 ci-a 1 5 1000
 		cp_row 2026-06-01T00:01:00+00:00 ci-a 1 5 1000
-		echo "# WINDOW_ROWS=ci-a=3/3"
-		cp_row 2026-06-01T00:02:00+00:00 ci-a 1 6 1000
-		cp_row 2026-06-01T00:02:00+00:00 ci-a 1 6 1000
 	} >> "$tsv"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"mesh=1 svcs=5 reps=3 ns=1 scope=none traffic=none — already has a valid row; skipping (resume)"* ]] || { echo "$stderr"; false; }
-	[[ "$stderr" == *"svcs=6 reps=3 ns=1 scope=none traffic=none — cut short while its rows were written (INCOMPLETE: ci-a has 2 of the 3 rows its window wrote): running it again"* ]]
-	# 004 over the same rows: cell 5 ran on fewer istiod pods than wanted (a data warning).
 	run --separate-stderr "${CP}/004-report-results.sh" --results-dir "$D" --format json
 	assert_success
 	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" == *"(ci-a ran 2 of its 3 istiod replicas)"* ]]

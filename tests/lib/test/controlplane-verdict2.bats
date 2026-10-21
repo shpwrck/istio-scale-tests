@@ -3,8 +3,7 @@
 # that ran on fewer istiod pods than wanted is marked where its figures are shown (§ in the
 # markdown cells table, its text block); a window whose istiod Deployment wanted another
 # replica count than at the sweep's start is a data warning without a verdict change (a
-# growth window's own line too); an entry without /<spec> names both causes; the attempts
-# name the first run's HARNESS_SHA and KUBE_VERSIONS in text, csv and markdown; and --help
+# growth window's own line too); an entry without /<spec> names both causes; and --help
 # names every provenance reason that turns a PASS into CAUTION.
 
 bats_require_minimum_version 1.5.0
@@ -20,12 +19,11 @@ setup() {
 	TSV="${RES}/controlplane-fixture-t2.tsv"
 }
 
-# cp_tsv <file> <second WINDOW_ROWS> <mesh-b rows in it> [line before it]: the fixture's
-# preamble (plus ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3) and two cells (15 and 30
-# services) of valid rows, each member 3 rows a window (mesh-b <n> in the second).
-# "TSV_LINES=@" in the line reads the TSV's lines before it.
+# cp_tsv <file> <second WINDOW_ROWS> <mesh-b rows in it>: the fixture's preamble (plus
+# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3) and two cells (15 and 30 services) of valid
+# rows, each member 3 rows a window (mesh-b <n> in the second).
 cp_tsv() {
-	awk -F'\t' -v OFS='\t' -v w2="$2" -v nb="$3" -v x="${4:-}" '
+	awk -F'\t' -v OFS='\t' -v w2="$2" -v nb="$3" '
 	function row(at, s, m, n,    i) { for (i = 1; i <= n; i++) { $0 = t; $1 = "2026-06-01T" at ":00+00:00"; $2 = m; $4 = s; $31 = 0; print } }
 	/^#/ {
 		print
@@ -36,9 +34,8 @@ cp_tsv() {
 	t == "" { t = $0 }
 	END {
 		print "# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3"; row("00:00", 15, "mesh-a", 3); row("00:00", 15, "mesh-b", 3)
-		if (x != "") print x
 		print "# WINDOW_ROWS=" w2; row("00:10", 30, "mesh-a", 3); row("00:10", 30, "mesh-b", nb)
-	}' "$FIXTURE" | awk '{ sub(/TSV_LINES=@/, "TSV_LINES=" (NR - 1)); print }' > "$1"
+	}' "$FIXTURE" > "$1"
 }
 
 # report <format> [dir]: 004 over res/ (or dir), its stderr apart.
@@ -102,20 +99,6 @@ verdict() { jq -r '.metadata.sla.verdict' <<<"$output"; }
 	# The fixture's verdict (FAIL: a restart) does not name it.
 	[ "$(verdict)" = FAIL ]
 	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" != *"replica count"* ]]
-}
-
-@test "the attempts name the first run's HARNESS_SHA and KUBE_VERSIONS (the TSV preamble's) in text, csv and markdown, as json does" {
-	local att
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3 "# RESUMED_AT=2026-06-01T00:05:00+00:00 TSV_LINES=@ HARNESS_SHA=res2 KUBE_VERSIONS=mesh-a=v1.35.0"
-	report json
-	[ "$(jq -c '.metadata.attempts[0] | [.run, .harness_sha, .kube_versions]' <<<"$output")" = '["first run","fixture","mesh-a=v1.34.8,mesh-b=v1.34.8"]' ]
-	att="the rows come from more than one run: the first run HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8 (6 row(s), 6 in the figures), then --resume at 2026-06-01T00:05:00Z HARNESS_SHA=res2 KUBE_VERSIONS=mesh-a=v1.35.0 (6 row(s), 6 in the figures)"
-	report text
-	assert_output --partial "# attempts: ${att}"
-	report csv
-	assert_output --partial "# attempts: ${att}"
-	report markdown
-	assert_output --partial "> **Attempts:** ${att}"
 }
 
 @test "--help names every provenance reason that turns a PASS into CAUTION (a harness or Istio version mix, rows of a run that recorded no harness) and both causes of a WINDOW_ROWS entry without /<spec>, within 100 columns" {

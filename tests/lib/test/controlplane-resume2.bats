@@ -1,13 +1,10 @@
 #!/usr/bin/env bats
-# Controlplane sweep resumes, part 2, through 003 and 004 (PL33; no cluster: kubectl is a
-# stub, and where a step must outlive a signal, 001 and 002 are fakes in a symlinked copy
-# of the tree): a harness change an earlier run recorded does not stop a --resume, which
-# carries it once; the first run's axis flags from the TSV when planned-cells.txt is
-# gone; the sweep's pages before a --resume say so until it ends; each window's row count
-# (WINDOW_ROWS) decides INCOMPLETE; leftovers on a mesh member outside --contexts stop the
-# sweep before any deletion; a step still running after a second signal is killed before
-# the INTERRUPTED row, and a step killed at the grace's end names the cleanup to run; a
-# --resume whose HARNESS_SHA differs only in git describe is the same harness.
+# The controlplane sweep through 003 and 004, part 2 (PL33; no cluster: kubectl is a stub,
+# and where a step must outlive a signal, 001 and 002 are fakes in a symlinked copy of the
+# tree): each window's row count (WINDOW_ROWS) decides INCOMPLETE; leftovers on a mesh
+# member outside --contexts stop the sweep before any deletion; a step still running after
+# a second signal is killed before the INTERRUPTED row, and a step killed at the grace's
+# end names the cleanup to run.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -16,9 +13,6 @@ CP="${ROOT}/tests/controlplane"
 REPORT="${CP}/004-report-results.sh"
 
 setup() {
-	# The test's own process (bats runs setup and the test in one): the CP_TERM stub looks for
-	# the sweep below it only, never in a shell that started bats.
-	export TEST_PID="$BASHPID"
 	EK="${BATS_TEST_TMPDIR}/kubeconfig"
 	: > "$EK"
 	BIN="${BATS_TEST_TMPDIR}/bin"
@@ -27,10 +21,7 @@ setup() {
 	# <file>.<ctx>): the Istio CR reads answer as fake-istio-cr.sh; `config get-contexts -o
 	# name` lists kube-contexts; a member's Istio remote secrets are remote.<ctx>; its
 	# controlplane-test namespaces are one while ns-left.<ctx> exists, and their delete
-	# removes it. 002's first read (its Running istiod pods) fails; under CP_TERM (once) it
-	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor below the test's process, closes
-	# its output and waits.
-	# Anything else fails, as against an empty kubeconfig.
+	# removes it. Anything else fails, as against an empty kubeconfig.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
 d="$RS_DIR"
@@ -53,22 +44,6 @@ case "$*" in
 *" delete namespace -l app.kubernetes.io/instance=controlplane-test "*)
 	rm -f "$d/ns-left.$ctx" ;;
 *" delete namespace controlplane-test "*) : ;;
-*" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running -o jsonpath="*)
-	if [ -n "${CP_TERM:-}" ] && [ ! -e "$d/term-sent" ]; then
-		: > "$d/term-sent"
-		p=$PPID s=""
-		while [ "${p:-1}" -gt 1 ] && [ "$p" != "${TEST_PID:?}" ]; do
-			case "$(ps -o args= -p "$p" 2>/dev/null)" in *003-run-sweep.sh*) s="$p" ;; esac
-			p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
-		done
-		[ -z "$s" ] || kill -TERM "$s"
-		exec >/dev/null 2>&1 3>&-
-		echo "$$" > "$d/stub-pid"
-		sleep 30 &
-		echo "$!" > "$d/sleep-pid"
-		wait
-	fi
-	exit 1 ;;
 *) exit 1 ;;
 esac
 STUB
@@ -79,9 +54,9 @@ STUB
 }
 
 teardown() {
-	# The stubs' and fakes' own processes, when a test left them (only PIDs they recorded).
+	# The fake's own process, when a test left it (only the PID it recorded).
 	local f p
-	for f in "${BATS_TEST_TMPDIR}/sleep-pid" "${BATS_TEST_TMPDIR}/stub-pid" "${BATS_TEST_TMPDIR}/fake-pid"; do
+	for f in "${BATS_TEST_TMPDIR}/fake-pid"; do
 		[[ -s "$f" ]] || continue
 		p="$(<"$f")"
 		if [[ "$p" =~ ^[0-9]+$ ]]; then kill -KILL "$p" 2>/dev/null || true; fi
@@ -118,16 +93,6 @@ measured() {
 	grep -E '^#|^timestamp' "$1" > "${1}.new"
 	printf '%s' "$2" >> "${1}.new"
 	mv "${1}.new" "$1"
-}
-
-# done_dir: a first run of mesh 1 (ci-a) x svcs 5 whose cell then holds a valid row (the
-# sweep measured it). Sets D and TSV.
-done_dir() {
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	TSV="$(sweep_tsv "$D")"
-	measured "$TSV" "$(cp_row 2026-06-01T00:01:00+00:00 ci-a 1 5 1000)"$'\n'
 }
 
 # stubborn_tree: a copy of the repo (symlinks) whose controlplane 001 succeeds and whose
@@ -186,91 +151,7 @@ FAKE
 	SWEEP="${TREE}/tests/controlplane/003-run-sweep.sh"
 }
 
-@test "a harness change an earlier run recorded does not stop a --resume: its outcome carries it once, also from a run that did not finish; a change of the mesh still does" {
-	local date
-	done_dir
-	echo 'PROBLEM=the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats)' >> "${D}/sweep-outcome.txt"
-	date="$(sed -n 's/^# DATE=//p' "${D}/sweep-outcome.txt")"
-	[ -n "$date" ]
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	[[ "$stderr" != *"records a problem"* ]]
-	[ "$(grep -c "^PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed during the sweep: HARNESS_SHA=aaa1111 at its start, bbb2222 at its end (bats) (kept: 1 row(s) of that run are in the figures)$" "${D}/sweep-outcome.txt")" = 1 ]
-	# Resumed again: the carried line is carried as it is, once.
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	[ "$(grep -c '^PROBLEM=.*the harness changed during the sweep: HARNESS_SHA=aaa1111' "${D}/sweep-outcome.txt")" = 1 ]
-	grep -q "^PROBLEM=an earlier run of this sweep (outcome of ${date}) recorded: the harness changed" "${D}/sweep-outcome.txt"
-	# A run that did not finish (its not-finished record) noted a harness change: carried too.
-	# The run it names (the last to start by 2030: the second --resume, which added no rows)
-	# wrote no rows, and the figures ran one harness: a NOTE.
-	mv -f "${D}/sweep-outcome.txt" "${D}/sweep-outcome.prev.txt"
-	printf 'RUN_ID=x\nEXIT=unfinished\nSTARTED_AT=2030-01-01T00:00:00Z\nNOTE=the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats)\n' > "${D}/sweep-outcome.txt"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	grep -qx 'NOTE=an earlier run of this sweep (started at 2030-01-01T00:00:00Z, not finished) recorded: the harness changed during the sweep: HARNESS_SHA=ccc3333 at its start (bats) (that run wrote no rows)' "${D}/sweep-outcome.txt"
-	[ "$(grep -c '^PROBLEM=.*HARNESS_SHA=aaa1111' "${D}/sweep-outcome.txt")" = 1 ]
-	# A change of the mesh under the sweep still refuses the --resume.
-	echo 'PROBLEM=the Istio version changed during the sweep (bats)' >> "${D}/sweep-outcome.txt"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 1 ]
-	[[ "$stderr" == *"--resume: this sweep's sweep-outcome.txt records a problem (the Istio version changed during the sweep (bats)), so no later run can vouch for its rows"* ]]
-}
-
-@test "a --resume of a sweep without planned-cells.txt takes the first run's axis flags from the TSV's # Contexts: line and says so; without that line too, it is refused unless all six axis flags are given" {
-	cp_sweep --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	TSV="$(sweep_tsv "$D")"
-	rm -f "${D}/planned-cells.txt"
-	CONTROLPLANE_SERVICE_COUNTS=10 cp_sweep --resume "$D" --contexts ci-a,ci-b
-	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"note: --resume: the axis flags not given take the first run's values (the TSV's \"# Contexts:\" line: an older harness started this sweep without planned-cells.txt): --mesh-sizes 2 --service-counts 5,6 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none"* ]]
-	[[ "$stderr" == *"Planned matrix:    2 = 1×2×1×1×1×1"* ]]
-	# Neither record: refused before any change, unless the flags are given.
-	rm -f "${D}/planned-cells.txt"
-	sed -i.bak '/^# Contexts: /d' "$TSV" && rm -f "${TSV}.bak"
-	local before
-	before="$(cksum < "$TSV")"
-	cp_sweep --resume "$D" --contexts ci-a,ci-b
-	[ "$status" -eq 1 ]
-	[[ "$stderr" == *"--resume: ${D} records none of its first run's axis values (no planned-cells.txt from its first run, no \"# Contexts:\" line in a controlplane-*.tsv), so a --resume would run the environment's, --config's or default value of each axis flag not given; nothing was run. Give all six axis flags the sweep ran with (not given: --mesh-sizes, --service-counts, --replica-counts, --namespace-counts, --sidecar-scopings, --traffic-configs)."* ]]
-	[ "$(cksum < "$TSV")" = "$before" ]
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none
-	[ "$status" -eq 4 ]
-}
-
-@test "the sweep's pages from before a --resume say so until it ends: a resume that is interrupted leaves them marked; one that ends writes them again" {
-	local p fm
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	# The sweep page and the envelope end with the outcome (the charts page has none).
-	for p in "$D"/sweep-[0-9]*.md "$D"/scale-envelope-*.md; do grep -q '^## Sweep outcome' "$p"; done
-	CP_TERM=1 cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 143 ]
-	for p in "$D"/sweep-*.md "$D"/scale-envelope-*.md; do
-		[ "$(grep -c '^## Sweep outcome' "$p")" = 0 ] || { echo "${p}: still shows the outcome"; false; }
-		grep -q '^> \*\*Sweep outcome\*\*: not written yet: a --resume of this sweep started at [0-9T:-]*Z, and this page is from before it' "$p"
-		# Under the title (the line after the blank that follows it) and in place of the
-		# outcome; front matter, where the page has it, records the resume's start.
-		[ "$(grep -c 'not written yet' "$p")" = 2 ]
-		awk '/^#/ && !t { t = NR } t && NR == t + 2 { print; exit }' "$p" | grep -q '^> \*\*Sweep outcome\*\*: not written yet: a --resume'
-		fm=0
-		if [ "$(head -n 1 "$p")" = --- ]; then fm=1; fi
-		[ "$(awk 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { exit } /^stale_since_resume: "[0-9T:-]+Z"$/ { n++ } END { print n + 0 }' "$p")" = "$fm" ]
-	done
-	head -n 1 "$D"/sweep-[0-9]*.md | grep -qx -- ---
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	for p in "$D"/sweep-*.md "$D"/scale-envelope-*.md; do
-		[ "$(grep -c 'not written yet' "$p")" = 0 ] || { echo "${p}: still marked"; false; }
-		[ "$(grep -c '^stale_since_resume:' "$p")" = 0 ]
-	done
-	for p in "$D"/sweep-[0-9]*.md "$D"/scale-envelope-*.md; do grep -q '^## Sweep outcome' "$p"; done
-}
-
-@test "each window's WINDOW_ROWS line decides INCOMPLETE: a member with fewer rows than its istiod replicas but all its window wrote is complete; one with fewer than its window wrote is not, and a --resume runs it again" {
+@test "each window's WINDOW_ROWS line decides INCOMPLETE: a member with fewer rows than its istiod replicas but all its window wrote is complete; one with fewer than its window wrote is not" {
 	cp_sweep --contexts ci-a,ci-b --mesh-sizes 1,2 --service-counts 5
 	[ "$status" -eq 4 ]
 	D="$(sweep_dir)"
@@ -286,10 +167,6 @@ FAKE
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
 	assert_success
 	jq -e '[.metadata.data_warnings[] | select(test("1 cell\\(s\\) are INCOMPLETE: .*mesh=2 svcs=5 reps=3 ns=1 scope=none traffic=none \\(ci-b has 1 of the 2 rows its window wrote\\)"))] | length == 1' <<<"$output"
-	cp_sweep --resume "$D" --contexts ci-a,ci-b
-	[ "$status" -eq 4 ]
-	[[ "${output}${stderr}" == *"mesh=1 svcs=5 reps=3 ns=1 scope=none traffic=none — already has a valid row; skipping (resume)"* ]]
-	[[ "${output}${stderr}" == *"mesh=2 svcs=5 reps=3 ns=1 scope=none traffic=none — cut short while its rows were written (INCOMPLETE: ci-b has 1 of the 2 rows its window wrote): running it again"* ]]
 }
 
 @test "leftovers on a mesh member outside --contexts stop the sweep before any deletion, with the 005 command for that member; the --contexts members' leftovers stay too" {
@@ -325,28 +202,5 @@ FAKE
 	FAKE_TERMS=1 SWEEP_STOP_GRACE_SEC=1 cp_sweep --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
 	[ "$status" -eq 143 ]
 	[ "$(awk -F'\t' '$8 == 999' "$(sweep_tsv "$(sweep_dir)")" | wc -l | tr -d ' ')" -eq 0 ]
-	[[ "$stderr" == *"still ran 1s after SIGTERM: sent SIGKILL (their own cleanup did not run; clean up with: ./tests/controlplane/005-cleanup.sh --contexts ci-a,ci-b; a --resume of this sweep also deletes the namespaces before its first cell)"* ]]
-}
-
-@test "a --resume whose HARNESS_SHA differs from the run before it only in git describe (the same HARNESS_CONTENT_KEY) gets an INFO, not the harness warning or NOTE" {
-	local key sha t
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	TSV="$(sweep_tsv "$D")"
-	key="$(sed -n 's/^# HARNESS_CONTENT_KEY=//p' "$TSV")"
-	[[ "$key" =~ ^[0-9a-f]{12}$ ]]
-	# The first run's describe was another tag on the same harness files.
-	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=v0.0.1-tagged/' "$TSV" && rm -f "${TSV}.bak"
-	cp_sweep --resume "$D" --contexts ci-a
-	[ "$status" -eq 4 ]
-	[[ "$stderr" != *"warning: --resume: this resume runs harness"* ]]
-	sha="$(sed -n 's/^HARNESS_SHA=//p' "${D}/sweep-outcome.txt")"
-	t="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "${D}/resumes.txt")"
-	grep -qx "INFO=the --resume at ${t} ran HARNESS_SHA=${sha}, after HARNESS_SHA=v0.0.1-tagged: they differ only in git describe (a commit or tag that left the harness files as they were; the same HARNESS_CONTENT_KEY ${key}), so its rows ran the same harness" "${D}/sweep-outcome.txt"
-	[ "$(grep -c '^NOTE=the --resume at .* ran HARNESS_SHA=' "${D}/sweep-outcome.txt")" = 0 ]
-	# The report: one harness, no provenance warning.
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	assert_success
-	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
+	[[ "$stderr" == *"still ran 1s after SIGTERM: sent SIGKILL (their own cleanup did not run; clean up with: ./tests/controlplane/005-cleanup.sh --contexts ci-a,ci-b; the next run of the sweep also deletes the namespaces before its first cell)"* ]]
 }

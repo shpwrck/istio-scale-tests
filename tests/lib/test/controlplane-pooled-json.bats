@@ -2,8 +2,7 @@
 # Controlplane 004 over sweep records and TSVs below its results dir, through its entrypoint
 # (PL33; fixture TSVs, no cluster): json has a top-level pooled_sweep_outcomes array next to
 # pooled_runs, as the other suites' reports do ([] when none), and keeps the data warnings;
-# a report of several TSVs names each attempt after its TSV, without an "each file's first
-# run:" prefix.
+# --help names it and how a warning names a cell of several TSVs.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -53,22 +52,6 @@ report() {
 	rm -rf "${BASE}/sweep-a"
 	report json "$BASE"
 	[ "$(jq -c '.pooled_sweep_outcomes' <<<"$output")" = '["sweep-b/sweep-outcome.txt: has not finished (it died, or still runs)"]' ]
-}
-
-@test "a report of several TSVs names each attempt after its TSV, with no 'each file's first run:' prefix" {
-	local t="${BASE}/sweep-b/controlplane-run-b.tsv" n rows att
-	# sweep-b's --resume ran the 30-service cell.
-	n="$(wc -l < "$t" | tr -d ' ')"
-	rows="$(tail -n 6 "$t" | awk -F'\t' -v OFS='\t' '{ $1 = "2026-06-01T00:05:00+00:00"; $4 = 30; print }')"
-	printf '# RESUMED_AT=2026-06-01T00:05:00+00:00 TSV_LINES=%s HARNESS_SHA=res2 KUBE_VERSIONS=mesh-a=v1.35.0\n# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3\n%s\n' "$n" "$rows" >> "$t"
-	att="the rows come from more than one run: sweep-a/controlplane-run-a.tsv: the first run HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8 (6 row(s), 6 in the figures); sweep-b/controlplane-run-b.tsv: the first run HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8 (6 row(s), 6 in the figures), then sweep-b/controlplane-run-b.tsv: --resume at 2026-06-01T00:05:00Z HARNESS_SHA=res2 KUBE_VERSIONS=mesh-a=v1.35.0 (6 row(s), 6 in the figures)"
-	report text "$BASE" --allow-multi-run
-	assert_output --partial "# attempts: ${att}"
-	refute_output --partial "each file's first run"
-	report csv "$BASE" --allow-multi-run
-	assert_output --partial "# attempts: ${att}"
-	report markdown "$BASE" --allow-multi-run
-	assert_output --partial "> **Attempts:** ${att}"
 }
 
 @test "--help names json pooled_sweep_outcomes and how a warning names a cell of several TSVs, within 100 columns" {

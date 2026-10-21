@@ -399,7 +399,7 @@ no_blank() { grep -v '^$' || true; }
 	assert_output --partial "Planned matrix:    1 cells"
 }
 
-@test "003 growth refusals: --service-counts, explicit, vsdr, --resume, descending M, mixed K, repeated K or mesh size" {
+@test "003 growth refusals: --service-counts, explicit, vsdr, descending M, mixed K, repeated K or mesh size" {
 	s=(--dry-run --contexts a --mesh-sizes 1)
 	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" "${s[@]}" --services-per-namespaces 2 --service-counts 10
 	assert_failure
@@ -410,9 +410,6 @@ no_blank() { grep -v '^$' || true; }
 	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" "${s[@]}" --services-per-namespaces 2 --traffic-configs vsdr --replica-counts 2
 	assert_failure
 	assert_output --partial "do not support --traffic-configs vsdr"
-	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" --resume "${BATS_TEST_TMPDIR}" --contexts a --mesh-sizes 1 --services-per-namespaces 2
-	assert_failure
-	assert_output --partial "--resume is not supported for growth series"
 	KUBECONFIG=/dev/null run "${CP}/003-run-sweep.sh" "${s[@]}" --services-per-namespaces 2 --workload-mode config-only --measurement-pod-counts 16,4
 	assert_failure
 	assert_output --partial "must be strictly ascending"

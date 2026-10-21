@@ -131,7 +131,6 @@ EXTRACTED_PATTERNS=(
 	'validate_traffic_config() {'
 	'vsdr_service_count() {'
 	'config_dump_breakdown() {'
-	'resume_preamble_scalar() {'
 	# dataplane local baseline: fortio.sh + is_ratio
 	'is_ratio() {'
 	'fortio_percentile_ms() {'
@@ -239,11 +238,10 @@ EXTRACTED_PATTERNS=(
 	'_sweep_outcome_by() {'
 	'_sweep_outcome_sweep_ids() {'
 	'sweep_outcome_recorded() {'
-	# not-finished record, latest attempts (common.sh); dirty hash, masked
+	# not-finished record (common.sh); dirty hash, masked
 	# errors, generations, proxy versions (preamble.sh); proxy summary (envelope.sh)
 	'sweep_outcome_unfinished() {'
 	'sweep_outcome_start() {'
-	'controlplane_latest_attempts() {'
 	'_harness_keys() {'
 	'_istio_version_mask() {'
 	'_istio_live_version_read() {'
@@ -310,15 +308,11 @@ EXTRACTED_PATTERNS=(
 	'function cp_key('
 	'function cp_cell_row('
 	'function cp_cell_state('
-	'function cp_plan_load('
 	'function cp_wl_parse('
 	'function cp_nr_parse('
-	# a controlplane sweep's runs and its resume command (common.sh)
 	'function cp_comment('
 	'function cp_end('
 	'function cp_mxo('
-	'controlplane_attempts() {'
-	'controlplane_resume_cmd() {'
 	'istio_generation_causes() {'
 	'istio_generations_read() {'
 	'istio_generations_diff() {'
@@ -339,7 +333,6 @@ EXTRACTED_PATTERNS=(
 	'_sweep_kill_hint() {'
 	'JSON_STR_AWK='
 	'function js('
-	'_sweep_resume_rows_added() {'
 	# an in-pod load stopped with its probe, or waited out after its exec failed (fortio.sh)
 	'fortio_client_stop() {'
 	'fortio_load_wait_out() {'
@@ -371,7 +364,6 @@ EXTRACTED_PATTERNS=(
 	'platform_warning_lines() {'
 	'platform_kind_path_warning() {'
 	'platform_unread_members() {'
-	'platform_resume_check() {'
 	'platform_drift_check() {'
 	'platform_compare_values() {'
 	'platform_compare_members() {'

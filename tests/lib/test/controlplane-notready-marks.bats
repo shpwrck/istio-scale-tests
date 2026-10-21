@@ -2,11 +2,10 @@
 # Controlplane 004 on istiod pods that were not Ready, through its entrypoint (PL33; fixture
 # TSVs, no cluster): a "# ISTIOD_NOT_READY_AT_END=" line (002 writes it after the
 # baseline's "# ISTIOD_NOT_READY=" line, both right before the window's WINDOW_ROWS line)
-# gives a data warning of its own, read from the cell's latest attempt only; a legacy cell
-# with either line is marked where its figures are shown (a text block line, ¶ on the
-# markdown cells table's n_total with one capped footnote, json istiod_not_ready and
-# istiod_not_ready_at_end); a growth window gets the data warning only. Names are
-# placeholders.
+# gives a data warning of its own; a legacy cell with either line is marked where its
+# figures are shown (a text block line, ¶ on the markdown cells table's n_total with one
+# capped footnote, json istiod_not_ready and istiod_not_ready_at_end); a growth window gets
+# the data warning only. Names are placeholders.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -110,8 +109,8 @@ cell() { printf 'mesh=2 svcs=%s reps=2 ns=1 scope=none traffic=none' "$1"; }
 	[ "$(grep -c '^  ! NOT READY AT WINDOW END: istiod-e on mesh-a ' <<<"$output")" -eq 7 ]
 }
 
-@test "only lines right before a WINDOW_ROWS line of the cell's latest attempt count; a growth window's end line gives the data warning, its json null" {
-	local d="${BATS_TEST_TMPDIR}/r" g="${BATS_TEST_TMPDIR}/g" n rows
+@test "only lines right before a WINDOW_ROWS line count; a growth window's end line gives the data warning, its json null" {
+	local d="${BATS_TEST_TMPDIR}/r" g="${BATS_TEST_TMPDIR}/g"
 	mkdir -p "$d" "$g"
 	# A baseline line with another line between it and the end line names nothing; the end
 	# line still counts.
@@ -126,18 +125,6 @@ cell() { printf 'mesh=2 svcs=%s reps=2 ns=1 scope=none traffic=none' "$1"; }
 	report json "$d"
 	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
 	[ "$(jq -c '[.results[] | .istiod_not_ready_at_end]' <<<"$output")" = '[[],[]]' ]
-	# The 20-service cell's first attempt had both lines; a --resume ran it again.
-	cp_cells "${d}/controlplane-fixture-t2.tsv" 2 \
-		"2=# ISTIOD_NOT_READY=mesh-b=istiod-x"$'\n'"# ISTIOD_NOT_READY_AT_END=mesh-b=istiod-y"
-	n="$(wc -l < "${d}/controlplane-fixture-t2.tsv" | tr -d ' ')"
-	rows="$(tail -n 6 "${d}/controlplane-fixture-t2.tsv")"
-	{
-		printf '# RESUMED_AT=2026-06-01T00:20:00+00:00 TSV_LINES=%s HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8\n' "$n"
-		printf '# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3\n%s\n' "$rows"
-	} >> "${d}/controlplane-fixture-t2.tsv"
-	report json "$d"
-	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
-	[ "$(jq -c '[.results[] | [.istiod_not_ready, .istiod_not_ready_at_end]]' <<<"$output")" = '[[[],[]],[[],[]]]' ]
 	# A growth series' first window: the data warning names it; json has no per-cell list.
 	awk '!/^#/ && $1 != "timestamp" && !d++ { print "# ISTIOD_NOT_READY_AT_END=mesh-a=istiod-g"; print "# WINDOW_ROWS=mesh-a=1/1" } { print }' "$GROWTH" > "${g}/controlplane-fixture-ns.tsv"
 	report json "$g"
@@ -145,7 +132,7 @@ cell() { printf 'mesh=2 svcs=%s reps=2 ns=1 scope=none traffic=none' "$1"; }
 	[ "$(jq -c '[.results[] | [.istiod_not_ready, .istiod_not_ready_at_end]] | unique' <<<"$output")" = '[[null,null]]' ]
 }
 
-@test "--help: both lines and what a pod not Ready does to the figures, the marks, 'up to five cells' and pooled_sweep_outcomes as each record is; within 100 columns" {
+@test "--help: both lines and what a pod not Ready does to the figures, the marks and 'up to five cells'; within 100 columns" {
 	local h
 	run --separate-stderr "$REPORT" --help
 	assert_success
@@ -153,5 +140,4 @@ cell() { printf 'mesh=2 svcs=%s reps=2 ns=1 scope=none traffic=none' "$1"; }
 	h="$(tr '\n' ' ' <<<"$output" | tr -s ' ')"
 	[[ "$h" == *"an istiod pod that was Running but not Ready at a window's baseline (its \"# ISTIOD_NOT_READY=<member>=<pod>,...\" line), and one not Ready at the window's end (its \"# ISTIOD_NOT_READY_AT_END=\" line): a pod that is not Ready takes no new proxy connection, and one shutting down also drops its own as it exits (their reconnects to the other replicas add to the cell's push, convergence and CPU figures), so the per-replica figures may include a replica that carried fewer proxies than the others, or none (its row's connected_proxies shows what it held at the window's end; a restarted replica's row is left out)."* ]]
 	[[ "$h" == *"a legacy cell with a pod not Ready in its text block (\"! NOT READY AT BASELINE: <pod> on <member>\", \"! NOT READY AT WINDOW END: ...\"), its n_total in the markdown cells table (¶, one footnote for both) and the json results' istiod_not_ready and istiod_not_ready_at_end (\"<member>=<pod>\" entries; [] when none, or the TSV's harness wrote no such line; null for a growth cell, whose windows only the data warning names). Each footnote names up to five cells (then \"and N more\")."* ]]
-	[[ "$h" == *"each record as it is: the PROBLEMs of the sweep-outcome.prev.txt behind one that has not finished count in the verdict only."* ]]
 }

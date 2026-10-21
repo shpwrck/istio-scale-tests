@@ -1461,16 +1461,15 @@ collect_growth_for_ctx() {
 # harness_change_line: the "# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>"
 # line a window writes before its rows when they ran other harness files than the TSV's
 # last record of them: its preamble's HARNESS_SHA and HARNESS_CONTENT_KEY, then each
-# "# RESUMED_AT=" and "# HARNESS_CHANGED_AT=" line. A sweep's TSV keeps the preamble of its
-# start, so without it the rows of a file edited (or a checkout) during the sweep would be
-# credited to the start's harness; controlplane_attempts reads the line as a boundary of the
-# rows' provenance. Compared by content key (harness_same: a commit or tag that left the
-# harness files as they were is no change), by HARNESS_SHA when either key is unknown. A
-# final phase whose baseline (its read in --state-dir) ran other files than it did spans
-# both: its rows go to the baseline's when that differs from the record (and HCL_AFTER, a
-# second line the window writes after its rows, records the final's, which the next
-# window's rows are compared with), else to the final's. Prints nothing when they match;
-# warns when it prints a line.
+# "# HARNESS_CHANGED_AT=" line. A sweep's TSV keeps the preamble of its start, so without it
+# the rows of a file edited (or a checkout) during the sweep would be credited to the
+# start's harness; 004 reads the line as a boundary of the rows' provenance. Compared by
+# content key (harness_same: a commit or tag that left the harness files as they were is no
+# change), by HARNESS_SHA when either key is unknown. A final phase whose baseline (its
+# read in --state-dir) ran other files than it did spans both: its rows go to the
+# baseline's when that differs from the record (and HCL_AFTER, a second line the window
+# writes after its rows, records the final's, which the next window's rows are compared
+# with), else to the final's. Prints nothing when they match; warns when it prints a line.
 HCL_AFTER=""
 harness_change_line() {
 	local rec_s rec_k s="$HARNESS_SHA" k="$HARNESS_CONTENT_KEY" t="$HARNESS_READ_AT" bs="" bk="" bt=""
@@ -1481,7 +1480,7 @@ harness_change_line() {
 		!/^#/ { next }
 		!hdr && index($0, "# HARNESS_SHA=") == 1 { s = substr($0, 15) }
 		!hdr && index($0, "# HARNESS_CONTENT_KEY=") == 1 { k = substr($0, 23) }
-		index($0, "# RESUMED_AT=") == 1 || index($0, "# HARNESS_CHANGED_AT=") == 1 { s = lv("HARNESS_SHA"); k = lv("HARNESS_CONTENT_KEY") }
+		index($0, "# HARNESS_CHANGED_AT=") == 1 { s = lv("HARNESS_SHA"); k = lv("HARNESS_CONTENT_KEY") }
 		END { printf "%s\t%s\n", (s == "" ? "unknown" : s), (k == "" ? "unknown" : k) }' "$TSV_FILE" 2>/dev/null) || true
 	if [[ "$PHASE" == final && -f "${STATE_DIR}/harness" ]]; then
 		IFS=$'\t' read -r bs bk bt < "${STATE_DIR}/harness" || true

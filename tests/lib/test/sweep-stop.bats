@@ -84,8 +84,7 @@ _skeleton_run() {
 # unexpected abort (the ERR trap). It keeps a copy of the sweep's record as each call saw it
 # (record-at-last-kubectl.txt). SS_INT: its first call after the sweep's start, once a TSV
 # is written, sends the sweep SIGINT. SS_CR: the Istio CR reads answer as
-# fake-istio-cr.sh (a version a --resume can match). STUB_ISTIOD: one istiod pod
-# (churn-dataplane's preflight).
+# fake-istio-cr.sh. STUB_ISTIOD: one istiod pod (churn-dataplane's preflight).
 _stop_stub() {
 	mkdir -p "$1"
 	cat > "${1}/kubectl" <<'STUB'
@@ -363,7 +362,7 @@ _trap_steps_guarded() {
 	grep -qx 'EXIT=unfinished' "${res}/record-at-last-kubectl.txt"
 }
 
-@test "Ctrl-C through a sweep (dataplane after its first mesh size, controlplane while it counts its cells) leaves it not finished, interrupted by SIGINT; a controlplane --resume after a stop record runs, keeps no .prev of it, and replaces it" {
+@test "Ctrl-C through a sweep (dataplane after its first mesh size, controlplane while it counts its cells) leaves it not finished, interrupted by SIGINT" {
 	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGINT is ignored here"
 	local res="${BATS_TEST_TMPDIR}/stopint" d bin="${BATS_TEST_TMPDIR}/stopbin"
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
@@ -390,26 +389,9 @@ _trap_steps_guarded() {
 	d="$(find "$cres" -maxdepth 1 -name 'sweep-*' -type d)"
 	grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt"
 	grep -qx 'ENDED_SIGNAL=SIGINT' "$d/sweep-outcome.txt"
-	# Its --resume, cut short in turn by an unexpected abort (its summary cannot be written):
-	# a stop record. A --resume after that runs (the stop is no recorded problem), keeps no
-	# sweep-outcome.prev.txt of it (it is no outcome of the sweep), and writes the outcome.
-	rm -f "$d/sweep-${d##*/sweep-}.md"
-	SS_RES="$cres" SS_MD='sweep-RID.md' SS_CR=1 CONTROLPLANE_RESULTS_DIR="$cres" PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
-		run --separate-stderr bash "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	grep -qx 'CUT_SHORT=1' "$d/sweep-outcome.txt"
-	[ ! -e "$d/sweep-outcome.prev.txt" ]
-	rmdir "$d/sweep-${d##*/sweep-}.md"
-	SS_RES="$cres" SS_MD= SS_CR=1 CONTROLPLANE_RESULTS_DIR="$cres" PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
-		run --separate-stderr bash "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	[[ "$stderr" != *"records a problem"* ]]
-	grep -qx 'EXIT=4' "$d/sweep-outcome.txt"
-	! grep -q '^CUT_SHORT=\|^NOTE=next: ' "$d/sweep-outcome.txt" || false
-	[ ! -e "$d/sweep-outcome.prev.txt" ]
 }
 
-@test "every sweep sets its EXIT trap (which calls sweep_outcome_on_exit) before sweep_outcome_start, takes its lock earlier only with --release-on-exit, each of its steps guarded, and its ERR trap is sweep_err_trap" {
+@test "every sweep sets its EXIT trap (which calls sweep_outcome_on_exit) before sweep_outcome_start, which takes its lock (no sweep takes it itself), each of its steps guarded, and its ERR trap is sweep_err_trap" {
 	local f t st
 	# The check fires on the EXIT trap propagation had before this pass.
 	printf '%s\n' "trap '_sweep_rc=\$?; sweep_cleanup; sweep_outcome_on_exit \"\$_sweep_rc\" || true' EXIT" > "${BATS_TEST_TMPDIR}/old.sh"
@@ -424,9 +406,9 @@ _trap_steps_guarded() {
 		t="$(grep -nE "^[[:space:]]*trap '.*on_exit.*' EXIT$" "$f" | head -n 1 | cut -d: -f1)"
 		st="$(grep -nE '^[[:space:]]*sweep_outcome_start "' "$f" | head -n 1 | cut -d: -f1)"
 		[[ -n "$t" && -n "$st" && "$t" -lt "$st" ]] || { echo "${f}: EXIT trap at ${t:-none}, start at ${st:-none}"; false; }
-		# sweep_outcome_start takes the lock after that trap; a sweep that takes it before
-		# (controlplane --resume) releases it on a stop before that trap (--release-on-exit).
-		! grep -nE '^[[:space:]]*sweep_lock ' "$f" | grep -v -- 'sweep_lock --release-on-exit ' || { echo "${f}: sweep_lock without --release-on-exit"; false; }
+		# sweep_outcome_start takes the lock after that trap: a sweep that took it before would
+		# leave it on a stop before that trap.
+		! grep -nE '^[[:space:]]*sweep_lock ' "$f" || { echo "${f}: sweep_lock before its EXIT trap"; false; }
 		# The EXIT trap calls the hook (tuning: in on_exit).
 		grep -qE 'sweep_outcome_on_exit "\$(\?|_sweep_rc|rc)"' "$f" || { echo "${f}: no sweep_outcome_on_exit"; false; }
 		grep -qxF "trap 'sweep_err_trap \"\$?\" \"\$LINENO\" \"\$BASH_COMMAND\"' ERR" "$f" || { echo "${f}: ERR trap"; false; }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # A member listed twice, a remote equal to the source, or two members the platform record
 # would write under one name, is refused before any cluster call: every --contexts and
-# --remote-contexts entrypoint, SETUP_CONTEXTS, no suite splitting a member list with
-# split_csv, and a --resume of a sweep an older harness started with a member twice.
+# --remote-contexts entrypoint, SETUP_CONTEXTS, and no suite splitting a member list with
+# split_csv.
 # Through the real entrypoints (PL33), with an empty kubeconfig and kubectl and oc stubs
 # that log every call.
 
@@ -219,40 +219,4 @@ _refuses() {
 	run split_contexts "${ctxs},${ctxs}" OUT --contexts
 	assert_failure
 	assert_output "error: --contexts lists member-001 twice (1000 items): list each mesh member once"
-}
-
-@test "003 --resume refuses a sweep an older harness started with a member twice, whatever --contexts says: start a new sweep" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" before cs
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$KC" run bash "${ROOT}/tests/controlplane/003-run-sweep.sh" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# What an older harness, which took a member twice, recorded for --contexts ci-a,ci-a,ci-b.
-	sed -i.bak -e 's/^# ISTIO_VERSION=.*/# ISTIO_VERSION=v1.30.5/' -e 's/^# ISTIO_ACTIVE_REVISIONS=.*/# ISTIO_ACTIVE_REVISIONS=ci-a=,ci-a=,ci-b=/' "$tsv" && rm -f "${tsv}.bak"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\nexit 1\n' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	before="$(cat "$tsv")"
-	for cs in ci-a,ci-b ci-a ci-b,ci-a ci-a,ci-c; do
-		PATH="${bin}:${PATH}" KUBECONFIG="$KC" run bash "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" --contexts "$cs" --mesh-sizes 1 --service-counts 5
-		assert_failure 1
-		assert_output --partial "error: --resume: this sweep's TSV preamble lists ci-a twice in ISTIO_ACTIVE_REVISIONS (ci-a=,ci-a=,ci-b=): an older harness took that member twice, so its mesh sizes counted it twice and no --contexts can repeat them (each member is now listed once). Start a new sweep with each mesh member listed once."
-		refute_output --partial "Resume with --contexts"
-		refute_output --partial "Istio version:"
-	done
-	# The same through ISTIO_VERSION_BY_CONTEXT, when ISTIO_ACTIVE_REVISIONS is absent.
-	sed -i.bak -e '/^# ISTIO_ACTIVE_REVISIONS=/d' -e 's/^# ISTIO_VERSION_BY_CONTEXT=.*/# ISTIO_VERSION_BY_CONTEXT=ci-b=v1.30.5,ci-a=v1.30.5,ci-b=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	before="$(cat "$tsv")"
-	PATH="${bin}:${PATH}" KUBECONFIG="$KC" run bash "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "lists ci-b twice in ISTIO_VERSION_BY_CONTEXT (ci-b=v1.30.5,ci-a=v1.30.5,ci-b=v1.30.5)"
-	# Nothing written: the TSV as it was, no resumes.txt.
-	[ "$(cat "$tsv")" = "$before" ]
-	[ ! -e "$d/resumes.txt" ]
-	# A member given twice now is refused when parsed, before any of this.
-	PATH="${bin}:${PATH}" KUBECONFIG="$KC" run bash "${ROOT}/tests/controlplane/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b,ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--contexts lists ci-a twice (ci-a,ci-b,ci-a): list each mesh member once"
-	refute_output --partial "preamble lists"
 }

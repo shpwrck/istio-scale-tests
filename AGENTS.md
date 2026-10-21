@@ -112,7 +112,7 @@ which wins over the upstream docs there when they disagree.
   pass's profile sets is a note, and one it sets that a member did not run, or that a member's
   TSVs do not record, warns), with what `platform_drift_changes` and `platform_drift_unread` find
   changed or not compared during each pass); a suite's sweep calls `platform_probe_share` right
-  after its `platform_probe` (controlplane: after its `--resume` check), then
+  after its `platform_probe`, then
   `platform_start_warnings`, and `platform_drift_check` after its last step, before its reports
   (tuning 003 refuses to start on a profile's objects with `platform_tuning_objects_refuse` instead
   of warning, and since a profile changes the record, each pass calls `platform_probe_reset`,

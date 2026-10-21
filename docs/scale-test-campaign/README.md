@@ -213,7 +213,7 @@ done
 - **Failures mid-sweep:** a failed probe is recorded as a `PROBE_FAILED` row and the sweep
   continues. A hung port-forward still shows as a live process with no log growth, so keep
   watching the log. If a sweep process dies, run that suite's cleanup and re-run the remaining
-  `--mesh-sizes` (controlplane: `--resume <sweep-dir>`).
+  `--mesh-sizes` (each run writes a new sweep dir).
 - **Credentials:** rotate after the campaign, not during it.
 - **Runtime:** several hours in total; churn-dataplane is the longest. More nodes shorten pod
   scheduling without affecting results.

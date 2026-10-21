@@ -5,10 +5,9 @@
 # its member's Deployment wants (WINDOW_ROWS <n>/<spec>), while a line without /<spec>
 # below the preamble's replicas is a warning only; the "could not count the sweep's cells"
 # PROBLEM is not counted; a pooled report counts each pooled sweep's outcome and names it;
-# HARNESS_CONTENT_KEY in every format and the envelope; each attempt's rows in text, csv
-# and markdown, its time in Z form; the scaling json escapes a quote and a backslash; a row
-# cut short is no row (its cell INCOMPLETE); and inputs of several Istio versions, or rows
-# of a run that recorded no harness, turn a PASS into CAUTION.
+# HARNESS_CONTENT_KEY in every format and the envelope; the scaling json escapes a quote and
+# a backslash; a row cut short is no row (its cell INCOMPLETE); and inputs of several Istio
+# versions, or rows of a run that recorded no harness, turn a PASS into CAUTION.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -27,7 +26,7 @@ setup() {
 # cp_tsv <file> <second WINDOW_ROWS> <mesh-b rows in it> [line before it]: the fixture's
 # preamble (plus HARNESS_CONTENT_KEY=111111111111 and ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,
 # mesh-b=3) and two cells (15 and 30 services) of valid rows, each member 3 rows a window
-# (mesh-b <n> in the second). "TSV_LINES=@" in the line reads the TSV's lines before it.
+# (mesh-b <n> in the second).
 cp_tsv() {
 	awk -F'\t' -v OFS='\t' -v w2="$2" -v nb="$3" -v x="${4:-}" '
 	function row(at, s, m, n,    i) { for (i = 1; i <= n; i++) { $0 = t; $1 = "2026-06-01T" at ":00+00:00"; $2 = m; $4 = s; $31 = 0; print } }
@@ -43,7 +42,7 @@ cp_tsv() {
 		print "# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3"; row("00:00", 15, "mesh-a", 3); row("00:00", 15, "mesh-b", 3)
 		if (x != "") print x
 		print "# WINDOW_ROWS=" w2; row("00:10", 30, "mesh-a", 3); row("00:10", 30, "mesh-b", nb)
-	}' "$FIXTURE" | awk '{ sub(/TSV_LINES=@/, "TSV_LINES=" (NR - 1)); print }' > "$1"
+	}' "$FIXTURE" > "$1"
 }
 
 # report <format> [dir] [flag...]: 004 over res/ (or dir), its stderr apart.
@@ -122,7 +121,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	report json
 	[ "$(verdict)" = CAUTION ]
 	[[ "$(headline)" == "${h}"* ]]
-	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == "The inputs ran on different harnesses (HARNESS_SHA fixture,other99; the harness changed during a run (HARNESS_CHANGED_AT), see the attempts)"* ]]
+	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == "The inputs ran on different harnesses (HARNESS_SHA fixture,other99; the harness changed during a run (HARNESS_CHANGED_AT))"* ]]
 	# A finished sweep whose own reads missed the change (no PROBLEM).
 	printf 'RUN_ID=fixture-t2\nEXIT=0\nUNIT=cells\nTOTAL=2\n' > "${RES}/sweep-outcome.txt"
 	report json
@@ -157,7 +156,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
 }
 
-@test "a pooled report counts the PROBLEMs of each pooled sweep's outcome and names each record; one dir names the record before an unfinished one" {
+@test "a pooled report counts the PROBLEMs of each pooled sweep's outcome and names each record" {
 	local base="${BATS_TEST_TMPDIR}/base" s
 	for s in a b; do
 		mkdir -p "${base}/sweep-${s}"
@@ -168,44 +167,37 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	report json "$base" --allow-multi-run
 	[ "$(verdict)" = PASS ]
 	printf 'RUN_ID=run-a\nEXIT=4\nPROBLEM=a\n' > "${base}/sweep-a/sweep-outcome.txt"
-	# sweep-b: a --resume running (unfinished), the outcome before it ended with two.
+	# sweep-b: one that has not finished (it died, or still runs).
 	printf 'RUN_ID=run-b\nEXIT=unfinished\nPROBLEM=b\n' > "${base}/sweep-b/sweep-outcome.txt"
-	printf "RUN_ID=run-b\nEXIT=4\nPROBLEM=c\nPROBLEM=could not count the sweep's cells: (bats)\n" > "${base}/sweep-b/sweep-outcome.prev.txt"
 	report json "$base" --allow-multi-run
 	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "the sweep outcomes record 3 PROBLEM(s) (sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt, and .prev.txt before it: 2), so the figures"* ]]
-	# One sweep alone: its record, and the one before it.
+	[[ "$(headline)" == "the sweep outcomes record 2 PROBLEM(s) (sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1), so the figures"* ]]
+	# One sweep alone: its record.
 	report json "${base}/sweep-b"
-	[[ "$(headline)" == "the sweep outcome records 2 PROBLEM(s) (sweep-outcome.txt, and .prev.txt before it), so the figures"* ]]
+	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
 	report json "${base}/sweep-a"
 	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
 }
 
-@test "HARNESS_CONTENT_KEY in every format and the envelope (mixed:<list> for several); each attempt's rows in text, csv and markdown; a --resume's time in Z form" {
-	local att mixed="mixed:111111111111,222222222222"
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3 "# RESUMED_AT=2026-06-01T00:05:00+00:00 TSV_LINES=@ HARNESS_SHA=fixture HARNESS_CONTENT_KEY=111111111111 ISTIO_NOTREADY_AT_RESUME=none ISTIO_GENERATIONS=mesh-a=1/1 ISTIO_PROXY_VERSIONS=mesh-a=1.30.5 KUBE_VERSIONS=mesh-a=v1.34.8"
+@test "HARNESS_CONTENT_KEY in every format and the envelope (mixed:<list> for several)" {
+	local mixed="mixed:111111111111,222222222222"
+	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3
 	report json
 	[ "$(jq -c '.metadata | [.harness_content_key, .harness_content_keys]' <<<"$output")" = '["111111111111",["111111111111"]]' ]
-	[ "$(jq -c '[.metadata.attempts[] | [.run, .rows, .rows_kept, .started_at]]' <<<"$output")" = '[["first run",6,6,"unknown"],["--resume at 2026-06-01T00:05:00Z",6,6,"2026-06-01T00:05:00Z"]]' ]
-	att="the rows come from more than one run: the first run HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.34.8 (6 row(s), 6 in the figures), then --resume at 2026-06-01T00:05:00Z HARNESS_SHA=fixture KUBE_VERSIONS=mesh-a=v1.34.8 (6 row(s), 6 in the figures)"
 	report text
 	assert_output --partial "  HARNESS_SHA=fixture  HARNESS_CONTENT_KEY=111111111111  "
 	assert_output --partial "  harness_shas=fixture  harness_content_keys=111111111111  "
-	assert_output --partial "# attempts: ${att}"
 	report csv
 	assert_line "# HARNESS_CONTENT_KEY=111111111111"
-	assert_output --partial "# attempts: ${att}"
 	report markdown
 	assert_line 'harness_content_key: "111111111111"'
 	assert_line 'harness_content_keys: ["111111111111"]'
-	assert_output --partial "> **Attempts:** ${att}"
 	report charts
 	assert_line 'harness_content_key: "111111111111"'
 	source "${ROOT}/tests/lib/platform.sh"
 	run render_scale_envelope "$RES" "$REPORT" mesh-a,mesh-b false
 	assert_success
 	assert_output --partial "(harness \`fixture\`, HARNESS_CONTENT_KEY \`111111111111\`; report harness "
-	assert_output --partial "> **Attempts:** first run HARNESS_SHA=fixture (6 row(s), 6 in the figures); --resume at 2026-06-01T00:05:00Z HARNESS_SHA=fixture (6 row(s), 6 in the figures)"
 	# Rows of two harnesses: mixed.
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3 "# HARNESS_CHANGED_AT=2026-06-01T00:05:00Z HARNESS_SHA=other99 HARNESS_CONTENT_KEY=222222222222"
 	report json
@@ -260,7 +252,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	[ "$(verdict)" = PASS ]
 }
 
-@test "rows in the figures from a run that recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY turn PASS into CAUTION: they cannot be shown to come from one harness (003's rule for a carried harness PROBLEM)" {
+@test "rows in the figures from a run that recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY turn PASS into CAUTION: they cannot be shown to come from one harness" {
 	local h="a run whose rows are in the figures recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY (git could not name its harness, or an older harness did not record it), so the rows cannot be shown to come from one harness; the figures: "
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3
 	sed -i.bak -e 's/^# HARNESS_SHA=.*/# HARNESS_SHA=unknown/' -e '/^# HARNESS_CONTENT_KEY=/d' "$TSV"

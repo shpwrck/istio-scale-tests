@@ -34,18 +34,17 @@
 #       limit (per-replica limit * replicas), matching numerator (a cross-replica
 #       `kubectl top` sum) to denominator scope (PL35). `unknown` if any arg bad.
 #   env_sla_verdict [--nodes-excluded REASON] <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct>
-#                   <restarts> <n_total> <n_valid> [caution_pct] [fail_pct] [not_run]
-#                   [incomplete] [problems] [problems_src] [cautions]
+#                   <restarts> <n_total> <n_valid> [caution_pct] [fail_pct] [incomplete]
+#                   [problems] [problems_src] [cautions]
 #                                                  -> "VERDICT|headline" — one of
 #       PASS / CAUTION / FAIL plus a one-line human headline. The verdict is computed
 #       only over the validity-gated aggregates the caller passes (the report's
 #       n_valid maxes), never configured axis values (PL35). The CAUTION/FAIL utilization
 #       bands default from the env (SCALE_SLA_CAUTION_PCT=75 / SCALE_SLA_FAIL_PCT=90 in
 #       config/options.env) but accept args 8/9 so the function stays pure/unit-testable.
-#       Arg 10: planned cells that never ran (NOT_RUN); arg 11: cells cut short while
-#       their member rows were written (INCOMPLETE); arg 12: the PROBLEM lines of the
-#       sweep outcome (arg 13: the records that hold them); arg 14: other conditions, one
-#       clause per line: each turns a PASS into CAUTION.
+#       Arg 10: cells cut short while their member rows were written (INCOMPLETE); arg 11:
+#       the PROBLEM lines of the sweep outcome (arg 12: the records that hold them); arg 13:
+#       other conditions, one clause per line: each turns a PASS into CAUTION.
 #       The controlplane report (004) is the SINGLE authoritative compute site;
 #       render_scale_envelope reads the verdict back from the report JSON.
 #   env_replicas_summary <n...>                    -> the ISTIOD_REPLICAS token for
@@ -72,7 +71,7 @@
 #       -> renders the docs/campaigns/TEMPLATE.md scale-envelope tables (mesh topology,
 #          control-plane provisioning & headroom, scale verdict) as markdown to stdout.
 #          Reads the report's JSON (peak-mesh row + capacity metadata; its provenance
-#          warning, attempts and data warnings lead the block) and takes a read-only
+#          warning and data warnings lead the block) and takes a read-only
 #          `kubectl top nodes` / `top pod -l app=istiod` snapshot across --contexts.
 #          Per-sweep dir only (PL6); never a flat glob.
 #
@@ -158,8 +157,8 @@ env_pct_of_limit() {
 }
 
 # env_sla_verdict [--nodes-excluded REASON] <icpu_pct> <imem_pct> <ncpu_pct> <nmem_pct>
-#                 <restarts> <n_total> <n_valid> [caution_pct] [fail_pct] [not_run]
-#                 [incomplete] [problems] [problems_src] [cautions]
+#                 <restarts> <n_total> <n_valid> [caution_pct] [fail_pct] [incomplete]
+#                 [problems] [problems_src] [cautions]
 # Computes the headline customer SLA verdict from the report's validity-gated
 # aggregates (already n_valid-filtered by the caller — never configured axis
 # values, PL35). The CAUTION/FAIL utilization bands default from the env
@@ -173,22 +172,19 @@ env_pct_of_limit() {
 # --nodes-excluded REASON (the nodes' figures do not measure the cluster: kind nodes report
 # the shared host) leaves ncpu_pct and nmem_pct out of the bands and adds "node figures left
 # out: REASON" as the last of the <cautions> below.
-# <not_run> (arg 10, default 0): planned cells of the sweep that never ran (NOT_RUN: no
-# row, so no sample of theirs is in n_total). The figures cover only the cells that ran, so
-# a PASS reads CAUTION "N planned cell(s) never ran (NOT_RUN)", and a CAUTION or FAIL
-# headline adds it. <incomplete> (arg 11, default 0): cells whose latest attempt has rows of
-# fewer members than its mesh size, or a member fewer rows than its window wrote
-# (INCOMPLETE: cut short while they were written), whose figures cover only those members:
-# the same, as "N cell(s) are INCOMPLETE". <problems> (arg 12, default 0): the PROBLEM
-# lines of the sweep's outcome (sweep-outcome.txt: the harness or Istio changed during the
-# sweep, ...), which the figures cannot show: the same, as "the sweep outcome records N
-# PROBLEM(s) (<problems_src>)"; <problems_src> (arg 13, default sweep-outcome.txt) names
-# the records counted (several, "<file>: <n>; <file>: <n>", read "the sweep outcomes
-# record"). <cautions> (arg 14, default none): other conditions the figures cannot show
-# (the rows ran on more than one harness, a cell ran on fewer istiod pods than wanted), one
-# clause per line, each the same: a PASS reads CAUTION "<clause>; the figures: <reason>",
-# and a CAUTION or FAIL headline adds "; also <clause>". Pass "" for args 8/9 to keep
-# their defaults.
+# <incomplete> (arg 10, default 0): cells with rows of fewer members than their mesh size,
+# or a member with fewer rows than its window wrote (INCOMPLETE: cut short while they were
+# written), whose figures cover only those members: a PASS reads CAUTION "N cell(s) are
+# INCOMPLETE", and a CAUTION or FAIL headline adds it. <problems> (arg 11, default 0): the
+# PROBLEM lines of the sweep's outcome (sweep-outcome.txt: the harness or Istio changed
+# during the sweep, ...), which the figures cannot show: the same, as "the sweep outcome
+# records N PROBLEM(s) (<problems_src>)"; <problems_src> (arg 12, default
+# sweep-outcome.txt) names the records counted (several, "<file>: <n>; <file>: <n>", read
+# "the sweep outcomes record"). <cautions> (arg 13, default none): other conditions the
+# figures cannot show (the rows ran on more than one harness, a cell ran on fewer istiod
+# pods than wanted), one clause per line, each the same: a PASS reads CAUTION "<clause>;
+# the figures: <reason>", and a CAUTION or FAIL headline adds "; also <clause>". Pass ""
+# for args 8/9 to keep their defaults.
 # Emits "<VERDICT>|<one-line headline>". Pure.
 # shellcheck disable=SC2329
 env_sla_verdict() {
@@ -198,9 +194,8 @@ env_sla_verdict() {
 		_env_nodes_ex=1
 		shift 2
 	fi
-	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}" not_run="${10:-0}" incomplete="${11:-0}"
-	local problems="${12:-0}" problems_src="${13:-sweep-outcome.txt}" cautions="${14:-}"
-	[[ "$not_run" =~ ^[0-9]+$ ]] || not_run=0
+	local caution="${8:-${SCALE_SLA_CAUTION_PCT:-75}}" fail="${9:-${SCALE_SLA_FAIL_PCT:-90}}" incomplete="${10:-0}"
+	local problems="${11:-0}" problems_src="${12:-sweep-outcome.txt}" cautions="${13:-}"
 	[[ "$incomplete" =~ ^[0-9]+$ ]] || incomplete=0
 	[[ "$problems" =~ ^[0-9]+$ ]] || problems=0
 	# The node figures left out: one more condition no figure shows, after the caller's.
@@ -208,7 +203,7 @@ env_sla_verdict() {
 	# The texts through the environment: awk -v would unescape a backslash in them.
 	_ESV_SRC="$problems_src" _ESV_CAUTIONS="$cautions" awk -v icpu="${1:-}" -v imem="${2:-}" -v ncpu="${3:-}" -v nmem="${4:-}" \
 	    -v restarts="${5:-0}" -v ntotal="${6:-0}" -v nvalid="${7:-0}" \
-	    -v caution="$caution" -v fail="$fail" -v notrun="$not_run" -v incomplete="$incomplete" \
+	    -v caution="$caution" -v fail="$fail" -v incomplete="$incomplete" \
 	    -v problems="$problems" -v nodes_ex="$_env_nodes_ex" '
 	function isnum(x) { return x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/ }
 	BEGIN {
@@ -239,11 +234,6 @@ env_sla_verdict() {
 			verdict = "CAUTION"; reason = "no utilization measured — headroom unverified"
 		} else {
 			verdict = "PASS"; reason = sprintf("peak utilization %d%% < %d%% across %s, no restarts, all %d samples valid", peak, caution+0, scope, nvalid+0)
-		}
-		# Planned cells that never ran: the figures cover only the cells that did.
-		if (notrun + 0 > 0) {
-			if (verdict == "PASS") { verdict = "CAUTION"; reason = sprintf("%d planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan; the cells that ran: %s", notrun, reason) }
-			else reason = sprintf("%s; also %d planned cell(s) never ran (NOT_RUN)", reason, notrun)
 		}
 		# Cells cut short while their member rows were written: their figures cover part of
 		# the mesh.
@@ -581,20 +571,9 @@ render_scale_envelope() {
 	# list below does: paste a redacted copy (redact-results.sh maps them).
 	local dw_lines=""
 	dw_lines="$(printf '%s' "$json" | jq -r '(.metadata.data_warnings // [])[] | "> **Data warning:** " + (split("\n") | join(" "))' 2>/dev/null || true)"
-	# The attempts behind it, when a --resume ran or the harness changed during a run: each
-	# run's or change's HARNESS_SHA and rows, as 004 prints them (no KUBE_VERSIONS: they
-	# name the members).
-	local att_line=""
-	att_line="$(printf '%s' "$json" | jq -r '(.metadata.attempts // []) | if length > 1 then "> **Attempts:** " + (map("\(.run) HARNESS_SHA=\(.harness_sha) (\(.rows) row(s), \(.rows_kept // .rows) in the figures)") | join("; ")) else empty end' 2>/dev/null || true)"
 	# The proxy versions at the start, summed over the members (no context names).
-	local proxy_versions earlier_rows earlier_cells earlier_line=""
+	local proxy_versions
 	proxy_versions="$(env_proxy_versions_summary "$(jq_get '.metadata.istio_proxy_versions')")"
-	# The report reads each cell's latest attempt; say how many rows that left out.
-	earlier_rows="$(jq_get '.metadata.earlier_attempt_rows_left_out')"
-	earlier_cells="$(jq_get '.metadata.earlier_attempt_cells')"
-	if [[ "$earlier_rows" =~ ^[1-9][0-9]*$ ]]; then
-		earlier_line="> Each cell's latest attempt only: ${earlier_rows} row(s) of earlier attempts of ${earlier_cells} cell(s) (failed, then run again by a --resume) are left out of every figure here."
-	fi
 	# While the sweep renders this, its outcome is not written yet: the same line the
 	# markdown report gets, which sweep_outcome --md replaces with the outcome (a sweep
 	# that dies before it leaves the line, so the envelope says it is not finished).
@@ -747,8 +726,6 @@ render_scale_envelope() {
 > Auto-generated by \`tests/lib/envelope.sh:render_scale_envelope\` from \`$(basename "$results_dir")\` (harness \`${harness_sha}\`, HARNESS_CONTENT_KEY \`${harness_key}\`; report harness \`${report_harness}\`: REPORT_HARNESS_SHA, the harness that rendered it).
 > Measured columns are the report's n_valid-gated peaks (restarted/SETUP_FAILED rows excluded).
 ${prov_line:+${prov_line}
-}${att_line:+${att_line}
-}${earlier_line:+${earlier_line}
 }${dw_lines:+${dw_lines}
 }${pending_line:+
 ${pending_line}

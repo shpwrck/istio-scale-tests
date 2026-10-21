@@ -1,11 +1,10 @@
 #!/usr/bin/env bats
 # tests/lib/redact-results.sh through its real entrypoint (PL33): what it replaces, what it
 # learns the member names from and when it refuses, file and dir names, --in-place, the
-# artifacts a sweep writes besides its TSV and reports (a controlplane --resume's
-# resumes.txt and # RESUMED_AT lines, planned-cells.txt, the .sweep.lock it skips), and
-# the file-name form of a context it shares with tuning and istiod-diag. Names are
-# placeholders (ci-a, ctx-a), addresses come from the documentation ranges (192.0.2.0/24,
-# 2001:db8::/32), hosts end in .example or .example.com.
+# artifacts a sweep writes besides its TSV and reports (a controlplane sweep's dir, the
+# .sweep.lock it skips), and the file-name form of a context it shares with tuning and
+# istiod-diag. Names are placeholders (ci-a, ctx-a), addresses come from the documentation
+# ranges (192.0.2.0/24, 2001:db8::/32), hosts end in .example or .example.com.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -49,19 +48,13 @@ cp_sweep() {
 		run --separate-stderr bash "$CP/003-run-sweep.sh" "$@"
 }
 
-@test "a resumed controlplane sweep: resumes.txt's member columns and the TSV's own lines are redacted, planned-cells.txt is copied, the lock file is not; 004 still tells the attempts apart in the copy" {
+@test "a controlplane sweep's dir: the TSV's own lines and the sweep's other files are redacted, the lock file is not copied" {
 	_cp_stub
 	cp_sweep --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
 	[ "$status" -eq 4 ]
 	local d tsv out="${BATS_TEST_TMPDIR}/copy"
 	d="$(find "$RES" -maxdepth 1 -name 'sweep-*' -type d)"
-	cp_sweep --resume "$d" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
-	[ "$status" -eq 4 ]
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	grep -q '^# RESUMED_AT=[^ ]* TSV_LINES=[0-9]* HARNESS_SHA=' "$tsv"
-	# The resume's line names both members in its member columns.
-	[[ "$(awk -F'\t' 'NR == 2 { print $4 "|" $6 "|" $7 }' "$d/resumes.txt")" == ci-a=*,ci-b=*"|"ci-a=*,ci-b=*"|"ci-a=*,ci-b=* ]]
-	[ -s "$d/planned-cells.txt" ]
 	# A run that died while it held the dir leaves its lock (the real sweep_lock).
 	bash -c 'source "$1/tests/lib/common.sh"; sweep_lock "$2"' _ "$ROOT" "$d"
 	[ -s "$d/.sweep.lock" ]
@@ -70,27 +63,9 @@ cp_sweep() {
 	[[ "$stderr" == *"/.sweep.lock (a sweep's lock file: the PID of the run that held the dir)"* ]]
 	local c="${out}/${d##*/}"
 	[ ! -e "${c}/.sweep.lock" ]
-	cmp "$d/planned-cells.txt" "${c}/planned-cells.txt"
-	# resumes.txt: the header as it was, the member columns with placeholders, the TSV's
-	# name (it names no member) as it was.
-	[ "$(head -n 1 "${c}/resumes.txt")" = "$(head -n 1 "$d/resumes.txt")" ]
-	[[ "$(awk -F'\t' 'NR == 2 { print $4 "|" $6 "|" $7 "|" $8 }' "${c}/resumes.txt")" == "<mesh-a-ctx>="*",<mesh-b-ctx>="*"|<mesh-a-ctx>="*",<mesh-b-ctx>="*"|<mesh-a-ctx>="*",<mesh-b-ctx>="*"|${tsv##*/}" ]]
-	# The TSV's resume line, its header and its preamble's resume keys.
-	[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}" | sed 's/ ISTIO_NOTREADY_AT_RESUME=.*//')" = "$(grep '^# RESUMED_AT=' "$tsv" | sed 's/ ISTIO_NOTREADY_AT_RESUME=.*//')" ]
-	[[ "$(grep '^# RESUMED_AT=' "${c}/${tsv##*/}")" == *" KUBE_VERSIONS=<mesh-a-ctx>="*",<mesh-b-ctx>="* ]]
 	[ "$(grep '^timestamp' "${c}/${tsv##*/}")" = "$(grep '^timestamp' "$tsv")" ]
 	run grep -rlE '(^|[^A-Za-z0-9_<])ci-[ab]([^A-Za-z0-9_]|$)' "$out"
 	assert_output ""
-	# The copy still tells the attempts apart (resumes.txt applies to its TSV by name).
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$c" --format json
-	assert_success
-	[ "$(jq -r '.metadata.attempts | length' <<<"$output")" = 2 ]
-	# resumes.txt alone: its member columns name the members, so it is not refused.
-	run --separate-stderr "$REDACT" --out "${BATS_TEST_TMPDIR}/alone" "$d/resumes.txt"
-	assert_success
-	[[ "$stderr" == *"<mesh-a-ctx>     ci-a"* && "$stderr" == *"<mesh-b-ctx>     ci-b"* ]]
-	run grep -cE '(^|[^<])ci-[ab]=' "${BATS_TEST_TMPDIR}/alone/resumes.txt"
-	assert_output 0
 }
 
 @test "a TSV's header row is redacted like any other line; its column names still pick the context columns the scan checks" {

@@ -97,12 +97,12 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 }
 
 @test "several records in the verdict read 'the sweep outcomes record'; one reads 'the sweep outcome records' (env_sla_verdict and the pooled report)" {
-	run env_sla_verdict 10 10 10 10 0 6 6 "" "" 0 0 2 "sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1"
+	run env_sla_verdict 10 10 10 10 0 6 6 "" "" 0 2 "sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1"
 	assert_output "CAUTION|the sweep outcomes record 2 PROBLEM(s) (sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1), so the figures may not measure what they seem to; the figures: peak utilization 10% < 75% across istiod + nodes, no restarts, all 6 samples valid"
-	run env_sla_verdict 10 10 10 10 1 6 5 "" "" 0 0 2 "sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1"
+	run env_sla_verdict 10 10 10 10 1 6 5 "" "" 0 2 "sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1"
 	assert_output --regexp '^FAIL\|.*; also the sweep outcomes record 2 PROBLEM\(s\) \(sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1\)$'
-	run env_sla_verdict 10 10 10 10 0 6 6 "" "" 0 0 2 "sweep-outcome.txt, and .prev.txt before it"
-	assert_output --regexp '^CAUTION\|the sweep outcome records 2 PROBLEM\(s\) \(sweep-outcome.txt, and .prev.txt before it\), so'
+	run env_sla_verdict 10 10 10 10 0 6 6 "" "" 0 2 "sweep-outcome.txt"
+	assert_output --regexp '^CAUTION\|the sweep outcome records 2 PROBLEM\(s\) \(sweep-outcome.txt\), so'
 	printf 'RUN_ID=run-a\nEXIT=4\nPROBLEM=a (bats)\n' > "${BASE}/sweep-a/sweep-outcome.txt"
 	printf 'RUN_ID=run-b\nEXIT=4\nPROBLEM=b (bats)\n' > "${BASE}/sweep-b/sweep-outcome.txt"
 	report json "$BASE" --allow-multi-run
@@ -122,12 +122,11 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	local d="${BATS_TEST_TMPDIR}/one" h
 	mkdir -p "$d"
 	cp "${BASE}/sweep-a/controlplane-run-a.tsv" "$d/"
-	# A --resume that has not finished, and the outcome before it, with one PROBLEM.
-	printf 'RUN_ID=run-a\nEXIT=unfinished\nUNIT=cells\n' > "${d}/sweep-outcome.txt"
-	printf 'RUN_ID=run-a\nEXIT=4\nPROBLEM=a (bats)\n' > "${d}/sweep-outcome.prev.txt"
+	# A record with one PROBLEM.
+	printf 'RUN_ID=run-a\nEXIT=4\nPROBLEM=a (bats)\n' > "${d}/sweep-outcome.txt"
 	report json "$d"
 	h="$(headline)"
-	[[ "$h" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt, and .prev.txt before it), so the figures"* ]]
+	[[ "$h" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
 	report json "${d}//"
 	[ "$(headline)" = "$h" ]
 	report json "${d}/"

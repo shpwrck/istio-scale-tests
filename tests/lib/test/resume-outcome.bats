@@ -1,12 +1,11 @@
 #!/usr/bin/env bats
-# Resumes, outcomes and provenance of the sweeps: a cell cut short while its rows were
-# written (INCOMPLETE) or by a stop (INTERRUPTED), leftovers a legacy cell would measure
-# on, NOT_RUN and INCOMPLETE in the SLA verdict, the content-hash HARNESS_SHA (submodules
-# left out), a stopped --resume, resumes.txt and the attempts, the sweep-dir lock, merged
-# values in markdown cells, SIGTERM reaching the step (whose EXIT trap still removes its
-# temp files), the tuning sweep's Istio CR checkpoints, controlplane 002's config_dump
-# samples and scrape skew, and every report's own harness. Through the real scripts where
-# a test can reach them (PL33); no cluster: kubectl is a stub.
+# Outcomes and provenance of the sweeps: a cell cut short while its rows were written
+# (INCOMPLETE) or by a stop (INTERRUPTED), leftovers a legacy cell would measure on,
+# INCOMPLETE in the SLA verdict, the content-hash HARNESS_SHA (submodules left out), the
+# sweep-dir lock, merged values in markdown cells, SIGTERM reaching the step (whose EXIT
+# trap still removes its temp files), the tuning sweep's Istio CR checkpoints, controlplane
+# 002's config_dump samples and scrape skew, and every report's own harness. Through the
+# real scripts where a test can reach them (PL33); no cluster: kubectl is a stub.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -30,12 +29,11 @@ setup() {
 	# the controlplane-test namespaces are one (controlplane-test-0) while ns-left exists,
 	# their delete removes it unless ns-stuck exists (then the delete fails); the plain
 	# namespace's delete succeeds. 002's first read (its Running istiod pods) fails, and
-	# first: touches stale-seen when the file STALE names exists; under CP_TERM (once) lists
-	# TMPDIR into tmp-at-term, records its PID (stub-pid), starts a 30 s sleep (sleep-pid),
-	# sends SIGTERM to the topmost *003-run-sweep.sh ancestor below the test's process (the
-	# sweep process alone), closes its output and waits for the sleep before it touches
-	# stub-slept (a sweep that waited for its step would wait for it). Anything else fails,
-	# as against an empty kubeconfig.
+	# under CP_TERM (once) first lists TMPDIR into tmp-at-term, records its PID (stub-pid),
+	# starts a 30 s sleep (sleep-pid), sends SIGTERM to the topmost *003-run-sweep.sh
+	# ancestor below the test's process (the sweep process alone), closes its output and
+	# waits for the sleep before it touches stub-slept (a sweep that waited for its step
+	# would wait for it). Anything else fails, as against an empty kubeconfig.
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/bin/sh
 d="$RO_DIR"
@@ -52,7 +50,6 @@ case "$*" in
 	rm -f "$d/ns-left" ;;
 *" delete namespace controlplane-test "*) : ;;
 *" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running -o jsonpath="*)
-	[ -z "${STALE:-}" ] || [ ! -e "$STALE" ] || : > "$d/stale-seen"
 	if [ -n "${CP_TERM:-}" ] && [ ! -e "$d/term-sent" ]; then
 		: > "$d/term-sent"
 		ls "${TMPDIR:-/tmp}" > "$d/tmp-at-term" 2>/dev/null || :
@@ -108,7 +105,7 @@ cp_row() {
 		"$1" "$2" "$3" "$4" "$5" "$(($4 * 2))"
 }
 
-# incomplete_dir: a first run of mesh 2 (ci-a, ci-b) x svcs 5,6, whose TSV then holds the
+# incomplete_dir: a run of mesh 2 (ci-a, ci-b) x svcs 5,6, whose TSV then holds the
 # rows a run cut short would leave: svcs=5 measured on both members, svcs=6 on ci-a only
 # (INCOMPLETE). Sets D and TSV.
 incomplete_dir() {
@@ -116,8 +113,6 @@ incomplete_dir() {
 	[ "$status" -eq 4 ]
 	D="$(sweep_dir)"
 	TSV="$(find "$D" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# The first run's status rows (svcs=5, svcs=6), for tests that need one.
-	awk -F'\t' '$2 == "PROBE_FAILED"' "$TSV" > "${BATS_TEST_TMPDIR}/status.rows"
 	# Members on nodes of their own (the stub reads no node provider, and a verdict over an
 	# unknown one leaves the node figures out: CAUTION).
 	grep -E '^#|^timestamp' "$TSV" \
@@ -149,50 +144,10 @@ incomplete_dir() {
 	done
 }
 
-@test "a --resume runs an INCOMPLETE cell again as a new attempt; a narrower --resume names it at its start and counts it as failed (INCOMPLETE)" {
-	incomplete_dir
-	# Narrower: svcs=6 is left out; it says so before its first cell, then counts it.
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5
-	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"note: --resume: this run's axis flags leave out 1 planned cell(s) not done yet (never ran, failed or INCOMPLETE), which will not run"*"mesh=2 svcs=6 reps=3 ns=1 scope=none traffic=none"* ]]
-	[[ "$stderr" == *"mesh=2 svcs=5 reps=3 ns=1 scope=none traffic=none — already has a valid row; skipping (resume)"* ]]
-	[[ "$stderr" == *"error: 1 of 2 cells failed: INCOMPLETE x1."* ]]
-	# Full: svcs=6 runs again (the stub fails its probe), marked as a new attempt in the TSV
-	# and in resumes.txt, whose last column names the TSV.
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6
-	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"[2/2] mesh=2 svcs=6 reps=3 ns=1 scope=none traffic=none — cut short while its rows were written (INCOMPLETE: rows of 1 of its 2 members): running it again; the reports use only this new attempt (resume)"* ]]
-	[[ "$stderr" == *"error: 1 of 2 cells failed: PROBE_FAILED x1."* ]]
-	[ "$(grep -c '^# RESUMED_AT=[^ ]* TSV_LINES=[0-9]* HARNESS_SHA=' "$TSV")" -eq 2 ]
-	head -n 1 "$D/resumes.txt" | grep -qx $'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\tHARNESS_CONTENT_KEY'
-	[ "$(awk -F'\t' 'NR > 1 { print $8 }' "$D/resumes.txt" | sort -u)" = "${TSV##*/}" ]
-	[ "$(awk -F'\t' 'NR > 1 { print $7 }' "$D/resumes.txt" | sort -u)" = "ci-a=2/2,ci-b=2/2" ]
-	# The reports use the latest attempt: a PROBE_FAILED cell, no INCOMPLETE warning.
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
-	[[ "$output" != *"are INCOMPLETE"* ]]
-}
-
-@test "a narrower --resume names the planned cells it leaves NOT_RUN at its start, with the flags that planned them; its end says NOT_RUN cells have no row" {
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5,6
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	TSV="$(find "$D" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# The run died before its second cell: no row of svcs=6.
-	awk -F'\t' '!(NF >= 40 && $4 == 6)' "$TSV" > "${TSV}.tmp"
-	mv "${TSV}.tmp" "$TSV"
-	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"note: --resume: this run's axis flags leave out 1 planned cell(s) not done yet (never ran, failed or INCOMPLETE), which will not run and count as failed at its end (NOT_RUN, or their last state): mesh=1 svcs=6 reps=3 ns=1 scope=none traffic=none. No cell has run yet: to run them in this resume, stop it now (Ctrl-C) and --resume with the axis flags that planned them (cells already measured are skipped):"$'\n'"  the first run: --mesh-sizes 1 --service-counts 5,6 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none"$'\n'* ]]
-	# Before the first cell.
-	local before="${stderr%%"[1/2] mesh=1 svcs=5"*}"
-	[[ "$before" == *"leave out 1 planned cell(s)"* ]]
-	[[ "$stderr" == *"error: 2 of 2 cells failed: NOT_RUN x1, PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt, in n_total, not n_valid); NOT_RUN cells have no row (planned-cells.txt lists them)"* ]]
-}
-
 # ---------------------------------------------------------------------------
 # SIGTERM to the sweep process inside a cell
 
-@test "a SIGTERM to the controlplane sweep's process alone reaches its step's whole tree at once (the kubectl it runs and that command's own child are gone when the sweep returns); the cell in progress gets an INTERRUPTED row, the record says SIGTERM, and a --resume runs that cell again" {
+@test "a SIGTERM to the controlplane sweep's process alone reaches its step's whole tree at once (the kubectl it runs and that command's own child are gone when the sweep returns); the cell in progress gets an INTERRUPTED row, and the record says SIGTERM" {
 	local p f
 	CP_TERM=1 cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 143 ] || { echo "status ${status}: ${stderr}"; false; }
@@ -213,10 +168,6 @@ incomplete_dir() {
 	grep -qx 'ENDED_SIGNAL=SIGTERM' "$D/sweep-outcome.txt"
 	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
 	[[ "$output" == *"INTERRUPTED"* ]]
-	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	[[ "$stderr" == *"Sweep [1/1]: mesh=1 svcs=5"* || "$output" == *"Sweep [1/1]: mesh=1 svcs=5"* ]]
-	[[ "$stderr" == *"error: 1 of 1 cells failed: PROBE_FAILED x1."* ]]
 }
 
 @test "a SIGTERM the controlplane sweep forwards to 002 runs 002's EXIT trap at once: the temp dir it had made is gone, and the sweep still ends on the signal (143)" {
@@ -256,7 +207,7 @@ incomplete_dir() {
 # ---------------------------------------------------------------------------
 # Leftovers a legacy cell would measure on
 
-@test "a legacy sweep deletes the controlplane-test namespaces an earlier run left (005-cleanup.sh) before its first cell; it stops before measuring anything when they remain; a cell's stale state dir is gone before 002 reads it" {
+@test "a legacy sweep deletes the controlplane-test namespaces an earlier run left (005-cleanup.sh) before its first cell; it stops before measuring anything when they remain" {
 	: > "${BATS_TEST_TMPDIR}/ns-left"
 	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 4 ]
@@ -265,30 +216,20 @@ incomplete_dir() {
 	[ ! -e "${BATS_TEST_TMPDIR}/ns-left" ]
 	# The note comes before the first cell.
 	[[ "${stderr%%Sweep [1/1]*}" == *"005-cleanup.sh deletes them now"* || "$output" == *"Sweep [1/1]"* ]]
-	D="$(sweep_dir)"
-	TSV="$(find "$D" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# A --resume reuses the cell's index: a state dir a run cut short left (its peak samples)
-	# is removed before 002 reads it.
-	mkdir -p "$D/state-combo-1"
-	echo 999999999 > "$D/state-combo-1/peak-mem-0.val"
-	STALE="$D/state-combo-1/peak-mem-0.val" cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	[ ! -e "${BATS_TEST_TMPDIR}/stale-seen" ]
-	# Namespaces the cleanup cannot delete stop the run before its first cell: nothing is
-	# measured, the reason says what to run.
+	# Namespaces the cleanup cannot delete stop the next run before its first cell: nothing
+	# is measured, the reason says what to run.
 	: > "${BATS_TEST_TMPDIR}/ns-left"
 	: > "${BATS_TEST_TMPDIR}/ns-stuck"
-	local before
-	before="$(grep -vc '^#' "$TSV")"
-	cp "$D/sweep-outcome.txt" "${BATS_TEST_TMPDIR}/rec.before"
-	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	rm -rf "${BATS_TEST_TMPDIR}/res"
+	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	[ "$status" -eq 1 ]
 	[[ "$stderr" == *"warn: 005-cleanup.sh reported a failure; counting the namespaces again"* ]]
 	[[ "$stderr" == *"controlplane-test namespaces are still on the members after 005-cleanup.sh (ci-a: 1: still Terminating, or the delete failed), and a cell would measure on top of them; nothing was measured. Run "*"/005-cleanup.sh --contexts ci-a until it leaves none, then run this command again."* ]]
 	[[ "$stderr" != *"Sweep [1/1]"* && "$output" != *"Sweep [1/1]"* ]]
-	[ "$(grep -vc '^#' "$TSV")" -eq "$before" ]
-	# A precondition of the run (before its start): the sweep's record stays as it was.
-	cmp "${BATS_TEST_TMPDIR}/rec.before" "$D/sweep-outcome.txt"
+	# A precondition of the run (before its start): no row and no sweep record.
+	D="$(sweep_dir)"
+	[ -d "$D" ]
+	[ -z "$(find "$D" -maxdepth 1 \( -name 'controlplane-*.tsv' -o -name sweep-outcome.txt \))" ]
 }
 
 @test "a member whose namespaces cannot be counted only warns" {
@@ -302,34 +243,6 @@ incomplete_dir() {
 
 # ---------------------------------------------------------------------------
 # One run per sweep dir
-
-@test "a sweep dir another live run holds (.sweep.lock with its PID) is refused before anything in it changes; a stale lock is taken over; the lock is gone when the run ends" {
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	[ ! -e "$D/.sweep.lock" ]
-	cp "$D/sweep-outcome.txt" "${BATS_TEST_TMPDIR}/rec.before"
-	ls -la "$D" | awk '{ print $5, $NF }' > "${BATS_TEST_TMPDIR}/ls.before"
-	# A live PID (this test's shell) holds it.
-	echo "$$" > "$D/.sweep.lock"
-	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 1 ]
-	[[ "$stderr" == *"another run of this sweep (PID $$) still runs in ${D}: wait for it to end, or stop it, before you start or --resume a run there (nothing was changed). If no such run exists (the host restarted and that PID is another process now), remove ${D}/.sweep.lock and run again."* ]]
-	cmp "${BATS_TEST_TMPDIR}/rec.before" "$D/sweep-outcome.txt"
-	[ ! -e "$D/sweep-outcome.prev.txt" ]
-	[ ! -e "$D/resumes.txt" ]
-	[ "$(<"$D/.sweep.lock")" = "$$" ]
-	# A PID that no longer runs: a stale lock, taken over; the run removes it at its end.
-	local dead
-	bash -c 'exit 0' &
-	dead=$!
-	wait "$dead" || true
-	echo "$dead" > "$D/.sweep.lock"
-	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	[ ! -e "$D/.sweep.lock" ]
-	[ -s "$D/resumes.txt" ]
-}
 
 @test "sweep_lock: a second shell is refused while the first holds the lock; the holder takes it again; _sweep_unlock removes only its own" {
 	local d="${BATS_TEST_TMPDIR}/lockdir"
@@ -352,152 +265,20 @@ incomplete_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# NOT_RUN and INCOMPLETE in the SLA verdict
+# INCOMPLETE in the SLA verdict
 
-@test "env_sla_verdict: NOT_RUN (arg 10) and INCOMPLETE (arg 11) turn a PASS into CAUTION and join a CAUTION or FAIL reason" {
-	run env_sla_verdict 10 15 40 50 0 4 4 75 90 0 0
+@test "env_sla_verdict: INCOMPLETE (arg 10) turns a PASS into CAUTION and joins a CAUTION or FAIL reason" {
+	run env_sla_verdict 10 15 40 50 0 4 4 75 90 0
 	[[ "$output" == PASS\|* ]]
-	run env_sla_verdict 10 15 40 50 0 4 4 75 90 2 0
-	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan; the cells that ran: "* ]]
-	run env_sla_verdict 10 15 40 50 0 4 4 75 90 0 1
+	run env_sla_verdict 10 15 40 50 0 4 4 75 90 1
 	[[ "$output" == "CAUTION|1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote: cut short while they were written), so their figures cover part of the mesh; the figures, these cells included: "* ]]
-	run env_sla_verdict 10 15 40 50 0 4 4 75 90 2 1
-	[[ "$output" == "CAUTION|2 planned cell(s) never ran (NOT_RUN), "*"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
-	run env_sla_verdict 80 15 40 50 0 4 4 75 90 1 1
-	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 planned cell(s) never ran (NOT_RUN); also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
-	run env_sla_verdict 95 15 40 50 0 4 4 75 90 3 0
-	[[ "$output" == FAIL\|* && "$output" == *"; also 3 planned cell(s) never ran (NOT_RUN)" ]]
+	run env_sla_verdict 80 15 40 50 0 4 4 75 90 1
+	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
+	run env_sla_verdict 95 15 40 50 0 4 4 75 90 3
+	[[ "$output" == FAIL\|* && "$output" == *"; also 3 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
 	# Not a count: 0.
-	run env_sla_verdict 10 15 40 50 0 4 4 75 90 x y
+	run env_sla_verdict 10 15 40 50 0 4 4 75 90 y
 	[[ "$output" == PASS\|* ]]
-}
-
-@test "a planned cell that never ran (NOT_RUN) makes the verdict CAUTION in every 004 format and in the scale envelope" {
-	incomplete_dir
-	# Drop svcs=6: a planned cell with no row.
-	awk -F'\t' '/^#/ || $1 == "timestamp" || $4 != 6' "$TSV" > "${TSV}.new"
-	mv "${TSV}.new" "$TSV"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	assert_success
-	[ "$(jq -r '.metadata.sla.verdict' <<<"$output")" = CAUTION ]
-	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == "1 planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan"* ]]
-	local fmt
-	for fmt in text markdown; do
-		run --separate-stderr bash "$REPORT" --results-dir "$D" --format "$fmt"
-		assert_success
-		[[ "$output" == *CAUTION* && "$output" == *"1 planned cell(s) never ran (NOT_RUN), so the sweep covers only part of its plan"* ]] || { echo "${fmt}: ${output}"; false; }
-	done
-	source "${ROOT}/tests/lib/platform.sh"
-	run --separate-stderr render_scale_envelope "$D" "$REPORT" "ci-a,ci-b" false
-	assert_success
-	assert_output --partial CAUTION
-	assert_output --partial "1 planned cell(s) never ran (NOT_RUN)"
-	refute_output --partial "PASS"
-	# With the cell measured on both members: PASS.
-	{
-		cp_row 2026-06-01T00:02:00+00:00 ci-a 2 6 900
-		cp_row 2026-06-01T00:02:00+00:00 ci-b 2 6 900
-	} >> "$TSV"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	[ "$(jq -r '.metadata.sla.verdict' <<<"$output")" = PASS ]
-}
-
-# ---------------------------------------------------------------------------
-# The attempts in controlplane 004
-
-@test "controlplane 004 names each attempt (its HARNESS_SHA and KUBE_VERSIONS) and REPORT_HARNESS_SHA in every format; a resume's harness joins harness_shas and the provenance warning, and one on other Kubernetes versions warns" {
-	local first ra rh c0 c1
-	incomplete_dir
-	cp_sweep --resume "$D" --contexts ci-a,ci-b --mesh-sizes 2 --service-counts 5,6
-	[ "$status" -eq 4 ]
-	# The first run read v1.30.0 on both members; the resume ran another harness and read
-	# v1.31.0 on ci-a.
-	sed -i 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=v1.30.0,ci-b=v1.30.0/' "$TSV"
-	sed -i 's/^\(# RESUMED_AT=[^ ]* TSV_LINES=[0-9]*\) HARNESS_SHA=.*/\1 HARNESS_SHA=abc1234/' "$TSV"
-	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "abc1234"; $4 = "ci-a=v1.31.0,ci-b=v1.30.0"; if (NF >= 9) $9 = "000000000000" } { print }' "$D/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt"
-	mv "${BATS_TEST_TMPDIR}/r.txt" "$D/resumes.txt"
-	first="$(sed -n 's/^# HARNESS_SHA=//p' "$TSV" | head -n 1)"
-	# The attempt labels print its time with Z.
-	ra="$(awk -F'\t' 'NR == 2 { t = $1; sub(/\+00:00$/, "Z", t); print t }' "$D/resumes.txt")"
-	rh="$(harness_sha)"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	assert_success
-	[ "$(jq -c '.metadata.attempts | map([.run, .harness_sha, .kube_versions])' <<<"$output")" = \
-		"[[\"first run\",\"${first}\",\"ci-a=v1.30.0,ci-b=v1.30.0\"],[\"--resume at ${ra}\",\"abc1234\",\"ci-a=v1.31.0,ci-b=v1.30.0\"]]" ]
-	[ "$(jq -c '.metadata.harness_shas' <<<"$output")" = "[\"${first}\",\"abc1234\"]" ]
-	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = "mixed:${first},abc1234" ]
-	[ "$(jq -r '.metadata.report_harness_sha' <<<"$output")" = "$rh" ]
-	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"ran on different harnesses (HARNESS_SHA ${first},abc1234; a --resume's included, see the attempts)"* ]]
-	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"A --resume ran on other Kubernetes server versions than the first run (ci-a v1.30.0 in the first run, v1.31.0 at the --resume at ${ra})"* ]]
-	[[ "$stderr" == *"WARNING: "*"ran on different harnesses"* ]]
-	# Every format but json gives each attempt's rows as json does (rows, rows_kept).
-	c0="$(jq -r '.metadata.attempts[0] | "\(.rows) row(s), \(.rows_kept) in the figures"' <<<"$output")"
-	c1="$(jq -r '.metadata.attempts[1] | "\(.rows) row(s), \(.rows_kept) in the figures"' <<<"$output")"
-	# And the first run's values (the TSV preamble's), as json's attempts[0] has them.
-	local v0
-	v0="$(jq -r '.metadata.attempts[0] | "HARNESS_SHA=\(.harness_sha) KUBE_VERSIONS=\(.kube_versions)"' <<<"$output")"
-	local att="the rows come from more than one run: the first run ${v0} (${c0}), then --resume at ${ra} HARNESS_SHA=abc1234 KUBE_VERSIONS=ci-a=v1.31.0,ci-b=v1.30.0 (${c1})"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
-	assert_line "# attempts: ${att}"
-	assert_output --partial "REPORT_HARNESS_SHA=${rh}"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format csv
-	assert_line "# attempts: ${att}"
-	assert_output --partial "REPORT_HARNESS_SHA=${rh}"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format markdown
-	assert_output --partial "> **Attempts:** ${att}"
-	assert_line "report_harness_sha: \"${rh}\""
-	assert_line --partial "attempts: [{"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format charts
-	assert_line "report_harness_sha: \"${rh}\""
-	assert_line --partial "attempts: [{"
-}
-
-@test "an attempt boundary is the TSV's own # RESUMED_AT line or a resumes.txt line of this TSV (one naming another TSV does not apply); rows after a status row with no boundary warn that two attempts are pooled" {
-	local n
-	incomplete_dir
-	# svcs=6: ci-a's row, then a status row (it failed partway), then a valid row of each member.
-	grep "	6	3	1	none	" "${BATS_TEST_TMPDIR}/status.rows" >> "$TSV"
-	n="$(wc -l < "$TSV" | tr -d ' ')"
-	cp "$TSV" "${BATS_TEST_TMPDIR}/head.tsv"
-	{
-		cp_row 2026-06-01T00:05:00+00:00 ci-a 2 6 800
-		cp_row 2026-06-01T00:05:00+00:00 ci-b 2 6 800
-	} > "${BATS_TEST_TMPDIR}/attempt2.rows"
-	cat "${BATS_TEST_TMPDIR}/attempt2.rows" >> "$TSV"
-	# No boundary: pooled, with a warning in every format.
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	assert_success
-	[ "$(jq -r '.metadata.earlier_attempt_rows_left_out' <<<"$output")" = 0 ]
-	jq -e '[.metadata.data_warnings[] | select(startswith("1 cell(s) have rows after a status row of their own with no recorded --resume start between them"))] | length == 1' <<<"$output"
-	local fmt
-	for fmt in text markdown csv charts; do
-		run --separate-stderr bash "$REPORT" --results-dir "$D" --format "$fmt"
-		[[ "$output" == *"1 cell(s) have rows after a status row of their own with no recorded --resume start between them"*"mesh=2 svcs=6"* ]] || { echo "${fmt}: ${output}"; false; }
-	done
-	# A resumes.txt line of another TSV: still no boundary.
-	# The resume ran the first run's harness (a mix of harnesses would make the verdict CAUTION).
-	printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\n2026-06-01T00:04:00+00:00\t%s\tnone\tci-a=unknown\t%s\tunknown\tunknown\tcontrolplane-other.tsv\n' \
-		"$(sed -n 's/^# HARNESS_SHA=//p' "$TSV" | head -n 1)" "$n" > "$D/resumes.txt"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	[ "$(jq -r '.metadata.earlier_attempt_rows_left_out' <<<"$output")" = 0 ]
-	[ "$(jq -r '.metadata.attempts | length' <<<"$output")" = 1 ]
-	jq -e '[.metadata.data_warnings[] | select(startswith("1 cell(s) have rows after a status row"))] | length == 1' <<<"$output"
-	# The same line for this TSV: two attempts, the earlier one's rows left out, no warning.
-	sed -i "s/controlplane-other.tsv/${TSV##*/}/" "$D/resumes.txt"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	[ "$(jq -c '[.metadata.earlier_attempt_rows_left_out, .metadata.earlier_attempt_cells, (.metadata.attempts | length)]' <<<"$output")" = '[2,1,2]' ]
-	jq -e '[.metadata.data_warnings[]? | select(startswith("1 cell(s) have rows after a status row"))] | length == 0' <<<"$output"
-	[ "$(jq -r '.metadata.sla.verdict' <<<"$output")" = PASS ]
-	# Without resumes.txt, the TSV's own line is that boundary (a copied TSV).
-	rm -f "$D/resumes.txt"
-	{
-		cat "${BATS_TEST_TMPDIR}/head.tsv"
-		printf '# RESUMED_AT=2026-06-01T00:04:00+00:00 TSV_LINES=%s HARNESS_SHA=fixture\n' "$n"
-		cat "${BATS_TEST_TMPDIR}/attempt2.rows"
-	} > "$TSV"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	[ "$(jq -c '[.metadata.earlier_attempt_rows_left_out, .metadata.earlier_attempt_cells, (.metadata.attempts | length), .metadata.attempts[1].kube_versions]' <<<"$output")" = '[2,1,2,"unknown"]' ]
-	jq -e '[.metadata.data_warnings[]? | select(startswith("1 cell(s) have rows after a status row"))] | length == 0' <<<"$output"
 }
 
 # ---------------------------------------------------------------------------
@@ -652,50 +433,7 @@ _hs() {
 }
 
 # ---------------------------------------------------------------------------
-# A --resume that stops
-
-@test "a --resume that stops records its reason without local paths and names the sweep dir on the console; every 004 format leads with the stop (STOPPED) and then shows the outcome before it; the charts warn" {
-	local rid
-	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 4 ]
-	D="$(sweep_dir)"
-	rid="${D##*/sweep-}"
-	# Its plan file cannot be written: a stop after the resume's start.
-	rm -f "$D/planned-cells.txt"
-	mkdir "$D/planned-cells.txt"
-	cp_sweep --resume "$D" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	[ "$status" -eq 1 ]
-	# The console keeps the full path, and names the sweep dir after the stop, then the next
-	# step with that path (SWEEP_NEXT_CONSOLE; the record keeps "<sweep dir>"), once.
-	[[ "$stderr" == *"error: could not write ${D}/planned-cells.txt, which records the cells this sweep plans; nothing was run."* ]]
-	[[ "$stderr" == *"  sweep dir: ${D}"$'\n'"  next: ./tests/controlplane/003-run-sweep.sh --resume ${D} --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none" ]]
-	[[ "$stderr" != *"next: --resume this sweep dir"* ]]
-	# The record (shared) does not.
-	grep -qxF "NOTE=next: --resume this sweep dir with the flags it ran with (the cells already measured are kept): ./tests/controlplane/003-run-sweep.sh --resume <sweep dir> --contexts ci-a --mesh-sizes 1 --service-counts 5 --replica-counts 3 --namespace-counts 1 --sidecar-scopings none --traffic-configs none (<sweep dir> is this sweep's directory)" "$D/sweep-outcome.txt"
-	grep -qx 'STOP_REASON=could not write <sweep dir>/planned-cells.txt, which records the cells this sweep plans; nothing was run.' "$D/sweep-outcome.txt"
-	! grep -qF "$BATS_TEST_TMPDIR" "$D/sweep-outcome.txt" || false
-	grep -qx 'CUT_SHORT=1' "$D/sweep-outcome.txt"
-	grep -q '^RESUMED_AT=' "$D/sweep-outcome.txt"
-	grep -qx 'EXIT=4' "$D/sweep-outcome.prev.txt"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format text
-	assert_line "# SWEEP OUTCOME (recorded in sweep-outcome.txt by run ${rid}, exit 1): STOPPED"
-	assert_line --index "$(( $(printf '%s\n' "${lines[@]}" | grep -n '^# SWEEP OUTCOME (recorded in sweep-outcome.txt' | cut -d: -f1) ))" \
-		"#   stopped early: could not write <sweep dir>/planned-cells.txt, which records the cells this sweep plans; nothing was run."
-	assert_line "# OUTCOME BEFORE THIS --RESUME (recorded in sweep-outcome.prev.txt by run ${rid}, exit 4):"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format markdown
-	assert_output --partial "(recorded in \`sweep-outcome.txt\` by run \`${rid}\`, exit 1): **stopped**"$'\n'"> - stopped early: could not write <sweep dir>/planned-cells.txt"
-	assert_output --partial "> **Outcome before this --resume** (recorded in \`sweep-outcome.prev.txt\` by run \`${rid}\`, exit 4):"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format csv
-	assert_line "# SWEEP_OUTCOME_EXIT=1"
-	assert_line --regexp '^# SWEEP_OUTCOME_RESUMED_AT=.'
-	assert_line "# SWEEP_OUTCOME_EARLIER_EXIT=4"
-	assert_line "# SWEEP_OUTCOME_EARLIER_FAILED_BY=PROBE_FAILED x1"
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format json
-	[ "$(jq -c '.sweep_outcome | [.exit, .stopped, (.resumed_at != null), .earlier.exit, .earlier.failed_by]' <<<"$output")" = '[1,true,true,4,"PROBE_FAILED x1"]' ]
-	[[ "$(jq -r '.sweep_outcome.stop_reason' <<<"$output")" == "could not write <sweep dir>/planned-cells.txt"* ]]
-	run --separate-stderr bash "$REPORT" --results-dir "$D" --format charts
-	assert_output --partial "> **Warning:** this sweep stopped early: could not write <sweep dir>/planned-cells.txt, which records the cells this sweep plans; nothing was run. These charts may show partial results (sweep-outcome.txt); the markdown report says what to do."
-}
+# A stop reason in the record
 
 @test "a stop reason names the home dir as ~ in the record; the console keeps the path" {
 	local d="${BATS_TEST_TMPDIR}/home/u/results/sweep-x"

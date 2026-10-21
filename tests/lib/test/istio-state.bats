@@ -148,7 +148,7 @@ pv_pod() {
 	[ "${#lines[@]}" -eq 8 ]
 }
 
-@test "through 003, an Istio CR edited during the sweep is a problem in its outcome (exit 4); a --resume refuses a sweep whose Istio CR was edited since it started" {
+@test "through 003, an Istio CR edited during the sweep is a problem in its outcome (exit 4)" {
 	local d tsv
 	# The generation goes from 2 to 3 right after the start's read.
 	echo 3 > "${BATS_TEST_TMPDIR}/bump-on-pods"
@@ -159,21 +159,6 @@ pv_pod() {
 	grep -qx '# ISTIO_GENERATIONS=ci-a=2/2' "$tsv"
 	assert_output --partial "error: the Istio CR or its IstioRevision was edited during the sweep, though the version and active revision read the same at the end (ci-a: its Istio CR default (generation 2 at the start, 3 at the end); ISTIO_GENERATIONS)"
 	grep -q '^PROBLEM=the Istio CR or its IstioRevision was edited during the sweep' "$d/sweep-outcome.txt"
-	# A --resume refuses a recorded problem anyway; without it, it refuses the edit itself,
-	# before any change.
-	rm -f "${BATS_TEST_TMPDIR}/bump-on-pods"
-	sed -i.bak '/^PROBLEM=/d' "$d/sweep-outcome.txt" && rm -f "$d/sweep-outcome.txt.bak"
-	local before
-	before="$(cat "$tsv")"
-	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: the Istio CR or its active IstioRevision was edited since this sweep started (ci-a: Istio CR generation 2 when the sweep started, 3 now; ISTIO_GENERATIONS), at the same version and active revision"
-	[ "$(cat "$tsv")" = "$before" ]
-	# Back at the generation it started on (nothing edited since): it resumes.
-	echo 2 > "${BATS_TEST_TMPDIR}/crgen"
-	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	refute_output --partial "was edited since this sweep started"
 }
 
 @test "a rollout that ended, whose confirming read then fails, is not ready (rollout-unconfirmed), never the ok the read before it saw" {
